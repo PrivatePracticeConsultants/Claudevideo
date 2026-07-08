@@ -303,6 +303,15 @@ td .rate { font-weight: 650; }
 .qa-line { font-size: 12px; color: var(--ink-2); white-space: nowrap; }
 .qa-line .bad { color: var(--critical); font-weight: 600; }
 .qa-line .warn { color: #9a6b00; font-weight: 600; }
+.url-card { background: var(--surface-1); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 14px 18px; margin-bottom: 16px; }
+.url-card h3 { margin: 0 0 4px; font-size: 14px; }
+.url-card p { margin: 0 0 8px; font-size: 12.5px; }
+.url-card textarea { width: 100%; box-sizing: border-box; background: var(--page);
+  border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px;
+  font: 12.5px/1.5 ui-monospace, monospace; resize: vertical; }
+.url-card textarea:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+
 .validate-card { background: var(--surface-1); border: 1px solid var(--border);
   border-radius: var(--radius); padding: 14px 18px; margin-top: 18px; }
 .validate-card h3 { margin: 0 0 4px; font-size: 14px; }

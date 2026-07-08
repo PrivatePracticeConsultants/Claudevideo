@@ -47,6 +47,17 @@ def _watcher_loop(cfg: MrfxConfig, store: Store, stop: threading.Event) -> None:
         log.exception("watcher stopped unexpectedly")
 
 
+def _url_worker_loop(cfg: MrfxConfig, store: Store, stop: threading.Event) -> None:
+    """Drains the URL queue while the server runs: download -> classify ->
+    (expand TOC | ingest). One file at a time; failures never kill the loop."""
+    from .fetch import run_queue
+
+    try:
+        run_queue(cfg, store, stop=stop)
+    except Exception:  # noqa: BLE001
+        log.exception("url worker stopped unexpectedly")
+
+
 def cmd_serve(cfg: MrfxConfig, args) -> int:
     import uvicorn
 
@@ -57,13 +68,76 @@ def cmd_serve(cfg: MrfxConfig, args) -> int:
     threading.Thread(
         target=_watcher_loop, args=(cfg, store, stop), name="mrfx-watcher", daemon=True
     ).start()
+    threading.Thread(
+        target=_url_worker_loop, args=(cfg, store, stop), name="mrfx-urls", daemon=True
+    ).start()
     app = create_app(cfg, store)
     print(f"\n  MRF Explorer  →  http://localhost:{cfg.port}\n"
-          f"  inbox: {cfg.inbox_dir}  (drop .json / .json.gz / .zip here)\n")
+          f"  inbox: {cfg.inbox_dir}  (drop .json / .json.gz / .zip here)\n"
+          f"  or paste MRF/TOC URLs on the Files tab — downloads run automatically\n")
     try:
         uvicorn.run(app, host="127.0.0.1", port=cfg.port, log_level="warning")
     finally:
         stop.set()
+    return 0
+
+
+def cmd_add(cfg: MrfxConfig, args) -> int:
+    """Add MRF/TOC URLs. If the dashboard is running, hand them to it (its
+    background worker downloads and ingests); otherwise process them right
+    here until the queue is drained."""
+    urls = list(args.urls or [])
+    if args.file:
+        urls += [ln.strip() for ln in Path(args.file).read_text().splitlines() if ln.strip()]
+    urls = [u for u in urls if not u.startswith("#")]
+    if not urls and not args.retry_failed:
+        print("nothing to add — pass URLs as arguments or --file urls.txt")
+        return 1
+
+    # If a server is already running it owns the store (and has a worker);
+    # send the URLs there instead of fighting over the database file.
+    import httpx as _httpx
+
+    try:
+        r = _httpx.post(f"http://localhost:{cfg.port}/api/urls",
+                        json={"urls": urls}, timeout=10)
+        if r.status_code == 200:
+            d = r.json()
+            print(f"handed to the running dashboard: {d['added']} queued, "
+                  f"{d['skipped']} already known, {d['invalid']} not URLs")
+            print(f"watch progress at http://localhost:{cfg.port} → Files tab")
+            return 0
+    except _httpx.HTTPError:
+        pass  # no server running — process locally below
+
+    from .fetch import add_urls, run_queue
+
+    store = Store(cfg.store_dir)
+    counts = add_urls(store, urls)
+    print(f"queued {counts['added']} URL(s) "
+          f"({counts['skipped']} already known, {counts['invalid']} not URLs)")
+    pending = store.url_queue_counts().get("queued", 0)
+    if pending == 0 and not args.retry_failed:
+        return 0
+    if args.retry_failed:
+        n = 0
+        for rec in store.list_urls():
+            if rec["status"] == "failed" and store.set_url_status_by_id(rec["id"], "queued"):
+                n += 1
+        print(f"re-queued {n} previously failed URL(s)")
+    print("downloading and ingesting (one file at a time — Ctrl-C to stop; "
+          "re-running `mrfx add` resumes where it left off)...")
+    processed = run_queue(cfg, store, drain=True, progress_bar=_make_cli_progress())
+    counts = store.url_queue_counts()
+    print(f"\nfinished: {processed} processed this run — "
+          f"{counts.get('done', 0)} done, {counts.get('failed', 0)} failed, "
+          f"{counts.get('queued', 0)} still queued")
+    for rec in store.list_urls(limit=50):
+        if rec["status"] == "failed":
+            print(f"  FAILED  {rec['url'][:90]}\n          → {rec['error']}")
+    if cfg.enrichment.mode != "off" and processed:
+        print("looking up practice names (NPPES)...")
+        run_enrichment(cfg, store)
     return 0
 
 
@@ -229,6 +303,10 @@ def main(argv: list[str] | None = None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("serve", help="start API + dashboard + inbox watcher")
+    p = sub.add_parser("add", help="paste MRF or TOC/index URLs — downloads and ingests automatically")
+    p.add_argument("urls", nargs="*", help="one or more http(s) URLs")
+    p.add_argument("--file", help="text file with one URL per line (# comments ok)")
+    p.add_argument("--retry-failed", action="store_true", help="also re-queue previously failed URLs")
     p = sub.add_parser("preflight", help="inspect a file before committing to a long parse")
     p.add_argument("path")
     p = sub.add_parser("ingest", help="one-shot ingest of a file or directory (default: inbox)")
@@ -266,6 +344,7 @@ def main(argv: list[str] | None = None) -> int:
     cfg.ensure_dirs()
     return {
         "serve": cmd_serve,
+        "add": cmd_add,
         "preflight": cmd_preflight,
         "ingest": cmd_ingest,
         "status": cmd_status,

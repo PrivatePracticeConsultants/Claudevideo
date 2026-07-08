@@ -104,26 +104,53 @@ it to stop the app when you're done.
 
 ---
 
-## Step 5 — Get a payer MRF file to analyze
+## Step 5 — Load payer data: just paste links (easiest)
 
-You need at least one machine-readable file (MRF) from a payer. The app helps
-you find one:
+You don't need to download anything by hand. Find a payer's transparency page
+(the **Sources** tab in the dashboard lists them by state), copy a link, and
+paste it into the app:
 
-1. In the dashboard, click the **Sources** tab.
-2. Pick a state → it shows that state's Blue Cross licensee(s) and the national
-   payers, each with a link to where their MRF files live.
-3. Click through, and download an **in-network rates** file (they end in
-   `.json.gz`). Start with a smaller one to try things out.
+1. In the dashboard, open the **Files** tab.
+2. In the **"Paste file links — the app does the rest"** box, paste one or
+   more links (one per line) and click **Add links**.
 
-A known, easy source to test with is Highmark's portal at
-<https://mrfdata.hmhs.com> — pick a state, then a `..._in-network-rates_...json.gz`
-file. (Files are big; grab a small one first.)
+Any of these link types work:
+
+- **A direct rate file** — ends in `.json.gz` or `.json`
+  (e.g. `..._in-network-rates_...json.gz`). Downloaded and analyzed.
+- **A Table of Contents / index link** — e.g.
+  `https://tcr.bcbsms.com/Table_of_Contents/Local_TOC.json`. The app opens it
+  and automatically queues **every rate file listed inside** (often hundreds).
+- **A plain file-listing page** — e.g. a folder page on
+  `https://mrfdata.hmhs.com`. The app lifts every file link off the page and
+  queues them all.
+
+The queue table under the box shows each link's plain-language status
+(`queued` → `downloading` with a MB progress bar → `analyzing` → `done` with a
+row count). Files process **one at a time in the background** — you can paste
+a whole state's worth of links and walk away. Each file's download is deleted
+after its rates are extracted, so your disk doesn't fill up. If you close the
+app mid-download, it picks up where it left off on restart.
+
+Not every link is a rate file: **allowed-amounts** files (out-of-network
+billed/allowed averages) contain no negotiated rates, and the app tells you so
+and skips them rather than loading junk.
+
+Prefer the terminal? The same thing works there:
+
+```
+mrfx add https://tcr.bcbsms.com/Table_of_Contents/Local_TOC.json
+mrfx add --file my_links.txt        # a text file of links, one per line
+```
+
+If the dashboard is running, `mrfx add` hands the links to it; if not, it
+downloads and processes them right in the terminal with a progress bar.
 
 ---
 
-## Step 6 — Load the file
+## Step 6 — Or load a file you already have
 
-Two ways:
+If you already downloaded MRF files yourself, two ways to load them:
 
 - **Small files (under 1 GB):** drag the `.json.gz` onto the **Files** tab's
   drop zone in the dashboard.
@@ -173,6 +200,9 @@ prompt). They're an alternative to the dashboard buttons.
 | Command | What it does |
 |---|---|
 | `mrfx serve` | Start the dashboard + folder watcher (Step 4) |
+| `mrfx add <url> [<url>…]` | Paste links from the terminal: rate files, TOC/index links, or listing pages (Step 5) |
+| `mrfx add --file links.txt` | Queue a whole text file of links (one per line) |
+| `mrfx add --retry-failed` | Re-queue every link that previously failed |
 | `mrfx preflight <path>` | Inspect a file before ingesting |
 | `mrfx ingest [path]` | Ingest a file or the whole inbox (shows a progress bar) |
 | `mrfx status` | List ingested files and totals |
@@ -187,6 +217,10 @@ prompt). They're an alternative to the dashboard buttons.
 - `config/mrfx.yaml` — settings (which codes to extract, port, enrichment on/off).
   Edit with any text editor; defaults are fine to start.
 - `data/inbox/` — drop MRF files here.
+- `data/downloads/` — where pasted links download to while processing. Each
+  file is deleted automatically once its rates are extracted (turn that off
+  with `delete_raw_after_ingest: false` in `config/mrfx.yaml` if you want to
+  keep the raw files).
 - `data/processed/` — files that finished (if `move_processed` is on).
 - `data/failed/` — files that couldn't be read, with a reason in the Files tab.
 - `data/mrfx_store/` — the analyzed database. Delete this folder (or run
@@ -203,6 +237,21 @@ prompt). They're an alternative to the dashboard buttons.
   `python3`.
 - **Port 8377 already in use** — change `port:` in `config/mrfx.yaml` to another
   number (e.g. 8400) and restart `mrfx serve`.
+- **A pasted link says "download link has expired"** — many payers (all the
+  Blue plans on `*.mrf.bcbs.com`) publish *signed* links that stop working
+  after a few days. Go back to the payer's TOC/index page, paste **that** link
+  instead, and the app will fetch fresh file links itself.
+- **A pasted link says "this looks like a web page"** — some payer portals
+  (e.g. Aetna's) build their file list with JavaScript, so there are no real
+  links in the page for the app to lift. Open the page in your browser, click
+  through to the actual `.json.gz` / TOC links, and paste those.
+- **A link shows "allowed-amounts (no rates)"** — that file is the payer's
+  out-of-network billed-charge report, which contains no negotiated rates.
+  Skipping it is correct; look for the `in-network-rates` files instead.
+- **A pasted file is huge and was refused** — files bigger than the safety
+  limit (default 5 GB compressed) are held back so a typo can't fill your
+  disk. Raise `confirm_over_gb:` in `config/mrfx.yaml` and press **retry** on
+  that row.
 - **A file shows `NEEDS COMPANION`** — that payer split its provider list into a
   separate reference file; download and drop that in too, and the app
   re-processes automatically.

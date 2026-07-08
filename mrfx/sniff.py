@@ -162,6 +162,9 @@ def _scan_header(stream: io.BufferedIOBase, pf: Preflight) -> None:
             pf.file_type = "provider_reference"
     elif "reporting_structure" in top_keys:
         pf.file_type = "toc"
+    elif "out_of_network" in top_keys:
+        # CMS allowed-amounts file: billed/allowed averages, not negotiated rates
+        pf.file_type = "allowed_amounts"
     elif top_keys:
         pf.file_type = "unknown"
 
@@ -218,6 +221,13 @@ def preflight(path: Path, cfg: MrfxConfig, store: Store | None = None) -> Prefli
         pf.messages.append(
             "This is an index/TOC file, not a rate file; drop the in-network "
             "files it references (see its in_network_files[].location URLs)."
+        )
+        return pf
+    if pf.file_type == "allowed_amounts":
+        pf.verdict = "NOT A RATE FILE"
+        pf.messages.append(
+            "This is an out-of-network allowed-amounts file (billed/allowed "
+            "averages), not a negotiated-rates file — nothing to extract."
         )
         return pf
     if pf.file_type == "provider_reference":

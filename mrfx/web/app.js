@@ -64,7 +64,10 @@ function switchView(view) {
   $$("nav button").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
   $$(".view").forEach((v) => v.classList.toggle("active", v.id === `view-${view}`));
   clearInterval(state.filesTimer);
-  if (view === "files") { loadFiles(); state.filesTimer = setInterval(loadFiles, 4000); }
+  if (view === "files") {
+    loadFiles(); loadUrlQueue();
+    state.filesTimer = setInterval(() => { loadFiles(); loadUrlQueue(); }, 4000);
+  }
   if (view === "cpt" && !state.cptSelected) {
     const first = Object.keys(state.catalog)[0];
     if (first) selectCpt(first);
@@ -778,7 +781,80 @@ async function loadFiles() {
   loadStats();
 }
 
+const KIND_LABEL = {
+  toc: "index / table of contents",
+  page: "web page",
+  in_network: "rate file",
+  provider_reference: "provider list",
+  allowed_amounts: "allowed-amounts (no rates)",
+  unknown: "?",
+};
+
+async function loadUrlQueue() {
+  let d;
+  try { d = await api("/api/urls"); } catch { return; }
+  const wrap = $("#url-wrap"), body = $("#url-body");
+  if (!d.urls.length) { wrap.style.display = "none"; return; }
+  wrap.style.display = "block";
+  body.innerHTML = d.urls.map((u) => {
+    const short = u.url.split("?")[0].replace(/^https?:\/\//, "");
+    const shown = short.length > 78 ? short.slice(0, 38) + "…" + short.slice(-37) : short;
+    let statusCell = `<span class="badge ${esc(u.status === "done" ? "done" : u.status === "failed" ? "failed" : "processing")}">${esc(u.status)}</span>`;
+    if (u.status === "downloading" && u.bytes_total > 0) {
+      statusCell += `<div class="progress"><div class="progress-fill" style="width:${Math.round(u.progress)}%"></div>
+        <span class="progress-label">${(u.bytes_done / 1e6).toFixed(0)} / ${(u.bytes_total / 1e6).toFixed(0)} MB</span></div>`;
+    } else if (u.status === "ingesting") {
+      statusCell += ` <span class="muted">(see file row below for chunk progress)</span>`;
+    }
+    if (u.status === "failed") {
+      statusCell += ` <button class="btn" style="padding:1px 8px;font-size:11.5px" data-url-retry="${u.id}">retry</button>`;
+    } else if (u.status === "queued") {
+      statusCell += ` <button class="btn" style="padding:1px 8px;font-size:11.5px" data-url-cancel="${u.id}">skip</button>`;
+    }
+    let notes = "";
+    if (u.kind === "toc" && u.status === "done") notes = `found ${fmtInt(u.child_count)} files inside — queued below`;
+    else if (u.kind === "page" && u.status === "done") notes = `found ${fmtInt(u.child_count)} file links on the page`;
+    else if (u.error) notes = `<span class="err-text">${esc(u.error)}</span>`;
+    return `<tr>
+      <td title="${esc(u.url)}">${esc(shown)}</td>
+      <td>${esc(KIND_LABEL[u.kind] || u.kind || "…")}</td>
+      <td>${statusCell}</td>
+      <td class="num">${u.rows_emitted ? fmtInt(u.rows_emitted) : ""}</td>
+      <td style="max-width:420px">${notes}</td>
+    </tr>`;
+  }).join("");
+  $$("[data-url-retry]", body).forEach((b) =>
+    b.addEventListener("click", async () => {
+      b.disabled = true;
+      await fetch(`/api/urls/${b.dataset.urlRetry}/retry`, { method: "POST" });
+      loadUrlQueue();
+    }));
+  $$("[data-url-cancel]", body).forEach((b) =>
+    b.addEventListener("click", async () => {
+      b.disabled = true;
+      await fetch(`/api/urls/${b.dataset.urlCancel}/cancel`, { method: "POST" });
+      loadUrlQueue();
+    }));
+}
+
 function initFilesView() {
+  $("#url-add").addEventListener("click", async () => {
+    const raw = $("#url-input").value.trim();
+    if (!raw) return;
+    const msg = $("#url-msg");
+    msg.textContent = "adding…";
+    try {
+      const r = await postJson("/api/urls", { urls: raw });
+      msg.textContent = `${r.added} queued` +
+        (r.skipped ? `, ${r.skipped} already known` : "") +
+        (r.invalid ? `, ${r.invalid} not valid links` : "");
+      if (r.added) $("#url-input").value = "";
+    } catch (e) {
+      msg.textContent = "could not add: " + e.message;
+    }
+    loadUrlQueue();
+  });
+
   $("#btn-scan").addEventListener("click", async () => {
     await fetch("/api/files/scan", { method: "POST" });
     setTimeout(loadFiles, 800);

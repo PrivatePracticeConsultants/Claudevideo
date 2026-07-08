@@ -169,6 +169,13 @@ def ingest_file(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight | None 
             _finish_file(cfg, path, ok=False)
             return {"status": "quarantined", "error": msg}
 
+        if pf.file_type == "allowed_amounts":
+            msg = ("out-of-network allowed-amounts file (billed/allowed averages) — "
+                   "contains no negotiated rates, skipped")
+            store.upsert_file(name, status="quarantined", error=msg, finished_at=_now())
+            _finish_file(cfg, path, ok=False)
+            return {"status": "quarantined", "error": msg}
+
         if pf.file_type == "unknown":
             msg = "; ".join(pf.messages) or "unrecognized file"
             store.upsert_file(name, status="quarantined", error=msg, finished_at=_now())

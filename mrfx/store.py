@@ -284,6 +284,23 @@ class Store:
                 non_facility_rate DOUBLE,
                 source VARCHAR
             );
+            CREATE TABLE IF NOT EXISTS url_queue (
+                id BIGINT PRIMARY KEY,
+                url VARCHAR,
+                dedup_key VARCHAR,          -- url without volatile query (signed URLs)
+                kind VARCHAR,               -- unknown | in_network | provider_reference | toc
+                status VARCHAR,             -- queued | downloading | expanding | ingesting | done | failed | skipped
+                parent_id BIGINT,           -- the TOC this url was discovered from
+                filename VARCHAR,           -- local filename once downloaded/ingested
+                bytes_total BIGINT,
+                bytes_done BIGINT,
+                progress DOUBLE DEFAULT 0,
+                rows_emitted BIGINT DEFAULT 0,
+                child_count BIGINT DEFAULT 0,
+                error VARCHAR,
+                added_at TIMESTAMP,
+                finished_at TIMESTAMP
+            );
             """
         )
         # migrate pre-existing stores created before the outreach columns
@@ -350,6 +367,110 @@ class Store:
         params.append(filename)
         with self.write_lock, self.connect() as con:
             con.execute(f"UPDATE files SET {', '.join(sets)} WHERE filename = ?", params)
+
+    # -- URL queue ----------------------------------------------------------
+
+    def enqueue_url(self, url: str, dedup_key: str, parent_id: int | None = None) -> int | None:
+        """Add a URL to the download queue. Deduped by dedup_key (URL without
+        volatile signed-query params). Returns the new row id, or None if it's
+        already queued/done."""
+        with self.write_lock, self.connect() as con:
+            exists = con.execute(
+                "SELECT id, status FROM url_queue WHERE dedup_key = ? LIMIT 1", [dedup_key]
+            ).fetchone()
+            if exists:
+                if exists[1] in ("failed", "skipped"):
+                    # re-adding a failed/skipped link retries it (fresh URL may
+                    # carry a new signature) — never a duplicate row
+                    con.execute(
+                        "UPDATE url_queue SET url = ?, status = 'queued', error = NULL, "
+                        "progress = 0, bytes_done = 0 WHERE id = ?",
+                        [url, exists[0]],
+                    )
+                    return exists[0]
+                return None  # already queued / in flight / done
+            nid = (con.execute("SELECT coalesce(max(id), 0) + 1 FROM url_queue").fetchone()[0])
+            con.execute(
+                "INSERT INTO url_queue (id, url, dedup_key, kind, status, parent_id, "
+                "bytes_total, bytes_done, progress, added_at) "
+                "VALUES (?, ?, ?, 'unknown', 'queued', ?, 0, 0, 0, current_timestamp)",
+                [nid, url, dedup_key, parent_id],
+            )
+            return nid
+
+    def next_queued_url(self) -> dict | None:
+        with self.write_lock, self.connect() as con:
+            row = con.execute(
+                "SELECT * FROM url_queue WHERE status = 'queued' ORDER BY id LIMIT 1"
+            ).fetchall()
+            if not row:
+                return None
+            cols = [d[0] for d in con.description]
+            rec = dict(zip(cols, row[0]))
+            con.execute("UPDATE url_queue SET status = 'downloading' WHERE id = ?", [rec["id"]])
+            return rec
+
+    def update_url(self, url_id: int, **fields) -> None:
+        allowed = {"kind", "status", "filename", "bytes_total", "bytes_done",
+                   "progress", "rows_emitted", "child_count", "error", "parent_id"}
+        fields = {k: v for k, v in fields.items() if k in allowed}
+        if fields.get("status") in ("done", "failed", "skipped"):
+            fields["finished_at"] = dt.datetime.now(dt.timezone.utc)
+        if not fields:
+            return
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        with self.write_lock, self.connect() as con:
+            con.execute(f"UPDATE url_queue SET {sets} WHERE id = ?", [*fields.values(), url_id])
+
+    def url_progress(self, url_id: int, bytes_done: int, bytes_total: int | None) -> None:
+        pct = (100.0 * bytes_done / bytes_total) if bytes_total else 0.0
+        with self.write_lock, self.connect() as con:
+            con.execute(
+                "UPDATE url_queue SET bytes_done = ?, bytes_total = ?, progress = ? WHERE id = ?",
+                [bytes_done, bytes_total or 0, round(pct, 2), url_id],
+            )
+
+    def list_urls(self, limit: int = 500) -> list[dict]:
+        with self.connect() as con:
+            rows = con.execute(
+                "SELECT * FROM url_queue ORDER BY id DESC LIMIT ?", [limit]
+            ).fetchall()
+            cols = [d[0] for d in con.description]
+        out = []
+        for r in rows:
+            d = dict(zip(cols, r))
+            for k in ("added_at", "finished_at"):
+                if d.get(k) is not None:
+                    d[k] = str(d[k])
+            out.append(d)
+        return out
+
+    def url_queue_counts(self) -> dict:
+        with self.connect() as con:
+            rows = con.execute("SELECT status, count(*) FROM url_queue GROUP BY status").fetchall()
+        return {s: n for s, n in rows}
+
+    def recover_stuck_urls(self) -> int:
+        """Rows left mid-flight by a crash/Ctrl-C go back to queued so the
+        next run resumes them. Called when a queue worker starts."""
+        with self.write_lock, self.connect() as con:
+            n = con.execute(
+                "SELECT count(*) FROM url_queue WHERE status IN ('downloading', 'expanding', 'ingesting')"
+            ).fetchone()[0]
+            if n:
+                con.execute(
+                    "UPDATE url_queue SET status = 'queued', progress = 0, bytes_done = 0 "
+                    "WHERE status IN ('downloading', 'expanding', 'ingesting')"
+                )
+        return n
+
+    def set_url_status_by_id(self, url_id: int, status: str) -> bool:
+        with self.write_lock, self.connect() as con:
+            r = con.execute("SELECT 1 FROM url_queue WHERE id = ?", [url_id]).fetchone()
+            if not r:
+                return False
+            con.execute("UPDATE url_queue SET status = ?, error = NULL WHERE id = ?", [status, url_id])
+            return True
 
     def drop_rates_part(self, source_file: str) -> None:
         path = self.rates_dir / f"{file_key(source_file)}.parquet"

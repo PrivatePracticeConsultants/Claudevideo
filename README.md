@@ -32,11 +32,15 @@ Two sibling tools in one repo:
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt && .venv/bin/pip install -e .
-.venv/bin/mrfx serve            # dashboard at http://localhost:8377 + inbox watcher
+.venv/bin/mrfx serve            # dashboard at http://localhost:8377 + inbox watcher + URL worker
+# easiest path: paste payer links in the Files tab, or from the terminal:
+.venv/bin/mrfx add https://tcr.bcbsms.com/Table_of_Contents/Local_TOC.json
+# or drop files you already have:
 cp ~/Downloads/2026-07-01_someplan_in-network.json.gz data/inbox/
 ```
 
-Other commands: `mrfx preflight <path>`, `mrfx ingest [path] [--force]`, `mrfx status`,
+Other commands: `mrfx add <url>… [--file links.txt] [--retry-failed]`,
+`mrfx preflight <path>`, `mrfx ingest [path] [--force]`, `mrfx status`,
 `mrfx export out.csv [--cpt 97110 --payer ... --grain tin]` (writes a
 `*_methodology.txt` sidecar), `mrfx reset --confirm`. Config in `config/mrfx.yaml`.
 
@@ -176,6 +180,35 @@ index — the tab says so. **Honesty contract**: `verified: true` entries were
 confirmed live; `verified: false` render with an "unverified — confirm link"
 badge and are never displayed as authoritative; confirming a URL persists it to
 `config/registry_overrides.yaml` and flips the badge locally.
+
+## Paste links, get data (URL-drop ingestion)
+
+You don't have to download files by hand. Paste links into the **Files** tab's
+"Paste file links" box (or run `mrfx add <url>`), and the app handles the rest.
+Three link kinds are auto-detected:
+
+- **Direct rate file** (`…in-network-rates….json.gz`) — downloaded, ingested
+  with the same chunked/streaming pipeline, raw download deleted afterwards
+  (keep it with `delete_raw_after_ingest: false`).
+- **Table of Contents / index JSON** (e.g.
+  `https://tcr.bcbsms.com/Table_of_Contents/Local_TOC.json`) — expanded and
+  every in-network file inside queued automatically (verified live: 466 files
+  from the BCBS-MS TOC).
+- **Plain file-listing page** (e.g. a folder on `https://mrfdata.hmhs.com`) —
+  file links lifted from the HTML and queued, TOCs found there cascade too
+  (verified live: a Highmark Delaware listing page fanned out to 8,000+
+  queued files).
+
+The queue (`url_queue` in the store) processes **one file at a time** in the
+background, dedupes re-pasted links (signed-query variants included), shows a
+download-MB progress bar per row, survives restarts (in-flight rows are
+re-queued on startup), and gives plain-language errors: expired signed links
+("download link has expired — go back to the payer's index page"),
+JavaScript-only portals (with instructions to click through and paste the real
+links), allowed-amounts files ("no negotiated rates — skipped"), and an
+oversize guard (`confirm_over_gb`, default 5 GB compressed) so a typo can't
+fill the disk. TLS verification is never disabled; incomplete corporate cert
+chains are repaired via AIA and verified against the system trust store.
 
 ## Companion provider-reference files
 

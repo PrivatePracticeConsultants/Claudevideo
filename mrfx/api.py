@@ -557,6 +557,36 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         background.add_task(scan_inbox, cfg, store)
         return {"status": "scanning"}
 
+    # -- URL-drop queue (paste links, the app does the rest) -------------------
+
+    @app.post("/api/urls")
+    async def urls_add(request: Request):
+        from .fetch import add_urls
+
+        body = await request.json()
+        raw = body.get("urls") or []
+        if isinstance(raw, str):
+            raw = raw.replace(",", "\n").splitlines()
+        counts = add_urls(store, [str(u) for u in raw])
+        return counts
+
+    @app.get("/api/urls")
+    def urls_list():
+        return {"urls": store.list_urls(), "counts": store.url_queue_counts()}
+
+    @app.post("/api/urls/{url_id}/retry")
+    def urls_retry(url_id: int):
+        if not store.set_url_status_by_id(url_id, "queued"):
+            raise HTTPException(404, "no such queued URL")
+        return {"status": "queued"}
+
+    @app.post("/api/urls/{url_id}/cancel")
+    def urls_cancel(url_id: int):
+        # in-flight downloads finish their current file; queued ones are skipped
+        if not store.set_url_status_by_id(url_id, "skipped"):
+            raise HTTPException(404, "no such queued URL")
+        return {"status": "skipped"}
+
     @app.post("/api/files/{filename}/confirm")
     def confirm_file(filename: str, background: BackgroundTasks):
         st = store.file_status(filename)

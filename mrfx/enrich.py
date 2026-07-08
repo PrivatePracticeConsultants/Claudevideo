@@ -24,8 +24,11 @@ NPPES_API = "https://npiregistry.cms.hhs.gov/api/"
 
 def enrich_via_api(cfg: MrfxConfig, store: Store, stop: threading.Event | None = None) -> int:
     """Sequential, polite NPPES lookups for every un-enriched NPI in the store."""
+    from .fetch import ssl_verify
+
     done = 0
-    with httpx.Client(headers={"User-Agent": cfg.user_agent}, timeout=30) as client:
+    with httpx.Client(headers={"User-Agent": cfg.user_agent}, timeout=30,
+                      verify=ssl_verify()) as client:
         while True:
             batch = store.unenriched_npis(limit=200)
             if not batch:

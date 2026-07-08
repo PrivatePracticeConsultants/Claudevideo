@@ -256,8 +256,28 @@
       <span class="spacer"></span>
       <button class="btn" id="btn-scan">Rescan inbox</button>
     </div>
+    <div class="url-card">
+      <h3>Paste file links — the app does the rest</h3>
+      <p class="muted">Paste one or more links (one per line): direct rate files
+        (<code class="inline">.json.gz</code>), a payer's <b>Table&nbsp;of&nbsp;Contents /
+        index</b> link (it will be opened and every file inside queued
+        automatically), or even a plain file-listing page. Downloads and
+        processing run in the background, one file at a time.</p>
+      <textarea id="url-input" rows="3" placeholder="https://tcr.bcbsms.com/Table_of_Contents/Local_TOC.json&#10;https://…_in-network-rates.json.gz"></textarea>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:8px">
+        <button class="btn primary" id="url-add">Add links</button>
+        <span id="url-msg" class="muted"></span>
+      </div>
+      <div class="tablewrap" style="max-height:34vh;margin-top:10px;display:none" id="url-wrap">
+        <table>
+          <thead><tr><th>Link</th><th>What it is</th><th>Status</th><th class="num">Rows</th><th>Notes</th></tr></thead>
+          <tbody id="url-body"></tbody>
+        </table>
+      </div>
+    </div>
+
     <div id="dropzone">
-      <b>Drop MRF files here</b> (.json / .json.gz / .zip, up to 1&nbsp;GB via browser)<br>
+      <b>…or drop MRF files here</b> (.json / .json.gz / .zip, up to 1&nbsp;GB via browser)<br>
       for larger files, drop into <code class="inline">data/inbox/</code> — the watcher picks them up automatically
       <input type="file" id="file-input" multiple style="display:none">
     </div>

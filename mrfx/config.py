@@ -46,6 +46,13 @@ class MrfxConfig(BaseModel):
     enrichment: EnrichmentConfig = Field(default_factory=EnrichmentConfig)
     port: int = 8377
     confirm_over_gb: float = 5.0
+    # URL-drop ingestion: staging for downloads, and knobs for aggregating many
+    # files without filling the disk.
+    downloads_dir: Path = Path("data/downloads")
+    delete_raw_after_ingest: bool = True   # keep only the compact Parquet (re-downloadable)
+    max_toc_files: int = 2000              # cap child files enqueued from one TOC
+    download_timeout_seconds: float = 900.0
+    download_retries: int = 4
     registry_path: Path = Path("config/payer_registry.yaml")
     registry_overrides_path: Path = Path("config/registry_overrides.yaml")
     user_agent: str = "mrf-explorer/0.1 (local analysis tool)"
@@ -67,7 +74,8 @@ class MrfxConfig(BaseModel):
         return name
 
     def ensure_dirs(self) -> None:
-        for d in (self.inbox_dir, self.processed_dir, self.failed_dir, self.store_dir):
+        for d in (self.inbox_dir, self.processed_dir, self.failed_dir,
+                  self.store_dir, self.downloads_dir):
             d.mkdir(parents=True, exist_ok=True)
 
 
