@@ -435,9 +435,17 @@ class Store:
             )
 
     def list_urls(self, limit: int = 500) -> list[dict]:
+        """Rows the user pasted (top-level, no parent) are always returned and
+        listed first — a 764-file index expansion must not push the row the
+        user is watching out of the window — then the newest `limit`
+        discovered children."""
         with self.connect() as con:
             rows = con.execute(
-                "SELECT * FROM url_queue ORDER BY id DESC LIMIT ?", [limit]
+                "SELECT * FROM url_queue WHERE parent_id IS NULL ORDER BY id DESC"
+            ).fetchall()
+            rows += con.execute(
+                "SELECT * FROM url_queue WHERE parent_id IS NOT NULL ORDER BY id DESC LIMIT ?",
+                [limit],
             ).fetchall()
             cols = [d[0] for d in con.description]
         out = []

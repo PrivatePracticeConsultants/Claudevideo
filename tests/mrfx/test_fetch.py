@@ -122,6 +122,18 @@ def test_dedup_and_failed_retry(cfg, store, server):
     assert sum(1 for r in store.list_urls() if "missing" in r["url"]) == 1
 
 
+def test_pasted_link_stays_visible_after_big_expansion(cfg, store, server):
+    # A big index queues hundreds of children; the row the user pasted must
+    # not scroll out of the dashboard's window.
+    add_urls(store, [f"{server}/toc.json"])
+    drain(cfg, store)
+    listed = store.list_urls(limit=1)  # window smaller than the child count
+    toc = [r for r in listed if dedup_key(r["url"]) == dedup_key(f"{server}/toc.json")]
+    assert toc and toc[0]["parent_id"] is None       # pasted link pinned first
+    assert listed[0]["parent_id"] is None
+    assert sum(1 for r in listed if r["parent_id"] is not None) == 1  # children still capped
+
+
 def test_byte_identical_file_on_second_url_skipped(cfg, store, server, http_root):
     # Blue plans host copies of each other's national files: same bytes, many
     # domains. The second copy must be skipped, not re-ingested.
