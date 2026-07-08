@@ -238,6 +238,9 @@ class Store:
                 taxonomy_desc VARCHAR,
                 city VARCHAR,
                 state VARCHAR,
+                address VARCHAR,
+                zip VARCHAR,
+                phone VARCHAR,
                 enriched_at TIMESTAMP
             );
             CREATE TABLE IF NOT EXISTS provider_refs (
@@ -266,6 +269,9 @@ class Store:
             );
             """
         )
+        # migrate pre-existing stores created before the outreach columns
+        for col in ("address", "zip", "phone"):
+            con.execute(f"ALTER TABLE npi_directory ADD COLUMN IF NOT EXISTS {col} VARCHAR")
 
     def _register_views(self, con: duckdb.DuckDBPyConnection) -> None:
         """(Re)point the derived views. Callers must hold write_lock."""
@@ -407,7 +413,14 @@ class Store:
         with self.connect() as con:
             rows = con.execute(
                 """
-                SELECT DISTINCT npi FROM rates
+                SELECT DISTINCT npi FROM (
+                    SELECT npi FROM rates
+                    UNION
+                    -- tin.type='npi' rows put an NPI in the TIN slot; it names
+                    -- the entity, so it needs enrichment too
+                    SELECT tin_value AS npi FROM rates
+                    WHERE tin_is_really_npi AND tin_value IS NOT NULL
+                )
                 WHERE npi NOT IN (SELECT npi FROM npi_directory)
                 ORDER BY npi LIMIT ?
                 """,
@@ -417,11 +430,15 @@ class Store:
 
     def save_npi(self, npi: str, org_name: str | None, taxonomy_code: str | None,
                  taxonomy_desc: str | None, city: str | None, state: str | None,
-                 entity_type: str | None = None) -> None:
+                 entity_type: str | None = None, address: str | None = None,
+                 zip_code: str | None = None, phone: str | None = None) -> None:
         with self.write_lock, self.connect() as con:
             con.execute(
-                "INSERT OR REPLACE INTO npi_directory VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT OR REPLACE INTO npi_directory "
+                "(npi, entity_type, org_name, taxonomy_code, taxonomy_desc, city, state, "
+                " address, zip, phone, enriched_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [npi, entity_type, org_name, taxonomy_code, taxonomy_desc, city, state,
+                 address, (zip_code or "")[:5] or None, phone,
                  dt.datetime.now(dt.timezone.utc)],
             )
 

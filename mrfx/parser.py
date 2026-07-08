@@ -35,12 +35,69 @@ ACCEPTED_CODE_TYPES = {"CPT", "HCPCS"}
 PGroup = tuple[str | None, str | None, tuple[str, ...]]
 
 
+# ---------------------------------------------------------------------------
+# cleaning helpers — real payer files carry numeric codes, string rates,
+# scalar where the schema says array, dashes/whitespace in identifiers, and
+# arbitrary extra fields. Clean best-effort; count what couldn't be salvaged.
+# ---------------------------------------------------------------------------
+
+
+def as_list(v) -> list:
+    """Schema-says-array fields that arrive as a scalar become a 1-list."""
+    if v is None:
+        return []
+    if isinstance(v, (list, tuple)):
+        return list(v)
+    return [v]
+
+
+def clean_code(v) -> str:
+    """'97110', 97110, 97110.0, ' g0283 ' -> canonical uppercase string."""
+    if isinstance(v, float) and v.is_integer():
+        v = int(v)
+    s = str(v).strip().upper()
+    if s.endswith(".0"):
+        s = s[:-2]
+    return s
+
+
+def clean_rate(v) -> float | None:
+    """Rate as number or string ('34.50', '$34.50', '34.50 USD') -> float, else None."""
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = re.sub(r"[^0-9.\-]", "", str(v))
+    try:
+        return float(s) if s else None
+    except ValueError:
+        return None
+
+
+def clean_digits(v) -> str:
+    """Identifier (NPI / EIN) as int, float, or dirty string -> digits only."""
+    if isinstance(v, float) and v.is_integer():
+        v = int(v)
+    return re.sub(r"\D", "", str(v))
+
+
+def clean_ref_id(v) -> int | None:
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        return None
+
+
 @dataclass
 class QaCounters:
     billing_type_other: int = 0       # non-CPT/HCPCS billing_code_type items
+    missing_code_type: int = 0        # target code accepted despite absent type
     multi_code_fields: int = 0        # multiple codes crammed into one billing_code
     zero_rates: int = 0               # $0.00 / $0.01 placeholder prices
     non_dollar_rows: int = 0          # percentage / per diem rows emitted
+    unparseable_rates: int = 0        # prices whose negotiated_rate could not be read
+    invalid_npis: int = 0             # NPIs that are not 10 digits after cleaning
+    bad_ref_ids: int = 0              # provider_reference ids that are not numeric
     rows: int = 0
 
     def to_dict(self) -> dict:
@@ -66,18 +123,31 @@ class ParseResult:
         return dt.date.today().strftime("%Y-%m")
 
 
-def parse_provider_group(pg: dict) -> PGroup:
-    npis = tuple(str(n) for n in (pg.get("npi") or []))
+def parse_provider_group(pg: dict, qa: QaCounters | None = None) -> PGroup:
+    npis = []
+    for n in as_list(pg.get("npi")):
+        d = clean_digits(n)
+        if not d:
+            continue
+        if len(d) != 10 and qa is not None:
+            qa.invalid_npis += 1
+        npis.append(d)
     tin = pg.get("tin") or {}
-    tin_type = (tin.get("type") or "").lower() or None
-    value = str(tin.get("value", "")).strip()
-    if tin_type == "ein":
-        value = value.replace("-", "")
-    return (value or None, tin_type, npis)
+    tin_type = str(tin.get("type") or "").strip().lower() or None
+    raw = tin.get("value")
+    if tin_type == "npi":
+        value = clean_digits(raw) or None
+    else:
+        value = clean_digits(raw) or None
+        # a 9-digit value with no declared type is in practice an EIN
+        if value and tin_type is None:
+            tin_type = "ein"
+    # dedupe while keeping order (payers repeat NPIs within a group)
+    return (value, tin_type, tuple(dict.fromkeys(npis)))
 
 
-def parse_groups(provider_groups: list[dict]) -> list[PGroup]:
-    return [parse_provider_group(pg) for pg in provider_groups or []]
+def parse_groups(provider_groups, qa: QaCounters | None = None) -> list[PGroup]:
+    return [parse_provider_group(pg, qa) for pg in as_list(provider_groups) if isinstance(pg, dict)]
 
 
 MULTI_CODE_RE = re.compile(r"[,\s;/]")
@@ -128,13 +198,17 @@ class InNetworkParser:
 
         for prefix, event, value in ijson.parse(stream, use_float=True):
             if builder is not None:
-                if building == "item" and not skipping and event == "string":
+                if building == "item" and not skipping and event in ("string", "number"):
                     if prefix == "in_network.item.billing_code":
-                        if self.code_set is not None and value not in self.code_set:
+                        code = clean_code(value)
+                        if self.code_set is not None and code not in self.code_set:
                             skipping = True
-                            if MULTI_CODE_RE.search(value.strip()):
+                            if isinstance(value, str) and MULTI_CODE_RE.search(value.strip()):
                                 r.qa.multi_code_fields += 1
-                    elif prefix == "in_network.item.billing_code_type" and value not in ACCEPTED_CODE_TYPES:
+                    elif (
+                        prefix == "in_network.item.billing_code_type"
+                        and str(value).strip().upper() not in ACCEPTED_CODE_TYPES
+                    ):
                         r.qa.billing_type_other += 1
                         skipping = True
                     if skipping:
@@ -175,6 +249,14 @@ class InNetworkParser:
         self._refs_complete = True
         for dg in self._deferred:
             self._emit_group(dg.billing_code, dg.billing_code_type, dg.groups, dg.ref_ids, dg.prices)
+        # Header fields (reporting_entity_name, version, last_updated_on) may
+        # appear AFTER in_network in the byte stream; rows built before they
+        # streamed past carry stale values — stamp the final ones everywhere.
+        for row in r.rows:
+            row["payer"] = r.payer
+            row["schema_version"] = r.schema_version
+            row["last_updated_on"] = r.last_updated_on
+            row["file_month"] = r.file_month
         return r
 
     # -- refs -----------------------------------------------------------------
@@ -202,17 +284,31 @@ class InNetworkParser:
     # -- items ----------------------------------------------------------------
 
     def _handle_item(self, item: dict) -> None:
-        code = str(item.get("billing_code", ""))
-        code_type = str(item.get("billing_code_type", ""))
-        if self.code_set is not None and code not in self.code_set:
+        qa = self.result.qa
+        code = clean_code(item.get("billing_code", ""))
+        code_type = str(item.get("billing_code_type") or "").strip().upper()
+        if not code or (self.code_set is not None and code not in self.code_set):
             return
-        if code_type not in ACCEPTED_CODE_TYPES:
+        if code_type and code_type not in ACCEPTED_CODE_TYPES:
             return
+        if not code_type:
+            # target code with the type field missing entirely: accept
+            # best-effort, infer the family from the code shape, and count it.
+            qa.missing_code_type += 1
+            code_type = "HCPCS" if re.fullmatch(r"[A-Z]\d{4}", code) else "CPT"
         self.result.items_matched += 1
-        for grp in item.get("negotiated_rates", []) or []:
-            groups = parse_groups(grp.get("provider_groups", []) or [])
-            ref_ids = [int(x) for x in (grp.get("provider_references") or [])]
-            prices = grp.get("negotiated_prices", []) or []
+        for grp in as_list(item.get("negotiated_rates")):
+            if not isinstance(grp, dict):
+                continue
+            groups = parse_groups(grp.get("provider_groups"), qa)
+            ref_ids = []
+            for x in as_list(grp.get("provider_references")):
+                rid = clean_ref_id(x)
+                if rid is None:
+                    qa.bad_ref_ids += 1
+                else:
+                    ref_ids.append(rid)
+            prices = [p for p in as_list(grp.get("negotiated_prices")) if isinstance(p, dict)]
             if not prices:
                 continue
             if not self._refs_complete and any(
@@ -247,9 +343,13 @@ class InNetworkParser:
 
         r = self.result
         for price in prices:
-            modifiers = [str(m) for m in (price.get("billing_code_modifier") or [])]
-            ntype = str(price.get("negotiated_type", "") or "")
-            rate = float(price.get("negotiated_rate", 0.0))
+            modifiers = [str(m).strip().upper() for m in as_list(price.get("billing_code_modifier")) if str(m).strip()]
+            ntype = str(price.get("negotiated_type", "") or "").strip().lower()
+            rate = clean_rate(price.get("negotiated_rate"))
+            if rate is None:
+                # no readable dollar figure: nothing to analyze, never fabricate 0.0
+                r.qa.unparseable_rates += 1
+                continue
             is_dollar = ntype in DOLLAR_TYPES
             if is_dollar and rate <= 0.01:
                 r.qa.zero_rates += 1
@@ -269,8 +369,8 @@ class InNetworkParser:
                 "negotiated_rate": rate,
                 "negotiated_type": ntype,
                 "is_dollar_rate": is_dollar,
-                "billing_class": str(price.get("billing_class", "") or ""),
-                "service_code": [str(s) for s in (price.get("service_code") or [])],
+                "billing_class": str(price.get("billing_class", "") or "").strip().lower(),
+                "service_code": [clean_code(s) for s in as_list(price.get("service_code")) if str(s).strip()],
                 "expiration_date": str(price.get("expiration_date", "") or ""),
                 "ingested_at": self._ingested_at,
             }

@@ -53,7 +53,8 @@ OUTLIER_RULE = "hide rows >5x or <0.2x of the code's median within the current f
 # ---------------------------------------------------------------------------
 
 _TIN_REL = """
-    SELECT coalesce(em.entity_name, td.display_name, 'TIN ' || t.tin_value) AS display_name,
+    SELECT coalesce(em.entity_name, td.display_name, nn.org_name,
+                    'TIN ' || t.tin_value) AS display_name,
            t.tin_value AS unit_id, t.tin_value,
            em.entity_name IS NOT NULL AS is_mapped_entity,
            t.tin_is_really_npi,
@@ -62,10 +63,14 @@ _TIN_REL = """
            t.modifier_set, t.billing_class, t.service_code_set, t.file_month,
            t.negotiated_rate, t.negotiated_type, t.is_dollar_rate,
            t.source_count, t.source_files, t.schema_version, t.last_updated_on,
-           coalesce(td.states, []) AS states, coalesce(td.cities, []) AS cities
+           coalesce(td.states, CASE WHEN nn.state IS NULL THEN [] ELSE [nn.state] END) AS states,
+           coalesce(td.cities, CASE WHEN nn.city IS NULL THEN [] ELSE [nn.city] END) AS cities
     FROM rates_by_tin t
     LEFT JOIN tin_directory td USING (tin_value)
     LEFT JOIN entity_map em USING (tin_value)
+    -- payers that set tin.type='npi' publish an NPI in the TIN slot: name and
+    -- locate those rows from the NPI directory instead of leaving raw numbers
+    LEFT JOIN npi_directory nn ON t.tin_is_really_npi AND nn.npi = t.tin_value
 """
 
 _ENTITY_REL = f"""
@@ -197,14 +202,17 @@ class FilterSet:
         if qp.get("hide_tin_npi", "0") in ("1", "true"):
             clauses.append("NOT tin_is_really_npi")
             add("hide_tin_is_really_npi", True)
-        if qp.get("rate_min"):
-            clauses.append("negotiated_rate >= ?")
-            params.append(float(qp["rate_min"]))
-            add("rate_min", float(qp["rate_min"]))
-        if qp.get("rate_max"):
-            clauses.append("negotiated_rate <= ?")
-            params.append(float(qp["rate_max"]))
-            add("rate_max", float(qp["rate_max"]))
+        for bound, op in (("rate_min", ">="), ("rate_max", "<=")):
+            raw = qp.get(bound)
+            if raw in (None, ""):
+                continue
+            try:
+                val = float(raw)
+            except (TypeError, ValueError):
+                continue  # junk numeric input is ignored, not a 500
+            clauses.append(f"negotiated_rate {op} ?")
+            params.append(val)
+            add(bound, val)
         self.hide_outliers = qp.get("hide_outliers", "0") in ("1", "true")
         add("hide_outliers", f"ON — {OUTLIER_RULE}" if self.hide_outliers else "off")
         self.where = " AND ".join(clauses) if clauses else "1=1"
@@ -212,7 +220,9 @@ class FilterSet:
 
 
 def grain_of(qp: dict, cfg: MrfxConfig, store: Store) -> str:
-    grain = qp.get("grain") or cfg.default_grain
+    grain = qp.get("grain") or cfg.default_grain or (
+        "entity" if store.entity_map() else "tin"
+    )
     if grain == "entity" and not store.entity_map():
         grain = "tin"  # entity grain degrades to tin when no map is loaded
     return grain if grain in GRAIN_REL else "tin"
@@ -358,7 +368,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
 
     # -- detail views -----------------------------------------------------------
 
-    @app.get("/api/entity/{grain}/{unit_id}")
+    @app.get("/api/entity/{grain}/{unit_id:path}")
     def entity_detail(grain: str, unit_id: str):
         if grain not in GRAIN_REL:
             raise HTTPException(404, "grain must be entity|tin|npi")
@@ -625,6 +635,28 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         out.write_bytes(buf.getvalue())
         background.add_task(out.unlink, missing_ok=True)
         return FileResponse(out, filename=f"mrfx_{view}_{stamp}.zip", media_type="application/zip")
+
+    @app.get("/api/export/outreach.csv")
+    def export_outreach(request: Request, background: BackgroundTasks):
+        """One row per entity (org name + geography + per-code merge fields),
+        for cross-referencing a contact list / Brevo mail merge."""
+        from .outreach import build_outreach_rows, outreach_csv
+
+        qp = dict(request.query_params)
+        grain = grain_of(qp, cfg, store)
+        if grain == "npi":
+            grain = "tin"  # outreach is entity-level by definition
+        fs = FilterSet(qp)
+        headers, rows = build_outreach_rows(
+            store, rel_sql(grain, fs), fs.params, fs.described.get("codes")
+        )
+        stamp = dt.datetime.now().strftime("%Y-%m-%d_%H%M")
+        out = Path(tempfile.mkstemp(suffix=".csv")[1])
+        out.write_text(outreach_csv(headers, rows), encoding="utf-8")
+        sidecar_note = methodology_text(cfg, store, grain, fs, "display_name", "asc", "outreach")
+        (out.with_suffix(".methodology.txt")).write_text(sidecar_note)
+        background.add_task(out.unlink, missing_ok=True)
+        return FileResponse(out, filename=f"mrfx_outreach_{stamp}.csv", media_type="text/csv")
 
     # -- benchmarks (§7B) --------------------------------------------------------------
 

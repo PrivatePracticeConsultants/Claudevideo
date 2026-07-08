@@ -33,7 +33,8 @@ class MrfxConfig(BaseModel):
     target_npis: list[str] = Field(default_factory=list)
     target_tins: list[str] = Field(default_factory=list)
     entity_map_path: Path = Path("config/entity_map.yaml")
-    default_grain: str = "tin"  # entity | tin | npi ("entity" auto-applies when a map exists)
+    # entity | tin | npi; unset resolves to entity when an entity map exists, else tin
+    default_grain: str | None = None
     mpfs_path: Path | None = None  # optional CMS MPFS extract (code, locality, non_facility_rate)
     report_branding: ReportBranding = Field(default_factory=ReportBranding)
     payer_name_map: dict[str, str] = Field(default_factory=dict)
@@ -51,10 +52,12 @@ class MrfxConfig(BaseModel):
 
     @property
     def code_set(self) -> frozenset[str] | None:
-        """None means ingest ALL billing codes."""
+        """None means ingest ALL billing codes. Canonicalized the same way the
+        parser cleans incoming billing_code values, so '97110' matches 97110,
+        97110.0, or ' g0283 '."""
         if self.codes.all_codes:
             return None
-        return frozenset(str(c) for c in self.codes.cpt_codes)
+        return frozenset(str(c).strip().upper().removesuffix(".0") for c in self.codes.cpt_codes)
 
     def normalize_payer(self, reporting_entity_name: str) -> str:
         name = (reporting_entity_name or "").strip() or "Unknown payer"

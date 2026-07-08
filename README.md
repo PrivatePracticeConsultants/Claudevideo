@@ -121,6 +121,52 @@ positioning is directional. MRF data is public data published for exactly this
 kind of third-party analysis; reports go to the subject practice about its own
 position, not to coordinate rates between competitors (not legal advice).
 
+## Messy files are expected
+
+Real payer files arrive with shuffled key order, missing fields, extra fields
+and loose types. Ingestion is best-effort with cleaning, never silent:
+
+- **Order-independent**: `reporting_entity_name` / `version` / `last_updated_on`
+  and `provider_references` may appear anywhere in the byte stream (before or
+  after `in_network`) — rows are stamped with the final header values and
+  late-arriving references resolve via deferral.
+- **Type cleaning**: numeric billing codes (`97110`, `97110.0`), string rates
+  (`"$34.50"`, `"34.50 USD"`), scalar-where-array fields (a lone `"GP"`
+  modifier, `"11"` service code), dirty identifiers (`"43-111 1111"`,
+  int/float NPIs, duplicate NPIs within a group), cased enums (`"CPT"`/`"cpt"`,
+  `"Professional"`) all normalize.
+- **Missing fields**: a price without a readable `negotiated_rate` is skipped
+  (never written as $0.00); a target code with no `billing_code_type` is
+  accepted best-effort with the family inferred from the code shape; a
+  9-digit TIN with no declared type is treated as an EIN. Unknown extra fields
+  are ignored.
+- **Every salvage decision is QA-counted** per file (unparseable rates, missing
+  code types, invalid NPIs, bad reference ids) and shown in the Files view.
+
+## Outreach export (contact-list cross-referencing / Brevo mail merge)
+
+`Outreach CSV` (explorer button), `GET /api/export/outreach.csv`, or
+`mrfx outreach contacts.csv [--payer ... --state MO --cpt 97110,97140 --month 2026-06]`
+produces **one row per entity**, shaped for matching against your own contact
+list and mass mail merge:
+
+- **Join keys**: `ORG_NAME` plus geography from the NPPES enrichment of the
+  entity's NPIs — `CITY`, `STATE`, `ZIP`, `ADDRESS`, `PHONE`. `WEBSITE` is
+  included as an always-empty column for template consistency (neither MRFs nor
+  NPPES publish websites — fill it from your own list).
+- **Merge fields** per code (Brevo-attribute-safe names, letter-first
+  UPPER_SNAKE): `C97110_RATE`, `C97110_MKT_MEDIAN`, `C97110_PCTL`,
+  `C97110_GAP_TO_MEDIAN` — enough for a template like *"your 97110 rate sits at
+  the {{C97110_PCTL}}th percentile in your market; the median practice gets
+  ${{C97110_GAP_TO_MEDIAN}} more per unit."* Codes come from the active code
+  filter (else the most-covered codes, capped at 10).
+- Honors the explorer's current filters (payer, state/city, month, discipline,
+  base-only), computes over dollar-rate rows, masks SSN-pattern TINs, writes a
+  UTF-8 BOM for Excel/Brevo, and ships a methodology sidecar. Filter to one
+  payer + one month for the cleanest per-market numbers.
+- Same responsible-use note as benchmarks: these emails go to each practice
+  about **its own** market position.
+
 ## How to get MRF files
 
 Use the dashboard's **Sources** tab: pick a state → its BCBS licensee(s) (all of

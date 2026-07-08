@@ -160,6 +160,32 @@ def cmd_export(cfg: MrfxConfig, args) -> int:
     return 0
 
 
+def cmd_outreach(cfg: MrfxConfig, args) -> int:
+    """One row per entity: org name + geography + per-code rate/percentile merge
+    fields, for contact-list cross-referencing and mail merge (e.g. Brevo)."""
+    from .api import FilterSet, grain_of, methodology_text, rel_sql
+    from .outreach import build_outreach_rows, outreach_csv
+
+    store = Store(cfg.store_dir)
+    qp = {k: v for k, v in {
+        "payer": args.payer, "cpt": args.cpt, "state": args.state, "city": args.city,
+        "month": args.month, "discipline": args.discipline,
+        "modifier": "base" if args.base_only else None,
+    }.items() if v not in (None, "")}
+    grain = grain_of({"grain": args.grain} if args.grain else {}, cfg, store)
+    if grain == "npi":
+        grain = "tin"
+    fs = FilterSet(qp)
+    headers, rows = build_outreach_rows(store, rel_sql(grain, fs), fs.params, fs.described.get("codes"))
+    out = Path(args.out)
+    out.write_text(outreach_csv(headers, rows), encoding="utf-8")
+    sidecar = out.with_name(out.stem + "_methodology.txt")
+    sidecar.write_text(methodology_text(cfg, store, grain, fs, "display_name", "asc", "outreach"))
+    print(f"exported {len(rows)} entities -> {out}\nmethodology -> {sidecar}")
+    print("columns:", ", ".join(headers[:14]), f"... + {len(headers) - 14} per-code merge fields")
+    return 0
+
+
 def cmd_reset(cfg: MrfxConfig, args) -> int:
     if not args.confirm:
         print("refusing: pass --confirm to clear the store (processed files are kept)")
@@ -193,6 +219,17 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--all-types", action="store_true", help="include non-dollar negotiated_type rows")
     p.add_argument("--rate-min", type=float, dest="rate_min")
     p.add_argument("--rate-max", type=float, dest="rate_max")
+    p = sub.add_parser("outreach", help="entity contact/geography CSV for mail-merge cross-referencing")
+    p.add_argument("out")
+    p.add_argument("--payer")
+    p.add_argument("--cpt", help="comma list of codes for the merge-field columns")
+    p.add_argument("--state")
+    p.add_argument("--city")
+    p.add_argument("--month")
+    p.add_argument("--discipline")
+    p.add_argument("--grain", choices=["entity", "tin"])
+    p.add_argument("--base-only", action="store_true", default=True,
+                   help="base-modifier rows only (default on)")
     p = sub.add_parser("reset", help="clear the store (keeps processed files)")
     p.add_argument("--confirm", action="store_true")
 
@@ -206,6 +243,7 @@ def main(argv: list[str] | None = None) -> int:
         "ingest": cmd_ingest,
         "status": cmd_status,
         "export": cmd_export,
+        "outreach": cmd_outreach,
         "reset": cmd_reset,
     }[args.cmd](cfg, args)
 

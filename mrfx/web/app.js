@@ -291,6 +291,9 @@ async function initFilters() {
   $("#btn-export-zip").addEventListener("click", () => {
     location.href = `/api/export.zip?${filterQuery({ sort: state.sort.col, dir: state.sort.dir, view: "explorer" })}`;
   });
+  $("#btn-outreach").addEventListener("click", () => {
+    location.href = `/api/export/outreach.csv?${filterQuery()}`;
+  });
 
   $$("#rates-table thead th[data-sort]").forEach((th) =>
     th.addEventListener("click", () => {
