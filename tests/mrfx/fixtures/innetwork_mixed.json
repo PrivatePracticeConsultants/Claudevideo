@@ -1,0 +1,103 @@
+{
+  "reporting_entity_name": "Testco Health Plans Inc",
+  "reporting_entity_type": "health insurance issuer",
+  "last_updated_on": "2026-06-01",
+  "version": "2.0.0",
+  "provider_references": [
+    {
+      "provider_group_id": 101,
+      "provider_groups": [
+        {"npi": [1111111111], "tin": {"type": "ein", "value": "11-1111111"}}
+      ]
+    }
+  ],
+  "in_network": [
+    {
+      "negotiation_arrangement": "ffs",
+      "name": "Therapeutic exercises",
+      "billing_code_type": "CPT",
+      "billing_code_type_version": "2026",
+      "billing_code": "97110",
+      "description": "Therapeutic exercises",
+      "negotiated_rates": [
+        {
+          "provider_groups": [
+            {"npi": [2222222222], "tin": {"type": "ein", "value": "22-2222222"}}
+          ],
+          "negotiated_prices": [
+            {
+              "negotiated_type": "negotiated",
+              "negotiated_rate": 34.5,
+              "expiration_date": "9999-12-31",
+              "service_code": ["11"],
+              "billing_class": "professional"
+            },
+            {
+              "negotiated_type": "negotiated",
+              "negotiated_rate": 29.33,
+              "expiration_date": "9999-12-31",
+              "service_code": ["11"],
+              "billing_class": "professional",
+              "billing_code_modifier": ["CQ"]
+            },
+            {
+              "negotiated_type": "percentage",
+              "negotiated_rate": 80.0,
+              "expiration_date": "9999-12-31",
+              "service_code": ["11"],
+              "billing_class": "professional"
+            }
+          ]
+        },
+        {
+          "provider_references": [101],
+          "negotiated_prices": [
+            {
+              "negotiated_type": "fee schedule",
+              "negotiated_rate": 31.07,
+              "expiration_date": "9999-12-31",
+              "service_code": ["11", "12"],
+              "billing_class": "professional"
+            }
+          ]
+        },
+        {
+          "provider_references": [555],
+          "negotiated_prices": [
+            {
+              "negotiated_type": "negotiated",
+              "negotiated_rate": 27.5,
+              "expiration_date": "9999-12-31",
+              "service_code": ["11"],
+              "billing_class": "professional"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "negotiation_arrangement": "ffs",
+      "name": "Office visit",
+      "billing_code_type": "CPT",
+      "billing_code_type_version": "2026",
+      "billing_code": "99213",
+      "description": "Not in the PT code set",
+      "negotiated_rates": [
+        {
+          "provider_groups": [
+            {"npi": [1111111111], "tin": {"type": "ein", "value": "11-1111111"}}
+          ],
+          "negotiated_prices": [
+            {
+              "negotiated_type": "negotiated",
+              "negotiated_rate": 80.0,
+              "expiration_date": "9999-12-31",
+              "service_code": ["11"],
+              "billing_class": "professional"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "reporting_entity_name": "Testco Health Plans Inc",
+  "reporting_entity_type": "health insurance issuer",
+  "version": "2.0.0",
+  "reporting_structure": [
+    {
+      "reporting_plans": [
+        {"plan_name": "TESTCO PPO", "plan_id_type": "EIN", "plan_id": "123456789", "plan_market_type": "group"}
+      ],
+      "in_network_files": [
+        {"description": "in-network file", "location": "https://example.com/testco_in-network.json.gz"}
+      ]
+    }
+  ]
+}

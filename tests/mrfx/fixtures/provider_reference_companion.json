@@ -1,0 +1,14 @@
+{
+  "reporting_entity_name": "Testco Health Plans Inc",
+  "reporting_entity_type": "health insurance issuer",
+  "last_updated_on": "2026-06-01",
+  "version": "2.0.0",
+  "provider_references": [
+    {
+      "provider_group_id": 555,
+      "provider_groups": [
+        {"npi": [5555555555, 5555555556], "tin": {"type": "ein", "value": "55-5555555"}}
+      ]
+    }
+  ]
+}

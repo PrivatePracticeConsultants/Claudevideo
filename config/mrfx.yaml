@@ -1,0 +1,50 @@
+# MRF Explorer configuration (validated by mrfx/config.py).
+
+codes:
+  # false = extract only cpt_codes below. true = ingest EVERY billing code —
+  # expect orders of magnitude more rows and hours-long parses on big payers.
+  all_codes: false
+  cpt_codes:
+    - "97161"
+    - "97162"
+    - "97163"
+    - "97164"
+    - "97110"
+    - "97112"
+    - "97113"
+    - "97116"
+    - "97124"
+    - "97140"
+    - "97150"
+    - "97530"
+    - "97535"
+    - "97542"
+    - "97760"
+    - "97010"
+    - "97012"
+    - "97014"
+    - "97032"
+    - "97035"
+    - "G0283"
+
+# Normalize reporting_entity_name variants to one payer label
+# (substring match, case-insensitive).
+payer_name_map:
+  "Anthem": "Anthem"
+  "Blue Cross and Blue Shield of Kansas City": "Blue KC"
+
+inbox_dir: data/inbox
+processed_dir: data/processed
+failed_dir: data/failed
+store_dir: data/mrfx_store
+move_processed: true          # false = leave files in inbox, track via checkpoint
+
+enrichment:
+  mode: api                   # api | bulk | off
+  # bulk_csv_path: /path/to/npidata_pfile_....csv   # NPPES Data Dissemination
+
+port: 8377
+confirm_over_gb: 5.0          # files above this wait for confirmation in the Files view
+
+registry_path: config/payer_registry.yaml
+registry_overrides_path: config/registry_overrides.yaml

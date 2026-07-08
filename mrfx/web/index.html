@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MRF Explorer</title>
+<link rel="stylesheet" href="styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect x='1' y='8' width='3' height='7' fill='%232a78d6'/><rect x='6' y='4' width='3' height='11' fill='%232a78d6'/><rect x='11' y='1' width='3' height='14' fill='%232a78d6'/></svg>">
+</head>
+<body>
+
+<header>
+  <h1>MRF <span>Explorer</span></h1>
+  <div id="dataset-stats">loading…</div>
+  <nav>
+    <button data-view="explorer" class="active">Explorer</button>
+    <button data-view="cpt">CPT comparison</button>
+    <button data-view="files">Files</button>
+    <button data-view="sources">Sources</button>
+  </nav>
+</header>
+
+<main>
+
+  <!-- ======================= EXPLORER ======================= -->
+  <section id="view-explorer" class="view active">
+    <div class="filters" id="explorer-filters">
+      <div class="field">
+        <label>Payer</label>
+        <div class="chips" id="f-payer-chips"></div>
+      </div>
+      <div class="field" style="max-width:600px">
+        <label>CPT / HCPCS <span class="muted" style="text-transform:none">(quick-pick)</span></label>
+        <div class="chips" id="f-cpt-chips"></div>
+      </div>
+      <div class="field">
+        <label>Modifier</label>
+        <select id="f-modifier">
+          <option value="">all rows</option>
+          <option value="base">base only (no modifier)</option>
+          <option value="CQ">CQ only</option>
+          <option value="GP">GP only</option>
+          <option value="GO">GO only</option>
+          <option value="GN">GN only</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Billing class</label>
+        <select id="f-class">
+          <option value="">all</option>
+          <option value="professional">professional</option>
+          <option value="institutional">institutional</option>
+        </select>
+      </div>
+      <div class="field grow">
+        <label>Org / NPI search</label>
+        <input type="text" id="f-q" placeholder="name or NPI…">
+      </div>
+      <div class="field">
+        <label>Rate range</label>
+        <div style="display:flex;gap:6px">
+          <input type="number" id="f-rate-min" placeholder="min" style="width:80px">
+          <input type="number" id="f-rate-max" placeholder="max" style="width:80px">
+        </div>
+      </div>
+      <label class="toggle" title="negotiated_type in (negotiated, fee schedule, derived)">
+        <input type="checkbox" id="f-dollar" checked> dollar rates only
+      </label>
+      <button class="btn" id="f-clear">Clear</button>
+      <button class="btn primary" id="btn-export">Export CSV</button>
+    </div>
+
+    <div class="summary" id="summary-strip"></div>
+
+    <div class="tablewrap">
+      <table id="rates-table">
+        <thead>
+          <tr>
+            <th data-sort="org_name">Organization</th>
+            <th data-sort="payer">Payer</th>
+            <th data-sort="billing_code">Code</th>
+            <th data-sort="modifier_set">Modifiers</th>
+            <th data-sort="billing_class">Billing class</th>
+            <th data-sort="negotiated_rate" class="num">Rate</th>
+            <th data-sort="negotiated_type">Type</th>
+            <th data-sort="source_count" class="num">Sources</th>
+          </tr>
+        </thead>
+        <tbody id="rates-body"></tbody>
+      </table>
+      <div id="rates-state"></div>
+    </div>
+
+    <div class="pager">
+      <button class="btn" id="pg-prev">‹ Prev</button>
+      <span id="pg-label">–</span>
+      <button class="btn" id="pg-next">Next ›</button>
+      <span class="spacer"></span>
+      <label>Page size
+        <select id="pg-size">
+          <option>50</option>
+          <option selected>100</option>
+          <option>250</option>
+        </select>
+      </label>
+    </div>
+  </section>
+
+  <!-- ======================= CPT COMPARISON ======================= -->
+  <section id="view-cpt" class="view">
+    <div class="view-head">
+      <h2>Who gets paid most for…</h2>
+      <div class="chips" id="cpt-chips"></div>
+      <span class="spacer"></span>
+      <label class="toggle"><input type="checkbox" id="cpt-base-only"> base rates only</label>
+      <button class="btn primary" id="cpt-export">Export CSV</button>
+    </div>
+    <div id="cpt-hist"></div>
+    <div class="tablewrap" style="max-height:calc(100vh - 430px)">
+      <table>
+        <thead>
+          <tr>
+            <th>#</th><th>Organization</th><th>Payer</th><th>Modifiers</th>
+            <th>Billing class</th>
+            <th class="num">Median rate</th><th class="num">Min</th><th class="num">Max</th><th class="num">Rows</th>
+          </tr>
+        </thead>
+        <tbody id="cpt-body"></tbody>
+      </table>
+      <div id="cpt-state"></div>
+    </div>
+  </section>
+
+  <!-- ======================= FILES ======================= -->
+  <section id="view-files" class="view">
+    <div class="view-head">
+      <h2>Ingest status</h2>
+      <span class="spacer"></span>
+      <button class="btn" id="btn-scan">Rescan inbox</button>
+    </div>
+    <div id="dropzone">
+      <b>Drop MRF files here</b> (.json / .json.gz / .zip, up to 1&nbsp;GB via browser)<br>
+      for larger files, drop into <code class="inline">data/inbox/</code> — the watcher picks them up automatically
+      <input type="file" id="file-input" multiple style="display:none">
+    </div>
+    <div class="tablewrap" style="max-height:calc(100vh - 330px)">
+      <table>
+        <thead>
+          <tr>
+            <th>File</th><th>Payer</th><th>Type</th><th>Status</th>
+            <th class="num">Rows</th><th>Warnings</th><th>Updated</th>
+          </tr>
+        </thead>
+        <tbody id="files-body"></tbody>
+      </table>
+      <div id="files-state"></div>
+    </div>
+  </section>
+
+  <!-- ======================= SOURCES ======================= -->
+  <section id="view-sources" class="view">
+    <div class="view-head">
+      <h2>Where to get MRF files</h2>
+      <div class="field">
+        <select id="src-state"><option value="">— pick a state —</option></select>
+      </div>
+      <span class="muted">find the source → download → drop in inbox → preflight → explore</span>
+    </div>
+    <div id="src-elevance" class="note-banner" style="display:none"></div>
+    <div id="src-state-cards" class="sources-grid"></div>
+    <h3 style="margin:26px 0 0;font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em">
+      National payers (all states)
+    </h3>
+    <div id="src-national-cards" class="sources-grid"></div>
+  </section>
+
+</main>
+
+<!-- org detail slide-over -->
+<div id="overlay"></div>
+<aside id="drawer" aria-hidden="true"></aside>
+<div id="tooltip"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

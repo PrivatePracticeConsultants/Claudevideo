@@ -1,0 +1,334 @@
+# payer_registry.yaml
+# Seed registry of payer MRF sources for the MRF Explorer.
+#
+# HONESTY CONTRACT:
+#   verified: true   → URL was confirmed pointing at a live MRF landing/index page.
+#   verified: false  → licensee mapping is correct, but the URL is a best-known
+#                      landing page or is left null; CONFIRM before trusting.
+#                      The dashboard must show these with a "verify" badge and let
+#                      the user paste the confirmed URL (which flips verified→true
+#                      locally). Never present an unverified URL as authoritative.
+#
+# The split-vs-inline (provider_reference) behavior is PER FILE and changes monthly.
+# Do not encode it here. `mrfx preflight` on the actual file is the source of truth.
+#
+# National payers below already cover all 50 states from a single portal. The
+# per-state section only resolves the correct BCBS licensee, which is the part
+# that actually varies by state.
+
+national_payers:
+  - name: UnitedHealthcare
+    mrf_url: https://transparency-in-coverage.uhc.com/
+    verified: true
+    notes: >
+      Opens to index files; unselect "Index file" to see in-network files.
+      Download API throttles bulk pulls. Choice/Choice Plus files ~86GB.
+      Opt-out employer book at https://private-transparency-in-coverage.uhc.com/
+  - name: Aetna (CVS Health)
+    mrf_url: https://health1.aetna.com/app/public/#/one/insurerCode=AETNACVS_I&brandCode=ALICSI/machine-readable-transparency-in-coverage
+    verified: true
+  - name: Cigna
+    mrf_url: https://www.cigna.com/legal/compliance/machine-readable-files
+    verified: true
+    notes: TOC approach; individual files stated up to ~1TB.
+  - name: Centene
+    mrf_url: https://www.centene.com/price-transparency-files.html
+    verified: true
+    notes: >
+      Per-brand TOCs (Ambetter, Health Net, WellCare, Fidelis, QualChoice, MHN).
+      Contact price_transparency@centene.com
+  - name: Humana
+    mrf_url: null
+    verified: false
+    notes: Humana has relocated its MRF entry point more than once. Search "Humana transparency in coverage machine readable files" for the current public link.
+  - name: Kaiser Permanente
+    mrf_url: null
+    verified: false
+    notes: Published by region (CA, CO, GA, HI, MD/VA/DC, OR/WA). Search "Kaiser Permanente transparency in coverage machine readable files <region>".
+
+# Elevance/Anthem publishes a national master index covering all its states:
+#   https://antm-pt-prod-dataz-nogbd-nophi-us-east1.s3.amazonaws.com/anthem/YYYY-MM-01_anthem_index.json.gz
+# The known -phi-/-nophi- URL bug applies. Portal: https://www.anthem.com/machine-readable-file/search
+elevance_master_index_pattern: https://antm-pt-prod-dataz-nogbd-nophi-us-east1.s3.amazonaws.com/anthem/{YYYY-MM}-01_anthem_index.json.gz
+
+# HCSC operates IL, TX, OK, NM, MT on one platform. Per-state landing pages follow
+# the pattern https://www.bcbs<st>.com/.../caa/caa-tic (only IL confirmed below).
+
+bcbs_by_state:
+  AL:
+    licensee: Blue Cross and Blue Shield of Alabama
+    parent: Independent
+    mrf_url: null
+    verified: false
+  AK:
+    licensee: Premera Blue Cross Blue Shield of Alaska
+    parent: Premera
+    mrf_url: null
+    verified: false
+  AZ:
+    licensee: Blue Cross Blue Shield of Arizona (AZ Blue)
+    parent: Independent
+    mrf_url: null
+    verified: false
+  AR:
+    licensee: Arkansas Blue Cross and Blue Shield
+    parent: Independent
+    mrf_url: null
+    verified: false
+  CA:
+    licensee: [Anthem Blue Cross, Blue Shield of California]
+    parent: [Elevance, Independent]
+    mrf_url: null
+    verified: false
+    notes: TWO separate Blue companies in CA. Anthem via Elevance master index; Blue Shield of CA is independent.
+  CO:
+    licensee: Anthem Blue Cross and Blue Shield of Colorado
+    parent: Elevance
+    mrf_url: https://www.anthem.com/machine-readable-file/search
+    verified: true
+    notes: Use Elevance master index; filter CO plans.
+  CT:
+    licensee: Anthem Blue Cross and Blue Shield of Connecticut
+    parent: Elevance
+    mrf_url: https://www.anthem.com/machine-readable-file/search
+    verified: true
+  DE:
+    licensee: Highmark Blue Cross Blue Shield Delaware
+    parent: Highmark
+    mrf_url: null
+    verified: false
+  DC:
+    licensee: CareFirst BlueCross BlueShield
+    parent: CareFirst
+    mrf_url: https://individual.carefirst.com/individuals-families/mandates-policies/machine-readable-file.page
+    verified: true
+  FL:
+    licensee: Florida Blue
+    parent: GuideWell
+    mrf_url: null
+    verified: false
+  GA:
+    licensee: Anthem Blue Cross and Blue Shield of Georgia
+    parent: Elevance
+    mrf_url: https://www.anthem.com/machine-readable-file/search
+    verified: true
+  HI:
+    licensee: Hawaii Medical Service Association (HMSA / BCBS Hawaii)
+    parent: Independent
+    mrf_url: null
+    verified: false
+  ID:
+    licensee: [Blue Cross of Idaho, Regence BlueShield of Idaho]
+    parent: [Independent, Cambia/Regence]
+    mrf_url: null
+    verified: false
+    notes: TWO competing Blue companies statewide.
+  IL:
+    licensee: Blue Cross and Blue Shield of Illinois
+    parent: HCSC
+    mrf_url: https://www.bcbsil.com/provider/standards/standard-requirements/caa/caa-tic
+    verified: true
+  IN:
+    licensee: Anthem Blue Cross and Blue Shield of Indiana
+    parent: Elevance
+    mrf_url: https://www.anthem.com/machine-readable-file/search
+    verified: true
+  IA:
+    licensee: Wellmark Blue Cross Blue Shield of Iowa
+    parent: Wellmark
+    mrf_url: null
+    verified: false
+  KS:
+    licensee: [Blue Cross and Blue Shield of Kansas, Blue Cross and Blue Shield of Kansas City]
+    parent: [Independent, Independent]
+    mrf_url: https://www.bcbsks.com/mrf
+    verified: true
+    notes: Blue KC (KC metro, crosses into western MO) at https://bcbskc.sapphiremrfhub.com/
+  KY:
+    licensee: Anthem Blue Cross and Blue Shield of Kentucky
+    parent: Elevance
+    mrf_url: https://www.anthem.com/machine-readable-file/search
+    verified: true
+  LA:
+    licensee: Blue Cross and Blue Shield of Louisiana
+    parent: Independent
+    mrf_url: null
+    verified: false
+  ME:
+    licensee: Anthem Blue Cross and Blue Shield of Maine
+    parent: Elevance
+    mrf_url: https://www.anthem.com/machine-readable-file/search
+    verified: true
+  MD:
+    licensee: CareFirst BlueCross BlueShield
+    parent: CareFirst
+    mrf_url: https://individual.carefirst.com/individuals-families/mandates-policies/machine-readable-file.page
+    verified: true
+  MA:
+    licensee: Blue Cross Blue Shield of Massachusetts
+    parent: Independent
+    mrf_url: https://transparency-in-coverage.bluecrossma.com/
+    verified: true
+  MI:
+    licensee: Blue Cross Blue Shield of Michigan
+    parent: Independent
+    mrf_url: https://www.bcbsm.com/mrf/index/
+    verified: true
+  MN:
+    licensee: Blue Cross and Blue Shield of Minnesota
+    parent: Independent
+    mrf_url: https://www.bluecrossmn.com/transparency-coverage-machine-readable-files
+    verified: true
+  MS:
+    licensee: Blue Cross & Blue Shield of Mississippi
+    parent: Independent
+    mrf_url: null
+    verified: false
+  MO:
+    licensee: [Anthem Blue Cross and Blue Shield (most of MO), Blue Cross and Blue Shield of Kansas City (western)]
+    parent: [Elevance, Independent]
+    mrf_url: https://www.anthem.com/machine-readable-file/search
+    verified: true
+    notes: St. Louis = Anthem. Blue KC at https://bcbskc.sapphiremrfhub.com/ covers ~30 western counties.
+  MT:
+    licensee: Blue Cross and Blue Shield of Montana
+    parent: HCSC
+    mrf_url: null
+    verified: false
+    notes: HCSC platform; pattern https://www.bcbsmt.com/.../caa/caa-tic (confirm).
+  NE:
+    licensee: Blue Cross and Blue Shield of Nebraska
+    parent: Independent
+    mrf_url: null
+    verified: false
+  NV:
+    licensee: Anthem Blue Cross and Blue Shield of Nevada
+    parent: Elevance
+    mrf_url: https://www.anthem.com/machine-readable-file/search
+    verified: true
+  NH:
+    licensee: Anthem Blue Cross and Blue Shield of New Hampshire
+    parent: Elevance
+    mrf_url: https://www.anthem.com/machine-readable-file/search
+    verified: true
+  NJ:
+    licensee: Horizon Blue Cross Blue Shield of New Jersey
+    parent: Independent
+    mrf_url: null
+    verified: false
+  NM:
+    licensee: Blue Cross and Blue Shield of New Mexico
+    parent: HCSC
+    mrf_url: null
+    verified: false
+    notes: HCSC platform; pattern https://www.bcbsnm.com/.../caa/caa-tic (confirm).
+  NY:
+    licensee: [Empire BlueCross BlueShield (Anthem), Excellus BCBS, Highmark BCBS of Western NY, Highmark Blue Shield of Northeastern NY]
+    parent: [Elevance, Independent, Highmark, Highmark]
+    mrf_url: https://www.empireblue.com/machine-readable-file/search/
+    verified: true
+    notes: >
+      NY is fragmented by region. Empire/Anthem downstate+eastern (verified);
+      Excellus central/upstate at https://news.excellusbcbs.com/developer-info/transparency-coverage-mrf (verified);
+      Highmark serves Buffalo (WNY) and Albany (NENY).
+  NC:
+    licensee: Blue Cross and Blue Shield of North Carolina
+    parent: Independent
+    mrf_url: https://www.bluecrossnc.com/policies-best-practices/machine-readable-files
+    verified: true
+  ND:
+    licensee: Blue Cross Blue Shield of North Dakota
+    parent: Independent (Noridian)
+    mrf_url: null
+    verified: false
+  OH:
+    licensee: Anthem Blue Cross and Blue Shield of Ohio
+    parent: Elevance
+    mrf_url: https://www.anthem.com/machine-readable-file/search
+    verified: true
+  OK:
+    licensee: Blue Cross and Blue Shield of Oklahoma
+    parent: HCSC
+    mrf_url: null
+    verified: false
+    notes: HCSC platform; pattern https://www.bcbsok.com/.../caa/caa-tic (confirm).
+  OR:
+    licensee: Regence BlueCross BlueShield of Oregon
+    parent: Cambia/Regence
+    mrf_url: null
+    verified: false
+  PA:
+    licensee: [Highmark Blue Cross Blue Shield (west/central), Independence Blue Cross (Philadelphia/SE), Capital Blue Cross (central)]
+    parent: [Highmark, Independent, Independent]
+    mrf_url: null
+    verified: false
+    notes: THREE Blue companies by region. Match the target practice's PA region.
+  RI:
+    licensee: Blue Cross & Blue Shield of Rhode Island
+    parent: Independent
+    mrf_url: null
+    verified: false
+  SC:
+    licensee: BlueCross BlueShield of South Carolina
+    parent: Independent
+    mrf_url: null
+    verified: false
+  SD:
+    licensee: Wellmark Blue Cross Blue Shield of South Dakota
+    parent: Wellmark
+    mrf_url: null
+    verified: false
+  TN:
+    licensee: BlueCross BlueShield of Tennessee
+    parent: Independent
+    mrf_url: null
+    verified: false
+  TX:
+    licensee: Blue Cross and Blue Shield of Texas
+    parent: HCSC
+    mrf_url: null
+    verified: false
+    notes: HCSC platform; pattern https://www.bcbstx.com/.../caa/caa-tic (confirm).
+  UT:
+    licensee: Regence BlueCross BlueShield of Utah
+    parent: Cambia/Regence
+    mrf_url: null
+    verified: false
+  VT:
+    licensee: Blue Cross and Blue Shield of Vermont
+    parent: Independent
+    mrf_url: null
+    verified: false
+  VA:
+    licensee: [Anthem Blue Cross and Blue Shield of Virginia (most), CareFirst BCBS (Northern VA)]
+    parent: [Elevance, CareFirst]
+    mrf_url: https://www.anthem.com/machine-readable-file/search
+    verified: true
+    notes: Northern VA (DC suburbs) is CareFirst territory.
+  WA:
+    licensee: [Premera Blue Cross, Regence BlueShield]
+    parent: [Premera, Cambia/Regence]
+    mrf_url: null
+    verified: false
+    notes: TWO Blue companies statewide.
+  WV:
+    licensee: Highmark Blue Cross Blue Shield West Virginia
+    parent: Highmark
+    mrf_url: null
+    verified: false
+  WI:
+    licensee: Anthem Blue Cross and Blue Shield of Wisconsin
+    parent: Elevance
+    mrf_url: https://www.anthem.com/machine-readable-file/search
+    verified: true
+  WY:
+    licensee: Blue Cross Blue Shield of Wyoming
+    parent: Independent
+    mrf_url: null
+    verified: false
+
+# Platform hint: once you know the vendor, navigation repeats.
+#   *.sapphiremrfhub.com  → Sapphire/S365 (EIN or company-name lookup)
+#   HealthSparq-hosted    → in-network/allowed-amount toggle + TOC
+#   HCSC (bcbs{il,tx,ok,nm,mt}.com) → /provider/.../caa/caa-tic pages
+#   Elevance/Anthem       → national S3 master index (all Anthem states at once)

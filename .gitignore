@@ -4,3 +4,6 @@ data/out/
 __pycache__/
 *.pyc
 .pytest_cache/
+data/
+bcbs_mo_mrf.egg-info/
+config/registry_overrides.yaml

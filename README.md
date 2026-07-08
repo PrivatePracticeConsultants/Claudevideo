@@ -1,3 +1,103 @@
+# Payer MRF tooling: extraction pipeline + MRF Explorer dashboard
+
+Two sibling tools in one repo:
+
+1. **[MRF Explorer](#mrf-explorer--drop-in-payer-rate-dashboard)** (`mrfx`) — drop
+   *any* payer's Transparency-in-Coverage in-network files into a folder and get a
+   local analytics dashboard: org × CPT × modifier rate table, filters, sorting,
+   CSV export. Payer-agnostic and file-driven.
+2. **[BCBS-MO extraction pipeline](#bcbs-mo-mrf--bcbs-missouri-ptrehab-negotiated-rate-extraction)**
+   (`run.py`) — targeted crawler/extractor for the two Missouri BCBS licensees:
+   discovers their MRFs, filters to a target NPI set, writes Parquet.
+
+---
+
+# MRF Explorer — drop-in payer rate dashboard
+
+```
+          Sources tab                    you                       mrfx
+  ┌───────────────────────┐   ┌──────────────────────┐   ┌──────────────────────┐
+  │ pick state → licensee │ → │ download MRF (.json/  │ → │ data/inbox/          │
+  │ + national payer URLs │   │  .json.gz/.zip)       │   │  watcher/`mrfx ingest`│
+  └───────────────────────┘   └──────────────────────┘   └──────────┬───────────┘
+                                                                    │ preflight → parse
+                                                                    ▼
+  ┌───────────────────────┐   ┌──────────────────────┐   ┌──────────────────────┐
+  │ CSV export (=view)    │ ← │ dashboard :8377      │ ← │ DuckDB/Parquet store │
+  └───────────────────────┘   └──────────────────────┘   └──────────────────────┘
+```
+
+## Quickstart
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt && .venv/bin/pip install -e .
+.venv/bin/mrfx serve            # dashboard at http://localhost:8377 + inbox watcher
+# in another shell (or just drag files onto the dashboard's Files view):
+cp ~/Downloads/2026-07-01_someplan_in-network.json.gz data/inbox/
+```
+
+Other commands: `mrfx preflight <path>` (inspect before a long parse),
+`mrfx ingest [path] [--force]`, `mrfx status`, `mrfx export out.csv [--cpt 97110 --payer ...]`,
+`mrfx reset --confirm`. Config in `config/mrfx.yaml` (code set, payer name
+normalization, `move_processed`, enrichment mode, `confirm_over_gb`, port).
+
+## How to get MRF files
+
+Use the dashboard's **Sources** tab: pick a state → it shows that state's BCBS
+licensee(s) (all of them in multi-Blue states — CA/ID/KS/MO/NY/PA/VA/WA) plus
+the national payers (UnitedHealthcare, Aetna, Cigna, Centene, Humana, Kaiser),
+each with its MRF entry point. Elevance/Anthem states share one national master
+index — the tab says so instead of implying per-state downloads. Download the
+in-network file(s) you care about and drop them in `data/inbox/`.
+
+**The registry's honesty contract** (`config/payer_registry.yaml`): entries with
+`verified: true` were confirmed pointing at a live MRF page; `verified: false`
+entries render with an "unverified — confirm link" badge and a one-click search;
+they are never displayed as authoritative. When you confirm a URL, paste it into
+the card — it persists to `config/registry_overrides.yaml` and flips the badge
+to "verified (locally)".
+
+## Companion provider-reference files (read before dropping files in)
+
+Many payers don't embed provider groups in the in-network file. Instead, rate
+groups cite integer `provider_references` ids that resolve against a reference
+table — either embedded at the top of the same file, or shipped as a **separate
+provider-reference file**. If you ingest an in-network file without its
+companion, every rate group whose ids can't be resolved is **counted and
+surfaced** ("N rate groups skipped — missing provider reference file") in the
+Files view and CLI — never silently dropped. Drop the companion in afterwards
+and mrfx re-ingests the affected files automatically.
+
+`mrfx preflight <file>` tells you *before* a multi-hour parse: file type
+(rate / reference / TOC / unknown), payer, schema version, `last_updated_on`,
+size + parse-time estimate, whether it uses provider references, and whether a
+matching companion (same payer, same month) is already present. Verdicts:
+`READY` / `NEEDS COMPANION` / `NOT A RATE FILE` / `UNREADABLE`. TOC/index files
+are never parsed for rates — preflight points you to the in-network URLs they
+list.
+
+## Volume expectations
+
+- In-network files are commonly **1–100+ GB uncompressed** (UHC Choice Plus
+  ~86 GB; some Cigna files ~1 TB). mrfx streams with constant memory, but parse
+  time is roughly proportional to size (~tens of MB/s) — preflight prints an
+  estimate, and files above `confirm_over_gb` wait for explicit confirmation.
+- With the default PT code set, even huge files usually yield modest row counts
+  (thousands–millions). `codes.all_codes: true` ingests **every** billing code —
+  expect orders of magnitude more rows and disk.
+- Browser uploads are capped at 1 GB; bigger files go straight into `data/inbox/`.
+- NPI → org-name enrichment runs in the background via the NPPES API (names fill
+  in as they resolve), or point `enrichment: bulk` at a local NPPES
+  Data Dissemination CSV for offline enrichment, or `off`.
+
+Non-dollar rows (`negotiated_type` = percentage / per diem) are tagged
+`is_dollar_rate = false` and excluded from rate stats by default — the
+"dollar rates only" toggle includes them, clearly labeled. Modifiers survive
+end-to-end into the CSV export. Exports mirror the active filter state exactly
+(same SQL), UTF-8 BOM for Excel, arrays `;`-joined.
+
+---
+
 # bcbs-mo-mrf — BCBS Missouri PT/Rehab negotiated-rate extraction
 
 Extracts commercial negotiated reimbursement rates for targeted physical-therapy /
