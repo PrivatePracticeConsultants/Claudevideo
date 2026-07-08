@@ -32,7 +32,9 @@ codes:
 payer_name_map:
   "Anthem": "Anthem"
   "Blue Cross and Blue Shield of Kansas City": "Blue KC"
-  "BKC": "Blue KC"   # Blue KC's MRF files report the entity name as just "BKC"
+  "BKC": "Blue KC"      # Blue KC's MRF files report the entity name as just "BKC"
+  "BCBSMI": "BCBS Michigan"
+  "bcbsla": "BCBS Louisiana"
 
 inbox_dir: data/inbox
 processed_dir: data/processed

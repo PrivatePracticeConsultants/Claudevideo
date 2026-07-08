@@ -169,6 +169,30 @@ sources:
       files ingested 2,573,672 rows (files report the payer as "BKC").
       Other payers on *.sapphiremrfhub.com hubs work the same way.
 
+  - name: Blue Cross Blue Shield of Michigan
+    url: https://bcbsm.sapphiremrfhub.com
+    kind: page
+    queueable: true
+    verified: "2026-07-08"
+    notes: >-
+      Sapphire hub, crawled automatically: index expanded to 264 files.
+      Metro-Detroit HMO shard ingested 8,418 therapy rows (payer "BCBSMI").
+      Specialty network files with no therapy codes (e.g. home infusion)
+      ingest honestly as 0 rows; a 5.9 GB shard trips the size guard until
+      confirm_over_gb is raised.
+
+  - name: Blue Cross Blue Shield of Louisiana
+    url: https://bcbsla.sapphiremrfhub.com
+    kind: page
+    queueable: true
+    verified: "2026-07-08"
+    notes: >-
+      Sapphire hub, crawled automatically: 2 TOCs (HMO Louisiana 275 files +
+      LAHSIC 263 files). The bcbsla P001 fee-schedule file (2.8 GB
+      uncompressed) ingested 14,607,476 rows — the largest single-file yield
+      tested (payer "bcbsla"). Also cross-lists other Blues' national files,
+      attributed per-file.
+
   # ---- National non-Blues ----
   - name: Centene / Ambetter (all states, one page)
     url: https://www.centene.com/price-transparency-files.html
@@ -309,3 +333,100 @@ sources:
     queueable: false
     verified: "2026-07-08"
     notes: JavaScript page (probed — no static links); paste file links from a browser.
+
+  - name: BCBS Alabama
+    url: https://www.bcbsal.org/web/transparency-in-coverage
+    kind: portal
+    queueable: false
+    verified: "2026-07-08"
+    notes: >-
+      JavaScript page (probed — no static links); paste file links from a
+      browser. Alabama's national files also appear inside other Blues'
+      indexes (the BCBS-MS TOC ingested one).
+
+  - name: BCBS Massachusetts
+    url: https://www.bluecrossma.org/about-us/transparency-coverage
+    kind: portal
+    queueable: false
+    verified: "2026-07-08"
+    notes: JavaScript page (probed — no static links); paste file links from a browser.
+
+  - name: BCBS Rhode Island
+    url: https://www.bcbsri.com/transparency-in-coverage
+    kind: portal
+    queueable: false
+    verified: "2026-07-08"
+    notes: JavaScript page (probed — no static links); paste file links from a browser.
+
+  - name: BCBS Vermont
+    url: https://www.bluecrossvt.org/transparency-in-coverage
+    kind: portal
+    queueable: false
+    verified: "2026-07-08"
+    notes: JavaScript page (probed — no static links); paste file links from a browser.
+
+  - name: BCBS Kansas
+    url: https://www.bcbsks.com/transparency-in-coverage
+    kind: portal
+    queueable: false
+    verified: "2026-07-08"
+    notes: JavaScript page (probed — no static links); paste file links from a browser.
+
+  - name: Arkansas BCBS
+    url: https://www.arkansasbluecross.com/transparency-in-coverage
+    kind: portal
+    queueable: false
+    verified: "2026-07-08"
+    notes: >-
+      JavaScript page (probed — no static links). Arkansas's national files
+      are widely cross-hosted by other Blues' indexes and were ingested via
+      the Wyoming/Nebraska/Western-NY trials.
+
+  - name: HMSA (BCBS Hawaii)
+    url: https://hmsa.com/machine-readable-files/
+    kind: portal
+    queueable: false
+    verified: "2026-07-08"
+    notes: JavaScript page (probed — no static MRF links); paste file links from a browser.
+
+  - name: Blue Shield of California
+    url: https://www.blueshieldca.com/en/home/get-to-know-blue-shield/machine-readable-files
+    kind: portal
+    queueable: false
+    verified: "2026-07-08"
+    notes: >-
+      JavaScript page (probed — no static links). Note CA has TWO Blues:
+      Anthem Blue Cross CA is covered by the Anthem/Elevance national index.
+
+  - name: Excellus BCBS (upstate New York)
+    url: https://www.excellusbcbs.com/transparency-in-coverage
+    kind: portal
+    queueable: false
+    verified: "2026-07-08"
+    notes: JavaScript page (probed — no static links); paste file links from a browser.
+
+  - name: Capital Blue Cross (central Pennsylvania)
+    url: https://www.capbluecross.com/wps/portal/cap/company/legal/machine-readable-files
+    kind: portal
+    queueable: false
+    verified: "2026-07-08"
+    notes: JavaScript page (probed — no static links); paste file links from a browser.
+
+  - name: Independence Blue Cross (Philadelphia)
+    url: https://www.ibx.com/resources/for-members/transparency-in-coverage
+    kind: portal
+    queueable: false
+    verified: "2026-07-08"
+    notes: >-
+      JavaScript page (probed — no static links). IBX's national-alliance
+      book is queueable via the "Independence National Alliance" Highmark
+      index above.
+
+  - name: BCBS Minnesota (own book)
+    url: https://www.bluecrossmn.com/about-us/transparency-coverage-regulations
+    kind: portal
+    queueable: false
+    verified: "2026-07-08"
+    notes: >-
+      JavaScript page (probed — no static links). The Minnesota partnership
+      book is queueable via the Highmark-hosted index above.

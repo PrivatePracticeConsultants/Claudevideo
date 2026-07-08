@@ -185,14 +185,16 @@ badge and are never displayed as authoritative; confirming a URL persists it to
 
 `config/known_sources.yaml` is a shipped catalog of every payer entry point
 this app has been live-tested against — each entry carries its verification
-date and what happened (files listed, rows ingested, quirks). 18 entries are
+date and what happened (files listed, rows ingested, quirks). 20 entries are
 **auto-queueable** (Highmark's 15 hosted Blue plans incl. FL/AZ/ID/MN/LA/NE,
-BCBS Mississippi's stable TOC, Centene/Ambetter's all-states page, and Blue
-KC's Sapphire hub); the rest are portals that need a browser click (UHC,
-Cigna, Aetna, Humana, HCSC, CareFirst, BCBS TN/NC/SC, Wellmark, Horizon NJ,
-Premera, Regence, Kaiser, Oscar, Molina, Priority Health — each probed and
-confirmed JavaScript-only) with instructions, plus Anthem/Elevance's national
-master index (10.5 GB — raise `confirm_over_gb` to use it). Monthly-dated URLs carry
+BCBS Mississippi's stable TOC, Centene/Ambetter's all-states page, and the
+Sapphire hubs of Blue KC, BCBS Michigan, and BCBS Louisiana); the rest are
+portals that need a browser click (UHC, Cigna, Aetna, Humana, HCSC,
+CareFirst, BCBS AL/TN/NC/SC/MA/RI/VT/KS, Arkansas, Wellmark, Horizon NJ,
+Premera, Regence, Kaiser, Oscar, Molina, Priority Health, HMSA, Blue Shield
+of CA, Excellus, Capital BC, IBX, BCBS MN — each probed and confirmed
+JavaScript-only) with instructions, plus Anthem/Elevance's national master
+index (10.5 GB — raise `confirm_over_gb` to use it). Monthly-dated URLs carry
 a `{FIRST_OF_MONTH}` placeholder resolved at queue time so the catalog never
 goes stale. Load them via `mrfx add --known`, the dashboard's **"Queue tested
 payer indexes"** button, or browse with **"Show tested sources"**
