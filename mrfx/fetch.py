@@ -170,10 +170,12 @@ class DownloadError(Exception):
 
 
 def download(cfg: MrfxConfig, url: str, dest: Path, progress_cb=None,
-             max_bytes: int | None = None) -> Path:
-    """Stream a URL to `dest` (atomic via .part). Retries transient failures;
-    raises DownloadError on a terminal failure (e.g. expired signed URL) or
-    when the payload exceeds max_bytes (the confirm_over_gb guard)."""
+             max_bytes: int | None = None) -> str:
+    """Stream a URL to `dest` (atomic via .part). Returns the sha256 hex of
+    the downloaded bytes (used to detect the same file arriving under a
+    different domain). Retries transient failures; raises DownloadError on a
+    terminal failure (e.g. expired signed URL) or when the payload exceeds
+    max_bytes (the confirm_over_gb guard)."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     part = dest.with_suffix(dest.suffix + ".part")
     last_exc: Exception | None = None
@@ -211,9 +213,11 @@ def download(cfg: MrfxConfig, url: str, dest: Path, progress_cb=None,
                     raise too_big(total)
                 done = 0
                 last_report = 0.0
+                sha = hashlib.sha256()
                 with open(part, "wb") as f:
                     for chunk in resp.iter_bytes(chunk_size=1 << 20):
                         f.write(chunk)
+                        sha.update(chunk)
                         done += len(chunk)
                         if max_bytes and done > max_bytes:
                             raise too_big(done)  # no Content-Length header case
@@ -223,7 +227,7 @@ def download(cfg: MrfxConfig, url: str, dest: Path, progress_cb=None,
                 if progress_cb:
                     progress_cb(done, total)
             part.replace(dest)
-            return dest
+            return sha.hexdigest()
         except DownloadError as e:
             last_exc = e
             if not e.retryable:
@@ -377,12 +381,25 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
     dest = cfg.downloads_dir / filename_for(url)
     try:
         store.update_url(url_id, status="downloading")
-        download(cfg, url, dest,
-                 progress_cb=lambda d, t: store.url_progress(url_id, d, t),
-                 max_bytes=int(cfg.confirm_over_gb * 1e9))
+        content_sha = download(cfg, url, dest,
+                               progress_cb=lambda d, t: store.url_progress(url_id, d, t),
+                               max_bytes=int(cfg.confirm_over_gb * 1e9))
     except DownloadError as e:
         log.warning("url %s download failed: %s", url, e)
         store.update_url(url_id, status="failed", error=str(e))
+        return
+    store.update_url(url_id, content_sha=content_sha)
+
+    # Blue plans host copies of each other's national files — the same bytes
+    # arrive under many domains. Skip byte-identical repeats instead of
+    # re-parsing millions of duplicate rows into the store.
+    twin = store.find_url_with_same_content(content_sha, exclude_id=url_id)
+    if twin:
+        store.update_url(url_id, status="skipped", kind="duplicate",
+                         error="identical to a file already ingested (payers host copies "
+                               f"of each other's files) — skipped as duplicate of {twin.split('?')[0]}")
+        dest.unlink(missing_ok=True)
+        log.info("%s — byte-identical to %s; skipped", url, twin.split("?")[0])
         return
 
     try:

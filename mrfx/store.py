@@ -298,6 +298,7 @@ class Store:
                 rows_emitted BIGINT DEFAULT 0,
                 child_count BIGINT DEFAULT 0,
                 error VARCHAR,
+                content_sha VARCHAR,        -- sha256 of downloaded bytes (cross-host dupe detection)
                 added_at TIMESTAMP,
                 finished_at TIMESTAMP
             );
@@ -309,6 +310,8 @@ class Store:
         # migrate stores created before the chunked-progress columns
         for col, typ in (("progress", "DOUBLE"), ("chunks_done", "BIGINT"), ("chunks_total", "BIGINT")):
             con.execute(f"ALTER TABLE files ADD COLUMN IF NOT EXISTS {col} {typ}")
+        # migrate stores created before content-hash duplicate detection
+        con.execute("ALTER TABLE url_queue ADD COLUMN IF NOT EXISTS content_sha VARCHAR")
 
     def _register_views(self, con: duckdb.DuckDBPyConnection) -> None:
         """(Re)point the derived views. Callers must hold write_lock."""
@@ -412,7 +415,8 @@ class Store:
 
     def update_url(self, url_id: int, **fields) -> None:
         allowed = {"kind", "status", "filename", "bytes_total", "bytes_done",
-                   "progress", "rows_emitted", "child_count", "error", "parent_id"}
+                   "progress", "rows_emitted", "child_count", "error", "parent_id",
+                   "content_sha"}
         fields = {k: v for k, v in fields.items() if k in allowed}
         if fields.get("status") in ("done", "failed", "skipped"):
             fields["finished_at"] = dt.datetime.now(dt.timezone.utc)
@@ -449,6 +453,20 @@ class Store:
         with self.connect() as con:
             rows = con.execute("SELECT status, count(*) FROM url_queue GROUP BY status").fetchall()
         return {s: n for s, n in rows}
+
+    def find_url_with_same_content(self, content_sha: str, exclude_id: int) -> str | None:
+        """URL of an already-ingested queue row whose downloaded bytes were
+        identical (Blue plans host copies of each other's national files, so
+        the same file arrives under many domains). None if no match."""
+        if not content_sha:
+            return None
+        with self.connect() as con:
+            row = con.execute(
+                "SELECT url FROM url_queue WHERE content_sha = ? AND status = 'done' "
+                "AND id != ? LIMIT 1",
+                [content_sha, exclude_id],
+            ).fetchone()
+        return row[0] if row else None
 
     def recover_stuck_urls(self) -> int:
         """Rows left mid-flight by a crash/Ctrl-C go back to queued so the

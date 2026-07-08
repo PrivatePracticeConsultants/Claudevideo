@@ -787,6 +787,7 @@ const KIND_LABEL = {
   in_network: "rate file",
   provider_reference: "provider list",
   allowed_amounts: "allowed-amounts (no rates)",
+  duplicate: "duplicate (already have it)",
   unknown: "?",
 };
 

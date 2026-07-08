@@ -134,7 +134,11 @@ app mid-download, it picks up where it left off on restart.
 
 Not every link is a rate file: **allowed-amounts** files (out-of-network
 billed/allowed averages) contain no negotiated rates, and the app tells you so
-and skips them rather than loading junk.
+and skips them rather than loading junk. The app also spots **duplicates**:
+Blue plans publish copies of each other's national files, so when a link
+downloads to the exact same bytes as a file you already loaded, it's skipped
+with a note saying which link it duplicates — your database stays clean even
+if you paste every state's index.
 
 Prefer the terminal? The same thing works there:
 
@@ -248,6 +252,14 @@ prompt). They're an alternative to the dashboard buttons.
 - **A link shows "allowed-amounts (no rates)"** — that file is the payer's
   out-of-network billed-charge report, which contains no negotiated rates.
   Skipping it is correct; look for the `in-network-rates` files instead.
+- **A link shows "duplicate (already have it)"** — the downloaded file was
+  byte-for-byte identical to one already loaded (Blue plans host copies of
+  each other's national files). Nothing was lost; the data is already in your
+  database under the first link.
+- **The payer name doesn't match the state I pasted** — normal. State indexes
+  list every file their members might need, including other Blue plans'
+  national files. The app names each file by the payer written *inside* it,
+  which is the accurate attribution.
 - **A pasted file is huge and was refused** — files bigger than the safety
   limit (default 5 GB compressed) are held back so a typo can't fill your
   disk. Raise `confirm_over_gb:` in `config/mrfx.yaml` and press **retry** on

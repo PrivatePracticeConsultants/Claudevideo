@@ -200,9 +200,15 @@ Three link kinds are auto-detected:
   queued files).
 
 The queue (`url_queue` in the store) processes **one file at a time** in the
-background, dedupes re-pasted links (signed-query variants included), shows a
-download-MB progress bar per row, survives restarts (in-flight rows are
-re-queued on startup), and gives plain-language errors: expired signed links
+background, dedupes re-pasted links (signed-query variants included), and also
+dedupes by **content**: every download is sha256-hashed, and a byte-identical
+file arriving under a different domain is skipped, not re-ingested. This
+matters for aggregation — Blue plans host copies of each other's national
+files (verified live: the same "Arkansas BCBS" shard appears in the WV,
+Nebraska, and Western-NY indexes under three domains; without content dedup a
+4-state trial picked up ~13% duplicate rows). It shows a download-MB progress
+bar per row, survives restarts (in-flight rows are re-queued on startup), and
+gives plain-language errors: expired signed links
 ("download link has expired — go back to the payer's index page"),
 JavaScript-only portals (with instructions to click through and paste the real
 links), allowed-amounts files ("no negotiated rates — skipped"), and an

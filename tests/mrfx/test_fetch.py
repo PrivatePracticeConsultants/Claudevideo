@@ -122,6 +122,24 @@ def test_dedup_and_failed_retry(cfg, store, server):
     assert sum(1 for r in store.list_urls() if "missing" in r["url"]) == 1
 
 
+def test_byte_identical_file_on_second_url_skipped(cfg, store, server, http_root):
+    # Blue plans host copies of each other's national files: same bytes, many
+    # domains. The second copy must be skipped, not re-ingested.
+    (http_root / "mirror_rates.json.gz").write_bytes((http_root / "rates.json.gz").read_bytes())
+    add_urls(store, [f"{server}/rates.json.gz"])
+    drain(cfg, store)
+    with store.connect() as con:
+        rows_after_first = con.execute("SELECT count(*) FROM rates").fetchone()[0]
+    add_urls(store, [f"{server}/mirror_rates.json.gz"])
+    drain(cfg, store)
+    mirror = next(r for r in store.list_urls() if "mirror" in r["url"])
+    assert mirror["status"] == "skipped" and mirror["kind"] == "duplicate"
+    assert "identical" in mirror["error"] and "rates.json.gz" in mirror["error"]
+    with store.connect() as con:  # no duplicate rows entered the store
+        assert con.execute("SELECT count(*) FROM rates").fetchone()[0] == rows_after_first
+    assert not any(cfg.downloads_dir.iterdir())  # mirror download cleaned up
+
+
 def test_oversize_guard(cfg, store, server):
     cfg.confirm_over_gb = 64 / 1e9  # 64 bytes — the 128-byte file trips it
     add_urls(store, [f"{server}/big_header.bin"])
