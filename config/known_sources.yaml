@@ -158,15 +158,16 @@ sources:
       (CA/CO/CT/GA/IN/KY/ME/MO/NV/NH/NY/OH/VA/WI); one Anthem CO shard (8 GB
       uncompressed) was previously ingested end-to-end: 1,057,258 rows.
 
-  - name: Blue KC (Kansas City) MRF hub
+  - name: Blue Cross and Blue Shield of Kansas City (Blue KC)
     url: https://bcbskc.sapphiremrfhub.com
-    kind: portal
-    queueable: false
+    kind: page
+    queueable: true
     verified: "2026-07-08"
     notes: >-
-      JavaScript portal (Sapphire hub) — no static links to lift. Open in a
-      browser and paste the TOC links it shows. (The repo's bcbs-mo pipeline
-      automates this portal separately.)
+      Sapphire/Gatsby hub — the app crawls its static data automatically:
+      found 2 TOC indexes; the main index expanded to 674 files; two rate
+      files ingested 2,573,672 rows (files report the payer as "BKC").
+      Other payers on *.sapphiremrfhub.com hubs work the same way.
 
   # ---- National non-Blues ----
   - name: Centene / Ambetter (all states, one page)
@@ -231,3 +232,80 @@ sources:
     queueable: false
     verified: "2026-07-08"
     notes: JavaScript page — no static links to lift; paste file links from a browser.
+
+  - name: BCBS Tennessee
+    url: https://www.bcbst.com/about/our-company/corporate-governance/transparency-in-coverage/machine-readable-files
+    kind: portal
+    queueable: false
+    verified: "2026-07-08"
+    notes: JavaScript page (probed — no static links); paste file links from a browser.
+
+  - name: Wellmark BCBS (Iowa / South Dakota)
+    url: https://www.wellmark.com/transparency-in-coverage
+    kind: portal
+    queueable: false
+    verified: "2026-07-08"
+    notes: JavaScript page (probed — no static links); paste file links from a browser.
+
+  - name: Horizon BCBS New Jersey
+    url: https://www.horizonblue.com/transparency-in-coverage
+    kind: portal
+    queueable: false
+    verified: "2026-07-08"
+    notes: JavaScript page (probed — no static links); paste file links from a browser.
+
+  - name: Premera Blue Cross (Washington / Alaska)
+    url: https://www.premera.com/visitor/transparency-in-coverage
+    kind: portal
+    queueable: false
+    verified: "2026-07-08"
+    notes: JavaScript page (probed — no static links); paste file links from a browser.
+
+  - name: Regence (Cambia — OR / WA / UT / ID)
+    url: https://www.regence.com/transparency-in-coverage
+    kind: portal
+    queueable: false
+    verified: "2026-07-08"
+    notes: JavaScript page (probed — no static links); paste file links from a browser.
+
+  - name: Kaiser Permanente
+    url: https://healthy.kaiserpermanente.org/front-door/machine-readable
+    kind: portal
+    queueable: false
+    verified: "2026-07-08"
+    notes: JavaScript page (probed — no static links); paste file links from a browser.
+
+  - name: Oscar Health
+    url: https://www.hioscar.com/machine-readable-files
+    kind: portal
+    queueable: false
+    verified: "2026-07-08"
+    notes: JavaScript page (probed — no static links); paste file links from a browser.
+
+  - name: Molina Healthcare
+    url: https://www.molinahealthcare.com/members/common/en-US/abtmolina/compliance/machinereadablefiles.aspx
+    kind: portal
+    queueable: false
+    verified: "2026-07-08"
+    notes: JavaScript page (probed — no static links); paste file links from a browser.
+
+  - name: BCBS North Carolina
+    url: https://www.bluecrossnc.com/about-us/policies-and-best-practices/transparency-coverage-mrf
+    kind: portal
+    queueable: false
+    verified: "2026-07-08"
+    notes: JavaScript page (probed — no static links); paste file links from a browser.
+
+  - name: BCBS South Carolina
+    url: https://www.southcarolinablues.com/web/public/brands/sc/members/using-your-insurance/transparency-in-coverage/
+    kind: portal
+    queueable: false
+    verified: "2026-07-08"
+    notes: JavaScript page (probed — no static links); paste file links from a browser.
+
+  - name: Priority Health (Michigan)
+    url: https://www.priorityhealth.com/machine-readable-files
+    kind: portal
+    queueable: false
+    verified: "2026-07-08"
+    notes: JavaScript page (probed — no static links); paste file links from a browser.

@@ -368,6 +368,54 @@ PAGE_HELP = (
 )
 
 
+def crawl_gatsby_hub(cfg: MrfxConfig, page_url: str, max_files: int) -> list[str]:
+    """Some payer MRF hubs (the Sapphire/HealthSparq platform — Blue KC is
+    one) are Gatsby apps: the page is empty HTML, but the file list ships as
+    static JSON the site itself fetches. Do what the browser would:
+    /page-data/index/page-data.json names static-query blobs; each blob at
+    /page-data/sq/d/<hash>.json carries TOC entries with a `url`. Returns []
+    if the site isn't built this way (harmless one-request probe)."""
+    parts = urlsplit(page_url)
+    origin = f"{parts.scheme}://{parts.netloc}"
+    seen: set[str] = set()
+    out: list[str] = []
+
+    def walk(node):
+        """Collect node['url'] JSON links, skipping entries the payer marked
+        suppressed (files pulled from publication — honesty over volume)."""
+        if isinstance(node, dict):
+            u = node.get("url")
+            if isinstance(u, str) and re.search(r"\.json(\.gz)?(\?|$)", u, re.I) \
+                    and not node.get("is_suppressed"):
+                full = urljoin(origin + "/", u.strip())
+                k = dedup_key(full)
+                if k not in seen and full.lower().startswith(("http://", "https://")):
+                    seen.add(k)
+                    out.append(full)
+            for v in node.values():
+                walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+
+    try:
+        with _client(cfg) as client:
+            r = client.get(f"{origin}/page-data/index/page-data.json")
+            if r.status_code != 200:
+                return []
+            hashes = (r.json() or {}).get("staticQueryHashes") or []
+            for h in [str(x) for x in hashes][:10]:  # hubs ship a handful
+                sq = client.get(f"{origin}/page-data/sq/d/{h}.json")
+                if sq.status_code == 200:
+                    walk(sq.json())
+                if len(out) >= max_files:
+                    break
+    except (httpx.HTTPError, ValueError) as e:  # network or non-JSON — not a hub
+        log.debug("gatsby probe %s: %s", origin, e)
+        return []
+    return out[:max_files]
+
+
 # ---------------------------------------------------------------------------
 # queue processing
 # ---------------------------------------------------------------------------
@@ -449,6 +497,10 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
         if looks_like_html(dest):
             links = extract_links_from_page(dest, url, cfg.max_toc_files)
             dest.unlink(missing_ok=True)
+            if not links:
+                # empty page — maybe a Gatsby-built MRF hub (Sapphire etc.)
+                # whose file list ships as static JSON next to the page
+                links = crawl_gatsby_hub(cfg, url, cfg.max_toc_files)
             if links:
                 added = 0
                 for cu in links:

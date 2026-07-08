@@ -185,12 +185,14 @@ badge and are never displayed as authoritative; confirming a URL persists it to
 
 `config/known_sources.yaml` is a shipped catalog of every payer entry point
 this app has been live-tested against — each entry carries its verification
-date and what happened (files listed, rows ingested, quirks). 17 entries are
+date and what happened (files listed, rows ingested, quirks). 18 entries are
 **auto-queueable** (Highmark's 15 hosted Blue plans incl. FL/AZ/ID/MN/LA/NE,
-BCBS Mississippi's stable TOC, Centene/Ambetter's all-states page); the rest
-are portals that need a browser click (UHC, Cigna, Aetna, Humana, HCSC,
-CareFirst, Blue KC) with instructions, plus Anthem/Elevance's national master
-index (10.5 GB — raise `confirm_over_gb` to use it). Monthly-dated URLs carry
+BCBS Mississippi's stable TOC, Centene/Ambetter's all-states page, and Blue
+KC's Sapphire hub); the rest are portals that need a browser click (UHC,
+Cigna, Aetna, Humana, HCSC, CareFirst, BCBS TN/NC/SC, Wellmark, Horizon NJ,
+Premera, Regence, Kaiser, Oscar, Molina, Priority Health — each probed and
+confirmed JavaScript-only) with instructions, plus Anthem/Elevance's national
+master index (10.5 GB — raise `confirm_over_gb` to use it). Monthly-dated URLs carry
 a `{FIRST_OF_MONTH}` placeholder resolved at queue time so the catalog never
 goes stale. Load them via `mrfx add --known`, the dashboard's **"Queue tested
 payer indexes"** button, or browse with **"Show tested sources"**
@@ -215,6 +217,11 @@ Three link kinds are auto-detected:
   file links lifted from the HTML and queued, TOCs found there cascade too
   (verified live: a Highmark Delaware listing page fanned out to 8,000+
   queued files).
+- **Sapphire/Gatsby MRF hubs** (`*.sapphiremrfhub.com` — Blue KC and other
+  HealthSparq-hosted payers): the page itself is empty JavaScript, but the
+  app fetches the hub's static data the way the browser would and queues
+  every TOC it lists, honoring the payer's `is_suppressed` flags (verified
+  live: Blue KC → 2 TOCs → 674 files → 2,573,672 rows ingested).
 
 The queue (`url_queue` in the store) processes **one file at a time** in the
 background, dedupes re-pasted links (signed-query variants included), and also

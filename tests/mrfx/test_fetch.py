@@ -161,6 +161,45 @@ def test_oversize_guard(cfg, store, server):
     assert "confirm_over_gb" in rec["error"]
 
 
+def test_gatsby_hub_page_crawled(cfg, store, tmp_path):
+    # Sapphire/HealthSparq-style hubs (Blue KC): empty HTML page, file list in
+    # Gatsby static-query JSON. Suppressed entries must be respected.
+    root = tmp_path / "hub"
+    (root / "page-data" / "index").mkdir(parents=True)
+    (root / "page-data" / "sq" / "d").mkdir(parents=True)
+    (root / "index.html").write_text("<!doctype html><html><body><div id=\"app\"></div></body></html>")
+    (root / "rates.json.gz").write_bytes(gzip.compress((FIXTURES / "innetwork_mixed.json").read_bytes()))
+
+    class Handler(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **k):
+            super().__init__(*a, directory=str(root), **k)
+
+        def log_message(self, *a):
+            pass
+
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{httpd.server_address[1]}"
+    (root / "page-data" / "index" / "page-data.json").write_text(json.dumps({"staticQueryHashes": ["abc123"]}))
+    (root / "page-data" / "sq" / "d" / "abc123.json").write_text(json.dumps({
+        "data": {"allTocsJson": {"edges": [
+            {"node": {"url": f"{base}/rates.json.gz", "is_suppressed": False}},
+            {"node": {"url": f"{base}/pulled.json.gz", "is_suppressed": True}},
+        ]}}}))
+    try:
+        add_urls(store, [base])
+        drain(cfg, store)
+        recs = {dedup_key(r["url"]): r for r in store.list_urls()}
+        hub = recs[dedup_key(base)]
+        assert hub["status"] == "done" and hub["kind"] == "page"
+        assert hub["child_count"] == 1  # suppressed entry NOT queued
+        child = recs[dedup_key(f"{base}/rates.json.gz")]
+        assert child["status"] == "done" and child["rows_emitted"] > 0
+        assert dedup_key(f"{base}/pulled.json.gz") not in recs
+    finally:
+        httpd.shutdown()
+
+
 def test_filename_for_is_safe_and_distinct():
     a = filename_for("https://x.com/payerA/2026-06_in-network-rates_1_of_2.json.gz?sig=1")
     b = filename_for("https://x.com/payerB/2026-06_in-network-rates_1_of_2.json.gz")

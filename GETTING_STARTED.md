@@ -141,9 +141,10 @@ with a note saying which link it duplicates — your database stays clean even
 if you paste every state's index.
 
 **Don't want to hunt for links at all?** The app ships with a catalog of
-payer sources it has already been tested against (17 auto-queueable indexes —
-Highmark's 15 hosted Blue plans, BCBS Mississippi, Centene/Ambetter — plus
-notes for the big portals like UHC, Cigna, and Anthem). Click **"Show tested
+payer sources it has already been tested against (18 auto-queueable — Highmark's
+15 hosted Blue plans, BCBS Mississippi, Centene/Ambetter's all-states page,
+and Blue KC's hub — plus notes for the big portals like UHC, Cigna, and
+Anthem). Click **"Show tested
 sources"** on the Files tab to browse it, or **"Queue tested payer indexes"**
 to load them all — monthly-dated links are refreshed to the current month
 automatically. The catalog lives in `config/known_sources.yaml` with each
