@@ -1,0 +1,140 @@
+{
+  "reporting_entity_name": "Test Payer",
+  "reporting_entity_type": "health insurance issuer",
+  "last_updated_on": "2026-06-01",
+  "version": "2.0.0",
+  "provider_references": [
+    {
+      "provider_group_id": 101,
+      "provider_groups": [
+        {"npi": [1111111111], "tin": {"type": "ein", "value": "111111111"}}
+      ]
+    },
+    {
+      "provider_group_id": 202,
+      "provider_groups": [
+        {"npi": [9999999999], "tin": {"type": "ein", "value": "999999999"}}
+      ]
+    }
+  ],
+  "in_network": [
+    {
+      "negotiation_arrangement": "ffs",
+      "name": "Therapeutic exercises",
+      "billing_code_type": "CPT",
+      "billing_code_type_version": "2026",
+      "billing_code": "97110",
+      "description": "Therapeutic exercises",
+      "negotiated_rates": [
+        {
+          "provider_groups": [
+            {"npi": [2222222222], "tin": {"type": "ein", "value": "222222222"}}
+          ],
+          "negotiated_prices": [
+            {
+              "negotiated_type": "negotiated",
+              "negotiated_rate": 34.5,
+              "expiration_date": "9999-12-31",
+              "service_code": ["11"],
+              "billing_class": "professional"
+            },
+            {
+              "negotiated_type": "negotiated",
+              "negotiated_rate": 29.33,
+              "expiration_date": "9999-12-31",
+              "service_code": ["11"],
+              "billing_class": "professional",
+              "billing_code_modifier": ["CQ"]
+            }
+          ]
+        },
+        {
+          "provider_references": [101],
+          "negotiated_prices": [
+            {
+              "negotiated_type": "fee schedule",
+              "negotiated_rate": 31.07,
+              "expiration_date": "9999-12-31",
+              "service_code": ["11", "12"],
+              "billing_class": "professional"
+            }
+          ]
+        },
+        {
+          "provider_groups": [
+            {"npi": [8888888888], "tin": {"type": "ein", "value": "888888888"}}
+          ],
+          "negotiated_prices": [
+            {
+              "negotiated_type": "negotiated",
+              "negotiated_rate": 55.0,
+              "expiration_date": "9999-12-31",
+              "service_code": ["11"],
+              "billing_class": "professional"
+            }
+          ]
+        },
+        {
+          "provider_references": [202],
+          "negotiated_prices": [
+            {
+              "negotiated_type": "negotiated",
+              "negotiated_rate": 44.0,
+              "expiration_date": "9999-12-31",
+              "service_code": ["11"],
+              "billing_class": "professional"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "negotiation_arrangement": "ffs",
+      "name": "Office visit",
+      "billing_code_type": "CPT",
+      "billing_code_type_version": "2026",
+      "billing_code": "99213",
+      "description": "Not a target code",
+      "negotiated_rates": [
+        {
+          "provider_groups": [
+            {"npi": [1111111111], "tin": {"type": "ein", "value": "111111111"}}
+          ],
+          "negotiated_prices": [
+            {
+              "negotiated_type": "negotiated",
+              "negotiated_rate": 80.0,
+              "expiration_date": "9999-12-31",
+              "service_code": ["11"],
+              "billing_class": "professional"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "negotiation_arrangement": "ffs",
+      "name": "TENS",
+      "billing_code_type": "HCPCS",
+      "billing_code_type_version": "2026",
+      "billing_code": "G0283",
+      "description": "Elec stim other than wound",
+      "negotiated_rates": [
+        {
+          "provider_groups": [
+            {"npi": [2222222222], "tin": {"type": "ein", "value": "222222222"}}
+          ],
+          "negotiated_prices": [
+            {
+              "negotiated_type": "negotiated",
+              "negotiated_rate": 12.75,
+              "expiration_date": "9999-12-31",
+              "service_code": ["11"],
+              "billing_class": "professional"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

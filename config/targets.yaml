@@ -1,0 +1,99 @@
+# BCBS Missouri PT/Rehab MRF extraction — target definition.
+# Edit this file; everything here is validated by src/config.py (pydantic).
+
+payers:
+  blue_kc:
+    enabled: true
+    hub_url: "https://bcbskc.sapphiremrfhub.com"
+    # Only pull TOCs whose payer_name matches one of these substrings
+    # (case-insensitive). Empty list = all TOCs listed on the hub.
+    toc_name_filters: []
+
+  anthem_mo:
+    enabled: true
+    # Region roots used by the Anthem MRF search portal
+    # (https://www.anthem.com/machine-readable-file/search). status.json on the
+    # primary decides which region is live; do not hardcode a TOC URL.
+    s3_primary: "https://antm-pt-prod-dataz-nogbd-nophi-us-east1.s3.amazonaws.com/"
+    s3_secondary: "https://antm-pt-prod-dataz-nogbd-nophi-us-east2.s3.us-east-2.amazonaws.com/"
+    # Anthem is EIN / employer-group gated. List the employer groups whose
+    # in-network files you want. Provide `ein` (9 digits, dash optional) or
+    # `name` (resolved via the portal's name-search index). See README for how
+    # to find an EIN.
+    employer_groups: []
+    #  - ein: "43-0653611"
+    #  - name: "washington university in st louis - ship"
+    # A group's file list spans every state Anthem operates in. Keep only
+    # in-network files whose filename/URL matches one of these substrings
+    # (case-insensitive). Empty list = keep everything (large!).
+    file_include_patterns: ["MO_", "anthembcbsmo"]
+    # Also include the "Blue Cross Blue Shield Association Out-of-Area Rates
+    # Files" (BlueCard host rates, signed mrf.bcbs.com URLs)?
+    include_out_of_area_files: true
+
+npi_targets:
+  state: "MO"
+  # NPPES API queries are description-based; results are then post-filtered to
+  # these exact taxonomy codes / prefixes. `2251` prefix covers all PT
+  # sub-specialties (orthopedic 2251X0800X, sports 2251S0007X, etc.).
+  taxonomies:
+    - code_prefix: "2251"          # Physical Therapist + all sub-specialties
+      search_description: "Physical Therapist"
+    - code: "261QP2000X"           # Clinic/Center, Physical Therapy
+      search_description: "Physical Therapy"
+    - code: "261QR0400X"           # Clinic/Center, Rehabilitation
+      search_description: "Rehabilitation"
+  # Optional: narrow NPPES queries by city (also used automatically to split a
+  # query that hits the API's ~1,200-result ceiling).
+  cities: []
+  # Also resolve individual practitioners (NPI-1) in addition to organizations.
+  # Blue KC's provider_references list individual NPIs under group TINs, so an
+  # org-only target set only matches Blue KC via TINs (see README). Turning
+  # this on captures individual PT NPIs directly but the statewide NPI-1 pool
+  # is large — expect NPPES truncation warnings unless you add `cities`.
+  include_individuals: false
+  # Hand-curated NPIs, unioned with NPPES results. org_name/tin optional.
+  explicit_providers: []
+  #  - npi: "1234567893"
+  #    org_name: "Example PT Group LLC"
+  #    tin: "431234567"
+
+# Billing codes to extract. G0283 is HCPCS; both CPT and HCPCS
+# billing_code_type values are accepted for codes in this list.
+billing_codes:
+  # PT evaluations
+  - "97161"
+  - "97162"
+  - "97163"
+  - "97164"
+  # Treatment
+  - "97110"
+  - "97112"
+  - "97113"
+  - "97116"
+  - "97124"
+  - "97140"
+  - "97150"
+  - "97530"
+  - "97535"
+  - "97542"
+  - "97760"
+  # Modalities
+  - "97010"
+  - "97012"
+  - "97014"
+  - "97032"
+  - "97035"
+  - "G0283"
+
+http:
+  user_agent: "bcbs-mo-mrf-research/0.1 (healthcare price-transparency research; contact: mf649@cornell.edu)"
+  timeout_seconds: 120
+  max_retries: 5
+  backoff_base_seconds: 2.0
+  # Extraction is deliberately single-threaded / polite. 403s and 429s on
+  # individual files are logged and skipped, never fatal.
+
+paths:
+  raw_dir: "data/raw"
+  out_dir: "data/out"
