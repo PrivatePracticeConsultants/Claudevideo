@@ -53,10 +53,43 @@ class Preflight:
         return {k: getattr(self, k) for k in self.__dataclass_fields__}
 
 
-def open_stream(path: Path) -> io.BufferedIOBase:
-    """Binary stream for .json / .json.gz / .zip (first json member)."""
-    raw = open(path, "rb")
+class _CountingRaw(io.RawIOBase):
+    """Wrap the raw (compressed) file to report cumulative bytes read — drives
+    an accurate progress bar off the exact compressed size, independent of the
+    uncompressed-size estimate."""
+
+    def __init__(self, fh, cb):
+        self._fh = fh
+        self._cb = cb
+        self._n = 0
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, b) -> int:
+        data = self._fh.read(len(b))
+        if data:
+            b[: len(data)] = data
+            self._n += len(data)
+            self._cb(self._n)
+        return len(data)
+
+    def close(self):
+        try:
+            self._fh.close()
+        finally:
+            super().close()
+
+
+def open_stream(path: Path, progress_cb=None) -> io.BufferedIOBase:
+    """Binary stream for .json / .json.gz / .zip (first json member).
+
+    progress_cb(compressed_bytes_read) is called as the underlying compressed
+    bytes are consumed, so callers can render a progress bar."""
+    raw: io.BufferedIOBase = open(path, "rb")
     head = raw.peek(4)[:4] if hasattr(raw, "peek") else raw.read(4)
+    if progress_cb is not None:
+        raw = io.BufferedReader(_CountingRaw(raw, progress_cb), buffer_size=1 << 20)
     if head[:2] == b"\x1f\x8b":
         return gzip.GzipFile(fileobj=raw)  # type: ignore[return-value]
     if head[:4] == b"PK\x03\x04":
@@ -69,7 +102,7 @@ def open_stream(path: Path) -> io.BufferedIOBase:
         if members[0].lower().endswith(".gz"):
             return gzip.GzipFile(fileobj=inner)  # type: ignore[return-value]
         return inner  # type: ignore[return-value]
-    return io.BufferedReader(raw, buffer_size=1 << 20)  # plain json
+    return io.BufferedReader(raw, buffer_size=1 << 20) if not isinstance(raw, io.BufferedReader) else raw
 
 
 def _estimate_uncompressed(path: Path, compressed: int) -> int | None:
@@ -84,6 +117,7 @@ def _scan_header(stream: io.BufferedIOBase, pf: Preflight) -> None:
     """Walk parse events over the first ~1 MB; stop early once classified."""
     limited = io.BytesIO(stream.read(HEADER_BYTES))
     top_keys: list[str] = []
+    truncated = False  # did the document run past the 1 MB window?
     try:
         for prefix, event, value in ijson.parse(limited):
             if prefix == "" and event == "map_key":
@@ -97,16 +131,35 @@ def _scan_header(stream: io.BufferedIOBase, pf: Preflight) -> None:
             # stop once we've started into a big payload array — the header is behind us
             if prefix in ("in_network.item", "reporting_structure.item") and event == "end_map":
                 break
-    except ijson.JSONERROR:
-        # expected: the 1 MB window slices mid-token. Whatever we saw stands.
-        pass
+    except ijson.JSONError:
+        # the 1 MB window sliced mid-token: the real document is larger than
+        # what we read (IncompleteJSONError subclasses JSONError). Keys seen so
+        # far stand, but we know there is MORE structure we haven't reached.
+        truncated = True
     pf._top_keys = top_keys  # type: ignore[attr-defined]
 
     if "in_network" in top_keys:
         pf.file_type = "in_network"
         pf.uses_provider_references = "provider_references" in top_keys
-    elif "provider_references" in top_keys:
+    elif "provider_groups" in top_keys:
+        # CMS standalone provider-reference file: top-level `provider_groups`.
         pf.file_type = "provider_reference"
+    elif "provider_references" in top_keys:
+        # Top-level `provider_references` is the EMBEDDED reference table of an
+        # in-network file, not a standalone reference file. If the read was
+        # truncated we simply haven't reached the `in_network` key yet (a large
+        # embedded ref table precedes it) — treat it as an in-network file so
+        # its rates are not dropped. Only when the whole document fit in the
+        # window with no `in_network` is it genuinely reference-only.
+        if truncated:
+            pf.file_type = "in_network"
+            pf.uses_provider_references = True
+            pf.messages.append(
+                "large embedded provider_references table precedes in_network; "
+                "classified as a rate file (the in_network key is past the 1 MB header window)"
+            )
+        else:
+            pf.file_type = "provider_reference"
     elif "reporting_structure" in top_keys:
         pf.file_type = "toc"
     elif top_keys:
@@ -129,7 +182,7 @@ def _detect_refs_deep(path: Path, pf: Preflight) -> None:
                     return
                 if prefix == "in_network.item" and event == "end_map":
                     return
-    except (ijson.JSONERROR, OSError, EOFError):
+    except (ijson.JSONError, OSError, EOFError):
         pass
 
 

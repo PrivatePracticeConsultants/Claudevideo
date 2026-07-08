@@ -197,13 +197,32 @@ in 50k-row batches and never holds the whole file, so a 275 MB shard that
 expands to 2.1M extracted rows parses in ~130 MB of Python memory (verified on
 a live Blue Cross Blue Shield of North Dakota file). DuckDB spills its rollup
 work to a temp dir under the store, so ingestion won't OOM regardless of file
-size or machine RAM. Parse time ≈ tens of MB/s (preflight estimates it), and
-files above `confirm_over_gb` wait for confirmation. The default code set keeps
-row counts modest; `codes.all_codes: true` ingests everything — expect orders
-of magnitude more. Browser uploads cap at 1 GB; bigger files go straight into
-`data/inbox/`. NPI enrichment runs in the background via NPPES (or a local bulk
-CSV, or off). Because codes are sharded across files, drop **all** of a
-licensee's in-network shards to see a code that isn't in the first one.
+size or machine RAM. Parse time ≈ tens of MB/s (preflight estimates it). The
+default code set keeps row counts modest; `codes.all_codes: true` ingests
+everything — expect orders of magnitude more. Browser uploads cap at 1 GB;
+bigger files go straight into `data/inbox/`. NPI enrichment runs in the
+background via NPPES (or a local bulk CSV, or off). Because codes are sharded
+across files, drop **all** of a licensee's in-network shards to see a code that
+isn't in the first one.
+
+### Very large files: chunked two-pass ingest + progress bar
+
+Some payers embed a **giant `provider_references` table** in the in-network
+file — one real Anthem Colorado shard carries 4.2M reference entries / 18.5M
+provider groups. Holding that whole table in memory to resolve references would
+need ~16 GB and OOM. For files past ~1.5 GB uncompressed, mrfx switches to a
+**two-pass chunked ingest**:
+
+1. **Pass 1 (skim)** streams the file and records only the reference ids the
+   *target* codes actually cite — a small therapist-relevant subset.
+2. **Pass 2 (extract)** keeps only that subset in memory while streaming rows to
+   the Parquet part in batches.
+
+The file is worked through in 64 MB compressed **chunks**, and a **progress bar**
+(chunk N/total, both passes) shows in the CLI (`mrfx ingest`) and live in the
+dashboard's Files view. Verified end-to-end on the 8 GB (uncompressed) Anthem CO
+shard: **1.06M rows in ~6.5 min at ~1.2 GB peak** (down from a 16 GB OOM), with
+the progress bar advancing to 100%.
 
 ---
 

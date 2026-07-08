@@ -80,19 +80,46 @@ def cmd_preflight(cfg: MrfxConfig, args) -> int:
     return worst
 
 
+def _make_cli_progress():
+    """A progress-bar callback for large-file ingest. Uses tqdm when present,
+    else a plain carriage-return line — either way the user sees chunks worked
+    through in real time."""
+    state = {"bar": None}
+    try:
+        from tqdm import tqdm
+    except ImportError:
+        tqdm = None
+
+    def cb(done, total, pct):
+        if tqdm is not None:
+            if state["bar"] is None:
+                state["bar"] = tqdm(total=total, unit="chunk", desc="  ingesting", leave=True)
+            state["bar"].n = done
+            state["bar"].refresh()
+            if done >= total:
+                state["bar"].close()
+                state["bar"] = None
+        else:
+            end = "\n" if done >= total else "\r"
+            print(f"  ingesting: chunk {done}/{total} ({pct:.0f}%)", end=end, flush=True)
+
+    return cb
+
+
 def cmd_ingest(cfg: MrfxConfig, args) -> int:
     store = Store(cfg.store_dir)
     path = Path(args.path) if args.path else cfg.inbox_dir
+    bar = _make_cli_progress()
     if path.is_dir():
         if path != cfg.inbox_dir:
             results = [
-                {"file": p.name, **ingest_file(cfg, store, p)}
+                {"file": p.name, **ingest_file(cfg, store, p, progress_bar=bar)}
                 for p in sorted(path.glob("*")) if p.is_file()
             ]
         else:
-            results = scan_inbox(cfg, store, force=args.force)
+            results = scan_inbox(cfg, store, force=args.force, progress_bar=bar)
     else:
-        results = [{"file": path.name, **ingest_file(cfg, store, path)}]
+        results = [{"file": path.name, **ingest_file(cfg, store, path, progress_bar=bar)}]
     for r in results:
         line = f"{r['file']}: {r['status']}"
         if r.get("rows") is not None:

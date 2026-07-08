@@ -12,11 +12,69 @@ import shutil
 from pathlib import Path
 
 from .config import MrfxConfig
-from .parser import InNetworkParser, ParseResult, parse_provider_reference_file
+from .parser import (
+    InNetworkParser,
+    ParseResult,
+    parse_provider_reference_file,
+    skim_needed_ref_ids,
+)
 from .sniff import Preflight, open_stream, preflight
 from .store import Store, file_key
 
 log = logging.getLogger(__name__)
+
+# Files whose estimated uncompressed size is at or above this use the
+# disk-backed reference index + chunked progress. Below it, the fast in-memory
+# path. ~1.5 GB uncompressed ≈ 150 MB compressed.
+LARGE_FILE_UNCOMPRESSED_BYTES = 1_500_000_000
+
+# One progress "chunk" = this many COMPRESSED bytes consumed. The bar reports
+# chunks_done / chunks_total so the user sees the file worked through in
+# digestible pieces.
+CHUNK_COMPRESSED_BYTES = 64 * 1024 * 1024  # 64 MB
+
+
+class _ProgressTracker:
+    """Drives the chunk progress bar from compressed bytes read. Updates the
+    files table (dashboard bar) and an optional CLI bar, throttled to chunk
+    boundaries so it never thrashes the store."""
+
+    def __init__(self, store: Store, filename: str, compressed_bytes: int, on_bar=None, passes: int = 1):
+        self.store = store
+        self.filename = filename
+        self.total_bytes = max(compressed_bytes, 1)
+        file_chunks = max(1, -(-self.total_bytes // CHUNK_COMPRESSED_BYTES))  # ceil
+        self.passes = passes
+        self.chunks_total = file_chunks * passes  # each pass reads the whole file
+        self._file_chunks = file_chunks
+        self.on_bar = on_bar
+        self._pass = 0
+        self._last_chunk = -1
+
+    def set_pass(self, pass_idx: int) -> None:
+        self._pass = pass_idx
+
+    def update(self, compressed_read: int) -> None:
+        in_pass = min(self._file_chunks, compressed_read // CHUNK_COMPRESSED_BYTES)
+        chunk = self._pass * self._file_chunks + in_pass
+        if chunk == self._last_chunk:
+            return
+        self._last_chunk = chunk
+        pct = min(100.0, 100.0 * chunk / self.chunks_total)
+        try:
+            self.store.update_progress(self.filename, pct, chunks_done=chunk, chunks_total=self.chunks_total)
+        except Exception:  # noqa: BLE001 — progress writes must never break ingest
+            pass
+        if self.on_bar:
+            self.on_bar(chunk, self.chunks_total, pct)
+
+    def finish(self) -> None:
+        try:
+            self.store.update_progress(self.filename, 100.0, self.chunks_total, self.chunks_total)
+        except Exception:  # noqa: BLE001
+            pass
+        if self.on_bar:
+            self.on_bar(self.chunks_total, self.chunks_total, 100.0)
 
 
 def qa_report(store: Store, result: ParseResult, source_file: str) -> dict:
@@ -81,8 +139,12 @@ def _finish_file(cfg: MrfxConfig, path: Path, ok: bool) -> None:
         shutil.move(str(path), dest)
 
 
-def ingest_file(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight | None = None) -> dict:
-    """Ingest one file. Returns the final files-table record fields."""
+def ingest_file(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight | None = None,
+                progress_bar=None) -> dict:
+    """Ingest one file. Returns the final files-table record fields.
+
+    progress_bar(chunks_done, chunks_total, pct) is called for large files so a
+    CLI can render a bar; the dashboard reads progress from the files table."""
     name = path.name
     if pf is None:
         pf = preflight(path, cfg, store)
@@ -134,13 +196,40 @@ def ingest_file(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight | None 
             "payer": pf.payer, "schema_version": pf.schema_version,
             "last_updated_on": pf.last_updated_on,
         }
+        # Huge files (multi-GB with a millions-strong embedded provider_
+        # references table) get a fast TWO-PASS ingest so the ref table never
+        # lands in RAM: pass 1 skims which references the target codes cite;
+        # pass 2 keeps only that subset in memory while extracting. Both passes
+        # feed the chunk progress bar. Small files keep the single-pass path.
+        est = pf.est_uncompressed_bytes or 0
+        big = est >= LARGE_FILE_UNCOMPRESSED_BYTES
+        keep_ref_ids = None
+        if big:
+            # progress spans two passes: pass 1 fills 0-50%, pass 2 fills 50-100%
+            progress = _ProgressTracker(store, name, pf.compressed_bytes,
+                                        on_bar=progress_bar, passes=2)
+            log.info("%s: large file (~%.1f GB uncompressed) — two-pass chunked ingest (%d chunks)",
+                     name, est / 1e9, progress.chunks_total)
+            store.upsert_file(name, chunks_total=progress.chunks_total, progress=0.0)
+            progress.set_pass(0)
+            with open_stream(path, progress_cb=progress.update) as stream:
+                keep_ref_ids = skim_needed_ref_ids(cfg, stream)
+            log.info("%s: pass 1 done — %d target-cited references to keep in memory",
+                     name, len(keep_ref_ids))
+            progress.set_pass(1)
+        else:
+            progress = None
+
         with store.rates_part_writer(name) as writer:
             parser = InNetworkParser(
                 cfg, source_file=name, external_refs=external_refs,
                 sink=writer.write_batch, header_defaults=header_defaults,
+                keep_ref_ids=keep_ref_ids,
             )
-            with open_stream(path) as stream:
+            with open_stream(path, progress_cb=progress.update if progress else None) as stream:
                 result = parser.parse(stream)
+        if progress is not None:
+            progress.finish()
         store.rebuild_rollups()
         store.upsert_file(
             name,
@@ -198,7 +287,7 @@ def requeue_skipped(cfg: MrfxConfig, store: Store, payer: str) -> list[str]:
     return requeued
 
 
-def scan_inbox(cfg: MrfxConfig, store: Store, force: bool = False) -> list[dict]:
+def scan_inbox(cfg: MrfxConfig, store: Store, force: bool = False, progress_bar=None) -> list[dict]:
     """One-shot pass over the inbox (used by `mrfx ingest` and the watcher).
 
     Files above confirm_over_gb are parked as pending_confirmation unless
@@ -227,5 +316,5 @@ def scan_inbox(cfg: MrfxConfig, store: Store, force: bool = False) -> list[dict]
             )
             results.append({"file": p.name, "status": "pending_confirmation"})
             continue
-        results.append({"file": p.name, **ingest_file(cfg, store, p, pf)})
+        results.append({"file": p.name, **ingest_file(cfg, store, p, pf, progress_bar=progress_bar)})
     return results

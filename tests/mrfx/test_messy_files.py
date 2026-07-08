@@ -180,6 +180,78 @@ def test_failed_parse_leaves_no_partial_part(cfg, store):
     assert res["status"] in ("failed", "quarantined")
 
 
+def test_large_file_two_pass_bounded_refs_and_progress(cfg, store, monkeypatch):
+    """A file over the large-file threshold takes the two-pass path: pass 1
+    learns which references the target codes cite, pass 2 keeps only those in
+    memory. A million unused refs must NOT be materialized, and progress must
+    reach 100%."""
+    import mrfx.ingest as ingest_mod
+    from mrfx.parser import InNetworkParser
+
+    # force the large-file path on a tiny file, and tiny chunks so progress ticks
+    monkeypatch.setattr(ingest_mod, "LARGE_FILE_UNCOMPRESSED_BYTES", 0)
+    monkeypatch.setattr(ingest_mod, "CHUNK_COMPRESSED_BYTES", 256)
+
+    # 1 target item citing ref 7, plus 2,000 UNUSED provider_references
+    data = {
+        "reporting_entity_name": "Big CO Payer", "version": "2.0.0", "last_updated_on": "2026-06-01",
+        "provider_references": (
+            [{"provider_group_id": i, "provider_groups": [
+                {"npi": [9000000000 + i], "tin": {"type": "ein", "value": f"99{i:07d}"}}]}
+             for i in range(2000)]
+            + [{"provider_group_id": 7, "provider_groups": [
+                {"npi": [1111111111], "tin": {"type": "ein", "value": "431111111"}}]}]
+        ),
+        "in_network": [{
+            "billing_code": "97110", "billing_code_type": "CPT",
+            "negotiated_rates": [{"provider_references": [7],
+                "negotiated_prices": [{"negotiated_type": "negotiated", "negotiated_rate": 40.0,
+                                       "billing_class": "professional", "service_code": ["11"]}]}],
+        }],
+    }
+    p = make_fixture(cfg.inbox_dir, "big_co.json", data)
+
+    seen = {}
+    orig_init = InNetworkParser.__init__
+
+    def spy(self, *a, **k):
+        orig_init(self, *a, **k)
+        seen["keep"] = self._keep_ref_ids
+    monkeypatch.setattr(InNetworkParser, "__init__", spy)
+
+    bar_calls = []
+    res = ingest_file(cfg, store, p, progress_bar=lambda d, t, pct: bar_calls.append((d, t, pct)))
+    assert res["status"] == "done" and res["rows"] == 1
+    # pass 2 was told to keep ONLY ref 7 — not the 2,000 unused ones
+    assert seen["keep"] == {7}
+    rows = rates(store)
+    assert rows[0]["npi"] == "1111111111" and rows[0]["negotiated_rate"] == 40.0
+    # progress ran and finished at 100%
+    assert bar_calls and bar_calls[-1][2] == 100.0
+    st = store.file_status("big_co.json")
+    assert st["progress"] == 100.0 and st["chunks_done"] == st["chunks_total"]
+
+
+def test_skim_finds_only_target_cited_refs(cfg):
+    import io
+    import json as _json
+
+    from mrfx.parser import skim_needed_ref_ids
+
+    data = {
+        "reporting_entity_name": "P", "version": "2.0.0", "last_updated_on": "2026-06-01",
+        "provider_references": [{"provider_group_id": i, "provider_groups": []} for i in range(50)],
+        "in_network": [
+            {"billing_code": "97110", "billing_code_type": "CPT",  # target -> keep its refs
+             "negotiated_rates": [{"provider_references": [3, 8], "negotiated_prices": [{"negotiated_rate": 1}]}]},
+            {"billing_code": "99213", "billing_code_type": "CPT",  # NON-target -> ignore its refs
+             "negotiated_rates": [{"provider_references": [40, 41], "negotiated_prices": [{"negotiated_rate": 1}]}]},
+        ],
+    }
+    needed = skim_needed_ref_ids(cfg, io.BytesIO(_json.dumps(data).encode()))
+    assert needed == {3, 8}  # 40/41 belong to a non-target code and are excluded
+
+
 def test_completely_valueless_item_is_survivable(cfg, store):
     data = {
         "reporting_entity_name": "Weird Payer", "version": "2.0.0", "last_updated_on": "2026-06-01",

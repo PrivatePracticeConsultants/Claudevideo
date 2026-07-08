@@ -241,6 +241,9 @@ class Store:
                 error VARCHAR,
                 preflight VARCHAR,
                 qa VARCHAR,
+                progress DOUBLE DEFAULT 0,
+                chunks_done BIGINT DEFAULT 0,
+                chunks_total BIGINT DEFAULT 0,
                 started_at TIMESTAMP,
                 finished_at TIMESTAMP
             );
@@ -286,6 +289,9 @@ class Store:
         # migrate pre-existing stores created before the outreach columns
         for col in ("address", "zip", "phone"):
             con.execute(f"ALTER TABLE npi_directory ADD COLUMN IF NOT EXISTS {col} VARCHAR")
+        # migrate stores created before the chunked-progress columns
+        for col, typ in (("progress", "DOUBLE"), ("chunks_done", "BIGINT"), ("chunks_total", "BIGINT")):
+            con.execute(f"ALTER TABLE files ADD COLUMN IF NOT EXISTS {col} {typ}")
 
     def _register_views(self, con: duckdb.DuckDBPyConnection) -> None:
         """(Re)point the derived views. Callers must hold write_lock."""
@@ -330,6 +336,21 @@ class Store:
         Writes to a temp file, then atomically swaps it into place on close."""
         return RatesPartWriter(self, source_file)
 
+    def update_progress(self, filename: str, progress: float,
+                        chunks_done: int | None = None, chunks_total: int | None = None) -> None:
+        """Lightweight progress write for the dashboard bar (no view churn)."""
+        sets = ["progress = ?"]
+        params: list = [round(progress, 3)]
+        if chunks_done is not None:
+            sets.append("chunks_done = ?")
+            params.append(chunks_done)
+        if chunks_total is not None:
+            sets.append("chunks_total = ?")
+            params.append(chunks_total)
+        params.append(filename)
+        with self.write_lock, self.connect() as con:
+            con.execute(f"UPDATE files SET {', '.join(sets)} WHERE filename = ?", params)
+
     def drop_rates_part(self, source_file: str) -> None:
         path = self.rates_dir / f"{file_key(source_file)}.parquet"
         with self.write_lock:
@@ -359,12 +380,15 @@ class Store:
         cols = {
             "payer", "file_type", "status", "schema_version", "last_updated_on",
             "size_bytes", "rows_emitted", "ref_groups_skipped", "error",
-            "preflight", "qa", "started_at", "finished_at",
+            "preflight", "qa", "progress", "chunks_done", "chunks_total",
+            "started_at", "finished_at",
         }
         fields = {k: v for k, v in fields.items() if k in cols}
         for jcol in ("preflight", "qa"):
             if jcol in fields and not isinstance(fields[jcol], (str, type(None))):
                 fields[jcol] = json.dumps(fields[jcol])
+        if not fields:
+            return  # nothing to write (all keys filtered out) — never emit empty SET
         with self.write_lock, self.connect() as con:
             exists = con.execute("SELECT 1 FROM files WHERE filename = ?", [filename]).fetchone()
             if exists:

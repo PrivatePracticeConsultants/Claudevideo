@@ -751,11 +751,18 @@ async function loadFiles() {
     let statusExtra = "";
     if (f.status === "pending_confirmation")
       statusExtra = ` <button class="btn" style="padding:2px 8px;font-size:12px" data-confirm="${esc(f.filename)}">ingest anyway</button>`;
+    const inflight = (f.status === "processing" || f.status === "queued") && f.chunks_total > 0;
+    const progressBar = inflight
+      ? `<div class="progress" title="working through the file in chunks">
+           <div class="progress-fill" style="width:${Math.round(f.progress || 0)}%"></div>
+           <span class="progress-label">chunk ${fmtInt(f.chunks_done)}/${fmtInt(f.chunks_total)} · ${Math.round(f.progress || 0)}%</span>
+         </div>`
+      : "";
     return `<tr>
       <td>${esc(f.filename)}</td>
       <td>${esc(f.payer || "?")}</td>
       <td>${esc(f.file_type || "?")}${f.schema_version && !String(f.schema_version).startsWith("2.") ? ` <span class="warn-text">v${esc(f.schema_version)}</span>` : ""}</td>
-      <td><span class="badge ${esc(f.status)}">${esc(f.status)}</span>${statusExtra}</td>
+      <td><span class="badge ${esc(f.status)}">${esc(f.status)}</span>${statusExtra}${progressBar}</td>
       <td class="num">${fmtInt(f.rows_emitted)}</td>
       <td>${qaLine(f.qa)}</td>
       <td>${warn}${f.error ? `<div class="err-text">${esc(f.error)}</div>` : ""}</td>

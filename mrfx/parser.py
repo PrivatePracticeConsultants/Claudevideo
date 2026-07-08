@@ -186,11 +186,17 @@ class InNetworkParser:
         external_refs: dict[int, list[PGroup]] | None = None,
         sink=None,
         header_defaults: dict | None = None,
+        keep_ref_ids: set[int] | None = None,
     ):
         self.cfg = cfg
         self.code_set = cfg.code_set  # None = all codes
         self.source_file = source_file
         self.external_refs = external_refs or {}
+        # Huge files: only the references the target codes actually cite are
+        # kept in memory (learned by a fast first pass). A multi-GB
+        # provider_references table with millions of unused groups never lands
+        # in RAM. None = keep all (small files).
+        self._keep_ref_ids = keep_ref_ids
         self.result = ParseResult()
         # Seed header from preflight (which already sniffed the first ~1 MB) so
         # rows are correct from the first batch even when the actual header
@@ -300,21 +306,28 @@ class InNetworkParser:
         rid = entry.get("provider_group_id")
         if rid is None:
             return
+        rid = int(rid)
+        # Huge files: skip references the target codes never cite (bounds memory
+        # to the therapist-relevant subset of a millions-strong ref table).
+        if self._keep_ref_ids is not None and rid not in self._keep_ref_ids:
+            return
         groups = entry.get("provider_groups")
         if groups is None and entry.get("location"):
             # file-driven app: remote reference locations are not fetched; the
             # user must drop the companion file in.
-            self.result.embedded_refs.setdefault(int(rid), [])
+            self.result.embedded_refs.setdefault(rid, [])
             return
-        self.result.embedded_refs[int(rid)] = parse_groups(groups or [])
+        self.result.embedded_refs[rid] = parse_groups(groups or [])
 
-    def _lookup_ref(self, rid: int) -> list[PGroup] | None:
-        got = self.result.embedded_refs.get(rid)
-        if got:
-            return got
-        # embedded-but-empty (location-style) falls through to a standalone
-        # reference file if one was ingested for this payer.
-        return self.external_refs.get(rid)
+    def _resolve_refs(self, ref_ids: list[int]) -> dict[int, list[PGroup] | None]:
+        """Resolve a rate group's cited ref ids from the in-memory table
+        (for huge files this holds only the target-cited subset), falling back
+        to a standalone companion file."""
+        out: dict[int, list[PGroup] | None] = {}
+        for rid in ref_ids:
+            g = self.result.embedded_refs.get(rid)
+            out[rid] = g if g else self.external_refs.get(rid)
+        return out
 
     # -- items ----------------------------------------------------------------
 
@@ -346,7 +359,10 @@ class InNetworkParser:
             prices = [p for p in as_list(grp.get("negotiated_prices")) if isinstance(p, dict)]
             if not prices:
                 continue
-            if not self._refs_complete and any(
+            # Defer only when the reference table hasn't finished streaming yet
+            # (in_network precedes provider_references); the common refs-first
+            # layout never defers.
+            if ref_ids and not self._refs_complete and any(
                 rid not in self.result.embedded_refs and rid not in self.external_refs
                 for rid in ref_ids
             ):
@@ -364,12 +380,14 @@ class InNetworkParser:
     ) -> None:
         all_groups = list(groups)
         missing_ref = False
-        for rid in ref_ids:
-            got = self._lookup_ref(rid)
-            if got is None or got == []:
-                missing_ref = True
-                continue
-            all_groups.extend(got)
+        if ref_ids:
+            resolved = self._resolve_refs(ref_ids)
+            for rid in ref_ids:
+                got = resolved.get(rid)
+                if not got:
+                    missing_ref = True
+                    continue
+                all_groups.extend(got)
         if missing_ref and not all_groups:
             self.result.ref_groups_skipped += 1
             return
@@ -426,6 +444,52 @@ class InNetworkParser:
                         self._buffer.append(row)
                     r.qa.rows += 1
         self._flush()
+
+
+def skim_needed_ref_ids(cfg: MrfxConfig, stream, progress_marker=None) -> set[int]:
+    """Fast first pass over a huge in-network file: find the provider_reference
+    ids that the TARGET billing codes actually cite. The (millions-strong)
+    provider_references table and every non-target in_network item are skipped
+    without materializing, so this pass is cheap and bounded — the returned set
+    is the therapist-relevant subset the extraction pass keeps in memory.
+    """
+    code_set = cfg.code_set
+    needed: set[int] = set()
+    builder = None
+    skipping = False
+    cur_code_ok = False
+
+    for prefix, event, value in ijson.parse(stream, use_float=True):
+        # skip the whole provider_references array cheaply
+        if prefix.startswith("provider_references"):
+            continue
+        if builder is not None:
+            if not skipping and event in ("string", "number"):
+                if prefix == "in_network.item.billing_code":
+                    cur_code_ok = code_set is None or clean_code(value) in code_set
+                    if not cur_code_ok:
+                        skipping = True
+                        builder = _DISCARDED
+                elif (
+                    prefix == "in_network.item.billing_code_type"
+                    and str(value).strip().upper() not in ACCEPTED_CODE_TYPES
+                ):
+                    skipping = True
+                    builder = _DISCARDED
+            if not skipping:
+                if prefix == "in_network.item.negotiated_rates.item.provider_references.item" and event in ("number", "string"):
+                    rid = clean_ref_id(value)
+                    if rid is not None:
+                        needed.add(rid)
+            if event == "end_map" and prefix == "in_network.item":
+                builder = None
+                skipping = False
+                cur_code_ok = False
+            continue
+        if event == "start_map" and prefix == "in_network.item":
+            builder = object()  # sentinel: "inside an item"
+            skipping = False
+    return needed
 
 
 def parse_provider_reference_file(cfg: MrfxConfig, stream) -> tuple[str, str | None, dict[int, list[PGroup]]]:

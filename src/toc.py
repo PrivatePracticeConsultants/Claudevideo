@@ -123,7 +123,7 @@ def discover_blue_kc(client: httpx.Client, cfg: Config) -> list[SourceFile]:
         try:
             path = _fetch_cached(client, cfg, url, "bluekc", node.get("file_name") or url.rsplit("/", 1)[-1])
             _parse_toc_file(path, "blue_kc", sources)
-        except (FetchError, ValueError, ijson.JSONERROR) as e:
+        except (FetchError, ValueError, ijson.JSONError) as e:
             log.warning("Blue KC TOC %s failed: %s — skipping", url, e)
     log.info("Blue KC: %d unique in-network files", len(sources))
     return list(sources.values())

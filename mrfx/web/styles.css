@@ -293,6 +293,13 @@ td .rate { font-weight: 650; }
 .opp-band b { font-variant-numeric: tabular-nums; }
 
 /* files QA + validation */
+.progress { position: relative; height: 16px; margin-top: 5px; border-radius: 8px;
+  background: var(--grid); overflow: hidden; min-width: 160px; }
+.progress-fill { position: absolute; inset: 0 auto 0 0; background: var(--accent);
+  border-radius: 8px; transition: width 0.4s ease; }
+.progress-label { position: absolute; inset: 0; display: flex; align-items: center;
+  justify-content: center; font-size: 10.5px; color: var(--ink); font-variant-numeric: tabular-nums; }
+
 .qa-line { font-size: 12px; color: var(--ink-2); white-space: nowrap; }
 .qa-line .bad { color: var(--critical); font-weight: 600; }
 .qa-line .warn { color: #9a6b00; font-weight: 600; }

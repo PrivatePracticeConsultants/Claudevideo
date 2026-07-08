@@ -327,7 +327,7 @@ class Extractor:
             log.log(level, "fetch failed (HTTP %s) for %s — continuing batch", e.status, source.url.split("?")[0])
             self.checkpoints.mark(source.url, "failed", error=f"http {e.status}")
             return {"status": "failed"}
-        except (EOFError, OSError, ijson.JSONERROR, httpx.HTTPError) as e:
+        except (EOFError, OSError, ijson.JSONError, httpx.HTTPError) as e:
             # truncated gzip, dropped connection, malformed JSON, ...
             log.error("stream error for %s: %s — continuing batch", source.url.split("?")[0], e)
             self.checkpoints.mark(source.url, "failed", error=f"{type(e).__name__}: {e}")
