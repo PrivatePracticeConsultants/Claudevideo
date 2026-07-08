@@ -136,17 +136,27 @@ def cmd_status(cfg: MrfxConfig, args) -> int:
 
 
 def cmd_export(cfg: MrfxConfig, args) -> int:
-    from .api import order_export_sql  # lazy import to keep CLI light
+    from .api import FilterSet, methodology_text, order_export_sql
 
     store = Store(cfg.store_dir)
     out = Path(args.out)
-    sql = order_export_sql(args)
+    sql, params = order_export_sql(args)
     with store.connect() as con:
-        con.execute(f"COPY ({sql[0]}) TO '{out}' (FORMAT CSV, HEADER)", sql[1])
+        con.execute(f"COPY ({sql}) TO '{out}' (FORMAT CSV, HEADER)", params)
     data = out.read_bytes()
     out.write_bytes(b"\xef\xbb\xbf" + data)
+    qp = {k: v for k, v in {
+        "payer": args.payer, "cpt": args.cpt, "modifier": args.modifier,
+        "billing_class": args.billing_class, "q": args.q,
+        "dollar_only": "0" if args.all_types else "1",
+        "rate_min": args.rate_min, "rate_max": args.rate_max,
+    }.items() if v not in (None, "")}
+    sidecar = out.with_name(out.stem + "_methodology.txt")
+    sidecar.write_text(
+        methodology_text(cfg, store, args.grain, FilterSet(qp), "negotiated_rate", "desc", "cli")
+    )
     n = data.count(b"\n") - 1
-    print(f"exported ~{max(n, 0):,} rows -> {out}")
+    print(f"exported ~{max(n, 0):,} rows -> {out}\nmethodology -> {sidecar}")
     return 0
 
 
@@ -179,6 +189,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--modifier")
     p.add_argument("--billing-class", dest="billing_class")
     p.add_argument("--q")
+    p.add_argument("--grain", choices=["entity", "tin", "npi"], default="tin")
     p.add_argument("--all-types", action="store_true", help="include non-dollar negotiated_type rows")
     p.add_argument("--rate-min", type=float, dest="rate_min")
     p.add_argument("--rate-max", type=float, dest="rate_max")

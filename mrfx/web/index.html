@@ -14,7 +14,8 @@
   <div id="dataset-stats">loading…</div>
   <nav>
     <button data-view="explorer" class="active">Explorer</button>
-    <button data-view="cpt">CPT comparison</button>
+    <button data-view="cpt">Code comparison</button>
+    <button data-view="benchmark">Benchmark</button>
     <button data-view="files">Files</button>
     <button data-view="sources">Sources</button>
   </nav>
@@ -26,23 +27,49 @@
   <section id="view-explorer" class="view active">
     <div class="filters" id="explorer-filters">
       <div class="field">
+        <label>Grain</label>
+        <div class="seg" id="f-grain">
+          <button data-g="entity">Entity</button>
+          <button data-g="tin" class="on">TIN</button>
+          <button data-g="npi">NPI</button>
+        </div>
+      </div>
+      <div class="field">
         <label>Payer</label>
         <div class="chips" id="f-payer-chips"></div>
       </div>
-      <div class="field" style="max-width:600px">
-        <label>CPT / HCPCS <span class="muted" style="text-transform:none">(quick-pick)</span></label>
-        <div class="chips" id="f-cpt-chips"></div>
+      <div class="field">
+        <label>Discipline</label>
+        <div class="chips" id="f-disc-chips">
+          <button class="chip" data-d="PT">PT</button>
+          <button class="chip" data-d="OT">OT</button>
+          <button class="chip" data-d="SLP">SLP</button>
+          <button class="chip" data-d="unspecified" title="shared code with no GP/GO/GN modifier — discipline honestly unknown">unspecified</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>Month</label>
+        <select id="f-month"><option value="">all months</option></select>
+      </div>
+      <div class="field" style="max-width:640px">
+        <label>Code quick-pick <span class="muted" style="text-transform:none">(grouped by discipline)</span></label>
+        <div class="chips codechips" id="f-cpt-chips"></div>
       </div>
       <div class="field">
         <label>Modifier</label>
         <select id="f-modifier">
           <option value="">all rows</option>
-          <option value="base">base only (no modifier)</option>
-          <option value="CQ">CQ only</option>
-          <option value="GP">GP only</option>
-          <option value="GO">GO only</option>
-          <option value="GN">GN only</option>
+          <option value="base">base (none, or GP/GO/GN only)</option>
+          <option value="assistant">assistant only (CQ/CO)</option>
+          <option value="KX">KX present</option>
         </select>
+      </div>
+      <div class="field">
+        <label>Custom modifier logic</label>
+        <div style="display:flex;gap:6px">
+          <input type="text" id="f-mod-has" placeholder="has (GP,…)" style="width:88px" title="all listed modifiers present">
+          <input type="text" id="f-mod-not" placeholder="not (CQ,…)" style="width:88px" title="none of the listed modifiers present">
+        </div>
       </div>
       <div class="field">
         <label>Billing class</label>
@@ -52,36 +79,68 @@
           <option value="institutional">institutional</option>
         </select>
       </div>
+      <div class="field">
+        <label>Place of service</label>
+        <select id="f-pos">
+          <option value="">all</option>
+          <option value="11">11 — office</option>
+          <option value="19">19 — off-campus hospital OP</option>
+          <option value="22">22 — on-campus hospital OP</option>
+          <option value="12">12 — home</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Practice state / city</label>
+        <div style="display:flex;gap:6px">
+          <input type="text" id="f-state" placeholder="MO" style="width:52px">
+          <input type="text" id="f-city" placeholder="city" style="width:110px">
+        </div>
+      </div>
       <div class="field grow">
-        <label>Org / NPI search</label>
-        <input type="text" id="f-q" placeholder="name or NPI…">
+        <label>Entity / TIN / NPI search</label>
+        <input type="text" id="f-q" placeholder="name, TIN or NPI…">
       </div>
       <div class="field">
         <label>Rate range</label>
         <div style="display:flex;gap:6px">
-          <input type="number" id="f-rate-min" placeholder="min" style="width:80px">
-          <input type="number" id="f-rate-max" placeholder="max" style="width:80px">
+          <input type="number" id="f-rate-min" placeholder="min" style="width:74px">
+          <input type="number" id="f-rate-max" placeholder="max" style="width:74px">
         </div>
       </div>
       <label class="toggle" title="negotiated_type in (negotiated, fee schedule, derived)">
         <input type="checkbox" id="f-dollar" checked> dollar rates only
       </label>
+      <label class="toggle" title="tin.type == 'npi' means the published 'TIN' is really an NPI, not an employer tax id">
+        <input type="checkbox" id="f-hidetinnpi"> hide TIN-is-NPI rows
+      </label>
+      <label class="toggle" title="hides rows >5x or <0.2x the code's median within the current filter — opt-in, never silent">
+        <input type="checkbox" id="f-outliers"> hide implausible rates
+      </label>
       <button class="btn" id="f-clear">Clear</button>
-      <button class="btn primary" id="btn-export">Export CSV</button>
+      <button class="btn" id="btn-export" title="CSV, current filter state exactly">Export CSV</button>
+      <button class="btn primary" id="btn-export-zip" title="CSV + methodology sidecar (zip)">Export + methodology</button>
     </div>
 
     <div class="summary" id="summary-strip"></div>
+    <div class="disclaimer">
+      A negotiated rate is <b>per code, not per visit</b>: most treatment codes are timed
+      15-minute units, and MPPR, assistant-modifier (CQ/CO) reductions, sequestration and
+      patient cost-share all sit between a published rate and revenue.
+    </div>
 
     <div class="tablewrap">
       <table id="rates-table">
         <thead>
           <tr>
-            <th data-sort="org_name">Organization</th>
+            <th data-sort="display_name">Entity</th>
             <th data-sort="payer">Payer</th>
             <th data-sort="billing_code">Code</th>
+            <th data-sort="discipline">Disc.</th>
             <th data-sort="modifier_set">Modifiers</th>
-            <th data-sort="billing_class">Billing class</th>
+            <th data-sort="billing_class">Class</th>
+            <th>POS</th>
             <th data-sort="negotiated_rate" class="num">Rate</th>
+            <th data-sort="rate_variants" class="num">Variants</th>
             <th data-sort="negotiated_type">Type</th>
             <th data-sort="source_count" class="num">Sources</th>
           </tr>
@@ -106,28 +165,85 @@
     </div>
   </section>
 
-  <!-- ======================= CPT COMPARISON ======================= -->
+  <!-- ======================= CODE COMPARISON ======================= -->
   <section id="view-cpt" class="view">
     <div class="view-head">
-      <h2>Who gets paid most for…</h2>
-      <div class="chips" id="cpt-chips"></div>
+      <h2>Which entities get paid most for…</h2>
       <span class="spacer"></span>
-      <label class="toggle"><input type="checkbox" id="cpt-base-only"> base rates only</label>
-      <button class="btn primary" id="cpt-export">Export CSV</button>
+      <label class="toggle"><input type="checkbox" id="cpt-base-only" checked> base rates only (no CQ/CO)</label>
+      <button class="btn primary" id="cpt-export">Export + methodology</button>
     </div>
+    <div class="chips codechips" id="cpt-chips" style="margin-bottom:10px"></div>
     <div id="cpt-hist"></div>
-    <div class="tablewrap" style="max-height:calc(100vh - 430px)">
+    <div id="cpt-trend"></div>
+    <div class="tablewrap" style="max-height:calc(100vh - 480px)">
       <table>
         <thead>
           <tr>
-            <th>#</th><th>Organization</th><th>Payer</th><th>Modifiers</th>
-            <th>Billing class</th>
-            <th class="num">Median rate</th><th class="num">Min</th><th class="num">Max</th><th class="num">Rows</th>
+            <th>#</th><th>Entity</th><th>Payer</th><th>Modifiers</th>
+            <th>Class</th><th class="num">NPIs</th>
+            <th class="num">Median rate</th><th class="num">Min</th><th class="num">Max</th>
           </tr>
         </thead>
         <tbody id="cpt-body"></tbody>
       </table>
       <div id="cpt-state"></div>
+    </div>
+  </section>
+
+  <!-- ======================= BENCHMARK ======================= -->
+  <section id="view-benchmark" class="view">
+    <div class="bench-grid">
+      <div class="bench-form">
+        <h2>Market benchmark</h2>
+        <div class="field"><label>Subject entity / TIN</label>
+          <input type="text" id="b-subject" list="b-subjects" placeholder="entity name or TIN…">
+          <datalist id="b-subjects"></datalist>
+        </div>
+        <div class="field"><label>As-of month (required)</label><select id="b-month"></select></div>
+        <div class="field"><label>Payer(s)</label><div class="chips" id="b-payer-chips"></div></div>
+        <div class="field"><label>Discipline</label>
+          <select id="b-disc"><option value="">any</option><option>PT</option><option>OT</option><option>SLP</option></select>
+        </div>
+        <div class="field"><label>State / city</label>
+          <div style="display:flex;gap:6px">
+            <input type="text" id="b-state" placeholder="MO" style="width:52px">
+            <input type="text" id="b-city" placeholder="city" style="width:120px">
+          </div>
+        </div>
+        <div class="field"><label>Billing class / POS</label>
+          <div style="display:flex;gap:6px">
+            <select id="b-class"><option value="professional">professional</option><option value="institutional">institutional</option></select>
+            <select id="b-pos"><option value="">any POS</option><option value="11">11 office</option><option value="19">19</option><option value="22">22</option></select>
+          </div>
+        </div>
+        <div class="field"><label>Target percentile</label>
+          <select id="b-target"><option value="50">median (p50)</option><option value="75">p75</option></select>
+        </div>
+        <div class="field"><label>Peer set</label>
+          <select id="b-peerset"><option value="">auto — all entities in market</option></select>
+        </div>
+        <details class="peerset-editor"><summary>Save a curated peer set</summary>
+          <input type="text" id="ps-name" placeholder="peer set name">
+          <textarea id="ps-tins" rows="3" placeholder="one TIN per line (e.g. the consolidator clinics near the subject)"></textarea>
+          <button class="btn" id="ps-save">Save peer set</button>
+        </details>
+        <div class="field"><label>Annual units per code <span class="muted" style="text-transform:none">(owner-supplied — required for the opportunity model)</span></label>
+          <textarea id="b-volumes" rows="4" placeholder="97110, 4200&#10;97140, 1800"></textarea>
+        </div>
+        <div class="mpfs-row">
+          <span id="mpfs-status" class="muted">MPFS: not loaded</span>
+          <label class="btn" style="cursor:pointer">Load MPFS CSV<input type="file" id="mpfs-file" accept=".csv" style="display:none"></label>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:12px">
+          <button class="btn primary" id="b-run">Run benchmark</button>
+          <button class="btn" id="b-report" disabled>Open pitch report</button>
+        </div>
+      </div>
+      <div class="bench-results">
+        <div id="b-out" class="empty"><h3>Pick a subject and an as-of month</h3>
+          Benchmarks compute over dollar-rate, base-modifier rows only.</div>
+      </div>
     </div>
   </section>
 
@@ -143,17 +259,35 @@
       for larger files, drop into <code class="inline">data/inbox/</code> — the watcher picks them up automatically
       <input type="file" id="file-input" multiple style="display:none">
     </div>
-    <div class="tablewrap" style="max-height:calc(100vh - 330px)">
+    <div class="tablewrap" style="max-height:48vh">
       <table>
         <thead>
           <tr>
             <th>File</th><th>Payer</th><th>Type</th><th>Status</th>
-            <th class="num">Rows</th><th>Warnings</th><th>Updated</th>
+            <th class="num">Rows</th><th>Data quality</th><th>Warnings</th><th>Updated</th>
           </tr>
         </thead>
         <tbody id="files-body"></tbody>
       </table>
       <div id="files-state"></div>
+    </div>
+
+    <div class="validate-card">
+      <h3>Validation cross-check</h3>
+      <p class="muted">Paste a TIN or NPI + code + a rate you know (e.g. from a remit) and compare
+        it with what was extracted — the fastest way to catch a filtering or pairing bug.</p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <input type="text" id="v-id" placeholder="TIN or NPI">
+        <input type="text" id="v-code" placeholder="code (97110)" style="width:110px">
+        <input type="number" id="v-expected" placeholder="expected $" step="0.01" style="width:110px">
+        <button class="btn" id="v-run">Check</button>
+        <span id="v-verdict"></span>
+      </div>
+      <div class="tablewrap" style="max-height:30vh;margin-top:10px;display:none" id="v-wrap">
+        <table><thead><tr><th>Payer</th><th>TIN</th><th>NPI</th><th>Code</th><th>Modifiers</th>
+          <th class="num">Extracted</th><th class="num">Δ vs expected</th><th>Month</th><th>Source file</th></tr></thead>
+          <tbody id="v-body"></tbody></table>
+      </div>
     </div>
   </section>
 
@@ -164,7 +298,7 @@
       <div class="field">
         <select id="src-state"><option value="">— pick a state —</option></select>
       </div>
-      <span class="muted">find the source → download → drop in inbox → preflight → explore</span>
+      <span class="muted">find the source → download → drop in inbox → preflight → explore → benchmark</span>
     </div>
     <div id="src-elevance" class="note-banner" style="display:none"></div>
     <div id="src-state-cards" class="sources-grid"></div>
@@ -176,7 +310,7 @@
 
 </main>
 
-<!-- org detail slide-over -->
+<!-- entity detail slide-over -->
 <div id="overlay"></div>
 <aside id="drawer" aria-hidden="true"></aside>
 <div id="tooltip"></div>

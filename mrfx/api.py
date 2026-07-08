@@ -1,142 +1,317 @@
-"""FastAPI JSON API over the DuckDB store + static dashboard hosting.
+"""FastAPI JSON API over the DuckDB store + static dashboard hosting (V4).
 
-Every list endpoint filters/sorts/paginates SERVER-SIDE (spec §8.3); CSV export
-reuses the exact same WHERE/ORDER SQL as the view that triggered it (§8.7).
+Every list endpoint filters/sorts/paginates SERVER-SIDE (§8.3); CSV export
+reuses the exact same WHERE/ORDER SQL as the view that produced it (§8.7) and
+ships with a methodology sidecar (§7A.6). The default analytical grain is
+(billing_code × TIN); entity and NPI grains are explicit toggles.
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import io
+import json
 import logging
 import tempfile
+import zipfile
 from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from .config import CPT_DESCRIPTIONS, MrfxConfig
+from . import __version__
+from .benchmark import (
+    BenchmarkError,
+    compute_benchmark,
+    compute_opportunity,
+    render_pitch_report,
+)
+from .catalog import catalog_json
+from .config import MrfxConfig
+from .entities import sync_entity_map, update_entity
 from .ingest import ingest_file, scan_inbox
 from .registry import Registry
-from .store import Store
+from .store import Store, mask_tin
 
 log = logging.getLogger(__name__)
 
 WEB_DIR = Path(__file__).parent / "web"
 
 SORTABLE = {
-    "org_name", "npi", "payer", "billing_code", "modifier_set",
+    "display_name", "unit_id", "payer", "billing_code", "discipline", "modifier_set",
     "billing_class", "negotiated_rate", "negotiated_type", "source_count",
-    "last_updated_on",
+    "npi_count", "tin_count", "rate_variants", "file_month", "last_updated_on",
 }
 
-UPLOAD_LIMIT_BYTES = 1 << 30  # browser uploads capped at 1 GB per spec §5.4
+UPLOAD_LIMIT_BYTES = 1 << 30  # browser uploads capped at 1 GB (§5.4)
+
+OUTLIER_RULE = "hide rows >5x or <0.2x of the code's median within the current filter"
+
+# ---------------------------------------------------------------------------
+# grain relations — uniform column set across entity / tin / npi
+# ---------------------------------------------------------------------------
+
+_TIN_REL = """
+    SELECT coalesce(em.entity_name, td.display_name, 'TIN ' || t.tin_value) AS display_name,
+           t.tin_value AS unit_id, t.tin_value,
+           em.entity_name IS NOT NULL AS is_mapped_entity,
+           t.tin_is_really_npi,
+           1 AS tin_count, t.npi_count, t.rate_variants, t.rate_min, t.rate_max,
+           t.payer, t.billing_code, t.billing_code_type, t.discipline, t.is_timed,
+           t.modifier_set, t.billing_class, t.service_code_set, t.file_month,
+           t.negotiated_rate, t.negotiated_type, t.is_dollar_rate,
+           t.source_count, t.source_files, t.schema_version, t.last_updated_on,
+           coalesce(td.states, []) AS states, coalesce(td.cities, []) AS cities
+    FROM rates_by_tin t
+    LEFT JOIN tin_directory td USING (tin_value)
+    LEFT JOIN entity_map em USING (tin_value)
+"""
+
+_ENTITY_REL = f"""
+    SELECT any_value(display_name) AS display_name,
+           entity_key AS unit_id,
+           string_agg(DISTINCT tin_value, '; ') AS tin_value,
+           bool_or(is_mapped_entity) AS is_mapped_entity,
+           bool_or(tin_is_really_npi) AS tin_is_really_npi,
+           count(DISTINCT tin_value) AS tin_count,
+           sum(npi_count) AS npi_count,
+           CASE WHEN count(DISTINCT negotiated_rate) > 1 THEN count(DISTINCT negotiated_rate)
+                ELSE max(rate_variants) END AS rate_variants,
+           min(rate_min) AS rate_min, max(rate_max) AS rate_max,
+           payer, billing_code, any_value(billing_code_type) AS billing_code_type,
+           discipline, any_value(is_timed) AS is_timed,
+           modifier_set, billing_class, service_code_set, file_month,
+           median(negotiated_rate) AS negotiated_rate,
+           any_value(negotiated_type) AS negotiated_type, is_dollar_rate,
+           sum(source_count) AS source_count,
+           string_agg(DISTINCT source_files, ';') AS source_files,
+           any_value(schema_version) AS schema_version,
+           max(last_updated_on) AS last_updated_on,
+           list_sort(list_distinct(flatten(list(states)))) AS states,
+           list_sort(list_distinct(flatten(list(cities)))) AS cities
+    FROM (
+        SELECT s.*, coalesce(s2.entity_name, s.display_name) AS entity_key
+        FROM ({_TIN_REL}) s LEFT JOIN entity_map s2 ON s2.tin_value = s.tin_value
+    )
+    GROUP BY entity_key, payer, billing_code, discipline, modifier_set,
+             billing_class, service_code_set, file_month, is_dollar_rate
+"""
+
+_NPI_REL = """
+    SELECT coalesce(n.org_name, 'NPI ' || d.npi) AS display_name,
+           d.npi AS unit_id, d.tin_value,
+           FALSE AS is_mapped_entity,
+           d.tin_is_really_npi,
+           1 AS tin_count, 1 AS npi_count, d.rate_variants,
+           d.negotiated_rate AS rate_min, d.negotiated_rate AS rate_max,
+           d.payer, d.billing_code, d.billing_code_type, d.discipline, d.is_timed,
+           d.modifier_set, d.billing_class, d.service_code_set, d.file_month,
+           d.negotiated_rate, d.negotiated_type, d.is_dollar_rate,
+           d.source_count, d.source_files, d.schema_version, d.last_updated_on,
+           CASE WHEN n.state IS NULL THEN [] ELSE [n.state] END AS states,
+           CASE WHEN n.city IS NULL THEN [] ELSE [n.city] END AS cities
+    FROM rates_dedup d LEFT JOIN npi_directory n USING (npi)
+"""
+
+GRAIN_REL = {"tin": _TIN_REL, "entity": _ENTITY_REL, "npi": _NPI_REL}
 
 
 class FilterSet:
-    """Translates query params into a parameterized WHERE clause, shared by
-    table, summary, and CSV export so the numbers always agree."""
+    """Query params -> parameterized WHERE over the uniform grain relation.
+    Shared by table, summary, and CSV export so the numbers always agree."""
 
-    def __init__(
-        self,
-        payer: list[str],
-        cpt: list[str],
-        modifier: str | None,
-        billing_class: str | None,
-        q: str | None,
-        dollar_only: bool,
-        rate_min: float | None,
-        rate_max: float | None,
-    ):
+    def __init__(self, qp: dict):
+        split = lambda s: [x.strip() for x in s.split(",") if x.strip()] if s else []  # noqa: E731
         clauses, params = [], []
-        if payer:
-            clauses.append(f"payer IN ({', '.join('?' for _ in payer)})")
-            params += payer
-        if cpt:
-            clauses.append(f"billing_code IN ({', '.join('?' for _ in cpt)})")
-            params += cpt
+        self.described: dict = {}
+
+        def add(desc_key, desc_val):
+            self.described[desc_key] = desc_val
+
+        payers = split(qp.get("payer"))
+        if payers:
+            clauses.append(f"payer IN ({', '.join('?' for _ in payers)})")
+            params += payers
+            add("payers", payers)
+        codes = split(qp.get("cpt") or qp.get("code"))
+        if codes:
+            clauses.append(f"billing_code IN ({', '.join('?' for _ in codes)})")
+            params += codes
+            add("codes", codes)
+        disciplines = split(qp.get("discipline"))
+        if disciplines:
+            clauses.append(f"discipline IN ({', '.join('?' for _ in disciplines)})")
+            params += disciplines
+            add("disciplines", disciplines)
+        modifier = qp.get("modifier")
         if modifier == "base":
-            clauses.append("modifier_set = ''")
+            clauses.append("(modifier_set = '' OR modifier_set IN ('GP','GO','GN'))")
+            add("modifier", "base only (no modifiers, or discipline GP/GO/GN only)")
+        elif modifier == "assistant":
+            clauses.append("(modifier_set LIKE '%CQ%' OR modifier_set LIKE '%CO%')")
+            add("modifier", "assistant-provided only (CQ/CO)")
         elif modifier:
             clauses.append("('|' || modifier_set || '|') LIKE ('%|' || ? || '|%')")
             params.append(modifier)
-        if billing_class:
+            add("modifier", f"contains {modifier}")
+        for m in split(qp.get("mod_has")):
+            clauses.append("('|' || modifier_set || '|') LIKE ('%|' || ? || '|%')")
+            params.append(m)
+            add(f"mod_has:{m}", True)
+        for m in split(qp.get("mod_not")):
+            clauses.append("('|' || modifier_set || '|') NOT LIKE ('%|' || ? || '|%')")
+            params.append(m)
+            add(f"mod_not:{m}", True)
+        if qp.get("billing_class"):
             clauses.append("billing_class = ?")
-            params.append(billing_class)
+            params.append(qp["billing_class"])
+            add("billing_class", qp["billing_class"])
+        if qp.get("pos"):
+            clauses.append("('|' || service_code_set || '|') LIKE ('%|' || ? || '|%')")
+            params.append(qp["pos"])
+            add("place_of_service", qp["pos"])
+        if qp.get("state"):
+            clauses.append("list_contains(states, ?)")
+            params.append(qp["state"].upper())
+            add("state", qp["state"].upper())
+        if qp.get("city"):
+            clauses.append("len(list_filter(cities, c -> upper(c) = upper(?))) > 0")
+            params.append(qp["city"])
+            add("city", qp["city"])
+        if qp.get("month"):
+            clauses.append("file_month = ?")
+            params.append(qp["month"])
+            add("as_of_month", qp["month"])
+        q = qp.get("q")
         if q:
-            clauses.append("(npi LIKE ? OR upper(coalesce(org_name, '')) LIKE upper(?))")
-            params += [f"%{q}%", f"%{q}%"]
+            clauses.append(
+                "(unit_id LIKE ? OR upper(display_name) LIKE upper(?) OR tin_value LIKE ?)"
+            )
+            params += [f"%{q}%", f"%{q}%", f"%{q}%"]
+            add("search", q)
+        dollar_only = qp.get("dollar_only", "1") not in ("0", "false")
         if dollar_only:
             clauses.append("is_dollar_rate")
-        if rate_min is not None:
+        add("dollar_rates_only", dollar_only)
+        if qp.get("hide_tin_npi", "0") in ("1", "true"):
+            clauses.append("NOT tin_is_really_npi")
+            add("hide_tin_is_really_npi", True)
+        if qp.get("rate_min"):
             clauses.append("negotiated_rate >= ?")
-            params.append(rate_min)
-        if rate_max is not None:
+            params.append(float(qp["rate_min"]))
+            add("rate_min", float(qp["rate_min"]))
+        if qp.get("rate_max"):
             clauses.append("negotiated_rate <= ?")
-            params.append(rate_max)
+            params.append(float(qp["rate_max"]))
+            add("rate_max", float(qp["rate_max"]))
+        self.hide_outliers = qp.get("hide_outliers", "0") in ("1", "true")
+        add("hide_outliers", f"ON — {OUTLIER_RULE}" if self.hide_outliers else "off")
         self.where = " AND ".join(clauses) if clauses else "1=1"
         self.params = params
 
 
-BASE_REL = """
-    SELECT d.*, coalesce(n.org_name, '') AS org_name, n.city, n.state
-    FROM rates_dedup d LEFT JOIN npi_directory n USING (npi)
-"""
+def grain_of(qp: dict, cfg: MrfxConfig, store: Store) -> str:
+    grain = qp.get("grain") or cfg.default_grain
+    if grain == "entity" and not store.entity_map():
+        grain = "tin"  # entity grain degrades to tin when no map is loaded
+    return grain if grain in GRAIN_REL else "tin"
 
 
-def parse_filters(
-    payer: str | None = None,
-    cpt: str | None = None,
-    modifier: str | None = None,
-    billing_class: str | None = None,
-    q: str | None = None,
-    dollar_only: bool = True,
-    rate_min: float | None = None,
-    rate_max: float | None = None,
-) -> FilterSet:
-    split = lambda s: [x.strip() for x in s.split(",") if x.strip()] if s else []  # noqa: E731
-    return FilterSet(split(payer), split(cpt), modifier, billing_class, q, dollar_only, rate_min, rate_max)
-
-
-def rel_sql(fs: FilterSet) -> str:
-    return f"WITH base AS ({BASE_REL}) SELECT * FROM base WHERE {fs.where}"
+def rel_sql(grain: str, fs: FilterSet) -> str:
+    base = f"WITH base AS ({GRAIN_REL[grain]}) SELECT * FROM base WHERE {fs.where}"
+    if fs.hide_outliers:
+        base = f"""
+        WITH filtered AS ({base}),
+        med AS (
+            SELECT billing_code, median(negotiated_rate) AS m
+            FROM filtered WHERE is_dollar_rate GROUP BY billing_code
+        )
+        SELECT filtered.* FROM filtered LEFT JOIN med USING (billing_code)
+        WHERE m IS NULL OR (negotiated_rate <= 5 * m AND negotiated_rate >= 0.2 * m)
+        """
+    return base
 
 
 def order_sql(sort: str, direction: str) -> str:
     if sort not in SORTABLE:
         sort = "negotiated_rate"
     direction = "ASC" if direction.lower() == "asc" else "DESC"
-    tiebreak = ", npi ASC, billing_code ASC, modifier_set ASC" if sort != "npi" else ", billing_code ASC"
-    return f"ORDER BY {sort} {direction} NULLS LAST{tiebreak}"
+    return f"ORDER BY {sort} {direction} NULLS LAST, unit_id ASC, billing_code ASC, modifier_set ASC"
 
 
-def export_select(fs: FilterSet, sort: str = "negotiated_rate", direction: str = "desc") -> tuple[str, list]:
-    """The one export query. Excel-friendly: arrays ;-joined, plain numbers."""
+# SQL twin of store.looks_like_ssn (slightly broader: over-masking is safe).
+_MASK_TIN_SQL = """
+    CASE WHEN tin_value IS NOT NULL
+              AND regexp_full_match(replace(tin_value, '; ', ''), '[0-9]+')
+              AND substr(tin_value, 1, 2) IN
+                  ('00','07','08','09','17','18','19','28','29','49',
+                   '69','70','78','79','89','96','97')
+         THEN 'MASKED-SSN' ELSE tin_value END AS tin_value
+"""
+
+
+def export_select(grain: str, fs: FilterSet, sort: str, direction: str) -> tuple[str, list]:
+    """The one export query (provenance columns per §7A.6)."""
     sql = f"""
-        SELECT payer, npi, org_name, billing_code, billing_code_type,
+        SELECT payer, {_MASK_TIN_SQL.replace('tin_value', 'unit_id').replace("AS unit_id", "AS unit_id", 1)},
+               display_name, {_MASK_TIN_SQL}, npi_count, tin_count,
+               billing_code, billing_code_type, discipline, is_timed,
                replace(modifier_set, '|', ';') AS modifiers,
-               negotiated_rate, negotiated_type, is_dollar_rate, billing_class,
+               negotiated_rate, rate_min, rate_max, rate_variants,
+               negotiated_type, is_dollar_rate, billing_class,
                replace(service_code_set, '|', ';') AS service_codes,
-               last_updated_on, expiration_date, source_count
-        FROM ({rel_sql(fs)}) {order_sql(sort, direction)}
+               file_month, last_updated_on, schema_version, source_count,
+               source_files
+        FROM ({rel_sql(grain, fs)}) {order_sql(sort, direction)}
     """
     return sql, fs.params
 
 
-def order_export_sql(args) -> tuple[str, list]:
-    """CLI adapter: argparse namespace -> the same export query the API uses."""
-    fs = parse_filters(
-        payer=args.payer, cpt=args.cpt, modifier=args.modifier,
-        billing_class=args.billing_class, q=args.q,
-        dollar_only=not args.all_types,
-        rate_min=args.rate_min, rate_max=args.rate_max,
-    )
-    return export_select(fs)
+def methodology_text(cfg: MrfxConfig, store: Store, grain: str, fs: FilterSet,
+                     sort: str, direction: str, view: str) -> str:
+    with store.connect() as con:
+        files = con.execute(
+            "SELECT filename, payer, substr(coalesce(last_updated_on, ''), 1, 7), "
+            "last_updated_on FROM files WHERE status = 'done' ORDER BY filename"
+        ).fetchall()
+    return "\n".join([
+        f"MRF Explorer v{__version__} export methodology — view: {view}",
+        f"Generated: {dt.datetime.now(dt.timezone.utc).isoformat()}",
+        f"Grain: {grain} (one row per billing_code x {grain} x modifier-set x class x POS-set x month)",
+        f"Filters: {json.dumps(fs.described, default=str)}",
+        f"Sort: {sort} {direction}",
+        "Dedup rule: distinct negotiated facts per grain tuple; a TIN/entity rate is the "
+        "median of its distinct published values, rate_variants counts them.",
+        f"Outlier handling: {fs.described.get('hide_outliers')}",
+        "Non-dollar negotiated_type rows (percentage, per diem) are excluded when "
+        f"dollar_rates_only is true (currently: {fs.described.get('dollar_rates_only')}).",
+        "SSN-pattern TINs are masked in every export.",
+        f"Source files ingested: {'; '.join(f'{f[0]} ({f[1]}, month {f[2]}, updated {f[3]})' for f in files) or 'none'}",
+        "Caveats: a negotiated rate is not per-visit revenue (timed 15-min units, MPPR, "
+        "CQ/CO reductions, sequestration, cost-share); published rates include "
+        "ghost rates (contracted-but-never-billed codes); a published rate is not "
+        "proof of collection.",
+    ])
+
+
+def _mask_row_tins(rows: list[dict]) -> list[dict]:
+    for r in rows:
+        if r.get("tin_value"):
+            r["tin_value"] = "; ".join(
+                mask_tin(t.strip()) or "" for t in str(r["tin_value"]).split(";")
+            )
+        # unit_id stays raw in JSON — it is the drill-down key, never displayed;
+        # the UI renders display_name + the masked tin_value column instead.
+    return rows
 
 
 def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     app = FastAPI(title="MRF Explorer", docs_url="/api/docs")
     registry = Registry(cfg)
+    sync_entity_map(cfg, store)
+    if cfg.mpfs_path and Path(cfg.mpfs_path).exists():
+        _load_mpfs_csv(store, Path(cfg.mpfs_path).read_bytes(), str(cfg.mpfs_path))
 
     # -- rates table ---------------------------------------------------------
 
@@ -148,101 +323,207 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         page: int = Query(1, ge=1),
         page_size: int = Query(100, ge=1, le=1000),
     ):
-        fs = _fs(request)
-        offset = (page - 1) * page_size
-        sql = f"{rel_sql(fs)} {order_sql(sort, dir)} LIMIT ? OFFSET ?"
+        qp = dict(request.query_params)
+        grain = grain_of(qp, cfg, store)
+        fs = FilterSet(qp)
+        sql = f"{rel_sql(grain, fs)} {order_sql(sort, dir)} LIMIT ? OFFSET ?"
         with store.connect() as con:
-            rows = _dicts(con.execute(sql, [*fs.params, page_size, offset]))
-            total = con.execute(
-                f"SELECT count(*) FROM ({rel_sql(fs)})", fs.params
-            ).fetchone()[0]
-        return {"rows": rows, "total": total, "page": page, "page_size": page_size}
+            rows = _dicts(con.execute(sql, [*fs.params, page_size, (page - 1) * page_size]))
+            total = con.execute(f"SELECT count(*) FROM ({rel_sql(grain, fs)})", fs.params).fetchone()[0]
+        return {"rows": _mask_row_tins(rows), "total": total, "page": page,
+                "page_size": page_size, "grain": grain}
 
     @app.get("/api/summary")
     def summary(request: Request):
-        fs = _fs(request)
+        qp = dict(request.query_params)
+        grain = grain_of(qp, cfg, store)
+        fs = FilterSet(qp)
         with store.connect() as con:
             row = con.execute(
                 f"""
-                SELECT count(*) AS n, count(DISTINCT npi) AS orgs,
-                       min(negotiated_rate) AS min, quantile_cont(negotiated_rate, .25) AS p25,
-                       median(negotiated_rate) AS median, quantile_cont(negotiated_rate, .75) AS p75,
-                       max(negotiated_rate) AS max
-                FROM ({rel_sql(fs)})
+                SELECT count(*) AS n,
+                       count(DISTINCT unit_id) AS entities,
+                       count(DISTINCT billing_code) AS codes,
+                       min(negotiated_rate) FILTER (is_dollar_rate) AS min,
+                       quantile_cont(negotiated_rate, .25) FILTER (is_dollar_rate) AS p25,
+                       median(negotiated_rate) FILTER (is_dollar_rate) AS median,
+                       quantile_cont(negotiated_rate, .75) FILTER (is_dollar_rate) AS p75,
+                       max(negotiated_rate) FILTER (is_dollar_rate) AS max
+                FROM ({rel_sql(grain, fs)})
                 """,
                 fs.params,
             ).fetchone()
-        keys = ["n", "orgs", "min", "p25", "median", "p75", "max"]
-        return dict(zip(keys, row))
+        keys = ["n", "entities", "codes", "min", "p25", "median", "p75", "max"]
+        return {**dict(zip(keys, row)), "grain": grain}
 
-    # -- org & cpt views -------------------------------------------------------
+    # -- detail views -----------------------------------------------------------
 
-    @app.get("/api/org/{npi}")
-    def org_detail(npi: str):
+    @app.get("/api/entity/{grain}/{unit_id}")
+    def entity_detail(grain: str, unit_id: str):
+        if grain not in GRAIN_REL:
+            raise HTTPException(404, "grain must be entity|tin|npi")
+        fs = FilterSet({"dollar_only": "0"})
         with store.connect() as con:
-            info = _dicts(con.execute("SELECT * FROM npi_directory WHERE npi = ?", [npi]))
             rows = _dicts(con.execute(
-                f"""
-                SELECT payer, billing_code, modifier_set, billing_class, negotiated_type,
-                       is_dollar_rate, negotiated_rate, source_count, last_updated_on
-                FROM ({BASE_REL}) WHERE npi = ?
-                ORDER BY billing_code, payer, modifier_set
-                """,
-                [npi],
+                f"SELECT * FROM ({GRAIN_REL[grain]}) WHERE unit_id = ? "
+                "ORDER BY billing_code, payer, modifier_set, file_month",
+                [unit_id],
             ))
+            if not rows:
+                raise HTTPException(404, f"no rates for {grain} {unit_id}")
+            if grain == "npi":
+                member_npis = _dicts(con.execute(
+                    "SELECT * FROM npi_directory WHERE npi = ?", [unit_id]))
+                tins = []
+            else:
+                tin_list = (
+                    [t for t, name in store.entity_map().items() if name == unit_id]
+                    if grain == "entity" and unit_id in set(store.entity_map().values())
+                    else [unit_id]
+                )
+                tins = _dicts(con.execute(
+                    f"SELECT * FROM tin_directory WHERE tin_value IN ({', '.join('?' for _ in tin_list)})",
+                    tin_list,
+                )) if tin_list else []
+                member_npis = _dicts(con.execute(
+                    f"""
+                    SELECT DISTINCT r.npi, n.org_name, n.entity_type, n.city, n.state, n.taxonomy_desc
+                    FROM rates r LEFT JOIN npi_directory n USING (npi)
+                    WHERE r.tin_value IN ({', '.join('?' for _ in tin_list)})
+                    ORDER BY r.npi
+                    """,
+                    tin_list,
+                )) if tin_list else []
             chart = _dicts(con.execute(
                 f"""
                 SELECT billing_code, payer, median(negotiated_rate) AS median_rate
-                FROM ({BASE_REL}) WHERE npi = ? AND is_dollar_rate
+                FROM ({GRAIN_REL[grain]}) WHERE unit_id = ? AND is_dollar_rate
                 GROUP BY billing_code, payer ORDER BY billing_code, payer
                 """,
-                [npi],
+                [unit_id],
             ))
-        if not rows:
-            raise HTTPException(404, f"no rates for NPI {npi}")
-        return {"npi": npi, "directory": info[0] if info else None, "rates": rows, "chart": chart}
+        variance = [r for r in rows if (r.get("rate_variants") or 1) > 1]
+        for t in tins:
+            t["tin_value"] = mask_tin(t["tin_value"])
+        return {
+            "unit_id": unit_id, "grain": grain,
+            "display_name": rows[0]["display_name"],
+            "rates": _mask_row_tins(rows), "tins": tins, "npis": member_npis,
+            "chart": chart, "variants": len(variance),
+        }
 
-    @app.get("/api/cpt/{code}")
-    def cpt_detail(code: str, dollar_only: bool = True, modifier: str | None = None):
-        mod_clause = "AND modifier_set = ''" if modifier == "base" else (
-            "AND ('|' || modifier_set || '|') LIKE ('%|' || ? || '|%')" if modifier else ""
-        )
-        mod_params = [modifier] if modifier and modifier != "base" else []
-        dollar_clause = "AND is_dollar_rate" if dollar_only else ""
+    @app.get("/api/code/{code}")
+    def code_detail(code: str, request: Request):
+        qp = dict(request.query_params)
+        qp["code"] = code
+        grain = grain_of(qp, cfg, store)
+        fs = FilterSet(qp)
         with store.connect() as con:
             ranked = _dicts(con.execute(
                 f"""
-                SELECT npi, org_name, payer, modifier_set, billing_class,
+                SELECT unit_id, any_value(display_name) AS display_name,
+                       payer, modifier_set, billing_class,
+                       any_value(discipline) AS discipline,
                        median(negotiated_rate) AS median_rate,
                        min(negotiated_rate) AS min_rate, max(negotiated_rate) AS max_rate,
-                       count(*) AS n
-                FROM ({BASE_REL})
-                WHERE billing_code = ? {dollar_clause} {mod_clause}
-                GROUP BY ALL ORDER BY median_rate DESC
-                LIMIT 500
+                       sum(npi_count) AS npi_count, count(*) AS n
+                FROM ({rel_sql(grain, fs)})
+                GROUP BY unit_id, payer, modifier_set, billing_class
+                ORDER BY median_rate DESC LIMIT 500
                 """,
-                [code, *mod_params],
+                fs.params,
             ))
             hist = _dicts(con.execute(
                 f"""
-                WITH r AS (
-                    SELECT negotiated_rate FROM ({BASE_REL})
-                    WHERE billing_code = ? {dollar_clause} {mod_clause}
-                )
+                WITH r AS (SELECT negotiated_rate FROM ({rel_sql(grain, fs)}) WHERE is_dollar_rate)
                 SELECT floor(negotiated_rate / g.w) * g.w AS bucket, count(*) AS n
                 FROM r, (SELECT greatest((max(negotiated_rate) - min(negotiated_rate)) / 20, 0.01) AS w FROM r) g
                 GROUP BY 1 ORDER BY 1
                 """,
-                [code, *mod_params],
+                fs.params,
             ))
-        return {
-            "billing_code": code,
-            "description": CPT_DESCRIPTIONS.get(code),
-            "ranked": ranked,
-            "histogram": hist,
-        }
+        info = catalog_json().get(code, {})
+        return {"billing_code": code, "grain": grain, **info, "ranked": ranked, "histogram": hist}
 
-    # -- files -----------------------------------------------------------------
+    @app.get("/api/trend")
+    def trend(request: Request):
+        qp = dict(request.query_params)
+        qp.pop("month", None)  # trend spans months by definition
+        grain = grain_of(qp, cfg, store)
+        fs = FilterSet(qp)
+        with store.connect() as con:
+            rows = _dicts(con.execute(
+                f"""
+                SELECT billing_code, payer, file_month,
+                       median(negotiated_rate) AS median_rate,
+                       count(DISTINCT unit_id) AS entities
+                FROM ({rel_sql(grain, fs)}) WHERE is_dollar_rate
+                GROUP BY billing_code, payer, file_month
+                ORDER BY billing_code, payer, file_month
+                """,
+                fs.params,
+            ))
+        return {"rows": rows}
+
+    @app.get("/api/months")
+    def months():
+        with store.connect() as con:
+            rows = con.execute(
+                "SELECT DISTINCT file_month FROM rates_by_tin ORDER BY file_month DESC"
+            ).fetchall()
+        return {"months": [r[0] for r in rows]}
+
+    # -- validation cross-check (§7A.10) -----------------------------------------
+
+    @app.post("/api/validate")
+    async def validate(request: Request):
+        body = await request.json()
+        ident = str(body.get("id", "")).replace("-", "").strip()
+        code = str(body.get("code", "")).strip()
+        expected = body.get("expected_rate")
+        if not ident or not code:
+            raise HTTPException(422, "id (TIN or NPI) and code are required")
+        with store.connect() as con:
+            rows = _dicts(con.execute(
+                """
+                SELECT payer, tin_value, npi, billing_code,
+                       coalesce(array_to_string(billing_code_modifier, '|'), '') AS modifiers,
+                       negotiated_rate, negotiated_type, billing_class,
+                       file_month, source_file
+                FROM rates
+                WHERE billing_code = ? AND (tin_value = ? OR npi = ?)
+                ORDER BY payer, file_month, negotiated_rate
+                """,
+                [code, ident, ident],
+            ))
+        for r in rows:
+            r["tin_value"] = mask_tin(r["tin_value"])
+            if expected is not None and r["negotiated_rate"]:
+                r["delta_vs_expected"] = round(r["negotiated_rate"] - float(expected), 2)
+        return {"rows": rows, "expected_rate": expected,
+                "match": any(abs(r.get("delta_vs_expected", 1)) < 0.005 for r in rows)
+                if expected is not None else None}
+
+    # -- entity map -----------------------------------------------------------------
+
+    @app.get("/api/entities/map")
+    def entities_map():
+        mapping = store.entity_map()
+        by_name: dict[str, list[str]] = {}
+        for tin, name in mapping.items():
+            by_name.setdefault(name, []).append(mask_tin(tin))
+        return {"entities": [{"name": n, "tins": sorted(t)} for n, t in sorted(by_name.items())]}
+
+    @app.post("/api/entities/update")
+    async def entities_update(request: Request):
+        body = await request.json()
+        name = str(body.get("name", "")).strip()
+        if not name:
+            raise HTTPException(422, "entity name required")
+        update_entity(cfg, store, name, body.get("add_tins") or [], body.get("remove_tins") or [])
+        return entities_map()
+
+    # -- files -----------------------------------------------------------------------
 
     @app.get("/api/files")
     def files():
@@ -254,6 +535,11 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             for k in ("started_at", "finished_at"):
                 if r.get(k) is not None:
                     r[k] = str(r[k])
+            if r.get("qa"):
+                try:
+                    r["qa"] = json.loads(r["qa"])
+                except json.JSONDecodeError:
+                    pass
         return {"files": rows}
 
     @app.post("/api/files/scan")
@@ -283,14 +569,26 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 if size > UPLOAD_LIMIT_BYTES:
                     out.close()
                     dest.unlink(missing_ok=True)
-                    raise HTTPException(
-                        413, "over 1 GB — drop the file into data/inbox/ instead of uploading"
-                    )
+                    raise HTTPException(413, "over 1 GB — drop the file into data/inbox/ instead")
                 out.write(chunk)
         background.add_task(scan_inbox, cfg, store)
         return {"status": "queued", "filename": dest.name, "bytes": size}
 
-    # -- export -----------------------------------------------------------------
+    # -- export (CSV + methodology sidecar, §7A.6) ---------------------------------
+
+    def _export_payload(request: Request, view: str, sort: str, dir: str, full: bool):
+        qp = {} if full else dict(request.query_params)
+        grain = grain_of(qp, cfg, store)
+        fs = FilterSet(qp if not full else {"dollar_only": "0"})
+        select, params = export_select(grain, fs, sort, dir)
+        stamp = dt.datetime.now().strftime("%Y-%m-%d_%H%M")
+        tmp = Path(tempfile.mkstemp(suffix=".csv")[1])
+        with store.connect() as con:
+            con.execute(f"COPY ({select}) TO '{tmp}' (FORMAT CSV, HEADER)", params)
+        raw = tmp.read_text()
+        tmp.unlink()
+        method = methodology_text(cfg, store, grain, fs, sort, dir, view)
+        return stamp, "﻿" + raw, method  # BOM for Excel
 
     @app.get("/api/export.csv")
     def export_csv(
@@ -301,24 +599,121 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         dir: str = "desc",
         full: bool = False,
     ):
-        fs = _fs(request) if not full else parse_filters(dollar_only=False)
-        select, params = export_select(fs, sort, dir)
-        stamp = dt.datetime.now().strftime("%Y-%m-%d_%H%M")
-        name = f"mrfx_{view}_{stamp}.csv"
-        tmp = Path(tempfile.mkstemp(suffix=".csv")[1])
-        with store.connect() as con:
-            con.execute(
-                f"COPY ({select}) TO '{tmp}' (FORMAT CSV, HEADER)", params
-            )
-        final = tmp.with_suffix(".bom.csv")
-        with open(final, "wb") as out:
-            out.write(b"\xef\xbb\xbf")
-            out.write(tmp.read_bytes())
-        tmp.unlink()
-        background.add_task(final.unlink, missing_ok=True)
-        return FileResponse(final, filename=name, media_type="text/csv")
+        stamp, csv_text, method = _export_payload(request, view, sort, dir, full)
+        out = Path(tempfile.mkstemp(suffix=".csv")[1])
+        out.write_text(csv_text, encoding="utf-8")
+        sidecar = out.with_suffix(".methodology.txt")
+        sidecar.write_text(method)
+        background.add_task(out.unlink, missing_ok=True)
+        return FileResponse(out, filename=f"mrfx_{view}_{stamp}.csv", media_type="text/csv")
 
-    # -- sources / registry ------------------------------------------------------
+    @app.get("/api/export.zip")
+    def export_zip(
+        request: Request,
+        background: BackgroundTasks,
+        view: str = "explorer",
+        sort: str = "negotiated_rate",
+        dir: str = "desc",
+        full: bool = False,
+    ):
+        stamp, csv_text, method = _export_payload(request, view, sort, dir, full)
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr(f"mrfx_{view}_{stamp}.csv", csv_text.encode("utf-8"))
+            z.writestr(f"mrfx_{view}_{stamp}_methodology.txt", method)
+        out = Path(tempfile.mkstemp(suffix=".zip")[1])
+        out.write_bytes(buf.getvalue())
+        background.add_task(out.unlink, missing_ok=True)
+        return FileResponse(out, filename=f"mrfx_{view}_{stamp}.zip", media_type="application/zip")
+
+    # -- benchmarks (§7B) --------------------------------------------------------------
+
+    @app.get("/api/benchmark/subjects")
+    def benchmark_subjects():
+        emap = store.entity_map()
+        with store.connect() as con:
+            tins = _dicts(con.execute(
+                "SELECT tin_value, display_name, npi_count, states FROM tin_directory "
+                "ORDER BY display_name"
+            ))
+        entities = sorted(set(emap.values()))
+        for t in tins:
+            t["entity"] = emap.get(t["tin_value"])
+            t["tin_value_masked"] = mask_tin(t["tin_value"])
+        return {"entities": entities, "tins": tins}
+
+    @app.post("/api/benchmark/market")
+    async def benchmark_market(request: Request):
+        body = await request.json()
+        try:
+            return compute_benchmark(store, str(body.get("subject", "")), body.get("market") or {})
+        except BenchmarkError as e:
+            raise HTTPException(422, str(e))
+
+    @app.post("/api/benchmark/opportunity")
+    async def benchmark_opportunity(request: Request):
+        body = await request.json()
+        try:
+            bench = compute_benchmark(store, str(body.get("subject", "")), body.get("market") or {})
+            volumes = {str(k): float(v) for k, v in (body.get("volumes") or {}).items()}
+            opp = compute_opportunity(bench, volumes,
+                                      int(body.get("conservative_percentile", 40)))
+            return {"benchmark": bench, "opportunity": opp}
+        except BenchmarkError as e:
+            raise HTTPException(422, str(e))
+
+    @app.post("/api/report/pitch", response_class=HTMLResponse)
+    async def pitch_report(request: Request):
+        body = await request.json()
+        try:
+            bench = compute_benchmark(store, str(body.get("subject", "")), body.get("market") or {})
+            opp = None
+            volumes = {str(k): float(v) for k, v in (body.get("volumes") or {}).items()}
+            if volumes:
+                opp = compute_opportunity(bench, volumes,
+                                          int(body.get("conservative_percentile", 40)))
+            return HTMLResponse(render_pitch_report(cfg, store, bench, opp))
+        except BenchmarkError as e:
+            raise HTTPException(422, str(e))
+
+    # peer sets
+    @app.get("/api/peersets")
+    def peersets():
+        return {"peer_sets": store.peer_sets()}
+
+    @app.post("/api/peersets")
+    async def peersets_save(request: Request):
+        body = await request.json()
+        name = str(body.get("name", "")).strip()
+        if not name:
+            raise HTTPException(422, "peer set name required")
+        store.save_peer_set(name, {
+            "mode": body.get("mode", "curated"),
+            "tins": [str(t).replace("-", "") for t in (body.get("tins") or [])],
+            "notes": body.get("notes", ""),
+        })
+        return {"peer_sets": store.peer_sets()}
+
+    @app.delete("/api/peersets/{name}")
+    def peersets_delete(name: str):
+        store.delete_peer_set(name)
+        return {"peer_sets": store.peer_sets()}
+
+    # MPFS
+    @app.get("/api/mpfs/status")
+    def mpfs_status():
+        return {"loaded": store.mpfs_loaded()}
+
+    @app.post("/api/mpfs/upload")
+    async def mpfs_upload(file: UploadFile):
+        data = await file.read()
+        try:
+            n = _load_mpfs_csv(store, data, file.filename or "upload.csv")
+        except (ValueError, KeyError) as e:
+            raise HTTPException(422, f"MPFS CSV must have code,locality,non_facility_rate columns: {e}")
+        return {"loaded": store.mpfs_loaded(), "rows": n}
+
+    # -- sources / registry ------------------------------------------------------------
 
     @app.get("/api/sources")
     def sources(state: str | None = None):
@@ -339,17 +734,15 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, "mrf_url must be https://")
         return registry.save_override(key, url)
 
-    # -- misc ---------------------------------------------------------------------
+    # -- misc -------------------------------------------------------------------------------
 
     @app.get("/api/stats")
     def stats():
         with store.connect() as con:
-            rates_n, orgs, payers = con.execute(
-                "SELECT count(*), count(DISTINCT npi), count(DISTINCT payer) FROM rates"
+            rates_n, tins, payers = con.execute(
+                "SELECT count(*), count(DISTINCT tin_value), count(DISTINCT payer) FROM rates"
             ).fetchone()
-            files_done = con.execute(
-                "SELECT count(*) FROM files WHERE status = 'done'"
-            ).fetchone()[0]
+            files_done = con.execute("SELECT count(*) FROM files WHERE status = 'done'").fetchone()[0]
             attention = _dicts(con.execute(
                 """
                 SELECT filename, status, ref_groups_skipped, error FROM files
@@ -357,10 +750,9 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                    OR ref_groups_skipped > 0
                 """
             ))
-        return {
-            "rates": rates_n, "orgs": orgs, "payers": payers,
-            "files_done": files_done, "attention": attention,
-        }
+        return {"rates": rates_n, "tins": tins, "payers": payers,
+                "files_done": files_done, "attention": attention,
+                "default_grain": grain_of({}, cfg, store)}
 
     @app.get("/api/payers")
     def payers():
@@ -368,9 +760,9 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             rows = con.execute("SELECT DISTINCT payer FROM rates ORDER BY payer").fetchall()
         return {"payers": [r[0] for r in rows]}
 
-    @app.get("/api/cpt_descriptions")
-    def cpt_descriptions():
-        return CPT_DESCRIPTIONS
+    @app.get("/api/catalog")
+    def catalog():
+        return catalog_json()
 
     @app.exception_handler(Exception)
     async def unhandled(request: Request, exc: Exception):
@@ -381,18 +773,39 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     return app
 
 
-def _fs(request: Request) -> FilterSet:
-    qp = request.query_params
-    return parse_filters(
-        payer=qp.get("payer"),
-        cpt=qp.get("cpt"),
-        modifier=qp.get("modifier"),
-        billing_class=qp.get("billing_class"),
-        q=qp.get("q"),
-        dollar_only=qp.get("dollar_only", "1") not in ("0", "false"),
-        rate_min=float(qp["rate_min"]) if qp.get("rate_min") else None,
-        rate_max=float(qp["rate_max"]) if qp.get("rate_max") else None,
-    )
+def order_export_sql(args) -> tuple[str, list]:
+    """CLI adapter: argparse namespace -> the same export query the API uses."""
+    qp = {
+        "payer": args.payer, "cpt": args.cpt, "modifier": args.modifier,
+        "billing_class": args.billing_class, "q": args.q,
+        "dollar_only": "0" if args.all_types else "1",
+        "rate_min": args.rate_min, "rate_max": args.rate_max,
+    }
+    qp = {k: v for k, v in qp.items() if v not in (None, "")}
+    fs = FilterSet(qp)
+    grain = getattr(args, "grain", None) or "tin"
+    return export_select(grain if grain in GRAIN_REL else "tin", fs, "negotiated_rate", "desc")
+
+
+def _load_mpfs_csv(store: Store, data: bytes, source: str) -> int:
+    import csv as _csv
+
+    text = data.decode("utf-8-sig", errors="replace")
+    reader = _csv.DictReader(io.StringIO(text))
+    fields = {(f or "").strip().lower(): f for f in (reader.fieldnames or [])}
+    required = {"code", "non_facility_rate"}
+    if not required <= set(fields):
+        raise ValueError(f"missing columns {required - set(fields)}")
+    rows = [
+        {
+            "code": row[fields["code"]].strip(),
+            "locality": row.get(fields.get("locality", ""), "") if fields.get("locality") else "",
+            "non_facility_rate": float(row[fields["non_facility_rate"]]),
+        }
+        for row in reader
+        if row.get(fields["code"], "").strip()
+    ]
+    return store.load_mpfs(rows, source)
 
 
 def _dicts(cursor) -> list[dict]:

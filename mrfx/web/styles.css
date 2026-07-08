@@ -242,6 +242,70 @@ td .rate { font-weight: 650; }
   margin-top: 14px;
 }
 
+/* ---------- V4 additions ---------- */
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+.seg button { background: var(--page); border: none; padding: 6px 12px; cursor: pointer; color: var(--ink-2); }
+.seg button + button { border-left: 1px solid var(--border); }
+.seg button.on { background: var(--accent); color: #fff; font-weight: 600; }
+
+.codechips { max-height: 76px; overflow-y: auto; }
+.chip .disc { font-size: 10px; color: var(--muted); margin-left: 3px; }
+.chip.on .disc { color: #dbe9fb; }
+
+.disclaimer {
+  border-left: 3px solid var(--warning);
+  background: color-mix(in srgb, var(--warning) 7%, var(--surface-1));
+  padding: 8px 14px; margin-bottom: 14px; border-radius: 0 var(--radius) var(--radius) 0;
+  color: var(--ink-2); font-size: 12.5px;
+}
+.variant-flag { color: #9a6b00; font-weight: 650; cursor: help; }
+.timed-tag { font-size: 10.5px; color: var(--muted); border: 1px solid var(--grid);
+  border-radius: 3px; padding: 0 4px; margin-left: 4px; vertical-align: 1px; }
+.disc-tag { display: inline-block; font-size: 10.5px; font-weight: 650; border-radius: 3px;
+  padding: 0 5px; margin-left: 4px; vertical-align: 1px;
+  color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.disc-tag.unspec { color: var(--muted); background: var(--grid); }
+
+/* benchmark */
+.bench-grid { display: grid; grid-template-columns: 330px 1fr; gap: 18px; align-items: start; }
+.bench-form { background: var(--surface-1); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 16px 18px; position: sticky; top: 72px; }
+.bench-form h2 { font-size: 15px; margin: 0 0 12px; }
+.bench-form .field { margin-bottom: 10px; display: flex; flex-direction: column; gap: 4px; }
+.bench-form label { font-size: 11.5px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+.bench-form input, .bench-form select, .bench-form textarea {
+  background: var(--page); border: 1px solid var(--border); border-radius: var(--radius); padding: 6px 9px; }
+.bench-form textarea { font: 12.5px/1.5 ui-monospace, monospace; }
+.peerset-editor { margin: 8px 0; font-size: 13px; }
+.peerset-editor summary { cursor: pointer; color: var(--accent); }
+.peerset-editor input, .peerset-editor textarea { width: 100%; margin-top: 6px; }
+.peerset-editor button { margin-top: 6px; }
+.mpfs-row { display: flex; align-items: center; gap: 10px; margin-top: 6px; font-size: 12.5px; }
+.bench-results { min-height: 300px; }
+.pstrip { position: relative; width: 110px; height: 8px; background: var(--grid);
+  border-radius: 4px; display: inline-block; vertical-align: middle; }
+.pstrip .marks { position: absolute; inset: 0; }
+.pstrip .you { position: absolute; top: -3px; width: 3px; height: 14px; background: var(--accent); border-radius: 2px; }
+.pctlbl { font-size: 11px; color: var(--ink-2); margin-left: 6px; font-variant-numeric: tabular-nums; }
+.bench-note { color: var(--ink-2); font-size: 12.5px; background: var(--surface-1);
+  border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 14px; margin-top: 12px; }
+.opp-band { font-size: 15px; margin: 14px 0 8px; }
+.opp-band b { font-variant-numeric: tabular-nums; }
+
+/* files QA + validation */
+.qa-line { font-size: 12px; color: var(--ink-2); white-space: nowrap; }
+.qa-line .bad { color: var(--critical); font-weight: 600; }
+.qa-line .warn { color: #9a6b00; font-weight: 600; }
+.validate-card { background: var(--surface-1); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 14px 18px; margin-top: 18px; }
+.validate-card h3 { margin: 0 0 4px; font-size: 14px; }
+.validate-card input { background: var(--page); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 6px 9px; }
+.v-ok { color: var(--good); font-weight: 650; }
+.v-bad { color: var(--critical); font-weight: 650; }
+
+.trendwrap { margin: 10px 0; }
+
 .view-head { display: flex; align-items: center; gap: 14px; margin: 4px 0 12px; flex-wrap: wrap; }
 .view-head h2 { font-size: 16px; margin: 0; }
 .view-head .spacer { flex: 1; }

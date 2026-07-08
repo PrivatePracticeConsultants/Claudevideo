@@ -1,11 +1,18 @@
-"""DuckDB-backed Parquet store: rates parts + files / npi_directory / provider_refs tables.
+"""DuckDB-backed Parquet store — V4 TIN-grain data model.
 
-Rate rows are written as one Parquet part per ingested source file (re-ingest
-overwrites the part, keeping ingestion idempotent). Metadata lives in a
-persistent DuckDB database; every reader connection registers a `rates` view
-over the parts glob plus the `rates_dedup` view.
+- `rates`: raw rows (one per extracted price × provider), parquet part per
+  source file (re-ingest overwrites its part; idempotent).
+- `rates_by_tin` (materialized): the app's spine — one row per
+  (payer, tin_value, billing_code, modifier_set, billing_class,
+  service_code_set, file_month) with npi_count / source_count /
+  rate_variants. NPI rows stay available for drill-down (`rates_dedup`).
+- `tin_directory` (derived): TIN -> display name (rolled up from the NPPES
+  org names of its NPIs), entity kind, npi_count, states, discipline.
+- `entity_map`: user-defined TIN -> entity grouping (config/entity_map.yaml).
+- `files`, `npi_directory`, `provider_refs`, `peer_sets`, `mpfs`.
 
-Writes are serialized behind a lock (watcher thread + API share the store).
+Writes are serialized behind a lock; readers never touch the DuckDB catalog
+(views are registered only at init and inside locked write paths).
 """
 
 from __future__ import annotations
@@ -13,6 +20,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import re
 import threading
 from pathlib import Path
 
@@ -24,12 +32,17 @@ RATES_SCHEMA = pa.schema(
     [
         pa.field("payer", pa.string(), nullable=False),
         pa.field("source_file", pa.string(), nullable=False),
+        pa.field("file_month", pa.string()),
         pa.field("schema_version", pa.string()),
         pa.field("last_updated_on", pa.string()),
+        pa.field("tin_value", pa.string()),
+        pa.field("tin_type", pa.string()),
+        pa.field("tin_is_really_npi", pa.bool_()),
         pa.field("npi", pa.string(), nullable=False),
-        pa.field("tin", pa.string()),
         pa.field("billing_code", pa.string(), nullable=False),
         pa.field("billing_code_type", pa.string()),
+        pa.field("discipline", pa.string()),
+        pa.field("is_timed", pa.bool_()),
         pa.field("billing_code_modifier", pa.list_(pa.string())),
         pa.field("negotiated_rate", pa.float64()),
         pa.field("negotiated_type", pa.string()),
@@ -41,41 +54,142 @@ RATES_SCHEMA = pa.schema(
     ]
 )
 
-_RATES_COLS_SQL = """
-    payer VARCHAR, source_file VARCHAR, schema_version VARCHAR,
-    last_updated_on VARCHAR, npi VARCHAR, tin VARCHAR,
-    billing_code VARCHAR, billing_code_type VARCHAR,
-    billing_code_modifier VARCHAR[], negotiated_rate DOUBLE,
-    negotiated_type VARCHAR, is_dollar_rate BOOLEAN, billing_class VARCHAR,
-    service_code VARCHAR[], expiration_date VARCHAR, ingested_at VARCHAR
-"""
-
 
 def file_key(name: str) -> str:
     return hashlib.sha1(name.encode()).hexdigest()[:16]
 
 
-# Deduped rollup: one row per distinct negotiated fact. List columns are
-# collapsed to '|'-joined strings so the GROUP BY stays cheap; the UI splits
-# them back apart for display.
+# --- SSN masking (§7A.7b) ----------------------------------------------------
+# EINs and SSNs are both 9 digits. A number is masked when it satisfies SSN
+# structural rules AND its 2-digit prefix is not a valid IRS EIN campus prefix.
+_VALID_EIN_PREFIXES = {
+    "01","02","03","04","05","06","10","11","12","13","14","15","16",
+    "20","21","22","23","24","25","26","27","30","31","32","33","34","35",
+    "36","37","38","39","40","41","42","43","44","45","46","47","48",
+    "50","51","52","53","54","55","56","57","58","59","60","61","62","63",
+    "64","65","66","67","68","71","72","73","74","75","76","77",
+    "80","81","82","83","84","85","86","87","88","90","91","92","93","94",
+    "95","98","99",
+}
+_SSN_RE = re.compile(r"^(?!000|666|9\d\d)\d{3}(?!00\d{4})\d{2}(?!0000)\d{4}$")
+
+
+def looks_like_ssn(tin: str | None) -> bool:
+    if not tin or not re.fullmatch(r"\d{9}", tin):
+        return False
+    return tin[:2] not in _VALID_EIN_PREFIXES and bool(_SSN_RE.match(tin))
+
+
+def mask_tin(tin: str | None) -> str | None:
+    """UI/export-safe TIN: SSN-pattern numbers are never shown raw."""
+    if tin is None:
+        return None
+    return "MASKED-SSN" if looks_like_ssn(tin) else tin
+
+
+# --- dedup / rollup queries ----------------------------------------------------
+
+# NPI-grain dedup (drill-down + npi grain toggle)
 DEDUP_QUERY = """
     SELECT payer, npi, billing_code,
            any_value(billing_code_type)                              AS billing_code_type,
+           any_value(discipline)                                     AS discipline,
+           any_value(is_timed)                                       AS is_timed,
            coalesce(array_to_string(billing_code_modifier, '|'), '') AS modifier_set,
            negotiated_rate, billing_class,
            coalesce(array_to_string(service_code, '|'), '')          AS service_code_set,
+           file_month,
+           any_value(tin_value)                                      AS tin_value,
+           bool_or(tin_is_really_npi)                                AS tin_is_really_npi,
            any_value(negotiated_type)                                AS negotiated_type,
            bool_or(is_dollar_rate)                                   AS is_dollar_rate,
-           any_value(tin)                                            AS tin,
            any_value(schema_version)                                 AS schema_version,
            max(last_updated_on)                                      AS last_updated_on,
            any_value(expiration_date)                                AS expiration_date,
-           count(DISTINCT source_file)                               AS source_count
+           count(DISTINCT source_file)                               AS source_count,
+           string_agg(DISTINCT source_file, ';')                     AS source_files,
+           1                                                         AS rate_variants,
+           1                                                         AS npi_count
     FROM rates
     GROUP BY payer, npi, billing_code,
              coalesce(array_to_string(billing_code_modifier, '|'), ''),
              negotiated_rate, billing_class,
-             coalesce(array_to_string(service_code, '|'), '')
+             coalesce(array_to_string(service_code, '|'), ''), file_month
+"""
+
+# TIN-grain spine (§4). Distinct rates within the tuple become rate_variants;
+# negotiated_rate is the median of the distinct values (min/max kept).
+BY_TIN_QUERY = """
+    SELECT payer, tin_value, billing_code,
+           any_value(tin_type)                                       AS tin_type,
+           bool_or(tin_is_really_npi)                                AS tin_is_really_npi,
+           any_value(billing_code_type)                              AS billing_code_type,
+           any_value(discipline)                                     AS discipline,
+           any_value(is_timed)                                       AS is_timed,
+           coalesce(array_to_string(billing_code_modifier, '|'), '') AS modifier_set,
+           billing_class,
+           coalesce(array_to_string(service_code, '|'), '')          AS service_code_set,
+           file_month, is_dollar_rate,
+           median(DISTINCT negotiated_rate)                          AS negotiated_rate,
+           min(negotiated_rate)                                      AS rate_min,
+           max(negotiated_rate)                                      AS rate_max,
+           count(DISTINCT negotiated_rate)                           AS rate_variants,
+           count(DISTINCT npi)                                       AS npi_count,
+           count(DISTINCT source_file)                               AS source_count,
+           string_agg(DISTINCT source_file, ';')                     AS source_files,
+           any_value(negotiated_type)                                AS negotiated_type,
+           any_value(schema_version)                                 AS schema_version,
+           max(last_updated_on)                                      AS last_updated_on,
+           any_value(expiration_date)                                AS expiration_date
+    FROM rates
+    GROUP BY payer, tin_value, billing_code,
+             coalesce(array_to_string(billing_code_modifier, '|'), ''),
+             billing_class,
+             coalesce(array_to_string(service_code, '|'), ''),
+             file_month, is_dollar_rate
+"""
+
+# TIN directory (§3.3a): display name from NPPES org names of the TIN's
+# Type-2 NPIs (mode); individual-billed TINs labeled by dominant person name.
+TIN_DIRECTORY_QUERY = """
+    WITH tin_npis AS (
+        SELECT DISTINCT tin_value, npi
+        FROM rates
+        WHERE tin_value IS NOT NULL AND NOT tin_is_really_npi
+    ),
+    joined AS (
+        SELECT t.tin_value, t.npi, d.entity_type, d.org_name, d.state, d.city
+        FROM tin_npis t LEFT JOIN npi_directory d USING (npi)
+    ),
+    names AS (
+        SELECT tin_value,
+               mode(org_name) FILTER (entity_type = 'NPI-2' AND org_name IS NOT NULL) AS org_mode,
+               mode(org_name) FILTER (org_name IS NOT NULL)                           AS any_mode,
+               count(*) FILTER (entity_type = 'NPI-2')                                AS n_orgs
+        FROM joined GROUP BY tin_value
+    ),
+    disc AS (
+        SELECT tin_value, mode(discipline) AS primary_discipline
+        FROM rates WHERE tin_value IS NOT NULL AND discipline != 'unspecified'
+        GROUP BY tin_value
+    )
+    SELECT j.tin_value,
+           any_value(r.tin_type)                                    AS tin_type,
+           coalesce(any_value(n.org_mode), any_value(n.any_mode),
+                    'TIN ' || j.tin_value)                          AS display_name,
+           CASE WHEN any_value(n.n_orgs) > 0 THEN 'org'
+                ELSE 'individual-billed' END                        AS entity_kind,
+           count(DISTINCT j.npi)                                    AS npi_count,
+           list_sort(list_distinct(list(j.state)
+                     FILTER (j.state IS NOT NULL)))                 AS states,
+           list_sort(list_distinct(list(j.city)
+                     FILTER (j.city IS NOT NULL)))                  AS cities,
+           any_value(d2.primary_discipline)                         AS primary_discipline
+    FROM joined j
+    LEFT JOIN names n ON n.tin_value = j.tin_value
+    LEFT JOIN disc d2 ON d2.tin_value = j.tin_value
+    LEFT JOIN (SELECT DISTINCT tin_value, tin_type FROM rates) r ON r.tin_value = j.tin_value
+    GROUP BY j.tin_value
 """
 
 
@@ -93,9 +207,7 @@ class Store:
     # -- connections --------------------------------------------------------
 
     def connect(self) -> duckdb.DuckDBPyConnection:
-        """Plain connection. Views are persisted in the database and their
-        parquet glob re-resolves per query, so readers NEVER touch the catalog
-        (concurrent CREATE OR REPLACE VIEW = write-write conflict). Views are
+        """Plain connection. Readers never touch the catalog; views are
         (re)registered only at init and inside locked write paths."""
         return duckdb.connect(str(self.db_path))
 
@@ -114,11 +226,13 @@ class Store:
                 ref_groups_skipped BIGINT DEFAULT 0,
                 error VARCHAR,
                 preflight VARCHAR,
+                qa VARCHAR,
                 started_at TIMESTAMP,
                 finished_at TIMESTAMP
             );
             CREATE TABLE IF NOT EXISTS npi_directory (
                 npi VARCHAR PRIMARY KEY,
+                entity_type VARCHAR,
                 org_name VARCHAR,
                 taxonomy_code VARCHAR,
                 taxonomy_desc VARCHAR,
@@ -131,31 +245,51 @@ class Store:
                 source_file VARCHAR,
                 last_updated_on VARCHAR,
                 ref_id BIGINT,
-                npis VARCHAR[],
-                tins VARCHAR[]
+                tin_value VARCHAR,
+                tin_type VARCHAR,
+                npis VARCHAR[]
+            );
+            CREATE TABLE IF NOT EXISTS entity_map (
+                tin_value VARCHAR PRIMARY KEY,
+                entity_name VARCHAR
+            );
+            CREATE TABLE IF NOT EXISTS peer_sets (
+                name VARCHAR PRIMARY KEY,
+                definition VARCHAR,      -- JSON: mode, filters or tin list
+                created_at TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS mpfs (
+                code VARCHAR,
+                locality VARCHAR,
+                non_facility_rate DOUBLE,
+                source VARCHAR
             );
             """
         )
 
     def _register_views(self, con: duckdb.DuckDBPyConnection) -> None:
-        """(Re)point the rates/rates_dedup views. Callers must hold write_lock."""
+        """(Re)point the derived views. Callers must hold write_lock."""
         glob = str(self.rates_dir / "*.parquet")
         if any(self.rates_dir.glob("*.parquet")):
             con.execute(f"CREATE OR REPLACE VIEW rates AS SELECT * FROM read_parquet('{glob}')")
         else:
-            con.execute(
-                f"CREATE OR REPLACE VIEW rates AS SELECT * FROM (SELECT {_empty_row()}) WHERE FALSE"
+            cols = ", ".join(
+                f"CAST(NULL AS {t}) AS {f.name}"
+                for f, t in zip(RATES_SCHEMA, _duck_types())
             )
-        # rates_dedup reads the materialized table when one has been built
-        # (rebuild_dedup after each ingest); the GROUP BY view is the fallback
-        # so ad-hoc setups still work.
-        has_mat = con.execute(
-            "SELECT count(*) FROM information_schema.tables WHERE table_name = 'rates_dedup_tbl'"
-        ).fetchone()[0]
-        if has_mat:
-            con.execute("CREATE OR REPLACE VIEW rates_dedup AS SELECT * FROM rates_dedup_tbl")
-        else:
-            con.execute(f"CREATE OR REPLACE VIEW rates_dedup AS {DEDUP_QUERY}")
+            con.execute(f"CREATE OR REPLACE VIEW rates AS SELECT * FROM (SELECT {cols}) WHERE FALSE")
+        for view, tbl, q in (
+            ("rates_dedup", "rates_dedup_tbl", DEDUP_QUERY),
+            ("rates_by_tin", "rates_by_tin_tbl", BY_TIN_QUERY),
+            ("tin_directory", "tin_directory_tbl", TIN_DIRECTORY_QUERY),
+        ):
+            has = con.execute(
+                "SELECT count(*) FROM information_schema.tables WHERE table_name = ?", [tbl]
+            ).fetchone()[0]
+            con.execute(
+                f"CREATE OR REPLACE VIEW {view} AS SELECT * FROM {tbl}" if has
+                else f"CREATE OR REPLACE VIEW {view} AS {q}"
+            )
 
     # -- rates parts ---------------------------------------------------------
 
@@ -167,7 +301,7 @@ class Store:
         with self.write_lock:
             pq.write_table(table, path)
             with self.connect() as con:
-                self._register_views(con)  # first part swaps the empty view for the glob
+                self._register_views(con)
         return path
 
     def drop_rates_part(self, source_file: str) -> None:
@@ -177,12 +311,21 @@ class Store:
             with self.connect() as con:
                 self._register_views(con)
 
-    def rebuild_dedup(self) -> None:
-        """Materialize rates_dedup after ingest so page queries stay fast."""
+    def rebuild_rollups(self) -> None:
+        """Materialize the dedup/by-TIN/tin-directory rollups after ingest or
+        enrichment so page queries stay fast."""
         with self.write_lock, self.connect() as con:
             self._register_views(con)  # rates view must see current parts first
             con.execute(f"CREATE OR REPLACE TABLE rates_dedup_tbl AS {DEDUP_QUERY}")
+            con.execute(f"CREATE OR REPLACE TABLE rates_by_tin_tbl AS {BY_TIN_QUERY}")
+            con.execute(f"CREATE OR REPLACE TABLE tin_directory_tbl AS {TIN_DIRECTORY_QUERY}")
             con.execute("CREATE OR REPLACE VIEW rates_dedup AS SELECT * FROM rates_dedup_tbl")
+            con.execute("CREATE OR REPLACE VIEW rates_by_tin AS SELECT * FROM rates_by_tin_tbl")
+            con.execute("CREATE OR REPLACE VIEW tin_directory AS SELECT * FROM tin_directory_tbl")
+
+    # legacy name used by tests/older callers
+    def rebuild_dedup(self) -> None:
+        self.rebuild_rollups()
 
     # -- files table ---------------------------------------------------------
 
@@ -190,21 +333,17 @@ class Store:
         cols = {
             "payer", "file_type", "status", "schema_version", "last_updated_on",
             "size_bytes", "rows_emitted", "ref_groups_skipped", "error",
-            "preflight", "started_at", "finished_at",
+            "preflight", "qa", "started_at", "finished_at",
         }
         fields = {k: v for k, v in fields.items() if k in cols}
-        if "preflight" in fields and not isinstance(fields["preflight"], (str, type(None))):
-            fields["preflight"] = json.dumps(fields["preflight"])
+        for jcol in ("preflight", "qa"):
+            if jcol in fields and not isinstance(fields[jcol], (str, type(None))):
+                fields[jcol] = json.dumps(fields[jcol])
         with self.write_lock, self.connect() as con:
-            exists = con.execute(
-                "SELECT 1 FROM files WHERE filename = ?", [filename]
-            ).fetchone()
+            exists = con.execute("SELECT 1 FROM files WHERE filename = ?", [filename]).fetchone()
             if exists:
                 sets = ", ".join(f"{k} = ?" for k in fields)
-                con.execute(
-                    f"UPDATE files SET {sets} WHERE filename = ?",
-                    [*fields.values(), filename],
-                )
+                con.execute(f"UPDATE files SET {sets} WHERE filename = ?", [*fields.values(), filename])
             else:
                 keys = ["filename", *fields.keys()]
                 con.execute(
@@ -220,34 +359,37 @@ class Store:
             cols = [d[0] for d in con.description]
             return dict(zip(cols, rows[0]))
 
-    # -- provider refs -------------------------------------------------------
+    # -- provider refs ---------------------------------------------------------
 
     def save_provider_refs(
-        self, payer: str, source_file: str, last_updated_on: str | None, refs: dict[int, tuple[list[str], list[str]]]
+        self, payer: str, source_file: str, last_updated_on: str | None,
+        refs: dict[int, list[tuple[str | None, str | None, tuple[str, ...]]]],
     ) -> None:
         with self.write_lock, self.connect() as con:
             con.execute(
                 "DELETE FROM provider_refs WHERE payer = ? AND source_file = ?",
                 [payer, source_file],
             )
+            if not refs:
+                return
             con.executemany(
-                "INSERT INTO provider_refs VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO provider_refs VALUES (?, ?, ?, ?, ?, ?, ?)",
                 [
-                    [payer, source_file, last_updated_on, rid, npis, tins]
-                    for rid, (npis, tins) in refs.items()
+                    [payer, source_file, last_updated_on, rid, tin_value, tin_type, list(npis)]
+                    for rid, groups in refs.items()
+                    for tin_value, tin_type, npis in (groups or [(None, None, ())])
                 ],
             )
 
-    def load_provider_refs(self, payer: str) -> dict[int, tuple[frozenset[str], frozenset[str]]]:
-        """All standalone-reference-file entries for a payer, ref_id -> (npis, tins)."""
+    def load_provider_refs(self, payer: str) -> dict[int, list[tuple[str | None, str | None, tuple[str, ...]]]]:
         with self.connect() as con:
             rows = con.execute(
-                "SELECT ref_id, npis, tins FROM provider_refs WHERE payer = ?", [payer]
+                "SELECT ref_id, tin_value, tin_type, npis FROM provider_refs WHERE payer = ?",
+                [payer],
             ).fetchall()
-        out: dict[int, tuple[frozenset[str], frozenset[str]]] = {}
-        for rid, npis, tins in rows:
-            prev = out.get(rid, (frozenset(), frozenset()))
-            out[rid] = (prev[0] | frozenset(npis or []), prev[1] | frozenset(tins or []))
+        out: dict[int, list] = {}
+        for rid, tin_value, tin_type, npis in rows:
+            out.setdefault(rid, []).append((tin_value, tin_type, tuple(npis or ())))
         return out
 
     def has_provider_refs(self, payer: str, last_updated_on: str | None = None) -> bool:
@@ -259,7 +401,7 @@ class Store:
         with self.connect() as con:
             return con.execute(q + " LIMIT 1", params).fetchone() is not None
 
-    # -- npi directory --------------------------------------------------------
+    # -- npi directory -----------------------------------------------------------
 
     def unenriched_npis(self, limit: int = 500) -> list[str]:
         with self.connect() as con:
@@ -274,37 +416,89 @@ class Store:
         return [r[0] for r in rows]
 
     def save_npi(self, npi: str, org_name: str | None, taxonomy_code: str | None,
-                 taxonomy_desc: str | None, city: str | None, state: str | None) -> None:
+                 taxonomy_desc: str | None, city: str | None, state: str | None,
+                 entity_type: str | None = None) -> None:
         with self.write_lock, self.connect() as con:
             con.execute(
-                """
-                INSERT OR REPLACE INTO npi_directory VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                [npi, org_name, taxonomy_code, taxonomy_desc, city, state,
+                "INSERT OR REPLACE INTO npi_directory VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                [npi, entity_type, org_name, taxonomy_code, taxonomy_desc, city, state,
                  dt.datetime.now(dt.timezone.utc)],
             )
 
-    # -- reset ----------------------------------------------------------------
+    # -- entity map -----------------------------------------------------------
+
+    def set_entity_map(self, mapping: dict[str, str]) -> None:
+        """Replace the TIN -> entity-name table (from config/entity_map.yaml)."""
+        with self.write_lock, self.connect() as con:
+            con.execute("DELETE FROM entity_map")
+            if mapping:
+                con.executemany(
+                    "INSERT INTO entity_map VALUES (?, ?)",
+                    [[tin, name] for tin, name in mapping.items()],
+                )
+
+    def entity_map(self) -> dict[str, str]:
+        with self.connect() as con:
+            return dict(con.execute("SELECT tin_value, entity_name FROM entity_map").fetchall())
+
+    # -- peer sets ---------------------------------------------------------------
+
+    def save_peer_set(self, name: str, definition: dict) -> None:
+        with self.write_lock, self.connect() as con:
+            con.execute(
+                "INSERT OR REPLACE INTO peer_sets VALUES (?, ?, ?)",
+                [name, json.dumps(definition), dt.datetime.now(dt.timezone.utc)],
+            )
+
+    def peer_sets(self) -> dict[str, dict]:
+        with self.connect() as con:
+            return {
+                name: json.loads(defn)
+                for name, defn in con.execute("SELECT name, definition FROM peer_sets").fetchall()
+            }
+
+    def delete_peer_set(self, name: str) -> None:
+        with self.write_lock, self.connect() as con:
+            con.execute("DELETE FROM peer_sets WHERE name = ?", [name])
+
+    # -- MPFS ----------------------------------------------------------------------
+
+    def load_mpfs(self, rows: list[dict], source: str) -> int:
+        with self.write_lock, self.connect() as con:
+            con.execute("DELETE FROM mpfs")
+            if not rows:
+                return 0
+            con.executemany(
+                "INSERT INTO mpfs VALUES (?, ?, ?, ?)",
+                [[r["code"], r.get("locality", ""), float(r["non_facility_rate"]), source] for r in rows],
+            )
+        return len(rows)
+
+    def mpfs_loaded(self) -> str | None:
+        with self.connect() as con:
+            row = con.execute("SELECT any_value(source) FROM mpfs").fetchone()
+        return row[0] if row else None
+
+    # -- reset ------------------------------------------------------------------------
 
     def reset(self) -> None:
         with self.write_lock:
             for p in self.rates_dir.glob("*.parquet"):
                 p.unlink()
             with self.connect() as con:
-                con.execute("DELETE FROM files; DELETE FROM npi_directory; DELETE FROM provider_refs;")
-                con.execute("DROP TABLE IF EXISTS rates_dedup_tbl")
+                con.execute(
+                    "DELETE FROM files; DELETE FROM npi_directory; DELETE FROM provider_refs; "
+                    "DELETE FROM peer_sets; DELETE FROM mpfs;"
+                )
+                for tbl in ("rates_dedup_tbl", "rates_by_tin_tbl", "tin_directory_tbl"):
+                    con.execute(f"DROP TABLE IF EXISTS {tbl}")
                 self._register_views(con)
 
 
-def _empty_row() -> str:
-    """Column expressions producing an empty typed rates relation."""
-    casts = {
-        "payer": "VARCHAR", "source_file": "VARCHAR", "schema_version": "VARCHAR",
-        "last_updated_on": "VARCHAR", "npi": "VARCHAR", "tin": "VARCHAR",
-        "billing_code": "VARCHAR", "billing_code_type": "VARCHAR",
-        "billing_code_modifier": "VARCHAR[]", "negotiated_rate": "DOUBLE",
-        "negotiated_type": "VARCHAR", "is_dollar_rate": "BOOLEAN",
-        "billing_class": "VARCHAR", "service_code": "VARCHAR[]",
-        "expiration_date": "VARCHAR", "ingested_at": "VARCHAR",
+def _duck_types() -> list[str]:
+    """DuckDB column types matching RATES_SCHEMA order (for the empty view)."""
+    mapping = {
+        "string": "VARCHAR", "double": "DOUBLE", "bool": "BOOLEAN",
+        "list<item: string>": "VARCHAR[]",
     }
-    return ", ".join(f"CAST(NULL AS {t}) AS {c}" for c, t in casts.items())
+    return [mapping[str(f.type)] for f in RATES_SCHEMA]

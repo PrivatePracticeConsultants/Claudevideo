@@ -1,29 +1,50 @@
 """Streaming MRF parsers: in-network rate files and standalone provider-reference files.
 
 Same discipline as the sibling pipeline (single ijson event pass, constant
-memory, early abandonment of non-target billing codes) plus:
-- payer-agnostic: payer label comes from the file's reporting_entity_name
-- v1.0 files ingest best-effort with schema_version recorded per row
-- rate groups citing provider-reference ids that cannot be resolved (no
-  embedded table, no ingested companion file) are COUNTED and surfaced,
-  never silently dropped
+memory, early abandonment of non-target billing codes) plus the V4 grain rules:
+
+- **NPI↔TIN pairing is preserved per provider group** — each
+  `{npi: [...], tin: {type, value}}` group emits its own rows, so a TIN never
+  absorbs NPIs from a sibling group.
+- `tin.type == "npi"` means the "TIN" is really an NPI, not an employer tax id:
+  those rows are flagged `tin_is_really_npi` (§3.3/§7A.7), never merged into
+  entity rollups by default.
+- discipline resolves modifier-first (GP/GO/GN), code second, "unspecified"
+  for unmodified shared codes; `is_timed` from the static catalog.
+- per-file QA counters feed the data-quality report (§7A.3).
 """
 
 from __future__ import annotations
 
 import datetime as dt
 import logging
+import re
 from dataclasses import dataclass, field
 
 import ijson
 
+from .catalog import is_timed, resolve_discipline
 from .config import DOLLAR_TYPES, MrfxConfig
-from .sniff import open_stream
-from .store import Store
+from .sniff import open_stream  # noqa: F401  (re-exported for ingest)
 
 log = logging.getLogger(__name__)
 
 ACCEPTED_CODE_TYPES = {"CPT", "HCPCS"}
+
+# one provider group: (tin_value, tin_type, npis)
+PGroup = tuple[str | None, str | None, tuple[str, ...]]
+
+
+@dataclass
+class QaCounters:
+    billing_type_other: int = 0       # non-CPT/HCPCS billing_code_type items
+    multi_code_fields: int = 0        # multiple codes crammed into one billing_code
+    zero_rates: int = 0               # $0.00 / $0.01 placeholder prices
+    non_dollar_rows: int = 0          # percentage / per diem rows emitted
+    rows: int = 0
+
+    def to_dict(self) -> dict:
+        return dict(self.__dict__)
 
 
 @dataclass
@@ -35,20 +56,31 @@ class ParseResult:
     items_seen: int = 0
     items_matched: int = 0
     ref_groups_skipped: int = 0
-    embedded_refs: dict[int, tuple[frozenset[str], frozenset[str]]] = field(default_factory=dict)
+    embedded_refs: dict[int, list[PGroup]] = field(default_factory=dict)
+    qa: QaCounters = field(default_factory=QaCounters)
+
+    @property
+    def file_month(self) -> str:
+        if self.last_updated_on and re.match(r"\d{4}-\d{2}", self.last_updated_on):
+            return self.last_updated_on[:7]
+        return dt.date.today().strftime("%Y-%m")
 
 
-def _providers_from_groups(provider_groups: list[dict]) -> tuple[frozenset[str], frozenset[str]]:
-    npis: set[str] = set()
-    tins: set[str] = set()
-    for pg in provider_groups or []:
-        for npi in pg.get("npi", []) or []:
-            npis.add(str(npi))
-        tin = pg.get("tin") or {}
-        value = str(tin.get("value", "")).replace("-", "")
-        if value and tin.get("type") == "ein":
-            tins.add(value)
-    return frozenset(npis), frozenset(tins)
+def parse_provider_group(pg: dict) -> PGroup:
+    npis = tuple(str(n) for n in (pg.get("npi") or []))
+    tin = pg.get("tin") or {}
+    tin_type = (tin.get("type") or "").lower() or None
+    value = str(tin.get("value", "")).strip()
+    if tin_type == "ein":
+        value = value.replace("-", "")
+    return (value or None, tin_type, npis)
+
+
+def parse_groups(provider_groups: list[dict]) -> list[PGroup]:
+    return [parse_provider_group(pg) for pg in provider_groups or []]
+
+
+MULTI_CODE_RE = re.compile(r"[,\s;/]")
 
 
 class _Discarded:
@@ -65,8 +97,7 @@ _DISCARDED = _Discarded()
 class _DeferredGroup:
     billing_code: str
     billing_code_type: str
-    npis: frozenset[str]
-    tins: frozenset[str]
+    groups: list[PGroup]
     ref_ids: list[int]
     prices: list[dict]
 
@@ -78,7 +109,7 @@ class InNetworkParser:
         self,
         cfg: MrfxConfig,
         source_file: str,
-        external_refs: dict[int, tuple[frozenset[str], frozenset[str]]] | None = None,
+        external_refs: dict[int, list[PGroup]] | None = None,
     ):
         self.cfg = cfg
         self.code_set = cfg.code_set  # None = all codes
@@ -98,15 +129,15 @@ class InNetworkParser:
         for prefix, event, value in ijson.parse(stream, use_float=True):
             if builder is not None:
                 if building == "item" and not skipping and event == "string":
-                    if (
-                        prefix == "in_network.item.billing_code"
-                        and self.code_set is not None
-                        and value not in self.code_set
-                    ) or (
-                        prefix == "in_network.item.billing_code_type"
-                        and value not in ACCEPTED_CODE_TYPES
-                    ):
+                    if prefix == "in_network.item.billing_code":
+                        if self.code_set is not None and value not in self.code_set:
+                            skipping = True
+                            if MULTI_CODE_RE.search(value.strip()):
+                                r.qa.multi_code_fields += 1
+                    elif prefix == "in_network.item.billing_code_type" and value not in ACCEPTED_CODE_TYPES:
+                        r.qa.billing_type_other += 1
                         skipping = True
+                    if skipping:
                         builder = _DISCARDED
                 end_prefix = "in_network.item" if building == "item" else "provider_references.item"
                 if not skipping:
@@ -143,7 +174,7 @@ class InNetworkParser:
 
         self._refs_complete = True
         for dg in self._deferred:
-            self._emit_group(dg.billing_code, dg.billing_code_type, dg.npis, dg.tins, dg.ref_ids, dg.prices)
+            self._emit_group(dg.billing_code, dg.billing_code_type, dg.groups, dg.ref_ids, dg.prices)
         return r
 
     # -- refs -----------------------------------------------------------------
@@ -154,18 +185,18 @@ class InNetworkParser:
             return
         groups = entry.get("provider_groups")
         if groups is None and entry.get("location"):
-            # this app is file-driven: remote reference locations are not
-            # fetched; the user must drop the companion file in.
-            self.result.embedded_refs.setdefault(int(rid), (frozenset(), frozenset()))
+            # file-driven app: remote reference locations are not fetched; the
+            # user must drop the companion file in.
+            self.result.embedded_refs.setdefault(int(rid), [])
             return
-        self.result.embedded_refs[int(rid)] = _providers_from_groups(groups or [])
+        self.result.embedded_refs[int(rid)] = parse_groups(groups or [])
 
-    def _lookup_ref(self, rid: int) -> tuple[frozenset[str], frozenset[str]] | None:
+    def _lookup_ref(self, rid: int) -> list[PGroup] | None:
         got = self.result.embedded_refs.get(rid)
-        if got is not None and (got[0] or got[1]):
+        if got:
             return got
-        # embedded-but-empty means a location-style entry we don't fetch:
-        # fall through to a standalone reference file if one was ingested.
+        # embedded-but-empty (location-style) falls through to a standalone
+        # reference file if one was ingested for this payer.
         return self.external_refs.get(rid)
 
     # -- items ----------------------------------------------------------------
@@ -179,7 +210,7 @@ class InNetworkParser:
             return
         self.result.items_matched += 1
         for grp in item.get("negotiated_rates", []) or []:
-            npis, tins = _providers_from_groups(grp.get("provider_groups", []) or [])
+            groups = parse_groups(grp.get("provider_groups", []) or [])
             ref_ids = [int(x) for x in (grp.get("provider_references") or [])]
             prices = grp.get("negotiated_prices", []) or []
             if not prices:
@@ -188,56 +219,80 @@ class InNetworkParser:
                 rid not in self.result.embedded_refs and rid not in self.external_refs
                 for rid in ref_ids
             ):
-                self._deferred.append(_DeferredGroup(code, code_type, npis, tins, ref_ids, prices))
+                self._deferred.append(_DeferredGroup(code, code_type, groups, ref_ids, prices))
                 continue
-            self._emit_group(code, code_type, npis, tins, ref_ids, prices)
+            self._emit_group(code, code_type, groups, ref_ids, prices)
 
-    def _emit_group(self, code, code_type, npis, tins, ref_ids, prices) -> None:
-        npis = set(npis)
-        tins = set(tins)
+    def _emit_group(
+        self,
+        code: str,
+        code_type: str,
+        groups: list[PGroup],
+        ref_ids: list[int],
+        prices: list[dict],
+    ) -> None:
+        all_groups = list(groups)
         missing_ref = False
         for rid in ref_ids:
             got = self._lookup_ref(rid)
-            if got is None:
+            if got is None or got == []:
                 missing_ref = True
                 continue
-            npis |= got[0]
-            tins |= got[1]
-        if missing_ref and not npis:
+            all_groups.extend(got)
+        if missing_ref and not all_groups:
             self.result.ref_groups_skipped += 1
             return
-        if not npis:
-            return  # nothing attributable (empty group)
-        tin_val = next(iter(sorted(tins)), None)
+        if not all_groups:
+            return
+
+        r = self.result
         for price in prices:
             modifiers = [str(m) for m in (price.get("billing_code_modifier") or [])]
             ntype = str(price.get("negotiated_type", "") or "")
+            rate = float(price.get("negotiated_rate", 0.0))
+            is_dollar = ntype in DOLLAR_TYPES
+            if is_dollar and rate <= 0.01:
+                r.qa.zero_rates += 1
+            if not is_dollar:
+                r.qa.non_dollar_rows += 1
             row_base = {
-                "payer": self.result.payer,
+                "payer": r.payer,
                 "source_file": self.source_file,
-                "schema_version": self.result.schema_version,
-                "last_updated_on": self.result.last_updated_on,
-                "tin": tin_val,
+                "file_month": r.file_month,
+                "schema_version": r.schema_version,
+                "last_updated_on": r.last_updated_on,
                 "billing_code": code,
                 "billing_code_type": code_type,
+                "discipline": resolve_discipline(code, modifiers),
+                "is_timed": is_timed(code),
                 "billing_code_modifier": modifiers,
-                "negotiated_rate": float(price.get("negotiated_rate", 0.0)),
+                "negotiated_rate": rate,
                 "negotiated_type": ntype,
-                "is_dollar_rate": ntype in DOLLAR_TYPES,
+                "is_dollar_rate": is_dollar,
                 "billing_class": str(price.get("billing_class", "") or ""),
                 "service_code": [str(s) for s in (price.get("service_code") or [])],
                 "expiration_date": str(price.get("expiration_date", "") or ""),
                 "ingested_at": self._ingested_at,
             }
-            for npi in sorted(npis):
-                self.result.rows.append({**row_base, "npi": npi})
+            # rows are emitted per provider GROUP so the NPI↔TIN pairing holds
+            for tin_value, tin_type, npis in all_groups:
+                tin_flags = {
+                    "tin_value": tin_value,
+                    "tin_type": tin_type,
+                    "tin_is_really_npi": tin_type == "npi",
+                }
+                if not npis:
+                    continue
+                for npi in npis:
+                    r.rows.append({**row_base, **tin_flags, "npi": npi})
+                    r.qa.rows += 1
 
 
-def parse_provider_reference_file(cfg: MrfxConfig, stream) -> tuple[str, str | None, dict]:
-    """Standalone provider-reference file -> (payer, last_updated_on, {ref_id: (npis, tins)})."""
+def parse_provider_reference_file(cfg: MrfxConfig, stream) -> tuple[str, str | None, dict[int, list[PGroup]]]:
+    """Standalone provider-reference file -> (payer, last_updated_on, {ref_id: [PGroup]})."""
     payer = "Unknown payer"
     last_updated = None
-    refs: dict[int, tuple[list[str], list[str]]] = {}
+    refs: dict[int, list[PGroup]] = {}
     builder = None
     for prefix, event, value in ijson.parse(stream, use_float=True):
         if builder is not None:
@@ -246,8 +301,7 @@ def parse_provider_reference_file(cfg: MrfxConfig, stream) -> tuple[str, str | N
                 entry = builder.value
                 rid = entry.get("provider_group_id")
                 if rid is not None:
-                    npis, tins = _providers_from_groups(entry.get("provider_groups") or [])
-                    refs[int(rid)] = (sorted(npis), sorted(tins))
+                    refs[int(rid)] = parse_groups(entry.get("provider_groups") or [])
                 builder = None
             continue
         if event == "start_map" and prefix == "provider_references.item":

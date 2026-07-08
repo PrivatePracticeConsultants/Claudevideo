@@ -12,11 +12,45 @@ import shutil
 from pathlib import Path
 
 from .config import MrfxConfig
-from .parser import InNetworkParser, parse_provider_reference_file
+from .parser import InNetworkParser, ParseResult, parse_provider_reference_file
 from .sniff import Preflight, open_stream, preflight
 from .store import Store
 
 log = logging.getLogger(__name__)
+
+
+def qa_report(result: ParseResult) -> dict:
+    """Per-file data-quality summary (§7A.3). Every number shown to a client
+    should come from a file whose QA report has been eyeballed."""
+    rows = result.rows
+    qa = result.qa.to_dict()
+    dollar = [r["negotiated_rate"] for r in rows if r["is_dollar_rate"]]
+    outliers = 0
+    if dollar:
+        by_code: dict[str, list[float]] = {}
+        for r in rows:
+            if r["is_dollar_rate"]:
+                by_code.setdefault(r["billing_code"], []).append(r["negotiated_rate"])
+        medians = {c: sorted(v)[len(v) // 2] for c, v in by_code.items()}
+        outliers = sum(
+            1 for r in rows
+            if r["is_dollar_rate"] and medians[r["billing_code"]] > 0
+            and (r["negotiated_rate"] > 5 * medians[r["billing_code"]]
+                 or r["negotiated_rate"] < 0.2 * medians[r["billing_code"]])
+        )
+    distinct_facts = len({
+        (r["payer"], r["tin_value"], r["npi"], r["billing_code"],
+         tuple(r["billing_code_modifier"]), r["negotiated_rate"], r["billing_class"])
+        for r in rows
+    })
+    qa.update({
+        "outlier_rates": outliers,
+        "outlier_rule": ">5x or <0.2x of the code's within-file median",
+        "non_dollar_share": round(qa["non_dollar_rows"] / len(rows), 4) if rows else 0.0,
+        "duplicate_explosion_ratio": round(len(rows) / distinct_facts, 2) if distinct_facts else 1.0,
+        "tin_is_really_npi_rows": sum(1 for r in rows if r["tin_is_really_npi"]),
+    })
+    return qa
 
 
 def _now() -> dt.datetime:
@@ -97,7 +131,7 @@ def ingest_file(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight | None 
                     result = parser2.parse(stream)
         store.drop_rates_part(name)
         store.write_rates_part(name, result.rows)
-        store.rebuild_dedup()
+        store.rebuild_rollups()
         store.upsert_file(
             name,
             payer=result.payer,
@@ -106,6 +140,7 @@ def ingest_file(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight | None 
             status="done",
             rows_emitted=len(result.rows),
             ref_groups_skipped=result.ref_groups_skipped,
+            qa=qa_report(result),
             finished_at=_now(),
         )
         _finish_file(cfg, path, ok=True)

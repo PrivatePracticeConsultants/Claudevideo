@@ -7,45 +7,14 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel, Field
 
-# Default PT/rehab code set (same as the sibling BCBS-MO pipeline).
-DEFAULT_CPT_CODES = [
-    "97161", "97162", "97163", "97164",
-    "97110", "97112", "97113", "97116", "97124", "97140", "97150",
-    "97530", "97535", "97542", "97760",
-    "97010", "97012", "97014", "97032", "97035", "G0283",
-]
-
-# Static CPT -> short description map for the shipped PT set (dashboard).
-CPT_DESCRIPTIONS = {
-    "97161": "PT eval, low complexity",
-    "97162": "PT eval, moderate complexity",
-    "97163": "PT eval, high complexity",
-    "97164": "PT re-evaluation",
-    "97110": "Therapeutic exercises",
-    "97112": "Neuromuscular re-education",
-    "97113": "Aquatic therapy w/ exercises",
-    "97116": "Gait training",
-    "97124": "Massage therapy",
-    "97140": "Manual therapy",
-    "97150": "Group therapeutic procedures",
-    "97530": "Therapeutic activities",
-    "97535": "Self-care/home management training",
-    "97542": "Wheelchair management training",
-    "97760": "Orthotic management & training",
-    "97010": "Hot/cold packs",
-    "97012": "Mechanical traction",
-    "97014": "Electrical stimulation (unattended)",
-    "97032": "Electrical stimulation (manual)",
-    "97035": "Ultrasound therapy",
-    "G0283": "Electrical stimulation, non-wound",
-}
+from .catalog import DEFAULT_CODE_SET
 
 DOLLAR_TYPES = ("negotiated", "fee schedule", "derived")
 
 
 class CodesConfig(BaseModel):
     all_codes: bool = False
-    cpt_codes: list[str] = Field(default_factory=lambda: list(DEFAULT_CPT_CODES))
+    cpt_codes: list[str] = Field(default_factory=lambda: list(DEFAULT_CODE_SET))
 
 
 class EnrichmentConfig(BaseModel):
@@ -53,8 +22,20 @@ class EnrichmentConfig(BaseModel):
     bulk_csv_path: Path | None = None
 
 
+class ReportBranding(BaseModel):
+    name: str = "MRF Explorer"
+    logo_path: Path | None = None
+
+
 class MrfxConfig(BaseModel):
     codes: CodesConfig = Field(default_factory=CodesConfig)
+    # optional targeting: NPIs from NPPES discovery, TINs from remits/contracts
+    target_npis: list[str] = Field(default_factory=list)
+    target_tins: list[str] = Field(default_factory=list)
+    entity_map_path: Path = Path("config/entity_map.yaml")
+    default_grain: str = "tin"  # entity | tin | npi ("entity" auto-applies when a map exists)
+    mpfs_path: Path | None = None  # optional CMS MPFS extract (code, locality, non_facility_rate)
+    report_branding: ReportBranding = Field(default_factory=ReportBranding)
     payer_name_map: dict[str, str] = Field(default_factory=dict)
     inbox_dir: Path = Path("data/inbox")
     processed_dir: Path = Path("data/processed")
@@ -90,6 +71,12 @@ class MrfxConfig(BaseModel):
 def load_mrfx_config(path: str | Path = "config/mrfx.yaml") -> MrfxConfig:
     p = Path(path)
     if not p.exists():
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "config file %s not found — running with built-in defaults "
+            "(store: data/mrfx_store, inbox: data/inbox)", p
+        )
         return MrfxConfig()
     raw = yaml.safe_load(p.read_text()) or {}
     return MrfxConfig.model_validate(raw)

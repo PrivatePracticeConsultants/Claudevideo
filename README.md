@@ -4,8 +4,8 @@ Two sibling tools in one repo:
 
 1. **[MRF Explorer](#mrf-explorer--drop-in-payer-rate-dashboard)** (`mrfx`) — drop
    *any* payer's Transparency-in-Coverage in-network files into a folder and get a
-   local analytics dashboard: org × CPT × modifier rate table, filters, sorting,
-   CSV export. Payer-agnostic and file-driven.
+   local analytics dashboard at the (code × TIN) grain: filters, sorting, CSV+methodology
+   export, market benchmarks, opportunity model, and client-ready pitch reports.
 2. **[BCBS-MO extraction pipeline](#bcbs-mo-mrf--bcbs-missouri-ptrehab-negotiated-rate-extraction)**
    (`run.py`) — targeted crawler/extractor for the two Missouri BCBS licensees:
    discovers their MRFs, filters to a target NPI set, writes Parquet.
@@ -23,7 +23,8 @@ Two sibling tools in one repo:
                                                                     │ preflight → parse
                                                                     ▼
   ┌───────────────────────┐   ┌──────────────────────┐   ┌──────────────────────┐
-  │ CSV export (=view)    │ ← │ dashboard :8377      │ ← │ DuckDB/Parquet store │
+  │ pitch report / CSV    │ ← │ dashboard :8377      │ ← │ DuckDB/Parquet store │
+  │ (+ methodology)       │   │ explore → benchmark  │   │ (code × TIN spine)   │
   └───────────────────────┘   └──────────────────────┘   └──────────────────────┘
 ```
 
@@ -32,69 +33,124 @@ Two sibling tools in one repo:
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt && .venv/bin/pip install -e .
 .venv/bin/mrfx serve            # dashboard at http://localhost:8377 + inbox watcher
-# in another shell (or just drag files onto the dashboard's Files view):
 cp ~/Downloads/2026-07-01_someplan_in-network.json.gz data/inbox/
 ```
 
-Other commands: `mrfx preflight <path>` (inspect before a long parse),
-`mrfx ingest [path] [--force]`, `mrfx status`, `mrfx export out.csv [--cpt 97110 --payer ...]`,
-`mrfx reset --confirm`. Config in `config/mrfx.yaml` (code set, payer name
-normalization, `move_processed`, enrichment mode, `confirm_over_gb`, port).
+Other commands: `mrfx preflight <path>`, `mrfx ingest [path] [--force]`, `mrfx status`,
+`mrfx export out.csv [--cpt 97110 --payer ... --grain tin]` (writes a
+`*_methodology.txt` sidecar), `mrfx reset --confirm`. Config in `config/mrfx.yaml`.
+
+## The grain: (billing_code × TIN), NPI for drill-down
+
+TIN is the entity/practice grain that matters for M&A and negotiation — a practice
+bills one TIN across many rendering NPIs, and payers contract at the TIN level.
+NPPES does not expose tax IDs, so the MRF itself links NPI→TIN: the parser
+preserves each provider group's NPI↔TIN pairing, `rates_by_tin` aggregates on
+TIN, and the dashboard drills down to the NPIs underneath. Caveats handled:
+
+- `tin.type == "npi"` means the published "TIN" is really an NPI — those rows are
+  flagged `tin_is_really_npi` with a filter to hide them from entity rollups.
+- SSN-pattern 9-digit TINs are masked (`MASKED-SSN`) in the UI and every export.
+- A TIN showing multiple distinct rates for the same (code, modifier-set, class,
+  POS, month) tuple is flagged (`rate_variants > 1`) — the shown rate is the
+  median of the variants, never a silent pick.
+- TIN display names roll up from the NPPES org names of the TIN's Type-2 NPIs;
+  TINs with only individual NPIs are labeled `individual-billed`.
+- `config/entity_map.yaml` groups multiple TINs into one named entity (post-roll-up
+  legacy TINs, pro/facility splits). Editable from the API/UI; constituent TINs
+  are always listed in the entity detail.
+
+## PT / OT / SLP code set & modifiers
+
+The default code set ships all three disciplines (evals, treatment, modalities,
+swallowing, AAC — see `mrfx/catalog.py`), each tagged with a short description,
+its discipline(s), and **timed vs untimed** (most treatment codes are 15-minute
+units). Shared codes (97110 appears for PT and OT alike) are attributed by the
+**therapy discipline modifier** — GP (PT) / GO (OT) / GN (SLP) — never guessed:
+an unmodified shared code is bucketed as *discipline unspecified*, a visible
+filter value. Assistant modifiers **CQ/CO** (85% payment) are never collapsed
+into base rates; KX and 59/XE/XS/XP/XU are preserved and filterable
+(`mod_has=GP&mod_not=CQ` = clean PT base rate).
+
+## Analytical safeguards (§7A)
+
+- **Per-visit disclaimer** pinned in the UI: a negotiated rate is per code, not
+  per visit (timed units, MPPR, CQ/CO reductions, sequestration, cost-share).
+- **Per-file QA report** after every ingest, shown in the Files view: `$0`/`$0.01`
+  placeholders, outliers (>5x / <0.2x the code's within-file median), non-dollar
+  share, non-CPT/HCPCS types, multi-code fields, duplicate-explosion ratio.
+- **Outlier hiding is opt-in** and labeled with its rule — rows are never dropped
+  silently.
+- **Point-in-time**: every row carries `file_month`; months accumulate rather than
+  overwrite; a month picker pins figures to a publication, and the code view
+  shows median-by-month trend.
+- **Provenance**: every export row carries payer, source_files, file_month,
+  last_updated_on, schema_version; every export has a methodology sidecar
+  (`.zip` from the dashboard, `*_methodology.txt` from the CLI) recording
+  filters, grain, dedup rule, outlier setting, code set, and app version.
+- **Validation cross-check** (Files view): paste a TIN/NPI + code + a rate you
+  know from a remit and see the extracted values beside it.
+
+## Benchmarking & pitch reports (§7B)
+
+The **Benchmark** tab answers "where does this practice sit vs its market":
+
+- subject (mapped entity or TIN) + market definition (payers, state/city from the
+  NPPES locations of each TIN's NPIs, discipline, class, POS, **required as-of
+  month**) → per-code subject rate vs market p10–p90, percentile position strip,
+  and the dollar gap to a target percentile (median default, p75 selectable).
+- **Peer sets**: auto (all entities matching the market) or curated (named, saved
+  TIN lists — "the consolidator clinics near the subject"); reports state which.
+- **Opportunity model**: `(target rate − subject rate) × annual units`, using
+  owner-supplied volumes only (paste `code, units` lines) — never invented —
+  with a conservative band (p40) beside the target figure.
+- **% of Medicare**: load a CMS MPFS extract (`code, locality, non_facility_rate`
+  CSV) and every benchmark gains subject/market %-of-Medicare columns. Optional;
+  never estimated.
+- **Pitch report**: print-ready HTML per subject with the percentile table,
+  strips, opportunity band, peer-set definition and a mandatory methodology
+  footer (files/months, filters, dedup rule, caveats). It refuses to render
+  without a pinned as-of month.
+
+**Honesty caveats baked into UI and reports:** benchmarks compute over
+dollar-rate, base-modifier rows by default (deviations are labeled toggles);
+**ghost rates** are real (a published rate ≠ the peer bills that code — hence
+discipline-scoped code sets and subject-supplied volumes); **a published rate is
+not proof a peer collects it** (contract vintages, lesser-of clauses) — market
+positioning is directional. MRF data is public data published for exactly this
+kind of third-party analysis; reports go to the subject practice about its own
+position, not to coordinate rates between competitors (not legal advice).
 
 ## How to get MRF files
 
-Use the dashboard's **Sources** tab: pick a state → it shows that state's BCBS
-licensee(s) (all of them in multi-Blue states — CA/ID/KS/MO/NY/PA/VA/WA) plus
-the national payers (UnitedHealthcare, Aetna, Cigna, Centene, Humana, Kaiser),
+Use the dashboard's **Sources** tab: pick a state → its BCBS licensee(s) (all of
+them in multi-Blue states — CA/ID/KS/MO/NY/PA/VA/WA) plus the national payers,
 each with its MRF entry point. Elevance/Anthem states share one national master
-index — the tab says so instead of implying per-state downloads. Download the
-in-network file(s) you care about and drop them in `data/inbox/`.
+index — the tab says so. **Honesty contract**: `verified: true` entries were
+confirmed live; `verified: false` render with an "unverified — confirm link"
+badge and are never displayed as authoritative; confirming a URL persists it to
+`config/registry_overrides.yaml` and flips the badge locally.
 
-**The registry's honesty contract** (`config/payer_registry.yaml`): entries with
-`verified: true` were confirmed pointing at a live MRF page; `verified: false`
-entries render with an "unverified — confirm link" badge and a one-click search;
-they are never displayed as authoritative. When you confirm a URL, paste it into
-the card — it persists to `config/registry_overrides.yaml` and flips the badge
-to "verified (locally)".
+## Companion provider-reference files
 
-## Companion provider-reference files (read before dropping files in)
-
-Many payers don't embed provider groups in the in-network file. Instead, rate
-groups cite integer `provider_references` ids that resolve against a reference
-table — either embedded at the top of the same file, or shipped as a **separate
-provider-reference file**. If you ingest an in-network file without its
-companion, every rate group whose ids can't be resolved is **counted and
-surfaced** ("N rate groups skipped — missing provider reference file") in the
-Files view and CLI — never silently dropped. Drop the companion in afterwards
-and mrfx re-ingests the affected files automatically.
-
-`mrfx preflight <file>` tells you *before* a multi-hour parse: file type
-(rate / reference / TOC / unknown), payer, schema version, `last_updated_on`,
-size + parse-time estimate, whether it uses provider references, and whether a
-matching companion (same payer, same month) is already present. Verdicts:
-`READY` / `NEEDS COMPANION` / `NOT A RATE FILE` / `UNREADABLE`. TOC/index files
-are never parsed for rates — preflight points you to the in-network URLs they
-list.
+Many payers publish rate groups that cite integer `provider_references` resolved
+against a reference table — embedded in the same file or shipped separately. If
+the companion is missing, affected groups are **counted and surfaced** ("N rate
+groups skipped — missing provider reference file"), never silently dropped;
+dropping the companion in later re-ingests the affected files automatically.
+`mrfx preflight <file>` reports type / payer / schema / month / size / parse
+estimate and the companion verdict (`READY` / `NEEDS COMPANION` /
+`NOT A RATE FILE` / `UNREADABLE`) from the header alone.
 
 ## Volume expectations
 
-- In-network files are commonly **1–100+ GB uncompressed** (UHC Choice Plus
-  ~86 GB; some Cigna files ~1 TB). mrfx streams with constant memory, but parse
-  time is roughly proportional to size (~tens of MB/s) — preflight prints an
-  estimate, and files above `confirm_over_gb` wait for explicit confirmation.
-- With the default PT code set, even huge files usually yield modest row counts
-  (thousands–millions). `codes.all_codes: true` ingests **every** billing code —
-  expect orders of magnitude more rows and disk.
-- Browser uploads are capped at 1 GB; bigger files go straight into `data/inbox/`.
-- NPI → org-name enrichment runs in the background via the NPPES API (names fill
-  in as they resolve), or point `enrichment: bulk` at a local NPPES
-  Data Dissemination CSV for offline enrichment, or `off`.
-
-Non-dollar rows (`negotiated_type` = percentage / per diem) are tagged
-`is_dollar_rate = false` and excluded from rate stats by default — the
-"dollar rates only" toggle includes them, clearly labeled. Modifiers survive
-end-to-end into the CSV export. Exports mirror the active filter state exactly
-(same SQL), UTF-8 BOM for Excel, arrays `;`-joined.
+In-network files run 1–100+ GB uncompressed (some ~1 TB). mrfx streams with
+constant memory; parse time ≈ tens of MB/s (preflight estimates it), and files
+above `confirm_over_gb` wait for confirmation. The default code set keeps row
+counts modest; `codes.all_codes: true` ingests everything — expect orders of
+magnitude more. Browser uploads cap at 1 GB; bigger files go straight into
+`data/inbox/`. NPI enrichment runs in the background via NPPES (or a local bulk
+CSV, or off).
 
 ---
 

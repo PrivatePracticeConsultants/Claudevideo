@@ -62,6 +62,7 @@ def enrich_via_api(cfg: MrfxConfig, store: Store, stop: threading.Event | None =
                 store.save_npi(
                     npi, name, tax.get("code"), tax.get("desc"),
                     addr.get("city"), addr.get("state"),
+                    entity_type=r.get("enumeration_type"),
                 )
                 done += 1
                 time.sleep(0.15)  # politeness
@@ -79,6 +80,7 @@ _BULK_COLS = {
     "city": "Provider Business Practice Location Address City Name",
     "state": "Provider Business Practice Location Address State Name",
     "tax1": "Healthcare Provider Taxonomy Code_1",
+    "entity": "Entity Type Code",
 }
 
 
@@ -108,9 +110,11 @@ def enrich_via_bulk(cfg: MrfxConfig, store: Store) -> int:
             name = row.get(_BULK_COLS["org"]) or " ".join(
                 p for p in (row.get(_BULK_COLS["first"]), row.get(_BULK_COLS["last"])) if p
             ) or None
+            entity = {"1": "NPI-1", "2": "NPI-2"}.get(str(row.get(_BULK_COLS["entity"], "")).strip())
             store.save_npi(
                 npi, name, row.get(_BULK_COLS["tax1"]) or None, None,
                 row.get(_BULK_COLS["city"]) or None, row.get(_BULK_COLS["state"]) or None,
+                entity_type=entity,
             )
             done += 1
             wanted.discard(npi)
