@@ -574,6 +574,22 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     def urls_list():
         return {"urls": store.list_urls(), "counts": store.url_queue_counts()}
 
+    @app.get("/api/known-sources")
+    def known_sources():
+        from .known_sources import load_known_sources
+
+        return {"sources": load_known_sources(cfg.known_sources_path)}
+
+    @app.post("/api/urls/known")
+    def urls_add_known():
+        from .fetch import add_urls
+        from .known_sources import load_known_sources
+
+        sources = load_known_sources(cfg.known_sources_path)
+        counts = add_urls(store, [s["url"] for s in sources if s["queueable"]])
+        counts["portals"] = sum(1 for s in sources if not s["queueable"])
+        return counts
+
     @app.post("/api/urls/{url_id}/retry")
     def urls_retry(url_id: int):
         if not store.set_url_status_by_id(url_id, "queued"):

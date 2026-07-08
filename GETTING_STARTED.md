@@ -140,11 +140,21 @@ downloads to the exact same bytes as a file you already loaded, it's skipped
 with a note saying which link it duplicates — your database stays clean even
 if you paste every state's index.
 
+**Don't want to hunt for links at all?** The app ships with a catalog of
+payer sources it has already been tested against (17 auto-queueable indexes —
+Highmark's 15 hosted Blue plans, BCBS Mississippi, Centene/Ambetter — plus
+notes for the big portals like UHC, Cigna, and Anthem). Click **"Show tested
+sources"** on the Files tab to browse it, or **"Queue tested payer indexes"**
+to load them all — monthly-dated links are refreshed to the current month
+automatically. The catalog lives in `config/known_sources.yaml` with each
+source's verification date and test results.
+
 Prefer the terminal? The same thing works there:
 
 ```
 mrfx add https://tcr.bcbsms.com/Table_of_Contents/Local_TOC.json
 mrfx add --file my_links.txt        # a text file of links, one per line
+mrfx add --known                    # queue all tested payer indexes
 ```
 
 If the dashboard is running, `mrfx add` hands the links to it; if not, it
@@ -206,6 +216,7 @@ prompt). They're an alternative to the dashboard buttons.
 | `mrfx serve` | Start the dashboard + folder watcher (Step 4) |
 | `mrfx add <url> [<url>…]` | Paste links from the terminal: rate files, TOC/index links, or listing pages (Step 5) |
 | `mrfx add --file links.txt` | Queue a whole text file of links (one per line) |
+| `mrfx add --known` | Queue every tested payer index from `config/known_sources.yaml` |
 | `mrfx add --retry-failed` | Re-queue every link that previously failed |
 | `mrfx preflight <path>` | Inspect a file before ingesting |
 | `mrfx ingest [path]` | Ingest a file or the whole inbox (shows a progress bar) |

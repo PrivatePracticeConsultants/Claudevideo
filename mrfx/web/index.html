@@ -264,9 +264,17 @@
         automatically), or even a plain file-listing page. Downloads and
         processing run in the background, one file at a time.</p>
       <textarea id="url-input" rows="3" placeholder="https://tcr.bcbsms.com/Table_of_Contents/Local_TOC.json&#10;https://…_in-network-rates.json.gz"></textarea>
-      <div style="display:flex;gap:8px;align-items:center;margin-top:8px">
+      <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap">
         <button class="btn primary" id="url-add">Add links</button>
+        <button class="btn" id="url-known">Queue tested payer indexes</button>
+        <button class="btn" id="url-known-list" title="Show the list of payer sources this app has been tested against">Show tested sources</button>
         <span id="url-msg" class="muted"></span>
+      </div>
+      <div id="known-wrap" style="display:none;margin-top:10px" class="tablewrap">
+        <table>
+          <thead><tr><th>Payer source</th><th>Type</th><th>Verified</th><th>Notes</th></tr></thead>
+          <tbody id="known-body"></tbody>
+        </table>
       </div>
       <div class="tablewrap" style="max-height:34vh;margin-top:10px;display:none" id="url-wrap">
         <table>

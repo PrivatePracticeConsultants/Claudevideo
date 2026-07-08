@@ -856,6 +856,41 @@ function initFilesView() {
     loadUrlQueue();
   });
 
+  $("#url-known").addEventListener("click", async () => {
+    const msg = $("#url-msg");
+    if (!confirm(
+      "Queue every payer index this app has been tested against?\n\n" +
+      "That's a lot of data: each index lists hundreds of rate files, and " +
+      "they download and process one at a time in the background (you can " +
+      "skip rows any time). Files identical to ones already loaded are " +
+      "skipped automatically."
+    )) return;
+    msg.textContent = "queueing tested sources…";
+    try {
+      const r = await postJson("/api/urls/known", {});
+      msg.textContent = `${r.added} tested indexes queued` +
+        (r.skipped ? `, ${r.skipped} already known` : "") +
+        (r.portals ? ` (${r.portals} portal-only sources need a browser — see "Show tested sources")` : "");
+    } catch (e) {
+      msg.textContent = "could not queue: " + e.message;
+    }
+    loadUrlQueue();
+  });
+
+  $("#url-known-list").addEventListener("click", async () => {
+    const wrap = $("#known-wrap");
+    if (wrap.style.display !== "none") { wrap.style.display = "none"; return; }
+    const d = await api("/api/known-sources");
+    $("#known-body").innerHTML = (d.sources || []).map((s) => `
+      <tr>
+        <td><a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.name)}</a></td>
+        <td>${s.queueable ? "auto-queueable" : "portal (open in browser)"}</td>
+        <td>${esc(s.verified || "")}</td>
+        <td style="max-width:480px">${esc(s.notes || "")}</td>
+      </tr>`).join("");
+    wrap.style.display = "";
+  });
+
   $("#btn-scan").addEventListener("click", async () => {
     await fetch("/api/files/scan", { method: "POST" });
     setTimeout(loadFiles, 800);

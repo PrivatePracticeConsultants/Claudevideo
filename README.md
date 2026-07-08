@@ -181,6 +181,23 @@ confirmed live; `verified: false` render with an "unverified — confirm link"
 badge and are never displayed as authoritative; confirming a URL persists it to
 `config/registry_overrides.yaml` and flips the badge locally.
 
+## Known sources: the app remembers where it's been
+
+`config/known_sources.yaml` is a shipped catalog of every payer entry point
+this app has been live-tested against — each entry carries its verification
+date and what happened (files listed, rows ingested, quirks). 17 entries are
+**auto-queueable** (Highmark's 15 hosted Blue plans incl. FL/AZ/ID/MN/LA/NE,
+BCBS Mississippi's stable TOC, Centene/Ambetter's all-states page); the rest
+are portals that need a browser click (UHC, Cigna, Aetna, Humana, HCSC,
+CareFirst, Blue KC) with instructions, plus Anthem/Elevance's national master
+index (10.5 GB — raise `confirm_over_gb` to use it). Monthly-dated URLs carry
+a `{FIRST_OF_MONTH}` placeholder resolved at queue time so the catalog never
+goes stale. Load them via `mrfx add --known`, the dashboard's **"Queue tested
+payer indexes"** button, or browse with **"Show tested sources"**
+(`GET /api/known-sources`, `POST /api/urls/known`). Your own history is
+separate and automatic: everything you queue/ingest persists in the store's
+`url_queue` and `files` tables across restarts.
+
 ## Paste links, get data (URL-drop ingestion)
 
 You don't have to download files by hand. Paste links into the **Files** tab's

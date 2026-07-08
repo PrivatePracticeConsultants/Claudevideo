@@ -90,8 +90,21 @@ def cmd_add(cfg: MrfxConfig, args) -> int:
     if args.file:
         urls += [ln.strip() for ln in Path(args.file).read_text().splitlines() if ln.strip()]
     urls = [u for u in urls if not u.startswith("#")]
+    if args.known:
+        from .known_sources import load_known_sources
+
+        known = load_known_sources(cfg.known_sources_path)
+        queueable = [s for s in known if s["queueable"]]
+        for s in queueable:
+            print(f"  + {s['name']}")
+        urls += [s["url"] for s in queueable]
+        skipped_portals = len(known) - len(queueable)
+        if skipped_portals:
+            print(f"({skipped_portals} portal-only sources need a browser — "
+                  "see the Sources list or config/known_sources.yaml)")
     if not urls and not args.retry_failed:
-        print("nothing to add — pass URLs as arguments or --file urls.txt")
+        print("nothing to add — pass URLs as arguments, --file urls.txt, or "
+              "--known for the tested payer indexes")
         return 1
 
     # If a server is already running it owns the store (and has a worker);
@@ -307,6 +320,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("urls", nargs="*", help="one or more http(s) URLs")
     p.add_argument("--file", help="text file with one URL per line (# comments ok)")
     p.add_argument("--retry-failed", action="store_true", help="also re-queue previously failed URLs")
+    p.add_argument("--known", action="store_true",
+                   help="queue every tested payer index from config/known_sources.yaml")
     p = sub.add_parser("preflight", help="inspect a file before committing to a long parse")
     p.add_argument("path")
     p = sub.add_parser("ingest", help="one-shot ingest of a file or directory (default: inbox)")

@@ -55,6 +55,7 @@ class MrfxConfig(BaseModel):
     download_retries: int = 4
     registry_path: Path = Path("config/payer_registry.yaml")
     registry_overrides_path: Path = Path("config/registry_overrides.yaml")
+    known_sources_path: Path = Path("config/known_sources.yaml")
     user_agent: str = "mrf-explorer/0.1 (local analysis tool)"
 
     @property
