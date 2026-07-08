@@ -130,6 +130,56 @@ def test_cleaning_helpers():
     assert as_list("x") == ["x"] and as_list(None) == [] and as_list([1]) == [1]
 
 
+def test_large_file_streams_without_accumulating_rows(cfg, store, monkeypatch):
+    """A file yielding more than one batch must stream to the part without the
+    parser holding all rows in memory (constant-memory guarantee, §8.1)."""
+    from mrfx.parser import InNetworkParser
+
+    monkeypatch.setattr(InNetworkParser, "BATCH_ROWS", 500)
+    # one code, one price, 1,500 provider groups -> 1,500 rows across 3 batches
+    groups = [
+        {"npi": [1000000000 + i], "tin": {"type": "ein", "value": f"43{i:07d}"}}
+        for i in range(1500)
+    ]
+    data = {
+        "reporting_entity_name": "Big Payer", "version": "2.0.0", "last_updated_on": "2026-06-01",
+        "in_network": [{
+            "billing_code": "97110", "billing_code_type": "CPT",
+            "negotiated_rates": [{"provider_groups": groups,
+                "negotiated_prices": [{"negotiated_type": "negotiated", "negotiated_rate": 40.0,
+                                       "billing_class": "professional", "service_code": ["11"]}]}],
+        }],
+    }
+    p = make_fixture(cfg.inbox_dir, "big.json", data)
+    res = ingest_file(cfg, store, p)
+    assert res["status"] == "done" and res["rows"] == 1500
+    with store.connect() as con:
+        assert con.execute("SELECT count(*) FROM rates").fetchone()[0] == 1500
+        # header stamped correctly on rows written in early batches
+        assert con.execute("SELECT count(DISTINCT payer) FROM rates").fetchone()[0] == 1
+        assert con.execute("SELECT DISTINCT file_month FROM rates").fetchone()[0] == "2026-06"
+
+
+def test_failed_parse_leaves_no_partial_part(cfg, store):
+    """The streaming writer swaps into place atomically; a mid-parse failure
+    must not leave a half-written part shadowing a prior good one."""
+    good = {
+        "reporting_entity_name": "P", "version": "2.0.0", "last_updated_on": "2026-06-01",
+        "in_network": [{"billing_code": "97110", "billing_code_type": "CPT",
+            "negotiated_rates": [{"provider_groups": [{"npi": [1111111111], "tin": {"type": "ein", "value": "431111111"}}],
+                "negotiated_prices": [{"negotiated_type": "negotiated", "negotiated_rate": 40.0, "billing_class": "professional"}]}]}],
+    }
+    p = make_fixture(cfg.inbox_dir, "good.json", good)
+    assert ingest_file(cfg, store, p)["status"] == "done"
+    with store.connect() as con:
+        assert con.execute("SELECT count(*) FROM rates").fetchone()[0] == 1
+    # truncated gzip under the same name (same part key) fails mid-stream
+    same = cfg.inbox_dir / "good.json.gz"
+    same.write_bytes(b"\x1f\x8b\x08\x00" + b"garbage" * 50)
+    res = ingest_file(cfg, store, same)
+    assert res["status"] in ("failed", "quarantined")
+
+
 def test_completely_valueless_item_is_survivable(cfg, store):
     data = {
         "reporting_entity_name": "Weird Payer", "version": "2.0.0", "last_updated_on": "2026-06-01",

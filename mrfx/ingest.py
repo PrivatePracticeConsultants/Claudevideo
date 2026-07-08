@@ -14,41 +14,50 @@ from pathlib import Path
 from .config import MrfxConfig
 from .parser import InNetworkParser, ParseResult, parse_provider_reference_file
 from .sniff import Preflight, open_stream, preflight
-from .store import Store
+from .store import Store, file_key
 
 log = logging.getLogger(__name__)
 
 
-def qa_report(result: ParseResult) -> dict:
-    """Per-file data-quality summary (§7A.3). Every number shown to a client
-    should come from a file whose QA report has been eyeballed."""
-    rows = result.rows
+def qa_report(store: Store, result: ParseResult, source_file: str) -> dict:
+    """Per-file data-quality summary (§7A.3). The incremental counters come from
+    the parser; the aggregate metrics (outliers, duplicate ratio, TIN=NPI count)
+    are computed in DuckDB over the written part so this scales to files with
+    millions of rows without holding them in Python memory."""
     qa = result.qa.to_dict()
-    dollar = [r["negotiated_rate"] for r in rows if r["is_dollar_rate"]]
-    outliers = 0
-    if dollar:
-        by_code: dict[str, list[float]] = {}
-        for r in rows:
-            if r["is_dollar_rate"]:
-                by_code.setdefault(r["billing_code"], []).append(r["negotiated_rate"])
-        medians = {c: sorted(v)[len(v) // 2] for c, v in by_code.items()}
-        outliers = sum(
-            1 for r in rows
-            if r["is_dollar_rate"] and medians[r["billing_code"]] > 0
-            and (r["negotiated_rate"] > 5 * medians[r["billing_code"]]
-                 or r["negotiated_rate"] < 0.2 * medians[r["billing_code"]])
-        )
-    distinct_facts = len({
-        (r["payer"], r["tin_value"], r["npi"], r["billing_code"],
-         tuple(r["billing_code_modifier"]), r["negotiated_rate"], r["billing_class"])
-        for r in rows
-    })
+    total = qa["rows"]
+    part = store.rates_dir / f"{file_key(source_file)}.parquet"
+    outliers = tin_npi = distinct_facts = 0
+    if total and part.exists():
+        with store.connect() as con:
+            p = str(part)
+            outliers = con.execute(
+                f"""
+                WITH r AS (SELECT * FROM read_parquet('{p}') WHERE is_dollar_rate),
+                med AS (SELECT billing_code, median(negotiated_rate) m FROM r GROUP BY billing_code)
+                SELECT count(*) FROM r JOIN med USING (billing_code)
+                WHERE m > 0 AND (negotiated_rate > 5 * m OR negotiated_rate < 0.2 * m)
+                """
+            ).fetchone()[0]
+            tin_npi = con.execute(
+                f"SELECT count(*) FROM read_parquet('{p}') WHERE tin_is_really_npi"
+            ).fetchone()[0]
+            distinct_facts = con.execute(
+                f"""
+                SELECT count(*) FROM (
+                    SELECT DISTINCT payer, tin_value, npi, billing_code,
+                           array_to_string(billing_code_modifier, '|'),
+                           negotiated_rate, billing_class
+                    FROM read_parquet('{p}')
+                )
+                """
+            ).fetchone()[0]
     qa.update({
         "outlier_rates": outliers,
         "outlier_rule": ">5x or <0.2x of the code's within-file median",
-        "non_dollar_share": round(qa["non_dollar_rows"] / len(rows), 4) if rows else 0.0,
-        "duplicate_explosion_ratio": round(len(rows) / distinct_facts, 2) if distinct_facts else 1.0,
-        "tin_is_really_npi_rows": sum(1 for r in rows if r["tin_is_really_npi"]),
+        "non_dollar_share": round(qa["non_dollar_rows"] / total, 4) if total else 0.0,
+        "duplicate_explosion_ratio": round(total / distinct_facts, 2) if distinct_facts else 1.0,
+        "tin_is_really_npi_rows": tin_npi,
     })
     return qa
 
@@ -116,21 +125,22 @@ def ingest_file(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight | None 
             requeued = requeue_skipped(cfg, store, payer)
             return {"status": "done", "refs": len(refs), "requeued": requeued}
 
-        # in-network rate file
+        # in-network rate file — stream rows straight into the parquet part in
+        # batches (constant memory, §8.1). The parser is seeded with the header
+        # preflight already sniffed, so batched rows carry the right payer/month
+        # even though the parser flushes before EOF.
         external_refs = store.load_provider_refs(pf.payer) if pf.payer else {}
-        parser = InNetworkParser(cfg, source_file=name, external_refs=external_refs)
-        with open_stream(path) as stream:
-            result = parser.parse(stream)
-        if result.payer != pf.payer and result.payer != "Unknown payer":
-            # header window missed the entity name; reload refs under the real payer
-            if not external_refs:
-                parser2 = InNetworkParser(
-                    cfg, source_file=name, external_refs=store.load_provider_refs(result.payer)
-                )
-                with open_stream(path) as stream:
-                    result = parser2.parse(stream)
-        store.drop_rates_part(name)
-        store.write_rates_part(name, result.rows)
+        header_defaults = {
+            "payer": pf.payer, "schema_version": pf.schema_version,
+            "last_updated_on": pf.last_updated_on,
+        }
+        with store.rates_part_writer(name) as writer:
+            parser = InNetworkParser(
+                cfg, source_file=name, external_refs=external_refs,
+                sink=writer.write_batch, header_defaults=header_defaults,
+            )
+            with open_stream(path) as stream:
+                result = parser.parse(stream)
         store.rebuild_rollups()
         store.upsert_file(
             name,
@@ -138,9 +148,9 @@ def ingest_file(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight | None 
             schema_version=result.schema_version,
             last_updated_on=result.last_updated_on,
             status="done",
-            rows_emitted=len(result.rows),
+            rows_emitted=result.qa.rows,
             ref_groups_skipped=result.ref_groups_skipped,
-            qa=qa_report(result),
+            qa=qa_report(store, result, name),
             finished_at=_now(),
         )
         _finish_file(cfg, path, ok=True)
@@ -150,7 +160,7 @@ def ingest_file(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight | None 
             )
         return {
             "status": "done",
-            "rows": len(result.rows),
+            "rows": result.qa.rows,
             "ref_groups_skipped": result.ref_groups_skipped,
         }
 

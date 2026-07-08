@@ -130,9 +130,11 @@ BY_TIN_QUERY = """
            billing_class,
            coalesce(array_to_string(service_code, '|'), '')          AS service_code_set,
            file_month, is_dollar_rate,
-           median(DISTINCT negotiated_rate)                          AS negotiated_rate,
-           min(negotiated_rate)                                      AS rate_min,
-           max(negotiated_rate)                                      AS rate_max,
+           -- round the aggregate to 4 dp: kills float-median noise
+           -- (86.835000000001) while preserving any legitimate sub-cent median
+           round(median(DISTINCT negotiated_rate), 4)                AS negotiated_rate,
+           round(min(negotiated_rate), 4)                            AS rate_min,
+           round(max(negotiated_rate), 4)                            AS rate_max,
            count(DISTINCT negotiated_rate)                           AS rate_variants,
            count(DISTINCT npi)                                       AS npi_count,
            count(DISTINCT source_file)                               AS source_count,
@@ -198,6 +200,8 @@ class Store:
         self.dir = Path(store_dir)
         self.rates_dir = self.dir / "rates"
         self.rates_dir.mkdir(parents=True, exist_ok=True)
+        self._tmp_dir = self.dir / "duckdb_tmp"
+        self._tmp_dir.mkdir(parents=True, exist_ok=True)
         self.db_path = self.dir / "mrfx.duckdb"
         self.write_lock = threading.Lock()
         with self.write_lock, self.connect() as con:
@@ -208,8 +212,18 @@ class Store:
 
     def connect(self) -> duckdb.DuckDBPyConnection:
         """Plain connection. Readers never touch the catalog; views are
-        (re)registered only at init and inside locked write paths."""
-        return duckdb.connect(str(self.db_path))
+        (re)registered only at init and inside locked write paths.
+
+        Each connection is told to spill to a temp dir under the store so the
+        big rollup GROUP BYs over national files (millions of rows) never OOM —
+        DuckDB streams to disk under memory pressure instead."""
+        con = duckdb.connect(str(self.db_path))
+        try:
+            con.execute(f"SET temp_directory = '{self._tmp_dir}'")
+            con.execute("SET preserve_insertion_order = false")
+        except duckdb.Error:  # older duckdb without these knobs
+            pass
+        return con
 
     def _init_tables(self, con: duckdb.DuckDBPyConnection) -> None:
         con.execute(
@@ -309,6 +323,12 @@ class Store:
             with self.connect() as con:
                 self._register_views(con)
         return path
+
+    def rates_part_writer(self, source_file: str) -> "RatesPartWriter":
+        """Streaming writer: accept row batches and flush them to the part
+        incrementally, so a huge file never holds all its rows in memory.
+        Writes to a temp file, then atomically swaps it into place on close."""
+        return RatesPartWriter(self, source_file)
 
     def drop_rates_part(self, source_file: str) -> None:
         path = self.rates_dir / f"{file_key(source_file)}.parquet"
@@ -510,6 +530,50 @@ class Store:
                 for tbl in ("rates_dedup_tbl", "rates_by_tin_tbl", "tin_directory_tbl"):
                     con.execute(f"DROP TABLE IF EXISTS {tbl}")
                 self._register_views(con)
+
+
+class RatesPartWriter:
+    """Incremental parquet writer for one source file's rows. Use as a context
+    manager; call write_batch(rows) any number of times. Rows are appended to a
+    temp parquet, atomically renamed into the part path on a clean exit, and
+    discarded on error — so a failed parse never leaves a partial part behind."""
+
+    def __init__(self, store: "Store", source_file: str):
+        self.store = store
+        self.path = store.rates_dir / f"{file_key(source_file)}.parquet"
+        self.tmp = store.rates_dir / f".{file_key(source_file)}.tmp.parquet"
+        self._writer: pq.ParquetWriter | None = None
+        self.rows_written = 0
+
+    def __enter__(self) -> "RatesPartWriter":
+        self.tmp.unlink(missing_ok=True)
+        return self
+
+    def write_batch(self, rows: list[dict]) -> None:
+        if not rows:
+            return
+        table = pa.Table.from_pylist(rows, schema=RATES_SCHEMA)
+        if self._writer is None:
+            self._writer = pq.ParquetWriter(self.tmp, RATES_SCHEMA)
+        self._writer.write_table(table)
+        self.rows_written += len(rows)
+
+    def __exit__(self, exc_type, exc, tb):
+        if self._writer is not None:
+            self._writer.close()
+        if exc_type is not None:
+            self.tmp.unlink(missing_ok=True)
+            return False
+        with self.store.write_lock:
+            if self.rows_written:
+                self.path.unlink(missing_ok=True)
+                self.tmp.replace(self.path)
+            else:
+                self.tmp.unlink(missing_ok=True)
+                self.path.unlink(missing_ok=True)  # re-ingest that now yields 0 rows
+            with self.store.connect() as con:
+                self.store._register_views(con)
+        return False
 
 
 def _duck_types() -> list[str]:

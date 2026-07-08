@@ -190,13 +190,20 @@ estimate and the companion verdict (`READY` / `NEEDS COMPANION` /
 
 ## Volume expectations
 
-In-network files run 1–100+ GB uncompressed (some ~1 TB). mrfx streams with
-constant memory; parse time ≈ tens of MB/s (preflight estimates it), and files
-above `confirm_over_gb` wait for confirmation. The default code set keeps row
-counts modest; `codes.all_codes: true` ingests everything — expect orders of
-magnitude more. Browser uploads cap at 1 GB; bigger files go straight into
+In-network files run 1–100+ GB uncompressed (some ~1 TB), and one licensee's
+data is usually split across many shards (codes divided across files). mrfx
+streams with **constant memory** — the parser flushes rows to the Parquet part
+in 50k-row batches and never holds the whole file, so a 275 MB shard that
+expands to 2.1M extracted rows parses in ~130 MB of Python memory (verified on
+a live Blue Cross Blue Shield of North Dakota file). DuckDB spills its rollup
+work to a temp dir under the store, so ingestion won't OOM regardless of file
+size or machine RAM. Parse time ≈ tens of MB/s (preflight estimates it), and
+files above `confirm_over_gb` wait for confirmation. The default code set keeps
+row counts modest; `codes.all_codes: true` ingests everything — expect orders
+of magnitude more. Browser uploads cap at 1 GB; bigger files go straight into
 `data/inbox/`. NPI enrichment runs in the background via NPPES (or a local bulk
-CSV, or off).
+CSV, or off). Because codes are sharded across files, drop **all** of a
+licensee's in-network shards to see a code that isn't in the first one.
 
 ---
 

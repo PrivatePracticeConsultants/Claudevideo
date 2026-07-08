@@ -175,20 +175,45 @@ class _DeferredGroup:
 class InNetworkParser:
     """One streaming pass over an in-network file."""
 
+    # rows flushed to the sink in batches so a huge file never materializes
+    # its whole row set in Python memory (constant-memory guarantee, §8.1)
+    BATCH_ROWS = 50_000
+
     def __init__(
         self,
         cfg: MrfxConfig,
         source_file: str,
         external_refs: dict[int, list[PGroup]] | None = None,
+        sink=None,
+        header_defaults: dict | None = None,
     ):
         self.cfg = cfg
         self.code_set = cfg.code_set  # None = all codes
         self.source_file = source_file
         self.external_refs = external_refs or {}
         self.result = ParseResult()
+        # Seed header from preflight (which already sniffed the first ~1 MB) so
+        # rows are correct from the first batch even when the actual header
+        # tokens stream past later. Prevents needing every row in memory to
+        # re-stamp at EOF.
+        if header_defaults:
+            self.result.payer = header_defaults.get("payer") or self.result.payer
+            self.result.schema_version = header_defaults.get("schema_version")
+            self.result.last_updated_on = header_defaults.get("last_updated_on")
+        self._sink = sink
+        self._buffer: list[dict] = []
+        self._flushed = False
         self._refs_complete = False
         self._deferred: list[_DeferredGroup] = []
         self._ingested_at = dt.datetime.now(dt.timezone.utc).isoformat()
+
+    def _flush(self, final: bool = False) -> None:
+        if self._sink is None or (not final and len(self._buffer) < self.BATCH_ROWS):
+            return
+        if self._buffer:
+            self._sink(self._buffer)
+            self._flushed = True
+            self._buffer = []
 
     def parse(self, stream) -> ParseResult:
         r = self.result
@@ -240,7 +265,14 @@ class InNetworkParser:
                 self._refs_complete = True
             elif event == "string" and prefix in ("reporting_entity_name", "version", "last_updated_on"):
                 if prefix == "reporting_entity_name":
-                    r.payer = self.cfg.normalize_payer(value)
+                    new_payer = self.cfg.normalize_payer(value)
+                    if self._flushed and new_payer != r.payer:
+                        log.warning(
+                            "%s: reporting_entity_name appeared after %d rows were already "
+                            "written; those rows keep the preflight-seeded payer %r",
+                            self.source_file, self.BATCH_ROWS, r.payer,
+                        )
+                    r.payer = new_payer
                 elif prefix == "version":
                     r.schema_version = value
                 else:
@@ -249,14 +281,17 @@ class InNetworkParser:
         self._refs_complete = True
         for dg in self._deferred:
             self._emit_group(dg.billing_code, dg.billing_code_type, dg.groups, dg.ref_ids, dg.prices)
-        # Header fields (reporting_entity_name, version, last_updated_on) may
-        # appear AFTER in_network in the byte stream; rows built before they
-        # streamed past carry stale values — stamp the final ones everywhere.
-        for row in r.rows:
+        # Header fields may appear AFTER in_network. Rows still in the buffer
+        # (not yet flushed) get the final header stamped now; already-flushed
+        # rows relied on the preflight seed (correct for every real file, whose
+        # header is at the top). The tiny header-at-EOF hostile case fits in one
+        # batch and is fully corrected here.
+        for row in self._buffer:
             row["payer"] = r.payer
             row["schema_version"] = r.schema_version
             row["last_updated_on"] = r.last_updated_on
             row["file_month"] = r.file_month
+        self._flush(final=True)
         return r
 
     # -- refs -----------------------------------------------------------------
@@ -384,8 +419,13 @@ class InNetworkParser:
                 if not npis:
                     continue
                 for npi in npis:
-                    r.rows.append({**row_base, **tin_flags, "npi": npi})
+                    row = {**row_base, **tin_flags, "npi": npi}
+                    if self._sink is None:
+                        r.rows.append(row)
+                    else:
+                        self._buffer.append(row)
                     r.qa.rows += 1
+        self._flush()
 
 
 def parse_provider_reference_file(cfg: MrfxConfig, stream) -> tuple[str, str | None, dict[int, list[PGroup]]]:
