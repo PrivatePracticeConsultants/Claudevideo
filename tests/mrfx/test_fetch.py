@@ -259,6 +259,17 @@ def test_react_portal_root_found_via_blobs_probe(cfg, store, http_root):
         httpd.shutdown()
 
 
+def test_rollups_rebuilt_once_queue_drains(cfg, store, server):
+    # queue ingests defer the (expensive, full) rollup rebuild; it must still
+    # run when the queue goes idle so dashboards see the new data
+    add_urls(store, [f"{server}/rates.json.gz", f"{server}/companion.json"])
+    drain(cfg, store)
+    with store.connect() as con:
+        raw = con.execute("SELECT count(*) FROM rates").fetchone()[0]
+        dedup = con.execute("SELECT count(*) FROM rates_dedup").fetchone()[0]
+    assert raw > 0 and dedup > 0  # rollup view populated after the drain
+
+
 def test_dedup_key_keeps_identity_params_drops_signature_params():
     # signed CDN re-pastes collapse to one row...
     a = dedup_key("https://x.mrf.bcbs.com/f.json.gz?&Expires=1&Signature=abc&Key-Pair-Id=K1")

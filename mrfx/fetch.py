@@ -539,9 +539,12 @@ def _enqueue_children(store: Store, urls: list[str], parent_id: int) -> int:
     )
 
 
-def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=None) -> None:
+def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=None,
+                       rebuild_rollups: bool = True) -> bool:
     """Download, classify, and route one queued URL. Never raises — failures
-    are recorded on the queue row so the worker keeps going."""
+    are recorded on the queue row so the worker keeps going. Returns True if
+    the URL ingested rate/reference data (so callers batching deferred rollup
+    rebuilds know work landed)."""
     url_id = rec["id"]
     url = rec["url"]
     dest = cfg.downloads_dir / filename_for(url)
@@ -554,7 +557,7 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
     except DownloadError as e:
         log.warning("url %s download failed: %s", url, e)
         store.update_url(url_id, status="failed", error=str(e))
-        return
+        return False
     store.update_url(url_id, content_sha=content_sha)
 
     # Blue plans host copies of each other's national files — the same bytes
@@ -567,14 +570,14 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
                                f"of each other's files) — skipped as duplicate of {twin.split('?')[0]}")
         dest.unlink(missing_ok=True)
         log.info("%s — byte-identical to %s; skipped", url, twin.split("?")[0])
-        return
+        return False
 
     try:
         pf = preflight(dest, cfg, store)
     except Exception as e:  # noqa: BLE001 — classification must never crash the worker
         store.update_url(url_id, status="failed", error=f"could not read file: {e}")
         dest.unlink(missing_ok=True)
-        return
+        return False
 
     if pf.file_type in ("toc", "blob_listing"):
         store.update_url(url_id, status="expanding", kind="toc")
@@ -586,7 +589,7 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
         except Exception as e:  # noqa: BLE001
             store.update_url(url_id, status="failed", kind="toc", error=f"index parse failed: {e}")
             dest.unlink(missing_ok=True)
-            return
+            return False
         added = _enqueue_children(store, child_urls, url_id)
         msg = f"index expanded: {len(child_urls)} files listed, {added} newly queued"
         if truncated:
@@ -600,14 +603,14 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
             # "found N files inside, working through them"
             store.update_url(url_id, status="done", kind="toc", child_count=added, error=None)
         dest.unlink(missing_ok=True)  # the index itself carries no rates
-        return
+        return False
 
     if pf.file_type == "allowed_amounts":
         # common on listing pages next to the rate files — skip, don't scare
         store.update_url(url_id, status="skipped", kind="allowed_amounts",
                          error="out-of-network allowed-amounts file (no negotiated rates) — skipped")
         dest.unlink(missing_ok=True)
-        return
+        return False
 
     if pf.file_type == "unknown":
         # A person pasting from their browser often pastes the PAGE, not the
@@ -634,21 +637,22 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
                 store.update_url(url_id, status="done", kind="page", child_count=added, error=None)
             else:
                 store.update_url(url_id, status="failed", kind="page", error=PAGE_HELP)
-            return
+            return False
         store.update_url(url_id, status="failed", kind="unknown",
                          error="; ".join(pf.messages) or "unrecognized file (not MRF JSON)")
         dest.unlink(missing_ok=True)
-        return
+        return False
 
     # in-network rate file or standalone provider-reference file: run the
     # normal (chunked) ingest in place. Deliberately NOT moved into the inbox —
     # the folder watcher would race the queue worker on the same file.
     store.update_url(url_id, status="ingesting", kind=pf.file_type, filename=dest.name)
     try:
-        result = ingest_file(cfg, store, dest, pf=pf, progress_bar=progress_bar)
+        result = ingest_file(cfg, store, dest, pf=pf, progress_bar=progress_bar,
+                              rebuild_rollups=rebuild_rollups)
     except Exception as e:  # noqa: BLE001 — belt and suspenders; ingest_file already isolates
         store.update_url(url_id, status="failed", kind=pf.file_type, error=f"ingest crashed: {e}")
-        return
+        return False
 
     status = result.get("status")
     if status == "done":
@@ -657,12 +661,14 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
                          rows_emitted=n or 0, error=None)
         if cfg.delete_raw_after_ingest:
             _cleanup_raw(cfg, dest)
+        return True
     elif status == "pending_confirmation":
         store.update_url(url_id, status="failed", kind=pf.file_type,
                          error="file exceeds confirm_over_gb; raise the limit in config/mrfx.yaml and retry")
     else:
         store.update_url(url_id, status="failed", kind=pf.file_type,
                          error=result.get("error") or status)
+    return False
 
 
 def _cleanup_raw(cfg: MrfxConfig, path: Path) -> None:
@@ -698,16 +704,41 @@ def add_urls(store: Store, urls: list[str]) -> dict:
     return {"added": added, "skipped": skipped, "invalid": invalid}
 
 
+# The dedup/by-TIN rollups are a FULL rebuild over all rows (minutes once the
+# store holds tens of millions). When grinding a big payer book, rebuilding
+# after every file would be quadratic wall-clock — batch it instead: rebuild
+# after this many ingested files, and once more when the queue goes idle.
+ROLLUP_BATCH_FILES = 10
+
+
 def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain: bool = False) -> int:
     """Process queued URLs one at a time until the queue is empty (drain=True,
-    for the CLI) or `stop` is set (the serve worker). Returns files processed."""
+    for the CLI) or `stop` is set (the serve worker). Returns files processed.
+
+    Rollup rebuilds are batched (every ROLLUP_BATCH_FILES ingests + at idle):
+    the raw rates land immediately; dashboards catch up in batches instead of
+    stalling the queue for minutes after every single file."""
     recovered = store.recover_stuck_urls()
     if recovered:
         log.info("resumed %d URL(s) left mid-flight by a previous run", recovered)
     processed = 0
+    ingests_pending_rollup = 0
+
+    def rebuild_now():
+        nonlocal ingests_pending_rollup
+        log.info("updating analytics rollups (%d newly ingested file(s))...", ingests_pending_rollup)
+        try:
+            store.rebuild_rollups()
+        except Exception:  # noqa: BLE001 — rollups retry on the next batch
+            log.exception("rollup rebuild failed; will retry after the next file")
+            return
+        ingests_pending_rollup = 0
+
     while stop is None or not stop.is_set():
         rec = store.next_queued_url()
         if rec is None:
+            if ingests_pending_rollup:
+                rebuild_now()
             if drain:
                 break
             if stop is not None:
@@ -716,9 +747,15 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
                 time.sleep(3.0)  # no stop event: idle politely, never busy-spin
             continue
         try:
-            process_url_record(cfg, store, rec, progress_bar=progress_bar)
+            if process_url_record(cfg, store, rec, progress_bar=progress_bar,
+                                  rebuild_rollups=False):
+                ingests_pending_rollup += 1
         except Exception:  # noqa: BLE001 — a bad URL must never kill the worker
             log.exception("url worker: unexpected error on %s", rec.get("url"))
             store.update_url(rec["id"], status="failed", error="unexpected worker error")
         processed += 1
+        if ingests_pending_rollup >= ROLLUP_BATCH_FILES:
+            rebuild_now()
+    if ingests_pending_rollup:
+        rebuild_now()  # stop was set mid-batch — don't leave dashboards stale
     return processed

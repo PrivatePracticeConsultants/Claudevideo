@@ -140,11 +140,17 @@ def _finish_file(cfg: MrfxConfig, path: Path, ok: bool) -> None:
 
 
 def ingest_file(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight | None = None,
-                progress_bar=None) -> dict:
+                progress_bar=None, rebuild_rollups: bool = True) -> dict:
     """Ingest one file. Returns the final files-table record fields.
 
     progress_bar(chunks_done, chunks_total, pct) is called for large files so a
-    CLI can render a bar; the dashboard reads progress from the files table."""
+    CLI can render a bar; the dashboard reads progress from the files table.
+
+    rebuild_rollups=False defers the (full, O(all-rows)) analytics rebuild —
+    the URL-queue worker batches it across many files instead of paying
+    minutes per file when grinding a large payer book. The raw `rates` view
+    is always current; only the dedup/by-TIN rollups lag until the batch
+    rebuild."""
     name = path.name
     if pf is None:
         pf = preflight(path, cfg, store)
@@ -237,7 +243,8 @@ def ingest_file(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight | None 
                 result = parser.parse(stream)
         if progress is not None:
             progress.finish()
-        store.rebuild_rollups()
+        if rebuild_rollups:
+            store.rebuild_rollups()
         store.upsert_file(
             name,
             payer=result.payer,
