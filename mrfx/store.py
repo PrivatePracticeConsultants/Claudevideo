@@ -405,15 +405,22 @@ class Store:
             return nid
 
     def next_queued_url(self) -> dict | None:
+        return self._claim_next("queued", "downloading")
+
+    def next_fetched_url(self) -> dict | None:
+        """Claim the next prefetched row (file already on disk) for processing."""
+        return self._claim_next("fetched", "ingesting")
+
+    def _claim_next(self, from_status: str, to_status: str) -> dict | None:
         with self.write_lock, self.connect() as con:
             row = con.execute(
-                "SELECT * FROM url_queue WHERE status = 'queued' ORDER BY id LIMIT 1"
+                f"SELECT * FROM url_queue WHERE status = '{from_status}' ORDER BY id LIMIT 1"
             ).fetchall()
             if not row:
                 return None
             cols = [d[0] for d in con.description]
             rec = dict(zip(cols, row[0]))
-            con.execute("UPDATE url_queue SET status = 'downloading' WHERE id = ?", [rec["id"]])
+            con.execute("UPDATE url_queue SET status = ? WHERE id = ?", [to_status, rec["id"]])
             return rec
 
     def update_url(self, url_id: int, **fields) -> None:
@@ -483,15 +490,18 @@ class Store:
 
     def recover_stuck_urls(self) -> int:
         """Rows left mid-flight by a crash/Ctrl-C go back to queued so the
-        next run resumes them. Called when a queue worker starts."""
+        next run resumes them ('fetched' rows simply re-download — safe, and
+        the content hash prevents any double ingest). Called when a queue
+        worker starts."""
         with self.write_lock, self.connect() as con:
             n = con.execute(
-                "SELECT count(*) FROM url_queue WHERE status IN ('downloading', 'expanding', 'ingesting')"
+                "SELECT count(*) FROM url_queue WHERE status IN "
+                "('downloading', 'fetched', 'expanding', 'ingesting')"
             ).fetchone()[0]
             if n:
                 con.execute(
                     "UPDATE url_queue SET status = 'queued', progress = 0, bytes_done = 0 "
-                    "WHERE status IN ('downloading', 'expanding', 'ingesting')"
+                    "WHERE status IN ('downloading', 'fetched', 'expanding', 'ingesting')"
                 )
         return n
 

@@ -16,6 +16,7 @@ keeping only the compact Parquet.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import re
@@ -543,6 +544,33 @@ def crawl_gatsby_hub(cfg: MrfxConfig, page_url: str, max_files: int) -> list[str
 # ---------------------------------------------------------------------------
 
 
+_META_SUFFIX = ".fetchmeta"  # sidecar handing a prefetched download to the processor
+
+
+def _meta_path(dest: Path) -> Path:
+    return Path(str(dest) + _META_SUFFIX)
+
+
+def fetch_url_record(cfg: MrfxConfig, store: Store, rec: dict) -> bool:
+    """Download stage only (used by the prefetch thread): stream the file to
+    disk, record its hash, and mark the row 'fetched' for the processor.
+    Returns False on failure (row marked failed, worker keeps going)."""
+    url_id, url = rec["id"], rec["url"]
+    dest = cfg.downloads_dir / filename_for(url)
+    try:
+        content_sha, final_url = download(
+            cfg, url, dest,
+            progress_cb=lambda d, t: store.url_progress(url_id, d, t),
+            max_bytes=int(cfg.confirm_over_gb * 1e9))
+    except DownloadError as e:
+        log.warning("url %s download failed: %s", url, e)
+        store.update_url(url_id, status="failed", error=str(e))
+        return False
+    _meta_path(dest).write_text(json.dumps({"sha": content_sha, "final_url": final_url}))
+    store.update_url(url_id, content_sha=content_sha, status="fetched")
+    return True
+
+
 def _enqueue_children(store: Store, urls: list[str], parent_id: int) -> int:
     """Queue discovered child URLs under their parent row; returns how many
     were newly queued (dupes of rows already queued/done return None)."""
@@ -561,17 +589,24 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
     url_id = rec["id"]
     url = rec["url"]
     dest = cfg.downloads_dir / filename_for(url)
-    try:
-        # (row already marked 'downloading' by next_queued_url when claimed)
-        content_sha, final_url = download(
-            cfg, url, dest,
-            progress_cb=lambda d, t: store.url_progress(url_id, d, t),
-            max_bytes=int(cfg.confirm_over_gb * 1e9))
-    except DownloadError as e:
-        log.warning("url %s download failed: %s", url, e)
-        store.update_url(url_id, status="failed", error=str(e))
-        return False
-    store.update_url(url_id, content_sha=content_sha)
+    meta_p = _meta_path(dest)
+    if dest.exists() and meta_p.exists():
+        # prefetched by the downloader thread — pick up where it left off
+        meta = json.loads(meta_p.read_text())
+        content_sha, final_url = meta["sha"], meta["final_url"]
+        meta_p.unlink(missing_ok=True)
+    else:
+        try:
+            # (row already marked 'downloading' by next_queued_url when claimed)
+            content_sha, final_url = download(
+                cfg, url, dest,
+                progress_cb=lambda d, t: store.url_progress(url_id, d, t),
+                max_bytes=int(cfg.confirm_over_gb * 1e9))
+        except DownloadError as e:
+            log.warning("url %s download failed: %s", url, e)
+            store.update_url(url_id, status="failed", error=str(e))
+            return False
+        store.update_url(url_id, content_sha=content_sha)
 
     # Blue plans host copies of each other's national files — the same bytes
     # arrive under many domains. Skip byte-identical repeats instead of
@@ -690,6 +725,7 @@ def _cleanup_raw(cfg: MrfxConfig, path: Path) -> None:
     can always be re-downloaded from its URL)."""
     try:
         path.unlink(missing_ok=True)
+        _meta_path(path).unlink(missing_ok=True)
         (cfg.processed_dir / path.name).unlink(missing_ok=True)
         (cfg.failed_dir / path.name).unlink(missing_ok=True)
     except OSError as e:
@@ -723,6 +759,9 @@ def add_urls(store: Store, urls: list[str]) -> dict:
 # after this many ingested files, and once more when the queue goes idle.
 ROLLUP_BATCH_FILES = 10
 
+# how many files the downloader may fetch ahead of the parser (disk-bounded)
+PREFETCH_AHEAD = 1
+
 
 def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain: bool = False) -> int:
     """Process queued URLs one at a time until the queue is empty (drain=True,
@@ -747,28 +786,62 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
             return
         ingests_pending_rollup = 0
 
-    while stop is None or not stop.is_set():
-        rec = store.next_queued_url()
-        if rec is None:
-            if ingests_pending_rollup:
+    # Pipeline: a downloader thread prefetches the NEXT file while the main
+    # loop parses the current one — network and CPU overlap instead of taking
+    # turns. At most PREFETCH_AHEAD files sit fetched-but-unprocessed on disk,
+    # so disk stays bounded exactly as before (plus one file).
+    import threading
+
+    dl_stop = threading.Event()
+
+    def downloader():
+        while not dl_stop.is_set() and (stop is None or not stop.is_set()):
+            counts = store.url_queue_counts()
+            if counts.get("fetched", 0) >= PREFETCH_AHEAD:
+                dl_stop.wait(0.5)
+                continue
+            rec = store.next_queued_url()
+            if rec is None:
+                dl_stop.wait(0.5)
+                continue
+            try:
+                fetch_url_record(cfg, store, rec)
+            except Exception:  # noqa: BLE001 — downloader must never die
+                log.exception("prefetch: unexpected error on %s", rec.get("url"))
+                store.update_url(rec["id"], status="failed", error="unexpected download error")
+
+    dl_thread = threading.Thread(target=downloader, daemon=True, name="mrfx-prefetch")
+    dl_thread.start()
+
+    try:
+        while stop is None or not stop.is_set():
+            rec = store.next_fetched_url()
+            if rec is None:
+                counts = store.url_queue_counts()
+                in_flight = counts.get("queued", 0) + counts.get("downloading", 0) + counts.get("fetched", 0)
+                if in_flight == 0:
+                    if ingests_pending_rollup:
+                        rebuild_now()
+                    if drain:
+                        break
+                if stop is not None:
+                    stop.wait(0.5 if in_flight else 3.0)
+                else:
+                    time.sleep(0.5 if in_flight else 3.0)
+                continue
+            try:
+                if process_url_record(cfg, store, rec, progress_bar=progress_bar,
+                                      rebuild_rollups=False):
+                    ingests_pending_rollup += 1
+            except Exception:  # noqa: BLE001 — a bad URL must never kill the worker
+                log.exception("url worker: unexpected error on %s", rec.get("url"))
+                store.update_url(rec["id"], status="failed", error="unexpected worker error")
+            processed += 1
+            if ingests_pending_rollup >= ROLLUP_BATCH_FILES:
                 rebuild_now()
-            if drain:
-                break
-            if stop is not None:
-                stop.wait(3.0)
-            else:
-                time.sleep(3.0)  # no stop event: idle politely, never busy-spin
-            continue
-        try:
-            if process_url_record(cfg, store, rec, progress_bar=progress_bar,
-                                  rebuild_rollups=False):
-                ingests_pending_rollup += 1
-        except Exception:  # noqa: BLE001 — a bad URL must never kill the worker
-            log.exception("url worker: unexpected error on %s", rec.get("url"))
-            store.update_url(rec["id"], status="failed", error="unexpected worker error")
-        processed += 1
-        if ingests_pending_rollup >= ROLLUP_BATCH_FILES:
-            rebuild_now()
+    finally:
+        dl_stop.set()
+        dl_thread.join(timeout=cfg.download_timeout_seconds + 30)
     if ingests_pending_rollup:
         rebuild_now()  # stop was set mid-batch — don't leave dashboards stale
     return processed

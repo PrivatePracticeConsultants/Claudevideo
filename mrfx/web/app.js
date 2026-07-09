@@ -799,7 +799,7 @@ async function loadUrlQueue() {
   wrap.style.display = "block";
   const c = d.counts || {};
   const total = Object.values(c).reduce((a, b) => a + b, 0);
-  const parts = ["queued", "downloading", "expanding", "ingesting", "done", "skipped"]
+  const parts = ["queued", "downloading", "fetched", "expanding", "ingesting", "done", "skipped"]
     .filter((k) => c[k]).map((k) => `${fmtInt(c[k])} ${k}`);
   if (c.failed) parts.push(`<span class="err-text">${fmtInt(c.failed)} failed</span>`);
   countsEl.innerHTML = parts.join(" · ") +
