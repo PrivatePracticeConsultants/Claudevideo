@@ -389,6 +389,7 @@ def expand_blobs_listing(path: Path, max_files: int, base_url: str = "") -> tupl
     indexes: list[str] = []
     seen: set[str] = set()
     truncated = False
+    excluded: dict[str, int] = {"allowed-amounts": 0, "drug-pricing": 0}
 
     with open_stream(path) as stream:
         for item in ijson.items(stream, "blobs.item"):
@@ -404,11 +405,13 @@ def expand_blobs_listing(path: Path, max_files: int, base_url: str = "") -> tupl
                 continue
             low = name.lower()
             if "allowed" in low:
+                excluded["allowed-amounts"] += 1
                 continue  # out-of-network billed averages — no negotiated rates
             is_rate_file = "in-network" in low
             if is_rate_file and _DRUG_FILE_RE.search(low):
                 # NDC / prescription-drug pricing — no medical CPT/HCPCS rates;
                 # ingesting would only produce honest zero-row files
+                excluded["drug-pricing"] += 1
                 continue
             k = dedup_key(loc)
             if k in seen:
@@ -422,6 +425,9 @@ def expand_blobs_listing(path: Path, max_files: int, base_url: str = "") -> tupl
     out = (rate_files + indexes)[:max_files]
     if len(rate_files) + len(indexes) > len(out):
         truncated = True
+    if any(excluded.values()):
+        log.info("listing: excluded %d allowed-amounts and %d drug-pricing entries (no medical rates)",
+                 excluded["allowed-amounts"], excluded["drug-pricing"])
     return out, truncated
 
 
@@ -585,6 +591,32 @@ def crawl_gatsby_hub(cfg: MrfxConfig, page_url: str, max_files: int) -> list[str
 # ---------------------------------------------------------------------------
 
 
+_MONTH_DATE_RE = re.compile(r"(\d{4})-(\d{2})-01")
+
+
+def _maybe_queue_prev_month(store: Store, rec: dict, err: str) -> None:
+    """Payers publish monthly-dated files, and early in a month the new one
+    often isn't posted yet — a 404 on a CURRENT-month-dated URL automatically
+    queues last month's name instead of leaving the user a wall of failures."""
+    if "404" not in err:
+        return
+    m = _MONTH_DATE_RE.search(rec.get("url") or "")
+    if not m:
+        return
+    import datetime as dt
+
+    today = dt.date.today()
+    if (int(m.group(1)), int(m.group(2))) != (today.year, today.month):
+        return  # only fall back one step, from the current month
+    prev = (today.replace(day=1) - dt.timedelta(days=1)).replace(day=1)
+    prev_url = rec["url"].replace(m.group(0), prev.isoformat(), 1)
+    if store.enqueue_url(prev_url, dedup_key(prev_url), parent_id=rec.get("parent_id")) is not None:
+        log.info("%s not published yet — queued last month's file instead", rec["url"])
+        store.update_url(rec["id"],
+                         error=err + " — this month's file isn't posted yet; "
+                               "queued last month's version instead")
+
+
 _META_SUFFIX = ".fetchmeta"  # sidecar handing a prefetched download to the processor
 
 
@@ -606,6 +638,7 @@ def fetch_url_record(cfg: MrfxConfig, store: Store, rec: dict) -> bool:
     except DownloadError as e:
         log.warning("url %s download failed: %s", url, e)
         store.update_url(url_id, status="failed", error=str(e))
+        _maybe_queue_prev_month(store, rec, str(e))
         return False
     _meta_path(dest).write_text(json.dumps({"sha": content_sha, "final_url": final_url}))
     store.update_url(url_id, content_sha=content_sha, status="fetched")
@@ -614,11 +647,9 @@ def fetch_url_record(cfg: MrfxConfig, store: Store, rec: dict) -> bool:
 
 def _enqueue_children(store: Store, urls: list[str], parent_id: int) -> int:
     """Queue discovered child URLs under their parent row; returns how many
-    were newly queued (dupes of rows already queued/done return None)."""
-    return sum(
-        1 for u in urls
-        if store.enqueue_url(u, dedup_key(u), parent_id=parent_id) is not None
-    )
+    were newly queued. One lock/connection for the whole batch — thousands of
+    children from one index must not thrash the store."""
+    return store.enqueue_urls([(u, dedup_key(u)) for u in urls], parent_id=parent_id)
 
 
 def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=None,
@@ -646,6 +677,7 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
         except DownloadError as e:
             log.warning("url %s download failed: %s", url, e)
             store.update_url(url_id, status="failed", error=str(e))
+            _maybe_queue_prev_month(store, rec, str(e))
             return False
         store.update_url(url_id, content_sha=content_sha)
 

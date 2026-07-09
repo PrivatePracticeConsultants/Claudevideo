@@ -469,3 +469,20 @@ def test_download_disk_space_guard(cfg, server, monkeypatch):
     with pytest.raises(DownloadError) as ei:
         download(cfg, url, dest)
     assert "disk space" in str(ei.value)
+
+
+def test_404_on_current_month_url_queues_previous_month(cfg, store, server):
+    import datetime as dt
+
+    today = dt.date.today()
+    cur = today.replace(day=1).isoformat()
+    prev = (today.replace(day=1) - dt.timedelta(days=1)).replace(day=1).isoformat()
+    add_urls(store, [f"{server}/{cur}_payer_index.json"])   # 404s on the test server
+    drain(cfg, store)
+    recs = store.list_urls()
+    cur_row = next(r for r in recs if cur in r["url"])
+    assert cur_row["status"] == "failed"
+    assert "last month's version" in cur_row["error"]
+    prev_row = next(r for r in recs if prev in r["url"])    # fallback was queued
+    assert prev_row["status"] == "failed"                    # (also 404s here — fine)
+    assert "last month" not in (prev_row["error"] or "")     # no infinite fallback chain

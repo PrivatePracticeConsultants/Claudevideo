@@ -429,31 +429,47 @@ class Store:
         volatile signed-query params). Returns the new row id, or None if it's
         already queued/done."""
         with self.write_lock, self.connect() as con:
-            exists = con.execute(
-                "SELECT id, status FROM url_queue WHERE dedup_key = ? LIMIT 1", [dedup_key]
-            ).fetchone()
-            if exists:
-                # Re-adding a failed link retries it (a fresh URL may carry a
-                # new signature). A 'skipped' row is only revived by a DIRECT
-                # paste (parent_id None): re-expanding a TOC must not undo the
-                # user's explicit skip or re-download a known duplicate.
-                retryable = ("failed",) if parent_id is not None else ("failed", "skipped")
-                if exists[1] in retryable:
-                    con.execute(
-                        "UPDATE url_queue SET url = ?, status = 'queued', error = NULL, "
-                        "progress = 0, bytes_done = 0 WHERE id = ?",
-                        [url, exists[0]],
-                    )
-                    return exists[0]
-                return None  # already queued / in flight / done
-            nid = (con.execute("SELECT coalesce(max(id), 0) + 1 FROM url_queue").fetchone()[0])
-            con.execute(
-                "INSERT INTO url_queue (id, url, dedup_key, kind, status, parent_id, "
-                "bytes_total, bytes_done, progress, added_at) "
-                "VALUES (?, ?, ?, 'unknown', 'queued', ?, 0, 0, 0, current_timestamp)",
-                [nid, url, dedup_key, parent_id],
-            )
-            return nid
+            return self._enqueue_one(con, url, dedup_key, parent_id)
+
+    def enqueue_urls(self, pairs: list[tuple[str, str]], parent_id: int | None = None) -> int:
+        """Batch enqueue under ONE lock + connection — a 2,000-child index
+        expansion must not pay a connection/lock cycle per child. Same
+        semantics as enqueue_url per row. Returns how many were newly queued
+        (or revived)."""
+        added = 0
+        with self.write_lock, self.connect() as con:
+            for url, dk in pairs:
+                if self._enqueue_one(con, url, dk, parent_id) is not None:
+                    added += 1
+        return added
+
+    def _enqueue_one(self, con: duckdb.DuckDBPyConnection, url: str, dedup_key: str,
+                     parent_id: int | None) -> int | None:
+        exists = con.execute(
+            "SELECT id, status FROM url_queue WHERE dedup_key = ? LIMIT 1", [dedup_key]
+        ).fetchone()
+        if exists:
+            # Re-adding a failed link retries it (a fresh URL may carry a
+            # new signature). A 'skipped' row is only revived by a DIRECT
+            # paste (parent_id None): re-expanding a TOC must not undo the
+            # user's explicit skip or re-download a known duplicate.
+            retryable = ("failed",) if parent_id is not None else ("failed", "skipped")
+            if exists[1] in retryable:
+                con.execute(
+                    "UPDATE url_queue SET url = ?, status = 'queued', error = NULL, "
+                    "progress = 0, bytes_done = 0 WHERE id = ?",
+                    [url, exists[0]],
+                )
+                return exists[0]
+            return None  # already queued / in flight / done
+        nid = (con.execute("SELECT coalesce(max(id), 0) + 1 FROM url_queue").fetchone()[0])
+        con.execute(
+            "INSERT INTO url_queue (id, url, dedup_key, kind, status, parent_id, "
+            "bytes_total, bytes_done, progress, added_at) "
+            "VALUES (?, ?, ?, 'unknown', 'queued', ?, 0, 0, 0, current_timestamp)",
+            [nid, url, dedup_key, parent_id],
+        )
+        return nid
 
     def next_queued_url(self) -> dict | None:
         return self._claim_next("queued", "downloading")

@@ -247,8 +247,13 @@ def cmd_status(cfg: MrfxConfig, args) -> int:
         totals = con.execute(
             "SELECT count(*), count(DISTINCT npi), count(DISTINCT payer) FROM rates"
         ).fetchone()
+    qc = store.url_queue_counts()
+    if qc:
+        line = " · ".join(f"{n} {st}" for st, n in sorted(qc.items()))
+        print(f"link queue: {line}")
     if not rows:
-        print("no files ingested yet — drop MRFs into", cfg.inbox_dir)
+        print("no files ingested yet — drop MRFs into", cfg.inbox_dir,
+              "or run: mrfx add --file config/starter_links.txt")
         return 0
     widths = (40, 22, 18, 22, 10, 8)
     hdr = ("filename", "payer", "type", "status", "rows", "skipped")
