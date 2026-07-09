@@ -228,8 +228,10 @@ def download(cfg: MrfxConfig, url: str, dest: Path, progress_cb=None,
                     )
                 if resp.status_code == 403:
                     raise DownloadError(
-                        "HTTP 403 — the link is forbidden or a signed URL has expired; "
-                        "re-copy a fresh URL (for TOC-derived links, re-add the TOC).",
+                        "HTTP 403 — access refused. Usual causes: a signed URL expired "
+                        "(re-copy a fresh link, or re-add the TOC it came from), or the "
+                        "site blocks automated downloads — if the link works in your "
+                        "browser, download it there and drop the file into data/inbox/.",
                         403, retryable=False,
                     )
                 if resp.status_code == 404:
@@ -759,6 +761,18 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
             else:
                 store.update_url(url_id, status="failed", kind="page", error=PAGE_HELP)
             return False
+        # Not HTML and not a recognized MRF shape. Some payers publish custom
+        # JSON wrappers that just list file URLs (BCBS Tennessee's
+        # {"TOC_Files": [...]} directories, for example) — lift any MRF-shaped
+        # links out of a small unknown file before giving up.
+        if dest.stat().st_size <= 64 << 20:
+            links = extract_links_from_page(dest, final_url, cfg.max_toc_files)
+            if links:
+                dest.unlink(missing_ok=True)
+                added = _enqueue_children(store, links, url_id)
+                log.info("%s — link container: %d file links, %d newly queued", url, len(links), added)
+                store.update_url(url_id, status="done", kind="page", child_count=added, error=None)
+                return False
         store.update_url(url_id, status="failed", kind="unknown",
                          error="; ".join(pf.messages) or "unrecognized file (not MRF JSON)")
         dest.unlink(missing_ok=True)

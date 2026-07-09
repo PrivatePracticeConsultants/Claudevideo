@@ -280,11 +280,27 @@ sources:
     notes: JavaScript page — no static links to lift; paste file links from a browser.
 
   - name: BCBS Tennessee
-    url: https://www.bcbst.com/about/our-company/corporate-governance/transparency-in-coverage/machine-readable-files
+    url: https://www.bcbst.com/tcr
+    kind: page
+    queueable: true
+    verified: "2026-07-09"
+    notes: >-
+      Static page linking two directory JSONs (custom {"TOC_Files": [...]}
+      wrappers — the app lifts links out of unknown JSON containers).
+      Verified cascade: page -> 2 directories -> 593 employer/main TOCs ->
+      rate files on the signed bcbstn CDN. First two files ingested 2,591,391
+      rows (BCBS Hawaii) and 1,125,723 rows (Wellmark South Dakota) — more
+      cross-hosted national files, attributed per-file as always.
+
+  - name: Universal Health Services (UHS — hospital system employer plan)
+    url: https://uhs.com/transparency-in-coverage-machine-readable-files/
     kind: portal
     queueable: false
-    verified: "2026-07-08"
-    notes: JavaScript page (probed — no static links); paste file links from a browser.
+    verified: "2026-07-09"
+    notes: >-
+      The site's firewall blocks automated downloads (HTTP 403 even with
+      browser headers). Open it in your browser; if files download there,
+      drop them into data/inbox/.
 
   - name: Wellmark BCBS (Iowa / South Dakota)
     url: https://www.wellmark.com/transparency-in-coverage

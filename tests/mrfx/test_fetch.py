@@ -486,3 +486,17 @@ def test_404_on_current_month_url_queues_previous_month(cfg, store, server):
     prev_row = next(r for r in recs if prev in r["url"])    # fallback was queued
     assert prev_row["status"] == "failed"                    # (also 404s here — fine)
     assert "last month" not in (prev_row["error"] or "")     # no infinite fallback chain
+
+
+def test_unknown_json_link_container_lifts_urls(cfg, store, server, http_root):
+    # BCBST-style custom wrapper: {"TOC_Files": [...]} — not HTML, not a CMS
+    # shape, but it lists MRF links; the app must follow them
+    (http_root / "directory.json").write_text(json.dumps(
+        {"TOC_Files": [f"{server}/toc.json"], "note": "custom payer wrapper"}))
+    add_urls(store, [f"{server}/directory.json"])
+    drain(cfg, store)
+    recs = {dedup_key(r["url"]): r for r in store.list_urls()}
+    wrapper = recs[dedup_key(f"{server}/directory.json")]
+    assert wrapper["status"] == "done" and wrapper["child_count"] == 1
+    assert recs[dedup_key(f"{server}/toc.json")]["status"] == "done"        # TOC expanded
+    assert recs[dedup_key(f"{server}/rates.json.gz")]["status"] == "done"   # rates landed
