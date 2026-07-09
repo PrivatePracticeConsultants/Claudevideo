@@ -778,8 +778,10 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
     import threading
     state = threading.Lock()
 
+    rollup_failures = 0
+
     def rebuild_now():
-        nonlocal ingests_pending_rollup
+        nonlocal ingests_pending_rollup, rollup_failures
         with state:
             n = ingests_pending_rollup
         if not n:
@@ -788,8 +790,21 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
         try:
             store.rebuild_rollups()
         except Exception:  # noqa: BLE001 — rollups retry on the next batch
+            rollup_failures += 1
+            if rollup_failures >= 3:
+                # never loop forever on a rebuild that keeps failing: the raw
+                # rates are safely on disk; dashboards just lag until the next
+                # successful rebuild (next batch, restart, or `mrfx serve`)
+                log.error(
+                    "rollup rebuild failed %d times — giving up for this run; "
+                    "raw data is safe, analytics will refresh on the next "
+                    "successful rebuild", rollup_failures)
+                with state:
+                    ingests_pending_rollup = 0
+                return
             log.exception("rollup rebuild failed; will retry after the next file")
             return
+        rollup_failures = 0
         with state:
             ingests_pending_rollup -= n
 

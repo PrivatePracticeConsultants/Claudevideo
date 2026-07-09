@@ -218,11 +218,12 @@ sources:
       max_toc_files (default 2000, alphabetical) — raise it in
       config/mrfx.yaml or paste specific file links for deeper reach. The
       Missouri Provider Network file ingested 88,649 therapy rows as
-      "UnitedHealthcare Insurance Company". Large-file stress test (2026-07-09):
-      Oxford Liberty Network (0.58 GB compressed) ingested 5,590,693 rows and
-      River Valley Heritage (1.70 GB compressed / ~17 GB uncompressed, 52
-      chunks) ingested 9,832,954 rows, back-to-back through the prefetch
-      pipeline at ~300 MB peak memory. Files named "...NDC..." are drug
+      "UnitedHealthcare Insurance Company". Large-file stress tests
+      (2026-07-09): Oxford Liberty Network (0.58 GB compressed) 5,590,693
+      rows; River Valley Heritage (1.70 GB / ~17 GB uncompressed) 9,832,954
+      rows; River Valley PS1-77_EL (3.39 GB / ~34 GB uncompressed, 102
+      chunks) 29,688,251 rows — the largest single file tested, parsed at
+      <1 GB memory with a 30 MB state file ingesting in parallel alongside. Files named "...NDC..." are drug
       pricing and are skipped at queue time. Employer plans under an opt-out
       book live at private-transparency-in-coverage.uhc.com.
 

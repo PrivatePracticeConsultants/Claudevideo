@@ -20,6 +20,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import os
 import re
 import threading
 import time
@@ -108,7 +109,11 @@ DEDUP_QUERY = """
            max(last_updated_on)                                      AS last_updated_on,
            any_value(expiration_date)                                AS expiration_date,
            count(DISTINCT source_file)                               AS source_count,
-           string_agg(DISTINCT source_file, ';')                     AS source_files,
+           -- representative file, not the full list: string_agg(DISTINCT)
+           -- over tens of millions of near-unique groups cannot spill and
+           -- explodes memory/temp disk; source_count carries the cardinality
+           -- and the raw rates table has the complete list on demand
+           any_value(source_file)                                    AS source_files,
            1                                                         AS rate_variants,
            1                                                         AS npi_count
     FROM rates
@@ -139,7 +144,7 @@ BY_TIN_QUERY = """
            count(DISTINCT negotiated_rate)                           AS rate_variants,
            count(DISTINCT npi)                                       AS npi_count,
            count(DISTINCT source_file)                               AS source_count,
-           string_agg(DISTINCT source_file, ';')                     AS source_files,
+           any_value(source_file)                                    AS source_files,
            any_value(negotiated_type)                                AS negotiated_type,
            any_value(schema_version)                                 AS schema_version,
            max(last_updated_on)                                      AS last_updated_on,
@@ -205,6 +210,11 @@ class Store:
         self._tmp_dir.mkdir(parents=True, exist_ok=True)
         self.db_path = self.dir / "mrfx.duckdb"
         self.write_lock = threading.Lock()
+        try:
+            total = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+            self._memory_limit_gb = max(2, min(12, int(total * 0.4 / 1e9)))
+        except (ValueError, OSError, AttributeError):
+            self._memory_limit_gb = 4
         with self.write_lock, self.connect() as con:
             self._init_tables(con)
             self._register_views(con)
@@ -241,9 +251,11 @@ class Store:
             # DuckDB's default memory limit is ~80% of system RAM; a rollup
             # rebuild over tens of millions of rows will happily balloon to
             # that before spilling — enough to get the process OOM-killed
-            # when anything else is running. Cap it hard: the spill path is
-            # fast and the rest of the app stays streaming/constant-memory.
-            con.execute("SET memory_limit = '3GB'")
+            # when anything else is running. But too tight a cap fails the
+            # rollup outright (its DISTINCT aggregates cannot spill), so use
+            # 40% of RAM clamped to [2GB, 12GB]: kernel-safe headroom AND
+            # room for stores with tens of millions of rows.
+            con.execute(f"SET memory_limit = '{self._memory_limit_gb}GB'")
         except duckdb.Error:  # older duckdb without these knobs
             pass
         return con
@@ -588,15 +600,34 @@ class Store:
 
     def rebuild_rollups(self) -> None:
         """Materialize the dedup/by-TIN/tin-directory rollups after ingest or
-        enrichment so page queries stay fast."""
+        enrichment so page queries stay fast. If the build hits the memory
+        limit (the DISTINCT aggregates cannot spill to disk), retry once
+        single-threaded — per-thread hash tables are the dominant cost."""
         with self.write_lock, self.connect() as con:
             self._register_views(con)  # rates view must see current parts first
-            con.execute(f"CREATE OR REPLACE TABLE rates_dedup_tbl AS {DEDUP_QUERY}")
-            con.execute(f"CREATE OR REPLACE TABLE rates_by_tin_tbl AS {BY_TIN_QUERY}")
-            con.execute(f"CREATE OR REPLACE TABLE tin_directory_tbl AS {TIN_DIRECTORY_QUERY}")
-            con.execute("CREATE OR REPLACE VIEW rates_dedup AS SELECT * FROM rates_dedup_tbl")
-            con.execute("CREATE OR REPLACE VIEW rates_by_tin AS SELECT * FROM rates_by_tin_tbl")
-            con.execute("CREATE OR REPLACE VIEW tin_directory AS SELECT * FROM tin_directory_tbl")
+            try:
+                self._build_rollup_tables(con)
+            except duckdb.OutOfMemoryException:
+                import logging as _logging
+
+                _logging.getLogger(__name__).warning(
+                    "rollup rebuild hit the memory limit; retrying single-threaded")
+                con.execute("SET threads = 1")
+                self._build_rollup_tables(con)
+
+    def _build_rollup_tables(self, con: duckdb.DuckDBPyConnection) -> None:
+        # rates_dedup stays a LIVE VIEW: at NPI×rate grain its groups are
+        # nearly one-per-row (a 30M-row store means a ~30M-group hash
+        # aggregation whose spill can exceed any reasonable disk). Drill-down
+        # queries always hit it WITH filters, which DuckDB pushes into the
+        # parquet scan — milliseconds, no materialization. The TIN-grain
+        # spine and directory have few groups and stay materialized.
+        con.execute("DROP TABLE IF EXISTS rates_dedup_tbl")
+        con.execute(f"CREATE OR REPLACE VIEW rates_dedup AS {DEDUP_QUERY}")
+        con.execute(f"CREATE OR REPLACE TABLE rates_by_tin_tbl AS {BY_TIN_QUERY}")
+        con.execute(f"CREATE OR REPLACE TABLE tin_directory_tbl AS {TIN_DIRECTORY_QUERY}")
+        con.execute("CREATE OR REPLACE VIEW rates_by_tin AS SELECT * FROM rates_by_tin_tbl")
+        con.execute("CREATE OR REPLACE VIEW tin_directory AS SELECT * FROM tin_directory_tbl")
 
     # legacy name used by tests/older callers
     def rebuild_dedup(self) -> None:
