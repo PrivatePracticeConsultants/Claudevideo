@@ -167,7 +167,14 @@ def test_gatsby_hub_page_crawled(cfg, store, tmp_path):
     root = tmp_path / "hub"
     (root / "page-data" / "index").mkdir(parents=True)
     (root / "page-data" / "sq" / "d").mkdir(parents=True)
-    (root / "index.html").write_text("<!doctype html><html><body><div id=\"app\"></div></body></html>")
+    # real Gatsby builds ship framework .json links in the HTML — these must
+    # be filtered out, not queued as "files" (they'd short-circuit the crawl)
+    (root / "index.html").write_text(
+        '<!doctype html><html><head>'
+        '<link rel="manifest" href="/manifest.json">'
+        '<link as="fetch" rel="preload" href="/page-data/index/page-data.json">'
+        '</head><body><div id="app"></div></body></html>'
+    )
     (root / "rates.json.gz").write_bytes(gzip.compress((FIXTURES / "innetwork_mixed.json").read_bytes()))
 
     class Handler(http.server.SimpleHTTPRequestHandler):
@@ -198,6 +205,86 @@ def test_gatsby_hub_page_crawled(cfg, store, tmp_path):
         assert dedup_key(f"{base}/pulled.json.gz") not in recs
     finally:
         httpd.shutdown()
+
+
+def test_dedup_key_keeps_identity_params_drops_signature_params():
+    # signed CDN re-pastes collapse to one row...
+    a = dedup_key("https://x.mrf.bcbs.com/f.json.gz?&Expires=1&Signature=abc&Key-Pair-Id=K1")
+    b = dedup_key("https://x.mrf.bcbs.com/f.json.gz?&Expires=2&Signature=xyz&Key-Pair-Id=K2")
+    assert a == b
+    # ...but download endpoints serving DIFFERENT files via query stay distinct
+    assert dedup_key("https://p.com/dl?file=a.json") != dedup_key("https://p.com/dl?file=b.json")
+    # Azure SAS params are volatile too
+    assert dedup_key("https://x.blob.core.windows.net/c/f.json?sv=1&se=2&sp=r&sig=q") == \
+           dedup_key("https://x.blob.core.windows.net/c/f.json?sv=9&se=8&sp=r&sig=z")
+
+
+def test_urls_api_never_splits_on_commas(cfg, store):
+    from fastapi.testclient import TestClient
+    from mrfx.api import create_app
+
+    client = TestClient(create_app(cfg, store))
+    url = "https://p.com/mrf/2026-07-01_Payer,-Inc._in-network.json.gz?ids=1,2"
+    r = client.post("/api/urls", json={"urls": url + "\n"}).json()
+    assert r == {"added": 1, "skipped": 0, "invalid": 0}
+    (rec,) = store.list_urls()
+    assert rec["url"] == url  # comma intact, one row
+
+
+def test_retry_failed_is_bulk_and_unbounded(cfg, store, server):
+    # failures beyond any display window must still be retried
+    for i in range(4):
+        add_urls(store, [f"{server}/missing_{i}.json.gz"])
+    drain(cfg, store)
+    assert store.url_queue_counts().get("failed") == 4
+    assert store.requeue_failed() == 4
+    assert store.url_queue_counts().get("queued") == 4
+
+
+def test_user_transition_guards(cfg, store, server):
+    add_urls(store, [f"{server}/rates.json.gz"])
+    drain(cfg, store)
+    (rec,) = store.list_urls()
+    assert rec["status"] == "done"
+    # done rows anchor duplicate detection — user actions must not touch them
+    assert store.set_url_status_by_id(rec["id"], "skipped") is False
+    assert store.set_url_status_by_id(rec["id"], "queued") is False
+    add_urls(store, [f"{server}/missing.json.gz"])
+    drain(cfg, store)
+    failed = next(r for r in store.list_urls() if "missing" in r["url"])
+    assert store.set_url_status_by_id(failed["id"], "queued") is True  # retry a failure
+
+
+def test_reexpanding_toc_does_not_undo_user_skip(cfg, store, server):
+    add_urls(store, [f"{server}/toc.json"])
+    drain(cfg, store)
+    child = next(r for r in store.list_urls() if dedup_key(r["url"]) == dedup_key(f"{server}/rates.json.gz"))
+    # user skips the (done) child? not allowed; simulate skipping a queued one:
+    # force it back to skipped state directly to model an explicit user cancel
+    with store.write_lock, store.connect() as con:
+        con.execute("UPDATE url_queue SET status='skipped' WHERE id = ?", [child["id"]])
+    # re-adding the TOC re-queues the TOC row itself but must NOT revive the
+    # skipped child during expansion
+    with store.write_lock, store.connect() as con:
+        con.execute("UPDATE url_queue SET status='failed' WHERE dedup_key = ?",
+                    [dedup_key(f"{server}/toc.json")])
+    add_urls(store, [f"{server}/toc.json"])
+    drain(cfg, store)
+    child_after = next(r for r in store.list_urls() if r["id"] == child["id"])
+    assert child_after["status"] == "skipped"
+    # but pasting the child's URL DIRECTLY revives it
+    add_urls(store, [f"{server}/rates.json.gz"])
+    child_after = next(r for r in store.list_urls() if r["id"] == child["id"])
+    assert child_after["status"] == "queued"
+
+
+def test_add_urls_expands_month_placeholder(cfg, store):
+    import datetime as dt
+
+    add_urls(store, ["https://x.com/{FIRST_OF_MONTH}_payer_index.json"])
+    (rec,) = store.list_urls()
+    first = dt.date.today().replace(day=1).isoformat()
+    assert rec["url"] == f"https://x.com/{first}_payer_index.json"
 
 
 def test_filename_for_is_safe_and_distinct():

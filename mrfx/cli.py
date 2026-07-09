@@ -113,15 +113,30 @@ def cmd_add(cfg: MrfxConfig, args) -> int:
 
     try:
         r = _httpx.post(f"http://localhost:{cfg.port}/api/urls",
-                        json={"urls": urls}, timeout=10)
+                        json={"urls": urls}, timeout=30)
         if r.status_code == 200:
             d = r.json()
             print(f"handed to the running dashboard: {d['added']} queued, "
                   f"{d['skipped']} already known, {d['invalid']} not URLs")
+            if args.retry_failed:
+                rf = _httpx.post(f"http://localhost:{cfg.port}/api/urls/retry-failed", timeout=30)
+                print(f"re-queued {rf.json().get('requeued', 0)} previously failed URL(s)"
+                      if rf.status_code == 200 else
+                      "could not re-queue failed URLs on the server — retry them in the Files tab")
             print(f"watch progress at http://localhost:{cfg.port} → Files tab")
             return 0
-    except _httpx.HTTPError:
-        pass  # no server running — process locally below
+        # something answered on our port but not correctly — do NOT open the
+        # same database from a second process (two workers would fight)
+        print(f"a server on port {cfg.port} answered HTTP {r.status_code} — "
+              "not adding locally while it may own the database. Check the "
+              "dashboard, or stop it and re-run this command.")
+        return 1
+    except _httpx.ConnectError:
+        pass  # nothing listening — safe to process locally below
+    except _httpx.HTTPError as e:
+        print(f"a server on port {cfg.port} is running but didn't accept the links ({e}). "
+              "Not adding locally while it may own the database — check the dashboard.")
+        return 1
 
     from .fetch import add_urls, run_queue
 
@@ -129,15 +144,11 @@ def cmd_add(cfg: MrfxConfig, args) -> int:
     counts = add_urls(store, urls)
     print(f"queued {counts['added']} URL(s) "
           f"({counts['skipped']} already known, {counts['invalid']} not URLs)")
-    pending = store.url_queue_counts().get("queued", 0)
-    if pending == 0 and not args.retry_failed:
-        return 0
     if args.retry_failed:
-        n = 0
-        for rec in store.list_urls():
-            if rec["status"] == "failed" and store.set_url_status_by_id(rec["id"], "queued"):
-                n += 1
+        n = store.requeue_failed()
         print(f"re-queued {n} previously failed URL(s)")
+    if store.url_queue_counts().get("queued", 0) == 0:
+        return 0
     print("downloading and ingesting (one file at a time — Ctrl-C to stop; "
           "re-running `mrfx add` resumes where it left off)...")
     processed = run_queue(cfg, store, drain=True, progress_bar=_make_cli_progress())

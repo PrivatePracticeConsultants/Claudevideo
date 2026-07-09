@@ -794,9 +794,28 @@ const KIND_LABEL = {
 async function loadUrlQueue() {
   let d;
   try { d = await api("/api/urls"); } catch { return; }
-  const wrap = $("#url-wrap"), body = $("#url-body");
-  if (!d.urls.length) { wrap.style.display = "none"; return; }
+  const wrap = $("#url-wrap"), body = $("#url-body"), countsEl = $("#url-counts");
+  if (!d.urls.length) { wrap.style.display = "none"; countsEl.textContent = ""; return; }
   wrap.style.display = "block";
+  const c = d.counts || {};
+  const total = Object.values(c).reduce((a, b) => a + b, 0);
+  const parts = ["queued", "downloading", "expanding", "ingesting", "done", "skipped"]
+    .filter((k) => c[k]).map((k) => `${fmtInt(c[k])} ${k}`);
+  if (c.failed) parts.push(`<span class="err-text">${fmtInt(c.failed)} failed</span>`);
+  countsEl.innerHTML = parts.join(" · ") +
+    (total > d.urls.length ? ` <span class="muted">(showing the newest ${fmtInt(d.urls.length)} of ${fmtInt(total)} links)</span>` : "");
+  if (c.failed) {
+    const btn = document.createElement("button");
+    btn.className = "btn";
+    btn.style.cssText = "padding:1px 8px;font-size:11.5px;margin-left:8px";
+    btn.textContent = "retry all failed";
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      await fetch("/api/urls/retry-failed", { method: "POST" });
+      loadUrlQueue();
+    });
+    countsEl.appendChild(btn);
+  }
   body.innerHTML = d.urls.map((u) => {
     const short = u.url.split("?")[0].replace(/^https?:\/\//, "");
     const shown = short.length > 78 ? short.slice(0, 38) + "…" + short.slice(-37) : short;

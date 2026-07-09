@@ -136,9 +136,11 @@ Not every link is a rate file: **allowed-amounts** files (out-of-network
 billed/allowed averages) contain no negotiated rates, and the app tells you so
 and skips them rather than loading junk. The app also spots **duplicates**:
 Blue plans publish copies of each other's national files, so when a link
-downloads to the exact same bytes as a file you already loaded, it's skipped
-with a note saying which link it duplicates — your database stays clean even
-if you paste every state's index.
+downloads to the exact same bytes as a file another link already loaded, it's
+skipped with a note saying which link it duplicates — your database stays
+clean even if you paste every state's index. (Duplicate detection compares
+link downloads to each other; files you copy into `data/inbox/` by hand
+aren't part of that comparison.)
 
 **Don't want to hunt for links at all?** The app ships with a catalog of
 payer sources it has already been tested against (20 auto-queueable —

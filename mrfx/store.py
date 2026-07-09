@@ -382,9 +382,12 @@ class Store:
                 "SELECT id, status FROM url_queue WHERE dedup_key = ? LIMIT 1", [dedup_key]
             ).fetchone()
             if exists:
-                if exists[1] in ("failed", "skipped"):
-                    # re-adding a failed/skipped link retries it (fresh URL may
-                    # carry a new signature) — never a duplicate row
+                # Re-adding a failed link retries it (a fresh URL may carry a
+                # new signature). A 'skipped' row is only revived by a DIRECT
+                # paste (parent_id None): re-expanding a TOC must not undo the
+                # user's explicit skip or re-download a known duplicate.
+                retryable = ("failed",) if parent_id is not None else ("failed", "skipped")
+                if exists[1] in retryable:
                     con.execute(
                         "UPDATE url_queue SET url = ?, status = 'queued', error = NULL, "
                         "progress = 0, bytes_done = 0 WHERE id = ?",
@@ -435,13 +438,15 @@ class Store:
             )
 
     def list_urls(self, limit: int = 500) -> list[dict]:
-        """Rows the user pasted (top-level, no parent) are always returned and
-        listed first — a 764-file index expansion must not push the row the
-        user is watching out of the window — then the newest `limit`
-        discovered children."""
+        """Rows the user pasted (top-level, no parent) are listed first — a
+        764-file index expansion must not push the row the user is watching
+        out of the window — then the newest `limit` discovered children.
+        Top-level rows are capped at `limit` too, so a thousand-line
+        `--file urls.txt` paste can't make the payload unbounded."""
         with self.connect() as con:
             rows = con.execute(
-                "SELECT * FROM url_queue WHERE parent_id IS NULL ORDER BY id DESC"
+                "SELECT * FROM url_queue WHERE parent_id IS NULL ORDER BY id DESC LIMIT ?",
+                [limit],
             ).fetchall()
             rows += con.execute(
                 "SELECT * FROM url_queue WHERE parent_id IS NOT NULL ORDER BY id DESC LIMIT ?",
@@ -490,13 +495,40 @@ class Store:
                 )
         return n
 
+    # legal transitions for user actions: retry revives dead rows; skip
+    # cancels rows not yet claimed by the worker. Nothing may touch 'done'
+    # (its content_sha anchors duplicate detection) or in-flight rows (the
+    # worker's final write would silently overwrite the change anyway).
+    _USER_TRANSITIONS = {
+        "queued": ("failed", "skipped"),
+        "skipped": ("queued", "failed"),
+    }
+
     def set_url_status_by_id(self, url_id: int, status: str) -> bool:
+        allowed_from = self._USER_TRANSITIONS.get(status)
+        if allowed_from is None:
+            return False
         with self.write_lock, self.connect() as con:
-            r = con.execute("SELECT 1 FROM url_queue WHERE id = ?", [url_id]).fetchone()
-            if not r:
+            r = con.execute("SELECT status FROM url_queue WHERE id = ?", [url_id]).fetchone()
+            if not r or r[0] not in allowed_from:
                 return False
-            con.execute("UPDATE url_queue SET status = ?, error = NULL WHERE id = ?", [status, url_id])
+            con.execute(
+                "UPDATE url_queue SET status = ?, error = NULL, progress = 0, bytes_done = 0 "
+                "WHERE id = ?", [status, url_id])
             return True
+
+    def requeue_failed(self) -> int:
+        """Bulk retry: every failed row back to queued in ONE statement — the
+        per-row path capped at list_urls' window silently stranded failures
+        beyond the newest 500. Returns rows re-queued."""
+        with self.write_lock, self.connect() as con:
+            n = con.execute("SELECT count(*) FROM url_queue WHERE status = 'failed'").fetchone()[0]
+            if n:
+                con.execute(
+                    "UPDATE url_queue SET status = 'queued', error = NULL, "
+                    "progress = 0, bytes_done = 0 WHERE status = 'failed'"
+                )
+        return n
 
     def drop_rates_part(self, source_file: str) -> None:
         path = self.rates_dir / f"{file_key(source_file)}.parquet"

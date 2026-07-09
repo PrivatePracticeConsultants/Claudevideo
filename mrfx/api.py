@@ -560,15 +560,22 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     # -- URL-drop queue (paste links, the app does the rest) -------------------
 
     @app.post("/api/urls")
-    async def urls_add(request: Request):
+    def urls_add(body: dict):
+        # sync def on purpose: enqueueing takes the store's write lock, and a
+        # sync route runs in the threadpool instead of blocking the event loop
         from .fetch import add_urls
 
-        body = await request.json()
         raw = body.get("urls") or []
         if isinstance(raw, str):
-            raw = raw.replace(",", "\n").splitlines()
+            # one link per line — commas are legal INSIDE URLs (signed query
+            # strings), so never split on them
+            raw = raw.splitlines()
         counts = add_urls(store, [str(u) for u in raw])
         return counts
+
+    @app.post("/api/urls/retry-failed")
+    def urls_retry_failed():
+        return {"requeued": store.requeue_failed()}
 
     @app.get("/api/urls")
     def urls_list():
@@ -593,14 +600,15 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     @app.post("/api/urls/{url_id}/retry")
     def urls_retry(url_id: int):
         if not store.set_url_status_by_id(url_id, "queued"):
-            raise HTTPException(404, "no such queued URL")
+            raise HTTPException(409, "only failed or skipped links can be retried "
+                                     "(this row may have just started or already finished)")
         return {"status": "queued"}
 
     @app.post("/api/urls/{url_id}/cancel")
     def urls_cancel(url_id: int):
-        # in-flight downloads finish their current file; queued ones are skipped
         if not store.set_url_status_by_id(url_id, "skipped"):
-            raise HTTPException(404, "no such queued URL")
+            raise HTTPException(409, "only queued or failed links can be skipped "
+                                     "(this row may have just started or already finished)")
         return {"status": "skipped"}
 
     @app.post("/api/files/{filename}/confirm")

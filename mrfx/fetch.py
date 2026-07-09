@@ -37,12 +37,28 @@ log = logging.getLogger(__name__)
 RETRYABLE_STATUS = {408, 425, 429, 500, 502, 503, 504}
 
 
+# Query params that carry a signature/expiry rather than identity. Dropping
+# only these (not the whole query) keeps signed CDN re-pastes deduped while
+# still distinguishing download endpoints like ?file=a.json vs ?file=b.json.
+_VOLATILE_QUERY = re.compile(
+    r"^(expires|signature|key-pair-id|awsaccesskeyid|x-amz-.*|token|sig|se|sp|sv|sr|st|ss|srt|spr|sip|skoid|sktid|skt|ske|sks|skv|rscd|rsct)$",
+    re.I,
+)
+
+
 def dedup_key(url: str) -> str:
     """Identity of a file independent of volatile signed-query params. Signed
-    CDN URLs (mrf.bcbs.com, S3 presigned) differ only in Expires/Signature.
+    CDN URLs (mrf.bcbs.com, S3 presigned, Azure SAS) differ only in their
+    signature params; identity params (e.g. ?file=...) are kept, sorted.
     Host is case-insensitive; the path is NOT (S3 keys are case-sensitive)."""
     parts = urlsplit(url)
-    return f"{parts.scheme.lower()}://{parts.netloc.lower()}{parts.path}"
+    kept = sorted(
+        f"{k}={v}"
+        for k, _, v in (p.partition("=") for p in parts.query.split("&") if p)
+        if k and not _VOLATILE_QUERY.match(k)
+    )
+    query = ("?" + "&".join(kept)) if kept else ""
+    return f"{parts.scheme.lower()}://{parts.netloc.lower()}{parts.path}{query}"
 
 
 def filename_for(url: str) -> str:
@@ -170,12 +186,13 @@ class DownloadError(Exception):
 
 
 def download(cfg: MrfxConfig, url: str, dest: Path, progress_cb=None,
-             max_bytes: int | None = None) -> str:
-    """Stream a URL to `dest` (atomic via .part). Returns the sha256 hex of
-    the downloaded bytes (used to detect the same file arriving under a
-    different domain). Retries transient failures; raises DownloadError on a
-    terminal failure (e.g. expired signed URL) or when the payload exceeds
-    max_bytes (the confirm_over_gb guard)."""
+             max_bytes: int | None = None) -> tuple[str, str]:
+    """Stream a URL to `dest` (atomic via .part). Returns (sha256_hex,
+    final_url) — the hash detects the same file arriving under a different
+    domain, and final_url (post-redirect) is the correct base for resolving
+    relative links found inside the payload. Retries transient failures;
+    raises DownloadError on a terminal failure (e.g. expired signed URL) or
+    when the payload exceeds max_bytes (the confirm_over_gb guard)."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     part = dest.with_suffix(dest.suffix + ".part")
     last_exc: Exception | None = None
@@ -212,7 +229,8 @@ def download(cfg: MrfxConfig, url: str, dest: Path, progress_cb=None,
                 if max_bytes and total and total > max_bytes:
                     raise too_big(total)
                 done = 0
-                last_report = 0.0
+                last_report = 0
+                last_report_t = 0.0
                 sha = hashlib.sha256()
                 with open(part, "wb") as f:
                     for chunk in resp.iter_bytes(chunk_size=1 << 20):
@@ -221,13 +239,19 @@ def download(cfg: MrfxConfig, url: str, dest: Path, progress_cb=None,
                         done += len(chunk)
                         if max_bytes and done > max_bytes:
                             raise too_big(done)  # no Content-Length header case
-                        if progress_cb and (done - last_report >= 8 << 20):
+                        # dashboard polls every ~4s; don't hammer the store
+                        # with a write-locked UPDATE for every 8 MB of a fast
+                        # link — report on bytes AND wall-clock
+                        now = time.monotonic()
+                        if progress_cb and done - last_report >= 8 << 20 and now - last_report_t >= 1.5:
                             progress_cb(done, total)
                             last_report = done
+                            last_report_t = now
                 if progress_cb:
                     progress_cb(done, total)
+                final_url = str(resp.url)
             part.replace(dest)
-            return sha.hexdigest()
+            return sha.hexdigest(), final_url
         except DownloadError as e:
             last_exc = e
             if not e.retryable:
@@ -332,6 +356,13 @@ def looks_like_html(path: Path) -> bool:
     return bool(_HTML_SNIFF_RE.search(head))
 
 
+# web-app plumbing that ends in .json but is never payer data — a Gatsby
+# build's own preload/manifest links would otherwise be queued as "files"
+_FRAMEWORK_ASSET_RE = re.compile(
+    r"(/page-data/|/manifest\.json|\.webmanifest|/favicon|/asset-manifest|/app-data\.json)", re.I
+)
+
+
 def extract_links_from_page(path: Path, base_url: str, max_files: int) -> list[str]:
     """Best effort: pull .json / .json.gz links out of an HTML page (payer
     directory listings like mrfdata.hmhs.com are plain pages full of file
@@ -347,6 +378,8 @@ def extract_links_from_page(path: Path, base_url: str, max_files: int) -> list[s
         for m in pattern.finditer(text):
             u = urljoin(base_url, m.group("u"))
             if not u.lower().startswith(("http://", "https://")):
+                continue
+            if _FRAMEWORK_ASSET_RE.search(u):
                 continue
             k = dedup_key(u)
             if k in seen:
@@ -383,6 +416,8 @@ def crawl_gatsby_hub(cfg: MrfxConfig, page_url: str, max_files: int) -> list[str
     def walk(node):
         """Collect node['url'] JSON links, skipping entries the payer marked
         suppressed (files pulled from publication — honesty over volume)."""
+        if len(out) >= max_files:
+            return
         if isinstance(node, dict):
             u = node.get("url")
             if isinstance(u, str) and re.search(r"\.json(\.gz)?(\?|$)", u, re.I) \
@@ -428,10 +463,11 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
     url = rec["url"]
     dest = cfg.downloads_dir / filename_for(url)
     try:
-        store.update_url(url_id, status="downloading")
-        content_sha = download(cfg, url, dest,
-                               progress_cb=lambda d, t: store.url_progress(url_id, d, t),
-                               max_bytes=int(cfg.confirm_over_gb * 1e9))
+        # (row already marked 'downloading' by next_queued_url when claimed)
+        content_sha, final_url = download(
+            cfg, url, dest,
+            progress_cb=lambda d, t: store.url_progress(url_id, d, t),
+            max_bytes=int(cfg.confirm_over_gb * 1e9))
     except DownloadError as e:
         log.warning("url %s download failed: %s", url, e)
         store.update_url(url_id, status="failed", error=str(e))
@@ -460,7 +496,9 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
     if pf.file_type == "toc":
         store.update_url(url_id, status="expanding", kind="toc")
         try:
-            child_urls, truncated = expand_toc(dest, cfg.max_toc_files, base_url=url)
+            # relative locations resolve against where the TOC actually came
+            # from (post-redirect), not the possibly-redirected pasted URL
+            child_urls, truncated = expand_toc(dest, cfg.max_toc_files, base_url=final_url)
         except Exception as e:  # noqa: BLE001
             store.update_url(url_id, status="failed", kind="toc", error=f"TOC parse failed: {e}")
             dest.unlink(missing_ok=True)
@@ -495,12 +533,16 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
         # file. If it's HTML, try to lift the file links off it; otherwise
         # explain what to do in plain language.
         if looks_like_html(dest):
-            links = extract_links_from_page(dest, url, cfg.max_toc_files)
+            links = extract_links_from_page(dest, final_url, cfg.max_toc_files)
             dest.unlink(missing_ok=True)
-            if not links:
-                # empty page — maybe a Gatsby-built MRF hub (Sapphire etc.)
-                # whose file list ships as static JSON next to the page
-                links = crawl_gatsby_hub(cfg, url, cfg.max_toc_files)
+            # a Gatsby-built MRF hub (Sapphire etc.) may render some links in
+            # the HTML and ship the rest as static JSON next to the page —
+            # probe it either way and merge (one cheap request for non-hubs)
+            seen_keys = {dedup_key(u) for u in links}
+            for hub_url in crawl_gatsby_hub(cfg, final_url, cfg.max_toc_files):
+                if dedup_key(hub_url) not in seen_keys and len(links) < cfg.max_toc_files:
+                    seen_keys.add(dedup_key(hub_url))
+                    links.append(hub_url)
             if links:
                 added = 0
                 for cu in links:
@@ -554,10 +596,14 @@ def _cleanup_raw(cfg: MrfxConfig, path: Path) -> None:
 
 
 def add_urls(store: Store, urls: list[str]) -> dict:
-    """Enqueue a batch of user-supplied URLs. Returns counts."""
+    """Enqueue a batch of user-supplied URLs. Returns counts. {FIRST_OF_MONTH}
+    placeholders (copied from config/known_sources.yaml) resolve here too, so
+    a pasted catalog line works the same as `mrfx add --known`."""
+    from .known_sources import expand_placeholders
+
     added = skipped = invalid = 0
     for raw in urls:
-        u = raw.strip()
+        u = expand_placeholders(raw.strip())
         if not u:
             continue
         if not u.lower().startswith(("http://", "https://")):
@@ -584,6 +630,8 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
                 break
             if stop is not None:
                 stop.wait(3.0)
+            else:
+                time.sleep(3.0)  # no stop event: idle politely, never busy-spin
             continue
         try:
             process_url_record(cfg, store, rec, progress_bar=progress_bar)
