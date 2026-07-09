@@ -233,6 +233,16 @@ Three link kinds are auto-detected:
   `max_toc_files` (verified live: 86,722 files listed; the UHC Missouri
   Provider Network file ingested 88,649 rows).
 
+**Parallel processing**: `parallel_ingests` in `config/mrfx.yaml` (shipped as
+3, auto-capped at your CPU cores minus one) parses that many files at once —
+each in its own OS process, while the database stays strictly single-writer
+in the main process. Verified: 2 workers ran the same 3 UHC files 1.5x faster
+with byte-identical row counts; a parser worker killed mid-parse restarts
+automatically and the file retries; killing the whole app mid-run resumes
+cleanly on restart with no duplicate rows. DuckDB's rollup memory is capped
+(3 GB, spills to disk) so analytics rebuilds can't balloon into the OOM
+killer on large stores.
+
 Every ingest is itself a **scan for your codes**: the parser streams the file
 and extracts only the billing codes in `config/mrfx.yaml` (`codes.cpt_codes`),
 so a file without them honestly records 0 rows. For huge two-pass files the

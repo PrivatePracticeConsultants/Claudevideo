@@ -50,6 +50,10 @@ class MrfxConfig(BaseModel):
     # files without filling the disk.
     downloads_dir: Path = Path("data/downloads")
     delete_raw_after_ingest: bool = True   # keep only the compact Parquet (re-downloadable)
+    # queue workers parsing files at the same time (each is a separate CPU
+    # process; the database is only ever written by the main process). 1 = one
+    # file at a time; 2-3 roughly doubles/triples throughput on 4+ cores.
+    parallel_ingests: int = 1
     max_toc_files: int = 2000              # cap child files enqueued from one TOC
     download_timeout_seconds: float = 900.0
     download_retries: int = 4

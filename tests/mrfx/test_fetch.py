@@ -264,6 +264,33 @@ def test_react_portal_root_found_via_blobs_probe(cfg, store, http_root):
         httpd.shutdown()
 
 
+def test_parallel_ingest_matches_serial(cfg, store, server, http_root, tmp_path):
+    # parallel_ingests=2: two parser processes, DB writes stay in this process.
+    # Outputs must match the serial path exactly.
+    import gzip as _gzip
+    import json as _json
+
+    doc = _json.loads((FIXTURES / "innetwork_mixed.json").read_text())
+    doc["reporting_entity_name"] = "Second Payer LLC"
+    (http_root / "rates_b.json.gz").write_bytes(_gzip.compress(_json.dumps(doc).encode()))
+    cfg.parallel_ingests = 2
+    add_urls(store, [f"{server}/rates.json.gz", f"{server}/rates_b.json.gz",
+                     f"{server}/companion.json"])
+    drain(cfg, store)
+    recs = {dedup_key(r["url"]): r for r in store.list_urls()}
+    a = recs[dedup_key(f"{server}/rates.json.gz")]
+    b = recs[dedup_key(f"{server}/rates_b.json.gz")]
+    assert a["status"] == "done" and b["status"] == "done"
+    assert a["rows_emitted"] == b["rows_emitted"] > 0  # same fixture -> same rows
+    with store.connect() as con:
+        total = con.execute("SELECT count(*) FROM rates").fetchone()[0]
+        payers = {r[0] for r in con.execute("SELECT DISTINCT payer FROM rates").fetchall()}
+        dedup = con.execute("SELECT count(*) FROM rates_dedup").fetchone()[0]
+    assert total == a["rows_emitted"] + b["rows_emitted"]
+    assert "Second Payer LLC" in payers and dedup > 0
+    assert not any(f.name.endswith(".progress") for f in cfg.downloads_dir.iterdir())
+
+
 def test_rollups_rebuilt_once_queue_drains(cfg, store, server):
     # queue ingests defer the (expensive, full) rollup rebuild; it must still
     # run when the queue goes idle so dashboards see the new data

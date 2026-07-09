@@ -775,29 +775,38 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
         log.info("resumed %d URL(s) left mid-flight by a previous run", recovered)
     processed = 0
     ingests_pending_rollup = 0
+    import threading
+    state = threading.Lock()
 
     def rebuild_now():
         nonlocal ingests_pending_rollup
-        log.info("updating analytics rollups (%d newly ingested file(s))...", ingests_pending_rollup)
+        with state:
+            n = ingests_pending_rollup
+        if not n:
+            return
+        log.info("updating analytics rollups (%d newly ingested file(s))...", n)
         try:
             store.rebuild_rollups()
         except Exception:  # noqa: BLE001 — rollups retry on the next batch
             log.exception("rollup rebuild failed; will retry after the next file")
             return
-        ingests_pending_rollup = 0
+        with state:
+            ingests_pending_rollup -= n
 
     # Pipeline: a downloader thread prefetches the NEXT file while the main
     # loop parses the current one — network and CPU overlap instead of taking
     # turns. At most PREFETCH_AHEAD files sit fetched-but-unprocessed on disk,
     # so disk stays bounded exactly as before (plus one file).
-    import threading
-
     dl_stop = threading.Event()
+
+    # keep every parser fed: allow one fetched file per worker plus one spare
+    prefetch_ahead = max(PREFETCH_AHEAD,
+                         int(getattr(cfg, "parallel_ingests", 1) or 1) + 1)
 
     def downloader():
         while not dl_stop.is_set() and (stop is None or not stop.is_set()):
             counts = store.url_queue_counts()
-            if counts.get("fetched", 0) >= PREFETCH_AHEAD:
+            if counts.get("fetched", 0) >= prefetch_ahead:
                 dl_stop.wait(0.5)
                 continue
             rec = store.next_queued_url()
@@ -813,35 +822,84 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
     dl_thread = threading.Thread(target=downloader, daemon=True, name="mrfx-prefetch")
     dl_thread.start()
 
-    try:
-        while stop is None or not stop.is_set():
+    # Processor side: parallel_ingests threads each claim a fetched file and
+    # run it through process_url_record. With parallel_ingests > 1 a process
+    # pool does the CPU-heavy parsing (ingest_file dispatches to it), so the
+    # threads mostly wait — the GIL never serializes the parsing itself. All
+    # DuckDB writes happen in THIS process; workers only compute.
+    parallel = max(1, min(int(getattr(cfg, "parallel_ingests", 1) or 1),
+                          max(1, (os.cpu_count() or 2) - 1)))
+    pool = None
+    if parallel > 1:
+        from . import ingest as _ingest_mod
+
+        pool = _ingest_mod.ParsePoolManager(parallel)
+        _ingest_mod.set_parse_pool(pool)
+        log.info("parallel ingest: %d parser worker process(es)", parallel)
+
+    active = 0
+
+    def processor():
+        nonlocal processed, ingests_pending_rollup, active
+        while not dl_stop.is_set() and (stop is None or not stop.is_set()):
+            with state:
+                active += 1
             rec = store.next_fetched_url()
             if rec is None:
-                counts = store.url_queue_counts()
-                in_flight = counts.get("queued", 0) + counts.get("downloading", 0) + counts.get("fetched", 0)
-                if in_flight == 0:
-                    if ingests_pending_rollup:
-                        rebuild_now()
-                    if drain:
-                        break
-                if stop is not None:
-                    stop.wait(0.5 if in_flight else 3.0)
-                else:
-                    time.sleep(0.5 if in_flight else 3.0)
+                with state:
+                    active -= 1
+                dl_stop.wait(0.4)
                 continue
             try:
-                if process_url_record(cfg, store, rec, progress_bar=progress_bar,
-                                      rebuild_rollups=False):
-                    ingests_pending_rollup += 1
-            except Exception:  # noqa: BLE001 — a bad URL must never kill the worker
-                log.exception("url worker: unexpected error on %s", rec.get("url"))
-                store.update_url(rec["id"], status="failed", error="unexpected worker error")
-            processed += 1
-            if ingests_pending_rollup >= ROLLUP_BATCH_FILES:
+                ok = False
+                try:
+                    ok = process_url_record(
+                        cfg, store, rec,
+                        progress_bar=progress_bar if parallel == 1 else None,
+                        rebuild_rollups=False)
+                except Exception:  # noqa: BLE001 — a bad URL must never kill the worker
+                    log.exception("url worker: unexpected error on %s", rec.get("url"))
+                    store.update_url(rec["id"], status="failed", error="unexpected worker error")
+                with state:
+                    processed += 1
+                    if ok:
+                        ingests_pending_rollup += 1
+            finally:
+                with state:
+                    active -= 1
+
+    proc_threads = [threading.Thread(target=processor, daemon=True, name=f"mrfx-proc-{i}")
+                    for i in range(parallel)]
+    for t in proc_threads:
+        t.start()
+
+    try:
+        while stop is None or not stop.is_set():
+            counts = store.url_queue_counts()
+            with state:
+                busy = active
+                pend = ingests_pending_rollup
+            in_flight = (counts.get("queued", 0) + counts.get("downloading", 0)
+                         + counts.get("fetched", 0) + busy)
+            if pend >= ROLLUP_BATCH_FILES or (in_flight == 0 and pend):
                 rebuild_now()
+                continue
+            if in_flight == 0 and drain:
+                break
+            if stop is not None:
+                stop.wait(0.5 if in_flight else 3.0)
+            else:
+                time.sleep(0.5 if in_flight else 3.0)
     finally:
         dl_stop.set()
+        for t in proc_threads:
+            t.join(timeout=cfg.download_timeout_seconds + 60)
         dl_thread.join(timeout=cfg.download_timeout_seconds + 30)
+        if pool is not None:
+            from . import ingest as _ingest_mod
+
+            _ingest_mod.set_parse_pool(None)
+            pool.shutdown()
     if ingests_pending_rollup:
         rebuild_now()  # stop was set mid-batch — don't leave dashboards stale
     return processed

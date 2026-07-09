@@ -36,6 +36,12 @@ payer_name_map:
   "BCBSMI": "BCBS Michigan"
   "bcbsla": "BCBS Louisiana"
 
+# Files parsed at the same time when grinding pasted links (each is its own
+# CPU process; the database stays single-writer, and a died worker restarts
+# automatically). Automatically capped at your CPU cores minus one, so 3 is
+# safe to leave as-is on any machine; set 1 to process strictly one at a time.
+parallel_ingests: 3
+
 inbox_dir: data/inbox
 processed_dir: data/processed
 failed_dir: data/failed

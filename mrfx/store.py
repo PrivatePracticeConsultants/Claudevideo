@@ -221,6 +221,12 @@ class Store:
         try:
             con.execute(f"SET temp_directory = '{self._tmp_dir}'")
             con.execute("SET preserve_insertion_order = false")
+            # DuckDB's default memory limit is ~80% of system RAM; a rollup
+            # rebuild over tens of millions of rows will happily balloon to
+            # that before spilling — enough to get the process OOM-killed
+            # when anything else is running. Cap it hard: the spill path is
+            # fast and the rest of the app stays streaming/constant-memory.
+            con.execute("SET memory_limit = '3GB'")
         except duckdb.Error:  # older duckdb without these knobs
             pass
         return con
@@ -349,6 +355,22 @@ class Store:
             with self.connect() as con:
                 self._register_views(con)
         return path
+
+    def finalize_rates_part(self, source_file: str, tmp_path: Path, rows_written: int) -> None:
+        """Adopt a parquet part written OUTSIDE this store (a parallel parse
+        worker writes to a temp path with no DB access; only this process
+        touches DuckDB). Mirrors RatesPartWriter's atomic finish."""
+        path = self.rates_dir / f"{file_key(source_file)}.parquet"
+        tmp = Path(tmp_path)
+        with self.write_lock:
+            if rows_written:
+                path.unlink(missing_ok=True)
+                tmp.replace(path)
+            else:
+                tmp.unlink(missing_ok=True)
+                path.unlink(missing_ok=True)  # re-ingest that now yields 0 rows
+            with self.connect() as con:
+                self._register_views(con)
 
     def rates_part_writer(self, source_file: str) -> "RatesPartWriter":
         """Streaming writer: accept row batches and flush them to the part
@@ -754,7 +776,9 @@ class RatesPartWriter:
     def __init__(self, store: "Store", source_file: str):
         self.store = store
         self.path = store.rates_dir / f"{file_key(source_file)}.parquet"
-        self.tmp = store.rates_dir / f".{file_key(source_file)}.tmp.parquet"
+        # NOT *.parquet: the rates view binds a glob over rates_dir, and a
+        # half-written temp matching it would break concurrent readers
+        self.tmp = store.rates_dir / f".{file_key(source_file)}.parquet.tmp"
         self._writer: pq.ParquetWriter | None = None
         self.rows_written = 0
 

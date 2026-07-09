@@ -7,7 +7,9 @@ A bad file quarantines with a visible error; it never raises out of
 from __future__ import annotations
 
 import datetime as dt
+import json
 import logging
+import os
 import shutil
 from pathlib import Path
 
@@ -77,12 +79,13 @@ class _ProgressTracker:
             self.on_bar(self.chunks_total, self.chunks_total, 100.0)
 
 
-def qa_report(store: Store, result: ParseResult, source_file: str) -> dict:
+def qa_report(store: Store, qa_counters: dict, source_file: str) -> dict:
     """Per-file data-quality summary (§7A.3). The incremental counters come from
-    the parser; the aggregate metrics (outliers, duplicate ratio, TIN=NPI count)
-    are computed in DuckDB over the written part so this scales to files with
-    millions of rows without holding them in Python memory."""
-    qa = result.qa.to_dict()
+    the parser (as a plain dict, so parallel workers can ship them across
+    processes); the aggregate metrics (outliers, duplicate ratio, TIN=NPI
+    count) are computed in DuckDB over the written part so this scales to
+    files with millions of rows without holding them in Python memory."""
+    qa = dict(qa_counters)
     total = qa["rows"]
     part = store.rates_dir / f"{file_key(source_file)}.parquet"
     outliers = tin_npi = distinct_facts = 0
@@ -137,6 +140,234 @@ def _finish_file(cfg: MrfxConfig, path: Path, ok: bool) -> None:
         dest = cfg.processed_dir / path.name
         cfg.processed_dir.mkdir(parents=True, exist_ok=True)
         shutil.move(str(path), dest)
+
+
+# ---------------------------------------------------------------------------
+# Parallel parse workers (parallel_ingests > 1). A worker is a separate OS
+# process that does PURE computation: read the file, write rows to its own
+# temp parquet, report progress through a sidecar JSON file. It never touches
+# DuckDB — the main process owns every database write, which is what makes
+# running several workers safe.
+# ---------------------------------------------------------------------------
+
+_PARSE_POOL = None
+
+
+class ParsePoolManager:
+    """Self-healing wrapper around a ProcessPoolExecutor. If a worker process
+    dies (OOM killer, crash, someone kills it), the executor is permanently
+    'broken' — every later submit raises. Rebuild it and let the caller retry
+    the one file that was in flight; the queue never gets poisoned."""
+
+    def __init__(self, max_workers: int):
+        import threading
+
+        self._max_workers = max_workers
+        self._lock = threading.Lock()
+        self._pool = self._make()
+
+    def _make(self):
+        import concurrent.futures
+        import multiprocessing
+
+        return concurrent.futures.ProcessPoolExecutor(
+            max_workers=self._max_workers,
+            mp_context=multiprocessing.get_context("spawn"))
+
+    def submit(self, fn, *args):
+        with self._lock:
+            return self._pool.submit(fn, *args)
+
+    def heal(self) -> None:
+        """Replace a broken executor (no-op if another thread already did)."""
+        import concurrent.futures
+
+        with self._lock:
+            broken = getattr(self._pool, "_broken", False)
+            if broken:
+                log.warning("a parser worker process died — restarting the worker pool")
+                try:
+                    self._pool.shutdown(wait=False, cancel_futures=True)
+                except Exception:  # noqa: BLE001
+                    pass
+                self._pool = self._make()
+
+    def shutdown(self) -> None:
+        with self._lock:
+            self._pool.shutdown(wait=True, cancel_futures=True)
+
+
+def set_parse_pool(pool) -> None:
+    """Install/remove the shared parse pool (run_queue owns its lifetime)."""
+    global _PARSE_POOL
+    _PARSE_POOL = pool
+
+
+def get_parse_pool():
+    return _PARSE_POOL
+
+
+def _parse_worker(cfg: MrfxConfig, path_str: str, name: str, header_defaults: dict,
+                  external_refs: dict, est: int, compressed_bytes: int,
+                  tmp_out: str, progress_path: str) -> dict:
+    """Runs in a child process. Returns a picklable summary; raises on failure
+    (the parent marks the file failed)."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from .store import RATES_SCHEMA
+
+    path = Path(path_str)
+    file_chunks = max(1, -(-max(compressed_bytes, 1) // CHUNK_COMPRESSED_BYTES))
+    big = (est or 0) >= LARGE_FILE_UNCOMPRESSED_BYTES
+    passes = 2 if big else 1
+    chunks_total = file_chunks * passes
+    state = {"pass": 0, "last": -1}
+
+    def report(compressed_read: int) -> None:
+        in_pass = min(file_chunks, compressed_read // CHUNK_COMPRESSED_BYTES)
+        chunk = state["pass"] * file_chunks + in_pass
+        if chunk == state["last"]:
+            return
+        state["last"] = chunk
+        try:
+            tmp = progress_path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump({"chunks_done": chunk, "chunks_total": chunks_total,
+                           "pct": min(100.0, 100.0 * chunk / chunks_total)}, f)
+            os.replace(tmp, progress_path)
+        except OSError:
+            pass  # progress is cosmetic
+
+    keep_ref_ids = None
+    if big:
+        with open_stream(path, progress_cb=report) as stream:
+            keep_ref_ids, target_items = skim_needed_ref_ids(cfg, stream)
+        if target_items == 0:
+            return {"short_circuit": True, "chunks_total": chunks_total}
+        state["pass"] = 1
+
+    rows_written = 0
+    writer = None
+
+    def sink(rows: list[dict]) -> None:
+        nonlocal rows_written, writer
+        if not rows:
+            return
+        table = pa.Table.from_pylist(rows, schema=RATES_SCHEMA)
+        if writer is None:
+            writer = pq.ParquetWriter(tmp_out, RATES_SCHEMA)
+        writer.write_table(table)
+        rows_written += len(rows)
+
+    parser = InNetworkParser(
+        cfg, source_file=name, external_refs=external_refs,
+        sink=sink, header_defaults=header_defaults, keep_ref_ids=keep_ref_ids,
+    )
+    try:
+        with open_stream(path, progress_cb=report) as stream:
+            result = parser.parse(stream)
+    finally:
+        if writer is not None:
+            writer.close()
+    return {
+        "short_circuit": False,
+        "chunks_total": chunks_total,
+        "payer": result.payer,
+        "schema_version": result.schema_version,
+        "last_updated_on": result.last_updated_on,
+        "ref_groups_skipped": result.ref_groups_skipped,
+        "qa": result.qa.to_dict(),
+        "rows": result.qa.rows,
+        "rows_written": rows_written,
+    }
+
+
+def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight,
+                              pool, progress_bar, rebuild_rollups: bool) -> dict:
+    """Dispatch the CPU-heavy parse to a worker process; this (main-process)
+    thread does all store writes: progress mirroring, part adoption, upserts."""
+    import concurrent.futures
+
+    name = path.name
+    external_refs = store.load_provider_refs(pf.payer) if pf.payer else {}
+    header_defaults = {
+        "payer": pf.payer, "schema_version": pf.schema_version,
+        "last_updated_on": pf.last_updated_on,
+    }
+    tmp_out = store.rates_dir / f".{file_key(name)}.parquet.tmp"  # must not match *.parquet
+    progress_path = str(path) + ".progress"
+
+    def dispatch_and_wait() -> dict:
+        tmp_out.unlink(missing_ok=True)
+        fut = pool.submit(
+            _parse_worker, cfg, str(path), name, header_defaults, external_refs,
+            pf.est_uncompressed_bytes or 0, pf.compressed_bytes, str(tmp_out), progress_path,
+        )
+        last = -1
+        while True:
+            try:
+                return fut.result(timeout=2.0)
+            except concurrent.futures.TimeoutError:
+                try:
+                    prog = json.loads(Path(progress_path).read_text())
+                except (OSError, ValueError):
+                    continue
+                if prog.get("chunks_done", -1) != last:
+                    last = prog["chunks_done"]
+                    store.update_progress(name, prog["pct"], chunks_done=prog["chunks_done"],
+                                          chunks_total=prog["chunks_total"])
+                    if progress_bar:
+                        progress_bar(prog["chunks_done"], prog["chunks_total"], prog["pct"])
+
+    try:
+        try:
+            payload = dispatch_and_wait()
+        except concurrent.futures.process.BrokenProcessPool:
+            # a worker died mid-parse (crash / OOM kill). Heal the pool and
+            # retry this file once — the download is still on disk.
+            log.warning("%s: parser worker died mid-parse; restarting pool and retrying once", name)
+            if hasattr(pool, "heal"):
+                pool.heal()
+            payload = dispatch_and_wait()
+    except Exception:
+        tmp_out.unlink(missing_ok=True)
+        raise
+    finally:
+        Path(progress_path).unlink(missing_ok=True)
+        Path(progress_path + ".tmp").unlink(missing_ok=True)
+
+    store.update_progress(name, 100.0, chunks_done=payload["chunks_total"],
+                          chunks_total=payload["chunks_total"])
+    if payload["short_circuit"]:
+        msg = ("scanned: none of the target billing codes appear in this "
+               "file — extraction pass skipped")
+        store.upsert_file(name, payer=pf.payer, status="done", rows_emitted=0,
+                          qa={"rows": 0, "messages": [msg]}, finished_at=_now())
+        _finish_file(cfg, path, ok=True)
+        log.info("%s: %s", name, msg)
+        return {"status": "done", "rows": 0, "payer": pf.payer, "note": msg}
+
+    store.finalize_rates_part(name, tmp_out, payload["rows_written"])
+    if rebuild_rollups:
+        store.rebuild_rollups()
+    store.upsert_file(
+        name,
+        payer=payload["payer"],
+        schema_version=payload["schema_version"],
+        last_updated_on=payload["last_updated_on"],
+        status="done",
+        rows_emitted=payload["rows"],
+        ref_groups_skipped=payload["ref_groups_skipped"],
+        qa=qa_report(store, payload["qa"], name),
+        finished_at=_now(),
+    )
+    _finish_file(cfg, path, ok=True)
+    if payload["ref_groups_skipped"]:
+        log.warning("%s: %d rate groups skipped — missing provider reference file",
+                    name, payload["ref_groups_skipped"])
+    return {"status": "done", "rows": payload["rows"],
+            "ref_groups_skipped": payload["ref_groups_skipped"]}
 
 
 def ingest_file(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight | None = None,
@@ -200,10 +431,17 @@ def ingest_file(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight | None 
             requeued = requeue_skipped(cfg, store, payer)
             return {"status": "done", "refs": len(refs), "requeued": requeued}
 
-        # in-network rate file — stream rows straight into the parquet part in
-        # batches (constant memory, §8.1). The parser is seeded with the header
-        # preflight already sniffed, so batched rows carry the right payer/month
-        # even though the parser flushes before EOF.
+        # in-network rate file. When a parse pool is installed (queue worker
+        # with parallel_ingests > 1) the CPU-heavy parse runs in a child
+        # process; this thread keeps every store write. Same code path
+        # otherwise (inbox watcher, CLI, tests): stream rows straight into
+        # the parquet part in batches (constant memory, §8.1). The parser is
+        # seeded with the header preflight already sniffed, so batched rows
+        # carry the right payer/month even though the parser flushes early.
+        pool = get_parse_pool()
+        if pool is not None:
+            return _ingest_in_network_pooled(cfg, store, path, pf, pool,
+                                             progress_bar, rebuild_rollups)
         external_refs = store.load_provider_refs(pf.payer) if pf.payer else {}
         header_defaults = {
             "payer": pf.payer, "schema_version": pf.schema_version,
@@ -267,7 +505,7 @@ def ingest_file(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight | None 
             status="done",
             rows_emitted=result.qa.rows,
             ref_groups_skipped=result.ref_groups_skipped,
-            qa=qa_report(store, result, name),
+            qa=qa_report(store, result.qa.to_dict(), name),
             finished_at=_now(),
         )
         _finish_file(cfg, path, ok=True)
