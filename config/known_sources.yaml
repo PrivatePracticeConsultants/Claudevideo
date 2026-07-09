@@ -375,8 +375,10 @@ sources:
       The universal-brand page embeds two CloudFront indexes
       (bcbssc_index.json — 702 files, and instil_index.json). The CDN 403s
       non-browser user agents; the app retries with a browser UA
-      automatically. Verified cascade: page -> 2 indexes -> rate files.
-      First ingests: INSTIL HEALTH 714,798 rows; BCBSSC 833 rows.
+      automatically. Verified cascade: page -> 2 indexes -> rate files
+      (incl. signed bcbssc.mrf.bcbs.com links). First ingests: BCBSSC main
+      book 423,333 rows; INSTIL HEALTH 714,798; BCBS Puerto Rico
+      (cross-hosted) 97,011; BCBSSC AI-CB 833.
 
   - name: Priority Health (Michigan)
     url: https://www.priorityhealth.com/machine-readable-files
