@@ -222,8 +222,11 @@ sources:
       (2026-07-09): Oxford Liberty Network (0.58 GB compressed) 5,590,693
       rows; River Valley Heritage (1.70 GB / ~17 GB uncompressed) 9,832,954
       rows; River Valley PS1-77_EL (3.39 GB / ~34 GB uncompressed, 102
-      chunks) 29,688,251 rows — the largest single file tested, parsed at
-      <1 GB memory with a 30 MB state file ingesting in parallel alongside. Files named "...NDC..." are drug
+      chunks) 29,688,251 rows; Charter 617 (8.85 GB / ~88 GB uncompressed,
+      264 chunks, above the default confirm_over_gb=5 guard — raised to 12
+      for the test) 63,987,440 rows in 3.8 h, surviving a kill/resume and a
+      disk-full episode mid-run — the largest single file tested. Parses at
+      <1 GB memory. Files named "...NDC..." are drug
       pricing and are skipped at queue time. Employer plans under an opt-out
       book live at private-transparency-in-coverage.uhc.com.
 
@@ -248,7 +251,9 @@ sources:
       TOC URLs — the app lifts the manifest paths off the page and follows
       them, so the signatures are always fresh (no browser needed). Verified
       cascade: page -> 2 manifests -> main TOC (134 files) + CO TOC (9) ->
-      signed rate files. First ingest: Sagamore Health Network 747,340 rows.
+      signed rate files. Verified ingests: Sagamore Health Network 747,340
+      rows; Upper Midwest Affiliation Partner / HealthPartners (532 MB zip,
+      ~5.2 GB uncompressed) 19,792,712 rows.
 
   - name: Aetna / CVS Health
     url: https://health1.aetna.com/app/public/#/one/insurerCode=AETNACVS_I&brandCode=ALICFI/machine-readable-transparency-in-coverage
