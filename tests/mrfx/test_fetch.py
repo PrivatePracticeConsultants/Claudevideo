@@ -389,3 +389,22 @@ def test_filename_for_is_safe_and_distinct():
     assert a.endswith(".json.gz")
     c = filename_for("https://x.com/app/public/")
     assert c.endswith(".json")         # page-ish URL still gets a usable name
+
+
+def test_store_connect_retries_transient_lock(cfg, store, monkeypatch):
+    # a user opening the .duckdb file read-only (CLI/BI tool) can hold the
+    # file lock for an instant; connect() must ride it out, not crash a run
+    import duckdb as _duckdb
+
+    real_connect = _duckdb.connect
+    fails = {"n": 2}
+
+    def flaky(path, *a, **k):
+        if isinstance(path, str) and path.endswith("mrfx.duckdb") and fails["n"] > 0:
+            fails["n"] -= 1
+            raise _duckdb.IOException("IO Error: Could not set lock on file (simulated)")
+        return real_connect(path, *a, **k)
+
+    monkeypatch.setattr("mrfx.store.duckdb.connect", flaky)
+    assert store.url_queue_counts() is not None  # survives two failed attempts
+    assert fails["n"] == 0

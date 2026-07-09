@@ -805,19 +805,23 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
 
     def downloader():
         while not dl_stop.is_set() and (stop is None or not stop.is_set()):
-            counts = store.url_queue_counts()
-            if counts.get("fetched", 0) >= prefetch_ahead:
-                dl_stop.wait(0.5)
-                continue
-            rec = store.next_queued_url()
-            if rec is None:
-                dl_stop.wait(0.5)
-                continue
             try:
-                fetch_url_record(cfg, store, rec)
-            except Exception:  # noqa: BLE001 — downloader must never die
-                log.exception("prefetch: unexpected error on %s", rec.get("url"))
-                store.update_url(rec["id"], status="failed", error="unexpected download error")
+                counts = store.url_queue_counts()
+                if counts.get("fetched", 0) >= prefetch_ahead:
+                    dl_stop.wait(0.5)
+                    continue
+                rec = store.next_queued_url()
+                if rec is None:
+                    dl_stop.wait(0.5)
+                    continue
+                try:
+                    fetch_url_record(cfg, store, rec)
+                except Exception:  # noqa: BLE001 — downloader must never die
+                    log.exception("prefetch: unexpected error on %s", rec.get("url"))
+                    store.update_url(rec["id"], status="failed", error="unexpected download error")
+            except Exception:  # noqa: BLE001 — even store hiccups must not kill the loop
+                log.exception("prefetch: transient store error; retrying shortly")
+                dl_stop.wait(2.0)
 
     dl_thread = threading.Thread(target=downloader, daemon=True, name="mrfx-prefetch")
     dl_thread.start()
@@ -844,7 +848,14 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
         while not dl_stop.is_set() and (stop is None or not stop.is_set()):
             with state:
                 active += 1
-            rec = store.next_fetched_url()
+            try:
+                rec = store.next_fetched_url()
+            except Exception:  # noqa: BLE001 — transient store error: back off, never die
+                log.exception("url worker: transient store error while claiming; retrying")
+                with state:
+                    active -= 1
+                dl_stop.wait(2.0)
+                continue
             if rec is None:
                 with state:
                     active -= 1
@@ -875,7 +886,12 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
 
     try:
         while stop is None or not stop.is_set():
-            counts = store.url_queue_counts()
+            try:
+                counts = store.url_queue_counts()
+            except Exception:  # noqa: BLE001 — coordinator survives store hiccups
+                log.exception("queue coordinator: transient store error; retrying")
+                (stop.wait if stop is not None else time.sleep)(2.0)
+                continue
             with state:
                 busy = active
                 pend = ingests_pending_rollup

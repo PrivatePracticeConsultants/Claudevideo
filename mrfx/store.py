@@ -22,6 +22,7 @@ import hashlib
 import json
 import re
 import threading
+import time
 from pathlib import Path
 
 import duckdb
@@ -217,7 +218,23 @@ class Store:
         Each connection is told to spill to a temp dir under the store so the
         big rollup GROUP BYs over national files (millions of rows) never OOM —
         DuckDB streams to disk under memory pressure instead."""
-        con = duckdb.connect(str(self.db_path))
+        # Transient lock conflicts are a fact of life: the user may open the
+        # .duckdb file read-only (CLI, a BI tool) while the app runs, and even
+        # a millisecond-held external lock lands exactly between our
+        # short-lived connections sometimes. Retry briefly instead of letting
+        # one unlucky race kill an hours-long ingest run.
+        last_exc: Exception | None = None
+        for attempt in range(6):
+            try:
+                con = duckdb.connect(str(self.db_path))
+                break
+            except duckdb.IOException as e:
+                if "lock" not in str(e).lower():
+                    raise
+                last_exc = e
+                time.sleep(min(0.2 * (2 ** attempt), 3.0))
+        else:
+            raise last_exc  # 6 attempts over ~6s — something genuinely holds it
         try:
             con.execute(f"SET temp_directory = '{self._tmp_dir}'")
             con.execute("SET preserve_insertion_order = false")
