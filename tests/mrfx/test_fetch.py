@@ -209,9 +209,12 @@ def test_gatsby_hub_page_crawled(cfg, store, tmp_path):
 
 def test_blobs_listing_api_expands_rate_files_first(cfg, store, server, http_root):
     # UHC/Optum-style portal API: {"blobs": [{name, downloadUrl}, ...]}.
-    # Rate files queue first; allowed-amounts entries are not queued at all.
+    # Rate files queue first; allowed-amounts and drug-pricing (NDC /
+    # prescription-drugs) entries are not queued at all.
     (http_root / "blobs.json").write_text(json.dumps({"blobs": [
         {"name": "2026-07-01_x_allowed-amounts.json.gz", "downloadUrl": f"{server}/nope.json.gz"},
+        {"name": "2026-07-01_p_PPO-NDC_in-network-rates.json.gz", "downloadUrl": f"{server}/drugs.json.gz"},
+        {"name": "2026-07-01_q_prescription-drugs_in-network.json.gz", "downloadUrl": f"{server}/drugs2.json.gz"},
         {"name": "2026-07-01_employer_index.json", "downloadUrl": f"{server}/companion.json"},
         {"name": "2026-07-01_net_in-network-rates.json.gz", "downloadUrl": f"{server}/rates.json.gz"},
     ]}))
@@ -223,6 +226,8 @@ def test_blobs_listing_api_expands_rate_files_first(cfg, store, server, http_roo
     assert listing["child_count"] == 2  # allowed-amounts entry never queued
     assert recs[dedup_key(f"{server}/rates.json.gz")]["status"] == "done"
     assert dedup_key(f"{server}/nope.json.gz") not in recs
+    assert dedup_key(f"{server}/drugs.json.gz") not in recs    # NDC file not queued
+    assert dedup_key(f"{server}/drugs2.json.gz") not in recs   # prescription-drugs not queued
     # in-network child was queued (lower id) before the index child
     assert recs[dedup_key(f"{server}/rates.json.gz")]["id"] < recs[dedup_key(f"{server}/companion.json")]["id"]
 

@@ -228,9 +228,18 @@ Three link kinds are auto-detected:
 - **UHC/Optum React portals** (`transparency-in-coverage.uhc.com` /
   `.optum.com`): pasting the portal root probes the platform's well-known
   file-listing API (`/api/v1/*/blobs/`) and expands the response like an
-  index — in-network rate files queue first, allowed-amounts entries are
-  never queued, and the cap is `max_toc_files` (verified live: 86,722 files
-  listed; the UHC Missouri Provider Network file ingested 88,649 rows).
+  index — in-network rate files queue first, allowed-amounts and drug-pricing
+  (NDC / prescription-drugs) entries are never queued, and the cap is
+  `max_toc_files` (verified live: 86,722 files listed; the UHC Missouri
+  Provider Network file ingested 88,649 rows).
+
+Every ingest is itself a **scan for your codes**: the parser streams the file
+and extracts only the billing codes in `config/mrfx.yaml` (`codes.cpt_codes`),
+so a file without them honestly records 0 rows. For huge two-pass files the
+scan pass now **short-circuits**: if pass 1 finds none of your target codes
+anywhere in the file, the extraction pass is skipped and the file is marked
+done with "none of the target billing codes appear in this file" — half the
+parse cost on every no-match multi-GB file.
 
 The queue (`url_queue` in the store) processes **one file at a time** in the
 background, dedupes re-pasted links (signed-query variants included), and also

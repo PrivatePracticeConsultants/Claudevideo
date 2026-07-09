@@ -248,8 +248,9 @@ def test_skim_finds_only_target_cited_refs(cfg):
              "negotiated_rates": [{"provider_references": [40, 41], "negotiated_prices": [{"negotiated_rate": 1}]}]},
         ],
     }
-    needed = skim_needed_ref_ids(cfg, io.BytesIO(_json.dumps(data).encode()))
+    needed, target_items = skim_needed_ref_ids(cfg, io.BytesIO(_json.dumps(data).encode()))
     assert needed == {3, 8}  # 40/41 belong to a non-target code and are excluded
+    assert target_items == 1  # exactly one item carried a target code
 
 
 def test_completely_valueless_item_is_survivable(cfg, store):

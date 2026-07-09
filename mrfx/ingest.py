@@ -226,9 +226,23 @@ def ingest_file(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight | None 
             store.upsert_file(name, chunks_total=progress.chunks_total, progress=0.0)
             progress.set_pass(0)
             with open_stream(path, progress_cb=progress.update) as stream:
-                keep_ref_ids = skim_needed_ref_ids(cfg, stream)
-            log.info("%s: pass 1 done — %d target-cited references to keep in memory",
-                     name, len(keep_ref_ids))
+                keep_ref_ids, target_items = skim_needed_ref_ids(cfg, stream)
+            log.info("%s: pass 1 done — %d target-code items, %d target-cited references",
+                     name, target_items, len(keep_ref_ids))
+            if target_items == 0:
+                # the scan IS the answer: none of the user's billing codes
+                # appear anywhere in this file, so the extraction pass would
+                # read gigabytes to emit zero rows — skip it and say so
+                progress.finish()
+                msg = ("scanned: none of the target billing codes appear in this "
+                       "file — extraction pass skipped")
+                store.upsert_file(
+                    name, payer=pf.payer, status="done", rows_emitted=0,
+                    qa={"rows": 0, "messages": [msg]}, finished_at=_now(),
+                )
+                _finish_file(cfg, path, ok=True)
+                log.info("%s: %s", name, msg)
+                return {"status": "done", "rows": 0, "payer": pf.payer, "note": msg}
             progress.set_pass(1)
         else:
             progress = None

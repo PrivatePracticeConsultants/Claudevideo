@@ -167,3 +167,31 @@ def test_dedup_view_counts_sources(cfg, store):
             """
         ).fetchone()
     assert row[0] == 2
+
+
+def test_big_file_scan_skips_extraction_when_no_target_codes(cfg, store, monkeypatch):
+    # two-pass path: when pass 1 finds NONE of the target codes, pass 2 is
+    # skipped entirely and the file is honestly recorded as done/0 rows
+    import json as _json
+    import mrfx.ingest as ing
+
+    monkeypatch.setattr(ing, "LARGE_FILE_UNCOMPRESSED_BYTES", 0)  # force two-pass
+    doc = _json.loads((FIXTURES / "innetwork_mixed.json").read_text())
+    for item in doc["in_network"]:
+        item["billing_code"] = "99213"  # office visit — not a therapy code
+    path = cfg.inbox_dir / "no_target_codes.json"
+    path.write_text(_json.dumps(doc))
+    result = ing.ingest_file(cfg, store, path)
+    assert result["status"] == "done" and result["rows"] == 0
+    assert "extraction pass skipped" in result["note"]
+    st = store.file_status("no_target_codes.json")
+    assert st["status"] == "done" and (st.get("rows_emitted") or 0) == 0
+
+
+def test_big_file_two_pass_still_extracts_target_codes(cfg, store, monkeypatch):
+    import mrfx.ingest as ing
+
+    monkeypatch.setattr(ing, "LARGE_FILE_UNCOMPRESSED_BYTES", 0)  # force two-pass
+    p = drop(cfg, "innetwork_mixed.json")
+    result = ing.ingest_file(cfg, store, p)
+    assert result["status"] == "done" and result["rows"] > 0

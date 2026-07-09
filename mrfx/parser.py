@@ -446,15 +446,21 @@ class InNetworkParser:
         self._flush()
 
 
-def skim_needed_ref_ids(cfg: MrfxConfig, stream, progress_marker=None) -> set[int]:
+def skim_needed_ref_ids(cfg: MrfxConfig, stream, progress_marker=None) -> tuple[set[int], int]:
     """Fast first pass over a huge in-network file: find the provider_reference
     ids that the TARGET billing codes actually cite. The (millions-strong)
     provider_references table and every non-target in_network item are skipped
     without materializing, so this pass is cheap and bounded — the returned set
     is the therapist-relevant subset the extraction pass keeps in memory.
+
+    Returns (needed_ref_ids, target_items_seen). target_items_seen counts
+    in_network items whose billing code IS in the target set — when it is 0
+    the file provably contains none of the codes the user cares about, so the
+    caller can skip the extraction pass entirely (this scan was the answer).
     """
     code_set = cfg.code_set
     needed: set[int] = set()
+    target_items = 0
     builder = None
     skipping = False
     cur_code_ok = False
@@ -482,6 +488,8 @@ def skim_needed_ref_ids(cfg: MrfxConfig, stream, progress_marker=None) -> set[in
                     if rid is not None:
                         needed.add(rid)
             if event == "end_map" and prefix == "in_network.item":
+                if not skipping and cur_code_ok:
+                    target_items += 1
                 builder = None
                 skipping = False
                 cur_code_ok = False
@@ -489,7 +497,7 @@ def skim_needed_ref_ids(cfg: MrfxConfig, stream, progress_marker=None) -> set[in
         if event == "start_map" and prefix == "in_network.item":
             builder = object()  # sentinel: "inside an item"
             skipping = False
-    return needed
+    return needed, target_items
 
 
 def parse_provider_reference_file(cfg: MrfxConfig, stream) -> tuple[str, str | None, dict[int, list[PGroup]]]:

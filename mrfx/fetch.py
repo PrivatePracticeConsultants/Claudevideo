@@ -329,12 +329,20 @@ def expand_toc(path: Path, max_files: int, base_url: str = "") -> tuple[list[str
     return urls, truncated
 
 
+# drug-pricing rate files, named unambiguously in UHC/Optum listings
+# ("...PPO-NDC_in-network-rates...", "..._prescription-drugs.json.gz").
+# Bounded-token match so an employer literally named "NDC Corp" isn't caught.
+_DRUG_FILE_RE = re.compile(r"(^|[-_])ndc([-_.]|$)|prescription-drug", re.I)
+
+
 def expand_blobs_listing(path: Path, max_files: int, base_url: str = "") -> tuple[list[str], bool]:
     """Expand a transparency-portal blobs listing ({"blobs": [{"name",
     "downloadUrl"}, ...]} — UHC / Optum style). Rate files first: the UHC
     listing carries ~7k in-network files, ~67k per-employer index files that
     mostly re-list the same shared network files, and ~12k allowed-amounts
-    files (no rates — not queued at all). Returns (urls, truncated)."""
+    files (no rates — not queued at all). In-network files named as DRUG
+    pricing (NDC / prescription-drugs) are skipped too — no medical CPT/HCPCS
+    rates in them. Returns (urls, truncated)."""
     rate_files: list[str] = []
     indexes: list[str] = []
     seen: set[str] = set()
@@ -355,11 +363,16 @@ def expand_blobs_listing(path: Path, max_files: int, base_url: str = "") -> tupl
             low = name.lower()
             if "allowed" in low:
                 continue  # out-of-network billed averages — no negotiated rates
+            is_rate_file = "in-network" in low
+            if is_rate_file and _DRUG_FILE_RE.search(low):
+                # NDC / prescription-drug pricing — no medical CPT/HCPCS rates;
+                # ingesting would only produce honest zero-row files
+                continue
             k = dedup_key(loc)
             if k in seen:
                 continue
             seen.add(k)
-            bucket = rate_files if "in-network" in low else indexes
+            bucket = rate_files if is_rate_file else indexes
             if len(bucket) < max_files:
                 bucket.append(loc)
             elif bucket is rate_files:
