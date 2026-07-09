@@ -329,6 +329,80 @@ def expand_toc(path: Path, max_files: int, base_url: str = "") -> tuple[list[str
     return urls, truncated
 
 
+def expand_blobs_listing(path: Path, max_files: int, base_url: str = "") -> tuple[list[str], bool]:
+    """Expand a transparency-portal blobs listing ({"blobs": [{"name",
+    "downloadUrl"}, ...]} — UHC / Optum style). Rate files first: the UHC
+    listing carries ~7k in-network files, ~67k per-employer index files that
+    mostly re-list the same shared network files, and ~12k allowed-amounts
+    files (no rates — not queued at all). Returns (urls, truncated)."""
+    rate_files: list[str] = []
+    indexes: list[str] = []
+    seen: set[str] = set()
+    truncated = False
+
+    with open_stream(path) as stream:
+        for item in ijson.items(stream, "blobs.item"):
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "")
+            loc = str(item.get("downloadUrl") or "").strip()
+            if not loc:
+                continue
+            if base_url and not loc.lower().startswith(("http://", "https://")):
+                loc = urljoin(base_url, loc)
+            if not loc.lower().startswith(("http://", "https://")):
+                continue
+            low = name.lower()
+            if "allowed" in low:
+                continue  # out-of-network billed averages — no negotiated rates
+            k = dedup_key(loc)
+            if k in seen:
+                continue
+            seen.add(k)
+            bucket = rate_files if "in-network" in low else indexes
+            if len(bucket) < max_files:
+                bucket.append(loc)
+            elif bucket is rate_files:
+                truncated = True
+    out = (rate_files + indexes)[:max_files]
+    if len(rate_files) + len(indexes) > len(out):
+        truncated = True
+    return out, truncated
+
+
+# Well-known transparency-portal listing APIs, probed (cheaply) when a pasted
+# page is HTML with no file links: the UHC/Optum React portals serve their
+# entire file list from these endpoints.
+_BLOBS_API_PATHS = ("/api/v1/uhc/blobs/", "/api/v1/oh/blobs/", "/api/v1/orx/blobs/")
+
+
+def probe_blobs_api(cfg: MrfxConfig, page_url: str) -> list[str]:
+    """Return the portal's blobs-API URL(s) if the page's origin serves one.
+    Reads only the first bytes of each candidate — the real listing (which can
+    run to tens of MB) is downloaded later through the normal queue."""
+    parts = urlsplit(page_url)
+    origin = f"{parts.scheme}://{parts.netloc}"
+    found: list[str] = []
+    try:
+        with _client(cfg) as client:
+            for p in _BLOBS_API_PATHS:
+                try:
+                    with client.stream("GET", origin + p) as resp:
+                        if resp.status_code != 200:
+                            continue
+                        head = b""
+                        for chunk in resp.iter_bytes(chunk_size=2048):
+                            head += chunk
+                            break
+                    if re.match(rb'\s*\{\s*"blobs"\s*:', head):
+                        found.append(origin + p)
+                except httpx.HTTPError:
+                    continue
+    except Exception as e:  # noqa: BLE001 — probe is best-effort
+        log.debug("blobs-api probe %s: %s", origin, e)
+    return found
+
+
 # ---------------------------------------------------------------------------
 # HTML pages (what a person pastes from their browser)
 # ---------------------------------------------------------------------------
@@ -456,6 +530,15 @@ def crawl_gatsby_hub(cfg: MrfxConfig, page_url: str, max_files: int) -> list[str
 # ---------------------------------------------------------------------------
 
 
+def _enqueue_children(store: Store, urls: list[str], parent_id: int) -> int:
+    """Queue discovered child URLs under their parent row; returns how many
+    were newly queued (dupes of rows already queued/done return None)."""
+    return sum(
+        1 for u in urls
+        if store.enqueue_url(u, dedup_key(u), parent_id=parent_id) is not None
+    )
+
+
 def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=None) -> None:
     """Download, classify, and route one queued URL. Never raises — failures
     are recorded on the queue row so the worker keeps going."""
@@ -493,20 +576,18 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
         dest.unlink(missing_ok=True)
         return
 
-    if pf.file_type == "toc":
+    if pf.file_type in ("toc", "blob_listing"):
         store.update_url(url_id, status="expanding", kind="toc")
+        expander = expand_toc if pf.file_type == "toc" else expand_blobs_listing
         try:
-            # relative locations resolve against where the TOC actually came
+            # relative locations resolve against where the index actually came
             # from (post-redirect), not the possibly-redirected pasted URL
-            child_urls, truncated = expand_toc(dest, cfg.max_toc_files, base_url=final_url)
+            child_urls, truncated = expander(dest, cfg.max_toc_files, base_url=final_url)
         except Exception as e:  # noqa: BLE001
-            store.update_url(url_id, status="failed", kind="toc", error=f"TOC parse failed: {e}")
+            store.update_url(url_id, status="failed", kind="toc", error=f"index parse failed: {e}")
             dest.unlink(missing_ok=True)
             return
-        added = 0
-        for cu in child_urls:
-            if store.enqueue_url(cu, dedup_key(cu), parent_id=url_id) is not None:
-                added += 1
+        added = _enqueue_children(store, child_urls, url_id)
         msg = f"index expanded: {len(child_urls)} files listed, {added} newly queued"
         if truncated:
             msg += f" (capped at max_toc_files={cfg.max_toc_files})"
@@ -518,7 +599,7 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
             # child_count on a done TOC row is how the dashboard says
             # "found N files inside, working through them"
             store.update_url(url_id, status="done", kind="toc", child_count=added, error=None)
-        dest.unlink(missing_ok=True)  # the TOC itself carries no rates
+        dest.unlink(missing_ok=True)  # the index itself carries no rates
         return
 
     if pf.file_type == "allowed_amounts":
@@ -543,11 +624,12 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
                 if dedup_key(hub_url) not in seen_keys and len(links) < cfg.max_toc_files:
                     seen_keys.add(dedup_key(hub_url))
                     links.append(hub_url)
+            if not links:
+                # React portals (UHC/Optum) serve their whole file list from a
+                # well-known API next to the page — probe before giving up
+                links = probe_blobs_api(cfg, final_url)
             if links:
-                added = 0
-                for cu in links:
-                    if store.enqueue_url(cu, dedup_key(cu), parent_id=url_id) is not None:
-                        added += 1
+                added = _enqueue_children(store, links, url_id)
                 log.info("%s — web page: found %d file links, %d newly queued", url, len(links), added)
                 store.update_url(url_id, status="done", kind="page", child_count=added, error=None)
             else:

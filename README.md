@@ -185,16 +185,17 @@ badge and are never displayed as authoritative; confirming a URL persists it to
 
 `config/known_sources.yaml` is a shipped catalog of every payer entry point
 this app has been live-tested against — each entry carries its verification
-date and what happened (files listed, rows ingested, quirks). 20 entries are
+date and what happened (files listed, rows ingested, quirks). 21 entries are
 **auto-queueable** (Highmark's 15 hosted Blue plans incl. FL/AZ/ID/MN/LA/NE,
-BCBS Mississippi's stable TOC, Centene/Ambetter's all-states page, and the
-Sapphire hubs of Blue KC, BCBS Michigan, and BCBS Louisiana); the rest are
-portals that need a browser click (UHC, Cigna, Aetna, Humana, HCSC,
-CareFirst, BCBS AL/TN/NC/SC/MA/RI/VT/KS, Arkansas, Wellmark, Horizon NJ,
-Premera, Regence, Kaiser, Oscar, Molina, Priority Health, HMSA, Blue Shield
-of CA, Excellus, Capital BC, IBX, BCBS MN — each probed and confirmed
-JavaScript-only) with instructions, plus Anthem/Elevance's national master
-index (10.5 GB — raise `confirm_over_gb` to use it). Monthly-dated URLs carry
+BCBS Mississippi's stable TOC, Centene/Ambetter's all-states page, the
+Sapphire hubs of Blue KC, BCBS Michigan, and BCBS Louisiana, and
+UnitedHealthcare's national portal); the rest are portals that need a
+browser click (Cigna, Aetna, Humana, HCSC, CareFirst, BCBS
+AL/TN/NC/SC/MA/RI/VT/KS, Arkansas, Wellmark, Horizon NJ, Premera, Regence,
+Kaiser, Oscar, Molina, Priority Health, HMSA, Blue Shield of CA, Excellus,
+Capital BC, IBX, BCBS MN — each probed and confirmed JavaScript-only) with
+instructions, plus Anthem/Elevance's national master index (10.5 GB — raise
+`confirm_over_gb` to use it). Monthly-dated URLs carry
 a `{FIRST_OF_MONTH}` placeholder resolved at queue time so the catalog never
 goes stale. Load them via `mrfx add --known`, the dashboard's **"Queue tested
 payer indexes"** button, or browse with **"Show tested sources"**
@@ -224,6 +225,12 @@ Three link kinds are auto-detected:
   app fetches the hub's static data the way the browser would and queues
   every TOC it lists, honoring the payer's `is_suppressed` flags (verified
   live: Blue KC → 2 TOCs → 674 files → 2,573,672 rows ingested).
+- **UHC/Optum React portals** (`transparency-in-coverage.uhc.com` /
+  `.optum.com`): pasting the portal root probes the platform's well-known
+  file-listing API (`/api/v1/*/blobs/`) and expands the response like an
+  index — in-network rate files queue first, allowed-amounts entries are
+  never queued, and the cap is `max_toc_files` (verified live: 86,722 files
+  listed; the UHC Missouri Provider Network file ingested 88,649 rows).
 
 The queue (`url_queue` in the store) processes **one file at a time** in the
 background, dedupes re-pasted links (signed-query variants included), and also

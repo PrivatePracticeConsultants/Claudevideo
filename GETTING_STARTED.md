@@ -143,10 +143,11 @@ link downloads to each other; files you copy into `data/inbox/` by hand
 aren't part of that comparison.)
 
 **Don't want to hunt for links at all?** The app ships with a catalog of
-payer sources it has already been tested against (20 auto-queueable —
+payer sources it has already been tested against (21 auto-queueable —
 Highmark's 15 hosted Blue plans, BCBS Mississippi, Centene/Ambetter's
-all-states page, and the Blue KC / BCBS Michigan / BCBS Louisiana hubs —
-plus notes for ~25 portals like UHC, Cigna, and Anthem). Click **"Show tested
+all-states page, the Blue KC / BCBS Michigan / BCBS Louisiana hubs, and
+UnitedHealthcare's national portal — plus notes for ~25 portals like Cigna
+and Anthem). Click **"Show tested
 sources"** on the Files tab to browse it, or **"Queue tested payer indexes"**
 to load them all — monthly-dated links are refreshed to the current month
 automatically. The catalog lives in `config/known_sources.yaml` with each

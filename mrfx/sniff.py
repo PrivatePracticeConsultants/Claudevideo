@@ -165,6 +165,11 @@ def _scan_header(stream: io.BufferedIOBase, pf: Preflight) -> None:
     elif "out_of_network" in top_keys:
         # CMS allowed-amounts file: billed/allowed averages, not negotiated rates
         pf.file_type = "allowed_amounts"
+    elif "blobs" in top_keys:
+        # transparency-portal file-listing API response (UHC / Optum):
+        # {"blobs": [{"name": ..., "downloadUrl": ...}, ...]} — an index of
+        # downloadable files, expanded like a TOC
+        pf.file_type = "blob_listing"
     elif top_keys:
         pf.file_type = "unknown"
 
@@ -228,6 +233,13 @@ def preflight(path: Path, cfg: MrfxConfig, store: Store | None = None) -> Prefli
         pf.messages.append(
             "This is an out-of-network allowed-amounts file (billed/allowed "
             "averages), not a negotiated-rates file — nothing to extract."
+        )
+        return pf
+    if pf.file_type == "blob_listing":
+        pf.verdict = "NOT A RATE FILE"
+        pf.messages.append(
+            "This is a portal file listing (blobs API response), not a rate "
+            "file; the files it lists will be queued automatically."
         )
         return pf
     if pf.file_type == "provider_reference":

@@ -207,6 +207,58 @@ def test_gatsby_hub_page_crawled(cfg, store, tmp_path):
         httpd.shutdown()
 
 
+def test_blobs_listing_api_expands_rate_files_first(cfg, store, server, http_root):
+    # UHC/Optum-style portal API: {"blobs": [{name, downloadUrl}, ...]}.
+    # Rate files queue first; allowed-amounts entries are not queued at all.
+    (http_root / "blobs.json").write_text(json.dumps({"blobs": [
+        {"name": "2026-07-01_x_allowed-amounts.json.gz", "downloadUrl": f"{server}/nope.json.gz"},
+        {"name": "2026-07-01_employer_index.json", "downloadUrl": f"{server}/companion.json"},
+        {"name": "2026-07-01_net_in-network-rates.json.gz", "downloadUrl": f"{server}/rates.json.gz"},
+    ]}))
+    add_urls(store, [f"{server}/blobs.json"])
+    drain(cfg, store)
+    recs = {dedup_key(r["url"]): r for r in store.list_urls()}
+    listing = recs[dedup_key(f"{server}/blobs.json")]
+    assert listing["status"] == "done" and listing["kind"] == "toc"
+    assert listing["child_count"] == 2  # allowed-amounts entry never queued
+    assert recs[dedup_key(f"{server}/rates.json.gz")]["status"] == "done"
+    assert dedup_key(f"{server}/nope.json.gz") not in recs
+    # in-network child was queued (lower id) before the index child
+    assert recs[dedup_key(f"{server}/rates.json.gz")]["id"] < recs[dedup_key(f"{server}/companion.json")]["id"]
+
+
+def test_react_portal_root_found_via_blobs_probe(cfg, store, http_root):
+    # a React portal page: no links in HTML, but /api/v1/uhc/blobs/ exists
+    root = http_root / "portal2"
+    (root / "api" / "v1" / "uhc" / "blobs").mkdir(parents=True)
+    (root / "index.html").write_text("<!doctype html><html><body><div id=root></div></body></html>")
+    (root / "rates.json.gz").write_bytes(gzip.compress((FIXTURES / "innetwork_mixed.json").read_bytes()))
+
+    class Handler(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **k):
+            super().__init__(*a, directory=str(root), **k)
+
+        def log_message(self, *a):
+            pass
+
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{httpd.server_address[1]}"
+    (root / "api" / "v1" / "uhc" / "blobs" / "index.html").write_text(json.dumps({"blobs": [
+        {"name": "n_in-network-rates.json.gz", "downloadUrl": f"{base}/rates.json.gz"},
+    ]}))
+    try:
+        add_urls(store, [base])
+        drain(cfg, store)
+        recs = {dedup_key(r["url"]): r for r in store.list_urls()}
+        portal = recs[dedup_key(base)]
+        assert portal["status"] == "done" and portal["kind"] == "page"
+        assert recs[dedup_key(f"{base}/rates.json.gz")]["status"] == "done"
+        assert recs[dedup_key(f"{base}/rates.json.gz")]["rows_emitted"] > 0
+    finally:
+        httpd.shutdown()
+
+
 def test_dedup_key_keeps_identity_params_drops_signature_params():
     # signed CDN re-pastes collapse to one row...
     a = dedup_key("https://x.mrf.bcbs.com/f.json.gz?&Expires=1&Signature=abc&Key-Pair-Id=K1")
