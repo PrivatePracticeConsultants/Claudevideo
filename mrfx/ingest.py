@@ -352,7 +352,7 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
 
     store.finalize_rates_part(name, tmp_out, payload["rows_written"])
     if rebuild_rollups:
-        store.rebuild_rollups()
+        _rebuild_rollups_best_effort(store, name)
     store.upsert_file(
         name,
         payer=payload["payer"],
@@ -370,6 +370,19 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
                     name, payload["ref_groups_skipped"])
     return {"status": "done", "rows": payload["rows"],
             "ref_groups_skipped": payload["ref_groups_skipped"]}
+
+
+def _rebuild_rollups_best_effort(store: Store, name: str) -> None:
+    """The parquet part is already durable when this runs: an analytics
+    rebuild failing (disk pressure, memory) must NOT fail the file — hours of
+    parsing would be retried for data that already landed. Rollups refresh on
+    the next successful rebuild, same contract as the queue's batched path."""
+    try:
+        store.rebuild_rollups()
+    except Exception:  # noqa: BLE001
+        log.exception(
+            "%s: rollup rebuild failed — the file's rows are safely stored; "
+            "analytics will refresh on the next successful rebuild", name)
 
 
 def ingest_file(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight | None = None,
@@ -498,7 +511,7 @@ def ingest_file(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight | None 
         if progress is not None:
             progress.finish()
         if rebuild_rollups:
-            store.rebuild_rollups()
+            _rebuild_rollups_best_effort(store, name)
         store.upsert_file(
             name,
             payer=result.payer,

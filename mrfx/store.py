@@ -22,6 +22,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -92,6 +93,10 @@ def mask_tin(tin: str | None) -> str | None:
 # --- dedup / rollup queries ----------------------------------------------------
 
 # NPI-grain dedup (drill-down + npi grain toggle)
+# materialized rollups rebuild in hash-partitioned passes above this many raw
+# rows — identical output, bounded memory/temp-disk per pass
+ROLLUP_PARTITION_ROWS = 15_000_000
+
 DEDUP_QUERY = """
     SELECT payer, npi, billing_code,
            any_value(billing_code_type)                              AS billing_code_type,
@@ -125,6 +130,11 @@ DEDUP_QUERY = """
 
 # TIN-grain spine (§4). Distinct rates within the tuple become rate_variants;
 # negotiated_rate is the median of the distinct values (min/max kept).
+# {part} is a partition predicate (TRUE for a single-shot build): billing_code
+# is part of the GROUP BY key, so building the table in hash(billing_code)
+# slices yields byte-identical results at a fraction of the memory/temp-disk
+# peak — the DISTINCT/median aggregates are what exhausted a 23 GB temp dir
+# on a 64M-row store when run in one shot.
 BY_TIN_QUERY = """
     SELECT payer, tin_value, billing_code,
            any_value(tin_type)                                       AS tin_type,
@@ -150,6 +160,7 @@ BY_TIN_QUERY = """
            max(last_updated_on)                                      AS last_updated_on,
            any_value(expiration_date)                                AS expiration_date
     FROM rates
+    WHERE {part}
     GROUP BY payer, tin_value, billing_code,
              coalesce(array_to_string(billing_code_modifier, '|'), ''),
              billing_class,
@@ -159,11 +170,13 @@ BY_TIN_QUERY = """
 
 # TIN directory (§3.3a): display name from NPPES org names of the TIN's
 # Type-2 NPIs (mode); individual-billed TINs labeled by dominant person name.
+# {part} partitions on tin_value (every group key below is a single TIN, so
+# hash(tin_value) slices rebuild to identical results) — see BY_TIN_QUERY.
 TIN_DIRECTORY_QUERY = """
     WITH tin_npis AS (
         SELECT DISTINCT tin_value, npi
         FROM rates
-        WHERE tin_value IS NOT NULL AND NOT tin_is_really_npi
+        WHERE tin_value IS NOT NULL AND NOT tin_is_really_npi AND {part}
     ),
     joined AS (
         SELECT t.tin_value, t.npi, d.entity_type, d.org_name, d.state, d.city
@@ -178,7 +191,7 @@ TIN_DIRECTORY_QUERY = """
     ),
     disc AS (
         SELECT tin_value, mode(discipline) AS primary_discipline
-        FROM rates WHERE tin_value IS NOT NULL AND discipline != 'unspecified'
+        FROM rates WHERE tin_value IS NOT NULL AND discipline != 'unspecified' AND {part}
         GROUP BY tin_value
     )
     SELECT j.tin_value,
@@ -196,7 +209,8 @@ TIN_DIRECTORY_QUERY = """
     FROM joined j
     LEFT JOIN names n ON n.tin_value = j.tin_value
     LEFT JOIN disc d2 ON d2.tin_value = j.tin_value
-    LEFT JOIN (SELECT DISTINCT tin_value, tin_type FROM rates) r ON r.tin_value = j.tin_value
+    LEFT JOIN (SELECT DISTINCT tin_value, tin_type FROM rates WHERE {part}) r
+           ON r.tin_value = j.tin_value
     GROUP BY j.tin_value
 """
 
@@ -274,6 +288,12 @@ class Store:
             # 40% of RAM clamped to [2GB, 12GB]: kernel-safe headroom AND
             # room for stores with tens of millions of rows.
             con.execute(f"SET memory_limit = '{self._memory_limit_gb}GB'")
+            # cap spill so one huge rollup can NEVER fill the disk and take
+            # down unrelated work (downloads, other stores' writes): leave at
+            # least ~20% of current free space untouched. Exceeding the cap
+            # fails just that query — raw data is unaffected.
+            free_gb = shutil.disk_usage(self._tmp_dir).free / 1e9
+            con.execute(f"SET max_temp_directory_size = '{max(1, int(free_gb * 0.8))}GB'")
         except duckdb.Error:  # older duckdb without these knobs
             pass
         return con
@@ -379,8 +399,8 @@ class Store:
             con.execute(f"CREATE OR REPLACE VIEW rates AS SELECT * FROM (SELECT {cols}) WHERE FALSE")
         for view, tbl, q in (
             ("rates_dedup", "rates_dedup_tbl", DEDUP_QUERY),
-            ("rates_by_tin", "rates_by_tin_tbl", BY_TIN_QUERY),
-            ("tin_directory", "tin_directory_tbl", TIN_DIRECTORY_QUERY),
+            ("rates_by_tin", "rates_by_tin_tbl", BY_TIN_QUERY.format(part="TRUE")),
+            ("tin_directory", "tin_directory_tbl", TIN_DIRECTORY_QUERY.format(part="TRUE")),
         ):
             has = con.execute(
                 "SELECT count(*) FROM information_schema.tables WHERE table_name = ?", [tbl]
@@ -656,10 +676,32 @@ class Store:
         # queries always hit it WITH filters, which DuckDB pushes into the
         # parquet scan — milliseconds, no materialization. The TIN-grain
         # spine and directory have few groups and stay materialized.
+        #
+        # Big stores build the materialized rollups in HASH PARTITIONS: the
+        # partition column is part of each GROUP BY key, so N slices produce
+        # identical rows to a single shot while peaking at ~1/N the
+        # memory/temp-disk (a one-shot build over 64M rows exhausted a 23 GB
+        # temp dir; the same build in 15M-row slices fits comfortably).
+        import logging as _logging
+
+        log = _logging.getLogger(__name__)
         con.execute("DROP TABLE IF EXISTS rates_dedup_tbl")
         con.execute(f"CREATE OR REPLACE VIEW rates_dedup AS {DEDUP_QUERY}")
-        con.execute(f"CREATE OR REPLACE TABLE rates_by_tin_tbl AS {BY_TIN_QUERY}")
-        con.execute(f"CREATE OR REPLACE TABLE tin_directory_tbl AS {TIN_DIRECTORY_QUERY}")
+        n_rows = con.execute("SELECT count(*) FROM rates").fetchone()[0] or 0
+        parts = max(1, -(-n_rows // ROLLUP_PARTITION_ROWS))
+        for tbl, query, key in (
+            ("rates_by_tin_tbl", BY_TIN_QUERY, "billing_code"),
+            ("tin_directory_tbl", TIN_DIRECTORY_QUERY, "tin_value"),
+        ):
+            if parts == 1:
+                con.execute(f"CREATE OR REPLACE TABLE {tbl} AS {query.format(part='TRUE')}")
+                continue
+            con.execute(  # schema only; slices append below
+                f"CREATE OR REPLACE TABLE {tbl} AS {query.format(part='FALSE')}")
+            for i in range(parts):
+                log.info("rollup %s: partition %d/%d (%d rows total)", tbl, i + 1, parts, n_rows)
+                pred = f"hash({key}) % {parts} = {i}"
+                con.execute(f"INSERT INTO {tbl} {query.format(part=pred)}")
         con.execute("CREATE OR REPLACE VIEW rates_by_tin AS SELECT * FROM rates_by_tin_tbl")
         con.execute("CREATE OR REPLACE VIEW tin_directory AS SELECT * FROM tin_directory_tbl")
 

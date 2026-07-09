@@ -119,6 +119,39 @@ def test_tin_display_name_from_nppes(cfg, store):
     assert set(detail["tins"][0]["states"]) == {"MO"}
 
 
+def test_partitioned_rollup_identical_to_single_shot(cfg, store, monkeypatch):
+    # big stores rebuild rollups in hash-partitioned passes; the union of the
+    # slices must be row-identical to the one-shot build
+    import mrfx.store as st
+
+    data = innetwork(items=[
+        item("97110", [ (["1111111111", "1222222222"], "43-1111111", "ein", [(40.0, None), (45.0, None)]) ]),
+        item("97112", [ (["1333333333"], "43-2222222", "ein", [(50.0, ["GP"])]) ]),
+        item("97161", [ (["1444444444"], "43-3333333", "ein", [(80.0, None)]) ]),
+        item("92507", [ (["1555555555"], "43-4444444", "ein", [(60.0, None), (61.0, None)]) ]),
+    ])
+    p = make_fixture(cfg.inbox_dir, "parts.json", data)
+    ingest_file(cfg, store, p)
+    store.save_npi("1111111111", "Sunrise PT LLC", "261QP2000X", "Clinic", "Saint Louis", "MO",
+                   entity_type="NPI-2")
+
+    def snapshot():
+        with store.connect() as con:
+            tin = con.execute(
+                "SELECT * FROM rates_by_tin_tbl ORDER BY billing_code, tin_value, "
+                "modifier_set, negotiated_rate").fetchall()
+            dirs = con.execute("SELECT * FROM tin_directory_tbl ORDER BY tin_value").fetchall()
+        return tin, dirs
+
+    store.rebuild_rollups()          # single shot (4 items << threshold)
+    single = snapshot()
+    monkeypatch.setattr(st, "ROLLUP_PARTITION_ROWS", 2)  # force multiple passes
+    store.rebuild_rollups()
+    parted = snapshot()
+    assert parted == single
+    assert len(single[0]) > 0 and len(single[1]) > 0
+
+
 def test_ssn_pattern_tin_masked():
     assert looks_like_ssn("078051120")       # classic SSN-pattern (invalid EIN prefix 07)
     assert not looks_like_ssn("431111111")   # 43 is a valid EIN prefix
