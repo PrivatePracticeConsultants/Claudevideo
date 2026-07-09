@@ -253,7 +253,10 @@ sources:
       cascade: page -> 2 manifests -> main TOC (134 files) + CO TOC (9) ->
       signed rate files. Verified ingests: Sagamore Health Network 747,340
       rows; Upper Midwest Affiliation Partner / HealthPartners (532 MB zip,
-      ~5.2 GB uncompressed) 19,792,712 rows.
+      ~5.2 GB uncompressed) 19,792,712 rows; Cigna Health & Life Pathwell
+      OAP (1.6 GB / ~15.7 GB uncompressed) 243,358,952 rows — the largest
+      single file ingested so far; its 264M-row store rebuilt analytics
+      rollups in 44 min via 18 hash partitions.
 
   - name: Aetna / CVS Health
     url: https://health1.aetna.com/app/public/#/one/insurerCode=AETNACVS_I&brandCode=ALICFI/machine-readable-transparency-in-coverage
