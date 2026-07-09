@@ -5,6 +5,7 @@ import gzip
 import http.server
 import json
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -408,3 +409,63 @@ def test_store_connect_retries_transient_lock(cfg, store, monkeypatch):
     monkeypatch.setattr("mrfx.store.duckdb.connect", flaky)
     assert store.url_queue_counts() is not None  # survives two failed attempts
     assert fails["n"] == 0
+
+
+def test_download_resumes_partial_file(cfg, tmp_path):
+    # a .part left by a crash/network drop resumes via HTTP Range instead of
+    # re-downloading; the final hash must equal the full file's
+    import hashlib
+    import http.server as hs
+
+    payload = gzip.compress((FIXTURES / "innetwork_mixed.json").read_bytes()) * 3
+    served_ranges = []
+
+    class RangeHandler(hs.BaseHTTPRequestHandler):
+        def do_GET(self):
+            rng = self.headers.get("Range")
+            if rng:
+                start = int(rng.split("=")[1].rstrip("-"))
+                served_ranges.append(start)
+                body = payload[start:]
+                self.send_response(206)
+                self.send_header("Content-Range", f"bytes {start}-{len(payload)-1}/{len(payload)}")
+            else:
+                body = payload
+                self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), RangeHandler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        from mrfx.fetch import download, filename_for
+
+        url = f"http://127.0.0.1:{httpd.server_address[1]}/f.json.gz"
+        dest = cfg.downloads_dir / filename_for(url)
+        cut = len(payload) // 3
+        Path(str(dest) + ".part").write_bytes(payload[:cut])  # simulate the crash
+        sha, _ = download(cfg, url, dest)
+        assert served_ranges == [cut]                          # resumed, not restarted
+        assert sha == hashlib.sha256(payload).hexdigest()      # bytes identical
+        assert dest.read_bytes() == payload
+    finally:
+        httpd.shutdown()
+
+
+def test_download_disk_space_guard(cfg, server, monkeypatch):
+    import collections
+    import shutil as _shutil
+
+    from mrfx.fetch import DownloadError, download, filename_for
+
+    fake = collections.namedtuple("usage", "total used free")(100 << 30, 100 << 30, 1 << 30)
+    monkeypatch.setattr("mrfx.fetch.shutil.disk_usage", lambda p: fake)  # 1GB free
+    url = f"{server}/rates.json.gz"
+    dest = cfg.downloads_dir / filename_for(url)
+    with pytest.raises(DownloadError) as ei:
+        download(cfg, url, dest)
+    assert "disk space" in str(ei.value)

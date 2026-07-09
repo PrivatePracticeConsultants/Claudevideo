@@ -142,12 +142,21 @@ clean even if you paste every state's index. (Duplicate detection compares
 link downloads to each other; files you copy into `data/inbox/` by hand
 aren't part of that comparison.)
 
-**Don't want to hunt for links at all?** The app ships with a catalog of
-payer sources it has already been tested against (21 auto-queueable —
-Highmark's 15 hosted Blue plans, BCBS Mississippi, Centene/Ambetter's
-all-states page, the Blue KC / BCBS Michigan / BCBS Louisiana hubs, and
-UnitedHealthcare's national portal — plus notes for ~25 portals like Cigna
-and Anthem). Click **"Show tested
+**Don't want to hunt for links at all?** The app ships ready to go:
+
+- **`config/starter_links.txt`** — every payer source verified in testing,
+  one per line, ready to load in a single command:
+
+  ```
+  mrfx add --file config/starter_links.txt
+  ```
+
+  That queues 21 sources (Highmark's 15 hosted Blue plans, BCBS Mississippi,
+  Centene/Ambetter's all-states page, the Blue KC / BCBS Michigan /
+  BCBS Louisiana hubs, and UnitedHealthcare's national portal). Each one
+  expands on its own — expect thousands of files to queue and let it run.
+  The same file lists the ~25 browser-only portals (Cigna, Anthem, Kaiser…)
+  with instructions in the comments. Click **"Show tested
 sources"** on the Files tab to browse it, or **"Queue tested payer indexes"**
 to load them all — monthly-dated links are refreshed to the current month
 automatically. The catalog lives in `config/known_sources.yaml` with each
@@ -221,6 +230,7 @@ prompt). They're an alternative to the dashboard buttons.
 | `mrfx add <url> [<url>…]` | Paste links from the terminal: rate files, TOC/index links, or listing pages (Step 5) |
 | `mrfx add --file links.txt` | Queue a whole text file of links (one per line) |
 | `mrfx add --known` | Queue every tested payer index from `config/known_sources.yaml` |
+| `mrfx add --file config/starter_links.txt` | Same, from the editable ready-to-go list |
 | `mrfx add --retry-failed` | Re-queue every link that previously failed |
 | `mrfx preflight <path>` | Inspect a file before ingesting |
 | `mrfx ingest [path]` | Ingest a file or the whole inbox (shows a progress bar) |
@@ -277,8 +287,20 @@ prompt). They're an alternative to the dashboard buttons.
   which is the accurate attribution.
 - **A pasted file is huge and was refused** — files bigger than the safety
   limit (default 5 GB compressed) are held back so a typo can't fill your
-  disk. Raise `confirm_over_gb:` in `config/mrfx.yaml` and press **retry** on
-  that row.
+  disk. If you really want it: open `config/mrfx.yaml`, change
+  `confirm_over_gb: 5.0` to a number bigger than the file (e.g. `12`),
+  save, and press **retry** on that row. Verified live on an 8.85 GB
+  UnitedHealthcare file — after the retry it downloads and processes
+  normally; just expect multi-GB files to take hours, not minutes (the
+  progress bar shows exactly where it is).
+- **Not enough disk space** — the app checks before downloading and tells
+  you how much a file needs; free up space and press retry. Partial
+  downloads are kept and **resume where they stopped**, so an interrupted
+  8 GB download doesn't start over.
+- **It's processing several files at once — is that OK?** Yes: that's
+  `parallel_ingests` in `config/mrfx.yaml` (shipped as 3, automatically
+  reduced on smaller machines). Set it to 1 if you want strictly one file
+  at a time.
 - **A file shows `NEEDS COMPANION`** — that payer split its provider list into a
   separate reference file; download and drop that in too, and the app
   re-processes automatically.

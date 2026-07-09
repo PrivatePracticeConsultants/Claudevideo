@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import ssl
 import time
 from pathlib import Path
@@ -210,7 +211,17 @@ def download(cfg: MrfxConfig, url: str, dest: Path, progress_cb=None,
     tried_chain_repair = False
     for attempt in range(cfg.download_retries + 1):
         try:
-            with _client(cfg, verify=verify_override) as client, client.stream("GET", url) as resp:
+            # RESUME: a .part left by a network drop or a killed process picks
+            # up where it stopped instead of re-downloading gigabytes. The
+            # filename is derived from the URL identity, so the part is for
+            # THIS file; if the server ignores/rejects the range we start over.
+            resume_from = part.stat().st_size if part.exists() else 0
+            req_headers = {"Range": f"bytes={resume_from}-"} if resume_from else {}
+            with _client(cfg, verify=verify_override) as client,                     client.stream("GET", url, headers=req_headers) as resp:
+                if resume_from and resp.status_code == 416:
+                    # range not satisfiable — stale/oversized part; start over
+                    part.unlink(missing_ok=True)
+                    raise DownloadError("stale partial download discarded", retryable=True)
                 if resp.status_code in RETRYABLE_STATUS:
                     raise DownloadError(
                         f"HTTP {resp.status_code}", resp.status_code, retryable=True
@@ -223,17 +234,44 @@ def download(cfg: MrfxConfig, url: str, dest: Path, progress_cb=None,
                     )
                 if resp.status_code == 404:
                     raise DownloadError("HTTP 404 — file not found at this URL", 404, retryable=False)
-                if resp.status_code != 200:
+                if resp.status_code not in (200, 206):
                     raise DownloadError(f"HTTP {resp.status_code}", resp.status_code, retryable=False)
 
-                total = int(resp.headers.get("Content-Length") or 0) or None
+                resuming = resume_from > 0 and resp.status_code == 206
+                if resuming:
+                    # Content-Range: bytes <from>-<to>/<total>
+                    cr = resp.headers.get("Content-Range", "")
+                    total = int(cr.rsplit("/", 1)[-1]) if "/" in cr and cr.rsplit("/", 1)[-1].isdigit() else None
+                else:
+                    resume_from = 0  # server sent the whole file (or fresh start)
+                    total = int(resp.headers.get("Content-Length") or 0) or None
                 if max_bytes and total and total > max_bytes:
                     raise too_big(total)
-                done = 0
-                last_report = 0
-                last_report_t = 0.0
+
+                # disk guard: a payer file must never run the machine out of
+                # space mid-download — fail up front with the friendly fix
+                if total:
+                    free = shutil.disk_usage(dest.parent).free
+                    need = (total - resume_from) + (2 << 30)  # +2GB working headroom
+                    if free < need:
+                        raise DownloadError(
+                            f"not enough free disk space for this file: it needs "
+                            f"~{(total - resume_from) / 1e9:.1f} GB (plus working room) but only "
+                            f"{free / 1e9:.1f} GB is free. Free up space and press retry.",
+                            retryable=False,
+                        )
+
                 sha = hashlib.sha256()
-                with open(part, "wb") as f:
+                if resuming:
+                    with open(part, "rb") as f:  # hash what we already have
+                        for blk in iter(lambda: f.read(1 << 20), b""):
+                            sha.update(blk)
+                    log.info("resuming download at %.1f GB / %s", resume_from / 1e9,
+                             f"{total / 1e9:.1f} GB" if total else "?")
+                done = resume_from
+                last_report = done
+                last_report_t = 0.0
+                with open(part, "ab" if resuming else "wb") as f:
                     for chunk in resp.iter_bytes(chunk_size=1 << 20):
                         f.write(chunk)
                         sha.update(chunk)
@@ -256,7 +294,10 @@ def download(cfg: MrfxConfig, url: str, dest: Path, progress_cb=None,
         except DownloadError as e:
             last_exc = e
             if not e.retryable:
-                part.unlink(missing_ok=True)
+                # keep the .part when a retry could finish it (disk-space
+                # guard); discard it when the content itself is the problem
+                if "disk space" not in str(e):
+                    part.unlink(missing_ok=True)
                 raise
             log.warning("download %s: %s (attempt %d/%d)", url, e, attempt + 1, cfg.download_retries + 1)
         except (httpx.TransportError, httpx.TimeoutException) as e:

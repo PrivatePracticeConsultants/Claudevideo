@@ -17,6 +17,7 @@ def cfg(tmp_path) -> MrfxConfig:
         processed_dir=tmp_path / "processed",
         failed_dir=tmp_path / "failed",
         store_dir=tmp_path / "store",
+        downloads_dir=tmp_path / "downloads",
         entity_map_path=tmp_path / "entity_map.yaml",
         payer_name_map={"Testco Health": "Testco"},
         confirm_over_gb=5.0,
