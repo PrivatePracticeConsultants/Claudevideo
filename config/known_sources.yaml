@@ -381,7 +381,11 @@ sources:
       automatically. Verified cascade: page -> 2 indexes -> rate files
       (incl. signed bcbssc.mrf.bcbs.com links). First ingests: BCBSSC main
       book 423,333 rows; INSTIL HEALTH 714,798; BCBS Puerto Rico
-      (cross-hosted) 97,011; BCBSSC AI-CB 833.
+      (cross-hosted) 97,011; BCBSSC AI-CB 833; BCBS North Carolina
+      (cross-hosted 310_32Q0, 11.45 GB gz / ~40 GB uncompressed, 46-min
+      two-pass ingest) 23,717,082. The index also carries 19-35 GB
+      compressed monsters (254_39x0 series) — the size and disk-space
+      guards refuse them gracefully until confirm_over_gb/disk allow.
 
   - name: Priority Health (Michigan)
     url: https://www.priorityhealth.com/machine-readable-files
