@@ -210,6 +210,7 @@ class Store:
         self._tmp_dir.mkdir(parents=True, exist_ok=True)
         self.db_path = self.dir / "mrfx.duckdb"
         self.write_lock = threading.Lock()
+        self._sweep_orphan_tmps()
         try:
             total = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
             self._memory_limit_gb = max(2, min(12, int(total * 0.4 / 1e9)))
@@ -218,6 +219,23 @@ class Store:
         with self.write_lock, self.connect() as con:
             self._init_tables(con)
             self._register_views(con)
+
+    def _sweep_orphan_tmps(self) -> None:
+        """Remove half-written `.{key}.{pid}.parquet.tmp` parts whose writing
+        process is gone (crash/kill mid-ingest). Temps owned by a LIVE process
+        are left alone — that's the whole point of the pid in the name."""
+        for p in self.rates_dir.glob(".*.parquet.tmp"):
+            parts = p.name.split(".")
+            pid = parts[-3] if len(parts) >= 4 and parts[-3].isdigit() else None
+            if pid is not None:
+                try:
+                    os.kill(int(pid), 0)
+                    continue  # owner is alive — in-progress write, keep it
+                except ProcessLookupError:
+                    pass  # owner is dead — orphan
+                except PermissionError:
+                    continue  # alive, owned by another user
+            p.unlink(missing_ok=True)
 
     # -- connections --------------------------------------------------------
 
@@ -841,8 +859,12 @@ class RatesPartWriter:
         self.store = store
         self.path = store.rates_dir / f"{file_key(source_file)}.parquet"
         # NOT *.parquet: the rates view binds a glob over rates_dir, and a
-        # half-written temp matching it would break concurrent readers
-        self.tmp = store.rates_dir / f".{file_key(source_file)}.parquet.tmp"
+        # half-written temp matching it would break concurrent readers.
+        # The pid keeps the temp private to this process — two processes on
+        # one store (a second serve, CLI ingest next to the app) must never
+        # unlink each other's in-progress writes (Store.__init__ sweeps
+        # orphans left by dead processes).
+        self.tmp = store.rates_dir / f".{file_key(source_file)}.{os.getpid()}.parquet.tmp"
         self._writer: pq.ParquetWriter | None = None
         self.rows_written = 0
 

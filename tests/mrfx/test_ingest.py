@@ -87,6 +87,24 @@ def test_ingest_inline_and_referenced_with_skip_counter(cfg, store):
     assert not p.exists() and (cfg.processed_dir / p.name).exists()
 
 
+def test_orphan_tmp_sweep_spares_live_writers(cfg, tmp_path):
+    # a crash mid-ingest leaves a .{key}.{pid}.parquet.tmp behind: a fresh
+    # Store must clean it up — but must NOT touch a temp whose owning process
+    # is still alive (a second serve/CLI process writing next door)
+    import os
+
+    from mrfx.store import Store
+
+    s1 = Store(cfg.store_dir)
+    orphan = s1.rates_dir / ".deadfile.999999999.parquet.tmp"
+    live = s1.rates_dir / f".livefile.{os.getpid()}.parquet.tmp"
+    orphan.write_bytes(b"x")
+    live.write_bytes(b"x")
+    Store(cfg.store_dir)  # init runs the sweep
+    assert not orphan.exists()
+    assert live.exists()
+
+
 def test_zip_mrf_ingests_end_to_end(cfg, store):
     # zipfile needs a SEEKABLE stream (central directory lives at the end of
     # the archive): the progress wrapper used during ingest must support seek,

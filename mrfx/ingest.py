@@ -295,7 +295,9 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
         "payer": pf.payer, "schema_version": pf.schema_version,
         "last_updated_on": pf.last_updated_on,
     }
-    tmp_out = store.rates_dir / f".{file_key(name)}.parquet.tmp"  # must not match *.parquet
+    # must not match *.parquet; pid keeps it private to this process (a second
+    # process ingesting the same file must never unlink our in-progress write)
+    tmp_out = store.rates_dir / f".{file_key(name)}.{os.getpid()}.parquet.tmp"
     progress_path = str(path) + ".progress"
 
     def dispatch_and_wait() -> dict:
