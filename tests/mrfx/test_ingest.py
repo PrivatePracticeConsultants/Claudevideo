@@ -87,6 +87,20 @@ def test_ingest_inline_and_referenced_with_skip_counter(cfg, store):
     assert not p.exists() and (cfg.processed_dir / p.name).exists()
 
 
+def test_zip_mrf_ingests_end_to_end(cfg, store):
+    # zipfile needs a SEEKABLE stream (central directory lives at the end of
+    # the archive): the progress wrapper used during ingest must support seek,
+    # or every zip MRF dies with a misleading "File is not a zip file"
+    import zipfile
+
+    p = cfg.inbox_dir / "innetwork_mixed.zip"
+    with zipfile.ZipFile(p, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.write(FIXTURES / "innetwork_mixed.json", "innetwork_mixed.json")
+    res = ingest_file(cfg, store, p)
+    assert res["status"] == "done"
+    assert {r["npi"] for r in rates(store)} >= {"2222222222", "1111111111"}
+
+
 def test_reference_file_ingest_then_requeue_resolves_skips(cfg, store):
     p = drop(cfg, "innetwork_mixed.json", gz=True)
     ingest_file(cfg, store, p)

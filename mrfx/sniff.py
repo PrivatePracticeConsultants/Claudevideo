@@ -66,6 +66,18 @@ class _CountingRaw(io.RawIOBase):
     def readable(self) -> bool:
         return True
 
+    # zipfile.ZipFile must seek to the central directory at the END of the
+    # archive — without these, every zip MRF read through a progress wrapper
+    # dies with a misleading "File is not a zip file"
+    def seekable(self) -> bool:
+        return self._fh.seekable()
+
+    def seek(self, pos: int, whence: int = 0) -> int:
+        return self._fh.seek(pos, whence)
+
+    def tell(self) -> int:
+        return self._fh.tell()
+
     def readinto(self, b) -> int:
         data = self._fh.read(len(b))
         if data:

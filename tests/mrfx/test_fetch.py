@@ -500,3 +500,113 @@ def test_unknown_json_link_container_lifts_urls(cfg, store, server, http_root):
     assert wrapper["status"] == "done" and wrapper["child_count"] == 1
     assert recs[dedup_key(f"{server}/toc.json")]["status"] == "done"        # TOC expanded
     assert recs[dedup_key(f"{server}/rates.json.gz")]["status"] == "done"   # rates landed
+
+
+def test_page_lifts_quoted_relative_json_config_paths(cfg, store, server, http_root):
+    # Cigna-style: the page embeds its manifest as a quoted JS string, not a
+    # link — "/static/mrf/latest.json" must still be found and followed
+    (http_root / "static").mkdir(exist_ok=True)
+    (http_root / "static" / "latest.json").write_text(json.dumps(
+        {"mrfs": [{"kind": "TOC", "files": [{"url": f"{server}/toc.json?Expires=9&Policy=abc&Signature=x"}]}]}))
+    (http_root / "cigna_like.html").write_text(
+        '<!doctype html><html><body><script>settings={"cigna_mrf":'
+        '{"manifest":"/static/latest.json"}}</script></body></html>')
+    add_urls(store, [f"{server}/cigna_like.html"])
+    drain(cfg, store)
+    recs = {dedup_key(r["url"]): r for r in store.list_urls()}
+    page = recs[dedup_key(f"{server}/cigna_like.html")]
+    assert page["status"] == "done" and page["child_count"] == 1
+    manifest = recs[dedup_key(f"{server}/static/latest.json")]
+    assert manifest["status"] == "done" and manifest["child_count"] == 1  # signed TOC lifted
+    assert recs[dedup_key(f"{server}/rates.json.gz")]["status"] == "done"  # cascade to rates
+
+
+def test_403_for_tool_ua_retries_as_browser(cfg):
+    # some CDNs fronting public MRF data (BCBS South Carolina's CloudFront)
+    # 403 any non-browser user agent: the download must fall back to a
+    # browser UA instead of failing
+    import hashlib
+    import http.server as hs
+
+    payload = gzip.compress(b'{"in_network": []}')
+    agents = []
+
+    class PickyHandler(hs.BaseHTTPRequestHandler):
+        def do_GET(self):
+            ua = self.headers.get("User-Agent", "")
+            agents.append(ua)
+            if "Chrome" not in ua:
+                self.send_response(403)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *a):
+            pass
+
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), PickyHandler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        from mrfx.fetch import download, filename_for
+
+        url = f"http://127.0.0.1:{httpd.server_address[1]}/index.json"
+        dest = cfg.downloads_dir / filename_for(url)
+        sha, _ = download(cfg, url, dest)
+        assert sha == hashlib.sha256(payload).hexdigest()
+        assert "mrf-explorer" in agents[0]      # we identified honestly first
+        assert "Chrome" in agents[-1]           # then fell back to a browser UA
+    finally:
+        httpd.shutdown()
+
+
+def test_truncated_download_resumes_and_completes(cfg):
+    # a server that drops the connection halfway must not yield a corrupt
+    # file: the short read is detected, and the retry resumes from the .part
+    import hashlib
+    import http.server as hs
+    import os as _os
+
+    # must be bigger than download()'s 1MB stream chunk: bytes only reach the
+    # .part in whole chunks, and the resume picks up from what was flushed
+    payload = _os.urandom(3 << 20)
+    calls = []
+
+    class FlakyHandler(hs.BaseHTTPRequestHandler):
+        def do_GET(self):
+            rng = self.headers.get("Range")
+            start = int(rng.split("=")[1].rstrip("-")) if rng else 0
+            calls.append(start)
+            body = payload[start:]
+            if not rng:  # first request: advertise full size, send only half
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body[: len(body) // 2])
+                self.wfile.flush()
+                self.connection.close()
+                return
+            self.send_response(206)
+            self.send_header("Content-Range", f"bytes {start}-{len(payload)-1}/{len(payload)}")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FlakyHandler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        from mrfx.fetch import download, filename_for
+
+        url = f"http://127.0.0.1:{httpd.server_address[1]}/f.json.gz"
+        dest = cfg.downloads_dir / filename_for(url)
+        sha, _ = download(cfg, url, dest)
+        assert sha == hashlib.sha256(payload).hexdigest()   # complete + intact
+        assert calls[0] == 0 and len(calls) >= 2 and calls[1] > 0  # resumed mid-file
+    finally:
+        httpd.shutdown()

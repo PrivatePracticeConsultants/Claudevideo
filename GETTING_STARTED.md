@@ -151,11 +151,12 @@ aren't part of that comparison.)
   mrfx add --file config/starter_links.txt
   ```
 
-  That queues 21 sources (Highmark's 15 hosted Blue plans, BCBS Mississippi,
-  Centene/Ambetter's all-states page, the Blue KC / BCBS Michigan /
-  BCBS Louisiana hubs, and UnitedHealthcare's national portal). Each one
+  That queues 24 sources (Highmark's 15 hosted Blue plans, BCBS Mississippi,
+  BCBS Tennessee, Cigna, BCBS South Carolina, Centene/Ambetter's all-states
+  page, the Blue KC / BCBS Michigan / BCBS Louisiana hubs, and
+  UnitedHealthcare's national portal). Each one
   expands on its own — expect thousands of files to queue and let it run.
-  The same file lists the ~25 browser-only portals (Cigna, Anthem, Kaiser…)
+  The same file lists the ~25 browser-only portals (Anthem, Aetna, Kaiser…)
   with instructions in the comments. Click **"Show tested
 sources"** on the Files tab to browse it, or **"Queue tested payer indexes"**
 to load them all — monthly-dated links are refreshed to the current month

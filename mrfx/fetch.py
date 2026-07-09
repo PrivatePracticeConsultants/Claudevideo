@@ -43,7 +43,7 @@ RETRYABLE_STATUS = {408, 425, 429, 500, 502, 503, 504}
 # only these (not the whole query) keeps signed CDN re-pastes deduped while
 # still distinguishing download endpoints like ?file=a.json vs ?file=b.json.
 _VOLATILE_QUERY = re.compile(
-    r"^(expires|signature|key-pair-id|awsaccesskeyid|x-amz-.*|token|sig|se|sp|sv|sr|st|ss|srt|spr|sip|skoid|sktid|skt|ske|sks|skv|rscd|rsct)$",
+    r"^(expires|signature|policy|key-pair-id|awsaccesskeyid|x-amz-.*|token|sig|se|sp|sv|sr|st|ss|srt|spr|sip|skoid|sktid|skt|ske|sks|skv|rscd|rsct)$",
     re.I,
 )
 
@@ -171,9 +171,16 @@ def _repair_incomplete_chain(url: str) -> ssl.SSLContext | None:
         return None
 
 
-def _client(cfg: MrfxConfig, verify=None) -> httpx.Client:
+# some CDNs fronting legally-public MRF data (e.g. BCBS South Carolina's
+# CloudFront) refuse anything that doesn't look like a browser. We identify
+# honestly first and only fall back to this UA after a 403.
+BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+
+
+def _client(cfg: MrfxConfig, verify=None, ua: str | None = None) -> httpx.Client:
     return httpx.Client(
-        headers={"User-Agent": cfg.user_agent, "Accept-Encoding": "identity"},
+        headers={"User-Agent": ua or cfg.user_agent, "Accept-Encoding": "identity"},
         follow_redirects=True,
         timeout=httpx.Timeout(cfg.download_timeout_seconds, connect=30.0),
         verify=verify if verify is not None else ssl_verify(),
@@ -209,6 +216,7 @@ def download(cfg: MrfxConfig, url: str, dest: Path, progress_cb=None,
 
     verify_override = None
     tried_chain_repair = False
+    ua_override: str | None = None
     for attempt in range(cfg.download_retries + 1):
         try:
             # RESUME: a .part left by a network drop or a killed process picks
@@ -217,7 +225,7 @@ def download(cfg: MrfxConfig, url: str, dest: Path, progress_cb=None,
             # THIS file; if the server ignores/rejects the range we start over.
             resume_from = part.stat().st_size if part.exists() else 0
             req_headers = {"Range": f"bytes={resume_from}-"} if resume_from else {}
-            with _client(cfg, verify=verify_override) as client,                     client.stream("GET", url, headers=req_headers) as resp:
+            with _client(cfg, verify=verify_override, ua=ua_override) as client,                     client.stream("GET", url, headers=req_headers) as resp:
                 if resume_from and resp.status_code == 416:
                     # range not satisfiable — stale/oversized part; start over
                     part.unlink(missing_ok=True)
@@ -227,6 +235,12 @@ def download(cfg: MrfxConfig, url: str, dest: Path, progress_cb=None,
                         f"HTTP {resp.status_code}", resp.status_code, retryable=True
                     )
                 if resp.status_code == 403:
+                    if ua_override is None:
+                        # CDN refuses non-browser user agents — retry
+                        # immediately (no backoff) looking like a browser
+                        ua_override = BROWSER_UA
+                        log.info("%s: HTTP 403 for our user-agent; retrying as a browser", url)
+                        continue
                     raise DownloadError(
                         "HTTP 403 — access refused. Usual causes: a signed URL expired "
                         "(re-copy a fresh link, or re-add the TOC it came from), or the "
@@ -290,6 +304,14 @@ def download(cfg: MrfxConfig, url: str, dest: Path, progress_cb=None,
                             last_report_t = now
                 if progress_cb:
                     progress_cb(done, total)
+                # a proxy/server can close the stream early without an error —
+                # a truncated download must never masquerade as the file
+                # (zip/gzip would fail later with a confusing message). The
+                # .part is kept, so the retry RESUMES from this exact byte.
+                if total is not None and done < total:
+                    raise DownloadError(
+                        f"connection closed early ({done / 1e6:.0f} of {total / 1e6:.0f} MB) "
+                        "— retrying from where it stopped", retryable=True)
                 final_url = str(resp.url)
             part.replace(dest)
             return sha.hexdigest(), final_url
@@ -316,7 +338,9 @@ def download(cfg: MrfxConfig, url: str, dest: Path, progress_cb=None,
         # backoff before retry
         if attempt < cfg.download_retries:
             time.sleep(2.0 * (2**attempt))
-    part.unlink(missing_ok=True)
+    # keep the .part: every failure that lands here was transient (terminal
+    # ones raised above), so a later "retry" on the queue resumes the download
+    # instead of restarting a multi-GB file from byte zero
     msg = f"download failed after {cfg.download_retries + 1} attempts: {last_exc}"
     if "CERTIFICATE_VERIFY_FAILED" in str(last_exc):
         msg += TLS_HELP
@@ -482,6 +506,12 @@ _ABS_LINK_RE = re.compile(
     r"""(?P<u>https?://[^"'\s<>]+?\.json(?:\.gz)?(?:\?[^"'\s<>]*)?)["'<\s]""",
     re.I,
 )
+# root-relative .json paths quoted in inline JS/config (Cigna embeds its MRF
+# manifest as "/static/mrf/latest.json" in page settings, not as a link)
+_REL_JSON_RE = re.compile(
+    r"""["'](?P<u>/[^"'\s<>]+?\.json(?:\.gz)?(?:\?[^"'\s<>]*)?)["']""",
+    re.I,
+)
 
 
 def looks_like_html(path: Path) -> bool:
@@ -511,7 +541,7 @@ def extract_links_from_page(path: Path, base_url: str, max_files: int) -> list[s
         return []
     seen: set[str] = set()
     out: list[str] = []
-    for pattern in (_ATTR_LINK_RE, _ABS_LINK_RE):
+    for pattern in (_ATTR_LINK_RE, _ABS_LINK_RE, _REL_JSON_RE):
         for m in pattern.finditer(text):
             u = urljoin(base_url, m.group("u"))
             if not u.lower().startswith(("http://", "https://")):

@@ -8,7 +8,7 @@
 # indexes expand, portals are crawled, duplicates and drug/allowed-amounts
 # files are skipped, and files over confirm_over_gb wait for your go-ahead.
 
-# ---- 22 auto-queueable sources ----
+# ---- 24 auto-queueable sources ----
 # Highmark BCBS West Virginia
 https://mrfdata.hmhs.com/files/443/wv/inbound/local/{FIRST_OF_MONTH}_Highmark_Blue_Cross_Blue_Shield_of_West_Virginia_index.json
 
@@ -75,10 +75,15 @@ https://transparency-in-coverage.uhc.com/
 # BCBS Tennessee
 https://www.bcbst.com/tcr
 
+# Cigna (national)
+https://www.cigna.com/legal/compliance/machine-readable-files
+
+# BCBS South Carolina (+ InStil Health)
+https://www.southcarolinablues.com/web/public/brands/universal/transparency-in-coverage/?branding=sc
+
 # ---- portals that need a browser (open, click through, paste the file links) ----
 #   Anthem / Elevance national master index (14 states):  https://antm-pt-prod-dataz-nogbd-nophi-us-east1.s3.amazonaws.com/anthem/{FIRST_OF_MONTH}_anthem_index.json.gz
 #   Optum Health (transparency portal):  https://transparency-in-coverage.optum.com/
-#   Cigna:  https://www.cigna.com/legal/compliance/machine-readable-files
 #   Aetna / CVS Health:  https://health1.aetna.com/app/public/#/one/insurerCode=AETNACVS_I&brandCode=ALICFI/machine-readable-transparency-in-coverage
 #   Humana:  https://developers.humana.com/patient-cost-transparency/documentation
 #   HCSC (BCBS Illinois / Texas / New Mexico / Oklahoma / Montana):  https://www.bcbsil.com/provider/standards/standard-requirements/caa/caa-tic
@@ -92,7 +97,6 @@ https://www.bcbst.com/tcr
 #   Oscar Health:  https://www.hioscar.com/machine-readable-files
 #   Molina Healthcare:  https://www.molinahealthcare.com/members/common/en-US/abtmolina/compliance/machinereadablefiles.aspx
 #   BCBS North Carolina:  https://www.bluecrossnc.com/about-us/policies-and-best-practices/transparency-coverage-mrf
-#   BCBS South Carolina:  https://www.southcarolinablues.com/web/public/brands/sc/members/using-your-insurance/transparency-in-coverage/
 #   Priority Health (Michigan):  https://www.priorityhealth.com/machine-readable-files
 #   BCBS Alabama:  https://www.bcbsal.org/web/transparency-in-coverage
 #   BCBS Massachusetts:  https://www.bluecrossma.org/about-us/transparency-coverage
