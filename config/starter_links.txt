@@ -8,7 +8,7 @@
 # indexes expand, portals are crawled, duplicates and drug/allowed-amounts
 # files are skipped, and files over confirm_over_gb wait for your go-ahead.
 
-# ---- 24 auto-queueable sources ----
+# ---- 27 auto-queueable sources ----
 # Highmark BCBS West Virginia
 https://mrfdata.hmhs.com/files/443/wv/inbound/local/{FIRST_OF_MONTH}_Highmark_Blue_Cross_Blue_Shield_of_West_Virginia_index.json
 
@@ -84,21 +84,25 @@ https://www.southcarolinablues.com/web/public/brands/universal/transparency-in-c
 # CareFirst (Maryland / DC / N. Virginia)
 https://individual.carefirst.com/individuals-families/mandates-policies/machine-readable-file.page
 
+# BCBS North Carolina
+https://www.bluecrossnc.com/policies-best-practices/machine-readable-files
+
+# Molina Healthcare (all states; needs Playwright — see README's JavaScript-portals section)
+https://www.molinahealthcare.com/marketplace/wa/en-us/About/compinfo/PricingTransparency
+
 # ---- portals that need a browser (open, click through, paste the file links) ----
 #   Anthem / Elevance national master index (14 states):  https://antm-pt-prod-dataz-nogbd-nophi-us-east1.s3.amazonaws.com/anthem/{FIRST_OF_MONTH}_anthem_index.json.gz
 #   Optum Health (transparency portal):  https://transparency-in-coverage.optum.com/
 #   Aetna / CVS Health:  https://health1.aetna.com/app/public/#/one/insurerCode=AETNACVS_I&brandCode=ALICFI/machine-readable-transparency-in-coverage
-#   Humana:  https://developers.humana.com/patient-cost-transparency/documentation
+#   Humana:  https://developers.humana.com/cost-transparency
 #   HCSC (BCBS Illinois / Texas / New Mexico / Oklahoma / Montana):  https://www.bcbsil.com/provider/standards/standard-requirements/caa/caa-tic
 #   Universal Health Services (UHS — hospital system employer plan):  https://uhs.com/transparency-in-coverage-machine-readable-files/
 #   Wellmark BCBS (Iowa / South Dakota):  https://www.wellmark.com/transparency-in-coverage
 #   Horizon BCBS New Jersey:  https://www.horizonblue.com/transparency-in-coverage
 #   Premera Blue Cross (Washington / Alaska):  https://www.premera.com/visitor/transparency-in-coverage
-#   Regence (Cambia — OR / WA / UT / ID):  https://www.regence.com/transparency-in-coverage
+#   Regence (Cambia — OR / WA / UT / ID):  https://www.regence.com/transparency-in-coverage/
 #   Kaiser Permanente:  https://healthy.kaiserpermanente.org/front-door/machine-readable
-#   Oscar Health:  https://www.hioscar.com/machine-readable-files
-#   Molina Healthcare:  https://www.molinahealthcare.com/members/common/en-US/abtmolina/compliance/machinereadablefiles.aspx
-#   BCBS North Carolina:  https://www.bluecrossnc.com/about-us/policies-and-best-practices/transparency-coverage-mrf
+#   Oscar Health:  https://www.hioscar.com/transparency-in-coverage-files/oscar
 #   Priority Health (Michigan):  https://www.priorityhealth.com/machine-readable-files
 #   BCBS Alabama:  https://www.bcbsal.org/web/transparency-in-coverage
 #   BCBS Massachusetts:  https://www.bluecrossma.org/about-us/transparency-coverage
@@ -106,9 +110,9 @@ https://individual.carefirst.com/individuals-families/mandates-policies/machine-
 #   BCBS Vermont:  https://www.bluecrossvt.org/transparency-in-coverage
 #   BCBS Kansas:  https://www.bcbsks.com/transparency-in-coverage
 #   Arkansas BCBS:  https://www.arkansasbluecross.com/transparency-in-coverage
-#   HMSA (BCBS Hawaii):  https://hmsa.com/machine-readable-files/
+#   HMSA (BCBS Hawaii):  https://hmsa.com/help-center/transparency-in-coverage-machine-readable-files/
 #   Blue Shield of California:  https://www.blueshieldca.com/en/home/get-to-know-blue-shield/machine-readable-files
-#   Excellus BCBS (upstate New York):  https://www.excellusbcbs.com/transparency-in-coverage
+#   Excellus BCBS (upstate NY — publishes allowed-amounts only, no rates):  https://excellusbcbs.healthsparq.com/healthsparq/public/#/one/insurerCode=EXC_I&brandCode=EXC&productCode=MRF/machine-readable-transparency-in-coverage
 #   Capital Blue Cross (central Pennsylvania):  https://www.capbluecross.com/wps/portal/cap/company/legal/machine-readable-files
 #   Independence Blue Cross (Philadelphia):  https://www.ibx.com/resources/for-members/transparency-in-coverage
 #   BCBS Minnesota (own book):  https://www.bluecrossmn.com/about-us/transparency-coverage-regulations

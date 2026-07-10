@@ -55,6 +55,12 @@ class MrfxConfig(BaseModel):
     # file at a time; 2-3 roughly doubles/triples throughput on 4+ cores.
     parallel_ingests: int = 1
     max_toc_files: int = 2000              # cap child files enqueued from one TOC
+    # JavaScript-only portals: when a pasted page yields no static links,
+    # render it in headless Chromium and harvest links from the rendered DOM
+    # and the page's own API responses. Needs the optional Playwright install
+    # (pip install playwright && playwright install chromium); silently
+    # skipped when unavailable.
+    render_js: bool = True
     download_timeout_seconds: float = 900.0
     download_retries: int = 4
     registry_path: Path = Path("config/payer_registry.yaml")

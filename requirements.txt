@@ -13,3 +13,6 @@ uvicorn==0.35.0
 watchfiles==1.1.0
 python-multipart==0.0.20
 cryptography==45.0.5
+# optional — enables automatic crawling of JavaScript-only payer portals
+# (after installing, run once: playwright install chromium)
+playwright==1.61.0

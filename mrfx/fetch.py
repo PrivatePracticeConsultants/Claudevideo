@@ -508,10 +508,13 @@ _ABS_LINK_RE = re.compile(
     r"""(?P<u>https?://[^"'\s<>]+?\.json(?:\.gz)?(?:\?[^"'\s<>]*)?)["'<\s]""",
     re.I,
 )
-# root-relative .json paths quoted in inline JS/config (Cigna embeds its MRF
-# manifest as "/static/mrf/latest.json" in page settings, not as a link)
+# relative .json paths quoted in inline JS/config or JSON listings: Cigna
+# embeds its manifest as "/static/mrf/latest.json" in page settings, and
+# HealthSparq metadata lists TOCs as "2026-07-01/tableOfContents/x_index
+# .json.gz" (resolved against the listing's own URL). A slash is required —
+# bare filenames ("package.json" in framework bundles) stay invisible.
 _REL_JSON_RE = re.compile(
-    r"""["'](?P<u>/[^"'\s<>]+?\.json(?:\.gz)?(?:\?[^"'\s<>]*)?)["']""",
+    r"""["'](?P<u>(?:/[^"'\s<>]+?|[^"'\s<>:]+/[^"'\s<>]+?)\.json(?:\.gz)?(?:\?[^"'\s<>]*)?)["']""",
     re.I,
 )
 
@@ -533,16 +536,12 @@ _FRAMEWORK_ASSET_RE = re.compile(
 )
 
 
-def extract_links_from_page(path: Path, base_url: str, max_files: int) -> list[str]:
-    """Best effort: pull .json / .json.gz links out of an HTML page (payer
-    directory listings like mrfdata.hmhs.com are plain pages full of file
-    links). Returns absolute, deduped URLs. Empty for JS-only portals."""
-    try:
-        with open(path, "rb") as f:
-            text = f.read(20 << 20).decode(errors="replace")  # pages are small; cap at 20 MB
-    except OSError:
-        return []
-    seen: set[str] = set()
+def extract_links_from_text(text: str, base_url: str, max_files: int,
+                            seen: set[str] | None = None) -> list[str]:
+    """Pull .json / .json.gz / .zip MRF links out of markup or JS/JSON text.
+    Returns absolute, deduped URLs; pass `seen` (dedup keys) to accumulate
+    across multiple sources (rendered DOM + captured API responses)."""
+    seen = seen if seen is not None else set()
     out: list[str] = []
     for pattern in (_ATTR_LINK_RE, _ABS_LINK_RE, _REL_JSON_RE):
         for m in pattern.finditer(text):
@@ -563,6 +562,18 @@ def extract_links_from_page(path: Path, base_url: str, max_files: int) -> list[s
     return out
 
 
+def extract_links_from_page(path: Path, base_url: str, max_files: int) -> list[str]:
+    """Best effort: pull .json / .json.gz links out of an HTML page (payer
+    directory listings like mrfdata.hmhs.com are plain pages full of file
+    links). Returns absolute, deduped URLs. Empty for JS-only portals."""
+    try:
+        with open(path, "rb") as f:
+            text = f.read(20 << 20).decode(errors="replace")  # pages are small; cap at 20 MB
+    except OSError:
+        return []
+    return extract_links_from_text(text, base_url, max_files)
+
+
 PAGE_HELP = (
     "This link is a web page, not a data file, and no file links could be "
     "found on it (many payer portals load their file lists with JavaScript). "
@@ -571,6 +582,18 @@ PAGE_HELP = (
     "'Table of Contents') and choose 'Copy link address', then paste those "
     "here instead."
 )
+
+PAGE_HELP_NO_RENDERER = PAGE_HELP + (
+    " Tip: installing Playwright lets the app render JavaScript pages "
+    "automatically — run: pip install playwright && playwright install "
+    "chromium — then press retry."
+)
+
+
+def _page_help() -> str:
+    from .render import render_available
+
+    return PAGE_HELP if render_available() else PAGE_HELP_NO_RENDERER
 
 
 def crawl_gatsby_hub(cfg: MrfxConfig, page_url: str, max_files: int) -> list[str]:
@@ -682,6 +705,18 @@ def fetch_url_record(cfg: MrfxConfig, store: Store, rec: dict) -> bool:
     return True
 
 
+def _mentions_allowed_amounts(dest: Path) -> bool:
+    """Cheap scan of a (possibly gzipped) TOC for allowed_amount_file keys —
+    only consulted when expansion found zero in-network files."""
+    try:
+        from .sniff import open_stream
+
+        with open_stream(dest) as stream:
+            return b"allowed_amount" in stream.read(8 << 20)
+    except Exception:  # noqa: BLE001 — classification nicety, never fatal
+        return False
+
+
 def _enqueue_children(store: Store, urls: list[str], parent_id: int) -> int:
     """Queue discovered child URLs under their parent row; returns how many
     were newly queued. One lock/connection for the whole batch — thousands of
@@ -753,8 +788,16 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
         if truncated:
             msg += f" (capped at max_toc_files={cfg.max_toc_files})"
         if not child_urls:
-            store.update_url(url_id, status="failed", kind="toc",
-                             error="this index/TOC lists no in-network file URLs")
+            # a TOC with only allowed_amount_file entries is a common TPA
+            # shape (out-of-network averages, no negotiated rates) — that's
+            # the payer's publication choice, not an error on our side
+            if _mentions_allowed_amounts(dest):
+                store.update_url(url_id, status="skipped", kind="toc",
+                                 error="this TOC lists only out-of-network allowed-amounts "
+                                       "files — no negotiated-rate files to ingest")
+            else:
+                store.update_url(url_id, status="failed", kind="toc",
+                                 error="this index/TOC lists no in-network file URLs")
         else:
             log.info("%s — %s", url, msg)
             # child_count on a done TOC row is how the dashboard says
@@ -789,12 +832,19 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
                 # React portals (UHC/Optum) serve their whole file list from a
                 # well-known API next to the page — probe before giving up
                 links = probe_blobs_api(cfg, final_url)
+            if not links and cfg.render_js:
+                # JavaScript-only portal: render it in headless Chromium and
+                # harvest links from the DOM and the page's API responses
+                from .render import render_page_links
+
+                store.update_url(url_id, error="page has no static links — rendering it in a headless browser…")
+                links = render_page_links(cfg, final_url, cfg.max_toc_files)
             if links:
                 added = _enqueue_children(store, links, url_id)
                 log.info("%s — web page: found %d file links, %d newly queued", url, len(links), added)
                 store.update_url(url_id, status="done", kind="page", child_count=added, error=None)
             else:
-                store.update_url(url_id, status="failed", kind="page", error=PAGE_HELP)
+                store.update_url(url_id, status="failed", kind="page", error=_page_help())
             return False
         # Not HTML and not a recognized MRF shape. Some payers publish custom
         # JSON wrappers that just list file URLs (BCBS Tennessee's

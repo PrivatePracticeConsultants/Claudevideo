@@ -368,22 +368,31 @@ sources:
       JavaScript page (old /machine-readable-files URL now 404s; re-probed
       the new path — no static links); paste file links from a browser.
 
-  - name: Molina Healthcare
+  - name: Molina Healthcare (all states)
     url: https://www.molinahealthcare.com/marketplace/wa/en-us/About/compinfo/PricingTransparency
-    kind: portal
-    queueable: false
-    verified: "2026-07-09"
+    kind: page
+    queueable: true
+    verified: "2026-07-10"
     notes: >-
-      Per-state marketplace pages (swap the state code in the URL, e.g.
-      /marketplace/fl/, /marketplace/nv/). JavaScript-rendered — no static
-      links; paste file links from a browser.
+      JavaScript page — with Playwright installed the app renders it
+      headlessly and lifts 19 state index links (CA/CT/FL/…/TX/WA — the
+      whole national footprint is on every state's page). Verified cascade:
+      page -> 19 indexes -> 3,431 files queued; first two California
+      in-network files ingested 404 rows each (small per-plan files).
+      Without Playwright the page reports "no links" with install
+      instructions.
 
   - name: BCBS North Carolina
-    url: https://www.bluecrossnc.com/about-us/policies-and-best-practices/transparency-coverage-mrf
-    kind: portal
-    queueable: false
-    verified: "2026-07-08"
-    notes: JavaScript page (probed — no static links); paste file links from a browser.
+    url: https://www.bluecrossnc.com/policies-best-practices/machine-readable-files
+    kind: page
+    queueable: true
+    verified: "2026-07-10"
+    notes: >-
+      The page embeds a signed non-ASO TOC link (mrfmftprod.bcbsnc.com) the
+      app lifts directly. Verified cascade: page -> TOC -> 10 in-network
+      files. Ingested: Preferred Provider Network (11.45 GB gz) 23,712,556
+      rows; BlueHPN-Atrium (~29.9 GB uncompressed) 4,669,816 rows. NC also
+      cross-hosts on other Blues' indexes (the SC index carries its book).
 
   - name: BCBS South Carolina
     url: https://www.southcarolinablues.com/web/public/brands/universal/transparency-in-coverage/?branding=sc
@@ -478,14 +487,18 @@ sources:
       Anthem Blue Cross CA is covered by the Anthem/Elevance national index.
 
   - name: Excellus BCBS (upstate New York)
-    url: https://news.excellusbcbs.com/developer-info/transparency-coverage-mrf
+    url: https://excellusbcbs.healthsparq.com/healthsparq/public/#/one/insurerCode=EXC_I&brandCode=EXC&productCode=MRF/machine-readable-transparency-in-coverage
     kind: portal
     queueable: false
-    verified: "2026-07-09"
+    verified: "2026-07-10"
     notes: >-
-      Old URL 404s; the developer-info page hands off to a HealthSparq
-      portal (excellusbcbs.healthsparq.com, JavaScript SPA). Paste file
-      links from a browser.
+      HealthSparq SPA — with Playwright the app renders it and follows its
+      latest_metadata.json to 117 employer-group TOCs automatically, BUT
+      every one lists only out-of-network allowed-amounts files (Excellus
+      publishes no negotiated-rate files at this endpoint), so there is
+      nothing to ingest. TOCs are marked skipped with that explanation.
+      The healthsparq render flow itself works and should generalize to
+      other HealthSparq-hosted Blues whose books do carry in-network files.
 
   - name: Capital Blue Cross (central Pennsylvania)
     url: https://www.capbluecross.com/wps/portal/cap/company/legal/machine-readable-files

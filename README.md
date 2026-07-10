@@ -185,14 +185,16 @@ badge and are never displayed as authoritative; confirming a URL persists it to
 
 `config/known_sources.yaml` is a shipped catalog of every payer entry point
 this app has been live-tested against — each entry carries its verification
-date and what happened (files listed, rows ingested, quirks). 24 entries are
+date and what happened (files listed, rows ingested, quirks). 27 entries are
 **auto-queueable** (Highmark's 15 hosted Blue plans incl. FL/AZ/ID/MN/LA/NE,
 BCBS Mississippi's stable TOC, BCBS Tennessee's /tcr directory page,
 Cigna's signed-manifest page, BCBS South Carolina's CloudFront indexes,
+BCBS North Carolina's signed TOC page, CareFirst's Azure-blob indexes,
+Molina Healthcare's all-states page (via the headless-browser renderer),
 Centene/Ambetter's all-states page, the Sapphire hubs of Blue KC, BCBS
 Michigan, and BCBS Louisiana, and UnitedHealthcare's national portal); the
 rest are portals that need a browser click (Aetna, Humana, HCSC,
-CareFirst, BCBS AL/NC/MA/RI/VT/KS, Arkansas, Wellmark, Horizon NJ,
+BCBS AL/MA/RI/VT/KS, Arkansas, Wellmark, Horizon NJ,
 Premera, Regence, Kaiser, Oscar, Molina, Priority Health, HMSA, Blue Shield
 of CA, Excellus, Capital BC, IBX, BCBS MN, UHS — probed; JavaScript-only or
 firewalled) with instructions, plus Anthem/Elevance's national master index
@@ -233,6 +235,16 @@ Three link kinds are auto-detected:
   (NDC / prescription-drugs) entries are never queued, and the cap is
   `max_toc_files` (verified live: 86,722 files listed; the UHC Missouri
   Provider Network file ingested 88,649 rows).
+- **JavaScript-only portals** (Molina, HealthSparq-hosted Blues, and other
+  pages whose file lists exist only after scripts run): with the optional
+  Playwright install (`pip install playwright && playwright install
+  chromium`) the app renders the page in headless Chromium and harvests
+  links from the rendered DOM **and** from the JSON responses the page's
+  own scripts fetch — the browser only renders; every network request is
+  made by the app's normal HTTP stack (proxy- and CA-aware, TLS verified).
+  Verified live: Molina's page → 19 state indexes → 3,431 files queued,
+  first California files ingested. Without Playwright these pages fail
+  with a message that includes the install command.
 
 **Parallel processing**: `parallel_ingests` in `config/mrfx.yaml` (shipped as
 3, auto-capped at your CPU cores minus one) parses that many files at once —

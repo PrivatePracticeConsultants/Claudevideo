@@ -151,10 +151,10 @@ aren't part of that comparison.)
   mrfx add --file config/starter_links.txt
   ```
 
-  That queues 24 sources (Highmark's 15 hosted Blue plans, BCBS Mississippi,
-  BCBS Tennessee, Cigna, BCBS South Carolina, Centene/Ambetter's all-states
-  page, the Blue KC / BCBS Michigan / BCBS Louisiana hubs, and
-  UnitedHealthcare's national portal). Each one
+  That queues 27 sources (Highmark's 15 hosted Blue plans, BCBS Mississippi,
+  BCBS Tennessee, Cigna, BCBS South and North Carolina, CareFirst, Molina,
+  Centene/Ambetter's all-states page, the Blue KC / BCBS Michigan /
+  BCBS Louisiana hubs, and UnitedHealthcare's national portal). Each one
   expands on its own — expect thousands of files to queue and let it run.
   The same file lists the ~25 browser-only portals (Anthem, Aetna, Kaiser…)
   with instructions in the comments. Click **"Show tested
@@ -273,8 +273,17 @@ prompt). They're an alternative to the dashboard buttons.
   instead, and the app will fetch fresh file links itself.
 - **A pasted link says "this looks like a web page"** — some payer portals
   (e.g. Aetna's) build their file list with JavaScript, so there are no real
-  links in the page for the app to lift. Open the page in your browser, click
-  through to the actual `.json.gz` / TOC links, and paste those.
+  links in the page for the app to lift. Two options: (1) install the
+  optional headless-browser helper once —
+
+  ```
+  .venv/bin/pip install playwright && .venv/bin/playwright install chromium
+  ```
+
+  — and press retry: the app will load the page like a real browser and
+  find the links itself (this is how Molina works out of the box). Or (2)
+  open the page in your browser, click through to the actual `.json.gz` /
+  TOC links, and paste those.
 - **A link shows "allowed-amounts (no rates)"** — that file is the payer's
   out-of-network billed-charge report, which contains no negotiated rates.
   Skipping it is correct; look for the `in-network-rates` files instead.

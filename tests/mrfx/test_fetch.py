@@ -626,3 +626,90 @@ def test_truncated_download_resumes_and_completes(cfg):
         assert calls[0] == 0 and len(calls) >= 2 and calls[1] > 0  # resumed mid-file
     finally:
         httpd.shutdown()
+
+
+def test_js_rendered_portal_links_harvested(cfg):
+    # JavaScript-only portal: the served HTML has NO links; the page's script
+    # fetches an API and injects some into the DOM, while another lives only
+    # inside the API response body. The headless render must find both.
+    pytest.importorskip("playwright.sync_api")
+    import http.server as hs
+
+    class Portal(hs.BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/portal":
+                body = (b"<html><body><div id='f'></div><script>"
+                        b"fetch('/api/list').then(r=>r.json()).then(d=>{"
+                        b"const el=document.getElementById('f');"
+                        b"d.dom_files.forEach(u=>{const a=document.createElement('a');"
+                        b"a.href=u;a.textContent=u;el.appendChild(a);});});"
+                        b"</script></body></html>")
+                ctype = "text/html"
+            elif self.path == "/api/list":
+                port = self.server.server_address[1]
+                body = json.dumps({
+                    "dom_files": ["/files/visible_in-network-rates.json.gz"],
+                    "reporting": [{"location":
+                        f"http://127.0.0.1:{port}/files/api-only_in-network-rates.json.gz"}],
+                }).encode()
+                ctype = "application/json"
+            else:
+                self.send_response(404); self.end_headers(); return
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Portal)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        from mrfx.render import render_page_links
+
+        base = f"http://127.0.0.1:{httpd.server_address[1]}"
+        links = render_page_links(cfg, f"{base}/portal", 50)
+        assert f"{base}/files/visible_in-network-rates.json.gz" in links      # DOM-injected
+        assert f"{base}/files/api-only_in-network-rates.json.gz" in links     # response-only
+    finally:
+        httpd.shutdown()
+
+
+def test_allowed_amounts_only_toc_skipped_not_failed(cfg, store):
+    # TPA employer-group TOCs (Excellus/HealthSparq) often list ONLY an
+    # allowed_amount_file — that's the payer's choice, not an error: the row
+    # must read 'skipped' with a plain-language reason
+    import http.server as hs
+
+    toc = json.dumps({
+        "reporting_entity_name": "Some TPA",
+        "reporting_structure": [{
+            "reporting_plans": [{"plan_name": "X", "plan_id_type": "EIN", "plan_id": "1"}],
+            "allowed_amount_file": {"description": "aa", "location": "https://x.example/aa.json.zip"},
+        }],
+        "version": "2.0.0",
+    }).encode()
+
+    class H(hs.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(toc)))
+            self.end_headers()
+            self.wfile.write(toc)
+
+        def log_message(self, *a):
+            pass
+
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{httpd.server_address[1]}/group_index.json"
+        add_urls(store, [url])
+        run_queue(cfg, store, drain=True)
+        (rec,) = store.list_urls()
+        assert rec["status"] == "skipped" and rec["kind"] == "toc"
+        assert "allowed-amounts" in rec["error"] and "no negotiated-rate" in rec["error"]
+    finally:
+        httpd.shutdown()
