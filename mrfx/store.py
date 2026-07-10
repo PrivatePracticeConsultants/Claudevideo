@@ -587,10 +587,10 @@ class Store:
             rows = con.execute("SELECT status, count(*) FROM url_queue GROUP BY status").fetchall()
         return {s: n for s, n in rows}
 
-    def find_url_with_same_content(self, content_sha: str, exclude_id: int) -> str | None:
-        """URL of an already-ingested queue row whose downloaded bytes were
-        identical (Blue plans host copies of each other's national files, so
-        the same file arrives under many domains). None if no match.
+    def find_url_with_same_content(self, content_sha: str, exclude_id: int) -> tuple[str, str] | None:
+        """(url, status) of an already-ingested queue row whose downloaded
+        bytes were identical (Blue plans host copies of each other's national
+        files, so the same file arrives under many domains). None if no match.
 
         'ingesting' twins count too: with parallel workers, two mirror copies
         can be claimed simultaneously — if only 'done' matched, both would
@@ -603,12 +603,44 @@ class Store:
             return None
         with self.connect() as con:
             row = con.execute(
-                "SELECT url FROM url_queue WHERE content_sha = ? AND id != ? "
+                "SELECT url, status FROM url_queue WHERE content_sha = ? AND id != ? "
                 "AND (status = 'done' OR (status = 'ingesting' AND id < ?)) "
                 "ORDER BY id LIMIT 1",
                 [content_sha, exclude_id, exclude_id],
             ).fetchone()
-        return row[0] if row else None
+        return (row[0], row[1]) if row else None
+
+    def revive_skipped_duplicates(self, content_sha: str, failed_id: int) -> int:
+        """The in-flight twin this sha's duplicates deferred to has FAILED:
+        re-queue them. Their downloads were kept on disk, so they ingest
+        without re-downloading (expired signed URLs don't matter)."""
+        if not content_sha:
+            return 0
+        with self.write_lock, self.connect() as con:
+            n = con.execute(
+                "SELECT count(*) FROM url_queue WHERE content_sha = ? "
+                "AND status = 'skipped' AND id != ?", [content_sha, failed_id],
+            ).fetchone()[0]
+            if n:
+                con.execute(
+                    "UPDATE url_queue SET status = 'queued', "
+                    "error = 'the identical link this deferred to failed — "
+                    "retrying from the kept download' "
+                    "WHERE content_sha = ? AND status = 'skipped' AND id != ?",
+                    [content_sha, failed_id])
+        return n
+
+    def skipped_duplicate_urls(self, content_sha: str, done_id: int) -> list[str]:
+        """URLs of skipped duplicates of this sha (for cleaning their kept
+        downloads once a twin has ingested successfully)."""
+        if not content_sha:
+            return []
+        with self.connect() as con:
+            rows = con.execute(
+                "SELECT url FROM url_queue WHERE content_sha = ? "
+                "AND status = 'skipped' AND id != ?", [content_sha, done_id],
+            ).fetchall()
+        return [r[0] for r in rows]
 
     def recover_stuck_files(self) -> int:
         """Files-table twin of recover_stuck_urls: an inbox ingest killed

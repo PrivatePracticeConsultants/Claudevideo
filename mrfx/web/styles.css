@@ -218,7 +218,7 @@ td .rate { font-weight: 650; }
 }
 .badge.done { color: var(--good); border-color: color-mix(in srgb, var(--good) 40%, transparent); }
 .badge.processing, .badge.queued { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
-.badge.skipped { background: #4a4a55; color: #cfcfda; }
+.badge.skipped { color: var(--muted); border-color: color-mix(in srgb, var(--muted) 40%, transparent); }
 .badge.failed, .badge.quarantined { color: var(--critical); border-color: color-mix(in srgb, var(--critical) 40%, transparent); }
 .badge.pending_confirmation { color: #9a6b00; border-color: color-mix(in srgb, var(--warning) 55%, transparent); }
 .warn-text { color: #9a6b00; font-size: 12.5px; }

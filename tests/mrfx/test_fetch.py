@@ -153,6 +153,46 @@ def test_byte_identical_file_on_second_url_skipped(cfg, store, server, http_root
     assert not any(cfg.downloads_dir.iterdir())  # mirror download cleaned up
 
 
+def test_duplicate_of_ingesting_twin_kept_and_revived(cfg, store, server, http_root):
+    # A twin that is merely INGESTING can still fail. The duplicate's bytes
+    # must be KEPT (not destroyed), and when the twin fails the duplicate is
+    # re-queued and ingests from the kept download — no re-download (signed
+    # URLs expire, so the kept bytes may be the only recoverable copy).
+    # Driven through process_url_record directly: run_queue's crash recovery
+    # would (correctly) re-queue the simulated mid-ingest row.
+    import hashlib
+
+    from mrfx.fetch import _meta_path, process_url_record
+
+    mirror = http_root / "revive_rates.json.gz"
+    mirror.write_bytes((http_root / "rates.json.gz").read_bytes())
+    sha = hashlib.sha256(mirror.read_bytes()).hexdigest()
+
+    # row A (lower id): simulate a parallel worker mid-ingest on identical bytes
+    add_urls(store, [f"{server}/rates.json.gz?copy=a"])
+    rec_a = next(r for r in store.list_urls() if "copy=a" in r["url"])
+    store.update_url(rec_a["id"], status="ingesting", content_sha=sha)
+
+    add_urls(store, [f"{server}/revive_rates.json.gz"])
+    process_url_record(cfg, store, store.next_queued_url())
+    rec_b = next(r for r in store.list_urls() if "revive" in r["url"])
+    assert rec_b["status"] == "skipped" and rec_b["kind"] == "duplicate"
+    assert "currently being processed" in rec_b["error"]
+    dest = cfg.downloads_dir / filename_for(rec_b["url"])
+    assert dest.exists() and _meta_path(dest).exists()  # bytes KEPT, not destroyed
+
+    # twin A fails -> B revives and must ingest from the kept download:
+    # remove the server file so any re-download attempt would 404
+    store.update_url(rec_a["id"], status="failed", error="ingest crashed: boom")
+    assert store.revive_skipped_duplicates(sha, rec_a["id"]) == 1
+    mirror.unlink()
+    rec = store.next_queued_url()
+    assert rec and "revive" in rec["url"]
+    process_url_record(cfg, store, rec)
+    rec_b = next(r for r in store.list_urls() if "revive" in r["url"])
+    assert rec_b["status"] == "done" and rec_b["rows_emitted"] > 0
+
+
 def test_oversize_guard(cfg, store, server):
     cfg.confirm_over_gb = 64 / 1e9  # 64 bytes — the 128-byte file trips it
     add_urls(store, [f"{server}/big_header.bin"])

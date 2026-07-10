@@ -58,12 +58,18 @@ Two codebases live in this repo:
    downloads resume via HTTP Range guarded by an If-Range validator (`.val`
    sidecar — republished content restarts instead of splicing); in-flight
    queue rows AND files-table 'processing' rows recover on restart
-   (`recover_stuck_urls` / `recover_stuck_files`); re-ingest atomically
-   replaces that file's part — never duplicates rows. Content-sha dedup
-   skips byte-identical files from other domains, asymmetric on id so two
-   parallel twins never both proceed (or both skip). `mrfx reset` clears
-   the url_queue with the data — done-row anchors must not outlive the
-   store they anchor.
+   (`recover_stuck_urls` / `recover_stuck_files` — the latter runs at CLI
+   startup, before any worker thread, so it never races a live ingest);
+   re-ingest atomically replaces that file's part — never duplicates rows.
+   Content-sha dedup skips byte-identical files from other domains; the
+   tie-break is asymmetric on row id, so two twins racing each other
+   resolve one-proceeds/one-skips. A skip against a still-*ingesting* twin
+   keeps its downloaded bytes and is auto-revived (skipped→queued) if that
+   twin later fails. Known residual: manually retrying a *failed* lower-id
+   row while its higher-id twin is mid-ingest can double-parse — wasted
+   work, not duplicated rows, because per-file parts replace atomically.
+   `mrfx reset` clears the url_queue with the data — done-row anchors must
+   not outlive the store they anchor.
 6. **Rollup scalability.** `rates_by_tin` / `tin_directory` are materialized
    (few groups); `rates_dedup` MUST remain a live view — at NPI×rate grain a
    30M-row store means a ~30M-group aggregation whose spill exceeded 27 GB of

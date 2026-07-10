@@ -7,7 +7,7 @@ import json
 import pytest
 
 from mrfx.ingest import ingest_file
-from mrfx.parser import as_list, clean_code, clean_digits, clean_rate
+from mrfx.parser import as_list, clean_code, clean_digits, clean_rate, clean_ref_id
 from tests.mrfx.conftest import make_fixture
 
 
@@ -128,6 +128,11 @@ def test_cleaning_helpers():
     assert clean_digits("43-111 1111") == "431111111"
     assert clean_digits(1234567890.0) == "1234567890"
     assert as_list("x") == ["x"] and as_list(None) == [] and as_list([1]) == [1]
+    # ref ids: integral forms pass; a non-integral id must be REJECTED, not
+    # truncated onto a different provider group's id
+    assert clean_ref_id("12") == 12 and clean_ref_id(12) == 12 and clean_ref_id(12.0) == 12
+    assert clean_ref_id("12.7") is None and clean_ref_id(12.7) is None
+    assert clean_ref_id("junk") is None and clean_ref_id(None) is None
 
 
 def test_large_file_streams_without_accumulating_rows(cfg, store, monkeypatch):

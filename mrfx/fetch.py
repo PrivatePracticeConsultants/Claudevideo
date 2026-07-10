@@ -447,7 +447,9 @@ def download(cfg: MrfxConfig, url: str, dest: Path, progress_cb=None,
     msg = f"download failed after {cfg.download_retries + 1} attempts: {last_exc}"
     if "CERTIFICATE_VERIFY_FAILED" in str(last_exc):
         msg += TLS_HELP
-    raise DownloadError(msg)
+    # retryable=True: the CAUSE was transient (terminal causes raised above),
+    # so callers must not treat this like a dead URL and destroy kept files
+    raise DownloadError(msg, retryable=True)
 
 
 # ---------------------------------------------------------------------------
@@ -813,10 +815,12 @@ def fetch_url_record(cfg: MrfxConfig, store: Store, rec: dict) -> bool:
         log.warning("url %s download failed: %s", url, e)
         store.update_url(url_id, status="failed", error=str(e))
         _maybe_queue_prev_month(store, rec, str(e))
-        # a stale complete download from an earlier run (recovered 'fetched'
-        # row) must not sit on disk forever once its URL is terminally dead
-        dest.unlink(missing_ok=True)
-        _meta_path(dest).unlink(missing_ok=True)
+        if not e.retryable:
+            # a stale complete download from an earlier run must not sit on
+            # disk forever once its URL is TERMINALLY dead — but a transient
+            # failure (network blip after retries) must not destroy it
+            dest.unlink(missing_ok=True)
+            _meta_path(dest).unlink(missing_ok=True)
         return False
     _meta_path(dest).write_text(json.dumps({"sha": content_sha, "final_url": final_url}))
     store.update_url(url_id, content_sha=content_sha, status="fetched")
@@ -868,8 +872,9 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
             log.warning("url %s download failed: %s", url, e)
             store.update_url(url_id, status="failed", error=str(e))
             _maybe_queue_prev_month(store, rec, str(e))
-            dest.unlink(missing_ok=True)
-            meta_p.unlink(missing_ok=True)
+            if not e.retryable:
+                dest.unlink(missing_ok=True)
+                meta_p.unlink(missing_ok=True)
             return False
         store.update_url(url_id, content_sha=content_sha)
 
@@ -878,11 +883,24 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
     # re-parsing millions of duplicate rows into the store.
     twin = store.find_url_with_same_content(content_sha, exclude_id=url_id)
     if twin:
-        store.update_url(url_id, status="skipped", kind="duplicate",
-                         error="identical to a file already ingested (payers host copies "
-                               f"of each other's files) — skipped as duplicate of {twin.split('?')[0]}")
-        dest.unlink(missing_ok=True)
-        log.info("%s — byte-identical to %s; skipped", url, twin.split("?")[0])
+        twin_url, twin_status = twin
+        if twin_status == "done":
+            store.update_url(url_id, status="skipped", kind="duplicate",
+                             error="identical to a file already ingested (payers host copies "
+                                   f"of each other's files) — skipped as duplicate of {twin_url.split('?')[0]}")
+            dest.unlink(missing_ok=True)
+            meta_p.unlink(missing_ok=True)
+        else:
+            # twin is still INGESTING — it can yet fail, so the bytes here are
+            # the only guaranteed copy. Keep them (+ metadata for reuse); if
+            # the twin fails, revive_skipped_duplicates re-queues this row and
+            # it ingests from the kept download without re-downloading.
+            _meta_path(dest).write_text(json.dumps({"sha": content_sha, "final_url": final_url}))
+            store.update_url(url_id, status="skipped", kind="duplicate",
+                             error="identical to a link currently being processed "
+                                   f"({twin_url.split('?')[0]}) — will retry automatically "
+                                   "from the kept download if that one fails")
+        log.info("%s — byte-identical to %s; skipped", url, twin_url.split("?")[0])
         return False
 
     try:
@@ -999,6 +1017,7 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
                               rebuild_rollups=rebuild_rollups)
     except Exception as e:  # noqa: BLE001 — belt and suspenders; ingest_file already isolates
         store.update_url(url_id, status="failed", kind=pf.file_type, error=f"ingest crashed: {e}")
+        _revive_twins(store, content_sha, url_id)
         return False
 
     status = result.get("status")
@@ -1008,14 +1027,29 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
                          rows_emitted=n or 0, error=None)
         if cfg.delete_raw_after_ingest:
             _cleanup_raw(cfg, dest)
+            # duplicates that deferred to this row kept their downloads in
+            # case we failed — we succeeded, so those bytes can go
+            for u in store.skipped_duplicate_urls(content_sha, url_id):
+                dup = cfg.downloads_dir / filename_for(u)
+                dup.unlink(missing_ok=True)
+                _meta_path(dup).unlink(missing_ok=True)
         return True
     elif status == "pending_confirmation":
         store.update_url(url_id, status="failed", kind=pf.file_type,
                          error="file exceeds confirm_over_gb; raise the limit in config/mrfx.yaml and retry")
+        _revive_twins(store, content_sha, url_id)
     else:
         store.update_url(url_id, status="failed", kind=pf.file_type,
                          error=result.get("error") or status)
+        _revive_twins(store, content_sha, url_id)
     return False
+
+
+def _revive_twins(store: Store, content_sha: str, failed_id: int) -> None:
+    n = store.revive_skipped_duplicates(content_sha, failed_id)
+    if n:
+        log.info("re-queued %d duplicate link(s) that deferred to the failed row "
+                 "(they resume from their kept downloads)", n)
 
 
 def _cleanup_raw(cfg: MrfxConfig, path: Path) -> None:
@@ -1070,9 +1104,6 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
     the raw rates land immediately; dashboards catch up in batches instead of
     stalling the queue for minutes after every single file."""
     recovered = store.recover_stuck_urls()
-    stale_files = store.recover_stuck_files()
-    if stale_files:
-        log.info("recovered %d file(s) left mid-ingest by a previous run", stale_files)
     if recovered:
         log.info("resumed %d URL(s) left mid-flight by a previous run", recovered)
     processed = 0

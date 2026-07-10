@@ -64,6 +64,13 @@ def cmd_serve(cfg: MrfxConfig, args) -> int:
     from .api import create_app
 
     store = Store(cfg.store_dir)
+    # BEFORE any worker starts: a crash mid-parse leaves files at
+    # 'processing', which scan_inbox skips forever. Flipping them to failed
+    # here (single-threaded, nothing else owns the store yet) lets the very
+    # first inbox scan re-ingest them without racing a live ingest.
+    n_stuck = store.recover_stuck_files()
+    if n_stuck:
+        log.info("recovered %d file(s) left mid-parse by a previous run", n_stuck)
     stop = threading.Event()
     threading.Thread(
         target=_watcher_loop, args=(cfg, store, stop), name="mrfx-watcher", daemon=True
@@ -150,6 +157,7 @@ def cmd_add(cfg: MrfxConfig, args) -> int:
     from .fetch import add_urls, run_queue
 
     store = Store(cfg.store_dir)
+    store.recover_stuck_files()  # no server owns the store — safe to recover
     counts = add_urls(store, urls)
     print(f"queued {counts['added']} URL(s) "
           f"({counts['skipped']} already known, {counts['invalid']} not URLs)")
@@ -218,6 +226,7 @@ def _make_cli_progress():
 
 def cmd_ingest(cfg: MrfxConfig, args) -> int:
     store = Store(cfg.store_dir)
+    store.recover_stuck_files()  # crashed 'processing' rows re-ingest this pass
     path = Path(args.path) if args.path else cfg.inbox_dir
     bar = _make_cli_progress()
     if path.is_dir():
