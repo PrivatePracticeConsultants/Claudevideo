@@ -270,8 +270,10 @@ sources:
       sends an incomplete TLS chain; the app repairs it automatically
       (fetches + verifies the missing DigiCert intermediates). Verified
       cascade: page -> 330 files queued (per-plan inNetworkRates on
-      mrf.healthsparq.com); first book (Aetna Health of California,
-      ~6.2 GB uncompressed) ingest verified via two-pass chunked mode.
+      mrf.healthsparq.com). First ingests: Aetna Health of California
+      (~6.2 GB uncompressed, two-pass chunked) 83,737,061 rows — the
+      second-largest single file tested; Aetna Health Inc. Maine
+      1,527,562 rows.
       FirstHealth (Aetna's rental PPO network) lives on the same platform:
       https://www.health1.firsthealth.com/app/public/#/one/insurerCode=FIRSTHEALTH_I&brandCode=FIRSTH/machine-readable-transparency-in-coverage
       — link harvest verified the same way.
