@@ -765,3 +765,50 @@ def test_resume_restarts_when_content_changed(cfg):
         assert dest.read_bytes() == new
     finally:
         httpd.shutdown()
+
+
+def test_js_portal_click_through_reveals_links(cfg):
+    # Harvard Pilgrim-class portal: the served page has NO links and no
+    # auto-fired API call — the list appears only after clicking "View Plan
+    # List" (behind a consent overlay). The renderer must click through.
+    pytest.importorskip("playwright.sync_api")
+    import http.server as hs
+
+    class Portal(hs.BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/portal":
+                body = (b"<html><body>"
+                        b"<div id='consent' style='position:fixed;inset:0;background:#fff'>"
+                        b"<button onclick=\"document.getElementById('consent').remove()\">"
+                        b"Accept all cookies</button></div>"
+                        b"<button id='v' onclick=\"fetch('/api/plans').then(r=>r.json())"
+                        b".then(d=>{const el=document.createElement('div');"
+                        b"d.files.forEach(u=>{const a=document.createElement('a');"
+                        b"a.href=u;a.textContent=u;el.appendChild(a);});"
+                        b"document.body.appendChild(el);})\">View Plan List</button>"
+                        b"</body></html>")
+                ctype = "text/html"
+            elif self.path == "/api/plans":
+                body = json.dumps({"files": ["/mrf/2026-07-01_hp_in-network-rates_index.json"]}).encode()
+                ctype = "application/json"
+            else:
+                self.send_response(404); self.end_headers(); return
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Portal)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        from mrfx.render import render_page_links
+
+        base = f"http://127.0.0.1:{httpd.server_address[1]}"
+        links = render_page_links(cfg, f"{base}/portal", 50)
+        assert f"{base}/mrf/2026-07-01_hp_in-network-rates_index.json" in links
+    finally:
+        httpd.shutdown()

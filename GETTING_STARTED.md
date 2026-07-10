@@ -151,14 +151,15 @@ aren't part of that comparison.)
   mrfx add --file config/starter_links.txt
   ```
 
-  That queues 29 sources (Highmark's 15 hosted Blue plans, BCBS Mississippi,
+  That queues 31 sources (Highmark's 15 hosted Blue plans, BCBS Mississippi,
   BCBS Tennessee, Cigna, BCBS South and North Carolina, CareFirst, Molina,
-  Kaiser, Aetna, Centene/Ambetter's all-states page, the Blue KC /
-  BCBS Michigan / BCBS Louisiana hubs, and UnitedHealthcare's national
-  portal — Molina/Kaiser/Aetna need the one-time Playwright install from
-  Step 3's note). Each one
+  Kaiser, Aetna, Harvard Pilgrim, the 14-state Anthem master index,
+  Centene/Ambetter's all-states page, the Blue KC / BCBS Michigan /
+  BCBS Louisiana hubs, and UnitedHealthcare's national portal —
+  Molina/Kaiser/Aetna/Harvard Pilgrim need the one-time Playwright install
+  from Step 3's note, and Anthem needs confirm_over_gb: 12). Each one
   expands on its own — expect thousands of files to queue and let it run.
-  The same file lists the ~25 browser-only portals (Anthem, Aetna, Kaiser…)
+  The same file lists the remaining browser-only portals (Humana, HCSC, Premera…)
   with instructions in the comments. Click **"Show tested
 sources"** on the Files tab to browse it, or **"Queue tested payer indexes"**
 to load them all — monthly-dated links are refreshed to the current month

@@ -8,7 +8,7 @@
 # indexes expand, portals are crawled, duplicates and drug/allowed-amounts
 # files are skipped, and files over confirm_over_gb wait for your go-ahead.
 
-# ---- 29 auto-queueable sources ----
+# ---- 31 auto-queueable sources ----
 # Highmark BCBS West Virginia
 https://mrfdata.hmhs.com/files/443/wv/inbound/local/{FIRST_OF_MONTH}_Highmark_Blue_Cross_Blue_Shield_of_West_Virginia_index.json
 
@@ -96,8 +96,13 @@ https://healthy.kaiserpermanente.org/southern-california/front-door/machine-read
 # Aetna / CVS Health (needs Playwright)
 https://health1.aetna.com/app/public/#/one/insurerCode=AETNACVS_I&brandCode=ALICFI/machine-readable-transparency-in-coverage
 
+# Harvard Pilgrim / Point32Health (needs Playwright; republished monthly)
+https://www.harvardpilgrim.org/public/machine-readable-files
+
+# Anthem / Elevance national master index — 14 states (set confirm_over_gb: 12 first)
+https://antm-pt-prod-dataz-nogbd-nophi-us-east1.s3.amazonaws.com/anthem/{FIRST_OF_MONTH}_anthem_index.json.gz
+
 # ---- portals that need a browser (open, click through, paste the file links) ----
-#   Anthem / Elevance national master index (14 states):  https://antm-pt-prod-dataz-nogbd-nophi-us-east1.s3.amazonaws.com/anthem/{FIRST_OF_MONTH}_anthem_index.json.gz
 #   Optum Health (transparency portal):  https://transparency-in-coverage.optum.com/
 #   Humana:  https://developers.humana.com/cost-transparency
 #   HCSC (BCBS Illinois / Texas / New Mexico / Oklahoma / Montana):  https://www.bcbsil.com/provider/standards/standard-requirements/caa/caa-tic
@@ -120,8 +125,4 @@ https://health1.aetna.com/app/public/#/one/insurerCode=AETNACVS_I&brandCode=ALIC
 #   Capital Blue Cross (central Pennsylvania):  https://www.capbluecross.com/wps/portal/cap/company/legal/machine-readable-files
 #   Independence Blue Cross (Philadelphia):  https://www.ibx.com/resources/for-members/transparency-in-coverage
 #   BCBS Minnesota (own book):  https://www.bluecrossmn.com/about-us/transparency-coverage-regulations
-#
-# Anthem/Elevance national master index (MO/CA/NY/OH/GA/VA + 8 more states):
-# the index alone is ~10.5 GB — set confirm_over_gb: 12 in config/mrfx.yaml
-# first, then uncomment:
-# https://antm-pt-prod-dataz-nogbd-nophi-us-east1.s3.amazonaws.com/anthem/{FIRST_OF_MONTH}_anthem_index.json.gz
+

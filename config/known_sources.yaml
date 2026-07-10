@@ -149,14 +149,17 @@ sources:
   - name: Anthem / Elevance national master index (14 states)
     url: https://antm-pt-prod-dataz-nogbd-nophi-us-east1.s3.amazonaws.com/anthem/{FIRST_OF_MONTH}_anthem_index.json.gz
     kind: toc
-    queueable: false
-    verified: "2026-07-08"
+    queueable: true
+    verified: "2026-07-10"
     notes: >-
-      Live-verified reachable, but the index alone is 10.5 GB compressed — to
-      pull from it, raise confirm_over_gb (e.g. to 12) and max_toc_files in
-      config/mrfx.yaml, then paste this link. Covers all Anthem states
-      (CA/CO/CT/GA/IN/KY/ME/MO/NV/NH/NY/OH/VA/WI); one Anthem CO shard (8 GB
-      uncompressed) was previously ingested end-to-end: 1,057,258 rows.
+      The index alone is 10.5 GB compressed — requires confirm_over_gb >= 12
+      in config/mrfx.yaml (the guard message says exactly that if you
+      forget). Verified end-to-end: 10.5 GB index downloaded in ~5 min,
+      stream-expanded to the max_toc_files cap (2,000 queued of many more —
+      raise the cap for deeper reach). Covers all Anthem states
+      (CA/CO/CT/GA/IN/KY/ME/MO/NV/NH/NY/OH/VA/WI). First ingests: Anthem
+      BCBS Nevada (cross-hosted on the CT domain) 609,819 rows; an Anthem CO
+      shard (8 GB uncompressed) previously ingested 1,057,258 rows.
 
   - name: Blue Cross and Blue Shield of Kansas City (Blue KC)
     url: https://bcbskc.sapphiremrfhub.com
@@ -386,6 +389,20 @@ sources:
     notes: >-
       JavaScript page (old /machine-readable-files URL now 404s; re-probed
       the new path — no static links); paste file links from a browser.
+
+  - name: Harvard Pilgrim / Point32Health (MA / NH / ME / CT)
+    url: https://www.harvardpilgrim.org/public/machine-readable-files
+    kind: page
+    queueable: true
+    verified: "2026-07-10"
+    notes: >-
+      The plan list hides behind a "View Plan List" button — with Playwright
+      the app renders the page, clicks it, and lifts 128 employer-group
+      index links (Azure blob). Verified cascade: page -> click -> 128
+      indexes -> shared network files (deduped across employers). First
+      ingests: two Harvard Pilgrim network zips, 10,138,585 and 10,138,511
+      rows. Files are only published for the current month — re-queue
+      monthly.
 
   - name: Molina Healthcare (all states)
     url: https://www.molinahealthcare.com/marketplace/wa/en-us/About/compinfo/PricingTransparency

@@ -51,6 +51,20 @@ SETTLE_MS = 2_500          # after networkidle: lazy tabs, delayed XHRs
 MAX_BODY_BYTES = 20 << 20  # never buffer a huge response into the page
 _SKIP_RESOURCES = {"image", "media", "font"}  # invisible to link harvesting
 
+# click-through: when the first render shows no links, the list is often one
+# click away — behind a "View Plan List" button or a consent overlay. Only
+# obviously-MRF-ish controls are clicked, and only a bounded number.
+MAX_CLICKS = 6
+import re as _re
+
+_CLICKABLE_TEXT_RE = _re.compile(
+    r"(view|show|see|display|open|get|access)[\s\w]{0,24}(plan|file|list|mrf|rate)"
+    r"|machine[\s-]?readable|in[\s-]?network|table\s+of\s+contents"
+    r"|transparency\s+file", _re.I)
+_CONSENT_TEXT_RE = _re.compile(
+    r"^\s*(accept(\s+all)?(\s+cookies)?|i\s+(agree|accept)|agree|continue"
+    r"|ok(ay)?|got\s+it|yes|proceed|confirm)\s*[.!»›]?\s*$", _re.I)
+
 
 def render_available() -> bool:
     try:
@@ -172,20 +186,86 @@ def render_page_links(cfg: MrfxConfig, url: str, max_files: int) -> list[str]:
                 except Exception:  # noqa: BLE001 — page may already be closing
                     pass
 
+        dom_snapshots: list[tuple[str, str]] = []  # (page_url, html)
+        clicks_done: list[str] = []
+
+        def harvest_progress() -> int:
+            """How many links the current snapshots + bodies would yield —
+            cheap check used to stop clicking as soon as something appears."""
+            probe_seen: set[str] = set()
+            n = 0
+            for u, html in dom_snapshots:
+                n += len(extract_links_from_text(html, u, max_files, seen=probe_seen))
+            for u, body in json_bodies:
+                n += len(extract_links_from_text(body, u, max_files, seen=probe_seen))
+            return n
+
+        def snapshot_all(context) -> None:
+            for pg in context.pages:
+                try:
+                    dom_snapshots.append((pg.url, pg.content()))
+                except Exception:  # noqa: BLE001 — page may be mid-navigation
+                    pass
+
+        def click_candidates(page, pattern, limit) -> int:
+            """Click visible controls whose text matches `pattern`; returns
+            how many were clicked. Elements are tagged first so the handles
+            stay stable while we iterate."""
+            try:
+                labels = page.evaluate(
+                    """() => Array.from(document.querySelectorAll(
+                           'button, a, [role=button], input[type=button], input[type=submit], summary'))
+                        .filter(el => el.offsetParent !== null)
+                        .map((el, i) => { el.setAttribute('data-mrfx-i', i);
+                                          return {i, text: (el.innerText || el.value || '').trim().slice(0, 90)}; })"""
+                ) or []
+            except Exception:  # noqa: BLE001
+                return 0
+            n = 0
+            for ent in labels:
+                if n >= limit:
+                    break
+                text = ent.get("text") or ""
+                if not text or not pattern.search(text):
+                    continue
+                try:
+                    page.click(f'[data-mrfx-i="{ent["i"]}"]', timeout=4000, no_wait_after=True)
+                    clicks_done.append(text[:40])
+                    n += 1
+                    page.wait_for_timeout(1_800)  # let the click's XHRs land
+                    try:
+                        page.wait_for_load_state("networkidle", timeout=6_000)
+                    except Exception:  # noqa: BLE001 — busy pages never go idle
+                        pass
+                except Exception:  # noqa: BLE001 — overlapped/destroyed element
+                    continue
+            return n
+
         with _RENDER_LOCK, sync_playwright() as pw:
             browser = _launch(pw)
             try:
-                page = browser.new_page(user_agent=BROWSER_UA)
-                page.route("**/*", fulfill)
+                context = browser.new_context(user_agent=BROWSER_UA)
+                context.route("**/*", fulfill)  # popups inherit the interception
+                page = context.new_page()
                 page.goto(url, wait_until="networkidle", timeout=RENDER_TIMEOUT_MS)
                 page.wait_for_timeout(SETTLE_MS)
-                final_url = page.url
-                dom_html = page.content()
+                snapshot_all(context)
+                if harvest_progress() == 0:
+                    # nothing yet: clear consent overlays, then click the
+                    # controls that look like they reveal the file list
+                    click_candidates(page, _CONSENT_TEXT_RE, 2)
+                    clicked = click_candidates(page, _CLICKABLE_TEXT_RE, MAX_CLICKS)
+                    if clicked:
+                        page.wait_for_timeout(SETTLE_MS)
+                        snapshot_all(context)
             finally:
                 browser.close()
                 holder["client"].close()
 
-        links += extract_links_from_text(dom_html, final_url, max_files, seen=seen)
+        for u, html in dom_snapshots:
+            if len(links) >= max_files:
+                break
+            links += extract_links_from_text(html, u, max_files - len(links), seen=seen)
         n_dom = len(links)
         for resp_url, body in json_bodies:
             if len(links) >= max_files:
@@ -194,10 +274,12 @@ def render_page_links(cfg: MrfxConfig, url: str, max_files: int) -> list[str]:
             links += extract_links_from_text(body, resp_url, max_files - len(links), seen=seen)
         if links:
             log.info("%s — rendered in headless browser: %d link(s) "
-                     "(%d from the page, %d from its API responses)",
-                     url, len(links), n_dom, len(links) - n_dom)
+                     "(%d from the page, %d from its API responses%s)",
+                     url, len(links), n_dom, len(links) - n_dom,
+                     f"; clicked: {', '.join(clicks_done)}" if clicks_done else "")
         else:
-            log.info("%s — rendered in headless browser: no file links appeared", url)
+            log.info("%s — rendered in headless browser: no file links appeared%s",
+                     url, f" (clicked: {', '.join(clicks_done)})" if clicks_done else "")
         return links
     except RenderBrowserMissing:
         raise  # actionable — the caller shows the one-line install fix
