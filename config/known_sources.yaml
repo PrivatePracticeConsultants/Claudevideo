@@ -260,10 +260,21 @@ sources:
 
   - name: Aetna / CVS Health
     url: https://health1.aetna.com/app/public/#/one/insurerCode=AETNACVS_I&brandCode=ALICFI/machine-readable-transparency-in-coverage
-    kind: portal
-    queueable: false
-    verified: "2026-07-08"
-    notes: JavaScript portal — open in a browser and paste the file links.
+    kind: page
+    queueable: true
+    verified: "2026-07-10"
+    notes: >-
+      health1 SPA — with Playwright the app renders it and captures the
+      HealthSparq metadata API, which lists real in-network rate files
+      (unlike Excellus's allowed-amounts-only book). Aetna's server also
+      sends an incomplete TLS chain; the app repairs it automatically
+      (fetches + verifies the missing DigiCert intermediates). Verified
+      cascade: page -> 330 files queued (per-plan inNetworkRates on
+      mrf.healthsparq.com); first book (Aetna Health of California,
+      ~6.2 GB uncompressed) ingest verified via two-pass chunked mode.
+      FirstHealth (Aetna's rental PPO network) lives on the same platform:
+      https://www.health1.firsthealth.com/app/public/#/one/insurerCode=FIRSTHEALTH_I&brandCode=FIRSTH/machine-readable-transparency-in-coverage
+      — link harvest verified the same way.
 
   - name: Humana
     url: https://developers.humana.com/cost-transparency
@@ -352,12 +363,18 @@ sources:
       JavaScript page (re-probed with trailing slash — no static links);
       paste file links from a browser.
 
-  - name: Kaiser Permanente
-    url: https://healthy.kaiserpermanente.org/front-door/machine-readable
-    kind: portal
-    queueable: false
-    verified: "2026-07-08"
-    notes: JavaScript page (probed — no static links); paste file links from a browser.
+  - name: Kaiser Permanente (all regions)
+    url: https://healthy.kaiserpermanente.org/southern-california/front-door/machine-readable
+    kind: page
+    queueable: true
+    verified: "2026-07-10"
+    notes: >-
+      JavaScript page — with Playwright the app renders it and lifts the
+      regional index links (KPIC/KFHP/Self-Funded per state: CA/CO/GA/HI/
+      MD/NC/OR/SC/VA/WA…). Verified cascade: page -> indexes -> rate files.
+      First ingests are American Specialty Health books (ASH administers
+      Kaiser's PT/OT/chiro network — exactly the therapy rates): KFHP-HI
+      22,292 rows; KFHP-NC 267,104 rows. Allowed-amounts entries skipped.
 
   - name: Oscar Health
     url: https://www.hioscar.com/transparency-in-coverage-files/oscar

@@ -83,14 +83,20 @@ def filename_for(url: str) -> str:
 
 def ssl_verify():
     """TLS verification that honors the standard CA-bundle env vars
-    (SSL_CERT_FILE / REQUESTS_CA_BUNDLE). Corporate networks and VPNs often
-    intercept HTTPS with their own certificate authority; without this, every
-    download fails with CERTIFICATE_VERIFY_FAILED even though the browser
-    works. Verification is never disabled — we only add the extra CA."""
+    (SSL_CERT_FILE / REQUESTS_CA_BUNDLE) IN ADDITION to the system trust
+    store. Corporate networks and VPNs often intercept HTTPS with their own
+    certificate authority; without this, every download fails with
+    CERTIFICATE_VERIFY_FAILED even though the browser works. Some setups
+    layer TWO interceptors (a local proxy CA in the env bundle plus a
+    network-level gateway CA only in the system store) — trusting the env
+    bundle INSTEAD of the system store breaks those, so both are loaded.
+    Verification is never disabled — we only add CAs."""
     cafile = os.environ.get("SSL_CERT_FILE") or os.environ.get("REQUESTS_CA_BUNDLE")
     if cafile and Path(cafile).exists():
         try:
-            return ssl.create_default_context(cafile=cafile)
+            ctx = ssl.create_default_context(cafile=cafile)
+            ctx.load_default_certs(ssl.Purpose.SERVER_AUTH)  # system store too
+            return ctx
         except ssl.SSLError:
             pass
     return True
@@ -111,6 +117,44 @@ TLS_HELP = (
 _REPAIRED_CTX: dict[str, ssl.SSLContext] = {}
 
 
+def _fetch_leaf_pem(host: str, port: int) -> str:
+    """Read the certificate a server presents, using the SAME network path
+    the downloads will use: behind an HTTP(S) proxy the direct route can be
+    intercepted by something else entirely, and repairing the wrong chain
+    helps nobody. Like ssl.get_server_certificate, no data is exchanged and
+    no trust decision is made here — the assembled chain is fully verified
+    against real roots + hostname before anything is trusted."""
+    proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+    if proxy:
+        try:
+            import socket
+
+            pp = urlsplit(proxy if "://" in proxy else "http://" + proxy)
+            sock = socket.create_connection((pp.hostname, pp.port or 8080), timeout=20)
+            try:
+                sock.sendall(f"CONNECT {host}:{port} HTTP/1.1\r\n"
+                             f"Host: {host}:{port}\r\n\r\n".encode())
+                resp = b""
+                while b"\r\n\r\n" not in resp and len(resp) < 65536:
+                    chunk = sock.recv(4096)
+                    if not chunk:
+                        break
+                    resp += chunk
+                if b" 200" not in resp.split(b"\r\n", 1)[0]:
+                    raise OSError(f"proxy CONNECT refused: {resp[:60]!r}")
+                ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE  # certificate DISCOVERY only
+                with ctx.wrap_socket(sock, server_hostname=host) as ss:
+                    der = ss.getpeercert(binary_form=True)
+                return ssl.DER_cert_to_PEM_cert(der)
+            finally:
+                sock.close()
+        except OSError:
+            pass  # fall through to the direct read
+    return ssl.get_server_certificate((host, port), timeout=20)
+
+
 def _repair_incomplete_chain(url: str) -> ssl.SSLContext | None:
     try:
         import certifi
@@ -127,7 +171,7 @@ def _repair_incomplete_chain(url: str) -> ssl.SSLContext | None:
         return _REPAIRED_CTX[host]
     try:
         # read only the certificate the server presents (no data is exchanged)
-        leaf_pem = ssl.get_server_certificate((host, port), timeout=20)
+        leaf_pem = _fetch_leaf_pem(host, port)
         leaf = x509.load_pem_x509_certificate(leaf_pem.encode())
         inters: list = []
         cur = leaf
@@ -532,7 +576,8 @@ def looks_like_html(path: Path) -> bool:
 # build's own preload/manifest links would otherwise be queued as "files"
 _FRAMEWORK_ASSET_RE = re.compile(
     r"(/page-data/|/manifest\.json|\.webmanifest|/favicon|/asset-manifest|/app-data\.json"
-    r"|/jcr:content/)", re.I  # AEM page components (BCBS NC embeds them as .json)
+    r"|/jcr:content/"          # AEM page components (BCBS NC embeds them as .json)
+    r"|search-api\.swiftype\.com|/api/v1/public/installs/)", re.I  # site-search widgets
 )
 
 

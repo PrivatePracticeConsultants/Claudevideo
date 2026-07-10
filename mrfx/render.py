@@ -94,7 +94,8 @@ def render_page_links(cfg: MrfxConfig, url: str, max_files: int) -> list[str]:
         return []
     import httpx
 
-    from .fetch import BROWSER_UA, extract_links_from_text, ssl_verify
+    from .fetch import (BROWSER_UA, _repair_incomplete_chain,
+                        extract_links_from_text, ssl_verify)
 
     try:
         from playwright.sync_api import sync_playwright
@@ -103,12 +104,36 @@ def render_page_links(cfg: MrfxConfig, url: str, max_files: int) -> list[str]:
         links: list[str] = []
         json_bodies: list[tuple[str, str]] = []  # (final_url, body_text)
 
-        client = httpx.Client(
-            headers={"User-Agent": BROWSER_UA},
-            follow_redirects=True,
-            timeout=30.0,
-            verify=ssl_verify(),
-        )
+        def make_client(verify):
+            return httpx.Client(
+                headers={"User-Agent": BROWSER_UA},
+                follow_redirects=True,
+                timeout=30.0,
+                verify=verify,
+            )
+
+        # mutable so the chain-repair fallback below can swap the client in
+        holder = {"client": make_client(ssl_verify())}
+
+        def _do_request(req):
+            headers = {k: v for k, v in req.headers.items()
+                       if k.lower() not in ("host", "cookie", "content-length")}
+            try:
+                return holder["client"].request(
+                    req.method, req.url, content=req.post_data_buffer, headers=headers)
+            except httpx.ConnectError as e:
+                # some payers (Aetna's health1 platform) serve an incomplete
+                # certificate chain — repair it like a browser would, exactly
+                # as the downloader does, then retry once
+                if "CERTIFICATE_VERIFY_FAILED" not in str(e):
+                    raise
+                ctx = _repair_incomplete_chain(req.url)
+                if ctx is None:
+                    raise
+                holder["client"].close()
+                holder["client"] = make_client(ctx)
+                return holder["client"].request(
+                    req.method, req.url, content=req.post_data_buffer, headers=headers)
 
         def fulfill(route):
             req = route.request
@@ -116,12 +141,7 @@ def render_page_links(cfg: MrfxConfig, url: str, max_files: int) -> list[str]:
                 route.abort()
                 return
             try:
-                r = client.request(
-                    req.method, req.url,
-                    content=req.post_data_buffer,
-                    headers={k: v for k, v in req.headers.items()
-                             if k.lower() not in ("host", "cookie", "content-length")},
-                )
+                r = _do_request(req)
                 body = r.content[: MAX_BODY_BYTES + 1]
                 if len(body) > MAX_BODY_BYTES:
                     route.abort()
@@ -149,7 +169,7 @@ def render_page_links(cfg: MrfxConfig, url: str, max_files: int) -> list[str]:
                 dom_html = page.content()
             finally:
                 browser.close()
-                client.close()
+                holder["client"].close()
 
         links += extract_links_from_text(dom_html, final_url, max_files, seen=seen)
         n_dom = len(links)

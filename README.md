@@ -185,15 +185,17 @@ badge and are never displayed as authoritative; confirming a URL persists it to
 
 `config/known_sources.yaml` is a shipped catalog of every payer entry point
 this app has been live-tested against — each entry carries its verification
-date and what happened (files listed, rows ingested, quirks). 27 entries are
+date and what happened (files listed, rows ingested, quirks). 29 entries are
 **auto-queueable** (Highmark's 15 hosted Blue plans incl. FL/AZ/ID/MN/LA/NE,
 BCBS Mississippi's stable TOC, BCBS Tennessee's /tcr directory page,
 Cigna's signed-manifest page, BCBS South Carolina's CloudFront indexes,
 BCBS North Carolina's signed TOC page, CareFirst's Azure-blob indexes,
-Molina Healthcare's all-states page (via the headless-browser renderer),
+Molina Healthcare's all-states page, Kaiser Permanente's regional
+indexes, and Aetna's HealthSparq portal (the last three via the
+headless-browser renderer),
 Centene/Ambetter's all-states page, the Sapphire hubs of Blue KC, BCBS
 Michigan, and BCBS Louisiana, and UnitedHealthcare's national portal); the
-rest are portals that need a browser click (Aetna, Humana, HCSC,
+rest are portals that need a browser click (Humana, HCSC,
 BCBS AL/MA/RI/VT/KS, Arkansas, Wellmark, Horizon NJ,
 Premera, Regence, Kaiser, Oscar, Molina, Priority Health, HMSA, Blue Shield
 of CA, Excellus, Capital BC, IBX, BCBS MN, UHS — probed; JavaScript-only or
