@@ -165,9 +165,10 @@ aren't part of that comparison.)
   mrfx add --file config/starter_links.txt
   ```
 
-  That queues 31 sources (Highmark's 15 hosted Blue plans, BCBS Mississippi,
+  That queues 33 sources (Highmark's 15 hosted Blue plans, BCBS Mississippi,
   BCBS Tennessee, Cigna, BCBS South and North Carolina, CareFirst, Molina,
-  Kaiser, Aetna, Harvard Pilgrim, the 14-state Anthem master index,
+  Kaiser, Aetna, Harvard Pilgrim, Regence, Oscar, the 14-state Anthem
+  master index,
   Centene/Ambetter's all-states page, the Blue KC / BCBS Michigan /
   BCBS Louisiana hubs, and UnitedHealthcare's national portal —
   Molina/Kaiser/Aetna/Harvard Pilgrim need the one-time Playwright install

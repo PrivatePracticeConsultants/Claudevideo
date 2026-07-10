@@ -361,12 +361,17 @@ sources:
 
   - name: Regence (Cambia — OR / WA / UT / ID)
     url: https://www.regence.com/transparency-in-coverage/
-    kind: portal
-    queueable: false
-    verified: "2026-07-09"
+    kind: page
+    queueable: true
+    verified: "2026-07-10"
     notes: >-
-      JavaScript page (re-probed with trailing slash — no static links);
-      paste file links from a browser.
+      With Playwright the app renders the page and lifts 8 monthly
+      per-licensee indexes (tic-mrf.regence.com/mrf/current/ — ASO and
+      non-ASO for OR/WA/UT/ID). Verified cascade: page -> 8 indexes ->
+      signed rate files on the bcbs.com CDN. First ingests (a 2-part file
+      hosted on the Idaho CDN that reports as Arkansas BCBS — more Blues
+      cross-hosting, attributed per-file as always): 366,680 + 239,547
+      rows.
 
   - name: Kaiser Permanente (all regions)
     url: https://healthy.kaiserpermanente.org/southern-california/front-door/machine-readable
@@ -383,12 +388,18 @@ sources:
 
   - name: Oscar Health
     url: https://www.hioscar.com/transparency-in-coverage-files/oscar
-    kind: portal
-    queueable: false
-    verified: "2026-07-09"
+    kind: page
+    queueable: true
+    verified: "2026-07-10"
     notes: >-
-      JavaScript page (old /machine-readable-files URL now 404s; re-probed
-      the new path — no static links); paste file links from a browser.
+      With Playwright the app renders the page and lifts ~25 monthly S3
+      index links — Oscar keeps YEARS of history online, so expect the
+      queue to swell (5,603 files from one paste in testing; every row
+      carries its file_month, so history is safe but noisy). To bound it,
+      paste just the newest index:
+      https://hioscar-cms-tic-us-east-1.s3.amazonaws.com/oscar/{FIRST_OF_MONTH}_oscar_index.json
+      Verified ingests: Davis Vision 0 rows (vision — correct skip-level),
+      Optum/UBH behavioral book 460 therapy rows.
 
   - name: Harvard Pilgrim / Point32Health (MA / NH / ME / CT)
     url: https://www.harvardpilgrim.org/public/machine-readable-files
