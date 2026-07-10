@@ -84,9 +84,9 @@ just the `activate` line** (the `source .venv/bin/activate` or
 `.venv\Scripts\Activate.ps1` step) — you don't reinstall.
 
 > **Optional but recommended — the headless-browser helper.** Some payers
-> (Molina, Kaiser, Aetna, Harvard Pilgrim, Regence) build their file lists
-> with JavaScript, and the app can read those pages automatically if you run
-> this once after the install above:
+> (Molina, Kaiser, Aetna, Harvard Pilgrim, Regence, and Oscar's file page)
+> build their file lists with JavaScript, and the app can read those pages
+> automatically if you run this once after the install above:
 >
 > ```
 > playwright install chromium
@@ -173,8 +173,10 @@ aren't part of that comparison.)
   master index,
   Centene/Ambetter's all-states page, the Blue KC / BCBS Michigan /
   BCBS Louisiana hubs, and UnitedHealthcare's national portal —
-  Molina/Kaiser/Aetna/Harvard Pilgrim/Regence need the one-time Playwright
-  install from Step 3's note, and Anthem needs confirm_over_gb: 12). Each one
+  Molina/Kaiser/Aetna/Harvard Pilgrim/Regence/Oscar need the one-time
+  Playwright install from Step 3's note (the starter-links FILE swaps Oscar
+  for a browser-free monthly index), and Anthem needs confirm_over_gb: 12).
+  Each one
   expands on its own — expect thousands of files to queue and let it run.
   The same file lists the remaining browser-only portals (Humana, HCSC, Premera…)
   with instructions in the comments. Click **"Show tested
@@ -421,9 +423,12 @@ them in one place, grouped by where you'll hit them.
   don't need: Files tab → **remove** button on any row (or
   `mrfx forget <filename>`). It reports the space freed, the dashboards
   update, and re-adding the link later brings the data back.
-- **`this file is being processed right now`** when removing — a file can't
-  be erased mid-parse (the running parse would quietly bring it back). Wait
-  for the row to reach `done` or `failed`, then remove it.
+- **`this file is being processed right now` / `…link is being retried right
+  now`** when removing — a file can't be erased mid-parse or mid-retry (the
+  running work would quietly bring it back). Wait for the row to reach
+  `done` or `failed`, then remove it. Similarly, `mrfx forget` and
+  `mrfx reset` refuse while the dashboard is running — use the Files tab's
+  remove button instead, or stop the server first.
 
 ### Getting help
 

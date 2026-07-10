@@ -193,8 +193,10 @@ Cigna's signed-manifest page, BCBS South Carolina's CloudFront indexes,
 BCBS North Carolina's signed TOC page, CareFirst's Azure-blob indexes,
 Molina Healthcare's all-states page, Kaiser Permanente's regional
 indexes, Aetna's HealthSparq portal, Harvard Pilgrim's click-gated plan
-list, Regence's JS-built page, and Oscar's monthly S3 index (the five
-JS-built pages via the headless-browser renderer), Anthem/Elevance's
+list, Regence's JS-built page, and Oscar's file page (those six JS-built
+pages via the headless-browser renderer; `config/starter_links.txt`
+swaps Oscar for its bounded monthly S3 index, which needs no browser),
+Anthem/Elevance's
 14-state master index (10.5 GB — needs confirm_over_gb: 12),
 Centene/Ambetter's all-states page, the Sapphire hubs of Blue KC, BCBS
 Michigan, and BCBS Louisiana, and UnitedHealthcare's national portal); the

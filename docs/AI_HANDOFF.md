@@ -81,7 +81,20 @@ Two codebases live in this repo:
    Benchmark basis_note/assumptions echo the toggles actually applied
    (include_assistant, base_only=false, dropped billing_class); the
    %-of-Medicare footer discloses the median-across-localities anchor.
-5. **NPPES poisoning guard.** Only a genuine HTTP-200 body WITH a "results"
+4a. **Numbers-correctness rules (the product IS the numbers).**
+   `negotiation_arrangement != ffs` items (bundle/capitation) are EXCLUDED —
+   a bundle price is not a per-code rate (QA-counted as bundled_items).
+   Modifier and service-code arrays are sorted+deduped at parse time so
+   publication order can never split the dedup grain. file_month = validated
+   header month, else the filename's stamped date, else ingestion month.
+   An untyped 10-digit tin.value is an NPI-in-the-TIN-slot (flagged), not an
+   EIN. `load_provider_refs` serves only each ref_id's NEWEST vintage —
+   two companion files must not union stale provider lists. Rollups rebuild
+   after enrichment lands (geographic benchmarks join tin_directory's
+   states/cities). Entity-grain rate = median of member-TIN rates — the
+   methodology text says exactly that, never "distinct published values".
+   MPFS codes are normalized like billing codes before matching.
+4b. **NPPES poisoning guard.** Only a genuine HTTP-200 body WITH a "results"
    key (empty list) may mark an NPI dead. Non-200s AND 200-wrapped error
    bodies ({"Errors": [...]}) leave the NPI un-enriched for retry; 20
    consecutive failures pause the run. `unenriched_npis` serves only
@@ -114,7 +127,21 @@ Two codebases live in this repo:
    failure leaves forget retryable instead of orphaning unreachable rates.
    A second `mrfx serve` claims the port BEFORE touching the store (running
    crash-recovery against a live server's rows corrupted in-flight parses);
-   `mrfx ingest` probes for a running server the same way.
+   `mrfx ingest`, `forget`, and `reset` probe for a running server the same
+   way (timeouts count as "owned" — fail closed). IN-process, one ingest per
+   filename at a time (`_claim_ingest`): watcher, upload scans, confirm
+   double-clicks, and requeue_skipped share pid-suffixed temp paths and
+   would corrupt the live part racing each other; forget takes the same
+   claim, and additionally refuses while the file's QUEUE row is in flight
+   (a retry keeps the files row at its old terminal status for the whole
+   download). Uploads stream to `*.uploading` and rename when complete;
+   scan_inbox skips working suffixes and size-growing files (a half-copied
+   file must not be quarantined and moved out from under its writer);
+   parse-progress sidecars live under the store, never the watched inbox.
+   The DuckDB temp-disk cap and SET threads are GLOBAL to the process's
+   shared instance: the cap is computed once per Store (per-connection
+   recomputation strangled running rebuilds), and the OOM retry's
+   single-thread mode is RESET afterward.
 6. **Rollup scalability.** `rates_by_tin` / `tin_directory` are materialized
    (few groups); `rates_dedup` MUST remain a live view — at NPI×rate grain a
    30M-row store means a ~30M-group aggregation whose spill exceeded 27 GB of

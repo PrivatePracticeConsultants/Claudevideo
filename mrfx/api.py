@@ -331,8 +331,10 @@ def methodology_text(cfg: MrfxConfig, store: Store, grain: str, fs: FilterSet,
         f"Grain: {grain} (one row per payer x billing_code x {grain} x modifier-set x class x POS-set x month)",
         f"Filters: {json.dumps(fs.described, default=str)}",
         f"Sort: {sort} {direction}",
-        "Dedup rule: distinct negotiated facts per grain tuple; a TIN/entity rate is the "
-        "median of its distinct published values, rate_variants counts them.",
+        "Dedup rule: distinct negotiated facts per grain tuple. A TIN rate is the "
+        "median of its distinct published values (rate_variants counts them); an "
+        "ENTITY rate is the median of its member TINs' rates, and entity npi_count/"
+        "source_count sum members (an NPI shared by two member TINs counts twice).",
         f"Outlier handling: {fs.described.get('hide_outliers')}",
         "Non-dollar negotiated_type rows (percentage, per diem) are excluded when "
         f"dollar_rates_only is true (currently: {fs.described.get('dollar_rates_only')}).",
@@ -624,10 +626,17 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             # minutes after this endpoint returned "forgotten"
             raise HTTPException(409, "this file is being processed right now — "
                                      "wait for it to finish, then remove it")
+        if store.url_inflight_for_filename(filename):
+            # a retried queue row is re-downloading this file — the files row
+            # still shows its OLD terminal status for the whole download
+            raise HTTPException(409, "this file's link is being retried right now — "
+                                     "wait for it (or skip the link), then remove it")
         try:
             info = forget_file(cfg, store, filename)
         except ValueError:
             raise HTTPException(400, "not a plain filename")
+        except RuntimeError as e:  # ingest claimed the file between check and act
+            raise HTTPException(409, str(e))
         return {"status": "forgotten", **info}
 
     # -- URL-drop queue (paste links, the app does the rest) -------------------
@@ -699,15 +708,21 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     @app.post("/api/upload")
     async def upload(file: UploadFile, background: BackgroundTasks):
         dest = cfg.inbox_dir / Path(file.filename or "upload.json").name
+        # stream to a name the inbox scanner ignores, rename when COMPLETE —
+        # the watcher fires on creation and would otherwise preflight (and
+        # quarantine/move!) a half-written file out from under this handler
+        tmp = dest.with_name(dest.name + ".uploading")
         size = 0
-        with open(dest, "wb") as out:
-            while chunk := await file.read(1 << 20):
-                size += len(chunk)
-                if size > UPLOAD_LIMIT_BYTES:
-                    out.close()
-                    dest.unlink(missing_ok=True)
-                    raise HTTPException(413, "over 1 GB — drop the file into data/inbox/ instead")
-                out.write(chunk)
+        try:
+            with open(tmp, "wb") as out:
+                while chunk := await file.read(1 << 20):
+                    size += len(chunk)
+                    if size > UPLOAD_LIMIT_BYTES:
+                        raise HTTPException(413, "over 1 GB — drop the file into data/inbox/ instead")
+                    out.write(chunk)
+            tmp.replace(dest)
+        finally:
+            tmp.unlink(missing_ok=True)
         background.add_task(scan_inbox, cfg, store)
         return {"status": "queued", "filename": dest.name, "bytes": size}
 
@@ -969,9 +984,13 @@ def _load_mpfs_csv(store: Store, data: bytes, source: str) -> int:
     required = {"code", "non_facility_rate"}
     if not required <= set(fields):
         raise ValueError(f"missing columns {required - set(fields)}")
+    from .parser import clean_code
+
     rows = []
     for i, row in enumerate(reader, start=2):
-        code = (row.get(fields["code"]) or "").strip()
+        # normalize like billing_code is normalized ('g0283' -> G0283,
+        # Excel's '97110.0' -> 97110) or %-of-Medicare silently never matches
+        code = clean_code(row.get(fields["code"]) or "")
         if not code:
             continue
         rate_raw = row.get(fields["non_facility_rate"])

@@ -131,6 +131,8 @@ def render_page_links(cfg: MrfxConfig, url: str, max_files: int) -> list[str]:
         seen: set[str] = set()
         links: list[str] = []
         json_bodies: list[tuple[str, str]] = []  # (final_url, body_text)
+        json_kept = {"bytes": 0}  # aggregate cap — 200 bodies x 20MB each would balloon
+        final_urls: dict[str, str] = {}  # requested document URL -> post-redirect URL
 
         def make_client(verify):
             return httpx.Client(
@@ -195,10 +197,16 @@ def render_page_links(cfg: MrfxConfig, url: str, max_files: int) -> list[str]:
                 if body is None:  # over the cap — never hand it to the page
                     route.abort()
                     return
+                if req.is_navigation_request():
+                    # httpx followed redirects internally, so the PAGE never
+                    # sees the final URL — remember it or relative links in
+                    # the DOM snapshot resolve against the pre-redirect host
+                    final_urls[req.url] = str(r.url)
                 ctype = (r.headers.get("content-type") or "").lower()
-                if len(json_bodies) < 200 and (
-                        "json" in ctype or str(r.url).split("?")[0].lower().endswith(".json")):
+                if (len(json_bodies) < 200 and json_kept["bytes"] < (64 << 20) and
+                        ("json" in ctype or str(r.url).split("?")[0].lower().endswith(".json"))):
                     json_bodies.append((str(r.url), body.decode(errors="replace")))
+                    json_kept["bytes"] += len(body)
                 route.fulfill(status=r.status_code, body=body,
                               headers={"content-type": r.headers.get("content-type", "")})
             except Exception:  # noqa: BLE001 — a failed asset must not sink the render
@@ -224,7 +232,9 @@ def render_page_links(cfg: MrfxConfig, url: str, max_files: int) -> list[str]:
         def snapshot_all(context) -> None:
             for pg in context.pages:
                 try:
-                    dom_snapshots.append((pg.url, pg.content()))
+                    # base for relative links = where the document REALLY came
+                    # from (post-redirect), not the address the page shows
+                    dom_snapshots.append((final_urls.get(pg.url, pg.url), pg.content()))
                 except Exception:  # noqa: BLE001 — page may be mid-navigation
                     pass
 
@@ -269,7 +279,11 @@ def render_page_links(cfg: MrfxConfig, url: str, max_files: int) -> list[str]:
                 # missing-browser error must not leak the httpx client
                 browser = _launch(pw)
                 try:
-                    context = browser.new_context(user_agent=BROWSER_UA)
+                    # service workers bypass route() interception entirely —
+                    # block them or the browser fetches from the network
+                    # itself, violating the everything-through-httpx invariant
+                    context = browser.new_context(user_agent=BROWSER_UA,
+                                                  service_workers="block")
                     context.route("**/*", fulfill)  # popups inherit the interception
                     page = context.new_page()
                     page.goto(url, wait_until="networkidle", timeout=RENDER_TIMEOUT_MS)

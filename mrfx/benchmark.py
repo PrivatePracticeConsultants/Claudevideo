@@ -250,6 +250,11 @@ def compute_opportunity(benchmark: dict, volumes: dict[str, float],
             f"conservative_percentile must be one of {PERCENTILES} — an unknown "
             "percentile would silently report a $0 conservative opportunity")
     target = benchmark["target_percentile"]
+    if conservative_percentile > target:
+        raise BenchmarkError(
+            f"conservative_percentile ({conservative_percentile}) must not exceed the "
+            f"target percentile ({target}) — the 'conservative' band would be the "
+            "LARGER number and the report labels would mislead")
     rows, total_target, total_conservative = [], 0.0, 0.0
     for r in benchmark["rows"]:
         units = volumes.get(r["billing_code"])

@@ -83,6 +83,10 @@ def cmd_serve(cfg: MrfxConfig, args) -> int:
     # worker threads, only to die minutes of damage later at uvicorn's bind.
     try:
         probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # uvicorn binds with SO_REUSEADDR; without it here, TIME_WAIT sockets
+        # from a server stopped seconds ago fail this probe and a perfectly
+        # valid restart gets told "another dashboard is running"
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         probe.bind(("127.0.0.1", cfg.port))
         probe.close()
     except OSError:
@@ -114,6 +118,14 @@ def cmd_serve(cfg: MrfxConfig, args) -> int:
         uvicorn.run(app, host="127.0.0.1", port=cfg.port, log_level="warning")
     finally:
         stop.set()
+        # don't let concurrent.futures' atexit hook block process exit for
+        # the remainder of a multi-hour parse: terminate workers now (their
+        # pid-suffixed temps are swept as orphans on the next start)
+        from .ingest import get_parse_pool
+
+        pool = get_parse_pool()
+        if pool is not None and hasattr(pool, "shutdown_now"):
+            pool.shutdown_now()
     return 0
 
 
@@ -208,7 +220,10 @@ def cmd_add(cfg: MrfxConfig, args) -> int:
                ("queued", "downloading", "fetched", "expanding", "ingesting"))
     if live == 0:
         return 0  # nothing queued and nothing left mid-flight by a crash
-    n_workers = max(1, int(getattr(cfg, "parallel_ingests", 1) or 1))
+    import os as _os
+
+    n_workers = max(1, min(int(getattr(cfg, "parallel_ingests", 1) or 1),
+                           max(1, (_os.cpu_count() or 2) - 1)))  # same clamp as run_queue
     print(f"downloading and ingesting ({n_workers} file(s) at a time — Ctrl-C to stop; "
           "re-running `mrfx add` resumes where it left off)...")
     processed = run_queue(cfg, store, drain=True, progress_bar=_make_cli_progress())
@@ -274,19 +289,41 @@ def _make_cli_progress():
     return cb
 
 
-def cmd_ingest(cfg: MrfxConfig, args) -> int:
-    # like cmd_add: never open the store while a running server owns it — and
-    # especially never run crash-recovery against its live 'processing' rows
+def _something_owns_the_port(cfg: MrfxConfig, action: str) -> bool:
+    """True (with a printed explanation) when the dashboard — or anything —
+    answers on our port, so store-owning CLI commands must not proceed.
+    trust_env=False keeps a corporate proxy from answering FOR localhost, and
+    a TIMEOUT counts as 'owned': a busy mid-startup server that can't answer
+    in 5s is exactly the case where opening its store would do damage."""
     import httpx as _httpx
 
     try:
-        _httpx.get(f"http://localhost:{cfg.port}/api/files", timeout=5)
-        print(f"a server is running on port {cfg.port} — drop files in the inbox or "
-              "use the dashboard instead of a second process (two writers would "
-              "fight over the database). Stop it to run `mrfx ingest` directly.")
+        r = _httpx.get(f"http://localhost:{cfg.port}/api/files", timeout=5,
+                       trust_env=False)
+        looks_mrfx = False
+        try:
+            r.json()["files"]
+            looks_mrfx = True
+        except Exception:  # noqa: BLE001
+            pass
+        who = "the mrfx dashboard" if looks_mrfx else "something (not obviously mrfx)"
+        print(f"{who} answered on port {cfg.port} — not {action} while it may own "
+              "the database. Use the dashboard, or stop it and re-run.")
+        return True
+    except _httpx.TimeoutException:
+        print(f"something on port {cfg.port} didn't answer within 5s — refusing to "
+              f"{action} in case it's the dashboard mid-start. Re-run in a moment, "
+              "or stop the server first.")
+        return True
+    except Exception:  # noqa: BLE001 — connection refused etc.: port is free
+        return False
+
+
+def cmd_ingest(cfg: MrfxConfig, args) -> int:
+    # like cmd_add: never open the store while a running server owns it — and
+    # especially never run crash-recovery against its live 'processing' rows
+    if _something_owns_the_port(cfg, "ingesting locally"):
         return 1
-    except Exception:  # noqa: BLE001 — nothing answering: safe to proceed
-        pass
     store = Store(cfg.store_dir)
     store.recover_stuck_files()  # crashed 'processing' rows re-ingest this pass
     path = Path(args.path) if args.path else cfg.inbox_dir
@@ -404,6 +441,9 @@ def cmd_forget(cfg: MrfxConfig, args) -> int:
     rest of the store — the user-controlled counterpart to `reset`."""
     from .ingest import forget_file
 
+    if _something_owns_the_port(cfg, "erasing files locally"):
+        print("tip: while the dashboard runs, use its Files tab's remove button instead.")
+        return 1
     store = Store(cfg.store_dir)
     rc = 0
     for name in args.filenames:
@@ -412,12 +452,17 @@ def cmd_forget(cfg: MrfxConfig, args) -> int:
             print(f"{name}: not in the store (check `mrfx status` for exact filenames)")
             rc = 1
             continue
-        if st.get("status") in ("processing", "queued"):
+        if st.get("status") in ("processing", "queued") or store.url_inflight_for_filename(name):
             print(f"{name}: being processed right now — wait for it to finish, "
                   "then forget it (removing mid-parse would quietly resurrect)")
             rc = 1
             continue
-        info = forget_file(cfg, store, name)
+        try:
+            info = forget_file(cfg, store, name)
+        except RuntimeError as e:
+            print(f"{name}: {e}")
+            rc = 1
+            continue
         print(f"{name}: removed {info['rows']:,} rows, freed {info['bytes'] / 1e6:.1f} MB")
     return rc
 
@@ -425,6 +470,8 @@ def cmd_forget(cfg: MrfxConfig, args) -> int:
 def cmd_reset(cfg: MrfxConfig, args) -> int:
     if not args.confirm:
         print("refusing: pass --confirm to clear the store (processed files are kept)")
+        return 1
+    if _something_owns_the_port(cfg, "resetting the store"):
         return 1
     Store(cfg.store_dir).reset()
     print("store cleared. processed files remain in", cfg.processed_dir)

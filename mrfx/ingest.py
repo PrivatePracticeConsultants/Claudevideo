@@ -11,6 +11,8 @@ import json
 import logging
 import os
 import shutil
+import threading
+import time
 from pathlib import Path
 
 from .config import MrfxConfig
@@ -128,10 +130,13 @@ def _qa_aggregates(store: Store, part: Path, total: int, qa: dict) -> None:
                 )
                 """
             ).fetchone()[0]
+    prices = qa.get("prices") or 0
     qa.update({
         "outlier_rates": outliers,
         "outlier_rule": ">5x or <0.2x of the code's within-file median",
-        "non_dollar_share": round(qa["non_dollar_rows"] / total, 4) if total else 0.0,
+        # share of PRICES (both counters are per-price): dividing a per-price
+        # numerator by the NPI-fanned row count understated it dramatically
+        "non_dollar_share": round(qa["non_dollar_rows"] / prices, 4) if prices else 0.0,
         "duplicate_explosion_ratio": round(total / distinct_facts, 2) if distinct_facts else 1.0,
         "tin_is_really_npi_rows": tin_npi,
     })
@@ -209,6 +214,19 @@ class ParsePoolManager:
     def shutdown(self) -> None:
         with self._lock:
             self._pool.shutdown(wait=True, cancel_futures=True)
+
+    def shutdown_now(self) -> None:
+        """Hard stop for process exit: cancel_futures + terminate workers.
+        Plain shutdown (and concurrent.futures' atexit hook) WAITS for
+        running futures — a SIGTERM'd server would block for the rest of a
+        multi-hour parse before exiting."""
+        with self._lock:
+            self._pool.shutdown(wait=False, cancel_futures=True)
+            for proc in list(getattr(self._pool, "_processes", {}).values()):
+                try:
+                    proc.terminate()
+                except Exception:  # noqa: BLE001 — already gone
+                    pass
 
 
 def set_parse_pool(pool) -> None:
@@ -320,7 +338,10 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
     # must not match *.parquet; pid keeps it private to this process (a second
     # process ingesting the same file must never unlink our in-progress write)
     tmp_out = store.rates_dir / f".{file_key(name)}.{os.getpid()}.parquet.tmp"
-    progress_path = str(path) + ".progress"
+    # progress sidecar lives under the STORE, not beside the source: writing
+    # it next to an inbox file fired a watch event every 64 MB chunk, and a
+    # crash left an orphan the next scan quarantined as a ghost "file"
+    progress_path = str(store.rates_dir / f".{file_key(name)}.{os.getpid()}.progress")
 
     def dispatch_and_wait() -> dict:
         tmp_out.unlink(missing_ok=True)
@@ -398,6 +419,30 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
             "ref_groups_skipped": payload["ref_groups_skipped"]}
 
 
+# One ingest per filename at a time, process-wide. Guards the shared
+# pid-suffixed temp path AND gives forget a way to exclude live parses.
+_CLAIMS_LOCK = threading.Lock()
+_ACTIVE_INGESTS: set[str] = set()
+
+
+def _claim_ingest(name: str) -> bool:
+    with _CLAIMS_LOCK:
+        if name in _ACTIVE_INGESTS:
+            return False
+        _ACTIVE_INGESTS.add(name)
+        return True
+
+
+def _release_ingest(name: str) -> None:
+    with _CLAIMS_LOCK:
+        _ACTIVE_INGESTS.discard(name)
+
+
+def ingest_in_progress(name: str) -> bool:
+    with _CLAIMS_LOCK:
+        return name in _ACTIVE_INGESTS
+
+
 def forget_file(cfg: MrfxConfig, store: Store, filename: str) -> dict:
     """Erase one ingested file on the user's request: its rates, provider
     references, files-table row, AND every raw copy on disk (inbox — else the
@@ -408,6 +453,18 @@ def forget_file(cfg: MrfxConfig, store: Store, filename: str) -> dict:
         # filenames come from the API path / CLI args — never let "../x"
         # reach the unlink calls below
         raise ValueError("not a plain filename")
+    if not _claim_ingest(filename):
+        # a live parse holds the claim: erasing under it would let the parse
+        # quietly resurrect every record after we report "forgotten"
+        raise RuntimeError("this file is being processed right now — "
+                           "wait for it to finish, then remove it")
+    try:
+        return _forget_file_locked(cfg, store, filename)
+    finally:
+        _release_ingest(filename)
+
+
+def _forget_file_locked(cfg: MrfxConfig, store: Store, filename: str) -> dict:
     # raw copies go FIRST — deleting the inbox copy after the DB rows would
     # leave a window where the watcher re-ingests the very file being erased
     freed_raw = 0
@@ -452,6 +509,22 @@ def ingest_file(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight | None 
     minutes per file when grinding a large payer book. The raw `rates` view
     is always current; only the dedup/by-TIN rollups lag until the batch
     rebuild."""
+    name = path.name
+    if not _claim_ingest(name):
+        # two threads on one filename share the same pid-suffixed temp: the
+        # slower writer's half-written parquet would be renamed into the live
+        # part. Watcher + upload background scan + confirm double-click +
+        # requeue_skipped can all collide here — one wins, the rest bow out.
+        log.info("%s: already being ingested by another worker — skipping", name)
+        return {"status": "skipped", "error": "already being ingested by another worker"}
+    try:
+        return _ingest_file_locked(cfg, store, path, pf, progress_bar, rebuild_rollups)
+    finally:
+        _release_ingest(name)
+
+
+def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight | None,
+                        progress_bar, rebuild_rollups: bool) -> dict:
     name = path.name
     if pf is None:
         pf = preflight(path, cfg, store)
@@ -631,13 +704,46 @@ def scan_inbox(cfg: MrfxConfig, store: Store, force: bool = False, progress_bar=
     resolve in one pass.
     """
     results = []
-    paths = [p for p in sorted(cfg.inbox_dir.glob("*")) if p.is_file()]
+    paths = []
+    candidates = []
+    for p in sorted(cfg.inbox_dir.glob("*")):
+        if not p.is_file():
+            continue
+        # working files must never be treated as MRFs: progress sidecars,
+        # half-renamed temps, and uploads still streaming in
+        if p.name.endswith((".progress", ".tmp", ".part", ".uploading", ".fetchmeta")):
+            continue
+        try:
+            candidates.append((p, p.stat().st_size))
+        except OSError:
+            continue
+    if candidates:
+        # a file still being copied/scp'd in GROWS between these two stats —
+        # preflighting it mid-write used to quarantine the half-file and MOVE
+        # it out from under the writer. Growing files get the next watch
+        # event/scan once the writer finishes.
+        time.sleep(0.3)
+        for p, size0 in candidates:
+            try:
+                if p.stat().st_size == size0:
+                    paths.append(p)
+            except OSError:
+                continue
     flights = []
     for p in paths:
         prior = store.file_status(p.name)
         if prior and prior.get("status") in ("done", "processing") and not force:
             continue
-        flights.append((p, preflight(p, cfg, store)))
+        try:
+            flights.append((p, preflight(p, cfg, store)))
+        except Exception as e:  # noqa: BLE001 — one unreadable neighbor (e.g.
+            # a corrupt .gz raising zlib.error) must not abort the whole scan
+            # forever; quarantine it and keep going
+            log.exception("%s: preflight crashed — quarantining", p.name)
+            store.upsert_file(p.name, status="quarantined",
+                              error=f"could not read file: {e}", finished_at=_now())
+            _finish_file(cfg, p, ok=False)
+            results.append({"file": p.name, "status": "quarantined", "error": str(e)})
 
     order = {"provider_reference": 0, "in_network": 1}
     flights.sort(key=lambda t: order.get(t[1].file_type, 2))

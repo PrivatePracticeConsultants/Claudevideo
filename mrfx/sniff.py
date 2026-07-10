@@ -106,12 +106,23 @@ def open_stream(path: Path, progress_cb=None) -> io.BufferedIOBase:
         return gzip.GzipFile(fileobj=raw)  # type: ignore[return-value]
     if head[:4] == b"PK\x03\x04":
         zf = zipfile.ZipFile(raw)
-        members = [m for m in zf.namelist() if m.lower().endswith((".json", ".json.gz"))]
+        members = [m for m in zf.infolist()
+                   if m.filename.lower().endswith((".json", ".json.gz"))]
         if not members:
             raw.close()
             raise ValueError("zip archive contains no .json member")
-        inner = zf.open(members[0])
-        if members[0].lower().endswith(".gz"):
+        # the LARGEST member is the rate file; picking namelist()[0] silently
+        # ingested a small manifest JSON and dropped the real data
+        pick = max(members, key=lambda m: m.file_size)
+        if len(members) > 1:
+            import logging as _logging
+
+            _logging.getLogger(__name__).info(
+                "%s: zip has %d .json members — reading the largest (%s); "
+                "the others are ignored", getattr(path, "name", path),
+                len(members), pick.filename)
+        inner = zf.open(pick)
+        if pick.filename.lower().endswith(".gz"):
             return gzip.GzipFile(fileobj=inner)  # type: ignore[return-value]
         return inner  # type: ignore[return-value]
     return io.BufferedReader(raw, buffer_size=1 << 20) if not isinstance(raw, io.BufferedReader) else raw
@@ -312,7 +323,10 @@ def _companion_in_inbox(cfg: MrfxConfig, pf: Preflight) -> bool:
             other = Preflight(filename=p.name)
             with open_stream(p) as stream:
                 _scan_header(stream, other)
-        except (OSError, EOFError, ValueError, zipfile.BadZipFile, gzip.BadGzipFile):
+        except Exception:  # noqa: BLE001 — a corrupt NEIGHBOR must cost only
+            # itself: a mid-stream deflate error raises zlib.error (NOT an
+            # OSError/BadGzipFile), and letting it escape here aborted every
+            # inbox scan forever until the file was manually deleted
             continue
         if other.file_type == "provider_reference":
             other_payer = cfg.normalize_payer(other.reporting_entity_name or "")

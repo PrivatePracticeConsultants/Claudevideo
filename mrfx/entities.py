@@ -8,6 +8,8 @@ TINs stand alone as their own entities. Edits from the UI persist back to YAML.
 from __future__ import annotations
 
 import logging
+import re
+import threading
 from pathlib import Path
 
 import yaml
@@ -84,27 +86,35 @@ def sync_entity_map(cfg: MrfxConfig, store: Store) -> dict[str, str]:
 
 def _tin_list(v) -> list:
     """A scalar means ONE tin — iterating a bare string here would map each
-    CHARACTER to the entity and persist that junk over the user's YAML."""
+    CHARACTER to the entity and persist that junk over the user's YAML.
+    (Floats/dicts arrive from hand-crafted API calls too: any non-sequence
+    is ONE value, never iterated.)"""
     if v is None:
         return []
-    if isinstance(v, (str, int)):
-        return [v]
-    return list(v)
+    if isinstance(v, (list, tuple, set)):
+        return list(v)
+    return [v]
+
+
+# API edits are read-modify-write over one YAML file: without this lock two
+# concurrent UI edits load the same snapshot and the loser's TINs vanish
+_EDIT_LOCK = threading.Lock()
 
 
 def update_entity(cfg: MrfxConfig, store: Store, entity_name: str,
                   add_tins: list[str] | None = None,
                   remove_tins: list[str] | None = None) -> dict[str, str]:
     """UI edit: add/remove TINs for an entity; persists to YAML + store."""
-    mapping = load_entity_map(cfg.entity_map_path)
-    for tin in _tin_list(add_tins):
-        tin = str(tin).replace("-", "").strip()
-        if tin:
-            mapping[tin] = entity_name
-    for tin in _tin_list(remove_tins):
-        tin = str(tin).replace("-", "").strip()
-        if mapping.get(tin) == entity_name:
-            del mapping[tin]
-    save_entity_map(cfg.entity_map_path, mapping)
-    store.set_entity_map(mapping)
-    return mapping
+    with _EDIT_LOCK:
+        mapping = load_entity_map(cfg.entity_map_path)
+        for tin in _tin_list(add_tins):
+            tin = re.sub(r"\D", "", str(tin))  # digits only ('12-3', '123.0' artifacts)
+            if tin:
+                mapping[tin] = entity_name
+        for tin in _tin_list(remove_tins):
+            tin = re.sub(r"\D", "", str(tin))
+            if mapping.get(tin) == entity_name:
+                del mapping[tin]
+        save_entity_map(cfg.entity_map_path, mapping)
+        store.set_entity_map(mapping)
+        return mapping

@@ -243,17 +243,23 @@ class Store:
             self._memory_limit_gb = max(2, min(12, int(total * 0.4 / 1e9)))
         except (ValueError, OSError, AttributeError):
             self._memory_limit_gb = 4
+        self._temp_cap_gb: int | None = None  # computed once, in connect()
         with self.write_lock, self.connect() as con:
             self._init_tables(con)
             self._register_views(con)
 
     def _sweep_orphan_tmps(self) -> None:
-        """Remove half-written `.{key}.{pid}.parquet.tmp` parts whose writing
-        process is gone (crash/kill mid-ingest). Temps owned by a LIVE process
-        are left alone — that's the whole point of the pid in the name."""
-        for p in self.rates_dir.glob(".*.parquet.tmp"):
-            parts = p.name.split(".")
-            pid = parts[-3] if len(parts) >= 4 and parts[-3].isdigit() else None
+        """Remove half-written `.{key}.{pid}.parquet.tmp` parts (and
+        `.{key}.{pid}.progress` sidecars) whose writing process is gone
+        (crash/kill mid-ingest). Temps owned by a LIVE process are left
+        alone — that's the whole point of the pid in the name."""
+        for p in [*self.rates_dir.glob(".*.parquet.tmp"),
+                  *self.rates_dir.glob(".*.progress"),
+                  *self.rates_dir.glob(".*.progress.tmp")]:
+            # both name shapes carry the pid right after the file key:
+            # .{key}.{pid}.parquet.tmp / .{key}.{pid}.progress[.tmp]
+            m = re.match(r"^\.(.+)\.(\d+)\.(parquet\.tmp|progress(\.tmp)?)$", p.name)
+            pid = m.group(2) if m else None
             if pid is not None:
                 try:
                     os.kill(int(pid), 0)
@@ -302,11 +308,16 @@ class Store:
             # room for stores with tens of millions of rows.
             con.execute(f"SET memory_limit = '{self._memory_limit_gb}GB'")
             # cap spill so one huge rollup can NEVER fill the disk and take
-            # down unrelated work (downloads, other stores' writes): leave at
-            # least ~20% of current free space untouched. Exceeding the cap
-            # fails just that query — raw data is unaffected.
-            free_gb = shutil.disk_usage(self._tmp_dir).free / 1e9
-            con.execute(f"SET max_temp_directory_size = '{max(1, int(free_gb * 0.8))}GB'")
+            # down unrelated work: leave ~20% of free space untouched.
+            # CRITICAL: this SET is GLOBAL to the process's shared DuckDB
+            # instance, and the cap is computed ONCE per Store — recomputing
+            # per connection let every dashboard poll shrink the cap to 80%
+            # of the free space a RUNNING rebuild had already spilled into,
+            # strangling the rebuild it was meant to protect.
+            if self._temp_cap_gb is None:
+                free_gb = shutil.disk_usage(self._tmp_dir).free / 1e9
+                self._temp_cap_gb = max(1, int(free_gb * 0.8))
+            con.execute(f"SET max_temp_directory_size = '{self._temp_cap_gb}GB'")
         except duckdb.Error:  # older duckdb without these knobs
             pass
         return con
@@ -665,7 +676,7 @@ class Store:
                 con.execute(
                     "UPDATE url_queue SET status = 'queued', "
                     "error = 'the identical link this deferred to failed — "
-                    "retrying from the kept download' "
+                    "retrying (from the kept download when still present)' "
                     "WHERE content_sha = ? AND status = 'skipped' "
                     "AND kind = 'duplicate' AND id != ?",
                     [content_sha, failed_id])
@@ -683,6 +694,18 @@ class Store:
                 [content_sha, done_id],
             ).fetchall()
         return [r[0] for r in rows]
+
+    def url_inflight_for_filename(self, filename: str) -> bool:
+        """True if any queue row that previously produced this file is being
+        re-processed right now (user pressed retry; the files row keeps its
+        old terminal status for the whole download, so forget must ask the
+        QUEUE, not just the files table)."""
+        with self.connect() as con:
+            return con.execute(
+                "SELECT 1 FROM url_queue WHERE filename = ? AND status IN "
+                "('queued', 'downloading', 'fetched', 'expanding', 'ingesting') LIMIT 1",
+                [filename],
+            ).fetchone() is not None
 
     def recover_stuck_files(self) -> int:
         """Files-table twin of recover_stuck_urls: an inbox ingest killed
@@ -795,7 +818,11 @@ class Store:
                 con.execute("DELETE FROM files WHERE filename = ?", [filename])
                 con.execute("COMMIT")
             except Exception:
-                con.execute("ROLLBACK")
+                try:
+                    con.execute("ROLLBACK")
+                except duckdb.Error:
+                    pass  # a failed COMMIT already aborted the transaction —
+                    # a ROLLBACK error here must not mask the original failure
                 raise
         return {"rows": rows, "bytes": freed}
 
@@ -813,8 +840,16 @@ class Store:
 
                 _logging.getLogger(__name__).warning(
                     "rollup rebuild hit the memory limit; retrying single-threaded")
+                # SET threads is GLOBAL to the shared instance: restore it or
+                # every other connection stays single-threaded forever
                 con.execute("SET threads = 1")
-                self._build_rollup_tables(con)
+                try:
+                    self._build_rollup_tables(con)
+                finally:
+                    try:
+                        con.execute("RESET threads")
+                    except duckdb.Error:
+                        pass
 
     def _build_rollup_tables(self, con: duckdb.DuckDBPyConnection) -> None:
         # rates_dedup stays a LIVE VIEW: at NPI×rate grain its groups are
@@ -927,13 +962,32 @@ class Store:
             )
 
     def load_provider_refs(self, payer: str) -> dict[int, list[tuple[str | None, str | None, tuple[str, ...]]]]:
+        """Per ref_id, only the NEWEST vintage's groups are served: two
+        companion files for one payer (a re-download under a new name, or two
+        publication months) must not UNION their provider lists — rates would
+        attach to stale-vintage NPIs/TINs. Ties/NULL dates fall back to the
+        highest source_file (deterministic), and duplicate identical groups
+        are collapsed."""
         with self.connect() as con:
             rows = con.execute(
-                "SELECT ref_id, tin_value, tin_type, npis FROM provider_refs WHERE payer = ?",
+                """
+                SELECT ref_id, tin_value, tin_type, npis FROM (
+                    SELECT *, rank() OVER (
+                        PARTITION BY ref_id
+                        ORDER BY coalesce(last_updated_on, '') DESC, source_file DESC
+                    ) AS vintage_rank
+                    FROM provider_refs WHERE payer = ?
+                ) WHERE vintage_rank = 1
+                """,
                 [payer],
             ).fetchall()
         out: dict[int, list] = {}
+        seen: set = set()
         for rid, tin_value, tin_type, npis in rows:
+            key = (rid, tin_value, tin_type, tuple(npis or ()))
+            if key in seen:
+                continue
+            seen.add(key)
             out.setdefault(rid, []).append((tin_value, tin_type, tuple(npis or ())))
         return out
 

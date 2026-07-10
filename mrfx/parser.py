@@ -67,6 +67,10 @@ def clean_rate(v) -> float | None:
         return None
     if isinstance(v, (int, float)):
         return float(v)
+    try:
+        return float(v)  # plain numerics (incl. "1e3") parse correctly first
+    except (TypeError, ValueError):
+        pass
     s = re.sub(r"[^0-9.\-]", "", str(v))
     try:
         return float(s) if s else None
@@ -103,6 +107,8 @@ class QaCounters:
     unparseable_rates: int = 0        # prices whose negotiated_rate could not be read
     invalid_npis: int = 0             # NPIs that are not 10 digits after cleaning
     bad_ref_ids: int = 0              # provider_reference ids that are not numeric
+    bundled_items: int = 0            # bundle/capitation items excluded (not per-code rates)
+    prices: int = 0                   # readable prices seen (denominator for price-level shares)
     rows: int = 0
 
     def to_dict(self) -> dict:
@@ -120,11 +126,19 @@ class ParseResult:
     ref_groups_skipped: int = 0
     embedded_refs: dict[int, list[PGroup]] = field(default_factory=dict)
     qa: QaCounters = field(default_factory=QaCounters)
+    source_file: str | None = None
 
     @property
     def file_month(self) -> str:
-        if self.last_updated_on and re.match(r"\d{4}-\d{2}", self.last_updated_on):
-            return self.last_updated_on[:7]
+        """Publication month: header first (validated — '2024-13' must not
+        pass), then the filename's date (payers stamp it: 2026-07_..._rates),
+        then the ingestion month as a last resort. The old header-or-today
+        rule silently split one publication across two months whenever a
+        dateless file was ingested near a month boundary."""
+        for candidate in (self.last_updated_on, self.source_file):
+            m = re.search(r"(20\d{2})[-_](\d{2})", str(candidate or ""))
+            if m and 1 <= int(m.group(2)) <= 12:
+                return f"{m.group(1)}-{m.group(2)}"
         return dt.date.today().strftime("%Y-%m")
 
 
@@ -144,9 +158,12 @@ def parse_provider_group(pg: dict, qa: QaCounters | None = None) -> PGroup:
         value = clean_digits(raw) or None
     else:
         value = clean_digits(raw) or None
-        # a 9-digit value with no declared type is in practice an EIN
         if value and tin_type is None:
-            tin_type = "ein"
+            # a 9-digit value with no declared type is in practice an EIN; a
+            # 10-digit one is an NPI in the TIN slot and must carry the
+            # tin_is_really_npi flag or it pollutes the practice directory
+            # and benchmark peer pool as a fake TIN
+            tin_type = "ein" if len(value) == 9 else ("npi" if len(value) == 10 else None)
     # dedupe while keeping order (payers repeat NPIs within a group)
     return (value, tin_type, tuple(dict.fromkeys(npis)))
 
@@ -203,6 +220,7 @@ class InNetworkParser:
         # in RAM. None = keep all (small files).
         self._keep_ref_ids = keep_ref_ids
         self.result = ParseResult()
+        self.result.source_file = source_file  # file_month falls back to its date
         # Seed header from preflight (which already sniffed the first ~1 MB) so
         # rows are correct from the first batch even when the actual header
         # tokens stream past later. Prevents needing every row in memory to
@@ -350,6 +368,13 @@ class InNetworkParser:
             # best-effort, infer the family from the code shape, and count it.
             qa.missing_code_type += 1
             code_type = "HCPCS" if re.fullmatch(r"[A-Z]\d{4}", code) else "CPT"
+        arrangement = str(item.get("negotiation_arrangement") or "ffs").strip().lower()
+        if arrangement not in ("", "ffs"):
+            # bundle/capitation: negotiated_rate prices the whole bundle, NOT
+            # this billing_code — letting it through would put a $500 bundle
+            # price into an $85 per-service market median
+            qa.bundled_items += 1
+            return
         self.result.items_matched += 1
         for grp in as_list(item.get("negotiated_rates")):
             if not isinstance(grp, dict):
@@ -402,13 +427,16 @@ class InNetworkParser:
 
         r = self.result
         for price in prices:
-            modifiers = [str(m).strip().upper() for m in as_list(price.get("billing_code_modifier")) if str(m).strip()]
+            # sorted+deduped: [GP,59] and [59,GP] are the SAME modifier set —
+            # publication order must not split the dedup grain into two medians
+            modifiers = sorted({str(m).strip().upper() for m in as_list(price.get("billing_code_modifier")) if str(m).strip()})
             ntype = str(price.get("negotiated_type", "") or "").strip().lower()
             rate = clean_rate(price.get("negotiated_rate"))
             if rate is None:
                 # no readable dollar figure: nothing to analyze, never fabricate 0.0
                 r.qa.unparseable_rates += 1
                 continue
+            r.qa.prices += 1
             is_dollar = ntype in DOLLAR_TYPES
             if is_dollar and rate <= 0.01:
                 r.qa.zero_rates += 1
@@ -429,7 +457,8 @@ class InNetworkParser:
                 "negotiated_type": ntype,
                 "is_dollar_rate": is_dollar,
                 "billing_class": str(price.get("billing_class", "") or "").strip().lower(),
-                "service_code": [clean_code(s) for s in as_list(price.get("service_code")) if str(s).strip()],
+                # sorted+deduped for the same grain reason as modifiers
+                "service_code": sorted({clean_code(s) for s in as_list(price.get("service_code")) if str(s).strip()}),
                 "expiration_date": str(price.get("expiration_date", "") or ""),
                 "ingested_at": self._ingested_at,
             }

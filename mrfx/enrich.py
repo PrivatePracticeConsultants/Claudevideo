@@ -178,22 +178,47 @@ def run_enrichment(cfg: MrfxConfig, store: Store, stop: threading.Event | None =
     mode = cfg.enrichment.mode
     if mode == "off":
         return 0
-    if mode == "bulk":
-        return enrich_via_bulk(cfg, store)
-    return enrich_via_api(cfg, store, stop)
+    done = enrich_via_bulk(cfg, store) if mode == "bulk" else enrich_via_api(cfg, store, stop)
+    if done:
+        # tin_directory materializes NPPES names/states/cities — without a
+        # rebuild here, geographic benchmarks (state/city joins) silently run
+        # against NULLs until the next ingest happens to trigger one
+        try:
+            store.rebuild_rollups()
+        except Exception:  # noqa: BLE001 — names are saved; directory refreshes
+            # on the next successful rebuild
+            log.exception("rollup refresh after enrichment failed — new names "
+                          "appear after the next rebuild")
+    return done
+
+
+_ENRICH_LOCK = threading.Lock()
+_ENRICH_ACTIVE = False
 
 
 def start_background_enrichment(cfg: MrfxConfig, store: Store) -> threading.Event:
-    """Fire-and-forget enrichment thread; returns its stop event."""
+    """Fire-and-forget enrichment thread; returns its stop event. Single
+    flight: the watcher calls this after EVERY scan with new files, and with
+    a long NPPES backlog N stacked threads would all fetch the same batch —
+    duplicate lookups, politeness sleep divided by N, 429s."""
+    global _ENRICH_ACTIVE
     stop = threading.Event()
     if cfg.enrichment.mode == "off":
         return stop
+    with _ENRICH_LOCK:
+        if _ENRICH_ACTIVE:
+            return stop  # a run is already grinding the same backlog
+        _ENRICH_ACTIVE = True
 
     def _loop():
+        global _ENRICH_ACTIVE
         try:
             run_enrichment(cfg, store, stop)
         except Exception:  # noqa: BLE001
             log.exception("enrichment thread died; names stay un-enriched until next run")
+        finally:
+            with _ENRICH_LOCK:
+                _ENRICH_ACTIVE = False
 
     threading.Thread(target=_loop, name="mrfx-enrich", daemon=True).start()
     return stop

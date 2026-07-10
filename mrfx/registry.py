@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import threading
 from pathlib import Path
 
 import yaml
@@ -120,17 +121,22 @@ class Registry:
 
     # -- overrides -------------------------------------------------------------
 
+    _SAVE_LOCK = threading.Lock()  # read-modify-write over one YAML file
+
     def save_override(self, key: str, mrf_url: str) -> dict:
-        path = self.cfg.registry_overrides_path
-        data = _load_yaml(path)
-        if not isinstance(data.get("entries"), dict):
-            data["entries"] = {}  # heal a hand-edited broken shape instead of TypeError
-        entries = data["entries"]
-        entries[key] = {
-            "mrf_url": mrf_url,
-            "confirmed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-        }
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(yaml.safe_dump(data, sort_keys=True))
-        self.overrides = data
-        return entries[key]
+        with Registry._SAVE_LOCK:
+            path = self.cfg.registry_overrides_path
+            data = _load_yaml(path)
+            if not isinstance(data.get("entries"), dict):
+                data["entries"] = {}  # heal a hand-edited broken shape instead of TypeError
+            entries = data["entries"]
+            entries[key] = {
+                "mrf_url": mrf_url,
+                "confirmed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            }
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text(yaml.safe_dump(data, sort_keys=True))
+            tmp.replace(path)  # atomic: a crash mid-write must not corrupt overrides
+            self.overrides = data
+            return entries[key]
