@@ -566,16 +566,24 @@ class Store:
     def list_urls(self, limit: int = 500) -> list[dict]:
         """Rows the user pasted (top-level, no parent) are listed first — a
         764-file index expansion must not push the row the user is watching
-        out of the window — then the newest `limit` discovered children.
-        Top-level rows are capped at `limit` too, so a thousand-line
-        `--file urls.txt` paste can't make the payload unbounded."""
+        out of the window — then children with the ACTIONABLE statuses
+        (failed/skipped: the only rows with retry buttons — a file forgotten
+        mid-grind on a 2,000-row queue must keep its retry button reachable),
+        then the newest `limit` other children. Each slice is capped at
+        `limit` so the payload stays bounded."""
         with self.connect() as con:
             rows = con.execute(
                 "SELECT * FROM url_queue WHERE parent_id IS NULL ORDER BY id DESC LIMIT ?",
                 [limit],
             ).fetchall()
             rows += con.execute(
-                "SELECT * FROM url_queue WHERE parent_id IS NOT NULL ORDER BY id DESC LIMIT ?",
+                "SELECT * FROM url_queue WHERE parent_id IS NOT NULL "
+                "AND status IN ('failed', 'skipped') ORDER BY id DESC LIMIT ?",
+                [limit],
+            ).fetchall()
+            rows += con.execute(
+                "SELECT * FROM url_queue WHERE parent_id IS NOT NULL "
+                "AND status NOT IN ('failed', 'skipped') ORDER BY id DESC LIMIT ?",
                 [limit],
             ).fetchall()
             cols = [d[0] for d in con.description]

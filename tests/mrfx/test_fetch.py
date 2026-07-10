@@ -135,6 +135,23 @@ def test_pasted_link_stays_visible_after_big_expansion(cfg, store, server):
     assert sum(1 for r in listed if r["parent_id"] is not None) == 1  # children still capped
 
 
+def test_skipped_child_stays_visible_in_big_queue(cfg, store):
+    # found live: a file forgotten mid-grind flips its queue row to skipped,
+    # but on a 1,700-child queue that early row fell outside the newest-500
+    # window — its retry button (the only path back) was unreachable.
+    # Actionable rows must be pinned into the listing.
+    parent = store.enqueue_url("https://x.example/toc.json", "https://x.example/toc.json")
+    with store.write_lock, store.connect() as con:
+        first = store._enqueue_one(con, "https://x.example/f0.json.gz",
+                                   "https://x.example/f0.json.gz", parent)
+    store.enqueue_urls(
+        [(f"https://x.example/f{i}.json.gz", f"https://x.example/f{i}.json.gz")
+         for i in range(1, 601)], parent_id=parent)
+    assert store.set_url_status_by_id(first, "skipped")
+    listed = store.list_urls(limit=500)
+    assert any(r["id"] == first and r["status"] == "skipped" for r in listed)
+
+
 def test_byte_identical_file_on_second_url_skipped(cfg, store, server, http_root):
     # Blue plans host copies of each other's national files: same bytes, many
     # domains. The second copy must be skipped, not re-ingested.
