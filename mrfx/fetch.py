@@ -117,6 +117,21 @@ TLS_HELP = (
 _REPAIRED_CTX: dict[str, ssl.SSLContext] = {}
 
 
+def _host_bypasses_proxy(host: str) -> bool:
+    """Rough NO_PROXY match (suffix rules only — the common case). When the
+    host bypasses the proxy, certificate discovery must bypass it too, or we
+    repair a chain httpx will never see."""
+    raw = os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or ""
+    host = host.lower()
+    for entry in (e.strip().lower() for e in raw.split(",") if e.strip()):
+        e = entry.lstrip("*").lstrip(".")
+        if "/" in e or not e:
+            continue  # CIDR entries would need an IP lookup — skip
+        if host == e or host.endswith("." + e):
+            return True
+    return False
+
+
 def _fetch_leaf_pem(host: str, port: int) -> str:
     """Read the certificate a server presents, using the SAME network path
     the downloads will use: behind an HTTP(S) proxy the direct route can be
@@ -125,6 +140,8 @@ def _fetch_leaf_pem(host: str, port: int) -> str:
     no trust decision is made here — the assembled chain is fully verified
     against real roots + hostname before anything is trusted."""
     proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+    if proxy and _host_bypasses_proxy(host):
+        proxy = None  # httpx will connect direct for this host — read direct too
     if proxy:
         try:
             import socket
@@ -203,6 +220,7 @@ def _repair_incomplete_chain(url: str) -> ssl.SSLContext | None:
         verifier.verify(leaf, inters)
         cafile = os.environ.get("SSL_CERT_FILE") or os.environ.get("REQUESTS_CA_BUNDLE") or certifi.where()
         ctx = ssl.create_default_context(cafile=cafile)
+        ctx.load_default_certs(ssl.Purpose.SERVER_AUTH)  # match ssl_verify(): system store too
         ctx.load_verify_locations(cadata="\n".join(
             i.public_bytes(serialization.Encoding.PEM).decode() for i in inters
         ))
@@ -248,6 +266,7 @@ def download(cfg: MrfxConfig, url: str, dest: Path, progress_cb=None,
     when the payload exceeds max_bytes (the confirm_over_gb guard)."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     part = dest.with_suffix(dest.suffix + ".part")
+    val_p = Path(str(part) + ".val")  # ETag/Last-Modified guarding resumes
     last_exc: Exception | None = None
 
     def too_big(n: int) -> DownloadError:
@@ -269,10 +288,20 @@ def download(cfg: MrfxConfig, url: str, dest: Path, progress_cb=None,
             # THIS file; if the server ignores/rejects the range we start over.
             resume_from = part.stat().st_size if part.exists() else 0
             req_headers = {"Range": f"bytes={resume_from}-"} if resume_from else {}
+            # If-Range with the validator saved when the .part was started:
+            # a payer republishing DIFFERENT bytes under the same URL between
+            # attempts would otherwise get spliced into the old .part by the
+            # range resume — with If-Range the server sends a full 200 for
+            # changed content, and the 200 path below restarts cleanly
+            if resume_from and val_p.exists():
+                validator = val_p.read_text().strip()
+                if validator:
+                    req_headers["If-Range"] = validator
             with _client(cfg, verify=verify_override, ua=ua_override) as client,                     client.stream("GET", url, headers=req_headers) as resp:
                 if resume_from and resp.status_code == 416:
                     # range not satisfiable — stale/oversized part; start over
                     part.unlink(missing_ok=True)
+                    val_p.unlink(missing_ok=True)
                     raise DownloadError("stale partial download discarded", retryable=True)
                 if resp.status_code in RETRYABLE_STATUS:
                     raise DownloadError(
@@ -328,6 +357,13 @@ def download(cfg: MrfxConfig, url: str, dest: Path, progress_cb=None,
                             sha.update(blk)
                     log.info("resuming download at %.1f GB / %s", resume_from / 1e9,
                              f"{total / 1e9:.1f} GB" if total else "?")
+                else:
+                    # remember the content validator for future resumes
+                    validator = resp.headers.get("ETag") or resp.headers.get("Last-Modified")
+                    if validator:
+                        val_p.write_text(validator)
+                    else:
+                        val_p.unlink(missing_ok=True)
                 done = resume_from
                 last_report = done
                 last_report_t = 0.0
@@ -358,6 +394,7 @@ def download(cfg: MrfxConfig, url: str, dest: Path, progress_cb=None,
                         "— retrying from where it stopped", retryable=True)
                 final_url = str(resp.url)
             part.replace(dest)
+            val_p.unlink(missing_ok=True)
             return sha.hexdigest(), final_url
         except DownloadError as e:
             last_exc = e
@@ -366,6 +403,7 @@ def download(cfg: MrfxConfig, url: str, dest: Path, progress_cb=None,
                 # guard); discard it when the content itself is the problem
                 if "disk space" not in str(e):
                     part.unlink(missing_ok=True)
+                    val_p.unlink(missing_ok=True)
                 raise
             log.warning("download %s: %s (attempt %d/%d)", url, e, attempt + 1, cfg.download_retries + 1)
         except (httpx.TransportError, httpx.TimeoutException) as e:
@@ -877,19 +915,26 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
                 # React portals (UHC/Optum) serve their whole file list from a
                 # well-known API next to the page — probe before giving up
                 links = probe_blobs_api(cfg, final_url)
+            browser_missing = False
             if not links and cfg.render_js:
                 # JavaScript-only portal: render it in headless Chromium and
                 # harvest links from the DOM and the page's API responses
-                from .render import render_page_links
+                from .render import RenderBrowserMissing, render_page_links
 
                 store.update_url(url_id, error="page has no static links — rendering it in a headless browser…")
-                links = render_page_links(cfg, final_url, cfg.max_toc_files)
+                try:
+                    links = render_page_links(cfg, final_url, cfg.max_toc_files)
+                except RenderBrowserMissing:
+                    browser_missing = True
             if links:
                 added = _enqueue_children(store, links, url_id)
                 log.info("%s — web page: found %d file links, %d newly queued", url, len(links), added)
                 store.update_url(url_id, status="done", kind="page", child_count=added, error=None)
             else:
-                store.update_url(url_id, status="failed", kind="page", error=_page_help())
+                msg = (PAGE_HELP + " The headless-browser helper is installed but its "
+                       "browser is not — run: playwright install chromium — then press "
+                       "retry.") if browser_missing else _page_help()
+                store.update_url(url_id, status="failed", kind="page", error=msg)
             return False
         # Not HTML and not a recognized MRF shape. Some payers publish custom
         # JSON wrappers that just list file URLs (BCBS Tennessee's

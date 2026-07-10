@@ -29,10 +29,20 @@ from __future__ import annotations
 import glob
 import logging
 import os
+import threading
 
 from .config import MrfxConfig
 
 log = logging.getLogger(__name__)
+
+# one Chromium at a time: several processor threads hitting several JS pages
+# at once would otherwise each spawn a browser (~200 MB apiece on small boxes)
+_RENDER_LOCK = threading.Lock()
+
+
+class RenderBrowserMissing(Exception):
+    """Playwright is installed but its Chromium browser is not — the fix is
+    one command, so callers surface it on the queue row."""
 
 # hard ceiling on a render: a portal that hasn't produced its file list in
 # this long isn't going to (networkidle usually lands well under 15s)
@@ -78,9 +88,11 @@ def _launch(pw):
     try:
         return pw.chromium.launch(**kwargs)
     except Exception as e:  # noqa: BLE001 — retry with a discovered binary
-        exe = _find_chromium()
-        if exe is None or "doesn't exist" not in str(e):
+        if "doesn't exist" not in str(e):
             raise
+        exe = _find_chromium()
+        if exe is None:
+            raise RenderBrowserMissing(str(e)[:200]) from e
         log.info("playwright's own chromium build is missing; using %s", exe)
         return pw.chromium.launch(executable_path=exe, **kwargs)
 
@@ -89,7 +101,9 @@ def render_page_links(cfg: MrfxConfig, url: str, max_files: int) -> list[str]:
     """Render `url` in headless Chromium and return MRF file links found in
     the rendered DOM + captured JSON responses. Best-effort: returns [] when
     Playwright is missing or the render fails — callers fall through to the
-    plain-language help message."""
+    plain-language help message. Raises RenderBrowserMissing when the
+    playwright PACKAGE is present but its browser was never installed, so
+    the caller can put the one-line fix on the queue row."""
     if not render_available():
         return []
     import httpx
@@ -158,7 +172,7 @@ def render_page_links(cfg: MrfxConfig, url: str, max_files: int) -> list[str]:
                 except Exception:  # noqa: BLE001 — page may already be closing
                     pass
 
-        with sync_playwright() as pw:
+        with _RENDER_LOCK, sync_playwright() as pw:
             browser = _launch(pw)
             try:
                 page = browser.new_page(user_agent=BROWSER_UA)
@@ -185,6 +199,8 @@ def render_page_links(cfg: MrfxConfig, url: str, max_files: int) -> list[str]:
         else:
             log.info("%s — rendered in headless browser: no file links appeared", url)
         return links
+    except RenderBrowserMissing:
+        raise  # actionable — the caller shows the one-line install fix
     except Exception as e:  # noqa: BLE001 — rendering is best-effort by contract
         log.warning("headless render of %s failed: %s", url, str(e)[:200])
         return []

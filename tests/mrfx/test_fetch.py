@@ -713,3 +713,55 @@ def test_allowed_amounts_only_toc_skipped_not_failed(cfg, store):
         assert "allowed-amounts" in rec["error"] and "no negotiated-rate" in rec["error"]
     finally:
         httpd.shutdown()
+
+
+def test_resume_restarts_when_content_changed(cfg):
+    # a payer republishing DIFFERENT bytes under the same URL between
+    # attempts must NOT get spliced into the old .part: the saved ETag rides
+    # an If-Range header, the server answers 200 (full new content), and the
+    # download restarts clean
+    import hashlib
+    import http.server as hs
+    import os as _os
+
+    old = _os.urandom(3 << 20)
+    new = _os.urandom(2 << 20)
+    state = {"content": old, "etag": '"v1"', "if_range_seen": []}
+
+    class ChangingHandler(hs.BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = state["content"]
+            if not self.headers.get("Range"):  # first attempt: truncate at half
+                self.send_response(200)
+                self.send_header("ETag", state["etag"])
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body[: len(body) // 2])
+                self.wfile.flush()
+                self.connection.close()
+                state["content"], state["etag"] = new, '"v2"'  # republish!
+                return
+            state["if_range_seen"].append(self.headers.get("If-Range"))
+            # validator no longer matches -> full 200 with the NEW content
+            self.send_response(200)
+            self.send_header("ETag", state["etag"])
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), ChangingHandler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        from mrfx.fetch import download, filename_for
+
+        url = f"http://127.0.0.1:{httpd.server_address[1]}/f.json.gz"
+        dest = cfg.downloads_dir / filename_for(url)
+        sha, _ = download(cfg, url, dest)
+        assert state["if_range_seen"] == ['"v1"']          # validator was sent
+        assert sha == hashlib.sha256(new).hexdigest()      # new content, no splice
+        assert dest.read_bytes() == new
+    finally:
+        httpd.shutdown()
