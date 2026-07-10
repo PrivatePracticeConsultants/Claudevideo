@@ -812,3 +812,23 @@ def test_js_portal_click_through_reveals_links(cfg):
         assert f"{base}/mrf/2026-07-01_hp_in-network-rates_index.json" in links
     finally:
         httpd.shutdown()
+
+
+def test_framework_asset_paths_not_lifted(cfg):
+    # the relative-path pattern must lift payer listings (HealthSparq
+    # filePath) but NOT web-app plumbing quoted all over rendered pages
+    from mrfx.fetch import extract_links_from_text
+
+    text = """
+      {"filePath": "2026-07-01/tableOfContents/2026-07-01_x_index.json.gz"}
+      "locales/en.json" "i18n/en-US.json" "/wp-content/plugins/a/b.json"
+      "/etc.clientlibs/settings/x.json" "/_next/static/chunks/pages.json"
+      "https://cdn.example.com/node_modules/pkg/package.json"
+      "/static/mrf/latest.json"
+    """
+    links = extract_links_from_text(text, "https://mrf.example.com/prd/mrf/X/latest_metadata.json", 50)
+    assert "https://mrf.example.com/prd/mrf/X/2026-07-01/tableOfContents/2026-07-01_x_index.json.gz" in links
+    assert "https://mrf.example.com/static/mrf/latest.json" in links  # Cigna-style kept
+    assert not any("locales" in l or "i18n" in l or "wp-content" in l or
+                   "clientlibs" in l or "_next" in l or "node_modules" in l
+                   for l in links)

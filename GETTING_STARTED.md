@@ -83,6 +83,20 @@ start of the line. **Any time you open a new terminal to use the app, re-run
 just the `activate` line** (the `source .venv/bin/activate` or
 `.venv\Scripts\Activate.ps1` step) — you don't reinstall.
 
+> **Optional but recommended — the headless-browser helper.** Some payers
+> (Molina, Kaiser, Aetna, Harvard Pilgrim) build their file lists with
+> JavaScript, and the app can read those pages automatically if you run this
+> once after the install above:
+>
+> ```
+> playwright install chromium
+> ```
+>
+> It downloads a private copy of the Chromium browser (~150 MB) used only for
+> reading payer pages. Skip it if you don't need those payers — everything
+> else works without it, and the app will tell you the exact command if a
+> page turns out to need it.
+
 ---
 
 ## Step 4 — Start the app

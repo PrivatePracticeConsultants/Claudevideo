@@ -29,6 +29,7 @@ from __future__ import annotations
 import glob
 import logging
 import os
+import re
 import threading
 
 from .config import MrfxConfig
@@ -55,15 +56,14 @@ _SKIP_RESOURCES = {"image", "media", "font"}  # invisible to link harvesting
 # click away — behind a "View Plan List" button or a consent overlay. Only
 # obviously-MRF-ish controls are clicked, and only a bounded number.
 MAX_CLICKS = 6
-import re as _re
 
-_CLICKABLE_TEXT_RE = _re.compile(
+_CLICKABLE_TEXT_RE = re.compile(
     r"(view|show|see|display|open|get|access)[\s\w]{0,24}(plan|file|list|mrf|rate)"
     r"|machine[\s-]?readable|in[\s-]?network|table\s+of\s+contents"
-    r"|transparency\s+file", _re.I)
-_CONSENT_TEXT_RE = _re.compile(
+    r"|transparency\s+file", re.I)
+_CONSENT_TEXT_RE = re.compile(
     r"^\s*(accept(\s+all)?(\s+cookies)?|i\s+(agree|accept)|agree|continue"
-    r"|ok(ay)?|got\s+it|yes|proceed|confirm)\s*[.!»›]?\s*$", _re.I)
+    r"|ok(ay)?|got\s+it|yes|proceed|confirm)\s*[.!»›]?\s*$", re.I)
 
 
 def render_available() -> bool:

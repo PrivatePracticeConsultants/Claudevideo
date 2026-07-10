@@ -149,8 +149,15 @@ def _fetch_leaf_pem(host: str, port: int) -> str:
             pp = urlsplit(proxy if "://" in proxy else "http://" + proxy)
             sock = socket.create_connection((pp.hostname, pp.port or 8080), timeout=20)
             try:
-                sock.sendall(f"CONNECT {host}:{port} HTTP/1.1\r\n"
-                             f"Host: {host}:{port}\r\n\r\n".encode())
+                connect = (f"CONNECT {host}:{port} HTTP/1.1\r\n"
+                           f"Host: {host}:{port}\r\n")
+                if pp.username:  # corporate proxies with credentials in the URL
+                    import base64
+
+                    cred = base64.b64encode(
+                        f"{pp.username}:{pp.password or ''}".encode()).decode()
+                    connect += f"Proxy-Authorization: Basic {cred}\r\n"
+                sock.sendall((connect + "\r\n").encode())
                 resp = b""
                 while b"\r\n\r\n" not in resp and len(resp) < 65536:
                     chunk = sock.recv(4096)
@@ -215,7 +222,13 @@ def _repair_incomplete_chain(url: str) -> ssl.SSLContext | None:
             return None
         # PROVE the repaired chain is valid for this hostname against real
         # roots before trusting anything (expiry, signatures, name — the works)
-        roots = x509.load_pem_x509_certificates(Path(certifi.where()).read_bytes())
+        import warnings
+
+        with warnings.catch_warnings():
+            # certifi ships one ancient root with a non-positive serial;
+            # cryptography warns on every load — irrelevant noise here
+            warnings.simplefilter("ignore")
+            roots = x509.load_pem_x509_certificates(Path(certifi.where()).read_bytes())
         verifier = PolicyBuilder().store(Store(roots)).build_server_verifier(x509.DNSName(host))
         verifier.verify(leaf, inters)
         cafile = os.environ.get("SSL_CERT_FILE") or os.environ.get("REQUESTS_CA_BUNDLE") or certifi.where()
@@ -409,7 +422,8 @@ def download(cfg: MrfxConfig, url: str, dest: Path, progress_cb=None,
         except (httpx.TransportError, httpx.TimeoutException) as e:
             last_exc = e
             # server sent an incomplete cert chain? repair it like a browser
-            # and retry immediately (once, without burning an attempt)
+            # and retry immediately (skips the backoff sleep; the retry does
+            # count against the attempt budget)
             if "CERTIFICATE_VERIFY_FAILED" in str(e) and not tried_chain_repair:
                 tried_chain_repair = True
                 ctx = _repair_incomplete_chain(url)
@@ -615,7 +629,14 @@ def looks_like_html(path: Path) -> bool:
 _FRAMEWORK_ASSET_RE = re.compile(
     r"(/page-data/|/manifest\.json|\.webmanifest|/favicon|/asset-manifest|/app-data\.json"
     r"|/jcr:content/"          # AEM page components (BCBS NC embeds them as .json)
-    r"|search-api\.swiftype\.com|/api/v1/public/installs/)", re.I  # site-search widgets
+    r"|search-api\.swiftype\.com|/api/v1/public/installs/"  # site-search widgets
+    # web-app plumbing directories: the relative-path pattern would otherwise
+    # lift every "locales/en.json"-style bundle path off rendered pages.
+    # Deliberately NOT /static/ or /assets/ — payers host real MRF manifests
+    # there (Cigna's /static/mrf/latest.json).
+    r"|/wp-content/|/wp-includes/|/etc\.clientlibs/|/node_modules/"
+    r"|[/\"'](?:locales|i18n|lang)/[a-z]{2}(?:[-_][A-Za-z]{2,4})?\.json"
+    r"|/_next/static/|/webpack/)", re.I
 )
 
 
