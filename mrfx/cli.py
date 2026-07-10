@@ -39,16 +39,25 @@ def _watcher_loop(cfg: MrfxConfig, store: Store, stop: threading.Event) -> None:
         # silently kill the watcher thread before it ever watches
         log.exception("initial inbox scan failed; watching for changes anyway")
     start_background_enrichment(cfg, store)
-    try:
-        for _changes in watchfiles.watch(cfg.inbox_dir, stop_event=stop, step=1000):
+    while not stop.is_set():
+        try:
+            for _changes in watchfiles.watch(cfg.inbox_dir, stop_event=stop, step=1000):
+                try:
+                    results = scan_inbox(cfg, store)
+                    if any(r.get("status") == "done" for r in results):
+                        start_background_enrichment(cfg, store)
+                except Exception:  # noqa: BLE001 — watcher survives everything
+                    log.exception("inbox scan failed; watcher continues")
+            return  # stop_event set — clean shutdown
+        except Exception:  # noqa: BLE001 — the watch itself died (inbox dir
+            # deleted, inotify hiccup). Re-arm instead of silently never
+            # watching again for the rest of the server's life.
+            log.exception("inbox watch errored; re-arming in 15s")
             try:
-                results = scan_inbox(cfg, store)
-                if any(r.get("status") == "done" for r in results):
-                    start_background_enrichment(cfg, store)
-            except Exception:  # noqa: BLE001 — watcher survives everything
-                log.exception("inbox scan failed; watcher continues")
-    except Exception:  # noqa: BLE001
-        log.exception("watcher stopped unexpectedly")
+                cfg.inbox_dir.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                pass
+            stop.wait(15)
 
 
 def _url_worker_loop(cfg: MrfxConfig, store: Store, stop: threading.Event) -> None:

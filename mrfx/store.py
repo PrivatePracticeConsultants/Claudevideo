@@ -461,7 +461,10 @@ class Store:
 
     def update_progress(self, filename: str, progress: float,
                         chunks_done: int | None = None, chunks_total: int | None = None) -> None:
-        """Lightweight progress write for the dashboard bar (no view churn)."""
+        """Lightweight progress write for the dashboard bar (no view churn).
+        BEST-EFFORT by contract: it is called from inside multi-hour parse
+        loops, and a transient store error here (user opened the .duckdb in a
+        BI tool) must never fail the parse it decorates."""
         sets = ["progress = ?"]
         params: list = [round(progress, 3)]
         if chunks_done is not None:
@@ -471,8 +474,14 @@ class Store:
             sets.append("chunks_total = ?")
             params.append(chunks_total)
         params.append(filename)
-        with self.write_lock, self.connect() as con:
-            con.execute(f"UPDATE files SET {', '.join(sets)} WHERE filename = ?", params)
+        try:
+            with self.write_lock, self.connect() as con:
+                con.execute(f"UPDATE files SET {', '.join(sets)} WHERE filename = ?", params)
+        except Exception as e:  # noqa: BLE001
+            import logging as _logging
+
+            _logging.getLogger(__name__).debug(
+                "progress write for %s skipped (%s) — cosmetic only", filename, e)
 
     # -- URL queue ----------------------------------------------------------
 
@@ -556,12 +565,20 @@ class Store:
             con.execute(f"UPDATE url_queue SET {sets} WHERE id = ?", [*fields.values(), url_id])
 
     def url_progress(self, url_id: int, bytes_done: int, bytes_total: int | None) -> None:
+        """BEST-EFFORT by contract: called from inside download stream loops —
+        a transient store error must never fail the download it decorates."""
         pct = (100.0 * bytes_done / bytes_total) if bytes_total else 0.0
-        with self.write_lock, self.connect() as con:
-            con.execute(
-                "UPDATE url_queue SET bytes_done = ?, bytes_total = ?, progress = ? WHERE id = ?",
-                [bytes_done, bytes_total or 0, round(pct, 2), url_id],
-            )
+        try:
+            with self.write_lock, self.connect() as con:
+                con.execute(
+                    "UPDATE url_queue SET bytes_done = ?, bytes_total = ?, progress = ? WHERE id = ?",
+                    [bytes_done, bytes_total or 0, round(pct, 2), url_id],
+                )
+        except Exception as e:  # noqa: BLE001
+            import logging as _logging
+
+            _logging.getLogger(__name__).debug(
+                "download-progress write for url %s skipped (%s) — cosmetic only", url_id, e)
 
     def list_urls(self, limit: int = 500) -> list[dict]:
         """Rows the user pasted (top-level, no parent) are listed first — a

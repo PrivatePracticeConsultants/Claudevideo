@@ -126,6 +126,32 @@ def test_registry_tolerates_per_entry_garbage(cfg, tmp_path):
     assert Registry(cfg).state("KS")[0]["verified_locally"] is True
 
 
+def test_cosmetic_failures_never_fail_real_work(cfg, store, monkeypatch):
+    # progress writes and derived QA stats decorate the real work — a store
+    # briefly locked by an external reader must not fail a download, a
+    # multi-hour parse, or flip a durable done-file to failed
+    import mrfx.ingest as ing
+    from mrfx.ingest import ingest_file, qa_report
+    from tests.mrfx.conftest import drop
+
+    def boom(*a, **k):
+        raise RuntimeError("store briefly locked by an external reader")
+
+    # 1. progress writers are best-effort by contract
+    monkeypatch.setattr(store, "connect", boom)
+    store.update_progress("x.json", 50.0)          # must not raise
+    store.url_progress(1, 100, 200)                # must not raise
+    monkeypatch.undo()
+
+    # 2. QA aggregates degrade instead of failing the finished file
+    monkeypatch.setattr(ing, "_qa_aggregates", boom)
+    qa = qa_report(store, {"rows": 5, "non_dollar_rows": 0}, "x.json")
+    assert qa["rows"] == 5 and any("unaffected" in m for m in qa["messages"])
+    p = drop(cfg, "innetwork_mixed.json", gz=True)
+    res = ingest_file(cfg, store, p)
+    assert res["status"] == "done" and res["rows"] > 0  # done despite QA outage
+
+
 def test_orphaned_parse_worker_exits_at_chunk_boundary(cfg, tmp_path, monkeypatch):
     # found live: killing the server left its parser workers re-parented to
     # init, burning 85% CPU on multi-GB parses nobody would ever collect.

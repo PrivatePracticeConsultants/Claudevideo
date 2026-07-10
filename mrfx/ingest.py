@@ -88,6 +88,21 @@ def qa_report(store: Store, qa_counters: dict, source_file: str) -> dict:
     qa = dict(qa_counters)
     total = qa["rows"]
     part = store.rates_dir / f"{file_key(source_file)}.parquet"
+    try:
+        _qa_aggregates(store, part, total, qa)
+    except Exception as e:  # noqa: BLE001 — this runs AFTER the parse succeeded
+        # and its parquet is durable: derived stats failing (store briefly
+        # locked by an external reader) must degrade, not flip a finished
+        # multi-hour file to 'failed' and re-parse it
+        log.warning("%s: QA aggregates unavailable (%s) — keeping parser counters only",
+                    source_file, e)
+        qa.setdefault("messages", []).append(
+            "aggregate QA metrics (outliers, duplicate ratio) could not be "
+            "computed this run — the rates themselves are unaffected")
+    return qa
+
+
+def _qa_aggregates(store: Store, part: Path, total: int, qa: dict) -> None:
     outliers = tin_npi = distinct_facts = 0
     if total and part.exists():
         with store.connect() as con:
@@ -120,7 +135,6 @@ def qa_report(store: Store, qa_counters: dict, source_file: str) -> dict:
         "duplicate_explosion_ratio": round(total / distinct_facts, 2) if distinct_facts else 1.0,
         "tin_is_really_npi_rows": tin_npi,
     })
-    return qa
 
 
 def _now() -> dt.datetime:
@@ -328,7 +342,11 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
                     store.update_progress(name, prog["pct"], chunks_done=prog["chunks_done"],
                                           chunks_total=prog["chunks_total"])
                     if progress_bar:
-                        progress_bar(prog["chunks_done"], prog["chunks_total"], prog["pct"])
+                        try:
+                            progress_bar(prog["chunks_done"], prog["chunks_total"], prog["pct"])
+                        except Exception:  # noqa: BLE001 — a display bar must
+                            # never fail the multi-hour parse it decorates
+                            progress_bar = None
 
     try:
         try:
