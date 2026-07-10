@@ -115,7 +115,16 @@ def cmd_add(cfg: MrfxConfig, args) -> int:
         r = _httpx.post(f"http://localhost:{cfg.port}/api/urls",
                         json={"urls": urls}, timeout=30)
         if r.status_code == 200:
-            d = r.json()
+            try:
+                d = r.json()
+                d["added"], d["skipped"], d["invalid"]
+            except (ValueError, KeyError, TypeError):
+                # something ELSE answered 200 on our port (another local app)
+                print(f"a server on port {cfg.port} answered, but it doesn't "
+                      "look like the mrfx dashboard — not adding locally while "
+                      "it may own the database. Stop it or change `port:` in "
+                      "config/mrfx.yaml, then re-run this command.")
+                return 1
             print(f"handed to the running dashboard: {d['added']} queued, "
                   f"{d['skipped']} already known, {d['invalid']} not URLs")
             if args.retry_failed:
@@ -147,8 +156,11 @@ def cmd_add(cfg: MrfxConfig, args) -> int:
     if args.retry_failed:
         n = store.requeue_failed()
         print(f"re-queued {n} previously failed URL(s)")
-    if store.url_queue_counts().get("queued", 0) == 0:
-        return 0
+    counts_now = store.url_queue_counts()
+    live = sum(counts_now.get(s, 0) for s in
+               ("queued", "downloading", "fetched", "expanding", "ingesting"))
+    if live == 0:
+        return 0  # nothing queued and nothing left mid-flight by a crash
     print("downloading and ingesting (one file at a time — Ctrl-C to stop; "
           "re-running `mrfx add` resumes where it left off)...")
     processed = run_queue(cfg, store, drain=True, progress_bar=_make_cli_progress())

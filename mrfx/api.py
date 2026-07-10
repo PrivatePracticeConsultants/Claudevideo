@@ -12,6 +12,7 @@ import datetime as dt
 import io
 import json
 import logging
+import os
 import tempfile
 import zipfile
 from pathlib import Path
@@ -395,6 +396,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                     f"SELECT * FROM tin_directory WHERE tin_value IN ({', '.join('?' for _ in tin_list)})",
                     tin_list,
                 )) if tin_list else []
+                for _t in tins:  # SSN-pattern TINs masked on every surface
+                    _t["tin_value_masked"] = mask_tin(_t["tin_value"])
                 member_npis = _dicts(con.execute(
                     f"""
                     SELECT DISTINCT r.npi, n.org_name, n.entity_type, n.city, n.state, n.taxonomy_desc
@@ -640,13 +643,19 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
 
     # -- export (CSV + methodology sidecar, §7A.6) ---------------------------------
 
+
+    def _mktemp(suffix: str) -> Path:
+        fd, p = tempfile.mkstemp(suffix=suffix)
+        os.close(fd)  # mkstemp returns an OPEN fd — dropping it leaks one per export
+        return Path(p)
+
     def _export_payload(request: Request, view: str, sort: str, dir: str, full: bool):
         qp = {} if full else dict(request.query_params)
         grain = grain_of(qp, cfg, store)
         fs = FilterSet(qp if not full else {"dollar_only": "0"})
         select, params = export_select(grain, fs, sort, dir)
         stamp = dt.datetime.now().strftime("%Y-%m-%d_%H%M")
-        tmp = Path(tempfile.mkstemp(suffix=".csv")[1])
+        tmp = _mktemp(".csv")
         with store.connect() as con:
             con.execute(f"COPY ({select}) TO '{tmp}' (FORMAT CSV, HEADER)", params)
         raw = tmp.read_text()
@@ -664,11 +673,12 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         full: bool = False,
     ):
         stamp, csv_text, method = _export_payload(request, view, sort, dir, full)
-        out = Path(tempfile.mkstemp(suffix=".csv")[1])
+        out = _mktemp(".csv")
         out.write_text(csv_text, encoding="utf-8")
         sidecar = out.with_suffix(".methodology.txt")
         sidecar.write_text(method)
         background.add_task(out.unlink, missing_ok=True)
+        background.add_task(sidecar.unlink, missing_ok=True)  # or it orphans per export
         return FileResponse(out, filename=f"mrfx_{view}_{stamp}.csv", media_type="text/csv")
 
     @app.get("/api/export.zip")
@@ -685,7 +695,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
             z.writestr(f"mrfx_{view}_{stamp}.csv", csv_text.encode("utf-8"))
             z.writestr(f"mrfx_{view}_{stamp}_methodology.txt", method)
-        out = Path(tempfile.mkstemp(suffix=".zip")[1])
+        out = _mktemp(".zip")
         out.write_bytes(buf.getvalue())
         background.add_task(out.unlink, missing_ok=True)
         return FileResponse(out, filename=f"mrfx_{view}_{stamp}.zip", media_type="application/zip")
@@ -705,11 +715,13 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             store, rel_sql(grain, fs), fs.params, fs.described.get("codes")
         )
         stamp = dt.datetime.now().strftime("%Y-%m-%d_%H%M")
-        out = Path(tempfile.mkstemp(suffix=".csv")[1])
+        out = _mktemp(".csv")
         out.write_text(outreach_csv(headers, rows), encoding="utf-8")
         sidecar_note = methodology_text(cfg, store, grain, fs, "display_name", "asc", "outreach")
-        (out.with_suffix(".methodology.txt")).write_text(sidecar_note)
+        sidecar = out.with_suffix(".methodology.txt")
+        sidecar.write_text(sidecar_note)
         background.add_task(out.unlink, missing_ok=True)
+        background.add_task(sidecar.unlink, missing_ok=True)
         return FileResponse(out, filename=f"mrfx_outreach_{stamp}.csv", media_type="text/csv")
 
     # -- benchmarks (§7B) --------------------------------------------------------------
@@ -723,6 +735,11 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 "ORDER BY display_name"
             ))
         entities = sorted(set(emap.values()))
+        # SSN-pattern TINs are masked on EVERY surface — a subject picker that
+        # displays the raw nine digits would be the one exception. They can't
+        # be selectable anyway (the mask can't round-trip to a lookup key), so
+        # they are excluded here rather than shown raw in the dropdown.
+        tins = [t for t in tins if mask_tin(t["tin_value"]) == t["tin_value"]]
         for t in tins:
             t["entity"] = emap.get(t["tin_value"])
             t["tin_value_masked"] = mask_tin(t["tin_value"])

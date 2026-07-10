@@ -21,7 +21,7 @@ from .parser import (
     skim_needed_ref_ids,
 )
 from .sniff import Preflight, open_stream, preflight
-from .store import Store, file_key
+from .store import Store, file_key, sql_path
 
 log = logging.getLogger(__name__)
 
@@ -94,14 +94,14 @@ def qa_report(store: Store, qa_counters: dict, source_file: str) -> dict:
             p = str(part)
             outliers = con.execute(
                 f"""
-                WITH r AS (SELECT * FROM read_parquet('{p}') WHERE is_dollar_rate),
+                WITH r AS (SELECT * FROM read_parquet('{sql_path(p)}') WHERE is_dollar_rate),
                 med AS (SELECT billing_code, median(negotiated_rate) m FROM r GROUP BY billing_code)
                 SELECT count(*) FROM r JOIN med USING (billing_code)
                 WHERE m > 0 AND (negotiated_rate > 5 * m OR negotiated_rate < 0.2 * m)
                 """
             ).fetchone()[0]
             tin_npi = con.execute(
-                f"SELECT count(*) FROM read_parquet('{p}') WHERE tin_is_really_npi"
+                f"SELECT count(*) FROM read_parquet('{sql_path(p)}') WHERE tin_is_really_npi"
             ).fetchone()[0]
             distinct_facts = con.execute(
                 f"""
@@ -109,7 +109,7 @@ def qa_report(store: Store, qa_counters: dict, source_file: str) -> dict:
                     SELECT DISTINCT payer, tin_value, npi, billing_code,
                            array_to_string(billing_code_modifier, '|'),
                            negotiated_rate, billing_class
-                    FROM read_parquet('{p}')
+                    FROM read_parquet('{sql_path(p)}')
                 )
                 """
             ).fetchone()[0]

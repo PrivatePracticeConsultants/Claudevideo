@@ -62,6 +62,13 @@ def file_key(name: str) -> str:
     return hashlib.sha1(name.encode()).hexdigest()[:16]
 
 
+def sql_path(p) -> str:
+    """Quote a filesystem path for inlining in SQL: DuckDB has no parameter
+    binding for SET/DDL statements, and a directory named O'Brien would
+    otherwise break the statement."""
+    return str(p).replace("'", "''")
+
+
 # --- SSN masking (§7A.7b) ----------------------------------------------------
 # EINs and SSNs are both 9 digits. A number is masked when it satisfies SSN
 # structural rules AND its 2-digit prefix is not a valid IRS EIN campus prefix.
@@ -278,7 +285,7 @@ class Store:
         else:
             raise last_exc  # 6 attempts over ~6s — something genuinely holds it
         try:
-            con.execute(f"SET temp_directory = '{self._tmp_dir}'")
+            con.execute(f"SET temp_directory = '{sql_path(self._tmp_dir)}'")
             con.execute("SET preserve_insertion_order = false")
             # DuckDB's default memory limit is ~80% of system RAM; a rollup
             # rebuild over tens of millions of rows will happily balloon to
@@ -388,7 +395,7 @@ class Store:
 
     def _register_views(self, con: duckdb.DuckDBPyConnection) -> None:
         """(Re)point the derived views. Callers must hold write_lock."""
-        glob = str(self.rates_dir / "*.parquet")
+        glob = sql_path(self.rates_dir / "*.parquet")
         if any(self.rates_dir.glob("*.parquet")):
             con.execute(f"CREATE OR REPLACE VIEW rates AS SELECT * FROM read_parquet('{glob}')")
         else:
@@ -431,7 +438,8 @@ class Store:
         tmp = Path(tmp_path)
         with self.write_lock:
             if rows_written:
-                path.unlink(missing_ok=True)
+                # replace() overwrites atomically — a preceding unlink would
+                # open a no-file window for lock-free concurrent readers
                 tmp.replace(path)
             else:
                 tmp.unlink(missing_ok=True)
@@ -582,16 +590,43 @@ class Store:
     def find_url_with_same_content(self, content_sha: str, exclude_id: int) -> str | None:
         """URL of an already-ingested queue row whose downloaded bytes were
         identical (Blue plans host copies of each other's national files, so
-        the same file arrives under many domains). None if no match."""
+        the same file arrives under many domains). None if no match.
+
+        'ingesting' twins count too: with parallel workers, two mirror copies
+        can be claimed simultaneously — if only 'done' matched, both would
+        pass this check and the same file would land twice. Only LOWER-id
+        in-flight twins defer this row (asymmetric on purpose: two concurrent
+        twins must not both skip in favor of each other — the lower id always
+        proceeds). If the ingesting twin later fails, the skipped row can be
+        retried from the dashboard."""
         if not content_sha:
             return None
         with self.connect() as con:
             row = con.execute(
-                "SELECT url FROM url_queue WHERE content_sha = ? AND status = 'done' "
-                "AND id != ? LIMIT 1",
-                [content_sha, exclude_id],
+                "SELECT url FROM url_queue WHERE content_sha = ? AND id != ? "
+                "AND (status = 'done' OR (status = 'ingesting' AND id < ?)) "
+                "ORDER BY id LIMIT 1",
+                [content_sha, exclude_id, exclude_id],
             ).fetchone()
         return row[0] if row else None
+
+    def recover_stuck_files(self) -> int:
+        """Files-table twin of recover_stuck_urls: an inbox ingest killed
+        mid-parse leaves its row at 'processing', and scan_inbox skips
+        'processing' files forever. Flip them to failed with a plain reason —
+        the next inbox scan re-ingests them. Called when a worker starts
+        (same single-owner assumption as recover_stuck_urls)."""
+        with self.write_lock, self.connect() as con:
+            n = con.execute(
+                "SELECT count(*) FROM files WHERE status = 'processing'"
+            ).fetchone()[0]
+            if n:
+                con.execute(
+                    "UPDATE files SET status = 'failed', "
+                    "error = 'interrupted by a restart — will re-ingest on the next scan' "
+                    "WHERE status = 'processing'"
+                )
+        return n
 
     def recover_stuck_urls(self) -> int:
         """Rows left mid-flight by a crash/Ctrl-C go back to queued so the
@@ -689,19 +724,32 @@ class Store:
         con.execute(f"CREATE OR REPLACE VIEW rates_dedup AS {DEDUP_QUERY}")
         n_rows = con.execute("SELECT count(*) FROM rates").fetchone()[0] or 0
         parts = max(1, -(-n_rows // ROLLUP_PARTITION_ROWS))
-        for tbl, query, key in (
-            ("rates_by_tin_tbl", BY_TIN_QUERY, "billing_code"),
-            ("tin_directory_tbl", TIN_DIRECTORY_QUERY, "tin_value"),
-        ):
-            if parts == 1:
-                con.execute(f"CREATE OR REPLACE TABLE {tbl} AS {query.format(part='TRUE')}")
-                continue
-            con.execute(  # schema only; slices append below
-                f"CREATE OR REPLACE TABLE {tbl} AS {query.format(part='FALSE')}")
-            for i in range(parts):
-                log.info("rollup %s: partition %d/%d (%d rows total)", tbl, i + 1, parts, n_rows)
-                pred = f"hash({key}) % {parts} = {i}"
-                con.execute(f"INSERT INTO {tbl} {query.format(part=pred)}")
+        # ONE TRANSACTION around the whole rebuild: a mid-slice failure (temp
+        # cap, memory, crash) must roll back to the PREVIOUS complete tables —
+        # a partially-filled rollup served as truth silently loses billing
+        # codes, which is far worse than stale analytics.
+        con.execute("BEGIN TRANSACTION")
+        try:
+            for tbl, query, key in (
+                ("rates_by_tin_tbl", BY_TIN_QUERY, "billing_code"),
+                ("tin_directory_tbl", TIN_DIRECTORY_QUERY, "tin_value"),
+            ):
+                if parts == 1:
+                    con.execute(f"CREATE OR REPLACE TABLE {tbl} AS {query.format(part='TRUE')}")
+                    continue
+                con.execute(  # schema only; slices append below
+                    f"CREATE OR REPLACE TABLE {tbl} AS {query.format(part='FALSE')}")
+                for i in range(parts):
+                    log.info("rollup %s: partition %d/%d (%d rows total)", tbl, i + 1, parts, n_rows)
+                    pred = f"hash({key}) % {parts} = {i}"
+                    con.execute(f"INSERT INTO {tbl} {query.format(part=pred)}")
+            con.execute("COMMIT")
+        except Exception:
+            try:
+                con.execute("ROLLBACK")
+            except duckdb.Error:
+                pass  # connection already aborted the transaction
+            raise
         con.execute("CREATE OR REPLACE VIEW rates_by_tin AS SELECT * FROM rates_by_tin_tbl")
         con.execute("CREATE OR REPLACE VIEW tin_directory AS SELECT * FROM tin_directory_tbl")
 
@@ -884,7 +932,12 @@ class Store:
             with self.connect() as con:
                 con.execute(
                     "DELETE FROM files; DELETE FROM npi_directory; DELETE FROM provider_refs; "
-                    "DELETE FROM peer_sets; DELETE FROM mpfs;"
+                    "DELETE FROM peer_sets; DELETE FROM mpfs; "
+                    # the queue too: surviving 'done' rows (and their content
+                    # hashes) would refuse to re-queue / dedup-away the very
+                    # URLs the user re-pastes to rebuild the store they just
+                    # wiped. entity_map stays — that's user configuration.
+                    "DELETE FROM url_queue;"
                 )
                 for tbl in ("rates_dedup_tbl", "rates_by_tin_tbl", "tin_directory_tbl"):
                     con.execute(f"DROP TABLE IF EXISTS {tbl}")
@@ -931,7 +984,7 @@ class RatesPartWriter:
             return False
         with self.store.write_lock:
             if self.rows_written:
-                self.path.unlink(missing_ok=True)
+                # replace() overwrites atomically — no unlink-first window
                 self.tmp.replace(self.path)
             else:
                 self.tmp.unlink(missing_ok=True)

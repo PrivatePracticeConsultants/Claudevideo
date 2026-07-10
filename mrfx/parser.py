@@ -303,10 +303,11 @@ class InNetworkParser:
     # -- refs -----------------------------------------------------------------
 
     def _add_ref(self, entry: dict) -> None:
-        rid = entry.get("provider_group_id")
+        # tolerant like the citation side (clean_ref_id): one dirty
+        # provider_group_id ("12.0" as a string) must not kill the whole file
+        rid = clean_ref_id(entry.get("provider_group_id"))
         if rid is None:
             return
-        rid = int(rid)
         # Huge files: skip references the target codes never cite (bounds memory
         # to the therapist-relevant subset of a millions-strong ref table).
         if self._keep_ref_ids is not None and rid not in self._keep_ref_ids:
@@ -483,7 +484,14 @@ def skim_needed_ref_ids(cfg: MrfxConfig, stream, progress_marker=None) -> tuple[
                     skipping = True
                     builder = _DISCARDED
             if not skipping:
-                if prefix == "in_network.item.negotiated_rates.item.provider_references.item" and event in ("number", "string"):
+                # both shapes: the schema says provider_references is an array
+                # of ids, but payers also write a bare scalar — the extraction
+                # pass tolerates that (as_list), so the skim MUST collect it
+                # too or every group citing it is dropped as "missing ref"
+                if event in ("number", "string") and prefix in (
+                    "in_network.item.negotiated_rates.item.provider_references.item",
+                    "in_network.item.negotiated_rates.item.provider_references",
+                ):
                     rid = clean_ref_id(value)
                     if rid is not None:
                         needed.add(rid)
@@ -511,9 +519,9 @@ def parse_provider_reference_file(cfg: MrfxConfig, stream) -> tuple[str, str | N
             builder.event(event, value)
             if event == "end_map" and prefix == "provider_references.item":
                 entry = builder.value
-                rid = entry.get("provider_group_id")
+                rid = clean_ref_id(entry.get("provider_group_id"))
                 if rid is not None:
-                    refs[int(rid)] = parse_groups(entry.get("provider_groups") or [])
+                    refs[rid] = parse_groups(entry.get("provider_groups") or [])
                 builder = None
             continue
         if event == "start_map" and prefix == "provider_references.item":

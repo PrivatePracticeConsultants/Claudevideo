@@ -198,7 +198,7 @@ Centene/Ambetter's all-states page, the Sapphire hubs of Blue KC, BCBS
 Michigan, and BCBS Louisiana, and UnitedHealthcare's national portal); the
 rest are portals that need a browser click (Humana, HCSC,
 BCBS AL/MA/RI/VT/KS, Wellmark, Horizon NJ,
-Premera, Regence, Kaiser, Oscar, Molina, Priority Health, HMSA, Blue Shield
+Premera, Priority Health, HMSA, Blue Shield
 of CA, Excellus, Capital BC, IBX, BCBS MN, UHS — probed; JavaScript-only or
 firewalled) with instructions, plus Anthem/Elevance's national master index
 (10.5 GB — raise `confirm_over_gb` to use it). Monthly-dated URLs carry

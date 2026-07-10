@@ -293,7 +293,8 @@ def download(cfg: MrfxConfig, url: str, dest: Path, progress_cb=None,
     verify_override = None
     tried_chain_repair = False
     ua_override: str | None = None
-    for attempt in range(cfg.download_retries + 1):
+    attempt = 0
+    while attempt <= cfg.download_retries:
         try:
             # RESUME: a .part left by a network drop or a killed process picks
             # up where it stopped instead of re-downloading gigabytes. The
@@ -323,8 +324,11 @@ def download(cfg: MrfxConfig, url: str, dest: Path, progress_cb=None,
                 if resp.status_code == 403:
                     if ua_override is None:
                         # CDN refuses non-browser user agents — retry
-                        # immediately (no backoff) looking like a browser
+                        # immediately looking like a browser. Free retry:
+                        # `attempt` is not advanced, so this works even when
+                        # the 403 lands on the final attempt (or retries=0).
                         ua_override = BROWSER_UA
+                        last_exc = DownloadError("HTTP 403 for our user-agent", 403, retryable=True)
                         log.info("%s: HTTP 403 for our user-agent; retrying as a browser", url)
                         continue
                     raise DownloadError(
@@ -412,9 +416,11 @@ def download(cfg: MrfxConfig, url: str, dest: Path, progress_cb=None,
         except DownloadError as e:
             last_exc = e
             if not e.retryable:
-                # keep the .part when a retry could finish it (disk-space
-                # guard); discard it when the content itself is the problem
-                if "disk space" not in str(e):
+                # keep the .part when a retry could finish it (the disk-space
+                # and confirm_over_gb guards both tell the user to fix the
+                # setting and press retry — the bytes are still good); discard
+                # it when the content itself is the problem
+                if "disk space" not in str(e) and "confirm_over_gb" not in str(e):
                     part.unlink(missing_ok=True)
                     val_p.unlink(missing_ok=True)
                 raise
@@ -422,8 +428,8 @@ def download(cfg: MrfxConfig, url: str, dest: Path, progress_cb=None,
         except (httpx.TransportError, httpx.TimeoutException) as e:
             last_exc = e
             # server sent an incomplete cert chain? repair it like a browser
-            # and retry immediately (skips the backoff sleep; the retry does
-            # count against the attempt budget)
+            # and retry immediately — a free retry (attempt not advanced),
+            # like the browser-UA fallback above
             if "CERTIFICATE_VERIFY_FAILED" in str(e) and not tried_chain_repair:
                 tried_chain_repair = True
                 ctx = _repair_incomplete_chain(url)
@@ -431,9 +437,10 @@ def download(cfg: MrfxConfig, url: str, dest: Path, progress_cb=None,
                     verify_override = ctx
                     continue
             log.warning("download %s network error: %s (attempt %d/%d)", url, e, attempt + 1, cfg.download_retries + 1)
-        # backoff before retry
-        if attempt < cfg.download_retries:
-            time.sleep(2.0 * (2**attempt))
+        # backoff before the next counted attempt
+        attempt += 1
+        if attempt <= cfg.download_retries:
+            time.sleep(2.0 * (2**(attempt - 1)))
     # keep the .part: every failure that lands here was transient (terminal
     # ones raised above), so a later "retry" on the queue resumes the download
     # instead of restarting a multi-GB file from byte zero
@@ -596,12 +603,12 @@ _HTML_SNIFF_RE = re.compile(rb"<\s*(!doctype\s+html|html|head|body)[\s>]", re.I)
 # path). data-* attributes too: CareFirst puts the real URL in data-key="..."
 # behind an href="javascript:void(0)" download button.
 _ATTR_LINK_RE = re.compile(
-    r"""(?:href|src|data-[a-z0-9_-]+)\s*=\s*["'](?P<u>[^"']+?\.json(?:\.gz)?(?:\?[^"']*)?)["']""",
+    r"""(?:href|src|data-[a-z0-9_-]+)\s*=\s*["'](?P<u>[^"']+?(?:\.json(?:\.gz)?|\.zip)(?:\?[^"']*)?)["']""",
     re.I,
 )
 # absolute file URLs anywhere else in the page (inlined JS/config blobs)
 _ABS_LINK_RE = re.compile(
-    r"""(?P<u>https?://[^"'\s<>]+?\.json(?:\.gz)?(?:\?[^"'\s<>]*)?)["'<\s]""",
+    r"""(?P<u>https?://[^"'\s<>]+?(?:\.json(?:\.gz)?|\.zip)(?:\?[^"'\s<>]*)?)["'<\s]""",
     re.I,
 )
 # relative .json paths quoted in inline JS/config or JSON listings: Cigna
@@ -610,7 +617,7 @@ _ABS_LINK_RE = re.compile(
 # .json.gz" (resolved against the listing's own URL). A slash is required —
 # bare filenames ("package.json" in framework bundles) stay invisible.
 _REL_JSON_RE = re.compile(
-    r"""["'](?P<u>(?:/[^"'\s<>]+?|[^"'\s<>:]+/[^"'\s<>]+?)\.json(?:\.gz)?(?:\?[^"'\s<>]*)?)["']""",
+    r"""["'](?P<u>(?:/[^"'\s<>]+?|[^"'\s<>:]+/[^"'\s<>]+?)(?:\.json(?:\.gz)?|\.zip)(?:\?[^"'\s<>]*)?)["']""",
     re.I,
 )
 
@@ -672,7 +679,7 @@ def extract_links_from_page(path: Path, base_url: str, max_files: int) -> list[s
     links). Returns absolute, deduped URLs. Empty for JS-only portals."""
     try:
         with open(path, "rb") as f:
-            text = f.read(20 << 20).decode(errors="replace")  # pages are small; cap at 20 MB
+            text = f.read(64 << 20).decode(errors="replace")  # match the 64 MB link-container admit limit
     except OSError:
         return []
     return extract_links_from_text(text, base_url, max_files)
@@ -737,7 +744,10 @@ def crawl_gatsby_hub(cfg: MrfxConfig, page_url: str, max_files: int) -> list[str
             r = client.get(f"{origin}/page-data/index/page-data.json")
             if r.status_code != 200:
                 return []
-            hashes = (r.json() or {}).get("staticQueryHashes") or []
+            data = r.json()
+            if not isinstance(data, dict):
+                return []  # catch-all routes answer 200 with arrays/strings
+            hashes = data.get("staticQueryHashes") or []
             for h in [str(x) for x in hashes][:10]:  # hubs ship a handful
                 sq = client.get(f"{origin}/page-data/sq/d/{h}.json")
                 if sq.status_code == 200:
@@ -803,6 +813,10 @@ def fetch_url_record(cfg: MrfxConfig, store: Store, rec: dict) -> bool:
         log.warning("url %s download failed: %s", url, e)
         store.update_url(url_id, status="failed", error=str(e))
         _maybe_queue_prev_month(store, rec, str(e))
+        # a stale complete download from an earlier run (recovered 'fetched'
+        # row) must not sit on disk forever once its URL is terminally dead
+        dest.unlink(missing_ok=True)
+        _meta_path(dest).unlink(missing_ok=True)
         return False
     _meta_path(dest).write_text(json.dumps({"sha": content_sha, "final_url": final_url}))
     store.update_url(url_id, content_sha=content_sha, status="fetched")
@@ -854,6 +868,8 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
             log.warning("url %s download failed: %s", url, e)
             store.update_url(url_id, status="failed", error=str(e))
             _maybe_queue_prev_month(store, rec, str(e))
+            dest.unlink(missing_ok=True)
+            meta_p.unlink(missing_ok=True)
             return False
         store.update_url(url_id, content_sha=content_sha)
 
@@ -1054,6 +1070,9 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
     the raw rates land immediately; dashboards catch up in batches instead of
     stalling the queue for minutes after every single file."""
     recovered = store.recover_stuck_urls()
+    stale_files = store.recover_stuck_files()
+    if stale_files:
+        log.info("recovered %d file(s) left mid-ingest by a previous run", stale_files)
     if recovered:
         log.info("resumed %d URL(s) left mid-flight by a previous run", recovered)
     processed = 0
@@ -1194,7 +1213,8 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
                 busy = active
                 pend = ingests_pending_rollup
             in_flight = (counts.get("queued", 0) + counts.get("downloading", 0)
-                         + counts.get("fetched", 0) + busy)
+                         + counts.get("fetched", 0) + counts.get("expanding", 0)
+                         + counts.get("ingesting", 0) + busy)
             if pend >= ROLLUP_BATCH_FILES or (in_flight == 0 and pend):
                 rebuild_now()
                 continue

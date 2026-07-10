@@ -143,12 +143,35 @@ def render_page_links(cfg: MrfxConfig, url: str, max_files: int) -> list[str]:
         # mutable so the chain-repair fallback below can swap the client in
         holder = {"client": make_client(ssl_verify())}
 
-        def _do_request(req):
+        def _send(req):
+            """Issue the browser's request through httpx and return
+            (response, body) with the body read STREAMING and hard-capped —
+            r.content would buffer a clicked multi-GB rate file entirely into
+            RAM before any size check could run. Returns (response, None)
+            when the cap is exceeded."""
             headers = {k: v for k, v in req.headers.items()
                        if k.lower() not in ("host", "cookie", "content-length")}
-            try:
-                return holder["client"].request(
+
+            def go():
+                request = holder["client"].build_request(
                     req.method, req.url, content=req.post_data_buffer, headers=headers)
+                r = holder["client"].send(request, stream=True)
+                try:
+                    if int(r.headers.get("content-length") or 0) > MAX_BODY_BYTES:
+                        return r, None
+                    chunks: list[bytes] = []
+                    total = 0
+                    for chunk in r.iter_bytes():
+                        total += len(chunk)
+                        if total > MAX_BODY_BYTES:
+                            return r, None
+                        chunks.append(chunk)
+                    return r, b"".join(chunks)
+                finally:
+                    r.close()
+
+            try:
+                return go()
             except httpx.ConnectError as e:
                 # some payers (Aetna's health1 platform) serve an incomplete
                 # certificate chain — repair it like a browser would, exactly
@@ -160,8 +183,7 @@ def render_page_links(cfg: MrfxConfig, url: str, max_files: int) -> list[str]:
                     raise
                 holder["client"].close()
                 holder["client"] = make_client(ctx)
-                return holder["client"].request(
-                    req.method, req.url, content=req.post_data_buffer, headers=headers)
+                return go()
 
         def fulfill(route):
             req = route.request
@@ -169,9 +191,8 @@ def render_page_links(cfg: MrfxConfig, url: str, max_files: int) -> list[str]:
                 route.abort()
                 return
             try:
-                r = _do_request(req)
-                body = r.content[: MAX_BODY_BYTES + 1]
-                if len(body) > MAX_BODY_BYTES:
+                r, body = _send(req)
+                if body is None:  # over the cap — never hand it to the page
                     route.abort()
                     return
                 ctype = (r.headers.get("content-type") or "").lower()
@@ -241,26 +262,31 @@ def render_page_links(cfg: MrfxConfig, url: str, max_files: int) -> list[str]:
                     continue
             return n
 
-        with _RENDER_LOCK, sync_playwright() as pw:
-            browser = _launch(pw)
-            try:
-                context = browser.new_context(user_agent=BROWSER_UA)
-                context.route("**/*", fulfill)  # popups inherit the interception
-                page = context.new_page()
-                page.goto(url, wait_until="networkidle", timeout=RENDER_TIMEOUT_MS)
-                page.wait_for_timeout(SETTLE_MS)
-                snapshot_all(context)
-                if harvest_progress() == 0:
-                    # nothing yet: clear consent overlays, then click the
-                    # controls that look like they reveal the file list
-                    click_candidates(page, _CONSENT_TEXT_RE, 2)
-                    clicked = click_candidates(page, _CLICKABLE_TEXT_RE, MAX_CLICKS)
-                    if clicked:
-                        page.wait_for_timeout(SETTLE_MS)
-                        snapshot_all(context)
-            finally:
-                browser.close()
-                holder["client"].close()
+        try:
+            with _RENDER_LOCK, sync_playwright() as pw:
+                # launch OUTSIDE the browser-closing try (there is no browser
+                # yet if it fails) but INSIDE the client-closing one — a
+                # missing-browser error must not leak the httpx client
+                browser = _launch(pw)
+                try:
+                    context = browser.new_context(user_agent=BROWSER_UA)
+                    context.route("**/*", fulfill)  # popups inherit the interception
+                    page = context.new_page()
+                    page.goto(url, wait_until="networkidle", timeout=RENDER_TIMEOUT_MS)
+                    page.wait_for_timeout(SETTLE_MS)
+                    snapshot_all(context)
+                    if harvest_progress() == 0:
+                        # nothing yet: clear consent overlays, then click the
+                        # controls that look like they reveal the file list
+                        click_candidates(page, _CONSENT_TEXT_RE, 2)
+                        clicked = click_candidates(page, _CLICKABLE_TEXT_RE, MAX_CLICKS)
+                        if clicked:
+                            page.wait_for_timeout(SETTLE_MS)
+                            snapshot_all(context)
+                finally:
+                    browser.close()
+        finally:
+            holder["client"].close()  # idempotent; covers every exit path
 
         for u, html in dom_snapshots:
             if len(links) >= max_files:

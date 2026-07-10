@@ -29,6 +29,9 @@ class ReportBranding(BaseModel):
 
 class MrfxConfig(BaseModel):
     codes: CodesConfig = Field(default_factory=CodesConfig)
+    # RESERVED — accepted for forward compatibility but NOT read by mrfx
+    # yet (the legacy src/ pipeline uses its own copies). Setting these does
+    # not filter anything today.
     # optional targeting: NPIs from NPPES discovery, TINs from remits/contracts
     target_npis: list[str] = Field(default_factory=list)
     target_tins: list[str] = Field(default_factory=list)

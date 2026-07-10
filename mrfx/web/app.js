@@ -340,7 +340,7 @@ async function openEntity(grain, unitId) {
     <h3>Constituent TIN${d.tins.length === 1 ? "" : "s"}</h3>
     <table><thead><tr><th>TIN</th><th>Display name</th><th>Kind</th><th class="num">NPIs</th><th>States</th><th>Discipline</th></tr></thead>
     <tbody>${d.tins.map((t) => `
-      <tr><td>${esc(t.tin_value)}</td><td>${esc(t.display_name || "")}</td>
+      <tr><td>${esc(t.tin_value_masked || t.tin_value)}</td><td>${esc(t.display_name || "")}</td>
       <td>${esc(t.entity_kind || "")}</td><td class="num">${fmtInt(t.npi_count)}</td>
       <td>${esc((t.states || []).join(", "))}</td><td>${esc(t.primary_discipline || "—")}</td></tr>`).join("")}
     </tbody></table>` : "";
@@ -775,7 +775,8 @@ async function loadFiles() {
   $$("[data-confirm]", body).forEach((b) =>
     b.addEventListener("click", async () => {
       b.disabled = true;
-      await fetch(`/api/files/${encodeURIComponent(b.dataset.confirm)}/confirm`, { method: "POST" });
+      const r = await fetch(`/api/files/${encodeURIComponent(b.dataset.confirm)}/confirm`, { method: "POST" });
+      if (!r.ok) alert((await r.json().catch(() => ({}))).detail || `confirm failed (HTTP ${r.status})`);
       loadFiles();
     }));
   loadStats();
@@ -819,16 +820,17 @@ async function loadUrlQueue() {
   body.innerHTML = d.urls.map((u) => {
     const short = u.url.split("?")[0].replace(/^https?:\/\//, "");
     const shown = short.length > 78 ? short.slice(0, 38) + "…" + short.slice(-37) : short;
-    let statusCell = `<span class="badge ${esc(u.status === "done" ? "done" : u.status === "failed" ? "failed" : "processing")}">${esc(u.status)}</span>`;
+    let statusCell = `<span class="badge ${esc(u.status === "done" ? "done" : u.status === "failed" ? "failed" : u.status === "skipped" ? "skipped" : "processing")}">${esc(u.status)}</span>`;
     if (u.status === "downloading" && u.bytes_total > 0) {
       statusCell += `<div class="progress"><div class="progress-fill" style="width:${Math.round(u.progress)}%"></div>
         <span class="progress-label">${(u.bytes_done / 1e6).toFixed(0)} / ${(u.bytes_total / 1e6).toFixed(0)} MB</span></div>`;
     } else if (u.status === "ingesting") {
       statusCell += ` <span class="muted">(see file row below for chunk progress)</span>`;
     }
-    if (u.status === "failed") {
+    if (u.status === "failed" || u.status === "skipped") {
       statusCell += ` <button class="btn" style="padding:1px 8px;font-size:11.5px" data-url-retry="${u.id}">retry</button>`;
-    } else if (u.status === "queued") {
+    }
+    if (u.status === "queued" || u.status === "failed") {
       statusCell += ` <button class="btn" style="padding:1px 8px;font-size:11.5px" data-url-cancel="${u.id}">skip</button>`;
     }
     let notes = "";
@@ -846,13 +848,15 @@ async function loadUrlQueue() {
   $$("[data-url-retry]", body).forEach((b) =>
     b.addEventListener("click", async () => {
       b.disabled = true;
-      await fetch(`/api/urls/${b.dataset.urlRetry}/retry`, { method: "POST" });
+      const r = await fetch(`/api/urls/${b.dataset.urlRetry}/retry`, { method: "POST" });
+      if (!r.ok) alert((await r.json().catch(() => ({}))).detail || `retry failed (HTTP ${r.status})`);
       loadUrlQueue();
     }));
   $$("[data-url-cancel]", body).forEach((b) =>
     b.addEventListener("click", async () => {
       b.disabled = true;
-      await fetch(`/api/urls/${b.dataset.urlCancel}/cancel`, { method: "POST" });
+      const r = await fetch(`/api/urls/${b.dataset.urlCancel}/cancel`, { method: "POST" });
+      if (!r.ok) alert((await r.json().catch(() => ({}))).detail || `skip failed (HTTP ${r.status})`);
       loadUrlQueue();
     }));
 }

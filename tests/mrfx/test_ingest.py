@@ -227,3 +227,57 @@ def test_big_file_two_pass_still_extracts_target_codes(cfg, store, monkeypatch):
     p = drop(cfg, "innetwork_mixed.json")
     result = ing.ingest_file(cfg, store, p)
     assert result["status"] == "done" and result["rows"] > 0
+
+
+def test_rollup_rebuild_failure_keeps_previous_tables(cfg, store, monkeypatch):
+    # the partitioned rebuild must be ALL OR NOTHING: a mid-slice failure
+    # (temp cap, memory) rolls back to the previous complete tables instead
+    # of serving a partially-filled rollup as truth
+    import mrfx.store as st
+
+    drop(cfg, "innetwork_mixed.json", gz=True)
+    scan_inbox(cfg, store)
+    store.rebuild_rollups()
+    with store.connect() as con:
+        before = con.execute("SELECT count(*) FROM rates_by_tin_tbl").fetchone()[0]
+    assert before > 0
+    monkeypatch.setattr(st, "ROLLUP_PARTITION_ROWS", 1)   # force multi-slice
+    monkeypatch.setattr(st, "TIN_DIRECTORY_QUERY", "SELECT * FROM no_such_table WHERE {part}")
+    import pytest as _pytest
+
+    with _pytest.raises(Exception):
+        store.rebuild_rollups()
+    with store.connect() as con:  # previous tables intact, not partial/empty
+        assert con.execute("SELECT count(*) FROM rates_by_tin_tbl").fetchone()[0] == before
+        assert con.execute("SELECT count(*) FROM tin_directory_tbl").fetchone()[0] > 0
+
+
+def test_two_pass_keeps_scalar_provider_references(cfg, store, monkeypatch):
+    # payers write "provider_references": 101 (scalar) as well as [101]; the
+    # two-pass skim must collect both or big files silently drop those groups
+    import json as _json
+
+    import mrfx.ingest as ing
+
+    doc = _json.loads((FIXTURES / "innetwork_mixed.json").read_text())
+    for item in doc["in_network"]:
+        for grp in item["negotiated_rates"]:
+            refs = grp.get("provider_references")
+            if isinstance(refs, list) and len(refs) == 1:
+                grp["provider_references"] = refs[0]  # scalar-ify
+    p = cfg.inbox_dir / "scalar_refs.json"
+    p.write_text(_json.dumps(doc))
+    monkeypatch.setattr(ing, "LARGE_FILE_UNCOMPRESSED_BYTES", 1)  # force two-pass
+    res = ingest_file(cfg, store, p)
+    assert res["status"] == "done"
+    npis = {r["npi"] for r in rates(store)}
+    assert "1111111111" in npis  # embedded ref 101, cited as a scalar
+
+
+def test_reset_clears_url_queue(cfg, store):
+    store.enqueue_url("https://x.example/rates.json.gz", "https://x.example/rates.json.gz")
+    store.reset()
+    with store.connect() as con:
+        assert con.execute("SELECT count(*) FROM url_queue").fetchone()[0] == 0
+    # and the same URL re-queues cleanly after the wipe
+    assert store.enqueue_url("https://x.example/rates.json.gz", "https://x.example/rates.json.gz") is not None
