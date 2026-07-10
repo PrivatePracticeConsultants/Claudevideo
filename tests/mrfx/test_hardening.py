@@ -126,6 +126,31 @@ def test_registry_tolerates_per_entry_garbage(cfg, tmp_path):
     assert Registry(cfg).state("KS")[0]["verified_locally"] is True
 
 
+def test_orphaned_parse_worker_exits_at_chunk_boundary(cfg, tmp_path, monkeypatch):
+    # found live: killing the server left its parser workers re-parented to
+    # init, burning 85% CPU on multi-GB parses nobody would ever collect.
+    # A worker whose parent changed must abandon the parse at the next
+    # chunk boundary instead of finishing it for nobody.
+    import shutil
+
+    import mrfx.ingest as ing
+    from tests.mrfx.conftest import FIXTURES
+
+    monkeypatch.setattr(ing, "CHUNK_COMPRESSED_BYTES", 512)  # tiny chunks
+    calls = {"n": 0}
+
+    def fake_getppid():
+        calls["n"] += 1
+        return 111 if calls["n"] == 1 else 222  # parent "dies" after entry
+
+    monkeypatch.setattr(ing.os, "getppid", fake_getppid)
+    p = tmp_path / "rates.json"
+    shutil.copy(FIXTURES / "innetwork_mixed.json", p)
+    with pytest.raises(SystemExit, match="parent process died"):
+        ing._parse_worker(cfg, str(p), p.name, {}, {}, 0, p.stat().st_size,
+                          str(tmp_path / "out.parquet.tmp"), str(tmp_path / "prog.json"))
+
+
 def test_prefetch_reuses_kept_download_never_redownloads(cfg, store, tmp_path):
     # a revived duplicate's kept bytes must be used as-is: re-downloading
     # could hit an expired signed URL (terminal 403) and destroy the only copy

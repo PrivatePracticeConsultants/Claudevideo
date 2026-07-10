@@ -223,6 +223,7 @@ def _parse_worker(cfg: MrfxConfig, path_str: str, name: str, header_defaults: di
     passes = 2 if big else 1
     chunks_total = file_chunks * passes
     state = {"pass": 0, "last": -1}
+    parent_pid = os.getppid()
 
     def report(compressed_read: int) -> None:
         in_pass = min(file_chunks, compressed_read // CHUNK_COMPRESSED_BYTES)
@@ -230,6 +231,13 @@ def _parse_worker(cfg: MrfxConfig, path_str: str, name: str, header_defaults: di
         if chunk == state["last"]:
             return
         state["last"] = chunk
+        if os.getppid() != parent_pid:
+            # the server that dispatched this parse is GONE (killed without
+            # pool shutdown; we were re-parented). Nobody will collect the
+            # result — seen live as orphans burning 85% CPU on 12 GB files.
+            # Stop within one chunk; the pid-suffixed temp is swept as a
+            # dead-pid orphan on the next store start.
+            raise SystemExit("parent process died — abandoning orphaned parse")
         try:
             tmp = progress_path + ".tmp"
             with open(tmp, "w") as f:
