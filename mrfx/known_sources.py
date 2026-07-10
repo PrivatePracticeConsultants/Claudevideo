@@ -33,8 +33,13 @@ def load_known_sources(path: Path, today: dt.date | None = None) -> list[dict]:
     except (OSError, yaml.YAMLError) as e:
         log.warning("could not read known sources %s: %s", path, e)
         return []
+    if not isinstance(raw, dict):
+        log.warning("known sources %s: top level must be a mapping — ignoring", path)
+        return []
     out = []
-    for s in raw.get("sources", []):
+    for s in raw.get("sources", []) or []:
+        if not isinstance(s, dict):
+            continue  # a stray string/list entry must not 500 the API
         url = str(s.get("url") or "").strip()
         if not url:
             continue

@@ -25,9 +25,19 @@ def _as_list(v) -> list:
 
 
 def _load_yaml(path: Path) -> dict:
+    """Tolerant: one stray tab in a user-edited YAML must not stop the whole
+    server from starting — degrade to empty and say so."""
     if not path.exists():
         return {}
-    return yaml.safe_load(path.read_text()) or {}
+    try:
+        data = yaml.safe_load(path.read_text()) or {}
+    except yaml.YAMLError as e:
+        log.warning("%s is not valid YAML (%s) — treating it as empty", path, e)
+        return {}
+    if not isinstance(data, dict):
+        log.warning("%s: top level must be a mapping — treating it as empty", path)
+        return {}
+    return data
 
 
 class Registry:

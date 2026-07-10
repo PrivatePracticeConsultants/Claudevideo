@@ -30,8 +30,9 @@ BASIS_NOTE = (
 GHOST_RATE_NOTE = (
     "Ghost rates: payers publish rates for provider-code combinations that are "
     "never actually billed; presence of a rate does not mean a peer performs "
-    "that code. Benchmarks are computed only within the discipline-scoped code "
-    "set to mitigate this."
+    "that code. Scope the market to a discipline or explicit code list to "
+    "mitigate this — the market definition above states which filters were "
+    "actually applied."
 )
 COLLECTION_NOTE = (
     "A published negotiated rate is not proof a peer collects it (contract "
@@ -63,8 +64,18 @@ def _market_where(market: dict, include_assistant: bool, include_non_dollar: boo
     if not include_assistant:
         clauses.append("t.modifier_set NOT LIKE '%CQ%' AND t.modifier_set NOT LIKE '%CO%'")
     if market.get("base_only", True):
-        # base = no modifiers at all, OR discipline modifier only
-        clauses.append("(t.modifier_set = '' OR t.modifier_set IN ('GP','GO','GN'))")
+        if include_assistant:
+            # base + assistant: any combination of discipline (GP/GO/GN) and
+            # assistant (CQ/CO) modifiers — still excludes KX/59/X{EPSU} rows.
+            # Without this, base_only filtered assistant rows straight back
+            # out and the include_assistant toggle changed nothing but the
+            # methodology note (a false provenance claim on reports).
+            clauses.append(
+                "(t.modifier_set = '' OR regexp_full_match(t.modifier_set, "
+                "'(GP|GO|GN|CQ|CO)(\\|(GP|GO|GN|CQ|CO))*'))")
+        else:
+            # base = no modifiers at all, OR discipline modifier only
+            clauses.append("(t.modifier_set = '' OR t.modifier_set IN ('GP','GO','GN'))")
     if market.get("billing_class", "professional"):
         clauses.append("t.billing_class = ?")
         params.append(market.get("billing_class", "professional"))
@@ -173,8 +184,11 @@ def compute_benchmark(store: Store, subject: str, market: dict) -> dict:
         cur = con.execute(sql, [subject_tins, *params, *peer_params])
         cols = [d[0] for d in cur.description]
         rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+        # median across loaded localities: a national PFS extract carries
+        # 100+ localities per code, and any_value() anchored "% of Medicare"
+        # to whichever locality DuckDB scanned first (nondeterministic)
         mpfs = dict(con.execute(
-            "SELECT code, any_value(non_facility_rate) FROM mpfs GROUP BY code"
+            "SELECT code, median(non_facility_rate) FROM mpfs GROUP BY code"
         ).fetchall())
         mpfs_source = store.mpfs_loaded()
 
@@ -223,6 +237,10 @@ def compute_opportunity(benchmark: dict, volumes: dict[str, float],
     """
     if not volumes:
         raise BenchmarkError("opportunity model requires user-supplied annual units per code")
+    if conservative_percentile not in PERCENTILES:
+        raise BenchmarkError(
+            f"conservative_percentile must be one of {PERCENTILES} — an unknown "
+            "percentile would silently report a $0 conservative opportunity")
     target = benchmark["target_percentile"]
     rows, total_target, total_conservative = [], 0.0, 0.0
     for r in benchmark["rows"]:

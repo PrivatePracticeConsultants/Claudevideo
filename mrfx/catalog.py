@@ -91,7 +91,10 @@ CODE_CATALOG: dict[str, tuple[str, tuple[str, ...], bool]] = {
     "92605": ("Non-speech-generating AAC device eval, first hour", (SLP,), False),
     "92606": ("Non-speech-generating AAC device services", (SLP,), False),
     "92607": ("Speech-generating AAC device eval, first hour", (SLP,), False),
-    "92608": ("Speech-generating AAC device eval, each addl 30 min", (SLP,), True),
+    # timed=False on purpose: it IS time-based but the flag means "15-minute
+    # unit" (and renders as 'timed 15-min' on reports) — 92608 is a 30-minute
+    # add-on, so labeling it 15-min was factually wrong on deliverables
+    "92608": ("Speech-generating AAC device eval, each addl 30 min", (SLP,), False),
     "92609": ("Speech-generating AAC device programming", (SLP,), False),
 }
 

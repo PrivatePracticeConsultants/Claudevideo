@@ -836,7 +836,11 @@ class Store:
 
     # -- npi directory -----------------------------------------------------------
 
-    def unenriched_npis(self, limit: int = 500) -> list[str]:
+    def unenriched_npis(self, limit: int = 500, after: str = "") -> list[str]:
+        """`after` is a keyset cursor (npi > after): the query is
+        deterministic, so callers that page through the full population
+        without saving rows in between MUST advance the cursor or every
+        page is identical."""
         with self.connect() as con:
             rows = con.execute(
                 """
@@ -848,10 +852,10 @@ class Store:
                     SELECT tin_value AS npi FROM rates
                     WHERE tin_is_really_npi AND tin_value IS NOT NULL
                 )
-                WHERE npi NOT IN (SELECT npi FROM npi_directory)
+                WHERE npi > ? AND npi NOT IN (SELECT npi FROM npi_directory)
                 ORDER BY npi LIMIT ?
                 """,
-                [limit],
+                [after, limit],
             ).fetchall()
         return [r[0] for r in rows]
 

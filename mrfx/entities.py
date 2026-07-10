@@ -22,7 +22,15 @@ def load_entity_map(path: Path) -> dict[str, str]:
     """YAML -> {tin: entity_name}. Duplicate TINs keep the first entity."""
     if not Path(path).exists():
         return {}
-    data = yaml.safe_load(Path(path).read_text()) or {}
+    try:
+        data = yaml.safe_load(Path(path).read_text()) or {}
+    except yaml.YAMLError as e:
+        log.warning("entity map %s is not valid YAML (%s) — ignoring it; fix the "
+                    "file and restart to get your groupings back", path, e)
+        return {}
+    if not isinstance(data, dict):
+        log.warning("entity map %s: top level must be a mapping — ignoring it", path)
+        return {}
     mapping: dict[str, str] = {}
     for entity in data.get("entities", []) or []:
         name = str(entity.get("name", "")).strip()

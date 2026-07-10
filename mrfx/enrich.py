@@ -27,6 +27,7 @@ def enrich_via_api(cfg: MrfxConfig, store: Store, stop: threading.Event | None =
     from .fetch import ssl_verify
 
     done = 0
+    consecutive_failures = 0
     with httpx.Client(headers={"User-Agent": cfg.user_agent}, timeout=30,
                       verify=ssl_verify()) as client:
         while True:
@@ -41,11 +42,30 @@ def enrich_via_api(cfg: MrfxConfig, store: Store, stop: threading.Event | None =
                     if resp.status_code == 429:
                         time.sleep(10)
                         resp = client.get(NPPES_API, params={"version": "2.1", "number": npi})
+                    if resp.status_code != 200:
+                        # NPPES errors return JSON bodies too — an empty
+                        # "results" here is NOT a dead NPI. Leave it
+                        # un-enriched so the next run retries it.
+                        log.warning("NPPES answered HTTP %d for %s — will retry next run",
+                                    resp.status_code, npi)
+                        consecutive_failures += 1
+                        if consecutive_failures >= 20:
+                            log.warning("NPPES failing persistently — pausing enrichment "
+                                        "until the next run (%d NPIs done)", done)
+                            return done
+                        time.sleep(2)
+                        continue
                     data = resp.json()
                 except (httpx.HTTPError, ValueError) as e:
                     log.warning("NPPES lookup failed for %s: %s — will retry next run", npi, e)
+                    consecutive_failures += 1
+                    if consecutive_failures >= 20:
+                        log.warning("NPPES unreachable — pausing enrichment until the "
+                                    "next run (%d NPIs done)", done)
+                        return done
                     time.sleep(2)
                     continue
+                consecutive_failures = 0
                 results = data.get("results") or []
                 if not results:
                     store.save_npi(npi, None, None, None, None, None)  # dead NPI: don't retry forever
@@ -100,11 +120,15 @@ def enrich_via_bulk(cfg: MrfxConfig, store: Store) -> int:
         log.error("enrichment.mode=bulk but bulk_csv_path %r not found", str(path))
         return 0
     wanted = set()
+    cursor = ""
     while True:
-        batch = store.unenriched_npis(limit=100000)
+        # keyset pagination: nothing is saved between pages, so without the
+        # cursor every page would be identical (an infinite loop at >=100k)
+        batch = store.unenriched_npis(limit=100000, after=cursor)
         if not batch:
             break
         wanted.update(batch)
+        cursor = batch[-1]
         if len(batch) < 100000:
             break
     if not wanted:

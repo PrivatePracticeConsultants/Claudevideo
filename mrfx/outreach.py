@@ -162,9 +162,19 @@ def build_outreach_rows(store: Store, rel_sql: str, params: list,
     return headers, out_rows
 
 
+def _defuse(v):
+    """Excel/Sheets execute cells starting with = + - @ (and tab/CR variants)
+    as formulas. Org names and addresses come from third-party MRF/NPPES
+    data, and this CSV is built to be opened in Excel/Brevo — prefix risky
+    leading characters with a quote so they render as text, never execute."""
+    if isinstance(v, str) and v and v[0] in "=+-@\t\r":
+        return "'" + v
+    return v
+
+
 def outreach_csv(headers: list[str], rows: list[dict]) -> str:
     buf = io.StringIO()
     w = csv.DictWriter(buf, fieldnames=headers, extrasaction="ignore")
     w.writeheader()
-    w.writerows(rows)
+    w.writerows([{k: _defuse(v) for k, v in r.items()} for r in rows])
     return "﻿" + buf.getvalue()  # BOM for Excel / Brevo import
