@@ -126,6 +126,51 @@ def test_registry_tolerates_per_entry_garbage(cfg, tmp_path):
     assert Registry(cfg).state("KS")[0]["verified_locally"] is True
 
 
+def test_crash_recovery_flips_stuck_rows(cfg, store):
+    # kill -9 leaves 'processing' files and mid-flight url rows; both must
+    # recover at startup or they are skipped/ignored forever
+    store.upsert_file("stuck.json", payer="X", file_type="in_network", status="processing")
+    a = store.enqueue_url("https://x.example/a.json.gz", "ka")
+    b = store.enqueue_url("https://x.example/b.json.gz", "kb")
+    store.update_url(a, status="downloading")
+    store.update_url(b, status="ingesting")
+    assert store.recover_stuck_files() == 1
+    st = store.file_status("stuck.json")
+    assert st["status"] == "failed" and "re-ingest" in st["error"]
+    assert store.recover_stuck_urls() == 2
+    assert all(r["status"] == "queued" for r in store.list_urls())
+
+
+def test_forget_api_guards_and_flow(cfg, store):
+    # HTTP forget path: 404 unknown, 409 while processing, success payload,
+    # and the done url row flips to skipped with a retry hint
+    from fastapi.testclient import TestClient
+
+    from mrfx.api import create_app
+    from mrfx.ingest import scan_inbox
+    from tests.mrfx.conftest import drop
+
+    client = TestClient(create_app(cfg, store))
+    assert client.delete("/api/files/nope.json").status_code == 404
+
+    p = drop(cfg, "innetwork_mixed.json", gz=True)
+    scan_inbox(cfg, store)
+    uid = store.enqueue_url("https://x.example/rates.json.gz", "kr")
+    store.update_url(uid, status="done", filename=p.name, content_sha="ab" * 32)
+
+    store.upsert_file(p.name, status="processing")
+    assert client.delete(f"/api/files/{p.name}").status_code == 409  # mid-parse guard
+    store.upsert_file(p.name, status="done")
+
+    r = client.delete(f"/api/files/{p.name}")
+    assert r.status_code == 200
+    d = r.json()
+    assert d["status"] == "forgotten" and d["rows"] > 0 and d["bytes"] > 0
+    assert store.file_status(p.name) is None
+    (row,) = [u for u in store.list_urls() if u["id"] == uid]
+    assert row["status"] == "skipped" and "retry" in row["error"]
+
+
 def test_cosmetic_failures_never_fail_real_work(cfg, store, monkeypatch):
     # progress writes and derived QA stats decorate the real work — a store
     # briefly locked by an external reader must not fail a download, a

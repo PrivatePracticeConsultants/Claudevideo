@@ -193,7 +193,8 @@ Cigna's signed-manifest page, BCBS South Carolina's CloudFront indexes,
 BCBS North Carolina's signed TOC page, CareFirst's Azure-blob indexes,
 Molina Healthcare's all-states page, Kaiser Permanente's regional
 indexes, Aetna's HealthSparq portal, Harvard Pilgrim's click-gated plan
-list (those four via the headless-browser renderer), Anthem/Elevance's
+list, Regence's JS-built page, and Oscar's monthly S3 index (the five
+JS-built pages via the headless-browser renderer), Anthem/Elevance's
 14-state master index (10.5 GB — needs confirm_over_gb: 12),
 Centene/Ambetter's all-states page, the Sapphire hubs of Blue KC, BCBS
 Michigan, and BCBS Louisiana, and UnitedHealthcare's national portal); the
@@ -201,8 +202,7 @@ rest are portals that need a browser click (Humana, HCSC,
 BCBS AL/MA/RI/VT/KS, Wellmark, Horizon NJ,
 Premera, Priority Health, HMSA, Blue Shield
 of CA, Excellus, Capital BC, IBX, BCBS MN, UHS — probed; JavaScript-only or
-firewalled) with instructions, plus Anthem/Elevance's national master index
-(10.5 GB — raise `confirm_over_gb` to use it). Monthly-dated URLs carry
+firewalled) with instructions. Monthly-dated URLs carry
 a `{FIRST_OF_MONTH}` placeholder resolved at queue time so the catalog never
 goes stale. Load them via `mrfx add --known`, the dashboard's **"Queue tested
 payer indexes"** button, or browse with **"Show tested sources"**
@@ -259,9 +259,12 @@ each in its own OS process, while the database stays strictly single-writer
 in the main process. Verified: 2 workers ran the same 3 UHC files 1.5x faster
 with byte-identical row counts; a parser worker killed mid-parse restarts
 automatically and the file retries; killing the whole app mid-run resumes
-cleanly on restart with no duplicate rows. DuckDB's rollup memory is capped
-(3 GB, spills to disk) so analytics rebuilds can't balloon into the OOM
-killer on large stores.
+cleanly on restart with no duplicate rows. DuckDB's memory for analytics
+rebuilds is capped (40% of RAM, clamped to 2–12 GB) and — because the
+rollups' DISTINCT aggregates cannot spill to disk — very large stores
+rebuild in hash-partitioned slices inside one transaction, with per-connection
+temp-disk capped at 80% of free space, so rebuilds can't balloon into the
+OOM killer or fill the disk.
 
 Every ingest is itself a **scan for your codes**: the parser streams the file
 and extracts only the billing codes in `config/mrfx.yaml` (`codes.cpt_codes`),
@@ -271,7 +274,8 @@ anywhere in the file, the extraction pass is skipped and the file is marked
 done with "none of the target billing codes appear in this file" — half the
 parse cost on every no-match multi-GB file.
 
-The queue (`url_queue` in the store) processes **one file at a time** in the
+The queue (`url_queue` in the store) processes **a bounded few files at a
+time** (`parallel_ingests`, shipped 3) in the
 background, dedupes re-pasted links (signed-query variants included), and also
 dedupes by **content**: every download is sha256-hashed, and a byte-identical
 file arriving under a different domain is skipped, not re-ingested. This
@@ -281,7 +285,8 @@ Nebraska, and Western-NY indexes under three domains; without content dedup a
 4-state trial picked up ~13% duplicate rows). It shows a download-MB progress
 bar per row, survives restarts (in-flight rows are re-queued on startup), and
 gives plain-language errors: expired signed links
-("download link has expired — go back to the payer's index page"),
+("HTTP 403 — access refused. Usual causes: a signed URL expired (re-copy a
+fresh link, or re-add the TOC it came from)…"),
 JavaScript-only portals (with instructions to click through and paste the real
 links), allowed-amounts files ("no negotiated rates — skipped"), and an
 oversize guard (`confirm_over_gb`, default 5 GB compressed) so a typo can't

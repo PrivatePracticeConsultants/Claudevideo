@@ -82,14 +82,26 @@ def sync_entity_map(cfg: MrfxConfig, store: Store) -> dict[str, str]:
     return mapping
 
 
+def _tin_list(v) -> list:
+    """A scalar means ONE tin — iterating a bare string here would map each
+    CHARACTER to the entity and persist that junk over the user's YAML."""
+    if v is None:
+        return []
+    if isinstance(v, (str, int)):
+        return [v]
+    return list(v)
+
+
 def update_entity(cfg: MrfxConfig, store: Store, entity_name: str,
                   add_tins: list[str] | None = None,
                   remove_tins: list[str] | None = None) -> dict[str, str]:
     """UI edit: add/remove TINs for an entity; persists to YAML + store."""
     mapping = load_entity_map(cfg.entity_map_path)
-    for tin in add_tins or []:
-        mapping[str(tin).replace("-", "").strip()] = entity_name
-    for tin in remove_tins or []:
+    for tin in _tin_list(add_tins):
+        tin = str(tin).replace("-", "").strip()
+        if tin:
+            mapping[tin] = entity_name
+    for tin in _tin_list(remove_tins):
         tin = str(tin).replace("-", "").strip()
         if mapping.get(tin) == entity_name:
             del mapping[tin]

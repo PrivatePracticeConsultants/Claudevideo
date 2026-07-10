@@ -47,13 +47,45 @@ Two codebases live in this repo:
    must never match the `*.parquet` view glob.
 3. **Fault isolation.** A bad file/URL marks ITS row failed with a
    plain-language message and the worker moves on. Worker loops survive
-   transient store errors (lock conflicts retry ~6s in `Store.connect`).
+   transient store errors (lock conflicts retry ~6s in `Store.connect`),
+   including a store failure INSIDE a failure handler (the recovery write is
+   itself guarded — a dead processor thread would stall the queue forever).
    A dead parser process heals (`ParsePoolManager`) and the file retries once.
+   The inbox watcher re-arms with 15s backoff if the watch itself dies
+   (deleted inbox dir). A typo in ANY user-editable file must never kill the
+   program: config/mrfx.yaml errors print one actionable `config problem:`
+   line and exit 1 (ConfigFileError; unknown keys warn; numeric bounds and
+   enrichment.mode Literal enforced); per-entry garbage in entity_map /
+   payer_registry / registry_overrides / known_sources is skipped with a
+   warning; a malformed mpfs_path CSV degrades instead of stopping serve.
+3b. **Cosmetic never fails real work.** `store.update_progress` /
+   `store.url_progress` are best-effort BY CONTRACT (swallow + debug-log) —
+   they run inside download/parse loops and must not fail them. `qa_report`'s
+   DuckDB aggregates degrade with a note (the parse already succeeded; its
+   parquet is durable). The CLI progress bar is dropped on error, not fatal.
+   Parser workers exit at the next chunk boundary if their parent dies
+   (`os.getppid` check) — a SIGTERM'd server must not leave orphans burning
+   CPU on parses nobody will collect.
 4. **Honesty contract.** Never fabricate: unverifiable registry links are
    badged unverified; drug/allowed-amounts files are skipped with the reason;
    0-row files stay 0 honestly; per-file payer attribution comes from inside
    the file (Blues cross-host each other's files — expected, documented);
-   every export carries a methodology sidecar; SSN-pattern TINs are masked.
+   every export carries a methodology sidecar (whose source list is labeled
+   as store inventory, NOT the filtered export's provenance; source_files is
+   one representative file, source_count the total). SSN-pattern TINs are
+   masked PER ELEMENT of joined lists and in the no-name fallback labels
+   ('TIN MASKED-SSN'), server-side and in the SPA's raw-unit_id sinks
+   (maskTin in app.js). Every CSV export formula-defuses third-party text
+   (leading =+-@ etc. get a quote prefix — `_defuse_sql` in api.py,
+   `_defuse` in outreach.py); pitch HTML html-escapes third-party names.
+   Benchmark basis_note/assumptions echo the toggles actually applied
+   (include_assistant, base_only=false, dropped billing_class); the
+   %-of-Medicare footer discloses the median-across-localities anchor.
+5. **NPPES poisoning guard.** Only a genuine HTTP-200 body WITH a "results"
+   key (empty list) may mark an NPI dead. Non-200s AND 200-wrapped error
+   bodies ({"Errors": [...]}) leave the NPI un-enriched for retry; 20
+   consecutive failures pause the run. `unenriched_npis` serves only
+   well-formed 10-digit ids so junk from messy files can't wedge the loop.
 5. **Idempotency / crash-resume.** Kill anything at any time: `.part`
    downloads resume via HTTP Range guarded by an If-Range validator (`.val`
    sidecar — republished content restarts instead of splicing); in-flight
@@ -68,8 +100,21 @@ Two codebases live in this repo:
    twin later fails. Known residual: manually retrying a *failed* lower-id
    row while its higher-id twin is mid-ingest can double-parse — wasted
    work, not duplicated rows, because per-file parts replace atomically.
-   `mrfx reset` clears the url_queue with the data — done-row anchors must
-   not outlive the store they anchor.
+   Auto-revival touches ONLY kind='duplicate' skipped rows — rows the user
+   skipped or forgot share the sha but must never resurrect behind their
+   back. Recovered 'fetched' rows whose download + .fetchmeta sidecar
+   survived are reused as-is, never re-downloaded (expired signed URLs
+   would 403 terminally and destroy the only copy); sidecars are written
+   atomically. `mrfx reset` clears the url_queue with the data — done-row
+   anchors must not outlive the store they anchor. User erasure
+   (`forget`/DELETE/remove button) refuses 'processing'/'queued' files (a
+   live parse would silently resurrect the data), deletes raw copies BEFORE
+   the DB rows (the watcher must not re-ingest mid-erase), and orders
+   parquet-unlink-first / files-row-last-in-one-transaction so a partial
+   failure leaves forget retryable instead of orphaning unreachable rates.
+   A second `mrfx serve` claims the port BEFORE touching the store (running
+   crash-recovery against a live server's rows corrupted in-flight parses);
+   `mrfx ingest` probes for a running server the same way.
 6. **Rollup scalability.** `rates_by_tin` / `tin_directory` are materialized
    (few groups); `rates_dedup` MUST remain a live view — at NPI×rate grain a
    30M-row store means a ~30M-group aggregation whose spill exceeded 27 GB of
@@ -93,6 +138,9 @@ provider_reference / allowed_amounts / duplicate / unknown`.
 User actions are guarded: retry only from failed/skipped; skip only from
 queued/failed (a done row anchors content-sha dedup and is untouchable).
 `dedup_key` strips signature/expiry query params but keeps identity params.
+`list_urls` pins actionable rows into the window (top-level pastes first,
+then failed/skipped children, then newest others, deduped by id) — a file
+forgotten mid-grind on a 2,000-row queue keeps its retry button reachable.
 
 ## Step 5 — Performance envelope (measured)
 
@@ -135,9 +183,10 @@ queued/failed (a done row anchors content-sha dedup and is untouchable).
 
 ## Step 7 — Test and verify like the history did
 
-- `.venv/bin/python -m pytest tests/ -q` — the suite (116+ tests) runs real
+- `.venv/bin/python -m pytest tests/ -q` — the suite (134+ tests) runs real
   end-to-end drains against local HTTP servers, including parallel mode,
-  kill-recovery semantics, dedup, guards, and messy-file parser cases
+  kill-recovery semantics (crash-flip of stuck files/urls is tested
+  directly), the forget HTTP flow, dedup, guards, and messy-file parser cases
   (`tests/mrfx/test_messy_files.py` documents payer quirks: header-at-EOF,
   refs-after-in_network, multi-code fields, junk types).
 - For anything touching ingest correctness, also do a live bounded run and

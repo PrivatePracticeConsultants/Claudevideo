@@ -7,8 +7,9 @@ Give the app a URL (or many) and it:
      lists (deduped, capped), which then flow through the same pipeline,
   4. otherwise hands the file to the normal chunked ingest.
 
-A single background worker drains the queue sequentially, so aggregating a
-whole payer (hundreds of files) never fills the disk: one file at a time, and
+Background workers drain the queue (`parallel_ingests` at a time, shipped 3,
+clamped to cores-1) with a one-file-ahead prefetch, so aggregating a whole
+payer (hundreds of files) never fills the disk: bounded files in flight, and
 the raw download is deleted after a successful ingest (config-controlled),
 keeping only the compact Parquet.
 """
@@ -800,6 +801,15 @@ def _meta_path(dest: Path) -> Path:
     return Path(str(dest) + _META_SUFFIX)
 
 
+def _write_meta(dest: Path, content_sha: str, final_url: str) -> None:
+    """Atomic sidecar write: a crash mid-write must leave either the old
+    sidecar or the new one, never a half-JSON that fails parsing later."""
+    meta_p = _meta_path(dest)
+    tmp = Path(str(meta_p) + ".tmp")
+    tmp.write_text(json.dumps({"sha": content_sha, "final_url": final_url}))
+    tmp.replace(meta_p)
+
+
 def fetch_url_record(cfg: MrfxConfig, store: Store, rec: dict) -> bool:
     """Download stage only (used by the prefetch thread): stream the file to
     disk, record its hash, and mark the row 'fetched' for the processor.
@@ -826,6 +836,10 @@ def fetch_url_record(cfg: MrfxConfig, store: Store, rec: dict) -> bool:
     except DownloadError as e:
         log.warning("url %s download failed: %s", url, e)
         store.update_url(url_id, status="failed", error=str(e))
+        # duplicates may have deferred to this row in an earlier life (it
+        # ingested once, failed, was retried, and now its signed URL is dead):
+        # they hold the kept bytes and must get their promised auto-retry
+        _revive_twins(store, rec.get("content_sha") or "", url_id)
         _maybe_queue_prev_month(store, rec, str(e))
         if not e.retryable:
             # a stale complete download from an earlier run must not sit on
@@ -834,7 +848,7 @@ def fetch_url_record(cfg: MrfxConfig, store: Store, rec: dict) -> bool:
             dest.unlink(missing_ok=True)
             _meta_path(dest).unlink(missing_ok=True)
         return False
-    _meta_path(dest).write_text(json.dumps({"sha": content_sha, "final_url": final_url}))
+    _write_meta(dest, content_sha, final_url)
     store.update_url(url_id, content_sha=content_sha, status="fetched")
     return True
 
@@ -868,12 +882,16 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
     url = rec["url"]
     dest = cfg.downloads_dir / filename_for(url)
     meta_p = _meta_path(dest)
+    meta = None
     if dest.exists() and meta_p.exists():
         # prefetched by the downloader thread — pick up where it left off
-        meta = json.loads(meta_p.read_text())
-        content_sha, final_url = meta["sha"], meta["final_url"]
+        try:
+            meta = json.loads(meta_p.read_text())
+            content_sha, final_url = meta["sha"], meta["final_url"]
+        except (ValueError, KeyError, OSError):
+            meta = None  # corrupt sidecar: fall through to a fresh download
         meta_p.unlink(missing_ok=True)
-    else:
+    if meta is None:
         try:
             # (row already marked 'downloading' by next_queued_url when claimed)
             content_sha, final_url = download(
@@ -907,7 +925,7 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
             # the only guaranteed copy. Keep them (+ metadata for reuse); if
             # the twin fails, revive_skipped_duplicates re-queues this row and
             # it ingests from the kept download without re-downloading.
-            _meta_path(dest).write_text(json.dumps({"sha": content_sha, "final_url": final_url}))
+            _write_meta(dest, content_sha, final_url)
             store.update_url(url_id, status="skipped", kind="duplicate",
                              error="identical to a link currently being processed "
                                    f"({twin_url.split('?')[0]}) — will retry automatically "

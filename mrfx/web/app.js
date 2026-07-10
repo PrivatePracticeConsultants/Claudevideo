@@ -26,12 +26,20 @@ const fmtMoney = (v) =>
 const fmtInt = (v) => (v == null ? "–" : Number(v).toLocaleString("en-US"));
 const esc = (s) =>
   String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+// client twin of the server's SSN-pattern TIN mask — for the few places that
+// render a raw unit_id (drawer meta, code ranking) instead of the
+// server-masked tin_value column
+const SSN_PREFIXES = new Set(["00","07","08","09","17","18","19","28","29","49","69","70","78","79","89","96","97"]);
+const maskTin = (t) => {
+  const s = String(t ?? "");
+  return /^[0-9]{9}$/.test(s) && SSN_PREFIXES.has(s.slice(0, 2)) ? "MASKED-SSN" : s;
+};
 
 async function api(path, opts) {
   const r = await fetch(path, opts);
   if (!r.ok) {
     let msg = `HTTP ${r.status}`;
-    try { msg = (await r.json()).detail || msg; } catch { /* keep */ }
+    try { const d = await r.json(); msg = d.detail || d.error || msg; } catch { /* keep */ }
     throw new Error(msg);
   }
   return r.json();
@@ -358,7 +366,7 @@ async function openEntity(grain, unitId) {
   drawer.innerHTML = `
     <button class="close" aria-label="close">×</button>
     <h2>${esc(d.display_name)}</h2>
-    <div class="meta">${grain.toUpperCase()} · ${esc(unitId)}${payers.length ? " · " + payers.map(esc).join(" / ") : ""}</div>
+    <div class="meta">${grain.toUpperCase()} · ${esc(maskTin(unitId))}${payers.length ? " · " + payers.map(esc).join(" / ") : ""}</div>
     ${varianceNote}
     <h3>Median dollar rate by code${payers.length > 1 ? " and payer" : ""}</h3>
     ${payers.length > 1 ? `<div class="legend">${payers.slice(0, 2).map((p, i) =>
@@ -529,7 +537,7 @@ async function selectCpt(code) {
   body.innerHTML = d.ranked.map((r, i) => `
     <tr class="clickable" data-uid="${esc(r.unit_id)}">
       <td class="num muted">${i + 1}</td>
-      <td>${esc(r.display_name || "(name pending)")}<div class="sub">${esc(r.unit_id)}</div></td>
+      <td>${esc(r.display_name || "(name pending)")}<div class="sub">${esc(maskTin(r.unit_id))}</div></td>
       <td>${esc(r.payer)}</td>
       <td>${modTags(r.modifier_set)}</td>
       <td>${esc(r.billing_class || "—")}</td>
@@ -562,10 +570,18 @@ let benchmarkInit = false;
 async function initBenchmark() {
   refreshMpfsStatus();
   if (benchmarkInit) return;
+  let subjects, months, payers, peersets;
+  try {
+    [subjects, months, payers, peersets] = await Promise.all([
+      api("/api/benchmark/subjects"), api("/api/months"), api("/api/payers"), api("/api/peersets"),
+    ]);
+  } catch (e) {
+    // one transient failure must not brick the tab for the whole session —
+    // leave benchmarkInit false so the next visit retries the load
+    $("#b-out").innerHTML = `<div class="empty">could not load benchmark data (${esc(e.message)}) — switch tabs and come back to retry</div>`;
+    return;
+  }
   benchmarkInit = true;
-  const [subjects, months, payers, peersets] = await Promise.all([
-    api("/api/benchmark/subjects"), api("/api/months"), api("/api/payers"), api("/api/peersets"),
-  ]);
   $("#b-subjects").innerHTML =
     subjects.entities.map((e) => `<option value="${esc(e)}">`).join("") +
     subjects.tins.map((t) => `<option value="${esc(t.tin_value)}">${esc(t.display_name)}</option>`).join("");
@@ -597,7 +613,10 @@ async function initBenchmark() {
     } catch (err) { alert(err.message); }
   });
   $("#b-run").addEventListener("click", runBenchmark);
-  $("#b-report").addEventListener("click", openPitchReport);
+  $("#b-report").addEventListener("click", async () => {
+    try { await openPitchReport(); }
+    catch (e) { alert(`could not build the report: ${e.message}`); }
+  });
 }
 
 function refreshPeersets(sets) {
@@ -771,7 +790,7 @@ async function loadFiles() {
       <td>${qaLine(f.qa)}</td>
       <td>${warn}${f.error ? `<div class="err-text">${esc(f.error)}</div>` : ""}</td>
       <td class="sub">${f.finished_at ? esc(f.finished_at.slice(0, 19)) : ""}</td>
-      <td>${inflight ? "" : `<button class="btn forget-btn" title="erase this file's rates and free its disk space (re-add its link or file to get it back)" data-forget="${esc(f.filename)}">remove</button>`}</td>
+      <td>${f.status === "processing" || f.status === "queued" ? "" : `<button class="btn forget-btn" title="erase this file's rates and free its disk space (re-add its link or file to get it back)" data-forget="${esc(f.filename)}">remove</button>`}</td>
     </tr>`;
   }).join("");
   $$("[data-confirm]", body).forEach((b) =>

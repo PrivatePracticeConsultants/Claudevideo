@@ -72,9 +72,24 @@ def _url_worker_loop(cfg: MrfxConfig, store: Store, stop: threading.Event) -> No
 
 
 def cmd_serve(cfg: MrfxConfig, args) -> int:
+    import socket
+
     import uvicorn
 
     from .api import create_app
+
+    # Claim the port BEFORE touching the store: a second `mrfx serve` used to
+    # run crash-recovery (flipping the live server's in-flight rows) and start
+    # worker threads, only to die minutes of damage later at uvicorn's bind.
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        probe.bind(("127.0.0.1", cfg.port))
+        probe.close()
+    except OSError:
+        print(f"port {cfg.port} is already in use — another mrfx dashboard (or other "
+              "app) is running. Not touching its database. Stop it first, or change "
+              "`port:` in config/mrfx.yaml.", file=sys.stderr)
+        return 1
 
     store = Store(cfg.store_dir)
     # BEFORE any worker starts: a crash mid-parse leaves files at
@@ -193,7 +208,8 @@ def cmd_add(cfg: MrfxConfig, args) -> int:
                ("queued", "downloading", "fetched", "expanding", "ingesting"))
     if live == 0:
         return 0  # nothing queued and nothing left mid-flight by a crash
-    print("downloading and ingesting (one file at a time — Ctrl-C to stop; "
+    n_workers = max(1, int(getattr(cfg, "parallel_ingests", 1) or 1))
+    print(f"downloading and ingesting ({n_workers} file(s) at a time — Ctrl-C to stop; "
           "re-running `mrfx add` resumes where it left off)...")
     processed = run_queue(cfg, store, drain=True, progress_bar=_make_cli_progress())
     counts = store.url_queue_counts()
@@ -259,6 +275,18 @@ def _make_cli_progress():
 
 
 def cmd_ingest(cfg: MrfxConfig, args) -> int:
+    # like cmd_add: never open the store while a running server owns it — and
+    # especially never run crash-recovery against its live 'processing' rows
+    import httpx as _httpx
+
+    try:
+        _httpx.get(f"http://localhost:{cfg.port}/api/files", timeout=5)
+        print(f"a server is running on port {cfg.port} — drop files in the inbox or "
+              "use the dashboard instead of a second process (two writers would "
+              "fight over the database). Stop it to run `mrfx ingest` directly.")
+        return 1
+    except Exception:  # noqa: BLE001 — nothing answering: safe to proceed
+        pass
     store = Store(cfg.store_dir)
     store.recover_stuck_files()  # crashed 'processing' rows re-ingest this pass
     path = Path(args.path) if args.path else cfg.inbox_dir
@@ -379,8 +407,14 @@ def cmd_forget(cfg: MrfxConfig, args) -> int:
     store = Store(cfg.store_dir)
     rc = 0
     for name in args.filenames:
-        if not store.file_status(name):
+        st = store.file_status(name)
+        if not st:
             print(f"{name}: not in the store (check `mrfx status` for exact filenames)")
+            rc = 1
+            continue
+        if st.get("status") in ("processing", "queued"):
+            print(f"{name}: being processed right now — wait for it to finish, "
+                  "then forget it (removing mid-parse would quietly resurrect)")
             rc = 1
             continue
         info = forget_file(cfg, store, name)

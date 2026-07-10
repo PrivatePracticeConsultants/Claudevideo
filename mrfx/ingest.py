@@ -408,20 +408,22 @@ def forget_file(cfg: MrfxConfig, store: Store, filename: str) -> dict:
         # filenames come from the API path / CLI args — never let "../x"
         # reach the unlink calls below
         raise ValueError("not a plain filename")
-    info = store.forget_file(filename)
-    freed = info["bytes"]
+    # raw copies go FIRST — deleting the inbox copy after the DB rows would
+    # leave a window where the watcher re-ingests the very file being erased
+    freed_raw = 0
     for d in (cfg.inbox_dir, cfg.processed_dir, cfg.failed_dir, cfg.downloads_dir):
         p = d / filename
         try:
             if p.exists():
-                freed += p.stat().st_size
+                freed_raw += p.stat().st_size
                 p.unlink()
             Path(str(p) + ".fetchmeta").unlink(missing_ok=True)
         except OSError as e:
             log.warning("forget %s: could not delete %s: %s", filename, p, e)
+    info = store.forget_file(filename)
     _rebuild_rollups_best_effort(store, filename)
-    info["bytes"] = freed
-    log.info("forgot %s: %d rows and %.1f MB removed", filename, info["rows"], freed / 1e6)
+    info["bytes"] += freed_raw
+    log.info("forgot %s: %d rows and %.1f MB removed", filename, info["rows"], info["bytes"] / 1e6)
     return info
 
 

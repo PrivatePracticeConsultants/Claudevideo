@@ -84,9 +84,9 @@ just the `activate` line** (the `source .venv/bin/activate` or
 `.venv\Scripts\Activate.ps1` step) — you don't reinstall.
 
 > **Optional but recommended — the headless-browser helper.** Some payers
-> (Molina, Kaiser, Aetna, Harvard Pilgrim) build their file lists with
-> JavaScript, and the app can read those pages automatically if you run this
-> once after the install above:
+> (Molina, Kaiser, Aetna, Harvard Pilgrim, Regence) build their file lists
+> with JavaScript, and the app can read those pages automatically if you run
+> this once after the install above:
 >
 > ```
 > playwright install chromium
@@ -139,10 +139,12 @@ Any of these link types work:
   `https://mrfdata.hmhs.com`. The app lifts every file link off the page and
   queues them all.
 
-The queue table under the box shows each link's plain-language status
-(`queued` → `downloading` with a MB progress bar → `analyzing` → `done` with a
-row count). Files process **one at a time in the background** — you can paste
-a whole state's worth of links and walk away. Each file's download is deleted
+The queue table under the box shows each link's status
+(`queued` → `downloading` with a MB progress bar → `ingesting` → `done` with a
+row count; index links show `expanding` while their file lists unpack). Files
+process **a few at a time in the background** (3 with the shipped settings —
+the `parallel_ingests:` knob in `config/mrfx.yaml`) — you can paste a whole
+state's worth of links and walk away. Each file's download is deleted
 after its rates are extracted, so your disk doesn't fill up. If you close the
 app mid-download, it picks up where it left off on restart.
 
@@ -171,8 +173,8 @@ aren't part of that comparison.)
   master index,
   Centene/Ambetter's all-states page, the Blue KC / BCBS Michigan /
   BCBS Louisiana hubs, and UnitedHealthcare's national portal —
-  Molina/Kaiser/Aetna/Harvard Pilgrim need the one-time Playwright install
-  from Step 3's note, and Anthem needs confirm_over_gb: 12). Each one
+  Molina/Kaiser/Aetna/Harvard Pilgrim/Regence need the one-time Playwright
+  install from Step 3's note, and Anthem needs confirm_over_gb: 12). Each one
   expands on its own — expect thousands of files to queue and let it run.
   The same file lists the remaining browser-only portals (Humana, HCSC, Premera…)
   with instructions in the comments. Click **"Show tested
@@ -254,9 +256,9 @@ prompt). They're an alternative to the dashboard buttons.
 | `mrfx preflight <path>` | Inspect a file before ingesting |
 | `mrfx ingest [path]` | Ingest a file or the whole inbox (shows a progress bar) |
 | `mrfx status` | List ingested files and totals |
-| `mrfx export out.csv --cpt 97110 --state MO` | Export a filtered CSV + methodology sidecar |
+| `mrfx export out.csv --cpt 97110 --payer "Aetna"` | Export a filtered CSV + methodology sidecar (state filtering lives in the dashboard and `mrfx outreach`) |
 | `mrfx outreach contacts.csv --state MO --cpt 97110,97140` | Contact/mail-merge CSV |
-| `mrfx forget <filename>` | Erase ONE file's rates + raw copies (names from `mrfx status`) |
+| `mrfx forget <filename> [more…]` | Erase chosen files' rates + raw copies (names from `mrfx status`) |
 | `mrfx reset --confirm` | Clear the analyzed data (keeps your downloaded files) |
 
 ---
@@ -311,18 +313,25 @@ them in one place, grouped by where you'll hit them.
 - **`python3: command not found` on Windows** — use `python` instead.
 - **Port 8377 already in use** — change `port:` in `config/mrfx.yaml` (e.g.
   8400) and restart `mrfx serve`.
+- **`config problem: …`** — a typo in `config/mrfx.yaml` (bad YAML, a
+  non-number port, an unknown `enrichment.mode`, an out-of-range value). The
+  message names the exact setting; fix that line and re-run. Deleting the
+  file entirely runs with safe defaults. Misspelled setting NAMES don't stop
+  the app — they're ignored with a "unknown setting(s)" warning, so check the
+  startup log if a change seems to have no effect.
 - **`a server on port … answered, but it doesn't look like the mrfx
   dashboard`** — some other program is using that port. Stop it, or change
   `port:` in `config/mrfx.yaml` and re-run.
 
 ### Pasted links: statuses you'll see and what to do
 
-- **`download link has expired` / HTTP 403 on a `*.mrf.bcbs.com` link** —
+- **`HTTP 403 — access refused. Usual causes: a signed URL expired…`** —
   Blue plans publish *signed* links that die after days. Don't paste file
   links from those hosts; paste the payer's **index/TOC or page link** (the
   starter list has them) — the app fetches fresh signed links itself.
-- **`this looks like a web page … no file links could be found`** — the page
-  builds its list with JavaScript. Fix: install the headless-browser helper
+- **`This link is a web page, not a data file, and no file links could be
+  found on it`** — the page builds its list with JavaScript. Fix: install
+  the headless-browser helper
   once (`pip install playwright && playwright install chromium`, in your
   venv), then press **retry** on the row. If the message says the helper *is*
   installed but the browser isn't, run just `playwright install chromium`.
@@ -412,6 +421,9 @@ them in one place, grouped by where you'll hit them.
   don't need: Files tab → **remove** button on any row (or
   `mrfx forget <filename>`). It reports the space freed, the dashboards
   update, and re-adding the link later brings the data back.
+- **`this file is being processed right now`** when removing — a file can't
+  be erased mid-parse (the running parse would quietly bring it back). Wait
+  for the row to reach `done` or `failed`, then remove it.
 
 ### Getting help
 

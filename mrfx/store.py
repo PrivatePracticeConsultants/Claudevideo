@@ -604,9 +604,13 @@ class Store:
                 [limit],
             ).fetchall()
             cols = [d[0] for d in con.description]
-        out = []
+        out, seen = [], set()
         for r in rows:
             d = dict(zip(cols, r))
+            if d["id"] in seen:
+                continue  # slices run as separate queries; a row changing
+                # status between them must not render twice in one poll
+            seen.add(d["id"])
             for k in ("added_at", "finished_at"):
                 if d.get(k) is not None:
                     d[k] = str(d[k])
@@ -644,32 +648,39 @@ class Store:
     def revive_skipped_duplicates(self, content_sha: str, failed_id: int) -> int:
         """The in-flight twin this sha's duplicates deferred to has FAILED:
         re-queue them. Their downloads were kept on disk, so they ingest
-        without re-downloading (expired signed URLs don't matter)."""
+        without re-downloading (expired signed URLs don't matter).
+
+        Only kind='duplicate' rows qualify — those are the ones the DEDUP
+        deferred. Rows the USER skipped or forgot share the sha but must
+        never be resurrected behind their back."""
         if not content_sha:
             return 0
         with self.write_lock, self.connect() as con:
             n = con.execute(
                 "SELECT count(*) FROM url_queue WHERE content_sha = ? "
-                "AND status = 'skipped' AND id != ?", [content_sha, failed_id],
+                "AND status = 'skipped' AND kind = 'duplicate' AND id != ?",
+                [content_sha, failed_id],
             ).fetchone()[0]
             if n:
                 con.execute(
                     "UPDATE url_queue SET status = 'queued', "
                     "error = 'the identical link this deferred to failed — "
                     "retrying from the kept download' "
-                    "WHERE content_sha = ? AND status = 'skipped' AND id != ?",
+                    "WHERE content_sha = ? AND status = 'skipped' "
+                    "AND kind = 'duplicate' AND id != ?",
                     [content_sha, failed_id])
         return n
 
     def skipped_duplicate_urls(self, content_sha: str, done_id: int) -> list[str]:
-        """URLs of skipped duplicates of this sha (for cleaning their kept
-        downloads once a twin has ingested successfully)."""
+        """URLs of dedup-deferred duplicates of this sha (for cleaning their
+        kept downloads once a twin has ingested successfully)."""
         if not content_sha:
             return []
         with self.connect() as con:
             rows = con.execute(
                 "SELECT url FROM url_queue WHERE content_sha = ? "
-                "AND status = 'skipped' AND id != ?", [content_sha, done_id],
+                "AND status = 'skipped' AND kind = 'duplicate' AND id != ?",
+                [content_sha, done_id],
             ).fetchall()
         return [r[0] for r in rows]
 
@@ -693,7 +704,8 @@ class Store:
 
     def recover_stuck_urls(self) -> int:
         """Rows left mid-flight by a crash/Ctrl-C go back to queued so the
-        next run resumes them ('fetched' rows simply re-download — safe, and
+        next run resumes them ('fetched' rows whose download + sidecar
+        survived are reused as-is; otherwise they re-download — either way
         the content hash prevents any double ingest). Called when a queue
         worker starts."""
         with self.write_lock, self.connect() as con:
@@ -765,14 +777,26 @@ class Store:
                 "SELECT rows_emitted FROM files WHERE filename = ?", [filename]
             ).fetchone()
             rows = int(row[0] or 0) if row else 0
-            con.execute("DELETE FROM provider_refs WHERE source_file = ?", [filename])
-            con.execute("DELETE FROM files WHERE filename = ?", [filename])
-            con.execute(
-                "UPDATE url_queue SET status = 'skipped', "
-                "error = 'data removed by user — press retry to re-download and re-ingest' "
-                "WHERE filename = ? AND status = 'done'", [filename])
+            # ORDER MATTERS for retryability: the parquet part goes first
+            # (with the view immediately re-registered so readers never see a
+            # dangling glob entry), and the files row is deleted LAST inside
+            # one transaction. If anything fails part-way, the files row
+            # survives — so `forget` can simply be run again — instead of
+            # leaving orphan rates that a missing files row makes unreachable.
             path.unlink(missing_ok=True)
             self._register_views(con)
+            con.execute("BEGIN")
+            try:
+                con.execute("DELETE FROM provider_refs WHERE source_file = ?", [filename])
+                con.execute(
+                    "UPDATE url_queue SET status = 'skipped', "
+                    "error = 'data removed by user — press retry to re-download and re-ingest' "
+                    "WHERE filename = ? AND status = 'done'", [filename])
+                con.execute("DELETE FROM files WHERE filename = ?", [filename])
+                con.execute("COMMIT")
+            except Exception:
+                con.execute("ROLLBACK")
+                raise
         return {"rows": rows, "bytes": freed}
 
     def rebuild_rollups(self) -> None:
@@ -941,6 +965,10 @@ class Store:
                     WHERE tin_is_really_npi AND tin_value IS NOT NULL
                 )
                 WHERE npi > ? AND npi NOT IN (SELECT npi FROM npi_directory)
+                  -- only well-formed 10-digit NPIs: junk ids from messy files
+                  -- always fail at NPPES, sort to the FRONT of every batch,
+                  -- and can wedge enrichment permanently at the same spot
+                  AND regexp_full_match(npi, '[0-9]{10}')
                 ORDER BY npi LIMIT ?
                 """,
                 [after, limit],

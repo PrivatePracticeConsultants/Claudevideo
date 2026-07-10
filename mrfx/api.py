@@ -615,8 +615,15 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         # so it runs in the threadpool instead of blocking the event loop
         from .ingest import forget_file
 
-        if not store.file_status(filename):
+        st = store.file_status(filename)
+        if not st:
             raise HTTPException(404, "no such file in the store")
+        if st.get("status") in ("processing", "queued"):
+            # forgetting mid-parse would silently lose the race: the ingest
+            # keeps reading its open file handle and re-creates every record
+            # minutes after this endpoint returned "forgotten"
+            raise HTTPException(409, "this file is being processed right now — "
+                                     "wait for it to finish, then remove it")
         try:
             info = forget_file(cfg, store, filename)
         except ValueError:

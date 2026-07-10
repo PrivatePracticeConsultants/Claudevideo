@@ -102,7 +102,9 @@ https://www.harvardpilgrim.org/public/machine-readable-files
 # Regence (Cambia — OR / WA / UT / ID; needs Playwright)
 https://www.regence.com/transparency-in-coverage/
 
-# Oscar Health (newest month only — page lifts years of history)
+# Oscar Health (newest month only — deliberately the direct S3 index, NOT the
+# page in known_sources.yaml: the page lifts years of history and needs the
+# headless browser; this URL is bounded and browser-free)
 https://hioscar-cms-tic-us-east-1.s3.amazonaws.com/oscar/{FIRST_OF_MONTH}_oscar_index.json
 
 # Anthem / Elevance national master index — 14 states (set confirm_over_gb: 12 first)
