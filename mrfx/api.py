@@ -251,10 +251,13 @@ def order_sql(sort: str, direction: str) -> str:
     return f"ORDER BY {sort} {direction} NULLS LAST, unit_id ASC, billing_code ASC, modifier_set ASC"
 
 
-# SQL twin of store.looks_like_ssn (slightly broader: over-masking is safe).
+# SQL twin of store.looks_like_ssn (slightly broader: over-masking is safe —
+# for TINs. The length must be 9-digit blocks: TINs/SSNs are 9 digits and a
+# joined list is a multiple of 9, but NPIs are 10 — '[0-9]+' masked every
+# npi-grain unit_id whose NPI happened to start 17/18/19/28/29).
 _MASK_TIN_SQL = """
     CASE WHEN tin_value IS NOT NULL
-              AND regexp_full_match(replace(tin_value, '; ', ''), '[0-9]+')
+              AND regexp_full_match(replace(tin_value, '; ', ''), '([0-9]{9})+')
               AND substr(tin_value, 1, 2) IN
                   ('00','07','08','09','17','18','19','28','29','49',
                    '69','70','78','79','89','96','97')

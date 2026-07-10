@@ -341,3 +341,18 @@ def test_qa_flags_outliers_and_zero_rates(cfg, store):
     shown = client.get("/api/rates").json()["total"]
     hidden = client.get("/api/rates?hide_outliers=1").json()["total"]
     assert shown == 5 and hidden == 3
+
+
+def test_npi_grain_export_does_not_mask_npis(cfg, store):
+    # the SQL mask must be 9-digit-block scoped: 10-digit NPIs beginning
+    # 17/18/19/28/29 were exported as 'MASKED-SSN', destroying identifiers
+    data = innetwork(items=[
+        item("97110", [ (["1712345678"], "43-1234567", "ein", [(40.0, None)]) ]),
+    ])
+    p = make_fixture(cfg.inbox_dir, "npi17.json", data)
+    ingest_file(cfg, store, p)
+    store.rebuild_rollups()
+    client = TestClient(create_app(cfg, store))
+    csv_text = client.get("/api/export.csv?grain=npi").text
+    assert "1712345678" in csv_text
+    assert "MASKED-SSN" not in csv_text
