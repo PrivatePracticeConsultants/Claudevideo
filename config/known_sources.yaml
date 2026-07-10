@@ -266,13 +266,14 @@ sources:
     notes: JavaScript portal — open in a browser and paste the file links.
 
   - name: Humana
-    url: https://developers.humana.com/patient-cost-transparency/documentation
+    url: https://developers.humana.com/cost-transparency
     kind: portal
     queueable: false
-    verified: "2026-07-08"
+    verified: "2026-07-09"
     notes: >-
-      File list is served through Humana's developer portal/API (endpoint was
-      erroring when tested). Open in a browser and paste the file links.
+      Developer portal (old /patient-cost-transparency URL now 404s; the
+      /cost-transparency page was returning 502 when re-tested). Open in a
+      browser and paste the file links.
 
   - name: HCSC (BCBS Illinois / Texas / New Mexico / Oklahoma / Montana)
     url: https://www.bcbsil.com/provider/standards/standard-requirements/caa/caa-tic
@@ -285,10 +286,18 @@ sources:
 
   - name: CareFirst (Maryland / DC / N. Virginia)
     url: https://individual.carefirst.com/individuals-families/mandates-policies/machine-readable-file.page
-    kind: portal
-    queueable: false
-    verified: "2026-07-08"
-    notes: JavaScript page — no static links to lift; paste file links from a browser.
+    kind: page
+    queueable: true
+    verified: "2026-07-09"
+    notes: >-
+      The download buttons hide the real Azure blob URLs in data-key
+      attributes (with spaces in the filenames) — the app lifts and encodes
+      them. Verified cascade: page -> 7 indexes (ppo/hmo/par/cfa/ncas/
+      netlease/FEHBP) -> 435 files. CareFirst slices its book by
+      billing-code range, so many small files legitimately ingest 0 rows;
+      the therapy codes landed in FEHBP hmo16 (2,727,332 rows) and 08C0
+      parts 28/33 (10,222 + 1,925 rows). Schema is v1.2.0 — ingested
+      best-effort, rates verified present.
 
   - name: BCBS Tennessee
     url: https://www.bcbst.com/tcr
@@ -335,11 +344,13 @@ sources:
     notes: JavaScript page (probed — no static links); paste file links from a browser.
 
   - name: Regence (Cambia — OR / WA / UT / ID)
-    url: https://www.regence.com/transparency-in-coverage
+    url: https://www.regence.com/transparency-in-coverage/
     kind: portal
     queueable: false
-    verified: "2026-07-08"
-    notes: JavaScript page (probed — no static links); paste file links from a browser.
+    verified: "2026-07-09"
+    notes: >-
+      JavaScript page (re-probed with trailing slash — no static links);
+      paste file links from a browser.
 
   - name: Kaiser Permanente
     url: https://healthy.kaiserpermanente.org/front-door/machine-readable
@@ -349,18 +360,23 @@ sources:
     notes: JavaScript page (probed — no static links); paste file links from a browser.
 
   - name: Oscar Health
-    url: https://www.hioscar.com/machine-readable-files
+    url: https://www.hioscar.com/transparency-in-coverage-files/oscar
     kind: portal
     queueable: false
-    verified: "2026-07-08"
-    notes: JavaScript page (probed — no static links); paste file links from a browser.
+    verified: "2026-07-09"
+    notes: >-
+      JavaScript page (old /machine-readable-files URL now 404s; re-probed
+      the new path — no static links); paste file links from a browser.
 
   - name: Molina Healthcare
-    url: https://www.molinahealthcare.com/members/common/en-US/abtmolina/compliance/machinereadablefiles.aspx
+    url: https://www.molinahealthcare.com/marketplace/wa/en-us/About/compinfo/PricingTransparency
     kind: portal
     queueable: false
-    verified: "2026-07-08"
-    notes: JavaScript page (probed — no static links); paste file links from a browser.
+    verified: "2026-07-09"
+    notes: >-
+      Per-state marketplace pages (swap the state code in the URL, e.g.
+      /marketplace/fl/, /marketplace/nv/). JavaScript-rendered — no static
+      links; paste file links from a browser.
 
   - name: BCBS North Carolina
     url: https://www.bluecrossnc.com/about-us/policies-and-best-practices/transparency-coverage-mrf
@@ -443,11 +459,14 @@ sources:
       the Wyoming/Nebraska/Western-NY trials.
 
   - name: HMSA (BCBS Hawaii)
-    url: https://hmsa.com/machine-readable-files/
+    url: https://hmsa.com/help-center/transparency-in-coverage-machine-readable-files/
     kind: portal
     queueable: false
-    verified: "2026-07-08"
-    notes: JavaScript page (probed — no static MRF links); paste file links from a browser.
+    verified: "2026-07-09"
+    notes: >-
+      Old URL 404s; the help-center page links a private S3 bucket
+      (hmsa-cost-transparency-west2 — listing denied) with no static file
+      links. Paste file links from a browser.
 
   - name: Blue Shield of California
     url: https://www.blueshieldca.com/en/home/get-to-know-blue-shield/machine-readable-files
@@ -459,11 +478,14 @@ sources:
       Anthem Blue Cross CA is covered by the Anthem/Elevance national index.
 
   - name: Excellus BCBS (upstate New York)
-    url: https://www.excellusbcbs.com/transparency-in-coverage
+    url: https://news.excellusbcbs.com/developer-info/transparency-coverage-mrf
     kind: portal
     queueable: false
-    verified: "2026-07-08"
-    notes: JavaScript page (probed — no static links); paste file links from a browser.
+    verified: "2026-07-09"
+    notes: >-
+      Old URL 404s; the developer-info page hands off to a HealthSparq
+      portal (excellusbcbs.healthsparq.com, JavaScript SPA). Paste file
+      links from a browser.
 
   - name: Capital Blue Cross (central Pennsylvania)
     url: https://www.capbluecross.com/wps/portal/cap/company/legal/machine-readable-files

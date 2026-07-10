@@ -81,13 +81,15 @@ https://www.cigna.com/legal/compliance/machine-readable-files
 # BCBS South Carolina (+ InStil Health)
 https://www.southcarolinablues.com/web/public/brands/universal/transparency-in-coverage/?branding=sc
 
+# CareFirst (Maryland / DC / N. Virginia)
+https://individual.carefirst.com/individuals-families/mandates-policies/machine-readable-file.page
+
 # ---- portals that need a browser (open, click through, paste the file links) ----
 #   Anthem / Elevance national master index (14 states):  https://antm-pt-prod-dataz-nogbd-nophi-us-east1.s3.amazonaws.com/anthem/{FIRST_OF_MONTH}_anthem_index.json.gz
 #   Optum Health (transparency portal):  https://transparency-in-coverage.optum.com/
 #   Aetna / CVS Health:  https://health1.aetna.com/app/public/#/one/insurerCode=AETNACVS_I&brandCode=ALICFI/machine-readable-transparency-in-coverage
 #   Humana:  https://developers.humana.com/patient-cost-transparency/documentation
 #   HCSC (BCBS Illinois / Texas / New Mexico / Oklahoma / Montana):  https://www.bcbsil.com/provider/standards/standard-requirements/caa/caa-tic
-#   CareFirst (Maryland / DC / N. Virginia):  https://individual.carefirst.com/individuals-families/mandates-policies/machine-readable-file.page
 #   Universal Health Services (UHS — hospital system employer plan):  https://uhs.com/transparency-in-coverage-machine-readable-files/
 #   Wellmark BCBS (Iowa / South Dakota):  https://www.wellmark.com/transparency-in-coverage
 #   Horizon BCBS New Jersey:  https://www.horizonblue.com/transparency-in-coverage

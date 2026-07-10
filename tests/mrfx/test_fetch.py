@@ -502,6 +502,22 @@ def test_unknown_json_link_container_lifts_urls(cfg, store, server, http_root):
     assert recs[dedup_key(f"{server}/rates.json.gz")]["status"] == "done"   # rates landed
 
 
+def test_page_lifts_data_attr_links_with_spaces(cfg):
+    # CareFirst-style: the real URL sits in data-key="..." behind an
+    # href="javascript:void(0)" button, and the filename contains spaces —
+    # both must be handled (space -> %20) or the index is invisible
+    from mrfx.fetch import extract_links_from_page
+
+    page = cfg.inbox_dir / "carefirst_like.html"
+    page.write_text(
+        '<html><body><table><tr><td><a class="dwd" href="javascript:void(0);" '
+        'data-key="https://blobs.example.com/mrf-files/2026-07-06_carefirst ppo_index.json">'
+        "Download</a></td></tr></table></body></html>"
+    )
+    links = extract_links_from_page(page, "https://individual.carefirst.com/x.page", 50)
+    assert links == ["https://blobs.example.com/mrf-files/2026-07-06_carefirst%20ppo_index.json"]
+
+
 def test_page_lifts_quoted_relative_json_config_paths(cfg, store, server, http_root):
     # Cigna-style: the page embeds its manifest as a quoted JS string, not a
     # link — "/static/mrf/latest.json" must still be found and followed

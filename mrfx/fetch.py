@@ -496,9 +496,11 @@ def probe_blobs_api(cfg: MrfxConfig, page_url: str) -> list[str]:
 
 _HTML_SNIFF_RE = re.compile(rb"<\s*(!doctype\s+html|html|head|body)[\s>]", re.I)
 # file links inside href/src attributes — relative ones included (directory
-# listings like mrfdata.hmhs.com use href="2026-06-25_...json.gz" with no path)
+# listings like mrfdata.hmhs.com use href="2026-06-25_...json.gz" with no
+# path). data-* attributes too: CareFirst puts the real URL in data-key="..."
+# behind an href="javascript:void(0)" download button.
 _ATTR_LINK_RE = re.compile(
-    r"""(?:href|src)\s*=\s*["'](?P<u>[^"']+?\.json(?:\.gz)?(?:\?[^"']*)?)["']""",
+    r"""(?:href|src|data-[a-z0-9_-]+)\s*=\s*["'](?P<u>[^"']+?\.json(?:\.gz)?(?:\?[^"']*)?)["']""",
     re.I,
 )
 # absolute file URLs anywhere else in the page (inlined JS/config blobs)
@@ -526,7 +528,8 @@ def looks_like_html(path: Path) -> bool:
 # web-app plumbing that ends in .json but is never payer data — a Gatsby
 # build's own preload/manifest links would otherwise be queued as "files"
 _FRAMEWORK_ASSET_RE = re.compile(
-    r"(/page-data/|/manifest\.json|\.webmanifest|/favicon|/asset-manifest|/app-data\.json)", re.I
+    r"(/page-data/|/manifest\.json|\.webmanifest|/favicon|/asset-manifest|/app-data\.json"
+    r"|/jcr:content/)", re.I  # AEM page components (BCBS NC embeds them as .json)
 )
 
 
@@ -543,7 +546,9 @@ def extract_links_from_page(path: Path, base_url: str, max_files: int) -> list[s
     out: list[str] = []
     for pattern in (_ATTR_LINK_RE, _ABS_LINK_RE, _REL_JSON_RE):
         for m in pattern.finditer(text):
-            u = urljoin(base_url, m.group("u"))
+            # payer filenames legitimately contain spaces ("carefirst ppo_
+            # index.json" on Azure) — encode them or the request is invalid
+            u = urljoin(base_url, m.group("u").strip()).replace(" ", "%20")
             if not u.lower().startswith(("http://", "https://")):
                 continue
             if _FRAMEWORK_ASSET_RE.search(u):
