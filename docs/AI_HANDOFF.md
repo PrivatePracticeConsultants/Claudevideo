@@ -55,10 +55,15 @@ Two codebases live in this repo:
    the file (Blues cross-host each other's files — expected, documented);
    every export carries a methodology sidecar; SSN-pattern TINs are masked.
 5. **Idempotency / crash-resume.** Kill anything at any time: `.part`
-   downloads resume via HTTP Range; in-flight queue rows re-queue on restart
-   (`recover_stuck_urls`); re-ingest atomically replaces that file's part —
-   never duplicates rows. Content-sha dedup skips byte-identical files from
-   other domains.
+   downloads resume via HTTP Range guarded by an If-Range validator (`.val`
+   sidecar — republished content restarts instead of splicing); in-flight
+   queue rows AND files-table 'processing' rows recover on restart
+   (`recover_stuck_urls` / `recover_stuck_files`); re-ingest atomically
+   replaces that file's part — never duplicates rows. Content-sha dedup
+   skips byte-identical files from other domains, asymmetric on id so two
+   parallel twins never both proceed (or both skip). `mrfx reset` clears
+   the url_queue with the data — done-row anchors must not outlive the
+   store they anchor.
 6. **Rollup scalability.** `rates_by_tin` / `tin_directory` are materialized
    (few groups); `rates_dedup` MUST remain a live view — at NPI×rate grain a
    30M-row store means a ~30M-group aggregation whose spill exceeded 27 GB of
@@ -66,6 +71,13 @@ Two codebases live in this repo:
    (cannot spill); DuckDB `memory_limit` is 40% RAM clamped [2,12] GB.
    Rollup rebuilds are batched (`ROLLUP_BATCH_FILES`), give up after 3
    failures (raw data is safe), and never run per-file during queue grinds.
+   Above ~15M raw rows they build in hash-partitioned slices (the partition
+   column is in every GROUP BY key — slice-union ≡ single shot) inside ONE
+   transaction: a mid-slice failure rolls back to the previous complete
+   tables, never a partial one. Each connection caps `max_temp_directory_
+   size` at 80% of free disk so a rollup can't starve unrelated work.
+   A rollup failure after the parquet part is durable does NOT fail the
+   file (`_rebuild_rollups_best_effort`).
 
 ## Step 4 — Know the URL pipeline states
 
@@ -93,11 +105,16 @@ queued/failed (a done row anchors content-sha dedup and is untouchable).
 
 ## Step 6 — Extending to a new payer (the usual task)
 
-1. Probe: is it a static page with `.json` hrefs (works already — Centene), a
-   CMS TOC/index URL (works — Highmark/BCBS-MS), a Sapphire/Gatsby hub (works
-   — `*.sapphiremrfhub.com`), a blobs-API React portal (works — UHC/Optum), or
-   JS-with-signed-links (Cigna/Aetna class — needs a human paste, catalog it
-   as `portal`)?
+1. Probe: is it a static page with `.json`/`.zip` hrefs or quoted config
+   paths (works — Centene, Cigna's /static manifest, BCBS NC's signed TOC,
+   CareFirst's data-key attributes), a CMS TOC/index URL (works — Highmark,
+   BCBS-MS, Anthem's 10.5 GB master index), a Sapphire/Gatsby hub (works —
+   `*.sapphiremrfhub.com`), a blobs-API React portal (works — UHC/Optum), a
+   JS-rendered page (works WITH Playwright — Molina, Kaiser, Aetna/health1,
+   Harvard Pilgrim's click-gated list, Regence, Oscar; `mrfx/render.py`
+   renders, clicks consent/"view list" controls, and harvests DOM + API
+   responses), or genuinely interactive/firewalled (Premera, HCSC, UHS —
+   catalog as `portal` with honest notes)?
 2. If a new *platform* pattern: add a probe/expander in `fetch.py` following
    `crawl_gatsby_hub` / `probe_blobs_api` as templates — wire into
    `process_url_record`'s unknown-HTML branch (extract → gatsby → blobs →
@@ -112,7 +129,7 @@ queued/failed (a done row anchors content-sha dedup and is untouchable).
 
 ## Step 7 — Test and verify like the history did
 
-- `.venv/bin/python -m pytest tests/ -q` — the suite (97+ tests) runs real
+- `.venv/bin/python -m pytest tests/ -q` — the suite (116+ tests) runs real
   end-to-end drains against local HTTP servers, including parallel mode,
   kill-recovery semantics, dedup, guards, and messy-file parser cases
   (`tests/mrfx/test_messy_files.py` documents payer quirks: header-at-EOF,
@@ -125,11 +142,22 @@ queued/failed (a done row anchors content-sha dedup and is untouchable).
   `nohup`, guard driver scripts with `if __name__ == "__main__"` (spawn
   workers re-import `__main__`).
 
+## Step 7b — The source catalog is the map
+
+`config/known_sources.yaml` holds 33 auto-queueable sources + ~20 probed
+portals, each with verified dates and real row counts — treat it as ground
+truth for "does this source work and what should it yield". The largest
+verified single-file ingests: Cigna CHLIC 243.4M rows, Aetna CA 83.7M, UHC
+Charter 617 64.0M (8.85 GB gz), NC PPO 23.7M, upper-midwest zip 19.8M.
+Guards verified live: 35.2 GB refused by confirm_over_gb, 25.1 GB by the
+disk-space guard, both with actionable messages.
+
 ## Step 8 — Known limitations / next frontiers
 
-- Cigna/Aetna/HCSC/Kaiser-class portals generate signed links in JS — no
-  hands-free path without per-payer browser automation (deliberately not
-  built; catalog guides the user to paste).
+- Renderer click-through handles single-click gates ("View Plan List");
+  multi-step forms (state pickers, searches) are still browser-only —
+  Premera, HCSC, IBX, Capital, several state Blues. Excellus publishes
+  allowed-amounts only (no negotiated rates) — cataloged, not a bug.
 - The UHC blobs listing caps at `max_toc_files` (alphabetical) — deeper reach
   needs a raised cap or targeted pastes; state network files follow the
   `*-Provider-Network_*EXGN_in-network` naming.

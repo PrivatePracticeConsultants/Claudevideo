@@ -276,77 +276,120 @@ prompt). They're an alternative to the dashboard buttons.
 
 ---
 
-## Troubleshooting
+## Debug FAQ — what it says, what it means, what to do
+
+Every message the app shows is designed to tell you the fix. This FAQ collects
+them in one place, grouped by where you'll hit them.
+
+### Setup problems
 
 - **`mrfx: command not found`** — the virtual environment isn't active. Re-run
-  the `activate` line from Step 3 (you'll see `(.venv)` in the prompt), then try
-  again.
-- **`python3: command not found` on Windows** — use `python` instead of
-  `python3`.
-- **Port 8377 already in use** — change `port:` in `config/mrfx.yaml` to another
-  number (e.g. 8400) and restart `mrfx serve`.
-- **A pasted link says "download link has expired"** — many payers (all the
-  Blue plans on `*.mrf.bcbs.com`) publish *signed* links that stop working
-  after a few days. Go back to the payer's TOC/index page, paste **that** link
-  instead, and the app will fetch fresh file links itself.
-- **A pasted link says "this looks like a web page"** — some payer portals
-  (e.g. Aetna's) build their file list with JavaScript, so there are no real
-  links in the page for the app to lift. Two options: (1) install the
-  optional headless-browser helper once —
+  the `activate` line from Step 3 (you'll see `(.venv)` in the prompt).
+- **`python3: command not found` on Windows** — use `python` instead.
+- **Port 8377 already in use** — change `port:` in `config/mrfx.yaml` (e.g.
+  8400) and restart `mrfx serve`.
+- **`a server on port … answered, but it doesn't look like the mrfx
+  dashboard`** — some other program is using that port. Stop it, or change
+  `port:` in `config/mrfx.yaml` and re-run.
 
-  ```
-  .venv/bin/pip install playwright && .venv/bin/playwright install chromium
-  ```
+### Pasted links: statuses you'll see and what to do
 
-  — and press retry: the app will load the page like a real browser and
-  find the links itself (this is how Molina works out of the box). Or (2)
-  open the page in your browser, click through to the actual `.json.gz` /
-  TOC links, and paste those.
-- **A link shows "allowed-amounts (no rates)"** — that file is the payer's
-  out-of-network billed-charge report, which contains no negotiated rates.
-  Skipping it is correct; look for the `in-network-rates` files instead.
-- **A link shows "duplicate (already have it)"** — the downloaded file was
-  byte-for-byte identical to one already loaded (Blue plans host copies of
-  each other's national files). Nothing was lost; the data is already in your
-  database under the first link.
-- **The payer name doesn't match the state I pasted** — normal. State indexes
-  list every file their members might need, including other Blue plans'
-  national files. The app names each file by the payer written *inside* it,
-  which is the accurate attribution.
-- **A pasted file is huge and was refused** — files bigger than the safety
-  limit (default 5 GB compressed) are held back so a typo can't fill your
-  disk. If you really want it: open `config/mrfx.yaml`, change
-  `confirm_over_gb: 5.0` to a number bigger than the file (e.g. `12`),
-  save, and press **retry** on that row. Verified live on an 8.85 GB
-  UnitedHealthcare file — after the retry it downloads and processes
-  normally; just expect multi-GB files to take hours, not minutes (the
-  progress bar shows exactly where it is).
-- **Not enough disk space** — the app checks before downloading and tells
-  you how much a file needs; free up space and press retry. Partial
-  downloads are kept and **resume where they stopped**, so an interrupted
-  8 GB download doesn't start over.
-- **It's processing several files at once — is that OK?** Yes: that's
-  `parallel_ingests` in `config/mrfx.yaml` (shipped as 3, automatically
-  reduced on smaller machines). Set it to 1 if you want strictly one file
-  at a time.
-- **A file shows `NEEDS COMPANION`** — that payer split its provider list into a
-  separate reference file; download and drop that in too, and the app
+- **`download link has expired` / HTTP 403 on a `*.mrf.bcbs.com` link** —
+  Blue plans publish *signed* links that die after days. Don't paste file
+  links from those hosts; paste the payer's **index/TOC or page link** (the
+  starter list has them) — the app fetches fresh signed links itself.
+- **`this looks like a web page … no file links could be found`** — the page
+  builds its list with JavaScript. Fix: install the headless-browser helper
+  once (`pip install playwright && playwright install chromium`, in your
+  venv), then press **retry** on the row. If the message says the helper *is*
+  installed but the browser isn't, run just `playwright install chromium`.
+  Still nothing after that? The page needs multi-step human clicks — open it
+  in your browser, right-click the real `.json/.json.gz/.zip` links, Copy
+  Link Address, and paste those.
+- **`file is X GB — larger than the confirm_over_gb safety limit`** — a
+  legitimately huge file. If you want it: raise `confirm_over_gb:` in
+  `config/mrfx.yaml` (e.g. `12`) and press retry — the partial download was
+  kept, so it resumes rather than restarting.
+- **`not enough free disk space for this file`** — the file needs more room
+  than you have. Free space (empty `data/processed/`, other downloads) and
+  press retry.
+- **`connection closed early (X of Y MB) — retrying from where it stopped`**
+  — a flaky network or server. The app retries and resumes automatically; if
+  it ultimately fails, press retry later — it continues from the same byte.
+- **`this TOC lists only out-of-network allowed-amounts files`** (skipped) —
+  that payer publishes no negotiated rates at this link (e.g. Excellus).
+  Correct behavior; nothing to fix.
+- **`identical to a file already ingested … skipped as duplicate`** — Blue
+  plans host copies of each other's national files. Your data already has
+  it; nothing was lost.
+- **`out-of-network allowed-amounts file (no negotiated rates) — skipped`** —
+  the link was a billed-charges report, not a rate file. Normal.
+- **`scanned: none of the target billing codes appear in this file`** — the
+  file is real but contains none of your CPT codes (payers slice files by
+  specialty). Normal — the queue moves on. If you expected codes, check
+  `codes.cpt_codes` in `config/mrfx.yaml`.
+- **A row shows 0 rows but says `done`** — same reason as above, or the
+  file's slice has no therapy codes. The Files tab QA panel shows what WAS
+  in the file.
+- **The payer name doesn't match the state I pasted** — normal and correct.
+  Blue plans host copies of each other's national files (an Idaho index can
+  carry an Arkansas book); the app attributes every file by the payer named
+  INSIDE it, which is the truthful label.
+- **`HTTP 404 — file not found`** — monthly links go stale. If it's a dated
+  URL early in the month, the payer may not have posted yet — retry in a few
+  days (the app already tries the previous month automatically). Otherwise
+  re-open the payer's page from the Sources tab for the current link.
+- **`HTTP 403 — access refused` even as a browser** — a few sites (UHS)
+  firewall all automation. Download the file in your browser and drop it
+  into `data/inbox/` — the app takes it from there.
+- **`unexpected worker error`** — a genuine bug or a shape the app has never
+  seen. The row's error text and `mrfx serve`'s terminal output have the
+  details; press retry once, and if it repeats, keep that URL aside and
+  report it (see the AI handoff doc — an assistant can debug from exactly
+  that output).
+
+### Files you dropped into the inbox
+
+- **`This file uses provider references. You must also drop in the matching
+  provider-reference file`** — the payer splits NPIs into a companion file.
+  Find it next to the rate file on the payer's page (usually named
+  `provider-reference` or similar), drop it in the inbox too, and the app
   re-processes automatically.
-- **Names show as "TIN 12345…" instead of practice names** — name lookup
-  (NPPES) runs in the background after ingest; give it a few minutes, or it may
-  be off in config (`enrichment: api`).
-- **It's slow / big file** — that's expected for multi-GB files; the Files tab
-  progress bar shows it working through in chunks. You can keep using the
-  dashboard on already-loaded data meanwhile.
+- **`File is not a zip file` / `unreadable`** — the download is corrupt or
+  isn't really an MRF. Re-download it; if it persists, the payer's file is
+  bad (it happens) — note it and move on.
+- **Stuck at `processing` after a crash/restart** — the app now flips those
+  to `failed` on startup and re-ingests on the next scan automatically. If
+  you see one frozen while the app is running, that file is genuinely being
+  parsed (big files take minutes to hours — the progress bar shows chunks).
+- **`interrupted by a restart — will re-ingest on the next scan`** — exactly
+  what it says; no action needed.
 
----
+### The queue and long runs
 
-## Important, honest caveats (these matter if numbers reach a client)
+- **I pressed Ctrl-C — is my work lost?** No. Restart `mrfx serve` (or re-run
+  `mrfx add`): downloads resume mid-file, interrupted files re-queue, and
+  nothing is double-ingested.
+- **The queue is huge and slow** — expected for whole-payer grinds (UHC and
+  Anthem queue thousands of files; parsing runs ~30s per uncompressed GB).
+  Raise `parallel_ingests:` in `config/mrfx.yaml` (3 is a good default on a
+  4-core machine), leave it running overnight, and skip rows you don't need.
+- **Rates look doubled for one payer** — check the Files tab for two ingests
+  of the same book under different filenames from before the dedup fix; if
+  so, `mrfx reset --confirm` and re-queue (dedup now catches mirrors even in
+  parallel).
+- **The dashboard says analytics are stale / a rollup failed** — the raw
+  data is safe; analytics refresh on the next successful rebuild (usually
+  the next file). If it keeps failing, you're low on disk — free some.
+- **The whole machine ran out of disk mid-grind** — deletes still work:
+  clear `data/processed/`, old exports, anything large; the app's guards
+  keep 2 GB headroom and cap its own temp usage, and every interrupted
+  piece resumes.
 
-- A published negotiated **rate is per billing code, not per visit**, and not
-  proof a practice actually collects it. The app keeps everything granular so
-  you model rather than guess; benchmark reports state this.
-- Payers publish "ghost" rates for codes a practice never bills — benchmarks
-  stay within the therapy code set to reduce that, and say so in the footer.
-- Outreach and benchmark reports are meant to go to **a practice about its own
-  market position**, not to coordinate pricing between competitors.
+### Getting help
+
+- `mrfx status` summarizes everything the store knows.
+- Each failed row's error text is written to be actionable — read it first.
+- For anything beyond this FAQ, hand `docs/AI_HANDOFF.md` plus the row's
+  error text to an AI assistant — that document tells it exactly how this
+  codebase works and how to debug it safely.
