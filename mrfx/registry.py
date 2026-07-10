@@ -49,15 +49,23 @@ class Registry:
     # -- normalization --------------------------------------------------------
 
     def _apply_override(self, card: dict) -> dict:
-        ov = (self.overrides.get("entries") or {}).get(card["key"])
-        if ov and ov.get("mrf_url"):
+        entries = self.overrides.get("entries")
+        if not isinstance(entries, dict):
+            return card  # hand-edited overrides file with a broken shape
+        ov = entries.get(card["key"])
+        if isinstance(ov, dict) and ov.get("mrf_url"):
             card = {**card, "mrf_url": ov["mrf_url"], "verified": True,
                     "verified_locally": True, "confirmed_at": ov.get("confirmed_at")}
         return card
 
     def national(self) -> list[dict]:
         cards = []
-        for entry in self.data.get("national_payers", []) or []:
+        raw = self.data.get("national_payers") or []
+        entries = raw if isinstance(raw, list) else []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                log.warning("payer registry: skipping malformed national entry %r", entry)
+                continue
             cards.append(self._apply_override({
                 "key": f"national:{entry.get('name')}",
                 "name": entry.get("name"),
@@ -69,10 +77,16 @@ class Registry:
             }))
         return cards
 
+    def _by_state(self) -> dict:
+        raw = self.data.get("bcbs_by_state") or {}
+        return raw if isinstance(raw, dict) else {}
+
     def state(self, code: str) -> list[dict]:
         code = code.upper()
-        entry = (self.data.get("bcbs_by_state") or {}).get(code)
-        if not entry:
+        entry = self._by_state().get(code)
+        if not isinstance(entry, dict):
+            if entry:
+                log.warning("payer registry: state %s entry is malformed — ignoring it", code)
             return []
         licensees = _as_list(entry.get("licensee"))
         parents = _as_list(entry.get("parent"))
@@ -93,7 +107,7 @@ class Registry:
         return cards
 
     def states(self) -> list[str]:
-        return sorted((self.data.get("bcbs_by_state") or {}).keys())
+        return sorted(self._by_state().keys())
 
     def elevance_note(self) -> str | None:
         pattern = self.data.get("elevance_master_index_pattern")
@@ -109,7 +123,9 @@ class Registry:
     def save_override(self, key: str, mrf_url: str) -> dict:
         path = self.cfg.registry_overrides_path
         data = _load_yaml(path)
-        entries = data.setdefault("entries", {})
+        if not isinstance(data.get("entries"), dict):
+            data["entries"] = {}  # heal a hand-edited broken shape instead of TypeError
+        entries = data["entries"]
         entries[key] = {
             "mrf_url": mrf_url,
             "confirmed_at": dt.datetime.now(dt.timezone.utc).isoformat(),

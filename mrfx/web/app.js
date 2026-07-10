@@ -701,7 +701,8 @@ function renderBenchmark(out, bench, opp) {
       <tbody>${rows}</tbody></table></div>
     ${oppHtml}
     <div class="bench-note">${esc(bench.basis_note)} Ghost rates: a published rate does not mean a
-    peer bills that code; benchmarks stay within the discipline-scoped code set. A published rate
+    peer bills that code — scoping the market to a discipline or code list mitigates this
+    (the market definition above shows which filters were actually applied). A published rate
     is not proof a peer collects it — this is directional market positioning.</div>`;
 }
 
@@ -770,6 +771,7 @@ async function loadFiles() {
       <td>${qaLine(f.qa)}</td>
       <td>${warn}${f.error ? `<div class="err-text">${esc(f.error)}</div>` : ""}</td>
       <td class="sub">${f.finished_at ? esc(f.finished_at.slice(0, 19)) : ""}</td>
+      <td>${inflight ? "" : `<button class="btn forget-btn" title="erase this file's rates and free its disk space (re-add its link or file to get it back)" data-forget="${esc(f.filename)}">remove</button>`}</td>
     </tr>`;
   }).join("");
   $$("[data-confirm]", body).forEach((b) =>
@@ -777,6 +779,19 @@ async function loadFiles() {
       b.disabled = true;
       const r = await fetch(`/api/files/${encodeURIComponent(b.dataset.confirm)}/confirm`, { method: "POST" });
       if (!r.ok) alert((await r.json().catch(() => ({}))).detail || `confirm failed (HTTP ${r.status})`);
+      loadFiles();
+    }));
+  $$("[data-forget]", body).forEach((b) =>
+    b.addEventListener("click", async () => {
+      const name = b.dataset.forget;
+      if (!confirm(`Remove ${name}?\n\nThis erases its rates from the database and deletes its raw copies to free disk space. You can get it back any time by re-adding its link or file.`)) return;
+      b.disabled = true;
+      const r = await fetch(`/api/files/${encodeURIComponent(name)}`, { method: "DELETE" });
+      if (!r.ok) {
+        alert((await r.json().catch(() => ({}))).detail || `remove failed (HTTP ${r.status})`);
+        b.disabled = false;
+        return;
+      }
       loadFiles();
     }));
   loadStats();

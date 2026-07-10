@@ -36,7 +36,7 @@ Two codebases live in this repo:
 | `mrfx/known_sources.py` + `config/known_sources.yaml` | The catalog of live-verified payer entry points with results; `{FIRST_OF_MONTH}` placeholder resolution. `config/starter_links.txt` is the paste-ready export of it. |
 | `mrfx/api.py` | FastAPI JSON API + static SPA. `/api/rates` (tin/npi/entity grains, server-side paging), benchmarks, exports (+methodology sidecars), outreach CSV, `/api/urls*`, `/api/known-sources`. |
 | `mrfx/web/` | Vanilla-JS SPA (no CDN deps): Explorer, Code comparison, Benchmark, Files (paste-links card + queue), Sources. |
-| `mrfx/cli.py` | `mrfx serve / add / preflight / ingest / status / export / outreach / reset`. `add` hands URLs to a running server, else drains locally. |
+| `mrfx/cli.py` | `mrfx serve / add / preflight / ingest / status / export / outreach / forget / reset`. `add` hands URLs to a running server, else drains locally. `forget <filename>` (or DELETE `/api/files/{name}`, the Files-tab remove button) erases one file's rates + raw copies and flips its done url_queue row to 'skipped' so the dedup anchor never outlives the data; rollups rebuild after. |
 
 ## Step 3 — Internalize the invariants (violating these breaks real users)
 

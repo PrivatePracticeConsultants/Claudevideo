@@ -806,6 +806,18 @@ def fetch_url_record(cfg: MrfxConfig, store: Store, rec: dict) -> bool:
     Returns False on failure (row marked failed, worker keeps going)."""
     url_id, url = rec["id"], rec["url"]
     dest = cfg.downloads_dir / filename_for(url)
+    keep_p = _meta_path(dest)
+    if dest.exists() and keep_p.exists():
+        # complete bytes already on disk (a kept duplicate download whose
+        # twin failed, or a prior prefetch). NEVER re-download here: the
+        # signed URL may have expired, and a terminal 403 would delete the
+        # only copy of the bytes this row was revived to use.
+        try:
+            meta = json.loads(keep_p.read_text())
+            store.update_url(url_id, content_sha=meta["sha"], status="fetched")
+            return True
+        except (ValueError, KeyError, OSError):
+            keep_p.unlink(missing_ok=True)  # corrupt sidecar — fresh download below
     try:
         content_sha, final_url = download(
             cfg, url, dest,
@@ -1218,7 +1230,16 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
                         rebuild_rollups=False)
                 except Exception:  # noqa: BLE001 — a bad URL must never kill the worker
                     log.exception("url worker: unexpected error on %s", rec.get("url"))
-                    store.update_url(rec["id"], status="failed", error="unexpected worker error")
+                    try:
+                        store.update_url(rec["id"], status="failed", error="unexpected worker error")
+                        # duplicates may have deferred to this row while it
+                        # was 'ingesting' — free them to retry
+                        _revive_twins(store, rec.get("content_sha") or "", rec["id"])
+                    except Exception:  # noqa: BLE001 — even the recovery write can
+                        # hit a locked store; if it does, the row is unstuck by
+                        # recover_stuck_urls on the next start — but this THREAD
+                        # must survive or the whole queue stalls
+                        log.exception("url worker: could not record the failure; continuing")
                 with state:
                     processed += 1
                     if ok:

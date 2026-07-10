@@ -49,13 +49,24 @@ UPLOAD_LIMIT_BYTES = 1 << 30  # browser uploads capped at 1 GB (§5.4)
 
 OUTLIER_RULE = "hide rows >5x or <0.2x of the code's median within the current filter"
 
+_SSN_PREFIXES = ("('00','07','08','09','17','18','19','28','29','49',"
+                 "'69','70','78','79','89','96','97')")
+
+# the no-name fallback label must never surface a raw SSN-pattern TIN — it is
+# rendered as display_name in the UI, CSV exports, and outreach ORG_NAME
+_TIN_LABEL_SQL = (
+    "'TIN ' || CASE WHEN regexp_full_match(t.tin_value, '[0-9]{9}') "
+    f"AND substr(t.tin_value, 1, 2) IN {_SSN_PREFIXES} "
+    "THEN 'MASKED-SSN' ELSE t.tin_value END"
+)
+
 # ---------------------------------------------------------------------------
 # grain relations — uniform column set across entity / tin / npi
 # ---------------------------------------------------------------------------
 
-_TIN_REL = """
+_TIN_REL = f"""
     SELECT coalesce(em.entity_name, td.display_name, nn.org_name,
-                    'TIN ' || t.tin_value) AS display_name,
+                    {_TIN_LABEL_SQL}) AS display_name,
            t.tin_value AS unit_id, t.tin_value,
            em.entity_name IS NOT NULL AS is_mapped_entity,
            t.tin_is_really_npi,
@@ -251,32 +262,56 @@ def order_sql(sort: str, direction: str) -> str:
     return f"ORDER BY {sort} {direction} NULLS LAST, unit_id ASC, billing_code ASC, modifier_set ASC"
 
 
-# SQL twin of store.looks_like_ssn (slightly broader: over-masking is safe —
-# for TINs. The length must be 9-digit blocks: TINs/SSNs are 9 digits and a
-# joined list is a multiple of 9, but NPIs are 10 — '[0-9]+' masked every
-# npi-grain unit_id whose NPI happened to start 17/18/19/28/29).
-_MASK_TIN_SQL = """
-    CASE WHEN tin_value IS NOT NULL
-              AND regexp_full_match(replace(tin_value, '; ', ''), '([0-9]{9})+')
-              AND substr(tin_value, 1, 2) IN
-                  ('00','07','08','09','17','18','19','28','29','49',
-                   '69','70','78','79','89','96','97')
-         THEN 'MASKED-SSN' ELSE tin_value END AS tin_value
-"""
+def _mask_tin_sql(col: str) -> str:
+    """SQL twin of store.mask_tin, applied PER ELEMENT of a single TIN or a
+    '; '-joined list. (An earlier version checked only the first element's
+    prefix, so an entity of [EIN, SSN-pattern] exported the SSN raw.)
+    Lengths must be exactly 9 digits: NPIs are 10 and must never mask."""
+    return (
+        f"CASE WHEN {col} IS NOT NULL THEN "
+        f"array_to_string(list_transform(string_split(CAST({col} AS VARCHAR), '; '), "
+        f"t -> CASE WHEN regexp_full_match(t, '[0-9]{{9}}') "
+        f"AND substr(t, 1, 2) IN {_SSN_PREFIXES} "
+        f"THEN 'MASKED-SSN' ELSE t END), '; ') "
+        f"ELSE NULL END"
+    )
+
+
+def _defuse_sql(expr: str) -> str:
+    """SQL twin of outreach._defuse: a leading =, +, -, @, tab, or CR would
+    execute as a formula when the CSV opens in Excel/Sheets — payer and org
+    names come from third-party files, so prefix a quote. CSV quoting alone
+    does not stop formula execution."""
+    return (f"CASE WHEN regexp_matches(CAST({expr} AS VARCHAR), '^[=+\\-@\\t\\r]') "
+            f"THEN chr(39) || CAST({expr} AS VARCHAR) "
+            f"ELSE CAST({expr} AS VARCHAR) END")
 
 
 def export_select(grain: str, fs: FilterSet, sort: str, direction: str) -> tuple[str, list]:
-    """The one export query (provenance columns per §7A.6)."""
+    """The one export query (provenance columns per §7A.6). Every text column
+    that can carry third-party strings is formula-defused; TIN columns are
+    masked per element first."""
+    d = _defuse_sql
     sql = f"""
-        SELECT payer, {_MASK_TIN_SQL.replace('tin_value', 'unit_id').replace("AS unit_id", "AS unit_id", 1)},
-               display_name, {_MASK_TIN_SQL}, npi_count, tin_count,
-               billing_code, billing_code_type, discipline, is_timed,
-               replace(modifier_set, '|', ';') AS modifiers,
+        SELECT {d('payer')} AS payer,
+               {d(_mask_tin_sql('unit_id'))} AS unit_id,
+               {d('display_name')} AS display_name,
+               {d(_mask_tin_sql('tin_value'))} AS tin_value,
+               npi_count, tin_count,
+               {d('billing_code')} AS billing_code,
+               {d('billing_code_type')} AS billing_code_type,
+               discipline, is_timed,
+               {d("replace(modifier_set, '|', ';')")} AS modifiers,
                negotiated_rate, rate_min, rate_max, rate_variants,
-               negotiated_type, is_dollar_rate, billing_class,
-               replace(service_code_set, '|', ';') AS service_codes,
-               file_month, last_updated_on, schema_version, source_count,
-               source_files
+               {d('negotiated_type')} AS negotiated_type,
+               is_dollar_rate,
+               {d('billing_class')} AS billing_class,
+               {d("replace(service_code_set, '|', ';')")} AS service_codes,
+               file_month,
+               {d('last_updated_on')} AS last_updated_on,
+               {d('schema_version')} AS schema_version,
+               source_count,
+               {d('source_files')} AS source_files
         FROM ({rel_sql(grain, fs)}) {order_sql(sort, direction)}
     """
     return sql, fs.params
@@ -287,12 +322,13 @@ def methodology_text(cfg: MrfxConfig, store: Store, grain: str, fs: FilterSet,
     with store.connect() as con:
         files = con.execute(
             "SELECT filename, payer, substr(coalesce(last_updated_on, ''), 1, 7), "
-            "last_updated_on FROM files WHERE status = 'done' ORDER BY filename"
+            "last_updated_on FROM files WHERE status = 'done' "
+            "AND file_type = 'in_network' ORDER BY filename"
         ).fetchall()
     return "\n".join([
         f"MRF Explorer v{__version__} export methodology — view: {view}",
         f"Generated: {dt.datetime.now(dt.timezone.utc).isoformat()}",
-        f"Grain: {grain} (one row per billing_code x {grain} x modifier-set x class x POS-set x month)",
+        f"Grain: {grain} (one row per payer x billing_code x {grain} x modifier-set x class x POS-set x month)",
         f"Filters: {json.dumps(fs.described, default=str)}",
         f"Sort: {sort} {direction}",
         "Dedup rule: distinct negotiated facts per grain tuple; a TIN/entity rate is the "
@@ -301,7 +337,11 @@ def methodology_text(cfg: MrfxConfig, store: Store, grain: str, fs: FilterSet,
         "Non-dollar negotiated_type rows (percentage, per diem) are excluded when "
         f"dollar_rates_only is true (currently: {fs.described.get('dollar_rates_only')}).",
         "SSN-pattern TINs are masked in every export.",
-        f"Source files ingested: {'; '.join(f'{f[0]} ({f[1]}, month {f[2]}, updated {f[3]})' for f in files) or 'none'}",
+        "Per-row provenance: source_files names ONE representative file per row; "
+        "source_count is the number of distinct files behind that row.",
+        "Rate files in the store at export time (the export above draws on the "
+        "subset matching its filters, NOT necessarily all of these): "
+        f"{'; '.join(f'{f[0]} ({f[1]}, month {f[2]}, updated {f[3]})' for f in files) or 'none'}",
         "Caveats: a negotiated rate is not per-visit revenue (timed 15-min units, MPPR, "
         "CQ/CO reductions, sequestration, cost-share); published rates include "
         "ghost rates (contracted-but-never-billed codes); a published rate is not "
@@ -325,7 +365,13 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     registry = Registry(cfg)
     sync_entity_map(cfg, store)
     if cfg.mpfs_path and Path(cfg.mpfs_path).exists():
-        _load_mpfs_csv(store, Path(cfg.mpfs_path).read_bytes(), str(cfg.mpfs_path))
+        try:
+            _load_mpfs_csv(store, Path(cfg.mpfs_path).read_bytes(), str(cfg.mpfs_path))
+        except Exception:  # noqa: BLE001 — a bad anchor CSV must not stop serve
+            logging.getLogger(__name__).exception(
+                "mpfs_path %s could not be loaded — %% -of-Medicare anchors are "
+                "off until the file is fixed (code,locality,non_facility_rate)",
+                cfg.mpfs_path)
 
     # -- rates table ---------------------------------------------------------
 
@@ -562,6 +608,20 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     def files_scan(background: BackgroundTasks):
         background.add_task(scan_inbox, cfg, store)
         return {"status": "scanning"}
+
+    @app.delete("/api/files/{filename}")
+    def files_forget(filename: str):
+        # sync def on purpose: takes the store write lock + a rollup rebuild,
+        # so it runs in the threadpool instead of blocking the event loop
+        from .ingest import forget_file
+
+        if not store.file_status(filename):
+            raise HTTPException(404, "no such file in the store")
+        try:
+            info = forget_file(cfg, store, filename)
+        except ValueError:
+            raise HTTPException(400, "not a plain filename")
+        return {"status": "forgotten", **info}
 
     # -- URL-drop queue (paste links, the app does the rest) -------------------
 
@@ -902,15 +962,25 @@ def _load_mpfs_csv(store: Store, data: bytes, source: str) -> int:
     required = {"code", "non_facility_rate"}
     if not required <= set(fields):
         raise ValueError(f"missing columns {required - set(fields)}")
-    rows = [
-        {
-            "code": row[fields["code"]].strip(),
-            "locality": row.get(fields.get("locality", ""), "") if fields.get("locality") else "",
-            "non_facility_rate": float(row[fields["non_facility_rate"]]),
-        }
-        for row in reader
-        if row.get(fields["code"], "").strip()
-    ]
+    rows = []
+    for i, row in enumerate(reader, start=2):
+        code = (row.get(fields["code"]) or "").strip()
+        if not code:
+            continue
+        rate_raw = row.get(fields["non_facility_rate"])
+        if rate_raw is None or str(rate_raw).strip() == "":
+            # short/truncated rows give None here — float(None) would be a
+            # TypeError that bypasses the caller's clean 422
+            raise ValueError(f"line {i} (code {code}): missing non_facility_rate")
+        try:
+            rate = float(rate_raw)
+        except ValueError:
+            raise ValueError(f"line {i} (code {code}): non-numeric rate {rate_raw!r}")
+        rows.append({
+            "code": code,
+            "locality": (row.get(fields.get("locality", ""), "") or "") if fields.get("locality") else "",
+            "non_facility_rate": rate,
+        })
     return store.load_mpfs(rows, source)
 
 

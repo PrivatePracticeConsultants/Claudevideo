@@ -203,8 +203,14 @@ TIN_DIRECTORY_QUERY = """
     )
     SELECT j.tin_value,
            any_value(r.tin_type)                                    AS tin_type,
+           -- the no-name fallback label must never surface a raw SSN-pattern
+           -- TIN: display_name renders in the UI and every export
            coalesce(any_value(n.org_mode), any_value(n.any_mode),
-                    'TIN ' || j.tin_value)                          AS display_name,
+                    'TIN ' || CASE WHEN regexp_full_match(j.tin_value, '[0-9]{{9}}')
+                                        AND substr(j.tin_value, 1, 2) IN
+                                        ('00','07','08','09','17','18','19','28','29',
+                                         '49','69','70','78','79','89','96','97')
+                                   THEN 'MASKED-SSN' ELSE j.tin_value END) AS display_name,
            CASE WHEN any_value(n.n_orgs) > 0 THEN 'org'
                 ELSE 'individual-billed' END                        AS entity_kind,
            count(DISTINCT j.npi)                                    AS npi_count,
@@ -718,6 +724,31 @@ class Store:
             path.unlink(missing_ok=True)
             with self.connect() as con:
                 self._register_views(con)
+
+    def forget_file(self, filename: str) -> dict:
+        """User-driven per-file erasure: delete this file's rates (its parquet
+        part), its provider references, and its files-table row, so the user
+        can trim the store without a full reset. Any url_queue row that
+        produced the file flips to 'skipped' (never deleted: a surviving
+        'done' row would dedup-away the same bytes forever with no data behind
+        the claim) — its retry button re-downloads if the user wants it back.
+        Returns {rows, bytes} removed. Rollups are the caller's job."""
+        path = self.rates_dir / f"{file_key(filename)}.parquet"
+        freed = path.stat().st_size if path.exists() else 0
+        with self.write_lock, self.connect() as con:
+            row = con.execute(
+                "SELECT rows_emitted FROM files WHERE filename = ?", [filename]
+            ).fetchone()
+            rows = int(row[0] or 0) if row else 0
+            con.execute("DELETE FROM provider_refs WHERE source_file = ?", [filename])
+            con.execute("DELETE FROM files WHERE filename = ?", [filename])
+            con.execute(
+                "UPDATE url_queue SET status = 'skipped', "
+                "error = 'data removed by user — press retry to re-download and re-ingest' "
+                "WHERE filename = ? AND status = 'done'", [filename])
+            path.unlink(missing_ok=True)
+            self._register_views(con)
+        return {"rows": rows, "bytes": freed}
 
     def rebuild_rollups(self) -> None:
         """Materialize the dedup/by-TIN/tin-directory rollups after ingest or

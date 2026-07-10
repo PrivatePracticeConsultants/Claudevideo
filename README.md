@@ -88,8 +88,9 @@ into base rates; KX and 59/XE/XS/XP/XU are preserved and filterable
 - **Point-in-time**: every row carries `file_month`; months accumulate rather than
   overwrite; a month picker pins figures to a publication, and the code view
   shows median-by-month trend.
-- **Provenance**: every export row carries payer, source_files, file_month,
-  last_updated_on, schema_version; every export has a methodology sidecar
+- **Provenance**: every export row carries payer, source_files (one
+  representative file per row — source_count gives the total number of files
+  behind it), file_month, last_updated_on, schema_version; every export has a methodology sidecar
   (`.zip` from the dashboard, `*_methodology.txt` from the CLI) recording
   filters, grain, dedup rule, outlier setting, code set, and app version.
 - **Validation cross-check** (Files view): paste a TIN/NPI + code + a rate you

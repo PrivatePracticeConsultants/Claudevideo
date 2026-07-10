@@ -256,6 +256,7 @@ prompt). They're an alternative to the dashboard buttons.
 | `mrfx status` | List ingested files and totals |
 | `mrfx export out.csv --cpt 97110 --state MO` | Export a filtered CSV + methodology sidecar |
 | `mrfx outreach contacts.csv --state MO --cpt 97110,97140` | Contact/mail-merge CSV |
+| `mrfx forget <filename>` | Erase ONE file's rates + raw copies (names from `mrfx status`) |
 | `mrfx reset --confirm` | Clear the analyzed data (keeps your downloaded files) |
 
 ---
@@ -273,6 +274,28 @@ prompt). They're an alternative to the dashboard buttons.
 - `data/failed/` — files that couldn't be read, with a reason in the Files tab.
 - `data/mrfx_store/` — the analyzed database. Delete this folder (or run
   `mrfx reset --confirm`) to start clean.
+
+### Keeping disk usage small
+
+The big payer files themselves never accumulate: each download is deleted
+automatically the moment its rates are extracted. What persists is only the
+compact analyzed database in `data/mrfx_store/` — roughly **15–20 GB for
+~350 million rate rows** (the raw files behind those rows were several
+terabytes). Three ways to control it:
+
+1. **Choose what goes in.** You don't have to run the whole starter list —
+   paste only the payers you care about, or copy `config/starter_links.txt`
+   and delete lines. On the Sources tab, add payers one at a time.
+2. **Erase per file, whenever you like.** Every row in the Files tab has a
+   **remove** button: it erases that file's rates from the database and
+   deletes any raw copies on disk, and tells you how much it freed. Same
+   thing from the terminal: `mrfx forget <filename>` (get exact filenames
+   from `mrfx status`). Nothing is lost forever — re-paste the link or
+   re-drop the file and it re-ingests.
+3. **Peak-usage note for very large files.** While a big file processes, the
+   download AND its extracted rows exist at once, so free space needs to
+   roughly cover the file's size plus headroom — the app checks this before
+   downloading and refuses with a clear message rather than filling the disk.
 
 ---
 
@@ -385,6 +408,10 @@ them in one place, grouped by where you'll hit them.
   clear `data/processed/`, old exports, anything large; the app's guards
   keep 2 GB headroom and cap its own temp usage, and every interrupted
   piece resumes.
+- **The database itself is bigger than I want** — remove the payer files you
+  don't need: Files tab → **remove** button on any row (or
+  `mrfx forget <filename>`). It reports the space freed, the dashboards
+  update, and re-adding the link later brings the data back.
 
 ### Getting help
 

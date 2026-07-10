@@ -65,6 +65,20 @@ def enrich_via_api(cfg: MrfxConfig, store: Store, stop: threading.Event | None =
                         return done
                     time.sleep(2)
                     continue
+                if "results" not in data:
+                    # NPPES also 200-wraps errors ({"Errors": [...]}, no
+                    # "results" key). That is NOT a dead NPI — writing one
+                    # here would poison it as permanently un-enrichable.
+                    log.warning("NPPES answered 200 without results for %s (%s) — "
+                                "will retry next run", npi,
+                                (data.get("Errors") or ["unknown error"])[0])
+                    consecutive_failures += 1
+                    if consecutive_failures >= 20:
+                        log.warning("NPPES failing persistently — pausing enrichment "
+                                    "until the next run (%d NPIs done)", done)
+                        return done
+                    time.sleep(2)
+                    continue
                 consecutive_failures = 0
                 results = data.get("results") or []
                 if not results:

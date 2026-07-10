@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from .catalog import DEFAULT_CODE_SET
 
 DOLLAR_TYPES = ("negotiated", "fee schedule", "derived")
+
+
+class ConfigFileError(Exception):
+    """config/mrfx.yaml is unreadable or invalid — message tells the user
+    exactly what to fix. Raised instead of a raw traceback so a typo in the
+    one file every user edits never kills the program cryptically."""
 
 
 class CodesConfig(BaseModel):
@@ -18,7 +25,9 @@ class CodesConfig(BaseModel):
 
 
 class EnrichmentConfig(BaseModel):
-    mode: str = "api"  # api | bulk | off
+    # Literal so a typo ("bulck") is a clear config error instead of silently
+    # falling through to API mode and hammering NPPES
+    mode: Literal["api", "bulk", "off"] = "api"
     bulk_csv_path: Path | None = None
 
 
@@ -47,8 +56,8 @@ class MrfxConfig(BaseModel):
     store_dir: Path = Path("data/mrfx_store")
     move_processed: bool = True
     enrichment: EnrichmentConfig = Field(default_factory=EnrichmentConfig)
-    port: int = 8377
-    confirm_over_gb: float = 5.0
+    port: int = Field(default=8377, ge=1, le=65535)
+    confirm_over_gb: float = Field(default=5.0, gt=0)
     # URL-drop ingestion: staging for downloads, and knobs for aggregating many
     # files without filling the disk.
     downloads_dir: Path = Path("data/downloads")
@@ -56,16 +65,16 @@ class MrfxConfig(BaseModel):
     # queue workers parsing files at the same time (each is a separate CPU
     # process; the database is only ever written by the main process). 1 = one
     # file at a time; 2-3 roughly doubles/triples throughput on 4+ cores.
-    parallel_ingests: int = 1
-    max_toc_files: int = 2000              # cap child files enqueued from one TOC
+    parallel_ingests: int = Field(default=1, ge=1)
+    max_toc_files: int = Field(default=2000, ge=1)  # cap child files enqueued from one TOC
     # JavaScript-only portals: when a pasted page yields no static links,
     # render it in headless Chromium and harvest links from the rendered DOM
     # and the page's own API responses. Needs the optional Playwright install
     # (pip install playwright && playwright install chromium); silently
     # skipped when unavailable.
     render_js: bool = True
-    download_timeout_seconds: float = 900.0
-    download_retries: int = 4
+    download_timeout_seconds: float = Field(default=900.0, gt=0)
+    download_retries: int = Field(default=4, ge=0)
     registry_path: Path = Path("config/payer_registry.yaml")
     registry_overrides_path: Path = Path("config/registry_overrides.yaml")
     known_sources_path: Path = Path("config/known_sources.yaml")
@@ -103,5 +112,33 @@ def load_mrfx_config(path: str | Path = "config/mrfx.yaml") -> MrfxConfig:
             "(store: data/mrfx_store, inbox: data/inbox)", p
         )
         return MrfxConfig()
-    raw = yaml.safe_load(p.read_text()) or {}
-    return MrfxConfig.model_validate(raw)
+    try:
+        raw = yaml.safe_load(p.read_text(encoding="utf-8", errors="replace")) or {}
+    except yaml.YAMLError as e:
+        raise ConfigFileError(
+            f"{p} is not valid YAML: {e}\nFix the file (or delete it to run "
+            "with defaults) and re-run."
+        ) from e
+    except OSError as e:
+        raise ConfigFileError(f"could not read {p}: {e}") from e
+    if not isinstance(raw, dict):
+        raise ConfigFileError(
+            f"{p} must be a mapping of settings (key: value), not "
+            f"{type(raw).__name__}. Fix the file (or delete it to run with "
+            "defaults) and re-run."
+        )
+    try:
+        cfg = MrfxConfig.model_validate(raw)
+    except ValidationError as e:
+        lines = "; ".join(
+            f"{'.'.join(str(x) for x in err['loc'])}: {err['msg']}" for err in e.errors()
+        )
+        raise ConfigFileError(f"{p} has invalid settings — {lines}") from e
+    unknown = set(raw) - set(MrfxConfig.model_fields)
+    if unknown:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "%s: unknown setting(s) ignored: %s — check for typos", p,
+            ", ".join(sorted(unknown)))
+    return cfg

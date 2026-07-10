@@ -274,6 +274,43 @@ def test_two_pass_keeps_scalar_provider_references(cfg, store, monkeypatch):
     assert "1111111111" in npis  # embedded ref 101, cited as a scalar
 
 
+def test_forget_file_erases_data_and_frees_disk(cfg, store):
+    # user-controlled per-file erasure: rates gone, raw copies gone, other
+    # files untouched, and the file re-ingests cleanly if re-added later
+    from mrfx.ingest import forget_file
+
+    p1 = drop(cfg, "innetwork_mixed.json", gz=True)
+    scan_inbox(cfg, store)
+    keep = make_fixture(cfg.inbox_dir, "keep.json",
+                        json.loads((FIXTURES / "innetwork_mixed.json").read_text()))
+    scan_inbox(cfg, store)
+    total = len(rates(store))
+    assert total > 0 and store.file_status(p1.name)
+
+    info = forget_file(cfg, store, p1.name)
+    assert info["rows"] > 0 and info["bytes"] > 0
+    assert store.file_status(p1.name) is None
+    remaining = rates(store)
+    assert remaining and all(r["source_file"] == "keep.json" for r in remaining)
+    # raw copies gone everywhere the app keeps them
+    for d in (cfg.inbox_dir, cfg.processed_dir, cfg.failed_dir, cfg.downloads_dir):
+        assert not (d / p1.name).exists()
+    # rollups rebuilt: still serving data, none of it from the forgotten file
+    with store.connect() as con:
+        assert con.execute("SELECT count(*) FROM rates_by_tin").fetchone()[0] > 0
+        assert con.execute(
+            "SELECT count(*) FROM rates_by_tin WHERE source_files = ?", [p1.name]
+        ).fetchone()[0] == 0
+    # path traversal never reaches the unlink calls
+    with pytest.raises(ValueError):
+        forget_file(cfg, store, "../evil")
+    # and the same file re-ingests cleanly afterward
+    drop(cfg, "innetwork_mixed.json", gz=True)
+    scan_inbox(cfg, store)
+    assert len(rates(store)) == total
+    assert store.file_status(p1.name)["status"] == "done"
+
+
 def test_reset_clears_url_queue(cfg, store):
     store.enqueue_url("https://x.example/rates.json.gz", "https://x.example/rates.json.gz")
     store.reset()

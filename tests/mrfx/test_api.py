@@ -110,7 +110,8 @@ def test_export_zip_has_methodology_sidecar(client):
     names = z.namelist()
     assert any(n.endswith("_methodology.txt") for n in names)
     method = z.read([n for n in names if n.endswith(".txt")][0]).decode()
-    assert "Filters" in method and "ghost rates" in method and "Source files" in method
+    assert "Filters" in method and "ghost rates" in method
+    assert "Rate files in the store at export time" in method  # honest source list
 
 
 def test_files_view_surfaces_skips_and_qa(cfg, store):

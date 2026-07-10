@@ -105,6 +105,8 @@ main { max-width: 1480px; margin: 0 auto; padding: 20px 24px 80px; }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 .btn.primary:hover { filter: brightness(1.08); color: #fff; }
 .btn:disabled { opacity: 0.5; cursor: default; }
+.forget-btn { padding: 2px 8px; font-size: 11.5px; color: var(--muted); }
+.forget-btn:hover { color: var(--critical); border-color: color-mix(in srgb, var(--critical) 45%, transparent); }
 
 /* ---------- summary strip ---------- */
 .summary {

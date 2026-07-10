@@ -225,6 +225,14 @@ def compute_benchmark(store: Store, subject: str, market: dict) -> dict:
             " [assistant rows INCLUDED by explicit toggle]" if include_assistant else ""
         ) + (
             " [non-dollar rows INCLUDED by explicit toggle]" if include_non_dollar else ""
+        ) + (
+            # both escape hatches are API-reachable; the note must never
+            # claim a basis the query didn't apply
+            " [ALL modifier rows included: market.base_only=false]"
+            if market.get("base_only", True) is False else ""
+        ) + (
+            " [all billing classes included: market.billing_class='']"
+            if not market.get("billing_class", "professional") else ""
         ),
     }
 
@@ -272,7 +280,10 @@ def compute_opportunity(benchmark: dict, volumes: dict[str, float],
         "assumptions": (
             f"Gap computed as (p{target} − subject rate) × owner-supplied annual units, "
             f"floored at $0 per code; conservative band at p{conservative_percentile}. "
-            "Rates from the pinned as-of month, base-modifier basis. "
+            # the basis must echo what the benchmark actually ran with — an
+            # unconditional "base-modifier basis" here was false whenever the
+            # include_assistant / base_only toggles were used
+            f"Rates from the pinned as-of month. {benchmark.get('basis_note', BASIS_NOTE)} "
             "Negotiated rate ≠ collections — MPPR, cost-share, denials and "
             "sequestration sit between rate and cash."
         ),
@@ -287,10 +298,15 @@ def compute_opportunity(benchmark: dict, volumes: dict[str, float],
 def methodology_footer(store: Store, benchmark: dict) -> str:
     market = benchmark["market"]
     with store.connect() as con:
-        files = con.execute(
-            "SELECT filename, payer, last_updated_on FROM files WHERE status = 'done' "
-            "AND file_type = 'in_network' ORDER BY filename"
-        ).fetchall()
+        # scope the source list to the market's payers when the market is
+        # payer-scoped — a single-payer report must not claim every payer's
+        # files as its sources
+        payers = market.get("payers") or []
+        q = ("SELECT filename, payer, last_updated_on FROM files WHERE status = 'done' "
+             "AND file_type = 'in_network' ")
+        if payers:
+            q += f"AND payer IN ({', '.join('?' for _ in payers)}) "
+        files = con.execute(q + "ORDER BY filename", payers).fetchall()
     lines = [
         f"Generated {dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} by MRF Explorer v{__version__}.",
         f"As-of month: {market.get('month')}. Peer basis: {benchmark['peer_set']}.",
@@ -299,12 +315,17 @@ def methodology_footer(store: Store, benchmark: dict) -> str:
         "Dedup rule: one row per (payer, TIN, code, modifier-set, billing class, "
         "place-of-service set, month); a TIN's rate is the median of its distinct "
         "published values (variants flagged).",
-        f"Source files: {'; '.join(f'{f[0]} ({f[1]}, {f[2]})' for f in files) or 'none'}.",
+        "Rate files in the store matching the market's payer scope (the "
+        "benchmark draws on the subset matching the full market definition): "
+        f"{'; '.join(f'{f[0]} ({f[1]}, {f[2]})' for f in files) or 'none'}.",
         GHOST_RATE_NOTE,
         COLLECTION_NOTE,
     ]
     if benchmark.get("mpfs_loaded"):
-        lines.append(f"% of Medicare uses the loaded MPFS extract: {benchmark.get('mpfs_source')}.")
+        lines.append(
+            "% of Medicare anchor: the MEDIAN non-facility rate across all "
+            f"localities in the loaded MPFS extract ({benchmark.get('mpfs_source')}) — "
+            "not your specific locality's fee schedule.")
     return "\n".join(lines)
 
 

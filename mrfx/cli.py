@@ -33,7 +33,11 @@ def _watcher_loop(cfg: MrfxConfig, store: Store, stop: threading.Event) -> None:
     import watchfiles
 
     log.info("watching %s", cfg.inbox_dir)
-    scan_inbox(cfg, store)  # pick up anything already sitting there
+    try:
+        scan_inbox(cfg, store)  # pick up anything already sitting there
+    except Exception:  # noqa: BLE001 — a store hiccup on the FIRST scan must not
+        # silently kill the watcher thread before it ever watches
+        log.exception("initial inbox scan failed; watching for changes anyway")
     start_background_enrichment(cfg, store)
     try:
         for _changes in watchfiles.watch(cfg.inbox_dir, stop_event=stop, step=1000):
@@ -95,7 +99,12 @@ def cmd_add(cfg: MrfxConfig, args) -> int:
     here until the queue is drained."""
     urls = list(args.urls or [])
     if args.file:
-        urls += [ln.strip() for ln in Path(args.file).read_text().splitlines() if ln.strip()]
+        try:
+            text = Path(args.file).read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            print(f"could not read --file {args.file}: {e}")
+            return 1
+        urls += [ln.strip() for ln in text.splitlines() if ln.strip()]
     urls = [u for u in urls if not u.startswith("#")]
     if args.known:
         from .known_sources import load_known_sources
@@ -153,6 +162,12 @@ def cmd_add(cfg: MrfxConfig, args) -> int:
         print(f"a server on port {cfg.port} is running but didn't accept the links ({e}). "
               "Not adding locally while it may own the database — check the dashboard.")
         return 1
+    except (_httpx.InvalidURL, ValueError) as e:
+        # a malformed HTTP_PROXY/HTTPS_PROXY env var surfaces here — say so
+        # instead of a traceback (downloads would hit the same wall anyway)
+        print(f"could not make an HTTP request at all ({e}). If HTTP_PROXY or "
+              "HTTPS_PROXY is set, check its value.")
+        return 1
 
     from .fetch import add_urls, run_queue
 
@@ -181,8 +196,18 @@ def cmd_add(cfg: MrfxConfig, args) -> int:
             print(f"  FAILED  {rec['url'][:90]}\n          → {rec['error']}")
     if cfg.enrichment.mode != "off" and processed:
         print("looking up practice names (NPPES)...")
-        run_enrichment(cfg, store)
+        _run_enrichment_best_effort(cfg, store)
     return 0
+
+
+def _run_enrichment_best_effort(cfg: MrfxConfig, store: Store) -> None:
+    """Name lookups are a bonus pass AFTER the ingest already succeeded — a
+    bad bulk CSV or NPPES hiccup must not end the command with a traceback."""
+    try:
+        run_enrichment(cfg, store)
+    except Exception as e:  # noqa: BLE001
+        print(f"name enrichment hit a problem ({e}) — your rates are saved; "
+              "names fill in on the next run")
 
 
 def cmd_preflight(cfg: MrfxConfig, args) -> int:
@@ -251,7 +276,7 @@ def cmd_ingest(cfg: MrfxConfig, args) -> int:
         print(line)
     if cfg.enrichment.mode != "off" and any(r.get("status") == "done" for r in results):
         print("enriching NPI names...")
-        run_enrichment(cfg, store)
+        _run_enrichment_best_effort(cfg, store)
     return 0 if all(r["status"] in ("done", "pending_confirmation") for r in results) else 1
 
 
@@ -337,6 +362,23 @@ def cmd_outreach(cfg: MrfxConfig, args) -> int:
     return 0
 
 
+def cmd_forget(cfg: MrfxConfig, args) -> int:
+    """Erase chosen files' data (rates + raw copies) without touching the
+    rest of the store — the user-controlled counterpart to `reset`."""
+    from .ingest import forget_file
+
+    store = Store(cfg.store_dir)
+    rc = 0
+    for name in args.filenames:
+        if not store.file_status(name):
+            print(f"{name}: not in the store (check `mrfx status` for exact filenames)")
+            rc = 1
+            continue
+        info = forget_file(cfg, store, name)
+        print(f"{name}: removed {info['rows']:,} rows, freed {info['bytes'] / 1e6:.1f} MB")
+    return rc
+
+
 def cmd_reset(cfg: MrfxConfig, args) -> int:
     if not args.confirm:
         print("refusing: pass --confirm to clear the store (processed files are kept)")
@@ -387,13 +429,25 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--grain", choices=["entity", "tin"])
     p.add_argument("--base-only", action="store_true", default=True,
                    help="base-modifier rows only (default on)")
+    p = sub.add_parser("forget", help="erase chosen files' rates + raw copies (see `mrfx status` for names)")
+    p.add_argument("filenames", nargs="+")
     p = sub.add_parser("reset", help="clear the store (keeps processed files)")
     p.add_argument("--confirm", action="store_true")
 
     args = ap.parse_args(argv)
     _setup_logging(args.verbose)
-    cfg = load_mrfx_config(args.config)
-    cfg.ensure_dirs()
+    from .config import ConfigFileError
+
+    try:
+        cfg = load_mrfx_config(args.config)
+        cfg.ensure_dirs()
+    except ConfigFileError as e:
+        print(f"config problem: {e}", file=sys.stderr)
+        return 1
+    except OSError as e:
+        print(f"could not create the data directories from {args.config}: {e}\n"
+              "Check the *_dir settings point at usable folder paths.", file=sys.stderr)
+        return 1
     return {
         "serve": cmd_serve,
         "add": cmd_add,
@@ -402,6 +456,7 @@ def main(argv: list[str] | None = None) -> int:
         "status": cmd_status,
         "export": cmd_export,
         "outreach": cmd_outreach,
+        "forget": cmd_forget,
         "reset": cmd_reset,
     }[args.cmd](cfg, args)
 

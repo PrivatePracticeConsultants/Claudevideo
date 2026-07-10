@@ -372,6 +372,33 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
             "ref_groups_skipped": payload["ref_groups_skipped"]}
 
 
+def forget_file(cfg: MrfxConfig, store: Store, filename: str) -> dict:
+    """Erase one ingested file on the user's request: its rates, provider
+    references, files-table row, AND every raw copy on disk (inbox — else the
+    watcher would immediately re-ingest it — processed, failed, downloads).
+    Rollups rebuild afterward so dashboards stop showing the removed rows.
+    Returns {rows, bytes} freed (bytes includes raw copies)."""
+    if Path(filename).name != filename:
+        # filenames come from the API path / CLI args — never let "../x"
+        # reach the unlink calls below
+        raise ValueError("not a plain filename")
+    info = store.forget_file(filename)
+    freed = info["bytes"]
+    for d in (cfg.inbox_dir, cfg.processed_dir, cfg.failed_dir, cfg.downloads_dir):
+        p = d / filename
+        try:
+            if p.exists():
+                freed += p.stat().st_size
+                p.unlink()
+            Path(str(p) + ".fetchmeta").unlink(missing_ok=True)
+        except OSError as e:
+            log.warning("forget %s: could not delete %s: %s", filename, p, e)
+    _rebuild_rollups_best_effort(store, filename)
+    info["bytes"] = freed
+    log.info("forgot %s: %d rows and %.1f MB removed", filename, info["rows"], freed / 1e6)
+    return info
+
+
 def _rebuild_rollups_best_effort(store: Store, name: str) -> None:
     """The parquet part is already durable when this runs: an analytics
     rebuild failing (disk pressure, memory) must NOT fail the file — hours of
