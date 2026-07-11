@@ -10,6 +10,12 @@ Two sibling tools in one repo:
    (`run.py`) — targeted crawler/extractor for the two Missouri BCBS licensees:
    discovers their MRFs, filters to a target NPI set, writes Parquet.
 
+> **AI agents / new engineers:** start with [`CLAUDE.md`](CLAUDE.md) (60-second
+> orientation), then read [`docs/AI_HANDOFF.md`](docs/AI_HANDOFF.md) in full
+> before making any substantive change — it is the authoritative module map,
+> invariant list, and per-payer extension recipe, verified against the code.
+> Non-technical setup lives in [`GETTING_STARTED.md`](GETTING_STARTED.md).
+
 ---
 
 # MRF Explorer — drop-in payer rate dashboard
