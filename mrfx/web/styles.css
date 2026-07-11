@@ -262,6 +262,7 @@ td .rate { font-weight: 650; }
   color: var(--ink-2); font-size: 12.5px;
 }
 .variant-flag { color: #9a6b00; font-weight: 650; cursor: help; }
+.ok-tag { font-size: 10.5px; font-weight: 650; color: var(--good); vertical-align: 1px; }
 .timed-tag { font-size: 10.5px; color: var(--muted); border: 1px solid var(--grid);
   border-radius: 3px; padding: 0 4px; margin-left: 4px; vertical-align: 1px; }
 .disc-tag { display: inline-block; font-size: 10.5px; font-weight: 650; border-radius: 3px;

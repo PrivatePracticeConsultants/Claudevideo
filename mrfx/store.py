@@ -388,6 +388,12 @@ class Store:
                 tin_value VARCHAR PRIMARY KEY,
                 entity_name VARCHAR
             );
+            -- user-verified practice website per tax id (NPPES has no URL field,
+            -- so these are the ONLY confirmed URLs — hand-checked, never guessed)
+            CREATE TABLE IF NOT EXISTS org_websites (
+                tin_value VARCHAR PRIMARY KEY,
+                url VARCHAR
+            );
             CREATE TABLE IF NOT EXISTS peer_sets (
                 name VARCHAR PRIMARY KEY,
                 definition VARCHAR,      -- JSON: mode, filters or tin list
@@ -1246,6 +1252,31 @@ class Store:
         with self.connect() as con:
             return dict(con.execute("SELECT tin_value, entity_name FROM entity_map").fetchall())
 
+    # -- verified websites -------------------------------------------------------
+
+    def org_websites(self) -> dict[str, str]:
+        """TIN -> hand-verified practice URL (NPPES has no website field, so
+        these are the only confirmed URLs)."""
+        with self.connect() as con:
+            return dict(con.execute(
+                "SELECT tin_value, url FROM org_websites WHERE url IS NOT NULL AND url <> ''"
+            ).fetchall())
+
+    def set_org_website(self, tins: list[str], url: str | None) -> None:
+        """Set (or clear, when url is falsy) the verified website for these tax
+        ids. An org's URL is stored on ALL its constituent TINs so it shows on
+        the entity no matter which TIN a later view resolves through."""
+        tins = [t for t in (tins or []) if t]
+        if not tins:
+            return
+        with self.write_lock, self.connect() as con:
+            if url:
+                con.executemany("INSERT OR REPLACE INTO org_websites VALUES (?, ?)",
+                                [[t, url] for t in tins])
+            else:
+                con.executemany("DELETE FROM org_websites WHERE tin_value = ?",
+                                [[t] for t in tins])
+
     # -- peer sets ---------------------------------------------------------------
 
     def save_peer_set(self, name: str, definition: dict) -> None:
@@ -1297,7 +1328,7 @@ class Store:
                     # the queue too: surviving 'done' rows (and their content
                     # hashes) would refuse to re-queue / dedup-away the very
                     # URLs the user re-pastes to rebuild the store they just
-                    # wiped. entity_map stays — that's user configuration.
+                    # wiped. entity_map and org_websites stay — user config.
                     "DELETE FROM url_queue;"
                 )
                 for tbl in ("rates_dedup_tbl", "rates_by_tin_tbl", "tin_directory_tbl"):

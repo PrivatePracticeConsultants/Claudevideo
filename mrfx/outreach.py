@@ -27,8 +27,20 @@ MAX_CODE_COLUMNS = 10
 BASE_HEADERS = [
     "ORG_NAME", "ENTITY_ID", "TINS", "NPI_COUNT", "ENTITY_KIND",
     "PRIMARY_DISCIPLINE", "CITY", "STATE", "ZIP", "ADDRESS", "PHONE",
-    "WEBSITE", "PAYERS", "MONTHS",
+    # WEBSITE = the URL you hand-verified and saved (blank until you do).
+    # WEBSITE_LOOKUP = a ready-made SEARCH link to find/verify one — a starting
+    # point, NOT a claimed official site (NPPES publishes no website field).
+    "WEBSITE", "WEBSITE_LOOKUP", "PAYERS", "MONTHS",
 ]
+
+
+def _lookup_url(name, city, state):
+    from urllib.parse import quote_plus
+    if not name:
+        return ""
+    terms = " ".join(t for t in (f'"{name}"', city or "", state or "",
+                                 "physical therapy") if t).strip()
+    return "https://www.google.com/search?q=" + quote_plus(terms)
 
 
 def _geo_by_tin(store: Store) -> dict[str, dict]:
@@ -117,6 +129,7 @@ def build_outreach_rows(store: Store, rel_sql: str, params: list,
         return round((vals[mid] if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2), 2)
 
     medians = {c: market_median(c) for c in wanted}
+    verified_sites = store.org_websites()
 
     headers = list(BASE_HEADERS)
     for c in wanted:
@@ -142,7 +155,10 @@ def build_outreach_rows(store: Store, rel_sql: str, params: list,
             "ZIP": g.get("zip") or "",
             "ADDRESS": g.get("address") or "",
             "PHONE": g.get("phone") or "",
-            "WEBSITE": "",  # not published in MRF/NPPES data — fill from your own list
+            # verified URL if you saved one for any of this org's tax ids;
+            # otherwise a search link to go find + verify one
+            "WEBSITE": next((verified_sites[t] for t in tin_list if t in verified_sites), ""),
+            "WEBSITE_LOOKUP": _lookup_url(display_name, g.get("city"), g.get("state")),
             "PAYERS": payers or "",
             "MONTHS": months or "",
         }

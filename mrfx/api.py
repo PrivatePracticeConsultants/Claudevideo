@@ -265,6 +265,17 @@ def _qp(request: "Request") -> dict:
     return qp
 
 
+def website_lookup_url(name: str | None, city: str | None, state: str | None) -> str:
+    """A ready-made web SEARCH link for a practice — org name + city + state.
+    NPPES has no website field, so this is a starting point to FIND and verify
+    the real site, never a claimed official URL. The verified URL is whatever
+    the user hand-checks and saves (store.org_websites)."""
+    from urllib.parse import quote_plus
+    terms = " ".join(t for t in (f'"{name}"' if name else "", city or "",
+                                  state or "", "physical therapy") if t).strip()
+    return "https://www.google.com/search?q=" + quote_plus(terms) if name else ""
+
+
 def grain_of(qp: dict, cfg: MrfxConfig, store: Store) -> str:
     # Entity grain rolls TINs up by the organization name their NPIs resolve to
     # in NPPES — this works with OR without a manual entity_map.yaml; the map
@@ -485,6 +496,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 member_npis = _dicts(con.execute(
                     "SELECT * FROM npi_directory WHERE npi = ?", [unit_id]))
                 tins = []
+                tin_list = []
             else:
                 if grain == "tin":
                     tin_list = [unit_id]  # unit_id IS the tax id
@@ -524,6 +536,13 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 [unit_id],
             ))
         variance = [r for r in rows if (r.get("rate_variants") or 1) > 1]
+        # website: the user-verified URL (if any of this org's TINs has one) +
+        # a lookup link to find/verify one. Compute BEFORE masking tin_value.
+        sites = store.org_websites()
+        website = next((sites[t] for t in tin_list if t in sites), None) if grain != "npi" else None
+        geo_row = (tins[0] if tins else (member_npis[0] if member_npis else {}))
+        website_lookup = website_lookup_url(rows[0]["display_name"],
+                                            geo_row.get("city"), geo_row.get("state"))
         for t in tins:
             t["tin_value"] = mask_tin(t["tin_value"])
         return {
@@ -531,6 +550,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             "display_name": rows[0]["display_name"],
             "rates": _mask_row_tins(rows), "tins": tins, "npis": member_npis,
             "chart": chart, "variants": len(variance),
+            "website": website, "website_lookup": website_lookup,
+            "website_tins": tin_list if grain != "npi" else [],
         }
 
     @app.get("/api/code/{code}")
@@ -643,6 +664,23 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, "entity name required")
         update_entity(cfg, store, name, body.get("add_tins") or [], body.get("remove_tins") or [])
         return entities_map()
+
+    @app.post("/api/org-website")
+    async def org_website(request: Request):
+        """Save (or clear, when url is empty) the hand-verified website for an
+        org — applied to all the tax ids passed (an entity's constituent TINs),
+        so it shows on the org however a later view resolves it. Accepts only
+        http(s) URLs; anything else is rejected rather than stored as a bad
+        link."""
+        body = await request.json()
+        tins = [str(t).strip() for t in (body.get("tins") or []) if str(t).strip()]
+        url = str(body.get("url") or "").strip()
+        if not tins:
+            raise HTTPException(422, "at least one tax id (tins) is required")
+        if url and not url.lower().startswith(("http://", "https://")):
+            raise HTTPException(422, "website must start with http:// or https:// (or be empty to clear)")
+        store.set_org_website(tins, url or None)
+        return {"saved": bool(url), "tins": len(tins), "url": url}
 
     # -- files -----------------------------------------------------------------------
 

@@ -393,10 +393,23 @@ async function openEntity(grain, unitId) {
   const varianceNote = d.variants
     ? `<div class="disclaimer">⚠ ${d.variants} rate tuple${d.variants === 1 ? "" : "s"} show multiple distinct rates within this entity (see Variants column) — check contract splits before quoting a single number.</div>`
     : "";
+  const canEditSite = d.website_tins && d.website_tins.length;
+  const siteHtml = (d.website || d.website_lookup || canEditSite) ? `
+    <div class="meta" style="margin-top:3px">Website:
+      ${d.website
+        ? `<a href="${esc(d.website)}" target="_blank" rel="noopener">${esc(d.website)}</a> <span class="ok-tag" title="you saved this as a verified URL">✓ verified</span>`
+        : (d.website_lookup
+            ? `<a href="${esc(d.website_lookup)}" target="_blank" rel="noopener">search for it ↗</a> <span class="muted">— no verified URL saved (NPPES has none)</span>`
+            : "none")}
+      ${canEditSite ? `<span style="display:inline-flex;gap:4px;margin-left:8px;vertical-align:middle">
+        <input id="d-website" type="url" placeholder="paste a verified URL" value="${esc(d.website || "")}" style="width:210px;font-size:12px">
+        <button class="btn" id="d-website-save" style="padding:1px 8px;font-size:11.5px">Save</button></span>` : ""}
+    </div>` : "";
   drawer.innerHTML = `
     <button class="close" aria-label="close">×</button>
     <h2>${esc(d.display_name)}</h2>
     <div class="meta">${grain.toUpperCase()} · ${esc(maskTin(unitId))}${payers.length ? " · " + payers.map(esc).join(" / ") : ""}</div>
+    ${siteHtml}
     ${varianceNote}
     <h3>Median dollar rate by code${payers.length > 1 ? " and payer" : ""}</h3>
     ${payers.length > 1 ? `<div class="legend">${payers.slice(0, 2).map((p, i) =>
@@ -423,6 +436,16 @@ async function openEntity(grain, unitId) {
       </table>
     </div>`;
   $(".close", drawer).onclick = closeDrawer;
+  const saveSite = $("#d-website-save", drawer);
+  if (saveSite) saveSite.onclick = async () => {
+    const url = $("#d-website", drawer).value.trim();
+    const r = await fetch("/api/org-website", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tins: d.website_tins, url }),
+    });
+    if (r.ok) openEntity(grain, unitId);  // reload so the verified link shows
+    else alert((await r.json().catch(() => ({}))).detail || "could not save the website");
+  };
   renderBarChart($("#entity-chart"), d.chart, payers.slice(0, 2));
 }
 function closeDrawer() {

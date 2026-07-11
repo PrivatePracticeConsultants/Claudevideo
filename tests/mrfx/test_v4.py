@@ -243,6 +243,40 @@ def test_entity_grain_auto_groups_by_nppes_name_without_a_map(cfg, store):
     assert {n["npi"] for n in detail["npis"]} == {"1111111111", "1222222222"}
 
 
+def test_verified_website_saves_and_flows_to_export(cfg, store):
+    # NPPES has no URL field, so the only trustworthy website is one the user
+    # hand-verifies. It must save against the org's tax ids, show back on the
+    # entity, reject non-http junk, and land in the outreach export; a lookup
+    # SEARCH link is always offered (never a claimed official site).
+    seed_two_tins(cfg, store)
+    for npi in store.unenriched_npis():
+        name = "Regional Rehab Group" if npi in ("1111111111", "1222222222") else "Solo PT"
+        store.save_npi(npi, name, "225100000X", "PT", "KC", "MO", entity_type="NPI-2")
+    store.rebuild_rollups()
+    client = TestClient(create_app(cfg, store))
+    det = client.get("/api/entity/entity/Regional Rehab Group").json()
+    assert det["website"] is None and det["website_lookup"].startswith("https://www.google.com/search")
+    assert set(det["website_tins"]) == {"431000001", "431000002"}
+
+    # non-http is rejected, not stored as a bad link
+    assert client.post("/api/org-website", json={"tins": det["website_tins"], "url": "ftp://x"}).status_code == 422
+    # a real URL saves against every constituent tax id and shows back
+    assert client.post("/api/org-website", json={"tins": det["website_tins"],
+                                                 "url": "https://regionalrehab.example"}).status_code == 200
+    assert client.get("/api/entity/entity/Regional Rehab Group").json()["website"] == "https://regionalrehab.example"
+
+    # and it flows to the outreach CSV (WEBSITE = verified, WEBSITE_LOOKUP = search link)
+    csv = client.get("/api/export/outreach.csv?grain=entity&cpt=97110").text
+    header = csv.splitlines()[0]
+    assert "WEBSITE" in header and "WEBSITE_LOOKUP" in header
+    line = next(l for l in csv.splitlines() if "Regional Rehab Group" in l)
+    assert "https://regionalrehab.example" in line
+
+    # clearing removes it
+    client.post("/api/org-website", json={"tins": det["website_tins"], "url": ""})
+    assert client.get("/api/entity/entity/Regional Rehab Group").json()["website"] is None
+
+
 def test_entity_map_ui_edit_persists_to_yaml(cfg, store):
     seed_two_tins(cfg, store)
     client = TestClient(create_app(cfg, store))
