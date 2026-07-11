@@ -100,6 +100,8 @@ def enrich_via_api(cfg: MrfxConfig, store: Store, stop: threading.Event | None =
                     npi = futs[fut]
                     try:
                         fut.result()
+                    except concurrent.futures.CancelledError:
+                        continue  # cancelled below after abort/stop
                     except (_EnrichFailure, httpx.HTTPError, ValueError) as e:
                         log.warning("NPPES lookup failed for %s: %s — will retry next run", npi, e)
                         with lock:
@@ -112,6 +114,15 @@ def enrich_via_api(cfg: MrfxConfig, store: Store, stop: threading.Event | None =
                         with lock:
                             recent_failures = 0
                             done += 1
+                    if aborted or (stop is not None and stop.is_set()):
+                        # don't grind through the rest of a 200-NPI batch of
+                        # 30s timeouts against a dead NPPES (or a stop request)
+                        # — drop everything not yet running; the ≤`workers`
+                        # in-flight requests finish on their own timeouts
+                        ex.shutdown(wait=False, cancel_futures=True)
+                        break
+            if stop is not None and stop.is_set():
+                break
             if aborted:
                 log.warning("NPPES failing persistently — pausing enrichment until the "
                             "next run (%d NPIs done)", done)

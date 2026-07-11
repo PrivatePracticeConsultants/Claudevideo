@@ -150,17 +150,24 @@ def _launch(pw):
     try:
         return pw.chromium.launch(**kwargs)
     except Exception as e:  # noqa: BLE001 — retry with a discovered binary
-        # Match the "browser was never installed" family of messages loosely:
-        # Playwright's exact wording drifts across versions ("Executable
-        # doesn't exist at …", "please run the following command", "playwright
-        # install"). Being liberal here keeps the auto-download self-heal
-        # working after a Playwright bump instead of silently degrading to
-        # "paste the links yourself". A genuinely different launch failure
-        # (crash, bad flag) won't match and is re-raised.
         msg = str(e).lower()
+        # Missing OS libraries are NOT a missing browser: "Host system is
+        # missing dependencies … playwright install-deps" and the loader's
+        # "error while loading shared libraries: libnss3.so" both need system
+        # packages that downloading Chromium again cannot provide — re-raise so
+        # the generic handler reports the real error instead of a false
+        # "couldn't download the browser".
+        if any(s in msg for s in ("install-deps", "missing dependencies",
+                                  "shared object", "shared librar")):
+            raise
+        # Match the "browser was never installed" family loosely — Playwright's
+        # wording drifts across versions ("Executable doesn't exist at …",
+        # "Please run the following command … playwright install"). Liberal
+        # matching keeps the auto-download self-heal working after a Playwright
+        # bump; a genuinely different launch failure (crash, bad flag) won't
+        # match and is re-raised.
         if not any(s in msg for s in ("doesn't exist", "does not exist",
-                                      "playwright install", "please run",
-                                      "executable", "no such file")):
+                                      "playwright install", "please run")):
             raise
         exe = _find_chromium()
         if exe is not None:

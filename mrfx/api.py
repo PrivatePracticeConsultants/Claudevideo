@@ -144,17 +144,22 @@ class FilterSet:
         def multi(key):
             # Payer names are FREE TEXT and very frequently contain commas
             # ("Blue Cross and Blue Shield of Illinois, a Division of HCSC"), so
-            # they must NOT be comma-split — that shattered one payer into two
-            # non-matching names and the filter returned nothing. They arrive as
-            # repeated params (?payer=a&payer=b); read every value verbatim.
-            # Falls back to a scalar/list on a plain dict (tests, internal calls).
+            # web values must NOT be comma-split — that shattered one payer into
+            # two non-matching names and the filter returned nothing. They
+            # arrive from the dashboard as repeated params (?payer=a&payer=b),
+            # preserved as a LIST by _qp: lists are read verbatim. A bare
+            # STRING (the CLI's --payer flag, older callers) keeps its
+            # historical comma-split so `--payer "Aetna,Cigna"` still means
+            # two payers — CLI users pick names from `mrfx status`, which
+            # shows them exactly as stored.
             if hasattr(qp, "getlist"):
                 return [v.strip() for v in qp.getlist(key) if v and v.strip()]
             v = qp.get(key)
             if not v:
                 return []
-            vs = v if isinstance(v, list) else [v]
-            return [x.strip() for x in vs if x and x.strip()]
+            if isinstance(v, list):
+                return [x.strip() for x in v if x and x.strip()]
+            return split(v)
 
         clauses, params = [], []
         self.described: dict = {}

@@ -240,6 +240,37 @@ def test_higher_id_ingesting_twin_still_dedups_low_id_retry(cfg, store, server, 
         assert con.execute("SELECT count(*) FROM url_queue WHERE status='ingesting'").fetchone()[0] == 1
 
 
+def test_racing_twins_cannot_mutually_defer(cfg, store, server):
+    # Both twins are mid-flight ('ingesting') with identical bytes and race
+    # into the atomic claim. The DEFER must land inside the locked step: the
+    # first claimer flips itself to skipped right there, so the second claimer
+    # no longer sees an in-flight twin and PROCEEDS. A caller-side flip let
+    # both defer to each other — both skipped, nobody ingests, and the revive
+    # hook never fires because neither twin ever fails.
+    add_urls(store, [f"{server}/rates.json.gz?copy=x", f"{server}/rates.json.gz?copy=y"])
+    rows = store.list_urls()
+    a = next(r for r in rows if "copy=x" in r["url"])
+    b = next(r for r in rows if "copy=y" in r["url"])
+    sha = "feed" * 16
+    store.update_url(a["id"], status="ingesting", content_sha=sha)
+    store.update_url(b["id"], status="ingesting", content_sha=sha)
+
+    # A claims first: defers to in-flight B AND is flipped skipped atomically
+    twin = store.claim_content_ingest(sha, a["id"], "in_network", "a.json.gz")
+    assert twin is not None and twin[1] == "ingesting"
+    a2 = next(r for r in store.list_urls() if r["id"] == a["id"])
+    assert a2["status"] == "skipped" and a2["kind"] == "duplicate"
+
+    # B claims second: A is no longer in-flight, so B WINS and ingests
+    assert store.claim_content_ingest(sha, b["id"], "in_network", "b.json.gz") is None
+    b2 = next(r for r in store.list_urls() if r["id"] == b["id"])
+    assert b2["status"] == "ingesting"  # exactly one twin proceeds
+
+    # and if B later fails, skipped A revives (the kept-bytes retry path)
+    store.update_url(b["id"], status="failed", error="ingest crashed: boom")
+    assert store.revive_skipped_duplicates(sha, b["id"]) == 1
+
+
 def test_oversize_guard(cfg, store, server):
     cfg.confirm_over_gb = 64 / 1e9  # 64 bytes — the 128-byte file trips it
     add_urls(store, [f"{server}/big_header.bin"])

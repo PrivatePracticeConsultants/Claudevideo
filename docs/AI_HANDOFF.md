@@ -78,9 +78,11 @@ Two codebases live in this repo:
    badged unverified; drug/allowed-amounts files are skipped with the reason;
    0-row files stay 0 honestly; per-file payer attribution comes from inside
    the file (Blues cross-host each other's files — expected, documented);
-   every export carries a methodology sidecar (whose source list is labeled
-   as store inventory, NOT the filtered export's provenance; source_files is
-   one representative file, source_count the total). SSN-pattern TINs are
+   the export ZIP and every CLI export carry a methodology sidecar (whose
+   source list is labeled as store inventory, NOT the filtered export's
+   provenance; source_files is one representative file, source_count the
+   total); the dashboard's plain-CSV buttons return just the CSV — use the
+   ZIP for anything that needs provenance attached. SSN-pattern TINs are
    masked PER ELEMENT of joined lists and in the no-name fallback labels
    ('TIN MASKED-SSN'), server-side and in the SPA's raw-unit_id sinks
    (maskTin in app.js). Every CSV export formula-defuses third-party text
@@ -124,14 +126,17 @@ Two codebases live in this repo:
    (`recover_stuck_urls` / `recover_stuck_files` — the latter runs at CLI
    startup, before any worker thread, so it never races a live ingest);
    re-ingest atomically replaces that file's part — never duplicates rows.
-   Content-sha dedup skips byte-identical files from other domains; the
-   cheap pre-ingest check uses row-id ordering, but the AUTHORITATIVE guard
-   is `claim_content_ingest` — an atomic check-and-claim under the write
-   lock right before ingest, so exactly one twin per content ingests no
-   matter the order or timing (a retried lower-id row can no longer slip
-   past a higher-id twin mid-ingest). A skip against a still-*ingesting*
-   twin keeps its downloaded bytes and is auto-revived (skipped→queued) if
-   that twin later fails.
+   Content-sha dedup skips byte-identical files from other domains. The
+   cheap pre-ingest check is a done-only FAST PATH (skip before wasting a
+   preflight); ALL in-flight twin arbitration happens in
+   `claim_content_ingest` — an atomic check-and-claim under the write lock
+   right before ingest whose DEFER also lands inside the lock (loser flipped
+   to skipped/duplicate in the same step). Both halves being atomic is what
+   guarantees exactly one twin per content ingests: an unlocked defer let
+   two racing twins each see the other 'ingesting' and BOTH skip — nobody
+   ingests, and the revive hook never fires because neither twin fails. A
+   skip against a still-*ingesting* twin keeps its downloaded bytes and is
+   auto-revived (skipped→queued) if that twin later fails.
    Auto-revival touches ONLY kind='duplicate' skipped rows — rows the user
    skipped or forgot share the sha but must never resurrect behind their
    back. Recovered 'fetched' rows whose download + .fetchmeta sidecar
@@ -166,11 +171,14 @@ Two codebases live in this repo:
    30M-row store means a ~30M-group aggregation whose spill exceeded 27 GB of
    disk when it was materialized. No `string_agg(DISTINCT …)` in rollups
    (cannot spill); DuckDB `memory_limit` is 40% RAM clamped [2,12] GB.
-   Rollup rebuilds are batched (`ROLLUP_BATCH_FILES`), refresh on a 90s
-   staleness timer mid-grind (`ROLLUP_MAX_STALE_SECONDS` — the dashboard
-   reads the rollups, so without this, filters looked broken on data that
-   "was there"), give up after 3
-   failures (raw data is safe), and never run per-file during queue grinds.
+   Rollup rebuilds are batched (`ROLLUP_BATCH_FILES`) and ALSO refresh on a
+   staleness timer mid-grind (the dashboard reads the rollups, so without
+   this, filters looked broken on data that "was there"). The timer counts
+   from rebuild COMPLETION and self-throttles to max(90s, 2x the last
+   rebuild's duration) — counting from the start would make any >90s rebuild
+   permanently "stale" and degenerate into a full rebuild per file, each one
+   holding the write lock. Rebuilds give up after 3 failures (raw data is
+   safe) and never run per-file during queue grinds.
    Above ~15M raw rows they build in hash-partitioned slices (the partition
    column is in every GROUP BY key — slice-union ≡ single shot) inside ONE
    transaction: a mid-slice failure rolls back to the previous complete
@@ -239,7 +247,7 @@ retry button reachable.
 
 ## Step 7 — Test and verify like the history did
 
-- `.venv/bin/python -m pytest tests/ -q` — the suite (134+ tests) runs real
+- `.venv/bin/python -m pytest tests/ -q` — the suite (157+ tests) runs real
   end-to-end drains against local HTTP servers, including parallel mode,
   kill-recovery semantics (crash-flip of stuck files/urls is tested
   directly), the forget HTTP flow, dedup, guards, and messy-file parser cases

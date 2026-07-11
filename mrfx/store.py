@@ -244,6 +244,10 @@ class Store:
         except (ValueError, OSError, AttributeError):
             self._memory_limit_gb = 4
         self._temp_cap_gb: int | None = None  # computed once, in connect()
+        # enrichment_progress scans the full rates view (DISTINCT npi over a
+        # UNION) — far too heavy to run on every 15s dashboard poll of a big
+        # store; cache it briefly ((monotonic, result), see enrichment_progress)
+        self._enrich_progress_cache: tuple[float, dict] | None = None
         with self.write_lock, self.connect() as con:
             self._init_tables(con)
             self._register_views(con)
@@ -293,7 +297,8 @@ class Store:
                 if "lock" not in str(e).lower():
                     raise
                 last_exc = e
-                time.sleep(min(0.2 * (2 ** attempt), 3.0))
+                if attempt < 5:  # no pointless sleep after the final attempt
+                    time.sleep(min(0.2 * (2 ** attempt), 3.0))
         else:
             raise last_exc  # 6 attempts over ~6s — something genuinely holds it
         try:
@@ -641,25 +646,24 @@ class Store:
         return {s: n for s, n in rows}
 
     def find_url_with_same_content(self, content_sha: str, exclude_id: int) -> tuple[str, str] | None:
-        """(url, status) of an already-ingested queue row whose downloaded
-        bytes were identical (Blue plans host copies of each other's national
-        files, so the same file arrives under many domains). None if no match.
+        """(url, status) of a DONE queue row whose downloaded bytes were
+        identical (Blue plans host copies of each other's national files, so
+        the same file arrives under many domains). None if no match.
 
-        'ingesting' twins count too: with parallel workers, two mirror copies
-        can be claimed simultaneously — if only 'done' matched, both would
-        pass this check and the same file would land twice. Only LOWER-id
-        in-flight twins defer this row (asymmetric on purpose: two concurrent
-        twins must not both skip in favor of each other — the lower id always
-        proceeds). If the ingesting twin later fails, the skipped row can be
-        retried from the dashboard."""
+        Deliberately a done-only FAST PATH: it lets a mirror copy skip before
+        wasting a preflight. In-flight ('ingesting') twins are NOT arbitrated
+        here — any unlocked skip decision against an in-flight twin can race
+        that twin's own skip decision and end with BOTH rows skipped and the
+        content never ingested. All in-flight arbitration happens atomically
+        in `claim_content_ingest` right before ingest, which is the
+        authoritative guard."""
         if not content_sha:
             return None
         with self.connect() as con:
             row = con.execute(
                 "SELECT url, status FROM url_queue WHERE content_sha = ? AND id != ? "
-                "AND (status = 'done' OR (status = 'ingesting' AND id < ?)) "
-                "ORDER BY id LIMIT 1",
-                [content_sha, exclude_id, exclude_id],
+                "AND status = 'done' ORDER BY id LIMIT 1",
+                [content_sha, exclude_id],
             ).fetchone()
         return (row[0], row[1]) if row else None
 
@@ -667,21 +671,23 @@ class Store:
                              kind: str | None, filename: str | None) -> tuple[str, str] | None:
         """Atomically decide whether THIS row may ingest its content, done
         right before the ingest under the write lock so the twin-check and the
-        status flip to 'ingesting' are ONE indivisible step.
+        status flip are ONE indivisible step.
 
         Returns (twin_url, twin_status) when a byte-identical twin is already
-        'done' or 'ingesting' and this row must defer; returns None after
-        winning the claim (this row's status is set to 'ingesting' with the
-        given kind/filename).
+        'done' or 'ingesting' — in that case THIS row is flipped to
+        skipped/duplicate (with the explanatory message) INSIDE the same
+        locked step. Returns None after winning the claim (this row's status
+        is set to 'ingesting' with the given kind/filename).
 
-        This is the authoritative dedup guard. Unlike the cheap pre-ingest
-        skip in `find_url_with_same_content`, it does NOT rely on queue-id
-        ordering: because the check and the set happen together under the lock,
-        exactly one twin per content wins no matter the order or timing — which
-        closes the hole where two twins processed concurrently both pass the
-        earlier check, or a lower-id twin arrives late via a retry while a
-        higher-id twin is already ingesting, and the same bytes get ingested
-        twice (inflating source_count)."""
+        Both outcomes must land inside the lock: if the loser were skipped by
+        the caller afterwards, two racing twins could each see the other still
+        'ingesting' and MUTUALLY defer — both skipped, nobody ingests, and
+        revive_skipped_duplicates never fires because neither twin fails.
+        With the defer atomic, the second racer sees the first one 'skipped'
+        (no longer in-flight) and proceeds: exactly one twin per content
+        ingests no matter the order or timing. This also closes the id-order
+        hole where a retried lower-id row slips past a higher-id twin already
+        ingesting and the same bytes land twice (inflating source_count)."""
         with self.write_lock, self.connect() as con:
             if content_sha:
                 row = con.execute(
@@ -691,7 +697,22 @@ class Store:
                     [content_sha, url_id],
                 ).fetchone()
                 if row:
-                    return (row[0], row[1])
+                    twin_url, twin_status = row
+                    plain = twin_url.split("?")[0]
+                    msg = (
+                        "identical to a file already ingested (payers host copies "
+                        f"of each other's files) — skipped as duplicate of {plain}"
+                        if twin_status == "done" else
+                        "identical to a link currently being processed "
+                        f"({plain}) — will retry automatically from the kept "
+                        "download if that one fails"
+                    )
+                    con.execute(
+                        "UPDATE url_queue SET status = 'skipped', kind = 'duplicate', "
+                        "error = ?, finished_at = ? WHERE id = ?",
+                        [msg, dt.datetime.now(dt.timezone.utc), url_id],
+                    )
+                    return (twin_url, twin_status)
             con.execute(
                 "UPDATE url_queue SET status = 'ingesting', kind = ?, filename = ? WHERE id = ?",
                 [kind, filename, url_id],
@@ -893,6 +914,7 @@ class Store:
         enrichment so page queries stay fast. If the build hits the memory
         limit (the DISTINCT aggregates cannot spill to disk), retry once
         single-threaded — per-thread hash tables are the dominant cost."""
+        self._enrich_progress_cache = None  # new rates change the NPI population
         with self.write_lock, self.connect() as con:
             self._register_views(con)  # rates view must see current parts first
             try:
@@ -1091,13 +1113,21 @@ class Store:
             ).fetchall()
         return [r[0] for r in rows]
 
-    def enrichment_progress(self) -> dict:
+    def enrichment_progress(self, max_age_seconds: float = 60.0) -> dict:
         """How far NPI->name enrichment has gotten, for the dashboard banner.
+        Cached for `max_age_seconds`: the two DISTINCT-over-UNION queries scan
+        the full rates parquet view, and the dashboard polls /api/stats every
+        15s — on a national-file store that would make every poll a
+        multi-second I/O storm competing with ingest. Progress moving up to a
+        minute late is invisible to a human; the scans are not.
         `total` counts well-formed NPIs actually referenced by rates (the same
         population enrichment works through); `named` is those NPPES gave a
         real organization/person name. `remaining` drives the 'still working'
         hint so an incomplete state filter reads as 'names still filling in',
         not 'broken'."""
+        cached = self._enrich_progress_cache
+        if cached is not None and (time.monotonic() - cached[0]) < max_age_seconds:
+            return cached[1]
         with self.connect() as con:
             total = con.execute(
                 """
@@ -1124,8 +1154,10 @@ class Store:
                 """
             ).fetchone()
         remaining = max(0, total - enriched)
-        return {"total": total, "enriched": enriched, "named": named,
-                "remaining": remaining}
+        result = {"total": total, "enriched": enriched, "named": named,
+                  "remaining": remaining}
+        self._enrich_progress_cache = (time.monotonic(), result)
+        return result
 
     def available_states(self) -> list[str]:
         """Distinct US states present in the enriched directory — used to fill
@@ -1172,6 +1204,7 @@ class Store:
                  address, (zip_code or "")[:5] or None, phone,
                  dt.datetime.now(dt.timezone.utc)],
             )
+        self._enrich_progress_cache = None  # progress moved; don't serve stale counts
 
     # -- entity map -----------------------------------------------------------
 

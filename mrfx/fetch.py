@@ -937,27 +937,19 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
         store.update_url(url_id, content_sha=content_sha)
 
     # Blue plans host copies of each other's national files — the same bytes
-    # arrive under many domains. Skip byte-identical repeats instead of
-    # re-parsing millions of duplicate rows into the store.
+    # arrive under many domains. Skip byte-identical repeats of files ALREADY
+    # ingested instead of re-parsing millions of duplicate rows. This is the
+    # done-only fast path; a twin still mid-ingest is arbitrated by the atomic
+    # claim below (an unlocked skip here could race that twin's own skip and
+    # strand the content with both rows skipped).
     twin = store.find_url_with_same_content(content_sha, exclude_id=url_id)
     if twin:
-        twin_url, twin_status = twin
-        if twin_status == "done":
-            store.update_url(url_id, status="skipped", kind="duplicate",
-                             error="identical to a file already ingested (payers host copies "
-                                   f"of each other's files) — skipped as duplicate of {twin_url.split('?')[0]}")
-            dest.unlink(missing_ok=True)
-            meta_p.unlink(missing_ok=True)
-        else:
-            # twin is still INGESTING — it can yet fail, so the bytes here are
-            # the only guaranteed copy. Keep them (+ metadata for reuse); if
-            # the twin fails, revive_skipped_duplicates re-queues this row and
-            # it ingests from the kept download without re-downloading.
-            _write_meta(dest, content_sha, final_url)
-            store.update_url(url_id, status="skipped", kind="duplicate",
-                             error="identical to a link currently being processed "
-                                   f"({twin_url.split('?')[0]}) — will retry automatically "
-                                   "from the kept download if that one fails")
+        twin_url = twin[0]
+        store.update_url(url_id, status="skipped", kind="duplicate",
+                         error="identical to a file already ingested (payers host copies "
+                               f"of each other's files) — skipped as duplicate of {twin_url.split('?')[0]}")
+        dest.unlink(missing_ok=True)
+        meta_p.unlink(missing_ok=True)
         log.info("%s — byte-identical to %s; skipped", url, twin_url.split("?")[0])
         return False
 
@@ -1077,14 +1069,23 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
     # which a retry can defeat. This check+claim is one locked step, so exactly
     # one twin per content ingests; a loser defers (and revives if we later
     # fail, via the kept download).
+    # NOTE: on defer, the claim flips THIS row to skipped/duplicate inside the
+    # same locked step (a caller-side flip would let two racing twins mutually
+    # defer and both end skipped with nobody ingesting) — only the bytes are
+    # handled here.
     twin2 = store.claim_content_ingest(content_sha, url_id, pf.file_type, dest.name)
     if twin2:
-        twin2_url = twin2[0]
-        _write_meta(dest, content_sha, final_url)
-        store.update_url(url_id, status="skipped", kind="duplicate",
-                         error="identical to a link currently being processed "
-                               f"({twin2_url.split('?')[0]}) — will retry automatically "
-                               "from the kept download if that one fails")
+        twin2_url, twin2_status = twin2
+        if twin2_status == "done":
+            # the twin FINISHED while we were preflighting — same terminal
+            # treatment as the early check: nothing to revive, drop the bytes
+            dest.unlink(missing_ok=True)
+            _meta_path(dest).unlink(missing_ok=True)
+        else:
+            # twin is mid-ingest and can still fail: keep the only other copy
+            # so revive_skipped_duplicates can re-run this row without a
+            # re-download (signed URLs expire)
+            _write_meta(dest, content_sha, final_url)
         log.info("%s — byte-identical to %s (claimed concurrently); skipped",
                  url, twin2_url.split("?")[0])
         return False
@@ -1198,9 +1199,10 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
 
     rollup_failures = 0
     last_rebuild_at = time.monotonic()
+    rollup_min_interval = float(ROLLUP_MAX_STALE_SECONDS)
 
     def rebuild_now():
-        nonlocal ingests_pending_rollup, rollup_failures, last_rebuild_at
+        nonlocal ingests_pending_rollup, rollup_failures, last_rebuild_at, rollup_min_interval
         with state:
             n = ingests_pending_rollup
         if not n:
@@ -1227,6 +1229,14 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
             log.exception("rollup rebuild failed; will retry after the next file")
             return
         rollup_failures = 0
+        # Re-stamp at COMPLETION and self-throttle by how long the rebuild
+        # actually took: counting the 90s window from the start would make a
+        # >90s rebuild permanently "stale" the moment it finished — a full
+        # rebuild after every single file, the exact per-file quadratic cost
+        # the batching exists to avoid, each one holding the write lock.
+        duration = time.monotonic() - last_rebuild_at
+        rollup_min_interval = max(float(ROLLUP_MAX_STALE_SECONDS), 2.0 * duration)
+        last_rebuild_at = time.monotonic()
         with state:
             ingests_pending_rollup -= n
 
@@ -1345,7 +1355,7 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
             in_flight = (counts.get("queued", 0) + counts.get("downloading", 0)
                          + counts.get("fetched", 0) + counts.get("expanding", 0)
                          + counts.get("ingesting", 0) + busy)
-            stale = pend and (time.monotonic() - last_rebuild_at) >= ROLLUP_MAX_STALE_SECONDS
+            stale = pend and (time.monotonic() - last_rebuild_at) >= rollup_min_interval
             if pend >= ROLLUP_BATCH_FILES or (in_flight == 0 and pend) or stale:
                 rebuild_now()
                 continue
