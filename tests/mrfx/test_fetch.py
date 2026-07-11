@@ -270,6 +270,120 @@ def test_disk_reservations_block_concurrent_overcommit(cfg, server, monkeypatch)
         dest.unlink(missing_ok=True)
 
 
+def test_sidecar_survives_ingest_failure_for_kill_free_reuse(cfg, store, server, monkeypatch):
+    # The .fetchmeta sidecar must outlive the ingest: unlinking it up front
+    # meant a kill (or crash) mid-ingest re-queued the row WITHOUT its reuse
+    # ticket — the retry re-downloaded from byte zero, and an expired signed
+    # URL then 403'd terminally and DELETED the only complete copy.
+    import mrfx.fetch as F
+
+    add_urls(store, [f"{server}/rates.json.gz?case=sidecar"])
+    rec = store.next_queued_url()
+    assert F.fetch_url_record(cfg, store, rec) is True  # downloaded + sidecar
+    dest = cfg.downloads_dir / F.filename_for(rec["url"])
+    assert dest.exists() and F._meta_path(dest).exists()
+
+    def boom(*a, **k):
+        raise RuntimeError("simulated mid-ingest death")
+
+    monkeypatch.setattr(F, "ingest_file", boom)
+    rec2 = store.next_fetched_url()
+    F.process_url_record(cfg, store, rec2)
+    row = next(r for r in store.list_urls() if r["id"] == rec["id"])
+    assert row["status"] == "failed"
+    # both the bytes AND the reuse ticket survive -> a retry ingests from the
+    # kept download instead of re-downloading a possibly-expired URL
+    assert dest.exists() and F._meta_path(dest).exists()
+
+
+def test_preflight_failure_revives_deferred_twins(cfg, store, server, monkeypatch):
+    # A twin that deferred ('skipped, will retry automatically if that one
+    # fails') must be revived when the winner dies in PREFLIGHT too — this
+    # failure path used to skip _revive_twins and strand the content forever.
+    import mrfx.fetch as F
+
+    add_urls(store, [f"{server}/rates.json.gz?tw=a", f"{server}/rates.json.gz?tw=b"])
+    rows = store.list_urls()
+    a = next(r for r in rows if "tw=a" in r["url"])
+    b = next(r for r in rows if "tw=b" in r["url"])
+    sha = "beef" * 16
+    store.update_url(a["id"], status="ingesting", content_sha=sha)
+    store.update_url(b["id"], status="ingesting", content_sha=sha)
+    # B races into the atomic claim first and defers to in-flight A
+    assert store.claim_content_ingest(sha, b["id"], "in_network", "b.json.gz") is not None
+
+    # A's downloaded bytes + sidecar are on disk; its preflight then dies
+    dest = cfg.downloads_dir / F.filename_for(a["url"])
+    dest.write_bytes(b"payload")
+    F._write_meta(dest, sha, a["url"])
+
+    def bad_preflight(*args, **kwargs):
+        raise OSError("simulated unreadable file")
+
+    monkeypatch.setattr(F, "preflight", bad_preflight)
+    a_rec = {**a, "content_sha": sha}
+    F.process_url_record(cfg, store, a_rec)
+    a2 = next(r for r in store.list_urls() if r["id"] == a["id"])
+    b2 = next(r for r in store.list_urls() if r["id"] == b["id"])
+    assert a2["status"] == "failed"
+    assert b2["status"] == "queued"  # the promise held: B revived, content not stranded
+
+
+def test_unknown_length_download_checks_disk_mid_stream(cfg, monkeypatch):
+    # Chunked responses carry no Content-Length, so no up-front reservation is
+    # possible — the stream must re-check free space periodically or N such
+    # downloads could quietly fill the drive together.
+    import collections
+    import http.server as hs
+    import threading as th
+
+    import mrfx.fetch as F
+
+    class Chunked(hs.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            blob = b"x" * 1024
+            for _ in range(64):  # 64 KB total, no Content-Length
+                self.wfile.write(f"{len(blob):X}\r\n".encode() + blob + b"\r\n")
+            self.wfile.write(b"0\r\n\r\n")
+
+        def log_message(self, *a):
+            pass
+
+    httpd = hs.ThreadingHTTPServer(("127.0.0.1", 0), Chunked)
+    th.Thread(target=httpd.serve_forever, daemon=True).start()
+    Usage = collections.namedtuple("Usage", "total used free")
+    monkeypatch.setattr(F.shutil, "disk_usage", lambda p: Usage(100 << 30, 100 << 30, 1 << 30))
+    monkeypatch.setattr(F, "_UNKNOWN_LEN_CHECK_BYTES", 4096)  # check every 4KB
+    try:
+        with pytest.raises(F.DownloadError, match="disk space"):
+            F.download(cfg, f"http://127.0.0.1:{httpd.server_address[1]}/x.json",
+                       cfg.downloads_dir / "chunked.json")
+    finally:
+        httpd.shutdown()
+
+
+def test_startup_sweeps_downloads_stranded_after_done(cfg, store, server):
+    # kill between the 'done' write and _cleanup_raw leaves the raw download
+    # on disk forever (the row is terminal — nothing else reclaims it); the
+    # queue-start sweep must reap it when delete_raw_after_ingest is on
+    import mrfx.fetch as F
+
+    add_urls(store, [f"{server}/rates.json.gz?sweep=1"])
+    rec = store.next_queued_url()
+    name = F.filename_for(rec["url"])
+    stranded = cfg.downloads_dir / name
+    stranded.write_bytes(b"leftover bytes")
+    F._write_meta(stranded, "dead" * 16, rec["url"])
+    store.update_url(rec["id"], status="done", filename=name)
+
+    assert cfg.delete_raw_after_ingest is True
+    run_queue(cfg, store, drain=True)  # queue empty; sweep runs at start
+    assert not stranded.exists() and not F._meta_path(stranded).exists()
+
+
 def test_reserve_is_atomic_check_and_set(cfg, monkeypatch):
     # Two same-size downloads racing into a disk that fits only one: the FIRST
     # reservation must be visible to the second check even though neither has

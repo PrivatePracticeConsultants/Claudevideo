@@ -286,6 +286,11 @@ _disk_reservations: dict[int, int] = {}
 _reservation_lock = threading.Lock()
 
 
+# unknown-length (chunked) responses get no up-front reservation; re-check the
+# disk every this-many streamed bytes instead
+_UNKNOWN_LEN_CHECK_BYTES = 256 << 20
+
+
 def _set_reservation(my_key: int, remaining: int) -> None:
     with _reservation_lock:
         _disk_reservations[my_key] = max(0, remaining)
@@ -442,6 +447,7 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                 done = resume_from
                 last_report = done
                 last_report_t = 0.0
+                last_free_check = done  # for the unknown-length mid-stream guard
                 with open(part, "ab" if resuming else "wb") as f:
                     for chunk in resp.iter_bytes(chunk_size=1 << 20):
                         f.write(chunk)
@@ -451,6 +457,18 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                             # written bytes now show in disk_usage; shrink the
                             # reservation so they're never counted twice
                             _set_reservation(my_key, total - done)
+                        elif done - last_free_check >= _UNKNOWN_LEN_CHECK_BYTES:
+                            # no Content-Length -> no up-front guard or
+                            # reservation was possible; check the disk
+                            # periodically mid-stream so N unknown-length
+                            # downloads can't quietly fill the drive together
+                            last_free_check = done
+                            if shutil.disk_usage(dest.parent).free < (2 << 30):
+                                raise DownloadError(
+                                    "not enough free disk space to continue this download "
+                                    f"(~{done / 1e9:.1f} GB written, under 2 GB left on the "
+                                    "drive). Free up space and press retry — it resumes "
+                                    "where it stopped.", retryable=False)
                         if max_bytes and done > max_bytes:
                             raise too_big(done)  # no Content-Length header case
                         # dashboard polls every ~4s; don't hammer the store
@@ -986,13 +1004,19 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
     meta_p = _meta_path(dest)
     meta = None
     if dest.exists() and meta_p.exists():
-        # prefetched by the downloader thread — pick up where it left off
+        # prefetched by the downloader thread — pick up where it left off.
+        # The sidecar is NOT unlinked here: it must outlive the whole ingest
+        # (hours on a national file), because a kill mid-ingest re-queues the
+        # row and the reuse fast path requires dest+sidecar to avoid a fresh
+        # download — where an expired signed URL would 403 terminally and
+        # DELETE the only complete copy. Terminal states clean it up
+        # (_cleanup_raw on success, the failure/skip paths below).
         try:
             meta = json.loads(meta_p.read_text())
             content_sha, final_url = meta["sha"], meta["final_url"]
         except (ValueError, KeyError, OSError):
             meta = None  # corrupt sidecar: fall through to a fresh download
-        meta_p.unlink(missing_ok=True)
+            meta_p.unlink(missing_ok=True)
     if meta is None:
         try:
             # (row already marked 'downloading' by next_queued_url when claimed)
@@ -1005,11 +1029,17 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
             store.update_url(url_id, status="oversize" if e.oversize else "failed",
                              error=str(e))
             _maybe_queue_prev_month(store, rec, str(e))
+            # a failed re-download may strand twins that deferred to this row
+            # on a PREVIOUS attempt (its sha is still on the record)
+            _revive_twins(store, rec.get("content_sha") or "", url_id)
             if not e.retryable:
                 dest.unlink(missing_ok=True)
                 meta_p.unlink(missing_ok=True)
             return False
         store.update_url(url_id, content_sha=content_sha)
+        # sidecar written on THIS path too, so a kill mid-ingest resumes from
+        # the kept download instead of re-downloading (see the note above)
+        _write_meta(dest, content_sha, final_url)
 
     # Blue plans host copies of each other's national files — the same bytes
     # arrive under many domains. Skip byte-identical repeats of files ALREADY
@@ -1033,6 +1063,11 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
     except Exception as e:  # noqa: BLE001 — classification must never crash the worker
         store.update_url(url_id, status="failed", error=f"could not read file: {e}")
         dest.unlink(missing_ok=True)
+        meta_p.unlink(missing_ok=True)
+        # twins that deferred to this row were promised an automatic retry if
+        # it failed — honor that on THIS failure path too, or their content is
+        # stranded 'skipped' forever
+        _revive_twins(store, content_sha, url_id)
         return False
 
     if pf.file_type in ("toc", "blob_listing"):
@@ -1267,6 +1302,18 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
     recovered = store.recover_stuck_urls()
     if recovered:
         log.info("resumed %d URL(s) left mid-flight by a previous run", recovered)
+    if cfg.delete_raw_after_ingest:
+        # reap downloads stranded by a kill between the 'done' write and
+        # _cleanup_raw — the row is terminal, so nothing else ever reclaims them
+        swept = 0
+        for name in store.done_download_filenames():
+            f = cfg.downloads_dir / name
+            if f.exists():
+                f.unlink(missing_ok=True)
+                _meta_path(f).unlink(missing_ok=True)
+                swept += 1
+        if swept:
+            log.info("reclaimed %d finished download(s) left behind by an earlier kill", swept)
     processed = 0
     ingests_pending_rollup = 0
     import threading
@@ -1424,6 +1471,7 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
     for t in proc_threads:
         t.start()
 
+    interrupted = False
     try:
         while stop is None or not stop.is_set():
             try:
@@ -1448,12 +1496,21 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
                 stop.wait(0.5 if in_flight else 3.0)
             else:
                 time.sleep(0.5 if in_flight else 3.0)
+    except KeyboardInterrupt:
+        # Ctrl-C: don't sit in multi-minute thread joins below — the threads
+        # are daemons and every in-flight state recovers on the next start
+        # (.part downloads resume; 'downloading'/'ingesting' rows are
+        # re-queued by recover_stuck_urls). Exit fast; work is safe.
+        interrupted = True
+        raise
     finally:
         dl_stop.set()
+        join_proc = 2.0 if interrupted else cfg.download_timeout_seconds + 60
+        join_dl = 2.0 if interrupted else cfg.download_timeout_seconds + 30
         for t in proc_threads:
-            t.join(timeout=cfg.download_timeout_seconds + 60)
+            t.join(timeout=join_proc)
         for t in dl_threads:
-            t.join(timeout=cfg.download_timeout_seconds + 30)
+            t.join(timeout=join_dl)
         if pool is not None:
             from . import ingest as _ingest_mod
 

@@ -254,7 +254,7 @@ retry button reachable.
 
 ## Step 7 — Test and verify like the history did
 
-- `.venv/bin/python -m pytest tests/ -q` — the suite (157+ tests) runs real
+- `.venv/bin/python -m pytest tests/ -q` — the suite (166+ tests) runs real
   end-to-end drains against local HTTP servers, including parallel mode,
   kill-recovery semantics (crash-flip of stuck files/urls is tested
   directly), the forget HTTP flow, dedup, guards, and messy-file parser cases

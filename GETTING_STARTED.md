@@ -427,9 +427,12 @@ them in one place, grouped by where you'll hit them.
   of the same book under different filenames from before the dedup fix; if
   so, `mrfx reset --confirm` and re-queue (dedup now catches mirrors even in
   parallel).
-- **The dashboard says analytics are stale / a rollup failed** — the raw
-  data is safe; analytics refresh on the next successful rebuild (usually
-  the next file). If it keeps failing, you're low on disk — free some.
+- **Dashboard numbers aren't updating during a big run** — the analytics
+  tables refresh in batches (every ~10 files and at least every ~90 seconds),
+  so brief lag mid-grind is normal. If numbers stay frozen for many minutes,
+  look at the `mrfx serve` terminal window: a "rollup rebuild failed" line
+  there usually means low disk — free some space; the raw data is safe and
+  analytics catch up on the next successful rebuild.
 - **The whole machine ran out of disk mid-grind** — deletes still work:
   clear `data/processed/`, old exports, anything large; the app's guards
   keep 2 GB headroom and cap its own temp usage, and every interrupted

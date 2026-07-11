@@ -121,10 +121,14 @@ DEDUP_QUERY = """
            negotiated_rate, billing_class,
            coalesce(array_to_string(service_code, '|'), '')          AS service_code_set,
            file_month,
-           any_value(tin_value)                                      AS tin_value,
-           bool_or(tin_is_really_npi)                                AS tin_is_really_npi,
+           -- tin_value / tin_is_really_npi / is_dollar_rate are part of the
+           -- GROUP BY key, NOT any_value/bool_or folds: an NPI billing the
+           -- same rate under TWO practices is two facts (folding attributed
+           -- the rate to an arbitrary TIN and hid the other association from
+           -- drill-down and TIN search), and a dollar row must never merge
+           -- with a same-numeric percentage row and swallow it
+           tin_value, tin_is_really_npi, is_dollar_rate,
            any_value(negotiated_type)                                AS negotiated_type,
-           bool_or(is_dollar_rate)                                   AS is_dollar_rate,
            any_value(schema_version)                                 AS schema_version,
            max(last_updated_on)                                      AS last_updated_on,
            any_value(expiration_date)                                AS expiration_date,
@@ -140,7 +144,8 @@ DEDUP_QUERY = """
     GROUP BY payer, npi, billing_code,
              coalesce(array_to_string(billing_code_modifier, '|'), ''),
              negotiated_rate, billing_class,
-             coalesce(array_to_string(service_code, '|'), ''), file_month
+             coalesce(array_to_string(service_code, '|'), ''), file_month,
+             tin_value, tin_is_really_npi, is_dollar_rate
 """
 
 # TIN-grain spine (§4). Distinct rates within the tuple become rate_variants;
@@ -562,6 +567,17 @@ class Store:
             [nid, url, dedup_key, parent_id],
         )
         return nid
+
+    def done_download_filenames(self) -> list[str]:
+        """Filenames of fully-ingested queue rows — their raw downloads are
+        reclaimable (parquet is durable). Feeds the startup sweep that reaps
+        files stranded by a kill between the 'done' write and _cleanup_raw."""
+        with self.connect() as con:
+            rows = con.execute(
+                "SELECT DISTINCT filename FROM url_queue "
+                "WHERE status = 'done' AND filename IS NOT NULL"
+            ).fetchall()
+        return [r[0] for r in rows if r[0]]
 
     def next_queued_url(self) -> dict | None:
         return self._claim_next("queued", "downloading")

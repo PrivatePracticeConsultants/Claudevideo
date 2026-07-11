@@ -452,7 +452,11 @@ class InNetworkParser:
         missing_ref = False
         if ref_ids:
             resolved = self._resolve_refs(ref_ids)
-            for rid in ref_ids:
+            # dict.fromkeys: some payers list the same reference id twice in
+            # one item — resolving it twice emitted every (npi, tin, price)
+            # row twice (aggregates use DISTINCT and were immune, but raw-row
+            # views and the QA dup ratio showed the doubles)
+            for rid in dict.fromkeys(ref_ids):
                 got = resolved.get(rid)
                 if not got:
                     missing_ref = True

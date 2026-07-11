@@ -8,6 +8,8 @@ import sys
 import threading
 from pathlib import Path
 
+import duckdb
+
 from .config import MrfxConfig, load_mrfx_config
 from .enrich import run_enrichment, start_background_enrichment
 from .ingest import ingest_file, scan_inbox
@@ -546,7 +548,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"could not create the data directories from {args.config}: {e}\n"
               "Check the *_dir settings point at usable folder paths.", file=sys.stderr)
         return 1
-    return {
+    handler = {
         "serve": cmd_serve,
         "add": cmd_add,
         "preflight": cmd_preflight,
@@ -556,7 +558,27 @@ def main(argv: list[str] | None = None) -> int:
         "outreach": cmd_outreach,
         "forget": cmd_forget,
         "reset": cmd_reset,
-    }[args.cmd](cfg, args)
+    }[args.cmd]
+    try:
+        return handler(cfg, args)
+    except KeyboardInterrupt:
+        # the FAQ's promise holds — downloads resume and in-flight files
+        # recover on the next start — so say that instead of a traceback
+        print("\nstopped. Your progress is saved: restart the same command "
+              "(or `mrfx serve`) and it picks up where it left off.")
+        return 130
+    except duckdb.IOException as e:
+        msg = str(e)
+        if "lock" in msg.lower():
+            print("the data store is busy right now (usually the dashboard/"
+                  "server is using it — heavy rebuilds can hold it for a few "
+                  "minutes). Try again shortly.", file=sys.stderr)
+        elif "open file" in msg.lower() or "No such file" in msg:
+            print(f"could not open a file: {e}\nCheck the output path exists "
+                  "and is writable.", file=sys.stderr)
+        else:
+            print(f"database problem: {e}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

@@ -293,7 +293,15 @@ def order_sql(sort: str, direction: str) -> str:
     if sort not in SORTABLE:
         sort = "negotiated_rate"
     direction = "ASC" if direction.lower() == "asc" else "DESC"
-    return f"ORDER BY {sort} {direction} NULLS LAST, unit_id ASC, billing_code ASC, modifier_set ASC"
+    # The tiebreaker must be a TOTAL order over the grain's row identity:
+    # LIMIT/OFFSET pages are independent queries, and DuckDB (with
+    # preserve_insertion_order off) may order still-tied rows differently per
+    # page — rows silently duplicated on one page and MISSING from another.
+    # Multi-month stores are tie-dense (a TIN's rate for a code is usually
+    # unchanged month over month), so every identity column joins the order.
+    return (f"ORDER BY {sort} {direction} NULLS LAST, unit_id ASC, billing_code ASC, "
+            "modifier_set ASC, payer ASC, file_month ASC, billing_class ASC, "
+            "service_code_set ASC, is_dollar_rate ASC")
 
 
 def _mask_tin_sql(col: str) -> str:

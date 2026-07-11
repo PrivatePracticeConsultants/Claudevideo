@@ -33,6 +33,53 @@ def test_rates_default_grain_is_tin(client):
     assert ref_tin["npi_count"] == 2  # two NPIs rolled into one entity row
 
 
+def test_pagination_is_stable_under_tied_sort_keys(cfg, store):
+    # Multi-month stores are tie-dense (a TIN's rate is usually unchanged
+    # month over month). LIMIT/OFFSET pages are independent queries, so with
+    # an incomplete tiebreaker DuckDB ordered tie-groups differently per page:
+    # some rows appeared twice and others NEVER appeared, silently. The
+    # tiebreaker must be a total order over the row identity.
+    from mrfx.store import RATES_SCHEMA  # noqa: F401 — documents the row shape
+
+    rows = []
+    for i in range(60):
+        for month in ("2026-05-01", "2026-06-01"):
+            rows.append({
+                "payer": "TiePayer", "source_file": f"tie_{month}.json",
+                "file_month": month[:7], "schema_version": "1.0.0",
+                "last_updated_on": month, "tin_value": f"6{i:08d}",
+                "tin_type": "ein", "tin_is_really_npi": False,
+                "npi": f"15{i:08d}", "billing_code": "97110",
+                "billing_code_type": "CPT", "discipline": "PT",
+                "is_timed": True, "billing_code_modifier": ["GP"],
+                "negotiated_rate": 55.0,  # every row ties on the sort key
+                "negotiated_type": "negotiated", "is_dollar_rate": True,
+                "billing_class": "professional", "service_code": ["11"],
+                "expiration_date": "2027-01-01", "ingested_at": "2026-07-11",
+            })
+    for month in ("2026-05-01", "2026-06-01"):
+        with store.rates_part_writer(f"tie_{month}.json") as w:
+            w.write_batch([r for r in rows if r["source_file"] == f"tie_{month}.json"])
+    store.upsert_file("tie_2026-05-01.json", payer="TiePayer", file_type="in_network", status="done")
+    store.upsert_file("tie_2026-06-01.json", payer="TiePayer", file_type="in_network", status="done")
+    store.rebuild_rollups()
+    client = TestClient(create_app(cfg, store))
+
+    first = client.get("/api/rates?grain=tin&page_size=7&page=1").json()
+    total = first["total"]
+    assert total >= 120
+    seen = []
+    page = 1
+    while len(seen) < total:
+        r = client.get(f"/api/rates?grain=tin&page_size=7&page={page}").json()
+        if not r["rows"]:
+            break
+        seen += [(row["unit_id"], row["file_month"], row["payer"]) for row in r["rows"]]
+        page += 1
+    assert len(seen) == total
+    assert len(set(seen)) == total, "pages duplicated some rows and dropped others"
+
+
 def test_stats_reports_enrichment_progress(client, store):
     s = client.get("/api/stats").json()
     assert "enrichment" in s and s["enrichment"]["total"] >= 1

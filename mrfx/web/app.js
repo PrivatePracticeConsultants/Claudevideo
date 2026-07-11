@@ -314,7 +314,11 @@ async function initFilters() {
     state.filters = { payers: [], cpts: [], disciplines: [], modifier: "", mod_has: "", mod_not: "",
       billing_class: "", pos: "", state: "", city: "", month: "", q: "",
       dollar: true, hide_tin_npi: false, hide_outliers: false, rate_min: "", rate_max: "" };
-    $$(".chip.on").forEach((c) => c.classList.remove("on"));
+    // Explorer chips ONLY — a document-wide ".chip.on" sweep also wiped the
+    // BENCHMARK tab's payer selection (read from the DOM at run time), so a
+    // Clear here silently turned a payer-scoped benchmark into all-payers
+    $$("#f-payer-chips .chip.on, #f-cpt-chips .chip.on, #f-disc-chips .chip.on")
+      .forEach((c) => c.classList.remove("on"));
     ["#f-modifier", "#f-mod-has", "#f-mod-not", "#f-class", "#f-pos", "#f-state", "#f-city",
      "#f-q", "#f-rate-min", "#f-rate-max", "#f-month"].forEach((id) => ($(id).value = ""));
     $("#f-dollar").checked = true;
@@ -624,9 +628,11 @@ async function initBenchmark() {
     const name = $("#ps-name").value.trim();
     const tins = $("#ps-tins").value.split(/\n+/).map((t) => t.trim()).filter(Boolean);
     if (!name || !tins.length) { alert("peer set needs a name and at least one TIN"); return; }
-    const r = await postJson("/api/peersets", { name, tins });
-    refreshPeersets(r.peer_sets);
-    $("#b-peerset").value = name;
+    try {
+      const r = await postJson("/api/peersets", { name, tins });
+      refreshPeersets(r.peer_sets);
+      $("#b-peerset").value = name;
+    } catch (e) { alert(`couldn't save the peer set: ${e.message}`); }
   });
   $("#mpfs-file").addEventListener("change", async (e) => {
     const f = e.target.files[0];
@@ -684,6 +690,10 @@ function benchmarkPayload() {
 
 async function runBenchmark() {
   const out = $("#b-out");
+  // a failed/aborted run must not leave "Open pitch report" armed with the
+  // PREVIOUS run's payload — a report that doesn't match what's on screen
+  state.lastBenchmarkPayload = null;
+  $("#b-report").disabled = true;
   let payload;
   try { payload = benchmarkPayload(); }
   catch (e) { out.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
@@ -997,9 +1007,9 @@ function initFilesView() {
     if (!confirm(
       "Queue every payer index this app has been tested against?\n\n" +
       "That's a lot of data: each index lists hundreds of rate files, and " +
-      "they download and process one at a time in the background (you can " +
-      "skip rows any time). Files identical to ones already loaded are " +
-      "skipped automatically."
+      "they download and process several at a time in the background, scaled " +
+      "to your machine (waiting rows can be skipped any time). Files " +
+      "identical to ones already loaded are skipped automatically."
     )) return;
     msg.textContent = "queueing tested sources…";
     try {
@@ -1016,7 +1026,9 @@ function initFilesView() {
   $("#url-known-list").addEventListener("click", async () => {
     const wrap = $("#known-wrap");
     if (wrap.style.display !== "none") { wrap.style.display = "none"; return; }
-    const d = await api("/api/known-sources");
+    let d;
+    try { d = await api("/api/known-sources"); }
+    catch (e) { $("#url-msg").textContent = `couldn't load the source list: ${e.message}`; return; }
     $("#known-body").innerHTML = (d.sources || []).map((s) => `
       <tr>
         <td><a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.name)}</a></td>
@@ -1044,9 +1056,12 @@ function initFilesView() {
     const id = $("#v-id").value.trim(), code = $("#v-code").value.trim();
     const expected = $("#v-expected").value;
     if (!id || !code) { alert("TIN/NPI and code required"); return; }
-    const r = await postJson("/api/validate", {
-      id, code, ...(expected ? { expected_rate: +expected } : {}),
-    });
+    let r;
+    try {
+      r = await postJson("/api/validate", {
+        id, code, ...(expected ? { expected_rate: +expected } : {}),
+      });
+    } catch (e) { alert(`validation lookup failed: ${e.message}`); return; }
     const verdict = $("#v-verdict");
     if (!r.rows.length) verdict.innerHTML = `<span class="v-bad">no extracted rows for that id + code</span>`;
     else if (r.match === true) verdict.innerHTML = `<span class="v-ok">✓ expected rate found in extraction</span>`;
@@ -1073,7 +1088,11 @@ async function uploadFiles(files) {
       if (!r.ok) alert(`upload failed: ${(await r.json()).detail || r.status}`);
     } catch (e) { alert(`upload failed: ${e.message}`); }
   }
-  location.reload();
+  // refresh in place — a full page reload dumped the user back on the
+  // Explorer tab right after they dropped a file on the Files tab
+  $("#dropzone").innerHTML = `<div class="muted">Uploaded — processing begins shortly.
+    Drop more files here.</div>`;
+  loadFiles();
 }
 
 /* =======================================================================
@@ -1082,12 +1101,24 @@ async function uploadFiles(files) {
 
 let sourcesLoaded = false;
 async function loadSources(stateCode = "") {
-  const d = await api(`/api/sources${stateCode ? `?state=${stateCode}` : ""}`);
+  let d;
+  try {
+    d = await api(`/api/sources${stateCode ? `?state=${stateCode}` : ""}`);
+  } catch (e) {
+    // a failed fetch used to leave a silently blank tab with no explanation
+    $("#src-state-cards").innerHTML =
+      `<div class="empty">Couldn't load the sources list (${esc(e.message)}) — ` +
+      `is the server still running? Switch tabs and back to retry.</div>`;
+    return;
+  }
   if (!sourcesLoaded) {
     const sel = $("#src-state");
     sel.innerHTML = `<option value="">— pick a state —</option>` +
       d.states.map((s) => `<option>${s}</option>`).join("");
-    sel.addEventListener("change", () => loadSources(sel.value));
+    // assignment, not addEventListener: an override-confirm reload re-runs
+    // this block, and stacked listeners fired N requests per change
+    sel.onchange = () => loadSources(sel.value);
+    sel.value = stateCode;  // keep the picked state across override reloads
     $("#src-national-cards").innerHTML = d.national.map(sourceCard).join("");
     hookOverrideForms($("#src-national-cards"));
     sourcesLoaded = true;
@@ -1168,9 +1199,12 @@ function hookOverrideForms(root) {
   }
   loadStats();
   loadStateOptions();
-  await initFilters();
-  initCptView();
-  initFilesView();
+  // one failed boot fetch must not brick the page: without this guard an
+  // /api/payers hiccup at load left the Code and Files tabs never wired
+  try { await initFilters(); }
+  catch (e) { console.error("filter init failed — refresh to retry:", e); }
+  try { initCptView(); } catch (e) { console.error(e); }
+  try { initFilesView(); } catch (e) { console.error(e); }
   refresh();
   setInterval(() => { loadStats(); loadStateOptions(); }, 15000);
 })();
