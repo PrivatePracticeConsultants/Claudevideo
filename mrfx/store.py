@@ -524,15 +524,19 @@ class Store:
             "SELECT id, status FROM url_queue WHERE dedup_key = ? LIMIT 1", [dedup_key]
         ).fetchone()
         if exists:
-            # Re-adding a failed link retries it (a fresh URL may carry a
-            # new signature). A 'skipped' row is only revived by a DIRECT
-            # paste (parent_id None): re-expanding a TOC must not undo the
-            # user's explicit skip or re-download a known duplicate.
-            retryable = ("failed",) if parent_id is not None else ("failed", "skipped")
+            # Re-adding a failed/over-size link retries it (a fresh URL may
+            # carry a new signature; or the user raised confirm_over_gb). A
+            # 'skipped' row is only revived by a DIRECT paste (parent_id
+            # None): re-expanding a TOC must not undo the user's explicit
+            # skip or re-download a known duplicate. force_size is reset so a
+            # re-paste re-checks the size ceiling rather than silently
+            # inheriting an old "download anyway".
+            retryable = (("failed", "oversize") if parent_id is not None
+                         else ("failed", "skipped", "oversize"))
             if exists[1] in retryable:
                 con.execute(
                     "UPDATE url_queue SET url = ?, status = 'queued', error = NULL, "
-                    "progress = 0, bytes_done = 0 WHERE id = ?",
+                    "progress = 0, bytes_done = 0, force_size = false WHERE id = ?",
                     [url, exists[0]],
                 )
                 return exists[0]
@@ -570,7 +574,7 @@ class Store:
                    "progress", "rows_emitted", "child_count", "error", "parent_id",
                    "content_sha"}
         fields = {k: v for k, v in fields.items() if k in allowed}
-        if fields.get("status") in ("done", "failed", "skipped"):
+        if fields.get("status") in ("done", "failed", "skipped", "oversize"):
             fields["finished_at"] = dt.datetime.now(dt.timezone.utc)
         if not fields:
             return
@@ -766,8 +770,10 @@ class Store:
             if not r or r[0] not in allowed_from:
                 return False
             con.execute(
-                "UPDATE url_queue SET status = ?, error = NULL, progress = 0, bytes_done = 0 "
-                "WHERE id = ?", [status, url_id])
+                "UPDATE url_queue SET status = ?, error = NULL, progress = 0, bytes_done = 0, "
+                # plain retry must NOT inherit a prior "download anyway" — that
+                # override is one-shot; only force_size_requeue re-sets it
+                "force_size = false WHERE id = ?", [status, url_id])
             return True
 
     def force_size_requeue(self, url_id: int) -> bool:
@@ -794,7 +800,8 @@ class Store:
             if n:
                 con.execute(
                     "UPDATE url_queue SET status = 'queued', error = NULL, "
-                    "progress = 0, bytes_done = 0 WHERE status = 'failed'"
+                    # bulk retry never inherits a one-shot "download anyway"
+                    "progress = 0, bytes_done = 0, force_size = false WHERE status = 'failed'"
                 )
         return n
 

@@ -682,14 +682,14 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     @app.post("/api/urls/{url_id}/retry")
     def urls_retry(url_id: int):
         if not store.set_url_status_by_id(url_id, "queued"):
-            raise HTTPException(409, "only failed or skipped links can be retried "
+            raise HTTPException(409, "only failed, skipped, or too-big links can be retried "
                                      "(this row may have just started or already finished)")
         return {"status": "queued"}
 
     @app.post("/api/urls/{url_id}/cancel")
     def urls_cancel(url_id: int):
         if not store.set_url_status_by_id(url_id, "skipped"):
-            raise HTTPException(409, "only queued or failed links can be skipped "
+            raise HTTPException(409, "only queued, failed, or too-big links can be skipped "
                                      "(this row may have just started or already finished)")
         return {"status": "skipped"}
 

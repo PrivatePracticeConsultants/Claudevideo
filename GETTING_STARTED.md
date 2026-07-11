@@ -141,9 +141,11 @@ Any of these link types work:
 
 The queue table under the box shows each link's status
 (`queued` → `downloading` with a MB progress bar → `ingesting` → `done` with a
-row count; index links show `expanding` while their file lists unpack). Files
-process **a few at a time in the background** (3 with the shipped settings —
-the `parallel_ingests:` knob in `config/mrfx.yaml`) — you can paste a whole
+row count; index links show `expanding` while their file lists unpack; a file
+bigger than the safety limit shows `too big` — see the disk section below).
+Files process **a few at a time in the background** — by default as many as
+your computer has processor cores minus one (the `parallel_ingests:` knob in
+`config/mrfx.yaml`, `0` = automatic) — you can paste a whole
 state's worth of links and walk away. Each file's download is deleted
 after its rates are extracted, so your disk doesn't fill up. If you close the
 app mid-download, it picks up where it left off on restart.
@@ -406,8 +408,11 @@ them in one place, grouped by where you'll hit them.
   nothing is double-ingested.
 - **The queue is huge and slow** — expected for whole-payer grinds (UHC and
   Anthem queue thousands of files; parsing runs ~30s per uncompressed GB).
-  Raise `parallel_ingests:` in `config/mrfx.yaml` (3 is a good default on a
-  4-core machine), leave it running overnight, and skip rows you don't need.
+  The app already uses (your cores − 1) parsers automatically
+  (`parallel_ingests: 0`); on a big multi-core machine that's the fastest
+  safe setting, so just leave it running overnight and skip rows you don't
+  need. (If the startup log warns that ijson is running its "pure-Python
+  backend", that makes parsing ~10× slower — reinstall as the log suggests.)
 - **Rates look doubled for one payer** — check the Files tab for two ingests
   of the same book under different filenames from before the dedup fix; if
   so, `mrfx reset --confirm` and re-queue (dedup now catches mirrors even in

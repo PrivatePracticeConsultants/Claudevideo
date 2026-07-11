@@ -7,10 +7,10 @@ Give the app a URL (or many) and it:
      lists (deduped, capped), which then flow through the same pipeline,
   4. otherwise hands the file to the normal chunked ingest.
 
-Background workers drain the queue (`parallel_ingests` at a time, shipped 3,
-clamped to cores-1) with a one-file-ahead prefetch, so aggregating a whole
-payer (hundreds of files) never fills the disk: bounded files in flight, and
-the raw download is deleted after a successful ingest (config-controlled),
+Background workers drain the queue (`parallel_ingests` at a time; default 0 =
+auto = CPU cores-1, capped 8) with a one-file-ahead prefetch, so aggregating a
+whole payer (hundreds of files) never fills the disk: bounded files in flight,
+and the raw download is deleted after a successful ingest (config-controlled),
 keeping only the compact Parquet.
 """
 
@@ -1201,10 +1201,13 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
         with state:
             ingests_pending_rollup -= n
 
-    # Pipeline: a downloader thread prefetches the NEXT file while the main
-    # loop parses the current one — network and CPU overlap instead of taking
-    # turns. At most PREFETCH_AHEAD files sit fetched-but-unprocessed on disk,
-    # so disk stays bounded exactly as before (plus one file).
+    # Pipeline: ONE downloader thread prefetches ahead while the parsers work
+    # — network and CPU overlap instead of taking turns. At most
+    # `prefetch_ahead` files sit fetched-but-unprocessed on disk. The single
+    # downloader fetches sequentially, and each download's disk-space guard
+    # measures ACTUAL free space (which already reflects the files sitting in
+    # the buffer), so the buffer self-limits to available disk — it never
+    # overcommits even though the count scales with worker parallelism.
     dl_stop = threading.Event()
 
     # keep every parser fed: allow one fetched file per worker plus one spare

@@ -26,7 +26,7 @@ Two codebases live in this repo:
 
 | Module | Role |
 |---|---|
-| `mrfx/config.py` | Pydantic config (`config/mrfx.yaml`). Key knobs: `codes.cpt_codes` (the target set; `all_codes: true` disables filtering), `confirm_over_gb` (download size guard, default 5), `max_toc_files` (children per index, default 2000), `parallel_ingests` (parser processes, shipped 3, clamped to cores−1), `delete_raw_after_ingest`. |
+| `mrfx/config.py` | Pydantic config (`config/mrfx.yaml`). Key knobs: `codes.cpt_codes` (the target set; `all_codes: true` disables filtering), `confirm_over_gb` (download size guard, default 5), `max_toc_files` (children per index, default 2000), `parallel_ingests` (parser processes; **0 = auto = cores−1 capped 8**, positive value clamped to cores−1 — via `resolve_worker_count`), `delete_raw_after_ingest`. |
 | `mrfx/sniff.py` | Header-window (1 MB) classification of any file: `in_network / provider_reference / toc / allowed_amounts / blob_listing / unknown`; `open_stream` (gzip/zip/plain + byte-progress); preflight verdicts. |
 | `mrfx/parser.py` | Streaming ijson parser. `InNetworkParser` (event-level, constant memory, batches rows to a sink), `skim_needed_ref_ids` (pass 1 of big files: returns target-cited ref ids + count of target-code items), provider-reference file parser, GP/GO/GN modifier-first discipline attribution, TIN/NPI pairing rules. |
 | `mrfx/ingest.py` | `ingest_file` orchestration: quarantines non-rate files, two-pass chunked ingest for files ≥1.5 GB uncompressed (`LARGE_FILE_UNCOMPRESSED_BYTES`), scan short-circuit when pass 1 finds zero target codes, chunk progress (`_ProgressTracker`), QA report, parallel worker (`_parse_worker`, `ParsePoolManager`) — workers are PURE (no DB access). |
@@ -160,14 +160,21 @@ Two codebases live in this repo:
 ## Step 4 — Know the URL pipeline states
 
 `url_queue.status`: `queued → downloading → fetched → (expanding|ingesting) →
-done | failed | skipped`. `kind`: `toc / page / in_network /
+done | failed | skipped | oversize`. `kind`: `toc / page / in_network /
 provider_reference / allowed_amounts / duplicate / unknown`.
-User actions are guarded: retry only from failed/skipped; skip only from
-queued/failed (a done row anchors content-sha dedup and is untouchable).
-`dedup_key` strips signature/expiry query params but keeps identity params.
-`list_urls` pins actionable rows into the window (top-level pastes first,
-then failed/skipped children, then newest others, deduped by id) — a file
-forgotten mid-grind on a 2,000-row queue keeps its retry button reachable.
+`oversize` is a distinct terminal state for files over confirm_over_gb — NOT
+'failed' (so one big payer's shards don't inflate the failure count or bury a
+real error); it shows amber "too big" in the UI with a "download anyway"
+button (`force_size_requeue` sets a one-shot `force_size` flag consumed by
+`_size_limit_for`; the flag is reset on every generic retry/re-queue so the
+override never silently carries into a later bulk retry). User actions are
+guarded: retry only from failed/skipped/oversize; skip only from
+queued/failed/oversize (a done row anchors content-sha dedup and is
+untouchable). `dedup_key` strips signature/expiry query params but keeps
+identity params. `list_urls` pins actionable rows into the window (top-level
+pastes first, then failed/skipped/oversize children, then newest others,
+deduped by id) — a file forgotten mid-grind on a 2,000-row queue keeps its
+retry button reachable.
 
 ## Step 5 — Performance envelope (measured)
 

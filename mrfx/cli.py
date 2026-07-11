@@ -227,12 +227,17 @@ def cmd_add(cfg: MrfxConfig, args) -> int:
           "re-running `mrfx add` resumes where it left off)...")
     processed = run_queue(cfg, store, drain=True, progress_bar=_make_cli_progress())
     counts = store.url_queue_counts()
+    over = counts.get("oversize", 0)
     print(f"\nfinished: {processed} processed this run — "
           f"{counts.get('done', 0)} done, {counts.get('failed', 0)} failed, "
-          f"{counts.get('queued', 0)} still queued")
+          + (f"{over} too big, " if over else "")
+          + f"{counts.get('queued', 0)} still queued")
     for rec in store.list_urls(limit=50):
         if rec["status"] == "failed":
             print(f"  FAILED  {rec['url'][:90]}\n          → {rec['error']}")
+        elif rec["status"] == "oversize":
+            print(f"  TOO BIG {rec['url'][:90]}\n          → over confirm_over_gb; raise it in "
+                  "config/mrfx.yaml (or use the dashboard's \"download anyway\") and re-run")
     if cfg.enrichment.mode != "off" and processed:
         print("looking up practice names (NPPES)...")
         _run_enrichment_best_effort(cfg, store)

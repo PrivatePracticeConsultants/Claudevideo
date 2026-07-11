@@ -240,6 +240,28 @@ def test_download_anyway_overrides_size_guard(cfg, store, server):
     assert store.force_size_requeue(rec["id"]) is False  # done row rejected
 
 
+def test_force_size_is_one_shot_not_inherited_by_later_retries(cfg, store, server):
+    # the "download anyway" override must NOT survive into a later generic
+    # retry — otherwise a transient failure after forcing would silently keep
+    # bypassing the size ceiling with no fresh confirmation
+    cfg.confirm_over_gb = 100 / 1e9
+    add_urls(store, [f"{server}/rates.json.gz"])
+    drain(cfg, store)
+    rec = next(r for r in store.list_urls() if "rates.json.gz" in r["url"])
+    assert rec["status"] == "oversize"
+    store.force_size_requeue(rec["id"])            # user forces it
+    assert next(r for r in store.list_urls() if r["id"] == rec["id"])["force_size"] is True
+    # simulate a transient failure of the forced attempt (not oversize)
+    store.update_url(rec["id"], status="failed", error="connection reset")
+    # plain retry / retry-all-failed / re-paste must each clear the override
+    store.set_url_status_by_id(rec["id"], "queued")
+    assert next(r for r in store.list_urls() if r["id"] == rec["id"])["force_size"] is False
+    store.update_url(rec["id"], status="failed", error="x")
+    store.force_size_requeue(rec["id"]); store.update_url(rec["id"], status="failed", error="x")
+    store.requeue_failed()
+    assert next(r for r in store.list_urls() if r["id"] == rec["id"])["force_size"] is False
+
+
 def test_gatsby_hub_page_crawled(cfg, store, tmp_path):
     # Sapphire/HealthSparq-style hubs (Blue KC): empty HTML page, file list in
     # Gatsby static-query JSON. Suppressed entries must be respected.

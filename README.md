@@ -255,8 +255,9 @@ Three link kinds are auto-detected:
   first California files ingested. Without Playwright these pages fail
   with a message that includes the install command.
 
-**Parallel processing**: `parallel_ingests` in `config/mrfx.yaml` (shipped as
-3, auto-capped at your CPU cores minus one) parses that many files at once —
+**Parallel processing**: `parallel_ingests` in `config/mrfx.yaml` (default
+`0` = auto: your CPU cores minus one, capped at 8; a positive value is
+honored but still clamped to cores−1) parses that many files at once —
 each in its own OS process, while the database stays strictly single-writer
 in the main process. Verified: 2 workers ran the same 3 UHC files 1.5x faster
 with byte-identical row counts; a parser worker killed mid-parse restarts
@@ -277,7 +278,7 @@ done with "none of the target billing codes appear in this file" — half the
 parse cost on every no-match multi-GB file.
 
 The queue (`url_queue` in the store) processes **a bounded few files at a
-time** (`parallel_ingests`, shipped 3) in the
+time** (`parallel_ingests`, default auto = cores−1) in the
 background, dedupes re-pasted links (signed-query variants included), and also
 dedupes by **content**: every download is sha256-hashed, and a byte-identical
 file arriving under a different domain is skipped, not re-ingested. This

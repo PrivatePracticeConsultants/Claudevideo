@@ -885,7 +885,8 @@ async function loadUrlQueue() {
     let notes = "";
     if (u.kind === "toc" && u.status === "done") notes = `found ${fmtInt(u.child_count)} files inside — queued below`;
     else if (u.kind === "page" && u.status === "done") notes = `found ${fmtInt(u.child_count)} file links on the page`;
-    else if (u.error) notes = `<span class="err-text">${esc(u.error)}</span>`;
+    // over-size note is amber, not red — it's "your OK needed", not an error
+    else if (u.error) notes = `<span class="${u.status === "oversize" ? "warn-text" : "err-text"}">${esc(u.error)}</span>`;
     return `<tr>
       <td title="${esc(u.url)}">${esc(shown)}</td>
       <td>${esc(KIND_LABEL[u.kind] || u.kind || "…")}</td>
