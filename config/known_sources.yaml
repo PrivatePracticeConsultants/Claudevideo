@@ -273,6 +273,34 @@ sources:
       PPO network — this is a direct plain-JSON route to it that needs no
       browser (unlike health1.firsthealth.com, which is a JS portal).
 
+  - name: Tufts Health Public Plans (Point32Health — Massachusetts)
+    url: https://eusprdtransparencymrfp32.blob.core.windows.net/thp/{FIRST_OF_MONTH}_TuftsHealthPublicPlansInc_index.json
+    kind: toc
+    queueable: true
+    verified: "2026-07-11"
+    notes: >-
+      CMS TOC v2.0.0, first-of-month dated path on Point32Health's Azure
+      tenant. Verified expansion: 3 in-network file children queued. This is
+      the Tufts Public Plans (Medicaid/ConnectorCare) book — a distinct book
+      from Harvard Pilgrim (same parent, Point32Health, already cataloged via
+      harvardpilgrim.org). Found via the mrfdatasolutions.com payer directory.
+
+  - name: Security Health Plan (Wisconsin)
+    url: https://www.securityhealth.org/insurance-resources/json
+    kind: page
+    queueable: true
+    verified: "2026-07-11"
+    notes: >-
+      Static page listing ~33 per-employer TOC files on
+      shp-web-public.s3.amazonaws.com (dated the 2nd of the month, so the
+      listing page is the stable entry — the app lifts the current links off
+      it). Each per-employer index is a ZIP-WRAPPED CMS TOC v2.0.0; all
+      employers share the same 3 in-network files. Verified: 24 employer
+      children queued, one zip-TOC expanded to its 3 in-network children.
+      NOTE: the sibling PRD/exchange/cms-data-index.json is the
+      interoperability index (providers/plans/drugs), NOT the price MRF.
+      Found via the mrfdatasolutions.com payer directory.
+
   - name: Optum Health (transparency portal)
     url: https://transparency-in-coverage.optum.com/
     kind: portal

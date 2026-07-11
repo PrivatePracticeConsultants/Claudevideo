@@ -172,14 +172,15 @@ aren't part of that comparison.)
   mrfx add --file config/starter_links.txt
   ```
 
-  That queues 36 sources (Highmark's 15 hosted Blue plans, BCBS Mississippi,
+  That queues 38 sources (Highmark's 15 hosted Blue plans, BCBS Mississippi,
   BCBS Tennessee, Cigna, BCBS South and North Carolina, CareFirst, Molina,
   Kaiser, Aetna, Harvard Pilgrim, Regence, Oscar, the 14-state Anthem
   master index,
   Centene/Ambetter's all-states page, the Blue KC / BCBS Michigan /
   BCBS Louisiana hubs, UnitedHealthcare's national portal, SelectHealth
-  (Utah/Idaho/Nevada), Moda Health (Oregon/Alaska/Texas), and the First
-  Health PPO rental network —
+  (Utah/Idaho/Nevada), Moda Health (Oregon/Alaska/Texas), the First
+  Health PPO rental network, Tufts Health Public Plans (Massachusetts),
+  and Security Health Plan (Wisconsin) —
   Molina/Kaiser/Aetna/Harvard Pilgrim/Regence/Oscar need the headless
   browser, which the app now downloads for itself on first use (the
   starter-links FILE swaps Oscar
