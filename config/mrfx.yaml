@@ -38,9 +38,10 @@ payer_name_map:
 
 # Files parsed at the same time when grinding pasted links (each is its own
 # CPU process; the database stays single-writer, and a died worker restarts
-# automatically). Automatically capped at your CPU cores minus one, so 3 is
-# safe to leave as-is on any machine; set 1 to process strictly one at a time.
-parallel_ingests: 3
+# automatically). 0 = auto: uses (your CPU cores - 1), capped at 8 — the
+# fastest safe setting on any machine. Set a specific number to pin it (still
+# capped at cores-1), or 1 to process strictly one file at a time.
+parallel_ingests: 0
 
 inbox_dir: data/inbox
 processed_dir: data/processed

@@ -804,6 +804,19 @@ def _meta_path(dest: Path) -> Path:
     return Path(str(dest) + _META_SUFFIX)
 
 
+def resolve_worker_count(cfg: MrfxConfig) -> int:
+    """Effective parser-process count. 0 (or unset) = auto: (CPU cores - 1)
+    capped at 8; a positive value is honored but still clamped to cores-1
+    (extra processes past the core count only add contention). Never less
+    than 1. Central so run_queue, the prefetch sizing, and the CLI banner
+    all agree."""
+    cores_cap = max(1, (os.cpu_count() or 2) - 1)
+    configured = int(getattr(cfg, "parallel_ingests", 0) or 0)
+    if configured <= 0:
+        return min(cores_cap, 8)
+    return max(1, min(configured, cores_cap))
+
+
 def _size_limit_for(cfg: MrfxConfig, rec: dict) -> int:
     """confirm_over_gb byte ceiling for this row — 0 (no ceiling) when the
     user pressed 'download anyway' on it. The disk-space guard inside
@@ -1195,8 +1208,7 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
     dl_stop = threading.Event()
 
     # keep every parser fed: allow one fetched file per worker plus one spare
-    prefetch_ahead = max(PREFETCH_AHEAD,
-                         int(getattr(cfg, "parallel_ingests", 1) or 1) + 1)
+    prefetch_ahead = max(PREFETCH_AHEAD, resolve_worker_count(cfg) + 1)
 
     def downloader():
         while not dl_stop.is_set() and (stop is None or not stop.is_set()):
@@ -1226,8 +1238,7 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
     # pool does the CPU-heavy parsing (ingest_file dispatches to it), so the
     # threads mostly wait — the GIL never serializes the parsing itself. All
     # DuckDB writes happen in THIS process; workers only compute.
-    parallel = max(1, min(int(getattr(cfg, "parallel_ingests", 1) or 1),
-                          max(1, (os.cpu_count() or 2) - 1)))
+    parallel = resolve_worker_count(cfg)
     pool = None
     if parallel > 1:
         from . import ingest as _ingest_mod

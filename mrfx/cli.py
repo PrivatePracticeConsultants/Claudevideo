@@ -220,10 +220,9 @@ def cmd_add(cfg: MrfxConfig, args) -> int:
                ("queued", "downloading", "fetched", "expanding", "ingesting"))
     if live == 0:
         return 0  # nothing queued and nothing left mid-flight by a crash
-    import os as _os
+    from .fetch import resolve_worker_count
 
-    n_workers = max(1, min(int(getattr(cfg, "parallel_ingests", 1) or 1),
-                           max(1, (_os.cpu_count() or 2) - 1)))  # same clamp as run_queue
+    n_workers = resolve_worker_count(cfg)
     print(f"downloading and ingesting ({n_workers} file(s) at a time — Ctrl-C to stop; "
           "re-running `mrfx add` resumes where it left off)...")
     processed = run_queue(cfg, store, drain=True, progress_bar=_make_cli_progress())
@@ -526,6 +525,10 @@ def main(argv: list[str] | None = None) -> int:
 
     args = ap.parse_args(argv)
     _setup_logging(args.verbose)
+    if args.cmd in ("serve", "ingest", "add"):
+        from .parser import warn_if_slow_json_backend
+
+        warn_if_slow_json_backend()  # loud warning if the pure-Python parser is active
     from .config import ConfigFileError
 
     try:

@@ -153,6 +153,38 @@ def test_second_concurrent_ingest_of_same_file_bows_out(cfg, store, monkeypatch)
     assert results and results[0]["status"] == "done"
 
 
+def test_worker_count_auto_scales_and_clamps(monkeypatch):
+    import mrfx.fetch as fetch
+    from mrfx.config import MrfxConfig
+    monkeypatch.setattr(fetch.os, "cpu_count", lambda: 8)
+    assert fetch.resolve_worker_count(MrfxConfig(parallel_ingests=0)) == 7  # auto = cores-1
+    assert fetch.resolve_worker_count(MrfxConfig(parallel_ingests=3)) == 3  # pinned
+    assert fetch.resolve_worker_count(MrfxConfig(parallel_ingests=99)) == 7  # clamp to cores-1
+    assert fetch.resolve_worker_count(MrfxConfig(parallel_ingests=1)) == 1
+    monkeypatch.setattr(fetch.os, "cpu_count", lambda: 64)
+    assert fetch.resolve_worker_count(MrfxConfig(parallel_ingests=0)) == 8  # auto capped at 8
+    monkeypatch.setattr(fetch.os, "cpu_count", lambda: 1)
+    assert fetch.resolve_worker_count(MrfxConfig(parallel_ingests=0)) == 1  # never below 1
+
+
+def test_json_backend_detector_runs():
+    # must never crash, and in this venv the fast C backend is present
+    from mrfx.parser import warn_if_slow_json_backend
+    assert warn_if_slow_json_backend() is True
+
+
+def test_file_month_memo_invalidates_on_header_change():
+    # the memo must recompute when last_updated_on arrives late (header-at-EOF)
+    from mrfx.parser import ParseResult
+    r = ParseResult(source_file="rates.json")
+    r.last_updated_on = None
+    first = r.file_month  # falls back (no date in name/header)
+    r.last_updated_on = "2025-03-01"
+    assert r.file_month == "2025-03"  # recomputed, not the stale cached value
+    r.last_updated_on = "2025-08-15"
+    assert r.file_month == "2025-08"
+
+
 def test_conservative_percentile_cannot_exceed_target():
     import pytest
 

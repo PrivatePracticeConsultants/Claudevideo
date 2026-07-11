@@ -65,7 +65,11 @@ class MrfxConfig(BaseModel):
     # queue workers parsing files at the same time (each is a separate CPU
     # process; the database is only ever written by the main process). 1 = one
     # file at a time; 2-3 roughly doubles/triples throughput on 4+ cores.
-    parallel_ingests: int = Field(default=1, ge=1)
+    # parser worker processes. 0 = auto: use (CPU cores - 1), capped at 8 —
+    # the safe default that scales to the machine. A positive value pins it
+    # (still clamped to cores-1). More workers = faster grinds on multi-core;
+    # never changes per-file behavior, so it can't affect the error rate.
+    parallel_ingests: int = Field(default=0, ge=0)
     max_toc_files: int = Field(default=2000, ge=1)  # cap child files enqueued from one TOC
     # JavaScript-only portals: when a pasted page yields no static links,
     # render it in headless Chromium and harvest links from the rendered DOM

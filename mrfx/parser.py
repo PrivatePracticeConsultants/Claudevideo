@@ -29,6 +29,33 @@ from .sniff import open_stream  # noqa: F401  (re-exported for ingest)
 
 log = logging.getLogger(__name__)
 
+
+def warn_if_slow_json_backend() -> bool:
+    """`import ijson` silently falls back to a PURE-PYTHON parser (~10x
+    slower) when its compiled C backend isn't installed — a trap that makes
+    every ingest crawl with no error. Return True if the fast backend is
+    active; warn loudly (once) and return False otherwise. Called at CLI
+    startup so a bad install is visible, not just slow."""
+    # ijson 3.x exposes the selected backend as a NAME STRING
+    # (ijson.backend / ijson.backend_name), e.g. 'yajl2_c' | 'python'.
+    name = str(getattr(ijson, "backend_name", None)
+               or getattr(ijson, "backend", None) or "")
+    fast = "yajl2" in name
+    if not fast:  # definitive cross-version fallback: is parse the C one?
+        try:
+            from ijson.backends import yajl2_c
+            fast = ijson.basic_parse is yajl2_c.basic_parse
+        except Exception:  # noqa: BLE001 — C backend genuinely absent
+            fast = False
+    if fast:
+        return True
+    log.warning(
+        "ijson is running its PURE-PYTHON backend (%s) — parsing will be "
+        "~10x slower. Reinstall in a Python that has a prebuilt ijson wheel "
+        "(pip install --force-reinstall ijson) to get the fast C backend.",
+        name or "python")
+    return False
+
 ACCEPTED_CODE_TYPES = {"CPT", "HCPCS"}
 
 # one provider group: (tin_value, tin_type, npis)
@@ -134,7 +161,19 @@ class ParseResult:
         pass), then the filename's date (payers stamp it: 2026-07_..._rates),
         then the ingestion month as a last resort. The old header-or-today
         rule silently split one publication across two months whenever a
-        dateless file was ingested near a month boundary."""
+        dateless file was ingested near a month boundary.
+
+        Memoized on its inputs: this is read once per emitted row, so the
+        regex used to run millions of times per file for a file-constant
+        value. The cache key recomputes if last_updated_on/source_file
+        change (the header-at-EOF case), so the value stays correct."""
+        key = (self.last_updated_on, self.source_file)
+        if getattr(self, "_fm_key", None) != key:
+            self._fm_key = key
+            self._fm = self._compute_file_month()
+        return self._fm
+
+    def _compute_file_month(self) -> str:
         for candidate in (self.last_updated_on, self.source_file):
             m = re.search(r"(20\d{2})[-_](\d{2})", str(candidate or ""))
             if m and 1 <= int(m.group(2)) <= 12:
