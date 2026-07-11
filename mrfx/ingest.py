@@ -70,7 +70,10 @@ class _ProgressTracker:
         except Exception:  # noqa: BLE001 — progress writes must never break ingest
             pass
         if self.on_bar:
-            self.on_bar(chunk, self.chunks_total, pct)
+            try:
+                self.on_bar(chunk, self.chunks_total, pct)
+            except Exception:  # noqa: BLE001 — a display bar is cosmetic; drop it
+                self.on_bar = None
 
     def finish(self) -> None:
         try:
@@ -78,7 +81,10 @@ class _ProgressTracker:
         except Exception:  # noqa: BLE001
             pass
         if self.on_bar:
-            self.on_bar(self.chunks_total, self.chunks_total, 100.0)
+            try:
+                self.on_bar(self.chunks_total, self.chunks_total, 100.0)
+            except Exception:  # noqa: BLE001
+                self.on_bar = None
 
 
 def qa_report(store: Store, qa_counters: dict, source_file: str) -> dict:
@@ -350,6 +356,9 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
             pf.est_uncompressed_bytes or 0, pf.compressed_bytes, str(tmp_out), progress_path,
         )
         last = -1
+        bar = progress_bar  # LOCAL copy — never rebind the closed-over param
+        # (assigning `progress_bar = None` here would make it local to this
+        # function and UnboundLocalError the `if` read one line up)
         while True:
             try:
                 return fut.result(timeout=2.0)
@@ -362,12 +371,12 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
                     last = prog["chunks_done"]
                     store.update_progress(name, prog["pct"], chunks_done=prog["chunks_done"],
                                           chunks_total=prog["chunks_total"])
-                    if progress_bar:
+                    if bar:
                         try:
-                            progress_bar(prog["chunks_done"], prog["chunks_total"], prog["pct"])
+                            bar(prog["chunks_done"], prog["chunks_total"], prog["pct"])
                         except Exception:  # noqa: BLE001 — a display bar must
                             # never fail the multi-hour parse it decorates
-                            progress_bar = None
+                            bar = None
 
     try:
         try:

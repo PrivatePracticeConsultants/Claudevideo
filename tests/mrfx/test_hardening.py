@@ -197,6 +197,28 @@ def test_cosmetic_failures_never_fail_real_work(cfg, store, monkeypatch):
     assert res["status"] == "done" and res["rows"] > 0  # done despite QA outage
 
 
+def test_progress_bar_that_throws_never_fails_the_ingest(cfg, store, monkeypatch):
+    # a display bar is cosmetic — if it raises (or, as in the regression, the
+    # progress code UnboundLocalErrors), the parse must still complete. Forces
+    # the chunked large-file path so the progress callback actually fires.
+    import mrfx.ingest as ing
+    from mrfx.ingest import ingest_file
+    from tests.mrfx.conftest import drop
+
+    monkeypatch.setattr(ing, "LARGE_FILE_UNCOMPRESSED_BYTES", 1)   # force two-pass
+    monkeypatch.setattr(ing, "CHUNK_COMPRESSED_BYTES", 64)          # many progress ticks
+    calls = {"n": 0}
+
+    def boom(done, total, pct):
+        calls["n"] += 1
+        raise RuntimeError("terminal detached / bar exploded")
+
+    p = drop(cfg, "innetwork_mixed.json", gz=True)
+    res = ingest_file(cfg, store, p, progress_bar=boom)
+    assert res["status"] == "done" and res["rows"] > 0  # parse survived the bad bar
+    assert calls["n"] >= 1  # the bar really did fire (and throw)
+
+
 def test_orphaned_parse_worker_exits_at_chunk_boundary(cfg, tmp_path, monkeypatch):
     # found live: killing the server left its parser workers re-parented to
     # init, burning 85% CPU on multi-GB parses nobody would ever collect.
