@@ -836,6 +836,9 @@ async function loadUrlQueue() {
   const total = Object.values(c).reduce((a, b) => a + b, 0);
   const parts = ["queued", "downloading", "fetched", "expanding", "ingesting", "done", "skipped"]
     .filter((k) => c[k]).map((k) => `${fmtInt(c[k])} ${k}`);
+  // over-size files are their OWN category, not failures — otherwise one big
+  // payer's shards make the failure count look alarming and bury real errors
+  if (c.oversize) parts.push(`<span class="warn-text">${fmtInt(c.oversize)} too big (needs your OK)</span>`);
   if (c.failed) parts.push(`<span class="err-text">${fmtInt(c.failed)} failed</span>`);
   countsEl.innerHTML = parts.join(" · ") +
     (total > d.urls.length ? ` <span class="muted">(showing the newest ${fmtInt(d.urls.length)} of ${fmtInt(total)} links)</span>` : "");
@@ -854,23 +857,29 @@ async function loadUrlQueue() {
   body.innerHTML = d.urls.map((u) => {
     const short = u.url.split("?")[0].replace(/^https?:\/\//, "");
     const shown = short.length > 78 ? short.slice(0, 38) + "…" + short.slice(-37) : short;
-    let statusCell = `<span class="badge ${esc(u.status === "done" ? "done" : u.status === "failed" ? "failed" : u.status === "skipped" ? "skipped" : "processing")}">${esc(u.status)}</span>`;
+    const badgeClass = u.status === "done" ? "done"
+      : u.status === "failed" ? "failed"
+      : u.status === "skipped" ? "skipped"
+      : u.status === "oversize" ? "pending_confirmation"  // amber, not red
+      : "processing";
+    const badgeLabel = u.status === "oversize" ? "too big" : u.status;
+    let statusCell = `<span class="badge ${esc(badgeClass)}">${esc(badgeLabel)}</span>`;
     if (u.status === "downloading" && u.bytes_total > 0) {
       statusCell += `<div class="progress"><div class="progress-fill" style="width:${Math.round(u.progress)}%"></div>
         <span class="progress-label">${(u.bytes_done / 1e6).toFixed(0)} / ${(u.bytes_total / 1e6).toFixed(0)} MB</span></div>`;
     } else if (u.status === "ingesting") {
       statusCell += ` <span class="muted">(see file row below for chunk progress)</span>`;
     }
-    if (u.status === "failed" || u.status === "skipped") {
+    if (u.status === "failed" || u.status === "skipped" || u.status === "oversize") {
       statusCell += ` <button class="btn" style="padding:1px 8px;font-size:11.5px" data-url-retry="${u.id}">retry</button>`;
     }
-    // stopped only by the size ceiling? offer a one-click "download anyway"
+    // over the size ceiling? offer a one-click "download anyway"
     // (the disk-space guard still protects the drive)
-    if ((u.status === "failed" || u.status === "skipped") &&
-        /confirm_over_gb|safety limit/i.test(u.error || "")) {
+    if (u.status === "oversize" ||
+        ((u.status === "failed" || u.status === "skipped") && /confirm_over_gb|safety limit/i.test(u.error || ""))) {
       statusCell += ` <button class="btn" style="padding:1px 8px;font-size:11.5px" title="download and ingest this file even though it is over the size limit — the disk-space check still applies" data-url-force="${u.id}">download anyway</button>`;
     }
-    if (u.status === "queued" || u.status === "failed") {
+    if (u.status === "queued" || u.status === "failed" || u.status === "oversize") {
       statusCell += ` <button class="btn" style="padding:1px 8px;font-size:11.5px" data-url-cancel="${u.id}">skip</button>`;
     }
     let notes = "";

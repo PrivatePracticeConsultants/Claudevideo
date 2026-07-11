@@ -609,12 +609,12 @@ class Store:
             ).fetchall()
             rows += con.execute(
                 "SELECT * FROM url_queue WHERE parent_id IS NOT NULL "
-                "AND status IN ('failed', 'skipped') ORDER BY id DESC LIMIT ?",
+                "AND status IN ('failed', 'skipped', 'oversize') ORDER BY id DESC LIMIT ?",
                 [limit],
             ).fetchall()
             rows += con.execute(
                 "SELECT * FROM url_queue WHERE parent_id IS NOT NULL "
-                "AND status NOT IN ('failed', 'skipped') ORDER BY id DESC LIMIT ?",
+                "AND status NOT IN ('failed', 'skipped', 'oversize') ORDER BY id DESC LIMIT ?",
                 [limit],
             ).fetchall()
             cols = [d[0] for d in con.description]
@@ -751,8 +751,10 @@ class Store:
     # (its content_sha anchors duplicate detection) or in-flight rows (the
     # worker's final write would silently overwrite the change anyway).
     _USER_TRANSITIONS = {
-        "queued": ("failed", "skipped"),
-        "skipped": ("queued", "failed"),
+        # 'oversize' is a too-big-needs-OK terminal state: retry (→queued)
+        # works once the user has raised confirm_over_gb, and skip dismisses it
+        "queued": ("failed", "skipped", "oversize"),
+        "skipped": ("queued", "failed", "oversize"),
     }
 
     def set_url_status_by_id(self, url_id: int, status: str) -> bool:
@@ -776,7 +778,7 @@ class Store:
         are-you-sure size ceiling for THIS file."""
         with self.write_lock, self.connect() as con:
             r = con.execute("SELECT status FROM url_queue WHERE id = ?", [url_id]).fetchone()
-            if not r or r[0] not in ("failed", "skipped"):
+            if not r or r[0] not in ("failed", "skipped", "oversize"):
                 return False
             con.execute(
                 "UPDATE url_queue SET status = 'queued', force_size = true, error = NULL, "

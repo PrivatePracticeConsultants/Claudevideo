@@ -215,8 +215,13 @@ def test_oversize_guard(cfg, store, server):
     add_urls(store, [f"{server}/big_header.bin"])
     drain(cfg, store)
     rec = next(r for r in store.list_urls() if "big_header" in r["url"])
-    assert rec["status"] == "failed"
+    # over-size is its OWN state, not 'failed' (so it never inflates the
+    # failure count or buries a real error)
+    assert rec["status"] == "oversize"
     assert "confirm_over_gb" in rec["error"]
+    # "retry all failed" must NOT re-trigger over-size rows (they'd just re-fail)
+    assert store.requeue_failed() == 0
+    assert next(r for r in store.list_urls() if "big_header" in r["url"])["status"] == "oversize"
 
 
 def test_download_anyway_overrides_size_guard(cfg, store, server):
@@ -226,8 +231,7 @@ def test_download_anyway_overrides_size_guard(cfg, store, server):
     add_urls(store, [f"{server}/rates.json.gz"])
     drain(cfg, store)
     rec = next(r for r in store.list_urls() if "rates.json.gz" in r["url"])
-    assert rec["status"] == "failed" and "download anyway" in rec["error"]
-    # a done/in-flight row can't be forced; only failed/skipped
+    assert rec["status"] == "oversize" and "download anyway" in rec["error"]
     assert store.force_size_requeue(rec["id"]) is True  # the button
     drain(cfg, store)
     rec = next(r for r in store.list_urls() if "rates.json.gz" in r["url"])

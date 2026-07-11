@@ -264,10 +264,12 @@ def _client(cfg: MrfxConfig, verify=None, ua: str | None = None) -> httpx.Client
 
 
 class DownloadError(Exception):
-    def __init__(self, msg: str, status: int | None = None, retryable: bool = False):
+    def __init__(self, msg: str, status: int | None = None, retryable: bool = False,
+                 oversize: bool = False):
         super().__init__(msg)
         self.status = status
         self.retryable = retryable
+        self.oversize = oversize  # tripped confirm_over_gb — not a real failure
 
 
 def download(cfg: MrfxConfig, url: str, dest: Path, progress_cb=None,
@@ -289,7 +291,7 @@ def download(cfg: MrfxConfig, url: str, dest: Path, progress_cb=None,
             f"safety limit ({(max_bytes or 0) / 1e9:.1f} GB). Press "
             "\"download anyway\" on this row to ingest it, or raise "
             "confirm_over_gb in config/mrfx.yaml for all files.",
-            retryable=False,
+            retryable=False, oversize=True,
         )
 
     verify_override = None
@@ -844,8 +846,10 @@ def fetch_url_record(cfg: MrfxConfig, store: Store, rec: dict) -> bool:
             progress_cb=lambda d, t: store.url_progress(url_id, d, t),
             max_bytes=_size_limit_for(cfg, rec))
     except DownloadError as e:
-        log.warning("url %s download failed: %s", url, e)
-        store.update_url(url_id, status="failed", error=str(e))
+        # over the size limit is NOT a failure — it's "too big, needs your OK"
+        # (distinct amber state so it never buries a real error in the count)
+        log.warning("url %s download stopped: %s", url, e)
+        store.update_url(url_id, status="oversize" if e.oversize else "failed", error=str(e))
         # duplicates may have deferred to this row in an earlier life (it
         # ingested once, failed, was retried, and now its signed URL is dead):
         # they hold the kept bytes and must get their promised auto-retry
@@ -909,8 +913,9 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
                 progress_cb=lambda d, t: store.url_progress(url_id, d, t),
                 max_bytes=_size_limit_for(cfg, rec))
         except DownloadError as e:
-            log.warning("url %s download failed: %s", url, e)
-            store.update_url(url_id, status="failed", error=str(e))
+            log.warning("url %s download stopped: %s", url, e)
+            store.update_url(url_id, status="oversize" if e.oversize else "failed",
+                             error=str(e))
             _maybe_queue_prev_month(store, rec, str(e))
             if not e.retryable:
                 dest.unlink(missing_ok=True)
@@ -1075,7 +1080,7 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
                 _meta_path(dup).unlink(missing_ok=True)
         return True
     elif status == "pending_confirmation":
-        store.update_url(url_id, status="failed", kind=pf.file_type,
+        store.update_url(url_id, status="oversize", kind=pf.file_type,
                          error="file exceeds the confirm_over_gb safety limit — press "
                                "\"download anyway\" on this row, or raise confirm_over_gb "
                                "in config/mrfx.yaml")
