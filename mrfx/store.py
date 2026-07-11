@@ -31,6 +31,13 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+# Parquet codec for the rate parts. zstd is ~30-50% smaller than the pyarrow
+# default (snappy) on real payer data, decompresses about as fast, and DuckDB
+# reads it natively — so the store shrinks with no query-speed cost. Mixed
+# snappy/zstd parts coexist fine (compression is per-file metadata), so old
+# parts need no migration; new ingests just get smaller.
+PARQUET_COMPRESSION = "zstd"
+
 RATES_SCHEMA = pa.schema(
     [
         pa.field("payer", pa.string(), nullable=False),
@@ -450,7 +457,7 @@ class Store:
         table = pa.Table.from_pylist(rows, schema=RATES_SCHEMA)
         path = self.rates_dir / f"{file_key(source_file)}.parquet"
         with self.write_lock:
-            pq.write_table(table, path)
+            pq.write_table(table, path, compression=PARQUET_COMPRESSION)
             with self.connect() as con:
                 self._register_views(con)
         return path
@@ -1309,7 +1316,7 @@ class RatesPartWriter:
             return
         table = pa.Table.from_pylist(rows, schema=RATES_SCHEMA)
         if self._writer is None:
-            self._writer = pq.ParquetWriter(self.tmp, RATES_SCHEMA)
+            self._writer = pq.ParquetWriter(self.tmp, RATES_SCHEMA, compression=PARQUET_COMPRESSION)
         self._writer.write_table(table)
         self.rows_written += len(rows)
 

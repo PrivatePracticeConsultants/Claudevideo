@@ -263,7 +263,7 @@ def _parse_worker(cfg: MrfxConfig, path_str: str, name: str, header_defaults: di
     import pyarrow as pa
     import pyarrow.parquet as pq
 
-    from .store import RATES_SCHEMA
+    from .store import PARQUET_COMPRESSION, RATES_SCHEMA
 
     path = Path(path_str)
     file_chunks = max(1, -(-max(compressed_bytes, 1) // CHUNK_COMPRESSED_BYTES))
@@ -312,7 +312,7 @@ def _parse_worker(cfg: MrfxConfig, path_str: str, name: str, header_defaults: di
             return
         table = pa.Table.from_pylist(rows, schema=RATES_SCHEMA)
         if writer is None:
-            writer = pq.ParquetWriter(tmp_out, RATES_SCHEMA)
+            writer = pq.ParquetWriter(tmp_out, RATES_SCHEMA, compression=PARQUET_COMPRESSION)
         writer.write_table(table)
         rows_written += len(rows)
 
