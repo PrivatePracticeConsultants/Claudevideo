@@ -338,7 +338,7 @@ class InNetworkParser:
                         log.warning(
                             "%s: reporting_entity_name appeared after %d rows were already "
                             "written; those rows keep the preflight-seeded payer %r",
-                            self.source_file, self.BATCH_ROWS, r.payer,
+                            self.source_file, r.qa.rows, r.payer,
                         )
                     r.payer = new_payer
                 elif prefix == "version":

@@ -830,7 +830,7 @@ async function loadFiles() {
       <td><span class="badge ${esc(f.status)}">${esc(f.status)}</span>${statusExtra}${progressBar}</td>
       <td class="num">${fmtInt(f.rows_emitted)}</td>
       <td>${qaLine(f.qa)}</td>
-      <td>${warn}${f.error ? `<div class="err-text">${esc(f.error)}</div>` : ""}</td>
+      <td>${warn}${f.error ? `<div class="${f.status === "pending_confirmation" ? "warn-text" : "err-text"}">${esc(f.error)}</div>` : ""}</td>
       <td class="sub">${f.finished_at ? esc(f.finished_at.slice(0, 19)) : ""}</td>
       <td>${f.status === "processing" || f.status === "queued" ? "" : `<button class="btn forget-btn" title="erase this file's rates and free its disk space (re-add its link or file to get it back)" data-forget="${esc(f.filename)}">remove</button>`}</td>
     </tr>`;
@@ -877,7 +877,12 @@ async function loadUrlQueue() {
   const c = d.counts || {};
   const total = Object.values(c).reduce((a, b) => a + b, 0);
   const parts = ["queued", "downloading", "fetched", "expanding", "ingesting", "done", "skipped"]
-    .filter((k) => c[k]).map((k) => `${fmtInt(c[k])} ${k}`);
+    .filter((k) => c[k]).map((k) => k === "skipped"
+      // skips are the app working as designed (duplicates of files already
+      // ingested, files without the target codes) — say so, or a healthy
+      // grind reads as mass failure
+      ? `${fmtInt(c[k])} skipped <span class="muted">(duplicates &amp; non-matches — normal)</span>`
+      : `${fmtInt(c[k])} ${k}`);
   // over-size files are their OWN category, not failures — otherwise one big
   // payer's shards make the failure count look alarming and bury real errors
   if (c.oversize) parts.push(`<span class="warn-text">${fmtInt(c.oversize)} too big (needs your OK)</span>`);
@@ -927,8 +932,16 @@ async function loadUrlQueue() {
     let notes = "";
     if (u.kind === "toc" && u.status === "done") notes = `found ${fmtInt(u.child_count)} files inside — queued below`;
     else if (u.kind === "page" && u.status === "done") notes = `found ${fmtInt(u.child_count)} file links on the page`;
-    // over-size note is amber, not red — it's "your OK needed", not an error
-    else if (u.error) notes = `<span class="${u.status === "oversize" ? "warn-text" : "err-text"}">${esc(u.error)}</span>`;
+    // Color the note by what it actually is: red is reserved for real
+    // failures. Over-size is amber ("your OK needed"), and SKIPPED rows are
+    // neutral — a duplicate of an already-ingested file, a file with none of
+    // the target codes, or an allowed-amounts-only TOC is the app working as
+    // designed, and on a big Blues aggregation duplicates can be MOST rows.
+    // Painting those red made a healthy run read as "the vast majority of
+    // files are showing errors".
+    else if (u.error) notes = `<span class="${
+      u.status === "oversize" ? "warn-text" : u.status === "skipped" ? "muted" : "err-text"
+    }">${esc(u.error)}</span>`;
     return `<tr>
       <td title="${esc(u.url)}">${esc(shown)}</td>
       <td>${esc(KIND_LABEL[u.kind] || u.kind || "…")}</td>
