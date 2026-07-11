@@ -76,3 +76,19 @@ def test_nppes_genuine_empty_result_marks_dead(cfg, store, nppes):
     nppes.payload = json.dumps({"result_count": 0, "results": []}).encode()
     enrich_via_api(cfg, store)
     assert store.unenriched_npis(limit=100) == []
+
+
+def test_concurrent_enrichment_names_every_npi(cfg, store, nppes):
+    # the concurrent path must enrich the WHOLE batch (names + state), not just
+    # the first — this is what makes the dashboard's names/state filter populate.
+    _seed_npis(cfg, store)
+    cfg.enrichment.api_concurrency = 4
+    nppes.payload = json.dumps({"result_count": 1, "results": [{
+        "enumeration_type": "NPI-1",
+        "basic": {"organization_name": "Acme Rehab LLC"},
+        "taxonomies": [{"primary": True, "code": "225100000X", "desc": "Physical Therapist"}],
+        "addresses": [{"address_purpose": "LOCATION", "city": "Austin", "state": "TX"}],
+    }]}).encode()
+    n = enrich_via_api(cfg, store)
+    assert n >= 2 and store.unenriched_npis(limit=100) == []  # all enriched, none left
+    assert "TX" in store.available_states()                    # state now filterable

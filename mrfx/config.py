@@ -29,6 +29,10 @@ class EnrichmentConfig(BaseModel):
     # falling through to API mode and hammering NPPES
     mode: Literal["api", "bulk", "off"] = "api"
     bulk_csv_path: Path | None = None
+    # NPPES API lookups run concurrently so names/states fill in quickly on a
+    # large book instead of one-every-0.15s. Kept modest to stay polite; dial
+    # down to 1 for strictly sequential, or up if NPPES tolerates it.
+    api_concurrency: int = Field(default=8, ge=1, le=32)
 
 
 class ReportBranding(BaseModel):

@@ -708,6 +708,22 @@ function pstrip(pct) {
 function renderBenchmark(out, bench, opp) {
   const mp = bench.mpfs_loaded;
   const t = bench.target_percentile;
+  // Explain flat percentiles instead of letting them look like a bug: within a
+  // single payer the negotiated rate for a code is often ONE fee-schedule
+  // amount across every provider, so P25=Median=P75. A tiny peer count does the
+  // same. Detect it and add a plain-language note.
+  const flat = bench.rows.filter((r) => r.p25 != null && r.p25 === r.p50 && r.p50 === r.p75).length;
+  const thin = bench.rows.filter((r) => (r.n_peers || 0) < 5).length;
+  const n = bench.rows.length || 1;
+  const spreadNote =
+    flat / n >= 0.5
+      ? ` <b>Why are the percentiles the same?</b> For most codes here every peer reports the
+          identical negotiated rate — a payer usually publishes one fee-schedule amount per code
+          across all providers, so P25/Median/P75 collapse to that number. That is the data, not an
+          error. You'll see real spread once you benchmark across multiple payers${
+            thin / n >= 0.5 ? ", or once more peer files are ingested (many codes have very few peers so far)" : ""
+          }.`
+      : "";
   const rows = bench.rows.map((r) => `
     <tr><td>${esc(r.billing_code)}${r.is_timed ? '<span class="timed-tag">15-min</span>' : ""}
       <div class="sub">${esc(r.description || "")}</div></td>
@@ -745,7 +761,7 @@ function renderBenchmark(out, bench, opp) {
       <th class="num">Peers</th><th>Position</th></tr></thead>
       <tbody>${rows}</tbody></table></div>
     ${oppHtml}
-    <div class="bench-note">${esc(bench.basis_note)} Ghost rates: a published rate does not mean a
+    <div class="bench-note">${esc(bench.basis_note)}${spreadNote} Ghost rates: a published rate does not mean a
     peer bills that code — scoping the market to a discipline or code list mitigates this
     (the market definition above shows which filters were actually applied). A published rate
     is not proof a peer collects it — this is directional market positioning.</div>`;

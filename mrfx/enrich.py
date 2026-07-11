@@ -22,92 +22,101 @@ log = logging.getLogger(__name__)
 NPPES_API = "https://npiregistry.cms.hhs.gov/api/"
 
 
+class _EnrichFailure(Exception):
+    """A transient NPPES failure for one NPI — leave it un-enriched to retry."""
+
+
+def _apply_nppes_result(store: Store, npi: str, data: dict) -> None:
+    """Persist one NPPES response. Raises _EnrichFailure for a transient/error
+    body so the NPI is left un-enriched (never poisoned as permanently dead)."""
+    if "results" not in data:
+        # NPPES 200-wraps errors ({"Errors": [...]}, no "results" key). That is
+        # NOT a dead NPI — writing one here would poison it as permanently
+        # un-enrichable, so treat it as a retryable failure.
+        raise _EnrichFailure(str((data.get("Errors") or ["unknown error"])[0]))
+    results = data.get("results") or []
+    if not results:
+        store.save_npi(npi, None, None, None, None, None)  # genuine dead NPI: don't retry forever
+        return
+    r = results[0]
+    basic = r.get("basic", {})
+    name = basic.get("organization_name") or " ".join(
+        p for p in (basic.get("first_name"), basic.get("last_name")) if p
+    ) or None
+    tax = next((t for t in r.get("taxonomies", []) if t.get("primary")), None) or (
+        r.get("taxonomies") or [{}]
+    )[0]
+    addr = next(
+        (a for a in r.get("addresses", []) if a.get("address_purpose") == "LOCATION"),
+        (r.get("addresses") or [{}])[0],
+    )
+    store.save_npi(
+        npi, name, tax.get("code"), tax.get("desc"),
+        addr.get("city"), addr.get("state"),
+        entity_type=r.get("enumeration_type"),
+        address=addr.get("address_1"),
+        zip_code=addr.get("postal_code"),
+        phone=addr.get("telephone_number"),
+    )
+
+
 def enrich_via_api(cfg: MrfxConfig, store: Store, stop: threading.Event | None = None) -> int:
-    """Sequential, polite NPPES lookups for every un-enriched NPI in the store."""
+    """Polite CONCURRENT NPPES lookups for every un-enriched NPI in the store,
+    so names/states fill in quickly on a large book instead of one-every-0.15s.
+    Poisoning guards are preserved: a transient/error response leaves the NPI
+    un-enriched to retry; only a genuine empty result marks it dead. A persistent
+    failure run trips a circuit breaker and pauses until the next run."""
+    import concurrent.futures
+
     from .fetch import ssl_verify
 
+    workers = max(1, int(getattr(cfg.enrichment, "api_concurrency", 8)))
     done = 0
-    consecutive_failures = 0
+    lock = threading.Lock()
+    recent_failures = 0  # trips the circuit breaker when NPPES is persistently down
+    aborted = False
+
     with httpx.Client(headers={"User-Agent": cfg.user_agent}, timeout=30,
                       verify=ssl_verify()) as client:
-        while True:
+
+        def lookup(npi: str) -> None:
+            resp = client.get(NPPES_API, params={"version": "2.1", "number": npi})
+            if resp.status_code == 429:
+                time.sleep(10)
+                resp = client.get(NPPES_API, params={"version": "2.1", "number": npi})
+            if resp.status_code != 200:
+                raise _EnrichFailure(f"HTTP {resp.status_code}")
+            _apply_nppes_result(store, npi, resp.json())
+
+        while not aborted:
+            if stop is not None and stop.is_set():
+                break
             batch = store.unenriched_npis(limit=200)
             if not batch:
                 break
-            for npi in batch:
-                if stop is not None and stop.is_set():
-                    return done
-                try:
-                    resp = client.get(NPPES_API, params={"version": "2.1", "number": npi})
-                    if resp.status_code == 429:
-                        time.sleep(10)
-                        resp = client.get(NPPES_API, params={"version": "2.1", "number": npi})
-                    if resp.status_code != 200:
-                        # NPPES errors return JSON bodies too — an empty
-                        # "results" here is NOT a dead NPI. Leave it
-                        # un-enriched so the next run retries it.
-                        log.warning("NPPES answered HTTP %d for %s — will retry next run",
-                                    resp.status_code, npi)
-                        consecutive_failures += 1
-                        if consecutive_failures >= 20:
-                            log.warning("NPPES failing persistently — pausing enrichment "
-                                        "until the next run (%d NPIs done)", done)
-                            return done
-                        time.sleep(2)
-                        continue
-                    data = resp.json()
-                except (httpx.HTTPError, ValueError) as e:
-                    log.warning("NPPES lookup failed for %s: %s — will retry next run", npi, e)
-                    consecutive_failures += 1
-                    if consecutive_failures >= 20:
-                        log.warning("NPPES unreachable — pausing enrichment until the "
-                                    "next run (%d NPIs done)", done)
-                        return done
-                    time.sleep(2)
-                    continue
-                if "results" not in data:
-                    # NPPES also 200-wraps errors ({"Errors": [...]}, no
-                    # "results" key). That is NOT a dead NPI — writing one
-                    # here would poison it as permanently un-enrichable.
-                    log.warning("NPPES answered 200 without results for %s (%s) — "
-                                "will retry next run", npi,
-                                (data.get("Errors") or ["unknown error"])[0])
-                    consecutive_failures += 1
-                    if consecutive_failures >= 20:
-                        log.warning("NPPES failing persistently — pausing enrichment "
-                                    "until the next run (%d NPIs done)", done)
-                        return done
-                    time.sleep(2)
-                    continue
-                consecutive_failures = 0
-                results = data.get("results") or []
-                if not results:
-                    store.save_npi(npi, None, None, None, None, None)  # dead NPI: don't retry forever
-                    continue
-                r = results[0]
-                basic = r.get("basic", {})
-                name = basic.get("organization_name") or " ".join(
-                    p for p in (basic.get("first_name"), basic.get("last_name")) if p
-                ) or None
-                tax = next((t for t in r.get("taxonomies", []) if t.get("primary")), None) or (
-                    r.get("taxonomies") or [{}]
-                )[0]
-                addr = next(
-                    (a for a in r.get("addresses", []) if a.get("address_purpose") == "LOCATION"),
-                    (r.get("addresses") or [{}])[0],
-                )
-                store.save_npi(
-                    npi, name, tax.get("code"), tax.get("desc"),
-                    addr.get("city"), addr.get("state"),
-                    entity_type=r.get("enumeration_type"),
-                    address=addr.get("address_1"),
-                    zip_code=addr.get("postal_code"),
-                    phone=addr.get("telephone_number"),
-                )
-                done += 1
-                time.sleep(0.15)  # politeness
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+                futs = {ex.submit(lookup, npi): npi for npi in batch}
+                for fut in concurrent.futures.as_completed(futs):
+                    npi = futs[fut]
+                    try:
+                        fut.result()
+                    except (_EnrichFailure, httpx.HTTPError, ValueError) as e:
+                        log.warning("NPPES lookup failed for %s: %s — will retry next run", npi, e)
+                        with lock:
+                            recent_failures += 1
+                            # threshold scales with concurrency: a whole batch of
+                            # in-flight requests can be failing before we react
+                            if recent_failures >= 20 + workers:
+                                aborted = True
+                    else:
+                        with lock:
+                            recent_failures = 0
+                            done += 1
+            if aborted:
+                log.warning("NPPES failing persistently — pausing enrichment until the "
+                            "next run (%d NPIs done)", done)
     if done:
-        log.info("enriched %d NPIs via NPPES API", done)
+        log.info("enriched %d NPIs via NPPES API (%d-way concurrent)", done, workers)
     return done
 
 
