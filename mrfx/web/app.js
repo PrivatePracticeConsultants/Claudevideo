@@ -90,7 +90,7 @@ async function loadStats() {
     const s = await api("/api/stats");
     let html =
       `<b>${fmtInt(s.rates)}</b> rate rows · <b>${fmtInt(s.tins)}</b> TINs · ` +
-      `<b>${s.payers}</b> payer${s.payers === 1 ? "" : "s"} · <b>${s.files_done}</b> files`;
+      `<b>${s.payers}</b> payer${s.payers === 1 ? "" : "s"} · <b>${fmtInt(s.files_done)}</b> files`;
     const e = s.enrichment;
     if (e && e.total > 0) {
       // names + states come from NPPES enrichment, which runs in the
@@ -113,7 +113,7 @@ async function loadStateOptions() {
   try {
     const { states } = await api("/api/states");
     const dl = $("#state-options");
-    if (dl) dl.innerHTML = (states || []).map((s) => `<option value="${s}">`).join("");
+    if (dl) dl.innerHTML = (states || []).map((s) => `<option value="${esc(s)}">`).join("");
   } catch { /* filter still works as free text */ }
 }
 

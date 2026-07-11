@@ -1097,10 +1097,18 @@ class Store:
         (an empty result then clearly means 'no rates there yet', not a bug)."""
         with self.connect() as con:
             try:
+                # union both directories: the state filter applies on every
+                # grain, and an NPI-grain-only state lives in npi_directory but
+                # not necessarily in a tin_directory row's aggregated `states`.
                 rows = con.execute(
                     """
-                    SELECT DISTINCT unnest(states) AS s FROM tin_directory
-                    WHERE states IS NOT NULL AND len(states) > 0
+                    SELECT DISTINCT s FROM (
+                        SELECT unnest(states) AS s FROM tin_directory
+                        WHERE states IS NOT NULL AND len(states) > 0
+                        UNION
+                        SELECT state AS s FROM npi_directory WHERE state IS NOT NULL
+                    )
+                    WHERE s IS NOT NULL AND s <> ''
                     ORDER BY s
                     """
                 ).fetchall()
