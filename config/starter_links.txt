@@ -8,7 +8,7 @@
 # indexes expand, portals are crawled, duplicates and drug/allowed-amounts
 # files are skipped, and files over confirm_over_gb wait for your go-ahead.
 
-# ---- 33 auto-queueable sources ----
+# ---- 36 auto-queueable sources ----
 # Highmark BCBS West Virginia
 https://mrfdata.hmhs.com/files/443/wv/inbound/local/{FIRST_OF_MONTH}_Highmark_Blue_Cross_Blue_Shield_of_West_Virginia_index.json
 
@@ -109,6 +109,16 @@ https://hioscar-cms-tic-us-east-1.s3.amazonaws.com/oscar/{FIRST_OF_MONTH}_oscar_
 
 # Anthem / Elevance national master index — 14 states (set confirm_over_gb: 12 first)
 https://antm-pt-prod-dataz-nogbd-nophi-us-east1.s3.amazonaws.com/anthem/{FIRST_OF_MONTH}_anthem_index.json.gz
+
+# SelectHealth (Intermountain — UT / ID / NV; directory of ~125 per-plan indexes,
+# mid-month dates — the app lifts the current links off this listing itself)
+https://ebu.intermountainhealthcare.org/selecthealth/transparencyincoverage/
+
+# Moda Health (OR / AK / TX — ModaSelect book; Connexus/Affinity swap the plan name)
+https://mrf.modahealth.com/mrf/Moda/{FIRST_OF_MONTH}_moda_ModaSelect_index.json
+
+# First Health PPO via Healthgram (Aetna's rental network — stable undated TOC)
+https://mrf.healthgram.com/mrfiles/FRST/FirstHealth_index.json
 
 # ---- portals that need a browser (open, click through, paste the file links) ----
 #   Optum Health (transparency portal):  https://transparency-in-coverage.optum.com/

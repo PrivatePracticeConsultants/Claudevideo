@@ -233,6 +233,46 @@ sources:
       pricing and are skipped at queue time. Employer plans under an opt-out
       book live at private-transparency-in-coverage.uhc.com.
 
+  # ---- Regional non-Blues & rental networks ----
+  - name: SelectHealth (Intermountain — Utah / Idaho / Nevada)
+    url: https://ebu.intermountainhealthcare.org/selecthealth/transparencyincoverage/
+    kind: page
+    queueable: true
+    verified: "2026-07-11"
+    notes: >-
+      Plain directory listing of ~125 per-plan CMS TOC index files (v2.0).
+      Dates are MID-month and irregular (e.g. 2026-06-11), so this listing
+      page is the stable entry — the app lifts the current index links off it
+      automatically (verified: 40 TOC children queued at the default cap;
+      raise max_toc_files for the full book). Each TOC's in_network files are
+      .json.gz on the same host.
+
+  - name: Moda Health (Oregon / Alaska / Texas)
+    url: https://mrf.modahealth.com/mrf/Moda/{FIRST_OF_MONTH}_moda_ModaSelect_index.json
+    kind: toc
+    queueable: true
+    verified: "2026-07-11"
+    notes: >-
+      CMS TOC v2.0.0, clean first-of-month dated path (2026-07-01 live).
+      Verified expansion: 13 in-network file children queued. Sibling books
+      swap the plan segment: _moda_Connexus_index.json and
+      _moda_Affinity_index.json at the same path; the full per-employer list
+      is on https://www.modahealth.com/privacy-center/machine-readable-files.shtml
+      (static page — also pasteable directly).
+
+  - name: First Health PPO via Healthgram (national rental network)
+    url: https://mrf.healthgram.com/mrfiles/FRST/FirstHealth_index.json
+    kind: toc
+    queueable: true
+    verified: "2026-07-11"
+    notes: >-
+      Stable UNdated path. CMS TOC v1.6.1 that cascades: it lists a nested
+      dated TOC which lists 20 in-network rate files (hosted on
+      mrf.healthsparq.com). Verified: nested TOC child queued and its 20
+      rate-file locations confirmed live. First Health is Aetna's rental
+      PPO network — this is a direct plain-JSON route to it that needs no
+      browser (unlike health1.firsthealth.com, which is a JS portal).
+
   - name: Optum Health (transparency portal)
     url: https://transparency-in-coverage.optum.com/
     kind: portal

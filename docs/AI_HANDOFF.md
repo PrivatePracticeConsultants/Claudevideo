@@ -65,7 +65,15 @@ Two codebases live in this repo:
    parquet is durable). The CLI progress bar is dropped on error, not fatal.
    Parser workers exit at the next chunk boundary if their parent dies
    (`os.getppid` check) — a SIGTERM'd server must not leave orphans burning
-   CPU on parses nobody will collect.
+   CPU on parses nobody will collect. `_finish_file` (the post-success move
+   of a source out of the inbox) is HOUSEKEEPING and never raises — on
+   Windows, antivirus/indexer locks routinely throw there, and letting that
+   escape flipped a fully-successful ingest to 'failed'. When Playwright's
+   Chromium is missing, `_launch` auto-downloads it once
+   (`python -m playwright install chromium`; `render_auto_install: false`
+   or PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD opts out) and retries before
+   surfacing the manual fix; the missing-browser message match is loose on
+   purpose (Playwright rewords it across versions).
 4. **Honesty contract.** Never fabricate: unverifiable registry links are
    badged unverified; drug/allowed-amounts files are skipped with the reason;
    0-row files stay 0 honestly; per-file payer attribution comes from inside
@@ -93,12 +101,22 @@ Two codebases live in this repo:
    after enrichment lands (geographic benchmarks join tin_directory's
    states/cities). Entity-grain rate = median of member-TIN rates — the
    methodology text says exactly that, never "distinct published values".
-   MPFS codes are normalized like billing codes before matching.
+   MPFS codes are normalized like billing codes before matching. Payer
+   names are free text WITH COMMAS ("..., a Division of HCSC") — the
+   `?payer=` filter travels as repeated params (`_qp` + FilterSet's
+   `multi()`), never comma-joined/split, or one name shatters into two
+   that match nothing.
 4b. **NPPES poisoning guard.** Only a genuine HTTP-200 body WITH a "results"
    key (empty list) may mark an NPI dead. Non-200s AND 200-wrapped error
-   bodies ({"Errors": [...]}) leave the NPI un-enriched for retry; 20
-   consecutive failures pause the run. `unenriched_npis` serves only
-   well-formed 10-digit ids so junk from messy files can't wedge the loop.
+   bodies ({"Errors": [...]}) leave the NPI un-enriched for retry; a
+   persistent failure run (20 + workers) trips the circuit breaker and
+   pauses until the next run. Lookups run CONCURRENTLY
+   (`enrichment.api_concurrency`, default 8) so names/states fill fast;
+   `unenriched_npis` serves only well-formed 10-digit ids so junk from
+   messy files can't wedge the loop. `/api/stats` exposes enrichment
+   progress (named/total/remaining) and `/api/states` the filterable
+   states — the dashboard shows both so an incomplete state filter reads
+   as "still identifying", not "broken".
 5. **Idempotency / crash-resume.** Kill anything at any time: `.part`
    downloads resume via HTTP Range guarded by an If-Range validator (`.val`
    sidecar — republished content restarts instead of splicing); in-flight
@@ -107,12 +125,13 @@ Two codebases live in this repo:
    startup, before any worker thread, so it never races a live ingest);
    re-ingest atomically replaces that file's part — never duplicates rows.
    Content-sha dedup skips byte-identical files from other domains; the
-   tie-break is asymmetric on row id, so two twins racing each other
-   resolve one-proceeds/one-skips. A skip against a still-*ingesting* twin
-   keeps its downloaded bytes and is auto-revived (skipped→queued) if that
-   twin later fails. Known residual: manually retrying a *failed* lower-id
-   row while its higher-id twin is mid-ingest can double-parse — wasted
-   work, not duplicated rows, because per-file parts replace atomically.
+   cheap pre-ingest check uses row-id ordering, but the AUTHORITATIVE guard
+   is `claim_content_ingest` — an atomic check-and-claim under the write
+   lock right before ingest, so exactly one twin per content ingests no
+   matter the order or timing (a retried lower-id row can no longer slip
+   past a higher-id twin mid-ingest). A skip against a still-*ingesting*
+   twin keeps its downloaded bytes and is auto-revived (skipped→queued) if
+   that twin later fails.
    Auto-revival touches ONLY kind='duplicate' skipped rows — rows the user
    skipped or forgot share the sha but must never resurrect behind their
    back. Recovered 'fetched' rows whose download + .fetchmeta sidecar
@@ -147,7 +166,10 @@ Two codebases live in this repo:
    30M-row store means a ~30M-group aggregation whose spill exceeded 27 GB of
    disk when it was materialized. No `string_agg(DISTINCT …)` in rollups
    (cannot spill); DuckDB `memory_limit` is 40% RAM clamped [2,12] GB.
-   Rollup rebuilds are batched (`ROLLUP_BATCH_FILES`), give up after 3
+   Rollup rebuilds are batched (`ROLLUP_BATCH_FILES`), refresh on a 90s
+   staleness timer mid-grind (`ROLLUP_MAX_STALE_SECONDS` — the dashboard
+   reads the rollups, so without this, filters looked broken on data that
+   "was there"), give up after 3
    failures (raw data is safe), and never run per-file during queue grinds.
    Above ~15M raw rows they build in hash-partitioned slices (the partition
    column is in every GROUP BY key — slice-union ≡ single shot) inside ONE
@@ -233,7 +255,7 @@ retry button reachable.
 
 ## Step 7b — The source catalog is the map
 
-`config/known_sources.yaml` holds 33 auto-queueable sources + ~20 probed
+`config/known_sources.yaml` holds 37 auto-queueable sources + 21 probed
 portals, each with verified dates and real row counts — treat it as ground
 truth for "does this source work and what should it yield". The largest
 verified single-file ingests: Cigna CHLIC 243.4M rows, Aetna CA 83.7M, UHC

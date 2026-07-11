@@ -172,14 +172,17 @@ aren't part of that comparison.)
   mrfx add --file config/starter_links.txt
   ```
 
-  That queues 33 sources (Highmark's 15 hosted Blue plans, BCBS Mississippi,
+  That queues 36 sources (Highmark's 15 hosted Blue plans, BCBS Mississippi,
   BCBS Tennessee, Cigna, BCBS South and North Carolina, CareFirst, Molina,
   Kaiser, Aetna, Harvard Pilgrim, Regence, Oscar, the 14-state Anthem
   master index,
   Centene/Ambetter's all-states page, the Blue KC / BCBS Michigan /
-  BCBS Louisiana hubs, and UnitedHealthcare's national portal —
-  Molina/Kaiser/Aetna/Harvard Pilgrim/Regence/Oscar need the one-time
-  Playwright install from Step 3's note (the starter-links FILE swaps Oscar
+  BCBS Louisiana hubs, UnitedHealthcare's national portal, SelectHealth
+  (Utah/Idaho/Nevada), Moda Health (Oregon/Alaska/Texas), and the First
+  Health PPO rental network —
+  Molina/Kaiser/Aetna/Harvard Pilgrim/Regence/Oscar need the headless
+  browser, which the app now downloads for itself on first use (the
+  starter-links FILE swaps Oscar
   for a browser-free monthly index), and Anthem needs confirm_over_gb: 12).
   Each one
   expands on its own — expect thousands of files to queue and let it run.

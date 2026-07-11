@@ -186,7 +186,7 @@ badge and are never displayed as authoritative; confirming a URL persists it to
 
 `config/known_sources.yaml` is a shipped catalog of every payer entry point
 this app has been live-tested against — each entry carries its verification
-date and what happened (files listed, rows ingested, quirks). 33 entries are
+date and what happened (files listed, rows ingested, quirks). 37 entries are
 **auto-queueable** (Highmark's 15 hosted Blue plans incl. FL/AZ/ID/MN/LA/NE,
 BCBS Mississippi's stable TOC, BCBS Tennessee's /tcr directory page,
 Cigna's signed-manifest page, BCBS South Carolina's CloudFront indexes,
@@ -199,7 +199,10 @@ swaps Oscar for its bounded monthly S3 index, which needs no browser),
 Anthem/Elevance's
 14-state master index (10.5 GB — needs confirm_over_gb: 12),
 Centene/Ambetter's all-states page, the Sapphire hubs of Blue KC, BCBS
-Michigan, and BCBS Louisiana, and UnitedHealthcare's national portal); the
+Michigan, and BCBS Louisiana, UnitedHealthcare's national portal,
+SelectHealth's per-plan index directory (UT/ID/NV), Moda Health's
+first-of-month TOCs (OR/AK/TX), and the First Health PPO rental network
+via Healthgram's stable TOC); the
 rest are portals that need a browser click (Humana, HCSC,
 BCBS AL/MA/RI/VT/KS, Wellmark, Horizon NJ,
 Premera, Priority Health, HMSA, Blue Shield
