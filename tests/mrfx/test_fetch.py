@@ -210,6 +210,36 @@ def test_duplicate_of_ingesting_twin_kept_and_revived(cfg, store, server, http_r
     assert rec_b["status"] == "done" and rec_b["rows_emitted"] > 0
 
 
+def test_higher_id_ingesting_twin_still_dedups_low_id_retry(cfg, store, server, http_root):
+    # Regression: the cheap pre-ingest check uses queue-id order, so a LOWER-id
+    # row (e.g. one that failed transiently and got re-queued) would slip past a
+    # HIGHER-id twin that is already ingesting and ingest the same bytes twice.
+    # The atomic claim right before ingest must catch it regardless of id order.
+    import hashlib
+
+    from mrfx.fetch import process_url_record
+
+    mirror = http_root / "lowid_rates.json.gz"
+    mirror.write_bytes((http_root / "rates.json.gz").read_bytes())
+    sha = hashlib.sha256(mirror.read_bytes()).hexdigest()
+
+    # low-id row is the one we process (simulating a late retry); the twin that
+    # is already ingesting was queued AFTER it, so it has a HIGHER id.
+    add_urls(store, [f"{server}/lowid_rates.json.gz"])
+    add_urls(store, [f"{server}/rates.json.gz?copy=hi"])
+    hi = next(r for r in store.list_urls() if "copy=hi" in r["url"])
+    lo = next(r for r in store.list_urls() if "lowid" in r["url"])
+    assert lo["id"] < hi["id"]
+    store.update_url(hi["id"], status="ingesting", content_sha=sha)
+
+    process_url_record(cfg, store, store.next_queued_url())
+    lo = next(r for r in store.list_urls() if "lowid" in r["url"])
+    assert lo["status"] == "skipped" and lo["kind"] == "duplicate"  # deferred, not ingested
+    # and the store never got a second copy of the rows
+    with store.connect() as con:
+        assert con.execute("SELECT count(*) FROM url_queue WHERE status='ingesting'").fetchone()[0] == 1
+
+
 def test_oversize_guard(cfg, store, server):
     cfg.confirm_over_gb = 64 / 1e9  # 64 bytes — the 128-byte file trips it
     add_urls(store, [f"{server}/big_header.bin"])

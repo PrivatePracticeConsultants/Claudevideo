@@ -265,6 +265,24 @@ def test_prefetch_reuses_kept_download_never_redownloads(cfg, store, tmp_path):
     assert dest.exists()  # bytes untouched
 
 
+def test_successful_ingest_stays_done_when_file_move_fails(cfg, store, monkeypatch):
+    # Windows antivirus/indexer can lock the just-written source file for a
+    # moment; the post-success move into processed/ must NOT be able to flip an
+    # already-'done' ingest to 'failed' and scare the user about good data.
+    import mrfx.ingest as ing
+    from mrfx.ingest import ingest_file
+    from tests.mrfx.conftest import drop
+
+    def boom(*a, **k):
+        raise PermissionError("[WinError 32] file is in use by another process")
+
+    monkeypatch.setattr(ing.shutil, "move", boom)
+    p = drop(cfg, "innetwork_mixed.json")
+    res = ingest_file(cfg, store, p)
+    assert res["status"] == "done" and res["rows"] > 0        # ingest succeeded
+    assert store.file_status(p.name)["status"] == "done"      # NOT flipped to failed
+
+
 class _FakeChromium:
     """Stand-in for pw.chromium: raise the missing-browser error until Chromium
     is 'downloaded', then hand back a sentinel browser."""

@@ -153,18 +153,28 @@ def _now() -> dt.datetime:
 
 
 def _finish_file(cfg: MrfxConfig, path: Path, ok: bool) -> None:
-    """Move a fully-processed file out of the inbox (config-controlled)."""
+    """Move a fully-processed file out of the inbox (config-controlled).
+
+    This is HOUSEKEEPING: the files-table status and the parquet rows are the
+    real record, so a move failure must never propagate. On Windows the source
+    file is routinely locked for a moment by antivirus or the search indexer
+    just after we write it — letting that OSError escape here would flip an
+    already-successful ingest to 'failed' in the caller's except block, scaring
+    a non-technical user with a failure on data that actually ingested fine.
+    Log it and leave the file in place (a re-scan sees status='done' and skips
+    it)."""
     if not path.exists():
         return
-    if not ok:
-        dest = cfg.failed_dir / path.name
-        cfg.failed_dir.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(path), dest)
-        return
-    if cfg.move_processed and cfg.inbox_dir in path.parents:
-        dest = cfg.processed_dir / path.name
-        cfg.processed_dir.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(path), dest)
+    try:
+        if not ok:
+            cfg.failed_dir.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(path), cfg.failed_dir / path.name)
+        elif cfg.move_processed and cfg.inbox_dir in path.parents:
+            cfg.processed_dir.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(path), cfg.processed_dir / path.name)
+    except OSError as e:
+        log.warning("could not move %s out of the inbox (%s) — the file's data is "
+                    "safe and its status is unchanged; leaving it in place", path.name, e)
 
 
 # ---------------------------------------------------------------------------
@@ -674,10 +684,7 @@ def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight
     except Exception as e:  # noqa: BLE001 — fault isolation is the contract here
         log.exception("ingest failed for %s", name)
         store.upsert_file(name, status="failed", error=f"{type(e).__name__}: {e}", finished_at=_now())
-        try:
-            _finish_file(cfg, path, ok=False)
-        except OSError:
-            pass
+        _finish_file(cfg, path, ok=False)  # never raises; the row is already 'failed'
         return {"status": "failed", "error": str(e)}
 
 

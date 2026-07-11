@@ -663,6 +663,41 @@ class Store:
             ).fetchone()
         return (row[0], row[1]) if row else None
 
+    def claim_content_ingest(self, content_sha: str, url_id: int,
+                             kind: str | None, filename: str | None) -> tuple[str, str] | None:
+        """Atomically decide whether THIS row may ingest its content, done
+        right before the ingest under the write lock so the twin-check and the
+        status flip to 'ingesting' are ONE indivisible step.
+
+        Returns (twin_url, twin_status) when a byte-identical twin is already
+        'done' or 'ingesting' and this row must defer; returns None after
+        winning the claim (this row's status is set to 'ingesting' with the
+        given kind/filename).
+
+        This is the authoritative dedup guard. Unlike the cheap pre-ingest
+        skip in `find_url_with_same_content`, it does NOT rely on queue-id
+        ordering: because the check and the set happen together under the lock,
+        exactly one twin per content wins no matter the order or timing — which
+        closes the hole where two twins processed concurrently both pass the
+        earlier check, or a lower-id twin arrives late via a retry while a
+        higher-id twin is already ingesting, and the same bytes get ingested
+        twice (inflating source_count)."""
+        with self.write_lock, self.connect() as con:
+            if content_sha:
+                row = con.execute(
+                    "SELECT url, status FROM url_queue WHERE content_sha = ? AND id != ? "
+                    "AND status IN ('done', 'ingesting') "
+                    "ORDER BY (status = 'done') DESC, id LIMIT 1",
+                    [content_sha, url_id],
+                ).fetchone()
+                if row:
+                    return (row[0], row[1])
+            con.execute(
+                "UPDATE url_queue SET status = 'ingesting', kind = ?, filename = ? WHERE id = ?",
+                [kind, filename, url_id],
+            )
+        return None
+
     def revive_skipped_duplicates(self, content_sha: str, failed_id: int) -> int:
         """The in-flight twin this sha's duplicates deferred to has FAILED:
         re-queue them. Their downloads were kept on disk, so they ingest
@@ -1080,7 +1115,8 @@ class Store:
                 """
                 SELECT count(*), count(*) FILTER (WHERE org_name IS NOT NULL)
                 FROM npi_directory
-                WHERE npi IN (
+                WHERE regexp_full_match(npi, '[0-9]{10}')  -- same population as `total`
+                  AND npi IN (
                     SELECT npi FROM rates
                     UNION
                     SELECT tin_value FROM rates WHERE tin_is_really_npi AND tin_value IS NOT NULL
@@ -1112,7 +1148,14 @@ class Store:
                     ORDER BY s
                     """
                 ).fetchall()
-            except Exception:  # noqa: BLE001 — no rows/view yet on a fresh store
+            except Exception as e:  # noqa: BLE001 — no rows/view yet on a fresh store
+                # A fresh store legitimately has no tin_directory view yet, so
+                # an empty result is normal — but log unexpected errors so a
+                # real problem (a broken view, a lock) isn't indistinguishable
+                # from "no data yet" forever.
+                import logging as _logging
+                _logging.getLogger(__name__).debug(
+                    "available_states query returned nothing (%s)", e)
                 return []
         return [r[0] for r in rows if r[0]]
 

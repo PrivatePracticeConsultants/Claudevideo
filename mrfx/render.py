@@ -150,7 +150,17 @@ def _launch(pw):
     try:
         return pw.chromium.launch(**kwargs)
     except Exception as e:  # noqa: BLE001 — retry with a discovered binary
-        if "doesn't exist" not in str(e):
+        # Match the "browser was never installed" family of messages loosely:
+        # Playwright's exact wording drifts across versions ("Executable
+        # doesn't exist at …", "please run the following command", "playwright
+        # install"). Being liberal here keeps the auto-download self-heal
+        # working after a Playwright bump instead of silently degrading to
+        # "paste the links yourself". A genuinely different launch failure
+        # (crash, bad flag) won't match and is re-raised.
+        msg = str(e).lower()
+        if not any(s in msg for s in ("doesn't exist", "does not exist",
+                                      "playwright install", "please run",
+                                      "executable", "no such file")):
             raise
         exe = _find_chromium()
         if exe is not None:

@@ -1070,7 +1070,24 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
     # in-network rate file or standalone provider-reference file: run the
     # normal (chunked) ingest in place. Deliberately NOT moved into the inbox —
     # the folder watcher would race the queue worker on the same file.
-    store.update_url(url_id, status="ingesting", kind=pf.file_type, filename=dest.name)
+    #
+    # Atomically claim this content for ingest. A byte-identical twin may have
+    # started or finished ingesting during our preflight — or be racing us in
+    # another processor thread — and the cheap check above uses queue-id order,
+    # which a retry can defeat. This check+claim is one locked step, so exactly
+    # one twin per content ingests; a loser defers (and revives if we later
+    # fail, via the kept download).
+    twin2 = store.claim_content_ingest(content_sha, url_id, pf.file_type, dest.name)
+    if twin2:
+        twin2_url = twin2[0]
+        _write_meta(dest, content_sha, final_url)
+        store.update_url(url_id, status="skipped", kind="duplicate",
+                         error="identical to a link currently being processed "
+                               f"({twin2_url.split('?')[0]}) — will retry automatically "
+                               "from the kept download if that one fails")
+        log.info("%s — byte-identical to %s (claimed concurrently); skipped",
+                 url, twin2_url.split("?")[0])
+        return False
     try:
         result = ingest_file(cfg, store, dest, pf=pf, progress_bar=progress_bar,
                               rebuild_rollups=rebuild_rollups)
