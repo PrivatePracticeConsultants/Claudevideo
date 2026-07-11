@@ -640,3 +640,143 @@ sources:
     notes: >-
       JavaScript page (probed — no static links). The Minnesota partnership
       book is queueable via the Highmark-hosted index above.
+
+  # ---- Browser-only portals from the mrfdatasolutions.com directory ----
+  # Probed 2026-07-11: these build their file list with JavaScript behind a
+  # search form and/or bot-check, so they are NOT auto-queueable. Open each in
+  # your browser, reach the file list, then right-click the .json/.json.gz/.zip
+  # links (or the "Table of Contents"/"index" link) -> Copy link address ->
+  # paste into the dashboard's "Paste file links" box. One TOC link expands
+  # into all the rate files inside it.
+  - name: Christus Health Plan (TX/LA/NM)
+    url: https://christushealthplan.healthsparq.com/healthsparq/public/#/one/insurerCode=CHRISTUS_I&brandCode=CHRISTUS/machine-readable-transparency-in-coverage
+    kind: portal
+    queueable: false
+    verified: "2026-07-11"
+    notes: >-
+      HealthSparq portal (reCAPTCHA + plan-search gated — the headless renderer
+      loads it but the file list is behind the search/bot-check). To load: open
+      the link, accept the terms, use the machine-readable-files search, then
+      copy the Table-of-Contents / in-network file links and paste them here.
+
+  - name: HAP — Health Alliance Plan (Michigan)
+    url: https://www.hap.org/transparency
+    kind: portal
+    queueable: false
+    verified: "2026-07-11"
+    notes: >-
+      HealthSparq portal (hap.healthsparq.com — search/bot-check gated). Open
+      the page, go to the machine-readable-files list, and paste the file/TOC
+      links here.
+
+  - name: Health New England (Massachusetts)
+    url: https://healthnewengland.org/transparency-coverage
+    kind: portal
+    queueable: false
+    verified: "2026-07-11"
+    notes: >-
+      HealthSparq portal (healthnewengland.healthsparq.com). Open, reach the
+      machine-readable file list, copy the .json/.json.gz links, paste here.
+
+  - name: SummaCare (Ohio)
+    url: https://www.summacare.com/
+    kind: portal
+    queueable: false
+    verified: "2026-07-11"
+    notes: >-
+      HealthSparq portal (summacareweb.healthsparq.com). Navigate to the
+      machine-readable-files page and paste its file/TOC links here.
+
+  - name: Univera Healthcare (western New York)
+    url: https://www.univerahealthcare.com/about/developer-information/transparency-coverage-mrf
+    kind: portal
+    queueable: false
+    verified: "2026-07-11"
+    notes: >-
+      HealthSparq portal (Excellus family). NOTE the related Excellus book is
+      allowed-amounts-only (no negotiated rates); check Univera's list has
+      in-network-rates files before pasting. Open, reach the list, paste links.
+
+  - name: ConnectiCare (Connecticut)
+    url: https://www.connecticare.com/about-us/transparency-coverage-compliance
+    kind: portal
+    queueable: false
+    verified: "2026-07-11"
+    notes: >-
+      Sapphire365 JS portal (transparency.connecticare.com — no reachable
+      static index on probe). Open in a browser, reach the machine-readable
+      file list, and paste the .json/TOC links here.
+
+  - name: CommunityCare (Oklahoma)
+    url: https://www.ccok.com/transparency-coverage-information
+    kind: portal
+    queueable: false
+    verified: "2026-07-11"
+    notes: >-
+      JavaScript portal (no static links on probe). Open the page, reach the
+      machine-readable file list, copy the file links and paste them here.
+
+  - name: Network Health (Wisconsin)
+    url: https://networkhealth.com/price-transparency
+    kind: portal
+    queueable: false
+    verified: "2026-07-11"
+    notes: >-
+      JavaScript portal (no static links on probe). Open, reach the file list,
+      paste the .json/.json.gz/TOC links here.
+
+  - name: Optima Health / Sentara (Virginia)
+    url: https://www.optimahealth.com/
+    kind: portal
+    queueable: false
+    verified: "2026-07-11"
+    notes: >-
+      JavaScript portal. Find the transparency-in-coverage / machine-readable
+      files page, then paste its file links here.
+
+  - name: UPMC Health Plan (Pennsylvania)
+    url: https://www.upmchealthplan.com/
+    kind: portal
+    queueable: false
+    verified: "2026-07-11"
+    notes: >-
+      JavaScript (.aspx) portal — the /mrf page returns an empty shell on
+      probe. Open in a browser, reach the machine-readable file list, and paste
+      the file/TOC links here.
+
+  - name: Viva Health (Alabama)
+    url: https://www.vivahealth.com/
+    kind: portal
+    queueable: false
+    verified: "2026-07-11"
+    notes: >-
+      JavaScript portal. Locate the transparency / machine-readable-files page
+      and paste its file links here.
+
+  - name: Capital Health Plan (Florida)
+    url: https://capitalhealth.com/transparency-in-coverage
+    kind: portal
+    queueable: false
+    verified: "2026-07-11"
+    notes: >-
+      JavaScript portal (no static MRF links on probe). Open, reach the file
+      list, paste the .json/TOC links here.
+
+  - name: Western Health Advantage (California)
+    url: https://www.westernhealth.com/
+    kind: portal
+    queueable: false
+    verified: "2026-07-11"
+    notes: >-
+      JavaScript portal (rate-limited on probe). Open in a browser, reach the
+      machine-readable file list, and paste its links here.
+
+  - name: EmblemHealth (New York)
+    url: https://transparency.emblemhealth.com/
+    kind: portal
+    queueable: false
+    verified: "2026-07-11"
+    notes: >-
+      Server-rendered DataTables portal (file rows load by AJAX — no inline
+      static links on probe). Open in a browser, let the table load, and copy
+      the file links from it into the paste box here.

@@ -204,11 +204,16 @@ SelectHealth's per-plan index directory (UT/ID/NV), Moda Health's
 first-of-month TOCs (OR/AK/TX), the First Health PPO rental network
 via Healthgram's stable TOC, Tufts Health Public Plans (MA), and Security
 Health Plan's per-employer zip-TOC listing (WI)); the
-rest are portals that need a browser click (Humana, HCSC,
+rest (34) are portals that need a browser click (Humana, HCSC,
 BCBS AL/MA/RI/VT/KS, Wellmark, Horizon NJ,
 Premera, Priority Health, HMSA, Blue Shield
-of CA, Excellus, Capital BC, IBX, BCBS MN, UHS — probed; JavaScript-only or
-firewalled) with instructions. Monthly-dated URLs carry
+of CA, Excellus, Capital BC, IBX, BCBS MN, UHS, plus a batch from the
+mrfdatasolutions directory — Christus, HAP, Health New England, SummaCare,
+Univera, ConnectiCare, CommunityCare OK, Network Health WI, Optima, UPMC,
+Viva, Capital Health FL, Western Health, EmblemHealth — probed;
+JavaScript-only or firewalled) with **step-by-step manual instructions in
+each entry's Notes** (open in a browser, reach the file list, right-click the
+`.json`/`.json.gz`/TOC links, Copy link address, paste into the Files tab). Monthly-dated URLs carry
 a `{FIRST_OF_MONTH}` placeholder resolved at queue time so the catalog never
 goes stale. Load them via `mrfx add --known`, the dashboard's **"Queue tested
 payer indexes"** button, or browse with **"Show tested sources"**

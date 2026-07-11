@@ -272,11 +272,28 @@
         <button class="btn" id="url-known-list" title="Show the list of payer sources this app has been tested against">Show tested sources</button>
         <span id="url-msg" class="muted"></span>
       </div>
-      <div id="known-wrap" style="display:none;margin-top:10px" class="tablewrap">
-        <table>
-          <thead><tr><th>Payer source</th><th>Type</th><th>Verified</th><th>Notes</th></tr></thead>
-          <tbody id="known-body"></tbody>
-        </table>
+      <div id="known-wrap" style="display:none;margin-top:10px">
+        <div class="note-banner" style="margin-top:0;margin-bottom:8px">
+          <b>Two kinds of source.</b> <b>Auto-queueable</b> ones load with the
+          "Queue tested payer indexes" button (or paste the link). <b>Portal
+          (open in browser)</b> ones build their file list with JavaScript
+          behind a search form or bot-check, so they can't be queued directly —
+          open them yourself and paste the file links. <b>How:</b> click the
+          payer name to open its page → follow the Notes for that row (accept
+          any terms, pick a plan/state if asked) until you see a list of files
+          ending in <code class="inline">.json</code>,
+          <code class="inline">.json.gz</code>, or
+          <code class="inline">.zip</code> → right-click each real file (or the
+          "Table of Contents"/"index" link) → <b>Copy link address</b> → paste
+          them into the "Paste file links" box above. One Table-of-Contents link
+          is enough; the app expands it into every rate file inside.
+        </div>
+        <div class="tablewrap">
+          <table>
+            <thead><tr><th>Payer source</th><th>Type</th><th>Verified</th><th>Notes / how to load it</th></tr></thead>
+            <tbody id="known-body"></tbody>
+          </table>
+        </div>
       </div>
       <div id="url-counts" class="muted" style="margin-top:10px"></div>
       <div class="tablewrap" style="max-height:34vh;margin-top:6px;display:none" id="url-wrap">

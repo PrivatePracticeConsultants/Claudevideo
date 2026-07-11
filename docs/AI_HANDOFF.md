@@ -263,7 +263,7 @@ retry button reachable.
 
 ## Step 7b — The source catalog is the map
 
-`config/known_sources.yaml` holds 38 auto-queueable sources + 20 probed
+`config/known_sources.yaml` holds 38 auto-queueable sources + 34 probed
 portals, each with verified dates and real row counts — treat it as ground
 truth for "does this source work and what should it yield". The largest
 verified single-file ingests: Cigna CHLIC 243.4M rows, Aetna CA 83.7M, UHC
