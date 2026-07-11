@@ -32,8 +32,9 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 # Parquet codec for the rate parts. zstd is ~30-50% smaller than the pyarrow
-# default (snappy) on real payer data, decompresses about as fast, and DuckDB
-# reads it natively — so the store shrinks with no query-speed cost. Mixed
+# default (snappy) on real payer data. Decode is marginally slower than snappy
+# but the store is on local disk and queries are I/O-bound on part SIZE, so the
+# smaller files are a net win in practice; DuckDB reads zstd natively. Mixed
 # snappy/zstd parts coexist fine (compression is per-file metadata), so old
 # parts need no migration; new ingests just get smaller.
 PARQUET_COMPRESSION = "zstd"
