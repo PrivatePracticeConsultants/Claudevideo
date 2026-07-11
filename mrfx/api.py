@@ -266,11 +266,17 @@ def _qp(request: "Request") -> dict:
 
 
 def grain_of(qp: dict, cfg: MrfxConfig, store: Store) -> str:
+    # Entity grain rolls TINs up by the organization name their NPIs resolve to
+    # in NPPES — this works with OR without a manual entity_map.yaml; the map
+    # only ADDS explicit TIN->name overrides on top. (Historically entity grain
+    # degraded to tin when no map was loaded, from back when _ENTITY_REL grouped
+    # ONLY by the map. It now also groups by the NPPES display_name, so an
+    # explicit entity request must be honored or the automatic org rollup is
+    # invisible — a TIN with no resolved name is its own entity, so unenriched
+    # data simply looks like tin grain until names arrive.)
     grain = qp.get("grain") or cfg.default_grain or (
         "entity" if store.entity_map() else "tin"
     )
-    if grain == "entity" and not store.entity_map():
-        grain = "tin"  # entity grain degrades to tin when no map is loaded
     return grain if grain in GRAIN_REL else "tin"
 
 

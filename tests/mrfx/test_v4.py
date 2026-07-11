@@ -214,6 +214,29 @@ def test_entity_map_aggregates_and_lists_tins(cfg, store):
     assert {t["tin_value"] for t in detail["tins"]} == {"431000001", "431000002"}
 
 
+def test_entity_grain_auto_groups_by_nppes_name_without_a_map(cfg, store):
+    # The core "roll up automatically" behavior: two DIFFERENT tax IDs whose
+    # providers resolve to the same NPPES organization name must merge into one
+    # entity at entity grain even with NO manual entity_map.yaml. Regression:
+    # grain_of used to silently degrade entity->tin whenever no map was loaded,
+    # so an explicit Entity-grain request showed per-TIN rows and the automatic
+    # org rollup was invisible.
+    seed_two_tins(cfg, store)
+    # enrich both org TINs' NPIs to the same chain name (as NPPES would)
+    for npi in store.unenriched_npis():
+        name = "Regional Rehab Group" if npi in ("1111111111", "1222222222") else "Solo PT"
+        store.save_npi(npi, name, "225100000X", "PT", "KC", "MO", entity_type="NPI-2")
+    store.rebuild_rollups()
+    assert not cfg.entity_map_path.exists()  # no manual map at all
+    client = TestClient(create_app(cfg, store))
+    r = client.get("/api/rates?grain=entity").json()
+    assert r["grain"] == "entity"  # request honored, not degraded to tin
+    chain = next(x for x in r["rows"] if x["display_name"] == "Regional Rehab Group")
+    assert chain["tin_count"] == 2                         # two tax IDs rolled into one org
+    assert chain["negotiated_rate"] == 43.0               # median of 40 / 46
+    assert set(chain["tin_value"].split("; ")) == {"431000001", "431000002"}
+
+
 def test_entity_map_ui_edit_persists_to_yaml(cfg, store):
     seed_two_tins(cfg, store)
     client = TestClient(create_app(cfg, store))

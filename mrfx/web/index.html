@@ -29,9 +29,9 @@
       <div class="field">
         <label>Grain</label>
         <div class="seg" id="f-grain">
-          <button data-g="entity">Entity</button>
-          <button data-g="tin" class="on">TIN</button>
-          <button data-g="npi">NPI</button>
+          <button data-g="entity" title="Roll tax IDs up into organizations automatically: TINs whose providers share the same NPPES organization name become one row (a chain billing under several tax IDs). Needs the provider-name lookup to have run. Edit config/entity_map.yaml to override groupings by hand.">Entity</button>
+          <button data-g="tin" class="on" title="One row per tax ID (billing entity) — how payers contract. The safe, exact grain.">TIN</button>
+          <button data-g="npi" title="One row per individual provider (drill-down).">NPI</button>
         </div>
       </div>
       <div class="field">

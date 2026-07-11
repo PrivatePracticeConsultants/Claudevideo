@@ -66,9 +66,17 @@ TIN, and the dashboard drills down to the NPIs underneath. Caveats handled:
   median of the variants, never a silent pick.
 - TIN display names roll up from the NPPES org names of the TIN's Type-2 NPIs;
   TINs with only individual NPIs are labeled `individual-billed`.
-- `config/entity_map.yaml` groups multiple TINs into one named entity (post-roll-up
-  legacy TINs, pro/facility splits). Editable from the API/UI; constituent TINs
-  are always listed in the entity detail.
+- **Entity grain rolls tax IDs up into organizations automatically**: switch the
+  grain toggle to *Entity* and TINs whose providers resolve to the same NPPES
+  organization name become one row — a chain billing under several tax IDs shows
+  as a single entity, rate = median of its member-TIN rates, with the constituent
+  TINs listed in the detail. No manual setup; it just needs the provider-name
+  lookup to have run (an un-named TIN is its own entity). `config/entity_map.yaml`
+  is the manual OVERRIDE on top — for grouping TINs NPPES names differently
+  (pro/facility splits, legacy tax IDs, a consolidator's mixed brands). Editable
+  from the API/UI. (Caveat: auto-grouping keys on the exact org name, so two
+  genuinely-unrelated practices registered under the identical generic name would
+  merge — use the manual map to split them if you hit that.)
 
 ## PT / OT / SLP code set & modifiers
 
