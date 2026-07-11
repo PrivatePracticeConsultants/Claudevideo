@@ -396,6 +396,7 @@ class Store:
                 child_count BIGINT DEFAULT 0,
                 error VARCHAR,
                 content_sha VARCHAR,        -- sha256 of downloaded bytes (cross-host dupe detection)
+                force_size BOOLEAN DEFAULT false,  -- user chose "download anyway" past confirm_over_gb
                 added_at TIMESTAMP,
                 finished_at TIMESTAMP
             );
@@ -409,6 +410,8 @@ class Store:
             con.execute(f"ALTER TABLE files ADD COLUMN IF NOT EXISTS {col} {typ}")
         # migrate stores created before content-hash duplicate detection
         con.execute("ALTER TABLE url_queue ADD COLUMN IF NOT EXISTS content_sha VARCHAR")
+        # migrate stores created before the "download anyway" size override
+        con.execute("ALTER TABLE url_queue ADD COLUMN IF NOT EXISTS force_size BOOLEAN DEFAULT false")
 
     def _register_views(self, con: duckdb.DuckDBPyConnection) -> None:
         """(Re)point the derived views. Callers must hold write_lock."""
@@ -763,6 +766,21 @@ class Store:
             con.execute(
                 "UPDATE url_queue SET status = ?, error = NULL, progress = 0, bytes_done = 0 "
                 "WHERE id = ?", [status, url_id])
+            return True
+
+    def force_size_requeue(self, url_id: int) -> bool:
+        """User pressed 'download anyway' on a row the confirm_over_gb guard
+        stopped: set the per-row override and re-queue it. Only a failed or
+        skipped row qualifies (same rule as retry); the disk-space guard
+        still applies, so this can't fill the drive — it only lifts the
+        are-you-sure size ceiling for THIS file."""
+        with self.write_lock, self.connect() as con:
+            r = con.execute("SELECT status FROM url_queue WHERE id = ?", [url_id]).fetchone()
+            if not r or r[0] not in ("failed", "skipped"):
+                return False
+            con.execute(
+                "UPDATE url_queue SET status = 'queued', force_size = true, error = NULL, "
+                "progress = 0, bytes_done = 0 WHERE id = ?", [url_id])
             return True
 
     def requeue_failed(self) -> int:

@@ -286,8 +286,9 @@ def download(cfg: MrfxConfig, url: str, dest: Path, progress_cb=None,
     def too_big(n: int) -> DownloadError:
         return DownloadError(
             f"file is {n / 1e9:.1f} GB — larger than the confirm_over_gb "
-            f"safety limit ({(max_bytes or 0) / 1e9:.1f} GB). If you meant to "
-            "ingest it, raise confirm_over_gb in config/mrfx.yaml and retry.",
+            f"safety limit ({(max_bytes or 0) / 1e9:.1f} GB). Press "
+            "\"download anyway\" on this row to ingest it, or raise "
+            "confirm_over_gb in config/mrfx.yaml for all files.",
             retryable=False,
         )
 
@@ -801,6 +802,15 @@ def _meta_path(dest: Path) -> Path:
     return Path(str(dest) + _META_SUFFIX)
 
 
+def _size_limit_for(cfg: MrfxConfig, rec: dict) -> int:
+    """confirm_over_gb byte ceiling for this row — 0 (no ceiling) when the
+    user pressed 'download anyway' on it. The disk-space guard inside
+    download() is separate and ALWAYS applies, so this never risks the disk."""
+    if rec.get("force_size"):
+        return 0
+    return int(cfg.confirm_over_gb * 1e9)
+
+
 def _write_meta(dest: Path, content_sha: str, final_url: str) -> None:
     """Atomic sidecar write: a crash mid-write must leave either the old
     sidecar or the new one, never a half-JSON that fails parsing later."""
@@ -832,7 +842,7 @@ def fetch_url_record(cfg: MrfxConfig, store: Store, rec: dict) -> bool:
         content_sha, final_url = download(
             cfg, url, dest,
             progress_cb=lambda d, t: store.url_progress(url_id, d, t),
-            max_bytes=int(cfg.confirm_over_gb * 1e9))
+            max_bytes=_size_limit_for(cfg, rec))
     except DownloadError as e:
         log.warning("url %s download failed: %s", url, e)
         store.update_url(url_id, status="failed", error=str(e))
@@ -897,7 +907,7 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
             content_sha, final_url = download(
                 cfg, url, dest,
                 progress_cb=lambda d, t: store.url_progress(url_id, d, t),
-                max_bytes=int(cfg.confirm_over_gb * 1e9))
+                max_bytes=_size_limit_for(cfg, rec))
         except DownloadError as e:
             log.warning("url %s download failed: %s", url, e)
             store.update_url(url_id, status="failed", error=str(e))
@@ -1066,7 +1076,9 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
         return True
     elif status == "pending_confirmation":
         store.update_url(url_id, status="failed", kind=pf.file_type,
-                         error="file exceeds confirm_over_gb; raise the limit in config/mrfx.yaml and retry")
+                         error="file exceeds the confirm_over_gb safety limit — press "
+                               "\"download anyway\" on this row, or raise confirm_over_gb "
+                               "in config/mrfx.yaml")
         _revive_twins(store, content_sha, url_id)
     else:
         store.update_url(url_id, status="failed", kind=pf.file_type,

@@ -219,6 +219,23 @@ def test_oversize_guard(cfg, store, server):
     assert "confirm_over_gb" in rec["error"]
 
 
+def test_download_anyway_overrides_size_guard(cfg, store, server):
+    # the dashboard "download anyway" button: a file stopped ONLY by the
+    # confirm_over_gb ceiling ingests when the per-row override is set
+    cfg.confirm_over_gb = 100 / 1e9  # 100 bytes — trips on the real rate file
+    add_urls(store, [f"{server}/rates.json.gz"])
+    drain(cfg, store)
+    rec = next(r for r in store.list_urls() if "rates.json.gz" in r["url"])
+    assert rec["status"] == "failed" and "download anyway" in rec["error"]
+    # a done/in-flight row can't be forced; only failed/skipped
+    assert store.force_size_requeue(rec["id"]) is True  # the button
+    drain(cfg, store)
+    rec = next(r for r in store.list_urls() if "rates.json.gz" in r["url"])
+    assert rec["status"] == "done" and rec["rows_emitted"] > 0
+    assert rec["force_size"] is True
+    assert store.force_size_requeue(rec["id"]) is False  # done row rejected
+
+
 def test_gatsby_hub_page_crawled(cfg, store, tmp_path):
     # Sapphire/HealthSparq-style hubs (Blue KC): empty HTML page, file list in
     # Gatsby static-query JSON. Suppressed entries must be respected.

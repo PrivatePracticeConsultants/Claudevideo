@@ -693,6 +693,15 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                                      "(this row may have just started or already finished)")
         return {"status": "skipped"}
 
+    @app.post("/api/urls/{url_id}/force-size")
+    def urls_force_size(url_id: int):
+        # "download anyway" past confirm_over_gb, for THIS file only. The
+        # disk-space guard still applies, so it can't fill the drive.
+        if not store.force_size_requeue(url_id):
+            raise HTTPException(409, "only a failed or skipped link can be forced past "
+                                     "the size limit (this row may be in flight or done)")
+        return {"status": "queued"}
+
     @app.post("/api/files/{filename}/confirm")
     def confirm_file(filename: str, background: BackgroundTasks):
         st = store.file_status(filename)

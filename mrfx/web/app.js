@@ -864,6 +864,12 @@ async function loadUrlQueue() {
     if (u.status === "failed" || u.status === "skipped") {
       statusCell += ` <button class="btn" style="padding:1px 8px;font-size:11.5px" data-url-retry="${u.id}">retry</button>`;
     }
+    // stopped only by the size ceiling? offer a one-click "download anyway"
+    // (the disk-space guard still protects the drive)
+    if ((u.status === "failed" || u.status === "skipped") &&
+        /confirm_over_gb|safety limit/i.test(u.error || "")) {
+      statusCell += ` <button class="btn" style="padding:1px 8px;font-size:11.5px" title="download and ingest this file even though it is over the size limit — the disk-space check still applies" data-url-force="${u.id}">download anyway</button>`;
+    }
     if (u.status === "queued" || u.status === "failed") {
       statusCell += ` <button class="btn" style="padding:1px 8px;font-size:11.5px" data-url-cancel="${u.id}">skip</button>`;
     }
@@ -891,6 +897,14 @@ async function loadUrlQueue() {
       b.disabled = true;
       const r = await fetch(`/api/urls/${b.dataset.urlCancel}/cancel`, { method: "POST" });
       if (!r.ok) alert((await r.json().catch(() => ({}))).detail || `skip failed (HTTP ${r.status})`);
+      loadUrlQueue();
+    }));
+  $$("[data-url-force]", body).forEach((b) =>
+    b.addEventListener("click", async () => {
+      if (!confirm("Download and ingest this oversized file?\n\nIt's larger than the safety limit, so it may take a long time and use a lot of disk. The disk-space check still applies, so it won't fill your drive.")) return;
+      b.disabled = true;
+      const r = await fetch(`/api/urls/${b.dataset.urlForce}/force-size`, { method: "POST" });
+      if (!r.ok) alert((await r.json().catch(() => ({}))).detail || `could not start (HTTP ${r.status})`);
       loadUrlQueue();
     }));
 }
