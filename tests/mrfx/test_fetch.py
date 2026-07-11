@@ -270,6 +270,34 @@ def test_disk_reservations_block_concurrent_overcommit(cfg, server, monkeypatch)
         dest.unlink(missing_ok=True)
 
 
+def test_reserve_is_atomic_check_and_set(cfg, monkeypatch):
+    # Two same-size downloads racing into a disk that fits only one: the FIRST
+    # reservation must be visible to the second check even though neither has
+    # streamed a byte yet — check-then-reserve as two steps would let both
+    # pass (a freshly expanded TOC hands the downloader threads a batch at
+    # exactly the same moment). free=12GB; each needs 10GB + 2GB headroom.
+    import collections
+
+    import mrfx.fetch as F
+
+    Usage = collections.namedtuple("Usage", "total used free")
+    monkeypatch.setattr(F.shutil, "disk_usage", lambda p: Usage(100 << 30, 88 << 30, 12 << 30))
+    a, b = 111, 222
+    try:
+        F._reserve_disk_or_raise(a, cfg.downloads_dir, total=10 << 30, resume_from=0)
+        assert F._disk_reservations[a] == 10 << 30
+        with pytest.raises(F.DownloadError, match="promised to downloads in progress"):
+            F._reserve_disk_or_raise(b, cfg.downloads_dir, total=10 << 30, resume_from=0)
+        assert b not in F._disk_reservations  # loser reserved nothing
+        # winner finishes -> the same second download now fits
+        F._clear_reservation(a)
+        F._reserve_disk_or_raise(b, cfg.downloads_dir, total=10 << 30, resume_from=0)
+        assert F._disk_reservations[b] == 10 << 30
+    finally:
+        F._clear_reservation(a)
+        F._clear_reservation(b)
+
+
 def test_resolve_download_count_modes(cfg, monkeypatch):
     import mrfx.fetch as F
 

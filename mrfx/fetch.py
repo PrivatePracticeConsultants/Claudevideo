@@ -286,11 +286,6 @@ _disk_reservations: dict[int, int] = {}
 _reservation_lock = threading.Lock()
 
 
-def _reserved_elsewhere(my_key: int) -> int:
-    with _reservation_lock:
-        return sum(v for k, v in _disk_reservations.items() if k != my_key)
-
-
 def _set_reservation(my_key: int, remaining: int) -> None:
     with _reservation_lock:
         _disk_reservations[my_key] = max(0, remaining)
@@ -299,6 +294,29 @@ def _set_reservation(my_key: int, remaining: int) -> None:
 def _clear_reservation(my_key: int) -> None:
     with _reservation_lock:
         _disk_reservations.pop(my_key, None)
+
+
+def _reserve_disk_or_raise(my_key: int, parent: Path, total: int, resume_from: int) -> None:
+    """Atomic check-AND-reserve. The free-space read, the sum of other
+    downloads' reservations, the verdict, and this download's own reservation
+    all happen under ONE lock hold — check-then-reserve as two steps would let
+    two downloads that start simultaneously (a freshly expanded TOC hands the
+    downloader threads a batch at once) both pass the check before either
+    reserves, overcommitting the disk together."""
+    need = (total - resume_from) + (2 << 30)  # +2GB working headroom
+    with _reservation_lock:
+        free = shutil.disk_usage(parent).free
+        others = sum(v for k, v in _disk_reservations.items() if k != my_key)
+        if free - others < need:
+            promised = (f" ({others / 1e9:.1f} GB of it is already promised "
+                        "to downloads in progress)") if others else ""
+            raise DownloadError(
+                f"not enough free disk space for this file: it needs "
+                f"~{(total - resume_from) / 1e9:.1f} GB (plus working room) but only "
+                f"{free / 1e9:.1f} GB is free{promised}. Free up space and press retry.",
+                retryable=False,
+            )
+        _disk_reservations[my_key] = max(0, total - resume_from)
 
 
 def download(cfg: MrfxConfig, url: str, dest: Path, progress_cb=None,
@@ -402,21 +420,10 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                 # disk guard: a payer file must never run the machine out of
                 # space mid-download — fail up front with the friendly fix.
                 # Other in-flight downloads' unwritten remainders don't show in
-                # disk_usage yet, so their reservations count against free.
+                # disk_usage yet, so their reservations count against free;
+                # check-and-reserve is one atomic step (see the helper).
                 if total:
-                    free = shutil.disk_usage(dest.parent).free
-                    others = _reserved_elsewhere(my_key)
-                    need = (total - resume_from) + (2 << 30)  # +2GB working headroom
-                    if free - others < need:
-                        promised = (f" ({others / 1e9:.1f} GB of it is already promised "
-                                    "to downloads in progress)") if others else ""
-                        raise DownloadError(
-                            f"not enough free disk space for this file: it needs "
-                            f"~{(total - resume_from) / 1e9:.1f} GB (plus working room) but only "
-                            f"{free / 1e9:.1f} GB is free{promised}. Free up space and press retry.",
-                            retryable=False,
-                        )
-                    _set_reservation(my_key, total - resume_from)
+                    _reserve_disk_or_raise(my_key, dest.parent, total, resume_from)
 
                 sha = hashlib.sha256()
                 if resuming:
