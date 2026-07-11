@@ -12,22 +12,27 @@ typed into a **terminal**:
 
 ---
 
-## Step 1 — Install Python 3.11 or newer (one time)
+## Step 1 — Install Python 3.12 (one time)
 
-Check whether you already have it:
+**Use Python 3.12** — not the newest release. The packages this app needs
+(duckdb, pyarrow, and friends) ship ready-made installers for 3.11/3.12 but
+often lag on brand-new Python versions, and without a ready-made installer the
+setup tries to *compile* them and fails. 3.12 is the sweet spot: fully
+supported everywhere, nothing to compile.
 
-```
-python3 --version
-```
+- **Windows**: install from
+  <https://www.python.org/downloads/release/python-3120/> — scroll to
+  "Files" and get **Windows installer (64-bit)**. **On the first installer
+  screen, tick "Add python.exe to PATH"** before clicking Install. You can
+  have 3.12 installed alongside a newer Python; Step 3 picks 3.12 explicitly
+  with `py -3.12`.
+- **macOS**: install 3.12 from <https://www.python.org/downloads/> — or, with
+  Homebrew, `brew install python@3.12`.
+- **Linux (Debian/Ubuntu)**: `sudo apt install python3.12 python3.12-venv python3-pip`
+  (or your distro's 3.12 package).
 
-If it prints `Python 3.11.x` or higher, skip to Step 2. Otherwise:
-
-- **macOS**: install from <https://www.python.org/downloads/> (get the latest
-  3.x installer) — or, if you use Homebrew, `brew install python@3.12`.
-- **Windows**: install from <https://www.python.org/downloads/>. **On the first
-  installer screen, tick "Add python.exe to PATH"** before clicking Install.
-  On Windows the command is usually `python` (not `python3`).
-- **Linux (Debian/Ubuntu)**: `sudo apt install python3 python3-venv python3-pip`.
+Already have 3.11 or 3.12? You're set — skip to Step 2. (Check with
+`python --version`, or on Windows `py -0p` to list every version installed.)
 
 ---
 
@@ -67,13 +72,32 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
-**Windows (PowerShell):**
+**Windows (PowerShell):** — build the environment with **Python 3.12
+specifically** (see the note below on why):
 ```
-python -m venv .venv
-.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-pip install -e .
+py -0p
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python --version
+python -m pip install -r requirements.txt
+python -m pip install -e .
 ```
+The first line (`py -0p`) lists the Python versions installed on your machine
+and their paths — you should see a `3.12` entry. If you don't, install Python
+3.12 from <https://www.python.org/downloads/release/python-3120/> (tick "Add
+python.exe to PATH"), then re-run the lines above. `python --version` should
+print `Python 3.12.x` once the environment is active.
+
+> **Why 3.12 and not the newest Python?** This is the single most common
+> install snag. If you see **`Failed to build installable wheels for some
+> pyproject.toml based projects` (duckdb, pyarrow, watchfiles, pydantic-core)**,
+> it means your Python is *newer* than those packages ship ready-made
+> installers for, so pip tried to *compile* them from source — which needs a
+> C/Rust build toolchain you don't have. The fix is not to install a compiler;
+> it's to use Python **3.12**, which has ready-made installers for everything
+> here. Delete the half-made `.venv` folder if one was created, then run the
+> `py -3.12 -m venv .venv` sequence above.
+
 > If Windows blocks the activate script with a security error, run this once,
 > then retry the activate line:
 > `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`
@@ -322,6 +346,15 @@ them in one place, grouped by where you'll hit them.
 
 ### Setup problems
 
+- **`Failed to build installable wheels for some pyproject.toml based
+  projects` (duckdb, pyarrow, watchfiles, pydantic-core)** — your Python is
+  newer than these packages ship ready-made installers for, so pip tried to
+  compile them from source and failed. **Don't install a compiler — use Python
+  3.12.** On Windows: `py -0p` to confirm 3.12 is installed (if not, get it
+  from <https://www.python.org/downloads/release/python-3120/>), delete the
+  half-made `.venv` folder, then run the Step-3 sequence starting with
+  `py -3.12 -m venv .venv`. `python --version` inside the active environment
+  must read `3.12.x` before you install.
 - **`mrfx: command not found`** — the virtual environment isn't active. Re-run
   the `activate` line from Step 3 (you'll see `(.venv)` in the prompt).
 - **`python3: command not found` on Windows** — use `python` instead.
