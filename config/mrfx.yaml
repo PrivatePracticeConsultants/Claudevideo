@@ -43,6 +43,12 @@ payer_name_map:
 # capped at cores-1), or 1 to process strictly one file at a time.
 parallel_ingests: 0
 
+# Files DOWNLOADED at the same time to feed the parsers above. 0 = auto:
+# enough to keep the parsers fed, capped at 4 (polite to payer servers).
+# 1 = strictly one download at a time. Concurrent downloads each reserve
+# their remaining size, so together they can never fill your disk.
+parallel_downloads: 0
+
 inbox_dir: data/inbox
 processed_dir: data/processed
 failed_dir: data/failed

@@ -23,6 +23,7 @@ import os
 import re
 import shutil
 import ssl
+import threading
 import time
 from pathlib import Path
 from urllib.parse import unquote, urljoin, urlsplit
@@ -272,6 +273,34 @@ class DownloadError(Exception):
         self.oversize = oversize  # tripped confirm_over_gb — not a real failure
 
 
+# Concurrent downloads must never COLLECTIVELY overcommit the disk. The single
+# sequential downloader got that for free: bytes already written show up in
+# shutil.disk_usage, so each new download's up-front guard saw the truth. With
+# N downloads in flight, the not-yet-written remainders are invisible to
+# disk_usage — so every in-flight download reserves its remaining bytes here,
+# and the guard counts everyone else's reservations against free space.
+# Reservations shrink as bytes land (the written bytes then show up in
+# disk_usage instead — never double-counted) and are always released in the
+# download's finally.
+_disk_reservations: dict[int, int] = {}
+_reservation_lock = threading.Lock()
+
+
+def _reserved_elsewhere(my_key: int) -> int:
+    with _reservation_lock:
+        return sum(v for k, v in _disk_reservations.items() if k != my_key)
+
+
+def _set_reservation(my_key: int, remaining: int) -> None:
+    with _reservation_lock:
+        _disk_reservations[my_key] = max(0, remaining)
+
+
+def _clear_reservation(my_key: int) -> None:
+    with _reservation_lock:
+        _disk_reservations.pop(my_key, None)
+
+
 def download(cfg: MrfxConfig, url: str, dest: Path, progress_cb=None,
              max_bytes: int | None = None) -> tuple[str, str]:
     """Stream a URL to `dest` (atomic via .part). Returns (sha256_hex,
@@ -280,6 +309,18 @@ def download(cfg: MrfxConfig, url: str, dest: Path, progress_cb=None,
     relative links found inside the payload. Retries transient failures;
     raises DownloadError on a terminal failure (e.g. expired signed URL) or
     when the payload exceeds max_bytes (the confirm_over_gb guard)."""
+    # the token object keeps this call's reservation key from being recycled
+    # while the download is alive; the finally releases it on EVERY exit —
+    # success, terminal failure, or an unexpected exception mid-stream
+    _token = object()
+    try:
+        return _download_reserved(cfg, url, dest, progress_cb, max_bytes, id(_token))
+    finally:
+        _clear_reservation(id(_token))
+
+
+def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
+                       max_bytes: int | None, my_key: int) -> tuple[str, str]:
     dest.parent.mkdir(parents=True, exist_ok=True)
     part = dest.with_suffix(dest.suffix + ".part")
     val_p = Path(str(part) + ".val")  # ETag/Last-Modified guarding resumes
@@ -359,17 +400,23 @@ def download(cfg: MrfxConfig, url: str, dest: Path, progress_cb=None,
                     raise too_big(total)
 
                 # disk guard: a payer file must never run the machine out of
-                # space mid-download — fail up front with the friendly fix
+                # space mid-download — fail up front with the friendly fix.
+                # Other in-flight downloads' unwritten remainders don't show in
+                # disk_usage yet, so their reservations count against free.
                 if total:
                     free = shutil.disk_usage(dest.parent).free
+                    others = _reserved_elsewhere(my_key)
                     need = (total - resume_from) + (2 << 30)  # +2GB working headroom
-                    if free < need:
+                    if free - others < need:
+                        promised = (f" ({others / 1e9:.1f} GB of it is already promised "
+                                    "to downloads in progress)") if others else ""
                         raise DownloadError(
                             f"not enough free disk space for this file: it needs "
                             f"~{(total - resume_from) / 1e9:.1f} GB (plus working room) but only "
-                            f"{free / 1e9:.1f} GB is free. Free up space and press retry.",
+                            f"{free / 1e9:.1f} GB is free{promised}. Free up space and press retry.",
                             retryable=False,
                         )
+                    _set_reservation(my_key, total - resume_from)
 
                 sha = hashlib.sha256()
                 if resuming:
@@ -393,6 +440,10 @@ def download(cfg: MrfxConfig, url: str, dest: Path, progress_cb=None,
                         f.write(chunk)
                         sha.update(chunk)
                         done += len(chunk)
+                        if total:
+                            # written bytes now show in disk_usage; shrink the
+                            # reservation so they're never counted twice
+                            _set_reservation(my_key, total - done)
                         if max_bytes and done > max_bytes:
                             raise too_big(done)  # no Content-Length header case
                         # dashboard polls every ~4s; don't hammer the store
@@ -815,6 +866,23 @@ def resolve_worker_count(cfg: MrfxConfig) -> int:
     if configured <= 0:
         return min(cores_cap, 8)
     return max(1, min(configured, cores_cap))
+
+
+# politeness ceiling for AUTO download concurrency: parsers chew ~30s per
+# uncompressed GB while a fetch is pure I/O, so a handful of concurrent
+# fetches saturates the pipeline — more would just hammer payer CDNs
+_AUTO_DOWNLOAD_CAP = 4
+
+
+def resolve_download_count(cfg: MrfxConfig) -> int:
+    """Effective concurrent-download count. 0 (or unset) = auto: enough to
+    keep the parser pool fed (min(workers, 4), floor 2 so even a one-core
+    box overlaps network with parse); an explicit value is honored up to the
+    config's ceiling of 8. 1 = the old strictly-sequential downloader."""
+    configured = int(getattr(cfg, "parallel_downloads", 0) or 0)
+    if configured <= 0:
+        return max(2, min(_AUTO_DOWNLOAD_CAP, resolve_worker_count(cfg)))
+    return max(1, min(configured, 8))
 
 
 def _size_limit_for(cfg: MrfxConfig, rec: dict) -> int:
@@ -1240,13 +1308,16 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
         with state:
             ingests_pending_rollup -= n
 
-    # Pipeline: ONE downloader thread prefetches ahead while the parsers work
-    # — network and CPU overlap instead of taking turns. At most
-    # `prefetch_ahead` files sit fetched-but-unprocessed on disk. The single
-    # downloader fetches sequentially, and each download's disk-space guard
-    # measures ACTUAL free space (which already reflects the files sitting in
-    # the buffer), so the buffer self-limits to available disk — it never
-    # overcommits even though the count scales with worker parallelism.
+    # Pipeline: N downloader threads prefetch ahead while the parsers work —
+    # network and CPU overlap instead of taking turns, and on many-small-file
+    # payers several fetches run at once so the parsers never starve waiting
+    # on one link. Roughly `prefetch_ahead` files sit fetched-but-unprocessed
+    # on disk (each thread checks the buffer before claiming, so the peak is
+    # prefetch_ahead - 1 + n_downloads — bounded). Disk safety does NOT rely
+    # on the buffer count: every download reserves its remaining bytes
+    # (_disk_reservations) and the up-front guard counts everyone else's
+    # reservations against free space, so concurrent fetches can never
+    # collectively overcommit the drive.
     dl_stop = threading.Event()
 
     # keep every parser fed: allow one fetched file per worker plus one spare
@@ -1259,7 +1330,7 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
                 if counts.get("fetched", 0) >= prefetch_ahead:
                     dl_stop.wait(0.5)
                     continue
-                rec = store.next_queued_url()
+                rec = store.next_queued_url()  # atomic claim — threads never share a row
                 if rec is None:
                     dl_stop.wait(0.5)
                     continue
@@ -1272,8 +1343,13 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
                 log.exception("prefetch: transient store error; retrying shortly")
                 dl_stop.wait(2.0)
 
-    dl_thread = threading.Thread(target=downloader, daemon=True, name="mrfx-prefetch")
-    dl_thread.start()
+    n_downloads = resolve_download_count(cfg)
+    dl_threads = [threading.Thread(target=downloader, daemon=True, name=f"mrfx-prefetch-{i}")
+                  for i in range(n_downloads)]
+    for t in dl_threads:
+        t.start()
+    if n_downloads > 1:
+        log.info("parallel downloads: %d fetcher thread(s)", n_downloads)
 
     # Processor side: parallel_ingests threads each claim a fetched file and
     # run it through process_url_record. With parallel_ingests > 1 a process
@@ -1369,7 +1445,8 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
         dl_stop.set()
         for t in proc_threads:
             t.join(timeout=cfg.download_timeout_seconds + 60)
-        dl_thread.join(timeout=cfg.download_timeout_seconds + 30)
+        for t in dl_threads:
+            t.join(timeout=cfg.download_timeout_seconds + 30)
         if pool is not None:
             from . import ingest as _ingest_mod
 

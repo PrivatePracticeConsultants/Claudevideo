@@ -74,6 +74,11 @@ class MrfxConfig(BaseModel):
     # (still clamped to cores-1). More workers = faster grinds on multi-core;
     # never changes per-file behavior, so it can't affect the error rate.
     parallel_ingests: int = Field(default=0, ge=0)
+    # How many files DOWNLOAD at once feeding the parsers. 0 = auto = enough
+    # to keep the workers fed, capped at 4 (polite to payer CDNs); 1 = the old
+    # strictly-sequential downloader. Concurrent downloads each reserve their
+    # remaining bytes so together they can never overcommit the disk.
+    parallel_downloads: int = Field(default=0, ge=0, le=8)
     max_toc_files: int = Field(default=2000, ge=1)  # cap child files enqueued from one TOC
     # JavaScript-only portals: when a pasted page yields no static links,
     # render it in headless Chromium and harvest links from the rendered DOM

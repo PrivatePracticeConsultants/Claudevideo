@@ -148,7 +148,10 @@ row count; index links show `expanding` while their file lists unpack; a file
 bigger than the safety limit shows `too big` — see the disk section below).
 Files process **a few at a time in the background** — by default as many as
 your computer has processor cores minus one (the `parallel_ingests:` knob in
-`config/mrfx.yaml`, `0` = automatic) — you can paste a whole
+`config/mrfx.yaml`, `0` = automatic), and **several files download at once**
+to keep those workers fed (`parallel_downloads:`, `0` = automatic, capped at
+4 to stay polite to payer servers; simultaneous downloads coordinate so they
+can never fill your disk together) — you can paste a whole
 state's worth of links and walk away. Each file's download is deleted
 after its rates are extracted, so your disk doesn't fill up. If you close the
 app mid-download, it picks up where it left off on restart.

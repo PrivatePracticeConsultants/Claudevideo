@@ -268,7 +268,12 @@ Three link kinds are auto-detected:
 `0` = auto: your CPU cores minus one, capped at 8; a positive value is
 honored but still clamped to cores−1) parses that many files at once —
 each in its own OS process, while the database stays strictly single-writer
-in the main process. Verified: 2 workers ran the same 3 UHC files 1.5x faster
+in the main process. `parallel_downloads` (default `0` = auto: enough to
+feed the parsers, capped at 4 to stay polite to payer CDNs) fetches that
+many files concurrently; simultaneous downloads each reserve their
+remaining bytes so together they can never overcommit the disk — the
+disk-space guard counts other in-flight downloads' reservations against
+free space before starting a new one. Verified: 2 workers ran the same 3 UHC files 1.5x faster
 with byte-identical row counts; a parser worker killed mid-parse restarts
 automatically and the file retries; killing the whole app mid-run resumes
 cleanly on restart with no duplicate rows. DuckDB's memory for analytics

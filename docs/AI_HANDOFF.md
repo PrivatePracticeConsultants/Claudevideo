@@ -31,7 +31,7 @@ Two codebases live in this repo:
 | `mrfx/parser.py` | Streaming ijson parser. `InNetworkParser` (event-level, constant memory, batches rows to a sink), `skim_needed_ref_ids` (pass 1 of big files: returns target-cited ref ids + count of target-code items), provider-reference file parser, GP/GO/GN modifier-first discipline attribution, TIN/NPI pairing rules. |
 | `mrfx/ingest.py` | `ingest_file` orchestration: quarantines non-rate files, two-pass chunked ingest for files ≥1.5 GB uncompressed (`LARGE_FILE_UNCOMPRESSED_BYTES`), scan short-circuit when pass 1 finds zero target codes, chunk progress (`_ProgressTracker`), QA report, parallel worker (`_parse_worker`, `ParsePoolManager`) — workers are PURE (no DB access). |
 | `mrfx/store.py` | DuckDB + Parquet parts. One parquet part per source file (re-ingest = atomic replace = idempotent). Materialized rollups: `rates_by_tin_tbl` (the spine), `tin_directory_tbl`; `rates_dedup` is a LIVE VIEW (see invariant 6). `url_queue` table drives URL ingestion. SSN masking. All writes behind one in-process lock. |
-| `mrfx/fetch.py` | URL-drop pipeline: `download` (retry/backoff, atomic `.part`, HTTP-Range resume, sha256 while streaming, disk-space guard, TLS incl. AIA chain repair), `dedup_key` (volatile signed-params stripped), `expand_toc`, `expand_blobs_listing` (UHC/Optum), `extract_links_from_page`, `crawl_gatsby_hub` (Sapphire hubs), `probe_blobs_api`, `process_url_record` (route one URL), `run_queue` (downloader thread + N processor threads + rollup batching). |
+| `mrfx/fetch.py` | URL-drop pipeline: `download` (retry/backoff, atomic `.part`, HTTP-Range resume, sha256 while streaming, disk-space guard, TLS incl. AIA chain repair), `dedup_key` (volatile signed-params stripped), `expand_toc`, `expand_blobs_listing` (UHC/Optum), `extract_links_from_page`, `crawl_gatsby_hub` (Sapphire hubs), `probe_blobs_api`, `process_url_record` (route one URL), `run_queue` (N downloader threads — `parallel_downloads`, 0=auto capped 4, concurrent fetches reserve remaining bytes so they never collectively overcommit the disk — + N processor threads + rollup batching). |
 | `mrfx/render.py` | OPTIONAL headless-Chromium fallback for JavaScript-only portals: renders the page, harvests links from the DOM + captured JSON responses, and when nothing appears dismisses consent overlays and clicks MRF-looking controls ('View Plan List' — Harvard Pilgrim) with a re-harvest; the browser never networks itself — every request is fetched by httpx (proxy/CA-aware, TLS verified) and fulfilled into the page. Degrades to a help message without Playwright. |
 | `mrfx/known_sources.py` + `config/known_sources.yaml` | The catalog of live-verified payer entry points with results; `{FIRST_OF_MONTH}` placeholder resolution. `config/starter_links.txt` is the paste-ready export of it. |
 | `mrfx/api.py` | FastAPI JSON API + static SPA. `/api/rates` (tin/npi/entity grains, server-side paging), benchmarks, exports (+methodology sidecars), outreach CSV, `/api/urls*`, `/api/known-sources`. |
@@ -214,9 +214,16 @@ retry button reachable.
 - Two-pass for ≥1.5 GB uncompressed; pass 1 skims target-cited refs (80k ids
   on an 8 GB Anthem shard vs 4.2M total); short-circuits pass 2 if zero
   target codes.
-- Parallel: N worker processes (`parallel_ingests`), downloads prefetch
-  (`fetched` state) so the network overlaps parsing. 3 files, serial 124 s →
-  2 workers 83 s, byte-identical outputs.
+- Parallel: N worker processes (`parallel_ingests`), N downloader threads
+  (`parallel_downloads`, 0 = auto = min(workers, 4), floor 2) prefetching
+  into the `fetched` state so the network overlaps parsing and many-small-
+  file payers don't starve the parsers behind one link. 3 files, serial
+  124 s → 2 workers 83 s, byte-identical outputs. Disk safety with
+  concurrent fetches: each download reserves its remaining bytes
+  (`_disk_reservations`) and the up-front guard counts everyone else's
+  reservations against free space — written bytes shrink the reservation as
+  they land in `disk_usage`, so nothing is double-counted and the fleet can
+  never collectively overcommit the drive.
 - Reference yields: UHC MO network 30 MB → 88,649 rows; Oxford 0.58 GB →
   5.59M; Heritage 1.7 GB → 9.83M; PS1-77 3.39 GB → 29.69M (70 s rollup at
   6.3 GB peak after the live-view fix); BCBSLA 2.8 GB unc → 14.6M.

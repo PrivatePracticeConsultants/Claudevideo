@@ -240,6 +240,88 @@ def test_higher_id_ingesting_twin_still_dedups_low_id_retry(cfg, store, server, 
         assert con.execute("SELECT count(*) FROM url_queue WHERE status='ingesting'").fetchone()[0] == 1
 
 
+def test_disk_reservations_block_concurrent_overcommit(cfg, server, monkeypatch):
+    # With N downloads in flight, bytes not yet written are invisible to
+    # disk_usage — the up-front guard must count OTHER downloads' reservations
+    # against free space or concurrent fetches could collectively fill the disk.
+    import collections
+
+    import mrfx.fetch as F
+
+    Usage = collections.namedtuple("Usage", "total used free")
+    monkeypatch.setattr(F.shutil, "disk_usage", lambda p: Usage(100 << 30, 90 << 30, 10 << 30))
+    dest = cfg.downloads_dir / "resv_rates.json.gz"
+    foreign = 424242  # another thread's in-flight download
+    try:
+        # a sibling download has promised 9.5 of the 10 free GB -> this small
+        # file (needs ~2GB headroom) must be refused, and say why
+        F._set_reservation(foreign, int(9.5 * 2**30))
+        with pytest.raises(F.DownloadError, match="promised to downloads in progress"):
+            F.download(cfg, f"{server}/rates.json.gz", dest)
+        assert not dest.exists()
+        # sibling finishes -> same download now succeeds, and its own
+        # reservation is released on the way out
+        F._clear_reservation(foreign)
+        sha, _ = F.download(cfg, f"{server}/rates.json.gz", dest)
+        assert dest.exists() and len(sha) == 64
+        assert F._disk_reservations == {}  # nothing leaked
+    finally:
+        F._clear_reservation(foreign)
+        dest.unlink(missing_ok=True)
+
+
+def test_resolve_download_count_modes(cfg, monkeypatch):
+    import mrfx.fetch as F
+
+    # auto on a big box: enough to feed the workers, politeness-capped at 4
+    monkeypatch.setattr(F.os, "cpu_count", lambda: 9)
+    cfg.parallel_downloads = 0
+    assert F.resolve_download_count(cfg) == 4
+    # auto on a tiny box: floor of 2 so network still overlaps parsing
+    monkeypatch.setattr(F.os, "cpu_count", lambda: 2)
+    assert F.resolve_download_count(cfg) == 2
+    # explicit values are honored; 1 = the old sequential downloader
+    cfg.parallel_downloads = 6
+    assert F.resolve_download_count(cfg) == 6
+    cfg.parallel_downloads = 1
+    assert F.resolve_download_count(cfg) == 1
+
+
+def test_parallel_downloads_drain_all_files(cfg, store, http_root, server):
+    # several distinct files + 3 concurrent downloaders: every row must land
+    # 'done' exactly once (atomic claims — no double-fetch, no starvation)
+    import json as _json
+
+    urls = []
+    for i in range(4):
+        doc = {
+            "reporting_entity_name": f"Par DL Payer {i}", "reporting_entity_type": "issuer",
+            "last_updated_on": "2026-06-01", "version": "1.0.0",
+            "in_network": [{
+                "negotiation_arrangement": "ffs", "name": "PT", "billing_code_type": "CPT",
+                "billing_code_type_version": "2026", "billing_code": "97110",
+                "negotiated_rates": [{
+                    "provider_groups": [{"npi": [1234567893], "tin": {"type": "ein", "value": f"12345678{i}"}}],
+                    "negotiated_prices": [{"negotiated_type": "negotiated", "negotiated_rate": 40.0 + i,
+                                           "expiration_date": "2027-01-01", "service_code": ["11"],
+                                           "billing_class": "professional"}],
+                }],
+            }],
+        }
+        (http_root / f"pardl_{i}.json").write_text(_json.dumps(doc))
+        urls.append(f"{server}/pardl_{i}.json")
+    add_urls(store, urls)
+    cfg.parallel_downloads = 3
+    try:
+        drain(cfg, store)
+    finally:
+        cfg.parallel_downloads = 0
+    rows = {r["url"]: r for r in store.list_urls() if r["url"] in urls}
+    assert len(rows) == 4
+    assert all(r["status"] == "done" and r["rows_emitted"] >= 1 for r in rows.values()), \
+        {u: (r["status"], r["error"]) for u, r in rows.items()}
+
+
 def test_racing_twins_cannot_mutually_defer(cfg, store, server):
     # Both twins are mid-flight ('ingesting') with identical bytes and race
     # into the atomic claim. The DEFER must land inside the locked step: the
