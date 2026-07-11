@@ -48,6 +48,45 @@ def test_stats_reports_enrichment_progress(client, store):
     assert client.get("/api/states").json()["states"] == ["MO"]
 
 
+def test_payer_filter_survives_commas_in_payer_name(cfg, store):
+    # Real reporting_entity_name values contain commas ("... , a Division of
+    # HCSC"). The old comma-joined ?payer= split one name into two and matched
+    # nothing. Repeated ?payer= params must filter to exactly that payer.
+    import json as _json
+
+    from mrfx.ingest import ingest_file
+
+    payer = "Blue Cross and Blue Shield of Illinois, a Division of HCSC"
+    doc = {
+        "reporting_entity_name": payer, "reporting_entity_type": "health plan",
+        "last_updated_on": "2026-06-01", "version": "1.0.0",
+        "in_network": [{
+            "negotiation_arrangement": "ffs", "name": "PT", "billing_code_type": "CPT",
+            "billing_code_type_version": "2026", "billing_code": "97110",
+            "negotiated_rates": [{
+                "provider_groups": [{"npi": [1234567893], "tin": {"type": "ein", "value": "123456789"}}],
+                "negotiated_prices": [{"negotiated_type": "negotiated", "negotiated_rate": 42.0,
+                                       "expiration_date": "2027-01-01", "service_code": ["11"],
+                                       "billing_class": "professional"}],
+            }],
+        }],
+    }
+    p = cfg.inbox_dir / "bcbsil.json"
+    cfg.inbox_dir.mkdir(parents=True, exist_ok=True)
+    p.write_text(_json.dumps(doc))
+    ingest_file(cfg, store, p)
+    client = TestClient(create_app(cfg, store))
+
+    # the payer name comes straight from /api/payers, exactly as stored
+    payers = client.get("/api/payers").json()["payers"]
+    assert payer in payers
+    # repeated param with the comma-bearing name filters to it (not zero rows)
+    r = client.get("/api/rates", params=[("payer", payer)]).json()
+    assert r["total"] >= 1 and all(row["payer"] == payer for row in r["rows"])
+    # and a genuinely absent payer still returns nothing
+    assert client.get("/api/rates", params=[("payer", "No Such Payer")]).json()["total"] == 0
+
+
 def test_pagination(client):
     r1 = client.get("/api/rates?page_size=2&page=1").json()
     r2 = client.get("/api/rates?page_size=2&page=2").json()

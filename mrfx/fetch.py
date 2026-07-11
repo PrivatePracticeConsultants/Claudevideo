@@ -1170,6 +1170,13 @@ def add_urls(store: Store, urls: list[str]) -> dict:
 # after this many ingested files, and once more when the queue goes idle.
 ROLLUP_BATCH_FILES = 10
 
+# ...but a grind of large files can take many minutes to reach 10, leaving the
+# dashboard (which reads the rollups, not the raw rates) looking stale — the
+# "filters don't work while it's still processing" complaint. Also rebuild when
+# the newest ingests are older than this, so analytics stay fresh mid-grind
+# without the per-file quadratic cost.
+ROLLUP_MAX_STALE_SECONDS = 90
+
 # how many files the downloader may fetch ahead of the parser (disk-bounded)
 PREFETCH_AHEAD = 1
 
@@ -1190,13 +1197,17 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
     state = threading.Lock()
 
     rollup_failures = 0
+    last_rebuild_at = time.monotonic()
 
     def rebuild_now():
-        nonlocal ingests_pending_rollup, rollup_failures
+        nonlocal ingests_pending_rollup, rollup_failures, last_rebuild_at
         with state:
             n = ingests_pending_rollup
         if not n:
             return
+        # stamp at attempt time so a failing rebuild doesn't re-fire the
+        # time-based trigger every loop (batch/idle triggers still apply)
+        last_rebuild_at = time.monotonic()
         log.info("updating analytics rollups (%d newly ingested file(s))...", n)
         try:
             store.rebuild_rollups()
@@ -1334,7 +1345,8 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
             in_flight = (counts.get("queued", 0) + counts.get("downloading", 0)
                          + counts.get("fetched", 0) + counts.get("expanding", 0)
                          + counts.get("ingesting", 0) + busy)
-            if pend >= ROLLUP_BATCH_FILES or (in_flight == 0 and pend):
+            stale = pend and (time.monotonic() - last_rebuild_at) >= ROLLUP_MAX_STALE_SECONDS
+            if pend >= ROLLUP_BATCH_FILES or (in_flight == 0 and pend) or stale:
                 rebuild_now()
                 continue
             if in_flight == 0 and drain:

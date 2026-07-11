@@ -140,13 +140,29 @@ class FilterSet:
 
     def __init__(self, qp: dict):
         split = lambda s: [x.strip() for x in s.split(",") if x.strip()] if s else []  # noqa: E731
+
+        def multi(key):
+            # Payer names are FREE TEXT and very frequently contain commas
+            # ("Blue Cross and Blue Shield of Illinois, a Division of HCSC"), so
+            # they must NOT be comma-split — that shattered one payer into two
+            # non-matching names and the filter returned nothing. They arrive as
+            # repeated params (?payer=a&payer=b); read every value verbatim.
+            # Falls back to a scalar/list on a plain dict (tests, internal calls).
+            if hasattr(qp, "getlist"):
+                return [v.strip() for v in qp.getlist(key) if v and v.strip()]
+            v = qp.get(key)
+            if not v:
+                return []
+            vs = v if isinstance(v, list) else [v]
+            return [x.strip() for x in vs if x and x.strip()]
+
         clauses, params = [], []
         self.described: dict = {}
 
         def add(desc_key, desc_val):
             self.described[desc_key] = desc_val
 
-        payers = split(qp.get("payer"))
+        payers = multi("payer")
         if payers:
             clauses.append(f"payer IN ({', '.join('?' for _ in payers)})")
             params += payers
@@ -229,6 +245,19 @@ class FilterSet:
         add("hide_outliers", f"ON — {OUTLIER_RULE}" if self.hide_outliers else "off")
         self.where = " AND ".join(clauses) if clauses else "1=1"
         self.params = params
+
+
+def _qp(request: "Request") -> dict:
+    """Query params as a MUTABLE plain dict (handlers add/remove keys), but with
+    the free-text multi-value `payer` filter preserved as the FULL list of
+    repeated values. Payer names contain commas, so they arrive as repeated
+    params (?payer=a&payer=b) rather than one comma-joined value that would
+    shatter a name into non-matching pieces."""
+    qp = dict(request.query_params)
+    payers = request.query_params.getlist("payer")
+    if payers:
+        qp["payer"] = payers
+    return qp
 
 
 def grain_of(qp: dict, cfg: MrfxConfig, store: Store) -> str:
@@ -385,7 +414,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         page: int = Query(1, ge=1),
         page_size: int = Query(100, ge=1, le=1000),
     ):
-        qp = dict(request.query_params)
+        qp = _qp(request)
         grain = grain_of(qp, cfg, store)
         fs = FilterSet(qp)
         sql = f"{rel_sql(grain, fs)} {order_sql(sort, dir)} LIMIT ? OFFSET ?"
@@ -397,7 +426,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
 
     @app.get("/api/summary")
     def summary(request: Request):
-        qp = dict(request.query_params)
+        qp = _qp(request)
         grain = grain_of(qp, cfg, store)
         fs = FilterSet(qp)
         with store.connect() as con:
@@ -478,7 +507,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
 
     @app.get("/api/code/{code}")
     def code_detail(code: str, request: Request):
-        qp = dict(request.query_params)
+        qp = _qp(request)
         qp["code"] = code
         grain = grain_of(qp, cfg, store)
         fs = FilterSet(qp)
@@ -511,7 +540,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
 
     @app.get("/api/trend")
     def trend(request: Request):
-        qp = dict(request.query_params)
+        qp = _qp(request)
         qp.pop("month", None)  # trend spans months by definition
         grain = grain_of(qp, cfg, store)
         fs = FilterSet(qp)
@@ -744,7 +773,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return Path(p)
 
     def _export_payload(request: Request, view: str, sort: str, dir: str, full: bool):
-        qp = {} if full else dict(request.query_params)
+        qp = {} if full else _qp(request)
         grain = grain_of(qp, cfg, store)
         fs = FilterSet(qp if not full else {"dollar_only": "0"})
         select, params = export_select(grain, fs, sort, dir)
@@ -800,7 +829,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         for cross-referencing a contact list / Brevo mail merge."""
         from .outreach import build_outreach_rows, outreach_csv
 
-        qp = dict(request.query_params)
+        qp = _qp(request)
         grain = grain_of(qp, cfg, store)
         if grain == "npi":
             grain = "tin"  # outreach is entity-level by definition

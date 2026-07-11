@@ -125,7 +125,10 @@ function filterQuery(extra = {}) {
   const f = state.filters;
   const p = new URLSearchParams();
   p.set("grain", state.grain);
-  if (f.payers.length) p.set("payer", f.payers.join(","));
+  // payer names are free text and frequently contain commas, so each goes as
+  // its own repeated ?payer= param — never comma-joined (that split one name
+  // into two and the filter matched nothing).
+  f.payers.forEach((x) => p.append("payer", x));
   if (f.cpts.length) p.set("cpt", f.cpts.join(","));
   if (f.disciplines.length) p.set("discipline", f.disciplines.join(","));
   if (f.modifier) p.set("modifier", f.modifier);
