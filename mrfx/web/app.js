@@ -88,10 +88,33 @@ function switchView(view) {
 async function loadStats() {
   try {
     const s = await api("/api/stats");
-    $("#dataset-stats").innerHTML =
+    let html =
       `<b>${fmtInt(s.rates)}</b> rate rows · <b>${fmtInt(s.tins)}</b> TINs · ` +
       `<b>${s.payers}</b> payer${s.payers === 1 ? "" : "s"} · <b>${s.files_done}</b> files`;
+    const e = s.enrichment;
+    if (e && e.total > 0) {
+      // names + states come from NPPES enrichment, which runs in the
+      // background; show how far along it is so a sparse state filter reads
+      // as "still filling in" rather than "broken".
+      if (s.enrichment_mode === "off") {
+        html += ` · <span class="muted">names off</span>`;
+      } else if (e.remaining > 0) {
+        html += ` · <b>${fmtInt(e.named)}/${fmtInt(e.total)}</b> names ` +
+                `<span class="muted">(identifying ${fmtInt(e.remaining)} more…)</span>`;
+      } else {
+        html += ` · <b>${fmtInt(e.named)}/${fmtInt(e.total)}</b> names`;
+      }
+    }
+    $("#dataset-stats").innerHTML = html;
   } catch { $("#dataset-stats").textContent = "API unreachable"; }
+}
+
+async function loadStateOptions() {
+  try {
+    const { states } = await api("/api/states");
+    const dl = $("#state-options");
+    if (dl) dl.innerHTML = (states || []).map((s) => `<option value="${s}">`).join("");
+  } catch { /* filter still works as free text */ }
 }
 
 /* =======================================================================
@@ -1112,9 +1135,10 @@ function hookOverrideForms(root) {
     $$("#f-grain button").forEach((b) => b.classList.toggle("on", b.dataset.g === state.grain));
   }
   loadStats();
+  loadStateOptions();
   await initFilters();
   initCptView();
   initFilesView();
   refresh();
-  setInterval(loadStats, 15000);
+  setInterval(() => { loadStats(); loadStateOptions(); }, 15000);
 })();

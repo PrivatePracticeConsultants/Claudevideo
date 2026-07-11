@@ -1056,6 +1056,58 @@ class Store:
             ).fetchall()
         return [r[0] for r in rows]
 
+    def enrichment_progress(self) -> dict:
+        """How far NPI->name enrichment has gotten, for the dashboard banner.
+        `total` counts well-formed NPIs actually referenced by rates (the same
+        population enrichment works through); `named` is those NPPES gave a
+        real organization/person name. `remaining` drives the 'still working'
+        hint so an incomplete state filter reads as 'names still filling in',
+        not 'broken'."""
+        with self.connect() as con:
+            total = con.execute(
+                """
+                SELECT count(*) FROM (
+                    SELECT DISTINCT npi FROM (
+                        SELECT npi FROM rates
+                        UNION
+                        SELECT tin_value AS npi FROM rates
+                        WHERE tin_is_really_npi AND tin_value IS NOT NULL
+                    ) WHERE regexp_full_match(npi, '[0-9]{10}')
+                )
+                """
+            ).fetchone()[0]
+            enriched, named = con.execute(
+                """
+                SELECT count(*), count(*) FILTER (WHERE org_name IS NOT NULL)
+                FROM npi_directory
+                WHERE npi IN (
+                    SELECT npi FROM rates
+                    UNION
+                    SELECT tin_value FROM rates WHERE tin_is_really_npi AND tin_value IS NOT NULL
+                )
+                """
+            ).fetchone()
+        remaining = max(0, total - enriched)
+        return {"total": total, "enriched": enriched, "named": named,
+                "remaining": remaining}
+
+    def available_states(self) -> list[str]:
+        """Distinct US states present in the enriched directory — used to fill
+        the dashboard's state filter so users only pick states that have data
+        (an empty result then clearly means 'no rates there yet', not a bug)."""
+        with self.connect() as con:
+            try:
+                rows = con.execute(
+                    """
+                    SELECT DISTINCT unnest(states) AS s FROM tin_directory
+                    WHERE states IS NOT NULL AND len(states) > 0
+                    ORDER BY s
+                    """
+                ).fetchall()
+            except Exception:  # noqa: BLE001 — no rows/view yet on a fresh store
+                return []
+        return [r[0] for r in rows if r[0]]
+
     def save_npi(self, npi: str, org_name: str | None, taxonomy_code: str | None,
                  taxonomy_desc: str | None, city: str | None, state: str | None,
                  entity_type: str | None = None, address: str | None = None,

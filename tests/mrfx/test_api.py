@@ -33,6 +33,21 @@ def test_rates_default_grain_is_tin(client):
     assert ref_tin["npi_count"] == 2  # two NPIs rolled into one entity row
 
 
+def test_stats_reports_enrichment_progress(client, store):
+    s = client.get("/api/stats").json()
+    assert "enrichment" in s and s["enrichment"]["total"] >= 1
+    assert s["enrichment"]["named"] == 0        # nothing enriched yet
+    assert s["enrichment_mode"] in ("api", "bulk", "off")
+    # states endpoint is empty until enrichment writes a state, then reflects it
+    assert client.get("/api/states").json()["states"] == []
+    for npi in store.unenriched_npis():
+        store.save_npi(npi, "Clinic LLC", "225100000X", "PT", "KC", "MO")
+    store.rebuild_rollups()
+    s2 = client.get("/api/stats").json()
+    assert s2["enrichment"]["named"] == s2["enrichment"]["total"]
+    assert client.get("/api/states").json()["states"] == ["MO"]
+
+
 def test_pagination(client):
     r1 = client.get("/api/rates?page_size=2&page=1").json()
     r2 = client.get("/api/rates?page_size=2&page=2").json()

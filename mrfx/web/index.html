@@ -92,7 +92,9 @@
       <div class="field">
         <label>Practice state / city</label>
         <div style="display:flex;gap:6px">
-          <input type="text" id="f-state" placeholder="MO" style="width:52px">
+          <input type="text" id="f-state" placeholder="MO" style="width:52px"
+                 list="state-options" autocomplete="off">
+          <datalist id="state-options"></datalist>
           <input type="text" id="f-city" placeholder="city" style="width:110px">
         </div>
       </div>

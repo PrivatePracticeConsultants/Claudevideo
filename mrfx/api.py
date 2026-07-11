@@ -949,7 +949,15 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             ))
         return {"rates": rates_n, "tins": tins, "payers": payers,
                 "files_done": files_done, "attention": attention,
+                "enrichment": store.enrichment_progress(),
+                "enrichment_mode": cfg.enrichment.mode,
                 "default_grain": grain_of({}, cfg, store)}
+
+    @app.get("/api/states")
+    def states():
+        """Distinct states that actually have enriched data — populates the
+        state filter so an empty pick reads as 'no data yet', not a broken box."""
+        return {"states": store.available_states()}
 
     @app.get("/api/payers")
     def payers():
