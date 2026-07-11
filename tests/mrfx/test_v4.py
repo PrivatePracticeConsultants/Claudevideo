@@ -235,6 +235,12 @@ def test_entity_grain_auto_groups_by_nppes_name_without_a_map(cfg, store):
     assert chain["tin_count"] == 2                         # two tax IDs rolled into one org
     assert chain["negotiated_rate"] == 43.0               # median of 40 / 46
     assert set(chain["tin_value"].split("; ")) == {"431000001", "431000002"}
+    # drilling in must list BOTH constituent tax IDs + their providers (an
+    # auto-grouped org used to open an empty drawer — the detail resolved
+    # members only through the manual map)
+    detail = client.get("/api/entity/entity/Regional Rehab Group").json()
+    assert {t["tin_value"] for t in detail["tins"]} == {"431000001", "431000002"}
+    assert {n["npi"] for n in detail["npis"]} == {"1111111111", "1222222222"}
 
 
 def test_entity_map_ui_edit_persists_to_yaml(cfg, store):

@@ -486,11 +486,20 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                     "SELECT * FROM npi_directory WHERE npi = ?", [unit_id]))
                 tins = []
             else:
-                tin_list = (
-                    [t for t, name in store.entity_map().items() if name == unit_id]
-                    if grain == "entity" and unit_id in set(store.entity_map().values())
-                    else [unit_id]
-                )
+                if grain == "tin":
+                    tin_list = [unit_id]  # unit_id IS the tax id
+                else:
+                    # Entity: resolve EVERY tax id that rolls up to this entity,
+                    # whether by a manual entity_map name or by the automatic
+                    # NPPES-name grouping. The TIN relation's display_name IS the
+                    # entity_key the grain groups on (it already coalesces the
+                    # manual map over the NPPES name), so matching on it here
+                    # yields exactly the members the entity row aggregated —
+                    # without this, an auto-grouped org showed an empty drawer.
+                    tin_list = [r[0] for r in con.execute(
+                        f"SELECT DISTINCT tin_value FROM ({GRAIN_REL['tin']}) WHERE display_name = ?",
+                        [unit_id],
+                    ).fetchall()]
                 tins = _dicts(con.execute(
                     f"SELECT * FROM tin_directory WHERE tin_value IN ({', '.join('?' for _ in tin_list)})",
                     tin_list,
