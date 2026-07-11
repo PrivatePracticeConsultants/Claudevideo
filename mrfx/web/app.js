@@ -672,6 +672,10 @@ async function initBenchmark() {
     try { await openPitchReport(); }
     catch (e) { alert(`could not build the report: ${e.message}`); }
   });
+  $("#b-negotiation").addEventListener("click", async () => {
+    try { await openNegotiationReport(); }
+    catch (e) { alert(`could not build the report: ${e.message}`); }
+  });
 }
 
 function refreshPeersets(sets) {
@@ -717,6 +721,7 @@ async function runBenchmark() {
   // PREVIOUS run's payload — a report that doesn't match what's on screen
   state.lastBenchmarkPayload = null;
   $("#b-report").disabled = true;
+  $("#b-negotiation").disabled = true;
   let payload;
   try { payload = benchmarkPayload(); }
   catch (e) { out.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
@@ -729,6 +734,7 @@ async function runBenchmark() {
   } catch (e) { out.innerHTML = `<div class="empty"><h3>Benchmark failed</h3>${esc(e.message)}</div>`; return; }
   state.lastBenchmarkPayload = payload;
   $("#b-report").disabled = false;
+  $("#b-negotiation").disabled = false;
   renderBenchmark(out, data.benchmark, data.opportunity);
 }
 
@@ -803,6 +809,17 @@ function renderBenchmark(out, bench, opp) {
 async function openPitchReport() {
   if (!state.lastBenchmarkPayload) return;
   const r = await fetch("/api/report/pitch", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(state.lastBenchmarkPayload),
+  });
+  if (!r.ok) { alert("report failed: " + (await r.text())); return; }
+  const blob = await r.blob();
+  window.open(URL.createObjectURL(blob), "_blank");
+}
+
+async function openNegotiationReport() {
+  if (!state.lastBenchmarkPayload) return;
+  const r = await fetch("/api/report/negotiation", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify(state.lastBenchmarkPayload),
   });

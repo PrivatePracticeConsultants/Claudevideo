@@ -101,11 +101,19 @@ def _market_where(market: dict, include_assistant: bool, include_non_dollar: boo
 
 
 def resolve_subject_tins(store: Store, subject: str) -> list[str]:
-    """Subject may be a mapped entity name or a raw TIN."""
+    """Subject may be a manually-mapped entity name, an AUTO-grouped org name
+    (every TIN whose NPPES organization name is `subject`), or a raw TIN."""
     emap = store.entity_map()
     tins = [t for t, name in emap.items() if name == subject]
     if tins:
         return tins
+    # auto-grouped org: the same NPPES display_name the entity grain groups on
+    with store.connect() as con:
+        named = [r[0] for r in con.execute(
+            "SELECT tin_value FROM tin_directory WHERE display_name = ?", [subject],
+        ).fetchall()]
+    if named:
+        return named
     return [subject.replace("-", "").strip()]
 
 
@@ -296,6 +304,203 @@ def compute_opportunity(benchmark: dict, volumes: dict[str, float],
 
 
 # ---------------------------------------------------------------------------
+# payer-negotiation one-pager (§7B.4)
+# ---------------------------------------------------------------------------
+
+
+def subject_payers(store: Store, subject: str, market: dict) -> list[str]:
+    """Distinct payers the subject actually has published rates with, scoped to
+    the market's as-of month (and payer-scope, if the caller pre-narrowed it).
+
+    A negotiation one-pager is per-payer, so this is the list of tables to
+    build — computed from the subject's own rows, not from every payer in the
+    store (a payer the subject doesn't contract with has nothing to negotiate).
+    """
+    subject_tins = resolve_subject_tins(store, subject)
+    if not subject_tins:
+        return []
+    month = market.get("month")
+    if not month:
+        raise BenchmarkError("an as-of month is required (7A.5) — pass market.month")
+    clauses = ["tin_value IN (SELECT unnest(?::VARCHAR[]))", "file_month = ?",
+               "payer IS NOT NULL"]
+    params: list = [subject_tins, month]
+    scope = market.get("payers") or []
+    if scope:
+        clauses.append(f"payer IN ({', '.join('?' for _ in scope)})")
+        params += scope
+    with store.connect() as con:
+        rows = con.execute(
+            f"SELECT DISTINCT payer FROM rates_by_tin WHERE {' AND '.join(clauses)} "
+            "ORDER BY payer",
+            params,
+        ).fetchall()
+    return [r[0] for r in rows if r[0]]
+
+
+def compute_payer_negotiation(store: Store, subject: str, market: dict,
+                              volumes: dict[str, float] | None = None,
+                              conservative_percentile: int = 40) -> dict:
+    """Per-payer negotiation view (§7B.4).
+
+    For each payer the subject contracts with, benchmark the subject against
+    *that payer's other providers only* (intra-payer peer comparison — the
+    number that matters at a contract renewal is "what is THIS payer paying my
+    peers", not a blended cross-payer market). Optionally attach the annual
+    opportunity per payer when the caller supplies volumes.
+    """
+    payers = subject_payers(store, subject, market)
+    if not payers:
+        raise BenchmarkError(
+            "subject has no rates in the pinned month for the given market scope "
+            "— nothing to build a per-payer negotiation view from")
+    volumes = {str(k): float(v) for k, v in (volumes or {}).items()} or None
+    sections, total_target, total_conservative = [], 0.0, 0.0
+    covered_payers = 0
+    for payer in payers:
+        pmarket = {**market, "payers": [payer]}
+        bench = compute_benchmark(store, subject, pmarket)
+        # only codes where the subject actually has a rate with this payer AND
+        # a peer set exists — an all-null section is noise on a one-pager
+        priced = [r for r in bench["rows"] if r.get("subject_rate") is not None]
+        if not priced:
+            continue
+        covered_payers += 1
+        opp = None
+        if volumes:
+            try:
+                opp = compute_opportunity(bench, volumes, conservative_percentile)
+                total_target += opp["total_at_target"]
+                total_conservative += opp["total_at_conservative"]
+            except BenchmarkError:
+                opp = None  # e.g. no overlapping code — skip this payer's dollars
+        # headline percentile: median of the per-code positions we have
+        pcts = [r["subject_percentile"] for r in priced
+                if r.get("subject_percentile") is not None]
+        headline_pct = round(sum(pcts) / len(pcts)) if pcts else None
+        sections.append({
+            "payer": payer,
+            "benchmark": bench,
+            "opportunity": opp,
+            "n_codes": len(priced),
+            "headline_percentile": headline_pct,
+        })
+    if not sections:
+        raise BenchmarkError(
+            "no payer has a benchmarkable code for this subject in the pinned "
+            "month (subject-priced codes with at least one peer)")
+    # lowest-percentile payer first: that's where the subject is most underpaid
+    # relative to peers, i.e. the strongest renegotiation case
+    sections.sort(key=lambda s: (s["headline_percentile"] is None,
+                                 s["headline_percentile"] if s["headline_percentile"] is not None else 999))
+    return {
+        "subject": subject,
+        "subject_tins": sections[0]["benchmark"]["subject_tins"],
+        "market": {k: v for k, v in market.items() if k != "payers"},
+        "payers": [s["payer"] for s in sections],
+        "sections": sections,
+        "has_volumes": bool(volumes),
+        "total_at_target": round(total_target, 2) if volumes else None,
+        "total_at_conservative": round(total_conservative, 2) if volumes else None,
+        "target_percentile": sections[0]["benchmark"]["target_percentile"],
+        "conservative_percentile": conservative_percentile if volumes else None,
+    }
+
+
+def render_negotiation_report(cfg: MrfxConfig, store: Store, neg: dict) -> str:
+    """Print-ready per-payer negotiation one-pager. One benchmark table per
+    payer the subject contracts with, ordered weakest-position-first, with a
+    cross-payer opportunity summary when volumes were supplied."""
+    if not neg.get("market", {}).get("month"):
+        raise BenchmarkError("negotiation report requires a pinned as-of month")
+    e = html.escape
+    target = neg["target_percentile"]
+    subject = neg["subject"]
+    month = neg["market"].get("month")
+
+    summary = ""
+    if neg.get("has_volumes"):
+        summary = (
+            f'<p class="band">Across {len(neg["sections"])} payer(s), lifting every '
+            f'contract to p{target} is worth <b>{_m(neg["total_at_target"])}</b>/yr '
+            f'(conservative p{neg["conservative_percentile"]}: '
+            f'<b>{_m(neg["total_at_conservative"])}</b>).</p>'
+        )
+
+    def payer_section(sec) -> str:
+        bench = sec["benchmark"]
+        payer = sec["payer"]
+        hp = sec.get("headline_percentile")
+        hp_txt = (f"You sit at roughly <b>p{hp:.0f}</b> among this payer's other "
+                  f"providers." if hp is not None else "")
+        rows_html = "".join(
+            f"<tr><td>{e(r['billing_code'])}<div class='sub'>{e(r['description'] or '')}</div></td>"
+            f"<td class='num'>{_m(r['subject_rate'])}</td>"
+            f"<td class='num'>{_m(r['p25'])}</td><td class='num'>{_m(r['p50'])}</td>"
+            f"<td class='num'>{_m(r['p75'])}</td>"
+            f"<td class='num'>{_m(r['target_rate'])}</td>"
+            f"<td class='num gap'>{_m(r['gap_to_target'])}</td>"
+            f"<td class='num sub'>{r['n_peers'] or 0}</td></tr>"
+            for r in bench["rows"] if r.get("subject_rate") is not None
+        )
+        opp = sec.get("opportunity")
+        opp_line = ""
+        if opp:
+            opp_line = (
+                f'<p class="note">Annual opportunity with {e(payer)}: '
+                f'<b>{_m(opp["total_at_target"])}</b> at p{target} '
+                f'(conservative {_m(opp["total_at_conservative"])}).</p>'
+            )
+        return f"""
+        <h2>{e(payer)}</h2>
+        <p class="meta">{hp_txt} {sec['n_codes']} benchmarked code(s), as of {e(str(month))}.</p>
+        <table><thead><tr><th>Code</th><th class="num">Your rate</th>
+        <th class="num">P25</th><th class="num">Median</th><th class="num">P75</th>
+        <th class="num">Target (p{target})</th><th class="num">Gap</th>
+        <th class="num">Peers</th></tr></thead>
+        <tbody>{rows_html}</tbody></table>
+        {opp_line}
+        """
+
+    body_sections = "".join(payer_section(s) for s in neg["sections"])
+    # methodology: reuse the footer of the weakest-position payer's benchmark,
+    # but scope the payer list to every payer in the report
+    foot_bench = dict(neg["sections"][0]["benchmark"])
+    foot_bench["market"] = {**foot_bench["market"], "payers": neg["payers"]}
+    footer = methodology_footer(store, foot_bench)
+    return f"""<!DOCTYPE html><html><head><meta charset="utf-8">
+<title>Payer negotiation one-pager — {e(subject)}</title>
+<style>
+ body {{ font: 13px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; color: #0b0b0b;
+        max-width: 900px; margin: 32px auto; padding: 0 24px; }}
+ h1 {{ font-size: 20px; margin-bottom: 2px; }} h2 {{ font-size: 15px; margin-top: 30px;
+        border-bottom: 2px solid #0b0b0b; padding-bottom: 3px; }}
+ .brand {{ color: #52514e; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }}
+ .brandbar {{ display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }}
+ .brandbar .brand {{ margin: 0; }} .logo {{ max-height: 40px; max-width: 200px; }}
+ .meta {{ color: #52514e; margin-bottom: 10px; }}
+ table {{ border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }}
+ th, td {{ text-align: left; padding: 6px 8px; border-bottom: 1px solid #e1e0d9; vertical-align: middle; }}
+ th {{ font-size: 11px; color: #898781; text-transform: uppercase; letter-spacing: .04em; }}
+ .num {{ text-align: right; }} .sub {{ color: #898781; font-size: 11.5px; }}
+ .gap {{ font-weight: 650; }}
+ .band {{ font-size: 14px; background: #f4f3ee; padding: 10px 14px; border-radius: 6px; }}
+ .note {{ color: #52514e; font-size: 12px; }}
+ footer {{ margin-top: 36px; border-top: 1px solid #c3c2b7; padding-top: 12px;
+          color: #52514e; font-size: 11px; white-space: pre-wrap; }}
+ @media print {{ body {{ margin: 0; }} h2 {{ break-after: avoid; }} }}
+</style></head><body>
+{_brand_header(cfg)}
+<h1>Payer negotiation one-pager — {e(subject)}</h1>
+<div class="meta">Where each payer pays you versus the peers it pays, as of {e(str(month))}.
+ Ordered weakest position first.</div>
+{summary}
+{body_sections}
+<footer>METHODOLOGY\n{e(footer)}</footer>
+</body></html>"""
+
+
+# ---------------------------------------------------------------------------
 # pitch report (§7B.5)
 # ---------------------------------------------------------------------------
 
@@ -342,7 +547,6 @@ def render_pitch_report(cfg: MrfxConfig, store: Store, benchmark: dict,
         raise BenchmarkError("pitch report requires a pinned as-of month")
     footer = methodology_footer(store, benchmark)
     e = html.escape
-    brand = cfg.report_branding.name
     target = benchmark["target_percentile"]
 
     def strip(r) -> str:
@@ -398,6 +602,8 @@ def render_pitch_report(cfg: MrfxConfig, store: Store, benchmark: dict,
         max-width: 900px; margin: 32px auto; padding: 0 24px; }}
  h1 {{ font-size: 20px; margin-bottom: 2px; }} h2 {{ font-size: 15px; margin-top: 28px; }}
  .brand {{ color: #52514e; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }}
+ .brandbar {{ display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }}
+ .brandbar .brand {{ margin: 0; }} .logo {{ max-height: 40px; max-width: 200px; }}
  .meta {{ color: #52514e; margin-bottom: 18px; }}
  table {{ border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }}
  th, td {{ text-align: left; padding: 6px 8px; border-bottom: 1px solid #e1e0d9; vertical-align: middle; }}
@@ -414,7 +620,7 @@ def render_pitch_report(cfg: MrfxConfig, store: Store, benchmark: dict,
           color: #52514e; font-size: 11px; white-space: pre-wrap; }}
  @media print {{ body {{ margin: 0; }} }}
 </style></head><body>
-<div class="brand">{e(brand)}</div>
+{_brand_header(cfg)}
 <h1>Negotiated-rate benchmark — {e(benchmark['subject'])}</h1>
 <div class="meta">As of {e(str(benchmark['market'].get('month')))} ·
  {e(benchmark['peer_set'])} · target: p{target}</div>
@@ -425,6 +631,29 @@ def render_pitch_report(cfg: MrfxConfig, store: Store, benchmark: dict,
 {opp_html}
 <footer>METHODOLOGY\n{e(footer)}</footer>
 </body></html>"""
+
+
+def _brand_header(cfg: MrfxConfig) -> str:
+    """Report-as-a-service header: the consultant's brand name plus, when a
+    readable ``report_branding.logo_path`` is configured, their logo inlined as
+    a data URI (reports must be self-contained single files — no external
+    fetches when a client opens the HTML offline). A missing or unreadable logo
+    is cosmetic and never fails the report (invariant 3)."""
+    e = html.escape
+    name = e(cfg.report_branding.name)
+    logo = cfg.report_branding.logo_path
+    if logo:
+        try:
+            import base64
+            import mimetypes
+            data = logo.read_bytes()
+            mime = mimetypes.guess_type(str(logo))[0] or "image/png"
+            b64 = base64.b64encode(data).decode("ascii")
+            return (f'<div class="brandbar"><img class="logo" alt="{name}" '
+                    f'src="data:{mime};base64,{b64}"><span class="brand">{name}</span></div>')
+        except Exception as exc:  # noqa: BLE001 — logo is decoration, never blocks a report
+            log.warning("report logo %s could not be embedded (%s); using text brand", logo, exc)
+    return f'<div class="brand">{name}</div>'
 
 
 def _m(v) -> str:

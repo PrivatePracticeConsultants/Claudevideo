@@ -130,6 +130,17 @@ The **Benchmark** tab answers "where does this practice sit vs its market":
   strips, opportunity band, peer-set definition and a mandatory methodology
   footer (files/months, filters, dedup rule, caveats). It refuses to render
   without a pinned as-of month.
+- **Payer-negotiation one-pager**: the same benchmark, split **per payer** — for
+  each payer the subject actually contracts with, a table of the subject's rate
+  versus *that payer's other providers only* (intra-payer peers, subject
+  excluded), ordered weakest-position-first so the strongest renegotiation case
+  leads. With volumes supplied it totals the annual dollar gap across payers.
+  This is the deliverable a practice takes into a contract renewal.
+- **Report-as-a-service branding**: both reports carry the consultant's brand
+  name and, when `report_branding.logo_path` points at a readable image, their
+  logo inlined as a data URI (reports stay single self-contained files — no
+  external fetch when a client opens them offline). A missing logo silently
+  falls back to the text brand; it never blocks a report.
 
 **Honesty caveats baked into UI and reports:** benchmarks compute over
 dollar-rate, base-modifier rows by default (deviations are labeled toggles);

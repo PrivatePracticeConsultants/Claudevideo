@@ -26,6 +26,8 @@ from .benchmark import (
     BenchmarkError,
     compute_benchmark,
     compute_opportunity,
+    compute_payer_negotiation,
+    render_negotiation_report,
     render_pitch_report,
 )
 from .catalog import catalog_json
@@ -965,6 +967,20 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 opp = compute_opportunity(bench, volumes,
                                           int(body.get("conservative_percentile", 40)))
             return HTMLResponse(render_pitch_report(cfg, store, bench, opp))
+        except BenchmarkError as e:
+            raise HTTPException(422, str(e))
+
+    @app.post("/api/report/negotiation", response_class=HTMLResponse)
+    async def negotiation_report(request: Request):
+        body = await request.json()
+        try:
+            volumes = {str(k): float(v) for k, v in (body.get("volumes") or {}).items()}
+            neg = compute_payer_negotiation(
+                store, str(body.get("subject", "")), body.get("market") or {},
+                volumes=volumes or None,
+                conservative_percentile=int(body.get("conservative_percentile", 40)),
+            )
+            return HTMLResponse(render_negotiation_report(cfg, store, neg))
         except BenchmarkError as e:
             raise HTTPException(422, str(e))
 

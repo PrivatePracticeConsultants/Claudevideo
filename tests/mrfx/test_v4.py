@@ -387,6 +387,52 @@ def test_pitch_report_renders_with_methodology_and_refuses_without_month(cfg, ma
     assert refused.status_code == 422
 
 
+@pytest.fixture
+def two_payer_store(cfg, store):
+    """Subject 43-0000000 contracts with TWO payers: underpaid by Alpha
+    (subject $30 vs peers 31..39) and near-top with Beta (subject $38)."""
+    peers = [([f"1{i:09d}"], f"43-00000{i:02d}", "ein", [(30.0 + i, None)]) for i in range(1, 10)]
+    alpha = innetwork(payer="Alpha Health Plan",
+                      items=[item("97110", [(["1000000000"], "43-0000000", "ein", [(30.0, None)])] + peers)])
+    beta = innetwork(payer="Beta Health Plan",
+                     items=[item("97110", [(["1000000000"], "43-0000000", "ein", [(38.0, None)])] + peers)])
+    ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "alpha.json", alpha))
+    ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "beta.json", beta))
+    return store
+
+
+def test_payer_negotiation_report_orders_weakest_payer_first(cfg, two_payer_store):
+    from mrfx.benchmark import compute_payer_negotiation
+    neg = compute_payer_negotiation(two_payer_store, "430000000", {"month": "2026-06"})
+    # both payers discovered; weakest position (Alpha, p0) leads
+    assert neg["payers"] == ["Alpha Health Plan", "Beta Health Plan"]
+    alpha = neg["sections"][0]
+    assert alpha["payer"] == "Alpha Health Plan"
+    assert alpha["headline_percentile"] == 0.0   # $30 below every Alpha peer
+    beta = neg["sections"][1]
+    assert beta["headline_percentile"] == 89.0   # $38 above 8 of 9 Beta peers
+    # each section benchmarks the subject only against THAT payer's peers
+    assert alpha["benchmark"]["market"]["payers"] == ["Alpha Health Plan"]
+    assert alpha["benchmark"]["rows"][0]["n_peers"] == 9
+
+
+def test_payer_negotiation_endpoint_renders_and_totals_opportunity(cfg, two_payer_store):
+    client = TestClient(create_app(cfg, two_payer_store))
+    r = client.post("/api/report/negotiation", json={
+        "subject": "430000000", "market": {"month": "2026-06"},
+        "volumes": {"97110": 1000},
+    })
+    assert r.status_code == 200
+    html = r.text
+    assert "Alpha Health Plan" in html and "Beta Health Plan" in html
+    assert "METHODOLOGY" in html
+    # Alpha gap (35-30)x1000 = 5000; Beta subject above median -> $0 opportunity
+    assert "$5,000.00" in html
+    # refuses without a pinned month, like the pitch report
+    refused = client.post("/api/report/negotiation", json={"subject": "430000000", "market": {}})
+    assert refused.status_code == 422
+
+
 def test_qa_flags_outliers_and_zero_rates(cfg, store):
     groups = [(["1000000001"], "43-7777777", "ein", [(30.0, None)]),
               (["1000000002"], "43-7777778", "ein", [(31.0, None)]),
