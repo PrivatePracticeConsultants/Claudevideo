@@ -25,9 +25,10 @@ def expand_placeholders(url: str, today: dt.date | None = None) -> str:
     return url.replace("{FIRST_OF_MONTH}", first_of_month(today))
 
 
-def load_known_sources(path: Path, today: dt.date | None = None) -> list[dict]:
+def load_known_sources(path: Path | str, today: dt.date | None = None) -> list[dict]:
     """Returns the catalog with URLs expanded. Missing/broken file returns []
     (the feature degrades to 'no known sources', never an error)."""
+    path = Path(path)  # tolerate a str path from a caller that didn't wrap it
     try:
         raw = yaml.safe_load(path.read_text()) or {}
     except (OSError, yaml.YAMLError) as e:

@@ -1,4 +1,4 @@
-"""mrfx CLI: serve | preflight | ingest | status | export | reset."""
+"""mrfx CLI: serve | add | preflight | ingest | status | export | outreach | forget | reset."""
 
 from __future__ import annotations
 
