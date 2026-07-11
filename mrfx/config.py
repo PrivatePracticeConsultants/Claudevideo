@@ -77,6 +77,11 @@ class MrfxConfig(BaseModel):
     # (pip install playwright && playwright install chromium); silently
     # skipped when unavailable.
     render_js: bool = True
+    # When render_js is on but Chromium isn't downloaded yet, fetch it once
+    # automatically (python -m playwright install chromium) instead of dropping
+    # the queue row to a manual "run this command" error. Honors
+    # PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD (managed environments forbid re-fetching).
+    render_auto_install: bool = True
     download_timeout_seconds: float = Field(default=900.0, gt=0)
     download_retries: int = Field(default=4, ge=0)
     registry_path: Path = Path("config/payer_registry.yaml")

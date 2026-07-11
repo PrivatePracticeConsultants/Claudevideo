@@ -30,6 +30,8 @@ import glob
 import logging
 import os
 import re
+import subprocess
+import sys
 import threading
 
 from .config import MrfxConfig
@@ -39,6 +41,12 @@ log = logging.getLogger(__name__)
 # one Chromium at a time: several processor threads hitting several JS pages
 # at once would otherwise each spawn a browser (~200 MB apiece on small boxes)
 _RENDER_LOCK = threading.Lock()
+
+# auto-download of Chromium is attempted at most once per process: if it fails
+# (offline, disk full), later renders must not each block on a 10-min download.
+_AUTO_INSTALL_LOCK = threading.Lock()
+_auto_install_attempted = False
+_auto_install_enabled = True  # set from cfg.render_auto_install at the call site
 
 
 class RenderBrowserMissing(Exception):
@@ -90,6 +98,46 @@ def _find_chromium() -> str | None:
     return None
 
 
+def _auto_install_chromium() -> bool:
+    """Best-effort self-heal: a fresh machine often has the playwright PACKAGE
+    (pulled in by requirements) but never ran `playwright install chromium`, so
+    the browser binary is absent. Download it once — `python -m playwright
+    install chromium` — instead of dropping the queue row to a manual
+    "run this command" error the layperson user then has to act on.
+
+    Attempted at most once per process (a second failure would just re-block a
+    ~10-minute download). Skipped when disabled in config or when
+    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD is set (managed environments ship the
+    browser at a fixed path and forbid re-fetching). Returns True only when an
+    install command actually ran to a clean exit."""
+    global _auto_install_attempted
+    with _AUTO_INSTALL_LOCK:
+        if _auto_install_attempted:
+            return False
+        _auto_install_attempted = True
+        if not _auto_install_enabled:
+            return False
+        if os.environ.get("PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD"):
+            log.info("chromium is missing but PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD is "
+                     "set — not auto-downloading; renders will show the manual fix")
+            return False
+        log.info("chromium browser is missing — downloading it once now "
+                 "(python -m playwright install chromium); this can take a minute…")
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-m", "playwright", "install", "chromium"],
+                capture_output=True, text=True, timeout=900)
+        except Exception as e:  # noqa: BLE001 — install is best-effort
+            log.warning("auto-download of chromium could not start: %s", str(e)[:200])
+            return False
+        if proc.returncode == 0:
+            log.info("chromium downloaded successfully; retrying the render")
+            return True
+        log.warning("auto-download of chromium exited %d: %s", proc.returncode,
+                    (proc.stderr or proc.stdout or "").strip()[:300])
+        return False
+
+
 def _launch(pw):
     kwargs = {"headless": True}
     args = ["--disable-background-networking"]
@@ -105,10 +153,20 @@ def _launch(pw):
         if "doesn't exist" not in str(e):
             raise
         exe = _find_chromium()
-        if exe is None:
-            raise RenderBrowserMissing(str(e)[:200]) from e
-        log.info("playwright's own chromium build is missing; using %s", exe)
-        return pw.chromium.launch(executable_path=exe, **kwargs)
+        if exe is not None:
+            log.info("playwright's own chromium build is missing; using %s", exe)
+            return pw.chromium.launch(executable_path=exe, **kwargs)
+        # No binary anywhere: download it once and retry, so the user never has
+        # to run a terminal command to get JS portals rendering.
+        if _auto_install_chromium():
+            try:
+                return pw.chromium.launch(**kwargs)
+            except Exception as e2:  # noqa: BLE001 — installed to a discoverable path?
+                exe = _find_chromium()
+                if exe is not None:
+                    return pw.chromium.launch(executable_path=exe, **kwargs)
+                raise RenderBrowserMissing(str(e2)[:200]) from e2
+        raise RenderBrowserMissing(str(e)[:200]) from e
 
 
 def render_page_links(cfg: MrfxConfig, url: str, max_files: int) -> list[str]:
@@ -120,6 +178,8 @@ def render_page_links(cfg: MrfxConfig, url: str, max_files: int) -> list[str]:
     the caller can put the one-line fix on the queue row."""
     if not render_available():
         return []
+    global _auto_install_enabled
+    _auto_install_enabled = cfg.render_auto_install
     import httpx
 
     from .fetch import (BROWSER_UA, _repair_incomplete_chain,

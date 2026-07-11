@@ -83,10 +83,13 @@ start of the line. **Any time you open a new terminal to use the app, re-run
 just the `activate` line** (the `source .venv/bin/activate` or
 `.venv\Scripts\Activate.ps1` step) — you don't reinstall.
 
-> **Optional but recommended — the headless-browser helper.** Some payers
+> **The headless-browser helper — now automatic.** Some payers
 > (Molina, Kaiser, Aetna, Harvard Pilgrim, Regence, and Oscar's file page)
-> build their file lists with JavaScript, and the app can read those pages
-> automatically if you run this once after the install above:
+> build their file lists with JavaScript. The first time you paste one of those
+> pages, the app downloads a private copy of the Chromium browser (~150 MB) for
+> itself and retries automatically — you don't have to run anything. (If you'd
+> rather pre-download it, or the automatic step ever fails because you were
+> offline, you can still run it by hand:)
 >
 > ```
 > playwright install chromium
@@ -334,14 +337,14 @@ them in one place, grouped by where you'll hit them.
   links from those hosts; paste the payer's **index/TOC or page link** (the
   starter list has them) — the app fetches fresh signed links itself.
 - **`This link is a web page, not a data file, and no file links could be
-  found on it`** — the page builds its list with JavaScript. Fix: install
-  the headless-browser helper
-  once (`pip install playwright && playwright install chromium`, in your
-  venv), then press **retry** on the row. If the message says the helper *is*
-  installed but the browser isn't, run just `playwright install chromium`.
-  Still nothing after that? The page needs multi-step human clicks — open it
-  in your browser, right-click the real `.json/.json.gz/.zip` links, Copy
-  Link Address, and paste those.
+  found on it`** — the page builds its list with JavaScript. The app reads
+  those pages with a headless browser it downloads for itself the first time
+  it needs it, so usually just press **retry** on the row. If the message says
+  it *tried to download the browser but couldn't* (you were offline, or the
+  disk was full), get back online and press retry — or pre-install it yourself
+  in your venv with `playwright install chromium`. Still nothing after that?
+  The page needs multi-step human clicks — open it in your browser, right-click
+  the real `.json/.json.gz/.zip` links, Copy Link Address, and paste those.
 - **`file is X GB — larger than the confirm_over_gb safety limit`** — a
   legitimately huge file. If you want it: raise `confirm_over_gb:` in
   `config/mrfx.yaml` (e.g. `12`) and press retry — the partial download was

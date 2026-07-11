@@ -1044,9 +1044,10 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
                 log.info("%s — web page: found %d file links, %d newly queued", url, len(links), added)
                 store.update_url(url_id, status="done", kind="page", child_count=added, error=None)
             else:
-                msg = (PAGE_HELP + " The headless-browser helper is installed but its "
-                       "browser is not — run: playwright install chromium — then press "
-                       "retry.") if browser_missing else _page_help()
+                msg = (PAGE_HELP + " The app tried to download the headless browser "
+                       "automatically but couldn't (usually no internet, or disk full). "
+                       "Once you're back online, press retry — or run this once yourself: "
+                       "playwright install chromium") if browser_missing else _page_help()
                 store.update_url(url_id, status="failed", kind="page", error=msg)
             return False
         # Not HTML and not a recognized MRF shape. Some payers publish custom

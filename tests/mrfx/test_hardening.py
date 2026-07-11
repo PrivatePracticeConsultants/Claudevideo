@@ -263,3 +263,95 @@ def test_prefetch_reuses_kept_download_never_redownloads(cfg, store, tmp_path):
     row = next(r for r in store.list_urls() if r["url"] == url)
     assert row["status"] == "fetched" and row["content_sha"] == "cafe" * 16
     assert dest.exists()  # bytes untouched
+
+
+class _FakeChromium:
+    """Stand-in for pw.chromium: raise the missing-browser error until Chromium
+    is 'downloaded', then hand back a sentinel browser."""
+    def __init__(self):
+        self.installed = False
+        self.launch_calls = 0
+
+    def launch(self, **kwargs):
+        self.launch_calls += 1
+        if not self.installed:
+            raise RuntimeError("Executable doesn't exist at /root/.cache/ms-playwright/…")
+        return f"browser(launch#{self.launch_calls})"
+
+
+def _reset_auto_install(monkeypatch):
+    import mrfx.render as render
+    monkeypatch.setattr(render, "_auto_install_attempted", False)
+    monkeypatch.setattr(render, "_auto_install_enabled", True)
+    monkeypatch.setattr(render, "_find_chromium", lambda: None)  # nothing on disk
+    monkeypatch.delenv("PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD", raising=False)
+    return render
+
+
+def test_missing_chromium_is_downloaded_then_launch_retried(monkeypatch):
+    # the layperson never ran `playwright install chromium`; a JS portal render
+    # must self-heal by downloading the browser once and retrying, not drop the
+    # row to a manual command.
+    render = _reset_auto_install(monkeypatch)
+    chromium = _FakeChromium()
+    ran = {"cmd": None}
+
+    class _Proc:
+        returncode = 0
+        stdout = stderr = ""
+
+    def fake_run(cmd, **kw):
+        ran["cmd"] = cmd
+        chromium.installed = True  # the download succeeds
+        return _Proc()
+
+    monkeypatch.setattr(render.subprocess, "run", fake_run)
+
+    class _PW:
+        pass
+    pw = _PW()
+    pw.chromium = chromium
+
+    browser = render._launch(pw)
+    assert browser == "browser(launch#2)"          # first launch failed, retry won
+    assert "install" in ran["cmd"] and "chromium" in ran["cmd"]
+    assert chromium.launch_calls == 2
+
+
+def test_missing_chromium_download_disabled_raises_actionable(monkeypatch):
+    # when auto-install is turned off (or the managed env forbids re-fetching),
+    # the caller must still get the actionable RenderBrowserMissing so the queue
+    # row can show the one-line manual fix.
+    render = _reset_auto_install(monkeypatch)
+    monkeypatch.setattr(render, "_auto_install_enabled", False)
+    ran = {"called": False}
+    monkeypatch.setattr(render.subprocess, "run",
+                        lambda *a, **k: ran.__setitem__("called", True))
+
+    class _PW:
+        pass
+    pw = _PW()
+    pw.chromium = _FakeChromium()  # never 'installs'
+    with pytest.raises(render.RenderBrowserMissing):
+        render._launch(pw)
+    assert ran["called"] is False  # no download attempted when disabled
+
+
+def test_chromium_auto_download_attempted_only_once(monkeypatch):
+    # a failed download (offline) must not re-block every later render on a
+    # ~10-minute install — the attempt is one-shot per process.
+    render = _reset_auto_install(monkeypatch)
+    calls = {"n": 0}
+
+    class _Proc:
+        returncode = 1  # download fails every time
+        stdout = stderr = "network unreachable"
+
+    def fake_run(cmd, **kw):
+        calls["n"] += 1
+        return _Proc()
+
+    monkeypatch.setattr(render.subprocess, "run", fake_run)
+    assert render._auto_install_chromium() is False
+    assert render._auto_install_chromium() is False  # second call is a no-op
+    assert calls["n"] == 1  # subprocess ran exactly once
