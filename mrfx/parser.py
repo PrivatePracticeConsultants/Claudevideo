@@ -58,6 +58,26 @@ def warn_if_slow_json_backend() -> bool:
 
 ACCEPTED_CODE_TYPES = {"CPT", "HCPCS"}
 
+
+def code_type_family(raw) -> str | None:
+    """Normalize a billing_code_type to 'CPT' / 'HCPCS', or None if it is a
+    genuinely different code system.
+
+    Tolerant of vendor spellings so a valid target row is not silently dropped:
+    an empty/whitespace value returns None here so the caller treats it the same
+    as an ABSENT type (accept best-effort by code shape) — previously an
+    empty-string type was rejected while a missing key was accepted. Prefixes
+    like 'CPT4' or 'HCPCS Level II' normalize to the family rather than being
+    dropped as billing_type_other."""
+    t = str(raw or "").strip().upper()
+    if not t:
+        return None
+    if t.startswith("HCPCS"):
+        return "HCPCS"
+    if t.startswith("CPT"):
+        return "CPT"
+    return "__other__"  # a real non-CPT/HCPCS system — reject
+
 # one provider group: (tin_value, tin_type, npis)
 PGroup = tuple[str | None, str | None, tuple[str, ...]]
 
@@ -175,8 +195,14 @@ class ParseResult:
 
     def _compute_file_month(self) -> str:
         for candidate in (self.last_updated_on, self.source_file):
-            m = re.search(r"(20\d{2})[-_](\d{2})", str(candidate or ""))
-            if m and 1 <= int(m.group(2)) <= 12:
+            # constrain the month to 01-12 INSIDE the pattern (not as a post
+            # check): a junk token like '2024_20' (month 20) in
+            # 'plan_2024_2025-03_rates.json' then fails the regex, and the
+            # engine continues to the real '2025-03' that OVERLAPS it. A plain
+            # first-match-then-validate would consume the '20' of '2025' and
+            # miss the valid date entirely. Also rejects '2024-13'.
+            m = re.search(r"(20\d{2})[-_](0[1-9]|1[0-2])", str(candidate or ""))
+            if m:
                 return f"{m.group(1)}-{m.group(2)}"
         return dt.date.today().strftime("%Y-%m")
 
@@ -187,8 +213,14 @@ def parse_provider_group(pg: dict, qa: QaCounters | None = None) -> PGroup:
         d = clean_digits(n)
         if not d:
             continue
-        if len(d) != 10 and qa is not None:
-            qa.invalid_npis += 1
+        if len(d) != 10:
+            # a malformed NPI (wrong digit count) must not enter the emitted
+            # rows — it would pollute the NPI-grain rollup and drill-down with a
+            # fake id. Count it for QA visibility and drop it; the group's TIN
+            # still carries the rate through its valid NPIs.
+            if qa is not None:
+                qa.invalid_npis += 1
+            continue
         npis.append(d)
     tin = pg.get("tin") or {}
     tin_type = str(tin.get("type") or "").strip().lower() or None
@@ -300,7 +332,11 @@ class InNetworkParser:
                                 r.qa.multi_code_fields += 1
                     elif (
                         prefix == "in_network.item.billing_code_type"
-                        and str(value).strip().upper() not in ACCEPTED_CODE_TYPES
+                        # an empty/whitespace type is NOT skipped here — it falls
+                        # through so _handle_item accepts it best-effort by code
+                        # shape (a missing key already does); only a genuinely
+                        # different code system is dropped as billing_type_other
+                        and code_type_family(value) == "__other__"
                     ):
                         r.qa.billing_type_other += 1
                         skipping = True
@@ -397,16 +433,18 @@ class InNetworkParser:
     def _handle_item(self, item: dict) -> None:
         qa = self.result.qa
         code = clean_code(item.get("billing_code", ""))
-        code_type = str(item.get("billing_code_type") or "").strip().upper()
+        family = code_type_family(item.get("billing_code_type"))
         if not code or (self.code_set is not None and code not in self.code_set):
             return
-        if code_type and code_type not in ACCEPTED_CODE_TYPES:
+        if family == "__other__":  # a real non-CPT/HCPCS system
             return
-        if not code_type:
-            # target code with the type field missing entirely: accept
+        if family is None:
+            # target code with the type field missing OR blank: accept
             # best-effort, infer the family from the code shape, and count it.
             qa.missing_code_type += 1
             code_type = "HCPCS" if re.fullmatch(r"[A-Z]\d{4}", code) else "CPT"
+        else:
+            code_type = family  # normalized 'CPT'/'HCPCS' (e.g. from 'CPT4')
         arrangement = str(item.get("negotiation_arrangement") or "ffs").strip().lower()
         if arrangement not in ("", "ffs"):
             # bundle/capitation: negotiated_rate prices the whole bundle, NOT
@@ -556,7 +594,11 @@ def skim_needed_ref_ids(cfg: MrfxConfig, stream, progress_marker=None) -> tuple[
                         builder = _DISCARDED
                 elif (
                     prefix == "in_network.item.billing_code_type"
-                    and str(value).strip().upper() not in ACCEPTED_CODE_TYPES
+                    # mirror the extraction pass: empty/blank type is kept
+                    # (best-effort), only a real other code system is skipped —
+                    # otherwise the skim and extraction passes disagree on which
+                    # ref ids to keep
+                    and code_type_family(value) == "__other__"
                 ):
                     skipping = True
                     builder = _DISCARDED

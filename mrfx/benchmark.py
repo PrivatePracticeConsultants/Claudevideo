@@ -61,6 +61,12 @@ def _market_where(market: dict, include_assistant: bool, include_non_dollar: boo
         params += payers
     if not include_non_dollar:
         clauses.append("t.is_dollar_rate")
+    # placeholder guard: $0 / $0.01 / negative dollar "rates" are payer
+    # placeholders (the parser flags them as zero_rates), never real negotiated
+    # prices — including them drags the market's p10/p25 (and any subject
+    # median that mixes a placeholder with a real value) below the truth. Only
+    # applies to dollar rows; a percentage row like 1.5 (150%) stays.
+    clauses.append("(NOT t.is_dollar_rate OR t.negotiated_rate > 0.01)")
     if not include_assistant:
         clauses.append("t.modifier_set NOT LIKE '%CQ%' AND t.modifier_set NOT LIKE '%CO%'")
     if market.get("base_only", True):
@@ -140,10 +146,14 @@ def compute_benchmark(store: Store, subject: str, market: dict) -> dict:
     where, params = _market_where(market, include_assistant, include_non_dollar)
 
     curated = market.get("curated_tins")
-    peer_clause = "AND t.tin_value NOT IN (SELECT tin FROM subject_tins)"
+    # peers filter runs directly on the already-grouped `base` CTE (aliased b) —
+    # re-joining the full rates_by_tin here just to re-apply a tin_value filter
+    # was a needless second scan of the whole analytical table, paid once PER
+    # PAYER by compute_payer_negotiation.
+    peer_clause = "b.tin_value NOT IN (SELECT tin FROM subject_tins)"
     peer_params: list = []
     if curated:
-        peer_clause += f" AND t.tin_value IN ({', '.join('?' for _ in curated)})"
+        peer_clause += f" AND b.tin_value IN ({', '.join('?' for _ in curated)})"
         peer_params = list(curated)
 
     pct_selects = ", ".join(
@@ -164,10 +174,8 @@ def compute_benchmark(store: Store, subject: str, market: dict) -> dict:
     ),
     peers AS (
         SELECT b.billing_code, b.tin_value, b.rate
-        FROM base b, rates_by_tin t
-        WHERE t.billing_code = b.billing_code AND t.tin_value = b.tin_value
-          {peer_clause}
-        GROUP BY ALL
+        FROM base b
+        WHERE {peer_clause}
     ),
     market_stats AS (
         SELECT billing_code, count(DISTINCT tin_value) AS n_peers, {pct_selects}
@@ -368,13 +376,16 @@ def compute_payer_negotiation(store: Store, subject: str, market: dict,
         covered_payers += 1
         opp = None
         if volumes:
-            try:
-                opp = compute_opportunity(bench, volumes, conservative_percentile)
-                total_target += opp["total_at_target"]
-                total_conservative += opp["total_at_conservative"]
-            except BenchmarkError:
-                opp = None  # e.g. no overlapping code — skip this payer's dollars
-        # headline percentile: median of the per-code positions we have
+            # A payer with no volume-matching code just yields empty rows and a
+            # $0 total (compute_opportunity does NOT raise for that). The only
+            # BenchmarkError it raises is a genuine config error (bad
+            # percentile) that applies to EVERY payer — letting it propagate to
+            # the 422 handler is correct; swallowing it here would print a
+            # fabricated "$0/yr" on the report (honesty invariant).
+            opp = compute_opportunity(bench, volumes, conservative_percentile)
+            total_target += opp["total_at_target"]
+            total_conservative += opp["total_at_conservative"]
+        # headline percentile: mean of the per-code positions we have
         pcts = [r["subject_percentile"] for r in priced
                 if r.get("subject_percentile") is not None]
         headline_pct = round(sum(pcts) / len(pcts)) if pcts else None
@@ -416,7 +427,11 @@ def require_geographic_scope(market: dict, kind: str) -> str:
     the *report* boundary only."""
     if market.get("state"):
         return ""
-    if market.get("allow_national"):
+    # coerce explicitly: a JSON string "false"/"no"/"0" is truthy in Python, so
+    # `if market.get("allow_national")` would treat a literal refusal as consent
+    an = market.get("allow_national")
+    allowed = an is True or (isinstance(an, str) and an.strip().lower() in ("true", "1", "yes"))
+    if allowed:
         return ("NATIONAL COMPARISON — no state filter was applied, so providers "
                 "across every loaded state are pooled into one distribution. "
                 "Negotiated reimbursement varies by geography; these percentiles "
@@ -691,7 +706,11 @@ def _brand_header(cfg: MrfxConfig) -> str:
 
 
 def _m(v) -> str:
-    return f"${v:,.2f}" if v is not None else "–"
+    if v is None:
+        return "–"
+    # negative dollars read as -$50.00, not $-50.00 (a subject above the target
+    # produces a negative gap in the report's Gap column)
+    return f"-${abs(v):,.2f}" if v < 0 else f"${v:,.2f}"
 
 
 def _pctnum(v) -> str:

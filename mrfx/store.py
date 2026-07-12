@@ -167,8 +167,18 @@ BY_TIN_QUERY = """
            coalesce(array_to_string(service_code, '|'), '')          AS service_code_set,
            file_month, is_dollar_rate,
            -- round the aggregate to 4 dp: kills float-median noise
-           -- (86.835000000001) while preserving any legitimate sub-cent median
-           round(median(DISTINCT negotiated_rate), 4)                AS negotiated_rate,
+           -- (86.835000000001) while preserving any legitimate sub-cent median.
+           -- Exclude $0/$0.01/negative DOLLAR placeholders from the median so a
+           -- TIN that published both a placeholder AND a real rate for the same
+           -- code isn't dragged to their midpoint (median of 0.01 and 85 = 42.5).
+           -- is_dollar_rate is a GROUP BY key, so the FILTER is a no-op for
+           -- non-dollar groups. coalesce keeps a placeholder-ONLY group showing
+           -- its value (so /api/rates still lists it and the hide-outliers
+           -- toggle still masks it) rather than becoming NULL.
+           round(coalesce(
+               median(DISTINCT negotiated_rate) FILTER (NOT is_dollar_rate OR negotiated_rate > 0.01),
+               median(DISTINCT negotiated_rate)
+           ), 4)                                                     AS negotiated_rate,
            round(min(negotiated_rate), 4)                            AS rate_min,
            round(max(negotiated_rate), 4)                            AS rate_max,
            count(DISTINCT negotiated_rate)                           AS rate_variants,
@@ -512,14 +522,20 @@ class Store:
             sets.append("chunks_total = ?")
             params.append(chunks_total)
         params.append(filename)
+        # non-blocking (see url_progress): never wait on a long rollup rebuild
+        # holding write_lock just to repaint a progress bar.
+        if not self.write_lock.acquire(timeout=1.0):
+            return
         try:
-            with self.write_lock, self.connect() as con:
+            with self.connect() as con:
                 con.execute(f"UPDATE files SET {', '.join(sets)} WHERE filename = ?", params)
         except Exception as e:  # noqa: BLE001
             import logging as _logging
 
             _logging.getLogger(__name__).debug(
                 "progress write for %s skipped (%s) — cosmetic only", filename, e)
+        finally:
+            self.write_lock.release()
 
     # -- URL queue ----------------------------------------------------------
 
@@ -619,10 +635,19 @@ class Store:
 
     def url_progress(self, url_id: int, bytes_done: int, bytes_total: int | None) -> None:
         """BEST-EFFORT by contract: called from inside download stream loops —
-        a transient store error must never fail the download it decorates."""
+        a transient store error must never fail the download it decorates.
+
+        NON-BLOCKING on the write lock: a multi-minute rollup rebuild holds
+        write_lock the whole time, and this runs inside the socket read loop —
+        blocking here would stop the download reading bytes for the rebuild's
+        duration and let an idle-timeout server drop the connection (invariant
+        3: a cosmetic helper must never break real work). If the lock is busy we
+        just skip this tick; the next one repaints the bar."""
         pct = (100.0 * bytes_done / bytes_total) if bytes_total else 0.0
+        if not self.write_lock.acquire(timeout=1.0):
+            return  # lock busy (e.g. rollup rebuild) — drop this cosmetic update
         try:
-            with self.write_lock, self.connect() as con:
+            with self.connect() as con:
                 con.execute(
                     "UPDATE url_queue SET bytes_done = ?, bytes_total = ?, progress = ? WHERE id = ?",
                     [bytes_done, bytes_total or 0, round(pct, 2), url_id],
@@ -632,6 +657,8 @@ class Store:
 
             _logging.getLogger(__name__).debug(
                 "download-progress write for url %s skipped (%s) — cosmetic only", url_id, e)
+        finally:
+            self.write_lock.release()
 
     def list_urls(self, limit: int = 500) -> list[dict]:
         """Rows the user pasted (top-level, no parent) are listed first — a

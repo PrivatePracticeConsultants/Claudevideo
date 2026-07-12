@@ -439,12 +439,14 @@ async function openEntity(grain, unitId) {
   const saveSite = $("#d-website-save", drawer);
   if (saveSite) saveSite.onclick = async () => {
     const url = $("#d-website", drawer).value.trim();
-    const r = await fetch("/api/org-website", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ tins: d.website_tins, url }),
-    });
-    if (r.ok) openEntity(grain, unitId);  // reload so the verified link shows
-    else alert((await r.json().catch(() => ({}))).detail || "could not save the website");
+    try {
+      const r = await fetch("/api/org-website", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tins: d.website_tins, url }),
+      });
+      if (r.ok) openEntity(grain, unitId);  // reload so the verified link shows
+      else alert((await r.json().catch(() => ({}))).detail || "could not save the website");
+    } catch (e) { alert("could not save the website: " + e.message); }
   };
   renderBarChart($("#entity-chart"), d.chart, payers.slice(0, 2));
 }
@@ -710,7 +712,9 @@ function benchmarkPayload() {
   const volumes = {};
   for (const line of $("#b-volumes").value.split(/\n+/)) {
     const m = line.split(/[,\t]/).map((s) => s.trim());
-    if (m.length >= 2 && m[0] && !isNaN(+m[1])) volumes[m[0]] = +m[1];
+    // require a non-empty numeric second field: "97110," -> +"" === 0, which
+    // would silently record 0 units instead of skipping the malformed line
+    if (m.length >= 2 && m[0] && m[1] !== "" && !isNaN(+m[1])) volumes[m[0]] = +m[1];
   }
   return { subject, market, volumes };
 }
@@ -827,13 +831,29 @@ function reportPayloadOrConfirmNational() {
 async function openReport(url) {
   const payload = reportPayloadOrConfirmNational();
   if (!payload) return;
-  const r = await fetch(url, {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  if (!r.ok) { alert("report failed: " + (await r.text())); return; }
-  const blob = await r.blob();
-  window.open(URL.createObjectURL(blob), "_blank");
+  // Open the tab SYNCHRONOUSLY, still inside the click's user-activation window
+  // (the optional confirm() above is synchronous, so activation is preserved).
+  // If we waited until after the await, a slow server render would push
+  // window.open past the activation window and the browser would silently
+  // block the popup — the report would just never appear.
+  const w = window.open("about:blank", "_blank");
+  try {
+    const r = await fetch(url, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!r.ok) {
+      if (w) w.close();
+      alert("report failed: " + (await r.text()));
+      return;
+    }
+    const objUrl = URL.createObjectURL(await r.blob());
+    if (w) w.location = objUrl; else window.location = objUrl;  // popup blocked -> same tab
+    setTimeout(() => URL.revokeObjectURL(objUrl), 60000);  // let the tab load, then free it
+  } catch (e) {
+    if (w) w.close();
+    alert("report failed: " + e.message);
+  }
 }
 
 async function openPitchReport() {
@@ -904,8 +924,10 @@ async function loadFiles() {
   $$("[data-confirm]", body).forEach((b) =>
     b.addEventListener("click", async () => {
       b.disabled = true;
-      const r = await fetch(`/api/files/${encodeURIComponent(b.dataset.confirm)}/confirm`, { method: "POST" });
-      if (!r.ok) alert((await r.json().catch(() => ({}))).detail || `confirm failed (HTTP ${r.status})`);
+      try {
+        const r = await fetch(`/api/files/${encodeURIComponent(b.dataset.confirm)}/confirm`, { method: "POST" });
+        if (!r.ok) alert((await r.json().catch(() => ({}))).detail || `confirm failed (HTTP ${r.status})`);
+      } catch (e) { alert("confirm failed: " + e.message); b.disabled = false; return; }
       loadFiles();
     }));
   $$("[data-forget]", body).forEach((b) =>
@@ -913,12 +935,14 @@ async function loadFiles() {
       const name = b.dataset.forget;
       if (!confirm(`Remove ${name}?\n\nThis erases its rates from the database and deletes its raw copies to free disk space. You can get it back any time by re-adding its link or file.`)) return;
       b.disabled = true;
-      const r = await fetch(`/api/files/${encodeURIComponent(name)}`, { method: "DELETE" });
-      if (!r.ok) {
-        alert((await r.json().catch(() => ({}))).detail || `remove failed (HTTP ${r.status})`);
-        b.disabled = false;
-        return;
-      }
+      try {
+        const r = await fetch(`/api/files/${encodeURIComponent(name)}`, { method: "DELETE" });
+        if (!r.ok) {
+          alert((await r.json().catch(() => ({}))).detail || `remove failed (HTTP ${r.status})`);
+          b.disabled = false;
+          return;
+        }
+      } catch (e) { alert("remove failed: " + e.message); b.disabled = false; return; }
       loadFiles();
     }));
   loadStats();
@@ -1016,27 +1040,22 @@ async function loadUrlQueue() {
       <td style="max-width:420px">${notes}</td>
     </tr>`;
   }).join("");
+  const urlAction = (b, path, label) => async () => {
+    b.disabled = true;
+    try {
+      const r = await fetch(path, { method: "POST" });
+      if (!r.ok) alert((await r.json().catch(() => ({}))).detail || `${label} failed (HTTP ${r.status})`);
+    } catch (e) { alert(`${label} failed: ` + e.message); b.disabled = false; return; }
+    loadUrlQueue();
+  };
   $$("[data-url-retry]", body).forEach((b) =>
-    b.addEventListener("click", async () => {
-      b.disabled = true;
-      const r = await fetch(`/api/urls/${b.dataset.urlRetry}/retry`, { method: "POST" });
-      if (!r.ok) alert((await r.json().catch(() => ({}))).detail || `retry failed (HTTP ${r.status})`);
-      loadUrlQueue();
-    }));
+    b.addEventListener("click", urlAction(b, `/api/urls/${b.dataset.urlRetry}/retry`, "retry")));
   $$("[data-url-cancel]", body).forEach((b) =>
-    b.addEventListener("click", async () => {
-      b.disabled = true;
-      const r = await fetch(`/api/urls/${b.dataset.urlCancel}/cancel`, { method: "POST" });
-      if (!r.ok) alert((await r.json().catch(() => ({}))).detail || `skip failed (HTTP ${r.status})`);
-      loadUrlQueue();
-    }));
+    b.addEventListener("click", urlAction(b, `/api/urls/${b.dataset.urlCancel}/cancel`, "skip")));
   $$("[data-url-force]", body).forEach((b) =>
     b.addEventListener("click", async () => {
       if (!confirm("Download and ingest this oversized file?\n\nIt's larger than the safety limit, so it may take a long time and use a lot of disk. The disk-space check still applies, so it won't fill your drive.")) return;
-      b.disabled = true;
-      const r = await fetch(`/api/urls/${b.dataset.urlForce}/force-size`, { method: "POST" });
-      if (!r.ok) alert((await r.json().catch(() => ({}))).detail || `could not start (HTTP ${r.status})`);
-      loadUrlQueue();
+      await urlAction(b, `/api/urls/${b.dataset.urlForce}/force-size`, "could not start")();
     }));
 }
 

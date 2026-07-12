@@ -131,8 +131,14 @@ def open_stream(path: Path, progress_cb=None) -> io.BufferedIOBase:
 def _estimate_uncompressed(path: Path, compressed: int) -> int | None:
     suffix = path.name.lower()
     if suffix.endswith(".gz") or suffix.endswith(".zip"):
-        # MRF json compresses very well; ~8-12x is typical. Use 10x.
-        return compressed * 10
+        # MRF JSON is extremely repetitive and commonly gzips 12-20x (sometimes
+        # more). A too-low multiplier is dangerous: it can route a genuinely
+        # huge, ref-heavy file to the single-pass IN-MEMORY path, which then
+        # holds the whole provider_references table in RAM and breaks the
+        # constant-memory invariant. Over-estimating is safe — it only routes a
+        # file to the two-pass streaming path, which is always correct. So bias
+        # high: 18x.
+        return compressed * 18
     return compressed
 
 

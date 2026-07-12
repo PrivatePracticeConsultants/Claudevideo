@@ -1393,6 +1393,11 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
                 except Exception:  # noqa: BLE001 — downloader must never die
                     log.exception("prefetch: unexpected error on %s", rec.get("url"))
                     store.update_url(rec["id"], status="failed", error="unexpected download error")
+                    # a non-DownloadError failure (e.g. a store hiccup mid-write)
+                    # still ends this row: revive any twins that deferred to its
+                    # content so the shared content isn't orphaned as skipped
+                    # (matches the DownloadError path at fetch_url_record).
+                    _revive_twins(store, rec.get("content_sha") or "", rec["id"])
             except Exception:  # noqa: BLE001 — even store hiccups must not kill the loop
                 log.exception("prefetch: transient store error; retrying shortly")
                 dl_stop.wait(2.0)

@@ -328,6 +328,37 @@ def test_benchmark_requires_month(market_store):
         compute_benchmark(market_store, "430000000", {})
 
 
+def test_placeholder_dollar_rates_excluded_from_benchmark(cfg, store):
+    # $0.01/$0 dollar "rates" are payer placeholders — they must not drag the
+    # subject median or appear as peers
+    groups = [
+        (["1000000000"], "43-0000000", "ein", [(0.01, None), (85.0, None)]),  # subject
+        (["1000000001"], "43-0000001", "ein", [(0.01, None)]),                # placeholder-only peer
+        (["1000000002"], "43-0000002", "ein", [(80.0, None)]),
+        (["1000000003"], "43-0000003", "ein", [(90.0, None)]),
+    ]
+    ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "ph.json",
+                                         innetwork(items=[item("97110", groups)])))
+    row = next(r for r in compute_benchmark(store, "430000000", {"month": "2026-06"})["rows"]
+               if r["billing_code"] == "97110")
+    assert row["subject_rate"] == 85.0   # not median(0.01, 85) == 42.5
+    assert row["n_peers"] == 2           # the 0.01-only peer is excluded
+    assert row["p50"] == 85.0            # median of {80, 90}
+
+
+def test_negotiation_report_surfaces_bad_percentile_not_fabricated_zero(cfg, two_payer_store):
+    # a conservative percentile above the target is a genuine config error for
+    # every payer; the report must 422, not silently print "$0/yr"
+    client = TestClient(create_app(cfg, two_payer_store))
+    r = client.post("/api/report/negotiation", json={
+        "subject": "430000000",
+        "market": {"month": "2026-06", "allow_national": True, "target_percentile": 25},
+        "volumes": {"97110": 1000},
+        "conservative_percentile": 40,
+    })
+    assert r.status_code == 422
+
+
 def test_opportunity_model_math(market_store):
     bench = compute_benchmark(market_store, "430000000", {"month": "2026-06"})
     opp = compute_opportunity(bench, {"97110": 1000}, conservative_percentile=40)

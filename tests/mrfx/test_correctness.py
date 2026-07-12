@@ -39,6 +39,55 @@ def _item(code="97110", arrangement=None, prices=None, npi="1111111111"):
     return it
 
 
+def test_blank_billing_code_type_accepted_like_a_missing_one(cfg, store):
+    # audit: an ABSENT type is accepted best-effort, so a present-but-blank ""
+    # must be too (previously it was dropped as billing_type_other)
+    it = _item()
+    it["billing_code_type"] = ""
+    p = make_fixture(cfg.inbox_dir, "blanktype.json", _mrf([it]))
+    res = ingest_file(cfg, store, p)
+    assert res["status"] == "done"
+    rows = _rates(store)
+    assert len(rows) == 1 and rows[0]["billing_code"] == "97110"
+
+
+def test_vendor_type_spelling_normalized_not_dropped(cfg, store):
+    # 'CPT4' / 'HCPCS Level II' are the CPT/HCPCS families, not a different system
+    it = _item()
+    it["billing_code_type"] = "CPT4"
+    p = make_fixture(cfg.inbox_dir, "cpt4.json", _mrf([it]))
+    ingest_file(cfg, store, p)
+    rows = _rates(store)
+    assert len(rows) == 1 and rows[0]["billing_code_type"] == "CPT"
+
+
+def test_malformed_npi_dropped_but_valid_kept(cfg, store):
+    it = {
+        "billing_code": "97110", "billing_code_type": "CPT",
+        "negotiated_rates": [{
+            "provider_groups": [{"npi": [1234567, 1111111111],  # 7-digit junk + valid
+                                 "tin": {"type": "ein", "value": "431111111"}}],
+            "negotiated_prices": [{"negotiated_type": "negotiated", "negotiated_rate": 50.0,
+                                   "billing_class": "professional"}],
+        }],
+    }
+    p = make_fixture(cfg.inbox_dir, "badnpi.json", _mrf([it]))
+    ingest_file(cfg, store, p)
+    npis = {r["npi"] for r in _rates(store)}
+    assert "1111111111" in npis and "1234567" not in npis
+
+
+def test_file_month_skips_invalid_leading_date_token(cfg, store):
+    # 'plan_2024_2025-03' — the junk '2024_20' (month 20) must not defeat the
+    # real '2025-03' that overlaps it; header date absent so the filename wins
+    data = {"reporting_entity_name": "Testco", "reporting_entity_type": "issuer",
+            "version": "2.0.0", "in_network": [_item()]}
+    p = make_fixture(cfg.inbox_dir, "plan_2024_2025-03_rates.json", data)
+    ingest_file(cfg, store, p)
+    rows = _rates(store)
+    assert rows and all(r["file_month"] == "2025-03" for r in rows)
+
+
 def test_bundle_and_capitation_items_excluded(cfg, store):
     # a $500 bundle price is NOT a per-code rate — it must never enter medians
     p = make_fixture(cfg.inbox_dir, "bundle.json", _mrf([

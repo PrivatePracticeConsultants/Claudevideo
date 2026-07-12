@@ -35,7 +35,7 @@ from .config import MrfxConfig
 from .entities import sync_entity_map, update_entity
 from .ingest import ingest_file, scan_inbox
 from .registry import Registry
-from .store import Store, mask_tin
+from .store import Store, mask_tin, sql_path
 
 log = logging.getLogger(__name__)
 
@@ -627,6 +627,13 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         expected = body.get("expected_rate")
         if not ident or not code:
             raise HTTPException(422, "id (TIN or NPI) and code are required")
+        if expected is not None and str(expected).strip() != "":
+            try:
+                expected = float(expected)  # a non-numeric expected_rate is a 422, not a 500
+            except (TypeError, ValueError):
+                raise HTTPException(422, "expected_rate must be a number")
+        else:
+            expected = None
         with store.connect() as con:
             rows = _dicts(con.execute(
                 """
@@ -848,7 +855,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         stamp = dt.datetime.now().strftime("%Y-%m-%d_%H%M")
         tmp = _mktemp(".csv")
         with store.connect() as con:
-            con.execute(f"COPY ({select}) TO '{tmp}' (FORMAT CSV, HEADER)", params)
+            con.execute(f"COPY ({select}) TO '{sql_path(tmp)}' (FORMAT CSV, HEADER)", params)
         raw = tmp.read_text()
         tmp.unlink()
         method = methodology_text(cfg, store, grain, fs, sort, dir, view)
@@ -941,7 +948,9 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         body = await request.json()
         try:
             return compute_benchmark(store, str(body.get("subject", "")), body.get("market") or {})
-        except BenchmarkError as e:
+        except (BenchmarkError, ValueError) as e:
+            # ValueError: a non-numeric volume / percentile in the JSON body
+            # (int()/float() coercion) — a client input error, so 422, not 500.
             raise HTTPException(422, str(e))
 
     @app.post("/api/benchmark/opportunity")
@@ -953,7 +962,9 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             opp = compute_opportunity(bench, volumes,
                                       int(body.get("conservative_percentile", 40)))
             return {"benchmark": bench, "opportunity": opp}
-        except BenchmarkError as e:
+        except (BenchmarkError, ValueError) as e:
+            # ValueError: a non-numeric volume / percentile in the JSON body
+            # (int()/float() coercion) — a client input error, so 422, not 500.
             raise HTTPException(422, str(e))
 
     @app.post("/api/report/pitch", response_class=HTMLResponse)
@@ -967,7 +978,9 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 opp = compute_opportunity(bench, volumes,
                                           int(body.get("conservative_percentile", 40)))
             return HTMLResponse(render_pitch_report(cfg, store, bench, opp))
-        except BenchmarkError as e:
+        except (BenchmarkError, ValueError) as e:
+            # ValueError: a non-numeric volume / percentile in the JSON body
+            # (int()/float() coercion) — a client input error, so 422, not 500.
             raise HTTPException(422, str(e))
 
     @app.post("/api/report/negotiation", response_class=HTMLResponse)
@@ -981,7 +994,9 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 conservative_percentile=int(body.get("conservative_percentile", 40)),
             )
             return HTMLResponse(render_negotiation_report(cfg, store, neg))
-        except BenchmarkError as e:
+        except (BenchmarkError, ValueError) as e:
+            # ValueError: a non-numeric volume / percentile in the JSON body
+            # (int()/float() coercion) — a client input error, so 422, not 500.
             raise HTTPException(422, str(e))
 
     # peer sets
