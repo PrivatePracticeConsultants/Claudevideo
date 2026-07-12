@@ -32,6 +32,8 @@ from .benchmark import (
 )
 from .catalog import catalog_json
 from .config import MrfxConfig
+from .leads import compute_leads, leads_csv
+from .monitor import compute_rate_changes, rate_changes_csv
 from .schedule import (
     compute_fee_schedule,
     fee_schedule_csv,
@@ -1034,6 +1036,66 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             return PlainTextResponse("﻿" + csv_text, headers={  # BOM for Excel
                 "Content-Disposition": 'attachment; filename="rate_card.csv"'})
         except BenchmarkError as e:
+            raise HTTPException(422, str(e))
+
+    # underpaid-practice leads (§7D)
+    @app.post("/api/leads")
+    async def leads(request: Request):
+        body = await request.json()
+        try:
+            return compute_leads(
+                store, body.get("market") or {},
+                threshold_percentile=int(body.get("threshold_percentile", 25)),
+                min_codes=int(body.get("min_codes", 3)),
+                limit=int(body.get("limit", 100)),
+                exclude_subject=(str(body["exclude_subject"]) if body.get("exclude_subject") else None),
+            )
+        except (BenchmarkError, ValueError) as e:
+            raise HTTPException(422, str(e))
+
+    @app.post("/api/leads.csv", response_class=PlainTextResponse)
+    async def leads_export(request: Request):
+        body = await request.json()
+        try:
+            result = compute_leads(
+                store, body.get("market") or {},
+                threshold_percentile=int(body.get("threshold_percentile", 25)),
+                min_codes=int(body.get("min_codes", 3)),
+                limit=int(body.get("limit", 1000)),
+                exclude_subject=(str(body["exclude_subject"]) if body.get("exclude_subject") else None),
+            )
+            return PlainTextResponse("﻿" + leads_csv(store, result), headers={
+                "Content-Disposition": 'attachment; filename="leads.csv"'})
+        except (BenchmarkError, ValueError) as e:
+            raise HTTPException(422, str(e))
+
+    # rate-change monitoring (§7E)
+    @app.post("/api/changes")
+    async def changes(request: Request):
+        body = await request.json()
+        try:
+            mp = body.get("min_pct")
+            return compute_rate_changes(
+                store, body.get("market") or {},
+                subject=(str(body["subject"]) if body.get("subject") else None),
+                min_pct=(float(mp) if mp not in (None, "") else None),
+            )
+        except (BenchmarkError, ValueError) as e:
+            raise HTTPException(422, str(e))
+
+    @app.post("/api/changes.csv", response_class=PlainTextResponse)
+    async def changes_export(request: Request):
+        body = await request.json()
+        try:
+            mp = body.get("min_pct")
+            result = compute_rate_changes(
+                store, body.get("market") or {},
+                subject=(str(body["subject"]) if body.get("subject") else None),
+                min_pct=(float(mp) if mp not in (None, "") else None),
+            )
+            return PlainTextResponse("﻿" + rate_changes_csv(result), headers={
+                "Content-Disposition": 'attachment; filename="rate_changes.csv"'})
+        except (BenchmarkError, ValueError) as e:
             raise HTTPException(422, str(e))
 
     # peer sets

@@ -547,6 +547,104 @@ def test_ratecard_report_and_csv_endpoints(cfg, ratecard_store):
     assert refused.status_code == 422
 
 
+# ---------------------------------------------------------------------------
+# underpaid-practice leads (§7D)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def market5_store(cfg, store):
+    """5 TINs over 3 codes; TIN ...001 is lowest on every code (p20)."""
+    tins = ["43-1000001", "43-1000002", "43-1000003", "43-1000004", "43-1000005"]
+    code_rates = {"97110": [30, 35, 40, 45, 50],
+                  "97140": [40, 45, 50, 55, 60],
+                  "97112": [25, 30, 35, 40, 45]}
+    items = [item(code, [([f"1{i:09d}"], tins[i], "ein", [(float(rates[i]), None)])
+                         for i in range(5)]) for code, rates in code_rates.items()]
+    ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "market5.json", innetwork(items=items)))
+    return store
+
+
+def test_leads_finds_underpaid_entities_ranked(cfg, market5_store):
+    from mrfx.leads import compute_leads
+    res = compute_leads(market5_store, {"month": "2026-06"}, threshold_percentile=25, min_codes=3)
+    assert res["count"] == 1
+    lead = res["leads"][0]
+    assert lead["tin_value"] == "431000001"
+    assert lead["median_percentile"] == 20.0
+    assert lead["avg_gap_to_median"] == 10.0   # 10 below each code's median
+    assert lead["n_codes"] == 3
+
+
+def test_leads_threshold_exclude_and_csv(cfg, market5_store):
+    client = TestClient(create_app(cfg, market5_store))
+    data = client.post("/api/leads", json={
+        "market": {"month": "2026-06"}, "threshold_percentile": 40, "min_codes": 3}).json()
+    tins = {x["tin_value"] for x in data["leads"]}
+    assert "431000001" in tins and "431000002" in tins  # p20 and p40
+    # excluding a known client drops it from the OUTPUT (distribution unchanged)
+    excl = client.post("/api/leads", json={
+        "market": {"month": "2026-06"}, "threshold_percentile": 40,
+        "exclude_subject": "431000001"}).json()
+    et = {x["tin_value"] for x in excl["leads"]}
+    assert "431000001" not in et and "431000002" in et
+    csv = client.post("/api/leads.csv", json={
+        "market": {"month": "2026-06"}, "threshold_percentile": 40})
+    assert csv.status_code == 200 and "# " in csv.text and "median_percentile" in csv.text
+
+
+# ---------------------------------------------------------------------------
+# rate-change monitoring (§7E)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def two_month_store(cfg, store):
+    """Same payer/TIN, May → June: 97110 cut 10%, 97140 up 10%."""
+    may = innetwork(payer="Acme", month="2026-05-01", items=[
+        item("97110", [(["1000000000"], "43-2000000", "ein", [(50.0, None)])]),
+        item("97140", [(["1000000000"], "43-2000000", "ein", [(60.0, None)])]),
+    ])
+    jun = innetwork(payer="Acme", month="2026-06-01", items=[
+        item("97110", [(["1000000000"], "43-2000000", "ein", [(45.0, None)])]),
+        item("97140", [(["1000000000"], "43-2000000", "ein", [(66.0, None)])]),
+    ])
+    ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "may.json", may))
+    ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "jun.json", jun))
+    return store
+
+
+def test_rate_changes_detects_cut_and_increase(cfg, two_month_store):
+    from mrfx.monitor import compute_rate_changes
+    res = compute_rate_changes(two_month_store, {"month": "2026-06"})
+    assert res["prev_month"] == "2026-05" and res["new_month"] == "2026-06"
+    assert res["n_cuts"] == 1 and res["n_increases"] == 1
+    by_code = {c["billing_code"]: c for c in res["changes"]}
+    assert by_code["97110"]["old_rate"] == 50.0 and by_code["97110"]["new_rate"] == 45.0
+    assert by_code["97110"]["pct_change"] == -10.0 and by_code["97110"]["direction"] == "cut"
+    assert by_code["97140"]["pct_change"] == 10.0 and by_code["97140"]["direction"] == "increase"
+
+
+def test_rate_changes_requires_two_months(cfg, store):
+    from mrfx.monitor import compute_rate_changes
+    ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "one.json", innetwork(items=[
+        item("97110", [(["1000000000"], "43-2000000", "ein", [(50.0, None)])])])))
+    with pytest.raises(BenchmarkError, match="two months"):
+        compute_rate_changes(store, {"month": "2026-06"})
+
+
+def test_rate_changes_endpoint_csv_and_min_pct(cfg, two_month_store):
+    client = TestClient(create_app(cfg, two_month_store))
+    r = client.post("/api/changes", json={"market": {"month": "2026-06"}})
+    assert r.status_code == 200 and r.json()["count"] == 2
+    csv = client.post("/api/changes.csv", json={"market": {"month": "2026-06"}})
+    assert csv.status_code == 200 and "old_rate" in csv.text and "# " in csv.text
+    # both moves are 10% -> a 15% floor returns nothing
+    filtered = client.post("/api/changes", json={
+        "market": {"month": "2026-06"}, "min_pct": 15}).json()
+    assert filtered["count"] == 0
+
+
 def test_qa_flags_outliers_and_zero_rates(cfg, store):
     groups = [(["1000000001"], "43-7777777", "ein", [(30.0, None)]),
               (["1000000002"], "43-7777778", "ein", [(31.0, None)]),

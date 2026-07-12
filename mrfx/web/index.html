@@ -17,6 +17,8 @@
     <button data-view="cpt">Code comparison</button>
     <button data-view="benchmark">Benchmark</button>
     <button data-view="ratecard">Rate card</button>
+    <button data-view="leads">Leads</button>
+    <button data-view="changes">Changes</button>
     <button data-view="files">Files</button>
     <button data-view="sources">Sources</button>
   </nav>
@@ -286,6 +288,76 @@
       <div class="bench-results">
         <div id="rc-out" class="empty"><h3>Pick a practice and an as-of month</h3>
           See every code it has a negotiated rate for, by payer, and which payers pay best.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ======================= LEADS ======================= -->
+  <section id="view-leads" class="view">
+    <div class="bench-grid">
+      <div class="bench-form">
+        <h2>Underpaid-practice leads</h2>
+        <p class="muted" style="text-transform:none;margin:-4px 0 10px">
+          Practices sitting furthest below the market — the biggest gap is the strongest prospect.
+          Position is each practice's median percentile across the codes it prices.</p>
+        <div class="field"><label>As-of month (required)</label><select id="ld-month"></select></div>
+        <div class="field"><label>State / discipline</label>
+          <div style="display:flex;gap:6px">
+            <input type="text" id="ld-state" placeholder="MO" style="width:52px" list="ld-states">
+            <datalist id="ld-states"></datalist>
+            <select id="ld-disc"><option value="">any discipline</option><option>PT</option><option>OT</option><option>SLP</option></select>
+          </div>
+        </div>
+        <div class="field"><label>Payer(s) <span class="muted" style="text-transform:none">(optional)</span></label><div class="chips" id="ld-payer-chips"></div></div>
+        <div class="field"><label>"Underpaid" cutoff (percentile)</label>
+          <select id="ld-threshold"><option value="25">at/below p25</option><option value="10">at/below p10</option><option value="40">at/below p40</option><option value="50">at/below median</option></select>
+        </div>
+        <div class="field"><label>Min. codes priced</label><input type="number" id="ld-mincodes" value="3" min="1" style="width:64px"></div>
+        <div class="field"><label>Exclude a practice <span class="muted" style="text-transform:none">(your client — TIN/entity)</span></label>
+          <input type="text" id="ld-exclude" list="ld-subjects" placeholder="optional">
+          <datalist id="ld-subjects"></datalist>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:12px">
+          <button class="btn primary" id="ld-run">Find leads</button>
+          <button class="btn" id="ld-csv" disabled>Download CSV</button>
+        </div>
+      </div>
+      <div class="bench-results">
+        <div id="ld-out" class="empty"><h3>Pick a month and a market</h3>
+          Find practices being underpaid relative to their local market, with contact info.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ======================= CHANGES ======================= -->
+  <section id="view-changes" class="view">
+    <div class="bench-grid">
+      <div class="bench-form">
+        <h2>Rate-change monitoring</h2>
+        <p class="muted" style="text-transform:none;margin:-4px 0 10px">
+          What a payer changed between two months — quiet cuts and increases on the same contract line.
+          Needs at least two months of a payer in the store.</p>
+        <div class="field"><label>New month (required)</label><select id="ch-month"></select></div>
+        <div class="field"><label>Compare to <span class="muted" style="text-transform:none">(prior month)</span></label>
+          <select id="ch-prev"><option value="">auto — the previous month present</option></select>
+        </div>
+        <div class="field"><label>Practice <span class="muted" style="text-transform:none">(optional — TIN/entity to scope)</span></label>
+          <input type="text" id="ch-subject" list="ch-subjects" placeholder="all practices">
+          <datalist id="ch-subjects"></datalist>
+        </div>
+        <div class="field"><label>Payer(s) <span class="muted" style="text-transform:none">(optional)</span></label><div class="chips" id="ch-payer-chips"></div></div>
+        <div class="field"><label>Discipline</label>
+          <select id="ch-disc"><option value="">any</option><option>PT</option><option>OT</option><option>SLP</option></select>
+        </div>
+        <div class="field"><label>Min. move (% ± )</label><input type="number" id="ch-minpct" placeholder="any" min="0" style="width:64px"></div>
+        <div style="display:flex;gap:8px;margin-top:12px">
+          <button class="btn primary" id="ch-run">Find changes</button>
+          <button class="btn" id="ch-csv" disabled>Download CSV</button>
+        </div>
+      </div>
+      <div class="bench-results">
+        <div id="ch-out" class="empty"><h3>Pick the new month</h3>
+          Compare it against a prior month to see every rate that moved.</div>
       </div>
     </div>
   </section>

@@ -20,6 +20,8 @@ const state = {
   filesTimer: null,
   lastBenchmarkPayload: null,
   lastRatecardPayload: null,
+  lastLeadsPayload: null,
+  lastChangesPayload: null,
 };
 
 const fmtMoney = (v) =>
@@ -83,6 +85,8 @@ function switchView(view) {
   }
   if (view === "benchmark") initBenchmark();
   if (view === "ratecard") initRatecard();
+  if (view === "leads") initLeads();
+  if (view === "changes") initChanges();
   if (view === "sources") loadSources();
 }
 
@@ -996,6 +1000,153 @@ async function downloadRatecardCsv() {
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 60000);
   } catch (e) { alert("CSV export failed: " + e.message); }
+}
+
+/* =======================================================================
+   LEADS + RATE-CHANGE MONITORING
+   ======================================================================= */
+
+async function postDownload(url, payload, filename) {
+  try {
+    const r = await fetch(url, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!r.ok) { alert("export failed: " + (await r.text())); return; }
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(await r.blob());
+    a.download = filename;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+  } catch (e) { alert("export failed: " + e.message); }
+}
+
+let leadsInit = false;
+async function initLeads() {
+  if (leadsInit) return;
+  let subjects, months, payers, states;
+  try {
+    [subjects, months, payers, states] = await Promise.all([
+      api("/api/benchmark/subjects"), api("/api/months"), api("/api/payers"),
+      api("/api/states").catch(() => ({ states: [] })),
+    ]);
+  } catch (e) { $("#ld-out").innerHTML = `<div class="empty">could not load data (${esc(e.message)}) — switch tabs and come back</div>`; return; }
+  leadsInit = true;
+  $("#ld-month").innerHTML = months.months.map((m) => `<option>${m}</option>`).join("") || `<option value="">no data ingested</option>`;
+  $("#ld-payer-chips").innerHTML = payers.payers.map((p) => `<button class="chip" data-payer="${esc(p)}">${esc(p)}</button>`).join("");
+  $("#ld-payer-chips").addEventListener("click", (ev) => { const b = ev.target.closest(".chip"); if (b) b.classList.toggle("on"); });
+  $("#ld-states").innerHTML = (states.states || []).map((s) => `<option value="${esc(s)}">`).join("");
+  $("#ld-subjects").innerHTML = subjects.entities.map((e) => `<option value="${esc(e)}">`).join("") +
+    subjects.tins.map((t) => `<option value="${esc(t.tin_value)}">${esc(t.display_name)}</option>`).join("");
+  $("#ld-run").addEventListener("click", runLeads);
+  $("#ld-csv").addEventListener("click", () => { if (state.lastLeadsPayload) postDownload("/api/leads.csv", state.lastLeadsPayload, "leads.csv"); });
+}
+
+function leadsPayload() {
+  const month = $("#ld-month").value;
+  if (!month) throw new Error("an as-of month is required");
+  const market = { month, payers: $$("#ld-payer-chips .chip.on").map((c) => c.dataset.payer) };
+  if ($("#ld-state").value.trim()) market.state = $("#ld-state").value.trim();
+  if ($("#ld-disc").value) market.discipline = $("#ld-disc").value;
+  const p = { market, threshold_percentile: +$("#ld-threshold").value, min_codes: +$("#ld-mincodes").value || 3 };
+  if ($("#ld-exclude").value.trim()) p.exclude_subject = $("#ld-exclude").value.trim();
+  return p;
+}
+
+async function runLeads() {
+  const out = $("#ld-out");
+  state.lastLeadsPayload = null;
+  $("#ld-csv").disabled = true;
+  let payload;
+  try { payload = leadsPayload(); } catch (e) { out.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  out.innerHTML = `<div class="loading">Finding leads</div>`;
+  let data;
+  try { data = await postJson("/api/leads", payload); } catch (e) { out.innerHTML = `<div class="empty"><h3>Search failed</h3>${esc(e.message)}</div>`; return; }
+  state.lastLeadsPayload = payload;
+  $("#ld-csv").disabled = false;
+  renderLeads(out, data);
+}
+
+function renderLeads(out, data) {
+  if (!data.leads.length) {
+    out.innerHTML = `<div class="empty"><h3>No leads found</h3>No practices at or below p${data.threshold_percentile} that price at least ${data.min_codes} codes with a market. Widen the cutoff or lower the min codes.</div>`;
+    return;
+  }
+  const rows = data.leads.map((l) => `<tr>
+    <td>${esc(l.display_name || "")}<div class="sub">${esc(l.entity_kind || "")}${l.website ? ` · <a href="${esc(l.website)}" target="_blank" rel="noopener">site</a>` : ""}</div></td>
+    <td class="sub">${esc([l.city, l.state].filter(Boolean).join(", "))}</td>
+    <td class="num">${fmtInt(l.npi_count)}</td>
+    <td class="num">${l.n_codes}</td>
+    <td class="num">p${l.median_percentile}</td>
+    <td class="num">$${fmtMoney(l.avg_gap_to_median)}</td>
+    <td class="sub">${esc(l.tin_value)}</td></tr>`).join("");
+  out.innerHTML = `<div class="rc-summary">${data.count} practice(s) at or below p${data.threshold_percentile}, most underpaid first. <span class="muted">Avg $ below median is a rate-level gap, not annual dollars.</span></div>
+    <div class="tablewrap"><table class="rc-table"><thead><tr><th>Practice</th><th>Location</th><th class="num">Providers</th><th class="num">Codes</th><th class="num">Position</th><th class="num">Avg $ below median</th><th>Tax ID</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+
+let changesInit = false;
+async function initChanges() {
+  if (changesInit) return;
+  let subjects, months, payers;
+  try {
+    [subjects, months, payers] = await Promise.all([
+      api("/api/benchmark/subjects"), api("/api/months"), api("/api/payers"),
+    ]);
+  } catch (e) { $("#ch-out").innerHTML = `<div class="empty">could not load data (${esc(e.message)}) — switch tabs and come back</div>`; return; }
+  changesInit = true;
+  const mopts = months.months.map((m) => `<option>${m}</option>`).join("");
+  $("#ch-month").innerHTML = mopts || `<option value="">no data ingested</option>`;
+  $("#ch-prev").innerHTML = `<option value="">auto — the previous month present</option>` + mopts;
+  $("#ch-payer-chips").innerHTML = payers.payers.map((p) => `<button class="chip" data-payer="${esc(p)}">${esc(p)}</button>`).join("");
+  $("#ch-payer-chips").addEventListener("click", (ev) => { const b = ev.target.closest(".chip"); if (b) b.classList.toggle("on"); });
+  $("#ch-subjects").innerHTML = subjects.entities.map((e) => `<option value="${esc(e)}">`).join("") +
+    subjects.tins.map((t) => `<option value="${esc(t.tin_value)}">${esc(t.display_name)}</option>`).join("");
+  $("#ch-run").addEventListener("click", runChanges);
+  $("#ch-csv").addEventListener("click", () => { if (state.lastChangesPayload) postDownload("/api/changes.csv", state.lastChangesPayload, "rate_changes.csv"); });
+}
+
+function changesPayload() {
+  const month = $("#ch-month").value;
+  if (!month) throw new Error("the new month is required");
+  const market = { month, payers: $$("#ch-payer-chips .chip.on").map((c) => c.dataset.payer) };
+  if ($("#ch-prev").value) market.prev_month = $("#ch-prev").value;
+  if ($("#ch-disc").value) market.discipline = $("#ch-disc").value;
+  const p = { market };
+  if ($("#ch-subject").value.trim()) p.subject = $("#ch-subject").value.trim();
+  if ($("#ch-minpct").value.trim()) p.min_pct = +$("#ch-minpct").value;
+  return p;
+}
+
+async function runChanges() {
+  const out = $("#ch-out");
+  state.lastChangesPayload = null;
+  $("#ch-csv").disabled = true;
+  let payload;
+  try { payload = changesPayload(); } catch (e) { out.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  out.innerHTML = `<div class="loading">Comparing months</div>`;
+  let data;
+  try { data = await postJson("/api/changes", payload); } catch (e) { out.innerHTML = `<div class="empty"><h3>Could not compare</h3>${esc(e.message)}</div>`; return; }
+  state.lastChangesPayload = payload;
+  $("#ch-csv").disabled = false;
+  renderChanges(out, data);
+}
+
+function renderChanges(out, d) {
+  if (!d.changes.length) {
+    out.innerHTML = `<div class="empty"><h3>No changes</h3>No rate moves from ${esc(d.prev_month)} to ${esc(d.new_month)} under the current filters.</div>`;
+    return;
+  }
+  const rows = d.changes.map((c) => {
+    const cls = c.direction === "cut" ? "chg-cut" : "chg-up";
+    return `<tr><td>${esc(c.payer)}</td>
+      <td>${esc(c.display_name || "")}<div class="sub">${esc(c.tin_value)}</div></td>
+      <td>${esc(c.billing_code)}<div class="sub">${esc(c.description || "")}${c.modifier_set ? ` · ${esc(c.modifier_set)}` : ""}</div></td>
+      <td class="num">$${fmtMoney(c.old_rate)}</td><td class="num">$${fmtMoney(c.new_rate)}</td>
+      <td class="num ${cls}">${c.delta < 0 ? "−" : "+"}$${fmtMoney(Math.abs(c.delta))}</td>
+      <td class="num ${cls}">${c.pct_change > 0 ? "+" : ""}${c.pct_change}%</td></tr>`;
+  }).join("");
+  out.innerHTML = `<div class="rc-summary"><b>${d.n_cuts}</b> cut(s), <b>${d.n_increases}</b> increase(s) from ${esc(d.prev_month)} → ${esc(d.new_month)}.${d.biggest_cut_pct != null ? ` Biggest cut ${d.biggest_cut_pct}%.` : ""}</div>
+    <div class="tablewrap"><table class="rc-table"><thead><tr><th>Payer</th><th>Practice</th><th>Code</th><th class="num">Was</th><th class="num">Now</th><th class="num">Δ</th><th class="num">%</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
 /* =======================================================================
