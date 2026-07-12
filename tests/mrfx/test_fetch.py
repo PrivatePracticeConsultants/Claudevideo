@@ -428,6 +428,73 @@ def test_unknown_length_download_holds_provisional_reservation(cfg, monkeypatch)
     assert F._disk_reservations == {}                # released on completion
 
 
+def test_flaky_truncating_server_with_weak_etag_still_completes(cfg):
+    # A server that (a) resets the connection every 50 KB and (b) advertises a
+    # WEAK ETag. Without the fixes: the weak ETag in If-Range makes the server
+    # answer ranges with a full 200, so every retry restarts at byte 0 and the
+    # fixed retry budget is exhausted. With the fixes: resume falls back to
+    # Last-Modified (a valid If-Range validator) so the server honors the range
+    # (206), and progress-making connections don't count against the budget, so
+    # the ~120 KB file completes over several truncated connections.
+    import collections
+    import http.server as hs
+    import threading as th
+
+    import mrfx.fetch as F
+
+    # multiple 1 MB read-chunks per connection so httpx yields (and we persist)
+    # full chunks before the truncation — as happens in a real 34 MB-of-300 MB
+    # drop; a sub-chunk body would be discarded by httpx and never reach .part.
+    body = bytes(i % 251 for i in range(3_000_000))
+
+    class Flaky(hs.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+        weak_etag = 'W/"v1"'
+        last_mod = "Wed, 21 Oct 2026 07:28:00 GMT"
+        saw_weak_ifrange = False
+
+        def do_GET(self):
+            rng = self.headers.get("Range")
+            ifr = self.headers.get("If-Range")
+            offset = int(rng.split("=")[1].split("-")[0]) if rng and "=" in rng else 0
+            honor = bool(rng)
+            if ifr is not None and ifr.strip() == self.weak_etag:
+                Flaky.saw_weak_ifrange = True  # a weak validator must NOT be sent here
+                honor = False                  # RFC: weak If-Range -> full 200
+            if not honor:
+                offset = 0
+            remaining = len(body) - offset
+            send = min(1_200_000, remaining)
+            self.send_response(206 if honor else 200)
+            self.send_header("ETag", self.weak_etag)
+            self.send_header("Last-Modified", self.last_mod)
+            self.send_header("Accept-Ranges", "bytes")
+            if honor:
+                self.send_header("Content-Range", f"bytes {offset}-{len(body)-1}/{len(body)}")
+            self.send_header("Content-Length", str(remaining))  # claim the full remainder
+            self.end_headers()
+            try:
+                self.wfile.write(body[offset:offset + send])
+            except Exception:
+                return
+            if send < remaining:
+                self.close_connection = True  # truncate: close before the rest
+
+        def log_message(self, *a):
+            pass
+
+    httpd = hs.ThreadingHTTPServer(("127.0.0.1", 0), Flaky)
+    th.Thread(target=httpd.serve_forever, daemon=True).start()
+    cfg.download_retries = 1  # only the progress-aware resets let this finish
+    dest = cfg.downloads_dir / "flaky.json"
+    try:
+        sha, _ = F.download(cfg, f"http://127.0.0.1:{httpd.server_address[1]}/f", dest)
+    finally:
+        httpd.shutdown()
+    assert dest.read_bytes() == body           # fully + correctly reassembled
+    assert Flaky.saw_weak_ifrange is False     # never sent the weak ETag in If-Range
+
+
 def test_reserve_is_atomic_check_and_set(cfg, monkeypatch):
     # Two same-size downloads racing into a disk that fits only one: the FIRST
     # reservation must be visible to the second check even though neither has

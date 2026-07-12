@@ -295,6 +295,11 @@ _UNKNOWN_LEN_CHECK_BYTES = 256 << 20
 # to the collective disk guard (it can't reserve its true size — unknown). Small
 # files over-reserve briefly, then release on completion; the safety is worth it.
 _UNKNOWN_LEN_RESERVATION = 2 << 30
+# runaway backstop: an attempt that ADVANCES the .part doesn't count against the
+# retry budget (a flaky server that resets every N MB must still be able to
+# finish a large file over many resumes), but total connections are capped so a
+# truly stuck server terminates instead of looping forever.
+_MAX_DOWNLOAD_CONNECTIONS = 100
 
 
 def _set_reservation(my_key: int, remaining: int) -> None:
@@ -367,8 +372,11 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
     verify_override = None
     tried_chain_repair = False
     ua_override: str | None = None
-    attempt = 0
-    while attempt <= cfg.download_retries:
+    attempt = 0            # CONSECUTIVE no-progress attempts, counted vs the budget
+    connections = 0        # total connections, runaway backstop
+    while attempt <= cfg.download_retries and connections < _MAX_DOWNLOAD_CONNECTIONS:
+        connections += 1
+        bytes_before = part.stat().st_size if part.exists() else 0
         try:
             # RESUME: a .part left by a network drop or a killed process picks
             # up where it stopped instead of re-downloading gigabytes. The
@@ -449,8 +457,19 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                     log.info("resuming download at %.1f GB / %s", resume_from / 1e9,
                              f"{total / 1e9:.1f} GB" if total else "?")
                 else:
-                    # remember the content validator for future resumes
-                    validator = resp.headers.get("ETag") or resp.headers.get("Last-Modified")
+                    # remember the content validator for future resumes. If-Range
+                    # REQUIRES a strong validator: a weak ETag (W/"...", common
+                    # behind CDNs / on-the-fly gzip) makes an RFC-compliant server
+                    # answer a range request with a full 200 instead of a 206, so
+                    # `resuming` stays false, the .part is truncated, and every
+                    # retry restarts at byte 0 — a large file behind a flaky
+                    # origin then never finishes. Prefer a strong ETag, else fall
+                    # back to Last-Modified (a valid If-Range validator). Store
+                    # nothing if neither exists, so resume sends a plain Range
+                    # (unconditional 206) rather than a doomed If-Range.
+                    etag = (resp.headers.get("ETag") or "").strip()
+                    strong = etag if etag and not etag.upper().startswith("W/") else ""
+                    validator = strong or (resp.headers.get("Last-Modified") or "").strip()
                     if validator:
                         val_p.write_text(validator)
                     else:
@@ -530,14 +549,26 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                     verify_override = ctx
                     continue
             log.warning("download %s network error: %s (attempt %d/%d)", url, e, attempt + 1, cfg.download_retries + 1)
-        # backoff before the next counted attempt
-        attempt += 1
-        if attempt <= cfg.download_retries:
-            time.sleep(2.0 * (2**(attempt - 1)))
+        # A connection that delivered NEW bytes made forward progress: a server
+        # that resets every N MB would otherwise burn the whole retry budget on
+        # a large file even though each attempt advances toward completion. Give
+        # it a free retry (reset the no-progress counter) and a short pause; only
+        # CONSECUTIVE zero-progress attempts count against download_retries.
+        # _MAX_DOWNLOAD_CONNECTIONS bounds the total so a truly stuck server ends.
+        bytes_after = part.stat().st_size if part.exists() else 0
+        if bytes_after > bytes_before:
+            log.info("download %s: advanced to %.0f MB after connection %d; resuming",
+                     url, bytes_after / 1e6, connections)
+            attempt = 0
+            time.sleep(1.0)
+        else:
+            attempt += 1
+            if attempt <= cfg.download_retries:
+                time.sleep(2.0 * (2**(attempt - 1)))
     # keep the .part: every failure that lands here was transient (terminal
     # ones raised above), so a later "retry" on the queue resumes the download
     # instead of restarting a multi-GB file from byte zero
-    msg = f"download failed after {cfg.download_retries + 1} attempts: {last_exc}"
+    msg = f"download failed after {connections} attempts: {last_exc}"
     if "CERTIFICATE_VERIFY_FAILED" in str(last_exc):
         msg += TLS_HELP
     # retryable=True: the CAUSE was transient (terminal causes raised above),
