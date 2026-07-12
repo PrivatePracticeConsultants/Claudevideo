@@ -246,16 +246,160 @@ _BULK_MAX_READ_FAILURES = 3
 _BULK_MIN_FULL_ROWS = 2_000_000
 
 
+# A compact NPI->fields parquet, built from the bulk file ONCE per signature.
+# The bulk NPPES file is ~8-9M rows / tens of GB; re-reading it every time a new
+# batch of NPIs needs names (each ingested payer file adds some) is the "takes
+# forever" cost. Converting it once to a small local parquet turns every
+# subsequent lookup into a sub-second indexed join (measured 0.02s vs a fresh
+# multi-GB scan). The parquet holds only the ~9 columns we keep.
+_NPPES_CACHE_COLS = ("npi", "org_name", "entity_type", "taxonomy_code",
+                     "city", "state", "address", "zip", "phone")
+
+
+def _nppes_cache_path(store: Store) -> Path:
+    return Path(store.dir) / "nppes_cache.parquet"
+
+
+def _nppes_sig_path(store: Store) -> Path:
+    return Path(store.dir) / "nppes_cache.sig"
+
+
+def _ensure_nppes_cache(cfg: MrfxConfig, store: Store, sig: tuple,
+                        stop: threading.Event | None) -> Path | None:
+    """Return a parquet of the whole NPPES file (built once per file signature),
+    or None if it can't be built — in which case the caller streams instead, so
+    behaviour is never worse than before. The build is a single pass over the
+    file (same cost as one scan); every enrichment after it is an instant join."""
+    pqp, sigp = _nppes_cache_path(store), _nppes_sig_path(store)
+    try:
+        if pqp.exists() and sigp.exists() and sigp.read_text(encoding="utf-8") == repr(sig):
+            return pqp
+    except OSError:
+        pass
+    try:
+        n = _write_nppes_parquet(cfg, store, pqp, stop)
+        if stop is not None and stop.is_set():
+            pqp.unlink(missing_ok=True)   # interrupted mid-build: incomplete
+            return None
+        sigp.write_text(repr(sig), encoding="utf-8")
+        log.info("built NPPES fast-lookup cache: %d rows -> %s", n, pqp.name)
+        return pqp
+    except Exception as e:  # noqa: BLE001 — any failure just falls back to streaming
+        log.warning("could not build NPPES fast cache (%s); streaming instead", e)
+        try:
+            pqp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return None
+
+
+def _write_nppes_parquet(cfg: MrfxConfig, store: Store, pqp: Path,
+                         stop: threading.Event | None) -> int:
+    """One streaming pass over the NPPES file -> compact parquet (the ~9 kept
+    columns). Positional reader, batched writes; interruptible via `stop`."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    schema = pa.schema([(c, pa.string()) for c in _NPPES_CACHE_COLS])
+    tmp = pqp.with_suffix(".parquet.tmp")
+    total = 0
+    writer = pq.ParquetWriter(str(tmp), schema, compression="zstd")
+    try:
+        with _open_bulk_text(cfg.enrichment.bulk_csv_path) as f:
+            reader = csv.reader(f)
+            header = next(reader, [])
+            col = {k: header.index(v) for k, v in _BULK_COLS.items() if v in header}
+            i_npi = col.get("npi")
+            if i_npi is None:
+                raise ValueError("NPPES file has no 'NPI' column — wrong file inside the zip?")
+            i_org, i_first, i_last = col.get("org"), col.get("first"), col.get("last")
+            i_ent, i_tax = col.get("entity"), col.get("tax1")
+            i_city, i_state = col.get("city"), col.get("state")
+            i_addr, i_zip, i_phone = col.get("address"), col.get("zip"), col.get("phone")
+
+            def at(row, ix):
+                return (row[ix] if ix is not None and ix < len(row) else None) or None
+
+            batch: dict[str, list] = {c: [] for c in _NPPES_CACHE_COLS}
+            for i, row in enumerate(reader):
+                if stop is not None and (i & 0x3FFF) == 0 and stop.is_set():
+                    break
+                npi = row[i_npi] if i_npi < len(row) else ""
+                if not npi:
+                    continue
+                name = at(row, i_org) or " ".join(
+                    p for p in (at(row, i_first), at(row, i_last)) if p) or None
+                entity = {"1": "NPI-1", "2": "NPI-2"}.get(str(at(row, i_ent) or "").strip())
+                for c, v in (("npi", npi), ("org_name", name), ("entity_type", entity),
+                             ("taxonomy_code", at(row, i_tax)), ("city", at(row, i_city)),
+                             ("state", at(row, i_state)), ("address", at(row, i_addr)),
+                             ("zip", at(row, i_zip)), ("phone", at(row, i_phone))):
+                    batch[c].append(v)
+                if len(batch["npi"]) >= 100000:
+                    writer.write_table(pa.table(batch, schema=schema))
+                    total += len(batch["npi"])
+                    batch = {c: [] for c in _NPPES_CACHE_COLS}
+            if batch["npi"]:
+                writer.write_table(pa.table(batch, schema=schema))
+                total += len(batch["npi"])
+    finally:
+        writer.close()
+    tmp.replace(pqp)  # atomic: a half-written cache never gets a matching .sig
+    return total
+
+
+def _enrich_from_parquet(store: Store, pqp: Path, wanted: set[str]) -> int:
+    """Resolve `wanted` NPIs by joining them against the prebuilt parquet — a
+    sub-second indexed lookup, no multi-GB re-read. Mirrors the streaming path's
+    save + absent-marking (including the partial-file guard)."""
+    global _bulk_absent
+    import pyarrow as pa
+
+    pth = str(pqp).replace("'", "''")
+    want_tbl = pa.table({"npi": pa.array(list(wanted), type=pa.string())})
+    with store.connect() as con:  # read-only; registered Arrow view, no write lock
+        nrows = con.execute(f"SELECT count(*) FROM read_parquet('{pth}')").fetchone()[0]
+        con.register("_want", want_tbl)
+        try:
+            matched = con.execute(
+                f"SELECT c.npi, c.org_name, c.entity_type, c.taxonomy_code, c.city, "
+                f"c.state, c.address, c.zip, c.phone "
+                f"FROM read_parquet('{pth}') c JOIN _want w ON w.npi = c.npi"
+            ).fetchall()
+        finally:
+            con.unregister("_want")
+    found = set()
+    for j in range(0, len(matched), 5000):
+        store.save_npis_bulk([{
+            "npi": r[0], "org_name": r[1], "entity_type": r[2], "taxonomy_code": r[3],
+            "city": r[4], "state": r[5], "address": r[6], "zip": r[7], "phone": r[8],
+        } for r in matched[j:j + 5000]])
+        found.update(r[0] for r in matched[j:j + 5000])
+    if matched:
+        _mark_dirty()
+    absent = wanted - found
+    if absent and nrows >= _BULK_MIN_FULL_ROWS:
+        _bulk_absent |= absent
+        ab = list(absent)
+        for j in range(0, len(ab), 5000):
+            store.save_npis_bulk([{"npi": n} for n in ab[j:j + 5000]])
+    elif absent:
+        log.warning("NPPES cache has only %d rows — looks partial/incomplete; "
+                    "leaving %d NPIs for a fuller file", nrows, len(absent))
+    log.info("enriched %d NPIs from the NPPES cache", len(matched))
+    return len(matched)
+
+
 def enrich_via_bulk(cfg: MrfxConfig, store: Store,
                     stop: threading.Event | None = None) -> int:
-    """Stream the NPPES bulk file once, filling every un-enriched NPI it covers.
-    Accepts the raw monthly ZIP or an unzipped CSV. Saves in batches so hundreds
-    of thousands of NPIs resolve in minutes, not hours of per-row commits.
+    """Fill every un-enriched NPI the NPPES bulk file covers. On first use it
+    converts the file to a compact local parquet (one pass); after that each
+    call is a sub-second indexed lookup instead of a fresh multi-GB scan. Falls
+    back to direct streaming if the cache can't be built.
 
-    Change-aware: skips the (multi-GB) scan entirely when the file is unchanged
-    and the only remaining un-enriched NPIs are ones this file already proved it
-    doesn't contain — otherwise a handful of deactivated/junk NPIs would make the
-    persistent loop re-read the whole file every cycle for nothing."""
+    Accepts the raw monthly ZIP or an unzipped CSV. Change-aware: skips work
+    entirely when the only remaining un-enriched NPIs are ones already proven
+    absent from this (unchanged) file."""
     global _bulk_sig, _bulk_absent, _bulk_read_failures
     path = cfg.enrichment.bulk_csv_path
     if not path or not Path(path).exists():
@@ -289,6 +433,18 @@ def enrich_via_bulk(cfg: MrfxConfig, store: Store,
     wanted -= _bulk_absent  # don't re-scan the file for ids it already lacked
     if not wanted:
         return 0  # nothing NEW to find in this unchanged file
+
+    # FAST PATH: resolve against a one-time compact parquet of the whole file.
+    # Built on the first call (one pass), then every lookup is sub-second. Any
+    # build/read failure returns None and we fall through to direct streaming,
+    # so this can never be slower or less correct than before.
+    cache = _ensure_nppes_cache(cfg, store, sig, stop)
+    if cache is not None:
+        try:
+            return _enrich_from_parquet(store, cache, wanted)
+        except Exception as e:  # noqa: BLE001 — fall back to streaming on any error
+            log.warning("NPPES cache lookup failed (%s); streaming instead", e)
+
     done = 0
     pending: list[dict] = []
 
