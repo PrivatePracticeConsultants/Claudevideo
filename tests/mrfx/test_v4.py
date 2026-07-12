@@ -576,6 +576,38 @@ def test_bulk_enrichment_reads_nppes_zip(cfg, store, tmp_path):
     assert row == ("Cornerstone PT", "Columbus", "OH", "NPI-2")
 
 
+def test_bulk_enrichment_change_aware_skips_rescan(cfg, store, tmp_path, monkeypatch):
+    # after a full scan, an NPI the file DOESN'T contain must not force a fresh
+    # multi-GB re-read every cycle — the persistent serve loop's efficiency fix
+    import csv as _csv
+    import io as _io
+    import zipfile as _zip
+
+    import mrfx.enrich as E
+    from mrfx.enrich import _BULK_COLS, enrich_via_bulk
+    monkeypatch.setattr(E, "_bulk_sig", None)   # isolate module change-awareness
+    monkeypatch.setattr(E, "_bulk_absent", set())
+    ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "cc.json", innetwork(items=[
+        item("97110", [(["1000000001"], "43-9000000", "ein", [(40.0, None)]),
+                       (["1000000002"], "43-9000001", "ein", [(41.0, None)])])])))
+    hdr = [_BULK_COLS[k] for k in
+           ("npi", "org", "first", "last", "city", "state", "tax1", "entity", "address", "zip", "phone")]
+    buf = _io.StringIO()
+    _csv.writer(buf).writerows([hdr,
+        ["1000000001", "In-File PT", "", "", "Columbus", "OH", "225100000X", "2", "1 St", "43004", "6140000000"]])
+    zpath = tmp_path / "npidata.zip"
+    with _zip.ZipFile(zpath, "w") as zf:
+        zf.writestr("npidata_pfile_2026.csv", buf.getvalue().encode())
+    cfg.enrichment.mode = "bulk"
+    cfg.enrichment.bulk_csv_path = zpath
+    assert enrich_via_bulk(cfg, store) == 1        # resolves 001; 002 recorded absent
+    opens = []
+    real = E._open_bulk_text
+    monkeypatch.setattr(E, "_open_bulk_text", lambda p: opens.append(1) or real(p))
+    assert enrich_via_bulk(cfg, store) == 0        # 002 still un-enriched but known-absent
+    assert opens == []                             # the file was NOT re-read
+
+
 def test_code_comparison_filters_by_state(cfg, store):
     # comparing a MO rate against a CA rate is misleading; the Code-comparison
     # endpoint must honor a state filter (backend already supports it via

@@ -118,7 +118,16 @@ _ENTITY_REL = f"""
            list_sort(list_distinct(flatten(list(states)))) AS states,
            list_sort(list_distinct(flatten(list(cities)))) AS cities
     FROM (
-        SELECT s.*, coalesce(s2.entity_name, s.display_name) AS entity_key
+        -- Group on the entity NAME, but a no-name SSN-pattern TIN falls back to
+        -- the literal 'TIN MASKED-SSN' label — identical for EVERY such TIN — so
+        -- grouping on it would merge unrelated sole-proprietor practices into one
+        -- bogus entity. Fall back to the (unique) tin_value in that case so each
+        -- stays its own entity; the masked label is still what renders.
+        SELECT s.*, coalesce(
+            s2.entity_name,
+            CASE WHEN s.display_name = 'TIN MASKED-SSN' THEN s.tin_value
+                 ELSE s.display_name END
+        ) AS entity_key
         FROM ({_TIN_REL}) s LEFT JOIN entity_map s2 ON s2.tin_value = s.tin_value
     )
     GROUP BY entity_key, payer, billing_code, discipline, modifier_set,
@@ -568,7 +577,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             chart = _dicts(con.execute(
                 f"""
                 SELECT billing_code, payer, median(negotiated_rate) AS median_rate
-                FROM ({GRAIN_REL[grain]}) WHERE unit_id = ? AND is_dollar_rate
+                FROM ({GRAIN_REL[grain]})
+                WHERE unit_id = ? AND is_dollar_rate AND negotiated_rate > 0.01
                 GROUP BY billing_code, payer ORDER BY billing_code, payer
                 """,
                 [unit_id],
@@ -968,7 +978,16 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 "SELECT tin_value, display_name, npi_count, states FROM tin_directory "
                 "ORDER BY display_name"
             ))
-        entities = sorted(set(emap.values()))
+            # auto-grouped orgs: an NPPES org name shared by >1 TIN is ONE
+            # practice on the Explorer's entity grain, and resolve_subject_tins
+            # expands the name to all its TINs — but without this it had no
+            # single picker option, so a multi-location org got benchmarked as a
+            # lone fragment TIN. Exclude the 'TIN …' no-name fallback labels.
+            auto = [r[0] for r in con.execute(
+                "SELECT display_name FROM tin_directory WHERE display_name NOT LIKE 'TIN %' "
+                "GROUP BY display_name HAVING count(*) > 1"
+            ).fetchall()]
+        entities = sorted(set(emap.values()) | set(auto))
         # SSN-pattern TINs are masked on EVERY surface — a subject picker that
         # displays the raw nine digits would be the one exception. They can't
         # be selectable anyway (the mask can't round-trip to a lookup key), so

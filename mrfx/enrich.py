@@ -70,15 +70,27 @@ def _apply_nppes_result(store: Store, npi: str, data: dict) -> None:
 _DIRECTORY_REFRESH_SECONDS = 240.0
 _refresh_lock = threading.Lock()
 _last_dir_refresh = 0.0
+# True when names have been saved to npi_directory but not yet materialized into
+# tin_directory by a rebuild. A rebuild clears it; every enrichment cycle retries
+# a throttled rebuild while it's set, so a batch whose rebuild was throttled (or
+# skipped) can never stay unshown — it materializes on a later cycle.
+_names_dirty = False
+
+
+def _mark_dirty() -> None:
+    global _names_dirty
+    with _refresh_lock:
+        _names_dirty = True
 
 
 def _maybe_refresh_directory(store: Store, force: bool = False) -> bool:
     """Rebuild the name/geo directory, throttled GLOBALLY (across enrichment
-    cycles) so the persistent serve loop — which re-polls every ~20s — can't
+    cycles) so the persistent serve loop — which re-polls frequently — can't
     trigger a minutes-long rebuild on every trickle of new NPIs. `force` runs it
     now regardless (the one-shot CLI path, so names show before it exits).
-    Best-effort: a rebuild here is cosmetic and must never fail enrichment."""
-    global _last_dir_refresh
+    Clears the dirty flag on success. Best-effort: a rebuild here is cosmetic
+    and must never fail enrichment."""
+    global _last_dir_refresh, _names_dirty
     with _refresh_lock:
         now = time.monotonic()
         if not force and now - _last_dir_refresh < _DIRECTORY_REFRESH_SECONDS:
@@ -86,15 +98,12 @@ def _maybe_refresh_directory(store: Store, force: bool = False) -> bool:
         _last_dir_refresh = now
     try:
         store.rebuild_rollups()
+        with _refresh_lock:
+            _names_dirty = False
         return True
     except Exception as e:  # noqa: BLE001
         log.warning("name-directory refresh skipped (%s)", e)
         return False
-
-
-def _recently_refreshed(within: float = 30.0) -> bool:
-    with _refresh_lock:
-        return time.monotonic() - _last_dir_refresh < within
 
 
 def enrich_via_api(cfg: MrfxConfig, store: Store, stop: threading.Event | None = None) -> int:
@@ -163,9 +172,11 @@ def enrich_via_api(cfg: MrfxConfig, store: Store, stop: threading.Event | None =
                 break
             # progressive refresh: materialize the names resolved so far into the
             # directory that powers the dashboard (globally throttled).
-            if done > done_at_refresh and _maybe_refresh_directory(store):
-                log.info("names refreshed (%d resolved so far)", done)
-                done_at_refresh = done
+            if done > done_at_refresh:
+                _mark_dirty()
+                if _maybe_refresh_directory(store):
+                    log.info("names refreshed (%d resolved so far)", done)
+                    done_at_refresh = done
             if aborted:
                 log.warning("NPPES failing persistently — pausing enrichment until the "
                             "next run (%d NPIs done)", done)
@@ -214,14 +225,37 @@ def _open_bulk_text(path: Path):
             yield f
 
 
-def enrich_via_bulk(cfg: MrfxConfig, store: Store) -> int:
+# change-awareness for the persistent serve loop: after a full scan we remember
+# the file's signature and the NPIs it does NOT contain (deactivated/new/junk
+# ids that would otherwise force a fresh multi-GB scan on every poll forever).
+_bulk_sig: tuple | None = None
+_bulk_absent: set[str] = set()
+
+
+def enrich_via_bulk(cfg: MrfxConfig, store: Store,
+                    stop: threading.Event | None = None) -> int:
     """Stream the NPPES bulk file once, filling every un-enriched NPI it covers.
     Accepts the raw monthly ZIP or an unzipped CSV. Saves in batches so hundreds
-    of thousands of NPIs resolve in minutes, not hours of per-row commits."""
+    of thousands of NPIs resolve in minutes, not hours of per-row commits.
+
+    Change-aware: skips the (multi-GB) scan entirely when the file is unchanged
+    and the only remaining un-enriched NPIs are ones this file already proved it
+    doesn't contain — otherwise a handful of deactivated/junk NPIs would make the
+    persistent loop re-read the whole file every cycle for nothing."""
+    global _bulk_sig, _bulk_absent
     path = cfg.enrichment.bulk_csv_path
     if not path or not Path(path).exists():
         log.error("enrichment.mode=bulk but bulk_csv_path %r not found", str(path))
         return 0
+    try:
+        st = Path(path).stat()
+        sig = (str(path), int(st.st_mtime), st.st_size)
+    except OSError:
+        sig = (str(path), 0, 0)
+    if sig != _bulk_sig:  # new file (or first run): everything is fresh again
+        _bulk_sig = sig
+        _bulk_absent = set()
+
     wanted = set()
     cursor = ""
     while True:
@@ -234,8 +268,9 @@ def enrich_via_bulk(cfg: MrfxConfig, store: Store) -> int:
         cursor = batch[-1]
         if len(batch) < 100000:
             break
+    wanted -= _bulk_absent  # don't re-scan the file for ids it already lacked
     if not wanted:
-        return 0
+        return 0  # nothing NEW to find in this unchanged file
     done = 0
     pending: list[dict] = []
 
@@ -245,11 +280,15 @@ def enrich_via_bulk(cfg: MrfxConfig, store: Store) -> int:
             store.save_npis_bulk(pending)
             done += len(pending)
             pending.clear()
+            _mark_dirty()
 
+    completed = False
     try:
         with _open_bulk_text(path) as f:
             reader = csv.DictReader(f)
-            for row in reader:
+            for i, row in enumerate(reader):
+                if stop is not None and (i & 0x3FFF) == 0 and stop.is_set():
+                    break  # interruptible: don't finish a 10 GB scan on shutdown
                 npi = row.get(_BULK_COLS["npi"], "")
                 if npi not in wanted:
                     continue
@@ -272,9 +311,14 @@ def enrich_via_bulk(cfg: MrfxConfig, store: Store) -> int:
                 if not wanted:
                     break
             flush()
-    except (OSError, zipfile.BadZipFile, ValueError) as e:
-        log.error("bulk enrichment could not read %s: %s", path, e)
-        flush()  # keep whatever we already matched
+            completed = stop is None or not stop.is_set()
+    except Exception as e:  # noqa: BLE001 — never crash enrichment; keep matches
+        log.error("bulk enrichment could not fully read %s: %s", path, e)
+        flush()  # retain whatever we already matched
+    if completed:
+        # a COMPLETE scan proves the ids still in `wanted` are absent from this
+        # file — remember them so the next cycle doesn't re-read the whole file
+        _bulk_absent |= wanted
     log.info("enriched %d NPIs from the bulk file", done)
     return done
 
@@ -284,17 +328,17 @@ def run_enrichment(cfg: MrfxConfig, store: Store, stop: threading.Event | None =
     mode = cfg.enrichment.mode
     if mode == "off":
         return 0
-    done = enrich_via_bulk(cfg, store) if mode == "bulk" else enrich_via_api(cfg, store, stop)
-    if done:
-        # tin_directory materializes NPPES names/states/cities — without a
-        # rebuild, geographic benchmarks (state/city joins) silently run against
-        # NULLs until the next ingest triggers one. `force` for the one-shot CLI
-        # path so names show before it returns; the persistent serve loop passes
-        # final_refresh=False and relies on the global throttle so a 20s poll of
-        # trickling NPIs can't rebuild every cycle. Skip the forced rebuild if a
-        # progressive one JUST ran (the api path refreshes mid-drain) — otherwise
-        # the CLI pays two back-to-back minutes-long rebuilds.
-        _maybe_refresh_directory(store, force=final_refresh and not _recently_refreshed())
+    done = enrich_via_bulk(cfg, store, stop) if mode == "bulk" else enrich_via_api(cfg, store, stop)
+    # tin_directory materializes NPPES names/states/cities — without a rebuild,
+    # geographic benchmarks (state/city joins) silently run against NULLs. The
+    # dirty flag (set by the save paths) means this rebuilds iff there are names
+    # not yet materialized — so a tail batch whose own refresh was throttled is
+    # picked up here or on a later cycle, and a run with nothing new does no
+    # rebuild. `force` (CLI one-shot) bypasses the throttle so names show before
+    # the command returns; serve passes final_refresh=False and the throttle
+    # governs the cadence.
+    if _names_dirty:
+        _maybe_refresh_directory(store, force=final_refresh)
     return done
 
 
@@ -312,17 +356,30 @@ def start_persistent_enrichment(cfg: MrfxConfig, store: Store,
         return
 
     def _loop():
+        first = True
         while not stop.is_set():
             try:
-                # final_refresh=False: the global throttle governs rebuilds, so a
-                # 20s poll of trickling NPIs doesn't rebuild the store every cycle
-                run_enrichment(cfg, store, stop, final_refresh=False)
+                # Force the rebuild on the FIRST cycle so names materialize
+                # promptly on boot regardless of the monotonic-clock value the
+                # throttle happens to start from (bulk mode resolves the whole
+                # book in one pass, then would wait a full poll to show it).
+                # Later cycles pass False so the global throttle governs cadence
+                # and a poll of trickling NPIs can't rebuild every time.
+                run_enrichment(cfg, store, stop, final_refresh=first)
+                first = False
             except Exception:  # noqa: BLE001 — a bad cycle must not kill the loop
                 log.exception("enrichment cycle failed; retrying after a pause")
-            stop.wait(_ENRICH_POLL_SECONDS)  # re-check for NPIs ingested since
+            # bulk mode re-reads a multi-GB file each pass, so poll far less
+            # often (the NPPES file is static for a month; change-awareness skips
+            # scans with nothing new); the per-NPI API path can poll frequently.
+            wait = (_BULK_POLL_SECONDS if cfg.enrichment.mode == "bulk"
+                    else _ENRICH_POLL_SECONDS)
+            stop.wait(wait)
 
     threading.Thread(target=_loop, name="mrfx-enrich", daemon=True).start()
 
 
 # how often the persistent loop re-checks for newly-ingested NPIs once drained
 _ENRICH_POLL_SECONDS = 20.0
+# bulk mode scans a multi-GB file, so poll on the order of tens of minutes
+_BULK_POLL_SECONDS = 1800.0

@@ -22,6 +22,7 @@ const state = {
   lastRatecardPayload: null,
   lastLeadsPayload: null,
   lastChangesPayload: null,
+  lastNamed: null,   // last NPPES "named" count seen, to refresh views as names land
 };
 
 const fmtMoney = (v) =>
@@ -110,9 +111,25 @@ async function loadStats() {
       } else {
         html += ` · <b>${fmtInt(e.named)}/${fmtInt(e.total)}</b> names`;
       }
+      // Names arrive in the background (NPPES enrichment). When the resolved
+      // count grows between polls, the display-name column, state-filter lists
+      // and geographic benchmarks now have data they lacked a moment ago, so
+      // refresh whatever the user is looking at instead of making them reload.
+      if (state.lastNamed != null && e.named > state.lastNamed) onNamesUpdated();
+      state.lastNamed = e.named;
     }
     $("#dataset-stats").innerHTML = html;
   } catch { $("#dataset-stats").textContent = "API unreachable"; }
+}
+
+// Called when NPPES enrichment resolves more names since the last poll. Cheap
+// and idempotent: refresh the state pickers everywhere and re-pull the data for
+// whichever view is open so freshly-identified names/geo appear live.
+function onNamesUpdated() {
+  loadStateOptions();
+  const v = state.view;
+  if (v === "explorer") { loadRates(); loadSummary(); }
+  else if (v === "cpt" && state.cptSelected) selectCpt(state.cptSelected);
 }
 
 async function loadStateOptions() {
@@ -645,10 +662,35 @@ function renderTrend(el, rows) {
    BENCHMARK
    ======================================================================= */
 
+// Repopulate a tab's subject datalist (and, when given, its month <select>)
+// from the live API. Called on every re-entry to a benchmark-family tab so
+// orgs newly identified by NPPES enrichment (fresh auto-grouped subjects) and
+// newly-ingested months appear without a page reload. Never clears the month
+// the user already picked; transient fetch errors leave the existing lists.
+async function refreshSubjectPickers(subjSel, monthSels = []) {
+  let subjects, months;
+  try {
+    [subjects, months] = await Promise.all([
+      api("/api/benchmark/subjects"), api("/api/months"),
+    ]);
+  } catch { return; }
+  if (subjSel) $(subjSel).innerHTML =
+    subjects.entities.map((e) => `<option value="${esc(e)}">`).join("") +
+    subjects.tins.map((t) => `<option value="${esc(t.tin_value)}">${esc(t.display_name)}</option>`).join("");
+  const opts = months.months.map((m) => `<option>${esc(m)}</option>`).join("");
+  for (const ms of monthSels) {
+    const el = $(ms.sel); if (!el) continue;
+    const cur = el.value;
+    el.innerHTML = (ms.prefix || "") + opts ||
+      `<option value="">no data ingested</option>`;
+    if (cur && months.months.includes(cur)) el.value = cur;
+  }
+}
+
 let benchmarkInit = false;
 async function initBenchmark() {
   refreshMpfsStatus();
-  if (benchmarkInit) return;
+  if (benchmarkInit) { refreshSubjectPickers("#b-subjects", [{ sel: "#b-month" }]); return; }
   let subjects, months, payers, peersets;
   try {
     [subjects, months, payers, peersets] = await Promise.all([
@@ -894,7 +936,7 @@ async function openNegotiationReport() {
 let ratecardInit = false;
 async function initRatecard() {
   refreshRcMpfs();
-  if (ratecardInit) return;
+  if (ratecardInit) { refreshSubjectPickers("#rc-subjects", [{ sel: "#rc-month" }]); return; }
   let subjects, months, payers;
   try {
     [subjects, months, payers] = await Promise.all([
@@ -1041,7 +1083,7 @@ async function postDownload(url, payload, filename) {
 
 let leadsInit = false;
 async function initLeads() {
-  if (leadsInit) return;
+  if (leadsInit) { refreshSubjectPickers("#ld-subjects", [{ sel: "#ld-month" }]); loadLdStates(); return; }
   let subjects, months, payers, states;
   try {
     [subjects, months, payers, states] = await Promise.all([
@@ -1058,6 +1100,13 @@ async function initLeads() {
     subjects.tins.map((t) => `<option value="${esc(t.tin_value)}">${esc(t.display_name)}</option>`).join("");
   $("#ld-run").addEventListener("click", runLeads);
   $("#ld-csv").addEventListener("click", () => { if (state.lastLeadsPayload) postDownload("/api/leads.csv", state.lastLeadsPayload, "leads.csv"); });
+}
+
+async function loadLdStates() {
+  try {
+    const { states } = await api("/api/states");
+    $("#ld-states").innerHTML = (states || []).map((s) => `<option value="${esc(s)}">`).join("");
+  } catch { /* keep existing list */ }
 }
 
 function leadsPayload() {
@@ -1104,7 +1153,11 @@ function renderLeads(out, data) {
 
 let changesInit = false;
 async function initChanges() {
-  if (changesInit) return;
+  if (changesInit) {
+    refreshSubjectPickers("#ch-subjects",
+      [{ sel: "#ch-month" }, { sel: "#ch-prev", prefix: `<option value="">auto — the previous month present</option>` }]);
+    return;
+  }
   let subjects, months, payers;
   try {
     [subjects, months, payers] = await Promise.all([
