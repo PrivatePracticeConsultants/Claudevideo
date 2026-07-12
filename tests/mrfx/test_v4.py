@@ -547,6 +547,60 @@ def test_ratecard_report_and_csv_endpoints(cfg, ratecard_store):
     assert refused.status_code == 422
 
 
+def test_defuse_csv_quotes_formula_cells():
+    from mrfx.store import defuse_csv
+    assert defuse_csv("=SUM(A1)") == "'=SUM(A1)"
+    assert defuse_csv("+1") == "'+1" and defuse_csv("@x") == "'@x" and defuse_csv("-3") == "'-3"
+    assert defuse_csv("Regional PT") == "Regional PT"
+    assert defuse_csv(None) is None and defuse_csv(42) == 42
+
+
+def test_changes_csv_defuses_malicious_payer_name(cfg, store):
+    # payer comes from the MRF's reporting_entity_name — a hostile "=..." name
+    # must not execute when the exported CSV opens in Excel
+    for name, month, rate in [("m.json", "2026-05-01", 50.0), ("j.json", "2026-06-01", 45.0)]:
+        data = innetwork(payer="=EvilPayer", month=month, items=[
+            item("97110", [(["1000000000"], "43-2000000", "ein", [(rate, None)])])])
+        ingest_file(cfg, store, make_fixture(cfg.inbox_dir, name, data))
+    client = TestClient(create_app(cfg, store))
+    csv = client.post("/api/changes.csv", json={"market": {"month": "2026-06"}}).text
+    assert "'=EvilPayer" in csv  # leading '=' defused with a quote
+
+
+def test_scorecard_does_not_cross_scale_rank_when_medicare_loaded(cfg, store):
+    # PayerC prices only a non-MPFS code; with the anchor loaded it must be
+    # UNRANKED (no % of Medicare), not ranked on its %-of-best (a different scale)
+    for payer, rows in [("PayerA", [("97110", 40.0), ("97140", 50.0)]),
+                        ("PayerB", [("97110", 48.0), ("97140", 55.0)]),
+                        ("PayerC", [("97140", 60.0)])]:
+        data = innetwork(payer=payer, items=[
+            item(c, [(["1000000000"], "43-3000000", "ein", [(r, None)])]) for c, r in rows])
+        ingest_file(cfg, store, make_fixture(cfg.inbox_dir, f"{payer}.json", data))
+    client = TestClient(create_app(cfg, store))
+    client.post("/api/mpfs/upload", files={"file": (
+        "m.csv", "code,locality,non_facility_rate\n97110,X,40\n", "text/csv")})
+    sc = {r["payer"]: r for r in client.post("/api/schedule/fee", json={
+        "subject": "433000000", "market": {"month": "2026-06"}}).json()["scorecard"]["rows"]}
+    assert sc["PayerA"]["rank"] is not None and sc["PayerB"]["rank"] is not None
+    assert sc["PayerC"]["rank"] is None                    # no MPFS code -> unranked
+    assert sc["PayerC"]["median_pct_medicare"] is None
+    assert sc["PayerC"]["median_pct_of_best"] == 100.0     # still computed, just not ranked on
+
+
+def test_rate_changes_biggest_cut_none_when_only_increases(cfg, store):
+    for name, month, r1, r2 in [("m.json", "2026-05-01", 50.0, 60.0),
+                                ("j.json", "2026-06-01", 55.0, 66.0)]:  # both go UP
+        data = innetwork(payer="Acme", month=month, items=[
+            item("97110", [(["1000000000"], "43-2000000", "ein", [(r1, None)])]),
+            item("97140", [(["1000000000"], "43-2000000", "ein", [(r2, None)])])])
+        ingest_file(cfg, store, make_fixture(cfg.inbox_dir, name, data))
+    from mrfx.monitor import compute_rate_changes
+    res = compute_rate_changes(store, {"month": "2026-06"})
+    assert res["n_cuts"] == 0 and res["n_increases"] == 2
+    assert res["biggest_cut_pct"] is None            # not the smallest increase
+    assert res["biggest_increase_pct"] is not None and res["biggest_increase_pct"] > 0
+
+
 # ---------------------------------------------------------------------------
 # underpaid-practice leads (§7D)
 # ---------------------------------------------------------------------------

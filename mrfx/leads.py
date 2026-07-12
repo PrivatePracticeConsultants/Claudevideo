@@ -20,7 +20,7 @@ import json
 
 from . import __version__
 from .benchmark import BenchmarkError, _market_where, resolve_subject_tins
-from .store import Store, mask_tin
+from .store import Store, defuse_csv, mask_tin
 
 PERCENTILES = (10, 25, 40, 50, 75, 90)
 
@@ -132,7 +132,8 @@ def leads_csv(store: Store, result: dict) -> str:
     w.writerow(["display_name", "tin", "entity_kind", "state", "city", "npi_count",
                 "n_codes", "median_percentile", "avg_gap_to_median", "website"])
     for x in result["leads"]:
-        w.writerow([x["display_name"], x["tin_value"], x["entity_kind"], x["state"] or "",
-                    x["city"] or "", x["npi_count"], x["n_codes"], x["median_percentile"],
-                    x["avg_gap_to_median"], x["website"] or ""])
+        w.writerow([defuse_csv(x["display_name"]), x["tin_value"], x["entity_kind"],
+                    x["state"] or "", defuse_csv(x["city"]) or "", x["npi_count"],
+                    x["n_codes"], x["median_percentile"], x["avg_gap_to_median"],
+                    defuse_csv(x["website"]) or ""])
     return out.getvalue()

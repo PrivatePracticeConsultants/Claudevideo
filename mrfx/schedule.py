@@ -37,7 +37,7 @@ from .benchmark import (
 )
 from .catalog import code_info
 from .config import MrfxConfig
-from .store import Store, mask_tin
+from .store import Store, defuse_csv, mask_tin
 
 
 def compute_fee_schedule(store: Store, subject: str, market: dict) -> dict:
@@ -119,6 +119,11 @@ def payer_scorecard(fee_schedule: dict) -> dict:
     Primary rank uses % of Medicare if available, else % of best.
     """
     codes = fee_schedule["codes"]
+    # ONE ranking scale for the whole scorecard: % of Medicare when the anchor
+    # is loaded (absolute, ~100-200%), else % of best (capped at 100%). Mixing
+    # them — ranking a Medicare-anchored payer against a %-of-best fallback
+    # payer — compares different scales and mis-orders them.
+    use_medicare = bool(fee_schedule.get("mpfs_loaded"))
     # best rate per code and how many payers priced it (for head-to-head)
     best_rate: dict[str, float] = {}
     n_payers_for_code: dict[str, int] = {}
@@ -152,8 +157,9 @@ def payer_scorecard(fee_schedule: dict) -> dict:
             "median_rate": round(statistics.median(rates), 2),
             "median_pct_medicare": med_medicare,
             "median_pct_of_best": med_best,
-            # rank on the absolute measure when we have it, else the relative one
-            "rank_metric": med_medicare if med_medicare is not None else med_best,
+            # one scale for everyone (see use_medicare): a payer that lacks the
+            # chosen metric is unranked, never cross-scale-compared
+            "rank_metric": med_medicare if use_medicare else med_best,
         })
 
     # payers with a rank metric first (best → worst); the rest by raw median rate
@@ -316,7 +322,7 @@ def fee_schedule_csv(fee_schedule: dict, scorecard: dict, store: Store) -> str:
             v = entry["rates"].get(payer)
             if not v or v["rate"] is None:
                 continue
-            w.writerow([payer, rank.get(payer) or "", entry["billing_code"],
-                        entry["description"] or "", v["rate"],
+            w.writerow([defuse_csv(payer), rank.get(payer) or "", entry["billing_code"],
+                        defuse_csv(entry["description"]) or "", v["rate"],
                         "" if v["pct_medicare"] is None else int(v["pct_medicare"])])
     return out.getvalue()

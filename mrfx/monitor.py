@@ -18,7 +18,7 @@ import json
 from . import __version__
 from .benchmark import BenchmarkError, _market_where, resolve_subject_tins
 from .catalog import code_info
-from .store import Store, mask_tin
+from .store import Store, defuse_csv, mask_tin
 
 
 def available_months(store: Store) -> list[str]:
@@ -118,8 +118,11 @@ def compute_rate_changes(store: Store, market: dict, *, subject: str | None = No
             "pct_change": r["pct_change"],
             "direction": direction,
         })
-    biggest_cut = min((r["pct_change"] for r in rows), default=None)
-    biggest_increase = max((r["pct_change"] for r in rows), default=None)
+    # only negative moves are cuts / only positive are increases — taking the
+    # min/max over ALL rows would report the smallest increase as a "cut" when
+    # nothing was actually cut this month
+    biggest_cut = min((p for p in pct_moves if p < 0), default=None)
+    biggest_increase = max((p for p in pct_moves if p > 0), default=None)
     return {
         "market": {k: v for k, v in market.items() if v not in (None, [], "")},
         "new_month": new_month,
@@ -153,7 +156,7 @@ def rate_changes_csv(result: dict) -> str:
     w.writerow(["payer", "display_name", "tin", "billing_code", "description",
                 "modifier_set", "old_rate", "new_rate", "delta", "pct_change", "direction"])
     for x in result["changes"]:
-        w.writerow([x["payer"], x["display_name"] or "", x["tin_value"], x["billing_code"],
-                    x["description"] or "", x["modifier_set"] or "", x["old_rate"],
-                    x["new_rate"], x["delta"], x["pct_change"], x["direction"]])
+        w.writerow([defuse_csv(x["payer"]), defuse_csv(x["display_name"]) or "", x["tin_value"],
+                    x["billing_code"], defuse_csv(x["description"]) or "", x["modifier_set"] or "",
+                    x["old_rate"], x["new_rate"], x["delta"], x["pct_change"], x["direction"]])
     return out.getvalue()

@@ -109,6 +109,17 @@ def mask_tin(tin: str | None) -> str | None:
     return "MASKED-SSN" if looks_like_ssn(tin) else tin
 
 
+def defuse_csv(v):
+    """Excel/Sheets execute a cell starting with = + - @ (or tab/CR) as a
+    formula. Org names, payer names, and descriptions come from third-party
+    MRF/NPPES data and these CSVs are built to be opened in a spreadsheet, so
+    prefix a risky leading character with a quote — it renders as text, never
+    executes. (Shared twin of outreach._defuse / api._defuse_sql.)"""
+    if isinstance(v, str) and v and v[0] in "=+-@\t\r":
+        return "'" + v
+    return v
+
+
 # --- dedup / rollup queries ----------------------------------------------------
 
 # NPI-grain dedup (drill-down + npi grain toggle)

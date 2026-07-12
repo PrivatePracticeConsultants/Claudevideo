@@ -356,6 +356,27 @@ def _defuse_sql(expr: str) -> str:
             f"ELSE CAST({expr} AS VARCHAR) END")
 
 
+def _as_int(v, default: int) -> int:
+    """Coerce a JSON body value to int; None/'' -> default. Any other junk
+    (a list, a non-numeric string) raises BenchmarkError so the handler returns
+    a clean 422 instead of a 500 on int(None)/int([])."""
+    if v is None or v == "":
+        return default
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        raise BenchmarkError(f"expected a whole number, got {v!r}")
+
+
+def _as_float(v, default):
+    if v is None or v == "":
+        return default
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        raise BenchmarkError(f"expected a number, got {v!r}")
+
+
 def export_select(grain: str, fs: FilterSet, sort: str, direction: str) -> tuple[str, list]:
     """The one export query (provenance columns per §7A.6). Every text column
     that can carry third-party strings is formula-defused; TIN columns are
@@ -1015,7 +1036,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         try:
             fs = compute_fee_schedule(store, str(body.get("subject", "")), body.get("market") or {})
             return {"fee_schedule": fs, "scorecard": payer_scorecard(fs)}
-        except BenchmarkError as e:
+        except (BenchmarkError, ValueError) as e:
             raise HTTPException(422, str(e))
 
     @app.post("/api/report/ratecard", response_class=HTMLResponse)
@@ -1024,7 +1045,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         try:
             fs = compute_fee_schedule(store, str(body.get("subject", "")), body.get("market") or {})
             return HTMLResponse(render_rate_card(cfg, store, fs, payer_scorecard(fs)))
-        except BenchmarkError as e:
+        except (BenchmarkError, ValueError) as e:
             raise HTTPException(422, str(e))
 
     @app.post("/api/schedule/fee.csv", response_class=PlainTextResponse)
@@ -1035,7 +1056,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             csv_text = fee_schedule_csv(fs, payer_scorecard(fs), store)
             return PlainTextResponse("﻿" + csv_text, headers={  # BOM for Excel
                 "Content-Disposition": 'attachment; filename="rate_card.csv"'})
-        except BenchmarkError as e:
+        except (BenchmarkError, ValueError) as e:
             raise HTTPException(422, str(e))
 
     # underpaid-practice leads (§7D)
@@ -1045,9 +1066,9 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         try:
             return compute_leads(
                 store, body.get("market") or {},
-                threshold_percentile=int(body.get("threshold_percentile", 25)),
-                min_codes=int(body.get("min_codes", 3)),
-                limit=int(body.get("limit", 100)),
+                threshold_percentile=_as_int(body.get("threshold_percentile"), 25),
+                min_codes=_as_int(body.get("min_codes"), 3),
+                limit=_as_int(body.get("limit"), 100),
                 exclude_subject=(str(body["exclude_subject"]) if body.get("exclude_subject") else None),
             )
         except (BenchmarkError, ValueError) as e:
@@ -1059,9 +1080,9 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         try:
             result = compute_leads(
                 store, body.get("market") or {},
-                threshold_percentile=int(body.get("threshold_percentile", 25)),
-                min_codes=int(body.get("min_codes", 3)),
-                limit=int(body.get("limit", 1000)),
+                threshold_percentile=_as_int(body.get("threshold_percentile"), 25),
+                min_codes=_as_int(body.get("min_codes"), 3),
+                limit=_as_int(body.get("limit"), 1000),
                 exclude_subject=(str(body["exclude_subject"]) if body.get("exclude_subject") else None),
             )
             return PlainTextResponse("﻿" + leads_csv(store, result), headers={
@@ -1074,11 +1095,10 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     async def changes(request: Request):
         body = await request.json()
         try:
-            mp = body.get("min_pct")
             return compute_rate_changes(
                 store, body.get("market") or {},
                 subject=(str(body["subject"]) if body.get("subject") else None),
-                min_pct=(float(mp) if mp not in (None, "") else None),
+                min_pct=_as_float(body.get("min_pct"), None),
             )
         except (BenchmarkError, ValueError) as e:
             raise HTTPException(422, str(e))
@@ -1087,11 +1107,10 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     async def changes_export(request: Request):
         body = await request.json()
         try:
-            mp = body.get("min_pct")
             result = compute_rate_changes(
                 store, body.get("market") or {},
                 subject=(str(body["subject"]) if body.get("subject") else None),
-                min_pct=(float(mp) if mp not in (None, "") else None),
+                min_pct=_as_float(body.get("min_pct"), None),
             )
             return PlainTextResponse("﻿" + rate_changes_csv(result), headers={
                 "Content-Disposition": 'attachment; filename="rate_changes.csv"'})
