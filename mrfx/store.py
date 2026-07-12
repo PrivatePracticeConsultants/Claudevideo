@@ -124,8 +124,15 @@ def defuse_csv(v):
 
 # NPI-grain dedup (drill-down + npi grain toggle)
 # materialized rollups rebuild in hash-partitioned passes above this many raw
-# rows — identical output, bounded memory/temp-disk per pass
+# rows — identical output, bounded memory/temp-disk per pass. This is the
+# CEILING; the effective slice is also capped to fit the memory limit (see
+# Store._rollup_partition_rows), so a small-RAM machine slices finer on its own.
 ROLLUP_PARTITION_ROWS = 15_000_000
+# The rollup's median/DISTINCT/list aggregates can't spill to disk, so peak RAM
+# tracks rows-per-slice. Budget this many raw rows per GB of memory limit: keeps
+# a slice's in-memory hash tables comfortably under the cap (≈15M rows at an
+# 8 GB limit, matching the validated default; ≈8M at 4 GB).
+ROLLUP_ROWS_PER_GB = 2_000_000
 
 DEDUP_QUERY = """
     SELECT payer, npi, billing_code,
@@ -270,7 +277,7 @@ TIN_DIRECTORY_QUERY = """
 
 
 class Store:
-    def __init__(self, store_dir: Path):
+    def __init__(self, store_dir: Path, memory_limit_gb: int | None = None):
         self.dir = Path(store_dir)
         self.rates_dir = self.dir / "rates"
         self.rates_dir.mkdir(parents=True, exist_ok=True)
@@ -279,11 +286,17 @@ class Store:
         self.db_path = self.dir / "mrfx.duckdb"
         self.write_lock = threading.Lock()
         self._sweep_orphan_tmps()
-        try:
-            total = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
-            self._memory_limit_gb = max(2, min(12, int(total * 0.4 / 1e9)))
-        except (ValueError, OSError, AttributeError):
-            self._memory_limit_gb = 4
+        if memory_limit_gb is not None:
+            # explicit override from config (duckdb_memory_gb): trust the user
+            # who knows their machine, but never below 1 GB (DuckDB can't do
+            # useful work under that and would fail every rollup).
+            self._memory_limit_gb = max(1, int(memory_limit_gb))
+        else:
+            try:
+                total = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+                self._memory_limit_gb = max(2, min(12, int(total * 0.4 / 1e9)))
+            except (ValueError, OSError, AttributeError):
+                self._memory_limit_gb = 4
         self._temp_cap_gb: int | None = None  # computed once, in connect()
         # enrichment_progress scans the full rates view (DISTINCT npi over a
         # UNION) — far too heavy to run on every 15s dashboard poll of a big
@@ -984,33 +997,56 @@ class Store:
                 raise
         return {"rows": rows, "bytes": freed}
 
+    def _rollup_partition_rows(self, split: int = 1) -> int:
+        """Rows per hash-partition slice for a rollup rebuild. Capped both by the
+        module ceiling (ROLLUP_PARTITION_ROWS, honored so tests can force many
+        slices) AND by what fits the memory limit (ROLLUP_ROWS_PER_GB), so a
+        small-RAM machine slices finer automatically instead of OOM-ing. `split`
+        is the retry escalator: each doubling subdivides further when a build
+        still hit the limit."""
+        mem_scaled = max(1_000_000, self._memory_limit_gb * ROLLUP_ROWS_PER_GB)
+        base = min(ROLLUP_PARTITION_ROWS, mem_scaled)
+        return max(1, base // max(1, split))
+
     def rebuild_rollups(self) -> None:
         """Materialize the dedup/by-TIN/tin-directory rollups after ingest or
-        enrichment so page queries stay fast. If the build hits the memory
-        limit (the DISTINCT aggregates cannot spill to disk), retry once
-        single-threaded — per-thread hash tables are the dominant cost."""
+        enrichment so page queries stay fast. The DISTINCT/median/list aggregates
+        can't spill to disk, so if a build still hits the memory limit we retry
+        single-threaded (per-thread hash tables are the dominant cost) and, if
+        that still OOMs, subdivide into progressively smaller hash-partition
+        slices until it fits — identical output, lower peak RAM each pass."""
+        import logging as _logging
+
+        log = _logging.getLogger(__name__)
         self._enrich_progress_cache = None  # new rates change the NPI population
         with self.write_lock, self.connect() as con:
             self._register_views(con)  # rates view must see current parts first
             try:
                 self._build_rollup_tables(con)
+                return
             except duckdb.OutOfMemoryException:
-                import logging as _logging
-
-                _logging.getLogger(__name__).warning(
-                    "rollup rebuild hit the memory limit; retrying single-threaded")
-                # SET threads is GLOBAL to the shared instance: restore it or
-                # every other connection stays single-threaded forever
-                con.execute("SET threads = 1")
-                try:
-                    self._build_rollup_tables(con)
-                finally:
+                log.warning("rollup rebuild hit the memory limit; retrying "
+                            "single-threaded with finer partitions")
+            # SET threads is GLOBAL to the shared instance: restore it or every
+            # other connection stays single-threaded forever.
+            con.execute("SET threads = 1")
+            try:
+                for split in (1, 2, 4, 8, 16):
                     try:
-                        con.execute("RESET threads")
-                    except duckdb.Error:
-                        pass
+                        self._build_rollup_tables(con, split=split)
+                        return
+                    except duckdb.OutOfMemoryException:
+                        if split == 16:
+                            raise  # genuinely can't fit at this memory limit
+                        log.warning("rollup still over the memory limit at "
+                                    "split=%d; subdividing further", split)
+            finally:
+                try:
+                    con.execute("RESET threads")
+                except duckdb.Error:
+                    pass
 
-    def _build_rollup_tables(self, con: duckdb.DuckDBPyConnection) -> None:
+    def _build_rollup_tables(self, con: duckdb.DuckDBPyConnection, split: int = 1) -> None:
         # rates_dedup stays a LIVE VIEW: at NPI×rate grain its groups are
         # nearly one-per-row (a 30M-row store means a ~30M-group hash
         # aggregation whose spill can exceed any reasonable disk). Drill-down
@@ -1029,7 +1065,11 @@ class Store:
         con.execute("DROP TABLE IF EXISTS rates_dedup_tbl")
         con.execute(f"CREATE OR REPLACE VIEW rates_dedup AS {DEDUP_QUERY}")
         n_rows = con.execute("SELECT count(*) FROM rates").fetchone()[0] or 0
-        parts = max(1, -(-n_rows // ROLLUP_PARTITION_ROWS))
+        rows_per_part = self._rollup_partition_rows(split)
+        parts = max(1, -(-n_rows // rows_per_part))
+        if split > 1:
+            log.info("rollup rebuild: %d partitions (%d rows/slice, split=%d)",
+                     parts, rows_per_part, split)
         # ONE TRANSACTION around the whole rebuild: a mid-slice failure (temp
         # cap, memory, crash) must roll back to the PREVIOUS complete tables —
         # a partially-filled rollup served as truth silently loses billing

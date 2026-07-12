@@ -65,6 +65,12 @@ class MrfxConfig(BaseModel):
     move_processed: bool = True
     enrichment: EnrichmentConfig = Field(default_factory=EnrichmentConfig)
     port: int = Field(default=8377, ge=1, le=65535)
+    # Cap DuckDB's working memory (GB). Unset = auto: 40% of system RAM, clamped
+    # to [2, 12] GB — deliberately below total so a heavy query can never get the
+    # process OS-killed mid-ingest. Raise this if a big analytics view or rollup
+    # fails with "Out of Memory" AND the machine has spare RAM (e.g. 8 on a 16 GB
+    # box); the rollup rebuild also slices itself finer to fit whatever this is.
+    duckdb_memory_gb: int | None = Field(default=None, ge=1, le=1024)
     confirm_over_gb: float = Field(default=5.0, gt=0)
     # URL-drop ingestion: staging for downloads, and knobs for aggregating many
     # files without filling the disk.

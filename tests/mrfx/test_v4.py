@@ -698,6 +698,29 @@ def test_bulk_enrichment_partial_file_does_not_poison(cfg, store, tmp_path, monk
             "SELECT org_name FROM npi_directory WHERE npi='1000000001'").fetchone()[0] == "Cornerstone PT"
 
 
+def test_duckdb_memory_override_and_partition_scaling(tmp_path):
+    # the config knob overrides the auto memory cap, and the rollup slice size
+    # scales to that budget (capped by the module ceiling) so a small-RAM box
+    # slices finer instead of OOM-ing; the retry escalator subdivides further.
+    from mrfx.store import ROLLUP_PARTITION_ROWS, ROLLUP_ROWS_PER_GB, Store
+    s = Store(tmp_path / "st", memory_limit_gb=3)
+    assert s._memory_limit_gb == 3
+    assert s._rollup_partition_rows(1) == min(ROLLUP_PARTITION_ROWS, 3 * ROLLUP_ROWS_PER_GB)
+    assert s._rollup_partition_rows(4) == s._rollup_partition_rows(1) // 4
+    assert s._rollup_partition_rows(10 ** 9) >= 1          # floors at 1, never 0
+    assert Store(tmp_path / "st2", memory_limit_gb=0)._memory_limit_gb == 1  # never below 1
+    s3 = Store(tmp_path / "st3")                            # auto mode
+    assert 2 <= s3._memory_limit_gb <= 12
+
+
+def test_config_duckdb_memory_knob(tmp_path):
+    from mrfx.config import load_mrfx_config
+    p = tmp_path / "mrfx.yaml"
+    p.write_text("duckdb_memory_gb: 8\n")
+    assert load_mrfx_config(p).duckdb_memory_gb == 8
+    assert load_mrfx_config(tmp_path / "missing.yaml").duckdb_memory_gb is None  # default
+
+
 def test_entity_grain_median_excludes_placeholder_only_tin(cfg, store):
     # A multi-TIN entity where one member published only a $0.01 placeholder and
     # another a real $80 must report the REAL rate as its entity median, not the

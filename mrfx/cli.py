@@ -96,7 +96,7 @@ def cmd_serve(cfg: MrfxConfig, args) -> int:
               "`port:` in config/mrfx.yaml.", file=sys.stderr)
         return 1
 
-    store = Store(cfg.store_dir)
+    store = Store(cfg.store_dir, cfg.duckdb_memory_gb)
     # BEFORE any worker starts: a crash mid-parse leaves files at
     # 'processing', which scan_inbox skips forever. Flipping them to failed
     # here (single-threaded, nothing else owns the store yet) lets the very
@@ -212,7 +212,7 @@ def cmd_add(cfg: MrfxConfig, args) -> int:
 
     from .fetch import add_urls, run_queue
 
-    store = Store(cfg.store_dir)
+    store = Store(cfg.store_dir, cfg.duckdb_memory_gb)
     store.recover_stuck_files()  # no server owns the store — safe to recover
     counts = add_urls(store, urls)
     print(f"queued {counts['added']} URL(s) "
@@ -260,7 +260,7 @@ def _run_enrichment_best_effort(cfg: MrfxConfig, store: Store) -> None:
 
 
 def cmd_preflight(cfg: MrfxConfig, args) -> int:
-    store = Store(cfg.store_dir)
+    store = Store(cfg.store_dir, cfg.duckdb_memory_gb)
     path = Path(args.path)
     paths = sorted(p for p in path.glob("*") if p.is_file()) if path.is_dir() else [path]
     worst = 0
@@ -333,7 +333,7 @@ def cmd_ingest(cfg: MrfxConfig, args) -> int:
     # especially never run crash-recovery against its live 'processing' rows
     if _something_owns_the_port(cfg, "ingesting locally"):
         return 1
-    store = Store(cfg.store_dir)
+    store = Store(cfg.store_dir, cfg.duckdb_memory_gb)
     store.recover_stuck_files()  # crashed 'processing' rows re-ingest this pass
     path = Path(args.path) if args.path else cfg.inbox_dir
     bar = _make_cli_progress()
@@ -364,7 +364,7 @@ def cmd_ingest(cfg: MrfxConfig, args) -> int:
 
 
 def cmd_status(cfg: MrfxConfig, args) -> int:
-    store = Store(cfg.store_dir)
+    store = Store(cfg.store_dir, cfg.duckdb_memory_gb)
     with store.connect() as con:
         rows = con.execute(
             """
@@ -397,7 +397,7 @@ def cmd_status(cfg: MrfxConfig, args) -> int:
 def cmd_export(cfg: MrfxConfig, args) -> int:
     from .api import FilterSet, methodology_text, order_export_sql
 
-    store = Store(cfg.store_dir)
+    store = Store(cfg.store_dir, cfg.duckdb_memory_gb)
     out = Path(args.out)
     sql, params = order_export_sql(args)
     with store.connect() as con:
@@ -425,7 +425,7 @@ def cmd_outreach(cfg: MrfxConfig, args) -> int:
     from .api import FilterSet, grain_of, methodology_text, rel_sql
     from .outreach import build_outreach_rows, outreach_csv
 
-    store = Store(cfg.store_dir)
+    store = Store(cfg.store_dir, cfg.duckdb_memory_gb)
     qp = {k: v for k, v in {
         "payer": args.payer, "cpt": args.cpt, "state": args.state, "city": args.city,
         "month": args.month, "discipline": args.discipline,
@@ -453,7 +453,7 @@ def cmd_forget(cfg: MrfxConfig, args) -> int:
     if _something_owns_the_port(cfg, "erasing files locally"):
         print("tip: while the dashboard runs, use its Files tab's remove button instead.")
         return 1
-    store = Store(cfg.store_dir)
+    store = Store(cfg.store_dir, cfg.duckdb_memory_gb)
     rc = 0
     for name in args.filenames:
         st = store.file_status(name)
@@ -480,7 +480,7 @@ def cmd_enrich(cfg: MrfxConfig, args) -> int:
     """Resolve NPI -> org names/geography on demand (no need to keep serve up).
     `--bulk <NPPES zip/csv>` does it in one fast local pass; otherwise the mode
     in config/mrfx.yaml applies (api or bulk)."""
-    store = Store(cfg.store_dir)
+    store = Store(cfg.store_dir, cfg.duckdb_memory_gb)
     if getattr(args, "bulk_file", None):
         cfg.enrichment.mode = "bulk"
         cfg.enrichment.bulk_csv_path = Path(args.bulk_file)
@@ -510,7 +510,7 @@ def cmd_reset(cfg: MrfxConfig, args) -> int:
         return 1
     if _something_owns_the_port(cfg, "resetting the store"):
         return 1
-    Store(cfg.store_dir).reset()
+    Store(cfg.store_dir, cfg.duckdb_memory_gb).reset()
     print("store cleared. processed files remain in", cfg.processed_dir)
     return 0
 

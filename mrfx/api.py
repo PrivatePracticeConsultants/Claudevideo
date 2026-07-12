@@ -1267,6 +1267,15 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     @app.exception_handler(Exception)
     async def unhandled(request: Request, exc: Exception):
         log.exception("API error on %s", request.url.path)
+        # DuckDB's memory-limit guard is not a bug — it means this view needs
+        # more working memory than the cap. Translate the raw "failed to pin
+        # block …" text into something a non-technical user can act on.
+        if "OutOfMemory" in type(exc).__name__ or "Out of Memory" in str(exc):
+            return JSONResponse(status_code=503, content={"error": (
+                f"This view needs more memory than the current limit "
+                f"({store._memory_limit_gb} GB). Narrow it with a filter (payer, "
+                f"code, or state), or raise duckdb_memory_gb in config/mrfx.yaml "
+                f"if your machine has spare RAM, then restart.")})
         return JSONResponse(status_code=500, content={"error": f"{type(exc).__name__}: {exc}"})
 
     app.mount("/", StaticFiles(directory=WEB_DIR, html=True), name="web")
