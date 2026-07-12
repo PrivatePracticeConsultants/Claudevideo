@@ -384,6 +384,50 @@ def test_startup_sweeps_downloads_stranded_after_done(cfg, store, server):
     assert not stranded.exists() and not F._meta_path(stranded).exists()
 
 
+def test_unknown_length_download_holds_provisional_reservation(cfg, monkeypatch):
+    # an unknown-length (chunked) download can't reserve its true size, but it
+    # must hold a PROVISIONAL reservation mid-stream so a concurrent
+    # known-length download's disk math can see it (else they overcommit).
+    import collections
+    import http.server as hs
+    import threading as th
+
+    import mrfx.fetch as F
+
+    class Chunked(hs.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            blob = b"x" * 1024
+            for _ in range(64):
+                self.wfile.write(f"{len(blob):X}\r\n".encode() + blob + b"\r\n")
+            self.wfile.write(b"0\r\n\r\n")
+
+        def log_message(self, *a):
+            pass
+
+    httpd = hs.ThreadingHTTPServer(("127.0.0.1", 0), Chunked)
+    th.Thread(target=httpd.serve_forever, daemon=True).start()
+    Usage = collections.namedtuple("Usage", "total used free")
+    seen = {}
+
+    def fake_usage(p):
+        if not seen:  # snapshot reservations the first time the stream re-checks disk
+            seen.update(F._disk_reservations)
+        return Usage(100 << 30, 50 << 30, 50 << 30)  # plenty free -> no raise
+
+    monkeypatch.setattr(F.shutil, "disk_usage", fake_usage)
+    monkeypatch.setattr(F, "_UNKNOWN_LEN_CHECK_BYTES", 4096)
+    try:
+        F.download(cfg, f"http://127.0.0.1:{httpd.server_address[1]}/x.json",
+                   cfg.downloads_dir / "prov.json")
+    finally:
+        httpd.shutdown()
+    assert seen and max(seen.values()) >= (2 << 30)  # provisional headroom was held
+    assert F._disk_reservations == {}                # released on completion
+
+
 def test_reserve_is_atomic_check_and_set(cfg, monkeypatch):
     # Two same-size downloads racing into a disk that fits only one: the FIRST
     # reservation must be visible to the second check even though neither has

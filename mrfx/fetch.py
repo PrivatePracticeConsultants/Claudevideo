@@ -286,9 +286,15 @@ _disk_reservations: dict[int, int] = {}
 _reservation_lock = threading.Lock()
 
 
-# unknown-length (chunked) responses get no up-front reservation; re-check the
-# disk every this-many streamed bytes instead
+# unknown-length (chunked) responses have no Content-Length to reserve against,
+# so they hold a fixed PROVISIONAL reservation (below) — enough that concurrent
+# known-length downloads' disk math can still see them — and re-check the disk
+# every this-many streamed bytes.
 _UNKNOWN_LEN_CHECK_BYTES = 256 << 20
+# provisional headroom an unknown-length download reserves so it isn't invisible
+# to the collective disk guard (it can't reserve its true size — unknown). Small
+# files over-reserve briefly, then release on completion; the safety is worth it.
+_UNKNOWN_LEN_RESERVATION = 2 << 30
 
 
 def _set_reservation(my_key: int, remaining: int) -> None:
@@ -429,6 +435,11 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                 # check-and-reserve is one atomic step (see the helper).
                 if total:
                     _reserve_disk_or_raise(my_key, dest.parent, total, resume_from)
+                else:
+                    # no Content-Length: reserve a provisional headroom so a
+                    # concurrent known-length download counts this one in its
+                    # up-front guard instead of overcommitting the disk.
+                    _set_reservation(my_key, _UNKNOWN_LEN_RESERVATION)
 
                 sha = hashlib.sha256()
                 if resuming:
@@ -457,11 +468,13 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                             # written bytes now show in disk_usage; shrink the
                             # reservation so they're never counted twice
                             _set_reservation(my_key, total - done)
-                        elif done - last_free_check >= _UNKNOWN_LEN_CHECK_BYTES:
-                            # no Content-Length -> no up-front guard or
-                            # reservation was possible; check the disk
-                            # periodically mid-stream so N unknown-length
-                            # downloads can't quietly fill the drive together
+                        # periodic free-space floor re-check for BOTH branches:
+                        # a known-length download reserved up front but never
+                        # re-checked, and an unknown-length one can't reserve its
+                        # true size — either way, concurrent downloads can erode
+                        # the free space mid-stream, so fail friendly at the 2 GB
+                        # floor instead of hitting a raw ENOSPC.
+                        if done - last_free_check >= _UNKNOWN_LEN_CHECK_BYTES:
                             last_free_check = done
                             if shutil.disk_usage(dest.parent).free < (2 << 30):
                                 raise DownloadError(

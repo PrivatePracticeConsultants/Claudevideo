@@ -153,6 +153,7 @@ class QaCounters:
     non_dollar_rows: int = 0          # percentage / per diem rows emitted
     unparseable_rates: int = 0        # prices whose negotiated_rate could not be read
     invalid_npis: int = 0             # NPIs that are not 10 digits after cleaning
+    tin_only_rows: int = 0            # TIN-only groups (no NPIs) emitted at npi=NULL
     bad_ref_ids: int = 0              # provider_reference ids that are not numeric
     bundled_items: int = 0            # bundle/capitation items excluded (not per-code rates)
     prices: int = 0                   # readable prices seen (denominator for price-level shares)
@@ -551,6 +552,18 @@ class InNetworkParser:
                     "tin_is_really_npi": tin_type == "npi",
                 }
                 if not npis:
+                    # A group with a TIN but no NPIs is a TIN-only rate — the
+                    # whole product is TIN-grain, so dropping it lost that
+                    # payer's rate for the TIN. Emit one row at npi=NULL so the
+                    # rate reaches the TIN/entity grains; it is filtered out of
+                    # the NPI grain (DEDUP_QUERY). A group with neither TIN nor
+                    # NPI carries nothing and is still skipped.
+                    if not tin_value:
+                        continue
+                    row = {**row_base, **tin_flags, "npi": None}
+                    (r.rows if self._sink is None else self._buffer).append(row)
+                    r.qa.rows += 1
+                    r.qa.tin_only_rows += 1
                     continue
                 for npi in npis:
                     row = {**row_base, **tin_flags, "npi": npi}

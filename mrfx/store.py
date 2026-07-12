@@ -49,7 +49,11 @@ RATES_SCHEMA = pa.schema(
         pa.field("tin_value", pa.string()),
         pa.field("tin_type", pa.string()),
         pa.field("tin_is_really_npi", pa.bool_()),
-        pa.field("npi", pa.string(), nullable=False),
+        # nullable: a provider group can carry a TIN but no NPIs (TIN-only
+        # rate). Such a row keeps the rate at the TIN grain with npi = NULL;
+        # it is filtered out of the NPI grain (DEDUP_QUERY) so it never shows
+        # as a phantom NPI.
+        pa.field("npi", pa.string(), nullable=True),
         pa.field("billing_code", pa.string(), nullable=False),
         pa.field("billing_code_type", pa.string()),
         pa.field("discipline", pa.string()),
@@ -141,6 +145,9 @@ DEDUP_QUERY = """
            1                                                         AS rate_variants,
            1                                                         AS npi_count
     FROM rates
+    -- TIN-only rows (npi IS NULL) live at the TIN grain only; excluding them
+    -- here keeps the NPI grain from showing a phantom "no-NPI" unit.
+    WHERE npi IS NOT NULL
     GROUP BY payer, npi, billing_code,
              coalesce(array_to_string(billing_code_modifier, '|'), ''),
              negotiated_rate, billing_class,

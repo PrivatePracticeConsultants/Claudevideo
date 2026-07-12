@@ -98,7 +98,14 @@ Two codebases live in this repo:
    publication order can never split the dedup grain. file_month = validated
    header month, else the filename's stamped date, else ingestion month.
    An untyped 10-digit tin.value is an NPI-in-the-TIN-slot (flagged), not an
-   EIN. `load_provider_refs` serves only each ref_id's NEWEST vintage —
+   EIN. A provider group with a TIN but NO NPIs (a TIN-only rate) emits one
+   row at `npi = NULL` (QA-counted as tin_only_rows) so the rate reaches the
+   TIN/entity grains; those rows are filtered OUT of the NPI grain
+   (DEDUP_QUERY `WHERE npi IS NOT NULL`) so they never show as a phantom NPI.
+   $0/$0.01/negative DOLLAR rates are payer placeholders: kept as rows (the
+   hide-outliers toggle masks them) but excluded from the TIN median
+   (BY_TIN_QUERY FILTER, coalesce fallback for placeholder-only TINs) and from
+   the benchmark market. `load_provider_refs` serves only each ref_id's NEWEST vintage —
    two companion files must not union stale provider lists. Rollups rebuild
    after enrichment lands (geographic benchmarks join tin_directory's
    states/cities). Entity-grain rate = median of member-TIN rates — the

@@ -525,6 +525,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                     SELECT DISTINCT r.npi, n.org_name, n.entity_type, n.city, n.state, n.taxonomy_desc
                     FROM rates r LEFT JOIN npi_directory n USING (npi)
                     WHERE r.tin_value IN ({', '.join('?' for _ in tin_list)})
+                      AND r.npi IS NOT NULL  -- TIN-only rows have no NPI to list
                     ORDER BY r.npi
                     """,
                     tin_list,

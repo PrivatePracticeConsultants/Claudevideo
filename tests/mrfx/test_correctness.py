@@ -88,6 +88,47 @@ def test_file_month_skips_invalid_leading_date_token(cfg, store):
     assert rows and all(r["file_month"] == "2025-03" for r in rows)
 
 
+def test_tin_only_group_kept_at_tin_grain_not_npi_grain(cfg, store):
+    # a provider group with a TIN but NO NPIs is a TIN-only rate — the whole
+    # product is TIN-grain, so it must not be dropped
+    it = {
+        "billing_code": "97110", "billing_code_type": "CPT",
+        "negotiated_rates": [{
+            "provider_groups": [{"npi": [], "tin": {"type": "ein", "value": "43-5550000"}}],
+            "negotiated_prices": [{"negotiated_type": "negotiated", "negotiated_rate": 77.0,
+                                   "billing_class": "professional"}],
+        }],
+    }
+    p = make_fixture(cfg.inbox_dir, "tinonly.json", _mrf([it]))
+    assert ingest_file(cfg, store, p)["status"] == "done"
+    rows = _rates(store)
+    assert len(rows) == 1 and rows[0]["npi"] is None and rows[0]["tin_value"] == "435550000"
+    qa = json.loads(store.file_status("tinonly.json")["qa"])
+    assert qa["tin_only_rows"] == 1
+    with store.connect() as con:
+        # TIN grain carries the rate, with npi_count 0 (no NPIs to count)
+        tin = con.execute(
+            "SELECT negotiated_rate, npi_count FROM rates_by_tin WHERE tin_value = '435550000'"
+        ).fetchone()
+        assert tin == (77.0, 0)
+        # NPI grain shows NO phantom unit for the null-npi row
+        assert con.execute("SELECT count(*) FROM rates_dedup").fetchone()[0] == 0
+
+
+def test_group_with_neither_tin_nor_npi_emits_nothing(cfg, store):
+    it = {
+        "billing_code": "97110", "billing_code_type": "CPT",
+        "negotiated_rates": [{
+            "provider_groups": [{"npi": [], "tin": {"type": "ein", "value": ""}}],
+            "negotiated_prices": [{"negotiated_type": "negotiated", "negotiated_rate": 77.0,
+                                   "billing_class": "professional"}],
+        }],
+    }
+    p = make_fixture(cfg.inbox_dir, "empty_group.json", _mrf([it]))
+    ingest_file(cfg, store, p)
+    assert _rates(store) == []
+
+
 def test_bundle_and_capitation_items_excluded(cfg, store):
     # a $500 bundle price is NOT a per-code rate — it must never enter medians
     p = make_fixture(cfg.inbox_dir, "bundle.json", _mrf([
