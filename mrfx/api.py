@@ -18,7 +18,7 @@ import zipfile
 from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
@@ -32,6 +32,12 @@ from .benchmark import (
 )
 from .catalog import catalog_json
 from .config import MrfxConfig
+from .schedule import (
+    compute_fee_schedule,
+    fee_schedule_csv,
+    payer_scorecard,
+    render_rate_card,
+)
 from .entities import sync_entity_map, update_entity
 from .ingest import ingest_file, scan_inbox
 from .registry import Registry
@@ -998,6 +1004,36 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         except (BenchmarkError, ValueError) as e:
             # ValueError: a non-numeric volume / percentile in the JSON body
             # (int()/float() coercion) — a client input error, so 422, not 500.
+            raise HTTPException(422, str(e))
+
+    # fee schedule / payer scorecard (§7C)
+    @app.post("/api/schedule/fee")
+    async def schedule_fee(request: Request):
+        body = await request.json()
+        try:
+            fs = compute_fee_schedule(store, str(body.get("subject", "")), body.get("market") or {})
+            return {"fee_schedule": fs, "scorecard": payer_scorecard(fs)}
+        except BenchmarkError as e:
+            raise HTTPException(422, str(e))
+
+    @app.post("/api/report/ratecard", response_class=HTMLResponse)
+    async def ratecard_report(request: Request):
+        body = await request.json()
+        try:
+            fs = compute_fee_schedule(store, str(body.get("subject", "")), body.get("market") or {})
+            return HTMLResponse(render_rate_card(cfg, store, fs, payer_scorecard(fs)))
+        except BenchmarkError as e:
+            raise HTTPException(422, str(e))
+
+    @app.post("/api/schedule/fee.csv", response_class=PlainTextResponse)
+    async def schedule_fee_csv(request: Request):
+        body = await request.json()
+        try:
+            fs = compute_fee_schedule(store, str(body.get("subject", "")), body.get("market") or {})
+            csv_text = fee_schedule_csv(fs, payer_scorecard(fs), store)
+            return PlainTextResponse("﻿" + csv_text, headers={  # BOM for Excel
+                "Content-Disposition": 'attachment; filename="rate_card.csv"'})
+        except BenchmarkError as e:
             raise HTTPException(422, str(e))
 
     # peer sets

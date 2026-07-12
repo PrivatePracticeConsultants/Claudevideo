@@ -19,6 +19,7 @@ const state = {
   cptSelected: null,
   filesTimer: null,
   lastBenchmarkPayload: null,
+  lastRatecardPayload: null,
 };
 
 const fmtMoney = (v) =>
@@ -81,6 +82,7 @@ function switchView(view) {
     if (first) selectCpt(first);
   }
   if (view === "benchmark") initBenchmark();
+  if (view === "ratecard") initRatecard();
   if (view === "sources") loadSources();
 }
 
@@ -828,11 +830,10 @@ function reportPayloadOrConfirmNational() {
   return { ...p, market: { ...m, allow_national: true } };
 }
 
-async function openReport(url) {
-  const payload = reportPayloadOrConfirmNational();
-  if (!payload) return;
+async function openReportWith(url, payload) {
+  if (!payload) return;  // e.g. national-confirm cancelled
   // Open the tab SYNCHRONOUSLY, still inside the click's user-activation window
-  // (the optional confirm() above is synchronous, so activation is preserved).
+  // (any confirm() before this call is synchronous, so activation is preserved).
   // If we waited until after the await, a slow server render would push
   // window.open past the activation window and the browser would silently
   // block the popup — the report would just never appear.
@@ -857,11 +858,144 @@ async function openReport(url) {
 }
 
 async function openPitchReport() {
-  await openReport("/api/report/pitch");
+  await openReportWith("/api/report/pitch", reportPayloadOrConfirmNational());
 }
 
 async function openNegotiationReport() {
-  await openReport("/api/report/negotiation");
+  await openReportWith("/api/report/negotiation", reportPayloadOrConfirmNational());
+}
+
+/* =======================================================================
+   RATE CARD + PAYER SCORECARD
+   ======================================================================= */
+
+let ratecardInit = false;
+async function initRatecard() {
+  refreshRcMpfs();
+  if (ratecardInit) return;
+  let subjects, months, payers;
+  try {
+    [subjects, months, payers] = await Promise.all([
+      api("/api/benchmark/subjects"), api("/api/months"), api("/api/payers"),
+    ]);
+  } catch (e) {
+    $("#rc-out").innerHTML = `<div class="empty">could not load data (${esc(e.message)}) — switch tabs and come back to retry</div>`;
+    return;
+  }
+  ratecardInit = true;
+  $("#rc-subjects").innerHTML =
+    subjects.entities.map((e) => `<option value="${esc(e)}">`).join("") +
+    subjects.tins.map((t) => `<option value="${esc(t.tin_value)}">${esc(t.display_name)}</option>`).join("");
+  $("#rc-month").innerHTML = months.months.map((m) => `<option>${m}</option>`).join("") ||
+    `<option value="">no data ingested</option>`;
+  $("#rc-payer-chips").innerHTML = payers.payers.map((p) =>
+    `<button class="chip" data-payer="${esc(p)}">${esc(p)}</button>`).join("");
+  $("#rc-payer-chips").addEventListener("click", (ev) => {
+    const b = ev.target.closest(".chip");
+    if (b) b.classList.toggle("on");
+  });
+  $("#rc-run").addEventListener("click", buildRatecard);
+  $("#rc-report").addEventListener("click", () =>
+    openReportWith("/api/report/ratecard", state.lastRatecardPayload));
+  $("#rc-csv").addEventListener("click", downloadRatecardCsv);
+}
+
+async function refreshRcMpfs() {
+  try {
+    const s = await api("/api/mpfs/status");
+    $("#rc-mpfs-status").innerHTML = s.loaded
+      ? `MPFS loaded: <b>${esc(s.loaded)}</b> — scorecard ranks by % of Medicare`
+      : "MPFS: not loaded — scorecard ranks by % of best payer";
+  } catch { /* ignore */ }
+}
+
+function ratecardPayload() {
+  const subject = $("#rc-subject").value.trim();
+  const month = $("#rc-month").value;
+  if (!subject || !month) throw new Error("subject and as-of month are required");
+  const market = {
+    month,
+    payers: $$("#rc-payer-chips .chip.on").map((c) => c.dataset.payer),
+    billing_class: $("#rc-class").value,
+  };
+  if ($("#rc-disc").value) market.discipline = $("#rc-disc").value;
+  return { subject, market };
+}
+
+async function buildRatecard() {
+  const out = $("#rc-out");
+  state.lastRatecardPayload = null;
+  $("#rc-report").disabled = true;
+  $("#rc-csv").disabled = true;
+  let payload;
+  try { payload = ratecardPayload(); }
+  catch (e) { out.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  out.innerHTML = `<div class="loading">Building rate card</div>`;
+  let data;
+  try { data = await postJson("/api/schedule/fee", payload); }
+  catch (e) { out.innerHTML = `<div class="empty"><h3>Could not build</h3>${esc(e.message)}</div>`; return; }
+  state.lastRatecardPayload = payload;
+  $("#rc-report").disabled = false;
+  $("#rc-csv").disabled = false;
+  renderRatecard(out, data.fee_schedule, data.scorecard);
+}
+
+const pctOrDash = (v) => (v == null ? "–" : `${v}%`);
+
+function renderRatecard(out, fs, sc) {
+  const mp = fs.mpfs_loaded;
+  if (!fs.codes.length) {
+    out.innerHTML = `<div class="empty"><h3>No rates found</h3>No published rates for this practice as of ${esc(String(fs.month))} under the current filters.</div>`;
+    return;
+  }
+  // order payer columns by scorecard rank (best first)
+  const order = {};
+  sc.rows.forEach((r, i) => { order[r.payer] = i; });
+  const payers = fs.payers.slice().sort((a, b) => (order[a] ?? 1e9) - (order[b] ?? 1e9));
+  const scHead = `<th class="num">Rank</th><th>Payer</th><th class="num">Codes</th>${
+    mp ? '<th class="num">Med % MCR</th>' : ""}<th class="num">Med % of best</th><th class="num">Med rate</th>`;
+  const scRows = sc.rows.map((r) => `<tr class="${r.rank === 1 ? "best-row" : ""}">
+      <td class="num">${r.rank ?? "–"}</td><td>${esc(r.payer)}</td><td class="num">${r.n_codes}</td>
+      ${mp ? `<td class="num">${pctOrDash(r.median_pct_medicare)}</td>` : ""}
+      <td class="num">${pctOrDash(r.median_pct_of_best)}</td>
+      <td class="num">$${fmtMoney(r.median_rate)}</td></tr>`).join("");
+  const feeHead = `<th>Code</th>${payers.map((p) => `<th class="num">${esc(p)}</th>`).join("")}`;
+  const feeRows = fs.codes.map((e) => {
+    const vals = payers.map((p) => (e.rates[p] && e.rates[p].rate != null ? e.rates[p].rate : null));
+    const present = vals.filter((v) => v != null);
+    const best = present.length ? Math.max(...present) : null;
+    const cells = payers.map((p) => {
+      const v = e.rates[p];
+      if (!v || v.rate == null) return `<td class="num">–</td>`;
+      const top = best != null && v.rate === best ? " top-rate" : "";
+      const mc = mp && v.pct_medicare != null ? `<div class="sub">${v.pct_medicare}% MC</div>` : "";
+      return `<td class="num${top}">$${fmtMoney(v.rate)}${mc}</td>`;
+    }).join("");
+    return `<tr><td>${esc(e.billing_code)}<div class="sub">${esc(e.description || "")}</div></td>${cells}</tr>`;
+  }).join("");
+  const bestLine = sc.best_payer ? `Best-paying payer: <b>${esc(sc.best_payer)}</b>. ` : "";
+  out.innerHTML = `
+    <div class="rc-summary">${bestLine}Payers ranked by ${mp ? "% of Medicare" : "% of the best payer"}.</div>
+    <h3>Payer scorecard — who pays best</h3>
+    <div class="tablewrap"><table class="rc-table"><thead><tr>${scHead}</tr></thead><tbody>${scRows}</tbody></table></div>
+    <h3 style="margin-top:18px">Fee schedule</h3>
+    <div class="tablewrap"><table class="rc-table"><thead><tr>${feeHead}</tr></thead><tbody>${feeRows}</tbody></table></div>`;
+}
+
+async function downloadRatecardCsv() {
+  if (!state.lastRatecardPayload) return;
+  try {
+    const r = await fetch("/api/schedule/fee.csv", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(state.lastRatecardPayload),
+    });
+    if (!r.ok) { alert("CSV export failed: " + (await r.text())); return; }
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(await r.blob());
+    a.download = "rate_card.csv";
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+  } catch (e) { alert("CSV export failed: " + e.message); }
 }
 
 /* =======================================================================

@@ -16,6 +16,7 @@
     <button data-view="explorer" class="active">Explorer</button>
     <button data-view="cpt">Code comparison</button>
     <button data-view="benchmark">Benchmark</button>
+    <button data-view="ratecard">Rate card</button>
     <button data-view="files">Files</button>
     <button data-view="sources">Sources</button>
   </nav>
@@ -248,6 +249,43 @@
       <div class="bench-results">
         <div id="b-out" class="empty"><h3>Pick a subject and an as-of month</h3>
           Benchmarks compute over dollar-rate, base-modifier rows only.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ======================= RATE CARD ======================= -->
+  <section id="view-ratecard" class="view">
+    <div class="bench-grid">
+      <div class="bench-form">
+        <h2>Rate card &amp; payer scorecard</h2>
+        <p class="muted" style="text-transform:none;margin:-4px 0 10px">
+          A practice's own negotiated rates, laid out by payer, with its payers ranked by who pays best.
+          No volumes or assumptions — just what the payers published.</p>
+        <div class="field"><label>Subject entity / TIN</label>
+          <input type="text" id="rc-subject" list="rc-subjects" placeholder="entity name or TIN…">
+          <datalist id="rc-subjects"></datalist>
+        </div>
+        <div class="field"><label>As-of month (required)</label><select id="rc-month"></select></div>
+        <div class="field"><label>Payer(s) <span class="muted" style="text-transform:none">(optional — limit to these)</span></label><div class="chips" id="rc-payer-chips"></div></div>
+        <div class="field"><label>Discipline</label>
+          <select id="rc-disc"><option value="">any</option><option>PT</option><option>OT</option><option>SLP</option></select>
+        </div>
+        <div class="field"><label>Billing class</label>
+          <select id="rc-class"><option value="professional">professional</option><option value="institutional">institutional</option></select>
+        </div>
+        <div class="mpfs-row">
+          <span id="rc-mpfs-status" class="muted">MPFS: not loaded</span>
+          <span class="muted" style="text-transform:none">load one on the Benchmark tab to add % of Medicare</span>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:12px">
+          <button class="btn primary" id="rc-run">Build rate card</button>
+          <button class="btn" id="rc-report" disabled>Open printable rate card</button>
+          <button class="btn" id="rc-csv" disabled>Download CSV</button>
+        </div>
+      </div>
+      <div class="bench-results">
+        <div id="rc-out" class="empty"><h3>Pick a practice and an as-of month</h3>
+          See every code it has a negotiated rate for, by payer, and which payers pay best.</div>
       </div>
     </div>
   </section>

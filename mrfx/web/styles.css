@@ -165,6 +165,16 @@ td .rate { font-weight: 650; }
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* rate card + payer scorecard */
+.rc-summary { font-size: 14px; margin: 4px 0 14px; padding: 10px 14px;
+  background: var(--surface-2, var(--surface-1)); border: 1px solid var(--border);
+  border-radius: var(--radius); }
+.rc-table td, .rc-table th { padding: 6px 10px; white-space: nowrap; vertical-align: top; }
+.rc-table .num { text-align: right; }
+.rc-table .sub { color: var(--muted); font-size: 11px; }
+.rc-table tr.best-row { background: rgba(40, 140, 70, 0.10); }
+.rc-table td.top-rate { font-weight: 700; color: var(--pos, #1c6b3a); }
+
 /* ---------- slide-over (org detail) ---------- */
 #overlay {
   position: fixed; inset: 0; background: rgba(0,0,0,0.35); z-index: 40;

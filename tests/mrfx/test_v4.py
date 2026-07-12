@@ -485,6 +485,68 @@ def test_payer_negotiation_endpoint_renders_and_totals_opportunity(cfg, two_paye
     assert "state" in no_state.text.lower()
 
 
+# ---------------------------------------------------------------------------
+# fee schedule + payer scorecard (§7C)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def ratecard_store(cfg, store):
+    """Subject 43-0000000 with two payers over two codes (no MPFS):
+    Payer A 97110=$40 97140=$50; Payer B 97110=$30 97140=$60."""
+    a = innetwork(payer="Payer A", items=[
+        item("97110", [(["1000000000"], "43-0000000", "ein", [(40.0, None)])]),
+        item("97140", [(["1000000000"], "43-0000000", "ein", [(50.0, None)])]),
+    ])
+    b = innetwork(payer="Payer B", items=[
+        item("97110", [(["1000000000"], "43-0000000", "ein", [(30.0, None)])]),
+        item("97140", [(["1000000000"], "43-0000000", "ein", [(60.0, None)])]),
+    ])
+    ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "rc_a.json", a))
+    ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "rc_b.json", b))
+    return store
+
+
+def test_fee_schedule_lays_out_rates_by_payer(cfg, ratecard_store):
+    from mrfx.schedule import compute_fee_schedule
+    fs = compute_fee_schedule(ratecard_store, "430000000", {"month": "2026-06"})
+    assert fs["payers"] == ["Payer A", "Payer B"]
+    codes = {c["billing_code"]: c for c in fs["codes"]}
+    assert codes["97110"]["rates"]["Payer A"]["rate"] == 40.0
+    assert codes["97110"]["rates"]["Payer B"]["rate"] == 30.0
+    assert codes["97140"]["rates"]["Payer B"]["rate"] == 60.0
+    assert fs["mpfs_loaded"] is False
+
+
+def test_payer_scorecard_ranks_by_pct_of_best_without_medicare(cfg, ratecard_store):
+    from mrfx.schedule import compute_fee_schedule, payer_scorecard
+    sc = payer_scorecard(compute_fee_schedule(ratecard_store, "430000000", {"month": "2026-06"}))
+    assert sc["metric"] == "pct_of_best"
+    # 97110 best=40 (A): A=100, B=75; 97140 best=60 (B): A=83, B=100
+    # median % of best: A=median(100,83.3)=92, B=median(75,100)=88 -> A ranks first
+    assert sc["best_payer"] == "Payer A"
+    ranks = {r["payer"]: r["rank"] for r in sc["rows"]}
+    assert ranks == {"Payer A": 1, "Payer B": 2}
+    a = next(r for r in sc["rows"] if r["payer"] == "Payer A")
+    assert a["n_codes"] == 2 and a["n_comparable"] == 2
+
+
+def test_ratecard_report_and_csv_endpoints(cfg, ratecard_store):
+    client = TestClient(create_app(cfg, ratecard_store))
+    html = client.post("/api/report/ratecard", json={
+        "subject": "430000000", "market": {"month": "2026-06"}})
+    assert html.status_code == 200
+    assert "Payer A" in html.text and "Payer B" in html.text
+    assert "who pays best" in html.text and "METHODOLOGY" in html.text
+    csv = client.post("/api/schedule/fee.csv", json={
+        "subject": "430000000", "market": {"month": "2026-06"}})
+    assert csv.status_code == 200
+    assert "# " in csv.text and "97110" in csv.text  # methodology header + data
+    # month is required, like the other reports
+    refused = client.post("/api/report/ratecard", json={"subject": "430000000", "market": {}})
+    assert refused.status_code == 422
+
+
 def test_qa_flags_outliers_and_zero_rates(cfg, store):
     groups = [(["1000000001"], "43-7777777", "ein", [(30.0, None)]),
               (["1000000002"], "43-7777778", "ein", [(31.0, None)]),

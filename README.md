@@ -151,6 +151,25 @@ The **Benchmark** tab answers "where does this practice sit vs its market":
   external fetch when a client opens them offline). A missing logo silently
   falls back to the text brand; it never blocks a report.
 
+## Rate card & payer scorecard (§7C)
+
+The **Rate card** tab reconstructs a single practice's own negotiated schedule
+— zero assumptions, no volumes:
+
+- **Fee schedule ("your rate card")**: every code the practice has a negotiated
+  rate for, laid out by payer, as of a pinned month. The MRF *is* the fee
+  schedule; most practices have never seen theirs written down. The best rate in
+  each row is highlighted.
+- **Payer scorecard ("who pays best")**: the practice's payers ranked by how
+  generously they pay, normalized fairly — median **% of Medicare** when an MPFS
+  anchor is loaded (absolute, comparable across payers), otherwise median **% of
+  the best payer** over head-to-head codes (needs no Medicare data; a payer with
+  no shared codes is listed but unranked).
+- **Deliverables**: a branded, print-ready **rate card** (scorecard on top, full
+  fee-schedule matrix below, methodology footer) and a **CSV** with the
+  methodology as leading comment lines. Same base-modifier, dollar-rate,
+  professional-class basis as the benchmark, so the numbers agree across tabs.
+
 **Honesty caveats baked into UI and reports:** benchmarks compute over
 dollar-rate, base-modifier rows by default (deviations are labeled toggles);
 **ghost rates** are real (a published rate ≠ the peer bills that code — hence
