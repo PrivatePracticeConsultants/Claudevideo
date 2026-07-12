@@ -136,6 +136,15 @@ The **Benchmark** tab answers "where does this practice sit vs its market":
   excluded), ordered weakest-position-first so the strongest renegotiation case
   leads. With volumes supplied it totals the annual dollar gap across payers.
   This is the deliverable a practice takes into a contract renewal.
+- **State scope is mandatory on reports**: negotiated reimbursement varies by
+  state, so both the pitch report and the negotiation one-pager **refuse to
+  render without a State filter** (the exploratory Benchmark tab is unaffected).
+  A stateless comparison pools every loaded state into one distribution — to run
+  that deliberately you pass `market.allow_national=true` (the dashboard asks for
+  a confirmation), and the report then carries a prominent "NATIONAL COMPARISON"
+  banner so it can never pass as an in-state benchmark. Note state comes from
+  NPPES enrichment, not the MRF, so a state filter only includes TINs whose NPIs
+  have been resolved to that state.
 - **Report-as-a-service branding**: both reports carry the consultant's brand
   name and, when `report_branding.logo_path` points at a readable image, their
   logo inlined as a data URI (reports stay single self-contained files — no

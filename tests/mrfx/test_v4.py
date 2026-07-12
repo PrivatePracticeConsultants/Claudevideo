@@ -374,7 +374,7 @@ def test_peer_sets_curated(cfg, market_store):
 def test_pitch_report_renders_with_methodology_and_refuses_without_month(cfg, market_store):
     client = TestClient(create_app(cfg, market_store))
     ok = client.post("/api/report/pitch", json={
-        "subject": "430000000", "market": {"month": "2026-06"},
+        "subject": "430000000", "market": {"month": "2026-06", "allow_national": True},
         "volumes": {"97110": 1000},
     })
     assert ok.status_code == 200
@@ -383,8 +383,24 @@ def test_pitch_report_renders_with_methodology_and_refuses_without_month(cfg, ma
     assert "As-of month: 2026-06" in html
     assert "Ghost rates" in html
     assert "$5,000.00" in html  # opportunity at target
+    assert "NATIONAL COMPARISON" in html  # explicit-national warning banner
     refused = client.post("/api/report/pitch", json={"subject": "430000000", "market": {}})
     assert refused.status_code == 422
+
+
+def test_report_requires_state_unless_national_explicitly_allowed(cfg, market_store):
+    client = TestClient(create_app(cfg, market_store))
+    # no state, no opt-in -> refused with a state-scope message
+    refused = client.post("/api/report/pitch", json={
+        "subject": "430000000", "market": {"month": "2026-06"}})
+    assert refused.status_code == 422
+    assert "state" in refused.text.lower()
+    # a state-scoped report renders without the national banner (fixture TINs
+    # have no NPPES state, so peers are empty, but the report still renders)
+    scoped = client.post("/api/report/pitch", json={
+        "subject": "430000000", "market": {"month": "2026-06", "state": "MO"}})
+    assert scoped.status_code == 200
+    assert "NATIONAL COMPARISON" not in scoped.text
 
 
 @pytest.fixture
@@ -419,7 +435,7 @@ def test_payer_negotiation_report_orders_weakest_payer_first(cfg, two_payer_stor
 def test_payer_negotiation_endpoint_renders_and_totals_opportunity(cfg, two_payer_store):
     client = TestClient(create_app(cfg, two_payer_store))
     r = client.post("/api/report/negotiation", json={
-        "subject": "430000000", "market": {"month": "2026-06"},
+        "subject": "430000000", "market": {"month": "2026-06", "allow_national": True},
         "volumes": {"97110": 1000},
     })
     assert r.status_code == 200
@@ -431,6 +447,11 @@ def test_payer_negotiation_endpoint_renders_and_totals_opportunity(cfg, two_paye
     # refuses without a pinned month, like the pitch report
     refused = client.post("/api/report/negotiation", json={"subject": "430000000", "market": {}})
     assert refused.status_code == 422
+    # and refuses a stateless national comparison unless explicitly allowed
+    no_state = client.post("/api/report/negotiation", json={
+        "subject": "430000000", "market": {"month": "2026-06"}})
+    assert no_state.status_code == 422
+    assert "state" in no_state.text.lower()
 
 
 def test_qa_flags_outliers_and_zero_rates(cfg, store):

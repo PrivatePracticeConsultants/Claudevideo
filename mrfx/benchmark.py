@@ -407,12 +407,38 @@ def compute_payer_negotiation(store: Store, subject: str, market: dict,
     }
 
 
+def require_geographic_scope(market: dict, kind: str) -> str:
+    """Client-facing reports must not silently pool multiple states — negotiated
+    reimbursement varies by geography, so a national comparison has to be an
+    explicit, labeled choice, never an accident in a deliverable (invariant 4:
+    honesty). Returns a warning banner when national is deliberately allowed;
+    raises otherwise. The exploratory Benchmark tab is unaffected — this guards
+    the *report* boundary only."""
+    if market.get("state"):
+        return ""
+    if market.get("allow_national"):
+        return ("NATIONAL COMPARISON — no state filter was applied, so providers "
+                "across every loaded state are pooled into one distribution. "
+                "Negotiated reimbursement varies by geography; these percentiles "
+                "blend markets and are not an in-state benchmark.")
+    raise BenchmarkError(
+        f"{kind} requires a state — reimbursement varies by state, so a "
+        "client report must be scoped to one (set the State field). To run a "
+        "deliberate pooled national comparison, pass market.allow_national=true.")
+
+
+def _geo_banner_html(note: str) -> str:
+    return (f'<div class="geo-warn">⚠ {html.escape(note)}</div>') if note else ""
+
+
 def render_negotiation_report(cfg: MrfxConfig, store: Store, neg: dict) -> str:
     """Print-ready per-payer negotiation one-pager. One benchmark table per
     payer the subject contracts with, ordered weakest-position-first, with a
     cross-payer opportunity summary when volumes were supplied."""
     if not neg.get("market", {}).get("month"):
         raise BenchmarkError("negotiation report requires a pinned as-of month")
+    geo_banner = _geo_banner_html(
+        require_geographic_scope(neg["market"], "negotiation report"))
     e = html.escape
     target = neg["target_percentile"]
     subject = neg["subject"]
@@ -486,6 +512,8 @@ def render_negotiation_report(cfg: MrfxConfig, store: Store, neg: dict) -> str:
  .gap {{ font-weight: 650; }}
  .band {{ font-size: 14px; background: #f4f3ee; padding: 10px 14px; border-radius: 6px; }}
  .note {{ color: #52514e; font-size: 12px; }}
+ .geo-warn {{ background: #fbe9d0; border: 1px solid #d99a3a; color: #7a4a00;
+          padding: 10px 14px; border-radius: 6px; font-size: 12.5px; margin: 12px 0; }}
  footer {{ margin-top: 36px; border-top: 1px solid #c3c2b7; padding-top: 12px;
           color: #52514e; font-size: 11px; white-space: pre-wrap; }}
  @media print {{ body {{ margin: 0; }} h2 {{ break-after: avoid; }} }}
@@ -494,6 +522,7 @@ def render_negotiation_report(cfg: MrfxConfig, store: Store, neg: dict) -> str:
 <h1>Payer negotiation one-pager — {e(subject)}</h1>
 <div class="meta">Where each payer pays you versus the peers it pays, as of {e(str(month))}.
  Ordered weakest position first.</div>
+{geo_banner}
 {summary}
 {body_sections}
 <footer>METHODOLOGY\n{e(footer)}</footer>
@@ -545,6 +574,8 @@ def render_pitch_report(cfg: MrfxConfig, store: Store, benchmark: dict,
     or methodology footer (§8.10 — they are generated here, unconditionally)."""
     if not benchmark.get("market", {}).get("month"):
         raise BenchmarkError("pitch report requires a pinned as-of month")
+    geo_banner = _geo_banner_html(
+        require_geographic_scope(benchmark["market"], "pitch report"))
     footer = methodology_footer(store, benchmark)
     e = html.escape
     target = benchmark["target_percentile"]
@@ -616,6 +647,8 @@ def render_pitch_report(cfg: MrfxConfig, store: Store, benchmark: dict,
  .pctlbl {{ font-size: 11px; color: #52514e; margin-left: 6px; }}
  .band {{ font-size: 14px; }}
  .note {{ color: #52514e; font-size: 12px; }}
+ .geo-warn {{ background: #fbe9d0; border: 1px solid #d99a3a; color: #7a4a00;
+          padding: 10px 14px; border-radius: 6px; font-size: 12.5px; margin: 12px 0; }}
  footer {{ margin-top: 36px; border-top: 1px solid #c3c2b7; padding-top: 12px;
           color: #52514e; font-size: 11px; white-space: pre-wrap; }}
  @media print {{ body {{ margin: 0; }} }}
@@ -624,6 +657,7 @@ def render_pitch_report(cfg: MrfxConfig, store: Store, benchmark: dict,
 <h1>Negotiated-rate benchmark — {e(benchmark['subject'])}</h1>
 <div class="meta">As of {e(str(benchmark['market'].get('month')))} ·
  {e(benchmark['peer_set'])} · target: p{target}</div>
+{geo_banner}
 <table><thead><tr><th>Code</th><th class="num">Your rate</th><th class="num">P25</th>
 <th class="num">Median</th><th class="num">P75</th><th class="num">Target (p{target})</th>
 <th class="num">Gap</th>{mp_heads}<th>Your position</th></tr></thead>

@@ -806,26 +806,42 @@ function renderBenchmark(out, bench, opp) {
     is not proof a peer collects it — this is directional market positioning.</div>`;
 }
 
-async function openPitchReport() {
-  if (!state.lastBenchmarkPayload) return;
-  const r = await fetch("/api/report/pitch", {
+// Client reports must be scoped to one state (reimbursement varies by state).
+// If no state is set, warn prominently and require an explicit opt-in before
+// running a pooled national comparison — so it can never slip into a
+// deliverable by accident. Returns a payload to send, or null if cancelled.
+function reportPayloadOrConfirmNational() {
+  if (!state.lastBenchmarkPayload) return null;
+  const p = state.lastBenchmarkPayload;
+  const m = p.market || {};
+  if (m.state && String(m.state).trim()) return p;
+  const ok = confirm(
+    "No state is set, so this report pools providers across ALL loaded states " +
+    "into one distribution. Negotiated reimbursement varies by state — an " +
+    "in-state comparison is almost always what you want for a client report.\n\n" +
+    "Run a national comparison anyway? (The report will carry a 'national' warning banner.)");
+  if (!ok) return null;
+  return { ...p, market: { ...m, allow_national: true } };
+}
+
+async function openReport(url) {
+  const payload = reportPayloadOrConfirmNational();
+  if (!payload) return;
+  const r = await fetch(url, {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(state.lastBenchmarkPayload),
+    body: JSON.stringify(payload),
   });
   if (!r.ok) { alert("report failed: " + (await r.text())); return; }
   const blob = await r.blob();
   window.open(URL.createObjectURL(blob), "_blank");
 }
 
+async function openPitchReport() {
+  await openReport("/api/report/pitch");
+}
+
 async function openNegotiationReport() {
-  if (!state.lastBenchmarkPayload) return;
-  const r = await fetch("/api/report/negotiation", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(state.lastBenchmarkPayload),
-  });
-  if (!r.ok) { alert("report failed: " + (await r.text())); return; }
-  const blob = await r.blob();
-  window.open(URL.createObjectURL(blob), "_blank");
+  await openReport("/api/report/negotiation");
 }
 
 /* =======================================================================
