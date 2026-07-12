@@ -587,6 +587,7 @@ def test_bulk_enrichment_change_aware_skips_rescan(cfg, store, tmp_path, monkeyp
     from mrfx.enrich import _BULK_COLS, enrich_via_bulk
     monkeypatch.setattr(E, "_bulk_sig", None)   # isolate module change-awareness
     monkeypatch.setattr(E, "_bulk_absent", set())
+    monkeypatch.setattr(E, "_BULK_MIN_FULL_ROWS", 1)  # tiny fixture counts as a "full" file
     ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "cc.json", innetwork(items=[
         item("97110", [(["1000000001"], "43-9000000", "ein", [(40.0, None)]),
                        (["1000000002"], "43-9000001", "ein", [(41.0, None)])])])))
@@ -622,6 +623,7 @@ def test_bulk_enrichment_marks_absent_npis_processed(cfg, store, tmp_path, monke
     monkeypatch.setattr(E, "_bulk_sig", None)
     monkeypatch.setattr(E, "_bulk_absent", set())
     monkeypatch.setattr(E, "_bulk_read_failures", 0)
+    monkeypatch.setattr(E, "_BULK_MIN_FULL_ROWS", 1)  # tiny fixture counts as a "full" file
     ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "ab.json", innetwork(items=[
         item("97110", [(["1000000001"], "43-9000000", "ein", [(40.0, None)]),
                        (["1000000002"], "43-9000001", "ein", [(41.0, None)])])])))
@@ -643,6 +645,57 @@ def test_bulk_enrichment_marks_absent_npis_processed(cfg, store, tmp_path, monke
     # ...so nothing is left "remaining", though only 001 actually got a name
     prog = store.enrichment_progress(max_age_seconds=0)
     assert prog["total"] == 2 and prog["remaining"] == 0 and prog["named"] == 1
+
+
+def test_bulk_enrichment_partial_file_does_not_poison(cfg, store, tmp_path, monkeypatch):
+    # A readable but PARTIAL NPPES file (e.g. a weekly incremental grabbed by
+    # mistake) must NOT mark the store's NPIs unresolvable. Absences from a file
+    # too small to be the full monthly are distrusted, so the NPIs stay retryable
+    # and the true monthly file (a new signature) later resolves them.
+    import csv as _csv
+    import io as _io
+    import zipfile as _zip
+
+    import mrfx.enrich as E
+    from mrfx.enrich import _BULK_COLS, enrich_via_bulk
+    monkeypatch.setattr(E, "_bulk_sig", None)
+    monkeypatch.setattr(E, "_bulk_absent", set())
+    # leave _BULK_MIN_FULL_ROWS at its real default (2M) — our fixtures are tiny,
+    # so they read as "partial" exactly like a weekly file would
+    ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "pp.json", innetwork(items=[
+        item("97110", [(["1000000001"], "43-9000000", "ein", [(40.0, None)])])])))
+    hdr = [_BULK_COLS[k] for k in
+           ("npi", "org", "first", "last", "city", "state", "tax1", "entity", "address", "zip", "phone")]
+
+    def zip_with(rows, name):
+        buf = _io.StringIO()
+        _csv.writer(buf).writerows([hdr, *rows])
+        zp = tmp_path / name
+        with _zip.ZipFile(zp, "w") as zf:
+            zf.writestr("npidata_pfile_2026.csv", buf.getvalue().encode())
+        return zp
+
+    # a partial file that does NOT contain our NPI at all
+    cfg.enrichment.mode = "bulk"
+    cfg.enrichment.bulk_csv_path = zip_with(
+        [["9999999999", "Someone Else", "", "", "X", "TX", "2", "2", "1 St", "70000", "0"]],
+        "weekly.zip")
+    assert enrich_via_bulk(cfg, store) == 0            # nothing resolved
+    with store.connect() as con:
+        assert con.execute("SELECT count(*) FROM npi_directory WHERE npi='1000000001'").fetchone()[0] == 0
+    # the NPI was NOT poisoned: still un-enriched and still pending
+    assert "1000000001" in store.unenriched_npis()
+    assert store.enrichment_progress(max_age_seconds=0)["remaining"] == 1
+
+    # now the true (still tiny in-test, so lower the gate) full file resolves it
+    monkeypatch.setattr(E, "_BULK_MIN_FULL_ROWS", 1)
+    cfg.enrichment.bulk_csv_path = zip_with(
+        [["1000000001", "Cornerstone PT", "", "", "Columbus", "OH", "225100000X", "2", "1 St", "43004", "0"]],
+        "monthly.zip")
+    assert enrich_via_bulk(cfg, store) == 1
+    with store.connect() as con:
+        assert con.execute(
+            "SELECT org_name FROM npi_directory WHERE npi='1000000001'").fetchone()[0] == "Cornerstone PT"
 
 
 def test_entity_grain_median_excludes_placeholder_only_tin(cfg, store):

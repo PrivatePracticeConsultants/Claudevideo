@@ -237,6 +237,13 @@ _bulk_absent: set[str] = set()
 # and resets everything).
 _bulk_read_failures = 0
 _BULK_MAX_READ_FAILURES = 3
+# The full NPPES monthly file is ~8-9M rows; a weekly incremental is orders of
+# magnitude smaller. Only a scan that read at least this many rows is trusted to
+# declare an NPI genuinely ABSENT (and write it as a processed dead row). This
+# stops a user who points at the wrong/partial NPPES download from permanently
+# marking their whole book unresolvable. Well below any real full file, well
+# above any weekly. (Tests lower it to simulate a full file.)
+_BULK_MIN_FULL_ROWS = 2_000_000
 
 
 def enrich_via_bulk(cfg: MrfxConfig, store: Store,
@@ -315,6 +322,7 @@ def enrich_via_bulk(cfg: MrfxConfig, store: Store,
             def at(row, ix):  # tolerate short/ragged rows; only called on matches
                 return (row[ix] if ix is not None and ix < len(row) else None) or None
 
+            i = -1
             for i, row in enumerate(reader):
                 if stop is not None and (i & 0x3FFF) == 0 and stop.is_set():
                     break  # interruptible: don't finish a 10 GB scan on shutdown
@@ -338,6 +346,7 @@ def enrich_via_bulk(cfg: MrfxConfig, store: Store,
                 if not wanted:
                     break
             flush()
+            scanned = i + 1
             completed = stop is None or not stop.is_set()
     except Exception as e:  # noqa: BLE001 — never crash enrichment; keep matches
         _bulk_read_failures += 1
@@ -346,18 +355,32 @@ def enrich_via_bulk(cfg: MrfxConfig, store: Store,
         flush()  # retain whatever we already matched
     if completed:
         _bulk_read_failures = 0  # a clean read clears the give-up counter
-        # A COMPLETE scan proves the ids still in `wanted` are absent from this
-        # file. Two things follow:
-        #  1. remember them so the next cycle doesn't re-read the whole file, and
-        #  2. write them as no-name dead rows — exactly what the API path does for
-        #     an empty NPPES result — so they count as PROCESSED and the dashboard
-        #     "identifying N more…" banner can actually reach zero. Without this a
-        #     single junk/deactivated NPI from a messy MRF wedges the banner on
-        #     forever even though bulk enrichment is genuinely finished.
-        _bulk_absent |= wanted
-        absent = list(wanted)
-        for j in range(0, len(absent), 5000):
-            store.save_npis_bulk([{"npi": n} for n in absent[j:j + 5000]])
+        if wanted and scanned < _BULK_MIN_FULL_ROWS:
+            # The file read cleanly but is FAR too small to be the full NPPES
+            # monthly (~8M rows) — almost certainly a weekly incremental or a
+            # truncated/partial file that happens to share the header. Do NOT
+            # trust its absences: marking the store's NPIs absent here would
+            # write them as dead rows and wedge them un-retryable against the
+            # real file (recoverable only by `mrfx reset`). Leave them for a
+            # fuller file; the "identifying N more…" banner honestly stays > 0,
+            # and swapping in the true monthly file (new signature) resolves it.
+            log.warning(
+                "bulk file %s had only %d rows — looks like a partial/weekly "
+                "NPPES file, not the full monthly; leaving %d NPIs for a fuller "
+                "file instead of marking them unresolvable", path, scanned, len(wanted))
+        else:
+            # A COMPLETE scan of a full-sized file proves the ids still in
+            # `wanted` are genuinely absent (deactivated / junk from messy MRFs).
+            # Two things follow:
+            #  1. remember them so the next cycle doesn't re-read the whole file,
+            #  2. write them as no-name dead rows — exactly what the API path does
+            #     for an empty NPPES result — so they count as PROCESSED and the
+            #     dashboard banner can actually reach zero. Without this a single
+            #     junk NPI wedges the banner on forever though enrichment is done.
+            _bulk_absent |= wanted
+            absent = list(wanted)
+            for j in range(0, len(absent), 5000):
+                store.save_npis_bulk([{"npi": n} for n in absent[j:j + 5000]])
     log.info("enriched %d NPIs from the bulk file", done)
     return done
 
