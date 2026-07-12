@@ -476,6 +476,34 @@ def cmd_forget(cfg: MrfxConfig, args) -> int:
     return rc
 
 
+def cmd_enrich(cfg: MrfxConfig, args) -> int:
+    """Resolve NPI -> org names/geography on demand (no need to keep serve up).
+    `--bulk <NPPES zip/csv>` does it in one fast local pass; otherwise the mode
+    in config/mrfx.yaml applies (api or bulk)."""
+    store = Store(cfg.store_dir)
+    if getattr(args, "bulk_file", None):
+        cfg.enrichment.mode = "bulk"
+        cfg.enrichment.bulk_csv_path = Path(args.bulk_file)
+    if cfg.enrichment.mode == "off":
+        print("enrichment.mode is 'off'. Set it to 'api' or 'bulk' in config/mrfx.yaml, "
+              "or pass --bulk <NPPES zip/csv>.", file=sys.stderr)
+        return 1
+    if cfg.enrichment.mode == "bulk":
+        src = cfg.enrichment.bulk_csv_path
+        if not src or not Path(src).exists():
+            print(f"bulk file not found: {src}\nDownload the NPPES full monthly file from "
+                  "https://download.cms.gov/nppes/NPI_Files.html and point --bulk (or "
+                  "enrichment.bulk_csv_path) at the .zip.", file=sys.stderr)
+            return 1
+        print(f"resolving names from {src} in one local pass — this reads the file once…")
+    else:
+        print("resolving names via the NPPES API (can take a while for a large book; "
+              "Ctrl-C is safe — it resumes)…")
+    n = run_enrichment(cfg, store)
+    print(f"identified {n:,} name(s).")
+    return 0
+
+
 def cmd_reset(cfg: MrfxConfig, args) -> int:
     if not args.confirm:
         print("refusing: pass --confirm to clear the store (processed files are kept)")
@@ -530,6 +558,9 @@ def main(argv: list[str] | None = None) -> int:
                    help="base-modifier rows only (default on)")
     p = sub.add_parser("forget", help="erase chosen files' rates + raw copies (see `mrfx status` for names)")
     p.add_argument("filenames", nargs="+")
+    p = sub.add_parser("enrich", help="resolve NPI names/geography now (NPPES bulk file or API)")
+    p.add_argument("--bulk", dest="bulk_file", metavar="PATH",
+                   help="NPPES full-file .zip (or unzipped .csv) — resolves all names in one local pass")
     p = sub.add_parser("reset", help="clear the store (keeps processed files)")
     p.add_argument("--confirm", action="store_true")
 
@@ -560,6 +591,7 @@ def main(argv: list[str] | None = None) -> int:
         "export": cmd_export,
         "outreach": cmd_outreach,
         "forget": cmd_forget,
+        "enrich": cmd_enrich,
         "reset": cmd_reset,
     }[args.cmd]
     try:

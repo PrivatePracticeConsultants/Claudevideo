@@ -547,6 +547,35 @@ def test_ratecard_report_and_csv_endpoints(cfg, ratecard_store):
     assert refused.status_code == 422
 
 
+def test_bulk_enrichment_reads_nppes_zip(cfg, store, tmp_path):
+    import csv as _csv
+    import io as _io
+    import zipfile as _zip
+
+    from mrfx.enrich import _BULK_COLS, enrich_via_bulk
+    ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "b.json", innetwork(items=[
+        item("97110", [(["1000000001"], "43-9000000", "ein", [(40.0, None)])])])))
+    hdr = [_BULK_COLS[k] for k in
+           ("npi", "org", "first", "last", "city", "state", "tax1", "entity", "address", "zip", "phone")]
+    buf = _io.StringIO()
+    w = _csv.writer(buf)
+    w.writerow(hdr)
+    w.writerow(["1000000001", "Cornerstone PT", "", "", "Columbus", "OH", "225100000X", "2",
+                "1 Main St", "43004", "6145551212"])
+    zpath = tmp_path / "NPPES_Data_Dissemination.zip"
+    with _zip.ZipFile(zpath, "w") as zf:
+        zf.writestr("npidata_pfile_20260601-20260630_fileheader.csv", b"small header\n")
+        zf.writestr("npidata_pfile_20260601-20260630.csv", buf.getvalue().encode())  # the big one
+    cfg.enrichment.mode = "bulk"
+    cfg.enrichment.bulk_csv_path = zpath
+    assert enrich_via_bulk(cfg, store) == 1  # streamed straight from the .zip
+    with store.connect() as con:
+        row = con.execute(
+            "SELECT org_name, city, state, entity_type FROM npi_directory WHERE npi = '1000000001'"
+        ).fetchone()
+    assert row == ("Cornerstone PT", "Columbus", "OH", "NPI-2")
+
+
 def test_code_comparison_filters_by_state(cfg, store):
     # comparing a MO rate against a CA rate is misleading; the Code-comparison
     # endpoint must honor a state filter (backend already supports it via
@@ -637,7 +666,7 @@ def test_rate_changes_biggest_cut_none_when_only_increases(cfg, store):
 
 @pytest.fixture
 def market5_store(cfg, store):
-    """5 TINs over 3 codes; TIN ...001 is lowest on every code (p20)."""
+    """5 TINs over 3 codes; TIN ...001 is lowest on every code (percent_rank p0)."""
     tins = ["43-1000001", "43-1000002", "43-1000003", "43-1000004", "43-1000005"]
     code_rates = {"97110": [30, 35, 40, 45, 50],
                   "97140": [40, 45, 50, 55, 60],
@@ -651,12 +680,33 @@ def market5_store(cfg, store):
 def test_leads_finds_underpaid_entities_ranked(cfg, market5_store):
     from mrfx.leads import compute_leads
     res = compute_leads(market5_store, {"month": "2026-06"}, threshold_percentile=25, min_codes=3)
-    assert res["count"] == 1
-    lead = res["leads"][0]
+    assert res["count"] == 2                    # p0 and p25 are both at/below p25
+    lead = res["leads"][0]                       # most underpaid first
     assert lead["tin_value"] == "431000001"
-    assert lead["median_percentile"] == 20.0
+    assert lead["median_percentile"] == 0.0    # percent_rank: cheapest = p0 (was 20 under cume_dist)
     assert lead["avg_gap_to_median"] == 10.0   # 10 below each code's median
     assert lead["n_codes"] == 3
+
+
+def test_leads_percentile_agrees_with_benchmark_in_thin_market(cfg, store):
+    # 2 providers on a code: the cheapest must read p0 in BOTH the lead sweep
+    # and the pitch benchmark (cume_dist wrongly put it at p50, so a p25 sweep
+    # could never surface the very practice the finder exists to find)
+    from mrfx.benchmark import compute_benchmark
+    from mrfx.leads import compute_leads
+    data = innetwork(items=[
+        item("97110", [(["1000000001"], "43-1111111", "ein", [(50.0, None)]),
+                       (["1000000002"], "43-2222222", "ein", [(100.0, None)])]),
+        item("97140", [(["1000000001"], "43-1111111", "ein", [(50.0, None)]),
+                       (["1000000002"], "43-2222222", "ein", [(100.0, None)])]),
+    ])
+    ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "thin.json", data))
+    leads = compute_leads(store, {"month": "2026-06"}, threshold_percentile=25, min_codes=1)
+    cheap = next(l for l in leads["leads"] if l["tin_value"] == "431111111")
+    assert cheap["median_percentile"] == 0.0                    # surfaced at p0
+    row = next(r for r in compute_benchmark(store, "431111111", {"month": "2026-06"})["rows"]
+               if r["billing_code"] == "97110")
+    assert row["subject_percentile"] == 0.0                      # benchmark agrees
 
 
 def test_leads_threshold_exclude_and_csv(cfg, market5_store):
@@ -740,11 +790,13 @@ def test_qa_flags_outliers_and_zero_rates(cfg, store):
     qa = json.loads(store.file_status("qa.json")["qa"])
     assert qa["zero_rates"] == 1
     assert qa["outlier_rates"] >= 2  # the 500 and the 0.01
-    # hide-outliers toggle is opt-in and labeled
+    # $0.01 placeholders are excluded from the rate views by default (they'd
+    # drag medians below the deliverables); the per-file zero_rates QA count
+    # above still reports them. hide-outliers then also hides the $500 outlier.
     client = TestClient(create_app(cfg, store))
     shown = client.get("/api/rates").json()["total"]
     hidden = client.get("/api/rates?hide_outliers=1").json()["total"]
-    assert shown == 5 and hidden == 3
+    assert shown == 4 and hidden == 3
 
 
 def test_npi_grain_export_does_not_mask_npis(cfg, store):

@@ -28,6 +28,10 @@ class EnrichmentConfig(BaseModel):
     # Literal so a typo ("bulck") is a clear config error instead of silently
     # falling through to API mode and hammering NPPES
     mode: Literal["api", "bulk", "off"] = "api"
+    # mode=bulk: point at the NPPES full monthly file — the raw .zip works
+    # directly (the npidata_pfile CSV is streamed from inside it) or an unzipped
+    # .csv. One local pass resolves the whole book in minutes. Get it from
+    # https://download.cms.gov/nppes/NPI_Files.html
     bulk_csv_path: Path | None = None
     # NPPES API lookups run concurrently so names/states fill in quickly on a
     # large book instead of one-every-0.15s. Kept modest to stay polite; dial

@@ -12,6 +12,7 @@ import datetime as dt
 import html
 import json
 import logging
+import statistics
 
 from . import __version__
 from .catalog import code_info
@@ -385,10 +386,11 @@ def compute_payer_negotiation(store: Store, subject: str, market: dict,
             opp = compute_opportunity(bench, volumes, conservative_percentile)
             total_target += opp["total_at_target"]
             total_conservative += opp["total_at_conservative"]
-        # headline percentile: mean of the per-code positions we have
+        # headline percentile: MEDIAN of the per-code positions (matches leads
+        # and the report tables; a mean let one outlier code swing the headline)
         pcts = [r["subject_percentile"] for r in priced
                 if r.get("subject_percentile") is not None]
-        headline_pct = round(sum(pcts) / len(pcts)) if pcts else None
+        headline_pct = round(statistics.median(pcts)) if pcts else None
         sections.append({
             "payer": payer,
             "benchmark": bench,

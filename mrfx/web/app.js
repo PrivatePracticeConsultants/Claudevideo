@@ -284,7 +284,7 @@ async function initFilters() {
 
   const months = (await api("/api/months")).months;
   $("#f-month").innerHTML = `<option value="">all months</option>` +
-    months.map((m) => `<option>${m}</option>`).join("");
+    months.map((m) => `<option>${esc(m)}</option>`).join("");
   $("#f-month").addEventListener("change", (e) => { state.filters.month = e.target.value; refreshFromFirstPage(); });
 
   const chips = $("#f-cpt-chips");
@@ -562,14 +562,14 @@ function initCptView() {
   $("#cpt-base-only").addEventListener("change", () => state.cptSelected && selectCpt(state.cptSelected));
   // comparing rates across states is misleading (a MO rate vs a NY rate are
   // different markets) — let the user scope the comparison to one state
-  const cptState = $("#cpt-state");
+  const cptState = $("#cpt-state-filter");
   let t;
   cptState.addEventListener("input", () => {
     clearTimeout(t);
     t = setTimeout(() => state.cptSelected && selectCpt(state.cptSelected), 300);
   });
   api("/api/states").then((s) => {
-    $("#cpt-states").innerHTML = (s.states || []).map((x) => `<option value="${esc(x)}">`).join("");
+    $("#cpt-state-opts").innerHTML = (s.states || []).map((x) => `<option value="${esc(x)}">`).join("");
   }).catch(() => {});
   $("#cpt-export").addEventListener("click", () => {
     if (!state.cptSelected) return;
@@ -587,7 +587,7 @@ async function selectCpt(code) {
   const body = $("#cpt-body"), stateEl = $("#cpt-state");
   body.innerHTML = "";
   stateEl.innerHTML = `<div class="loading">Loading ${esc(code)}</div>`;
-  const cptState = $("#cpt-state").value.trim();
+  const cptState = $("#cpt-state-filter").value.trim();
   const p = new URLSearchParams({ grain: "tin" });
   if ($("#cpt-base-only").checked) p.set("modifier", "base");
   if (cptState) p.set("state", cptState);
@@ -664,7 +664,7 @@ async function initBenchmark() {
   $("#b-subjects").innerHTML =
     subjects.entities.map((e) => `<option value="${esc(e)}">`).join("") +
     subjects.tins.map((t) => `<option value="${esc(t.tin_value)}">${esc(t.display_name)}</option>`).join("");
-  $("#b-month").innerHTML = months.months.map((m) => `<option>${m}</option>`).join("") ||
+  $("#b-month").innerHTML = months.months.map((m) => `<option>${esc(m)}</option>`).join("") ||
     `<option value="">no data ingested</option>`;
   $("#b-payer-chips").innerHTML = payers.payers.map((p) =>
     `<button class="chip" data-payer="${esc(p)}">${esc(p)}</button>`).join("");
@@ -908,7 +908,7 @@ async function initRatecard() {
   $("#rc-subjects").innerHTML =
     subjects.entities.map((e) => `<option value="${esc(e)}">`).join("") +
     subjects.tins.map((t) => `<option value="${esc(t.tin_value)}">${esc(t.display_name)}</option>`).join("");
-  $("#rc-month").innerHTML = months.months.map((m) => `<option>${m}</option>`).join("") ||
+  $("#rc-month").innerHTML = months.months.map((m) => `<option>${esc(m)}</option>`).join("") ||
     `<option value="">no data ingested</option>`;
   $("#rc-payer-chips").innerHTML = payers.payers.map((p) =>
     `<button class="chip" data-payer="${esc(p)}">${esc(p)}</button>`).join("");
@@ -1050,7 +1050,7 @@ async function initLeads() {
     ]);
   } catch (e) { $("#ld-out").innerHTML = `<div class="empty">could not load data (${esc(e.message)}) — switch tabs and come back</div>`; return; }
   leadsInit = true;
-  $("#ld-month").innerHTML = months.months.map((m) => `<option>${m}</option>`).join("") || `<option value="">no data ingested</option>`;
+  $("#ld-month").innerHTML = months.months.map((m) => `<option>${esc(m)}</option>`).join("") || `<option value="">no data ingested</option>`;
   $("#ld-payer-chips").innerHTML = payers.payers.map((p) => `<button class="chip" data-payer="${esc(p)}">${esc(p)}</button>`).join("");
   $("#ld-payer-chips").addEventListener("click", (ev) => { const b = ev.target.closest(".chip"); if (b) b.classList.toggle("on"); });
   $("#ld-states").innerHTML = (states.states || []).map((s) => `<option value="${esc(s)}">`).join("");
@@ -1112,7 +1112,7 @@ async function initChanges() {
     ]);
   } catch (e) { $("#ch-out").innerHTML = `<div class="empty">could not load data (${esc(e.message)}) — switch tabs and come back</div>`; return; }
   changesInit = true;
-  const mopts = months.months.map((m) => `<option>${m}</option>`).join("");
+  const mopts = months.months.map((m) => `<option>${esc(m)}</option>`).join("");
   $("#ch-month").innerHTML = mopts || `<option value="">no data ingested</option>`;
   $("#ch-prev").innerHTML = `<option value="">auto — the previous month present</option>` + mopts;
   $("#ch-payer-chips").innerHTML = payers.payers.map((p) => `<button class="chip" data-payer="${esc(p)}">${esc(p)}</button>`).join("");
@@ -1492,7 +1492,7 @@ async function loadSources(stateCode = "") {
   if (!sourcesLoaded) {
     const sel = $("#src-state");
     sel.innerHTML = `<option value="">— pick a state —</option>` +
-      d.states.map((s) => `<option>${s}</option>`).join("");
+      d.states.map((s) => `<option>${esc(s)}</option>`).join("");
     // assignment, not addEventListener: an override-confirm reload re-runs
     // this block, and stacked listeners fired N requests per change
     sel.onchange = () => loadSources(sel.value);

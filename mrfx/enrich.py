@@ -6,10 +6,13 @@ immediately and names fill in as rows land in `npi_directory`.
 
 from __future__ import annotations
 
+import contextlib
 import csv
+import io
 import logging
 import threading
 import time
+import zipfile
 from pathlib import Path
 
 import httpx
@@ -87,6 +90,11 @@ def _maybe_refresh_directory(store: Store, force: bool = False) -> bool:
     except Exception as e:  # noqa: BLE001
         log.warning("name-directory refresh skipped (%s)", e)
         return False
+
+
+def _recently_refreshed(within: float = 30.0) -> bool:
+    with _refresh_lock:
+        return time.monotonic() - _last_dir_refresh < within
 
 
 def enrich_via_api(cfg: MrfxConfig, store: Store, stop: threading.Event | None = None) -> int:
@@ -182,8 +190,34 @@ _BULK_COLS = {
 }
 
 
+@contextlib.contextmanager
+def _open_bulk_text(path: Path):
+    """Yield a text stream over the NPPES bulk CSV. Accepts the raw monthly ZIP
+    (streams the big `npidata_pfile_*.csv` member directly — no 10 GB manual
+    unzip) or a plain .csv. The member is picked as the largest npidata_pfile
+    CSV that is NOT the small *_fileheader.csv."""
+    p = Path(path)
+    if p.suffix.lower() == ".zip":
+        with zipfile.ZipFile(p) as zf:
+            csvs = [m for m in zf.infolist() if m.filename.lower().endswith(".csv")]
+            main = [m for m in csvs if "npidata_pfile" in m.filename.lower()
+                    and "fileheader" not in m.filename.lower()]
+            pick = max(main or csvs, key=lambda m: m.file_size, default=None)
+            if pick is None:
+                raise ValueError(f"no CSV found inside {p.name}")
+            log.info("bulk: reading %s (%.1f GB) from %s",
+                     pick.filename, pick.file_size / 1e9, p.name)
+            with zf.open(pick) as raw:
+                yield io.TextIOWrapper(raw, encoding="utf-8", errors="replace", newline="")
+    else:
+        with open(p, newline="", encoding="utf-8", errors="replace") as f:
+            yield f
+
+
 def enrich_via_bulk(cfg: MrfxConfig, store: Store) -> int:
-    """Stream the NPPES bulk CSV once, filling every un-enriched NPI it covers."""
+    """Stream the NPPES bulk file once, filling every un-enriched NPI it covers.
+    Accepts the raw monthly ZIP or an unzipped CSV. Saves in batches so hundreds
+    of thousands of NPIs resolve in minutes, not hours of per-row commits."""
     path = cfg.enrichment.bulk_csv_path
     if not path or not Path(path).exists():
         log.error("enrichment.mode=bulk but bulk_csv_path %r not found", str(path))
@@ -203,29 +237,45 @@ def enrich_via_bulk(cfg: MrfxConfig, store: Store) -> int:
     if not wanted:
         return 0
     done = 0
-    with open(path, newline="", encoding="utf-8", errors="replace") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            npi = row.get(_BULK_COLS["npi"], "")
-            if npi not in wanted:
-                continue
-            name = row.get(_BULK_COLS["org"]) or " ".join(
-                p for p in (row.get(_BULK_COLS["first"]), row.get(_BULK_COLS["last"])) if p
-            ) or None
-            entity = {"1": "NPI-1", "2": "NPI-2"}.get(str(row.get(_BULK_COLS["entity"], "")).strip())
-            store.save_npi(
-                npi, name, row.get(_BULK_COLS["tax1"]) or None, None,
-                row.get(_BULK_COLS["city"]) or None, row.get(_BULK_COLS["state"]) or None,
-                entity_type=entity,
-                address=row.get(_BULK_COLS["address"]) or None,
-                zip_code=row.get(_BULK_COLS["zip"]) or None,
-                phone=row.get(_BULK_COLS["phone"]) or None,
-            )
-            done += 1
-            wanted.discard(npi)
-            if not wanted:
-                break
-    log.info("enriched %d NPIs from bulk CSV", done)
+    pending: list[dict] = []
+
+    def flush():
+        nonlocal done
+        if pending:
+            store.save_npis_bulk(pending)
+            done += len(pending)
+            pending.clear()
+
+    try:
+        with _open_bulk_text(path) as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                npi = row.get(_BULK_COLS["npi"], "")
+                if npi not in wanted:
+                    continue
+                name = row.get(_BULK_COLS["org"]) or " ".join(
+                    p for p in (row.get(_BULK_COLS["first"]), row.get(_BULK_COLS["last"])) if p
+                ) or None
+                entity = {"1": "NPI-1", "2": "NPI-2"}.get(str(row.get(_BULK_COLS["entity"], "")).strip())
+                pending.append({
+                    "npi": npi, "org_name": name, "entity_type": entity,
+                    "taxonomy_code": row.get(_BULK_COLS["tax1"]) or None,
+                    "city": row.get(_BULK_COLS["city"]) or None,
+                    "state": row.get(_BULK_COLS["state"]) or None,
+                    "address": row.get(_BULK_COLS["address"]) or None,
+                    "zip": row.get(_BULK_COLS["zip"]) or None,
+                    "phone": row.get(_BULK_COLS["phone"]) or None,
+                })
+                wanted.discard(npi)
+                if len(pending) >= 5000:
+                    flush()
+                if not wanted:
+                    break
+            flush()
+    except (OSError, zipfile.BadZipFile, ValueError) as e:
+        log.error("bulk enrichment could not read %s: %s", path, e)
+        flush()  # keep whatever we already matched
+    log.info("enriched %d NPIs from the bulk file", done)
     return done
 
 
@@ -241,8 +291,10 @@ def run_enrichment(cfg: MrfxConfig, store: Store, stop: threading.Event | None =
         # NULLs until the next ingest triggers one. `force` for the one-shot CLI
         # path so names show before it returns; the persistent serve loop passes
         # final_refresh=False and relies on the global throttle so a 20s poll of
-        # trickling NPIs can't rebuild every cycle.
-        _maybe_refresh_directory(store, force=final_refresh)
+        # trickling NPIs can't rebuild every cycle. Skip the forced rebuild if a
+        # progressive one JUST ran (the api path refreshes mid-drain) — otherwise
+        # the CLI pays two back-to-back minutes-long rebuilds.
+        _maybe_refresh_directory(store, force=final_refresh and not _recently_refreshed())
     return done
 
 

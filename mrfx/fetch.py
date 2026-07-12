@@ -297,9 +297,13 @@ _UNKNOWN_LEN_CHECK_BYTES = 256 << 20
 _UNKNOWN_LEN_RESERVATION = 2 << 30
 # runaway backstop: an attempt that ADVANCES the .part doesn't count against the
 # retry budget (a flaky server that resets every N MB must still be able to
-# finish a large file over many resumes), but total connections are capped so a
-# truly stuck server terminates instead of looping forever.
-_MAX_DOWNLOAD_CONNECTIONS = 100
+# finish a large file over many resumes). The real terminator for a stuck server
+# is the consecutive-no-progress `attempt` budget; this only bounds the
+# pathological progress-but-never-finishes case. Set high enough to complete the
+# documented 22 GB max even against an origin that resets every ~10 MB (~2200
+# resumes), so a single download() call can finish rather than needing repeated
+# queue retries; each connection sleeps ≥1 s, so this also caps wall-clock.
+_MAX_DOWNLOAD_CONNECTIONS = 2500
 
 
 def _set_reservation(my_key: int, remaining: int) -> None:
@@ -431,6 +435,13 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                     cr = resp.headers.get("Content-Range", "")
                     total = int(cr.rsplit("/", 1)[-1]) if "/" in cr and cr.rsplit("/", 1)[-1].isdigit() else None
                 else:
+                    if resume_from and req_headers.get("Range"):
+                        # we asked for a range and got a full 200 — this server
+                        # ignores our conditional resume (e.g. it treats the
+                        # stored validator as weak). Drop it so the NEXT attempt
+                        # sends a plain unconditional Range instead of repeating
+                        # the doomed If-Range and restarting from 0 forever.
+                        val_p.unlink(missing_ok=True)
                     resume_from = 0  # server sent the whole file (or fresh start)
                     total = int(resp.headers.get("Content-Length") or 0) or None
                 if max_bytes and total and total > max_bytes:

@@ -240,7 +240,13 @@ class FilterSet:
             add("search", q)
         dollar_only = qp.get("dollar_only", "1") not in ("0", "false")
         if dollar_only:
-            clauses.append("is_dollar_rate")
+            # exclude $0/$0.01/negative DOLLAR placeholders here too, so the
+            # explorer / code-comparison / CSV-export medians and mins agree with
+            # the benchmark and rate-card (which strip them via _market_where).
+            # Without this the same store shows a lower median on one screen than
+            # another. The per-file zero_rates QA count still reports how many
+            # placeholders a payer published (transparency preserved there).
+            clauses.append("is_dollar_rate AND negotiated_rate > 0.01")
         add("dollar_rates_only", dollar_only)
         if qp.get("hide_tin_npi", "0") in ("1", "true"):
             clauses.append("NOT tin_is_really_npi")
@@ -978,9 +984,9 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         body = await request.json()
         try:
             return compute_benchmark(store, str(body.get("subject", "")), body.get("market") or {})
-        except (BenchmarkError, ValueError) as e:
-            # ValueError: a non-numeric volume / percentile in the JSON body
-            # (int()/float() coercion) — a client input error, so 422, not 500.
+        except (BenchmarkError, ValueError, TypeError) as e:
+            # ValueError/TypeError: a non-numeric or null volume/percentile in
+            # the JSON body (int()/float()/None) — a client input error, so 422.
             raise HTTPException(422, str(e))
 
     @app.post("/api/benchmark/opportunity")
@@ -992,9 +998,9 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             opp = compute_opportunity(bench, volumes,
                                       int(body.get("conservative_percentile", 40)))
             return {"benchmark": bench, "opportunity": opp}
-        except (BenchmarkError, ValueError) as e:
-            # ValueError: a non-numeric volume / percentile in the JSON body
-            # (int()/float() coercion) — a client input error, so 422, not 500.
+        except (BenchmarkError, ValueError, TypeError) as e:
+            # ValueError/TypeError: a non-numeric or null volume/percentile in
+            # the JSON body (int()/float()/None) — a client input error, so 422.
             raise HTTPException(422, str(e))
 
     @app.post("/api/report/pitch", response_class=HTMLResponse)
@@ -1008,9 +1014,9 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 opp = compute_opportunity(bench, volumes,
                                           int(body.get("conservative_percentile", 40)))
             return HTMLResponse(render_pitch_report(cfg, store, bench, opp))
-        except (BenchmarkError, ValueError) as e:
-            # ValueError: a non-numeric volume / percentile in the JSON body
-            # (int()/float() coercion) — a client input error, so 422, not 500.
+        except (BenchmarkError, ValueError, TypeError) as e:
+            # ValueError/TypeError: a non-numeric or null volume/percentile in
+            # the JSON body (int()/float()/None) — a client input error, so 422.
             raise HTTPException(422, str(e))
 
     @app.post("/api/report/negotiation", response_class=HTMLResponse)
@@ -1024,9 +1030,9 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 conservative_percentile=int(body.get("conservative_percentile", 40)),
             )
             return HTMLResponse(render_negotiation_report(cfg, store, neg))
-        except (BenchmarkError, ValueError) as e:
-            # ValueError: a non-numeric volume / percentile in the JSON body
-            # (int()/float() coercion) — a client input error, so 422, not 500.
+        except (BenchmarkError, ValueError, TypeError) as e:
+            # ValueError/TypeError: a non-numeric or null volume/percentile in
+            # the JSON body (int()/float()/None) — a client input error, so 422.
             raise HTTPException(422, str(e))
 
     # fee schedule / payer scorecard (§7C)
@@ -1036,7 +1042,9 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         try:
             fs = compute_fee_schedule(store, str(body.get("subject", "")), body.get("market") or {})
             return {"fee_schedule": fs, "scorecard": payer_scorecard(fs)}
-        except (BenchmarkError, ValueError) as e:
+        except (BenchmarkError, ValueError, TypeError) as e:
+            # ValueError/TypeError: a non-numeric or null volume/percentile in
+            # the JSON body — a client input error (422), never a 500.
             raise HTTPException(422, str(e))
 
     @app.post("/api/report/ratecard", response_class=HTMLResponse)
@@ -1045,7 +1053,9 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         try:
             fs = compute_fee_schedule(store, str(body.get("subject", "")), body.get("market") or {})
             return HTMLResponse(render_rate_card(cfg, store, fs, payer_scorecard(fs)))
-        except (BenchmarkError, ValueError) as e:
+        except (BenchmarkError, ValueError, TypeError) as e:
+            # ValueError/TypeError: a non-numeric or null volume/percentile in
+            # the JSON body — a client input error (422), never a 500.
             raise HTTPException(422, str(e))
 
     @app.post("/api/schedule/fee.csv", response_class=PlainTextResponse)
@@ -1056,7 +1066,9 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             csv_text = fee_schedule_csv(fs, payer_scorecard(fs), store)
             return PlainTextResponse("﻿" + csv_text, headers={  # BOM for Excel
                 "Content-Disposition": 'attachment; filename="rate_card.csv"'})
-        except (BenchmarkError, ValueError) as e:
+        except (BenchmarkError, ValueError, TypeError) as e:
+            # ValueError/TypeError: a non-numeric or null volume/percentile in
+            # the JSON body — a client input error (422), never a 500.
             raise HTTPException(422, str(e))
 
     # underpaid-practice leads (§7D)
@@ -1071,7 +1083,9 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 limit=_as_int(body.get("limit"), 100),
                 exclude_subject=(str(body["exclude_subject"]) if body.get("exclude_subject") else None),
             )
-        except (BenchmarkError, ValueError) as e:
+        except (BenchmarkError, ValueError, TypeError) as e:
+            # ValueError/TypeError: a non-numeric or null volume/percentile in
+            # the JSON body — a client input error (422), never a 500.
             raise HTTPException(422, str(e))
 
     @app.post("/api/leads.csv", response_class=PlainTextResponse)
@@ -1087,7 +1101,9 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             )
             return PlainTextResponse("﻿" + leads_csv(store, result), headers={
                 "Content-Disposition": 'attachment; filename="leads.csv"'})
-        except (BenchmarkError, ValueError) as e:
+        except (BenchmarkError, ValueError, TypeError) as e:
+            # ValueError/TypeError: a non-numeric or null volume/percentile in
+            # the JSON body — a client input error (422), never a 500.
             raise HTTPException(422, str(e))
 
     # rate-change monitoring (§7E)
@@ -1100,7 +1116,9 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 subject=(str(body["subject"]) if body.get("subject") else None),
                 min_pct=_as_float(body.get("min_pct"), None),
             )
-        except (BenchmarkError, ValueError) as e:
+        except (BenchmarkError, ValueError, TypeError) as e:
+            # ValueError/TypeError: a non-numeric or null volume/percentile in
+            # the JSON body — a client input error (422), never a 500.
             raise HTTPException(422, str(e))
 
     @app.post("/api/changes.csv", response_class=PlainTextResponse)
@@ -1114,7 +1132,9 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             )
             return PlainTextResponse("﻿" + rate_changes_csv(result), headers={
                 "Content-Disposition": 'attachment; filename="rate_changes.csv"'})
-        except (BenchmarkError, ValueError) as e:
+        except (BenchmarkError, ValueError, TypeError) as e:
+            # ValueError/TypeError: a non-numeric or null volume/percentile in
+            # the JSON body — a client input error (422), never a 500.
             raise HTTPException(422, str(e))
 
     # peer sets
