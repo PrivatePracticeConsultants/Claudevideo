@@ -109,7 +109,19 @@ _ENTITY_REL = f"""
            payer, billing_code, any_value(billing_code_type) AS billing_code_type,
            discipline, any_value(is_timed) AS is_timed,
            modifier_set, billing_class, service_code_set, file_month,
-           median(negotiated_rate) AS negotiated_rate,
+           -- Re-median across the entity's member TINs — but a placeholder-ONLY
+           -- TIN carries its 0.01 as its per-TIN "median" (store.BY_TIN_QUERY's
+           -- coalesce fallback), so folding it in would drag a multi-TIN entity
+           -- to a bogus midpoint (median of 0.01 and 80 = 40) and disagree with
+           -- the benchmark, which strips placeholders first. Mirror the TIN-level
+           -- FILTER exactly: drop placeholder members from a dollar group, but
+           -- keep a placeholder-only entity showing its value (coalesce) instead
+           -- of NULL. is_dollar_rate is a GROUP BY key, so this no-ops for
+           -- non-dollar (percentage) groups.
+           round(coalesce(
+               median(negotiated_rate) FILTER (NOT is_dollar_rate OR negotiated_rate > 0.01),
+               median(negotiated_rate)
+           ), 4) AS negotiated_rate,
            any_value(negotiated_type) AS negotiated_type, is_dollar_rate,
            sum(source_count) AS source_count,
            string_agg(DISTINCT source_files, ';') AS source_files,

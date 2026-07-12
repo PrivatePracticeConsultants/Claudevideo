@@ -230,6 +230,13 @@ def _open_bulk_text(path: Path):
 # ids that would otherwise force a fresh multi-GB scan on every poll forever).
 _bulk_sig: tuple | None = None
 _bulk_absent: set[str] = set()
+# consecutive COMPLETE-read failures for the current signature. A genuinely
+# corrupt/truncated file would otherwise be re-read in full every poll forever
+# (a scan that raises never accumulates _bulk_absent); after this many failures
+# we give up on that exact file until it changes (a re-download changes the sig
+# and resets everything).
+_bulk_read_failures = 0
+_BULK_MAX_READ_FAILURES = 3
 
 
 def enrich_via_bulk(cfg: MrfxConfig, store: Store,
@@ -242,7 +249,7 @@ def enrich_via_bulk(cfg: MrfxConfig, store: Store,
     and the only remaining un-enriched NPIs are ones this file already proved it
     doesn't contain — otherwise a handful of deactivated/junk NPIs would make the
     persistent loop re-read the whole file every cycle for nothing."""
-    global _bulk_sig, _bulk_absent
+    global _bulk_sig, _bulk_absent, _bulk_read_failures
     path = cfg.enrichment.bulk_csv_path
     if not path or not Path(path).exists():
         log.error("enrichment.mode=bulk but bulk_csv_path %r not found", str(path))
@@ -255,6 +262,10 @@ def enrich_via_bulk(cfg: MrfxConfig, store: Store,
     if sig != _bulk_sig:  # new file (or first run): everything is fresh again
         _bulk_sig = sig
         _bulk_absent = set()
+        _bulk_read_failures = 0
+    if _bulk_read_failures >= _BULK_MAX_READ_FAILURES:
+        # gave up on this exact (unreadable) file; wait for it to change
+        return 0
 
     wanted = set()
     cursor = ""
@@ -285,25 +296,41 @@ def enrich_via_bulk(cfg: MrfxConfig, store: Store,
     completed = False
     try:
         with _open_bulk_text(path) as f:
-            reader = csv.DictReader(f)
+            # Positional csv.reader, NOT DictReader: the NPPES pfile has ~330
+            # columns and ~8M rows but we keep only ~11 fields for a few thousand
+            # NPIs. DictReader builds a full ~330-key dict for EVERY row before we
+            # discard 99.9% of them — the dominant cost on a 10 GB file. Reading
+            # the header once and indexing by position skips that entirely.
+            reader = csv.reader(f)
+            header = next(reader, [])
+            col = {k: header.index(v) for k, v in _BULK_COLS.items() if v in header}
+            i_npi = col.get("npi")
+            if i_npi is None:  # not the npidata pfile / unexpected layout
+                raise ValueError("NPPES file has no 'NPI' column — wrong file inside the zip?")
+            i_org, i_first, i_last = col.get("org"), col.get("first"), col.get("last")
+            i_ent, i_tax = col.get("entity"), col.get("tax1")
+            i_city, i_state = col.get("city"), col.get("state")
+            i_addr, i_zip, i_phone = col.get("address"), col.get("zip"), col.get("phone")
+
+            def at(row, ix):  # tolerate short/ragged rows; only called on matches
+                return (row[ix] if ix is not None and ix < len(row) else None) or None
+
             for i, row in enumerate(reader):
                 if stop is not None and (i & 0x3FFF) == 0 and stop.is_set():
                     break  # interruptible: don't finish a 10 GB scan on shutdown
-                npi = row.get(_BULK_COLS["npi"], "")
+                npi = row[i_npi] if i_npi < len(row) else ""
                 if npi not in wanted:
                     continue
-                name = row.get(_BULK_COLS["org"]) or " ".join(
-                    p for p in (row.get(_BULK_COLS["first"]), row.get(_BULK_COLS["last"])) if p
+                name = at(row, i_org) or " ".join(
+                    p for p in (at(row, i_first), at(row, i_last)) if p
                 ) or None
-                entity = {"1": "NPI-1", "2": "NPI-2"}.get(str(row.get(_BULK_COLS["entity"], "")).strip())
+                entity = {"1": "NPI-1", "2": "NPI-2"}.get(str(at(row, i_ent) or "").strip())
                 pending.append({
                     "npi": npi, "org_name": name, "entity_type": entity,
-                    "taxonomy_code": row.get(_BULK_COLS["tax1"]) or None,
-                    "city": row.get(_BULK_COLS["city"]) or None,
-                    "state": row.get(_BULK_COLS["state"]) or None,
-                    "address": row.get(_BULK_COLS["address"]) or None,
-                    "zip": row.get(_BULK_COLS["zip"]) or None,
-                    "phone": row.get(_BULK_COLS["phone"]) or None,
+                    "taxonomy_code": at(row, i_tax),
+                    "city": at(row, i_city), "state": at(row, i_state),
+                    "address": at(row, i_addr), "zip": at(row, i_zip),
+                    "phone": at(row, i_phone),
                 })
                 wanted.discard(npi)
                 if len(pending) >= 5000:
@@ -313,12 +340,24 @@ def enrich_via_bulk(cfg: MrfxConfig, store: Store,
             flush()
             completed = stop is None or not stop.is_set()
     except Exception as e:  # noqa: BLE001 — never crash enrichment; keep matches
-        log.error("bulk enrichment could not fully read %s: %s", path, e)
+        _bulk_read_failures += 1
+        log.error("bulk enrichment could not fully read %s (attempt %d/%d): %s",
+                  path, _bulk_read_failures, _BULK_MAX_READ_FAILURES, e)
         flush()  # retain whatever we already matched
     if completed:
-        # a COMPLETE scan proves the ids still in `wanted` are absent from this
-        # file — remember them so the next cycle doesn't re-read the whole file
+        _bulk_read_failures = 0  # a clean read clears the give-up counter
+        # A COMPLETE scan proves the ids still in `wanted` are absent from this
+        # file. Two things follow:
+        #  1. remember them so the next cycle doesn't re-read the whole file, and
+        #  2. write them as no-name dead rows — exactly what the API path does for
+        #     an empty NPPES result — so they count as PROCESSED and the dashboard
+        #     "identifying N more…" banner can actually reach zero. Without this a
+        #     single junk/deactivated NPI from a messy MRF wedges the banner on
+        #     forever even though bulk enrichment is genuinely finished.
         _bulk_absent |= wanted
+        absent = list(wanted)
+        for j in range(0, len(absent), 5000):
+            store.save_npis_bulk([{"npi": n} for n in absent[j:j + 5000]])
     log.info("enriched %d NPIs from the bulk file", done)
     return done
 

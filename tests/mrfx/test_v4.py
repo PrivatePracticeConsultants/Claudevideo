@@ -608,6 +608,64 @@ def test_bulk_enrichment_change_aware_skips_rescan(cfg, store, tmp_path, monkeyp
     assert opens == []                             # the file was NOT re-read
 
 
+def test_bulk_enrichment_marks_absent_npis_processed(cfg, store, tmp_path, monkeypatch):
+    # An NPI the NPPES file doesn't contain (deactivated / junk from a messy MRF)
+    # must be recorded as a PROCESSED no-name row, exactly like the API path's
+    # dead row for an empty result — otherwise the dashboard's "identifying N
+    # more…" banner can never reach zero even though enrichment is finished.
+    import csv as _csv
+    import io as _io
+    import zipfile as _zip
+
+    import mrfx.enrich as E
+    from mrfx.enrich import _BULK_COLS, enrich_via_bulk
+    monkeypatch.setattr(E, "_bulk_sig", None)
+    monkeypatch.setattr(E, "_bulk_absent", set())
+    monkeypatch.setattr(E, "_bulk_read_failures", 0)
+    ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "ab.json", innetwork(items=[
+        item("97110", [(["1000000001"], "43-9000000", "ein", [(40.0, None)]),
+                       (["1000000002"], "43-9000001", "ein", [(41.0, None)])])])))
+    hdr = [_BULK_COLS[k] for k in
+           ("npi", "org", "first", "last", "city", "state", "tax1", "entity", "address", "zip", "phone")]
+    buf = _io.StringIO()
+    _csv.writer(buf).writerows([hdr,
+        ["1000000001", "In-File PT", "", "", "Columbus", "OH", "225100000X", "2", "1 St", "43004", "6140000000"]])
+    zpath = tmp_path / "npidata.zip"
+    with _zip.ZipFile(zpath, "w") as zf:
+        zf.writestr("npidata_pfile_2026.csv", buf.getvalue().encode())
+    cfg.enrichment.mode = "bulk"
+    cfg.enrichment.bulk_csv_path = zpath
+    assert enrich_via_bulk(cfg, store) == 1
+    # the absent NPI 002 is now a processed dead row (present, but no name)...
+    with store.connect() as con:
+        row = con.execute("SELECT org_name FROM npi_directory WHERE npi = '1000000002'").fetchone()
+    assert row is not None and row[0] is None
+    # ...so nothing is left "remaining", though only 001 actually got a name
+    prog = store.enrichment_progress(max_age_seconds=0)
+    assert prog["total"] == 2 and prog["remaining"] == 0 and prog["named"] == 1
+
+
+def test_entity_grain_median_excludes_placeholder_only_tin(cfg, store):
+    # A multi-TIN entity where one member published only a $0.01 placeholder and
+    # another a real $80 must report the REAL rate as its entity median, not the
+    # midpoint (40). Guards api._ENTITY_REL's cross-TIN re-median against folding
+    # placeholder-only member TINs back in — which made the Explorer disagree
+    # with the benchmark (the invariant: one store never shows two medians).
+    data = innetwork(items=[item("97110", [
+        (["1111111111"], "43-1000001", "ein", [(80.0, None)]),   # real rate
+        (["1222222222"], "43-1000002", "ein", [(0.01, None)]),   # placeholder only
+    ])])
+    ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "ph.json", data))
+    for npi in store.unenriched_npis():
+        store.save_npi(npi, "Regional Rehab Group", "225100000X", "PT", "KC", "MO", entity_type="NPI-2")
+    store.rebuild_rollups()
+    client = TestClient(create_app(cfg, store))
+    rows = client.get("/api/rates?grain=entity").json()["rows"]
+    chain = next(x for x in rows if x["display_name"] == "Regional Rehab Group")
+    assert chain["tin_count"] == 2
+    assert chain["negotiated_rate"] == 80.0   # NOT median(80, 0.01) == 40
+
+
 def test_code_comparison_filters_by_state(cfg, store):
     # comparing a MO rate against a CA rate is misleading; the Code-comparison
     # endpoint must honor a state filter (backend already supports it via
