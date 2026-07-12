@@ -96,7 +96,10 @@ def cmd_serve(cfg: MrfxConfig, args) -> int:
               "`port:` in config/mrfx.yaml.", file=sys.stderr)
         return 1
 
-    store = Store(cfg.store_dir, cfg.duckdb_memory_gb)
+    # keep_warm: serve is long-lived and fires several queries per dashboard
+    # click, so pin the DuckDB settings once instead of re-SETting them on every
+    # request connection (~14ms each). One-shot CLI commands stay unpinned.
+    store = Store(cfg.store_dir, cfg.duckdb_memory_gb, keep_warm=True)
     # BEFORE any worker starts: a crash mid-parse leaves files at
     # 'processing', which scan_inbox skips forever. Flipping them to failed
     # here (single-threaded, nothing else owns the store yet) lets the very

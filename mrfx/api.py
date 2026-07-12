@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 
@@ -494,6 +495,30 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
 
     # -- rates table ---------------------------------------------------------
 
+    # Row-count cache for the table's pagination total. The count is the same
+    # for every page and every sort of one filter set, and only changes when the
+    # data does — but it was recomputed (a full scan of the filtered relation)
+    # on every keystroke, page turn, and sort click, which dominates latency on
+    # a large store. Key on (grain, filter, data_generation) so paging/sorting
+    # reuse it instantly and any ingest/rebuild (which bumps data_generation)
+    # invalidates it; a short TTL backstops the live NPI-grain view, whose parts
+    # can change without a rebuild. Bounded so it can't grow without limit.
+    _count_cache: dict[tuple, tuple[float, int]] = {}
+    _COUNT_TTL = 30.0
+
+    def _filtered_count(con, grain: str, fs: FilterSet) -> int:
+        key = (grain, fs.where, tuple(fs.params), fs.hide_outliers, store.data_generation)
+        hit = _count_cache.get(key)
+        now = time.monotonic()
+        if hit is not None and now - hit[0] < _COUNT_TTL:
+            return hit[1]
+        total = con.execute(
+            f"SELECT count(*) FROM ({rel_sql(grain, fs)})", fs.params).fetchone()[0]
+        if len(_count_cache) > 512:
+            _count_cache.clear()  # crude but fine: keys churn as filters change
+        _count_cache[key] = (now, total)
+        return total
+
     @app.get("/api/rates")
     def rates(
         request: Request,
@@ -508,7 +533,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         sql = f"{rel_sql(grain, fs)} {order_sql(sort, dir)} LIMIT ? OFFSET ?"
         with store.connect() as con:
             rows = _dicts(con.execute(sql, [*fs.params, page_size, (page - 1) * page_size]))
-            total = con.execute(f"SELECT count(*) FROM ({rel_sql(grain, fs)})", fs.params).fetchone()[0]
+            total = _filtered_count(con, grain, fs)
         return {"rows": _mask_row_tins(rows), "total": total, "page": page,
                 "page_size": page_size, "grain": grain}
 

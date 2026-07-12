@@ -713,6 +713,44 @@ def test_duckdb_memory_override_and_partition_scaling(tmp_path):
     assert 2 <= s3._memory_limit_gb <= 12
 
 
+def test_row_count_cache_invalidates_on_new_data(cfg, store):
+    # the /api/rates pagination total is cached per filter for speed; it must
+    # never serve a STALE count after more rows land. A rebuild (which every
+    # ingest triggers) bumps store.data_generation, part of the cache key.
+    g0 = store.data_generation
+    ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "a.json", innetwork(items=[
+        item("97110", [(["1000000001"], "43-1000001", "ein", [(40.0, None)])])])))
+    assert store.data_generation > g0  # rebuild bumped the generation
+    client = TestClient(create_app(cfg, store))
+    t1 = client.get("/api/rates?cpt=97110").json()["total"]
+    assert t1 == 1
+    # a second TIN for the same code arrives — the cached total must update
+    ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "b.json", innetwork(items=[
+        item("97110", [(["1000000002"], "43-1000002", "ein", [(55.0, None)])])])))
+    t2 = client.get("/api/rates?cpt=97110").json()["total"]
+    assert t2 == 2  # not the stale 1
+
+
+def test_keep_warm_pins_settings_and_stays_correct(tmp_path):
+    # serve pins one connection so per-request connections skip the four SET
+    # pragmas; they must still SEE those global settings, and a non-warm store
+    # (the CLI default) must keep working with no pin.
+    from mrfx.store import Store
+    s = Store(tmp_path / "w", memory_limit_gb=3, keep_warm=True)
+    assert s._pin is not None
+    with s.connect() as con:  # fresh connection inherits the pinned globals
+        assert con.execute("SELECT current_setting('memory_limit')").fetchone()[0]
+        assert str(con.execute(
+            "SELECT current_setting('preserve_insertion_order')").fetchone()[0]).lower() == "false"
+        assert con.execute("SELECT 1").fetchone()[0] == 1
+    s.close(); s.close()          # idempotent
+    assert s._pin is None
+    s2 = Store(tmp_path / "c")     # CLI default: no pin, still functional
+    assert s2._pin is None
+    with s2.connect() as con:
+        assert con.execute("SELECT 1").fetchone()[0] == 1
+
+
 def test_config_duckdb_memory_knob(tmp_path):
     from mrfx.config import load_mrfx_config
     p = tmp_path / "mrfx.yaml"

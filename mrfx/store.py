@@ -277,7 +277,8 @@ TIN_DIRECTORY_QUERY = """
 
 
 class Store:
-    def __init__(self, store_dir: Path, memory_limit_gb: int | None = None):
+    def __init__(self, store_dir: Path, memory_limit_gb: int | None = None,
+                 keep_warm: bool = False):
         self.dir = Path(store_dir)
         self.rates_dir = self.dir / "rates"
         self.rates_dir.mkdir(parents=True, exist_ok=True)
@@ -298,10 +299,30 @@ class Store:
             except (ValueError, OSError, AttributeError):
                 self._memory_limit_gb = 4
         self._temp_cap_gb: int | None = None  # computed once, in connect()
+        # bumped whenever the analytics tables change (rebuild/reset) so the API's
+        # row-count cache can key on it and never serve a stale total across an
+        # ingest — see api.rates(). Cheap monotonic int, not a data hash.
+        self.data_generation = 0
         # enrichment_progress scans the full rates view (DISTINCT npi over a
         # UNION) — far too heavy to run on every 15s dashboard poll of a big
         # store; cache it briefly ((monotonic, result), see enrichment_progress)
         self._enrich_progress_cache: tuple[float, dict] | None = None
+        # `keep_warm` (serve only) pins ONE connection open for the process's
+        # lifetime. DuckDB's memory/temp settings are GLOBAL to the in-process
+        # database instance and persist while any connection holds it, so with a
+        # pin we apply them ONCE and every short-lived per-request connection
+        # inherits them for free instead of re-running four SET pragmas each time
+        # (~14ms/call — the dominant floor on a busy dashboard). NOT used by the
+        # one-shot CLI: holding the file open would block a concurrent
+        # `mrfx status`/`export`/BI tool (DuckDB is single-writer per process),
+        # and the CLI's brief runs don't benefit anyway.
+        self._pin: duckdb.DuckDBPyConnection | None = None
+        if keep_warm:
+            try:
+                self._pin = duckdb.connect(str(self.db_path))
+                self._apply_settings(self._pin)
+            except duckdb.Error:
+                self._pin = None  # fall back to per-connection SET (still correct)
         with self.write_lock, self.connect() as con:
             self._init_tables(con)
             self._register_views(con)
@@ -355,6 +376,17 @@ class Store:
                     time.sleep(min(0.2 * (2 ** attempt), 3.0))
         else:
             raise last_exc  # 6 attempts over ~6s — something genuinely holds it
+        # The four settings below are GLOBAL to the in-process DuckDB instance
+        # and are applied once on the pinned connection (see __init__), so a
+        # normal per-request connection inherits them and skips the re-SET cost.
+        # Only apply here if the pin is absent (older duckdb / open failed).
+        if self._pin is None:
+            self._apply_settings(con)
+        return con
+
+    def _apply_settings(self, con: duckdb.DuckDBPyConnection) -> None:
+        """Apply the store's spill/memory settings to a connection. GLOBAL to the
+        DuckDB instance, so setting them on any one live connection covers all."""
         try:
             con.execute(f"SET temp_directory = '{sql_path(self._tmp_dir)}'")
             con.execute("SET preserve_insertion_order = false")
@@ -367,19 +399,29 @@ class Store:
             # room for stores with tens of millions of rows.
             con.execute(f"SET memory_limit = '{self._memory_limit_gb}GB'")
             # cap spill so one huge rollup can NEVER fill the disk and take
-            # down unrelated work: leave ~20% of free space untouched.
-            # CRITICAL: this SET is GLOBAL to the process's shared DuckDB
-            # instance, and the cap is computed ONCE per Store — recomputing
-            # per connection let every dashboard poll shrink the cap to 80%
-            # of the free space a RUNNING rebuild had already spilled into,
-            # strangling the rebuild it was meant to protect.
+            # down unrelated work: leave ~20% of free space untouched. The cap
+            # is computed ONCE per Store — recomputing per connection let every
+            # dashboard poll shrink the cap to 80% of the free space a RUNNING
+            # rebuild had already spilled into, strangling the rebuild it was
+            # meant to protect.
             if self._temp_cap_gb is None:
                 free_gb = shutil.disk_usage(self._tmp_dir).free / 1e9
                 self._temp_cap_gb = max(1, int(free_gb * 0.8))
             con.execute(f"SET max_temp_directory_size = '{self._temp_cap_gb}GB'")
         except duckdb.Error:  # older duckdb without these knobs
             pass
-        return con
+
+    def close(self) -> None:
+        """Release the pinned connection. Safe to call more than once."""
+        if self._pin is not None:
+            try:
+                self._pin.close()
+            except duckdb.Error:
+                pass
+            self._pin = None
+
+    def __del__(self):
+        self.close()
 
     def _init_tables(self, con: duckdb.DuckDBPyConnection) -> None:
         con.execute(
@@ -1019,6 +1061,7 @@ class Store:
 
         log = _logging.getLogger(__name__)
         self._enrich_progress_cache = None  # new rates change the NPI population
+        self.data_generation += 1          # invalidate the API row-count cache
         with self.write_lock, self.connect() as con:
             self._register_views(con)  # rates view must see current parts first
             try:
@@ -1426,6 +1469,7 @@ class Store:
     # -- reset ------------------------------------------------------------------------
 
     def reset(self) -> None:
+        self.data_generation += 1  # invalidate the API row-count cache
         with self.write_lock:
             for p in self.rates_dir.glob("*.parquet"):
                 p.unlink()

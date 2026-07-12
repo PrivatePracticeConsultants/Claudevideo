@@ -255,6 +255,10 @@ async function loadSummary() {
 
 const refresh = () => { loadRates(); loadSummary(); };
 const refreshFromFirstPage = () => { state.page = 1; refresh(); };
+// Sorting and page-size changes re-order/re-window the SAME filtered set, so
+// the summary stats (medians, counts, benchmarks) are unchanged — reload only
+// the table, skipping a heavy summary recompute that dominates on a big store.
+const reloadTableFirstPage = () => { state.page = 1; loadRates(); };
 
 function codeChipsHtml() {
   const groups = { PT: [], OT: [], SLP: [] };
@@ -364,12 +368,12 @@ async function initFilters() {
       const col = th.dataset.sort;
       if (state.sort.col === col) state.sort.dir = state.sort.dir === "desc" ? "asc" : "desc";
       else state.sort = { col, dir: ["negotiated_rate", "source_count", "rate_variants"].includes(col) ? "desc" : "asc" };
-      refreshFromFirstPage();
+      reloadTableFirstPage();
     }));
 
   $("#pg-prev").addEventListener("click", () => { state.page = Math.max(1, state.page - 1); loadRates(); });
   $("#pg-next").addEventListener("click", () => { state.page += 1; loadRates(); });
-  $("#pg-size").addEventListener("change", (e) => { state.pageSize = +e.target.value; refreshFromFirstPage(); });
+  $("#pg-size").addEventListener("change", (e) => { state.pageSize = +e.target.value; reloadTableFirstPage(); });
 }
 
 function updateSortArrows() {
