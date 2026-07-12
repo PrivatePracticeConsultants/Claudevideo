@@ -75,26 +75,32 @@ _TIN_LABEL_SQL = (
 # grain relations — uniform column set across entity / tin / npi
 # ---------------------------------------------------------------------------
 
-_TIN_REL = f"""
-    SELECT coalesce(em.entity_name, td.display_name, nn.org_name,
-                    {_TIN_LABEL_SQL}) AS display_name,
-           t.tin_value AS unit_id, t.tin_value,
-           em.entity_name IS NOT NULL AS is_mapped_entity,
-           t.tin_is_really_npi,
-           1 AS tin_count, t.npi_count, t.rate_variants, t.rate_min, t.rate_max,
-           t.payer, t.billing_code, t.billing_code_type, t.discipline, t.is_timed,
-           t.modifier_set, t.billing_class, t.service_code_set, t.file_month,
-           t.negotiated_rate, t.negotiated_type, t.is_dollar_rate,
-           t.source_count, t.source_files, t.schema_version, t.last_updated_on,
-           coalesce(td.states, CASE WHEN nn.state IS NULL THEN [] ELSE [nn.state] END) AS states,
-           coalesce(td.cities, CASE WHEN nn.city IS NULL THEN [] ELSE [nn.city] END) AS cities
-    FROM rates_by_tin t
+# The name/geo columns come from three LEFT JOINs (directory, entity map, NPI
+# directory). Split into projection + joins so the table endpoint can attach them
+# AFTER sorting+limiting the base rows to one page — joining 100 rows instead of
+# the whole store (see api.rates()'s late-join path). `t` is the base relation.
+_TIN_PROJECTION = f"""
+    coalesce(em.entity_name, td.display_name, nn.org_name,
+             {_TIN_LABEL_SQL}) AS display_name,
+    t.tin_value AS unit_id, t.tin_value,
+    em.entity_name IS NOT NULL AS is_mapped_entity,
+    t.tin_is_really_npi,
+    1 AS tin_count, t.npi_count, t.rate_variants, t.rate_min, t.rate_max,
+    t.payer, t.billing_code, t.billing_code_type, t.discipline, t.is_timed,
+    t.modifier_set, t.billing_class, t.service_code_set, t.file_month,
+    t.negotiated_rate, t.negotiated_type, t.is_dollar_rate,
+    t.source_count, t.source_files, t.schema_version, t.last_updated_on,
+    coalesce(td.states, CASE WHEN nn.state IS NULL THEN [] ELSE [nn.state] END) AS states,
+    coalesce(td.cities, CASE WHEN nn.city IS NULL THEN [] ELSE [nn.city] END) AS cities
+"""
+_TIN_JOINS = """
     LEFT JOIN tin_directory td USING (tin_value)
     LEFT JOIN entity_map em USING (tin_value)
     -- payers that set tin.type='npi' publish an NPI in the TIN slot: name and
     -- locate those rows from the NPI directory instead of leaving raw numbers
     LEFT JOIN npi_directory nn ON t.tin_is_really_npi AND nn.npi = t.tin_value
 """
+_TIN_REL = f"SELECT {_TIN_PROJECTION} FROM rates_by_tin t {_TIN_JOINS}"
 
 _ENTITY_REL = f"""
     SELECT any_value(display_name) AS display_name,
@@ -195,6 +201,10 @@ class FilterSet:
 
         clauses, params = [], []
         self.described: dict = {}
+        # True once a filter references a column that only exists AFTER the
+        # name/geo joins (states, cities, display_name). The table endpoint can
+        # take its fast late-join path only when this stays False.
+        self.uses_dim_cols = False
 
         def add(desc_key, desc_val):
             self.described[desc_key] = desc_val
@@ -245,10 +255,12 @@ class FilterSet:
             clauses.append("list_contains(states, ?)")
             params.append(qp["state"].upper())
             add("state", qp["state"].upper())
+            self.uses_dim_cols = True  # `states` is a joined column
         if qp.get("city"):
             clauses.append("len(list_filter(cities, c -> upper(c) = upper(?))) > 0")
             params.append(qp["city"])
             add("city", qp["city"])
+            self.uses_dim_cols = True  # `cities` is a joined column
         if qp.get("month"):
             clauses.append("file_month = ?")
             params.append(qp["month"])
@@ -260,6 +272,7 @@ class FilterSet:
             )
             params += [f"%{q}%", f"%{q}%", f"%{q}%"]
             add("search", q)
+            self.uses_dim_cols = True  # searches display_name (a joined column)
         dollar_only = qp.get("dollar_only", "1") not in ("0", "false")
         if dollar_only:
             # exclude $0/$0.01/negative DOLLAR placeholders here too, so the
@@ -506,14 +519,30 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     _count_cache: dict[tuple, tuple[float, int]] = {}
     _COUNT_TTL = 30.0
 
+    def _tin_late_join_ok(grain: str, fs: FilterSet, sort: str) -> bool:
+        """The TIN-grain table can attach names/geo AFTER paging (join 100 rows,
+        not the whole store) only when nothing needs those joined columns first:
+        no filter on state/city/search, no per-code outlier median (needs the
+        full set), and no sort by display_name (a joined column). Every ORDER BY
+        tiebreaker is otherwise a base rates_by_tin column, so the page — and its
+        order — is byte-identical to the full-join query, just far cheaper."""
+        return (grain == "tin" and not fs.hide_outliers
+                and not fs.uses_dim_cols and sort != "display_name")
+
     def _filtered_count(con, grain: str, fs: FilterSet) -> int:
         key = (grain, fs.where, tuple(fs.params), fs.hide_outliers, store.data_generation)
         hit = _count_cache.get(key)
         now = time.monotonic()
         if hit is not None and now - hit[0] < _COUNT_TTL:
             return hit[1]
-        total = con.execute(
-            f"SELECT count(*) FROM ({rel_sql(grain, fs)})", fs.params).fetchone()[0]
+        # When the late-join path applies, the LEFT joins can't change the row
+        # count (≤1 match each), so count the base table directly and skip
+        # building three hash tables over the whole store.
+        if _tin_late_join_ok(grain, fs, "negotiated_rate"):
+            count_sql = f"SELECT count(*) FROM rates_by_tin WHERE {fs.where}"
+        else:
+            count_sql = f"SELECT count(*) FROM ({rel_sql(grain, fs)})"
+        total = con.execute(count_sql, fs.params).fetchone()[0]
         if len(_count_cache) > 512:
             _count_cache.clear()  # crude but fine: keys churn as filters change
         _count_cache[key] = (now, total)
@@ -530,9 +559,22 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         qp = _qp(request)
         grain = grain_of(qp, cfg, store)
         fs = FilterSet(qp)
-        sql = f"{rel_sql(grain, fs)} {order_sql(sort, dir)} LIMIT ? OFFSET ?"
+        order = order_sql(sort, dir)
+        limit_params = [*fs.params, page_size, (page - 1) * page_size]
+        if _tin_late_join_ok(grain, fs, sort):
+            # sort + LIMIT the base rows to one page FIRST (no joins), THEN attach
+            # names/geo to just those rows. On a broad view this turns three
+            # whole-store hash joins into a 100-row join — seconds -> milliseconds.
+            # Order the PROJECTED page (unique output names) — ordering the raw
+            # join would be ambiguous for a sort column that also exists in a
+            # dimension table (e.g. npi_count lives in tin_directory too).
+            sql = (f"WITH page AS (SELECT *, tin_value AS unit_id FROM rates_by_tin "
+                   f"WHERE {fs.where} {order} LIMIT ? OFFSET ?) "
+                   f"SELECT * FROM (SELECT {_TIN_PROJECTION} FROM page t {_TIN_JOINS}) {order}")
+        else:
+            sql = f"{rel_sql(grain, fs)} {order} LIMIT ? OFFSET ?"
         with store.connect() as con:
-            rows = _dicts(con.execute(sql, [*fs.params, page_size, (page - 1) * page_size]))
+            rows = _dicts(con.execute(sql, limit_params))
             total = _filtered_count(con, grain, fs)
         return {"rows": _mask_row_tins(rows), "total": total, "page": page,
                 "page_size": page_size, "grain": grain}

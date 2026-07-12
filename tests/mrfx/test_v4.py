@@ -713,6 +713,50 @@ def test_duckdb_memory_override_and_partition_scaling(tmp_path):
     assert 2 <= s3._memory_limit_gb <= 12
 
 
+def test_tin_late_join_matches_full_join(cfg, store):
+    # The table's fast path sorts+limits the base rows, THEN attaches names/geo to
+    # just the page. It must return byte-identical rows to the original full-join
+    # query for every eligible filter/sort — this guards that equivalence.
+    from mrfx.api import FilterSet, _TIN_JOINS, _TIN_PROJECTION, order_sql, rel_sql
+    data = innetwork(items=[
+        item("97110", [(["1000000001"], "43-1000001", "ein", [(40.0, None)]),
+                       (["1000000002"], "43-1000002", "ein", [(0.01, None)]),   # placeholder
+                       (["1000000003"], "43-1000003", "ein", [(90.0, None)])]),
+        item("97112", [(["1000000001"], "43-1000001", "ein", [(55.0, None)]),
+                       (["1900000009"], "1900000009", "npi", [(75.0, None)])]),  # tin_type=npi
+    ])
+    ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "lj.json", data))
+    store.save_npi("1000000001", "Alpha PT", None, None, "KC", "MO", entity_type="NPI-2")
+    store.save_npi("1000000002", "Beta Rehab", None, None, "LA", "CA", entity_type="NPI-2")
+    store.save_npi("1900000009", "Solo Provider", None, None, "STL", "MO", entity_type="NPI-1")
+    store.rebuild_rollups()
+
+    def old(fs, s, dr):
+        return f"{rel_sql('tin', fs)} {order_sql(s, dr)} LIMIT ? OFFSET ?"
+
+    def new(fs, s, dr):
+        o = order_sql(s, dr)
+        return (f"WITH page AS (SELECT *, tin_value AS unit_id FROM rates_by_tin "
+                f"WHERE {fs.where} {o} LIMIT ? OFFSET ?) "
+                f"SELECT * FROM (SELECT {_TIN_PROJECTION} FROM page t {_TIN_JOINS}) {o}")
+
+    combos = [({}, "negotiated_rate", "desc"), ({}, "negotiated_rate", "asc"),
+              ({}, "payer", "asc"), ({}, "npi_count", "desc"), ({}, "billing_code", "asc"),
+              ({"cpt": "97110"}, "negotiated_rate", "desc"),
+              ({"rate_min": "50"}, "negotiated_rate", "desc"),
+              ({"dollar_only": "1"}, "negotiated_rate", "asc")]
+    with store.connect() as con:
+        for qp, s, dr in combos:
+            fs = FilterSet(qp)
+            assert not fs.uses_dim_cols
+            pr = [*fs.params, 100, 0]
+            assert con.execute(old(fs, s, dr), pr).fetchall() == \
+                   con.execute(new(fs, s, dr), pr).fetchall(), (qp, s, dr)
+    # dim-col filters (state) route through the full-join path and still work
+    mo = TestClient(create_app(cfg, store)).get("/api/rates?state=MO").json()
+    assert mo["rows"] and all(r["display_name"] for r in mo["rows"])
+
+
 def test_row_count_cache_invalidates_on_new_data(cfg, store):
     # the /api/rates pagination total is cached per filter for speed; it must
     # never serve a STALE count after more rows land. A rebuild (which every
