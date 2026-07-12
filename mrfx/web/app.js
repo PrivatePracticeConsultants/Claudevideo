@@ -560,11 +560,23 @@ function initCptView() {
     if (b) selectCpt(b.dataset.cpt);
   });
   $("#cpt-base-only").addEventListener("change", () => state.cptSelected && selectCpt(state.cptSelected));
+  // comparing rates across states is misleading (a MO rate vs a NY rate are
+  // different markets) — let the user scope the comparison to one state
+  const cptState = $("#cpt-state");
+  let t;
+  cptState.addEventListener("input", () => {
+    clearTimeout(t);
+    t = setTimeout(() => state.cptSelected && selectCpt(state.cptSelected), 300);
+  });
+  api("/api/states").then((s) => {
+    $("#cpt-states").innerHTML = (s.states || []).map((x) => `<option value="${esc(x)}">`).join("");
+  }).catch(() => {});
   $("#cpt-export").addEventListener("click", () => {
     if (!state.cptSelected) return;
     const p = new URLSearchParams({ cpt: state.cptSelected, view: `code_${state.cptSelected}`,
       grain: state.grain === "npi" ? "npi" : "tin", sort: "negotiated_rate", dir: "desc" });
     if ($("#cpt-base-only").checked) p.set("modifier", "base");
+    if (cptState.value.trim()) p.set("state", cptState.value.trim());
     location.href = `/api/export.zip?${p}`;
   });
 }
@@ -575,18 +587,24 @@ async function selectCpt(code) {
   const body = $("#cpt-body"), stateEl = $("#cpt-state");
   body.innerHTML = "";
   stateEl.innerHTML = `<div class="loading">Loading ${esc(code)}</div>`;
+  const cptState = $("#cpt-state").value.trim();
   const p = new URLSearchParams({ grain: "tin" });
   if ($("#cpt-base-only").checked) p.set("modifier", "base");
+  if (cptState) p.set("state", cptState);
+  const trendP = new URLSearchParams({ cpt: code, grain: "tin" });
+  if ($("#cpt-base-only").checked) trendP.set("modifier", "base");
+  if (cptState) trendP.set("state", cptState);
   let d, trend;
   try {
     [d, trend] = await Promise.all([
       api(`/api/code/${code}?${p}`),
-      api(`/api/trend?cpt=${code}&grain=tin${$("#cpt-base-only").checked ? "&modifier=base" : ""}`),
+      api(`/api/trend?${trendP}`),
     ]);
   } catch (e) { stateEl.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
   const info = state.catalog[code] || {};
   $("#view-cpt h2").textContent =
     `Which entities get paid most for ${code}${info.description ? " — " + info.description : ""}` +
+    (cptState ? ` · ${cptState}` : "") +
     (info.timed ? " (timed 15-min units)" : "");
   renderHistogram($("#cpt-hist"), d.histogram, code);
   renderTrend($("#cpt-trend"), trend.rows);

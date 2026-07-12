@@ -547,6 +547,35 @@ def test_ratecard_report_and_csv_endpoints(cfg, ratecard_store):
     assert refused.status_code == 422
 
 
+def test_code_comparison_filters_by_state(cfg, store):
+    # comparing a MO rate against a CA rate is misleading; the Code-comparison
+    # endpoint must honor a state filter (backend already supports it via
+    # FilterSet — this locks in that the code view passes it through)
+    data = innetwork(items=[item("97110", [
+        (["1000000001"], "43-1111111", "ein", [(40.0, None)]),
+        (["1000000002"], "43-2222222", "ein", [(50.0, None)]),
+    ])])
+    ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "cc.json", data))
+    store.save_npi("1000000001", "MO Rehab", None, None, "Columbia", "MO", entity_type="NPI-2")
+    store.save_npi("1000000002", "CA Rehab", None, None, "LA", "CA", entity_type="NPI-2")
+    store.rebuild_rollups()
+    client = TestClient(create_app(cfg, store))
+    assert len(client.get("/api/code/97110").json()["ranked"]) == 2
+    mo = client.get("/api/code/97110?state=MO").json()["ranked"]
+    assert len(mo) == 1 and mo[0]["unit_id"] == "431111111"
+
+
+def test_directory_refresh_is_globally_throttled(cfg, store, monkeypatch):
+    import mrfx.enrich as E
+    calls = []
+    monkeypatch.setattr(store, "rebuild_rollups", lambda: calls.append(1))
+    monkeypatch.setattr(E, "_last_dir_refresh", 0.0)
+    assert E._maybe_refresh_directory(store) is True       # first call runs
+    assert E._maybe_refresh_directory(store) is False      # within the window -> throttled
+    assert E._maybe_refresh_directory(store, force=True) is True  # force overrides (CLI path)
+    assert len(calls) == 2
+
+
 def test_defuse_csv_quotes_formula_cells():
     from mrfx.store import defuse_csv
     assert defuse_csv("=SUM(A1)") == "'=SUM(A1)"

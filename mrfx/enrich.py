@@ -60,6 +60,35 @@ def _apply_nppes_result(store: Store, npi: str, data: dict) -> None:
     )
 
 
+# surface names PROGRESSIVELY: rebuild the directory at most this often once new
+# NPIs have resolved, so a long backlog (or a still-ingesting monster file) shows
+# names as they come in instead of only when the whole run finishes. Throttled
+# so the (minutes-long, write-locked) rebuild can't dominate a big store.
+_DIRECTORY_REFRESH_SECONDS = 240.0
+_refresh_lock = threading.Lock()
+_last_dir_refresh = 0.0
+
+
+def _maybe_refresh_directory(store: Store, force: bool = False) -> bool:
+    """Rebuild the name/geo directory, throttled GLOBALLY (across enrichment
+    cycles) so the persistent serve loop — which re-polls every ~20s — can't
+    trigger a minutes-long rebuild on every trickle of new NPIs. `force` runs it
+    now regardless (the one-shot CLI path, so names show before it exits).
+    Best-effort: a rebuild here is cosmetic and must never fail enrichment."""
+    global _last_dir_refresh
+    with _refresh_lock:
+        now = time.monotonic()
+        if not force and now - _last_dir_refresh < _DIRECTORY_REFRESH_SECONDS:
+            return False
+        _last_dir_refresh = now
+    try:
+        store.rebuild_rollups()
+        return True
+    except Exception as e:  # noqa: BLE001
+        log.warning("name-directory refresh skipped (%s)", e)
+        return False
+
+
 def enrich_via_api(cfg: MrfxConfig, store: Store, stop: threading.Event | None = None) -> int:
     """Polite CONCURRENT NPPES lookups for every un-enriched NPI in the store,
     so names/states fill in quickly on a large book instead of one-every-0.15s.
@@ -88,6 +117,7 @@ def enrich_via_api(cfg: MrfxConfig, store: Store, stop: threading.Event | None =
                 raise _EnrichFailure(f"HTTP {resp.status_code}")
             _apply_nppes_result(store, npi, resp.json())
 
+        done_at_refresh = 0
         while not aborted:
             if stop is not None and stop.is_set():
                 break
@@ -123,6 +153,11 @@ def enrich_via_api(cfg: MrfxConfig, store: Store, stop: threading.Event | None =
                         break
             if stop is not None and stop.is_set():
                 break
+            # progressive refresh: materialize the names resolved so far into the
+            # directory that powers the dashboard (globally throttled).
+            if done > done_at_refresh and _maybe_refresh_directory(store):
+                log.info("names refreshed (%d resolved so far)", done)
+                done_at_refresh = done
             if aborted:
                 log.warning("NPPES failing persistently — pausing enrichment until the "
                             "next run (%d NPIs done)", done)
@@ -194,51 +229,48 @@ def enrich_via_bulk(cfg: MrfxConfig, store: Store) -> int:
     return done
 
 
-def run_enrichment(cfg: MrfxConfig, store: Store, stop: threading.Event | None = None) -> int:
+def run_enrichment(cfg: MrfxConfig, store: Store, stop: threading.Event | None = None,
+                   final_refresh: bool = True) -> int:
     mode = cfg.enrichment.mode
     if mode == "off":
         return 0
     done = enrich_via_bulk(cfg, store) if mode == "bulk" else enrich_via_api(cfg, store, stop)
     if done:
         # tin_directory materializes NPPES names/states/cities — without a
-        # rebuild here, geographic benchmarks (state/city joins) silently run
-        # against NULLs until the next ingest happens to trigger one
-        try:
-            store.rebuild_rollups()
-        except Exception:  # noqa: BLE001 — names are saved; directory refreshes
-            # on the next successful rebuild
-            log.exception("rollup refresh after enrichment failed — new names "
-                          "appear after the next rebuild")
+        # rebuild, geographic benchmarks (state/city joins) silently run against
+        # NULLs until the next ingest triggers one. `force` for the one-shot CLI
+        # path so names show before it returns; the persistent serve loop passes
+        # final_refresh=False and relies on the global throttle so a 20s poll of
+        # trickling NPIs can't rebuild every cycle.
+        _maybe_refresh_directory(store, force=final_refresh)
     return done
 
 
-_ENRICH_LOCK = threading.Lock()
-_ENRICH_ACTIVE = False
+def start_persistent_enrichment(cfg: MrfxConfig, store: Store,
+                                stop: threading.Event) -> None:
+    """Long-lived enrichment for `serve`: keeps draining newly-ingested NPIs and
+    refreshing names for the whole server lifetime, so identification tracks
+    extraction instead of waiting for it to finish.
 
-
-def start_background_enrichment(cfg: MrfxConfig, store: Store) -> threading.Event:
-    """Fire-and-forget enrichment thread; returns its stop event. Single
-    flight: the watcher calls this after EVERY scan with new files, and with
-    a long NPPES backlog N stacked threads would all fetch the same batch —
-    duplicate lookups, politeness sleep divided by N, 429s."""
-    global _ENRICH_ACTIVE
-    stop = threading.Event()
+    The old fire-on-trigger model only ran at startup and after INBOX scans, so
+    files pulled by the URL worker (pasted payer links) were never enriched —
+    names sat at 0 until something touched the inbox. This single always-on
+    loop covers every ingestion source: it drains what's there, then re-polls."""
     if cfg.enrichment.mode == "off":
-        return stop
-    with _ENRICH_LOCK:
-        if _ENRICH_ACTIVE:
-            return stop  # a run is already grinding the same backlog
-        _ENRICH_ACTIVE = True
+        return
 
     def _loop():
-        global _ENRICH_ACTIVE
-        try:
-            run_enrichment(cfg, store, stop)
-        except Exception:  # noqa: BLE001
-            log.exception("enrichment thread died; names stay un-enriched until next run")
-        finally:
-            with _ENRICH_LOCK:
-                _ENRICH_ACTIVE = False
+        while not stop.is_set():
+            try:
+                # final_refresh=False: the global throttle governs rebuilds, so a
+                # 20s poll of trickling NPIs doesn't rebuild the store every cycle
+                run_enrichment(cfg, store, stop, final_refresh=False)
+            except Exception:  # noqa: BLE001 — a bad cycle must not kill the loop
+                log.exception("enrichment cycle failed; retrying after a pause")
+            stop.wait(_ENRICH_POLL_SECONDS)  # re-check for NPIs ingested since
 
     threading.Thread(target=_loop, name="mrfx-enrich", daemon=True).start()
-    return stop
+
+
+# how often the persistent loop re-checks for newly-ingested NPIs once drained
+_ENRICH_POLL_SECONDS = 20.0

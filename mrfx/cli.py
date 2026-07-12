@@ -11,7 +11,7 @@ from pathlib import Path
 import duckdb
 
 from .config import MrfxConfig, load_mrfx_config
-from .enrich import run_enrichment, start_background_enrichment
+from .enrich import run_enrichment, start_persistent_enrichment
 from .ingest import ingest_file, scan_inbox
 from .sniff import format_preflight, preflight
 from .store import Store
@@ -40,14 +40,13 @@ def _watcher_loop(cfg: MrfxConfig, store: Store, stop: threading.Event) -> None:
     except Exception:  # noqa: BLE001 — a store hiccup on the FIRST scan must not
         # silently kill the watcher thread before it ever watches
         log.exception("initial inbox scan failed; watching for changes anyway")
-    start_background_enrichment(cfg, store)
+    # enrichment is driven by the always-on persistent loop started in
+    # cmd_serve (it covers inbox AND URL-worker ingests) — not re-triggered here
     while not stop.is_set():
         try:
             for _changes in watchfiles.watch(cfg.inbox_dir, stop_event=stop, step=1000):
                 try:
-                    results = scan_inbox(cfg, store)
-                    if any(r.get("status") == "done" for r in results):
-                        start_background_enrichment(cfg, store)
+                    scan_inbox(cfg, store)
                 except Exception:  # noqa: BLE001 — watcher survives everything
                     log.exception("inbox scan failed; watcher continues")
             return  # stop_event set — clean shutdown
@@ -112,6 +111,10 @@ def cmd_serve(cfg: MrfxConfig, args) -> int:
     threading.Thread(
         target=_url_worker_loop, args=(cfg, store, stop), name="mrfx-urls", daemon=True
     ).start()
+    # always-on enrichment: identifies names as extraction proceeds (covers both
+    # the inbox watcher AND the URL worker), refreshing the directory
+    # progressively rather than only when everything finishes.
+    start_persistent_enrichment(cfg, store, stop)
     app = create_app(cfg, store)
     print(f"\n  MRF Explorer  →  http://localhost:{cfg.port}\n"
           f"  inbox: {cfg.inbox_dir}  (drop .json / .json.gz / .zip here)\n"
