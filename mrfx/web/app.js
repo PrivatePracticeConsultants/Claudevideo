@@ -695,30 +695,26 @@ let benchmarkInit = false;
 async function initBenchmark() {
   refreshMpfsStatus();
   if (benchmarkInit) { refreshSubjectPickers("#b-subjects", [{ sel: "#b-month" }]); return; }
-  let subjects, months, payers, peersets;
-  try {
-    [subjects, months, payers, peersets] = await Promise.all([
-      api("/api/benchmark/subjects"), api("/api/months"), api("/api/payers"), api("/api/peersets"),
-    ]);
-  } catch (e) {
-    // one transient failure must not brick the tab for the whole session —
-    // leave benchmarkInit false so the next visit retries the load
-    $("#b-out").innerHTML = `<div class="empty">could not load benchmark data (${esc(e.message)}) — switch tabs and come back to retry</div>`;
-    return;
-  }
   benchmarkInit = true;
-  $("#b-subjects").innerHTML =
+  // Independent loads: a single failing/slow call must not blank the required
+  // As-of month (or the whole tab).
+  const [subjects, months, payers, peersets] = await Promise.all([
+    api("/api/benchmark/subjects").catch(() => null),
+    api("/api/months").catch(() => null),
+    api("/api/payers").catch(() => null),
+    api("/api/peersets").catch(() => null),
+  ]);
+  if (subjects) $("#b-subjects").innerHTML =
     subjects.entities.map((e) => `<option value="${esc(e)}">`).join("") +
     subjects.tins.map((t) => `<option value="${esc(t.tin_value)}">${esc(t.display_name)}</option>`).join("");
-  $("#b-month").innerHTML = months.months.map((m) => `<option>${esc(m)}</option>`).join("") ||
-    `<option value="">no data ingested</option>`;
-  $("#b-payer-chips").innerHTML = payers.payers.map((p) =>
+  fillMonthSelect("#b-month", months);
+  if (payers) $("#b-payer-chips").innerHTML = payers.payers.map((p) =>
     `<button class="chip" data-payer="${esc(p)}">${esc(p)}</button>`).join("");
   $("#b-payer-chips").addEventListener("click", (ev) => {
     const b = ev.target.closest(".chip");
     if (b) b.classList.toggle("on");
   });
-  refreshPeersets(peersets.peer_sets);
+  refreshPeersets((peersets || {}).peer_sets);
   $("#ps-save").addEventListener("click", async () => {
     const name = $("#ps-name").value.trim();
     const tins = $("#ps-tins").value.split(/\n+/).map((t) => t.trim()).filter(Boolean);
@@ -941,22 +937,17 @@ let ratecardInit = false;
 async function initRatecard() {
   refreshRcMpfs();
   if (ratecardInit) { refreshSubjectPickers("#rc-subjects", [{ sel: "#rc-month" }]); return; }
-  let subjects, months, payers;
-  try {
-    [subjects, months, payers] = await Promise.all([
-      api("/api/benchmark/subjects"), api("/api/months"), api("/api/payers"),
-    ]);
-  } catch (e) {
-    $("#rc-out").innerHTML = `<div class="empty">could not load data (${esc(e.message)}) — switch tabs and come back to retry</div>`;
-    return;
-  }
   ratecardInit = true;
-  $("#rc-subjects").innerHTML =
+  const [subjects, months, payers] = await Promise.all([
+    api("/api/benchmark/subjects").catch(() => null),
+    api("/api/months").catch(() => null),
+    api("/api/payers").catch(() => null),
+  ]);
+  if (subjects) $("#rc-subjects").innerHTML =
     subjects.entities.map((e) => `<option value="${esc(e)}">`).join("") +
     subjects.tins.map((t) => `<option value="${esc(t.tin_value)}">${esc(t.display_name)}</option>`).join("");
-  $("#rc-month").innerHTML = months.months.map((m) => `<option>${esc(m)}</option>`).join("") ||
-    `<option value="">no data ingested</option>`;
-  $("#rc-payer-chips").innerHTML = payers.payers.map((p) =>
+  fillMonthSelect("#rc-month", months);
+  if (payers) $("#rc-payer-chips").innerHTML = payers.payers.map((p) =>
     `<button class="chip" data-payer="${esc(p)}">${esc(p)}</button>`).join("");
   $("#rc-payer-chips").addEventListener("click", (ev) => {
     const b = ev.target.closest(".chip");
@@ -1088,22 +1079,35 @@ async function postDownload(url, payload, filename) {
 let leadsInit = false;
 async function initLeads() {
   if (leadsInit) { refreshSubjectPickers("#ld-subjects", [{ sel: "#ld-month" }]); loadLdStates(); return; }
-  let subjects, months, payers, states;
-  try {
-    [subjects, months, payers, states] = await Promise.all([
-      api("/api/benchmark/subjects"), api("/api/months"), api("/api/payers"),
-      api("/api/states").catch(() => ({ states: [] })),
-    ]);
-  } catch (e) { $("#ld-out").innerHTML = `<div class="empty">could not load data (${esc(e.message)}) — switch tabs and come back</div>`; return; }
   leadsInit = true;
-  $("#ld-month").innerHTML = months.months.map((m) => `<option>${esc(m)}</option>`).join("") || `<option value="">no data ingested</option>`;
-  $("#ld-payer-chips").innerHTML = payers.payers.map((p) => `<button class="chip" data-payer="${esc(p)}">${esc(p)}</button>`).join("");
+  // Load each picker INDEPENDENTLY: a single failing/slow call (e.g. the
+  // subject list on a large store) must never leave the required As-of month
+  // blank. A fail-fast Promise.all used to abort the whole tab and blank it.
+  const [subjects, months, payers, states] = await Promise.all([
+    api("/api/benchmark/subjects").catch(() => null),
+    api("/api/months").catch(() => null),
+    api("/api/payers").catch(() => null),
+    api("/api/states").catch(() => null),
+  ]);
+  fillMonthSelect("#ld-month", months);
+  if (payers) $("#ld-payer-chips").innerHTML = payers.payers.map((p) => `<button class="chip" data-payer="${esc(p)}">${esc(p)}</button>`).join("");
   $("#ld-payer-chips").addEventListener("click", (ev) => { const b = ev.target.closest(".chip"); if (b) b.classList.toggle("on"); });
-  $("#ld-states").innerHTML = (states.states || []).map((s) => `<option value="${esc(s)}">`).join("");
-  $("#ld-subjects").innerHTML = subjects.entities.map((e) => `<option value="${esc(e)}">`).join("") +
+  if (states) $("#ld-states").innerHTML = (states.states || []).map((s) => `<option value="${esc(s)}">`).join("");
+  if (subjects) $("#ld-subjects").innerHTML = subjects.entities.map((e) => `<option value="${esc(e)}">`).join("") +
     subjects.tins.map((t) => `<option value="${esc(t.tin_value)}">${esc(t.display_name)}</option>`).join("");
   $("#ld-run").addEventListener("click", runLeads);
   $("#ld-csv").addEventListener("click", () => { if (state.lastLeadsPayload) postDownload("/api/leads.csv", state.lastLeadsPayload, "leads.csv"); });
+}
+
+// Populate a month <select> from an /api/months payload, tolerating a failed
+// fetch (null) or a store with no dated months, so the "required" field always
+// says something actionable instead of sitting silently empty.
+function fillMonthSelect(sel, months, prefix = "") {
+  const el = $(sel);
+  if (!el) return;
+  if (!months) { el.innerHTML = `<option value="">couldn't load months — reopen this tab</option>`; return; }
+  const opts = (months.months || []).filter(Boolean).map((m) => `<option>${esc(m)}</option>`).join("");
+  el.innerHTML = prefix + opts || `<option value="">no dated data yet — ingest a file first</option>`;
 }
 
 async function loadLdStates() {
@@ -1162,19 +1166,17 @@ async function initChanges() {
       [{ sel: "#ch-month" }, { sel: "#ch-prev", prefix: `<option value="">auto — the previous month present</option>` }]);
     return;
   }
-  let subjects, months, payers;
-  try {
-    [subjects, months, payers] = await Promise.all([
-      api("/api/benchmark/subjects"), api("/api/months"), api("/api/payers"),
-    ]);
-  } catch (e) { $("#ch-out").innerHTML = `<div class="empty">could not load data (${esc(e.message)}) — switch tabs and come back</div>`; return; }
   changesInit = true;
-  const mopts = months.months.map((m) => `<option>${esc(m)}</option>`).join("");
-  $("#ch-month").innerHTML = mopts || `<option value="">no data ingested</option>`;
-  $("#ch-prev").innerHTML = `<option value="">auto — the previous month present</option>` + mopts;
-  $("#ch-payer-chips").innerHTML = payers.payers.map((p) => `<button class="chip" data-payer="${esc(p)}">${esc(p)}</button>`).join("");
+  const [subjects, months, payers] = await Promise.all([
+    api("/api/benchmark/subjects").catch(() => null),
+    api("/api/months").catch(() => null),
+    api("/api/payers").catch(() => null),
+  ]);
+  fillMonthSelect("#ch-month", months);
+  fillMonthSelect("#ch-prev", months, `<option value="">auto — the previous month present</option>`);
+  if (payers) $("#ch-payer-chips").innerHTML = payers.payers.map((p) => `<button class="chip" data-payer="${esc(p)}">${esc(p)}</button>`).join("");
   $("#ch-payer-chips").addEventListener("click", (ev) => { const b = ev.target.closest(".chip"); if (b) b.classList.toggle("on"); });
-  $("#ch-subjects").innerHTML = subjects.entities.map((e) => `<option value="${esc(e)}">`).join("") +
+  if (subjects) $("#ch-subjects").innerHTML = subjects.entities.map((e) => `<option value="${esc(e)}">`).join("") +
     subjects.tins.map((t) => `<option value="${esc(t.tin_value)}">${esc(t.display_name)}</option>`).join("");
   $("#ch-run").addEventListener("click", runChanges);
   $("#ch-csv").addEventListener("click", () => { if (state.lastChangesPayload) postDownload("/api/changes.csv", state.lastChangesPayload, "rate_changes.csv"); });

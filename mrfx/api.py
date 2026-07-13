@@ -738,7 +738,9 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     def months():
         with store.connect() as con:
             rows = con.execute(
-                "SELECT DISTINCT file_month FROM rates_by_tin ORDER BY file_month DESC"
+                "SELECT DISTINCT file_month FROM rates_by_tin "
+                "WHERE file_month IS NOT NULL AND file_month <> '' "
+                "ORDER BY file_month DESC"
             ).fetchall()
         return {"months": [r[0] for r in rows]}
 
