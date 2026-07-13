@@ -671,6 +671,25 @@ function renderTrend(el, rows) {
 // orgs newly identified by NPPES enrichment (fresh auto-grouped subjects) and
 // newly-ingested months appear without a page reload. Never clears the month
 // the user already picked; transient fetch errors leave the existing lists.
+// Subject picker is a server-side TYPEAHEAD: the API returns at most ~50
+// matches, so the whole (possibly huge) directory is never serialized. The
+// datalist starts with a "largest practices" set and refills as the user types.
+function subjectOptionsHtml(data) {
+  return (data.entities || []).map((e) => `<option value="${esc(e)}"></option>`).join("") +
+    (data.tins || []).map((t) => `<option value="${esc(t.tin_value)}">${esc(t.display_name)}</option>`).join("");
+}
+function wireSubjectSearch(inputSel, datalistSel) {
+  const input = $(inputSel);
+  if (!input || input.dataset.searchWired) return;   // wire once
+  input.dataset.searchWired = "1";
+  input.addEventListener("input", debounce(async () => {
+    try {
+      const data = await api(`/api/benchmark/subjects?q=${encodeURIComponent(input.value.trim())}`);
+      const dl = $(datalistSel); if (dl) dl.innerHTML = subjectOptionsHtml(data);
+    } catch { /* keep the current options on a transient failure */ }
+  }, 200));
+}
+
 async function refreshSubjectPickers(subjSel, monthSels = []) {
   let subjects, months;
   try {
@@ -678,9 +697,7 @@ async function refreshSubjectPickers(subjSel, monthSels = []) {
       api("/api/benchmark/subjects"), api("/api/months"),
     ]);
   } catch { return; }
-  if (subjSel) $(subjSel).innerHTML =
-    subjects.entities.map((e) => `<option value="${esc(e)}">`).join("") +
-    subjects.tins.map((t) => `<option value="${esc(t.tin_value)}">${esc(t.display_name)}</option>`).join("");
+  if (subjSel) $(subjSel).innerHTML = subjectOptionsHtml(subjects);
   const opts = months.months.map((m) => `<option>${esc(m)}</option>`).join("");
   for (const ms of monthSels) {
     const el = $(ms.sel); if (!el) continue;
@@ -704,9 +721,8 @@ async function initBenchmark() {
     api("/api/payers").catch(() => null),
     api("/api/peersets").catch(() => null),
   ]);
-  if (subjects) $("#b-subjects").innerHTML =
-    subjects.entities.map((e) => `<option value="${esc(e)}">`).join("") +
-    subjects.tins.map((t) => `<option value="${esc(t.tin_value)}">${esc(t.display_name)}</option>`).join("");
+  if (subjects) $("#b-subjects").innerHTML = subjectOptionsHtml(subjects);
+  wireSubjectSearch("#b-subject", "#b-subjects");
   fillMonthSelect("#b-month", months);
   if (payers) $("#b-payer-chips").innerHTML = payers.payers.map((p) =>
     `<button class="chip" data-payer="${esc(p)}">${esc(p)}</button>`).join("");
@@ -943,9 +959,8 @@ async function initRatecard() {
     api("/api/months").catch(() => null),
     api("/api/payers").catch(() => null),
   ]);
-  if (subjects) $("#rc-subjects").innerHTML =
-    subjects.entities.map((e) => `<option value="${esc(e)}">`).join("") +
-    subjects.tins.map((t) => `<option value="${esc(t.tin_value)}">${esc(t.display_name)}</option>`).join("");
+  if (subjects) $("#rc-subjects").innerHTML = subjectOptionsHtml(subjects);
+  wireSubjectSearch("#rc-subject", "#rc-subjects");
   fillMonthSelect("#rc-month", months);
   if (payers) $("#rc-payer-chips").innerHTML = payers.payers.map((p) =>
     `<button class="chip" data-payer="${esc(p)}">${esc(p)}</button>`).join("");
@@ -1093,8 +1108,8 @@ async function initLeads() {
   if (payers) $("#ld-payer-chips").innerHTML = payers.payers.map((p) => `<button class="chip" data-payer="${esc(p)}">${esc(p)}</button>`).join("");
   $("#ld-payer-chips").addEventListener("click", (ev) => { const b = ev.target.closest(".chip"); if (b) b.classList.toggle("on"); });
   if (states) $("#ld-states").innerHTML = (states.states || []).map((s) => `<option value="${esc(s)}">`).join("");
-  if (subjects) $("#ld-subjects").innerHTML = subjects.entities.map((e) => `<option value="${esc(e)}">`).join("") +
-    subjects.tins.map((t) => `<option value="${esc(t.tin_value)}">${esc(t.display_name)}</option>`).join("");
+  if (subjects) $("#ld-subjects").innerHTML = subjectOptionsHtml(subjects);
+  wireSubjectSearch("#ld-exclude", "#ld-subjects");
   $("#ld-run").addEventListener("click", runLeads);
   $("#ld-csv").addEventListener("click", () => { if (state.lastLeadsPayload) postDownload("/api/leads.csv", state.lastLeadsPayload, "leads.csv"); });
 }
@@ -1176,8 +1191,8 @@ async function initChanges() {
   fillMonthSelect("#ch-prev", months, `<option value="">auto — the previous month present</option>`);
   if (payers) $("#ch-payer-chips").innerHTML = payers.payers.map((p) => `<button class="chip" data-payer="${esc(p)}">${esc(p)}</button>`).join("");
   $("#ch-payer-chips").addEventListener("click", (ev) => { const b = ev.target.closest(".chip"); if (b) b.classList.toggle("on"); });
-  if (subjects) $("#ch-subjects").innerHTML = subjects.entities.map((e) => `<option value="${esc(e)}">`).join("") +
-    subjects.tins.map((t) => `<option value="${esc(t.tin_value)}">${esc(t.display_name)}</option>`).join("");
+  if (subjects) $("#ch-subjects").innerHTML = subjectOptionsHtml(subjects);
+  wireSubjectSearch("#ch-subject", "#ch-subjects");
   $("#ch-run").addEventListener("click", runChanges);
   $("#ch-csv").addEventListener("click", () => { if (state.lastChangesPayload) postDownload("/api/changes.csv", state.lastChangesPayload, "rate_changes.csv"); });
 }

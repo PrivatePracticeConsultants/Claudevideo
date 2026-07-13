@@ -840,6 +840,26 @@ def test_keep_warm_pins_settings_and_stays_correct(tmp_path):
         assert con.execute("SELECT 1").fetchone()[0] == 1
 
 
+def test_benchmark_subjects_search_and_cap(cfg, store):
+    # the subject picker is a server-side typeahead: capped so it stays fast on a
+    # big store, and filterable by org name or TIN.
+    data = innetwork(items=[item("97110", [
+        ([f"1{i:09d}"], f"43{i:07d}"[:9], "ein", [(40.0 + i, None)]) for i in range(120)
+    ])])
+    ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "s.json", data))
+    for i in range(120):
+        store.save_npi(f"1{i:09d}", ("Acme PT" if i % 2 else "Beacon Rehab") + f" {i}",
+                       None, None, "KC", "MO", entity_type="NPI-2")
+    store.rebuild_rollups()
+    c = TestClient(create_app(cfg, store))
+    default = c.get("/api/benchmark/subjects?limit=50").json()
+    assert 0 < len(default["tins"]) <= 50            # capped, not all 120
+    acme = c.get("/api/benchmark/subjects?q=acme").json()
+    assert acme["tins"] and all("acme" in t["display_name"].lower() for t in acme["tins"])
+    tinq = c.get("/api/benchmark/subjects?q=430000005").json()
+    assert any(t["tin_value"].startswith("430000005") for t in tinq["tins"])
+
+
 def test_config_duckdb_memory_knob(tmp_path):
     from mrfx.config import load_mrfx_config
     p = tmp_path / "mrfx.yaml"

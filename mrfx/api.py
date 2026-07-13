@@ -1052,23 +1052,40 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     # -- benchmarks (§7B) --------------------------------------------------------------
 
     @app.get("/api/benchmark/subjects")
-    def benchmark_subjects():
+    def benchmark_subjects(q: str = "", limit: int = Query(50, ge=1, le=500)):
+        """Subject typeahead. Returns at most `limit` matches so the picker stays
+        fast on a national store (hundreds of thousands of TINs) — the whole
+        directory used to be serialized on every tab open. `q` filters by org
+        name or TIN; empty `q` returns the largest practices as a starter set."""
         emap = store.entity_map()
+        ql = q.strip().lower()
+        like = f"%{ql}%"
         with store.connect() as con:
-            tins = _dicts(con.execute(
-                "SELECT tin_value, display_name, npi_count, states FROM tin_directory "
-                "ORDER BY display_name"
-            ))
             # auto-grouped orgs: an NPPES org name shared by >1 TIN is ONE
             # practice on the Explorer's entity grain, and resolve_subject_tins
             # expands the name to all its TINs — but without this it had no
             # single picker option, so a multi-location org got benchmarked as a
             # lone fragment TIN. Exclude the 'TIN …' no-name fallback labels.
+            auto_sql = ("SELECT display_name FROM tin_directory "
+                        "WHERE display_name NOT LIKE 'TIN %' "
+                        + ("AND lower(display_name) LIKE ? " if ql else "")
+                        + "GROUP BY display_name HAVING count(*) > 1 LIMIT ?")
             auto = [r[0] for r in con.execute(
-                "SELECT display_name FROM tin_directory WHERE display_name NOT LIKE 'TIN %' "
-                "GROUP BY display_name HAVING count(*) > 1"
-            ).fetchall()]
+                auto_sql, ([like] if ql else []) + [limit]).fetchall()]
+            if ql:
+                tins = _dicts(con.execute(
+                    "SELECT tin_value, display_name, npi_count, states FROM tin_directory "
+                    "WHERE lower(display_name) LIKE ? OR tin_value LIKE ? "
+                    "ORDER BY npi_count DESC NULLS LAST, display_name LIMIT ?",
+                    [like, f"{ql}%", limit]))
+            else:
+                tins = _dicts(con.execute(
+                    "SELECT tin_value, display_name, npi_count, states FROM tin_directory "
+                    "ORDER BY npi_count DESC NULLS LAST, display_name LIMIT ?", [limit]))
         entities = sorted(set(emap.values()) | set(auto))
+        if ql:
+            entities = [e for e in entities if ql in e.lower()]
+        entities = entities[:limit]
         # SSN-pattern TINs are masked on EVERY surface — a subject picker that
         # displays the raw nine digits would be the one exception. They can't
         # be selectable anyway (the mask can't round-trip to a lookup key), so
