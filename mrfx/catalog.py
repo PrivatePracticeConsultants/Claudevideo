@@ -135,13 +135,19 @@ def therapy_taxonomy_sql(col: str, prefixes=THERAPY_TAXONOMY_PREFIXES,
 # ONCE per worker, not per file. Keyed on the file signature so a rebuilt cache
 # reloads.
 _therapy_npi_cache: dict[tuple, frozenset] = {}
+# A cache built from the full NPPES monthly has ~8-9M rows; a weekly/partial file
+# has far fewer. Filtering ingest against a partial cache would drop REAL
+# therapists (they just aren't in that small file), so below this we decline to
+# filter and keep everything. Matches enrich._BULK_MIN_FULL_ROWS.
+_THERAPY_CACHE_MIN_ROWS = 2_000_000
 
 
 def therapy_npi_set(cache_parquet) -> frozenset[str] | None:
     """The set of NPIs that are PT/OT/SLP or a therapy clinic, read from the
     NPPES fast-lookup parquet. Returns None when the cache is missing/unreadable
-    — the caller then keeps every row rather than silently dropping the whole
-    file. Used by the parser when config.therapy_only_ingest is on."""
+    OR looks partial (too few rows to be the full NPPES) — the caller then keeps
+    every row rather than silently dropping real therapists. Used by the parser
+    when config.therapy_only_ingest is on."""
     from pathlib import Path
     p = Path(cache_parquet)
     try:
@@ -155,7 +161,11 @@ def therapy_npi_set(cache_parquet) -> frozenset[str] | None:
     try:
         import duckdb
         pth = str(p).replace("'", "''")
-        rows = duckdb.connect().execute(
+        con = duckdb.connect()
+        total = con.execute(f"SELECT count(*) FROM read_parquet('{pth}')").fetchone()[0]
+        if total < _THERAPY_CACHE_MIN_ROWS:
+            return None  # partial/weekly file — don't trust it to classify therapists
+        rows = con.execute(
             f"SELECT npi FROM read_parquet('{pth}') "
             f"WHERE {therapy_taxonomy_sql('taxonomy_code')}").fetchall()
         result = frozenset(r[0] for r in rows if r[0])

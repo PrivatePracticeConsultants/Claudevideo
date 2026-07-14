@@ -848,11 +848,15 @@ def test_therapy_only_ingest_drops_non_therapists(cfg, store, tmp_path, monkeypa
     import zipfile as _zip
     from pathlib import Path
 
+    import mrfx.catalog as C
     import mrfx.enrich as E
     from mrfx.enrich import _BULK_COLS, enrich_via_bulk
     monkeypatch.setattr(E, "_bulk_sig", None)
     monkeypatch.setattr(E, "_bulk_absent", set())
     monkeypatch.setattr(E, "_BULK_MIN_FULL_ROWS", 1)
+    # the real NPPES monthly has ~8-9M rows; trust this tiny test cache
+    monkeypatch.setattr(C, "_THERAPY_CACHE_MIN_ROWS", 1)
+    monkeypatch.setattr(C, "_therapy_npi_cache", {})
     hdr = [_BULK_COLS[k] for k in
            ("npi", "org", "first", "last", "city", "state", "tax1", "entity", "address", "zip", "phone")]
     buf = _io.StringIO()
@@ -882,6 +886,20 @@ def test_therapy_only_ingest_drops_non_therapists(cfg, store, tmp_path, monkeypa
             "SELECT qa FROM files WHERE filename='filt.json'").fetchone()[0])
     assert npis == {"1000000001", "1000000003"}      # PT + SLP kept, MD dropped
     assert qa["non_therapy_dropped"] == 1            # the drop is counted for transparency
+
+    # NPI-in-TIN-slot: an NPI sitting in the tin slot (empty npi array) IS
+    # classifiable — the MD there is dropped, the PT there is kept (a genuine
+    # EIN TIN-only rate, below, is always kept since there's no NPI to judge).
+    ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "slot.json", innetwork(items=[
+        item("97116", [([], "1000000002", "npi", [(60.0, None)])])])))     # MD in tin slot
+    ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "slot2.json", innetwork(items=[
+        item("97116", [([], "1000000001", "npi", [(61.0, None)]),           # PT in tin slot
+                       ([], "43-3333333", "ein", [(62.0, None)])])])))      # genuine EIN TIN-only
+    with store.connect() as con:
+        tins = {r[0] for r in con.execute(
+            "SELECT tin_value FROM rates WHERE billing_code='97116'").fetchall()}
+    assert "1000000002" not in tins                  # MD-in-tin-slot dropped
+    assert {"1000000001", "433333333"} <= tins       # PT-in-slot + EIN TIN-only kept
 
 
 def test_store_migrates_stale_rollup_schema(cfg, store):

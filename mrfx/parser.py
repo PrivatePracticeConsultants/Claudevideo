@@ -586,6 +586,16 @@ class InNetworkParser:
                     # NPI carries nothing and is still skipped.
                     if not tin_value:
                         continue
+                    # therapy_only_ingest: when the "TIN" is really an NPI in the
+                    # tin slot (tin.type=="npi", empty npi array), it IS
+                    # classifiable — drop it if that NPI isn't a therapist. A
+                    # genuine EIN TIN-only rate has no NPI to judge, so it is
+                    # always kept (the honest TIN-grain rate).
+                    if (self._therapy_npis is not None
+                            and tin_flags["tin_is_really_npi"]
+                            and tin_value not in self._therapy_npis):
+                        r.qa.non_therapy_dropped += 1
+                        continue
                     row = {**row_base, **tin_flags, "npi": None}
                     (r.rows if self._sink is None else self._buffer).append(row)
                     r.qa.rows += 1
