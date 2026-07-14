@@ -133,8 +133,19 @@ ROLLUP_PARTITION_ROWS = 15_000_000
 # The rollup's median/DISTINCT/list aggregates can't spill to disk, so peak RAM
 # tracks rows-per-slice. Budget this many raw rows per GB of memory limit: keeps
 # a slice's in-memory hash tables comfortably under the cap (≈15M rows at an
-# 8 GB limit, matching the validated default; ≈8M at 4 GB).
+# 8 GB limit, matching the validated default; ≈8M at 4 GB). This is the
+# SINGLE-THREAD budget — DuckDB keeps one hash table per thread, so the slice
+# size is divided by the rebuild's thread count (see _rollup_partition_rows).
 ROLLUP_ROWS_PER_GB = 2_000_000
+# Parallelism cap for a rollup rebuild. The un-spillable per-thread hash tables
+# mean peak RAM ≈ threads × slice-size, so unbounded threads on a many-core box
+# multiply memory past the limit (→ OOM → the slow single-threaded fallback) AND
+# over-partition (with only ~21 distinct billing codes, extra slices are wasted
+# full scans). A moderate cap keeps the FIRST attempt both parallel (fast) and
+# within budget: slices are sized for exactly this many threads, so the build
+# fits on the first try instead of falling back. Kept low enough that
+# threads × (slice ≈ memory_limit/threads) leaves comfortable headroom.
+ROLLUP_MAX_THREADS = 4
 
 DEDUP_QUERY = """
     SELECT payer, npi, billing_code,
@@ -1079,14 +1090,18 @@ class Store:
                 raise
         return {"rows": rows, "bytes": freed}
 
-    def _rollup_partition_rows(self, split: int = 1) -> int:
+    def _rollup_partition_rows(self, split: int = 1, threads: int = 1) -> int:
         """Rows per hash-partition slice for a rollup rebuild. Capped both by the
         module ceiling (ROLLUP_PARTITION_ROWS, honored so tests can force many
         slices) AND by what fits the memory limit (ROLLUP_ROWS_PER_GB), so a
-        small-RAM machine slices finer automatically instead of OOM-ing. `split`
-        is the retry escalator: each doubling subdivides further when a build
-        still hit the limit."""
+        small-RAM machine slices finer automatically instead of OOM-ing. `threads`
+        divides the budget because DuckDB keeps one un-spillable hash table per
+        thread, so a parallel build peaks at ≈threads × slice-size — sizing for
+        the thread count lets the fast multi-threaded pass fit on the first try.
+        `split` is the retry escalator: each doubling subdivides further when a
+        build still hit the limit."""
         mem_scaled = max(1_000_000, self._memory_limit_gb * ROLLUP_ROWS_PER_GB)
+        mem_scaled = max(1_000_000, mem_scaled // max(1, threads))
         base = min(ROLLUP_PARTITION_ROWS, mem_scaled)
         return max(1, base // max(1, split))
 
@@ -1104,19 +1119,38 @@ class Store:
         self.data_generation += 1          # invalidate the API row-count cache
         with self.write_lock, self.connect() as con:
             self._register_views(con)  # rates view must see current parts first
+            # Cap parallelism for the rebuild and size the slices for that thread
+            # count. The un-spillable per-thread hash tables make peak RAM scale
+            # with threads, so an unbounded multi-threaded first attempt on a big
+            # store OOMs — then the old code fell back to a SINGLE-threaded rebuild
+            # that could take an hour on tens of millions of rows. Capping to
+            # ROLLUP_MAX_THREADS keeps the first attempt parallel (fast) while its
+            # slices are sized to fit, so it succeeds without the slow fallback.
             try:
-                self._build_rollup_tables(con)
-                return
-            except duckdb.OutOfMemoryException:
-                log.warning("rollup rebuild hit the memory limit; retrying "
-                            "single-threaded with finer partitions")
-            # SET threads is GLOBAL to the shared instance: restore it or every
-            # other connection stays single-threaded forever.
-            con.execute("SET threads = 1")
+                avail = int(con.execute("SELECT current_setting('threads')").fetchone()[0])
+            except Exception:  # noqa: BLE001 — older duckdb / odd value
+                avail = 1
+            build_threads = max(1, min(avail, ROLLUP_MAX_THREADS))
+            reset_threads = False
             try:
+                con.execute(f"SET threads = {build_threads}")
+                reset_threads = True
+            except duckdb.Error:
+                build_threads = avail  # couldn't cap; size for what's running
+            try:
+                try:
+                    self._build_rollup_tables(con, threads=build_threads)
+                    return
+                except duckdb.OutOfMemoryException:
+                    log.warning("rollup rebuild hit the memory limit; retrying "
+                                "single-threaded with finer partitions")
+                # SET threads is GLOBAL to the shared instance: restore it or every
+                # other connection stays single-threaded forever.
+                con.execute("SET threads = 1")
+                reset_threads = True
                 for split in (1, 2, 4, 8, 16):
                     try:
-                        self._build_rollup_tables(con, split=split)
+                        self._build_rollup_tables(con, split=split, threads=1)
                         return
                     except duckdb.OutOfMemoryException:
                         if split == 16:
@@ -1124,12 +1158,14 @@ class Store:
                         log.warning("rollup still over the memory limit at "
                                     "split=%d; subdividing further", split)
             finally:
-                try:
-                    con.execute("RESET threads")
-                except duckdb.Error:
-                    pass
+                if reset_threads:
+                    try:
+                        con.execute("RESET threads")
+                    except duckdb.Error:
+                        pass
 
-    def _build_rollup_tables(self, con: duckdb.DuckDBPyConnection, split: int = 1) -> None:
+    def _build_rollup_tables(self, con: duckdb.DuckDBPyConnection, split: int = 1,
+                             threads: int = 1) -> None:
         # rates_dedup stays a LIVE VIEW: at NPI×rate grain its groups are
         # nearly one-per-row (a 30M-row store means a ~30M-group hash
         # aggregation whose spill can exceed any reasonable disk). Drill-down
@@ -1148,11 +1184,11 @@ class Store:
         con.execute("DROP TABLE IF EXISTS rates_dedup_tbl")
         con.execute(f"CREATE OR REPLACE VIEW rates_dedup AS {DEDUP_QUERY}")
         n_rows = con.execute("SELECT count(*) FROM rates").fetchone()[0] or 0
-        rows_per_part = self._rollup_partition_rows(split)
+        rows_per_part = self._rollup_partition_rows(split, threads)
         parts = max(1, -(-n_rows // rows_per_part))
-        if split > 1:
-            log.info("rollup rebuild: %d partitions (%d rows/slice, split=%d)",
-                     parts, rows_per_part, split)
+        if parts > 1:
+            log.info("rollup rebuild: %d partitions (%d rows/slice, %d threads, split=%d)",
+                     parts, rows_per_part, threads, split)
         # ONE TRANSACTION around the whole rebuild: a mid-slice failure (temp
         # cap, memory, crash) must roll back to the PREVIOUS complete tables —
         # a partially-filled rollup served as truth silently loses billing

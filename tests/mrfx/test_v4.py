@@ -832,6 +832,11 @@ def test_duckdb_memory_override_and_partition_scaling(tmp_path):
     assert s._rollup_partition_rows(1) == min(ROLLUP_PARTITION_ROWS, 3 * ROLLUP_ROWS_PER_GB)
     assert s._rollup_partition_rows(4) == s._rollup_partition_rows(1) // 4
     assert s._rollup_partition_rows(10 ** 9) >= 1          # floors at 1, never 0
+    # a parallel build divides the per-slice budget by the thread count (one
+    # un-spillable hash table per thread), so it fits without OOM-ing
+    assert s._rollup_partition_rows(1, threads=4) == s._rollup_partition_rows(1) // 4
+    assert s._rollup_partition_rows(1, threads=1) == s._rollup_partition_rows(1)
+    assert s._rollup_partition_rows(1, threads=10 ** 9) >= 1  # still floors at 1
     assert Store(tmp_path / "st2", memory_limit_gb=0)._memory_limit_gb == 1  # never below 1
     s3 = Store(tmp_path / "st3")                            # auto mode
     assert 2 <= s3._memory_limit_gb <= 12

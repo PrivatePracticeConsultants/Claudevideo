@@ -529,6 +529,15 @@ them in one place, grouped by where you'll hit them.
   look at the `mrfx serve` terminal window: a "rollup rebuild failed" line
   there usually means low disk — free some space; the raw data is safe and
   analytics catch up on the next successful rebuild.
+- **I saw an "Out of Memory" line and the rebuild slowed to a crawl** — on a
+  very large store (tens of millions of rate rows) the analytics rebuild can hit
+  its memory cap. It recovers on its own: it caps how many CPU cores it uses for
+  the rebuild and sizes each pass to fit, and if a pass still doesn't fit it
+  retries in progressively smaller slices — so it always finishes, just more
+  slowly, and your data is never at risk. If your machine has plenty of spare
+  RAM and you want it faster, raise the cap in `config/mrfx.yaml`, e.g.
+  `duckdb_memory_gb: 8` on a 16 GB box, and restart. (Leave it unset to let the
+  app pick a kernel-safe default automatically.)
 - **The whole machine ran out of disk mid-grind** — deletes still work:
   clear `data/processed/`, old exports, anything large; the app's guards
   keep 2 GB headroom and cap its own temp usage, and every interrupted
