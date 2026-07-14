@@ -42,16 +42,20 @@ def _apply_nppes_result(store: Store, npi: str, data: dict) -> None:
         store.save_npi(npi, None, None, None, None, None)  # genuine dead NPI: don't retry forever
         return
     r = results[0]
-    basic = r.get("basic", {})
+    # `.get(k, default)` returns the default only when the key is ABSENT — a
+    # present-but-null value (NPPES does emit "basic": null / "taxonomies": null)
+    # returns None, so `None.get(...)` / `for x in None` would throw an uncaught
+    # TypeError that aborts the whole enrichment cycle. Coerce every container.
+    basic = r.get("basic") or {}
     name = basic.get("organization_name") or " ".join(
         p for p in (basic.get("first_name"), basic.get("last_name")) if p
     ) or None
-    tax = next((t for t in r.get("taxonomies", []) if t.get("primary")), None) or (
-        r.get("taxonomies") or [{}]
-    )[0]
+    taxonomies = r.get("taxonomies") or []
+    tax = next((t for t in taxonomies if t.get("primary")), None) or (taxonomies or [{}])[0]
+    addresses = r.get("addresses") or []
     addr = next(
-        (a for a in r.get("addresses", []) if a.get("address_purpose") == "LOCATION"),
-        (r.get("addresses") or [{}])[0],
+        (a for a in addresses if a.get("address_purpose") == "LOCATION"),
+        (addresses or [{}])[0],
     )
     store.save_npi(
         npi, name, tax.get("code"), tax.get("desc"),

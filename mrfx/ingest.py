@@ -545,23 +545,27 @@ def ingest_file(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight | None 
 def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight | None,
                         progress_bar, rebuild_rollups: bool) -> dict:
     name = path.name
-    if pf is None:
-        pf = preflight(path, cfg, store)
-
-    store.upsert_file(
-        name,
-        payer=pf.payer,
-        file_type=pf.file_type,
-        status="processing",
-        schema_version=pf.schema_version,
-        last_updated_on=pf.last_updated_on,
-        size_bytes=pf.compressed_bytes,
-        preflight=pf.to_dict(),
-        started_at=_now(),
-        error=None,
-    )
-
     try:
+        # preflight + the initial 'processing' upsert live INSIDE the try so a
+        # corrupt file (e.g. a truncated .gz that makes preflight raise) on the
+        # one-shot CLI / requeue path becomes a 'failed' row with a plain
+        # message, not a raw traceback — honoring the "never raises" contract.
+        if pf is None:
+            pf = preflight(path, cfg, store)
+
+        store.upsert_file(
+            name,
+            payer=pf.payer,
+            file_type=pf.file_type,
+            status="processing",
+            schema_version=pf.schema_version,
+            last_updated_on=pf.last_updated_on,
+            size_bytes=pf.compressed_bytes,
+            preflight=pf.to_dict(),
+            started_at=_now(),
+            error=None,
+        )
+
         if pf.file_type == "toc":
             msg = "index/TOC file — not a rate file; drop the in-network files it references"
             store.upsert_file(name, status="quarantined", error=msg, finished_at=_now())

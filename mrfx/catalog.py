@@ -162,13 +162,23 @@ def therapy_npi_set(cache_parquet) -> frozenset[str] | None:
         import duckdb
         pth = str(p).replace("'", "''")
         con = duckdb.connect()
-        total = con.execute(f"SELECT count(*) FROM read_parquet('{pth}')").fetchone()[0]
-        if total < _THERAPY_CACHE_MIN_ROWS:
-            return None  # partial/weekly file — don't trust it to classify therapists
-        rows = con.execute(
-            f"SELECT npi FROM read_parquet('{pth}') "
-            f"WHERE {therapy_taxonomy_sql('taxonomy_code')}").fetchall()
+        try:
+            total = con.execute(f"SELECT count(*) FROM read_parquet('{pth}')").fetchone()[0]
+            if total < _THERAPY_CACHE_MIN_ROWS:
+                return None  # partial/weekly file — don't trust it to classify therapists
+            rows = con.execute(
+                f"SELECT npi FROM read_parquet('{pth}') "
+                f"WHERE {therapy_taxonomy_sql('taxonomy_code')}").fetchall()
+        finally:
+            con.close()  # don't leak a connection per file on the long grind
         result = frozenset(r[0] for r in rows if r[0])
+        if not result:
+            # A full-size file that matches ZERO therapy taxonomies means the
+            # taxonomy column is unusable (all-NULL / wrong layout / renamed) —
+            # a real full NPPES has hundreds of thousands of therapists. Trust
+            # nothing here and keep every row rather than silently wiping the
+            # store on a "successful"-looking ingest.
+            return None
     except Exception:  # noqa: BLE001 — unreadable cache -> keep all rows
         return None
     _therapy_npi_cache[key] = result

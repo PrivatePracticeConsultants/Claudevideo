@@ -239,7 +239,11 @@ def parse_provider_group(pg: dict, qa: QaCounters | None = None) -> PGroup:
                 qa.invalid_npis += 1
             continue
         npis.append(d)
-    tin = pg.get("tin") or {}
+    # a truthy non-dict tin (some payers write "tin": "123456789" or a list
+    # instead of the {type,value} object) would make tin.get() raise and fail
+    # the WHOLE file — guard it like every other messy-field path does
+    tin = pg.get("tin")
+    tin = tin if isinstance(tin, dict) else {}
     tin_type = str(tin.get("type") or "").strip().lower() or None
     raw = tin.get("value")
     if tin_type == "npi":

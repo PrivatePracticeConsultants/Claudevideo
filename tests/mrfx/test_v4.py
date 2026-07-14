@@ -159,6 +159,38 @@ def test_ssn_pattern_tin_masked():
     assert mask_tin("431111111") == "431111111"
 
 
+def test_malformed_tin_object_does_not_crash_file(cfg, store):
+    # a payer that writes "tin" as a bare string or a list (not the {type,value}
+    # object) must not take down the WHOLE file — the bad group is tolerated and
+    # the valid sibling group in the same item still lands.
+    from mrfx.parser import parse_provider_group
+    # unit: non-dict tin slots return an empty-TIN group instead of raising
+    assert parse_provider_group({"npi": ["1111111111"], "tin": "123456789"}) == (None, None, ("1111111111",))
+    assert parse_provider_group({"npi": ["2222222222"], "tin": ["43-1"]}) == (None, None, ("2222222222",))
+
+    # end-to-end: a file whose first group has a string tin still ingests; the
+    # good group's rate is captured, and the file status is 'done' not 'failed'.
+    data = innetwork(items=[{
+        "negotiation_arrangement": "ffs", "billing_code_type": "CPT",
+        "billing_code_type_version": "2026", "billing_code": "97110",
+        "negotiated_rates": [{
+            "provider_groups": [
+                {"npi": ["1111111111"], "tin": "123456789"},               # malformed
+                {"npi": ["2222222222"], "tin": {"type": "ein", "value": "43-7777777"}},
+            ],
+            "negotiated_prices": [{"negotiated_type": "negotiated",
+                                   "negotiated_rate": 42.0, "service_code": ["11"],
+                                   "billing_class": "professional"}],
+        }],
+    }])
+    rec = ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "badtin.json", data))
+    assert rec["status"] == "done"
+    with store.connect() as con:
+        tins = {r[0] for r in con.execute(
+            "SELECT tin_value FROM rates WHERE billing_code='97110'").fetchall()}
+    assert "437777777" in tins       # the well-formed sibling group survived
+
+
 def test_discipline_attribution(cfg, store):
     data = innetwork(items=[
         item("97110", [ (["1111111111"], "43-5555555", "ein",
@@ -900,6 +932,50 @@ def test_therapy_only_ingest_drops_non_therapists(cfg, store, tmp_path, monkeypa
             "SELECT tin_value FROM rates WHERE billing_code='97116'").fetchall()}
     assert "1000000002" not in tins                  # MD-in-tin-slot dropped
     assert {"1000000001", "433333333"} <= tins       # PT-in-slot + EIN TIN-only kept
+
+
+def test_therapy_npi_set_distrusts_full_cache_with_no_therapists(tmp_path, monkeypatch):
+    # a full-SIZE cache whose taxonomy column is unusable (all-NULL / wrong
+    # layout) matches zero therapists -> must return None (keep all), NOT an
+    # empty set that would silently drop every real therapist row at ingest.
+    import duckdb
+
+    import mrfx.catalog as C
+    monkeypatch.setattr(C, "_THERAPY_CACHE_MIN_ROWS", 3)
+    monkeypatch.setattr(C, "_therapy_npi_cache", {})
+    pq = tmp_path / "nppes_cache.parquet"
+    con = duckdb.connect()
+    # 4 rows (over the min), every taxonomy_code NULL -> no therapy match
+    con.execute("CREATE TABLE t(npi VARCHAR, taxonomy_code VARCHAR)")
+    con.execute("INSERT INTO t VALUES ('1','x'),('2',NULL),('3',NULL),('4',NULL)")
+    con.execute("UPDATE t SET taxonomy_code=NULL")
+    con.execute(f"COPY t TO '{pq}' (FORMAT PARQUET)")
+    con.close()
+    assert C.therapy_npi_set(pq) is None      # fail safe: keep everything
+
+    # sanity: a cache WITH a real therapist taxonomy returns that npi
+    con = duckdb.connect()
+    con.execute("CREATE TABLE t(npi VARCHAR, taxonomy_code VARCHAR)")
+    con.execute("INSERT INTO t VALUES ('9','2251X00000X'),('8','207R00000X'),"
+                "('7','225100000X'),('6',NULL)")
+    pq2 = tmp_path / "nppes_cache2.parquet"
+    con.execute(f"COPY t TO '{pq2}' (FORMAT PARQUET)")
+    con.close()
+    got = C.therapy_npi_set(pq2)
+    assert got is not None and "9" in got and "7" in got and "8" not in got
+
+
+def test_apply_nppes_result_tolerates_null_fields(cfg, store):
+    # NPPES can emit "basic": null / "taxonomies": null / "addresses": null — a
+    # present-but-null container must not throw an uncaught TypeError that aborts
+    # the enrichment cycle; the NPI is saved with whatever is available.
+    from mrfx.enrich import _apply_nppes_result
+    _apply_nppes_result(store, "1234567893", {"results": [{
+        "enumeration_type": "NPI-1", "number": "1234567893",
+        "basic": None, "taxonomies": None, "addresses": None}]})
+    with store.connect() as con:
+        row = con.execute("SELECT npi FROM npi_directory WHERE npi='1234567893'").fetchone()
+    assert row is not None       # saved, no crash
 
 
 def test_store_migrates_stale_rollup_schema(cfg, store):
