@@ -278,6 +278,61 @@ Once a file is `done`:
 
 ---
 
+## Make provider names fill in fast (recommended)
+
+The rates load with raw NPI numbers first, then the app fills in each
+provider's **name, city/state, and taxonomy** in the background. You'll see a
+banner like *"5,192 / 854,692 names (identifying 849,492 more…)"* while it
+works.
+
+Out of the box that runs in **`api` mode** — it looks each NPI up one at a
+time over the internet against the public NPPES service, which is heavily
+rate-limited. For a big book (hundreds of thousands of providers) that can
+take **days**. If your banner is climbing only a few thousand per day, this is
+why.
+
+**The fast way — point it at the NPPES bulk file (one local pass, minutes):**
+
+1. Download the **NPPES full monthly file** (a ~1 GB `.zip`) from
+   <https://download.cms.gov/nppes/NPI_Files.html>. Keep it as the `.zip` — you
+   do **not** need to unzip it.
+2. In `config/mrfx.yaml`, change the `enrichment:` block to:
+
+   ```yaml
+   enrichment:
+     mode: bulk
+     bulk_csv_path: 'E:\NPPES_Data_Dissemination_July_2026_V2.zip'
+   ```
+
+   Use the real path to *your* download. On Windows, **keep the single quotes**
+   around the path (or write it with forward slashes,
+   `E:/NPPES_Data_Dissemination_July_2026_V2.zip`) so the backslashes are read
+   correctly.
+3. Restart `mrfx serve`.
+
+The first time it runs, it reads the file **once** (a few minutes) and builds a
+small local lookup cache (`nppes_cache.parquet` in your store folder). After
+that, every provider — the whole backlog at once, and anything new you ingest
+later — is identified in seconds, with no internet lookups.
+
+**Already have a backlog and don't want to restart?** Run this once from a
+terminal (venv active) to clear it immediately, whatever your config says:
+
+```
+mrfx enrich --bulk "E:\NPPES_Data_Dissemination_July_2026_V2.zip"
+```
+
+It prints `identified N name(s)` when done. Safe to run while `mrfx serve` is
+up.
+
+> The app only trusts the **full monthly** file for this (it's ~8–9 million
+> providers). If you accidentally point it at a small *weekly* update, it
+> notices the file is too small, keeps everyone's names instead of blanking
+> them, and leaves the banner honestly above zero until you swap in the full
+> file.
+
+---
+
 ## Command-line reference (optional)
 
 All of these run in a terminal with the venv activated (`(.venv)` in the
@@ -296,6 +351,7 @@ prompt). They're an alternative to the dashboard buttons.
 | `mrfx status` | List ingested files and totals |
 | `mrfx export out.csv --cpt 97110 --payer "Aetna"` | Export a filtered CSV + methodology sidecar (state filtering lives in the dashboard and `mrfx outreach`) |
 | `mrfx outreach contacts.csv --state MO --cpt 97110,97140` | Contact/mail-merge CSV |
+| `mrfx enrich --bulk "E:\NPPES…zip"` | Fill in provider names/geography now, in one fast local pass from the NPPES bulk file (see "Make provider names fill in fast" above) |
 | `mrfx forget <filename> [more…]` | Erase chosen files' rates + raw copies (names from `mrfx status`) |
 | `mrfx reset --confirm` | Clear the analyzed data (keeps your downloaded files) |
 
@@ -480,6 +536,27 @@ them in one place, grouped by where you'll hit them.
   `done` or `failed`, then remove it. Similarly, `mrfx forget` and
   `mrfx reset` refuse while the dashboard is running — use the Files tab's
   remove button instead, or stop the server first.
+
+### Provider names / identification
+
+- **Names are identifying very slowly — the banner crawls up a few thousand a
+  day.** You're in `api` mode, looking each provider up one at a time over the
+  internet (rate-limited, so a big book takes days). Switch to the local NPPES
+  bulk file — see **"Make provider names fill in fast (recommended)"** above.
+  One local pass identifies the whole backlog in minutes. Quick version: set
+  `enrichment.mode: bulk` + `bulk_csv_path` in `config/mrfx.yaml` and restart,
+  or run `mrfx enrich --bulk "E:\NPPES…zip"` right now to clear the backlog.
+- **The banner never reaches zero.** A handful of NPIs in payer files are
+  deactivated or malformed and simply aren't in NPPES — those are marked
+  "identified" (no name found) so the count settles just short of 100% instead
+  of hanging forever. That's expected, not a stall.
+- **I switched to bulk mode but nothing changed / it says the file is too
+  small.** You likely pointed it at an NPPES *weekly* update, not the *full
+  monthly* file. The app refuses to trust a partial file (it would wrongly
+  blank real providers) and keeps everyone's names. Download the full monthly
+  `.zip` from <https://download.cms.gov/nppes/NPI_Files.html> and point
+  `bulk_csv_path` at that. Also check the path is right — on Windows keep it in
+  single quotes or use forward slashes.
 
 ### Getting help
 

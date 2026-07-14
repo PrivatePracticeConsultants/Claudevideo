@@ -56,8 +56,20 @@ store_dir: data/mrfx_store
 move_processed: true          # false = leave files in inbox, track via checkpoint
 
 enrichment:
+  # How provider names/geography get filled in behind the raw NPI numbers.
+  #   api  = look each NPI up over the internet (no download, but rate-limited —
+  #          a big book can take DAYS).
+  #   bulk = one fast local pass over the NPPES monthly file (minutes for the
+  #          whole book, then instant). RECOMMENDED for large books.
+  #   off  = don't identify names.
+  # For bulk: download the FULL monthly .zip from
+  # https://download.cms.gov/nppes/NPI_Files.html, set mode: bulk, and point
+  # bulk_csv_path at it (keep the .zip — no need to unzip). See "Make provider
+  # names fill in fast" in GETTING_STARTED.md.
   mode: api                   # api | bulk | off
-  # bulk_csv_path: /path/to/npidata_pfile_....csv   # NPPES Data Dissemination
+  # On Windows keep the path in single quotes (or use forward slashes) so the
+  # backslashes read correctly:
+  # bulk_csv_path: 'E:\NPPES_Data_Dissemination_July_2026_V2.zip'
 
 # Keep ONLY therapist rows (PT/OT/SLP + therapy clinics, by NPPES taxonomy) at
 # ingest, dropping the MDs/DOs/NPs who merely bill a 97xxx code. Shrinks the
