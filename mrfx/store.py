@@ -339,6 +339,33 @@ class Store:
         with self.write_lock, self.connect() as con:
             self._init_tables(con)
             self._register_views(con)
+        self._migrate_stale_rollups()
+
+    def _migrate_stale_rollups(self) -> None:
+        """A prior version may have materialized the rollup tables WITHOUT a
+        column this version's queries now reference (e.g. is_therapy). Reopening
+        such a store would 500 every dashboard query — the view points at the
+        stale table and the SELECT can't bind the missing column — until an
+        ingest happened to trigger a rebuild. Detect that drift and rebuild once
+        now (best-effort; a rebuild failure must not stop the app from opening)."""
+        try:
+            with self.connect() as con:
+                if not con.execute(
+                    "SELECT count(*) FROM information_schema.tables "
+                    "WHERE table_name = 'tin_directory_tbl'").fetchone()[0]:
+                    return  # no materialized table -> views use the current-schema query
+                cols = {r[0] for r in con.execute(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = 'tin_directory_tbl'").fetchall()}
+            if "is_therapy" not in cols:
+                import logging as _logging
+                _logging.getLogger(__name__).info(
+                    "migrating store: rebuilding rollups for the new is_therapy column")
+                self.rebuild_rollups()
+        except Exception as e:  # noqa: BLE001
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "rollup schema-migration check skipped (%s)", e)
 
     def _sweep_orphan_tmps(self) -> None:
         """Remove half-written `.{key}.{pid}.parquet.tmp` parts (and

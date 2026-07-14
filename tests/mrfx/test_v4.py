@@ -840,6 +840,26 @@ def test_keep_warm_pins_settings_and_stays_correct(tmp_path):
         assert con.execute("SELECT 1").fetchone()[0] == 1
 
 
+def test_store_migrates_stale_rollup_schema(cfg, store):
+    # a store materialized by an OLDER version lacks the is_therapy column;
+    # reopening must self-heal (rebuild) so the dashboard doesn't 500 on every
+    # query until an ingest happens to trigger a rebuild.
+    from mrfx.store import Store
+    ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "m.json", innetwork(items=[
+        item("97110", [(["1000000001"], "43-1000001", "ein", [(40.0, None)])])])))
+    with store.connect() as con:
+        con.execute("ALTER TABLE tin_directory_tbl DROP COLUMN is_therapy")
+        assert "is_therapy" not in {r[0] for r in con.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name='tin_directory_tbl'").fetchall()}
+    s2 = Store(cfg.store_dir)  # reopen triggers the schema migration
+    with s2.connect() as con:
+        assert "is_therapy" in {r[0] for r in con.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name='tin_directory_tbl'").fetchall()}
+    assert TestClient(create_app(cfg, s2)).get("/api/rates?grain=tin").status_code == 200
+
+
 def test_therapy_only_filter(cfg, store):
     # keep only PT/OT/SLP providers & therapy practices (by NPPES taxonomy);
     # drop the MDs/DOs/NPs who merely billed a 97xxx code.

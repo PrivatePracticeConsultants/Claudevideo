@@ -286,10 +286,11 @@ def _ensure_nppes_cache(cfg: MrfxConfig, store: Store, sig: tuple,
         return pqp
     except Exception as e:  # noqa: BLE001 — any failure just falls back to streaming
         log.warning("could not build NPPES fast cache (%s); streaming instead", e)
-        try:
-            pqp.unlink(missing_ok=True)
-        except OSError:
-            pass
+        for leftover in (pqp, pqp.with_suffix(".parquet.tmp")):
+            try:
+                leftover.unlink(missing_ok=True)   # incl. the temp not yet swapped in
+            except OSError:
+                pass
         return None
 
 
