@@ -257,7 +257,17 @@ BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 
 def _client(cfg: MrfxConfig, verify=None, ua: str | None = None) -> httpx.Client:
     return httpx.Client(
-        headers={"User-Agent": ua or cfg.user_agent, "Accept-Encoding": "identity"},
+        # Some payer CDNs (Akamai/Cloudflare fronts) reset a connection almost
+        # immediately for a request that doesn't look like a browser. Send the
+        # headers a browser always would. Accept-Encoding stays `identity`: MRFs
+        # are already gzip, and letting the CDN re-encode complicates resume.
+        headers={
+            "User-Agent": ua or cfg.user_agent,
+            "Accept": "*/*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "identity",
+            "Connection": "keep-alive",
+        },
         follow_redirects=True,
         timeout=httpx.Timeout(cfg.download_timeout_seconds, connect=30.0),
         verify=verify if verify is not None else ssl_verify(),

@@ -31,6 +31,8 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from .catalog import therapy_taxonomy_sql
+
 # Parquet codec for the rate parts. zstd is ~30-50% smaller than the pyarrow
 # default (snappy) on real payer data. Decode is marginally slower than snappy
 # but the store is on local disk and queries are I/O-bound on part SIZE, so the
@@ -234,7 +236,8 @@ TIN_DIRECTORY_QUERY = """
         WHERE tin_value IS NOT NULL AND NOT tin_is_really_npi AND {part}
     ),
     joined AS (
-        SELECT t.tin_value, t.npi, d.entity_type, d.org_name, d.state, d.city
+        SELECT t.tin_value, t.npi, d.entity_type, d.org_name, d.state, d.city,
+               d.taxonomy_code
         FROM tin_npis t LEFT JOIN npi_directory d USING (npi)
     ),
     names AS (
@@ -266,7 +269,13 @@ TIN_DIRECTORY_QUERY = """
                      FILTER (j.state IS NOT NULL)))                 AS states,
            list_sort(list_distinct(list(j.city)
                      FILTER (j.city IS NOT NULL)))                  AS cities,
-           any_value(d2.primary_discipline)                         AS primary_discipline
+           any_value(d2.primary_discipline)                         AS primary_discipline,
+           -- a TIN is a "therapy practice" if ANY of its NPIs is a PT/OT/SLP or
+           -- a therapy clinic (by NPPES taxonomy) — lets the UI hide the MDs/DOs
+           -- /NPs who merely billed a 97xxx code. Enrichment-dependent: NULL
+           -- taxonomy (not yet enriched) is not therapy, so it fills in as names
+           -- land. bool_or over the TIN's providers.
+           coalesce(bool_or({therapy}), FALSE)                      AS is_therapy
     FROM joined j
     LEFT JOIN names n ON n.tin_value = j.tin_value
     LEFT JOIN disc d2 ON d2.tin_value = j.tin_value
@@ -274,6 +283,10 @@ TIN_DIRECTORY_QUERY = """
            ON r.tin_value = j.tin_value
     GROUP BY j.tin_value
 """
+# inline the therapy-taxonomy test now (its identifiers are constants); {part}
+# stays for the per-partition .format() at rebuild time.
+TIN_DIRECTORY_QUERY = TIN_DIRECTORY_QUERY.replace(
+    "{therapy}", therapy_taxonomy_sql("j.taxonomy_code"))
 
 
 class Store:

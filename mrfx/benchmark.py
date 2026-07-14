@@ -92,6 +92,11 @@ def _market_where(market: dict, include_assistant: bool, include_non_dollar: boo
     if market.get("pos"):
         clauses.append("('|' || t.service_code_set || '|') LIKE ('%|' || ? || '|%')")
         params.append(str(market["pos"]))
+    if market.get("therapy_only"):
+        # only PT/OT/SLP providers & therapy practices (by NPPES taxonomy) — the
+        # market and the subject both restrict to real therapists, so the
+        # benchmark isn't diluted by the MDs/DOs/NPs who billed a 97xxx code.
+        clauses.append("coalesce(td.is_therapy, FALSE)")
     if market.get("state"):
         clauses.append("list_contains(td.states, ?)")
         params.append(market["state"].upper())

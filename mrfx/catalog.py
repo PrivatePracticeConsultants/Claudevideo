@@ -100,6 +100,35 @@ CODE_CATALOG: dict[str, tuple[str, tuple[str, ...], bool]] = {
 
 DEFAULT_CODE_SET = list(CODE_CATALOG.keys())
 
+# NPPES Healthcare Provider Taxonomy codes for the provider TYPES this tool
+# targets — PT / OT / SLP and outpatient therapy clinics. Used to tell an actual
+# therapist/therapy practice from an MD/DO/NP who merely billed a 97xxx code (the
+# MRF lists every provider with a rate for a code, not just therapists). Prefix
+# match covers all specializations under a discipline. Extend these tuples if a
+# payer's therapists carry a taxonomy not listed here.
+THERAPY_TAXONOMY_PREFIXES = (
+    "2251",  # Physical Therapist (all specializations)
+    "2252",  # Physical Therapist Assistant
+    "225X",  # Occupational Therapist (all specializations)
+    "224Z",  # Occupational Therapy Assistant
+    "235Z",  # Speech-Language Pathologist
+)
+# full org/clinic taxonomies for practices that HOUSE therapists
+THERAPY_TAXONOMY_CODES = (
+    "261QP2300X",  # Clinic/Center - Physical Therapy
+    "261QR0400X",  # Clinic/Center - Rehabilitation
+)
+
+
+def therapy_taxonomy_sql(col: str, prefixes=THERAPY_TAXONOMY_PREFIXES,
+                         codes=THERAPY_TAXONOMY_CODES) -> str:
+    """A SQL boolean expression: TRUE when `col` (an NPPES taxonomy_code) is a
+    PT/OT/SLP or outpatient-therapy-clinic taxonomy. Values are hard-coded
+    identifiers (letters+digits), never user input, so inlining is safe."""
+    likes = " OR ".join(f"{col} LIKE '{p}%'" for p in prefixes) or "FALSE"
+    code_list = ", ".join(f"'{c}'" for c in codes) or "''"
+    return f"({col} IS NOT NULL AND (({likes}) OR {col} IN ({code_list})))"
+
 
 def code_info(code: str) -> tuple[str, tuple[str, ...], bool]:
     return CODE_CATALOG.get(code, ("", (), False))

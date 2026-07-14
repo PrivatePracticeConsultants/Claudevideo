@@ -840,6 +840,30 @@ def test_keep_warm_pins_settings_and_stays_correct(tmp_path):
         assert con.execute("SELECT 1").fetchone()[0] == 1
 
 
+def test_therapy_only_filter(cfg, store):
+    # keep only PT/OT/SLP providers & therapy practices (by NPPES taxonomy);
+    # drop the MDs/DOs/NPs who merely billed a 97xxx code.
+    data = innetwork(items=[item("97110", [
+        (["1000000001"], "43-1000001", "ein", [(40.0, None)]),   # PT  2251
+        (["1000000002"], "43-1000002", "ein", [(120.0, None)]),  # MD  207R
+        (["1000000003"], "43-1000003", "ein", [(55.0, None)]),   # SLP 235Z
+    ])])
+    ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "t.json", data))
+    store.save_npi("1000000001", "Alpha PT",  "225100000X", None, "KC", "MO", entity_type="NPI-2")
+    store.save_npi("1000000002", "Beta MD",   "207R00000X", None, "KC", "MO", entity_type="NPI-1")
+    store.save_npi("1000000003", "Gamma SLP", "235Z00000X", None, "KC", "MO", entity_type="NPI-2")
+    store.rebuild_rollups()
+    with store.connect() as con:
+        flags = dict(con.execute("SELECT display_name, is_therapy FROM tin_directory").fetchall())
+    assert flags["Alpha PT"] and flags["Gamma SLP"] and not flags["Beta MD"]
+    c = TestClient(create_app(cfg, store))
+    assert c.get("/api/rates?grain=tin").json()["total"] == 3
+    ther = c.get("/api/rates?grain=tin&therapy_only=1").json()
+    assert {r["display_name"] for r in ther["rows"]} == {"Alpha PT", "Gamma SLP"}
+    npith = c.get("/api/rates?grain=npi&therapy_only=1").json()   # NPI grain too
+    assert {r["display_name"] for r in npith["rows"]} == {"Alpha PT", "Gamma SLP"}
+
+
 def test_benchmark_subjects_search_and_cap(cfg, store):
     # the subject picker is a server-side typeahead: capped so it stays fast on a
     # big store, and filterable by org name or TIN.

@@ -31,7 +31,7 @@ from .benchmark import (
     render_negotiation_report,
     render_pitch_report,
 )
-from .catalog import catalog_json
+from .catalog import catalog_json, therapy_taxonomy_sql
 from .config import MrfxConfig
 from .leads import compute_leads, leads_csv
 from .monitor import compute_rate_changes, rate_changes_csv
@@ -75,6 +75,10 @@ _TIN_LABEL_SQL = (
 # grain relations — uniform column set across entity / tin / npi
 # ---------------------------------------------------------------------------
 
+# therapy-provider tests for the different NPI columns each grain exposes
+_THERAPY_NN = therapy_taxonomy_sql("nn.taxonomy_code")   # NPI-in-TIN-slot row
+_THERAPY_N = therapy_taxonomy_sql("n.taxonomy_code")     # NPI grain
+
 # The name/geo columns come from three LEFT JOINs (directory, entity map, NPI
 # directory). Split into projection + joins so the table endpoint can attach them
 # AFTER sorting+limiting the base rows to one page — joining 100 rows instead of
@@ -91,7 +95,10 @@ _TIN_PROJECTION = f"""
     t.negotiated_rate, t.negotiated_type, t.is_dollar_rate,
     t.source_count, t.source_files, t.schema_version, t.last_updated_on,
     coalesce(td.states, CASE WHEN nn.state IS NULL THEN [] ELSE [nn.state] END) AS states,
-    coalesce(td.cities, CASE WHEN nn.city IS NULL THEN [] ELSE [nn.city] END) AS cities
+    coalesce(td.cities, CASE WHEN nn.city IS NULL THEN [] ELSE [nn.city] END) AS cities,
+    -- PT/OT/SLP practice? from tin_directory (EIN TINs) or, for an NPI-in-the-
+    -- TIN-slot row, that NPI's own taxonomy.
+    coalesce(td.is_therapy, {_THERAPY_NN}, FALSE) AS is_therapy
 """
 _TIN_JOINS = """
     LEFT JOIN tin_directory td USING (tin_value)
@@ -135,7 +142,8 @@ _ENTITY_REL = f"""
            any_value(schema_version) AS schema_version,
            max(last_updated_on) AS last_updated_on,
            list_sort(list_distinct(flatten(list(states)))) AS states,
-           list_sort(list_distinct(flatten(list(cities)))) AS cities
+           list_sort(list_distinct(flatten(list(cities)))) AS cities,
+           bool_or(is_therapy) AS is_therapy   -- entity is therapy if any TIN is
     FROM (
         -- Group on the entity NAME, but a no-name SSN-pattern TIN falls back to
         -- the literal 'TIN MASKED-SSN' label — identical for EVERY such TIN — so
@@ -153,7 +161,7 @@ _ENTITY_REL = f"""
              billing_class, service_code_set, file_month, is_dollar_rate
 """
 
-_NPI_REL = """
+_NPI_REL = f"""
     SELECT coalesce(n.org_name, 'NPI ' || d.npi) AS display_name,
            d.npi AS unit_id, d.tin_value,
            FALSE AS is_mapped_entity,
@@ -165,7 +173,8 @@ _NPI_REL = """
            d.negotiated_rate, d.negotiated_type, d.is_dollar_rate,
            d.source_count, d.source_files, d.schema_version, d.last_updated_on,
            CASE WHEN n.state IS NULL THEN [] ELSE [n.state] END AS states,
-           CASE WHEN n.city IS NULL THEN [] ELSE [n.city] END AS cities
+           CASE WHEN n.city IS NULL THEN [] ELSE [n.city] END AS cities,
+           coalesce({_THERAPY_N}, FALSE) AS is_therapy
     FROM rates_dedup d LEFT JOIN npi_directory n USING (npi)
 """
 
@@ -286,6 +295,12 @@ class FilterSet:
         if qp.get("hide_tin_npi", "0") in ("1", "true"):
             clauses.append("NOT tin_is_really_npi")
             add("hide_tin_is_really_npi", True)
+        if qp.get("therapy_only", "0") in ("1", "true"):
+            # keep only PT/OT/SLP providers & therapy practices (by NPPES
+            # taxonomy) — drops the MDs/DOs/NPs who merely billed a 97xxx code.
+            clauses.append("is_therapy")
+            add("therapy_providers_only", True)
+            self.uses_dim_cols = True  # is_therapy is a joined/computed column
         for bound, op in (("rate_min", ">="), ("rate_max", "<=")):
             raw = qp.get(bound)
             if raw in (None, ""):

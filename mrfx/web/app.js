@@ -10,7 +10,8 @@ const state = {
   filters: {
     payers: [], cpts: [], disciplines: [], modifier: "", mod_has: "", mod_not: "",
     billing_class: "", pos: "", state: "", city: "", month: "", q: "",
-    dollar: true, hide_tin_npi: false, hide_outliers: false, rate_min: "", rate_max: "",
+    dollar: true, hide_tin_npi: false, hide_outliers: false, therapy_only: false,
+    rate_min: "", rate_max: "",
   },
   sort: { col: "negotiated_rate", dir: "desc" },
   page: 1,
@@ -166,6 +167,7 @@ function filterQuery(extra = {}) {
   p.set("dollar_only", f.dollar ? "1" : "0");
   if (f.hide_tin_npi) p.set("hide_tin_npi", "1");
   if (f.hide_outliers) p.set("hide_outliers", "1");
+  if (f.therapy_only) p.set("therapy_only", "1");
   if (f.rate_min !== "") p.set("rate_min", f.rate_min);
   if (f.rate_max !== "") p.set("rate_max", f.rate_max);
   for (const [k, v] of Object.entries(extra)) p.set(k, v);
@@ -336,11 +338,13 @@ async function initFilters() {
   bind("#f-dollar", "dollar");
   bind("#f-hidetinnpi", "hide_tin_npi");
   bind("#f-outliers", "hide_outliers");
+  bind("#f-therapy", "therapy_only");
 
   $("#f-clear").addEventListener("click", () => {
     state.filters = { payers: [], cpts: [], disciplines: [], modifier: "", mod_has: "", mod_not: "",
       billing_class: "", pos: "", state: "", city: "", month: "", q: "",
-      dollar: true, hide_tin_npi: false, hide_outliers: false, rate_min: "", rate_max: "" };
+      dollar: true, hide_tin_npi: false, hide_outliers: false, therapy_only: false,
+      rate_min: "", rate_max: "" };
     // Explorer chips ONLY — a document-wide ".chip.on" sweep also wiped the
     // BENCHMARK tab's payer selection (read from the DOM at run time), so a
     // Clear here silently turned a payer-scoped benchmark into all-payers
@@ -351,6 +355,7 @@ async function initFilters() {
     $("#f-dollar").checked = true;
     $("#f-hidetinnpi").checked = false;
     $("#f-outliers").checked = false;
+    $("#f-therapy").checked = false;
     refreshFromFirstPage();
   });
   $("#btn-export").addEventListener("click", () => {
@@ -786,6 +791,7 @@ function benchmarkPayload() {
     billing_class: $("#b-class").value,
     target_percentile: +$("#b-target").value,
   };
+  if ($("#b-therapy").checked) market.therapy_only = true;
   if ($("#b-disc").value) market.discipline = $("#b-disc").value;
   if ($("#b-state").value.trim()) market.state = $("#b-state").value.trim();
   if ($("#b-city").value.trim()) market.city = $("#b-city").value.trim();
@@ -1138,6 +1144,7 @@ function leadsPayload() {
   const market = { month, payers: $$("#ld-payer-chips .chip.on").map((c) => c.dataset.payer) };
   if ($("#ld-state").value.trim()) market.state = $("#ld-state").value.trim();
   if ($("#ld-disc").value) market.discipline = $("#ld-disc").value;
+  if ($("#ld-therapy").checked) market.therapy_only = true;
   const p = { market, threshold_percentile: +$("#ld-threshold").value, min_codes: +$("#ld-mincodes").value || 3 };
   if ($("#ld-exclude").value.trim()) p.exclude_subject = $("#ld-exclude").value.trim();
   return p;
@@ -1159,7 +1166,8 @@ async function runLeads() {
 
 function renderLeads(out, data) {
   if (!data.leads.length) {
-    out.innerHTML = `<div class="empty"><h3>No leads found</h3>No practices at or below p${data.threshold_percentile} that price at least ${data.min_codes} codes with a market. Widen the cutoff or lower the min codes.</div>`;
+    const therapyOn = $("#ld-therapy") && $("#ld-therapy").checked;
+    out.innerHTML = `<div class="empty"><h3>No leads found</h3>No practices at or below p${data.threshold_percentile} that price at least ${data.min_codes} codes with a market. Widen the cutoff or lower the min codes.${therapyOn ? ` <br><span class="muted">"Therapy providers only" is on — practices whose NPIs aren't identified yet (or aren't PT/OT/SLP) are excluded. Uncheck it, or let NPI identification finish, to see more.</span>` : ""}</div>`;
     return;
   }
   const rows = data.leads.map((l) => `<tr>
