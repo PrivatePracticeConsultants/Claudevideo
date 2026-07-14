@@ -59,6 +59,15 @@ enrichment:
   mode: api                   # api | bulk | off
   # bulk_csv_path: /path/to/npidata_pfile_....csv   # NPPES Data Dissemination
 
+# Keep ONLY therapist rows (PT/OT/SLP + therapy clinics, by NPPES taxonomy) at
+# ingest, dropping the MDs/DOs/NPs who merely bill a 97xxx code. Shrinks the
+# store several-fold and speeds every rebuild/query. Off by default. It
+# PERMANENTLY drops those rows (re-ingest to recover) and needs the NPPES data
+# loaded first (enrichment.mode: bulk) — until the lookup cache is built it
+# ingests everything and logs a warning. TIN-only rates are always kept. Tip:
+# run `mrfx enrich --bulk <file>` once to build the cache before ingesting.
+# therapy_only_ingest: false
+
 port: 8377
 confirm_over_gb: 5.0          # files above this wait for confirmation in the Files view
 

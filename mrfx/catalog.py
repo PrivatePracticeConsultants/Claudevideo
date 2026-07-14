@@ -130,6 +130,41 @@ def therapy_taxonomy_sql(col: str, prefixes=THERAPY_TAXONOMY_PREFIXES,
     return f"({col} IS NOT NULL AND (({likes}) OR {col} IN ({code_list})))"
 
 
+# parser worker cache: {(path, mtime, size): frozenset[npi]} so the (nationally
+# ~hundreds-of-thousands-strong) therapy-NPI set is read from the NPPES parquet
+# ONCE per worker, not per file. Keyed on the file signature so a rebuilt cache
+# reloads.
+_therapy_npi_cache: dict[tuple, frozenset] = {}
+
+
+def therapy_npi_set(cache_parquet) -> frozenset[str] | None:
+    """The set of NPIs that are PT/OT/SLP or a therapy clinic, read from the
+    NPPES fast-lookup parquet. Returns None when the cache is missing/unreadable
+    — the caller then keeps every row rather than silently dropping the whole
+    file. Used by the parser when config.therapy_only_ingest is on."""
+    from pathlib import Path
+    p = Path(cache_parquet)
+    try:
+        st = p.stat()
+    except OSError:
+        return None  # not built yet; don't cache — it may appear later
+    key = (str(p), int(st.st_mtime), st.st_size)
+    hit = _therapy_npi_cache.get(key)
+    if hit is not None:
+        return hit
+    try:
+        import duckdb
+        pth = str(p).replace("'", "''")
+        rows = duckdb.connect().execute(
+            f"SELECT npi FROM read_parquet('{pth}') "
+            f"WHERE {therapy_taxonomy_sql('taxonomy_code')}").fetchall()
+        result = frozenset(r[0] for r in rows if r[0])
+    except Exception:  # noqa: BLE001 — unreadable cache -> keep all rows
+        return None
+    _therapy_npi_cache[key] = result
+    return result
+
+
 def code_info(code: str) -> tuple[str, tuple[str, ...], bool]:
     return CODE_CATALOG.get(code, ("", (), False))
 

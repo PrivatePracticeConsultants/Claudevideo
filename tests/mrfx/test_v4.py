@@ -840,6 +840,50 @@ def test_keep_warm_pins_settings_and_stays_correct(tmp_path):
         assert con.execute("SELECT 1").fetchone()[0] == 1
 
 
+def test_therapy_only_ingest_drops_non_therapists(cfg, store, tmp_path, monkeypatch):
+    # opt-in: at extraction, keep only PT/OT/SLP-provider rows; drop MDs/DOs/NPs;
+    # keep TIN-only rows; ingest all (no drop) when the NPPES cache isn't built.
+    import csv as _csv
+    import io as _io
+    import zipfile as _zip
+    from pathlib import Path
+
+    import mrfx.enrich as E
+    from mrfx.enrich import _BULK_COLS, enrich_via_bulk
+    monkeypatch.setattr(E, "_bulk_sig", None)
+    monkeypatch.setattr(E, "_bulk_absent", set())
+    monkeypatch.setattr(E, "_BULK_MIN_FULL_ROWS", 1)
+    hdr = [_BULK_COLS[k] for k in
+           ("npi", "org", "first", "last", "city", "state", "tax1", "entity", "address", "zip", "phone")]
+    buf = _io.StringIO()
+    _csv.writer(buf).writerows([hdr,
+        ["1000000001", "Alpha PT", "", "", "KC", "MO", "225100000X", "2", "1 St", "64000", "0"],
+        ["1000000002", "Beta MD", "", "", "KC", "MO", "207R00000X", "1", "2 St", "64000", "0"],
+        ["1000000003", "Gamma SLP", "", "", "KC", "MO", "235Z00000X", "2", "3 St", "64000", "0"]])
+    zp = tmp_path / "npidata.zip"
+    with _zip.ZipFile(zp, "w") as zf:
+        zf.writestr("npidata_pfile_2026.csv", buf.getvalue().encode())
+    cfg.enrichment.mode = "bulk"
+    cfg.enrichment.bulk_csv_path = zp
+
+    # seed a file (before the cache exists) + build the NPPES cache
+    ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "seed.json", innetwork(items=[
+        item("97110", [(["1000000001", "1000000002", "1000000003"], "43-1111111", "ein", [(40.0, None)])])])))
+    enrich_via_bulk(cfg, store)
+    assert (Path(cfg.store_dir) / "nppes_cache.parquet").exists()
+
+    # now ingest a NEW file with therapy_only_ingest ON — MD is dropped
+    cfg.therapy_only_ingest = True
+    ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "filt.json", innetwork(items=[
+        item("97112", [(["1000000001", "1000000002", "1000000003"], "43-2222222", "ein", [(50.0, None)])])])))
+    with store.connect() as con:
+        npis = {r[0] for r in con.execute("SELECT npi FROM rates WHERE billing_code='97112'").fetchall()}
+        qa = json.loads(con.execute(
+            "SELECT qa FROM files WHERE filename='filt.json'").fetchone()[0])
+    assert npis == {"1000000001", "1000000003"}      # PT + SLP kept, MD dropped
+    assert qa["non_therapy_dropped"] == 1            # the drop is counted for transparency
+
+
 def test_store_migrates_stale_rollup_schema(cfg, store):
     # a store materialized by an OLDER version lacks the is_therapy column;
     # reopening must self-heal (rebuild) so the dashboard doesn't 500 on every

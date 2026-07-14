@@ -71,6 +71,16 @@ class MrfxConfig(BaseModel):
     # fails with "Out of Memory" AND the machine has spare RAM (e.g. 8 on a 16 GB
     # box); the rollup rebuild also slices itself finer to fit whatever this is.
     duckdb_memory_gb: int | None = Field(default=None, ge=1, le=1024)
+    # OPT-IN: at extraction, keep only rows whose NPI is a PT/OT/SLP or therapy
+    # clinic (by NPPES taxonomy), dropping the MDs/DOs/NPs who merely bill a
+    # 97xxx code. Shrinks the store (often several-fold) and speeds every rebuild
+    # and query. Tradeoffs: it PERMANENTLY drops those rows (re-ingest to get
+    # them back), and it needs the NPPES data loaded first (enrichment.mode=bulk)
+    # so it knows who's a therapist — until the NPPES lookup cache exists it
+    # ingests everything and logs a warning (never silently drops). TIN-only
+    # rates (no NPI) are always kept. Leave off to keep the full store and use
+    # the dashboard's "therapy providers only" toggle for therapist-only views.
+    therapy_only_ingest: bool = False
     confirm_over_gb: float = Field(default=5.0, gt=0)
     # URL-drop ingestion: staging for downloads, and knobs for aggregating many
     # files without filling the disk.

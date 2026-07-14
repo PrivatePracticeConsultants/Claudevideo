@@ -20,6 +20,7 @@ import datetime as dt
 import logging
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import ijson
 
@@ -28,6 +29,20 @@ from .config import DOLLAR_TYPES, MrfxConfig
 from .sniff import open_stream  # noqa: F401  (re-exported for ingest)
 
 log = logging.getLogger(__name__)
+
+# therapy_only_ingest is on but the NPPES lookup cache isn't built yet — warn
+# ONCE per process instead of per file (the parser runs per file, often in a
+# pool). We keep every row until the cache exists rather than drop blindly.
+_WARNED_NO_THERAPY_CACHE = False
+
+
+def _warn_no_therapy_cache() -> None:
+    global _WARNED_NO_THERAPY_CACHE
+    _WARNED_NO_THERAPY_CACHE = True
+    log.warning(
+        "therapy_only_ingest is on but the NPPES lookup cache isn't built yet — "
+        "ingesting ALL providers for now. Run NPI identification (enrichment.mode="
+        "bulk) so it can tell therapists apart; files ingested after that filter.")
 
 
 def warn_if_slow_json_backend() -> bool:
@@ -154,6 +169,7 @@ class QaCounters:
     unparseable_rates: int = 0        # prices whose negotiated_rate could not be read
     invalid_npis: int = 0             # NPIs that are not 10 digits after cleaning
     tin_only_rows: int = 0            # TIN-only groups (no NPIs) emitted at npi=NULL
+    non_therapy_dropped: int = 0      # rows skipped at ingest (therapy_only_ingest)
     bad_ref_ids: int = 0              # provider_reference ids that are not numeric
     bundled_items: int = 0            # bundle/capitation items excluded (not per-code rates)
     prices: int = 0                   # readable prices seen (denominator for price-level shares)
@@ -307,6 +323,16 @@ class InNetworkParser:
         self._refs_complete = False
         self._deferred: list[_DeferredGroup] = []
         self._ingested_at = dt.datetime.now(dt.timezone.utc).isoformat()
+        # therapy_only_ingest: keep only PT/OT/SLP-provider rows. The set of
+        # therapy NPIs comes from the NPPES fast-lookup cache; if it isn't built
+        # yet, `_therapy_npis` is None and we keep everything (a logged warning),
+        # never silently dropping a whole file. Loaded once per worker (cached).
+        self._therapy_npis = None
+        if getattr(cfg, "therapy_only_ingest", False):
+            from .catalog import therapy_npi_set
+            self._therapy_npis = therapy_npi_set(Path(cfg.store_dir) / "nppes_cache.parquet")
+            if self._therapy_npis is None and not _WARNED_NO_THERAPY_CACHE:
+                _warn_no_therapy_cache()
 
     def _flush(self, final: bool = False) -> None:
         if self._sink is None or (not final and len(self._buffer) < self.BATCH_ROWS):
@@ -566,6 +592,12 @@ class InNetworkParser:
                     r.qa.tin_only_rows += 1
                     continue
                 for npi in npis:
+                    # therapy_only_ingest: drop rows for NPIs that aren't a
+                    # PT/OT/SLP or therapy clinic (per NPPES). TIN-only rows above
+                    # are always kept (no NPI to classify).
+                    if self._therapy_npis is not None and npi not in self._therapy_npis:
+                        r.qa.non_therapy_dropped += 1
+                        continue
                     row = {**row_base, **tin_flags, "npi": npi}
                     if self._sink is None:
                         r.rows.append(row)
