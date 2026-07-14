@@ -296,7 +296,7 @@ why.
 1. Download the **NPPES full monthly file** (a ~1 GB `.zip`) from
    <https://download.cms.gov/nppes/NPI_Files.html>. Keep it as the `.zip` — you
    do **not** need to unzip it.
-2. In `config/mrfx.yaml`, change the `enrichment:` block to:
+2. In `config/mrfx.yaml`, set `bulk_csv_path` under the `enrichment:` block:
 
    ```yaml
    enrichment:
@@ -308,6 +308,13 @@ why.
    around the path (or write it with forward slashes,
    `E:/NPPES_Data_Dissemination_July_2026_V2.zip`) so the backslashes are read
    correctly.
+
+   > **You only really need the `bulk_csv_path` line.** Whenever that file is
+   > present the app uses it automatically — even if `mode` is left at the
+   > default `api`. Setting `mode: bulk` is just the explicit form. (So if names
+   > were "stuck", the usual cause is a `bulk_csv_path` that's misspelled or
+   > points at a file that isn't there — the app can't use a file it can't find,
+   > and falls back to the slow API. Double-check the path.)
 3. Restart `mrfx serve`.
 
 The first time it runs, it reads the file **once** (a few minutes) and builds a
@@ -540,12 +547,19 @@ them in one place, grouped by where you'll hit them.
 ### Provider names / identification
 
 - **Names are identifying very slowly — the banner crawls up a few thousand a
-  day.** You're in `api` mode, looking each provider up one at a time over the
-  internet (rate-limited, so a big book takes days). Switch to the local NPPES
-  bulk file — see **"Make provider names fill in fast (recommended)"** above.
-  One local pass identifies the whole backlog in minutes. Quick version: set
-  `enrichment.mode: bulk` + `bulk_csv_path` in `config/mrfx.yaml` and restart,
-  or run `mrfx enrich --bulk "E:\NPPES…zip"` right now to clear the backlog.
+  day, or is stuck at a few thousand.** You're being served by the slow `api`
+  path, looking each provider up one at a time over the internet (rate-limited,
+  so a big book takes days and can appear stuck once NPPES throttles you). Point
+  the app at the local NPPES bulk file — see **"Make provider names fill in fast
+  (recommended)"** above. One local pass identifies the whole backlog in
+  minutes. Quick version: set `bulk_csv_path` in `config/mrfx.yaml` and restart
+  (that alone switches to the fast local path — `mode` can stay `api`), or run
+  `mrfx enrich --bulk "E:\NPPES…zip"` right now to clear the backlog. **If you
+  already set `bulk_csv_path` and it's still slow, the path is almost certainly
+  wrong** — a misspelled path or one pointing at a file that isn't there is
+  silently un-usable, so the app falls back to the API. Check the `mrfx serve`
+  window: it now logs a warning naming the missing file. Fix the path (mind the
+  Windows quotes/slashes) and restart.
 - **The banner never reaches zero.** A handful of NPIs in payer files are
   deactivated or malformed and simply aren't in NPPES — those are marked
   "identified" (no name found) so the count settles just short of 100% instead

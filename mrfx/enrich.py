@@ -546,12 +546,56 @@ def enrich_via_bulk(cfg: MrfxConfig, store: Store,
     return done
 
 
+_WARNED_BULK_PATH_MISSING = False
+
+
+def _bulk_file_ready(cfg: MrfxConfig) -> bool:
+    """True when a usable local NPPES bulk file is configured and on disk."""
+    p = cfg.enrichment.bulk_csv_path
+    try:
+        return bool(p) and Path(p).exists()
+    except OSError:
+        return False
+
+
+def use_bulk_enrichment(cfg: MrfxConfig) -> bool:
+    """Whether this run should use the local NPPES bulk file instead of the API.
+
+    Prefer bulk whenever a bulk file is actually PRESENT — a user who set
+    `bulk_csv_path` clearly wants their local file used, and bulk resolves the
+    whole book in one local pass instead of crawling the rate-limited NPPES API
+    for days. This closes the #1 "names are stuck" footgun: setting
+    `bulk_csv_path` but leaving `mode: api` (the default) used to silently ignore
+    the downloaded file. If the configured path is MISSING we don't switch (we
+    warn and let the API run), so a stale path can't strand a user with no
+    enrichment at all."""
+    mode = cfg.enrichment.mode
+    if mode == "bulk":
+        return True
+    if mode == "api" and _bulk_file_ready(cfg):
+        return True
+    return False
+
+
 def run_enrichment(cfg: MrfxConfig, store: Store, stop: threading.Event | None = None,
                    final_refresh: bool = True) -> int:
+    global _WARNED_BULK_PATH_MISSING
     mode = cfg.enrichment.mode
     if mode == "off":
         return 0
-    done = enrich_via_bulk(cfg, store, stop) if mode == "bulk" else enrich_via_api(cfg, store, stop)
+    use_bulk = use_bulk_enrichment(cfg)
+    if mode == "api" and use_bulk:
+        log.info("enrichment: a local NPPES bulk file is configured — using it "
+                 "(one fast local pass) instead of the rate-limited API")
+    elif mode == "api" and cfg.enrichment.bulk_csv_path and not _WARNED_BULK_PATH_MISSING:
+        # they configured a bulk file but it isn't on disk — they meant to use
+        # it; the API path (slow, rate-limited) is running only as a fallback.
+        _WARNED_BULK_PATH_MISSING = True
+        log.warning("enrichment.bulk_csv_path is set (%s) but the file was not "
+                    "found — falling back to the slow NPPES API. Fix the path to "
+                    "identify the whole book in one local pass.",
+                    cfg.enrichment.bulk_csv_path)
+    done = enrich_via_bulk(cfg, store, stop) if use_bulk else enrich_via_api(cfg, store, stop)
     # tin_directory materializes NPPES names/states/cities — without a rebuild,
     # geographic benchmarks (state/city joins) silently run against NULLs. The
     # dirty flag (set by the save paths) means this rebuilds iff there are names
@@ -592,10 +636,12 @@ def start_persistent_enrichment(cfg: MrfxConfig, store: Store,
                 first = False
             except Exception:  # noqa: BLE001 — a bad cycle must not kill the loop
                 log.exception("enrichment cycle failed; retrying after a pause")
-            # bulk mode re-reads a multi-GB file each pass, so poll far less
+            # bulk runs re-read a multi-GB file each pass, so poll far less
             # often (the NPPES file is static for a month; change-awareness skips
             # scans with nothing new); the per-NPI API path can poll frequently.
-            wait = (_BULK_POLL_SECONDS if cfg.enrichment.mode == "bulk"
+            # Use the EFFECTIVE mode so an api-mode config with a present bulk
+            # file (which we run as bulk) also polls on the slow cadence.
+            wait = (_BULK_POLL_SECONDS if use_bulk_enrichment(cfg)
                     else _ENRICH_POLL_SECONDS)
             stop.wait(wait)
 

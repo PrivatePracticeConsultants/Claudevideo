@@ -679,6 +679,53 @@ def test_bulk_enrichment_marks_absent_npis_processed(cfg, store, tmp_path, monke
     assert prog["total"] == 2 and prog["remaining"] == 0 and prog["named"] == 1
 
 
+def test_api_mode_with_present_bulk_file_uses_bulk(cfg, store, tmp_path, monkeypatch):
+    # THE "names stuck at a few thousand" footgun: a user who sets bulk_csv_path
+    # but leaves mode:api (the default) used to have the downloaded file silently
+    # ignored and crawl the rate-limited API for days. Now a PRESENT bulk file is
+    # preferred regardless of mode, so run_enrichment resolves from the file.
+    import csv as _csv
+    import io as _io
+    import zipfile as _zip
+
+    import mrfx.enrich as E
+    from mrfx.enrich import _BULK_COLS, run_enrichment, use_bulk_enrichment
+    monkeypatch.setattr(E, "_bulk_sig", None)
+    monkeypatch.setattr(E, "_bulk_absent", set())
+    monkeypatch.setattr(E, "_bulk_read_failures", 0)
+    monkeypatch.setattr(E, "_BULK_MIN_FULL_ROWS", 1)
+    # fail loudly if the API path is ever taken (it must NOT be)
+    monkeypatch.setattr(E, "enrich_via_api",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("used API, not bulk")))
+    hdr = [_BULK_COLS[k] for k in
+           ("npi", "org", "first", "last", "city", "state", "tax1", "entity", "address", "zip", "phone")]
+    buf = _io.StringIO()
+    _csv.writer(buf).writerows([hdr,
+        ["1000000001", "In-File PT", "", "", "KC", "MO", "225100000X", "2", "1 St", "64000", "0"]])
+    zpath = tmp_path / "npidata.zip"
+    with _zip.ZipFile(zpath, "w") as zf:
+        zf.writestr("npidata_pfile_2026.csv", buf.getvalue().encode())
+
+    ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "a.json", innetwork(items=[
+        item("97110", [(["1000000001"], "43-1000001", "ein", [(40.0, None)])])])))
+
+    cfg.enrichment.mode = "api"                     # NOT bulk
+    cfg.enrichment.bulk_csv_path = zpath            # but a real file is present
+    assert use_bulk_enrichment(cfg) is True         # present file wins over api
+    assert run_enrichment(cfg, store) == 1          # resolved from the file, no API
+    with store.connect() as con:
+        name = con.execute(
+            "SELECT org_name FROM npi_directory WHERE npi='1000000001'").fetchone()[0]
+    assert name == "In-File PT"
+
+    # a MISSING bulk path must NOT switch to bulk — the API remains the fallback
+    cfg.enrichment.bulk_csv_path = tmp_path / "does_not_exist.zip"
+    assert use_bulk_enrichment(cfg) is False
+    # and with no bulk path at all, plain api
+    cfg.enrichment.bulk_csv_path = None
+    assert use_bulk_enrichment(cfg) is False
+
+
 def test_bulk_enrichment_uses_cache_for_new_npis(cfg, store, tmp_path, monkeypatch):
     # THE speed fix: after the NPPES file is converted to a local parquet once,
     # a later batch of new NPIs must resolve WITHOUT re-reading the bulk file.

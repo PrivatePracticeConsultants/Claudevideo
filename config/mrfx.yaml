@@ -63,9 +63,11 @@ enrichment:
   #          whole book, then instant). RECOMMENDED for large books.
   #   off  = don't identify names.
   # For bulk: download the FULL monthly .zip from
-  # https://download.cms.gov/nppes/NPI_Files.html, set mode: bulk, and point
-  # bulk_csv_path at it (keep the .zip — no need to unzip). See "Make provider
-  # names fill in fast" in GETTING_STARTED.md.
+  # https://download.cms.gov/nppes/NPI_Files.html and point bulk_csv_path at it
+  # (keep the .zip — no need to unzip). Just setting bulk_csv_path is enough —
+  # whenever that file is present it is used automatically (one fast local pass),
+  # even if mode is left at 'api'; setting mode: bulk is the explicit form. See
+  # "Make provider names fill in fast" in GETTING_STARTED.md.
   mode: api                   # api | bulk | off
   # On Windows keep the path in single quotes (or use forward slashes) so the
   # backslashes read correctly:
