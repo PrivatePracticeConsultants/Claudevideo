@@ -409,6 +409,46 @@ terabytes). Three ways to control it:
 
 ---
 
+## Updating to a new version without losing your data
+
+Your **data and the program are separate folders**, so you can drop in a newer
+build and keep everything you've already ingested — rates, identified provider
+names, the link queue, entity groupings, peer sets. All of that lives in the
+`data/` folder, which is **never** part of a code download, so a code update
+cannot touch it. The one file a new build *does* replace is your
+`config/mrfx.yaml` (your settings), so protect that.
+
+Steps (a few minutes, no re-ingesting):
+
+1. **Stop the app** — press Ctrl-C in the `mrfx serve` window. While it runs it
+   keeps the database open, so don't update code mid-run.
+2. **Save your settings** — copy `config/mrfx.yaml` somewhere safe (or just note
+   your `bulk_csv_path` line and any other edits).
+3. **(Recommended) back up your store** — copy the whole `data/` folder
+   somewhere first. It may be several GB, but it's your entire book of work, and
+   then even a mistake is fully recoverable.
+4. **Put the new code in.** The simplest safe way: open the new build's `.zip`,
+   and copy its **`mrfx` folder** over your existing `mrfx` folder (choose
+   replace/overwrite). That single folder *is* the whole program — this updates
+   everything while leaving `data/`, `config/`, and `.venv/` untouched, so
+   there's nothing to restore. (If you'd rather unzip the whole thing over the
+   folder, that works too — just put your saved `config/mrfx.yaml` back after.)
+5. **Restart `mrfx serve`.** You do **not** need to reinstall anything — your
+   virtual environment already has what it needs.
+
+On that first restart the app notices its summary tables are from the older
+version and **rebuilds them once** — a one-time wait proportional to your store
+size. This only recomputes the compact analytics from your existing rates; it
+does **not** re-download, re-parse, or re-identify anything. After it finishes,
+the new features are live and every number is preserved.
+
+**Adding new payer files** then works exactly as always — drop them in the inbox
+or paste links; they ingest alongside what's already there. Re-adding a file you
+already have is automatically **skipped, not duplicated**, so your numbers can't
+get double-counted.
+
+---
+
 ## Debug FAQ — what it says, what it means, what to do
 
 Every message the app shows is designed to tell you the fix. This FAQ collects
