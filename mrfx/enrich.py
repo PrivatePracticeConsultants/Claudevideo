@@ -101,7 +101,12 @@ def _maybe_refresh_directory(store: Store, force: bool = False) -> bool:
             return False
         _last_dir_refresh = now
     try:
-        store.rebuild_rollups()
+        # names_only: enrichment resolved NPI names/geo, which only feed
+        # tin_directory. The rate spine (rates_by_tin) is built purely from the
+        # rates and is unchanged, so skip its expensive rebuild — this is what
+        # kept searches responsive during a long identification instead of
+        # re-aggregating every raw row every few minutes.
+        store.rebuild_rollups(names_only=True)
         with _refresh_lock:
             _names_dirty = False
         return True

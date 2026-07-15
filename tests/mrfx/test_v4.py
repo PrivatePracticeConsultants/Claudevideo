@@ -119,6 +119,44 @@ def test_tin_display_name_from_nppes(cfg, store):
     assert set(detail["tins"][0]["states"]) == {"MO"}
 
 
+def test_names_only_rebuild_updates_directory_not_rate_spine(cfg, store, monkeypatch):
+    # enrichment resolves NAMES, which only feed tin_directory. rebuild_rollups
+    # (names_only=True) must materialize those names AND leave the rate spine
+    # (rates_by_tin) byte-identical — it's built purely from rates and is what's
+    # expensive to rebuild, so skipping it is what keeps search responsive during
+    # a long identification.
+    import mrfx.store as st
+    ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "no.json", innetwork(items=[
+        item("97110", [(["1111111111", "1222222222"], "43-4444444", "ein",
+                        [(40.0, None), (44.0, None)])])])))
+    store.rebuild_rollups()   # full build establishes both tables
+    with store.connect() as con:
+        spine_before = con.execute(
+            "SELECT payer, tin_value, billing_code, negotiated_rate, npi_count "
+            "FROM rates_by_tin ORDER BY billing_code").fetchall()
+        name_before = con.execute(
+            "SELECT display_name FROM tin_directory WHERE tin_value='434444444'").fetchone()[0]
+
+    # names arrive AFTER the full build; a names-only refresh must surface them
+    store.save_npi("1111111111", "Sunrise PT LLC", "261QP2300X", "Clinic/Center - Physical Therapy",
+                   "STL", "MO", entity_type="NPI-2")
+    store.save_npi("1222222222", "Sunrise PT LLC", "261QP2300X", "Clinic/Center - Physical Therapy",
+                   "Fenton", "MO", entity_type="NPI-2")
+    # force partitioning too, to exercise the sliced names-only path
+    monkeypatch.setattr(st, "ROLLUP_PARTITION_ROWS", 1)
+    store.rebuild_rollups(names_only=True)
+
+    with store.connect() as con:
+        spine_after = con.execute(
+            "SELECT payer, tin_value, billing_code, negotiated_rate, npi_count "
+            "FROM rates_by_tin ORDER BY billing_code").fetchall()
+        name_after = con.execute(
+            "SELECT display_name FROM tin_directory WHERE tin_value='434444444'").fetchone()[0]
+    assert spine_after == spine_before          # rate spine untouched
+    assert name_before is None or name_before != "Sunrise PT LLC"
+    assert name_after == "Sunrise PT LLC"       # names materialized by the light rebuild
+
+
 def test_partitioned_rollup_identical_to_single_shot(cfg, store, monkeypatch):
     # big stores rebuild rollups in hash-partitioned passes; the union of the
     # slices must be row-identical to the one-shot build
@@ -1200,7 +1238,7 @@ def test_code_comparison_filters_by_state(cfg, store):
 def test_directory_refresh_is_globally_throttled(cfg, store, monkeypatch):
     import mrfx.enrich as E
     calls = []
-    monkeypatch.setattr(store, "rebuild_rollups", lambda: calls.append(1))
+    monkeypatch.setattr(store, "rebuild_rollups", lambda *a, **k: calls.append(1))
     monkeypatch.setattr(E, "_last_dir_refresh", 0.0)
     assert E._maybe_refresh_directory(store) is True       # first call runs
     assert E._maybe_refresh_directory(store) is False      # within the window -> throttled

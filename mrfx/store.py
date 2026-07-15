@@ -1105,18 +1105,29 @@ class Store:
         base = min(ROLLUP_PARTITION_ROWS, mem_scaled)
         return max(1, base // max(1, split))
 
-    def rebuild_rollups(self) -> None:
+    def rebuild_rollups(self, names_only: bool = False) -> None:
         """Materialize the dedup/by-TIN/tin-directory rollups after ingest or
         enrichment so page queries stay fast. The DISTINCT/median/list aggregates
         can't spill to disk, so if a build still hits the memory limit we retry
         single-threaded (per-thread hash tables are the dominant cost) and, if
         that still OOMs, subdivide into progressively smaller hash-partition
-        slices until it fits — identical output, lower peak RAM each pass."""
+        slices until it fits — identical output, lower peak RAM each pass.
+
+        names_only=True rebuilds ONLY the name/geo directory (tin_directory),
+        skipping the rate spine (rates_by_tin). The rate spine is built purely
+        FROM rates and does NOT depend on NPPES names, so an ENRICHMENT cycle
+        (which only resolves names) has no reason to re-run its expensive
+        median(DISTINCT) aggregation over every raw row. Doing so on a big store
+        rebuilt the whole spine every ~4 minutes during a long identification,
+        starving concurrent searches. Ingest (new rates) still does a full
+        rebuild."""
         import logging as _logging
 
         log = _logging.getLogger(__name__)
         self._enrich_progress_cache = None  # new rates change the NPI population
         self.data_generation += 1          # invalidate the API row-count cache
+        tables = (("tin_directory_tbl",) if names_only
+                  else ("rates_by_tin_tbl", "tin_directory_tbl"))
         with self.write_lock, self.connect() as con:
             self._register_views(con)  # rates view must see current parts first
             # Cap parallelism for the rebuild and size the slices for that thread
@@ -1139,7 +1150,7 @@ class Store:
                 build_threads = avail  # couldn't cap; size for what's running
             try:
                 try:
-                    self._build_rollup_tables(con, threads=build_threads)
+                    self._build_rollup_tables(con, threads=build_threads, tables=tables)
                     return
                 except duckdb.OutOfMemoryException:
                     log.warning("rollup rebuild hit the memory limit; retrying "
@@ -1150,7 +1161,7 @@ class Store:
                 reset_threads = True
                 for split in (1, 2, 4, 8, 16):
                     try:
-                        self._build_rollup_tables(con, split=split, threads=1)
+                        self._build_rollup_tables(con, split=split, threads=1, tables=tables)
                         return
                     except duckdb.OutOfMemoryException:
                         if split == 16:
@@ -1165,7 +1176,7 @@ class Store:
                         pass
 
     def _build_rollup_tables(self, con: duckdb.DuckDBPyConnection, split: int = 1,
-                             threads: int = 1) -> None:
+                             threads: int = 1, tables: tuple[str, ...] | None = None) -> None:
         # rates_dedup stays a LIVE VIEW: at NPI×rate grain its groups are
         # nearly one-per-row (a 30M-row store means a ~30M-group hash
         # aggregation whose spill can exceed any reasonable disk). Drill-down
@@ -1193,12 +1204,18 @@ class Store:
         # cap, memory, crash) must roll back to the PREVIOUS complete tables —
         # a partially-filled rollup served as truth silently loses billing
         # codes, which is far worse than stale analytics.
+        # (table, query, hash-partition key, view). `tables` selects a subset —
+        # a names-only enrichment refresh rebuilds just tin_directory_tbl and
+        # leaves the (unchanged, expensive) rate spine alone.
+        specs = {
+            "rates_by_tin_tbl": (BY_TIN_QUERY, "billing_code", "rates_by_tin"),
+            "tin_directory_tbl": (TIN_DIRECTORY_QUERY, "tin_value", "tin_directory"),
+        }
+        selected = tables if tables is not None else tuple(specs)
         con.execute("BEGIN TRANSACTION")
         try:
-            for tbl, query, key in (
-                ("rates_by_tin_tbl", BY_TIN_QUERY, "billing_code"),
-                ("tin_directory_tbl", TIN_DIRECTORY_QUERY, "tin_value"),
-            ):
+            for tbl in selected:
+                query, key, _view = specs[tbl]
                 if parts == 1:
                     con.execute(f"CREATE OR REPLACE TABLE {tbl} AS {query.format(part='TRUE')}")
                     continue
@@ -1215,8 +1232,9 @@ class Store:
             except duckdb.Error:
                 pass  # connection already aborted the transaction
             raise
-        con.execute("CREATE OR REPLACE VIEW rates_by_tin AS SELECT * FROM rates_by_tin_tbl")
-        con.execute("CREATE OR REPLACE VIEW tin_directory AS SELECT * FROM tin_directory_tbl")
+        for tbl in selected:
+            _query, _key, view = specs[tbl]
+            con.execute(f"CREATE OR REPLACE VIEW {view} AS SELECT * FROM {tbl}")
 
     # legacy name used by tests/older callers
     def rebuild_dedup(self) -> None:
