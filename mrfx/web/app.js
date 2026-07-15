@@ -109,6 +109,17 @@ async function loadStats() {
       } else if (e.remaining > 0) {
         html += ` · <b>${fmtInt(e.named)}/${fmtInt(e.total)}</b> names ` +
                 `<span class="muted">(identifying ${fmtInt(e.remaining)} more…)</span>`;
+        // On the slow per-NPI NPPES API with a big backlog, nudge toward the
+        // one-pass bulk file — the difference between days and minutes. Only
+        // when we're NOT already using it and the backlog is large enough to
+        // matter (a small tail finishes on its own).
+        if (!s.enrichment_bulk_active && e.remaining > 5000) {
+          html += ` <span class="muted">— slow (NPPES web lookups). To finish ` +
+                  `in one local pass, download the NPPES monthly file ` +
+                  `(<a href="https://download.cms.gov/nppes/NPI_Files.html" target="_blank" rel="noopener">download.cms.gov</a>) ` +
+                  `and set <code>bulk_csv_path</code> in <code>config/mrfx.yaml</code>, ` +
+                  `then restart — or run <code>mrfx enrich --bulk &lt;file.zip&gt;</code>.</span>`;
+        }
       } else {
         html += ` · <b>${fmtInt(e.named)}/${fmtInt(e.total)}</b> names`;
       }

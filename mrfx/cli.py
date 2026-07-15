@@ -491,6 +491,7 @@ def cmd_enrich(cfg: MrfxConfig, args) -> int:
         print("enrichment.mode is 'off'. Set it to 'api' or 'bulk' in config/mrfx.yaml, "
               "or pass --bulk <NPPES zip/csv>.", file=sys.stderr)
         return 1
+    from .enrich import use_bulk_enrichment
     if cfg.enrichment.mode == "bulk":
         src = cfg.enrichment.bulk_csv_path
         if not src or not Path(src).exists():
@@ -498,10 +499,16 @@ def cmd_enrich(cfg: MrfxConfig, args) -> int:
                   "https://download.cms.gov/nppes/NPI_Files.html and point --bulk (or "
                   "enrichment.bulk_csv_path) at the .zip.", file=sys.stderr)
             return 1
-        print(f"resolving names from {src} in one local pass — this reads the file once…")
+    if use_bulk_enrichment(cfg):
+        print(f"resolving names from {cfg.enrichment.bulk_csv_path} in one local "
+              "pass — this reads the file once…")
     else:
-        print("resolving names via the NPPES API (can take a while for a large book; "
-              "Ctrl-C is safe — it resumes)…")
+        print("resolving names via the NPPES API (can take a while for a large "
+              "book; Ctrl-C is safe — it resumes).\n"
+              "  Tip: to identify the whole book in ONE fast local pass, download "
+              "the NPPES full monthly file from\n"
+              "  https://download.cms.gov/nppes/NPI_Files.html and re-run with "
+              "--bulk <file.zip> (or set enrichment.bulk_csv_path).")
     n = run_enrichment(cfg, store)
     print(f"identified {n:,} name(s).")
     return 0

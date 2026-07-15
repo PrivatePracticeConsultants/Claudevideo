@@ -85,6 +85,9 @@ def test_stats_reports_enrichment_progress(client, store):
     assert "enrichment" in s and s["enrichment"]["total"] >= 1
     assert s["enrichment"]["named"] == 0        # nothing enriched yet
     assert s["enrichment_mode"] in ("api", "bulk", "off")
+    # drives the dashboard's "use the bulk file" nudge: false on the default API
+    # config (no bulk file present), so the hint shows on a slow big-book run
+    assert s["enrichment_bulk_active"] is False
     # states endpoint is empty until enrichment writes a state, then reflects it
     assert client.get("/api/states").json()["states"] == []
     for npi in store.unenriched_npis():

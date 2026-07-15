@@ -33,6 +33,7 @@ from .benchmark import (
 )
 from .catalog import catalog_json, therapy_taxonomy_sql
 from .config import MrfxConfig
+from .enrich import use_bulk_enrichment
 from .leads import compute_leads, leads_csv
 from .monitor import compute_rate_changes, rate_changes_csv
 from .schedule import (
@@ -1347,6 +1348,9 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 "files_done": files_done, "attention": attention,
                 "enrichment": store.enrichment_progress(),
                 "enrichment_mode": cfg.enrichment.mode,
+                # True when the fast local NPPES bulk file is actually in use, so
+                # the dashboard only nudges toward it when we're on the slow API.
+                "enrichment_bulk_active": use_bulk_enrichment(cfg),
                 "default_grain": grain_of({}, cfg, store)}
 
     @app.get("/api/states")
