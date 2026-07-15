@@ -33,6 +33,8 @@ from .benchmark import (
     _m,
     _market_where,
     _pctnum,
+    _rates_relation,
+    month_label,
     resolve_subject_tins,
 )
 from .catalog import code_info
@@ -50,13 +52,14 @@ def compute_fee_schedule(store: Store, subject: str, market: dict) -> dict:
     include_assistant = bool(market.get("include_assistant", False))
     include_non_dollar = bool(market.get("include_non_dollar", False))
     where, params = _market_where(market, include_assistant, include_non_dollar)
+    rel = _rates_relation(market)
 
     sql = f"""
     WITH subject_tins AS (SELECT unnest(?::VARCHAR[]) AS tin),
     per_tin AS (
         SELECT t.payer, t.billing_code, t.tin_value,
                median(t.negotiated_rate) AS rate
-        FROM rates_by_tin t LEFT JOIN tin_directory td USING (tin_value)
+        FROM {rel} t LEFT JOIN tin_directory td USING (tin_value)
         WHERE {where} AND t.tin_value IN (SELECT tin FROM subject_tins)
         GROUP BY t.payer, t.billing_code, t.tin_value
     )
@@ -199,7 +202,7 @@ def _methodology(store: Store, fee_schedule: dict) -> str:
         files = con.execute(q + "ORDER BY filename", payers).fetchall()
     lines = [
         f"Generated {dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} by MRF Explorer v{__version__}.",
-        f"As-of month: {market.get('month')}. Subject tax IDs: {', '.join(fee_schedule['subject_tins']) or 'n/a'}.",
+        f"As-of month: {month_label(market.get('month'))}. Subject tax IDs: {', '.join(fee_schedule['subject_tins']) or 'n/a'}.",
         f"Market definition: {json.dumps({k: v for k, v in market.items()})}.",
         fee_schedule["basis_note"],
         "Rate for a (payer, code) is the median across the subject's tax IDs of "
@@ -295,7 +298,7 @@ def render_rate_card(cfg: MrfxConfig, store: Store, fee_schedule: dict,
 </style></head><body>
 {_brand_header(cfg)}
 <h1>Rate card — {e(fee_schedule['subject'])}</h1>
-<div class="meta">Your negotiated rates by payer, as of {e(str(month))}. {best_line}</div>
+<div class="meta">Your negotiated rates by payer, as of {e(month_label(month))}. {best_line}</div>
 <h2>Payer scorecard — who pays best</h2>
 <div class="wrap"><table><thead><tr>{sc_head}</tr></thead><tbody>{sc_html}</tbody></table></div>
 <h2>Fee schedule</h2>

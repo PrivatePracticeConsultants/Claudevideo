@@ -48,14 +48,50 @@ class BenchmarkError(ValueError):
     pass
 
 
+# Sentinel as-of "month": instead of a single calendar month, use each
+# contract's NEWEST file. Payers republish their whole rate file monthly, so a
+# contract appears once per ingested month; pinning a month (or this "latest"
+# collapse) keeps ONE rate per contract — never the double-count of pooling
+# every month, and never a stale/current vintage blend.
+LATEST_MONTH = "latest"
+
+
+def is_latest(market: dict) -> bool:
+    return str(market.get("month") or "").strip().lower() == LATEST_MONTH
+
+
+def _rates_relation(market: dict) -> str:
+    """The FROM-relation for market queries, aliased `t` by the caller.
+    Pinned month → plain `rates_by_tin` (the file_month = ? clause in
+    _market_where selects that snapshot). "Latest" → a subquery that keeps only
+    the newest file_month PER CONTRACT (the full rates_by_tin grain minus
+    file_month), so every payer appears at its freshest vintage regardless of
+    which calendar month is newest, with no republished-snapshot double-count."""
+    if is_latest(market):
+        return ("(SELECT * FROM rates_by_tin QUALIFY row_number() OVER ("
+                "PARTITION BY payer, tin_value, billing_code, modifier_set, "
+                "billing_class, service_code_set, is_dollar_rate "
+                "ORDER BY file_month DESC) = 1)")
+    return "rates_by_tin"
+
+
+def month_label(month) -> str:
+    """Human/report label for an as-of value."""
+    return ("latest available (newest file per contract)"
+            if str(month or "").strip().lower() == LATEST_MONTH else str(month))
+
+
 def _market_where(market: dict, include_assistant: bool, include_non_dollar: bool) -> tuple[str, list]:
-    """Shared WHERE over rates_by_tin joined tin_directory (alias t/td)."""
+    """Shared WHERE over rates_by_tin joined tin_directory (alias t/td).
+    Pair with _rates_relation(market) as the FROM-relation — for "latest" the
+    relation already reduces to one row per contract, so no file_month filter."""
     clauses, params = ["t.tin_value IS NOT NULL", "NOT t.tin_is_really_npi"], []
     month = market.get("month")
     if not month:
-        raise BenchmarkError("an as-of month is required (7A.5) — pass market.month")
-    clauses.append("t.file_month = ?")
-    params.append(month)
+        raise BenchmarkError("an as-of month is required (7A.5) — pass market.month (or 'latest')")
+    if not is_latest(market):
+        clauses.append("t.file_month = ?")
+        params.append(month)
     payers = market.get("payers") or []
     if payers:
         clauses.append(f"t.payer IN ({', '.join('?' for _ in payers)})")
@@ -150,6 +186,7 @@ def compute_benchmark(store: Store, subject: str, market: dict) -> dict:
     include_assistant = bool(market.get("include_assistant", False))
     include_non_dollar = bool(market.get("include_non_dollar", False))
     where, params = _market_where(market, include_assistant, include_non_dollar)
+    rel = _rates_relation(market)
 
     curated = market.get("curated_tins")
     # peers filter runs directly on the already-grouped `base` CTE (aliased b) —
@@ -169,7 +206,7 @@ def compute_benchmark(store: Store, subject: str, market: dict) -> dict:
     WITH subject_tins AS (SELECT unnest(?::VARCHAR[]) AS tin),
     base AS (
         SELECT t.billing_code, t.tin_value, median(t.negotiated_rate) AS rate
-        FROM rates_by_tin t LEFT JOIN tin_directory td USING (tin_value)
+        FROM {rel} t LEFT JOIN tin_directory td USING (tin_value)
         WHERE {where}
         GROUP BY t.billing_code, t.tin_value
     ),
@@ -335,10 +372,13 @@ def subject_payers(store: Store, subject: str, market: dict) -> list[str]:
         return []
     month = market.get("month")
     if not month:
-        raise BenchmarkError("an as-of month is required (7A.5) — pass market.month")
-    clauses = ["tin_value IN (SELECT unnest(?::VARCHAR[]))", "file_month = ?",
-               "payer IS NOT NULL"]
-    params: list = [subject_tins, month]
+        raise BenchmarkError("an as-of month is required (7A.5) — pass market.month (or 'latest')")
+    # "latest": payers the subject contracts with in ANY month present
+    clauses = ["tin_value IN (SELECT unnest(?::VARCHAR[]))", "payer IS NOT NULL"]
+    params: list = [subject_tins]
+    if not is_latest(market):
+        clauses.append("file_month = ?")
+        params.append(month)
     scope = market.get("payers") or []
     if scope:
         clauses.append(f"payer IN ({', '.join('?' for _ in scope)})")
@@ -436,10 +476,11 @@ def _entity_rates(store: Store, tins: list[str], market: dict) -> dict[str, floa
     the median of its member TINs' medians — the same rule as everywhere else."""
     where, params = _market_where(market, bool(market.get("include_assistant")),
                                   bool(market.get("include_non_dollar")))
+    rel = _rates_relation(market)
     sql = f"""
     WITH base AS (
         SELECT t.billing_code, t.tin_value, median(t.negotiated_rate) AS rate
-        FROM rates_by_tin t LEFT JOIN tin_directory td USING (tin_value)
+        FROM {rel} t LEFT JOIN tin_directory td USING (tin_value)
         WHERE {where} AND t.tin_value IN (SELECT unnest(?::VARCHAR[]))
         GROUP BY 1, 2)
     SELECT billing_code, round(median(rate), 2) FROM base GROUP BY 1
@@ -482,6 +523,7 @@ def compute_payer_comparison(store: Store, subject: str, payer: str, market: dic
     other_market = {k: v for k, v in market.items() if k != "payers"}
     o_where, o_params = _market_where(other_market, bool(market.get("include_assistant")),
                                       bool(market.get("include_non_dollar")))
+    orel = _rates_relation(other_market)
     subject_tins = resolve_subject_tins(store, subject)
     with store.connect() as con:
         # two-level entity rule here too (invariant 5): per-TIN median first,
@@ -492,7 +534,7 @@ def compute_payer_comparison(store: Store, subject: str, payer: str, market: dic
             WITH per_tin AS (
                 SELECT t.billing_code, t.payer, t.tin_value,
                        median(t.negotiated_rate) AS rate
-                FROM rates_by_tin t LEFT JOIN tin_directory td USING (tin_value)
+                FROM {orel} t LEFT JOIN tin_directory td USING (tin_value)
                 WHERE {o_where} AND t.payer != ?
                   AND t.tin_value IN (SELECT unnest(?::VARCHAR[]))
                 GROUP BY 1, 2, 3),
@@ -539,7 +581,7 @@ def compute_payer_comparison(store: Store, subject: str, payer: str, market: dic
         rows.append(row)
     if not rows:
         raise BenchmarkError(
-            f"{subject} has no priced codes with {payer} in {market.get('month')} "
+            f"{subject} has no priced codes with {payer} in {month_label(market.get('month'))} "
             "under the market basis — nothing to negotiate from")
 
     def _avg(vals):
@@ -687,7 +729,7 @@ def render_payer_compare_report(cfg: MrfxConfig, store: Store, comp: dict) -> st
 {_brand_header(cfg)}
 <h1>Payer negotiation — {e(comp['subject'])} vs {e(comp['payer'])}</h1>
 <div class="meta">What {e(comp['payer'])} pays you, its market, your named
- comparables, and your other payers — per code, as of {e(str(month))}.</div>
+ comparables, and your other payers — per code, as of {e(month_label(month))}.</div>
 {geo_banner}
 <div class="band"><ul>{''.join(f'<li>{ln}</li>' for ln in lev)}{comp_lines}</ul></div>
 <h2>Per-code comparison</h2>
@@ -782,7 +824,7 @@ def render_negotiation_report(cfg: MrfxConfig, store: Store, neg: dict) -> str:
             )
         return f"""
         <h2>{e(payer)}</h2>
-        <p class="meta">{hp_txt} {sec['n_codes']} benchmarked code(s), as of {e(str(month))}.</p>
+        <p class="meta">{hp_txt} {sec['n_codes']} benchmarked code(s), as of {e(month_label(month))}.</p>
         <table><thead><tr><th>Code</th><th class="num">Your rate</th>
         <th class="num">P25</th><th class="num">Median</th><th class="num">P75</th>
         <th class="num">Target (p{target})</th><th class="num">Gap</th>
@@ -823,7 +865,7 @@ def render_negotiation_report(cfg: MrfxConfig, store: Store, neg: dict) -> str:
 </style></head><body>
 {_brand_header(cfg)}
 <h1>Payer negotiation one-pager — {e(subject)}</h1>
-<div class="meta">Where each payer pays you versus the peers it pays, as of {e(str(month))}.
+<div class="meta">Where each payer pays you versus the peers it pays, as of {e(month_label(month))}.
  Ordered weakest position first.</div>
 {geo_banner}
 {summary}
@@ -851,7 +893,7 @@ def methodology_footer(store: Store, benchmark: dict) -> str:
         files = con.execute(q + "ORDER BY filename", payers).fetchall()
     lines = [
         f"Generated {dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} by MRF Explorer v{__version__}.",
-        f"As-of month: {market.get('month')}. Peer basis: {benchmark['peer_set']}.",
+        f"As-of month: {month_label(market.get('month'))}. Peer basis: {benchmark['peer_set']}.",
         f"Market definition: {json.dumps({k: v for k, v in market.items() if v not in (None, [], '')})}.",
         benchmark["basis_note"],
         "Dedup rule: one row per (payer, TIN, code, modifier-set, billing class, "
@@ -958,7 +1000,7 @@ def render_pitch_report(cfg: MrfxConfig, store: Store, benchmark: dict,
 </style></head><body>
 {_brand_header(cfg)}
 <h1>Negotiated-rate benchmark — {e(benchmark['subject'])}</h1>
-<div class="meta">As of {e(str(benchmark['market'].get('month')))} ·
+<div class="meta">As of {e(month_label(benchmark['market'].get('month')))} ·
  {e(benchmark['peer_set'])} · target: p{target}</div>
 {geo_banner}
 <table><thead><tr><th>Code</th><th class="num">Your rate</th><th class="num">P25</th>

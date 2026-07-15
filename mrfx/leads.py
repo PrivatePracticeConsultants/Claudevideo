@@ -19,7 +19,7 @@ import datetime as dt
 import json
 
 from . import __version__
-from .benchmark import BenchmarkError, _market_where, resolve_subject_tins
+from .benchmark import BenchmarkError, _market_where, _rates_relation, resolve_subject_tins
 from .store import Store, defuse_csv, mask_tin
 
 PERCENTILES = (10, 25, 40, 50, 75, 90)
@@ -37,6 +37,7 @@ def compute_leads(store: Store, market: dict, *, threshold_percentile: int = 25,
     include_assistant = bool(market.get("include_assistant", False))
     include_non_dollar = bool(market.get("include_non_dollar", False))
     where, params = _market_where(market, include_assistant, include_non_dollar)
+    rel = _rates_relation(market)
 
     # optionally drop a known practice from its own lead list (a consultant
     # sweeping for prospects excludes the client they already have). Excluded
@@ -52,7 +53,7 @@ def compute_leads(store: Store, market: dict, *, threshold_percentile: int = 25,
     sql = f"""
     WITH base AS (
         SELECT t.billing_code, t.tin_value, median(t.negotiated_rate) AS rate
-        FROM rates_by_tin t LEFT JOIN tin_directory td USING (tin_value)
+        FROM {rel} t LEFT JOIN tin_directory td USING (tin_value)
         WHERE {where}
         GROUP BY t.billing_code, t.tin_value
     ),

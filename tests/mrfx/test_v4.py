@@ -1247,6 +1247,44 @@ def test_benchmark_subjects_search_and_cap(cfg, store):
     assert any(t["tin_value"].startswith("430000005") for t in tinq["tins"])
 
 
+def test_latest_month_uses_newest_file_per_contract(cfg, store):
+    # "latest" as-of: each contract uses its NEWEST file, so every payer appears
+    # at its freshest vintage regardless of which calendar month is newest —
+    # without the double-count of pooling all months.
+    from mrfx.benchmark import _entity_rates, subject_payers
+
+    def one(payer, month, rate):
+        d = innetwork(payer=payer, month=f"{month}-01", items=[
+            item("97110", [(["1000000001"], "43-5000001", "ein", [(rate, None)])])])
+        return make_fixture(cfg.inbox_dir, f"{payer.replace(' ','')}_{month}.json", d)
+
+    # Payer A: subject priced in May ($50) AND June ($60, a raise). Payer B:
+    # ONLY May ($40) -- its newest file is May.
+    ingest_file(cfg, store, one("Alpha Health", "2026-05", 50.0))
+    ingest_file(cfg, store, one("Alpha Health", "2026-06", 60.0))
+    ingest_file(cfg, store, one("Beta Plans", "2026-05", 40.0))
+    store.rebuild_rollups()
+    tins = ["435000001"]
+
+    # PINNED June: only Alpha has a June file -> just its June rate 60.
+    assert _entity_rates(store, tins, {"month": "2026-06"}) == {"97110": 60.0}
+    assert subject_payers(store, "435000001", {"month": "2026-06"}) == ["Alpha Health"]
+    # PINNED May: Alpha's May 50 + Beta's May 40 -> entity median 45.
+    assert _entity_rates(store, tins, {"month": "2026-05"}) == {"97110": 45.0}
+
+    # LATEST: Alpha at its NEWEST (June 60, NOT pooled with May's 50) AND Beta at
+    # its newest (May 40) -> median(60, 40) = 50. Both payers present, each at
+    # its freshest vintage regardless of which calendar month is newest.
+    assert _entity_rates(store, tins, {"month": "latest"}) == {"97110": 50.0}
+    assert subject_payers(store, "435000001", {"month": "latest"}) == ["Alpha Health", "Beta Plans"]
+
+    # API accepts "latest"; the report labels it, not a fake date
+    c = TestClient(create_app(cfg, store))
+    r = c.post("/api/report/pitch", json={"subject": "435000001",
+               "market": {"month": "latest", "allow_national": True}})
+    assert r.status_code == 200 and "latest available" in r.text
+
+
 def test_payer_comparison_math_and_report(cfg, store):
     # Negotiate view: subject vs ONE payer's market, named comparables as
     # columns, plus what the subject's OTHER payers pay — all hand-checked.

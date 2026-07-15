@@ -4,6 +4,13 @@
 const $ = (sel, el = document) => el.querySelector(sel);
 const $$ = (sel, el = document) => [...el.querySelectorAll(sel)];
 
+// Default as-of choice for the report tabs: one CURRENT rate per contract
+// across every payer (newest file each), instead of forcing a single calendar
+// month. Value "latest" is understood by the benchmark/negotiate/leads/ratecard
+// APIs; specific months stay selectable below it for a historical snapshot.
+const LATEST_MONTH_OPT =
+  '<option value="latest">Latest available — all payers, newest rates</option>';
+
 const state = {
   view: "explorer",
   grain: "tin",
@@ -746,7 +753,7 @@ async function refreshSubjectPickers(subjSel, monthSels = []) {
 let benchmarkInit = false;
 async function initBenchmark() {
   refreshMpfsStatus();
-  if (benchmarkInit) { refreshSubjectPickers("#b-subjects", [{ sel: "#b-month" }]); return; }
+  if (benchmarkInit) { refreshSubjectPickers("#b-subjects", [{ sel: "#b-month", prefix: LATEST_MONTH_OPT }]); return; }
   benchmarkInit = true;
   // Independent loads: a single failing/slow call must not blank the required
   // As-of month (or the whole tab).
@@ -758,7 +765,7 @@ async function initBenchmark() {
   ]);
   if (subjects) $("#b-subjects").innerHTML = subjectOptionsHtml(subjects);
   wireSubjectSearch("#b-subject", "#b-subjects");
-  fillMonthSelect("#b-month", months);
+  fillMonthSelect("#b-month", months, LATEST_MONTH_OPT);
   if (payers) $("#b-payer-chips").innerHTML = payers.payers.map((p) =>
     `<button class="chip" data-payer="${esc(p)}">${esc(p)}</button>`).join("");
   $("#b-payer-chips").addEventListener("click", (ev) => {
@@ -1000,7 +1007,7 @@ async function initNegotiate() {
     $("#ng-subjects").innerHTML = subjectOptionsHtml(subjects);  // listeners
     $("#ng-comps").innerHTML = subjectOptionsHtml(subjects);     // below still wire
   }
-  fillMonthSelect("#ng-month", months);
+  fillMonthSelect("#ng-month", months, LATEST_MONTH_OPT);
   $("#ng-payer").innerHTML = `<option value="">— pick a payer —</option>` +
     ((payers && payers.payers) || []).map((p) => `<option>${esc(p)}</option>`).join("");
   wireSubjectSearch("#ng-subject", "#ng-subjects");
@@ -1104,7 +1111,7 @@ async function runNegotiate() {
 
 async function initRatecard() {
   refreshRcMpfs();
-  if (ratecardInit) { refreshSubjectPickers("#rc-subjects", [{ sel: "#rc-month" }]); return; }
+  if (ratecardInit) { refreshSubjectPickers("#rc-subjects", [{ sel: "#rc-month", prefix: LATEST_MONTH_OPT }]); return; }
   ratecardInit = true;
   const [subjects, months, payers] = await Promise.all([
     api("/api/benchmark/subjects").catch(() => null),
@@ -1113,7 +1120,7 @@ async function initRatecard() {
   ]);
   if (subjects) $("#rc-subjects").innerHTML = subjectOptionsHtml(subjects);
   wireSubjectSearch("#rc-subject", "#rc-subjects");
-  fillMonthSelect("#rc-month", months);
+  fillMonthSelect("#rc-month", months, LATEST_MONTH_OPT);
   if (payers) $("#rc-payer-chips").innerHTML = payers.payers.map((p) =>
     `<button class="chip" data-payer="${esc(p)}">${esc(p)}</button>`).join("");
   $("#rc-payer-chips").addEventListener("click", (ev) => {
@@ -1245,7 +1252,7 @@ async function postDownload(url, payload, filename) {
 
 let leadsInit = false;
 async function initLeads() {
-  if (leadsInit) { refreshSubjectPickers("#ld-subjects", [{ sel: "#ld-month" }]); loadLdStates(); return; }
+  if (leadsInit) { refreshSubjectPickers("#ld-subjects", [{ sel: "#ld-month", prefix: LATEST_MONTH_OPT }]); loadLdStates(); return; }
   leadsInit = true;
   // Load each picker INDEPENDENTLY: a single failing/slow call (e.g. the
   // subject list on a large store) must never leave the required As-of month
@@ -1256,7 +1263,7 @@ async function initLeads() {
     api("/api/payers").catch(() => null),
     api("/api/states").catch(() => null),
   ]);
-  fillMonthSelect("#ld-month", months);
+  fillMonthSelect("#ld-month", months, LATEST_MONTH_OPT);
   if (payers) $("#ld-payer-chips").innerHTML = payers.payers.map((p) => `<button class="chip" data-payer="${esc(p)}">${esc(p)}</button>`).join("");
   $("#ld-payer-chips").addEventListener("click", (ev) => { const b = ev.target.closest(".chip"); if (b) b.classList.toggle("on"); });
   if (states) $("#ld-states").innerHTML = (states.states || []).map((s) => `<option value="${esc(s)}">`).join("");
