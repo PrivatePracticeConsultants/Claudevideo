@@ -299,10 +299,13 @@ class FilterSet:
             clauses.append("NOT tin_is_really_npi")
             add("hide_tin_is_really_npi", True)
         if qp.get("therapy_only", "0") in ("1", "true"):
-            # keep only PT/OT/SLP providers & therapy practices (by NPPES
-            # taxonomy) — drops the MDs/DOs/NPs who merely billed a 97xxx code.
+            # STRICT practice test (tin_directory.is_therapy): majority of the
+            # practice's identified NPIs are PT/OT/SLP (or a therapy-clinic org
+            # NPI), and no hospital-class NPI — excludes MDs/DOs/NPs, physician
+            # groups, and hospital systems that merely bill 97xxx codes.
             clauses.append("is_therapy")
-            add("therapy_providers_only", True)
+            add("therapy_practices_only",
+                "majority PT/OT/SLP (or therapy-clinic org NPI), no hospital-class NPI")
             self.uses_dim_cols = True  # is_therapy is a joined/computed column
         for bound, op in (("rate_min", ">="), ("rate_max", "<=")):
             raw = qp.get(bound)
@@ -1214,7 +1217,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             return compute_payer_comparison(
                 store, str(body.get("subject", "")), str(body.get("payer", "")),
                 body.get("market") or {},
-                comparables=[str(c) for c in (body.get("comparables") or [])],
+                comparables=[str(c) for c in (body.get("comparables") or [])]
+                if isinstance(body.get("comparables") or [], list) else [],
             )
         except (BenchmarkError, ValueError, TypeError) as e:
             raise HTTPException(422, str(e))
@@ -1226,7 +1230,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             comp = compute_payer_comparison(
                 store, str(body.get("subject", "")), str(body.get("payer", "")),
                 body.get("market") or {},
-                comparables=[str(c) for c in (body.get("comparables") or [])],
+                comparables=[str(c) for c in (body.get("comparables") or [])]
+                if isinstance(body.get("comparables") or [], list) else [],
             )
             return HTMLResponse(render_payer_compare_report(cfg, store, comp))
         except (BenchmarkError, ValueError, TypeError) as e:

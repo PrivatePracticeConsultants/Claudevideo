@@ -1271,17 +1271,18 @@ def test_payer_comparison_math_and_report(cfg, store):
                                     market, comparables=["43-9222222"])
     (r,) = comp["rows"]
     assert r["subject_rate"] == 50.0
-    # peers exclude the subject: [60, 70, 75, 80] -> p50 72.5, gap 22.5 (+31.0%)
+    # peers exclude the subject: [60, 70, 75, 80] -> p50 72.5, gap 22.5.
+    # UPLIFT semantics, subject denominator: (72.5-50)/50 = +45.0%
     assert r["p50"] == 72.5 and r["gap_to_median"] == 22.5
-    assert r["gap_to_median_pct"] == 31.0
+    assert r["gap_to_median_pct"] == 45.0
     assert r["subject_percentile"] == 0          # below every peer
     assert r["comp_rates"] == [75.0] and r["best_comparable"] == 75.0
     assert r["other_payers_rate"] == 66.0 and r["n_other_payers"] == 1
     s = comp["summary"]
     assert s["n_codes"] == 1 and s["n_below_median"] == 1
     assert s["headline_percentile"] == 0
-    # other payers pay (66-50)/66 = +24.2% more
-    assert s["avg_other_payer_diff_pct"] == 24.2
+    # other payers pay (66-50)/50 = +32.0% more (subject denominator everywhere)
+    assert s["avg_other_payer_diff_pct"] == 32.0
     (cs,) = comp["comparables"]
     assert cs["n_shared_codes"] == 1 and cs["n_paid_more"] == 1
     assert cs["median_premium_pct"] == 50.0      # (75-50)/50
@@ -1291,7 +1292,9 @@ def test_payer_comparison_math_and_report(cfg, store):
         cfg, store, compute_payer_comparison(
             store, "439111111", "Testco",
             {**market, "allow_national": True}, comparables=["43-9222222"]))
-    for needle in ("Ask scenarios", "43-9222222", "Testco",
+    # comparable label: dash-stripped for the mask check -> "439222222" (a
+    # valid-EIN-prefix TIN stays visible; an SSN-pattern one would be masked)
+    for needle in ("Ask scenarios", "439222222", "Testco",
                    "METHODOLOGY", "$72.50", "$75.00"):
         assert needle in html_doc, needle
 
@@ -1305,6 +1308,37 @@ def test_payer_comparison_math_and_report(cfg, store):
                 json={"subject": "439111111", "payer": "Testco",
                       "market": market, "comparables": ["43-9222222"]})
     assert ok.status_code == 200 and ok.json()["rows"][0]["p50"] == 72.5
+    # a string comparables body must not char-split into garbage columns
+    guard = c.post("/api/negotiate/compare",
+                   json={"subject": "439111111", "payer": "Testco",
+                         "market": market, "comparables": "Acme"})
+    assert guard.status_code == 200 and guard.json()["comparables"] == []
+
+    # OTHER-payers column follows the two-level entity rule: per-TIN median
+    # first, then across TINs/payers. Subject = two TINs grouped by NPPES name;
+    # other payer pays TIN A [90,100,110] (3 base-modifier variants -> median
+    # 100) and TIN B [60] -> entity rate median(100,60)=80. Pooling raw rows
+    # would say 95.
+    ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "twotin.json", innetwork(
+        payer="Other Insurance Co",
+        items=[item("97140", [
+            (["1000000021"], "43-9777771", "ein", [(90.0, None), (100.0, ["GP"]), (110.0, ["GO"])]),
+            (["1000000022"], "43-9777772", "ein", [(60.0, None)]),
+        ]),
+        item("97110", [(["1000000021"], "43-9777771", "ein", [(55.0, None)])])])))
+    # the NEGOTIATING payer prices the same org on 97110 only — 97140 has no
+    # subject rate with Testco, so only 97110 shows; other_payers uses 97110=55?
+    # No: subject must be priced on the code with the negotiating payer for the
+    # row to exist. Price 97140 with Testco for TIN A too:
+    ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "twotin_t.json", innetwork(
+        items=[item("97140", [(["1000000021"], "43-9777771", "ein", [(70.0, None)]),
+                              (["1000000023"], "43-9888888", "ein", [(75.0, None)])])])))
+    store.save_npi("1000000021", "TwoTin Rehab", "225100000X", None, "KC", "MO", entity_type="NPI-2")
+    store.save_npi("1000000022", "TwoTin Rehab", "225100000X", None, "KC", "MO", entity_type="NPI-2")
+    store.rebuild_rollups()
+    comp2 = compute_payer_comparison(store, "TwoTin Rehab", "Testco", market)
+    r97140 = next(x for x in comp2["rows"] if x["billing_code"] == "97140")
+    assert r97140["other_payers_rate"] == 80.0   # two-level, NOT the pooled 95.0
 
 
 def test_config_duckdb_memory_knob(tmp_path):

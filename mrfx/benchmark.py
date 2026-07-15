@@ -463,15 +463,18 @@ def compute_payer_comparison(store: Store, subject: str, payer: str, market: dic
 
     # named comparables: what THIS payer pays entities the user considers
     # comparable — columns, one per name, in the order given
-    comps = []
+    comps, seen_comps = [], set()
     for name in (comparables or []):
         name = str(name).strip()
-        if not name or name == subject:
+        if not name or name == subject or name in seen_comps:
             continue
+        seen_comps.add(name)
         tins = resolve_subject_tins(store, name)
         rates = _entity_rates(store, tins, pmarket)
-        comps.append({"name": mask_tin(name) if name.isdigit() else name,
-                      "tins": [mask_tin(t) for t in tins], "rates": rates})
+        # a raw TIN typed WITH dashes must still be SSN-masked in the label
+        digits = "".join(ch for ch in name if ch.isdigit())
+        label = mask_tin(digits) if digits and len(digits) == len(name.replace("-", "").replace(" ", "")) else name
+        comps.append({"name": label, "tins": [mask_tin(t) for t in tins], "rates": rates})
 
     # cross-payer leverage: the subject's own rates for the same codes with
     # every OTHER payer (same month/basis) — "you pay me less than my other
@@ -481,27 +484,52 @@ def compute_payer_comparison(store: Store, subject: str, payer: str, market: dic
                                       bool(market.get("include_non_dollar")))
     subject_tins = resolve_subject_tins(store, subject)
     with store.connect() as con:
+        # two-level entity rule here too (invariant 5): per-TIN median first,
+        # THEN median across TINs per payer, THEN median across payers — pooling
+        # raw rows across TINs let a many-variant TIN outvote a sibling TIN
         others = {r[0]: {"rate": r[1], "n_payers": r[2]} for r in con.execute(
             f"""
-            WITH base AS (
-                SELECT t.billing_code, t.payer, median(t.negotiated_rate) AS rate
+            WITH per_tin AS (
+                SELECT t.billing_code, t.payer, t.tin_value,
+                       median(t.negotiated_rate) AS rate
                 FROM rates_by_tin t LEFT JOIN tin_directory td USING (tin_value)
                 WHERE {o_where} AND t.payer != ?
                   AND t.tin_value IN (SELECT unnest(?::VARCHAR[]))
-                GROUP BY 1, 2)
+                GROUP BY 1, 2, 3),
+            per_payer AS (
+                SELECT billing_code, payer, median(rate) AS rate
+                FROM per_tin GROUP BY 1, 2)
             SELECT billing_code, round(median(rate), 2), count(DISTINCT payer)
-            FROM base GROUP BY 1
+            FROM per_payer GROUP BY 1
             """, [*o_params, payer, subject_tins]).fetchall()}
+        # the subject's own priced codes under this payer/basis — so a code
+        # with ZERO peers still appears (market columns dashed) instead of
+        # silently vanishing from a "every code you're priced on" table
+        subject_priced = _entity_rates(store, subject_tins, pmarket)
 
+    bench_by_code = {r["billing_code"]: r for r in bench["rows"]}
     rows = []
-    for r in bench["rows"]:
-        if r.get("subject_rate") is None:
-            continue  # negotiation rows are the codes the subject is priced on
-        code, subj, p50 = r["billing_code"], r["subject_rate"], r.get("p50")
+    for code in sorted(set(subject_priced) | {c for c, r in bench_by_code.items()
+                                              if r.get("subject_rate") is not None}):
+        r = bench_by_code.get(code)
+        if r is None:
+            # subject-priced code with NO peers under this payer market: keep it
+            # visible with dashed market columns rather than silently dropping it
+            desc, _, timed = code_info(code)
+            r = {"billing_code": code, "subject_rate": subject_priced[code],
+                 "n_peers": 0, "description": desc, "is_timed": timed,
+                 "subject_percentile": None,
+                 **{f"p{p}": None for p in PERCENTILES},
+                 "target_rate": None, "gap_to_target": None}
+        elif r.get("subject_rate") is None:
+            continue
+        subj, p50 = r["subject_rate"], r.get("p50")
         row = dict(r)
         row["gap_to_median"] = round(p50 - subj, 2) if p50 is not None else None
+        # UPLIFT semantics, denominator = YOUR rate ("+45%" means your rate
+        # × 1.45 reaches the median) — consistent across every % in this view
         row["gap_to_median_pct"] = (
-            round(100 * (p50 - subj) / p50, 1) if p50 else None)
+            round(100 * (p50 - subj) / subj, 1) if p50 is not None and subj else None)
         o = others.get(code)
         row["other_payers_rate"] = o["rate"] if o else None
         row["n_other_payers"] = o["n_payers"] if o else 0
@@ -548,13 +576,16 @@ def compute_payer_comparison(store: Store, subject: str, payer: str, market: dic
             "n_below_median": len(below),
             # honest averages across the subject's priced codes (each code
             # weighted equally — utilization weighting needs volumes we don't have)
+            # ONE denominator everywhere: the subject's own rate. "+45%" always
+            # means "your rate × 1.45" — a payer analyst can check the arithmetic
+            # and every % in the document agrees with every other.
             "avg_gap_to_median_pct": _avg([r["gap_to_median_pct"] for r in rows]),
             "avg_uplift_to_p75_pct": _avg([
                 round(100 * (r["p75"] - r["subject_rate"]) / r["subject_rate"], 1)
                 for r in rows if r.get("p75") and r["subject_rate"]]),
             "avg_other_payer_diff_pct": _avg([
-                round(100 * (r["other_payers_rate"] - r["subject_rate"]) / r["other_payers_rate"], 1)
-                for r in rows if r.get("other_payers_rate") and r["subject_rate"] is not None]),
+                round(100 * (r["other_payers_rate"] - r["subject_rate"]) / r["subject_rate"], 1)
+                for r in rows if r.get("other_payers_rate") and r["subject_rate"]]),
         },
     }
 

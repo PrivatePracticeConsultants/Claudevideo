@@ -996,8 +996,10 @@ async function initNegotiate() {
     api("/api/months").catch(() => null),
     api("/api/payers").catch(() => null),
   ]);
-  $("#ng-subjects").innerHTML = subjectOptionsHtml(subjects);
-  $("#ng-comps").innerHTML = subjectOptionsHtml(subjects);
+  if (subjects) {           // a failed boot fetch must not brick the tab —
+    $("#ng-subjects").innerHTML = subjectOptionsHtml(subjects);  // listeners
+    $("#ng-comps").innerHTML = subjectOptionsHtml(subjects);     // below still wire
+  }
   fillMonthSelect("#ng-month", months);
   $("#ng-payer").innerHTML = `<option value="">— pick a payer —</option>` +
     ((payers && payers.payers) || []).map((p) => `<option>${esc(p)}</option>`).join("");
@@ -1063,7 +1065,7 @@ async function runNegotiate() {
   catch (e) { out.innerHTML = `<div class="empty"><h3>Couldn't compare</h3>${esc(e.message)}</div>`; return; }
   state.lastNegotiatePayload = payload;
   $("#ng-report").disabled = false;
-  const mny = (v) => (v == null ? "–" : `$${fmtMoney(v)}`);
+  const mny = (v) => (v == null ? "–" : v < 0 ? `-$${fmtMoney(-v)}` : `$${fmtMoney(v)}`);
   const s = d.summary;
   const cards = [
     s.headline_percentile != null

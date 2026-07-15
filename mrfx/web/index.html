@@ -235,7 +235,7 @@
         <div class="field"><label>Target percentile</label>
           <select id="b-target"><option value="50">median (p50)</option><option value="75">p75</option></select>
         </div>
-        <label class="toggle" title="market = only PT/OT/SLP providers & therapy practices (by NPPES taxonomy), not the MDs/DOs/NPs who billed a 97xxx code. Needs NPI identification.">
+        <label class="toggle" title="market = keep only therapy PRACTICES: the majority of the practice's identified providers are PT/OT/SLP (or it's a therapy clinic), and it has no hospital-class NPI — hides MDs/DOs/NPs, physician groups, and hospital systems that merely bill 97xxx codes. Needs NPI identification.">
           <input type="checkbox" id="b-therapy" checked> therapy practices only
         </label>
         <div class="field"><label>Peer set</label>
