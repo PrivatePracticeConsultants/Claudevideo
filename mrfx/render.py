@@ -57,6 +57,14 @@ class RenderBrowserMissing(Exception):
 # this long isn't going to (networkidle usually lands well under 15s)
 RENDER_TIMEOUT_MS = 45_000
 SETTLE_MS = 2_500          # after networkidle: lazy tabs, delayed XHRs
+# HARD wall-clock ceiling on one render. Individual Playwright calls are
+# timeout-bounded, but page.evaluate()/page.content() have NO timeout: a portal
+# whose JS busy-loops the main thread after networkidle would hang the protocol
+# call forever — holding _RENDER_LOCK and wedging the whole queue behind it
+# until a restart. A watchdog closes the browser at this deadline; the hung call
+# then raises and the row fails with a plain message instead. Generous: goto
+# (45s) + settle + consent + 6 clicks (~12s each) + snapshots fit comfortably.
+RENDER_HARD_DEADLINE_S = 240.0
 MAX_BODY_BYTES = 20 << 20  # never buffer a huge response into the page
 _SKIP_RESOURCES = {"image", "media", "font"}  # invisible to link harvesting
 
@@ -136,6 +144,29 @@ def _auto_install_chromium() -> bool:
         log.warning("auto-download of chromium exited %d: %s", proc.returncode,
                     (proc.stderr or proc.stdout or "").strip()[:300])
         return False
+
+
+def _close_quietly(browser) -> None:
+    """Close a Playwright browser tolerating every error (it may already be
+    dead if the watchdog fired)."""
+    try:
+        browser.close()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _kill_render_driver(pw) -> None:
+    """Watchdog kill for a hung render. Sync-Playwright objects are
+    thread-affine, so a cross-thread browser.close() just raises in the timer
+    thread and unblocks nothing — terminating the driver process is what makes
+    the hung protocol call raise in the render thread. Reaches through private
+    attributes by necessity; any failure degrades to the old no-watchdog
+    behavior (best-effort, never raises)."""
+    try:
+        proc = pw._impl_obj._connection._transport._proc  # noqa: SLF001
+        proc.kill()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _launch(pw):
@@ -355,6 +386,17 @@ def render_page_links(cfg: MrfxConfig, url: str, max_files: int) -> list[str]:
                 # yet if it fails) but INSIDE the client-closing one — a
                 # missing-browser error must not leak the httpx client
                 browser = _launch(pw)
+                # watchdog: hard wall-clock ceiling (see RENDER_HARD_DEADLINE_S).
+                # Killing the driver process makes any hung protocol call raise,
+                # which the outer except turns into a normal row failure instead
+                # of a forever-held _RENDER_LOCK wedging the whole queue.
+                watchdog = threading.Timer(
+                    RENDER_HARD_DEADLINE_S,
+                    lambda: (log.warning(
+                        "%s — render exceeded %.0fs; terminating the browser",
+                        url, RENDER_HARD_DEADLINE_S), _kill_render_driver(pw)))
+                watchdog.daemon = True
+                watchdog.start()
                 try:
                     # service workers bypass route() interception entirely —
                     # block them or the browser fetches from the network
@@ -375,7 +417,8 @@ def render_page_links(cfg: MrfxConfig, url: str, max_files: int) -> list[str]:
                             page.wait_for_timeout(SETTLE_MS)
                             snapshot_all(context)
                 finally:
-                    browser.close()
+                    watchdog.cancel()
+                    _close_quietly(browser)
         finally:
             holder["client"].close()  # idempotent; covers every exit path
 

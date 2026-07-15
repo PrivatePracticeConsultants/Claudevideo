@@ -18,7 +18,7 @@ from pathlib import Path
 import httpx
 
 from .config import MrfxConfig
-from .store import Store
+from .store import Store, replace_with_retry
 
 log = logging.getLogger(__name__)
 
@@ -354,7 +354,10 @@ def _write_nppes_parquet(cfg: MrfxConfig, store: Store, pqp: Path,
                 total += len(batch["npi"])
     finally:
         writer.close()
-    tmp.replace(pqp)  # atomic: a half-written cache never gets a matching .sig
+    # atomic, with Windows sharing-violation tolerance (a parser worker may be
+    # reading the old cache at this instant): a half-written cache never gets a
+    # matching .sig
+    replace_with_retry(tmp, pqp)
     return total
 
 

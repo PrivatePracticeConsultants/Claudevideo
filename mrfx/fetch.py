@@ -44,10 +44,19 @@ RETRYABLE_STATUS = {408, 425, 429, 500, 502, 503, 504}
 # Query params that carry a signature/expiry rather than identity. Dropping
 # only these (not the whole query) keeps signed CDN re-pastes deduped while
 # still distinguishing download endpoints like ?file=a.json vs ?file=b.json.
-_VOLATILE_QUERY = re.compile(
-    r"^(expires|signature|policy|key-pair-id|awsaccesskeyid|x-amz-.*|token|sig|se|sp|sv|sr|st|ss|srt|spr|sip|skoid|sktid|skt|ske|sks|skv|rscd|rsct)$",
+# Two tiers: names that are unambiguously signature material are ALWAYS
+# stripped; the short generic Azure-SAS names (st, se, sp, …) and `token` are
+# stripped ONLY when the query also carries a real signature param — a listing
+# whose per-file URLs differ only in `?st=NY` or `?token=<file-id>` must NOT
+# collapse every file to one dedup key (silent under-ingestion).
+_VOLATILE_ALWAYS = re.compile(
+    r"^(expires|signature|policy|key-pair-id|awsaccesskeyid|x-amz-.*|sig)$", re.I)
+_VOLATILE_IF_SIGNED = re.compile(
+    r"^(token|se|sp|sv|sr|st|ss|srt|spr|sip|skoid|sktid|skt|ske|sks|skv|rscd|rsct)$",
     re.I,
 )
+_SIGNATURE_MARKERS = re.compile(
+    r"^(sig|signature|x-amz-signature|x-amz-credential|awsaccesskeyid|key-pair-id)$", re.I)
 
 
 def dedup_key(url: str) -> str:
@@ -56,10 +65,13 @@ def dedup_key(url: str) -> str:
     signature params; identity params (e.g. ?file=...) are kept, sorted.
     Host is case-insensitive; the path is NOT (S3 keys are case-sensitive)."""
     parts = urlsplit(url)
+    pairs = [p.partition("=") for p in parts.query.split("&") if p]
+    signed = any(_SIGNATURE_MARKERS.match(k) for k, _, _ in pairs if k)
     kept = sorted(
         f"{k}={v}"
-        for k, _, v in (p.partition("=") for p in parts.query.split("&") if p)
-        if k and not _VOLATILE_QUERY.match(k)
+        for k, _, v in pairs
+        if k and not _VOLATILE_ALWAYS.match(k)
+        and not (signed and _VOLATILE_IF_SIGNED.match(k))
     )
     query = ("?" + "&".join(kept)) if kept else ""
     return f"{parts.scheme.lower()}://{parts.netloc.lower()}{parts.path}{query}"
@@ -1457,12 +1469,21 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
                     fetch_url_record(cfg, store, rec)
                 except Exception:  # noqa: BLE001 — downloader must never die
                     log.exception("prefetch: unexpected error on %s", rec.get("url"))
-                    store.update_url(rec["id"], status="failed", error="unexpected download error")
-                    # a non-DownloadError failure (e.g. a store hiccup mid-write)
-                    # still ends this row: revive any twins that deferred to its
-                    # content so the shared content isn't orphaned as skipped
-                    # (matches the DownloadError path at fetch_url_record).
-                    _revive_twins(store, rec.get("content_sha") or "", rec["id"])
+                    try:
+                        store.update_url(rec["id"], status="failed", error="unexpected download error")
+                        # a non-DownloadError failure (e.g. a store hiccup mid-write)
+                        # still ends this row: revive any twins that deferred to its
+                        # content so the shared content isn't orphaned as skipped
+                        # (matches the DownloadError path at fetch_url_record).
+                        _revive_twins(store, rec.get("content_sha") or "", rec["id"])
+                    except Exception:  # noqa: BLE001 — correlated failure (disk full
+                        # breaking both download AND the DB write): the row stays
+                        # 'downloading' with no owner; say so instead of silently
+                        # swallowing it — recover_stuck_urls re-queues it (and any
+                        # stranded twins) on the next worker start.
+                        log.exception(
+                            "prefetch: could not record the failure for %s — the row "
+                            "will be recovered on the next start", rec.get("url"))
             except Exception:  # noqa: BLE001 — even store hiccups must not kill the loop
                 log.exception("prefetch: transient store error; retrying shortly")
                 dl_stop.wait(2.0)

@@ -30,7 +30,10 @@ def load_known_sources(path: Path | str, today: dt.date | None = None) -> list[d
     (the feature degrades to 'no known sources', never an error)."""
     path = Path(path)  # tolerate a str path from a caller that didn't wrap it
     try:
-        raw = yaml.safe_load(path.read_text()) or {}
+        # errors="replace": a non-UTF8 byte from a Windows editor degrades to a
+        # replacement char instead of raising UnicodeDecodeError (a 500 on the
+        # known-sources API and a traceback from `mrfx add --known`).
+        raw = yaml.safe_load(path.read_text(encoding="utf-8", errors="replace")) or {}
     except (OSError, yaml.YAMLError) as e:
         log.warning("could not read known sources %s: %s", path, e)
         return []

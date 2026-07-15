@@ -31,9 +31,12 @@ def _load_yaml(path: Path) -> dict:
     if not path.exists():
         return {}
     try:
-        data = yaml.safe_load(path.read_text()) or {}
-    except yaml.YAMLError as e:
-        log.warning("%s is not valid YAML (%s) — treating it as empty", path, e)
+        # errors="replace": a Windows-ANSI byte (a user editing in Notepad with
+        # a non-UTF8 locale) must not kill the server with UnicodeDecodeError.
+        # OSError covers a directory-at-the-path / permission problems.
+        data = yaml.safe_load(path.read_text(encoding="utf-8", errors="replace")) or {}
+    except (yaml.YAMLError, OSError) as e:
+        log.warning("%s could not be read as YAML (%s) — treating it as empty", path, e)
         return {}
     if not isinstance(data, dict):
         log.warning("%s: top level must be a mapping — treating it as empty", path)

@@ -83,6 +83,104 @@ def sql_path(p) -> str:
     return str(p).replace("'", "''")
 
 
+def _total_ram_bytes() -> int:
+    """Physical RAM, cross-platform, 0 if unknown. os.sysconf doesn't exist on
+    Windows — without this branch the documented '40% of RAM, clamped [2,12] GB'
+    auto memory cap silently fell back to a flat 4 GB on the target platform."""
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            class _MemStatus(ctypes.Structure):
+                _fields_ = [("dwLength", ctypes.c_ulong),
+                            ("dwMemoryLoad", ctypes.c_ulong),
+                            ("ullTotalPhys", ctypes.c_uint64),
+                            ("ullAvailPhys", ctypes.c_uint64),
+                            ("ullTotalPageFile", ctypes.c_uint64),
+                            ("ullAvailPageFile", ctypes.c_uint64),
+                            ("ullTotalVirtual", ctypes.c_uint64),
+                            ("ullAvailVirtual", ctypes.c_uint64),
+                            ("ullAvailExtendedVirtual", ctypes.c_uint64)]
+
+            st = _MemStatus()
+            st.dwLength = ctypes.sizeof(st)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)):
+                return int(st.ullTotalPhys)
+        except Exception:  # noqa: BLE001
+            return 0
+        return 0
+    try:
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    except (ValueError, OSError, AttributeError):
+        return 0
+
+
+def replace_with_retry(src: Path, dst: Path, attempts: int = 5) -> None:
+    """`src.replace(dst)` with brief retries. On Windows, replace/unlink raise
+    PermissionError while ANY handle is open on the target without
+    FILE_SHARE_DELETE — a dashboard query scanning the parquet glob at the wrong
+    instant, or antivirus/Search indexer touching the fresh file. Failing a
+    multi-hour parse at its very last step over a 100ms transient lock is
+    unacceptable; a short backoff outlives every scanner we've seen. Re-raises
+    after the final attempt — the caller's normal error handling applies."""
+    for i in range(attempts):
+        try:
+            Path(src).replace(dst)
+            return
+        except PermissionError:
+            if i == attempts - 1:
+                raise
+            time.sleep(0.2 * (i + 1))
+
+
+def unlink_with_retry(p: Path, attempts: int = 4) -> None:
+    """missing_ok unlink with the same Windows transient-lock tolerance as
+    replace_with_retry. Swallows a still-locked file on the final attempt —
+    every caller unlinks either a tmp (cosmetic leak) or a part that the next
+    swap will overwrite, so refusing to crash is the correct direction."""
+    for i in range(attempts):
+        try:
+            Path(p).unlink(missing_ok=True)
+            return
+        except PermissionError:
+            if i == attempts - 1:
+                return
+            time.sleep(0.2 * (i + 1))
+
+
+def _pid_alive(pid: int) -> bool:
+    """Is `pid` a live process? Platform-aware: on Windows `os.kill(pid, 0)` is
+    NOT a liveness probe — signal 0 is CTRL_C_EVENT, so it either delivers a
+    real Ctrl-C to an unlucky recycled-pid console group or raises a plain
+    OSError for a dead pid (which used to escape the orphan sweep and brick
+    EVERY command after an interrupted parse). Unsure -> True: keeping a
+    stranger's temp file is a cosmetic leak; deleting a live writer's temp is
+    corruption."""
+    if os.name == "nt":
+        try:
+            import ctypes
+            SYNCHRONIZE = 0x00100000
+            h = ctypes.windll.kernel32.OpenProcess(SYNCHRONIZE, False, pid)
+            if not h:
+                return False  # no such process (or access denied w/ no handle -> treat dead)
+            try:
+                # WAIT_TIMEOUT (0x102) = still running; WAIT_OBJECT_0 = exited
+                return ctypes.windll.kernel32.WaitForSingleObject(h, 0) == 0x102
+            finally:
+                ctypes.windll.kernel32.CloseHandle(h)
+        except Exception:  # noqa: BLE001 — can't tell: keep the file
+            return True
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # alive, owned by another user
+    except OSError:
+        return True  # can't tell: keep the file
+
+
 # --- SSN masking (§7A.7b) ----------------------------------------------------
 # EINs and SSNs are both 9 digits. A number is masked when it satisfies SSN
 # structural rules AND its 2-digit prefix is not a valid IRS EIN campus prefix.
@@ -317,11 +415,11 @@ class Store:
             # useful work under that and would fail every rollup).
             self._memory_limit_gb = max(1, int(memory_limit_gb))
         else:
-            try:
-                total = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+            total = _total_ram_bytes()
+            if total:
                 self._memory_limit_gb = max(2, min(12, int(total * 0.4 / 1e9)))
-            except (ValueError, OSError, AttributeError):
-                self._memory_limit_gb = 4
+            else:
+                self._memory_limit_gb = 4  # RAM size unknown: safe flat default
         self._temp_cap_gb: int | None = None  # computed once, in connect()
         # bumped whenever the analytics tables change (rebuild/reset) so the API's
         # row-count cache can key on it and never serve a stale total across an
@@ -390,15 +488,12 @@ class Store:
             # .{key}.{pid}.parquet.tmp / .{key}.{pid}.progress[.tmp]
             m = re.match(r"^\.(.+)\.(\d+)\.(parquet\.tmp|progress(\.tmp)?)$", p.name)
             pid = m.group(2) if m else None
-            if pid is not None:
-                try:
-                    os.kill(int(pid), 0)
-                    continue  # owner is alive — in-progress write, keep it
-                except ProcessLookupError:
-                    pass  # owner is dead — orphan
-                except PermissionError:
-                    continue  # alive, owned by another user
-            p.unlink(missing_ok=True)
+            if pid is not None and _pid_alive(int(pid)):
+                continue  # owner is alive — in-progress write, keep it
+            try:
+                p.unlink(missing_ok=True)
+            except OSError:
+                pass  # locked by AV/indexer — a leftover tmp is cosmetic, not fatal
 
     # -- connections --------------------------------------------------------
 
@@ -596,17 +691,10 @@ class Store:
             )
 
     # -- rates parts ---------------------------------------------------------
-
-    def write_rates_part(self, source_file: str, rows: list[dict]) -> Path | None:
-        if not rows:
-            return None
-        table = pa.Table.from_pylist(rows, schema=RATES_SCHEMA)
-        path = self.rates_dir / f"{file_key(source_file)}.parquet"
-        with self.write_lock:
-            pq.write_table(table, path, compression=PARQUET_COMPRESSION)
-            with self.connect() as con:
-                self._register_views(con)
-        return path
+    # (the old write_rates_part, which wrote DIRECTLY to the live part path with
+    # no tmp+rename, is deleted: it had zero callers and a kill mid-write would
+    # have left a corrupt half-parquet inside the rates view glob. Every live
+    # path goes through RatesPartWriter / finalize_rates_part, which are atomic.)
 
     def finalize_rates_part(self, source_file: str, tmp_path: Path, rows_written: int) -> None:
         """Adopt a parquet part written OUTSIDE this store (a parallel parse
@@ -618,10 +706,10 @@ class Store:
             if rows_written:
                 # replace() overwrites atomically — a preceding unlink would
                 # open a no-file window for lock-free concurrent readers
-                tmp.replace(path)
+                replace_with_retry(tmp, path)
             else:
-                tmp.unlink(missing_ok=True)
-                path.unlink(missing_ok=True)  # re-ingest that now yields 0 rows
+                unlink_with_retry(tmp)
+                unlink_with_retry(path)  # re-ingest that now yields 0 rows
             with self.connect() as con:
                 self._register_views(con)
 
@@ -985,6 +1073,35 @@ class Store:
                     "UPDATE url_queue SET status = 'queued', progress = 0, bytes_done = 0 "
                     "WHERE status IN ('downloading', 'fetched', 'expanding', 'ingesting')"
                 )
+            # Stranded dedup twins: a duplicate defers to its in-flight twin
+            # with the promise "will retry automatically if that one fails" —
+            # but the failure write and the twin revival are two separate store
+            # calls, so a crash exactly between them leaves the duplicate
+            # 'skipped' forever (its twin is terminally 'failed', which the
+            # in-flight sweep above never touches). Honor the promise at
+            # startup: re-queue duplicates whose sha has no successful or
+            # live twin left to defer to.
+            revived = con.execute(
+                "SELECT count(*) FROM url_queue d WHERE d.status = 'skipped' "
+                "AND d.kind = 'duplicate' AND d.content_sha IS NOT NULL "
+                "AND NOT EXISTS (SELECT 1 FROM url_queue t "
+                "  WHERE t.content_sha = d.content_sha AND t.id != d.id "
+                "  AND t.status IN ('done', 'queued', 'downloading', 'fetched', "
+                "                   'expanding', 'ingesting'))"
+            ).fetchone()[0]
+            if revived:
+                con.execute(
+                    "UPDATE url_queue SET status = 'queued', "
+                    "error = 'the identical link this deferred to failed — retrying "
+                    "(from the kept download when still present)' "
+                    "WHERE status = 'skipped' AND kind = 'duplicate' "
+                    "AND content_sha IS NOT NULL "
+                    "AND NOT EXISTS (SELECT 1 FROM url_queue t "
+                    "  WHERE t.content_sha = url_queue.content_sha AND t.id != url_queue.id "
+                    "  AND t.status IN ('done', 'queued', 'downloading', 'fetched', "
+                    "                   'expanding', 'ingesting'))"
+                )
+                n += revived
         return n
 
     # legal transitions for user actions: retry revives dead rows; skip
@@ -1045,7 +1162,7 @@ class Store:
     def drop_rates_part(self, source_file: str) -> None:
         path = self.rates_dir / f"{file_key(source_file)}.parquet"
         with self.write_lock:
-            path.unlink(missing_ok=True)
+            unlink_with_retry(path)
             with self.connect() as con:
                 self._register_views(con)
 
@@ -1070,7 +1187,7 @@ class Store:
             # one transaction. If anything fails part-way, the files row
             # survives — so `forget` can simply be run again — instead of
             # leaving orphan rates that a missing files row makes unreachable.
-            path.unlink(missing_ok=True)
+            unlink_with_retry(path)
             self._register_views(con)
             con.execute("BEGIN")
             try:
@@ -1125,7 +1242,10 @@ class Store:
 
         log = _logging.getLogger(__name__)
         self._enrich_progress_cache = None  # new rates change the NPI population
-        self.data_generation += 1          # invalidate the API row-count cache
+        # NOTE: data_generation is bumped by _build_rollup_tables AFTER its
+        # transaction commits — bumping here (pre-build) let a concurrent poll
+        # cache a count computed from the OLD tables under the NEW generation
+        # and serve that stale total for the cache TTL after the swap.
         tables = (("tin_directory_tbl",) if names_only
                   else ("rates_by_tin_tbl", "tin_directory_tbl"))
         with self.write_lock, self.connect() as con:
@@ -1232,6 +1352,10 @@ class Store:
             except duckdb.Error:
                 pass  # connection already aborted the transaction
             raise
+        # bump AFTER the commit: a count computed from the old tables during the
+        # (minutes-long) build stays keyed to the old generation, and the first
+        # post-swap request misses the cache and recounts against the new tables.
+        self.data_generation += 1
         for tbl in selected:
             _query, _key, view = specs[tbl]
             con.execute(f"CREATE OR REPLACE VIEW {view} AS SELECT * FROM {tbl}")
@@ -1582,10 +1706,9 @@ class Store:
     # -- reset ------------------------------------------------------------------------
 
     def reset(self) -> None:
-        self.data_generation += 1  # invalidate the API row-count cache
         with self.write_lock:
             for p in self.rates_dir.glob("*.parquet"):
-                p.unlink()
+                unlink_with_retry(p)
             with self.connect() as con:
                 con.execute(
                     "DELETE FROM files; DELETE FROM npi_directory; DELETE FROM provider_refs; "
@@ -1599,6 +1722,10 @@ class Store:
                 for tbl in ("rates_dedup_tbl", "rates_by_tin_tbl", "tin_directory_tbl"):
                     con.execute(f"DROP TABLE IF EXISTS {tbl}")
                 self._register_views(con)
+        # AFTER the wipe: a count computed mid-reset (from the old tables) must
+        # not be cached under the post-reset generation and served for 30s
+        # against the now-empty store.
+        self.data_generation += 1
 
 
 class RatesPartWriter:
@@ -1642,10 +1769,10 @@ class RatesPartWriter:
         with self.store.write_lock:
             if self.rows_written:
                 # replace() overwrites atomically — no unlink-first window
-                self.tmp.replace(self.path)
+                replace_with_retry(self.tmp, self.path)
             else:
-                self.tmp.unlink(missing_ok=True)
-                self.path.unlink(missing_ok=True)  # re-ingest that now yields 0 rows
+                unlink_with_retry(self.tmp)
+                unlink_with_retry(self.path)  # re-ingest that now yields 0 rows
             with self.store.connect() as con:
                 self.store._register_views(con)
         return False

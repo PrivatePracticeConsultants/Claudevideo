@@ -33,6 +33,76 @@ def test_rates_default_grain_is_tin(client):
     assert ref_tin["npi_count"] == 2  # two NPIs rolled into one entity row
 
 
+def test_every_sortable_column_returns_200_on_tin_grain(client):
+    # regression: sort=tin_count 500'd on the late-join fast path (the base
+    # table has no such column; it's synthesized in the projection). Every
+    # advertised SORTABLE column must work on the default grain.
+    from mrfx.api import SORTABLE
+    for col in SORTABLE:
+        r = client.get(f"/api/rates?sort={col}")
+        assert r.status_code == 200, f"sort={col} -> {r.status_code}"
+
+
+def test_entity_drawer_not_empty_for_masked_ssn_entity(cfg, store):
+    # an SSN-pattern TIN's entity key falls back to the RAW tin_value while its
+    # display_name is the masked 'TIN MASKED-SSN' label — the display_name-only
+    # member lookup could never match, so the drawer showed rates with an empty
+    # member-TIN table. The fix matches key OR tin_value.
+    from tests.mrfx.conftest import make_fixture
+    from mrfx.ingest import ingest_file
+
+    doc = {
+        "reporting_entity_name": "SsnCo", "reporting_entity_type": "issuer",
+        "last_updated_on": "2026-06-01", "version": "2.0.0",
+        "provider_references": [], "in_network": [{
+            "negotiation_arrangement": "ffs", "billing_code_type": "CPT",
+            "billing_code_type_version": "2026", "billing_code": "97110",
+            "negotiated_rates": [{
+                # 078051120: classic SSN pattern with an invalid EIN prefix
+                "provider_groups": [{"npi": [1000000009], "tin": {"type": "ein", "value": "078-05-1120"}}],
+                "negotiated_prices": [{"negotiated_type": "negotiated", "negotiated_rate": 44.0,
+                                       "service_code": ["11"], "billing_class": "professional"}]}]}]}
+    ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "ssn.json", doc))
+    client = TestClient(create_app(cfg, store))
+    rows = client.get("/api/rates?grain=entity&payer=SsnCo").json()["rows"]
+    assert rows and rows[0]["display_name"] == "TIN MASKED-SSN"
+    uid = rows[0]["unit_id"]                      # the raw tin (drill-down key)
+    detail = client.get(f"/api/entity/entity/{uid}").json()
+    assert detail["tins"], "masked-SSN entity drawer must list its member TIN"
+    assert detail["tins"][0]["tin_value_masked"] == "MASKED-SSN"
+    assert any(m["npi"] == "1000000009" for m in detail["npis"])
+
+
+def test_code_detail_never_blends_dollar_and_percentage(cfg, store):
+    # under dollar_only=0, a unit holding $85 AND a 150% percentage row must
+    # produce TWO ranked rows, not one blended median that matches nothing
+    from tests.mrfx.conftest import make_fixture
+    from mrfx.ingest import ingest_file
+    import json as _json
+
+    doc = {
+        "reporting_entity_name": "BlendCo", "reporting_entity_type": "issuer",
+        "last_updated_on": "2026-06-01", "version": "2.0.0",
+        "provider_references": [], "in_network": [{
+            "negotiation_arrangement": "ffs", "billing_code_type": "CPT",
+            "billing_code_type_version": "2026", "billing_code": "97110",
+            "negotiated_rates": [{
+                "provider_groups": [{"npi": [1000000001], "tin": {"type": "ein", "value": "43-1"}}],
+                "negotiated_prices": [
+                    {"negotiated_type": "negotiated", "negotiated_rate": 85.0,
+                     "service_code": ["11"], "billing_class": "professional"},
+                    {"negotiated_type": "percentage", "negotiated_rate": 1.5,
+                     "service_code": ["11"], "billing_class": "professional"},
+                ]}]}]}
+    ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "blend.json", doc))
+    client = TestClient(create_app(cfg, store))
+    ranked = client.get("/api/code/97110?dollar_only=0&payer=BlendCo").json()["ranked"]
+    by_dollar = {bool(r["is_dollar_rate"]): r for r in ranked}
+    assert len(ranked) == 2
+    assert by_dollar[True]["median_rate"] == 85.0     # dollars alone
+    assert by_dollar[False]["median_rate"] == 1.5     # percentage alone, never 43.25
+
+
 def test_pagination_is_stable_under_tied_sort_keys(cfg, store):
     # Multi-month stores are tie-dense (a TIN's rate is usually unchanged
     # month over month). LIMIT/OFFSET pages are independent queries, so with

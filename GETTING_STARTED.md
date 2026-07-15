@@ -253,9 +253,11 @@ large files) and then `done`, with a row count and a data-quality summary. Big
 files can take several minutes — that's normal; the progress bar shows chunks
 completing.
 
-> Want to check a file *before* committing to a long parse? In a second
-> terminal (with the venv activated) run `mrfx preflight data/inbox/<file>` —
-> it reports the payer, size, and whether it's ready to ingest, in seconds.
+> Want to check a file *before* committing to a long parse? Stop the dashboard
+> (Ctrl-C — while it runs it keeps the database open, so CLI commands politely
+> refuse), then run `mrfx preflight data/inbox/<file>` — it reports the payer,
+> size, and whether it's ready to ingest, in seconds. (Large files also park as
+> "waiting for confirmation" on the Files tab, which shows the same facts.)
 
 ---
 
@@ -322,15 +324,20 @@ small local lookup cache (`nppes_cache.parquet` in your store folder). After
 that, every provider — the whole backlog at once, and anything new you ingest
 later — is identified in seconds, with no internet lookups.
 
-**Already have a backlog and don't want to restart?** Run this once from a
-terminal (venv active) to clear it immediately, whatever your config says:
+**Already have a backlog?** You have two options:
 
-```
-mrfx enrich --bulk "E:\NPPES_Data_Dissemination_July_2026_V2.zip"
-```
+- **Easiest:** just set `bulk_csv_path` (step 2 above) and restart `mrfx serve`
+  — the running app picks the file up on its own and clears the backlog in one
+  pass. Nothing else to run.
+- **Or run it as a one-off command** — stop the dashboard first (Ctrl-C in its
+  window; while it runs it keeps the database open, so this command will
+  politely refuse), then:
 
-It prints `identified N name(s)` when done. Safe to run while `mrfx serve` is
-up.
+  ```
+  mrfx enrich --bulk "E:\NPPES_Data_Dissemination_July_2026_V2.zip"
+  ```
+
+  It prints `identified N name(s)` when done; start the dashboard again after.
 
 > The app only trusts the **full monthly** file for this (it's ~8–9 million
 > providers). If you accidentally point it at a small *weekly* update, it
@@ -562,8 +569,9 @@ them in one place, grouped by where you'll hit them.
   the app at the local NPPES bulk file — see **"Make provider names fill in fast
   (recommended)"** above. One local pass identifies the whole backlog in
   minutes. Quick version: set `bulk_csv_path` in `config/mrfx.yaml` and restart
-  (that alone switches to the fast local path — `mode` can stay `api`), or run
-  `mrfx enrich --bulk "E:\NPPES…zip"` right now to clear the backlog. **If you
+  (that alone switches to the fast local path — `mode` can stay `api`; the
+  one-off `mrfx enrich --bulk` command does the same but needs the dashboard
+  stopped first). **If you
   already set `bulk_csv_path` and it's still slow, the path is almost certainly
   wrong** — a misspelled path or one pointing at a file that isn't there is
   silently un-usable, so the app falls back to the API. Check the `mrfx serve`

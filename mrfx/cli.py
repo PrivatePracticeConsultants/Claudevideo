@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 import threading
 from pathlib import Path
@@ -63,13 +64,21 @@ def _watcher_loop(cfg: MrfxConfig, store: Store, stop: threading.Event) -> None:
 
 def _url_worker_loop(cfg: MrfxConfig, store: Store, stop: threading.Event) -> None:
     """Drains the URL queue while the server runs: download -> classify ->
-    (expand TOC | ingest). One file at a time; failures never kill the loop."""
+    (expand TOC | ingest). One file at a time; failures never kill the loop.
+    run_queue survives per-row failures internally, but its startup section
+    (crash recovery, pool creation) can still throw — without the re-arm loop
+    one such error would silently kill the worker for the server's whole life,
+    leaving every pasted link sitting at 'queued' with no error anywhere the
+    user looks."""
     from .fetch import run_queue
 
-    try:
-        run_queue(cfg, store, stop=stop)
-    except Exception:  # noqa: BLE001
-        log.exception("url worker stopped unexpectedly")
+    while not stop.is_set():
+        try:
+            run_queue(cfg, store, stop=stop)
+            return  # clean exit (stop requested)
+        except Exception:  # noqa: BLE001
+            log.exception("url worker stopped unexpectedly — restarting in 30s")
+            stop.wait(30)
 
 
 def cmd_serve(cfg: MrfxConfig, args) -> int:
@@ -84,10 +93,18 @@ def cmd_serve(cfg: MrfxConfig, args) -> int:
     # worker threads, only to die minutes of damage later at uvicorn's bind.
     try:
         probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        # uvicorn binds with SO_REUSEADDR; without it here, TIME_WAIT sockets
-        # from a server stopped seconds ago fail this probe and a perfectly
-        # valid restart gets told "another dashboard is running"
-        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if os.name == "nt":
+            # Windows: SO_REUSEADDR lets a bind SUCCEED on a port with a live
+            # listener, so the guard never fired — a second `mrfx serve` ran
+            # crash-recovery against the live server before dying on the DB
+            # lock. SO_EXCLUSIVEADDRUSE makes the probe honest, and Windows
+            # has no POSIX TIME_WAIT bind problem so nothing is lost.
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        else:
+            # uvicorn binds with SO_REUSEADDR; without it here, TIME_WAIT
+            # sockets from a server stopped seconds ago fail this probe and a
+            # perfectly valid restart gets told "another dashboard is running"
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         probe.bind(("127.0.0.1", cfg.port))
         probe.close()
     except OSError:
@@ -263,6 +280,10 @@ def _run_enrichment_best_effort(cfg: MrfxConfig, store: Store) -> None:
 
 
 def cmd_preflight(cfg: MrfxConfig, args) -> int:
+    # the running dashboard holds the database open for its whole lifetime, so
+    # opening the store here would just spin ~6s and fail confusingly
+    if _something_owns_the_port(cfg, "opening the store for preflight"):
+        return 1
     store = Store(cfg.store_dir, cfg.duckdb_memory_gb)
     path = Path(args.path)
     paths = sorted(p for p in path.glob("*") if p.is_file()) if path.is_dir() else [path]
@@ -367,6 +388,9 @@ def cmd_ingest(cfg: MrfxConfig, args) -> int:
 
 
 def cmd_status(cfg: MrfxConfig, args) -> int:
+    if _something_owns_the_port(cfg, "reading the store locally"):
+        print("(the dashboard's Files tab shows the same information live)")
+        return 1
     store = Store(cfg.store_dir, cfg.duckdb_memory_gb)
     with store.connect() as con:
         rows = con.execute(
@@ -399,12 +423,17 @@ def cmd_status(cfg: MrfxConfig, args) -> int:
 
 def cmd_export(cfg: MrfxConfig, args) -> int:
     from .api import FilterSet, methodology_text, order_export_sql
+    from .store import sql_path
 
+    if _something_owns_the_port(cfg, "exporting locally"):
+        return 1
     store = Store(cfg.store_dir, cfg.duckdb_memory_gb)
     out = Path(args.out)
     sql, params = order_export_sql(args)
     with store.connect() as con:
-        con.execute(f"COPY ({sql}) TO '{out}' (FORMAT CSV, HEADER)", params)
+        # sql_path: an output path containing an apostrophe (C:\Users\O'Brien\…)
+        # must not break the COPY statement
+        con.execute(f"COPY ({sql}) TO '{sql_path(out)}' (FORMAT CSV, HEADER)", params)
     data = out.read_bytes()
     out.write_bytes(b"\xef\xbb\xbf" + data)
     qp = {k: v for k, v in {
@@ -428,6 +457,8 @@ def cmd_outreach(cfg: MrfxConfig, args) -> int:
     from .api import FilterSet, grain_of, methodology_text, rel_sql
     from .outreach import build_outreach_rows, outreach_csv
 
+    if _something_owns_the_port(cfg, "exporting outreach locally"):
+        return 1
     store = Store(cfg.store_dir, cfg.duckdb_memory_gb)
     qp = {k: v for k, v in {
         "payer": args.payer, "cpt": args.cpt, "state": args.state, "city": args.city,
@@ -480,9 +511,17 @@ def cmd_forget(cfg: MrfxConfig, args) -> int:
 
 
 def cmd_enrich(cfg: MrfxConfig, args) -> int:
-    """Resolve NPI -> org names/geography on demand (no need to keep serve up).
-    `--bulk <NPPES zip/csv>` does it in one fast local pass; otherwise the mode
-    in config/mrfx.yaml applies (api or bulk)."""
+    """Resolve NPI -> org names/geography on demand. `--bulk <NPPES zip/csv>`
+    does it in one fast local pass; otherwise the mode in config/mrfx.yaml
+    applies (api or bulk). Requires the dashboard to be STOPPED — the running
+    server owns the database (and its own always-on enrichment loop picks up a
+    configured bulk file by itself, so with serve running there's nothing this
+    command adds)."""
+    if _something_owns_the_port(cfg, "enriching locally"):
+        print("Tip: the running dashboard identifies names on its own — with "
+              "bulk_csv_path set in config/mrfx.yaml it uses your NPPES file "
+              "automatically. To run this command instead, stop the server first.")
+        return 1
     store = Store(cfg.store_dir, cfg.duckdb_memory_gb)
     if getattr(args, "bulk_file", None):
         cfg.enrichment.mode = "bulk"
@@ -564,8 +603,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--month")
     p.add_argument("--discipline")
     p.add_argument("--grain", choices=["entity", "tin"])
-    p.add_argument("--base-only", action="store_true", default=True,
-                   help="base-modifier rows only (default on)")
+    # BooleanOptionalAction: the old store_true+default=True made the flag a
+    # no-op (nothing could ever turn it off) — --no-base-only now works
+    p.add_argument("--base-only", action=argparse.BooleanOptionalAction, default=True,
+                   help="base-modifier rows only (default on; --no-base-only includes modified rows)")
     p = sub.add_parser("forget", help="erase chosen files' rates + raw copies (see `mrfx status` for names)")
     p.add_argument("filenames", nargs="+")
     p = sub.add_parser("enrich", help="resolve NPI names/geography now (NPPES bulk file or API)")
@@ -615,9 +656,12 @@ def main(argv: list[str] | None = None) -> int:
     except duckdb.IOException as e:
         msg = str(e)
         if "lock" in msg.lower():
-            print("the data store is busy right now (usually the dashboard/"
-                  "server is using it — heavy rebuilds can hold it for a few "
-                  "minutes). Try again shortly.", file=sys.stderr)
+            print("another program has the data store open — usually the "
+                  "dashboard (`mrfx serve`), which keeps it open for its whole "
+                  "run (it will NOT free up on its own). Stop the dashboard "
+                  "(Ctrl-C in its window) and re-run this command, or use the "
+                  "dashboard's own buttons instead. If it's a BI tool or "
+                  "another window, close that.", file=sys.stderr)
         elif "open file" in msg.lower() or "No such file" in msg:
             print(f"could not open a file: {e}\nCheck the output path exists "
                   "and is writable.", file=sys.stderr)

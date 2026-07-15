@@ -272,6 +272,7 @@ def _parse_worker(cfg: MrfxConfig, path_str: str, name: str, header_defaults: di
     chunks_total = file_chunks * passes
     state = {"pass": 0, "last": -1}
     parent_pid = os.getppid()
+    from .store import _pid_alive  # platform-aware; see below
 
     def report(compressed_read: int) -> None:
         in_pass = min(file_chunks, compressed_read // CHUNK_COMPRESSED_BYTES)
@@ -279,12 +280,16 @@ def _parse_worker(cfg: MrfxConfig, path_str: str, name: str, header_defaults: di
         if chunk == state["last"]:
             return
         state["last"] = chunk
-        if os.getppid() != parent_pid:
-            # the server that dispatched this parse is GONE (killed without
-            # pool shutdown; we were re-parented). Nobody will collect the
-            # result — seen live as orphans burning 85% CPU on 12 GB files.
-            # Stop within one chunk; the pid-suffixed temp is swept as a
-            # dead-pid orphan on the next store start.
+        # the server that dispatched this parse is GONE (killed without pool
+        # shutdown). Nobody will collect the result — seen live as orphans
+        # burning 85% CPU on 12 GB files. Stop within one chunk; the
+        # pid-suffixed temp is swept as a dead-pid orphan on the next store
+        # start. POSIX signals death by re-parenting (getppid changes); on
+        # Windows getppid keeps returning the DEAD parent's pid forever, so
+        # probe the parent's liveness directly.
+        died = (os.getppid() != parent_pid if os.name != "nt"
+                else not _pid_alive(parent_pid))
+        if died:
             raise SystemExit("parent process died — abandoning orphaned parse")
         try:
             tmp = progress_path + ".tmp"
@@ -410,6 +415,10 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
     if payload["short_circuit"]:
         msg = ("scanned: none of the target billing codes appear in this "
                "file — extraction pass skipped")
+        # a RE-ingest under the same filename must not keep serving the OLD
+        # version's rates: drop any existing part so the 0-row record and the
+        # store agree (the normal paths do this via finalize_rates_part)
+        store.drop_rates_part(name)
         store.upsert_file(name, payer=pf.payer, status="done", rows_emitted=0,
                           qa={"rows": 0, "messages": [msg]}, finished_at=_now())
         _finish_file(cfg, path, ok=True)
@@ -640,6 +649,9 @@ def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight
                 progress.finish()
                 msg = ("scanned: none of the target billing codes appear in this "
                        "file — extraction pass skipped")
+                # same-filename re-ingest: drop the old part so 0 rows recorded
+                # means 0 rows served (mirrors the pooled short-circuit path)
+                store.drop_rates_part(name)
                 store.upsert_file(
                     name, payer=pf.payer, status="done", rows_emitted=0,
                     qa={"rows": 0, "messages": [msg]}, finished_at=_now(),

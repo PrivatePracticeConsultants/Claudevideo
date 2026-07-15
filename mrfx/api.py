@@ -539,11 +539,14 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         """The TIN-grain table can attach names/geo AFTER paging (join 100 rows,
         not the whole store) only when nothing needs those joined columns first:
         no filter on state/city/search, no per-code outlier median (needs the
-        full set), and no sort by display_name (a joined column). Every ORDER BY
-        tiebreaker is otherwise a base rates_by_tin column, so the page — and its
-        order — is byte-identical to the full-join query, just far cheaper."""
+        full set), and no sort by a column the base table lacks: display_name is
+        joined, and tin_count exists only as the projection's synthesized
+        `1 AS tin_count` (sorting the base table by it was a BinderException →
+        500). Every other ORDER BY tiebreaker is a base rates_by_tin column, so
+        the page — and its order — is byte-identical to the full-join query,
+        just far cheaper."""
         return (grain == "tin" and not fs.hide_outliers
-                and not fs.uses_dim_cols and sort != "display_name")
+                and not fs.uses_dim_cols and sort not in ("display_name", "tin_count"))
 
     def _filtered_count(con, grain: str, fs: FilterSet) -> int:
         key = (grain, fs.where, tuple(fs.params), fs.hide_outliers, store.data_generation)
@@ -649,9 +652,14 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                     # manual map over the NPPES name), so matching on it here
                     # yields exactly the members the entity row aggregated —
                     # without this, an auto-grouped org showed an empty drawer.
+                    # `OR tin_value = ?`: a NO-NAME entity's key falls back to
+                    # the raw tin_value while its display_name is the masked
+                    # 'TIN …' label — display_name alone can't match, and the
+                    # drawer showed rates with no member table.
                     tin_list = [r[0] for r in con.execute(
-                        f"SELECT DISTINCT tin_value FROM ({GRAIN_REL['tin']}) WHERE display_name = ?",
-                        [unit_id],
+                        f"SELECT DISTINCT tin_value FROM ({GRAIN_REL['tin']}) "
+                        "WHERE display_name = ? OR tin_value = ?",
+                        [unit_id, unit_id],
                     ).fetchall()]
                 tins = _dicts(con.execute(
                     f"SELECT * FROM tin_directory WHERE tin_value IN ({', '.join('?' for _ in tin_list)})",
@@ -709,11 +717,16 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 SELECT unit_id, any_value(display_name) AS display_name,
                        payer, modifier_set, billing_class,
                        any_value(discipline) AS discipline,
+                       -- is_dollar_rate in the GROUP BY: under dollar_only=0 a
+                       -- unit holding $85 AND a 150% percentage row must not
+                       -- blend them into one median that matches no published
+                       -- number (dollars and percentages are incommensurable)
+                       is_dollar_rate,
                        median(negotiated_rate) AS median_rate,
                        min(negotiated_rate) AS min_rate, max(negotiated_rate) AS max_rate,
                        sum(npi_count) AS npi_count, count(*) AS n
                 FROM ({rel_sql(grain, fs)})
-                GROUP BY unit_id, payer, modifier_set, billing_class
+                GROUP BY unit_id, payer, modifier_set, billing_class, is_dollar_rate
                 ORDER BY median_rate DESC LIMIT 500
                 """,
                 fs.params,
@@ -991,6 +1004,11 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return Path(p)
 
     def _export_payload(request: Request, view: str, sort: str, dir: str, full: bool):
+        """Build the export as a temp FILE (BOM-prefixed for Excel) and return
+        its path — never the CSV as a Python string. `?full=true` on a 64M-row
+        store is multiple GB; DuckDB streams the COPY to disk under its own
+        memory cap, and everything after must stay disk-to-disk so the export
+        can't balloon the process RSS with data-sized strings."""
         qp = {} if full else _qp(request)
         grain = grain_of(qp, cfg, store)
         fs = FilterSet(qp if not full else {"dollar_only": "0"})
@@ -999,10 +1017,14 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         tmp = _mktemp(".csv")
         with store.connect() as con:
             con.execute(f"COPY ({select}) TO '{sql_path(tmp)}' (FORMAT CSV, HEADER)", params)
-        raw = tmp.read_text()
+        out = _mktemp(".csv")
+        import shutil as _shutil
+        with open(out, "wb") as dst, open(tmp, "rb") as src:
+            dst.write(b"\xef\xbb\xbf")           # BOM for Excel
+            _shutil.copyfileobj(src, dst, 1 << 20)
         tmp.unlink()
         method = methodology_text(cfg, store, grain, fs, sort, dir, view)
-        return stamp, "﻿" + raw, method  # BOM for Excel
+        return stamp, out, method
 
     @app.get("/api/export.csv")
     def export_csv(
@@ -1013,13 +1035,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         dir: str = "desc",
         full: bool = False,
     ):
-        stamp, csv_text, method = _export_payload(request, view, sort, dir, full)
-        out = _mktemp(".csv")
-        out.write_text(csv_text, encoding="utf-8")
-        sidecar = out.with_suffix(".methodology.txt")
-        sidecar.write_text(method)
-        background.add_task(out.unlink, missing_ok=True)
-        background.add_task(sidecar.unlink, missing_ok=True)  # or it orphans per export
+        stamp, out, _method = _export_payload(request, view, sort, dir, full)
+        background.add_task(out.unlink, missing_ok=True)  # or it orphans per export
         return FileResponse(out, filename=f"mrfx_{view}_{stamp}.csv", media_type="text/csv")
 
     @app.get("/api/export.zip")
@@ -1031,20 +1048,18 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         dir: str = "desc",
         full: bool = False,
     ):
-        stamp, csv_text, method = _export_payload(request, view, sort, dir, full)
-        buf = io.BytesIO()
-        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-            z.writestr(f"mrfx_{view}_{stamp}.csv", csv_text.encode("utf-8"))
-            z.writestr(f"mrfx_{view}_{stamp}_methodology.txt", method)
+        stamp, csv_path, method = _export_payload(request, view, sort, dir, full)
         out = _mktemp(".zip")
-        out.write_bytes(buf.getvalue())
+        # z.write streams the CSV from disk; ZipFile writes to the file as it
+        # goes — no data-sized BytesIO copy of a multi-GB export in RAM
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+            z.write(csv_path, f"mrfx_{view}_{stamp}.csv")
+            z.writestr(f"mrfx_{view}_{stamp}_methodology.txt", method)
+        csv_path.unlink(missing_ok=True)
         background.add_task(out.unlink, missing_ok=True)
         return FileResponse(out, filename=f"mrfx_{view}_{stamp}.zip", media_type="application/zip")
 
-    @app.get("/api/export/outreach.csv")
-    def export_outreach(request: Request, background: BackgroundTasks):
-        """One row per entity (org name + geography + per-code merge fields),
-        for cross-referencing a contact list / Brevo mail merge."""
+    def _outreach_parts(request: Request):
         from .outreach import build_outreach_rows, outreach_csv
 
         qp = _qp(request)
@@ -1055,15 +1070,36 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         headers, rows = build_outreach_rows(
             store, rel_sql(grain, fs), fs.params, fs.described.get("codes")
         )
+        method = methodology_text(cfg, store, grain, fs, "display_name", "asc", "outreach")
+        return outreach_csv(headers, rows), method
+
+    @app.get("/api/export/outreach.csv")
+    def export_outreach(request: Request, background: BackgroundTasks):
+        """One row per entity (org name + geography + per-code merge fields),
+        for cross-referencing a contact list / Brevo mail merge. DATA ONLY —
+        no comment header lines that would break a mail-merge import; the
+        dashboard button uses outreach.zip, which carries the methodology."""
+        csv_text, _method = _outreach_parts(request)
         stamp = dt.datetime.now().strftime("%Y-%m-%d_%H%M")
         out = _mktemp(".csv")
-        out.write_text(outreach_csv(headers, rows), encoding="utf-8")
-        sidecar_note = methodology_text(cfg, store, grain, fs, "display_name", "asc", "outreach")
-        sidecar = out.with_suffix(".methodology.txt")
-        sidecar.write_text(sidecar_note)
+        out.write_text(csv_text, encoding="utf-8")
         background.add_task(out.unlink, missing_ok=True)
-        background.add_task(sidecar.unlink, missing_ok=True)
         return FileResponse(out, filename=f"mrfx_outreach_{stamp}.csv", media_type="text/csv")
+
+    @app.get("/api/export/outreach.zip")
+    def export_outreach_zip(request: Request, background: BackgroundTasks):
+        """Outreach CSV + its methodology sidecar in one ZIP — the honesty
+        contract says every delivered export carries its methodology, and a
+        bare CSV download had nowhere to put it (comment lines would break
+        the mail-merge import the CSV exists for)."""
+        csv_text, method = _outreach_parts(request)
+        stamp = dt.datetime.now().strftime("%Y-%m-%d_%H%M")
+        out = _mktemp(".zip")
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr(f"mrfx_outreach_{stamp}.csv", csv_text.encode("utf-8"))
+            z.writestr(f"mrfx_outreach_{stamp}_methodology.txt", method)
+        background.add_task(out.unlink, missing_ok=True)
+        return FileResponse(out, filename=f"mrfx_outreach_{stamp}.zip", media_type="application/zip")
 
     # -- benchmarks (§7B) --------------------------------------------------------------
 

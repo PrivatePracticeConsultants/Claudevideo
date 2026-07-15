@@ -220,6 +220,31 @@ def test_big_file_scan_skips_extraction_when_no_target_codes(cfg, store, monkeyp
     assert st["status"] == "done" and (st.get("rows_emitted") or 0) == 0
 
 
+def test_short_circuit_reingest_drops_stale_part(cfg, store, monkeypatch):
+    # a RE-ingest under the same filename whose new content short-circuits
+    # (no target codes) must DROP the old version's parquet part — otherwise
+    # the files table says done/0 rows while the store keeps serving the old
+    # rates as current (invariant 6: re-ingest atomically replaces the part)
+    import json as _json
+    import mrfx.ingest as ing
+
+    doc = _json.loads((FIXTURES / "innetwork_mixed.json").read_text())
+    path = cfg.inbox_dir / "monthly.json"
+    path.write_text(_json.dumps(doc))
+    assert ing.ingest_file(cfg, store, path)["rows"] > 0   # v1: real therapy rows
+    with store.connect() as con:
+        assert con.execute("SELECT count(*) FROM rates WHERE source_file='monthly.json'").fetchone()[0] > 0
+
+    monkeypatch.setattr(ing, "LARGE_FILE_UNCOMPRESSED_BYTES", 0)  # v2 takes the two-pass path
+    for item in doc["in_network"]:
+        item["billing_code"] = "99213"                     # v2: no target codes at all
+    path.write_text(_json.dumps(doc))
+    result = ing.ingest_file(cfg, store, path)
+    assert result["rows"] == 0 and "skipped" in result["note"]
+    with store.connect() as con:                            # v1's rows are GONE
+        assert con.execute("SELECT count(*) FROM rates WHERE source_file='monthly.json'").fetchone()[0] == 0
+
+
 def test_big_file_two_pass_still_extracts_target_codes(cfg, store, monkeypatch):
     import mrfx.ingest as ing
 

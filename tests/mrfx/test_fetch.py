@@ -809,6 +809,14 @@ def test_dedup_key_keeps_identity_params_drops_signature_params():
     # Azure SAS params are volatile too
     assert dedup_key("https://x.blob.core.windows.net/c/f.json?sv=1&se=2&sp=r&sig=q") == \
            dedup_key("https://x.blob.core.windows.net/c/f.json?sv=9&se=8&sp=r&sig=z")
+    # ...but the short generic names (st, se, token, …) are stripped ONLY on a
+    # provably-signed URL: a listing whose files differ only in ?st=NY or
+    # ?token=<file-id> must NOT collapse to one key (silent under-ingestion)
+    assert dedup_key("https://p.com/rates?st=NY") != dedup_key("https://p.com/rates?st=MO")
+    assert dedup_key("https://p.com/dl?token=fileA") != dedup_key("https://p.com/dl?token=fileB")
+    # with a signature present, st IS a SAS param again and still dedups
+    assert dedup_key("https://x.net/f.json?st=2026-01-01&sig=a") == \
+           dedup_key("https://x.net/f.json?st=2026-02-02&sig=b")
 
 
 def test_urls_api_never_splits_on_commas(cfg, store):

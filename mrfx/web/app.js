@@ -198,6 +198,15 @@ async function loadRates() {
     stateEl.innerHTML = `<div class="empty"><h3>No rates match</h3>
       Drop MRF files into <code class="inline">data/inbox/</code> or loosen the filters.</div>`;
     $("#pg-label").textContent = "–";
+    $("#pg-prev").disabled = true;   // stale-enabled buttons on the old branch
+    $("#pg-next").disabled = true;   // let a click page a nonexistent table
+    return;
+  }
+  // total shrank under us (a file was removed mid-browse): an out-of-range page
+  // renders an empty body with "page 99 of 1" — clamp back and refetch instead
+  if (!data.rows.length && data.page > 1) {
+    state.page = Math.max(1, Math.ceil(data.total / state.pageSize));
+    loadRates();
     return;
   }
   stateEl.innerHTML = "";
@@ -287,7 +296,11 @@ function codeChipsHtml() {
 }
 
 async function initFilters() {
-  const payers = (await api("/api/payers")).payers;
+  // Resilient loads (same class as the Leads-tab fix): a single failed boot
+  // fetch — server mid-restart, transient DB lock — must NOT abort this
+  // function before the export/pagination/sort listeners below are wired,
+  // which left a filterless, unpaginable Explorer until a manual reload.
+  const payers = (await api("/api/payers").catch(() => null))?.payers ?? [];
   const payerChips = $("#f-payer-chips");
   payerChips.innerHTML = payers.length
     ? payers.map((p) => `<button class="chip" data-payer="${esc(p)}">${esc(p)}</button>`).join("")
@@ -316,7 +329,7 @@ async function initFilters() {
     refreshFromFirstPage();
   });
 
-  const months = (await api("/api/months")).months;
+  const months = (await api("/api/months").catch(() => null))?.months ?? [];
   $("#f-month").innerHTML = `<option value="">all months</option>` +
     months.map((m) => `<option>${esc(m)}</option>`).join("");
   $("#f-month").addEventListener("change", (e) => { state.filters.month = e.target.value; refreshFromFirstPage(); });
@@ -376,7 +389,9 @@ async function initFilters() {
     location.href = `/api/export.zip?${filterQuery({ sort: state.sort.col, dir: state.sort.dir, view: "explorer" })}`;
   });
   $("#btn-outreach").addEventListener("click", () => {
-    location.href = `/api/export/outreach.csv?${filterQuery()}`;
+    // .zip: the outreach CSV + its methodology sidecar together (comment lines
+    // inside the CSV itself would break the mail-merge import it exists for)
+    location.href = `/api/export/outreach.zip?${filterQuery()}`;
   });
 
   $$("#rates-table thead th[data-sort]").forEach((th) =>
@@ -698,9 +713,12 @@ function wireSubjectSearch(inputSel, datalistSel) {
   const input = $(inputSel);
   if (!input || input.dataset.searchWired) return;   // wire once
   input.dataset.searchWired = "1";
+  let seq = 0;  // a slow OLD response must not overwrite a newer query's options
   input.addEventListener("input", debounce(async () => {
+    const mine = ++seq;
     try {
       const data = await api(`/api/benchmark/subjects?q=${encodeURIComponent(input.value.trim())}`);
+      if (mine !== seq) return;  // stale — a newer request already resolved
       const dl = $(datalistSel); if (dl) dl.innerHTML = subjectOptionsHtml(data);
     } catch { /* keep the current options on a transient failure */ }
   }, 200));

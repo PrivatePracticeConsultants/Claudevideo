@@ -36,6 +36,21 @@ def test_missing_catalog_degrades_to_empty(tmp_path):
     assert load_known_sources(tmp_path / "nope.yaml") == []
 
 
+def test_non_utf8_yaml_never_crashes(tmp_path):
+    # a Windows-ANSI byte (Notepad in a cp1252 locale) used to raise
+    # UnicodeDecodeError out of both loaders — a 500 on the known-sources API
+    # and a dead `mrfx serve` at startup for the registry (invariant #3: a
+    # user-editable file must never kill the program)
+    bad = tmp_path / "bad.yaml"
+    bad.write_bytes("sources:\n  - name: caf\xe9\n".encode("cp1252"))
+    assert isinstance(load_known_sources(bad), list)   # degrades, no raise
+
+    from mrfx.registry import _load_yaml
+    assert isinstance(_load_yaml(bad), dict)           # degrades, no raise
+    # a directory at the path (IsADirectoryError/OSError) degrades too
+    assert _load_yaml(tmp_path) == {}
+
+
 def test_known_sources_enqueue(cfg, store):
     sources = load_known_sources(REPO_CATALOG)
     counts = add_urls(store, [s["url"] for s in sources if s["queueable"]])
