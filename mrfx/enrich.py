@@ -408,7 +408,9 @@ def enrich_via_bulk(cfg: MrfxConfig, store: Store,
     global _bulk_sig, _bulk_absent, _bulk_read_failures
     path = cfg.enrichment.bulk_csv_path
     if not path or not Path(path).exists():
-        log.error("enrichment.mode=bulk but bulk_csv_path %r not found", str(path))
+        # don't claim mode=bulk — this also runs for an auto-promoted api-mode
+        # config whose file vanished between the presence check and here (TOCTOU)
+        log.error("NPPES bulk_csv_path %r not found — skipping the bulk pass", str(path))
         return 0
     try:
         st = Path(path).stat()
@@ -596,6 +598,22 @@ def run_enrichment(cfg: MrfxConfig, store: Store, stop: threading.Event | None =
                     "identify the whole book in one local pass.",
                     cfg.enrichment.bulk_csv_path)
     done = enrich_via_bulk(cfg, store, stop) if use_bulk else enrich_via_api(cfg, store, stop)
+    # AUTO-PROMOTED bulk (mode is api; we chose bulk only because a file is
+    # present): if that bulk pass couldn't finish the book — a corrupt/truncated
+    # file whose read-failure circuit breaker tripped, or a partial/weekly file
+    # that deliberately leaves NPIs "for a fuller file" — fall back to the API for
+    # whatever is still unresolved. Otherwise a present-but-BAD file strands the
+    # user with NO names at all, which is worse than the plain api mode they
+    # configured (the exact "names stuck" symptom, reintroduced). A healthy full
+    # file resolves everything (real names + absent dead rows), leaving nothing
+    # un-enriched, so this fallback is a no-op on the happy path. We do NOT do
+    # this for an explicit mode:bulk — that user opted out of the API, and the
+    # "leave partial for a fuller file" behavior is intentional there.
+    if (use_bulk and mode == "api" and (stop is None or not stop.is_set())
+            and store.unenriched_npis(limit=1)):
+        log.info("bulk enrichment left NPIs unresolved (missing/partial NPPES "
+                 "file) — finishing the rest via the NPPES API")
+        done += enrich_via_api(cfg, store, stop)
     # tin_directory materializes NPPES names/states/cities — without a rebuild,
     # geographic benchmarks (state/city joins) silently run against NULLs. The
     # dirty flag (set by the save paths) means this rebuilds iff there are names

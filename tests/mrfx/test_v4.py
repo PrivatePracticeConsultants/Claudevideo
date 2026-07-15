@@ -726,6 +726,53 @@ def test_api_mode_with_present_bulk_file_uses_bulk(cfg, store, tmp_path, monkeyp
     assert use_bulk_enrichment(cfg) is False
 
 
+def test_auto_bulk_falls_back_to_api_when_file_is_bad(cfg, store, tmp_path, monkeypatch):
+    # regression: an auto-promoted bulk (mode:api + a PRESENT but corrupt/partial
+    # NPPES file) must NOT strand the user with no names — after bulk resolves
+    # nothing, run_enrichment falls back to the API for the remainder. (An
+    # explicit mode:bulk is left alone; that user opted out of the API.)
+    import mrfx.enrich as E
+    from mrfx.enrich import run_enrichment
+    monkeypatch.setattr(E, "_bulk_sig", None)
+    monkeypatch.setattr(E, "_bulk_absent", set())
+    monkeypatch.setattr(E, "_bulk_read_failures", 0)
+
+    # a stub API that resolves whatever bulk left un-enriched (no real network)
+    api_calls = []
+    def fake_api(cfg_, store_, stop=None):
+        npis = store_.unenriched_npis(limit=1000)
+        for n in npis:
+            store_.save_npi(n, "API Name", "225100000X", "Physical Therapist", "KC", "MO")
+        api_calls.append(len(npis))
+        return len(npis)
+    monkeypatch.setattr(E, "enrich_via_api", fake_api)
+
+    ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "a.json", innetwork(items=[
+        item("97110", [(["1000000001", "1000000002"], "43-1000001", "ein", [(40.0, None)])])])))
+
+    corrupt = tmp_path / "npidata.zip"
+    corrupt.write_bytes(b"this is not a valid zip file")   # bulk read fails
+    cfg.enrichment.mode = "api"                             # auto-promote path
+    cfg.enrichment.bulk_csv_path = corrupt
+
+    run_enrichment(cfg, store)
+    assert api_calls and api_calls[0] == 2                  # API finished both NPIs
+    with store.connect() as con:
+        named = {r[0] for r in con.execute(
+            "SELECT npi FROM npi_directory WHERE org_name='API Name'").fetchall()}
+    assert named == {"1000000001", "1000000002"}           # not stranded
+
+    # explicit mode:bulk must NOT fall back to the API (user opted out)
+    api_calls.clear()
+    monkeypatch.setattr(E, "_bulk_sig", None)
+    store.reset()
+    ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "b.json", innetwork(items=[
+        item("97110", [(["1000000003"], "43-1000002", "ein", [(41.0, None)])])])))
+    cfg.enrichment.mode = "bulk"
+    run_enrichment(cfg, store)
+    assert api_calls == []                                  # no API fallback
+
+
 def test_bulk_enrichment_uses_cache_for_new_npis(cfg, store, tmp_path, monkeypatch):
     # THE speed fix: after the NPPES file is converted to a local parquet once,
     # a later batch of new NPIs must resolve WITHOUT re-reading the bulk file.
@@ -837,6 +884,15 @@ def test_duckdb_memory_override_and_partition_scaling(tmp_path):
     assert s._rollup_partition_rows(1, threads=4) == s._rollup_partition_rows(1) // 4
     assert s._rollup_partition_rows(1, threads=1) == s._rollup_partition_rows(1)
     assert s._rollup_partition_rows(1, threads=10 ** 9) >= 1  # still floors at 1
+    # thread division happens BEFORE the module ceiling, so when the ceiling
+    # binds (big memory) the two are NOT simply divisor-related — pin the actual
+    # divide-then-cap semantics: min(ceiling, gb*rows_per_gb // threads). This is
+    # the memory-safe ordering (threads × slice ≤ memory budget).
+    big = Store(tmp_path / "st_big", memory_limit_gb=8)        # 8*2M=16M > 15M ceiling
+    assert big._rollup_partition_rows(1) == ROLLUP_PARTITION_ROWS            # capped at 15M
+    assert big._rollup_partition_rows(1, threads=4) == min(
+        ROLLUP_PARTITION_ROWS, (8 * ROLLUP_ROWS_PER_GB) // 4)               # 4M, not 15M//4
+    assert big._rollup_partition_rows(1, threads=4) != big._rollup_partition_rows(1) // 4
     assert Store(tmp_path / "st2", memory_limit_gb=0)._memory_limit_gb == 1  # never below 1
     s3 = Store(tmp_path / "st3")                            # auto mode
     assert 2 <= s3._memory_limit_gb <= 12
