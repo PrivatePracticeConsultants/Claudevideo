@@ -121,8 +121,8 @@
       <label class="toggle" title="hides rows >5x or <0.2x the code's median within the current filter — opt-in, never silent">
         <input type="checkbox" id="f-outliers"> hide implausible rates
       </label>
-      <label class="toggle" title="keep only PT/OT/SLP providers and therapy practices (by NPPES taxonomy) — hides MDs/DOs/NPs who merely billed a 97xxx code. Needs NPI identification.">
-        <input type="checkbox" id="f-therapy"> therapy providers only
+      <label class="toggle" title="keep only therapy PRACTICES: the majority of the practice's identified providers are PT/OT/SLP (or it's a therapy clinic), and it has no hospital-class NPI — hides MDs/DOs/NPs, physician groups, and hospital systems that merely bill 97xxx codes. Needs NPI identification.">
+        <input type="checkbox" id="f-therapy"> therapy practices only
       </label>
       <button class="btn" id="f-clear">Clear</button>
       <button class="btn" id="btn-export" title="CSV, current filter state exactly">Export CSV</button>
@@ -235,7 +235,7 @@
           <select id="b-target"><option value="50">median (p50)</option><option value="75">p75</option></select>
         </div>
         <label class="toggle" title="market = only PT/OT/SLP providers & therapy practices (by NPPES taxonomy), not the MDs/DOs/NPs who billed a 97xxx code. Needs NPI identification.">
-          <input type="checkbox" id="b-therapy" checked> therapy providers only
+          <input type="checkbox" id="b-therapy" checked> therapy practices only
         </label>
         <div class="field"><label>Peer set</label>
           <select id="b-peerset"><option value="">auto — all entities in market</option></select>
@@ -324,7 +324,7 @@
         </div>
         <div class="field"><label>Min. codes priced</label><input type="number" id="ld-mincodes" value="3" min="1" style="width:64px"></div>
         <label class="toggle" title="keep only PT/OT/SLP providers & therapy practices (by NPPES taxonomy) — drops MDs/DOs/NPs. Needs NPI identification.">
-          <input type="checkbox" id="ld-therapy" checked> therapy providers only
+          <input type="checkbox" id="ld-therapy" checked> therapy practices only
         </label>
         <div class="field"><label>Exclude a practice <span class="muted" style="text-transform:none">(your client — TIN/entity)</span></label>
           <input type="text" id="ld-exclude" list="ld-subjects" placeholder="optional">

@@ -1196,7 +1196,7 @@ async function runLeads() {
 function renderLeads(out, data) {
   if (!data.leads.length) {
     const therapyOn = $("#ld-therapy") && $("#ld-therapy").checked;
-    out.innerHTML = `<div class="empty"><h3>No leads found</h3>No practices at or below p${data.threshold_percentile} that price at least ${data.min_codes} codes with a market. Widen the cutoff or lower the min codes.${therapyOn ? ` <br><span class="muted">"Therapy providers only" is on — practices whose NPIs aren't identified yet (or aren't PT/OT/SLP) are excluded. Uncheck it, or let NPI identification finish, to see more.</span>` : ""}</div>`;
+    out.innerHTML = `<div class="empty"><h3>No leads found</h3>No practices at or below p${data.threshold_percentile} that price at least ${data.min_codes} codes with a market. Widen the cutoff or lower the min codes.${therapyOn ? ` <br><span class="muted">"Therapy practices only" is on — it keeps practices whose identified providers are MOSTLY PT/OT/SLP and excludes hospital systems and physician groups (and practices not yet identified). Uncheck it, or let NPI identification finish, to see more.</span>` : ""}</div>`;
     return;
   }
   const rows = data.leads.map((l) => `<tr>

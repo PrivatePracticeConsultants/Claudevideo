@@ -31,7 +31,7 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from .catalog import therapy_taxonomy_sql
+from .catalog import hospital_taxonomy_sql, therapy_taxonomy_sql
 
 # Parquet codec for the rate parts. zstd is ~30-50% smaller than the pyarrow
 # default (snappy) on real payer data. Decode is marginally slower than snappy
@@ -379,12 +379,23 @@ TIN_DIRECTORY_QUERY = """
            list_sort(list_distinct(list(j.city)
                      FILTER (j.city IS NOT NULL)))                  AS cities,
            any_value(d2.primary_discipline)                         AS primary_discipline,
-           -- a TIN is a "therapy practice" if ANY of its NPIs is a PT/OT/SLP or
-           -- a therapy clinic (by NPPES taxonomy) — lets the UI hide the MDs/DOs
-           -- /NPs who merely billed a 97xxx code. Enrichment-dependent: NULL
-           -- taxonomy (not yet enriched) is not therapy, so it fills in as names
-           -- land. bool_or over the TIN's providers.
-           coalesce(bool_or({therapy}), FALSE)                      AS is_therapy
+           -- STRICT practice test: a TIN is a "therapy practice" only when it is
+           -- PREDOMINANTLY therapy — the MAJORITY of its taxonomy-identified NPIs
+           -- are PT/OT/SLP (or it carries a therapy-CLINIC org NPI) — AND it has
+           -- no hospital-class NPI. The old any-member bool_or let a hospital
+           -- system with 5 employed PTs among 500 MDs (or a physician group with
+           -- one PT) pass into leads/benchmarks under its MD-heavy identity.
+           -- Enrichment-dependent: NULL taxonomies don't count either way, so
+           -- the flag fills in as identification lands.
+           count(DISTINCT j.npi) FILTER ({therapy})                 AS therapy_npi_count,
+           count(DISTINCT j.npi)
+               FILTER (j.taxonomy_code IS NOT NULL)                 AS classified_npi_count,
+           coalesce(bool_or({hospital}), FALSE)                     AS has_hospital,
+           coalesce(
+               (count(DISTINCT j.npi) FILTER ({therapy})) * 2
+                   > count(DISTINCT j.npi) FILTER (j.taxonomy_code IS NOT NULL)
+               OR bool_or({clinic}), FALSE)
+           AND NOT coalesce(bool_or({hospital}), FALSE)             AS is_therapy
     FROM joined j
     LEFT JOIN names n ON n.tin_value = j.tin_value
     LEFT JOIN disc d2 ON d2.tin_value = j.tin_value
@@ -392,10 +403,16 @@ TIN_DIRECTORY_QUERY = """
            ON r.tin_value = j.tin_value
     GROUP BY j.tin_value
 """
-# inline the therapy-taxonomy test now (its identifiers are constants); {part}
+# inline the taxonomy tests now (their identifiers are constants); {part}
 # stays for the per-partition .format() at rebuild time.
-TIN_DIRECTORY_QUERY = TIN_DIRECTORY_QUERY.replace(
-    "{therapy}", therapy_taxonomy_sql("j.taxonomy_code"))
+TIN_DIRECTORY_QUERY = (
+    TIN_DIRECTORY_QUERY
+    .replace("{therapy}", therapy_taxonomy_sql("j.taxonomy_code"))
+    .replace("{hospital}", hospital_taxonomy_sql("j.taxonomy_code"))
+    # clinic-org codes alone (no PT/OT/SLP prefixes): a true therapy-clinic org
+    # NPI qualifies a small practice even when front-office NPs tie the count
+    .replace("{clinic}", therapy_taxonomy_sql("j.taxonomy_code", prefixes=()))
+)
 
 
 class Store:
@@ -466,10 +483,11 @@ class Store:
                 cols = {r[0] for r in con.execute(
                     "SELECT column_name FROM information_schema.columns "
                     "WHERE table_name = 'tin_directory_tbl'").fetchall()}
-            if "is_therapy" not in cols:
+            if "is_therapy" not in cols or "has_hospital" not in cols:
                 import logging as _logging
                 _logging.getLogger(__name__).info(
-                    "migrating store: rebuilding rollups for the new is_therapy column")
+                    "migrating store: rebuilding rollups for the strict therapy-"
+                    "practice columns (therapy share + hospital exclusion)")
                 self.rebuild_rollups()
         except Exception as e:  # noqa: BLE001
             import logging as _logging

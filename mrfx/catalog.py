@@ -119,6 +119,26 @@ THERAPY_TAXONOMY_CODES = (
     "261QR0400X",  # Clinic/Center - Rehabilitation
 )
 
+# Hospital-CLASS taxonomies: any NPI carrying one of these marks its whole TIN
+# as a hospital/health system, which the strict practice filter EXCLUDES — the
+# outreach target is private outpatient practices, and a hospital that employs
+# a few therapists (or whose outpatient rehab department carries the rehab-
+# clinic code) is not one. Prefix match; extend if a payer's hospitals carry
+# something not listed.
+HOSPITAL_TAXONOMY_PREFIXES = (
+    "282",  # Hospitals (general acute care, long term care, ...)
+    "283",  # Special hospitals (rehabilitation 283X, psychiatric, children's)
+    "284",  # Specialty hospitals
+    "273",  # Hospital units (rehabilitation unit 273Y, psych unit, ...)
+)
+
+
+def hospital_taxonomy_sql(col: str) -> str:
+    """A SQL boolean: TRUE when `col` is a hospital-class NPPES taxonomy.
+    Constants only — safe to inline, same contract as therapy_taxonomy_sql."""
+    likes = " OR ".join(f"{col} LIKE '{p}%'" for p in HOSPITAL_TAXONOMY_PREFIXES)
+    return f"({col} IS NOT NULL AND ({likes}))"
+
 
 def therapy_taxonomy_sql(col: str, prefixes=THERAPY_TAXONOMY_PREFIXES,
                          codes=THERAPY_TAXONOMY_CODES) -> str:

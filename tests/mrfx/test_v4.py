@@ -1168,6 +1168,65 @@ def test_therapy_only_filter(cfg, store):
     assert {r["display_name"] for r in npith["rows"]} == {"Alpha PT", "Gamma SLP"}
 
 
+def test_therapy_filter_excludes_hospitals_and_md_majority_groups(cfg, store):
+    # STRICT practice rule: majority of identified NPIs are therapy (or a
+    # therapy-clinic org NPI), AND no hospital-class NPI. The old any-member
+    # rule let hospital systems and physician groups with a single employed PT
+    # into leads/benchmarks.
+    data = innetwork(items=[item("97110", [
+        # hospital system: 1 PT among 3 MDs + a hospital org NPI
+        (["1000000001", "1000000002", "1000000003", "1000000004", "1000000005"],
+         "43-2000001", "ein", [(90.0, None)]),
+        # physician group: 1 PT + 2 MDs (therapy minority)
+        (["1000000006", "1000000007", "1000000008"], "43-2000002", "ein", [(80.0, None)]),
+        # true private practice: 2 PTs + 1 front-office NP (therapy majority)
+        (["1000000009", "1000000010", "1000000011"], "43-2000003", "ein", [(60.0, None)]),
+        # all-PT staff but under a REHAB HOSPITAL's NPI umbrella -> veto
+        (["1000000012", "1000000013", "1000000014"], "43-2000004", "ein", [(70.0, None)]),
+        # tiny clinic: 1 PT + 1 NP (tie) but carries a PT-clinic org NPI
+        (["1000000015", "1000000016", "1000000017"], "43-2000005", "ein", [(50.0, None)]),
+    ])])
+    ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "strict.json", data))
+    seed = [
+        # hospital system
+        ("1000000001", "Hosp PT", "225100000X"), ("1000000002", "Hosp MD1", "207R00000X"),
+        ("1000000003", "Hosp MD2", "207R00000X"), ("1000000004", "Hosp MD3", "207R00000X"),
+        ("1000000005", "General Hospital", "282N00000X"),
+        # physician group
+        ("1000000006", "Grp PT", "225100000X"), ("1000000007", "Grp MD1", "207R00000X"),
+        ("1000000008", "Grp MD2", "207R00000X"),
+        # private practice
+        ("1000000009", "Priv PT1", "225100000X"), ("1000000010", "Priv PT2", "225100000X"),
+        ("1000000011", "Priv NP", "363L00000X"),
+        # all-PT under a rehab-hospital NPI
+        ("1000000012", "RH PT1", "225100000X"), ("1000000013", "RH PT2", "225100000X"),
+        ("1000000014", "Rehab Hospital", "283X00000X"),
+        # tiny clinic w/ clinic org code
+        ("1000000015", "Tiny PT", "225100000X"), ("1000000016", "Tiny NP", "363L00000X"),
+        ("1000000017", "Tiny PT Clinic", "261QP2300X"),
+    ]
+    for npi, name, tax in seed:
+        store.save_npi(npi, name, tax, None, "KC", "MO", entity_type="NPI-2")
+    store.rebuild_rollups()
+    with store.connect() as con:
+        flags = dict(con.execute("SELECT tin_value, is_therapy FROM tin_directory").fetchall())
+        hosp = dict(con.execute("SELECT tin_value, has_hospital FROM tin_directory").fetchall())
+    assert not flags["432000001"]        # hospital system: minority + hospital veto
+    assert hosp["432000001"] is True
+    assert not flags["432000002"]        # physician group: therapy minority
+    assert flags["432000003"]            # private practice: 2 of 3 therapy
+    assert not flags["432000004"]        # all-PT staff but hospital-class NPI -> veto
+    assert hosp["432000004"] is True
+    assert flags["432000005"]            # tie, but therapy-clinic org NPI qualifies
+
+    # the filter flows through to the API therapy toggle at tin grain
+    c = TestClient(create_app(cfg, store))
+    ther = c.get("/api/rates?grain=tin&therapy_only=1&cpt=97110").json()
+    kept = {r["tin_value"] for r in ther["rows"]}
+    assert kept & {"432000003", "432000005"}
+    assert not kept & {"432000001", "432000002", "432000004"}
+
+
 def test_benchmark_subjects_search_and_cap(cfg, store):
     # the subject picker is a server-side typeahead: capped so it stays fast on a
     # big store, and filterable by org name or TIN.
