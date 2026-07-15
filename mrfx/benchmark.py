@@ -425,6 +425,256 @@ def compute_payer_negotiation(store: Store, subject: str, market: dict,
     }
 
 
+# ---------------------------------------------------------------------------
+# payer-comparison workspace (Negotiate tab): one subject, ONE payer, named
+# comparable entities as columns, plus the cross-payer leverage metrics
+# ---------------------------------------------------------------------------
+
+
+def _entity_rates(store: Store, tins: list[str], market: dict) -> dict[str, float]:
+    """{code: rate} for one entity under the market basis: the entity's rate is
+    the median of its member TINs' medians — the same rule as everywhere else."""
+    where, params = _market_where(market, bool(market.get("include_assistant")),
+                                  bool(market.get("include_non_dollar")))
+    sql = f"""
+    WITH base AS (
+        SELECT t.billing_code, t.tin_value, median(t.negotiated_rate) AS rate
+        FROM rates_by_tin t LEFT JOIN tin_directory td USING (tin_value)
+        WHERE {where} AND t.tin_value IN (SELECT unnest(?::VARCHAR[]))
+        GROUP BY 1, 2)
+    SELECT billing_code, round(median(rate), 2) FROM base GROUP BY 1
+    """
+    with store.connect() as con:
+        return dict(con.execute(sql, [*params, tins]).fetchall())
+
+
+def compute_payer_comparison(store: Store, subject: str, payer: str, market: dict,
+                             comparables: list[str] | None = None) -> dict:
+    """The Negotiate view: subject vs ONE payer's market, per CPT code, with
+    user-named comparable entities as side-by-side columns and the cross-payer
+    context ("what your OTHER payers pay you for the same code") that anchors a
+    renegotiation ask. Every number follows the house basis: dollar base-modifier
+    rows, pinned month, entity rate = median of member-TIN medians, placeholders
+    excluded, percentiles over this payer's OTHER providers."""
+    if not payer:
+        raise BenchmarkError("pick the payer you are negotiating with")
+    pmarket = {**market, "payers": [payer]}
+    bench = compute_benchmark(store, subject, pmarket)
+
+    # named comparables: what THIS payer pays entities the user considers
+    # comparable — columns, one per name, in the order given
+    comps = []
+    for name in (comparables or []):
+        name = str(name).strip()
+        if not name or name == subject:
+            continue
+        tins = resolve_subject_tins(store, name)
+        rates = _entity_rates(store, tins, pmarket)
+        comps.append({"name": mask_tin(name) if name.isdigit() else name,
+                      "tins": [mask_tin(t) for t in tins], "rates": rates})
+
+    # cross-payer leverage: the subject's own rates for the same codes with
+    # every OTHER payer (same month/basis) — "you pay me less than my other
+    # contracts do" is often the strongest single line in the room
+    other_market = {k: v for k, v in market.items() if k != "payers"}
+    o_where, o_params = _market_where(other_market, bool(market.get("include_assistant")),
+                                      bool(market.get("include_non_dollar")))
+    subject_tins = resolve_subject_tins(store, subject)
+    with store.connect() as con:
+        others = {r[0]: {"rate": r[1], "n_payers": r[2]} for r in con.execute(
+            f"""
+            WITH base AS (
+                SELECT t.billing_code, t.payer, median(t.negotiated_rate) AS rate
+                FROM rates_by_tin t LEFT JOIN tin_directory td USING (tin_value)
+                WHERE {o_where} AND t.payer != ?
+                  AND t.tin_value IN (SELECT unnest(?::VARCHAR[]))
+                GROUP BY 1, 2)
+            SELECT billing_code, round(median(rate), 2), count(DISTINCT payer)
+            FROM base GROUP BY 1
+            """, [*o_params, payer, subject_tins]).fetchall()}
+
+    rows = []
+    for r in bench["rows"]:
+        if r.get("subject_rate") is None:
+            continue  # negotiation rows are the codes the subject is priced on
+        code, subj, p50 = r["billing_code"], r["subject_rate"], r.get("p50")
+        row = dict(r)
+        row["gap_to_median"] = round(p50 - subj, 2) if p50 is not None else None
+        row["gap_to_median_pct"] = (
+            round(100 * (p50 - subj) / p50, 1) if p50 else None)
+        o = others.get(code)
+        row["other_payers_rate"] = o["rate"] if o else None
+        row["n_other_payers"] = o["n_payers"] if o else 0
+        row["comp_rates"] = [c["rates"].get(code) for c in comps]
+        best = [v for v in row["comp_rates"] if v is not None]
+        row["best_comparable"] = max(best) if best else None
+        rows.append(row)
+    if not rows:
+        raise BenchmarkError(
+            f"{subject} has no priced codes with {payer} in {market.get('month')} "
+            "under the market basis — nothing to negotiate from")
+
+    def _avg(vals):
+        vals = [v for v in vals if v is not None]
+        return round(statistics.mean(vals), 1) if vals else None
+
+    pcts = [r["subject_percentile"] for r in rows if r.get("subject_percentile") is not None]
+    below = [r for r in rows if r.get("p50") is not None and r["subject_rate"] < r["p50"]]
+    comp_summaries = []
+    for i, c in enumerate(comps):
+        pairs = [(r["subject_rate"], r["comp_rates"][i]) for r in rows
+                 if r["comp_rates"][i] is not None]
+        prem = [round(100 * (cr - sr) / sr, 1) for sr, cr in pairs if sr]
+        comp_summaries.append({
+            "name": c["name"], "n_shared_codes": len(pairs),
+            "n_paid_more": sum(1 for sr, cr in pairs if cr > sr),
+            "median_premium_pct": round(statistics.median(prem), 1) if prem else None,
+        })
+    return {
+        "subject": subject,
+        "subject_tins": bench["subject_tins"],
+        "payer": payer,
+        "market": {k: v for k, v in market.items() if k != "payers"},
+        "rows": rows,
+        "comparables": comp_summaries,
+        "mpfs_loaded": bench["mpfs_loaded"],
+        "mpfs_source": bench.get("mpfs_source"),
+        "basis_note": bench["basis_note"],
+        "peer_set": bench["peer_set"],
+        "target_percentile": bench["target_percentile"],
+        "summary": {
+            "headline_percentile": round(statistics.median(pcts)) if pcts else None,
+            "n_codes": len(rows),
+            "n_below_median": len(below),
+            # honest averages across the subject's priced codes (each code
+            # weighted equally — utilization weighting needs volumes we don't have)
+            "avg_gap_to_median_pct": _avg([r["gap_to_median_pct"] for r in rows]),
+            "avg_uplift_to_p75_pct": _avg([
+                round(100 * (r["p75"] - r["subject_rate"]) / r["subject_rate"], 1)
+                for r in rows if r.get("p75") and r["subject_rate"]]),
+            "avg_other_payer_diff_pct": _avg([
+                round(100 * (r["other_payers_rate"] - r["subject_rate"]) / r["other_payers_rate"], 1)
+                for r in rows if r.get("other_payers_rate") and r["subject_rate"] is not None]),
+        },
+    }
+
+
+def render_payer_compare_report(cfg: MrfxConfig, store: Store, comp: dict) -> str:
+    """Print-ready payer-negotiation comparison: the document the owner hands
+    the payer. Per-code table (subject vs this payer's market vs named
+    comparables vs the subject's other payers), leverage summary, and an ask
+    table at median / p75 / best-comparable. Same honesty rails as every other
+    report: pinned month, geographic-scope guard, full methodology footer."""
+    if not comp.get("market", {}).get("month"):
+        raise BenchmarkError("payer comparison report requires a pinned as-of month")
+    geo_banner = _geo_banner_html(
+        require_geographic_scope(comp["market"], "payer comparison report"))
+    e = html.escape
+    s = comp["summary"]
+    month = comp["market"].get("month")
+    comp_heads = "".join(f"<th class='num'>{e(c['name'])}</th>" for c in comp["comparables"])
+    mp = comp.get("mpfs_loaded")
+    mp_heads = "<th class='num'>% Medicare (you / median)</th>" if mp else ""
+
+    def _pctm(r):
+        if not mp:
+            return ""
+        a, b = r.get("subject_pct_medicare"), r.get("median_pct_medicare")
+        return (f"<td class='num sub'>{_pctnum(a)} / {_pctnum(b)}</td>")
+
+    rows_html = "".join(
+        f"<tr><td>{e(r['billing_code'])}<div class='sub'>{e(r['description'] or '')}"
+        f"{' · timed 15-min' if r['is_timed'] else ''}</div></td>"
+        f"<td class='num'><b>{_m(r['subject_rate'])}</b></td>"
+        f"<td class='num'>{_m(r.get('other_payers_rate'))}"
+        f"<div class='sub'>{r.get('n_other_payers') or 0} payer(s)</div></td>"
+        f"<td class='num'>{_m(r['p25'])}</td><td class='num'>{_m(r['p50'])}</td>"
+        f"<td class='num'>{_m(r['p75'])}</td>"
+        f"<td class='num'>{'p%.0f' % r['subject_percentile'] if r.get('subject_percentile') is not None else '–'}</td>"
+        f"<td class='num gap'>{_m(r['gap_to_median'])}</td>"
+        + "".join(f"<td class='num'>{_m(v)}</td>" for v in r["comp_rates"])
+        + _pctm(r)
+        + f"<td class='num sub'>{r['n_peers'] or 0}</td></tr>"
+        for r in comp["rows"]
+    )
+    asks_html = "".join(
+        f"<tr><td>{e(r['billing_code'])}</td><td class='num'>{_m(r['subject_rate'])}</td>"
+        f"<td class='num'>{_m(r['p50'])}</td><td class='num'>{_m(r['p75'])}</td>"
+        f"<td class='num'>{_m(r.get('best_comparable'))}</td></tr>"
+        for r in comp["rows"]
+    )
+    comp_lines = "".join(
+        f"<li><b>{e(c['name'])}</b>: this payer pays them more than you on "
+        f"{c['n_paid_more']} of {c['n_shared_codes']} shared code(s)"
+        + (f", median premium {c['median_premium_pct']:+.1f}% vs your rate"
+           if c['median_premium_pct'] is not None else "") + ".</li>"
+        for c in comp["comparables"] if c["n_shared_codes"]
+    )
+    lev = []
+    if s["headline_percentile"] is not None:
+        lev.append(f"You sit at roughly <b>p{s['headline_percentile']}</b> among "
+                   f"{e(comp['payer'])}'s other providers across your "
+                   f"{s['n_codes']} priced code(s); <b>{s['n_below_median']}</b> "
+                   "of them are below this payer's median.")
+    if s["avg_gap_to_median_pct"] is not None and s["avg_gap_to_median_pct"] > 0:
+        lev.append(f"Reaching this payer's <b>median</b> is an average uplift of "
+                   f"<b>{s['avg_gap_to_median_pct']:.1f}%</b> across your codes"
+                   + (f"; p75 would be {s['avg_uplift_to_p75_pct']:.1f}%"
+                      if s["avg_uplift_to_p75_pct"] is not None else "") + ".")
+    if s["avg_other_payer_diff_pct"] is not None and s["avg_other_payer_diff_pct"] > 0:
+        lev.append(f"Your OTHER payers pay you on average "
+                   f"<b>{s['avg_other_payer_diff_pct']:.1f}% more</b> for the same "
+                   "codes — this contract prices below your own book.")
+    footer = methodology_footer(store, {
+        "market": {**comp["market"], "payers": [comp["payer"]]},
+        "peer_set": comp["peer_set"], "basis_note": comp["basis_note"],
+        "mpfs_loaded": comp["mpfs_loaded"], "mpfs_source": comp.get("mpfs_source"),
+    })
+    return f"""<!DOCTYPE html><html><head><meta charset="utf-8">
+<title>Payer negotiation — {e(comp['subject'])} vs {e(comp['payer'])}</title>
+<style>
+ body {{ font: 13px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; color: #0b0b0b;
+        max-width: 980px; margin: 32px auto; padding: 0 24px; }}
+ h1 {{ font-size: 20px; margin-bottom: 2px; }} h2 {{ font-size: 15px; margin-top: 28px; }}
+ .brand {{ color: #52514e; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }}
+ .brandbar {{ display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }}
+ .brandbar .brand {{ margin: 0; }} .logo {{ max-height: 40px; max-width: 200px; }}
+ .meta {{ color: #52514e; margin-bottom: 10px; }}
+ table {{ border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }}
+ th, td {{ text-align: left; padding: 6px 8px; border-bottom: 1px solid #e1e0d9; vertical-align: middle; }}
+ th {{ font-size: 11px; color: #898781; text-transform: uppercase; letter-spacing: .04em; }}
+ .num {{ text-align: right; }} .sub {{ color: #898781; font-size: 11.5px; }}
+ .gap {{ font-weight: 650; }}
+ .band {{ font-size: 13.5px; background: #f4f3ee; padding: 10px 14px; border-radius: 6px; }}
+ .band li {{ margin: 4px 0 4px 16px; }}
+ .geo-warn {{ background: #fbe9d0; border: 1px solid #d99a3a; color: #7a4a00;
+          padding: 10px 14px; border-radius: 6px; font-size: 12.5px; margin: 12px 0; }}
+ footer {{ margin-top: 36px; border-top: 1px solid #c3c2b7; padding-top: 12px;
+          color: #52514e; font-size: 11px; white-space: pre-wrap; }}
+ @media print {{ body {{ margin: 0; }} h2 {{ break-after: avoid; }} }}
+</style></head><body>
+{_brand_header(cfg)}
+<h1>Payer negotiation — {e(comp['subject'])} vs {e(comp['payer'])}</h1>
+<div class="meta">What {e(comp['payer'])} pays you, its market, your named
+ comparables, and your other payers — per code, as of {e(str(month))}.</div>
+{geo_banner}
+<div class="band"><ul>{''.join(f'<li>{ln}</li>' for ln in lev)}{comp_lines}</ul></div>
+<h2>Per-code comparison</h2>
+<table><thead><tr><th>Code</th><th class="num">Your rate</th>
+<th class="num">Your other payers</th><th class="num">P25</th><th class="num">Median</th>
+<th class="num">P75</th><th class="num">Your %ile</th><th class="num">Gap to median</th>
+{comp_heads}{mp_heads}<th class="num">Peers</th></tr></thead>
+<tbody>{rows_html}</tbody></table>
+<h2>Ask scenarios (per code)</h2>
+<p class="sub">Reference points for the request — current rate, this payer's median
+and P75, and the best rate this payer already pays one of your named comparables.</p>
+<table><thead><tr><th>Code</th><th class="num">Current</th><th class="num">At median</th>
+<th class="num">At P75</th><th class="num">Best comparable</th></tr></thead>
+<tbody>{asks_html}</tbody></table>
+<footer>METHODOLOGY\n{e(footer)}</footer>
+</body></html>"""
+
+
 def require_geographic_scope(market: dict, kind: str) -> str:
     """Client-facing reports must not silently pool multiple states — negotiated
     reimbursement varies by geography, so a national comparison has to be an

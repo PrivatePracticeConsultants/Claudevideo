@@ -343,3 +343,10 @@ td .rate { font-weight: 650; }
 .view-head .spacer { flex: 1; }
 .muted { color: var(--muted); }
 code.inline { background: var(--grid); border-radius: 4px; padding: 1px 5px; font-size: 12.5px; }
+
+/* Negotiate tab summary cards */
+.stats-row { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+.stats-row .stat { background: var(--panel, #f4f3ee); border: 1px solid var(--border, #e1e0d9);
+  border-radius: 8px; padding: 10px 14px; min-width: 140px; }
+.stats-row .stat b { display: block; font-size: 19px; }
+.stats-row .stat span { font-size: 11.5px; color: var(--muted, #898781); }

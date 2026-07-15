@@ -1247,6 +1247,66 @@ def test_benchmark_subjects_search_and_cap(cfg, store):
     assert any(t["tin_value"].startswith("430000005") for t in tinq["tins"])
 
 
+def test_payer_comparison_math_and_report(cfg, store):
+    # Negotiate view: subject vs ONE payer's market, named comparables as
+    # columns, plus what the subject's OTHER payers pay — all hand-checked.
+    from mrfx.benchmark import compute_payer_comparison, render_payer_compare_report
+
+    # the negotiating payer: subject @50, comparable @75, peers @60/70/80
+    ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "nego.json", innetwork(items=[
+        item("97110", [
+            (["1000000001"], "43-9111111", "ein", [(50.0, None)]),   # subject
+            (["1000000002"], "43-9222222", "ein", [(75.0, None)]),   # comparable
+            (["1000000003"], "43-9333333", "ein", [(60.0, None)]),
+            (["1000000004"], "43-9444444", "ein", [(70.0, None)]),
+            (["1000000005"], "43-9555555", "ein", [(80.0, None)]),
+        ])])))
+    # a different payer paying the SUBJECT 66 for the same code (leverage line)
+    ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "other.json", innetwork(
+        payer="Other Insurance Co",
+        items=[item("97110", [(["1000000001"], "43-9111111", "ein", [(66.0, None)])])])))
+
+    market = {"month": "2026-06"}
+    comp = compute_payer_comparison(store, "439111111", "Testco",
+                                    market, comparables=["43-9222222"])
+    (r,) = comp["rows"]
+    assert r["subject_rate"] == 50.0
+    # peers exclude the subject: [60, 70, 75, 80] -> p50 72.5, gap 22.5 (+31.0%)
+    assert r["p50"] == 72.5 and r["gap_to_median"] == 22.5
+    assert r["gap_to_median_pct"] == 31.0
+    assert r["subject_percentile"] == 0          # below every peer
+    assert r["comp_rates"] == [75.0] and r["best_comparable"] == 75.0
+    assert r["other_payers_rate"] == 66.0 and r["n_other_payers"] == 1
+    s = comp["summary"]
+    assert s["n_codes"] == 1 and s["n_below_median"] == 1
+    assert s["headline_percentile"] == 0
+    # other payers pay (66-50)/66 = +24.2% more
+    assert s["avg_other_payer_diff_pct"] == 24.2
+    (cs,) = comp["comparables"]
+    assert cs["n_shared_codes"] == 1 and cs["n_paid_more"] == 1
+    assert cs["median_premium_pct"] == 50.0      # (75-50)/50
+
+    # printable report: needs a state (or explicit national), carries the asks
+    html_doc = render_payer_compare_report(
+        cfg, store, compute_payer_comparison(
+            store, "439111111", "Testco",
+            {**market, "allow_national": True}, comparables=["43-9222222"]))
+    for needle in ("Ask scenarios", "43-9222222", "Testco",
+                   "METHODOLOGY", "$72.50", "$75.00"):
+        assert needle in html_doc, needle
+
+    # API surface: month is required -> 422 with a plain message
+    c = TestClient(create_app(cfg, store))
+    bad = c.post("/api/negotiate/compare",
+                 json={"subject": "439111111", "payer": "Testco",
+                       "market": {}})
+    assert bad.status_code == 422
+    ok = c.post("/api/negotiate/compare",
+                json={"subject": "439111111", "payer": "Testco",
+                      "market": market, "comparables": ["43-9222222"]})
+    assert ok.status_code == 200 and ok.json()["rows"][0]["p50"] == 72.5
+
+
 def test_config_duckdb_memory_knob(tmp_path):
     from mrfx.config import load_mrfx_config
     p = tmp_path / "mrfx.yaml"

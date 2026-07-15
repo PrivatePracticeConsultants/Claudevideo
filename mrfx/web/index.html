@@ -16,6 +16,7 @@
     <button data-view="explorer" class="active">Explorer</button>
     <button data-view="cpt">Code comparison</button>
     <button data-view="benchmark">Benchmark</button>
+    <button data-view="negotiate">Negotiate</button>
     <button data-view="ratecard">Rate card</button>
     <button data-view="leads">Leads</button>
     <button data-view="changes">Changes</button>
@@ -261,6 +262,50 @@
       <div class="bench-results">
         <div id="b-out" class="empty"><h3>Pick a subject and an as-of month</h3>
           Benchmarks compute over dollar-rate, base-modifier rows only.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ======================= NEGOTIATE (payer comparison) ======================= -->
+  <section id="view-negotiate" class="view">
+    <div class="bench-grid">
+      <div class="bench-form">
+        <h2>Payer negotiation</h2>
+        <div class="field"><label>Your practice (subject)</label>
+          <input type="text" id="ng-subject" list="ng-subjects" placeholder="entity name or TIN…">
+          <datalist id="ng-subjects"></datalist>
+        </div>
+        <div class="field"><label>Payer you're negotiating with (required)</label>
+          <select id="ng-payer"></select>
+        </div>
+        <div class="field"><label>As-of month (required)</label><select id="ng-month"></select></div>
+        <div class="field"><label>State <span class="muted" style="text-transform:none">(required for the printable report)</span></label>
+          <input type="text" id="ng-state" placeholder="MO" style="width:52px">
+        </div>
+        <div class="field"><label>Discipline</label>
+          <select id="ng-disc"><option value="">any</option><option>PT</option><option>OT</option><option>SLP</option></select>
+        </div>
+        <label class="toggle" title="market = only therapy practices (majority PT/OT/SLP, no hospitals). Needs NPI identification.">
+          <input type="checkbox" id="ng-therapy" checked> therapy practices only
+        </label>
+        <div class="field"><label>Comparable entities <span class="muted" style="text-transform:none">(each adds a column)</span></label>
+          <div style="display:flex;gap:6px">
+            <input type="text" id="ng-comp" list="ng-comps" placeholder="entity name or TIN…" style="flex:1">
+            <button class="btn" id="ng-add">Add</button>
+          </div>
+          <datalist id="ng-comps"></datalist>
+          <div class="chips" id="ng-comp-chips" style="margin-top:6px"></div>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:12px">
+          <button class="btn primary" id="ng-run">Compare</button>
+          <button class="btn" id="ng-report" disabled title="Print-ready document for the payer request">Printable report</button>
+        </div>
+      </div>
+      <div class="bench-results">
+        <div id="ng-out" class="empty"><h3>Pick your practice, the payer, and a month</h3>
+          Compares every CPT code you're priced on against this payer's market
+          (median/percentiles), your named comparables, and what your other
+          payers pay you — the working numbers for a rate request.</div>
       </div>
     </div>
   </section>

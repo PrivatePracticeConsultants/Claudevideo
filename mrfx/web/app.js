@@ -86,6 +86,7 @@ function switchView(view) {
     if (first) selectCpt(first);
   }
   if (view === "benchmark") initBenchmark();
+  if (view === "negotiate") initNegotiate();
   if (view === "ratecard") initRatecard();
   if (view === "leads") initLeads();
   if (view === "changes") initChanges();
@@ -985,6 +986,120 @@ async function openNegotiationReport() {
    ======================================================================= */
 
 let ratecardInit = false;
+/* ---------- Negotiate: one payer, named comparables ---------- */
+async function initNegotiate() {
+  if (state.ngInited) return;
+  state.ngInited = true;
+  state.ngComps = [];
+  const [subjects, months, payers] = await Promise.all([
+    api("/api/benchmark/subjects").catch(() => null),
+    api("/api/months").catch(() => null),
+    api("/api/payers").catch(() => null),
+  ]);
+  $("#ng-subjects").innerHTML = subjectOptionsHtml(subjects);
+  $("#ng-comps").innerHTML = subjectOptionsHtml(subjects);
+  fillMonthSelect("#ng-month", months);
+  $("#ng-payer").innerHTML = `<option value="">— pick a payer —</option>` +
+    ((payers && payers.payers) || []).map((p) => `<option>${esc(p)}</option>`).join("");
+  wireSubjectSearch("#ng-subject", "#ng-subjects");
+  wireSubjectSearch("#ng-comp", "#ng-comps");
+  const addComp = () => {
+    const v = $("#ng-comp").value.trim();
+    if (!v || state.ngComps.includes(v)) return;
+    state.ngComps.push(v);
+    $("#ng-comp").value = "";
+    renderCompChips();
+    if (state.lastNegotiatePayload) runNegotiate();   // live column add
+  };
+  $("#ng-add").addEventListener("click", addComp);
+  $("#ng-comp").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addComp(); } });
+  $("#ng-comp-chips").addEventListener("click", (ev) => {
+    const x = ev.target.closest(".chip");
+    if (!x) return;
+    state.ngComps = state.ngComps.filter((c) => c !== x.dataset.comp);
+    renderCompChips();
+    if (state.lastNegotiatePayload) runNegotiate();
+  });
+  $("#ng-run").addEventListener("click", runNegotiate);
+  $("#ng-report").addEventListener("click", () => {
+    if (!state.lastNegotiatePayload) return;
+    const p = state.lastNegotiatePayload;
+    if (!p.market.state) {
+      if (!confirm("No state set — the report will pool every loaded state into one national comparison. Continue?")) return;
+      p.market.allow_national = true;
+    }
+    openReportWith("/api/report/payer-compare", p);
+  });
+}
+
+function renderCompChips() {
+  $("#ng-comp-chips").innerHTML = state.ngComps.map((c) =>
+    `<button class="chip on" data-comp="${esc(c)}" title="remove">${esc(c)} ✕</button>`).join("");
+}
+
+function negotiatePayload() {
+  const subject = $("#ng-subject").value.trim();
+  const payer = $("#ng-payer").value;
+  const month = $("#ng-month").value;
+  if (!subject) throw new Error("enter your practice (subject)");
+  if (!payer) throw new Error("pick the payer you're negotiating with");
+  if (!month) throw new Error("an as-of month is required");
+  const market = { month, therapy_only: $("#ng-therapy").checked };
+  if ($("#ng-state").value.trim()) market.state = $("#ng-state").value.trim().toUpperCase();
+  if ($("#ng-disc").value) market.discipline = $("#ng-disc").value;
+  return { subject, payer, market, comparables: state.ngComps.slice() };
+}
+
+async function runNegotiate() {
+  const out = $("#ng-out");
+  let payload;
+  try { payload = negotiatePayload(); }
+  catch (e) { out.innerHTML = `<div class="empty"><h3>${esc(e.message)}</h3></div>`; return; }
+  out.innerHTML = `<div class="empty"><h3>Comparing…</h3></div>`;
+  state.lastNegotiatePayload = null;
+  $("#ng-report").disabled = true;
+  let d;
+  try { d = await postJson("/api/negotiate/compare", payload); }
+  catch (e) { out.innerHTML = `<div class="empty"><h3>Couldn't compare</h3>${esc(e.message)}</div>`; return; }
+  state.lastNegotiatePayload = payload;
+  $("#ng-report").disabled = false;
+  const mny = (v) => (v == null ? "–" : `$${fmtMoney(v)}`);
+  const s = d.summary;
+  const cards = [
+    s.headline_percentile != null
+      ? `<div class="stat"><b>p${s.headline_percentile}</b><span>your position among ${esc(d.payer)}'s providers</span></div>` : "",
+    `<div class="stat"><b>${s.n_below_median}/${s.n_codes}</b><span>codes below this payer's median</span></div>`,
+    s.avg_gap_to_median_pct != null
+      ? `<div class="stat"><b>${s.avg_gap_to_median_pct > 0 ? "+" : ""}${s.avg_gap_to_median_pct}%</b><span>avg uplift to reach the median</span></div>` : "",
+    s.avg_other_payer_diff_pct != null
+      ? `<div class="stat"><b>${s.avg_other_payer_diff_pct > 0 ? "+" : ""}${s.avg_other_payer_diff_pct}%</b><span>your other payers pay this much more</span></div>` : "",
+  ].filter(Boolean).join("");
+  const compHeads = d.comparables.map((c) => `<th class="num" title="what this payer pays them">${esc(c.name)}</th>`).join("");
+  const rows = d.rows.map((r) => {
+    const compCells = r.comp_rates.map((v) =>
+      `<td class="num${v != null && r.subject_rate != null && v > r.subject_rate ? " warn-text" : ""}">${mny(v)}</td>`).join("");
+    return `<tr><td>${esc(r.billing_code)}<div class="sub">${esc(r.description || "")}</div></td>
+      <td class="num"><b>${mny(r.subject_rate)}</b></td>
+      <td class="num">${mny(r.other_payers_rate)}<div class="sub">${r.n_other_payers || 0} payer(s)</div></td>
+      <td class="num">${mny(r.p25)}</td><td class="num">${mny(r.p50)}</td><td class="num">${mny(r.p75)}</td>
+      <td class="num">${r.subject_percentile != null ? "p" + Math.round(r.subject_percentile) : "–"}</td>
+      <td class="num ${r.gap_to_median > 0 ? "warn-text" : ""}">${mny(r.gap_to_median)}${r.gap_to_median_pct != null ? `<div class="sub">${r.gap_to_median_pct > 0 ? "+" : ""}${r.gap_to_median_pct}%</div>` : ""}</td>
+      ${compCells}<td class="num sub">${r.n_peers || 0}</td></tr>`;
+  }).join("");
+  const compNotes = d.comparables.filter((c) => c.n_shared_codes).map((c) =>
+    `<li><b>${esc(c.name)}</b>: paid more than you on ${c.n_paid_more}/${c.n_shared_codes} shared codes` +
+    (c.median_premium_pct != null ? ` (median ${c.median_premium_pct > 0 ? "+" : ""}${c.median_premium_pct}% vs your rate)` : "") + `</li>`).join("");
+  out.innerHTML = `
+    <div class="stats-row">${cards}</div>
+    ${compNotes ? `<ul class="note" style="margin:8px 0 12px">${compNotes}</ul>` : ""}
+    <div style="overflow-x:auto"><table><thead><tr>
+      <th>Code</th><th class="num">You</th><th class="num">Your other payers</th>
+      <th class="num">P25</th><th class="num">Median</th><th class="num">P75</th>
+      <th class="num">%ile</th><th class="num">Gap to median</th>${compHeads}
+      <th class="num">Peers</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <p class="note">${esc(d.basis_note)} Peer stats exclude your own TIN(s). Use "Printable report" for the payer-ready document with full methodology.</p>`;
+}
+
 async function initRatecard() {
   refreshRcMpfs();
   if (ratecardInit) { refreshSubjectPickers("#rc-subjects", [{ sel: "#rc-month" }]); return; }

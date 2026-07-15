@@ -27,8 +27,10 @@ from .benchmark import (
     BenchmarkError,
     compute_benchmark,
     compute_opportunity,
+    compute_payer_comparison,
     compute_payer_negotiation,
     render_negotiation_report,
+    render_payer_compare_report,
     render_pitch_report,
 )
 from .catalog import catalog_json, therapy_taxonomy_sql
@@ -1202,6 +1204,32 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         except (BenchmarkError, ValueError, TypeError) as e:
             # ValueError/TypeError: a non-numeric or null volume/percentile in
             # the JSON body (int()/float()/None) — a client input error, so 422.
+            raise HTTPException(422, str(e))
+
+    # payer-comparison workspace (Negotiate tab): one payer, named comparables
+    @app.post("/api/negotiate/compare")
+    async def negotiate_compare(request: Request):
+        body = await request.json()
+        try:
+            return compute_payer_comparison(
+                store, str(body.get("subject", "")), str(body.get("payer", "")),
+                body.get("market") or {},
+                comparables=[str(c) for c in (body.get("comparables") or [])],
+            )
+        except (BenchmarkError, ValueError, TypeError) as e:
+            raise HTTPException(422, str(e))
+
+    @app.post("/api/report/payer-compare", response_class=HTMLResponse)
+    async def payer_compare_report(request: Request):
+        body = await request.json()
+        try:
+            comp = compute_payer_comparison(
+                store, str(body.get("subject", "")), str(body.get("payer", "")),
+                body.get("market") or {},
+                comparables=[str(c) for c in (body.get("comparables") or [])],
+            )
+            return HTMLResponse(render_payer_compare_report(cfg, store, comp))
+        except (BenchmarkError, ValueError, TypeError) as e:
             raise HTTPException(422, str(e))
 
     # fee schedule / payer scorecard (§7C)
