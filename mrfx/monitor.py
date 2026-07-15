@@ -40,6 +40,15 @@ def compute_rate_changes(store: Store, market: dict, *, subject: str | None = No
     new_month = market.get("month")
     if not new_month:
         raise BenchmarkError("an as-of month is required (7A.5) — pass market.month")
+    if str(new_month).strip().lower() == "latest" or \
+       str(market.get("prev_month") or "").strip().lower() == "latest":
+        # rate CHANGES compare two specific publication months — "latest" names
+        # no single month, and treating it as a literal string fabricated a
+        # comparison (lexically > every YYYY-MM, so prev auto-picked the newest
+        # real month against a phantom new one)
+        raise BenchmarkError(
+            "rate changes compare two specific months — pick a real month "
+            "(e.g. 2026-07), not 'latest'")
     months = available_months(store)
     old_month = market.get("prev_month")
     if not old_month:

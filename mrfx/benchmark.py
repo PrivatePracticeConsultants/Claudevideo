@@ -347,7 +347,8 @@ def compute_opportunity(benchmark: dict, volumes: dict[str, float],
             # the basis must echo what the benchmark actually ran with — an
             # unconditional "base-modifier basis" here was false whenever the
             # include_assistant / base_only toggles were used
-            f"Rates from the pinned as-of month. {benchmark.get('basis_note', BASIS_NOTE)} "
+            f"Rates as of {month_label(benchmark['market'].get('month'))}. "
+            f"{benchmark.get('basis_note', BASIS_NOTE)} "
             "Negotiated rate ≠ collections — MPPR, cost-share, denials and "
             "sequestration sit between rate and cash."
         ),
@@ -406,7 +407,7 @@ def compute_payer_negotiation(store: Store, subject: str, market: dict,
     payers = subject_payers(store, subject, market)
     if not payers:
         raise BenchmarkError(
-            "subject has no rates in the pinned month for the given market scope "
+            "subject has no rates for the given as-of month and market scope "
             "— nothing to build a per-payer negotiation view from")
     volumes = {str(k): float(v) for k, v in (volumes or {}).items()} or None
     sections, total_target, total_conservative = [], 0.0, 0.0
@@ -445,8 +446,8 @@ def compute_payer_negotiation(store: Store, subject: str, market: dict,
         })
     if not sections:
         raise BenchmarkError(
-            "no payer has a benchmarkable code for this subject in the pinned "
-            "month (subject-priced codes with at least one peer)")
+            "no payer has a benchmarkable code for this subject at the given "
+            "as-of month (subject-priced codes with at least one peer)")
     # lowest-percentile payer first: that's where the subject is most underpaid
     # relative to peers, i.e. the strongest renegotiation case
     sections.sort(key=lambda s: (s["headline_percentile"] is None,

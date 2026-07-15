@@ -1284,6 +1284,13 @@ def test_latest_month_uses_newest_file_per_contract(cfg, store):
                "market": {"month": "latest", "allow_national": True}})
     assert r.status_code == 200 and "latest available" in r.text
 
+    # rate CHANGES compare two real months: "latest" is lexically > every
+    # YYYY-MM, so it silently fabricated a comparison — must 422 instead
+    bad = c.post("/api/changes", json={"market": {"month": "latest"}})
+    assert bad.status_code == 422 and "specific months" in bad.json()["detail"]
+    ok = c.post("/api/changes", json={"market": {"month": "2026-06"}})
+    assert ok.status_code == 200 and ok.json()["new_month"] == "2026-06"
+
 
 def test_payer_comparison_math_and_report(cfg, store):
     # Negotiate view: subject vs ONE payer's market, named comparables as

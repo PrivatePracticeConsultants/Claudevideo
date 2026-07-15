@@ -744,8 +744,8 @@ async function refreshSubjectPickers(subjSel, monthSels = []) {
   for (const ms of monthSels) {
     const el = $(ms.sel); if (!el) continue;
     const cur = el.value;
-    el.innerHTML = (ms.prefix || "") + opts ||
-      `<option value="">no data ingested</option>`;
+    el.innerHTML = opts ? (ms.prefix || "") + opts
+      : `<option value="">no data ingested</option>`;
     if (cur && months.months.includes(cur)) el.value = cur;
   }
 }
@@ -920,7 +920,7 @@ function renderBenchmark(out, bench, opp) {
       </tbody></table></div>
     <div class="bench-note">${esc(opp.assumptions)}</div>` : "";
   out.innerHTML = `
-    <h2 style="font-size:15px;margin:0 0 4px">${esc(bench.subject)} vs market — as of ${esc(bench.market.month)}</h2>
+    <h2 style="font-size:15px;margin:0 0 4px">${esc(bench.subject)} vs market — as of ${esc(bench.market.month === "latest" ? "latest available" : bench.market.month)}</h2>
     <div class="muted" style="margin-bottom:10px">${esc(bench.peer_set)} · target p${t}</div>
     <div class="tablewrap"><table>
       <thead><tr><th>Code</th><th class="num">You</th><th class="num">P25</th><th class="num">Median</th>
@@ -995,7 +995,19 @@ async function openNegotiationReport() {
 let ratecardInit = false;
 /* ---------- Negotiate: one payer, named comparables ---------- */
 async function initNegotiate() {
-  if (state.ngInited) return;
+  if (state.ngInited) {
+    // re-entry: refresh pickers like every sibling tab — a payer/month/org
+    // ingested since the first open must show up without a page reload
+    refreshSubjectPickers("#ng-subjects", [{ sel: "#ng-month", prefix: LATEST_MONTH_OPT }]);
+    refreshSubjectPickers("#ng-comps", []);
+    api("/api/payers").then((p) => {
+      const el = $("#ng-payer"); const cur = el.value;
+      el.innerHTML = `<option value="">— pick a payer —</option>` +
+        (p.payers || []).map((x) => `<option>${esc(x)}</option>`).join("");
+      if (cur && (p.payers || []).includes(cur)) el.value = cur;
+    }).catch(() => {});
+    return;
+  }
   state.ngInited = true;
   state.ngComps = [];
   const [subjects, months, payers] = await Promise.all([
@@ -1032,10 +1044,11 @@ async function initNegotiate() {
   $("#ng-run").addEventListener("click", runNegotiate);
   $("#ng-report").addEventListener("click", () => {
     if (!state.lastNegotiatePayload) return;
-    const p = state.lastNegotiatePayload;
+    const p = { ...state.lastNegotiatePayload,
+                market: { ...state.lastNegotiatePayload.market } };
     if (!p.market.state) {
       if (!confirm("No state set — the report will pool every loaded state into one national comparison. Continue?")) return;
-      p.market.allow_national = true;
+      p.market.allow_national = true;  // on the COPY: next click re-confirms
     }
     openReportWith("/api/report/payer-compare", p);
   });
@@ -1178,7 +1191,7 @@ const pctOrDash = (v) => (v == null ? "–" : `${v}%`);
 function renderRatecard(out, fs, sc) {
   const mp = fs.mpfs_loaded;
   if (!fs.codes.length) {
-    out.innerHTML = `<div class="empty"><h3>No rates found</h3>No published rates for this practice as of ${esc(String(fs.month))} under the current filters.</div>`;
+    out.innerHTML = `<div class="empty"><h3>No rates found</h3>No published rates for this practice as of ${esc(fs.month === "latest" ? "latest available" : String(fs.month))} under the current filters.</div>`;
     return;
   }
   // order payer columns by scorecard rank (best first)
@@ -1281,7 +1294,10 @@ function fillMonthSelect(sel, months, prefix = "") {
   if (!el) return;
   if (!months) { el.innerHTML = `<option value="">couldn't load months — reopen this tab</option>`; return; }
   const opts = (months.months || []).filter(Boolean).map((m) => `<option>${esc(m)}</option>`).join("");
-  el.innerHTML = prefix + opts || `<option value="">no dated data yet — ingest a file first</option>`;
+  // opts-empty must still show the actionable hint — `prefix + opts ||` was
+  // truthy with a prefix alone, hiding "ingest a file first" on a fresh store
+  el.innerHTML = opts ? prefix + opts
+    : `<option value="">no dated data yet — ingest a file first</option>`;
 }
 
 async function loadLdStates() {
