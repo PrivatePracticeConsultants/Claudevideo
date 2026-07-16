@@ -72,12 +72,13 @@ class MrfxConfig(BaseModel):
     # box); the rollup rebuild also slices itself finer to fit whatever this is.
     duckdb_memory_gb: int | None = Field(default=None, ge=1, le=1024)
     # Where DuckDB writes its temporary SPILL files during heavy rollups/queries
-    # (when a step needs more than duckdb_memory_gb). Unset = a `duckdb_tmp`
-    # folder inside store_dir. Point this at a FAST disk (an SSD/NVMe) when the
-    # store itself lives on a slow spinning HDD: the store can be tens of GB and
-    # stay on the roomy drive, while the transient spill — the thing that stalls
-    # every parser worker while a rollup grinds — gets SSD speed. Needs only a
-    # few GB free. Example (Windows): duckdb_temp_dir: "C:\\mrfx_spill".
+    # (when a step needs more than duckdb_memory_gb). Unset = AUTOMATIC: if the
+    # store sits on a spinning HDD and a roomy SSD is present (Windows), spill is
+    # auto-routed to the SSD — the thing that otherwise stalls every parser
+    # worker while a rollup grinds; otherwise it's a `duckdb_tmp` folder inside
+    # store_dir. Set this to force a specific fast disk (or to override the
+    # auto-choice). Needs only a few GB free. Example: duckdb_temp_dir:
+    # "C:\\mrfx_spill". The app makes its own per-store subfolder inside it.
     duckdb_temp_dir: Path | None = None
 
     @field_validator("duckdb_temp_dir", mode="before")

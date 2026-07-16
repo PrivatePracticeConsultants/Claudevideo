@@ -397,31 +397,34 @@ moves that number, in order of impact:
    an overnight grind: plug in, Settings → System → Power → set "Put my device
    to sleep" to **Never** (screen off is fine).
 
-5. **Put the database on your fastest disk — this is the big one if your data
-   sits on a hard drive (HDD).** The heavy step at the end of each batch (the
-   "rollup") writes a lot of temporary scratch data, and if that lands on a
-   spinning HDD every parser worker sits idle waiting for it — you'll see the
-   CPU graph stuck well below what your cores could do while the disk light
-   pins. Two ways to fix it:
+5. **Fast-disk scratch — now automatic.** The heavy step at the end of each
+   batch (the "rollup") writes a lot of temporary scratch data, and if that
+   lands on a spinning hard drive (HDD) every parser worker sits idle waiting
+   for it — you'll see the CPU graph stuck well below what your cores could do
+   while the disk light pins. **You don't have to do anything about this
+   anymore:** when your store is on an HDD and you have an SSD with room, the
+   app detects it on startup and sends the scratch to the SSD by itself. You'll
+   see a line like
 
-   - **Best, if it fits:** put the whole project (or just the store) on your
-     SSD. Set `store_dir` to a folder on the SSD in `config/mrfx.yaml`, e.g.
-     `store_dir: "C:\\mrfxdata\\mrfx_store"`, and move your existing store
-     folder there first so you keep your data.
-   - **If your book is too big for the SSD:** leave the store on the roomy
-     hard drive but send just the temporary scratch to the SSD — it only needs
-     a few GB free:
+   ```
+   rollup spill → C:\mrfx_spill\spill-1a2b3c4d5e  [auto-selected (store is on a slower disk)]
+   ```
 
-     ```yaml
-     duckdb_temp_dir: "C:\\mrfx_spill"
-     ```
+   confirming it did (it makes its own subfolder, so nothing else on that drive
+   is touched). If your store is already on an SSD, there's nothing to do and
+   you won't see that line.
 
-     When the app starts you'll see a line like
-     `rollup spill → C:\mrfx_spill\spill-1a2b3c4d5e` confirming it took effect
-     (the app makes its own subfolder there, so nothing else in that folder is
-     ever touched). (Not sure which drive is your SSD? In Task
-     Manager → Performance, the disk labeled **SSD/NVMe** is the fast one; a
-     disk labeled **HDD** is the slow one.)
+   To override the auto-choice — force a specific drive, or point it at a disk
+   the detector didn't pick — set it yourself in `config/mrfx.yaml`; it only
+   needs a few GB free:
+
+   ```yaml
+   duckdb_temp_dir: "D:\\mrfx_spill"
+   ```
+
+   And if the SSD has room for your whole book, putting the store itself there
+   is best of all — `store_dir: "C:\\mrfxdata\\mrfx_store"` (move your existing
+   store folder there first so you keep your data).
 
 Changes to `config/mrfx.yaml` take effect on the next `mrfx serve` start — stop
 it (Ctrl-C), edit, start again; the queue resumes where it left off.

@@ -56,10 +56,10 @@ store_dir: data/mrfx_store
 move_processed: true          # false = leave files in inbox, track via checkpoint
 
 # Where DuckDB writes temporary SPILL scratch during the heavy end-of-batch
-# rollup. Unset = a folder inside store_dir. If your store lives on a slow
-# spinning hard drive but you have an SSD, point this at the SSD (needs only a
-# few GB free) — the spill is what stalls the parser workers while a rollup
-# runs, and moving just it to fast storage speeds up big grinds. Example:
+# rollup. Unset = AUTOMATIC: if your store is on a slow spinning hard drive and
+# you have a roomy SSD, the app routes the spill to the SSD by itself (this is
+# what stalls the parser workers while a rollup runs); otherwise a folder inside
+# store_dir. Set this only to force a specific fast disk. Example:
 # duckdb_temp_dir: "C:\\mrfx_spill"
 
 enrichment:

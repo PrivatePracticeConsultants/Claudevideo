@@ -431,3 +431,88 @@ def test_duckdb_temp_dir_default_is_in_store(tmp_path):
 
     store = Store(tmp_path / "store")
     assert store._tmp_dir == tmp_path / "store" / "duckdb_tmp"
+    assert store.spill_is_relocated is False
+    assert store.spill_is_auto is False
+
+
+def test_parse_media_output_tolerant():
+    from mrfx.store import _parse_media_output
+
+    got = _parse_media_output("C=SSD\nE=HDD\n\ngarbage line\nD:=Unspecified\n=oops\nX=")
+    assert got == {"C": "SSD", "E": "HDD", "D": "Unspecified"}
+    assert _parse_media_output("") == {}
+
+
+def test_choose_spill_drive_only_hdd_to_ssd():
+    from mrfx.store import _choose_spill_drive
+
+    big = lambda dl: 500 * 10**9  # noqa: E731 — plenty of room everywhere
+    # store on an HDD (E), a roomy SSD (C) present -> relocate to C
+    assert _choose_spill_drive("E", {"E": "HDD", "C": "SSD"}, big) == "C"
+    # store already on an SSD -> never relocate
+    assert _choose_spill_drive("C", {"C": "SSD", "E": "HDD"}, big) is None
+    # store on HDD but NO ssd available -> keep in-store
+    assert _choose_spill_drive("E", {"E": "HDD", "F": "HDD"}, big) is None
+    # store drive type unknown/unspecified -> don't touch (conservative)
+    assert _choose_spill_drive("E", {"E": "Unspecified", "C": "SSD"}, big) is None
+    # prefer the ROOMIEST ssd
+    free = {"C": 30 * 10**9, "D": 800 * 10**9}
+    assert _choose_spill_drive("E", {"E": "HDD", "C": "SSD", "D": "SSD"},
+                               lambda dl: free[dl]) == "D"
+    # an ssd that's too full is skipped
+    assert _choose_spill_drive("E", {"E": "HDD", "C": "SSD"},
+                               lambda dl: 5 * 10**9) is None
+
+
+def test_choose_spill_drive_case_insensitive():
+    from mrfx.store import _choose_spill_drive
+
+    assert _choose_spill_drive("e", {"E": "hdd", "C": "ssd"},
+                               lambda dl: 500 * 10**9) == "C"
+
+
+def test_store_uses_auto_selected_spill(tmp_path, monkeypatch):
+    # Simulate the Windows auto-detect returning a fast SSD base: the store must
+    # spill into a per-store subfolder there and flag it as auto-selected.
+    import mrfx.store as store_mod
+    from mrfx.store import Store
+
+    fast = tmp_path / "ssd"
+    monkeypatch.setattr(store_mod, "_auto_spill_base", lambda d: fast)
+    store = Store(tmp_path / "store", auto_spill=True)
+    assert store._tmp_dir.parent == fast
+    assert store._tmp_dir.name.startswith("spill-")
+    assert store.spill_is_relocated is True
+    assert store.spill_is_auto is True
+    with store.connect() as con:
+        got = con.execute("SELECT current_setting('temp_directory')").fetchone()[0]
+    assert str(store._tmp_dir) in got
+
+
+def test_explicit_temp_dir_beats_auto(tmp_path, monkeypatch):
+    # An explicit duckdb_temp_dir wins over auto-detection, and is NOT flagged
+    # as auto (so the banner says "from your config").
+    import mrfx.store as store_mod
+    from mrfx.store import Store
+
+    auto = tmp_path / "auto_ssd"
+    explicit = tmp_path / "my_ssd"
+    monkeypatch.setattr(store_mod, "_auto_spill_base", lambda d: auto)
+    store = Store(tmp_path / "store", temp_dir=explicit, auto_spill=True)
+    assert store._tmp_dir.parent == explicit
+    assert store.spill_is_relocated is True
+    assert store.spill_is_auto is False
+
+
+def test_auto_spill_never_fatal(tmp_path, monkeypatch):
+    # If auto-detection itself raises, the store still opens (in-store spill).
+    import mrfx.store as store_mod
+    from mrfx.store import Store
+
+    def boom(_):
+        raise RuntimeError("wmi exploded")
+
+    monkeypatch.setattr(store_mod, "_auto_spill_base", boom)
+    store = Store(tmp_path / "store", auto_spill=True)
+    assert store._tmp_dir == tmp_path / "store" / "duckdb_tmp"
+    assert store.spill_is_relocated is False

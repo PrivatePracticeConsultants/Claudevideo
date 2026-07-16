@@ -247,6 +247,16 @@ retry button reachable.
 - Reference yields: UHC MO network 30 MB → 88,649 rows; Oxford 0.58 GB →
   5.59M; Heritage 1.7 GB → 9.83M; PS1-77 3.39 GB → 29.69M (70 s rollup at
   6.3 GB peak after the live-view fix); BCBSLA 2.8 GB unc → 14.6M.
+- Spill placement: DuckDB spills big rollups to `temp_directory`. On a spinning
+  HDD that stalls every parser worker (observed: 8 workers, CPU stuck ~39%).
+  `duckdb_temp_dir` overrides the location; when UNSET, `_auto_spill_base`
+  (Windows only) queries `Get-PhysicalDisk`+`Get-Partition` once (cached, 10s
+  timeout) and routes spill to the roomiest SSD (≥20 GB free) IF the store is
+  on a confirmed HDD — else stays in-store. Every step is best-effort: any
+  failure → in-store default, never blocks store open. Each store gets its own
+  `spill-<sha1(store)[:10]>` subfolder so two stores sharing a base can't clash.
+  Pure decision (`_choose_spill_drive`) and PS parsing (`_parse_media_output`)
+  are unit-tested; the Windows probe itself is not runnable off-Windows.
 
 ## Step 6 — Extending to a new payer (the usual task)
 

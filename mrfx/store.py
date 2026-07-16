@@ -20,11 +20,14 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
+import subprocess
 import threading
 import time
+from functools import lru_cache
 from pathlib import Path
 
 import duckdb
@@ -113,6 +116,89 @@ def _total_ram_bytes() -> int:
         return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
     except (ValueError, OSError, AttributeError):
         return 0
+
+
+# --- automatic fast-disk spill selection (Windows HDD store → SSD scratch) ----
+# DuckDB spills big rollups to disk; on a spinning HDD that stalls every parser
+# worker. When the store is on a confirmed HDD and a roomy SSD is present, the
+# spill is auto-routed to the SSD. Every step is best-effort: any failure leaves
+# the spill in the store (the prior behavior), never breaks opening the store.
+_AUTO_SPILL_MIN_FREE_BYTES = 20 * 10**9  # don't relocate onto a near-full drive
+
+
+def _parse_media_output(text: str) -> dict[str, str]:
+    """Parse `DRIVELETTER=MediaType` lines (from the PowerShell probe below)
+    into {'C': 'SSD', 'E': 'HDD', …}. Tolerant of blank/garbage lines."""
+    out: dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if "=" not in line:
+            continue
+        dl, mt = line.split("=", 1)
+        dl = dl.strip().rstrip(":").upper()
+        mt = mt.strip()
+        if len(dl) == 1 and dl.isalpha() and mt:
+            out[dl] = mt
+    return out
+
+
+@lru_cache(maxsize=1)
+def _windows_drive_media() -> dict[str, str]:
+    """Map drive letter → media type ('SSD'/'HDD'/'Unspecified'/…) on Windows,
+    via one PowerShell call (cached for the process). Empty on non-Windows or
+    ANY failure/timeout, so callers fall back to in-store spill. Joins physical
+    disks (which carry MediaType) to partitions (which carry drive letters)."""
+    if os.name != "nt":
+        return {}
+    ps = (
+        "$m=@{}; Get-PhysicalDisk | ForEach-Object { $m[[int]$_.DeviceId]=$_.MediaType }; "
+        "Get-Partition | Where-Object { $_.DriveLetter } | ForEach-Object "
+        "{ \"$($_.DriveLetter)=$($m[[int]$_.DiskNumber])\" }"
+    )
+    try:
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+            capture_output=True, text=True, timeout=10)
+        return _parse_media_output(proc.stdout or "")
+    except Exception:  # noqa: BLE001 — detection is best-effort, never fatal
+        return {}
+
+
+def _choose_spill_drive(store_drive: str, media: dict[str, str], free_bytes,
+                        min_free: float = _AUTO_SPILL_MIN_FREE_BYTES) -> str | None:
+    """Pure decision (unit-testable off Windows): given the store's drive letter,
+    a {letter: media_type} map, and a free-bytes(letter)->int probe, return the
+    letter of the roomiest SSD to spill onto — or None to keep spill in-store.
+    Relocate ONLY off a confirmed HDD onto a confirmed SSD with ≥ min_free free."""
+    sd = (store_drive or "").upper()
+    if media.get(sd, "").upper() != "HDD":
+        return None  # store already fast (or type unknown): don't touch spill
+    best: tuple[str, int] | None = None
+    for dl, mt in media.items():
+        dl = dl.upper()
+        if dl == sd or mt.upper() != "SSD":
+            continue
+        try:
+            free = free_bytes(dl)
+        except OSError:
+            continue
+        if free >= min_free and (best is None or free > best[1]):
+            best = (dl, free)
+    return best[0] if best else None
+
+
+def _auto_spill_base(store_dir: Path) -> Path | None:
+    """Windows-only: if the store lives on a spinning HDD and a roomy SSD exists,
+    return `<SSD>:\\mrfx_spill` for rollup scratch. None whenever we can't
+    clearly improve things — a pure heuristic that is always safe to ignore."""
+    media = _windows_drive_media()
+    if not media:
+        return None
+    drive = os.path.splitdrive(os.path.abspath(str(store_dir)))[0].rstrip(":").upper()
+    if len(drive) != 1 or not drive.isalpha():
+        return None
+    chosen = _choose_spill_drive(drive, media, lambda dl: shutil.disk_usage(f"{dl}:\\").free)
+    return Path(f"{chosen}:\\mrfx_spill") if chosen else None
 
 
 def replace_with_retry(src: Path, dst: Path, attempts: int = 5) -> None:
@@ -417,32 +503,44 @@ TIN_DIRECTORY_QUERY = (
 
 class Store:
     def __init__(self, store_dir: Path, memory_limit_gb: int | None = None,
-                 keep_warm: bool = False, temp_dir: Path | None = None):
+                 keep_warm: bool = False, temp_dir: Path | None = None,
+                 auto_spill: bool = False):
         self.dir = Path(store_dir)
         self.rates_dir = self.dir / "rates"
         self.rates_dir.mkdir(parents=True, exist_ok=True)
-        # DuckDB spill directory. Defaults inside the store, but can be pointed
-        # at a fast disk (duckdb_temp_dir) when the store lives on a slow HDD —
-        # the spill is what stalls parser workers during a rollup. If the given
-        # path can't be created (bad drive letter, no permission), fall back to
-        # the in-store default rather than failing to open the store at all.
-        if temp_dir is not None:
+        # DuckDB spill directory. Defaults inside the store; the spill is what
+        # stalls parser workers during a rollup, so on a slow-HDD store it is
+        # routed to a fast disk — either an explicit duckdb_temp_dir (temp_dir)
+        # or, when that's unset, an auto-detected roomy SSD (Windows only).
+        # self.spill_is_relocated lets the serve banner report where it landed.
+        self.spill_is_relocated = False
+        self.spill_is_auto = False
+        spill_base = temp_dir
+        # auto_spill only for the rollup-heavy entry points (serve, ingest): the
+        # detection probe (a PowerShell call on Windows) isn't worth paying on
+        # every quick read-only command like `status`/`export`.
+        if spill_base is None and auto_spill:
             try:
-                import hashlib
-                # per-store subfolder: if two stores (e.g. the real one and a
-                # trial) are ever configured with the SAME duckdb_temp_dir,
-                # their DuckDB instances must not share one spill directory —
-                # spill file names are per-instance counters, not unique.
+                spill_base = _auto_spill_base(self.dir)
+                self.spill_is_auto = spill_base is not None
+            except Exception:  # noqa: BLE001 — auto-detection must never be fatal
+                spill_base = None
+        if spill_base is not None:
+            try:
+                # per-store subfolder: two stores (the real one and a trial)
+                # sharing ONE spill base must not share a spill directory —
+                # DuckDB spill file names are per-instance counters, not unique.
                 tag = hashlib.sha1(str(self.dir.resolve()).encode()).hexdigest()[:10]
-                cand = Path(temp_dir) / f"spill-{tag}"
+                cand = Path(spill_base) / f"spill-{tag}"
                 cand.mkdir(parents=True, exist_ok=True)
                 self._tmp_dir = cand
+                self.spill_is_relocated = True
             except OSError:
-                import logging as _logging
-                _logging.getLogger(__name__).warning(
-                    "duckdb_temp_dir %r is not usable — falling back to the "
-                    "in-store spill folder", str(temp_dir))
+                logging.getLogger(__name__).warning(
+                    "spill dir %r is not usable — falling back to the in-store "
+                    "spill folder", str(spill_base))
                 self._tmp_dir = self.dir / "duckdb_tmp"
+                self.spill_is_auto = False
         else:
             self._tmp_dir = self.dir / "duckdb_tmp"
         self._tmp_dir.mkdir(parents=True, exist_ok=True)

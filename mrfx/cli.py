@@ -116,7 +116,7 @@ def cmd_serve(cfg: MrfxConfig, args) -> int:
     # keep_warm: serve is long-lived and fires several queries per dashboard
     # click, so pin the DuckDB settings once instead of re-SETting them on every
     # request connection (~14ms each). One-shot CLI commands stay unpinned.
-    store = Store(cfg.store_dir, cfg.duckdb_memory_gb, keep_warm=True, temp_dir=cfg.duckdb_temp_dir)
+    store = Store(cfg.store_dir, cfg.duckdb_memory_gb, keep_warm=True, temp_dir=cfg.duckdb_temp_dir, auto_spill=True)
     # BEFORE any worker starts: a crash mid-parse leaves files at
     # 'processing', which scan_inbox skips forever. Flipping them to failed
     # here (single-threaded, nothing else owns the store yet) lets the very
@@ -137,10 +137,13 @@ def cmd_serve(cfg: MrfxConfig, args) -> int:
     start_persistent_enrichment(cfg, store, stop)
     app = create_app(cfg, store)
     spill_line = ""
-    if cfg.duckdb_temp_dir is not None:
-        # confirm the fast-spill override actually took (or fell back), so the
-        # user isn't guessing whether their SSD path was accepted
-        spill_line = f"  rollup spill → {store._tmp_dir}\n"
+    if store.spill_is_relocated:
+        # confirm where rollup scratch landed — an explicit duckdb_temp_dir, or
+        # an auto-picked fast SSD when the store sits on a slow HDD — so the
+        # user isn't guessing whether the speedup took
+        how = "auto-selected (store is on a slower disk)" if store.spill_is_auto \
+            else "from your config"
+        spill_line = f"  rollup spill → {store._tmp_dir}  [{how}]\n"
     print(f"\n  MRF Explorer  →  http://localhost:{cfg.port}\n"
           f"  inbox: {cfg.inbox_dir}  (drop .json / .json.gz / .zip here)\n"
           f"{spill_line}"
@@ -363,7 +366,10 @@ def cmd_ingest(cfg: MrfxConfig, args) -> int:
     # especially never run crash-recovery against its live 'processing' rows
     if _something_owns_the_port(cfg, "ingesting locally"):
         return 1
-    store = Store(cfg.store_dir, cfg.duckdb_memory_gb, temp_dir=cfg.duckdb_temp_dir)
+    # auto_spill: a CLI ingest of a directory can trigger big rollups, so let it
+    # route spill to a fast disk too (same as serve)
+    store = Store(cfg.store_dir, cfg.duckdb_memory_gb, temp_dir=cfg.duckdb_temp_dir,
+                  auto_spill=True)
     store.recover_stuck_files()  # crashed 'processing' rows re-ingest this pass
     path = Path(args.path) if args.path else cfg.inbox_dir
     bar = _make_cli_progress()
