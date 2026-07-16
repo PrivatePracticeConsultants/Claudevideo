@@ -596,8 +596,20 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
             time.sleep(1.0)
         else:
             attempt += 1
+            # Deterministic CDN early-close (e.g. mrf.bcbs.com sending ~15 KB
+            # then hanging up on every attempt): plain fast retries can't fix a
+            # connection the edge is REJECTING. Two levers that do help:
+            if attempt >= 2 and ua_override is None:
+                # 1) look like a browser (same lever the 403 path uses) — bot
+                #    fingerprinting is the usual cause of repeated early closes
+                ua_override = BROWSER_UA
+                log.info("%s: repeated early-close with no progress; retrying "
+                         "as a browser", url)
             if attempt <= cfg.download_retries:
-                time.sleep(2.0 * (2**(attempt - 1)))
+                # 2) a REAL cool-down: CDN throttle windows run 30-60s+, so cap
+                #    the escalation at 90s instead of 16s, with jitter so
+                #    parallel downloads to one host don't re-slam it in sync
+                time.sleep(min(90.0, 2.0 * (2 ** (attempt - 1))) + (connections % 3))
     # keep the .part: every failure that lands here was transient (terminal
     # ones raised above), so a later "retry" on the queue resumes the download
     # instead of restarting a multi-GB file from byte zero
