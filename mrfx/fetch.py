@@ -601,15 +601,21 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
             # connection the edge is REJECTING. Two levers that do help:
             if attempt >= 2 and ua_override is None:
                 # 1) look like a browser (same lever the 403 path uses) — bot
-                #    fingerprinting is the usual cause of repeated early closes
+                #    fingerprinting is a common cause of repeated dead retries.
+                #    FREE retry (attempt handed back), mirroring the 403 path:
+                #    without it, at download_retries<=1 the switch fired on the
+                #    way OUT of the loop and the browser UA was never sent.
                 ua_override = BROWSER_UA
-                log.info("%s: repeated early-close with no progress; retrying "
+                attempt -= 1
+                log.info("%s: repeated failures with no progress; retrying "
                          "as a browser", url)
             if attempt <= cfg.download_retries:
                 # 2) a REAL cool-down: CDN throttle windows run 30-60s+, so cap
-                #    the escalation at 90s instead of 16s, with jitter so
-                #    parallel downloads to one host don't re-slam it in sync
-                time.sleep(min(90.0, 2.0 * (2 ** (attempt - 1))) + (connections % 3))
+                #    the escalation at 90s instead of 16s, with RANDOM jitter —
+                #    parallel downloads that started together fail in lockstep,
+                #    so a deterministic offset would re-slam the host in sync
+                import random
+                time.sleep(min(90.0, 2.0 * (2 ** (attempt - 1))) + random.uniform(0, 3))
     # keep the .part: every failure that lands here was transient (terminal
     # ones raised above), so a later "retry" on the queue resumes the download
     # instead of restarting a multi-GB file from byte zero
