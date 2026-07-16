@@ -98,7 +98,7 @@ def test_cli_outreach_writes_csv_and_methodology(cfg, outreach_store, tmp_path, 
         "out": str(out), "payer": None, "cpt": "97110", "state": None, "city": None,
         "month": None, "discipline": None, "grain": None, "base_only": True,
     })
-    monkeypatch.setattr(cli, "Store", lambda *_: outreach_store)
+    monkeypatch.setattr(cli, "Store", lambda *_, **__: outreach_store)
     assert cli.cmd_outreach(cfg, args) == 0
     rows = list(csv.DictReader(io.StringIO(out.read_text(encoding="utf-8-sig"))))
     assert len(rows) == 5 and "C97110_PCTL" in rows[0]

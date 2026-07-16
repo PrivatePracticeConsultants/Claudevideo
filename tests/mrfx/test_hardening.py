@@ -373,3 +373,39 @@ def test_chromium_auto_download_attempted_only_once(monkeypatch):
     assert render._auto_install_chromium() is False
     assert render._auto_install_chromium() is False  # second call is a no-op
     assert calls["n"] == 1  # subprocess ran exactly once
+
+
+def test_duckdb_temp_dir_override_honored(tmp_path):
+    # A user on a slow HDD points the spill at a fast SSD; the store must use
+    # that directory for DuckDB's temp_directory, not the in-store default.
+    from mrfx.store import Store
+
+    fast = tmp_path / "ssd_spill"
+    store = Store(tmp_path / "store", temp_dir=fast)
+    assert store._tmp_dir == fast
+    assert fast.is_dir()
+    # and it actually feeds DuckDB's temp_directory pragma
+    with store.connect() as con:
+        got = con.execute("SELECT current_setting('temp_directory')").fetchone()[0]
+    assert str(fast) in got
+
+
+def test_duckdb_temp_dir_bad_path_falls_back(tmp_path):
+    # An unusable override (e.g. a drive letter that doesn't exist) must NOT
+    # stop the store from opening — it falls back to the in-store spill folder.
+    from mrfx.store import Store
+
+    store_dir = tmp_path / "store"
+    # a path whose PARENT is a regular file can't be mkdir'd -> OSError
+    blocker = tmp_path / "afile"
+    blocker.write_text("x")
+    store = Store(store_dir, temp_dir=blocker / "cannot" / "exist")
+    assert store._tmp_dir == store_dir / "duckdb_tmp"
+    assert store._tmp_dir.is_dir()
+
+
+def test_duckdb_temp_dir_default_is_in_store(tmp_path):
+    from mrfx.store import Store
+
+    store = Store(tmp_path / "store")
+    assert store._tmp_dir == tmp_path / "store" / "duckdb_tmp"

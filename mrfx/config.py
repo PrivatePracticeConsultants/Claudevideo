@@ -71,6 +71,14 @@ class MrfxConfig(BaseModel):
     # fails with "Out of Memory" AND the machine has spare RAM (e.g. 8 on a 16 GB
     # box); the rollup rebuild also slices itself finer to fit whatever this is.
     duckdb_memory_gb: int | None = Field(default=None, ge=1, le=1024)
+    # Where DuckDB writes its temporary SPILL files during heavy rollups/queries
+    # (when a step needs more than duckdb_memory_gb). Unset = a `duckdb_tmp`
+    # folder inside store_dir. Point this at a FAST disk (an SSD/NVMe) when the
+    # store itself lives on a slow spinning HDD: the store can be tens of GB and
+    # stay on the roomy drive, while the transient spill — the thing that stalls
+    # every parser worker while a rollup grinds — gets SSD speed. Needs only a
+    # few GB free. Example (Windows): duckdb_temp_dir: "C:\\mrfx_spill".
+    duckdb_temp_dir: Path | None = None
     # OPT-IN: at extraction, keep only rows whose NPI is a PT/OT/SLP or therapy
     # clinic (by NPPES taxonomy), dropping the MDs/DOs/NPs who merely bill a
     # 97xxx code. Shrinks the store (often several-fold) and speeds every rebuild

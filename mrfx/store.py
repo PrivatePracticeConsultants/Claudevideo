@@ -417,11 +417,28 @@ TIN_DIRECTORY_QUERY = (
 
 class Store:
     def __init__(self, store_dir: Path, memory_limit_gb: int | None = None,
-                 keep_warm: bool = False):
+                 keep_warm: bool = False, temp_dir: Path | None = None):
         self.dir = Path(store_dir)
         self.rates_dir = self.dir / "rates"
         self.rates_dir.mkdir(parents=True, exist_ok=True)
-        self._tmp_dir = self.dir / "duckdb_tmp"
+        # DuckDB spill directory. Defaults inside the store, but can be pointed
+        # at a fast disk (duckdb_temp_dir) when the store lives on a slow HDD —
+        # the spill is what stalls parser workers during a rollup. If the given
+        # path can't be created (bad drive letter, no permission), fall back to
+        # the in-store default rather than failing to open the store at all.
+        if temp_dir is not None:
+            try:
+                cand = Path(temp_dir)
+                cand.mkdir(parents=True, exist_ok=True)
+                self._tmp_dir = cand
+            except OSError:
+                import logging as _logging
+                _logging.getLogger(__name__).warning(
+                    "duckdb_temp_dir %r is not usable — falling back to the "
+                    "in-store spill folder", str(temp_dir))
+                self._tmp_dir = self.dir / "duckdb_tmp"
+        else:
+            self._tmp_dir = self.dir / "duckdb_tmp"
         self._tmp_dir.mkdir(parents=True, exist_ok=True)
         self.db_path = self.dir / "mrfx.duckdb"
         self.write_lock = threading.Lock()
