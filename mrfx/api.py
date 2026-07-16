@@ -53,6 +53,25 @@ log = logging.getLogger(__name__)
 
 WEB_DIR = Path(__file__).parent / "web"
 
+
+class NoCacheStaticFiles(StaticFiles):
+    """Serve the dashboard with `Cache-Control: no-cache`.
+
+    Starlette's StaticFiles sends only ETag/Last-Modified, so a browser is free
+    to *heuristically* cache app.js/index.html and skip revalidation. When the
+    user drops in a new build (replaces the `mrfx` folder), the browser can keep
+    running the OLD app.js against the NEW markup — which showed up as the
+    "As-of month" dropdown rendering blank after an update. `no-cache` (NOT
+    no-store) forces a conditional revalidation on every load: unchanged files
+    still 304 cheaply, but an updated file is always re-fetched, so a build swap
+    takes effect on the next page load without a manual hard-refresh.
+    """
+
+    def file_response(self, *args, **kwargs):  # noqa: ANN002, ANN003
+        resp = super().file_response(*args, **kwargs)
+        resp.headers["Cache-Control"] = "no-cache"
+        return resp
+
 SORTABLE = {
     "display_name", "unit_id", "payer", "billing_code", "discipline", "modifier_set",
     "billing_class", "negotiated_rate", "negotiated_type", "source_count",
@@ -1452,7 +1471,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 f"if your machine has spare RAM, then restart.")})
         return JSONResponse(status_code=500, content={"error": f"{type(exc).__name__}: {exc}"})
 
-    app.mount("/", StaticFiles(directory=WEB_DIR, html=True), name="web")
+    app.mount("/", NoCacheStaticFiles(directory=WEB_DIR, html=True), name="web")
     return app
 
 

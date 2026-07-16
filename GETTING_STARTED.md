@@ -435,6 +435,13 @@ Steps (a few minutes, no re-ingesting):
    folder, that works too — just put your saved `config/mrfx.yaml` back after.)
 5. **Restart `mrfx serve`.** You do **not** need to reinstall anything — your
    virtual environment already has what it needs.
+6. **Hard-refresh the dashboard in your browser** — press **Ctrl-Shift-R** (or
+   Ctrl-F5) once on the dashboard tab. Browsers cache the dashboard's code, and
+   after a build swap they can keep running the *old* page against the new app —
+   the tell-tale sign is a control that suddenly shows **blank** (e.g. the
+   "As-of month" dropdown). A hard-refresh loads the new page. (New builds also
+   ask the browser not to cache the dashboard, so this gets less necessary over
+   time, but it's the instant fix if anything looks off right after updating.)
 
 On that first restart the app notices its summary tables are from the older
 version and **rebuilds them once** — a one-time wait proportional to your store
