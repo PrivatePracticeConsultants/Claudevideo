@@ -347,6 +347,70 @@ later — is identified in seconds, with no internet lookups.
 
 ---
 
+## Making a big queue finish faster
+
+The app already works in parallel: several downloads run at once to keep
+several parser processes fed, and it auto-sizes both to your machine. When
+`mrfx serve` starts it prints exactly what it chose — look for these two lines:
+
+```
+parallel downloads: 3 fetcher thread(s)
+parallel ingest: 3 parser worker process(es)
+```
+
+Parsing is the slow part (roughly 30 seconds per uncompressed GB *per worker*,
+and big payer files are 10–200 GB uncompressed), so the wall-clock for a long
+queue is basically `total uncompressed GB ÷ workers`. Here's what actually
+moves that number, in order of impact:
+
+1. **Use more of your CPU (if you have it).** Auto mode uses your core count
+   minus one, but stops at **8** workers to stay safe on RAM. If Task Manager →
+   Performance → CPU shows more logical processors than the banner is using
+   AND you have plenty of memory, set it explicitly in `config/mrfx.yaml`:
+
+   ```yaml
+   parallel_ingests: 11   # e.g. on a 12-core machine
+   ```
+
+   Rule of thumb: **allow ~2 GB of RAM per worker** and leave a few GB for the
+   database and Windows itself. On a 16 GB machine, don't go past 5–6; on
+   32 GB, 10–12 is fine. (If you've ever seen an out-of-memory error on this
+   machine, stay at the auto setting.) Values above your core count are
+   clamped — extra processes past the cores only fight each other.
+
+2. **More simultaneous downloads if the parsers are starving.** On the Files
+   tab, if parsers sit idle while links crawl (common with Blue-plan CDNs that
+   stall and back off), raise:
+
+   ```yaml
+   parallel_downloads: 6   # max 8
+   ```
+
+3. **Don't ingest what you don't need.** The single biggest cost is all-codes
+   mega-files. The app already skips files that contain none of your CPT codes
+   (it detects that on a fast first pass and stops), and re-adding a file you
+   already have costs nothing (skipped by content). But when a payer offers
+   both one national everything-file and smaller per-plan/per-state files,
+   paste the smaller ones for the states you actually work in.
+
+4. **Keep the machine awake.** Windows sleep pauses everything mid-queue. For
+   an overnight grind: plug in, Settings → System → Power → set "Put my device
+   to sleep" to **Never** (screen off is fine).
+
+5. **Keep `data/` on the internal SSD** (it is by default). Parquet staging and
+   the database live there; putting the project on a USB drive or spinning
+   disk slows every ingest and rollup.
+
+Changes to `config/mrfx.yaml` take effect on the next `mrfx serve` start — stop
+it (Ctrl-C), edit, start again; the queue resumes where it left off.
+
+> Why not just crank it to 100? Each parser worker is a real CPU process
+> chewing a real file; past your core count they only fight for the same
+> cores, and past your RAM they crash the machine into the swap file. The
+> caps above are where more truly stops helping.
+
+---
+
 ## Command-line reference (optional)
 
 All of these run in a terminal with the venv activated (`(.venv)` in the

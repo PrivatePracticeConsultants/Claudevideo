@@ -220,6 +220,17 @@ retry button reachable.
 - Parse ≈ 30–35 s per uncompressed GB per pass (ijson C backend; this IS the
   bottleneck — 95% of processing; isal/gzip and buffer tuning were measured
   and rejected as noise).
+- Faster-parse dead ends, measured (don't re-litigate without new data): the
+  Python event loop is ~55% of parse; a tight drain-loop for skipped items
+  gains ~0% (the C generator's yield is the cost, not the loop body);
+  `ijson.items` C-building every item is ~1.4x end-to-end BUT materializes
+  every NON-target item as Python dicts — an all-codes UHC file can carry a
+  single non-target item large enough to spike a worker by GBs, which the
+  current skip path never builds. Rejected: breaks the peak-memory envelope
+  on exactly the worst files. Larger `buf_size` to ijson measured SLOWER
+  (64 KB default wins). The remaining honest lever is process count
+  (`parallel_ingests`), documented for the user in GETTING_STARTED
+  "Making a big queue finish faster".
 - Two-pass for ≥1.5 GB uncompressed; pass 1 skims target-cited refs (80k ids
   on an 8 GB Anthem shard vs 4.2M total); short-circuits pass 2 if zero
   target codes.
