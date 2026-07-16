@@ -416,8 +416,10 @@ moves that number, in order of impact:
      duckdb_temp_dir: "C:\\mrfx_spill"
      ```
 
-     When the app starts you'll see a line like `rollup spill → C:\mrfx_spill`
-     confirming it took effect. (Not sure which drive is your SSD? In Task
+     When the app starts you'll see a line like
+     `rollup spill → C:\mrfx_spill\spill-1a2b3c4d5e` confirming it took effect
+     (the app makes its own subfolder there, so nothing else in that folder is
+     ever touched). (Not sure which drive is your SSD? In Task
      Manager → Performance, the disk labeled **SSD/NVMe** is the fast one; a
      disk labeled **HDD** is the slow one.)
 

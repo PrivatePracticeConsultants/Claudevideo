@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from .catalog import DEFAULT_CODE_SET
 
@@ -79,6 +79,16 @@ class MrfxConfig(BaseModel):
     # every parser worker while a rollup grinds — gets SSD speed. Needs only a
     # few GB free. Example (Windows): duckdb_temp_dir: "C:\\mrfx_spill".
     duckdb_temp_dir: Path | None = None
+
+    @field_validator("duckdb_temp_dir", mode="before")
+    @classmethod
+    def _empty_temp_dir_is_none(cls, v):
+        # `duckdb_temp_dir: ""` (someone blanking the line rather than deleting
+        # it) must mean "unset", not Path('') == the process's current working
+        # directory — spill would silently land wherever the app was launched
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
     # OPT-IN: at extraction, keep only rows whose NPI is a PT/OT/SLP or therapy
     # clinic (by NPPES taxonomy), dropping the MDs/DOs/NPs who merely bill a
     # 97xxx code. Shrinks the store (often several-fold) and speeds every rebuild

@@ -377,17 +377,39 @@ def test_chromium_auto_download_attempted_only_once(monkeypatch):
 
 def test_duckdb_temp_dir_override_honored(tmp_path):
     # A user on a slow HDD points the spill at a fast SSD; the store must use
-    # that directory for DuckDB's temp_directory, not the in-store default.
+    # a per-store subfolder UNDER that directory (two stores configured with
+    # the same duckdb_temp_dir must never share one spill dir — DuckDB spill
+    # file names are per-instance counters, not unique across instances).
     from mrfx.store import Store
 
     fast = tmp_path / "ssd_spill"
     store = Store(tmp_path / "store", temp_dir=fast)
-    assert store._tmp_dir == fast
-    assert fast.is_dir()
+    assert store._tmp_dir.parent == fast
+    assert store._tmp_dir.name.startswith("spill-")
+    assert store._tmp_dir.is_dir()
     # and it actually feeds DuckDB's temp_directory pragma
     with store.connect() as con:
         got = con.execute("SELECT current_setting('temp_directory')").fetchone()[0]
-    assert str(fast) in got
+    assert str(store._tmp_dir) in got
+    # a DIFFERENT store sharing the same duckdb_temp_dir gets its own subfolder
+    other = Store(tmp_path / "store2", temp_dir=fast)
+    assert other._tmp_dir != store._tmp_dir
+    # the SAME store reopened maps back to the same subfolder (stable tag)
+    again = Store(tmp_path / "store", temp_dir=fast)
+    assert again._tmp_dir == store._tmp_dir
+
+
+def test_duckdb_temp_dir_empty_string_means_unset(tmp_path, monkeypatch):
+    # `duckdb_temp_dir: ""` in the YAML must mean "not set" — Path('') is the
+    # process CWD and spill would silently land wherever the app was launched.
+    from mrfx.config import MrfxConfig
+
+    cfg = MrfxConfig(duckdb_temp_dir="")
+    assert cfg.duckdb_temp_dir is None
+    cfg = MrfxConfig(duckdb_temp_dir="   ")
+    assert cfg.duckdb_temp_dir is None
+    cfg = MrfxConfig(duckdb_temp_dir=str(tmp_path / "x"))
+    assert cfg.duckdb_temp_dir == tmp_path / "x"
 
 
 def test_duckdb_temp_dir_bad_path_falls_back(tmp_path):

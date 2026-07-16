@@ -428,7 +428,13 @@ class Store:
         # the in-store default rather than failing to open the store at all.
         if temp_dir is not None:
             try:
-                cand = Path(temp_dir)
+                import hashlib
+                # per-store subfolder: if two stores (e.g. the real one and a
+                # trial) are ever configured with the SAME duckdb_temp_dir,
+                # their DuckDB instances must not share one spill directory —
+                # spill file names are per-instance counters, not unique.
+                tag = hashlib.sha1(str(self.dir.resolve()).encode()).hexdigest()[:10]
+                cand = Path(temp_dir) / f"spill-{tag}"
                 cand.mkdir(parents=True, exist_ok=True)
                 self._tmp_dir = cand
             except OSError:
