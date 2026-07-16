@@ -393,9 +393,13 @@ def test_benchmark_percentiles_and_position(cfg, market_store):
     assert top["rows"][0]["subject_percentile"] == 100.0
 
 
-def test_benchmark_requires_month(market_store):
-    with pytest.raises(BenchmarkError, match="as-of month"):
-        compute_benchmark(market_store, "430000000", {})
+def test_benchmark_defaults_to_latest_month(market_store):
+    # the user never has to pick a month: an empty market means "latest
+    # available" and the result records the explicit vintage it defaulted to
+    auto = compute_benchmark(market_store, "430000000", {})
+    explicit = compute_benchmark(market_store, "430000000", {"month": "latest"})
+    assert auto["market"]["month"] == "latest"
+    assert auto["rows"] == explicit["rows"]
 
 
 def test_placeholder_dollar_rates_excluded_from_benchmark(cfg, store):
@@ -612,9 +616,11 @@ def test_ratecard_report_and_csv_endpoints(cfg, ratecard_store):
         "subject": "430000000", "market": {"month": "2026-06"}})
     assert csv.status_code == 200
     assert "# " in csv.text and "97110" in csv.text  # methodology header + data
-    # month is required, like the other reports
-    refused = client.post("/api/report/ratecard", json={"subject": "430000000", "market": {}})
-    assert refused.status_code == 422
+    # no month = latest available (the user never has to pick one) — and the
+    # report must still STATE its vintage instead of refusing
+    auto = client.post("/api/report/ratecard", json={"subject": "430000000", "market": {}})
+    assert auto.status_code == 200
+    assert "latest available" in auto.text
 
 
 def test_bulk_enrichment_reads_nppes_zip(cfg, store, tmp_path):
@@ -1343,12 +1349,14 @@ def test_payer_comparison_math_and_report(cfg, store):
                    "METHODOLOGY", "$72.50", "$75.00"):
         assert needle in html_doc, needle
 
-    # API surface: month is required -> 422 with a plain message
+    # API surface: no month = latest available; the response records the
+    # explicit vintage it defaulted to (never a silent blank)
     c = TestClient(create_app(cfg, store))
-    bad = c.post("/api/negotiate/compare",
-                 json={"subject": "439111111", "payer": "Testco",
-                       "market": {}})
-    assert bad.status_code == 422
+    auto = c.post("/api/negotiate/compare",
+                  json={"subject": "439111111", "payer": "Testco",
+                        "market": {}})
+    assert auto.status_code == 200
+    assert auto.json()["market"]["month"] == "latest"
     ok = c.post("/api/negotiate/compare",
                 json={"subject": "439111111", "payer": "Testco",
                       "market": market, "comparables": ["43-9222222"]})

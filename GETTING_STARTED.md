@@ -270,9 +270,11 @@ Once a file is `done`:
   clicking column headers. Click a row to drill into a practice.
 - **Code comparison** tab: pick a code → see which practices are paid most,
   with a distribution chart.
-- **Benchmark** tab: pick a subject practice + an as-of month → see where its
-  rates sit versus the market (percentiles), the dollar gap, and — with your
-  own volume numbers — an opportunity estimate and a printable pitch report.
+- **Benchmark** tab: pick a subject practice → see where its rates sit versus
+  the market (percentiles), the dollar gap, and — with your own volume numbers —
+  an opportunity estimate and a printable pitch report. You never have to pick
+  an as-of month: it defaults to **Latest available** (every payer at its
+  newest rates); the dropdown is only for pinning a historical snapshot.
 - **Export**: the **Export CSV** / **Export + methodology** buttons download the
   current filtered view. The **Outreach CSV** button gives one row per practice
   with name + address + phone + per-code rate/percentile columns — ready to

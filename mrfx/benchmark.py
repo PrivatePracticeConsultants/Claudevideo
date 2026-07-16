@@ -60,6 +60,19 @@ def is_latest(market: dict) -> bool:
     return str(market.get("month") or "").strip().lower() == LATEST_MONTH
 
 
+def normalize_market(market: dict | None) -> dict:
+    """Copy of `market` with an explicit as-of vintage: an empty/missing month
+    means LATEST_MONTH (newest file per contract). Every compute entry point
+    runs this first, so the user never has to pick a month — while reports and
+    methodology footers still carry an explicit vintage label (honesty rails
+    downstream keep asserting month is set). Rate CHANGES are the exception:
+    they compare two real months and keep their own strict validation."""
+    m = dict(market or {})
+    if not str(m.get("month") or "").strip():
+        m["month"] = LATEST_MONTH
+    return m
+
+
 def _rates_relation(market: dict) -> str:
     """The FROM-relation for market queries, aliased `t` by the caller.
     Pinned month → plain `rates_by_tin` (the file_month = ? clause in
@@ -181,6 +194,7 @@ def resolve_peer_set(store: Store, market: dict) -> tuple[str, dict]:
 
 def compute_benchmark(store: Store, subject: str, market: dict) -> dict:
     """Per-code subject vs market percentiles (§7B.1)."""
+    market = normalize_market(market)
     subject_tins = resolve_subject_tins(store, subject)
     peer_desc, market = resolve_peer_set(store, market)
     include_assistant = bool(market.get("include_assistant", False))
@@ -368,18 +382,16 @@ def subject_payers(store: Store, subject: str, market: dict) -> list[str]:
     build — computed from the subject's own rows, not from every payer in the
     store (a payer the subject doesn't contract with has nothing to negotiate).
     """
+    market = normalize_market(market)
     subject_tins = resolve_subject_tins(store, subject)
     if not subject_tins:
         return []
-    month = market.get("month")
-    if not month:
-        raise BenchmarkError("an as-of month is required (7A.5) — pass market.month (or 'latest')")
     # "latest": payers the subject contracts with in ANY month present
     clauses = ["tin_value IN (SELECT unnest(?::VARCHAR[]))", "payer IS NOT NULL"]
     params: list = [subject_tins]
     if not is_latest(market):
         clauses.append("file_month = ?")
-        params.append(month)
+        params.append(market["month"])
     scope = market.get("payers") or []
     if scope:
         clauses.append(f"payer IN ({', '.join('?' for _ in scope)})")
@@ -404,6 +416,7 @@ def compute_payer_negotiation(store: Store, subject: str, market: dict,
     peers", not a blended cross-payer market). Optionally attach the annual
     opportunity per payer when the caller supplies volumes.
     """
+    market = normalize_market(market)
     payers = subject_payers(store, subject, market)
     if not payers:
         raise BenchmarkError(
@@ -500,6 +513,7 @@ def compute_payer_comparison(store: Store, subject: str, payer: str, market: dic
     excluded, percentiles over this payer's OTHER providers."""
     if not payer:
         raise BenchmarkError("pick the payer you are negotiating with")
+    market = normalize_market(market)
     pmarket = {**market, "payers": [payer]}
     bench = compute_benchmark(store, subject, pmarket)
 

@@ -34,6 +34,7 @@ from .benchmark import (
     _market_where,
     _pctnum,
     _rates_relation,
+    normalize_market,
     month_label,
     resolve_subject_tins,
 )
@@ -48,6 +49,7 @@ def compute_fee_schedule(store: Store, subject: str, market: dict) -> dict:
     Rate for a (payer, code) = median across the subject's TINs of each TIN's
     median published rate — the same entity-grain rule the rest of the app uses.
     """
+    market = normalize_market(market)
     subject_tins = resolve_subject_tins(store, subject)
     include_assistant = bool(market.get("include_assistant", False))
     include_non_dollar = bool(market.get("include_non_dollar", False))

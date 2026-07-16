@@ -733,20 +733,18 @@ function wireSubjectSearch(inputSel, datalistSel) {
 }
 
 async function refreshSubjectPickers(subjSel, monthSels = []) {
-  let subjects, months;
-  try {
-    [subjects, months] = await Promise.all([
-      api("/api/benchmark/subjects"), api("/api/months"),
-    ]);
-  } catch { return; }
-  if (subjSel) $(subjSel).innerHTML = subjectOptionsHtml(subjects);
-  const opts = months.months.map((m) => `<option>${esc(m)}</option>`).join("");
+  // independent fetches: one failing must not freeze the other's pickers
+  const [subjects, months] = await Promise.all([
+    api("/api/benchmark/subjects").catch(() => null),
+    api("/api/months").catch(() => null),
+  ]);
+  if (subjSel && subjects) $(subjSel).innerHTML = subjectOptionsHtml(subjects);
   for (const ms of monthSels) {
     const el = $(ms.sel); if (!el) continue;
     const cur = el.value;
-    el.innerHTML = opts ? (ms.prefix || "") + opts
-      : `<option value="">no data ingested</option>`;
-    if (cur && months.months.includes(cur)) el.value = cur;
+    fillMonthSelect(ms.sel, months, ms.prefix || "");
+    // keep the user's pick across the refresh ("latest" included)
+    if (cur && (cur === "latest" || (months?.months || []).includes(cur))) el.value = cur;
   }
 }
 
@@ -820,8 +818,8 @@ async function refreshMpfsStatus() {
 
 function benchmarkPayload() {
   const subject = $("#b-subject").value.trim();
-  const month = $("#b-month").value;
-  if (!subject || !month) throw new Error("subject and as-of month are required");
+  const month = $("#b-month").value || "latest"; // empty = newest rate per contract
+  if (!subject) throw new Error("pick a subject practice first");
   const market = {
     month,
     payers: $$("#b-payer-chips .chip.on").map((c) => c.dataset.payer),
@@ -1062,10 +1060,9 @@ function renderCompChips() {
 function negotiatePayload() {
   const subject = $("#ng-subject").value.trim();
   const payer = $("#ng-payer").value;
-  const month = $("#ng-month").value;
+  const month = $("#ng-month").value || "latest"; // empty = newest rate per contract
   if (!subject) throw new Error("enter your practice (subject)");
   if (!payer) throw new Error("pick the payer you're negotiating with");
-  if (!month) throw new Error("an as-of month is required");
   const market = { month, therapy_only: $("#ng-therapy").checked };
   if ($("#ng-state").value.trim()) market.state = $("#ng-state").value.trim().toUpperCase();
   if ($("#ng-disc").value) market.discipline = $("#ng-disc").value;
@@ -1157,8 +1154,8 @@ async function refreshRcMpfs() {
 
 function ratecardPayload() {
   const subject = $("#rc-subject").value.trim();
-  const month = $("#rc-month").value;
-  if (!subject || !month) throw new Error("subject and as-of month are required");
+  const month = $("#rc-month").value || "latest"; // empty = newest rate per contract
+  if (!subject) throw new Error("pick a subject practice first");
   const market = {
     month,
     payers: $$("#rc-payer-chips .chip.on").map((c) => c.dataset.payer),
@@ -1287,17 +1284,26 @@ async function initLeads() {
 }
 
 // Populate a month <select> from an /api/months payload, tolerating a failed
-// fetch (null) or a store with no dated months, so the "required" field always
-// says something actionable instead of sitting silently empty.
+// fetch (null) or a store with no dated months. With a Latest prefix (the
+// report tabs), "Latest available" is ALWAYS the first option and the default —
+// it needs no month list, so the tab stays fully usable even when /api/months
+// failed or nothing dated is ingested yet; the hint rides along as a
+// secondary, non-default option. Without a prefix (the Changes tab, which
+// needs real months), the old actionable-hint behavior stands.
 function fillMonthSelect(sel, months, prefix = "") {
   const el = $(sel);
   if (!el) return;
-  if (!months) { el.innerHTML = `<option value="">couldn't load months — reopen this tab</option>`; return; }
-  const opts = (months.months || []).filter(Boolean).map((m) => `<option>${esc(m)}</option>`).join("");
-  // opts-empty must still show the actionable hint — `prefix + opts ||` was
-  // truthy with a prefix alone, hiding "ingest a file first" on a fresh store
-  el.innerHTML = opts ? prefix + opts
-    : `<option value="">no dated data yet — ingest a file first</option>`;
+  const opts = months
+    ? (months.months || []).filter(Boolean).map((m) => `<option>${esc(m)}</option>`).join("")
+    : "";
+  const note = !months
+    ? `<option value="" disabled>couldn't load months — reopen this tab</option>`
+    : `<option value="" disabled>no dated data yet — ingest a file first</option>`;
+  if (prefix) {
+    el.innerHTML = prefix + (opts || note);
+  } else {
+    el.innerHTML = opts || note.replace(" disabled>", ">");
+  }
 }
 
 async function loadLdStates() {
@@ -1308,8 +1314,7 @@ async function loadLdStates() {
 }
 
 function leadsPayload() {
-  const month = $("#ld-month").value;
-  if (!month) throw new Error("an as-of month is required");
+  const month = $("#ld-month").value || "latest"; // empty = newest rate per contract
   const market = { month, payers: $$("#ld-payer-chips .chip.on").map((c) => c.dataset.payer) };
   if ($("#ld-state").value.trim()) market.state = $("#ld-state").value.trim();
   if ($("#ld-disc").value) market.discipline = $("#ld-disc").value;

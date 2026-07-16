@@ -19,7 +19,8 @@ import datetime as dt
 import json
 
 from . import __version__
-from .benchmark import BenchmarkError, _market_where, _rates_relation, resolve_subject_tins
+from .benchmark import (BenchmarkError, _market_where, _rates_relation,
+                        normalize_market, resolve_subject_tins)
 from .store import Store, defuse_csv, mask_tin
 
 PERCENTILES = (10, 25, 40, 50, 75, 90)
@@ -29,6 +30,7 @@ def compute_leads(store: Store, market: dict, *, threshold_percentile: int = 25,
                   min_codes: int = 3, limit: int = 100,
                   exclude_subject: str | None = None) -> dict:
     """Underpaid entities in the market, most-underpaid first (§7D.1)."""
+    market = normalize_market(market)
     if threshold_percentile <= 0 or threshold_percentile >= 100:
         raise BenchmarkError("threshold_percentile must be between 1 and 99")
     if min_codes < 1:
