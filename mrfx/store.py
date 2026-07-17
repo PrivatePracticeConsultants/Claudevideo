@@ -119,6 +119,44 @@ def _total_ram_bytes() -> int:
 
 
 # --- automatic fast-disk spill selection (Windows HDD store → SSD scratch) ----
+def _avail_ram_bytes() -> int:
+    """Physical RAM currently AVAILABLE, cross-platform, 0 if unknown. The auto
+    memory cap must respect this, not just total RAM: on a 32 GB machine with
+    20 GB already in use by other apps, a 12 GB DuckDB cap overcommits what is
+    actually free — observed as a silent NATIVE process death (no traceback,
+    prompt just returns) partway through a big rollup aggregation."""
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            class _MemStatus(ctypes.Structure):
+                _fields_ = [("dwLength", ctypes.c_ulong),
+                            ("dwMemoryLoad", ctypes.c_ulong),
+                            ("ullTotalPhys", ctypes.c_uint64),
+                            ("ullAvailPhys", ctypes.c_uint64),
+                            ("ullTotalPageFile", ctypes.c_uint64),
+                            ("ullAvailPageFile", ctypes.c_uint64),
+                            ("ullTotalVirtual", ctypes.c_uint64),
+                            ("ullAvailVirtual", ctypes.c_uint64),
+                            ("ullAvailExtendedVirtual", ctypes.c_uint64)]
+
+            st = _MemStatus()
+            st.dwLength = ctypes.sizeof(st)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)):
+                return int(st.ullAvailPhys)
+        except Exception:  # noqa: BLE001
+            return 0
+        return 0
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except OSError:
+        pass
+    return 0
+
+
 # DuckDB spills big rollups to disk; on a spinning HDD that stalls every parser
 # worker. When the store is on a confirmed HDD and a roomy SSD is present, the
 # spill is auto-routed to the SSD. Every step is best-effort: any failure leaves
@@ -575,7 +613,14 @@ class Store:
         else:
             total = _total_ram_bytes()
             if total:
-                self._memory_limit_gb = max(2, min(12, int(total * 0.4 / 1e9)))
+                cap = max(2, min(12, int(total * 0.4 / 1e9)))
+                avail = _avail_ram_bytes()
+                if avail:
+                    # never plan to use more than ~60% of what is FREE right
+                    # now — a cap sized off total RAM alone overcommitted a
+                    # machine already 2/3 used and died natively mid-rollup
+                    cap = max(2, min(cap, int(avail * 0.6 / 1e9)))
+                self._memory_limit_gb = cap
             else:
                 self._memory_limit_gb = 4  # RAM size unknown: safe flat default
         self._temp_cap_gb: int | None = None  # computed once, in connect()
@@ -1583,10 +1628,19 @@ class Store:
         if parts > 1:
             log.info("rollup rebuild: %d partitions (%d rows/slice, %d threads, split=%d)",
                      parts, rows_per_part, threads, split)
-        # ONE TRANSACTION around the whole rebuild: a mid-slice failure (temp
-        # cap, memory, crash) must roll back to the PREVIOUS complete tables —
-        # a partially-filled rollup served as truth silently loses billing
-        # codes, which is far worse than stale analytics.
+        # ONE TRANSACTION PER TABLE: a mid-slice failure must roll back to that
+        # table's PREVIOUS complete version (a partially-filled rollup served
+        # as truth silently loses billing codes). Per-table — not one mega-
+        # transaction around both — on purpose: a 15-minute two-table
+        # transaction on an 85M-row store accumulated enough native state to
+        # die with STATUS_HEAP_CORRUPTION (0xC0000374) partway through table
+        # two, taking BOTH tables' work with it (observed live, exit code
+        # confirmed). Each table commits alone, a CHECKPOINT between tables
+        # flushes the WAL and releases memory, and the coverage markers land
+        # in their own tiny transaction only after EVERY table committed — so
+        # a crash between tables re-triggers the rebuild on next start instead
+        # of masking it. Brief mixed-generation window between commits is the
+        # accepted cost (each table is internally consistent at all times).
         # (table, query, hash-partition key, view). `tables` selects a subset —
         # a names-only enrichment refresh rebuilds just tin_directory_tbl and
         # leaves the (unchanged, expensive) rate spine alone.
@@ -1596,47 +1650,47 @@ class Store:
         }
         selected = tables if tables is not None else tuple(specs)
         t_build = time.monotonic()
-        con.execute("BEGIN TRANSACTION")
-        try:
-            for tbl in selected:
-                query, key, _view = specs[tbl]
+        for tbl in selected:
+            query, key, _view = specs[tbl]
+            con.execute("BEGIN TRANSACTION")
+            try:
                 if parts == 1:
                     con.execute(f"CREATE OR REPLACE TABLE {tbl} AS {query.format(part='TRUE')}")
-                    continue
-                con.execute(  # schema only; slices append below
-                    f"CREATE OR REPLACE TABLE {tbl} AS {query.format(part='FALSE')}")
-                for i in range(parts):
-                    log.info("rollup %s: partition %d/%d (%d rows total)", tbl, i + 1, parts, n_rows)
-                    pred = f"hash({key}) % {parts} = {i}"
-                    con.execute(f"INSERT INTO {tbl} {query.format(part=pred)}")
-            # same-transaction markers: which schema built these tables, and
-            # through WHEN they cover done files — restart uses them to catch
-            # a kill that landed between 'done' rows and their batched rollup.
-            # FULL rebuilds only: a names-only refresh leaves the rate spine
-            # untouched, and stamping here would mask real spine staleness.
-            if "rates_by_tin_tbl" in selected:
-                con.execute(
-                    "INSERT OR REPLACE INTO meta VALUES ('rollup_schema_version', ?)",
-                    [str(ROLLUP_SCHEMA_VERSION)])
-                con.execute(
-                    "INSERT OR REPLACE INTO meta VALUES ('rollup_covered_through', ("
-                    "SELECT coalesce(max(finished_at)::VARCHAR, '') FROM files "
-                    "WHERE status = 'done' AND rows_emitted > 0))")
-            if parts > 1:
-                # the commit writes the whole new table to the database FILE —
-                # on a hard drive this is the slowest step of the cycle, and
-                # it used to run in total silence right after "partition N/N"
-                # (read live as the app being stuck)
-                log.info("rollup: all partitions built — writing %d table(s) to "
-                         "the database file (can take minutes on a hard drive; "
-                         "not stuck)", len(selected))
-            con.execute("COMMIT")
-        except Exception:
+                else:
+                    con.execute(  # schema only; slices append below
+                        f"CREATE OR REPLACE TABLE {tbl} AS {query.format(part='FALSE')}")
+                    for i in range(parts):
+                        log.info("rollup %s: partition %d/%d (%d rows total)", tbl, i + 1, parts, n_rows)
+                        pred = f"hash({key}) % {parts} = {i}"
+                        con.execute(f"INSERT INTO {tbl} {query.format(part=pred)}")
+                    log.info("rollup %s: writing to the database file (can take "
+                             "minutes on a hard drive; not stuck)", tbl)
+                con.execute("COMMIT")
+            except Exception:
+                try:
+                    con.execute("ROLLBACK")
+                except duckdb.Error:
+                    pass  # connection already aborted the transaction
+                raise
             try:
-                con.execute("ROLLBACK")
+                # flush the WAL and release transaction memory before the next
+                # table — the accumulation across tables is what crashed
+                con.execute("CHECKPOINT")
             except duckdb.Error:
-                pass  # connection already aborted the transaction
-            raise
+                pass  # another connection's txn can block it; next one catches up
+        # markers AFTER every table committed, in their own tiny transaction:
+        # which schema built these tables, and through WHEN they cover done
+        # files (restart uses them to catch a kill before a batched rollup).
+        # FULL rebuilds only: a names-only refresh leaves the rate spine
+        # untouched, and stamping would mask real spine staleness.
+        if "rates_by_tin_tbl" in selected:
+            con.execute(
+                "INSERT OR REPLACE INTO meta VALUES ('rollup_schema_version', ?)",
+                [str(ROLLUP_SCHEMA_VERSION)])
+            con.execute(
+                "INSERT OR REPLACE INTO meta VALUES ('rollup_covered_through', ("
+                "SELECT coalesce(max(finished_at)::VARCHAR, '') FROM files "
+                "WHERE status = 'done' AND rows_emitted > 0))")
         if parts > 1:
             log.info("rollup rebuild finished in %.0fs", time.monotonic() - t_build)
         # bump AFTER the commit: a count computed from the old tables during the
