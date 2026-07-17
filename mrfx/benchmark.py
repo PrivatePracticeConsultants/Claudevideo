@@ -89,8 +89,11 @@ def _rates_relation(market: dict) -> str:
     update on different cadences. Known limit: a code line absent from ALL of a
     payer's newer files lingers at its last-seen vintage."""
     if is_latest(market):
+        # tin_is_really_npi is part of the identity: an EIN row and a same-
+        # digit-string npi-typed row are different providers — one must never
+        # supersede the other
         return ("(SELECT * FROM rates_by_tin QUALIFY file_month = max(file_month) "
-                "OVER (PARTITION BY payer, tin_value, billing_code))")
+                "OVER (PARTITION BY payer, tin_value, tin_is_really_npi, billing_code))")
     return "rates_by_tin"
 
 
@@ -919,7 +922,7 @@ def methodology_footer(store: Store, benchmark: dict) -> str:
         benchmark["basis_note"],
         "Dedup rule: one row per (payer, TIN, code, modifier-set, billing class, "
         "place-of-service set, month); a TIN's rate is the median of its distinct "
-        "published values (variants flagged).",
+        "published values excluding $0/$0.01 dollar placeholders (variants flagged).",
         "Rate files in the store matching the market's payer scope (the "
         "benchmark draws on the subset matching the full market definition): "
         f"{'; '.join(f'{f[0]} ({f[1]}, {f[2]})' for f in files) or 'none'}.",

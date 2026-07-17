@@ -561,11 +561,16 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
         except DownloadError as e:
             last_exc = e
             if not e.retryable:
-                # keep the .part when a retry could finish it (the disk-space
-                # and confirm_over_gb guards both tell the user to fix the
-                # setting and press retry — the bytes are still good); discard
-                # it when the content itself is the problem
-                if "disk space" not in str(e) and "confirm_over_gb" not in str(e):
+                # keep the .part when a retry could finish it: the disk-space
+                # and confirm_over_gb guards tell the user to fix the setting
+                # and press retry, and an HTTP 403 on a SIGNED link usually
+                # means the signature expired — a re-added fresh link keeps the
+                # same dedup filename and resumes these bytes (deleting them
+                # once threw away a 20 GB resume). Discard only when the
+                # content itself is the problem.
+                keep = ("disk space" in str(e) or "confirm_over_gb" in str(e)
+                        or "403" in str(e))
+                if not keep:
                     part.unlink(missing_ok=True)
                     val_p.unlink(missing_ok=True)
                 raise
@@ -1050,6 +1055,17 @@ def fetch_url_record(cfg: MrfxConfig, store: Store, rec: dict) -> bool:
         # over the size limit is NOT a failure — it's "too big, needs your OK"
         # (distinct amber state so it never buries a real error in the count)
         log.warning("url %s download stopped: %s", url, e)
+        if "free disk space" in str(e):
+            # a FULL DISK is one condition, not a per-row failure: failing this
+            # row and instantly claiming the next converted every remaining
+            # queued link into 'failed' overnight ("3,000 failed" for one full
+            # disk). Leave the row queued and pause this downloader — space
+            # may free up (a parse finishing deletes its raw download).
+            store.update_url(url_id, status="queued", error=str(e))
+            log.warning("disk is full — pausing this downloader for 60s "
+                        "(free up space; the queue resumes by itself)")
+            time.sleep(60)
+            return False
         store.update_url(url_id, status="oversize" if e.oversize else "failed", error=str(e))
         # duplicates may have deferred to this row in an earlier life (it
         # ingested once, failed, was retried, and now its signed URL is dead):
@@ -1397,6 +1413,10 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
     recovered = store.recover_stuck_urls()
     if recovered:
         log.info("resumed %d URL(s) left mid-flight by a previous run", recovered)
+    refit = store.requeue_oversize_within(int(cfg.confirm_over_gb * 1e9))
+    if refit:
+        log.info("re-queued %d file(s) previously over the size limit — they "
+                 "now fit confirm_over_gb (%.1f GB)", refit, cfg.confirm_over_gb)
     if cfg.delete_raw_after_ingest:
         # reap downloads stranded by a kill between the 'done' write and
         # _cleanup_raw — the row is terminal, so nothing else ever reclaims them

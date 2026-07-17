@@ -124,6 +124,16 @@ def cmd_serve(cfg: MrfxConfig, args) -> int:
     n_stuck = store.recover_stuck_files()
     if n_stuck:
         log.info("recovered %d file(s) left mid-parse by a previous run", n_stuck)
+    if store.rollups_stale():
+        # a kill landed between files going 'done' and their BATCHED rollup:
+        # the Files tab showed them done while their rates were missing from
+        # every number, and nothing on restart noticed. Catch up now, in the
+        # background so the dashboard is usable meanwhile.
+        log.info("analytics are behind the ingested files (a previous run "
+                 "stopped before its batched rollup) — catching up in the "
+                 "background")
+        threading.Thread(target=lambda: store.rebuild_rollups(),
+                         name="mrfx-rollup-catchup", daemon=True).start()
     stop = threading.Event()
     threading.Thread(
         target=_watcher_loop, args=(cfg, store, stop), name="mrfx-watcher", daemon=True

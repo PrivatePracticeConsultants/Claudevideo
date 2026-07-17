@@ -310,6 +310,30 @@ disk-space guard, both with actionable messages.
 
 ## Step 8 — Known limitations / next frontiers
 
+Deferred from the July 2026 comprehensive audit (real findings, consciously
+not yet built — pick these up before adding features):
+- Signed-URL re-expansion: a TOC's children hold signed URLs captured at
+  expansion; after a long pause they 403. The .part is now KEPT on 403 and a
+  fresh link resumes it, but there is no auto-re-expand of the parent TOC on a
+  child 403, no re-expand action on a 'done' TOC row, and revive-on-re-add
+  does not update a child row's stored URL. A wall of 403s after a multi-hour
+  pause on mrf.bcbs.com/Anthem still requires re-pasting links.
+- No cancel for in-flight downloads/parses (only queued/failed/oversize rows
+  have actions); a wrong 22 GB paste must run its course or the server be
+  restarted.
+- Orphaned .part files: skipping a row whose download had started leaves its
+  .part in data/downloads forever (no sweep ties .parts to skipped rows).
+- The Files tab's actionable child window is the newest 500 rows; oversize
+  rows beyond it are reachable only via the auto-requeue-on-raised-limit path.
+- Threadpool: tokens raised to 100 and hour-long background work moved off
+  the request pool, but there is still no per-endpoint bound on concurrent
+  heavy computes, and during a rollup the global SET threads squeezes reader
+  parallelism (slow polls can still stack under extreme load).
+- Windows unlink/replace vs long readers: replace budget is ~90s and forget
+  now fails HONESTLY when a reader holds the part; the full fix (persistent
+  pending-delete tombstones + rates-view anti-join) is designed but unbuilt.
+
+
 - Renderer click-through handles single-click gates ("View Plan List");
   multi-step forms (state pickers, searches) are still browser-only —
   Premera, HCSC, IBX, Capital, several state Blues. Excellus publishes

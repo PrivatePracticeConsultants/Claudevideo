@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import tempfile
+import threading
 import time
 import zipfile
 from pathlib import Path
@@ -510,9 +511,11 @@ def methodology_text(cfg: MrfxConfig, store: Store, grain: str, fs: FilterSet,
         f"Filters: {json.dumps(fs.described, default=str)}",
         f"Sort: {sort} {direction}",
         "Dedup rule: distinct negotiated facts per grain tuple. A TIN rate is the "
-        "median of its distinct published values (rate_variants counts them); an "
-        "ENTITY rate is the median of its member TINs' rates, and entity npi_count/"
-        "source_count sum members (an NPI shared by two member TINs counts twice).",
+        "median of its distinct published values EXCLUDING $0/$0.01 dollar "
+        "placeholders (rate_variants still counts them, and rate_min/rate_max "
+        "still show them); an ENTITY rate is the median of its member TINs' "
+        "rates, and entity npi_count/source_count sum members (an NPI shared by "
+        "two member TINs counts twice).",
         f"Outlier handling: {fs.described.get('hide_outliers')}",
         "Non-dollar negotiated_type rows (percentage, per diem) are excluded when "
         f"dollar_rates_only is true (currently: {fs.described.get('dollar_rates_only')}).",
@@ -538,6 +541,17 @@ def _mask_row_tins(rows: list[dict]) -> list[dict]:
         # unit_id stays raw in JSON — it is the drill-down key, never displayed;
         # the UI renders display_name + the masked tin_value column instead.
     return rows
+
+
+def _bg_safe(fn, *args) -> None:
+    """Daemon-thread wrapper for long background work (inbox scans, confirmed
+    ingests): log failures instead of dying silently. Deliberately NOT
+    BackgroundTasks — those share the request threadpool's tokens, and an
+    hours-long ingest parked there starves every other request."""
+    try:
+        fn(*args)
+    except Exception:  # noqa: BLE001 — background work must never die silently
+        log.exception("background task %s failed", getattr(fn, "__name__", fn))
 
 
 def _fs(qp: dict) -> FilterSet:
@@ -649,11 +663,11 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 SELECT count(*) AS n,
                        count(DISTINCT unit_id) AS entities,
                        count(DISTINCT billing_code) AS codes,
-                       min(negotiated_rate) FILTER (is_dollar_rate) AS min,
-                       quantile_cont(negotiated_rate, .25) FILTER (is_dollar_rate) AS p25,
-                       median(negotiated_rate) FILTER (is_dollar_rate) AS median,
-                       quantile_cont(negotiated_rate, .75) FILTER (is_dollar_rate) AS p75,
-                       max(negotiated_rate) FILTER (is_dollar_rate) AS max
+                       min(negotiated_rate) FILTER (is_dollar_rate AND negotiated_rate > 0.01) AS min,
+                       quantile_cont(negotiated_rate, .25) FILTER (is_dollar_rate AND negotiated_rate > 0.01) AS p25,
+                       median(negotiated_rate) FILTER (is_dollar_rate AND negotiated_rate > 0.01) AS median,
+                       quantile_cont(negotiated_rate, .75) FILTER (is_dollar_rate AND negotiated_rate > 0.01) AS p75,
+                       max(negotiated_rate) FILTER (is_dollar_rate AND negotiated_rate > 0.01) AS max
                 FROM ({rel_sql(grain, fs)})
                 """,
                 fs.params,
@@ -911,8 +925,12 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return {"files": rows}
 
     @app.post("/api/files/scan")
-    def files_scan(background: BackgroundTasks):
-        background.add_task(scan_inbox, cfg, store)
+    def files_scan():
+        # a plain daemon thread, NOT BackgroundTasks: background tasks share
+        # the request threadpool's 40 tokens, and an hours-long inbox scan
+        # parked there starves every other request (audit F3)
+        threading.Thread(target=_bg_safe, args=(scan_inbox, cfg, store),
+                         name="mrfx-scan", daemon=True).start()
         return {"status": "scanning"}
 
     @app.delete("/api/files/{filename}")
@@ -1007,24 +1025,28 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return {"status": "queued"}
 
     @app.post("/api/files/{filename}/confirm")
-    def confirm_file(filename: str, background: BackgroundTasks):
+    def confirm_file(filename: str):
         st = store.file_status(filename)
         if not st or st.get("status") != "pending_confirmation":
             raise HTTPException(404, "file is not awaiting confirmation")
         path = cfg.inbox_dir / filename
         if not path.exists():
             raise HTTPException(404, "file no longer in inbox")
-        background.add_task(ingest_file, cfg, store, path)
+        threading.Thread(target=_bg_safe, args=(ingest_file, cfg, store, path),
+                         name="mrfx-confirm-ingest", daemon=True).start()
         store.upsert_file(filename, status="queued")
         return {"status": "queued"}
 
     @app.post("/api/upload")
-    def upload(file: UploadFile, background: BackgroundTasks):
+    def upload(file: UploadFile):
         dest = cfg.inbox_dir / Path(file.filename or "upload.json").name
         # stream to a name the inbox scanner ignores, rename when COMPLETE —
         # the watcher fires on creation and would otherwise preflight (and
         # quarantine/move!) a half-written file out from under this handler
-        tmp = dest.with_name(dest.name + ".uploading")
+        import uuid as _uuid
+        # pid+uuid keeps two simultaneous uploads OF THE SAME NAME from
+        # truncating each other's in-progress temp (audit F7)
+        tmp = dest.with_name(f"{dest.name}.{os.getpid()}-{_uuid.uuid4().hex[:8]}.uploading")
         size = 0
         try:
             with open(tmp, "wb") as out:
@@ -1036,7 +1058,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             tmp.replace(dest)
         finally:
             tmp.unlink(missing_ok=True)
-        background.add_task(scan_inbox, cfg, store)
+        threading.Thread(target=_bg_safe, args=(scan_inbox, cfg, store),
+                         name="mrfx-upload-scan", daemon=True).start()
         return {"status": "queued", "filename": dest.name, "bytes": size}
 
     # -- export (CSV + methodology sidecar, §7A.6) ---------------------------------
@@ -1480,6 +1503,19 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             # client input, not a server fault
             return JSONResponse(status_code=422, content={"error": str(exc)})
         return JSONResponse(status_code=500, content={"error": f"{type(exc).__name__}: {exc}"})
+
+    @app.on_event("startup")
+    async def _widen_threadpool():
+        # sync endpoints + their lock-waits share anyio's default 40-token
+        # threadpool; during a minutes-long rollup a busy dashboard can park
+        # enough waiters to starve even trivial requests ("API unreachable" by
+        # pool exhaustion). More headroom is cheap — these threads are idle
+        # waiters, not CPU burners. (audit F3)
+        try:
+            import anyio.to_thread
+            anyio.to_thread.current_default_thread_limiter().total_tokens = 100
+        except Exception:  # noqa: BLE001 — tuning must never block startup
+            log.exception("could not widen the request threadpool; keeping default")
 
     app.mount("/", NoCacheStaticFiles(directory=WEB_DIR, html=True), name="web")
     return app

@@ -115,13 +115,16 @@ def _maybe_refresh_directory(store: Store, force: bool = False) -> bool:
         # rates and is unchanged, so skip its expensive rebuild — this is what
         # kept searches responsive during a long identification instead of
         # re-aggregating every raw row every few minutes.
-        store.rebuild_rollups(names_only=True)
         # BUILD time, not build + time spent queued behind an ingest rollup's
         # write lock: wall-clock here once counted a 40-min lock wait as the
         # refresh "taking" 40 min and deferred the next one for hours — the
-        # steady name-refresh churn went silent and the app looked dead.
-        took = getattr(store, "last_rollup_build_seconds", None)
-        if took is None:
+        # steady name-refresh churn went silent and the app looked dead. The
+        # duration comes back as the RETURN VALUE: a shared store attribute
+        # was clobbered by the next thread's rebuild before this thread could
+        # read it (audit F4), re-inflating the interval under exactly the
+        # contention this exists for.
+        took = store.rebuild_rollups(names_only=True)
+        if not isinstance(took, (int, float)):  # older Store stub in tests
             took = time.monotonic() - t0
         with _refresh_lock:
             _names_dirty = False

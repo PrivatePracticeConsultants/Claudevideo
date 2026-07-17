@@ -429,7 +429,9 @@ function updateSortArrows() {
 
 async function openEntity(grain, unitId) {
   const drawer = $("#drawer"), overlay = $("#overlay");
-  drawer.innerHTML = `<div class="loading">Loading ${esc(unitId)}</div>`;
+  // generic text on purpose: unitId can be an SSN-pattern TIN, and this
+  // pre-load flash was the one surface that painted it unmasked
+  drawer.innerHTML = `<div class="loading">Loading provider detail</div>`;
   drawer.classList.add("open"); overlay.classList.add("open");
   overlay.onclick = closeDrawer;
   let d;

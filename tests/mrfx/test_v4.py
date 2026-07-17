@@ -1702,3 +1702,26 @@ def test_npi_grain_export_does_not_mask_npis(cfg, store):
     csv_text = client.get("/api/export.csv?grain=npi").text
     assert "1712345678" in csv_text
     assert "MASKED-SSN" not in csv_text
+
+
+def test_npi_typed_tin_never_blends_with_real_ein(cfg, store):
+    # a 9-digit value typed 'npi' colliding with a real EIN string is TWO
+    # identities: bool_or-folding them made one hybrid row whose median
+    # (92.0) matched neither, and NOT tin_is_really_npi then hid BOTH — the
+    # real EIN practice vanished from every benchmark surface
+    from mrfx.benchmark import _entity_rates
+
+    a = innetwork(month="2026-06-01", items=[
+        item("97110", [(["1111111111"], "43-1111111", "ein", [(85.0, None)])])])
+    b = innetwork(month="2026-06-01", items=[
+        item("97110", [(["3333333333"], "431111111", "npi", [(99.0, None)])])])
+    ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "ein.json", a))
+    ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "npityped.json", b))
+    store.rebuild_rollups()
+    with store.connect() as con:
+        rows = con.execute(
+            "SELECT tin_is_really_npi, negotiated_rate FROM rates_by_tin "
+            "WHERE tin_value = '431111111' ORDER BY negotiated_rate").fetchall()
+    assert rows == [(False, 85.0), (True, 99.0)]  # two rows, no blend
+    # the EIN practice is present in market math at its real rate
+    assert _entity_rates(store, ["431111111"], {"month": "latest"}) == {"97110": 85.0}

@@ -201,14 +201,15 @@ def _auto_spill_base(store_dir: Path) -> Path | None:
     return Path(f"{chosen}:\\mrfx_spill") if chosen else None
 
 
-def replace_with_retry(src: Path, dst: Path, attempts: int = 5) -> None:
-    """`src.replace(dst)` with brief retries. On Windows, replace/unlink raise
+def replace_with_retry(src: Path, dst: Path, attempts: int = 12) -> None:
+    """`src.replace(dst)` with retries. On Windows, replace/unlink raise
     PermissionError while ANY handle is open on the target without
-    FILE_SHARE_DELETE — a dashboard query scanning the parquet glob at the wrong
-    instant, or antivirus/Search indexer touching the fresh file. Failing a
-    multi-hour parse at its very last step over a 100ms transient lock is
-    unacceptable; a short backoff outlives every scanner we've seen. Re-raises
-    after the final attempt — the caller's normal error handling applies."""
+    FILE_SHARE_DELETE — a dashboard query scanning the parquet glob, a running
+    full-store CSV export (minutes-long!), or antivirus touching the fresh
+    file. Failing a multi-hour parse at its very last step over a lock held by
+    the app's OWN export is unacceptable, so the backoff budget (~90s total)
+    is sized to outlive a big export scan, not just a 100ms AV probe.
+    Re-raises after the final attempt — the caller's error handling applies."""
     for i in range(attempts):
         try:
             Path(src).replace(dst)
@@ -216,22 +217,25 @@ def replace_with_retry(src: Path, dst: Path, attempts: int = 5) -> None:
         except PermissionError:
             if i == attempts - 1:
                 raise
-            time.sleep(0.2 * (i + 1))
+            time.sleep(min(0.2 * (2 ** i), 15.0))
 
 
-def unlink_with_retry(p: Path, attempts: int = 4) -> None:
+def unlink_with_retry(p: Path, attempts: int = 4) -> bool:
     """missing_ok unlink with the same Windows transient-lock tolerance as
-    replace_with_retry. Swallows a still-locked file on the final attempt —
-    every caller unlinks either a tmp (cosmetic leak) or a part that the next
-    swap will overwrite, so refusing to crash is the correct direction."""
+    replace_with_retry. Returns False when the file is STILL THERE after the
+    final attempt (a long reader holds it open) instead of raising — but
+    callers for whom the deletion is load-bearing (forget: the honesty
+    contract says removed data must actually be removed) MUST check the
+    return value; a tmp-cleanup caller may ignore it (cosmetic leak)."""
     for i in range(attempts):
         try:
             Path(p).unlink(missing_ok=True)
-            return
+            return True
         except PermissionError:
             if i == attempts - 1:
-                return
+                return False
             time.sleep(0.2 * (i + 1))
+    return True
 
 
 def _pid_alive(pid: int) -> bool:
@@ -377,10 +381,15 @@ DEDUP_QUERY = """
 # slices yields byte-identical results at a fraction of the memory/temp-disk
 # peak — the DISTINCT/median aggregates are what exhausted a 23 GB temp dir
 # on a 64M-row store when run in one shot.
+# bump when a rollup GROUP BY / column-semantics change must reach EXISTING
+# stores (same columns, different grain -> the missing-column probe can't see
+# it). v2: tin_is_really_npi joined the BY_TIN grain (identity blending fix).
+ROLLUP_SCHEMA_VERSION = 2
+
 BY_TIN_QUERY = """
     SELECT payer, tin_value, billing_code,
            any_value(tin_type)                                       AS tin_type,
-           bool_or(tin_is_really_npi)                                AS tin_is_really_npi,
+           tin_is_really_npi,
            any_value(billing_code_type)                              AS billing_code_type,
            any_value(discipline)                                     AS discipline,
            any_value(is_timed)                                       AS is_timed,
@@ -417,7 +426,13 @@ BY_TIN_QUERY = """
              coalesce(array_to_string(billing_code_modifier, '|'), ''),
              billing_class,
              coalesce(array_to_string(service_code, '|'), ''),
-             file_month, is_dollar_rate
+             file_month, is_dollar_rate,
+             -- part of the GRAIN, not bool_or-folded: a 9-digit value typed
+             -- 'npi' colliding with a real EIN string must stay a SEPARATE
+             -- row, or the blend's median matches neither identity and the
+             -- NOT tin_is_really_npi market filter hides both (the EIN
+             -- practice silently vanished from every benchmark surface)
+             tin_is_really_npi
 """
 
 # TIN directory (§3.3a): display name from NPPES org names of the TIN's
@@ -618,11 +633,11 @@ class Store:
 
     def _migrate_stale_rollups(self) -> None:
         """A prior version may have materialized the rollup tables WITHOUT a
-        column this version's queries now reference (e.g. is_therapy). Reopening
-        such a store would 500 every dashboard query — the view points at the
-        stale table and the SELECT can't bind the missing column — until an
-        ingest happened to trigger a rebuild. Detect that drift and rebuild once
-        now (best-effort; a rebuild failure must not stop the app from opening)."""
+        column this version's queries now reference (e.g. is_therapy), or with
+        an older GROUP-BY grain (the meta version below). Reopening such a
+        store would serve wrong/failing queries until an ingest happened to
+        trigger a rebuild. Detect drift and rebuild once now (best-effort; a
+        rebuild failure must not stop the app from opening)."""
         try:
             with self.connect() as con:
                 if not con.execute(
@@ -632,16 +647,42 @@ class Store:
                 cols = {r[0] for r in con.execute(
                     "SELECT column_name FROM information_schema.columns "
                     "WHERE table_name = 'tin_directory_tbl'").fetchall()}
-            if "is_therapy" not in cols or "has_hospital" not in cols:
+                ver = self._meta_get(con, "rollup_schema_version")
+            if ("is_therapy" not in cols or "has_hospital" not in cols
+                    or ver != str(ROLLUP_SCHEMA_VERSION)):
                 import logging as _logging
                 _logging.getLogger(__name__).info(
-                    "migrating store: rebuilding rollups for the strict therapy-"
-                    "practice columns (therapy share + hospital exclusion)")
+                    "migrating store: rollup tables were built by an older "
+                    "version (schema v%s -> v%d) — rebuilding once",
+                    ver or "?", ROLLUP_SCHEMA_VERSION)
                 self.rebuild_rollups()
         except Exception as e:  # noqa: BLE001
             import logging as _logging
             _logging.getLogger(__name__).warning(
                 "rollup schema-migration check skipped (%s)", e)
+
+    def _meta_get(self, con: duckdb.DuckDBPyConnection, key: str) -> str | None:
+        try:
+            row = con.execute("SELECT value FROM meta WHERE key = ?", [key]).fetchone()
+            return row[0] if row else None
+        except duckdb.Error:
+            return None
+
+    def rollups_stale(self) -> bool:
+        """True when a done rate file finished AFTER the last committed rollup
+        covered it — the crash window: URL-queue ingests defer rollups and
+        batch them; a kill during/before the batched rebuild leaves files
+        'done' (with row counts in the Files tab) whose rates are silently
+        missing from every dashboard number, and nothing on restart noticed."""
+        try:
+            with self.connect() as con:
+                covered = self._meta_get(con, "rollup_covered_through") or ""
+                newest = con.execute(
+                    "SELECT coalesce(max(finished_at)::VARCHAR, '') FROM files "
+                    "WHERE status = 'done' AND rows_emitted > 0").fetchone()[0]
+            return bool(newest) and newest > covered
+        except Exception:  # noqa: BLE001 — a probe failure must not block startup
+            return False
 
     def _sweep_orphan_tmps(self) -> None:
         """Remove half-written `.{key}.{pid}.parquet.tmp` parts (and
@@ -802,6 +843,10 @@ class Store:
                 definition VARCHAR,      -- JSON: mode, filters or tin list
                 created_at TIMESTAMP
             );
+            CREATE TABLE IF NOT EXISTS meta (
+                key VARCHAR PRIMARY KEY,
+                value VARCHAR
+            );
             CREATE TABLE IF NOT EXISTS mpfs (
                 code VARCHAR,
                 locality VARCHAR,
@@ -883,7 +928,15 @@ class Store:
                 replace_with_retry(tmp, path)
             else:
                 unlink_with_retry(tmp)
-                unlink_with_retry(path)  # re-ingest that now yields 0 rows
+                if not unlink_with_retry(path) and path.exists():
+                    # a long reader held the old part open: its rows survive
+                    # while the files row will say 0 — say so loudly instead
+                    # of silently serving numbers the ledger disclaims
+                    import logging as _logging
+                    _logging.getLogger(__name__).warning(
+                        "%s re-ingested to 0 rows but its OLD rates file is "
+                        "held open by a running query — old rows remain "
+                        "visible until the next rebuild or restart", source_file)
             with self.connect() as con:
                 self._register_views(con)
 
@@ -1333,6 +1386,25 @@ class Store:
                 )
         return n
 
+    def requeue_oversize_within(self, limit_bytes: int) -> int:
+        """Re-queue 'oversize' rows whose known size fits the CURRENT
+        confirm_over_gb — the user raised the limit and restarted, which the
+        FAQ presents as the fix, but nothing re-queued the stopped rows (and
+        past the UI's row window they had no reachable button at all)."""
+        if limit_bytes <= 0:
+            return 0
+        with self.write_lock, self.connect() as con:
+            n = con.execute(
+                "SELECT count(*) FROM url_queue WHERE status = 'oversize' "
+                "AND bytes_total IS NOT NULL AND bytes_total <= ?",
+                [limit_bytes]).fetchone()[0]
+            if n:
+                con.execute(
+                    "UPDATE url_queue SET status = 'queued', error = NULL "
+                    "WHERE status = 'oversize' AND bytes_total IS NOT NULL "
+                    "AND bytes_total <= ?", [limit_bytes])
+        return n
+
     def drop_rates_part(self, source_file: str) -> None:
         path = self.rates_dir / f"{file_key(source_file)}.parquet"
         with self.write_lock:
@@ -1361,7 +1433,15 @@ class Store:
             # one transaction. If anything fails part-way, the files row
             # survives — so `forget` can simply be run again — instead of
             # leaving orphan rates that a missing files row makes unreachable.
-            unlink_with_retry(path)
+            if not unlink_with_retry(path) and path.exists():
+                # Windows: a long reader (a running full-store export) held the
+                # part open past the retry budget. Reporting "forgotten" while
+                # the rates survive — and get rebuilt into the rollups — would
+                # break the honesty contract; fail honestly and retryably.
+                raise RuntimeError(
+                    "this file's data is held open by a running query or "
+                    "export — let it finish (or close other tools reading the "
+                    "store) and press remove again")
             self._register_views(con)
             con.execute("BEGIN")
             try:
@@ -1396,7 +1476,7 @@ class Store:
         base = min(ROLLUP_PARTITION_ROWS, mem_scaled)
         return max(1, base // max(1, split))
 
-    def rebuild_rollups(self, names_only: bool = False) -> None:
+    def rebuild_rollups(self, names_only: bool = False) -> float:
         """Materialize the dedup/by-TIN/tin-directory rollups after ingest or
         enrichment so page queries stay fast. The DISTINCT/median/list aggregates
         can't spill to disk, so if a build still hits the memory limit we retry
@@ -1453,7 +1533,7 @@ class Store:
             try:
                 try:
                     self._build_rollup_tables(con, threads=build_threads, tables=tables)
-                    return
+                    return time.monotonic() - t_locked
                 except duckdb.OutOfMemoryException:
                     log.warning("rollup rebuild hit the memory limit; retrying "
                                 "single-threaded with finer partitions")
@@ -1464,7 +1544,7 @@ class Store:
                 for split in (1, 2, 4, 8, 16):
                     try:
                         self._build_rollup_tables(con, split=split, threads=1, tables=tables)
-                        return
+                        return time.monotonic() - t_locked
                     except duckdb.OutOfMemoryException:
                         if split == 16:
                             raise  # genuinely can't fit at this memory limit
@@ -1529,6 +1609,19 @@ class Store:
                     log.info("rollup %s: partition %d/%d (%d rows total)", tbl, i + 1, parts, n_rows)
                     pred = f"hash({key}) % {parts} = {i}"
                     con.execute(f"INSERT INTO {tbl} {query.format(part=pred)}")
+            # same-transaction markers: which schema built these tables, and
+            # through WHEN they cover done files — restart uses them to catch
+            # a kill that landed between 'done' rows and their batched rollup.
+            # FULL rebuilds only: a names-only refresh leaves the rate spine
+            # untouched, and stamping here would mask real spine staleness.
+            if "rates_by_tin_tbl" in selected:
+                con.execute(
+                    "INSERT OR REPLACE INTO meta VALUES ('rollup_schema_version', ?)",
+                    [str(ROLLUP_SCHEMA_VERSION)])
+                con.execute(
+                    "INSERT OR REPLACE INTO meta VALUES ('rollup_covered_through', ("
+                    "SELECT coalesce(max(finished_at)::VARCHAR, '') FROM files "
+                    "WHERE status = 'done' AND rows_emitted > 0))")
             if parts > 1:
                 # the commit writes the whole new table to the database FILE —
                 # on a hard drive this is the slowest step of the cycle, and
@@ -1821,14 +1914,36 @@ class Store:
     # -- entity map -----------------------------------------------------------
 
     def set_entity_map(self, mapping: dict[str, str]) -> None:
-        """Replace the TIN -> entity-name table (from config/entity_map.yaml)."""
+        """Replace the TIN -> entity-name table (from config/entity_map.yaml).
+
+        Upsert-shaped on purpose: INSERT OR REPLACE for present keys, DELETE
+        only for absent ones, in ONE transaction. The old DELETE-all +
+        re-INSERT hit a DuckDB PK/MVCC edge: while any long transaction (a
+        rollup rebuild) holds an old snapshot, a deleted key can't be vacuumed
+        from the PK index and re-inserting it fails with a spurious
+        'Duplicate key' (measured: 86/480 concurrent entity edits 500'd during
+        an ingest). OR REPLACE is verified safe against both live and
+        tombstoned keys, and the single transaction removes the instant where
+        a concurrent reader saw an EMPTY map between the two statements."""
         with self.write_lock, self.connect() as con:
-            con.execute("DELETE FROM entity_map")
-            if mapping:
-                con.executemany(
-                    "INSERT INTO entity_map VALUES (?, ?)",
-                    [[tin, name] for tin, name in mapping.items()],
-                )
+            con.execute("BEGIN TRANSACTION")
+            try:
+                if mapping:
+                    con.execute(
+                        "DELETE FROM entity_map WHERE tin_value NOT IN "
+                        "(SELECT unnest(?::VARCHAR[]))", [list(mapping)])
+                    con.executemany(
+                        "INSERT OR REPLACE INTO entity_map VALUES (?, ?)",
+                        [[tin, name] for tin, name in mapping.items()])
+                else:
+                    con.execute("DELETE FROM entity_map")
+                con.execute("COMMIT")
+            except Exception:
+                try:
+                    con.execute("ROLLBACK")
+                except duckdb.Error:
+                    pass
+                raise
 
     def entity_map(self) -> dict[str, str]:
         with self.connect() as con:
@@ -1882,14 +1997,25 @@ class Store:
     # -- MPFS ----------------------------------------------------------------------
 
     def load_mpfs(self, rows: list[dict], source: str) -> int:
+        # one transaction: readers (benchmark % of Medicare) must never see the
+        # empty instant between the DELETE and the INSERT (no PK on mpfs, so
+        # the DuckDB tombstone edge that bit entity_map doesn't apply here)
         with self.write_lock, self.connect() as con:
-            con.execute("DELETE FROM mpfs")
-            if not rows:
-                return 0
-            con.executemany(
-                "INSERT INTO mpfs VALUES (?, ?, ?, ?)",
-                [[r["code"], r.get("locality", ""), float(r["non_facility_rate"]), source] for r in rows],
-            )
+            con.execute("BEGIN TRANSACTION")
+            try:
+                con.execute("DELETE FROM mpfs")
+                if rows:
+                    con.executemany(
+                        "INSERT INTO mpfs VALUES (?, ?, ?, ?)",
+                        [[r["code"], r.get("locality", ""), float(r["non_facility_rate"]), source] for r in rows],
+                    )
+                con.execute("COMMIT")
+            except Exception:
+                try:
+                    con.execute("ROLLBACK")
+                except duckdb.Error:
+                    pass
+                raise
         return len(rows)
 
     def mpfs_loaded(self) -> str | None:
@@ -1938,6 +2064,7 @@ class RatesPartWriter:
         # unlink each other's in-progress writes (Store.__init__ sweeps
         # orphans left by dead processes).
         self.tmp = store.rates_dir / f".{file_key(source_file)}.{os.getpid()}.parquet.tmp"
+        self.source_file = source_file
         self._writer: pq.ParquetWriter | None = None
         self.rows_written = 0
 
@@ -1966,7 +2093,12 @@ class RatesPartWriter:
                 replace_with_retry(self.tmp, self.path)
             else:
                 unlink_with_retry(self.tmp)
-                unlink_with_retry(self.path)  # re-ingest that now yields 0 rows
+                if not unlink_with_retry(self.path) and self.path.exists():
+                    import logging as _logging
+                    _logging.getLogger(__name__).warning(
+                        "%s re-ingested to 0 rows but its OLD rates file is "
+                        "held open by a running query — old rows remain "
+                        "visible until the next rebuild or restart", self.source_file)
             with self.store.connect() as con:
                 self.store._register_views(con)
         return False

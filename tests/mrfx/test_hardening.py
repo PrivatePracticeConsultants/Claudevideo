@@ -619,7 +619,7 @@ def test_refresh_interval_uses_build_time_not_lock_wait():
         # simulates: long wall time (lock wait) but a fast actual build
         def rebuild_rollups(self, names_only=False):
             _time.sleep(0.05)  # stand-in for a long lock wait
-            self.last_rollup_build_seconds = 1.0  # the real build was fast
+            return 1.0  # the real build was fast
 
     en._last_dir_refresh = 0.0
     en._dir_refresh_interval = en._DIRECTORY_REFRESH_SECONDS
@@ -628,7 +628,7 @@ def test_refresh_interval_uses_build_time_not_lock_wait():
 
     class SlowBuildStore:
         def rebuild_rollups(self, names_only=False):
-            self.last_rollup_build_seconds = 300.0  # genuinely slow build
+            return 300.0  # genuinely slow build
 
     assert en._maybe_refresh_directory(SlowBuildStore(), force=True) is True
     assert en._dir_refresh_interval == 1500.0
@@ -644,3 +644,22 @@ def test_project_root_config_dir_case_insensitive(tmp_path):
     (root / "Config" / "mrfx.yaml").write_text("store_dir: data/mrfx_store\n")
     cfg = load_mrfx_config(root / "Config" / "mrfx.yaml")
     assert cfg.store_dir == root / "data" / "mrfx_store"
+
+
+def test_entity_map_edit_survives_long_open_snapshot(store):
+    # While ANY long transaction (a rollup rebuild) holds an old snapshot,
+    # DuckDB can't vacuum a deleted PK key, so the old DELETE-all + re-INSERT
+    # in set_entity_map raised a spurious 'Duplicate key' — every entity edit
+    # made during an ingest 500'd. The upsert-shaped replace must survive.
+    store.set_entity_map({"222222222": "A"})
+    old = store.connect()
+    old.execute("BEGIN TRANSACTION")
+    old.execute("SELECT count(*) FROM entity_map")
+    try:
+        store.set_entity_map({"222222222": "B"})                       # same key, new name
+        store.set_entity_map({"222222222": "C", "333333333": "D"})     # add a key
+        store.set_entity_map({"333333333": "D"})                       # remove a key
+    finally:
+        old.execute("ROLLBACK")
+        old.close()
+    assert store.entity_map() == {"333333333": "D"}

@@ -50,6 +50,13 @@ def compute_rate_changes(store: Store, market: dict, *, subject: str | None = No
             "rate changes compare two specific months — pick a real month "
             "(e.g. 2026-07), not 'latest'")
     months = available_months(store)
+    if new_month not in months:
+        # "0 changes for 2027-01" when 2027-01 has no rows is fabrication —
+        # there is nothing to compare, and the CSV header would present the
+        # absence of data as the absence of change
+        raise BenchmarkError(
+            f"no data for {new_month} in the store — months present: "
+            f"{', '.join(months) or 'none'}")
     old_month = market.get("prev_month")
     if not old_month:
         earlier = [m for m in months if m < new_month]
@@ -166,6 +173,7 @@ def rate_changes_csv(result: dict) -> str:
                 "modifier_set", "old_rate", "new_rate", "delta", "pct_change", "direction"])
     for x in result["changes"]:
         w.writerow([defuse_csv(x["payer"]), defuse_csv(x["display_name"]) or "", x["tin_value"],
-                    x["billing_code"], defuse_csv(x["description"]) or "", x["modifier_set"] or "",
+                    x["billing_code"], defuse_csv(x["description"]) or "",
+                    defuse_csv(x["modifier_set"]) or "",
                     x["old_rate"], x["new_rate"], x["delta"], x["pct_change"], x["direction"]])
     return out.getvalue()

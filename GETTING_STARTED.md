@@ -167,9 +167,11 @@ Any of these link types work:
   queues them all.
 
 The queue table under the box shows each link's status
-(`queued` → `downloading` with a MB progress bar → `ingesting` → `done` with a
-row count; index links show `expanding` while their file lists unpack; a file
-bigger than the safety limit shows `too big` — see the disk section below).
+(`queued` → `downloading` with a MB progress bar → `fetched` (downloaded,
+waiting for a free parser — normal on a busy grind) → `ingesting` → `done`
+with a row count; index links show `expanding` while their file lists unpack;
+a file bigger than the safety limit shows `too big` — see the disk section
+below).
 Files process **a few at a time in the background** — by default as many as
 your computer has processor cores minus one (the `parallel_ingests:` knob in
 `config/mrfx.yaml`, `0` = automatic), and **several files download at once**
@@ -273,8 +275,9 @@ Once a file is `done`:
 - **Benchmark** tab: pick a subject practice → see where its rates sit versus
   the market (percentiles), the dollar gap, and — with your own volume numbers —
   an opportunity estimate and a printable pitch report. You never have to pick
-  an as-of month: it defaults to **Latest available** (every payer at its
-  newest rates); the dropdown is only for pinning a historical snapshot.
+  an as-of month: it defaults to **Latest available** (each contract line at
+  its newest publication); the dropdown is only for pinning a historical
+  snapshot.
 - **Export**: the **Export CSV** / **Export + methodology** buttons download the
   current filtered view. The **Outreach CSV** button gives one row per practice
   with name + address + phone + per-code rate/percentile columns — ready to
@@ -596,12 +599,15 @@ them in one place, grouped by where you'll hit them.
   The page needs multi-step human clicks — open it in your browser, right-click
   the real `.json/.json.gz/.zip` links, Copy Link Address, and paste those.
 - **`file is X GB — larger than the confirm_over_gb safety limit`** — a
-  legitimately huge file. If you want it: raise `confirm_over_gb:` in
-  `config/mrfx.yaml` (e.g. `12`) and press retry — the partial download was
-  kept, so it resumes rather than restarting.
+  legitimately huge file. If you want just this one, press **"download
+  anyway"** on its row. If you want all of them: raise `confirm_over_gb:` in
+  `config/mrfx.yaml` (e.g. `12`) and restart — every stopped file that now
+  fits the new limit re-queues **automatically**, and kept partial downloads
+  resume rather than restart.
 - **`not enough free disk space for this file`** — the file needs more room
-  than you have. Free space (empty `data/processed/`, other downloads) and
-  press retry.
+  than you have. The queue doesn't fail on this: it **pauses and re-checks
+  every minute**, so just free space (empty `data/processed/`, old downloads)
+  and it resumes by itself.
 - **`connection closed early (X of Y MB) — retrying from where it stopped`**
   — a flaky network or server. The app retries and resumes automatically; if
   it ultimately fails, press retry later — it continues from the same byte.
