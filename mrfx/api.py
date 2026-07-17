@@ -18,7 +18,7 @@ import time
 import zipfile
 from pathlib import Path
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request, UploadFile
+from fastapi import BackgroundTasks, Body, FastAPI, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -815,9 +815,15 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
 
     # -- validation cross-check (§7A.10) -----------------------------------------
 
+    # EVERY endpoint below is a sync `def` ON PURPOSE: FastAPI runs sync
+    # endpoints in a threadpool, keeping the event loop free. An `async def`
+    # that computes a benchmark (seconds-to-minutes on a big store) or waits on
+    # the store's write lock (held for minutes during a rollup) BLOCKS the
+    # loop — the server answers nothing, and the dashboard's 15s poll reports
+    # "API unreachable" until the work finishes. Enforced by a test that walks
+    # every route and rejects coroutine endpoints.
     @app.post("/api/validate")
-    async def validate(request: Request):
-        body = await request.json()
+    def validate(body: dict = Body(...)):
         ident = str(body.get("id", "")).replace("-", "").strip()
         code = str(body.get("code", "")).strip()
         expected = body.get("expected_rate")
@@ -862,8 +868,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return {"entities": [{"name": n, "tins": sorted(t)} for n, t in sorted(by_name.items())]}
 
     @app.post("/api/entities/update")
-    async def entities_update(request: Request):
-        body = await request.json()
+    def entities_update(body: dict = Body(...)):
         name = str(body.get("name", "")).strip()
         if not name:
             raise HTTPException(422, "entity name required")
@@ -871,13 +876,12 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return entities_map()
 
     @app.post("/api/org-website")
-    async def org_website(request: Request):
+    def org_website(body: dict = Body(...)):
         """Save (or clear, when url is empty) the hand-verified website for an
         org — applied to all the tax ids passed (an entity's constituent TINs),
         so it shows on the org however a later view resolves it. Accepts only
         http(s) URLs; anything else is rejected rather than stored as a bad
         link."""
-        body = await request.json()
         tins = [str(t).strip() for t in (body.get("tins") or []) if str(t).strip()]
         url = str(body.get("url") or "").strip()
         if not tins:
@@ -1015,7 +1019,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return {"status": "queued"}
 
     @app.post("/api/upload")
-    async def upload(file: UploadFile, background: BackgroundTasks):
+    def upload(file: UploadFile, background: BackgroundTasks):
         dest = cfg.inbox_dir / Path(file.filename or "upload.json").name
         # stream to a name the inbox scanner ignores, rename when COMPLETE —
         # the watcher fires on creation and would otherwise preflight (and
@@ -1024,7 +1028,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         size = 0
         try:
             with open(tmp, "wb") as out:
-                while chunk := await file.read(1 << 20):
+                while chunk := file.file.read(1 << 20):
                     size += len(chunk)
                     if size > UPLOAD_LIMIT_BYTES:
                         raise HTTPException(413, "over 1 GB — drop the file into data/inbox/ instead")
@@ -1189,8 +1193,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return {"entities": entities, "tins": tins}
 
     @app.post("/api/benchmark/market")
-    async def benchmark_market(request: Request):
-        body = await request.json()
+    def benchmark_market(body: dict = Body(...)):
         try:
             return compute_benchmark(store, str(body.get("subject", "")), body.get("market") or {})
         except (BenchmarkError, ValueError, TypeError) as e:
@@ -1199,8 +1202,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, str(e))
 
     @app.post("/api/benchmark/opportunity")
-    async def benchmark_opportunity(request: Request):
-        body = await request.json()
+    def benchmark_opportunity(body: dict = Body(...)):
         try:
             bench = compute_benchmark(store, str(body.get("subject", "")), body.get("market") or {})
             volumes = {str(k): float(v) for k, v in (body.get("volumes") or {}).items()}
@@ -1213,8 +1215,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, str(e))
 
     @app.post("/api/report/pitch", response_class=HTMLResponse)
-    async def pitch_report(request: Request):
-        body = await request.json()
+    def pitch_report(body: dict = Body(...)):
         try:
             bench = compute_benchmark(store, str(body.get("subject", "")), body.get("market") or {})
             opp = None
@@ -1229,8 +1230,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, str(e))
 
     @app.post("/api/report/negotiation", response_class=HTMLResponse)
-    async def negotiation_report(request: Request):
-        body = await request.json()
+    def negotiation_report(body: dict = Body(...)):
         try:
             volumes = {str(k): float(v) for k, v in (body.get("volumes") or {}).items()}
             neg = compute_payer_negotiation(
@@ -1246,8 +1246,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
 
     # payer-comparison workspace (Negotiate tab): one payer, named comparables
     @app.post("/api/negotiate/compare")
-    async def negotiate_compare(request: Request):
-        body = await request.json()
+    def negotiate_compare(body: dict = Body(...)):
         try:
             return compute_payer_comparison(
                 store, str(body.get("subject", "")), str(body.get("payer", "")),
@@ -1259,8 +1258,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, str(e))
 
     @app.post("/api/report/payer-compare", response_class=HTMLResponse)
-    async def payer_compare_report(request: Request):
-        body = await request.json()
+    def payer_compare_report(body: dict = Body(...)):
         try:
             comp = compute_payer_comparison(
                 store, str(body.get("subject", "")), str(body.get("payer", "")),
@@ -1274,8 +1272,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
 
     # fee schedule / payer scorecard (§7C)
     @app.post("/api/schedule/fee")
-    async def schedule_fee(request: Request):
-        body = await request.json()
+    def schedule_fee(body: dict = Body(...)):
         try:
             fs = compute_fee_schedule(store, str(body.get("subject", "")), body.get("market") or {})
             return {"fee_schedule": fs, "scorecard": payer_scorecard(fs)}
@@ -1285,8 +1282,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, str(e))
 
     @app.post("/api/report/ratecard", response_class=HTMLResponse)
-    async def ratecard_report(request: Request):
-        body = await request.json()
+    def ratecard_report(body: dict = Body(...)):
         try:
             fs = compute_fee_schedule(store, str(body.get("subject", "")), body.get("market") or {})
             return HTMLResponse(render_rate_card(cfg, store, fs, payer_scorecard(fs)))
@@ -1296,8 +1292,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, str(e))
 
     @app.post("/api/schedule/fee.csv", response_class=PlainTextResponse)
-    async def schedule_fee_csv(request: Request):
-        body = await request.json()
+    def schedule_fee_csv(body: dict = Body(...)):
         try:
             fs = compute_fee_schedule(store, str(body.get("subject", "")), body.get("market") or {})
             csv_text = fee_schedule_csv(fs, payer_scorecard(fs), store)
@@ -1310,8 +1305,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
 
     # underpaid-practice leads (§7D)
     @app.post("/api/leads")
-    async def leads(request: Request):
-        body = await request.json()
+    def leads(body: dict = Body(...)):
         try:
             return compute_leads(
                 store, body.get("market") or {},
@@ -1326,8 +1320,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, str(e))
 
     @app.post("/api/leads.csv", response_class=PlainTextResponse)
-    async def leads_export(request: Request):
-        body = await request.json()
+    def leads_export(body: dict = Body(...)):
         try:
             result = compute_leads(
                 store, body.get("market") or {},
@@ -1345,8 +1338,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
 
     # rate-change monitoring (§7E)
     @app.post("/api/changes")
-    async def changes(request: Request):
-        body = await request.json()
+    def changes(body: dict = Body(...)):
         try:
             return compute_rate_changes(
                 store, body.get("market") or {},
@@ -1359,8 +1351,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, str(e))
 
     @app.post("/api/changes.csv", response_class=PlainTextResponse)
-    async def changes_export(request: Request):
-        body = await request.json()
+    def changes_export(body: dict = Body(...)):
         try:
             result = compute_rate_changes(
                 store, body.get("market") or {},
@@ -1380,8 +1371,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return {"peer_sets": store.peer_sets()}
 
     @app.post("/api/peersets")
-    async def peersets_save(request: Request):
-        body = await request.json()
+    def peersets_save(body: dict = Body(...)):
         name = str(body.get("name", "")).strip()
         if not name:
             raise HTTPException(422, "peer set name required")
@@ -1403,8 +1393,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return {"loaded": store.mpfs_loaded()}
 
     @app.post("/api/mpfs/upload")
-    async def mpfs_upload(file: UploadFile):
-        data = await file.read()
+    def mpfs_upload(file: UploadFile):
+        data = file.file.read()
         try:
             n = _load_mpfs_csv(store, data, file.filename or "upload.csv")
         except (ValueError, KeyError) as e:
@@ -1423,8 +1413,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         }
 
     @app.post("/api/sources/override")
-    async def sources_override(request: Request):
-        body = await request.json()
+    def sources_override(body: dict = Body(...)):
         key, url = body.get("key"), (body.get("mrf_url") or "").strip()
         if not key or not url:
             raise HTTPException(422, "key and mrf_url required")

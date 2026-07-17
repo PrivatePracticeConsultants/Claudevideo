@@ -559,3 +559,19 @@ def test_explorer_month_filter_rejects_latest(cfg, store):
     assert r.status_code == 422
     assert "real month" in r.json()["detail"]
     assert c.get("/api/rates?month=2026-06").status_code == 200
+
+
+def test_no_route_blocks_the_event_loop(cfg, store):
+    # Every endpoint must be a sync `def` (threadpool) — an `async def` doing
+    # store/compute work blocks uvicorn's single event loop, and the whole
+    # server (including the dashboard's status poll) reads as "API unreachable"
+    # for the duration of a heavy benchmark or a rollup's write-lock wait.
+    import asyncio
+
+    from fastapi.routing import APIRoute
+
+    from mrfx.api import create_app
+
+    offenders = [r.path for r in create_app(cfg, store).routes
+                 if isinstance(r, APIRoute) and asyncio.iscoroutinefunction(r.endpoint)]
+    assert offenders == [], f"async endpoints would block the event loop: {offenders}"
