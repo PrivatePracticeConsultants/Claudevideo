@@ -677,6 +677,17 @@ them in one place, grouped by where you'll hit them.
 - **I pressed Ctrl-C — is my work lost?** No. Restart `mrfx serve` (or re-run
   `mrfx add`): downloads resume mid-file, interrupted files re-queue, and
   nothing is double-ingested.
+- **A file's chunk progress hasn't moved for a long time** — two different
+  things look identical here, and newer builds now tell you which in the log:
+  (1) **The dashboard bar is frozen but the parse is fine.** While a big
+  analytics rebuild runs, progress-bar updates are skipped on purpose (they'd
+  otherwise wait on the same lock) — the bar catches up when the rebuild
+  finishes. (2) **The parse itself has gone quiet.** The log now prints
+  `no parse progress for N minutes (stuck at chunk X)` every 15 minutes when
+  that happens. Some quiet is legitimate (one enormous section inside the
+  file, a saturated disk — check Task Manager → Performance → Disk). If it
+  repeats for hours *and* the disk shows no activity, press Ctrl-C and start
+  again: the file re-queues, downloads resume mid-file, and nothing is lost.
 - **Log says `rollup … partition 15/15` and then goes quiet for minutes** —
   normal, not stuck. Each partition line prints *before* that slice runs, and
   after the last one the whole result is written into the database file — the

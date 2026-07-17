@@ -374,6 +374,13 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
         bar = progress_bar  # LOCAL copy — never rebind the closed-over param
         # (assigning `progress_bar = None` here would make it local to this
         # function and UnboundLocalError the `if` read one line up)
+        # Stall watchdog: this loop reads the worker's progress FILE, so it
+        # sees advancement even while the dashboard mirror (update_progress)
+        # is skip-on-busy behind a long rollup's write lock. Hours of frozen
+        # bars used to be indistinguishable from a hung worker — say which.
+        stall_warn = 900.0  # 15 min between complaints
+        last_advance = time.monotonic()
+        warned_at = 0.0
         while True:
             try:
                 return fut.result(timeout=2.0)
@@ -381,9 +388,11 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
                 try:
                     prog = json.loads(Path(progress_path).read_text())
                 except (OSError, ValueError):
-                    continue
-                if prog.get("chunks_done", -1) != last:
+                    prog = None
+                now = time.monotonic()
+                if prog and prog.get("chunks_done", -1) != last:
                     last = prog["chunks_done"]
+                    last_advance = now
                     store.update_progress(name, prog["pct"], chunks_done=prog["chunks_done"],
                                           chunks_total=prog["chunks_total"])
                     if bar:
@@ -392,6 +401,17 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
                         except Exception:  # noqa: BLE001 — a display bar must
                             # never fail the multi-hour parse it decorates
                             bar = None
+                elif (now - last_advance > stall_warn
+                        and now - warned_at > stall_warn):
+                    warned_at = now
+                    log.warning(
+                        "%s: no parse progress for %.0f minutes (stuck at chunk "
+                        "%s). The worker process is still attached; long quiet "
+                        "stretches happen on a single enormous item or a "
+                        "saturated disk. If this repeats for hours with no disk "
+                        "activity, Ctrl-C and restart — the file re-queues and "
+                        "everything else resumes.",
+                        name, (now - last_advance) / 60, last if last >= 0 else "0")
 
     try:
         try:
