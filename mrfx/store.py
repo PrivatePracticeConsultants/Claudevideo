@@ -1547,7 +1547,23 @@ class Store:
         # and serve that stale total for the cache TTL after the swap.
         tables = (("tin_directory_tbl",) if names_only
                   else ("rates_by_tin_tbl", "tin_directory_tbl"))
-        with self.write_lock, self.connect() as con:
+        # instrumented lock wait: the stretch between a caller's "updating
+        # analytics rollups…" line and the first partition banner had ZERO
+        # narration — five silent hours read as a dead app when another
+        # rebuild (or a finishing ingest) held this lock. Say so, per minute.
+        t_wait = time.monotonic()
+        while not self.write_lock.acquire(timeout=60.0):
+            log.info("analytics rebuild: waiting its turn for the store lock "
+                     "(%.0f min so far — another rebuild or a finishing ingest "
+                     "holds it; this is a queue, not a hang)",
+                     (time.monotonic() - t_wait) / 60)
+        try:
+            return self._rebuild_rollups_locked(tables, log)
+        finally:
+            self.write_lock.release()
+
+    def _rebuild_rollups_locked(self, tables: tuple[str, ...], log) -> float:
+        with self.connect() as con:
             # BUILD time measured from lock ACQUISITION, not from the caller's
             # request: a refresh that queued 40 min behind an ingest rollup did
             # not "take" 40 min. The enrichment loop's adaptive cadence reads
@@ -1622,6 +1638,7 @@ class Store:
         log = _logging.getLogger(__name__)
         con.execute("DROP TABLE IF EXISTS rates_dedup_tbl")
         con.execute(f"CREATE OR REPLACE VIEW rates_dedup AS {DEDUP_QUERY}")
+        log.info("rollup: preparing (counting source rows)…")
         n_rows = con.execute("SELECT count(*) FROM rates").fetchone()[0] or 0
         rows_per_part = self._rollup_partition_rows(split, threads)
         parts = max(1, -(-n_rows // rows_per_part))
