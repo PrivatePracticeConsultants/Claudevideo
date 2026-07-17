@@ -72,8 +72,16 @@ def _apply_nppes_result(store: Store, npi: str, data: dict) -> None:
 # names as they come in instead of only when the whole run finishes. Throttled
 # so the (minutes-long, write-locked) rebuild can't dominate a big store.
 _DIRECTORY_REFRESH_SECONDS = 240.0
+# ADAPTIVE cadence: on a big store one directory rebuild can take LONGER than
+# the fixed throttle (measured: ~5 min over 85M rows vs the 240s floor), so a
+# fixed interval rebuilt back-to-back forever and the ingest queue's own
+# rollups queued behind it. After each rebuild the next one must wait at least
+# 5x how long the last one TOOK — a 2s refresh keeps the 4-minute cadence, a
+# 5-minute grind recurs at most every ~25 minutes.
+_REFRESH_DURATION_MULTIPLE = 5.0
 _refresh_lock = threading.Lock()
 _last_dir_refresh = 0.0
+_dir_refresh_interval = _DIRECTORY_REFRESH_SECONDS
 # True when names have been saved to npi_directory but not yet materialized into
 # tin_directory by a rebuild. A rebuild clears it; every enrichment cycle retries
 # a throttled rebuild while it's set, so a batch whose rebuild was throttled (or
@@ -94,12 +102,13 @@ def _maybe_refresh_directory(store: Store, force: bool = False) -> bool:
     now regardless (the one-shot CLI path, so names show before it exits).
     Clears the dirty flag on success. Best-effort: a rebuild here is cosmetic
     and must never fail enrichment."""
-    global _last_dir_refresh, _names_dirty
+    global _last_dir_refresh, _names_dirty, _dir_refresh_interval
     with _refresh_lock:
         now = time.monotonic()
-        if not force and now - _last_dir_refresh < _DIRECTORY_REFRESH_SECONDS:
+        if not force and now - _last_dir_refresh < _dir_refresh_interval:
             return False
         _last_dir_refresh = now
+    t0 = time.monotonic()
     try:
         # names_only: enrichment resolved NPI names/geo, which only feed
         # tin_directory. The rate spine (rates_by_tin) is built purely from the
@@ -107,8 +116,18 @@ def _maybe_refresh_directory(store: Store, force: bool = False) -> bool:
         # kept searches responsive during a long identification instead of
         # re-aggregating every raw row every few minutes.
         store.rebuild_rollups(names_only=True)
+        took = time.monotonic() - t0
         with _refresh_lock:
             _names_dirty = False
+            # adaptive: the next refresh waits proportionally to how long this
+            # one took, so a rebuild slower than the fixed floor can't run
+            # back-to-back and starve the ingest queue's own rollups
+            _dir_refresh_interval = max(_DIRECTORY_REFRESH_SECONDS,
+                                        _REFRESH_DURATION_MULTIPLE * took)
+            _last_dir_refresh = time.monotonic()
+        if took > _DIRECTORY_REFRESH_SECONDS:
+            log.info("name-directory refresh took %.0fs — next refresh in ~%.0f min "
+                     "so ingest rollups get the disk", took, _dir_refresh_interval / 60)
         return True
     except Exception as e:  # noqa: BLE001
         log.warning("name-directory refresh skipped (%s)", e)

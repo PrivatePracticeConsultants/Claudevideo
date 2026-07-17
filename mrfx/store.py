@@ -1506,6 +1506,7 @@ class Store:
             "tin_directory_tbl": (TIN_DIRECTORY_QUERY, "tin_value", "tin_directory"),
         }
         selected = tables if tables is not None else tuple(specs)
+        t_build = time.monotonic()
         con.execute("BEGIN TRANSACTION")
         try:
             for tbl in selected:
@@ -1519,6 +1520,14 @@ class Store:
                     log.info("rollup %s: partition %d/%d (%d rows total)", tbl, i + 1, parts, n_rows)
                     pred = f"hash({key}) % {parts} = {i}"
                     con.execute(f"INSERT INTO {tbl} {query.format(part=pred)}")
+            if parts > 1:
+                # the commit writes the whole new table to the database FILE —
+                # on a hard drive this is the slowest step of the cycle, and
+                # it used to run in total silence right after "partition N/N"
+                # (read live as the app being stuck)
+                log.info("rollup: all partitions built — writing %d table(s) to "
+                         "the database file (can take minutes on a hard drive; "
+                         "not stuck)", len(selected))
             con.execute("COMMIT")
         except Exception:
             try:
@@ -1526,6 +1535,8 @@ class Store:
             except duckdb.Error:
                 pass  # connection already aborted the transaction
             raise
+        if parts > 1:
+            log.info("rollup rebuild finished in %.0fs", time.monotonic() - t_build)
         # bump AFTER the commit: a count computed from the old tables during the
         # (minutes-long) build stays keyed to the old generation, and the first
         # post-swap request misses the cache and recounts against the new tables.

@@ -659,6 +659,15 @@ them in one place, grouped by where you'll hit them.
 - **I pressed Ctrl-C — is my work lost?** No. Restart `mrfx serve` (or re-run
   `mrfx add`): downloads resume mid-file, interrupted files re-queue, and
   nothing is double-ingested.
+- **Log says `rollup … partition 15/15` and then goes quiet for minutes** —
+  normal, not stuck. Each partition line prints *before* that slice runs, and
+  after the last one the whole result is written into the database file — the
+  slowest disk step of the cycle, several minutes on a hard drive. Newer
+  builds print `writing N table(s) to the database file … not stuck` and then
+  `rollup rebuild finished in Ns` so you can see it working; if you're unsure,
+  Task Manager → Performance → your data disk will show heavy activity while
+  it writes. Only worry if there's total silence *and* zero disk activity for
+  15+ minutes.
 - **The queue is huge and slow** — expected for whole-payer grinds (UHC and
   Anthem queue thousands of files; parsing runs ~30s per uncompressed GB).
   The app already uses (your cores − 1) parsers automatically
