@@ -1298,6 +1298,49 @@ def test_latest_month_uses_newest_file_per_contract(cfg, store):
     assert ok.status_code == 200 and ok.json()["new_month"] == "2026-06"
 
 
+def test_latest_supersedes_restructured_variants(cfg, store):
+    # A payer's newer file that RESTRUCTURES a line — drops a modifier variant,
+    # widens the POS set — fully supersedes the older publication. Regression:
+    # supersession used to be keyed on the full variant (modifier/POS) set, so
+    # a June variant with no July twin lingered forever and dragged the median
+    # (June ''+GP @34.50 pooled with July '' @37.95 -> 36.22, not 37.95).
+    from mrfx.benchmark import _entity_rates
+
+    def _pos_item(code, tin, rate, service_codes):
+        return {"negotiation_arrangement": "ffs", "billing_code_type": "CPT",
+                "billing_code_type_version": "2026", "billing_code": code,
+                "negotiated_rates": [{
+                    "provider_groups": [{"npi": [1000000002],
+                                         "tin": {"type": "ein", "value": tin}}],
+                    "negotiated_prices": [{"negotiated_type": "negotiated",
+                                           "negotiated_rate": rate,
+                                           "service_code": service_codes,
+                                           "billing_class": "professional"}]}]}
+
+    june = innetwork(month="2026-06-01", items=[
+        # modifier drift: base + GP variants in June…
+        item("97110", [(["1000000001"], "43-6000001", "ein",
+                        [(34.5, None), (34.5, ["GP"])])]),
+        # POS drift: '11' in June…
+        _pos_item("97112", "43-6000002", 40.0, ["11"]),
+    ])
+    july = innetwork(month="2026-07-01", items=[
+        # …July publishes ONLY the base variant, at the raise
+        item("97110", [(["1000000001"], "43-6000001", "ein", [(37.95, None)])]),
+        # …July widens to '11|12', at the raise
+        _pos_item("97112", "43-6000002", 45.0, ["11", "12"]),
+    ])
+    ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "drift_june.json", june))
+    ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "drift_july.json", july))
+    store.rebuild_rollups()
+
+    assert _entity_rates(store, ["436000001"], {"month": "latest"}) == {"97110": 37.95}
+    assert _entity_rates(store, ["436000002"], {"month": "latest"}) == {"97112": 45.0}
+    # pinned months still see each vintage exactly as published
+    assert _entity_rates(store, ["436000001"], {"month": "2026-06"}) == {"97110": 34.5}
+    assert _entity_rates(store, ["436000002"], {"month": "2026-06"}) == {"97112": 40.0}
+
+
 def test_payer_comparison_math_and_report(cfg, store):
     # Negotiate view: subject vs ONE payer's market, named comparables as
     # columns, plus what the subject's OTHER payers pay — all hand-checked.

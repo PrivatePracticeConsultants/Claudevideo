@@ -352,12 +352,14 @@ later — is identified in seconds, with no internet lookups.
 ## Making a big queue finish faster
 
 The app already works in parallel: several downloads run at once to keep
-several parser processes fed, and it auto-sizes both to your machine. When
-`mrfx serve` starts it prints exactly what it chose — look for these two lines:
+several parser processes fed, and it auto-sizes both to your machine. When the
+download queue starts working you'll see log lines like these (they appear
+once it's running more than one of each; a single-worker machine won't show
+them):
 
 ```
-parallel downloads: 3 fetcher thread(s)
-parallel ingest: 3 parser worker process(es)
+14:05:01 INFO    mrfx.fetch: parallel downloads: 3 fetcher thread(s)
+14:05:01 INFO    mrfx.fetch: parallel ingest: 3 parser worker process(es)
 ```
 
 Parsing is the slow part (roughly 30 seconds per uncompressed GB *per worker*,

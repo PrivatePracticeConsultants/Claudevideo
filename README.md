@@ -115,8 +115,8 @@ into base rates; KX and 59/XE/XS/XP/XU are preserved and filterable
 The **Benchmark** tab answers "where does this practice sit vs its market":
 
 - subject (mapped entity or TIN) + market definition (payers, state/city from the
-  NPPES locations of each TIN's NPIs, discipline, class, POS, **required as-of
-  month**) → per-code subject rate vs market p10–p90, percentile position strip,
+  NPPES locations of each TIN's NPIs, discipline, class, POS, as-of vintage —
+  **latest available by default**, a pinned month optional) → per-code subject rate vs market p10–p90, percentile position strip,
   and the dollar gap to a target percentile (median default, p75 selectable).
 - **Peer sets**: auto (all entities matching the market) or curated (named, saved
   TIN lists — "the consolidator clinics near the subject"); reports state which.
@@ -128,8 +128,8 @@ The **Benchmark** tab answers "where does this practice sit vs its market":
   never estimated.
 - **Pitch report**: print-ready HTML per subject with the percentile table,
   strips, opportunity band, peer-set definition and a mandatory methodology
-  footer (files/months, filters, dedup rule, caveats). It refuses to render
-  without a pinned as-of month.
+  footer (files/months, filters, dedup rule, caveats). It always states its
+  as-of vintage (latest available by default, or the pinned month).
 - **Payer-negotiation one-pager**: the same benchmark, split **per payer** — for
   each payer the subject actually contracts with, a table of the subject's rate
   versus *that payer's other providers only* (intra-payer peers, subject

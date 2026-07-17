@@ -741,6 +741,10 @@ async function refreshSubjectPickers(subjSel, monthSels = []) {
   if (subjSel && subjects) $(subjSel).innerHTML = subjectOptionsHtml(subjects);
   for (const ms of monthSels) {
     const el = $(ms.sel); if (!el) continue;
+    // transient /api/months failure: a select that already has a working list
+    // (tab re-entry) keeps it — rewriting would drop a pinned month and
+    // silently reset the vintage. Only fill when there's nothing usable yet.
+    if (!months && el.options.length > 0) continue;
     const cur = el.value;
     fillMonthSelect(ms.sel, months, ms.prefix || "");
     // keep the user's pick across the refresh ("latest" included)

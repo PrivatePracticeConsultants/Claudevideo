@@ -516,3 +516,46 @@ def test_auto_spill_never_fatal(tmp_path, monkeypatch):
     store = Store(tmp_path / "store", auto_spill=True)
     assert store._tmp_dir == tmp_path / "store" / "duckdb_tmp"
     assert store.spill_is_relocated is False
+
+
+def test_stale_spill_files_swept_on_open(tmp_path):
+    # crash leftovers: DuckDB never removes pre-existing temp files itself, so
+    # the store sweeps duckdb_temp* in ITS spill dir on open (lock held = ours)
+    from mrfx.store import Store
+
+    fast = tmp_path / "ssd"
+    s1 = Store(tmp_path / "store", temp_dir=fast)
+    dead = s1._tmp_dir / "duckdb_temp_storage-123.tmp"
+    dead.write_bytes(b"x" * 1024)
+    s1.close()
+    s2 = Store(tmp_path / "store", temp_dir=fast)
+    assert not dead.exists()
+    s2.close()
+
+
+def test_explicit_spill_fallback_is_flagged(tmp_path):
+    # an unusable duckdb_temp_dir must be VISIBLE (serve banner reads the flag),
+    # not a silent in-store fallback the user mistakes for success
+    from mrfx.store import Store
+
+    blocker = tmp_path / "afile"
+    blocker.write_text("x")
+    store = Store(tmp_path / "store", temp_dir=blocker / "no" / "way")
+    assert store.spill_is_relocated is False
+    assert store.spill_fallback_from is not None
+    assert "no" in store.spill_fallback_from
+
+
+def test_explorer_month_filter_rejects_latest(cfg, store):
+    # 'latest' is the REPORT tabs' sentinel; the explorer month filter matches
+    # file_month literally, so it must 422 instead of silently matching 0 rows
+    # while the methodology sidecar claims the filter applied
+    from fastapi.testclient import TestClient
+
+    from mrfx.api import create_app
+
+    c = TestClient(create_app(cfg, store))
+    r = c.get("/api/rates?month=latest")
+    assert r.status_code == 422
+    assert "real month" in r.json()["detail"]
+    assert c.get("/api/rates?month=2026-06").status_code == 200

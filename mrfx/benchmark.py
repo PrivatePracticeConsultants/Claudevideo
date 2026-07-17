@@ -49,10 +49,11 @@ class BenchmarkError(ValueError):
 
 
 # Sentinel as-of "month": instead of a single calendar month, use each
-# contract's NEWEST file. Payers republish their whole rate file monthly, so a
-# contract appears once per ingested month; pinning a month (or this "latest"
-# collapse) keeps ONE rate per contract — never the double-count of pooling
-# every month, and never a stale/current vintage blend.
+# payer+provider+code line's NEWEST file. Payers republish their whole rate
+# file monthly, so a line appears once per ingested month; pinning a month (or
+# this "latest" collapse) never double-counts by pooling every month, and a
+# line's newer publication fully supersedes its older one — see
+# _rates_relation for the supersession grain and its one known limit.
 LATEST_MONTH = "latest"
 
 
@@ -76,15 +77,20 @@ def normalize_market(market: dict | None) -> dict:
 def _rates_relation(market: dict) -> str:
     """The FROM-relation for market queries, aliased `t` by the caller.
     Pinned month → plain `rates_by_tin` (the file_month = ? clause in
-    _market_where selects that snapshot). "Latest" → a subquery that keeps only
-    the newest file_month PER CONTRACT (the full rates_by_tin grain minus
-    file_month), so every payer appears at its freshest vintage regardless of
-    which calendar month is newest, with no republished-snapshot double-count."""
+    _market_where selects that snapshot). "Latest" → a subquery that keeps, per
+    (payer, TIN, billing code), ALL rows of that line's newest file_month.
+
+    Supersession is at the payer+TIN+code level on purpose. Finer (the full
+    variant key incl. modifier/POS sets) blended vintages: when a payer's newer
+    file restructures a line — drops the 'GP' variant, widens POS '11' to
+    '11|12' — the old variant had no newer twin, survived forever, and dragged
+    the median (measured: June GP 34.50 pooling with July 37.95 → 36.22).
+    Coarser (per payer) would drop whole regions when a payer's shard files
+    update on different cadences. Known limit: a code line absent from ALL of a
+    payer's newer files lingers at its last-seen vintage."""
     if is_latest(market):
-        return ("(SELECT * FROM rates_by_tin QUALIFY row_number() OVER ("
-                "PARTITION BY payer, tin_value, billing_code, modifier_set, "
-                "billing_class, service_code_set, is_dollar_rate "
-                "ORDER BY file_month DESC) = 1)")
+        return ("(SELECT * FROM rates_by_tin QUALIFY file_month = max(file_month) "
+                "OVER (PARTITION BY payer, tin_value, billing_code))")
     return "rates_by_tin"
 
 

@@ -144,6 +144,10 @@ def cmd_serve(cfg: MrfxConfig, args) -> int:
         how = "auto-selected (store is on a slower disk)" if store.spill_is_auto \
             else "from your config"
         spill_line = f"  rollup spill → {store._tmp_dir}  [{how}]\n"
+    elif store.spill_fallback_from:
+        # the configured dir was unusable — say so, or the user believes it took
+        spill_line = (f"  rollup spill → {store._tmp_dir}  [your duckdb_temp_dir "
+                      f"({store.spill_fallback_from}) wasn't usable — check the drive]\n")
     print(f"\n  MRF Explorer  →  http://localhost:{cfg.port}\n"
           f"  inbox: {cfg.inbox_dir}  (drop .json / .json.gz / .zip here)\n"
           f"{spill_line}"
@@ -241,7 +245,8 @@ def cmd_add(cfg: MrfxConfig, args) -> int:
 
     from .fetch import add_urls, run_queue
 
-    store = Store(cfg.store_dir, cfg.duckdb_memory_gb, temp_dir=cfg.duckdb_temp_dir)
+    store = Store(cfg.store_dir, cfg.duckdb_memory_gb, temp_dir=cfg.duckdb_temp_dir,
+                  auto_spill=True)  # drains/rebuilds rollups — rollup-heavy
     store.recover_stuck_files()  # no server owns the store — safe to recover
     counts = add_urls(store, urls)
     print(f"queued {counts['added']} URL(s) "
@@ -480,7 +485,11 @@ def cmd_outreach(cfg: MrfxConfig, args) -> int:
     grain = grain_of({"grain": args.grain} if args.grain else {}, cfg, store)
     if grain == "npi":
         grain = "tin"
-    fs = FilterSet(qp)
+    try:
+        fs = FilterSet(qp)
+    except ValueError as e:  # e.g. --month latest (a report-tab sentinel, not a month)
+        print(f"can't build that export: {e}", file=sys.stderr)
+        return 1
     headers, rows = build_outreach_rows(store, rel_sql(grain, fs), fs.params, fs.described.get("codes"))
     out = Path(args.out)
     out.write_text(outreach_csv(headers, rows), encoding="utf-8")
@@ -499,7 +508,8 @@ def cmd_forget(cfg: MrfxConfig, args) -> int:
     if _something_owns_the_port(cfg, "erasing files locally"):
         print("tip: while the dashboard runs, use its Files tab's remove button instead.")
         return 1
-    store = Store(cfg.store_dir, cfg.duckdb_memory_gb, temp_dir=cfg.duckdb_temp_dir)
+    store = Store(cfg.store_dir, cfg.duckdb_memory_gb, temp_dir=cfg.duckdb_temp_dir,
+                  auto_spill=True)  # drains/rebuilds rollups — rollup-heavy
     rc = 0
     for name in args.filenames:
         st = store.file_status(name)
@@ -534,7 +544,8 @@ def cmd_enrich(cfg: MrfxConfig, args) -> int:
               "bulk_csv_path set in config/mrfx.yaml it uses your NPPES file "
               "automatically. To run this command instead, stop the server first.")
         return 1
-    store = Store(cfg.store_dir, cfg.duckdb_memory_gb, temp_dir=cfg.duckdb_temp_dir)
+    store = Store(cfg.store_dir, cfg.duckdb_memory_gb, temp_dir=cfg.duckdb_temp_dir,
+                  auto_spill=True)  # drains/rebuilds rollups — rollup-heavy
     if getattr(args, "bulk_file", None):
         cfg.enrichment.mode = "bulk"
         cfg.enrichment.bulk_csv_path = Path(args.bulk_file)

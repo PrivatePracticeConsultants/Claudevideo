@@ -515,6 +515,7 @@ class Store:
         # self.spill_is_relocated lets the serve banner report where it landed.
         self.spill_is_relocated = False
         self.spill_is_auto = False
+        self.spill_fallback_from: str | None = None  # set when an explicit dir was unusable
         spill_base = temp_dir
         # auto_spill only for the rollup-heavy entry points (serve, ingest): the
         # detection probe (a PowerShell call on Windows) isn't worth paying on
@@ -540,6 +541,10 @@ class Store:
                     "spill dir %r is not usable — falling back to the in-store "
                     "spill folder", str(spill_base))
                 self._tmp_dir = self.dir / "duckdb_tmp"
+                if not self.spill_is_auto:
+                    # an EXPLICIT duckdb_temp_dir silently falling back would
+                    # leave the user believing their config took — surface it
+                    self.spill_fallback_from = str(spill_base)
                 self.spill_is_auto = False
         else:
             self._tmp_dir = self.dir / "duckdb_tmp"
@@ -584,9 +589,32 @@ class Store:
             except duckdb.Error:
                 self._pin = None  # fall back to per-connection SET (still correct)
         with self.write_lock, self.connect() as con:
+            # holding a live connection means DuckDB's file lock is OURS — no
+            # other process is using this store, so every duckdb_temp_* file in
+            # the spill dir is a dead leftover (crash/power-loss mid-rollup).
+            # DuckDB never cleans pre-existing temp files itself (verified on
+            # 1.3): unswept, one power loss could strand tens of GB — on the
+            # auto-spill SSD that's the user's system drive filling up with no
+            # visible cause. Sweep BEFORE _init_tables (nothing has spilled yet).
+            self._sweep_stale_spill()
             self._init_tables(con)
             self._register_views(con)
         self._migrate_stale_rollups()
+
+    def _sweep_stale_spill(self) -> None:
+        """Best-effort removal of dead DuckDB spill files in our spill dir.
+        Only call while holding a live connection (the DuckDB file lock proves
+        sole ownership). Cosmetic-tier: a locked/vanishing file never fails
+        the open."""
+        try:
+            for p in self._tmp_dir.glob("duckdb_temp*"):
+                try:
+                    if p.is_file():
+                        p.unlink()
+                except OSError:
+                    continue
+        except OSError:
+            pass
 
     def _migrate_stale_rollups(self) -> None:
         """A prior version may have materialized the rollup tables WITHOUT a
@@ -690,8 +718,15 @@ class Store:
             # rebuild had already spilled into, strangling the rebuild it was
             # meant to protect.
             if self._temp_cap_gb is None:
-                free_gb = shutil.disk_usage(self._tmp_dir).free / 1e9
-                self._temp_cap_gb = max(1, int(free_gb * 0.8))
+                try:
+                    free_gb = shutil.disk_usage(self._tmp_dir).free / 1e9
+                    self._temp_cap_gb = max(1, int(free_gb * 0.8))
+                except OSError:
+                    # spill drive vanished between mkdir and first connect
+                    # (unplugged USB SSD, dropped share) — a conservative flat
+                    # cap keeps the store OPENING; actual spill writes to a
+                    # dead drive will surface their own error if it comes to it
+                    self._temp_cap_gb = 8
             con.execute(f"SET max_temp_directory_size = '{self._temp_cap_gb}GB'")
         except duckdb.Error:  # older duckdb without these knobs
             pass

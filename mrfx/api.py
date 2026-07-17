@@ -293,6 +293,13 @@ class FilterSet:
             add("city", qp["city"])
             self.uses_dim_cols = True  # `cities` is a joined column
         if qp.get("month"):
+            if str(qp["month"]).strip().lower() == "latest":
+                # the report tabs' "latest" sentinel is not a real file_month —
+                # matching it literally returned 0 rows while the methodology
+                # sidecar claimed as_of_month "latest" was applied
+                raise ValueError(
+                    "the explorer month filter takes a real month like 2026-07 "
+                    "(leave it empty to see all months)")
             clauses.append("file_month = ?")
             params.append(qp["month"])
             add("as_of_month", qp["month"])
@@ -533,6 +540,15 @@ def _mask_row_tins(rows: list[dict]) -> list[dict]:
     return rows
 
 
+def _fs(qp: dict) -> FilterSet:
+    """FilterSet for a request: an unusable filter value (e.g. month=latest on
+    the explorer) is the CLIENT's error — 422 with the message, never a 500."""
+    try:
+        return FilterSet(qp)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+
+
 def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     app = FastAPI(title="MRF Explorer", docs_url="/api/docs")
     registry = Registry(cfg)
@@ -601,7 +617,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     ):
         qp = _qp(request)
         grain = grain_of(qp, cfg, store)
-        fs = FilterSet(qp)
+        fs = _fs(qp)
         order = order_sql(sort, dir)
         limit_params = [*fs.params, page_size, (page - 1) * page_size]
         if _tin_late_join_ok(grain, fs, sort):
@@ -626,7 +642,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     def summary(request: Request):
         qp = _qp(request)
         grain = grain_of(qp, cfg, store)
-        fs = FilterSet(qp)
+        fs = _fs(qp)
         with store.connect() as con:
             row = con.execute(
                 f"""
@@ -734,7 +750,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         qp = _qp(request)
         qp["code"] = code
         grain = grain_of(qp, cfg, store)
-        fs = FilterSet(qp)
+        fs = _fs(qp)
         with store.connect() as con:
             ranked = _dicts(con.execute(
                 f"""
@@ -772,7 +788,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         qp = _qp(request)
         qp.pop("month", None)  # trend spans months by definition
         grain = grain_of(qp, cfg, store)
-        fs = FilterSet(qp)
+        fs = _fs(qp)
         with store.connect() as con:
             rows = _dicts(con.execute(
                 f"""
@@ -1035,7 +1051,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         can't balloon the process RSS with data-sized strings."""
         qp = {} if full else _qp(request)
         grain = grain_of(qp, cfg, store)
-        fs = FilterSet(qp if not full else {"dollar_only": "0"})
+        fs = _fs(qp if not full else {"dollar_only": "0"})
         select, params = export_select(grain, fs, sort, dir)
         stamp = dt.datetime.now().strftime("%Y-%m-%d_%H%M")
         tmp = _mktemp(".csv")
@@ -1090,7 +1106,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         grain = grain_of(qp, cfg, store)
         if grain == "npi":
             grain = "tin"  # outreach is entity-level by definition
-        fs = FilterSet(qp)
+        fs = _fs(qp)
         headers, rows = build_outreach_rows(
             store, rel_sql(grain, fs), fs.params, fs.described.get("codes")
         )
@@ -1469,6 +1485,11 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 f"({store._memory_limit_gb} GB). Narrow it with a filter (payer, "
                 f"code, or state), or raise duckdb_memory_gb in config/mrfx.yaml "
                 f"if your machine has spare RAM, then restart.")})
+        if isinstance(exc, ValueError):
+            # a filter/parameter the request supplied was unusable (e.g. the
+            # explorer month filter given the report tabs' 'latest' sentinel) —
+            # client input, not a server fault
+            return JSONResponse(status_code=422, content={"error": str(exc)})
         return JSONResponse(status_code=500, content={"error": f"{type(exc).__name__}: {exc}"})
 
     app.mount("/", NoCacheStaticFiles(directory=WEB_DIR, html=True), name="web")
