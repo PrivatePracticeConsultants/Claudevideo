@@ -148,7 +148,16 @@ def cmd_serve(cfg: MrfxConfig, args) -> int:
         # the configured dir was unusable — say so, or the user believes it took
         spill_line = (f"  rollup spill → {store._tmp_dir}  [your duckdb_temp_dir "
                       f"({store.spill_fallback_from}) wasn't usable — check the drive]\n")
+    # say WHICH store this server opened and how much is in it — an empty count
+    # against a book the user knows is big means the wrong folder/store, and
+    # that must be readable at a glance, not a mystery of an empty dashboard
+    try:
+        with store.connect() as con:
+            n_files = con.execute("SELECT count(*) FROM files").fetchone()[0] or 0
+    except duckdb.Error:
+        n_files = 0
     print(f"\n  MRF Explorer  →  http://localhost:{cfg.port}\n"
+          f"  store: {Path(cfg.store_dir).resolve()}  ({n_files:,} file(s) ingested)\n"
           f"  inbox: {cfg.inbox_dir}  (drop .json / .json.gz / .zip here)\n"
           f"{spill_line}"
           f"  or paste MRF/TOC URLs on the Files tab — downloads run automatically\n")
@@ -646,6 +655,16 @@ def main(argv: list[str] | None = None) -> int:
         warn_if_slow_json_backend()  # loud warning if the pure-Python parser is active
     from .config import ConfigFileError
 
+    # Wrong-folder rescue: with the DEFAULT --config, if config/mrfx.yaml isn't
+    # under the current directory, fall back to the one next to the installed
+    # package (editable install => the project folder). Without this, running
+    # `mrfx serve` from any other directory silently created a brand-new empty
+    # store there and the dashboard showed nothing — the real store was fine.
+    if args.config == "config/mrfx.yaml" and not Path(args.config).exists():
+        pkg_cfg = Path(__file__).resolve().parent.parent / "config" / "mrfx.yaml"
+        if pkg_cfg.exists():
+            log.info("no config/mrfx.yaml here — using the project's: %s", pkg_cfg)
+            args.config = str(pkg_cfg)
     try:
         cfg = load_mrfx_config(args.config)
         cfg.ensure_dirs()

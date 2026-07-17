@@ -575,3 +575,33 @@ def test_no_route_blocks_the_event_loop(cfg, store):
     offenders = [r.path for r in create_app(cfg, store).routes
                  if isinstance(r, APIRoute) and asyncio.iscoroutinefunction(r.endpoint)]
     assert offenders == [], f"async endpoints would block the event loop: {offenders}"
+
+
+def test_config_paths_anchor_to_project_not_cwd(tmp_path, monkeypatch):
+    # relative paths in <root>/config/mrfx.yaml must resolve against <root>,
+    # NOT the terminal's current directory — running `mrfx serve` from the
+    # wrong folder used to silently create a brand-new empty store there
+    # (seen live as "the dashboard is completely empty after an update")
+    root = tmp_path / "proj"
+    (root / "config").mkdir(parents=True)
+    (root / "config" / "mrfx.yaml").write_text(
+        "store_dir: data/mrfx_store\ninbox_dir: data/inbox\n"
+        "enrichment:\n  mode: bulk\n  bulk_csv_path: nppes.zip\n")
+    elsewhere = tmp_path / "somewhere_else"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    cfg = load_mrfx_config(root / "config" / "mrfx.yaml")
+    assert cfg.store_dir == root / "data" / "mrfx_store"
+    assert cfg.inbox_dir == root / "data" / "inbox"
+    assert cfg.enrichment.bulk_csv_path == root / "nppes.zip"
+    # absolute paths in the file are honored untouched
+    (root / "config" / "mrfx.yaml").write_text(
+        f'store_dir: "{tmp_path / "abs_store"}"\n')
+    cfg = load_mrfx_config(root / "config" / "mrfx.yaml")
+    assert cfg.store_dir == tmp_path / "abs_store"
+    # a config NOT in a config/ folder anchors to its own directory
+    lone = tmp_path / "lone"
+    lone.mkdir()
+    (lone / "mrfx.yaml").write_text("store_dir: data/mrfx_store\n")
+    cfg = load_mrfx_config(lone / "mrfx.yaml")
+    assert cfg.store_dir == lone / "data" / "mrfx_store"

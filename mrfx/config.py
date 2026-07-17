@@ -159,6 +159,39 @@ class MrfxConfig(BaseModel):
             d.mkdir(parents=True, exist_ok=True)
 
 
+# Path settings a loaded config may express RELATIVE to the project folder.
+# Anchored in load_mrfx_config so `mrfx serve` run from ANY directory finds the
+# same store — unanchored, "data/mrfx_store" resolved against the terminal's
+# current directory, and starting the app from the wrong folder silently
+# created a brand-new empty store there (seen live: "dashboard is completely
+# empty after an update" — the real store was intact, just not looked at).
+_ANCHORED_FIELDS = ("inbox_dir", "processed_dir", "failed_dir", "store_dir",
+                    "downloads_dir", "entity_map_path", "mpfs_path",
+                    "duckdb_temp_dir", "registry_path",
+                    "registry_overrides_path", "known_sources_path")
+
+
+def _project_root_of(config_path: Path) -> Path:
+    """The project folder a config file belongs to: its parent, or — for the
+    conventional `<root>/config/mrfx.yaml` layout — the config dir's parent."""
+    parent = config_path.resolve().parent
+    return parent.parent if parent.name == "config" else parent
+
+
+def _anchor_paths(cfg: MrfxConfig, root: Path) -> MrfxConfig:
+    for name in _ANCHORED_FIELDS:
+        v = getattr(cfg, name, None)
+        if v is not None and not Path(v).is_absolute():
+            setattr(cfg, name, root / v)
+    b = getattr(cfg.enrichment, "bulk_csv_path", None)
+    if b is not None and not Path(b).is_absolute():
+        cfg.enrichment.bulk_csv_path = root / b
+    lp = getattr(cfg.report_branding, "logo_path", None)
+    if lp is not None and not Path(lp).is_absolute():
+        cfg.report_branding.logo_path = root / lp
+    return cfg
+
+
 def load_mrfx_config(path: str | Path = "config/mrfx.yaml") -> MrfxConfig:
     p = Path(path)
     if not p.exists():
@@ -198,4 +231,4 @@ def load_mrfx_config(path: str | Path = "config/mrfx.yaml") -> MrfxConfig:
         logging.getLogger(__name__).warning(
             "%s: unknown setting(s) ignored: %s — check for typos", p,
             ", ".join(sorted(unknown)))
-    return cfg
+    return _anchor_paths(cfg, _project_root_of(p))

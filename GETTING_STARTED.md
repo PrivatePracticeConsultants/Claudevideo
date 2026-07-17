@@ -656,6 +656,18 @@ them in one place, grouped by where you'll hit them.
 
 ### The queue and long runs
 
+- **The dashboard is completely EMPTY after an update or restart** — your data
+  is almost certainly fine; the app most likely opened a **brand-new store in
+  the wrong folder** because the terminal wasn't in the project folder when
+  you ran `mrfx serve`. Check the startup text: the `store:` line names the
+  exact folder it opened and how many files are in it — if it isn't
+  `E:\Claudevideo\data\mrfx_store` (or says `0 file(s)` when you know you have
+  a book), close it, `cd E:\Claudevideo`, and start again. Newer builds also
+  find the project's config automatically no matter where you start from, so
+  this mostly can't happen anymore. (If the store path is right and it's still
+  empty, check that `data\mrfx_store` still exists and has large files — and
+  restore your `data\` backup if you replaced the whole project folder during
+  an update instead of just the `mrfx` folder.)
 - **I pressed Ctrl-C — is my work lost?** No. Restart `mrfx serve` (or re-run
   `mrfx add`): downloads resume mid-file, interrupted files re-queue, and
   nothing is double-ingested.
