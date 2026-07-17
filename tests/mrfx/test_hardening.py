@@ -605,3 +605,42 @@ def test_config_paths_anchor_to_project_not_cwd(tmp_path, monkeypatch):
     (lone / "mrfx.yaml").write_text("store_dir: data/mrfx_store\n")
     cfg = load_mrfx_config(lone / "mrfx.yaml")
     assert cfg.store_dir == lone / "data" / "mrfx_store"
+
+
+def test_refresh_interval_uses_build_time_not_lock_wait():
+    # a refresh that queued 40 min behind an ingest rollup did not "take"
+    # 40 min — the adaptive cadence must read the store's measured BUILD time,
+    # or one contended refresh silences name updates for hours
+    import time as _time
+
+    import mrfx.enrich as en
+
+    class FakeStore:
+        # simulates: long wall time (lock wait) but a fast actual build
+        def rebuild_rollups(self, names_only=False):
+            _time.sleep(0.05)  # stand-in for a long lock wait
+            self.last_rollup_build_seconds = 1.0  # the real build was fast
+
+    en._last_dir_refresh = 0.0
+    en._dir_refresh_interval = en._DIRECTORY_REFRESH_SECONDS
+    assert en._maybe_refresh_directory(FakeStore(), force=True) is True
+    assert en._dir_refresh_interval == en._DIRECTORY_REFRESH_SECONDS  # 5*1.0 < floor
+
+    class SlowBuildStore:
+        def rebuild_rollups(self, names_only=False):
+            self.last_rollup_build_seconds = 300.0  # genuinely slow build
+
+    assert en._maybe_refresh_directory(SlowBuildStore(), force=True) is True
+    assert en._dir_refresh_interval == 1500.0
+    en._dir_refresh_interval = en._DIRECTORY_REFRESH_SECONDS  # reset for other tests
+    en._last_dir_refresh = 0.0
+
+
+def test_project_root_config_dir_case_insensitive(tmp_path):
+    # Windows folders are case-insensitive: <root>/Config/mrfx.yaml must anchor
+    # to <root>, exactly like <root>/config/mrfx.yaml
+    root = tmp_path / "proj2"
+    (root / "Config").mkdir(parents=True)
+    (root / "Config" / "mrfx.yaml").write_text("store_dir: data/mrfx_store\n")
+    cfg = load_mrfx_config(root / "Config" / "mrfx.yaml")
+    assert cfg.store_dir == root / "data" / "mrfx_store"

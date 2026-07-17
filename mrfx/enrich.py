@@ -116,7 +116,13 @@ def _maybe_refresh_directory(store: Store, force: bool = False) -> bool:
         # kept searches responsive during a long identification instead of
         # re-aggregating every raw row every few minutes.
         store.rebuild_rollups(names_only=True)
-        took = time.monotonic() - t0
+        # BUILD time, not build + time spent queued behind an ingest rollup's
+        # write lock: wall-clock here once counted a 40-min lock wait as the
+        # refresh "taking" 40 min and deferred the next one for hours — the
+        # steady name-refresh churn went silent and the app looked dead.
+        took = getattr(store, "last_rollup_build_seconds", None)
+        if took is None:
+            took = time.monotonic() - t0
         with _refresh_lock:
             _names_dirty = False
             # adaptive: the next refresh waits proportionally to how long this

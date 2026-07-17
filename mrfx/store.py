@@ -1423,6 +1423,14 @@ class Store:
         tables = (("tin_directory_tbl",) if names_only
                   else ("rates_by_tin_tbl", "tin_directory_tbl"))
         with self.write_lock, self.connect() as con:
+            # BUILD time measured from lock ACQUISITION, not from the caller's
+            # request: a refresh that queued 40 min behind an ingest rollup did
+            # not "take" 40 min. The enrichment loop's adaptive cadence reads
+            # this — timing from outside the lock inflated its interval to
+            # hours and the steady name-refresh log churn went silent (read
+            # live as "the app stopped running").
+            t_locked = time.monotonic()
+            self.last_rollup_build_seconds: float | None = None
             self._register_views(con)  # rates view must see current parts first
             # Cap parallelism for the rebuild and size the slices for that thread
             # count. The un-spillable per-thread hash tables make peak RAM scale
@@ -1468,6 +1476,7 @@ class Store:
                         con.execute("RESET threads")
                     except duckdb.Error:
                         pass
+                self.last_rollup_build_seconds = time.monotonic() - t_locked
 
     def _build_rollup_tables(self, con: duckdb.DuckDBPyConnection, split: int = 1,
                              threads: int = 1, tables: tuple[str, ...] | None = None) -> None:

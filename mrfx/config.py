@@ -173,9 +173,11 @@ _ANCHORED_FIELDS = ("inbox_dir", "processed_dir", "failed_dir", "store_dir",
 
 def _project_root_of(config_path: Path) -> Path:
     """The project folder a config file belongs to: its parent, or — for the
-    conventional `<root>/config/mrfx.yaml` layout — the config dir's parent."""
+    conventional `<root>/config/mrfx.yaml` layout — the config dir's parent.
+    Case-insensitive: Windows folders are case-insensitive, and a project whose
+    folder happens to be cased `Config` must anchor the same as `config`."""
     parent = config_path.resolve().parent
-    return parent.parent if parent.name == "config" else parent
+    return parent.parent if parent.name.lower() == "config" else parent
 
 
 def _anchor_paths(cfg: MrfxConfig, root: Path) -> MrfxConfig:
