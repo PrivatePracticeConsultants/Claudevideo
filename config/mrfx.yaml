@@ -55,6 +55,13 @@ failed_dir: data/failed
 store_dir: data/mrfx_store
 move_processed: true          # false = leave files in inbox, track via checkpoint
 
+# Memory ceiling (GB) for the analytics database (rollup rebuilds + dashboard
+# queries). 8 is the sweet spot on a 32 GB machine: the rebuild sizes its work
+# to fit on the first try (instead of failing upward into retries) while
+# leaving headroom for the parser workers, Windows, and your browser.
+# Remove the line to let the app choose automatically from available RAM.
+duckdb_memory_gb: 8
+
 # Where DuckDB writes temporary SPILL scratch during the heavy end-of-batch
 # rollup. Unset = AUTOMATIC: if your store is on a slow spinning hard drive and
 # you have a roomy SSD, the app routes the spill to the SSD by itself (this is
