@@ -719,12 +719,16 @@ them in one place, grouped by where you'll hit them.
   of the same book under different filenames from before the dedup fix; if
   so, `mrfx reset --confirm` and re-queue (dedup now catches mirrors even in
   parallel).
-- **Dashboard numbers aren't updating during a big run** — the analytics
-  tables refresh in batches (every ~10 files and at least every ~90 seconds),
-  so brief lag mid-grind is normal. If numbers stay frozen for many minutes,
-  look at the `mrfx serve` terminal window: a "rollup rebuild failed" line
-  there usually means low disk — free some space; the raw data is safe and
-  analytics catch up on the next successful rebuild.
+- **Dashboard numbers aren't updating during a big run** — deliberate. On a
+  big store an analytics refresh is a heavy full scan, so mid-grind it runs at
+  most once per a self-chosen interval (about 4× however long the last refresh
+  took — the log prints the schedule: "next mid-grind refresh in ~N min"), and
+  once more when the queue finishes. In between, the disk belongs to
+  downloading and extraction; the Files tab still updates live. If numbers
+  stay stale long past the printed schedule, look at the `mrfx serve` terminal
+  window: a "rollup rebuild failed" line there usually means low disk — free
+  some space; the raw data is safe and analytics catch up on the next
+  successful rebuild.
 - **I saw an "Out of Memory" line and the rebuild slowed to a crawl** — on a
   very large store (tens of millions of rate rows) the analytics rebuild can hit
   its memory cap. It recovers on its own: it caps how many CPU cores it uses for

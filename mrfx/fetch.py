@@ -1386,18 +1386,32 @@ def add_urls(store: Store, urls: list[str]) -> dict:
     return {"added": added, "skipped": skipped, "invalid": invalid}
 
 
-# The dedup/by-TIN rollups are a FULL rebuild over all rows (minutes once the
-# store holds tens of millions). When grinding a big payer book, rebuilding
-# after every file would be quadratic wall-clock — batch it instead: rebuild
-# after this many ingested files, and once more when the queue goes idle.
-ROLLUP_BATCH_FILES = 10
-
-# ...but a grind of large files can take many minutes to reach 10, leaving the
-# dashboard (which reads the rollups, not the raw rates) looking stale — the
-# "filters don't work while it's still processing" complaint. Also rebuild when
-# the newest ingests are older than this, so analytics stay fresh mid-grind
-# without the per-file quadratic cost.
+# The dedup/by-TIN rollups are a FULL rebuild over all rows (an hour+ once the
+# store holds tens of millions). Mid-grind rebuilds are therefore purely
+# TIME-based: at most one per adaptive interval (a multiple of how long the
+# last one took), plus a final one when the queue goes idle. The floor below
+# keeps a small store's dashboard fresh without per-file quadratic cost.
 ROLLUP_MAX_STALE_SECONDS = 90
+
+# Adaptive interval = this multiple of the last rebuild's duration: the disk
+# and CPU spend at most ~1/(N+1) of a long grind rebuilding analytics, and the
+# rest extracting. 2.0 was measured too aggressive on an 86M-row store on a
+# hard drive — rebuilds owned half the disk and chunk progress crawled.
+ROLLUP_INTERVAL_MULTIPLE = 4.0
+
+
+def _rollup_due(pend: int, in_flight: int, since_last: float, min_interval: float) -> bool:
+    """The ONE mid-grind rebuild decision (unit-tested). Rebuild when ingests
+    are pending AND either the queue just went idle (grind over — dashboards
+    must be current) or the adaptive interval has elapsed. There is
+    deliberately NO count-based trigger: on a big store one rebuild outlasts
+    any batch of fresh ingests, so an unconditioned "N files pending" check
+    fired the instant each rebuild finished — rebuilds ran back-to-back for
+    the whole grind, monopolizing the store's disk, and extraction slowed to
+    what users reported as "chunks frozen, CPU busy"."""
+    if pend <= 0:
+        return False
+    return in_flight == 0 or since_last >= min_interval
 
 # how many files the downloader may fetch ahead of the parser (disk-bounded)
 PREFETCH_AHEAD = 1
@@ -1407,9 +1421,9 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
     """Process queued URLs one at a time until the queue is empty (drain=True,
     for the CLI) or `stop` is set (the serve worker). Returns files processed.
 
-    Rollup rebuilds are batched (every ROLLUP_BATCH_FILES ingests + at idle):
-    the raw rates land immediately; dashboards catch up in batches instead of
-    stalling the queue for minutes after every single file."""
+    Rollup rebuilds are time-batched (adaptive interval + once at idle — see
+    _rollup_due): the raw rates land immediately; dashboards catch up in
+    batches instead of the rebuild monopolizing the disk mid-grind."""
     recovered = store.recover_stuck_urls()
     if recovered:
         log.info("resumed %d URL(s) left mid-flight by a previous run", recovered)
@@ -1472,8 +1486,16 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
         # rebuild after every single file, the exact per-file quadratic cost
         # the batching exists to avoid, each one holding the write lock.
         duration = time.monotonic() - last_rebuild_at
-        rollup_min_interval = max(float(ROLLUP_MAX_STALE_SECONDS), 2.0 * duration)
+        rollup_min_interval = max(float(ROLLUP_MAX_STALE_SECONDS),
+                                  ROLLUP_INTERVAL_MULTIPLE * duration)
         last_rebuild_at = time.monotonic()
+        if duration > 60:
+            # a long rebuild means a long gap until the next one — say so, or
+            # hours of "numbers not updating" mid-grind reads as a hang
+            log.info("analytics refresh took %.0f min — next mid-grind refresh "
+                     "in ~%.0f min (extraction gets the disk in between; a "
+                     "final refresh always runs when the queue finishes)",
+                     duration / 60, rollup_min_interval / 60)
         with state:
             ingests_pending_rollup -= n
 
@@ -1615,8 +1637,8 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
             in_flight = (counts.get("queued", 0) + counts.get("downloading", 0)
                          + counts.get("fetched", 0) + counts.get("expanding", 0)
                          + counts.get("ingesting", 0) + busy)
-            stale = pend and (time.monotonic() - last_rebuild_at) >= rollup_min_interval
-            if pend >= ROLLUP_BATCH_FILES or (in_flight == 0 and pend) or stale:
+            if _rollup_due(pend, in_flight, time.monotonic() - last_rebuild_at,
+                           rollup_min_interval):
                 rebuild_now()
                 continue
             if in_flight == 0 and drain:

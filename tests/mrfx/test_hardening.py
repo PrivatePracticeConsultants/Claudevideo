@@ -720,3 +720,40 @@ def test_stack_recorder_writes_and_refreshes(tmp_path):
             raise AssertionError("recorder never refreshed the snapshot")
     finally:
         stop.set()
+
+
+def test_rollup_never_rebuilds_back_to_back_mid_grind():
+    # The field failure: an unconditioned "10 files pending" trigger meant a
+    # big store's hour-long rebuild ended with the next batch already
+    # pending, so rebuilds ran back-to-back and extraction starved for the
+    # disk ("chunks frozen, CPU busy"). Mid-grind, ONLY the adaptive
+    # interval may trigger — no pending count, however large, forces it.
+    from mrfx.fetch import _rollup_due
+
+    assert not _rollup_due(500, 3, 10.0, 3600.0)      # huge backlog, interval not passed
+    assert _rollup_due(1, 3, 3600.0, 3600.0)          # interval passed → rebuild
+    assert _rollup_due(1, 0, 0.0, 3600.0)             # queue idle → final rebuild now
+    assert not _rollup_due(0, 0, 99999.0, 1.0)        # nothing pending → never
+
+
+def test_scan_inbox_rebuilds_once_per_pass(cfg, store, monkeypatch):
+    # Two files dropped together must cost ONE full analytics rebuild, not
+    # one per file (each is a full scan of the entire store).
+    import mrfx.ingest as ingest_mod
+    from tests.mrfx.conftest import drop
+
+    drop(cfg, "innetwork_mixed.json", gz=True)
+    # same fixture under a second name = a second real ingest in one pass
+    import gzip
+    import shutil
+    src = cfg.inbox_dir / "innetwork_mixed.json.gz"
+    with gzip.open(src) as fin, open(cfg.inbox_dir / "second_copy.json", "wb") as fout:
+        shutil.copyfileobj(fin, fout)
+
+    calls = []
+    real = store.rebuild_rollups
+    monkeypatch.setattr(store, "rebuild_rollups",
+                        lambda *a, **k: (calls.append(1), real(*a, **k))[1])
+    results = ingest_mod.scan_inbox(cfg, store)
+    assert [r["status"] for r in results].count("done") == 2
+    assert len(calls) == 1

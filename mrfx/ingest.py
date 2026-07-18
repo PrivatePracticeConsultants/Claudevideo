@@ -846,6 +846,7 @@ def scan_inbox(cfg: MrfxConfig, store: Store, force: bool = False, progress_bar=
     order = {"provider_reference": 0, "in_network": 1}
     flights.sort(key=lambda t: order.get(t[1].file_type, 2))
 
+    ingested = False
     for p, pf in flights:
         gb = pf.compressed_bytes / 1e9
         if not force and gb > cfg.confirm_over_gb:
@@ -856,5 +857,14 @@ def scan_inbox(cfg: MrfxConfig, store: Store, force: bool = False, progress_bar=
             )
             results.append({"file": p.name, "status": "pending_confirmation"})
             continue
-        results.append({"file": p.name, **ingest_file(cfg, store, p, pf, progress_bar=progress_bar)})
+        r = ingest_file(cfg, store, p, pf, progress_bar=progress_bar,
+                        rebuild_rollups=False)
+        results.append({"file": p.name, **r})
+        ingested = ingested or r.get("status") == "done"
+    if ingested:
+        # ONE rebuild for the whole pass: the per-file default turned an
+        # N-file inbox drop into N full scans of the entire store (an hour+
+        # each on a big book). If this rebuild fails or is skipped, the
+        # covered-through marker stays behind and serve-start catches up.
+        _rebuild_rollups_best_effort(store, "inbox scan")
     return results

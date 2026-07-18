@@ -180,14 +180,19 @@ Two codebases live in this repo:
    30M-row store means a ~30M-group aggregation whose spill exceeded 27 GB of
    disk when it was materialized. No `string_agg(DISTINCT …)` in rollups
    (cannot spill); DuckDB `memory_limit` is 40% RAM clamped [2,12] GB.
-   Rollup rebuilds are batched (`ROLLUP_BATCH_FILES`) and ALSO refresh on a
-   staleness timer mid-grind (the dashboard reads the rollups, so without
-   this, filters looked broken on data that "was there"). The timer counts
-   from rebuild COMPLETION and self-throttles to max(90s, 2x the last
-   rebuild's duration) — counting from the start would make any >90s rebuild
-   permanently "stale" and degenerate into a full rebuild per file, each one
-   holding the write lock. Rebuilds give up after 3 failures (raw data is
-   safe) and never run per-file during queue grinds.
+   Mid-grind rollup rebuilds are purely TIME-based (`_rollup_due`): one per
+   adaptive interval of max(90s, `ROLLUP_INTERVAL_MULTIPLE` (4x) × the last
+   rebuild's duration), counted from rebuild COMPLETION, plus a final rebuild
+   when the queue goes idle. There is deliberately NO count-based ("N files
+   pending") trigger: on a big store one rebuild outlasts any batch of fresh
+   ingests, so an unconditioned batch check fired the instant each rebuild
+   finished — rebuilds ran back-to-back for the whole grind, monopolized the
+   store's disk, and extraction slowed to "chunks frozen, CPU busy" (the
+   measured July 2026 field failure). Counting the interval from the start
+   instead of completion would likewise degenerate into rebuild-per-file.
+   `scan_inbox` batches to ONE rebuild per pass for the same reason.
+   Rebuilds give up after 3 failures (raw data is safe) and never run
+   per-file during queue grinds.
    Above ~15M raw rows they build in hash-partitioned slices (the partition
    column is in every GROUP BY key — slice-union ≡ single shot) inside ONE
    transaction: a mid-slice failure rolls back to the previous complete
