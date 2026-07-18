@@ -30,6 +30,47 @@ def _setup_logging(verbose: bool) -> None:
     logging.getLogger("watchfiles").setLevel(logging.WARNING)
 
 
+def _start_stack_recorder(store_dir: Path, interval: float = 30.0,
+                          stop: threading.Event | None = None) -> threading.Thread:
+    """Black-box flight recorder for `serve`: every `interval` seconds, write
+    every thread's live stack to <store>/diagnostics/stacks_latest.txt
+    (atomic replace, so the file is never half-written). When the server
+    wedges so hard that even HTTP stops answering, this file is the channel
+    that still works — open it in Notepad and paste it into a bug report.
+    The timestamp in the first line doubles as a heartbeat: if it stops
+    refreshing, the whole process is dead or frozen, not just one part.
+    Cosmetic helper — it must never fail real work."""
+    import time
+
+    from .ingest import thread_stacks_text
+
+    diag = Path(store_dir) / "diagnostics"
+    path = diag / "stacks_latest.txt"
+
+    def loop() -> None:
+        while stop is None or not stop.is_set():
+            try:
+                diag.mkdir(parents=True, exist_ok=True)
+                tmp = path.with_suffix(".txt.tmp")
+                tmp.write_text(
+                    f"snapshot written {time.strftime('%Y-%m-%d %H:%M:%S')} "
+                    f"(refreshed every {interval:.0f}s while the server runs; "
+                    "if this time is old, the process is dead or frozen)\n\n"
+                    + thread_stacks_text(),
+                    encoding="utf-8")
+                os.replace(tmp, path)
+            except Exception:  # noqa: BLE001 — the recorder must never hurt the flight
+                pass
+            if stop is None:
+                time.sleep(interval)
+            elif stop.wait(interval):
+                return
+
+    t = threading.Thread(target=loop, daemon=True, name="mrfx-stack-recorder")
+    t.start()
+    return t
+
+
 def _watcher_loop(cfg: MrfxConfig, store: Store, stop: threading.Event) -> None:
     """Inbox watcher: any file event triggers a scan pass. A bad file never
     kills this loop (scan_inbox isolates per-file failures)."""
@@ -144,6 +185,7 @@ def cmd_serve(cfg: MrfxConfig, args) -> int:
         threading.Thread(target=lambda: store.rebuild_rollups(),
                          name="mrfx-rollup-catchup", daemon=True).start()
     stop = threading.Event()
+    _start_stack_recorder(store.dir, stop=stop)
     threading.Thread(
         target=_watcher_loop, args=(cfg, store, stop), name="mrfx-watcher", daemon=True
     ).start()
@@ -179,7 +221,9 @@ def cmd_serve(cfg: MrfxConfig, args) -> int:
           f"  store: {Path(cfg.store_dir).resolve()}  ({n_files:,} file(s) ingested)\n"
           f"  inbox: {cfg.inbox_dir}  (drop .json / .json.gz / .zip here)\n"
           f"{spill_line}"
-          f"  or paste MRF/TOC URLs on the Files tab — downloads run automatically\n")
+          f"  or paste MRF/TOC URLs on the Files tab — downloads run automatically\n"
+          f"  if the app ever freezes: open {store.dir / 'diagnostics' / 'stacks_latest.txt'}\n"
+          f"  in Notepad and send its contents (auto-refreshed every 30s)\n")
     try:
         uvicorn.run(app, host="127.0.0.1", port=cfg.port, log_level="warning")
     finally:

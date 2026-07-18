@@ -688,3 +688,35 @@ def test_debug_stacks_endpoint(cfg, store):
                  if isinstance(rt, APIRoute) and rt.path == "/api/debug/stacks")
     assert asyncio.iscoroutinefunction(route.endpoint), (
         "debug_stacks must not depend on a threadpool worker being free")
+
+
+def test_stack_recorder_writes_and_refreshes(tmp_path):
+    # The flight recorder is the diagnosis channel of last resort — when the
+    # server is so wedged even HTTP is dead, <store>/diagnostics/
+    # stacks_latest.txt must exist, contain thread stacks, and keep
+    # refreshing (its heartbeat is how a dead process is distinguished
+    # from a jammed one).
+    import threading
+    import time
+
+    from mrfx.cli import _start_stack_recorder
+
+    stop = threading.Event()
+    _start_stack_recorder(tmp_path, interval=0.2, stop=stop)
+    try:
+        path = tmp_path / "diagnostics" / "stacks_latest.txt"
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not path.exists():
+            time.sleep(0.05)
+        assert path.exists(), "recorder never wrote its first snapshot"
+        text = path.read_text(encoding="utf-8")
+        assert "snapshot written" in text and "--- thread " in text
+        first_mtime = path.stat().st_mtime_ns
+        while time.monotonic() < deadline:
+            if path.stat().st_mtime_ns != first_mtime:
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError("recorder never refreshed the snapshot")
+    finally:
+        stop.set()

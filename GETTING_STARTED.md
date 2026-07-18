@@ -688,6 +688,17 @@ them in one place, grouped by where you'll hit them.
   file, a saturated disk — check Task Manager → Performance → Disk). If it
   repeats for hours *and* the disk shows no activity, press Ctrl-C and start
   again: the file re-queues, downloads resume mid-file, and nothing is lost.
+- **The app is frozen and you want to know why (or report it)** — three
+  channels, in order of preference: (1) open
+  `http://localhost:8377/api/debug/stacks` in the browser — it answers even
+  when the rest of the dashboard is jammed; (2) if the browser can't reach
+  the app at all, open `data\mrfx_store\diagnostics\stacks_latest.txt` in
+  Notepad — the server rewrites it every 30 seconds with the same diagnosis,
+  and the timestamp on its first line tells you whether the process is even
+  alive; (3) if both the counter and the extracted-MB number freeze for ~30
+  minutes, the log prints the full diagnosis by itself. Paste whichever you
+  got into a bug report — it names the exact line every part of the program
+  is sitting on.
 - **Log says `rollup … partition 15/15` and then goes quiet for minutes** —
   normal, not stuck. Each partition line prints *before* that slice runs, and
   after the last one the whole result is written into the database file — the
