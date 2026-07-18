@@ -15,7 +15,9 @@ if (-not ($IsWindows -or $env:OS -eq 'Windows_NT')) {
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
 $script:ModulePath = Join-Path $PSScriptRoot 'OrderReferring\OrderReferring.psm1'
+$script:RmModulePath = Join-Path $PSScriptRoot 'ReferralMap\ReferralMap.psm1'
 Import-Module $script:ModulePath -Force
+Import-Module $script:RmModulePath -Force
 
 # ---------------------------------------------------------------------------
 # Window layout
@@ -163,6 +165,47 @@ $xaml = @'
               Text="Snapshots accumulate automatically each time CMS publishes an update. Two or more are needed to compare."/>
         </Grid>
       </TabItem>
+      <!-- ============ Referral map tab ============ -->
+      <TabItem Header="  Referral map (2015)  ">
+        <Grid Margin="10">
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="5*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="6*"/>
+            <RowDefinition Height="Auto"/>
+          </Grid.RowDefinitions>
+          <TextBlock Grid.Row="0" TextWrapping="Wrap" Foreground="#333" Margin="0,0,0,6"
+              Text="Enter a ZIP code to see which providers historically fed the most Medicare patients into each outpatient rehab clinic in that area. Built from the newest public CMS shared-patient release (Jan–Sep 2015, 30-day window) joined with the live NPPES registry — it maps the structure of the referral market, not current volumes."/>
+          <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,6">
+            <TextBlock Text="ZIP:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+            <TextBox x:Name="RmZipBox" Width="100" Height="28" VerticalContentAlignment="Center"
+                     MaxLength="6" ToolTip="5-digit ZIP, or a prefix like 630* for a wider area"/>
+            <CheckBox x:Name="RmOrgOnly" Content="Clinics (organizations) only" VerticalAlignment="Center"
+                      Margin="14,0,0,0" ToolTip="Unchecked: also includes individual PT/OT/SLP providers (solo practices bill under individual NPIs)"/>
+            <Button x:Name="RmRunButton" Content="Map referral sources" Padding="14,5" Margin="14,0,0,0"/>
+            <Button x:Name="RmDownloadButton" Content="Download CMS dataset" Padding="10,5" Margin="10,0,0,0"/>
+            <TextBlock x:Name="RmDataStatus" VerticalAlignment="Center" Margin="12,0,0,0" Foreground="#666"/>
+          </StackPanel>
+          <DataGrid Grid.Row="2" x:Name="RmClinicGrid" IsReadOnly="True" AutoGenerateColumns="True"
+                    CanUserAddRows="False" GridLinesVisibility="Horizontal"
+                    HeadersVisibility="Column" EnableRowVirtualization="True"/>
+          <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="0,6,0,4">
+            <TextBlock x:Name="RmSourceLabel" Text="Referral sources (select a clinic above to filter):"
+                       VerticalAlignment="Center"/>
+            <Button x:Name="RmExportClinicsButton" Content="Export clinics..." Padding="10,4"
+                    Margin="14,0,0,0" IsEnabled="False"/>
+            <Button x:Name="RmExportSourcesButton" Content="Export sources..." Padding="10,4"
+                    Margin="8,0,0,0" IsEnabled="False"/>
+          </StackPanel>
+          <DataGrid Grid.Row="4" x:Name="RmSourceGrid" IsReadOnly="True" AutoGenerateColumns="True"
+                    CanUserAddRows="False" GridLinesVisibility="Horizontal"
+                    HeadersVisibility="Column" EnableRowVirtualization="True"/>
+          <TextBlock Grid.Row="5" x:Name="RmSummary" Margin="0,6,0,0" Foreground="#333" TextWrapping="Wrap"
+              Text="One-time setup: click 'Download CMS dataset' (~356 MB download, ~1.7 GB on disk)."/>
+        </Grid>
+      </TabItem>
     </TabControl>
 
     <!-- Footer: honesty note -->
@@ -183,7 +226,10 @@ foreach ($name in @(
     'FlagPartB', 'FlagDme', 'FlagHha', 'FlagPmd', 'FlagHospice', 'SearchGrid', 'SearchSummary',
     'NpiListBox', 'LoadNpiFileButton', 'BatchCheckButton', 'ExportBatchButton', 'BatchGrid', 'BatchSummary',
     'OldSnapCombo', 'NewSnapCombo', 'ChangeTypeCombo', 'CompareButton', 'ExportChangesButton',
-    'ChangesGrid', 'ChangesSummary'
+    'ChangesGrid', 'ChangesSummary',
+    'RmZipBox', 'RmOrgOnly', 'RmRunButton', 'RmDownloadButton', 'RmDataStatus',
+    'RmClinicGrid', 'RmSourceLabel', 'RmExportClinicsButton', 'RmExportSourcesButton',
+    'RmSourceGrid', 'RmSummary'
 )) {
     $ui[$name] = $window.FindName($name)
     if (-not $ui[$name]) { throw "Internal error: UI element '$name' not found." }
@@ -197,6 +243,7 @@ $script:Data = $null              # in-memory List[OrfProvider] (current snapsho
 $script:LastSearchResults = @()   # full result sets kept for export
 $script:LastBatchResults = @()
 $script:LastChangeResults = @()
+$script:RmResult = $null          # last referral-map result object
 $script:Busy = $false
 $script:Jobs = New-Object System.Collections.ArrayList
 $script:MaxGridRows = 5000
@@ -210,7 +257,8 @@ function Set-Status([string]$Text) { $ui.StatusText.Text = $Text }
 function Set-Busy([bool]$On, [string]$Message) {
     $script:Busy = $On
     foreach ($b in @($ui.UpdateButton, $ui.SearchButton, $ui.BatchCheckButton,
-                     $ui.CompareButton, $ui.LoadNpiFileButton)) {
+                     $ui.CompareButton, $ui.LoadNpiFileButton,
+                     $ui.RmRunButton, $ui.RmDownloadButton)) {
         $b.IsEnabled = -not $On
     }
     $window.Cursor = if ($On) { [System.Windows.Input.Cursors]::Wait } else { $null }
@@ -551,10 +599,144 @@ $ui.ExportChangesButton.Add_Click({
 })
 
 # ---------------------------------------------------------------------------
+# Referral map tab
+# ---------------------------------------------------------------------------
+
+$script:RmClinicCols = @('NPI', 'Name', 'Type', 'Taxonomy', 'City', 'State', 'Zip',
+                         'ReferralSources', 'SharedPatients', 'SameDay', 'ExistedInDataYear')
+$script:RmSourceCols = @('SourceNPI', 'SourceName', 'SourceSpecialty', 'SourceCity', 'SourceState',
+                         'ClinicNPI', 'ClinicName', 'SharedPatients', 'SharedEvents', 'SameDay')
+
+function Update-RmStatus {
+    $status = Get-RmStatus
+    if ($status.DatasetReady) {
+        $ui.RmDataStatus.Text = 'Dataset ready ({0}, {1}-day window)' -f $status.Year, $status.Interval
+        $ui.RmDownloadButton.Visibility = 'Collapsed'
+    } else {
+        $ui.RmDataStatus.Text = 'Dataset not downloaded yet'
+        $ui.RmDownloadButton.Visibility = 'Visible'
+    }
+}
+
+function Export-RmWithDialog {
+    param([object[]]$Rows, [string]$SuggestedName, [string]$Description)
+    if (-not $Rows -or $Rows.Count -eq 0) { Show-ErrorBox 'Nothing to export yet — run a map first.'; return }
+    $dialog = New-Object Microsoft.Win32.SaveFileDialog
+    $dialog.Filter = 'CSV files (*.csv)|*.csv'
+    $dialog.FileName = $SuggestedName
+    if ($dialog.ShowDialog($window)) {
+        try {
+            $notes = if ($script:RmResult) { $script:RmResult.Notes } else { @() }
+            $result = $Rows | Export-RmResult -Path $dialog.FileName -Notes $notes -Description $Description
+            Set-Status "Exported $('{0:N0}' -f $result.Rows) rows to $($result.Path) (with methodology sidecar)."
+        } catch {
+            Show-ErrorBox "Export failed: $($_.Exception.Message)"
+        }
+    }
+}
+
+$ui.RmDownloadButton.Add_Click({
+    if ($script:Busy) { return }
+    Set-Busy $true 'Downloading the CMS shared-patient dataset (~356 MB; this can take several minutes)...'
+    $ui.RmSummary.Text = 'Downloading... the app stays usable; this tab will report when the dataset is ready.'
+    Invoke-Async -Kind 'rm-download' -Params @{ RmModulePath = $script:RmModulePath } `
+        -WorkerScript 'param($RmModulePath) Import-Module $RmModulePath; Save-RmDataset' `
+        -OnDone {
+            param($result)
+            Set-Busy $false $null
+            Update-StatusFromDisk
+            Update-RmStatus
+            $ui.RmSummary.Text = $result[0].Message + ' Enter a ZIP and click "Map referral sources".'
+        } `
+        -OnFail {
+            param($message)
+            Set-Busy $false $null
+            Update-StatusFromDisk
+            Update-RmStatus
+            Show-ErrorBox $message
+        }
+})
+
+$ui.RmRunButton.Add_Click({
+    if ($script:Busy) { return }
+    $zip = $ui.RmZipBox.Text.Trim()
+    if ($zip -notmatch '^\d{3,5}\*?$' -or ($zip -match '^\d{1,4}$' -and $zip.Length -lt 5)) {
+        Show-ErrorBox 'Enter a 5-digit ZIP code, or a prefix ending in * (e.g. 630*) for a wider area.'
+        return
+    }
+    if (-not (Get-RmStatus).DatasetReady) {
+        Show-ErrorBox "The CMS dataset isn't downloaded yet — click 'Download CMS dataset' first (one-time, ~356 MB)."
+        return
+    }
+    Set-Busy $true "Mapping referral sources for $zip — NPPES lookup, then a scan of ~35M provider pairs (1-2 minutes)..."
+    Invoke-Async -Kind 'rm-run' -Params @{
+            RmModulePath = $script:RmModulePath
+            Zip = $zip
+            OrgOnly = [bool]$ui.RmOrgOnly.IsChecked
+        } `
+        -WorkerScript 'param($RmModulePath, $Zip, $OrgOnly) Import-Module $RmModulePath; Get-RmReferralMap -Zip $Zip -OrganizationsOnly:$OrgOnly' `
+        -OnDone {
+            param($result)
+            Set-Busy $false $null
+            $map = $result[0]
+            $script:RmResult = $map
+            $clinics = @($map.Clinics)
+            $sources = @($map.Sources)
+            $ui.RmClinicGrid.ItemsSource = (ConvertTo-DataTable -Rows $clinics -Columns $script:RmClinicCols).DefaultView
+            $ui.RmSourceGrid.ItemsSource = (ConvertTo-DataTable -Rows $sources -Columns $script:RmSourceCols).DefaultView
+            $ui.RmSourceLabel.Text = 'Referral sources — all clinics (select a clinic above to filter):'
+            $ui.RmExportClinicsButton.IsEnabled = ($clinics.Count -gt 0)
+            $ui.RmExportSourcesButton.IsEnabled = ($sources.Count -gt 0)
+            $withVolume = @($clinics | Where-Object { $_.SharedPatients -gt 0 }).Count
+            $tooNew = @($clinics | Where-Object { $_.ExistedInDataYear -like 'No*' }).Count
+            $ui.RmSummary.Text = ("ZIP $($map.Zip): $($clinics.Count) rehab provider(s) found in NPPES; " +
+                "$withVolume had inbound shared-patient volume in the 2015 data " +
+                "($('{0:N0}' -f $sources.Count) source relationships)." +
+                $(if ($tooNew -gt 0) { " $tooNew did not have an NPI yet in 2015 (their zeros mean 'did not exist', not 'no referrals')." } else { '' }) +
+                ' Reminder: 2015 vintage — market structure, not current volumes; pairs under 11 patients/year are excluded by CMS. Tip: a prefix like 630* widens the area.')
+            Set-Status "Referral map for $($map.Zip) complete."
+        } `
+        -OnFail {
+            param($message)
+            Set-Busy $false $null
+            Show-ErrorBox $message
+        }
+})
+
+$ui.RmClinicGrid.Add_SelectionChanged({
+    if (-not $script:RmResult) { return }
+    $row = $ui.RmClinicGrid.SelectedItem
+    if ($row -is [System.Data.DataRowView]) {
+        $npi = [string]$row.Row['NPI']
+        $filtered = @($script:RmResult.Sources | Where-Object { $_.ClinicNPI -eq $npi })
+        $ui.RmSourceGrid.ItemsSource = (ConvertTo-DataTable -Rows $filtered -Columns $script:RmSourceCols).DefaultView
+        $ui.RmSourceLabel.Text = "Referral sources for $([string]$row.Row['Name']) ($npi) — $($filtered.Count) source(s):"
+    } else {
+        $ui.RmSourceGrid.ItemsSource = (ConvertTo-DataTable -Rows @($script:RmResult.Sources) -Columns $script:RmSourceCols).DefaultView
+        $ui.RmSourceLabel.Text = 'Referral sources — all clinics (select a clinic above to filter):'
+    }
+})
+
+$ui.RmExportClinicsButton.Add_Click({
+    if (-not $script:RmResult) { return }
+    Export-RmWithDialog -Rows @($script:RmResult.Clinics) `
+        -SuggestedName "rehab-clinics-$($script:RmResult.Zip.TrimEnd('*')).csv" `
+        -Description "Outpatient rehab providers in ZIP $($script:RmResult.Zip), ranked by inbound shared-patient volume (CMS 2015 shared-patient data)"
+})
+
+$ui.RmExportSourcesButton.Add_Click({
+    if (-not $script:RmResult) { return }
+    Export-RmWithDialog -Rows @($script:RmResult.Sources) `
+        -SuggestedName "referral-sources-$($script:RmResult.Zip.TrimEnd('*')).csv" `
+        -Description "Referral sources feeding outpatient rehab providers in ZIP $($script:RmResult.Zip) (CMS 2015 shared-patient data)"
+})
+
+# ---------------------------------------------------------------------------
 # Startup
 # ---------------------------------------------------------------------------
 
 Update-StatusFromDisk
+Update-RmStatus
 if (Get-OrfLatestSnapshot) { Start-DataLoad }
 
 $window.Add_Closed({ $timer.Stop() })
