@@ -1485,6 +1485,21 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     def catalog():
         return catalog_json()
 
+    @app.get("/api/debug/stacks", response_class=PlainTextResponse)
+    def debug_stacks():
+        """Live stack of every thread in the server process — the decisive
+        stall diagnostic. When the app burns CPU with nothing in the log, this
+        names the exact line every thread sits on (lock waits included).
+        Localhost-only app; text is for pasting into a bug report."""
+        import sys as _sys
+        import traceback as _tb
+        names = {t.ident: t.name for t in threading.enumerate()}
+        out = [f"mrfx {__version__} — {len(names)} threads\n"]
+        for tid, frame in sorted(_sys._current_frames().items()):
+            out.append(f"--- thread {names.get(tid, tid)} ---")
+            out.append("".join(_tb.format_stack(frame)))
+        return PlainTextResponse("\n".join(out))
+
     @app.exception_handler(Exception)
     async def unhandled(request: Request, exc: Exception):
         log.exception("API error on %s", request.url.path)

@@ -663,3 +663,14 @@ def test_entity_map_edit_survives_long_open_snapshot(store):
         old.execute("ROLLBACK")
         old.close()
     assert store.entity_map() == {"333333333": "D"}
+
+
+def test_debug_stacks_endpoint(cfg, store):
+    from fastapi.testclient import TestClient
+
+    from mrfx.api import create_app
+
+    c = TestClient(create_app(cfg, store))
+    r = c.get("/api/debug/stacks")
+    assert r.status_code == 200
+    assert "--- thread " in r.text and "threading.py" in r.text

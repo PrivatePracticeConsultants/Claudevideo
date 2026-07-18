@@ -404,14 +404,22 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
                 elif (now - last_advance > stall_warn
                         and now - warned_at > stall_warn):
                     warned_at = now
+                    # ground truth beats the chunk counter: if the worker's
+                    # output parquet is GROWING, rows are being extracted no
+                    # matter what any frozen counter says
+                    try:
+                        out_mb = tmp_out.stat().st_size / 1e6
+                    except OSError:
+                        out_mb = 0.0
                     log.warning(
-                        "%s: no parse progress for %.0f minutes (stuck at chunk "
-                        "%s). The worker process is still attached; long quiet "
-                        "stretches happen on a single enormous item or a "
-                        "saturated disk. If this repeats for hours with no disk "
-                        "activity, Ctrl-C and restart — the file re-queues and "
-                        "everything else resumes.",
-                        name, (now - last_advance) / 60, last if last >= 0 else "0")
+                        "%s: no chunk advance for %.0f minutes (chunk %s); "
+                        "extracted output so far: %.0f MB. If that MB number "
+                        "GROWS between these messages, extraction is working "
+                        "and only the counter is quiet (huge single section). "
+                        "If it stays frozen too for hours, Ctrl-C and restart "
+                        "— the file re-queues and everything else resumes.",
+                        name, (now - last_advance) / 60,
+                        last if last >= 0 else "0", out_mb)
 
     try:
         try:
