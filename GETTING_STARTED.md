@@ -719,12 +719,14 @@ them in one place, grouped by where you'll hit them.
   of the same book under different filenames from before the dedup fix; if
   so, `mrfx reset --confirm` and re-queue (dedup now catches mirrors even in
   parallel).
-- **Dashboard numbers aren't updating during a big run** — deliberate. On a
-  big store an analytics refresh is a heavy full scan, so mid-grind it runs at
-  most once per a self-chosen interval (about 4× however long the last refresh
-  took — the log prints the schedule: "next mid-grind refresh in ~N min"), and
-  once more when the queue finishes. In between, the disk belongs to
-  downloading and extraction; the Files tab still updates live. If numbers
+- **Dashboard numbers aren't updating during a big run** — they catch up in
+  batches, and each catch-up now recomputes only the slice for the payers
+  that just landed (log line: "analytics update … payer slice, not a full
+  rebuild"), which usually takes minutes even on a huge store. Mid-grind the
+  refresh runs at most once per a self-chosen interval (about 4× however
+  long the last one took — the log prints "next mid-grind refresh in ~N
+  min"), and once more when the queue finishes. In between, the disk belongs
+  to downloading and extraction; the Files tab still updates live. If numbers
   stay stale long past the printed schedule, look at the `mrfx serve` terminal
   window: a "rollup rebuild failed" line there usually means low disk — free
   some space; the raw data is safe and analytics catch up on the next

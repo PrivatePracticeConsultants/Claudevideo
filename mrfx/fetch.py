@@ -1463,7 +1463,17 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
         last_rebuild_at = time.monotonic()
         log.info("updating analytics rollups (%d newly ingested file(s))...", n)
         try:
-            store.rebuild_rollups()
+            try:
+                # payer-slice update: cost scales with the new files' payers,
+                # not the whole store (an hour-long full scan on a big book)
+                store.update_rollups_incremental()
+            except Exception as e:  # noqa: BLE001 — incremental is an
+                # optimization with strict preconditions (prior full build,
+                # current schema, payer recorded); the full rebuild is the
+                # always-correct fallback
+                log.info("incremental analytics update unavailable (%s) — "
+                         "running a full rebuild", e)
+                store.rebuild_rollups()
         except Exception:  # noqa: BLE001 — rollups retry on the next batch
             rollup_failures += 1
             if rollup_failures >= 3:

@@ -492,8 +492,6 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
         return {"status": "done", "rows": 0, "payer": pf.payer, "note": msg}
 
     store.finalize_rates_part(name, tmp_out, payload["rows_written"])
-    if rebuild_rollups:
-        _rebuild_rollups_best_effort(store, name)
     store.upsert_file(
         name,
         payer=payload["payer"],
@@ -505,6 +503,12 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
         qa=qa_report(store, payload["qa"], name),
         finished_at=_now(),
     )
+    # rollup AFTER the done-upsert: the incremental update finds its work by
+    # "done files newer than the coverage marker" — called before the upsert
+    # it would recompute the PREVIOUS file's slice and miss this one entirely
+    # (a crash between the two leaves the marker behind; serve-start catches up)
+    if rebuild_rollups:
+        _rebuild_rollups_best_effort(store, name)
     _finish_file(cfg, path, ok=True)
     if payload["ref_groups_skipped"]:
         log.warning("%s: %d rate groups skipped — missing provider reference file",
@@ -572,18 +576,34 @@ def _forget_file_locked(cfg: MrfxConfig, store: Store, filename: str) -> dict:
         except OSError as e:
             log.warning("forget %s: could not delete %s: %s", filename, p, e)
     info = store.forget_file(filename)
-    _rebuild_rollups_best_effort(store, filename)
+    # full rebuild on purpose: a removal leaves no delta for the incremental
+    # path to key on — see _rebuild_rollups_best_effort's docstring
+    _rebuild_rollups_best_effort(store, filename, incremental=False)
     info["bytes"] += freed_raw
     log.info("forgot %s: %d rows and %.1f MB removed", filename, info["rows"], info["bytes"] / 1e6)
     return info
 
 
-def _rebuild_rollups_best_effort(store: Store, name: str) -> None:
+def _rebuild_rollups_best_effort(store: Store, name: str,
+                                 incremental: bool = True) -> None:
     """The parquet part is already durable when this runs: an analytics
     rebuild failing (disk pressure, memory) must NOT fail the file — hours of
     parsing would be retried for data that already landed. Rollups refresh on
-    the next successful rebuild, same contract as the queue's batched path."""
+    the next successful rebuild, same contract as the queue's batched path.
+
+    incremental=False forces the full rebuild — required after `forget`: a
+    REMOVED file leaves no delta rows behind, so the incremental path (which
+    derives affected slices from files newer than the coverage marker) would
+    see nothing to do and leave the removed rows in every dashboard number."""
     try:
+        if incremental:
+            try:
+                store.update_rollups_incremental()
+                return
+            except Exception as e:  # noqa: BLE001 — strict-precondition
+                # optimization; the full rebuild is the always-correct fallback
+                log.info("%s: incremental analytics update unavailable (%s) — "
+                         "running a full rebuild", name, e)
         store.rebuild_rollups()
     except Exception:  # noqa: BLE001
         log.exception(
@@ -739,8 +759,6 @@ def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight
                 result = parser.parse(stream)
         if progress is not None:
             progress.finish()
-        if rebuild_rollups:
-            _rebuild_rollups_best_effort(store, name)
         store.upsert_file(
             name,
             payer=result.payer,
@@ -752,6 +770,10 @@ def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight
             qa=qa_report(store, result.qa.to_dict(), name),
             finished_at=_now(),
         )
+        # rollup AFTER the done-upsert — same reason as the pooled path: the
+        # incremental update keys on done files newer than the coverage marker
+        if rebuild_rollups:
+            _rebuild_rollups_best_effort(store, name)
         _finish_file(cfg, path, ok=True)
         if result.ref_groups_skipped:
             log.warning(

@@ -1569,6 +1569,13 @@ class Store:
         # and serve that stale total for the cache TTL after the swap.
         tables = (("tin_directory_tbl",) if names_only
                   else ("rates_by_tin_tbl", "tin_directory_tbl"))
+        self._acquire_rollup_lock(log)
+        try:
+            return self._rebuild_rollups_locked(tables, log)
+        finally:
+            self.rollup_lock.release()
+
+    def _acquire_rollup_lock(self, log) -> None:
         # instrumented lock wait: the stretch between a caller's "updating
         # analytics rollups…" line and the first partition banner had ZERO
         # narration — five silent hours read as a dead app when another
@@ -1579,10 +1586,177 @@ class Store:
                      "finish (%.0f min so far — this is a queue, not a hang; "
                      "downloads and parsing continue meanwhile)",
                      (time.monotonic() - t_wait) / 60)
+
+    def update_rollups_incremental(self) -> float:
+        """Incremental alternative to rebuild_rollups(): recompute ONLY the
+        slices of the materialized rollups that new files can affect, so the
+        cost scales with the ingested payer's data instead of the whole store
+        (a full rebuild over ~86M rows is an hour on a hard drive; a
+        one-payer slice is minutes).
+
+        Correct by the shape of the grain, not by merging aggregates:
+        - rates_by_tin's GROUP BY includes `payer`, so a new file can only
+          change groups belonging to its own payer(s). The affected payers'
+          slices are DELETEd and re-aggregated exactly from raw rows —
+          median(DISTINCT) is not mathematically mergeable, so we recompute
+          it on the slice; results are bit-identical to a full rebuild
+          (regression-tested). Payer-scoping (not payer+month) also heals a
+          re-ingested file whose file_month changed between versions.
+        - tin_directory's grain is `tin_value`; only TINs present in the new
+          files are recomputed (across all payers, exactly).
+        The delta is derived from the store's own coverage marker — every
+        done file newer than rollup_covered_through — so nothing can be
+        silently skipped, and the marker only advances to the delta's own
+        max(finished_at), never past files that finish mid-update.
+
+        Raises (RuntimeError/duckdb.Error) whenever the precondition for an
+        exact delta doesn't hold — no prior full build, rollup schema
+        migration pending, a file with no recorded payer, OOM at max split —
+        and callers fall back to rebuild_rollups(), which is always correct.
+        NOT used by `forget` (removals leave no delta rows to find the
+        affected slices from — forget keeps the full rebuild)."""
+        import logging as _logging
+
+        log = _logging.getLogger(__name__)
+        self._acquire_rollup_lock(log)
         try:
-            return self._rebuild_rollups_locked(tables, log)
+            with self.connect() as con:
+                t_locked = time.monotonic()
+                self._register_views(con)
+                if self._meta_get(con, "rollup_schema_version") != str(ROLLUP_SCHEMA_VERSION):
+                    raise RuntimeError("rollup tables were built by an older "
+                                       "version (or never built)")
+                for tbl in ("rates_by_tin_tbl", "tin_directory_tbl"):
+                    if not con.execute(
+                            "SELECT count(*) FROM information_schema.tables "
+                            "WHERE table_name = ?", [tbl]).fetchone()[0]:
+                        raise RuntimeError(f"{tbl} is not materialized yet")
+                covered = self._meta_get(con, "rollup_covered_through") or ""
+                delta = con.execute(
+                    "SELECT filename, finished_at::VARCHAR "
+                    "FROM files WHERE status = 'done' AND rows_emitted > 0 "
+                    "AND finished_at::VARCHAR > ?", [covered]).fetchall()
+                if not delta:
+                    return 0.0
+                new_covered = max(t for _f, t in delta)
+                q = lambda s: "'" + s.replace("'", "''") + "'"  # noqa: E731
+                files_pred = ("source_file IN ("
+                              + ", ".join(q(f) for f, _t in delta) + ")")
+                # affected payers come from the delta files' ROWS, never from
+                # files.payer: multi-licensee books (Highmark et al.) stamp a
+                # per-row payer that differs from the file-level label, and
+                # scoping by the wrong name would recompute the wrong slice
+                # while the new rows silently never landed (caught by test).
+                payers = [r[0] for r in con.execute(
+                    f"SELECT DISTINCT payer FROM rates WHERE {files_pred}").fetchall()]
+                if any(p is None for p in payers):
+                    raise RuntimeError("a new file has rows with no payer")
+                if not payers:
+                    # the delta files contributed no rows after all (rows_emitted
+                    # said otherwise — trust the parts); full rebuild sorts it out
+                    raise RuntimeError("no rows found for the new files")
+                payer_pred = "payer IN (" + ", ".join(q(p) for p in sorted(payers)) + ")"
+                log.info("analytics update: %d new file(s) — recomputing %d "
+                         "payer slice(s) instead of the whole store", len(delta), len(payers))
+                self._apply_rollup_delta(con, payer_pred, files_pred, log)
+                con.execute(
+                    "INSERT OR REPLACE INTO meta VALUES ('rollup_covered_through', ?)",
+                    [new_covered])
+                self._enrich_progress_cache = None
+                self.data_generation += 1
+                took = time.monotonic() - t_locked
+                self.last_rollup_build_seconds = took
+                log.info("analytics update finished in %.0fs (payer slice, not "
+                         "a full rebuild)", took)
+                return took
         finally:
             self.rollup_lock.release()
+
+    def _apply_rollup_delta(self, con: duckdb.DuckDBPyConnection, payer_pred: str,
+                            files_pred: str, log) -> None:
+        """Delete-and-recompute the affected rollup slices. Same OOM ladder as
+        the full build (thread cap first, then finer hash partitions); same
+        one-transaction-per-table + CHECKPOINT discipline (a mid-slice failure
+        rolls back to that table's previous complete version)."""
+        try:
+            avail = int(con.execute("SELECT current_setting('threads')").fetchone()[0])
+        except Exception:  # noqa: BLE001 — older duckdb / odd value
+            avail = 1
+        threads = max(1, min(avail, ROLLUP_MAX_THREADS))
+        reset_threads = False
+        try:
+            con.execute(f"SET threads = {threads}")
+            reset_threads = True
+        except duckdb.Error:
+            threads = avail
+        # affected TINs: computed ONCE from the delta files' parts (per-file
+        # parquet stats prune every other file's part from this scan)
+        con.execute("DROP TABLE IF EXISTS __delta_tins")
+        con.execute("CREATE TEMP TABLE __delta_tins AS "
+                    f"SELECT DISTINCT tin_value FROM rates WHERE {files_pred} "
+                    "AND tin_value IS NOT NULL")
+        tin_pred = "tin_value IN (SELECT tin_value FROM __delta_tins)"
+        n_rows = con.execute(
+            f"SELECT count(*) FROM rates WHERE {payer_pred}").fetchone()[0] or 0
+        try:
+            try:
+                self._apply_rollup_delta_sliced(con, payer_pred, tin_pred, n_rows,
+                                                split=1, threads=threads, log=log)
+                return
+            except duckdb.OutOfMemoryException:
+                log.warning("analytics update hit the memory limit; retrying "
+                            "single-threaded with finer partitions")
+            con.execute("SET threads = 1")
+            reset_threads = True
+            for split in (1, 2, 4, 8, 16):
+                try:
+                    self._apply_rollup_delta_sliced(con, payer_pred, tin_pred, n_rows,
+                                                    split=split, threads=1, log=log)
+                    return
+                except duckdb.OutOfMemoryException:
+                    if split == 16:
+                        raise  # caller falls back to the full rebuild's ladder
+                    log.warning("analytics update still over the memory limit "
+                                "at split=%d; subdividing further", split)
+        finally:
+            if reset_threads:
+                try:
+                    con.execute("RESET threads")
+                except duckdb.Error:
+                    pass
+
+    def _apply_rollup_delta_sliced(self, con: duckdb.DuckDBPyConnection, payer_pred: str,
+                                   tin_pred: str, n_rows: int, split: int,
+                                   threads: int, log) -> None:
+        rows_per_part = self._rollup_partition_rows(split, threads)
+        parts = max(1, -(-n_rows // rows_per_part))
+        specs = (
+            ("rates_by_tin_tbl", BY_TIN_QUERY, "billing_code", payer_pred),
+            ("tin_directory_tbl", TIN_DIRECTORY_QUERY, "tin_value", tin_pred),
+        )
+        for tbl, query, key, pred in specs:
+            con.execute("BEGIN TRANSACTION")
+            try:
+                # the slice is deleted and re-aggregated inside ONE txn: a
+                # reader never sees the slice missing, and a failure rolls
+                # back to the previous complete table
+                con.execute(f"DELETE FROM {tbl} WHERE {pred}")
+                for i in range(parts):
+                    part = pred if parts == 1 else f"({pred}) AND hash({key}) % {parts} = {i}"
+                    if parts > 1:
+                        log.info("analytics update %s: partition %d/%d", tbl, i + 1, parts)
+                    con.execute(f"INSERT INTO {tbl} {query.format(part=part)}")
+                con.execute("COMMIT")
+            except Exception:
+                try:
+                    con.execute("ROLLBACK")
+                except duckdb.Error:
+                    pass  # connection already aborted the transaction
+                raise
+            try:
+                con.execute("CHECKPOINT")
+            except duckdb.Error:
+                pass  # another connection's txn can block it; next one catches up
 
     def _rebuild_rollups_locked(self, tables: tuple[str, ...], log) -> float:
         with self.connect() as con:

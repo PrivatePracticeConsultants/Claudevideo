@@ -182,7 +182,17 @@ def cmd_serve(cfg: MrfxConfig, args) -> int:
         log.info("analytics are behind the ingested files (a previous run "
                  "stopped before its batched rollup) — catching up in the "
                  "background")
-        threading.Thread(target=lambda: store.rebuild_rollups(),
+
+        def _catch_up() -> None:
+            try:
+                store.update_rollups_incremental()
+            except Exception as e:  # noqa: BLE001 — incremental is an
+                # optimization; the full rebuild is the always-correct fallback
+                log.info("incremental analytics catch-up unavailable (%s) — "
+                         "running a full rebuild", e)
+                store.rebuild_rollups()
+
+        threading.Thread(target=_catch_up,
                          name="mrfx-rollup-catchup", daemon=True).start()
     stop = threading.Event()
     _start_stack_recorder(store.dir, stop=stop)

@@ -180,7 +180,22 @@ Two codebases live in this repo:
    30M-row store means a ~30M-group aggregation whose spill exceeded 27 GB of
    disk when it was materialized. No `string_agg(DISTINCT …)` in rollups
    (cannot spill); DuckDB `memory_limit` is 40% RAM clamped [2,12] GB.
-   Mid-grind rollup rebuilds are purely TIME-based (`_rollup_due`): one per
+   Ingest-driven refreshes go through `update_rollups_incremental()` first:
+   it recomputes ONLY the payer slices of `rates_by_tin_tbl` (grain includes
+   payer, so groups never cross payers — payer scoping also heals re-ingests
+   whose file_month changed) and only the delta files' TINs in
+   `tin_directory_tbl`. The delta = done files newer than the
+   `rollup_covered_through` marker; affected payers come from the delta
+   files' ROWS (never `files.payer` — multi-licensee books stamp per-row
+   payers). Median(DISTINCT) is not mergeable, so slices are re-aggregated
+   exactly from raw rows: results are bit-identical to a full rebuild
+   (equivalence-tested), measured 104s full vs 9.3s incremental on a
+   2.45M-row 3-payer store. Any precondition failure (no prior full build,
+   schema migration, no rows) raises and the caller falls back to
+   `rebuild_rollups()`. `forget` ALWAYS uses the full rebuild (a removal
+   leaves no delta to key on). The done-upsert must precede the rollup call
+   (the incremental finds its work via the marker; regression-tested).
+   Mid-grind refreshes are purely TIME-based (`_rollup_due`): one per
    adaptive interval of max(90s, `ROLLUP_INTERVAL_MULTIPLE` (4x) × the last
    rebuild's duration), counted from rebuild COMPLETION, plus a final rebuild
    when the queue goes idle. There is deliberately NO count-based ("N files

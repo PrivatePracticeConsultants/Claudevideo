@@ -757,3 +757,102 @@ def test_scan_inbox_rebuilds_once_per_pass(cfg, store, monkeypatch):
     results = ingest_mod.scan_inbox(cfg, store)
     assert [r["status"] for r in results].count("done") == 2
     assert len(calls) == 1
+
+
+def _payer_part(store, fname, payer, rows):
+    # rows: (tin, npi, code, month, rate)
+    recs = [dict(
+        payer=payer, tin_value=t, tin_type="ein", npi=n, source_file=fname,
+        billing_code=c, billing_code_type="CPT", discipline="pt", is_timed=True,
+        billing_class="professional", negotiated_rate=r, negotiated_type="negotiated",
+        is_dollar_rate=True, modifier_set=[], service_code=["11"], file_month=m,
+        last_updated_on="2026-06-01", expiration_date=None, schema_version="2.0.0",
+        tin_is_really_npi=False, state="MO",
+    ) for (t, n, c, m, r) in rows]
+    with store.rates_part_writer(fname) as w:
+        w.write_batch(recs)
+    store.upsert_file(fname, payer=payer, file_type="in_network", status="done",
+                      rows_emitted=len(recs))
+
+
+def _rollup_snapshot(store):
+    with store.connect() as con:
+        # source_files is any_value() — legitimately nondeterministic for a
+        # group spanning several files, so it's excluded from the comparison
+        spine = con.execute(
+            "SELECT * EXCLUDE (source_files) FROM rates_by_tin_tbl "
+            "ORDER BY payer, tin_value, billing_code, file_month, modifier_set, "
+            "billing_class, service_code_set, is_dollar_rate, tin_is_really_npi"
+        ).fetchall()
+        directory = con.execute(
+            "SELECT * FROM tin_directory_tbl ORDER BY tin_value").fetchall()
+    return spine, directory
+
+
+def test_incremental_rollup_matches_full_rebuild(cfg, store):
+    # Numbers correctness IS the product: the payer-slice incremental update
+    # must produce BIT-IDENTICAL rollups to a full rebuild — including a
+    # group that spans an old file and a new file (median over both).
+    import duckdb as _duckdb  # noqa: F401
+
+    _payer_part(store, "a1.json", "Alpha", [
+        ("431111111", "1111111111", "97110", "2026-06", 50.0),
+        ("431111111", "1111111112", "97110", "2026-06", 60.0),
+        ("432222222", "1111111113", "97112", "2026-06", 70.0),
+    ])
+    store.upsert_file("a1.json", finished_at="2026-07-01 10:00:00")
+    _payer_part(store, "b1.json", "Beta", [
+        ("433333333", "1111111114", "97110", "2026-06", 80.0),
+    ])
+    store.upsert_file("b1.json", finished_at="2026-07-01 10:00:01")
+    store.rebuild_rollups()
+    assert not store.rollups_stale()
+
+    # a new Alpha file: a new month, a brand-new TIN, and an overlapping
+    # (same tin/code/month as a1) rate that must merge into the group median
+    _payer_part(store, "a2.json", "Alpha", [
+        ("431111111", "1111111111", "97110", "2026-07", 55.0),
+        ("434444444", "1111111115", "97110", "2026-07", 90.0),
+        ("431111111", "1111111116", "97110", "2026-06", 70.0),
+    ])
+    store.upsert_file("a2.json", finished_at="2026-07-01 11:00:00")
+    assert store.rollups_stale()
+
+    took = store.update_rollups_incremental()
+    assert took > 0.0 and not store.rollups_stale()
+    inc = _rollup_snapshot(store)
+
+    # cross-file group: median of {50, 60, 70} = 60, 2 source files, 3 NPIs
+    with store.connect() as con:
+        row = con.execute(
+            "SELECT negotiated_rate, source_count, npi_count FROM rates_by_tin_tbl "
+            "WHERE tin_value = '431111111' AND file_month = '2026-06'").fetchone()
+    assert row == (60.0, 2, 3)
+
+    store.rebuild_rollups()
+    assert inc == _rollup_snapshot(store)
+
+    # nothing new -> the incremental update is a fast no-op
+    assert store.update_rollups_incremental() == 0.0
+
+
+def test_incremental_rollup_falls_back_when_preconditions_missing(cfg, store):
+    # no prior full build (no schema marker / tables) -> must raise so
+    # callers run the always-correct full rebuild instead
+    _payer_part(store, "x.json", "Gamma", [
+        ("435555555", "1111111117", "97110", "2026-06", 40.0),
+    ])
+    store.upsert_file("x.json", finished_at="2026-07-01 10:00:00")
+    with pytest.raises(Exception):
+        store.update_rollups_incremental()
+    # rollup tables built by an OLDER schema version -> raise, so the
+    # migration goes through the full rebuild (which re-stamps the marker)
+    store.rebuild_rollups()
+    _payer_part(store, "y.json", "Delta", [
+        ("436666666", "1111111118", "97110", "2026-06", 45.0),
+    ])
+    store.upsert_file("y.json", finished_at="2026-07-02 10:00:00")
+    with store.connect() as con:
+        con.execute("INSERT OR REPLACE INTO meta VALUES ('rollup_schema_version', '1')")
+    with pytest.raises(Exception):
+        store.update_rollups_incremental()
