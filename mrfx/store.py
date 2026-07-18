@@ -604,6 +604,16 @@ class Store:
         self._tmp_dir.mkdir(parents=True, exist_ok=True)
         self.db_path = self.dir / "mrfx.duckdb"
         self.write_lock = threading.Lock()
+        # Rollup rebuilds serialize against EACH OTHER here — NOT against the
+        # write_lock. Holding write_lock for a rebuild froze the whole
+        # pipeline: claiming a queue row (downloaders AND parsers) needs
+        # write_lock, so a slow 86M-row directory rebuild stopped every
+        # download and every parse dispatch for its full duration (seen live:
+        # 12 threads parked on write_lock behind one enrichment rebuild, CPU
+        # burning, zero extraction). Rebuild transactions touch only the
+        # rollup tables; the small writers touch url_queue/files/etc — DuckDB
+        # commits disjoint-table transactions concurrently without conflict.
+        self.rollup_lock = threading.Lock()
         self._sweep_orphan_tmps()
         if memory_limit_gb is not None:
             # explicit override from config (duckdb_memory_gb): trust the user
@@ -632,6 +642,7 @@ class Store:
         # UNION) — far too heavy to run on every 15s dashboard poll of a big
         # store; cache it briefly ((monotonic, result), see enrichment_progress)
         self._enrich_progress_cache: tuple[float, dict] | None = None
+        self._enrich_progress_lock = threading.Lock()  # single-flight for the scan
         # `keep_warm` (serve only) pins ONE connection open for the process's
         # lifetime. DuckDB's memory/temp settings are GLOBAL to the in-process
         # database instance and persist while any connection holds it, so with a
@@ -712,6 +723,17 @@ class Store:
             return row[0] if row else None
         except duckdb.Error:
             return None
+
+    def directory_ready(self) -> bool:
+        """True when a materialized tin_directory table exists — the boot-time
+        forced name refresh has nothing to add unless new names arrived."""
+        try:
+            with self.connect() as con:
+                return bool(con.execute(
+                    "SELECT count(*) FROM information_schema.tables "
+                    "WHERE table_name = 'tin_directory_tbl'").fetchone()[0])
+        except Exception:  # noqa: BLE001
+            return False
 
     def rollups_stale(self) -> bool:
         """True when a done rate file finished AFTER the last committed rollup
@@ -1552,15 +1574,15 @@ class Store:
         # narration — five silent hours read as a dead app when another
         # rebuild (or a finishing ingest) held this lock. Say so, per minute.
         t_wait = time.monotonic()
-        while not self.write_lock.acquire(timeout=60.0):
-            log.info("analytics rebuild: waiting its turn for the store lock "
-                     "(%.0f min so far — another rebuild or a finishing ingest "
-                     "holds it; this is a queue, not a hang)",
+        while not self.rollup_lock.acquire(timeout=60.0):
+            log.info("analytics rebuild: waiting for the previous rebuild to "
+                     "finish (%.0f min so far — this is a queue, not a hang; "
+                     "downloads and parsing continue meanwhile)",
                      (time.monotonic() - t_wait) / 60)
         try:
             return self._rebuild_rollups_locked(tables, log)
         finally:
-            self.write_lock.release()
+            self.rollup_lock.release()
 
     def _rebuild_rollups_locked(self, tables: tuple[str, ...], log) -> float:
         with self.connect() as con:
@@ -1862,36 +1884,46 @@ class Store:
         cached = self._enrich_progress_cache
         if cached is not None and (time.monotonic() - cached[0]) < max_age_seconds:
             return cached[1]
-        with self.connect() as con:
-            total = con.execute(
-                """
-                SELECT count(*) FROM (
-                    SELECT DISTINCT npi FROM (
+        # single-flight: on a big store this scan can outlive the poll
+        # interval, and every 15s poll then stacked ANOTHER identical scan
+        # (seen live: four threads in this query at once). One computes;
+        # the rest serve the last known value, stale is fine for a banner.
+        if not self._enrich_progress_lock.acquire(blocking=False):
+            return cached[1] if cached is not None else {
+                "total": 0, "enriched": 0, "named": 0, "remaining": 0}
+        try:
+            with self.connect() as con:
+                total = con.execute(
+                    """
+                    SELECT count(*) FROM (
+                        SELECT DISTINCT npi FROM (
+                            SELECT npi FROM rates
+                            UNION
+                            SELECT tin_value AS npi FROM rates
+                            WHERE tin_is_really_npi AND tin_value IS NOT NULL
+                        ) WHERE regexp_full_match(npi, '[0-9]{10}')
+                    )
+                    """
+                ).fetchone()[0]
+                enriched, named = con.execute(
+                    """
+                    SELECT count(*), count(*) FILTER (WHERE org_name IS NOT NULL)
+                    FROM npi_directory
+                    WHERE regexp_full_match(npi, '[0-9]{10}')  -- same population as `total`
+                      AND npi IN (
                         SELECT npi FROM rates
                         UNION
-                        SELECT tin_value AS npi FROM rates
-                        WHERE tin_is_really_npi AND tin_value IS NOT NULL
-                    ) WHERE regexp_full_match(npi, '[0-9]{10}')
-                )
-                """
-            ).fetchone()[0]
-            enriched, named = con.execute(
-                """
-                SELECT count(*), count(*) FILTER (WHERE org_name IS NOT NULL)
-                FROM npi_directory
-                WHERE regexp_full_match(npi, '[0-9]{10}')  -- same population as `total`
-                  AND npi IN (
-                    SELECT npi FROM rates
-                    UNION
-                    SELECT tin_value FROM rates WHERE tin_is_really_npi AND tin_value IS NOT NULL
-                )
-                """
-            ).fetchone()
-        remaining = max(0, total - enriched)
-        result = {"total": total, "enriched": enriched, "named": named,
-                  "remaining": remaining}
-        self._enrich_progress_cache = (time.monotonic(), result)
-        return result
+                        SELECT tin_value FROM rates WHERE tin_is_really_npi AND tin_value IS NOT NULL
+                    )
+                    """
+                ).fetchone()
+            remaining = max(0, total - enriched)
+            result = {"total": total, "enriched": enriched, "named": named,
+                      "remaining": remaining}
+            self._enrich_progress_cache = (time.monotonic(), result)
+            return result
+        finally:
+            self._enrich_progress_lock.release()
 
     def available_states(self) -> list[str]:
         """Distinct US states present in the enriched directory — used to fill

@@ -107,6 +107,15 @@ def _maybe_refresh_directory(store: Store, force: bool = False) -> bool:
         now = time.monotonic()
         if not force and now - _last_dir_refresh < _dir_refresh_interval:
             return False
+        dirty = _names_dirty
+    ready = getattr(store, "directory_ready", None)
+    if not dirty and callable(ready) and ready():
+        # NOTHING new to materialize: the boot-time forced refresh used to
+        # rebuild the whole directory anyway — on an 86M-row store, ~an hour
+        # of grinding at every serve start for an identical result. Names
+        # saved later set the dirty flag and refresh on the normal cadence.
+        return False
+    with _refresh_lock:
         _last_dir_refresh = now
     t0 = time.monotonic()
     try:
