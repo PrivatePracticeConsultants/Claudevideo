@@ -23,7 +23,7 @@ from .parser import (
     skim_needed_ref_ids,
 )
 from .sniff import Preflight, open_stream, preflight
-from .store import Store, file_key, sql_path
+from .store import FINISHED_NOW, Store, file_key, sql_path
 
 log = logging.getLogger(__name__)
 
@@ -486,7 +486,7 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
         # store agree (the normal paths do this via finalize_rates_part)
         store.drop_rates_part(name)
         store.upsert_file(name, payer=pf.payer, status="done", rows_emitted=0,
-                          qa={"rows": 0, "messages": [msg]}, finished_at=_now())
+                          qa={"rows": 0, "messages": [msg]}, finished_at=FINISHED_NOW)
         _finish_file(cfg, path, ok=True)
         log.info("%s: %s", name, msg)
         return {"status": "done", "rows": 0, "payer": pf.payer, "note": msg}
@@ -501,7 +501,7 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
         rows_emitted=payload["rows"],
         ref_groups_skipped=payload["ref_groups_skipped"],
         qa=qa_report(store, payload["qa"], name),
-        finished_at=_now(),
+        finished_at=FINISHED_NOW,
     )
     # rollup AFTER the done-upsert: the incremental update finds its work by
     # "done files newer than the coverage marker" — called before the upsert
@@ -576,9 +576,11 @@ def _forget_file_locked(cfg: MrfxConfig, store: Store, filename: str) -> dict:
         except OSError as e:
             log.warning("forget %s: could not delete %s: %s", filename, p, e)
     info = store.forget_file(filename)
-    # full rebuild on purpose: a removal leaves no delta for the incremental
-    # path to key on — see _rebuild_rollups_best_effort's docstring
-    _rebuild_rollups_best_effort(store, filename, incremental=False)
+    # forget_file queued the removed payers' slices (rollup_pending_payers),
+    # so the incremental path recomputes exactly those — minutes, not the
+    # hour-long full rebuild; if THIS fails, the queued note keeps
+    # rollups_stale() True and serve-start catches up
+    _rebuild_rollups_best_effort(store, filename)
     info["bytes"] += freed_raw
     log.info("forgot %s: %d rows and %.1f MB removed", filename, info["rows"], info["bytes"] / 1e6)
     return info
@@ -591,10 +593,10 @@ def _rebuild_rollups_best_effort(store: Store, name: str,
     parsing would be retried for data that already landed. Rollups refresh on
     the next successful rebuild, same contract as the queue's batched path.
 
-    incremental=False forces the full rebuild — required after `forget`: a
-    REMOVED file leaves no delta rows behind, so the incremental path (which
-    derives affected slices from files newer than the coverage marker) would
-    see nothing to do and leave the removed rows in every dashboard number."""
+    Removals are found via the rollup_pending_payers note the removal itself
+    queues (forget_file / drop_rates_part / a replaced part), so the
+    incremental path handles them too. incremental=False remains for callers
+    that explicitly want the full rebuild."""
     try:
         if incremental:
             try:
@@ -686,7 +688,7 @@ def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight
             store.save_provider_refs(payer, name, last_updated, refs)
             store.upsert_file(
                 name, payer=payer, status="done", last_updated_on=last_updated,
-                rows_emitted=len(refs), finished_at=_now(),
+                rows_emitted=len(refs), finished_at=FINISHED_NOW,
             )
             _finish_file(cfg, path, ok=True)
             requeued = requeue_skipped(cfg, store, payer)
@@ -740,7 +742,7 @@ def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight
                 store.drop_rates_part(name)
                 store.upsert_file(
                     name, payer=pf.payer, status="done", rows_emitted=0,
-                    qa={"rows": 0, "messages": [msg]}, finished_at=_now(),
+                    qa={"rows": 0, "messages": [msg]}, finished_at=FINISHED_NOW,
                 )
                 _finish_file(cfg, path, ok=True)
                 log.info("%s: %s", name, msg)
@@ -768,7 +770,7 @@ def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight
             rows_emitted=result.qa.rows,
             ref_groups_skipped=result.ref_groups_skipped,
             qa=qa_report(store, result.qa.to_dict(), name),
-            finished_at=_now(),
+            finished_at=FINISHED_NOW,
         )
         # rollup AFTER the done-upsert — same reason as the pooled path: the
         # incremental update keys on done files newer than the coverage marker

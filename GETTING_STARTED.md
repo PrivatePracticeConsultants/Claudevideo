@@ -719,6 +719,13 @@ them in one place, grouped by where you'll hit them.
   of the same book under different filenames from before the dedup fix; if
   so, `mrfx reset --confirm` and re-queue (dedup now catches mirrors even in
   parallel).
+- **First start after updating the app feels slow** — expected, once: the
+  log prints "full analytics rebuild: the slow whole-store pass (one-time
+  after an upgrade…)". Let it finish (downloads and extraction keep running,
+  just slower while they share the disk). Every update after that is
+  payer-sized and fast. Related warning: after upgrading, do NOT run an
+  older copy of the app against the same data folder — the app will detect
+  it and redo the full pass on the next start to keep the numbers right.
 - **Dashboard numbers aren't updating during a big run** — they catch up in
   batches, and each catch-up now recomputes only the slice for the payers
   that just landed (log line: "analytics update … payer slice, not a full

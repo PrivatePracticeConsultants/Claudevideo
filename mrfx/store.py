@@ -424,6 +424,12 @@ DEDUP_QUERY = """
 # it). v2: tin_is_really_npi joined the BY_TIN grain (identity blending fix).
 ROLLUP_SCHEMA_VERSION = 2
 
+# Sentinel for upsert_file(finished_at=...): "stamp the completion time INSIDE
+# the write lock". Callers must never pre-compute a done-timestamp in Python —
+# the lock wait between computing it and committing can put the value behind
+# the rollup coverage marker (see upsert_file).
+FINISHED_NOW = object()
+
 BY_TIN_QUERY = """
     SELECT payer, tin_value, billing_code,
            any_value(tin_type)                                       AS tin_type,
@@ -712,6 +718,26 @@ class Store:
                     "version (schema v%s -> v%d) — rebuilding once",
                     ver or "?", ROLLUP_SCHEMA_VERSION)
                 self.rebuild_rollups()
+                return
+            with self.connect() as con:
+                if (self._meta_get(con, "rollup_covered_through") is not None
+                        and self._meta_get(con, "rollup_covered_names") is None):
+                    # The version marker matches but the covered-names key —
+                    # written by every build of THIS version — is absent. That
+                    # means the tables were last rebuilt either by a pre-tie-
+                    # break build or by an OLDER app run against this store
+                    # after a rollback (older builds rebuild the tables in
+                    # their old grain but never touch these keys, so the
+                    # version marker lies). Provenance unverifiable -> queue
+                    # ONE background full rebuild; incremental updates refuse
+                    # to run (rollup_needs_full) until it completes.
+                    import logging as _logging
+                    _logging.getLogger(__name__).info(
+                        "analytics provenance can't be verified (the tables may "
+                        "have been rebuilt by an older app version) — scheduling "
+                        "one full refresh in the background")
+                    con.execute(
+                        "INSERT OR REPLACE INTO meta VALUES ('rollup_needs_full', '1')")
         except Exception as e:  # noqa: BLE001
             import logging as _logging
             _logging.getLogger(__name__).warning(
@@ -743,11 +769,20 @@ class Store:
         missing from every dashboard number, and nothing on restart noticed."""
         try:
             with self.connect() as con:
+                if self._meta_get(con, "rollup_needs_full") == "1":
+                    return True
+                if self._read_pending_payers(con)[1]:
+                    return True  # a removed part's slices await recompute
                 covered = self._meta_get(con, "rollup_covered_through") or ""
-                newest = con.execute(
-                    "SELECT coalesce(max(finished_at)::VARCHAR, '') FROM files "
-                    "WHERE status = 'done' AND rows_emitted > 0").fetchone()[0]
-            return bool(newest) and newest > covered
+                names = set(json.loads(
+                    self._meta_get(con, "rollup_covered_names") or "[]"))
+                cand = con.execute(
+                    "SELECT filename, finished_at::VARCHAR FROM files "
+                    "WHERE status = 'done' AND rows_emitted > 0 "
+                    "AND finished_at::VARCHAR >= ?", [covered]).fetchall()
+                # tie-break by filename: same-microsecond twins of the marker
+                # are stale unless the marker explicitly names them
+                return any(t > covered or f not in names for f, t in cand)
         except Exception:  # noqa: BLE001 — a probe failure must not block startup
             return False
 
@@ -988,7 +1023,14 @@ class Store:
         touches DuckDB). Mirrors RatesPartWriter's atomic finish."""
         path = self.rates_dir / f"{file_key(source_file)}.parquet"
         tmp = Path(tmp_path)
+        # scan the OLD part's payers before replacing/removing it (outside the
+        # lock): a replacement can carry different per-row payers than the old
+        # version, and a 0-row outcome removes the part entirely — either way
+        # the old payers' slices must be queued for the incremental rollup
+        doomed = self._part_payers_for_removal(path)
         with self.write_lock:
+            with self.connect() as con:
+                self._queue_removed_payers(con, doomed)
             if rows_written:
                 # replace() overwrites atomically — a preceding unlink would
                 # open a no-file window for lock-free concurrent readers
@@ -1472,9 +1514,93 @@ class Store:
                     "AND bytes_total <= ?", [limit_bytes])
         return n
 
+    def _part_payers_for_removal(self, path: Path) -> list[str] | None:
+        """Distinct payers of a live part that is about to be removed or
+        replaced. Deliberately LOCK-FREE — a multi-GB part scan under
+        write_lock would stall every claim/progress/upsert for seconds; the
+        per-filename ingest claim already serializes writers of one part.
+        Returns [] when no part exists; None when the part is unreadable
+        (caller must then force the full-rebuild flag)."""
+        try:
+            if not path.exists():
+                return []
+            with self.connect() as con:
+                return [r[0] for r in con.execute(
+                    f"SELECT DISTINCT payer FROM read_parquet('{sql_path(path)}') "
+                    "WHERE payer IS NOT NULL").fetchall()]
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _read_pending_payers(self, con: duckdb.DuckDBPyConnection) -> tuple[int, list[str]]:
+        """(generation, payers) of the queued-removal note. The generation
+        bumps on every append so a consumer can tell whether the note changed
+        while it worked."""
+        raw = self._meta_get(con, "rollup_pending_payers")
+        if not raw:
+            return 0, []
+        try:
+            obj = json.loads(raw)
+        except ValueError:
+            return 0, []
+        if isinstance(obj, list):  # tolerate a bare-list shape
+            return 0, [p for p in obj if isinstance(p, str)]
+        return int(obj.get("gen", 0)), [p for p in obj.get("payers", [])
+                                        if isinstance(p, str)]
+
+    def _consume_pending_payers(self, con: duckdb.DuckDBPyConnection,
+                                gen0: int, consumed: list[str]) -> None:
+        """Under write_lock: drop the consumed payers from the pending note —
+        but ONLY if no appender bumped the generation meanwhile. A concurrent
+        append (another part removed mid-rollup) may have RE-queued a payer
+        whose slice we computed from pre-removal data; leaving the whole note
+        intact costs one redundant recompute and never loses a slice."""
+        with self.write_lock:
+            gen, cur = self._read_pending_payers(con)
+            if gen != gen0:
+                return
+            remain = sorted(set(cur) - set(consumed))
+            if remain:
+                con.execute(
+                    "INSERT OR REPLACE INTO meta VALUES ('rollup_pending_payers', ?)",
+                    [json.dumps({"gen": gen, "payers": remain})])
+            else:
+                con.execute("DELETE FROM meta WHERE key = 'rollup_pending_payers'")
+
+    def _queue_removed_payers(self, con: duckdb.DuckDBPyConnection,
+                              payers: list[str] | None) -> None:
+        """Under write_lock: queue removed/replaced payer slices for the next
+        incremental rollup. A removed part's rows vanish from the raw store,
+        but its files row leaves the rows_emitted>0 delta — without this
+        note the orphaned rollup slice would keep serving the removed rows
+        with rollups_stale() False. payers=None (unreadable part) forces the
+        full-rebuild flag instead."""
+        try:
+            if payers == []:
+                return
+            if payers is None:
+                con.execute(
+                    "INSERT OR REPLACE INTO meta VALUES ('rollup_needs_full', '1')")
+                return
+            gen, cur = self._read_pending_payers(con)
+            con.execute(
+                "INSERT OR REPLACE INTO meta VALUES ('rollup_pending_payers', ?)",
+                [json.dumps({"gen": gen + 1,
+                             "payers": sorted(set(cur) | set(payers))})])
+        except Exception:  # noqa: BLE001 — never block the removal itself
+            try:
+                con.execute(
+                    "INSERT OR REPLACE INTO meta VALUES ('rollup_needs_full', '1')")
+            except Exception:  # noqa: BLE001
+                logging.getLogger(__name__).warning(
+                    "could not record removed-part payers — rollups may lag "
+                    "until the next full rebuild")
+
     def drop_rates_part(self, source_file: str) -> None:
         path = self.rates_dir / f"{file_key(source_file)}.parquet"
+        doomed = self._part_payers_for_removal(path)  # scan OUTSIDE the lock
         with self.write_lock:
+            with self.connect() as con:
+                self._queue_removed_payers(con, doomed)
             unlink_with_retry(path)
             with self.connect() as con:
                 self._register_views(con)
@@ -1486,10 +1612,16 @@ class Store:
         produced the file flips to 'skipped' (never deleted: a surviving
         'done' row would dedup-away the same bytes forever with no data behind
         the claim) — its retry button re-downloads if the user wants it back.
-        Returns {rows, bytes} removed. Rollups are the caller's job."""
+        Returns {rows, bytes} removed. Rollups are the caller's job — but the
+        removed payers' slices are queued here (rollup_pending_payers), so
+        even if the caller's rollup FAILS, rollups_stale() stays True and the
+        serve-start catch-up recomputes the slice instead of the "forgotten"
+        rows silently living on in every dashboard number."""
         path = self.rates_dir / f"{file_key(filename)}.parquet"
         freed = path.stat().st_size if path.exists() else 0
+        doomed = self._part_payers_for_removal(path)  # scan OUTSIDE the lock
         with self.write_lock, self.connect() as con:
+            self._queue_removed_payers(con, doomed)
             row = con.execute(
                 "SELECT rows_emitted FROM files WHERE filename = ?", [filename]
             ).fetchone()
@@ -1609,12 +1741,16 @@ class Store:
         silently skipped, and the marker only advances to the delta's own
         max(finished_at), never past files that finish mid-update.
 
+        Removals (forget, a part re-ingested to 0 rows, a replaced part whose
+        old version carried other payers) are handled via the
+        `rollup_pending_payers` meta note queued by the removal itself — see
+        _queue_removed_payers.
+
         Raises (RuntimeError/duckdb.Error) whenever the precondition for an
         exact delta doesn't hold — no prior full build, rollup schema
-        migration pending, a file with no recorded payer, OOM at max split —
-        and callers fall back to rebuild_rollups(), which is always correct.
-        NOT used by `forget` (removals leave no delta rows to find the
-        affected slices from — forget keeps the full rebuild)."""
+        migration pending, a file with no recorded payer, an unscopable
+        removal (`rollup_needs_full`), OOM at max split — and callers fall
+        back to rebuild_rollups(), which is always correct."""
         import logging as _logging
 
         log = _logging.getLogger(__name__)
@@ -1622,7 +1758,12 @@ class Store:
         try:
             with self.connect() as con:
                 t_locked = time.monotonic()
-                self._register_views(con)
+                with self.write_lock:
+                    # view (re)registration is a catalog write — racing another
+                    # connection's _register_views raises TransactionException,
+                    # and in the worst caller (a finishing multi-hour parse's
+                    # finalize) that marked the DONE file failed
+                    self._register_views(con)
                 if self._meta_get(con, "rollup_schema_version") != str(ROLLUP_SCHEMA_VERSION):
                     raise RuntimeError("rollup tables were built by an older "
                                        "version (or never built)")
@@ -1631,17 +1772,37 @@ class Store:
                             "SELECT count(*) FROM information_schema.tables "
                             "WHERE table_name = ?", [tbl]).fetchone()[0]:
                         raise RuntimeError(f"{tbl} is not materialized yet")
+                if self._meta_get(con, "rollup_needs_full") == "1":
+                    raise RuntimeError("a data removal could not be scoped — "
+                                       "full rebuild required")
                 covered = self._meta_get(con, "rollup_covered_through") or ""
-                delta = con.execute(
-                    "SELECT filename, finished_at::VARCHAR "
+                # filenames AT the covered timestamp: a strict `>` alone would
+                # permanently skip a file whose done-upsert committed after the
+                # marker was stamped but with an identical (same-microsecond)
+                # finished_at — silent missing rows with rollups_stale() False
+                covered_names = set(json.loads(
+                    self._meta_get(con, "rollup_covered_names") or "[]"))
+                cand = con.execute(
+                    "SELECT filename, finished_at::VARCHAR, coalesce(file_type, '') "
                     "FROM files WHERE status = 'done' AND rows_emitted > 0 "
-                    "AND finished_at::VARCHAR > ?", [covered]).fetchall()
-                if not delta:
+                    "AND finished_at::VARCHAR >= ?", [covered]).fetchall()
+                delta = [(f, t, ft) for f, t, ft in cand
+                         if t > covered or f not in covered_names]
+                # provider-reference files legitimately have rows_emitted>0
+                # but contribute NO rates rows — they advance the marker but
+                # must not trip the "no rows found" anomaly check
+                rate_delta = [(f, t) for f, t, ft in delta
+                              if ft != "provider_reference"]
+                # payer slices queued by a removed or replaced part (a file
+                # re-ingested to 0 rows leaves the rows_emitted>0 delta; a
+                # replaced part may have carried payers its new version
+                # doesn't) — the orphaned slices are found via this note
+                pend_gen, pending = self._read_pending_payers(con)
+                if not delta and not pending:
                     return 0.0
-                new_covered = max(t for _f, t in delta)
                 q = lambda s: "'" + s.replace("'", "''") + "'"  # noqa: E731
                 files_pred = ("source_file IN ("
-                              + ", ".join(q(f) for f, _t in delta) + ")")
+                              + ", ".join(q(f) for f, _t in rate_delta) + ")") if rate_delta else "FALSE"
                 # affected payers come from the delta files' ROWS, never from
                 # files.payer: multi-licensee books (Highmark et al.) stamp a
                 # per-row payer that differs from the file-level label, and
@@ -1651,23 +1812,121 @@ class Store:
                     f"SELECT DISTINCT payer FROM rates WHERE {files_pred}").fetchall()]
                 if any(p is None for p in payers):
                     raise RuntimeError("a new file has rows with no payer")
-                if not payers:
+                if rate_delta and not payers and not pending:
                     # the delta files contributed no rows after all (rows_emitted
                     # said otherwise — trust the parts); full rebuild sorts it out
                     raise RuntimeError("no rows found for the new files")
-                payer_pred = "payer IN (" + ", ".join(q(p) for p in sorted(payers)) + ")"
-                log.info("analytics update: %d new file(s) — recomputing %d "
-                         "payer slice(s) instead of the whole store", len(delta), len(payers))
-                self._apply_rollup_delta(con, payer_pred, files_pred, log)
-                con.execute(
-                    "INSERT OR REPLACE INTO meta VALUES ('rollup_covered_through', ?)",
-                    [new_covered])
+                payers = sorted(set(payers) | set(pending))
+                if payers:
+                    payer_pred = "payer IN (" + ", ".join(q(p) for p in payers) + ")"
+                    log.info("analytics update: %d new file(s), %d queued slice(s) — "
+                             "recomputing %d payer slice(s) instead of the whole store",
+                             len(delta), len(pending), len(payers))
+                    self._apply_rollup_delta(con, payer_pred, files_pred, log)
+                else:
+                    log.info("analytics update: %d new reference file(s) — "
+                             "no rate slices to recompute", len(delta))
+                if delta:
+                    new_covered = max(t for _f, t, _ft in delta)
+                    names = {f for f, t, _ft in delta if t == new_covered}
+                    if new_covered == covered:
+                        names |= covered_names  # boundary-only delta: keep prior names
+                    con.execute(
+                        "INSERT OR REPLACE INTO meta VALUES ('rollup_covered_through', ?)",
+                        [new_covered])
+                    con.execute(
+                        "INSERT OR REPLACE INTO meta VALUES ('rollup_covered_names', ?)",
+                        [json.dumps(sorted(names))])
+                # consume ONLY the pending payers this run actually recomputed,
+                # and only if no removal re-queued anything meanwhile — a
+                # wholesale DELETE would destroy concurrent notes and their
+                # slices would never be recomputed
+                self._consume_pending_payers(con, pend_gen, pending)
                 self._enrich_progress_cache = None
                 self.data_generation += 1
                 took = time.monotonic() - t_locked
                 self.last_rollup_build_seconds = took
                 log.info("analytics update finished in %.0fs (payer slice, not "
                          "a full rebuild)", took)
+                return took
+        finally:
+            self.rollup_lock.release()
+
+    def refresh_directory_incremental(self) -> float:
+        """Names-only sibling of update_rollups_incremental: recompute
+        tin_directory rows ONLY for TINs touched by NPIs whose NPPES record
+        landed since the last refresh (meta `directory_names_through`, keyed
+        on npi_directory.enriched_at). The full names_only rebuild
+        re-aggregated the ENTIRE store every enrichment cycle — the last
+        recurring whole-store scan, and on a big HDD store the thing that
+        flattened extraction throughput minutes into every run. Crash-safe:
+        enriched_at is durable, so names saved just before a kill are still
+        newer than the marker and materialize on the next refresh (>= keeps
+        boundary NPIs re-included rather than ever missing one — a redundant
+        TIN recompute is harmless). Raises when preconditions fail (no
+        materialized tables, schema drift, affected set too large to be
+        worth scoping) — callers fall back to
+        rebuild_rollups(names_only=True)."""
+        import logging as _logging
+
+        log = _logging.getLogger(__name__)
+        self._acquire_rollup_lock(log)
+        try:
+            with self.connect() as con:
+                t0 = time.monotonic()
+                with self.write_lock:
+                    self._register_views(con)
+                if self._meta_get(con, "rollup_schema_version") != str(ROLLUP_SCHEMA_VERSION):
+                    raise RuntimeError("rollup tables were built by an older "
+                                       "version (or never built)")
+                if not con.execute(
+                        "SELECT count(*) FROM information_schema.tables "
+                        "WHERE table_name = 'tin_directory_tbl'").fetchone()[0]:
+                    raise RuntimeError("tin_directory is not materialized yet")
+                covered = self._meta_get(con, "directory_names_through")
+                if covered is None:
+                    # never stamped -> a full names build must run once first
+                    raise RuntimeError("no names-coverage marker yet")
+                new_max = con.execute(
+                    "SELECT coalesce(max(enriched_at)::VARCHAR, '') "
+                    "FROM npi_directory").fetchone()[0]
+                if not new_max:
+                    return 0.0
+                con.execute("DROP TABLE IF EXISTS __delta_tins")
+                con.execute(
+                    "CREATE TEMP TABLE __delta_tins AS "
+                    "SELECT DISTINCT r.tin_value FROM rates r "
+                    "JOIN npi_directory d ON d.npi = r.npi "
+                    "WHERE r.tin_value IS NOT NULL AND d.enriched_at::VARCHAR >= ?",
+                    [covered])
+                n_new = con.execute("SELECT count(*) FROM __delta_tins").fetchone()[0]
+                if n_new:
+                    total = con.execute(
+                        "SELECT count(*) FROM tin_directory_tbl").fetchone()[0] or 0
+                    if total and n_new > max(1000, total // 4):
+                        raise RuntimeError(
+                            f"{n_new:,} of {total:,} TINs affected — the full "
+                            "directory rebuild is cheaper")
+                    tin_pred = "tin_value IN (SELECT tin_value FROM __delta_tins)"
+                    con.execute("BEGIN TRANSACTION")
+                    try:
+                        con.execute(f"DELETE FROM tin_directory_tbl WHERE {tin_pred}")
+                        con.execute("INSERT INTO tin_directory_tbl "
+                                    + TIN_DIRECTORY_QUERY.format(part=tin_pred))
+                        con.execute("COMMIT")
+                    except Exception:
+                        try:
+                            con.execute("ROLLBACK")
+                        except duckdb.Error:
+                            pass
+                        raise
+                con.execute(
+                    "INSERT OR REPLACE INTO meta VALUES ('directory_names_through', ?)",
+                    [new_max])
+                self.data_generation += 1
+                took = time.monotonic() - t0
+                log.info("name refresh: %d TIN(s) updated in %.0fs (scoped to "
+                         "newly identified NPIs, not the whole store)", n_new, took)
                 return took
         finally:
             self.rollup_lock.release()
@@ -1746,6 +2005,13 @@ class Store:
                     if parts > 1:
                         log.info("analytics update %s: partition %d/%d", tbl, i + 1, parts)
                     con.execute(f"INSERT INTO {tbl} {query.format(part=part)}")
+                if tbl == "tin_directory_tbl":
+                    # prune ghosts: a re-ingest that shrank/emptied a part can
+                    # leave directory rows for TINs with no rates anywhere —
+                    # invisible to the spine but not to directory-driven views
+                    con.execute(
+                        "DELETE FROM tin_directory_tbl WHERE NOT EXISTS ("
+                        "SELECT 1 FROM rates r WHERE r.tin_value = tin_directory_tbl.tin_value)")
                 con.execute("COMMIT")
             except Exception:
                 try:
@@ -1768,7 +2034,10 @@ class Store:
             # live as "the app stopped running").
             t_locked = time.monotonic()
             self.last_rollup_build_seconds: float | None = None
-            self._register_views(con)  # rates view must see current parts first
+            with self.write_lock:
+                # catalog write — must not race another connection's
+                # _register_views (see update_rollups_incremental)
+                self._register_views(con)  # rates view must see current parts first
             # Cap parallelism for the rebuild and size the slices for that thread
             # count. The un-spillable per-thread hash tables make peak RAM scale
             # with threads, so an unbounded multi-threaded first attempt on a big
@@ -1832,8 +2101,34 @@ class Store:
         import logging as _logging
 
         log = _logging.getLogger(__name__)
-        con.execute("DROP TABLE IF EXISTS rates_dedup_tbl")
-        con.execute(f"CREATE OR REPLACE VIEW rates_dedup AS {DEDUP_QUERY}")
+        # COVERAGE SNAPSHOT taken BEFORE any table build reads the rates glob:
+        # stamping a fresh max(finished_at) AFTER an hour-long build claimed
+        # files that finished mid-build — files whose rows the earlier hash
+        # partitions never saw (a part landing mid-build is torn across
+        # slices). With the snapshot, anything finishing after this instant
+        # stays newer than the marker; the next incremental picks it up and
+        # its payer-slice recompute also heals any torn partial inclusion.
+        # Same rule for the removal notes: only clear what existed NOW.
+        cover_ts = con.execute(
+            "SELECT coalesce(max(finished_at)::VARCHAR, '') FROM files "
+            "WHERE status = 'done' AND rows_emitted > 0").fetchone()[0]
+        cover_names = [] if not cover_ts else [r[0] for r in con.execute(
+            "SELECT filename FROM files WHERE status = 'done' "
+            "AND rows_emitted > 0 AND finished_at::VARCHAR = ?", [cover_ts]).fetchall()]
+        pend_gen, pending_snapshot = self._read_pending_payers(con)
+        needs_full_snapshot = self._meta_get(con, "rollup_needs_full") == "1"
+        dir_names_ts = con.execute(
+            "SELECT coalesce(max(enriched_at)::VARCHAR, '') "
+            "FROM npi_directory").fetchone()[0]
+        with self.write_lock:
+            # catalog writes — must not race a writer's _register_views
+            con.execute("DROP TABLE IF EXISTS rates_dedup_tbl")
+            con.execute(f"CREATE OR REPLACE VIEW rates_dedup AS {DEDUP_QUERY}")
+        if tables is None or "rates_by_tin_tbl" in tables:
+            log.info("full analytics rebuild: the slow whole-store pass (one-time "
+                     "after an upgrade, or when a shortcut wasn't safe). Extraction "
+                     "continues but shares the disk; once this completes, updates "
+                     "are payer-sized and fast.")
         log.info("rollup: preparing (counting source rows)…")
         n_rows = con.execute("SELECT count(*) FROM rates").fetchone()[0] or 0
         rows_per_part = self._rollup_partition_rows(split, threads)
@@ -1900,19 +2195,41 @@ class Store:
             con.execute(
                 "INSERT OR REPLACE INTO meta VALUES ('rollup_schema_version', ?)",
                 [str(ROLLUP_SCHEMA_VERSION)])
+            # the SNAPSHOT values from before the build read anything — files
+            # finishing mid-build stay newer than the marker (the names list
+            # tie-breaks same-microsecond twins so none can hide behind it)
             con.execute(
-                "INSERT OR REPLACE INTO meta VALUES ('rollup_covered_through', ("
-                "SELECT coalesce(max(finished_at)::VARCHAR, '') FROM files "
-                "WHERE status = 'done' AND rows_emitted > 0))")
+                "INSERT OR REPLACE INTO meta VALUES ('rollup_covered_through', ?)",
+                [cover_ts])
+            con.execute(
+                "INSERT OR REPLACE INTO meta VALUES ('rollup_covered_names', ?)",
+                [json.dumps(sorted(cover_names))])
+            # clear ONLY the removal notes that existed before the build began
+            # (this build's scans cover those removals); notes appended
+            # mid-build stay queued for the next incremental
+            self._consume_pending_payers(con, pend_gen, pending_snapshot)
+            if needs_full_snapshot:
+                # set before we started -> this build satisfied it; set
+                # mid-build -> keep it, the next rollup must go full again
+                con.execute("DELETE FROM meta WHERE key = 'rollup_needs_full'")
+        if "tin_directory_tbl" in selected:
+            # names coverage for the incremental refresh — SNAPSHOT semantics,
+            # same reason as the rollup marker: names landing mid-build stay
+            # newer than the marker and materialize on the next refresh
+            con.execute(
+                "INSERT OR REPLACE INTO meta VALUES ('directory_names_through', ?)",
+                [dir_names_ts])
         if parts > 1:
             log.info("rollup rebuild finished in %.0fs", time.monotonic() - t_build)
         # bump AFTER the commit: a count computed from the old tables during the
         # (minutes-long) build stays keyed to the old generation, and the first
         # post-swap request misses the cache and recounts against the new tables.
         self.data_generation += 1
-        for tbl in selected:
-            _query, _key, view = specs[tbl]
-            con.execute(f"CREATE OR REPLACE VIEW {view} AS SELECT * FROM {tbl}")
+        with self.write_lock:
+            # catalog writes — must not race a writer's _register_views
+            for tbl in selected:
+                _query, _key, view = specs[tbl]
+                con.execute(f"CREATE OR REPLACE VIEW {view} AS SELECT * FROM {tbl}")
 
     # legacy name used by tests/older callers
     def rebuild_dedup(self) -> None:
@@ -1934,6 +2251,15 @@ class Store:
         if not fields:
             return  # nothing to write (all keys filtered out) — never emit empty SET
         with self.write_lock, self.connect() as con:
+            if fields.get("finished_at") is FINISHED_NOW:
+                # stamped INSIDE the lock, at commit order: a timestamp taken
+                # before a (possibly ~90s) write_lock wait can land BEHIND an
+                # already-advanced rollup coverage marker — that file would be
+                # invisible to every future delta AND to rollups_stale(),
+                # its rows silently missing from analytics forever.
+                # UTC-aware to match ingest's _now() (mixed naive/aware stamps
+                # would corrupt the marker's chronological ordering).
+                fields["finished_at"] = dt.datetime.now(dt.timezone.utc)
             exists = con.execute("SELECT 1 FROM files WHERE filename = ?", [filename]).fetchone()
             if exists:
                 sets = ", ".join(f"{k} = ?" for k in fields)
@@ -2364,7 +2690,12 @@ class RatesPartWriter:
         if exc_type is not None:
             self.tmp.unlink(missing_ok=True)
             return False
+        # old-part payer scan outside the lock — same contract as
+        # finalize_rates_part (replacement AND 0-row removal both queue)
+        doomed = self.store._part_payers_for_removal(self.path)
         with self.store.write_lock:
+            with self.store.connect() as con:
+                self.store._queue_removed_payers(con, doomed)
             if self.rows_written:
                 # replace() overwrites atomically — no unlink-first window
                 replace_with_retry(self.tmp, self.path)

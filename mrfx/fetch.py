@@ -1485,7 +1485,10 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
                     "raw data is safe, analytics will refresh on the next "
                     "successful rebuild", rollup_failures)
                 with state:
-                    ingests_pending_rollup = 0
+                    # drop only the credits THIS attempt covered — files that
+                    # landed during the failing attempts must still be able to
+                    # trigger a later rebuild within this run
+                    ingests_pending_rollup = max(0, ingests_pending_rollup - n)
                 return
             log.exception("rollup rebuild failed; will retry after the next file")
             return

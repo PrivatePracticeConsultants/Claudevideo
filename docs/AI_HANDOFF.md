@@ -180,6 +180,31 @@ Two codebases live in this repo:
    30M-row store means a ~30M-group aggregation whose spill exceeded 27 GB of
    disk when it was materialized. No `string_agg(DISTINCT …)` in rollups
    (cannot spill); DuckDB `memory_limit` is 40% RAM clamped [2,12] GB.
+   NO recurring whole-store scans may exist: the enrichment name-refresh
+   goes through `refresh_directory_incremental()` (TINs of NPIs with
+   `enriched_at` newer than meta `directory_names_through`; >= re-includes
+   boundary NPIs rather than ever missing one), falling back to the
+   names_only full rebuild (first build, drift, >25%-of-TINs affected).
+   Removals (forget / re-ingest-to-0-rows / replaced parts) queue their old
+   payers in meta `rollup_pending_payers` (generation-counted; consumers
+   subtract only what they processed and only if the generation didn't move
+   — see `_queue_removed_payers`/`_consume_pending_payers`); an unreadable
+   doomed part sets `rollup_needs_full` instead. `rollups_stale()` returns
+   True for ANY of: marker-behind (with same-microsecond filename
+   tie-break via `rollup_covered_names`), pending payers, or needs_full.
+   Coverage markers are SNAPSHOTS taken before a build reads anything —
+   never stamped from post-build state (files finishing mid-build must
+   stay newer than the marker). Done-upserts stamp `finished_at` INSIDE
+   the write lock via the `FINISHED_NOW` sentinel (a pre-lock timestamp
+   can land behind an advanced marker). All rollup-side catalog writes
+   (view registration) take write_lock briefly — two connections'
+   CREATE OR REPLACE VIEW race raises TransactionException and once could
+   mark a finished multi-hour parse failed. Store provenance: every build
+   of this version writes `rollup_covered_names`; if the version marker
+   matches but that key is absent at open, an OLDER app copy may have
+   rebuilt the tables after a rollback — `_migrate_stale_rollups` sets
+   `rollup_needs_full` for one background full rebuild. NEVER run an older
+   app copy against an upgraded store expecting correct analytics.
    Ingest-driven refreshes go through `update_rollups_incremental()` first:
    it recomputes ONLY the payer slices of `rates_by_tin_tbl` (grain includes
    payer, so groups never cross payers — payer scoping also heals re-ingests

@@ -856,3 +856,106 @@ def test_incremental_rollup_falls_back_when_preconditions_missing(cfg, store):
         con.execute("INSERT OR REPLACE INTO meta VALUES ('rollup_schema_version', '1')")
     with pytest.raises(Exception):
         store.update_rollups_incremental()
+
+
+def test_incremental_rollup_heals_zero_row_reingest(cfg, store):
+    # A file re-ingested down to 0 rows drops its parquet part — but its
+    # files row leaves the rows_emitted>0 delta, so without the queued-slice
+    # note the removed rows would keep being served with rollups_stale()
+    # False (honesty-contract violation, found in the launch audit).
+    _payer_part(store, "z1.json", "Zeta", [
+        ("437777777", "1111111119", "97110", "2026-06", 42.0)])
+    store.upsert_file("z1.json", finished_at="2026-07-01 10:00:00")
+    store.rebuild_rollups()
+    with store.connect() as con:
+        assert con.execute("SELECT count(*) FROM rates_by_tin_tbl "
+                           "WHERE payer = 'Zeta'").fetchone()[0] == 1
+    store.drop_rates_part("z1.json")  # the short-circuit re-ingest path
+    store.upsert_file("z1.json", rows_emitted=0, finished_at="2026-07-01 11:00:00")
+    assert store.rollups_stale()      # queued slice = detectable staleness
+    store.update_rollups_incremental()
+    assert not store.rollups_stale()
+    with store.connect() as con:
+        assert con.execute("SELECT count(*) FROM rates_by_tin_tbl "
+                           "WHERE payer = 'Zeta'").fetchone()[0] == 0
+        # the ghost directory row is pruned too
+        assert con.execute("SELECT count(*) FROM tin_directory_tbl "
+                           "WHERE tin_value = '437777777'").fetchone()[0] == 0
+
+
+def test_incremental_rollup_boundary_same_microsecond(cfg, store):
+    # A done-upsert committing AFTER the marker stamp with an IDENTICAL
+    # finished_at (same-microsecond race) must still be detected and rolled
+    # up — the marker tie-breaks by filename, never by timestamp alone.
+    _payer_part(store, "m1.json", "Mu", [
+        ("438888888", "1111111120", "97110", "2026-06", 30.0)])
+    store.upsert_file("m1.json", finished_at="2026-07-01 10:00:00")
+    store.rebuild_rollups()
+    assert not store.rollups_stale()
+    _payer_part(store, "m2.json", "Nu", [
+        ("439999999", "1111111121", "97110", "2026-06", 33.0)])
+    store.upsert_file("m2.json", finished_at="2026-07-01 10:00:00")  # same instant
+    assert store.rollups_stale()
+    store.update_rollups_incremental()
+    assert not store.rollups_stale()
+    with store.connect() as con:
+        assert con.execute("SELECT count(*) FROM rates_by_tin_tbl "
+                           "WHERE payer = 'Nu'").fetchone()[0] == 1
+    assert store.update_rollups_incremental() == 0.0
+
+
+def test_scoped_name_refresh_matches_full_rebuild(cfg, store):
+    # The enrichment name-refresh must no longer re-scan the whole store:
+    # refresh_directory_incremental recomputes only TINs touched by newly
+    # enriched NPIs — and its result must equal a full names rebuild.
+    _payer_part(store, "n1.json", "Omega", [
+        ("441111111", "1311111111", "97110", "2026-06", 55.0),
+        ("442222222", "1322222222", "97110", "2026-06", 65.0),
+    ])
+    store.upsert_file("n1.json", finished_at="2026-07-01 10:00:00")
+    store.rebuild_rollups()  # stamps directory_names_through
+
+    store.save_npi("1311111111", org_name="Omega Physical Therapy LLC",
+                   taxonomy_code="225100000X", taxonomy_desc=None,
+                   city="ST LOUIS", state="MO", entity_type="NPI-2")
+    took = store.refresh_directory_incremental()
+    assert isinstance(took, float)
+    with store.connect() as con:
+        named = con.execute("SELECT display_name FROM tin_directory_tbl "
+                            "WHERE tin_value = '441111111'").fetchone()[0]
+        other = con.execute("SELECT display_name FROM tin_directory_tbl "
+                            "WHERE tin_value = '442222222'").fetchone()[0]
+    assert named == "Omega Physical Therapy LLC"
+    assert other.startswith("TIN ")  # untouched TIN keeps its fallback label
+    inc_rows = None
+    with store.connect() as con:
+        inc_rows = con.execute(
+            "SELECT * FROM tin_directory_tbl ORDER BY tin_value").fetchall()
+    store.rebuild_rollups(names_only=True)
+    with store.connect() as con:
+        full_rows = con.execute(
+            "SELECT * FROM tin_directory_tbl ORDER BY tin_value").fetchall()
+    assert inc_rows == full_rows
+
+
+def test_rollback_provenance_guard_forces_one_full_rebuild(cfg, store):
+    # The user's real history: rollups rebuilt by an OLDER app copy leave the
+    # version marker intact but not the covered-names key. Reopening the
+    # store must schedule one full rebuild and refuse incremental updates
+    # until it runs.
+    from mrfx.store import Store
+
+    _payer_part(store, "p1.json", "Rho", [
+        ("443333333", "1333333333", "97110", "2026-06", 45.0)])
+    store.upsert_file("p1.json", finished_at="2026-07-01 10:00:00")
+    store.rebuild_rollups()
+    assert not store.rollups_stale()
+    with store.connect() as con:  # simulate an old build's rebuild history
+        con.execute("DELETE FROM meta WHERE key = 'rollup_covered_names'")
+    reopened = Store(cfg.store_dir, 2)
+    assert reopened.rollups_stale()          # needs_full queued at open
+    with pytest.raises(Exception):
+        reopened.update_rollups_incremental()
+    reopened.rebuild_rollups()               # the one-time full pass
+    assert not reopened.rollups_stale()
+    assert reopened.update_rollups_incremental() == 0.0

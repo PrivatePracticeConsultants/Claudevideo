@@ -132,7 +132,22 @@ def _maybe_refresh_directory(store: Store, force: bool = False) -> bool:
         # was clobbered by the next thread's rebuild before this thread could
         # read it (audit F4), re-inflating the interval under exactly the
         # contention this exists for.
-        took = store.rebuild_rollups(names_only=True)
+        # scoped refresh first: recompute ONLY the TINs touched by newly
+        # identified NPIs (enriched_at newer than the names marker). The
+        # names_only FULL rebuild re-scans the entire store — on a big HDD
+        # store that recurring whole-store pass flattened extraction
+        # throughput minutes into every run. Full rebuild stays as the
+        # fallback (first build, schema drift, huge affected set).
+        inc = getattr(store, "refresh_directory_incremental", None)
+        if callable(inc):
+            try:
+                took = inc()
+            except Exception as e:  # noqa: BLE001 — strict-precondition optimization
+                log.info("scoped name refresh unavailable (%s) — full directory "
+                         "rebuild", e)
+                took = store.rebuild_rollups(names_only=True)
+        else:  # older Store stub in tests
+            took = store.rebuild_rollups(names_only=True)
         if not isinstance(took, (int, float)):  # older Store stub in tests
             took = time.monotonic() - t0
         with _refresh_lock:
