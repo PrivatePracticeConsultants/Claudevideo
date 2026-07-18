@@ -47,6 +47,12 @@ $script:RmConfig = [ordered]@{
 }
 
 # Taxonomy codes that define "outpatient rehab clinic" for this tool.
+# COUPLING WARNING: if you add a code here, you MUST also make sure at least
+# one entry in $script:RmSearchTerms below phrase-matches that taxonomy's NPPES
+# description, or providers with the new code will silently never be found —
+# NPPES only supports description phrase search, and e.g. 'Physical Therapist'
+# and 'Physical Therapy' are DIFFERENT phrases (this exact miss happened once:
+# 4 vs 45 providers found in one ZIP).
 $script:RmClinicTaxonomies = @{
     '261QP2000X' = 'Clinic/Center: Physical Therapy'
     '261QR0400X' = 'Clinic/Center: Rehabilitation'
@@ -76,12 +82,12 @@ function Set-RmConfig {
         [string]$DataDir,
         [ValidateRange(2009, 2015)][int]$Year,
         [ValidateSet(30, 60, 90, 180)][int]$Interval,
-        [int]$EnrichCap = -1
+        [ValidateRange(0, 100000)][int]$EnrichCap
     )
     if ($DataDir)  { $script:RmConfig.DataDir = $DataDir }
     if ($Year)     { $script:RmConfig.Year = $Year }
     if ($Interval) { $script:RmConfig.Interval = $Interval }
-    if ($EnrichCap -ge 0) { $script:RmConfig.EnrichCap = [Math]::Min($EnrichCap, 100000) }
+    if ($PSBoundParameters.ContainsKey('EnrichCap')) { $script:RmConfig.EnrichCap = $EnrichCap }
 }
 
 # ---------------------------------------------------------------------------
@@ -254,9 +260,13 @@ function Save-RmDataset {
         }
     }
 
+    # WinPS 5.1's progress bar slows large -OutFile downloads ~10x; suppress it.
+    # Unique temp names so two concurrent runs can never share a partial file.
+    $ProgressPreference = 'SilentlyContinue'
+    $runId = [guid]::NewGuid().ToString('N')
     $url = $script:RmConfig.FoiaUrlTemplate -f $Year, $Interval
-    $zipPath = Join-Path $script:RmConfig.DataDir ('pspp_{0}_days{1}.zip.tmp' -f $Year, $Interval)
-    $extractDir = Join-Path $script:RmConfig.DataDir ('extract_{0}_{1}.tmp' -f $Year, $Interval)
+    $zipPath = Join-Path $script:RmConfig.DataDir ('pspp_{0}_days{1}.{2}.zip.tmp' -f $Year, $Interval, $runId)
+    $extractDir = Join-Path $script:RmConfig.DataDir ('extract_{0}_{1}.{2}.tmp' -f $Year, $Interval, $runId)
     try {
         Write-Verbose "Downloading $url"
         Invoke-WebRequest -Uri $url -OutFile $zipPath -UseBasicParsing -TimeoutSec 7200 -ErrorAction Stop
@@ -360,6 +370,10 @@ function Find-RmClinic {
                 $isOrg = ((Get-RmProp $r 'enumeration_type') -eq 'NPI-2')
                 $name = if ($isOrg) { [string](Get-RmProp $basic 'organization_name') }
                         else { ('{0} {1}' -f (Get-RmProp $basic 'first_name'), (Get-RmProp $basic 'last_name')).Trim() }
+                # NPPES postal codes are usually ZIP+4 but malformed/short
+                # values exist in the live registry; never let one bad row
+                # abort the whole query.
+                $postal = [string](Get-RmProp $loc[0] 'postal_code')
                 $found[$npi] = [pscustomobject]@{
                     NPI        = $npi
                     Name       = $name
@@ -367,7 +381,7 @@ function Find-RmClinic {
                     Taxonomy   = $allowed[[string](Get-RmProp $matched[0] 'code')]
                     City       = [string](Get-RmProp $loc[0] 'city')
                     State      = [string](Get-RmProp $loc[0] 'state')
-                    Zip        = ([string](Get-RmProp $loc[0] 'postal_code')).Substring(0, 5)
+                    Zip        = $postal.Substring(0, [Math]::Min(5, $postal.Length))
                     Enumerated = [string](Get-RmProp $basic 'enumeration_date')
                 }
             }
@@ -399,11 +413,20 @@ function Get-RmProviderDetail {
     $result = @{}
     $missing = @($Npi | Sort-Object -Unique | Where-Object { -not $cache.ContainsKey($_) })
     $n = 0
+    $consecutiveFailures = 0
     foreach ($id in $missing) {
+        if ($consecutiveFailures -ge 3) {
+            # The registry (or the connection) is down — stop hammering it.
+            # Un-looked-up NPIs stay uncached so the next run retries them.
+            Write-Warning ("NPPES lookups failed 3 times in a row; skipping the remaining " +
+                "$(@($missing).Count - $n) lookups. Results show NPIs without names; run again later to fill them in.")
+            break
+        }
         $n++
         if ($n % 10 -eq 0) { Start-Sleep -Milliseconds 200 }   # be polite to NPPES
         try {
             $resp = Invoke-RmNppes ('number={0}' -f $id)
+            $consecutiveFailures = 0
             $results = @(Get-RmProp $resp 'results')
             if ($results.Count -eq 0) {
                 $cache[$id] = [pscustomobject]@{
@@ -425,6 +448,7 @@ function Get-RmProviderDetail {
             }
         } catch {
             # Leave uncached so a later run can retry; report honestly for now.
+            $consecutiveFailures++
             $result[$id] = [pscustomobject]@{ Name = '(lookup failed)'; Specialty = ''; City = ''; State = '' }
         }
     }
@@ -535,12 +559,19 @@ function Get-RmReferralMap {
     }
     # NPPES reflects TODAY's providers; an NPI enumerated after the data year
     # cannot appear in that year's claims. Flag those honestly instead of
-    # letting their zero rows read as "no referrals".
-    $dataYearEnd = '{0}-12-31' -f $script:RmConfig.Year
+    # letting their zero rows read as "no referrals". Dates are PARSED, not
+    # string-compared — a format change from NPPES must yield '' (unknown),
+    # never a wrong Yes/No.
+    $dataYearEnd = Get-Date -Year $script:RmConfig.Year -Month 12 -Day 31
     $clinicRows = @($clinics | ForEach-Object {
+        $enumDate = [datetime]::MinValue
+        $parsed = -not [string]::IsNullOrEmpty($_.Enumerated) -and
+                  [datetime]::TryParseExact($_.Enumerated, 'yyyy-MM-dd',
+                      [System.Globalization.CultureInfo]::InvariantCulture,
+                      [System.Globalization.DateTimeStyles]::None, [ref]$enumDate)
         $agg = if ($byClinic.ContainsKey($_.NPI)) { $byClinic[$_.NPI] } else { $null }
-        $existed = if (-not $_.Enumerated) { '' }
-                   elseif ($_.Enumerated -le $dataYearEnd) { 'Yes' }
+        $existed = if (-not $parsed) { '' }
+                   elseif ($enumDate -le $dataYearEnd) { 'Yes' }
                    else { "No (NPI issued $($_.Enumerated))" }
         [pscustomobject]@{
             NPI             = $_.NPI

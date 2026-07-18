@@ -272,14 +272,18 @@ function Show-ErrorBox([string]$Message) {
 
 # Runs a script block with parameters in a background runspace so the window
 # never freezes; OnDone/OnFail run back on the UI thread via the poll timer.
+# Owns the busy choreography: sets busy here, and the timer ALWAYS clears busy
+# before dispatching, so no handler can leave the window stuck disabled.
 function Invoke-Async {
     param(
         [Parameter(Mandatory)][string]$Kind,
         [Parameter(Mandatory)][string]$WorkerScript,
         [hashtable]$Params = @{},
         [Parameter(Mandatory)][scriptblock]$OnDone,
-        [Parameter(Mandatory)][scriptblock]$OnFail
+        [Parameter(Mandatory)][scriptblock]$OnFail,
+        [string]$BusyMessage
     )
+    Set-Busy $true $BusyMessage
     $rs = [runspacefactory]::CreateRunspace()
     $rs.Open()
     $ps = [powershell]::Create()
@@ -303,10 +307,19 @@ $timer.Add_Tick({
         $result = $null; $failure = $null
         try {
             $output = $job.PS.EndInvoke($job.Handle)
-            if ($job.PS.Streams.Error.Count -gt 0) {
+            # A worker SUCCEEDED if it produced output — an incidental
+            # non-terminating error record (e.g. an antivirus briefly locking
+            # the change-log file) must not discard a completed result.
+            if ($output.Count -gt 0) {
+                $result = $output
+                if ($job.PS.Streams.Error.Count -gt 0) {
+                    Write-Warning ("Background task '$($job.Kind)' reported warnings: " +
+                        (($job.PS.Streams.Error | ForEach-Object { $_.ToString() }) -join '; '))
+                }
+            } elseif ($job.PS.Streams.Error.Count -gt 0) {
                 $failure = ($job.PS.Streams.Error | ForEach-Object { $_.ToString() }) -join "`n"
             } else {
-                $result = $output
+                $result = $output   # legitimately empty
             }
         } catch {
             $failure = $_.Exception.InnerException.Message
@@ -314,10 +327,10 @@ $timer.Add_Tick({
         } finally {
             $job.PS.Dispose(); $job.RS.Dispose()
         }
+        Set-Busy $false $null   # unconditional: handlers can never strand the UI disabled
         try {
             if ($failure) { & $job.OnFail $failure } else { & $job.OnDone $result }
         } catch {
-            Set-Busy $false $null
             Show-ErrorBox "Unexpected error: $($_.Exception.Message)"
         }
     }
@@ -326,14 +339,23 @@ $timer.Start()
 
 # DataGrids bind DataTables (WPF cannot auto-generate columns from PowerShell
 # objects). Display is capped; exports always use the full result set.
+# Integer-valued columns get typed [int] so clicking a column header sorts
+# numerically (a string column would put 9 above 65 above 450).
 function ConvertTo-DataTable {
     param([object[]]$Rows, [string[]]$Columns)
     $table = New-Object System.Data.DataTable
-    foreach ($c in $Columns) { [void]$table.Columns.Add($c) }
+    foreach ($c in $Columns) {
+        $type = [string]
+        if ($Rows.Count -gt 0 -and $Rows[0].$c -is [int]) { $type = [int] }
+        [void]$table.Columns.Add($c, $type)
+    }
     $count = [Math]::Min($Rows.Count, $script:MaxGridRows)
     for ($i = 0; $i -lt $count; $i++) {
         $r = $table.NewRow()
-        foreach ($c in $Columns) { $r[$c] = [string]$Rows[$i].$c }
+        foreach ($c in $Columns) {
+            $v = $Rows[$i].$c
+            $r[$c] = if ($null -eq $v) { [DBNull]::Value } else { $v }
+        }
         $table.Rows.Add($r)
     }
     $table
@@ -388,19 +410,17 @@ function Update-StatusFromDisk {
 function Start-DataLoad {
     $latest = Get-OrfLatestSnapshot
     if (-not $latest) { return }
-    Set-Busy $true "Loading $($latest.Name) into memory..."
-    Invoke-Async -Kind 'load' -Params @{ ModulePath = $script:ModulePath; Path = $latest.FullName } `
+    Invoke-Async -Kind 'load' -BusyMessage "Loading $($latest.Name) into memory..." `
+        -Params @{ ModulePath = $script:ModulePath; Path = $latest.FullName } `
         -WorkerScript 'param($ModulePath, $Path) Import-Module $ModulePath; Import-OrfSnapshot -Path $Path' `
         -OnDone {
             param($result)
             # The worker returns the List as the single output object.
             $script:Data = $result[0]
-            Set-Busy $false $null
             Update-StatusFromDisk
         } `
         -OnFail {
             param($message)
-            Set-Busy $false $null
             Update-StatusFromDisk
             Show-ErrorBox "Could not load the data file: $message"
         }
@@ -412,12 +432,11 @@ function Start-DataLoad {
 
 $ui.UpdateButton.Add_Click({
     if ($script:Busy) { return }
-    Set-Busy $true 'Contacting CMS and downloading if a newer release exists (this can take a few minutes)...'
     Invoke-Async -Kind 'update' -Params @{ ModulePath = $script:ModulePath } `
+        -BusyMessage 'Contacting CMS and downloading if a newer release exists (this can take a few minutes)...' `
         -WorkerScript 'param($ModulePath) Import-Module $ModulePath; Update-OrfData' `
         -OnDone {
             param($result)
-            Set-Busy $false $null
             $r = $result[0]
             Set-Status $r.Message
             Update-SnapshotCombos
@@ -425,7 +444,6 @@ $ui.UpdateButton.Add_Click({
         } `
         -OnFail {
             param($message)
-            Set-Busy $false $null
             Update-StatusFromDisk
             Show-ErrorBox $message
         }
@@ -442,26 +460,28 @@ $ui.SearchButton.Add_Click({
         Show-ErrorBox 'NPI must be digits only (up to 10).'
         return
     }
+    $name = $ui.NameBox.Text.Trim()
+    $anyFlag = [bool]$ui.FlagPartB.IsChecked -or [bool]$ui.FlagDme.IsChecked -or
+               [bool]$ui.FlagHha.IsChecked -or [bool]$ui.FlagPmd.IsChecked -or
+               [bool]$ui.FlagHospice.IsChecked
+    if (-not $name -and -not $npi -and -not $anyFlag) {
+        # An unconstrained search would materialize all ~2M rows on the UI thread.
+        Show-ErrorBox 'Enter a name or NPI, or tick at least one eligibility box, then click Search.'
+        return
+    }
     $hits = [OrfEngine]::Search(
-        $script:Data, $ui.NameBox.Text, $npi,
+        $script:Data, $name, $npi,
         [bool]$ui.FlagPartB.IsChecked, [bool]$ui.FlagDme.IsChecked,
         [bool]$ui.FlagHha.IsChecked, [bool]$ui.FlagPmd.IsChecked,
         [bool]$ui.FlagHospice.IsChecked, 0)
-    $records = @($hits | ForEach-Object {
-        [pscustomobject]@{
-            NPI = $_.NPI; LastName = $_.LastName; FirstName = $_.FirstName
-            PartB = if ($_.PartB) { 'Y' } else { 'N' }
-            DME = if ($_.DME) { 'Y' } else { 'N' }
-            HHA = if ($_.HHA) { 'Y' } else { 'N' }
-            PMD = if ($_.PMD) { 'Y' } else { 'N' }
-            Hospice = if ($_.Hospice) { 'Y' } else { 'N' }
-        }
-    })
-    $script:LastSearchResults = $records
+    # Keep the raw engine hits; only the displayed slice is converted now.
+    # Export converts the full set at export time (streams through the module).
+    $script:LastSearchResults = $hits
+    $display = @($hits | Select-Object -First $script:MaxGridRows | ConvertTo-OrfRecord)
     $cols = @('NPI', 'LastName', 'FirstName', 'PartB', 'DME', 'HHA', 'PMD', 'Hospice')
-    $ui.SearchGrid.ItemsSource = (ConvertTo-DataTable -Rows $records -Columns $cols).DefaultView
-    $ui.ExportSearchButton.IsEnabled = ($records.Count -gt 0)
-    $ui.SearchSummary.Text = "$('{0:N0}' -f $records.Count) matching provider(s)." + (Get-CappedNote $records.Count)
+    $ui.SearchGrid.ItemsSource = (ConvertTo-DataTable -Rows $display -Columns $cols).DefaultView
+    $ui.ExportSearchButton.IsEnabled = ($hits.Count -gt 0)
+    $ui.SearchSummary.Text = "$('{0:N0}' -f $hits.Count) matching provider(s)." + (Get-CappedNote $hits.Count)
 })
 
 $ui.ExportSearchButton.Add_Click({
@@ -474,7 +494,8 @@ $ui.ExportSearchButton.Add_Click({
     }
     $desc = 'Provider search'
     if ($filters.Count -gt 0) { $desc += ': ' + ($filters -join '; ') }
-    Export-WithDialog -Rows $script:LastSearchResults -SuggestedName 'provider-search.csv' -Description $desc
+    Export-WithDialog -Rows @($script:LastSearchResults | ConvertTo-OrfRecord) `
+        -SuggestedName 'provider-search.csv' -Description $desc
 })
 
 $ui.LoadNpiFileButton.Add_Click({
@@ -482,14 +503,13 @@ $ui.LoadNpiFileButton.Add_Click({
     $dialog.Filter = 'Text or CSV files (*.txt;*.csv)|*.txt;*.csv|All files (*.*)|*.*'
     if ($dialog.ShowDialog($window)) {
         try {
-            $text = Get-Content -LiteralPath $dialog.FileName -Raw
-            $npis = [regex]::Matches($text, '(?<!\d)\d{10}(?!\d)') | ForEach-Object { $_.Value }
+            $npis = @(Get-OrfNpiFromText -Text (Get-Content -LiteralPath $dialog.FileName -Raw))
             if ($npis.Count -eq 0) {
                 Show-ErrorBox "No 10-digit NPIs found in $($dialog.FileName)."
                 return
             }
-            $ui.NpiListBox.Text = ($npis | Select-Object -Unique) -join "`r`n"
-            $ui.BatchSummary.Text = "Loaded $(@($npis | Select-Object -Unique).Count) unique NPI(s) from file. Click 'Run check'."
+            $ui.NpiListBox.Text = $npis -join "`r`n"
+            $ui.BatchSummary.Text = "Loaded $($npis.Count) unique NPI(s) from file. Click 'Run check'."
         } catch {
             Show-ErrorBox "Could not read the file: $($_.Exception.Message)"
         }
@@ -502,33 +522,14 @@ $ui.BatchCheckButton.Add_Click({
         Show-ErrorBox "No data loaded yet. Click 'Check for updates' first to download the CMS file."
         return
     }
-    $npis = @([regex]::Matches($ui.NpiListBox.Text, '(?<!\d)\d{10}(?!\d)') |
-              ForEach-Object { $_.Value } | Select-Object -Unique)
+    $npis = @(Get-OrfNpiFromText -Text $ui.NpiListBox.Text)
     if ($npis.Count -eq 0) {
         Show-ErrorBox 'Paste at least one 10-digit NPI (or load a file) first.'
         return
     }
-    # Check against the in-memory snapshot — instant, no reload needed.
-    $map = New-Object 'System.Collections.Generic.Dictionary[string,object]'
-    foreach ($p in $script:Data) { if (-not $map.ContainsKey($p.NPI)) { $map.Add($p.NPI, $p) } }
-    $records = @(foreach ($n in $npis) {
-        if (-not [OrfEngine]::IsValidNpi($n)) {
-            [pscustomobject]@{ NPI = $n; Status = 'INVALID NPI'; LastName = ''; FirstName = ''
-                               PartB = ''; DME = ''; HHA = ''; PMD = ''; Hospice = '' }
-        } elseif ($map.ContainsKey($n)) {
-            $p = $map[$n]
-            [pscustomobject]@{ NPI = $n; Status = 'ELIGIBLE (on CMS list)'
-                               LastName = $p.LastName; FirstName = $p.FirstName
-                               PartB = if ($p.PartB) { 'Y' } else { 'N' }
-                               DME = if ($p.DME) { 'Y' } else { 'N' }
-                               HHA = if ($p.HHA) { 'Y' } else { 'N' }
-                               PMD = if ($p.PMD) { 'Y' } else { 'N' }
-                               Hospice = if ($p.Hospice) { 'Y' } else { 'N' } }
-        } else {
-            [pscustomobject]@{ NPI = $n; Status = 'NOT ON LIST'; LastName = ''; FirstName = ''
-                               PartB = 'N'; DME = 'N'; HHA = 'N'; PMD = 'N'; Hospice = 'N' }
-        }
-    })
+    # One classification implementation for GUI and CLI: the module function,
+    # fed the already-loaded snapshot (C#-indexed — no file reload, no drift).
+    $records = @($npis | Test-OrfNpi -Data $script:Data)
     $script:LastBatchResults = $records
     $cols = @('NPI', 'Status', 'LastName', 'FirstName', 'PartB', 'DME', 'HHA', 'PMD', 'Hospice')
     $ui.BatchGrid.ItemsSource = (ConvertTo-DataTable -Rows $records -Columns $cols).DefaultView
@@ -559,8 +560,8 @@ $ui.CompareButton.Add_Click({
     if (-not $oldName -or -not $newName) { Show-ErrorBox 'Pick two snapshots to compare.'; return }
     if ($oldName -eq $newName) { Show-ErrorBox 'Pick two different snapshots.'; return }
     $snapDir = Split-Path $files[0].FullName
-    Set-Busy $true "Comparing $oldName to $newName..."
-    Invoke-Async -Kind 'compare' -Params @{
+    Invoke-Async -Kind 'compare' -BusyMessage "Comparing $oldName to $newName..." `
+        -Params @{
             ModulePath = $script:ModulePath
             OldPath = (Join-Path $snapDir $oldName)
             NewPath = (Join-Path $snapDir $newName)
@@ -568,7 +569,6 @@ $ui.CompareButton.Add_Click({
         -WorkerScript 'param($ModulePath, $OldPath, $NewPath) Import-Module $ModulePath; Compare-OrfSnapshot -OldPath $OldPath -NewPath $NewPath' `
         -OnDone {
             param($result)
-            Set-Busy $false $null
             Update-StatusFromDisk
             $all = @($result)
             $filter = ([System.Windows.Controls.ComboBoxItem]$ui.ChangeTypeCombo.SelectedItem).Content
@@ -587,7 +587,6 @@ $ui.CompareButton.Add_Click({
         } `
         -OnFail {
             param($message)
-            Set-Busy $false $null
             Update-StatusFromDisk
             Show-ErrorBox "Comparison failed: $message"
         }
@@ -637,20 +636,18 @@ function Export-RmWithDialog {
 
 $ui.RmDownloadButton.Add_Click({
     if ($script:Busy) { return }
-    Set-Busy $true 'Downloading the CMS shared-patient dataset (~356 MB; this can take several minutes)...'
-    $ui.RmSummary.Text = 'Downloading... the app stays usable; this tab will report when the dataset is ready.'
+    $ui.RmSummary.Text = 'Downloading... this tab will report when the dataset is ready.'
     Invoke-Async -Kind 'rm-download' -Params @{ RmModulePath = $script:RmModulePath } `
+        -BusyMessage 'Downloading the CMS shared-patient dataset (~356 MB; this can take several minutes)...' `
         -WorkerScript 'param($RmModulePath) Import-Module $RmModulePath; Save-RmDataset' `
         -OnDone {
             param($result)
-            Set-Busy $false $null
             Update-StatusFromDisk
             Update-RmStatus
             $ui.RmSummary.Text = $result[0].Message + ' Enter a ZIP and click "Map referral sources".'
         } `
         -OnFail {
             param($message)
-            Set-Busy $false $null
             Update-StatusFromDisk
             Update-RmStatus
             Show-ErrorBox $message
@@ -668,16 +665,15 @@ $ui.RmRunButton.Add_Click({
         Show-ErrorBox "The CMS dataset isn't downloaded yet — click 'Download CMS dataset' first (one-time, ~356 MB)."
         return
     }
-    Set-Busy $true "Mapping referral sources for $zip — NPPES lookup, then a scan of ~35M provider pairs (1-2 minutes)..."
     Invoke-Async -Kind 'rm-run' -Params @{
             RmModulePath = $script:RmModulePath
             Zip = $zip
             OrgOnly = [bool]$ui.RmOrgOnly.IsChecked
         } `
+        -BusyMessage "Mapping referral sources for $zip — NPPES lookup, then a scan of ~35M provider pairs (1-2 minutes)..." `
         -WorkerScript 'param($RmModulePath, $Zip, $OrgOnly) Import-Module $RmModulePath; Get-RmReferralMap -Zip $Zip -OrganizationsOnly:$OrgOnly' `
         -OnDone {
             param($result)
-            Set-Busy $false $null
             $map = $result[0]
             $script:RmResult = $map
             $clinics = @($map.Clinics)
@@ -698,7 +694,7 @@ $ui.RmRunButton.Add_Click({
         } `
         -OnFail {
             param($message)
-            Set-Busy $false $null
+            Update-RmStatus
             Show-ErrorBox $message
         }
 })

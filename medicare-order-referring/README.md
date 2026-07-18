@@ -141,9 +141,10 @@ anything, and a validation failure keeps your existing snapshot untouched.
 
 ## Tests
 
-The test suite (33 tests across both modules: download/update/validation/
-idempotency, search, batch check, snapshot diff, referral-map discovery/scan/
-enrichment/flags, exports, retention) runs against local HTTP test doubles of
+The test suite (40 tests across both modules: download/update/validation/
+idempotency, crash-recovery state repair, older-release and retention safety,
+search, batch check, snapshot diff, referral-map discovery/paging/scan/
+enrichment/flags, exports) runs against local HTTP test doubles of
 the CMS hosts and the NPPES API — no external traffic:
 
 ```powershell

@@ -1,0 +1,5 @@
+# PowerShell sources contain non-ASCII characters in user-facing strings and
+# must keep a UTF-8 BOM: Windows PowerShell 5.1 parses BOM-less files as ANSI,
+# which corrupts them into mojibake or parse errors.
+[*.{ps1,psm1,psd1}]
+charset = utf-8-bom

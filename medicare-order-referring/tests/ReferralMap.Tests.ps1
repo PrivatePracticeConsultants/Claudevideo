@@ -93,6 +93,16 @@ Describe 'Clinic discovery via NPPES' {
         @($clinics).Count | Should -Be 1
         $clinics[0].NPI | Should -Be '9000000001'
     }
+    It 'supports ZIP-prefix searches and survives malformed short postal codes' {
+        $clinics = @(Find-RmClinic -Zip '999*')
+        @($clinics | ForEach-Object NPI) | Sort-Object |
+            Should -Be @('9000000001', '9000000002', '9000000005', '9000000006')
+        ($clinics | Where-Object NPI -eq '9000000006').Zip | Should -Be '9999'
+    }
+    It 'pages through NPPES results past the 200-row page size' {
+        $clinics = @(Find-RmClinic -Zip 88888)
+        @($clinics).Count | Should -Be 201
+    }
     It 'rejects malformed ZIP input' {
         { Find-RmClinic -Zip 'abc12' } | Should -Throw
         { Find-RmClinic -Zip '1' } | Should -Throw

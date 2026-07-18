@@ -18,6 +18,8 @@ Set-StrictMode -Version Latest
 # Configuration
 # ---------------------------------------------------------------------------
 
+$script:OrfLastLoaded = $null   # set by Import-OrfSnapshot; used by export sidecars
+
 $script:OrfConfig = [ordered]@{
     # CMS open-data catalog (data.json). Overridable for tests via ORF_CATALOG_URL.
     CatalogUrl   = if ($env:ORF_CATALOG_URL) { $env:ORF_CATALOG_URL } else { 'https://data.cms.gov/data.json' }
@@ -234,8 +236,9 @@ public static class OrfEngine
     }
 
     // Keyed by NPI. If a file ever contained duplicate NPIs the first row wins,
-    // matching how CMS's own lookup behaves.
-    private static Dictionary<string, OrfProvider> Index(List<OrfProvider> data)
+    // matching how CMS's own lookup behaves. Public so batch checks against an
+    // already-loaded snapshot can index at native speed.
+    public static Dictionary<string, OrfProvider> BuildIndex(List<OrfProvider> data)
     {
         Dictionary<string, OrfProvider> map =
             new Dictionary<string, OrfProvider>(data.Count, StringComparer.Ordinal);
@@ -248,8 +251,8 @@ public static class OrfEngine
 
     public static OrfDiffResult Diff(List<OrfProvider> oldData, List<OrfProvider> newData)
     {
-        Dictionary<string, OrfProvider> oldMap = Index(oldData);
-        Dictionary<string, OrfProvider> newMap = Index(newData);
+        Dictionary<string, OrfProvider> oldMap = BuildIndex(oldData);
+        Dictionary<string, OrfProvider> newMap = BuildIndex(newData);
         OrfDiffResult result = new OrfDiffResult();
         result.OldCount = oldMap.Count;
         result.NewCount = newMap.Count;
@@ -419,28 +422,32 @@ function Get-OrfCatalogInfo {
     $dataset = $dataset[0]
 
     # Distributions come in (API, CSV) pairs per release, newest first. Pick the
-    # CSV with the newest 'modified' date.
+    # CSV with the newest 'modified' date. The modified date becomes part of a
+    # local filename, so only accept a strict yyyy-MM-dd prefix — a datetime or
+    # junk value from the remote catalog must never reach the filesystem.
     $csvDist = @((Get-OrfProp $dataset 'distribution') |
         Where-Object { (Get-OrfProp $_ 'format') -eq 'CSV' -and (Get-OrfProp $_ 'downloadURL') } |
-        Sort-Object { [string](Get-OrfProp $_ 'modified') } -Descending)
+        ForEach-Object {
+            $m = [regex]::Match([string](Get-OrfProp $_ 'modified'), '^\d{4}-\d{2}-\d{2}')
+            if ($m.Success) {
+                [pscustomobject]@{
+                    ReleaseDate = $m.Value
+                    CsvUrl      = [string](Get-OrfProp $_ 'downloadURL')
+                }
+            } else {
+                Write-Warning "Skipping a catalog entry with an unrecognized date: '$(Get-OrfProp $_ 'modified')'"
+            }
+        } |
+        Sort-Object ReleaseDate -Descending)
     if ($csvDist.Count -eq 0) {
-        throw ("The '$(Get-OrfProp $dataset 'title')' dataset has no CSV download listed in the " +
+        throw ("The '$(Get-OrfProp $dataset 'title')' dataset has no usable CSV download listed in the " +
                "CMS catalog. CMS may have changed how the data is published.")
     }
-    $latest = $csvDist[0]
 
     [pscustomobject]@{
-        DatasetTitle  = [string](Get-OrfProp $dataset 'title')
-        ReleaseDate   = [string](Get-OrfProp $latest 'modified')
-        CsvUrl        = [string](Get-OrfProp $latest 'downloadURL')
-        Periodicity   = [string](Get-OrfProp $dataset 'accrualPeriodicity')
-        Temporal      = [string](Get-OrfProp $latest 'temporal')
-        AllCsvReleases = $csvDist | ForEach-Object {
-            [pscustomobject]@{
-                ReleaseDate = [string](Get-OrfProp $_ 'modified')
-                CsvUrl      = [string](Get-OrfProp $_ 'downloadURL')
-            }
-        }
+        ReleaseDate    = $csvDist[0].ReleaseDate
+        CsvUrl         = $csvDist[0].CsvUrl
+        AllCsvReleases = $csvDist
     }
 }
 
@@ -477,9 +484,33 @@ function Update-OrfData {
     $snapshotName = 'OrderReferring_{0}.csv' -f $release.ReleaseDate
     $snapshotPath = Join-Path $paths.SnapshotDir $snapshotName
 
+    # On Windows PowerShell 5.1 the download progress bar slows large
+    # Invoke-WebRequest -OutFile transfers by ~10x. Function-local override.
+    $ProgressPreference = 'SilentlyContinue'
+
     $state = Read-OrfState
     if (-not $Force -and (Test-Path -LiteralPath $snapshotPath)) {
         Write-Verbose "Already current: $snapshotName"
+        # Self-heal: if a previous run was killed between promoting the file
+        # and writing state.json, the metadata still cites the older release.
+        # Re-derive it from the file so status and export sidecars stay honest.
+        $latestOnDisk = Get-OrfLatestSnapshot
+        if ($latestOnDisk -and (-not $state -or $state.ReleaseDate -ne ($latestOnDisk.BaseName -replace '^OrderReferring_', ''))) {
+            try {
+                $repairRows = [OrfEngine]::Load($latestOnDisk.FullName)
+                Write-OrfState ([ordered]@{
+                    ReleaseDate  = ($latestOnDisk.BaseName -replace '^OrderReferring_', '')
+                    CsvUrl       = $release.CsvUrl
+                    Sha256       = (Get-FileHash -LiteralPath $latestOnDisk.FullName -Algorithm SHA256).Hash
+                    RowCount     = $repairRows.Count
+                    DownloadedAt = (Get-Date).ToString('o')
+                })
+                $state = Read-OrfState
+                Write-Verbose "Repaired stale state metadata from $($latestOnDisk.Name)."
+            } catch {
+                Write-Warning "Could not repair state metadata: $($_.Exception.Message)"
+            }
+        }
         return [pscustomobject]@{
             Updated      = $false
             ReleaseDate  = $release.ReleaseDate
@@ -491,9 +522,11 @@ function Update-OrfData {
 
     $previousSnapshot = Get-OrfLatestSnapshot
 
-    # Download to a temp name, validate, then atomically promote. A crash or
-    # network failure at any point leaves the previous snapshot untouched.
-    $tmpPath = $snapshotPath + '.tmp'
+    # Download to a unique temp name (concurrent runs — e.g. the scheduled task
+    # and the GUI — must never share a partial file), validate, then atomically
+    # promote. A crash or network failure at any point leaves the previous
+    # snapshot untouched.
+    $tmpPath = '{0}.{1}.tmp' -f $snapshotPath, [guid]::NewGuid().ToString('N')
     try {
         Write-Verbose "Downloading $($release.CsvUrl)"
         Invoke-WebRequest -Uri $release.CsvUrl -OutFile $tmpPath -UseBasicParsing `
@@ -518,11 +551,24 @@ function Update-OrfData {
     }
 
     $sha = (Get-FileHash -LiteralPath $tmpPath -Algorithm SHA256).Hash
-    Move-Item -LiteralPath $tmpPath -Destination $snapshotPath -Force
+    try {
+        Move-Item -LiteralPath $tmpPath -Destination $snapshotPath -Force
+    } catch {
+        Remove-Item -LiteralPath $tmpPath -ErrorAction SilentlyContinue
+        throw ("The validated download could not be moved into place (another " +
+               "update may be running). Your existing data is unchanged. " +
+               "Details: $($_.Exception.Message)")
+    }
+
+    # Is the file we just downloaded the newest on disk? Explicitly requesting
+    # an OLDER release (-ReleaseDate) must not rewrite current-state metadata,
+    # must not produce a chronologically backwards change log, and must not be
+    # treated as "the" data by queries (which always load the newest snapshot).
+    $isNewest = (-not $previousSnapshot) -or ($snapshotName -ge $previousSnapshot.Name)
 
     # Change log vs. the previous snapshot (best effort — never blocks the update).
     $changeSummary = $null
-    if ($previousSnapshot -and $previousSnapshot.FullName -ne $snapshotPath) {
+    if ($isNewest -and $previousSnapshot -and $previousSnapshot.FullName -ne $snapshotPath) {
         try {
             $oldRows = [OrfEngine]::Load($previousSnapshot.FullName)
             $diff = [OrfEngine]::Diff($oldRows, $rows)
@@ -540,18 +586,22 @@ function Update-OrfData {
         }
     }
 
-    Write-OrfState ([ordered]@{
-        ReleaseDate  = $release.ReleaseDate
-        CsvUrl       = $release.CsvUrl
-        Sha256       = $sha
-        RowCount     = $rows.Count
-        DownloadedAt = (Get-Date).ToString('o')
-    })
+    if ($isNewest) {
+        Write-OrfState ([ordered]@{
+            ReleaseDate  = $release.ReleaseDate
+            CsvUrl       = $release.CsvUrl
+            Sha256       = $sha
+            RowCount     = $rows.Count
+            DownloadedAt = (Get-Date).ToString('o')
+        })
+    }
 
-    # Retention: keep the most recent N snapshots.
-    $all = @(Get-OrfSnapshotFiles)
-    if ($all.Count -gt $script:OrfConfig.KeepSnapshots) {
-        $all | Select-Object -First ($all.Count - $script:OrfConfig.KeepSnapshots) |
+    # Retention: keep the most recent N snapshots — but never the one that was
+    # just downloaded, even if it sorts older than everything else.
+    $all = @(Get-OrfSnapshotFiles | Where-Object { $_.FullName -ne $snapshotPath })
+    $keep = $script:OrfConfig.KeepSnapshots - 1   # the new file occupies one slot
+    if ($all.Count -gt $keep) {
+        $all | Select-Object -First ($all.Count - $keep) |
             Remove-Item -Force -ErrorAction SilentlyContinue
     }
 
@@ -612,6 +662,13 @@ function Import-OrfSnapshot {
     if (-not (Test-Path -LiteralPath $Path)) {
         throw "Snapshot file not found: $Path"
     }
+    # Remember which snapshot was actually loaded so export sidecars can cite
+    # the file the numbers really came from (not just the newest release).
+    $leaf = Split-Path -Leaf $Path
+    $script:OrfLastLoaded = [pscustomobject]@{
+        File    = $leaf
+        Release = ($leaf -replace '^OrderReferring_', '' -replace '\.csv$', '')
+    }
     ,([OrfEngine]::Load($Path))
 }
 
@@ -647,8 +704,7 @@ function Search-OrfProvider {
         [ValidatePattern('^\d{1,10}$')][string]$Npi,
         [ValidateSet('PARTB', 'DME', 'HHA', 'PMD', 'HOSPICE')][string[]]$RequireFlag = @(),
         [int]$Limit = 0,
-        [string]$SnapshotPath,
-        [switch]$Raw   # return engine objects instead of Y/N records (internal/GUI use)
+        [string]$SnapshotPath
     )
 
     $data = Import-OrfSnapshot -Path $SnapshotPath
@@ -657,8 +713,24 @@ function Search-OrfProvider {
         ($RequireFlag -contains 'PARTB'), ($RequireFlag -contains 'DME'),
         ($RequireFlag -contains 'HHA'), ($RequireFlag -contains 'PMD'),
         ($RequireFlag -contains 'HOSPICE'), $Limit)
-    if ($Raw) { return ,$hits }
     $hits | ConvertTo-OrfRecord
+}
+
+function Get-OrfNpiFromText {
+    <#
+    .SYNOPSIS
+      Extracts every distinct 10-digit NPI-shaped number from arbitrary text
+      (a pasted spreadsheet column, a whole report, a raw list), preserving
+      first-seen order. The single source of truth for NPI extraction — the
+      GUI and Test-OrfNpi both use it.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
+
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($m in [regex]::Matches($Text, '(?<!\d)\d{10}(?!\d)')) {
+        if ($seen.Add($m.Value)) { $m.Value }
+    }
 }
 
 function Test-OrfNpi {
@@ -672,12 +744,16 @@ function Test-OrfNpi {
     .PARAMETER Path
       A text or CSV file to read NPIs from. Every 10-digit number found in the
       file is checked, so a raw list, or a CSV with an NPI column, both work.
+    .PARAMETER Data
+      An already-loaded snapshot (from Import-OrfSnapshot). Skips the file
+      reload — used by the GUI, which keeps the snapshot in memory.
     #>
     [CmdletBinding()]
     param(
         [Parameter(ValueFromPipeline)][string[]]$Npi,
         [string]$Path,
-        [string]$SnapshotPath
+        [string]$SnapshotPath,
+        [object]$Data
     )
 
     begin { $collected = New-Object System.Collections.Generic.List[string] }
@@ -685,9 +761,8 @@ function Test-OrfNpi {
     end {
         if ($Path) {
             if (-not (Test-Path -LiteralPath $Path)) { throw "NPI list file not found: $Path" }
-            $text = Get-Content -LiteralPath $Path -Raw
-            foreach ($m in [regex]::Matches($text, '(?<!\d)\d{10}(?!\d)')) {
-                $collected.Add($m.Value)
+            foreach ($n in Get-OrfNpiFromText -Text (Get-Content -LiteralPath $Path -Raw)) {
+                $collected.Add($n)
             }
         }
         # Normalize: trim, dedupe, preserve order.
@@ -700,9 +775,8 @@ function Test-OrfNpi {
             throw "No NPIs to check. Provide -Npi values or a -Path file containing 10-digit NPIs."
         }
 
-        $data = Import-OrfSnapshot -Path $SnapshotPath
-        $map = New-Object 'System.Collections.Generic.Dictionary[string,object]'
-        foreach ($p in $data) { if (-not $map.ContainsKey($p.NPI)) { $map.Add($p.NPI, $p) } }
+        if ($null -eq $Data) { $Data = Import-OrfSnapshot -Path $SnapshotPath }
+        $map = [OrfEngine]::BuildIndex($Data)
 
         foreach ($n in $list) {
             if (-not [OrfEngine]::IsValidNpi($n)) {
@@ -789,14 +863,19 @@ function Export-OrfResult {
             New-Item -ItemType Directory -Path $dir -Force | Out-Null
         }
         if ($rows.Count -eq 0) {
-            # An empty result is a legitimate answer; write the header-only file
-            # honestly rather than failing or inventing rows.
+            # An empty result is a legitimate answer. With zero rows there is no
+            # schema to emit, so the CSV is left empty; the sidecar records the
+            # honest "0 rows" rather than inventing content.
             Set-Content -LiteralPath $Path -Value '' -Encoding UTF8
         } else {
             $rows | Export-Csv -LiteralPath $Path -NoTypeInformation -Encoding UTF8
         }
 
+        # Provenance: prefer the snapshot actually loaded by this session's
+        # queries (Import-OrfSnapshot records it); fall back to the newest
+        # release named in state.json.
         $state = Read-OrfState
+        $loaded = $script:OrfLastLoaded
         $sidecar = $Path -replace '\.[Cc][Ss][Vv]$', ''
         $sidecar = "$sidecar.methodology.txt"
         @(
@@ -808,9 +887,11 @@ function Export-OrfResult {
             ''
             'Source: CMS "Order and Referring" public dataset'
             '  https://data.cms.gov/provider-characteristics/medicare-provider-supplier-enrollment/order-and-referring'
-            $(if ($state) { "Data release:   $($state.ReleaseDate) ($('{0:N0}' -f $state.RowCount) providers)" }
-              else { 'Data release:   (no local snapshot metadata available)' })
-            $(if ($state) { "File SHA-256:   $($state.Sha256)" })
+            $(if ($loaded) { "Data snapshot:  $($loaded.File) (release $($loaded.Release); the snapshot this session's queries loaded)" })
+            $(if ($state -and (-not $loaded -or $state.ReleaseDate -eq $loaded.Release)) {
+                "Data release:   $($state.ReleaseDate) ($('{0:N0}' -f $state.RowCount) providers)" })
+            $(if ($state -and (-not $loaded -or $state.ReleaseDate -eq $loaded.Release)) { "File SHA-256:   $($state.Sha256)" })
+            $(if (-not $state -and -not $loaded) { 'Data release:   (no local snapshot metadata available)' })
             ''
             'This dataset lists providers eligible to ORDER AND REFER within Medicare'
             '(Part B, DME, HHA, PMD, Hospice eligibility flags). It contains no claims'
@@ -841,8 +922,13 @@ function Install-OrfUpdateTask {
         throw "Scheduled tasks are only supported on Windows."
     }
     $moduleFile = Join-Path $PSScriptRoot 'OrderReferring.psm1'
-    $cmd = "Import-Module '$moduleFile'; Update-OrfData"
-    $pwshExe = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh.exe' } else { 'powershell.exe' }
+    # Double any embedded single quotes (e.g. C:\Users\O'Brien\...) so the
+    # command stays valid, and use the RESOLVED pwsh path — Task Scheduler does
+    # not share this session's PATH, so a bare 'pwsh.exe' can fail at run time.
+    $escaped = $moduleFile -replace "'", "''"
+    $cmd = "Import-Module '$escaped'; Update-OrfData"
+    $pwshCmd = Get-Command pwsh -ErrorAction SilentlyContinue
+    $pwshExe = if ($pwshCmd -and $pwshCmd.Source) { $pwshCmd.Source } else { 'powershell.exe' }
     $action = New-ScheduledTaskAction -Execute $pwshExe `
         -Argument "-NoProfile -WindowStyle Hidden -Command `"$cmd`""
     $trigger = New-ScheduledTaskTrigger -Daily -At $At
@@ -869,6 +955,7 @@ Export-ModuleMember -Function @(
     'Get-OrfCatalogInfo', 'Update-OrfData', 'Get-OrfStatus',
     'Get-OrfSnapshotFiles', 'Get-OrfLatestSnapshot', 'Import-OrfSnapshot',
     'Search-OrfProvider', 'Test-OrfNpi', 'Compare-OrfSnapshot',
+    'ConvertTo-OrfRecord', 'Get-OrfNpiFromText',
     'Export-OrfResult',
     'Install-OrfUpdateTask', 'Uninstall-OrfUpdateTask'
 )

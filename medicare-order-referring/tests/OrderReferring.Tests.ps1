@@ -27,6 +27,8 @@ BeforeAll {
     ) -join "`n"
     Set-Content -Path (Join-Path $script:SiteDir 'release1.csv') -Value $release1 -Encoding UTF8 -NoNewline
     Set-Content -Path (Join-Path $script:SiteDir 'release2.csv') -Value $release2 -Encoding UTF8 -NoNewline
+    # An even older release, used by the older-release/retention safety tests.
+    Set-Content -Path (Join-Path $script:SiteDir 'release0.csv') -Value $release1 -Encoding UTF8 -NoNewline
 
     # --- Local HTTP server serving a fake CMS catalog ---------------------
     $script:Port = Get-Random -Minimum 20000 -Maximum 45000
@@ -40,6 +42,7 @@ BeforeAll {
                     @{ format = 'CSV'; downloadURL = "$base/release2.csv"; modified = '2026-02-02' }
                     @{ format = 'API'; accessURL = "$base/api"; modified = '2026-02-02' }
                     @{ format = 'CSV'; downloadURL = "$base/release1.csv"; modified = '2026-01-01' }
+                    @{ format = 'CSV'; downloadURL = "$base/release0.csv"; modified = '2025-12-01' }
                 )
             }
         )
@@ -95,7 +98,7 @@ Describe 'Catalog discovery' {
         $info = Get-OrfCatalogInfo
         $info.ReleaseDate | Should -Be '2026-02-02'
         $info.CsvUrl | Should -Match 'release2\.csv$'
-        $info.AllCsvReleases.Count | Should -Be 2
+        $info.AllCsvReleases.Count | Should -Be 3
     }
 }
 
@@ -228,5 +231,52 @@ Describe 'Snapshot retention' {
         } finally {
             Set-OrfConfig -KeepSnapshots 8
         }
+    }
+}
+
+Describe 'Batch helpers' {
+    It 'accepts an already-loaded snapshot via -Data (no file reload)' {
+        $data = Import-OrfSnapshot
+        $r = @(Test-OrfNpi -Npi 1417051921 -Data $data)
+        $r[0].Status | Should -Match 'ELIGIBLE'
+        $r[0].LastName | Should -Be 'SMITH'
+    }
+    It 'extracts and dedupes NPIs from arbitrary text' {
+        @(Get-OrfNpiFromText -Text "x 1417051921, 1417051921`nphone 123 1760465553") |
+            Should -Be @('1417051921', '1760465553')
+        @(Get-OrfNpiFromText -Text 'nothing here') | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'Older-release and state safety' {
+    It 'downloading an older release neither rewrites state nor writes a backwards change log' {
+        $before = Get-OrfStatus
+        $r = Update-OrfData -ReleaseDate '2025-12-01'
+        $r.Updated | Should -BeTrue
+        (Get-OrfStatus).LocalRelease | Should -Be $before.LocalRelease   # still 2026-02-02
+        (Get-OrfStatus).LocalRelease | Should -Be '2026-02-02'
+        @(Get-ChildItem (Join-Path $env:ORF_DATA_DIR 'changes') -Filter '*to_2025-12-01*') |
+            Should -BeNullOrEmpty
+    }
+    It 'retention never deletes the just-downloaded snapshot' {
+        # 3 snapshots on disk (2025-12-01, 2026-01-01, 2026-02-02); cap at 2 and
+        # force a re-download of the newest: the oldest must go, newest must stay.
+        Set-OrfConfig -KeepSnapshots 2
+        try {
+            $r = Update-OrfData -Force
+            $names = @(Get-OrfSnapshotFiles | ForEach-Object Name)
+            $names | Should -Be @('OrderReferring_2026-01-01.csv', 'OrderReferring_2026-02-02.csv')
+            Test-Path $r.SnapshotPath | Should -BeTrue
+        } finally {
+            Set-OrfConfig -KeepSnapshots 8
+        }
+    }
+    It 'self-heals stale state metadata on a no-op update' {
+        Remove-Item (Join-Path $env:ORF_DATA_DIR 'state.json') -Force
+        $r = Update-OrfData
+        $r.Updated | Should -BeFalse
+        $status = Get-OrfStatus
+        $status.LocalRelease | Should -Be '2026-02-02'
+        $status.LocalRowCount | Should -Be 3
     }
 }

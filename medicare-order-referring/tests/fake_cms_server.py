@@ -49,6 +49,14 @@ IN_ZIP = [
 ]
 MAILING_ONLY = provider('9000000004', 'NPI-2', 'ELSEWHERE PT CENTER', ['261QP2000X'],
                         '111110000', mailing_zip='999990000')
+# A malformed short location postal code (these exist in the live registry):
+# must not crash discovery. Reachable only via a prefix search like 999*.
+SHORT_POSTAL = provider('9000000006', 'NPI-1', ('SHORT', 'ZIPCODE'), ['225100000X'], '9999')
+
+# ZIP 88888: a paging fixture — 201 individual PTs so the client must fetch a
+# full 200-row page and then a second page.
+PAGED = [provider(f'86{i:08d}', 'NPI-1', ('PT', f'PAGE{i}'), ['225100000X'], '888880000')
+         for i in range(201)]
 
 # Source providers looked up by number= during enrichment.
 SOURCES = {
@@ -91,18 +99,22 @@ class Handler(BaseHTTPRequestHandler):
             q = {k: v[0] for k, v in parse_qs(url.query).items()}
             if 'number' in q:
                 hit = SOURCES.get(q['number'])
-                for p in IN_ZIP + [MAILING_ONLY]:
+                for p in IN_ZIP + [MAILING_ONLY, SHORT_POSTAL] + PAGED:
                     if p['number'] == q['number']:
                         hit = p
                 results = [hit] if hit else []
                 self._json({'result_count': len(results), 'results': results})
                 return
-            postal = q.get('postal_code', '')
+            # ZIP matching mirrors NPPES: the fixture's ZIP must START WITH the
+            # query prefix (query '999*' matches fixtures in 99999).
+            prefix = q.get('postal_code', '').rstrip('*')
             term = q.get('taxonomy_description', '')
             skip = int(q.get('skip', '0'))
             results = []
-            if skip == 0 and postal.rstrip('*').startswith('99999') and term == 'Physical Therapy':
-                results = IN_ZIP + [MAILING_ONLY]
+            if term == 'Physical Therapy' and '99999'.startswith(prefix[:5]) and skip == 0:
+                results = IN_ZIP + [MAILING_ONLY, SHORT_POSTAL]
+            elif term == 'Physical Therapist' and '88888'.startswith(prefix[:5]):
+                results = PAGED[skip:skip + 200]
             self._json({'result_count': len(results), 'results': results})
             return
         self.send_response(404)
