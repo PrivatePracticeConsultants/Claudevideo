@@ -625,7 +625,24 @@ class Store:
             # explicit override from config (duckdb_memory_gb): trust the user
             # who knows their machine, but never below 1 GB (DuckDB can't do
             # useful work under that and would fail every rollup).
-            self._memory_limit_gb = max(1, int(memory_limit_gb))
+            want = max(1, int(memory_limit_gb))
+            # …and never so high it risks a NATIVE OOM kill (uncatchable — the
+            # console just closes). DuckDB's cap + parser workers + OS + browser
+            # must coexist; hold the analytics pool to ~70% of TOTAL RAM. The
+            # config comment tells users to raise this when a view OOMs, so an
+            # over-eager value on a 32 GB box is a real hazard, not paranoia.
+            total = _total_ram_bytes()
+            if total:
+                safe = max(2, int(total * 0.7 / 1e9))
+                if want > safe:
+                    logging.getLogger(__name__).warning(
+                        "duckdb_memory_gb=%d is close to this machine's total RAM "
+                        "(%.0f GB) — capping the analytics pool at %d GB so the "
+                        "parser workers, Windows, and your browser aren't starved "
+                        "(too high risks an uncatchable out-of-memory crash)",
+                        want, total / 1e9, safe)
+                    want = safe
+            self._memory_limit_gb = want
         else:
             total = _total_ram_bytes()
             if total:
@@ -649,6 +666,17 @@ class Store:
         # store; cache it briefly ((monotonic, result), see enrichment_progress)
         self._enrich_progress_cache: tuple[float, dict] | None = None
         self._enrich_progress_lock = threading.Lock()  # single-flight for the scan
+        # SAME hazard, SAME fix for the header row/tin/payer counts and the
+        # state-filter list: both scan the full store (count(DISTINCT ...) over
+        # 86M raw rows; DISTINCT-unnest over the directories) and BOTH are on
+        # the dashboard's 15s poll. Uncached, each poll stacked another
+        # whole-store HDD scan behind the last, saturating the disk the parser
+        # workers stream from — the "starts strong, stalls after a few minutes,
+        # CPU busy, chunks frozen, recovers when I close the dashboard" report.
+        self._store_stats_cache: tuple[float, dict] | None = None
+        self._store_stats_lock = threading.Lock()
+        self._states_cache: tuple[float, list[str]] | None = None
+        self._states_lock = threading.Lock()
         # `keep_warm` (serve only) pins ONE connection open for the process's
         # lifetime. DuckDB's memory/temp settings are GLOBAL to the in-process
         # database instance and persist while any connection holds it, so with a
@@ -1695,6 +1723,8 @@ class Store:
 
         log = _logging.getLogger(__name__)
         self._enrich_progress_cache = None  # new rates change the NPI population
+        self._store_stats_cache = None
+        self._states_cache = None
         # NOTE: data_generation is bumped by _build_rollup_tables AFTER its
         # transaction commits — bumping here (pre-build) let a concurrent poll
         # cache a count computed from the OLD tables under the NEW generation
@@ -1817,15 +1847,31 @@ class Store:
                     # said otherwise — trust the parts); full rebuild sorts it out
                     raise RuntimeError("no rows found for the new files")
                 payers = sorted(set(payers) | set(pending))
+                # A REMOVAL (forget / re-ingest-to-fewer-rows / replaced part)
+                # queues pending payers. It can change the tin_directory row of
+                # any TIN that lost a SUBSET of its NPIs but still has rates
+                # from surviving files (a shared TIN) — and those TINs are NOT
+                # in the delta files, while the directory has no payer column to
+                # scope by. So on a removal the rate spine stays payer-scoped
+                # (fast; payer is a grain key) but the directory is rebuilt in
+                # full — correct, and rare (removals don't happen in a normal
+                # first-time grind).
+                removal = bool(pending)
                 if payers:
                     payer_pred = "payer IN (" + ", ".join(q(p) for p in payers) + ")"
                     log.info("analytics update: %d new file(s), %d queued slice(s) — "
                              "recomputing %d payer slice(s) instead of the whole store",
                              len(delta), len(pending), len(payers))
-                    self._apply_rollup_delta(con, payer_pred, files_pred, log)
+                    self._apply_rollup_delta(con, payer_pred, files_pred, log,
+                                             directory_scoped=not removal)
                 else:
                     log.info("analytics update: %d new reference file(s) — "
                              "no rate slices to recompute", len(delta))
+                if removal:
+                    log.info("analytics update: a removal changed shared "
+                             "practices — refreshing the full name directory "
+                             "(rate slices stayed scoped and fast)")
+                    self._build_rollup_tables(con, tables=("tin_directory_tbl",))
                 if delta:
                     new_covered = max(t for _f, t, _ft in delta)
                     names = {f for f, t, _ft in delta if t == new_covered}
@@ -1843,6 +1889,8 @@ class Store:
                 # slices would never be recomputed
                 self._consume_pending_payers(con, pend_gen, pending)
                 self._enrich_progress_cache = None
+                self._store_stats_cache = None
+                self._states_cache = None
                 self.data_generation += 1
                 took = time.monotonic() - t_locked
                 self.last_rollup_build_seconds = took
@@ -1932,11 +1980,15 @@ class Store:
             self.rollup_lock.release()
 
     def _apply_rollup_delta(self, con: duckdb.DuckDBPyConnection, payer_pred: str,
-                            files_pred: str, log) -> None:
+                            files_pred: str, log, directory_scoped: bool = True) -> None:
         """Delete-and-recompute the affected rollup slices. Same OOM ladder as
         the full build (thread cap first, then finer hash partitions); same
         one-transaction-per-table + CHECKPOINT discipline (a mid-slice failure
-        rolls back to that table's previous complete version)."""
+        rolls back to that table's previous complete version).
+
+        directory_scoped=False rebuilds ONLY the rate spine here and leaves the
+        directory to the caller (a removal needs the FULL directory — see
+        update_rollups_incremental)."""
         try:
             avail = int(con.execute("SELECT current_setting('threads')").fetchone()[0])
         except Exception:  # noqa: BLE001 — older duckdb / odd value
@@ -1960,7 +2012,8 @@ class Store:
         try:
             try:
                 self._apply_rollup_delta_sliced(con, payer_pred, tin_pred, n_rows,
-                                                split=1, threads=threads, log=log)
+                                                split=1, threads=threads, log=log,
+                                                directory_scoped=directory_scoped)
                 return
             except duckdb.OutOfMemoryException:
                 log.warning("analytics update hit the memory limit; retrying "
@@ -1970,7 +2023,8 @@ class Store:
             for split in (1, 2, 4, 8, 16):
                 try:
                     self._apply_rollup_delta_sliced(con, payer_pred, tin_pred, n_rows,
-                                                    split=split, threads=1, log=log)
+                                                    split=split, threads=1, log=log,
+                                                    directory_scoped=directory_scoped)
                     return
                 except duckdb.OutOfMemoryException:
                     if split == 16:
@@ -1986,13 +2040,13 @@ class Store:
 
     def _apply_rollup_delta_sliced(self, con: duckdb.DuckDBPyConnection, payer_pred: str,
                                    tin_pred: str, n_rows: int, split: int,
-                                   threads: int, log) -> None:
+                                   threads: int, log, directory_scoped: bool = True) -> None:
         rows_per_part = self._rollup_partition_rows(split, threads)
         parts = max(1, -(-n_rows // rows_per_part))
-        specs = (
-            ("rates_by_tin_tbl", BY_TIN_QUERY, "billing_code", payer_pred),
-            ("tin_directory_tbl", TIN_DIRECTORY_QUERY, "tin_value", tin_pred),
-        )
+        specs = [("rates_by_tin_tbl", BY_TIN_QUERY, "billing_code", payer_pred)]
+        if directory_scoped:
+            # a removal skips this and rebuilds the directory in full afterward
+            specs.append(("tin_directory_tbl", TIN_DIRECTORY_QUERY, "tin_value", tin_pred))
         for tbl, query, key, pred in specs:
             con.execute("BEGIN TRANSACTION")
             try:
@@ -2186,39 +2240,52 @@ class Store:
                 con.execute("CHECKPOINT")
             except duckdb.Error:
                 pass  # another connection's txn can block it; next one catches up
-        # markers AFTER every table committed, in their own tiny transaction:
-        # which schema built these tables, and through WHEN they cover done
-        # files (restart uses them to catch a kill before a batched rollup).
-        # FULL rebuilds only: a names-only refresh leaves the rate spine
-        # untouched, and stamping would mask real spine staleness.
+        # markers AFTER every table committed, in ONE transaction: which schema
+        # built these tables, and through WHEN they cover done files (restart
+        # uses them to catch a kill before a batched rollup). Atomic so a kill
+        # between marker writes can't leave a torn set (e.g. covered_through
+        # advanced but covered_names not) that would mis-scope the next
+        # incremental. FULL rebuilds stamp coverage; a names-only refresh
+        # leaves the rate spine untouched and stamps only the names marker.
+        # The pending-payers consume takes write_lock, so it runs AFTER this
+        # transaction commits (nesting a write_lock section inside an open
+        # txn is fine, but keeping the consume separate avoids holding the
+        # meta txn across a lock wait).
+        con.execute("BEGIN TRANSACTION")
+        try:
+            if "rates_by_tin_tbl" in selected:
+                con.execute(
+                    "INSERT OR REPLACE INTO meta VALUES ('rollup_schema_version', ?)",
+                    [str(ROLLUP_SCHEMA_VERSION)])
+                # SNAPSHOT values from before the build read anything — files
+                # finishing mid-build stay newer than the marker (the names
+                # list tie-breaks same-microsecond twins so none can hide)
+                con.execute(
+                    "INSERT OR REPLACE INTO meta VALUES ('rollup_covered_through', ?)",
+                    [cover_ts])
+                con.execute(
+                    "INSERT OR REPLACE INTO meta VALUES ('rollup_covered_names', ?)",
+                    [json.dumps(sorted(cover_names))])
+                if needs_full_snapshot:
+                    # set before we started -> satisfied; set mid-build -> keep
+                    con.execute("DELETE FROM meta WHERE key = 'rollup_needs_full'")
+            if "tin_directory_tbl" in selected:
+                con.execute(
+                    "INSERT OR REPLACE INTO meta VALUES ('directory_names_through', ?)",
+                    [dir_names_ts])
+            con.execute("COMMIT")
+        except Exception:
+            try:
+                con.execute("ROLLBACK")
+            except duckdb.Error:
+                pass
+            raise
         if "rates_by_tin_tbl" in selected:
-            con.execute(
-                "INSERT OR REPLACE INTO meta VALUES ('rollup_schema_version', ?)",
-                [str(ROLLUP_SCHEMA_VERSION)])
-            # the SNAPSHOT values from before the build read anything — files
-            # finishing mid-build stay newer than the marker (the names list
-            # tie-breaks same-microsecond twins so none can hide behind it)
-            con.execute(
-                "INSERT OR REPLACE INTO meta VALUES ('rollup_covered_through', ?)",
-                [cover_ts])
-            con.execute(
-                "INSERT OR REPLACE INTO meta VALUES ('rollup_covered_names', ?)",
-                [json.dumps(sorted(cover_names))])
             # clear ONLY the removal notes that existed before the build began
             # (this build's scans cover those removals); notes appended
-            # mid-build stay queued for the next incremental
+            # mid-build stay queued for the next incremental. Takes write_lock,
+            # so kept out of the meta transaction above.
             self._consume_pending_payers(con, pend_gen, pending_snapshot)
-            if needs_full_snapshot:
-                # set before we started -> this build satisfied it; set
-                # mid-build -> keep it, the next rollup must go full again
-                con.execute("DELETE FROM meta WHERE key = 'rollup_needs_full'")
-        if "tin_directory_tbl" in selected:
-            # names coverage for the incremental refresh — SNAPSHOT semantics,
-            # same reason as the rollup marker: names landing mid-build stay
-            # newer than the marker and materialize on the next refresh
-            con.execute(
-                "INSERT OR REPLACE INTO meta VALUES ('directory_names_through', ?)",
-                [dir_names_ts])
         if parts > 1:
             log.info("rollup rebuild finished in %.0fs", time.monotonic() - t_build)
         # bump AFTER the commit: a count computed from the old tables during the
@@ -2369,6 +2436,34 @@ class Store:
             ).fetchall()
         return [r[0] for r in rows]
 
+    def store_stats(self, max_age_seconds: float = 60.0) -> dict:
+        """Whole-store {rates, tins, payers} counts for the dashboard header.
+        Cached + single-flight for exactly the reason enrichment_progress is:
+        count(DISTINCT tin_value/payer) forces a full scan + hash of every raw
+        parquet row (~86M), and the header polls this every 15s. Uncached, a
+        scan slower than the poll made polls STACK — several whole-store HDD
+        scans at once, starving the parser workers of the disk. One thread
+        computes; the rest serve the last value (a header count up to a minute
+        stale is invisible; the I/O storm is not)."""
+        cached = self._store_stats_cache
+        if cached is not None and (time.monotonic() - cached[0]) < max_age_seconds:
+            return cached[1]
+        if not self._store_stats_lock.acquire(blocking=False):
+            return cached[1] if cached is not None else {"rates": 0, "tins": 0, "payers": 0}
+        try:
+            cached = self._store_stats_cache  # re-check: another thread may have filled it
+            if cached is not None and (time.monotonic() - cached[0]) < max_age_seconds:
+                return cached[1]
+            with self.connect() as con:
+                rates_n, tins, payers = con.execute(
+                    "SELECT count(*), count(DISTINCT tin_value), count(DISTINCT payer) "
+                    "FROM rates").fetchone()
+            result = {"rates": rates_n, "tins": tins, "payers": payers}
+            self._store_stats_cache = (time.monotonic(), result)
+            return result
+        finally:
+            self._store_stats_lock.release()
+
     def enrichment_progress(self, max_age_seconds: float = 60.0) -> dict:
         """How far NPI->name enrichment has gotten, for the dashboard banner.
         Cached for `max_age_seconds`: the two DISTINCT-over-UNION queries scan
@@ -2425,10 +2520,31 @@ class Store:
         finally:
             self._enrich_progress_lock.release()
 
-    def available_states(self) -> list[str]:
+    def available_states(self, max_age_seconds: float = 60.0) -> list[str]:
         """Distinct US states present in the enriched directory — used to fill
         the dashboard's state filter so users only pick states that have data
-        (an empty result then clearly means 'no rates there yet', not a bug)."""
+        (an empty result then clearly means 'no rates there yet', not a bug).
+
+        Cached + single-flight like store_stats/enrichment_progress: the
+        DISTINCT-unnest over both directories is another full scan on the 15s
+        poll (loadStateOptions), and the state list changes slowly (only as
+        enrichment resolves new geography)."""
+        cached = self._states_cache
+        if cached is not None and (time.monotonic() - cached[0]) < max_age_seconds:
+            return cached[1]
+        if not self._states_lock.acquire(blocking=False):
+            return cached[1] if cached is not None else []
+        try:
+            cached = self._states_cache
+            if cached is not None and (time.monotonic() - cached[0]) < max_age_seconds:
+                return cached[1]
+            result = self._compute_states()
+            self._states_cache = (time.monotonic(), result)
+            return result
+        finally:
+            self._states_lock.release()
+
+    def _compute_states(self) -> list[str]:
         with self.connect() as con:
             try:
                 # union both directories: the state filter applies on every
@@ -2471,6 +2587,8 @@ class Store:
                  dt.datetime.now(dt.timezone.utc)],
             )
         self._enrich_progress_cache = None  # progress moved; don't serve stale counts
+        self._store_stats_cache = None
+        self._states_cache = None  # a new state may now be present
 
     def save_npis_bulk(self, rows: list[dict]) -> None:
         """Insert many NPPES records at once. Keys per row: npi, entity_type,
@@ -2484,8 +2602,6 @@ class Store:
         if not rows:
             return
         import pyarrow as pa
-
-        now = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)  # naive -> TIMESTAMP
 
         def sarr(key):
             return pa.array([r.get(key) for r in rows], type=pa.string())
@@ -2501,18 +2617,28 @@ class Store:
             "address": sarr("address"),
             "zip": pa.array([(r.get("zip") or "")[:5] or None for r in rows], type=pa.string()),
             "phone": sarr("phone"),
-            "enriched_at": pa.array([now] * len(rows), type=pa.timestamp("us")),
         })
-        cols = ("npi, entity_type, org_name, taxonomy_code, taxonomy_desc, city, "
-                "state, address, zip, phone, enriched_at")
+        batch_cols = ("npi, entity_type, org_name, taxonomy_code, taxonomy_desc, "
+                      "city, state, address, zip, phone")
+        cols = batch_cols + ", enriched_at"
         with self.write_lock, self.connect() as con:
+            # enriched_at is stamped INSIDE the lock so it reflects COMMIT
+            # order: a timestamp captured before the (serialized) write could
+            # land out of order vs a concurrent writer, and the scoped
+            # directory refresh keys on max(enriched_at) — an out-of-order
+            # stamp below that max would be permanently skipped (latent; the
+            # single enrichment loop serializes today, but a second bulk writer
+            # would trip it).
+            now = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
             con.register("_npi_batch", batch)
             try:
                 con.execute(f"INSERT OR REPLACE INTO npi_directory ({cols}) "
-                            f"SELECT {cols} FROM _npi_batch")
+                            f"SELECT {batch_cols}, ? FROM _npi_batch", [now])
             finally:
                 con.unregister("_npi_batch")
         self._enrich_progress_cache = None
+        self._store_stats_cache = None
+        self._states_cache = None
 
     # -- entity map -----------------------------------------------------------
 

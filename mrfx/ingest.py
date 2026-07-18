@@ -247,6 +247,26 @@ class ParsePoolManager:
                     pass
                 self._pool = self._make()
 
+    def force_heal(self) -> None:
+        """Terminate ALL worker processes and rebuild the pool — the escape
+        hatch for a worker that is alive but WEDGED (a pathological file spun
+        it into a byte-frozen CPU loop; heal() only replaces an already-dead
+        pool). Collateral: other in-flight parses on this pool die too, but
+        they re-queue and resume — far better than a processor thread blocked
+        forever on one hung worker. Rare (guarded by a long both-frozen
+        deadline)."""
+        with self._lock:
+            for proc in list(getattr(self._pool, "_processes", {}).values()):
+                try:
+                    proc.terminate()
+                except Exception:  # noqa: BLE001 — already gone
+                    pass
+            try:
+                self._pool.shutdown(wait=False, cancel_futures=True)
+            except Exception:  # noqa: BLE001
+                pass
+            self._pool = self._make()
+
     def shutdown(self) -> None:
         with self._lock:
             self._pool.shutdown(wait=True, cancel_futures=True)
@@ -399,9 +419,18 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
         # is skip-on-busy behind a long rollup's write lock. Hours of frozen
         # bars used to be indistinguishable from a hung worker — say which.
         stall_warn = 900.0  # 15 min between complaints
+        # Hard deadline: a worker whose chunk counter AND output file have BOTH
+        # been frozen this long is genuinely wedged (no healthy parse freezes
+        # its output for an hour — it emits row batches continuously). Kill it
+        # so the file fails+re-queues instead of blocking this processor thread
+        # forever. Generous, so a legitimately slow-but-advancing parse is never
+        # touched (any chunk tick or output growth resets the clock).
+        stall_kill = 3600.0
         last_advance = time.monotonic()
         warned_at = 0.0
         last_out_mb = -1.0   # output size at the previous complaint
+        kill_ref_mb = -1.0   # output size when the freeze began (for the kill test)
+        kill_ref_at = time.monotonic()
         stacks_dumped = False  # one auto-dump per stall episode, not per warn
         while True:
             try:
@@ -416,6 +445,8 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
                     last = prog["chunks_done"]
                     last_advance = now
                     last_out_mb = -1.0
+                    kill_ref_mb = -1.0  # progress resets the hard-kill clock
+                    kill_ref_at = now
                     stacks_dumped = False
                     store.update_progress(name, prog["pct"], chunks_done=prog["chunks_done"],
                                           chunks_total=prog["chunks_total"])
@@ -458,6 +489,26 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
                             "part of the program is waiting on.\n%s",
                             name, thread_stacks_text())
                     last_out_mb = out_mb
+                    # hard-kill test: track when the OUTPUT last grew; if both
+                    # the chunk counter and the output have been frozen for
+                    # stall_kill, the worker is wedged (not merely slow) — kill
+                    # the pool so this file fails and re-queues instead of
+                    # blocking a processor thread forever.
+                    if kill_ref_mb < 0 or out_mb > kill_ref_mb + 0.5:
+                        kill_ref_mb = out_mb   # output advanced -> reset the clock
+                        kill_ref_at = now
+                    elif now - kill_ref_at > stall_kill:
+                        log.error(
+                            "%s: no progress AND no output growth for %.0f "
+                            "minutes — the parser worker is wedged. Terminating "
+                            "it so this file re-queues; other in-flight files "
+                            "re-queue too and resume automatically.",
+                            name, (now - kill_ref_at) / 60)
+                        if hasattr(pool, "force_heal"):
+                            pool.force_heal()
+                        raise RuntimeError(
+                            f"parser worker wedged on {name} (no progress for "
+                            f"{stall_kill/60:.0f} min) — killed and re-queued")
 
     try:
         try:

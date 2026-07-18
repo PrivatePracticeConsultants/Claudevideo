@@ -959,3 +959,58 @@ def test_rollback_provenance_guard_forces_one_full_rebuild(cfg, store):
     reopened.rebuild_rollups()               # the one-time full pass
     assert not reopened.rollups_stale()
     assert reopened.update_rollups_incremental() == 0.0
+
+
+def test_forget_recomputes_shared_tin_directory_flags(cfg, store):
+    # Launch-audit HIGH regression: a TIN shared across two files, one carrying
+    # a HOSPITAL NPI (excludes it from leads) and one a THERAPY NPI. Forgetting
+    # the hospital file must flip has_hospital→False / is_therapy→True — the
+    # incremental removal path used to leave the directory row stale
+    # (rollups_stale()==False), silently mis-qualifying the lead.
+    _payer_part(store, "hosp.json", "Hospital Plan", [
+        ("450000001", "1400000001", "97110", "2026-06", 60.0)])
+    store.upsert_file("hosp.json", finished_at="2026-07-01 10:00:00")
+    _payer_part(store, "ther.json", "Therapy Plan", [
+        ("450000001", "1400000002", "97110", "2026-06", 62.0)])
+    store.upsert_file("ther.json", finished_at="2026-07-01 10:00:01")
+    store.save_npi("1400000001", org_name="Big Hospital System",
+                   taxonomy_code="282N00000X", taxonomy_desc=None,
+                   city="ST LOUIS", state="MO", entity_type="NPI-2")
+    store.save_npi("1400000002", org_name="Downtown PT",
+                   taxonomy_code="2251C2600X", taxonomy_desc=None,
+                   city="ST LOUIS", state="MO", entity_type="NPI-2")
+    store.rebuild_rollups()
+    with store.connect() as con:
+        row = con.execute("SELECT has_hospital, is_therapy, npi_count FROM "
+                          "tin_directory_tbl WHERE tin_value = '450000001'").fetchone()
+    assert row == (True, False, 2)  # hospital NPI present → excluded from leads
+
+    from mrfx.ingest import forget_file
+    forget_file(cfg, store, "hosp.json")
+    assert not store.rollups_stale()  # removal fully accounted for
+    with store.connect() as con:
+        inc = con.execute("SELECT has_hospital, is_therapy, npi_count FROM "
+                          "tin_directory_tbl WHERE tin_value = '450000001'").fetchone()
+    assert inc == (False, True, 1)  # now purely therapy → qualifies as a lead
+
+    # must match a full rebuild exactly
+    store.rebuild_rollups()
+    with store.connect() as con:
+        full = con.execute("SELECT has_hospital, is_therapy, npi_count FROM "
+                           "tin_directory_tbl WHERE tin_value = '450000001'").fetchone()
+    assert inc == full
+
+
+def test_store_stats_and_states_cached_single_flight(cfg, store):
+    # The stall fix: store_stats and available_states must serve from cache
+    # within the TTL (no repeat whole-store scan on the 15s dashboard poll).
+    _payer_part(store, "s.json", "Sig", [
+        ("451111111", "1411111111", "97110", "2026-06", 40.0)])
+    store.upsert_file("s.json", finished_at="2026-07-01 10:00:00")
+    store.rebuild_rollups()
+    a = store.store_stats()
+    assert a["rates"] == 1 and a["payers"] == 1
+    # second call within TTL returns the SAME cached dict object
+    assert store.store_stats() is store._store_stats_cache[1]
+    st = store.available_states()
+    assert store.available_states() is store._states_cache[1]

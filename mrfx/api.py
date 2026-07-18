@@ -517,6 +517,16 @@ def methodology_text(cfg: MrfxConfig, store: Store, grain: str, fs: FilterSet,
         "rates, and entity npi_count/source_count sum members (an NPI shared by "
         "two member TINs counts twice).",
         f"Outlier handling: {fs.described.get('hide_outliers')}",
+        # honesty: with no month filter the grain keeps each file_month as its
+        # own row, so a rate republished monthly appears once per month and the
+        # medians/counts pool every vintage. Say so, or an exported median reads
+        # as one number when it blends several months.
+        ("As-of month: " + str(fs.described["as_of_month"]) + " (only this month's rates)."
+         if "as_of_month" in fs.described else
+         "As-of month: ALL months pooled (no month filter was set) — a rate "
+         "republished across months is counted once per month, so these "
+         "medians/counts blend every vintage. Set a month filter, or use the "
+         "report tabs' 'latest' view, for a single-vintage number."),
         "Non-dollar negotiated_type rows (percentage, per diem) are excluded when "
         f"dollar_rates_only is true (currently: {fs.described.get('dollar_rates_only')}).",
         "SSN-pattern TINs are masked in every export.",
@@ -1448,10 +1458,12 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
 
     @app.get("/api/stats")
     def stats():
+        # the whole-store counts are cached + single-flight (store_stats): this
+        # endpoint is on the dashboard's 15s poll, and an uncached
+        # count(DISTINCT) over 86M raw rows stacked concurrent HDD scans that
+        # starved the parser workers of the disk (the recurring "stall")
+        counts = store.store_stats()
         with store.connect() as con:
-            rates_n, tins, payers = con.execute(
-                "SELECT count(*), count(DISTINCT tin_value), count(DISTINCT payer) FROM rates"
-            ).fetchone()
             files_done = con.execute("SELECT count(*) FROM files WHERE status = 'done'").fetchone()[0]
             attention = _dicts(con.execute(
                 """
@@ -1460,7 +1472,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                    OR ref_groups_skipped > 0
                 """
             ))
-        return {"rates": rates_n, "tins": tins, "payers": payers,
+        return {"rates": counts["rates"], "tins": counts["tins"], "payers": counts["payers"],
                 "files_done": files_done, "attention": attention,
                 "enrichment": store.enrichment_progress(),
                 "enrichment_mode": cfg.enrichment.mode,

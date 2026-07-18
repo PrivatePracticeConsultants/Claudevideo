@@ -205,6 +205,18 @@ Two codebases live in this repo:
    rebuilt the tables after a rollback — `_migrate_stale_rollups` sets
    `rollup_needs_full` for one background full rebuild. NEVER run an older
    app copy against an upgraded store expecting correct analytics.
+   REMOVALS (forget / re-ingest-to-fewer-rows / replaced part) recompute the
+   rate spine payer-scoped BUT the tin_directory in FULL: a removal can change
+   a directory row for any TIN that lost a subset of its NPIs while keeping
+   rates from other files (a shared TIN), and the directory has no payer
+   column to scope by (regression-tested via the hospital+therapy shared-TIN
+   case). Removals are rare (never in a first-time grind), so this is correct
+   and cheap in practice; additive updates keep both tables payer/TIN-scoped.
+   The dashboard's /api/stats (whole-store count(DISTINCT tin_value/payer)) and
+   /api/states are cached + single-flight (`store_stats`/`available_states`,
+   like `enrichment_progress`): uncached on the 15s poll they stacked
+   concurrent whole-store HDD scans and starved the parser workers — the
+   long-hunted "starts strong then stalls, CPU busy, chunks frozen" report.
    Ingest-driven refreshes go through `update_rollups_incremental()` first:
    it recomputes ONLY the payer slices of `rates_by_tin_tbl` (grain includes
    payer, so groups never cross payers — payer scoping also heals re-ingests
@@ -377,6 +389,19 @@ not yet built — pick these up before adding features):
 - Windows unlink/replace vs long readers: replace budget is ~90s and forget
   now fails HONESTLY when a reader holds the part; the full fix (persistent
   pending-delete tombstones + rates-view anti-join) is designed but unbuilt.
+- Provider-reference memory amplification: `load_provider_refs(payer)` is
+  materialized per-file in the main process AND pickled into each worker, so a
+  ref-heavy payer (UHC/Highmark) parsed by 8 concurrent workers holds up to
+  ~16 copies of a large refs dict — a swap risk on a 32 GB box. The parse
+  itself streams (bounded); only the refs dict amplifies. Mitigation today:
+  lower `parallel_ingests` for a ref-heavy grind. Fix (share one refs dict
+  across the main-process threads; scope to files that actually cite refs) is
+  deferred. A hung-but-alive worker is now force-killed after 60 min
+  both-frozen (`ParsePoolManager.force_heal`), so this can no longer become a
+  permanent processor-thread stall.
+- Auto-spill relocates rollup scratch off an HDD only on Windows WITH a roomy
+  SSD (PowerShell Get-PhysicalDisk probe). On an all-HDD box the rollup and the
+  parser reads contend on one spindle — SLOW during a rebuild, not a stall.
 
 
 - Renderer click-through handles single-click gates ("View Plan List");

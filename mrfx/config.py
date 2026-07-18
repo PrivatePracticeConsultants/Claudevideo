@@ -226,11 +226,27 @@ def load_mrfx_config(path: str | Path = "config/mrfx.yaml") -> MrfxConfig:
             f"{'.'.join(str(x) for x in err['loc'])}: {err['msg']}" for err in e.errors()
         )
         raise ConfigFileError(f"{p} has invalid settings — {lines}") from e
+    import logging
+    _log = logging.getLogger(__name__)
     unknown = set(raw) - set(MrfxConfig.model_fields)
     if unknown:
-        import logging
-
-        logging.getLogger(__name__).warning(
+        _log.warning(
             "%s: unknown setting(s) ignored: %s — check for typos", p,
             ", ".join(sorted(unknown)))
+    # recurse ONE level into nested mapping sections (codes/enrichment/…): a
+    # typo'd nested key (e.g. `bulk_csv` for `bulk_csv_path`, or `cpt_code` for
+    # `cpt_codes`) is silently dropped by pydantic's extra=ignore, so the
+    # setting never takes effect and names/codes quietly stay at defaults with
+    # nothing said. Warn per nested typo so it's visible, not a mystery.
+    for key, model_field in MrfxConfig.model_fields.items():
+        section = raw.get(key)
+        ann = getattr(model_field, "annotation", None)
+        sub_fields = getattr(ann, "model_fields", None)
+        if isinstance(section, dict) and sub_fields:
+            bad = set(section) - set(sub_fields)
+            if bad:
+                _log.warning(
+                    "%s: unknown setting(s) under '%s' ignored: %s — check for "
+                    "typos (this section's values stay at their defaults)",
+                    p, key, ", ".join(sorted(bad)))
     return _anchor_paths(cfg, _project_root_of(p))
