@@ -82,11 +82,20 @@ def _url_worker_loop(cfg: MrfxConfig, store: Store, stop: threading.Event) -> No
 
 
 def cmd_serve(cfg: MrfxConfig, args) -> int:
+    import faulthandler
     import socket
 
     import uvicorn
 
     from .api import create_app
+
+    # A native-code crash (e.g. the 0xC0000374 heap-corruption class) normally
+    # kills the process with NO output — the console just closes. This prints
+    # every thread's stack on the way down so there's something to report.
+    try:
+        faulthandler.enable()
+    except (RuntimeError, OSError, ValueError):
+        pass  # no usable stderr (e.g. pythonw) — diagnostics are cosmetic
 
     # Claim the port BEFORE touching the store: a second `mrfx serve` used to
     # run crash-recovery (flipping the live server's in-flight rows) and start

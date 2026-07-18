@@ -46,7 +46,7 @@ from .schedule import (
     render_rate_card,
 )
 from .entities import sync_entity_map, update_entity
-from .ingest import ingest_file, scan_inbox
+from .ingest import ingest_file, scan_inbox, thread_stacks_text
 from .registry import Registry
 from .store import Store, mask_tin, sql_path
 
@@ -1486,19 +1486,19 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return catalog_json()
 
     @app.get("/api/debug/stacks", response_class=PlainTextResponse)
-    def debug_stacks():
+    async def debug_stacks():
         """Live stack of every thread in the server process — the decisive
         stall diagnostic. When the app burns CPU with nothing in the log, this
         names the exact line every thread sits on (lock waits included).
-        Localhost-only app; text is for pasting into a bug report."""
-        import sys as _sys
-        import traceback as _tb
-        names = {t.ident: t.name for t in threading.enumerate()}
-        out = [f"mrfx {__version__} — {len(names)} threads\n"]
-        for tid, frame in sorted(_sys._current_frames().items()):
-            out.append(f"--- thread {names.get(tid, tid)} ---")
-            out.append("".join(_tb.format_stack(frame)))
-        return PlainTextResponse("\n".join(out))
+
+        Deliberately `async` — the ONE allowed coroutine endpoint. Sync
+        endpoints borrow a threadpool worker; if a stall has every worker
+        wedged, a sync diagnostic queues behind the very jam it exists to
+        diagnose and never answers. Running on the event loop needs no
+        worker, and it's safe there: a pure in-memory frame walk, a few
+        milliseconds, no store or lock access. Localhost-only app; text is
+        for pasting into a bug report."""
+        return PlainTextResponse(thread_stacks_text())
 
     @app.exception_handler(Exception)
     async def unhandled(request: Request, exc: Exception):

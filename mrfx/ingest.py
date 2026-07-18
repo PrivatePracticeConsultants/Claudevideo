@@ -38,6 +38,26 @@ LARGE_FILE_UNCOMPRESSED_BYTES = 1_500_000_000
 CHUNK_COMPRESSED_BYTES = 64 * 1024 * 1024  # 64 MB
 
 
+def thread_stacks_text() -> str:
+    """Every main-process thread's live Python stack, formatted for a bug
+    report. Shared by /api/debug/stacks and the parse-stall watchdog's
+    auto-dump. Pure in-memory frame walk — no locks, no store access — so it
+    is safe to call from any thread even when the rest of the program is
+    wedged (which is exactly when it gets called)."""
+    import sys as _sys
+    import traceback as _tb
+
+    from . import __version__
+
+    names = {t.ident: t.name for t in threading.enumerate()}
+    out = [f"mrfx {__version__} — {len(names)} threads "
+           "(parser worker processes are separate and not shown)\n"]
+    for tid, frame in sorted(_sys._current_frames().items()):
+        out.append(f"--- thread {names.get(tid, tid)} ---")
+        out.append("".join(_tb.format_stack(frame)))
+    return "\n".join(out)
+
+
 class _ProgressTracker:
     """Drives the chunk progress bar from compressed bytes read. Updates the
     files table (dashboard bar) and an optional CLI bar, throttled to chunk
@@ -381,6 +401,8 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
         stall_warn = 900.0  # 15 min between complaints
         last_advance = time.monotonic()
         warned_at = 0.0
+        last_out_mb = -1.0   # output size at the previous complaint
+        stacks_dumped = False  # one auto-dump per stall episode, not per warn
         while True:
             try:
                 return fut.result(timeout=2.0)
@@ -393,6 +415,8 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
                 if prog and prog.get("chunks_done", -1) != last:
                     last = prog["chunks_done"]
                     last_advance = now
+                    last_out_mb = -1.0
+                    stacks_dumped = False
                     store.update_progress(name, prog["pct"], chunks_done=prog["chunks_done"],
                                           chunks_total=prog["chunks_total"])
                     if bar:
@@ -420,6 +444,20 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
                         "— the file re-queues and everything else resumes.",
                         name, (now - last_advance) / 60,
                         last if last >= 0 else "0", out_mb)
+                    # counter AND output both frozen across two consecutive
+                    # complaints = a real stall. Put the diagnosis in the
+                    # console right here — when a stall wedges the whole
+                    # server, the /api/debug/stacks page may not answer, and
+                    # this log is the one channel that always works.
+                    if last_out_mb >= 0 and out_mb <= last_out_mb and not stacks_dumped:
+                        stacks_dumped = True
+                        log.warning(
+                            "%s: output hasn't grown either — dumping every "
+                            "thread's stack below (once per stall). Paste it "
+                            "into a bug report; it names the exact line each "
+                            "part of the program is waiting on.\n%s",
+                            name, thread_stacks_text())
+                    last_out_mb = out_mb
 
     try:
         try:

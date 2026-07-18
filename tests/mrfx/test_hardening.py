@@ -572,8 +572,12 @@ def test_no_route_blocks_the_event_loop(cfg, store):
 
     from mrfx.api import create_app
 
+    # ONE deliberate exception: /api/debug/stacks runs on the event loop so it
+    # still answers when every threadpool worker is wedged — the situation it
+    # exists to diagnose. It does no store/compute work (in-memory frame walk).
     offenders = [r.path for r in create_app(cfg, store).routes
-                 if isinstance(r, APIRoute) and asyncio.iscoroutinefunction(r.endpoint)]
+                 if isinstance(r, APIRoute) and asyncio.iscoroutinefunction(r.endpoint)
+                 and r.path != "/api/debug/stacks"]
     assert offenders == [], f"async endpoints would block the event loop: {offenders}"
 
 
@@ -666,11 +670,21 @@ def test_entity_map_edit_survives_long_open_snapshot(store):
 
 
 def test_debug_stacks_endpoint(cfg, store):
+    import asyncio
+
+    from fastapi.routing import APIRoute
     from fastapi.testclient import TestClient
 
     from mrfx.api import create_app
 
-    c = TestClient(create_app(cfg, store))
+    app = create_app(cfg, store)
+    c = TestClient(app)
     r = c.get("/api/debug/stacks")
     assert r.status_code == 200
     assert "--- thread " in r.text and "threading.py" in r.text
+    # It must stay async (event loop, not threadpool): the diagnostic has to
+    # answer even when a stall has consumed every threadpool worker.
+    route = next(rt for rt in app.routes
+                 if isinstance(rt, APIRoute) and rt.path == "/api/debug/stacks")
+    assert asyncio.iscoroutinefunction(route.endpoint), (
+        "debug_stacks must not depend on a threadpool worker being free")
