@@ -1,4 +1,4 @@
-# Pester tests for the PracticeGroups module. Runs against the local fake CMS
+﻿# Pester tests for the PracticeGroups module. Runs against the local fake CMS
 # server (NPPES double + /foia file serving) — no external traffic.
 
 BeforeAll {
@@ -116,6 +116,15 @@ Describe 'Practice group query' {
     }
     It 'throws a helpful error for a ZIP with no therapists' {
         { Get-PgGroupsInZip -Zip 10101 } | Should -Throw '*no individual PT/OT/SLP*'
+    }
+    It 'returns group membership for a single NPI (Provider 360 bridge)' {
+        $m = @(Get-PgMembershipForNpi -Npi 7011111111)
+        $m.Count | Should -Be 1
+        $m[0].GroupName | Should -Be 'Test Rehab, Inc'
+        $m[0].RosterSize | Should -Be 3
+    }
+    It 'returns nothing for an NPI not in any group' {
+        @(Get-PgMembershipForNpi -Npi 9999999999) | Should -BeNullOrEmpty
     }
 }
 

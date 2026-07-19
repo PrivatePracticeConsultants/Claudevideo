@@ -159,6 +159,67 @@ Describe 'Referral map' {
     }
 }
 
+Describe 'Group referral footprint (bridge)' {
+    It 'rolls inbound volume up to buckets with top sources' {
+        # Map both clinics into one bucket 'GroupX'.
+        $map = @{ '9000000001' = 'GroupX'; '9000000002' = 'GroupX' }
+        $fp = @(Get-RmInboundByBucket -TargetToBucket $map -TopPerBucket 5)
+        $fp.Count | Should -Be 1
+        $fp[0].Bucket | Should -Be 'GroupX'
+        $fp[0].SharedPatients | Should -Be 88   # 45+20+12+11
+        $fp[0].SourceCount | Should -Be 3        # 8000000001, 8000000002, 8000000003
+        $top = @($fp[0].TopSources)[0]
+        $top.SourceNPI | Should -Be '8000000001' # 45+12 = 57, the biggest
+        $top.SharedPatients | Should -Be 57
+        $top.SourceName | Should -Be 'DAVID DOCTOR'
+    }
+    It 'keeps separate buckets separate' {
+        $map = @{ '9000000001' = 'A'; '9000000002' = 'B' }
+        $fp = @(Get-RmInboundByBucket -TargetToBucket $map)
+        ($fp | Where-Object Bucket -eq 'A').SharedPatients | Should -Be 65
+        ($fp | Where-Object Bucket -eq 'B').SharedPatients | Should -Be 23
+    }
+    It 'credits an NPI in multiple buckets to each (list-valued map)' {
+        # 9000000001 (65) belongs to both PAC1 and PAC2; 9000000002 (23) only PAC2.
+        $map = @{ '9000000001' = @('PAC1', 'PAC2'); '9000000002' = @('PAC2') }
+        $fp = @(Get-RmInboundByBucket -TargetToBucket $map)
+        ($fp | Where-Object Bucket -eq 'PAC1').SharedPatients | Should -Be 65
+        ($fp | Where-Object Bucket -eq 'PAC2').SharedPatients | Should -Be 88   # 65 + 23
+    }
+}
+
+Describe 'Provider 360 referral activity' {
+    It 'returns inbound and outbound edges for one NPI, enriched' {
+        $act = Get-RmProviderReferralActivity -Npi 9000000001
+        $inb = @($act.Inbound); $outb = @($act.Outbound)
+        $inb.Count | Should -Be 2         # from 8000000001 (45) and 8000000002 (20)
+        $inb[0].NPI | Should -Be '8000000001'
+        $inb[0].SharedPatients | Should -Be 45
+        $inb[0].Name | Should -Be 'DAVID DOCTOR'
+        $outb.Count | Should -Be 1        # 9000000001 -> 8000000001 (99)
+        $outb[0].NPI | Should -Be '8000000001'
+        $outb[0].SharedPatients | Should -Be 99
+    }
+    It 'rejects a non-10-digit NPI' {
+        { Get-RmProviderReferralActivity -Npi 123 } | Should -Throw
+    }
+}
+
+Describe 'Engine scans' {
+    It 'ScanOutbound matches on the source column' {
+        $set = New-Object 'System.Collections.Generic.HashSet[string]'
+        [void]$set.Add('8000000001')
+        $out = [RmEngine]::ScanOutbound((Get-RmDatasetPath), $set)
+        @($out).Count | Should -Be 3     # 8000000001 -> 9000000001, 9000000002, 7000000000
+    }
+    It 'ScanEither matches either column in one pass' {
+        $set = New-Object 'System.Collections.Generic.HashSet[string]'
+        [void]$set.Add('9000000001')
+        $e = [RmEngine]::ScanEither((Get-RmDatasetPath), $set)
+        @($e).Count | Should -Be 3       # 2 inbound + 1 outbound
+    }
+}
+
 Describe 'Referral map export' {
     It 'writes CSV plus a methodology sidecar including the vintage warning' {
         $map = Get-RmReferralMap -Zip 99999

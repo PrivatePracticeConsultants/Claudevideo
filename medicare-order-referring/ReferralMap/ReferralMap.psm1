@@ -113,11 +113,11 @@ public class RmEdge
 public static class RmEngine
 {
     // Streams the CMS shared-patient file (headerless CSV: NPI1,NPI2,PairCount,
-    // BeneCount,SameDayCount with space-padded numbers) and returns every row
-    // whose NPI2 (the provider who saw the patient SECOND) is in targets.
-    // Throws with a plain message if the file does not look like the expected
-    // format, rather than returning wrong numbers.
-    public static List<RmEdge> ScanInbound(string path, HashSet<string> targets)
+    // BeneCount,SameDayCount) and returns rows matching a set of NPIs on one
+    // column. matchColumn 1 = NPI2 (inbound: who the patient was seen by SECOND,
+    // i.e. the recipient); 0 = NPI1 (outbound: the initiator). Throws with a
+    // plain message on a malformed file rather than returning wrong numbers.
+    private static List<RmEdge> Scan(string path, HashSet<string> match, int matchColumn)
     {
         List<RmEdge> edges = new List<RmEdge>();
         long lineNo = 0;
@@ -140,11 +140,10 @@ public static class RmEngine
                             "This does not look like a CMS shared-patient file.");
                     continue;
                 }
-                string npi2 = f[1].Trim();
-                if (!targets.Contains(npi2)) continue;
+                if (!match.Contains(f[matchColumn].Trim())) continue;
                 RmEdge e = new RmEdge();
                 e.SourceNpi = f[0].Trim();
-                e.TargetNpi = npi2;
+                e.TargetNpi = f[1].Trim();
                 int v;
                 e.PairCount = int.TryParse(f[2].Trim(), out v) ? v : 0;
                 e.BeneCount = int.TryParse(f[3].Trim(), out v) ? v : 0;
@@ -158,6 +157,57 @@ public static class RmEngine
             throw new InvalidDataException(
                 "The file '" + path + "' had " + badLines + " malformed lines out of " +
                 lineNo + "; refusing to report numbers from a file that malformed.");
+        return edges;
+    }
+
+    // Rows where a target NPI is the SECOND provider (received the patient).
+    public static List<RmEdge> ScanInbound(string path, HashSet<string> targets)
+    {
+        return Scan(path, targets, 1);
+    }
+
+    // Rows where a source NPI is the FIRST provider (initiated / sent onward).
+    public static List<RmEdge> ScanOutbound(string path, HashSet<string> sources)
+    {
+        return Scan(path, sources, 0);
+    }
+
+    // Rows where an NPI in 'set' appears in EITHER column — one pass for a
+    // single-provider 360 view (inbound + outbound together).
+    public static List<RmEdge> ScanEither(string path, HashSet<string> set)
+    {
+        List<RmEdge> edges = new List<RmEdge>();
+        long lineNo = 0, badLines = 0;
+        using (StreamReader reader = new StreamReader(path, Encoding.ASCII, false, 1 << 20))
+        {
+            string line;
+            while ((line = reader.ReadLine()) != null)
+            {
+                lineNo++;
+                if (line.Length == 0) continue;
+                string[] f = line.Split(',');
+                if (f.Length != 5)
+                {
+                    badLines++;
+                    if (lineNo <= 5)
+                        throw new InvalidDataException("Line " + lineNo + " of '" + path +
+                            "' is malformed; this does not look like a CMS shared-patient file.");
+                    continue;
+                }
+                string a = f[0].Trim(), b = f[1].Trim();
+                if (!set.Contains(a) && !set.Contains(b)) continue;
+                RmEdge e = new RmEdge();
+                e.SourceNpi = a; e.TargetNpi = b;
+                int v;
+                e.PairCount = int.TryParse(f[2].Trim(), out v) ? v : 0;
+                e.BeneCount = int.TryParse(f[3].Trim(), out v) ? v : 0;
+                e.SameDayCount = int.TryParse(f[4].Trim(), out v) ? v : 0;
+                edges.Add(e);
+            }
+        }
+        if (lineNo == 0) throw new InvalidDataException("The file '" + path + "' is empty.");
+        if (badLines > lineNo / 100)
+            throw new InvalidDataException("The file '" + path + "' had too many malformed lines.");
         return edges;
     }
 
@@ -721,6 +771,144 @@ function Get-RmReferralMap {
     }
 }
 
+function Get-RmInboundByBucket {
+    <#
+    .SYNOPSIS
+      Rolls 2015 inbound shared-patient volume up to arbitrary buckets. Given a
+      map of provider NPI -> bucket label (e.g. therapist NPI -> practice-group
+      name), returns per-bucket total shared patients and top referral sources.
+      This is the bridge that gives a PRACTICE GROUP a referral footprint by
+      summing its member therapists' inbound volume.
+    .PARAMETER TargetToBucket
+      Hashtable: individual NPI (string) -> bucket label, OR an array of labels
+      when one NPI belongs to several buckets (its volume is credited to each).
+      Use a STABLE UNIQUE key as the label (e.g. a group PAC ID), not a display
+      name — two distinct entities can share a name.
+    .PARAMETER TopPerBucket
+      How many top sources to keep and name per bucket (default 10).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable]$TargetToBucket,
+        [int]$TopPerBucket = 10,
+        [switch]$SkipEnrichment
+    )
+    $dataset = Get-RmDatasetPath
+    if (-not (Test-Path -LiteralPath $dataset)) {
+        throw "The CMS shared-patient dataset is not downloaded yet (Referral map tab)."
+    }
+    $targets = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($k in $TargetToBucket.Keys) { [void]$targets.Add([string]$k) }
+    if ($targets.Count -eq 0) { return @() }
+    $edges = [RmEngine]::ScanInbound($dataset, $targets)
+
+    # bucket -> @{ Benes; Sources = @{ srcNpi -> benes } }. One target NPI may
+    # map to several buckets (a therapist in more than one group); credit each.
+    $buckets = @{}
+    foreach ($e in $edges) {
+        foreach ($label in @($TargetToBucket[$e.TargetNpi])) {
+            if (-not $label) { continue }
+            $lbl = [string]$label
+            if (-not $buckets.ContainsKey($lbl)) {
+                $buckets[$lbl] = [pscustomobject]@{ Benes = 0; Sources = @{} }
+            }
+            $b = $buckets[$lbl]
+            $b.Benes += $e.BeneCount
+            if (-not $b.Sources.ContainsKey($e.SourceNpi)) { $b.Sources[$e.SourceNpi] = 0 }
+            $b.Sources[$e.SourceNpi] += $e.BeneCount
+        }
+    }
+
+    # Enrich the union of top sources across buckets (cached). Capped so a
+    # prefix search spanning many groups can't fire thousands of NPPES lookups;
+    # any beyond the cap show NPI only (SharedPatients stays correct regardless).
+    $topByBucket = @{}
+    $needEnrich = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($label in $buckets.Keys) {
+        $top = @($buckets[$label].Sources.GetEnumerator() | Sort-Object Value -Descending |
+            Select-Object -First $TopPerBucket)
+        $topByBucket[$label] = $top
+        foreach ($t in $top) { [void]$needEnrich.Add($t.Key) }
+    }
+    $detail = @{}
+    if (-not $SkipEnrichment -and $needEnrich.Count -gt 0) {
+        $enrichList = @($needEnrich) | Select-Object -First $script:RmConfig.EnrichCap
+        if (@($needEnrich).Count -gt @($enrichList).Count) {
+            Write-Warning ("Naming the top sources for the top $($script:RmConfig.EnrichCap) of " +
+                "$(@($needEnrich).Count) providers; the rest show NPI only.")
+        }
+        $detail = Get-RmProviderDetail -Npi @($enrichList)
+    }
+
+    foreach ($label in ($buckets.Keys | Sort-Object { -$buckets[$_].Benes })) {
+        $top = foreach ($t in $topByBucket[$label]) {
+            $d = if ($detail.ContainsKey($t.Key)) { $detail[$t.Key] } else { $null }
+            [pscustomobject]@{
+                SourceNPI       = $t.Key
+                SourceName      = if ($d) { $d.Name } else { '' }
+                SourceSpecialty = if ($d) { $d.Specialty } else { '' }
+                SharedPatients  = $t.Value
+            }
+        }
+        [pscustomobject]@{
+            Bucket         = $label
+            SharedPatients = $buckets[$label].Benes
+            SourceCount    = $buckets[$label].Sources.Count
+            TopSources     = @($top)
+        }
+    }
+}
+
+function Get-RmProviderReferralActivity {
+    <#
+    .SYNOPSIS
+      Full 2015 referral activity for ONE provider NPI: inbound (who shared
+      patients into them) and outbound (who they shared patients onward to),
+      each ranked by volume and enriched with names/specialties.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidatePattern('^\d{10}$')][string]$Npi,
+        [int]$Top = 25,
+        [switch]$SkipEnrichment
+    )
+    $dataset = Get-RmDatasetPath
+    if (-not (Test-Path -LiteralPath $dataset)) {
+        throw "The CMS shared-patient dataset is not downloaded yet (Referral map tab)."
+    }
+    $set = New-Object 'System.Collections.Generic.HashSet[string]'
+    [void]$set.Add($Npi)
+    $edges = [RmEngine]::ScanEither($dataset, $set)
+
+    $inbound  = @($edges | Where-Object { $_.TargetNpi -eq $Npi } | Sort-Object BeneCount -Descending)
+    $outbound = @($edges | Where-Object { $_.SourceNpi -eq $Npi } | Sort-Object BeneCount -Descending)
+    $inbound  = @($inbound  | Select-Object -First $Top)
+    $outbound = @($outbound | Select-Object -First $Top)
+
+    $others = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($e in $inbound)  { [void]$others.Add($e.SourceNpi) }
+    foreach ($e in $outbound) { [void]$others.Add($e.TargetNpi) }
+    $detail = @{}
+    if (-not $SkipEnrichment -and $others.Count -gt 0) { $detail = Get-RmProviderDetail -Npi @($others) }
+
+    $mk = {
+        param($otherNpi, $e)
+        $d = if ($detail.ContainsKey($otherNpi)) { $detail[$otherNpi] } else { $null }
+        [pscustomobject]@{
+            NPI            = $otherNpi
+            Name           = if ($d) { $d.Name } else { '' }
+            Specialty      = if ($d) { $d.Specialty } else { '' }
+            SharedPatients = $e.BeneCount
+            SameDay        = $e.SameDayCount
+        }
+    }
+    [pscustomobject]@{
+        Npi      = $Npi
+        Inbound  = @($inbound  | ForEach-Object { & $mk $_.SourceNpi $_ })
+        Outbound = @($outbound | ForEach-Object { & $mk $_.TargetNpi $_ })
+    }
+}
+
 function Export-RmResult {
     <#
     .SYNOPSIS
@@ -762,5 +950,6 @@ function Export-RmResult {
 Export-ModuleMember -Function @(
     'Get-RmConfig', 'Set-RmConfig', 'Get-RmStatus', 'Get-RmDatasetPath',
     'Save-RmDataset', 'Find-RmClinic', 'Get-RmProviderDetail',
-    'Get-RmReferralMap', 'Export-RmResult', 'Clear-RmStaleTemp'
+    'Get-RmReferralMap', 'Get-RmInboundByBucket', 'Get-RmProviderReferralActivity',
+    'Export-RmResult', 'Clear-RmStaleTemp'
 )

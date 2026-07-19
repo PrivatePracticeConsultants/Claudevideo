@@ -46,7 +46,7 @@ What it *can* do, accurately:
 That's it. No installation; works with the PowerShell built into Windows
 (and with PowerShell 7 if you have it).
 
-### The five tabs
+### The six tabs
 
 | Tab | What it does |
 | --- | --- |
@@ -54,7 +54,8 @@ That's it. No installation; works with the PowerShell built into Windows
 | **Batch NPI check** | Paste any text containing NPIs, or load a `.txt`/`.csv` file — every 10-digit NPI is extracted, checksum-validated, and checked against the CMS list. Statuses: `ELIGIBLE (on CMS list)`, `NOT ON LIST`, `INVALID NPI`. Export results. |
 | **What changed** | Compare any two downloaded snapshots: providers Added / Removed / Changed (eligibility flag flips) / Renamed (name change only, flags unchanged — the old name is shown in an OldName column). Export results. |
 | **Referral map (2015)** | Enter a ZIP (or prefix like `630*`): every outpatient rehab provider there is ranked by how many Medicare patients each source provider fed into them, per the CMS shared-patient data. Select a provider to see their referral sources by name/specialty/volume. Export both tables. |
-| **Practice groups** | Enter a ZIP: the outpatient-rehab **practice groups** operating there, each with its therapist roster, ranked by local presence. Built from the CMS clinic-group reassignment file — **current** data, and it fills the gap where private-practice clinics were invisible in the referral map. Export groups and rosters. |
+| **Practice groups** | Enter a ZIP: the outpatient-rehab **practice groups** operating there, each with its therapist roster, ranked by local presence. Built from the CMS clinic-group reassignment file — **current** data, and it fills the gap where private-practice clinics were invisible in the referral map. Optionally add each group's **2015 referral footprint** (its local therapists' historical shared-patient pull, rolled up to the group). Export groups and rosters. |
+| **Provider lookup** | Enter any NPI for a single-provider profile that composes every dataset: current eligibility + flags, specialty and location (NPPES), practice-group memberships, and 2015 referral activity — both who shared patients *into* them and who they shared patients *onward to*. Export the inbound and outbound lists. |
 
 ## The Referral map tab: what it is and its limits
 
@@ -117,6 +118,35 @@ Honest limits (also in every export sidecar):
 - This is enrollment/affiliation data, **not** referrals or claims. It shows who
   practices together, not who refers to whom.
 
+### The bridge: a group's 2015 referral footprint
+
+The **Add 2015 referral footprint** button ties the two ZIP tools together. It
+takes each practice group's *local* (in-ZIP) therapists, sums their 2015 inbound
+shared-patient volume from the referral-map dataset, and rolls it up to the
+group — so a private practice that never appeared as an organization in the
+shared-patient file finally gets a referral footprint through its therapists.
+The `LocalReferrals2015` column fills in, and selecting a group shows its top
+2015 referral sources. (Needs the Referral map dataset downloaded; same 2015
+vintage and shared-patient caveats apply.)
+
+## The Provider lookup tab: one NPI, every dataset
+
+Enter any NPI and the app assembles a single profile from all four sources:
+
+- **Order & Referring** — current eligibility and the Part B/DME/HHA/PMD/Hospice
+  flags (from the roster loaded on the Search tab).
+- **NPPES** — name, primary specialty, and practice city/state (live).
+- **Practice groups** — which group(s) the NPI reassigns benefits to (if that
+  dataset is downloaded).
+- **Referral map (2015)** — inbound (who shared patients into them) and outbound
+  (who they shared patients onward to), each ranked and name/specialty-enriched
+  (if that dataset is downloaded).
+
+Whatever optional datasets you've downloaded are folded in; the rest are noted
+as unavailable. The inbound and outbound lists export with a methodology
+sidecar. It's the fastest way to answer "tell me everything we know about this
+provider" — a referrer, a competitor, or a prospect.
+
 ## Staying current automatically
 
 CMS publishes on a ~3.5-day cycle. Two ways to stay current:
@@ -170,13 +200,14 @@ anything, and a validation failure keeps your existing snapshot untouched.
 
 ## Tests
 
-The test suite (62 tests across three modules: download/update/validation/
+The test suite (70 tests across three modules: download/update/validation/
 idempotency, crash-recovery state repair, older-release and retention safety,
 schema-drift tolerance, CSV formula-injection neutralization, download-URL and
 zip-slip rejection, search, batch check, snapshot diff/rename detection,
-referral-map discovery/paging/scan/enrichment/vintage-flags, practice-group
-Latin-1 loading/matching/roster/export, exports) runs against local HTTP test
-doubles of the CMS hosts and the NPPES API — no external traffic:
+referral-map discovery/paging/scan/enrichment/vintage-flags, group referral
+footprint, provider-360 inbound/outbound activity, practice-group Latin-1
+loading/matching/roster/membership/export, exports) runs against local HTTP
+test doubles of the CMS hosts and the NPPES API — no external traffic:
 
 ```powershell
 Invoke-Pester .\tests -Output Detailed     # requires the Pester module

@@ -237,8 +237,11 @@ $xaml = @'
           <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="0,6,0,4">
             <TextBlock x:Name="PgRosterLabel" Text="Therapist roster (select a group above to filter):"
                        VerticalAlignment="Center"/>
+            <Button x:Name="PgFootprintButton" Content="Add 2015 referral footprint" Padding="10,4"
+                    Margin="14,0,0,0" IsEnabled="False"
+                    ToolTip="Roll each group's LOCAL therapists' 2015 shared-patient volume up to the group (needs the Referral map dataset)."/>
             <Button x:Name="PgExportGroupsButton" Content="Export groups..." Padding="10,4"
-                    Margin="14,0,0,0" IsEnabled="False"/>
+                    Margin="8,0,0,0" IsEnabled="False"/>
             <Button x:Name="PgExportRosterButton" Content="Export rosters..." Padding="10,4"
                     Margin="8,0,0,0" IsEnabled="False"/>
           </StackPanel>
@@ -247,6 +250,50 @@ $xaml = @'
                     HeadersVisibility="Column" EnableRowVirtualization="True"/>
           <TextBlock Grid.Row="5" x:Name="PgSummary" Margin="0,6,0,0" Foreground="#333" TextWrapping="Wrap"
               Text="One-time setup: click 'Download CMS dataset' (~510 MB download). This tab needs no other data."/>
+        </Grid>
+      </TabItem>
+
+      <!-- ============ Provider 360 lookup tab ============ -->
+      <TabItem Header="  Provider lookup  ">
+        <Grid Margin="10">
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+          </Grid.RowDefinitions>
+          <TextBlock Grid.Row="0" TextWrapping="Wrap" Foreground="#333" Margin="0,0,0,6"
+              Text="Enter any NPI for a single-provider profile that pulls together every dataset in this app: current eligibility and specialty, practice-group memberships, and their 2015 referral activity (who sent them patients, and who they sent onward). Optional data is shown when downloaded on the other tabs."/>
+          <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,6">
+            <TextBlock Text="NPI:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+            <TextBox x:Name="LkNpiBox" Width="140" Height="28" VerticalContentAlignment="Center"
+                     MaxLength="10" ToolTip="A full 10-digit NPI"/>
+            <Button x:Name="LkRunButton" Content="Look up provider" Padding="14,5" Margin="14,0,0,0"/>
+          </StackPanel>
+          <Border Grid.Row="2" Background="White" BorderBrush="#D5DBE1" BorderThickness="1"
+                  CornerRadius="4" Padding="10" Margin="0,0,0,8">
+            <TextBlock x:Name="LkDetail" TextWrapping="Wrap" Foreground="#222"
+                       Text="Enter an NPI and click Look up provider."/>
+          </Border>
+          <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="0,4,0,4">
+            <TextBlock x:Name="LkInboundLabel" VerticalAlignment="Center"
+                       Text="Referral sources (who shared patients INTO them, 2015):"/>
+            <Button x:Name="LkExportInboundButton" Content="Export..." Padding="10,4" Margin="12,0,0,0" IsEnabled="False"/>
+          </StackPanel>
+          <DataGrid Grid.Row="4" x:Name="LkInboundGrid" IsReadOnly="True" AutoGenerateColumns="True"
+                    CanUserAddRows="False" GridLinesVisibility="Horizontal"
+                    HeadersVisibility="Column" EnableRowVirtualization="True"/>
+          <StackPanel Grid.Row="5" Orientation="Horizontal" Margin="0,4,0,4">
+            <TextBlock x:Name="LkOutboundLabel" VerticalAlignment="Center"
+                       Text="Referral destinations (who they shared patients ONWARD to, 2015):"/>
+            <Button x:Name="LkExportOutboundButton" Content="Export..." Padding="10,4" Margin="12,0,0,0" IsEnabled="False"/>
+          </StackPanel>
+          <DataGrid Grid.Row="6" x:Name="LkOutboundGrid" IsReadOnly="True" AutoGenerateColumns="True"
+                    CanUserAddRows="False" GridLinesVisibility="Horizontal"
+                    HeadersVisibility="Column" EnableRowVirtualization="True"/>
         </Grid>
       </TabItem>
     </TabControl>
@@ -274,7 +321,10 @@ foreach ($name in @(
     'RmClinicGrid', 'RmSourceLabel', 'RmExportClinicsButton', 'RmExportSourcesButton',
     'RmSourceGrid', 'RmSummary',
     'PgZipBox', 'PgRunButton', 'PgDownloadButton', 'PgDataStatus', 'PgGroupGrid',
-    'PgRosterLabel', 'PgExportGroupsButton', 'PgExportRosterButton', 'PgRosterGrid', 'PgSummary'
+    'PgRosterLabel', 'PgFootprintButton', 'PgExportGroupsButton', 'PgExportRosterButton',
+    'PgRosterGrid', 'PgSummary',
+    'LkNpiBox', 'LkRunButton', 'LkDetail', 'LkInboundLabel', 'LkExportInboundButton',
+    'LkInboundGrid', 'LkOutboundLabel', 'LkExportOutboundButton', 'LkOutboundGrid'
 )) {
     $ui[$name] = $window.FindName($name)
     if (-not $ui[$name]) { throw "Internal error: UI element '$name' not found." }
@@ -295,6 +345,9 @@ $script:LastChangeResults = @()    # currently-shown (filtered) compare result
 $script:LastChangeDesc = ''
 $script:RmResult = $null          # last referral-map result object
 $script:PgResult = $null          # last practice-group result object
+$script:LkInbound = @()           # last provider-lookup inbound / outbound rows
+$script:LkOutbound = @()
+$script:LkNpi = ''
 $script:Busy = $false
 $script:Jobs = New-Object System.Collections.ArrayList
 $script:MaxGridRows = 5000
@@ -310,7 +363,8 @@ function Set-Busy([bool]$On, [string]$Message) {
     foreach ($b in @($ui.UpdateButton, $ui.SearchButton, $ui.BatchCheckButton,
                      $ui.CompareButton, $ui.LoadNpiFileButton,
                      $ui.RmRunButton, $ui.RmDownloadButton,
-                     $ui.PgRunButton, $ui.PgDownloadButton)) {
+                     $ui.PgRunButton, $ui.PgDownloadButton, $ui.PgFootprintButton,
+                     $ui.LkRunButton)) {
         $b.IsEnabled = -not $On
     }
     $window.Cursor = if ($On) { [System.Windows.Input.Cursors]::Wait } else { $null }
@@ -706,21 +760,31 @@ function Update-RmStatus {
 }
 
 function Export-RmWithDialog {
-    param([object[]]$Rows, [string]$SuggestedName, [string]$Description)
+    param([object[]]$Rows, [string]$SuggestedName, [string]$Description, [string[]]$Notes)
+    if ($script:Busy) { return }
     if (-not $Rows -or $Rows.Count -eq 0) { Show-ErrorBox 'Nothing to export yet — run a map first.'; return }
     $dialog = New-Object Microsoft.Win32.SaveFileDialog
     $dialog.Filter = 'CSV files (*.csv)|*.csv'
     $dialog.FileName = $SuggestedName
     if ($dialog.ShowDialog($window)) {
         try {
-            $notes = if ($script:RmResult) { $script:RmResult.Notes } else { @() }
-            $result = $Rows | Export-RmResult -Path $dialog.FileName -Notes $notes -Description $Description
+            $useNotes = if ($PSBoundParameters.ContainsKey('Notes')) { $Notes }
+                        elseif ($script:RmResult) { $script:RmResult.Notes } else { @() }
+            $result = $Rows | Export-RmResult -Path $dialog.FileName -Notes $useNotes -Description $Description
             Set-Status "Exported $('{0:N0}' -f $result.Rows) rows to $($result.Path) (with methodology sidecar)."
         } catch {
             Show-ErrorBox "Export failed: $($_.Exception.Message)"
         }
     }
 }
+
+# Methodology notes for a Provider 360 referral-activity export.
+$script:LkNotes = @(
+    'Source: CMS Physician Shared Patient Patterns (FOIA), 2015, 30-day interval.'
+    '2015 vintage — market structure, not current volumes.'
+    'SharedPatients = unique Medicare beneficiaries shared in the interval window (a referral proxy, not billed referrals). Labs/imaging/hospitals appear from co-occurring care — read by specialty.'
+    'Inbound = the other provider was seen FIRST (they shared into this NPI). Outbound = this NPI was seen first. Same-day pairs are attributed by CMS to the lower NPI, so direction near same-day is approximate.'
+)
 
 $ui.RmDownloadButton.Add_Click({
     if ($script:Busy) { return }
@@ -820,8 +884,9 @@ $ui.RmExportSourcesButton.Add_Click({
 # Practice groups tab
 # ---------------------------------------------------------------------------
 
-$script:PgGroupCols = @('GroupName', 'State', 'TherapistsInZip', 'RosterSize', 'GroupPacId')
+$script:PgGroupCols = @('GroupName', 'State', 'TherapistsInZip', 'RosterSize', 'LocalReferrals2015', 'GroupPacId')
 $script:PgRosterCols = @('GroupName', 'GroupPacId', 'NPI', 'FirstName', 'LastName', 'Specialty', 'InThisZip')
+$script:PgFootprintSources = @{}   # groupName -> top-sources array (after footprint run)
 
 function Update-PgStatus {
     $status = Get-PgStatus
@@ -887,6 +952,7 @@ $ui.PgRunButton.Add_Click({
             param($result)
             $pg = $result[0]
             $script:PgResult = $pg
+            $script:PgFootprintSources = @{}   # cleared for the new ZIP
             $groups = @($pg.Groups)
             $rosters = @($pg.Rosters)
             $ui.PgGroupGrid.ItemsSource = (ConvertTo-DataTable -Rows $groups -Columns $script:PgGroupCols).DefaultView
@@ -894,6 +960,8 @@ $ui.PgRunButton.Add_Click({
             $ui.PgRosterLabel.Text = 'Therapist roster — all groups (select a group above to filter):'
             $ui.PgExportGroupsButton.IsEnabled = ($groups.Count -gt 0)
             $ui.PgExportRosterButton.IsEnabled = ($rosters.Count -gt 0)
+            # The footprint bridge needs the Referral map (shared-patient) dataset.
+            $ui.PgFootprintButton.IsEnabled = ($groups.Count -gt 0 -and (Get-RmStatus).DatasetReady)
             $ui.PgSummary.Text = ("ZIP $($pg.Zip): $($pg.TherapistCount) individual therapists found; " +
                 "$($groups.Count) multi-provider practice group(s) operate here; " +
                 "$($pg.SoloCount) therapists are solo or not in a named group. " +
@@ -912,13 +980,63 @@ $ui.PgGroupGrid.Add_SelectionChanged({
     $row = $ui.PgGroupGrid.SelectedItem
     if ($row -is [System.Data.DataRowView]) {
         $pac = [string]$row.Row['GroupPacId']
+        $name = [string]$row.Row['GroupName']
         $filtered = @($script:PgResult.Rosters | Where-Object { $_.GroupPacId -eq $pac })
         $ui.PgRosterGrid.ItemsSource = (ConvertTo-DataTable -Rows $filtered -Columns $script:PgRosterCols).DefaultView
-        $ui.PgRosterLabel.Text = "Roster for $([string]$row.Row['GroupName']) — $($filtered.Count) therapist(s):"
+        $label = "Roster for $name — $($filtered.Count) therapist(s)."
+        # If a footprint was computed, show THIS group's top 2015 sources, keyed
+        # by the unique PAC ID (group names are not unique).
+        if ($script:PgFootprintSources.ContainsKey($pac)) {
+            $tops = @($script:PgFootprintSources[$pac] | Select-Object -First 3 |
+                ForEach-Object { "$($_.SourceName) ($($_.SharedPatients))" })
+            if ($tops.Count) { $label += '  Top 2015 sources for local therapists: ' + ($tops -join ', ') + '.' }
+        }
+        $ui.PgRosterLabel.Text = $label
     } else {
         $ui.PgRosterGrid.ItemsSource = (ConvertTo-DataTable -Rows @($script:PgResult.Rosters) -Columns $script:PgRosterCols).DefaultView
         $ui.PgRosterLabel.Text = 'Therapist roster — all groups (select a group above to filter):'
     }
+})
+
+$ui.PgFootprintButton.Add_Click({
+    if ($script:Busy -or -not $script:PgResult) { return }
+    # Roll each group's LOCAL (in-ZIP) therapists' 2015 inbound volume up to the
+    # group. Key by GroupPacId (UNIQUE) — group names are not unique, and one
+    # therapist can be in several groups, so the map value is a LIST of PAC IDs.
+    $map = @{}
+    foreach ($r in $script:PgResult.Rosters) {
+        if ($r.InThisZip -eq 'Y') {
+            $npi = [string]$r.NPI
+            if (-not $map.ContainsKey($npi)) { $map[$npi] = New-Object System.Collections.Generic.List[string] }
+            if (-not $map[$npi].Contains([string]$r.GroupPacId)) { $map[$npi].Add([string]$r.GroupPacId) }
+        }
+    }
+    if ($map.Count -eq 0) { Show-ErrorBox 'No in-ZIP therapists to compute a footprint for.'; return }
+    Invoke-Async -Kind 'pg-footprint' -Params @{ RmModulePath = $script:RmModulePath; Map = $map } `
+        -BusyMessage 'Rolling 2015 referral volume up to each practice group (scanning ~35M shared-patient pairs)...' `
+        -WorkerScript 'param($RmModulePath, $Map) Import-Module $RmModulePath; Get-RmInboundByBucket -TargetToBucket $Map -TopPerBucket 10' `
+        -OnDone {
+            param($result)
+            $fp = @($result)
+            $byPac = @{}
+            foreach ($b in $fp) { $byPac[$b.Bucket] = $b; $script:PgFootprintSources[$b.Bucket] = @($b.TopSources) }
+            # Augment each group row (matched by unique PAC ID) and rebind.
+            $augmented = foreach ($g in @($script:PgResult.Groups)) {
+                $val = if ($byPac.ContainsKey($g.GroupPacId)) { $byPac[$g.GroupPacId].SharedPatients } else { 0 }
+                $g | Add-Member -NotePropertyName 'LocalReferrals2015' -NotePropertyValue $val -Force -PassThru
+            }
+            $script:PgResult.Groups = @($augmented)
+            $ui.PgGroupGrid.ItemsSource = (ConvertTo-DataTable -Rows @($augmented) -Columns $script:PgGroupCols).DefaultView
+            $withVol = @($fp | Where-Object { $_.SharedPatients -gt 0 }).Count
+            $ui.PgSummary.Text = ("2015 referral footprint added: $withVol group(s) had local therapists with " +
+                "shared-patient volume. Select a group to see its top sources. Reminder: 2015 vintage; a source " +
+                'is a shared-patient proxy (labs/hospitals appear too — read by specialty).')
+            Set-Status 'Referral footprint computed.'
+        } `
+        -OnFail {
+            param($message)
+            Show-ErrorBox "Footprint failed: $message"
+        }
 })
 
 $ui.PgExportGroupsButton.Add_Click({
@@ -933,6 +1051,111 @@ $ui.PgExportRosterButton.Add_Click({
     Export-PgWithDialog -Rows @($script:PgResult.Rosters) `
         -SuggestedName "practice-group-rosters-$($script:PgResult.Zip.TrimEnd('*')).csv" `
         -Description "Therapist rosters for practice groups in ZIP $($script:PgResult.Zip) (CMS clinic-group reassignment data)"
+})
+
+# ---------------------------------------------------------------------------
+# Provider 360 lookup tab
+# ---------------------------------------------------------------------------
+
+$script:LkCols = @('NPI', 'Name', 'Specialty', 'SharedPatients', 'SameDay')
+
+$ui.LkRunButton.Add_Click({
+    if ($script:Busy) { return }
+    $npi = $ui.LkNpiBox.Text.Trim()
+    if ($npi -notmatch '^\d{10}$') { Show-ErrorBox 'Enter a full 10-digit NPI.'; return }
+
+    # Eligibility comes from the in-memory O&R snapshot (main session); the
+    # heavy NPPES + shared-patient + group work runs in a worker.
+    $eligLine = 'Order & Referring eligibility: (data not loaded — use the Search tab''s "Check for updates" first)'
+    if ($script:Data) {
+        $chk = @($npi | Test-OrfNpi -Data $script:Data)[0]
+        if ($chk.Status -like 'ELIGIBLE*') {
+            $eligLine = "Order & Referring: ELIGIBLE — PartB=$($chk.PartB) DME=$($chk.DME) HHA=$($chk.HHA) PMD=$($chk.PMD) Hospice=$($chk.Hospice)"
+        } elseif ($chk.Status -eq 'NOT ON LIST') {
+            $eligLine = 'Order & Referring: NOT on the current eligible-to-order/refer list.'
+        } else {
+            $eligLine = "Order & Referring: $($chk.Status)."
+        }
+    }
+    $script:LkEligLine = $eligLine
+    $script:LkNpi = $npi
+    $hasRm = (Get-RmStatus).DatasetReady
+    $hasPg = (Get-PgStatus).DatasetReady
+
+    $ui.LkDetail.Text = "Looking up $npi ..."
+    $ui.LkExportInboundButton.IsEnabled = $false
+    $ui.LkExportOutboundButton.IsEnabled = $false
+    Invoke-Async -Kind 'lk-run' -Params @{
+            RmModulePath = $script:RmModulePath; PgModulePath = $script:PgModulePath
+            Npi = $npi; HasRm = $hasRm; HasPg = $hasPg
+        } `
+        -BusyMessage "Looking up $npi — NPPES, plus 2015 referral scan and practice groups if those datasets are present..." `
+        -WorkerScript @'
+param($RmModulePath, $PgModulePath, $Npi, $HasRm, $HasPg)
+Import-Module $RmModulePath
+$detail = (Get-RmProviderDetail -Npi @($Npi))[$Npi]
+$activity = if ($HasRm) { Get-RmProviderReferralActivity -Npi $Npi } else { $null }
+$groups = @()
+if ($HasPg) { Import-Module $PgModulePath; $groups = @(Get-PgMembershipForNpi -Npi $Npi) }
+[pscustomobject]@{ Detail = $detail; Activity = $activity; Groups = $groups; HasRm = $HasRm; HasPg = $HasPg }
+'@ `
+        -OnDone {
+            param($result)
+            $r = $result[0]
+            $d = $r.Detail
+            $lines = New-Object System.Collections.Generic.List[string]
+            $nm = if ($d -and $d.Name) { $d.Name } else { '(name not found in NPPES)' }
+            $loc = if ($d -and ($d.City -or $d.State)) { " — $($d.City), $($d.State)" } else { '' }
+            $spec = if ($d -and $d.Specialty) { "  |  $($d.Specialty)" } else { '' }
+            $lines.Add("NPI $($script:LkNpi):  $nm$loc$spec")
+            $lines.Add($script:LkEligLine)
+            if ($r.HasPg) {
+                $gs = @($r.Groups)
+                if ($gs.Count) {
+                    $lines.Add("Practice groups: " + (@($gs | ForEach-Object { "$($_.GroupName) [$($_.State), roster $($_.RosterSize)]" }) -join '; '))
+                } else { $lines.Add('Practice groups: none on record (solo, or not reassigning to a group).') }
+            } else {
+                $lines.Add('Practice groups: (Practice groups dataset not downloaded.)')
+            }
+            $ui.LkDetail.Text = ($lines -join "`n")
+
+            if ($r.HasRm -and $r.Activity) {
+                $inb = @($r.Activity.Inbound); $outb = @($r.Activity.Outbound)
+                $script:LkInbound = $inb; $script:LkOutbound = $outb
+                $ui.LkInboundGrid.ItemsSource = (ConvertTo-DataTable -Rows $inb -Columns $script:LkCols).DefaultView
+                $ui.LkOutboundGrid.ItemsSource = (ConvertTo-DataTable -Rows $outb -Columns $script:LkCols).DefaultView
+                $ui.LkInboundLabel.Text = "Referral sources (who shared patients INTO them, 2015) — $($inb.Count):"
+                $ui.LkOutboundLabel.Text = "Referral destinations (who they shared patients ONWARD to, 2015) — $($outb.Count):"
+                $ui.LkExportInboundButton.IsEnabled = ($inb.Count -gt 0)
+                $ui.LkExportOutboundButton.IsEnabled = ($outb.Count -gt 0)
+            } else {
+                $script:LkInbound = @(); $script:LkOutbound = @()
+                $ui.LkInboundGrid.ItemsSource = $null
+                $ui.LkOutboundGrid.ItemsSource = $null
+                $ui.LkInboundLabel.Text = 'Referral activity: (Referral map dataset not downloaded — download it on that tab to see 2015 referral sources/destinations.)'
+                $ui.LkOutboundLabel.Text = ''
+            }
+            Set-Status "Lookup for $($script:LkNpi) complete."
+        } `
+        -OnFail {
+            param($message)
+            $ui.LkDetail.Text = "Lookup failed: $message"
+            Show-ErrorBox $message
+        }
+})
+
+$ui.LkExportInboundButton.Add_Click({
+    if (-not $script:LkInbound -or @($script:LkInbound).Count -eq 0) { return }
+    Export-RmWithDialog -Rows @($script:LkInbound) -SuggestedName "referrals-in-$($script:LkNpi).csv" `
+        -Description "2015 referral sources sharing patients into NPI $($script:LkNpi) (CMS shared-patient data)" `
+        -Notes $script:LkNotes
+})
+
+$ui.LkExportOutboundButton.Add_Click({
+    if (-not $script:LkOutbound -or @($script:LkOutbound).Count -eq 0) { return }
+    Export-RmWithDialog -Rows @($script:LkOutbound) -SuggestedName "referrals-out-$($script:LkNpi).csv" `
+        -Description "2015 referral destinations NPI $($script:LkNpi) shared patients onward to (CMS shared-patient data)" `
+        -Notes $script:LkNotes
 })
 
 # ---------------------------------------------------------------------------

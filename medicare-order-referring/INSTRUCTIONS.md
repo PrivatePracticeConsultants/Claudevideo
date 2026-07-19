@@ -44,7 +44,7 @@ tells you you're up to date. It never breaks your existing data.
 
 ---
 
-## 4. The five tabs, in plain English
+## 4. The six tabs, in plain English
 
 ### Tab 1 — Search providers
 *"Is Dr. Smith allowed to refer Medicare patients?"*
@@ -102,6 +102,30 @@ shows the private-practice clinics the referral map can't. Two things to know:
 only one or two local therapists is a multi-site chain, not a big local clinic —
 rank by `TherapistsInZip` for local size. And this is *who practices together*,
 not *who refers to whom*.
+
+**Optional — "Add 2015 referral footprint":** if you've downloaded the Referral
+map dataset too, this button fills in a `LocalReferrals2015` column showing each
+group's historical referral pull (its local therapists' 2015 shared-patient
+volume, added up). Click a group afterward to see its top referral sources. It's
+how a private practice — invisible in the referral map by itself — gets a
+referral footprint.
+
+### Tab 6 — Provider lookup
+*"Tell me everything about this one provider."*
+
+Type any 10-digit NPI and click **Look up provider**. The app pulls together
+everything it knows into one profile:
+
+- Current Medicare eligibility and flags (from the Search tab's data).
+- Name, specialty, and city/state.
+- Which practice group(s) they belong to (if you downloaded that dataset).
+- Their 2015 referral activity, in two tables: who sent them patients, and who
+  they sent patients to — each with names and specialties. (Needs the Referral
+  map dataset.)
+
+Both referral tables export. Whatever optional datasets you haven't downloaded
+are simply noted as unavailable — the rest still show. It's the quickest way to
+size up a referrer, a competitor, or a prospect.
 
 ### Tab 4 — Referral map (2015)
 *"Who sends patients to the rehab providers in my area?"*

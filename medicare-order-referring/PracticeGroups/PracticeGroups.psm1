@@ -512,6 +512,27 @@ function Get-PgGroupsInZip {
     }
 }
 
+function Get-PgMembershipForNpi {
+    <#
+    .SYNOPSIS
+      Returns the practice group(s) an individual NPI belongs to (name, state,
+      roster size). Used by the Provider 360 lookup. Loads the dataset if needed.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Npi)
+    Import-PgDataset | Out-Null
+    if (-not $script:PgNpiIndex.ContainsKey($Npi)) { return @() }
+    foreach ($gpac in $script:PgNpiIndex[$Npi]) {
+        $g = $script:PgGroups[$gpac]
+        [pscustomobject]@{
+            GroupName  = if ($g.Name) { $g.Name } else { '(solo / no business name)' }
+            State      = $g.State
+            RosterSize = $g.Members.Count
+            GroupPacId = $gpac
+        }
+    }
+}
+
 function Export-PgResult {
     <# .SYNOPSIS Exports practice-group rows to CSV with a methodology sidecar. #>
     [CmdletBinding()]
@@ -544,5 +565,5 @@ function Export-PgResult {
 Export-ModuleMember -Function @(
     'Get-PgConfig', 'Set-PgConfig', 'Get-PgStatus', 'Get-PgDatasetPath',
     'Save-PgDataset', 'Import-PgDataset', 'Get-PgTherapistNpiInZip',
-    'Get-PgGroupsInZip', 'Export-PgResult', 'Clear-PgStaleTemp'
+    'Get-PgGroupsInZip', 'Get-PgMembershipForNpi', 'Export-PgResult', 'Clear-PgStaleTemp'
 )
