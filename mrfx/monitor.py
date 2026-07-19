@@ -94,14 +94,19 @@ def compute_rate_changes(store: Store, market: dict, *, subject: str | None = No
                      t.billing_class, t.service_code_set
         """
 
+    # LEFT JOIN the display name PER RESULT ROW — never fetch the whole
+    # tin_directory into a Python dict (one entry per TIN = millions at 300M
+    # rows → OOM). The change set is bounded by month-over-month rate moves.
     sql = f"""
     WITH cur AS ({side(where_cur)}), prev AS ({side(where_prev)})
     SELECT c.payer, c.tin_value, c.billing_code, c.modifier_set,
            round(p.rate, 2) AS old_rate, round(c.rate, 2) AS new_rate,
            round(c.rate - p.rate, 2) AS delta,
-           round(100.0 * (c.rate - p.rate) / p.rate, 1) AS pct_change
+           round(100.0 * (c.rate - p.rate) / p.rate, 1) AS pct_change,
+           td.display_name AS display_name
     FROM cur c JOIN prev p USING
         (payer, tin_value, billing_code, modifier_set, billing_class, service_code_set)
+    LEFT JOIN tin_directory td ON td.tin_value = c.tin_value
     WHERE p.rate > 0 AND abs(c.rate - p.rate) >= 0.01
     ORDER BY pct_change ASC
     """
@@ -110,7 +115,6 @@ def compute_rate_changes(store: Store, market: dict, *, subject: str | None = No
         cur = con.execute(sql, params)
         cols = [d[0] for d in cur.description]
         raw = [dict(zip(cols, r)) for r in cur.fetchall()]
-        names = dict(con.execute("SELECT tin_value, display_name FROM tin_directory").fetchall())
 
     rows, cuts, increases, pct_moves = [], 0, 0, []
     for r in raw:
@@ -124,7 +128,7 @@ def compute_rate_changes(store: Store, market: dict, *, subject: str | None = No
         rows.append({
             "payer": r["payer"],
             "tin_value": mask_tin(r["tin_value"]),
-            "display_name": names.get(r["tin_value"]),
+            "display_name": r["display_name"],
             "billing_code": r["billing_code"],
             "description": desc,
             "modifier_set": r["modifier_set"],

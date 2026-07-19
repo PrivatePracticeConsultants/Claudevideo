@@ -597,6 +597,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     # invalidates it; a short TTL backstops the live NPI-grain view, whose parts
     # can change without a rebuild. Bounded so it can't grow without limit.
     _count_cache: dict[tuple, tuple[float, int]] = {}
+    _count_lock = threading.Lock()  # single-flight for the heavy non-late-join count
     _COUNT_TTL = 30.0
 
     def _tin_late_join_ok(grain: str, fs: FilterSet, sort: str) -> bool:
@@ -620,16 +621,41 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             return hit[1]
         # When the late-join path applies, the LEFT joins can't change the row
         # count (≤1 match each), so count the base table directly and skip
-        # building three hash tables over the whole store.
+        # building three hash tables over the whole store. That path is cheap
+        # (indexed on the materialized table) and needs no single-flight.
         if _tin_late_join_ok(grain, fs, "negotiated_rate"):
-            count_sql = f"SELECT count(*) FROM rates_by_tin WHERE {fs.where}"
-        else:
-            count_sql = f"SELECT count(*) FROM ({rel_sql(grain, fs)})"
-        total = con.execute(count_sql, fs.params).fetchone()[0]
-        if len(_count_cache) > 512:
-            _count_cache.clear()  # crude but fine: keys churn as filters change
-        _count_cache[key] = (now, total)
-        return total
+            total = con.execute(
+                f"SELECT count(*) FROM rates_by_tin WHERE {fs.where}", fs.params).fetchone()[0]
+            _count_cache[key] = (now, total)
+            return total
+        # The heavy path (entity/NPI grain, or dim-filtered) is a full-store
+        # aggregation. Single-flight it so N concurrent page/sort clicks on a
+        # cold cache don't each launch a whole-store scan (a stampede that
+        # thrashes the HDD at 300M rows). One computes; the rest serve the last
+        # value (or wait) rather than piling on.
+        if not _count_lock.acquire(blocking=False):
+            if hit is not None:
+                return hit[1]
+            with _count_lock:  # no prior value — block for the first computation
+                hit = _count_cache.get(key)
+                if hit is not None and time.monotonic() - hit[0] < _COUNT_TTL:
+                    return hit[1]
+                total = con.execute(
+                    f"SELECT count(*) FROM ({rel_sql(grain, fs)})", fs.params).fetchone()[0]
+                _count_cache[key] = (time.monotonic(), total)
+                return total
+        try:
+            hit = _count_cache.get(key)  # re-check under the lock
+            if hit is not None and time.monotonic() - hit[0] < _COUNT_TTL:
+                return hit[1]
+            total = con.execute(
+                f"SELECT count(*) FROM ({rel_sql(grain, fs)})", fs.params).fetchone()[0]
+            if len(_count_cache) > 512:
+                _count_cache.clear()  # crude but fine: keys churn as filters change
+            _count_cache[key] = (time.monotonic(), total)
+            return total
+        finally:
+            _count_lock.release()
 
     @app.get("/api/rates")
     def rates(

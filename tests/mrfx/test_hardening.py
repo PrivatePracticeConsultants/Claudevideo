@@ -1155,3 +1155,51 @@ def test_serve_supervisor_stops_on_ctrl_c(monkeypatch):
         raise KeyboardInterrupt
     monkeypatch.setattr(subprocess, "call", boom)
     assert cli._supervise_serve("config/mrfx.yaml") == 0  # Ctrl-C → clean stop
+
+
+def test_bulk_enrichment_streams_bounded_batches(monkeypatch, tmp_path):
+    # 300M-scale fix: enrich_via_bulk must resolve the un-enriched NPI
+    # population in BOUNDED batches via the cache, never accumulate it all in
+    # one Python set (that OOMs outside DuckDB's cap). Assert _enrich_from_parquet
+    # is called once PER page (bounded), covering all pages, and that the
+    # unbounded process-lifetime `_bulk_absent` set is gone.
+    import mrfx.enrich as E
+
+    assert not hasattr(E, "_bulk_absent"), "the unbounded absent-set must be removed"
+
+    # Two FULL keyset pages (size == the 100k page limit) then a short one, so
+    # the pager makes multiple passes — each resolved by its OWN bounded
+    # _enrich_from_parquet call, never one call holding the whole population.
+    LIMIT = 100000
+    p1 = ["1%09d" % i for i in range(LIMIT)]
+    p2 = ["2%09d" % i for i in range(LIMIT)]
+    p3 = ["3%09d" % i for i in range(7)]
+    def fake_unenriched(limit, after=""):
+        if not after:
+            return p1
+        if after == p1[-1]:
+            return p2
+        if after == p2[-1]:
+            return p3
+        return []
+    seen = []
+    def fake_from_parquet(store, cache, wanted):
+        assert len(wanted) <= LIMIT, "batch not bounded — whole population at once"
+        seen.append(len(wanted))
+        return len(wanted)
+
+    class FakeStore:
+        rollup_in_progress = staticmethod(lambda: False)
+        unenriched_npis = staticmethod(fake_unenriched)
+    monkeypatch.setattr(E, "_ensure_nppes_cache", lambda *a, **k: tmp_path / "cache.parquet")
+    monkeypatch.setattr(E, "_enrich_from_parquet", fake_from_parquet)
+
+    from mrfx.config import EnrichmentConfig, MrfxConfig
+    cfg = MrfxConfig(store_dir=str(tmp_path / "s"), inbox_dir=str(tmp_path / "i"))
+    nppes = tmp_path / "nppes.csv"; nppes.write_text("NPI\n")
+    cfg.enrichment = EnrichmentConfig(mode="bulk", bulk_csv_path=str(nppes))
+    monkeypatch.setattr(E, "_bulk_sig", None)
+
+    done = E.enrich_via_bulk(cfg, FakeStore(), stop=None)
+    assert done == 2 * LIMIT + 7          # every page resolved
+    assert len(seen) == 3                 # one bounded call PER page, not one giant call

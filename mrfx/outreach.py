@@ -43,37 +43,56 @@ def _lookup_url(name, city, state):
     return "https://www.google.com/search?q=" + quote_plus(terms)
 
 
-def _geo_by_tin(store: Store) -> dict[str, dict]:
-    """TIN -> most common practice location among its NPIs (NPPES-enriched)."""
+def _geo_by_tin(store: Store, scope_tins: list[str]) -> dict[str, dict]:
+    """TIN -> most common practice location among its NPIs (NPPES-enriched),
+    SCOPED to the export's in-filter TINs — the whole-store version built one
+    Python dict entry per TIN (millions at 300M rows → OOM)."""
+    if not scope_tins:
+        return {}
+    import pyarrow as pa
+    scope = pa.table({"tin_value": pa.array(scope_tins, type=pa.string())})
     with store.connect() as con:
-        rows = con.execute(
-            """
-            WITH tin_npi AS (
-                SELECT DISTINCT tin_value, npi FROM rates
-                WHERE tin_value IS NOT NULL AND NOT tin_is_really_npi
-                UNION
-                -- tin.type='npi' rows: the "TIN" IS an NPI — locate through it
-                SELECT DISTINCT tin_value, tin_value AS npi FROM rates
-                WHERE tin_value IS NOT NULL AND tin_is_really_npi
-            )
-            SELECT tin_value,
-                   mode(n.city)    FILTER (n.city IS NOT NULL)    AS city,
-                   mode(n.state)   FILTER (n.state IS NOT NULL)   AS state,
-                   mode(n.zip)     FILTER (n.zip IS NOT NULL)     AS zip,
-                   mode(n.address) FILTER (n.address IS NOT NULL) AS address,
-                   mode(n.phone)   FILTER (n.phone IS NOT NULL)   AS phone
-            FROM tin_npi JOIN npi_directory n USING (npi)
-            GROUP BY tin_value
-            """
-        ).fetchall()
+        con.register("_scope", scope)
+        try:
+            rows = con.execute(
+                """
+                WITH tin_npi AS (
+                    SELECT DISTINCT r.tin_value, r.npi FROM rates r JOIN _scope s USING (tin_value)
+                    WHERE r.tin_value IS NOT NULL AND NOT r.tin_is_really_npi
+                    UNION
+                    -- tin.type='npi' rows: the "TIN" IS an NPI — locate through it
+                    SELECT DISTINCT r.tin_value, r.tin_value AS npi FROM rates r JOIN _scope s USING (tin_value)
+                    WHERE r.tin_value IS NOT NULL AND r.tin_is_really_npi
+                )
+                SELECT tin_value,
+                       mode(n.city)    FILTER (n.city IS NOT NULL)    AS city,
+                       mode(n.state)   FILTER (n.state IS NOT NULL)   AS state,
+                       mode(n.zip)     FILTER (n.zip IS NOT NULL)     AS zip,
+                       mode(n.address) FILTER (n.address IS NOT NULL) AS address,
+                       mode(n.phone)   FILTER (n.phone IS NOT NULL)   AS phone
+                FROM tin_npi JOIN npi_directory n USING (npi)
+                GROUP BY tin_value
+                """
+            ).fetchall()
+        finally:
+            con.unregister("_scope")
     return {r[0]: {"city": r[1], "state": r[2], "zip": r[3], "address": r[4], "phone": r[5]} for r in rows}
 
 
-def _tin_meta(store: Store) -> dict[str, dict]:
+def _tin_meta(store: Store, scope_tins: list[str]) -> dict[str, dict]:
+    if not scope_tins:
+        return {}
+    import pyarrow as pa
+    scope = pa.table({"tin_value": pa.array(scope_tins, type=pa.string())})
     with store.connect() as con:
-        rows = con.execute(
-            "SELECT tin_value, entity_kind, primary_discipline FROM tin_directory"
-        ).fetchall()
+        con.register("_scope", scope)
+        try:
+            rows = con.execute(
+                "SELECT td.tin_value, td.entity_kind, td.primary_discipline "
+                "FROM tin_directory td JOIN _scope s USING (tin_value)"
+            ).fetchall()
+        finally:
+            con.unregister("_scope")
     return {r[0]: {"entity_kind": r[1], "primary_discipline": r[2]} for r in rows}
 
 
@@ -105,8 +124,13 @@ def build_outreach_rows(store: Store, rel_sql: str, params: list,
             params,
         ).fetchall()
 
-    geo = _geo_by_tin(store)
-    meta = _tin_meta(store)
+    # only the TINs actually in this export's filtered result — geo/meta used to
+    # scan the WHOLE store (one Python dict entry per TIN → OOM at 300M rows).
+    # units[2] is the per-unit `string_agg(DISTINCT tin_value)`.
+    scope_tins = sorted({t.strip() for u in units
+                         for t in (u[2] or "").split(";") if t.strip()})
+    geo = _geo_by_tin(store, scope_tins)
+    meta = _tin_meta(store, scope_tins)
 
     # per-code entity medians -> market stats
     by_code: dict[str, dict[str, float]] = {}

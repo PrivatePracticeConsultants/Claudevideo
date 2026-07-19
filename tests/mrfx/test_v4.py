@@ -662,7 +662,6 @@ def test_bulk_enrichment_change_aware_skips_rescan(cfg, store, tmp_path, monkeyp
     import mrfx.enrich as E
     from mrfx.enrich import _BULK_COLS, enrich_via_bulk
     monkeypatch.setattr(E, "_bulk_sig", None)   # isolate module change-awareness
-    monkeypatch.setattr(E, "_bulk_absent", set())
     monkeypatch.setattr(E, "_BULK_MIN_FULL_ROWS", 1)  # tiny fixture counts as a "full" file
     ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "cc.json", innetwork(items=[
         item("97110", [(["1000000001"], "43-9000000", "ein", [(40.0, None)]),
@@ -697,7 +696,6 @@ def test_bulk_enrichment_marks_absent_npis_processed(cfg, store, tmp_path, monke
     import mrfx.enrich as E
     from mrfx.enrich import _BULK_COLS, enrich_via_bulk
     monkeypatch.setattr(E, "_bulk_sig", None)
-    monkeypatch.setattr(E, "_bulk_absent", set())
     monkeypatch.setattr(E, "_bulk_read_failures", 0)
     monkeypatch.setattr(E, "_BULK_MIN_FULL_ROWS", 1)  # tiny fixture counts as a "full" file
     ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "ab.json", innetwork(items=[
@@ -735,7 +733,6 @@ def test_api_mode_with_present_bulk_file_uses_bulk(cfg, store, tmp_path, monkeyp
     import mrfx.enrich as E
     from mrfx.enrich import _BULK_COLS, run_enrichment, use_bulk_enrichment
     monkeypatch.setattr(E, "_bulk_sig", None)
-    monkeypatch.setattr(E, "_bulk_absent", set())
     monkeypatch.setattr(E, "_bulk_read_failures", 0)
     monkeypatch.setattr(E, "_BULK_MIN_FULL_ROWS", 1)
     # fail loudly if the API path is ever taken (it must NOT be)
@@ -778,7 +775,6 @@ def test_auto_bulk_falls_back_to_api_when_file_is_bad(cfg, store, tmp_path, monk
     import mrfx.enrich as E
     from mrfx.enrich import run_enrichment
     monkeypatch.setattr(E, "_bulk_sig", None)
-    monkeypatch.setattr(E, "_bulk_absent", set())
     monkeypatch.setattr(E, "_bulk_read_failures", 0)
 
     # a stub API that resolves whatever bulk left un-enriched (no real network)
@@ -827,7 +823,6 @@ def test_bulk_enrichment_uses_cache_for_new_npis(cfg, store, tmp_path, monkeypat
     import mrfx.enrich as E
     from mrfx.enrich import _BULK_COLS, _nppes_cache_path, enrich_via_bulk
     monkeypatch.setattr(E, "_bulk_sig", None)
-    monkeypatch.setattr(E, "_bulk_absent", set())
     monkeypatch.setattr(E, "_bulk_read_failures", 0)
     monkeypatch.setattr(E, "_BULK_MIN_FULL_ROWS", 1)
     hdr = [_BULK_COLS[k] for k in
@@ -874,7 +869,6 @@ def test_bulk_enrichment_partial_file_does_not_poison(cfg, store, tmp_path, monk
     import mrfx.enrich as E
     from mrfx.enrich import _BULK_COLS, enrich_via_bulk
     monkeypatch.setattr(E, "_bulk_sig", None)
-    monkeypatch.setattr(E, "_bulk_absent", set())
     # leave _BULK_MIN_FULL_ROWS at its real default (2M) — our fixtures are tiny,
     # so they read as "partial" exactly like a weekly file would
     ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "pp.json", innetwork(items=[
@@ -1036,7 +1030,6 @@ def test_therapy_only_ingest_drops_non_therapists(cfg, store, tmp_path, monkeypa
     import mrfx.enrich as E
     from mrfx.enrich import _BULK_COLS, enrich_via_bulk
     monkeypatch.setattr(E, "_bulk_sig", None)
-    monkeypatch.setattr(E, "_bulk_absent", set())
     monkeypatch.setattr(E, "_BULK_MIN_FULL_ROWS", 1)
     # the real NPPES monthly has ~8-9M rows; trust this tiny test cache
     monkeypatch.setattr(C, "_THERAPY_CACHE_MIN_ROWS", 1)

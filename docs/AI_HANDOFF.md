@@ -402,6 +402,28 @@ not yet built — pick these up before adding features):
 - Auto-spill relocates rollup scratch off an HDD only on Windows WITH a roomy
   SSD (PowerShell Get-PhysicalDisk probe). On an all-HDD box the rollup and the
   parser reads contend on one spindle — SLOW during a rebuild, not a stall.
+- Full-store scale (300M+ rate rows) — TIME, not correctness or memory. Two
+  paths are O(partitions × total_rows) because the hash-partition predicate is
+  not pushed into the scan, so every slice re-reads the whole table:
+  - **C1 — a FULL rollup rebuild** (`rebuild_rollups()` / `rollup_needs_full`
+    drift / a schema migration) re-aggregates all rows per partition. At ~300M
+    rows this is hours, not minutes. It is NOT hit on the normal grind: new
+    files take the payer-scoped incremental path (`update_rollups_incremental`),
+    whose per-slice memory and time are bounded by the SLICE, invariant to total
+    store size. C1 only fires on an explicit rebuild, a >25%-of-TINs drift, or a
+    version bump — all rare and all logged. Memory stays capped the whole time
+    (the OOM ladder subdivides 1→64); it is slow, never a crash.
+  - **C2 — `forget` / a removal** keeps the rate spine payer-scoped and fast but
+    rebuilds the tin_directory in FULL, because a removed file can change which
+    practices are shared across the survivors (a directory row is correct only
+    against the whole surviving store). At 300M rows that directory rebuild is a
+    long operation (tens of minutes to hours), logged honestly at start
+    ("refreshing the full name directory"). Removals are rare by design. The
+    scoped-forget fix (recompute only the directory rows for TINs the removed
+    file actually touched, then re-check just those for lost sharing) is designed
+    but unbuilt — build it if removals become routine at book scale.
+  Both are graceful (bounded memory, honest logs, correct results); the cost is
+  wall-clock on operations that don't happen during a normal ingest grind.
 
 
 - Renderer click-through handles single-click gates ("View Plan List");

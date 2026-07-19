@@ -312,10 +312,9 @@ def _open_bulk_text(path: Path):
 # the file's signature and the NPIs it does NOT contain (deactivated/new/junk
 # ids that would otherwise force a fresh multi-GB scan on every poll forever).
 _bulk_sig: tuple | None = None
-_bulk_absent: set[str] = set()
 # consecutive COMPLETE-read failures for the current signature. A genuinely
 # corrupt/truncated file would otherwise be re-read in full every poll forever
-# (a scan that raises never accumulates _bulk_absent); after this many failures
+# (a scan that raises never makes progress); after this many failures
 # we give up on that exact file until it changes (a re-download changes the sig
 # and resets everything).
 _bulk_read_failures = 0
@@ -327,6 +326,11 @@ _BULK_MAX_READ_FAILURES = 3
 # marking their whole book unresolvable. Well below any real full file, well
 # above any weekly. (Tests lower it to simulate a full file.)
 _BULK_MIN_FULL_ROWS = 2_000_000
+# Streaming-fallback cap: the rare direct-file path holds at most this many
+# un-enriched NPIs in memory per pass (the cache path streams and needs no
+# such set). Bounds the Python heap at 300M rows where the full un-enriched
+# population is tens of millions; the rest resolve over subsequent cycles.
+_BULK_STREAM_MAX_WANTED = 2_000_000
 
 
 # A compact NPI->fields parquet, built from the bulk file ONCE per signature.
@@ -436,10 +440,12 @@ def _write_nppes_parquet(cfg: MrfxConfig, store: Store, pqp: Path,
 
 
 def _enrich_from_parquet(store: Store, pqp: Path, wanted: set[str]) -> int:
-    """Resolve `wanted` NPIs by joining them against the prebuilt parquet — a
-    sub-second indexed lookup, no multi-GB re-read. Mirrors the streaming path's
-    save + absent-marking (including the partial-file guard)."""
-    global _bulk_absent
+    """Resolve a BOUNDED batch of `wanted` NPIs by joining them against the
+    prebuilt parquet — a sub-second indexed lookup, no multi-GB re-read. The
+    caller streams the un-enriched population through this in 100k batches, so
+    `wanted` is never the whole (tens-of-millions at 300M rows) set at once —
+    that would OOM the Python process OUTSIDE DuckDB's memory cap. Mirrors the
+    streaming path's save + absent-marking (incl. the partial-file guard)."""
     import pyarrow as pa
 
     pth = str(pqp).replace("'", "''")
@@ -466,14 +472,16 @@ def _enrich_from_parquet(store: Store, pqp: Path, wanted: set[str]) -> int:
         _mark_dirty()
     absent = wanted - found
     if absent and nrows >= _BULK_MIN_FULL_ROWS:
-        _bulk_absent |= absent
+        # write no-name dead rows so these count as PROCESSED (enriched_at set)
+        # and drop out of the next unenriched_npis page — this, not an in-memory
+        # set, is what stops them being re-scanned (the old process-lifetime
+        # `_bulk_absent` set grew unbounded at 300M).
         ab = list(absent)
         for j in range(0, len(ab), 5000):
             store.save_npis_bulk([{"npi": n} for n in ab[j:j + 5000]])
     elif absent:
-        log.warning("NPPES cache has only %d rows — looks partial/incomplete; "
-                    "leaving %d NPIs for a fuller file", nrows, len(absent))
-    log.info("enriched %d NPIs from the NPPES cache", len(matched))
+        log.debug("NPPES cache has only %d rows — looks partial/incomplete; "
+                  "leaving %d NPIs for a fuller file", nrows, len(absent))
     return len(matched)
 
 
@@ -487,7 +495,7 @@ def enrich_via_bulk(cfg: MrfxConfig, store: Store,
     Accepts the raw monthly ZIP or an unzipped CSV. Change-aware: skips work
     entirely when the only remaining un-enriched NPIs are ones already proven
     absent from this (unchanged) file."""
-    global _bulk_sig, _bulk_absent, _bulk_read_failures
+    global _bulk_sig, _bulk_read_failures
     path = cfg.enrichment.bulk_csv_path
     if not path or not Path(path).exists():
         # don't claim mode=bulk — this also runs for an auto-promoted api-mode
@@ -501,49 +509,58 @@ def enrich_via_bulk(cfg: MrfxConfig, store: Store,
         sig = (str(path), 0, 0)
     if sig != _bulk_sig:  # new file (or first run): everything is fresh again
         _bulk_sig = sig
-        _bulk_absent = set()
         _bulk_read_failures = 0
     if _bulk_read_failures >= _BULK_MAX_READ_FAILURES:
         # gave up on this exact (unreadable) file; wait for it to change
         return 0
 
-    wanted = set()
-    cursor = ""
-    while True:
-        # yield to an in-flight rollup: unenriched_npis is a whole-store
-        # DISTINCT + anti-join scan, and running it CONCURRENTLY with a rollup
-        # delta made both thrash the 8 GB pool and the HDD — extraction slowed
-        # to a crawl (seen live: enrich scan + rollup delta + summary all at
-        # once). Names are less time-critical than extraction, so wait the
-        # rollup out; the loop resumes the instant it clears. (stop is None on
-        # the synchronous CLI/test path — nothing to yield to there.)
-        if stop is not None:
-            _wait_out_rollup(store, stop)
-            if stop.is_set():
-                break
-        # keyset pagination: nothing is saved between pages, so without the
-        # cursor every page would be identical (an infinite loop at >=100k)
-        batch = store.unenriched_npis(limit=100000, after=cursor)
-        if not batch:
-            break
+    # FAST PATH: resolve against a one-time compact parquet of the whole file.
+    # Built on the first call (one pass), then every lookup is sub-second.
+    cache = _ensure_nppes_cache(cfg, store, sig, stop)
+
+    def _paged(cursor: str):
+        """Yield keyset-paged batches of un-enriched NPIs, yielding to any
+        in-flight rollup between pages (its whole-store scan + our whole-store
+        scan would otherwise thrash the 8 GB pool and the HDD)."""
+        while True:
+            if stop is not None:
+                _wait_out_rollup(store, stop)
+                if stop.is_set():
+                    return
+            batch = store.unenriched_npis(limit=100000, after=cursor)
+            if not batch:
+                return
+            cursor = batch[-1]
+            yield batch
+            if len(batch) < 100000:
+                return
+
+    if cache is not None:
+        # STREAM in bounded 100k batches — never hold the whole un-enriched NPI
+        # population (tens of millions at 300M rows) in Python at once; that
+        # OOMs the process OUTSIDE DuckDB's memory cap. The keyset cursor covers
+        # everyone once per pass; each batch is a sub-second indexed join.
+        done = 0
+        for batch in _paged(""):
+            try:
+                done += _enrich_from_parquet(store, cache, set(batch))
+            except Exception as e:  # noqa: BLE001 — one bad batch, not the whole run
+                log.warning("NPPES cache lookup failed on a batch (%s) — "
+                            "skipping it this cycle", e)
+        if done:
+            log.info("enriched %d NPIs from the NPPES cache", done)
+        return done
+
+    # STREAMING FALLBACK (cache couldn't be built — rare): one pass over the
+    # multi-GB file resolves a BOUNDED slice of wanted NPIs; the rest come next
+    # cycle. Capped so `wanted` can't grow to the whole population and OOM.
+    wanted: set[str] = set()
+    for batch in _paged(""):
         wanted.update(batch)
-        cursor = batch[-1]
-        if len(batch) < 100000:
+        if len(wanted) >= _BULK_STREAM_MAX_WANTED:
             break
-    wanted -= _bulk_absent  # don't re-scan the file for ids it already lacked
     if not wanted:
         return 0  # nothing NEW to find in this unchanged file
-
-    # FAST PATH: resolve against a one-time compact parquet of the whole file.
-    # Built on the first call (one pass), then every lookup is sub-second. Any
-    # build/read failure returns None and we fall through to direct streaming,
-    # so this can never be slower or less correct than before.
-    cache = _ensure_nppes_cache(cfg, store, sig, stop)
-    if cache is not None:
-        try:
-            return _enrich_from_parquet(store, cache, wanted)
-        except Exception as e:  # noqa: BLE001 — fall back to streaming on any error
-            log.warning("NPPES cache lookup failed (%s); streaming instead", e)
 
     done = 0
     pending: list[dict] = []
@@ -627,13 +644,10 @@ def enrich_via_bulk(cfg: MrfxConfig, store: Store,
         else:
             # A COMPLETE scan of a full-sized file proves the ids still in
             # `wanted` are genuinely absent (deactivated / junk from messy MRFs).
-            # Two things follow:
-            #  1. remember them so the next cycle doesn't re-read the whole file,
-            #  2. write them as no-name dead rows — exactly what the API path does
-            #     for an empty NPPES result — so they count as PROCESSED and the
-            #     dashboard banner can actually reach zero. Without this a single
-            #     junk NPI wedges the banner on forever though enrichment is done.
-            _bulk_absent |= wanted
+            # Write them as no-name dead rows — exactly what the API path does
+            # for an empty NPPES result — so they count as PROCESSED (enriched_at
+            # set) and drop out of the next unenriched_npis page; that DB marking,
+            # not an in-memory set, is what stops them being re-scanned.
             absent = list(wanted)
             for j in range(0, len(absent), 5000):
                 store.save_npis_bulk([{"npi": n} for n in absent[j:j + 5000]])
