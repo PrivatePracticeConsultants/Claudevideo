@@ -87,6 +87,9 @@ def compute_leads(store: Store, market: dict, *, threshold_percentile: int = 25,
     ORDER BY p.median_pct ASC, td.npi_count DESC NULLS LAST, p.avg_gap_to_median DESC
     LIMIT ?
     """
+    # the state the user filtered on (if any) — a matched TIN is guaranteed to
+    # carry it, so it's the state to SHOW even for a multi-state billing entity
+    filter_state = (market.get("state") or "").upper() or None
     with store.connect() as con:
         cur = con.execute(sql, [*params, min_codes, threshold_percentile, *excl_params, limit])
         cols = [d[0] for d in cur.description]
@@ -96,12 +99,24 @@ def compute_leads(store: Store, market: dict, *, threshold_percentile: int = 25,
     for r in rows:
         states = r.get("states") or []
         cities = r.get("cities") or []
+        # A billing TIN (one tax ID) can span several states — a multi-location
+        # group, a management company, a metro straddling a state line. Such a
+        # TIN MATCHES a state filter because it has a location there, but its
+        # alphabetically-first state was being shown, so it looked out-of-state.
+        # Show the MATCHED state when a filter is applied (it's guaranteed
+        # present); expose the full list + a flag so the UI/CSV can be honest.
+        if filter_state and filter_state in states:
+            primary_state = filter_state
+        else:
+            primary_state = states[0] if states else None
         leads.append({
             "tin_value": mask_tin(r["tin_value"]),
             "display_name": r["display_name"],
             "entity_kind": r["entity_kind"],
             "npi_count": r["npi_count"],
-            "state": states[0] if states else None,
+            "state": primary_state,
+            "states": states,                 # full list — never hide multi-state
+            "multi_state": len(states) > 1,
             "city": cities[0] if cities else None,
             "n_codes": r["n_codes"],
             "median_percentile": r["median_pct"],
@@ -137,11 +152,15 @@ def leads_csv(store: Store, result: dict) -> str:
     ]:
         out.write(f"# {line}\n")
     w = csv.writer(out)
-    w.writerow(["display_name", "tin", "entity_kind", "state", "city", "npi_count",
-                "n_codes", "median_percentile", "avg_gap_to_median", "website"])
+    # `state` is the matched/primary state; `all_states` is the full list so a
+    # multi-state billing entity is never silently presented as single-state
+    w.writerow(["display_name", "tin", "entity_kind", "state", "all_states",
+                "city", "npi_count", "n_codes", "median_percentile",
+                "avg_gap_to_median", "website"])
     for x in result["leads"]:
         w.writerow([defuse_csv(x["display_name"]), x["tin_value"], x["entity_kind"],
-                    x["state"] or "", defuse_csv(x["city"]) or "", x["npi_count"],
+                    x["state"] or "", "; ".join(x.get("states") or []),
+                    defuse_csv(x["city"]) or "", x["npi_count"],
                     x["n_codes"], x["median_percentile"], x["avg_gap_to_median"],
                     defuse_csv(x["website"]) or ""])
     return out.getvalue()

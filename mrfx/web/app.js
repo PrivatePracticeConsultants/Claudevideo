@@ -1361,7 +1361,7 @@ function renderLeads(out, data) {
   }
   const rows = data.leads.map((l) => `<tr>
     <td>${esc(l.display_name || "")}<div class="sub">${esc(l.entity_kind || "")}${l.website ? ` · <a href="${esc(l.website)}" target="_blank" rel="noopener">site</a>` : ""}</div></td>
-    <td class="sub">${esc([l.city, l.state].filter(Boolean).join(", "))}</td>
+    <td class="sub">${esc([l.city, l.state].filter(Boolean).join(", "))}${l.multi_state ? ` <span class="muted" title="${esc((l.states || []).join(", "))}">(+${(l.states || []).length - 1} more state${(l.states || []).length - 1 === 1 ? "" : "s"})</span>` : ""}</td>
     <td class="num">${fmtInt(l.npi_count)}</td>
     <td class="num">${l.n_codes}</td>
     <td class="num">p${l.median_percentile}</td>

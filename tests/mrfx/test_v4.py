@@ -1616,6 +1616,47 @@ def test_leads_threshold_exclude_and_csv(cfg, market5_store):
     assert csv.status_code == 200 and "# " in csv.text and "median_percentile" in csv.text
 
 
+def test_leads_state_filter_shows_matched_state_for_multistate_tin(cfg, store):
+    # A billing TIN spanning AR+MO matches a MO filter (it HAS a MO location);
+    # it must DISPLAY MO — not its alphabetically-first state (AR) — and expose
+    # the full list + multi_state flag so it's never silently mislabeled. A
+    # purely-AR TIN must not appear at all.
+    from mrfx.leads import compute_leads, leads_csv
+
+    def r(t, n, code, rate):
+        return dict(payer="P", tin_value=t, tin_type="ein", npi=n, source_file="f.json",
+            billing_code=code, billing_code_type="CPT", discipline="pt", is_timed=True,
+            billing_class="professional", negotiated_rate=rate, negotiated_type="negotiated",
+            is_dollar_rate=True, modifier_set=[], service_code=["11"], file_month="2026-06",
+            last_updated_on="2026-06-01", expiration_date=None, schema_version="2.0.0",
+            tin_is_really_npi=False, state="MO")
+    recs = []
+    for code, rate in [("97110", 40), ("97112", 50), ("97140", 60)]:
+        recs += [r("450000001", "1400000001", code, rate),        # multi: AR npi
+                 r("450000001", "1400000002", code, rate),        # multi: MO npi
+                 r("450000002", "1400000003", code, rate + 30),   # pure MO (peer)
+                 r("450000003", "1400000004", code, rate)]        # pure AR
+    with store.rates_part_writer("f.json") as w:
+        w.write_batch(recs)
+    store.upsert_file("f.json", payer="P", file_type="in_network", status="done",
+                      rows_emitted=len(recs), finished_at="2026-07-01 10:00:00")
+    store.save_npi("1400000001", "Multi Group", "2251C2600X", None, "BENTONVILLE", "AR", entity_type="NPI-2")
+    store.save_npi("1400000002", "Multi Group", "2251C2600X", None, "KANSAS CITY", "MO", entity_type="NPI-2")
+    store.save_npi("1400000003", "KC PT", "2251C2600X", None, "KANSAS CITY", "MO", entity_type="NPI-2")
+    store.save_npi("1400000004", "Arkansas PT", "2251C2600X", None, "LITTLE ROCK", "AR", entity_type="NPI-2")
+    store.rebuild_rollups()
+
+    res = compute_leads(store, {"month": "latest", "state": "MO"},
+                        threshold_percentile=99, min_codes=1)
+    tins = {L["tin_value"] for L in res["leads"]}
+    assert "450000003" not in tins  # purely-AR org correctly excluded
+    multi = next(L for L in res["leads"] if L["tin_value"] == "450000001")
+    assert multi["state"] == "MO"               # shows the matched state, not "AR"
+    assert multi["multi_state"] is True
+    assert set(multi["states"]) == {"AR", "MO"}  # full list preserved
+    assert "all_states" in leads_csv(store, res)  # export is transparent too
+
+
 # ---------------------------------------------------------------------------
 # rate-change monitoring (§7E)
 # ---------------------------------------------------------------------------
