@@ -113,7 +113,7 @@ Describe 'Update pipeline' {
         $r = Update-OrfData
         $r.Updated | Should -BeTrue
         $r.RowCount | Should -Be 3
-        $r.Message | Should -Match '1 added, 1 removed, 1 changed'
+        $r.Message | Should -Match '1 added, 1 removed, 1 flag-changed'
         $changeFiles = Get-ChildItem (Join-Path $env:ORF_DATA_DIR 'changes')
         $changeFiles.Count | Should -Be 1
     }
@@ -200,6 +200,23 @@ Describe 'Snapshot comparison' {
         $flip.OldFlags | Should -Match 'PARTB=N'
         $flip.NewFlags | Should -Match 'PARTB=Y'
     }
+    It 'distinguishes a pure name change as Renamed, not Changed' {
+        $a = Join-Path $script:WorkDir 'ren_a.csv'
+        $b = Join-Path $script:WorkDir 'ren_b.csv'
+        Set-Content $a "NPI,LAST_NAME,FIRST_NAME,PARTB,DME,HHA,PMD,HOSPICE`n1417051921,SMITH,JOHN,Y,Y,N,N,N" -Encoding UTF8 -NoNewline
+        Set-Content $b "NPI,LAST_NAME,FIRST_NAME,PARTB,DME,HHA,PMD,HOSPICE`n1417051921,JONES,JOHN,Y,Y,N,N,N" -Encoding UTF8 -NoNewline
+        $c = @(Compare-OrfSnapshot -OldPath $a -NewPath $b)
+        $c.Count | Should -Be 1
+        $c[0].ChangeType | Should -Be 'Renamed'
+        $c[0].OldName | Should -Be 'SMITH, JOHN'
+        $c[0].OldFlags | Should -Be $c[0].NewFlags
+    }
+    It 'auto-swaps snapshots handed to it newest-first (Added stays Added)' {
+        $changesReversed = @(Compare-OrfSnapshot -OldPath (Get-OrfSnapshotFiles)[-1].FullName `
+                                                 -NewPath (Get-OrfSnapshotFiles)[-2].FullName -WarningAction SilentlyContinue)
+        # Same result as the correctly-ordered default comparison.
+        ($changesReversed | Where-Object ChangeType -eq 'Added').NPI | Should -Be '1295400745'
+    }
 }
 
 Describe 'Export' {
@@ -220,6 +237,78 @@ Describe 'Export' {
         $result = Search-OrfProvider -Name 'zzz-no-such-name' | Export-OrfResult -Path $out
         $result.Rows | Should -Be 0
         Test-Path $out | Should -BeTrue
+    }
+    It 'renders the five Y/N flag columns correctly (guards against field swaps)' {
+        # 1760465553 in release2 = JONES,BOB,PARTB=Y,DME=Y,HHA=N,PMD=Y,HOSPICE=N
+        $rec = @(Search-OrfProvider -Npi 1760465553)[0]
+        $rec.PartB | Should -Be 'Y'; $rec.DME | Should -Be 'Y'; $rec.HHA | Should -Be 'N'
+        $rec.PMD | Should -Be 'Y'; $rec.Hospice | Should -Be 'N'
+    }
+    It 'writes a UTF-8 BOM so Excel renders names consistently across PS versions' {
+        $out = Join-Path $script:WorkDir 'bom.csv'
+        Search-OrfProvider -Npi 1417051921 | Export-OrfResult -Path $out | Out-Null
+        $bytes = [System.IO.File]::ReadAllBytes($out)
+        $bytes[0..2] | Should -Be @(0xEF, 0xBB, 0xBF)
+    }
+}
+
+Describe 'Export safety (CSV formula injection)' {
+    It 'neutralizes leading = + - @ in exported cells' {
+        $rows = @(
+            [pscustomobject]@{ NPI = '1417051921'; LastName = '=cmd|calc'; FirstName = 'A' }
+            [pscustomobject]@{ NPI = '1972040137'; LastName = '+evil'; FirstName = '-danger' }
+        )
+        $out = Join-Path $script:WorkDir 'inject.csv'
+        $rows | Export-OrfResult -Path $out | Out-Null
+        $csv = Import-Csv $out
+        $csv[0].LastName | Should -Be "'=cmd|calc"
+        $csv[1].LastName | Should -Be "'+evil"
+        $csv[1].FirstName | Should -Be "'-danger"
+    }
+}
+
+Describe 'Download URL safety' {
+    It 'rejects a catalog whose download URL is not https/loopback' {
+        $badCat = Join-Path $script:SiteDir 'data.json'
+        $orig = Get-Content $badCat -Raw
+        try {
+            $cat = $orig | ConvertFrom-Json
+            $cat.dataset[0].distribution[0].downloadURL = 'file:///etc/passwd'
+            $cat.dataset[0].distribution[0].modified = '2027-01-01'
+            $cat | ConvertTo-Json -Depth 6 | Set-Content $badCat -Encoding UTF8
+            { Update-OrfData } | Should -Throw '*only https*'
+        } finally {
+            Set-Content $badCat -Value $orig -Encoding UTF8
+        }
+    }
+}
+
+Describe 'State file robustness' {
+    It 'treats a schema-drifted state.json as absent instead of crashing' {
+        $sf = Join-Path $env:ORF_DATA_DIR 'state.json'
+        $saved = Get-Content $sf -Raw
+        try {
+            '{ "SomeOtherKey": 1 }' | Set-Content $sf -Encoding UTF8
+            # Must not throw under StrictMode even though ReleaseDate is absent.
+            { Get-OrfStatus | Out-Null } | Should -Not -Throw
+            (Get-OrfStatus -WarningAction SilentlyContinue).LocalRelease | Should -BeNullOrEmpty
+        } finally {
+            Set-Content $sf -Value $saved -Encoding UTF8
+        }
+    }
+}
+
+Describe 'Duplicate-NPI provider count' {
+    It 'BuildIndex counts unique providers, not raw rows (first row wins)' {
+        $dup = Join-Path $script:WorkDir 'dup.csv'
+        Set-Content $dup ("NPI,LAST_NAME,FIRST_NAME,PARTB,DME,HHA,PMD,HOSPICE`n" +
+            "1417051921,SMITH,JOHN,Y,Y,N,N,N`n1417051921,DUPE,X,N,N,N,N,N`n1972040137,A,B,Y,N,Y,N,Y") `
+            -Encoding UTF8 -NoNewline
+        $rows = [OrfEngine]::Load($dup)
+        $rows.Count | Should -Be 3
+        [OrfEngine]::BuildIndex($rows).Count | Should -Be 2
+        # First row wins for a duplicate NPI.
+        [OrfEngine]::BuildIndex($rows)['1417051921'].LastName | Should -Be 'SMITH'
     }
 }
 

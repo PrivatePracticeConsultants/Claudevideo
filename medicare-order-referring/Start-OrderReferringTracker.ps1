@@ -148,11 +148,12 @@ $xaml = @'
             <TextBlock Text="to" VerticalAlignment="Center" Margin="8,0,8,0"/>
             <ComboBox x:Name="NewSnapCombo" Width="200" Height="28"/>
             <TextBlock Text="Show:" VerticalAlignment="Center" Margin="14,0,6,0"/>
-            <ComboBox x:Name="ChangeTypeCombo" Width="110" Height="28" SelectedIndex="0">
+            <ComboBox x:Name="ChangeTypeCombo" Width="120" Height="28" SelectedIndex="0">
               <ComboBoxItem Content="All"/>
               <ComboBoxItem Content="Added"/>
               <ComboBoxItem Content="Removed"/>
               <ComboBoxItem Content="Changed"/>
+              <ComboBoxItem Content="Renamed"/>
             </ComboBox>
             <Button x:Name="CompareButton" Content="Compare" Padding="14,5" Margin="10,0,0,0"/>
             <Button x:Name="ExportChangesButton" Content="Export results..." Padding="12,5"
@@ -240,9 +241,14 @@ foreach ($name in @(
 # ---------------------------------------------------------------------------
 
 $script:Data = $null              # in-memory List[OrfProvider] (current snapshot)
+$script:LoadedSnapshotFile = $null # the snapshot file $script:Data came from (for export provenance)
+$script:PendingLoadFile = $null   # file a background load is currently reading
 $script:LastSearchResults = @()   # full result sets kept for export
+$script:LastSearchDesc = ''       # description captured when the search ran (not at export time)
 $script:LastBatchResults = @()
-$script:LastChangeResults = @()
+$script:LastChangeResultsAll = @() # unfiltered compare result (ChangeTypeCombo filters a view of this)
+$script:LastChangeResults = @()    # currently-shown (filtered) compare result
+$script:LastChangeDesc = ''
 $script:RmResult = $null          # last referral-map result object
 $script:Busy = $false
 $script:Jobs = New-Object System.Collections.ArrayList
@@ -369,13 +375,17 @@ function Get-CappedNote([int]$Total) {
 
 function Export-WithDialog {
     param([object[]]$Rows, [string]$SuggestedName, [string]$Description)
-    if ($Rows.Count -eq 0) { Show-ErrorBox 'Nothing to export yet — run a search/check first.'; return }
+    if ($script:Busy) { return }
+    if (-not $Rows -or $Rows.Count -eq 0) { Show-ErrorBox 'Nothing to export yet — run a search/check first.'; return }
     $dialog = New-Object Microsoft.Win32.SaveFileDialog
     $dialog.Filter = 'CSV files (*.csv)|*.csv'
     $dialog.FileName = $SuggestedName
     if ($dialog.ShowDialog($window)) {
         try {
-            $result = $Rows | Export-OrfResult -Path $dialog.FileName -Description $Description
+            # Pass the exact snapshot the shown rows came from, so the sidecar
+            # cites that release even if a newer one was downloaded since.
+            $result = $Rows | Export-OrfResult -Path $dialog.FileName -Description $Description `
+                -DataSnapshotFile $script:LoadedSnapshotFile
             Set-Status "Exported $('{0:N0}' -f $result.Rows) rows to $($result.Path) (with methodology sidecar)."
         } catch {
             Show-ErrorBox "Export failed: $($_.Exception.Message)"
@@ -384,16 +394,18 @@ function Export-WithDialog {
 }
 
 function Update-SnapshotCombos {
+    # Preserve the user's current picks across refreshes — resetting them mid-task
+    # would silently change which two snapshots a pending Compare/Export refers to.
     $files = @(Get-OrfSnapshotFiles)
     $names = @($files | ForEach-Object { $_.Name })
+    $prevOld = [string]$ui.OldSnapCombo.SelectedItem
+    $prevNew = [string]$ui.NewSnapCombo.SelectedItem
     $ui.OldSnapCombo.ItemsSource = $names
     $ui.NewSnapCombo.ItemsSource = $names
-    if ($names.Count -ge 2) {
-        $ui.OldSnapCombo.SelectedIndex = $names.Count - 2
-        $ui.NewSnapCombo.SelectedIndex = $names.Count - 1
-    } elseif ($names.Count -eq 1) {
-        $ui.NewSnapCombo.SelectedIndex = 0
-    }
+    if ($prevOld -and $names -contains $prevOld) { $ui.OldSnapCombo.SelectedItem = $prevOld }
+    elseif ($names.Count -ge 2) { $ui.OldSnapCombo.SelectedIndex = $names.Count - 2 }
+    if ($prevNew -and $names -contains $prevNew) { $ui.NewSnapCombo.SelectedItem = $prevNew }
+    elseif ($names.Count -ge 1) { $ui.NewSnapCombo.SelectedIndex = $names.Count - 1 }
 }
 
 function Update-StatusFromDisk {
@@ -407,9 +419,22 @@ function Update-StatusFromDisk {
     Update-SnapshotCombos
 }
 
+function Reset-SearchAndBatch {
+    # Results computed from a now-replaced snapshot must not be exportable —
+    # their sidecar provenance would no longer match the loaded data.
+    $script:LastSearchResults = @(); $script:LastBatchResults = @()
+    $ui.ExportSearchButton.IsEnabled = $false
+    $ui.ExportBatchButton.IsEnabled = $false
+    $ui.SearchGrid.ItemsSource = $null
+    $ui.BatchGrid.ItemsSource = $null
+}
+
 function Start-DataLoad {
     $latest = Get-OrfLatestSnapshot
     if (-not $latest) { return }
+    # Record the file we are about to load in a script-scoped var (not a closure
+    # over a function local, which would not survive the async boundary).
+    $script:PendingLoadFile = $latest.FullName
     Invoke-Async -Kind 'load' -BusyMessage "Loading $($latest.Name) into memory..." `
         -Params @{ ModulePath = $script:ModulePath; Path = $latest.FullName } `
         -WorkerScript 'param($ModulePath, $Path) Import-Module $ModulePath; Import-OrfSnapshot -Path $Path' `
@@ -417,6 +442,8 @@ function Start-DataLoad {
             param($result)
             # The worker returns the List as the single output object.
             $script:Data = $result[0]
+            $script:LoadedSnapshotFile = $script:PendingLoadFile
+            Reset-SearchAndBatch   # old results belonged to the previous snapshot
             Update-StatusFromDisk
         } `
         -OnFail {
@@ -477,6 +504,16 @@ $ui.SearchButton.Add_Click({
     # Keep the raw engine hits; only the displayed slice is converted now.
     # Export converts the full set at export time (streams through the module).
     $script:LastSearchResults = $hits
+    # Capture the description NOW so a later edit to the boxes can't relabel the
+    # already-computed rows at export time.
+    $filters = @()
+    if ($name) { $filters += "name contains '$name'" }
+    if ($npi)  { $filters += "NPI starts with '$npi'" }
+    foreach ($pair in @(@($ui.FlagPartB, 'PARTB'), @($ui.FlagDme, 'DME'), @($ui.FlagHha, 'HHA'),
+                        @($ui.FlagPmd, 'PMD'), @($ui.FlagHospice, 'HOSPICE'))) {
+        if ($pair[0].IsChecked) { $filters += "requires $($pair[1])=Y" }
+    }
+    $script:LastSearchDesc = 'Provider search' + $(if ($filters.Count) { ': ' + ($filters -join '; ') } else { '' })
     $display = @($hits | Select-Object -First $script:MaxGridRows | ConvertTo-OrfRecord)
     $cols = @('NPI', 'LastName', 'FirstName', 'PartB', 'DME', 'HHA', 'PMD', 'Hospice')
     $ui.SearchGrid.ItemsSource = (ConvertTo-DataTable -Rows $display -Columns $cols).DefaultView
@@ -485,17 +522,8 @@ $ui.SearchButton.Add_Click({
 })
 
 $ui.ExportSearchButton.Add_Click({
-    $filters = @()
-    if ($ui.NameBox.Text) { $filters += "name contains '$($ui.NameBox.Text)'" }
-    if ($ui.NpiBox.Text) { $filters += "NPI starts with '$($ui.NpiBox.Text)'" }
-    foreach ($pair in @(@($ui.FlagPartB, 'PARTB'), @($ui.FlagDme, 'DME'), @($ui.FlagHha, 'HHA'),
-                        @($ui.FlagPmd, 'PMD'), @($ui.FlagHospice, 'HOSPICE'))) {
-        if ($pair[0].IsChecked) { $filters += "requires $($pair[1])=Y" }
-    }
-    $desc = 'Provider search'
-    if ($filters.Count -gt 0) { $desc += ': ' + ($filters -join '; ') }
     Export-WithDialog -Rows @($script:LastSearchResults | ConvertTo-OrfRecord) `
-        -SuggestedName 'provider-search.csv' -Description $desc
+        -SuggestedName 'provider-search.csv' -Description $script:LastSearchDesc
 })
 
 $ui.LoadNpiFileButton.Add_Click({
@@ -560,6 +588,9 @@ $ui.CompareButton.Add_Click({
     if (-not $oldName -or -not $newName) { Show-ErrorBox 'Pick two snapshots to compare.'; return }
     if ($oldName -eq $newName) { Show-ErrorBox 'Pick two different snapshots.'; return }
     $snapDir = Split-Path $files[0].FullName
+    # Capture the description synchronously (the OnDone closure must not depend
+    # on these click-handler locals surviving the async boundary).
+    $script:LastChangeDesc = "Changes between snapshots $oldName and $newName"
     Invoke-Async -Kind 'compare' -BusyMessage "Comparing $oldName to $newName..." `
         -Params @{
             ModulePath = $script:ModulePath
@@ -570,20 +601,8 @@ $ui.CompareButton.Add_Click({
         -OnDone {
             param($result)
             Update-StatusFromDisk
-            $all = @($result)
-            $filter = ([System.Windows.Controls.ComboBoxItem]$ui.ChangeTypeCombo.SelectedItem).Content
-            $records = if ($filter -and $filter -ne 'All') {
-                @($all | Where-Object ChangeType -eq $filter)
-            } else { $all }
-            $script:LastChangeResults = $records
-            $cols = @('ChangeType', 'NPI', 'LastName', 'FirstName', 'OldFlags', 'NewFlags')
-            $ui.ChangesGrid.ItemsSource = (ConvertTo-DataTable -Rows $records -Columns $cols).DefaultView
-            $ui.ExportChangesButton.IsEnabled = ($records.Count -gt 0)
-            $added   = @($all | Where-Object ChangeType -eq 'Added').Count
-            $removed = @($all | Where-Object ChangeType -eq 'Removed').Count
-            $changed = @($all | Where-Object ChangeType -eq 'Changed').Count
-            $ui.ChangesSummary.Text = ("$('{0:N0}' -f $added) added, $('{0:N0}' -f $removed) removed, " +
-                "$('{0:N0}' -f $changed) changed between the two snapshots." + (Get-CappedNote $records.Count))
+            $script:LastChangeResultsAll = @($result)
+            Update-ChangesView   # applies the current ChangeType filter to the grid + export set
         } `
         -OnFail {
             param($message)
@@ -592,9 +611,32 @@ $ui.CompareButton.Add_Click({
         }
 })
 
+# Re-applies the ChangeType filter to the stored full compare result. Called by
+# Compare's OnDone AND by the ChangeType combo, so flipping the combo after a
+# compare actually re-filters instead of leaving a stale grid/export set.
+function Update-ChangesView {
+    $all = @($script:LastChangeResultsAll)
+    $sel = $ui.ChangeTypeCombo.SelectedItem
+    $filter = if ($sel -is [System.Windows.Controls.ComboBoxItem]) { [string]$sel.Content } else { 'All' }
+    $records = if ($filter -and $filter -ne 'All') { @($all | Where-Object ChangeType -eq $filter) } else { $all }
+    $script:LastChangeResults = $records
+    $cols = @('ChangeType', 'NPI', 'LastName', 'FirstName', 'OldName', 'OldFlags', 'NewFlags')
+    $ui.ChangesGrid.ItemsSource = (ConvertTo-DataTable -Rows $records -Columns $cols).DefaultView
+    $ui.ExportChangesButton.IsEnabled = ($records.Count -gt 0)
+    $added   = @($all | Where-Object ChangeType -eq 'Added').Count
+    $removed = @($all | Where-Object ChangeType -eq 'Removed').Count
+    $changed = @($all | Where-Object ChangeType -eq 'Changed').Count
+    $renamed = @($all | Where-Object ChangeType -eq 'Renamed').Count
+    $ui.ChangesSummary.Text = ("$('{0:N0}' -f $added) added, $('{0:N0}' -f $removed) removed, " +
+        "$('{0:N0}' -f $changed) flag-changed, $('{0:N0}' -f $renamed) renamed between the two snapshots." +
+        (Get-CappedNote $records.Count))
+}
+
+$ui.ChangeTypeCombo.Add_SelectionChanged({ if ($script:LastChangeResultsAll.Count) { Update-ChangesView } })
+
 $ui.ExportChangesButton.Add_Click({
-    $desc = "Changes between snapshots $([string]$ui.OldSnapCombo.SelectedItem) and $([string]$ui.NewSnapCombo.SelectedItem)"
-    Export-WithDialog -Rows $script:LastChangeResults -SuggestedName 'orf-changes.csv' -Description $desc
+    Export-WithDialog -Rows $script:LastChangeResults -SuggestedName 'orf-changes.csv' `
+        -Description $script:LastChangeDesc
 })
 
 # ---------------------------------------------------------------------------
@@ -650,6 +692,7 @@ $ui.RmDownloadButton.Add_Click({
             param($message)
             Update-StatusFromDisk
             Update-RmStatus
+            $ui.RmSummary.Text = 'Download did not complete. Click "Download CMS dataset" to try again.'
             Show-ErrorBox $message
         }
 })
@@ -731,9 +774,23 @@ $ui.RmExportSourcesButton.Add_Click({
 # Startup
 # ---------------------------------------------------------------------------
 
+# Sweep *.tmp download partials left by a previous run that was closed or killed
+# mid-download. 2-minute floor so a scheduled-task download actively writing
+# right now (recent LastWriteTime) is spared while abandoned partials are cleared.
+try { Clear-OrfStaleTemp -OlderThanMinutes 2 } catch { }
+try { Clear-RmStaleTemp -OlderThanMinutes 2 } catch { }
+
 Update-StatusFromDisk
 Update-RmStatus
 if (Get-OrfLatestSnapshot) { Start-DataLoad }
 
-$window.Add_Closed({ $timer.Stop() })
+# On close, stop the completion timer and best-effort tear down any in-flight
+# background jobs so a partial download does not linger.
+$window.Add_Closed({
+    $timer.Stop()
+    foreach ($job in @($script:Jobs)) {
+        try { $job.PS.Stop(); $job.PS.Dispose(); $job.RS.Dispose() } catch { }
+    }
+    $script:Jobs.Clear()
+})
 [void]$window.ShowDialog()

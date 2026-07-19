@@ -121,10 +121,11 @@ Describe 'Referral map' {
         $clinics[1].NPI | Should -Be '9000000002'   # 12+11 = 23 benes
         $clinics[1].SharedPatients | Should -Be 23
     }
-    It 'flags providers whose NPI did not exist in the data year' {
+    It 'flags providers enumerated after the file''s service cutoff (Sep 1, 2015)' {
         $clinics = @($script:Map.Clinics)
         ($clinics | Where-Object NPI -eq '9000000001').ExistedInDataYear | Should -Be 'Yes'
-        ($clinics | Where-Object NPI -eq '9000000005').ExistedInDataYear | Should -Match '^No \(NPI issued 2019'
+        # 2015-11-10 is within 2015 but after the ~Sep-1 cutoff → must be "No".
+        ($clinics | Where-Object NPI -eq '9000000005').ExistedInDataYear | Should -Match '^No \(NPI issued 2015-11-10'
         ($script:Map.Notes -join ' ') | Should -Match '1 of 3 providers'
     }
     It 'ignores outbound and unrelated pairs' {
@@ -168,6 +169,39 @@ Describe 'Referral map export' {
         $sidecar = Get-Content $r.Methodology -Raw
         $sidecar | Should -Match 'Shared Patient Patterns'
         $sidecar | Should -Match 'NOT current volumes'
+    }
+    It 'neutralizes CSV formula injection in NPPES-sourced names' {
+        $rows = @([pscustomobject]@{ SourceNPI = '8000000001'; SourceName = '=HYPERLINK("http://evil")'; ClinicName = 'A' })
+        $out = Join-Path $script:WorkDir 'rm-inject.csv'
+        $rows | Export-RmResult -Path $out | Out-Null
+        (Import-Csv $out)[0].SourceName | Should -Be "'=HYPERLINK(""http://evil"")"
+    }
+}
+
+Describe 'Download safety' {
+    It 'rejects a non-CMS / non-loopback download host' {
+        $saved = $env:RM_FOIA_URL_TEMPLATE
+        try {
+            $env:RM_FOIA_URL_TEMPLATE = 'https://evil.example.com/pspp-{0}-days{1}.zip'
+            Import-Module (Join-Path $script:Root 'ReferralMap/ReferralMap.psm1') -Force
+            { Save-RmDataset -Year 2011 } | Should -Throw '*only https CMS hosts*'
+        } finally {
+            $env:RM_FOIA_URL_TEMPLATE = $saved
+            Import-Module (Join-Path $script:Root 'ReferralMap/ReferralMap.psm1') -Force
+        }
+    }
+    It 'rejects a zip whose entry path escapes the extraction dir (zip-slip)' {
+        # Craft a zip with an entry named "../evil.txt".
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $slipZip = Join-Path $script:SiteDir 'pspp-2010-days30.zip'
+        Remove-Item $slipZip -ErrorAction SilentlyContinue
+        $z = [System.IO.Compression.ZipFile]::Open($slipZip, 'Create')
+        try {
+            $entry = $z.CreateEntry('../evil.txt')
+            $w = New-Object System.IO.StreamWriter($entry.Open())
+            $w.Write('1,2,3,4,5'); $w.Dispose()
+        } finally { $z.Dispose() }
+        { Save-RmDataset -Year 2010 } | Should -Throw '*unsafe entry path*'
     }
 }
 

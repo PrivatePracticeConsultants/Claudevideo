@@ -187,10 +187,64 @@ function Get-RmProp([object]$Object, [string]$Name) {
     }
 }
 
+# Neutralizes CSV/Excel formula injection. NPPES names are self-declared by
+# whoever registered the NPI, so an org named =HYPERLINK(...) could execute
+# when the exported CSV is opened in Excel. Self-contained (no dependency on
+# the OrderReferring module, which may not be loaded in a worker runspace).
+function ConvertTo-RmSafeCsvRecord {
+    param([Parameter(ValueFromPipeline)]$Row)
+    process {
+        $dirty = $false
+        $out = [ordered]@{}
+        foreach ($p in $Row.PSObject.Properties) {
+            $v = $p.Value
+            if ($v -is [string] -and $v -match '^[=+\-@\t\r]') { $out[$p.Name] = "'" + $v; $dirty = $true }
+            else { $out[$p.Name] = $v }
+        }
+        if ($dirty) { [pscustomobject]$out } else { $Row }
+    }
+}
+
+# CSV with a UTF-8 BOM on both PS 5.1 and 7 (see the OrderReferring twin for
+# why); streams via ConvertTo-Csv.
+function Write-RmCsvFile {
+    param([object[]]$Rows, [string]$Path)
+    $full = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+    $enc = New-Object System.Text.UTF8Encoding($true)
+    $sw = New-Object System.IO.StreamWriter($full, $false, $enc)
+    try {
+        $Rows | ConvertTo-RmSafeCsvRecord | ConvertTo-Csv -NoTypeInformation |
+            ForEach-Object { $sw.WriteLine($_) }
+    } finally { $sw.Dispose() }
+}
+
+# The last date of MEDICARE SERVICE that can appear in a given release. A
+# provider whose NPI was issued after this could not be in the file, so their
+# zero counts mean "did not exist yet", not "no referrals". The 2015 file was
+# cut off mid-year (services through ~Sep 1, 2015); earlier years span the full
+# calendar year. Source: CMS shared-patient methodology date-range table.
+function Get-RmDataWindowEnd([int]$Year) {
+    if ($Year -eq 2015) { [datetime]'2015-09-01' } else { [datetime]("{0}-12-31" -f $Year) }
+}
+
 function Initialize-RmDataDir {
     $d = $script:RmConfig.DataDir
     if (-not (Test-Path -LiteralPath $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
     $d
+}
+
+function Clear-RmStaleTemp {
+    <# .SYNOPSIS Removes abandoned *.tmp download/extract partials whose last
+       write is older than the threshold (e.g. from a window closed mid-download).
+       An actively-downloading file keeps being written, so it is spared. #>
+    [CmdletBinding()]
+    param([int]$OlderThanMinutes = 360)
+    $d = $script:RmConfig.DataDir
+    if (-not (Test-Path -LiteralPath $d)) { return }
+    $cutoff = (Get-Date).AddMinutes(-$OlderThanMinutes)
+    Get-ChildItem -LiteralPath $d -Filter '*.tmp' -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.LastWriteTime -lt $cutoff } |
+        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 function Get-RmDatasetPath {
@@ -206,7 +260,10 @@ function Read-RmNppesCache {
     $cache = @{}
     if (Test-Path -LiteralPath $p) {
         try {
-            $json = Get-Content -LiteralPath $p -Raw | ConvertFrom-Json
+            # -Encoding UTF8 so a BOM-less cache written under PS 7 is not
+            # ANSI-misdecoded under a later Windows PowerShell 5.1 run (which
+            # would permanently corrupt cached non-ASCII provider names).
+            $json = Get-Content -LiteralPath $p -Raw -Encoding UTF8 | ConvertFrom-Json
             foreach ($prop in $json.PSObject.Properties) { $cache[$prop.Name] = $prop.Value }
         } catch {
             Write-Warning "NPPES cache was unreadable and will be rebuilt: $($_.Exception.Message)"
@@ -221,6 +278,35 @@ function Write-RmNppesCache([hashtable]$Cache) {
     $tmp = $p + '.tmp'
     $Cache | ConvertTo-Json -Depth 5 -Compress | Set-Content -LiteralPath $tmp -Encoding UTF8
     Move-Item -LiteralPath $tmp -Destination $p -Force
+}
+
+function Test-RmNpiShape([string]$Npi) { $Npi -match '^\d{10}$' }
+
+# The FOIA download must come from CMS over https (or a loopback host for the
+# test doubles) — the URL template is overridable, so validate before fetching.
+function Assert-RmSafeUrl([string]$Url) {
+    $u = $null
+    if (-not [uri]::TryCreate($Url, [System.UriKind]::Absolute, [ref]$u)) {
+        throw "Unusable dataset download URL: '$Url'."
+    }
+    $okHost = $u.Host -eq 'downloads.cms.gov' -or $u.Host -eq 'data.cms.gov' -or $u.IsLoopback
+    if (($u.Scheme -ne 'https' -and -not ($u.Scheme -eq 'http' -and $u.IsLoopback)) -or -not $okHost) {
+        throw "Refusing to download from '$Url': only https CMS hosts (or loopback for testing) are allowed."
+    }
+}
+
+# Rejects zip-slip: any entry whose resolved path escapes the extraction dir.
+function Assert-RmSafeZip([string]$ZipPath) {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($ZipPath)
+    try {
+        foreach ($entry in $zip.Entries) {
+            $name = $entry.FullName
+            if ($name -match '^[/\\]' -or $name -match '(^|[/\\])\.\.([/\\]|$)' -or $name -match '^[A-Za-z]:') {
+                throw "The downloaded zip contains an unsafe entry path ('$name'); refusing to extract it."
+            }
+        }
+    } finally { $zip.Dispose() }
 }
 
 function Invoke-RmNppes([string]$Query) {
@@ -263,14 +349,22 @@ function Save-RmDataset {
     # WinPS 5.1's progress bar slows large -OutFile downloads ~10x; suppress it.
     # Unique temp names so two concurrent runs can never share a partial file.
     $ProgressPreference = 'SilentlyContinue'
+    Clear-RmStaleTemp   # sweep partials abandoned by an earlier killed run
     $runId = [guid]::NewGuid().ToString('N')
     $url = $script:RmConfig.FoiaUrlTemplate -f $Year, $Interval
+    Assert-RmSafeUrl $url
     $zipPath = Join-Path $script:RmConfig.DataDir ('pspp_{0}_days{1}.{2}.zip.tmp' -f $Year, $Interval, $runId)
     $extractDir = Join-Path $script:RmConfig.DataDir ('extract_{0}_{1}.{2}.tmp' -f $Year, $Interval, $runId)
     try {
         Write-Verbose "Downloading $url"
         Invoke-WebRequest -Uri $url -OutFile $zipPath -UseBasicParsing -TimeoutSec 7200 -ErrorAction Stop
+        # Guard against a hostile/oversized payload (largest real file ~600 MB).
+        $zipBytes = (Get-Item -LiteralPath $zipPath).Length
+        if ($zipBytes -gt 2GB) {
+            throw "The downloaded file is $([int]($zipBytes/1MB)) MB, far larger than any real CMS release; refusing it."
+        }
         if (Test-Path -LiteralPath $extractDir) { Remove-Item -Recurse -Force $extractDir }
+        Assert-RmSafeZip $zipPath   # reject zip-slip entry names before extracting
         Expand-Archive -LiteralPath $zipPath -DestinationPath $extractDir -Force
         $txt = @(Get-ChildItem -LiteralPath $extractDir -Filter '*.txt')
         if ($txt.Count -ne 1) {
@@ -411,7 +505,10 @@ function Get-RmProviderDetail {
 
     $cache = Read-RmNppesCache
     $result = @{}
-    $missing = @($Npi | Sort-Object -Unique | Where-Object { -not $cache.ContainsKey($_) })
+    # Only look up well-formed NPIs — the source NPIs come from an external data
+    # file and must never be concatenated into a URL or cache key unvalidated.
+    $missing = @($Npi | Sort-Object -Unique |
+        Where-Object { (Test-RmNpiShape $_) -and -not $cache.ContainsKey($_) })
     $n = 0
     $consecutiveFailures = 0
     foreach ($id in $missing) {
@@ -425,7 +522,7 @@ function Get-RmProviderDetail {
         $n++
         if ($n % 10 -eq 0) { Start-Sleep -Milliseconds 200 }   # be polite to NPPES
         try {
-            $resp = Invoke-RmNppes ('number={0}' -f $id)
+            $resp = Invoke-RmNppes ('number={0}' -f [uri]::EscapeDataString($id))
             $consecutiveFailures = 0
             $results = @(Get-RmProp $resp 'results')
             if ($results.Count -eq 0) {
@@ -515,12 +612,19 @@ function Get-RmReferralMap {
     $detail = @{}
     $enrichNote = ''
     if (-not $SkipEnrichment) {
-        $distinctSources = @($edges | Sort-Object BeneCount -Descending |
-            ForEach-Object { $_.SourceNpi } | Select-Object -Unique)
+        # Rank each source by its TOTAL shared patients across all its edges (a
+        # source feeding several clinics 15 each must outrank a single 20-edge).
+        $sourceTotals = @{}
+        foreach ($e in $edges) {
+            if (-not $sourceTotals.ContainsKey($e.SourceNpi)) { $sourceTotals[$e.SourceNpi] = 0 }
+            $sourceTotals[$e.SourceNpi] += $e.BeneCount
+        }
+        $distinctSources = @($sourceTotals.GetEnumerator() | Sort-Object Value -Descending |
+            ForEach-Object { $_.Key })
         $toEnrich = @($distinctSources | Select-Object -First $script:RmConfig.EnrichCap)
         if ($distinctSources.Count -gt $toEnrich.Count) {
             $enrichNote = ("Provider details were looked up for the top {0} of {1} distinct sources " +
-                "(by shared-patient volume); the rest show NPI only. Raise the cap with Set-RmConfig -EnrichCap.") -f
+                "(by total shared-patient volume); the rest show NPI only. Raise the cap with Set-RmConfig -EnrichCap.") -f
                 $toEnrich.Count, $distinctSources.Count
             Write-Warning $enrichNote
         }
@@ -557,12 +661,13 @@ function Get-RmReferralMap {
         $agg.SameDay += $e.SameDayCount
         $agg.Sources += 1
     }
-    # NPPES reflects TODAY's providers; an NPI enumerated after the data year
-    # cannot appear in that year's claims. Flag those honestly instead of
+    # NPPES reflects TODAY's providers; an NPI enumerated after the last date of
+    # SERVICE in the file cannot appear in it. Flag those honestly instead of
     # letting their zero rows read as "no referrals". Dates are PARSED, not
     # string-compared — a format change from NPPES must yield '' (unknown),
-    # never a wrong Yes/No.
-    $dataYearEnd = Get-Date -Year $script:RmConfig.Year -Month 12 -Day 31
+    # never a wrong Yes/No. The 2015 file was cut off ~Sep 1, 2015, so a
+    # provider enumerated in, say, Nov 2015 could not appear.
+    $dataWindowEnd = Get-RmDataWindowEnd $script:RmConfig.Year
     $clinicRows = @($clinics | ForEach-Object {
         $enumDate = [datetime]::MinValue
         $parsed = -not [string]::IsNullOrEmpty($_.Enumerated) -and
@@ -571,7 +676,7 @@ function Get-RmReferralMap {
                       [System.Globalization.DateTimeStyles]::None, [ref]$enumDate)
         $agg = if ($byClinic.ContainsKey($_.NPI)) { $byClinic[$_.NPI] } else { $null }
         $existed = if (-not $parsed) { '' }
-                   elseif ($enumDate -le $dataYearEnd) { 'Yes' }
+                   elseif ($enumDate -le $dataWindowEnd) { 'Yes' }
                    else { "No (NPI issued $($_.Enumerated))" }
         [pscustomobject]@{
             NPI             = $_.NPI
@@ -595,15 +700,16 @@ function Get-RmReferralMap {
             $script:RmConfig.Year, $script:RmConfig.Interval)
         $(if ($script:RmConfig.Year -eq 2015) { 'The 2015 file covers claims from 2015-01-01 to 2015-09-01 — the NEWEST public release of this data. It shows the historical structure of the referral market, NOT current volumes.' }
           else { 'This is historical data; it shows the structure of the referral market at that time, NOT current volumes.' })
-        'SharedPatients = unique Medicare beneficiaries seen by the source provider and then the clinic within the interval window (CMS referral proxy; not billed referrals).'
-        'Pairs sharing fewer than 11 patients in the year are excluded by CMS, so low-volume referrers are invisible.'
-        'Same-day pairs are attributed by CMS to the lower NPI; direction for SameDay counts is ambiguous.'
+        'SharedPatients in the SOURCES table = unique Medicare beneficiaries that source provider shared with that one clinic within the interval window (CMS referral proxy; not billed referrals).'
+        'SharedPatients in the CLINICS table = the SUM of those per-source counts, NOT a unique-patient total: a patient sent by three sources is counted three times. Treat it as relative referral VOLUME, not a headcount of distinct patients.'
+        'Pairs sharing fewer than 11 patients within the file''s window are excluded by CMS, so low-volume referrers are invisible. (For 2015 that window is ~8 months, Jan–Sep, not a full year.)'
+        'Same-day pairs are attributed by CMS to the LOWER NPI as the initiator. This scan only captures rows where the clinic is the SECOND provider, so same-day activity in which the clinic holds the lower NPI is not counted — the SameDay column is a partial, direction-ambiguous subset, useful only as a rough signal.'
         'Shared-patient pairs also capture co-occurring care — labs, imaging, and hospitals seen in the same window appear as "sources" without having referred anyone. Interpret sources by specialty: an orthopedic surgeon feeding a PT is referral-like; a lab is not.'
         'Clinic list = NPPES providers with a practice location in the requested ZIP holding taxonomies: ' +
             (@($script:RmClinicTaxonomies.Values) + $(if (-not $OrganizationsOnly) { @($script:RmIndividualTaxonomies.Values) } else { @() }) -join ', ') + '.'
         'NPPES reflects providers and addresses as of TODAY. Providers whose NPI was issued after the data year are flagged in ExistedInDataYear — their zero counts mean "did not exist yet", not "no referrals". Clinics that moved or re-enumerated since the data year can also show zero; a ZIP prefix search (e.g. 630*) widens the net.'
         'IMPORTANT: private-practice ORGANIZATION NPIs rarely appear in this file. CMS built the pairs from performing (rendering) provider NPIs on office claims and facility NPIs on institutional claims — a private clinic''s billing/group NPI is generally not included. Private practices therefore show up through their INDIVIDUAL therapists; hospital rehab departments show up as organizations. (Verified: 130 pre-2015 PT-chain org NPIs matched 0 rows, while a 244-therapist national sample matched 280 inbound rows.)'
-        $(if ($notYetEnumerated -gt 0) { '{0} of {1} providers found in this ZIP did not yet have their NPI in {2}.' -f $notYetEnumerated, $clinicRows.Count, $script:RmConfig.Year })
+        $(if ($notYetEnumerated -gt 0) { '{0} of {1} providers found in this ZIP were issued their NPI after the {2} file''s service window ended, so they cannot appear in it (ExistedInDataYear = No).' -f $notYetEnumerated, $clinicRows.Count, $script:RmConfig.Year })
         $(if ($enrichNote) { $enrichNote })
     ) | Where-Object { $_ }
 
@@ -638,7 +744,7 @@ function Export-RmResult {
         if ($rows.Count -eq 0) {
             Set-Content -LiteralPath $Path -Value '' -Encoding UTF8
         } else {
-            $rows | Export-Csv -LiteralPath $Path -NoTypeInformation -Encoding UTF8
+            Write-RmCsvFile -Rows $rows -Path $Path
         }
         $sidecar = ($Path -replace '\.[Cc][Ss][Vv]$', '') + '.methodology.txt'
         @(
@@ -656,5 +762,5 @@ function Export-RmResult {
 Export-ModuleMember -Function @(
     'Get-RmConfig', 'Set-RmConfig', 'Get-RmStatus', 'Get-RmDatasetPath',
     'Save-RmDataset', 'Find-RmClinic', 'Get-RmProviderDetail',
-    'Get-RmReferralMap', 'Export-RmResult'
+    'Get-RmReferralMap', 'Export-RmResult', 'Clear-RmStaleTemp'
 )

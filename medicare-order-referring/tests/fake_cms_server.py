@@ -43,9 +43,11 @@ IN_ZIP = [
     provider('9000000001', 'NPI-2', 'TEST REHAB CLINIC LLC', ['261QP2000X'], '999991234'),
     provider('9000000002', 'NPI-1', ('PAT', 'THERAPIST'), ['225100000X'], '999990000'),
     provider('9000000003', 'NPI-1', ('ANNE', 'ASSISTANT'), ['225200000X'], '999990000'),
-    # Enumerated AFTER the 2015 data year: must be flagged, zeros are expected.
+    # Enumerated 2015-11-10 — WITHIN the calendar year but AFTER the 2015 file's
+    # ~Sep-1 service cutoff, so it must be flagged "No". (With a naive Dec-31
+    # cutoff this would wrongly read "Yes"; guards the data-window-end fix.)
     provider('9000000005', 'NPI-1', ('NEW', 'GRAD'), ['225100000X'], '999990000',
-             enumerated='2019-04-23'),
+             enumerated='2015-11-10'),
 ]
 MAILING_ONLY = provider('9000000004', 'NPI-2', 'ELSEWHERE PT CENTER', ['261QP2000X'],
                         '111110000', mailing_zip='999990000')

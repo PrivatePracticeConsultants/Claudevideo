@@ -78,8 +78,10 @@ tells you you're up to date. It never breaks your existing data.
 *"Who got added or removed since last time?"*
 
 Every data download is kept as a dated snapshot. Pick two snapshots, click
-**Compare**, and see exactly who was **Added**, **Removed**, or **Changed**
-(eligibility flags flipped) between them. Exportable like everything else.
+**Compare**, and see exactly who was **Added**, **Removed**, **Changed**
+(eligibility flags flipped), or **Renamed** (name changed but eligibility did
+not — the previous name is shown so you can tell it apart from a real
+eligibility change). Exportable like everything else.
 
 ### Tab 4 — Referral map (2015)
 *"Who sends patients to the rehab providers in my area?"*
@@ -90,8 +92,9 @@ newest public CMS provider-to-provider data; takes a few minutes).
 Then:
 1. Type a ZIP code — or a prefix like `630*` to cover a wider area — and
    click **Map referral sources**.
-2. **Top table:** every outpatient rehab provider in that area, ranked by how
-   many Medicare patients flowed into them.
+2. **Top table:** every outpatient rehab provider in that area, ranked by
+   referral *volume* (the SharedPatients number adds up each source's patients,
+   so treat it as a ranking score, not a count of distinct people).
 3. **Click any row** and the bottom table shows *who fed them those
    patients* — names, specialties, cities, and patient counts.
 4. Export either table with the buttons.

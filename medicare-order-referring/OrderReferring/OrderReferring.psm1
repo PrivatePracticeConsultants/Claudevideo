@@ -77,10 +77,11 @@ public class OrfProvider
 
 public class OrfChange
 {
-    public string ChangeType;   // Added | Removed | Changed
+    public string ChangeType;   // Added | Removed | Changed (flags) | Renamed (name only)
     public string NPI;
     public string LastName;
     public string FirstName;
+    public string OldName;      // "LAST, FIRST" before a rename; empty otherwise
     public string OldFlags;     // e.g. "PARTB=Y DME=Y HHA=N PMD=N HOSPICE=N"
     public string NewFlags;
 }
@@ -267,19 +268,24 @@ public static class OrfEngine
                 OrfChange c = new OrfChange();
                 c.ChangeType = "Added"; c.NPI = p.NPI;
                 c.LastName = p.LastName; c.FirstName = p.FirstName;
-                c.OldFlags = ""; c.NewFlags = FlagString(p);
+                c.OldName = ""; c.OldFlags = ""; c.NewFlags = FlagString(p);
                 result.Changes.Add(c);
             }
             else
             {
                 string oldFlags = FlagString(oldP);
                 string newFlags = FlagString(p);
-                if (oldFlags != newFlags ||
-                    oldP.LastName != p.LastName || oldP.FirstName != p.FirstName)
+                bool nameChanged = oldP.LastName != p.LastName || oldP.FirstName != p.FirstName;
+                if (oldFlags != newFlags || nameChanged)
                 {
                     OrfChange c = new OrfChange();
-                    c.ChangeType = "Changed"; c.NPI = p.NPI;
+                    // "Changed" is reserved for eligibility-flag changes; a
+                    // pure name change (marriage, CMS typo fix) is "Renamed"
+                    // so users are not told eligibility moved when it didn't.
+                    c.ChangeType = (oldFlags != newFlags) ? "Changed" : "Renamed";
+                    c.NPI = p.NPI;
                     c.LastName = p.LastName; c.FirstName = p.FirstName;
+                    c.OldName = nameChanged ? (oldP.LastName + ", " + oldP.FirstName) : "";
                     c.OldFlags = oldFlags; c.NewFlags = newFlags;
                     result.Changes.Add(c);
                 }
@@ -293,7 +299,7 @@ public static class OrfEngine
                 OrfChange c = new OrfChange();
                 c.ChangeType = "Removed"; c.NPI = p.NPI;
                 c.LastName = p.LastName; c.FirstName = p.FirstName;
-                c.OldFlags = FlagString(p); c.NewFlags = "";
+                c.OldName = ""; c.OldFlags = FlagString(p); c.NewFlags = "";
                 result.Changes.Add(c);
             }
         }
@@ -337,6 +343,56 @@ function Get-OrfProp([object]$Object, [string]$Name) {
     }
 }
 
+# Neutralizes CSV/Excel formula injection: a provider name beginning with
+# = + - @ TAB or CR would execute as a formula when the exported CSV is opened
+# in Excel. Affected cells get a leading apostrophe (Excel renders it as text).
+function ConvertTo-OrfSafeCsvRecord {
+    param([Parameter(ValueFromPipeline)]$Row)
+    process {
+        $dirty = $false
+        $out = [ordered]@{}
+        foreach ($p in $Row.PSObject.Properties) {
+            $v = $p.Value
+            if ($v -is [string] -and $v -match '^[=+\-@\t\r]') {
+                $out[$p.Name] = "'" + $v
+                $dirty = $true
+            } else {
+                $out[$p.Name] = $v
+            }
+        }
+        if ($dirty) { [pscustomobject]$out } else { $Row }
+    }
+}
+
+# Writes rows to a CSV with a UTF-8 BOM on BOTH PS 5.1 and 7 (Export-Csv's
+# -Encoding UTF8 is BOM on 5.1 but BOM-less on 7). A consistent BOM means Excel
+# renders accented provider names correctly regardless of which PS ran. Streams
+# via ConvertTo-Csv so large exports never materialize as one big string.
+function Write-OrfCsvFile {
+    param([object[]]$Rows, [string]$Path)
+    $full = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+    $enc = New-Object System.Text.UTF8Encoding($true)
+    $sw = New-Object System.IO.StreamWriter($full, $false, $enc)
+    try {
+        $Rows | ConvertTo-OrfSafeCsvRecord | ConvertTo-Csv -NoTypeInformation |
+            ForEach-Object { $sw.WriteLine($_) }
+    } finally { $sw.Dispose() }
+}
+
+# Downloads must come from https (or http://localhost, for the test doubles).
+# The catalog is remote data — its downloadURL must never be able to point the
+# tool at file:// paths or arbitrary schemes.
+function Assert-OrfSafeDownloadUrl([string]$Url) {
+    $u = $null
+    if (-not [uri]::TryCreate($Url, [System.UriKind]::Absolute, [ref]$u)) {
+        throw "The CMS catalog supplied an unusable download URL: '$Url'."
+    }
+    if ($u.Scheme -ne 'https' -and -not ($u.Scheme -eq 'http' -and $u.IsLoopback)) {
+        throw ("Refusing to download from '$Url': only https:// sources " +
+               "(or http://localhost for testing) are allowed.")
+    }
+}
+
 function Get-OrfPaths {
     $dataDir = $script:OrfConfig.DataDir
     [pscustomobject]@{
@@ -358,10 +414,25 @@ function Initialize-OrfDataDir {
 }
 
 function Read-OrfState {
+    # Returns $null (never throws) when state.json is missing, unparseable, OR
+    # structurally unexpected. Callers treat $null as "no metadata" and rebuild
+    # it; under Set-StrictMode a later $state.ReleaseDate on a drifted object
+    # would otherwise crash the app before its window even opens.
     $paths = Get-OrfPaths
     if (Test-Path -LiteralPath $paths.StateFile) {
         try {
-            return Get-Content -LiteralPath $paths.StateFile -Raw | ConvertFrom-Json
+            # -Encoding UTF8 forces a UTF-8 decode on both PS 5.1 and 7 (5.1
+            # would otherwise fall back to the ANSI codepage for a BOM-less file
+            # that PS 7 wrote, corrupting any non-ASCII content).
+            $obj = Get-Content -LiteralPath $paths.StateFile -Raw -Encoding UTF8 | ConvertFrom-Json
+            $required = 'ReleaseDate', 'RowCount', 'Sha256'
+            $missing = @($required | Where-Object { $null -eq $obj.PSObject.Properties[$_] })
+            if ($missing.Count -gt 0) {
+                Write-Warning ("State file has an unexpected shape (missing: $($missing -join ', ')) " +
+                    "and will be rebuilt on the next update.")
+                return $null
+            }
+            return $obj
         } catch {
             Write-Warning "State file was unreadable and will be rebuilt: $($_.Exception.Message)"
         }
@@ -382,6 +453,24 @@ function Get-OrfSnapshotFiles {
     if (-not (Test-Path -LiteralPath $paths.SnapshotDir)) { return @() }
     @(Get-ChildItem -LiteralPath $paths.SnapshotDir -Filter 'OrderReferring_*.csv' |
         Sort-Object Name)
+}
+
+function Clear-OrfStaleTemp {
+    <#
+    .SYNOPSIS
+      Removes abandoned *.tmp download partials (e.g. from a process killed or a
+      window closed mid-download). Only touches files whose last write is older
+      than the threshold — an actively-downloading file keeps being written, so
+      a concurrent, still-running download is never disturbed.
+    #>
+    [CmdletBinding()]
+    param([int]$OlderThanMinutes = 360)
+    $paths = Get-OrfPaths
+    if (-not (Test-Path -LiteralPath $paths.SnapshotDir)) { return }
+    $cutoff = (Get-Date).AddMinutes(-$OlderThanMinutes)
+    Get-ChildItem -LiteralPath $paths.SnapshotDir -Filter '*.tmp' -ErrorAction SilentlyContinue |
+        Where-Object { $_.LastWriteTime -lt $cutoff } |
+        Remove-Item -Force -ErrorAction SilentlyContinue
 }
 
 function Get-OrfLatestSnapshot {
@@ -468,6 +557,7 @@ function Update-OrfData {
     )
 
     $paths = Initialize-OrfDataDir
+    Clear-OrfStaleTemp   # sweep partials abandoned by an earlier killed run
     $catalog = Get-OrfCatalogInfo
 
     $release = if ($ReleaseDate) {
@@ -502,7 +592,7 @@ function Update-OrfData {
                     ReleaseDate  = ($latestOnDisk.BaseName -replace '^OrderReferring_', '')
                     CsvUrl       = $release.CsvUrl
                     Sha256       = (Get-FileHash -LiteralPath $latestOnDisk.FullName -Algorithm SHA256).Hash
-                    RowCount     = $repairRows.Count
+                    RowCount     = [OrfEngine]::BuildIndex($repairRows).Count
                     DownloadedAt = (Get-Date).ToString('o')
                 })
                 $state = Read-OrfState
@@ -527,6 +617,7 @@ function Update-OrfData {
     # promote. A crash or network failure at any point leaves the previous
     # snapshot untouched.
     $tmpPath = '{0}.{1}.tmp' -f $snapshotPath, [guid]::NewGuid().ToString('N')
+    Assert-OrfSafeDownloadUrl $release.CsvUrl
     try {
         Write-Verbose "Downloading $($release.CsvUrl)"
         Invoke-WebRequest -Uri $release.CsvUrl -OutFile $tmpPath -UseBasicParsing `
@@ -548,6 +639,14 @@ function Update-OrfData {
     if ($rows.Count -eq 0) {
         Remove-Item -LiteralPath $tmpPath -ErrorAction SilentlyContinue
         throw "The downloaded file contained a header but zero data rows; it was discarded."
+    }
+
+    # Everything user-facing says "providers", so count UNIQUE NPIs; a file
+    # with duplicate rows must not inflate that number.
+    $providerCount = [OrfEngine]::BuildIndex($rows).Count
+    if ($providerCount -ne $rows.Count) {
+        Write-Warning ("The CMS file contains $($rows.Count - $providerCount) duplicate NPI row(s); " +
+            "counts reflect the $providerCount unique providers.")
     }
 
     $sha = (Get-FileHash -LiteralPath $tmpPath -Algorithm SHA256).Hash
@@ -574,13 +673,15 @@ function Update-OrfData {
             $diff = [OrfEngine]::Diff($oldRows, $rows)
             $changeFile = Join-Path $paths.ChangeDir `
                 ('changes_{0}_to_{1}.csv' -f ($previousSnapshot.BaseName -replace '^OrderReferring_', ''), $release.ReleaseDate)
-            $diff.Changes |
-                Select-Object ChangeType, NPI, LastName, FirstName, OldFlags, NewFlags |
-                Export-Csv -LiteralPath $changeFile -NoTypeInformation -Encoding UTF8
+            $changeRows = @($diff.Changes |
+                Select-Object ChangeType, NPI, LastName, FirstName, OldName, OldFlags, NewFlags)
+            Write-OrfCsvFile -Rows $changeRows -Path $changeFile
             $added   = @($diff.Changes | Where-Object ChangeType -eq 'Added').Count
             $removed = @($diff.Changes | Where-Object ChangeType -eq 'Removed').Count
             $changed = @($diff.Changes | Where-Object ChangeType -eq 'Changed').Count
-            $changeSummary = "$added added, $removed removed, $changed changed vs. previous snapshot."
+            $renamed = @($diff.Changes | Where-Object ChangeType -eq 'Renamed').Count
+            $changeSummary = "$added added, $removed removed, $changed flag-changed" +
+                $(if ($renamed) { ", $renamed renamed" }) + ' vs. previous snapshot.'
         } catch {
             Write-Warning "Update succeeded, but the change log could not be built: $($_.Exception.Message)"
         }
@@ -591,7 +692,7 @@ function Update-OrfData {
             ReleaseDate  = $release.ReleaseDate
             CsvUrl       = $release.CsvUrl
             Sha256       = $sha
-            RowCount     = $rows.Count
+            RowCount     = $providerCount
             DownloadedAt = (Get-Date).ToString('o')
         })
     }
@@ -609,10 +710,10 @@ function Update-OrfData {
         Updated      = $true
         ReleaseDate  = $release.ReleaseDate
         SnapshotPath = $snapshotPath
-        RowCount     = $rows.Count
+        RowCount     = $providerCount
         Sha256       = $sha
         Message      = ("Downloaded release {0}: {1:N0} providers.{2}" -f
-                        $release.ReleaseDate, $rows.Count,
+                        $release.ReleaseDate, $providerCount,
                         $(if ($changeSummary) { " $changeSummary" } else { '' }))
     }
 }
@@ -827,12 +928,21 @@ function Compare-OrfSnapshot {
         if (-not $OldPath) { $OldPath = $files[-2].FullName }
         if (-not $NewPath) { $NewPath = $files[-1].FullName }
     }
+    # Added/Removed only mean anything old→new. If the caller handed the files
+    # newest-first, swap them rather than silently reporting inverted results.
+    $oldLeaf = Split-Path -Leaf $OldPath
+    $newLeaf = Split-Path -Leaf $NewPath
+    if ($oldLeaf -gt $newLeaf) {
+        Write-Warning ("Snapshots were given newest-first; comparing in chronological order " +
+                       "instead ($newLeaf -> $oldLeaf).")
+        $OldPath, $NewPath = $NewPath, $OldPath
+    }
     $oldRows = Import-OrfSnapshot -Path $OldPath
     $newRows = Import-OrfSnapshot -Path $NewPath
     $diff = [OrfEngine]::Diff($oldRows, $newRows)
     Write-Verbose ("Old: {0:N0} rows; New: {1:N0} rows; {2:N0} differences." -f
                    $diff.OldCount, $diff.NewCount, $diff.Changes.Count)
-    $diff.Changes | Select-Object ChangeType, NPI, LastName, FirstName, OldFlags, NewFlags
+    $diff.Changes | Select-Object ChangeType, NPI, LastName, FirstName, OldName, OldFlags, NewFlags
 }
 
 # ---------------------------------------------------------------------------
@@ -852,7 +962,10 @@ function Export-OrfResult {
     param(
         [Parameter(ValueFromPipeline)][object[]]$InputObject,
         [Parameter(Mandatory)][string]$Path,
-        [string]$Description = ''
+        [string]$Description = '',
+        # Explicit provenance for callers (the GUI) whose data was loaded in a
+        # different runspace, so $script:OrfLastLoaded is not set in this one.
+        [string]$DataSnapshotFile
     )
 
     begin { $rows = New-Object System.Collections.Generic.List[object] }
@@ -868,14 +981,20 @@ function Export-OrfResult {
             # honest "0 rows" rather than inventing content.
             Set-Content -LiteralPath $Path -Value '' -Encoding UTF8
         } else {
-            $rows | Export-Csv -LiteralPath $Path -NoTypeInformation -Encoding UTF8
+            Write-OrfCsvFile -Rows $rows -Path $Path
         }
 
-        # Provenance: prefer the snapshot actually loaded by this session's
-        # queries (Import-OrfSnapshot records it); fall back to the newest
-        # release named in state.json.
+        # Provenance: prefer an explicitly-passed snapshot file, then the one
+        # this session's queries loaded (Import-OrfSnapshot records it), then
+        # the newest release named in state.json.
         $state = Read-OrfState
-        $loaded = $script:OrfLastLoaded
+        $loaded = if ($DataSnapshotFile) {
+            $leaf = Split-Path -Leaf $DataSnapshotFile
+            [pscustomobject]@{
+                File    = $leaf
+                Release = ($leaf -replace '^OrderReferring_', '' -replace '\.csv$', '')
+            }
+        } else { $script:OrfLastLoaded }
         $sidecar = $Path -replace '\.[Cc][Ss][Vv]$', ''
         $sidecar = "$sidecar.methodology.txt"
         @(
@@ -953,9 +1072,9 @@ function Uninstall-OrfUpdateTask {
 Export-ModuleMember -Function @(
     'Get-OrfConfig', 'Set-OrfConfig',
     'Get-OrfCatalogInfo', 'Update-OrfData', 'Get-OrfStatus',
-    'Get-OrfSnapshotFiles', 'Get-OrfLatestSnapshot', 'Import-OrfSnapshot',
+    'Get-OrfSnapshotFiles', 'Get-OrfLatestSnapshot', 'Import-OrfSnapshot', 'Clear-OrfStaleTemp',
     'Search-OrfProvider', 'Test-OrfNpi', 'Compare-OrfSnapshot',
-    'ConvertTo-OrfRecord', 'Get-OrfNpiFromText',
+    'ConvertTo-OrfRecord', 'Get-OrfNpiFromText', 'ConvertTo-OrfSafeCsvRecord',
     'Export-OrfResult',
     'Install-OrfUpdateTask', 'Uninstall-OrfUpdateTask'
 )
