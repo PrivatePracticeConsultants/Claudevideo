@@ -285,9 +285,9 @@ async function loadSummary() {
     // aggregates hitting the memory cap on a big unfiltered view. Say so and
     // what to do — the same guidance loadRates gives — instead of a mystery
     // empty strip.
-    const msg = /memory|503/i.test(e.message || "")
+    const msg = /memory/i.test(e.message || "")
       ? "Stats need more memory than the current limit — add a filter (payer, code, or state), or raise duckdb_memory_gb in config and restart."
-      : "Stats unavailable for this view.";
+      : "Stats are busy — they'll appear on the next refresh.";
     el.innerHTML = `<div class="stat" style="flex:1"><div class="k">Summary</div><div class="v" style="font-size:0.8rem;font-weight:normal">${esc(msg)}</div></div>`;
   }
 }

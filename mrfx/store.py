@@ -671,6 +671,10 @@ class Store:
         # row-count cache can key on it and never serve a stale total across an
         # ingest — see api.rates(). Cheap monotonic int, not a data hash.
         self.data_generation = 0
+        self._generation_lock = threading.Lock()  # leaf lock: bump sites hold
+        # DIFFERENT outer locks (rollup_lock vs write_lock), so a bare += 1
+        # read-modify-write could lose an increment and let the API's
+        # generation-keyed caches serve pre-rebuild numbers for one TTL
         # enrichment_progress scans the full rates view (DISTINCT npi over a
         # UNION) — far too heavy to run on every 15s dashboard poll of a big
         # store; cache it briefly ((monotonic, result), see enrichment_progress)
@@ -699,11 +703,25 @@ class Store:
         self._pin: duckdb.DuckDBPyConnection | None = None
         if keep_warm:
             try:
-                self._pin = duckdb.connect(str(self.db_path))
-                self._apply_settings(self._pin)
-            except duckdb.Error:
-                self._pin = None  # fall back to per-connection SET (still correct)
+                # same retry budget as connect(): a one-second external reader
+                # (BI tool, `mrfx status` from another window) racing serve's
+                # boot used to SILENTLY downgrade the whole session to pin-less
+                # mode — instance-teardown churn plus a residual SET-threads
+                # hazard — with nothing logged (audit F2)
+                self._pin = self._connect_with_retry()
+                self._apply_settings(self._pin, include_threads=True)
+            except duckdb.Error as e:
+                self._pin = None  # per-connection settings still applied
+                logging.getLogger(__name__).warning(
+                    "could not pin a database connection (%s) — running "
+                    "un-pinned; performance may dip and settings re-apply "
+                    "per connection", e)
         with self.write_lock, self.connect() as con:
+            if self._pin is None:
+                # first-ever settings application happens HERE, still
+                # single-threaded (no worker threads exist yet) — the ONLY
+                # place threads may be set in pin-less mode (audit F1)
+                self._apply_settings(con, include_threads=True)
             # holding a live connection means DuckDB's file lock is OURS — no
             # other process is using this store, so every duckdb_temp_* file in
             # the spill dir is a dead leftover (crash/power-loss mid-rollup).
@@ -852,6 +870,22 @@ class Store:
         Each connection is told to spill to a temp dir under the store so the
         big rollup GROUP BYs over national files (millions of rows) never OOM —
         DuckDB streams to disk under memory pressure instead."""
+        con = self._connect_with_retry()
+        # The settings below are GLOBAL to the in-process DuckDB instance
+        # and are applied once on the pinned connection (see __init__), so a
+        # normal per-request connection inherits them and skips the re-SET cost.
+        # Only apply here if the pin is absent (older duckdb / open failed) —
+        # and NEVER the thread count: in pin-less mode the instance can be torn
+        # down between connections, and re-SETting threads on a fresh instance
+        # while another thread's query is mid-flight is the deadlock class this
+        # store just eliminated. A fresh pin-less instance simply runs DuckDB's
+        # default thread count; rollup slice sizing reads the ACTUAL count, so
+        # memory stays bounded either way (audit F1).
+        if self._pin is None:
+            self._apply_settings(con, include_threads=False)
+        return con
+
+    def _connect_with_retry(self) -> duckdb.DuckDBPyConnection:
         # Transient lock conflicts are a fact of life: the user may open the
         # .duckdb file read-only (CLI, a BI tool) while the app runs, and even
         # a millisecond-held external lock lands exactly between our
@@ -860,27 +894,26 @@ class Store:
         last_exc: Exception | None = None
         for attempt in range(6):
             try:
-                con = duckdb.connect(str(self.db_path))
-                break
+                return duckdb.connect(str(self.db_path))
             except duckdb.IOException as e:
                 if "lock" not in str(e).lower():
                     raise
                 last_exc = e
                 if attempt < 5:  # no pointless sleep after the final attempt
                     time.sleep(min(0.2 * (2 ** attempt), 3.0))
-        else:
-            raise last_exc  # 6 attempts over ~6s — something genuinely holds it
-        # The four settings below are GLOBAL to the in-process DuckDB instance
-        # and are applied once on the pinned connection (see __init__), so a
-        # normal per-request connection inherits them and skips the re-SET cost.
-        # Only apply here if the pin is absent (older duckdb / open failed).
-        if self._pin is None:
-            self._apply_settings(con)
-        return con
+        raise last_exc  # 6 attempts over ~6s — something genuinely holds it
 
-    def _apply_settings(self, con: duckdb.DuckDBPyConnection) -> None:
+    def _apply_settings(self, con: duckdb.DuckDBPyConnection,
+                        include_threads: bool = False) -> None:
         """Apply the store's spill/memory settings to a connection. GLOBAL to the
-        DuckDB instance, so setting them on any one live connection covers all."""
+        DuckDB instance, so setting them on any one live connection covers all.
+
+        include_threads=True is allowed ONLY from __init__, before any worker
+        thread exists: `SET threads` resizes the instance's global task
+        scheduler and DEADLOCKS if any other connection has a query in flight
+        (it waits for them to quiesce; they wait for the scheduler it seized —
+        observed live as a total freeze). The other settings here are
+        config/buffer-pool writes that do not quiesce the scheduler."""
         try:
             con.execute(f"SET temp_directory = '{sql_path(self._tmp_dir)}'")
             con.execute("SET preserve_insertion_order = false")
@@ -909,22 +942,22 @@ class Store:
                     # dead drive will surface their own error if it comes to it
                     self._temp_cap_gb = 8
             con.execute(f"SET max_temp_directory_size = '{self._temp_cap_gb}GB'")
-            # Thread count is set ONCE here (global to the instance) and NEVER
-            # changed again — a mid-flight `SET threads` on the live,
-            # concurrently-queried instance DEADLOCKS the whole store (it waits
-            # for in-flight queries to quiesce while they wait for the scheduler
-            # it seized). Capping to ROLLUP_MAX_THREADS keeps rollup slices
-            # sized as validated (the memory/partition math in
-            # _rollup_partition_rows divides the budget by exactly this count)
-            # AND bounds concurrent-query CPU/RAM contention. Parser workers are
-            # SEPARATE processes, unaffected by this. Idempotent: only SET when
-            # it differs, so the per-connection fallback path can't thrash it.
-            try:
-                cur = int(con.execute("SELECT current_setting('threads')").fetchone()[0])
-            except Exception:  # noqa: BLE001
-                cur = None
-            if cur != self._rollup_threads:
-                con.execute(f"SET threads = {self._rollup_threads}")
+            # Thread count: set ONCE, from __init__ only (single-threaded by
+            # construction — no worker threads exist yet), and NEVER again for
+            # the process lifetime. Capping to ROLLUP_MAX_THREADS keeps rollup
+            # slices sized as validated (_rollup_partition_rows divides the
+            # budget by the running count) AND bounds concurrent-query CPU/RAM
+            # contention. Parser workers are SEPARATE processes, unaffected.
+            # FAIL CLOSED (audit F3): if the probe can't confirm the current
+            # value differs, do NOT execute the dangerous SET.
+            if include_threads:
+                try:
+                    cur = int(con.execute(
+                        "SELECT current_setting('threads')").fetchone()[0])
+                except Exception:  # noqa: BLE001
+                    cur = None
+                if cur is not None and cur != self._rollup_threads:
+                    con.execute(f"SET threads = {self._rollup_threads}")
         except duckdb.Error:  # older duckdb without these knobs
             pass
 
@@ -1102,6 +1135,7 @@ class Store:
                         "visible until the next rebuild or restart", source_file)
             with self.connect() as con:
                 self._register_views(con)
+        self._invalidate_scan_caches()
 
     def rates_part_writer(self, source_file: str) -> "RatesPartWriter":
         """Streaming writer: accept row batches and flush them to the part
@@ -1658,6 +1692,7 @@ class Store:
             unlink_with_retry(path)
             with self.connect() as con:
                 self._register_views(con)
+        self._invalidate_scan_caches()
 
     def forget_file(self, filename: str) -> dict:
         """User-driven per-file erasure: delete this file's rates (its parquet
@@ -1712,6 +1747,7 @@ class Store:
                     pass  # a failed COMMIT already aborted the transaction —
                     # a ROLLBACK error here must not mask the original failure
                 raise
+        self._invalidate_scan_caches()
         return {"rows": rows, "bytes": freed}
 
     def _rollup_partition_rows(self, split: int = 1, threads: int = 1) -> int:
@@ -1758,8 +1794,8 @@ class Store:
         tables = (("tin_directory_tbl",) if names_only
                   else ("rates_by_tin_tbl", "tin_directory_tbl"))
         self._acquire_rollup_lock(log)
-        self._rollup_active = True
         try:
+            self._rollup_active = True
             return self._rebuild_rollups_locked(tables, log)
         finally:
             self._rollup_active = False
@@ -1813,8 +1849,8 @@ class Store:
 
         log = _logging.getLogger(__name__)
         self._acquire_rollup_lock(log)
-        self._rollup_active = True
         try:
+            self._rollup_active = True
             with self.connect() as con:
                 t_locked = time.monotonic()
                 with self.write_lock:
@@ -1900,7 +1936,27 @@ class Store:
                     log.info("analytics update: a removal changed shared "
                              "practices — refreshing the full name directory "
                              "(rate slices stayed scoped and fast)")
-                    self._build_rollup_tables(con, tables=("tin_directory_tbl",))
+                    # size slices for the ACTUAL thread count and give this
+                    # build the same OOM ladder as every other — the default
+                    # (threads=1, no ladder) under-partitioned by ~4x and one
+                    # OOM aborted the whole incremental into the hour-long
+                    # full-rebuild fallback (verification audit)
+                    try:
+                        thr = max(1, int(con.execute(
+                            "SELECT current_setting('threads')").fetchone()[0]))
+                    except Exception:  # noqa: BLE001
+                        thr = 1
+                    for split in (1, 2, 4, 8, 16, 32, 64):
+                        try:
+                            self._build_rollup_tables(
+                                con, split=split, threads=thr,
+                                tables=("tin_directory_tbl",))
+                            break
+                        except duckdb.OutOfMemoryException:
+                            if split == 64:
+                                raise
+                            log.warning("directory refresh over the memory "
+                                        "limit at split=%d; subdividing", split)
                 if delta:
                     new_covered = max(t for _f, t, _ft in delta)
                     names = {f for f, t, _ft in delta if t == new_covered}
@@ -1920,7 +1976,7 @@ class Store:
                 self._enrich_progress_cache = None
                 self._store_stats_cache = None
                 self._states_cache = None
-                self.data_generation += 1
+                self._bump_generation()
                 took = time.monotonic() - t_locked
                 self.last_rollup_build_seconds = took
                 log.info("analytics update finished in %.0fs (payer slice, not "
@@ -1949,8 +2005,8 @@ class Store:
 
         log = _logging.getLogger(__name__)
         self._acquire_rollup_lock(log)
-        self._rollup_active = True
         try:
+            self._rollup_active = True
             with self.connect() as con:
                 t0 = time.monotonic()
                 with self.write_lock:
@@ -2002,7 +2058,7 @@ class Store:
                 con.execute(
                     "INSERT OR REPLACE INTO meta VALUES ('directory_names_through', ?)",
                     [new_max])
-                self.data_generation += 1
+                self._bump_generation()
                 took = time.monotonic() - t0
                 log.info("name refresh: %d TIN(s) updated in %.0fs (scoped to "
                          "newly identified NPIs, not the whole store)", n_new, took)
@@ -2059,6 +2115,10 @@ class Store:
                 return
             except duckdb.OutOfMemoryException:
                 if split == 64:
+                    log.error(
+                        "analytics update cannot fit in the current memory "
+                        "limit even at the finest slicing — raise "
+                        "duckdb_memory_gb in config/mrfx.yaml and restart")
                     raise  # caller falls back to the full rebuild's ladder
                 log.warning("analytics update over the memory limit at split=%d; "
                             "subdividing into finer partitions", split)
@@ -2068,7 +2128,7 @@ class Store:
                                    threads: int, log, directory_scoped: bool = True) -> None:
         rows_per_part = self._rollup_partition_rows(split, threads)
         parts = max(1, -(-n_rows // rows_per_part))
-        specs = [("rates_by_tin_tbl", BY_TIN_QUERY, "billing_code", payer_pred)]
+        specs = [("rates_by_tin_tbl", BY_TIN_QUERY, "billing_code || coalesce(tin_value, '')", payer_pred)]
         if directory_scoped:
             # a removal skips this and rebuilds the directory in full afterward
             specs.append(("tin_directory_tbl", TIN_DIRECTORY_QUERY, "tin_value", tin_pred))
@@ -2141,6 +2201,12 @@ class Store:
                         return time.monotonic() - t_locked
                     except duckdb.OutOfMemoryException:
                         if split == 64:
+                            log.error(
+                                "analytics rebuild cannot fit in the current "
+                                "memory limit even at the finest slicing — "
+                                "raise duckdb_memory_gb in config/mrfx.yaml "
+                                "and restart (raw data is safe; dashboards "
+                                "lag until a rebuild succeeds)")
                             raise  # genuinely can't fit at this memory limit
                         log.warning("rollup over the memory limit at split=%d; "
                                     "subdividing into finer partitions", split)
@@ -2216,7 +2282,7 @@ class Store:
         # a names-only enrichment refresh rebuilds just tin_directory_tbl and
         # leaves the (unchanged, expensive) rate spine alone.
         specs = {
-            "rates_by_tin_tbl": (BY_TIN_QUERY, "billing_code", "rates_by_tin"),
+            "rates_by_tin_tbl": (BY_TIN_QUERY, "billing_code || coalesce(tin_value, '')", "rates_by_tin"),
             "tin_directory_tbl": (TIN_DIRECTORY_QUERY, "tin_value", "tin_directory"),
         }
         selected = tables if tables is not None else tuple(specs)
@@ -2300,12 +2366,25 @@ class Store:
         # bump AFTER the commit: a count computed from the old tables during the
         # (minutes-long) build stays keyed to the old generation, and the first
         # post-swap request misses the cache and recounts against the new tables.
-        self.data_generation += 1
+        self._bump_generation()
         with self.write_lock:
             # catalog writes — must not race a writer's _register_views
             for tbl in selected:
                 _query, _key, view = specs[tbl]
                 con.execute(f"CREATE OR REPLACE VIEW {view} AS SELECT * FROM {tbl}")
+
+    def _bump_generation(self) -> None:
+        with self._generation_lock:
+            self.data_generation += 1
+
+    def _invalidate_scan_caches(self) -> None:
+        """Drop the cached whole-store scans (header counts, states,
+        enrichment progress) after any write that changes the rates view or
+        directories — a 60s TTL alone let the header disagree with the Files
+        tab right after an ingest/forget (verification audit)."""
+        self._store_stats_cache = None
+        self._states_cache = None
+        self._enrich_progress_cache = None
 
     # legacy name used by tests/older callers
     def rebuild_dedup(self) -> None:
@@ -2783,7 +2862,8 @@ class Store:
         # AFTER the wipe: a count computed mid-reset (from the old tables) must
         # not be cached under the post-reset generation and served for 30s
         # against the now-empty store.
-        self.data_generation += 1
+        self._bump_generation()
+        self._invalidate_scan_caches()
 
 
 class RatesPartWriter:
@@ -2844,6 +2924,7 @@ class RatesPartWriter:
                         "visible until the next rebuild or restart", self.source_file)
             with self.store.connect() as con:
                 self.store._register_views(con)
+        self.store._invalidate_scan_caches()
         return False
 
 

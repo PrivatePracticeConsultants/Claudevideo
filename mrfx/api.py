@@ -677,20 +677,25 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         qp = _qp(request)
         grain = grain_of(qp, cfg, store)
         fs = _fs(qp)
-        key = (grain, fs.where, tuple(fs.params), store.data_generation)
-        empty = {"n": 0, "entities": 0, "codes": 0, "min": None, "p25": None,
-                 "median": None, "p75": None, "max": None, "grain": grain}
+        # hide_outliers is applied inside rel_sql but is NOT part of fs.where/
+        # params — omitting it from the key served the unfiltered stats to the
+        # outlier-hidden view (and vice versa) for a TTL: the strip disagreed
+        # with the table it sits above (caught by the verification audit,
+        # reproduced live: max=$9000 shown with the outlier "hidden")
+        key = (grain, fs.where, tuple(fs.params), fs.hide_outliers,
+               store.data_generation)
         hit = _summary_cache.get(key)
         now = time.monotonic()
         if hit is not None and now - hit[0] < _SUMMARY_TTL:
             return hit[1]
         if not _summary_lock.acquire(blocking=False):
-            # a heavy scan is already running — serve the last value for this
-            # key if we have one, else the freshest anything (never a 2nd scan)
+            # a heavy scan is already running — serve the last value for THIS
+            # key, else say "busy" honestly (serving another filter's numbers
+            # under this view's label would be a wrong number; and iterating
+            # the cache dict here races the winner's insert/clear)
             if hit is not None:
                 return hit[1]
-            any_recent = max(_summary_cache.values(), default=None, key=lambda v: v[0])
-            return any_recent[1] if any_recent is not None else empty
+            raise HTTPException(503, "summary is busy — it will load on the next refresh")
         try:
             hit = _summary_cache.get(key)  # re-check under the lock
             if hit is not None and time.monotonic() - hit[0] < _SUMMARY_TTL:

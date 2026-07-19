@@ -501,14 +501,16 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
                         log.error(
                             "%s: no progress AND no output growth for %.0f "
                             "minutes — the parser worker is wedged. Terminating "
-                            "it so this file re-queues; other in-flight files "
-                            "re-queue too and resume automatically.",
+                            "it; THIS file is marked failed (press retry in the "
+                            "Files tab), other in-flight files re-queue and "
+                            "resume automatically.",
                             name, (now - kill_ref_at) / 60)
                         if hasattr(pool, "force_heal"):
                             pool.force_heal()
                         raise RuntimeError(
-                            f"parser worker wedged on {name} (no progress for "
-                            f"{stall_kill/60:.0f} min) — killed and re-queued")
+                            f"parser worker wedged (no progress for "
+                            f"{stall_kill/60:.0f} min) — worker killed; press "
+                            "retry to try this file again")
 
     try:
         try:
@@ -520,6 +522,15 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
             if hasattr(pool, "heal"):
                 pool.heal()
             payload = dispatch_and_wait()
+        except concurrent.futures.CancelledError as e:
+            # a QUEUED future cancelled by another thread's force_heal.
+            # CancelledError is a BaseException since 3.8 — left unconverted it
+            # sails past every `except Exception` fault-isolation layer and
+            # silently kills the processor/watcher thread that hit it
+            # (verification audit). Convert so the normal failed+retry flow runs.
+            raise RuntimeError(
+                "parse was cancelled by a worker-pool restart — press retry "
+                "on this file; other files resume automatically") from e
     except Exception:
         tmp_out.unlink(missing_ok=True)
         raise
