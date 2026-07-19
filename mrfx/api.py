@@ -662,28 +662,62 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return {"rows": _mask_row_tins(rows), "total": total, "page": page,
                 "page_size": page_size, "grain": grain}
 
+    # The summary strip is a heavy whole-store aggregation (5 quantiles + 2
+    # count-distinct). Cache it on (grain, filter, data_generation) with a
+    # short TTL + single-flight, exactly like _filtered_count/store_stats: it
+    # was seen running CONCURRENTLY with a rollup delta and the enrichment
+    # scan, three heavy scans thrashing the 8 GB pool. Paging never reloads it;
+    # this collapses repeated identical loads and stops stacking.
+    _summary_cache: dict[tuple, tuple[float, dict]] = {}
+    _summary_lock = threading.Lock()
+    _SUMMARY_TTL = 30.0
+
     @app.get("/api/summary")
     def summary(request: Request):
         qp = _qp(request)
         grain = grain_of(qp, cfg, store)
         fs = _fs(qp)
-        with store.connect() as con:
-            row = con.execute(
-                f"""
-                SELECT count(*) AS n,
-                       count(DISTINCT unit_id) AS entities,
-                       count(DISTINCT billing_code) AS codes,
-                       min(negotiated_rate) FILTER (is_dollar_rate AND negotiated_rate > 0.01) AS min,
-                       quantile_cont(negotiated_rate, .25) FILTER (is_dollar_rate AND negotiated_rate > 0.01) AS p25,
-                       median(negotiated_rate) FILTER (is_dollar_rate AND negotiated_rate > 0.01) AS median,
-                       quantile_cont(negotiated_rate, .75) FILTER (is_dollar_rate AND negotiated_rate > 0.01) AS p75,
-                       max(negotiated_rate) FILTER (is_dollar_rate AND negotiated_rate > 0.01) AS max
-                FROM ({rel_sql(grain, fs)})
-                """,
-                fs.params,
-            ).fetchone()
-        keys = ["n", "entities", "codes", "min", "p25", "median", "p75", "max"]
-        return {**dict(zip(keys, row)), "grain": grain}
+        key = (grain, fs.where, tuple(fs.params), store.data_generation)
+        empty = {"n": 0, "entities": 0, "codes": 0, "min": None, "p25": None,
+                 "median": None, "p75": None, "max": None, "grain": grain}
+        hit = _summary_cache.get(key)
+        now = time.monotonic()
+        if hit is not None and now - hit[0] < _SUMMARY_TTL:
+            return hit[1]
+        if not _summary_lock.acquire(blocking=False):
+            # a heavy scan is already running — serve the last value for this
+            # key if we have one, else the freshest anything (never a 2nd scan)
+            if hit is not None:
+                return hit[1]
+            any_recent = max(_summary_cache.values(), default=None, key=lambda v: v[0])
+            return any_recent[1] if any_recent is not None else empty
+        try:
+            hit = _summary_cache.get(key)  # re-check under the lock
+            if hit is not None and time.monotonic() - hit[0] < _SUMMARY_TTL:
+                return hit[1]
+            with store.connect() as con:
+                row = con.execute(
+                    f"""
+                    SELECT count(*) AS n,
+                           count(DISTINCT unit_id) AS entities,
+                           count(DISTINCT billing_code) AS codes,
+                           min(negotiated_rate) FILTER (is_dollar_rate AND negotiated_rate > 0.01) AS min,
+                           quantile_cont(negotiated_rate, .25) FILTER (is_dollar_rate AND negotiated_rate > 0.01) AS p25,
+                           median(negotiated_rate) FILTER (is_dollar_rate AND negotiated_rate > 0.01) AS median,
+                           quantile_cont(negotiated_rate, .75) FILTER (is_dollar_rate AND negotiated_rate > 0.01) AS p75,
+                           max(negotiated_rate) FILTER (is_dollar_rate AND negotiated_rate > 0.01) AS max
+                    FROM ({rel_sql(grain, fs)})
+                    """,
+                    fs.params,
+                ).fetchone()
+            keys = ["n", "entities", "codes", "min", "p25", "median", "p75", "max"]
+            result = {**dict(zip(keys, row)), "grain": grain}
+            if len(_summary_cache) > 256:
+                _summary_cache.clear()
+            _summary_cache[key] = (time.monotonic(), result)
+            return result
+        finally:
+            _summary_lock.release()
 
     # -- detail views -----------------------------------------------------------
 

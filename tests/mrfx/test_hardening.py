@@ -1014,3 +1014,54 @@ def test_store_stats_and_states_cached_single_flight(cfg, store):
     assert store.store_stats() is store._store_stats_cache[1]
     st = store.available_states()
     assert store.available_states() is store._states_cache[1]
+
+
+def test_enrichment_yields_to_rollup(cfg, store):
+    # Extraction-starvation fix: enrichment's whole-store NPI scan must pause
+    # while a rollup is aggregating (both are heavy scans that thrash the pool
+    # and disk together). _wait_out_rollup blocks on store.rollup_in_progress().
+    import threading
+    import time
+
+    from mrfx.enrich import _wait_out_rollup
+
+    assert store.rollup_in_progress() is False
+    store._rollup_active = True
+    stop = threading.Event()
+    released = []
+
+    def waiter():
+        _wait_out_rollup(store, stop, cap_seconds=30)
+        released.append(time.monotonic())
+
+    t = threading.Thread(target=waiter)
+    t.start()
+    time.sleep(0.3)
+    assert not released, "enrichment should still be waiting while rollup active"
+    store._rollup_active = False  # rollup finishes
+    t.join(timeout=5)
+    assert released, "enrichment must resume once the rollup clears"
+
+    # the cap prevents a stuck rollup from pausing names forever
+    store._rollup_active = True
+    t0 = time.monotonic()
+    _wait_out_rollup(store, stop, cap_seconds=1)
+    assert time.monotonic() - t0 < 5  # returned at the cap, didn't hang
+    store._rollup_active = False
+
+
+def test_summary_cached_and_single_flight(cfg, store):
+    from fastapi.testclient import TestClient
+
+    from mrfx.api import create_app
+
+    _payer_part(store, "sum.json", "SumCo", [
+        ("452222222", "1422222222", "97110", "2026-06", 50.0)])
+    store.upsert_file("sum.json", finished_at="2026-07-01 10:00:00")
+    store.rebuild_rollups()
+    c = TestClient(create_app(cfg, store))
+    a = c.get("/api/summary").json()
+    assert a["n"] == 1 and a["median"] == 50.0
+    # identical follow-up served from cache (same data_generation) — no error,
+    # same numbers
+    assert c.get("/api/summary").json() == a

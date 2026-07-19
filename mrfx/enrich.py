@@ -95,6 +95,21 @@ def _mark_dirty() -> None:
         _names_dirty = True
 
 
+def _wait_out_rollup(store: Store, stop: threading.Event, cap_seconds: float = 600.0) -> None:
+    """Block the caller while a rollup is aggregating, so enrichment's
+    whole-store NPI scan doesn't run concurrently with a rollup delta (both
+    are heavy DuckDB scans; together they thrash the 8 GB pool and the HDD and
+    slow extraction). Capped so a genuinely stuck rollup can't pause names
+    forever — after the cap, enrichment proceeds and just shares the disk."""
+    in_progress = getattr(store, "rollup_in_progress", None)
+    if not callable(in_progress):
+        return
+    waited = 0.0
+    while in_progress() and not stop.is_set() and waited < cap_seconds:
+        stop.wait(2.0)
+        waited += 2.0
+
+
 def _maybe_refresh_directory(store: Store, force: bool = False) -> bool:
     """Rebuild the name/geo directory, throttled GLOBALLY (across enrichment
     cycles) so the persistent serve loop — which re-polls frequently — can't
@@ -199,6 +214,13 @@ def enrich_via_api(cfg: MrfxConfig, store: Store, stop: threading.Event | None =
         while not aborted:
             if stop is not None and stop.is_set():
                 break
+            # yield the store to an in-flight rollup (same reason as the bulk
+            # path): the per-batch unenriched_npis scan is whole-store even at
+            # limit=200 (DISTINCT + anti-join + ORDER BY precede the LIMIT)
+            if stop is not None:
+                _wait_out_rollup(store, stop)
+                if stop.is_set():
+                    break
             batch = store.unenriched_npis(limit=200)
             if not batch:
                 break
@@ -488,6 +510,17 @@ def enrich_via_bulk(cfg: MrfxConfig, store: Store,
     wanted = set()
     cursor = ""
     while True:
+        # yield to an in-flight rollup: unenriched_npis is a whole-store
+        # DISTINCT + anti-join scan, and running it CONCURRENTLY with a rollup
+        # delta made both thrash the 8 GB pool and the HDD — extraction slowed
+        # to a crawl (seen live: enrich scan + rollup delta + summary all at
+        # once). Names are less time-critical than extraction, so wait the
+        # rollup out; the loop resumes the instant it clears. (stop is None on
+        # the synchronous CLI/test path — nothing to yield to there.)
+        if stop is not None:
+            _wait_out_rollup(store, stop)
+            if stop.is_set():
+                break
         # keyset pagination: nothing is saved between pages, so without the
         # cursor every page would be identical (an infinite loop at >=100k)
         batch = store.unenriched_npis(limit=100000, after=cursor)

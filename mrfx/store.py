@@ -620,6 +620,12 @@ class Store:
         # rollup tables; the small writers touch url_queue/files/etc — DuckDB
         # commits disjoint-table transactions concurrently without conflict.
         self.rollup_lock = threading.Lock()
+        # True while any rollup (full/incremental/names) is aggregating. The
+        # enrichment loop reads it to YIELD its own whole-store NPI scan while a
+        # rollup runs — two heavy scans at once thrash the 8 GB pool and the
+        # HDD, slowing extraction (a plain bool; GIL makes the read/write
+        # atomic, no lock needed).
+        self._rollup_active = False
         self._sweep_orphan_tmps()
         if memory_limit_gb is not None:
             # explicit override from config (duckdb_memory_gb): trust the user
@@ -1732,9 +1738,11 @@ class Store:
         tables = (("tin_directory_tbl",) if names_only
                   else ("rates_by_tin_tbl", "tin_directory_tbl"))
         self._acquire_rollup_lock(log)
+        self._rollup_active = True
         try:
             return self._rebuild_rollups_locked(tables, log)
         finally:
+            self._rollup_active = False
             self.rollup_lock.release()
 
     def _acquire_rollup_lock(self, log) -> None:
@@ -1785,6 +1793,7 @@ class Store:
 
         log = _logging.getLogger(__name__)
         self._acquire_rollup_lock(log)
+        self._rollup_active = True
         try:
             with self.connect() as con:
                 t_locked = time.monotonic()
@@ -1898,6 +1907,7 @@ class Store:
                          "a full rebuild)", took)
                 return took
         finally:
+            self._rollup_active = False
             self.rollup_lock.release()
 
     def refresh_directory_incremental(self) -> float:
@@ -1919,6 +1929,7 @@ class Store:
 
         log = _logging.getLogger(__name__)
         self._acquire_rollup_lock(log)
+        self._rollup_active = True
         try:
             with self.connect() as con:
                 t0 = time.monotonic()
@@ -1977,7 +1988,13 @@ class Store:
                          "newly identified NPIs, not the whole store)", n_new, took)
                 return took
         finally:
+            self._rollup_active = False
             self.rollup_lock.release()
+
+    def rollup_in_progress(self) -> bool:
+        """True while a rollup is aggregating — the enrichment loop yields its
+        own whole-store NPI scan to it (see enrich._wait_out_rollup)."""
+        return self._rollup_active
 
     def _apply_rollup_delta(self, con: duckdb.DuckDBPyConnection, payer_pred: str,
                             files_pred: str, log, directory_scoped: bool = True) -> None:
