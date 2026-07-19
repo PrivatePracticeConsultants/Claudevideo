@@ -46,7 +46,7 @@ What it *can* do, accurately:
 That's it. No installation; works with the PowerShell built into Windows
 (and with PowerShell 7 if you have it).
 
-### The four tabs
+### The five tabs
 
 | Tab | What it does |
 | --- | --- |
@@ -54,6 +54,7 @@ That's it. No installation; works with the PowerShell built into Windows
 | **Batch NPI check** | Paste any text containing NPIs, or load a `.txt`/`.csv` file — every 10-digit NPI is extracted, checksum-validated, and checked against the CMS list. Statuses: `ELIGIBLE (on CMS list)`, `NOT ON LIST`, `INVALID NPI`. Export results. |
 | **What changed** | Compare any two downloaded snapshots: providers Added / Removed / Changed (eligibility flag flips) / Renamed (name change only, flags unchanged — the old name is shown in an OldName column). Export results. |
 | **Referral map (2015)** | Enter a ZIP (or prefix like `630*`): every outpatient rehab provider there is ranked by how many Medicare patients each source provider fed into them, per the CMS shared-patient data. Select a provider to see their referral sources by name/specialty/volume. Export both tables. |
+| **Practice groups** | Enter a ZIP: the outpatient-rehab **practice groups** operating there, each with its therapist roster, ranked by local presence. Built from the CMS clinic-group reassignment file — **current** data, and it fills the gap where private-practice clinics were invisible in the referral map. Export groups and rosters. |
 
 ## The Referral map tab: what it is and its limits
 
@@ -93,6 +94,28 @@ Honest limitations (also written into every export's methodology sidecar):
 For *current* referral flows, pair this with your own EMR/claims referral data
 or a commercial license (CareSet, Trella Health, etc.) — see the discussion in
 the repo history.
+
+## The Practice groups tab: the current-data companion
+
+Where the referral map is 2015 and can't see private-practice organization NPIs,
+this tab is **current** and organizes providers by their practice group. It uses
+the CMS *Revalidation Clinic Group Practice Reassignment* file (updated ~monthly,
+~510 MB one-time download), which records which individual therapists reassign
+their Medicare benefits to which group practice. Joined with the live NPPES
+registry, that answers: *which outpatient-rehab practices operate in this ZIP,
+and who's on their therapist roster right now?* — a clean competitive-landscape
+map with no vintage caveat.
+
+Honest limits (also in every export sidecar):
+
+- A "group" is a practice with a legal business name and 2+ therapist members.
+  Solo/private-practice therapists reassign to themselves (blank business name)
+  and are counted separately, not shown as groups.
+- **RosterSize is nationwide.** A large roster with only a few in-ZIP members is
+  a multi-site organization (e.g. a national rehab company with one local
+  therapist), not a big local clinic — rank by `TherapistsInZip` for local size.
+- This is enrollment/affiliation data, **not** referrals or claims. It shows who
+  practices together, not who refers to whom.
 
 ## Staying current automatically
 
@@ -147,13 +170,13 @@ anything, and a validation failure keeps your existing snapshot untouched.
 
 ## Tests
 
-The test suite (51 tests across both modules: download/update/validation/
+The test suite (62 tests across three modules: download/update/validation/
 idempotency, crash-recovery state repair, older-release and retention safety,
 schema-drift tolerance, CSV formula-injection neutralization, download-URL and
 zip-slip rejection, search, batch check, snapshot diff/rename detection,
-referral-map discovery/paging/scan/enrichment/vintage-flags, exports) runs
-against local HTTP test doubles of the CMS hosts and the NPPES API — no
-external traffic:
+referral-map discovery/paging/scan/enrichment/vintage-flags, practice-group
+Latin-1 loading/matching/roster/export, exports) runs against local HTTP test
+doubles of the CMS hosts and the NPPES API — no external traffic:
 
 ```powershell
 Invoke-Pester .\tests -Output Detailed     # requires the Pester module

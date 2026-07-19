@@ -16,8 +16,10 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
 $script:ModulePath = Join-Path $PSScriptRoot 'OrderReferring\OrderReferring.psm1'
 $script:RmModulePath = Join-Path $PSScriptRoot 'ReferralMap\ReferralMap.psm1'
+$script:PgModulePath = Join-Path $PSScriptRoot 'PracticeGroups\PracticeGroups.psm1'
 Import-Module $script:ModulePath -Force
 Import-Module $script:RmModulePath -Force
+Import-Module $script:PgModulePath -Force
 
 # ---------------------------------------------------------------------------
 # Window layout
@@ -207,6 +209,46 @@ $xaml = @'
               Text="One-time setup: click 'Download CMS dataset' (~356 MB download, ~1.7 GB on disk)."/>
         </Grid>
       </TabItem>
+
+      <!-- ============ Practice groups tab ============ -->
+      <TabItem Header="  Practice groups  ">
+        <Grid Margin="10">
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="5*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="6*"/>
+            <RowDefinition Height="Auto"/>
+          </Grid.RowDefinitions>
+          <TextBlock Grid.Row="0" TextWrapping="Wrap" Foreground="#333" Margin="0,0,0,6"
+              Text="Enter a ZIP to see the outpatient-rehab PRACTICE GROUPS operating there, each with its therapist roster. Built from the CMS clinic-group reassignment file (current, updated ~monthly) joined with the live NPPES registry. This is who practices where NOW — it fills the gap where private-practice clinics were invisible in the referral-map tab."/>
+          <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,6">
+            <TextBlock Text="ZIP:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+            <TextBox x:Name="PgZipBox" Width="100" Height="28" VerticalContentAlignment="Center"
+                     MaxLength="6" ToolTip="5-digit ZIP, or a prefix like 630* for a wider area"/>
+            <Button x:Name="PgRunButton" Content="Find practice groups" Padding="14,5" Margin="14,0,0,0"/>
+            <Button x:Name="PgDownloadButton" Content="Download CMS dataset" Padding="10,5" Margin="10,0,0,0"/>
+            <TextBlock x:Name="PgDataStatus" VerticalAlignment="Center" Margin="12,0,0,0" Foreground="#666"/>
+          </StackPanel>
+          <DataGrid Grid.Row="2" x:Name="PgGroupGrid" IsReadOnly="True" AutoGenerateColumns="True"
+                    CanUserAddRows="False" GridLinesVisibility="Horizontal"
+                    HeadersVisibility="Column" EnableRowVirtualization="True"/>
+          <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="0,6,0,4">
+            <TextBlock x:Name="PgRosterLabel" Text="Therapist roster (select a group above to filter):"
+                       VerticalAlignment="Center"/>
+            <Button x:Name="PgExportGroupsButton" Content="Export groups..." Padding="10,4"
+                    Margin="14,0,0,0" IsEnabled="False"/>
+            <Button x:Name="PgExportRosterButton" Content="Export rosters..." Padding="10,4"
+                    Margin="8,0,0,0" IsEnabled="False"/>
+          </StackPanel>
+          <DataGrid Grid.Row="4" x:Name="PgRosterGrid" IsReadOnly="True" AutoGenerateColumns="True"
+                    CanUserAddRows="False" GridLinesVisibility="Horizontal"
+                    HeadersVisibility="Column" EnableRowVirtualization="True"/>
+          <TextBlock Grid.Row="5" x:Name="PgSummary" Margin="0,6,0,0" Foreground="#333" TextWrapping="Wrap"
+              Text="One-time setup: click 'Download CMS dataset' (~510 MB download). This tab needs no other data."/>
+        </Grid>
+      </TabItem>
     </TabControl>
 
     <!-- Footer: honesty note -->
@@ -230,7 +272,9 @@ foreach ($name in @(
     'ChangesGrid', 'ChangesSummary',
     'RmZipBox', 'RmOrgOnly', 'RmRunButton', 'RmDownloadButton', 'RmDataStatus',
     'RmClinicGrid', 'RmSourceLabel', 'RmExportClinicsButton', 'RmExportSourcesButton',
-    'RmSourceGrid', 'RmSummary'
+    'RmSourceGrid', 'RmSummary',
+    'PgZipBox', 'PgRunButton', 'PgDownloadButton', 'PgDataStatus', 'PgGroupGrid',
+    'PgRosterLabel', 'PgExportGroupsButton', 'PgExportRosterButton', 'PgRosterGrid', 'PgSummary'
 )) {
     $ui[$name] = $window.FindName($name)
     if (-not $ui[$name]) { throw "Internal error: UI element '$name' not found." }
@@ -250,6 +294,7 @@ $script:LastChangeResultsAll = @() # unfiltered compare result (ChangeTypeCombo 
 $script:LastChangeResults = @()    # currently-shown (filtered) compare result
 $script:LastChangeDesc = ''
 $script:RmResult = $null          # last referral-map result object
+$script:PgResult = $null          # last practice-group result object
 $script:Busy = $false
 $script:Jobs = New-Object System.Collections.ArrayList
 $script:MaxGridRows = 5000
@@ -264,7 +309,8 @@ function Set-Busy([bool]$On, [string]$Message) {
     $script:Busy = $On
     foreach ($b in @($ui.UpdateButton, $ui.SearchButton, $ui.BatchCheckButton,
                      $ui.CompareButton, $ui.LoadNpiFileButton,
-                     $ui.RmRunButton, $ui.RmDownloadButton)) {
+                     $ui.RmRunButton, $ui.RmDownloadButton,
+                     $ui.PgRunButton, $ui.PgDownloadButton)) {
         $b.IsEnabled = -not $On
     }
     $window.Cursor = if ($On) { [System.Windows.Input.Cursors]::Wait } else { $null }
@@ -771,6 +817,125 @@ $ui.RmExportSourcesButton.Add_Click({
 })
 
 # ---------------------------------------------------------------------------
+# Practice groups tab
+# ---------------------------------------------------------------------------
+
+$script:PgGroupCols = @('GroupName', 'State', 'TherapistsInZip', 'RosterSize', 'GroupPacId')
+$script:PgRosterCols = @('GroupName', 'GroupPacId', 'NPI', 'FirstName', 'LastName', 'Specialty', 'InThisZip')
+
+function Update-PgStatus {
+    $status = Get-PgStatus
+    if ($status.DatasetReady) {
+        $ui.PgDataStatus.Text = 'Dataset ready ({0:N0} MB)' -f ($status.DatasetBytes / 1MB)
+        $ui.PgDownloadButton.Visibility = 'Collapsed'
+    } else {
+        $ui.PgDataStatus.Text = 'Dataset not downloaded yet'
+        $ui.PgDownloadButton.Visibility = 'Visible'
+    }
+}
+
+function Export-PgWithDialog {
+    param([object[]]$Rows, [string]$SuggestedName, [string]$Description)
+    if ($script:Busy) { return }
+    if (-not $Rows -or $Rows.Count -eq 0) { Show-ErrorBox 'Nothing to export yet — find groups first.'; return }
+    $dialog = New-Object Microsoft.Win32.SaveFileDialog
+    $dialog.Filter = 'CSV files (*.csv)|*.csv'
+    $dialog.FileName = $SuggestedName
+    if ($dialog.ShowDialog($window)) {
+        try {
+            $notes = if ($script:PgResult) { $script:PgResult.Notes } else { @() }
+            $result = $Rows | Export-PgResult -Path $dialog.FileName -Notes $notes -Description $Description
+            Set-Status "Exported $('{0:N0}' -f $result.Rows) rows to $($result.Path) (with methodology sidecar)."
+        } catch { Show-ErrorBox "Export failed: $($_.Exception.Message)" }
+    }
+}
+
+$ui.PgDownloadButton.Add_Click({
+    if ($script:Busy) { return }
+    $ui.PgSummary.Text = 'Downloading... this tab will report when the dataset is ready.'
+    Invoke-Async -Kind 'pg-download' -Params @{ PgModulePath = $script:PgModulePath } `
+        -BusyMessage 'Downloading the CMS clinic-group reassignment dataset (~510 MB; this can take several minutes)...' `
+        -WorkerScript 'param($PgModulePath) Import-Module $PgModulePath; Save-PgDataset' `
+        -OnDone {
+            param($result)
+            Update-PgStatus
+            $ui.PgSummary.Text = $result[0].Message + ' Enter a ZIP and click "Find practice groups".'
+        } `
+        -OnFail {
+            param($message)
+            Update-PgStatus
+            $ui.PgSummary.Text = 'Download did not complete. Click "Download CMS dataset" to try again.'
+            Show-ErrorBox $message
+        }
+})
+
+$ui.PgRunButton.Add_Click({
+    if ($script:Busy) { return }
+    $zip = $ui.PgZipBox.Text.Trim()
+    if ($zip -notmatch '^\d{3,5}\*?$' -or ($zip -match '^\d{1,4}$' -and $zip.Length -lt 5)) {
+        Show-ErrorBox 'Enter a 5-digit ZIP code, or a prefix ending in * (e.g. 630*) for a wider area.'
+        return
+    }
+    if (-not (Get-PgStatus).DatasetReady) {
+        Show-ErrorBox "The dataset isn't downloaded yet — click 'Download CMS dataset' first (one-time, ~510 MB)."
+        return
+    }
+    Invoke-Async -Kind 'pg-run' -Params @{ PgModulePath = $script:PgModulePath; Zip = $zip } `
+        -BusyMessage "Finding practice groups for $zip — NPPES lookup, then matching against the reassignment roster (first run also loads ~510 MB into memory)..." `
+        -WorkerScript 'param($PgModulePath, $Zip) Import-Module $PgModulePath; Get-PgGroupsInZip -Zip $Zip' `
+        -OnDone {
+            param($result)
+            $pg = $result[0]
+            $script:PgResult = $pg
+            $groups = @($pg.Groups)
+            $rosters = @($pg.Rosters)
+            $ui.PgGroupGrid.ItemsSource = (ConvertTo-DataTable -Rows $groups -Columns $script:PgGroupCols).DefaultView
+            $ui.PgRosterGrid.ItemsSource = (ConvertTo-DataTable -Rows $rosters -Columns $script:PgRosterCols).DefaultView
+            $ui.PgRosterLabel.Text = 'Therapist roster — all groups (select a group above to filter):'
+            $ui.PgExportGroupsButton.IsEnabled = ($groups.Count -gt 0)
+            $ui.PgExportRosterButton.IsEnabled = ($rosters.Count -gt 0)
+            $ui.PgSummary.Text = ("ZIP $($pg.Zip): $($pg.TherapistCount) individual therapists found; " +
+                "$($groups.Count) multi-provider practice group(s) operate here; " +
+                "$($pg.SoloCount) therapists are solo or not in a named group. " +
+                'RosterSize is nationwide — a big roster with few in-ZIP members is a multi-site organization.')
+            Set-Status "Practice groups for $($pg.Zip) complete."
+        } `
+        -OnFail {
+            param($message)
+            Update-PgStatus
+            Show-ErrorBox $message
+        }
+})
+
+$ui.PgGroupGrid.Add_SelectionChanged({
+    if (-not $script:PgResult) { return }
+    $row = $ui.PgGroupGrid.SelectedItem
+    if ($row -is [System.Data.DataRowView]) {
+        $pac = [string]$row.Row['GroupPacId']
+        $filtered = @($script:PgResult.Rosters | Where-Object { $_.GroupPacId -eq $pac })
+        $ui.PgRosterGrid.ItemsSource = (ConvertTo-DataTable -Rows $filtered -Columns $script:PgRosterCols).DefaultView
+        $ui.PgRosterLabel.Text = "Roster for $([string]$row.Row['GroupName']) — $($filtered.Count) therapist(s):"
+    } else {
+        $ui.PgRosterGrid.ItemsSource = (ConvertTo-DataTable -Rows @($script:PgResult.Rosters) -Columns $script:PgRosterCols).DefaultView
+        $ui.PgRosterLabel.Text = 'Therapist roster — all groups (select a group above to filter):'
+    }
+})
+
+$ui.PgExportGroupsButton.Add_Click({
+    if (-not $script:PgResult) { return }
+    Export-PgWithDialog -Rows @($script:PgResult.Groups) `
+        -SuggestedName "practice-groups-$($script:PgResult.Zip.TrimEnd('*')).csv" `
+        -Description "Outpatient-rehab practice groups operating in ZIP $($script:PgResult.Zip) (CMS clinic-group reassignment data)"
+})
+
+$ui.PgExportRosterButton.Add_Click({
+    if (-not $script:PgResult) { return }
+    Export-PgWithDialog -Rows @($script:PgResult.Rosters) `
+        -SuggestedName "practice-group-rosters-$($script:PgResult.Zip.TrimEnd('*')).csv" `
+        -Description "Therapist rosters for practice groups in ZIP $($script:PgResult.Zip) (CMS clinic-group reassignment data)"
+})
+
+# ---------------------------------------------------------------------------
 # Startup
 # ---------------------------------------------------------------------------
 
@@ -779,9 +944,11 @@ $ui.RmExportSourcesButton.Add_Click({
 # right now (recent LastWriteTime) is spared while abandoned partials are cleared.
 try { Clear-OrfStaleTemp -OlderThanMinutes 2 } catch { }
 try { Clear-RmStaleTemp -OlderThanMinutes 2 } catch { }
+try { Clear-PgStaleTemp -OlderThanMinutes 2 } catch { }
 
 Update-StatusFromDisk
 Update-RmStatus
+Update-PgStatus
 if (Get-OrfLatestSnapshot) { Start-DataLoad }
 
 # On close, stop the completion timer and best-effort tear down any in-flight

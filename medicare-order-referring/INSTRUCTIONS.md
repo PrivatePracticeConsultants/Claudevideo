@@ -44,7 +44,7 @@ tells you you're up to date. It never breaks your existing data.
 
 ---
 
-## 4. The four tabs, in plain English
+## 4. The five tabs, in plain English
 
 ### Tab 1 — Search providers
 *"Is Dr. Smith allowed to refer Medicare patients?"*
@@ -82,6 +82,26 @@ Every data download is kept as a dated snapshot. Pick two snapshots, click
 (eligibility flags flipped), or **Renamed** (name changed but eligibility did
 not — the previous name is shown so you can tell it apart from a real
 eligibility change). Exportable like everything else.
+
+### Tab 5 — Practice groups
+*"Which rehab practices operate in my area, and who's on their team — right now?"*
+
+One-time setup: click **Download CMS dataset** (~510 MB; this tab needs no other
+data). Then type a ZIP and click **Find practice groups**.
+
+1. **Top table:** every multi-therapist rehab practice group operating in that
+   ZIP, ranked by how many of their therapists practice locally
+   (`TherapistsInZip`), with the group's total nationwide roster size.
+2. **Click any group** to see its full therapist roster below — names,
+   specialties, and which ones are in your ZIP.
+3. Export either table.
+
+Unlike the referral map, this is **current** data (updated monthly), and it
+shows the private-practice clinics the referral map can't. Two things to know:
+`RosterSize` counts the group's therapists *nationwide*, so a huge roster with
+only one or two local therapists is a multi-site chain, not a big local clinic —
+rank by `TherapistsInZip` for local size. And this is *who practices together*,
+not *who refers to whom*.
 
 ### Tab 4 — Referral map (2015)
 *"Who sends patients to the rehab providers in my area?"*

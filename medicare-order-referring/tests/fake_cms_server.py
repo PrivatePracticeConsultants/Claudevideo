@@ -69,6 +69,14 @@ SOURCES = {
     # 8000000003 deliberately absent -> "(NPI deactivated or not found)"
 }
 
+# ZIP 77777: individual therapists for the PracticeGroups tests. Two belong to a
+# named multi-member group, one is solo (its group has a blank name).
+PG_THERAPISTS = [
+    provider('7011111111', 'NPI-1', ('JOSE', 'MEMBERONE'), ['225100000X'], '777770000'),
+    provider('7022222222', 'NPI-1', ('PAT', 'MEMBERTWO'), ['225100000X'], '777770000'),
+    provider('7044444444', 'NPI-1', ('SAM', 'SOLO'), ['225100000X'], '777770000'),
+]
+
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
@@ -101,7 +109,7 @@ class Handler(BaseHTTPRequestHandler):
             q = {k: v[0] for k, v in parse_qs(url.query).items()}
             if 'number' in q:
                 hit = SOURCES.get(q['number'])
-                for p in IN_ZIP + [MAILING_ONLY, SHORT_POSTAL] + PAGED:
+                for p in IN_ZIP + [MAILING_ONLY, SHORT_POSTAL] + PAGED + PG_THERAPISTS:
                     if p['number'] == q['number']:
                         hit = p
                 results = [hit] if hit else []
@@ -117,6 +125,8 @@ class Handler(BaseHTTPRequestHandler):
                 results = IN_ZIP + [MAILING_ONLY, SHORT_POSTAL]
             elif term == 'Physical Therapist' and '88888'.startswith(prefix[:5]):
                 results = PAGED[skip:skip + 200]
+            elif term == 'Physical Therapist' and '77777'.startswith(prefix[:5]) and skip == 0:
+                results = PG_THERAPISTS
             self._json({'result_count': len(results), 'results': results})
             return
         self.send_response(404)
