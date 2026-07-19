@@ -1065,3 +1065,54 @@ def test_summary_cached_and_single_flight(cfg, store):
     # identical follow-up served from cache (same data_generation) — no error,
     # same numbers
     assert c.get("/api/summary").json() == a
+
+
+def test_rollup_never_sets_threads_midflight(cfg, store):
+    # THE deadlock: `SET threads` on the shared instance while other
+    # connections run queries froze the whole store (disk 0%, every DuckDB
+    # thread parked, 20+ min). The thread count is now fixed at open; a
+    # rollup (full OR incremental) must never change it — verified by running
+    # rollups CONCURRENTLY with continuous background queries and asserting
+    # completion + a stable thread count.
+    import threading
+    import time
+
+    _payer_part(store, "d1.json", "DeadA", [
+        (f"46{i:07d}", f"15{i:08d}", "97110", "2026-06", 40.0 + i) for i in range(50)])
+    store.upsert_file("d1.json", finished_at="2026-07-01 10:00:00")
+    store.rebuild_rollups()
+    with store.connect() as con:
+        threads0 = con.execute("SELECT current_setting('threads')").fetchone()[0]
+
+    stop = threading.Event()
+    errors = []
+
+    def hammer():  # simulate the dashboard + enrichment querying during a rollup
+        while not stop.is_set():
+            try:
+                with store.connect() as con:
+                    con.execute("SELECT count(DISTINCT tin_value) FROM rates").fetchone()
+                    con.execute("SELECT count(*) FROM files").fetchone()
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+                return
+
+    threads = [threading.Thread(target=hammer) for _ in range(4)]
+    for t in threads:
+        t.start()
+    try:
+        # several rollups back-to-back while the hammer threads query
+        for i in range(3):
+            _payer_part(store, f"d{i+2}.json", f"Dead{i}", [
+                (f"47{i}{j:06d}", f"16{i}{j:07d}", "97110", "2026-06", 55.0) for j in range(30)])
+            store.upsert_file(f"d{i+2}.json", finished_at=f"2026-07-01 10:0{i+1}:00")
+            t0 = time.monotonic()
+            store.update_rollups_incremental()
+            assert time.monotonic() - t0 < 60, "rollup stalled under concurrent queries (deadlock?)"
+    finally:
+        stop.set()
+        for t in threads:
+            t.join(timeout=10)
+    assert not errors, f"concurrent queries errored during rollups: {errors}"
+    with store.connect() as con:
+        assert con.execute("SELECT current_setting('threads')").fetchone()[0] == threads0

@@ -662,6 +662,10 @@ class Store:
                 self._memory_limit_gb = cap
             else:
                 self._memory_limit_gb = 4  # RAM size unknown: safe flat default
+        # Global DuckDB thread count, set ONCE at open (see _apply_settings):
+        # capped so rollup slices size as validated AND concurrent-query
+        # contention stays bounded. Never below 1, never above the machine.
+        self._rollup_threads = max(1, min(ROLLUP_MAX_THREADS, os.cpu_count() or 4))
         self._temp_cap_gb: int | None = None  # computed once, in connect()
         # bumped whenever the analytics tables change (rebuild/reset) so the API's
         # row-count cache can key on it and never serve a stale total across an
@@ -905,6 +909,22 @@ class Store:
                     # dead drive will surface their own error if it comes to it
                     self._temp_cap_gb = 8
             con.execute(f"SET max_temp_directory_size = '{self._temp_cap_gb}GB'")
+            # Thread count is set ONCE here (global to the instance) and NEVER
+            # changed again — a mid-flight `SET threads` on the live,
+            # concurrently-queried instance DEADLOCKS the whole store (it waits
+            # for in-flight queries to quiesce while they wait for the scheduler
+            # it seized). Capping to ROLLUP_MAX_THREADS keeps rollup slices
+            # sized as validated (the memory/partition math in
+            # _rollup_partition_rows divides the budget by exactly this count)
+            # AND bounds concurrent-query CPU/RAM contention. Parser workers are
+            # SEPARATE processes, unaffected by this. Idempotent: only SET when
+            # it differs, so the per-connection fallback path can't thrash it.
+            try:
+                cur = int(con.execute("SELECT current_setting('threads')").fetchone()[0])
+            except Exception:  # noqa: BLE001
+                cur = None
+            if cur != self._rollup_threads:
+                con.execute(f"SET threads = {self._rollup_threads}")
         except duckdb.Error:  # older duckdb without these knobs
             pass
 
@@ -2006,17 +2026,21 @@ class Store:
         directory_scoped=False rebuilds ONLY the rate spine here and leaves the
         directory to the caller (a removal needs the FULL directory — see
         update_rollups_incremental)."""
+        # READ the current thread count for partition sizing — NEVER `SET
+        # threads`. SET threads reconfigures the shared instance's GLOBAL task
+        # scheduler; on a live store with other connections mid-query (the
+        # dashboard, the enrichment scan, a files UPDATE) it DEADLOCKS — SET
+        # threads waits for those queries to quiesce while they wait for the
+        # scheduler it seized (observed live: every DuckDB thread frozen at its
+        # query line, disk 0%, for 20+ minutes). Memory is bounded purely by
+        # hash-partition slicing, sized for the running thread count
+        # (_rollup_partition_rows divides the budget by threads, so more
+        # threads just yields more, smaller slices).
         try:
-            avail = int(con.execute("SELECT current_setting('threads')").fetchone()[0])
+            threads = int(con.execute("SELECT current_setting('threads')").fetchone()[0])
         except Exception:  # noqa: BLE001 — older duckdb / odd value
-            avail = 1
-        threads = max(1, min(avail, ROLLUP_MAX_THREADS))
-        reset_threads = False
-        try:
-            con.execute(f"SET threads = {threads}")
-            reset_threads = True
-        except duckdb.Error:
-            threads = avail
+            threads = 1
+        threads = max(1, threads)
         # affected TINs: computed ONCE from the delta files' parts (per-file
         # parquet stats prune every other file's part from this scan)
         con.execute("DROP TABLE IF EXISTS __delta_tins")
@@ -2026,34 +2050,18 @@ class Store:
         tin_pred = "tin_value IN (SELECT tin_value FROM __delta_tins)"
         n_rows = con.execute(
             f"SELECT count(*) FROM rates WHERE {payer_pred}").fetchone()[0] or 0
-        try:
+        # escalate PARTITION fineness on OOM (never thread count) until it fits
+        for split in (1, 2, 4, 8, 16, 32, 64):
             try:
                 self._apply_rollup_delta_sliced(con, payer_pred, tin_pred, n_rows,
-                                                split=1, threads=threads, log=log,
+                                                split=split, threads=threads, log=log,
                                                 directory_scoped=directory_scoped)
                 return
             except duckdb.OutOfMemoryException:
-                log.warning("analytics update hit the memory limit; retrying "
-                            "single-threaded with finer partitions")
-            con.execute("SET threads = 1")
-            reset_threads = True
-            for split in (1, 2, 4, 8, 16):
-                try:
-                    self._apply_rollup_delta_sliced(con, payer_pred, tin_pred, n_rows,
-                                                    split=split, threads=1, log=log,
-                                                    directory_scoped=directory_scoped)
-                    return
-                except duckdb.OutOfMemoryException:
-                    if split == 16:
-                        raise  # caller falls back to the full rebuild's ladder
-                    log.warning("analytics update still over the memory limit "
-                                "at split=%d; subdividing further", split)
-        finally:
-            if reset_threads:
-                try:
-                    con.execute("RESET threads")
-                except duckdb.Error:
-                    pass
+                if split == 64:
+                    raise  # caller falls back to the full rebuild's ladder
+                log.warning("analytics update over the memory limit at split=%d; "
+                            "subdividing into finer partitions", split)
 
     def _apply_rollup_delta_sliced(self, con: duckdb.DuckDBPyConnection, payer_pred: str,
                                    tin_pred: str, n_rows: int, split: int,
@@ -2109,50 +2117,34 @@ class Store:
                 # catalog write — must not race another connection's
                 # _register_views (see update_rollups_incremental)
                 self._register_views(con)  # rates view must see current parts first
-            # Cap parallelism for the rebuild and size the slices for that thread
-            # count. The un-spillable per-thread hash tables make peak RAM scale
-            # with threads, so an unbounded multi-threaded first attempt on a big
-            # store OOMs — then the old code fell back to a SINGLE-threaded rebuild
-            # that could take an hour on tens of millions of rows. Capping to
-            # ROLLUP_MAX_THREADS keeps the first attempt parallel (fast) while its
-            # slices are sized to fit, so it succeeds without the slow fallback.
+            # READ the running thread count for partition sizing — NEVER `SET
+            # threads`. Changing DuckDB's GLOBAL thread count on the shared,
+            # concurrently-queried instance DEADLOCKS: SET threads waits for
+            # in-flight queries (dashboard/enrichment/UPDATE) to quiesce while
+            # they wait for the scheduler it seized (seen live: all DuckDB
+            # threads frozen at their query lines, disk 0%, 20+ minutes).
+            # Memory is bounded by hash-partition slicing alone — sized for the
+            # thread count (_rollup_partition_rows divides the budget by
+            # threads → more threads yields more, smaller slices).
             try:
-                avail = int(con.execute("SELECT current_setting('threads')").fetchone()[0])
+                build_threads = int(con.execute(
+                    "SELECT current_setting('threads')").fetchone()[0])
             except Exception:  # noqa: BLE001 — older duckdb / odd value
-                avail = 1
-            build_threads = max(1, min(avail, ROLLUP_MAX_THREADS))
-            reset_threads = False
+                build_threads = 1
+            build_threads = max(1, build_threads)
             try:
-                con.execute(f"SET threads = {build_threads}")
-                reset_threads = True
-            except duckdb.Error:
-                build_threads = avail  # couldn't cap; size for what's running
-            try:
-                try:
-                    self._build_rollup_tables(con, threads=build_threads, tables=tables)
-                    return time.monotonic() - t_locked
-                except duckdb.OutOfMemoryException:
-                    log.warning("rollup rebuild hit the memory limit; retrying "
-                                "single-threaded with finer partitions")
-                # SET threads is GLOBAL to the shared instance: restore it or every
-                # other connection stays single-threaded forever.
-                con.execute("SET threads = 1")
-                reset_threads = True
-                for split in (1, 2, 4, 8, 16):
+                # escalate PARTITION fineness on OOM (never thread count)
+                for split in (1, 2, 4, 8, 16, 32, 64):
                     try:
-                        self._build_rollup_tables(con, split=split, threads=1, tables=tables)
+                        self._build_rollup_tables(con, split=split,
+                                                  threads=build_threads, tables=tables)
                         return time.monotonic() - t_locked
                     except duckdb.OutOfMemoryException:
-                        if split == 16:
+                        if split == 64:
                             raise  # genuinely can't fit at this memory limit
-                        log.warning("rollup still over the memory limit at "
-                                    "split=%d; subdividing further", split)
+                        log.warning("rollup over the memory limit at split=%d; "
+                                    "subdividing into finer partitions", split)
             finally:
-                if reset_threads:
-                    try:
-                        con.execute("RESET threads")
-                    except duckdb.Error:
-                        pass
                 self.last_rollup_build_seconds = time.monotonic() - t_locked
 
     def _build_rollup_tables(self, con: duckdb.DuckDBPyConnection, split: int = 1,
