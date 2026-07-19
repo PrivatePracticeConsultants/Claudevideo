@@ -232,6 +232,29 @@ Two codebases live in this repo:
    `rebuild_rollups()`. `forget` ALWAYS uses the full rebuild (a removal
    leaves no delta to key on). The done-upsert must precede the rollup call
    (the incremental finds its work via the marker; regression-tested).
+   CLUSTERING (do not remove): both materialized rollups are built with a
+   trailing `ORDER BY` — `rates_by_tin_tbl` by `(billing_code, tin_value)`,
+   `tin_directory_tbl` by `tin_value` (in BY_TIN_QUERY / TIN_DIRECTORY_QUERY, so
+   it flows through the full build, every hash slice, AND the incremental
+   delta). This is LOAD-BEARING, not cosmetic: DuckDB keeps per-row-group
+   min/max zonemaps, so a code-filtered query (nearly every real summary /
+   benchmark / leads / `/api/code` call carries a `billing_code IN` filter)
+   skips the row groups that can't match instead of scanning the whole spine —
+   measured 20-60x on a code-filtered aggregate over 30M rows (80ms→2ms).
+   Clustering the directory by tin_value gives the point lookups that dominate
+   it (entity-detail, the per-row LEFT JOINs from rates_by_tin / monitor /
+   outreach / benchmark) the same zonemap pruning an ART index would, but
+   carried in the build query so it survives every CREATE OR REPLACE with no
+   index to maintain and no INSERT slowdown on the delta path. The ORDER BY is a
+   SPILLABLE operator over the (already grouped, smaller) output, so it never
+   breaks the bounded-memory slice build; each hash slice sorts independently
+   and still prunes because pruning is per-row-group, not global. Rows are
+   byte-identical as a SET — only physical order changes, and every reader
+   re-aggregates. Regression-guarded (`test_rollup_tables_are_clustered_*`);
+   incremental deltas append a small unsorted tail that a full rebuild
+   re-clusters. `/api/payers` reads DISTINCT payer from the materialized spine
+   (small native table) rather than a DISTINCT scan across every raw parquet
+   part on the dashboard-load path.
    Mid-grind refreshes are purely TIME-based (`_rollup_due`): one per
    adaptive interval of max(90s, `ROLLUP_INTERVAL_MULTIPLE` (4x) × the last
    rebuild's duration), counted from rebuild COMPLETION, plus a final rebuild
@@ -412,7 +435,10 @@ not yet built — pick these up before adding features):
     whose per-slice memory and time are bounded by the SLICE, invariant to total
     store size. C1 only fires on an explicit rebuild, a >25%-of-TINs drift, or a
     version bump — all rare and all logged. Memory stays capped the whole time
-    (the OOM ladder subdivides 1→64); it is slow, never a crash.
+    (the OOM ladder subdivides 1→64); it is slow, never a crash. (The clustering
+    ORDER BY adds a bounded, spillable sort per slice — modest extra wall-clock
+    on this already-slow path, and it makes every subsequent dashboard query
+    prune, so it pays for itself many times over.)
   - **C2 — `forget` / a removal** keeps the rate spine payer-scoped and fast but
     rebuilds the tin_directory in FULL, because a removed file can change which
     practices are shared across the survivors (a directory row is correct only

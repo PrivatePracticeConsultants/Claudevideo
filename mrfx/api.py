@@ -1554,8 +1554,19 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
 
     @app.get("/api/payers")
     def payers():
+        # populate the payer-filter dropdown. Read DISTINCT payer from the
+        # MATERIALIZED spine (rates_by_tin_tbl) when it exists: one small native
+        # table with a low-cardinality payer column, vs. a DISTINCT scan across
+        # every raw parquet part in the store (an uncached full-store scan on the
+        # interactive dashboard-load path). Fall back to raw `rates` only before
+        # the first rollup exists, so a brand-new store still lists its payers.
         with store.connect() as con:
-            rows = con.execute("SELECT DISTINCT payer FROM rates ORDER BY payer").fetchall()
+            has_tbl = con.execute(
+                "SELECT count(*) FROM information_schema.tables "
+                "WHERE table_name = 'rates_by_tin_tbl'").fetchone()[0]
+            src = "rates_by_tin_tbl" if has_tbl else "rates"
+            rows = con.execute(
+                f"SELECT DISTINCT payer FROM {src} ORDER BY payer").fetchall()
         return {"payers": [r[0] for r in rows]}
 
     @app.get("/api/catalog")

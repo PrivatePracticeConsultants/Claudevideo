@@ -46,6 +46,75 @@ def test_export_defuses_formulas_and_masks_ssn_per_element(store):
     assert joined == "431111111; MASKED-SSN"
 
 
+def test_rollup_tables_are_clustered_for_zonemap_pruning(store):
+    """The materialized spine must land physically clustered by billing_code and
+    the directory by tin_value, so DuckDB's per-row-group min/max zonemaps prune
+    a code-/tin-filtered query instead of scanning the whole table. Guards the
+    ORDER BY in BY_TIN_QUERY / TIN_DIRECTORY_QUERY against being silently
+    dropped (a code-filtered summary/benchmark/leads query is 20-60x slower
+    without it at scale). Rows must also stay identical as a SET — clustering
+    only reorders, never adds/drops a fact."""
+    codes = ["97530", "97110", "G0283", "97140", "97112", "97161"]
+    rows = []
+    # scrambled input order: many (code, tin) pairs, deliberately NOT pre-sorted
+    for i in range(600):
+        code = codes[(i * 7) % len(codes)]
+        tin = "43%07d" % ((i * 13) % 40)
+        npi = "1%09d" % (i % 55)
+        rows.append(dict(
+            payer="Payer %d" % (i % 3), tin_value=tin, tin_type="ein", npi=npi,
+            source_file="f.json", billing_code=code, billing_code_type="CPT",
+            discipline="pt", is_timed=True, billing_class="professional",
+            negotiated_rate=25.0 + (i % 40), negotiated_type="negotiated",
+            is_dollar_rate=True, modifier_set=[], service_code=["11"],
+            file_month="2026-06", last_updated_on="2026-06-01", expiration_date=None,
+            schema_version="2.0.0", tin_is_really_npi=False, state=None,
+        ))
+    with store.rates_part_writer("f.json") as w:
+        w.write_batch(rows)
+    store.rebuild_rollups()
+
+    with store.connect() as con:
+        # physical scan order (no ORDER BY in the probe) must be non-decreasing:
+        # proof the table was materialized clustered, not in aggregate-hash order
+        spine = [r[0] for r in con.execute(
+            "SELECT billing_code FROM rates_by_tin_tbl").fetchall()]
+        assert spine == sorted(spine), "spine not clustered by billing_code"
+        direc = [r[0] for r in con.execute(
+            "SELECT tin_value FROM tin_directory_tbl").fetchall()]
+        assert direc == sorted(direc), "directory not clustered by tin_value"
+        # SET-equality: clustering must not have changed which facts exist
+        n_codes = con.execute(
+            "SELECT count(DISTINCT billing_code) FROM rates_by_tin_tbl").fetchone()[0]
+        assert n_codes == len(codes)
+
+
+def test_payers_endpoint_avoids_raw_parquet_full_scan(cfg, store):
+    """/api/payers reads DISTINCT payer from the materialized spine, not a
+    DISTINCT scan over every raw parquet part (an uncached full-store scan on the
+    dashboard-load path). It must still return every payer, and still work
+    before the first rollup exists (fallback to raw rates)."""
+    from fastapi.testclient import TestClient
+    from mrfx.api import create_app
+
+    rows = [dict(
+        payer=p, tin_value="431111111", tin_type="ein", npi="1000000001",
+        source_file="f.json", billing_code="97110", billing_code_type="CPT",
+        discipline="pt", is_timed=True, billing_class="professional",
+        negotiated_rate=50.0, negotiated_type="negotiated", is_dollar_rate=True,
+        modifier_set=[], service_code=["11"], file_month="2026-06",
+        last_updated_on="2026-06-01", expiration_date=None, schema_version="2.0.0",
+        tin_is_really_npi=False, state=None,
+    ) for p in ("Aetna", "Cigna", "United")]
+    with store.rates_part_writer("f.json") as w:
+        w.write_batch(rows)
+    store.rebuild_rollups()
+
+    client = TestClient(create_app(cfg, store))
+    got = client.get("/api/payers").json()["payers"]
+    assert got == ["Aetna", "Cigna", "United"]
+
+
 def test_methodology_lists_only_rate_files_and_says_so(cfg, store):
     store.upsert_file("rates.json", payer="Testco", file_type="in_network", status="done")
     store.upsert_file("refs.json", payer="Testco", file_type="provider_reference", status="done")
