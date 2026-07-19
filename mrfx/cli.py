@@ -669,13 +669,58 @@ def cmd_reset(cfg: MrfxConfig, args) -> int:
     return 0
 
 
+def _supervise_serve(config_path: str) -> int:
+    """Run `mrfx serve` in a child process, restarting on any abnormal exit.
+    Stops cleanly on a normal exit (code 0, e.g. the port is taken) or on
+    Ctrl-C. Backs off between restarts so a crash-on-boot can't hot-loop."""
+    import subprocess
+    import time as _time
+
+    child = [sys.executable, "-m", "mrfx", "--config", config_path, "serve"]
+    print("MRF Explorer supervisor: auto-restart is ON. If the server ever "
+          "stops unexpectedly it will relaunch in a few seconds and resume "
+          "where it left off. Press Ctrl-C (twice) to stop for good.\n",
+          file=sys.stderr)
+    backoff = 5
+    while True:
+        started = _time.monotonic()
+        try:
+            code = subprocess.call(child)
+        except KeyboardInterrupt:
+            return 0  # user stopping the whole thing
+        # a server that ran healthily for a while then died is a fresh incident,
+        # not a boot loop — reset the backoff so it comes right back
+        if _time.monotonic() - started > 120:
+            backoff = 5
+        if code == 0:
+            # a CLEAN exit is deliberate (Ctrl-C shutdown, or the port was
+            # already in use) — do NOT relaunch, or a second dashboard would
+            # fight the first forever
+            print("MRF Explorer exited normally — supervisor stopping.",
+                  file=sys.stderr)
+            return 0
+        print(f"\nMRF Explorer stopped unexpectedly (exit code {code}). "
+              f"Restarting in {backoff}s — your data is safe and it resumes "
+              f"where it left off. Press Ctrl-C to stop.\n", file=sys.stderr)
+        try:
+            _time.sleep(backoff)
+        except KeyboardInterrupt:
+            return 0
+        # escalate the wait if it keeps dying quickly, so a persistent
+        # crash-on-boot (e.g. bad config) can't spin at 100% relaunching
+        backoff = min(backoff * 2, 60)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="mrfx", description="MRF Explorer — drop-in payer rate dashboard")
     ap.add_argument("--config", default="config/mrfx.yaml")
     ap.add_argument("-v", "--verbose", action="store_true")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("serve", help="start API + dashboard + inbox watcher")
+    p = sub.add_parser("serve", help="start API + dashboard + inbox watcher")
+    p.add_argument("--supervise", action="store_true",
+                   help="auto-restart if the server ever exits unexpectedly "
+                        "(native crash, power blip) — resumes where it left off")
     p = sub.add_parser("add", help="paste MRF or TOC/index URLs — downloads and ingests automatically")
     p.add_argument("urls", nargs="*", help="one or more http(s) URLs")
     p.add_argument("--file", help="text file with one URL per line (# comments ok)")
@@ -738,6 +783,16 @@ def main(argv: list[str] | None = None) -> int:
         if pkg_cfg.exists():
             log.info("no config/mrfx.yaml here — using the project's: %s", pkg_cfg)
             args.config = str(pkg_cfg)
+    # Supervisor: relaunch a clean child `mrfx serve` whenever it exits
+    # abnormally (a native DuckDB crash under memory pressure, a power blip).
+    # The store resumes exactly where it left off (crash-recovery + rollup
+    # catch-up run on every boot), so for the user a crash becomes a ~5s blip
+    # instead of a dead window they must notice and restart by hand. Runs the
+    # child OUT OF PROCESS so even an interpreter-level crash can't take the
+    # supervisor down with it.
+    if args.cmd == "serve" and getattr(args, "supervise", False):
+        return _supervise_serve(args.config)
+
     try:
         cfg = load_mrfx_config(args.config)
         cfg.ensure_dirs()

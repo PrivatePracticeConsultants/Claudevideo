@@ -1116,3 +1116,42 @@ def test_rollup_never_sets_threads_midflight(cfg, store):
     assert not errors, f"concurrent queries errored during rollups: {errors}"
     with store.connect() as con:
         assert con.execute("SELECT current_setting('threads')").fetchone()[0] == threads0
+
+
+def test_serve_supervisor_restarts_on_crash_stops_on_clean(monkeypatch):
+    # The auto-restart supervisor: relaunch on an abnormal exit, stop on a
+    # clean exit (0) or Ctrl-C, and never hot-loop (backoff). A rare native
+    # DuckDB crash under memory pressure should become a ~5s blip, not a dead
+    # window the user must notice.
+    import subprocess
+    import time as _t
+
+    import mrfx.cli as cli
+
+    calls = {"n": 0}
+    sleeps = []
+
+    def fake_call(argv):
+        calls["n"] += 1
+        # crash twice (non-zero), then exit cleanly
+        return -1073740940 if calls["n"] <= 2 else 0
+
+    monkeypatch.setattr(subprocess, "call", fake_call)
+    # the function does `import time as _time`, so patch the real time.sleep
+    monkeypatch.setattr(_t, "sleep", lambda s: sleeps.append(s))
+
+    rc = cli._supervise_serve("config/mrfx.yaml")
+    assert rc == 0
+    assert calls["n"] == 3          # two crashes relaunched, third clean → stop
+    assert sleeps and all(s > 0 for s in sleeps)  # backed off between restarts
+
+
+def test_serve_supervisor_stops_on_ctrl_c(monkeypatch):
+    import subprocess
+
+    import mrfx.cli as cli
+
+    def boom(argv):
+        raise KeyboardInterrupt
+    monkeypatch.setattr(subprocess, "call", boom)
+    assert cli._supervise_serve("config/mrfx.yaml") == 0  # Ctrl-C → clean stop
