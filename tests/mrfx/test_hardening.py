@@ -115,6 +115,38 @@ def test_payers_endpoint_avoids_raw_parquet_full_scan(cfg, store):
     assert got == ["Aetna", "Cigna", "United"]
 
 
+def test_skip_if_busy_rebuild_coalesces_instead_of_stacking(store):
+    """A periodic rebuild trigger must NOT queue behind an in-flight rebuild and
+    then run its own pass in turn — that pile-up stacked multi-hour rebuilds
+    back-to-back (the '388 min waiting' loop). With skip_if_busy it returns the
+    ROLLUP_SKIPPED sentinel immediately when a rebuild already holds the lock."""
+    import threading
+    import time as _time
+
+    from mrfx.store import ROLLUP_SKIPPED
+
+    # simulate a rebuild in progress: hold the rollup lock from another thread
+    store.rollup_lock.acquire()
+    try:
+        results = {}
+
+        def call():
+            t0 = _time.monotonic()
+            results["inc"] = store.update_rollups_incremental(skip_if_busy=True)
+            results["full"] = store.rebuild_rollups(skip_if_busy=True)
+            results["elapsed"] = _time.monotonic() - t0
+
+        t = threading.Thread(target=call)
+        t.start()
+        t.join(timeout=10)
+        assert not t.is_alive(), "skip_if_busy blocked instead of returning fast"
+        assert results["inc"] == ROLLUP_SKIPPED
+        assert results["full"] == ROLLUP_SKIPPED
+        assert results["elapsed"] < 5   # returned immediately, did not queue
+    finally:
+        store.rollup_lock.release()
+
+
 def test_methodology_lists_only_rate_files_and_says_so(cfg, store):
     store.upsert_file("rates.json", payer="Testco", file_type="in_network", status="done")
     store.upsert_file("refs.json", payer="Testco", file_type="provider_reference", status="done")

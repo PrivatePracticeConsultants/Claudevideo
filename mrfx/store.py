@@ -430,6 +430,14 @@ ROLLUP_SCHEMA_VERSION = 2
 # the rollup coverage marker (see upsert_file).
 FINISHED_NOW = object()
 
+# Returned by a skip_if_busy rebuild that found another rebuild already running.
+# The periodic triggers (ingest rollup, name refresh) pass skip_if_busy=True so
+# they DON'T queue behind a multi-hour rebuild and then each run their own
+# multi-hour pass in turn (the observed "waiting 388 min" pile-up that reads as
+# an infinite loop). The running rebuild covers the current data; the next
+# scheduled trigger catches anything that landed after it started.
+ROLLUP_SKIPPED = -1.0
+
 BY_TIN_QUERY = """
     SELECT payer, tin_value, billing_code,
            any_value(tin_type)                                       AS tin_type,
@@ -1784,7 +1792,8 @@ class Store:
         base = min(ROLLUP_PARTITION_ROWS, mem_scaled)
         return max(1, base // max(1, split))
 
-    def rebuild_rollups(self, names_only: bool = False) -> float:
+    def rebuild_rollups(self, names_only: bool = False,
+                        skip_if_busy: bool = False) -> float:
         """Materialize the dedup/by-TIN/tin-directory rollups after ingest or
         enrichment so page queries stay fast. The DISTINCT/median/list aggregates
         can't spill to disk, so if a build still hits the memory limit we retry
@@ -1812,7 +1821,8 @@ class Store:
         # and serve that stale total for the cache TTL after the swap.
         tables = (("tin_directory_tbl",) if names_only
                   else ("rates_by_tin_tbl", "tin_directory_tbl"))
-        self._acquire_rollup_lock(log)
+        if not self._acquire_rollup_lock(log, skip_if_busy=skip_if_busy):
+            return ROLLUP_SKIPPED
         try:
             self._rollup_active = True
             return self._rebuild_rollups_locked(tables, log)
@@ -1820,19 +1830,36 @@ class Store:
             self._rollup_active = False
             self.rollup_lock.release()
 
-    def _acquire_rollup_lock(self, log) -> None:
+    def _acquire_rollup_lock(self, log, skip_if_busy: bool = False) -> bool:
         # instrumented lock wait: the stretch between a caller's "updating
         # analytics rollups…" line and the first partition banner had ZERO
         # narration — five silent hours read as a dead app when another
         # rebuild (or a finishing ingest) held this lock. Say so, per minute.
+        #
+        # skip_if_busy=True (the PERIODIC triggers — ingest rollup, name
+        # refresh): if a rebuild is already running, do NOT queue behind it.
+        # Blocking-queueing let a second (and third) periodic trigger stack up
+        # over a multi-hour rebuild and then each run its OWN multi-hour pass in
+        # turn — the "waiting 293 min / 388 min" pile-up that reads as an
+        # infinite loop. The running rebuild already covers the current data,
+        # and the next scheduled trigger picks up anything that lands after it.
+        if skip_if_busy:
+            if self.rollup_lock.acquire(blocking=False):
+                return True
+            log.info("analytics rebuild already running — skipping this refresh "
+                     "so it can't stack another multi-hour pass behind it (the "
+                     "running rebuild covers current data; the next cycle catches "
+                     "the rest)")
+            return False
         t_wait = time.monotonic()
         while not self.rollup_lock.acquire(timeout=60.0):
             log.info("analytics rebuild: waiting for the previous rebuild to "
                      "finish (%.0f min so far — this is a queue, not a hang; "
                      "downloads and parsing continue meanwhile)",
                      (time.monotonic() - t_wait) / 60)
+        return True
 
-    def update_rollups_incremental(self) -> float:
+    def update_rollups_incremental(self, skip_if_busy: bool = False) -> float:
         """Incremental alternative to rebuild_rollups(): recompute ONLY the
         slices of the materialized rollups that new files can affect, so the
         cost scales with the ingested payer's data instead of the whole store
@@ -1867,7 +1894,8 @@ class Store:
         import logging as _logging
 
         log = _logging.getLogger(__name__)
-        self._acquire_rollup_lock(log)
+        if not self._acquire_rollup_lock(log, skip_if_busy=skip_if_busy):
+            return ROLLUP_SKIPPED
         try:
             self._rollup_active = True
             with self.connect() as con:
@@ -2005,7 +2033,7 @@ class Store:
             self._rollup_active = False
             self.rollup_lock.release()
 
-    def refresh_directory_incremental(self) -> float:
+    def refresh_directory_incremental(self, skip_if_busy: bool = False) -> float:
         """Names-only sibling of update_rollups_incremental: recompute
         tin_directory rows ONLY for TINs touched by NPIs whose NPPES record
         landed since the last refresh (meta `directory_names_through`, keyed
@@ -2023,7 +2051,8 @@ class Store:
         import logging as _logging
 
         log = _logging.getLogger(__name__)
-        self._acquire_rollup_lock(log)
+        if not self._acquire_rollup_lock(log, skip_if_busy=skip_if_busy):
+            return ROLLUP_SKIPPED
         try:
             self._rollup_active = True
             with self.connect() as con:

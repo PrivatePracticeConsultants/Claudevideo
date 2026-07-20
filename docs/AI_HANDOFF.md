@@ -268,6 +268,30 @@ Two codebases live in this repo:
    `scan_inbox` batches to ONE rebuild per pass for the same reason.
    Rebuilds give up after 3 failures (raw data is safe) and never run
    per-file during queue grinds.
+   COALESCING (skip_if_busy): the PERIODIC triggers — the ingest worker's
+   `rebuild_now` and the enrichment name refresh `_maybe_refresh_directory` —
+   now pass `skip_if_busy=True` to `update_rollups_incremental` /
+   `rebuild_rollups` / `refresh_directory_incremental`. `_acquire_rollup_lock`
+   then does a NON-BLOCKING acquire and returns the `ROLLUP_SKIPPED` sentinel
+   instead of queueing. Before this, both triggers blocking-queued behind one
+   in-flight rebuild and then each ran its OWN multi-hour pass in turn — on a
+   300M-row store that meant a full rebuild finishing only to have the queued
+   name-refresh start its own whole-store pass, logged as "analytics rebuild:
+   waiting for the previous rebuild to finish (388 min so far)" from TWO
+   different waiters at once, which reads as an infinite loop. With coalescing at
+   most one rebuild runs; a skipped trigger keeps its work pending (ingest
+   credits / the names-dirty flag) and the next cadence retries once the lock
+   frees. The one-shot CLI enrichment passes `force=True` → `skip_if_busy=False`
+   so it still runs immediately (no concurrent rebuild exists there). A slow
+   FULL rebuild being CHOSEN over the fast incremental is a separate signal:
+   `update_rollups_incremental` raises (and `rebuild_now` falls back to a full
+   rebuild, LOGGING the reason) when `rollup_needs_full` is set — a removal that
+   couldn't be scoped, or a prior full rebuild that never completed to clear it.
+   The flag clears only on a SUCCESSFUL full build (rate spine included), so a
+   full rebuild that keeps failing, or a re-ingest whose old part is transiently
+   unreadable and re-latches the flag, keeps forcing fulls. If the field log
+   shows "incremental analytics update unavailable (a data removal could not be
+   scoped — full rebuild required)", that is the cause.
    Above ~15M raw rows they build in hash-partitioned slices (the partition
    column is in every GROUP BY key — slice-union ≡ single shot) inside ONE
    transaction: a mid-slice failure rolls back to the previous complete

@@ -110,6 +110,17 @@ def _wait_out_rollup(store: Store, stop: threading.Event, cap_seconds: float = 6
         waited += 2.0
 
 
+def _names_only_rebuild(store: Store, skip_if_busy: bool = True):
+    """Full directory rebuild, coalesced (skip_if_busy) when the Store supports
+    it — a name refresh must never stack a whole-store rebuild behind an
+    in-flight ingest rollup. Falls back to the plain call for older Store stubs
+    (tests) that lack the parameter."""
+    try:
+        return store.rebuild_rollups(names_only=True, skip_if_busy=skip_if_busy)
+    except TypeError:
+        return store.rebuild_rollups(names_only=True)
+
+
 def _maybe_refresh_directory(store: Store, force: bool = False) -> bool:
     """Rebuild the name/geo directory, throttled GLOBALLY (across enrichment
     cycles) so the persistent serve loop — which re-polls frequently — can't
@@ -153,16 +164,34 @@ def _maybe_refresh_directory(store: Store, force: bool = False) -> bool:
         # store that recurring whole-store pass flattened extraction
         # throughput minutes into every run. Full rebuild stays as the
         # fallback (first build, schema drift, huge affected set).
+        # COALESCE: skip_if_busy so a name refresh never queues behind an
+        # in-flight ingest rollup and then runs its OWN (whole-store, on the
+        # fallback path) rebuild in turn — the pile-up that stacked multi-hour
+        # rebuilds back-to-back. If a rebuild is already running it returns
+        # ROLLUP_SKIPPED; we leave the dirty flag set and retry next cadence.
+        try:
+            from .store import ROLLUP_SKIPPED
+        except Exception:  # noqa: BLE001 — older Store stub in tests
+            ROLLUP_SKIPPED = -1.0
+        # force (the one-shot CLI path) must run NOW regardless — no concurrent
+        # rebuild exists there anyway; only the persistent serve loop coalesces.
+        skip = not force
         inc = getattr(store, "refresh_directory_incremental", None)
         if callable(inc):
             try:
+                took = inc(skip_if_busy=skip)
+            except TypeError:  # older Store without skip_if_busy
                 took = inc()
             except Exception as e:  # noqa: BLE001 — strict-precondition optimization
                 log.info("scoped name refresh unavailable (%s) — full directory "
                          "rebuild", e)
-                took = store.rebuild_rollups(names_only=True)
+                took = _names_only_rebuild(store, skip)
         else:  # older Store stub in tests
-            took = store.rebuild_rollups(names_only=True)
+            took = _names_only_rebuild(store, skip)
+        if took == ROLLUP_SKIPPED:
+            # a rebuild is already running — don't clear the dirty flag or
+            # re-time the interval; the next cadence retries once it frees
+            return False
         if not isinstance(took, (int, float)):  # older Store stub in tests
             took = time.monotonic() - t0
         with _refresh_lock:

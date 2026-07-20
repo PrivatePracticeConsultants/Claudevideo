@@ -1524,19 +1524,29 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
         # stamp at attempt time so a failing rebuild doesn't re-fire the
         # time-based trigger every loop (batch/idle triggers still apply)
         last_rebuild_at = time.monotonic()
+        # COALESCE: if a rebuild (e.g. the enrichment name refresh) is already
+        # running, don't queue behind it and then run our OWN multi-hour pass in
+        # turn — the credits stay pending and the next cycle retries. Without
+        # this, the ingest rollup + the name refresh stacked behind one slow
+        # rebuild and ran back-to-back for hours (the "waiting 388 min" loop).
+        from .store import ROLLUP_SKIPPED
         log.info("updating analytics rollups (%d newly ingested file(s))...", n)
         try:
             try:
                 # payer-slice update: cost scales with the new files' payers,
                 # not the whole store (an hour-long full scan on a big book)
-                store.update_rollups_incremental()
+                r = store.update_rollups_incremental(skip_if_busy=True)
             except Exception as e:  # noqa: BLE001 — incremental is an
                 # optimization with strict preconditions (prior full build,
                 # current schema, payer recorded); the full rebuild is the
                 # always-correct fallback
                 log.info("incremental analytics update unavailable (%s) — "
                          "running a full rebuild", e)
-                store.rebuild_rollups()
+                r = store.rebuild_rollups(skip_if_busy=True)
+            if r == ROLLUP_SKIPPED:
+                # a rebuild is already running; keep the credits pending so the
+                # next _rollup_due fires after it, and don't count this as done
+                return
         except Exception:  # noqa: BLE001 — rollups retry on the next batch
             rollup_failures += 1
             if rollup_failures >= 3:
