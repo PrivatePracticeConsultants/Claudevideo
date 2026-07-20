@@ -132,6 +132,17 @@ class MrfxConfig(BaseModel):
     render_auto_install: bool = True
     download_timeout_seconds: float = Field(default=900.0, gt=0)
     download_retries: int = Field(default=4, ge=0)
+    # Wall-clock STALL deadline: give up on a download that has gone this many
+    # seconds without any NET forward byte progress, even if individual retries
+    # keep reconnecting. download_retries resets on any progress, so without this
+    # a flaky CDN that dribbles/truncates bytes could hold a scarce downloader
+    # slot for over an hour (bounded only by 2500 connections x the 900s read
+    # timeout) — a handful of such files parks every slot and NOTHING reaches the
+    # parsers. This bounds the damage: the stuck file fails fast, its .part is
+    # kept for a later retry, and the slot frees for good files. A steadily
+    # advancing large download keeps refreshing the progress clock and is never
+    # touched, however slow. 0 disables the deadline (old behavior).
+    download_stall_seconds: float = Field(default=600.0, ge=0)
     registry_path: Path = Path("config/payer_registry.yaml")
     registry_overrides_path: Path = Path("config/registry_overrides.yaml")
     known_sources_path: Path = Path("config/known_sources.yaml")

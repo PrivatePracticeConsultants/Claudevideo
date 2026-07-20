@@ -327,6 +327,16 @@ _UNKNOWN_LEN_RESERVATION = 2 << 30
 # queue retries; each connection sleeps ≥1 s, so this also caps wall-clock.
 _MAX_DOWNLOAD_CONNECTIONS = 2500
 
+# Preserve hard-won progress: when we ask a server to RESUME (Range) and it
+# instead answers with a full 200, the old code truncated the .part and
+# restarted from byte 0 — so one stray range-ignoring response near the end of a
+# multi-GB download wiped everything and the file then failed. Above this much
+# already-downloaded, we KEEP the .part and retry for a real resume instead of
+# throwing the bytes away; the stall deadline terminates the case where the
+# server only ever sends 200. Below it there is little to lose, so a clean
+# restart (which also handles a legitimate content change) is fine.
+_KEEP_PART_ON_200_BYTES = 64 << 20
+
 
 def _set_reservation(my_key: int, remaining: int) -> None:
     with _reservation_lock:
@@ -400,7 +410,22 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
     ua_override: str | None = None
     attempt = 0            # CONSECUTIVE no-progress attempts, counted vs the budget
     connections = 0        # total connections, runaway backstop
+    # STALL DEADLINE: wall-clock time of the last NET forward progress. A flaky
+    # server that dribbles/truncates bytes resets the `attempt` budget on every
+    # tiny advance, so without this it could hold a scarce downloader slot for
+    # over an hour and starve every other file. If no net progress lands within
+    # cfg.download_stall_seconds we give up FAST, keep the .part, and free the
+    # slot. A steadily advancing download keeps refreshing this and is untouched.
+    stall_budget = cfg.download_stall_seconds
+    last_progress_t = time.monotonic()
+    highwater = part.stat().st_size if part.exists() else 0
     while attempt <= cfg.download_retries and connections < _MAX_DOWNLOAD_CONNECTIONS:
+        if stall_budget and time.monotonic() - last_progress_t > stall_budget:
+            # bounded by the stall deadline, not the (progress-resetting) retry
+            # count — this is the terminator for a dribbling/stuck server
+            last_exc = last_exc or DownloadError(
+                "no progress for %d s" % int(stall_budget), retryable=True)
+            break
         connections += 1
         bytes_before = part.stat().st_size if part.exists() else 0
         try:
@@ -457,12 +482,29 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                     cr = resp.headers.get("Content-Range", "")
                     total = int(cr.rsplit("/", 1)[-1]) if "/" in cr and cr.rsplit("/", 1)[-1].isdigit() else None
                 else:
+                    if resume_from >= _KEEP_PART_ON_200_BYTES:
+                        # PRESERVE hard-won progress: we asked to resume a large
+                        # .part and the server sent the whole file (ignored our
+                        # Range). Truncating back to 0 here is what let one stray
+                        # 200 near the end of a multi-GB download wipe everything
+                        # and then fail. Skip this response WITHOUT touching the
+                        # .part or validator and retry for a real 206 resume; if
+                        # the server only ever sends 200 the stall deadline ends
+                        # it with the bytes intact for a later retry.
+                        log.warning(
+                            "%s: server returned the full file for our resume "
+                            "request; keeping the %.0f MB already downloaded and "
+                            "retrying for a resume", url, resume_from / 1e6)
+                        raise DownloadError(
+                            "server ignored resume; kept partial download",
+                            retryable=True)
                     if resume_from and req_headers.get("Range"):
-                        # we asked for a range and got a full 200 — this server
-                        # ignores our conditional resume (e.g. it treats the
-                        # stored validator as weak). Drop it so the NEXT attempt
-                        # sends a plain unconditional Range instead of repeating
-                        # the doomed If-Range and restarting from 0 forever.
+                        # small .part: little to lose. We asked for a range and
+                        # got a full 200 — this server ignores our conditional
+                        # resume (e.g. it treats the stored validator as weak).
+                        # Drop it so the NEXT attempt sends a plain unconditional
+                        # Range instead of repeating the doomed If-Range and
+                        # restarting from 0 forever.
                         val_p.unlink(missing_ok=True)
                     resume_from = 0  # server sent the whole file (or fresh start)
                     total = int(resp.headers.get("Content-Length") or 0) or None
@@ -594,6 +636,12 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
         # CONSECUTIVE zero-progress attempts count against download_retries.
         # _MAX_DOWNLOAD_CONNECTIONS bounds the total so a truly stuck server ends.
         bytes_after = part.stat().st_size if part.exists() else 0
+        if bytes_after > highwater:
+            # genuine NET forward progress (past the previous best) — reset the
+            # stall clock. A truncate-and-rewrite of the same bytes does NOT
+            # advance the highwater, so it correctly counts as a stall.
+            highwater = bytes_after
+            last_progress_t = time.monotonic()
         if bytes_after > bytes_before:
             log.info("download %s: advanced to %.0f MB after connection %d; resuming",
                      url, bytes_after / 1e6, connections)
@@ -624,7 +672,22 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
     # keep the .part: every failure that lands here was transient (terminal
     # ones raised above), so a later "retry" on the queue resumes the download
     # instead of restarting a multi-GB file from byte zero
-    msg = f"download failed after {connections} attempts: {last_exc}"
+    stalled = stall_budget and time.monotonic() - last_progress_t > stall_budget
+    if stalled:
+        # the file the user actually asked about: the CDN closes early / stalls
+        # and this server won't resume, so retries can't finish it. Say so
+        # plainly and give the one reliable workaround, and note the slot is now
+        # free for the other files (the whole point of failing fast here).
+        got = f"{highwater / 1e6:.0f} MB" if highwater else "no data"
+        msg = (f"gave up after {int(stall_budget)}s with no download progress "
+               f"({got} received over {connections} tries) — this server keeps "
+               "closing the connection early and won't resume. The bytes so far "
+               "are kept, so pressing retry later (or on a better connection) "
+               "picks up where it stopped; or open the link in your browser and "
+               "drop the downloaded file into data/inbox/. Other files keep "
+               "downloading in the meantime.")
+    else:
+        msg = f"download failed after {connections} attempts: {last_exc}"
     if "CERTIFICATE_VERIFY_FAILED" in str(last_exc):
         msg += TLS_HELP
     # retryable=True: the CAUSE was transient (terminal causes raised above),

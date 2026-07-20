@@ -401,6 +401,25 @@ not yet built — pick these up before adding features):
 - No cancel for in-flight downloads/parses (only queued/failed/oversize rows
   have actions); a wrong 22 GB paste must run its course or the server be
   restarted.
+- Download slot starvation is bounded by a STALL DEADLINE, not just retries.
+  `download_retries` resets on ANY byte progress, so a flaky CDN that
+  dribbles/truncates bytes could once hold one of the few (2-4) downloader slots
+  for 75+ min (only `_MAX_DOWNLOAD_CONNECTIONS=2500` x the 900s read timeout
+  bounded it) — a handful of such files parked every slot and NOTHING reached
+  the parsers. `download_stall_seconds` (default 600) gives up when there is no
+  NET forward progress (tracked by a `highwater` mark, so a truncate-and-rewrite
+  of the same bytes counts as a stall) for that long; the row fails fast with a
+  plain-language message, its `.part` is kept for a later retry, and the slot
+  frees for good files. A steadily-advancing large download keeps refreshing the
+  clock and is never killed. RELATEDLY: a `Range`-ignored full `200` answering a
+  resume no longer truncates a large `.part` back to 0 (>`_KEEP_PART_ON_200_BYTES`
+  = 64 MB it is skipped and we retry for a real 206) — one stray 200 near the end
+  of a multi-GB download used to wipe everything and then fail. Regression-tested
+  (`test_stall_deadline_fails_fast_and_keeps_partial`,
+  `test_range_ignored_200_keeps_large_partial`). Still open: no fair scheduling —
+  `_claim_next` is plain `ORDER BY id`, so a cluster of flaky low-id rows is
+  re-tried before fresh files; deprioritizing rows that have already burned
+  connections would let good files jump the queue.
 - Orphaned .part files: skipping a row whose download had started leaves its
   .part in data/downloads forever (no sweep ties .parts to skipped rows).
 - The Files tab's actionable child window is the newest 500 rows; oversize

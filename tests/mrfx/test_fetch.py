@@ -1271,6 +1271,125 @@ def test_resume_restarts_when_content_changed(cfg):
         httpd.shutdown()
 
 
+def test_stall_deadline_fails_fast_and_keeps_partial(cfg):
+    # a CDN that closes the connection early on EVERY attempt and won't resume
+    # must not hold a downloader slot for an hour (download_retries resets on any
+    # byte progress, so only this wall-clock stall deadline bounds it). It should
+    # give up within ~the deadline, keep the bytes it got, and say so plainly so
+    # the OTHER queued files keep flowing.
+    import http.server as hs
+    import os as _os
+    import time as _time
+
+    cfg.download_stall_seconds = 1.0   # tiny deadline for the test
+    cfg.download_retries = 6           # would loop long without the deadline
+    payload = _os.urandom(4 << 20)
+    calls = []
+
+    class EarlyClose(hs.BaseHTTPRequestHandler):
+        def do_GET(self):
+            calls.append(1)
+            # always advertise the FULL size but send only a few KB then hang up,
+            # and ignore Range (answer 200) — the un-resumable early-close class
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload[:4096])
+            self.wfile.flush()
+            self.connection.close()
+
+        def log_message(self, *a):
+            pass
+
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), EarlyClose)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        from mrfx.fetch import DownloadError, download, filename_for
+
+        url = f"http://127.0.0.1:{httpd.server_address[1]}/f.json.gz"
+        dest = cfg.downloads_dir / filename_for(url)
+        part = dest.with_suffix(dest.suffix + ".part")
+        t0 = _time.monotonic()
+        with pytest.raises(DownloadError) as ei:
+            download(cfg, url, dest)
+        elapsed = _time.monotonic() - t0
+        # fails FAST (deadline + at most one attempt's worth), not 75 min
+        assert elapsed < 60, f"stall deadline did not fire ({elapsed:.0f}s)"
+        assert "no download progress" in str(ei.value)
+        assert getattr(ei.value, "retryable", False) is True   # kept, not dead
+        assert part.exists()   # .part retained for a later retry, not discarded
+    finally:
+        httpd.shutdown()
+
+
+def test_range_ignored_200_keeps_large_partial(cfg, monkeypatch):
+    # a stray full-file 200 answering our RESUME request must not truncate a
+    # large .part back to zero (one such response near the end of a multi-GB
+    # download used to wipe everything and then fail). Above the keep threshold
+    # we skip the 200 and retry for a real 206 resume, preserving the bytes.
+    import hashlib
+    import http.server as hs
+    import os as _os
+
+    import mrfx.fetch as F
+    monkeypatch.setattr(F, "_KEEP_PART_ON_200_BYTES", 1000)  # trip with a small part
+
+    payload = _os.urandom(5000)
+    calls = []
+    state = {"served_200": False}
+
+    class Handler(hs.BaseHTTPRequestHandler):
+        def do_GET(self):
+            rng = self.headers.get("Range")
+            start = int(rng.split("=")[1].rstrip("-")) if rng else 0
+            calls.append(start)
+            if rng and not state["served_200"]:
+                # first RESUME: ignore the range, answer a full 200 (the trap)
+                state["served_200"] = True
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
+            if rng:  # later resume: honor it -> completes from the kept bytes
+                body = payload[start:]
+                self.send_response(206)
+                self.send_header("Content-Range", f"bytes {start}-{len(payload)-1}/{len(payload)}")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            # no prior .part in this test path
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *a):
+            pass
+
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        from mrfx.fetch import download, filename_for
+
+        url = f"http://127.0.0.1:{httpd.server_address[1]}/f.json.gz"
+        dest = cfg.downloads_dir / filename_for(url)
+        part = dest.with_suffix(dest.suffix + ".part")
+        # seed a 2000-byte partial (correct prefix) so a resume is attempted
+        part.parent.mkdir(parents=True, exist_ok=True)
+        part.write_bytes(payload[:2000])
+
+        sha, _ = download(cfg, url, dest)
+        assert sha == hashlib.sha256(payload).hexdigest()   # completed, intact
+        # the 200 was skipped WITHOUT truncating: the resume that completed it
+        # started from 2000 (the kept bytes), never from 0
+        assert 0 not in calls, f"restarted from byte 0 (progress wiped): {calls}"
+        assert 2000 in calls
+    finally:
+        httpd.shutdown()
+
+
 def test_js_portal_click_through_reveals_links(cfg):
     # Harvard Pilgrim-class portal: the served page has NO links and no
     # auto-fired API call — the list appears only after clicking "View Plan

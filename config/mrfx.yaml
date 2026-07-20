@@ -49,6 +49,14 @@ parallel_ingests: 0
 # their remaining size, so together they can never fill your disk.
 parallel_downloads: 0
 
+# Give up on a download that goes this many seconds with NO forward progress —
+# a flaky server (CDN) that keeps closing the connection early and won't resume.
+# Without this, one bad file can tie up a download slot for over an hour and
+# stall everything else; with it the file fails fast (its partial bytes are kept
+# for a later retry) so the others keep flowing. A slow-but-steady large
+# download is never affected. Lower it to abandon dead files sooner; 0 disables.
+download_stall_seconds: 600
+
 inbox_dir: data/inbox
 processed_dir: data/processed
 failed_dir: data/failed
