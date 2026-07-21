@@ -336,6 +336,13 @@ _MAX_DOWNLOAD_CONNECTIONS = 2500
 # server only ever sends 200. Below it there is little to lose, so a clean
 # restart (which also handles a legitimate content change) is fine.
 _KEEP_PART_ON_200_BYTES = 64 << 20
+# ...but only refuse a range-ignored 200 this many times before accepting it as
+# a fresh restart. Preserving the .part protects against a TRANSIENT 200 (a CDN
+# hiccup on a server that normally resumes); but a server that NEVER supports
+# Range answers every resume with 200, and refusing forever means the file can
+# never complete. After a few refusals we take the 200 and restart from 0 — the
+# only way such a file finishes. Reset once a real 206 proves resume works.
+_KEEP_200_MAX_REFUSALS = 3
 
 
 def _set_reservation(my_key: int, remaining: int) -> None:
@@ -425,6 +432,7 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
     # download may hold its slot, regardless of slow progress.
     max_budget = cfg.download_max_seconds
     dl_start = time.monotonic()
+    kept_200_refusals = 0  # consecutive range-ignored 200s refused to save a big .part
     def _over_time_cap() -> bool:
         return bool(max_budget) and time.monotonic() - dl_start > max_budget
     while attempt <= cfg.download_retries and connections < _MAX_DOWNLOAD_CONNECTIONS:
@@ -462,6 +470,7 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                     # range not satisfiable — stale/oversized part; start over
                     part.unlink(missing_ok=True)
                     val_p.unlink(missing_ok=True)
+                    highwater = 0  # the .part is gone — don't claim bytes kept
                     raise DownloadError("stale partial download discarded", retryable=True)
                 if resp.status_code in RETRYABLE_STATUS:
                     raise DownloadError(
@@ -494,23 +503,37 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                     # Content-Range: bytes <from>-<to>/<total>
                     cr = resp.headers.get("Content-Range", "")
                     total = int(cr.rsplit("/", 1)[-1]) if "/" in cr and cr.rsplit("/", 1)[-1].isdigit() else None
+                    kept_200_refusals = 0  # resume works — reset the refuse budget
                 else:
-                    if resume_from >= _KEEP_PART_ON_200_BYTES:
+                    if (resume_from >= _KEEP_PART_ON_200_BYTES
+                            and kept_200_refusals < _KEEP_200_MAX_REFUSALS):
                         # PRESERVE hard-won progress: we asked to resume a large
                         # .part and the server sent the whole file (ignored our
                         # Range). Truncating back to 0 here is what let one stray
                         # 200 near the end of a multi-GB download wipe everything
                         # and then fail. Skip this response WITHOUT touching the
-                        # .part or validator and retry for a real 206 resume; if
-                        # the server only ever sends 200 the stall deadline ends
-                        # it with the bytes intact for a later retry.
+                        # .part or validator and retry for a real 206 resume.
+                        # BOUNDED: a server that NEVER supports Range only ever
+                        # sends 200, so after _KEEP_200_MAX_REFUSALS we fall
+                        # through and accept the restart (below) — otherwise the
+                        # file could never finish (audit HIGH-1).
+                        kept_200_refusals += 1
                         log.warning(
                             "%s: server returned the full file for our resume "
                             "request; keeping the %.0f MB already downloaded and "
-                            "retrying for a resume", url, resume_from / 1e6)
+                            "retrying for a resume (%d/%d)", url, resume_from / 1e6,
+                            kept_200_refusals, _KEEP_200_MAX_REFUSALS)
                         raise DownloadError(
                             "server ignored resume; kept partial download",
                             retryable=True)
+                    if resume_from >= _KEEP_PART_ON_200_BYTES:
+                        # exhausted the refuse budget: this server won't resume,
+                        # so accept the full 200 and restart from 0 (the only way
+                        # it completes). The bytes are overwritten from scratch.
+                        log.warning(
+                            "%s: server never honored our resume after %d tries — "
+                            "restarting the download from the beginning",
+                            url, kept_200_refusals)
                     if resume_from and req_headers.get("Range"):
                         # small .part: little to lose. We asked for a range and
                         # got a full 200 — this server ignores our conditional
@@ -712,8 +735,8 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
         # a slow-but-progressing download that ran past the wall-clock cap:
         # set aside so it can't keep starving the parsers, bytes kept for resume
         got = f"{highwater / 1e6:.0f} MB" if highwater else "no data"
-        mins = int(max_budget / 60)
-        msg = (f"set aside after {mins} min still downloading ({got} so far) so it "
+        span = f"{max_budget / 60:.0f} min" if max_budget >= 60 else f"{int(max_budget)} s"
+        msg = (f"set aside after {span} still downloading ({got} so far) so it "
                "can't keep blocking other files from ingesting — the connection "
                "is too slow to finish it in a reasonable time. The bytes so far "
                "are kept: press retry to resume it (ideally on a faster "
@@ -1549,21 +1572,30 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
     last_rebuild_at = time.monotonic()
     rollup_min_interval = float(ROLLUP_MAX_STALE_SECONDS)
 
-    def rebuild_now():
+    def rebuild_now() -> bool:
+        """Returns True only when a rebuild actually RAN to completion. False on
+        no-op / coalesced-skip / failure so the coordinator backs off (sleeps)
+        instead of hot-spinning: _rollup_due fires unconditionally while the
+        queue is idle with credits pending, so a bare `continue` after a skip
+        would peg a CPU and flood the log for the whole length of a concurrent
+        multi-hour rebuild (audit HIGH-2)."""
         nonlocal ingests_pending_rollup, rollup_failures, last_rebuild_at, rollup_min_interval
         with state:
             n = ingests_pending_rollup
         if not n:
-            return
+            return False
+        # COALESCE: if a rebuild (e.g. the enrichment name refresh) is already
+        # running, don't queue behind it and then run our OWN multi-hour pass in
+        # turn — the credits stay pending and the next cycle retries. Check
+        # BEFORE logging/attempting so the idle back-off path stays quiet (no
+        # "updating rollups…" line every few seconds for hours). skip_if_busy on
+        # the store calls is the race-safe backstop for the check-then-act gap.
+        from .store import ROLLUP_SKIPPED
+        if store.rollup_in_progress():
+            return False
         # stamp at attempt time so a failing rebuild doesn't re-fire the
         # time-based trigger every loop (batch/idle triggers still apply)
         last_rebuild_at = time.monotonic()
-        # COALESCE: if a rebuild (e.g. the enrichment name refresh) is already
-        # running, don't queue behind it and then run our OWN multi-hour pass in
-        # turn — the credits stay pending and the next cycle retries. Without
-        # this, the ingest rollup + the name refresh stacked behind one slow
-        # rebuild and ran back-to-back for hours (the "waiting 388 min" loop).
-        from .store import ROLLUP_SKIPPED
         log.info("updating analytics rollups (%d newly ingested file(s))...", n)
         try:
             try:
@@ -1580,7 +1612,7 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
             if r == ROLLUP_SKIPPED:
                 # a rebuild is already running; keep the credits pending so the
                 # next _rollup_due fires after it, and don't count this as done
-                return
+                return False
         except Exception:  # noqa: BLE001 — rollups retry on the next batch
             rollup_failures += 1
             if rollup_failures >= 3:
@@ -1596,9 +1628,9 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
                     # landed during the failing attempts must still be able to
                     # trigger a later rebuild within this run
                     ingests_pending_rollup = max(0, ingests_pending_rollup - n)
-                return
+                return False
             log.exception("rollup rebuild failed; will retry after the next file")
-            return
+            return False
         rollup_failures = 0
         # Re-stamp at COMPLETION and self-throttle by how long the rebuild
         # actually took: counting the 90s window from the start would make a
@@ -1759,8 +1791,14 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
                          + counts.get("ingesting", 0) + busy)
             if _rollup_due(pend, in_flight, time.monotonic() - last_rebuild_at,
                            rollup_min_interval):
-                rebuild_now()
-                continue
+                if rebuild_now():
+                    continue   # a rebuild RAN — re-evaluate the queue now
+                # skipped (a rebuild is already running) or failed: fall through
+                # to the wait below so we don't hot-spin _rollup_due (which fires
+                # unconditionally while idle) for the whole concurrent rebuild.
+                # In drain mode there is no concurrent rebuild holder, so this
+                # path is only reached on a genuine failure; the post-loop final
+                # rebuild still handles any pending credits before returning.
             if in_flight == 0 and drain:
                 break
             if stop is not None:

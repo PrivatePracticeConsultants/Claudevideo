@@ -448,8 +448,12 @@ not yet built — pick these up before adding features):
   slow attempt stays inside the iter_bytes loop for hours and would never reach
   the loop-top check): past it the file is set aside with its .part kept
   (retryable) so the slot frees. Regression-tested
-  (`test_wall_clock_cap_sets_aside_a_too_slow_download`). Still open: no fair
-  scheduling —
+  (`test_wall_clock_cap_sets_aside_a_too_slow_download`). The preserve-partial
+  refusal of a range-ignored 200 is BOUNDED (`_KEEP_200_MAX_REFUSALS`): a server
+  that NEVER supports Range only ever sends 200, so after a few refusals we
+  accept it and restart from 0 — otherwise such a file could never complete
+  (`test_no_range_server_completes_after_bounded_200_refusals`). Still open: no
+  fair scheduling —
   `_claim_next` is plain `ORDER BY id`, so a cluster of flaky low-id rows is
   re-tried before fresh files; deprioritizing rows that have already burned
   connections would let good files jump the queue.

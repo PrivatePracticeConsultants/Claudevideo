@@ -1322,6 +1322,53 @@ def test_stall_deadline_fails_fast_and_keeps_partial(cfg):
         httpd.shutdown()
 
 
+def test_no_range_server_completes_after_bounded_200_refusals(cfg, monkeypatch):
+    """A server that NEVER supports Range (always answers a resume with a full
+    200) must still COMPLETE. The preserve-partial guard refuses a range-ignored
+    200 for a large .part to protect progress, but bounded: after
+    _KEEP_200_MAX_REFUSALS it accepts the 200 and restarts, so the file finishes
+    instead of failing forever (audit HIGH-1 regression)."""
+    import hashlib
+    import http.server as hs
+    import os as _os
+
+    import mrfx.fetch as F
+    monkeypatch.setattr(F, "_KEEP_PART_ON_200_BYTES", 1000)  # trip with a small part
+
+    payload = _os.urandom(5000)
+    calls = []
+
+    class NoRange(hs.BaseHTTPRequestHandler):
+        def do_GET(self):
+            calls.append(self.headers.get("Range"))
+            # ALWAYS ignore Range → full 200, every time
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *a):
+            pass
+
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), NoRange)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        from mrfx.fetch import download, filename_for
+
+        url = f"http://127.0.0.1:{httpd.server_address[1]}/f.json.gz"
+        dest = cfg.downloads_dir / filename_for(url)
+        part = dest.with_suffix(dest.suffix + ".part")
+        part.parent.mkdir(parents=True, exist_ok=True)
+        part.write_bytes(payload[:2000])   # a large (>threshold) prior partial
+
+        sha, _ = download(cfg, url, dest)
+        assert sha == hashlib.sha256(payload).hexdigest()   # COMPLETED, intact
+        # it refused the 200 a bounded number of times, then accepted the restart
+        assert len(calls) >= 2
+    finally:
+        httpd.shutdown()
+
+
 def test_wall_clock_cap_sets_aside_a_too_slow_download(cfg):
     """A download that keeps trickling in (advancing, so the no-progress stall
     deadline never fires) must not hold a slot for hours. The hard wall-clock cap

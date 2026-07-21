@@ -110,15 +110,25 @@ def _wait_out_rollup(store: Store, stop: threading.Event, cap_seconds: float = 6
         waited += 2.0
 
 
+def _accepts_skip(fn) -> bool:
+    """Does `fn` accept a skip_if_busy kwarg? Probe the SIGNATURE rather than
+    catch TypeError from the call — a TypeError raised INSIDE the rebuild would
+    otherwise be swallowed and silently retried without coalescing."""
+    try:
+        import inspect
+        return "skip_if_busy" in inspect.signature(fn).parameters
+    except (TypeError, ValueError):  # C-callable / no signature (old test stub)
+        return False
+
+
 def _names_only_rebuild(store: Store, skip_if_busy: bool = True):
     """Full directory rebuild, coalesced (skip_if_busy) when the Store supports
     it — a name refresh must never stack a whole-store rebuild behind an
     in-flight ingest rollup. Falls back to the plain call for older Store stubs
     (tests) that lack the parameter."""
-    try:
+    if _accepts_skip(store.rebuild_rollups):
         return store.rebuild_rollups(names_only=True, skip_if_busy=skip_if_busy)
-    except TypeError:
-        return store.rebuild_rollups(names_only=True)
+    return store.rebuild_rollups(names_only=True)
 
 
 def _maybe_refresh_directory(store: Store, force: bool = False) -> bool:
@@ -178,10 +188,9 @@ def _maybe_refresh_directory(store: Store, force: bool = False) -> bool:
         skip = not force
         inc = getattr(store, "refresh_directory_incremental", None)
         if callable(inc):
+            inc_kwargs = {"skip_if_busy": skip} if _accepts_skip(inc) else {}
             try:
-                took = inc(skip_if_busy=skip)
-            except TypeError:  # older Store without skip_if_busy
-                took = inc()
+                took = inc(**inc_kwargs)
             except Exception as e:  # noqa: BLE001 — strict-precondition optimization
                 log.info("scoped name refresh unavailable (%s) — full directory "
                          "rebuild", e)
