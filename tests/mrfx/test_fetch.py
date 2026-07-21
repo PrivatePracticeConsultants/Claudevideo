@@ -1322,6 +1322,27 @@ def test_stall_deadline_fails_fast_and_keeps_partial(cfg):
         httpd.shutdown()
 
 
+def test_add_urls_accepts_bare_domain_and_rejects_garbage(store):
+    """A user pasting a portal address from the browser bar without the scheme
+    ('transparency-in-coverage.uhc.com') must be accepted (https:// assumed),
+    not rejected as 'not a valid link'. Real garbage / bare filenames still fail."""
+    from mrfx.fetch import _normalize_url, add_urls
+
+    assert _normalize_url("transparency-in-coverage.uhc.com") == \
+        "https://transparency-in-coverage.uhc.com"
+    assert _normalize_url("example.com/mrf/latest.json") == \
+        "https://example.com/mrf/latest.json"
+    assert _normalize_url("//cdn.example.com/x.json") == "https://cdn.example.com/x.json"
+    assert _normalize_url("rates.json") is None        # bare filename, not a host
+    assert _normalize_url("just some text") is None
+
+    r = add_urls(store, ["transparency-in-coverage.uhc.com", "not a url", ""])
+    assert r["added"] == 1 and r["invalid"] == 1        # blank line isn't counted
+    (row,) = [u for u in store.list_urls()
+              if u["url"] == "https://transparency-in-coverage.uhc.com"]
+    assert row["status"] == "queued"
+
+
 def test_no_range_server_completes_after_bounded_200_refusals(cfg, monkeypatch):
     """A server that NEVER supports Range (always answers a resume with a full
     200) must still COMPLETE. The preserve-partial guard refuses a range-ignored

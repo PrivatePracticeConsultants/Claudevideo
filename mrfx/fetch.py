@@ -1485,19 +1485,45 @@ def _cleanup_raw(cfg: MrfxConfig, path: Path) -> None:
         log.warning("could not delete raw %s: %s", path, e)
 
 
+# a bare host (optionally with a path) that a person pastes from their browser's
+# address bar without the scheme — "transparency-in-coverage.uhc.com". Requires a
+# dot-separated domain with a real TLD and no whitespace, so free text and typos
+# aren't silently turned into URLs.
+_BARE_HOST_RE = re.compile(r"^(?:[\w-]+\.)+[a-z]{2,}(?::\d+)?(?:/\S*)?$", re.I)
+
+
+def _normalize_url(u: str) -> str | None:
+    """Return a fetchable http(s) URL, or None if it isn't one. Accepts a bare
+    domain the way a browser would — prepend https:// — so a pasted
+    'transparency-in-coverage.uhc.com' isn't rejected as 'not a valid link'."""
+    if not u:
+        return None
+    if u.lower().startswith(("http://", "https://")):
+        return u
+    if u.startswith("//"):          # protocol-relative
+        return "https:" + u
+    if _BARE_HOST_RE.match(u):      # bare host / host+path
+        # ...but don't turn a bare local filename ("rates.json") into a host:
+        # only when there's no path and the "TLD" is a data-file extension.
+        if "/" not in u and u.rsplit(".", 1)[-1].split(":")[0].lower() in {
+                "json", "gz", "zip", "csv", "txt", "xml", "pdf", "xlsx"}:
+            return None
+        return "https://" + u
+    return None
+
+
 def add_urls(store: Store, urls: list[str]) -> dict:
     """Enqueue a batch of user-supplied URLs. Returns counts. {FIRST_OF_MONTH}
     placeholders (copied from config/known_sources.yaml) resolve here too, so
-    a pasted catalog line works the same as `mrfx add --known`."""
+    a pasted catalog line works the same as `mrfx add --known`. A bare domain
+    (no http/https) is accepted and https:// is assumed."""
     from .known_sources import expand_placeholders
 
     added = skipped = invalid = 0
     for raw in urls:
-        u = expand_placeholders(raw.strip())
+        u = _normalize_url(expand_placeholders(raw.strip()))
         if not u:
-            continue
-        if not u.lower().startswith(("http://", "https://")):
-            invalid += 1
+            invalid += 1 if raw.strip() else 0
             continue
         if store.enqueue_url(u, dedup_key(u)) is not None:
             added += 1
