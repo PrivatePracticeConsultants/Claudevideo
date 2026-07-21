@@ -440,7 +440,16 @@ not yet built — pick these up before adding features):
   = 64 MB it is skipped and we retry for a real 206) — one stray 200 near the end
   of a multi-GB download used to wipe everything and then fail. Regression-tested
   (`test_stall_deadline_fails_fast_and_keeps_partial`,
-  `test_range_ignored_200_keeps_large_partial`). Still open: no fair scheduling —
+  `test_range_ignored_200_keeps_large_partial`). The stall deadline only fires on
+  NO net progress, so a download TRICKLING in at tens of KB/s advances forever
+  and never trips it — yet holds a slot for hours ("694 min downloading, still
+  blocking ingestion"). `download_max_seconds` (default 3h) is a HARD wall-clock
+  cap on one download, enforced at the retry loop top AND mid-stream (a single
+  slow attempt stays inside the iter_bytes loop for hours and would never reach
+  the loop-top check): past it the file is set aside with its .part kept
+  (retryable) so the slot frees. Regression-tested
+  (`test_wall_clock_cap_sets_aside_a_too_slow_download`). Still open: no fair
+  scheduling —
   `_claim_next` is plain `ORDER BY id`, so a cluster of flaky low-id rows is
   re-tried before fresh files; deprioritizing rows that have already burned
   connections would let good files jump the queue.

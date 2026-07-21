@@ -57,6 +57,14 @@ parallel_downloads: 0
 # download is never affected. Lower it to abandon dead files sooner; 0 disables.
 download_stall_seconds: 600
 
+# Hard cap (seconds) on how long ANY single download may run before it's set
+# aside so it stops blocking other files from ingesting. The stall setting above
+# only catches downloads making NO progress; this also catches ones trickling in
+# so slowly they'd hold a slot for hours (the "694 minutes downloading" case).
+# Its partial bytes are kept — press retry to resume. Default 3 hours; raise it
+# if you routinely pull very large files over a slow link, or set 0 to disable.
+download_max_seconds: 10800
+
 inbox_dir: data/inbox
 processed_dir: data/processed
 failed_dir: data/failed

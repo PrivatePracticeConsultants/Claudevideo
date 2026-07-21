@@ -143,6 +143,17 @@ class MrfxConfig(BaseModel):
     # advancing large download keeps refreshing the progress clock and is never
     # touched, however slow. 0 disables the deadline (old behavior).
     download_stall_seconds: float = Field(default=600.0, ge=0)
+    # HARD wall-clock cap on a single download, in seconds. The stall deadline
+    # above only fires on NO net progress; a file trickling in very slowly (tens
+    # of KB/s) keeps advancing, never trips it, and can hold one of the few
+    # downloader slots for many HOURS — starving the parsers of new files ("694
+    # min downloading, still blocking ingestion"). This caps the total time any
+    # one download may hold a slot: past it, the file is set aside (its partial
+    # is KEPT, so a later retry resumes it) and the slot frees for other files.
+    # Default 3h is generous for a legitimate large file on a normal connection;
+    # raise it if you routinely pull tens-of-GB files over a slow link, or set 0
+    # to disable the cap.
+    download_max_seconds: float = Field(default=10800.0, ge=0)
     registry_path: Path = Path("config/payer_registry.yaml")
     registry_overrides_path: Path = Path("config/registry_overrides.yaml")
     known_sources_path: Path = Path("config/known_sources.yaml")

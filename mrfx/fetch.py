@@ -419,12 +419,25 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
     stall_budget = cfg.download_stall_seconds
     last_progress_t = time.monotonic()
     highwater = part.stat().st_size if part.exists() else 0
+    # HARD wall-clock cap: the stall deadline only fires on NO net progress, so a
+    # download trickling in at tens of KB/s never trips it yet can hold a scarce
+    # slot for many hours and starve the parsers. This bounds the TOTAL time one
+    # download may hold its slot, regardless of slow progress.
+    max_budget = cfg.download_max_seconds
+    dl_start = time.monotonic()
+    def _over_time_cap() -> bool:
+        return bool(max_budget) and time.monotonic() - dl_start > max_budget
     while attempt <= cfg.download_retries and connections < _MAX_DOWNLOAD_CONNECTIONS:
         if stall_budget and time.monotonic() - last_progress_t > stall_budget:
             # bounded by the stall deadline, not the (progress-resetting) retry
             # count — this is the terminator for a dribbling/stuck server
             last_exc = last_exc or DownloadError(
                 "no progress for %d s" % int(stall_budget), retryable=True)
+            break
+        if _over_time_cap():
+            last_exc = last_exc or DownloadError(
+                "exceeded the %d s download time cap" % int(max_budget),
+                retryable=True)
             break
         connections += 1
         bytes_before = part.stat().st_size if part.exists() else 0
@@ -578,6 +591,15 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                                     "where it stopped.", retryable=False)
                         if max_bytes and done > max_bytes:
                             raise too_big(done)  # no Content-Length header case
+                        # enforce the wall-clock cap MID-STREAM too: a single slow
+                        # attempt that trickles bytes stays inside this loop for
+                        # hours and would never reach the loop-top check. Raise
+                        # retryable so the .part is kept; the loop-top cap check
+                        # then makes it terminal and frees the slot.
+                        if _over_time_cap():
+                            raise DownloadError(
+                                "exceeded the download time cap mid-stream",
+                                retryable=True)
                         # dashboard polls every ~4s; don't hammer the store
                         # with a write-locked UPDATE for every 8 MB of a fast
                         # link — report on bytes AND wall-clock
@@ -686,6 +708,18 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                "picks up where it stopped; or open the link in your browser and "
                "drop the downloaded file into data/inbox/. Other files keep "
                "downloading in the meantime.")
+    elif _over_time_cap():
+        # a slow-but-progressing download that ran past the wall-clock cap:
+        # set aside so it can't keep starving the parsers, bytes kept for resume
+        got = f"{highwater / 1e6:.0f} MB" if highwater else "no data"
+        mins = int(max_budget / 60)
+        msg = (f"set aside after {mins} min still downloading ({got} so far) so it "
+               "can't keep blocking other files from ingesting — the connection "
+               "is too slow to finish it in a reasonable time. The bytes so far "
+               "are kept: press retry to resume it (ideally on a faster "
+               "connection), raise download_max_seconds in config/mrfx.yaml if "
+               "this is a genuinely huge file worth the wait, or open the link in "
+               "your browser and drop the file into data/inbox/.")
     else:
         msg = f"download failed after {connections} attempts: {last_exc}"
     if "CERTIFICATE_VERIFY_FAILED" in str(last_exc):

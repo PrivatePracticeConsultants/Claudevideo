@@ -1322,6 +1322,54 @@ def test_stall_deadline_fails_fast_and_keeps_partial(cfg):
         httpd.shutdown()
 
 
+def test_wall_clock_cap_sets_aside_a_too_slow_download(cfg):
+    """A download that keeps trickling in (advancing, so the no-progress stall
+    deadline never fires) must not hold a slot for hours. The hard wall-clock cap
+    sets it aside — keeping its partial — so other files can ingest."""
+    import http.server as hs
+    import time as _time
+
+    cfg.download_stall_seconds = 999   # isolate the CAP: never trip the stall
+    cfg.download_max_seconds = 2       # tiny cap for the test
+    cfg.download_retries = 6
+
+    class SlowTrickle(hs.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", str(50 << 20))  # claim 50 MB
+            self.end_headers()
+            # dribble forever: advances the .part (no stall) but never finishes
+            try:
+                for _ in range(1000):
+                    self.wfile.write(b"x" * (256 << 10))
+                    self.wfile.flush()
+                    _time.sleep(0.2)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+        def log_message(self, *a):
+            pass
+
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), SlowTrickle)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        from mrfx.fetch import DownloadError, download, filename_for
+
+        url = f"http://127.0.0.1:{httpd.server_address[1]}/f.json.gz"
+        dest = cfg.downloads_dir / filename_for(url)
+        part = dest.with_suffix(dest.suffix + ".part")
+        t0 = _time.monotonic()
+        with pytest.raises(DownloadError) as ei:
+            download(cfg, url, dest)
+        elapsed = _time.monotonic() - t0
+        assert elapsed < 30, f"cap did not fire ({elapsed:.0f}s)"
+        assert "set aside" in str(ei.value)
+        assert getattr(ei.value, "retryable", False) is True
+        assert part.exists()   # partial kept for resume
+    finally:
+        httpd.shutdown()
+
+
 def test_range_ignored_200_keeps_large_partial(cfg, monkeypatch):
     # a stray full-file 200 answering our RESUME request must not truncate a
     # large .part back to zero (one such response near the end of a multi-GB
