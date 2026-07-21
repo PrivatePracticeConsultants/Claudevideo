@@ -1322,6 +1322,78 @@ def test_stall_deadline_fails_fast_and_keeps_partial(cfg):
         httpd.shutdown()
 
 
+def test_clear_queued_and_cancel_downloading(store):
+    """The two queue-control buttons: clear-queued bulk-skips the waiting backlog
+    (retryable, nothing destroyed); cancel-downloading flips in-flight rows and
+    records their ids so the running downloader threads abort."""
+    from mrfx.fetch import add_urls
+
+    add_urls(store, ["https://a.example/1.json.gz", "https://b.example/2.json.gz",
+                     "https://c.example/3.json.gz"])
+    # simulate one row mid-download (next_queued_url flips it to 'downloading')
+    dl = store.next_queued_url()
+    assert {u["url"]: u["status"] for u in store.list_urls()}[dl["url"]] == "downloading"
+
+    cleared = store.clear_queued()
+    assert cleared == 2            # the two still-queued rows
+    stopped = store.cancel_all_downloading()
+    assert stopped == 1
+    assert store.is_download_canceled(dl["id"]) is True
+
+    rows = {u["url"]: u for u in store.list_urls()}
+    assert all(rows[u]["status"] == "skipped" for u in rows)   # all set aside
+    # the cancel flag clears once honored, so a retry isn't instantly re-canceled
+    store.clear_download_cancel(dl["id"])
+    assert store.is_download_canceled(dl["id"]) is False
+
+
+def test_download_aborts_mid_stream_on_cancel(cfg):
+    """A cancel_check that flips True mid-download must abort promptly, keep the
+    partial (retryable), and raise a canceled DownloadError — so 'stop downloads'
+    frees the slot instead of waiting for a huge file to finish."""
+    import http.server as hs
+    import time as _time
+
+    payload_sent = {"n": 0}
+
+    class Slow(hs.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", str(50 << 20))
+            self.end_headers()
+            try:
+                for _ in range(200):
+                    self.wfile.write(b"x" * (512 << 10)); self.wfile.flush()
+                    payload_sent["n"] += 1
+                    _time.sleep(0.05)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+        def log_message(self, *a):
+            pass
+
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Slow)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        from mrfx.fetch import DownloadError, download, filename_for
+
+        url = f"http://127.0.0.1:{httpd.server_address[1]}/f.json.gz"
+        dest = cfg.downloads_dir / filename_for(url)
+        part = dest.with_suffix(dest.suffix + ".part")
+        state = {"cancel": False}
+        # cancel after a couple of chunks land
+        def check():
+            return payload_sent["n"] >= 2
+        t0 = _time.monotonic()
+        with pytest.raises(DownloadError) as ei:
+            download(cfg, url, dest, cancel_check=check)
+        assert _time.monotonic() - t0 < 20
+        assert getattr(ei.value, "canceled", False) is True
+        assert part.exists()   # partial kept for a later resume
+    finally:
+        httpd.shutdown()
+
+
 def test_add_urls_accepts_bare_domain_and_rejects_garbage(store):
     """A user pasting a portal address from the browser bar without the scheme
     ('transparency-in-coverage.uhc.com') must be accepted (https:// assumed),

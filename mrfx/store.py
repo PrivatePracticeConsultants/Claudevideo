@@ -637,6 +637,12 @@ class Store:
         self._tmp_dir.mkdir(parents=True, exist_ok=True)
         self.db_path = self.dir / "mrfx.duckdb"
         self.write_lock = threading.Lock()
+        # url_ids the user asked to cancel mid-download ("stop downloads"): the
+        # in-flight downloader thread polls is_download_canceled() and aborts.
+        # In-memory (same process as the workers); cleared once the download
+        # sees it and stops.
+        self._canceled_downloads: set[int] = set()
+        self._cancel_lock = threading.Lock()
         # Rollup rebuilds serialize against EACH OTHER here — NOT against the
         # write_lock. Holding write_lock for a rebuild froze the whole
         # pipeline: claiming a queue row (downloaders AND parsers) needs
@@ -1639,6 +1645,50 @@ class Store:
                     "progress = 0, bytes_done = 0, force_size = false WHERE status = 'failed'"
                 )
         return n
+
+    def clear_queued(self) -> int:
+        """Bulk-cancel every not-yet-started row (queued / fetched / expanding)
+        so a runaway backlog (e.g. a whole national portal) stops feeding the
+        parsers. Marks them 'skipped' (retryable — they show a retry button), so
+        nothing is destroyed; already-downloaded and in-flight rows are left
+        alone. Returns the count cleared."""
+        with self.write_lock, self.connect() as con:
+            n = con.execute(
+                "SELECT count(*) FROM url_queue WHERE status IN "
+                "('queued', 'fetched', 'expanding')").fetchone()[0]
+            if n:
+                con.execute(
+                    "UPDATE url_queue SET status = 'skipped', kind = 'canceled', "
+                    "error = 'cleared from the queue' WHERE status IN "
+                    "('queued', 'fetched', 'expanding')")
+        return n
+
+    def cancel_all_downloading(self) -> int:
+        """Stop every in-flight download so the freed slots (and the parsers) can
+        work through what's already downloaded. Flips 'downloading' rows to
+        'skipped' AND records their ids so the running downloader threads abort
+        mid-stream (is_download_canceled). Partial .part files are kept — a later
+        retry resumes them. Returns the count signalled."""
+        with self.write_lock, self.connect() as con:
+            ids = [r[0] for r in con.execute(
+                "SELECT id FROM url_queue WHERE status = 'downloading'").fetchall()]
+            if ids:
+                con.execute(
+                    "UPDATE url_queue SET status = 'skipped', kind = 'canceled', "
+                    "error = 'download stopped by user' WHERE status = 'downloading'")
+        with self._cancel_lock:
+            self._canceled_downloads.update(ids)
+        return len(ids)
+
+    def is_download_canceled(self, url_id: int) -> bool:
+        with self._cancel_lock:
+            return url_id in self._canceled_downloads
+
+    def clear_download_cancel(self, url_id: int) -> None:
+        """The downloader calls this once it has honored a cancel, so a later
+        retry of the SAME row isn't instantly canceled again."""
+        with self._cancel_lock:
+            self._canceled_downloads.discard(url_id)
 
     def requeue_oversize_within(self, limit_bytes: int) -> int:
         """Re-queue 'oversize' rows whose known size fits the CURRENT

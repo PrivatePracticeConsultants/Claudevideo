@@ -288,11 +288,12 @@ def _client(cfg: MrfxConfig, verify=None, ua: str | None = None) -> httpx.Client
 
 class DownloadError(Exception):
     def __init__(self, msg: str, status: int | None = None, retryable: bool = False,
-                 oversize: bool = False):
+                 oversize: bool = False, canceled: bool = False):
         super().__init__(msg)
         self.status = status
         self.retryable = retryable
         self.oversize = oversize  # tripped confirm_over_gb — not a real failure
+        self.canceled = canceled  # user pressed "stop downloads" — not an error
 
 
 # Concurrent downloads must never COLLECTIVELY overcommit the disk. The single
@@ -379,29 +380,41 @@ def _reserve_disk_or_raise(my_key: int, parent: Path, total: int, resume_from: i
 
 
 def download(cfg: MrfxConfig, url: str, dest: Path, progress_cb=None,
-             max_bytes: int | None = None) -> tuple[str, str]:
+             max_bytes: int | None = None, cancel_check=None) -> tuple[str, str]:
     """Stream a URL to `dest` (atomic via .part). Returns (sha256_hex,
     final_url) — the hash detects the same file arriving under a different
     domain, and final_url (post-redirect) is the correct base for resolving
     relative links found inside the payload. Retries transient failures;
     raises DownloadError on a terminal failure (e.g. expired signed URL) or
-    when the payload exceeds max_bytes (the confirm_over_gb guard)."""
+    when the payload exceeds max_bytes (the confirm_over_gb guard).
+
+    `cancel_check` (optional): a callable polled between connections and
+    mid-stream; when it returns True the download aborts with a canceled
+    DownloadError so the user's "stop downloads" frees the slot at once."""
     # the token object keeps this call's reservation key from being recycled
     # while the download is alive; the finally releases it on EVERY exit —
     # success, terminal failure, or an unexpected exception mid-stream
     _token = object()
     try:
-        return _download_reserved(cfg, url, dest, progress_cb, max_bytes, id(_token))
+        return _download_reserved(cfg, url, dest, progress_cb, max_bytes,
+                                  id(_token), cancel_check)
     finally:
         _clear_reservation(id(_token))
 
 
 def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
-                       max_bytes: int | None, my_key: int) -> tuple[str, str]:
+                       max_bytes: int | None, my_key: int,
+                       cancel_check=None) -> tuple[str, str]:
     dest.parent.mkdir(parents=True, exist_ok=True)
     part = dest.with_suffix(dest.suffix + ".part")
     val_p = Path(str(part) + ".val")  # ETag/Last-Modified guarding resumes
     last_exc: Exception | None = None
+
+    def _canceled() -> bool:
+        try:
+            return bool(cancel_check and cancel_check())
+        except Exception:  # noqa: BLE001 — a check failure must not crash the download
+            return False
 
     def too_big(n: int) -> DownloadError:
         return DownloadError(
@@ -436,6 +449,8 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
     def _over_time_cap() -> bool:
         return bool(max_budget) and time.monotonic() - dl_start > max_budget
     while attempt <= cfg.download_retries and connections < _MAX_DOWNLOAD_CONNECTIONS:
+        if _canceled():
+            raise DownloadError("download canceled", retryable=False, canceled=True)
         if stall_budget and time.monotonic() - last_progress_t > stall_budget:
             # bounded by the stall deadline, not the (progress-resetting) retry
             # count — this is the terminator for a dribbling/stuck server
@@ -623,6 +638,12 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                             raise DownloadError(
                                 "exceeded the download time cap mid-stream",
                                 retryable=True)
+                        # user pressed "stop downloads" — abort NOW to free the
+                        # slot (checked per streamed chunk, throttled by the 1 MB
+                        # chunk size so it's cheap)
+                        if _canceled():
+                            raise DownloadError("download canceled", retryable=False,
+                                                canceled=True)
                         # dashboard polls every ~4s; don't hammer the store
                         # with a write-locked UPDATE for every 8 MB of a fast
                         # link — report on bytes AND wall-clock
@@ -656,7 +677,7 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                 # once threw away a 20 GB resume). Discard only when the
                 # content itself is the problem.
                 keep = ("disk space" in str(e) or "confirm_over_gb" in str(e)
-                        or "403" in str(e))
+                        or "403" in str(e) or e.canceled)  # cancel keeps for resume
                 if not keep:
                     part.unlink(missing_ok=True)
                     val_p.unlink(missing_ok=True)
@@ -1170,8 +1191,18 @@ def fetch_url_record(cfg: MrfxConfig, store: Store, rec: dict) -> bool:
         content_sha, final_url = download(
             cfg, url, dest,
             progress_cb=lambda d, t: store.url_progress(url_id, d, t),
-            max_bytes=_size_limit_for(cfg, rec))
+            max_bytes=_size_limit_for(cfg, rec),
+            cancel_check=lambda: store.is_download_canceled(url_id))
     except DownloadError as e:
+        if e.canceled:
+            # the user pressed "stop downloads": the row was already flipped to
+            # 'skipped' by cancel_all_downloading, and the .part is kept for a
+            # later retry. Just clear the one-shot cancel flag and step aside —
+            # NEVER overwrite the status (that would turn a deliberate stop into
+            # a scary 'failed').
+            store.clear_download_cancel(url_id)
+            log.info("url %s: download stopped by user", url)
+            return False
         # over the size limit is NOT a failure — it's "too big, needs your OK"
         # (distinct amber state so it never buries a real error in the count)
         log.warning("url %s download stopped: %s", url, e)
@@ -1254,8 +1285,13 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
             content_sha, final_url = download(
                 cfg, url, dest,
                 progress_cb=lambda d, t: store.url_progress(url_id, d, t),
-                max_bytes=_size_limit_for(cfg, rec))
+                max_bytes=_size_limit_for(cfg, rec),
+                cancel_check=lambda: store.is_download_canceled(url_id))
         except DownloadError as e:
+            if e.canceled:  # user stopped it — row already 'skipped', .part kept
+                store.clear_download_cancel(url_id)
+                log.info("url %s: download stopped by user", url)
+                return False
             log.warning("url %s download stopped: %s", url, e)
             store.update_url(url_id, status="oversize" if e.oversize else "failed",
                              error=str(e))

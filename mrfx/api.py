@@ -1056,6 +1056,19 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     def urls_retry_failed():
         return {"requeued": store.requeue_failed()}
 
+    @app.post("/api/urls/clear-queued")
+    def urls_clear_queued():
+        # bulk-cancel the not-yet-started backlog (e.g. a whole national portal
+        # queued 2,000 at a time) so the parsers can catch up. Marked 'skipped'
+        # (retryable), nothing destroyed.
+        return {"cleared": store.clear_queued()}
+
+    @app.post("/api/urls/stop-downloads")
+    def urls_stop_downloads():
+        # abort in-flight downloads mid-stream to free the slots; partial files
+        # are kept so a later retry resumes them.
+        return {"stopped": store.cancel_all_downloading()}
+
     @app.get("/api/urls")
     def urls_list():
         return {"urls": store.list_urls(), "counts": store.url_queue_counts()}

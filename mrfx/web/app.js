@@ -1651,6 +1651,31 @@ function initFilesView() {
     loadUrlQueue();
   });
 
+  $("#url-clear-queued").addEventListener("click", async () => {
+    const msg = $("#url-msg");
+    if (!confirm("Cancel everything WAITING to download?\n\nFiles already " +
+      "downloaded or being processed are untouched, and cleared links become " +
+      "'skipped' so you can retry them later. This lets ingesting catch up.")) return;
+    msg.textContent = "clearing queue…";
+    try {
+      const r = await postJson("/api/urls/clear-queued", {});
+      msg.textContent = `cleared ${r.cleared} waiting link${r.cleared === 1 ? "" : "s"}`;
+    } catch (e) { msg.textContent = "could not clear: " + e.message; }
+    loadUrlQueue();
+  });
+
+  $("#url-stop-dl").addEventListener("click", async () => {
+    const msg = $("#url-msg");
+    if (!confirm("Stop the downloads in progress right now?\n\nPartial files " +
+      "are kept, so a retry resumes them. The freed slots let ingesting catch up.")) return;
+    msg.textContent = "stopping downloads…";
+    try {
+      const r = await postJson("/api/urls/stop-downloads", {});
+      msg.textContent = `stopped ${r.stopped} download${r.stopped === 1 ? "" : "s"}`;
+    } catch (e) { msg.textContent = "could not stop: " + e.message; }
+    loadUrlQueue();
+  });
+
   $("#url-known").addEventListener("click", async () => {
     const msg = $("#url-msg");
     if (!confirm(
