@@ -178,10 +178,10 @@ def cmd_serve(cfg: MrfxConfig, args) -> int:
         # a kill landed between files going 'done' and their BATCHED rollup:
         # the Files tab showed them done while their rates were missing from
         # every number, and nothing on restart noticed. Catch up now, in the
-        # background so the dashboard is usable meanwhile.
-        log.info("analytics are behind the ingested files (a previous run "
-                 "stopped before its batched rollup) — catching up in the "
-                 "background")
+        # background so the dashboard is usable meanwhile. Log the REASON so a
+        # slow full rebuild (rollup_needs_full) isn't a silent multi-hour hang.
+        log.info("analytics are behind the ingested files — catching up in the "
+                 "background. Reason: %s", store.rollup_stale_reason())
 
         def _catch_up() -> None:
             try:

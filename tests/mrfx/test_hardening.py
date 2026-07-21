@@ -147,6 +147,40 @@ def test_skip_if_busy_rebuild_coalesces_instead_of_stacking(store):
         store.rollup_lock.release()
 
 
+def test_best_effort_rebuild_coalesces_and_stale_reason_reports_needs_full(store):
+    """The inbox/direct-ingest best-effort rebuild must also coalesce (skip when
+    a rebuild already holds the lock) — it was the last blocking pile-up source
+    (the "waiting 57 min" waiter). And rollup_stale_reason must name a forced
+    full rebuild so it isn't a silent multi-hour mystery."""
+    import threading
+    import time as _time
+
+    from mrfx.ingest import _rebuild_rollups_best_effort
+
+    # rollup_needs_full set → the reason string must say a full rebuild is forced
+    with store.connect() as con:
+        con.execute("INSERT OR REPLACE INTO meta VALUES ('rollup_needs_full', '1')")
+    assert "full rebuild is FLAGGED" in store.rollup_stale_reason()
+
+    # a rebuild is "in progress": hold the lock; best-effort must NOT block
+    store.rollup_lock.acquire()
+    try:
+        done = {}
+
+        def call():
+            t0 = _time.monotonic()
+            _rebuild_rollups_best_effort(store, "inbox scan")
+            done["elapsed"] = _time.monotonic() - t0
+
+        t = threading.Thread(target=call)
+        t.start()
+        t.join(timeout=10)
+        assert not t.is_alive(), "best-effort rebuild blocked instead of coalescing"
+        assert done["elapsed"] < 5
+    finally:
+        store.rollup_lock.release()
+
+
 def test_methodology_lists_only_rate_files_and_says_so(cfg, store):
     store.upsert_file("rates.json", payer="Testco", file_type="in_network", status="done")
     store.upsert_file("refs.json", payer="Testco", file_type="provider_reference", status="done")

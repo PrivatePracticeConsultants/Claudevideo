@@ -869,6 +869,36 @@ class Store:
         except Exception:  # noqa: BLE001 — a probe failure must not block startup
             return False
 
+    def rollup_stale_reason(self) -> str:
+        """Plain-language reason the rollups are stale — logged at serve start so
+        a slow FULL rebuild isn't a silent mystery. 'needs full rebuild' is the
+        one that forces the hours-long whole-store pass; 'N new file(s)' takes
+        the fast incremental path."""
+        try:
+            with self.connect() as con:
+                if self._meta_get(con, "rollup_needs_full") == "1":
+                    return ("a full rebuild is FLAGGED (rollup_needs_full) — a "
+                            "removal that couldn't be scoped, or a prior full "
+                            "rebuild that didn't finish; this forces the slow "
+                            "whole-store pass until it completes once")
+                pend = self._read_pending_payers(con)[1]
+                if pend:
+                    return (f"{len(pend)} payer slice(s) from a removal/replace "
+                            "await recompute (incremental)")
+                covered = self._meta_get(con, "rollup_covered_through") or ""
+                names = set(json.loads(
+                    self._meta_get(con, "rollup_covered_names") or "[]"))
+                cand = con.execute(
+                    "SELECT filename, finished_at::VARCHAR FROM files "
+                    "WHERE status = 'done' AND rows_emitted > 0 "
+                    "AND finished_at::VARCHAR >= ?", [covered]).fetchall()
+                n_new = sum(1 for f, t in cand if t > covered or f not in names)
+                if n_new:
+                    return f"{n_new} newly ingested file(s) not yet rolled up (incremental)"
+                return "not stale"
+        except Exception as e:  # noqa: BLE001
+            return f"unknown ({e})"
+
     def _sweep_orphan_tmps(self) -> None:
         """Remove half-written `.{key}.{pid}.parquet.tmp` parts (and
         `.{key}.{pid}.progress` sidecars) whose writing process is gone
@@ -1635,16 +1665,31 @@ class Store:
         write_lock would stall every claim/progress/upsert for seconds; the
         per-filename ingest claim already serializes writers of one part.
         Returns [] when no part exists; None when the part is unreadable
-        (caller must then force the full-rebuild flag)."""
-        try:
-            if not path.exists():
-                return []
-            with self.connect() as con:
-                return [r[0] for r in con.execute(
-                    f"SELECT DISTINCT payer FROM read_parquet('{sql_path(path)}') "
-                    "WHERE payer IS NOT NULL").fetchall()]
-        except Exception:  # noqa: BLE001
-            return None
+        (caller must then force the full-rebuild flag).
+
+        RETRIES a transient read failure before giving up: returning None latches
+        `rollup_needs_full`, which forces the hours-long whole-store rebuild — and
+        a part briefly held open by an antivirus scan, the Windows indexer, or a
+        live reader is a transient condition, not a corrupt file. A permanent
+        full-rebuild demand from a 200ms lock is exactly the "why is it doing a
+        full rebuild again" trap, so read up to 3 times with short backoffs."""
+        if not path.exists():
+            return []
+        last: Exception | None = None
+        for i in range(3):
+            try:
+                with self.connect() as con:
+                    return [r[0] for r in con.execute(
+                        f"SELECT DISTINCT payer FROM read_parquet('{sql_path(path)}') "
+                        "WHERE payer IS NOT NULL").fetchall()]
+            except Exception as e:  # noqa: BLE001
+                last = e
+                if i < 2:
+                    time.sleep(0.5 * (i + 1))  # 0.5s, 1s — ride out a transient lock
+        logging.getLogger(__name__).warning(
+            "could not read %s to scope its removal after 3 tries (%s) — forcing "
+            "a full analytics rebuild to stay correct", path.name, last)
+        return None
 
     def _read_pending_payers(self, con: duckdb.DuckDBPyConnection) -> tuple[int, list[str]]:
         """(generation, payers) of the queued-removal note. The generation

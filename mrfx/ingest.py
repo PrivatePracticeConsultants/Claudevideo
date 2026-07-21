@@ -658,17 +658,35 @@ def _rebuild_rollups_best_effort(store: Store, name: str,
     Removals are found via the rollup_pending_payers note the removal itself
     queues (forget_file / drop_rates_part / a replaced part), so the
     incremental path handles them too. incremental=False remains for callers
-    that explicitly want the full rebuild."""
+    that explicitly want the full rebuild.
+
+    COALESCED (skip_if_busy): this is best-effort, so if a rebuild is already
+    running we skip rather than BLOCK behind it — a blocking wait here was the
+    last remaining pile-up source (the inbox watcher / a direct ingest queuing
+    behind the queue worker's multi-hour rebuild, seen as "waiting 57 min").
+    The rollup refreshes on the next cycle. ROLLUP_SKIPPED is a normal return,
+    so the incremental's `return` already avoids the full-rebuild fallback."""
+    from .store import ROLLUP_SKIPPED
+
+    def _skip_kw(fn):
+        try:
+            import inspect
+            return {"skip_if_busy": True} if "skip_if_busy" in inspect.signature(fn).parameters else {}
+        except (TypeError, ValueError):  # C-callable / old test stub
+            return {}
     try:
         if incremental:
             try:
-                store.update_rollups_incremental()
+                if store.update_rollups_incremental(
+                        **_skip_kw(store.update_rollups_incremental)) == ROLLUP_SKIPPED:
+                    log.info("%s: a rebuild is already running — skipping this "
+                             "best-effort refresh (the running one covers it)", name)
                 return
             except Exception as e:  # noqa: BLE001 — strict-precondition
                 # optimization; the full rebuild is the always-correct fallback
                 log.info("%s: incremental analytics update unavailable (%s) — "
                          "running a full rebuild", name, e)
-        store.rebuild_rollups()
+        store.rebuild_rollups(**_skip_kw(store.rebuild_rollups))
     except Exception:  # noqa: BLE001
         log.exception(
             "%s: rollup rebuild failed — the file's rows are safely stored; "
