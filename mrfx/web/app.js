@@ -100,6 +100,7 @@ function switchView(view) {
     const first = Object.keys(state.catalog)[0];
     if (first) selectCpt(first);
   }
+  if (view === "markets") initMarkets();
   if (view === "benchmark") initBenchmark();
   if (view === "negotiate") initNegotiate();
   if (view === "ratecard") initRatecard();
@@ -215,7 +216,7 @@ async function loadOverview(stateCode = "") {
   const idx = (d.payer_index || []);
   const payerBlock = idx.length
     ? `<div class="ov-block"><h3>Which payers pay above vs below market</h3>
-       <div class="muted" style="margin-bottom:6px">Index = this payer's median rate ÷ the market median, across the codes it prices. <b>1.10 = pays ~10% above market</b>; 0.90 = ~10% below. Payers pricing under ${3} codes are omitted.</div>
+       <div class="muted" style="margin-bottom:6px">Index = this payer's median rate ÷ the market median, across the codes it prices. <b>1.10 = pays ~10% above market</b>; 0.90 = ~10% below. Payers pricing under 3 codes are omitted.</div>
        <div class="tablewrap"><table>
         <thead><tr><th>Payer</th><th class="num">Index</th><th>vs market</th><th class="num">Codes</th></tr></thead>
         <tbody>${idx.map((p) => {
@@ -239,6 +240,151 @@ async function loadOverview(stateCode = "") {
   out.innerHTML = `<div class="rc-summary">Market snapshot — <b>${scope}</b>. ${payerBlock ? "The payer index below is the fastest read on where the reimbursement leverage is." : ""}</div>
     <div class="stats-row">${cards}</div>${payerBlock}${disc}${topCodes}
     <div class="bench-note">All figures use published dollar negotiated rates (base modifier, professional class). A published rate is directional market positioning, not proof a provider collects it.</div>`;
+}
+
+/* =======================================================================
+   MARKETS — single-code market intelligence (geography, negotiability,
+   % of Medicare, assistant/telehealth differential)
+   ======================================================================= */
+let marketsWired = false;
+
+async function initMarkets() {
+  if (!marketsWired) {
+    marketsWired = true;
+    // code datalist from the catalog; state + payer lists loaded once
+    $("#mk-code-opts").innerHTML = Object.entries(state.catalog)
+      .map(([c, info]) => `<option value="${esc(c)}">${esc(info.description || "")}</option>`).join("");
+    try {
+      const [{ states }, { payers }] = await Promise.all([
+        api("/api/states").catch(() => ({ states: [] })),
+        api("/api/payers").catch(() => ({ payers: [] })),
+      ]);
+      $("#mk-state-opts").innerHTML = (states || []).map((s) => `<option value="${esc(s)}">`).join("");
+      $("#mk-payer-opts").innerHTML = (payers || []).map((p) => `<option value="${esc(p)}">`).join("");
+    } catch { /* free text still works */ }
+    $("#mk-run").addEventListener("click", loadMarkets);
+    $("#mk-code").addEventListener("keydown", (e) => { if (e.key === "Enter") loadMarkets(); });
+    if (!$("#mk-code").value) {
+      const first = Object.keys(state.catalog)[0];
+      if (first) $("#mk-code").value = first;
+    }
+  }
+}
+
+function marketFromMk() {
+  const market = { month: "latest" };
+  const st = $("#mk-state").value.trim();
+  const payer = $("#mk-payer").value.trim();
+  if (st) market.state = st.toUpperCase();
+  if ($("#mk-disc").value) market.discipline = $("#mk-disc").value;
+  if (payer) market.payers = [payer];
+  if ($("#mk-therapy").checked) market.therapy_only = true;
+  return market;
+}
+
+async function loadMarkets() {
+  const out = $("#mk-out");
+  const code = $("#mk-code").value.trim();
+  if (!code) { out.innerHTML = `<div class="empty">Pick a billing code first.</div>`; return; }
+  const market = marketFromMk();
+  const body = { code, market };
+  out.innerHTML = `<div class="loading">Loading market intelligence for ${esc(code)}</div>`;
+  // fetch all four views in parallel; each renders (or shows its own error) so
+  // one failing section never blanks the others
+  const [geo, neg, mcr, diff] = await Promise.all([
+    postJson("/api/market/geography", body).catch((e) => ({ _err: e.message })),
+    postJson("/api/market/negotiability", body).catch((e) => ({ _err: e.message })),
+    postJson("/api/market/medicare", body).catch((e) => ({ _err: e.message })),
+    postJson("/api/market/differential", body).catch((e) => ({ _err: e.message })),
+  ]);
+  const desc = state.catalog[code]?.description || "";
+  out.innerHTML =
+    `<div class="rc-summary">Market intelligence — <b>${esc(code)}</b>${desc ? " · " + esc(desc) : ""}. ` +
+    `Latest rate per contract; thin cells (&lt;5 practices) suppressed.</div>` +
+    renderMkMedicare(mcr) + renderMkNegotiability(neg) +
+    renderMkGeography(geo) + renderMkDifferential(diff);
+}
+
+function mkErr(d, title) {
+  return `<div class="ov-block"><h3>${title}</h3><div class="empty">${esc(d._err)}</div></div>`;
+}
+function mkEmpty(title, msg) {
+  return `<div class="ov-block"><h3>${title}</h3><div class="muted">${msg}</div></div>`;
+}
+
+function renderMkGeography(d) {
+  if (d._err) return mkErr(d, "Where it pays best (by state)");
+  if (!d.states || !d.states.length)
+    return mkEmpty("Where it pays best (by state)",
+      "No state has ≥5 identified practices for this code yet (geography comes from NPPES enrichment — it fills in as NPIs are identified).");
+  const rows = d.states.map((s) => `<tr>
+    <td>${esc(s.state)}</td>
+    <td class="num"><b>${money(s.median_rate)}</b></td>
+    <td class="num muted">${money(s.p25)}–${money(s.p75)}</td>
+    <td class="num muted">${fmtInt(s.n_practices)}</td></tr>`).join("");
+  return `<div class="ov-block"><h3>Where it pays best — by state</h3>
+    <div class="muted" style="margin-bottom:6px">National median ${money(d.national_median)} across ${fmtInt(d.national_practices)} practices. ${esc(d.geo_note)}</div>
+    <div class="tablewrap"><table>
+      <thead><tr><th>State</th><th class="num">Median</th><th class="num">P25–P75</th><th class="num">Practices</th></tr></thead>
+      <tbody>${rows}</tbody></table></div></div>`;
+}
+
+function renderMkNegotiability(d) {
+  if (d._err) return mkErr(d, "Which payers negotiate (rate spread)");
+  if (!d.payers || !d.payers.length)
+    return mkEmpty("Which payers negotiate (rate spread)",
+      "No payer prices this code across ≥5 practices yet — a spread needs a real market.");
+  const badge = { wide: "good", moderate: "", tight: "muted" };
+  const rows = d.payers.map((p) => `<tr>
+    <td>${esc(p.payer)}</td>
+    <td><span class="disc-tag ${badge[p.negotiability] || ""}">${p.negotiability}</span></td>
+    <td class="num">${p.spread_pct == null ? "–" : p.spread_pct + "%"}</td>
+    <td class="num muted">${money(p.p10)}</td>
+    <td class="num"><b>${money(p.p50)}</b></td>
+    <td class="num muted">${money(p.p90)}</td>
+    <td class="num muted">${fmtInt(p.n_practices)}</td></tr>`).join("");
+  return `<div class="ov-block"><h3>Which payers negotiate — rate spread across practices</h3>
+    <div class="muted" style="margin-bottom:6px">Spread = (p90 − p10) as a % of the payer's median. <b>Wide</b> ≥25% (clearly negotiates — a low-paid practice has room); <b>tight</b> &lt;10% (a fixed fee schedule). Ranked widest first.</div>
+    <div class="tablewrap"><table>
+      <thead><tr><th>Payer</th><th>Negotiability</th><th class="num">Spread</th><th class="num">P10</th><th class="num">Median</th><th class="num">P90</th><th class="num">Practices</th></tr></thead>
+      <tbody>${rows}</tbody></table></div></div>`;
+}
+
+function renderMkMedicare(d) {
+  if (d._err) return mkErr(d, "% of Medicare");
+  if (!d.mpfs_loaded)
+    return mkEmpty("% of Medicare",
+      "No MPFS anchor loaded — load a Medicare Physician Fee Schedule CSV on the Benchmark tab to see rates as a % of Medicare. (Market median without an anchor: " + money(d.market_median) + ".)");
+  if (!d.payers || !d.payers.length)
+    return mkEmpty("% of Medicare", "No payer prices this code across ≥5 practices yet.");
+  const rows = d.payers.map((p) => `<tr>
+    <td>${esc(p.payer)}</td>
+    <td class="num"><b>${money(p.median_rate)}</b></td>
+    <td class="num">${p.pct_medicare == null ? "–" : p.pct_medicare + "%"}</td>
+    <td class="num muted">${fmtInt(p.n_practices)}</td></tr>`).join("");
+  return `<div class="ov-block"><h3>% of Medicare</h3>
+    <div class="muted" style="margin-bottom:6px">Medicare (non-facility) = ${money(d.mpfs_rate)}. Market median ${money(d.market_median)} = <b>${d.market_pct_medicare}% of Medicare</b> (P25–P75: ${d.market_p25_pct_medicare}%–${d.market_p75_pct_medicare}%). ${esc(d.medicare_note)}</div>
+    <div class="tablewrap"><table>
+      <thead><tr><th>Payer</th><th class="num">Median rate</th><th class="num">% of Medicare</th><th class="num">Practices</th></tr></thead>
+      <tbody>${rows}</tbody></table></div></div>`;
+}
+
+function renderMkDifferential(d) {
+  if (d._err) return mkErr(d, "Assistant & telehealth differentials");
+  if (!d.payers || !d.payers.length)
+    return mkEmpty("Assistant & telehealth differentials",
+      "No payer publishes a paired assistant (CQ/CO) or telehealth line for this code — nothing to compare. (That itself is informative: assistants/telehealth are billed at the base rate or simply not published.)");
+  const rows = d.payers.map((p) => `<tr>
+    <td>${esc(p.payer)}</td>
+    <td class="num">${p.asst_pairs ? p.asst_pct_of_base + "%" : "<span class='muted'>not published</span>"}</td>
+    <td class="num muted">${p.asst_pairs ? money(p.asst_base_med) + " → " + money(p.asst_med) + " · " + fmtInt(p.asst_pairs) : "–"}</td>
+    <td class="num">${p.tele_pairs ? p.tele_pct_of_office + "%" : "<span class='muted'>not published</span>"}</td>
+    <td class="num muted">${p.tele_pairs ? money(p.office_med) + " → " + money(p.tele_med) + " · " + fmtInt(p.tele_pairs) : "–"}</td></tr>`).join("");
+  return `<div class="ov-block"><h3>Assistant (CQ/CO) &amp; telehealth differentials</h3>
+    <div class="muted" style="margin-bottom:6px">${esc(d.diff_note)}</div>
+    <div class="tablewrap"><table>
+      <thead><tr><th>Payer</th><th class="num">Assistant % of base</th><th class="num">base→asst · pairs</th><th class="num">Telehealth % of office</th><th class="num">office→tele · pairs</th></tr></thead>
+      <tbody>${rows}</tbody></table></div></div>`;
 }
 
 /* =======================================================================
@@ -340,12 +486,14 @@ function rateRow(r) {
     <td>${modTags(r.modifier_set)}</td>
     <td>${esc(r.billing_class || "—")}</td>
     <td class="sub">${esc((r.service_code_set || "").replaceAll("|", ", ") || "—")}</td>
-    <td class="num"><span class="rate">$${fmtMoney(r.negotiated_rate)}</span></td>
+    <td class="num"><span class="rate">${money(r.negotiated_rate)}</span></td>
     <td class="num">${variants}</td>
     <td>${esc(r.negotiated_type)}${r.is_dollar_rate ? "" : ` <span class="warn-text">(non-dollar)</span>`}</td>
     <td class="num">${fmtInt(r.source_count)}</td>
   </tr>`;
 }
+// referenced above at the rate cell: use money() so a non-dollar row (null
+// rate when "dollar rates only" is unchecked) renders "–", not "$–".
 
 async function loadSummary() {
   const el = $("#summary-strip");
@@ -358,9 +506,14 @@ async function loadSummary() {
       stat("Codes", fmtInt(s.codes)) +
       stat("Min", money(s.min)) +
       stat("P25", money(s.p25)) +
-      stat("Median (all codes)", money(s.median)) +
+      stat("Median", money(s.median)) +
       stat("P75", money(s.p75)) +
       stat("Max", money(s.max));
+    // all five rate stats blend every matched code (97110 with 97530 etc.) —
+    // say so once, so P25/Median/P75 aren't read as one service's spread
+    const note = $("#summary-strip-note");
+    if (note) note.textContent =
+      "Min · P25 · Median · P75 · Max span every matched code together; per-code medians are in the table below.";
     renderByCode($("#summary-bycode"), s.by_code, s.mpfs_loaded);
   } catch (e) {
     // Don't blank silently: a 503 here is almost always the summary's exact
@@ -607,7 +760,7 @@ async function openEntity(grain, unitId) {
             <td>${esc(r.billing_class || "—")}</td>
             <td class="sub">${esc(r.file_month || "")}</td>
             <td>${esc(r.negotiated_type)}${r.is_dollar_rate ? "" : ' <span class="warn-text">(non-dollar)</span>'}</td>
-            <td class="num"><span class="rate">$${fmtMoney(r.negotiated_rate)}</span></td>
+            <td class="num"><span class="rate">${money(r.negotiated_rate)}</span></td>
             <td class="num">${(r.rate_variants || 1) > 1 ? `<span class="variant-flag">${r.rate_variants}</span>` : "1"}</td>
           </tr>`).join("")}
         </tbody>
@@ -637,7 +790,7 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeDrawe
 /* ---------- charts (dataviz-skill mark specs) ---------- */
 
 function renderBarChart(el, chart, payers) {
-  if (!chart.length) { el.innerHTML = `<div class="muted">no dollar rates</div>`; return; }
+  if (!chart || !chart.length) { el.innerHTML = `<div class="muted">no dollar rates</div>`; return; }
   const codes = [...new Set(chart.map((c) => c.billing_code))].sort();
   const byKey = Object.fromEntries(chart.map((c) => [`${c.billing_code}|${c.payer}`, c.median_rate]));
   const maxV = Math.max(...chart.map((c) => c.median_rate));
@@ -745,10 +898,13 @@ function initCptView() {
   }).catch(() => {});
   $("#cpt-export").addEventListener("click", () => {
     if (!state.cptSelected) return;
+    // the on-screen ranking is ALWAYS TIN grain (selectCpt hardcodes it), so the
+    // export must be too — inheriting the Explorer tab's grain toggle emitted
+    // NPI-grain rows that didn't match the table the user was looking at.
     const p = new URLSearchParams({ cpt: state.cptSelected, view: `code_${state.cptSelected}`,
-      grain: state.grain === "npi" ? "npi" : "tin", sort: "negotiated_rate", dir: "desc" });
+      grain: "tin", sort: "negotiated_rate", dir: "desc" });
     if ($("#cpt-base-only").checked) p.set("modifier", "base");
-    if (cptState.value.trim()) p.set("state", cptState.value.trim());
+    if (cptState.value.trim()) p.set("state", cptState.value.trim().toUpperCase());
     location.href = `/api/export.zip?${p}`;
   });
 }
@@ -939,6 +1095,33 @@ async function initBenchmark() {
     try { await openNegotiationReport(); }
     catch (e) { alert(`could not build the report: ${e.message}`); }
   });
+  $("#b-gaps-run").addEventListener("click", runContractGaps);
+}
+
+async function runContractGaps() {
+  const el = $("#b-gaps");
+  let payload;
+  try { payload = benchmarkPayload(); }
+  catch (e) { el.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  el.innerHTML = `<div class="loading">Finding contract gaps</div>`;
+  let d;
+  try { d = await postJson("/api/contract-gaps", { subject: payload.subject, market: payload.market }); }
+  catch (e) { el.innerHTML = `<div class="empty">Couldn't find gaps (${esc(e.message)}).</div>`; return; }
+  if (!d.count) {
+    el.innerHTML = `<div class="ov-block"><h3>Contract gaps</h3><div class="muted">No codes found that ≥${d.min_peers} peers price and ${esc(d.subject)} doesn't — the subject is priced on everything its peers are (under this market basis).</div></div>`;
+    return;
+  }
+  const rows = d.gaps.map((g) => `<tr>
+    <td>${esc(g.billing_code)}</td>
+    <td class="sub">${esc(g.description || "")}${g.is_timed ? " <span class='timed-tag'>timed</span>" : ""}</td>
+    <td class="num muted">${fmtInt(g.n_peers)}</td>
+    <td class="num"><b>${money(g.peer_median)}</b></td>
+    <td class="num muted">${money(g.peer_p25)}–${money(g.peer_p75)}</td></tr>`).join("");
+  el.innerHTML = `<div class="ov-block"><h3>Contract gaps — codes peers price that ${esc(d.subject)} doesn't (${d.count})</h3>
+    <div class="muted" style="margin-bottom:6px">${esc(d.gap_note)}</div>
+    <div class="tablewrap"><table>
+      <thead><tr><th>Code</th><th>Description</th><th class="num">Peers pricing it</th><th class="num">Peer median</th><th class="num">P25–P75</th></tr></thead>
+      <tbody>${rows}</tbody></table></div></div>`;
 }
 
 function refreshPeersets(sets) {
@@ -1261,7 +1444,7 @@ async function runNegotiate() {
     <div style="overflow-x:auto"><table><thead><tr>
       <th>Code</th><th class="num">You</th><th class="num">Your other payers</th>
       <th class="num">P25</th><th class="num">Median</th><th class="num">P75</th>
-      <th class="num">%ile</th><th class="num">Gap to median</th>${compHeads}
+      <th class="num" title="the subject's percentile position among this payer's other providers">Position</th><th class="num">Gap to median</th>${compHeads}
       <th class="num">Peers</th></tr></thead><tbody>${rows}</tbody></table></div>
     <p class="note">${esc(d.basis_note)} Peer stats exclude your own TIN(s). Use "Printable report" for the payer-ready document with full methodology.</p>`;
 }
@@ -1334,6 +1517,7 @@ const pctOrDash = (v) => (v == null ? "–" : `${v}%`);
 
 function renderRatecard(out, fs, sc) {
   const mp = fs.mpfs_loaded;
+  sc = sc || { rows: [] };  // never assume a scorecard came back — guard the forEach
   if (!fs.codes.length) {
     out.innerHTML = `<div class="empty"><h3>No rates found</h3>No published rates for this practice as of ${esc(fs.month === "latest" ? "latest available" : String(fs.month))} under the current filters.</div>`;
     return;
@@ -1428,6 +1612,37 @@ async function initLeads() {
   wireSubjectSearch("#ld-exclude", "#ld-subjects");
   $("#ld-run").addEventListener("click", runLeads);
   $("#ld-csv").addEventListener("click", () => { if (state.lastLeadsPayload) postDownload("/api/leads.csv", state.lastLeadsPayload, "leads.csv"); });
+  $("#ld-board-run").addEventListener("click", runLeaderboard);
+}
+
+async function runLeaderboard() {
+  const el = $("#ld-board");
+  const payload = leadsPayload();  // reuse the same market scope
+  const sort = $("#ld-board-sort").value;
+  el.innerHTML = `<div class="loading">Building market leaderboard</div>`;
+  let d;
+  try {
+    d = await postJson("/api/leaderboard", {
+      market: payload.market, min_codes: payload.min_codes, sort, limit: 50 });
+  } catch (e) { el.innerHTML = `<div class="empty">Couldn't build the leaderboard (${esc(e.message)}).</div>`; return; }
+  if (!d.count) {
+    el.innerHTML = `<div class="ov-block"><h3>Market leaderboard</h3><div class="muted">No practices price at least ${d.min_codes} codes with a real market under this scope.</div></div>`;
+    return;
+  }
+  const label = { size: "biggest (by NPIs)", paid: "best-paid", footprint: "widest footprint" }[d.sort] || d.sort;
+  const rows = d.practices.map((p, i) => `<tr>
+    <td class="num muted">${i + 1}</td>
+    <td>${esc(p.display_name || "")}<div class="sub">${esc(p.entity_kind || "")}${p.website ? ` · <a href="${esc(p.website)}" target="_blank" rel="noopener">site</a>` : ""}</div></td>
+    <td class="sub">${esc([p.city, p.state].filter(Boolean).join(", "))}${p.multi_state ? ` <span class="muted" title="${esc((p.states || []).join(", "))}">(+${(p.states || []).length - 1})</span>` : ""}</td>
+    <td class="num">${fmtInt(p.npi_count)}</td>
+    <td class="num">${fmtInt(p.n_codes)}</td>
+    <td class="num">p${p.median_percentile}</td>
+    <td class="num">${money(p.median_rate)}</td></tr>`).join("");
+  el.innerHTML = `<div class="ov-block"><h3>Market leaderboard — ${esc(label)} (${d.count})</h3>
+    <div class="muted" style="margin-bottom:6px">${esc(d.note)}</div>
+    <div class="tablewrap"><table>
+      <thead><tr><th>#</th><th>Practice</th><th>Location</th><th class="num">NPIs</th><th class="num">Codes</th><th class="num">Position</th><th class="num">Median rate</th></tr></thead>
+      <tbody>${rows}</tbody></table></div></div>`;
 }
 
 // Populate a month <select> from an /api/months payload, tolerating a failed
@@ -1525,6 +1740,39 @@ async function initChanges() {
   wireSubjectSearch("#ch-subject", "#ch-subjects");
   $("#ch-run").addEventListener("click", runChanges);
   $("#ch-csv").addEventListener("click", () => { if (state.lastChangesPayload) postDownload("/api/changes.csv", state.lastChangesPayload, "rate_changes.csv"); });
+  $("#ch-traj-run").addEventListener("click", runTrajectory);
+}
+
+async function runTrajectory() {
+  const el = $("#ch-traj");
+  // trajectory spans all months, so it ignores the two-month picker; it reuses
+  // only the payer/discipline scope from the changes market
+  const market = { payers: $$("#ch-payer-chips .chip.on").map((c) => c.dataset.payer) };
+  if ($("#ch-disc").value) market.discipline = $("#ch-disc").value;
+  el.innerHTML = `<div class="loading">Tracing payer trajectories across all months</div>`;
+  let d;
+  try { d = await postJson("/api/trajectory", { market }); }
+  catch (e) { el.innerHTML = `<div class="empty">Couldn't build the trajectory (${esc(e.message)}).</div>`; return; }
+  if (!d.count) {
+    el.innerHTML = `<div class="ov-block"><h3>Payer trajectory</h3><div class="muted">No payer has ≥2 months of data under this scope. Re-ingest the payers' newer MRFs (a later file month).</div></div>`;
+    return;
+  }
+  const arrow = { down: "▼", up: "▲", flat: "▬" };
+  const rows = d.payers.map((p) => {
+    const cls = p.direction === "down" ? "chg-cut" : p.direction === "up" ? "chg-up" : "";
+    const pct = p.cumulative_pct == null ? "–" : (p.cumulative_pct > 0 ? "+" : "") + p.cumulative_pct + "%";
+    return `<tr>
+      <td>${esc(p.payer)}</td>
+      <td class="num muted">${esc(p.first_month)}→${esc(p.last_month)} (${p.n_months})</td>
+      <td class="num">${money(p.first_rate)} → <b>${money(p.last_rate)}</b></td>
+      <td class="num ${cls}">${arrow[p.direction] || ""} ${pct}</td>
+      <td class="num muted">${p.cut_streak || 0}</td></tr>`;
+  }).join("");
+  el.innerHTML = `<div class="ov-block"><h3>Payer rate trajectory — all ${d.months.length} loaded months</h3>
+    <div class="muted" style="margin-bottom:6px">${esc(d.note)} Most-eroding first.</div>
+    <div class="tablewrap"><table>
+      <thead><tr><th>Payer</th><th class="num">Span</th><th class="num">First → last median</th><th class="num">Cumulative</th><th class="num">Cut streak</th></tr></thead>
+      <tbody>${rows}</tbody></table></div></div>`;
 }
 
 function changesPayload() {

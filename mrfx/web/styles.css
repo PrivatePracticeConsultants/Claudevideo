@@ -281,6 +281,12 @@ td .rate { font-weight: 650; }
   padding: 0 5px; margin-left: 4px; vertical-align: 1px;
   color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
 .disc-tag.unspec { color: var(--muted); background: var(--grid); }
+/* Markets tab: negotiability badge + payer-trajectory direction (the .rc-table
+   chg colors are scoped, so define standalone variants for the ov-block tables) */
+.disc-tag.good { color: #fff; background: var(--good); }
+.disc-tag.muted { color: var(--muted); background: var(--grid); }
+td.chg-cut { color: var(--critical); font-weight: 650; }
+td.chg-up { color: var(--good); font-weight: 650; }
 
 /* benchmark */
 .bench-grid { display: grid; grid-template-columns: 330px 1fr; gap: 18px; align-items: start; }

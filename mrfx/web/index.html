@@ -16,6 +16,7 @@
     <button data-view="overview">Overview</button>
     <button data-view="explorer" class="active">Explorer</button>
     <button data-view="cpt">Code comparison</button>
+    <button data-view="markets">Markets</button>
     <button data-view="benchmark">Benchmark</button>
     <button data-view="negotiate">Negotiate</button>
     <button data-view="ratecard">Rate card</button>
@@ -67,7 +68,7 @@
         </div>
       </div>
       <div class="field">
-        <label>Month</label>
+        <label>Month <span class="muted" style="text-transform:none" title="With 'all months' the medians and row counts pool every ingested vintage of a contract; the report tabs (Benchmark, Rate card, Leads, Markets) default to 'latest' — one current rate per contract. Pick a month here to match them.">(all months = pooled)</span></label>
         <select id="f-month"><option value="">all months</option></select>
       </div>
       <div class="field" style="max-width:640px">
@@ -148,6 +149,7 @@
     </div>
 
     <div class="summary" id="summary-strip"></div>
+    <div class="muted" style="font-size:11.5px;margin:-6px 0 10px" id="summary-strip-note"></div>
     <div id="summary-bycode"></div>
     <div class="disclaimer">
       A negotiated rate is <b>per code, not per visit</b>: most treatment codes are timed
@@ -223,6 +225,35 @@
     </div>
   </section>
 
+  <!-- ======================= MARKETS ======================= -->
+  <section id="view-markets" class="view">
+    <div class="view-head">
+      <h2>Market intelligence for a code</h2>
+      <span class="spacer"></span>
+      <label class="toggle" style="text-transform:none">Code
+        <input type="text" id="mk-code" list="mk-code-opts" placeholder="97110" style="width:80px;margin-left:4px">
+        <datalist id="mk-code-opts"></datalist>
+      </label>
+      <label class="toggle" style="text-transform:none">State
+        <input type="text" id="mk-state" list="mk-state-opts" placeholder="all" style="width:56px;margin-left:4px">
+        <datalist id="mk-state-opts"></datalist>
+      </label>
+      <label class="toggle" style="text-transform:none">Discipline
+        <select id="mk-disc"><option value="">any</option><option>PT</option><option>OT</option><option>SLP</option></select>
+      </label>
+      <label class="toggle" style="text-transform:none">Payer
+        <input type="text" id="mk-payer" list="mk-payer-opts" placeholder="all" style="width:130px;margin-left:4px">
+        <datalist id="mk-payer-opts"></datalist>
+      </label>
+      <label class="toggle" title="keep only PT/OT/SLP providers & therapy practices (by NPPES taxonomy)"><input type="checkbox" id="mk-therapy"> therapy only</label>
+      <button class="btn primary" id="mk-run">Run</button>
+    </div>
+    <div id="mk-out" class="empty"><h3>Pick a code</h3>
+      For one code across the whole market: where it pays best by state, which payers actually
+      negotiate (the rate spread), its rate as a % of Medicare, and whether payers cut for PTA/OTA
+      assistants or telehealth. All on the same basis as the Benchmark and Rate-card tabs.</div>
+  </section>
+
   <!-- ======================= BENCHMARK ======================= -->
   <section id="view-benchmark" class="view">
     <div class="bench-grid">
@@ -275,10 +306,14 @@
           <button class="btn" id="b-report" disabled>Open pitch report</button>
           <button class="btn" id="b-negotiation" disabled title="Per-payer breakdown: where each payer pays you versus the peers it pays">Payer-negotiation one-pager</button>
         </div>
+        <div style="margin-top:8px">
+          <button class="btn" id="b-gaps-run" title="Codes the subject's peers publish rates for, that the subject has no rate on — candidate contract gaps">Find contract gaps</button>
+        </div>
       </div>
       <div class="bench-results">
         <div id="b-out" class="empty"><h3>Pick a subject practice</h3>
           Benchmarks compute over dollar-rate, base-modifier rows only.</div>
+        <div id="b-gaps"></div>
       </div>
     </div>
   </section>
@@ -396,10 +431,19 @@
           <button class="btn primary" id="ld-run">Find leads</button>
           <button class="btn" id="ld-csv" disabled>Download CSV</button>
         </div>
+        <div style="margin-top:8px">
+          <button class="btn" id="ld-board-run" title="The inverse of leads: the market's biggest / best-paid / widest-footprint practices — comparables and anchors">Market leaderboard</button>
+          <select id="ld-board-sort" style="margin-left:4px">
+            <option value="size">by size (NPIs)</option>
+            <option value="paid">by how well-paid</option>
+            <option value="footprint">by footprint (states)</option>
+          </select>
+        </div>
       </div>
       <div class="bench-results">
         <div id="ld-out" class="empty"><h3>Pick a market</h3>
           Find practices being underpaid relative to their local market, with contact info.</div>
+        <div id="ld-board"></div>
       </div>
     </div>
   </section>
@@ -429,10 +473,14 @@
           <button class="btn primary" id="ch-run">Find changes</button>
           <button class="btn" id="ch-csv" disabled>Download CSV</button>
         </div>
+        <div style="margin-top:8px">
+          <button class="btn" id="ch-traj-run" title="Each payer's median-rate path across ALL loaded months — is a payer eroding rates over time?">Payer trajectory (all months)</button>
+        </div>
       </div>
       <div class="bench-results">
         <div id="ch-out" class="empty"><h3>Pick the new month</h3>
           Compare it against a prior month to see every rate that moved.</div>
+        <div id="ch-traj"></div>
       </div>
     </div>
   </section>
