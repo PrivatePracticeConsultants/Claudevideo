@@ -30,6 +30,7 @@ from .benchmark import (
     compute_opportunity,
     compute_payer_comparison,
     compute_payer_negotiation,
+    contract_gaps,
     render_negotiation_report,
     render_payer_compare_report,
     render_pitch_report,
@@ -37,8 +38,14 @@ from .benchmark import (
 from .catalog import catalog_json, therapy_taxonomy_sql
 from .config import MrfxConfig
 from .enrich import use_bulk_enrichment
-from .leads import compute_leads, leads_csv
-from .monitor import compute_rate_changes, rate_changes_csv
+from .leads import compute_leaderboard, compute_leads, leads_csv
+from .market import (
+    assistant_pos_diff,
+    geographic_rates,
+    medicare_index,
+    negotiability,
+)
+from .monitor import compute_payer_trajectory, compute_rate_changes, rate_changes_csv
 from .schedule import (
     compute_fee_schedule,
     fee_schedule_csv,
@@ -1536,6 +1543,65 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         except (BenchmarkError, ValueError, TypeError) as e:
             # ValueError/TypeError: a non-numeric or null volume/percentile in
             # the JSON body — a client input error (422), never a 500.
+            raise HTTPException(422, str(e))
+
+    # market intelligence for one code (Markets tab): geography, negotiability,
+    # % of Medicare, assistant/telehealth differential — all share the house basis
+    @app.post("/api/market/geography")
+    def market_geography(body: dict = Body(...)):
+        try:
+            return geographic_rates(store, body.get("code"), body.get("market") or {},
+                                    limit=_as_int(body.get("limit"), 60))
+        except (BenchmarkError, ValueError, TypeError) as e:
+            raise HTTPException(422, str(e))
+
+    @app.post("/api/market/negotiability")
+    def market_negotiability(body: dict = Body(...)):
+        try:
+            return negotiability(store, body.get("code"), body.get("market") or {})
+        except (BenchmarkError, ValueError, TypeError) as e:
+            raise HTTPException(422, str(e))
+
+    @app.post("/api/market/medicare")
+    def market_medicare(body: dict = Body(...)):
+        try:
+            return medicare_index(store, body.get("code"), body.get("market") or {})
+        except (BenchmarkError, ValueError, TypeError) as e:
+            raise HTTPException(422, str(e))
+
+    @app.post("/api/market/differential")
+    def market_differential(body: dict = Body(...)):
+        try:
+            return assistant_pos_diff(store, body.get("code"), body.get("market") or {})
+        except (BenchmarkError, ValueError, TypeError) as e:
+            raise HTTPException(422, str(e))
+
+    @app.post("/api/contract-gaps")
+    def contract_gaps_ep(body: dict = Body(...)):
+        try:
+            return contract_gaps(
+                store, str(body.get("subject") or ""), body.get("market") or {},
+                min_peers=_as_int(body.get("min_peers"), 5),
+                limit=_as_int(body.get("limit"), 100))
+        except (BenchmarkError, ValueError, TypeError) as e:
+            raise HTTPException(422, str(e))
+
+    @app.post("/api/leaderboard")
+    def leaderboard_ep(body: dict = Body(...)):
+        try:
+            return compute_leaderboard(
+                store, body.get("market") or {},
+                min_codes=_as_int(body.get("min_codes"), 3),
+                limit=_as_int(body.get("limit"), 50),
+                sort=str(body.get("sort") or "size"))
+        except (BenchmarkError, ValueError, TypeError) as e:
+            raise HTTPException(422, str(e))
+
+    @app.post("/api/trajectory")
+    def trajectory_ep(body: dict = Body(...)):
+        try:
+            return compute_payer_trajectory(store, body.get("market") or {})
+        except (BenchmarkError, ValueError, TypeError) as e:
             raise HTTPException(422, str(e))
 
     # peer sets

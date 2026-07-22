@@ -16,7 +16,8 @@ import datetime as dt
 import json
 
 from . import __version__
-from .benchmark import BenchmarkError, _market_where, resolve_subject_tins
+from .benchmark import (BenchmarkError, _market_where, normalize_market,
+                        resolve_subject_tins)
 from .catalog import code_info
 from .store import Store, defuse_csv, mask_tin
 
@@ -171,6 +172,93 @@ def compute_rate_changes(store: Store, market: dict, *, subject: str | None = No
         "biggest_increase_pct": biggest_increase,
         "by_payer": by_payer,
         "changes": rows,
+    }
+
+
+def compute_payer_trajectory(store: Store, market: dict, *, min_months: int = 2) -> dict:
+    """Each payer's median therapy-rate trajectory across ALL loaded months —
+    the strategic read a two-month diff can't give: is a payer eroding rates
+    over time (sign a multi-year deal against), and how long is the cut streak?
+
+    The panel of practices priced can shift month to month, so this is the
+    market's median each month (directional), not a matched-line diff — that's
+    what compute_rate_changes is for. Payers ranked most-eroding first.
+    """
+    months = available_months(store)
+    if len(months) < min_months:
+        raise BenchmarkError(
+            "rate-trajectory needs at least two months in the store — re-ingest "
+            "the payers' newer MRFs (a later file_month) and try again.")
+    # trajectory spans every month, so DON'T pin one: 'latest' makes
+    # _market_where skip the file_month clause; we then read rates_by_tin
+    # directly (NOT the 'latest' supersession relation, which would collapse
+    # history to one row per contract).
+    m = normalize_market({**(market or {}), "month": "latest"})
+    include_assistant = bool(m.get("include_assistant", False))
+    include_non_dollar = bool(m.get("include_non_dollar", False))
+    where, params = _market_where(m, include_assistant, include_non_dollar)
+    sql = f"""
+    WITH base AS (
+        SELECT t.payer, t.file_month, t.tin_value, median(t.negotiated_rate) AS rate
+        FROM rates_by_tin t LEFT JOIN tin_directory td USING (tin_value)
+        WHERE {where}
+        GROUP BY t.payer, t.file_month, t.tin_value
+    )
+    SELECT payer, file_month,
+           round(median(rate), 2)    AS median_rate,
+           count(DISTINCT tin_value) AS n_practices
+    FROM base GROUP BY payer, file_month
+    ORDER BY payer, file_month
+    """
+    with store.connect() as con:
+        cur = con.execute(sql, params)
+        cols = [d[0] for d in cur.description]
+        raw = [dict(zip(cols, r)) for r in cur.fetchall()]
+
+    series: dict[str, list] = {}
+    for r in raw:
+        series.setdefault(r["payer"], []).append(r)
+    payers = []
+    for payer, pts in series.items():
+        pts.sort(key=lambda x: x["file_month"])
+        if len(pts) < min_months:
+            continue  # need ≥2 months for THIS payer to trace a trajectory
+        first, last = pts[0], pts[-1]
+        cumulative = (round(100.0 * (last["median_rate"] - first["median_rate"])
+                            / first["median_rate"], 1)
+                      if first["median_rate"] else None)
+        # consecutive months of decline counting back from the newest point
+        streak = 0
+        for i in range(len(pts) - 1, 0, -1):
+            if pts[i]["median_rate"] < pts[i - 1]["median_rate"]:
+                streak += 1
+            else:
+                break
+        payers.append({
+            "payer": payer,
+            "n_months": len(pts),
+            "first_month": first["file_month"], "last_month": last["file_month"],
+            "first_rate": first["median_rate"], "last_rate": last["median_rate"],
+            "cumulative_pct": cumulative,
+            "cut_streak": streak,
+            "direction": ("down" if cumulative is not None and cumulative < 0
+                          else "up" if cumulative is not None and cumulative > 0
+                          else "flat"),
+            "series": [{"month": p["file_month"], "median_rate": p["median_rate"],
+                        "n_practices": p["n_practices"]} for p in pts],
+        })
+    # most-eroding first (most negative cumulative change); flats/ups after
+    payers.sort(key=lambda d: (d["cumulative_pct"] is None,
+                               d["cumulative_pct"] if d["cumulative_pct"] is not None else 0))
+    return {
+        "market": {k: v for k, v in market.items() if v not in (None, [], "")},
+        "months": months,
+        "count": len(payers),
+        "payers": payers,
+        "note": ("Median rate is over the practices priced EACH month; the panel "
+                 "can shift between months, so a trajectory is directional market "
+                 "movement, not a matched-contract diff (use the change monitor "
+                 "for line-level moves). Published rates, not collections."),
     }
 
 

@@ -656,6 +656,84 @@ def compute_payer_comparison(store: Store, subject: str, payer: str, market: dic
     }
 
 
+# ---------------------------------------------------------------------------
+# contract-gap finder (§7B.5) — codes peers price that the subject does not
+# ---------------------------------------------------------------------------
+
+
+def contract_gaps(store: Store, subject: str, market: dict, *,
+                  min_peers: int = 5, limit: int = 100) -> dict:
+    """Codes that at least `min_peers` of the subject's market peers have a
+    published rate for, but the subject has NO rate on — candidate contract or
+    fee-schedule gaps to chase. Directional: absence in an MRF is a publishing
+    gap as often as a real coverage gap, so this opens a question, not a claim."""
+    if min_peers < 1:
+        raise BenchmarkError("min_peers must be at least 1")
+    limit = max(1, min(int(limit), 1000))
+    market = normalize_market(market)
+    subject_tins = resolve_subject_tins(store, subject)
+    peer_desc, market = resolve_peer_set(store, market)
+    where, params = _market_where(market, bool(market.get("include_assistant")),
+                                  bool(market.get("include_non_dollar")))
+    rel = _rates_relation(market)
+    curated = market.get("curated_tins")
+    peer_clause = "b.tin_value NOT IN (SELECT tin FROM subject_tins)"
+    peer_params: list = []
+    if curated:
+        peer_clause += f" AND b.tin_value IN ({', '.join('?' for _ in curated)})"
+        peer_params = list(curated)
+    sql = f"""
+    WITH subject_tins AS (SELECT unnest(?::VARCHAR[]) AS tin),
+    base AS (
+        SELECT t.billing_code, t.tin_value, median(t.negotiated_rate) AS rate
+        FROM {rel} t LEFT JOIN tin_directory td USING (tin_value)
+        WHERE {where}
+        GROUP BY t.billing_code, t.tin_value
+    ),
+    subj AS (
+        SELECT DISTINCT billing_code FROM base
+        WHERE tin_value IN (SELECT tin FROM subject_tins)
+    ),
+    peers AS (
+        SELECT b.billing_code,
+               count(DISTINCT b.tin_value)          AS n_peers,
+               round(median(b.rate), 2)             AS peer_median,
+               round(quantile_cont(b.rate, .25), 2) AS peer_p25,
+               round(quantile_cont(b.rate, .75), 2) AS peer_p75
+        FROM base b WHERE {peer_clause}
+        GROUP BY b.billing_code
+    )
+    SELECT p.billing_code, p.n_peers, p.peer_median, p.peer_p25, p.peer_p75
+    FROM peers p
+    WHERE p.n_peers >= ? AND p.billing_code NOT IN (SELECT billing_code FROM subj)
+    ORDER BY p.n_peers DESC, p.billing_code
+    LIMIT ?
+    """
+    with store.connect() as con:
+        cur = con.execute(sql, [subject_tins, *params, *peer_params, min_peers, limit])
+        cols = [d[0] for d in cur.description]
+        rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+    for r in rows:
+        desc, _, timed = code_info(r["billing_code"])
+        r["description"] = desc
+        r["is_timed"] = timed
+    return {
+        "subject": subject,
+        "subject_tins": [mask_tin(t) for t in subject_tins],
+        "market": {k: v for k, v in market.items() if k != "curated_tins"},
+        "peer_set": peer_desc,
+        "min_peers": min_peers,
+        "count": len(rows),
+        "gaps": rows,
+        "basis_note": BASIS_NOTE,
+        "gap_note": (
+            "A code appears here when peers publish a rate for it and the subject "
+            "does not. Absence in an MRF is not proof the subject lacks the "
+            "contract — it can be a publishing gap. Directional; confirm against "
+            "the subject's actual fee schedule before acting."),
+    }
+
+
 def render_payer_compare_report(cfg: MrfxConfig, store: Store, comp: dict) -> str:
     """Print-ready payer-negotiation comparison: the document the owner hands
     the payer. Per-code table (subject vs this payer's market vs named

@@ -173,6 +173,90 @@ def compute_leads(store: Store, market: dict, *, threshold_percentile: int = 25,
     }
 
 
+def compute_leaderboard(store: Store, market: dict, *, min_codes: int = 3,
+                        limit: int = 50, sort: str = "size") -> dict:
+    """The inverse of the lead finder: rank the market's practices by SIZE
+    (distinct NPIs under the TIN), by how HIGH they're paid (median percentile),
+    or by geographic FOOTPRINT — to surface the anchor practices, consolidators,
+    and named comparables a consultant benchmarks against or approaches. Same
+    market basis and two-TIN-real-market rule as the lead finder."""
+    market = normalize_market(market)
+    if min_codes < 1:
+        raise BenchmarkError("min_codes must be at least 1")
+    limit = max(1, min(int(limit), 1000))
+    sort = sort if sort in ("size", "paid", "footprint") else "size"
+    include_assistant = bool(market.get("include_assistant", False))
+    include_non_dollar = bool(market.get("include_non_dollar", False))
+    where, params = _market_where(market, include_assistant, include_non_dollar)
+    rel = _rates_relation(market)
+    order = {
+        # biggest groups first; then best-paid; then widest footprint
+        "size": "td.npi_count DESC NULLS LAST, p.median_pct DESC",
+        "paid": "p.median_pct DESC, td.npi_count DESC NULLS LAST",
+        "footprint": "len(td.states) DESC NULLS LAST, td.npi_count DESC NULLS LAST",
+    }[sort]
+    sql = f"""
+    WITH base AS (
+        SELECT t.billing_code, t.tin_value, median(t.negotiated_rate) AS rate
+        FROM {rel} t LEFT JOIN tin_directory td USING (tin_value)
+        WHERE {where}
+        GROUP BY t.billing_code, t.tin_value
+    ),
+    ranked AS (
+        SELECT billing_code, tin_value, rate,
+               100 * percent_rank() OVER (PARTITION BY billing_code ORDER BY rate) AS pct,
+               count(*) OVER (PARTITION BY billing_code) AS n_in_code
+        FROM base
+    ),
+    per_tin AS (
+        SELECT tin_value, count(*) AS n_codes,
+               round(median(pct), 0)  AS median_pct,
+               round(median(rate), 2) AS median_rate
+        FROM ranked WHERE n_in_code >= 2 GROUP BY tin_value
+    )
+    SELECT p.tin_value, p.n_codes, p.median_pct, p.median_rate,
+           td.display_name, td.entity_kind, td.npi_count, td.states, td.cities
+    FROM per_tin p JOIN tin_directory td USING (tin_value)
+    WHERE p.n_codes >= ?
+    ORDER BY {order}, p.tin_value
+    LIMIT ?
+    """
+    filter_state = (market.get("state") or "").upper() or None
+    with store.connect() as con:
+        cur = con.execute(sql, [*params, min_codes, limit])
+        cols = [d[0] for d in cur.description]
+        rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+    sites = store.org_websites()
+    out = []
+    for r in rows:
+        states = r.get("states") or []
+        cities = r.get("cities") or []
+        primary_state = (filter_state if filter_state and filter_state in states
+                         else (states[0] if states else None))
+        out.append({
+            "tin_value": mask_tin(r["tin_value"]),
+            "display_name": r["display_name"],
+            "entity_kind": r["entity_kind"],
+            "npi_count": r["npi_count"],
+            "state": primary_state,
+            "states": states,
+            "multi_state": len(states) > 1,
+            "city": cities[0] if cities else None,
+            "n_codes": r["n_codes"],
+            "median_percentile": r["median_pct"],
+            "median_rate": r["median_rate"],
+            "website": sites.get(r["tin_value"]),
+        })
+    return {
+        "market": {k: v for k, v in market.items() if v not in (None, [], "")},
+        "sort": sort, "min_codes": min_codes, "count": len(out),
+        "practices": out,
+        "note": ("Ranked over published negotiated rates; size is distinct NPIs "
+                 "under the billing TIN (a hospital system collapses many NPIs "
+                 "into one TIN). Percentile position is not collections."),
+    }
+
+
 def leads_csv(store: Store, result: dict) -> str:
     """Prospect list as CSV with a methodology header block (honesty invariant:
     exports carry their methodology)."""
