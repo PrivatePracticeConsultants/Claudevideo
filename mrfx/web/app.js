@@ -35,6 +35,11 @@ const state = {
 
 const fmtMoney = (v) =>
   v == null ? "–" : Number(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+// dollar-prefixed money that degrades to a bare en-dash for null — a plain
+// `"$" + fmtMoney(v)` rendered "$–" for a missing value (a code with no peers,
+// an unfilled opportunity cell), which reads as a glitch. Use this for any
+// money cell that can legitimately be empty.
+const money = (v) => (v == null ? "–" : "$" + fmtMoney(v));
 const fmtInt = (v) => (v == null ? "–" : Number(v).toLocaleString("en-US"));
 const esc = (s) =>
   String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -908,28 +913,28 @@ function renderBenchmark(out, bench, opp) {
   const rows = bench.rows.map((r) => `
     <tr><td>${esc(r.billing_code)}${r.is_timed ? '<span class="timed-tag">15-min</span>' : ""}
       <div class="sub">${esc(r.description || "")}</div></td>
-      <td class="num"><span class="rate">${r.subject_rate != null ? "$" + fmtMoney(r.subject_rate) : "–"}</span></td>
-      <td class="num">$${fmtMoney(r.p25)}</td>
-      <td class="num">$${fmtMoney(r.p50)}</td>
-      <td class="num">$${fmtMoney(r.p75)}</td>
-      <td class="num">${r.target_rate != null ? "$" + fmtMoney(r.target_rate) : "–"}</td>
-      <td class="num ${r.gap_to_target > 0 ? "warn-text" : ""}">${r.gap_to_target != null ? "$" + fmtMoney(r.gap_to_target) : "–"}</td>
+      <td class="num"><span class="rate">${money(r.subject_rate)}</span></td>
+      <td class="num">${money(r.p25)}</td>
+      <td class="num">${money(r.p50)}</td>
+      <td class="num">${money(r.p75)}</td>
+      <td class="num">${money(r.target_rate)}</td>
+      <td class="num ${r.gap_to_target > 0 ? "warn-text" : ""}">${money(r.gap_to_target)}</td>
       ${mp ? `<td class="num">${r.subject_pct_medicare != null ? r.subject_pct_medicare + "%" : "–"}</td>
               <td class="num">${r.median_pct_medicare != null ? r.median_pct_medicare + "%" : "–"}</td>` : ""}
       <td class="num muted">${fmtInt(r.n_peers)}</td>
       <td>${pstrip(r.subject_percentile)}</td></tr>`).join("");
   const oppHtml = opp ? `
     <div class="opp-band">Annual gross opportunity:
-      conservative (p${opp.conservative_percentile}) <b>$${fmtMoney(opp.total_at_conservative)}</b>
-      · at target (p${opp.target_percentile}) <b>$${fmtMoney(opp.total_at_target)}</b></div>
+      conservative (p${opp.conservative_percentile}) <b>${money(opp.total_at_conservative)}</b>
+      · at target (p${opp.target_percentile}) <b>${money(opp.total_at_target)}</b></div>
     <div class="tablewrap"><table>
       <thead><tr><th>Code</th><th class="num">Annual units</th><th class="num">Your rate</th>
       <th class="num">Target</th><th class="num">Opportunity (conservative)</th><th class="num">Opportunity (target)</th></tr></thead>
       <tbody>${opp.rows.map((o) => `
         <tr><td>${esc(o.billing_code)}</td><td class="num">${fmtInt(o.annual_units)}</td>
-        <td class="num">$${fmtMoney(o.subject_rate)}</td><td class="num">${o.target_rate != null ? "$" + fmtMoney(o.target_rate) : "–"}</td>
-        <td class="num">$${fmtMoney(o.opportunity_at_conservative)}</td>
-        <td class="num"><b>$${fmtMoney(o.opportunity_at_target)}</b></td></tr>`).join("")}
+        <td class="num">${money(o.subject_rate)}</td><td class="num">${money(o.target_rate)}</td>
+        <td class="num">${money(o.opportunity_at_conservative)}</td>
+        <td class="num"><b>${money(o.opportunity_at_target)}</b></td></tr>`).join("")}
       </tbody></table></div>
     <div class="bench-note">${esc(opp.assumptions)}</div>` : "";
   out.innerHTML = `
@@ -1365,7 +1370,7 @@ function renderLeads(out, data) {
     <td class="num">${fmtInt(l.npi_count)}</td>
     <td class="num">${l.n_codes}</td>
     <td class="num">p${l.median_percentile}</td>
-    <td class="num">$${fmtMoney(l.avg_gap_to_median)}</td>
+    <td class="num">${money(l.avg_gap_to_median)}</td>
     <td class="sub">${esc(l.tin_value)}</td></tr>`).join("");
   out.innerHTML = `<div class="rc-summary">${data.count} practice(s) at or below p${data.threshold_percentile}, most underpaid first. <span class="muted">Avg $ below median is a rate-level gap, not annual dollars.</span></div>
     <div class="tablewrap"><table class="rc-table"><thead><tr><th>Practice</th><th>Location</th><th class="num">Providers</th><th class="num">Codes</th><th class="num">Position</th><th class="num">Avg $ below median</th><th>Tax ID</th></tr></thead><tbody>${rows}</tbody></table></div>`;
