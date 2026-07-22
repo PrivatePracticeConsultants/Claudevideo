@@ -102,7 +102,9 @@ function switchView(view) {
   if (view === "ratecard") initRatecard();
   if (view === "leads") initLeads();
   if (view === "changes") initChanges();
-  if (view === "sources") loadSources();
+  // re-entry: keep whatever state was picked (else the cards blank out while the
+  // dropdown still shows the state, and re-picking the same option fires no change)
+  if (view === "sources") loadSources($("#src-state")?.value || "");
 }
 
 /* ---------- header stats ---------- */
@@ -280,11 +282,11 @@ async function loadSummary() {
       stat("Rows", fmtInt(s.n)) +
       stat(state.grain === "npi" ? "NPIs" : "Entities", fmtInt(s.entities)) +
       stat("Codes", fmtInt(s.codes)) +
-      stat("Min", "$" + fmtMoney(s.min)) +
-      stat("P25", "$" + fmtMoney(s.p25)) +
-      stat("Median", "$" + fmtMoney(s.median)) +
-      stat("P75", "$" + fmtMoney(s.p75)) +
-      stat("Max", "$" + fmtMoney(s.max));
+      stat("Min", money(s.min)) +
+      stat("P25", money(s.p25)) +
+      stat("Median", money(s.median)) +
+      stat("P75", money(s.p75)) +
+      stat("Max", money(s.max));
   } catch (e) {
     // Don't blank silently: a 503 here is almost always the summary's exact
     // aggregates hitting the memory cap on a big unfiltered view. Say so and
@@ -1534,6 +1536,7 @@ const KIND_LABEL = {
   provider_reference: "provider list",
   allowed_amounts: "allowed-amounts (no rates)",
   duplicate: "duplicate (already have it)",
+  canceled: "cleared by you",
   unknown: "?",
 };
 
