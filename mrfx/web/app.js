@@ -1836,7 +1836,7 @@ function renderChanges(out, d) {
        <div class="muted" style="margin-top:4px">Median % move across each payer's changed contract lines (≥2 lines), most-cutting first.</div></div>`
     : "";
   const capNote = d.truncated
-    ? ` <span class="warn-text">Showing the ${fmtInt(d.cap)} largest moves — narrow the market (payer/state/discipline) to see the rest.</span>`
+    ? ` <span class="warn-text">Showing the ${fmtInt(d.cap)} largest moves — the cut/increase counts and by-payer stats cover only these. Narrow the market (payer/state/discipline) to see the rest.</span>`
     : "";
   out.innerHTML = `<div class="rc-summary"><b>${d.n_cuts}</b> cut(s), <b>${d.n_increases}</b> increase(s) from ${esc(d.prev_month)} → ${esc(d.new_month)}.${d.biggest_cut_pct != null ? ` Biggest cut ${d.biggest_cut_pct}%.` : ""}${capNote}</div>
     ${byPayer}
@@ -2134,8 +2134,14 @@ function initFilesView() {
 
   $("#v-run").addEventListener("click", async () => {
     const id = $("#v-id").value.trim(), code = $("#v-code").value.trim();
-    const expected = $("#v-expected").value;
+    const expected = $("#v-expected").value.trim();
     if (!id || !code) { alert("TIN/NPI and code required"); return; }
+    // "$85.00" → NaN → JSON null → the server treats it as "no expected rate"
+    // and shows a neutral verdict — the user believes their check ran. Catch it.
+    if (expected && isNaN(+expected)) {
+      alert("expected rate must be a plain number, like 85.00 (no $ or commas)");
+      return;
+    }
     let r;
     try {
       r = await postJson("/api/validate", {

@@ -400,14 +400,23 @@ def grain_of(qp: dict, cfg: MrfxConfig, store: Store) -> str:
 def rel_sql(grain: str, fs: FilterSet) -> str:
     base = f"WITH base AS ({GRAIN_REL[grain]}) SELECT * FROM base WHERE {fs.where}"
     if fs.hide_outliers:
+        # The reference median must exclude $0/$0.01 placeholders: with
+        # "dollar rates only" OFF, fs.where no longer strips them, and a
+        # placeholder-heavy code's median collapsed toward $0.01 — the 0.2x-5x
+        # band then hid most REAL rates. And the band is denominated in
+        # dollars, so percentage/per-diem rows (rate ~1.5) must be exempt from
+        # it — hiding them was exactly what unchecking dollar-only asked to
+        # undo.
         base = f"""
         WITH filtered AS ({base}),
         med AS (
             SELECT billing_code, median(negotiated_rate) AS m
-            FROM filtered WHERE is_dollar_rate GROUP BY billing_code
+            FROM filtered WHERE is_dollar_rate AND negotiated_rate > 0.01
+            GROUP BY billing_code
         )
         SELECT filtered.* FROM filtered LEFT JOIN med USING (billing_code)
-        WHERE m IS NULL OR (negotiated_rate <= 5 * m AND negotiated_rate >= 0.2 * m)
+        WHERE NOT is_dollar_rate OR m IS NULL
+           OR (negotiated_rate <= 5 * m AND negotiated_rate >= 0.2 * m)
         """
     return base
 
@@ -796,7 +805,6 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     def entity_detail(grain: str, unit_id: str):
         if grain not in GRAIN_REL:
             raise HTTPException(404, "grain must be entity|tin|npi")
-        fs = FilterSet({"dollar_only": "0"})
         with store.connect() as con:
             rows = _dicts(con.execute(
                 f"SELECT * FROM ({GRAIN_REL[grain]}) WHERE unit_id = ? "
@@ -860,9 +868,20 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         # a lookup link to find/verify one. Compute BEFORE masking tin_value.
         sites = store.org_websites()
         website = next((sites[t] for t in tin_list if t in sites), None) if grain != "npi" else None
-        geo_row = (tins[0] if tins else (member_npis[0] if member_npis else {}))
-        website_lookup = website_lookup_url(rows[0]["display_name"],
-                                            geo_row.get("city"), geo_row.get("state"))
+        # geo for the lookup link: tin_directory rows carry LIST columns
+        # (states/cities), npi_directory rows carry scalars (state/city) —
+        # reading .get("city") off a directory row was always None, so the
+        # lookup degraded to a name-only search for every TIN/entity drawer
+        if tins:
+            t0 = tins[0]
+            geo_city = (t0.get("cities") or [None])[0]
+            geo_state = (t0.get("states") or [None])[0]
+        elif member_npis:
+            geo_city = member_npis[0].get("city")
+            geo_state = member_npis[0].get("state")
+        else:
+            geo_city = geo_state = None
+        website_lookup = website_lookup_url(rows[0]["display_name"], geo_city, geo_state)
         for t in tins:
             t["tin_value"] = mask_tin(t["tin_value"])
         return {

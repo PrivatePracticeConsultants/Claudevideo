@@ -107,12 +107,18 @@ def update_entity(cfg: MrfxConfig, store: Store, entity_name: str,
     """UI edit: add/remove TINs for an entity; persists to YAML + store."""
     with _EDIT_LOCK:
         mapping = load_entity_map(cfg.entity_map_path)
+        def _clean(t) -> str:
+            # drop an Excel float artifact FIRST: bare \D-stripping turned
+            # "123456789.0" into the 10-digit "1234567890" — an NPI-shaped
+            # wrong identity silently persisted to the map
+            return re.sub(r"\D", "", str(t).strip().removesuffix(".0"))
+
         for tin in _tin_list(add_tins):
-            tin = re.sub(r"\D", "", str(tin))  # digits only ('12-3', '123.0' artifacts)
+            tin = _clean(tin)
             if tin:
                 mapping[tin] = entity_name
         for tin in _tin_list(remove_tins):
-            tin = re.sub(r"\D", "", str(tin))
+            tin = _clean(tin)
             if mapping.get(tin) == entity_name:
                 del mapping[tin]
         save_entity_map(cfg.entity_map_path, mapping)

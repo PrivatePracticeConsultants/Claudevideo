@@ -289,8 +289,9 @@ def rate_changes_csv(result: dict) -> str:
         f"Generated {dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} by MRF Explorer v{__version__}.",
         f"Rate changes from {result['prev_month']} to {result['new_month']} "
         f"({result['n_cuts']} cuts, {result['n_increases']} increases)."
-        + (f" NOTE: capped at the {result['cap']} largest moves — narrow the "
-           "market (payer/state/discipline) to see the rest."
+        + (f" NOTE: capped at the {result['cap']} largest moves — the counts "
+           "above cover only these rows; narrow the market "
+           "(payer/state/discipline) to see the rest."
            if result.get("truncated") else ""),
         f"Market definition: {json.dumps(result['market'])}.",
         "A change is a rate move on the SAME contract line (payer, TIN, code, "

@@ -496,10 +496,18 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                     req_headers["If-Range"] = validator
             with _client(cfg, verify=verify_override, ua=ua_override) as client,                     client.stream("GET", url, headers=req_headers) as resp:
                 if resume_from and resp.status_code == 416:
-                    # range not satisfiable — stale/oversized part; start over
+                    # range not satisfiable — stale/oversized part; start over.
+                    # Reset the WHOLE progress ledger with it: leaving the stall
+                    # anchor at the old multi-GB part size made the reset
+                    # condition (highwater - anchor >= 1 MB) hugely negative, so
+                    # a healthy full-speed restart whose first connection
+                    # outlived download_stall_seconds was falsely failed as
+                    # "no progress".
                     part.unlink(missing_ok=True)
                     val_p.unlink(missing_ok=True)
                     highwater = 0  # the .part is gone — don't claim bytes kept
+                    stall_anchor_hw = 0
+                    last_progress_t = time.monotonic()
                     raise DownloadError("stale partial download discarded", retryable=True)
                 if resp.status_code in RETRYABLE_STATUS:
                     raise DownloadError(
@@ -1201,6 +1209,13 @@ def fetch_url_record(cfg: MrfxConfig, store: Store, rec: dict) -> bool:
         # twin failed, or a prior prefetch). NEVER re-download here: the
         # signed URL may have expired, and a terminal 403 would delete the
         # only copy of the bytes this row was revived to use.
+        if store.is_download_canceled(url_id):
+            # a stop landed between this row's claim and now: the row is
+            # already 'skipped'; don't overwrite it with 'fetched' (the kept
+            # bytes stay for a later retry)
+            store.clear_download_cancel(url_id)
+            log.info("url %s: stopped by user before reusing the kept download", url)
+            return False
         try:
             meta = json.loads(keep_p.read_text())
             store.update_url(url_id, content_sha=meta["sha"], status="fetched")
@@ -1215,12 +1230,14 @@ def fetch_url_record(cfg: MrfxConfig, store: Store, rec: dict) -> bool:
             max_bytes=_size_limit_for(cfg, rec),
             cancel_check=lambda: store.is_download_canceled(url_id))
       except DownloadError as e:
-        if e.canceled:
+        if e.canceled or store.is_download_canceled(url_id):
             # the user pressed "stop downloads": the row was already flipped to
             # 'skipped' by cancel_all_downloading, and the .part is kept for a
             # later retry. Step aside — NEVER overwrite the status (that would
-            # turn a deliberate stop into a scary 'failed'). The flag is cleared
-            # in the finally below.
+            # turn a deliberate stop into a scary 'failed'). The second check
+            # catches a stop that landed during a backoff sleep / stall break,
+            # where the raised error is not itself flagged canceled. The flag
+            # is cleared in the finally below.
             log.info("url %s: download stopped by user", url)
             return False
         # over the size limit is NOT a failure — it's "too big, needs your OK"
@@ -1321,7 +1338,14 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
                 max_bytes=_size_limit_for(cfg, rec),
                 cancel_check=lambda: store.is_download_canceled(url_id))
         except DownloadError as e:
-            if e.canceled:  # user stopped it — row already 'skipped', .part kept
+            if e.canceled or store.is_download_canceled(url_id):
+                # user stopped it — row already 'skipped', .part kept. The
+                # second check catches a stop that landed during a backoff
+                # sleep or between the last poll and a stall/cap break: the
+                # error raised is then NOT flagged canceled, but marking the
+                # row 'failed' would overwrite the user's deliberate stop with
+                # a scary failure and leak the one-shot flag onto a future
+                # retry of this id.
                 store.clear_download_cancel(url_id)
                 log.info("url %s: download stopped by user", url)
                 return False

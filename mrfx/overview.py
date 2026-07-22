@@ -43,13 +43,17 @@ def market_overview(store: Store, state: str | None = None) -> dict:
                        count(DISTINCT t.tin_value)    AS practices
                 FROM {rel} t {j} WHERE {where}""", params).fetchone()
 
-        # per-TIN median first (the house grain), then median across TINs
+        # per-TIN median first (the house grain), then median across TINs.
+        # lower(): the parser stores discipline as "PT"/"OT"/"SLP" (catalog.py)
+        # — a literal lowercase IN-list matched nothing on real data and this
+        # whole landing-page section silently never rendered.
         by_discipline = con.execute(
             f"""WITH per_tin AS (
-                    SELECT t.discipline, t.tin_value, median(t.negotiated_rate) AS rate
+                    SELECT lower(t.discipline) AS discipline, t.tin_value,
+                           median(t.negotiated_rate) AS rate
                     FROM {rel} t {j}
-                    WHERE {where} AND t.discipline IN ('pt','ot','slp')
-                    GROUP BY t.discipline, t.tin_value)
+                    WHERE {where} AND lower(t.discipline) IN ('pt','ot','slp')
+                    GROUP BY lower(t.discipline), t.tin_value)
                 SELECT discipline, median(rate) AS median,
                        count(DISTINCT tin_value) AS practices
                 FROM per_tin GROUP BY discipline ORDER BY discipline""", params).fetchall()

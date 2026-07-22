@@ -26,7 +26,7 @@ def _row(payer, tin, npi, code, rate, month, *, mods=None, pos=("11",)):
     return dict(
         payer=payer, tin_value=tin, tin_type="ein", npi=npi,
         source_file=f"{month}.json", billing_code=code, billing_code_type="CPT",
-        discipline="pt", is_timed=True, billing_class="professional",
+        discipline="PT", is_timed=True, billing_class="professional",
         negotiated_rate=float(rate), negotiated_type="negotiated",
         is_dollar_rate=True, billing_code_modifier=list(mods or []), service_code=list(pos),
         file_month=month, last_updated_on=f"{month}-01", expiration_date=None,
@@ -44,7 +44,7 @@ def _seed(store, payer_base=None, codes=("97110", "97112", "97140", "97530"),
             rows.append(dict(
                 payer=p, tin_value="43%07d" % j, tin_type="ein", npi="1%09d" % j,
                 source_file=f"{month}.json", billing_code=c, billing_code_type="CPT",
-                discipline="pt", is_timed=True, billing_class="professional",
+                discipline="PT", is_timed=True, billing_class="professional",
                 negotiated_rate=float(payer_base[p] + j), negotiated_type="negotiated",
                 is_dollar_rate=True, modifier_set=[], service_code=["11"],
                 file_month=month, last_updated_on=f"{month}-01", expiration_date=None,
@@ -69,6 +69,11 @@ def test_market_overview_ranks_payers_above_and_below_market(store):
     # practices is a DISTINCT count (8 seeded), not sum-over-codes (would be 32)
     assert all(x["practices"] == 8 for x in ov["payer_index"])
     assert "basis_note" in ov  # honesty: overview states its basis
+    # by_discipline must render against PARSER-cased disciplines ("PT" — the
+    # lowercase IN-list regression made this section silently empty on real data)
+    assert [d["discipline"] for d in ov["by_discipline"]] == ["pt"]
+    assert ov["by_discipline"][0]["median"] is not None
+    assert ov["by_discipline"][0]["practices"] == 8
 
 
 def test_overview_median_agrees_with_markets_median(store):

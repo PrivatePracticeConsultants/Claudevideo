@@ -540,12 +540,27 @@ def cmd_export(cfg: MrfxConfig, args) -> int:
     store = Store(cfg.store_dir, cfg.duckdb_memory_gb, temp_dir=cfg.duckdb_temp_dir)
     out = Path(args.out)
     sql, params = order_export_sql(args)
-    with store.connect() as con:
-        # sql_path: an output path containing an apostrophe (C:\Users\O'Brien\…)
-        # must not break the COPY statement
-        con.execute(f"COPY ({sql}) TO '{sql_path(out)}' (FORMAT CSV, HEADER)", params)
-    data = out.read_bytes()
-    out.write_bytes(b"\xef\xbb\xbf" + data)
+    # COPY to a temp, then stream BOM + bytes to the real path. Reading the
+    # whole CSV into Python just to prepend the Excel BOM materialized a
+    # multi-GB export (plus a concatenated copy) in RAM — the exact blowup the
+    # API's streaming export path was built to avoid.
+    tmp = out.with_name(out.name + ".tmp")
+    n = 0
+    try:
+        with store.connect() as con:
+            # sql_path: an output path containing an apostrophe (C:\Users\O'Brien\…)
+            # must not break the COPY statement
+            con.execute(f"COPY ({sql}) TO '{sql_path(tmp)}' (FORMAT CSV, HEADER)", params)
+        import shutil
+        with open(out, "wb") as dst, open(tmp, "rb") as src:
+            dst.write(b"\xef\xbb\xbf")
+            shutil.copyfileobj(src, dst, 1 << 20)
+        with open(tmp, "rb") as src:  # row count without holding the file in RAM
+            for chunk in iter(lambda: src.read(1 << 20), b""):
+                n += chunk.count(b"\n")
+        n -= 1  # header
+    finally:
+        tmp.unlink(missing_ok=True)
     qp = {k: v for k, v in {
         "payer": args.payer, "cpt": args.cpt, "modifier": args.modifier,
         "billing_class": args.billing_class, "q": args.q,
@@ -556,7 +571,6 @@ def cmd_export(cfg: MrfxConfig, args) -> int:
     sidecar.write_text(
         methodology_text(cfg, store, args.grain, FilterSet(qp), "negotiated_rate", "desc", "cli")
     )
-    n = data.count(b"\n") - 1
     print(f"exported ~{max(n, 0):,} rows -> {out}\nmethodology -> {sidecar}")
     return 0
 
@@ -617,7 +631,9 @@ def cmd_forget(cfg: MrfxConfig, args) -> int:
             continue
         try:
             info = forget_file(cfg, store, name)
-        except RuntimeError as e:
+        except (RuntimeError, ValueError) as e:
+            # ValueError: a path-like name ("../x") — same message the API
+            # returns as a 400, printed plainly instead of a traceback
             print(f"{name}: {e}")
             rc = 1
             continue

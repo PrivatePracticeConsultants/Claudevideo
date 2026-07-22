@@ -109,16 +109,19 @@ def build_outreach_rows(store: Store, rel_sql: str, params: list,
                    max(npi_count)                                AS npi_count,
                    string_agg(DISTINCT payer, '; ' ORDER BY payer)  AS payers,
                    string_agg(DISTINCT file_month, '; ' ORDER BY file_month) AS months
-            FROM ({rel_sql}) WHERE is_dollar_rate
+            FROM ({rel_sql}) WHERE is_dollar_rate AND negotiated_rate > 0.01
             GROUP BY unit_id
             ORDER BY display_name
             """,
             params,
         ).fetchall()
+        # > 0.01: $0/$0.01 placeholder rows must not export as a "rate" of 0.01
+        # or drag other entities' percentile columns — same basis as the
+        # benchmark and every dashboard median
         unit_code = con.execute(
             f"""
             SELECT unit_id, billing_code, median(negotiated_rate) AS rate
-            FROM ({rel_sql}) WHERE is_dollar_rate
+            FROM ({rel_sql}) WHERE is_dollar_rate AND negotiated_rate > 0.01
             GROUP BY unit_id, billing_code
             """,
             params,

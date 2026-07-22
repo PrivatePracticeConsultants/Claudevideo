@@ -93,8 +93,51 @@ class _CountingRaw(io.RawIOBase):
             super().close()
 
 
+class _Prefixed(io.RawIOBase):
+    """Replays `prefix` bytes, then delegates to `stream` — used to un-read the
+    3 bytes _debom had to inspect on a stream that can't seek (gzip/zip)."""
+
+    def __init__(self, prefix: bytes, stream):
+        self._prefix = prefix
+        self._s = stream
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, b) -> int:
+        if self._prefix:
+            n = min(len(b), len(self._prefix))
+            b[:n] = self._prefix[:n]
+            self._prefix = self._prefix[n:]
+            return n
+        data = self._s.read(len(b))
+        if not data:
+            return 0
+        b[: len(data)] = data
+        return len(data)
+
+    def close(self) -> None:
+        try:
+            self._s.close()
+        finally:
+            super().close()
+
+
+def _debom(stream):
+    """Strip a UTF-8 byte-order mark from the front of a JSON stream. Windows
+    editors (Notepad's default) prepend it, and the ijson C backend rejects the
+    very first byte — turning a perfectly good hand-saved file into a wrong
+    'no in_network key found' verdict. All consumers read sequentially, so
+    inspecting 3 bytes and replaying them when they weren't a BOM is safe."""
+    head = stream.read(3)
+    if head == b"\xef\xbb\xbf":
+        return io.BufferedReader(_Prefixed(b"", stream), buffer_size=1 << 20)
+    return io.BufferedReader(_Prefixed(head, stream), buffer_size=1 << 20)
+
+
 def open_stream(path: Path, progress_cb=None) -> io.BufferedIOBase:
-    """Binary stream for .json / .json.gz / .zip (first json member).
+    """Binary stream for .json / .json.gz / .zip (first json member), with a
+    leading UTF-8 BOM stripped (any layer — plain, inside gzip, inside zip).
 
     progress_cb(compressed_bytes_read) is called as the underlying compressed
     bytes are consumed, so callers can render a progress bar."""
@@ -103,7 +146,7 @@ def open_stream(path: Path, progress_cb=None) -> io.BufferedIOBase:
     if progress_cb is not None:
         raw = io.BufferedReader(_CountingRaw(raw, progress_cb), buffer_size=1 << 20)
     if head[:2] == b"\x1f\x8b":
-        return gzip.GzipFile(fileobj=raw)  # type: ignore[return-value]
+        return _debom(gzip.GzipFile(fileobj=raw))
     if head[:4] == b"PK\x03\x04":
         zf = zipfile.ZipFile(raw)
         members = [m for m in zf.infolist()
@@ -123,9 +166,9 @@ def open_stream(path: Path, progress_cb=None) -> io.BufferedIOBase:
                 len(members), pick.filename)
         inner = zf.open(pick)
         if pick.filename.lower().endswith(".gz"):
-            return gzip.GzipFile(fileobj=inner)  # type: ignore[return-value]
-        return inner  # type: ignore[return-value]
-    return io.BufferedReader(raw, buffer_size=1 << 20) if not isinstance(raw, io.BufferedReader) else raw
+            return _debom(gzip.GzipFile(fileobj=inner))
+        return _debom(inner)
+    return _debom(raw)
 
 
 def _estimate_uncompressed(path: Path, compressed: int) -> int | None:

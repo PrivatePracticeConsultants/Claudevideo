@@ -1858,6 +1858,23 @@ class Store:
             con.execute("BEGIN")
             try:
                 con.execute("DELETE FROM provider_refs WHERE source_file = ?", [filename])
+                # Neutralize duplicate twins of the erased content FIRST (while
+                # the anchor is still 'done', so the subquery finds its sha):
+                # clearing their content_sha makes them permanently ineligible
+                # for the failed-twin auto-revive — otherwise a THIRD twin of
+                # the same bytes that failed long ago would satisfy the revive
+                # predicate on the next restart and silently re-download and
+                # re-ingest the data the user just erased. Their retry button
+                # still works (retry re-downloads by URL, sha is recomputed).
+                con.execute(
+                    "UPDATE url_queue SET content_sha = NULL, "
+                    "error = 'the identical file this deferred to was removed by "
+                    "the user — press retry to re-download it' "
+                    "WHERE kind = 'duplicate' AND status = 'skipped' "
+                    "AND content_sha IS NOT NULL AND content_sha IN "
+                    "  (SELECT content_sha FROM url_queue "
+                    "   WHERE filename = ? AND status = 'done' "
+                    "   AND content_sha IS NOT NULL)", [filename])
                 con.execute(
                     "UPDATE url_queue SET status = 'skipped', "
                     "error = 'data removed by user — press retry to re-download and re-ingest' "

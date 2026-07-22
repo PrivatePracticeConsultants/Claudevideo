@@ -62,7 +62,8 @@ def compute_fee_schedule(store: Store, subject: str, market: dict) -> dict:
         SELECT t.payer, t.billing_code, t.tin_value,
                median(t.negotiated_rate) AS rate
         FROM {rel} t LEFT JOIN tin_directory td USING (tin_value)
-        WHERE {where} AND t.tin_value IN (SELECT tin FROM subject_tins)
+        WHERE {where} AND t.is_dollar_rate
+          AND t.tin_value IN (SELECT tin FROM subject_tins)
         GROUP BY t.payer, t.billing_code, t.tin_value
     )
     SELECT payer, billing_code,
@@ -196,12 +197,17 @@ def payer_scorecard(fee_schedule: dict) -> dict:
 def _methodology(store: Store, fee_schedule: dict) -> str:
     market = fee_schedule["market"]
     payers = fee_schedule.get("payers") or []
-    with store.connect() as con:
-        q = ("SELECT filename, payer, last_updated_on FROM files WHERE status = 'done' "
-             "AND file_type = 'in_network' ")
-        if payers:
-            q += f"AND payer IN ({', '.join('?' for _ in payers)}) "
-        files = con.execute(q + "ORDER BY filename", payers).fetchall()
+    if payers:
+        with store.connect() as con:
+            files = con.execute(
+                "SELECT filename, payer, last_updated_on FROM files "
+                "WHERE status = 'done' AND file_type = 'in_network' "
+                f"AND payer IN ({', '.join('?' for _ in payers)}) "
+                "ORDER BY filename", payers).fetchall()
+    else:
+        # an empty fee schedule matched no payers — listing EVERY ingested file
+        # as its "source" would over-claim provenance for a report with no rows
+        files = []
     lines = [
         f"Generated {dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} by MRF Explorer v{__version__}.",
         f"As-of month: {month_label(market.get('month'))}. Subject tax IDs: {', '.join(fee_schedule['subject_tins']) or 'n/a'}.",
