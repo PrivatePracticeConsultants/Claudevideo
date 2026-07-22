@@ -81,6 +81,40 @@ def compute_fee_schedule(store: Store, subject: str, market: dict) -> dict:
         ).fetchall())
         mpfs_source = store.mpfs_loaded()
 
+        # For each (payer, code) the subject is priced on, what does THAT payer
+        # pay the subject's PEERS for the same code — the median across every
+        # other practice that payer prices, on the same basis. This is the
+        # negotiation hook per cell ("Aetna pays you $45; its median for your
+        # peers is $52 — you're 13% under"). Scoped to the subject's own payers
+        # and codes so the billing_code clustering prunes and we don't scan the
+        # whole book; peers exclude the subject's TINs (self-exclusion matches
+        # the benchmark's position metric).
+        subj_payers = sorted({r["payer"] for r in raw})
+        subj_codes = sorted({r["billing_code"] for r in raw})
+        market_by: dict[tuple, dict] = {}
+        if subj_payers and subj_codes:
+            msql = f"""
+            WITH subject_tins AS (SELECT unnest(?::VARCHAR[]) AS tin),
+            per_tin AS (
+                SELECT t.payer, t.billing_code, t.tin_value,
+                       median(t.negotiated_rate) AS rate
+                FROM {rel} t LEFT JOIN tin_directory td USING (tin_value)
+                WHERE {where} AND t.is_dollar_rate
+                  AND t.payer IN ({', '.join('?' for _ in subj_payers)})
+                  AND t.billing_code IN ({', '.join('?' for _ in subj_codes)})
+                  AND t.tin_value NOT IN (SELECT tin FROM subject_tins)
+                GROUP BY t.payer, t.billing_code, t.tin_value
+            )
+            SELECT payer, billing_code,
+                   round(median(rate), 2)     AS market_median,
+                   count(DISTINCT tin_value)  AS n_peers
+            FROM per_tin GROUP BY payer, billing_code
+            """
+            mcur = con.execute(msql, [subject_tins, *params, *subj_payers, *subj_codes])
+            for row in mcur.fetchall():
+                d = dict(zip([c[0] for c in mcur.description], row))
+                market_by[(d["payer"], d["billing_code"])] = d
+
     payers = sorted({r["payer"] for r in raw})
     by_code: dict[str, dict] = {}
     for r in raw:
@@ -90,14 +124,23 @@ def compute_fee_schedule(store: Store, subject: str, market: dict) -> dict:
             desc, _, timed = code_info(code)
             entry = {
                 "billing_code": code, "description": desc, "is_timed": timed,
-                "rates": {},  # payer -> {rate, pct_medicare}
+                "rates": {},  # payer -> {rate, pct_medicare, market_median, n_peers, vs_market_pct}
             }
             by_code[code] = entry
         pct = None
         base = mpfs.get(code)
         if base and r["rate"]:
             pct = round(100 * r["rate"] / base, 0)
-        entry["rates"][r["payer"]] = {"rate": r["rate"], "pct_medicare": pct}
+        mk = market_by.get((r["payer"], code)) or {}
+        mkt_med, n_peers = mk.get("market_median"), mk.get("n_peers") or 0
+        # signed % the subject sits above (+) or below (-) what this payer pays
+        # peers; None when there are no peers (only the subject prices it here)
+        vs = (round(100 * (r["rate"] - mkt_med) / mkt_med)
+              if r["rate"] and mkt_med else None)
+        entry["rates"][r["payer"]] = {
+            "rate": r["rate"], "pct_medicare": pct,
+            "market_median": mkt_med, "n_peers": n_peers, "vs_market_pct": vs,
+        }
 
     codes = sorted(by_code.values(), key=lambda e: e["billing_code"])
     return {
@@ -216,6 +259,10 @@ def _methodology(store: Store, fee_schedule: dict) -> str:
         "Rate for a (payer, code) is the median across the subject's tax IDs of "
         "each tax ID's median published value (variants collapse per the app's "
         "dedup rule).",
+        "Peer comparison ('peer $X · ±Y% vs peers'): the median rate THIS payer "
+        "pays every OTHER practice for the same code (subject excluded), on the "
+        "same basis and market scope; +Y% means the subject is paid above that "
+        "peer median, -Y% below it. A published rate is not proof of collection.",
         "Payer scorecard: payers are ranked by median % of Medicare when an MPFS "
         "anchor is loaded (absolute), otherwise by the median ratio of this "
         "payer's rate to the BEST payer's rate over codes at least two payers "
@@ -273,6 +320,17 @@ def render_rate_card(cfg: MrfxConfig, store: Store, fee_schedule: dict,
             top = " class='num top'" if best is not None and v["rate"] == best else " class='num'"
             sub = (f"<div class='sub'>{_pctnum(v['pct_medicare'])} MC</div>"
                    if mp and v["pct_medicare"] is not None else "")
+            # peer comparison: what this payer pays your peers for this code
+            if v.get("market_median") is not None:
+                vs = v.get("vs_market_pct")
+                if vs is None:
+                    vs_span = ""
+                elif vs == 0:
+                    vs_span = " · even w/ peers"
+                else:
+                    cls = "up" if vs > 0 else "down"
+                    vs_span = f" · <span class='{cls}'>{'+' if vs > 0 else ''}{vs}% vs peers</span>"
+                sub += f"<div class='sub'>peer {_m(v['market_median'])}{vs_span}</div>"
             cells += f"<td{top}>{_m(v['rate'])}{sub}</td>"
         return (f"<tr><td>{e(entry['billing_code'])}"
                 f"<div class='sub'>{e(entry['description'] or '')}"
@@ -300,6 +358,7 @@ def render_rate_card(cfg: MrfxConfig, store: Store, fee_schedule: dict,
  th {{ font-size: 11px; color: #898781; text-transform: uppercase; letter-spacing: .04em; }}
  .num {{ text-align: right; }} .sub {{ color: #898781; font-size: 11px; font-weight: 400; }}
  tr.best {{ background: #eef6ee; }} td.top {{ font-weight: 700; color: #1c6b3a; }}
+ .sub .up {{ color: #1c6b3a; font-weight: 600; }} .sub .down {{ color: #b3261e; font-weight: 600; }}
  footer {{ margin-top: 32px; border-top: 1px solid #c3c2b7; padding-top: 12px;
           color: #52514e; font-size: 11px; white-space: pre-wrap; }}
  @media print {{ body {{ margin: 0; }} }}
@@ -326,7 +385,8 @@ def fee_schedule_csv(fee_schedule: dict, scorecard: dict, store: Store) -> str:
         out.write(f"# {line}\n")
     w = csv.writer(out)
     w.writerow(["payer", "scorecard_rank", "billing_code", "description",
-                "rate", "pct_of_medicare"])
+                "rate", "pct_of_medicare",
+                "payer_peer_median", "peer_practices", "vs_peer_median_pct"])
     rank = {r["payer"]: r.get("rank") for r in scorecard["rows"]}
     for entry in fee_schedule["codes"]:
         for payer in fee_schedule["payers"]:
@@ -335,5 +395,8 @@ def fee_schedule_csv(fee_schedule: dict, scorecard: dict, store: Store) -> str:
                 continue
             w.writerow([defuse_csv(payer), rank.get(payer) or "", entry["billing_code"],
                         defuse_csv(entry["description"]) or "", v["rate"],
-                        "" if v["pct_medicare"] is None else int(v["pct_medicare"])])
+                        "" if v["pct_medicare"] is None else int(v["pct_medicare"]),
+                        "" if v.get("market_median") is None else v["market_median"],
+                        v.get("n_peers") or 0,
+                        "" if v.get("vs_market_pct") is None else v["vs_market_pct"]])
     return out.getvalue()

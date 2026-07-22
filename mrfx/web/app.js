@@ -1551,13 +1551,21 @@ function renderRatecard(out, fs, sc) {
       if (!v || v.rate == null) return `<td class="num">–</td>`;
       const top = best != null && v.rate === best ? " top-rate" : "";
       const mc = mp && v.pct_medicare != null ? `<div class="sub">${v.pct_medicare}% MC</div>` : "";
-      return `<td class="num${top}">$${fmtMoney(v.rate)}${mc}</td>`;
+      // peer comparison: what THIS payer pays your peers for this code
+      let peer = "";
+      if (v.market_median != null) {
+        const vs = v.vs_market_pct;
+        const tag = vs == null ? "" : vs === 0 ? " · even"
+          : ` · <span class="${vs > 0 ? "peer-up" : "peer-down"}">${vs > 0 ? "+" : ""}${vs}% vs peers</span>`;
+        peer = `<div class="sub" title="what ${esc(p)} pays your peers for this code (${fmtInt(v.n_peers)} practice${v.n_peers === 1 ? "" : "s"}, you excluded)">peer $${fmtMoney(v.market_median)}${tag}</div>`;
+      }
+      return `<td class="num${top}">$${fmtMoney(v.rate)}${mc}${peer}</td>`;
     }).join("");
     return `<tr><td>${esc(e.billing_code)}<div class="sub">${esc(e.description || "")}</div></td>${cells}</tr>`;
   }).join("");
   const bestLine = sc.best_payer ? `Best-paying payer: <b>${esc(sc.best_payer)}</b>. ` : "";
   out.innerHTML = `
-    <div class="rc-summary">${bestLine}Payers ranked by ${mp ? "% of Medicare" : "% of the best payer"}.</div>
+    <div class="rc-summary">${bestLine}Payers ranked by ${mp ? "% of Medicare" : "% of the best payer"}. Each cell shows your rate, then <b>peer $</b> — what that payer pays your peers for the same code — and how you compare.</div>
     <h3>Payer scorecard — who pays best</h3>
     <div class="tablewrap"><table class="rc-table"><thead><tr>${scHead}</tr></thead><tbody>${scRows}</tbody></table></div>
     <h3 style="margin-top:18px">Fee schedule</h3>

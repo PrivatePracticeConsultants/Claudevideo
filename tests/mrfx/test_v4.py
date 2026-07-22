@@ -444,6 +444,20 @@ def test_opportunity_model_math(market_store):
         compute_opportunity(bench, {})
 
 
+def test_fee_schedule_peer_comparison(market_store):
+    # each rate-card cell compares the subject's rate to what THAT payer pays
+    # the subject's PEERS for the same code (subject excluded)
+    from mrfx.schedule import compute_fee_schedule
+    fs = compute_fee_schedule(market_store, "430000000", {"month": "2026-06"})
+    e = next(x for x in fs["codes"] if x["billing_code"] == "97110")
+    payer = fs["payers"][0]
+    v = e["rates"][payer]
+    assert v["rate"] == 30.0
+    assert v["market_median"] == 35.0    # median of the 9 peers 31..39
+    assert v["n_peers"] == 9             # subject's own TIN excluded
+    assert v["vs_market_pct"] == -14     # 30 is ~14% below the peer median
+
+
 def test_mpfs_percent_of_medicare(cfg, market_store):
     client = TestClient(create_app(cfg, market_store))
     # no MPFS loaded -> no % of Medicare column
