@@ -194,6 +194,9 @@ def medicare_index(store: Store, code: str, market: dict) -> dict:
         "mpfs_rate": round(base, 2) if base else None,
         "mpfs_loaded": store.mpfs_loaded(),
         "market_median": mkt[0], "market_p25": mkt[1], "market_p75": mkt[2],
+        # surface the backing count so a "market median" from 1-4 practices reads
+        # as thin, not authoritative (the per-payer rows already gate on _MIN_CELL)
+        "market_practices": mkt[3],
         "market_pct_medicare": pct(mkt[0]),
         "market_p25_pct_medicare": pct(mkt[1]),
         "market_p75_pct_medicare": pct(mkt[2]),
@@ -225,13 +228,17 @@ def assistant_pos_diff(store: Store, code: str, market: dict) -> dict:
     where, params = _market_where(m, True, bool(m.get("include_non_dollar")))
     rel = _rates_relation(m)
 
-    # Each differential pairs LIKE WITH LIKE, within the same payer×practice, at
-    # office place-of-service (POS 11) so a telehealth line can't contaminate the
-    # base: office-base (no CQ/CO) is the reference; office-assistant (CQ/CO) and
-    # telehealth-base (POS 02/10, no CQ/CO) are compared against it.
+    # Each differential pairs LIKE WITH LIKE within the same payer×practice at
+    # office place-of-service (POS 11): office-base (no CQ/CO) is the reference;
+    # office-assistant (CQ/CO) and telehealth-base are compared against it.
+    # `tele` requires a telehealth POS AND no office POS, so a line that lists
+    # both (e.g. "02|11") counts as office only and never double-feeds both
+    # buckets. Lines with NO POS at all match neither and are excluded — the
+    # differential only covers POS-tagged rows (stated in the note).
     office = "('|'||service_code_set||'|') LIKE '%|11|%'"
-    tele = ("(('|'||service_code_set||'|') LIKE '%|02|%' "
-            "OR ('|'||service_code_set||'|') LIKE '%|10|%')")
+    tele = ("((('|'||service_code_set||'|') LIKE '%|02|%' "
+            "OR ('|'||service_code_set||'|') LIKE '%|10|%') "
+            "AND ('|'||service_code_set||'|') NOT LIKE '%|11|%')")
     base = "modifier_set NOT LIKE '%CQ%' AND modifier_set NOT LIKE '%CO%'"
     asst = "(modifier_set LIKE '%CQ%' OR modifier_set LIKE '%CO%')"
     sql = f"""
@@ -274,9 +281,11 @@ def assistant_pos_diff(store: Store, code: str, market: dict) -> dict:
         "payers": rows,
         "basis_note": BASIS_NOTE + " Assistant (CQ/CO) rows are INCLUDED here by design.",
         "diff_note": (
-            "Each differential compares rates from the SAME payer and practice "
-            "(assistant vs base, telehealth vs office). A payer with 0 pairs "
-            "simply does not publish that line — reported as 'not published', "
-            "never as parity. Telehealth therapy lines are sparse; treat small "
-            "pair counts as directional."),
+            "Each % is the median per-practice ratio (assistant vs base, "
+            "telehealth vs office) within the SAME payer and practice; the two "
+            "medians shown are references, not that percentage's exact numerator/"
+            "denominator. Only office-POS (11) rows anchor the base, so a payer "
+            "that publishes no POS-tagged line shows 0 pairs — reported as 'not "
+            "published', never as parity. Telehealth lines are sparse; treat "
+            "small pair counts as directional."),
     }

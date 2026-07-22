@@ -670,8 +670,16 @@ def contract_gaps(store: Store, subject: str, market: dict, *,
     if min_peers < 1:
         raise BenchmarkError("min_peers must be at least 1")
     limit = max(1, min(int(limit), 1000))
+    subject = str(subject or "").strip()
+    if not subject:
+        raise BenchmarkError("pick a subject practice")
     market = normalize_market(market)
     subject_tins = resolve_subject_tins(store, subject)
+    # a blank/unknown subject resolves to [""], which matches no rows — the subj
+    # CTE would then exclude nothing and EVERY peer-priced code would read as a
+    # "gap" for a practice that isn't there. Refuse instead of fabricating.
+    if not any(t for t in subject_tins):
+        raise BenchmarkError("subject not found — pick a practice that has rates in the store")
     peer_desc, market = resolve_peer_set(store, market)
     where, params = _market_where(market, bool(market.get("include_assistant")),
                                   bool(market.get("include_non_dollar")))
@@ -705,7 +713,10 @@ def contract_gaps(store: Store, subject: str, market: dict, *,
     )
     SELECT p.billing_code, p.n_peers, p.peer_median, p.peer_p25, p.peer_p75
     FROM peers p
-    WHERE p.n_peers >= ? AND p.billing_code NOT IN (SELECT billing_code FROM subj)
+    WHERE p.n_peers >= ?
+      -- NOT IN with a NULL in the subquery zeroes the whole result; billing_code
+      -- is non-null in the schema, but guard the subquery to be safe
+      AND p.billing_code NOT IN (SELECT billing_code FROM subj WHERE billing_code IS NOT NULL)
     ORDER BY p.n_peers DESC, p.billing_code
     LIMIT ?
     """

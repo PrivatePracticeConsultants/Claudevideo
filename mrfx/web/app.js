@@ -337,7 +337,7 @@ function renderMkNegotiability(d) {
   const badge = { wide: "good", moderate: "", tight: "muted" };
   const rows = d.payers.map((p) => `<tr>
     <td>${esc(p.payer)}</td>
-    <td><span class="disc-tag ${badge[p.negotiability] || ""}">${p.negotiability}</span></td>
+    <td><span class="disc-tag ${badge[p.negotiability] || ""}">${esc(p.negotiability)}</span></td>
     <td class="num">${p.spread_pct == null ? "–" : p.spread_pct + "%"}</td>
     <td class="num muted">${money(p.p10)}</td>
     <td class="num"><b>${money(p.p50)}</b></td>
@@ -352,9 +352,15 @@ function renderMkNegotiability(d) {
 
 function renderMkMedicare(d) {
   if (d._err) return mkErr(d, "% of Medicare");
-  if (!d.mpfs_loaded)
+  // gate on the PER-CODE anchor (mpfs_rate), not the global mpfs_loaded flag: an
+  // MPFS file can be loaded yet not contain this code, in which case every
+  // %-of-Medicare is null and the note would read "null%".
+  if (!d.mpfs_rate)
     return mkEmpty("% of Medicare",
-      "No MPFS anchor loaded — load a Medicare Physician Fee Schedule CSV on the Benchmark tab to see rates as a % of Medicare. (Market median without an anchor: " + money(d.market_median) + ".)");
+      (d.mpfs_loaded
+        ? "The loaded MPFS file has no non-facility rate for this code — can't anchor it to Medicare."
+        : "No MPFS anchor loaded — load a Medicare Physician Fee Schedule CSV on the Benchmark tab to see rates as a % of Medicare.") +
+      " (Market median: " + money(d.market_median) + " across " + fmtInt(d.market_practices) + " practices.)");
   if (!d.payers || !d.payers.length)
     return mkEmpty("% of Medicare", "No payer prices this code across ≥5 practices yet.");
   const rows = d.payers.map((p) => `<tr>
@@ -363,7 +369,7 @@ function renderMkMedicare(d) {
     <td class="num">${p.pct_medicare == null ? "–" : p.pct_medicare + "%"}</td>
     <td class="num muted">${fmtInt(p.n_practices)}</td></tr>`).join("");
   return `<div class="ov-block"><h3>% of Medicare</h3>
-    <div class="muted" style="margin-bottom:6px">Medicare (non-facility) = ${money(d.mpfs_rate)}. Market median ${money(d.market_median)} = <b>${d.market_pct_medicare}% of Medicare</b> (P25–P75: ${d.market_p25_pct_medicare}%–${d.market_p75_pct_medicare}%). ${esc(d.medicare_note)}</div>
+    <div class="muted" style="margin-bottom:6px">Medicare (non-facility) = ${money(d.mpfs_rate)}. Market median ${money(d.market_median)} across ${fmtInt(d.market_practices)} practices = <b>${d.market_pct_medicare}% of Medicare</b> (P25–P75: ${d.market_p25_pct_medicare}%–${d.market_p75_pct_medicare}%). ${esc(d.medicare_note)}</div>
     <div class="tablewrap"><table>
       <thead><tr><th>Payer</th><th class="num">Median rate</th><th class="num">% of Medicare</th><th class="num">Practices</th></tr></thead>
       <tbody>${rows}</tbody></table></div></div>`;
@@ -376,9 +382,9 @@ function renderMkDifferential(d) {
       "No payer publishes a paired assistant (CQ/CO) or telehealth line for this code — nothing to compare. (That itself is informative: assistants/telehealth are billed at the base rate or simply not published.)");
   const rows = d.payers.map((p) => `<tr>
     <td>${esc(p.payer)}</td>
-    <td class="num">${p.asst_pairs ? p.asst_pct_of_base + "%" : "<span class='muted'>not published</span>"}</td>
+    <td class="num">${p.asst_pairs && p.asst_pct_of_base != null ? p.asst_pct_of_base + "%" : "<span class='muted'>not published</span>"}</td>
     <td class="num muted">${p.asst_pairs ? money(p.asst_base_med) + " → " + money(p.asst_med) + " · " + fmtInt(p.asst_pairs) : "–"}</td>
-    <td class="num">${p.tele_pairs ? p.tele_pct_of_office + "%" : "<span class='muted'>not published</span>"}</td>
+    <td class="num">${p.tele_pairs && p.tele_pct_of_office != null ? p.tele_pct_of_office + "%" : "<span class='muted'>not published</span>"}</td>
     <td class="num muted">${p.tele_pairs ? money(p.office_med) + " → " + money(p.tele_med) + " · " + fmtInt(p.tele_pairs) : "–"}</td></tr>`).join("");
   return `<div class="ov-block"><h3>Assistant (CQ/CO) &amp; telehealth differentials</h3>
     <div class="muted" style="margin-bottom:6px">${esc(d.diff_note)}</div>

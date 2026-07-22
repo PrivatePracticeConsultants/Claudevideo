@@ -196,6 +196,11 @@ def test_contract_gaps_finds_codes_peers_have(store):
     assert {g["billing_code"] for g in d["gaps"]} == {"97140", "97530"}
     for g in d["gaps"]:
         assert g["n_peers"] >= 5 and g["peer_median"] is not None
+    # a blank/unknown subject must REFUSE, not fabricate a full gap list
+    import pytest
+    from mrfx.benchmark import BenchmarkError
+    with pytest.raises(BenchmarkError):
+        contract_gaps(store, "", {"month": month}, min_peers=5)
 
 
 def test_practice_leaderboard_orders_by_position(store):
