@@ -1561,33 +1561,35 @@ class Store:
                     "WHERE status IN ('downloading', 'fetched', 'expanding', 'ingesting')"
                 )
             # Stranded dedup twins: a duplicate defers to its in-flight twin
-            # with the promise "will retry automatically if that one fails" —
+            # with the promise "will retry automatically if that one FAILS" —
             # but the failure write and the twin revival are two separate store
             # calls, so a crash exactly between them leaves the duplicate
             # 'skipped' forever (its twin is terminally 'failed', which the
-            # in-flight sweep above never touches). Honor the promise at
-            # startup: re-queue duplicates whose sha has no successful or
-            # live twin left to defer to.
-            revived = con.execute(
-                "SELECT count(*) FROM url_queue d WHERE d.status = 'skipped' "
-                "AND d.kind = 'duplicate' AND d.content_sha IS NOT NULL "
+            # in-flight sweep above never touches). Honor the promise at startup.
+            #
+            # The trigger is specifically a FAILED twin. A twin that is merely
+            # 'skipped' — because the user forgot the ingested file or skipped
+            # it by hand — is NOT a failure: reviving off it would silently
+            # re-download and re-ingest data the user deliberately erased (the
+            # forget path flips the 'done' anchor to 'skipped', which used to
+            # satisfy the old "no live/done twin" predicate). So require an
+            # actually-failed twin, AND still no live/done twin to defer to.
+            revive_pred = (
+                "status = 'skipped' AND kind = 'duplicate' AND content_sha IS NOT NULL "
+                "AND EXISTS (SELECT 1 FROM url_queue t "
+                "  WHERE t.content_sha = url_queue.content_sha AND t.id != url_queue.id "
+                "  AND t.status = 'failed') "
                 "AND NOT EXISTS (SELECT 1 FROM url_queue t "
-                "  WHERE t.content_sha = d.content_sha AND t.id != d.id "
+                "  WHERE t.content_sha = url_queue.content_sha AND t.id != url_queue.id "
                 "  AND t.status IN ('done', 'queued', 'downloading', 'fetched', "
-                "                   'expanding', 'ingesting'))"
-            ).fetchone()[0]
+                "                   'expanding', 'ingesting'))")
+            revived = con.execute(
+                f"SELECT count(*) FROM url_queue WHERE {revive_pred}").fetchone()[0]
             if revived:
                 con.execute(
                     "UPDATE url_queue SET status = 'queued', "
                     "error = 'the identical link this deferred to failed — retrying "
-                    "(from the kept download when still present)' "
-                    "WHERE status = 'skipped' AND kind = 'duplicate' "
-                    "AND content_sha IS NOT NULL "
-                    "AND NOT EXISTS (SELECT 1 FROM url_queue t "
-                    "  WHERE t.content_sha = url_queue.content_sha AND t.id != url_queue.id "
-                    "  AND t.status IN ('done', 'queued', 'downloading', 'fetched', "
-                    "                   'expanding', 'ingesting'))"
-                )
+                    f"(from the kept download when still present)' WHERE {revive_pred}")
                 n += revived
         return n
 
@@ -3002,6 +3004,10 @@ class Store:
                 for tbl in ("rates_dedup_tbl", "rates_by_tin_tbl", "tin_directory_tbl"):
                     con.execute(f"DROP TABLE IF EXISTS {tbl}")
                 self._register_views(con)
+            # url_queue ids are gone; drop any lingering cancel flags so a reused
+            # id can never inherit a stale "canceled" verdict
+            with self._cancel_lock:
+                self._canceled_downloads.clear()
         # AFTER the wipe: a count computed mid-reset (from the old tables) must
         # not be cached under the post-reset generation and served for 30s
         # against the now-empty store.

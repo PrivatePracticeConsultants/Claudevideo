@@ -1188,19 +1188,19 @@ def fetch_url_record(cfg: MrfxConfig, store: Store, rec: dict) -> bool:
         except (ValueError, KeyError, OSError):
             keep_p.unlink(missing_ok=True)  # corrupt sidecar — fresh download below
     try:
+      try:
         content_sha, final_url = download(
             cfg, url, dest,
             progress_cb=lambda d, t: store.url_progress(url_id, d, t),
             max_bytes=_size_limit_for(cfg, rec),
             cancel_check=lambda: store.is_download_canceled(url_id))
-    except DownloadError as e:
+      except DownloadError as e:
         if e.canceled:
             # the user pressed "stop downloads": the row was already flipped to
             # 'skipped' by cancel_all_downloading, and the .part is kept for a
-            # later retry. Just clear the one-shot cancel flag and step aside —
-            # NEVER overwrite the status (that would turn a deliberate stop into
-            # a scary 'failed').
-            store.clear_download_cancel(url_id)
+            # later retry. Step aside — NEVER overwrite the status (that would
+            # turn a deliberate stop into a scary 'failed'). The flag is cleared
+            # in the finally below.
             log.info("url %s: download stopped by user", url)
             return False
         # over the size limit is NOT a failure — it's "too big, needs your OK"
@@ -1230,9 +1230,22 @@ def fetch_url_record(cfg: MrfxConfig, store: Store, rec: dict) -> bool:
             dest.unlink(missing_ok=True)
             _meta_path(dest).unlink(missing_ok=True)
         return False
-    _write_meta(dest, content_sha, final_url)
-    store.update_url(url_id, content_sha=content_sha, status="fetched")
-    return True
+      _write_meta(dest, content_sha, final_url)
+      if store.is_download_canceled(url_id):
+        # the user hit "stop" in the instant AFTER download()'s last cancel
+        # poll but before the stream ended, so it returned success: the row is
+        # already 'skipped' and the .part/sidecar are kept for a retry. Honor
+        # the stop instead of overwriting it with 'fetched'.
+        log.info("url %s: finished just as the user stopped it — kept for retry", url)
+        return False
+      store.update_url(url_id, content_sha=content_sha, status="fetched")
+      return True
+    finally:
+      # a one-shot flag: once download() has returned (any outcome) it has done
+      # its job. Clearing here closes the leak where a cancel that lost the race
+      # (or coincided with a non-cancel failure) left the id set forever and
+      # wedged a future retry of that same id as "canceled".
+      store.clear_download_cancel(url_id)
 
 
 def _mentions_allowed_amounts(dest: Path) -> bool:
@@ -1307,6 +1320,16 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
         # sidecar written on THIS path too, so a kill mid-ingest resumes from
         # the kept download instead of re-downloading (see the note above)
         _write_meta(dest, content_sha, final_url)
+
+    # download stage complete — retire the one-shot cancel flag (mirrors
+    # fetch_url_record's finally). If the user's stop landed in the success-race
+    # window after download()'s last poll, the row is already 'skipped' and the
+    # kept .part is left for a retry; don't march on and overwrite it.
+    if store.is_download_canceled(url_id):
+        store.clear_download_cancel(url_id)
+        log.info("url %s: finished just as the user stopped it — kept for retry", url)
+        return False
+    store.clear_download_cancel(url_id)
 
     # Blue plans host copies of each other's national files — the same bytes
     # arrive under many domains. Skip byte-identical repeats of files ALREADY

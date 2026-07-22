@@ -210,6 +210,43 @@ def test_duplicate_of_ingesting_twin_kept_and_revived(cfg, store, server, http_r
     assert rec_b["status"] == "done" and rec_b["rows_emitted"] > 0
 
 
+def test_forgotten_file_does_not_resurrect_its_duplicate_twin(cfg, store, server, http_root):
+    # A mirror link deferred to the file the user later FORGETS. Forget flips the
+    # ingested row's queue anchor done->skipped; recover_stuck_urls must NOT then
+    # revive the duplicate (which would silently re-download + re-ingest the very
+    # bytes the user erased). Auto-revive fires only for an actually-FAILED twin.
+    import hashlib
+    from mrfx.fetch import process_url_record
+
+    mirror = http_root / "forget_rates.json.gz"
+    mirror.write_bytes((http_root / "rates.json.gz").read_bytes())
+    sha = hashlib.sha256(mirror.read_bytes()).hexdigest()
+
+    add_urls(store, [f"{server}/rates.json.gz?copy=keep"])
+    a = next(r for r in store.list_urls() if "copy=keep" in r["url"])
+    store.update_url(a["id"], status="ingesting", content_sha=sha)
+    add_urls(store, [f"{server}/forget_rates.json.gz"])   # the deferring twin
+    process_url_record(cfg, store, store.next_queued_url())
+    b = next(r for r in store.list_urls() if "forget_rates" in r["url"])
+    assert b["status"] == "skipped" and b["kind"] == "duplicate"
+
+    # A finishes, then the user forgets it: mirror forget_file's queue flip
+    store.update_url(a["id"], status="done")
+    with store.write_lock, store.connect() as con:
+        con.execute("UPDATE url_queue SET status='skipped' WHERE id=?", [a["id"]])
+
+    store.recover_stuck_urls()
+    b2 = next(r for r in store.list_urls() if r["id"] == b["id"])
+    assert b2["status"] == "skipped"   # NOT resurrected behind the user's back
+
+    # but a genuinely FAILED twin still triggers the promised auto-retry
+    with store.write_lock, store.connect() as con:
+        con.execute("UPDATE url_queue SET status='failed' WHERE id=?", [a["id"]])
+    store.recover_stuck_urls()
+    b3 = next(r for r in store.list_urls() if r["id"] == b["id"])
+    assert b3["status"] == "queued"
+
+
 def test_higher_id_ingesting_twin_still_dedups_low_id_retry(cfg, store, server, http_root):
     # Regression: the cheap pre-ingest check uses queue-id order, so a LOWER-id
     # row (e.g. one that failed transiently and got re-queued) would slip past a

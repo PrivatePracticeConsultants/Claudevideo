@@ -68,6 +68,17 @@ def test_market_overview_ranks_payers_above_and_below_market(store):
     assert all(x["codes"] >= 3 for x in ov["payer_index"])
     # practices is a DISTINCT count (8 seeded), not sum-over-codes (would be 32)
     assert all(x["practices"] == 8 for x in ov["payer_index"])
+    assert "basis_note" in ov  # honesty: overview states its basis
+
+
+def test_overview_median_agrees_with_markets_median(store):
+    # cross-tab consistency: the landing-page code median and the Markets tab's
+    # market median for the SAME code must match (both per-TIN, report basis)
+    _seed(store)
+    ov = market_overview(store)
+    ov_med = {c["billing_code"]: c["median"] for c in ov["top_codes"]}
+    mi = medicare_index(store, "97110", {"month": "latest"})
+    assert ov_med["97110"] == mi["market_median"]
 
 
 def test_code_payer_rank_orders_by_median(cfg, store):

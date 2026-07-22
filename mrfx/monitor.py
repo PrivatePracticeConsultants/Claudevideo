@@ -21,6 +21,10 @@ from .benchmark import (BenchmarkError, _market_where, normalize_market,
 from .catalog import code_info
 from .store import Store, defuse_csv, mask_tin
 
+# a rate-change list beyond this is unusable in a browser and a memory risk to
+# drain whole; cap it, keeping the biggest moves, and flag truncation honestly
+_CHANGES_CAP = 5000
+
 
 def available_months(store: Store) -> list[str]:
     with store.connect() as con:
@@ -98,29 +102,41 @@ def compute_rate_changes(store: Store, market: dict, *, subject: str | None = No
     # LEFT JOIN the display name PER RESULT ROW — never fetch the whole
     # tin_directory into a Python dict (one entry per TIN = millions at 300M
     # rows → OOM). The change set is bounded by month-over-month rate moves.
+    # min_pct is pushed into SQL and the result is CAPPED: at book scale an
+    # unscoped two-month diff can move millions of contract lines, and draining
+    # that whole set into Python (then copying it twice more) would OOM the
+    # single user's process / wedge their browser. Keep the biggest moves.
+    min_pct_sql = float(min_pct) if min_pct is not None else 0.0
     sql = f"""
-    WITH cur AS ({side(where_cur)}), prev AS ({side(where_prev)})
-    SELECT c.payer, c.tin_value, c.billing_code, c.modifier_set,
-           round(p.rate, 2) AS old_rate, round(c.rate, 2) AS new_rate,
-           round(c.rate - p.rate, 2) AS delta,
-           round(100.0 * (c.rate - p.rate) / p.rate, 1) AS pct_change,
-           td.display_name AS display_name
-    FROM cur c JOIN prev p USING
-        (payer, tin_value, billing_code, modifier_set, billing_class, service_code_set)
-    LEFT JOIN tin_directory td ON td.tin_value = c.tin_value
-    WHERE p.rate > 0 AND abs(c.rate - p.rate) >= 0.01
-    ORDER BY pct_change ASC
+    WITH cur AS ({side(where_cur)}), prev AS ({side(where_prev)}),
+    moves AS (
+        SELECT c.payer, c.tin_value, c.billing_code, c.modifier_set,
+               round(p.rate, 2) AS old_rate, round(c.rate, 2) AS new_rate,
+               round(c.rate - p.rate, 2) AS delta,
+               round(100.0 * (c.rate - p.rate) / p.rate, 1) AS pct_change,
+               td.display_name AS display_name
+        FROM cur c JOIN prev p USING
+            (payer, tin_value, billing_code, modifier_set, billing_class, service_code_set)
+        LEFT JOIN tin_directory td ON td.tin_value = c.tin_value
+        WHERE p.rate > 0 AND abs(c.rate - p.rate) >= 0.01
+    )
+    SELECT * FROM moves
+    WHERE abs(pct_change) >= ?
+    ORDER BY abs(pct_change) DESC, pct_change ASC
+    LIMIT ?
     """
-    params = [*p_cur, *subj_params, *p_prev, *subj_params]
+    params = [*p_cur, *subj_params, *p_prev, *subj_params, min_pct_sql, _CHANGES_CAP + 1]
     with store.connect() as con:
         cur = con.execute(sql, params)
         cols = [d[0] for d in cur.description]
         raw = [dict(zip(cols, r)) for r in cur.fetchall()]
+    truncated = len(raw) > _CHANGES_CAP
+    raw = raw[:_CHANGES_CAP]
+    # display order: most-negative (biggest cut) first, like before the cap
+    raw.sort(key=lambda r: r["pct_change"])
 
     rows, cuts, increases, pct_moves = [], 0, 0, []
     for r in raw:
-        if min_pct is not None and abs(r["pct_change"]) < min_pct:
-            continue
         desc, _, _ = code_info(r["billing_code"])
         direction = "cut" if r["delta"] < 0 else "increase"
         cuts += direction == "cut"
@@ -166,6 +182,8 @@ def compute_rate_changes(store: Store, market: dict, *, subject: str | None = No
         "prev_month": old_month,
         "subject": subject,
         "count": len(rows),
+        "truncated": truncated,
+        "cap": _CHANGES_CAP,
         "n_cuts": cuts,
         "n_increases": increases,
         "biggest_cut_pct": biggest_cut,
@@ -270,7 +288,10 @@ def rate_changes_csv(result: dict) -> str:
     for line in [
         f"Generated {dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} by MRF Explorer v{__version__}.",
         f"Rate changes from {result['prev_month']} to {result['new_month']} "
-        f"({result['n_cuts']} cuts, {result['n_increases']} increases).",
+        f"({result['n_cuts']} cuts, {result['n_increases']} increases)."
+        + (f" NOTE: capped at the {result['cap']} largest moves — narrow the "
+           "market (payer/state/discipline) to see the rest."
+           if result.get("truncated") else ""),
         f"Market definition: {json.dumps(result['market'])}.",
         "A change is a rate move on the SAME contract line (payer, TIN, code, "
         "modifier-set, billing class, place-of-service set) present in BOTH "

@@ -380,11 +380,13 @@ function renderMkDifferential(d) {
   if (!d.payers || !d.payers.length)
     return mkEmpty("Assistant & telehealth differentials",
       "No payer publishes a paired assistant (CQ/CO) or telehealth line for this code — nothing to compare. (That itself is informative: assistants/telehealth are billed at the base rate or simply not published.)");
+  const mc = d.min_cell || 5;
+  const thin = (n) => (n && n < mc ? " <span class='timed-tag' title='fewer than " + mc + " practices back this — directional, not a market fact'>thin</span>" : "");
   const rows = d.payers.map((p) => `<tr>
     <td>${esc(p.payer)}</td>
-    <td class="num">${p.asst_pairs && p.asst_pct_of_base != null ? p.asst_pct_of_base + "%" : "<span class='muted'>not published</span>"}</td>
+    <td class="num">${p.asst_pairs && p.asst_pct_of_base != null ? p.asst_pct_of_base + "%" + thin(p.asst_pairs) : "<span class='muted'>not published</span>"}</td>
     <td class="num muted">${p.asst_pairs ? money(p.asst_base_med) + " → " + money(p.asst_med) + " · " + fmtInt(p.asst_pairs) : "–"}</td>
-    <td class="num">${p.tele_pairs && p.tele_pct_of_office != null ? p.tele_pct_of_office + "%" : "<span class='muted'>not published</span>"}</td>
+    <td class="num">${p.tele_pairs && p.tele_pct_of_office != null ? p.tele_pct_of_office + "%" + thin(p.tele_pairs) : "<span class='muted'>not published</span>"}</td>
     <td class="num muted">${p.tele_pairs ? money(p.office_med) + " → " + money(p.tele_med) + " · " + fmtInt(p.tele_pairs) : "–"}</td></tr>`).join("");
   return `<div class="ov-block"><h3>Assistant (CQ/CO) &amp; telehealth differentials</h3>
     <div class="muted" style="margin-bottom:6px">${esc(d.diff_note)}</div>
@@ -1833,7 +1835,10 @@ function renderChanges(out, d) {
           <td class="num muted">${fmtInt(p.n)}</td></tr>`).join("")}</tbody></table></div>
        <div class="muted" style="margin-top:4px">Median % move across each payer's changed contract lines (≥2 lines), most-cutting first.</div></div>`
     : "";
-  out.innerHTML = `<div class="rc-summary"><b>${d.n_cuts}</b> cut(s), <b>${d.n_increases}</b> increase(s) from ${esc(d.prev_month)} → ${esc(d.new_month)}.${d.biggest_cut_pct != null ? ` Biggest cut ${d.biggest_cut_pct}%.` : ""}</div>
+  const capNote = d.truncated
+    ? ` <span class="warn-text">Showing the ${fmtInt(d.cap)} largest moves — narrow the market (payer/state/discipline) to see the rest.</span>`
+    : "";
+  out.innerHTML = `<div class="rc-summary"><b>${d.n_cuts}</b> cut(s), <b>${d.n_increases}</b> increase(s) from ${esc(d.prev_month)} → ${esc(d.new_month)}.${d.biggest_cut_pct != null ? ` Biggest cut ${d.biggest_cut_pct}%.` : ""}${capNote}</div>
     ${byPayer}
     <div class="tablewrap"><table class="rc-table"><thead><tr><th>Payer</th><th>Practice</th><th>Code</th><th class="num">Was</th><th class="num">Now</th><th class="num">Δ</th><th class="num">%</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }

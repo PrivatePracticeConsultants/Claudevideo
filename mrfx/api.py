@@ -902,7 +902,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             ))
             hist = _dicts(con.execute(
                 f"""
-                WITH r AS (SELECT negotiated_rate FROM ({rel_sql(grain, fs)}) WHERE is_dollar_rate)
+                WITH r AS (SELECT negotiated_rate FROM ({rel_sql(grain, fs)}) WHERE is_dollar_rate AND negotiated_rate > 0.01)
                 SELECT floor(negotiated_rate / g.w) * g.w AS bucket, count(*) AS n
                 FROM r, (SELECT greatest((max(negotiated_rate) - min(negotiated_rate)) / 20, 0.01) AS w FROM r) g
                 GROUP BY 1 ORDER BY 1
@@ -911,18 +911,28 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             ))
             # PAYER LEADERBOARD: which payers pay best for THIS code in the
             # current filter (state/discipline/etc). One row per payer — the
-            # median across the distinct practices that payer prices — plus the
-            # spread and how many practices back it (a thin n reads as noise).
+            # median across the distinct PRACTICES that payer prices (each
+            # practice collapsed to its own median first, so a TIN publishing
+            # many modifier/POS/month variants counts once, matching the
+            # Benchmark/Markets/report grain — not a raw-row median that
+            # over-weights variant-heavy TINs). Placeholders ($0/$0.01) excluded
+            # even when the user turns dollar-only off.
             payer_rank = _dicts(con.execute(
                 f"""
+                WITH per_unit AS (
+                    SELECT payer, unit_id, median(negotiated_rate) AS rate
+                    FROM ({rel_sql(grain, fs)})
+                    WHERE is_dollar_rate AND negotiated_rate > 0.01
+                    GROUP BY payer, unit_id
+                )
                 SELECT payer,
-                       median(negotiated_rate)               AS median_rate,
-                       quantile_cont(negotiated_rate, .25)   AS p25,
-                       quantile_cont(negotiated_rate, .75)   AS p75,
-                       min(negotiated_rate)                  AS min_rate,
-                       max(negotiated_rate)                  AS max_rate,
-                       count(DISTINCT unit_id)               AS n_entities
-                FROM ({rel_sql(grain, fs)}) WHERE is_dollar_rate
+                       median(rate)               AS median_rate,
+                       quantile_cont(rate, .25)   AS p25,
+                       quantile_cont(rate, .75)   AS p75,
+                       min(rate)                  AS min_rate,
+                       max(rate)                  AS max_rate,
+                       count(DISTINCT unit_id)    AS n_entities
+                FROM per_unit
                 GROUP BY payer ORDER BY median_rate DESC
                 """,
                 fs.params,
@@ -953,7 +963,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 SELECT billing_code, payer, file_month,
                        median(negotiated_rate) AS median_rate,
                        count(DISTINCT unit_id) AS entities
-                FROM ({rel_sql(grain, fs)}) WHERE is_dollar_rate
+                FROM ({rel_sql(grain, fs)}) WHERE is_dollar_rate AND negotiated_rate > 0.01
                 GROUP BY billing_code, payer, file_month
                 ORDER BY billing_code, payer, file_month
                 """,
@@ -1196,7 +1206,11 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
 
     @app.post("/api/upload")
     def upload(file: UploadFile):
-        dest = cfg.inbox_dir / Path(file.filename or "upload.json").name
+        # Path(...).name strips every traversal ("../x"→"x"), but ".", "..", ""
+        # collapse to "" → dest would be the inbox dir itself; fall back to a
+        # safe name so the temp/rename never targets a directory
+        safe = Path(file.filename or "upload.json").name or "upload.json"
+        dest = cfg.inbox_dir / safe
         # stream to a name the inbox scanner ignores, rename when COMPLETE —
         # the watcher fires on creation and would otherwise preflight (and
         # quarantine/move!) a half-written file out from under this handler

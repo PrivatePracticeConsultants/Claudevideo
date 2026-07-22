@@ -12,11 +12,15 @@ month) so every number lines up with the benchmark and rate-card tabs:
                             for telehealth place-of-service — a therapy-niche
                             question no generic rate tool answers
 
-Every view suppresses thin cells (< _MIN_CELL backing practices) so one or two
-contracts can't masquerade as "the market", and carries the honesty rails the
-rest of the app uses: NPPES geography is provider location (not the rate's), a
-published rate is not proof of collection, and absence in an MRF is not proof of
-non-coverage.
+The geography, negotiability, and % of Medicare views suppress thin cells
+(< _MIN_CELL backing practices) so one or two contracts can't masquerade as
+"the market". The assistant/telehealth differential is the deliberate exception:
+paired assistant (CQ/CO) and telehealth lines are sparse — many payers publish
+none — so it reports whatever pairs exist WITH their pair count shown, and the
+UI flags any payer backed by fewer than _MIN_CELL pairs as directional rather
+than hiding it. All views carry the honesty rails the rest of the app uses:
+NPPES geography is provider location (not the rate's), a published rate is not
+proof of collection, and absence in an MRF is not proof of non-coverage.
 """
 
 from __future__ import annotations
@@ -277,7 +281,7 @@ def assistant_pos_diff(store: Store, code: str, market: dict) -> dict:
         rows = _dicts(con.execute(sql, params))
     return {
         "code": code, "description": code_info(code)[0],
-        "as_of": month_label(m["month"]),
+        "as_of": month_label(m["month"]), "min_cell": _MIN_CELL,
         "payers": rows,
         "basis_note": BASIS_NOTE + " Assistant (CQ/CO) rows are INCLUDED here by design.",
         "diff_note": (

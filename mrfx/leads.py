@@ -60,11 +60,15 @@ def compute_leads(store: Store, market: dict, *, threshold_percentile: int = 25,
         GROUP BY t.billing_code, t.tin_value
     ),
     ranked AS (
-        -- percent_rank (0 at the cheapest, = fraction strictly below) matches
-        -- the benchmark's subject-excluded position metric; cume_dist put the
-        -- cheapest at 1/n, so in a thin 2-3 provider market the most-underpaid
-        -- practice could never reach the default p25 sweep — the very practice
-        -- the finder exists to surface.
+        -- percent_rank (0 at the cheapest, = fraction strictly below): the
+        -- cheapest practice sits at 0 so in a thin 2-3 provider market the
+        -- most-underpaid practice can still reach the default p25 sweep (the
+        -- very practice the finder exists to surface — cume_dist would floor it
+        -- at 1/n and hide it). NOTE this is a DIFFERENT convention and scope
+        -- than the Benchmark tab's position (market-wide incl. self here vs
+        -- intra-payer excl. self there, and strictly-below vs at-or-below), so
+        -- a practice's leads percentile can differ from its benchmark position
+        -- by up to ~1/n — they are not meant to be identical.
         SELECT billing_code, tin_value, rate,
                100 * percent_rank() OVER (PARTITION BY billing_code ORDER BY rate) AS pct,
                median(rate)      OVER (PARTITION BY billing_code) AS code_median,
