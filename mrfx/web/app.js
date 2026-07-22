@@ -37,9 +37,12 @@ const fmtMoney = (v) =>
   v == null ? "–" : Number(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 // dollar-prefixed money that degrades to a bare en-dash for null — a plain
 // `"$" + fmtMoney(v)` rendered "$–" for a missing value (a code with no peers,
-// an unfilled opportunity cell), which reads as a glitch. Use this for any
-// money cell that can legitimately be empty.
-const money = (v) => (v == null ? "–" : "$" + fmtMoney(v));
+// an unfilled opportunity cell), which reads as a glitch. Negatives render as
+// "-$50.00" (not "$-50.00") — the benchmark Gap column is negative whenever the
+// subject is priced above target, and the reports / Negotiate tab already do
+// this. Use for any money cell that can be empty and/or negative.
+const money = (v) =>
+  v == null ? "–" : v < 0 ? "-$" + fmtMoney(-v) : "$" + fmtMoney(v);
 const fmtInt = (v) => (v == null ? "–" : Number(v).toLocaleString("en-US"));
 const esc = (s) =>
   String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -894,6 +897,14 @@ function pstrip(pct) {
 }
 
 function renderBenchmark(out, bench, opp) {
+  if (!bench || !bench.rows || !bench.rows.length) {
+    // a header-only empty table reads as broken; say why there's nothing
+    out.innerHTML = `<div class="empty"><h3>No market rates for this subject</h3>` +
+      `No peer-priced codes matched this market definition. Widen the filters ` +
+      `(payer, discipline, state/city, place of service), or wait for more peer ` +
+      `files to finish ingesting.</div>`;
+    return;
+  }
   const mp = bench.mpfs_loaded;
   const t = bench.target_percentile;
   // Explain flat percentiles instead of letting them look like a bug: within a
