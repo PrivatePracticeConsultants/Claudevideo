@@ -184,13 +184,24 @@ def cmd_serve(cfg: MrfxConfig, args) -> int:
                  "background. Reason: %s", store.rollup_stale_reason())
 
         def _catch_up() -> None:
+            # COALESCE (skip_if_busy): the URL worker may already be running its
+            # own catch-up rebuild by the time this thread is scheduled. Queuing
+            # behind it (blocking) is what logged "waiting for the previous
+            # rebuild to finish (1000+ min)" and then ran a REDUNDANT second pass
+            # over the same backlog. Skip when one is already in flight — it
+            # covers the data, and rollups_stale() re-triggers if anything is
+            # left. Only run our own pass when nothing else is.
+            from .store import ROLLUP_SKIPPED
             try:
-                store.update_rollups_incremental()
+                if store.update_rollups_incremental(skip_if_busy=True) == ROLLUP_SKIPPED:
+                    log.info("analytics catch-up: a rebuild is already running — "
+                             "it covers the backlog, so skipping the duplicate "
+                             "startup pass")
             except Exception as e:  # noqa: BLE001 — incremental is an
                 # optimization; the full rebuild is the always-correct fallback
                 log.info("incremental analytics catch-up unavailable (%s) — "
                          "running a full rebuild", e)
-                store.rebuild_rollups()
+                store.rebuild_rollups(skip_if_busy=True)
 
         threading.Thread(target=_catch_up,
                          name="mrfx-rollup-catchup", daemon=True).start()

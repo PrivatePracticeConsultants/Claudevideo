@@ -1547,6 +1547,58 @@ def test_wall_clock_cap_sets_aside_a_too_slow_download(cfg):
         httpd.shutdown()
 
 
+def test_dribbling_resume_trips_stall_not_the_wall_cap(cfg):
+    """A CDN that RESUMES (206) but dribbles only a few KB per connection before
+    closing used to reset the stall clock on every tiny advance, so the download
+    stayed 'progressing' and held its slot until the multi-hour wall-clock cap.
+    Meaningful-progress gating must make it trip the fast stall deadline instead
+    (the UHC-giant-file class: 0.4 GB / 15.3 GB, inching nowhere)."""
+    import http.server as hs
+    import time as _time
+
+    cfg.download_stall_seconds = 2      # fast stall deadline
+    cfg.download_max_seconds = 60       # cap is the SLOW backstop — must NOT be what fires
+    cfg.download_retries = 6
+
+    class DribbleResume(hs.BaseHTTPRequestHandler):
+        def do_GET(self):
+            total = 50 << 20
+            rng = self.headers.get("Range", "")
+            start = int(rng.split("=")[1].split("-")[0]) if rng.startswith("bytes=") else 0
+            self.send_response(206 if start else 200)
+            if start:
+                self.send_header("Content-Range", f"bytes {start}-{total - 1}/{total}")
+            self.send_header("Content-Length", str(total - start))
+            self.end_headers()
+            try:                                  # 8 KB, well under the 1 MB floor
+                self.wfile.write(b"x" * 8192)
+                self.wfile.flush()
+                self.connection.close()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+        def log_message(self, *a):
+            pass
+
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), DribbleResume)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        from mrfx.fetch import DownloadError, download, filename_for
+
+        url = f"http://127.0.0.1:{httpd.server_address[1]}/f.json.gz"
+        dest = cfg.downloads_dir / filename_for(url)
+        part = dest.with_suffix(dest.suffix + ".part")
+        t0 = _time.monotonic()
+        with pytest.raises(DownloadError) as ei:
+            download(cfg, url, dest)
+        elapsed = _time.monotonic() - t0
+        assert elapsed < 30, f"stall deadline did not fire ({elapsed:.0f}s) — cap fired instead"
+        assert "no download progress" in str(ei.value)   # stall, not the wall cap
+        assert part.exists()                              # dribbled bytes kept for resume
+    finally:
+        httpd.shutdown()
+
+
 def test_range_ignored_200_keeps_large_partial(cfg, monkeypatch):
     # a stray full-file 200 answering our RESUME request must not truncate a
     # large .part back to zero (one such response near the end of a multi-GB

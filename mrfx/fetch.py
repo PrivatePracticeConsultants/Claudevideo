@@ -328,6 +328,16 @@ _UNKNOWN_LEN_RESERVATION = 2 << 30
 # queue retries; each connection sleeps ≥1 s, so this also caps wall-clock.
 _MAX_DOWNLOAD_CONNECTIONS = 2500
 
+# The stall deadline resets only on MEANINGFUL forward progress. A flaky CDN
+# (UHC's, on multi-GB files) closes the connection after dribbling a few KB, then
+# does it again — each tiny advance used to reset the stall clock, so the file
+# stayed "progressing" and held its slot for the whole wall-clock cap (hours)
+# instead of failing in the stall window. A download that can't move at least
+# this many bytes within download_stall_seconds is effectively dead (even 2 KB/s
+# clears 1 MB in 10 min), so it's set aside fast and the slot freed for files
+# that can actually finish.
+_STALL_MIN_PROGRESS_BYTES = 1_000_000
+
 # Preserve hard-won progress: when we ask a server to RESUME (Range) and it
 # instead answers with a full 200, the old code truncated the .part and
 # restarted from byte 0 — so one stray range-ignoring response near the end of a
@@ -439,6 +449,10 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
     stall_budget = cfg.download_stall_seconds
     last_progress_t = time.monotonic()
     highwater = part.stat().st_size if part.exists() else 0
+    # bytes at the last stall-clock reset — the clock only resets once the file
+    # has advanced _STALL_MIN_PROGRESS_BYTES past this, so KB-sized dribbles from
+    # a connection-closing CDN can't keep a dead download alive to the wall cap
+    stall_anchor_hw = highwater
     # HARD wall-clock cap: the stall deadline only fires on NO net progress, so a
     # download trickling in at tens of KB/s never trips it yet can hold a scarce
     # slot for many hours and starve the parsers. This bounds the TOTAL time one
@@ -703,10 +717,16 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
         # _MAX_DOWNLOAD_CONNECTIONS bounds the total so a truly stuck server ends.
         bytes_after = part.stat().st_size if part.exists() else 0
         if bytes_after > highwater:
-            # genuine NET forward progress (past the previous best) — reset the
-            # stall clock. A truncate-and-rewrite of the same bytes does NOT
-            # advance the highwater, so it correctly counts as a stall.
+            # NET forward progress past the previous best. A truncate-and-rewrite
+            # of the same bytes does NOT advance the highwater, so it counts as a
+            # stall.
             highwater = bytes_after
+        if highwater - stall_anchor_hw >= _STALL_MIN_PROGRESS_BYTES:
+            # only MEANINGFUL progress (≥ _STALL_MIN_PROGRESS_BYTES since the last
+            # reset) refreshes the stall deadline — a few-KB dribble does not, so
+            # a connection-closing CDN trips the stall window instead of holding
+            # the slot until the multi-hour wall-clock cap
+            stall_anchor_hw = highwater
             last_progress_t = time.monotonic()
         if bytes_after > bytes_before:
             log.info("download %s: advanced to %.0f MB after connection %d; resuming",
