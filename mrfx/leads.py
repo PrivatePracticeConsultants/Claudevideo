@@ -94,6 +94,44 @@ def compute_leads(store: Store, market: dict, *, threshold_percentile: int = 25,
         cur = con.execute(sql, [*params, min_codes, threshold_percentile, *excl_params, limit])
         cols = [d[0] for d in cur.description]
         rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+        # OUTREACH HOOK: for each prospect, WHICH payer underpays them most —
+        # the payer with the biggest average shortfall vs the code's market
+        # median. Turns "this practice is at p18" into "…because <payer> pays
+        # them $X under market." Scoped to the returned TINs (small set).
+        worst_payer: dict[str, dict] = {}
+        lead_tins = [r["tin_value"] for r in rows]
+        if lead_tins:
+            wsql = f"""
+            WITH tp AS (
+                SELECT t.tin_value, t.payer, t.billing_code,
+                       median(t.negotiated_rate) AS rate
+                FROM {rel} t LEFT JOIN tin_directory td USING (tin_value)
+                WHERE {where} AND t.tin_value IN (SELECT unnest(?::VARCHAR[]))
+                GROUP BY t.tin_value, t.payer, t.billing_code
+            ),
+            mkt AS (
+                SELECT billing_code, median(rate) AS code_median FROM (
+                    SELECT t.billing_code, t.tin_value,
+                           median(t.negotiated_rate) AS rate
+                    FROM {rel} t LEFT JOIN tin_directory td USING (tin_value)
+                    WHERE {where} GROUP BY t.billing_code, t.tin_value
+                ) GROUP BY billing_code
+            ),
+            gap AS (
+                SELECT tp.tin_value, tp.payer,
+                       round(avg(greatest(0, m.code_median - tp.rate)), 2) AS avg_gap,
+                       count(*) AS n_codes
+                FROM tp JOIN mkt m USING (billing_code)
+                GROUP BY tp.tin_value, tp.payer
+            )
+            SELECT tin_value, payer, avg_gap FROM (
+                SELECT *, row_number() OVER (
+                    PARTITION BY tin_value ORDER BY avg_gap DESC, payer) AS rn
+                FROM gap) WHERE rn = 1
+            """
+            for tv, payer, gap in con.execute(
+                    wsql, [*params, lead_tins, *params]).fetchall():
+                worst_payer[tv] = {"payer": payer, "avg_gap": gap}
     sites = store.org_websites()
     leads = []
     for r in rows:
@@ -122,6 +160,9 @@ def compute_leads(store: Store, market: dict, *, threshold_percentile: int = 25,
             "median_percentile": r["median_pct"],
             "avg_gap_to_median": r["avg_gap_to_median"],
             "website": sites.get(r["tin_value"]),
+            # the payer driving the underpayment — the outreach angle
+            "worst_payer": (worst_payer.get(r["tin_value"]) or {}).get("payer"),
+            "worst_payer_gap": (worst_payer.get(r["tin_value"]) or {}).get("avg_gap"),
         })
     return {
         "market": {k: v for k, v in market.items() if v not in (None, [], "")},
@@ -156,11 +197,12 @@ def leads_csv(store: Store, result: dict) -> str:
     # multi-state billing entity is never silently presented as single-state
     w.writerow(["display_name", "tin", "entity_kind", "state", "all_states",
                 "city", "npi_count", "n_codes", "median_percentile",
-                "avg_gap_to_median", "website"])
+                "avg_gap_to_median", "worst_payer", "worst_payer_gap", "website"])
     for x in result["leads"]:
         w.writerow([defuse_csv(x["display_name"]), x["tin_value"], x["entity_kind"],
                     x["state"] or "", "; ".join(x.get("states") or []),
                     defuse_csv(x["city"]) or "", x["npi_count"],
                     x["n_codes"], x["median_percentile"], x["avg_gap_to_median"],
+                    defuse_csv(x.get("worst_payer")) or "", x.get("worst_payer_gap") or "",
                     defuse_csv(x["website"]) or ""])
     return out.getvalue()

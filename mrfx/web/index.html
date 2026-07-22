@@ -13,6 +13,7 @@
   <h1>MRF <span>Explorer</span></h1>
   <div id="dataset-stats">loading…</div>
   <nav>
+    <button data-view="overview">Overview</button>
     <button data-view="explorer" class="active">Explorer</button>
     <button data-view="cpt">Code comparison</button>
     <button data-view="benchmark">Benchmark</button>
@@ -26,6 +27,20 @@
 </header>
 
 <main>
+
+  <!-- ======================= OVERVIEW ======================= -->
+  <section id="view-overview" class="view">
+    <div class="filters" style="align-items:flex-end">
+      <div class="field">
+        <label for="ov-state">State (optional)</label>
+        <input id="ov-state" list="ov-state-list" placeholder="all states" style="width:120px">
+        <datalist id="ov-state-list"></datalist>
+      </div>
+      <button class="btn" id="ov-refresh">Refresh</button>
+      <span class="muted">A one-glance read of the market: coverage, rates by discipline, best-covered codes, and which payers pay above vs below market.</span>
+    </div>
+    <div id="ov-out"><div class="loading">Loading market overview</div></div>
+  </section>
 
   <!-- ======================= EXPLORER ======================= -->
   <section id="view-explorer" class="view active">
@@ -133,6 +148,7 @@
     </div>
 
     <div class="summary" id="summary-strip"></div>
+    <div id="summary-bycode"></div>
     <div class="disclaimer">
       A negotiated rate is <b>per code, not per visit</b>: most treatment codes are timed
       15-minute units, and MPPR, assistant-modifier (CQ/CO) reductions, sequestration and
@@ -189,6 +205,7 @@
       <button class="btn primary" id="cpt-export">Export + methodology</button>
     </div>
     <div class="chips codechips" id="cpt-chips" style="margin-bottom:10px"></div>
+    <div id="cpt-payer-rank"></div>
     <div id="cpt-hist"></div>
     <div id="cpt-trend"></div>
     <div class="tablewrap" style="max-height:calc(100vh - 480px)">

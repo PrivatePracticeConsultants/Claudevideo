@@ -697,6 +697,9 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     _summary_cache: dict[tuple, tuple[float, dict]] = {}
     _summary_lock = threading.Lock()
     _SUMMARY_TTL = 30.0
+    # the market overview does several whole-spine GROUP BYs — heavy at book
+    # scale — so cache per (state, data_generation); it changes only on a rebuild.
+    _overview_cache: dict[tuple, dict] = {}
 
     @app.get("/api/summary")
     def summary(request: Request):
@@ -741,8 +744,37 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                     """,
                     fs.params,
                 ).fetchone()
+                # PER-CODE breakdown: one blended median across 97110+97530+…
+                # is analytically meaningless (different services), so give a row
+                # per code — median, spread (IQR), practice count, and % of
+                # Medicare / below-Medicare flag when an MPFS anchor is loaded.
+                by_code = _dicts(con.execute(
+                    f"""
+                    WITH r AS (SELECT billing_code, negotiated_rate, unit_id
+                               FROM ({rel_sql(grain, fs)})
+                               WHERE is_dollar_rate AND negotiated_rate > 0.01)
+                    SELECT r.billing_code,
+                           median(r.negotiated_rate)             AS median,
+                           quantile_cont(r.negotiated_rate, .25) AS p25,
+                           quantile_cont(r.negotiated_rate, .75) AS p75,
+                           count(DISTINCT r.unit_id)             AS entities,
+                           m.mc                                  AS mpfs_rate
+                    FROM r LEFT JOIN (SELECT code, median(non_facility_rate) AS mc
+                                      FROM mpfs GROUP BY code) m ON m.code = r.billing_code
+                    GROUP BY r.billing_code, m.mc
+                    ORDER BY r.billing_code
+                    """,
+                    fs.params,
+                ))
+            for c in by_code:
+                mc = c.pop("mpfs_rate", None)
+                c["pct_medicare"] = (round(100 * c["median"] / mc)
+                                     if mc and c.get("median") else None)
+                c["below_medicare"] = bool(mc and c.get("median") is not None
+                                           and c["median"] < mc)
             keys = ["n", "entities", "codes", "min", "p25", "median", "p75", "max"]
-            result = {**dict(zip(keys, row)), "grain": grain}
+            result = {**dict(zip(keys, row)), "grain": grain, "by_code": by_code,
+                      "mpfs_loaded": any(c["pct_medicare"] is not None for c in by_code)}
             if len(_summary_cache) > 256:
                 _summary_cache.clear()
             _summary_cache[key] = (time.monotonic(), result)
@@ -869,8 +901,35 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 """,
                 fs.params,
             ))
+            # PAYER LEADERBOARD: which payers pay best for THIS code in the
+            # current filter (state/discipline/etc). One row per payer — the
+            # median across the distinct practices that payer prices — plus the
+            # spread and how many practices back it (a thin n reads as noise).
+            payer_rank = _dicts(con.execute(
+                f"""
+                SELECT payer,
+                       median(negotiated_rate)               AS median_rate,
+                       quantile_cont(negotiated_rate, .25)   AS p25,
+                       quantile_cont(negotiated_rate, .75)   AS p75,
+                       min(negotiated_rate)                  AS min_rate,
+                       max(negotiated_rate)                  AS max_rate,
+                       count(DISTINCT unit_id)               AS n_entities
+                FROM ({rel_sql(grain, fs)}) WHERE is_dollar_rate
+                GROUP BY payer ORDER BY median_rate DESC
+                """,
+                fs.params,
+            ))
+            base = con.execute(
+                "SELECT median(non_facility_rate) FROM mpfs WHERE code = ?", [code]
+            ).fetchone()[0]
+        if base:  # % of Medicare per payer when an MPFS anchor is loaded
+            for p in payer_rank:
+                p["pct_medicare"] = (round(100 * p["median_rate"] / base)
+                                     if p.get("median_rate") else None)
         info = catalog_json().get(code, {})
-        return {"billing_code": code, "grain": grain, **info, "ranked": ranked, "histogram": hist}
+        return {"billing_code": code, "grain": grain, **info, "ranked": ranked,
+                "histogram": hist, "payer_rank": payer_rank,
+                "mpfs_rate": round(base, 2) if base else None}
 
     @app.get("/api/trend")
     def trend(request: Request):
@@ -1497,6 +1556,20 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     def peersets_delete(name: str):
         store.delete_peer_set(name)
         return {"peer_sets": store.peer_sets()}
+
+    @app.get("/api/overview")
+    def overview(request: Request):
+        from .overview import market_overview
+        state = (_qp(request).get("state") or "").strip().upper() or None
+        key = (state, store.data_generation)
+        hit = _overview_cache.get(key)
+        if hit is not None:
+            return hit
+        result = market_overview(store, state)
+        if len(_overview_cache) > 64:
+            _overview_cache.clear()
+        _overview_cache[key] = result
+        return result
 
     # MPFS
     @app.get("/api/mpfs/status")

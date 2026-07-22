@@ -143,6 +143,22 @@ def compute_rate_changes(store: Store, market: dict, *, subject: str | None = No
     # nothing was actually cut this month
     biggest_cut = min((p for p in pct_moves if p < 0), default=None)
     biggest_increase = max((p for p in pct_moves if p > 0), default=None)
+    # BY-PAYER direction: is a payer systematically cutting PT rates across the
+    # market, or is this one-off? Median move + net cut/increase count per payer,
+    # most-cutting first — the strategic read a flat per-line list can't give.
+    import statistics
+    by_payer_map: dict[str, list] = {}
+    for row in rows:
+        by_payer_map.setdefault(row["payer"], []).append(row)
+    by_payer = sorted((
+        {
+            "payer": payer,
+            "n": len(rs),
+            "n_cuts": sum(1 for x in rs if x["direction"] == "cut"),
+            "n_increases": sum(1 for x in rs if x["direction"] == "increase"),
+            "median_pct_change": round(statistics.median(x["pct_change"] for x in rs), 1),
+        } for payer, rs in by_payer_map.items()),
+        key=lambda d: d["median_pct_change"])
     return {
         "market": {k: v for k, v in market.items() if v not in (None, [], "")},
         "new_month": new_month,
@@ -153,6 +169,7 @@ def compute_rate_changes(store: Store, market: dict, *, subject: str | None = No
         "n_increases": increases,
         "biggest_cut_pct": biggest_cut,
         "biggest_increase_pct": biggest_increase,
+        "by_payer": by_payer,
         "changes": rows,
     }
 

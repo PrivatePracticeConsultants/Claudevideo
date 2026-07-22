@@ -108,6 +108,7 @@ function switchView(view) {
   // re-entry: keep whatever state was picked (else the cards blank out while the
   // dropdown still shows the state, and re-picking the same option fires no change)
   if (view === "sources") loadSources($("#src-state")?.value || "");
+  if (view === "overview") initOverview();
 }
 
 /* ---------- header stats ---------- */
@@ -167,7 +168,77 @@ async function loadStateOptions() {
     const { states } = await api("/api/states");
     const dl = $("#state-options");
     if (dl) dl.innerHTML = (states || []).map((s) => `<option value="${esc(s)}">`).join("");
+    const ov = $("#ov-state-list");
+    if (ov) ov.innerHTML = (states || []).map((s) => `<option value="${esc(s)}">`).join("");
   } catch { /* filter still works as free text */ }
+}
+
+/* =======================================================================
+   MARKET OVERVIEW (landing) — orient the user before they touch a filter
+   ======================================================================= */
+let overviewWired = false;
+async function initOverview() {
+  if (!overviewWired) {
+    overviewWired = true;
+    $("#ov-refresh").addEventListener("click", () => loadOverview($("#ov-state").value.trim()));
+    $("#ov-state").addEventListener("change", () => loadOverview($("#ov-state").value.trim()));
+    loadStateOptions();
+  }
+  loadOverview($("#ov-state").value.trim());
+}
+
+async function loadOverview(stateCode = "") {
+  const out = $("#ov-out");
+  out.innerHTML = `<div class="loading">Loading market overview</div>`;
+  let d;
+  try { d = await api(`/api/overview${stateCode ? `?state=${encodeURIComponent(stateCode)}` : ""}`); }
+  catch (e) { out.innerHTML = `<div class="empty">Couldn't load the overview (${esc(e.message)}).</div>`; return; }
+  if (!d.practices) {
+    out.innerHTML = `<div class="empty"><h3>No rates${stateCode ? " in " + esc(stateCode) : ""} yet</h3>Ingest some payer files first, or clear the state filter.</div>`;
+    return;
+  }
+  const scope = d.state ? `${esc(d.state)}` : "all loaded states";
+  const cards = [
+    ["Payers", fmtInt(d.payers)],
+    ["Practices (TINs)", fmtInt(d.practices)],
+    ["Codes", fmtInt(d.codes)],
+    ["States with data", fmtInt(d.states)],
+  ].map(([k, v]) => `<div class="stat"><b>${v}</b><span>${k}</span></div>`).join("");
+
+  const disc = (d.by_discipline || []).length
+    ? `<div class="ov-block"><h3>Typical rate by discipline</h3><div class="tablewrap"><table>
+        <thead><tr><th>Discipline</th><th class="num">Median rate</th><th class="num">Practices</th></tr></thead>
+        <tbody>${d.by_discipline.map((x) => `<tr><td>${esc(x.label)}</td><td class="num">${money(x.median)}</td><td class="num muted">${fmtInt(x.practices)}</td></tr>`).join("")}</tbody></table></div></div>`
+    : "";
+
+  // payer index: 1.00 = market; above = pays more, below = pays less. Color the bar.
+  const idx = (d.payer_index || []);
+  const payerBlock = idx.length
+    ? `<div class="ov-block"><h3>Which payers pay above vs below market</h3>
+       <div class="muted" style="margin-bottom:6px">Index = this payer's median rate ÷ the market median, across the codes it prices. <b>1.10 = pays ~10% above market</b>; 0.90 = ~10% below. Payers pricing under ${3} codes are omitted.</div>
+       <div class="tablewrap"><table>
+        <thead><tr><th>Payer</th><th class="num">Index</th><th>vs market</th><th class="num">Codes</th></tr></thead>
+        <tbody>${idx.map((p) => {
+          const pct = Math.round((p.index - 1) * 100);
+          const above = p.index >= 1;
+          const w = Math.min(Math.abs(p.index - 1) * 100 * 2, 100);
+          return `<tr><td>${esc(p.payer)}</td>
+            <td class="num"><b>${p.index.toFixed(2)}</b></td>
+            <td><span class="idxbar ${above ? "idx-up" : "idx-down"}" style="width:${Math.max(w, 3)}%"></span>
+                <span class="pctlbl ${above ? "" : "warn-text"}">${pct > 0 ? "+" : ""}${pct}%</span></td>
+            <td class="num muted">${fmtInt(p.codes)}</td></tr>`;
+        }).join("")}</tbody></table></div></div>`
+    : `<div class="ov-block muted">Not enough payer overlap yet to rank payers (need payers pricing ≥3 of the same codes). Ingest more files.</div>`;
+
+  const topCodes = (d.top_codes || []).length
+    ? `<div class="ov-block"><h3>Best-covered codes</h3><div class="tablewrap"><table>
+        <thead><tr><th>Code</th><th>Description</th><th class="num">Practices</th><th class="num">Market median</th></tr></thead>
+        <tbody>${d.top_codes.map((c) => `<tr><td>${esc(c.billing_code)}</td><td class="sub">${esc(c.description || "")}</td><td class="num">${fmtInt(c.practices)}</td><td class="num">${money(c.median)}</td></tr>`).join("")}</tbody></table></div></div>`
+    : "";
+
+  out.innerHTML = `<div class="rc-summary">Market snapshot — <b>${scope}</b>. ${payerBlock ? "The payer index below is the fastest read on where the reimbursement leverage is." : ""}</div>
+    <div class="stats-row">${cards}</div>${payerBlock}${disc}${topCodes}
+    <div class="bench-note">All figures use published dollar negotiated rates (base modifier, professional class). A published rate is directional market positioning, not proof a provider collects it.</div>`;
 }
 
 /* =======================================================================
@@ -287,9 +358,10 @@ async function loadSummary() {
       stat("Codes", fmtInt(s.codes)) +
       stat("Min", money(s.min)) +
       stat("P25", money(s.p25)) +
-      stat("Median", money(s.median)) +
+      stat("Median (all codes)", money(s.median)) +
       stat("P75", money(s.p75)) +
       stat("Max", money(s.max));
+    renderByCode($("#summary-bycode"), s.by_code, s.mpfs_loaded);
   } catch (e) {
     // Don't blank silently: a 503 here is almost always the summary's exact
     // aggregates hitting the memory cap on a big unfiltered view. Say so and
@@ -299,7 +371,26 @@ async function loadSummary() {
       ? "Stats need more memory than the current limit — add a filter (payer, code, or state), or raise duckdb_memory_gb in config and restart."
       : "Stats are busy — they'll appear on the next refresh.";
     el.innerHTML = `<div class="stat" style="flex:1"><div class="k">Summary</div><div class="v" style="font-size:0.8rem;font-weight:normal">${esc(msg)}</div></div>`;
+    const bc = $("#summary-bycode"); if (bc) bc.innerHTML = "";
   }
+}
+
+// Per-code breakdown of the current filter — the strip's one blended median
+// mixes different services (97110 vs 97530), so give a real median + spread PER
+// code, with a below-Medicare flag when an MPFS anchor is loaded.
+function renderByCode(el, rows, mpfs) {
+  if (!el) return;
+  if (!rows || rows.length < 2) { el.innerHTML = ""; return; }  // one code: strip is enough
+  const body = rows.map((c) => `<tr>
+    <td>${esc(c.billing_code)}</td>
+    <td class="num"><span class="rate">${money(c.median)}</span></td>
+    <td class="num muted">${money(c.p25)}–${money(c.p75)}</td>
+    ${mpfs ? `<td class="num ${c.below_medicare ? "warn-text" : ""}">${c.pct_medicare != null ? c.pct_medicare + "%" : "–"}${c.below_medicare ? " ⚠" : ""}</td>` : ""}
+    <td class="num muted">${fmtInt(c.entities)}</td></tr>`).join("");
+  el.innerHTML = `<div class="ov-block"><h3>By code${mpfs ? " · ⚠ = below Medicare" : ""}</h3>
+    <div class="tablewrap" style="max-height:34vh"><table>
+      <thead><tr><th>Code</th><th class="num">Median</th><th class="num">P25–P75</th>${mpfs ? `<th class="num">% of Medicare</th>` : ""}<th class="num">Practices</th></tr></thead>
+      <tbody>${body}</tbody></table></div></div>`;
 }
 
 const refresh = () => { loadRates(); loadSummary(); };
@@ -687,6 +778,7 @@ async function selectCpt(code) {
     `Which entities get paid most for ${code}${info.description ? " — " + info.description : ""}` +
     (cptState ? ` · ${cptState}` : "") +
     (info.timed ? " (timed 15-min units)" : "");
+  renderPayerRank($("#cpt-payer-rank"), d.payer_rank, d.mpfs_rate);
   renderHistogram($("#cpt-hist"), d.histogram, code);
   renderTrend($("#cpt-trend"), trend.rows);
   if (!d.ranked.length) {
@@ -707,6 +799,28 @@ async function selectCpt(code) {
       <td class="num">$${fmtMoney(r.max_rate)}</td>
     </tr>`).join("");
   $$("tr.clickable", body).forEach((tr) => tr.addEventListener("click", () => openEntity("tin", tr.dataset.uid)));
+}
+
+// Payer leaderboard for one code: who pays best, with spread + confidence.
+function renderPayerRank(el, rows, mpfsRate) {
+  if (!el) return;
+  if (!rows || !rows.length) { el.innerHTML = ""; return; }
+  const mp = rows.some((r) => r.pct_medicare != null);
+  const body = rows.map((r) => {
+    const thin = (r.n_entities || 0) < 5;
+    return `<tr>
+      <td>${esc(r.payer)}</td>
+      <td class="num"><span class="rate">${money(r.median_rate)}</span></td>
+      <td class="num muted">${money(r.p25)}–${money(r.p75)}</td>
+      ${mp ? `<td class="num ${r.pct_medicare != null && r.pct_medicare < 100 ? "warn-text" : ""}">${r.pct_medicare != null ? r.pct_medicare + "%" : "–"}</td>` : ""}
+      <td class="num ${thin ? "muted" : ""}" title="${thin ? "thin sample — read with caution" : ""}">${fmtInt(r.n_entities)}${thin ? " ⚠" : ""}</td>
+    </tr>`;
+  }).join("");
+  el.innerHTML = `<div class="ov-block"><h3>Which payer pays best for this code${mpfsRate ? ` · Medicare $${fmtMoney(mpfsRate)}` : ""}</h3>
+    <div class="tablewrap" style="max-height:34vh"><table>
+      <thead><tr><th>Payer</th><th class="num">Median</th><th class="num">P25–P75</th>${mp ? `<th class="num">% of Medicare</th>` : ""}<th class="num">Practices</th></tr></thead>
+      <tbody>${body}</tbody></table></div>
+    <div class="muted" style="margin-top:4px">One row per payer — the median across the distinct practices it prices for this code. ⚠ marks a thin sample (&lt;5 practices).</div></div>`;
 }
 
 function renderTrend(el, rows) {
@@ -1384,9 +1498,10 @@ function renderLeads(out, data) {
     <td class="num">${l.n_codes}</td>
     <td class="num">p${l.median_percentile}</td>
     <td class="num">${money(l.avg_gap_to_median)}</td>
+    <td>${l.worst_payer ? `${esc(l.worst_payer)}<div class="sub">${money(l.worst_payer_gap)}/code under mkt</div>` : "<span class='muted'>–</span>"}</td>
     <td class="sub">${esc(l.tin_value)}</td></tr>`).join("");
-  out.innerHTML = `<div class="rc-summary">${data.count} practice(s) at or below p${data.threshold_percentile}, most underpaid first. <span class="muted">Avg $ below median is a rate-level gap, not annual dollars.</span></div>
-    <div class="tablewrap"><table class="rc-table"><thead><tr><th>Practice</th><th>Location</th><th class="num">Providers</th><th class="num">Codes</th><th class="num">Position</th><th class="num">Avg $ below median</th><th>Tax ID</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  out.innerHTML = `<div class="rc-summary">${data.count} practice(s) at or below p${data.threshold_percentile}, most underpaid first. <span class="muted">"Underpaid by" is the payer with the biggest average shortfall vs the market median — your outreach hook. Avg $ below median is a rate-level gap, not annual dollars.</span></div>
+    <div class="tablewrap"><table class="rc-table"><thead><tr><th>Practice</th><th>Location</th><th class="num">Providers</th><th class="num">Codes</th><th class="num">Position</th><th class="num">Avg $ below median</th><th>Underpaid most by</th><th>Tax ID</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
 let changesInit = false;
@@ -1452,7 +1567,20 @@ function renderChanges(out, d) {
       <td class="num ${cls}">${c.delta < 0 ? "−" : "+"}$${fmtMoney(Math.abs(c.delta))}</td>
       <td class="num ${cls}">${c.pct_change > 0 ? "+" : ""}${c.pct_change}%</td></tr>`;
   }).join("");
+  // by-payer direction: is a payer systematically cutting across the market?
+  const bp = (d.by_payer || []).filter((p) => p.n >= 2);
+  const byPayer = bp.length
+    ? `<div class="ov-block"><h3>By payer — is a payer cutting across the market?</h3>
+       <div class="tablewrap" style="max-height:30vh"><table class="rc-table">
+        <thead><tr><th>Payer</th><th class="num">Median move</th><th class="num">Cuts</th><th class="num">Increases</th><th class="num">Lines</th></tr></thead>
+        <tbody>${bp.map((p) => `<tr><td>${esc(p.payer)}</td>
+          <td class="num ${p.median_pct_change < 0 ? "chg-cut" : p.median_pct_change > 0 ? "chg-up" : ""}">${p.median_pct_change > 0 ? "+" : ""}${p.median_pct_change}%</td>
+          <td class="num">${fmtInt(p.n_cuts)}</td><td class="num">${fmtInt(p.n_increases)}</td>
+          <td class="num muted">${fmtInt(p.n)}</td></tr>`).join("")}</tbody></table></div>
+       <div class="muted" style="margin-top:4px">Median % move across each payer's changed contract lines (≥2 lines), most-cutting first.</div></div>`
+    : "";
   out.innerHTML = `<div class="rc-summary"><b>${d.n_cuts}</b> cut(s), <b>${d.n_increases}</b> increase(s) from ${esc(d.prev_month)} → ${esc(d.new_month)}.${d.biggest_cut_pct != null ? ` Biggest cut ${d.biggest_cut_pct}%.` : ""}</div>
+    ${byPayer}
     <div class="tablewrap"><table class="rc-table"><thead><tr><th>Payer</th><th>Practice</th><th>Code</th><th class="num">Was</th><th class="num">Now</th><th class="num">Δ</th><th class="num">%</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
