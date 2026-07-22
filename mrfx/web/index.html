@@ -21,6 +21,7 @@
     <button data-view="negotiate">Negotiate</button>
     <button data-view="ratecard">Rate card</button>
     <button data-view="leads">Leads</button>
+    <button data-view="roster">Payer roster</button>
     <button data-view="changes">Changes</button>
     <button data-view="files">Files</button>
     <button data-view="sources">Sources</button>
@@ -223,6 +224,37 @@
       </table>
       <div id="cpt-state"></div>
     </div>
+  </section>
+
+  <!-- ======================= PAYER ROSTER ======================= -->
+  <section id="view-roster" class="view">
+    <div class="view-head">
+      <h2>Organizations contracted with…</h2>
+      <span class="spacer"></span>
+      <label class="toggle" style="text-transform:none">Payer
+        <input type="text" id="ro-payer" list="ro-payer-opts" placeholder="pick a payer" style="width:180px;margin-left:4px">
+        <datalist id="ro-payer-opts"></datalist>
+      </label>
+      <label class="toggle" style="text-transform:none">State
+        <input type="text" id="ro-state" list="ro-state-opts" placeholder="all" style="width:56px;margin-left:4px">
+        <datalist id="ro-state-opts"></datalist>
+      </label>
+      <label class="toggle" style="text-transform:none">Discipline
+        <select id="ro-disc"><option value="">any</option><option>PT</option><option>OT</option><option>SLP</option></select>
+      </label>
+      <label class="toggle" style="text-transform:none">Min codes
+        <input type="number" id="ro-mincodes" value="1" min="1" style="width:56px;margin-left:4px">
+      </label>
+      <label class="toggle" style="text-transform:none">Sort
+        <select id="ro-sort"><option value="name">name</option><option value="size">size (NPIs)</option><option value="paid">best-paid</option><option value="codes">most codes</option></select>
+      </label>
+      <label class="toggle" title="keep only PT/OT/SLP providers & therapy practices (by NPPES taxonomy)"><input type="checkbox" id="ro-therapy"> therapy only</label>
+      <button class="btn primary" id="ro-run">Run</button>
+      <button class="btn" id="ro-csv" disabled>Download CSV</button>
+    </div>
+    <div id="ro-out" class="empty"><h3>Pick a payer</h3>
+      Every organization the payer publishes therapy rates for — the payer's book of practices in your
+      market. Filter by state/discipline, sort by size or how well they're paid, and export the list.</div>
   </section>
 
   <!-- ======================= MARKETS ======================= -->

@@ -458,6 +458,26 @@ def test_fee_schedule_peer_comparison(market_store):
     assert v["vs_market_pct"] == -14     # 30 is ~14% below the peer median
 
 
+def test_payer_roster_lists_contracted_orgs(market_store):
+    # every organization the payer publishes rates for — subject + 9 peers
+    from mrfx.leads import compute_payer_roster
+    with market_store.connect() as con:
+        payer = con.execute("SELECT DISTINCT payer FROM rates_by_tin LIMIT 1").fetchone()[0]
+    d = compute_payer_roster(market_store, payer, {"month": "2026-06"})
+    assert d["payer"] == payer
+    assert d["count"] == 10                                  # all 10 TINs contracted
+    assert len({o["tin_value"] for o in d["organizations"]}) == 10
+    for o in d["organizations"]:
+        assert o["n_codes"] == 1 and o["median_rate"] is not None
+    # a payer nobody contracts with -> empty, not an error
+    assert compute_payer_roster(market_store, "Nonexistent Payer", {"month": "2026-06"})["count"] == 0
+    # blank payer refused
+    import pytest as _pytest
+    from mrfx.benchmark import BenchmarkError
+    with _pytest.raises(BenchmarkError):
+        compute_payer_roster(market_store, "", {"month": "2026-06"})
+
+
 def test_mpfs_percent_of_medicare(cfg, market_store):
     client = TestClient(create_app(cfg, market_store))
     # no MPFS loaded -> no % of Medicare column

@@ -38,7 +38,8 @@ from .benchmark import (
 from .catalog import catalog_json, therapy_taxonomy_sql
 from .config import MrfxConfig
 from .enrich import use_bulk_enrichment
-from .leads import compute_leaderboard, compute_leads, leads_csv
+from .leads import (compute_leaderboard, compute_leads, compute_payer_roster,
+                    leads_csv, payer_roster_csv)
 from .market import (
     assistant_pos_diff,
     geographic_rates,
@@ -1634,6 +1635,30 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     def trajectory_ep(body: dict = Body(...)):
         try:
             return compute_payer_trajectory(store, body.get("market") or {})
+        except (BenchmarkError, ValueError, TypeError) as e:
+            raise HTTPException(422, str(e))
+
+    @app.post("/api/roster")
+    def roster_ep(body: dict = Body(...)):
+        try:
+            return compute_payer_roster(
+                store, str(body.get("payer") or ""), body.get("market") or {},
+                min_codes=_as_int(body.get("min_codes"), 1),
+                limit=_as_int(body.get("limit"), 500),
+                sort=str(body.get("sort") or "name"))
+        except (BenchmarkError, ValueError, TypeError) as e:
+            raise HTTPException(422, str(e))
+
+    @app.post("/api/roster.csv", response_class=PlainTextResponse)
+    def roster_csv_ep(body: dict = Body(...)):
+        try:
+            result = compute_payer_roster(
+                store, str(body.get("payer") or ""), body.get("market") or {},
+                min_codes=_as_int(body.get("min_codes"), 1),
+                limit=_as_int(body.get("limit"), 2000),
+                sort=str(body.get("sort") or "name"))
+            return PlainTextResponse("﻿" + payer_roster_csv(result), headers={
+                "Content-Disposition": 'attachment; filename="payer_roster.csv"'})
         except (BenchmarkError, ValueError, TypeError) as e:
             raise HTTPException(422, str(e))
 

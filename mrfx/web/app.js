@@ -101,6 +101,7 @@ function switchView(view) {
     if (first) selectCpt(first);
   }
   if (view === "markets") initMarkets();
+  if (view === "roster") initRoster();
   if (view === "benchmark") initBenchmark();
   if (view === "negotiate") initNegotiate();
   if (view === "ratecard") initRatecard();
@@ -393,6 +394,75 @@ function renderMkDifferential(d) {
     <div class="tablewrap"><table>
       <thead><tr><th>Payer</th><th class="num">Assistant % of base</th><th class="num">base→asst · pairs</th><th class="num">Telehealth % of office</th><th class="num">office→tele · pairs</th></tr></thead>
       <tbody>${rows}</tbody></table></div></div>`;
+}
+
+/* =======================================================================
+   PAYER ROSTER — every organization contracted with one payer
+   ======================================================================= */
+let rosterWired = false;
+let lastRosterBody = null;
+
+async function initRoster() {
+  if (!rosterWired) {
+    rosterWired = true;
+    try {
+      const [{ payers }, { states }] = await Promise.all([
+        api("/api/payers").catch(() => ({ payers: [] })),
+        api("/api/states").catch(() => ({ states: [] })),
+      ]);
+      $("#ro-payer-opts").innerHTML = (payers || []).map((p) => `<option value="${esc(p)}">`).join("");
+      $("#ro-state-opts").innerHTML = (states || []).map((s) => `<option value="${esc(s)}">`).join("");
+    } catch { /* free text still works */ }
+    $("#ro-run").addEventListener("click", loadRoster);
+    $("#ro-payer").addEventListener("keydown", (e) => { if (e.key === "Enter") loadRoster(); });
+    $("#ro-csv").addEventListener("click", () => { if (lastRosterBody) postDownload("/api/roster.csv", lastRosterBody, "payer_roster.csv"); });
+  }
+}
+
+function rosterBody() {
+  const payer = $("#ro-payer").value.trim();
+  const market = { month: "latest" };
+  if ($("#ro-state").value.trim()) market.state = $("#ro-state").value.trim().toUpperCase();
+  if ($("#ro-disc").value) market.discipline = $("#ro-disc").value;
+  if ($("#ro-therapy").checked) market.therapy_only = true;
+  return { payer, market, min_codes: +$("#ro-mincodes").value || 1, sort: $("#ro-sort").value };
+}
+
+async function loadRoster() {
+  const out = $("#ro-out");
+  const body = rosterBody();
+  $("#ro-csv").disabled = true;
+  lastRosterBody = null;
+  if (!body.payer) { out.innerHTML = `<div class="empty">Pick a payer first.</div>`; return; }
+  out.innerHTML = `<div class="loading">Finding organizations contracted with ${esc(body.payer)}</div>`;
+  let d;
+  try { d = await postJson("/api/roster", body); }
+  catch (e) { out.innerHTML = `<div class="empty"><h3>Couldn't load the roster</h3>${esc(e.message)}</div>`; return; }
+  lastRosterBody = body;
+  $("#ro-csv").disabled = false;
+  renderRoster(out, d);
+}
+
+function renderRoster(out, d) {
+  if (!d.organizations.length) {
+    out.innerHTML = `<div class="empty"><h3>No organizations found</h3>No practices publish therapy rates with ${esc(d.payer)} under the current filters. ${$("#ro-therapy").checked ? "\"Therapy only\" is on — uncheck it, or let NPI identification finish, to see more." : "Widen the state/discipline or lower min codes."}</div>`;
+    return;
+  }
+  const rows = d.organizations.map((o, i) => `<tr>
+    <td class="num muted">${i + 1}</td>
+    <td>${esc(o.display_name || "(name pending)")}<div class="sub">${esc(o.entity_kind || "")}${o.website ? ` · <a href="${esc(o.website)}" target="_blank" rel="noopener">site</a>` : ""}</div></td>
+    <td class="sub">${esc([o.city, o.state].filter(Boolean).join(", "))}${o.multi_state ? ` <span class="muted" title="${esc((o.states || []).join(", "))}">(+${(o.states || []).length - 1})</span>` : ""}</td>
+    <td class="num">${fmtInt(o.npi_count)}</td>
+    <td class="num">${fmtInt(o.n_codes)}</td>
+    <td class="num">${o.median_percentile == null ? "<span class='muted'>–</span>" : "p" + o.median_percentile}</td>
+    <td class="num">${money(o.median_rate)}</td>
+    <td class="sub">${esc(o.tin_value)}</td></tr>`).join("");
+  const cap = d.truncated ? ` <span class="warn-text">Showing the first ${fmtInt(d.limit)} — narrow by state/discipline to see the rest.</span>` : "";
+  out.innerHTML = `<div class="rc-summary"><b>${fmtInt(d.count)}${d.truncated ? "+" : ""}</b> organization${d.count === 1 ? "" : "s"} contracted with <b>${esc(d.payer)}</b>${d.market.state ? " in " + esc(d.market.state) : ""}${d.market.discipline ? " · " + esc(d.market.discipline) : ""}.${cap}</div>
+    <div class="muted" style="font-size:11.5px;margin:-6px 0 10px">${esc(d.note)}</div>
+    <div class="tablewrap" style="max-height:calc(100vh - 220px)"><table>
+      <thead><tr><th>#</th><th>Organization</th><th>Location</th><th class="num">Providers</th><th class="num">Codes</th><th class="num" title="position among this payer's other practices">Position</th><th class="num">Median rate</th><th>TIN</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>`;
 }
 
 /* =======================================================================

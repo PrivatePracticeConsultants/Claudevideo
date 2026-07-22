@@ -261,6 +261,143 @@ def compute_leaderboard(store: Store, market: dict, *, min_codes: int = 3,
     }
 
 
+def compute_payer_roster(store: Store, payer: str, market: dict, *,
+                         min_codes: int = 1, limit: int = 500,
+                         sort: str = "name") -> dict:
+    """Every organization contracted with ONE payer — the payer's book of
+    therapy practices. 'Contracted' means the payer published negotiated rates
+    for that practice in its MRF; that is the best available signal, not proof
+    of an active, billed contract. One row per billing TIN, joined to its NPPES
+    name/geography, with how many codes it prices with the payer, its median
+    rate, and where it sits among the payer's OTHER practices (percentile).
+
+    Same house basis (dollar, base-modifier, professional, latest) and market
+    scope (state/discipline/therapy_only) as every other view — the payer is
+    just pinned. Scoping to the one payer keeps the scan bounded."""
+    payer = str(payer or "").strip()
+    if not payer:
+        raise BenchmarkError("pick a payer")
+    if min_codes < 1:
+        raise BenchmarkError("min_codes must be at least 1")
+    limit = max(1, min(int(limit), 2000))
+    sort = sort if sort in ("name", "size", "paid", "codes") else "name"
+    market = normalize_market({**(market or {}), "payers": [payer]})
+    include_assistant = bool(market.get("include_assistant", False))
+    include_non_dollar = bool(market.get("include_non_dollar", False))
+    where, params = _market_where(market, include_assistant, include_non_dollar)
+    rel = _rates_relation(market)
+    order = {
+        "name": "td.display_name NULLS LAST, td.npi_count DESC NULLS LAST",
+        "size": "td.npi_count DESC NULLS LAST, td.display_name NULLS LAST",
+        "paid": "p.median_pct DESC NULLS LAST, td.npi_count DESC NULLS LAST",
+        "codes": "p.n_codes DESC, td.npi_count DESC NULLS LAST",
+    }[sort]
+    sql = f"""
+    WITH base AS (
+        SELECT t.billing_code, t.tin_value, median(t.negotiated_rate) AS rate
+        FROM {rel} t LEFT JOIN tin_directory td USING (tin_value)
+        WHERE {where}
+        GROUP BY t.billing_code, t.tin_value
+    ),
+    ranked AS (
+        SELECT billing_code, tin_value, rate,
+               100 * percent_rank() OVER (PARTITION BY billing_code ORDER BY rate) AS pct,
+               count(*) OVER (PARTITION BY billing_code) AS n_in_code
+        FROM base
+    ),
+    per_tin AS (
+        -- n_codes counts EVERY code the practice prices with the payer (book
+        -- size); median_pct only over codes the payer prices for ≥2 practices
+        -- (a real distribution to place them in), null when there are none
+        SELECT tin_value, count(*) AS n_codes,
+               round(median(rate), 2) AS median_rate,
+               round(median(pct) FILTER (WHERE n_in_code >= 2), 0) AS median_pct
+        FROM ranked GROUP BY tin_value
+    )
+    SELECT p.tin_value, p.n_codes, p.median_pct, p.median_rate,
+           td.display_name, td.entity_kind, td.npi_count, td.states, td.cities
+    FROM per_tin p JOIN tin_directory td USING (tin_value)
+    WHERE p.n_codes >= ?
+    ORDER BY {order}, p.tin_value
+    LIMIT ?
+    """
+    filter_state = (market.get("state") or "").upper() or None
+    with store.connect() as con:
+        cur = con.execute(sql, [*params, min_codes, limit + 1])
+        cols = [d[0] for d in cur.description]
+        rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+    truncated = len(rows) > limit
+    rows = rows[:limit]
+    sites = store.org_websites()
+    out = []
+    for r in rows:
+        states = r.get("states") or []
+        cities = r.get("cities") or []
+        primary_state = (filter_state if filter_state and filter_state in states
+                         else (states[0] if states else None))
+        out.append({
+            "tin_value": mask_tin(r["tin_value"]),
+            "display_name": r["display_name"],
+            "entity_kind": r["entity_kind"],
+            "npi_count": r["npi_count"],
+            "state": primary_state,
+            "states": states,
+            "multi_state": len(states) > 1,
+            "city": cities[0] if cities else None,
+            "n_codes": r["n_codes"],
+            "median_percentile": r["median_pct"],
+            "median_rate": r["median_rate"],
+            "website": sites.get(r["tin_value"]),
+        })
+    return {
+        "payer": payer,
+        "market": {k: v for k, v in market.items()
+                   if k != "payers" and v not in (None, [], "")},
+        "sort": sort, "min_codes": min_codes,
+        "count": len(out), "truncated": truncated, "limit": limit,
+        "organizations": out,
+        "note": ("'Contracted' = the payer published negotiated rates for the "
+                 "practice; a published rate is not proof of an active or billed "
+                 "contract. Percentile is the practice's position among THIS "
+                 "payer's other practices (codes it prices for ≥2 practices); "
+                 "size is distinct NPIs under the billing TIN. Names/geography "
+                 "from NPPES enrichment — practices still being identified show "
+                 "a masked TIN and no location."),
+    }
+
+
+def payer_roster_csv(result: dict) -> str:
+    """Payer roster as CSV with a methodology header block."""
+    import csv
+    import io
+    out = io.StringIO()
+    for line in [
+        f"Generated {dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} by MRF Explorer v{__version__}.",
+        f"Organizations contracted with {result['payer']} "
+        f"({result['count']}{'+' if result.get('truncated') else ''}, "
+        f"pricing at least {result['min_codes']} code(s)).",
+        f"Market definition: {json.dumps(result['market'])}.",
+        "'Contracted' = the payer published negotiated rates for the practice — "
+        "not proof of an active/billed contract. Percentile is the practice's "
+        "position among this payer's other practices; not collections. "
+        "Names/geography from NPPES enrichment.",
+    ]:
+        out.write(f"# {line}\n")
+    w = csv.writer(out)
+    w.writerow(["display_name", "tin", "entity_kind", "state", "all_states",
+                "city", "npi_count", "n_codes", "median_percentile",
+                "median_rate", "website"])
+    for x in result["organizations"]:
+        w.writerow([defuse_csv(x["display_name"]) or "", x["tin_value"],
+                    x["entity_kind"] or "", x["state"] or "",
+                    "; ".join(x.get("states") or []),
+                    defuse_csv(x["city"]) or "", x["npi_count"],
+                    x["n_codes"], x["median_percentile"] if x["median_percentile"] is not None else "",
+                    x["median_rate"] if x["median_rate"] is not None else "",
+                    defuse_csv(x["website"]) or ""])
+    return out.getvalue()
+
+
 def leads_csv(store: Store, result: dict) -> str:
     """Prospect list as CSV with a methodology header block (honesty invariant:
     exports carry their methodology)."""
