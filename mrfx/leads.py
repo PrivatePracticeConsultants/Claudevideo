@@ -127,7 +127,7 @@ def compute_leads(store: Store, market: dict, *, threshold_percentile: int = 25,
             SELECT tin_value, payer, avg_gap FROM (
                 SELECT *, row_number() OVER (
                     PARTITION BY tin_value ORDER BY avg_gap DESC, payer) AS rn
-                FROM gap) WHERE rn = 1
+                FROM gap) WHERE rn = 1 AND avg_gap > 0
             """
             for tv, payer, gap in con.execute(
                     wsql, [*params, lead_tins, *params]).fetchall():

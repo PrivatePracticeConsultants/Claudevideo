@@ -56,26 +56,31 @@ def market_overview(store: Store, state: str | None = None) -> dict:
                 GROUP BY r.billing_code
                 ORDER BY practices DESC, r.billing_code LIMIT 15""", params).fetchall()
 
-        # payer index: payer_median / market_median per code, then median over codes
+        # payer index: payer_median / market_median per code, then median over
+        # codes. `pcnt` counts DISTINCT practices per payer directly — summing
+        # the per-code counts would double-count any practice priced on >1 code.
         payer_index = con.execute(
             f"""WITH base AS (
                     SELECT r.payer, r.billing_code,
-                           median(r.negotiated_rate)   AS payer_med,
-                           count(DISTINCT r.tin_value) AS n
+                           median(r.negotiated_rate)   AS payer_med
                     FROM rates_by_tin r {join} WHERE {where}
                     GROUP BY r.payer, r.billing_code
                 ),
                 mkt AS (SELECT billing_code, median(payer_med) AS mkt_med
-                        FROM base GROUP BY billing_code)
+                        FROM base GROUP BY billing_code),
+                pcnt AS (SELECT r.payer, count(DISTINCT r.tin_value) AS practices
+                         FROM rates_by_tin r {join} WHERE {where}
+                         GROUP BY r.payer)
                 SELECT b.payer,
                        round(median(b.payer_med / m.mkt_med), 3) AS idx,
                        count(DISTINCT b.billing_code)            AS codes,
-                       sum(b.n)                                   AS practices
+                       any_value(p.practices)                    AS practices
                 FROM base b JOIN mkt m USING (billing_code)
+                JOIN pcnt p USING (payer)
                 WHERE m.mkt_med > 0
                 GROUP BY b.payer
                 HAVING count(DISTINCT b.billing_code) >= {_MIN_INDEX_CODES}
-                ORDER BY idx DESC""", params).fetchall()
+                ORDER BY idx DESC""", params * 2).fetchall()
 
     disc_label = {"pt": "Physical therapy", "ot": "Occupational therapy",
                   "slp": "Speech-language pathology"}

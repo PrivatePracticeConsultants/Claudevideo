@@ -346,15 +346,15 @@ code.inline { background: var(--grid); border-radius: 4px; padding: 1px 5px; fon
 
 /* Negotiate tab summary cards */
 .stats-row { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
-.stats-row .stat { background: var(--panel, #f4f3ee); border: 1px solid var(--border, #e1e0d9);
+.stats-row .stat { background: var(--surface-1); border: 1px solid var(--border);
   border-radius: 8px; padding: 10px 14px; min-width: 140px; }
 .stats-row .stat b { display: block; font-size: 19px; }
-.stats-row .stat span { font-size: 11.5px; color: var(--muted, #898781); }
+.stats-row .stat span { font-size: 11.5px; color: var(--muted); }
 
 /* Overview tab: section blocks + payer-index bar */
 .ov-block { margin: 16px 0; }
 .ov-block h3 { font-size: 13.5px; margin: 0 0 6px; }
 .idxbar { display: inline-block; height: 8px; border-radius: 3px; vertical-align: middle;
   margin-right: 6px; min-width: 3px; }
-.idx-up { background: var(--good, #3f9142); }
-.idx-down { background: var(--warn, #c2603a); }
+.idx-up { background: var(--good); }
+.idx-down { background: var(--warning); }

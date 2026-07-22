@@ -700,6 +700,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     # the market overview does several whole-spine GROUP BYs — heavy at book
     # scale — so cache per (state, data_generation); it changes only on a rebuild.
     _overview_cache: dict[tuple, dict] = {}
+    _overview_lock = threading.Lock()
 
     @app.get("/api/summary")
     def summary(request: Request):
@@ -922,10 +923,12 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             base = con.execute(
                 "SELECT median(non_facility_rate) FROM mpfs WHERE code = ?", [code]
             ).fetchone()[0]
-        if base:  # % of Medicare per payer when an MPFS anchor is loaded
-            for p in payer_rank:
-                p["pct_medicare"] = (round(100 * p["median_rate"] / base)
-                                     if p.get("median_rate") else None)
+        # % of Medicare per payer when an MPFS anchor is loaded; the key is
+        # always present (None without an anchor) so the frontend never reads
+        # undefined — matching /api/summary by_code.
+        for p in payer_rank:
+            p["pct_medicare"] = (round(100 * p["median_rate"] / base)
+                                 if base and p.get("median_rate") else None)
         info = catalog_json().get(code, {})
         return {"billing_code": code, "grain": grain, **info, "ranked": ranked,
                 "histogram": hist, "payer_rank": payer_rank,
@@ -1565,11 +1568,22 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         hit = _overview_cache.get(key)
         if hit is not None:
             return hit
-        result = market_overview(store, state)
-        if len(_overview_cache) > 64:
-            _overview_cache.clear()
-        _overview_cache[key] = result
-        return result
+        # single-flight: the overview does several whole-spine GROUP BYs, so a
+        # cold cache (esp. right after a rebuild bumps data_generation for all
+        # polling tabs at once) would otherwise fan out N concurrent scans.
+        if not _overview_lock.acquire(blocking=False):
+            raise HTTPException(503, "overview is building — it will load on the next refresh")
+        try:
+            hit = _overview_cache.get(key)  # re-check under the lock
+            if hit is not None:
+                return hit
+            result = market_overview(store, state)
+            if len(_overview_cache) > 64:
+                _overview_cache.clear()
+            _overview_cache[key] = result
+            return result
+        finally:
+            _overview_lock.release()
 
     # MPFS
     @app.get("/api/mpfs/status")

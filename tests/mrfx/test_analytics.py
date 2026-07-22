@@ -45,6 +45,8 @@ def test_market_overview_ranks_payers_above_and_below_market(store):
     assert [x["payer"] for x in ov["payer_index"]][0] == "BCBS"
     # thin-sample guard: a payer pricing < 3 codes is omitted
     assert all(x["codes"] >= 3 for x in ov["payer_index"])
+    # practices is a DISTINCT count (8 seeded), not sum-over-codes (would be 32)
+    assert all(x["practices"] == 8 for x in ov["payer_index"])
 
 
 def test_code_payer_rank_orders_by_median(cfg, store):
