@@ -20,6 +20,15 @@
 
 Set-StrictMode -Version Latest
 
+# Ensure TLS 1.2 is available for the CMS/NPPES HTTPS endpoints. Windows
+# PowerShell 5.1 on older .NET Framework defaults to TLS 1.0, which the .gov
+# endpoints reject ("Could not create SSL/TLS secure channel"); OR-ing in Tls12
+# only ADDS a stronger protocol (never removes one). No-op on PS 7 / .NET Core.
+try {
+    [Net.ServicePointManager]::SecurityProtocol =
+        [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+} catch { }
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
