@@ -119,6 +119,18 @@ class MrfxConfig(BaseModel):
     # push harder on a fast link with a big queue. Concurrent downloads each
     # reserve their remaining bytes so together they can never overcommit disk.
     parallel_downloads: int = Field(default=0, ge=0, le=8)
+    # SEGMENTED download: split ONE large file into this many byte-range pieces
+    # pulled in parallel over separate connections, then stitched — a real
+    # speed-up on a fast CDN that throttles a single connection (a few huge
+    # files finish several times faster). 1 = off (default; every download is
+    # one connection). Only kicks in for files ≥ ~200 MB whose server supports
+    # range requests; small files, resumed partials, and range-refusing servers
+    # fall back to a single connection automatically. NOTE it MULTIPLIES open
+    # connections (segments × parallel_downloads), so on a flaky CDN like UHC's
+    # that closes connections it can raise the failure rate — pair a higher
+    # segment count with a LOWER parallel_downloads (e.g. segments 4, downloads
+    # 2). Best for a queue of a few very large files, not hundreds of small ones.
+    download_segments: int = Field(default=1, ge=1, le=8)
     max_toc_files: int = Field(default=2000, ge=1)  # cap child files enqueued from one TOC
     # JavaScript-only portals: when a pasted page yields no static links,
     # render it in headless Chromium and harvest links from the rendered DOM

@@ -560,6 +560,86 @@ def test_reserve_is_atomic_check_and_set(cfg, monkeypatch):
         F._clear_reservation(b)
 
 
+def test_segmented_download_assembles_correct_bytes(cfg, monkeypatch):
+    # a range-supporting server: the file is pulled in parallel byte-range
+    # segments and must assemble byte-identical with the right sha
+    import hashlib
+    import http.server as hs
+    import os as _os
+    import mrfx.fetch as F
+
+    payload = _os.urandom(300_000)
+    expected = hashlib.sha256(payload).hexdigest()
+
+    class Ranged(hs.BaseHTTPRequestHandler):
+        def do_GET(self):
+            rng = self.headers.get("Range", "")
+            if rng.startswith("bytes="):
+                a, b = rng[6:].split("-")
+                start = int(a); end = int(b) if b else len(payload) - 1
+                end = min(end, len(payload) - 1)
+                body = payload[start:end + 1]
+                self.send_response(206)
+                self.send_header("Content-Range", f"bytes {start}-{end}/{len(payload)}")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers(); self.wfile.write(body)
+            else:
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers(); self.wfile.write(payload)
+
+        def log_message(self, *a):
+            pass
+
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Ranged)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        monkeypatch.setattr(F, "_SEGMENT_MIN_BYTES", 1000)     # let a tiny file segment
+        monkeypatch.setattr(F, "_SEGMENT_MIN_PIECE", 50_000)   # 300 KB / 50 KB -> 4 pieces
+        cfg.download_segments = 4
+        url = f"http://127.0.0.1:{httpd.server_address[1]}/f.json.gz"
+        dest = cfg.downloads_dir / F.filename_for(url)
+        sha, _final = F.download(cfg, url, dest)
+        assert sha == expected
+        assert dest.read_bytes() == payload                    # every segment stitched right
+        assert not dest.with_suffix(dest.suffix + ".part").exists()
+    finally:
+        httpd.shutdown()
+
+
+def test_segmentation_falls_back_when_server_ignores_range(cfg, monkeypatch):
+    # a server that answers 200 to a Range probe -> no segmentation, the
+    # single-connection path still downloads the file correctly
+    import hashlib
+    import http.server as hs
+    import os as _os
+    import mrfx.fetch as F
+
+    payload = _os.urandom(200_000)
+
+    class NoRange(hs.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)                            # ignores Range
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers(); self.wfile.write(payload)
+
+        def log_message(self, *a):
+            pass
+
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), NoRange)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        monkeypatch.setattr(F, "_SEGMENT_MIN_BYTES", 1000)
+        monkeypatch.setattr(F, "_SEGMENT_MIN_PIECE", 50_000)
+        cfg.download_segments = 4
+        url = f"http://127.0.0.1:{httpd.server_address[1]}/f.json.gz"
+        dest = cfg.downloads_dir / F.filename_for(url)
+        sha, _final = F.download(cfg, url, dest)
+        assert sha == hashlib.sha256(payload).hexdigest()
+    finally:
+        httpd.shutdown()
+
+
 def test_resolve_download_count_modes(cfg, monkeypatch):
     import mrfx.fetch as F
 

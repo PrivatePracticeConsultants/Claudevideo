@@ -356,6 +356,153 @@ _KEEP_PART_ON_200_BYTES = 64 << 20
 _KEEP_200_MAX_REFUSALS = 3
 
 
+# SEGMENTED download tuning: only split files at least this big, and keep each
+# segment at least this large (segmenting a small file just adds connections and
+# a redundant hashing pass for no throughput win).
+_SEGMENT_MIN_BYTES = 200 << 20   # 200 MB — floor for even trying to segment
+_SEGMENT_MIN_PIECE = 64 << 20    # 64 MB — smallest per-segment slice
+
+
+class _SegmentationFailed(Exception):
+    """A segment couldn't complete after retries — the caller deletes the
+    (holey) .part and falls back to a single-connection download."""
+
+
+def resolve_download_segments(cfg: MrfxConfig) -> int:
+    """How many parallel byte-range segments to split ONE large file into.
+    1 (default) = off. Clamped to the config ceiling of 8."""
+    return max(1, min(int(getattr(cfg, "download_segments", 1) or 1), 8))
+
+
+def _probe_ranges(cfg: MrfxConfig, url: str, ua: str | None) -> tuple[int, str] | None:
+    """Learn (total_size, final_url) via a tiny ranged GET. Returns None when
+    the server doesn't support range requests (answers 200 to a Range) or the
+    total size is unknown — the caller then downloads with one connection."""
+    try:
+        with _client(cfg, ua=ua) as client, \
+                client.stream("GET", url, headers={"Range": "bytes=0-0"}) as resp:
+            if resp.status_code != 206:
+                return None
+            tail = resp.headers.get("Content-Range", "").rsplit("/", 1)[-1]
+            total = int(tail) if tail.isdigit() else 0
+            return (total, str(resp.url)) if total > 0 else None
+    except (httpx.TransportError, httpx.TimeoutException, ValueError):
+        return None
+
+
+def _segmented_download(cfg: MrfxConfig, url: str, dest: Path, part: Path, val_p: Path,
+                        total: int, my_key: int, progress_cb, cancel_check,
+                        n_segments: int, max_budget: float, dl_start: float,
+                        ua: str | None) -> tuple[str, str]:
+    """Download `total` bytes as `n_segments` contiguous ranges in parallel,
+    each on its own connection writing to its own offset of the preallocated
+    .part. On full success: hash the assembled file and atomically move it into
+    place. On a segment's terminal failure raise _SegmentationFailed (holey
+    .part deleted); on the user's stop raise a canceled DownloadError. A
+    segmented .part is NEVER kept (its size == total but content is holey, so a
+    later sequential resume would finish it CORRUPT) — hence delete-on-any-exit
+    except success."""
+    with open(part, "wb") as f:            # preallocate so each thread can seek
+        f.truncate(total)
+    seg = total // n_segments
+    bounds = [(i * seg, (total if i == n_segments - 1 else (i + 1) * seg) - 1)
+              for i in range(n_segments)]
+    prog = {"done": 0}
+    lock = threading.Lock()
+    state = {"canceled": False, "err": None}
+
+    def _halt() -> str | None:
+        if max_budget and time.monotonic() - dl_start > max_budget:
+            return "cap"
+        try:
+            if cancel_check and cancel_check():
+                return "cancel"
+        except Exception:  # noqa: BLE001 — a check failure must not crash a worker
+            return None
+        return None
+
+    def worker(start: int, end: int) -> None:
+        got, tries = 0, 0
+        seg_len = end - start + 1
+        while got < seg_len and not state["err"] and not state["canceled"]:
+            h = _halt()
+            if h == "cancel":
+                state["canceled"] = True
+                return
+            if h == "cap":
+                state["err"] = "download time cap"
+                return
+            try:
+                headers = {"Range": f"bytes={start + got}-{end}"}
+                with _client(cfg, ua=ua) as client, \
+                        client.stream("GET", url, headers=headers) as resp:
+                    if resp.status_code != 206:
+                        raise DownloadError(f"segment HTTP {resp.status_code}",
+                                            retryable=resp.status_code in RETRYABLE_STATUS)
+                    with open(part, "r+b") as f:
+                        f.seek(start + got)
+                        for chunk in resp.iter_bytes(chunk_size=1 << 20):
+                            if state["err"] or state["canceled"]:
+                                return
+                            h = _halt()
+                            if h == "cancel":
+                                state["canceled"] = True
+                                return
+                            if h == "cap":
+                                state["err"] = "download time cap"
+                                return
+                            f.write(chunk)
+                            got += len(chunk)
+                            with lock:
+                                prog["done"] += len(chunk)
+                tries = 0  # a clean pass (even a short one) resets the retry budget
+            except (httpx.TransportError, httpx.TimeoutException, DownloadError) as e:
+                tries += 1
+                if tries > cfg.download_retries + 2:
+                    state["err"] = f"segment failed after {tries} tries: {e}"
+                    return
+                time.sleep(min(30.0, 2.0 * (2 ** (tries - 1))))
+
+    threads = [threading.Thread(target=worker, args=b, name="mrfx-seg", daemon=True)
+               for b in bounds]
+    log.info("downloading %s in %d parallel segments (%.1f GB)",
+             url, n_segments, total / 1e9)
+    for t in threads:
+        t.start()
+    last_report_t = 0.0
+    while any(t.is_alive() for t in threads):
+        time.sleep(0.4)
+        with lock:
+            done = prog["done"]
+        _set_reservation(my_key, total - done)
+        now = time.monotonic()
+        if progress_cb and now - last_report_t >= 1.5:
+            progress_cb(done, total)
+            last_report_t = now
+        if state["canceled"] or state["err"]:
+            break
+    for t in threads:
+        t.join(timeout=30.0)
+
+    if state["canceled"]:
+        part.unlink(missing_ok=True)
+        val_p.unlink(missing_ok=True)
+        raise DownloadError("download canceled", retryable=False, canceled=True)
+    if state["err"] or prog["done"] < total or part.stat().st_size != total:
+        part.unlink(missing_ok=True)
+        val_p.unlink(missing_ok=True)
+        raise _SegmentationFailed(state["err"] or "segments did not assemble a complete file")
+    if progress_cb:
+        progress_cb(total, total)
+    sha = hashlib.sha256()
+    with open(part, "rb") as f:            # hash the assembled file in one pass
+        for blk in iter(lambda: f.read(1 << 20), b""):
+            sha.update(blk)
+    part.replace(dest)
+    val_p.unlink(missing_ok=True)
+    return sha.hexdigest(), url
+
+
 def _set_reservation(my_key: int, remaining: int) -> None:
     with _reservation_lock:
         _disk_reservations[my_key] = max(0, remaining)
@@ -462,6 +609,30 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
     kept_200_refusals = 0  # consecutive range-ignored 200s refused to save a big .part
     def _over_time_cap() -> bool:
         return bool(max_budget) and time.monotonic() - dl_start > max_budget
+
+    # SEGMENTED download: split a big, range-supporting file across parallel
+    # connections. Fresh downloads only (a resumed .part uses the sequential
+    # path); off by default (download_segments == 1). On failure it deletes its
+    # holey .part and falls through to the single-connection loop below.
+    n_seg = resolve_download_segments(cfg)
+    if n_seg > 1 and not part.exists() and not _canceled():
+        probe = _probe_ranges(cfg, url, ua_override)
+        if probe:
+            total_sz, final_url = probe
+            if max_bytes and total_sz > max_bytes:
+                raise too_big(total_sz)   # honor confirm_over_gb BEFORE fetching
+            if total_sz >= _SEGMENT_MIN_BYTES:
+                segs = min(n_seg, max(1, total_sz // _SEGMENT_MIN_PIECE))
+                if segs > 1:
+                    _reserve_disk_or_raise(my_key, dest.parent, total_sz, 0)
+                    try:
+                        return _segmented_download(
+                            cfg, final_url, dest, part, val_p, total_sz, my_key,
+                            progress_cb, cancel_check, segs, max_budget, dl_start,
+                            ua_override)
+                    except _SegmentationFailed as e:
+                        log.info("%s: %s — falling back to a single connection", url, e)
+
     while attempt <= cfg.download_retries and connections < _MAX_DOWNLOAD_CONNECTIONS:
         if _canceled():
             raise DownloadError("download canceled", retryable=False, canceled=True)
