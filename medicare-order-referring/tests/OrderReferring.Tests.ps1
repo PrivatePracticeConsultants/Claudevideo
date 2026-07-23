@@ -298,6 +298,29 @@ Describe 'State file robustness' {
     }
 }
 
+Describe 'Referrer watchlist' {
+    It 'saves and reloads a watchlist, extracting NPIs from messy text' {
+        $r = Set-OrfWatchlist -Npi "watch: 1417051921, 1417051921`nDr Jones 1760465553"
+        $r.Count | Should -Be 2
+        @(Get-OrfWatchlist) | Should -Be @('1417051921', '1760465553')
+    }
+    It 'reports current eligibility and change-since-last per watched NPI' {
+        # latest two snapshots are release1 (2026-01-01) -> release2 (2026-02-02):
+        # 1295400745 added, 1972040137 removed, 1760465553 PARTB-flipped.
+        $rep = @(Get-OrfWatchlistReport -Npi @('1417051921','1972040137','1295400745','1760465553'))
+        ($rep | Where-Object NPI -eq '1417051921').ChangeSinceLast | Should -Be 'Unchanged'
+        ($rep | Where-Object NPI -eq '1417051921').Status | Should -Match 'ELIGIBLE'
+        ($rep | Where-Object NPI -eq '1972040137').ChangeSinceLast | Should -Be 'Removed'
+        ($rep | Where-Object NPI -eq '1972040137').Status | Should -Be 'NOT ON LIST'
+        ($rep | Where-Object NPI -eq '1295400745').ChangeSinceLast | Should -Be 'Added'
+        ($rep | Where-Object NPI -eq '1760465553').ChangeSinceLast | Should -Be 'Changed'
+    }
+    It 'throws when there is nothing to report on' {
+        Remove-Item (Join-Path $env:ORF_DATA_DIR 'watchlist.json') -ErrorAction SilentlyContinue
+        { Get-OrfWatchlistReport } | Should -Throw '*No NPIs*'
+    }
+}
+
 Describe 'Duplicate-NPI provider count' {
     It 'BuildIndex counts unique providers, not raw rows (first row wins)' {
         $dup = Join-Path $script:WorkDir 'dup.csv'

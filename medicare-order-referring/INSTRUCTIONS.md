@@ -44,7 +44,7 @@ tells you you're up to date. It never breaks your existing data.
 
 ---
 
-## 4. The six tabs, in plain English
+## 4. The tabs, in plain English
 
 ### Tab 1 — Search providers
 *"Is Dr. Smith allowed to refer Medicare patients?"*
@@ -126,6 +126,23 @@ everything it knows into one profile:
 Both referral tables export. Whatever optional datasets you haven't downloaded
 are simply noted as unavailable — the rest still show. It's the quickest way to
 size up a referrer, a competitor, or a prospect.
+
+### Tab 7 — Watchlist
+*"Did any of MY referrers change in the latest update?"*
+
+Paste your referring providers' NPIs into the box and click **Save watchlist**
+(it's remembered between sessions). Then, after each update, click **Check now**:
+you'll see just your referrers, each with their current eligibility and a
+**ChangeSinceLast** column — dropped from the list, eligibility flags flipped,
+renamed, or unchanged. It turns the one-time Batch check into ongoing
+monitoring, so a referrer who loses eligibility is a phone call, not a surprise
+denial. Export the report.
+
+**Tip on the Referral map tab:** the **Export specialty mix** button breaks your
+referral sources into a specialty profile ("45% orthopedic surgery, 20% primary
+care…"). Select a clinic first to profile just that clinic, or leave it
+unselected for the whole ZIP — handy for seeing where a practice's funnel comes
+from.
 
 ### Tab 4 — Referral map (2015)
 *"Who sends patients to the rehab providers in my area?"*

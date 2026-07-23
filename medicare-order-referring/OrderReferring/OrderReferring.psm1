@@ -946,6 +946,105 @@ function Compare-OrfSnapshot {
 }
 
 # ---------------------------------------------------------------------------
+# Referrer watchlist (ongoing monitoring across bi-weekly updates)
+# ---------------------------------------------------------------------------
+
+function Get-OrfWatchlistPath { Join-Path $script:OrfConfig.DataDir 'watchlist.json' }
+
+function Set-OrfWatchlist {
+    <#
+    .SYNOPSIS
+      Saves a set of referring-provider NPIs to watch. Extracts every 10-digit
+      NPI from the input (paste a messy list or a spreadsheet column), dedupes,
+      and persists them. Replaces any existing watchlist.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory, ValueFromPipeline)][AllowEmptyString()][string[]]$Npi)
+    begin { $buf = New-Object System.Collections.Generic.List[string] }
+    process { foreach ($n in $Npi) { if ($n) { $buf.Add($n) } } }
+    end {
+        $list = Get-OrfNpiFromText -Text ($buf -join "`n")
+        Initialize-OrfDataDir | Out-Null
+        $path = Get-OrfWatchlistPath
+        $tmp = $path + '.tmp'
+        ([ordered]@{ Npis = @($list); UpdatedAt = (Get-Date).ToString('o') } | ConvertTo-Json -Depth 3) |
+            Set-Content -LiteralPath $tmp -Encoding UTF8
+        Move-Item -LiteralPath $tmp -Destination $path -Force
+        [pscustomobject]@{ Count = @($list).Count; Path = $path }
+    }
+}
+
+function Get-OrfWatchlist {
+    <# .SYNOPSIS Returns the saved watchlist NPIs (empty array if none saved). #>
+    $path = Get-OrfWatchlistPath
+    if (-not (Test-Path -LiteralPath $path)) { return @() }
+    try {
+        $obj = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($null -ne $obj.PSObject.Properties['Npis']) { return @($obj.Npis) }
+    } catch {
+        Write-Warning "Watchlist file was unreadable: $($_.Exception.Message)"
+    }
+    @()
+}
+
+function Get-OrfWatchlistReport {
+    <#
+    .SYNOPSIS
+      For each watched NPI (or an explicit -Npi set): its CURRENT eligibility and
+      flags, plus what changed for it since the previous snapshot — so after each
+      bi-weekly CMS update you see only YOUR referrers' changes, not the whole
+      2,000-row diff. Statuses in ChangeSinceLast: Added, Removed, Changed
+      (flags), Renamed, Unchanged, or '(no prior snapshot)'.
+    #>
+    [CmdletBinding()]
+    param([string[]]$Npi)
+
+    # NB: `$x = if (...) { @() }` yields $null (empty branch emits nothing), so
+    # wrap the whole result in @(...) before touching .Count under StrictMode.
+    $source = if ($Npi) { Get-OrfNpiFromText -Text ($Npi -join "`n") } else { Get-OrfWatchlist }
+    $list = @($source)
+    if ($list.Count -eq 0) {
+        throw "No NPIs to report on. Save a watchlist first (Set-OrfWatchlist) or pass -Npi."
+    }
+
+    # Current eligibility from the latest snapshot.
+    $current = @($list | Test-OrfNpi)
+    $currById = @{}
+    foreach ($c in $current) { $currById[$c.NPI] = $c }
+
+    # Change vs the previous snapshot (best effort — skipped if <2 snapshots).
+    $changeById = @{}
+    $files = @(Get-OrfSnapshotFiles)
+    $havePrior = $files.Count -ge 2
+    if ($havePrior) {
+        $watch = New-Object 'System.Collections.Generic.HashSet[string]'
+        foreach ($n in $list) { [void]$watch.Add($n) }
+        foreach ($ch in (Compare-OrfSnapshot -WarningAction SilentlyContinue)) {
+            if ($watch.Contains($ch.NPI)) { $changeById[$ch.NPI] = $ch.ChangeType }
+        }
+    }
+
+    foreach ($n in $list) {
+        $c = $currById[$n]
+        $change = if (-not $havePrior) { '(no prior snapshot)' }
+                  elseif ($changeById.ContainsKey($n)) { $changeById[$n] }
+                  else { 'Unchanged' }
+        [pscustomobject]@{
+            NPI       = $n
+            Status    = $c.Status
+            LastName  = $c.LastName
+            FirstName = $c.FirstName
+            PartB     = $c.PartB
+            DME       = $c.DME
+            HHA       = $c.HHA
+            PMD       = $c.PMD
+            Hospice   = $c.Hospice
+            ChangeSinceLast = $change
+        }
+    }
+}
+
+# ---------------------------------------------------------------------------
 # Export
 # ---------------------------------------------------------------------------
 
@@ -1075,6 +1174,7 @@ Export-ModuleMember -Function @(
     'Get-OrfSnapshotFiles', 'Get-OrfLatestSnapshot', 'Import-OrfSnapshot', 'Clear-OrfStaleTemp',
     'Search-OrfProvider', 'Test-OrfNpi', 'Compare-OrfSnapshot',
     'ConvertTo-OrfRecord', 'Get-OrfNpiFromText', 'ConvertTo-OrfSafeCsvRecord',
+    'Set-OrfWatchlist', 'Get-OrfWatchlist', 'Get-OrfWatchlistReport',
     'Export-OrfResult',
     'Install-OrfUpdateTask', 'Uninstall-OrfUpdateTask'
 )

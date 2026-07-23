@@ -188,6 +188,20 @@ Describe 'Group referral footprint (bridge)' {
     }
 }
 
+Describe 'Source specialty mix' {
+    It 'rolls sources up by specialty with correct shares' {
+        $mix = @(Get-RmSourceSpecialtyMix -Rows @($script:Map.Sources))
+        $fm = $mix | Where-Object Specialty -eq 'Family Medicine'
+        $fm.SharedPatients | Should -Be 57    # 45 + 12 (8000000001 into both clinics)
+        $fm.Sources | Should -Be 1
+        ($mix | Where-Object Specialty -eq 'Orthopaedic Surgery').SharedPatients | Should -Be 20
+        ($mix | Where-Object Specialty -eq '(specialty not looked up)').SharedPatients | Should -Be 11
+        # Shares sum to ~100 and Family Medicine leads.
+        $mix[0].Specialty | Should -Be 'Family Medicine'
+        [math]::Round((@($mix) | Measure-Object PctOfVolume -Sum).Sum) | Should -Be 100
+    }
+}
+
 Describe 'Provider 360 referral activity' {
     It 'returns inbound and outbound edges for one NPI, enriched' {
         $act = Get-RmProviderReferralActivity -Npi 9000000001

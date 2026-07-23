@@ -56,6 +56,12 @@ That's it. No installation; works with the PowerShell built into Windows
 | **Referral map (2015)** | Enter a ZIP (or prefix like `630*`): every outpatient rehab provider there is ranked by how many Medicare patients each source provider fed into them, per the CMS shared-patient data. Select a provider to see their referral sources by name/specialty/volume. Export both tables. |
 | **Practice groups** | Enter a ZIP: the outpatient-rehab **practice groups** operating there, each with its therapist roster, ranked by local presence. Built from the CMS clinic-group reassignment file — **current** data, and it fills the gap where private-practice clinics were invisible in the referral map. Optionally add each group's **2015 referral footprint** (its local therapists' historical shared-patient pull, rolled up to the group). Export groups and rosters. |
 | **Provider lookup** | Enter any NPI for a single-provider profile that composes every dataset: current eligibility + flags, specialty and location (NPPES), practice-group memberships, and 2015 referral activity — both who shared patients *into* them and who they shared patients *onward to*. Export the inbound and outbound lists. |
+| **Watchlist** | Save your referring providers' NPIs once; after each bi-weekly CMS update, one click shows — for just your referrers — their current eligibility and what changed since the previous update (dropped, flags flipped, renamed). Ongoing monitoring instead of a one-time check. Export the report. |
+
+The **Referral map** tab also has an **Export specialty mix** button: it breaks the
+displayed referral sources down by specialty (e.g. "45% orthopedic surgery, 20%
+primary care") — select a clinic first to profile just that clinic, or leave it
+unselected for the whole ZIP.
 
 ## The Referral map tab: what it is and its limits
 
@@ -200,7 +206,7 @@ anything, and a validation failure keeps your existing snapshot untouched.
 
 ## Tests
 
-The test suite (70 tests across three modules: download/update/validation/
+The test suite (75 tests across three modules: download/update/validation/
 idempotency, crash-recovery state repair, older-release and retention safety,
 schema-drift tolerance, CSV formula-injection neutralization, download-URL and
 zip-slip rejection, search, batch check, snapshot diff/rename detection,

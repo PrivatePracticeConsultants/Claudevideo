@@ -201,6 +201,9 @@ $xaml = @'
                     Margin="14,0,0,0" IsEnabled="False"/>
             <Button x:Name="RmExportSourcesButton" Content="Export sources..." Padding="10,4"
                     Margin="8,0,0,0" IsEnabled="False"/>
+            <Button x:Name="RmExportMixButton" Content="Export specialty mix..." Padding="10,4"
+                    Margin="8,0,0,0" IsEnabled="False"
+                    ToolTip="Break the displayed referral sources down by specialty (e.g. % from ortho vs primary care)."/>
           </StackPanel>
           <DataGrid Grid.Row="4" x:Name="RmSourceGrid" IsReadOnly="True" AutoGenerateColumns="True"
                     CanUserAddRows="False" GridLinesVisibility="Horizontal"
@@ -296,6 +299,39 @@ $xaml = @'
                     HeadersVisibility="Column" EnableRowVirtualization="True"/>
         </Grid>
       </TabItem>
+
+      <!-- ============ Watchlist tab ============ -->
+      <TabItem Header="  Watchlist  ">
+        <Grid Margin="10">
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+          </Grid.RowDefinitions>
+          <TextBlock Grid.Row="0" TextWrapping="Wrap" Foreground="#333" Margin="0,0,0,6"
+              Text="Save your referring providers' NPIs once, then after each bi-weekly CMS update click Check to see — for just YOUR referrers — their current eligibility and what changed since the previous update (dropped, flags flipped, or renamed). Turns the one-time batch check into ongoing monitoring."/>
+          <Grid Grid.Row="1" Margin="0,0,0,6">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="*"/>
+              <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <TextBox Grid.Column="0" x:Name="WlBox" Height="70" AcceptsReturn="True"
+                     VerticalScrollBarVisibility="Auto" TextWrapping="Wrap" FontFamily="Consolas"
+                     ToolTip="Paste your referring providers' NPIs (any format)."/>
+            <StackPanel Grid.Column="1" Margin="10,0,0,0">
+              <Button x:Name="WlSaveButton" Content="Save watchlist" Padding="10,5" Margin="0,0,0,6"/>
+              <Button x:Name="WlCheckButton" Content="Check now" Padding="10,5" Margin="0,0,0,6"/>
+              <Button x:Name="WlExportButton" Content="Export report..." Padding="10,5" IsEnabled="False"/>
+            </StackPanel>
+          </Grid>
+          <DataGrid Grid.Row="2" x:Name="WlGrid" IsReadOnly="True" AutoGenerateColumns="True"
+                    CanUserAddRows="False" GridLinesVisibility="Horizontal"
+                    HeadersVisibility="Column" EnableRowVirtualization="True"/>
+          <TextBlock Grid.Row="3" x:Name="WlSummary" Margin="0,6,0,0" Foreground="#333" TextWrapping="Wrap"
+              Text="Paste NPIs, click Save watchlist, then Check now. Needs the Order &amp; Referring data (Search tab) downloaded."/>
+        </Grid>
+      </TabItem>
     </TabControl>
 
     <!-- Footer: honesty note -->
@@ -324,7 +360,9 @@ foreach ($name in @(
     'PgRosterLabel', 'PgFootprintButton', 'PgExportGroupsButton', 'PgExportRosterButton',
     'PgRosterGrid', 'PgSummary',
     'LkNpiBox', 'LkRunButton', 'LkDetail', 'LkInboundLabel', 'LkExportInboundButton',
-    'LkInboundGrid', 'LkOutboundLabel', 'LkExportOutboundButton', 'LkOutboundGrid'
+    'LkInboundGrid', 'LkOutboundLabel', 'LkExportOutboundButton', 'LkOutboundGrid',
+    'RmExportMixButton',
+    'WlBox', 'WlSaveButton', 'WlCheckButton', 'WlExportButton', 'WlGrid', 'WlSummary'
 )) {
     $ui[$name] = $window.FindName($name)
     if (-not $ui[$name]) { throw "Internal error: UI element '$name' not found." }
@@ -348,6 +386,7 @@ $script:PgResult = $null          # last practice-group result object
 $script:LkInbound = @()           # last provider-lookup inbound / outbound rows
 $script:LkOutbound = @()
 $script:LkNpi = ''
+$script:WlReport = @()            # last watchlist report rows
 $script:Busy = $false
 $script:Jobs = New-Object System.Collections.ArrayList
 $script:MaxGridRows = 5000
@@ -364,7 +403,7 @@ function Set-Busy([bool]$On, [string]$Message) {
                      $ui.CompareButton, $ui.LoadNpiFileButton,
                      $ui.RmRunButton, $ui.RmDownloadButton,
                      $ui.PgRunButton, $ui.PgDownloadButton, $ui.PgFootprintButton,
-                     $ui.LkRunButton)) {
+                     $ui.LkRunButton, $ui.WlCheckButton)) {
         $b.IsEnabled = -not $On
     }
     $window.Cursor = if ($On) { [System.Windows.Input.Cursors]::Wait } else { $null }
@@ -464,7 +503,11 @@ function ConvertTo-DataTable {
         }
         $table.Rows.Add($r)
     }
-    $table
+    # Return with a leading comma: PowerShell otherwise ENUMERATES the DataTable
+    # into its DataRows on output, so the caller's `.DefaultView` would run
+    # against a stream of DataRows and WPF's grid bind would fail with
+    # "Value cannot be null. Parameter name: key". The comma keeps it a DataTable.
+    , $table
 }
 
 function Get-CappedNote([int]$Total) {
@@ -836,6 +879,7 @@ $ui.RmRunButton.Add_Click({
             $ui.RmSourceLabel.Text = 'Referral sources — all clinics (select a clinic above to filter):'
             $ui.RmExportClinicsButton.IsEnabled = ($clinics.Count -gt 0)
             $ui.RmExportSourcesButton.IsEnabled = ($sources.Count -gt 0)
+            $ui.RmExportMixButton.IsEnabled = ($sources.Count -gt 0)
             $withVolume = @($clinics | Where-Object { $_.SharedPatients -gt 0 }).Count
             $tooNew = @($clinics | Where-Object { $_.ExistedInDataYear -like 'No*' }).Count
             $ui.RmSummary.Text = ("ZIP $($map.Zip): $($clinics.Count) rehab provider(s) found in NPPES; " +
@@ -878,6 +922,25 @@ $ui.RmExportSourcesButton.Add_Click({
     Export-RmWithDialog -Rows @($script:RmResult.Sources) `
         -SuggestedName "referral-sources-$($script:RmResult.Zip.TrimEnd('*')).csv" `
         -Description "Referral sources feeding outpatient rehab providers in ZIP $($script:RmResult.Zip) (CMS 2015 shared-patient data)"
+})
+
+$ui.RmExportMixButton.Add_Click({
+    if (-not $script:RmResult) { return }
+    # Break the referral sources down by specialty. If a clinic is selected,
+    # profile just that clinic's sources; otherwise the whole ZIP.
+    $sel = $ui.RmClinicGrid.SelectedItem
+    $rows = @($script:RmResult.Sources)
+    $scope = "ZIP $($script:RmResult.Zip)"
+    if ($sel -is [System.Data.DataRowView]) {
+        $npi = [string]$sel.Row['NPI']
+        $rows = @($rows | Where-Object { $_.ClinicNPI -eq $npi })
+        $scope = "$([string]$sel.Row['Name']) ($npi)"
+    }
+    $mix = @(Get-RmSourceSpecialtyMix -Rows $rows)
+    $notes = @($script:RmResult.Notes) + @('',
+        'Specialty mix: referral sources grouped by NPPES primary specialty. PctOfVolume is each specialty''s share of total shared-patient volume. Read with the usual caveat — labs/imaging/hospitals appear as "sources" from co-occurring care.')
+    Export-RmWithDialog -Rows $mix -SuggestedName "specialty-mix-$($script:RmResult.Zip.TrimEnd('*')).csv" `
+        -Description "Referral-source specialty mix for $scope (CMS 2015 shared-patient data)" -Notes $notes
 })
 
 # ---------------------------------------------------------------------------
@@ -1159,8 +1222,68 @@ $ui.LkExportOutboundButton.Add_Click({
 })
 
 # ---------------------------------------------------------------------------
+# Watchlist tab
+# ---------------------------------------------------------------------------
+
+$script:WlCols = @('NPI', 'Status', 'ChangeSinceLast', 'LastName', 'FirstName',
+                   'PartB', 'DME', 'HHA', 'PMD', 'Hospice')
+
+$ui.WlSaveButton.Add_Click({
+    if ($script:Busy) { return }
+    $npis = @(Get-OrfNpiFromText -Text $ui.WlBox.Text)
+    if ($npis.Count -eq 0) { Show-ErrorBox 'Paste at least one 10-digit NPI to save.'; return }
+    try {
+        $r = $npis | Set-OrfWatchlist
+        $ui.WlBox.Text = (@(Get-OrfWatchlist) -join "`r`n")   # normalized view
+        $ui.WlSummary.Text = "Saved $($r.Count) NPI(s) to your watchlist. Click 'Check now' to see their status."
+    } catch { Show-ErrorBox "Could not save watchlist: $($_.Exception.Message)" }
+})
+
+$ui.WlCheckButton.Add_Click({
+    if ($script:Busy) { return }
+    if (-not $script:Data) {
+        Show-ErrorBox "No data loaded yet. Click 'Check for updates' on the Search tab first."
+        return
+    }
+    $npis = @(Get-OrfNpiFromText -Text $ui.WlBox.Text)
+    if ($npis.Count -eq 0) { $npis = @(Get-OrfWatchlist) }
+    if ($npis.Count -eq 0) { Show-ErrorBox 'Save or paste some NPIs first.'; return }
+    Invoke-Async -Kind 'wl-check' -Params @{ ModulePath = $script:ModulePath; Npi = $npis } `
+        -BusyMessage 'Checking your watchlist against the latest data and the previous update...' `
+        -WorkerScript 'param($ModulePath, $Npi) Import-Module $ModulePath; Get-OrfWatchlistReport -Npi $Npi' `
+        -OnDone {
+            param($result)
+            $rows = @($result)
+            $script:WlReport = $rows
+            $ui.WlGrid.ItemsSource = (ConvertTo-DataTable -Rows $rows -Columns $script:WlCols).DefaultView
+            $ui.WlExportButton.IsEnabled = ($rows.Count -gt 0)
+            $dropped = @($rows | Where-Object { $_.ChangeSinceLast -eq 'Removed' }).Count
+            $flag    = @($rows | Where-Object { $_.ChangeSinceLast -eq 'Changed' }).Count
+            $notOn   = @($rows | Where-Object { $_.Status -eq 'NOT ON LIST' }).Count
+            $ui.WlSummary.Text = ("$($rows.Count) watched provider(s): $notOn not on the current list" +
+                $(if ($dropped) { ", $dropped dropped since the last update" } else { '' }) +
+                $(if ($flag) { ", $flag had eligibility flags change" } else { '' }) +
+                '. Sort by ChangeSinceLast to see what moved.')
+            Set-Status 'Watchlist checked.'
+        } `
+        -OnFail {
+            param($message)
+            Show-ErrorBox "Watchlist check failed: $message"
+        }
+})
+
+$ui.WlExportButton.Add_Click({
+    if (-not $script:WlReport -or @($script:WlReport).Count -eq 0) { return }
+    Export-WithDialog -Rows @($script:WlReport) -SuggestedName 'watchlist-report.csv' `
+        -Description "Referrer watchlist status and change-since-last-update ($(@($script:WlReport).Count) NPIs)"
+})
+
+# ---------------------------------------------------------------------------
 # Startup
 # ---------------------------------------------------------------------------
+
+# Load any saved watchlist into its box.
+try { $ui.WlBox.Text = (@(Get-OrfWatchlist) -join "`r`n") } catch { }
 
 # Sweep *.tmp download partials left by a previous run that was closed or killed
 # mid-download. 2-minute floor so a scheduled-task download actively writing
@@ -1173,6 +1296,23 @@ Update-StatusFromDisk
 Update-RmStatus
 Update-PgStatus
 if (Get-OrfLatestSnapshot) { Start-DataLoad }
+
+# Safety net: any unhandled exception in a click/UI handler is shown in a
+# message box and marked handled, so the app stays open instead of crashing out
+# of ShowDialog (the failure mode a single non-technical user cannot recover
+# from). Real errors are still surfaced — just not fatally.
+try {
+    $window.Dispatcher.add_UnhandledException({
+        param($sender, $e)
+        try {
+            [void][System.Windows.MessageBox]::Show($window,
+                "Something went wrong, but the app is still running:`n`n$($e.Exception.Message)",
+                'Order & Referring Tracker',
+                [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning)
+        } catch { }
+        $e.Handled = $true
+    })
+} catch { }
 
 # On close, stop the completion timer and best-effort tear down any in-flight
 # background jobs so a partial download does not linger.

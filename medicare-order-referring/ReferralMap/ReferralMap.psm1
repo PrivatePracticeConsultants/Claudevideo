@@ -415,7 +415,12 @@ function Save-RmDataset {
         }
         if (Test-Path -LiteralPath $extractDir) { Remove-Item -Recurse -Force $extractDir }
         Assert-RmSafeZip $zipPath   # reject zip-slip entry names before extracting
-        Expand-Archive -LiteralPath $zipPath -DestinationPath $extractDir -Force
+        # Extract via the .NET API, NOT Expand-Archive: on Windows PowerShell 5.1
+        # Expand-Archive rejects any file whose extension is not literally .zip
+        # (our temp ends in .zip.tmp), whereas ZipFile is extension-agnostic and
+        # works identically on 5.1 and 7.
+        Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+        [System.IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $extractDir)
         $txt = @(Get-ChildItem -LiteralPath $extractDir -Filter '*.txt')
         if ($txt.Count -ne 1) {
             throw "Expected exactly one .txt inside the CMS zip, found $($txt.Count)."
@@ -909,6 +914,53 @@ function Get-RmProviderReferralActivity {
     }
 }
 
+function Get-RmSourceSpecialtyMix {
+    <#
+    .SYNOPSIS
+      Rolls a set of referral-source rows up by SPECIALTY: per specialty, how
+      many distinct sources and how much shared-patient volume, with each
+      specialty's share of the total. Turns a long source list into an
+      actionable referral-mix profile (e.g. "45% orthopedic surgery, 20%
+      primary care"). Works on referral-map .Sources or Provider-360 inbound.
+    .PARAMETER Rows
+      The source rows.
+    .PARAMETER SpecialtyField / VolumeField / IdField
+      Property names to read (default to referral-map .Sources names).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Rows,
+        [string]$SpecialtyField = 'SourceSpecialty',
+        [string]$VolumeField = 'SharedPatients',
+        [string]$IdField = 'SourceNPI'
+    )
+    $bySpec = @{}
+    $total = 0
+    foreach ($r in $Rows) {
+        $spec = [string]$r.$SpecialtyField
+        if ([string]::IsNullOrWhiteSpace($spec)) { $spec = '(specialty not looked up)' }
+        $vol = [int]$r.$VolumeField
+        $id  = [string]$r.$IdField
+        if (-not $bySpec.ContainsKey($spec)) {
+            $bySpec[$spec] = [pscustomobject]@{ Vol = 0; Ids = (New-Object 'System.Collections.Generic.HashSet[string]') }
+        }
+        $bySpec[$spec].Vol += $vol
+        [void]$bySpec[$spec].Ids.Add($id)
+        $total += $vol
+    }
+    $rowsOut = foreach ($spec in $bySpec.Keys) {
+        $b = $bySpec[$spec]
+        [pscustomobject]@{
+            Specialty      = $spec
+            Sources        = $b.Ids.Count
+            SharedPatients = $b.Vol
+            PctOfVolume    = if ($total -gt 0) { [math]::Round(100.0 * $b.Vol / $total, 1) } else { 0 }
+        }
+    }
+    @($rowsOut | Sort-Object -Property @{Expression = 'SharedPatients'; Descending = $true},
+                                        @{Expression = 'Specialty'; Descending = $false})
+}
+
 function Export-RmResult {
     <#
     .SYNOPSIS
@@ -951,5 +1003,5 @@ Export-ModuleMember -Function @(
     'Get-RmConfig', 'Set-RmConfig', 'Get-RmStatus', 'Get-RmDatasetPath',
     'Save-RmDataset', 'Find-RmClinic', 'Get-RmProviderDetail',
     'Get-RmReferralMap', 'Get-RmInboundByBucket', 'Get-RmProviderReferralActivity',
-    'Export-RmResult', 'Clear-RmStaleTemp'
+    'Get-RmSourceSpecialtyMix', 'Export-RmResult', 'Clear-RmStaleTemp'
 )
