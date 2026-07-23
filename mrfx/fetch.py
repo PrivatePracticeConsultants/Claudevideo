@@ -1162,10 +1162,12 @@ def resolve_worker_count(cfg: MrfxConfig) -> int:
     return max(1, min(configured, cores_cap))
 
 
-# politeness ceiling for AUTO download concurrency: parsers chew ~30s per
-# uncompressed GB while a fetch is pure I/O, so a handful of concurrent
-# fetches saturates the pipeline — more would just hammer payer CDNs
-_AUTO_DOWNLOAD_CAP = 4
+# politeness ceiling for AUTO download concurrency. 6 = the classic per-host
+# connection limit every web browser uses, so it's inherently CDN-polite while
+# giving slow/flaky payer CDNs (where a single connection lags the parsers) more
+# files in flight. Raise parallel_downloads in config to go up to 8; a fast CDN
+# just fills the prefetch buffer and idles the extra downloaders (harmless).
+_AUTO_DOWNLOAD_CAP = 6
 
 
 def resolve_download_count(cfg: MrfxConfig) -> int:

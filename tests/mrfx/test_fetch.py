@@ -563,10 +563,11 @@ def test_reserve_is_atomic_check_and_set(cfg, monkeypatch):
 def test_resolve_download_count_modes(cfg, monkeypatch):
     import mrfx.fetch as F
 
-    # auto on a big box: enough to feed the workers, politeness-capped at 4
+    # auto on a big box: enough to feed the workers, politeness-capped at 6
+    # (the browser per-host connection limit)
     monkeypatch.setattr(F.os, "cpu_count", lambda: 9)
     cfg.parallel_downloads = 0
-    assert F.resolve_download_count(cfg) == 4
+    assert F.resolve_download_count(cfg) == 6
     # auto on a tiny box: floor of 2 so network still overlaps parsing
     monkeypatch.setattr(F.os, "cpu_count", lambda: 2)
     assert F.resolve_download_count(cfg) == 2
