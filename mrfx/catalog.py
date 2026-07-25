@@ -116,6 +116,35 @@ CODE_CATALOG: dict[str, tuple[str, tuple[str, ...], bool]] = {
     # add-on, so labeling it 15-min was factually wrong on deliverables
     "92608": ("Speech-generating AAC device eval, each addl 30 min", (SLP,), False),
     "92609": ("Speech-generating AAC device programming", (SLP,), False),
+    "92618": ("Non-speech-generating AAC device services, each addl 30 min", (OT, SLP), False),
+    # ---- modality gaps: these complete the 97012-97036 runs above, and all
+    # three are "always therapy" on the CMS list. AOTA's list carries 97024.
+    "97024": ("Diathermy (e.g. microwave)", (PT, OT), False),
+    "97028": ("Ultraviolet therapy", (PT, OT), False),
+    "97034": ("Contrast baths", (PT, OT), True),
+    # ---- assessments not previously collected ----
+    "97755": ("Assistive technology assessment", (PT, OT), True),
+    # per HOUR, not a 15-minute unit — see the 92608 note above
+    "96105": ("Assessment of aphasia", (SLP,), False),
+    "96125": ("Standardized cognitive performance testing", (OT, SLP), False),
+    "92520": ("Laryngeal function studies", (SLP,), False),
+    # per DAY, not timed
+    "95992": ("Canalith repositioning (Epley/Semont)", (PT, OT), False),
+    # ---- pelvic health ----
+    # biofeedback is the core of a fast-growing outpatient PT niche that was
+    # entirely invisible without these two
+    "90912": ("Biofeedback training, first 15 min", (PT,), True),
+    "90913": ("Biofeedback training, each addl 15 min", (PT,), True),
+    # ---- caregiver training (new 2024/2025; all three disciplines) ----
+    # The "initial" codes are 30-MINUTE units and the group codes are untimed,
+    # so only the each-additional-15 codes are is_timed — mislabeling the 30s as
+    # "timed 15-min" would misstate the unit on a client's rate card.
+    "97550": ("Caregiver training, initial 30 min", (PT, OT, SLP), False),
+    "97551": ("Caregiver training, each addl 15 min", (PT, OT, SLP), True),
+    "97552": ("Caregiver training, group", (PT, OT, SLP), False),
+    "G0541": ("Caregiver training, direct care, initial 30 min (HCPCS)", (PT, OT, SLP), False),
+    "G0542": ("Caregiver training, direct care, each addl 15 min (HCPCS)", (PT, OT, SLP), True),
+    "G0543": ("Caregiver training, direct care, group (HCPCS)", (PT, OT, SLP), False),
 }
 
 DEFAULT_CODE_SET = list(CODE_CATALOG.keys())

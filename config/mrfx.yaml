@@ -4,28 +4,93 @@ codes:
   # false = extract only cpt_codes below. true = ingest EVERY billing code —
   # expect orders of magnitude more rows and hours-long parses on big payers.
   all_codes: false
+  # The codes collected from every file. This list IS the ingest filter — a code
+  # that isn't here is never extracted, and adding one later only affects files
+  # ingested AFTER the change (re-add a link to pick it up in old files).
+  #
+  # It defaults to the app's full PT/OT/SLP catalog. Trim it if you only care
+  # about a few codes and want smaller/faster ingests; every entry below is a
+  # real, currently-active CPT/HCPCS code (verified against the CMS 2026 MPFS
+  # and Therapy Code List).
   cpt_codes:
-    - "97161"
-    - "97162"
-    - "97163"
-    - "97164"
-    - "97110"
-    - "97112"
-    - "97113"
-    - "97116"
-    - "97124"
-    - "97140"
-    - "97150"
-    - "97530"
-    - "97535"
-    - "97542"
-    - "97760"
-    - "97010"
-    - "97012"
-    - "97014"
-    - "97032"
-    - "97035"
-    - "G0283"
+    - "97161"   # PT          PT eval, low complexity
+    - "97162"   # PT          PT eval, moderate complexity
+    - "97163"   # PT          PT eval, high complexity
+    - "97164"   # PT          PT re-evaluation
+    - "97165"   # OT          OT eval, low complexity
+    - "97166"   # OT          OT eval, moderate complexity
+    - "97167"   # OT          OT eval, high complexity
+    - "97168"   # OT          OT re-evaluation
+    - "97110"   # PT/OT       Therapeutic exercises
+    - "97112"   # PT/OT       Neuromuscular re-education
+    - "97140"   # PT/OT       Manual therapy
+    - "97150"   # PT/OT       Group therapeutic procedures
+    - "97530"   # PT/OT       Therapeutic activities
+    - "97535"   # PT/OT       Self-care/home management training
+    - "97542"   # PT/OT       Wheelchair management training
+    - "97760"   # PT/OT       Orthotic management & training, initial
+    - "97761"   # PT/OT       Prosthetic training, initial
+    - "97763"   # PT/OT       Orthotic/prosthetic management, established
+    - "97113"   # PT/OT       Aquatic therapy w/ exercises
+    - "97116"   # PT/OT       Gait training
+    - "97124"   # PT/OT       Massage therapy
+    - "97750"   # PT/OT       Physical performance test
+    - "97129"   # PT/OT/SLP   Cognitive function intervention, first 15 min
+    - "97130"   # PT/OT/SLP   Cognitive function intervention, each addl 15 min
+    - "97533"   # PT/OT/SLP   Sensory integrative techniques
+    - "97537"   # PT/OT       Community/work reintegration training
+    - "97010"   # PT/OT       Hot/cold packs
+    - "97012"   # PT          Mechanical traction
+    - "97014"   # PT          Electrical stimulation (unattended)
+    - "97016"   # PT          Vasopneumatic devices
+    - "97018"   # PT/OT       Paraffin bath
+    - "97022"   # PT/OT       Whirlpool
+    - "97026"   # PT          Infrared therapy
+    - "97032"   # PT          Electrical stimulation (manual)
+    - "97033"   # PT/OT       Iontophoresis
+    - "97035"   # PT/OT       Ultrasound therapy
+    - "97036"   # PT          Hubbard tank
+    - "G0283"   # PT/OT       Electrical stimulation, non-wound (HCPCS)
+    - "92521"   # SLP         Evaluation of speech fluency
+    - "92522"   # SLP         Evaluation of speech sound production
+    - "92523"   # SLP         Speech sound production w/ language eval
+    - "92524"   # SLP         Behavioral & qualitative analysis of voice and resonance
+    - "92507"   # SLP         Speech, language, voice & communication treatment, individual
+    - "92508"   # SLP         Speech, language, voice & communication treatment, group
+    - "92526"   # OT/SLP      Swallowing/oral function for feeding treatment
+    - "92610"   # OT/SLP      Swallowing function evaluation
+    - "92611"   # OT/SLP      Motion fluoroscopic swallow study
+    - "92612"   # SLP         Flexible endoscopic swallow eval (FEES)
+    - "92613"   # SLP         FEES interpretation and report
+    - "92614"   # SLP         Laryngeal sensory testing
+    - "92615"   # SLP         Laryngeal sensory testing interpretation
+    - "92616"   # SLP         FEES w/ laryngeal sensory testing
+    - "92617"   # SLP         FEES w/ sensory testing interpretation
+    - "92626"   # SLP         Auditory function eval for implanted device, first hour
+    - "92627"   # SLP         Auditory function eval for implanted device, each addl 15 min
+    - "92597"   # SLP         Voice prosthetic evaluation
+    - "92605"   # OT/SLP      Non-speech-generating AAC device eval, first hour
+    - "92606"   # OT/SLP      Non-speech-generating AAC device services
+    - "92607"   # SLP         Speech-generating AAC device eval, first hour
+    - "92608"   # SLP         Speech-generating AAC device eval, each addl 30 min
+    - "92609"   # SLP         Speech-generating AAC device programming
+    - "92618"   # OT/SLP      Non-speech-generating AAC device services, each addl 30 min
+    - "97024"   # PT/OT       Diathermy (e.g. microwave)
+    - "97028"   # PT/OT       Ultraviolet therapy
+    - "97034"   # PT/OT       Contrast baths
+    - "97755"   # PT/OT       Assistive technology assessment
+    - "96105"   # SLP         Assessment of aphasia
+    - "96125"   # OT/SLP      Standardized cognitive performance testing
+    - "92520"   # SLP         Laryngeal function studies
+    - "95992"   # PT/OT       Canalith repositioning (Epley/Semont)
+    - "90912"   # PT          Biofeedback training, first 15 min
+    - "90913"   # PT          Biofeedback training, each addl 15 min
+    - "97550"   # PT/OT/SLP   Caregiver training, initial 30 min
+    - "97551"   # PT/OT/SLP   Caregiver training, each addl 15 min
+    - "97552"   # PT/OT/SLP   Caregiver training, group
+    - "G0541"   # PT/OT/SLP   Caregiver training, direct care, initial 30 min (HCPCS)
+    - "G0542"   # PT/OT/SLP   Caregiver training, direct care, each addl 15 min (HCPCS)
+    - "G0543"   # PT/OT/SLP   Caregiver training, direct care, group (HCPCS)
 
 # Normalize reporting_entity_name variants to one payer label
 # (substring match, case-insensitive).

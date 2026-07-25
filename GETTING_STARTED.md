@@ -433,6 +433,19 @@ moves that number, in order of impact:
    both one national everything-file and smaller per-plan/per-state files,
    paste the smaller ones for the states you actually work in.
 
+   The list of codes it collects lives at `codes.cpt_codes` in
+   `config/mrfx.yaml`, and each line is labelled with its discipline and plain
+   description so you can see what you're keeping. It covers the full PT, OT
+   and SLP set — evaluations, treatment, modalities, swallowing studies, AAC,
+   biofeedback and caregiver training. Trim it if you only care about a handful
+   of codes and want smaller, faster ingests.
+
+   **Adding a code only affects files ingested afterwards.** That list is the
+   extraction filter, so a code that wasn't in it was never pulled out of the
+   files you already loaded — no later update recovers it. To pick up new codes
+   in files you already have, re-add those links (the app re-downloads and
+   re-extracts them).
+
 4. **Keep the machine awake.** Windows sleep pauses everything mid-queue. For
    an overnight grind: plug in, Settings → System → Power → set "Put my device
    to sleep" to **Never** (screen off is fine).

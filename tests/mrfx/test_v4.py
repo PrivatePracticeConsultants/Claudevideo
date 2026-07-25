@@ -2061,3 +2061,43 @@ def test_rate_card_scope_filters_apply_to_peers_not_to_the_subject(cfg, store):
     assert other["codes"][0]["rates"]["Aetna"]["rate"] == 45.0
     # ...while that state scope DOES empty the peer comparison (no KS peers)
     assert other["codes"][0]["rates"]["Aetna"]["market_median"] is None
+
+
+def test_shipped_config_collects_the_whole_catalog():
+    """cpt_codes IS the ingest filter — a code absent from it is never extracted,
+    and no later fix recovers it without re-ingesting every file. The shipped
+    list had drifted to 21 PT-side codes while the catalog grew to cover OT and
+    SLP, so a product sold as PT/OT/SLP silently collected NO speech codes and
+    no OT evaluations at all. Keep the two in lockstep."""
+    from pathlib import Path
+
+    from mrfx.catalog import CODE_CATALOG
+    from mrfx.config import load_mrfx_config
+
+    cfg_path = Path(__file__).resolve().parents[2] / "config" / "mrfx.yaml"
+    shipped = load_mrfx_config(str(cfg_path)).code_set
+    missing = sorted(set(CODE_CATALOG) - set(shipped))
+    assert not missing, f"catalog codes the shipped config never collects: {missing}"
+    unknown = sorted(set(shipped) - set(CODE_CATALOG))
+    assert not unknown, f"collected codes with no catalog entry (no name/discipline): {unknown}"
+
+
+def test_new_catalog_codes_carry_the_right_unit_and_disciplines():
+    """`is_timed` means specifically a 15-MINUTE unit — it renders as
+    'timed 15-min' on a client's rate card — so the 30-minute and per-hour and
+    per-day codes must be False even though they are time-based."""
+    from mrfx.catalog import code_info, resolve_discipline
+
+    for code in ("97550", "G0541"):                    # initial 30 minutes
+        assert code_info(code)[2] is False, code
+    for code in ("97551", "G0542", "97034", "97755", "90912", "90913"):
+        assert code_info(code)[2] is True, code        # genuine 15-min units
+    for code in ("96105", "96125", "95992", "92520", "97552", "G0543", "92618"):
+        assert code_info(code)[2] is False, code       # per hour / per day / group / 30-min
+
+    # caregiver training is billable by all three, so an unmodified row must
+    # stay 'unspecified' rather than being confidently mis-tagged
+    assert resolve_discipline("97550", []) == "unspecified"
+    assert resolve_discipline("97550", ["GN"]) == "SLP"
+    # pelvic-health biofeedback is PT-only, so it may attribute by code
+    assert resolve_discipline("90912", []) == "PT"
