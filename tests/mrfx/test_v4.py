@@ -138,9 +138,9 @@ def test_names_only_rebuild_updates_directory_not_rate_spine(cfg, store, monkeyp
             "SELECT display_name FROM tin_directory WHERE tin_value='434444444'").fetchone()[0]
 
     # names arrive AFTER the full build; a names-only refresh must surface them
-    store.save_npi("1111111111", "Sunrise PT LLC", "261QP2300X", "Clinic/Center - Physical Therapy",
+    store.save_npi("1111111111", "Sunrise PT LLC", "261QP2000X", "Clinic/Center - Physical Therapy",
                    "STL", "MO", entity_type="NPI-2")
-    store.save_npi("1222222222", "Sunrise PT LLC", "261QP2300X", "Clinic/Center - Physical Therapy",
+    store.save_npi("1222222222", "Sunrise PT LLC", "261QP2000X", "Clinic/Center - Physical Therapy",
                    "Fenton", "MO", entity_type="NPI-2")
     # force partitioning too, to exercise the sliced names-only path
     monkeypatch.setattr(st, "ROLLUP_PARTITION_ROWS", 1)
@@ -1242,7 +1242,9 @@ def test_therapy_practice_rule_matrix(store):
     not yet identified)."""
     PT, OTA, SLP = "225100000X", "224ZR0403X", "235Z00000X"
     MD, CHIRO, NP = "207R00000X", "111N00000X", "363L00000X"
-    PT_CLINIC, REHAB_CLINIC = "261QP2300X", "261QR0400X"
+    PT_CLINIC, REHAB_CLINIC = "261QP2000X", "261QR0400X"
+    SPEECH_CLINIC, PEDS_CLINIC = "261QH0700X", "261QD1600X"
+    PRIMARY_CARE = "261QP2300X"
     HOSP, SNF, HHA = "282N00000X", "314000000X", "251E00000X"
     cases = [
         ("pure PT practice",                [PT, PT, PT],                  True),
@@ -1271,12 +1273,25 @@ def test_therapy_practice_rule_matrix(store):
         ("rehab clinic + 1 PT + 20 unknown", [REHAB_CLINIC, PT] + [None] * 20,  False),
         ("PT clinic + 50 unidentified",     [PT_CLINIC] + [None] * 50,          False),
         ("PT clinic + 3 unknown (small)",   [PT_CLINIC, None, None, None],      True),
+        # OT / speech / pediatric practices must qualify the same way a PT clinic
+        # does. NUCC has NO Occupational-Therapy clinic code, so an OT-only
+        # practice qualifies on its PROVIDERS — that path has to work.
+        ("speech clinic + 3 unknown",       [SPEECH_CLINIC, None, None, None],  True),
+        ("pediatric dev-disabilities clinic", [PEDS_CLINIC, None, None, None],  True),
+        ("OT-only practice (no OT clinic code exists)", [OTA, OTA, OTA],        True),
+        ("peds OT + SLP under a PT clinic", [OTA, SLP, PT_CLINIC],              True),
+        # 261QP2300X is PRIMARY CARE, not physical therapy — it was mislabelled
+        # in the code, so every primary-care clinic counted as a therapy practice
+        ("primary-care clinic + 3 unknown", [PRIMARY_CARE, None, None, None],   False),
+        ("primary-care clinic + 2 MDs",     [PRIMARY_CARE, MD, MD],             False),
     ]
     # NPPES entity_type must be realistic: an org/clinic/facility taxonomy belongs
     # to a Type-2 (organization) NPI, a clinician to a Type-1 (individual) one.
     # Seeding individual MDs as NPI-2 made them look like billing shells, which
     # the share denominator deliberately ignores.
     ORG_PREFIXES = ("261Q", "282", "283", "314", "251E", "252Y", "2513", "1932", "332B")
+    # (261Q covers every Clinic/Center code: PT, Hearing-and-Speech, Developmental
+    # Disabilities, CORF, Rehabilitation and Primary Care)
     def _etype(tax: str) -> str:
         return "NPI-2" if tax.startswith(ORG_PREFIXES) else "NPI-1"
 
@@ -1343,7 +1358,7 @@ def test_therapy_filter_excludes_hospitals_and_md_majority_groups(cfg, store):
         ("1000000014", "Rehab Hospital", "283X00000X"),
         # tiny clinic w/ clinic org code
         ("1000000015", "Tiny PT", "225100000X"), ("1000000016", "Tiny NP", "363L00000X"),
-        ("1000000017", "Tiny PT Clinic", "261QP2300X"),
+        ("1000000017", "Tiny PT Clinic", "261QP2000X"),
     ]
     # realistic entity types: clinicians are Type-1 NPIs, the hospital/clinic org
     # NPIs are Type-2 (the share denominator ignores non-therapy ORG NPIs, so

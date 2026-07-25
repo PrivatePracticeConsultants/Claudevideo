@@ -117,20 +117,37 @@ THERAPY_TAXONOMY_PREFIXES = (
     # 1-SLP + 1-SLPA practice scored 50% and was hidden.
     "2355S",
 )
-# full org/clinic taxonomies for practices that HOUSE therapists
+# Org/clinic taxonomies for practices that HOUSE therapists. Verified against
+# the authoritative NUCC code set (v25.1) — an earlier version of this list had
+# 261QP2300X labelled "Clinic/Center - Physical Therapy"; that code is actually
+# **Primary Care**, so every primary-care clinic in the book counted as a therapy
+# practice. The real PT clinic code is 261QP2000X.
+#
+# NOTE there is NO Occupational-Therapy clinic/center code in NUCC (checked all
+# 883 codes): an OT-only practice enumerates under the individual OT taxonomies
+# (225X*/224Z*), or as Rehabilitation / Developmental Disabilities. That's why
+# the OT side leans on the provider-share test rather than a clinic code.
 THERAPY_TAXONOMY_CODES = (
-    "261QP2300X",  # Clinic/Center - Physical Therapy
-    "261QR0400X",  # Clinic/Center - Rehabilitation
+    "261QP2000X",  # Clinic/Center - Physical Therapy
+    "261QH0700X",  # Clinic/Center - Hearing and Speech (the speech-clinic code)
+    "261QD1600X",  # Clinic/Center - Developmental Disabilities (pediatric PT/OT/ST)
+    "261QR0401X",  # Clinic/Center - Rehabilitation, CORF (outpatient PT/OT/SLP by definition)
+    "261QR0400X",  # Clinic/Center - Rehabilitation (AMBIGUOUS — numerator only, see below)
 )
-# UNAMBIGUOUS therapy-clinic org codes. "Clinic/Center - Physical Therapy" is
-# only ever a therapy practice, so it's strong enough evidence to qualify a TIN
-# on a simple majority (a two-therapist clinic with one NP on staff is still a
-# therapy clinic). Deliberately does NOT include 261QR0400X
-# ("Clinic/Center - Rehabilitation"), which physiatry groups, multispecialty
-# rehab and hospital outpatient departments also carry — that one only counts
-# toward the share numerator and can never by itself qualify a TIN.
+# UNAMBIGUOUS therapy-clinic org codes: a practice carrying one of these is a
+# therapy clinic, so the code is strong enough evidence to qualify a TIN on a
+# simple majority (a two-therapist clinic with one NP on staff is still a therapy
+# clinic) and to stand in for enrichment at a small practice.
+# Deliberately EXCLUDES 261QR0400X ("Clinic/Center - Rehabilitation"), which
+# physiatry groups, multispecialty rehab and hospital outpatient departments also
+# carry — that one only counts toward the share numerator and can never by itself
+# qualify a TIN. Also excludes 261QR0404X (Cardiac rehab) and 261QR0405X
+# (Substance-Use-Disorder rehab), which are not PT/OT/SLP at all.
 THERAPY_CLINIC_STRONG_CODES = (
-    "261QP2300X",
+    "261QP2000X",  # Physical Therapy
+    "261QH0700X",  # Hearing and Speech
+    "261QD1600X",  # Developmental Disabilities (peds therapy)
+    "261QR0401X",  # CORF
 )
 
 # Hospital-CLASS taxonomies: any NPI carrying one of these marks its whole TIN

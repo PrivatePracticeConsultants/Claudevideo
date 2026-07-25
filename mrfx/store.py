@@ -439,7 +439,12 @@ ROLLUP_SCHEMA_VERSION = 2
 # org NPIs no longer dilute), 75% threshold, enrichment-coverage test whose
 # small-clinic escape needs the unambiguous PT-clinic code, and the facility veto
 # widened past hospitals (SNF/home health/hospice/residential/schools/agencies).
-DIRECTORY_SCHEMA_VERSION = 2
+# v3: clinic taxonomy codes corrected against the authoritative NUCC set —
+# 261QP2300X is PRIMARY CARE, not Physical Therapy (every primary-care clinic was
+# counting as a therapy practice); the real PT code 261QP2000X replaces it, and
+# Hearing-and-Speech / Developmental-Disabilities / CORF clinics were added so
+# speech and pediatric therapy clinics stop being excluded.
+DIRECTORY_SCHEMA_VERSION = 3
 
 # Sentinel for upsert_file(finished_at=...): "stamp the completion time INSIDE
 # the write lock". Callers must never pre-compute a done-timestamp in Python —
