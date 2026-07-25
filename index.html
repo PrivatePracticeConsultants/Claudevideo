@@ -1,0 +1,2232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Code Blue! — ER Co-op</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: #0d1117;
+    overflow: hidden;
+    font-family: "Trebuchet MS", "Segoe UI", system-ui, sans-serif;
+  }
+  #wrap {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+  }
+  canvas {
+    image-rendering: auto;
+    background: #10161f;
+    box-shadow: 0 0 60px rgba(0,0,0,.8);
+    border-radius: 6px;
+  }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="game" width="1280" height="800"></canvas></div>
+<script>
+"use strict";
+/* =====================================================================
+   CODE BLUE! — a two-player couch co-op ER game.
+   Single file, vanilla JS + Canvas, no dependencies.
+
+   Sections:
+     1. Constants & config
+     2. Utilities (rng, math, drawing primitives)
+     3. Audio (synthesized Web Audio SFX)
+     4. Input (shared keyboard, two control sets)
+     5. Data (items, ailments, station recipes, levels)
+     6. World construction (map parsing, pathfinding)
+     7. Entities (players, patients, items, stations)
+     8. Interaction resolution (interact key / use key)
+     9. Simulation update
+    10. Rendering (world, entities, HUD, screens)
+    11. State machine & main loop
+   ===================================================================== */
+
+/* ---------------------------------------------------------------------
+   1. CONSTANTS & CONFIG
+   --------------------------------------------------------------------- */
+
+const W = 1280, H = 800;
+const TILE = 40, COLS = 32, ROWS = 16;
+const PLAY_X = 0, PLAY_Y = 96;              // play field origin inside canvas
+const PLAY_W = COLS * TILE, PLAY_H = ROWS * TILE;
+const HUD_H = PLAY_Y;                        // top bar
+const LEGEND_Y = PLAY_Y + PLAY_H;            // bottom legend strip
+const LEGEND_H = H - LEGEND_Y;
+
+const PLAYER_R = 13;                         // collision radius
+const SPEED_FREE = 205;                      // px/sec, hands empty
+const SPEED_ITEM = 195;                      // carrying an item
+const SPEED_PATIENT = 152;                   // carrying a patient
+const REACH = 58;                            // interaction reach (px, tile centres)
+const FACE_DOT = 0.25;                       // how forgiving facing is
+
+const COMBO_WINDOW = 7.0;                    // sec between discharges to keep combo
+const COMBO_MAX = 3.0;
+const DEFIB_CHARGE_LIFE = 12.0;              // sec a charged defib stays charged
+const LAB_REVEAL_BONUS = 0.30;               // patience refunded when lab reveals
+
+const PALETTE = {
+  floorA:   "#e9eef3",
+  floorB:   "#e0e7ee",
+  wall:     "#3d4a5c",
+  wallTop:  "#55647a",
+  hud:      "#141c27",
+  hudLine:  "#26374d",
+  text:     "#eaf2ff",
+  dim:      "#8ea3bd",
+  good:     "#4ec97a",
+  warn:     "#f2b134",
+  bad:      "#e4573d",
+  p1:       "#3fb6e8",
+  p2:       "#f2795f",
+};
+
+/* ---------------------------------------------------------------------
+   2. UTILITIES
+   --------------------------------------------------------------------- */
+
+const clamp = (v, a, b) => v < a ? a : (v > b ? b : v);
+const fmtMult = (m) => (Math.round(m * 100) / 100).toString();
+const lerp = (a, b, t) => a + (b - a) * t;
+
+/** Small deterministic PRNG (mulberry32) so a level always plays the same way. */
+function makeRng(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a = (a + 0x6D2B79F5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+  const rr = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + rr, y);
+  ctx.arcTo(x + w, y, x + w, y + h, rr);
+  ctx.arcTo(x + w, y + h, x, y + h, rr);
+  ctx.arcTo(x, y + h, x, y, rr);
+  ctx.arcTo(x, y, x + w, y, rr);
+  ctx.closePath();
+}
+
+function fillRound(ctx, x, y, w, h, r, color) {
+  ctx.fillStyle = color; roundRect(ctx, x, y, w, h, r); ctx.fill();
+}
+
+function text(ctx, str, x, y, size, color, align, weight) {
+  ctx.font = (weight || "bold") + " " + size + 'px "Trebuchet MS", "Segoe UI", sans-serif';
+  ctx.fillStyle = color;
+  ctx.textAlign = align || "left";
+  ctx.textBaseline = "alphabetic";
+  ctx.fillText(str, x, y);
+}
+
+function fmtTime(sec) {
+  sec = Math.max(0, Math.ceil(sec));
+  const m = Math.floor(sec / 60), s = sec % 60;
+  return m + ":" + (s < 10 ? "0" : "") + s;
+}
+
+/* ---------------------------------------------------------------------
+   3. AUDIO — tiny synthesized SFX, no assets.
+   --------------------------------------------------------------------- */
+
+const Sound = {
+  ctx: null,
+  muted: false,
+  init() {
+    if (this.ctx) { if (this.ctx.state === "suspended") this.ctx.resume(); return; }
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    try { this.ctx = new AC(); } catch (err) { this.ctx = null; }
+  },
+  /** One shaped oscillator blip. */
+  tone(freq, dur, type, vol, slideTo) {
+    if (this.muted || !this.ctx) return;
+    const t0 = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const g = this.ctx.createGain();
+    osc.type = type || "square";
+    osc.frequency.setValueAtTime(freq, t0);
+    if (slideTo) osc.frequency.exponentialRampToValueAtTime(Math.max(20, slideTo), t0 + dur);
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.exponentialRampToValueAtTime(vol || 0.12, t0 + 0.012);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    osc.connect(g); g.connect(this.ctx.destination);
+    osc.start(t0); osc.stop(t0 + dur + 0.02);
+  },
+  noise(dur, vol, freq) {
+    if (this.muted || !this.ctx) return;
+    const n = Math.floor(this.ctx.sampleRate * dur);
+    const buf = this.ctx.createBuffer(1, n, this.ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / n);
+    const src = this.ctx.createBufferSource(); src.buffer = buf;
+    const bp = this.ctx.createBiquadFilter(); bp.type = "bandpass"; bp.frequency.value = freq || 900;
+    const g = this.ctx.createGain(); g.gain.value = vol || 0.1;
+    src.connect(bp); bp.connect(g); g.connect(this.ctx.destination);
+    src.start();
+  },
+  play(name) {
+    switch (name) {
+      case "pickup":   this.tone(520, 0.07, "square", 0.09, 720); break;
+      case "drop":     this.tone(300, 0.07, "square", 0.08, 220); break;
+      case "place":    this.tone(420, 0.10, "triangle", 0.11, 560); break;
+      case "tick":     this.tone(700, 0.035, "square", 0.035); break;
+      case "step":     this.tone(240, 0.05, "sine", 0.05); break;
+      case "done":     this.tone(660, 0.09, "triangle", 0.12, 990); break;
+      case "discharge":
+        this.tone(660, 0.09, "triangle", 0.13);
+        setTimeout(() => this.tone(880, 0.09, "triangle", 0.13), 80);
+        setTimeout(() => this.tone(1180, 0.16, "triangle", 0.13), 160);
+        break;
+      case "spawn":    this.tone(380, 0.09, "sine", 0.08, 470); break;
+      case "error":    this.tone(150, 0.13, "sawtooth", 0.09, 90); break;
+      case "shock":    this.noise(0.22, 0.16, 1800); this.tone(90, 0.25, "sawtooth", 0.10, 40); break;
+      case "charge":   this.tone(300, 0.4, "sawtooth", 0.06, 1200); break;
+      case "flatline": this.tone(880, 1.1, "sine", 0.10); break;
+      case "leave":    this.tone(300, 0.28, "square", 0.09, 120); break;
+      case "lab":      this.tone(760, 0.12, "sine", 0.1, 520); setTimeout(() => this.tone(980, 0.18, "sine", 0.1), 120); break;
+      case "menu":     this.tone(600, 0.05, "square", 0.07); break;
+      case "star":     this.tone(880, 0.12, "triangle", 0.12, 1320); break;
+      case "jam":      this.noise(0.18, 0.12, 400); break;
+      case "levelend": this.tone(523, 0.15, "triangle", 0.12);
+                       setTimeout(() => this.tone(659, 0.15, "triangle", 0.12), 150);
+                       setTimeout(() => this.tone(784, 0.30, "triangle", 0.12), 300);
+                       break;
+    }
+  }
+};
+
+/* ---------------------------------------------------------------------
+   4. INPUT
+   --------------------------------------------------------------------- */
+
+const Keys = Object.create(null);      // held state by event.code
+const Pressed = Object.create(null);   // edge-triggered, cleared each frame
+
+const CONTROLS = [
+  { up: "KeyW", down: "KeyS", left: "KeyA", right: "KeyD", interact: "KeyE", use: "KeyQ" },
+  { up: "ArrowUp", down: "ArrowDown", left: "ArrowLeft", right: "ArrowRight", interact: "Slash", use: "Period" }
+];
+
+const SWALLOW = new Set([
+  "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space", "Slash", "Period",
+  "KeyW", "KeyA", "KeyS", "KeyD", "KeyQ", "KeyE", "Escape"
+]);
+
+window.addEventListener("keydown", (e) => {
+  if (SWALLOW.has(e.code)) e.preventDefault();
+  if (!Keys[e.code]) Pressed[e.code] = true;
+  Keys[e.code] = true;
+  Sound.init();                          // browsers need a gesture before audio
+}, { passive: false });
+
+window.addEventListener("keyup", (e) => {
+  if (SWALLOW.has(e.code)) e.preventDefault();
+  Keys[e.code] = false;
+}, { passive: false });
+
+window.addEventListener("blur", () => { for (const k in Keys) Keys[k] = false; });
+
+const wasPressed = (code) => !!Pressed[code];
+function clearPressed() { for (const k in Pressed) delete Pressed[k]; }
+
+/* ---------------------------------------------------------------------
+   5. DATA — items, ailments, stations, levels
+   --------------------------------------------------------------------- */
+
+const ITEMS = {
+  bandage:       { name: "Bandage",  short: "BND" },
+  syringe:       { name: "Syringe",  short: "SYR" },
+  film:          { name: "Raw film", short: "FLM" },
+  xrayimg:       { name: "X-ray",    short: "IMG" },
+  cast:          { name: "Cast",     short: "CST" },
+  sample:        { name: "Blood",    short: "LAB" },
+  crate:         { name: "Supplies", short: "BOX" },
+  defib:         { name: "Defib",    short: "DEF" },
+  defib_charged: { name: "Defib +",  short: "DEF" }
+};
+
+/* Station types. `solid` stations block movement and are worked from an
+   adjacent tile. `holdsPatient` stations can have a patient placed on them. */
+const STATIONS = {
+  bed:       { name: "Bed",            color: "#f7fbff", edge: "#9db6cf", holdsPatient: true },
+  supply:    { name: "Supply Shelf",   color: "#2fb59a", edge: "#1d7d6a", stockMax: 3 },
+  medicine:  { name: "Medicine Cabinet", color: "#3d78d8", edge: "#27508f", stockMax: 3 },
+  xray:      { name: "X-Ray",          color: "#4a5568", edge: "#2d3444", holdsPatient: true },
+  cast:      { name: "Cast Bench",     color: "#c8a86b", edge: "#8d7343" },
+  charger:   { name: "Charging Dock",  color: "#f2b134", edge: "#a97a15" },
+  lab:       { name: "Lab",            color: "#9b5de5", edge: "#6a35a8" },
+  delivery:  { name: "Delivery Door",  color: "#a9743f", edge: "#6f4a26" },
+  defibrack: { name: "Defib Rack",     color: "#e4573d", edge: "#9c3324" }
+};
+
+/* Ailments.
+   `steps` are the patient-bound requirements, in order:
+     k:'bedside'   — worked at the patient's bed (optionally needs a held item,
+                     optionally produces one)
+     k:'atStation' — the patient must be sitting on that station
+     k:'lab'       — completed remotely when someone analyses this patient's sample
+   `chain` is the player-facing workflow shown in the HUD legend. */
+const AILMENTS = {
+  cut: {
+    name: "Laceration", color: "#e4573d", score: 80, patienceMul: 1.05,
+    steps: [{ k: "bedside", need: "bandage", dur: 1.3, label: "Apply bandage" }],
+    chain: [{ s: "supply", t: "Shelf" }, { s: "bed", t: "Bandage" }]
+  },
+  infection: {
+    name: "Infection", color: "#4ec97a", score: 110, patienceMul: 1.0,
+    steps: [{ k: "bedside", need: "syringe", dur: 1.5, label: "Inject antibiotics" }],
+    chain: [{ s: "medicine", t: "Med Cab" }, { s: "bed", t: "Inject" }]
+  },
+  fracture: {
+    name: "Fracture", color: "#c2b38e", score: 175, patienceMul: 1.45,
+    steps: [
+      { k: "atStation", station: "xray", dur: 2.4, label: "X-ray the patient" },
+      { k: "bedside", need: "cast", dur: 2.0, label: "Apply cast" }
+    ],
+    chain: [{ s: "xray", t: "X-ray" }, { s: "xray", t: "Develop" }, { s: "cast", t: "Mix cast" }, { s: "bed", t: "Apply" }]
+  },
+  cardiac: {
+    name: "Cardiac", color: "#ff4d6d", score: 195, patienceMul: 0.9,
+    steps: [{ k: "bedside", need: "defib_charged", dur: 1.2, label: "Defibrillate" }],
+    chain: [{ s: "defibrack", t: "Defib" }, { s: "charger", t: "Charge" }, { s: "bed", t: "Shock" }]
+  },
+  mystery: {
+    name: "Mystery", color: "#b58bff", score: 215, patienceMul: 1.55,
+    steps: [
+      { k: "bedside", produce: "sample", dur: 1.3, label: "Draw blood" },
+      { k: "lab", label: "Awaiting lab" }
+    ],
+    chain: [{ s: "bed", t: "Draw" }, { s: "lab", t: "Analyse" }, { s: "?", t: "Then treat" }]
+  }
+};
+
+/* Station recipes, evaluated top-down; first match wins.
+     need:      item the player must be holding (null = must be empty-handed)
+     out:       item produced
+     stock:     consumes one unit of shelf stock
+     restock:   refills the shelf
+     patientStep: advances the occupying patient's `atStation` step
+     labWork:   analyses a blood sample */
+const RECIPES = {
+  supply: [
+    { need: "crate", out: null, dur: 1.5, restock: true, label: "Restock shelf" },
+    { need: null, out: "bandage", dur: 1.0, stock: true, label: "Take bandage" }
+  ],
+  medicine: [
+    { need: "crate", out: null, dur: 1.5, restock: true, label: "Restock cabinet" },
+    { need: null, out: "syringe", dur: 1.6, stock: true, label: "Fill syringe" }
+  ],
+  xray: [
+    { need: "film", out: "xrayimg", dur: 1.5, label: "Develop film" },
+    { need: null, out: "film", dur: 2.4, patientStep: true, label: "X-ray patient" }
+  ],
+  cast: [{ need: "xrayimg", out: "cast", dur: 2.0, label: "Mix cast" }],
+  charger: [{ need: "defib", out: "defib_charged", dur: 1.8, label: "Charge defib" }],
+  lab: [{ need: "sample", out: null, dur: 2.6, labWork: true, label: "Analyse blood" }],
+  delivery: [{ need: null, out: "crate", dur: 1.4, label: "Collect supplies" }],
+  defibrack: [],
+  bed: []
+};
+
+/* --- Levels -------------------------------------------------------------
+   Map legend:
+     #  wall            .  floor          E  entrance      O  exit
+     b  bed             s  supply shelf   m  medicine cabinet
+     x  X-ray           c  cast bench     h  charger (defib dock)
+     l  lab             d  delivery door  f  defib rack
+   Every map is exactly 32 columns x 16 rows.                              */
+
+const LEVELS = [
+  {
+    name: "First Shift",
+    blurb: "Cuts and infections. Take your time — learn the room.",
+    seed: 1337,
+    duration: 180,
+    patience: 78,
+    spawnStart: 11.0, spawnEnd: 7.5,
+    maxWaiting: 3,
+    ailments: ["cut", "infection"],
+    stars: [700, 1400, 2100],
+    restock: false, jams: false, flatline: false,
+    map: [
+      "################################",
+      "#..............................#",
+      "#.E...........####.......#######",
+      "#.....bb......####.......#######",
+      "#........................#######",
+      "#.....bb.........ss......#######",
+      "#..............................#",
+      "#.....bb.........mm............#",
+      "#..............................#",
+      "#.....bb.................#######",
+      "#.............####.......#######",
+      "#.O...........####.......#######",
+      "#........................#######",
+      "#..............................#",
+      "#..............................#",
+      "################################"
+    ]
+  },
+  {
+    name: "Twin Wards",
+    blurb: "Fractures arrive. The X-ray and the cast bench are on opposite sides.",
+    seed: 24601,
+    duration: 180,
+    patience: 64,
+    spawnStart: 9.5, spawnEnd: 5.8,
+    maxWaiting: 4,
+    ailments: ["cut", "infection", "fracture"],
+    stars: [800, 1500, 2200],
+    restock: false, jams: false, flatline: false,
+    map: [
+      "################################",
+      "#..............##..............#",
+      "#.E............##..............#",
+      "#.........ss...##..............#",
+      "#....bb........##..............#",
+      "#..............##..............#",
+      "#....bb........##.........mm...#",
+      "#..............................#",
+      "#..............................#",
+      "#....bb........##..............#",
+      "#..............##.........cc...#",
+      "#....x.........##..............#",
+      "#.O............##..............#",
+      "#..............##..............#",
+      "#..............................#",
+      "################################"
+    ]
+  },
+  {
+    name: "Crash Cart",
+    blurb: "Cardiac cases. One defibrillator for the whole floor — and the shelves run dry.",
+    seed: 90210,
+    duration: 180,
+    patience: 64,
+    spawnStart: 9.0, spawnEnd: 5.4,
+    maxWaiting: 5,
+    ailments: ["cut", "infection", "fracture", "cardiac"],
+    stars: [800, 1600, 2400],
+    restock: true, jams: false, flatline: true,
+    map: [
+      "################################",
+      "#...d......................ss..#",
+      "#.E............................#",
+      "#.....####...........####......#",
+      "#.....####...........####..mm..#",
+      "#..............................#",
+      "#.....bb.........bb............#",
+      "#..............................#",
+      "#..............................#",
+      "#.....bb.........bb........cc..#",
+      "#..............................#",
+      "#.....####...........####......#",
+      "#.O...####...........####..x...#",
+      "#.............f............h...#",
+      "#..............................#",
+      "################################"
+    ]
+  },
+  {
+    name: "The Gauntlet",
+    blurb: "Mystery cases need the lab. The X-ray jams. Work both ends of the corridor.",
+    seed: 55555,
+    duration: 180,
+    patience: 52,
+    spawnStart: 8.0, spawnEnd: 4.8,
+    maxWaiting: 5,
+    ailments: ["cut", "infection", "fracture", "cardiac", "mystery"],
+    stars: [900, 1800, 2700],
+    restock: true, jams: true, flatline: true,
+    map: [
+      "################################",
+      "#.E.....#..ss...##..mm...#.....#",
+      "#.......#.......##.......#.....#",
+      "#..bb...#.......##.......#..d..#",
+      "#.......#.......##.......#.....#",
+      "#..bb...#..f....##.......#.....#",
+      "#.......#.......##.......#.....#",
+      "#..............................#",
+      "#..............................#",
+      "#.......#.......##.......#.....#",
+      "#..bb...#.......##.......#.....#",
+      "#.......#..x....##..h....#.l...#",
+      "#..bb...#.......##.......#.....#",
+      "#.O.....#..c....##.......#.....#",
+      "#.......#.......##.......#.....#",
+      "################################"
+    ]
+  },
+  {
+    name: "Code Blue",
+    blurb: "Everything at once, everything far apart. Two coordinated medics only.",
+    seed: 777001,
+    duration: 180,
+    patience: 48,
+    spawnStart: 7.0, spawnEnd: 4.2,
+    maxWaiting: 6,
+    ailments: ["cut", "infection", "fracture", "cardiac", "mystery"],
+    stars: [1000, 2100, 3100],
+    restock: true, jams: true, flatline: true,
+    map: [
+      "################################",
+      "#..ss....#....d.....#.......mm.#",
+      "#.E......#..........#..........#",
+      "#........#..........#..........#",
+      "#..####..#####..#####..####....#",
+      "#..#........................#..#",
+      "#..#..bb......bb......bb....#..#",
+      "#..#........................#..#",
+      "#.....bb......bb......bb....#..#",
+      "#..#........................#..#",
+      "#..####..#####..#####..#####...#",
+      "#..........#........#..........#",
+      "#..f.......#...h....#.....l....#",
+      "#.O........#........#..........#",
+      "#....x.....#........#.....cc...#",
+      "################################"
+    ]
+  }
+];
+
+/* ---------------------------------------------------------------------
+   6. WORLD CONSTRUCTION
+   --------------------------------------------------------------------- */
+
+const CHAR_TO_STATION = {
+  b: "bed", s: "supply", m: "medicine", x: "xray", c: "cast",
+  h: "charger", l: "lab", d: "delivery", f: "defibrack"
+};
+
+function makeWorld(levelDef) {
+  const world = {
+    def: levelDef,
+    grid: [],            // per-tile: {solid, station|null, entrance, exit}
+    stations: [],
+    beds: [],
+    entrance: { x: 1, y: 1 },
+    exit: { x: 1, y: 1 },
+    waitSlots: []
+  };
+
+  for (let y = 0; y < ROWS; y++) {
+    const row = [];
+    const line = levelDef.map[y];
+    for (let x = 0; x < COLS; x++) {
+      const ch = line[x] || "#";
+      const cell = { solid: false, station: null, entrance: false, exit: false, x, y };
+      if (ch === "#") {
+        cell.solid = true;
+      } else if (ch === "E") {
+        cell.entrance = true; world.entrance = { x, y };
+      } else if (ch === "O") {
+        cell.exit = true; world.exit = { x, y };
+      } else if (CHAR_TO_STATION[ch]) {
+        const type = CHAR_TO_STATION[ch];
+        const st = {
+          type, x, y,
+          cx: x * TILE + TILE / 2, cy: y * TILE + TILE / 2,
+          occupant: null,
+          stock: STATIONS[type].stockMax !== undefined
+            ? (levelDef.restock ? STATIONS[type].stockMax : Infinity)
+            : Infinity,
+          jammed: false,
+          flash: 0,
+          hasDefib: type === "defibrack"
+        };
+        cell.solid = true;
+        cell.station = st;
+        world.stations.push(st);
+        if (type === "bed") world.beds.push(st);
+      }
+      row.push(cell);
+    }
+    world.grid.push(row);
+  }
+
+  world.waitSlots = computeWaitSlots(world, 8);
+  return world;
+}
+
+const inBounds = (x, y) => x >= 0 && y >= 0 && x < COLS && y < ROWS;
+const cellAt = (world, tx, ty) => inBounds(tx, ty) ? world.grid[ty][tx] : null;
+const tileOf = (px, py) => ({ x: Math.floor(px / TILE), y: Math.floor(py / TILE) });
+const isWalkable = (world, tx, ty) => { const c = cellAt(world, tx, ty); return !!c && !c.solid; };
+
+/** Breadth-first flood from the entrance; the first N walkable tiles that are
+    not the entrance/exit become the waiting-room slots. */
+function computeWaitSlots(world, n) {
+  const start = world.entrance;
+  const seen = new Set([start.x + "," + start.y]);
+  const q = [start];
+  const out = [];
+  while (q.length && out.length < n) {
+    const cur = q.shift();
+    const c = cellAt(world, cur.x, cur.y);
+    if (c && !c.entrance && !c.exit) out.push({ x: cur.x, y: cur.y });
+    const nbrs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+    for (const [dx, dy] of nbrs) {
+      const nx = cur.x + dx, ny = cur.y + dy, key = nx + "," + ny;
+      if (!seen.has(key) && isWalkable(world, nx, ny)) { seen.add(key); q.push({ x: nx, y: ny }); }
+    }
+  }
+  return out;
+}
+
+/** BFS path of tile centres from one tile to another (4-connected). */
+function findPath(world, from, to) {
+  if (from.x === to.x && from.y === to.y) return [];
+  const prev = new Map();
+  const startKey = from.x + "," + from.y;
+  const seen = new Set([startKey]);
+  const q = [from];
+  const nbrs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+  while (q.length) {
+    const cur = q.shift();
+    if (cur.x === to.x && cur.y === to.y) {
+      const path = [];
+      let k = cur.x + "," + cur.y;
+      while (k !== startKey) {
+        const [px, py] = k.split(",").map(Number);
+        path.push({ x: px * TILE + TILE / 2, y: py * TILE + TILE / 2 });
+        k = prev.get(k);
+        if (k === undefined) return [];
+      }
+      path.reverse();
+      return path;
+    }
+    for (const [dx, dy] of nbrs) {
+      const nx = cur.x + dx, ny = cur.y + dy, key = nx + "," + ny;
+      if (!seen.has(key) && isWalkable(world, nx, ny)) {
+        seen.add(key); prev.set(key, cur.x + "," + cur.y); q.push({ x: nx, y: ny });
+      }
+    }
+  }
+  return [];
+}
+
+/* ---------------------------------------------------------------------
+   7. ENTITIES
+   --------------------------------------------------------------------- */
+
+let nextId = 1;
+
+function makeItem(type, extra) {
+  const it = { type, id: nextId++ };
+  if (extra) Object.assign(it, extra);
+  if (type === "defib_charged") it.charge = DEFIB_CHARGE_LIFE;
+  return it;
+}
+
+function makePlayer(index, x, y) {
+  return {
+    index,
+    x, y,
+    dx: 0, dy: 1,
+    item: null,
+    patient: null,
+    work: null,           // {key, t, dur, action}
+    bob: 0,
+    hintT: 0, hint: "",
+    color: index === 0 ? PALETTE.p1 : PALETTE.p2,
+    ctrl: CONTROLS[index]
+  };
+}
+
+function makePatient(world, ailmentKey, level) {
+  const a = AILMENTS[ailmentKey];
+  const p = {
+    id: nextId++,
+    ailment: ailmentKey,
+    steps: a.steps.map(s => Object.assign({}, s)),
+    step: 0,
+    x: world.entrance.x * TILE + TILE / 2,
+    y: world.entrance.y * TILE + TILE / 2,
+    patienceMax: level.patience * a.patienceMul,
+    patience: level.patience * a.patienceMul,
+    state: "walking",     // walking | waiting | carried | bed | station | leaving | gone
+    path: [],
+    slot: null,
+    station: null,
+    done: false,
+    labPending: false,
+    revealed: false,
+    bob: Math.random() * 6.28,
+    flash: 0
+  };
+  return p;
+}
+
+/* ---------------------------------------------------------------------
+   8. GAME STATE
+   --------------------------------------------------------------------- */
+
+const Game = {
+  screen: "title",         // title | select | play | paused | results
+  playerCount: 1,
+  world: null,
+  levelIndex: 0,
+  level: null,
+  players: [],
+  patients: [],
+  floorItems: [],
+  popups: [],
+  particles: [],
+  rng: null,
+  time: 0,                 // seconds elapsed in level
+  spawnTimer: 0,
+  score: 0,
+  lives: 3,
+  treated: 0,
+  lost: 0,
+  combo: 0,
+  comboTimer: 0,
+  shake: 0,
+  flashRed: 0,
+  banner: null,            // {text, t}
+  result: null,
+  selectIndex: 0,
+  progress: LEVELS.map(() => ({ best: 0, stars: 0, unlocked: false }))
+};
+Game.progress[0].unlocked = true;
+
+function popup(x, y, str, color, big) {
+  Game.popups.push({ x, y, text: str, color: color || "#fff", t: 0, life: big ? 1.5 : 1.1, size: big ? 22 : 15 });
+}
+
+function burst(x, y, color, n) {
+  for (let i = 0; i < (n || 10); i++) {
+    const a = Math.random() * Math.PI * 2, s = 40 + Math.random() * 110;
+    Game.particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, t: 0, life: 0.4 + Math.random() * 0.4, color });
+  }
+}
+
+function startLevel(index) {
+  const def = LEVELS[index];
+  Game.levelIndex = index;
+  Game.level = def;
+  Game.world = makeWorld(def);
+  Game.rng = makeRng(def.seed);
+  Game.patients = [];
+  Game.floorItems = [];
+  Game.popups = [];
+  Game.particles = [];
+  Game.time = 0;
+  Game.spawnTimer = 2.0;
+  Game.score = 0;
+  Game.lives = 3;
+  Game.treated = 0;
+  Game.lost = 0;
+  Game.combo = 0;
+  Game.comboTimer = 0;
+  Game.shake = 0;
+  Game.flashRed = 0;
+  Game.banner = { text: def.name, sub: def.blurb, t: 0 };
+  Game.result = null;
+
+  // Drop the players near the exit, on open floor.
+  const spawnTiles = findOpenTilesNear(Game.world, Game.world.exit, 2);
+  Game.players = [];
+  for (let i = 0; i < Game.playerCount; i++) {
+    const t = spawnTiles[i] || spawnTiles[0] || { x: 1, y: 1 };
+    Game.players.push(makePlayer(i, t.x * TILE + TILE / 2, t.y * TILE + TILE / 2));
+  }
+  Game.screen = "play";
+  Sound.play("menu");
+}
+
+function findOpenTilesNear(world, origin, count) {
+  const out = [];
+  const seen = new Set();
+  const q = [{ x: origin.x, y: origin.y }];
+  seen.add(origin.x + "," + origin.y);
+  while (q.length && out.length < count + 2) {
+    const cur = q.shift();
+    if (isWalkable(world, cur.x, cur.y)) out.push(cur);
+    for (const [dx, dy] of [[1, 0], [0, 1], [-1, 0], [0, -1]]) {
+      const nx = cur.x + dx, ny = cur.y + dy, k = nx + "," + ny;
+      if (!seen.has(k) && isWalkable(world, nx, ny)) { seen.add(k); q.push({ x: nx, y: ny }); }
+    }
+  }
+  return out;
+}
+
+/* ---------------------------------------------------------------------
+   9. INTERACTION
+   --------------------------------------------------------------------- */
+
+/** Find the station the player is facing (searching the 8 neighbouring tiles). */
+function facingStation(world, p, filter) {
+  const tp = tileOf(p.x, p.y);
+  let best = null, bestScore = -1;
+  for (let oy = -1; oy <= 1; oy++) {
+    for (let ox = -1; ox <= 1; ox++) {
+      const c = cellAt(world, tp.x + ox, tp.y + oy);
+      if (!c || !c.station) continue;
+      const st = c.station;
+      if (filter && !filter(st)) continue;
+      const vx = st.cx - p.x, vy = st.cy - p.y;
+      const d = Math.hypot(vx, vy);
+      if (d > REACH) continue;
+      const dot = (vx / d) * p.dx + (vy / d) * p.dy;
+      if (dot < FACE_DOT) continue;
+      const score = dot * 2 - d / REACH;
+      if (score > bestScore) { bestScore = score; best = st; }
+    }
+  }
+  return best;
+}
+
+/** Find a loose patient (waiting or walking) the player is facing. */
+function facingPatient(p) {
+  let best = null, bestScore = -1;
+  for (const pt of Game.patients) {
+    if (pt.state !== "waiting" && pt.state !== "walking") continue;
+    const vx = pt.x - p.x, vy = pt.y - p.y;
+    const d = Math.hypot(vx, vy);
+    if (d > 46) continue;
+    const dot = d < 1 ? 1 : (vx / d) * p.dx + (vy / d) * p.dy;
+    if (dot < 0) continue;
+    const score = dot * 2 - d / 46;
+    if (score > bestScore) { bestScore = score; best = pt; }
+  }
+  return best;
+}
+
+/** Find a loose item on the floor the player is facing. */
+function facingFloorItem(p) {
+  let best = null, bestD = 44;
+  for (const it of Game.floorItems) {
+    const d = Math.hypot(it.x - p.x, it.y - p.y);
+    if (d < bestD) { bestD = d; best = it; }
+  }
+  return best;
+}
+
+function hint(p, msg) { p.hint = msg; p.hintT = 1.6; }
+
+/** E / "/" — pick up, put down, place patients. */
+function doInteract(p) {
+  const world = Game.world;
+
+  // Carrying a patient: place them on a bed / X-ray, or set them down.
+  if (p.patient) {
+    const target = facingStation(world, p, st => STATIONS[st.type].holdsPatient && !st.occupant);
+    if (target) {
+      p.patient.state = "station";
+      p.patient.station = target;
+      p.patient.x = target.cx; p.patient.y = target.cy - 6;
+      target.occupant = p.patient;
+      target.flash = 0.3;
+      p.patient = null;
+      Sound.play("place");
+      return;
+    }
+    // Otherwise set them down on the floor in front (or under) the player.
+    const spot = freeSpotInFront(world, p);
+    if (spot) {
+      const pt = p.patient;
+      pt.state = "waiting"; pt.x = spot.x; pt.y = spot.y; pt.path = [];
+      pt.slot = null; pt.station = null;
+      p.patient = null;
+      Sound.play("drop");
+    } else {
+      hint(p, "No room to set them down");
+    }
+    return;
+  }
+
+  // Carrying an item: drop it (or hand it to a shelf-free floor tile).
+  if (p.item) {
+    const spot = freeSpotInFront(world, p);
+    if (spot) {
+      const it = p.item;
+      it.x = spot.x; it.y = spot.y;
+      Game.floorItems.push(it);
+      p.item = null;
+      Sound.play("drop");
+    } else {
+      hint(p, "Nowhere to put that");
+    }
+    return;
+  }
+
+  // Empty-handed: pick something up. Priority: patient in front, patient on a
+  // bed/X-ray we face, the defib rack, then a floor item.
+  const loose = facingPatient(p);
+  if (loose) {
+    loose.state = "carried"; loose.path = []; loose.slot = null;
+    p.patient = loose;
+    Sound.play("pickup");
+    return;
+  }
+
+  const occupied = facingStation(world, p, st => st.occupant);
+  if (occupied) {
+    const pt = occupied.occupant;
+    occupied.occupant = null;
+    pt.state = "carried"; pt.station = null;
+    p.patient = pt;
+    Sound.play("pickup");
+    return;
+  }
+
+  const rack = facingStation(world, p, st => st.type === "defibrack" && st.hasDefib);
+  if (rack) {
+    rack.hasDefib = false;
+    p.item = makeItem("defib");
+    Sound.play("pickup");
+    return;
+  }
+
+  const fitem = facingFloorItem(p);
+  if (fitem) {
+    Game.floorItems.splice(Game.floorItems.indexOf(fitem), 1);
+    delete fitem.x; delete fitem.y;
+    p.item = fitem;
+    Sound.play("pickup");
+    return;
+  }
+
+  hint(p, "Nothing here");
+}
+
+function freeSpotInFront(world, p) {
+  const candidates = [
+    { x: p.x + p.dx * 34, y: p.y + p.dy * 34 },
+    { x: p.x, y: p.y }
+  ];
+  for (const c of candidates) {
+    const t = tileOf(c.x, c.y);
+    if (isWalkable(world, t.x, t.y)) return { x: t.x * TILE + TILE / 2, y: t.y * TILE + TILE / 2 };
+  }
+  return null;
+}
+
+/* --- The "use" key: start or continue a hold-to-work action -------------- */
+
+/** What (if anything) can this player work on right now? Returns a job
+    descriptor: {key, dur, run} where run() applies the effect. */
+function findJob(p) {
+  const world = Game.world;
+  if (p.patient) return null;   // hands full of patient
+
+  // 1. Bedside work on the patient we are facing.
+  const bedStation = facingStation(world, p, st => st.occupant && st.type === "bed");
+  if (bedStation) {
+    const pt = bedStation.occupant;
+    const step = pt.steps[pt.step];
+    if (step && step.k === "bedside") {
+      const holdsRight = step.need ? (p.item && p.item.type === step.need) : !p.item;
+      if (holdsRight) {
+        return {
+          key: "bed" + bedStation.x + "," + bedStation.y + ":" + pt.id + ":" + pt.step,
+          dur: step.dur,
+          label: step.label,
+          run: () => {
+            if (step.need) {
+              if (step.need === "defib_charged") {
+                p.item = makeItem("defib");         // discharged, still in hand
+                Sound.play("shock");
+                Game.shake = Math.max(Game.shake, 7);
+                burst(pt.x, pt.y, "#ffe066", 16);
+              } else {
+                p.item = null;
+              }
+            }
+            if (step.produce) p.item = makeItem(step.produce, { pid: pt.id });
+            advancePatient(pt);
+          }
+        };
+      }
+      if (step.need) hint(p, "Needs " + ITEMS[step.need].name);
+    } else if (step && step.k === "lab") {
+      hint(p, "Lab is still working");
+    } else if (step && step.k === "atStation") {
+      hint(p, "Take them to the " + STATIONS[step.station].name);
+    }
+  }
+
+  // 2. Station work.
+  const st = facingStation(world, p, s => RECIPES[s.type] && RECIPES[s.type].length);
+  if (!st) return null;
+
+  if (st.jammed) {
+    if (p.item) { hint(p, "Free your hands to fix it"); return null; }
+    return {
+      key: "fix" + st.x + "," + st.y,
+      dur: 2.2,
+      label: "Repair " + STATIONS[st.type].name,
+      run: () => {
+        st.jammed = false; st.flash = 0.4;
+        popup(st.cx, st.cy - 24, "Fixed!", PALETTE.good);
+        Sound.play("done");
+      }
+    };
+  }
+
+  for (const r of RECIPES[st.type]) {
+    const holds = r.need ? (p.item && p.item.type === r.need) : !p.item;
+    if (!holds) continue;
+
+    if (r.patientStep) {
+      const pt = st.occupant;
+      if (!pt) { hint(p, "Put a patient on the " + STATIONS[st.type].name); continue; }
+      const step = pt.steps[pt.step];
+      if (!step || step.k !== "atStation" || step.station !== st.type) { hint(p, "They don't need that"); continue; }
+      return {
+        key: "st" + st.x + "," + st.y + ":" + pt.id + ":" + pt.step,
+        dur: r.dur, label: r.label,
+        run: () => {
+          if (r.out) p.item = makeItem(r.out);
+          advancePatient(pt);
+          maybeJam(st);
+        }
+      };
+    }
+
+    if (r.stock && st.stock <= 0) { hint(p, "Empty — restock from the delivery door"); continue; }
+
+    if (r.restock) {
+      if (st.stock >= (STATIONS[st.type].stockMax || 0)) { hint(p, "Already full"); continue; }
+      return {
+        key: "re" + st.x + "," + st.y, dur: r.dur, label: r.label,
+        run: () => {
+          st.stock = STATIONS[st.type].stockMax;
+          p.item = null; st.flash = 0.4;
+          popup(st.cx, st.cy - 24, "Restocked", PALETTE.good);
+          Sound.play("done");
+        }
+      };
+    }
+
+    if (r.labWork) {
+      const pid = p.item.pid;
+      return {
+        key: "lab" + st.x + "," + st.y + ":" + (pid || 0), dur: r.dur, label: r.label,
+        run: () => {
+          p.item = null;
+          const pt = Game.patients.find(q => q.id === pid && q.state !== "gone");
+          if (!pt) { popup(st.cx, st.cy - 24, "Patient gone", PALETTE.dim); return; }
+          revealMystery(pt);
+        }
+      };
+    }
+
+    // Plain transform / production recipe.
+    return {
+      key: "st" + st.x + "," + st.y + ":" + r.label, dur: r.dur, label: r.label,
+      run: () => {
+        if (r.stock && st.stock !== Infinity) st.stock--;
+        p.item = r.out ? makeItem(r.out) : null;
+        st.flash = 0.3;
+        if (r.out === "defib_charged") Sound.play("charge"); else Sound.play("done");
+        maybeJam(st);
+      }
+    };
+  }
+  return null;
+}
+
+function maybeJam(st) {
+  if (!Game.level.jams) return;
+  if (st.type !== "xray") return;
+  if (Game.rng() < 0.28) {
+    st.jammed = true;
+    popup(st.cx, st.cy - 26, "JAMMED", PALETTE.warn);
+    Sound.play("jam");
+  }
+}
+
+function revealMystery(pt) {
+  const pool = Game.level.ailments.filter(a => a !== "mystery");
+  const key = pool[Math.floor(Game.rng() * pool.length)] || "cut";
+  const a = AILMENTS[key];
+  pt.ailment = key;
+  pt.revealed = true;
+  pt.steps = a.steps.map(s => Object.assign({}, s));
+  pt.step = 0;
+  pt.done = false;
+  pt.patienceMax = Math.max(pt.patienceMax, Game.level.patience * a.patienceMul);
+  pt.patience = Math.min(pt.patienceMax, pt.patience + pt.patienceMax * LAB_REVEAL_BONUS);
+  popup(pt.x, pt.y - 30, "It's " + a.name + "!", a.color, true);
+  Sound.play("lab");
+}
+
+function advancePatient(pt) {
+  pt.step++;
+  pt.flash = 0.35;
+  Sound.play("step");
+  if (pt.step >= pt.steps.length) {
+    pt.done = true;
+    popup(pt.x, pt.y - 30, "Treated!", PALETTE.good);
+    Sound.play("done");
+    burst(pt.x, pt.y, PALETTE.good, 12);
+  }
+}
+
+/* ---------------------------------------------------------------------
+   10. SIMULATION
+   --------------------------------------------------------------------- */
+
+function updatePlayer(p, dt) {
+  const world = Game.world;
+  const c = p.ctrl;
+  let mx = 0, my = 0;
+  if (Keys[c.left]) mx -= 1;
+  if (Keys[c.right]) mx += 1;
+  if (Keys[c.up]) my -= 1;
+  if (Keys[c.down]) my += 1;
+
+  const moving = mx !== 0 || my !== 0;
+  if (moving) {
+    const len = Math.hypot(mx, my);
+    mx /= len; my /= len;
+    p.dx = mx; p.dy = my;
+    const speed = p.patient ? SPEED_PATIENT : (p.item ? SPEED_ITEM : SPEED_FREE);
+    moveWithCollision(world, p, mx * speed * dt, my * speed * dt);
+    p.bob += dt * 11;
+  } else {
+    p.bob += dt * 2;
+  }
+
+  // Interact (edge-triggered)
+  if (wasPressed(c.interact)) doInteract(p);
+
+  // Use (held) — progress a job, cancel if the job identity changes.
+  if (Keys[c.use]) {
+    const job = findJob(p);
+    if (!job) {
+      p.work = null;
+    } else if (!p.work || p.work.key !== job.key) {
+      p.work = { key: job.key, t: 0, dur: job.dur, label: job.label, run: job.run, tick: 0 };
+    } else {
+      p.work.run = job.run;                  // keep the closure fresh
+      p.work.t += dt;
+      p.work.tick += dt;
+      if (p.work.tick > 0.22) { p.work.tick = 0; Sound.play("tick"); }
+      if (p.work.t >= p.work.dur) {
+        const run = p.work.run;
+        p.work = null;
+        run();
+      }
+    }
+  } else {
+    p.work = null;
+  }
+
+  // Auto-discharge: walk a treated patient onto the exit tile.
+  if (p.patient && p.patient.done) {
+    const t = tileOf(p.x, p.y);
+    const cell = cellAt(world, t.x, t.y);
+    if (cell && cell.exit) dischargePatient(p);
+  }
+
+  if (p.hintT > 0) p.hintT -= dt;
+}
+
+function moveWithCollision(world, p, dx, dy) {
+  // Axis-separated sweep so sliding along walls feels good.
+  let nx = p.x + dx;
+  if (!collides(world, nx, p.y)) p.x = nx;
+  let ny = p.y + dy;
+  if (!collides(world, p.x, ny)) p.y = ny;
+  p.x = clamp(p.x, PLAYER_R, PLAY_W - PLAYER_R);
+  p.y = clamp(p.y, PLAYER_R, PLAY_H - PLAYER_R);
+}
+
+function collides(world, px, py) {
+  const r = PLAYER_R;
+  const x0 = Math.floor((px - r) / TILE), x1 = Math.floor((px + r) / TILE);
+  const y0 = Math.floor((py - r) / TILE), y1 = Math.floor((py + r) / TILE);
+  for (let ty = y0; ty <= y1; ty++)
+    for (let tx = x0; tx <= x1; tx++)
+      if (!isWalkable(world, tx, ty)) return true;
+  return false;
+}
+
+function dischargePatient(p) {
+  const pt = p.patient;
+  p.patient = null;
+  pt.state = "gone";
+
+  const a = AILMENTS[pt.ailment];
+  const frac = pt.patience / pt.patienceMax;
+  Game.combo = Game.comboTimer > 0 ? Game.combo + 1 : 1;
+  Game.comboTimer = COMBO_WINDOW;
+  const mult = Math.min(COMBO_MAX, 1 + 0.25 * (Game.combo - 1));
+  const speedBonus = Math.round(frac * 100);
+  const gained = Math.round((a.score + speedBonus) * mult);
+  Game.score += gained;
+  Game.treated++;
+
+  popup(pt.x, pt.y - 26, "+" + gained + (mult > 1 ? "  x" + fmtMult(mult) : ""), PALETTE.good, true);
+  burst(pt.x, pt.y, "#ffe066", 18);
+  Sound.play("discharge");
+}
+
+function losePatient(pt) {
+  pt.state = "gone";
+  Game.lost++;
+  Game.lives--;
+  Game.combo = 0; Game.comboTimer = 0;
+  const penalty = 60;
+  Game.score = Math.max(0, Game.score - penalty);
+
+  if (Game.level.flatline) {
+    popup(pt.x, pt.y - 26, "FLATLINE  -" + penalty, PALETTE.bad, true);
+    Game.shake = 16;
+    Game.flashRed = 0.5;
+    Sound.play("flatline");
+    burst(pt.x, pt.y, PALETTE.bad, 20);
+  } else {
+    popup(pt.x, pt.y - 26, "Stormed out  -" + penalty, PALETTE.bad, true);
+    Game.shake = 6;
+    Sound.play("leave");
+  }
+
+  // free whatever they occupied
+  if (pt.station) { pt.station.occupant = null; pt.station = null; }
+  for (const p of Game.players) if (p.patient === pt) p.patient = null;
+}
+
+function updatePatients(dt) {
+  for (const pt of Game.patients) {
+    if (pt.state === "gone") continue;
+    pt.bob += dt * 3;
+    if (pt.flash > 0) pt.flash -= dt;
+
+    // Patience: slower once they are settled in a bed.
+    if (!pt.done) {
+      const inBed = pt.station && pt.station.type === "bed";
+      const rate = inBed ? 0.62 : (pt.state === "station" ? 0.8 : 1.0);
+      pt.patience -= dt * rate;
+      if (pt.patience <= 0) { losePatient(pt); continue; }
+    }
+
+    // Movement for patients that walk themselves in.
+    if (pt.state === "walking") {
+      if (pt.path.length) {
+        const tgt = pt.path[0];
+        const vx = tgt.x - pt.x, vy = tgt.y - pt.y;
+        const d = Math.hypot(vx, vy);
+        if (d < 4) pt.path.shift();
+        else { const s = 78 * dt; pt.x += (vx / d) * s; pt.y += (vy / d) * s; }
+      } else {
+        pt.state = "waiting";
+      }
+    } else if (pt.state === "carried") {
+      const carrier = Game.players.find(p => p.patient === pt);
+      if (carrier) { pt.x = carrier.x; pt.y = carrier.y - 26; }
+    }
+  }
+  Game.patients = Game.patients.filter(p => p.state !== "gone");
+}
+
+function chooseAilment() {
+  const pool = Game.level.ailments;
+  // Weight the newest ailment of the level a little higher so it shows up.
+  const r = Game.rng();
+  const idx = Math.floor(r * pool.length);
+  return pool[clamp(idx, 0, pool.length - 1)];
+}
+
+function updateSpawning(dt) {
+  const lvl = Game.level;
+  const waiting = Game.patients.filter(p => p.state === "waiting" || p.state === "walking").length;
+  Game.spawnTimer -= dt;
+  if (Game.spawnTimer > 0) return;
+
+  if (waiting >= lvl.maxWaiting) { Game.spawnTimer = 1.0; return; }
+
+  const free = Game.world.waitSlots.filter(s =>
+    !Game.patients.some(p => p.slot && p.slot.x === s.x && p.slot.y === s.y));
+  if (!free.length) { Game.spawnTimer = 1.0; return; }
+
+  const pt = makePatient(Game.world, chooseAilment(), lvl);
+  const slot = free[Math.floor(Game.rng() * free.length)];
+  pt.slot = slot;
+  pt.path = findPath(Game.world, Game.world.entrance, slot);
+  Game.patients.push(pt);
+  Sound.play("spawn");
+
+  // Spawn interval ramps down across the level, with a little jitter.
+  const t = clamp(Game.time / lvl.duration, 0, 1);
+  const base = lerp(lvl.spawnStart, lvl.spawnEnd, t);
+  Game.spawnTimer = base * (0.82 + Game.rng() * 0.36);
+}
+
+function updateItems(dt) {
+  // Charged defibs lose their charge; loose defibs are never truly lost.
+  const decay = (it) => {
+    if (it.type !== "defib_charged") return;
+    it.charge -= dt;
+    if (it.charge <= 0) {
+      it.type = "defib";
+      delete it.charge;
+      Sound.play("error");
+    }
+  };
+  for (const p of Game.players) if (p.item) decay(p.item);
+  for (const it of Game.floorItems) decay(it);
+}
+
+function updateEffects(dt) {
+  for (const p of Game.popups) { p.t += dt; p.y -= dt * 26; }
+  Game.popups = Game.popups.filter(p => p.t < p.life);
+  for (const q of Game.particles) {
+    q.t += dt; q.x += q.vx * dt; q.y += q.vy * dt; q.vy += 240 * dt;
+  }
+  Game.particles = Game.particles.filter(q => q.t < q.life);
+  if (Game.shake > 0) Game.shake = Math.max(0, Game.shake - dt * 26);
+  if (Game.flashRed > 0) Game.flashRed = Math.max(0, Game.flashRed - dt * 1.4);
+  for (const st of Game.world.stations) if (st.flash > 0) st.flash -= dt;
+  if (Game.banner) { Game.banner.t += dt; if (Game.banner.t > 3.2) Game.banner = null; }
+  if (Game.comboTimer > 0) {
+    Game.comboTimer -= dt;
+    if (Game.comboTimer <= 0) Game.combo = 0;
+  }
+}
+
+function updatePlay(dt) {
+  Game.time += dt;
+  for (const p of Game.players) updatePlayer(p, dt);
+  updatePatients(dt);
+  updateSpawning(dt);
+  updateItems(dt);
+  updateEffects(dt);
+
+  if (Game.time >= Game.level.duration || Game.lives <= 0) endLevel();
+}
+
+function starsFor(index, score) {
+  const th = LEVELS[index].stars;
+  let s = 0;
+  for (const t of th) if (score >= t) s++;
+  return s;
+}
+
+function endLevel() {
+  const failed = Game.lives <= 0;
+  const stars = failed ? 0 : starsFor(Game.levelIndex, Game.score);
+  const prog = Game.progress[Game.levelIndex];
+  const newBest = Game.score > prog.best;
+  if (newBest) prog.best = Game.score;
+  prog.stars = Math.max(prog.stars, stars);
+  if (stars >= 1 && Game.levelIndex + 1 < LEVELS.length) Game.progress[Game.levelIndex + 1].unlocked = true;
+
+  Game.result = {
+    failed, stars, newBest,
+    score: Game.score, treated: Game.treated, lost: Game.lost,
+    t: 0, shown: 0
+  };
+  Game.screen = "results";
+  Sound.play(failed ? "error" : "levelend");
+}
+
+/* ---------------------------------------------------------------------
+   11. RENDERING
+   --------------------------------------------------------------------- */
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+
+function fitCanvas() {
+  const s = Math.min(window.innerWidth / W, window.innerHeight / H);
+  canvas.style.width = Math.floor(W * s) + "px";
+  canvas.style.height = Math.floor(H * s) + "px";
+}
+window.addEventListener("resize", fitCanvas);
+fitCanvas();
+
+/* --- icons ------------------------------------------------------------- */
+
+function drawAilmentIcon(g, key, x, y, r) {
+  const a = AILMENTS[key];
+  g.save();
+  g.translate(x, y);
+  g.fillStyle = a.color;
+  switch (key) {
+    case "cut":
+      g.strokeStyle = a.color; g.lineWidth = Math.max(2, r * 0.34); g.lineCap = "round";
+      g.beginPath(); g.moveTo(-r * .6, r * .6); g.lineTo(r * .6, -r * .6); g.stroke();
+      g.beginPath(); g.moveTo(-r * .1, r * .7); g.lineTo(r * .55, r * .1); g.stroke();
+      break;
+    case "infection":
+      g.beginPath(); g.arc(0, 0, r * .72, 0, 6.283); g.fill();
+      g.fillStyle = "#1d5c34";
+      for (const [ox, oy] of [[-.28, -.2], [.25, -.05], [-.05, .3]]) {
+        g.beginPath(); g.arc(ox * r * 2, oy * r * 2, r * .16, 0, 6.283); g.fill();
+      }
+      break;
+    case "fracture":
+      g.fillStyle = "#efe7d2"; g.strokeStyle = "#7d7156"; g.lineWidth = 1.6;
+      g.beginPath();
+      g.moveTo(-r * .7, -r * .2); g.lineTo(0, r * .05); g.lineTo(r * .7, -r * .25);
+      g.lineTo(r * .7, r * .25); g.lineTo(0, r * .5); g.lineTo(-r * .7, r * .3);
+      g.closePath(); g.fill(); g.stroke();
+      g.strokeStyle = "#c0392b"; g.lineWidth = Math.max(1.5, r * .2);
+      g.beginPath(); g.moveTo(r * .05, -r * .55); g.lineTo(-r * .1, r * .7); g.stroke();
+      break;
+    case "cardiac": {
+      g.fillStyle = a.color;
+      const s = r * .95;
+      g.beginPath();
+      g.moveTo(0, s * .75);
+      g.bezierCurveTo(-s * 1.3, -s * .1, -s * .55, -s * 1.0, 0, -s * .35);
+      g.bezierCurveTo(s * .55, -s * 1.0, s * 1.3, -s * .1, 0, s * .75);
+      g.fill();
+      g.strokeStyle = "#fff"; g.lineWidth = Math.max(1.4, r * .16); g.lineJoin = "round";
+      g.beginPath();
+      g.moveTo(-s * .6, 0); g.lineTo(-s * .2, 0); g.lineTo(0, -s * .35);
+      g.lineTo(s * .18, s * .28); g.lineTo(s * .35, 0); g.lineTo(s * .62, 0);
+      g.stroke();
+      break;
+    }
+    case "mystery":
+      g.beginPath(); g.arc(0, 0, r * .78, 0, 6.283); g.fill();
+      text(g, "?", 0, r * .45, r * 1.35, "#fff", "center");
+      break;
+  }
+  g.restore();
+}
+
+function drawItemIcon(g, type, x, y, r) {
+  g.save();
+  g.translate(x, y);
+  switch (type) {
+    case "bandage":
+      g.save(); g.rotate(-0.5);
+      fillRound(g, -r, -r * .42, r * 2, r * .84, r * .3, "#f6efdc");
+      g.fillStyle = "#e0d3ae"; g.beginPath(); g.arc(0, 0, r * .32, 0, 6.283); g.fill();
+      g.restore(); break;
+    case "syringe":
+      g.save(); g.rotate(-0.6);
+      fillRound(g, -r * .9, -r * .28, r * 1.4, r * .56, r * .2, "#e8f6ff");
+      g.fillStyle = "#4bb3f0"; g.fillRect(-r * .85, -r * .22, r * .8, r * .44);
+      g.strokeStyle = "#cfd8e3"; g.lineWidth = Math.max(1.4, r * .16);
+      g.beginPath(); g.moveTo(r * .5, 0); g.lineTo(r * 1.05, 0); g.stroke();
+      g.restore(); break;
+    case "film":
+      fillRound(g, -r * .8, -r * .95, r * 1.6, r * 1.9, r * .18, "#39404f");
+      g.fillStyle = "#5d6879"; g.fillRect(-r * .55, -r * .7, r * 1.1, r * 1.4);
+      break;
+    case "xrayimg":
+      fillRound(g, -r * .8, -r * .95, r * 1.6, r * 1.9, r * .18, "#1d3a52");
+      g.strokeStyle = "#a8dcff"; g.lineWidth = Math.max(1.2, r * .16);
+      g.beginPath(); g.moveTo(-r * .3, -r * .55); g.lineTo(r * .1, r * .1); g.lineTo(-r * .2, r * .6); g.stroke();
+      break;
+    case "cast":
+      fillRound(g, -r * .85, -r * .6, r * 1.7, r * 1.2, r * .45, "#f3eddb");
+      g.strokeStyle = "#cdc2a3"; g.lineWidth = 1.2;
+      for (let i = -1; i <= 1; i++) { g.beginPath(); g.moveTo(i * r * .45, -r * .6); g.lineTo(i * r * .45 - r * .2, r * .6); g.stroke(); }
+      break;
+    case "sample":
+      fillRound(g, -r * .42, -r * .95, r * .84, r * 1.9, r * .3, "#dfe8f0");
+      g.fillStyle = "#c0392b"; fillRound(g, -r * .32, -r * .1, r * .64, r * .95, r * .2, "#c0392b");
+      g.fillStyle = "#8d99a8"; g.fillRect(-r * .5, -r * 1.05, r, r * .3);
+      break;
+    case "crate":
+      fillRound(g, -r * .95, -r * .8, r * 1.9, r * 1.6, r * .2, "#c8974f");
+      g.strokeStyle = "#8a6532"; g.lineWidth = Math.max(1.4, r * .16);
+      g.beginPath(); g.moveTo(-r * .95, 0); g.lineTo(r * .95, 0); g.stroke();
+      g.beginPath(); g.moveTo(0, -r * .8); g.lineTo(0, r * .8); g.stroke();
+      break;
+    case "defib":
+    case "defib_charged": {
+      const hot = type === "defib_charged";
+      fillRound(g, -r, -r * .8, r * 2, r * 1.6, r * .25, hot ? "#ffd84d" : "#e0a52b");
+      g.fillStyle = "#33383f";
+      g.fillRect(-r * .75, -r * .5, r * .55, r * 1.0);
+      g.fillRect(r * .2, -r * .5, r * .55, r * 1.0);
+      if (hot) {
+        g.strokeStyle = "#ff5c5c"; g.lineWidth = Math.max(1.4, r * .2); g.lineJoin = "round";
+        g.beginPath(); g.moveTo(-r * .1, -r * .6); g.lineTo(-r * .32, 0); g.lineTo(r * .05, 0); g.lineTo(-r * .15, r * .65); g.stroke();
+      }
+      break;
+    }
+  }
+  g.restore();
+}
+
+/* --- world ------------------------------------------------------------- */
+
+function drawWorld(g) {
+  const world = Game.world;
+
+  // floor
+  for (let y = 0; y < ROWS; y++) {
+    for (let x = 0; x < COLS; x++) {
+      const c = world.grid[y][x];
+      if (c.solid && !c.station) continue;
+      g.fillStyle = ((x + y) & 1) ? PALETTE.floorA : PALETTE.floorB;
+      g.fillRect(x * TILE, y * TILE, TILE, TILE);
+    }
+  }
+
+  // entrance / exit markers
+  drawZone(g, world.entrance, "#7ec8e3", "IN");
+  drawZone(g, world.exit, "#8ce6a8", "OUT");
+
+  // walls
+  for (let y = 0; y < ROWS; y++) {
+    for (let x = 0; x < COLS; x++) {
+      const c = world.grid[y][x];
+      if (!c.solid || c.station) continue;
+      g.fillStyle = PALETTE.wall;
+      g.fillRect(x * TILE, y * TILE, TILE, TILE);
+      const above = cellAt(world, x, y - 1);
+      if (!above || !above.solid || above.station) {
+        g.fillStyle = PALETTE.wallTop;
+        g.fillRect(x * TILE, y * TILE, TILE, 7);
+      }
+    }
+  }
+
+  // stations
+  for (const st of world.stations) drawStation(g, st);
+}
+
+function drawZone(g, tile, color, label) {
+  const x = tile.x * TILE, y = tile.y * TILE;
+  g.save();
+  g.globalAlpha = 0.45;
+  g.fillStyle = color;
+  g.fillRect(x, y, TILE, TILE);
+  g.restore();
+  g.setLineDash([5, 4]);
+  g.strokeStyle = color; g.lineWidth = 2;
+  g.strokeRect(x + 2, y + 2, TILE - 4, TILE - 4);
+  g.setLineDash([]);
+  text(g, label, x + TILE / 2, y + TILE / 2 + 4, 11, "#26404f", "center");
+}
+
+function drawStation(g, st) {
+  const info = STATIONS[st.type];
+  const x = st.x * TILE, y = st.y * TILE;
+
+  if (st.type === "bed") {
+    fillRound(g, x + 2, y + 3, TILE - 4, TILE - 6, 6, "#ffffff");
+    g.strokeStyle = st.occupant ? "#7fb6e0" : "#c2d2e0"; g.lineWidth = 2;
+    roundRect(g, x + 2, y + 3, TILE - 4, TILE - 6, 6); g.stroke();
+    g.fillStyle = "#cfe4f7"; g.fillRect(x + 5, y + 6, TILE - 10, 9);   // pillow
+    g.fillStyle = "#9fc7e8"; g.fillRect(x + 4, y + TILE - 15, TILE - 8, 9); // blanket
+  } else {
+    fillRound(g, x + 2, y + 2, TILE - 4, TILE - 4, 6, info.color);
+    g.strokeStyle = info.edge; g.lineWidth = 2;
+    roundRect(g, x + 2, y + 2, TILE - 4, TILE - 4, 6); g.stroke();
+    drawStationGlyph(g, st, x + TILE / 2, y + TILE / 2);
+  }
+
+  // stock pips
+  if (st.stock !== Infinity && st.stock !== undefined) {
+    const max = info.stockMax;
+    for (let i = 0; i < max; i++) {
+      g.fillStyle = i < st.stock ? "#ffffff" : "rgba(0,0,0,.35)";
+      g.fillRect(x + 4 + i * 6, y + TILE - 8, 4, 4);
+    }
+  }
+
+  if (st.jammed) {
+    g.save();
+    g.globalAlpha = 0.55 + 0.35 * Math.sin(performance.now() / 90);
+    g.fillStyle = PALETTE.warn;
+    g.fillRect(x + 2, y + 2, TILE - 4, TILE - 4);
+    g.restore();
+    text(g, "!", x + TILE / 2, y + TILE / 2 + 8, 22, "#3a2a00", "center");
+  }
+
+  if (st.type === "defibrack" && st.hasDefib) drawItemIcon(g, "defib", x + TILE / 2, y + TILE / 2 + 2, 9);
+
+  if (st.flash > 0) {
+    g.save();
+    g.globalAlpha = clamp(st.flash * 2, 0, .7);
+    g.fillStyle = "#ffffff";
+    fillRound(g, x + 2, y + 2, TILE - 4, TILE - 4, 6, "#ffffff");
+    g.restore();
+  }
+}
+
+function drawStationGlyph(g, st, cx, cy) {
+  g.save();
+  g.translate(cx, cy);
+  switch (st.type) {
+    case "supply":
+      g.fillStyle = "#ffffff";
+      g.fillRect(-12, -10, 24, 5); g.fillRect(-12, -1, 24, 5); g.fillRect(-12, 8, 24, 5);
+      break;
+    case "medicine":
+      g.fillStyle = "#ffffff";
+      g.fillRect(-3.5, -11, 7, 22); g.fillRect(-11, -3.5, 22, 7);
+      break;
+    case "xray":
+      g.fillStyle = "#9fd8ff";
+      g.beginPath(); g.arc(0, -3, 8, 0, 6.283); g.fill();
+      g.fillStyle = "#2b3444"; g.fillRect(-9, 6, 18, 5);
+      g.strokeStyle = "#9fd8ff"; g.lineWidth = 1.5;
+      g.beginPath(); g.moveTo(-11, -12); g.lineTo(11, -12); g.stroke();
+      break;
+    case "cast":
+      g.fillStyle = "#fdf7e6";
+      g.beginPath(); g.arc(0, 0, 10, 0, 6.283); g.fill();
+      g.strokeStyle = "#8d7343"; g.lineWidth = 2;
+      g.beginPath(); g.arc(0, 0, 10, 0, 6.283); g.stroke();
+      g.beginPath(); g.moveTo(-7, -7); g.lineTo(7, 7); g.stroke();
+      break;
+    case "charger":
+      g.fillStyle = "#3a2c05";
+      g.beginPath(); g.moveTo(2, -12); g.lineTo(-6, 1); g.lineTo(0, 1); g.lineTo(-2, 12);
+      g.lineTo(7, -2); g.lineTo(1, -2); g.closePath(); g.fill();
+      break;
+    case "lab":
+      g.fillStyle = "#f0e6ff";
+      g.beginPath(); g.moveTo(-4, -11); g.lineTo(4, -11); g.lineTo(4, -3);
+      g.lineTo(10, 10); g.lineTo(-10, 10); g.lineTo(-4, -3); g.closePath(); g.fill();
+      g.fillStyle = "#6a35a8"; g.fillRect(-8, 4, 16, 6);
+      break;
+    case "delivery":
+      g.fillStyle = "#f3e2cd";
+      g.fillRect(-12, -12, 24, 24);
+      g.strokeStyle = "#6f4a26"; g.lineWidth = 2;
+      g.beginPath(); g.moveTo(-12, 0); g.lineTo(12, 0); g.stroke();
+      g.beginPath(); g.moveTo(0, -12); g.lineTo(0, 12); g.stroke();
+      break;
+    case "defibrack":
+      g.strokeStyle = "#ffd9d1"; g.lineWidth = 2;
+      g.strokeRect(-12, -10, 24, 20);
+      break;
+  }
+  g.restore();
+}
+
+/* --- entities ---------------------------------------------------------- */
+
+function drawPatient(g, pt, x, y, scale) {
+  const s = scale || 1;
+  const bobY = pt.state === "waiting" || pt.state === "walking" ? Math.sin(pt.bob) * 1.6 : 0;
+  g.save();
+  g.translate(x, y + bobY);
+  g.scale(s, s);
+
+  if (pt.flash > 0) {
+    g.save(); g.globalAlpha = clamp(pt.flash * 2, 0, .8);
+    g.fillStyle = "#fff"; g.beginPath(); g.arc(0, -4, 20, 0, 6.283); g.fill(); g.restore();
+  }
+
+  // gown body
+  fillRound(g, -10, -8, 20, 20, 7, pt.done ? "#bff0cf" : "#e8eef6");
+  g.strokeStyle = pt.done ? "#4ec97a" : "#b6c4d4"; g.lineWidth = 1.5;
+  roundRect(g, -10, -8, 20, 20, 7); g.stroke();
+  // head
+  g.fillStyle = "#f2c9a0";
+  g.beginPath(); g.arc(0, -14, 8, 0, 6.283); g.fill();
+  g.fillStyle = "#5a4634";
+  g.beginPath(); g.arc(0, -17, 8, Math.PI, 0); g.fill();
+  // eyes
+  g.fillStyle = "#3a3a3a";
+  g.beginPath(); g.arc(-3, -13, 1.4, 0, 6.283); g.fill();
+  g.beginPath(); g.arc(3, -13, 1.4, 0, 6.283); g.fill();
+
+  g.restore();
+
+  // ailment badge — a light bubble with a pointer, like a speech tag
+  const badgeY = y - 33;
+  const a2 = AILMENTS[pt.ailment];
+  g.fillStyle = "rgba(255,255,255,.94)";
+  g.beginPath(); g.arc(x, badgeY, 12, 0, 6.283); g.fill();
+  g.beginPath(); g.moveTo(x - 4, badgeY + 9); g.lineTo(x + 4, badgeY + 9); g.lineTo(x, badgeY + 16); g.closePath(); g.fill();
+  g.strokeStyle = a2.color; g.lineWidth = 2;
+  g.beginPath(); g.arc(x, badgeY, 12, 0, 6.283); g.stroke();
+  drawAilmentIcon(g, pt.ailment, x, badgeY, 8);
+  if (pt.revealed) {
+    g.fillStyle = "#b58bff";
+    g.beginPath(); g.arc(x + 10, badgeY - 9, 3.5, 0, 6.283); g.fill();
+  }
+
+  // patience bar
+  const frac = clamp(pt.patience / pt.patienceMax, 0, 1);
+  drawMeter(g, x - 16, y + 16, 32, 5, frac, pt.done);
+
+  // step pips
+  const n = pt.steps.length;
+  if (n > 1 && !pt.done) {
+    for (let i = 0; i < n; i++) {
+      g.fillStyle = i < pt.step ? PALETTE.good : "rgba(255,255,255,.55)";
+      g.strokeStyle = "rgba(30,40,55,.7)"; g.lineWidth = 1;
+      g.beginPath(); g.arc(x - (n - 1) * 4 + i * 8, y + 25, 2.8, 0, 6.283); g.fill(); g.stroke();
+    }
+  }
+
+  if (pt.steps[pt.step] && pt.steps[pt.step].k === "lab") {
+    const t = performance.now() / 180;
+    g.strokeStyle = "#b58bff"; g.lineWidth = 2.5;
+    g.beginPath(); g.arc(x, y - 34, 15, t, t + 2.2); g.stroke();
+  }
+}
+
+function drawMeter(g, x, y, w, h, frac, done) {
+  fillRound(g, x - 1, y - 1, w + 2, h + 2, 3, "rgba(15,22,32,.75)");
+  let col = PALETTE.good;
+  if (done) col = "#4ec97a";
+  else if (frac < 0.25) {
+    const pulse = 0.55 + 0.45 * Math.sin(performance.now() / 90);
+    col = "rgb(" + Math.round(210 + 45 * pulse) + ",50,50)";
+  } else if (frac < 0.55) col = PALETTE.warn;
+  fillRound(g, x, y, Math.max(0, w * frac), h, 2.5, col);
+}
+
+function drawPlayer(g, p) {
+  const bob = Math.sin(p.bob) * 1.8;
+  const x = p.x, y = p.y + bob;
+
+  // shadow
+  g.fillStyle = "rgba(20,30,45,.18)";
+  g.beginPath(); g.ellipse(p.x, p.y + 15, 13, 5, 0, 0, 6.283); g.fill();
+
+  g.save();
+  g.translate(x, y);
+
+  // legs
+  g.fillStyle = "#33465e";
+  g.fillRect(-7, 8, 5, 7); g.fillRect(2, 8, 5, 7);
+  // scrubs body
+  fillRound(g, -11, -8, 22, 19, 8, p.color);
+  g.strokeStyle = "rgba(0,0,0,.22)"; g.lineWidth = 1.5;
+  roundRect(g, -11, -8, 22, 19, 8); g.stroke();
+  // v-neck
+  g.fillStyle = "rgba(255,255,255,.75)";
+  g.beginPath(); g.moveTo(-5, -8); g.lineTo(0, -1); g.lineTo(5, -8); g.closePath(); g.fill();
+  // arms reaching in facing direction
+  g.fillStyle = p.color;
+  const ax = p.dx * 8, ay = p.dy * 6;
+  g.beginPath(); g.arc(-9 + ax, 2 + ay, 4, 0, 6.283); g.fill();
+  g.beginPath(); g.arc(9 + ax, 2 + ay, 4, 0, 6.283); g.fill();
+  // head
+  g.fillStyle = "#f7d3ad";
+  g.beginPath(); g.arc(0, -16, 9, 0, 6.283); g.fill();
+  // cap
+  g.fillStyle = p.color;
+  g.beginPath(); g.arc(0, -18, 9, Math.PI, 0); g.fill();
+  g.fillRect(-9, -19, 18, 3);
+  // face
+  g.fillStyle = "#3a3a3a";
+  const ex = p.dx * 2.2, ey = p.dy * 1.6;
+  g.beginPath(); g.arc(-3.2 + ex, -15 + ey, 1.5, 0, 6.283); g.fill();
+  g.beginPath(); g.arc(3.2 + ex, -15 + ey, 1.5, 0, 6.283); g.fill();
+  // mask
+  g.fillStyle = "rgba(255,255,255,.9)";
+  fillRound(g, -5 + ex, -12 + ey, 10, 5, 2, "rgba(255,255,255,.9)");
+
+  // player number tag
+  text(g, "P" + (p.index + 1), 0, 6, 9, "rgba(255,255,255,.9)", "center");
+  g.restore();
+
+  // carried item / patient above head
+  if (p.patient) {
+    drawPatient(g, p.patient, x, y - 40, 0.78);
+  } else if (p.item) {
+    g.save();
+    g.globalAlpha = .25; g.fillStyle = "#000";
+    g.beginPath(); g.ellipse(x, y - 26, 12, 4, 0, 0, 6.283); g.fill();
+    g.restore();
+    drawItemIcon(g, p.item.type, x, y - 32, 11);
+    if (p.item.type === "defib_charged") {
+      const f = clamp(p.item.charge / DEFIB_CHARGE_LIFE, 0, 1);
+      drawMeter(g, x - 14, y - 46, 28, 4, f);
+    }
+    if (p.item.type === "sample") {
+      text(g, "#" + (p.item.pid % 100), x + 14, y - 30, 10, "#ffd0d0", "left");
+    }
+  }
+
+  // work progress bar
+  if (p.work) {
+    const f = clamp(p.work.t / p.work.dur, 0, 1);
+    const bx = x - 24, by = y + 22;
+    fillRound(g, bx - 2, by - 2, 52, 11, 4, "rgba(15,22,32,.8)");
+    fillRound(g, bx, by, 48 * f, 7, 3, "#ffe066");
+    labelPill(g, p.work.label, x, by + 13, "#eaf2ff");
+  } else if (p.hintT > 0) {
+    g.save();
+    g.globalAlpha = clamp(p.hintT, 0, 1);
+    labelPill(g, p.hint, x, y + 20, "#ffd9a0");
+    g.restore();
+  }
+}
+
+/** A centred caption on its own dark pill, so it stays readable over beds. */
+function labelPill(g, str, cx, top, color) {
+  g.font = 'bold 11px "Trebuchet MS", "Segoe UI", sans-serif';
+  const w = g.measureText(str).width + 12;
+  fillRound(g, cx - w / 2, top, w, 15, 5, "rgba(15,22,32,.82)");
+  text(g, str, cx, top + 11, 11, color, "center");
+}
+
+function drawFloorItem(g, it) {
+  g.fillStyle = "rgba(20,30,45,.18)";
+  g.beginPath(); g.ellipse(it.x, it.y + 8, 11, 4, 0, 0, 6.283); g.fill();
+  drawItemIcon(g, it.type, it.x, it.y, 11);
+}
+
+/* --- HUD --------------------------------------------------------------- */
+
+function drawHUD(g) {
+  g.fillStyle = PALETTE.hud;
+  g.fillRect(0, 0, W, HUD_H);
+  g.fillStyle = PALETTE.hudLine;
+  g.fillRect(0, HUD_H - 3, W, 3);
+
+  const lvl = Game.level;
+
+  // Left: level name + timer
+  text(g, (Game.levelIndex + 1) + ". " + lvl.name, 22, 32, 20, PALETTE.text);
+  const remain = Math.max(0, lvl.duration - Game.time);
+  const urgent = remain < 30;
+  text(g, fmtTime(remain), 22, 72, 34, urgent ? PALETTE.bad : PALETTE.text);
+  text(g, "TIME", 118, 72, 13, PALETTE.dim);
+
+  // Lives
+  for (let i = 0; i < 3; i++) {
+    const hx = 180 + i * 26, hy = 62;
+    g.save(); g.translate(hx, hy); g.scale(1, 1);
+    g.fillStyle = i < Game.lives ? "#ff4d6d" : "rgba(255,255,255,.15)";
+    g.beginPath();
+    g.moveTo(0, 7);
+    g.bezierCurveTo(-12, -1, -5, -10, 0, -3.5);
+    g.bezierCurveTo(5, -10, 12, -1, 0, 7);
+    g.fill(); g.restore();
+  }
+
+  // Centre: score + combo
+  text(g, String(Game.score), W / 2, 52, 40, PALETTE.text, "center");
+  text(g, "SCORE", W / 2, 70, 12, PALETTE.dim, "center");
+  if (Game.combo > 1) {
+    const mult = Math.min(COMBO_MAX, 1 + 0.25 * (Game.combo - 1));
+    const a = clamp(Game.comboTimer / COMBO_WINDOW, 0, 1);
+    g.save(); g.globalAlpha = 0.4 + 0.6 * a;
+    text(g, "COMBO x" + fmtMult(mult), W / 2 + 120, 46, 17, PALETTE.warn, "left");
+    fillRound(g, W / 2 + 120, 54, 100 * a, 5, 2.5, PALETTE.warn);
+    g.restore();
+  }
+
+  // Right: star thresholds
+  const bx = W - 300;
+  text(g, "TARGETS", bx, 26, 12, PALETTE.dim);
+  for (let i = 0; i < 3; i++) {
+    const th = lvl.stars[i];
+    const hit = Game.score >= th;
+    const sx = bx + i * 90;
+    drawStar(g, sx + 12, 48, 11, hit ? "#ffd54a" : "rgba(255,255,255,.16)");
+    text(g, String(th), sx + 28, 53, 15, hit ? PALETTE.text : PALETTE.dim);
+  }
+  text(g, "Treated " + Game.treated + "   Lost " + Game.lost, bx, 76, 13, PALETTE.dim);
+
+  // mute indicator
+  text(g, Sound.muted ? "M: sound off" : "M: sound on", W - 22, 26, 12, PALETTE.dim, "right");
+  text(g, "Esc: pause", W - 22, 76, 12, PALETTE.dim, "right");
+}
+
+function drawStar(g, x, y, r, color) {
+  g.save(); g.translate(x, y); g.fillStyle = color;
+  g.beginPath();
+  for (let i = 0; i < 10; i++) {
+    const rad = i % 2 ? r * .45 : r;
+    const a = -Math.PI / 2 + i * Math.PI / 5;
+    if (i === 0) g.moveTo(Math.cos(a) * rad, Math.sin(a) * rad);
+    else g.lineTo(Math.cos(a) * rad, Math.sin(a) * rad);
+  }
+  g.closePath(); g.fill(); g.restore();
+}
+
+const CHAIN_COLORS = {
+  supply: "#2fb59a", medicine: "#3d78d8", xray: "#4a5568", cast: "#c8a86b",
+  charger: "#f2b134", lab: "#9b5de5", defibrack: "#e4573d", bed: "#8fb8dd", "?": "#6b7b90"
+};
+
+function drawLegend(g) {
+  g.fillStyle = "#0f1620";
+  g.fillRect(0, LEGEND_Y, W, LEGEND_H);
+  g.fillStyle = PALETTE.hudLine;
+  g.fillRect(0, LEGEND_Y, W, 2);
+
+  const list = Game.level.ailments;
+  const colW = W / list.length;
+  for (let i = 0; i < list.length; i++) {
+    const key = list[i], a = AILMENTS[key];
+    const x0 = i * colW + 14;
+    const y0 = LEGEND_Y + 12;
+    drawAilmentIcon(g, key, x0 + 11, y0 + 12, 11);
+    text(g, a.name, x0 + 27, y0 + 10, 14, a.color);
+    text(g, "+" + a.score, x0 + 27, y0 + 24, 11, PALETTE.dim);
+
+    let cx = x0 + 27;
+    const cy = y0 + 36;
+    g.font = 'bold 10px "Trebuchet MS", "Segoe UI", sans-serif';
+    for (let j = 0; j < a.chain.length; j++) {
+      const step = a.chain[j];
+      const wBox = Math.max(34, g.measureText(step.t).width);
+      fillRound(g, cx, cy, wBox + 8, 15, 4, CHAIN_COLORS[step.s] || "#555");
+      text(g, step.t, cx + (wBox + 8) / 2, cy + 11, 10, "#ffffff", "center");
+      cx += wBox + 8;
+      if (j < a.chain.length - 1) {
+        text(g, "→", cx + 5, cy + 11, 11, PALETTE.dim, "center");
+        cx += 11;
+      }
+    }
+  }
+}
+
+function drawBanner(g) {
+  if (!Game.banner) return;
+  const t = Game.banner.t;
+  let alpha = 1;
+  if (t < 0.3) alpha = t / 0.3;
+  else if (t > 2.6) alpha = clamp((3.2 - t) / 0.6, 0, 1);
+  g.save();
+  g.globalAlpha = alpha;
+  fillRound(g, W / 2 - 300, PLAY_Y + 190, 600, 110, 14, "rgba(12,18,26,.88)");
+  text(g, Game.banner.text, W / 2, PLAY_Y + 240, 40, PALETTE.text, "center");
+  text(g, Game.banner.sub, W / 2, PLAY_Y + 272, 16, PALETTE.dim, "center", "normal");
+  g.restore();
+}
+
+/* --- screens ----------------------------------------------------------- */
+
+function drawTitle(g) {
+  g.fillStyle = "#0d1117"; g.fillRect(0, 0, W, H);
+
+  // pulsing ECG line across the back
+  g.save();
+  g.strokeStyle = "rgba(63,182,232,.25)"; g.lineWidth = 3;
+  g.beginPath();
+  const t = performance.now() / 700;
+  for (let x = 0; x <= W; x += 8) {
+    const phase = (x / W * 6 + t) % 6;
+    let y = H * 0.93;
+    if (phase > 2.4 && phase < 3.0) y -= 90 * Math.sin((phase - 2.4) / 0.6 * Math.PI);
+    else if (phase >= 3.0 && phase < 3.3) y += 40;
+    if (x === 0) g.moveTo(x, y); else g.lineTo(x, y);
+  }
+  g.stroke(); g.restore();
+
+  text(g, "CODE BLUE!", W / 2, 150, 82, "#3fb6e8", "center");
+  text(g, "a two-player emergency room", W / 2, 186, 20, PALETTE.dim, "center", "normal");
+
+  // controls card
+  fillRound(g, 150, 230, 460, 250, 14, "#141c27");
+  text(g, "PLAYER 1", 180, 268, 20, PALETTE.p1);
+  text(g, "Move", 180, 302, 15, PALETTE.dim, "left", "normal");
+  text(g, "W A S D", 380, 302, 16, PALETTE.text);
+  text(g, "Pick up / put down", 180, 334, 15, PALETTE.dim, "left", "normal");
+  text(g, "E", 380, 334, 16, PALETTE.text);
+  text(g, "Work station (hold)", 180, 366, 15, PALETTE.dim, "left", "normal");
+  text(g, "Q", 380, 366, 16, PALETTE.text);
+  text(g, "Pause  Esc          Mute  M", 180, 420, 14, PALETTE.dim, "left", "normal");
+  text(g, "Restart  Esc then R", 180, 444, 14, PALETTE.dim, "left", "normal");
+
+  fillRound(g, 670, 230, 460, 250, 14, "#141c27");
+  text(g, "PLAYER 2", 700, 268, 20, PALETTE.p2);
+  text(g, "Move", 700, 302, 15, PALETTE.dim, "left", "normal");
+  text(g, "Arrow keys", 900, 302, 16, PALETTE.text);
+  text(g, "Pick up / put down", 700, 334, 15, PALETTE.dim, "left", "normal");
+  text(g, "/  (slash)", 900, 334, 16, PALETTE.text);
+  text(g, "Work station (hold)", 700, 366, 15, PALETTE.dim, "left", "normal");
+  text(g, ".  (period)", 900, 366, 16, PALETTE.text);
+  text(g, "Treat patients, wheel them to the green", 700, 420, 14, PALETTE.dim, "left", "normal");
+  text(g, "OUT tile before their patience runs out.", 700, 444, 14, PALETTE.dim, "left", "normal");
+
+  const blink = (Math.sin(performance.now() / 320) + 1) / 2;
+  g.save(); g.globalAlpha = 0.55 + 0.45 * blink;
+  text(g, "Press  1  for solo shift      Press  2  for co-op", W / 2, 560, 28, "#ffd54a", "center");
+  g.restore();
+  text(g, "Then pick a level. Anything on the keyboard wakes the audio.", W / 2, 600, 14, PALETTE.dim, "center", "normal");
+
+  // deco: two little medics
+  const fake1 = { x: W / 2 - 90, y: 690, dx: 1, dy: 0, bob: performance.now() / 300, color: PALETTE.p1, index: 0, item: null, patient: null, work: null, hintT: 0 };
+  const fake2 = { x: W / 2 + 90, y: 690, dx: -1, dy: 0, bob: performance.now() / 300 + 2, color: PALETTE.p2, index: 1, item: null, patient: null, work: null, hintT: 0 };
+  drawPlayer(g, fake1); drawPlayer(g, fake2);
+}
+
+function drawSelect(g) {
+  g.fillStyle = "#0d1117"; g.fillRect(0, 0, W, H);
+  text(g, "SELECT A SHIFT", W / 2, 90, 44, PALETTE.text, "center");
+  text(g, Game.playerCount === 1 ? "Solo" : "Co-op (2 players)", W / 2, 122, 17, PALETTE.dim, "center", "normal");
+
+  const cardW = 210, cardH = 300, gap = 20;
+  const total = LEVELS.length * cardW + (LEVELS.length - 1) * gap;
+  const x0 = (W - total) / 2;
+
+  for (let i = 0; i < LEVELS.length; i++) {
+    const lvl = LEVELS[i], prog = Game.progress[i];
+    const x = x0 + i * (cardW + gap), y = 170;
+    const sel = i === Game.selectIndex;
+    const locked = !prog.unlocked;
+
+    fillRound(g, x, y, cardW, cardH, 14, locked ? "#161b22" : "#182231");
+    if (sel) {
+      g.strokeStyle = "#ffd54a"; g.lineWidth = 4;
+      roundRect(g, x - 2, y - 2, cardW + 4, cardH + 4, 16); g.stroke();
+    }
+
+    text(g, String(i + 1), x + 18, y + 44, 32, locked ? "#3d4a5c" : "#3fb6e8");
+    text(g, lvl.name, x + 52, y + 42, 19, locked ? "#4a5666" : PALETTE.text);
+
+    // mini map preview
+    const mw = cardW - 36, mh = mw * (ROWS / COLS);
+    const mx = x + 18, my = y + 60;
+    fillRound(g, mx - 4, my - 4, mw + 8, mh + 8, 6, "#0d131b");
+    const px = mw / COLS, py = mh / ROWS;
+    for (let ty = 0; ty < ROWS; ty++) {
+      for (let tx = 0; tx < COLS; tx++) {
+        const ch = lvl.map[ty][tx];
+        let col = null;
+        if (ch === "#") col = "#2b3646";
+        else if (ch === "b") col = "#ffffff";
+        else if (ch === "E") col = "#7ec8e3";
+        else if (ch === "O") col = "#8ce6a8";
+        else if (CHAR_TO_STATION[ch]) col = STATIONS[CHAR_TO_STATION[ch]].color;
+        else col = "#1a2431";
+        g.fillStyle = locked ? "#20262e" : col;
+        g.fillRect(mx + tx * px, my + ty * py, Math.ceil(px), Math.ceil(py));
+      }
+    }
+
+    // ailment icons for this level
+    let ix = x + 22;
+    for (const key of lvl.ailments) {
+      drawAilmentIcon(g, key, ix, my + mh + 22, 9);
+      ix += 24;
+    }
+
+    // stars + best
+    for (let s = 0; s < 3; s++) {
+      drawStar(g, x + 42 + s * 30, my + mh + 60, 13,
+        locked ? "#242c36" : (prog.stars > s ? "#ffd54a" : "rgba(255,255,255,.14)"));
+    }
+    text(g, locked ? "LOCKED" : "Best  " + prog.best, x + cardW / 2, my + mh + 90, 14,
+      locked ? "#4a5666" : PALETTE.dim, "center", "normal");
+  }
+
+  const sel = LEVELS[Game.selectIndex];
+  text(g, sel.blurb, W / 2, 520, 17, PALETTE.dim, "center", "normal");
+  text(g, "Star targets:  " + sel.stars.join("   /   "), W / 2, 548, 15, "#ffd54a", "center", "normal");
+
+  text(g, "A / D  or  ← →   choose      E  or  Enter   start      Esc   back", W / 2, 610, 18, PALETTE.text, "center");
+
+  // legend of ailments in the selected level with full chains
+  const saveLevel = Game.level;
+  Game.level = sel;
+  drawLegend(g);
+  Game.level = saveLevel;
+}
+
+function drawPause(g) {
+  g.fillStyle = "rgba(8,12,18,.78)"; g.fillRect(0, 0, W, H);
+  fillRound(g, W / 2 - 240, 230, 480, 300, 16, "#141c27");
+  text(g, "PAUSED", W / 2, 300, 44, PALETTE.text, "center");
+  text(g, "Esc      resume", W / 2, 370, 20, PALETTE.dim, "center", "normal");
+  text(g, "R        restart this level", W / 2, 406, 20, PALETTE.dim, "center", "normal");
+  text(g, "M        sound " + (Sound.muted ? "on" : "off"), W / 2, 442, 20, PALETTE.dim, "center", "normal");
+  text(g, "L        back to level select", W / 2, 478, 20, PALETTE.dim, "center", "normal");
+}
+
+function drawResults(g) {
+  const r = Game.result;
+  g.fillStyle = "rgba(8,12,18,.86)"; g.fillRect(0, 0, W, H);
+  fillRound(g, W / 2 - 320, 150, 640, 500, 18, "#141c27");
+
+  text(g, r.failed ? "SHIFT LOST" : "SHIFT OVER", W / 2, 220, 46, r.failed ? PALETTE.bad : PALETTE.text, "center");
+  text(g, LEVELS[Game.levelIndex].name, W / 2, 252, 18, PALETTE.dim, "center", "normal");
+
+  for (let i = 0; i < 3; i++) {
+    const lit = i < r.stars && r.t > 0.4 + i * 0.35;
+    drawStar(g, W / 2 - 90 + i * 90, 330, lit ? 40 : 34, lit ? "#ffd54a" : "rgba(255,255,255,.12)");
+  }
+
+  text(g, String(r.score), W / 2, 430, 54, PALETTE.text, "center");
+  text(g, "FINAL SCORE" + (r.newBest && !r.failed ? "   — NEW BEST!" : ""), W / 2, 456, 15, r.newBest ? "#ffd54a" : PALETTE.dim, "center");
+
+  text(g, "Patients treated", W / 2 - 200, 510, 17, PALETTE.dim, "left", "normal");
+  text(g, String(r.treated), W / 2 + 200, 510, 17, PALETTE.text, "right");
+  text(g, "Patients lost", W / 2 - 200, 542, 17, PALETTE.dim, "left", "normal");
+  text(g, String(r.lost), W / 2 + 200, 542, 17, PALETTE.text, "right");
+
+  const th = LEVELS[Game.levelIndex].stars;
+  text(g, "Targets  " + th.join("  /  "), W / 2, 578, 15, PALETTE.dim, "center", "normal");
+
+  text(g, "E / Enter   continue        R   retry", W / 2, 620, 20, PALETTE.text, "center");
+}
+
+/* --- frame composition -------------------------------------------------- */
+
+function render() {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+
+  if (Game.screen === "title") { drawTitle(ctx); return; }
+  if (Game.screen === "select") { drawSelect(ctx); return; }
+
+  // background behind the play field
+  ctx.fillStyle = "#0f1620";
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.save();
+  const sh = Game.shake;
+  const ox = sh ? (Math.random() - 0.5) * sh : 0;
+  const oy = sh ? (Math.random() - 0.5) * sh : 0;
+  ctx.translate(PLAY_X + ox, PLAY_Y + oy);
+  ctx.beginPath(); ctx.rect(-ox, -oy, PLAY_W, PLAY_H); ctx.clip();
+
+  drawWorld(ctx);
+
+  for (const it of Game.floorItems) drawFloorItem(ctx, it);
+
+  // Patients that are placed or waiting, sorted with players by depth.
+  const drawables = [];
+  for (const pt of Game.patients) {
+    if (pt.state === "carried") continue;
+    drawables.push({ y: pt.y, fn: () => drawPatient(ctx, pt, pt.x, pt.y) });
+  }
+  for (const p of Game.players) drawables.push({ y: p.y, fn: () => drawPlayer(ctx, p) });
+  drawables.sort((a, b) => a.y - b.y);
+  for (const d of drawables) d.fn();
+
+  for (const q of Game.particles) {
+    ctx.globalAlpha = clamp(1 - q.t / q.life, 0, 1);
+    ctx.fillStyle = q.color;
+    ctx.fillRect(q.x - 2, q.y - 2, 4, 4);
+  }
+  ctx.globalAlpha = 1;
+
+  for (const p of Game.popups) {
+    ctx.globalAlpha = clamp(1 - p.t / p.life, 0, 1);
+    text(ctx, p.text, p.x, p.y, p.size, "rgba(10,14,20,.75)", "center");
+    text(ctx, p.text, p.x - 1, p.y - 1, p.size, p.color, "center");
+  }
+  ctx.globalAlpha = 1;
+  ctx.restore();
+
+  if (Game.flashRed > 0) {
+    ctx.save();
+    ctx.globalAlpha = Game.flashRed * 0.5;
+    ctx.fillStyle = "#ff2d2d";
+    ctx.fillRect(PLAY_X, PLAY_Y, PLAY_W, PLAY_H);
+    ctx.restore();
+  }
+
+  drawHUD(ctx);
+  drawLegend(ctx);
+  drawBanner(ctx);
+
+  if (Game.screen === "paused") drawPause(ctx);
+  if (Game.screen === "results") drawResults(ctx);
+}
+
+/* ---------------------------------------------------------------------
+   12. SCREEN INPUT + MAIN LOOP
+   --------------------------------------------------------------------- */
+
+function handleScreenKeys() {
+  if (wasPressed("KeyM")) { Sound.muted = !Sound.muted; if (!Sound.muted) Sound.play("menu"); }
+
+  switch (Game.screen) {
+    case "title":
+      if (wasPressed("Digit1") || wasPressed("Numpad1")) { Game.playerCount = 1; Game.screen = "select"; Sound.play("menu"); }
+      if (wasPressed("Digit2") || wasPressed("Numpad2")) { Game.playerCount = 2; Game.screen = "select"; Sound.play("menu"); }
+      break;
+
+    case "select":
+      if (wasPressed("KeyA") || wasPressed("ArrowLeft")) { Game.selectIndex = (Game.selectIndex + LEVELS.length - 1) % LEVELS.length; Sound.play("menu"); }
+      if (wasPressed("KeyD") || wasPressed("ArrowRight")) { Game.selectIndex = (Game.selectIndex + 1) % LEVELS.length; Sound.play("menu"); }
+      if (wasPressed("KeyE") || wasPressed("Enter") || wasPressed("Slash")) {
+        if (Game.progress[Game.selectIndex].unlocked) startLevel(Game.selectIndex);
+        else Sound.play("error");
+      }
+      if (wasPressed("Escape")) { Game.screen = "title"; Sound.play("menu"); }
+      break;
+
+    case "play":
+      if (wasPressed("Escape")) { Game.screen = "paused"; Sound.play("menu"); }
+      break;
+
+    case "paused":
+      if (wasPressed("Escape")) { Game.screen = "play"; Sound.play("menu"); }
+      if (wasPressed("KeyR")) startLevel(Game.levelIndex);
+      if (wasPressed("KeyL")) { Game.screen = "select"; Sound.play("menu"); }
+      break;
+
+    case "results":
+      if (wasPressed("KeyR")) startLevel(Game.levelIndex);
+      if (wasPressed("KeyE") || wasPressed("Enter") || wasPressed("Slash")) {
+        Game.selectIndex = Math.min(LEVELS.length - 1,
+          Game.result.stars >= 1 ? Game.levelIndex + 1 : Game.levelIndex);
+        Game.screen = "select";
+        Sound.play("menu");
+      }
+      break;
+  }
+}
+
+let lastT = performance.now();
+
+function frame(now) {
+  const dt = Math.min(0.05, (now - lastT) / 1000);
+  lastT = now;
+
+  handleScreenKeys();
+
+  if (Game.screen === "play") updatePlay(dt);
+  else if (Game.screen === "results") { Game.result.t += dt; updateEffects(dt); }
+  else if (Game.screen === "paused") { /* frozen */ }
+
+  render();
+  clearPressed();
+  requestAnimationFrame(frame);
+}
+
+/* Dev/test hook: lets an automated playtest inspect and drive the game.
+   Nothing in the game itself reads from this object. */
+window.CodeBlue = {
+  Game, LEVELS, AILMENTS, STATIONS, ITEMS,
+  startLevel,
+  state: () => ({
+    screen: Game.screen,
+    time: Game.time,
+    score: Game.score,
+    lives: Game.lives,
+    treated: Game.treated,
+    lost: Game.lost,
+    players: Game.players.map(p => ({
+      x: p.x, y: p.y, tx: Math.floor(p.x / TILE), ty: Math.floor(p.y / TILE),
+      item: p.item ? p.item.type : null,
+      patient: p.patient ? { id: p.patient.id, ailment: p.patient.ailment, done: p.patient.done, step: p.patient.step } : null,
+      work: p.work ? { label: p.work.label, t: p.work.t, dur: p.work.dur } : null,
+      hint: p.hintT > 0 ? p.hint : null
+    })),
+    patients: Game.patients.map(p => ({
+      id: p.id, ailment: p.ailment, state: p.state, step: p.step, steps: p.steps.length,
+      done: p.done, x: p.x, y: p.y, tx: Math.floor(p.x / TILE), ty: Math.floor(p.y / TILE),
+      patience: +(p.patience / p.patienceMax).toFixed(2)
+    })),
+    stations: Game.world ? Game.world.stations.map(s => ({
+      type: s.type, x: s.x, y: s.y, stock: s.stock === Infinity ? "inf" : s.stock,
+      occupant: s.occupant ? s.occupant.id : null, jammed: s.jammed, hasDefib: !!s.hasDefib
+    })) : [],
+    floorItems: Game.floorItems.map(i => ({ type: i.type, tx: Math.floor(i.x / TILE), ty: Math.floor(i.y / TILE) }))
+  })
+};
+
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
