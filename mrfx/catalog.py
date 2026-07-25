@@ -118,6 +118,16 @@ THERAPY_TAXONOMY_CODES = (
     "261QP2300X",  # Clinic/Center - Physical Therapy
     "261QR0400X",  # Clinic/Center - Rehabilitation
 )
+# UNAMBIGUOUS therapy-clinic org codes. "Clinic/Center - Physical Therapy" is
+# only ever a therapy practice, so it's strong enough evidence to qualify a TIN
+# on a simple majority (a two-therapist clinic with one NP on staff is still a
+# therapy clinic). Deliberately does NOT include 261QR0400X
+# ("Clinic/Center - Rehabilitation"), which physiatry groups, multispecialty
+# rehab and hospital outpatient departments also carry — that one only counts
+# toward the share numerator and can never by itself qualify a TIN.
+THERAPY_CLINIC_STRONG_CODES = (
+    "261QP2300X",
+)
 
 # Hospital-CLASS taxonomies: any NPI carrying one of these marks its whole TIN
 # as a hospital/health system, which the strict practice filter EXCLUDES — the
@@ -132,11 +142,48 @@ HOSPITAL_TAXONOMY_PREFIXES = (
     "273",  # Hospital units (rehabilitation unit 273Y, psych unit, ...)
 )
 
+# NON-OUTPATIENT facility classes that also bill 97xxx therapy codes. The target
+# is OUTPATIENT PT/OT/SLP practices, so a nursing home, a home-health agency or
+# a residential/hospice program that employs therapists is not a prospect even
+# when therapists are the majority of its identified NPIs. Excluded the same way
+# hospitals are (any member NPI disqualifies the TIN).
+NON_OUTPATIENT_TAXONOMY_PREFIXES = (
+    "314",    # Skilled Nursing Facility
+    "313M",   # Nursing Facility / Intermediate Care
+    "315",    # Intermediate Care / residential
+    "310",    # Assisted living / residential treatment
+    "311",    # Homemaker / adult day / residential care
+    "251E",   # Home Health Agency
+    "251J",   # Nursing Care (home) Agency
+    "3336",   # Pharmacies (co-billing noise)
+    "251G",   # Hospice care, community based
+    "3416",   # Ambulance / transport
+)
+
+# How much of a TIN's IDENTIFIED providers must be PT/OT/SLP (or a therapy
+# clinic) for the practice to count as a therapy practice. 75 = three quarters.
+# A bare majority (>50%) admitted genuinely mixed groups — a chiropractic or
+# physician office with a couple of therapists on staff read as a "therapy
+# practice". Raise toward 100 for only-therapy purity; lower to ~60 to include
+# more mixed rehab groups. Requires a directory rebuild to take effect (the
+# ROLLUP_SCHEMA_VERSION bump handles that automatically on upgrade).
+THERAPY_MIN_SHARE_PCT = 75
+
 
 def hospital_taxonomy_sql(col: str) -> str:
     """A SQL boolean: TRUE when `col` is a hospital-class NPPES taxonomy.
     Constants only — safe to inline, same contract as therapy_taxonomy_sql."""
     likes = " OR ".join(f"{col} LIKE '{p}%'" for p in HOSPITAL_TAXONOMY_PREFIXES)
+    return f"({col} IS NOT NULL AND ({likes}))"
+
+
+def excluded_facility_taxonomy_sql(col: str) -> str:
+    """A SQL boolean: TRUE when `col` is a hospital OR any other non-outpatient
+    facility class (SNF, home health, residential, hospice…). One member NPI
+    carrying any of these disqualifies the whole TIN from the strict
+    outpatient-therapy-practice filter. Constants only — safe to inline."""
+    prefixes = HOSPITAL_TAXONOMY_PREFIXES + NON_OUTPATIENT_TAXONOMY_PREFIXES
+    likes = " OR ".join(f"{col} LIKE '{p}%'" for p in prefixes)
     return f"({col} IS NOT NULL AND ({likes}))"
 
 

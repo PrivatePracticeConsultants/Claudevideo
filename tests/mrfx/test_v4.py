@@ -1201,6 +1201,62 @@ def test_therapy_only_filter(cfg, store):
     assert {r["display_name"] for r in npith["rows"]} == {"Alpha PT", "Gamma SLP"}
 
 
+def test_therapy_practice_rule_matrix(store):
+    """Pins the STRICT outpatient-therapy-practice rule end to end: share
+    threshold, enrichment-coverage test, and the non-outpatient facility vetoes.
+    Each case is a TIN whose member NPIs carry the listed taxonomies (None =
+    not yet identified)."""
+    PT, OTA, SLP = "225100000X", "224ZR0403X", "235Z00000X"
+    MD, CHIRO, NP = "207R00000X", "111N00000X", "363L00000X"
+    PT_CLINIC, REHAB_CLINIC = "261QP2300X", "261QR0400X"
+    HOSP, SNF, HHA = "282N00000X", "314000000X", "251E00000X"
+    cases = [
+        ("pure PT practice",                [PT, PT, PT],                  True),
+        ("PT + PTA/OTA + SLP + clinic",     [PT, OTA, SLP, PT_CLINIC],     True),
+        ("small clinic, only org known",    [PT_CLINIC, None, None, None], True),
+        ("3 PT + 1 MD (75% = at the bar)",  [PT, PT, PT, MD],              True),
+        ("2 PT + 1 MD (67% = under bar)",   [PT, PT, MD],                  False),
+        ("chiro office w/ 2 PTs",           [PT, PT, CHIRO, CHIRO],        False),
+        ("physician group, 2 PT / 8 MD",    [PT, PT] + [MD] * 8,           False),
+        ("big group, 1 PT + 49 unknown",    [PT] + [None] * 49,            False),
+        ("hospital employing 5 PTs",        [PT] * 5 + [HOSP],             False),
+        ("SNF with therapists",             [PT, PT, PT, SNF],             False),
+        ("home health agency w/ PTs",       [PT, PT, PT, HHA],             False),
+        ("physiatry grp w/ rehab clinic",   [REHAB_CLINIC] + [MD] * 6,     False),
+        ("nothing identified yet",          [None, None],                  False),
+        ("2 PT + 1 NP + clinic org",        [PT, PT, NP, PT_CLINIC],       True),
+        # a DEFINITE PT clinic qualifies on a simple majority (67% here)...
+        ("tiny PT clinic: PT + NP + clinic", [PT, NP, PT_CLINIC],          True),
+        # ...but the ambiguous REHAB-clinic code never qualifies on its own
+        ("rehab-clinic code + NP majority", [REHAB_CLINIC, NP, NP],        False),
+    ]
+    rows, n = [], 0
+    for idx, (_label, taxes, _exp) in enumerate(cases):
+        tin = "45%07d" % idx
+        for tax in taxes:
+            n += 1
+            npi = "2%09d" % n
+            if tax:
+                store.save_npi(npi, f"Org {idx}", tax, None, "KC", "MO", entity_type="NPI-2")
+            rows.append(dict(
+                payer="Aetna", tin_value=tin, tin_type="ein", npi=npi,
+                source_file="matrix.json", billing_code="97110", billing_code_type="CPT",
+                discipline="PT", is_timed=True, billing_class="professional",
+                negotiated_rate=50.0, negotiated_type="negotiated", is_dollar_rate=True,
+                billing_code_modifier=[], service_code=["11"], file_month="2026-06",
+                last_updated_on="2026-06-01", expiration_date=None,
+                schema_version="2.0.0", tin_is_really_npi=False, state=None))
+    with store.rates_part_writer("matrix.json") as w:
+        w.write_batch(rows)
+    store.rebuild_rollups()
+    with store.connect() as con:
+        flags = dict(con.execute(
+            "SELECT tin_value, is_therapy FROM tin_directory").fetchall())
+    wrong = [label for idx, (label, _t, exp) in enumerate(cases)
+             if bool(flags.get("45%07d" % idx)) != exp]
+    assert not wrong, f"therapy-practice rule misclassified: {wrong}"
+
+
 def test_therapy_filter_excludes_hospitals_and_md_majority_groups(cfg, store):
     # STRICT practice rule: majority of identified NPIs are therapy (or a
     # therapy-clinic org NPI), AND no hospital-class NPI. The old any-member
@@ -1212,7 +1268,7 @@ def test_therapy_filter_excludes_hospitals_and_md_majority_groups(cfg, store):
          "43-2000001", "ein", [(90.0, None)]),
         # physician group: 1 PT + 2 MDs (therapy minority)
         (["1000000006", "1000000007", "1000000008"], "43-2000002", "ein", [(80.0, None)]),
-        # true private practice: 2 PTs + 1 front-office NP (therapy majority)
+        # true private practice: all-therapy staff (PT + PTA + SLP)
         (["1000000009", "1000000010", "1000000011"], "43-2000003", "ein", [(60.0, None)]),
         # all-PT staff but under a REHAB HOSPITAL's NPI umbrella -> veto
         (["1000000012", "1000000013", "1000000014"], "43-2000004", "ein", [(70.0, None)]),
@@ -1228,9 +1284,9 @@ def test_therapy_filter_excludes_hospitals_and_md_majority_groups(cfg, store):
         # physician group
         ("1000000006", "Grp PT", "225100000X"), ("1000000007", "Grp MD1", "207R00000X"),
         ("1000000008", "Grp MD2", "207R00000X"),
-        # private practice
-        ("1000000009", "Priv PT1", "225100000X"), ("1000000010", "Priv PT2", "225100000X"),
-        ("1000000011", "Priv NP", "363L00000X"),
+        # private practice (all-therapy staff: PT + PTA + SLP)
+        ("1000000009", "Priv PT1", "225100000X"), ("1000000010", "Priv PTA", "2252"),
+        ("1000000011", "Priv SLP", "235Z00000X"),
         # all-PT under a rehab-hospital NPI
         ("1000000012", "RH PT1", "225100000X"), ("1000000013", "RH PT2", "225100000X"),
         ("1000000014", "Rehab Hospital", "283X00000X"),
@@ -1247,7 +1303,7 @@ def test_therapy_filter_excludes_hospitals_and_md_majority_groups(cfg, store):
     assert not flags["432000001"]        # hospital system: minority + hospital veto
     assert hosp["432000001"] is True
     assert not flags["432000002"]        # physician group: therapy minority
-    assert flags["432000003"]            # private practice: 2 of 3 therapy
+    assert flags["432000003"]            # private practice: all-therapy staff
     assert not flags["432000004"]        # all-PT staff but hospital-class NPI -> veto
     assert hosp["432000004"] is True
     assert flags["432000005"]            # tie, but therapy-clinic org NPI qualifies

@@ -34,7 +34,9 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from .catalog import hospital_taxonomy_sql, therapy_taxonomy_sql
+from .catalog import (THERAPY_CLINIC_STRONG_CODES, THERAPY_MIN_SHARE_PCT,
+                      excluded_facility_taxonomy_sql, hospital_taxonomy_sql,
+                      therapy_taxonomy_sql)
 
 # Parquet codec for the rate parts. zstd is ~30-50% smaller than the pyarrow
 # default (snappy) on real payer data. Decode is marginally slower than snappy
@@ -422,7 +424,10 @@ DEDUP_QUERY = """
 # bump when a rollup GROUP BY / column-semantics change must reach EXISTING
 # stores (same columns, different grain -> the missing-column probe can't see
 # it). v2: tin_is_really_npi joined the BY_TIN grain (identity blending fix).
-ROLLUP_SCHEMA_VERSION = 2
+# v3: is_therapy tightened (share threshold + coverage test + non-outpatient
+# facility exclusion) — same columns, stricter meaning, so existing directories
+# must rebuild or the old lenient flags would keep admitting mixed groups.
+ROLLUP_SCHEMA_VERSION = 3
 
 # Sentinel for upsert_file(finished_at=...): "stamp the completion time INSIDE
 # the write lock". Callers must never pre-compute a done-timestamp in Python —
@@ -543,23 +548,47 @@ TIN_DIRECTORY_QUERY = """
            list_sort(list_distinct(list(j.city)
                      FILTER (j.city IS NOT NULL)))                  AS cities,
            any_value(d2.primary_discipline)                         AS primary_discipline,
-           -- STRICT practice test: a TIN is a "therapy practice" only when it is
-           -- PREDOMINANTLY therapy — the MAJORITY of its taxonomy-identified NPIs
-           -- are PT/OT/SLP (or it carries a therapy-CLINIC org NPI) — AND it has
-           -- no hospital-class NPI. The old any-member bool_or let a hospital
-           -- system with 5 employed PTs among 500 MDs (or a physician group with
-           -- one PT) pass into leads/benchmarks under its MD-heavy identity.
-           -- Enrichment-dependent: NULL taxonomies don't count either way, so
-           -- the flag fills in as identification lands.
+           -- STRICT outpatient-therapy-practice test. A TIN qualifies only when
+           -- ALL of these hold:
+           --   (a) SHARE: at least {min_share}% of its taxonomy-IDENTIFIED NPIs are
+           --       PT/OT/SLP (incl. PTA/OTA) or a therapy-clinic org NPI. A bare
+           --       majority (the old rule) admitted genuinely mixed groups — a
+           --       chiropractic or physician office with two therapists on staff
+           --       read as a "therapy practice".
+           --   (b) COVERAGE: at least half its NPIs are identified, OR it carries a
+           --       therapy-CLINIC org NPI. Without this, a 50-provider physician
+           --       group with 49 not-yet-identified NPIs and ONE identified PT
+           --       scored 100% therapy and sailed through — the single biggest
+           --       leak, and worst early in enrichment. The clinic-org escape
+           --       keeps a genuinely small therapy clinic visible while its
+           --       individual NPIs are still being identified.
+           --   (c) NOT a hospital/health system, and NOT a non-outpatient facility
+           --       (SNF, home health, residential, hospice…): those employ
+           --       therapists but are not outpatient practices, so ANY such member
+           --       NPI disqualifies the TIN.
+           -- The therapy-clinic org code no longer BLANKET-qualifies a TIN (it
+           -- still counts toward the share numerator): physiatry and multispecialty
+           -- rehab groups carry 261QR0400X too, and the old bool_or bypass let
+           -- every one of them in regardless of how MD-heavy they were.
+           -- Enrichment-dependent by design: NULL taxonomies count toward neither
+           -- side of the share, so the flag sharpens as identification lands.
            count(DISTINCT j.npi) FILTER ({therapy})                 AS therapy_npi_count,
            count(DISTINCT j.npi)
                FILTER (j.taxonomy_code IS NOT NULL)                 AS classified_npi_count,
            coalesce(bool_or({hospital}), FALSE)                     AS has_hospital,
-           coalesce(
-               (count(DISTINCT j.npi) FILTER ({therapy})) * 2
-                   > count(DISTINCT j.npi) FILTER (j.taxonomy_code IS NOT NULL)
-               OR bool_or({clinic}), FALSE)
-           AND NOT coalesce(bool_or({hospital}), FALSE)             AS is_therapy
+           (count(DISTINCT j.npi) FILTER (j.taxonomy_code IS NOT NULL)) > 0
+           AND ((count(DISTINCT j.npi) FILTER ({therapy})) * 100
+                    >= (count(DISTINCT j.npi) FILTER (j.taxonomy_code IS NOT NULL)) * {min_share}
+                -- a DEFINITE therapy clinic ("Clinic/Center - Physical Therapy",
+                -- never anything else) needs only a simple majority: a two-
+                -- therapist clinic with one NP on staff is still a therapy clinic
+                OR (coalesce(bool_or({strong_clinic}), FALSE)
+                    AND (count(DISTINCT j.npi) FILTER ({therapy})) * 2
+                        > count(DISTINCT j.npi) FILTER (j.taxonomy_code IS NOT NULL)))
+           AND ((count(DISTINCT j.npi) FILTER (j.taxonomy_code IS NOT NULL)) * 2
+                    >= count(DISTINCT j.npi)
+                OR coalesce(bool_or({clinic}), FALSE))
+           AND NOT coalesce(bool_or({excluded}), FALSE)             AS is_therapy
     FROM joined j
     LEFT JOIN names n ON n.tin_value = j.tin_value
     LEFT JOIN disc d2 ON d2.tin_value = j.tin_value
@@ -581,9 +610,17 @@ TIN_DIRECTORY_QUERY = (
     TIN_DIRECTORY_QUERY
     .replace("{therapy}", therapy_taxonomy_sql("j.taxonomy_code"))
     .replace("{hospital}", hospital_taxonomy_sql("j.taxonomy_code"))
-    # clinic-org codes alone (no PT/OT/SLP prefixes): a true therapy-clinic org
-    # NPI qualifies a small practice even when front-office NPs tie the count
+    # hospital + every other non-outpatient facility class: any member NPI
+    # carrying one disqualifies the TIN from the strict practice filter
+    .replace("{excluded}", excluded_facility_taxonomy_sql("j.taxonomy_code"))
+    # clinic-org codes alone (no PT/OT/SLP prefixes): satisfies the COVERAGE
+    # test for a small therapy clinic whose individual NPIs aren't identified
+    # yet — it no longer bypasses the share test
     .replace("{clinic}", therapy_taxonomy_sql("j.taxonomy_code", prefixes=()))
+    # unambiguous PT-clinic org code only (never the ambiguous rehab-clinic one)
+    .replace("{strong_clinic}", therapy_taxonomy_sql(
+        "j.taxonomy_code", prefixes=(), codes=THERAPY_CLINIC_STRONG_CODES))
+    .replace("{min_share}", str(THERAPY_MIN_SHARE_PCT))
 )
 
 
