@@ -176,6 +176,8 @@ td .rate { font-weight: 650; }
 .rc-table td.top-rate { font-weight: 700; color: var(--pos, #1c6b3a); }
 .rc-table .peer-up { color: var(--good); font-weight: 600; }
 .rc-table .peer-down { color: var(--critical); font-weight: 600; }
+/* matches the printable rate card's "thin" flag so screen and report agree */
+.rc-table .thin { color: var(--warn, #9a6b00); font-weight: 600; }
 .rc-table td.chg-cut { color: var(--neg, #b3261e); font-weight: 650; }
 .rc-table td.chg-up { color: var(--pos, #1c6b3a); font-weight: 650; }
 

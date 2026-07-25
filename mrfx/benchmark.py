@@ -885,6 +885,58 @@ def require_geographic_scope(market: dict, kind: str) -> str:
         "deliberate pooled national comparison, pass market.allow_national=true.")
 
 
+def _subject_has_scoped_rates(store: Store, subject: str, market: dict) -> bool:
+    """Does the subject have any rate rows under the FULL market scope (state,
+    discipline, basis, month)? Mirrors compute_benchmark's `subject` CTE, unlike
+    subject_payers() which deliberately ignores geography."""
+    subject_tins = resolve_subject_tins(store, subject)
+    if not subject_tins:
+        return False
+    market = normalize_market(market)
+    where, params = _market_where(market,
+                                  bool(market.get("include_assistant", False)),
+                                  bool(market.get("include_non_dollar", False)))
+    with store.connect() as con:
+        return bool(con.execute(
+            f"SELECT 1 FROM {_rates_relation(market)} t "
+            f"LEFT JOIN tin_directory td USING (tin_value) WHERE {where} "
+            "AND t.tin_value IN (SELECT unnest(?::VARCHAR[])) LIMIT 1",
+            [*params, subject_tins]).fetchone())
+
+
+def require_subject_content(store: Store, benchmark: dict, kind: str) -> None:
+    """A client-facing report must be ABOUT its subject, not merely titled after
+    it. A mistyped practice name — or a real one scoped to a state/discipline it
+    has no rows under — still produced a branded document headed with the
+    practice's name whose entire "Your rate" and "Gap" columns were dashes: an
+    absence of data dressed as a finding (invariant 4).
+
+    The test has to match what the page actually SHOWS. The benchmark LEFT JOINs
+    the subject onto the market, so:
+      - rows present, every `subject_rate` NULL -> the wrong-subject case; refuse.
+      - no rows at all -> ambiguous. It means the MARKET side is empty, which
+        happens both when the subject is real but has no peers under this scope
+        (renders fine: their own rates are genuine, the market columns are just
+        empty) and when the scope contains nobody at all. So ask the subject the
+        SAME scoped question the report asks.
+    Partial coverage is fine and useful — this fires only when NOTHING is priced.
+
+    Unlike the rate card, this report IS the market comparison, so its subject
+    stays inside the market scope; the rate card's subject deliberately does not,
+    because there the peers are an annotation on the client's own fee schedule."""
+    rows = benchmark.get("rows") or []
+    if any(r.get("subject_rate") is not None for r in rows):
+        return
+    if not rows and _subject_has_scoped_rates(
+            store, benchmark.get("subject") or "", benchmark.get("market") or {}):
+        return
+    raise BenchmarkError(
+            f"{kind}: no published rates for this practice under the current "
+            "filters — there is nothing to compare against the market. Check "
+            "the practice name/tax ID, and widen the as-of month, state or "
+            "discipline filters.")
+
+
 def _geo_banner_html(note: str) -> str:
     return (f'<div class="geo-warn">⚠ {html.escape(note)}</div>') if note else ""
 
@@ -1032,6 +1084,7 @@ def render_pitch_report(cfg: MrfxConfig, store: Store, benchmark: dict,
     or methodology footer (§8.10 — they are generated here, unconditionally)."""
     if not benchmark.get("market", {}).get("month"):
         raise BenchmarkError("pitch report requires a pinned as-of month")
+    require_subject_content(store, benchmark, "pitch report")
     geo_banner = _geo_banner_html(
         require_geographic_scope(benchmark["market"], "pitch report"))
     footer = methodology_footer(store, benchmark)

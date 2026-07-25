@@ -176,8 +176,8 @@ Files process **a few at a time in the background** — by default as many as
 your computer has processor cores minus one (the `parallel_ingests:` knob in
 `config/mrfx.yaml`, `0` = automatic), and **several files download at once**
 to keep those workers fed (`parallel_downloads:`, `0` = automatic, capped at
-4 to stay polite to payer servers; simultaneous downloads coordinate so they
-can never fill your disk together) — you can paste a whole
+6 — the same per-host limit a web browser uses; simultaneous downloads
+coordinate so they can never fill your disk together) — you can paste a whole
 state's worth of links and walk away. Each file's download is deleted
 after its rates are extracted, so your disk doesn't fill up. If you close the
 app mid-download, it picks up where it left off on restart.
@@ -392,6 +392,29 @@ moves that number, in order of impact:
    ```yaml
    parallel_downloads: 6   # max 8
    ```
+
+   This is the right lever when **many files** are queued: it fetches more of
+   them at once.
+
+   **If the queue is only a few VERY LARGE files, that knob does nothing** —
+   there is nothing to run alongside. What limits you then is usually not your
+   internet speed but the payer's CDN, which throttles *each connection*: one
+   5 GB file trickles in at a fraction of your line rate no matter how fast
+   your connection is. Split that single file across several connections
+   instead (byte-range requests, the way a download manager works):
+
+   ```yaml
+   download_segments: 4    # 1 = off, max 8
+   parallel_downloads: 2   # lower this when you raise segments
+   ```
+
+   Lower `parallel_downloads` at the same time, because the two multiply
+   (4 segments x 2 files = 8 open connections) and a flaky CDN starts dropping
+   connections when you open too many. If a server refuses range requests the
+   app notices and quietly uses one connection, so turning this on is safe.
+   How to tell which case you're in: watch the Files tab. Many links at once,
+   each moving slowly -> raise `parallel_downloads`. One huge file crawling on
+   its own while everything waits -> raise `download_segments`.
 
 3. **Don't ingest what you don't need.** The single biggest cost is all-codes
    mega-files. The app already skips files that contain none of your CPT codes

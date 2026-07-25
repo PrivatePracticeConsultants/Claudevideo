@@ -62,6 +62,17 @@ def compute_fee_schedule(store: Store, subject: str, market: dict) -> dict:
     include_assistant = bool(market.get("include_assistant", False))
     include_non_dollar = bool(market.get("include_non_dollar", False))
     where, params = _market_where(market, include_assistant, include_non_dollar)
+    # The subject is WHOEVER THE USER NAMED — the market-SCOPE filters describe
+    # the peer population, not the client. Running them over the subject's own
+    # rates meant ticking "therapy practices only (peers)" blanked the client's
+    # own card when their TIN wasn't flagged, and setting State silently dropped
+    # a multi-state subject's out-of-state TINs, CHANGING their reported rate —
+    # while the report banner promised "your own rates above are unaffected".
+    # Basis and content filters (month, dollar/modifier/class, payers, codes,
+    # discipline) still apply to both sides so the comparison stays like-for-like.
+    subject_where, subject_params = _market_where(
+        {k: v for k, v in market.items() if k not in ("therapy_only", "state", "city")},
+        include_assistant, include_non_dollar)
     rel = _rates_relation(market)
 
     sql = f"""
@@ -70,7 +81,7 @@ def compute_fee_schedule(store: Store, subject: str, market: dict) -> dict:
         SELECT t.payer, t.billing_code, t.tin_value,
                median(t.negotiated_rate) AS rate
         FROM {rel} t LEFT JOIN tin_directory td USING (tin_value)
-        WHERE {where} AND t.is_dollar_rate
+        WHERE {subject_where} AND t.is_dollar_rate
           AND t.tin_value IN (SELECT tin FROM subject_tins)
         GROUP BY t.payer, t.billing_code, t.tin_value
     )
@@ -82,7 +93,7 @@ def compute_fee_schedule(store: Store, subject: str, market: dict) -> dict:
     ORDER BY billing_code, payer
     """
     with store.connect() as con:
-        cur = con.execute(sql, [subject_tins, *params])
+        cur = con.execute(sql, [subject_tins, *subject_params])
         raw = [dict(zip([d[0] for d in cur.description], r)) for r in cur.fetchall()]
         mpfs = dict(con.execute(
             "SELECT code, median(non_facility_rate) FROM mpfs GROUP BY code"
@@ -301,12 +312,31 @@ def _methodology(store: Store, fee_schedule: dict) -> str:
     return "\n".join(lines)
 
 
+def require_rate_card_content(fee_schedule: dict) -> None:
+    """A client-facing deliverable must never be EMPTY-but-official-looking.
+
+    A mistyped practice name, or a state/discipline scope the subject has no
+    rows under, resolves to a subject with zero codes. The interactive tab says
+    "No rates found" and stops — but the report and CSV happily rendered a
+    branded, methodology-footed document with two empty tables, which a user
+    could hand to a client as if it meant "this practice has no contracts".
+    Refuse instead, the way the negotiation report already does (invariant 4:
+    honesty — never present an absence of data as a finding)."""
+    if not fee_schedule.get("codes"):
+        raise BenchmarkError(
+            "no published rates for this practice under the current filters "
+            "— nothing to put on a rate card. Check the practice name/tax ID, "
+            "and widen the as-of month, state or discipline filters.")
+
+
 def render_rate_card(cfg: MrfxConfig, store: Store, fee_schedule: dict,
                      scorecard: dict) -> str:
     """Print-ready branded rate card: payer scorecard on top, full fee-schedule
-    matrix below (payer columns ordered best→worst). Refuses without a month."""
+    matrix below (payer columns ordered best→worst). Refuses without a month,
+    and refuses to render an empty card."""
     if not fee_schedule.get("market", {}).get("month"):
         raise BenchmarkError("rate card requires a pinned as-of month")
+    require_rate_card_content(fee_schedule)
     e = html.escape
     month = fee_schedule["market"].get("month")
     # GEOGRAPHIC SCOPE. The card's primary content is the subject's OWN rates,
@@ -423,7 +453,8 @@ def render_rate_card(cfg: MrfxConfig, store: Store, fee_schedule: dict,
 def fee_schedule_csv(fee_schedule: dict, scorecard: dict, store: Store) -> str:
     """Long-format CSV (payer, code, rate, % Medicare) with a methodology header
     block as leading comment lines (honesty invariant: exports carry their
-    methodology)."""
+    methodology). Like the report, refuses to emit an empty card."""
+    require_rate_card_content(fee_schedule)
     import csv
     import io
     out = io.StringIO()
@@ -443,6 +474,11 @@ def fee_schedule_csv(fee_schedule: dict, scorecard: dict, store: Store) -> str:
                         defuse_csv(entry["description"]) or "", v["rate"],
                         "" if v["pct_medicare"] is None else int(v["pct_medicare"]),
                         "" if v.get("market_median") is None else v["market_median"],
-                        v.get("n_peers") or 0,
+                        # A suppressed cell reports NO peer figures at all. Printing
+                        # the raw count next to a blank median contradicted the
+                        # methodology block ("omitted entirely") — and that block
+                        # isn't even emitted when every cell is suppressed, leaving
+                        # an unexplained number in a client's CSV.
+                        "" if v.get("market_median") is None else (v.get("n_peers") or 0),
                         "" if v.get("vs_market_pct") is None else v["vs_market_pct"]])
     return out.getvalue()

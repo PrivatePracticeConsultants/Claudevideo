@@ -368,11 +368,20 @@ def test_entity_map_ui_edit_persists_to_yaml(cfg, store):
 
 @pytest.fixture
 def market_store(cfg, store):
-    """Synthetic market: subject TIN at $30; 9 peers at $31..$39 (known distribution)."""
+    """Synthetic market: subject TIN at $30; 9 peers at $31..$39 (known distribution).
+
+    All ten are PT practices located in MO, so a state-scoped report has a real
+    subject AND real peers — an unlocated fixture made "scoped to MO" silently
+    mean "nobody", which is indistinguishable from a scoping bug.
+    """
     groups = [([f"1{i:09d}"], f"43-00000{i:02d}", "ein", [(30.0 + i, None)]) for i in range(10)]
     data = innetwork(items=[item("97110", groups)])
     p = make_fixture(cfg.inbox_dir, "market.json", data)
     ingest_file(cfg, store, p)
+    for i in range(10):
+        store.save_npi(f"1{i:09d}", f"PT Practice {i}", "225100000X", None, "StL", "MO",
+                       entity_type="NPI-1")
+    store.rebuild_rollups()
     return store
 
 
@@ -568,12 +577,17 @@ def test_report_requires_state_unless_national_explicitly_allowed(cfg, market_st
         "subject": "430000000", "market": {"month": "2026-06"}})
     assert refused.status_code == 422
     assert "state" in refused.text.lower()
-    # a state-scoped report renders without the national banner (fixture TINs
-    # have no NPPES state, so peers are empty, but the report still renders)
+    # a state-scoped report renders without the national banner — and with real
+    # in-state peers, so the absence of the banner is the thing under test
     scoped = client.post("/api/report/pitch", json={
         "subject": "430000000", "market": {"month": "2026-06", "state": "MO"}})
     assert scoped.status_code == 200
     assert "NATIONAL COMPARISON" not in scoped.text
+    # a state the subject has no presence in has no subject rates to report on
+    elsewhere = client.post("/api/report/pitch", json={
+        "subject": "430000000", "market": {"month": "2026-06", "state": "AK"}})
+    assert elsewhere.status_code == 422
+    assert "no published rates for this practice" in elsewhere.json()["detail"]
 
 
 @pytest.fixture
@@ -689,6 +703,35 @@ def test_ratecard_report_and_csv_endpoints(cfg, ratecard_store):
     auto = client.post("/api/report/ratecard", json={"subject": "430000000", "market": {}})
     assert auto.status_code == 200
     assert "latest available" in auto.text
+
+
+def test_ratecard_refuses_to_render_an_empty_client_deliverable(cfg, ratecard_store):
+    """A mistyped practice, or a scope the subject has no rows under, used to
+    produce a BRANDED rate card with two empty tables and a methodology footer —
+    a document a user could hand a client as if it meant "no contracts". Both
+    deliverable paths must refuse; the interactive tab still answers 200 so it
+    can render its own "No rates found" empty state."""
+    client = TestClient(create_app(cfg, ratecard_store))
+    ghost = {"subject": "NO_SUCH_PRACTICE", "market": {"month": "2026-06"}}
+
+    interactive = client.post("/api/schedule/fee", json=ghost)
+    assert interactive.status_code == 200                       # tab can still explain
+    assert interactive.json()["fee_schedule"]["codes"] == []
+
+    for path in ("/api/report/ratecard", "/api/schedule/fee.csv"):
+        r = client.post(path, json=ghost)
+        assert r.status_code == 422, path
+        assert "no published rates for this practice" in r.json()["detail"]
+
+    # a real subject pinned to a month it has no files for is the same class
+    scoped = client.post("/api/report/ratecard", json={
+        "subject": "430000000", "market": {"month": "1999-01"}})
+    assert scoped.status_code == 422
+    # ...but a state scope must NOT empty a real subject's card: state defines
+    # the PEER population, and the subject's own rates are theirs regardless
+    in_state = client.post("/api/report/ratecard", json={
+        "subject": "430000000", "market": {"month": "2026-06", "state": "AK"}})
+    assert in_state.status_code == 200
 
 
 def test_bulk_enrichment_reads_nppes_zip(cfg, store, tmp_path):
@@ -1245,6 +1288,7 @@ def test_therapy_practice_rule_matrix(store):
     PT_CLINIC, REHAB_CLINIC = "261QP2000X", "261QR0400X"
     SPEECH_CLINIC, PEDS_CLINIC = "261QH0700X", "261QD1600X"
     PRIMARY_CARE = "261QP2300X"
+    MULTI_ORG = "193200000X"     # Multi-Specialty Group — a billing shell, not a clinician
     HOSP, SNF, HHA = "282N00000X", "314000000X", "251E00000X"
     cases = [
         ("pure PT practice",                [PT, PT, PT],                  True),
@@ -1284,6 +1328,26 @@ def test_therapy_practice_rule_matrix(store):
         # in the code, so every primary-care clinic counted as a therapy practice
         ("primary-care clinic + 3 unknown", [PRIMARY_CARE, None, None, None],   False),
         ("primary-care clinic + 2 MDs",     [PRIMARY_CARE, MD, MD],             False),
+        # ORG NPIs ARE NOT HEADCOUNT. A multi-site group that registers one org
+        # NPI per location was buying itself a phantom therapist per site: these
+        # three all qualified while the identical TIN minus the org NPIs did not.
+        ("3 clinic site orgs + 3 PT + 5 MD", [PT_CLINIC] * 3 + [PT] * 3 + [MD] * 5, False),
+        ("3 clinic site orgs + 1 MD (no therapist at all)",
+                                             [PT_CLINIC] * 3 + [MD],            False),
+        ("control: same clinicians, no org NPIs", [PT] * 3 + [MD] * 5,          False),
+        # ...and a real clinic must still pass on its clinicians
+        ("1 clinic org + 2 PT + 1 MD",      [PT_CLINIC, PT, PT, MD],            True),
+        # COVERAGE must be measured on the same clinician population as the
+        # share. Counting org NPIs as "identified" while the share ignored them
+        # meant every extra billing shell bought one more unidentified NPI.
+        ("1 PT + org shell + 2 unknown",    [PT, MULTI_ORG, None, None],        False),
+        ("1 PT + 3 org shells + 4 unknown", [PT] + [MULTI_ORG] * 3 + [None] * 4, False),
+        ("1 PT + 100 shells + 100 unknown",
+                                    [PT] + [MULTI_ORG] * 100 + [None] * 100,    False),
+        # an incorporated sole proprietor: NPPES gives them a TYPE-2 NPI that
+        # still carries their PRACTITIONER taxonomy. That is a therapist, not a
+        # billing shell, and a one-person practice must not vanish because of it.
+        ("incorporated solo PT (org NPI, PT taxonomy)", [(PT, "NPI-2")],        True),
     ]
     # NPPES entity_type must be realistic: an org/clinic/facility taxonomy belongs
     # to a Type-2 (organization) NPI, a clinician to a Type-1 (individual) one.
@@ -1301,9 +1365,12 @@ def test_therapy_practice_rule_matrix(store):
         for tax in taxes:
             n += 1
             npi = "2%09d" % n
+            # a case may pin the entity type explicitly as (taxonomy, entity_type)
+            # when the realistic pairing is not the one _etype() infers
+            tax, etype = tax if isinstance(tax, tuple) else (tax, None)
             if tax:
                 store.save_npi(npi, f"Org {idx}", tax, None, "KC", "MO",
-                               entity_type=_etype(tax))
+                               entity_type=etype or _etype(tax))
             rows.append(dict(
                 payer="Aetna", tin_value=tin, tin_type="ein", npi=npi,
                 source_file="matrix.json", billing_code="97110", billing_code_type="CPT",
@@ -1920,3 +1987,77 @@ def test_npi_typed_tin_never_blends_with_real_ein(cfg, store):
     assert rows == [(False, 85.0), (True, 99.0)]  # two rows, no blend
     # the EIN practice is present in market math at its real rate
     assert _entity_rates(store, ["431111111"], {"month": "latest"}) == {"97110": 85.0}
+
+
+def test_directory_schema_migration_actually_runs_and_advances_the_marker(cfg, store):
+    """The directory-only migration is what carries a changed therapy-practice
+    rule into an ALREADY-BUILT store. It called rebuild_rollups(tables=...) — a
+    kwarg that doesn't exist — so the TypeError was swallowed by the broad
+    except, the marker never advanced, the check re-fired on every launch, and
+    the new rule never reached the user's data. Only a full rebuild (hours)
+    healed it by accident. Assert the marker really moves."""
+    from mrfx.store import DIRECTORY_SCHEMA_VERSION, Store
+
+    groups = [([f"1{i:09d}"], f"43-00000{i:02d}", "ein", [(30.0 + i, None)]) for i in range(3)]
+    p = make_fixture(cfg.inbox_dir, "mig.json", innetwork(items=[item("97110", groups)]))
+    ingest_file(cfg, store, p)
+    store.rebuild_rollups()
+    with store.connect() as con:
+        assert store._meta_get(con, "directory_schema_version") == str(DIRECTORY_SCHEMA_VERSION)
+        # simulate a store built by an older version of the practice rules
+        con.execute("INSERT OR REPLACE INTO meta VALUES ('directory_schema_version', '1')")
+
+    reopened = Store(cfg.store_dir)          # __init__ runs _migrate_stale_rollups
+    with reopened.connect() as con:
+        assert con.execute(
+            "SELECT count(*) FROM tin_directory").fetchone()[0] > 0   # directory survived
+        assert reopened._meta_get(con, "directory_schema_version") == str(
+            DIRECTORY_SCHEMA_VERSION), "migration ran but never stamped the new version"
+
+
+def test_rate_card_scope_filters_apply_to_peers_not_to_the_subject(cfg, store):
+    """The State field and the "therapy practices only (peers)" box define the
+    PEER population. They were also being run over the subject's own rates, so a
+    client whose TIN wasn't flagged as a therapy practice got "No rates found",
+    and a multi-state subject's own reported rate CHANGED when a state was
+    picked — while the report banner promised the opposite."""
+    from mrfx.schedule import compute_fee_schedule
+
+    rows = []
+    for tin, npi, rate in (("430000000", "1000000000", 45.0),   # subject, MO
+                           ("430000001", "1000000001", 50.0),   # peers, MO
+                           ("430000002", "1000000002", 55.0),
+                           ("430000003", "1000000003", 60.0),
+                           ("430000004", "1000000004", 65.0)):
+        rows.append(dict(
+            payer="Aetna", tin_value=tin, tin_type="ein", npi=npi,
+            source_file="rc.json", billing_code="97110", billing_code_type="CPT",
+            discipline="PT", is_timed=True, billing_class="professional",
+            negotiated_rate=rate, negotiated_type="negotiated", is_dollar_rate=True,
+            billing_code_modifier=[], service_code=["11"], file_month="2026-06",
+            last_updated_on="2026-06-01", expiration_date=None,
+            schema_version="2.0.0", tin_is_really_npi=False, state=None))
+    with store.rates_part_writer("rc.json") as w:
+        w.write_batch(rows)
+    # the SUBJECT is an MD office (not a therapy practice) in MO; peers are PT clinics
+    store.save_npi("1000000000", "Subject Grp", "207R00000X", None, "StL", "MO",
+                   entity_type="NPI-1")
+    for n in range(1, 5):
+        store.save_npi(f"100000000{n}", f"Peer PT {n}", "225100000X", None, "StL", "MO",
+                       entity_type="NPI-1")
+    store.rebuild_rollups()
+
+    base = compute_fee_schedule(store, "430000000", {"month": "2026-06"})
+    assert base["codes"][0]["rates"]["Aetna"]["rate"] == 45.0
+
+    # ticking the peers-only box must not blank the client's own card
+    ther = compute_fee_schedule(store, "430000000",
+                                {"month": "2026-06", "therapy_only": True})
+    assert ther["codes"][0]["rates"]["Aetna"]["rate"] == 45.0
+
+    # nor may a state the subject has no NPPES presence in erase their own rate
+    other = compute_fee_schedule(store, "430000000",
+                                 {"month": "2026-06", "state": "KS"})
+    assert other["codes"][0]["rates"]["Aetna"]["rate"] == 45.0
+    # ...while that state scope DOES empty the peer comparison (no KS peers)
+    assert other["codes"][0]["rates"]["Aetna"]["market_median"] is None

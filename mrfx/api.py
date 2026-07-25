@@ -341,13 +341,19 @@ class FilterSet:
             clauses.append("is_therapy")
             add("therapy_practices_only",
                 f"outpatient PT/OT/SLP practices only: >= {THERAPY_MIN_SHARE_PCT}% of the "
-                "practice's identified providers are PT/OT/SLP (incl. PTA/OTA/SLPA "
-                "or a Physical-Therapy clinic org NPI; non-therapy ORG NPIs are "
-                "not counted against it), at least half its NPIs are identified "
-                f"(or it is a <= {THERAPY_SMALL_PRACTICE_NPIS}-NPI practice carrying the "
-                "Physical-Therapy clinic code), and it carries no hospital, "
-                "skilled-nursing, home-health, hospice, residential, school/agency, "
-                "pharmacy or ambulance NPI")
+                "practice's identified CLINICIANS are PT/OT/SLP (incl. PTA/OTA/SLPA); "
+                "organization NPIs are counted on neither side, being billing "
+                "entities rather than people. A practice carrying a definite "
+                "therapy-clinic org NPI (Clinic/Center - Physical Therapy, "
+                "Hearing and Speech, Developmental Disabilities, or CORF) qualifies "
+                "on half its clinicians, and a "
+                f"<= {THERAPY_SMALL_PRACTICE_NPIS}-NPI practice known only by such an "
+                "NPI (or by an incorporated sole proprietor's own practitioner NPI) "
+                "qualifies while its clinicians are still being identified. "
+                "Otherwise at least half the practice's clinician NPIs must be "
+                "identified. Any hospital, skilled-nursing, home-health, hospice, "
+                "residential, school/agency, pharmacy or ambulance NPI disqualifies "
+                "the practice outright.")
             self.uses_dim_cols = True  # is_therapy is a joined/computed column
         for bound, op in (("rate_min", ">="), ("rate_max", "<=")):
             raw = qp.get(bound)

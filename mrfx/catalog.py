@@ -42,54 +42,74 @@ CODE_CATALOG: dict[str, tuple[str, tuple[str, ...], bool]] = {
     "97760": ("Orthotic management & training, initial", (PT, OT), True),
     "97761": ("Prosthetic training, initial", (PT, OT), True),
     "97763": ("Orthotic/prosthetic management, established", (PT, OT), True),
-    # ---- PT-leaning treatment ----
-    "97113": ("Aquatic therapy w/ exercises", (PT,), True),
-    "97116": ("Gait training", (PT,), True),
-    "97124": ("Massage therapy", (PT,), True),
+    # ---- shared PT/OT treatment (AOTA's own 2026 code list carries all three) ----
+    "97113": ("Aquatic therapy w/ exercises", (PT, OT), True),
+    "97116": ("Gait training", (PT, OT), True),
+    "97124": ("Massage therapy", (PT, OT), True),
     "97750": ("Physical performance test", (PT, OT), True),
-    # ---- OT-specific ----
-    "97129": ("Cognitive function intervention, first 15 min", (OT, SLP), True),
-    "97130": ("Cognitive function intervention, each addl 15 min", (OT, SLP), True),
-    "97533": ("Sensory integrative techniques", (OT,), True),
-    "97537": ("Community/work reintegration training", (OT,), True),
-    # ---- PT modalities ----
+    # ---- cognitive / sensory / community reintegration ----
+    # CMS MAC article A56566 (the JOINT PT-and-OT outpatient article) covers all
+    # four, and states verbatim for 97129/97130 and 97533: "This service is
+    # payable to speech-language pathologists under certain conditions."
+    "97129": ("Cognitive function intervention, first 15 min", (PT, OT, SLP), True),
+    "97130": ("Cognitive function intervention, each addl 15 min", (PT, OT, SLP), True),
+    "97533": ("Sensory integrative techniques", (PT, OT, SLP), True),
+    "97537": ("Community/work reintegration training", (PT, OT), True),
+    # ---- modalities (PT-dominant; several are core hand therapy) ----
+    # CMS marks every one of these "always therapy … regardless of who performs
+    # them", i.e. OT billing is permitted throughout. The four widened to (PT,OT)
+    # here are the ones AOTA's own published list carries, which is evidence OTs
+    # actually bill them; the rest stay PT because widening on permission alone
+    # would trade a mostly-right attribution for `unspecified` on every row.
     "97010": ("Hot/cold packs", (PT, OT), False),
     "97012": ("Mechanical traction", (PT,), False),
     "97014": ("Electrical stimulation (unattended)", (PT,), False),
     "97016": ("Vasopneumatic devices", (PT,), False),
     "97018": ("Paraffin bath", (PT, OT), False),
-    "97022": ("Whirlpool", (PT,), False),
+    "97022": ("Whirlpool", (PT, OT), False),
     "97026": ("Infrared therapy", (PT,), False),
     "97032": ("Electrical stimulation (manual)", (PT,), True),
     "97033": ("Iontophoresis", (PT, OT), True),
-    "97035": ("Ultrasound therapy", (PT,), True),
+    "97035": ("Ultrasound therapy", (PT, OT), True),
     "97036": ("Hubbard tank", (PT,), True),
-    "G0283": ("Electrical stimulation, non-wound (HCPCS)", (PT,), False),
+    "G0283": ("Electrical stimulation, non-wound (HCPCS)", (PT, OT), False),
     # ---- SLP evals (untimed) ----
     "92521": ("Evaluation of speech fluency", (SLP,), False),
     "92522": ("Evaluation of speech sound production", (SLP,), False),
     "92523": ("Speech sound production w/ language eval", (SLP,), False),
-    "92524": ("Behavioral analysis of voice and resonance", (SLP,), False),
+    "92524": ("Behavioral & qualitative analysis of voice and resonance", (SLP,), False),
     # ---- SLP treatment ----
-    "92507": ("Speech/hearing therapy, individual", (SLP,), False),
-    "92508": ("Speech/hearing therapy, group", (SLP,), False),
-    "92526": ("Swallowing dysfunction treatment", (SLP,), False),
-    # ---- swallowing studies ----
-    "92610": ("Swallowing function evaluation", (SLP,), False),
-    "92611": ("Motion fluoroscopic swallow study", (SLP,), False),
+    # 92507/92508 descriptions were the PRE-2014 wording ("speech/hearing
+    # therapy", from the deleted 92506 era); CMS's 2026 descriptor is
+    # "Tx sp lang voice comm indiv/group". 92526 is not swallowing-only — CMS
+    # calls it "Oral function therapy", and the feeding half is exactly why
+    # AOTA's own list carries it.
+    "92507": ("Speech, language, voice & communication treatment, individual", (SLP,), False),
+    "92508": ("Speech, language, voice & communication treatment, group", (SLP,), False),
+    "92526": ("Swallowing/oral function for feeding treatment", (OT, SLP), False),
+    # ---- swallowing studies (AOTA's 2026 list carries both: OT feeding therapy) ----
+    "92610": ("Swallowing function evaluation", (OT, SLP), False),
+    "92611": ("Motion fluoroscopic swallow study", (OT, SLP), False),
     "92612": ("Flexible endoscopic swallow eval (FEES)", (SLP,), False),
     "92613": ("FEES interpretation and report", (SLP,), False),
     "92614": ("Laryngeal sensory testing", (SLP,), False),
     "92615": ("Laryngeal sensory testing interpretation", (SLP,), False),
     "92616": ("FEES w/ laryngeal sensory testing", (SLP,), False),
     "92617": ("FEES w/ sensory testing interpretation", (SLP,), False),
-    # ---- auditory rehab ----
-    "92626": ("Auditory function evaluation, first hour", (SLP,), False),
-    "92627": ("Auditory function evaluation, each addl 15 min", (SLP,), True),
+    # ---- implanted-device auditory evaluation ----
+    # NOT "auditory rehabilitation" — CPT 2020 revised the descriptor to
+    # candidacy/postoperative status for a SURGICALLY IMPLANTED device, and CMS
+    # classes these as AUDIOLOGY codes: they are absent from the CMS Therapy Code
+    # List entirely and never take GN. Kept because SLPs do bill them in aural-
+    # rehab settings, but read these rates as audiology, not therapy.
+    "92626": ("Auditory function eval for implanted device, first hour", (SLP,), False),
+    "92627": ("Auditory function eval for implanted device, each addl 15 min", (SLP,), True),
     # ---- AAC / voice ----
     "92597": ("Voice prosthetic evaluation", (SLP,), False),
-    "92605": ("Non-speech-generating AAC device eval, first hour", (SLP,), False),
-    "92606": ("Non-speech-generating AAC device services", (SLP,), False),
+    # the NON-speech-generating AAC family is on AOTA's list (OT assistive
+    # technology); the speech-generating family below is SLP-only
+    "92605": ("Non-speech-generating AAC device eval, first hour", (OT, SLP), False),
+    "92606": ("Non-speech-generating AAC device services", (OT, SLP), False),
     "92607": ("Speech-generating AAC device eval, first hour", (SLP,), False),
     # timed=False on purpose: it IS time-based but the flag means "15-minute
     # unit" (and renders as 'timed 15-min' on reports) — 92608 is a 30-minute
@@ -187,9 +207,14 @@ NON_OUTPATIENT_TAXONOMY_PREFIXES = (
     "324",    # Residential treatment, physical disabilities
     "385H",   # Respite care
     # Agencies and schools that employ PT/OT/SLP but are not outpatient
-    # practices — an Early Intervention agency or a school district is not a
-    # prospect even when therapists are most of its identified providers:
-    "252Y",   # Early Intervention Provider Agency
+    # practices — a school district is not a prospect even when therapists are
+    # most of its identified providers.
+    # NOT vetoed: 252Y (Early Intervention Provider Agency). The veto is
+    # absolute — ONE member NPI disqualifies the whole TIN — and private
+    # pediatric PT/OT/SLP clinics routinely hold an EI agency NPI alongside
+    # their clinic NPI, so vetoing it deleted exactly the pediatric practices
+    # this tool is meant to surface. An EI agency's own therapists now face the
+    # ordinary clinician-share test like any other practice.
     "251C",   # Developmentally Disabled Services Day Training
     "2513",   # Local Education Agency (school districts)
     "251S",   # Community/Behavioral Health Agency

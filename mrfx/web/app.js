@@ -11,6 +11,11 @@ const $$ = (sel, el = document) => [...el.querySelectorAll(sel)];
 const LATEST_MONTH_OPT =
   '<option value="latest">Latest available — all payers, newest rates</option>';
 
+// Below this many peer practices a peer median is directional only. Must track
+// schedule._THIN_PEERS — the printable report flags the same cells, and screen
+// and report must not disagree about which numbers carry a caveat.
+const THIN_PEERS = 5;
+
 const state = {
   view: "explorer",
   grain: "tin",
@@ -1382,7 +1387,13 @@ async function openReportWith(url, payload) {
     });
     if (!r.ok) {
       if (w) w.close();
-      alert("report failed: " + (await r.text()));
+      // The refusals here are deliberate, plain-language guards (no state
+      // scope, no rates for this subject) that the user is meant to ACT on —
+      // so show the message, not the raw {"detail": …} JSON wrapper.
+      const raw = await r.text();
+      let msg = raw;
+      try { msg = JSON.parse(raw).detail || raw; } catch (_) { /* not JSON */ }
+      alert("Can't build this report.\n\n" + msg);
       return;
     }
     const objUrl = URL.createObjectURL(await r.blob());
@@ -1600,8 +1611,13 @@ async function buildRatecard() {
   try { data = await postJson("/api/schedule/fee", payload); }
   catch (e) { out.innerHTML = `<div class="empty"><h3>Could not build</h3>${esc(e.message)}</div>`; return; }
   state.lastRatecardPayload = payload;
-  $("#rc-report").disabled = false;
-  $("#rc-csv").disabled = false;
+  // Only offer the client-facing deliverables when there IS a card. With zero
+  // codes the server now refuses to render one, so enabling the buttons would
+  // only produce an error alert — and before that guard existed it produced a
+  // branded, empty rate card the user could have sent to a client.
+  const hasCard = ((data.fee_schedule || {}).codes || []).length > 0;
+  $("#rc-report").disabled = !hasCard;
+  $("#rc-csv").disabled = !hasCard;
   renderRatecard(out, data.fee_schedule, data.scorecard);
 }
 
@@ -1642,7 +1658,11 @@ function renderRatecard(out, fs, sc) {
         const vs = v.vs_market_pct;
         const tag = vs == null ? "" : vs === 0 ? " · even"
           : ` · <span class="${vs > 0 ? "peer-up" : "peer-down"}">${vs > 0 ? "+" : ""}${vs}% vs peers</span>`;
-        peer = `<div class="sub" title="what ${esc(p)} pays your peers for this code (${fmtInt(v.n_peers)} practice${v.n_peers === 1 ? "" : "s"}, you excluded)">peer $${fmtMoney(v.market_median)}${tag}</div>`;
+        // The peer count and the thin flag must be VISIBLE, not tucked into a
+        // tooltip: the printable report shows both, so a screenshotted dashboard
+        // otherwise presents the same number with none of its caveats.
+        const thin = v.n_peers < THIN_PEERS ? ` <span class="thin">thin</span>` : "";
+        peer = `<div class="sub" title="what ${esc(p)} pays your peers for this code (you excluded)">peer $${fmtMoney(v.market_median)}${tag} · ${fmtInt(v.n_peers)} peer${v.n_peers === 1 ? "" : "s"}${thin}</div>`;
       }
       return `<td class="num${top}">$${fmtMoney(v.rate)}${mc}${peer}</td>`;
     }).join("");

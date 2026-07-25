@@ -44,10 +44,26 @@ payer_name_map:
 parallel_ingests: 0
 
 # Files DOWNLOADED at the same time to feed the parsers above. 0 = auto:
-# enough to keep the parsers fed, capped at 4 (polite to payer servers).
+# enough to keep the parsers fed, capped at 6 (a browser's own per-host limit).
 # 1 = strictly one download at a time. Concurrent downloads each reserve
 # their remaining size, so together they can never fill your disk.
 parallel_downloads: 0
+
+# Connections used for ONE file, via HTTP byte-range requests (like a download
+# manager). 1 = off. Raise this when the queue is a few VERY LARGE files and
+# downloading is the slow stage: many payer CDNs throttle each connection, so
+# one 5 GB file arrives at a fraction of your line speed no matter how fast your
+# internet is, and splitting it into 4 ranges fetches 4 pieces at once.
+#
+# When it does NOT help: hundreds of small files (parallel_downloads above is
+# already the right lever there), a server that refuses range requests (mrfx
+# detects this and silently falls back to one connection), or a link you are
+# resuming a partial download of.
+#
+# It MULTIPLIES open connections (segments x parallel_downloads), so on a flaky
+# CDN that drops connections a high value raises the failure rate. Pair a higher
+# segment count with a LOWER parallel_downloads — e.g. segments 4, downloads 2.
+download_segments: 1
 
 # Give up on a download that goes this many seconds with NO forward progress —
 # a flaky server (CDN) that keeps closing the connection early and won't resume.
@@ -110,6 +126,10 @@ enrichment:
 # loaded first (enrichment.mode: bulk) — until the lookup cache is built it
 # ingests everything and logs a warning. TIN-only rates are always kept. Tip:
 # run `mrfx enrich --bulk <file>` once to build the cache before ingesting.
+# CAVEAT: this filter is applied at PARSE time, so it is the one setting an app
+# update cannot repair. If a later version widens which taxonomies count as
+# therapy, the practice directory is rebuilt automatically but rows already
+# dropped at ingest are gone — re-ingest those files to pick them up.
 # therapy_only_ingest: false
 
 port: 8377

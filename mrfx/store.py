@@ -444,7 +444,7 @@ ROLLUP_SCHEMA_VERSION = 2
 # counting as a therapy practice); the real PT code 261QP2000X replaces it, and
 # Hearing-and-Speech / Developmental-Disabilities / CORF clinics were added so
 # speech and pediatric therapy clinics stop being excluded.
-DIRECTORY_SCHEMA_VERSION = 3
+DIRECTORY_SCHEMA_VERSION = 4
 
 # Sentinel for upsert_file(finished_at=...): "stamp the completion time INSIDE
 # the write lock". Callers must never pre-compute a done-timestamp in Python —
@@ -589,47 +589,87 @@ TIN_DIRECTORY_QUERY = """
            -- every one of them in regardless of how MD-heavy they were.
            -- Enrichment-dependent by design: NULL taxonomies count toward neither
            -- side of the share, so the flag sharpens as identification lands.
-           count(DISTINCT j.npi) FILTER ({therapy})                 AS therapy_npi_count,
-           count(DISTINCT j.npi)
-               FILTER (j.taxonomy_code IS NOT NULL)                 AS classified_npi_count,
+           -- Counted on CLINICIANS (NPI-1 / unknown), never on org NPIs. A group
+           -- that registers one org NPI per location would otherwise buy itself a
+           -- "therapist" per site: measured live, 3 PT-clinic site orgs + 3 PTs +
+           -- 5 MDs passed, and so did 3 site orgs + 1 MD with ZERO therapists at
+           -- all. Org NPIs contribute as EVIDENCE (the strong-clinic signal and
+           -- the org-only-practice case below), not as headcount.
+           count(DISTINCT j.npi) FILTER (
+               coalesce(j.entity_type, 'NPI-1') <> 'NPI-2'
+               AND {therapy})                                       AS therapy_npi_count,
+           count(DISTINCT j.npi) FILTER (
+               coalesce(j.entity_type, 'NPI-1') <> 'NPI-2'
+               AND j.taxonomy_code IS NOT NULL)                     AS classified_npi_count,
            coalesce(bool_or({hospital}), FALSE)                     AS has_hospital,
            coalesce(bool_or({excluded}), FALSE)                     AS has_facility,
-           -- SHARE denominator counts identified PROVIDERS, not billing shells: a
-           -- non-therapy ORG (NPI-2) code — "Multi-Specialty Group", a DME/orthotics
-           -- arm, a billing entity — is the practice's paperwork, not a clinician,
-           -- and at a 2-3 provider practice one such org NPI silently pushed a real
-           -- therapy clinic under the bar (75% of 3 rounds up to "all 3"). Non-
-           -- therapy INDIVIDUALS (an MD medical director, a chiropractor) still
-           -- count against the share — that's the mixed-group case we exclude.
-           -- Therapy org NPIs stay in the numerator (they're positive evidence).
+           -- ONE population, measured consistently: the TIN's CLINICIANS, i.e.
+           -- every NPI that isn't a known organization. An org (NPI-2) code —
+           -- "Multi-Specialty Group", a DME/orthotics arm, a per-location billing
+           -- shell — is the practice's paperwork, not a person, so it belongs on
+           -- NEITHER side of the share NOR in the coverage denominator.
+           -- Mixing populations was itself the bug: counting org NPIs in the
+           -- numerator handed multi-site groups a phantom therapist per location,
+           -- and measuring coverage over ALL NPIs while the share ignored orgs
+           -- meant each added shell bought one more unidentified NPI (measured:
+           -- 1 PT + 100 shells + 100 unknowns qualified).
            -- coalesce(entity_type,'NPI-1'): an UNKNOWN entity type must count as a
            -- clinician (dilute), not as a shell. Without it, `NULL = 'NPI-2'` is
            -- NULL, the FILTER drops the row, and an MD whose entity type wasn't
            -- recorded stopped diluting — quietly re-loosening the rule.
-           (count(DISTINCT j.npi) FILTER (
-                    j.taxonomy_code IS NOT NULL
-                    AND NOT (coalesce(j.entity_type, 'NPI-1') = 'NPI-2' AND NOT {therapy}))) > 0
-           AND ((count(DISTINCT j.npi) FILTER ({therapy})) * 100
+           (
+               -- (a) SHARE: {min_share}% of identified clinicians are PT/OT/SLP
+               (count(DISTINCT j.npi) FILTER (
+                        coalesce(j.entity_type, 'NPI-1') <> 'NPI-2'
+                        AND j.taxonomy_code IS NOT NULL) > 0
+                AND (count(DISTINCT j.npi) FILTER (
+                        coalesce(j.entity_type, 'NPI-1') <> 'NPI-2' AND {therapy})) * 100
                     >= (count(DISTINCT j.npi) FILTER (
-                            j.taxonomy_code IS NOT NULL
-                            AND NOT (coalesce(j.entity_type, 'NPI-1') = 'NPI-2' AND NOT {therapy}))) * {min_share}
-                -- a DEFINITE therapy clinic ("Clinic/Center - Physical Therapy",
-                -- never anything else) needs only a simple majority: a two-
-                -- therapist clinic with one NP on staff is still a therapy clinic
-                OR (coalesce(bool_or({strong_clinic}), FALSE)
-                    AND (count(DISTINCT j.npi) FILTER ({therapy})) * 2
-                        > count(DISTINCT j.npi) FILTER (
-                              j.taxonomy_code IS NOT NULL
-                              AND NOT (coalesce(j.entity_type, 'NPI-1') = 'NPI-2' AND NOT {therapy}))))
-           -- COVERAGE: half the TIN's NPIs identified, OR it is a SMALL practice
-           -- carrying the unambiguous PT-clinic org code. The escape MUST use the
-           -- strong code and MUST be size-bounded: allowing the ambiguous
-           -- rehab-clinic code here (or any size) let a physiatry group / hospital
-           -- outpatient rehab dept whose ONLY identified NPI was its
+                        coalesce(j.entity_type, 'NPI-1') <> 'NPI-2'
+                        AND j.taxonomy_code IS NOT NULL)) * {min_share})
+               -- (b) a DEFINITE therapy clinic ("Clinic/Center - Physical Therapy"
+               --     and friends, never the ambiguous rehab code) needs only HALF
+               --     its clinicians: a two-therapist clinic with an NP on staff is
+               --     still a therapy clinic.
+               OR (coalesce(bool_or({strong_clinic}), FALSE)
+                   AND count(DISTINCT j.npi) FILTER (
+                       coalesce(j.entity_type, 'NPI-1') <> 'NPI-2'
+                       AND j.taxonomy_code IS NOT NULL) > 0
+                   AND (count(DISTINCT j.npi) FILTER (
+                       coalesce(j.entity_type, 'NPI-1') <> 'NPI-2' AND {therapy})) * 2
+                       >= count(DISTINCT j.npi) FILTER (
+                           coalesce(j.entity_type, 'NPI-1') <> 'NPI-2'
+                           AND j.taxonomy_code IS NOT NULL))
+               -- (c) a SMALL practice with NO identified clinician yet, known only
+               --     by an org NPI that is either an unambiguous therapy CLINIC or
+               --     an incorporated sole proprietor still carrying their
+               --     PRACTITIONER taxonomy. This is the ordinary early-enrichment
+               --     state of a real one-site clinic. Bounded in size, and it must
+               --     be a strong code — the ambiguous "Clinic/Center -
+               --     Rehabilitation" org NPI standing alone is exactly the
+               --     physiatry / hospital-outpatient population we exclude — and
+               --     nothing identified may contradict it.
+               OR ((coalesce(bool_or({strong_clinic}), FALSE)
+                    OR coalesce(bool_or({therapy_practitioner}), FALSE))
+                   AND count(DISTINCT j.npi) FILTER (
+                       coalesce(j.entity_type, 'NPI-1') <> 'NPI-2'
+                       AND j.taxonomy_code IS NOT NULL) = 0
+                   AND count(DISTINCT j.npi) FILTER (
+                       j.taxonomy_code IS NOT NULL AND NOT {therapy}) = 0
+                   AND count(DISTINCT j.npi) <= {small_practice})
+           )
+           -- COVERAGE: half the TIN's CLINICIAN slots identified, OR it is a SMALL
+           -- practice carrying an unambiguous therapy-clinic org code. The escape
+           -- MUST use the strong code and MUST be size-bounded: allowing the
+           -- ambiguous rehab-clinic code here (or any size) let a physiatry group /
+           -- hospital outpatient rehab dept whose ONLY identified NPI was its
            -- "Clinic/Center - Rehabilitation" org NPI score 100% therapy and skip
            -- coverage entirely — reopening the exact leak this rule exists to close.
-           AND ((count(DISTINCT j.npi) FILTER (j.taxonomy_code IS NOT NULL)) * 2
-                    >= count(DISTINCT j.npi)
+           AND ((count(DISTINCT j.npi) FILTER (
+                        coalesce(j.entity_type, 'NPI-1') <> 'NPI-2'
+                        AND j.taxonomy_code IS NOT NULL)) * 2
+                    >= count(DISTINCT j.npi) FILTER (
+                        coalesce(j.entity_type, 'NPI-1') <> 'NPI-2')
                 OR (coalesce(bool_or({strong_clinic}), FALSE)
                     AND count(DISTINCT j.npi) <= {small_practice}))
            AND NOT coalesce(bool_or({excluded}), FALSE)             AS is_therapy
@@ -666,6 +706,13 @@ TIN_DIRECTORY_QUERY = (
     # alone qualify a whole physiatry/hospital-outpatient TIN.
     .replace("{strong_clinic}", therapy_taxonomy_sql(
         "j.taxonomy_code", prefixes=(), codes=THERAPY_CLINIC_STRONG_CODES))
+    # PRACTITIONER therapy taxonomies only (Physical Therapist, OTA, SLP… — a
+    # person's credential), never the Clinic/Center org codes. An incorporated
+    # sole proprietor gets a Type-2 NPI that still carries their PRACTITIONER
+    # taxonomy — that is a therapist, not a billing shell — so it must be able to
+    # stand in for a clinician at a one-person practice.
+    .replace("{therapy_practitioner}", therapy_taxonomy_sql(
+        "j.taxonomy_code", codes=()))
     .replace("{min_share}", str(THERAPY_MIN_SHARE_PCT))
     .replace("{small_practice}", str(THERAPY_SMALL_PRACTICE_NPIS))
 )
@@ -903,7 +950,12 @@ class Store:
                     "older version (directory v%s -> v%d) — rebuilding just the "
                     "directory (the rate data is untouched)",
                     dver or "?", DIRECTORY_SCHEMA_VERSION)
-                self.rebuild_rollups(tables=("tin_directory_tbl",))
+                # names_only=True IS the directory-only selection (see
+                # rebuild_rollups) — passing tables= raised a TypeError that the
+                # broad except below swallowed as a "skipped" warning, so the
+                # marker never advanced, the check re-fired on every launch, and
+                # rule changes never reached an existing store.
+                self.rebuild_rollups(names_only=True)
                 return
             with self.connect() as con:
                 if (self._meta_get(con, "rollup_covered_through") is not None
@@ -2273,6 +2325,17 @@ class Store:
                 if self._meta_get(con, "rollup_schema_version") != str(ROLLUP_SCHEMA_VERSION):
                     raise RuntimeError("rollup tables were built by an older "
                                        "version (or never built)")
+                # The DIRECTORY version moves independently of the rollup one, and
+                # this INSERT feeds TIN_DIRECTORY_QUERY's CURRENT column list into
+                # the EXISTING table. Against a directory built before a column was
+                # added that's a raw column-count BinderException; only the caller's
+                # fallback-to-full-rebuild happened to repair it. Refuse up front so
+                # the intended path (full names rebuild) runs deliberately.
+                if self._meta_get(con, "directory_schema_version") != str(
+                        DIRECTORY_SCHEMA_VERSION):
+                    raise RuntimeError("the practice directory was built by an "
+                                       "older version — a full names rebuild "
+                                       "must run first")
                 if not con.execute(
                         "SELECT count(*) FROM information_schema.tables "
                         "WHERE table_name = 'tin_directory_tbl'").fetchone()[0]:
