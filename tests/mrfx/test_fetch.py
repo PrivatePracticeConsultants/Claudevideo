@@ -1,6 +1,7 @@
 """URL-drop ingestion tests: direct file URLs, TOC auto-expansion, web-page
 handling, dedup, retry, and the oversize guard — against a local HTTP server."""
 
+import argparse
 import gzip
 import http.server
 import json
@@ -643,14 +644,19 @@ def test_segmentation_falls_back_when_server_ignores_range(cfg, monkeypatch):
 def test_resolve_download_count_modes(cfg, monkeypatch):
     import mrfx.fetch as F
 
-    # auto on a big box: enough to feed the workers, politeness-capped at 6
-    # (the browser per-host connection limit)
+    # auto = the politeness cap (6, the browser per-host connection limit),
+    # INDEPENDENT of core count: downloading is network-bound, so sizing it by
+    # cores throttled the exact case it should help — a 4-core laptop waiting on
+    # a slow payer CDN got 3 fetches in flight instead of 6.
     monkeypatch.setattr(F.os, "cpu_count", lambda: 9)
     cfg.parallel_downloads = 0
     assert F.resolve_download_count(cfg) == 6
-    # auto on a tiny box: floor of 2 so network still overlaps parsing
+    monkeypatch.setattr(F.os, "cpu_count", lambda: 4)
+    assert F.resolve_download_count(cfg) == 6
     monkeypatch.setattr(F.os, "cpu_count", lambda: 2)
-    assert F.resolve_download_count(cfg) == 2
+    assert F.resolve_download_count(cfg) == 6
+    monkeypatch.setattr(F.os, "cpu_count", lambda: 1)
+    assert F.resolve_download_count(cfg) == 6
     # explicit values are honored; 1 = the old sequential downloader
     cfg.parallel_downloads = 6
     assert F.resolve_download_count(cfg) == 6
@@ -1813,3 +1819,174 @@ def test_framework_asset_paths_not_lifted(cfg):
     assert not any("locales" in l or "i18n" in l or "wp-content" in l or
                    "clientlibs" in l or "_next" in l or "node_modules" in l
                    for l in links)
+
+
+def test_speedtest_recommends_segments_on_a_per_connection_throttle(cfg, capsys, monkeypatch):
+    """`mrfx speedtest` answers the question a user cannot answer by guessing:
+    is this link slow because the payer throttles each connection (splitting it
+    helps) or because their own line is full (nothing to tune)? Here the server
+    throttles per connection, so it must recommend segments."""
+    import http.server as hs
+    import os as _os
+    import threading as _th
+    import time as _time
+
+    from mrfx.cli import cmd_speedtest
+
+    payload = _os.urandom(24_000_000)
+
+    class Throttled(hs.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self):
+            rng = self.headers.get("Range", "")
+            if not rng.startswith("bytes="):
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers(); self.wfile.write(payload); return
+            a, b = rng[6:].split("-")
+            start = int(a); end = min(int(b) if b else len(payload) - 1, len(payload) - 1)
+            body = payload[start:end + 1]
+            self.send_response(206)
+            self.send_header("Content-Range", f"bytes {start}-{end}/{len(payload)}")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            # Hard per-connection rate cap (~3 MB/s a lane), so N lanes really
+            # is ~N x and the measured ratio is unambiguous rather than sitting
+            # near the command's "is this just noise?" threshold.
+            for i in range(0, len(body), 65_536):
+                self.wfile.write(body[i:i + 65_536])
+                _time.sleep(0.02)
+
+        def log_message(self, *a):
+            pass
+
+    httpd = hs.ThreadingHTTPServer(("127.0.0.1", 0), Throttled)
+    _th.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{httpd.server_address[1]}/big.json.gz"
+        rc = cmd_speedtest(cfg, argparse.Namespace(url=url, mb=6))
+        out = capsys.readouterr().out
+    finally:
+        httpd.shutdown()
+    assert rc == 0
+    assert "range requests supported" in out
+    assert "1 connection" in out and "2 connections" in out
+    assert "download_segments:" in out, out          # actionable recommendation
+    assert "throttles each connection" in out
+    # It recommends a real multi-lane value. WHICH one (2/4/8) depends on where
+    # the loopback server's own threading tops out, so don't pin it — the
+    # contract under test is "detects the throttle and names a setting > 1".
+    assert any(f"download_segments: {n}" in out for n in (2, 4, 8)), out
+    assert "download_segments: 1" not in out
+    # it must not read the SAME bytes every attempt (a CDN cache would then
+    # flatter the later, multi-connection runs and fake a speedup)
+    assert "different" in out and "slice per attempt" in out
+
+
+def test_speedtest_says_so_when_the_server_refuses_ranges(cfg, capsys):
+    """No range support means one connection is the only option — say that
+    plainly instead of recommending a setting that cannot take effect."""
+    import http.server as hs
+    import os as _os
+    import threading as _th
+
+    from mrfx.cli import cmd_speedtest
+
+    payload = _os.urandom(50_000)
+
+    class NoRange(hs.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self):
+            self.send_response(200)          # 200 to a Range == no range support
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers(); self.wfile.write(payload)
+
+        def log_message(self, *a):
+            pass
+
+    httpd = hs.ThreadingHTTPServer(("127.0.0.1", 0), NoRange)
+    _th.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        rc = cmd_speedtest(cfg, argparse.Namespace(
+            url=f"http://127.0.0.1:{httpd.server_address[1]}/f.json.gz", mb=6))
+        out = capsys.readouterr().out
+    finally:
+        httpd.shutdown()
+    assert rc == 0
+    assert "does not support range requests" in out
+    assert "download_segments" in out and "no effect" in out
+
+
+def test_speedtest_refuses_to_judge_a_file_too_small_to_measure(cfg, capsys):
+    """A 1.17x difference over half a megabyte is noise, and acting on it would
+    open extra connections for nothing. Decline instead of inventing a verdict."""
+    import http.server as hs
+    import os as _os
+    import threading as _th
+
+    from mrfx.cli import cmd_speedtest
+
+    payload = _os.urandom(400_000)
+
+    class Ranged(hs.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self):
+            rng = self.headers.get("Range", "")
+            a, b = rng[6:].split("-")
+            start = int(a); end = min(int(b) if b else len(payload) - 1, len(payload) - 1)
+            body = payload[start:end + 1]
+            self.send_response(206)
+            self.send_header("Content-Range", f"bytes {start}-{end}/{len(payload)}")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers(); self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    httpd = hs.ThreadingHTTPServer(("127.0.0.1", 0), Ranged)
+    _th.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        rc = cmd_speedtest(cfg, argparse.Namespace(
+            url=f"http://127.0.0.1:{httpd.server_address[1]}/f.json.gz", mb=40))
+        out = capsys.readouterr().out
+    finally:
+        httpd.shutdown()
+    assert rc == 0
+    assert "too small to measure" in out
+    assert "VERDICT" not in out          # no verdict invented from noise
+
+
+def test_speedtest_names_a_dead_link_instead_of_blaming_range_support(cfg, capsys):
+    """A 404 fails the range probe too. Reporting "no range support" there would
+    send the user tuning a setting when the real answer is "your link expired" —
+    payer links are signed and die after days, so this is the common case."""
+    import http.server as hs
+    import threading as _th
+
+    from mrfx.cli import cmd_speedtest
+
+    class Gone(hs.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self):
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    httpd = hs.ThreadingHTTPServer(("127.0.0.1", 0), Gone)
+    _th.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        rc = cmd_speedtest(cfg, argparse.Namespace(
+            url=f"http://127.0.0.1:{httpd.server_address[1]}/expired.json.gz", mb=6))
+        out = capsys.readouterr().out
+    finally:
+        httpd.shutdown()
+    assert rc == 1
+    assert "HTTP 404" in out and "expire" in out
+    assert "range requests" not in out          # don't misdiagnose it

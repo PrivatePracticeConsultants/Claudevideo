@@ -412,9 +412,19 @@ moves that number, in order of impact:
    (4 segments x 2 files = 8 open connections) and a flaky CDN starts dropping
    connections when you open too many. If a server refuses range requests the
    app notices and quietly uses one connection, so turning this on is safe.
-   How to tell which case you're in: watch the Files tab. Many links at once,
-   each moving slowly -> raise `parallel_downloads`. One huge file crawling on
-   its own while everything waits -> raise `download_segments`.
+
+   **Don't guess — measure it.** Copy one of the big links that's holding your
+   queue up and run:
+
+   ```
+   mrfx speedtest "https://…the-big-file.json.gz"
+   ```
+
+   It downloads a slice of that file on 1, 2, 4 and 8 connections (a different
+   slice each time, so a server-side cache can't skew the result) and tells you
+   which case you're in — either the exact `download_segments` line to paste in,
+   or that extra connections don't help and the file really is just that big.
+   Takes a couple of minutes and changes nothing on your machine.
 
 3. **Don't ingest what you don't need.** The single biggest cost is all-codes
    mega-files. The app already skips files that contain none of your CPT codes

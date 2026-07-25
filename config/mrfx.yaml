@@ -43,9 +43,10 @@ payer_name_map:
 # capped at cores-1), or 1 to process strictly one file at a time.
 parallel_ingests: 0
 
-# Files DOWNLOADED at the same time to feed the parsers above. 0 = auto:
-# enough to keep the parsers fed, capped at 6 (a browser's own per-host limit).
-# 1 = strictly one download at a time. Concurrent downloads each reserve
+# Files DOWNLOADED at the same time to feed the parsers above. 0 = auto: 6,
+# the same per-host connection limit a web browser uses. This is deliberately
+# NOT tied to your processor count — downloading waits on the network, not the
+# CPU. 1 = strictly one download at a time. Concurrent downloads each reserve
 # their remaining size, so together they can never fill your disk.
 parallel_downloads: 0
 

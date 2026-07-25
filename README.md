@@ -321,12 +321,18 @@ Three link kinds are auto-detected:
 `0` = auto: your CPU cores minus one, capped at 8; a positive value is
 honored but still clamped to cores−1) parses that many files at once —
 each in its own OS process, while the database stays strictly single-writer
-in the main process. `parallel_downloads` (default `0` = auto: enough to
-feed the parsers, capped at 4 to stay polite to payer CDNs) fetches that
+in the main process. `parallel_downloads` (default `0` = auto: 6, the per-host
+connection limit a browser uses — deliberately NOT tied to core count, since
+downloading waits on the network rather than the CPU) fetches that
 many files concurrently; simultaneous downloads each reserve their
 remaining bytes so together they can never overcommit the disk — the
 disk-space guard counts other in-flight downloads' reservations against
-free space before starting a new one. Verified: 2 workers ran the same 3 UHC files 1.5x faster
+free space before starting a new one. `download_segments` (default `1` = off)
+splits ONE file across that many HTTP byte-range connections, for the other
+shape of slow: a queue of a few multi-GB files on a CDN that throttles each
+connection. `mrfx speedtest <url>` measures a real link on 1/2/4/8
+connections and says which of the two situations you're in rather than
+leaving it to guesswork. Verified: 2 workers ran the same 3 UHC files 1.5x faster
 with byte-identical row counts; a parser worker killed mid-parse restarts
 automatically and the file retries; killing the whole app mid-run resumes
 cleanly on restart with no duplicate rows. DuckDB's memory for analytics

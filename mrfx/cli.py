@@ -685,6 +685,138 @@ def cmd_enrich(cfg: MrfxConfig, args) -> int:
     return 0
 
 
+def cmd_speedtest(cfg: MrfxConfig, args) -> int:
+    """Measure a real MRF link on THIS machine: one connection vs several byte
+    ranges, over an equal-sized but DIFFERENT slice each time, then recommend a
+    download_segments value.
+
+    "Downloads are slow" has two very different causes and opposite fixes — a
+    payer CDN that throttles each connection (split the file: download_segments)
+    versus a genuinely saturated internet connection (nothing to tune). Only a
+    measurement on the user's own network can tell them apart, so this makes
+    that measurement one command instead of guesswork. Reuses the downloader's
+    own HTTP client and range probe, so what it reports is what ingest will do.
+    """
+    import threading
+    import time as _time
+
+    from .fetch import _client, _probe_ranges
+
+    url = args.url
+    mb = max(8, int(args.mb))
+    probe = _probe_ranges(cfg, url, None)
+    if probe is None:
+        # A dead link also fails the range probe, and MRF links expire constantly
+        # (most are signed with an Expires= stamp). Saying "no range support"
+        # there would send the user tuning a setting when the real answer is
+        # "grab a fresh link" — so find out which it is before advising.
+        try:
+            with _client(cfg) as client, client.stream("GET", url) as resp:
+                status = resp.status_code
+        except Exception as e:  # noqa: BLE001 — reporting the failure IS the result
+            print(f"Could not reach that link ({type(e).__name__}). Check the URL, or "
+                  "your connection.")
+            return 1
+        if status >= 400:
+            print(f"That link returned HTTP {status} — it's not downloadable at all, so "
+                  "there is\nnothing to measure. Payer links are usually signed and "
+                  "expire after a few\ndays; re-open the payer's index page and copy a "
+                  "fresh one.")
+            return 1
+        print("This server does not support range requests (or won't report a size),\n"
+              "so a download can only ever use ONE connection here — download_segments\n"
+              "would have no effect on this link. mrfx detects this automatically and\n"
+              "falls back, so there is nothing to change.")
+        return 0
+    total, final_url = probe
+    ATTEMPTS = 4                      # 1, 2, 4, 8 connections
+    _MIN_WINDOW = 5_000_000           # below this, timing noise swamps the signal
+    # Give each attempt a DIFFERENT slice of the file when there's room. Reading
+    # the same first N bytes four times lets the CDN serve later attempts from a
+    # hot cache, which flatters exactly the multi-connection runs we're judging.
+    window = min(total // ATTEMPTS, mb * 1_000_000)
+    print(f"file: {total / 1e6:,.1f} MB · range requests supported")
+    if window < _MIN_WINDOW:
+        print(f"\nThis file is only {total / 1e6:,.1f} MB — too small to measure "
+              "meaningfully, and\ntoo small for download_segments to matter either "
+              "way. Re-run this against\none of the multi-GB links that are "
+              "actually holding your queue up.")
+        return 0
+    print(f"measuring a different {window / 1e6:,.1f} MB slice per attempt, so a "
+          f"CDN cache\ncan't flatter the later ones (~{ATTEMPTS * window / 1e6:,.0f} "
+          f"MB of traffic total)\n")
+
+    def fetch(lo: int, hi: int) -> int:
+        got = 0
+        with _client(cfg) as client, client.stream(
+                "GET", final_url, headers={"Range": f"bytes={lo}-{hi}"}) as resp:
+            resp.raise_for_status()
+            for chunk in resp.iter_bytes(1 << 20):
+                got += len(chunk)
+        return got
+
+    def run(n: int, base: int) -> float:
+        """MB/s pulling `window` bytes from `base` split across n parallel ranges."""
+        piece, got = window // n, [0] * n
+        errs: list[BaseException] = []
+
+        def work(i: int) -> None:
+            lo = base + i * piece
+            hi = (base + window - 1) if i == n - 1 else (lo + piece - 1)
+            try:
+                got[i] = fetch(lo, hi)
+            except BaseException as e:  # noqa: BLE001 — a failed lane is a result
+                errs.append(e)
+
+        t0 = _time.monotonic()
+        threads = [threading.Thread(target=work, args=(i,)) for i in range(n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        elapsed = max(_time.monotonic() - t0, 1e-6)
+        if errs:
+            print(f"  {n} connection(s): {len(errs)} of {n} failed "
+                  f"({type(errs[0]).__name__}) — this CDN dislikes that many")
+            return 0.0
+        return sum(got) / 1e6 / elapsed
+
+    one = run(1, 0)
+    print(f"  1 connection : {one:6.2f} MB/s")
+    if one <= 0:
+        print("\nThe single-connection download failed, so there is no baseline to "
+              "compare against. Try again, or try a different link.")
+        return 1
+    # A genuine per-connection throttle shows up as 2x or more. Anything under
+    # that is ordinary run-to-run variance on a shared link, and acting on it
+    # would just open extra connections for nothing (raising the failure rate on
+    # a flaky CDN) — so hold the bar high enough that the advice is real.
+    _REAL_GAIN = 1.5
+    best, best_n = one, 1
+    for k, n in enumerate((2, 4, 8), start=1):
+        rate = run(n, k * window)
+        if rate > 0:
+            print(f"  {n} connections: {rate:6.2f} MB/s   ({rate / one:.2f}x)")
+        if rate > best * _REAL_GAIN:
+            best, best_n = rate, n
+    print()
+    if best_n == 1:
+        print("VERDICT: extra connections did not help. This link is limited by your\n"
+              "own internet speed (or the parse stage), not by the payer's server —\n"
+              "the files really are just that big. Leave download_segments at 1;\n"
+              f"at {one:.1f} MB/s a 5 GB file takes about "
+              f"{5000 / max(one, 0.01) / 60:.0f} minutes and no setting will change that.")
+    else:
+        hrs = total / 1e6 / max(one, 0.01) / 3600
+        print(f"VERDICT: this server throttles each connection — {best_n} connections\n"
+              f"ran {best / one:.1f}x faster. Set this in config/mrfx.yaml, then restart:\n\n"
+              f"  download_segments: {best_n}\n"
+              f"  parallel_downloads: 2      # lower this when you raise segments\n\n"
+              f"For a file this size that is roughly {hrs:.1f}h -> "
+              f"{hrs / (best / one):.1f}h.")
+    return 0
+
+
 def cmd_reset(cfg: MrfxConfig, args) -> int:
     if not args.confirm:
         print("refusing: pass --confirm to clear the store (processed files are kept)")
@@ -789,6 +921,13 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("enrich", help="resolve NPI names/geography now (NPPES bulk file or API)")
     p.add_argument("--bulk", dest="bulk_file", metavar="PATH",
                    help="NPPES full-file .zip (or unzipped .csv) — resolves all names in one local pass")
+    p = sub.add_parser(
+        "speedtest",
+        help="measure one MRF link: is it the payer's server throttling, or your connection?")
+    p.add_argument("url", help="a direct MRF file URL (not an index/TOC page)")
+    p.add_argument("--mb", type=int, default=40,
+                   help="MB to pull per attempt (default 40; downloads it 4x, once per setting)")
+
     p = sub.add_parser("reset", help="clear the store (keeps processed files)")
     p.add_argument("--confirm", action="store_true")
 
@@ -840,6 +979,7 @@ def main(argv: list[str] | None = None) -> int:
         "outreach": cmd_outreach,
         "forget": cmd_forget,
         "enrich": cmd_enrich,
+        "speedtest": cmd_speedtest,
         "reset": cmd_reset,
     }[args.cmd]
     try:

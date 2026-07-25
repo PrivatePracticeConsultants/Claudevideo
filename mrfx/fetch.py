@@ -1342,13 +1342,22 @@ _AUTO_DOWNLOAD_CAP = 6
 
 
 def resolve_download_count(cfg: MrfxConfig) -> int:
-    """Effective concurrent-download count. 0 (or unset) = auto: enough to
-    keep the parser pool fed (min(workers, 4), floor 2 so even a one-core
-    box overlaps network with parse); an explicit value is honored up to the
-    config's ceiling of 8. 1 = the old strictly-sequential downloader."""
+    """Effective concurrent-download count. 0 (or unset) = auto: the politeness
+    ceiling above; an explicit value is honored up to the config's ceiling of 8.
+    1 = the old strictly-sequential downloader.
+
+    NOT derived from the core count. Downloading is network-bound — it spends
+    its life blocked on a socket, using almost no CPU — so sizing it by cores
+    was a category error that quietly throttled the common case: on a 4-core
+    laptop `min(cores - 1, 6)` allowed only 3 fetches in flight, so when the
+    payer's CDN was the slow stage (the usual reason the parsers sit idle) two
+    thirds of the available concurrency went unused no matter how fast the
+    user's connection was. Disk safety is unaffected: every download reserves
+    its remaining bytes and the up-front guard counts other reservations
+    against free space, so extra fetchers self-limit rather than overcommit."""
     configured = int(getattr(cfg, "parallel_downloads", 0) or 0)
     if configured <= 0:
-        return max(2, min(_AUTO_DOWNLOAD_CAP, resolve_worker_count(cfg)))
+        return _AUTO_DOWNLOAD_CAP
     return max(1, min(configured, 8))
 
 
