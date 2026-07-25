@@ -107,11 +107,15 @@ DEFAULT_CODE_SET = list(CODE_CATALOG.keys())
 # match covers all specializations under a discipline. Extend these tuples if a
 # payer's therapists carry a taxonomy not listed here.
 THERAPY_TAXONOMY_PREFIXES = (
-    "2251",  # Physical Therapist (all specializations)
-    "2252",  # Physical Therapist Assistant
-    "225X",  # Occupational Therapist (all specializations)
-    "224Z",  # Occupational Therapy Assistant
-    "235Z",  # Speech-Language Pathologist
+    "2251",   # Physical Therapist (all specializations)
+    "2252",   # Physical Therapist Assistant
+    "225X",   # Occupational Therapist (all specializations)
+    "224Z",   # Occupational Therapy Assistant
+    "235Z",   # Speech-Language Pathologist
+    # Speech-Language ASSISTANT. Deliberately the 5-char prefix: bare "2355"
+    # would also sweep in 2355A2700X (Audiology Assistant). Without this a
+    # 1-SLP + 1-SLPA practice scored 50% and was hidden.
+    "2355S",
 )
 # full org/clinic taxonomies for practices that HOUSE therapists
 THERAPY_TAXONOMY_CODES = (
@@ -150,14 +154,29 @@ HOSPITAL_TAXONOMY_PREFIXES = (
 NON_OUTPATIENT_TAXONOMY_PREFIXES = (
     "314",    # Skilled Nursing Facility
     "313M",   # Nursing Facility / Intermediate Care
-    "315",    # Intermediate Care / residential
-    "310",    # Assisted living / residential treatment
-    "311",    # Homemaker / adult day / residential care
+    "315",    # Hospice / inpatient-care facility
+    "310",    # Nursing & Custodial Care Facility (assisted living, ICF)
+    "311",    # Custodial care (adult day, homemaker, group home)
     "251E",   # Home Health Agency
     "251J",   # Nursing Care (home) Agency
-    "3336",   # Pharmacies (co-billing noise)
     "251G",   # Hospice care, community based
+    "3336",   # Pharmacies (co-billing noise)
     "3416",   # Ambulance / transport
+    # Residential treatment / group-living families (the classes the earlier
+    # comment CLAIMED 310/311/315 covered but didn't):
+    "320",    # Residential treatment (mental illness, dev. disabilities)
+    "322",    # Residential treatment, chemical dependency
+    "323",    # Residential treatment, intellectual/dev. disabilities
+    "324",    # Residential treatment, physical disabilities
+    "385H",   # Respite care
+    # Agencies and schools that employ PT/OT/SLP but are not outpatient
+    # practices — an Early Intervention agency or a school district is not a
+    # prospect even when therapists are most of its identified providers:
+    "252Y",   # Early Intervention Provider Agency
+    "251C",   # Developmentally Disabled Services Day Training
+    "2513",   # Local Education Agency (school districts)
+    "251S",   # Community/Behavioral Health Agency
+    "251K",   # Public Health / Welfare Agency
 )
 
 # How much of a TIN's IDENTIFIED providers must be PT/OT/SLP (or a therapy
@@ -168,6 +187,13 @@ NON_OUTPATIENT_TAXONOMY_PREFIXES = (
 # more mixed rehab groups. Requires a directory rebuild to take effect (the
 # ROLLUP_SCHEMA_VERSION bump handles that automatically on upgrade).
 THERAPY_MIN_SHARE_PCT = 75
+
+# Ceiling (in NPIs) for the "small clinic whose providers aren't identified yet"
+# escape from the coverage test. A genuinely small therapy clinic carrying the
+# unambiguous PT-clinic org code is real even before NPPES identifies its
+# therapists; a 500-provider entity is not "small" and must earn the flag on
+# identified providers instead.
+THERAPY_SMALL_PRACTICE_NPIS = 10
 
 
 def hospital_taxonomy_sql(col: str) -> str:

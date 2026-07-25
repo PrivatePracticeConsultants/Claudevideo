@@ -35,7 +35,8 @@ from .benchmark import (
     render_payer_compare_report,
     render_pitch_report,
 )
-from .catalog import catalog_json, therapy_taxonomy_sql
+from .catalog import (THERAPY_MIN_SHARE_PCT, THERAPY_SMALL_PRACTICE_NPIS,
+                      catalog_json, therapy_taxonomy_sql)
 from .config import MrfxConfig
 from .enrich import use_bulk_enrichment
 from .leads import (compute_leaderboard, compute_leads, compute_payer_roster,
@@ -334,13 +335,19 @@ class FilterSet:
             clauses.append("NOT tin_is_really_npi")
             add("hide_tin_is_really_npi", True)
         if qp.get("therapy_only", "0") in ("1", "true"):
-            # STRICT practice test (tin_directory.is_therapy): majority of the
-            # practice's identified NPIs are PT/OT/SLP (or a therapy-clinic org
-            # NPI), and no hospital-class NPI — excludes MDs/DOs/NPs, physician
-            # groups, and hospital systems that merely bill 97xxx codes.
+            # STRICT outpatient-practice test (tin_directory.is_therapy) — the
+            # description below ships verbatim in every export's methodology
+            # sidecar, so it must state the rule the query ACTUALLY applied.
             clauses.append("is_therapy")
             add("therapy_practices_only",
-                "majority PT/OT/SLP (or therapy-clinic org NPI), no hospital-class NPI")
+                f"outpatient PT/OT/SLP practices only: >= {THERAPY_MIN_SHARE_PCT}% of the "
+                "practice's identified providers are PT/OT/SLP (incl. PTA/OTA/SLPA "
+                "or a Physical-Therapy clinic org NPI; non-therapy ORG NPIs are "
+                "not counted against it), at least half its NPIs are identified "
+                f"(or it is a <= {THERAPY_SMALL_PRACTICE_NPIS}-NPI practice carrying the "
+                "Physical-Therapy clinic code), and it carries no hospital, "
+                "skilled-nursing, home-health, hospice, residential, school/agency, "
+                "pharmacy or ambulance NPI")
             self.uses_dim_cols = True  # is_therapy is a joined/computed column
         for bound, op in (("rate_min", ">="), ("rate_max", "<=")):
             raw = qp.get(bound)

@@ -35,6 +35,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from .catalog import (THERAPY_CLINIC_STRONG_CODES, THERAPY_MIN_SHARE_PCT,
+                      THERAPY_SMALL_PRACTICE_NPIS,
                       excluded_facility_taxonomy_sql, hospital_taxonomy_sql,
                       therapy_taxonomy_sql)
 
@@ -421,13 +422,24 @@ DEDUP_QUERY = """
 # slices yields byte-identical results at a fraction of the memory/temp-disk
 # peak — the DISTINCT/median aggregates are what exhausted a 23 GB temp dir
 # on a 64M-row store when run in one shot.
-# bump when a rollup GROUP BY / column-semantics change must reach EXISTING
-# stores (same columns, different grain -> the missing-column probe can't see
-# it). v2: tin_is_really_npi joined the BY_TIN grain (identity blending fix).
-# v3: is_therapy tightened (share threshold + coverage test + non-outpatient
-# facility exclusion) — same columns, stricter meaning, so existing directories
-# must rebuild or the old lenient flags would keep admitting mixed groups.
-ROLLUP_SCHEMA_VERSION = 3
+# bump when a RATE-SPINE (rates_by_tin) GROUP BY / column-semantics change must
+# reach EXISTING stores (same columns, different grain -> the missing-column
+# probe can't see it). v2: tin_is_really_npi joined the BY_TIN grain (identity
+# blending fix). Bumping this forces the hours-long WHOLE-STORE pass, so only
+# bump it for a real spine change — a directory-only change uses
+# DIRECTORY_SCHEMA_VERSION below.
+ROLLUP_SCHEMA_VERSION = 2
+
+# bump when only the DIRECTORY's column semantics change (is_therapy rules,
+# name/geo derivation). Rebuilding tin_directory alone is minutes, not hours, so
+# this must NOT ride on ROLLUP_SCHEMA_VERSION: doing that made a therapy-filter
+# tweak re-aggregate the entire 300M-row rate spine and blocked serve (and even
+# `mrfx status`) inside Store.__init__ until it finished.
+# v2: is_therapy tightened — share measured over identified PROVIDERS (non-therapy
+# org NPIs no longer dilute), 75% threshold, enrichment-coverage test whose
+# small-clinic escape needs the unambiguous PT-clinic code, and the facility veto
+# widened past hospitals (SNF/home health/hospice/residential/schools/agencies).
+DIRECTORY_SCHEMA_VERSION = 2
 
 # Sentinel for upsert_file(finished_at=...): "stamp the completion time INSIDE
 # the write lock". Callers must never pre-compute a done-timestamp in Python —
@@ -576,18 +588,45 @@ TIN_DIRECTORY_QUERY = """
            count(DISTINCT j.npi)
                FILTER (j.taxonomy_code IS NOT NULL)                 AS classified_npi_count,
            coalesce(bool_or({hospital}), FALSE)                     AS has_hospital,
-           (count(DISTINCT j.npi) FILTER (j.taxonomy_code IS NOT NULL)) > 0
+           coalesce(bool_or({excluded}), FALSE)                     AS has_facility,
+           -- SHARE denominator counts identified PROVIDERS, not billing shells: a
+           -- non-therapy ORG (NPI-2) code — "Multi-Specialty Group", a DME/orthotics
+           -- arm, a billing entity — is the practice's paperwork, not a clinician,
+           -- and at a 2-3 provider practice one such org NPI silently pushed a real
+           -- therapy clinic under the bar (75% of 3 rounds up to "all 3"). Non-
+           -- therapy INDIVIDUALS (an MD medical director, a chiropractor) still
+           -- count against the share — that's the mixed-group case we exclude.
+           -- Therapy org NPIs stay in the numerator (they're positive evidence).
+           -- coalesce(entity_type,'NPI-1'): an UNKNOWN entity type must count as a
+           -- clinician (dilute), not as a shell. Without it, `NULL = 'NPI-2'` is
+           -- NULL, the FILTER drops the row, and an MD whose entity type wasn't
+           -- recorded stopped diluting — quietly re-loosening the rule.
+           (count(DISTINCT j.npi) FILTER (
+                    j.taxonomy_code IS NOT NULL
+                    AND NOT (coalesce(j.entity_type, 'NPI-1') = 'NPI-2' AND NOT {therapy}))) > 0
            AND ((count(DISTINCT j.npi) FILTER ({therapy})) * 100
-                    >= (count(DISTINCT j.npi) FILTER (j.taxonomy_code IS NOT NULL)) * {min_share}
+                    >= (count(DISTINCT j.npi) FILTER (
+                            j.taxonomy_code IS NOT NULL
+                            AND NOT (coalesce(j.entity_type, 'NPI-1') = 'NPI-2' AND NOT {therapy}))) * {min_share}
                 -- a DEFINITE therapy clinic ("Clinic/Center - Physical Therapy",
                 -- never anything else) needs only a simple majority: a two-
                 -- therapist clinic with one NP on staff is still a therapy clinic
                 OR (coalesce(bool_or({strong_clinic}), FALSE)
                     AND (count(DISTINCT j.npi) FILTER ({therapy})) * 2
-                        > count(DISTINCT j.npi) FILTER (j.taxonomy_code IS NOT NULL)))
+                        > count(DISTINCT j.npi) FILTER (
+                              j.taxonomy_code IS NOT NULL
+                              AND NOT (coalesce(j.entity_type, 'NPI-1') = 'NPI-2' AND NOT {therapy}))))
+           -- COVERAGE: half the TIN's NPIs identified, OR it is a SMALL practice
+           -- carrying the unambiguous PT-clinic org code. The escape MUST use the
+           -- strong code and MUST be size-bounded: allowing the ambiguous
+           -- rehab-clinic code here (or any size) let a physiatry group / hospital
+           -- outpatient rehab dept whose ONLY identified NPI was its
+           -- "Clinic/Center - Rehabilitation" org NPI score 100% therapy and skip
+           -- coverage entirely — reopening the exact leak this rule exists to close.
            AND ((count(DISTINCT j.npi) FILTER (j.taxonomy_code IS NOT NULL)) * 2
                     >= count(DISTINCT j.npi)
-                OR coalesce(bool_or({clinic}), FALSE))
+                OR (coalesce(bool_or({strong_clinic}), FALSE)
+                    AND count(DISTINCT j.npi) <= {small_practice}))
            AND NOT coalesce(bool_or({excluded}), FALSE)             AS is_therapy
     FROM joined j
     LEFT JOIN names n ON n.tin_value = j.tin_value
@@ -616,11 +655,14 @@ TIN_DIRECTORY_QUERY = (
     # clinic-org codes alone (no PT/OT/SLP prefixes): satisfies the COVERAGE
     # test for a small therapy clinic whose individual NPIs aren't identified
     # yet — it no longer bypasses the share test
-    .replace("{clinic}", therapy_taxonomy_sql("j.taxonomy_code", prefixes=()))
-    # unambiguous PT-clinic org code only (never the ambiguous rehab-clinic one)
+    # unambiguous PT-clinic org code only (never the ambiguous rehab-clinic one).
+    # Used for BOTH escapes — the share escape and the coverage escape; wiring
+    # the coverage escape to the broader {clinic} set let a rehab-clinic org NPI
+    # alone qualify a whole physiatry/hospital-outpatient TIN.
     .replace("{strong_clinic}", therapy_taxonomy_sql(
         "j.taxonomy_code", prefixes=(), codes=THERAPY_CLINIC_STRONG_CODES))
     .replace("{min_share}", str(THERAPY_MIN_SHARE_PCT))
+    .replace("{small_practice}", str(THERAPY_SMALL_PRACTICE_NPIS))
 )
 
 
@@ -836,6 +878,7 @@ class Store:
                     "SELECT column_name FROM information_schema.columns "
                     "WHERE table_name = 'tin_directory_tbl'").fetchall()}
                 ver = self._meta_get(con, "rollup_schema_version")
+                dver = self._meta_get(con, "directory_schema_version")
             if ("is_therapy" not in cols or "has_hospital" not in cols
                     or ver != str(ROLLUP_SCHEMA_VERSION)):
                 import logging as _logging
@@ -844,6 +887,18 @@ class Store:
                     "version (schema v%s -> v%d) — rebuilding once",
                     ver or "?", ROLLUP_SCHEMA_VERSION)
                 self.rebuild_rollups()
+                return
+            if "has_facility" not in cols or dver != str(DIRECTORY_SCHEMA_VERSION):
+                # DIRECTORY-ONLY drift (e.g. the therapy-practice rules changed):
+                # rebuild just tin_directory — minutes — instead of dragging the
+                # whole rate spine through an hours-long pass on every such tweak.
+                import logging as _logging
+                _logging.getLogger(__name__).info(
+                    "migrating store: the practice directory was built by an "
+                    "older version (directory v%s -> v%d) — rebuilding just the "
+                    "directory (the rate data is untouched)",
+                    dver or "?", DIRECTORY_SCHEMA_VERSION)
+                self.rebuild_rollups(tables=("tin_directory_tbl",))
                 return
             with self.connect() as con:
                 if (self._meta_get(con, "rollup_covered_through") is not None
@@ -2547,6 +2602,12 @@ class Store:
                 con.execute(
                     "INSERT OR REPLACE INTO meta VALUES ('directory_names_through', ?)",
                     [dir_names_ts])
+                # stamp the DIRECTORY semantics version here (not with the spine's
+                # marker): a directory-only rebuild must be able to clear its own
+                # migration, or the drift check would re-fire every startup
+                con.execute(
+                    "INSERT OR REPLACE INTO meta VALUES ('directory_schema_version', ?)",
+                    [str(DIRECTORY_SCHEMA_VERSION)])
             con.execute("COMMIT")
         except Exception:
             try:

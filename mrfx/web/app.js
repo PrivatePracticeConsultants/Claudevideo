@@ -299,6 +299,7 @@ async function loadMarkets() {
     postJson("/api/market/differential", body).catch((e) => ({ _err: e.message })),
   ]);
   const desc = state.catalog[code]?.description || "";
+  out.classList.remove("empty");
   out.innerHTML =
     `<div class="rc-summary">Market intelligence — <b>${esc(code)}</b>${desc ? " · " + esc(desc) : ""}. ` +
     `Latest rate per contract; thin cells (&lt;5 practices) suppressed.</div>` +
@@ -425,7 +426,11 @@ function rosterBody() {
   if ($("#ro-state").value.trim()) market.state = $("#ro-state").value.trim().toUpperCase();
   if ($("#ro-disc").value) market.discipline = $("#ro-disc").value;
   if ($("#ro-therapy").checked) market.therapy_only = true;
-  return { payer, market, min_codes: +$("#ro-mincodes").value || 1, sort: $("#ro-sort").value };
+  // send an explicit limit so the CSV contains exactly the list on screen —
+  // the endpoints' own defaults differ (500 vs 2000), which made the "showing
+  // the first 500" note wrong for the export
+  return { payer, market, min_codes: +$("#ro-mincodes").value || 1,
+           sort: $("#ro-sort").value, limit: 500 };
 }
 
 async function loadRoster() {
@@ -444,6 +449,9 @@ async function loadRoster() {
 }
 
 function renderRoster(out, d) {
+  // .empty styles the placeholder (centred, muted, big padding) — drop it before
+  // rendering a real table, or the table inherits placeholder framing
+  out.classList.toggle("empty", !d.organizations.length);
   if (!d.organizations.length) {
     out.innerHTML = `<div class="empty"><h3>No organizations found</h3>No practices publish therapy rates with ${esc(d.payer)} under the current filters. ${$("#ro-therapy").checked ? "\"Therapy only\" is on — uncheck it, or let NPI identification finish, to see more." : "Widen the state/discipline or lower min codes."}</div>`;
     return;
@@ -461,7 +469,7 @@ function renderRoster(out, d) {
   out.innerHTML = `<div class="rc-summary"><b>${fmtInt(d.count)}${d.truncated ? "+" : ""}</b> organization${d.count === 1 ? "" : "s"} contracted with <b>${esc(d.payer)}</b>${d.market.state ? " in " + esc(d.market.state) : ""}${d.market.discipline ? " · " + esc(d.market.discipline) : ""}.${cap}</div>
     <div class="muted" style="font-size:11.5px;margin:-6px 0 10px">${esc(d.note)}</div>
     <div class="tablewrap" style="max-height:calc(100vh - 220px)"><table>
-      <thead><tr><th>#</th><th>Organization</th><th>Location</th><th class="num">Providers</th><th class="num">Codes</th><th class="num" title="position among this payer's other practices">Position</th><th class="num">Median rate</th><th>TIN</th></tr></thead>
+      <thead><tr><th>#</th><th>Organization</th><th>Location</th><th class="num">Providers</th><th class="num">Codes</th><th class="num" title="position among this payer's other practices">Position</th><th class="num" title="median across whichever codes that practice prices with this payer — not comparable row-to-row unless the practices price the same codes">Median rate*</th><th>TIN</th></tr></thead>
       <tbody>${rows}</tbody></table></div>`;
 }
 
@@ -1531,12 +1539,14 @@ async function initRatecard() {
   refreshRcMpfs();
   if (ratecardInit) { refreshSubjectPickers("#rc-subjects", [{ sel: "#rc-month", prefix: LATEST_MONTH_OPT }]); return; }
   ratecardInit = true;
-  const [subjects, months, payers] = await Promise.all([
+  const [subjects, months, payers, states] = await Promise.all([
     api("/api/benchmark/subjects").catch(() => null),
     api("/api/months").catch(() => null),
     api("/api/payers").catch(() => null),
+    api("/api/states").catch(() => null),
   ]);
   if (subjects) $("#rc-subjects").innerHTML = subjectOptionsHtml(subjects);
+  if (states) $("#rc-states").innerHTML = (states.states || []).map((s) => `<option value="${esc(s)}">`).join("");
   wireSubjectSearch("#rc-subject", "#rc-subjects");
   fillMonthSelect("#rc-month", months, LATEST_MONTH_OPT);
   if (payers) $("#rc-payer-chips").innerHTML = payers.payers.map((p) =>
@@ -1570,6 +1580,10 @@ function ratecardPayload() {
     billing_class: $("#rc-class").value,
   };
   if ($("#rc-disc").value) market.discipline = $("#rc-disc").value;
+  // scope the per-cell peer comparison (blank = pooled, and the printable card
+  // prints a national-comparison banner saying so)
+  if ($("#rc-state").value.trim()) market.state = $("#rc-state").value.trim().toUpperCase();
+  if ($("#rc-therapy").checked) market.therapy_only = true;
   return { subject, market };
 }
 
@@ -1594,6 +1608,7 @@ async function buildRatecard() {
 const pctOrDash = (v) => (v == null ? "–" : `${v}%`);
 
 function renderRatecard(out, fs, sc) {
+  out.classList.remove("empty");  // real table, not the placeholder
   const mp = fs.mpfs_loaded;
   sc = sc || { rows: [] };  // never assume a scorecard came back — guard the forEach
   if (!fs.codes.length) {

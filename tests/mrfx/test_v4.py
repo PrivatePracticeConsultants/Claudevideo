@@ -478,6 +478,40 @@ def test_payer_roster_lists_contracted_orgs(market_store):
         compute_payer_roster(market_store, "", {"month": "2026-06"})
 
 
+def test_ratecard_peer_comparison_gates_thin_cells_and_labels_scope(cfg, market_store):
+    """The peer figure lands in a CLIENT-FACING deliverable, so: a cell backed by
+    too few peers reports nothing (never a one-contract 'market median'), the peer
+    COUNT is printed in the report, and an unscoped card says it pooled states."""
+    from mrfx.schedule import (compute_fee_schedule, fee_schedule_csv,
+                               payer_scorecard, render_rate_card)
+    # market_store: subject 430000000 at $30 with 9 peers at $31..$39 on 97110
+    fs = compute_fee_schedule(market_store, "430000000", {"month": "2026-06"})
+    v = fs["codes"][0]["rates"][fs["payers"][0]]
+    assert v["n_peers"] == 9 and v["market_median"] == 35.0
+    assert v["vs_market_pct"] == -14          # 30 vs a 35 peer median
+    sc = payer_scorecard(fs)
+    html = render_rate_card(cfg, market_store, fs, sc)
+    assert "peer $35.00" in html and "9 TINs" in html   # count travels with the number
+    # unscoped (no state) => the deliverable must SAY it pooled states
+    assert "NATIONAL PEER COMPARISON" in html
+    assert "payer_peer_median" in fee_schedule_csv(fs, sc, market_store)
+
+    # a 2-peer market is below the gate: no peer figure at all, anywhere
+    import mrfx.schedule as S
+    orig = S._MIN_PEERS
+    try:
+        S._MIN_PEERS = 20                      # nothing can clear this
+        thin = compute_fee_schedule(market_store, "430000000", {"month": "2026-06"})
+        tv = thin["codes"][0]["rates"][thin["payers"][0]]
+        assert tv["market_median"] is None and tv["vs_market_pct"] is None
+        assert tv["n_peers"] == 9              # the count is still reported honestly
+        body = render_rate_card(cfg, market_store, thin, payer_scorecard(thin))
+        table = body.split("<h2>Fee schedule</h2>")[1].split("<footer>")[0]
+        assert "peer $" not in table           # suppressed in the deliverable
+    finally:
+        S._MIN_PEERS = orig
+
+
 def test_mpfs_percent_of_medicare(cfg, market_store):
     client = TestClient(create_app(cfg, market_store))
     # no MPFS loaded -> no % of Medicare column
@@ -1229,7 +1263,23 @@ def test_therapy_practice_rule_matrix(store):
         ("tiny PT clinic: PT + NP + clinic", [PT, NP, PT_CLINIC],          True),
         # ...but the ambiguous REHAB-clinic code never qualifies on its own
         ("rehab-clinic code + NP majority", [REHAB_CLINIC, NP, NP],        False),
+        # The COVERAGE escape must need the UNAMBIGUOUS PT-clinic code and a small
+        # NPI count. Wiring it to the broader clinic set (or leaving it unbounded)
+        # let these four skip the coverage test on a 100%-therapy numerator — the
+        # physiatry / hospital-outpatient-rehab population, i.e. the exact leak.
+        ("rehab clinic + 3 unidentified",   [REHAB_CLINIC, None, None, None],   False),
+        ("rehab clinic + 1 PT + 20 unknown", [REHAB_CLINIC, PT] + [None] * 20,  False),
+        ("PT clinic + 50 unidentified",     [PT_CLINIC] + [None] * 50,          False),
+        ("PT clinic + 3 unknown (small)",   [PT_CLINIC, None, None, None],      True),
     ]
+    # NPPES entity_type must be realistic: an org/clinic/facility taxonomy belongs
+    # to a Type-2 (organization) NPI, a clinician to a Type-1 (individual) one.
+    # Seeding individual MDs as NPI-2 made them look like billing shells, which
+    # the share denominator deliberately ignores.
+    ORG_PREFIXES = ("261Q", "282", "283", "314", "251E", "252Y", "2513", "1932", "332B")
+    def _etype(tax: str) -> str:
+        return "NPI-2" if tax.startswith(ORG_PREFIXES) else "NPI-1"
+
     rows, n = [], 0
     for idx, (_label, taxes, _exp) in enumerate(cases):
         tin = "45%07d" % idx
@@ -1237,7 +1287,8 @@ def test_therapy_practice_rule_matrix(store):
             n += 1
             npi = "2%09d" % n
             if tax:
-                store.save_npi(npi, f"Org {idx}", tax, None, "KC", "MO", entity_type="NPI-2")
+                store.save_npi(npi, f"Org {idx}", tax, None, "KC", "MO",
+                               entity_type=_etype(tax))
             rows.append(dict(
                 payer="Aetna", tin_value=tin, tin_type="ein", npi=npi,
                 source_file="matrix.json", billing_code="97110", billing_code_type="CPT",
@@ -1294,8 +1345,13 @@ def test_therapy_filter_excludes_hospitals_and_md_majority_groups(cfg, store):
         ("1000000015", "Tiny PT", "225100000X"), ("1000000016", "Tiny NP", "363L00000X"),
         ("1000000017", "Tiny PT Clinic", "261QP2300X"),
     ]
+    # realistic entity types: clinicians are Type-1 NPIs, the hospital/clinic org
+    # NPIs are Type-2 (the share denominator ignores non-therapy ORG NPIs, so
+    # seeding an individual MD as NPI-2 would wrongly stop it from diluting)
     for npi, name, tax in seed:
-        store.save_npi(npi, name, tax, None, "KC", "MO", entity_type="NPI-2")
+        is_org = tax.startswith(("261Q", "282", "283"))
+        store.save_npi(npi, name, tax, None, "KC", "MO",
+                       entity_type="NPI-2" if is_org else "NPI-1")
     store.rebuild_rollups()
     with store.connect() as con:
         flags = dict(con.execute("SELECT tin_value, is_therapy FROM tin_directory").fetchall())

@@ -411,9 +411,16 @@
         <div class="field"><label>Discipline</label>
           <select id="rc-disc"><option value="">any</option><option>PT</option><option>OT</option><option>SLP</option></select>
         </div>
+        <div class="field"><label>State <span class="muted" style="text-transform:none" title="Scopes the 'peer' comparison in each cell to one state. Reimbursement varies by geography, so leaving this blank pools every loaded state and the printable card says so.">(scopes the peer comparison)</span></label>
+          <input type="text" id="rc-state" placeholder="all states" style="width:110px" list="rc-states" autocomplete="off">
+          <datalist id="rc-states"></datalist>
+        </div>
         <div class="field"><label>Billing class</label>
           <select id="rc-class"><option value="professional">professional</option><option value="institutional">institutional</option></select>
         </div>
+        <label class="toggle" title="compare against OUTPATIENT PT/OT/SLP practices only (same rule as the other tabs' therapy filter) — hides physician groups, hospitals and facilities from the peer median">
+          <input type="checkbox" id="rc-therapy"> therapy practices only (peers)
+        </label>
         <div class="mpfs-row">
           <span id="rc-mpfs-status" class="muted">MPFS: not loaded</span>
           <span class="muted" style="text-transform:none">load one on the Benchmark tab to add % of Medicare</span>

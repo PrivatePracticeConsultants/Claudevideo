@@ -30,6 +30,7 @@ from .benchmark import (
     GHOST_RATE_NOTE,
     BenchmarkError,
     _brand_header,
+    _geo_banner_html,
     _m,
     _market_where,
     _pctnum,
@@ -41,6 +42,13 @@ from .benchmark import (
 from .catalog import code_info
 from .config import MrfxConfig
 from .store import Store, defuse_csv, mask_tin
+
+# Minimum DISTINCT peer practices behind a per-cell "peer median" before it is
+# reported at all, and the count below which it is flagged as thin/directional.
+# The rate card is a client-facing deliverable, so a one-contract "market" must
+# never appear in it unlabeled (matches market._MIN_CELL's intent).
+_MIN_PEERS = 3
+_THIN_PEERS = 5
 
 
 def compute_fee_schedule(store: Store, subject: str, market: dict) -> dict:
@@ -133,8 +141,15 @@ def compute_fee_schedule(store: Store, subject: str, market: dict) -> dict:
             pct = round(100 * r["rate"] / base, 0)
         mk = market_by.get((r["payer"], code)) or {}
         mkt_med, n_peers = mk.get("market_median"), mk.get("n_peers") or 0
+        # THINNESS GATE: "the peer median" over one or two contracts is a single
+        # competitor's rate wearing a market's label — and this figure lands in a
+        # client-facing deliverable. Below _MIN_PEERS we report nothing rather
+        # than something indefensible; at or above it the peer COUNT travels with
+        # the number everywhere (screen, report, CSV) so the reader can judge it.
+        if n_peers < _MIN_PEERS:
+            mkt_med = None
         # signed % the subject sits above (+) or below (-) what this payer pays
-        # peers; None when there are no peers (only the subject prices it here)
+        # peers; None when there aren't enough peers to say
         vs = (round(100 * (r["rate"] - mkt_med) / mkt_med)
               if r["rate"] and mkt_med else None)
         entry["rates"][r["payer"]] = {
@@ -259,10 +274,17 @@ def _methodology(store: Store, fee_schedule: dict) -> str:
         "Rate for a (payer, code) is the median across the subject's tax IDs of "
         "each tax ID's median published value (variants collapse per the app's "
         "dedup rule).",
-        "Peer comparison ('peer $X · ±Y% vs peers'): the median rate THIS payer "
-        "pays every OTHER practice for the same code (subject excluded), on the "
-        "same basis and market scope; +Y% means the subject is paid above that "
-        "peer median, -Y% below it. A published rate is not proof of collection.",
+        *([
+            "Peer comparison ('peer $X · ±Y% vs peers (N TINs)'): the median rate "
+            "THIS payer pays every OTHER billing tax ID for the same code (subject "
+            "excluded), on the same basis and market scope; +Y% means the subject is "
+            f"paid above that peer median, -Y% below it. Cells backed by fewer than "
+            f"{_MIN_PEERS} peer tax IDs are omitted entirely, and fewer than "
+            f"{_THIN_PEERS} are marked 'thin' — a two-contract 'market' is not a "
+            "benchmark. A published rate is not proof of collection."
+        ] if any(v.get("market_median") is not None
+                 for row in fee_schedule["codes"] for v in row["rates"].values())
+          else []),
         "Payer scorecard: payers are ranked by median % of Medicare when an MPFS "
         "anchor is loaded (absolute), otherwise by the median ratio of this "
         "payer's rate to the BEST payer's rate over codes at least two payers "
@@ -287,6 +309,21 @@ def render_rate_card(cfg: MrfxConfig, store: Store, fee_schedule: dict,
         raise BenchmarkError("rate card requires a pinned as-of month")
     e = html.escape
     month = fee_schedule["market"].get("month")
+    # GEOGRAPHIC SCOPE. The card's primary content is the subject's OWN rates,
+    # which need no scoping — but the peer columns are a market comparison, and a
+    # client-facing deliverable must never pool states silently (invariant 4).
+    # The sibling reports RAISE because they are nothing but a market comparison;
+    # here the comparison is a secondary annotation, so we label it prominently
+    # instead of refusing (and the Rate-card form now offers a State field).
+    has_peers = any(v.get("market_median") is not None
+                    for row in fee_schedule["codes"] for v in row["rates"].values())
+    geo_banner = ""
+    if has_peers and not fee_schedule["market"].get("state"):
+        geo_banner = _geo_banner_html(
+            "NATIONAL PEER COMPARISON — no state filter was applied, so the "
+            "'peer' figures pool practices across every loaded state. Negotiated "
+            "reimbursement varies by geography; set the State field for an "
+            "in-market comparison. Your own rates above are unaffected.")
     mp = fee_schedule.get("mpfs_loaded")
     # order payer columns by scorecard rank (unranked payers keep their place)
     order = {r["payer"]: i for i, r in enumerate(scorecard["rows"])}
@@ -320,9 +357,12 @@ def render_rate_card(cfg: MrfxConfig, store: Store, fee_schedule: dict,
             top = " class='num top'" if best is not None and v["rate"] == best else " class='num'"
             sub = (f"<div class='sub'>{_pctnum(v['pct_medicare'])} MC</div>"
                    if mp and v["pct_medicare"] is not None else "")
-            # peer comparison: what this payer pays your peers for this code
+            # peer comparison: what this payer pays your peers for this code.
+            # The peer COUNT is printed here too — without it the reader of the
+            # deliverable cannot tell a 40-practice market from a 3-practice one.
             if v.get("market_median") is not None:
                 vs = v.get("vs_market_pct")
+                n_p = v.get("n_peers") or 0
                 if vs is None:
                     vs_span = ""
                 elif vs == 0:
@@ -330,7 +370,9 @@ def render_rate_card(cfg: MrfxConfig, store: Store, fee_schedule: dict,
                 else:
                     cls = "up" if vs > 0 else "down"
                     vs_span = f" · <span class='{cls}'>{'+' if vs > 0 else ''}{vs}% vs peers</span>"
-                sub += f"<div class='sub'>peer {_m(v['market_median'])}{vs_span}</div>"
+                thin = " <span class='thin'>thin</span>" if n_p < _THIN_PEERS else ""
+                sub += (f"<div class='sub'>peer {_m(v['market_median'])}{vs_span}"
+                        f" ({n_p} TIN{'' if n_p == 1 else 's'}){thin}</div>")
             cells += f"<td{top}>{_m(v['rate'])}{sub}</td>"
         return (f"<tr><td>{e(entry['billing_code'])}"
                 f"<div class='sub'>{e(entry['description'] or '')}"
@@ -359,6 +401,9 @@ def render_rate_card(cfg: MrfxConfig, store: Store, fee_schedule: dict,
  .num {{ text-align: right; }} .sub {{ color: #898781; font-size: 11px; font-weight: 400; }}
  tr.best {{ background: #eef6ee; }} td.top {{ font-weight: 700; color: #1c6b3a; }}
  .sub .up {{ color: #1c6b3a; font-weight: 600; }} .sub .down {{ color: #b3261e; font-weight: 600; }}
+ .sub .thin {{ color: #9a6b00; font-weight: 600; }}
+ .geo-warn {{ background: #fbe9d0; border: 1px solid #d99a3a; color: #7a4a00;
+             padding: 8px 12px; margin: 10px 0 14px; font-size: 12px; }}
  footer {{ margin-top: 32px; border-top: 1px solid #c3c2b7; padding-top: 12px;
           color: #52514e; font-size: 11px; white-space: pre-wrap; }}
  @media print {{ body {{ margin: 0; }} }}
@@ -366,6 +411,7 @@ def render_rate_card(cfg: MrfxConfig, store: Store, fee_schedule: dict,
 {_brand_header(cfg)}
 <h1>Rate card — {e(fee_schedule['subject'])}</h1>
 <div class="meta">Your negotiated rates by payer, as of {e(month_label(month))}. {best_line}</div>
+{geo_banner}
 <h2>Payer scorecard — who pays best</h2>
 <div class="wrap"><table><thead><tr>{sc_head}</tr></thead><tbody>{sc_html}</tbody></table></div>
 <h2>Fee schedule</h2>
