@@ -240,6 +240,58 @@ const Sound = {
   }
 };
 
+/* --- background music: a synthesized ambient loop -----------------------
+   Two detuned pads over a soft bass pulse; an off-beat tick layer fades in
+   while any patient is critical. Runs on a self-correcting setTimeout chain
+   against AudioContext time. Toggled with N; M (SFX mute) silences it too. */
+const Music = {
+  on: true,
+  playing: false,
+  timer: null,
+  step: 0,
+  start() {
+    if (this.playing) return;
+    this.playing = true;
+    this.step = 0;
+    this.tick();
+  },
+  stop() { this.playing = false; if (this.timer) clearTimeout(this.timer); },
+  note(freq, dur, type, vol) {
+    if (!this.on || Sound.muted || !Sound.ctx) return;
+    Sound.tone(freq, dur, type, vol);
+  },
+  tick() {
+    if (!this.playing) return;
+    const tense = Game.screen === "play" && Game.critical < CRIT_AT;
+    const stepDur = tense ? 0.21 : 0.25;            // eighth notes, ~120/96 bpm
+    const i = this.step % 32;
+
+    // bass: a slow Am - F - C - G walk, one root per 8 steps
+    const roots = [110.0, 87.31, 130.81, 98.0];
+    if (i % 8 === 0) this.note(roots[Math.floor(i / 8)], 0.42, "sine", 0.045);
+    if (i % 8 === 4) this.note(roots[Math.floor(i / 8)] * 2, 0.2, "sine", 0.022);
+
+    // pad: two detuned triangles on each chord change
+    if (i % 8 === 0) {
+      const r = roots[Math.floor(i / 8)] * 2;
+      this.note(r * 1.5, 1.6, "triangle", 0.016);
+      this.note(r * 1.498 * 1.26, 1.6, "triangle", 0.013);
+    }
+
+    // sparkle: an occasional high pentatonic ping on menus and calm play
+    if (!tense && (i === 6 || i === 22)) {
+      const pent = [523.25, 587.33, 659.25, 783.99, 880.0];
+      this.note(pent[(this.step >> 3) % pent.length], 0.5, "sine", 0.012);
+    }
+
+    // tension layer: off-beat ticks while someone is close to flatlining
+    if (tense && i % 2 === 1) this.note(2200, 0.03, "square", 0.018);
+
+    this.step++;
+    this.timer = setTimeout(() => this.tick(), stepDur * 1000);
+  }
+};
+
 /* ---------------------------------------------------------------------
    4. INPUT
    --------------------------------------------------------------------- */
@@ -254,7 +306,7 @@ const CONTROLS = [
 
 const SWALLOW = new Set([
   "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space", "Slash", "Period",
-  "KeyW", "KeyA", "KeyS", "KeyD", "KeyQ", "KeyE", "Escape", "ShiftLeft", "ShiftRight"
+  "KeyW", "KeyA", "KeyS", "KeyD", "KeyQ", "KeyE", "KeyN", "KeyM", "Escape", "ShiftLeft", "ShiftRight"
 ]);
 
 window.addEventListener("keydown", (e) => {
@@ -856,6 +908,7 @@ function makePlayer(index, x, y) {
     work: null,           // {key, t, dur, action}
     stamina: STAMINA_MAX,
     sprinting: false,
+    squash: 0,
     bob: 0,
     step: 0,              // walk-cycle phase
     hintT: 0, hint: "",
@@ -866,15 +919,18 @@ function makePlayer(index, x, y) {
 
 function makePatient(world, ailmentKey, level) {
   const a = AILMENTS[ailmentKey];
+  // VIPs appear from level 3 on (and in endless): double points, thinner patience
+  const vip = (Game.levelIndex >= 2 || Game.endless) && Game.rng() < 0.10;
   const p = {
+    vip,
     id: nextId++,
     ailment: ailmentKey,
     steps: a.steps.map(s => Object.assign({}, s)),
     step: 0,
     x: world.entrance.x * TILE + TILE / 2,
     y: world.entrance.y * TILE + TILE / 2,
-    patienceMax: level.patience * a.patienceMul,
-    patience: level.patience * a.patienceMul,
+    patienceMax: level.patience * a.patienceMul * (vip ? 0.8 : 1),
+    patience: level.patience * a.patienceMul * (vip ? 0.8 : 1),
     state: "walking",     // walking | waiting | carried | bed | station | leaving | gone
     path: [],
     slot: null,
@@ -995,6 +1051,7 @@ function startLevel(index) {
   Game.flashGood = 0;
   Game.banner = { text: def.name, sub: def.blurb, t: 0 };
   Game.result = null;
+  Game.tutorial = (index === 0) ? { stage: 0, t: 0 } : null;
 
   // Drop the players near the exit, on open floor.
   const spawnTiles = findOpenTilesNear(Game.world, Game.world.exit, 2);
@@ -1005,6 +1062,7 @@ function startLevel(index) {
   }
   Game.screen = "play";
   Sound.play("menu");
+  Music.start();
 }
 
 function findOpenTilesNear(world, origin, count) {
@@ -1075,11 +1133,13 @@ function facingFloorItem(p) {
   return best;
 }
 
-function hint(p, msg) { p.hint = msg; p.hintT = 1.6; }
+let SILENT_HINTS = false;
+function hint(p, msg) { if (SILENT_HINTS) return; p.hint = msg; p.hintT = 1.6; }
 
 /** E / "/" — pick up, put down, place patients. */
 function doInteract(p) {
   const world = Game.world;
+  p.squash = 0.18;
 
   // Carrying a patient: place them on a bed / X-ray, or set them down.
   if (p.patient) {
@@ -1175,6 +1235,28 @@ function freeSpotInFront(world, p) {
   return null;
 }
 
+/** What would E do right now? Side-effect-free mirror of doInteract, used
+    only for the on-screen button prompt. */
+function previewInteract(p) {
+  const world = Game.world;
+  if (p.patient) {
+    if (facingStation(world, p, st => STATIONS[st.type].holdsPatient && !st.occupant))
+      return p.patient.done ? null : "Place patient";
+    return p.patient.done ? null : "Set down";
+  }
+  if (p.item) {
+    const bedded = facingStation(world, p, st => st.occupant && st.type === "bed");
+    if (bedded) return null;                      // Q is the star here, keep E quiet
+    return "Drop " + ITEMS[p.item.type].name.toLowerCase();
+  }
+  if (facingPatient(p)) return "Pick up patient";
+  if (facingStation(world, p, st => st.occupant)) return "Pick up patient";
+  if (facingStation(world, p, st => st.type === "defibrack" && st.hasDefib)) return "Take defib";
+  const fi = facingFloorItem(p);
+  if (fi) return "Pick up " + ITEMS[fi.type].name.toLowerCase();
+  return null;
+}
+
 /* --- The "use" key: start or continue a hold-to-work action -------------- */
 
 /** What (if anything) can this player work on right now? Returns a job
@@ -1195,6 +1277,7 @@ function findJob(p) {
           key: "bed" + bedStation.x + "," + bedStation.y + ":" + pt.id + ":" + pt.step,
           dur: step.dur,
           label: step.label,
+          ptId: pt.id,
           run: () => {
             if (step.need) {
               if (step.need === "defib_charged") {
@@ -1248,7 +1331,7 @@ function findJob(p) {
       if (!step || step.k !== "atStation" || step.station !== st.type) { hint(p, "They don't need that"); continue; }
       return {
         key: "st" + st.x + "," + st.y + ":" + pt.id + ":" + pt.step,
-        dur: r.dur, label: r.label,
+        dur: r.dur, label: r.label, ptId: pt.id,
         run: () => {
           if (r.out) p.item = makeItem(r.out);
           advancePatient(pt);
@@ -1382,7 +1465,7 @@ function updatePlayer(p, dt) {
     if (!job) {
       p.work = null;
     } else if (!p.work || p.work.key !== job.key) {
-      p.work = { key: job.key, t: 0, dur: job.dur, label: job.label, run: job.run, tick: 0 };
+      p.work = { key: job.key, t: 0, dur: job.dur, label: job.label, run: job.run, ptId: job.ptId, tick: 0 };
     } else {
       p.work.run = job.run;                  // keep the closure fresh
       p.work.t += dt;
@@ -1406,6 +1489,18 @@ function updatePlayer(p, dt) {
   }
 
   if (p.hintT > 0) p.hintT -= dt;
+  if (p.squash > 0) p.squash -= dt;
+
+  // contextual button prompts (drawn by the renderer)
+  if (!p.work) {
+    SILENT_HINTS = true;
+    p.promptE = previewInteract(p);
+    const job = findJob(p);
+    p.promptQ = job ? job.label : null;
+    SILENT_HINTS = false;
+  } else {
+    p.promptE = null; p.promptQ = null;
+  }
 }
 
 function moveWithCollision(world, p, dx, dy) {
@@ -1441,6 +1536,7 @@ function dischargePatient(p) {
   const mult = Math.min(COMBO_MAX, 1 + 0.25 * (Game.combo - 1));
 
   let base = a.score + Math.round(frac * 100);
+  if (pt.vip) base *= 2;
   let callout = null, calloutColor = PALETTE.good;
   if (frac >= PERFECT_AT) {
     base += Math.round(a.score * 0.5);
@@ -1455,8 +1551,14 @@ function dischargePatient(p) {
   const gained = Math.round(base * mult);
   Game.score += gained;
   Game.treated++;
+  if (Game.endless && Game.treated % 10 === 0 && Game.lives < 3) {
+    Game.lives++;
+    popup(pt.x, pt.y - 92, "LIFE RESTORED", "#ff4d6d", true);
+    Sound.play("newbest");
+  }
 
-  popup(pt.x, pt.y - 26, "+" + gained + (mult > 1 ? "  x" + fmtMult(mult) : ""), PALETTE.good, true);
+  popup(pt.x, pt.y - 26, "+" + gained + (mult > 1 ? "  x" + fmtMult(mult) : ""), pt.vip ? "#ffd54a" : PALETTE.good, true);
+  if (pt.vip) popup(pt.x, pt.y - 70, "VIP x2", "#ffd54a", true);
   if (callout) popup(pt.x, pt.y - 52, callout, calloutColor, true);
   if (Game.combo >= 3) popup(pt.x, pt.y - 74, "CHAIN x" + Game.combo, "#8be9ff");
   burst(pt.x, pt.y, "#ffe066", 18 + Math.min(20, Game.combo * 3));
@@ -1499,7 +1601,8 @@ function updatePatients(dt) {
     // Patience: slower once they are settled in a bed.
     if (!pt.done) {
       const inBed = pt.station && pt.station.type === "bed";
-      const rate = inBed ? 0.62 : (pt.state === "station" ? 0.8 : 1.0);
+      let rate = inBed ? 0.62 : (pt.state === "station" ? 0.8 : 1.0);
+      if (Game.tendedIds && Game.tendedIds.has(pt.id)) rate *= 0.25;
       pt.patience -= dt * rate;
       if (pt.patience <= 0) { losePatient(pt); continue; }
     }
@@ -1614,7 +1717,10 @@ function updateEffects(dt) {
   if (Game.banner) { Game.banner.t += dt; if (Game.banner.t > 3.2) Game.banner = null; }
   if (Game.comboTimer > 0) {
     Game.comboTimer -= dt;
-    if (Game.comboTimer <= 0) Game.combo = 0;
+    if (Game.comboTimer <= 0) {
+      if (Game.combo >= 2) Sound.tone(340, 0.18, "triangle", 0.05, 190);
+      Game.combo = 0;
+    }
   }
 }
 
@@ -1634,14 +1740,45 @@ function updateHeartMonitor(dt) {
   }
 }
 
+/* First-shift tutorial: six short tips that each wait for the player to
+   actually do the thing before moving on. Level 1 only. */
+const TUTORIAL_STEPS = [
+  { text: "Patients arrive at the blue IN door - walk up and press E to pick one up",
+    done: () => Game.players.some(p => p.patient) },
+  { text: "Carry them to a bed and press E to tuck them in",
+    done: () => Game.patients.some(pt => pt.state === "station") },
+  { text: "The bubble shows what they need - fetch it from the matching station",
+    done: () => Game.players.some(p => p.item) },
+  { text: "Stand at the bed and HOLD the use key to treat them",
+    done: () => Game.patients.some(pt => pt.done) || Game.treated > 0 },
+  { text: "Healed! Pick them up and walk them to the green OUT tile",
+    done: () => Game.treated > 0 },
+  { text: "Quick discharges chain into combo multipliers. Good luck out there!",
+    done: () => Game.tutorial.t > 5 }
+];
+
+function updateTutorial(dt) {
+  const tut = Game.tutorial;
+  if (!tut || tut.stage >= TUTORIAL_STEPS.length) return;
+  tut.t += dt;
+  if (tut.t > 2.0 && TUTORIAL_STEPS[tut.stage].done()) {
+    tut.stage++;
+    tut.t = 0;
+    Sound.play("step");
+  }
+}
+
 function updatePlay(dt) {
   Game.time += dt;
   for (const p of Game.players) updatePlayer(p, dt);
+  Game.tendedIds = new Set();
+  for (const p of Game.players) if (p.work && p.work.ptId) Game.tendedIds.add(p.work.ptId);
   updatePatients(dt);
   updateWaves(dt);
   updateSpawning(dt);
   updateItems(dt);
   updateHeartMonitor(dt);
+  updateTutorial(dt);
   updateEffects(dt);
 
   if (Game.time >= Game.level.duration || Game.lives <= 0) endLevel();
@@ -2320,13 +2457,50 @@ function drawPatient(g, pt, x, y, scale) {
   g.fillStyle = "rgba(255,255,255,.96)";
   g.beginPath(); g.arc(x, badgeY, 12.5, 0, 6.283); g.fill();
   g.beginPath(); g.moveTo(x - 4, badgeY + 9.5); g.lineTo(x + 4, badgeY + 9.5); g.lineTo(x, badgeY + 17); g.closePath(); g.fill();
-  g.strokeStyle = a2.color; g.lineWidth = 2.2;
+  g.strokeStyle = pt.vip ? "#e8b40b" : a2.color; g.lineWidth = 2.2;
   g.beginPath(); g.arc(x, badgeY, 12.5, 0, 6.283); g.stroke();
   drawAilmentIcon(g, pt.ailment, x, badgeY, 8);
   if (pt.revealed) {
     g.fillStyle = "#b58bff";
     g.beginPath(); g.arc(x + 10, badgeY - 9, 3.6, 0, 6.283); g.fill();
     g.strokeStyle = "#fff"; g.lineWidth = 1; g.stroke();
+  }
+  if (pt.vip) {
+    // little gold crown above the badge
+    g.fillStyle = "#ffd54a";
+    g.strokeStyle = "#b8880a"; g.lineWidth = 1;
+    g.beginPath();
+    g.moveTo(x - 7, badgeY - 12);
+    g.lineTo(x - 7, badgeY - 18); g.lineTo(x - 3.5, badgeY - 14.5);
+    g.lineTo(x, badgeY - 20); g.lineTo(x + 3.5, badgeY - 14.5);
+    g.lineTo(x + 7, badgeY - 18); g.lineTo(x + 7, badgeY - 12);
+    g.closePath(); g.fill(); g.stroke();
+  }
+
+  // need bubble: while settled, show exactly what to bring or do next
+  const cur = pt.steps[pt.step];
+  if (!pt.done && cur && (pt.state === "station")) {
+    const nx = x + 21, ny = badgeY + 3;
+    let draw = null;
+    if (cur.k === "bedside" && cur.need) draw = () => drawItemIcon(g, cur.need, nx, ny, 7);
+    else if (cur.k === "bedside" && cur.produce) draw = () => drawItemIcon(g, cur.produce, nx, ny, 7);
+    else if (cur.k === "atStation" && pt.station && pt.station.type !== cur.station) {
+      const col = STATIONS[cur.station].color;
+      draw = () => {
+        g.fillStyle = col;
+        roundRect(g, nx - 7, ny - 7, 14, 14, 4); g.fill();
+        g.strokeStyle = "rgba(255,255,255,.8)"; g.lineWidth = 1.6; g.lineCap = "round";
+        g.beginPath(); g.moveTo(nx - 3, ny); g.lineTo(nx + 3, ny); g.stroke();
+        g.beginPath(); g.moveTo(nx + 1, ny - 3); g.lineTo(nx + 4, ny); g.lineTo(nx + 1, ny + 3); g.stroke();
+      };
+    }
+    if (draw) {
+      g.fillStyle = "rgba(255,255,255,.94)";
+      g.beginPath(); g.arc(nx, ny, 10, 0, 6.283); g.fill();
+      g.strokeStyle = "rgba(90,120,150,.7)"; g.lineWidth = 1.4;
+      g.beginPath(); g.arc(nx, ny, 10, 0, 6.283); g.stroke();
+      draw();
+    }
   }
 
   drawMeter(g, x - 17, y + 19, 34, 5, frac, pt.done);
@@ -2387,6 +2561,10 @@ function drawPlayer(g, p) {
 
   g.save();
   g.translate(x, y);
+  if (p.squash > 0) {
+    const k = Math.sin((p.squash / 0.18) * Math.PI) * 0.16;
+    g.scale(1 + k, 1 - k);
+  }
 
   drawBody(g, {
     bodyColor: p.color,
@@ -2451,7 +2629,7 @@ function drawPlayer(g, p) {
     }
   }
 
-  // work progress / hint
+  // work progress / hint / contextual prompts
   if (p.work) {
     const f = clamp(p.work.t / p.work.dur, 0, 1);
     const bx = x - 26, by = y + 24;
@@ -2468,13 +2646,53 @@ function drawPlayer(g, p) {
     g.globalAlpha = clamp(p.hintT, 0, 1);
     labelPill(g, p.hint, x, y + 22, "#ffd9a0");
     g.restore();
+  } else if (p.promptE || p.promptQ) {
+    const keys = p.index === 0 ? ["E", "Q"] : ["/", "."];
+    let py2 = y + 24;
+    if (p.promptQ) { promptPill(g, keys[1], p.promptQ, x, py2, "#ffe28a"); py2 += 17; }
+    if (p.promptE) promptPill(g, keys[0], p.promptE, x, py2, "#a8dcff");
+  }
+
+  // a bouncing chevron pointing at the exit while carrying a healed patient
+  if (p.patient && p.patient.done) {
+    const ex = Game.world.exit.x * TILE + TILE / 2, ey = Game.world.exit.y * TILE + TILE / 2;
+    const ang = Math.atan2(ey - y, ex - x);
+    const rr = 34 + Math.sin(performance.now() / 160) * 4;
+    g.save();
+    g.translate(x + Math.cos(ang) * rr, y + Math.sin(ang) * rr);
+    g.rotate(ang);
+    g.fillStyle = "#3fbf72";
+    g.strokeStyle = "rgba(10,30,20,.5)"; g.lineWidth = 1.5;
+    g.beginPath();
+    g.moveTo(9, 0); g.lineTo(-5, -8); g.lineTo(-1, 0); g.lineTo(-5, 8);
+    g.closePath(); g.fill(); g.stroke();
+    g.restore();
   }
 }
 
-/** A centred caption on its own dark pill, so it stays readable over beds. */
+/** A keycap + caption pill for contextual controls. */
+function promptPill(g, key, label, cx, top, keyColor) {
+  g.font = 'bold 10px "Trebuchet MS", "Segoe UI", sans-serif';
+  const lw = g.measureText(label).width;
+  const w = 16 + 5 + lw + 12;
+  cx = clamp(cx, w / 2 + 3, PLAY_W - w / 2 - 3);
+  g.save();
+  g.globalAlpha = 0.92;
+  g.fillStyle = "rgba(14,22,34,.85)";
+  roundRect(g, cx - w / 2, top, w, 15, 5); g.fill();
+  g.fillStyle = keyColor;
+  roundRect(g, cx - w / 2 + 3, top + 2.2, 13, 10.6, 3); g.fill();
+  text(g, key, cx - w / 2 + 9.5, top + 10.6, 8.5, "#1a2432", "center");
+  text(g, label, cx - w / 2 + 21, top + 11, 10, "#dde9f5", "left");
+  g.restore();
+}
+
+/** A centred caption on its own dark pill, so it stays readable over beds.
+    Clamped so it never clips at the arena edge. */
 function labelPill(g, str, cx, top, color) {
   g.font = 'bold 11px "Trebuchet MS", "Segoe UI", sans-serif';
   const w = g.measureText(str).width + 12;
+  cx = clamp(cx, w / 2 + 3, PLAY_W - w / 2 - 3);
   g.fillStyle = "rgba(14,22,34,.85)";
   roundRect(g, cx - w / 2, top, w, 15, 5); g.fill();
   text(g, str, cx, top + 11, 11, color, "center");
@@ -2528,6 +2746,8 @@ function drawHUD(g) {
     text(g, fmtTime(Game.time), 26, 70, 32, "#8be9ff");
     text(g, "SURVIVED", 128, 70, 11, PALETTE.dim);
     text(g, "WAVE " + Game.wave, 128, 52, 12, PALETTE.warn);
+    if (Game.waveTimer < 12)
+      text(g, "AMB " + Math.ceil(Game.waveTimer) + "s", 190, 52, 12, "#ff9a6a");
   } else {
     const remain = Math.max(0, lvl.duration - Game.time);
     const urgent = remain < 30;
@@ -2536,6 +2756,8 @@ function drawHUD(g) {
     text(g, fmtTime(remain), 26, 70, 32, col);
     text(g, "TIME", 122, 70, 11, PALETTE.dim);
     if (Game.wave > 0) text(g, "WAVE " + Game.wave, 122, 52, 12, PALETTE.warn);
+    if (Game.waveTimer < 12 && remain > Game.waveTimer)
+      text(g, "AMB " + Math.ceil(Game.waveTimer) + "s", 178, 52, 12, "#ff9a6a");
   }
 
   // --- lives ---
@@ -2593,7 +2815,7 @@ function drawHUD(g) {
     text(g, "Treated " + Game.treated + "   Lost " + Game.lost, bx + 12, 74, 12, PALETTE.dim);
   }
 
-  text(g, Sound.muted ? "M  muted" : "M  sound", W - 20, 26, 11, PALETTE.dim, "right");
+  text(g, (Sound.muted ? "M  muted" : "M  sound") + (Music.on ? "  ·  N  music" : "  ·  N  off"), W - 20, 26, 11, PALETTE.dim, "right");
   text(g, "Esc  pause", W - 20, 74, 11, PALETTE.dim, "right");
 }
 
@@ -2653,6 +2875,29 @@ function drawLegend(g) {
       }
     }
   }
+}
+
+function drawTutorial(g) {
+  const tut = Game.tutorial;
+  if (!tut || tut.stage >= TUTORIAL_STEPS.length) return;
+  if (Game.banner) return;                        // never fight the level banner
+  const msg = TUTORIAL_STEPS[tut.stage].text;
+  const a = clamp(tut.t * 2.5, 0, 1);
+  g.save();
+  g.globalAlpha = a;
+  g.font = 'bold 15px "Trebuchet MS", "Segoe UI", sans-serif';
+  const w = g.measureText(msg).width + 84;
+  const bx = W / 2 - w / 2, by = PLAY_Y + 10;
+  g.fillStyle = "rgba(10,18,28,.88)";
+  roundRect(g, bx, by, w, 34, 10); g.fill();
+  g.strokeStyle = "rgba(63,182,232,.6)"; g.lineWidth = 1.5;
+  roundRect(g, bx, by, w, 34, 10); g.stroke();
+  const pulse = 0.7 + 0.3 * Math.sin(performance.now() / 240);
+  g.fillStyle = "rgba(63,182,232," + pulse + ")";
+  g.beginPath(); g.arc(bx + 20, by + 17, 5, 0, 6.283); g.fill();
+  text(g, msg, bx + 36, by + 22, 15, "#dff0ff", "left");
+  text(g, (tut.stage + 1) + "/" + TUTORIAL_STEPS.length, bx + w - 14, by + 22, 11, PALETTE.dim, "right");
+  g.restore();
 }
 
 function drawBanner(g) {
@@ -2900,6 +3145,25 @@ function drawPause(g) {
 function drawResults(g) {
   const r = Game.result;
   g.fillStyle = "rgba(8,12,18,.88)"; g.fillRect(0, 0, W, H);
+
+  if (!r.failed && (r.stars === 3 || r.newBest)) {
+    const colors = ["#ffd54a", "#48c3f0", "#4ec97a", "#ff7ab8", "#b58bff"];
+    for (let i = 0; i < 60; i++) {
+      const h1 = Math.sin(i * 999.7) * 0.5 + 0.5;      // stable pseudo-randoms
+      const h2 = Math.sin(i * 337.3) * 0.5 + 0.5;
+      const h3 = Math.sin(i * 741.1) * 0.5 + 0.5;
+      const fall = ((r.t * (40 + h2 * 90) + h1 * H) % (H + 40)) - 20;
+      const cx2 = h1 * W + Math.sin(r.t * 2 + i) * 26;
+      g.save();
+      g.translate(cx2, fall);
+      g.rotate(r.t * (1 + h3 * 3) + i);
+      g.fillStyle = colors[i % colors.length];
+      g.globalAlpha = 0.85;
+      g.fillRect(-4, -2.5, 8, 5);
+      g.restore();
+    }
+  }
+
   g.fillStyle = "rgba(255,255,255,.05)";
   roundRect(g, W / 2 - 330, 96, 660, 610, 20); g.fill();
   g.strokeStyle = r.failed ? "rgba(228,87,61,.45)" : "rgba(63,182,232,.40)";
@@ -3035,6 +3299,7 @@ function render() {
 
   drawHUD(ctx);
   drawLegend(ctx);
+  drawTutorial(ctx);
   drawBanner(ctx);
 
   if (Game.screen === "paused") drawPause(ctx);
@@ -3047,6 +3312,7 @@ function render() {
 
 function handleScreenKeys() {
   if (wasPressed("KeyM")) { Sound.muted = !Sound.muted; if (!Sound.muted) Sound.play("menu"); }
+  if (wasPressed("KeyN")) { Music.on = !Music.on; Sound.play("menu"); }
 
   switch (Game.screen) {
     case "title":
