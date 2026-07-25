@@ -69,6 +69,17 @@ const COMBO_MAX = 3.0;
 const DEFIB_CHARGE_LIFE = 12.0;              // sec a charged defib stays charged
 const LAB_REVEAL_BONUS = 0.30;               // patience refunded when lab reveals
 
+const SPRINT_MUL = 1.45;                     // speed multiplier while sprinting
+const SPRINT_MUL_PATIENT = 1.32;             // ... a little less with a patient
+const STAMINA_MAX = 2.6;                     // sec of sprint at full charge
+const STAMINA_REGEN = 0.62;                  // charge per sec while not sprinting
+const PERFECT_AT = 0.70;                     // patience left for a PERFECT bonus
+const CLUTCH_AT = 0.16;                      // patience left for a CLUTCH bonus
+const CLUTCH_BONUS = 90;
+const WAVE_FIRST = 34;                       // sec before the first ambulance
+const WAVE_EVERY = 40;                       // sec between ambulances
+const CRIT_AT = 0.28;                        // patience fraction that starts the heart monitor
+
 const PALETTE = {
   floorA:   "#e9eef3",
   floorB:   "#e0e7ee",
@@ -93,7 +104,9 @@ const clamp = (v, a, b) => v < a ? a : (v > b ? b : v);
 const fmtMult = (m) => (Math.round(m * 100) / 100).toString();
 const lerp = (a, b, t) => a + (b - a) * t;
 
-/** Small deterministic PRNG (mulberry32) so a level always plays the same way. */
+/** Small deterministic PRNG (mulberry32). Seeded per level, so the arrival
+    sequence is reproducible for identical play; jams and lab reveals also draw
+    from this stream, so diverging play diverges the rolls. */
 function makeRng(seed) {
   let a = seed >>> 0;
   return function () {
@@ -174,6 +187,14 @@ const Sound = {
     src.connect(bp); bp.connect(g); g.connect(this.ctx.destination);
     src.start();
   },
+  /** Discharge fanfare that climbs with the combo chain. */
+  discharge(combo) {
+    const step = Math.min(9, Math.max(1, combo)) - 1;
+    const root = 523.25 * Math.pow(2, step / 12);   // one semitone per chain link
+    this.tone(root, 0.09, "triangle", 0.13);
+    setTimeout(() => this.tone(root * 1.26, 0.09, "triangle", 0.13), 80);
+    setTimeout(() => this.tone(root * 1.5, 0.17, "triangle", 0.13), 160);
+  },
   play(name) {
     switch (name) {
       case "pickup":   this.tone(520, 0.07, "square", 0.09, 720); break;
@@ -197,6 +218,20 @@ const Sound = {
       case "menu":     this.tone(600, 0.05, "square", 0.07); break;
       case "star":     this.tone(880, 0.12, "triangle", 0.12, 1320); break;
       case "jam":      this.noise(0.18, 0.12, 400); break;
+      case "clutch":
+        this.tone(1320, 0.07, "square", 0.11);
+        setTimeout(() => this.tone(1760, 0.16, "square", 0.11), 70);
+        break;
+      case "heart":    this.tone(120, 0.07, "sine", 0.09, 70); break;
+      case "siren":
+        this.tone(720, 0.30, "sawtooth", 0.07, 980);
+        setTimeout(() => this.tone(980, 0.30, "sawtooth", 0.07, 720), 300);
+        break;
+      case "sprint":   this.noise(0.10, 0.05, 2200); break;
+      case "newbest":
+        [0, 120, 240, 400].forEach((d, i) =>
+          setTimeout(() => this.tone(523 * Math.pow(2, i / 4), 0.18, "triangle", 0.12), d));
+        break;
       case "levelend": this.tone(523, 0.15, "triangle", 0.12);
                        setTimeout(() => this.tone(659, 0.15, "triangle", 0.12), 150);
                        setTimeout(() => this.tone(784, 0.30, "triangle", 0.12), 300);
@@ -213,13 +248,13 @@ const Keys = Object.create(null);      // held state by event.code
 const Pressed = Object.create(null);   // edge-triggered, cleared each frame
 
 const CONTROLS = [
-  { up: "KeyW", down: "KeyS", left: "KeyA", right: "KeyD", interact: "KeyE", use: "KeyQ" },
-  { up: "ArrowUp", down: "ArrowDown", left: "ArrowLeft", right: "ArrowRight", interact: "Slash", use: "Period" }
+  { up: "KeyW", down: "KeyS", left: "KeyA", right: "KeyD", interact: "KeyE", use: "KeyQ", sprint: "ShiftLeft" },
+  { up: "ArrowUp", down: "ArrowDown", left: "ArrowLeft", right: "ArrowRight", interact: "Slash", use: "Period", sprint: "ShiftRight" }
 ];
 
 const SWALLOW = new Set([
   "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space", "Slash", "Period",
-  "KeyW", "KeyA", "KeyS", "KeyD", "KeyQ", "KeyE", "Escape"
+  "KeyW", "KeyA", "KeyS", "KeyD", "KeyQ", "KeyE", "Escape", "ShiftLeft", "ShiftRight"
 ]);
 
 window.addEventListener("keydown", (e) => {
@@ -473,7 +508,7 @@ const LEVELS = [
     seed: 777001,
     duration: 180,
     patience: 48,
-    spawnStart: 7.0, spawnEnd: 4.2,
+    spawnStart: 7.8, spawnEnd: 4.7,
     maxWaiting: 6,
     ailments: ["cut", "infection", "fracture", "cardiac", "mystery"],
     stars: [1000, 2100, 3100],
@@ -496,8 +531,191 @@ const LEVELS = [
       "#....x.....#........#.....cc...#",
       "################################"
     ]
+  },
+  {
+    name: "Double Trouble",
+    blurb: "Two wards, one crossing. Whoever holds the middle holds the shift.",
+    seed: 61001,
+    duration: 180,
+    patience: 48,
+    spawnStart: 7.6, spawnEnd: 4.6,
+    maxWaiting: 6,
+    ailments: ["cut", "infection", "fracture", "cardiac", "mystery"],
+    stars: [1600, 2900, 4200],
+    restock: true, jams: true, flatline: true,
+    map: [
+      "################################",
+      "#..............##..............#",
+      "#.E.........ss.##..............#",
+      "#.......##.....##.....##.......#",
+      "#....bb.##.....##..x..##.bb....#",
+      "#.......##..mm.##.....##.......#",
+      "#....bb........##..c...........#",
+      "#...........................f..#",
+      "#..............................#",
+      "#....bb........##..l...........#",
+      "#.......##.....##.....##.......#",
+      "#....bb.##.....##..h..##.bb....#",
+      "#.......##.....##.....##.......#",
+      "#.O.........d..##..............#",
+      "#..............##..............#",
+      "################################"
+    ]
+  },
+  {
+    name: "The Maze",
+    blurb: "Winding corridors and dead ends. Learn the routes or lose the run.",
+    seed: 71002,
+    duration: 180,
+    patience: 46,
+    spawnStart: 7.4, spawnEnd: 4.5,
+    maxWaiting: 6,
+    ailments: ["cut", "infection", "fracture", "cardiac", "mystery"],
+    stars: [900, 1600, 2300],
+    restock: true, jams: true, flatline: true,
+    map: [
+      "################################",
+      "#.E..#.......#...#.......#...d.#",
+      "#....#.s.....#...#.......#.....#",
+      "#.bb.#....bb.#...#.bb..h.#.....#",
+      "#....#.......#...#.......#.....#",
+      "#....#.......#...#.......#.....#",
+      "#.bb.#...........#...#...#.....#",
+      "#....#.........x.#...#...#.....#",
+      "#..............c.#...#.........#",
+      "#........#...........#.........#",
+      "#........#...#.......#.........#",
+      "#........#...#.......#.l.......#",
+      "#......m.#bb.#....bb.#.........#",
+      "#.O......#...#.......#.......f.#",
+      "#........#...#.......#.........#",
+      "################################"
+    ]
+  },
+  {
+    name: "Triage",
+    blurb: "Sixteen beds and no excuses. Volume is the enemy here.",
+    seed: 81003,
+    duration: 180,
+    patience: 44,
+    spawnStart: 7.2, spawnEnd: 4.4,
+    maxWaiting: 7,
+    ailments: ["cut", "infection", "fracture", "cardiac", "mystery"],
+    stars: [1000, 1800, 2600],
+    restock: true, jams: true, flatline: true,
+    map: [
+      "################################",
+      "#.E...ss................mm.....#",
+      "#..............................#",
+      "#..........bb......bb..........#",
+      "#......##..............##......#",
+      "#......##..bb......bb..##....x.#",
+      "#..............................#",
+      "#.............####...........c.#",
+      "#.............####.............#",
+      "#............................h.#",
+      "#......##..bb......bb..##......#",
+      "#......##..............##....l.#",
+      "#..........bb......bb..........#",
+      "#..............................#",
+      "#.O...d........f...............#",
+      "################################"
+    ]
+  },
+  {
+    name: "Rush Hour",
+    blurb: "Compact and relentless. Everything is close, nothing is calm.",
+    seed: 91004,
+    duration: 180,
+    patience: 42,
+    spawnStart: 7.0, spawnEnd: 4.3,
+    maxWaiting: 7,
+    ailments: ["cut", "infection", "fracture", "cardiac", "mystery"],
+    stars: [1900, 3400, 5000],
+    restock: true, jams: true, flatline: true,
+    map: [
+      "################################",
+      "#.E.........ss..d.mm...........#",
+      "#..............................#",
+      "#.......bb............bb.......#",
+      "####........................####",
+      "####........########........####",
+      "#............xc..hl............#",
+      "#....bb..................bb....#",
+      "#..............................#",
+      "#..............f...............#",
+      "####........########........####",
+      "####........................####",
+      "#.......bb............bb.......#",
+      "#..............................#",
+      "#.O............................#",
+      "################################"
+    ]
+  },
+  {
+    name: "Total Chaos",
+    blurb: "Four wings, one hub, every machine as far away as it can be.",
+    seed: 101005,
+    duration: 180,
+    patience: 40,
+    spawnStart: 6.8, spawnEnd: 4.2,
+    maxWaiting: 8,
+    ailments: ["cut", "infection", "fracture", "cardiac", "mystery"],
+    stars: [1150, 2100, 3000],
+    restock: true, jams: true, flatline: true,
+    map: [
+      "################################",
+      "#.E......#............#........#",
+      "#....ss..#..########..#..x.....#",
+      "#........#............#........#",
+      "#........#............#........#",
+      "#....mm......bb..bb......c.....#",
+      "#..............................#",
+      "#............bb..bb............#",
+      "#..............................#",
+      "#..f.........bb..bb......l.....#",
+      "#..............................#",
+      "#........#............#........#",
+      "#.....h..#..########..#..d.....#",
+      "#........#............#........#",
+      "#.O......#............#........#",
+      "################################"
+    ]
   }
 ];
+
+/* Endless mode: no clock, spawns tighten forever, three lives, chase a best. */
+const ENDLESS = {
+  name: "Night Shift",
+  blurb: "No clock. No end. Spawns tighten forever — how long can you hold?",
+  seed: 424242,
+  duration: Infinity,
+  endless: true,
+  patience: 52,
+  spawnStart: 8.5, spawnEnd: 3.2,
+  maxWaiting: 8,
+  ailments: ["cut", "infection", "fracture", "cardiac", "mystery"],
+  stars: [2000, 4000, 6500],
+  restock: true, jams: true, flatline: true,
+  map: [
+    "################################",
+    "#.E.....ss......d.....mm.......#",
+    "#..............................#",
+    "#........##..........##........#",
+    "#........##...bbbb...##........#",
+    "#........##..........##........#",
+    "#.............bbbb.............#",
+    "#....x....................h....#",
+    "#..............................#",
+    "#....c........bbbb........l....#",
+    "#........##..........##........#",
+    "#........##...bbbb...##........#",
+    "#........##..........##........#",
+    "#..............................#",
+    "#.O............f...............#",
+    "################################"
+  ]
+};
 
 /* ---------------------------------------------------------------------
    6. WORLD CONSTRUCTION
@@ -554,7 +772,7 @@ function makeWorld(levelDef) {
     world.grid.push(row);
   }
 
-  world.waitSlots = computeWaitSlots(world, 8);
+  world.waitSlots = computeWaitSlots(world, Math.max(8, (levelDef.maxWaiting || 0) + 3));
   return world;
 }
 
@@ -636,7 +854,10 @@ function makePlayer(index, x, y) {
     item: null,
     patient: null,
     work: null,           // {key, t, dur, action}
+    stamina: STAMINA_MAX,
+    sprinting: false,
     bob: 0,
+    step: 0,              // walk-cycle phase
     hintT: 0, hint: "",
     color: index === 0 ? PALETTE.p1 : PALETTE.p2,
     ctrl: CONTROLS[index]
@@ -686,13 +907,25 @@ const Game = {
   time: 0,                 // seconds elapsed in level
   spawnTimer: 0,
   score: 0,
+  scoreShown: 0,
+  critical: 1,
   lives: 3,
   treated: 0,
   lost: 0,
   combo: 0,
   comboTimer: 0,
+  bestCombo: 0,
+  perfects: 0,
+  clutches: 0,
+  wave: 0,
+  waveTimer: WAVE_FIRST,
+  burst: 0,
+  endless: false,
+  endlessBest: 0,
+  heartTimer: 0,
   shake: 0,
   flashRed: 0,
+  flashGood: 0,
   banner: null,            // {text, t}
   result: null,
   selectIndex: 0,
@@ -711,8 +944,26 @@ function burst(x, y, color, n) {
   }
 }
 
+/** Campaign levels are 0..N-1; index -1 is the endless Night Shift. */
+function levelDef(index) { return index < 0 ? ENDLESS : LEVELS[index]; }
+
+/** Total campaign stars, and the title the player has earned with them. */
+function totalStars() { return Game.progress.reduce((n, p) => n + p.stars, 0); }
+const RANKS = [
+  { at: 0, name: "Intern" }, { at: 5, name: "Resident" }, { at: 12, name: "Attending" },
+  { at: 20, name: "Chief" }, { at: 27, name: "Legend" }
+];
+function rankName() {
+  const t = totalStars();
+  let r = RANKS[0];
+  for (const x of RANKS) if (t >= x.at) r = x;
+  return r.name;
+}
+const ENDLESS_UNLOCK = 6;
+const endlessUnlocked = () => totalStars() >= ENDLESS_UNLOCK;
+
 function startLevel(index) {
-  const def = LEVELS[index];
+  const def = levelDef(index);
   Game.levelIndex = index;
   Game.level = def;
   Game.world = makeWorld(def);
@@ -724,13 +975,24 @@ function startLevel(index) {
   Game.time = 0;
   Game.spawnTimer = 2.0;
   Game.score = 0;
+  Game.scoreShown = 0;
+  Game.critical = 1;
   Game.lives = 3;
   Game.treated = 0;
   Game.lost = 0;
   Game.combo = 0;
   Game.comboTimer = 0;
+  Game.bestCombo = 0;
+  Game.perfects = 0;
+  Game.clutches = 0;
+  Game.wave = 0;
+  Game.waveTimer = WAVE_FIRST;
+  Game.burst = 0;
+  Game.heartTimer = 0;
+  Game.endless = !!def.endless;
   Game.shake = 0;
   Game.flashRed = 0;
+  Game.flashGood = 0;
   Game.banner = { text: def.name, sub: def.blurb, t: 0 };
   Game.result = null;
 
@@ -1089,13 +1351,24 @@ function updatePlayer(p, dt) {
   if (Keys[c.down]) my += 1;
 
   const moving = mx !== 0 || my !== 0;
+  p.moving = moving;
+  const wantSprint = !!Keys[c.sprint] && moving && p.stamina > 0;
+  p.sprinting = wantSprint;
+  if (wantSprint) {
+    p.stamina = Math.max(0, p.stamina - dt);
+  } else {
+    p.stamina = Math.min(STAMINA_MAX, p.stamina + dt * STAMINA_REGEN);
+  }
+
   if (moving) {
     const len = Math.hypot(mx, my);
     mx /= len; my /= len;
     p.dx = mx; p.dy = my;
-    const speed = p.patient ? SPEED_PATIENT : (p.item ? SPEED_ITEM : SPEED_FREE);
+    let speed = p.patient ? SPEED_PATIENT : (p.item ? SPEED_ITEM : SPEED_FREE);
+    if (wantSprint) speed *= p.patient ? SPRINT_MUL_PATIENT : SPRINT_MUL;
     moveWithCollision(world, p, mx * speed * dt, my * speed * dt);
-    p.bob += dt * 11;
+    p.bob += dt * (wantSprint ? 15 : 11);
+    p.step += dt * (wantSprint ? 13 : 9);
   } else {
     p.bob += dt * 2;
   }
@@ -1163,22 +1436,39 @@ function dischargePatient(p) {
   const a = AILMENTS[pt.ailment];
   const frac = pt.patience / pt.patienceMax;
   Game.combo = Game.comboTimer > 0 ? Game.combo + 1 : 1;
+  Game.bestCombo = Math.max(Game.bestCombo, Game.combo);
   Game.comboTimer = COMBO_WINDOW;
   const mult = Math.min(COMBO_MAX, 1 + 0.25 * (Game.combo - 1));
-  const speedBonus = Math.round(frac * 100);
-  const gained = Math.round((a.score + speedBonus) * mult);
+
+  let base = a.score + Math.round(frac * 100);
+  let callout = null, calloutColor = PALETTE.good;
+  if (frac >= PERFECT_AT) {
+    base += Math.round(a.score * 0.5);
+    callout = "PERFECT!"; calloutColor = "#ffd54a";
+    Game.perfects++;
+  } else if (frac <= CLUTCH_AT) {
+    base += CLUTCH_BONUS;
+    callout = "CLUTCH SAVE!"; calloutColor = "#ff7ab8";
+    Game.clutches++;
+  }
+
+  const gained = Math.round(base * mult);
   Game.score += gained;
   Game.treated++;
 
   popup(pt.x, pt.y - 26, "+" + gained + (mult > 1 ? "  x" + fmtMult(mult) : ""), PALETTE.good, true);
-  burst(pt.x, pt.y, "#ffe066", 18);
-  Sound.play("discharge");
+  if (callout) popup(pt.x, pt.y - 52, callout, calloutColor, true);
+  if (Game.combo >= 3) popup(pt.x, pt.y - 74, "CHAIN x" + Game.combo, "#8be9ff");
+  burst(pt.x, pt.y, "#ffe066", 18 + Math.min(20, Game.combo * 3));
+  Game.flashGood = 0.35;
+  Sound.discharge(Game.combo);
+  if (callout === "CLUTCH SAVE!") Sound.play("clutch");
 }
 
 function losePatient(pt) {
   pt.state = "gone";
   Game.lost++;
-  Game.lives--;
+  Game.lives = Math.max(0, Game.lives - 1);
   Game.combo = 0; Game.comboTimer = 0;
   const penalty = 60;
   Game.score = Math.max(0, Game.score - penalty);
@@ -1241,6 +1531,30 @@ function chooseAilment() {
   return pool[clamp(idx, 0, pool.length - 1)];
 }
 
+/** Interval between arrivals right now: ramps down across a timed level, and
+    keeps tightening forever in endless mode. */
+function currentSpawnInterval() {
+  const lvl = Game.level;
+  if (Game.endless) {
+    // asymptotic squeeze: 8.5s at the start, closing on spawnEnd after ~4 min
+    return Math.max(lvl.spawnEnd, lvl.spawnStart - Game.time / 26);
+  }
+  const t = clamp(Game.time / lvl.duration, 0, 1);
+  return lerp(lvl.spawnStart, lvl.spawnEnd, t);
+}
+
+/** Ambulances arrive on a rhythm, dumping several patients at once. Gives the
+    shift a pulse of calm and panic instead of a flat grind. */
+function updateWaves(dt) {
+  Game.waveTimer -= dt;
+  if (Game.waveTimer > 0) return;
+  Game.wave++;
+  Game.waveTimer = WAVE_EVERY;
+  Game.burst = 2 + Math.min(3, Math.floor(Game.wave / 2));
+  Game.banner = { text: "AMBULANCE INBOUND", sub: Game.burst + " patients arriving at once", t: 0, urgent: true };
+  Sound.play("siren");
+}
+
 function updateSpawning(dt) {
   const lvl = Game.level;
   const waiting = Game.patients.filter(p => p.state === "waiting" || p.state === "walking").length;
@@ -1260,10 +1574,13 @@ function updateSpawning(dt) {
   Game.patients.push(pt);
   Sound.play("spawn");
 
-  // Spawn interval ramps down across the level, with a little jitter.
-  const t = clamp(Game.time / lvl.duration, 0, 1);
-  const base = lerp(lvl.spawnStart, lvl.spawnEnd, t);
-  Game.spawnTimer = base * (0.82 + Game.rng() * 0.36);
+  // Mid-burst arrivals come almost back to back; otherwise use the ramp.
+  if (Game.burst > 0) {
+    Game.burst--;
+    Game.spawnTimer = 0.55;
+  } else {
+    Game.spawnTimer = currentSpawnInterval() * (0.82 + Game.rng() * 0.36);
+  }
 }
 
 function updateItems(dt) {
@@ -1288,8 +1605,11 @@ function updateEffects(dt) {
     q.t += dt; q.x += q.vx * dt; q.y += q.vy * dt; q.vy += 240 * dt;
   }
   Game.particles = Game.particles.filter(q => q.t < q.life);
+  Game.scoreShown += (Game.score - Game.scoreShown) * Math.min(1, dt * 9);
+  if (Math.abs(Game.score - Game.scoreShown) < 0.6) Game.scoreShown = Game.score;
   if (Game.shake > 0) Game.shake = Math.max(0, Game.shake - dt * 26);
   if (Game.flashRed > 0) Game.flashRed = Math.max(0, Game.flashRed - dt * 1.4);
+  if (Game.flashGood > 0) Game.flashGood = Math.max(0, Game.flashGood - dt * 2.2);
   for (const st of Game.world.stations) if (st.flash > 0) st.flash -= dt;
   if (Game.banner) { Game.banner.t += dt; if (Game.banner.t > 3.2) Game.banner = null; }
   if (Game.comboTimer > 0) {
@@ -1298,18 +1618,37 @@ function updateEffects(dt) {
   }
 }
 
+/** A heartbeat that quickens while anyone is close to running out. */
+function updateHeartMonitor(dt) {
+  let worst = 1;
+  for (const pt of Game.patients) {
+    if (pt.done || pt.state === "gone") continue;
+    worst = Math.min(worst, pt.patience / pt.patienceMax);
+  }
+  Game.critical = worst;
+  if (worst >= CRIT_AT) { Game.heartTimer = 0; return; }
+  Game.heartTimer -= dt;
+  if (Game.heartTimer <= 0) {
+    Game.heartTimer = lerp(0.30, 0.78, clamp(worst / CRIT_AT, 0, 1));
+    Sound.play("heart");
+  }
+}
+
 function updatePlay(dt) {
   Game.time += dt;
   for (const p of Game.players) updatePlayer(p, dt);
   updatePatients(dt);
+  updateWaves(dt);
   updateSpawning(dt);
   updateItems(dt);
+  updateHeartMonitor(dt);
   updateEffects(dt);
 
   if (Game.time >= Game.level.duration || Game.lives <= 0) endLevel();
 }
 
 function starsFor(index, score) {
+  if (index < 0) return 0;
   const th = LEVELS[index].stars;
   let s = 0;
   for (const t of th) if (score >= t) s++;
@@ -1318,24 +1657,47 @@ function starsFor(index, score) {
 
 function endLevel() {
   const failed = Game.lives <= 0;
+
+  if (Game.endless) {
+    const newBest = Game.score > Game.endlessBest;
+    if (newBest) Game.endlessBest = Game.score;
+    Game.result = {
+      failed, stars: 0, newBest, endless: true,
+      name: ENDLESS.name, targets: null,
+      score: Game.score, treated: Game.treated, lost: Game.lost,
+      survived: Game.time, wave: Game.wave,
+      bestCombo: Game.bestCombo, perfects: Game.perfects, clutches: Game.clutches,
+      t: 0
+    };
+    Game.screen = "results";
+    Sound.play(newBest ? "newbest" : "error");
+    return;
+  }
+
   const stars = failed ? 0 : starsFor(Game.levelIndex, Game.score);
   const prog = Game.progress[Game.levelIndex];
   const newBest = Game.score > prog.best;
   if (newBest) prog.best = Game.score;
+  const gainedStars = Math.max(0, stars - prog.stars);
   prog.stars = Math.max(prog.stars, stars);
   if (stars >= 1 && Game.levelIndex + 1 < LEVELS.length) Game.progress[Game.levelIndex + 1].unlocked = true;
 
   Game.result = {
-    failed, stars, newBest,
+    failed, stars, newBest, gainedStars,
+    name: LEVELS[Game.levelIndex].name, targets: LEVELS[Game.levelIndex].stars,
     score: Game.score, treated: Game.treated, lost: Game.lost,
-    t: 0, shown: 0
+    bestCombo: Game.bestCombo, perfects: Game.perfects, clutches: Game.clutches,
+    t: 0
   };
   Game.screen = "results";
-  Sound.play(failed ? "error" : "levelend");
+  Sound.play(failed ? "error" : (newBest ? "newbest" : "levelend"));
 }
 
 /* ---------------------------------------------------------------------
    11. RENDERING
+
+   The static parts of a level (floor, walls, painted decals) are baked once
+   into an offscreen canvas; only entities and lighting are redrawn per frame.
    --------------------------------------------------------------------- */
 
 const canvas = document.getElementById("game");
@@ -1349,7 +1711,154 @@ function fitCanvas() {
 window.addEventListener("resize", fitCanvas);
 fitCanvas();
 
-/* --- icons ------------------------------------------------------------- */
+/* --- cached paints ------------------------------------------------------ */
+
+const Paint = {};
+function initPaints() {
+  const v = ctx.createRadialGradient(PLAY_W / 2, PLAY_H / 2, PLAY_H * 0.30,
+                                     PLAY_W / 2, PLAY_H / 2, PLAY_H * 0.95);
+  v.addColorStop(0, "rgba(0,0,0,0)");
+  v.addColorStop(1, "rgba(6,10,18,0.26)");
+  Paint.vignette = v;
+
+  const hud = ctx.createLinearGradient(0, 0, 0, HUD_H);
+  hud.addColorStop(0, "#1b2636");
+  hud.addColorStop(1, "#111925");
+  Paint.hud = hud;
+
+  const t = ctx.createLinearGradient(0, 0, 0, H);
+  t.addColorStop(0, "#0b1220");
+  t.addColorStop(0.55, "#101b2c");
+  t.addColorStop(1, "#0a1018");
+  Paint.title = t;
+}
+initPaints();
+
+/* --- static background bake --------------------------------------------- */
+
+/** Render floor, wall blocks and painted decals once per level. */
+function bakeBackground(world) {
+  const c = document.createElement("canvas");
+  c.width = PLAY_W; c.height = PLAY_H;
+  const g = c.getContext("2d");
+  const rng = makeRng(world.def.seed ^ 0x9e3779b9);
+
+  const solid = (x, y) => { const cell = cellAt(world, x, y); return !cell || cell.solid; };
+  const isWall = (x, y) => { const cell = cellAt(world, x, y); return !cell || (cell.solid && !cell.station); };
+
+  // ---- floor ----
+  for (let y = 0; y < ROWS; y++) {
+    for (let x = 0; x < COLS; x++) {
+      const cell = world.grid[y][x];
+      if (isWall(x, y)) continue;
+      const px = x * TILE, py = y * TILE;
+      g.fillStyle = ((x + y) & 1) ? PALETTE.floorA : PALETTE.floorB;
+      g.fillRect(px, py, TILE, TILE);
+      // grout
+      g.strokeStyle = "rgba(120,145,170,.16)";
+      g.lineWidth = 1;
+      g.strokeRect(px + .5, py + .5, TILE - 1, TILE - 1);
+      // occasional scuff so the floor is not perfectly uniform
+      if (rng() < 0.07) {
+        g.fillStyle = "rgba(140,160,180,.10)";
+        const rw = 6 + rng() * 12, rh = 3 + rng() * 6;
+        g.beginPath();
+        g.ellipse(px + 8 + rng() * 24, py + 8 + rng() * 24, rw / 2, rh / 2, rng() * 3, 0, 6.283);
+        g.fill();
+      }
+      void cell;
+    }
+  }
+
+  // ---- painted ward markings ----
+  paintCross(g, world);
+  paintZone(g, world.entrance, "#37a8d8", "IN");
+  paintZone(g, world.exit, "#3fbf72", "OUT");
+
+  // ---- wall blocks: base, top face, rim light, cast shadow ----
+  for (let y = 0; y < ROWS; y++) {
+    for (let x = 0; x < COLS; x++) {
+      if (!isWall(x, y)) continue;
+      const px = x * TILE, py = y * TILE;
+      // shadow onto the floor below
+      if (!solid(x, y + 1)) {
+        const sh = g.createLinearGradient(0, py + TILE, 0, py + TILE + 14);
+        sh.addColorStop(0, "rgba(20,30,45,.34)");
+        sh.addColorStop(1, "rgba(20,30,45,0)");
+        g.fillStyle = sh;
+        g.fillRect(px, py + TILE, TILE, 14);
+      }
+      g.fillStyle = PALETTE.wall;
+      g.fillRect(px, py, TILE, TILE);
+      // top face where nothing sits above
+      if (!isWall(x, y - 1)) {
+        g.fillStyle = PALETTE.wallTop;
+        g.fillRect(px, py, TILE, 9);
+        g.fillStyle = "rgba(255,255,255,.10)";
+        g.fillRect(px, py, TILE, 3);
+      }
+      // seams between wall tiles
+      g.strokeStyle = "rgba(0,0,0,.16)";
+      g.lineWidth = 1;
+      if (isWall(x + 1, y)) { g.beginPath(); g.moveTo(px + TILE - .5, py); g.lineTo(px + TILE - .5, py + TILE); g.stroke(); }
+      if (isWall(x, y + 1)) { g.beginPath(); g.moveTo(px, py + TILE - .5); g.lineTo(px + TILE, py + TILE - .5); g.stroke(); }
+      // outer edge darkening
+      g.strokeStyle = "rgba(8,14,22,.45)";
+      if (!isWall(x - 1, y)) { g.beginPath(); g.moveTo(px + .5, py); g.lineTo(px + .5, py + TILE); g.stroke(); }
+      if (!isWall(x + 1, y)) { g.beginPath(); g.moveTo(px + TILE - .5, py); g.lineTo(px + TILE - .5, py + TILE); g.stroke(); }
+      if (!isWall(x, y + 1)) { g.beginPath(); g.moveTo(px, py + TILE - .5); g.lineTo(px + TILE, py + TILE - .5); g.stroke(); }
+    }
+  }
+  return c;
+}
+
+/** A faint red cross painted on the floor of the largest open area. */
+function paintCross(g, world) {
+  let best = null, bestScore = -1, bestRoom = 0;
+  for (let y = 2; y < ROWS - 4; y++) {
+    for (let x = 2; x < COLS - 4; x++) {
+      let room = 0;
+      for (let oy = 0; oy < 4; oy++)
+        for (let ox = 0; ox < 4; ox++)
+          if (isWalkable(world, x + ox, y + oy)) room++;
+      // prefer roomy spots, and among equals the one nearest the middle
+      const away = Math.hypot(x + 2 - COLS / 2, y + 2 - ROWS / 2);
+      const score = room * 10 - away;
+      if (score > bestScore) { bestScore = score; bestRoom = room; best = { x, y }; }
+    }
+  }
+  if (!best || bestRoom < 16) return;
+  const cx = (best.x + 2) * TILE, cy = (best.y + 2) * TILE;
+  g.save();
+  g.globalAlpha = 0.11;
+  g.fillStyle = "#c0392b";
+  const arm = 22, thick = 26;
+  g.fillRect(cx - thick / 2, cy - arm - thick / 2, thick, arm * 2 + thick);
+  g.fillRect(cx - arm - thick / 2, cy - thick / 2, arm * 2 + thick, thick);
+  g.restore();
+}
+
+function paintZone(g, tile, color, label) {
+  const x = tile.x * TILE, y = tile.y * TILE;
+  g.save();
+  g.globalAlpha = 0.20;
+  g.fillStyle = color;
+  g.fillRect(x, y, TILE, TILE);
+  g.restore();
+  g.strokeStyle = color;
+  g.lineWidth = 2;
+  g.setLineDash([6, 4]);
+  g.strokeRect(x + 3.5, y + 3.5, TILE - 7, TILE - 7);
+  g.setLineDash([]);
+  g.font = 'bold 11px "Trebuchet MS", "Segoe UI", sans-serif';
+  g.textAlign = "center";
+  g.fillStyle = color;
+  g.globalAlpha = 0.95;
+  g.fillText(label, x + TILE / 2, y + TILE / 2 + 4);
+  g.globalAlpha = 1;
+}
+
+/* --- icons -------------------------------------------------------------- */
 
 function drawAilmentIcon(g, key, x, y, r) {
   const a = AILMENTS[key];
@@ -1358,44 +1867,62 @@ function drawAilmentIcon(g, key, x, y, r) {
   g.fillStyle = a.color;
   switch (key) {
     case "cut":
-      g.strokeStyle = a.color; g.lineWidth = Math.max(2, r * 0.34); g.lineCap = "round";
-      g.beginPath(); g.moveTo(-r * .6, r * .6); g.lineTo(r * .6, -r * .6); g.stroke();
-      g.beginPath(); g.moveTo(-r * .1, r * .7); g.lineTo(r * .55, r * .1); g.stroke();
+      g.strokeStyle = "#f7f2ea"; g.lineWidth = Math.max(3, r * 0.46); g.lineCap = "round";
+      g.beginPath(); g.moveTo(-r * .62, r * .62); g.lineTo(r * .62, -r * .62); g.stroke();
+      g.strokeStyle = a.color; g.lineWidth = Math.max(2, r * 0.30);
+      g.beginPath(); g.moveTo(-r * .62, r * .62); g.lineTo(r * .62, -r * .62); g.stroke();
+      g.beginPath(); g.moveTo(-r * .05, r * .72); g.lineTo(r * .58, r * .12); g.stroke();
       break;
     case "infection":
-      g.beginPath(); g.arc(0, 0, r * .72, 0, 6.283); g.fill();
+      g.beginPath(); g.arc(0, 0, r * .74, 0, 6.283); g.fill();
+      g.strokeStyle = a.color; g.lineWidth = Math.max(1.4, r * .18); g.lineCap = "round";
+      for (let i = 0; i < 6; i++) {
+        const ang = i * 1.047;
+        g.beginPath();
+        g.moveTo(Math.cos(ang) * r * .68, Math.sin(ang) * r * .68);
+        g.lineTo(Math.cos(ang) * r * 1.02, Math.sin(ang) * r * 1.02);
+        g.stroke();
+      }
       g.fillStyle = "#1d5c34";
-      for (const [ox, oy] of [[-.28, -.2], [.25, -.05], [-.05, .3]]) {
-        g.beginPath(); g.arc(ox * r * 2, oy * r * 2, r * .16, 0, 6.283); g.fill();
+      for (const [ox, oy] of [[-.26, -.18], [.24, -.04], [-.04, .28]]) {
+        g.beginPath(); g.arc(ox * r * 2, oy * r * 2, r * .15, 0, 6.283); g.fill();
       }
       break;
     case "fracture":
-      g.fillStyle = "#efe7d2"; g.strokeStyle = "#7d7156"; g.lineWidth = 1.6;
+      g.fillStyle = "#f3ecd9"; g.strokeStyle = "#6f6449"; g.lineWidth = 1.6; g.lineJoin = "round";
       g.beginPath();
-      g.moveTo(-r * .7, -r * .2); g.lineTo(0, r * .05); g.lineTo(r * .7, -r * .25);
-      g.lineTo(r * .7, r * .25); g.lineTo(0, r * .5); g.lineTo(-r * .7, r * .3);
-      g.closePath(); g.fill(); g.stroke();
-      g.strokeStyle = "#c0392b"; g.lineWidth = Math.max(1.5, r * .2);
-      g.beginPath(); g.moveTo(r * .05, -r * .55); g.lineTo(-r * .1, r * .7); g.stroke();
+      g.moveTo(-r * .75, -r * .30);
+      g.arc(-r * .75, -r * .18, r * .22, -1.6, 1.6, true);
+      g.lineTo(r * .55, r * .12);
+      g.arc(r * .75, r * .24, r * .22, -1.6, 1.6, false);
+      g.closePath();
+      g.fill(); g.stroke();
+      g.strokeStyle = "#c0392b"; g.lineWidth = Math.max(1.6, r * .22); g.lineCap = "round";
+      g.beginPath(); g.moveTo(r * .02, -r * .52); g.lineTo(-r * .12, r * .62); g.stroke();
       break;
     case "cardiac": {
-      g.fillStyle = a.color;
       const s = r * .95;
+      g.fillStyle = a.color;
       g.beginPath();
-      g.moveTo(0, s * .75);
-      g.bezierCurveTo(-s * 1.3, -s * .1, -s * .55, -s * 1.0, 0, -s * .35);
-      g.bezierCurveTo(s * .55, -s * 1.0, s * 1.3, -s * .1, 0, s * .75);
+      g.moveTo(0, s * .78);
+      g.bezierCurveTo(-s * 1.32, -s * .08, -s * .56, -s * 1.02, 0, -s * .34);
+      g.bezierCurveTo(s * .56, -s * 1.02, s * 1.32, -s * .08, 0, s * .78);
       g.fill();
-      g.strokeStyle = "#fff"; g.lineWidth = Math.max(1.4, r * .16); g.lineJoin = "round";
+      g.strokeStyle = "rgba(255,255,255,.35)"; g.lineWidth = 1;
+      g.stroke();
+      g.strokeStyle = "#fff"; g.lineWidth = Math.max(1.5, r * .17);
+      g.lineJoin = "round"; g.lineCap = "round";
       g.beginPath();
-      g.moveTo(-s * .6, 0); g.lineTo(-s * .2, 0); g.lineTo(0, -s * .35);
-      g.lineTo(s * .18, s * .28); g.lineTo(s * .35, 0); g.lineTo(s * .62, 0);
+      g.moveTo(-s * .62, 0); g.lineTo(-s * .22, 0); g.lineTo(0, -s * .34);
+      g.lineTo(s * .18, s * .3); g.lineTo(s * .34, 0); g.lineTo(s * .62, 0);
       g.stroke();
       break;
     }
     case "mystery":
-      g.beginPath(); g.arc(0, 0, r * .78, 0, 6.283); g.fill();
-      text(g, "?", 0, r * .45, r * 1.35, "#fff", "center");
+      g.beginPath(); g.arc(0, 0, r * .8, 0, 6.283); g.fill();
+      g.strokeStyle = "rgba(255,255,255,.30)"; g.lineWidth = 1.2;
+      g.beginPath(); g.arc(0, 0, r * .8, 0, 6.283); g.stroke();
+      text(g, "?", 0, r * .46, r * 1.4, "#fff", "center");
       break;
   }
   g.restore();
@@ -1404,54 +1931,85 @@ function drawAilmentIcon(g, key, x, y, r) {
 function drawItemIcon(g, type, x, y, r) {
   g.save();
   g.translate(x, y);
+  g.lineJoin = "round";
   switch (type) {
     case "bandage":
       g.save(); g.rotate(-0.5);
-      fillRound(g, -r, -r * .42, r * 2, r * .84, r * .3, "#f6efdc");
-      g.fillStyle = "#e0d3ae"; g.beginPath(); g.arc(0, 0, r * .32, 0, 6.283); g.fill();
+      fillRound(g, -r, -r * .44, r * 2, r * .88, r * .32, "#f8f2e0");
+      g.strokeStyle = "#cfc3a2"; g.lineWidth = 1.2;
+      roundRect(g, -r, -r * .44, r * 2, r * .88, r * .32); g.stroke();
+      g.fillStyle = "#e7dcc0";
+      g.beginPath(); g.arc(0, 0, r * .34, 0, 6.283); g.fill();
+      g.fillStyle = "#cdbf9c";
+      for (let i = -1; i <= 1; i++)
+        for (let j = -1; j <= 1; j++)
+          if (i || j) { g.beginPath(); g.arc(i * r * .16, j * r * .16, r * .05, 0, 6.283); g.fill(); }
       g.restore(); break;
     case "syringe":
-      g.save(); g.rotate(-0.6);
-      fillRound(g, -r * .9, -r * .28, r * 1.4, r * .56, r * .2, "#e8f6ff");
-      g.fillStyle = "#4bb3f0"; g.fillRect(-r * .85, -r * .22, r * .8, r * .44);
-      g.strokeStyle = "#cfd8e3"; g.lineWidth = Math.max(1.4, r * .16);
-      g.beginPath(); g.moveTo(r * .5, 0); g.lineTo(r * 1.05, 0); g.stroke();
+      g.save(); g.rotate(-0.62);
+      fillRound(g, -r * .95, -r * .3, r * 1.5, r * .6, r * .18, "#eef8ff");
+      g.fillStyle = "#3fa9e8"; fillRound(g, -r * .9, -r * .22, r * .85, r * .44, r * .1, "#3fa9e8");
+      g.strokeStyle = "#b9c8d6"; g.lineWidth = 1.1;
+      roundRect(g, -r * .95, -r * .3, r * 1.5, r * .6, r * .18); g.stroke();
+      g.strokeStyle = "#dfe7ee"; g.lineWidth = Math.max(1.6, r * .17); g.lineCap = "round";
+      g.beginPath(); g.moveTo(r * .55, 0); g.lineTo(r * 1.1, 0); g.stroke();
       g.restore(); break;
     case "film":
-      fillRound(g, -r * .8, -r * .95, r * 1.6, r * 1.9, r * .18, "#39404f");
-      g.fillStyle = "#5d6879"; g.fillRect(-r * .55, -r * .7, r * 1.1, r * 1.4);
+      fillRound(g, -r * .82, -r * .98, r * 1.64, r * 1.96, r * .2, "#333a48");
+      g.fillStyle = "#4d576a"; g.fillRect(-r * .58, -r * .74, r * 1.16, r * 1.48);
+      g.strokeStyle = "#232a36"; g.lineWidth = 1.4;
+      roundRect(g, -r * .82, -r * .98, r * 1.64, r * 1.96, r * .2); g.stroke();
       break;
-    case "xrayimg":
-      fillRound(g, -r * .8, -r * .95, r * 1.6, r * 1.9, r * .18, "#1d3a52");
-      g.strokeStyle = "#a8dcff"; g.lineWidth = Math.max(1.2, r * .16);
-      g.beginPath(); g.moveTo(-r * .3, -r * .55); g.lineTo(r * .1, r * .1); g.lineTo(-r * .2, r * .6); g.stroke();
+    case "xrayimg": {
+      fillRound(g, -r * .82, -r * .98, r * 1.64, r * 1.96, r * .2, "#16324a");
+      const gl = g.createLinearGradient(0, -r, 0, r);
+      gl.addColorStop(0, "rgba(150,215,255,.55)");
+      gl.addColorStop(1, "rgba(150,215,255,.10)");
+      g.fillStyle = gl;
+      g.fillRect(-r * .6, -r * .76, r * 1.2, r * 1.52);
+      g.strokeStyle = "#a8dcff"; g.lineWidth = Math.max(1.3, r * .17); g.lineCap = "round";
+      g.beginPath(); g.moveTo(-r * .28, -r * .56); g.lineTo(r * .1, r * .06); g.lineTo(-r * .2, r * .6); g.stroke();
       break;
+    }
     case "cast":
-      fillRound(g, -r * .85, -r * .6, r * 1.7, r * 1.2, r * .45, "#f3eddb");
-      g.strokeStyle = "#cdc2a3"; g.lineWidth = 1.2;
-      for (let i = -1; i <= 1; i++) { g.beginPath(); g.moveTo(i * r * .45, -r * .6); g.lineTo(i * r * .45 - r * .2, r * .6); g.stroke(); }
+      fillRound(g, -r * .88, -r * .62, r * 1.76, r * 1.24, r * .5, "#f5efdd");
+      g.strokeStyle = "#c8bb99"; g.lineWidth = 1.3;
+      roundRect(g, -r * .88, -r * .62, r * 1.76, r * 1.24, r * .5); g.stroke();
+      g.strokeStyle = "rgba(190,178,146,.85)"; g.lineWidth = 1.6;
+      for (let i = -1; i <= 1; i++) {
+        g.beginPath(); g.moveTo(i * r * .48, -r * .6); g.lineTo(i * r * .48 - r * .22, r * .6); g.stroke();
+      }
       break;
     case "sample":
-      fillRound(g, -r * .42, -r * .95, r * .84, r * 1.9, r * .3, "#dfe8f0");
-      g.fillStyle = "#c0392b"; fillRound(g, -r * .32, -r * .1, r * .64, r * .95, r * .2, "#c0392b");
-      g.fillStyle = "#8d99a8"; g.fillRect(-r * .5, -r * 1.05, r, r * .3);
+      fillRound(g, -r * .44, -r * .98, r * .88, r * 1.96, r * .3, "#e6eef5");
+      fillRound(g, -r * .32, -r * .12, r * .64, r * .98, r * .2, "#c0392b");
+      g.fillStyle = "rgba(255,255,255,.45)";
+      g.fillRect(-r * .26, -r * .8, r * .16, r * .6);
+      g.fillStyle = "#8d99a8"; fillRound(g, -r * .52, -r * 1.06, r * 1.04, r * .34, r * .1, "#8d99a8");
       break;
     case "crate":
-      fillRound(g, -r * .95, -r * .8, r * 1.9, r * 1.6, r * .2, "#c8974f");
-      g.strokeStyle = "#8a6532"; g.lineWidth = Math.max(1.4, r * .16);
-      g.beginPath(); g.moveTo(-r * .95, 0); g.lineTo(r * .95, 0); g.stroke();
-      g.beginPath(); g.moveTo(0, -r * .8); g.lineTo(0, r * .8); g.stroke();
+      fillRound(g, -r * .98, -r * .82, r * 1.96, r * 1.64, r * .18, "#c8974f");
+      g.fillStyle = "rgba(255,255,255,.16)";
+      g.fillRect(-r * .98, -r * .82, r * 1.96, r * .34);
+      g.strokeStyle = "#87642f"; g.lineWidth = Math.max(1.5, r * .17);
+      g.beginPath(); g.moveTo(-r * .98, 0); g.lineTo(r * .98, 0); g.stroke();
+      g.beginPath(); g.moveTo(0, -r * .82); g.lineTo(0, r * .82); g.stroke();
+      roundRect(g, -r * .98, -r * .82, r * 1.96, r * 1.64, r * .18); g.stroke();
       break;
     case "defib":
     case "defib_charged": {
       const hot = type === "defib_charged";
-      fillRound(g, -r, -r * .8, r * 2, r * 1.6, r * .25, hot ? "#ffd84d" : "#e0a52b");
-      g.fillStyle = "#33383f";
-      g.fillRect(-r * .75, -r * .5, r * .55, r * 1.0);
-      g.fillRect(r * .2, -r * .5, r * .55, r * 1.0);
+      fillRound(g, -r * 1.02, -r * .82, r * 2.04, r * 1.64, r * .26, hot ? "#ffd84d" : "#d99f2c");
+      g.strokeStyle = hot ? "#b98800" : "#8e6613"; g.lineWidth = 1.4;
+      roundRect(g, -r * 1.02, -r * .82, r * 2.04, r * 1.64, r * .26); g.stroke();
+      g.fillStyle = "#2e333b";
+      fillRound(g, -r * .78, -r * .52, r * .58, r * 1.04, r * .14, "#2e333b");
+      fillRound(g, r * .2, -r * .52, r * .58, r * 1.04, r * .14, "#2e333b");
       if (hot) {
-        g.strokeStyle = "#ff5c5c"; g.lineWidth = Math.max(1.4, r * .2); g.lineJoin = "round";
-        g.beginPath(); g.moveTo(-r * .1, -r * .6); g.lineTo(-r * .32, 0); g.lineTo(r * .05, 0); g.lineTo(-r * .15, r * .65); g.stroke();
+        g.strokeStyle = "#ff5c5c"; g.lineWidth = Math.max(1.5, r * .21); g.lineJoin = "round";
+        g.beginPath();
+        g.moveTo(-r * .06, -r * .62); g.lineTo(-r * .3, r * .02); g.lineTo(r * .06, r * .02); g.lineTo(-r * .12, r * .66);
+        g.stroke();
       }
       break;
     }
@@ -1459,102 +2017,111 @@ function drawItemIcon(g, type, x, y, r) {
   g.restore();
 }
 
-/* --- world ------------------------------------------------------------- */
+/* --- world -------------------------------------------------------------- */
 
 function drawWorld(g) {
   const world = Game.world;
-
-  // floor
-  for (let y = 0; y < ROWS; y++) {
-    for (let x = 0; x < COLS; x++) {
-      const c = world.grid[y][x];
-      if (c.solid && !c.station) continue;
-      g.fillStyle = ((x + y) & 1) ? PALETTE.floorA : PALETTE.floorB;
-      g.fillRect(x * TILE, y * TILE, TILE, TILE);
-    }
-  }
-
-  // entrance / exit markers
-  drawZone(g, world.entrance, "#7ec8e3", "IN");
-  drawZone(g, world.exit, "#8ce6a8", "OUT");
-
-  // walls
-  for (let y = 0; y < ROWS; y++) {
-    for (let x = 0; x < COLS; x++) {
-      const c = world.grid[y][x];
-      if (!c.solid || c.station) continue;
-      g.fillStyle = PALETTE.wall;
-      g.fillRect(x * TILE, y * TILE, TILE, TILE);
-      const above = cellAt(world, x, y - 1);
-      if (!above || !above.solid || above.station) {
-        g.fillStyle = PALETTE.wallTop;
-        g.fillRect(x * TILE, y * TILE, TILE, 7);
-      }
-    }
-  }
-
-  // stations
+  if (!world.bg) world.bg = bakeBackground(world);
+  g.drawImage(world.bg, 0, 0);
   for (const st of world.stations) drawStation(g, st);
 }
 
-function drawZone(g, tile, color, label) {
-  const x = tile.x * TILE, y = tile.y * TILE;
-  g.save();
-  g.globalAlpha = 0.45;
-  g.fillStyle = color;
-  g.fillRect(x, y, TILE, TILE);
-  g.restore();
-  g.setLineDash([5, 4]);
-  g.strokeStyle = color; g.lineWidth = 2;
-  g.strokeRect(x + 2, y + 2, TILE - 4, TILE - 4);
-  g.setLineDash([]);
-  text(g, label, x + TILE / 2, y + TILE / 2 + 4, 11, "#26404f", "center");
+/** Cabinet-style body shared by every machine. */
+function machineBody(g, x, y, w, h, top, bottom, edge) {
+  const gr = g.createLinearGradient(0, y, 0, y + h);
+  gr.addColorStop(0, top);
+  gr.addColorStop(1, bottom);
+  g.fillStyle = "rgba(18,28,42,.30)";
+  roundRect(g, x + 2, y + 5, w, h, 7); g.fill();          // drop shadow
+  g.fillStyle = gr;
+  roundRect(g, x, y, w, h, 7); g.fill();
+  g.strokeStyle = edge; g.lineWidth = 2;
+  roundRect(g, x, y, w, h, 7); g.stroke();
+  g.fillStyle = "rgba(255,255,255,.22)";
+  roundRect(g, x + 3, y + 3, w - 6, 5, 3); g.fill();      // top highlight
 }
 
 function drawStation(g, st) {
   const info = STATIONS[st.type];
   const x = st.x * TILE, y = st.y * TILE;
 
-  if (st.type === "bed") {
-    fillRound(g, x + 2, y + 3, TILE - 4, TILE - 6, 6, "#ffffff");
-    g.strokeStyle = st.occupant ? "#7fb6e0" : "#c2d2e0"; g.lineWidth = 2;
-    roundRect(g, x + 2, y + 3, TILE - 4, TILE - 6, 6); g.stroke();
-    g.fillStyle = "#cfe4f7"; g.fillRect(x + 5, y + 6, TILE - 10, 9);   // pillow
-    g.fillStyle = "#9fc7e8"; g.fillRect(x + 4, y + TILE - 15, TILE - 8, 9); // blanket
-  } else {
-    fillRound(g, x + 2, y + 2, TILE - 4, TILE - 4, 6, info.color);
-    g.strokeStyle = info.edge; g.lineWidth = 2;
-    roundRect(g, x + 2, y + 2, TILE - 4, TILE - 4, 6); g.stroke();
+  if (st.type === "bed") { drawBed(g, st, x, y); }
+  else {
+    machineBody(g, x + 3, y + 2, TILE - 6, TILE - 7, shade(info.color, 1.14), shade(info.color, 0.82), info.edge);
     drawStationGlyph(g, st, x + TILE / 2, y + TILE / 2);
+    // status LED
+    const ok = !st.jammed && st.stock !== 0;
+    g.fillStyle = ok ? "rgba(140,255,190,.95)" : "rgba(255,120,90,.95)";
+    const pulse = 0.55 + 0.45 * Math.sin(performance.now() / (ok ? 520 : 160));
+    g.globalAlpha = 0.45 + 0.55 * pulse;
+    g.beginPath(); g.arc(x + TILE - 9, y + 8, 2.6, 0, 6.283); g.fill();
+    g.globalAlpha = 1;
   }
 
   // stock pips
   if (st.stock !== Infinity && st.stock !== undefined) {
     const max = info.stockMax;
     for (let i = 0; i < max; i++) {
-      g.fillStyle = i < st.stock ? "#ffffff" : "rgba(0,0,0,.35)";
-      g.fillRect(x + 4 + i * 6, y + TILE - 8, 4, 4);
+      const px = x + 6 + i * 8, py = y + TILE - 9;
+      g.fillStyle = i < st.stock ? "#eafff6" : "rgba(0,0,0,.40)";
+      roundRect(g, px, py, 5, 5, 1.5); g.fill();
     }
   }
 
   if (st.jammed) {
     g.save();
-    g.globalAlpha = 0.55 + 0.35 * Math.sin(performance.now() / 90);
+    g.globalAlpha = 0.45 + 0.35 * Math.sin(performance.now() / 90);
     g.fillStyle = PALETTE.warn;
-    g.fillRect(x + 2, y + 2, TILE - 4, TILE - 4);
+    roundRect(g, x + 3, y + 2, TILE - 6, TILE - 7, 7); g.fill();
     g.restore();
-    text(g, "!", x + TILE / 2, y + TILE / 2 + 8, 22, "#3a2a00", "center");
+    text(g, "!", x + TILE / 2, y + TILE / 2 + 9, 24, "#3a2a00", "center");
   }
 
   if (st.type === "defibrack" && st.hasDefib) drawItemIcon(g, "defib", x + TILE / 2, y + TILE / 2 + 2, 9);
 
   if (st.flash > 0) {
     g.save();
-    g.globalAlpha = clamp(st.flash * 2, 0, .7);
+    g.globalAlpha = clamp(st.flash * 1.8, 0, .65);
     g.fillStyle = "#ffffff";
-    fillRound(g, x + 2, y + 2, TILE - 4, TILE - 4, 6, "#ffffff");
+    roundRect(g, x + 3, y + 2, TILE - 6, TILE - 7, 7); g.fill();
     g.restore();
   }
+}
+
+function drawBed(g, st, x, y) {
+  g.fillStyle = "rgba(18,28,42,.22)";
+  roundRect(g, x + 4, y + 8, TILE - 7, TILE - 10, 6); g.fill();
+  // frame
+  fillRound(g, x + 2, y + 3, TILE - 4, TILE - 7, 6, "#f9fcff");
+  g.strokeStyle = st.occupant ? "#6fa9d8" : "#c3d2e0";
+  g.lineWidth = 2;
+  roundRect(g, x + 2, y + 3, TILE - 4, TILE - 7, 6); g.stroke();
+  // mattress + pillow
+  const m = g.createLinearGradient(0, y + 6, 0, y + TILE - 5);
+  m.addColorStop(0, "#eaf3fb");
+  m.addColorStop(1, "#d4e5f4");
+  g.fillStyle = m;
+  roundRect(g, x + 5, y + 6, TILE - 10, TILE - 12, 4); g.fill();
+  g.fillStyle = "#ffffff";
+  roundRect(g, x + 7, y + 7, TILE - 14, 8, 3); g.fill();
+  // folded blanket
+  g.fillStyle = "#8fbde4";
+  roundRect(g, x + 5, y + TILE - 17, TILE - 10, 10, 3); g.fill();
+  g.strokeStyle = "rgba(255,255,255,.55)"; g.lineWidth = 1;
+  g.beginPath(); g.moveTo(x + 6, y + TILE - 13.5); g.lineTo(x + TILE - 6, y + TILE - 13.5); g.stroke();
+  // side rails
+  g.strokeStyle = "rgba(120,150,180,.55)"; g.lineWidth = 1.5;
+  g.beginPath(); g.moveTo(x + 3.5, y + 12); g.lineTo(x + 3.5, y + TILE - 12); g.stroke();
+  g.beginPath(); g.moveTo(x + TILE - 3.5, y + 12); g.lineTo(x + TILE - 3.5, y + TILE - 12); g.stroke();
+}
+
+/** Lighten / darken a hex colour. */
+function shade(hex, f) {
+  const n = parseInt(hex.slice(1), 16);
+  const r = clamp(Math.round(((n >> 16) & 255) * f), 0, 255);
+  const gg = clamp(Math.round(((n >> 8) & 255) * f), 0, 255);
+  const b = clamp(Math.round((n & 255) * f), 0, 255);
+  return "rgb(" + r + "," + gg + "," + b + ")";
 }
 
 function drawStationGlyph(g, st, cx, cy) {
@@ -1562,204 +2129,344 @@ function drawStationGlyph(g, st, cx, cy) {
   g.translate(cx, cy);
   switch (st.type) {
     case "supply":
-      g.fillStyle = "#ffffff";
-      g.fillRect(-12, -10, 24, 5); g.fillRect(-12, -1, 24, 5); g.fillRect(-12, 8, 24, 5);
+      g.fillStyle = "rgba(10,30,26,.55)";
+      roundRect(g, -13, -12, 26, 24, 3); g.fill();
+      g.fillStyle = "#eafff8";
+      for (let i = 0; i < 3; i++) { roundRect(g, -11, -10 + i * 8, 22, 5, 1.5); g.fill(); }
       break;
     case "medicine":
+      g.fillStyle = "rgba(8,20,44,.5)";
+      roundRect(g, -13, -12, 26, 24, 3); g.fill();
       g.fillStyle = "#ffffff";
-      g.fillRect(-3.5, -11, 7, 22); g.fillRect(-11, -3.5, 22, 7);
+      roundRect(g, -3.5, -10, 7, 20, 2); g.fill();
+      roundRect(g, -10, -3.5, 20, 7, 2); g.fill();
       break;
     case "xray":
+      g.fillStyle = "#1d2534";
+      roundRect(g, -13, -12, 26, 20, 3); g.fill();
       g.fillStyle = "#9fd8ff";
-      g.beginPath(); g.arc(0, -3, 8, 0, 6.283); g.fill();
-      g.fillStyle = "#2b3444"; g.fillRect(-9, 6, 18, 5);
-      g.strokeStyle = "#9fd8ff"; g.lineWidth = 1.5;
-      g.beginPath(); g.moveTo(-11, -12); g.lineTo(11, -12); g.stroke();
+      g.globalAlpha = 0.85;
+      g.beginPath(); g.arc(0, -3, 7, 0, 6.283); g.fill();
+      g.globalAlpha = 1;
+      g.strokeStyle = "#6fb6e0"; g.lineWidth = 1.2;
+      g.beginPath(); g.arc(0, -3, 7, 0, 6.283); g.stroke();
+      g.fillStyle = "#3a4657";
+      g.fillRect(-11, 9, 22, 4);
       break;
     case "cast":
-      g.fillStyle = "#fdf7e6";
+      g.fillStyle = "#fdf8ea";
       g.beginPath(); g.arc(0, 0, 10, 0, 6.283); g.fill();
-      g.strokeStyle = "#8d7343"; g.lineWidth = 2;
+      g.strokeStyle = "#8a7343"; g.lineWidth = 2;
       g.beginPath(); g.arc(0, 0, 10, 0, 6.283); g.stroke();
-      g.beginPath(); g.moveTo(-7, -7); g.lineTo(7, 7); g.stroke();
+      g.strokeStyle = "#b9a271"; g.lineWidth = 1.6;
+      g.beginPath(); g.moveTo(-6.5, -6.5); g.lineTo(6.5, 6.5); g.stroke();
+      g.beginPath(); g.moveTo(-6.5, 2); g.lineTo(2, -6.5); g.stroke();
       break;
     case "charger":
-      g.fillStyle = "#3a2c05";
-      g.beginPath(); g.moveTo(2, -12); g.lineTo(-6, 1); g.lineTo(0, 1); g.lineTo(-2, 12);
+      g.fillStyle = "rgba(50,34,4,.45)";
+      roundRect(g, -12, -12, 24, 24, 4); g.fill();
+      g.fillStyle = "#fff3c4";
+      g.beginPath();
+      g.moveTo(3, -11); g.lineTo(-6, 1); g.lineTo(0, 1); g.lineTo(-3, 11);
       g.lineTo(7, -2); g.lineTo(1, -2); g.closePath(); g.fill();
       break;
     case "lab":
-      g.fillStyle = "#f0e6ff";
-      g.beginPath(); g.moveTo(-4, -11); g.lineTo(4, -11); g.lineTo(4, -3);
-      g.lineTo(10, 10); g.lineTo(-10, 10); g.lineTo(-4, -3); g.closePath(); g.fill();
-      g.fillStyle = "#6a35a8"; g.fillRect(-8, 4, 16, 6);
+      g.fillStyle = "rgba(30,10,52,.45)";
+      roundRect(g, -13, -12, 26, 24, 3); g.fill();
+      g.fillStyle = "#f2e9ff";
+      g.beginPath();
+      g.moveTo(-4, -10); g.lineTo(4, -10); g.lineTo(4, -3);
+      g.lineTo(10, 9); g.lineTo(-10, 9); g.lineTo(-4, -3); g.closePath(); g.fill();
+      g.fillStyle = "#b06bff";
+      g.beginPath();
+      g.moveTo(-6.6, 3); g.lineTo(6.6, 3); g.lineTo(10, 9); g.lineTo(-10, 9); g.closePath(); g.fill();
+      g.fillStyle = "rgba(255,255,255,.75)";
+      g.beginPath(); g.arc(-2, 5.5, 1.5, 0, 6.283); g.fill();
+      g.beginPath(); g.arc(3, 6.5, 1.1, 0, 6.283); g.fill();
       break;
     case "delivery":
-      g.fillStyle = "#f3e2cd";
-      g.fillRect(-12, -12, 24, 24);
-      g.strokeStyle = "#6f4a26"; g.lineWidth = 2;
-      g.beginPath(); g.moveTo(-12, 0); g.lineTo(12, 0); g.stroke();
+      g.fillStyle = "#f5e5cf";
+      roundRect(g, -13, -12, 26, 24, 2); g.fill();
+      g.strokeStyle = "#7a5029"; g.lineWidth = 2;
+      g.beginPath(); g.moveTo(-13, 0); g.lineTo(13, 0); g.stroke();
       g.beginPath(); g.moveTo(0, -12); g.lineTo(0, 12); g.stroke();
+      g.strokeStyle = "rgba(122,80,41,.5)"; g.lineWidth = 1;
+      roundRect(g, -13, -12, 26, 24, 2); g.stroke();
       break;
     case "defibrack":
-      g.strokeStyle = "#ffd9d1"; g.lineWidth = 2;
-      g.strokeRect(-12, -10, 24, 20);
+      g.strokeStyle = "rgba(255,220,212,.85)"; g.lineWidth = 2;
+      g.setLineDash([4, 3]);
+      roundRect(g, -12, -10, 24, 20, 3); g.stroke();
+      g.setLineDash([]);
       break;
   }
   g.restore();
 }
 
-/* --- entities ---------------------------------------------------------- */
+/* --- entities ----------------------------------------------------------- */
+
+/** Shared rounded-body character with a walk cycle. */
+function drawBody(g, opts) {
+  const { bodyColor, edgeColor, legColor, step, facing, moving } = opts;
+  const swing = moving ? Math.sin(step) * 4 : 0;
+  // legs
+  g.fillStyle = legColor;
+  roundRect(g, -7, 7 + Math.max(0, swing), 5.5, 8 - Math.abs(swing) * .3, 2); g.fill();
+  roundRect(g, 1.5, 7 + Math.max(0, -swing), 5.5, 8 - Math.abs(swing) * .3, 2); g.fill();
+  // torso
+  const gr = g.createLinearGradient(0, -9, 0, 11);
+  gr.addColorStop(0, shade(bodyColor, 1.16));
+  gr.addColorStop(1, shade(bodyColor, 0.86));
+  g.fillStyle = gr;
+  roundRect(g, -11, -9, 22, 20, 8); g.fill();
+  g.strokeStyle = edgeColor; g.lineWidth = 1.6;
+  roundRect(g, -11, -9, 22, 20, 8); g.stroke();
+  // arms follow the facing direction, counter-swinging
+  g.fillStyle = shade(bodyColor, 0.94);
+  const ax = facing.x * 8, ay = facing.y * 6;
+  g.beginPath(); g.arc(-9.5 + ax, 2 + ay - swing * .5, 4.2, 0, 6.283); g.fill();
+  g.beginPath(); g.arc(9.5 + ax, 2 + ay + swing * .5, 4.2, 0, 6.283); g.fill();
+  g.strokeStyle = edgeColor; g.lineWidth = 1.2;
+  g.beginPath(); g.arc(-9.5 + ax, 2 + ay - swing * .5, 4.2, 0, 6.283); g.stroke();
+  g.beginPath(); g.arc(9.5 + ax, 2 + ay + swing * .5, 4.2, 0, 6.283); g.stroke();
+}
+
+function drawFace(g, opts) {
+  const { facing, blink, mood, skin } = opts;
+  g.fillStyle = skin;
+  g.beginPath(); g.arc(0, -16, 9, 0, 6.283); g.fill();
+  g.strokeStyle = "rgba(90,60,40,.35)"; g.lineWidth = 1.2;
+  g.beginPath(); g.arc(0, -16, 9, 0, 6.283); g.stroke();
+  const ex = facing.x * 2.4, ey = facing.y * 1.8;
+  g.fillStyle = "#33302e";
+  if (blink) {
+    g.fillRect(-4.6 + ex, -15.6 + ey, 3, 1.3);
+    g.fillRect(1.6 + ex, -15.6 + ey, 3, 1.3);
+  } else {
+    g.beginPath(); g.arc(-3.1 + ex, -15 + ey, 1.6, 0, 6.283); g.fill();
+    g.beginPath(); g.arc(3.1 + ex, -15 + ey, 1.6, 0, 6.283); g.fill();
+  }
+  if (mood !== undefined) {
+    g.strokeStyle = "#9c6a55"; g.lineWidth = 1.3; g.lineCap = "round";
+    g.beginPath();
+    if (mood > 0.55) g.arc(0, -12.4, 3, 0.25, Math.PI - 0.25);            // content
+    else if (mood > 0.3) { g.moveTo(-2.6, -11.4); g.lineTo(2.6, -11.4); } // flat
+    else g.arc(0, -9.6, 3, Math.PI + 0.3, -0.3);                          // worried
+    g.stroke();
+  }
+}
 
 function drawPatient(g, pt, x, y, scale) {
   const s = scale || 1;
-  const bobY = pt.state === "waiting" || pt.state === "walking" ? Math.sin(pt.bob) * 1.6 : 0;
+  const frac = clamp(pt.patience / pt.patienceMax, 0, 1);
+  const walking = pt.state === "waiting" || pt.state === "walking";
+  const bobY = walking ? Math.sin(pt.bob) * 1.6 : 0;
+  const panic = !pt.done && frac < CRIT_AT;
+
   g.save();
   g.translate(x, y + bobY);
   g.scale(s, s);
 
+  g.fillStyle = "rgba(20,32,48,.20)";
+  g.beginPath(); g.ellipse(0, 16, 12, 4.5, 0, 0, 6.283); g.fill();
+
   if (pt.flash > 0) {
-    g.save(); g.globalAlpha = clamp(pt.flash * 2, 0, .8);
-    g.fillStyle = "#fff"; g.beginPath(); g.arc(0, -4, 20, 0, 6.283); g.fill(); g.restore();
+    g.save(); g.globalAlpha = clamp(pt.flash * 1.8, 0, .75);
+    g.fillStyle = "#fff"; g.beginPath(); g.arc(0, -4, 21, 0, 6.283); g.fill(); g.restore();
+  }
+  if (panic) {
+    g.save();
+    g.globalAlpha = 0.20 + 0.18 * Math.sin(performance.now() / 110);
+    g.fillStyle = "#ff4d4d";
+    g.beginPath(); g.arc(0, -4, 20, 0, 6.283); g.fill();
+    g.restore();
   }
 
-  // gown body
-  fillRound(g, -10, -8, 20, 20, 7, pt.done ? "#bff0cf" : "#e8eef6");
-  g.strokeStyle = pt.done ? "#4ec97a" : "#b6c4d4"; g.lineWidth = 1.5;
-  roundRect(g, -10, -8, 20, 20, 7); g.stroke();
-  // head
-  g.fillStyle = "#f2c9a0";
-  g.beginPath(); g.arc(0, -14, 8, 0, 6.283); g.fill();
-  g.fillStyle = "#5a4634";
-  g.beginPath(); g.arc(0, -17, 8, Math.PI, 0); g.fill();
-  // eyes
-  g.fillStyle = "#3a3a3a";
-  g.beginPath(); g.arc(-3, -13, 1.4, 0, 6.283); g.fill();
-  g.beginPath(); g.arc(3, -13, 1.4, 0, 6.283); g.fill();
+  const gown = pt.done ? "#b9edcb" : "#e9eff7";
+  drawBody(g, {
+    bodyColor: gown,
+    edgeColor: pt.done ? "#4ec97a" : "#aebdcd",
+    legColor: "#c9d4e0",
+    step: pt.bob * 1.6, facing: { x: 0, y: 1 }, moving: pt.state === "walking"
+  });
+  // gown ties
+  g.strokeStyle = "rgba(150,170,195,.8)"; g.lineWidth = 1;
+  g.beginPath(); g.moveTo(-5, -4); g.lineTo(5, -4); g.stroke();
 
+  const blink = ((performance.now() / 1000 + pt.id * 1.7) % 4.2) < 0.12;
+  drawFace(g, {
+    facing: { x: 0, y: 0.4 }, blink, mood: pt.done ? 1 : frac,
+    skin: pt.done ? "#f6d3ac" : (panic ? "#f3c39c" : "#f2c9a0")
+  });
+  // hair
+  g.fillStyle = "#5b4635";
+  g.beginPath(); g.arc(0, -18, 9, Math.PI, 0); g.fill();
+
+  if (panic) {                                   // sweat beads
+    g.fillStyle = "rgba(140,205,255,.95)";
+    const t = performance.now() / 260;
+    for (let i = 0; i < 2; i++) {
+      const off = ((t + i * 0.5) % 1);
+      g.beginPath(); g.arc(9 - i * 17, -20 + off * 12, 1.8, 0, 6.283); g.fill();
+    }
+  }
   g.restore();
 
-  // ailment badge — a light bubble with a pointer, like a speech tag
-  const badgeY = y - 33;
+  // ailment badge
+  const badgeY = y - 34;
   const a2 = AILMENTS[pt.ailment];
-  g.fillStyle = "rgba(255,255,255,.94)";
-  g.beginPath(); g.arc(x, badgeY, 12, 0, 6.283); g.fill();
-  g.beginPath(); g.moveTo(x - 4, badgeY + 9); g.lineTo(x + 4, badgeY + 9); g.lineTo(x, badgeY + 16); g.closePath(); g.fill();
-  g.strokeStyle = a2.color; g.lineWidth = 2;
-  g.beginPath(); g.arc(x, badgeY, 12, 0, 6.283); g.stroke();
+  g.fillStyle = "rgba(18,28,42,.28)";
+  g.beginPath(); g.arc(x + 1, badgeY + 2, 12.5, 0, 6.283); g.fill();
+  g.fillStyle = "rgba(255,255,255,.96)";
+  g.beginPath(); g.arc(x, badgeY, 12.5, 0, 6.283); g.fill();
+  g.beginPath(); g.moveTo(x - 4, badgeY + 9.5); g.lineTo(x + 4, badgeY + 9.5); g.lineTo(x, badgeY + 17); g.closePath(); g.fill();
+  g.strokeStyle = a2.color; g.lineWidth = 2.2;
+  g.beginPath(); g.arc(x, badgeY, 12.5, 0, 6.283); g.stroke();
   drawAilmentIcon(g, pt.ailment, x, badgeY, 8);
   if (pt.revealed) {
     g.fillStyle = "#b58bff";
-    g.beginPath(); g.arc(x + 10, badgeY - 9, 3.5, 0, 6.283); g.fill();
+    g.beginPath(); g.arc(x + 10, badgeY - 9, 3.6, 0, 6.283); g.fill();
+    g.strokeStyle = "#fff"; g.lineWidth = 1; g.stroke();
   }
 
-  // patience bar
-  const frac = clamp(pt.patience / pt.patienceMax, 0, 1);
-  drawMeter(g, x - 16, y + 16, 32, 5, frac, pt.done);
+  drawMeter(g, x - 17, y + 19, 34, 5, frac, pt.done);
 
   // step pips
   const n = pt.steps.length;
   if (n > 1 && !pt.done) {
     for (let i = 0; i < n; i++) {
-      g.fillStyle = i < pt.step ? PALETTE.good : "rgba(255,255,255,.55)";
-      g.strokeStyle = "rgba(30,40,55,.7)"; g.lineWidth = 1;
-      g.beginPath(); g.arc(x - (n - 1) * 4 + i * 8, y + 25, 2.8, 0, 6.283); g.fill(); g.stroke();
+      g.fillStyle = i < pt.step ? PALETTE.good : "rgba(255,255,255,.65)";
+      g.strokeStyle = "rgba(28,40,58,.75)"; g.lineWidth = 1;
+      g.beginPath(); g.arc(x - (n - 1) * 4.5 + i * 9, y + 29, 3, 0, 6.283); g.fill(); g.stroke();
     }
   }
 
   if (pt.steps[pt.step] && pt.steps[pt.step].k === "lab") {
     const t = performance.now() / 180;
-    g.strokeStyle = "#b58bff"; g.lineWidth = 2.5;
-    g.beginPath(); g.arc(x, y - 34, 15, t, t + 2.2); g.stroke();
+    g.strokeStyle = "#b58bff"; g.lineWidth = 2.6; g.lineCap = "round";
+    g.beginPath(); g.arc(x, badgeY, 16, t, t + 2.2); g.stroke();
   }
 }
 
 function drawMeter(g, x, y, w, h, frac, done) {
-  fillRound(g, x - 1, y - 1, w + 2, h + 2, 3, "rgba(15,22,32,.75)");
+  g.fillStyle = "rgba(14,22,34,.78)";
+  roundRect(g, x - 1.5, y - 1.5, w + 3, h + 3, 3.5); g.fill();
   let col = PALETTE.good;
   if (done) col = "#4ec97a";
   else if (frac < 0.25) {
     const pulse = 0.55 + 0.45 * Math.sin(performance.now() / 90);
-    col = "rgb(" + Math.round(210 + 45 * pulse) + ",50,50)";
+    col = "rgb(" + Math.round(206 + 49 * pulse) + ",52,52)";
   } else if (frac < 0.55) col = PALETTE.warn;
-  fillRound(g, x, y, Math.max(0, w * frac), h, 2.5, col);
+  g.fillStyle = col;
+  roundRect(g, x, y, Math.max(0, w * frac), h, 2.5); g.fill();
+  g.fillStyle = "rgba(255,255,255,.28)";
+  roundRect(g, x, y, Math.max(0, w * frac), h * 0.45, 2); g.fill();
 }
 
 function drawPlayer(g, p) {
+  const moving = !!(p.moving);
   const bob = Math.sin(p.bob) * 1.8;
   const x = p.x, y = p.y + bob;
+  const facing = { x: p.dx || 0, y: p.dy || 1 };
 
-  // shadow
-  g.fillStyle = "rgba(20,30,45,.18)";
-  g.beginPath(); g.ellipse(p.x, p.y + 15, 13, 5, 0, 0, 6.283); g.fill();
+  // sprint trail
+  if (p.sprinting) {
+    g.save();
+    for (let i = 1; i <= 3; i++) {
+      g.globalAlpha = 0.16 / i;
+      g.fillStyle = p.color;
+      g.beginPath();
+      g.ellipse(x - facing.x * i * 9, y - facing.y * i * 9 + 2, 10, 12, 0, 0, 6.283);
+      g.fill();
+    }
+    g.restore();
+  }
+
+  g.fillStyle = "rgba(20,32,48,.22)";
+  g.beginPath(); g.ellipse(p.x, p.y + 16, 13, 5, 0, 0, 6.283); g.fill();
 
   g.save();
   g.translate(x, y);
 
-  // legs
-  g.fillStyle = "#33465e";
-  g.fillRect(-7, 8, 5, 7); g.fillRect(2, 8, 5, 7);
-  // scrubs body
-  fillRound(g, -11, -8, 22, 19, 8, p.color);
-  g.strokeStyle = "rgba(0,0,0,.22)"; g.lineWidth = 1.5;
-  roundRect(g, -11, -8, 22, 19, 8); g.stroke();
-  // v-neck
-  g.fillStyle = "rgba(255,255,255,.75)";
-  g.beginPath(); g.moveTo(-5, -8); g.lineTo(0, -1); g.lineTo(5, -8); g.closePath(); g.fill();
-  // arms reaching in facing direction
-  g.fillStyle = p.color;
-  const ax = p.dx * 8, ay = p.dy * 6;
-  g.beginPath(); g.arc(-9 + ax, 2 + ay, 4, 0, 6.283); g.fill();
-  g.beginPath(); g.arc(9 + ax, 2 + ay, 4, 0, 6.283); g.fill();
-  // head
-  g.fillStyle = "#f7d3ad";
-  g.beginPath(); g.arc(0, -16, 9, 0, 6.283); g.fill();
-  // cap
-  g.fillStyle = p.color;
-  g.beginPath(); g.arc(0, -18, 9, Math.PI, 0); g.fill();
-  g.fillRect(-9, -19, 18, 3);
-  // face
-  g.fillStyle = "#3a3a3a";
-  const ex = p.dx * 2.2, ey = p.dy * 1.6;
-  g.beginPath(); g.arc(-3.2 + ex, -15 + ey, 1.5, 0, 6.283); g.fill();
-  g.beginPath(); g.arc(3.2 + ex, -15 + ey, 1.5, 0, 6.283); g.fill();
-  // mask
-  g.fillStyle = "rgba(255,255,255,.9)";
-  fillRound(g, -5 + ex, -12 + ey, 10, 5, 2, "rgba(255,255,255,.9)");
+  drawBody(g, {
+    bodyColor: p.color,
+    edgeColor: "rgba(12,22,34,.45)",
+    legColor: "#31445c",
+    step: p.step || 0, facing, moving
+  });
 
-  // player number tag
-  text(g, "P" + (p.index + 1), 0, 6, 9, "rgba(255,255,255,.9)", "center");
+  // v-neck
+  g.fillStyle = "rgba(255,255,255,.78)";
+  g.beginPath(); g.moveTo(-5, -9); g.lineTo(0, -1.5); g.lineTo(5, -9); g.closePath(); g.fill();
+
+  const blink = ((performance.now() / 1000 + p.index * 2.3) % 4.6) < 0.12;
+  drawFace(g, { facing, blink, skin: "#f7d3ad" });
+
+  // scrub cap
+  g.fillStyle = shade(p.color, 1.05);
+  g.beginPath(); g.arc(0, -18, 9.2, Math.PI, 0); g.fill();
+  g.fillStyle = shade(p.color, 0.9);
+  roundRect(g, -9.4, -19.5, 18.8, 3.4, 1.5); g.fill();
+  // surgical mask
+  g.fillStyle = "rgba(255,255,255,.92)";
+  roundRect(g, -5.4 + facing.x * 2.2, -12.6 + facing.y * 1.6, 10.8, 5.2, 2); g.fill();
+  g.strokeStyle = "rgba(160,180,200,.9)"; g.lineWidth = 0.9;
+  roundRect(g, -5.4 + facing.x * 2.2, -12.6 + facing.y * 1.6, 10.8, 5.2, 2); g.stroke();
+
+  // player tag
+  g.fillStyle = "rgba(10,18,28,.55)";
+  roundRect(g, -8, 0.5, 16, 9, 3); g.fill();
+  text(g, "P" + (p.index + 1), 0, 7.6, 8.5, "rgba(255,255,255,.95)", "center");
   g.restore();
 
-  // carried item / patient above head
+  // stamina, only while it matters
+  if (p.stamina !== undefined && p.stamina < STAMINA_MAX - 0.02) {
+    const f = clamp(p.stamina / STAMINA_MAX, 0, 1);
+    g.fillStyle = "rgba(14,22,34,.7)";
+    roundRect(g, x - 13, y + 20, 26, 4, 2); g.fill();
+    g.fillStyle = f > 0.25 ? "#8be9ff" : "#ff9a6a";
+    roundRect(g, x - 12, y + 21, 24 * f, 2, 1); g.fill();
+  }
+
+  // carried patient / item
   if (p.patient) {
-    drawPatient(g, p.patient, x, y - 40, 0.78);
+    g.save();
+    g.translate(x, y - 42);
+    g.scale(0.76, 0.76);
+    drawPatient(g, p.patient, 0, 0, 1);
+    g.restore();
   } else if (p.item) {
     g.save();
-    g.globalAlpha = .25; g.fillStyle = "#000";
-    g.beginPath(); g.ellipse(x, y - 26, 12, 4, 0, 0, 6.283); g.fill();
+    g.globalAlpha = .22; g.fillStyle = "#000";
+    g.beginPath(); g.ellipse(x, y - 25, 12, 4, 0, 0, 6.283); g.fill();
     g.restore();
-    drawItemIcon(g, p.item.type, x, y - 32, 11);
+    const lift = Math.sin(p.bob * 0.6) * 1.2;
+    drawItemIcon(g, p.item.type, x, y - 33 + lift, 11);
     if (p.item.type === "defib_charged") {
       const f = clamp(p.item.charge / DEFIB_CHARGE_LIFE, 0, 1);
-      drawMeter(g, x - 14, y - 46, 28, 4, f);
+      drawMeter(g, x - 15, y - 48, 30, 4, f);
     }
     if (p.item.type === "sample") {
-      text(g, "#" + (p.item.pid % 100), x + 14, y - 30, 10, "#ffd0d0", "left");
+      text(g, "#" + (p.item.pid % 100), x + 15, y - 31, 10, "#ffd0d0", "left");
     }
   }
 
-  // work progress bar
+  // work progress / hint
   if (p.work) {
     const f = clamp(p.work.t / p.work.dur, 0, 1);
-    const bx = x - 24, by = y + 22;
-    fillRound(g, bx - 2, by - 2, 52, 11, 4, "rgba(15,22,32,.8)");
-    fillRound(g, bx, by, 48 * f, 7, 3, "#ffe066");
+    const bx = x - 26, by = y + 24;
+    g.fillStyle = "rgba(14,22,34,.82)";
+    roundRect(g, bx - 2, by - 2, 56, 11, 4); g.fill();
+    const gr = g.createLinearGradient(bx, 0, bx + 52, 0);
+    gr.addColorStop(0, "#ffd54a");
+    gr.addColorStop(1, "#fff3b0");
+    g.fillStyle = gr;
+    roundRect(g, bx, by, 52 * f, 7, 3); g.fill();
     labelPill(g, p.work.label, x, by + 13, "#eaf2ff");
   } else if (p.hintT > 0) {
     g.save();
     g.globalAlpha = clamp(p.hintT, 0, 1);
-    labelPill(g, p.hint, x, y + 20, "#ffd9a0");
+    labelPill(g, p.hint, x, y + 22, "#ffd9a0");
     g.restore();
   }
 }
@@ -1768,72 +2475,126 @@ function drawPlayer(g, p) {
 function labelPill(g, str, cx, top, color) {
   g.font = 'bold 11px "Trebuchet MS", "Segoe UI", sans-serif';
   const w = g.measureText(str).width + 12;
-  fillRound(g, cx - w / 2, top, w, 15, 5, "rgba(15,22,32,.82)");
+  g.fillStyle = "rgba(14,22,34,.85)";
+  roundRect(g, cx - w / 2, top, w, 15, 5); g.fill();
   text(g, str, cx, top + 11, 11, color, "center");
 }
 
 function drawFloorItem(g, it) {
-  g.fillStyle = "rgba(20,30,45,.18)";
-  g.beginPath(); g.ellipse(it.x, it.y + 8, 11, 4, 0, 0, 6.283); g.fill();
-  drawItemIcon(g, it.type, it.x, it.y, 11);
+  g.fillStyle = "rgba(20,32,48,.20)";
+  g.beginPath(); g.ellipse(it.x, it.y + 9, 11, 4, 0, 0, 6.283); g.fill();
+  const bob = Math.sin(performance.now() / 420 + it.id) * 1.4;
+  drawItemIcon(g, it.type, it.x, it.y + bob, 11);
 }
 
-/* --- HUD --------------------------------------------------------------- */
+/** Soft ring under whatever each medic is currently facing. */
+function drawFocusRings(g) {
+  for (const p of Game.players) {
+    const st = facingStation(Game.world, p, () => true);
+    if (!st) continue;
+    const t = performance.now() / 260;
+    g.save();
+    g.globalAlpha = 0.30 + 0.14 * Math.sin(t);
+    g.strokeStyle = p.color;
+    g.lineWidth = 2.5;
+    roundRect(g, st.x * TILE + 1, st.y * TILE + 1, TILE - 2, TILE - 2, 8);
+    g.stroke();
+    g.restore();
+  }
+}
+
+/* --- HUD ---------------------------------------------------------------- */
+
+function hudCard(g, x, y, w, h, label) {
+  g.fillStyle = "rgba(255,255,255,.045)";
+  roundRect(g, x, y, w, h, 9); g.fill();
+  g.strokeStyle = "rgba(255,255,255,.07)"; g.lineWidth = 1;
+  roundRect(g, x, y, w, h, 9); g.stroke();
+  if (label) text(g, label, x + 12, y + 16, 10, PALETTE.dim);
+}
 
 function drawHUD(g) {
-  g.fillStyle = PALETTE.hud;
+  g.fillStyle = Paint.hud;
   g.fillRect(0, 0, W, HUD_H);
-  g.fillStyle = PALETTE.hudLine;
+  g.fillStyle = "rgba(63,182,232,.35)";
   g.fillRect(0, HUD_H - 3, W, 3);
 
   const lvl = Game.level;
 
-  // Left: level name + timer
-  text(g, (Game.levelIndex + 1) + ". " + lvl.name, 22, 32, 20, PALETTE.text);
-  const remain = Math.max(0, lvl.duration - Game.time);
-  const urgent = remain < 30;
-  text(g, fmtTime(remain), 22, 72, 34, urgent ? PALETTE.bad : PALETTE.text);
-  text(g, "TIME", 118, 72, 13, PALETTE.dim);
-
-  // Lives
-  for (let i = 0; i < 3; i++) {
-    const hx = 180 + i * 26, hy = 62;
-    g.save(); g.translate(hx, hy); g.scale(1, 1);
-    g.fillStyle = i < Game.lives ? "#ff4d6d" : "rgba(255,255,255,.15)";
-    g.beginPath();
-    g.moveTo(0, 7);
-    g.bezierCurveTo(-12, -1, -5, -10, 0, -3.5);
-    g.bezierCurveTo(5, -10, 12, -1, 0, 7);
-    g.fill(); g.restore();
+  // --- clock / level ---
+  hudCard(g, 14, 10, 236, HUD_H - 22);
+  text(g, (Game.endless ? "∞" : (Game.levelIndex + 1)) + "  " + lvl.name, 26, 30, 15, PALETTE.text);
+  if (Game.endless) {
+    text(g, fmtTime(Game.time), 26, 70, 32, "#8be9ff");
+    text(g, "SURVIVED", 128, 70, 11, PALETTE.dim);
+    text(g, "WAVE " + Game.wave, 128, 52, 12, PALETTE.warn);
+  } else {
+    const remain = Math.max(0, lvl.duration - Game.time);
+    const urgent = remain < 30;
+    let col = urgent ? PALETTE.bad : PALETTE.text;
+    if (urgent && Math.sin(performance.now() / 160) > 0) col = "#ff8f7a";
+    text(g, fmtTime(remain), 26, 70, 32, col);
+    text(g, "TIME", 122, 70, 11, PALETTE.dim);
+    if (Game.wave > 0) text(g, "WAVE " + Game.wave, 122, 52, 12, PALETTE.warn);
   }
 
-  // Centre: score + combo
-  text(g, String(Game.score), W / 2, 52, 40, PALETTE.text, "center");
-  text(g, "SCORE", W / 2, 70, 12, PALETTE.dim, "center");
-  if (Game.combo > 1) {
-    const mult = Math.min(COMBO_MAX, 1 + 0.25 * (Game.combo - 1));
-    const a = clamp(Game.comboTimer / COMBO_WINDOW, 0, 1);
-    g.save(); g.globalAlpha = 0.4 + 0.6 * a;
-    text(g, "COMBO x" + fmtMult(mult), W / 2 + 120, 46, 17, PALETTE.warn, "left");
-    fillRound(g, W / 2 + 120, 54, 100 * a, 5, 2.5, PALETTE.warn);
+  // --- lives ---
+  for (let i = 0; i < 3; i++) {
+    const hx = 184 + i * 22, hy = 62;
+    const alive = i < Game.lives;
+    g.save();
+    g.translate(hx, hy);
+    const beat = alive && Game.critical < CRIT_AT ? 1 + 0.14 * Math.sin(performance.now() / 130) : 1;
+    g.scale(beat, beat);
+    g.fillStyle = alive ? "#ff4d6d" : "rgba(255,255,255,.12)";
+    g.beginPath();
+    g.moveTo(0, 7);
+    g.bezierCurveTo(-11, -1, -5, -10, 0, -3.5);
+    g.bezierCurveTo(5, -10, 11, -1, 0, 7);
+    g.fill();
     g.restore();
   }
 
-  // Right: star thresholds
-  const bx = W - 300;
-  text(g, "TARGETS", bx, 26, 12, PALETTE.dim);
-  for (let i = 0; i < 3; i++) {
-    const th = lvl.stars[i];
-    const hit = Game.score >= th;
-    const sx = bx + i * 90;
-    drawStar(g, sx + 12, 48, 11, hit ? "#ffd54a" : "rgba(255,255,255,.16)");
-    text(g, String(th), sx + 28, 53, 15, hit ? PALETTE.text : PALETTE.dim);
-  }
-  text(g, "Treated " + Game.treated + "   Lost " + Game.lost, bx, 76, 13, PALETTE.dim);
+  // --- score + combo ---
+  const shown = Math.round(Game.scoreShown);
+  text(g, String(shown), W / 2, 52, 42, PALETTE.text, "center");
+  text(g, "SCORE", W / 2, 70, 11, PALETTE.dim, "center");
 
-  // mute indicator
-  text(g, Sound.muted ? "M: sound off" : "M: sound on", W - 22, 26, 12, PALETTE.dim, "right");
-  text(g, "Esc: pause", W - 22, 76, 12, PALETTE.dim, "right");
+  if (Game.combo > 1) {
+    const mult = Math.min(COMBO_MAX, 1 + 0.25 * (Game.combo - 1));
+    const a = clamp(Game.comboTimer / COMBO_WINDOW, 0, 1);
+    const cx = W / 2 + 138, cy = 46;
+    g.save();
+    g.globalAlpha = 0.45 + 0.55 * a;
+    g.strokeStyle = "rgba(255,255,255,.14)"; g.lineWidth = 4;
+    g.beginPath(); g.arc(cx, cy, 20, 0, 6.283); g.stroke();
+    g.strokeStyle = PALETTE.warn; g.lineWidth = 4; g.lineCap = "round";
+    g.beginPath(); g.arc(cx, cy, 20, -Math.PI / 2, -Math.PI / 2 + 6.283 * a); g.stroke();
+    text(g, "x" + fmtMult(mult), cx, cy + 5, 15, PALETTE.warn, "center");
+    text(g, "CHAIN " + Game.combo, cx, cy + 34, 11, PALETTE.dim, "center");
+    g.restore();
+  }
+
+  // --- targets / best ---
+  const bx = W - 330;
+  if (Game.endless) {
+    hudCard(g, bx, 10, 250, HUD_H - 22, "PERSONAL BEST");
+    text(g, String(Game.endlessBest), bx + 12, 52, 26, "#ffd54a");
+    text(g, "Treated " + Game.treated + "   Lost " + Game.lost, bx + 12, 74, 12, PALETTE.dim);
+  } else {
+    hudCard(g, bx, 10, 250, HUD_H - 22, "TARGETS");
+    for (let i = 0; i < 3; i++) {
+      const th = lvl.stars[i];
+      const hit = Game.score >= th;
+      const sx = bx + 14 + i * 78;
+      drawStar(g, sx + 9, 46, 10, hit ? "#ffd54a" : "rgba(255,255,255,.15)");
+      text(g, String(th), sx + 23, 51, 13, hit ? PALETTE.text : PALETTE.dim);
+    }
+    text(g, "Treated " + Game.treated + "   Lost " + Game.lost, bx + 12, 74, 12, PALETTE.dim);
+  }
+
+  text(g, Sound.muted ? "M  muted" : "M  sound", W - 20, 26, 11, PALETTE.dim, "right");
+  text(g, "Esc  pause", W - 20, 74, 11, PALETTE.dim, "right");
 }
 
 function drawStar(g, x, y, r, color) {
@@ -1854,9 +2615,9 @@ const CHAIN_COLORS = {
 };
 
 function drawLegend(g) {
-  g.fillStyle = "#0f1620";
+  g.fillStyle = "#0c1420";
   g.fillRect(0, LEGEND_Y, W, LEGEND_H);
-  g.fillStyle = PALETTE.hudLine;
+  g.fillStyle = "rgba(63,182,232,.22)";
   g.fillRect(0, LEGEND_Y, W, 2);
 
   const list = Game.level.ailments;
@@ -1864,22 +2625,30 @@ function drawLegend(g) {
   for (let i = 0; i < list.length; i++) {
     const key = list[i], a = AILMENTS[key];
     const x0 = i * colW + 14;
-    const y0 = LEGEND_Y + 12;
+    const y0 = LEGEND_Y + 11;
+    if (i > 0) {
+      g.fillStyle = "rgba(255,255,255,.06)";
+      g.fillRect(i * colW - 2, LEGEND_Y + 8, 1, LEGEND_H - 16);
+    }
     drawAilmentIcon(g, key, x0 + 11, y0 + 12, 11);
-    text(g, a.name, x0 + 27, y0 + 10, 14, a.color);
-    text(g, "+" + a.score, x0 + 27, y0 + 24, 11, PALETTE.dim);
+    text(g, a.name, x0 + 27, y0 + 10, 13, a.color);
+    text(g, "+" + a.score, x0 + 27, y0 + 24, 10, PALETTE.dim);
 
     let cx = x0 + 27;
-    const cy = y0 + 36;
+    const cy = y0 + 34;
     g.font = 'bold 10px "Trebuchet MS", "Segoe UI", sans-serif';
     for (let j = 0; j < a.chain.length; j++) {
-      const step = a.chain[j];
-      const wBox = Math.max(34, g.measureText(step.t).width);
-      fillRound(g, cx, cy, wBox + 8, 15, 4, CHAIN_COLORS[step.s] || "#555");
-      text(g, step.t, cx + (wBox + 8) / 2, cy + 11, 10, "#ffffff", "center");
-      cx += wBox + 8;
+      const stp = a.chain[j];
+      const wBox = Math.max(32, g.measureText(stp.t).width) + 9;
+      const col = CHAIN_COLORS[stp.s] || "#555";
+      g.fillStyle = col;
+      roundRect(g, cx, cy, wBox, 16, 5); g.fill();
+      g.fillStyle = "rgba(255,255,255,.18)";
+      roundRect(g, cx, cy, wBox, 6, 4); g.fill();
+      text(g, stp.t, cx + wBox / 2, cy + 11, 10, "#ffffff", "center");
+      cx += wBox;
       if (j < a.chain.length - 1) {
-        text(g, "→", cx + 5, cy + 11, 11, PALETTE.dim, "center");
+        text(g, "›", cx + 5, cy + 12, 13, PALETTE.dim, "center");
         cx += 11;
       }
     }
@@ -1888,183 +2657,303 @@ function drawLegend(g) {
 
 function drawBanner(g) {
   if (!Game.banner) return;
-  const t = Game.banner.t;
+  const b = Game.banner, t = b.t;
   let alpha = 1;
   if (t < 0.3) alpha = t / 0.3;
   else if (t > 2.6) alpha = clamp((3.2 - t) / 0.6, 0, 1);
+  const urgent = !!b.urgent;
   g.save();
   g.globalAlpha = alpha;
-  fillRound(g, W / 2 - 300, PLAY_Y + 190, 600, 110, 14, "rgba(12,18,26,.88)");
-  text(g, Game.banner.text, W / 2, PLAY_Y + 240, 40, PALETTE.text, "center");
-  text(g, Game.banner.sub, W / 2, PLAY_Y + 272, 16, PALETTE.dim, "center", "normal");
+  const bw = 620, bx = W / 2 - bw / 2, by = PLAY_Y + 180;
+  g.fillStyle = "rgba(10,16,24,.90)";
+  roundRect(g, bx, by, bw, 112, 16); g.fill();
+  g.strokeStyle = urgent ? "#e4573d" : "rgba(63,182,232,.55)";
+  g.lineWidth = 3;
+  roundRect(g, bx, by, bw, 112, 16); g.stroke();
+  if (urgent) {
+    g.globalAlpha = alpha * (0.35 + 0.35 * Math.sin(performance.now() / 90));
+    g.fillStyle = "#e4573d";
+    roundRect(g, bx, by, bw, 112, 16); g.fill();
+    g.globalAlpha = alpha;
+  }
+  text(g, b.text, W / 2, by + 54, 38, urgent ? "#ffd9d1" : PALETTE.text, "center");
+  text(g, b.sub, W / 2, by + 86, 15, PALETTE.dim, "center", "normal");
   g.restore();
 }
 
-/* --- screens ----------------------------------------------------------- */
+/* --- screens ------------------------------------------------------------ */
 
 function drawTitle(g) {
-  g.fillStyle = "#0d1117"; g.fillRect(0, 0, W, H);
+  g.fillStyle = Paint.title;
+  g.fillRect(0, 0, W, H);
 
-  // pulsing ECG line across the back
+  // ECG sweep across the lower third
   g.save();
-  g.strokeStyle = "rgba(63,182,232,.25)"; g.lineWidth = 3;
+  g.strokeStyle = "rgba(63,182,232,.28)"; g.lineWidth = 3; g.lineJoin = "round";
   g.beginPath();
   const t = performance.now() / 700;
-  for (let x = 0; x <= W; x += 8) {
+  for (let x = 0; x <= W; x += 6) {
     const phase = (x / W * 6 + t) % 6;
-    let y = H * 0.93;
-    if (phase > 2.4 && phase < 3.0) y -= 90 * Math.sin((phase - 2.4) / 0.6 * Math.PI);
-    else if (phase >= 3.0 && phase < 3.3) y += 40;
+    let y = H * 0.955;
+    if (phase > 2.4 && phase < 3.0) y -= 80 * Math.sin((phase - 2.4) / 0.6 * Math.PI);
+    else if (phase >= 3.0 && phase < 3.3) y += 34;
     if (x === 0) g.moveTo(x, y); else g.lineTo(x, y);
   }
   g.stroke(); g.restore();
 
-  text(g, "CODE BLUE!", W / 2, 150, 82, "#3fb6e8", "center");
-  text(g, "a two-player emergency room", W / 2, 186, 20, PALETTE.dim, "center", "normal");
+  const pulse = 1 + 0.012 * Math.sin(performance.now() / 420);
+  g.save();
+  g.translate(W / 2, 140); g.scale(pulse, pulse);
+  text(g, "CODE BLUE!", 2, 4, 86, "rgba(0,0,0,.45)", "center");
+  text(g, "CODE BLUE!", 0, 0, 86, "#48c3f0", "center");
+  g.restore();
+  text(g, "a two-player emergency room", W / 2, 182, 19, PALETTE.dim, "center", "normal");
 
-  // controls card
-  fillRound(g, 150, 230, 460, 250, 14, "#141c27");
-  text(g, "PLAYER 1", 180, 268, 20, PALETTE.p1);
-  text(g, "Move", 180, 302, 15, PALETTE.dim, "left", "normal");
-  text(g, "W A S D", 380, 302, 16, PALETTE.text);
-  text(g, "Pick up / put down", 180, 334, 15, PALETTE.dim, "left", "normal");
-  text(g, "E", 380, 334, 16, PALETTE.text);
-  text(g, "Work station (hold)", 180, 366, 15, PALETTE.dim, "left", "normal");
-  text(g, "Q", 380, 366, 16, PALETTE.text);
-  text(g, "Pause  Esc          Mute  M", 180, 420, 14, PALETTE.dim, "left", "normal");
-  text(g, "Restart  Esc then R", 180, 444, 14, PALETTE.dim, "left", "normal");
+  const cards = [
+    { x: 128, color: PALETTE.p1, title: "PLAYER 1",
+      rows: [["Move", "W A S D"], ["Pick up / put down", "E"], ["Work station (hold)", "Q"], ["Sprint (hold)", "Left Shift"]] },
+    { x: 664, color: PALETTE.p2, title: "PLAYER 2",
+      rows: [["Move", "Arrow keys"], ["Pick up / put down", "/  slash"], ["Work station (hold)", ".  period"], ["Sprint (hold)", "Right Shift"]] }
+  ];
+  for (const c of cards) {
+    g.fillStyle = "rgba(255,255,255,.045)";
+    roundRect(g, c.x, 222, 488, 250, 16); g.fill();
+    g.strokeStyle = "rgba(255,255,255,.09)"; g.lineWidth = 1;
+    roundRect(g, c.x, 222, 488, 250, 16); g.stroke();
+    g.fillStyle = c.color;
+    roundRect(g, c.x, 222, 488, 5, 3); g.fill();
+    text(g, c.title, c.x + 28, 262, 20, c.color);
+    c.rows.forEach((r, i) => {
+      const y = 300 + i * 36;
+      text(g, r[0], c.x + 28, y, 15, PALETTE.dim, "left", "normal");
+      keyCap(g, r[1], c.x + 300, y - 14);
+    });
+  }
 
-  fillRound(g, 670, 230, 460, 250, 14, "#141c27");
-  text(g, "PLAYER 2", 700, 268, 20, PALETTE.p2);
-  text(g, "Move", 700, 302, 15, PALETTE.dim, "left", "normal");
-  text(g, "Arrow keys", 900, 302, 16, PALETTE.text);
-  text(g, "Pick up / put down", 700, 334, 15, PALETTE.dim, "left", "normal");
-  text(g, "/  (slash)", 900, 334, 16, PALETTE.text);
-  text(g, "Work station (hold)", 700, 366, 15, PALETTE.dim, "left", "normal");
-  text(g, ".  (period)", 900, 366, 16, PALETTE.text);
-  text(g, "Treat patients, wheel them to the green", 700, 420, 14, PALETTE.dim, "left", "normal");
-  text(g, "OUT tile before their patience runs out.", 700, 444, 14, PALETTE.dim, "left", "normal");
+  text(g, "Escape pauses · M mutes · treat patients, then wheel them to the green OUT tile",
+       W / 2, 512, 14, PALETTE.dim, "center", "normal");
 
   const blink = (Math.sin(performance.now() / 320) + 1) / 2;
   g.save(); g.globalAlpha = 0.55 + 0.45 * blink;
-  text(g, "Press  1  for solo shift      Press  2  for co-op", W / 2, 560, 28, "#ffd54a", "center");
+  text(g, "Press  1  solo          Press  2  co-op", W / 2, 570, 30, "#ffd54a", "center");
   g.restore();
-  text(g, "Then pick a level. Anything on the keyboard wakes the audio.", W / 2, 600, 14, PALETTE.dim, "center", "normal");
 
-  // deco: two little medics
-  const fake1 = { x: W / 2 - 90, y: 690, dx: 1, dy: 0, bob: performance.now() / 300, color: PALETTE.p1, index: 0, item: null, patient: null, work: null, hintT: 0 };
-  const fake2 = { x: W / 2 + 90, y: 690, dx: -1, dy: 0, bob: performance.now() / 300 + 2, color: PALETTE.p2, index: 1, item: null, patient: null, work: null, hintT: 0 };
-  drawPlayer(g, fake1); drawPlayer(g, fake2);
+  const demo = (i, x, dxs) => ({
+    x, y: 690, dx: dxs, dy: 0, bob: performance.now() / 300 + i * 2,
+    step: performance.now() / 160 + i * 2, moving: true, stamina: STAMINA_MAX,
+    color: i === 0 ? PALETTE.p1 : PALETTE.p2, index: i,
+    item: null, patient: null, work: null, hintT: 0
+  });
+  g.save();
+  g.translate(W / 2, 690); g.scale(1.7, 1.7); g.translate(-W / 2, -690);
+  drawPlayer(g, demo(0, W / 2 - 52, 1));
+  drawPlayer(g, demo(1, W / 2 + 52, -1));
+  g.restore();
 }
 
-function drawSelect(g) {
-  g.fillStyle = "#0d1117"; g.fillRect(0, 0, W, H);
-  text(g, "SELECT A SHIFT", W / 2, 90, 44, PALETTE.text, "center");
-  text(g, Game.playerCount === 1 ? "Solo" : "Co-op (2 players)", W / 2, 122, 17, PALETTE.dim, "center", "normal");
+function keyCap(g, label, x, y) {
+  g.font = 'bold 14px "Trebuchet MS", "Segoe UI", sans-serif';
+  const w = Math.max(34, g.measureText(label).width + 20);
+  g.fillStyle = "rgba(255,255,255,.10)";
+  roundRect(g, x, y, w, 24, 6); g.fill();
+  g.strokeStyle = "rgba(255,255,255,.18)"; g.lineWidth = 1;
+  roundRect(g, x, y, w, 24, 6); g.stroke();
+  text(g, label, x + w / 2, y + 17, 14, PALETTE.text, "center");
+}
 
-  const cardW = 210, cardH = 300, gap = 20;
-  const total = LEVELS.length * cardW + (LEVELS.length - 1) * gap;
+const SELECT_COLS = 5;
+const ENDLESS_SLOT = () => LEVELS.length;
+
+function drawSelect(g) {
+  g.fillStyle = Paint.title;
+  g.fillRect(0, 0, W, H);
+
+  const stars = totalStars();
+  text(g, "SELECT A SHIFT", W / 2, 62, 38, PALETTE.text, "center");
+
+  // measured, centred status line: ★ n/30 · Rank · Mode
+  g.font = 'bold 16px "Trebuchet MS", "Segoe UI", sans-serif';
+  const parts = [
+    { t: stars + " / " + (LEVELS.length * 3), c: "#ffd54a" },
+    { t: "·", c: PALETTE.dim },
+    { t: rankName(), c: PALETTE.text },
+    { t: "·", c: PALETTE.dim },
+    { t: Game.playerCount === 1 ? "Solo" : "Co-op", c: PALETTE.dim }
+  ];
+  const GAPX = 10, STARW = 26;
+  let lineW = STARW;
+  for (const pp of parts) lineW += g.measureText(pp.t).width + GAPX;
+  let lx = W / 2 - lineW / 2;
+  drawStar(g, lx + 8, 86, 11, "#ffd54a");
+  lx += STARW;
+  for (const pp of parts) {
+    text(g, pp.t, lx, 92, 16, pp.c);
+    lx += g.measureText(pp.t).width + GAPX;
+    g.font = 'bold 16px "Trebuchet MS", "Segoe UI", sans-serif';
+  }
+
+  const cardW = 210, cardH = 178, gap = 18;
+  const total = SELECT_COLS * cardW + (SELECT_COLS - 1) * gap;
   const x0 = (W - total) / 2;
 
   for (let i = 0; i < LEVELS.length; i++) {
-    const lvl = LEVELS[i], prog = Game.progress[i];
-    const x = x0 + i * (cardW + gap), y = 170;
-    const sel = i === Game.selectIndex;
-    const locked = !prog.unlocked;
-
-    fillRound(g, x, y, cardW, cardH, 14, locked ? "#161b22" : "#182231");
-    if (sel) {
-      g.strokeStyle = "#ffd54a"; g.lineWidth = 4;
-      roundRect(g, x - 2, y - 2, cardW + 4, cardH + 4, 16); g.stroke();
-    }
-
-    text(g, String(i + 1), x + 18, y + 44, 32, locked ? "#3d4a5c" : "#3fb6e8");
-    text(g, lvl.name, x + 52, y + 42, 19, locked ? "#4a5666" : PALETTE.text);
-
-    // mini map preview
-    const mw = cardW - 36, mh = mw * (ROWS / COLS);
-    const mx = x + 18, my = y + 60;
-    fillRound(g, mx - 4, my - 4, mw + 8, mh + 8, 6, "#0d131b");
-    const px = mw / COLS, py = mh / ROWS;
-    for (let ty = 0; ty < ROWS; ty++) {
-      for (let tx = 0; tx < COLS; tx++) {
-        const ch = lvl.map[ty][tx];
-        let col = null;
-        if (ch === "#") col = "#2b3646";
-        else if (ch === "b") col = "#ffffff";
-        else if (ch === "E") col = "#7ec8e3";
-        else if (ch === "O") col = "#8ce6a8";
-        else if (CHAR_TO_STATION[ch]) col = STATIONS[CHAR_TO_STATION[ch]].color;
-        else col = "#1a2431";
-        g.fillStyle = locked ? "#20262e" : col;
-        g.fillRect(mx + tx * px, my + ty * py, Math.ceil(px), Math.ceil(py));
-      }
-    }
-
-    // ailment icons for this level
-    let ix = x + 22;
-    for (const key of lvl.ailments) {
-      drawAilmentIcon(g, key, ix, my + mh + 22, 9);
-      ix += 24;
-    }
-
-    // stars + best
-    for (let s = 0; s < 3; s++) {
-      drawStar(g, x + 42 + s * 30, my + mh + 60, 13,
-        locked ? "#242c36" : (prog.stars > s ? "#ffd54a" : "rgba(255,255,255,.14)"));
-    }
-    text(g, locked ? "LOCKED" : "Best  " + prog.best, x + cardW / 2, my + mh + 90, 14,
-      locked ? "#4a5666" : PALETTE.dim, "center", "normal");
+    const col = i % SELECT_COLS, row = Math.floor(i / SELECT_COLS);
+    drawLevelCard(g, i, x0 + col * (cardW + gap), 118 + row * (cardH + gap), cardW, cardH);
   }
 
-  const sel = LEVELS[Game.selectIndex];
-  text(g, sel.blurb, W / 2, 520, 17, PALETTE.dim, "center", "normal");
-  text(g, "Star targets:  " + sel.stars.join("   /   "), W / 2, 548, 15, "#ffd54a", "center", "normal");
+  // endless card
+  const ex = W / 2 - 300, ey = 118 + 2 * (cardH + gap), ew = 600, eh = 74;
+  const selE = Game.selectIndex === ENDLESS_SLOT();
+  const openE = endlessUnlocked();
+  g.fillStyle = openE ? "rgba(155,93,229,.16)" : "rgba(255,255,255,.03)";
+  roundRect(g, ex, ey, ew, eh, 14); g.fill();
+  g.strokeStyle = selE ? "#ffd54a" : (openE ? "rgba(155,93,229,.6)" : "rgba(255,255,255,.07)");
+  g.lineWidth = selE ? 4 : 1.5;
+  roundRect(g, ex, ey, ew, eh, 14); g.stroke();
+  text(g, "∞", ex + 30, ey + 50, 34, openE ? "#c39bff" : "#3a4453", "center");
+  text(g, "NIGHT SHIFT — endless", ex + 56, ey + 32, 20, openE ? PALETTE.text : "#4a5666");
+  text(g, openE ? "No clock. Spawns tighten forever. Best  " + Game.endlessBest
+                : "Unlocks at " + ENDLESS_UNLOCK + " stars (you have " + stars + ")",
+       ex + 56, ey + 54, 14, PALETTE.dim, "left", "normal");
 
-  text(g, "A / D  or  ← →   choose      E  or  Enter   start      Esc   back", W / 2, 610, 18, PALETTE.text, "center");
+  const selDef = Game.selectIndex === ENDLESS_SLOT() ? ENDLESS : LEVELS[Game.selectIndex];
+  text(g, selDef.blurb, W / 2, ey + 112, 16, PALETTE.dim, "center", "normal");
+  text(g, "A / D or ← →  choose     W / S or ↑ ↓  row     E or Enter  start     Esc  back",
+       W / 2, ey + 144, 16, PALETTE.text, "center");
 
-  // legend of ailments in the selected level with full chains
   const saveLevel = Game.level;
-  Game.level = sel;
+  Game.level = selDef;
   drawLegend(g);
   Game.level = saveLevel;
 }
 
+function drawLevelCard(g, i, x, y, cardW, cardH) {
+  const lvl = LEVELS[i], prog = Game.progress[i];
+  const sel = i === Game.selectIndex;
+  const locked = !prog.unlocked;
+
+  g.fillStyle = locked ? "rgba(255,255,255,.025)" : "rgba(255,255,255,.06)";
+  roundRect(g, x, y, cardW, cardH, 13); g.fill();
+  g.strokeStyle = sel ? "#ffd54a" : "rgba(255,255,255,.08)";
+  g.lineWidth = sel ? 4 : 1.5;
+  roundRect(g, x, y, cardW, cardH, 13); g.stroke();
+
+  const num = String(i + 1);
+  text(g, num, x + 14, y + 30, 22, locked ? "#3d4a5c" : "#48c3f0");
+  g.font = 'bold 22px "Trebuchet MS", "Segoe UI", sans-serif';
+  const numW = g.measureText(num).width;
+  text(g, lvl.name, x + 20 + numW + 8, y + 29, 15, locked ? "#4a5666" : PALETTE.text);
+
+  // mini map
+  const mw = cardW - 28, mh = mw * (ROWS / COLS);
+  const mx = x + 14, my = y + 42;
+  g.fillStyle = "#0a1017";
+  roundRect(g, mx - 3, my - 3, mw + 6, mh + 6, 5); g.fill();
+  const px = mw / COLS, py = mh / ROWS;
+  for (let ty = 0; ty < ROWS; ty++) {
+    for (let tx = 0; tx < COLS; tx++) {
+      const ch = lvl.map[ty][tx];
+      let col;
+      if (ch === "#") col = "#2b3646";
+      else if (ch === "b") col = "#ffffff";
+      else if (ch === "E") col = "#37a8d8";
+      else if (ch === "O") col = "#3fbf72";
+      else if (CHAR_TO_STATION[ch]) col = STATIONS[CHAR_TO_STATION[ch]].color;
+      else col = "#151f2b";
+      g.fillStyle = locked ? "#1c222a" : col;
+      g.fillRect(mx + tx * px, my + ty * py, Math.ceil(px), Math.ceil(py));
+    }
+  }
+
+  let ix = x + 18;
+  for (const key of lvl.ailments) {
+    g.globalAlpha = locked ? 0.25 : 1;
+    drawAilmentIcon(g, key, ix, my + mh + 18, 8);
+    g.globalAlpha = 1;
+    ix += 21;
+  }
+
+  for (let s2 = 0; s2 < 3; s2++) {
+    drawStar(g, x + cardW - 62 + s2 * 20, my + mh + 18, 9,
+      locked ? "#242c36" : (prog.stars > s2 ? "#ffd54a" : "rgba(255,255,255,.14)"));
+  }
+  text(g, locked ? "LOCKED" : "Best  " + prog.best, x + cardW / 2, my + mh + 40, 13,
+    locked ? "#4a5666" : PALETTE.dim, "center", "normal");
+}
+
 function drawPause(g) {
-  g.fillStyle = "rgba(8,12,18,.78)"; g.fillRect(0, 0, W, H);
-  fillRound(g, W / 2 - 240, 230, 480, 300, 16, "#141c27");
-  text(g, "PAUSED", W / 2, 300, 44, PALETTE.text, "center");
-  text(g, "Esc      resume", W / 2, 370, 20, PALETTE.dim, "center", "normal");
-  text(g, "R        restart this level", W / 2, 406, 20, PALETTE.dim, "center", "normal");
-  text(g, "M        sound " + (Sound.muted ? "on" : "off"), W / 2, 442, 20, PALETTE.dim, "center", "normal");
-  text(g, "L        back to level select", W / 2, 478, 20, PALETTE.dim, "center", "normal");
+  g.fillStyle = "rgba(8,12,18,.80)"; g.fillRect(0, 0, W, H);
+  g.fillStyle = "rgba(255,255,255,.05)";
+  roundRect(g, W / 2 - 250, 220, 500, 320, 18); g.fill();
+  g.strokeStyle = "rgba(255,255,255,.10)"; g.lineWidth = 1.5;
+  roundRect(g, W / 2 - 250, 220, 500, 320, 18); g.stroke();
+  text(g, "PAUSED", W / 2, 292, 44, PALETTE.text, "center");
+  const rows = [["Esc", "resume"], ["R", "restart this shift"],
+                ["M", "sound " + (Sound.muted ? "on" : "off")], ["L", "back to level select"]];
+  rows.forEach((r, i) => {
+    const y = 348 + i * 44;
+    keyCap(g, r[0], W / 2 - 150, y - 17);
+    text(g, r[1], W / 2 - 80, y, 19, PALETTE.dim, "left", "normal");
+  });
 }
 
 function drawResults(g) {
   const r = Game.result;
-  g.fillStyle = "rgba(8,12,18,.86)"; g.fillRect(0, 0, W, H);
-  fillRound(g, W / 2 - 320, 150, 640, 500, 18, "#141c27");
+  g.fillStyle = "rgba(8,12,18,.88)"; g.fillRect(0, 0, W, H);
+  g.fillStyle = "rgba(255,255,255,.05)";
+  roundRect(g, W / 2 - 330, 96, 660, 610, 20); g.fill();
+  g.strokeStyle = r.failed ? "rgba(228,87,61,.45)" : "rgba(63,182,232,.40)";
+  g.lineWidth = 2;
+  roundRect(g, W / 2 - 330, 96, 660, 610, 20); g.stroke();
 
-  text(g, r.failed ? "SHIFT LOST" : "SHIFT OVER", W / 2, 220, 46, r.failed ? PALETTE.bad : PALETTE.text, "center");
-  text(g, LEVELS[Game.levelIndex].name, W / 2, 252, 18, PALETTE.dim, "center", "normal");
+  text(g, r.failed ? "SHIFT LOST" : "SHIFT OVER", W / 2, 162, 44, r.failed ? PALETTE.bad : PALETTE.text, "center");
+  text(g, r.name || "", W / 2, 190, 17, PALETTE.dim, "center", "normal");
 
-  for (let i = 0; i < 3; i++) {
-    const lit = i < r.stars && r.t > 0.4 + i * 0.35;
-    drawStar(g, W / 2 - 90 + i * 90, 330, lit ? 40 : 34, lit ? "#ffd54a" : "rgba(255,255,255,.12)");
+  if (r.endless) {
+    text(g, fmtTime(r.survived), W / 2, 262, 52, "#8be9ff", "center");
+    text(g, "SURVIVED  ·  " + r.wave + " waves", W / 2, 288, 14, PALETTE.dim, "center");
+  } else {
+    for (let i = 0; i < 3; i++) {
+      const lit = i < r.stars && r.t > 0.4 + i * 0.35;
+      const pop = lit ? 1 + 0.25 * Math.max(0, 1 - (r.t - (0.4 + i * 0.35)) * 4) : 1;
+      g.save();
+      g.translate(W / 2 - 92 + i * 92, 268); g.scale(pop, pop);
+      drawStar(g, 0, 0, lit ? 38 : 32, lit ? "#ffd54a" : "rgba(255,255,255,.11)");
+      g.restore();
+    }
   }
 
-  text(g, String(r.score), W / 2, 430, 54, PALETTE.text, "center");
-  text(g, "FINAL SCORE" + (r.newBest && !r.failed ? "   — NEW BEST!" : ""), W / 2, 456, 15, r.newBest ? "#ffd54a" : PALETTE.dim, "center");
+  text(g, String(r.score), W / 2, 372, 54, PALETTE.text, "center");
+  text(g, "FINAL SCORE", W / 2, 396, 13, PALETTE.dim, "center");
+  if (r.newBest) {
+    const b = 0.6 + 0.4 * Math.sin(performance.now() / 180);
+    g.save(); g.globalAlpha = b;
+    text(g, "NEW BEST!", W / 2, 424, 22, "#ffd54a", "center");
+    g.restore();
+  } else if (r.gainedStars > 0) {
+    text(g, "+" + r.gainedStars + (r.gainedStars === 1 ? " NEW STAR" : " NEW STARS"),
+         W / 2, 424, 20, "#ffd54a", "center");
+  }
 
-  text(g, "Patients treated", W / 2 - 200, 510, 17, PALETTE.dim, "left", "normal");
-  text(g, String(r.treated), W / 2 + 200, 510, 17, PALETTE.text, "right");
-  text(g, "Patients lost", W / 2 - 200, 542, 17, PALETTE.dim, "left", "normal");
-  text(g, String(r.lost), W / 2 + 200, 542, 17, PALETTE.text, "right");
+  const stats = [
+    ["Patients treated", String(r.treated)],
+    ["Patients lost", String(r.lost)],
+    ["Best chain", "x" + (r.bestCombo || 0)],
+    ["Perfect discharges", String(r.perfects || 0)],
+    ["Clutch saves", String(r.clutches || 0)]
+  ];
+  stats.forEach((s2, i) => {
+    const y = 466 + i * 30;
+    text(g, s2[0], W / 2 - 250, y, 16, PALETTE.dim, "left", "normal");
+    g.fillStyle = "rgba(255,255,255,.06)";
+    g.fillRect(W / 2 - 250, y + 6, 500, 1);
+    text(g, s2[1], W / 2 + 250, y, 16, PALETTE.text, "right");
+  });
 
-  const th = LEVELS[Game.levelIndex].stars;
-  text(g, "Targets  " + th.join("  /  "), W / 2, 578, 15, PALETTE.dim, "center", "normal");
-
-  text(g, "E / Enter   continue        R   retry", W / 2, 620, 20, PALETTE.text, "center");
+  if (r.targets) {
+    text(g, "Targets  " + r.targets.join("  /  "), W / 2, 634, 14, PALETTE.dim, "center", "normal");
+  }
+  text(g, "E / Enter  continue          R  retry", W / 2, 674, 19, PALETTE.text, "center");
 }
 
 /* --- frame composition -------------------------------------------------- */
@@ -2076,8 +2965,7 @@ function render() {
   if (Game.screen === "title") { drawTitle(ctx); return; }
   if (Game.screen === "select") { drawSelect(ctx); return; }
 
-  // background behind the play field
-  ctx.fillStyle = "#0f1620";
+  ctx.fillStyle = "#0b1119";
   ctx.fillRect(0, 0, W, H);
 
   ctx.save();
@@ -2088,10 +2976,11 @@ function render() {
   ctx.beginPath(); ctx.rect(-ox, -oy, PLAY_W, PLAY_H); ctx.clip();
 
   drawWorld(ctx);
+  drawFocusRings(ctx);
 
   for (const it of Game.floorItems) drawFloorItem(ctx, it);
 
-  // Patients that are placed or waiting, sorted with players by depth.
+  // depth-sorted entities
   const drawables = [];
   for (const pt of Game.patients) {
     if (pt.state === "carried") continue;
@@ -2104,14 +2993,27 @@ function render() {
   for (const q of Game.particles) {
     ctx.globalAlpha = clamp(1 - q.t / q.life, 0, 1);
     ctx.fillStyle = q.color;
-    ctx.fillRect(q.x - 2, q.y - 2, 4, 4);
+    const s2 = 4 * (1 - q.t / q.life) + 1;
+    ctx.fillRect(q.x - s2 / 2, q.y - s2 / 2, s2, s2);
   }
   ctx.globalAlpha = 1;
 
+  // lighting sits under the popups so text stays crisp
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.translate(PLAY_X + ox, PLAY_Y + oy);
+  ctx.fillStyle = Paint.vignette;
+  ctx.fillRect(-ox, -oy, PLAY_W, PLAY_H);
+  ctx.restore();
+
   for (const p of Game.popups) {
-    ctx.globalAlpha = clamp(1 - p.t / p.life, 0, 1);
-    text(ctx, p.text, p.x, p.y, p.size, "rgba(10,14,20,.75)", "center");
-    text(ctx, p.text, p.x - 1, p.y - 1, p.size, p.color, "center");
+    ctx.globalAlpha = clamp(1 - p.t / p.life, 0, 1) * clamp(p.t * 6, 0, 1);
+    const rise = 1 + 0.25 * clamp(1 - p.t * 4, 0, 1);
+    ctx.save();
+    ctx.translate(p.x, p.y); ctx.scale(rise, rise);
+    text(ctx, p.text, 1.5, 1.5, p.size, "rgba(8,12,18,.8)", "center");
+    text(ctx, p.text, 0, 0, p.size, p.color, "center");
+    ctx.restore();
   }
   ctx.globalAlpha = 1;
   ctx.restore();
@@ -2120,6 +3022,13 @@ function render() {
     ctx.save();
     ctx.globalAlpha = Game.flashRed * 0.5;
     ctx.fillStyle = "#ff2d2d";
+    ctx.fillRect(PLAY_X, PLAY_Y, PLAY_W, PLAY_H);
+    ctx.restore();
+  }
+  if (Game.flashGood > 0) {
+    ctx.save();
+    ctx.globalAlpha = Game.flashGood * 0.20;
+    ctx.fillStyle = "#8bffb0";
     ctx.fillRect(PLAY_X, PLAY_Y, PLAY_W, PLAY_H);
     ctx.restore();
   }
@@ -2145,15 +3054,37 @@ function handleScreenKeys() {
       if (wasPressed("Digit2") || wasPressed("Numpad2")) { Game.playerCount = 2; Game.screen = "select"; Sound.play("menu"); }
       break;
 
-    case "select":
-      if (wasPressed("KeyA") || wasPressed("ArrowLeft")) { Game.selectIndex = (Game.selectIndex + LEVELS.length - 1) % LEVELS.length; Sound.play("menu"); }
-      if (wasPressed("KeyD") || wasPressed("ArrowRight")) { Game.selectIndex = (Game.selectIndex + 1) % LEVELS.length; Sound.play("menu"); }
+    case "select": {
+      const last = ENDLESS_SLOT();
+      const move = (d) => {
+        Game.selectIndex = clamp(Game.selectIndex + d, 0, last);
+        Sound.play("menu");
+      };
+      if (wasPressed("KeyA") || wasPressed("ArrowLeft")) {
+        if (Game.selectIndex !== last && Game.selectIndex % SELECT_COLS !== 0) move(-1);
+      }
+      if (wasPressed("KeyD") || wasPressed("ArrowRight")) {
+        if (Game.selectIndex !== last && Game.selectIndex % SELECT_COLS !== SELECT_COLS - 1
+            && Game.selectIndex + 1 < LEVELS.length) move(1);
+      }
+      if (wasPressed("KeyW") || wasPressed("ArrowUp")) {
+        if (Game.selectIndex === last) { Game.selectIndex = Math.min(LEVELS.length - 1, SELECT_COLS + 2); Sound.play("menu"); }
+        else if (Game.selectIndex >= SELECT_COLS) move(-SELECT_COLS);
+      }
+      if (wasPressed("KeyS") || wasPressed("ArrowDown")) {
+        if (Game.selectIndex + SELECT_COLS < LEVELS.length) move(SELECT_COLS);
+        else if (Game.selectIndex !== last) { Game.selectIndex = last; Sound.play("menu"); }
+      }
       if (wasPressed("KeyE") || wasPressed("Enter") || wasPressed("Slash")) {
-        if (Game.progress[Game.selectIndex].unlocked) startLevel(Game.selectIndex);
-        else Sound.play("error");
+        if (Game.selectIndex === last) {
+          if (endlessUnlocked()) startLevel(-1); else Sound.play("error");
+        } else if (Game.progress[Game.selectIndex].unlocked) {
+          startLevel(Game.selectIndex);
+        } else Sound.play("error");
       }
       if (wasPressed("Escape")) { Game.screen = "title"; Sound.play("menu"); }
       break;
+    }
 
     case "play":
       if (wasPressed("Escape")) { Game.screen = "paused"; Sound.play("menu"); }
@@ -2167,8 +3098,10 @@ function handleScreenKeys() {
 
     case "results":
       if (wasPressed("KeyR")) startLevel(Game.levelIndex);
+      if (wasPressed("Escape")) { Game.screen = "select"; Sound.play("menu"); }
       if (wasPressed("KeyE") || wasPressed("Enter") || wasPressed("Slash")) {
-        Game.selectIndex = Math.min(LEVELS.length - 1,
+        if (Game.endless) Game.selectIndex = ENDLESS_SLOT();
+        else Game.selectIndex = Math.min(LEVELS.length - 1,
           Game.result.stars >= 1 ? Game.levelIndex + 1 : Game.levelIndex);
         Game.screen = "select";
         Sound.play("menu");
