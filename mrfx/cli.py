@@ -497,7 +497,43 @@ def cmd_ingest(cfg: MrfxConfig, args) -> int:
     return 0 if all(r["status"] in ("done", "pending_confirmation") for r in results) else 1
 
 
+def _print_code_coverage(cfg: MrfxConfig) -> None:
+    """State which billing codes are being collected, and say so LOUDLY when a
+    whole discipline is being dropped.
+
+    codes.cpt_codes is the extraction filter, and leaving a code out fails
+    silently — a file with none of the target codes honestly records 0 rows and
+    the queue moves on, which looks exactly like a file that had nothing. A
+    shipped list that had quietly drifted to a PT-only subset therefore meant
+    zero speech-therapy rates were ever extracted, with nothing anywhere saying
+    so. Anything this easy to get wrong and this invisible belongs on screen."""
+    from .catalog import CODE_CATALOG
+
+    if cfg.codes.all_codes:
+        print("collecting: EVERY billing code (codes.all_codes: true)")
+        return
+    active = cfg.code_set or frozenset()
+    missing = [c for c in CODE_CATALOG if c not in active]
+    if not missing:
+        print(f"collecting: all {len(active)} PT/OT/SLP codes")
+        return
+    # which disciplines lose EVERY one of their codes — the headline failure
+    dropped = []
+    for disc in ("PT", "OT", "SLP"):
+        of_disc = [c for c, (_d, ds, _t) in CODE_CATALOG.items() if disc in ds]
+        if of_disc and all(c in missing for c in of_disc):
+            dropped.append(disc)
+    warn = f" — NO {'/'.join(dropped)} codes at all!" if dropped else ""
+    print(f"collecting: {len(active)} of {len(CODE_CATALOG)} known PT/OT/SLP "
+          f"codes{warn}")
+    print(f"  {len(missing)} known code(s) are NOT being extracted; files are "
+          "scanned only for the\n  list in codes.cpt_codes (config/mrfx.yaml). "
+          "Delete that whole list to collect\n  everything, then re-add links "
+          "to pick the new codes up in files you already have.")
+
+
 def cmd_status(cfg: MrfxConfig, args) -> int:
+    _print_code_coverage(cfg)
     if _something_owns_the_port(cfg, "reading the store locally"):
         print("(the dashboard's Files tab shows the same information live)")
         return 1

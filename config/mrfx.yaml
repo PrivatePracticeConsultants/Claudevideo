@@ -8,10 +8,14 @@ codes:
   # that isn't here is never extracted, and adding one later only affects files
   # ingested AFTER the change (re-add a link to pick it up in old files).
   #
-  # It defaults to the app's full PT/OT/SLP catalog. Trim it if you only care
-  # about a few codes and want smaller/faster ingests; every entry below is a
-  # real, currently-active CPT/HCPCS code (verified against the CMS 2026 MPFS
-  # and Therapy Code List).
+  # DELETING this whole list is the recommended setting: it then collects the
+  # app's full PT/OT/SLP catalog and picks up new codes automatically on every
+  # update. It's spelled out here only so you can SEE what's collected and trim
+  # it if you want smaller, faster ingests. `mrfx status` prints what's active
+  # and warns if a whole discipline is being dropped.
+  #
+  # Every entry is a real, currently-active CPT/HCPCS code, verified against the
+  # CMS 2026 MPFS file and Therapy Code List.
   cpt_codes:
     - "97161"   # PT          PT eval, low complexity
     - "97162"   # PT          PT eval, moderate complexity

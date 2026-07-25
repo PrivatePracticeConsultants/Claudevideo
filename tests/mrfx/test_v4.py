@@ -2101,3 +2101,32 @@ def test_new_catalog_codes_carry_the_right_unit_and_disciplines():
     assert resolve_discipline("97550", ["GN"]) == "SLP"
     # pelvic-health biofeedback is PT-only, so it may attribute by code
     assert resolve_discipline("90912", []) == "PT"
+
+
+def test_status_states_which_codes_are_collected_and_flags_a_dropped_discipline(capsys):
+    """cpt_codes is the extraction filter and omitting a code fails SILENTLY —
+    a file with none of the target codes honestly logs 0 rows, identical to a
+    file that had nothing. The shipped list had drifted to a PT-only subset, so
+    speech rates were never extracted and nothing anywhere said so. Surface it."""
+    from mrfx.catalog import CODE_CATALOG
+    from mrfx.cli import _print_code_coverage
+    from mrfx.config import CodesConfig, MrfxConfig
+
+    def cov(**codes):
+        cfg = MrfxConfig(codes=CodesConfig(**codes))
+        _print_code_coverage(cfg)
+        return capsys.readouterr().out
+
+    # default (no cpt_codes given) = the whole catalog, stated plainly
+    out = cov()
+    assert f"all {len(CODE_CATALOG)} PT/OT/SLP codes" in out
+    assert "NOT being extracted" not in out
+
+    # the exact PT-only list that shipped: name the missing discipline
+    out = cov(cpt_codes=["97110", "97112", "97140", "97530"])
+    assert "NO SLP codes at all!" in out
+    assert "NOT being extracted" in out
+    assert "codes.cpt_codes" in out            # tells them where to fix it
+
+    out = cov(all_codes=True)
+    assert "EVERY billing code" in out
