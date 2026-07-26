@@ -546,7 +546,7 @@ const LEVELS = [
     blurb: "Cardiac cases. One defibrillator for the whole floor — and the shelves run dry.",
     seed: 90210,
     duration: 180,
-    patience: 96,
+    patience: 82,
     spawnStart: 9.2, spawnEnd: 6.2,
     maxWaiting: 5,
     ailments: ["cut", "infection", "fracture", "cardiac"],
@@ -580,11 +580,11 @@ const LEVELS = [
     blurb: "Mystery cases need the lab. The X-ray jams. Work both ends of the corridor.",
     seed: 55555,
     duration: 180,
-    patience: 58,
+    patience: 55,
     spawnStart: 8.6, spawnEnd: 5.8,
     maxWaiting: 5,
     ailments: ["cut", "infection", "fracture", "cardiac", "mystery"],
-    stars: [1300, 3400, 4950],
+    stars: [1050, 3000, 4950],
     restock: true, jams: true, flatline: true,
         theme: { floor:"#e9e6de", floorAlt:"#e0ddd4", wall:"#8fa398", wallTop:"#aab9b0", base:"#6a7d73",
              accent:"#7fb08d", wood:"#b08a5e", leaf:"#4f9d66", leaf2:"#6fb87f", pot:"#a5714f",
@@ -648,7 +648,7 @@ const LEVELS = [
     blurb: "Two wards, one crossing. Whoever holds the middle holds the shift.",
     seed: 61001,
     duration: 180,
-    patience: 61,
+    patience: 71,
     spawnStart: 7.6, spawnEnd: 5.1,
     maxWaiting: 6,
     ailments: ["cut", "infection", "fracture", "cardiac", "mystery"],
@@ -682,7 +682,7 @@ const LEVELS = [
     blurb: "Winding corridors and dead ends. Learn the routes or lose the run.",
     seed: 71002,
     duration: 180,
-    patience: 72,
+    patience: 76,
     spawnStart: 7.2, spawnEnd: 4.9,
     maxWaiting: 6,
     ailments: ["cut", "infection", "fracture", "cardiac", "mystery"],
@@ -716,7 +716,7 @@ const LEVELS = [
     blurb: "Sixteen beds and no excuses. Volume is the enemy here.",
     seed: 81003,
     duration: 180,
-    patience: 80,
+    patience: 100,
     spawnStart: 6.9, spawnEnd: 4.7,
     maxWaiting: 7,
     ailments: ["cut", "infection", "fracture", "cardiac", "mystery"],
@@ -750,7 +750,7 @@ const LEVELS = [
     blurb: "Compact and relentless. Everything is close, nothing is calm.",
     seed: 91004,
     duration: 180,
-    patience: 62,
+    patience: 55,
     spawnStart: 6.6, spawnEnd: 4.5,
     maxWaiting: 7,
     ailments: ["cut", "infection", "fracture", "cardiac", "mystery"],
@@ -784,7 +784,7 @@ const LEVELS = [
     blurb: "Four wings, one hub, every machine as far away as it can be.",
     seed: 101005,
     duration: 180,
-    patience: 64,
+    patience: 69,
     spawnStart: 6.3, spawnEnd: 4.3,
     maxWaiting: 8,
     ailments: ["cut", "infection", "fracture", "cardiac", "mystery"],
@@ -1891,7 +1891,8 @@ function dischargePatient(p) {
     Game.clutches++;
   }
 
-  const gained = Math.round(base * mult * (Game.diff ? Game.diff.scoreMul : 1));
+  const surge = Game.event ? EVENT_PAY : 1;
+  const gained = Math.round(base * mult * surge * (Game.diff ? Game.diff.scoreMul : 1));
   Game.score += gained;
   Game.treated++;
   Game.byAilment[pt.ailment] = (Game.byAilment[pt.ailment] || 0) + 1;
@@ -1906,6 +1907,7 @@ function dischargePatient(p) {
   }
 
   popup(pt.x, pt.y - 26, "+" + gained + (mult > 1 ? "  x" + fmtMult(mult) : ""), pt.vip ? "#ffd54a" : PALETTE.good, true);
+  if (surge > 1) popup(pt.x, pt.y - 92, "SURGE PAY", Game.event.def.color);
   if (pt.vip) popup(pt.x, pt.y - 70, "VIP x2", "#ffd54a", true);
   if (callout) popup(pt.x, pt.y - 52, callout, calloutColor, true);
   if (Game.combo >= 3) popup(pt.x, pt.y - 74, "CHAIN x" + Game.combo, "#8be9ff");
@@ -2208,8 +2210,9 @@ function updateNurse(dt) {
    Shift events, pickups, and the co-op high five.
    --------------------------------------------------------------------- */
 
-const EVENT_FIRST = 38;         // sec before the first event can fire
-const EVENT_GAP   = 34;         // and roughly how long between them after
+const EVENT_FIRST = 45;         // sec before the first event can fire
+const EVENT_GAP   = 42;         // and roughly how long between them after
+const EVENT_PAY   = 1.40;       // discharges are worth more while a surge runs
 const PICKUP_FIRST = 26;
 const PICKUP_GAP   = 30;
 
@@ -2265,10 +2268,10 @@ function updateEvents(dt) {
   Game.shake = Math.max(Game.shake, 6);
 
   switch (def.key) {
-    case "ambulance": Game.burst = 3; Game.spawnTimer = Math.min(Game.spawnTimer, 0.6); break;
-    case "outbreak":  Game.forceAilment = 4; Game.spawnTimer = Math.min(Game.spawnTimer, 1.2); break;
-    case "flicker":   Game.workMul = 1.45; break;
-    case "rush":      Game.spawnMul = 0.55; break;
+    case "ambulance": Game.burst = 2; Game.spawnTimer = Math.min(Game.spawnTimer, 0.6); break;
+    case "outbreak":  Game.forceAilment = 3; Game.spawnTimer = Math.min(Game.spawnTimer, 1.2); break;
+    case "flicker":   Game.workMul = 1.30; break;
+    case "rush":      Game.spawnMul = 0.70; break;
     case "vip":       Game.forceVip = true; Game.spawnTimer = Math.min(Game.spawnTimer, 1.0); break;
   }
 }
@@ -4504,7 +4507,7 @@ function drawEventChip(g) {
   roundRect(g, x, y, w, 30, 9); g.stroke();
   g.fillStyle = e.color;
   roundRect(g, x + 6, y + 23, (w - 12) * left, 3, 1.5); g.fill();
-  text(g, e.name, x + w / 2, y + 18, 13, e.color, "center");
+  text(g, e.name + "   x" + EVENT_PAY.toFixed(1), x + w / 2, y + 18, 13, e.color, "center");
 }
 
 /** Three medals per ward, filled in as the shift challenges are met. */
