@@ -1254,6 +1254,12 @@ const Game = {
   result: null,
   selectIndex: 0,
   difficulty: 1,           // index into DIFFS
+  howToPage: 0,
+  howToFrom: "title",
+  builderMode: false,
+  builder: null,
+  builderWorld: null,
+  staff: [],
   livesMax: 3,
   byAilment: {},           // treated count per ailment, this shift
   event: null,             // {def, t} — the shift event currently running
@@ -1314,6 +1320,8 @@ function enterCharSelect() {
 const perkActive = (key) => Game.perksActive.includes(key);
 
 function startLevel(index) {
+  Game.builderMode = false;
+  Game.staff = [];
   const def = levelDef(index);
   Game.levelIndex = index;
   Game.level = def;
@@ -1896,6 +1904,12 @@ function dischargePatient(p) {
   Game.score += gained;
   Game.treated++;
   Game.byAilment[pt.ailment] = (Game.byAilment[pt.ailment] || 0) + 1;
+  if (Game.builderMode && Game.builder) {
+    const cr = Math.max(6, Math.round(gained / 7));
+    Game.builder.credits += cr;
+    Game.builder.totalCredits += cr;
+    popup(pt.x, pt.y - 108, "+" + cr + "c", "#6fd3b4");
+  }
   Game.career.treated++;
   if (pt.ailment === "cardiac") Game.career.cardiac++;
   if (pt.ailment === "mystery") Game.career.mystery++;
@@ -1978,8 +1992,29 @@ function updatePatients(dt) {
 
 const EASE_IN_SECS = 25;                 // opening window with no brutal cases
 
+/* Which chains can this department physically run? In builder mode a case you
+   have no equipment for is not a challenge, it is a guaranteed loss — so those
+   patients are diverted to another hospital and never arrive. Building the
+   machine is what opens the (higher-scoring) case type. */
+function treatableAilments(pool) {
+  const have = (t) => Game.world.stations.some(q => q.type === t);
+  return pool.filter(a => {
+    if (a === "cut") return have("supply");
+    if (a === "infection") return have("medicine");
+    if (a === "fracture") return have("xray") && have("cast");
+    if (a === "cardiac") return have("defibrack") && have("charger");
+    if (a === "mystery") return have("lab");
+    return true;
+  });
+}
+
 function chooseAilment() {
   let pool = Game.level.ailments;
+  if (Game.builderMode) {
+    const ok = treatableAilments(pool);
+    if (ok.length) pool = ok;
+    else return "cut";                       // a bare ward still gets walk-ins
+  }
   if (Game.forceAilment > 0 && pool.includes("infection")) {
     Game.forceAilment--;
     return "infection";
@@ -2355,11 +2390,39 @@ function updatePlay(dt) {
   updateSpawning(dt);
   updateItems(dt);
   updateNurse(dt);
+  updateStaff(dt);
   updateHeartMonitor(dt);
   updateTutorial(dt);
   updateEffects(dt);
 
+  if (Game.builderMode) {
+    if (Game.lives <= 0) endBuilderRun();
+    else if (Game.time >= Game.level.duration) endWave();
+    return;
+  }
   if (Game.time >= Game.level.duration || Game.lives <= 0) endLevel();
+}
+
+function endBuilderRun() {
+  const B = Game.builder;
+  B.bestWave = Math.max(B.bestWave || 0, B.wave);
+  Game.builderBest = Math.max(Game.builderBest || 0, B.wave);
+  Game.career.shifts++;
+  const xpGain = Math.round(Game.score / 10) + Game.treated * 5;
+  Game.xp += xpGain;
+  checkLiveAchievements();
+  Game.result = {
+    failed: true, stars: 0, newBest: B.wave >= (Game.builderBest || 0),
+    builder: true, wave: B.wave, xpGain, challenges: null,
+    name: "ER Builder — wave " + B.wave, targets: null,
+    score: Game.score, treated: Game.treated, lost: Game.lost,
+    bestCombo: Game.bestCombo, perfects: Game.perfects, clutches: Game.clutches,
+    spent: B.totalCredits, built: B.bought.length, staff: Game.staff.length,
+    t: 0
+  };
+  Game.screen = "results";
+  Game.builderMode = false;
+  Sound.play("error");
 }
 
 function starsFor(index, score) {
@@ -2428,6 +2491,698 @@ function endLevel() {
   };
   Game.screen = "results";
   Sound.play(failed ? "error" : (newBest ? "newbest" : "levelend"));
+}
+
+
+/* =====================================================================
+   ER BUILDER — wave mode.
+
+   You design the department. Each wave is a three-minute shift; treating
+   patients earns credits, and between waves you spend them on beds,
+   machines and staff and place them wherever you like on the floor. The
+   ward PERSISTS across waves, so the run is the story of the ER you built.
+   ===================================================================== */
+
+const BUILDER_MAP = [
+  "################################",
+  "#..............................#",
+  "#.E............................#",
+  "#..............................#",
+  "#....b.b.......................#",
+  "#..............................#",
+  "#..............................#",
+  "#.........s...................##",
+  "#.........m...................##",
+  "#..............................#",
+  "#..............................#",
+  "#.O............................#",
+  "#..............................#",
+  "#..............................#",
+  "#..............................#",
+  "################################"
+];
+
+const BUILDER_THEME = {
+  floor: "#f4efe3", floorAlt: "#ebe4d4", wall: "#9fc9bd", wallTop: "#bde0d6",
+  base: "#6fa79a", accent: "#48c3f0", wood: "#c99a63", leaf: "#5fb872",
+  leaf2: "#83d290", pot: "#d98a5f", locker: "#a7bccb", crate: "#dcb98c",
+  crate2: "#c9a173", curtain: "#bfdcee", rug: "#d6e6f2"
+};
+
+/* Escalation is deliberately gentle on arrivals and steep on variety: new
+   ailments are what actually make a wave harder, because each one adds a
+   whole procedure chain to juggle. Rates bottom out at values a built-up
+   department can genuinely service. */
+function builderWaveDef(n) {
+  const ail = ["cut", "infection"];
+  if (n >= 2) ail.push("fracture");
+  if (n >= 3) ail.push("cardiac");
+  if (n >= 5) ail.push("mystery");
+  const notes = [];
+  if (n === 2) notes.push("fractures arriving");
+  if (n === 3) notes.push("cardiac arrests arriving");
+  if (n === 4) notes.push("shelves now run dry");
+  if (n === 5) notes.push("mystery cases arriving");
+  if (n === 6) notes.push("equipment starts to jam");
+  return {
+    name: "Wave " + n,
+    blurb: notes.length ? notes.join(" · ") : "Keep the department moving.",
+    seed: (0xB0A5 + n * 7919) >>> 0,
+    duration: 180,
+    patience: Math.max(48, 94 - n * 4),
+    spawnStart: Math.max(5.4, 13.0 - n * 0.72),
+    spawnEnd: Math.max(4.0, 9.0 - n * 0.55),
+    maxWaiting: Math.min(9, 3 + Math.floor(n / 2)),
+    ailments: ail,
+    stars: null,
+    restock: n >= 4,
+    jams: n >= 6,
+    flatline: n >= 3,
+    theme: BUILDER_THEME,
+    props: ["bench", "plant", "chair", "cooler", "sign", "locker"],
+    map: BUILDER_MAP,
+    builder: true
+  };
+}
+
+/* The shop. `kind` decides what buying it does:
+     station  — placed on the floor as a working machine
+     waitslot — widens the queue the waiting room can hold
+     staff    — an NPC that does one job for you, placed where it starts
+     passive  — a permanent run-wide upgrade                              */
+const SHOP = [
+  { key: "bed",      name: "Treatment Bay",    cost: 130, kind: "station", station: "bed",
+    blurb: "Another bed. More beds means more patients in progress at once." },
+  { key: "supply",   name: "Supply Shelf",     cost: 90,  kind: "station", station: "supply",
+    blurb: "Bandages, close to where you need them." },
+  { key: "medicine", name: "Medicine Cabinet", cost: 110, kind: "station", station: "medicine",
+    blurb: "Syringes for infections." },
+  { key: "xray",     name: "X-ray Machine",    cost: 185, kind: "station", station: "xray", from: 2,
+    blurb: "Opens your doors to fracture cases (+175 each). Pairs with the cast mixer." },
+  { key: "cast",     name: "Cast Mixer",       cost: 120, kind: "station", station: "cast", from: 2,
+    blurb: "Turns a developed X-ray into a cast." },
+  { key: "defibrack",name: "Defib Station",    cost: 195, kind: "station", station: "defibrack", from: 3,
+    blurb: "With a charger, opens your doors to cardiac cases (+195 each)." },
+  { key: "charger",  name: "Defib Charger",    cost: 130, kind: "station", station: "charger", from: 3,
+    blurb: "Charges a defib. Put it near the beds — the charge drains fast." },
+  { key: "lab",      name: "Path Lab",         cost: 175, kind: "station", station: "lab", from: 5,
+    blurb: "Opens your doors to mystery cases (+215 each)." },
+  { key: "delivery", name: "Delivery Door",    cost: 85,  kind: "station", station: "delivery", from: 4,
+    blurb: "Where crates come from, for restocking empty shelves." },
+  { key: "bench",    name: "Waiting Bench",    cost: 70,  kind: "waitslot",
+    blurb: "Two more places for patients to wait, so the doors stay open longer." },
+
+  { key: "porter",   name: "Patient Coordinator", cost: 240, kind: "staff", role: "porter",
+    blurb: "Brings arrivals from the door to a free bed so you can stay on treatment." },
+  { key: "xraytech", name: "X-ray Technician",    cost: 225, kind: "staff", role: "xraytech", from: 2,
+    blurb: "Runs the X-ray and develops the film, leaving the image ready to collect." },
+  { key: "labtech",  name: "Lab Technician",      cost: 205, kind: "staff", role: "labtech", from: 5,
+    blurb: "Collects blood samples off the floor and runs them through the lab." },
+  { key: "clerk",    name: "Supply Clerk",        cost: 180, kind: "staff", role: "clerk", from: 4,
+    blurb: "Fetches crates and restocks any shelf that runs dry." },
+  { key: "nurse",    name: "Comfort Nurse",       cost: 200, kind: "staff", role: "nurse",
+    blurb: "Sits with the most distressed waiting patient and buys you time." },
+
+  { key: "shoes",    name: "Grippy Sneakers",  cost: 150, kind: "passive",
+    blurb: "Everyone moves 8% faster with 40% more sprint. Stacks up to three times." },
+  { key: "life",     name: "Extra Life",       cost: 170, kind: "passive",
+    blurb: "One more mistake before the run ends." },
+  { key: "charm",    name: "Lucky Charm",      cost: 140, kind: "passive",
+    blurb: "Chains last 2.5s longer and PERFECT is easier to earn." }
+];
+
+const STAFF_LOOK = {
+  porter:   { body: "#7fb2e8", cap: "#7fb2e8", label: "COORD",
+              look: { skin: "#e8b184", hair: "#3f3833", style: "short", acc: "none" } },
+  xraytech: { body: "#b9a6e0", cap: "#b9a6e0", label: "X-RAY",
+              look: { skin: "#8a5a3b", hair: "#241f1c", style: "bun", acc: "none" } },
+  labtech:  { body: "#8fd6c0", cap: "#8fd6c0", label: "LAB",
+              look: { skin: "#f2c898", hair: "#2e2a28", style: "fringe", acc: "glasses" } },
+  clerk:    { body: "#f0c86b", cap: "#f0c86b", label: "SUPPLY",
+              look: { skin: "#c8865a", hair: "#5b4635", style: "curls", acc: "none" } },
+  nurse:    { body: "#ffffff", cap: "#ffd7e0", label: "NURSE",
+              look: { skin: "#f6cfa6", hair: "#8a5a33", style: "fringe", acc: "none" } }
+};
+
+/* ---------------- placing things into a live ward ---------------- */
+
+/** Every open tile reachable from the entrance, and every station adjacent to
+    one. Used to prove a placement has not sealed anything off. */
+function wardConnected(world) {
+  const seen = new Set([world.entrance.x + "," + world.entrance.y]);
+  const q = [world.entrance];
+  while (q.length) {
+    const c = q.shift();
+    for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+      const nx = c.x + dx, ny = c.y + dy, k = nx + "," + ny;
+      if (seen.has(k) || !isWalkable(world, nx, ny)) continue;
+      seen.add(k); q.push({ x: nx, y: ny });
+    }
+  }
+  let open = 0;
+  for (let y = 0; y < ROWS; y++)
+    for (let x = 0; x < COLS; x++) if (isWalkable(world, x, y)) open++;
+  if (seen.size !== open) return false;                 // an island got cut off
+  if (!seen.has(world.exit.x + "," + world.exit.y)) return false;
+  for (const st of world.stations) {                    // every machine usable
+    let ok = false;
+    for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]])
+      if (seen.has((st.x + dx) + "," + (st.y + dy))) ok = true;
+    if (!ok) return false;
+  }
+  return true;
+}
+
+/** Why can this tile not take a machine? Returns null when it can. */
+function placementProblem(world, x, y) {
+  if (x < 1 || y < 1 || x >= COLS - 1 || y >= ROWS - 1) return "Outside the ward";
+  const cell = cellAt(world, x, y);
+  if (!cell) return "Outside the ward";
+  if (cell.entrance || cell.exit) return "That is a doorway";
+  if (cell.station) return "Something is already here";
+  if (cell.solid) return "That is a wall";
+  if (Game.patients.some(q => q.state !== "gone" &&
+      Math.floor(q.x / TILE) === x && Math.floor(q.y / TILE) === y))
+    return "Someone is standing there";
+  return null;
+}
+
+/** Drop a station onto the floor, refusing anything that would seal the ward. */
+function placeStation(world, type, x, y) {
+  const problem = placementProblem(world, x, y);
+  if (problem) return problem;
+  const cell = world.grid[y][x];
+  const st = {
+    type, x, y,
+    cx: x * TILE + TILE / 2, cy: y * TILE + TILE / 2,
+    occupant: null,
+    stock: STATIONS[type].stockMax !== undefined
+      ? (Game.level && Game.level.restock ? STATIONS[type].stockMax : Infinity)
+      : Infinity,
+    jammed: false, flash: 0.6,
+    hasDefib: type === "defibrack"
+  };
+  cell.solid = true; cell.station = st;
+  world.stations.push(st);
+  if (type === "bed") world.beds.push(st);
+
+  if (!wardConnected(world)) {                          // undo, cleanly
+    cell.solid = false; cell.station = null;
+    world.stations.pop();
+    if (type === "bed") world.beds.pop();
+    return "That would block the way through";
+  }
+  world.waitSlots = computeWaitSlots(world, world.slotTarget || 8);
+  world.mesh = null;                                    // force a rebake
+  return null;
+}
+
+/* ---------------- staff ---------------- */
+
+function makeStaff(role, tx, ty) {
+  return {
+    role, x: tx * TILE + TILE / 2, y: ty * TILE + TILE / 2,
+    home: { x: tx, y: ty },
+    dx: 0, dy: 1, bob: 0, step: 0, moving: false,
+    path: [], target: null, carrying: null, item: null,
+    workT: 0, phase: "idle", cooldown: 0, comfort: 0
+  };
+}
+
+const STAFF_SPEED = 132;
+
+/** Walk toward a tile. Returns "arrived" | "moving" | "blocked". */
+function staffWalk(st, tx, ty, dt, adjacent) {
+  const here = tileOf(st.x, st.y);
+  const done = adjacent
+    ? Math.abs(here.x - tx) + Math.abs(here.y - ty) === 1
+    : (here.x === tx && here.y === ty);
+  if (done) {
+    const cx = tx * TILE + TILE / 2, cy = ty * TILE + TILE / 2;
+    const d = Math.hypot(cx - st.x, cy - st.y);
+    if (d > 1) { st.dx = (cx - st.x) / d; st.dy = (cy - st.y) / d; }
+    st.moving = false;
+    return "arrived";
+  }
+  if (!st.path.length || st.repathT === undefined || (st.repathT -= dt) <= 0) {
+    st.repathT = 0.6;
+    let goal = { x: tx, y: ty };
+    if (adjacent || !isWalkable(Game.world, tx, ty)) {
+      let best = null;
+      for (const [dx, dy] of [[0,1],[1,0],[-1,0],[0,-1]]) {
+        if (isWalkable(Game.world, tx + dx, ty + dy)) { best = { x: tx + dx, y: ty + dy }; break; }
+      }
+      if (!best) return "blocked";
+      goal = best;
+    }
+    st.path = findPath(Game.world, here, goal) || [];
+    if (!st.path.length && !(here.x === goal.x && here.y === goal.y)) return "blocked";
+  }
+  const next = st.path[0];
+  if (!next) return "blocked";
+  // findPath waypoints are already in PIXELS (see findPath), not tile indices
+  const vx = next.x - st.x, vy = next.y - st.y, d = Math.hypot(vx, vy);
+  if (d < 4) { st.path.shift(); return "moving"; }
+  const sp = STAFF_SPEED * dt;
+  st.x += (vx / d) * sp; st.y += (vy / d) * sp;
+  st.dx = vx / d; st.dy = vy / d;
+  st.moving = true; st.step += dt * 9;
+  return "moving";
+}
+
+/** Hold a job for `dur` seconds. Returns true on the frame it completes. */
+function staffWork(st, dur, dt) {
+  st.workT += dt;
+  if (st.workT < dur * Game.workMul) return false;
+  st.workT = 0;
+  return true;
+}
+
+function updateStaff(dt) {
+  for (const st of Game.staff) {
+    st.bob += dt * (st.moving ? 11 : 2);
+    if (st.cooldown > 0) st.cooldown -= dt;
+    switch (st.role) {
+      case "porter":   staffPorter(st, dt); break;
+      case "xraytech": staffXrayTech(st, dt); break;
+      case "labtech":  staffLabTech(st, dt); break;
+      case "clerk":    staffClerk(st, dt); break;
+      case "nurse":    staffNurse(st, dt); break;
+    }
+    if (st.carrying) { st.carrying.x = st.x; st.carrying.y = st.y - 4; }
+  }
+}
+
+function freeBedFor(world) {
+  return world.beds.find(b => !b.occupant) || null;
+}
+
+function staffPorter(st, dt) {
+  if (st.carrying) {
+    const pt = st.carrying;
+    if (pt.state !== "carried") { st.carrying = null; st.path = []; return; }
+    const bed = st.target && !st.target.occupant ? st.target : freeBedFor(Game.world);
+    if (!bed) { st.moving = false; return; }             // nowhere to put them
+    st.target = bed;
+    if (staffWalk(st, bed.x, bed.y, dt, true) === "arrived") {
+      pt.state = "station"; pt.station = bed;
+      pt.x = bed.cx; pt.y = bed.cy - 6;
+      bed.occupant = pt; bed.flash = 0.3;
+      st.carrying = null; st.target = null; st.path = [];
+      Sound.play("place");
+    }
+    return;
+  }
+  // pick the most distressed arrival, but only if there is a bed to take them to
+  if (!freeBedFor(Game.world)) { st.moving = false; st.target = null; return; }
+  let best = null, bestFrac = 2;
+  for (const pt of Game.patients) {
+    if (pt.state !== "waiting" && pt.state !== "walking") continue;
+    if (Game.staff.some(o => o !== st && o.target === pt)) continue;
+    const f = pt.patience / pt.patienceMax;
+    if (f < bestFrac) { bestFrac = f; best = pt; }
+  }
+  if (!best) { st.moving = false; st.target = null; return; }
+  st.target = best;
+  const t = tileOf(best.x, best.y);
+  if (staffWalk(st, t.x, t.y, dt, false) === "arrived") {
+    if (best.state === "waiting" || best.state === "walking") {
+      best.state = "carried"; best.path = []; best.slot = null;
+      st.carrying = best; st.target = null; st.path = [];
+      Sound.play("pickup");
+    } else { st.target = null; }
+  }
+}
+
+function staffXrayTech(st, dt) {
+  const world = Game.world;
+  // 1. a patient sitting on an X-ray waiting for the machine to be run
+  const waiting = Game.patients.find(q => q.state === "station" && q.station &&
+    q.station.type === "xray" && q.steps[q.step] &&
+    q.steps[q.step].k === "atStation" && q.steps[q.step].station === "xray");
+  if (waiting) {
+    const m = waiting.station;
+    if (m.jammed) { st.workT = 0; }
+    if (staffWalk(st, m.x, m.y, dt, true) === "arrived") {
+      if (m.jammed) {
+        if (staffWork(st, 2.2, dt)) { m.jammed = false; m.flash = 0.4; Sound.play("done"); }
+      } else if (staffWork(st, waiting.steps[waiting.step].dur, dt)) {
+        advancePatient(waiting);
+        st.item = makeItem("film");                       // holds the exposed film
+        Sound.play("done");
+      }
+    }
+    return;
+  }
+  // 2. develop a film they are holding, then leave the image by the machine
+  if (st.item && st.item.type === "film") {
+    const m = nearestStationOfType(st, "xray");
+    if (!m) { st.item = null; return; }
+    if (staffWalk(st, m.x, m.y, dt, true) === "arrived" && staffWork(st, 1.5, dt)) {
+      const img = makeItem("xrayimg");
+      const spot = tileOf(st.x, st.y);
+      img.x = spot.x * TILE + TILE / 2; img.y = spot.y * TILE + TILE / 2;
+      Game.floorItems.push(img);
+      st.item = null;
+      popup(img.x, img.y - 26, "X-ray ready", "#a8dcff");
+      Sound.play("lab");
+    }
+    return;
+  }
+  staffIdle(st, dt);
+}
+
+function staffLabTech(st, dt) {
+  const sample = Game.floorItems.find(i => i.type === "sample");
+  if (st.item && st.item.type === "sample") {
+    const lab = nearestStationOfType(st, "lab");
+    if (!lab) { st.item = null; return; }
+    if (staffWalk(st, lab.x, lab.y, dt, true) === "arrived" && staffWork(st, 2.6, dt)) {
+      runLabSample(st.item);
+      st.item = null;
+      Sound.play("lab");
+    }
+    return;
+  }
+  if (sample) {
+    const t = tileOf(sample.x, sample.y);
+    if (staffWalk(st, t.x, t.y, dt, false) === "arrived") {
+      const i = Game.floorItems.indexOf(sample);
+      if (i >= 0) {
+        Game.floorItems.splice(i, 1);
+        delete sample.x; delete sample.y;
+        st.item = sample;
+        Sound.play("pickup");
+      }
+    }
+    return;
+  }
+  staffIdle(st, dt);
+}
+
+function staffClerk(st, dt) {
+  const empty = Game.world.stations.find(q =>
+    (q.type === "supply" || q.type === "medicine") && q.stock === 0);
+  if (!empty) { st.item = null; staffIdle(st, dt); return; }
+  if (st.item && st.item.type === "crate") {
+    if (staffWalk(st, empty.x, empty.y, dt, true) === "arrived" && staffWork(st, 1.5, dt)) {
+      empty.stock = STATIONS[empty.type].stockMax;
+      empty.flash = 0.5;
+      st.item = null;
+      popup(empty.cx, empty.cy - 26, "Restocked", PALETTE.good);
+      Sound.play("done");
+    }
+    return;
+  }
+  const door = nearestStationOfType(st, "delivery");
+  if (!door) { staffIdle(st, dt); return; }
+  if (staffWalk(st, door.x, door.y, dt, true) === "arrived" && staffWork(st, 1.4, dt)) {
+    st.item = makeItem("crate");
+    Sound.play("pickup");
+  }
+}
+
+function staffNurse(st, dt) {
+  if (st.target && (st.target.state !== "station" || st.target.done ||
+      st.target.patience / st.target.patienceMax > 0.92)) {
+    st.target = null; st.path = []; st.comfort = 0;
+  }
+  if (!st.target && st.cooldown <= 0) {
+    let best = null, bestFrac = 0.85;
+    for (const pt of Game.patients) {
+      if (pt.state !== "station" || pt.done) continue;
+      const f = pt.patience / pt.patienceMax;
+      if (f < bestFrac) { bestFrac = f; best = pt; }
+    }
+    st.target = best;
+  }
+  if (!st.target) { staffIdle(st, dt); return; }
+  const bed = st.target.station;
+  if (!bed) { st.target = null; return; }
+  if (staffWalk(st, bed.x, bed.y, dt, true) === "arrived") {
+    st.comfort += dt;
+    if (st.comfort >= 1.3) {
+      const pt = st.target;
+      pt.patience = Math.min(pt.patienceMax, pt.patience + pt.patienceMax * 0.18);
+      popup(pt.x, pt.y - 30, "+ ♥", "#ff8fa8", false);
+      Sound.play("place");
+      st.comfort = 0; st.cooldown = 5.0; st.target = null;
+    }
+  }
+}
+
+/** Drift back to where they were posted, so the floor does not fill with
+    staff standing in doorways. */
+function staffIdle(st, dt) {
+  st.workT = 0;
+  const here = tileOf(st.x, st.y);
+  if (here.x === st.home.x && here.y === st.home.y) { st.moving = false; return; }
+  staffWalk(st, st.home.x, st.home.y, dt, false);
+}
+
+/** Resolve a blood sample the way the player's lab job does. */
+function runLabSample(item) {
+  const pt = Game.patients.find(q => q.id === item.pid && q.state !== "gone");
+  if (!pt) return false;
+  revealMystery(pt);
+  return true;
+}
+
+function nearestStationOfType(st, type) {
+  let best = null, bestD = Infinity;
+  for (const q of Game.world.stations) {
+    if (q.type !== type) continue;
+    const d = Math.hypot(q.cx - st.x, q.cy - st.y);
+    if (d < bestD) { bestD = d; best = q; }
+  }
+  return best;
+}
+
+
+/* ---------------- run lifecycle ---------------- */
+
+function startBuilderRun() {
+  Game.builder = {
+    wave: 1, credits: 0, offers: [], cursor: 0,
+    placing: null, message: null, messageT: 0,
+    bought: [], shoes: 0, charm: false, extraLives: 0,
+    totalCredits: 0, bestWave: Game.builder ? Game.builder.bestWave || 0 : 0
+  };
+  Game.staff = [];
+  Game.builderWorld = null;
+  beginWave(1, true);
+}
+
+function beginWave(n, fresh) {
+  const def = builderWaveDef(n);
+  Game.builder.wave = n;
+  Game.levelIndex = -2;                    // neither campaign nor endless
+  Game.level = def;
+  Game.builderMode = true;
+  Game.endless = false;
+
+  const D = DIFFS[Game.difficulty] || DIFFS[1];
+  Game.diff = D;
+  const shoes = Game.builder.shoes;
+  Game.speedMul = 1 + 0.08 * shoes;
+  Game.staminaMax = STAMINA_MAX * (1 + 0.4 * Math.min(1, shoes));
+  Game.comboWindow = Game.builder.charm ? COMBO_WINDOW + 2.5 : COMBO_WINDOW;
+  Game.perfectAt = Game.builder.charm ? 0.60 : PERFECT_AT;
+
+  if (fresh || !Game.builderWorld) {
+    Game.builderWorld = makeWorld(def);
+    Game.builderWorld.slotTarget = 8;
+    Game.livesMax = D.lives + Game.builder.extraLives;
+    Game.lives = Game.livesMax;
+  } else {
+    Game.builderWorld.def = def;           // new wave rules, same room
+    Game.builderWorld.mesh = null;
+    Game.livesMax = D.lives + Game.builder.extraLives;
+    Game.lives = Math.min(Game.lives + 0, Game.livesMax);
+  }
+  Game.world = Game.builderWorld;
+
+  // The wave that turns restocking on must come with a crate source: a ward
+  // with dry shelves and no delivery door is a guaranteed slow loss, which is
+  // a design bug rather than a challenge. The door arrives with the rule.
+  if (def.restock && !Game.world.stations.some(q => q.type === "delivery")) {
+    const e = Game.world.entrance;
+    outer:
+    for (let r = 2; r < COLS; r++) {
+      for (let y = Math.max(1, e.y - r); y <= Math.min(ROWS - 2, e.y + r); y++) {
+        for (let x = Math.max(1, e.x - r); x <= Math.min(COLS - 2, e.x + r); x++) {
+          if (Math.max(Math.abs(x - e.x), Math.abs(y - e.y)) !== r) continue;
+          if (placeStation(Game.world, "delivery", x, y) === null) break outer;
+        }
+      }
+    }
+    Game.banner = { text: "SUPPLY DOCK INSTALLED", sub: "shelves now run dry — collect crates here",
+                    t: 0, color: "#c8dd97" };
+  }
+
+  // shelves start each wave full; whether they can run dry is a wave rule
+  for (const st of Game.world.stations) {
+    st.occupant = null; st.jammed = false; st.flash = 0;
+    if (STATIONS[st.type].stockMax !== undefined) {
+      st.stock = def.restock ? STATIONS[st.type].stockMax : Infinity;
+    }
+    if (st.type === "defibrack") st.hasDefib = true;
+  }
+
+  Game.rng = makeRng(def.seed);
+  Game.patients = [];
+  Game.floorItems = [];
+  Game.popups = [];
+  Game.particles = [];
+  Game.pickups = [];
+  Game.time = 0;
+  Game.spawnTimer = 3.0;
+  Game.scoreShown = Game.score;
+  if (fresh) { Game.score = 0; Game.scoreShown = 0; Game.treated = 0; Game.lost = 0; }
+  Game.critical = 1;
+  Game.byAilment = {};
+  Game.combo = 0; Game.comboTimer = 0;
+  Game.wave = n;
+  Game.waveTimer = WAVE_FIRST;
+  Game.burst = 0;
+  Game.event = null; Game.eventTimer = EVENT_FIRST;
+  Game.eventsSeen = []; Game.spawnMul = 1; Game.workMul = 1; Game.dim = 0;
+  Game.forceAilment = 0; Game.forceVip = false;
+  Game.pickupTimer = PICKUP_FIRST;
+  Game.highFiveCool = 0;
+  Game.shake = 0; Game.flashRed = 0; Game.flashGood = 0;
+  Game.result = null;
+  Game.tutorial = null;
+  Game.banner = { text: def.name, sub: def.blurb, t: 0, color: "#6fd3b4" };
+
+  // medics start on the entrance mat
+  const e = Game.world.entrance;
+  Game.players = [];
+  for (let i = 0; i < Game.playerCount; i++) {
+    Game.players.push(makePlayer(i, e.x * TILE + TILE / 2 + (i ? 26 : -6),
+                                    e.y * TILE + TILE / 2 + 30));
+  }
+  Game.nurse = null;                        // builder mode uses Game.staff
+  Game.screen = "play";
+  Sound.play("levelend");
+  Music.start();
+}
+
+/** Wave over: bank credits and open the shop. */
+function endWave() {
+  const B = Game.builder;
+  // shift change: whoever is still in the ward is handed over off-screen, so
+  // the build phase shows your room, not a frozen crowd with stale prompts
+  for (const pt of Game.patients) {
+    if (pt.station) { pt.station.occupant = null; }
+    pt.state = "gone";
+  }
+  Game.patients = [];
+  Game.floorItems = [];
+  Game.pickups = [];
+  for (const pl of Game.players) { pl.patient = null; pl.item = null; pl.work = null; }
+  for (const st of Game.staff) { st.carrying = null; st.item = null; st.target = null; st.path = []; }
+  const bonus = 60 + B.wave * 18 + Game.treated * 4;
+  B.credits += bonus;
+  B.totalCredits += bonus;
+  B.bestWave = Math.max(B.bestWave || 0, B.wave);
+  B.lastBonus = bonus;
+  B.offers = rollOffers();
+  for (const o of B.offers) o.bought = false;
+  B.cursor = 0;
+  B.placing = null;
+  B.message = "Wave " + B.wave + " cleared  ·  +" + bonus + " credits";
+  B.messageT = 0;
+  Game.screen = "build";
+  Sound.play("newbest");
+}
+
+/** The shop hand: the Treatment Bay is ALWAYS offered — beds are the
+    department's fundamental capacity, and a hand without one can strand a
+    run — plus three rotating offers biased toward gaps. */
+function rollOffers() {
+  const B = Game.builder, world = Game.world;
+  const have = (t) => world.stations.some(q => q.type === t);
+  const staffCount = (r) => Game.staff.filter(q => q.role === r).length;
+  const bed = SHOP.find(q => q.key === "bed");
+  const pool = [];
+  for (const item of SHOP) {
+    if (item === bed) continue;                                // staple slot
+    if (item.from && B.wave + 1 < item.from) continue;         // not relevant yet
+    let weight = 10;
+    if (item.kind === "station" && !have(item.station)) weight = 40;
+    if (item.kind === "staff") weight = staffCount(item.role) ? 6 : 24;
+    if (item.key === "life" && Game.lives >= Game.livesMax) weight = 4;
+    if (item.key === "shoes") weight = B.shoes >= 3 ? 0 : 12;
+    if (item.key === "charm") weight = B.charm ? 0 : 12;
+    for (let i = 0; i < weight; i++) pool.push(item);
+  }
+  const out = [bed];
+  let guard = 0;
+  while (out.length < 4 && pool.length && guard++ < 400) {
+    const pick = pool[Math.floor(Game.rng() * pool.length)];
+    if (!out.includes(pick)) out.push(pick);
+  }
+  return out;
+}
+
+function builderSay(msg) {
+  Game.builder.message = msg;
+  Game.builder.messageT = 0;
+}
+
+/** Spend on an offer. Placeables go into placement mode; passives apply now. */
+function buyOffer(idx) {
+  const B = Game.builder;
+  const item = B.offers[idx];
+  if (!item) return;
+  if (item.bought) { builderSay("Already bought this one"); Sound.play("error"); return; }
+  if (B.credits < item.cost) { builderSay("Not enough credits"); Sound.play("error"); return; }
+
+  if (item.kind === "passive") {
+    B.credits -= item.cost;
+    item.bought = true;
+    if (item.key === "shoes") B.shoes++;
+    if (item.key === "charm") B.charm = true;
+    if (item.key === "life") { B.extraLives++; Game.livesMax++; Game.lives++; }
+    B.bought.push(item.key);
+    builderSay(item.name + " added");
+    Sound.play("done");
+    return;
+  }
+  if (item.kind === "waitslot") {
+    B.credits -= item.cost;
+    item.bought = true;
+    Game.world.slotTarget = (Game.world.slotTarget || 8) + 2;
+    Game.world.waitSlots = computeWaitSlots(Game.world, Game.world.slotTarget);
+    B.bought.push(item.key);
+    builderSay("Waiting room widened");
+    Sound.play("done");
+    return;
+  }
+  // station or staff: pick a tile
+  const e = Game.world.entrance;
+  B.placing = { item, idx, x: e.x + 3, y: e.y + 3 };
+  builderSay("Move with WASD, E to place, Q to cancel");
+  Sound.play("menu");
+}
+
+function confirmPlacement() {
+  const B = Game.builder, pl = B.placing;
+  if (!pl) return;
+  if (pl.item.kind === "staff") {
+    if (!isWalkable(Game.world, pl.x, pl.y)) { builderSay("Staff need open floor"); Sound.play("error"); return; }
+    Game.staff.push(makeStaff(pl.item.role, pl.x, pl.y));
+  } else {
+    const problem = placeStation(Game.world, pl.item.station, pl.x, pl.y);
+    if (problem) { builderSay(problem); Sound.play("error"); return; }
+  }
+  B.credits -= pl.item.cost;
+  pl.item.bought = true;
+  B.bought.push(pl.item.key);
+  builderSay(pl.item.name + " installed");
+  Sound.play("done");
+  B.placing = null;
 }
 
 /* =====================================================================
@@ -3829,9 +4584,10 @@ function drawSceneEntities() {
     drawPatient3D(pt);
   }
 
-  // medics
+  // medics and hired staff
   for (const p of Game.players) drawPlayer3D(p);
   if (Game.nurse) drawNurse3D(Game.nurse);
+  for (const st of Game.staff) drawStaff3D(st);
 }
 
 /* Every patient is a different person. The look is derived from a PRIVATE rng
@@ -3942,6 +4698,28 @@ function drawPlayer3D(p) {
   } else if (p.item) {
     const bobY = Math.sin(p.bob * 0.6) * 0.02;
     drawItem3D(p.item.type, _lx(wx, ry, 0, 0.34), 0.62 + bobY, _lz(wz, ry, 0, 0.34), ry);
+  }
+}
+
+/** Hired staff share the plush model; the scrub colour is their department. */
+function drawStaff3D(st) {
+  const L = STAFF_LOOK[st.role] || STAFF_LOOK.nurse;
+  const ry = Math.atan2(st.dx || 0, st.dy || 1);
+  drawCharacter3D({
+    wx: st.x * T2W, wz: st.y * T2W, ry,
+    bob: st.bob, step: st.step || 0, moving: !!st.moving,
+    body: L.body, cap: L.cap, look: L.look, scale: 0.95
+  });
+  if (_pass !== "shadow" && st.item) {
+    drawItem3D(st.item.type, st.x * T2W, 1.30, st.y * T2W, performance.now() / 700);
+  }
+  if (_pass !== "shadow" && st.carrying) {
+    drawCharacter3D({
+      wx: st.x * T2W, wz: st.y * T2W, ry,
+      y: 1.28, bob: st.bob * 0.6, step: 0, moving: false,
+      body: patientLook(st.carrying).gown, look: patientLook(st.carrying),
+      noCap: true, tucked: true, scale: 0.62
+    });
   }
 }
 
@@ -4438,6 +5216,12 @@ function hudCard(g, x, y, w, h, label) {
 function drawHUD(g) {
   g.fillStyle = Paint.hud;
   g.fillRect(0, 0, W, HUD_H);
+  if (Game.builderMode && Game.builder) {
+    // credits are the whole point of a wave, so they sit in the HUD
+    fillRound(g, W / 2 + 150, 14, 150, 44, 10, "rgba(111,211,180,.14)");
+    text(g, String(Game.builder.credits), W / 2 + 225, 40, 22, "#6fd3b4", "center");
+    text(g, "CREDITS", W / 2 + 225, 54, 9, PALETTE.dim, "center");
+  }
   g.fillStyle = "rgba(63,182,232,.35)";
   g.fillRect(0, HUD_H - 3, W, 3);
 
@@ -4445,7 +5229,9 @@ function drawHUD(g) {
 
   // --- clock / level ---
   hudCard(g, 14, 10, 236, HUD_H - 22);
-  text(g, (Game.endless ? "∞" : (Game.levelIndex + 1)) + "  " + lvl.name, 26, 30, 15, PALETTE.text);
+  text(g, Game.builderMode ? ("ER  " + lvl.name)
+        : ((Game.endless ? "∞" : (Game.levelIndex + 1)) + "  " + lvl.name),
+       26, 30, 15, PALETTE.text);
   Game.perksActive.forEach((k, i) => {
     g.save(); g.translate(224 - i * 24, 26); g.scale(0.55, 0.55); g.translate(-224 + i * 24, -26);
     drawPerkIcon(g, k, 224 - i * 24, 26, true);
@@ -4508,7 +5294,11 @@ function drawHUD(g) {
 
   // --- targets / best ---
   const bx = W - 330;
-  if (Game.endless) {
+  if (Game.builderMode) {
+    hudCard(g, bx, 10, 250, HUD_H - 22, "WAVE " + (Game.builder ? Game.builder.wave : 1));
+    text(g, "Best wave  " + (Game.builderBest || "—"), bx + 12, 52, 16, "#6fd3b4");
+    text(g, "Treated " + Game.treated + "   Lost " + Game.lost, bx + 12, 74, 12, PALETTE.dim);
+  } else if (Game.endless) {
     hudCard(g, bx, 10, 250, HUD_H - 22, "PERSONAL BEST");
     text(g, String(Game.endlessBest), bx + 12, 52, 26, "#ffd54a");
     text(g, "Treated " + Game.treated + "   Lost " + Game.lost, bx + 12, 74, 12, PALETTE.dim);
@@ -4735,7 +5525,7 @@ function drawTitle(g) {
     });
   }
 
-  text(g, "Escape pauses · M mutes · treat patients, then wheel them to the green OUT tile",
+  text(g, "Escape pauses · M mutes · press  H  for how to play",
        W / 2, CY - 58, 14, PALETTE.dim, "center", "normal");
 
   const blink = (Math.sin(performance.now() / 320) + 1) / 2;
@@ -4919,9 +5709,335 @@ function drawPerkIcon(g, key, cx, cy, lit) {
 
 const SELECT_COLS = 5;
 const ENDLESS_SLOT = () => LEVELS.length;
+const BUILDER_SLOT = () => LEVELS.length + 1;
+const BUILDER_UNLOCK = 3;
+const builderUnlocked = () => totalStars() >= BUILDER_UNLOCK;
 
 
 /** Career screen: achievements earned, plus the running career totals. */
+
+/* ---------------------------------------------------------------------
+   How to play. Built from AILMENTS / RECIPES / STATIONS rather than a
+   hand-written copy of them, so the instructions cannot drift out of sync
+   with the actual procedures.
+   --------------------------------------------------------------------- */
+
+const HOWTO_PAGES = 3;
+
+function drawHowTo(g) {
+  g.fillStyle = Paint.title;
+  g.fillRect(0, 0, W, H);
+  const page = Game.howToPage || 0;
+
+  text(g, "HOW TO PLAY", W / 2, 56, 34, PALETTE.text, "center");
+  const titles = ["Controls & the shift", "The five procedures", "Modes & extras"];
+  text(g, titles[page], W / 2, 82, 16, PALETTE.dim, "center", "normal");
+
+  if (page === 0) drawHowToControls(g);
+  else if (page === 1) drawHowToProcedures(g);
+  else drawHowToModes(g);
+
+  for (let i = 0; i < HOWTO_PAGES; i++) {
+    g.fillStyle = i === page ? "#ffd54a" : "rgba(255,255,255,.16)";
+    g.beginPath(); g.arc(W / 2 - (HOWTO_PAGES - 1) * 9 + i * 18, H - 62, 5, 0, 6.283); g.fill();
+  }
+  text(g, "A / D  page      Esc  back", W / 2, H - 32, 15, PALETTE.text, "center");
+}
+
+function drawHowToControls(g) {
+  const cards = [
+    { x: 96, color: PALETTE.p1, title: "PLAYER 1",
+      rows: [["Move", "W A S D"], ["Pick up / put down", "E"], ["Work a station (hold)", "Q"], ["Sprint (hold)", "Left Shift"]] },
+    { x: 664, color: PALETTE.p2, title: "PLAYER 2",
+      rows: [["Move", "Arrow keys"], ["Pick up / put down", "/"], ["Work a station (hold)", "."], ["Sprint (hold)", "Right Shift"]] }
+  ];
+  for (const c of cards) {
+    fillRound(g, c.x, 106, 520, 148, 14, "rgba(255,255,255,.045)");
+    g.fillStyle = c.color; roundRect(g, c.x, 106, 520, 4, 2); g.fill();
+    text(g, c.title, c.x + 22, 138, 17, c.color);
+    c.rows.forEach((r, i) => {
+      const y = 166 + i * 26;
+      text(g, r[0], c.x + 22, y, 13, PALETTE.dim, "left", "normal");
+      keyCap(g, r[1], c.x + 250, y - 14);
+    });
+  }
+
+  const steps = [
+    ["1", "Patients arrive at the blue IN door.", "Walk into them and press E to lift one onto your shoulders."],
+    ["2", "Carry them to a free bed.", "Stand beside the bed facing it and press E to lay them down."],
+    ["3", "Do what their badge asks.", "Fetch the item they need from a station (hold Q), carry it back, then hold Q at the bedside."],
+    ["4", "Wheel them out.", "Once the badge turns green, pick them up again and walk onto the green OUT tile."]
+  ];
+  fillRound(g, 96, 274, 1088, 210, 14, "rgba(255,255,255,.04)");
+  text(g, "EVERY PATIENT, EVERY TIME", 118, 300, 12, "#ffd54a");
+  steps.forEach((s2, i) => {
+    const y = 328 + i * 38;
+    g.fillStyle = "#48c3f0";
+    g.beginPath(); g.arc(130, y - 5, 11, 0, 6.283); g.fill();
+    text(g, s2[0], 130, y, 14, "#0d1117", "center");
+    text(g, s2[1], 152, y, 15, PALETTE.text);
+    g.font = 'bold 15px "Trebuchet MS", "Segoe UI", sans-serif';
+    text(g, s2[2], 152 + g.measureText(s2[1]).width + 10, y, 13, PALETTE.dim, "left", "normal");
+  });
+
+  const tips = [
+    "The bar under a patient is their patience. Empty it and you lose a life.",
+    "Discharge quickly, one after another, to build a CHAIN multiplier.",
+    "Discharge with lots of patience left for PERFECT; on the last sliver for a CLUTCH SAVE.",
+    "Two players: stand together and both press Q for a high five — refills sprint, keeps the chain."
+  ];
+  fillRound(g, 96, 498, 1088, 122, 14, "rgba(255,255,255,.04)");
+  text(g, "WORTH KNOWING", 118, 524, 12, "#ffd54a");
+  tips.forEach((t, i) => {
+    text(g, "•  " + t, 118, 550 + i * 22, 13, PALETTE.dim, "left", "normal");
+  });
+}
+
+function drawHowToProcedures(g) {
+  const keys = Object.keys(AILMENTS);
+  keys.forEach((k, i) => {
+    const a = AILMENTS[k];
+    const y = 110 + i * 96;
+    fillRound(g, 96, y, 1088, 84, 13, "rgba(255,255,255,.04)");
+    drawAilmentIcon(g, k, 132, y + 42, 15);
+    text(g, a.name, 164, y + 32, 19, a.color);
+    text(g, "+" + a.score + " points", 164, y + 54, 12, PALETTE.dim, "left", "normal");
+    text(g, HOWTO_STEPS[k], 164, y + 72, 13, PALETTE.text, "left", "normal");
+
+    // the chain as station chips, the same shorthand the in-game legend uses
+    let cx = 500;
+    a.chain.forEach((c, j) => {
+      const label = c.t;
+      g.font = 'bold 12px "Trebuchet MS", "Segoe UI", sans-serif';
+      const w = g.measureText(label).width + 18;
+      const col = c.s === "bed" ? "#7db2f2" : (STATIONS[c.s] ? STATIONS[c.s].color : "#8a93a0");
+      fillRound(g, cx, y + 22, w, 22, 7, col);
+      text(g, label, cx + w / 2, y + 37, 12, "#10202e", "center");
+      cx += w + 6;
+      if (j < a.chain.length - 1) {
+        text(g, "›", cx, y + 38, 14, PALETTE.dim, "left");
+        cx += 12;
+      }
+    });
+  });
+  text(g, "Shelves can run dry on later shifts — collect a crate from the Delivery door and hold Q at the shelf. " +
+          "Machines jam: empty your hands and hold Q to fix one.",
+       W / 2, 612, 13, PALETTE.dim, "center", "normal");
+}
+
+function drawHowToModes(g) {
+  const modes = [
+    ["CAMPAIGN", "#48c3f0", "Ten handmade wards, three minutes each. Score sets your stars; stars unlock the next ward and your perks. Three shift challenges per ward give you a reason to come back."],
+    ["NIGHT SHIFT (ENDLESS)", "#c39bff", "No clock. Arrivals tighten forever and every tenth patient buys back a life. Unlocks at six stars."],
+    ["ER BUILDER (WAVES)", "#6fd3b4", "You design the department. Treat patients to earn credits, then between waves buy beds, machines and staff and place them wherever you like. Press start when your ER is ready. Waves escalate; the run ends when you run out of lives."]
+  ];
+  let y = 116;
+  for (const [name, col, blurb] of modes) {
+    fillRound(g, 96, y, 1088, 92, 13, "rgba(255,255,255,.04)");
+    g.fillStyle = col; roundRect(g, 96, y, 5, 92, 2.5); g.fill();
+    text(g, name, 122, y + 30, 19, col);
+    wrapText(g, blurb, 122, y + 54, 1030, 19, 13, PALETTE.dim);
+    y += 104;
+  }
+  const extras = [
+    ["Shift events", "From the third ward on, a surge can hit mid-shift — an ambulance, an outbreak, a power flicker. Discharges pay extra while one runs."],
+    ["Pickups", "Coffee makes you quicker; adrenaline makes sprinting free. Both sit on the floor and expire if ignored."],
+    ["Difficulty", "Casual, Standard or Overtime — press T on the shift select. Overtime pays 1.45x."]
+  ];
+  fillRound(g, 96, y, 1088, 118, 13, "rgba(255,255,255,.04)");
+  text(g, "ALSO IN PLAY", 118, y + 24, 12, "#ffd54a");
+  extras.forEach(([n, b], i) => {
+    const ey = y + 50 + i * 24;
+    text(g, n, 118, ey, 13, PALETTE.text);
+    g.font = 'bold 13px "Trebuchet MS", "Segoe UI", sans-serif';
+    text(g, b, 118 + g.measureText(n).width + 12, ey, 13, PALETTE.dim, "left", "normal");
+  });
+}
+
+/* Plain-language one-liner per procedure. The chain chips above give the exact
+   station order; this says what you are actually doing. */
+const HOWTO_STEPS = {
+  cut:      "Grab a bandage from a supply shelf, carry it to the bed, hold Q to dress the wound.",
+  infection:"Fill a syringe at a medicine cabinet, carry it over, hold Q to inject.",
+  fracture: "Carry the patient onto the X-ray and hold Q. Develop the film at the X-ray, mix the cast at the mixer, then apply it at the bed.",
+  cardiac:  "Take the defib off its rack, charge it at the charger, then shock them at the bed BEFORE the charge drains.",
+  mystery:  "Draw blood at the bed with empty hands, run the sample to the lab, wait for the result — then treat whatever it turns out to be."
+};
+
+/** Word-wrap helper for the longer explanatory blocks. */
+function wrapText(g, str, x, y, maxW, lineH, size, color) {
+  g.font = 'normal ' + size + 'px "Trebuchet MS", "Segoe UI", sans-serif';
+  const words = str.split(" ");
+  let line = "", ly = y;
+  for (const w of words) {
+    const test = line ? line + " " + w : w;
+    if (g.measureText(test).width > maxW && line) {
+      text(g, line, x, ly, size, color, "left", "normal");
+      line = w; ly += lineH;
+      g.font = 'normal ' + size + 'px "Trebuchet MS", "Segoe UI", sans-serif';
+    } else line = test;
+  }
+  if (line) text(g, line, x, ly, size, color, "left", "normal");
+}
+
+
+/* ---------------------------------------------------------------------
+   The build phase: shop on the left, your ward live behind it, and a
+   placement cursor you drive around the floor.
+   --------------------------------------------------------------------- */
+
+function drawBuild(g) {
+  const B = Game.builder;
+  if (!B) return;
+
+  // a light scrim: you are choosing where things go, so you must see the room
+  g.fillStyle = "rgba(8,13,22,.55)";
+  g.fillRect(0, 0, W, H);
+  const top = g.createLinearGradient(0, 0, 0, 150);
+  top.addColorStop(0, "rgba(8,13,22,.92)"); top.addColorStop(1, "rgba(8,13,22,.35)");
+  g.fillStyle = top; g.fillRect(0, 0, W, 150);
+
+  text(g, "BUILD YOUR ER", 40, 56, 32, "#6fd3b4");
+  text(g, "Wave " + B.wave + " cleared  ·  next up wave " + (B.wave + 1),
+       40, 82, 15, PALETTE.dim, "left", "normal");
+
+  // credits
+  const cw = 210;
+  fillRound(g, W - cw - 40, 30, cw, 60, 12, "rgba(12,20,30,.9)");
+  g.strokeStyle = "rgba(111,211,180,.5)"; g.lineWidth = 2;
+  roundRect(g, W - cw - 40, 30, cw, 60, 12); g.stroke();
+  text(g, String(B.credits), W - cw / 2 - 40, 66, 30, "#6fd3b4", "center");
+  text(g, "CREDITS", W - cw / 2 - 40, 82, 10, PALETTE.dim, "center");
+
+  if (B.placing) { drawPlacementUI(g); return; }
+
+  // offers
+  const n = B.offers.length, ow = 268, gap = 14;
+  const x0 = (W - (n * ow + (n - 1) * gap)) / 2;
+  for (let i = 0; i < n; i++) {
+    const item = B.offers[i], x = x0 + i * (ow + gap), y = 168, h = 250;
+    const sel = i === B.cursor;
+    const afford = B.credits >= item.cost && !item.bought;
+    fillRound(g, x, y, ow, h, 14, item.bought ? "rgba(111,211,180,.12)" : "rgba(14,22,34,.92)");
+    g.strokeStyle = sel ? "#ffd54a" : (afford ? "rgba(111,211,180,.45)" : "rgba(255,255,255,.10)");
+    g.lineWidth = sel ? 4 : 1.5;
+    roundRect(g, x, y, ow, h, 14); g.stroke();
+
+    const kindCol = { station: "#8fd0f0", staff: "#ffb3c0", passive: "#ffd54a", waitslot: "#c8dd97" }[item.kind];
+    fillRound(g, x + 16, y + 16, 74, 18, 6, kindCol);
+    text(g, item.kind === "waitslot" ? "ROOM" : item.kind.toUpperCase(),
+         x + 53, y + 30, 10, "#10202e", "center");
+
+    drawShopIcon(g, item, x + ow - 44, y + 44, 20);
+    text(g, item.name, x + 16, y + 66, 17, PALETTE.text);
+    wrapText(g, item.blurb, x + 16, y + 92, ow - 32, 17, 12, PALETTE.dim);
+
+    if (item.bought) {
+      text(g, "INSTALLED", x + ow / 2, y + h - 22, 16, "#6fd3b4", "center");
+    } else {
+      text(g, item.cost + " c", x + ow / 2, y + h - 22, 20,
+           afford ? "#6fd3b4" : "#7d5a5a", "center");
+    }
+  }
+
+  // your department, at a glance
+  const stats = [
+    ["Beds", Game.world.beds.length],
+    ["Machines", Game.world.stations.filter(q => q.type !== "bed").length],
+    ["Staff", Game.staff.length],
+    ["Waiting room", Game.world.waitSlots.length],
+    ["Lives", Game.lives + " / " + Game.livesMax]
+  ];
+  const sw = 900, sx = W / 2 - sw / 2, sy = 442;
+  fillRound(g, sx, sy, sw, 56, 12, "rgba(14,22,34,.85)");
+  stats.forEach((st, i) => {
+    const cx2 = sx + 18 + i * (sw - 36) / stats.length;
+    text(g, String(st[1]), cx2, sy + 30, 20, PALETTE.text);
+    text(g, st[0], cx2, sy + 47, 11, PALETTE.dim, "left", "normal");
+  });
+
+  if (B.message && B.messageT < 4) {
+    g.save();
+    g.globalAlpha = clamp(4 - B.messageT, 0, 1);
+    text(g, B.message, W / 2, 528, 17, "#ffd54a", "center");
+    g.restore();
+  }
+
+  text(g, "A / D  choose      E  buy      Enter  start wave " + (B.wave + 1) +
+          "      H  how to play",
+       W / 2, H - 54, 17, PALETTE.text, "center");
+  text(g, "Unspent credits carry over — you do not have to buy anything.",
+       W / 2, H - 30, 13, PALETTE.dim, "center", "normal");
+}
+
+/** Placement mode: a cursor over the floor with live validity feedback. */
+function drawPlacementUI(g) {
+  const B = Game.builder, pl = B.placing;
+  const problem = pl.item.kind === "staff"
+    ? (isWalkable(Game.world, pl.x, pl.y) ? null : "Staff need open floor")
+    : placementProblem(Game.world, pl.x, pl.y);
+
+  // the cursor, projected onto the floor
+  const s0 = projectToScreen(pl.x + 0.5, 0.02, pl.y + 0.5);
+  const s1 = projectToScreen(pl.x + 0.5, 0.85, pl.y + 0.5);
+  if (s0) {
+    g.save();
+    g.globalAlpha = 0.55 + 0.35 * Math.sin(performance.now() / 180);
+    g.strokeStyle = problem ? "#e4573d" : "#6fd3b4";
+    g.lineWidth = 4;
+    g.beginPath(); g.ellipse(s0.x, s0.y, 34, 17, 0, 0, 6.283); g.stroke();
+    if (s1) {
+      g.beginPath(); g.moveTo(s0.x, s0.y); g.lineTo(s1.x, s1.y); g.stroke();
+      drawShopIcon(g, pl.item, s1.x, s1.y - 16, 16);
+    }
+    g.restore();
+  }
+
+  const bw = 560, bx = W / 2 - bw / 2, by = 168;
+  fillRound(g, bx, by, bw, 104, 14, "rgba(12,20,30,.94)");
+  g.strokeStyle = problem ? "#e4573d" : "#6fd3b4"; g.lineWidth = 2;
+  roundRect(g, bx, by, bw, 104, 14); g.stroke();
+  text(g, "PLACING  " + pl.item.name.toUpperCase(), W / 2, by + 32, 19,
+       problem ? "#ffb3a8" : "#6fd3b4", "center");
+  text(g, problem || "Looks good — press E to install it here",
+       W / 2, by + 60, 15, problem ? "#ffb3a8" : PALETTE.text, "center", "normal");
+  text(g, "tile " + pl.x + ", " + pl.y, W / 2, by + 84, 12, PALETTE.dim, "center", "normal");
+
+  text(g, "W A S D  move      E  place      Q or Esc  cancel",
+       W / 2, H - 54, 17, PALETTE.text, "center");
+}
+
+/** Small pictogram per shop line so the cards are scannable. */
+function drawShopIcon(g, item, x, y, r) {
+  g.save();
+  g.translate(x, y);
+  if (item.kind === "station") {
+    const col = STATIONS[item.station] ? STATIONS[item.station].color : "#8fd0f0";
+    fillRound(g, -r, -r * 0.8, r * 2, r * 1.6, r * 0.3, col);
+    if (item.station === "bed") {
+      g.fillStyle = "#ffffff";
+      fillRound(g, -r * 0.8, -r * 0.6, r * 1.6, r * 0.5, r * 0.2, "#ffffff");
+    } else {
+      g.strokeStyle = "rgba(255,255,255,.85)"; g.lineWidth = 2; g.lineCap = "round";
+      g.beginPath(); g.moveTo(-r * 0.5, 0); g.lineTo(r * 0.5, 0); g.stroke();
+    }
+  } else if (item.kind === "staff") {
+    const L = STAFF_LOOK[item.role];
+    g.fillStyle = L ? L.body : "#ffb3c0";
+    g.beginPath(); g.arc(0, r * 0.35, r * 0.7, 0, 6.283); g.fill();
+    g.fillStyle = "#f2c898";
+    g.beginPath(); g.arc(0, -r * 0.5, r * 0.55, 0, 6.283); g.fill();
+    g.fillStyle = L ? L.cap : "#ffd7e0";
+    g.beginPath(); g.arc(0, -r * 0.72, r * 0.52, Math.PI, 0); g.fill();
+  } else if (item.kind === "waitslot") {
+    fillRound(g, -r, -r * 0.1, r * 2, r * 0.35, r * 0.15, "#c99a63");
+    fillRound(g, -r, -r * 0.75, r * 2, r * 0.4, r * 0.15, "#c99a63");
+  } else {
+    drawStar(g, 0, 0, r * 0.9, "#ffd54a");
+  }
+  g.restore();
+}
+
 function drawMedalsScreen(g) {
   g.fillStyle = Paint.title;
   g.fillRect(0, 0, W, H);
@@ -4990,8 +6106,24 @@ function drawSelect(g) {
     drawLevelCard(g, i, x0 + col * (cardW + gap), 112 + row * (cardH + gap), cardW, cardH);
   }
 
-  // endless card
-  const ex = W / 2 - 300, ey = 112 + 2 * (cardH + gap), ew = 600, eh = 66;
+  // the two special modes, side by side
+  const ey = 112 + 2 * (cardH + gap), ew = 452, eh = 66;
+  const ex = W / 2 - ew - 8;
+  const bx2 = W / 2 + 8;
+  const selB = Game.selectIndex === BUILDER_SLOT();
+  const openB = builderUnlocked();
+  g.fillStyle = openB ? "rgba(111,211,180,.16)" : "rgba(255,255,255,.03)";
+  roundRect(g, bx2, ey, ew, eh, 14); g.fill();
+  g.strokeStyle = selB ? "#ffd54a" : (openB ? "rgba(111,211,180,.6)" : "rgba(255,255,255,.07)");
+  g.lineWidth = selB ? 4 : 1.5;
+  roundRect(g, bx2, ey, ew, eh, 14); g.stroke();
+  drawShopIcon(g, { kind: "station", station: "bed" }, bx2 + 32, ey + 33, 14);
+  text(g, "ER BUILDER — waves", bx2 + 58, ey + 30, 18, openB ? PALETTE.text : "#4a5666");
+  text(g, openB ? "Build the department between waves." + (Game.builderBest
+                    ? "   Best wave  " + Game.builderBest : "")
+                : "Unlocks at " + BUILDER_UNLOCK + " stars (you have " + stars + ")",
+       bx2 + 58, ey + 50, 13, PALETTE.dim, "left", "normal");
+
   const selE = Game.selectIndex === ENDLESS_SLOT();
   const openE = endlessUnlocked();
   g.fillStyle = openE ? "rgba(155,93,229,.16)" : "rgba(255,255,255,.03)";
@@ -4999,17 +6131,19 @@ function drawSelect(g) {
   g.strokeStyle = selE ? "#ffd54a" : (openE ? "rgba(155,93,229,.6)" : "rgba(255,255,255,.07)");
   g.lineWidth = selE ? 4 : 1.5;
   roundRect(g, ex, ey, ew, eh, 14); g.stroke();
-  text(g, "∞", ex + 30, ey + 50, 34, openE ? "#c39bff" : "#3a4453", "center");
-  text(g, "NIGHT SHIFT — endless", ex + 56, ey + 32, 20, openE ? PALETTE.text : "#4a5666");
-  text(g, openE ? "No clock. Spawns tighten forever. Best  " + Game.endlessBest
+  text(g, "∞", ex + 30, ey + 46, 30, openE ? "#c39bff" : "#3a4453", "center");
+  text(g, "NIGHT SHIFT — endless", ex + 56, ey + 30, 18, openE ? PALETTE.text : "#4a5666");
+  text(g, openE ? "No clock. Arrivals tighten forever.   Best  " + Game.endlessBest
                 : "Unlocks at " + ENDLESS_UNLOCK + " stars (you have " + stars + ")",
-       ex + 56, ey + 54, 14, PALETTE.dim, "left", "normal");
+       ex + 56, ey + 50, 13, PALETTE.dim, "left", "normal");
 
-  const selDef = Game.selectIndex === ENDLESS_SLOT() ? ENDLESS : LEVELS[Game.selectIndex];
+  const selDef = Game.selectIndex === ENDLESS_SLOT() ? ENDLESS
+               : Game.selectIndex === BUILDER_SLOT() ? builderWaveDef(1)
+               : LEVELS[Game.selectIndex];
   text(g, selDef.blurb, W / 2, ey + 104, 16, PALETTE.dim, "center", "normal");
 
   // the three shift challenges for whatever is highlighted
-  if (Game.selectIndex !== ENDLESS_SLOT()) {
+  if (Game.selectIndex < LEVELS.length) {
     const list = CHALLENGES[Game.selectIndex] || [];
     const done = Game.progress[Game.selectIndex].challenges;
     const cw = 700, cx = W / 2 - cw / 2, cy = ey + 118;
@@ -5026,7 +6160,7 @@ function drawSelect(g) {
 
   text(g, "A / D  choose    W / S  row    E  start    P  perks" +
        (Game.perksActive.length ? " (" + Game.perksActive.length + ")" : "") +
-       "    T  " + DIFFS[Game.difficulty].name + "    C  medals    Esc  back",
+       "    T  " + DIFFS[Game.difficulty].name + "    C  medals    H  how to play    Esc  back",
        W / 2, ey + 200, 15, PALETTE.text, "center");
 
   const saveLevel = Game.level;
@@ -5096,11 +6230,11 @@ function drawPause(g) {
   roundRect(g, W / 2 - 250, 220, 500, 320, 18); g.fill();
   g.strokeStyle = "rgba(255,255,255,.10)"; g.lineWidth = 1.5;
   roundRect(g, W / 2 - 250, 220, 500, 320, 18); g.stroke();
-  text(g, "PAUSED", W / 2, 292, 44, PALETTE.text, "center");
-  const rows = [["Esc", "resume"], ["R", "restart this shift"],
+  text(g, "PAUSED", W / 2, 288, 42, PALETTE.text, "center");
+  const rows = [["Esc", "resume"], ["R", "restart this shift"], ["H", "how to play"],
                 ["M", "sound " + (Sound.muted ? "on" : "off")], ["L", "back to level select"]];
   rows.forEach((r, i) => {
-    const y = 348 + i * 44;
+    const y = 336 + i * 40;
     keyCap(g, r[0], W / 2 - 150, y - 17);
     text(g, r[1], W / 2 - 80, y, 19, PALETTE.dim, "left", "normal");
   });
@@ -5139,7 +6273,10 @@ function drawResults(g) {
   text(g, r.failed ? "SHIFT LOST" : "SHIFT OVER", W / 2, 138, 44, r.failed ? PALETTE.bad : PALETTE.text, "center");
   text(g, r.name || "", W / 2, 166, 17, PALETTE.dim, "center", "normal");
 
-  if (r.endless) {
+  if (r.builder) {
+    text(g, "WAVE " + r.wave, W / 2, 240, 52, "#6fd3b4", "center");
+    text(g, r.newBest ? "YOUR DEEPEST RUN YET" : "THE DEPARTMENT FELL", W / 2, 266, 13, PALETTE.dim, "center");
+  } else if (r.endless) {
     text(g, fmtTime(r.survived), W / 2, 236, 52, "#8be9ff", "center");
     text(g, "SURVIVED  ·  " + r.wave + " waves", W / 2, 262, 14, PALETTE.dim, "center");
   } else {
@@ -5165,7 +6302,13 @@ function drawResults(g) {
          W / 2, 392, 20, "#ffd54a", "center");
   }
 
-  const stats = [
+  const stats = r.builder ? [
+    ["Patients treated", String(r.treated)],
+    ["Patients lost", String(r.lost)],
+    ["Credits earned", String(r.spent || 0)],
+    ["Things built", String(r.built || 0)],
+    ["Staff hired", String(r.staff || 0)]
+  ] : [
     ["Patients treated", String(r.treated)],
     ["Patients lost", String(r.lost)],
     ["Best chain", "x" + (r.bestCombo || 0)],
@@ -5341,6 +6484,18 @@ function drawWorldUI(g) {
     }
   }
 
+  // --- who is who among the hired staff ---
+  for (const st of Game.staff) {
+    const L = STAFF_LOOK[st.role];
+    if (!L) continue;
+    const sp = projectToScreen(st.x * T2W, 2.30, st.y * T2W);
+    if (!sp) continue;
+    g.font = 'bold 10px "Trebuchet MS", "Segoe UI", sans-serif';
+    const w = g.measureText(L.label).width + 14;
+    fillRound(g, sp.x - w / 2, sp.y - 9, w, 16, 5, "rgba(12,20,30,.8)");
+    text(g, L.label, sp.x, sp.y + 3, 10, L.body, "center");
+  }
+
   // --- floating score popups ---
   for (const p of Game.popups) {
     const s = projectToScreen(p.x * T2W, 1.0 + p.t * 0.5, p.y * T2W);
@@ -5435,12 +6590,13 @@ function render() {
     return;
   }
 
-  const inWard = Game.screen === "play" || Game.screen === "paused" || Game.screen === "results";
+  const inWard = Game.screen === "play" || Game.screen === "paused" ||
+                 Game.screen === "results" || Game.screen === "build";
 
   if (inWard && Game.world) {
     CAM.shake = Game.shake;
     renderWorld3D(0);
-    drawWorldUI(ctx);
+    if (Game.screen !== "build") drawWorldUI(ctx);
     if (Game.flashRed > 0) {
       ctx.save(); ctx.globalAlpha = Game.flashRed * 0.45;
       ctx.fillStyle = "#ff2d2d"; ctx.fillRect(PLAY_X, PLAY_Y, PLAY_W, PLAY_H); ctx.restore();
@@ -5461,14 +6617,19 @@ function render() {
       ctx.fillRect(PLAY_X, PLAY_Y, PLAY_W, PLAY_H);
       ctx.restore();
     }
-    drawHUD(ctx);
-    drawLegend(ctx);
-    drawEventChip(ctx);
-    drawTutorial(ctx);
-    drawBanner(ctx);
+    if (Game.screen !== "build") {
+      // the build phase is its own full-screen UI; the shift HUD underneath
+      // it is stale information and just bleeds through the scrim
+      drawHUD(ctx);
+      drawLegend(ctx);
+      drawEventChip(ctx);
+      drawTutorial(ctx);
+      drawBanner(ctx);
+    }
     drawToasts(ctx);
     if (Game.screen === "paused") drawPause(ctx);
     if (Game.screen === "results") drawResults(ctx);
+    if (Game.screen === "build") drawBuild(ctx);
     return;
   }
 
@@ -5478,6 +6639,7 @@ function render() {
   if (Game.screen === "select") drawSelect(ctx);
   else if (Game.screen === "perks") drawPerks(ctx);
   else if (Game.screen === "medals") drawMedalsScreen(ctx);
+  else if (Game.screen === "howto") drawHowTo(ctx);
 }
 
 /* ---------------------------------------------------------------------
@@ -5492,6 +6654,7 @@ function handleScreenKeys() {
     case "title":
       if (wasPressed("Digit1") || wasPressed("Numpad1")) { Game.playerCount = 1; enterCharSelect(); }
       if (wasPressed("Digit2") || wasPressed("Numpad2")) { Game.playerCount = 2; enterCharSelect(); }
+      if (wasPressed("KeyH")) { Game.howToFrom = "title"; Game.screen = "howto"; Sound.play("menu"); }
       break;
 
     case "chars": {
@@ -5525,29 +6688,34 @@ function handleScreenKeys() {
     }
 
     case "select": {
-      const last = ENDLESS_SLOT();
+      const last = BUILDER_SLOT();
       const move = (d) => {
         Game.selectIndex = clamp(Game.selectIndex + d, 0, last);
         Sound.play("menu");
       };
+      const special = (i) => i >= LEVELS.length;
       if (wasPressed("KeyA") || wasPressed("ArrowLeft")) {
-        if (Game.selectIndex !== last && Game.selectIndex % SELECT_COLS !== 0) move(-1);
+        if (Game.selectIndex === BUILDER_SLOT()) move(-1);
+        else if (!special(Game.selectIndex) && Game.selectIndex % SELECT_COLS !== 0) move(-1);
       }
       if (wasPressed("KeyD") || wasPressed("ArrowRight")) {
-        if (Game.selectIndex !== last && Game.selectIndex % SELECT_COLS !== SELECT_COLS - 1
-            && Game.selectIndex + 1 < LEVELS.length) move(1);
+        if (Game.selectIndex === ENDLESS_SLOT()) move(1);
+        else if (!special(Game.selectIndex) && Game.selectIndex % SELECT_COLS !== SELECT_COLS - 1
+                 && Game.selectIndex + 1 < LEVELS.length) move(1);
       }
       if (wasPressed("KeyW") || wasPressed("ArrowUp")) {
-        if (Game.selectIndex === last) { Game.selectIndex = Math.min(LEVELS.length - 1, SELECT_COLS + 2); Sound.play("menu"); }
+        if (special(Game.selectIndex)) { Game.selectIndex = Math.min(LEVELS.length - 1, SELECT_COLS + 2); Sound.play("menu"); }
         else if (Game.selectIndex >= SELECT_COLS) move(-SELECT_COLS);
       }
       if (wasPressed("KeyS") || wasPressed("ArrowDown")) {
         if (Game.selectIndex + SELECT_COLS < LEVELS.length) move(SELECT_COLS);
-        else if (Game.selectIndex !== last) { Game.selectIndex = last; Sound.play("menu"); }
+        else if (!special(Game.selectIndex)) { Game.selectIndex = ENDLESS_SLOT(); Sound.play("menu"); }
       }
       if (wasPressed("KeyE") || wasPressed("Enter") || wasPressed("Slash")) {
-        if (Game.selectIndex === last) {
+        if (Game.selectIndex === ENDLESS_SLOT()) {
           if (endlessUnlocked()) startLevel(-1); else Sound.play("error");
+        } else if (Game.selectIndex === BUILDER_SLOT()) {
+          if (builderUnlocked()) startBuilderRun(); else Sound.play("error");
         } else if (Game.progress[Game.selectIndex].unlocked) {
           startLevel(Game.selectIndex);
         } else Sound.play("error");
@@ -5561,6 +6729,7 @@ function handleScreenKeys() {
         checkLiveAchievements();          // catch anything earned but not yet ticked
         Game.screen = "medals"; Sound.play("menu");
       }
+      if (wasPressed("KeyH")) { Game.howToFrom = "select"; Game.screen = "howto"; Sound.play("menu"); }
       if (wasPressed("Escape")) { Game.screen = "title"; Sound.play("menu"); }
       break;
     }
@@ -5594,21 +6763,72 @@ function handleScreenKeys() {
       break;
     }
 
+    case "build": {
+      const B = Game.builder;
+      if (!B) { Game.screen = "select"; break; }
+      if (B.placing) {
+        const mv = (dx, dy) => {
+          B.placing.x = clamp(B.placing.x + dx, 1, COLS - 2);
+          B.placing.y = clamp(B.placing.y + dy, 1, ROWS - 2);
+        };
+        if (wasPressed("KeyA") || wasPressed("ArrowLeft")) mv(-1, 0);
+        if (wasPressed("KeyD") || wasPressed("ArrowRight")) mv(1, 0);
+        if (wasPressed("KeyW") || wasPressed("ArrowUp")) mv(0, -1);
+        if (wasPressed("KeyS") || wasPressed("ArrowDown")) mv(0, 1);
+        if (wasPressed("KeyE") || wasPressed("Enter") || wasPressed("Slash")) confirmPlacement();
+        if (wasPressed("KeyQ") || wasPressed("Escape") || wasPressed("Period")) {
+          B.placing = null; builderSay("Cancelled"); Sound.play("menu");
+        }
+        break;
+      }
+      if (wasPressed("KeyA") || wasPressed("ArrowLeft")) {
+        B.cursor = (B.cursor + B.offers.length - 1) % B.offers.length; Sound.play("menu");
+      }
+      if (wasPressed("KeyD") || wasPressed("ArrowRight")) {
+        B.cursor = (B.cursor + 1) % B.offers.length; Sound.play("menu");
+      }
+      if (wasPressed("KeyE") || wasPressed("Slash")) buyOffer(B.cursor);
+      if (wasPressed("Enter")) beginWave(B.wave + 1, false);
+      if (wasPressed("KeyH")) { Game.howToFrom = "build"; Game.screen = "howto"; Sound.play("menu"); }
+      break;
+    }
+
+    case "howto": {
+      if (wasPressed("KeyD") || wasPressed("ArrowRight")) {
+        Game.howToPage = (Game.howToPage + 1) % HOWTO_PAGES; Sound.play("menu");
+      }
+      if (wasPressed("KeyA") || wasPressed("ArrowLeft")) {
+        Game.howToPage = (Game.howToPage + HOWTO_PAGES - 1) % HOWTO_PAGES; Sound.play("menu");
+      }
+      if (wasPressed("Escape") || wasPressed("KeyH") || wasPressed("Enter")) {
+        Game.screen = Game.howToFrom || "title"; Sound.play("menu");
+      }
+      break;
+    }
+
     case "play":
       if (wasPressed("Escape")) { Game.screen = "paused"; Sound.play("menu"); }
       break;
 
     case "paused":
       if (wasPressed("Escape")) { Game.screen = "play"; Sound.play("menu"); }
-      if (wasPressed("KeyR")) startLevel(Game.levelIndex);
-      if (wasPressed("KeyL")) { Game.screen = "select"; Sound.play("menu"); }
+      if (wasPressed("KeyR")) {
+        if (Game.builderMode) { startBuilderRun(); break; }
+        startLevel(Game.levelIndex);
+      }
+      if (wasPressed("KeyH")) { Game.howToFrom = "paused"; Game.screen = "howto"; Sound.play("menu"); }
+      if (wasPressed("KeyL")) { Game.builderMode = false; Game.screen = "select"; Sound.play("menu"); }
       break;
 
     case "results":
-      if (wasPressed("KeyR")) startLevel(Game.levelIndex);
+      if (wasPressed("KeyR")) {
+        if (Game.result && Game.result.builder) { startBuilderRun(); break; }
+        startLevel(Game.levelIndex);
+      }
       if (wasPressed("Escape")) { Game.screen = "select"; Sound.play("menu"); }
       if (wasPressed("KeyE") || wasPressed("Enter") || wasPressed("Slash")) {
-        if (Game.endless) Game.selectIndex = ENDLESS_SLOT();
+        if (Game.result && Game.result.builder) Game.selectIndex = BUILDER_SLOT();
+        else if (Game.endless) Game.selectIndex = ENDLESS_SLOT();
         else Game.selectIndex = Math.min(LEVELS.length - 1,
           Game.result.stars >= 1 ? Game.levelIndex + 1 : Game.levelIndex);
         Game.screen = "select";
@@ -5627,6 +6847,10 @@ function frame(now) {
   handleScreenKeys();
 
   if (Game.screen === "play") updatePlay(dt);
+  else if (Game.screen === "build") {
+    if (Game.builder) Game.builder.messageT += dt;
+    updateEffects(dt);
+  }
   else if (Game.screen === "results") { Game.result.t += dt; updateEffects(dt); }
   else if (Game.screen === "paused") { /* frozen */ }
 
