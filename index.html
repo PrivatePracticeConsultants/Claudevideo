@@ -1090,29 +1090,37 @@ const SEVERITY = {
               color: "#ff4d6d", ring: "#ff4d6d" }
 };
 
+/* How far into the shift we are, as 0..1. Endless has duration: Infinity, so
+   dividing elapsed time by it yields a hard 0 forever — which silently froze
+   criticals at their opening rate and made comorbidity IMPOSSIBLE in endless,
+   the one mode with no clock to create escalation of its own. Endless instead
+   ramps against a fixed reference window. */
+const ENDLESS_RAMP = 260;         // seconds to reach full intensity in endless
+
+function shiftProgress() {
+  const dur = Game.level && Game.level.duration;
+  if (!dur || !isFinite(dur)) return clamp(Game.time / ENDLESS_RAMP, 0, 1);
+  return clamp(Game.time / dur, 0, 1);
+}
+
 /** How likely a critical case is right now: ramps through the shift so the
     back half of a clock feels different from the front. */
 function criticalChance() {
   if (Game.levelIndex === 0 && !Game.builderMode) return 0;      // tutorial ward stays plain
-  const dur = (Game.level && Game.level.duration) || 150;
-  const t = clamp(Game.time / dur, 0, 1);
+  const t = shiftProgress();
   const wave = Game.builderMode && Game.builder ? Game.builder.wave : 0;
   return clamp(0.06 + t * 0.22 + wave * 0.015, 0, 0.34);
 }
 
 function minorChance() {
-  const dur = (Game.level && Game.level.duration) || 150;
-  const t = clamp(Game.time / dur, 0, 1);
-  return clamp(0.34 - t * 0.18, 0.12, 0.34);      // fewer freebies as it heats up
+  return clamp(0.34 - shiftProgress() * 0.18, 0.12, 0.34);   // fewer freebies as it heats up
 }
 
 /** Comorbidity: a second condition on the same patient. Late-shift only. */
 function comorbidChance() {
   if (Game.levelIndex >= 0 && Game.levelIndex < 4 && !Game.builderMode && !Game.endless) return 0;
   if (Game.builderMode && Game.builder && Game.builder.wave < 4) return 0;
-  const dur = (Game.level && Game.level.duration) || 150;
-  const t = clamp(Game.time / dur, 0, 1);
-  return clamp((t - 0.25) * 0.22, 0, 0.16);
+  return clamp((shiftProgress() - 0.25) * 0.22, 0, 0.16);
 }
 
 function rollSeverity() {
@@ -3218,7 +3226,7 @@ function staffXrayTech(st, dt) {
   // 2. develop a film they are holding, then leave the image by the machine
   if (st.item && st.item.type === "film") {
     const m = nearestStationOfType(st, "xray");
-    if (!m) { st.item = null; return; }
+    if (!m) { staffDropItem(st); return; }
     staffJob(st, "develop");
     if (staffWalk(st, m.x, m.y, dt, true) === "arrived" && staffWork(st, 1.5, dt)) {
       const img = makeItem("xrayimg");
@@ -3235,10 +3243,13 @@ function staffXrayTech(st, dt) {
 }
 
 function staffLabTech(st, dt) {
-  const sample = Game.floorItems.find(i => i.type === "sample");
+  const hasLab = Game.world.stations.some(q => q.type === "lab");
+  // do not lift a sample there is nowhere to take: better on the floor where a
+  // player can carry it once a lab exists
+  const sample = hasLab ? Game.floorItems.find(i => i.type === "sample") : null;
   if (st.item && st.item.type === "sample") {
     const lab = nearestStationOfType(st, "lab");
-    if (!lab) { st.item = null; return; }
+    if (!lab) { staffDropItem(st); return; }
     staffJob(st, "analyse");
     if (staffWalk(st, lab.x, lab.y, dt, true) === "arrived" && staffWork(st, 2.6, dt)) {
       runLabSample(st.item);
@@ -3266,7 +3277,7 @@ function staffLabTech(st, dt) {
 function staffClerk(st, dt) {
   const empty = Game.world.stations.find(q =>
     (q.type === "supply" || q.type === "medicine") && q.stock === 0);
-  if (!empty) { st.item = null; staffIdle(st, dt); return; }
+  if (!empty) { if (st.item) staffDropItem(st); staffIdle(st, dt); return; }
   if (st.item && st.item.type === "crate") {
     staffJob(st, "restock" + empty.x + "," + empty.y);
     if (staffWalk(st, empty.x, empty.y, dt, true) === "arrived" && staffWork(st, 1.5, dt)) {
@@ -3323,6 +3334,26 @@ function staffIdle(st, dt) {
   const here = tileOf(st.x, st.y);
   if (here.x === st.home.x && here.y === st.home.y) { st.moving = false; return; }
   staffWalk(st, st.home.x, st.home.y, dt, false);
+}
+
+/** Put a staffer's item back on the floor instead of deleting it.
+    Staff used to null their hands when they could not find the machine they
+    needed, which DESTROYED the item — and a destroyed sample or film leaves
+    its patient stuck at that step forever with no way for anyone to recover.
+    Dropping it keeps the chain completable by hand. */
+function staffDropItem(st) {
+  const it = st.item;
+  st.item = null;
+  if (!it) return;
+  const t = tileOf(st.x, st.y);
+  if (!isWalkable(Game.world, t.x, t.y)) {
+    const e = Game.world.entrance;
+    it.x = e.x * TILE + TILE / 2; it.y = e.y * TILE + TILE / 2;
+  } else {
+    it.x = t.x * TILE + TILE / 2; it.y = t.y * TILE + TILE / 2;
+  }
+  it.vx = 0; it.vy = 0;
+  Game.floorItems.push(it);
 }
 
 /** Resolve a blood sample the way the player's lab job does. */
@@ -6521,6 +6552,11 @@ function drawMedalsScreen(g) {
 }
 
 function drawSelect(g) {
+  // The two special slots (endless, builder) sit outside the LEVELS array and
+  // are navigated by hand, so an out-of-range cursor is one edit away from
+  // throwing on selDef.blurb. Clamping here keeps the screen drawable whatever
+  // the navigation does.
+  Game.selectIndex = clamp(Game.selectIndex | 0, 0, BUILDER_SLOT());
   g.fillStyle = Paint.title;
   g.fillRect(0, 0, W, H);
 
