@@ -4188,7 +4188,9 @@ function drawPause(g) {
 
 function drawResults(g) {
   const r = Game.result;
-  g.fillStyle = "rgba(8,12,18,.88)"; g.fillRect(0, 0, W, H);
+  // near-opaque: the live HUD and the ward behind were bleeding through the
+  // card and competing with the numbers you are meant to be reading
+  g.fillStyle = "rgba(8,12,18,.95)"; g.fillRect(0, 0, W, H);
 
   if (!r.failed && (r.stars === 3 || r.newBest)) {
     const colors = ["#ffd54a", "#48c3f0", "#4ec97a", "#ff7ab8", "#b58bff"];
@@ -4208,7 +4210,7 @@ function drawResults(g) {
     }
   }
 
-  g.fillStyle = "rgba(255,255,255,.05)";
+  g.fillStyle = "rgba(19,26,37,.96)";
   roundRect(g, W / 2 - 330, 96, 660, 610, 20); g.fill();
   g.strokeStyle = r.failed ? "rgba(228,87,61,.45)" : "rgba(63,182,232,.40)";
   g.lineWidth = 2;
@@ -4260,8 +4262,20 @@ function drawResults(g) {
 
   if (r.targets) {
     text(g, "Targets  " + r.targets.join("  /  "), W / 2, 634, 14, PALETTE.dim, "center", "normal");
+    // The near-miss line is the whole "one more go" hook: knowing you were 180
+    // points off three stars is far more motivating than a bare target list.
+    const next = r.targets[r.stars];
+    if (next !== undefined) {
+      const gap = next - r.score;
+      const label = "\u2605".repeat(r.stars + 1);
+      g.save();
+      g.globalAlpha = 0.75 + 0.25 * Math.sin(performance.now() / 300);
+      text(g, gap > 0 ? gap + " more for " + label : "next up: " + label,
+           W / 2, 658, 16, "#ffd54a", "center");
+      g.restore();
+    }
   }
-  text(g, "E / Enter  continue          R  retry", W / 2, 674, 19, PALETTE.text, "center");
+  text(g, "E / Enter  continue          R  retry", W / 2, 686, 19, PALETTE.text, "center");
 }
 
 
