@@ -903,7 +903,8 @@ function makeWorld(levelDef) {
     world.grid.push(row);
   }
 
-  if (Game.perksActive && Game.perksActive.includes("bays")) addExtraBeds(world, 2);
+  // builder wards grow through the shop, not through campaign perks
+  if (!levelDef.builder && Game.perksActive && Game.perksActive.includes("bays")) addExtraBeds(world, 2);
 
   world.waitSlots = computeWaitSlots(world, Math.max(8, (levelDef.maxWaiting || 0) + 3));
   return world;
@@ -1914,7 +1915,7 @@ function dischargePatient(p) {
   if (pt.ailment === "cardiac") Game.career.cardiac++;
   if (pt.ailment === "mystery") Game.career.mystery++;
   checkLiveAchievements();
-  if (Game.endless && Game.treated % 10 === 0 && Game.lives < 3) {
+  if (Game.endless && Game.treated % 10 === 0 && Game.lives < Game.livesMax) {
     Game.lives++;
     popup(pt.x, pt.y - 92, "LIFE RESTORED", "#ff4d6d", true);
     Sound.play("newbest");
@@ -2266,8 +2267,12 @@ function randomFreeTile(world) {
 }
 
 function updateEvents(dt) {
-  // no events on the two tutorial wards — learn the job before it gets weird
-  if (Game.levelIndex < 2 && !Game.endless) return;
+  // no events on the two tutorial wards — learn the job before it gets weird.
+  // In builder mode they start at wave 3, once the department has some shape
+  // (levelIndex is -2 there, so the campaign guard must not swallow it).
+  if (Game.builderMode) {
+    if (!Game.builder || Game.builder.wave < 3) return;
+  } else if (Game.levelIndex < 2 && !Game.endless) return;
 
   if (Game.event) {
     Game.event.t += dt;
@@ -2405,14 +2410,15 @@ function updatePlay(dt) {
 
 function endBuilderRun() {
   const B = Game.builder;
+  const prevBest = Game.builderBest || 0;      // capture BEFORE maxing, or a tie reads as a record
   B.bestWave = Math.max(B.bestWave || 0, B.wave);
-  Game.builderBest = Math.max(Game.builderBest || 0, B.wave);
+  Game.builderBest = Math.max(prevBest, B.wave);
   Game.career.shifts++;
   const xpGain = Math.round(Game.score / 10) + Game.treated * 5;
   Game.xp += xpGain;
   checkLiveAchievements();
   Game.result = {
-    failed: true, stars: 0, newBest: B.wave >= (Game.builderBest || 0),
+    failed: true, stars: 0, newBest: B.wave > prevBest,
     builder: true, wave: B.wave, xpGain, challenges: null,
     name: "ER Builder — wave " + B.wave, targets: null,
     score: Game.score, treated: Game.treated, lost: Game.lost,
@@ -2549,9 +2555,13 @@ function builderWaveDef(n) {
     blurb: notes.length ? notes.join(" · ") : "Keep the department moving.",
     seed: (0xB0A5 + n * 7919) >>> 0,
     duration: 180,
-    patience: Math.max(48, 94 - n * 4),
-    spawnStart: Math.max(5.4, 13.0 - n * 0.72),
-    spawnEnd: Math.max(4.0, 9.0 - n * 0.55),
+    // Floors re-measured after the staff fixes: with working hires, two
+    // players went 7 waves without a single loss at the old floors, so the
+    // wall never arrived. These keep deep waves tightening until the ward's
+    // own floor space becomes the limit.
+    patience: Math.max(40, 94 - n * 4.5),
+    spawnStart: Math.max(4.4, 13.0 - n * 0.80),
+    spawnEnd: Math.max(3.2, 9.0 - n * 0.62),
     maxWaiting: Math.min(9, 3 + Math.floor(n / 2)),
     ailments: ail,
     stars: null,
@@ -2814,22 +2824,35 @@ function staffPorter(st, dt) {
   }
 }
 
+/** Reset a staffer's work timer whenever the job identity changes, so a
+    half-finished shot cannot count toward a repair (or vice versa). */
+function staffJob(st, key) {
+  if (st.jobKey !== key) { st.jobKey = key; st.workT = 0; }
+}
+
 function staffXrayTech(st, dt) {
   const world = Game.world;
-  // 1. a patient sitting on an X-ray waiting for the machine to be run
-  const waiting = Game.patients.find(q => q.state === "station" && q.station &&
+  // 1. a patient on an X-ray — but only with free hands: shooting a second
+  //    patient while holding an undeveloped film silently destroyed the film,
+  //    leaving its fracture patient permanently untreatable
+  const waiting = !st.item && Game.patients.find(q => q.state === "station" && q.station &&
     q.station.type === "xray" && q.steps[q.step] &&
     q.steps[q.step].k === "atStation" && q.steps[q.step].station === "xray");
   if (waiting) {
     const m = waiting.station;
-    if (m.jammed) { st.workT = 0; }
     if (staffWalk(st, m.x, m.y, dt, true) === "arrived") {
       if (m.jammed) {
+        // the old code zeroed workT every frame the machine was jammed, so the
+        // 2.2s repair never accumulated and the tech stood there forever
+        staffJob(st, "fix" + m.x + "," + m.y);
         if (staffWork(st, 2.2, dt)) { m.jammed = false; m.flash = 0.4; Sound.play("done"); }
-      } else if (staffWork(st, waiting.steps[waiting.step].dur, dt)) {
-        advancePatient(waiting);
-        st.item = makeItem("film");                       // holds the exposed film
-        Sound.play("done");
+      } else {
+        staffJob(st, "shoot" + waiting.id);
+        if (staffWork(st, waiting.steps[waiting.step].dur, dt)) {
+          advancePatient(waiting);
+          st.item = makeItem("film");                     // holds the exposed film
+          Sound.play("done");
+        }
       }
     }
     return;
@@ -2838,6 +2861,7 @@ function staffXrayTech(st, dt) {
   if (st.item && st.item.type === "film") {
     const m = nearestStationOfType(st, "xray");
     if (!m) { st.item = null; return; }
+    staffJob(st, "develop");
     if (staffWalk(st, m.x, m.y, dt, true) === "arrived" && staffWork(st, 1.5, dt)) {
       const img = makeItem("xrayimg");
       const spot = tileOf(st.x, st.y);
@@ -2857,6 +2881,7 @@ function staffLabTech(st, dt) {
   if (st.item && st.item.type === "sample") {
     const lab = nearestStationOfType(st, "lab");
     if (!lab) { st.item = null; return; }
+    staffJob(st, "analyse");
     if (staffWalk(st, lab.x, lab.y, dt, true) === "arrived" && staffWork(st, 2.6, dt)) {
       runLabSample(st.item);
       st.item = null;
@@ -2885,6 +2910,7 @@ function staffClerk(st, dt) {
     (q.type === "supply" || q.type === "medicine") && q.stock === 0);
   if (!empty) { st.item = null; staffIdle(st, dt); return; }
   if (st.item && st.item.type === "crate") {
+    staffJob(st, "restock" + empty.x + "," + empty.y);
     if (staffWalk(st, empty.x, empty.y, dt, true) === "arrived" && staffWork(st, 1.5, dt)) {
       empty.stock = STATIONS[empty.type].stockMax;
       empty.flash = 0.5;
@@ -2896,6 +2922,7 @@ function staffClerk(st, dt) {
   }
   const door = nearestStationOfType(st, "delivery");
   if (!door) { staffIdle(st, dt); return; }
+  staffJob(st, "collect");
   if (staffWalk(st, door.x, door.y, dt, true) === "arrived" && staffWork(st, 1.4, dt)) {
     st.item = makeItem("crate");
     Sound.play("pickup");
@@ -3038,7 +3065,12 @@ function beginWave(n, fresh) {
   Game.time = 0;
   Game.spawnTimer = 3.0;
   Game.scoreShown = Game.score;
-  if (fresh) { Game.score = 0; Game.scoreShown = 0; Game.treated = 0; Game.lost = 0; }
+  if (fresh) {
+    Game.score = 0; Game.scoreShown = 0; Game.treated = 0; Game.lost = 0;
+    // stats behind "in one shift" achievements must not leak in from the
+    // campaign shift played just before this run
+    Game.bestCombo = 0; Game.perfects = 0; Game.clutches = 0;
+  }
   Game.critical = 1;
   Game.byAilment = {};
   Game.combo = 0; Game.comboTimer = 0;
@@ -4645,8 +4677,10 @@ function drawPatient3D(pt) {
   // hid every face in the ward. Walkers face the way they are heading.
   let ry = 0;
   if (pt.state === "walking" && pt.path && pt.path.length) {
+    // findPath waypoints are already pixels; scaling them again pointed every
+    // walk-in at a near-constant garbage direction
     const n = pt.path[0];
-    ry = Math.atan2(n.x * TILE + TILE / 2 - pt.x, n.y * TILE + TILE / 2 - pt.y);
+    ry = Math.atan2(n.x - pt.x, n.y - pt.y);
   }
   drawCharacter3D({
     wx, wz,
@@ -5255,9 +5289,11 @@ function drawHUD(g) {
       text(g, "AMB " + Math.ceil(Game.waveTimer) + "s", 178, 52, 12, "#ff9a6a");
   }
 
-  // --- lives ---
-  for (let i = 0; i < 3; i++) {
-    const hx = 184 + i * 22, hy = 62;
+  // --- lives: as many hearts as this run actually has ---
+  const nHearts = Math.min(6, Game.livesMax || 3);
+  const heartGap = nHearts > 4 ? 16 : 22;      // squeeze so 5-6 still fit the card
+  for (let i = 0; i < nHearts; i++) {
+    const hx = 184 + i * heartGap, hy = 62;
     const alive = i < Game.lives;
     g.save();
     g.translate(hx, hy);
@@ -5294,7 +5330,7 @@ function drawHUD(g) {
 
   // --- targets / best ---
   const bx = W - 330;
-  if (Game.builderMode) {
+  if (Game.builderMode || (lvl && lvl.builder)) {
     hudCard(g, bx, 10, 250, HUD_H - 22, "WAVE " + (Game.builder ? Game.builder.wave : 1));
     text(g, "Best wave  " + (Game.builderBest || "—"), bx + 12, 52, 16, "#6fd3b4");
     text(g, "Treated " + Game.treated + "   Lost " + Game.lost, bx + 12, 74, 12, PALETTE.dim);
@@ -5304,7 +5340,7 @@ function drawHUD(g) {
     text(g, "Treated " + Game.treated + "   Lost " + Game.lost, bx + 12, 74, 12, PALETTE.dim);
   } else {
     hudCard(g, bx, 10, 250, HUD_H - 22, "TARGETS");
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < (lvl.stars ? 3 : 0); i++) {
       const th = lvl.stars[i];
       const hit = Game.score >= th;
       const sx = bx + 14 + i * 78;
