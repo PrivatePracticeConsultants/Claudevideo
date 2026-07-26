@@ -59,22 +59,31 @@ const HUD_H = PLAY_Y;                        // top bar
 const LEGEND_Y = PLAY_Y + PLAY_H;            // bottom legend strip
 const LEGEND_H = H - LEGEND_Y;
 
+// Movement was tuned on the small early wards and never revisited for the big
+// ones. Measured service cost ran ~8s/patient on First Shift but ~20s on Triage,
+// almost all of it walking, which is why the late levels were unwinnable rather
+// than hard. Speeds are up ~20% and sprint is a real tool now (3.6s of charge at
+// 1.55x), which is what makes a 40-tile ward playable inside a 3-minute shift.
 const PLAYER_R = 13;                         // collision radius
-const SPEED_FREE = 205;                      // px/sec, hands empty
-const SPEED_ITEM = 195;                      // carrying an item
-const SPEED_PATIENT = 152;                   // carrying a patient
+const SPEED_FREE = 245;                      // px/sec, hands empty
+const SPEED_ITEM = 235;                      // carrying an item
+const SPEED_PATIENT = 185;                   // carrying a patient
 const REACH = 58;                            // interaction reach (px, tile centres)
 const FACE_DOT = 0.25;                       // how forgiving facing is
 
-const COMBO_WINDOW = 7.0;                    // sec between discharges to keep combo
+const COMBO_WINDOW = 11.0;                   // sec between discharges to keep combo
+// 7.0 was unreachable: the median gap between discharges is 7.7s on the EASIEST
+// level with two players, so chains broke about half the time and the observed
+// peak chain was 2 on every level. 11.0 catches ~12 of 19 gaps on level 1, which
+// makes CHAIN x3+ a thing you can actually play for.
 const COMBO_MAX = 3.0;
 const DEFIB_CHARGE_LIFE = 12.0;              // sec a charged defib stays charged
 const LAB_REVEAL_BONUS = 0.30;               // patience refunded when lab reveals
 
-const SPRINT_MUL = 1.45;                     // speed multiplier while sprinting
+const SPRINT_MUL = 1.55;                     // speed multiplier while sprinting
 const SPRINT_MUL_PATIENT = 1.32;             // ... a little less with a patient
-const STAMINA_MAX = 2.6;                     // sec of sprint at full charge
-const STAMINA_REGEN = 0.62;                  // charge per sec while not sprinting
+const STAMINA_MAX = 3.6;                     // sec of sprint at full charge
+const STAMINA_REGEN = 0.80;                  // charge per sec while not sprinting
 const PERFECT_AT = 0.70;                     // patience left for a PERFECT bonus
 const CLUTCH_AT = 0.16;                      // patience left for a CLUTCH bonus
 const CLUTCH_BONUS = 90;
@@ -473,7 +482,7 @@ const LEVELS = [
     spawnStart: 11.0, spawnEnd: 7.5,
     maxWaiting: 3,
     ailments: ["cut", "infection"],
-    stars: [700, 1400, 2100],
+    stars: [1050, 1900, 2800],
     restock: false, jams: false, flatline: false,
     map: [
       "################################",
@@ -499,11 +508,11 @@ const LEVELS = [
     blurb: "Fractures arrive. The X-ray and the cast bench are on opposite sides.",
     seed: 24601,
     duration: 180,
-    patience: 64,
-    spawnStart: 9.5, spawnEnd: 5.8,
+    patience: 70,
+    spawnStart: 10.0, spawnEnd: 6.8,
     maxWaiting: 4,
     ailments: ["cut", "infection", "fracture"],
-    stars: [800, 1500, 2200],
+    stars: [650, 1150, 1700],
     restock: false, jams: false, flatline: false,
     map: [
       "################################",
@@ -529,11 +538,11 @@ const LEVELS = [
     blurb: "Cardiac cases. One defibrillator for the whole floor — and the shelves run dry.",
     seed: 90210,
     duration: 180,
-    patience: 64,
-    spawnStart: 9.0, spawnEnd: 5.4,
+    patience: 96,
+    spawnStart: 9.2, spawnEnd: 6.2,
     maxWaiting: 5,
     ailments: ["cut", "infection", "fracture", "cardiac"],
-    stars: [800, 1600, 2400],
+    stars: [550, 1050, 1550],
     restock: true, jams: false, flatline: true,
     map: [
       "################################",
@@ -559,11 +568,11 @@ const LEVELS = [
     blurb: "Mystery cases need the lab. The X-ray jams. Work both ends of the corridor.",
     seed: 55555,
     duration: 180,
-    patience: 52,
-    spawnStart: 8.0, spawnEnd: 4.8,
+    patience: 58,
+    spawnStart: 8.6, spawnEnd: 5.8,
     maxWaiting: 5,
     ailments: ["cut", "infection", "fracture", "cardiac", "mystery"],
-    stars: [900, 1800, 2700],
+    stars: [1300, 3400, 4950],
     restock: true, jams: true, flatline: true,
     map: [
       "################################",
@@ -589,11 +598,11 @@ const LEVELS = [
     blurb: "Everything at once, everything far apart. Two coordinated medics only.",
     seed: 777001,
     duration: 180,
-    patience: 48,
-    spawnStart: 7.8, spawnEnd: 4.7,
+    patience: 64,
+    spawnStart: 8.0, spawnEnd: 5.4,
     maxWaiting: 6,
     ailments: ["cut", "infection", "fracture", "cardiac", "mystery"],
-    stars: [1000, 2100, 3100],
+    stars: [1950, 3350, 4900],
     restock: true, jams: true, flatline: true,
     map: [
       "################################",
@@ -619,11 +628,11 @@ const LEVELS = [
     blurb: "Two wards, one crossing. Whoever holds the middle holds the shift.",
     seed: 61001,
     duration: 180,
-    patience: 48,
-    spawnStart: 7.6, spawnEnd: 4.6,
+    patience: 61,
+    spawnStart: 7.6, spawnEnd: 5.1,
     maxWaiting: 6,
     ailments: ["cut", "infection", "fracture", "cardiac", "mystery"],
-    stars: [1600, 2900, 4200],
+    stars: [1200, 2100, 3050],
     restock: true, jams: true, flatline: true,
     map: [
       "################################",
@@ -649,11 +658,11 @@ const LEVELS = [
     blurb: "Winding corridors and dead ends. Learn the routes or lose the run.",
     seed: 71002,
     duration: 180,
-    patience: 46,
-    spawnStart: 7.4, spawnEnd: 4.5,
+    patience: 72,
+    spawnStart: 7.2, spawnEnd: 4.9,
     maxWaiting: 6,
     ailments: ["cut", "infection", "fracture", "cardiac", "mystery"],
-    stars: [900, 1600, 2300],
+    stars: [1600, 2750, 4050],
     restock: true, jams: true, flatline: true,
     map: [
       "################################",
@@ -679,11 +688,11 @@ const LEVELS = [
     blurb: "Sixteen beds and no excuses. Volume is the enemy here.",
     seed: 81003,
     duration: 180,
-    patience: 44,
-    spawnStart: 7.2, spawnEnd: 4.4,
+    patience: 80,
+    spawnStart: 6.9, spawnEnd: 4.7,
     maxWaiting: 7,
     ailments: ["cut", "infection", "fracture", "cardiac", "mystery"],
-    stars: [1000, 1800, 2600],
+    stars: [1500, 2600, 3750],
     restock: true, jams: true, flatline: true,
     map: [
       "################################",
@@ -709,11 +718,11 @@ const LEVELS = [
     blurb: "Compact and relentless. Everything is close, nothing is calm.",
     seed: 91004,
     duration: 180,
-    patience: 42,
-    spawnStart: 7.0, spawnEnd: 4.3,
+    patience: 62,
+    spawnStart: 6.6, spawnEnd: 4.5,
     maxWaiting: 7,
     ailments: ["cut", "infection", "fracture", "cardiac", "mystery"],
-    stars: [1900, 3400, 5000],
+    stars: [1600, 2750, 4000],
     restock: true, jams: true, flatline: true,
     map: [
       "################################",
@@ -739,11 +748,11 @@ const LEVELS = [
     blurb: "Four wings, one hub, every machine as far away as it can be.",
     seed: 101005,
     duration: 180,
-    patience: 40,
-    spawnStart: 6.8, spawnEnd: 4.2,
+    patience: 64,
+    spawnStart: 6.3, spawnEnd: 4.3,
     maxWaiting: 8,
     ailments: ["cut", "infection", "fracture", "cardiac", "mystery"],
-    stars: [1150, 2100, 3000],
+    stars: [1450, 2450, 3600],
     restock: true, jams: true, flatline: true,
     map: [
       "################################",
@@ -777,7 +786,7 @@ const ENDLESS = {
   spawnStart: 8.5, spawnEnd: 3.2,
   maxWaiting: 8,
   ailments: ["cut", "infection", "fracture", "cardiac", "mystery"],
-  stars: [2000, 4000, 6500],
+  stars: [1800, 3600, 6000],
   restock: true, jams: true, flatline: true,
   map: [
     "################################",
@@ -1258,7 +1267,12 @@ function facingPatient(p) {
     const vx = pt.x - p.x, vy = pt.y - p.y;
     const d = Math.hypot(vx, vy);
     if (d > 46) continue;
-    const dot = d < 1 ? 1 : (vx / d) * p.dx + (vy / d) * p.dy;
+    // Inside your own body radius, "which way am I facing" is meaningless: a
+    // sub-pixel offset flips the dot product and the patient becomes
+    // impossible to pick up while you stand on top of them. The old guard was
+    // d < 1, which is so tight it almost never fired — a medic standing 1px
+    // from a patient facing the wrong way could be stuck indefinitely.
+    const dot = d < PLAYER_R ? 1 : (vx / d) * p.dx + (vy / d) * p.dy;
     if (dot < 0) continue;
     const score = dot * 2 - d / 46;
     if (score > bestScore) { bestScore = score; best = pt; }
@@ -1978,10 +1992,13 @@ function updateNurse(dt) {
     nu.comfort += dt;
     if (nu.comfort >= 1.3) {
       const pt = nu.target;
-      pt.patience = Math.min(pt.patienceMax, pt.patience + pt.patienceMax * 0.28);
+      // 0.28 every 3.5s out-healed the 0.62/s drain about threefold, which made
+      // patience stop mattering entirely; 0.18 every 5s buys back roughly one
+      // patient's worth of time, so she helps without playing the game for you
+      pt.patience = Math.min(pt.patienceMax, pt.patience + pt.patienceMax * 0.18);
       popup(pt.x, pt.y - 30, "+ \u2665", "#ff8fa8", false);
       Sound.play("place");
-      nu.comfort = 0; nu.cooldown = 3.5; nu.target = null;
+      nu.comfort = 0; nu.cooldown = 5.0; nu.target = null;
     }
   }
 }
