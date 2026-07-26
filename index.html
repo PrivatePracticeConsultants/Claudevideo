@@ -489,18 +489,24 @@ const CONTROLS = [
    comboBonus extra seconds on the chain window
    calmR      radius in pixels within which waiting patients fret more slowly */
 const TRAITS = {
-  quickfeet: { name: "Quick Feet",    blurb: "Fastest on her feet, first to run out of puff.",
-               speedMul: 1.085, staminaMul: 0.85 },
+  /* The penalty side of every trade is HALF the size of the bonus side, and
+     that is deliberate. The first tuning used symmetric trades, and an A/B on
+     the builder (same bots, traits neutralised vs active) ended at wave 10
+     against wave 7: over a long run a few percent of net-negative throughput
+     compounds into a death spiral, so "flavour" quietly became a 30% survival
+     hit. Traits are meant to colour a pairing, not to be a difficulty setting. */
+  quickfeet: { name: "Quick Feet",    blurb: "Fastest on her feet, a little less puff.",
+               speedMul: 1.08, staminaMul: 0.92 },
   steady:    { name: "Steady Hands",  blurb: "Every procedure a little quicker; no hurry between them.",
-               workMul: 0.88, speedMul: 0.955 },
+               workMul: 0.90, speedMul: 0.98 },
   reader:    { name: "Chart Reader",  blurb: "Bloods come back fast. Mystery cases are his.",
-               labMul: 0.70, speedMul: 0.96 },
+               labMul: 0.70, speedMul: 0.985 },
   puff:      { name: "Double Puff",   blurb: "Sprints further than anyone, works a touch slower.",
-               staminaMul: 1.40, workMul: 1.07 },
+               staminaMul: 1.35, workMul: 1.03 },
   sunshine:  { name: "Sunshine",      blurb: "People waiting near her stay calm.",
-               calmR: 150, calmMul: 0.86, workMul: 1.05 },
+               calmR: 150, calmMul: 0.86, workMul: 1.02 },
   catnap:    { name: "Cat-Napper",    blurb: "Holds a combo chain together longer than she should.",
-               comboBonus: 2.2, speedMul: 0.94 }
+               comboBonus: 2.2, speedMul: 0.97 }
 };
 
 /* Each medic owns a scrub colour. Six medics in the same cyan scrubs are one
@@ -629,10 +635,15 @@ const Pads = {
         if (x > this.DEADZONE) want[ctrl.right] = true;
         if (y < -this.DEADZONE) want[ctrl.up] = true;
         if (y > this.DEADZONE) want[ctrl.down] = true;
-        // menu verbs, so a pad alone can get through the front end
+        // Menu verbs, so a pad alone can get through the front end. Gated off
+        // the play screen: B doubles as sprint in the ward, and without the
+        // gate every sprint press also asserted Escape — pausing the game the
+        // moment you tried to run. Start still pauses from anywhere.
         if (down(9)) want.Escape = true;          // start
-        if (down(0)) want.Enter = true;           // A also confirms
-        if (down(1)) want.Escape = true;          // B also backs out
+        if (Game.screen !== "play") {
+          if (down(0)) want.Enter = true;         // A confirms
+          if (down(1)) want.Escape = true;        // B backs out
+        }
       }
       const had = this.asserted[slot];
       for (const code in want)
@@ -6015,8 +6026,14 @@ function drawCharacter3D(o) {
   // --- head: oversized, the plush proportion ------------------------------
   const HY = 0.845;
   p = P(0, HY, 0);
+  /* Under a hijab the head shrinks a touch. Not for looks — the wrap's shell is
+     nearly concentric with the head sphere, and at plush scale the two surfaces
+     sit close enough to z-fight, which rendered as bare arcs "leaking" through
+     the fabric on the merch sheets. Real clearance is the only reliable cure;
+     the face features float proud of the head anyway, so nothing else moves. */
+  const hs = look.acc === "hijab" ? 0.945 : 1;
   drawMesh(shadowPass ? MESH.sphereLo : MESH.sphere, p[0], p[1], p[2], ry,
-           0.375*S, 0.365*S, 0.365*S, skin);
+           0.375*S*hs, 0.365*S*hs, 0.365*S*hs, skin);
   if (shadowPass) { setFuzz(0); return; }
 
   // soft ears, sewn on: cheap geometry, and the single biggest cuteness win
@@ -6110,8 +6127,8 @@ function drawCharacter3D(o) {
     // the shell only a hair bigger than the head and the cheek frames sitting
     // forward of the cheeks, so the fabric closed over the face and she read as
     // a face behind frosted glass rather than a face being framed.
-    p = P(0, HY + 0.030, -0.175);
-    drawMesh(MESH.sphere, p[0], p[1], p[2], ry, 0.412*S, 0.408*S, 0.335*S, hc);
+    p = P(0, HY + 0.030, -0.170);
+    drawMesh(MESH.sphere, p[0], p[1], p[2], ry, 0.425*S, 0.420*S, 0.345*S, hc);
     // narrow side panels, set back level with the ears
     for (const sx of [-1, 1]) {
       p = P(sx * 0.330, HY - 0.075, -0.045);
@@ -6119,10 +6136,17 @@ function drawCharacter3D(o) {
     }
     // crown, plus a forehead band so no scalp shows above the wrap: the shell is
     // set back far enough that the top of the head peeked out in front of it
-    p = P(0, HY + 0.215, -0.055);
-    drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.320*S, 0.155*S, 0.285*S, hc);
-    p = P(0, HY + 0.150, 0.100);
-    drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.330*S, 0.170*S, 0.290*S, hc);
+    /* The crown and the forehead band must OVERLAP each other and the shell:
+       they are the same colour, so overlap is invisible, but any gap between
+       them lets the head sphere surface through as bare arcs across the wrap —
+       which is exactly what the first merch renders showed. */
+    /* One dome over the entire top half, rather than a crown piece and a band
+       trying to meet: two ellipsoids can cover every AXIS extent and still leave
+       a bare corner on the diagonal, which kept surfacing as a skin arc no
+       matter how the radii were nudged. Its z reach stays under 0.30 so the
+       brow and eyes (proud at z 0.33) are never swallowed. */
+    p = P(0, HY + 0.130, -0.010);
+    drawMesh(MESH.dome, p[0], p[1], p[2], ry, 0.400*S, 0.310*S, 0.300*S, hc);
     // and a drape that gathers at the neck rather than across the mouth
     p = P(0, HY - 0.430, -0.040);
     drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.255*S, 0.170*S, 0.225*S, hc);
