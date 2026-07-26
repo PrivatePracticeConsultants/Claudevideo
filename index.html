@@ -15,16 +15,18 @@
     position: absolute; inset: 0;
     display: flex; align-items: center; justify-content: center;
   }
-  canvas {
+  #stack { position: relative; }
+  #stack canvas {
+    position: absolute; left: 0; top: 0;
     image-rendering: auto;
-    background: #10161f;
-    box-shadow: 0 0 60px rgba(0,0,0,.8);
     border-radius: 6px;
   }
+  #gl { background: #0b1119; box-shadow: 0 0 60px rgba(0,0,0,.8); }
+  #game { background: transparent; }
 </style>
 </head>
 <body>
-<div id="wrap"><canvas id="game" width="1280" height="800"></canvas></div>
+<div id="wrap"><div id="stack"><canvas id="gl" width="1280" height="800"></canvas><canvas id="game" width="1280" height="800"></canvas></div></div>
 <script>
 "use strict";
 /* =====================================================================
@@ -127,23 +129,6 @@ function roundRect(ctx, x, y, w, h, r) {
   ctx.arcTo(x + w, y + h, x, y + h, rr);
   ctx.arcTo(x, y + h, x, y, rr);
   ctx.arcTo(x, y, x + w, y, rr);
-  ctx.closePath();
-}
-
-/** Rounded rect with per-corner radii [tl, tr, br, bl] — lets wall blobs
-    round only their convex corners so clusters read as one soft shape. */
-function roundRect4(ctx, x, y, w, h, r) {
-  const [tl, tr, br, bl] = r;
-  ctx.beginPath();
-  ctx.moveTo(x + tl, y);
-  ctx.lineTo(x + w - tr, y);
-  if (tr) ctx.arcTo(x + w, y, x + w, y + tr, tr);
-  ctx.lineTo(x + w, y + h - br);
-  if (br) ctx.arcTo(x + w, y + h, x + w - br, y + h, br);
-  ctx.lineTo(x + bl, y + h);
-  if (bl) ctx.arcTo(x, y + h, x, y + h - bl, bl);
-  ctx.lineTo(x, y + tl);
-  if (tl) ctx.arcTo(x, y, x + tl, y, tl);
   ctx.closePath();
 }
 
@@ -2064,6 +2049,1298 @@ function endLevel() {
   Sound.play(failed ? "error" : (newBest ? "newbest" : "levelend"));
 }
 
+/* =====================================================================
+   10.5  3D ENGINE  (WebGL2, written from scratch — no libraries)
+
+   The simulation is untouched: it still runs on the 32x16 pixel grid.
+   Sim (x, y) maps to world (X, Z) at one tile per unit; +Y is up.
+   ===================================================================== */
+
+const T2W = 1 / TILE;                 // sim pixels -> world units
+const WALL_Y = 1.15;                  // wall height in world units
+const LIGHT_DIR = [-0.42, -1.0, -0.38];
+
+/* ---------------- minimal mat4 / vec3 ---------------- */
+
+function m4() { return new Float32Array(16); }
+function m4Identity(o) {
+  o[0]=1;o[1]=0;o[2]=0;o[3]=0; o[4]=0;o[5]=1;o[6]=0;o[7]=0;
+  o[8]=0;o[9]=0;o[10]=1;o[11]=0; o[12]=0;o[13]=0;o[14]=0;o[15]=1; return o;
+}
+/** out = a * b  (column-major, so `b` is applied first) */
+function m4Mul(o, a, b) {
+  for (let c = 0; c < 4; c++) {
+    const b0 = b[c*4], b1 = b[c*4+1], b2 = b[c*4+2], b3 = b[c*4+3];
+    o[c*4]   = a[0]*b0 + a[4]*b1 + a[8]*b2  + a[12]*b3;
+    o[c*4+1] = a[1]*b0 + a[5]*b1 + a[9]*b2  + a[13]*b3;
+    o[c*4+2] = a[2]*b0 + a[6]*b1 + a[10]*b2 + a[14]*b3;
+    o[c*4+3] = a[3]*b0 + a[7]*b1 + a[11]*b2 + a[15]*b3;
+  }
+  return o;
+}
+function m4Perspective(o, fovy, aspect, near, far) {
+  const f = 1 / Math.tan(fovy / 2), nf = 1 / (near - far);
+  o.fill(0);
+  o[0] = f / aspect; o[5] = f; o[10] = (far + near) * nf;
+  o[11] = -1; o[14] = 2 * far * near * nf;
+  return o;
+}
+function m4Ortho(o, l, r, b, t, n, f) {
+  o.fill(0);
+  o[0] = 2/(r-l); o[5] = 2/(t-b); o[10] = -2/(f-n); o[15] = 1;
+  o[12] = -(r+l)/(r-l); o[13] = -(t+b)/(t-b); o[14] = -(f+n)/(f-n);
+  return o;
+}
+function m4LookAt(o, ex, ey, ez, cx, cy, cz, ux, uy, uz) {
+  let zx = ex-cx, zy = ey-cy, zz = ez-cz;
+  let l = Math.hypot(zx, zy, zz) || 1; zx/=l; zy/=l; zz/=l;
+  let xx = uy*zz - uz*zy, xy = uz*zx - ux*zz, xz = ux*zy - uy*zx;
+  l = Math.hypot(xx, xy, xz) || 1; xx/=l; xy/=l; xz/=l;
+  const yx = zy*xz - zz*xy, yy = zz*xx - zx*xz, yz = zx*xy - zy*xx;
+  o[0]=xx; o[1]=yx; o[2]=zx; o[3]=0;
+  o[4]=xy; o[5]=yy; o[6]=zy; o[7]=0;
+  o[8]=xz; o[9]=yz; o[10]=zz; o[11]=0;
+  o[12]=-(xx*ex+xy*ey+xz*ez);
+  o[13]=-(yx*ex+yy*ey+yz*ez);
+  o[14]=-(zx*ex+zy*ey+zz*ez);
+  o[15]=1;
+  return o;
+}
+/** Translate * RotateY * Scale — all our objects need only this. */
+function m4TRS(o, px, py, pz, ry, sx, sy, sz) {
+  const c = Math.cos(ry), s = Math.sin(ry);
+  o[0]=c*sx;  o[1]=0;    o[2]=-s*sx; o[3]=0;
+  o[4]=0;     o[5]=sy;   o[6]=0;     o[7]=0;
+  o[8]=s*sz;  o[9]=0;    o[10]=c*sz; o[11]=0;
+  o[12]=px;   o[13]=py;  o[14]=pz;   o[15]=1;
+  return o;
+}
+/** Normal matrix for a TRS with only Y rotation + scale: inverse-transpose. */
+function m3NormalFromTRS(o, ry, sx, sy, sz) {
+  const c = Math.cos(ry), s = Math.sin(ry);
+  const ix = 1/(sx||1), iy = 1/(sy||1), iz = 1/(sz||1);
+  o[0]=c*ix; o[1]=0;  o[2]=-s*ix;
+  o[3]=0;    o[4]=iy; o[5]=0;
+  o[6]=s*iz; o[7]=0;  o[8]=c*iz;
+  return o;
+}
+
+/* ---------------- colour helper ---------------- */
+
+const _colCache = Object.create(null);
+function rgb(hex) {
+  let v = _colCache[hex];
+  if (v) return v;
+  const n = parseInt(hex.slice(1), 16);
+  v = [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
+  _colCache[hex] = v;
+  return v;
+}
+
+/* ---------------- mesh builder ---------------- */
+
+function MB() { this.p = []; this.n = []; this.c = []; this.i = []; }
+
+MB.prototype.vert = function (x, y, z, nx, ny, nz, col) {
+  this.p.push(x, y, z);
+  this.n.push(nx, ny, nz);
+  this.c.push(col[0], col[1], col[2]);
+  return this.p.length / 3 - 1;
+};
+MB.prototype.tri = function (a, b, c) { this.i.push(a, b, c); };
+/** Emit a quad with the winding that makes its normal face `nrm`. */
+MB.prototype.quad = function (a, b, c, d, nx, ny, nz) {
+  const p = this.p;
+  const ux = p[b*3]-p[a*3], uy = p[b*3+1]-p[a*3+1], uz = p[b*3+2]-p[a*3+2];
+  const vx = p[d*3]-p[a*3], vy = p[d*3+1]-p[a*3+1], vz = p[d*3+2]-p[a*3+2];
+  const cx2 = uy*vz - uz*vy, cy2 = uz*vx - ux*vz, cz2 = ux*vy - uy*vx;
+  if (cx2*nx + cy2*ny + cz2*nz >= 0) { this.tri(a,b,c); this.tri(a,c,d); }
+  else { this.tri(a,d,c); this.tri(a,c,b); }
+};
+
+/** Ellipsoid. segU around Y, segV pole to pole. */
+function mbSphere(mb, cx, cy, cz, rx, ry, rz, col, segU, segV) {
+  segU = segU || 14; segV = segV || 10;
+  const base = mb.p.length / 3;
+  for (let j = 0; j <= segV; j++) {
+    const v = j / segV * Math.PI, sv = Math.sin(v), cv = Math.cos(v);
+    for (let i = 0; i <= segU; i++) {
+      const u = i / segU * Math.PI * 2, su = Math.sin(u), cu = Math.cos(u);
+      const nx = sv * cu, ny = cv, nz = sv * su;
+      // normal of an ellipsoid is the gradient, not the position direction
+      let gx = nx / rx, gy = ny / ry, gz = nz / rz;
+      const gl2 = Math.hypot(gx, gy, gz) || 1;
+      mb.vert(cx + nx*rx, cy + ny*ry, cz + nz*rz, gx/gl2, gy/gl2, gz/gl2, col);
+    }
+  }
+  for (let j = 0; j < segV; j++) {
+    for (let i = 0; i < segU; i++) {
+      const a = base + j*(segU+1) + i, b = a + 1, c = a + segU + 1, d = c + 1;
+      mb.tri(a, c, b); mb.tri(b, c, d);
+    }
+  }
+}
+
+/** Hemisphere (upper half), used for scrub caps. */
+function mbDome(mb, cx, cy, cz, rx, ry, rz, col, segU, segV) {
+  segU = segU || 14; segV = segV || 6;
+  const base = mb.p.length / 3;
+  for (let j = 0; j <= segV; j++) {
+    const v = j / segV * (Math.PI / 2), sv = Math.cos(v), cv = Math.sin(v);
+    for (let i = 0; i <= segU; i++) {
+      const u = i / segU * Math.PI * 2, su = Math.sin(u), cu = Math.cos(u);
+      const nx = sv * cu, ny = cv, nz = sv * su;
+      let gx = nx / rx, gy = ny / ry, gz = nz / rz;
+      const gl2 = Math.hypot(gx, gy, gz) || 1;
+      mb.vert(cx + nx*rx, cy + ny*ry, cz + nz*rz, gx/gl2, gy/gl2, gz/gl2, col);
+    }
+  }
+  for (let j = 0; j < segV; j++) {
+    for (let i = 0; i < segU; i++) {
+      const a = base + j*(segU+1) + i, b = a + 1, c = a + segU + 1, d = c + 1;
+      mb.tri(a, c, b); mb.tri(b, c, d);
+    }
+  }
+}
+
+/** Cylinder along Y with optional caps. */
+function mbCylinder(mb, cx, cy, cz, rTop, rBot, h, col, seg, caps) {
+  seg = seg || 16;
+  const y0 = cy - h / 2, y1 = cy + h / 2;
+  const base = mb.p.length / 3;
+  const slope = (rBot - rTop) / h;
+  for (let i = 0; i <= seg; i++) {
+    const u = i / seg * Math.PI * 2, su = Math.sin(u), cu = Math.cos(u);
+    let nx = cu, ny = slope, nz = su;
+    const l = Math.hypot(nx, ny, nz) || 1;
+    mb.vert(cx + cu*rBot, y0, cz + su*rBot, nx/l, ny/l, nz/l, col);
+    mb.vert(cx + cu*rTop, y1, cz + su*rTop, nx/l, ny/l, nz/l, col);
+  }
+  for (let i = 0; i < seg; i++) {
+    const a = base + i*2, b = a + 1, c = a + 2, d = a + 3;
+    mb.tri(a, c, b); mb.tri(b, c, d);
+  }
+  if (caps !== false) {
+    const tc = mb.vert(cx, y1, cz, 0, 1, 0, col);
+    for (let i = 0; i < seg; i++) {
+      const u0 = i/seg*Math.PI*2, u1 = (i+1)/seg*Math.PI*2;
+      const p0 = mb.vert(cx + Math.cos(u0)*rTop, y1, cz + Math.sin(u0)*rTop, 0,1,0, col);
+      const p1 = mb.vert(cx + Math.cos(u1)*rTop, y1, cz + Math.sin(u1)*rTop, 0,1,0, col);
+      mb.tri(tc, p0, p1);
+    }
+    const bc = mb.vert(cx, y0, cz, 0, -1, 0, col);
+    for (let i = 0; i < seg; i++) {
+      const u0 = i/seg*Math.PI*2, u1 = (i+1)/seg*Math.PI*2;
+      const p0 = mb.vert(cx + Math.cos(u0)*rBot, y0, cz + Math.sin(u0)*rBot, 0,-1,0, col);
+      const p1 = mb.vert(cx + Math.cos(u1)*rBot, y0, cz + Math.sin(u1)*rBot, 0,-1,0, col);
+      mb.tri(bc, p1, p0);
+    }
+  }
+}
+
+/**
+ * Rounded box, assembled from 6 flat faces, 12 quarter-cylinder edges and
+ * 8 sphere octants. Seams weld exactly because every part shares the same
+ * angular parameterisation.
+ */
+function mbRoundedBox(mb, cx, cy, cz, hx, hy, hz, r, col, seg) {
+  seg = seg || 3;
+  r = Math.min(r, hx * 0.999, hy * 0.999, hz * 0.999);
+  const ax = hx - r, ay = hy - r, az = hz - r;
+
+  // --- 6 flat faces ---
+  const F = [
+    [[1,0,0],[0,1,0],[0,0,1], hx, ay, az],
+    [[-1,0,0],[0,0,1],[0,1,0], hx, az, ay],
+    [[0,1,0],[0,0,1],[1,0,0], hy, az, ax],
+    [[0,-1,0],[1,0,0],[0,0,1], hy, ax, az],
+    [[0,0,1],[1,0,0],[0,1,0], hz, ax, ay],
+    [[0,0,-1],[0,1,0],[1,0,0], hz, ay, ax]
+  ];
+  for (const [n, u, v, off, hu, hv] of F) {
+    const ox = cx + n[0]*off, oy = cy + n[1]*off, oz = cz + n[2]*off;
+    const idx = [];
+    for (const [su, sv] of [[-1,-1],[1,-1],[1,1],[-1,1]]) {
+      idx.push(mb.vert(
+        ox + u[0]*hu*su + v[0]*hv*sv,
+        oy + u[1]*hu*su + v[1]*hv*sv,
+        oz + u[2]*hu*su + v[2]*hv*sv,
+        n[0], n[1], n[2], col));
+    }
+    mb.quad(idx[0], idx[1], idx[2], idx[3], n[0], n[1], n[2]);
+  }
+
+  // --- 12 edges (quarter cylinders) ---
+  // axis 0=X (arc in YZ), 1=Y (arc in ZX), 2=Z (arc in XY)
+  const edges = [
+    [0, 'y', 'z'], [1, 'z', 'x'], [2, 'x', 'y']
+  ];
+  for (const [axis, p1, p2] of edges) {
+    const half = axis === 0 ? ax : axis === 1 ? ay : az;
+    for (const s1 of [-1, 1]) for (const s2 of [-1, 1]) {
+      const ring = [];
+      for (let k = 0; k <= seg; k++) {
+        const a = k / seg * Math.PI / 2, ca = Math.cos(a), sa = Math.sin(a);
+        const n = { x: 0, y: 0, z: 0 };
+        n[p1] = s1 * ca; n[p2] = s2 * sa;
+        const cOff = { x: 0, y: 0, z: 0 };
+        cOff[p1] = s1 * (axis === 0 ? (p1 === 'y' ? ay : az) : axis === 1 ? (p1 === 'z' ? az : ax) : (p1 === 'x' ? ax : ay));
+        cOff[p2] = s2 * (axis === 0 ? (p2 === 'z' ? az : ay) : axis === 1 ? (p2 === 'x' ? ax : az) : (p2 === 'y' ? ay : ax));
+        const lo = { x: cx, y: cy, z: cz }, hi = { x: cx, y: cy, z: cz };
+        const axKey = axis === 0 ? 'x' : axis === 1 ? 'y' : 'z';
+        lo[axKey] -= half; hi[axKey] += half;
+        const a0 = mb.vert(lo.x + cOff.x + n.x*r, lo.y + cOff.y + n.y*r, lo.z + cOff.z + n.z*r, n.x, n.y, n.z, col);
+        const a1 = mb.vert(hi.x + cOff.x + n.x*r, hi.y + cOff.y + n.y*r, hi.z + cOff.z + n.z*r, n.x, n.y, n.z, col);
+        ring.push([a0, a1, n]);
+      }
+      for (let k = 0; k < seg; k++) {
+        const [q0, q1, n] = ring[k], [w0, w1] = ring[k + 1];
+        mb.quad(q0, q1, w1, w0, n.x, n.y, n.z);
+      }
+    }
+  }
+
+  // --- 8 corners (sphere octants) ---
+  for (const sx of [-1, 1]) for (const sy of [-1, 1]) for (const sz of [-1, 1]) {
+    const ox = cx + sx*ax, oy = cy + sy*ay, oz = cz + sz*az;
+    const grid = [];
+    for (let j = 0; j <= seg; j++) {
+      const el = j / seg * Math.PI / 2, ce = Math.cos(el), se = Math.sin(el);
+      const row = [];
+      for (let i = 0; i <= seg; i++) {
+        const az2 = i / seg * Math.PI / 2;
+        const nx = sx * ce * Math.cos(az2), ny = sy * se, nz = sz * ce * Math.sin(az2);
+        row.push(mb.vert(ox + nx*r, oy + ny*r, oz + nz*r, nx, ny, nz, col));
+      }
+      grid.push(row);
+    }
+    for (let j = 0; j < seg; j++) {
+      for (let i = 0; i < seg; i++) {
+        const p = mb.p;
+        const a = grid[j][i], b = grid[j][i+1], c = grid[j+1][i], d = grid[j+1][i+1];
+        // outward normal at the patch centre decides winding
+        const nx = p[a*3] - ox, ny = p[a*3+1] - oy, nz = p[a*3+2] - oz;
+        mb.quad(a, b, d, c, nx, ny, nz);
+      }
+    }
+  }
+}
+
+/** Flat quad from four explicit corners. */
+function mbQuad(mb, pts, col, nx, ny, nz) {
+  const idx = pts.map(p => mb.vert(p[0], p[1], p[2], nx, ny, nz, col));
+  mb.quad(idx[0], idx[1], idx[2], idx[3], nx, ny, nz);
+}
+
+/** Torus in the XY plane (used for spectacles). */
+function mbTorus(mb, cx, cy, cz, R, r, col, segU, segV) {
+  segU = segU || 16; segV = segV || 8;
+  const base = mb.p.length / 3;
+  for (let i = 0; i <= segU; i++) {
+    const u = i / segU * Math.PI * 2, cu = Math.cos(u), su = Math.sin(u);
+    for (let j = 0; j <= segV; j++) {
+      const v = j / segV * Math.PI * 2, cv = Math.cos(v), sv = Math.sin(v);
+      const nx = cu * cv, ny = su * cv, nz = sv;
+      mb.vert(cx + (R + r*cv)*cu, cy + (R + r*cv)*su, cz + r*sv, nx, ny, nz, col);
+    }
+  }
+  for (let i = 0; i < segU; i++) {
+    for (let j = 0; j < segV; j++) {
+      const a = base + i*(segV+1) + j, b = a + segV + 1, c = a + 1, d = b + 1;
+      mb.tri(a, b, c); mb.tri(c, b, d);
+    }
+  }
+}
+
+/* ---------------- GL core ---------------- */
+
+const GL = {
+  gl: null, ok: false,
+  prog: null, shadowProg: null,
+  shadowFB: null, shadowTex: null, SHADOW_RES: 2048,
+  view: m4(), proj: m4(), viewProj: m4(), lightVP: m4(),
+  _model: m4(), _mvp: m4(), _nrm: new Float32Array(9),
+  camEye: [16, 18, 26]
+};
+
+function glCompile(gl, type, src) {
+  const sh = gl.createShader(type);
+  gl.shaderSource(sh, src);
+  gl.compileShader(sh);
+  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+    throw new Error("shader: " + gl.getShaderInfoLog(sh));
+  }
+  return sh;
+}
+function glProgram(gl, vs, fs) {
+  const p = gl.createProgram();
+  gl.attachShader(p, glCompile(gl, gl.VERTEX_SHADER, vs));
+  gl.attachShader(p, glCompile(gl, gl.FRAGMENT_SHADER, fs));
+  gl.bindAttribLocation(p, 0, "aPos");
+  gl.bindAttribLocation(p, 1, "aNrm");
+  gl.bindAttribLocation(p, 2, "aCol");
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+    throw new Error("link: " + gl.getProgramInfoLog(p));
+  }
+  // cache uniform locations
+  p.u = {};
+  const n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
+  for (let i = 0; i < n; i++) {
+    const info = gl.getActiveUniform(p, i);
+    p.u[info.name.replace("[0]", "")] = gl.getUniformLocation(p, info.name);
+  }
+  return p;
+}
+
+/** Upload a MB into GPU buffers. */
+function glMesh(mb) {
+  const gl = GL.gl;
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+  const mk = (data, loc, size) => {
+    const b = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, b);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(data), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(loc);
+    gl.vertexAttribPointer(loc, size, gl.FLOAT, false, 0, 0);
+    return b;
+  };
+  mk(mb.p, 0, 3); mk(mb.n, 1, 3); mk(mb.c, 2, 3);
+  const ib = gl.createBuffer();
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib);
+  const big = mb.p.length / 3 > 65535;
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,
+    big ? new Uint32Array(mb.i) : new Uint16Array(mb.i), gl.STATIC_DRAW);
+  gl.bindVertexArray(null);
+  return { vao, count: mb.i.length, type: big ? gl.UNSIGNED_INT : gl.UNSIGNED_SHORT };
+}
+
+/* ---------------- shaders ---------------- */
+
+const VS_MAIN = `#version 300 es
+in vec3 aPos; in vec3 aNrm; in vec3 aCol;
+uniform mat4 uMVP, uModel, uLightVP;
+uniform mat3 uNrmMat;
+out vec3 vNrm; out vec3 vCol; out vec3 vWorld; out vec4 vLight;
+void main() {
+  vec4 wp = uModel * vec4(aPos, 1.0);
+  vWorld = wp.xyz;
+  vNrm = normalize(uNrmMat * aNrm);
+  vCol = aCol;
+  vLight = uLightVP * wp;
+  gl_Position = uMVP * vec4(aPos, 1.0);
+}`;
+
+const FS_MAIN = `#version 300 es
+precision highp float;
+precision highp sampler2DShadow;
+in vec3 vNrm; in vec3 vCol; in vec3 vWorld; in vec4 vLight;
+uniform vec3 uCam;
+uniform vec3 uLightDir;      // surface -> light, normalised
+uniform vec3 uTint;
+uniform float uEmissive;
+uniform float uShadowTexel;
+uniform float uAmb;          // hemisphere fill strength
+uniform float uKey;          // sun strength
+uniform float uShadowOn;     // 0 on menu passes: no shadow map is valid there
+uniform sampler2DShadow uShadow;
+out vec4 frag;
+
+float shadowFactor() {
+  if (uShadowOn < 0.5) return 1.0;
+  vec3 pc = vLight.xyz / vLight.w;
+  pc = pc * 0.5 + 0.5;
+  if (pc.z >= 1.0 || pc.x < 0.0 || pc.x > 1.0 || pc.y < 0.0 || pc.y > 1.0) return 1.0;
+  float bias = 0.0022;
+  float s = 0.0;
+  for (int y = -1; y <= 1; y++) {
+    for (int x = -1; x <= 1; x++) {
+      vec2 off = vec2(float(x), float(y)) * uShadowTexel * 1.25;
+      s += texture(uShadow, vec3(pc.xy + off, pc.z - bias));
+    }
+  }
+  return s / 9.0;
+}
+
+void main() {
+  vec3 albedo = vCol * uTint;
+  vec3 N = normalize(vNrm);
+  vec3 V = normalize(uCam - vWorld);
+  vec3 L = uLightDir;
+
+  float ndl = dot(N, L);
+  float wrapped = clamp((ndl + 0.32) / 1.32, 0.0, 1.0);
+  float sh = shadowFactor();
+
+  vec3 sky = vec3(0.74, 0.82, 0.94);
+  vec3 grd = vec3(0.46, 0.40, 0.33);
+  vec3 amb = mix(grd, sky, N.y * 0.5 + 0.5) * uAmb;
+  vec3 sun = vec3(1.00, 0.96, 0.89) * (wrapped * uKey) * (0.38 + 0.62 * sh);
+
+  vec3 H = normalize(L + V);
+  float spec = pow(max(dot(N, H), 0.0), 46.0) * 0.32 * sh * step(0.02, ndl);
+  float rim = pow(1.0 - max(dot(N, V), 0.0), 3.2) * 0.20;
+
+  vec3 c = albedo * (amb + sun) + vec3(spec) + vec3(0.52, 0.70, 0.95) * rim;
+  c = mix(c, albedo * 1.15, uEmissive);
+  // gentle filmic-ish shoulder so highlights do not clip harshly
+  c = c / (c + vec3(0.92)) * 1.62;
+  frag = vec4(c, 1.0);
+}`;
+
+const VS_SHADOW = `#version 300 es
+in vec3 aPos;
+uniform mat4 uMVP;
+void main() { gl_Position = uMVP * vec4(aPos, 1.0); }`;
+
+const FS_SHADOW = `#version 300 es
+precision highp float;
+void main() {}`;
+
+/* ---------------- engine bootstrap ---------------- */
+
+const MESH = {};
+
+function initGL(canvas3d) {
+  const gl = canvas3d.getContext("webgl2", {
+    antialias: true, alpha: false, depth: true, powerPreference: "high-performance"
+  });
+  if (!gl) return false;
+  GL.gl = gl;
+  GL.prog = glProgram(gl, VS_MAIN, FS_MAIN);
+  GL.shadowProg = glProgram(gl, VS_SHADOW, FS_SHADOW);
+
+  // shadow map: a depth texture sampled with hardware comparison
+  GL.shadowTex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, GL.shadowTex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.DEPTH_COMPONENT24, GL.SHADOW_RES, GL.SHADOW_RES,
+                0, gl.DEPTH_COMPONENT, gl.UNSIGNED_INT, null);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_COMPARE_MODE, gl.COMPARE_REF_TO_TEXTURE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_COMPARE_FUNC, gl.LEQUAL);
+  GL.shadowFB = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, GL.shadowFB);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, GL.shadowTex, 0);
+  gl.drawBuffers([gl.NONE]);
+  gl.readBuffer(gl.NONE);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+  // unit primitives, all white so uTint can colour them
+  const W = [1, 1, 1];
+  let mb = new MB(); mbSphere(mb, 0, 0, 0, 1, 1, 1, W, 18, 12); MESH.sphere = glMesh(mb);
+  mb = new MB(); mbSphere(mb, 0, 0, 0, 1, 1, 1, W, 10, 7);      MESH.sphereLo = glMesh(mb);
+  mb = new MB(); mbDome(mb, 0, 0, 0, 1, 1, 1, W, 18, 8);        MESH.dome = glMesh(mb);
+  mb = new MB(); mbRoundedBox(mb, 0, 0, 0, 1, 1, 1, 0.16, W, 3); MESH.box = glMesh(mb);
+  mb = new MB(); mbRoundedBox(mb, 0, 0, 0, 1, 1, 1, 0.45, W, 4); MESH.boxSoft = glMesh(mb);
+  mb = new MB(); mbCylinder(mb, 0, 0, 0, 1, 1, 1, W, 18, true);  MESH.cyl = glMesh(mb);
+  mb = new MB(); mbCylinder(mb, 0, 0, 0, 0.01, 1, 1, W, 16, true); MESH.cone = glMesh(mb);
+  mb = new MB(); mbTorus(mb, 0, 0, 0, 1, 0.16, W, 20, 8);        MESH.torus = glMesh(mb);
+
+  gl.enable(gl.DEPTH_TEST);
+  gl.enable(gl.CULL_FACE);
+  gl.cullFace(gl.BACK);
+  GL.ok = true;
+  return true;
+}
+
+/* ---------------- draw helpers ---------------- */
+
+let _pass = "main";
+
+function drawMesh(mesh, px, py, pz, ry, sx, sy, sz, color, emissive) {
+  const gl = GL.gl;
+  m4TRS(GL._model, px, py, pz, ry || 0, sx, sy, sz);
+  if (_pass === "shadow") {
+    m4Mul(GL._mvp, GL.lightVP, GL._model);
+    gl.uniformMatrix4fv(GL.shadowProg.u.uMVP, false, GL._mvp);
+  } else {
+    m4Mul(GL._mvp, GL.viewProj, GL._model);
+    m3NormalFromTRS(GL._nrm, ry || 0, sx, sy, sz);
+    const p = GL.prog;
+    gl.uniformMatrix4fv(p.u.uMVP, false, GL._mvp);
+    gl.uniformMatrix4fv(p.u.uModel, false, GL._model);
+    gl.uniformMatrix3fv(p.u.uNrmMat, false, GL._nrm);
+    gl.uniform3fv(p.u.uTint, color || [1, 1, 1]);
+    gl.uniform1f(p.u.uEmissive, emissive || 0);
+  }
+  gl.bindVertexArray(mesh.vao);
+  gl.drawElements(gl.TRIANGLES, mesh.count, mesh.type, 0);
+}
+
+/* ---------------- level geometry ---------------- */
+
+/** Merge the wall grid into maximal rectangles so the ward is a handful of
+    solid blocks instead of hundreds of tiles. */
+function greedyRects(test) {
+  const used = new Uint8Array(COLS * ROWS);
+  const out = [];
+  for (let y = 0; y < ROWS; y++) {
+    for (let x = 0; x < COLS; x++) {
+      if (used[y * COLS + x] || !test(x, y)) continue;
+      let w = 1;
+      while (x + w < COLS && test(x + w, y) && !used[y * COLS + x + w]) w++;
+      let h = 1;
+      grow: while (y + h < ROWS) {
+        for (let i = 0; i < w; i++) {
+          if (!test(x + i, y + h) || used[(y + h) * COLS + x + i]) break grow;
+        }
+        h++;
+      }
+      for (let j = 0; j < h; j++) for (let i = 0; i < w; i++) used[(y + j) * COLS + x + i] = 1;
+      out.push({ x, y, w, h });
+    }
+  }
+  return out;
+}
+
+const MAT = {
+  floor:    "#f5ecdb",
+  floorAlt: "#efe4cf",
+  wall:     "#a9e0d4",
+  wallTop:  "#c2ebe1",
+  base:     "#7cc4b4",
+  bedFrame: "#fbfdff",
+  bedSheet: "#eef5fc",
+  metal:    "#c9d4de"
+};
+
+/** Build the whole static level: floor, walls, decor, station bodies. */
+function buildLevelMesh(world) {
+  const mb = new MB();
+  const rng = makeRng((world.def.seed ^ 0x51ed) >>> 0);
+  const isWall = (x, y) => { const c = cellAt(world, x, y); return !c || (c.solid && !c.station); };
+
+  /* ---- floor: subdivided so baked light pools have somewhere to live ---- */
+  const SUB = 2, gw = COLS * SUB, gh = ROWS * SUB, step = 1 / SUB;
+  const lights = [];
+  for (let ly = 2; ly < ROWS; ly += 5) {
+    for (let lx = 3; lx < COLS; lx += 6) {
+      if (isWalkable(world, lx, ly)) lights.push([lx + 0.5, ly + 0.5]);
+    }
+  }
+  const fc = rgb(MAT.floor), fa = rgb(MAT.floorAlt);
+  const shadeAt = (wx, wz) => {
+    let lit = 0;
+    for (const [lx, lz] of lights) {
+      const d = Math.hypot(wx - lx, wz - lz);
+      lit += Math.max(0, 1 - d / 3.6);
+    }
+    lit = Math.min(0.13, lit * 0.11);
+    const t = ((Math.floor(wx) + Math.floor(wz)) & 1) ? 0 : 1;
+    const b = t ? fa : fc;
+    const n = (rng() - 0.5) * 0.03;
+    return [
+      clamp(b[0] * (1 + lit) + n, 0, 1),
+      clamp(b[1] * (1 + lit) + n, 0, 1),
+      clamp(b[2] * (1 + lit * 0.92) + n, 0, 1)
+    ];
+  };
+  for (let j = 0; j < gh; j++) {
+    for (let i = 0; i < gw; i++) {
+      const x0 = i * step, z0 = j * step, x1 = x0 + step, z1 = z0 + step;
+      const c = shadeAt(x0 + step / 2, z0 + step / 2);
+      mbQuad(mb, [[x0,0,z0],[x1,0,z0],[x1,0,z1],[x0,0,z1]], c, 0, 1, 0);
+    }
+  }
+
+  /* ---- wayfinding stripe, painted just above the floor ---- */
+  const way = findPath(world, world.entrance, world.exit);
+  if (way.length) {
+    const stripe = rgb("#ffb3c4");
+    let px = world.entrance.x + 0.5, pz = world.entrance.y + 0.5;
+    for (const w of way) {
+      const nx = w.x * T2W, nz = w.y * T2W;
+      const dx = nx - px, dz = nz - pz, len = Math.hypot(dx, dz) || 1;
+      const ox = -dz / len * 0.07, oz = dx / len * 0.07;
+      mbQuad(mb, [[px+ox,0.012,pz+oz],[nx+ox,0.012,nz+oz],[nx-ox,0.012,nz-oz],[px-ox,0.012,pz-oz]],
+             stripe, 0, 1, 0);
+      px = nx; pz = nz;
+    }
+  }
+
+  /* ---- entrance / exit mats ---- */
+  const mat = (tile, col) => {
+    mbRoundedBox(mb, tile.x + 0.5, 0.018, tile.y + 0.5, 0.44, 0.018, 0.44, 0.14, rgb(col), 2);
+  };
+  mat(world.entrance, "#63bde8");
+  mat(world.exit, "#6ad39a");
+
+  /* ---- walls as merged blocks ---- */
+  const wallCol = rgb(MAT.wall), topCol = rgb(MAT.wallTop), baseCol = rgb(MAT.base);
+  const rects = greedyRects(isWall);
+  for (const r of rects) {
+    const cx = r.x + r.w / 2, cz = r.y + r.h / 2;
+    const hx = r.w / 2, hz = r.h / 2;
+    mbRoundedBox(mb, cx, WALL_Y / 2, cz, hx, WALL_Y / 2, hz, 0.14, wallCol, 3);
+    // a lighter cap inlay so the tops read as a finished surface
+    mbRoundedBox(mb, cx, WALL_Y + 0.005, cz, hx - 0.10, 0.02, hz - 0.10, 0.06, topCol, 2);
+    // skirting board around the base
+    mbRoundedBox(mb, cx, 0.055, cz, hx + 0.015, 0.055, hz + 0.015, 0.03, baseCol, 2);
+  }
+  world.wallRects = rects;
+
+  /* ---- wall decor ---- */
+  buildDecor(mb, world, rng, isWall);
+
+  /* ---- station bodies (dynamic bits are drawn per frame) ---- */
+  for (const st of world.stations) {
+    const cx = st.x + 0.5, cz = st.y + 0.5;
+    if (st.type === "bed") {
+      mbRoundedBox(mb, cx, 0.10, cz, 0.30, 0.10, 0.42, 0.05, rgb(MAT.metal), 2);   // chassis
+      mbRoundedBox(mb, cx, 0.24, cz, 0.40, 0.09, 0.46, 0.07, rgb(MAT.bedFrame), 3); // mattress
+      mbRoundedBox(mb, cx, 0.38, cz - 0.28, 0.30, 0.06, 0.13, 0.05, rgb("#ffffff"), 3); // pillow
+      mbRoundedBox(mb, cx, 0.30, cz + 0.47, 0.34, 0.16, 0.03, 0.03, rgb(MAT.metal), 2); // footboard
+    } else {
+      const info = STATIONS[st.type];
+      const body = rgb(info.color), edge = rgb(info.edge);
+      const h = st.type === "delivery" ? 0.92 : 0.72;
+      mbRoundedBox(mb, cx, h / 2, cz, 0.42, h / 2, 0.42, 0.10, body, 3);
+      mbRoundedBox(mb, cx, h + 0.02, cz, 0.36, 0.03, 0.36, 0.03, edge, 2);   // top trim
+      buildStationDetail(mb, st, cx, cz, h);
+    }
+  }
+  return glMesh(mb);
+}
+
+/** Per-machine silhouette details so each station is identifiable in 3D. */
+function buildStationDetail(mb, st, cx, cz, h) {
+  const white = rgb("#ffffff"), dark = rgb("#3c4657");
+  switch (st.type) {
+    case "supply":
+      for (let i = 0; i < 3; i++) {
+        mbRoundedBox(mb, cx, 0.20 + i * 0.20, cz + 0.40, 0.30, 0.045, 0.05, 0.02, white, 2);
+      }
+      break;
+    case "medicine":
+      mbRoundedBox(mb, cx, h * 0.62, cz + 0.42, 0.07, 0.20, 0.03, 0.02, white, 2);
+      mbRoundedBox(mb, cx, h * 0.62, cz + 0.42, 0.20, 0.07, 0.03, 0.02, white, 2);
+      break;
+    case "xray":
+      mbCylinder(mb, cx, h + 0.30, cz, 0.05, 0.05, 0.55, rgb(MAT.metal), 10, true);
+      mbRoundedBox(mb, cx, h + 0.58, cz, 0.26, 0.10, 0.20, 0.06, dark, 3);
+      mbSphere(mb, cx, h + 0.50, cz + 0.10, 0.09, 0.09, 0.09, rgb("#cfeeff"), 12, 8);
+      break;
+    case "cast":
+      mbCylinder(mb, cx, h + 0.10, cz, 0.22, 0.26, 0.20, rgb("#fdf6e6"), 16, true);
+      break;
+    case "charger":
+      mbRoundedBox(mb, cx, h + 0.16, cz, 0.10, 0.16, 0.05, 0.03, rgb("#fff3c4"), 2);
+      break;
+    case "lab":
+      mbCylinder(mb, cx - 0.12, h + 0.14, cz, 0.06, 0.11, 0.28, rgb("#efe6ff"), 14, true);
+      mbCylinder(mb, cx + 0.12, h + 0.10, cz + 0.06, 0.05, 0.09, 0.20, rgb("#dcc6ff"), 14, true);
+      break;
+    case "delivery":
+      mbRoundedBox(mb, cx, h * 0.55, cz + 0.42, 0.34, 0.30, 0.03, 0.03, rgb("#f7e7d2"), 2);
+      break;
+    case "defibrack":
+      mbRoundedBox(mb, cx, h + 0.10, cz, 0.30, 0.10, 0.30, 0.05, rgb("#ffd9d1"), 2);
+      break;
+  }
+}
+
+/** Plants, posters, windows and a clock, placed deterministically. */
+function buildDecor(mb, world, rng, isWall) {
+  const spots = [];
+  for (let y = 0; y < ROWS; y++)
+    for (let x = 0; x < COLS; x++)
+      if (isWall(x, y)) spots.push({ x, y, boundary: y === 0 || y === ROWS - 1 || x === 0 || x === COLS - 1 });
+
+  let gap = 0;
+  for (const sp of spots) {
+    gap++;
+    const cx = sp.x + 0.5, cz = sp.y + 0.5;
+    const roll = rng();
+    const southOpen = isWalkable(world, sp.x, sp.y + 1);
+
+    if (sp.boundary && southOpen && sp.x % 5 === 2) {
+      // window punched into the wall face
+      mbQuad(mb, [[cx-0.30, 0.34, cz+0.501],[cx+0.30, 0.34, cz+0.501],
+                  [cx+0.30, 0.94, cz+0.501],[cx-0.30, 0.94, cz+0.501]],
+             rgb("#bfe6f7"), 0, 0, 1);
+      mbRoundedBox(mb, cx, 0.64, cz + 0.505, 0.34, 0.34, 0.015, 0.05, rgb("#eaf6fb"), 2);
+      mbQuad(mb, [[cx-0.27, 0.37, cz+0.515],[cx+0.27, 0.37, cz+0.515],
+                  [cx+0.27, 0.91, cz+0.515],[cx-0.27, 0.91, cz+0.515]],
+             rgb("#a9dcf2"), 0, 0, 1);
+      continue;
+    }
+    if (gap < 3) continue;
+    if (roll < 0.14) {                       // potted plant on top of the wall
+      mbCylinder(mb, cx, WALL_Y + 0.10, cz, 0.15, 0.11, 0.20, rgb("#e08a5f"), 12, true);
+      mbSphere(mb, cx, WALL_Y + 0.30, cz, 0.20, 0.17, 0.20, rgb("#79c98a"), 12, 8);
+      mbSphere(mb, cx - 0.10, WALL_Y + 0.24, cz + 0.06, 0.12, 0.10, 0.12, rgb("#93d99f"), 10, 7);
+      gap = 0;
+    } else if (roll < 0.24 && southOpen) {   // poster on the wall face
+      mbQuad(mb, [[cx-0.22, 0.42, cz+0.502],[cx+0.22, 0.42, cz+0.502],
+                  [cx+0.22, 0.92, cz+0.502],[cx-0.22, 0.92, cz+0.502]],
+             rgb("#fffdf6"), 0, 0, 1);
+      mbQuad(mb, [[cx-0.15, 0.54, cz+0.508],[cx+0.15, 0.54, cz+0.508],
+                  [cx+0.15, 0.80, cz+0.508],[cx-0.15, 0.80, cz+0.508]],
+             rgb(roll < 0.19 ? "#ef5d6b" : "#7db2f2"), 0, 0, 1);
+      gap = 0;
+    } else if (roll < 0.28 && southOpen) {   // wall clock
+      mbCylinder(mb, cx, 0.80, cz + 0.50, 0.16, 0.16, 0.05, rgb("#ffffff"), 16, true);
+      gap = 0;
+    }
+  }
+
+  // red cross sign over the entrance
+  const e = world.entrance;
+  if (isWall(e.x, e.y - 1)) {
+    const cx = e.x + 0.5, cz = e.y - 0.5;
+    mbRoundedBox(mb, cx, WALL_Y + 0.22, cz, 0.26, 0.26, 0.06, 0.05, rgb("#ffffff"), 2);
+    mbRoundedBox(mb, cx, WALL_Y + 0.22, cz - 0.07, 0.07, 0.19, 0.03, 0.02, rgb("#ef5d6b"), 2);
+    mbRoundedBox(mb, cx, WALL_Y + 0.22, cz - 0.07, 0.19, 0.07, 0.03, 0.02, rgb("#ef5d6b"), 2);
+  }
+}
+
+/* ---------------- character rendering ---------------- */
+
+/** Rotate a local offset into world space around the character's facing. */
+function _lx(ox, ry, lx, lz) { return ox + lx * Math.cos(ry) + lz * Math.sin(ry); }
+function _lz(oz, ry, lx, lz) { return oz - lx * Math.sin(ry) + lz * Math.cos(ry); }
+
+const SKIN_DEFAULT = "#ffdcb8";
+
+/**
+ * One plush medic / patient / nurse.
+ * o = { wx, wz, ry, bob, step, moving, body, look, scale, y, tucked, mood }
+ */
+const CHAR_SCALE = 1.85;
+
+function drawCharacter3D(o) {
+  const S = (o.scale || 1) * CHAR_SCALE;
+  const ox = o.wx, oz = o.wz, ry = o.ry || 0;
+  const y0 = (o.y || 0);
+  const bob = Math.sin(o.bob || 0) * 0.012 * S;
+  const swing = o.moving ? Math.sin(o.step || 0) * 0.10 * S : 0;
+  const look = o.look || {};
+  const skin = rgb(look.skin || SKIN_DEFAULT);
+  const body = rgb(o.body || "#e9eff7");
+  const P = (lx, ly, lz) => [_lx(ox, ry, lx * S, lz * S), y0 + ly * S + bob, _lz(oz, ry, lx * S, lz * S)];
+  const shadowPass = _pass === "shadow";
+
+  // feet
+  if (!o.tucked) {
+    let p = P(-0.15, 0.07, swing);
+    drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.11*S, 0.07*S, 0.14*S, rgb("#5b6b80"));
+    p = P(0.15, 0.07, -swing);
+    drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.11*S, 0.07*S, 0.14*S, rgb("#5b6b80"));
+  }
+
+  // torso
+  let p = P(0, 0.34, 0);
+  drawMesh(shadowPass ? MESH.sphereLo : MESH.sphere, p[0], p[1], p[2], ry,
+           0.29*S, 0.28*S, 0.26*S, body);
+
+  if (!shadowPass) {
+    // chest cross
+    p = P(0, 0.36, 0.24);
+    drawMesh(MESH.box, p[0], p[1], p[2], ry, 0.030*S, 0.085*S, 0.02*S, rgb("#ffffff"));
+    drawMesh(MESH.box, p[0], p[1], p[2], ry, 0.075*S, 0.034*S, 0.02*S, rgb("#ffffff"));
+    // mitten hands
+    p = P(-0.30, 0.36 + swing * 0.4, 0.10);
+    drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.105*S, 0.105*S, 0.105*S, body);
+    p = P(0.30, 0.36 - swing * 0.4, 0.10);
+    drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.105*S, 0.105*S, 0.105*S, body);
+  }
+
+  // head
+  const HY = 0.80;
+  p = P(0, HY, 0);
+  drawMesh(shadowPass ? MESH.sphereLo : MESH.sphere, p[0], p[1], p[2], ry,
+           0.31*S, 0.31*S, 0.31*S, skin);
+  if (shadowPass) return;
+
+  // eyes: dark bead + specular pip, set into the face
+  for (const sx of [-1, 1]) {
+    p = P(sx * 0.108, HY + 0.035, 0.288);
+    drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.060*S, 0.074*S, 0.052*S, rgb("#33292b"));
+    p = P(sx * 0.128, HY + 0.075, 0.300);
+    drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.026*S, 0.026*S, 0.026*S, rgb("#ffffff"), 0.9);
+  }
+  // blush
+  for (const sx of [-1, 1]) {
+    p = P(sx * 0.215, HY - 0.055, 0.225);
+    drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.072*S, 0.046*S, 0.032*S, rgb("#ff9aab"));
+  }
+
+  // hair
+  const hair = rgb(look.hair || "#5b4635");
+  if (look.style === "curls") {
+    for (const dx of [-0.20, -0.10, 0, 0.10, 0.20]) {
+      p = P(dx, HY + 0.10, -0.16);
+      drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.100*S, 0.090*S, 0.100*S, hair);
+    }
+  } else if (look.style === "puffs") {
+    for (const sx of [-1, 1]) {
+      p = P(sx * 0.335, HY + 0.02, -0.02);
+      drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.135*S, 0.135*S, 0.135*S, hair);
+    }
+    p = P(0, HY + 0.06, -0.12);
+    drawMesh(MESH.dome, p[0], p[1], p[2], ry, 0.29*S, 0.20*S, 0.29*S, hair);
+  } else if (look.style === "fringe") {
+    p = P(0, HY + 0.115, 0.175);
+    drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.245*S, 0.085*S, 0.215*S, hair);
+  }
+
+  if (look.acc === "hijab") {
+    const hc = rgb(look.accColor || "#7fd8c8");
+    p = P(0, HY - 0.02, -0.04);
+    drawMesh(MESH.sphere, p[0], p[1], p[2], ry, 0.345*S, 0.345*S, 0.295*S, hc);
+    p = P(0, HY - 0.30, 0.02);
+    drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.20*S, 0.13*S, 0.16*S, hc);
+  } else {
+    // scrub cap
+    const cap = rgb(o.cap || "#8fd0f0");
+    p = P(0, HY + 0.135, -0.02);
+    drawMesh(MESH.dome, p[0], p[1], p[2], ry, 0.318*S, 0.245*S, 0.318*S, cap);
+    p = P(0, HY + 0.135, -0.02);
+    drawMesh(MESH.cyl, p[0], p[1], p[2], ry, 0.328*S, 0.048*S, 0.328*S, cap);
+    p = P(0, HY + 0.36, 0.0);
+    drawMesh(MESH.box, p[0], p[1], p[2], ry, 0.022*S, 0.055*S, 0.03*S, rgb("#ffffff"));
+    drawMesh(MESH.box, p[0], p[1], p[2], ry, 0.055*S, 0.022*S, 0.03*S, rgb("#ffffff"));
+    if (look.acc === "catcap") {
+      for (const sx of [-1, 1]) {
+        p = P(sx * 0.20, HY + 0.42, -0.03);
+        drawMesh(MESH.cone, p[0], p[1], p[2], ry, 0.10*S, 0.17*S, 0.06*S, cap);
+      }
+    }
+  }
+  if (look.acc === "glasses") {
+    for (const sx of [-1, 1]) {
+      p = P(sx * 0.112, HY + 0.045, 0.300);
+      drawMesh(MESH.torus, p[0], p[1], p[2], ry, 0.085*S, 0.085*S, 0.085*S, rgb("#4a4038"));
+    }
+  }
+}
+
+/* ---------------- item models ---------------- */
+
+function drawItem3D(type, wx, wy, wz, spin) {
+  const r = spin || 0;
+  switch (type) {
+    case "bandage":
+      drawMesh(MESH.boxSoft, wx, wy, wz, r, 0.13, 0.055, 0.09, rgb("#f8f2e0"));
+      drawMesh(MESH.sphereLo, wx, wy, wz + 0.02, r, 0.05, 0.05, 0.05, rgb("#e7dcc0"));
+      break;
+    case "syringe":
+      drawMesh(MESH.cyl, wx, wy, wz, r, 0.045, 0.20, 0.045, rgb("#eef8ff"));
+      drawMesh(MESH.cyl, wx, wy - 0.02, wz, r, 0.040, 0.10, 0.040, rgb("#3fa9e8"));
+      drawMesh(MESH.cyl, wx, wy + 0.16, wz, r, 0.012, 0.12, 0.012, rgb("#dfe7ee"));
+      break;
+    case "film":
+      drawMesh(MESH.box, wx, wy, wz, r, 0.09, 0.12, 0.012, rgb("#333a48"));
+      break;
+    case "xrayimg":
+      drawMesh(MESH.box, wx, wy, wz, r, 0.09, 0.12, 0.012, rgb("#16324a"));
+      drawMesh(MESH.box, wx, wy, wz + 0.014, r, 0.065, 0.09, 0.004, rgb("#a8dcff"), 0.55);
+      break;
+    case "cast":
+      drawMesh(MESH.cyl, wx, wy, wz, r + 1.57, 0.09, 0.22, 0.09, rgb("#f5efdd"));
+      break;
+    case "sample":
+      drawMesh(MESH.cyl, wx, wy, wz, r, 0.045, 0.20, 0.045, rgb("#e6eef5"));
+      drawMesh(MESH.cyl, wx, wy - 0.04, wz, r, 0.038, 0.11, 0.038, rgb("#c0392b"));
+      drawMesh(MESH.cyl, wx, wy + 0.11, wz, r, 0.052, 0.04, 0.052, rgb("#8d99a8"));
+      break;
+    case "crate":
+      drawMesh(MESH.box, wx, wy, wz, r, 0.15, 0.13, 0.15, rgb("#c8974f"));
+      drawMesh(MESH.box, wx, wy + 0.02, wz, r, 0.155, 0.02, 0.155, rgb("#87642f"));
+      break;
+    case "defib":
+    case "defib_charged": {
+      const hot = type === "defib_charged";
+      drawMesh(MESH.box, wx, wy, wz, r, 0.16, 0.10, 0.11, rgb(hot ? "#ffd84d" : "#d99f2c"), hot ? 0.35 : 0);
+      drawMesh(MESH.box, wx - 0.08, wy + 0.11, wz, r, 0.05, 0.04, 0.05, rgb("#2e333b"));
+      drawMesh(MESH.box, wx + 0.08, wy + 0.11, wz, r, 0.05, 0.04, 0.05, rgb("#2e333b"));
+      break;
+    }
+  }
+}
+
+/* ---------------- camera ---------------- */
+
+const CAM = { pitch: 0.93, yaw: 0, dist: 26, tx: 16, ty: 0, tz: 8, shake: 0 };
+
+function buildCamera(aspect, orbit) {
+  const yaw = CAM.yaw + (orbit || 0);
+  const cp = Math.cos(CAM.pitch), sp = Math.sin(CAM.pitch);
+  const ex = CAM.tx + Math.sin(yaw) * CAM.dist * cp;
+  const ey = CAM.ty + CAM.dist * sp;
+  const ez = CAM.tz + Math.cos(yaw) * CAM.dist * cp;
+  let sx = 0, sy = 0;
+  if (CAM.shake > 0) {
+    sx = (Math.random() - 0.5) * CAM.shake * 0.02;
+    sy = (Math.random() - 0.5) * CAM.shake * 0.02;
+  }
+  GL.camEye[0] = ex; GL.camEye[1] = ey; GL.camEye[2] = ez;
+  m4LookAt(GL.view, ex, ey, ez, CAM.tx + sx, CAM.ty + sy, CAM.tz, 0, 1, 0);
+  m4Perspective(GL.proj, 0.62, aspect, 0.5, 90);
+  m4Mul(GL.viewProj, GL.proj, GL.view);
+}
+
+/** Pull the camera back until the whole ward is inside the frame. */
+function fitCamera(aspect) {
+  const corners = [];
+  for (const x of [0, COLS]) for (const z of [0, ROWS]) for (const y of [0, WALL_Y + 0.6]) corners.push([x, y, z]);
+  let lo = 12, hi = 70;
+  for (let it = 0; it < 26; it++) {
+    const mid = (lo + hi) / 2;
+    CAM.dist = mid;
+    buildCamera(aspect, 0);
+    let fits = true;
+    for (const c of corners) {
+      const m = GL.viewProj;
+      const cw = m[3]*c[0] + m[7]*c[1] + m[11]*c[2] + m[15];
+      if (cw <= 0.01) { fits = false; break; }
+      const nx = (m[0]*c[0] + m[4]*c[1] + m[8]*c[2] + m[12]) / cw;
+      const ny = (m[1]*c[0] + m[5]*c[1] + m[9]*c[2] + m[13]) / cw;
+      if (Math.abs(nx) > 0.995 || Math.abs(ny) > 0.985) { fits = false; break; }
+    }
+    if (fits) hi = mid; else lo = mid;
+  }
+  CAM.dist = hi;
+  buildCamera(aspect, 0);
+}
+
+function projectToScreen(wx, wy, wz) {
+  const m = GL.viewProj;
+  const cw = m[3]*wx + m[7]*wy + m[11]*wz + m[15];
+  if (cw <= 0.001) return null;
+  const nx = (m[0]*wx + m[4]*wy + m[8]*wz + m[12]) / cw;
+  const ny = (m[1]*wx + m[5]*wy + m[9]*wz + m[13]) / cw;
+  return {
+    x: PLAY_X + (nx * 0.5 + 0.5) * PLAY_W,
+    y: PLAY_Y + (1 - (ny * 0.5 + 0.5)) * PLAY_H
+  };
+}
+
+/* ---------------- scene assembly ---------------- */
+
+function bedTopY() { return 0.34; }
+
+/** Everything dynamic in the ward, for whichever pass is active. */
+function drawSceneEntities() {
+  const world = Game.world;
+
+  // bed blankets (colour tracks occupancy)
+  for (const st of world.stations) {
+    if (st.type !== "bed") continue;
+    const cx = st.x + 0.5, cz = st.y + 0.5;
+    if (_pass !== "shadow") {
+      drawMesh(MESH.boxSoft, cx, 0.40, cz + 0.10, 0, 0.395, 0.085, 0.34,
+               rgb(st.occupant ? "#ff9fb6" : "#a8d4f5"));
+      drawMesh(MESH.boxSoft, cx, 0.45, cz - 0.20, 0, 0.395, 0.055, 0.09,
+               rgb("#ffffff"));
+    }
+  }
+
+  // loose items
+  for (const it of Game.floorItems) {
+    const t = performance.now() / 600 + it.id;
+    drawItem3D(it.type, it.x * T2W, 0.16 + Math.sin(t) * 0.02, it.y * T2W, t * 0.4);
+  }
+
+  // patients not being carried
+  for (const pt of Game.patients) {
+    if (pt.state === "carried") continue;
+    drawPatient3D(pt);
+  }
+
+  // medics
+  for (const p of Game.players) drawPlayer3D(p);
+  if (Game.nurse) drawNurse3D(Game.nurse);
+}
+
+const HAIRS = ["#6b5140", "#3f3833", "#8a5a33", "#54646e"];
+
+function patientLook(pt) {
+  return { skin: pt.done ? "#ffddb8" : "#fbd4a8", hair: HAIRS[pt.id % 4], style: "fringe", acc: "none" };
+}
+
+function drawPatient3D(pt) {
+  const inBed = pt.station && pt.station.type === "bed";
+  const wx = pt.x * T2W, wz = pt.y * T2W;
+  drawCharacter3D({
+    wx, wz,
+    ry: inBed ? 0 : Math.PI,
+    y: inBed ? bedTopY() + 0.04 : 0,
+    bob: pt.bob, step: pt.bob * 1.6, moving: pt.state === "walking",
+    body: pt.done ? "#b9edcb" : "#e9eff7",
+    cap: pt.done ? "#8ce0a8" : "#dfe7f2",
+    look: patientLook(pt),
+    tucked: inBed,
+    scale: 0.92
+  });
+  if (inBed && _pass !== "shadow") {
+    // duvet drawn over the lower body
+    drawMesh(MESH.boxSoft, wx, bedTopY() + 0.13, wz + 0.14, 0,
+             0.385, 0.105, 0.30, rgb(pt.done ? "#93e5b0" : "#ff9fb6"));
+  }
+  if (pt.vip && _pass !== "shadow") {
+    const t = performance.now() / 700;
+    drawMesh(MESH.torus, wx, (inBed ? bedTopY() + 0.04 : 0) + 1.28, wz, t,
+             0.13, 0.13, 0.13, rgb("#ffd54a"), 0.75);
+  }
+}
+
+function drawPlayer3D(p) {
+  const ry = Math.atan2(p.dx || 0, p.dy || 1);
+  const wx = p.x * T2W, wz = p.y * T2W;
+  const squash = p.squash > 0 ? Math.sin((p.squash / 0.18) * Math.PI) * 0.10 : 0;
+  drawCharacter3D({
+    wx, wz, ry,
+    bob: p.bob, step: p.step || 0, moving: !!p.moving,
+    body: p.index === 0 ? "#4fb8e8" : "#ff8f70",
+    cap: p.index === 0 ? "#4fb8e8" : "#ff8f70",
+    look: p.look || CHARACTERS[p.index % CHARACTERS.length],
+    scale: 1 + squash * 0.5
+  });
+  if (_pass === "shadow") return;
+
+  // carried patient rides on the shoulders; items float in front
+  if (p.patient) {
+    drawCharacter3D({
+      wx: _lx(wx, ry, 0, -0.12), wz: _lz(wz, ry, 0, -0.12), ry,
+      y: 1.16, bob: p.bob * 0.5, step: 0, moving: false,
+      body: p.patient.done ? "#b9edcb" : "#e9eff7",
+      cap: p.patient.done ? "#8ce0a8" : "#dfe7f2",
+      look: patientLook(p.patient), scale: 0.72
+    });
+  } else if (p.item) {
+    const bobY = Math.sin(p.bob * 0.6) * 0.02;
+    drawItem3D(p.item.type, _lx(wx, ry, 0, 0.34), 0.62 + bobY, _lz(wz, ry, 0, 0.34), ry);
+  }
+}
+
+function drawNurse3D(nu) {
+  const ry = Math.atan2(nu.dx || 0, nu.dy || 1);
+  drawCharacter3D({
+    wx: nu.x * T2W, wz: nu.y * T2W, ry,
+    bob: nu.bob, step: nu.step || 0, moving: !!nu.moving,
+    body: "#ffffff", cap: "#ffd7e0",
+    look: { skin: "#f6cfa6", hair: "#8a5a33", style: "fringe", acc: "none" },
+    scale: 0.95
+  });
+}
+
+/* ---------------- passes ---------------- */
+
+function renderWorld3D(orbit) {
+  const gl = GL.gl;
+  const world = Game.world;
+  if (!world.mesh) world.mesh = buildLevelMesh(world);
+
+  // the ward camera owns its own framing; menus must not leak theirs in
+  CAM.tx = COLS / 2; CAM.ty = 0; CAM.tz = ROWS / 2; CAM.pitch = 0.93;
+  if (!world.camDist) {
+    fitCamera(PLAY_W / PLAY_H);
+    world.camDist = CAM.dist * 0.93;      // crop the empty corners a little
+  }
+  CAM.dist = world.camDist;
+
+  // ---- shadow pass ----
+  const cx = COLS / 2, cz = ROWS / 2;
+  const L = LIGHT_DIR;
+  const ll = Math.hypot(L[0], L[1], L[2]);
+  const lx = -L[0]/ll, ly = -L[1]/ll, lz = -L[2]/ll;      // surface -> light
+  const D = 24;
+  const lightView = m4();
+  m4LookAt(lightView, cx + lx*D, ly*D, cz + lz*D, cx, 0, cz, 0, 1, 0);
+  const lightProj = m4();
+  m4Ortho(lightProj, -19, 19, -13, 13, 1, 52);
+  m4Mul(GL.lightVP, lightProj, lightView);
+
+  gl.bindFramebuffer(gl.FRAMEBUFFER, GL.shadowFB);
+  gl.viewport(0, 0, GL.SHADOW_RES, GL.SHADOW_RES);
+  gl.clear(gl.DEPTH_BUFFER_BIT);
+  gl.useProgram(GL.shadowProg);
+  gl.enable(gl.CULL_FACE);
+  gl.cullFace(gl.FRONT);                                   // peter-panning guard
+  _pass = "shadow";
+  drawMesh(world.mesh, 0, 0, 0, 0, 1, 1, 1);
+  drawSceneEntities();
+  gl.cullFace(gl.BACK);
+
+  // ---- main pass ----
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(PLAY_X, H - (PLAY_Y + PLAY_H), PLAY_W, PLAY_H);
+  gl.scissor(PLAY_X, H - (PLAY_Y + PLAY_H), PLAY_W, PLAY_H);
+  gl.enable(gl.SCISSOR_TEST);
+  gl.clearColor(0.055, 0.075, 0.105, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+  buildCamera(PLAY_W / PLAY_H, orbit);
+  gl.useProgram(GL.prog);
+  const u = GL.prog.u;
+  gl.uniform3fv(u.uCam, GL.camEye);
+  gl.uniform3f(u.uLightDir, lx, ly, lz);
+  gl.uniformMatrix4fv(u.uLightVP, false, GL.lightVP);
+  gl.uniform1f(u.uShadowTexel, 1 / GL.SHADOW_RES);
+  gl.uniform1f(u.uAmb, 0.46); gl.uniform1f(u.uKey, 0.78);
+  gl.uniform1f(u.uShadowOn, 1);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, GL.shadowTex);
+  gl.uniform1i(u.uShadow, 0);
+  _pass = "main";
+  drawMesh(world.mesh, 0, 0, 0, 0, 1, 1, 1);
+  drawSceneEntities();
+  gl.disable(gl.SCISSOR_TEST);
+}
+
+/**
+ * Pick a few long open corridor runs for the title medics to pace along.
+ * Straight runs of free tiles only, so nobody ever walks through a wall.
+ */
+function showcaseLanes(world) {
+  const runs = [];
+  for (let y = 1; y < ROWS - 1; y++) {
+    let x = 1;
+    while (x < COLS - 1) {
+      if (world.grid[y][x].solid) { x++; continue; }
+      let e = x;
+      while (e < COLS - 1 && !world.grid[y][e].solid) e++;
+      if (e - x >= 7) runs.push({ y, x0: x + 0.5, x1: e - 1.5 });
+      x = e + 1;
+    }
+  }
+  runs.sort((a, b) => (b.x1 - b.x0) - (a.x1 - a.x0));
+  const picked = [];
+  for (const r of runs) {
+    if (picked.every(p => Math.abs(p.y - r.y) >= 3)) picked.push(r);
+    if (picked.length === 3) break;
+  }
+  return picked;
+}
+
+/** Title backdrop: the ward, slowly orbiting, with a shift on the floor. */
+let _showcase = null;
+function renderShowcase() {
+  const gl = GL.gl;
+  if (!_showcase) {
+    const keep = Game.perksActive;
+    Game.perksActive = [];
+    _showcase = makeWorld(LEVELS[0]);
+    Game.perksActive = keep;
+  }
+  if (!_showcase.mesh) _showcase.mesh = buildLevelMesh(_showcase);
+
+  const t = performance.now() / 9000;
+  const keep = { d: CAM.dist, p: CAM.pitch, tx: CAM.tx, ty: CAM.ty, tz: CAM.tz };
+  // framed as a hero shot in the upper-middle band, clear of the control panels
+  CAM.tx = COLS / 2; CAM.ty = -2.6; CAM.tz = ROWS / 2;
+  CAM.pitch = 0.80;
+  fitCamera(W / H);
+  CAM.dist *= 1.16;
+  buildCamera(W / H, Math.sin(t) * 0.42);
+  Object.assign(CAM, { pitch: keep.p });
+
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, W, H);
+  gl.disable(gl.SCISSOR_TEST);
+  gl.clearColor(0.043, 0.058, 0.086, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  gl.useProgram(GL.prog);
+  const u = GL.prog.u;
+  const L = LIGHT_DIR, ll = Math.hypot(L[0], L[1], L[2]);
+  m4Identity(GL.lightVP);
+  gl.uniform3fv(u.uCam, GL.camEye);
+  gl.uniform3f(u.uLightDir, -L[0]/ll, -L[1]/ll, -L[2]/ll);
+  gl.uniformMatrix4fv(u.uLightVP, false, GL.lightVP);
+  gl.uniform1f(u.uShadowTexel, 1 / GL.SHADOW_RES);
+  // dimmer than gameplay: the menu type has to stay readable on top of it
+  gl.uniform1f(u.uAmb, 0.38); gl.uniform1f(u.uKey, 0.62);
+  gl.uniform1f(u.uShadowOn, 0);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, GL.shadowTex);
+  gl.uniform1i(u.uShadow, 0);
+  _pass = "main";
+  drawMesh(_showcase.mesh, 0, 0, 0, 0, 1, 1, 1);
+
+  // a shift on duty: medics pacing the corridors so the ward is not a dead set
+  if (!_showcase.lanes) _showcase.lanes = showcaseLanes(_showcase);
+  const now = performance.now() / 1000;
+  const tints = ["#4fb8e8", "#ff8f70", "#8be9c0"];
+  _showcase.lanes.forEach((ln, i) => {
+    const span = ln.x1 - ln.x0;
+    const phase = now * 0.30 + i * 0.7;
+    const u01 = (Math.sin(phase) + 1) / 2;          // ping-pong along the run
+    const tx = ln.x0 + span * u01;
+    const dir = Math.cos(phase) >= 0 ? 1 : -1;
+    drawCharacter3D({
+      wx: tx, wz: ln.y + 0.5,
+      ry: dir > 0 ? Math.PI / 2 : -Math.PI / 2,
+      bob: now * 9, step: now * 9, moving: true,
+      body: tints[i], cap: tints[i],
+      look: CHARACTERS[(i * 2 + 1) % CHARACTERS.length]
+    });
+  });
+
+  CAM.dist = keep.d; CAM.pitch = keep.p;
+  CAM.tx = keep.tx; CAM.ty = keep.ty; CAM.tz = keep.tz;
+}
+
+/** Six medics on a turntable for the character picker. */
+function renderPortraits() {
+  const gl = GL.gl;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, W, H);
+  gl.disable(gl.SCISSOR_TEST);
+  gl.clearColor(0.043, 0.058, 0.086, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+  const n = CHARACTERS.length;
+  const keep = { d: CAM.dist, p: CAM.pitch, tx: CAM.tx, ty: CAM.ty, tz: CAM.tz };
+  CAM.tx = 0; CAM.ty = 0.30; CAM.tz = 0; CAM.pitch = 0.20; CAM.dist = 15.0;
+  buildCamera(W / H, 0);
+  gl.useProgram(GL.prog);
+  const u = GL.prog.u;
+  // portrait key light sits beside the camera so faces are lit, not silhouetted
+  const kl = Math.hypot(0.34, 0.60, 0.72);
+  m4Identity(GL.lightVP);
+  gl.uniform3fv(u.uCam, GL.camEye);
+  gl.uniform3f(u.uLightDir, -0.34/kl, 0.60/kl, 0.72/kl);
+  gl.uniformMatrix4fv(u.uLightVP, false, GL.lightVP);
+  gl.uniform1f(u.uShadowTexel, 1 / GL.SHADOW_RES);
+  gl.uniform1f(u.uAmb, 0.78); gl.uniform1f(u.uKey, 0.92);
+  gl.uniform1f(u.uShadowOn, 0);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, GL.shadowTex);
+  gl.uniform1i(u.uShadow, 0);
+  _pass = "main";
+
+  const t = performance.now() / 1000;
+  for (let i = 0; i < n; i++) {
+    const sel = Game.charCursor[0] === i || (Game.playerCount === 2 && Game.charCursor[1] === i);
+    const spread = 2.5;
+    const wx = (i - (n - 1) / 2) * spread;
+    drawCharacter3D({
+      wx, wz: 0, ry: Math.sin(t * 0.6 + i) * 0.5,
+      bob: t * 2 + i, step: 0, moving: false,
+      body: Game.charCursor[1] === i && Game.charCursor[0] !== i ? "#ff8f70" : "#4fb8e8",
+      cap: Game.charCursor[1] === i && Game.charCursor[0] !== i ? "#ff8f70" : "#4fb8e8",
+      look: CHARACTERS[i],
+      scale: sel ? 1.12 : 0.94
+    });
+  }
+  CAM.dist = keep.d; CAM.pitch = keep.p;
+  CAM.tx = keep.tx; CAM.ty = keep.ty; CAM.tz = keep.tz;
+}
+
+function clearGL(r, g2, b) {
+  const gl = GL.gl;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, W, H);
+  gl.disable(gl.SCISSOR_TEST);
+  gl.clearColor(r, g2, b, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+}
+
 /* ---------------------------------------------------------------------
    11. RENDERING
 
@@ -2073,14 +3350,22 @@ function endLevel() {
 
 const canvas = document.getElementById("game");
 const ctx = canvas.getContext("2d");
+const canvas3d = document.getElementById("gl");
+const stack = document.getElementById("stack");
 
 function fitCanvas() {
   const s = Math.min(window.innerWidth / W, window.innerHeight / H);
-  canvas.style.width = Math.floor(W * s) + "px";
-  canvas.style.height = Math.floor(H * s) + "px";
+  const w = Math.floor(W * s), h = Math.floor(H * s);
+  for (const c of [canvas, canvas3d]) {
+    c.style.width = w + "px";
+    c.style.height = h + "px";
+  }
+  stack.style.width = w + "px";
+  stack.style.height = h + "px";
 }
 window.addEventListener("resize", fitCanvas);
 fitCanvas();
+initGL(canvas3d);
 
 /* --- cached paints ------------------------------------------------------ */
 
@@ -2106,333 +3391,6 @@ function initPaints() {
 initPaints();
 
 /* --- static background bake --------------------------------------------- */
-
-/** Two-layer level bake.
-    bg:   floor (linoleum, light pools, reflections), wall FRONT faces,
-          contact shadows — everything entities walk in front of.
-    caps: wall TOP faces + rooftop decor, drawn AFTER entities so medics
-          walking behind a wall are genuinely occluded by it. */
-const WALL_H = 20;                       // visual wall height in px
-
-function bakeBackground(world) {
-  const bg = document.createElement("canvas");
-  bg.width = PLAY_W; bg.height = PLAY_H;
-  const g = bg.getContext("2d");
-  const caps = document.createElement("canvas");
-  caps.width = PLAY_W; caps.height = PLAY_H + WALL_H;
-  const gc = caps.getContext("2d");
-  gc.translate(0, WALL_H);               // room for caps that poke above row 0
-  const rng = makeRng(world.def.seed ^ 0x9e3779b9);
-
-  const isWall = (x, y) => { const cell = cellAt(world, x, y); return !cell || (cell.solid && !cell.station); };
-  const R = 11;
-  const radii = (x, y) => {
-    const n = isWall(x, y - 1), s2 = isWall(x, y + 1), w2 = isWall(x - 1, y), e2 = isWall(x + 1, y);
-    return [(!n && !w2) ? R : 0, (!n && !e2) ? R : 0, (!s2 && !e2) ? R : 0, (!s2 && !w2) ? R : 0];
-  };
-
-  // ---- linoleum floor: warm base, sheen, speckle ----
-  const base = g.createLinearGradient(0, 0, 0, PLAY_H);
-  base.addColorStop(0, "#f3ead9");
-  base.addColorStop(0.5, "#faf3e7");
-  base.addColorStop(1, "#efe5d2");
-  g.fillStyle = base;
-  g.fillRect(0, 0, PLAY_W, PLAY_H);
-
-  // ceiling light pools on the walkable floor
-  for (let ly = 2; ly < ROWS; ly += 5) {
-    for (let lx = 3; lx < COLS; lx += 6) {
-      if (!isWalkable(world, lx, ly)) continue;
-      const cx = lx * TILE + TILE / 2, cy = ly * TILE + TILE / 2;
-      const pool = g.createRadialGradient(cx, cy, 18, cx, cy, 130);
-      pool.addColorStop(0, "rgba(255,252,240,.34)");
-      pool.addColorStop(0.55, "rgba(255,250,235,.13)");
-      pool.addColorStop(1, "rgba(255,250,235,0)");
-      g.fillStyle = pool;
-      g.fillRect(cx - 130, cy - 130, 260, 260);
-    }
-  }
-
-  // polish streaks: long soft diagonal sheen lines
-  g.save();
-  g.globalAlpha = 0.05;
-  g.strokeStyle = "#ffffff";
-  g.lineWidth = 9;
-  g.lineCap = "round";
-  for (let i = 0; i < 7; i++) {
-    const sx = rng() * PLAY_W, sy = rng() * PLAY_H;
-    g.beginPath();
-    g.moveTo(sx, sy);
-    g.lineTo(sx + 140 + rng() * 160, sy - 40 - rng() * 60);
-    g.stroke();
-  }
-  g.restore();
-
-  // fine speckle
-  for (let i = 0; i < 480; i++) {
-    const fx = rng() * PLAY_W, fy = rng() * PLAY_H;
-    const t = tileOf(fx, fy);
-    if (isWall(t.x, t.y)) continue;
-    g.fillStyle = rng() < 0.5 ? "rgba(180,160,130,.14)" : "rgba(255,255,255,.20)";
-    g.beginPath(); g.arc(fx, fy, 0.7 + rng() * 1.1, 0, 6.283); g.fill();
-  }
-  // a few larger soft scuffs
-  for (let i = 0; i < 40; i++) {
-    const fx = rng() * PLAY_W, fy = rng() * PLAY_H;
-    const t = tileOf(fx, fy);
-    if (isWall(t.x, t.y)) continue;
-    g.fillStyle = "rgba(190,170,140,.09)";
-    g.beginPath();
-    g.ellipse(fx, fy, 4 + rng() * 8, 2 + rng() * 4, rng() * 3, 0, 6.283);
-    g.fill();
-  }
-
-  // ---- hospital wayfinding line ----
-  const way = findPath(world, world.entrance, world.exit);
-  if (way.length) {
-    g.save();
-    g.strokeStyle = "rgba(255,143,163,.5)";
-    g.lineWidth = 5;
-    g.lineJoin = "round"; g.lineCap = "round";
-    g.beginPath();
-    g.moveTo(world.entrance.x * TILE + TILE / 2, world.entrance.y * TILE + TILE / 2);
-    for (const w2 of way) g.lineTo(w2.x, w2.y);
-    g.stroke();
-    g.strokeStyle = "rgba(255,255,255,.45)";
-    g.lineWidth = 1.6;
-    g.setLineDash([8, 10]);
-    g.stroke();
-    g.setLineDash([]);
-    g.restore();
-  }
-
-  paintZone(g, world.entrance, "#5cb8e6", "IN");
-  paintZone(g, world.exit, "#63cf8e", "OUT");
-
-  // ---- walls: ambient shadow, faked floor reflection, front face -> bg ----
-  for (let y = 0; y < ROWS; y++) {
-    for (let x = 0; x < COLS; x++) {
-      if (!isWall(x, y)) continue;
-      const px = x * TILE, py = y * TILE;
-      const r = radii(x, y);
-      const southOpen = !isWall(x, y + 1);
-
-      // directional cast shadow (key light upper-left), in soft layers
-      for (const [ox, oy, al] of [[4, 5, 0.10], [7, 8, 0.07], [10, 11, 0.05]]) {
-        g.fillStyle = "rgba(95,75,50," + al + ")";
-        roundRect4(g, px + ox, py + oy, TILE, TILE, r); g.fill();
-      }
-
-      if (southOpen) {
-        // faked reflection of the wall on the polished floor below
-        const refl = g.createLinearGradient(0, py + TILE, 0, py + TILE + 13);
-        refl.addColorStop(0, "rgba(109,184,167,.20)");
-        refl.addColorStop(1, "rgba(109,184,167,0)");
-        g.fillStyle = refl;
-        g.fillRect(px + 1, py + TILE, TILE - 2, 13);
-      }
-    }
-  }
-  for (let y = 0; y < ROWS; y++) {
-    for (let x = 0; x < COLS; x++) {
-      if (!isWall(x, y)) continue;
-      const px = x * TILE, py = y * TILE;
-      const r = radii(x, y);
-
-      // body of the wall within its own tile (visible sliver between cap and face)
-      g.fillStyle = PALETTE.wallSide;
-      roundRect4(g, px, py, TILE, TILE, r); g.fill();
-
-      // front (south) face with vertical shading + baseboard + contact AO
-      if (!isWall(x, y + 1)) {
-        const faceTop = py + TILE - WALL_H;
-        const face = g.createLinearGradient(0, faceTop, 0, py + TILE);
-        face.addColorStop(0, shade(PALETTE.wallSide, 1.12));
-        face.addColorStop(0.75, PALETTE.wallSide);
-        face.addColorStop(1, shade(PALETTE.wallSide, 0.82));
-        g.fillStyle = face;
-        roundRect4(g, px, faceTop, TILE, WALL_H, [0, 0, r[2], r[3]]); g.fill();
-        // baseboard
-        g.fillStyle = shade(PALETTE.wallSide, 0.68);
-        roundRect4(g, px, py + TILE - 4.5, TILE, 4.5, [0, 0, r[2], r[3]]); g.fill();
-        // contact AO on the floor
-        const ao = g.createLinearGradient(0, py + TILE, 0, py + TILE + 6);
-        ao.addColorStop(0, "rgba(60,45,25,.22)");
-        ao.addColorStop(1, "rgba(60,45,25,0)");
-        g.fillStyle = ao;
-        g.fillRect(px, py + TILE, TILE, 6);
-      }
-    }
-  }
-
-  // ---- wall caps (top faces) -> overlay canvas ----
-  for (let y = 0; y < ROWS; y++) {
-    for (let x = 0; x < COLS; x++) {
-      if (!isWall(x, y)) continue;
-      const px = x * TILE, py = y * TILE;
-      const r = radii(x, y);
-      const capTop = g.createLinearGradient(0, py - WALL_H, 0, py + TILE - WALL_H);
-      capTop.addColorStop(0, shade(PALETTE.wall, 1.05));
-      capTop.addColorStop(1, shade(PALETTE.wall, 0.94));
-      gc.fillStyle = capTop;
-      roundRect4(gc, px, py - WALL_H, TILE, TILE, r); gc.fill();
-      // crisp lit edge along the cap's south rim (the "thickness" cue)
-      if (!isWall(x, y + 1)) {
-        gc.fillStyle = "rgba(255,255,255,.34)";
-        roundRect4(gc, px + 1, py + TILE - WALL_H - 3.5, TILE - 2, 3.5, [0, 0, Math.min(r[2], 4), Math.min(r[3], 4)]);
-        gc.fill();
-      }
-      if (!isWall(x, y - 1)) {
-        gc.fillStyle = "rgba(0,0,0,.08)";
-        roundRect4(gc, px, py - WALL_H, TILE, 3, [r[0], r[1], 0, 0]); gc.fill();
-      }
-      if (!isWall(x - 1, y)) {
-        gc.fillStyle = "rgba(255,255,255,.16)";
-        roundRect4(gc, px, py - WALL_H, 3, TILE, [r[0], 0, 0, r[3]]); gc.fill();
-      }
-      if (!isWall(x + 1, y)) {
-        gc.fillStyle = "rgba(0,0,0,.07)";
-        roundRect4(gc, px + TILE - 3, py - WALL_H, 3, TILE, [0, r[1], r[2], 0]); gc.fill();
-      }
-    }
-  }
-
-  bakeDecor(gc, world, rng, isWall);
-  return { bg, caps };
-}
-
-/** Windows, plants, posters and a clock, placed deterministically on the
-    wall blobs so every ward feels furnished. Purely cosmetic. */
-function bakeDecor(g, world, rng, isWall) {
-  const spots = [];
-  for (let y = 0; y < ROWS; y++)
-    for (let x = 0; x < COLS; x++)
-      if (isWall(x, y)) spots.push({ x, y, boundary: y === 0 });
-
-  let sinceDecor = 0;
-  for (const sp of spots) {
-    sinceDecor++;
-    const cx = sp.x * TILE + TILE / 2;
-    const cy = sp.y * TILE + TILE / 2 - WALL_H + (sp.boundary ? 5 : 0);
-    const roll = rng();
-    if (sp.boundary) {
-      if (sp.x % 5 === 2) drawWindow(g, cx, cy);
-      else if (roll < 0.08) drawClock(g, cx, cy);
-      continue;
-    }
-    if (sinceDecor < 3) continue;
-    if (roll < 0.16) { drawPlant(g, cx, cy); sinceDecor = 0; }
-    else if (roll < 0.28) { drawPoster(g, cx, cy, rng); sinceDecor = 0; }
-  }
-
-  // a big friendly red cross sign over the entrance
-  const e = world.entrance;
-  if (isWall(e.x, e.y - 1)) {
-    const cx = e.x * TILE + TILE / 2, cy = (e.y - 1) * TILE + TILE / 2 - WALL_H + 6;
-    g.fillStyle = "#ffffff";
-    roundRect(g, cx - 12, cy - 12, 24, 24, 7); g.fill();
-    g.strokeStyle = "rgba(0,0,0,.12)"; g.lineWidth = 1.5;
-    roundRect(g, cx - 12, cy - 12, 24, 24, 7); g.stroke();
-    g.fillStyle = "#ef5d6b";
-    roundRect(g, cx - 3.5, cy - 9, 7, 18, 2.5); g.fill();
-    roundRect(g, cx - 9, cy - 3.5, 18, 7, 2.5); g.fill();
-  }
-}
-
-function drawWindow(g, cx, cy) {
-  fillRound(g, cx - 13, cy - 11, 26, 22, 7, "#bfe6f7");
-  const sky = g.createLinearGradient(0, cy - 11, 0, cy + 11);
-  sky.addColorStop(0, "#a6ddf5");
-  sky.addColorStop(1, "#d6f0fb");
-  g.fillStyle = sky;
-  roundRect(g, cx - 11, cy - 9, 22, 18, 5); g.fill();
-  g.fillStyle = "#ffffff";                               // a puffy cloud
-  g.beginPath();
-  g.arc(cx - 3, cy + 1, 3.4, 0, 6.283);
-  g.arc(cx + 2, cy - 1, 4.2, 0, 6.283);
-  g.arc(cx + 6, cy + 2, 3, 0, 6.283);
-  g.fill();
-  g.strokeStyle = "#8fc6de"; g.lineWidth = 2;
-  roundRect(g, cx - 13, cy - 11, 26, 22, 7); g.stroke();
-}
-
-function drawPlant(g, cx, cy) {
-  g.fillStyle = "#e8946a";                               // pot
-  roundRect(g, cx - 7, cy + 2, 14, 9, 3); g.fill();
-  g.fillStyle = "#d17c50";
-  roundRect(g, cx - 8, cy, 16, 4, 2); g.fill();
-  g.fillStyle = "#7fce8f";                               // leaves
-  for (const [ox, oy, r] of [[-5, -6, 5], [5, -5, 5], [0, -10, 5.5], [0, -3, 5]]) {
-    g.beginPath(); g.arc(cx + ox, cy + oy, r, 0, 6.283); g.fill();
-  }
-  g.fillStyle = "#a4e0ae";
-  g.beginPath(); g.arc(cx - 2, cy - 8, 2.6, 0, 6.283); g.fill();
-}
-
-function drawPoster(g, cx, cy, rng) {
-  const kind = Math.floor(rng() * 3);
-  fillRound(g, cx - 10, cy - 12, 20, 24, 3, "#fffdf6");
-  g.strokeStyle = "rgba(90,110,120,.5)"; g.lineWidth = 1.5;
-  roundRect(g, cx - 10, cy - 12, 20, 24, 3); g.stroke();
-  if (kind === 0) {                                      // heart chart
-    g.strokeStyle = "#ef5d6b"; g.lineWidth = 1.8; g.lineJoin = "round";
-    g.beginPath();
-    g.moveTo(cx - 7, cy); g.lineTo(cx - 3, cy); g.lineTo(cx - 1, cy - 5);
-    g.lineTo(cx + 1, cy + 4); g.lineTo(cx + 3, cy); g.lineTo(cx + 7, cy);
-    g.stroke();
-  } else if (kind === 1) {                               // smiley face
-    g.fillStyle = "#ffd166";
-    g.beginPath(); g.arc(cx, cy - 2, 6, 0, 6.283); g.fill();
-    g.fillStyle = "#5a4a2a";
-    g.beginPath(); g.arc(cx - 2.2, cy - 3.5, 1, 0, 6.283); g.fill();
-    g.beginPath(); g.arc(cx + 2.2, cy - 3.5, 1, 0, 6.283); g.fill();
-    g.strokeStyle = "#5a4a2a"; g.lineWidth = 1.2;
-    g.beginPath(); g.arc(cx, cy - 1.5, 3, 0.4, Math.PI - 0.4); g.stroke();
-    g.fillStyle = "#8aa4b8";
-    g.fillRect(cx - 6, cy + 6, 12, 1.6);
-  } else {                                               // wash your paws
-    g.fillStyle = "#7db2f2";
-    g.beginPath(); g.arc(cx, cy - 3, 4.5, 0, 6.283); g.fill();
-    g.beginPath();
-    g.moveTo(cx, cy - 12); g.lineTo(cx - 4.4, cy - 4); g.lineTo(cx + 4.4, cy - 4);
-    g.closePath(); g.fill();
-    g.fillStyle = "#8aa4b8";
-    g.fillRect(cx - 6, cy + 4, 12, 1.6);
-    g.fillRect(cx - 4, cy + 7, 8, 1.6);
-  }
-}
-
-function drawClock(g, cx, cy) {
-  g.fillStyle = "#ffffff";
-  g.beginPath(); g.arc(cx, cy, 9, 0, 6.283); g.fill();
-  g.strokeStyle = "#7a8b99"; g.lineWidth = 2;
-  g.beginPath(); g.arc(cx, cy, 9, 0, 6.283); g.stroke();
-  g.strokeStyle = "#4a5a68"; g.lineWidth = 1.6; g.lineCap = "round";
-  g.beginPath(); g.moveTo(cx, cy); g.lineTo(cx, cy - 5.5); g.stroke();
-  g.beginPath(); g.moveTo(cx, cy); g.lineTo(cx + 4, cy + 1.5); g.stroke();
-}
-
-function paintZone(g, tile, color, label) {
-  const x = tile.x * TILE, y = tile.y * TILE;
-  // a soft rounded doormat
-  fillRound(g, x + 2, y + 2, TILE - 4, TILE - 4, 10, color);
-  g.save();
-  g.globalAlpha = 0.35;
-  fillRound(g, x + 5, y + 5, TILE - 10, TILE - 10, 8, "#ffffff");
-  g.restore();
-  g.strokeStyle = "rgba(255,255,255,.85)";
-  g.lineWidth = 2;
-  g.setLineDash([5, 5]);
-  roundRect(g, x + 4.5, y + 4.5, TILE - 9, TILE - 9, 8);
-  g.stroke();
-  g.setLineDash([]);
-  g.font = 'bold 12px "Trebuchet MS", "Segoe UI", sans-serif';
-  g.textAlign = "center";
-  g.fillStyle = "#ffffff";
-  g.strokeStyle = "rgba(0,60,40,.35)"; g.lineWidth = 3; g.lineJoin = "round";
-  g.strokeText(label, x + TILE / 2, y + TILE / 2 + 4);
-  g.fillText(label, x + TILE / 2, y + TILE / 2 + 4);
-}
 
 /* --- icons -------------------------------------------------------------- */
 
@@ -2593,489 +3551,6 @@ function drawItemIcon(g, type, x, y, r) {
   g.restore();
 }
 
-/* --- world -------------------------------------------------------------- */
-
-function drawWorld(g) {
-  const world = Game.world;
-  if (!world.bg) {
-    const baked = bakeBackground(world);
-    world.bg = baked.bg;
-    world.caps = baked.caps;
-  }
-  g.drawImage(world.bg, 0, 0);
-  for (const st of world.stations) drawStation(g, st);
-}
-
-/** Cabinet-style body shared by every machine. */
-function machineBody(g, x, y, w, h, top, bottom, edge) {
-  const TOP_H = 9;                                        // visible top face
-  // contact shadow hugging the base, wider than the body
-  const sh = g.createRadialGradient(x + w / 2 + 4, y + h + 2, 3, x + w / 2 + 4, y + h + 2, w * 0.66);
-  sh.addColorStop(0, "rgba(90,70,45,.32)");
-  sh.addColorStop(1, "rgba(90,70,45,0)");
-  g.fillStyle = sh;
-  g.beginPath(); g.ellipse(x + w / 2 + 4, y + h + 3, w * 0.66, 7.5, 0, 0, 6.283); g.fill();
-
-  // front face: vertical shading, darker toward the ground
-  const gr = g.createLinearGradient(0, y + TOP_H, 0, y + h);
-  gr.addColorStop(0, top);
-  gr.addColorStop(0.7, bottom);
-  gr.addColorStop(1, shade(bottom, 0.82));
-  g.fillStyle = gr;
-  roundRect(g, x, y + TOP_H - 2, w, h - TOP_H + 2, 8); g.fill();
-
-  // top face: lighter, catching the ceiling light
-  const tp = g.createLinearGradient(0, y, 0, y + TOP_H + 3);
-  tp.addColorStop(0, shade(top, 1.16));
-  tp.addColorStop(1, top);
-  g.fillStyle = tp;
-  roundRect(g, x, y, w, TOP_H + 4, 8); g.fill();
-  // lit rim where top meets front
-  g.fillStyle = "rgba(255,255,255,.38)";
-  roundRect(g, x + 2, y + TOP_H + 1, w - 4, 2.2, 1); g.fill();
-
-  g.strokeStyle = edge; g.lineWidth = 2;
-  roundRect(g, x, y, w, h, 8); g.stroke();
-  // specular dot top-left
-  g.fillStyle = "rgba(255,255,255,.5)";
-  g.beginPath(); g.ellipse(x + 7, y + 4.5, 3.6, 1.8, -0.3, 0, 6.283); g.fill();
-}
-
-function drawStation(g, st) {
-  const info = STATIONS[st.type];
-  const x = st.x * TILE, y = st.y * TILE;
-
-  if (st.type === "bed") { drawBed(g, st, x, y); }
-  else {
-    machineBody(g, x + 3, y + 2, TILE - 6, TILE - 7, shade(info.color, 1.14), shade(info.color, 0.82), info.edge);
-    drawStationGlyph(g, st, x + TILE / 2, y + TILE / 2);
-    // status LED
-    const ok = !st.jammed && st.stock !== 0;
-    g.fillStyle = ok ? "rgba(140,255,190,.95)" : "rgba(255,120,90,.95)";
-    const pulse = 0.55 + 0.45 * Math.sin(performance.now() / (ok ? 520 : 160));
-    g.globalAlpha = 0.45 + 0.55 * pulse;
-    g.beginPath(); g.arc(x + TILE - 9, y + 8, 2.6, 0, 6.283); g.fill();
-    g.globalAlpha = 1;
-  }
-
-  // stock pips
-  if (st.stock !== Infinity && st.stock !== undefined) {
-    const max = info.stockMax;
-    for (let i = 0; i < max; i++) {
-      const px = x + 6 + i * 8, py = y + TILE - 9;
-      g.fillStyle = i < st.stock ? "#eafff6" : "rgba(0,0,0,.40)";
-      roundRect(g, px, py, 5, 5, 1.5); g.fill();
-    }
-  }
-
-  if (st.jammed) {
-    g.save();
-    g.globalAlpha = 0.45 + 0.35 * Math.sin(performance.now() / 90);
-    g.fillStyle = PALETTE.warn;
-    roundRect(g, x + 3, y + 2, TILE - 6, TILE - 7, 7); g.fill();
-    g.restore();
-    text(g, "!", x + TILE / 2, y + TILE / 2 + 9, 24, "#3a2a00", "center");
-  }
-
-  if (st.type === "defibrack" && st.hasDefib) drawItemIcon(g, "defib", x + TILE / 2, y + TILE / 2 + 2, 9);
-
-  if (st.flash > 0) {
-    g.save();
-    g.globalAlpha = clamp(st.flash * 1.8, 0, .65);
-    g.fillStyle = "#ffffff";
-    roundRect(g, x + 3, y + 2, TILE - 6, TILE - 7, 7); g.fill();
-    g.restore();
-  }
-}
-
-function drawBed(g, st, x, y) {
-  // grounded contact shadow + little legs peeking out
-  const sh = g.createRadialGradient(x + TILE / 2 + 4, y + TILE - 1, 4, x + TILE / 2 + 4, y + TILE - 1, TILE * 0.62);
-  sh.addColorStop(0, "rgba(90,70,45,.30)");
-  sh.addColorStop(1, "rgba(90,70,45,0)");
-  g.fillStyle = sh;
-  g.beginPath(); g.ellipse(x + TILE / 2, y + TILE - 2, TILE * 0.6, 7, 0, 0, 6.283); g.fill();
-  g.fillStyle = "#b8a68e";
-  roundRect(g, x + 5, y + TILE - 6, 4, 5, 1.5); g.fill();
-  roundRect(g, x + TILE - 9, y + TILE - 6, 4, 5, 1.5); g.fill();
-  // frame side face (the bed has height now)
-  fillRound(g, x + 2, y + 6, TILE - 4, TILE - 9, 9, "#e4d9c8");
-  // plush frame top
-  fillRound(g, x + 2, y + 2, TILE - 4, TILE - 6, 9, "#ffffff");
-  g.strokeStyle = st.occupant ? "#7fb3e8" : "#e3d5c4";
-  g.lineWidth = 2;
-  roundRect(g, x + 2, y + 2, TILE - 4, TILE - 6, 9); g.stroke();
-  // big fluffy pillow
-  fillRound(g, x + 6, y + 5, TILE - 12, 10, 5, "#fdf8ef");
-  g.strokeStyle = "#e8dcc8"; g.lineWidth = 1.2;
-  roundRect(g, x + 6, y + 5, TILE - 12, 10, 5); g.stroke();
-  // pastel blanket with a stitched edge and a heart
-  const blanket = st.occupant ? "#ffc9d6" : "#c9e6ff";
-  fillRound(g, x + 4, y + 16, TILE - 8, TILE - 22, 6, blanket);
-  g.strokeStyle = "rgba(255,255,255,.85)"; g.lineWidth = 1.4;
-  g.setLineDash([3, 3]);
-  roundRect(g, x + 6.5, y + 18.5, TILE - 13, TILE - 27, 4); g.stroke();
-  g.setLineDash([]);
-  const hx = x + TILE / 2, hy = y + TILE - 12;
-  g.fillStyle = st.occupant ? "#ff8fa8" : "#8fbfe8";
-  g.beginPath();
-  g.moveTo(hx, hy + 3.4);
-  g.bezierCurveTo(hx - 5.5, hy - 1, hx - 2.6, hy - 5, hx, hy - 1.6);
-  g.bezierCurveTo(hx + 2.6, hy - 5, hx + 5.5, hy - 1, hx, hy + 3.4);
-  g.fill();
-}
-
-/** Lighten / darken a hex colour. */
-function shade(hex, f) {
-  const n = parseInt(hex.slice(1), 16);
-  const r = clamp(Math.round(((n >> 16) & 255) * f), 0, 255);
-  const gg = clamp(Math.round(((n >> 8) & 255) * f), 0, 255);
-  const b = clamp(Math.round((n & 255) * f), 0, 255);
-  return "rgb(" + r + "," + gg + "," + b + ")";
-}
-
-function drawStationGlyph(g, st, cx, cy) {
-  g.save();
-  g.translate(cx, cy);
-  switch (st.type) {
-    case "supply":
-      g.fillStyle = "rgba(10,30,26,.55)";
-      roundRect(g, -13, -12, 26, 24, 3); g.fill();
-      g.fillStyle = "#eafff8";
-      for (let i = 0; i < 3; i++) { roundRect(g, -11, -10 + i * 8, 22, 5, 1.5); g.fill(); }
-      break;
-    case "medicine":
-      g.fillStyle = "rgba(8,20,44,.5)";
-      roundRect(g, -13, -12, 26, 24, 3); g.fill();
-      g.fillStyle = "#ffffff";
-      roundRect(g, -3.5, -10, 7, 20, 2); g.fill();
-      roundRect(g, -10, -3.5, 20, 7, 2); g.fill();
-      break;
-    case "xray":
-      g.fillStyle = "#46557a";
-      roundRect(g, -13, -12, 26, 20, 3); g.fill();
-      g.fillStyle = "#9fd8ff";
-      g.globalAlpha = 0.85;
-      g.beginPath(); g.arc(0, -3, 7, 0, 6.283); g.fill();
-      g.globalAlpha = 1;
-      g.strokeStyle = "#6fb6e0"; g.lineWidth = 1.2;
-      g.beginPath(); g.arc(0, -3, 7, 0, 6.283); g.stroke();
-      g.fillStyle = "#3a4657";
-      g.fillRect(-11, 9, 22, 4);
-      break;
-    case "cast":
-      g.fillStyle = "#fdf8ea";
-      g.beginPath(); g.arc(0, 0, 10, 0, 6.283); g.fill();
-      g.strokeStyle = "#8a7343"; g.lineWidth = 2;
-      g.beginPath(); g.arc(0, 0, 10, 0, 6.283); g.stroke();
-      g.strokeStyle = "#b9a271"; g.lineWidth = 1.6;
-      g.beginPath(); g.moveTo(-6.5, -6.5); g.lineTo(6.5, 6.5); g.stroke();
-      g.beginPath(); g.moveTo(-6.5, 2); g.lineTo(2, -6.5); g.stroke();
-      break;
-    case "charger":
-      g.fillStyle = "rgba(50,34,4,.45)";
-      roundRect(g, -12, -12, 24, 24, 4); g.fill();
-      g.fillStyle = "#fff3c4";
-      g.beginPath();
-      g.moveTo(3, -11); g.lineTo(-6, 1); g.lineTo(0, 1); g.lineTo(-3, 11);
-      g.lineTo(7, -2); g.lineTo(1, -2); g.closePath(); g.fill();
-      break;
-    case "lab":
-      g.fillStyle = "rgba(30,10,52,.45)";
-      roundRect(g, -13, -12, 26, 24, 3); g.fill();
-      g.fillStyle = "#f2e9ff";
-      g.beginPath();
-      g.moveTo(-4, -10); g.lineTo(4, -10); g.lineTo(4, -3);
-      g.lineTo(10, 9); g.lineTo(-10, 9); g.lineTo(-4, -3); g.closePath(); g.fill();
-      g.fillStyle = "#b06bff";
-      g.beginPath();
-      g.moveTo(-6.6, 3); g.lineTo(6.6, 3); g.lineTo(10, 9); g.lineTo(-10, 9); g.closePath(); g.fill();
-      g.fillStyle = "rgba(255,255,255,.75)";
-      g.beginPath(); g.arc(-2, 5.5, 1.5, 0, 6.283); g.fill();
-      g.beginPath(); g.arc(3, 6.5, 1.1, 0, 6.283); g.fill();
-      break;
-    case "delivery":
-      g.fillStyle = "#f5e5cf";
-      roundRect(g, -13, -12, 26, 24, 2); g.fill();
-      g.strokeStyle = "#7a5029"; g.lineWidth = 2;
-      g.beginPath(); g.moveTo(-13, 0); g.lineTo(13, 0); g.stroke();
-      g.beginPath(); g.moveTo(0, -12); g.lineTo(0, 12); g.stroke();
-      g.strokeStyle = "rgba(122,80,41,.5)"; g.lineWidth = 1;
-      roundRect(g, -13, -12, 26, 24, 2); g.stroke();
-      break;
-    case "defibrack":
-      g.strokeStyle = "rgba(255,220,212,.85)"; g.lineWidth = 2;
-      g.setLineDash([4, 3]);
-      roundRect(g, -12, -10, 24, 20, 3); g.stroke();
-      g.setLineDash([]);
-      break;
-  }
-  g.restore();
-}
-
-/* --- entities ----------------------------------------------------------- */
-
-/** Shared rounded-body character with a walk cycle. */
-/** Chibi body: a soft egg-shaped tummy, stubby feet and mitten arms.
-    The head (drawFace) sits big on top — plush-toy proportions. */
-function drawBody(g, opts) {
-  const { bodyColor, edgeColor, legColor, step, facing, moving } = opts;
-  const swing = moving ? Math.sin(step) * 3.5 : 0;
-  // stubby feet
-  g.fillStyle = legColor;
-  g.beginPath(); g.ellipse(-5.5, 13.8 + Math.max(0, swing) * .5, 4.5, 3.1, 0, 0, 6.283); g.fill();
-  g.beginPath(); g.ellipse(5.5, 13.8 + Math.max(0, -swing) * .5, 4.5, 3.1, 0, 0, 6.283); g.fill();
-  g.strokeStyle = shade(legColor, 0.72); g.lineWidth = 1;
-  g.beginPath(); g.ellipse(-5.5, 13.8 + Math.max(0, swing) * .5, 4.5, 3.1, 0, 0, 6.283); g.stroke();
-  g.beginPath(); g.ellipse(5.5, 13.8 + Math.max(0, -swing) * .5, 4.5, 3.1, 0, 0, 6.283); g.stroke();
-  // round tummy
-  const gr = g.createLinearGradient(0, -6, 0, 15);
-  gr.addColorStop(0, shade(bodyColor, 1.10));
-  gr.addColorStop(1, shade(bodyColor, 0.90));
-  g.fillStyle = gr;
-  g.beginPath(); g.ellipse(0, 5, 12.5, 10.5, 0, 0, 6.283); g.fill();
-  // rounded-form shading matching the head's key light
-  const bod = g.createRadialGradient(-4.5, 0.5, 2, 0, 5, 13.5);
-  bod.addColorStop(0, "rgba(255,255,255,.26)");
-  bod.addColorStop(0.55, "rgba(255,255,255,0)");
-  bod.addColorStop(1, "rgba(40,30,20,.16)");
-  g.fillStyle = bod;
-  g.beginPath(); g.ellipse(0, 5, 12.5, 10.5, 0, 0, 6.283); g.fill();
-  g.strokeStyle = edgeColor; g.lineWidth = 1.8;
-  g.beginPath(); g.ellipse(0, 5, 12.5, 10.5, 0, 0, 6.283); g.stroke();
-  // mitten arms that reach toward the facing direction
-  const ax = facing.x * 6.5, ay = facing.y * 4.5;
-  g.fillStyle = shade(bodyColor, 1.04);
-  g.strokeStyle = edgeColor; g.lineWidth = 1.4;
-  g.beginPath(); g.arc(-11 + ax, 4 + ay - swing * .5, 4.4, 0, 6.283); g.fill(); g.stroke();
-  g.beginPath(); g.arc(11 + ax, 4 + ay + swing * .5, 4.4, 0, 6.283); g.fill(); g.stroke();
-}
-
-/** Big round chibi head: glossy tear-drop eyes, rosy blush, tiny mouth.
-    mood 1 = beaming (closed happy eyes); low mood = worried brows. */
-function drawFace(g, opts) {
-  const { facing, blink, mood, skin } = opts;
-  const HY = -15, HR = opts.headR || 13.5;
-  const spread = HR / 13.5;              // pull cheeks in for smaller face windows
-
-  // contact shadow of the head resting on the body
-  g.fillStyle = "rgba(90,60,40,.20)";
-  g.beginPath(); g.ellipse(0, HY + HR - 1, HR * 0.72, 3.6, 0, 0, 6.283); g.fill();
-
-  g.fillStyle = skin;
-  g.beginPath(); g.arc(0, HY, HR, 0, 6.283); g.fill();
-  // sphere shading: soft key light from the upper-left
-  const sph = g.createRadialGradient(-HR * 0.38, HY - HR * 0.42, HR * 0.12, 0, HY, HR * 1.08);
-  sph.addColorStop(0, "rgba(255,255,255,.34)");
-  sph.addColorStop(0.5, "rgba(255,255,255,.06)");
-  sph.addColorStop(0.82, "rgba(140,85,55,0)");
-  sph.addColorStop(1, "rgba(140,85,55,.22)");
-  g.fillStyle = sph;
-  g.beginPath(); g.arc(0, HY, HR, 0, 6.283); g.fill();
-  g.strokeStyle = "rgba(150,100,75,.45)"; g.lineWidth = 1.6;
-  g.beginPath(); g.arc(0, HY, HR, 0, 6.283); g.stroke();
-
-  const ex = facing.x * 2.6, ey = facing.y * 1.8;
-  const happy = mood !== undefined && mood >= 0.999;
-
-  if (happy) {
-    // beaming: closed arched eyes ( ^ ^ )
-    g.strokeStyle = "#4a3b32"; g.lineWidth = 2; g.lineCap = "round";
-    g.beginPath(); g.arc(-4.6, HY + 2, 2.8, Math.PI + 0.4, -0.4); g.stroke();
-    g.beginPath(); g.arc(4.6, HY + 2, 2.8, Math.PI + 0.4, -0.4); g.stroke();
-  } else if (blink) {
-    g.strokeStyle = "#4a3b32"; g.lineWidth = 1.8; g.lineCap = "round";
-    g.beginPath(); g.moveTo(-6.8 + ex, HY + 1.5 + ey); g.lineTo(-2.4 + ex, HY + 1.5 + ey); g.stroke();
-    g.beginPath(); g.moveTo(2.4 + ex, HY + 1.5 + ey); g.lineTo(6.8 + ex, HY + 1.5 + ey); g.stroke();
-  } else {
-    // glossy plush eyes: dark drop + big highlight + tiny sparkle
-    for (const sx of [-1, 1]) {
-      const cx = sx * 4.6 + ex, cy = HY + 1.5 + ey;
-      g.fillStyle = "#3d3230";
-      g.beginPath(); g.ellipse(cx, cy, 2.9, 3.8, 0, 0, 6.283); g.fill();
-      g.fillStyle = "#ffffff";
-      g.beginPath(); g.arc(cx - 1, cy - 1.4, 1.25, 0, 6.283); g.fill();
-      g.beginPath(); g.arc(cx + 0.9, cy + 1.1, 0.55, 0, 6.283); g.fill();
-    }
-    // worried brows when things are getting scary
-    if (mood !== undefined && mood < 0.3) {
-      g.strokeStyle = "#8a6a52"; g.lineWidth = 1.5; g.lineCap = "round";
-      g.beginPath(); g.moveTo(-7 + ex, HY - 4.5); g.lineTo(-2.8 + ex, HY - 3); g.stroke();
-      g.beginPath(); g.moveTo(7 + ex, HY - 4.5); g.lineTo(2.8 + ex, HY - 3); g.stroke();
-    }
-  }
-
-  // rosy blush
-  g.fillStyle = "rgba(255,125,140,.32)";
-  g.beginPath(); g.ellipse(-8.2 * spread + ex * .5, HY + 5.5, 2.9, 1.9, 0, 0, 6.283); g.fill();
-  g.beginPath(); g.ellipse(8.2 * spread + ex * .5, HY + 5.5, 2.9, 1.9, 0, 0, 6.283); g.fill();
-
-  // tiny mouth
-  g.strokeStyle = "#a56a55"; g.lineWidth = 1.4; g.lineCap = "round";
-  g.beginPath();
-  if (happy) {
-    g.arc(0 + ex * .5, HY + 6, 3.4, 0.25, Math.PI - 0.25);
-  } else if (mood !== undefined && mood < 0.3) {
-    g.arc(0 + ex * .5, HY + 9.5, 2.4, Math.PI + 0.35, -0.35);   // small worried o
-  } else {
-    g.arc(0 + ex * .5, HY + 6, 2.2, 0.35, Math.PI - 0.35);      // soft smile
-  }
-  g.stroke();
-}
-
-function drawPatient(g, pt, x, y, scale) {
-  const s = scale || 1;
-  const frac = clamp(pt.patience / pt.patienceMax, 0, 1);
-  const walking = pt.state === "waiting" || pt.state === "walking";
-  const bobY = walking ? Math.sin(pt.bob) * 1.6 : 0;
-  const panic = !pt.done && frac < CRIT_AT;
-
-  g.save();
-  g.translate(x, y + bobY);
-  g.scale(s, s);
-
-  g.fillStyle = "rgba(120,95,70,.22)";
-  g.beginPath(); g.ellipse(2.5, 16.5, 13, 4.5, 0, 0, 6.283); g.fill();
-
-  if (pt.flash > 0) {
-    g.save(); g.globalAlpha = clamp(pt.flash * 1.8, 0, .75);
-    g.fillStyle = "#fff"; g.beginPath(); g.arc(0, -4, 21, 0, 6.283); g.fill(); g.restore();
-  }
-  if (panic) {
-    g.save();
-    g.globalAlpha = 0.20 + 0.18 * Math.sin(performance.now() / 110);
-    g.fillStyle = "#ff4d4d";
-    g.beginPath(); g.arc(0, -4, 20, 0, 6.283); g.fill();
-    g.restore();
-  }
-
-  const gown = pt.done ? "#b9edcb" : "#e9eff7";
-  drawBody(g, {
-    bodyColor: gown,
-    edgeColor: pt.done ? "#4ec97a" : "#aebdcd",
-    legColor: "#c9d4e0",
-    step: pt.bob * 1.6, facing: { x: 0, y: 1 }, moving: pt.state === "walking"
-  });
-  const blink = ((performance.now() / 1000 + pt.id * 1.7) % 4.2) < 0.12;
-  drawFace(g, {
-    facing: { x: 0, y: 0.4 }, blink, mood: pt.done ? 1 : frac,
-    skin: pt.done ? "#ffddb8" : (panic ? "#f8cba2" : "#fbd4a8")
-  });
-  // fluffy mop of hair with a cowlick — varies a little per patient
-  const hairCol = ["#6b5140", "#3f3833", "#8a5a33", "#54646e"][pt.id % 4];
-  g.fillStyle = hairCol;
-  g.beginPath(); g.arc(0, -17.5, 13.6, Math.PI + 0.15, -0.15); g.fill();
-  g.beginPath(); g.arc(-7, -24, 4.4, 0, 6.283); g.fill();
-  g.beginPath(); g.arc(7, -24, 4.4, 0, 6.283); g.fill();
-  g.strokeStyle = hairCol; g.lineWidth = 2; g.lineCap = "round";
-  g.beginPath(); g.moveTo(1, -28.5); g.quadraticCurveTo(4, -33, 7.5, -31.5); g.stroke();
-
-  if (panic) {                                   // sweat beads
-    g.fillStyle = "rgba(140,205,255,.95)";
-    const t = performance.now() / 260;
-    for (let i = 0; i < 2; i++) {
-      const off = ((t + i * 0.5) % 1);
-      g.beginPath(); g.arc(9 - i * 17, -20 + off * 12, 1.8, 0, 6.283); g.fill();
-    }
-  }
-
-  // tucked in: bedded patients lie under the blanket, arms and all
-  if (pt.station && pt.station.type === "bed") {
-    const bl = g.createLinearGradient(0, 2, 0, 17);
-    bl.addColorStop(0, "#ffd4de");
-    bl.addColorStop(1, "#f7b8c8");
-    g.fillStyle = bl;
-    roundRect(g, -14, 2, 28, 15, 6); g.fill();
-    // rounded-form shading on the blanket itself
-    const bsh = g.createRadialGradient(-4, 4, 2, 0, 9, 16);
-    bsh.addColorStop(0, "rgba(255,255,255,.35)");
-    bsh.addColorStop(0.6, "rgba(255,255,255,0)");
-    bsh.addColorStop(1, "rgba(120,60,80,.14)");
-    g.fillStyle = bsh;
-    roundRect(g, -14, 2, 28, 15, 6); g.fill();
-    // folded white sheet edge at the chest
-    g.fillStyle = "#ffffff";
-    roundRect(g, -14, 2, 28, 4.5, 3); g.fill();
-    g.strokeStyle = "rgba(210,150,170,.7)"; g.lineWidth = 1.2;
-    g.setLineDash([3, 3]);
-    roundRect(g, -11.5, 8, 23, 6.5, 3); g.stroke();
-    g.setLineDash([]);
-  }
-  g.restore();
-
-  // ailment badge
-  const badgeY = y - 44;
-  const a2 = AILMENTS[pt.ailment];
-  g.fillStyle = "rgba(18,28,42,.28)";
-  g.beginPath(); g.arc(x + 1, badgeY + 2, 12.5, 0, 6.283); g.fill();
-  g.fillStyle = "rgba(255,255,255,.96)";
-  g.beginPath(); g.arc(x, badgeY, 12.5, 0, 6.283); g.fill();
-  g.beginPath(); g.moveTo(x - 4, badgeY + 9.5); g.lineTo(x + 4, badgeY + 9.5); g.lineTo(x, badgeY + 17); g.closePath(); g.fill();
-  g.strokeStyle = pt.vip ? "#e8b40b" : a2.color; g.lineWidth = 2.2;
-  g.beginPath(); g.arc(x, badgeY, 12.5, 0, 6.283); g.stroke();
-  drawAilmentIcon(g, pt.ailment, x, badgeY, 8);
-  if (pt.revealed) {
-    g.fillStyle = "#b58bff";
-    g.beginPath(); g.arc(x + 10, badgeY - 9, 3.6, 0, 6.283); g.fill();
-    g.strokeStyle = "#fff"; g.lineWidth = 1; g.stroke();
-  }
-  if (pt.vip) {
-    // little gold crown above the badge
-    g.fillStyle = "#ffd54a";
-    g.strokeStyle = "#b8880a"; g.lineWidth = 1;
-    g.beginPath();
-    g.moveTo(x - 7, badgeY - 12);
-    g.lineTo(x - 7, badgeY - 18); g.lineTo(x - 3.5, badgeY - 14.5);
-    g.lineTo(x, badgeY - 20); g.lineTo(x + 3.5, badgeY - 14.5);
-    g.lineTo(x + 7, badgeY - 18); g.lineTo(x + 7, badgeY - 12);
-    g.closePath(); g.fill(); g.stroke();
-  }
-
-  // need bubble: while settled, show exactly what to bring or do next
-  const cur = pt.steps[pt.step];
-  if (!pt.done && cur && (pt.state === "station")) {
-    const nx = x + 21, ny = badgeY + 3;
-    let draw = null;
-    if (cur.k === "bedside" && cur.need) draw = () => drawItemIcon(g, cur.need, nx, ny, 7);
-    else if (cur.k === "bedside" && cur.produce) draw = () => drawItemIcon(g, cur.produce, nx, ny, 7);
-    else if (cur.k === "atStation" && pt.station && pt.station.type !== cur.station) {
-      const col = STATIONS[cur.station].color;
-      draw = () => {
-        g.fillStyle = col;
-        roundRect(g, nx - 7, ny - 7, 14, 14, 4); g.fill();
-        g.strokeStyle = "rgba(255,255,255,.8)"; g.lineWidth = 1.6; g.lineCap = "round";
-        g.beginPath(); g.moveTo(nx - 3, ny); g.lineTo(nx + 3, ny); g.stroke();
-        g.beginPath(); g.moveTo(nx + 1, ny - 3); g.lineTo(nx + 4, ny); g.lineTo(nx + 1, ny + 3); g.stroke();
-      };
-    }
-    if (draw) {
-      g.fillStyle = "rgba(255,255,255,.94)";
-      g.beginPath(); g.arc(nx, ny, 10, 0, 6.283); g.fill();
-      g.strokeStyle = "rgba(90,120,150,.7)"; g.lineWidth = 1.4;
-      g.beginPath(); g.arc(nx, ny, 10, 0, 6.283); g.stroke();
-      draw();
-    }
-  }
-
-  drawMeter(g, x - 17, y + 22, 34, 5, frac, pt.done);
-
-  // step pips
-  const n = pt.steps.length;
-  if (n > 1 && !pt.done) {
-    for (let i = 0; i < n; i++) {
-      g.fillStyle = i < pt.step ? PALETTE.good : "rgba(255,255,255,.65)";
-      g.strokeStyle = "rgba(28,40,58,.75)"; g.lineWidth = 1;
-      g.beginPath(); g.arc(x - (n - 1) * 4.5 + i * 9, y + 32, 3, 0, 6.283); g.fill(); g.stroke();
-    }
-  }
-
-  if (pt.steps[pt.step] && pt.steps[pt.step].k === "lab") {
-    const t = performance.now() / 180;
-    g.strokeStyle = "#b58bff"; g.lineWidth = 2.6; g.lineCap = "round";
-    g.beginPath(); g.arc(x, badgeY, 16, t, t + 2.2); g.stroke();
-  }
-}
-
 function drawMeter(g, x, y, w, h, frac, done) {
   g.fillStyle = "rgba(14,22,34,.78)";
   roundRect(g, x - 1.5, y - 1.5, w + 3, h + 3, 3.5); g.fill();
@@ -3092,245 +3567,6 @@ function drawMeter(g, x, y, w, h, frac, done) {
 }
 
 /** The helper nurse: white scrubs, pink cross cap, hearts while comforting. */
-function drawNurse(g, nu) {
-  const bobY = Math.sin(nu.bob) * 1.6;
-  g.fillStyle = "rgba(120,95,70,.22)";
-  g.beginPath(); g.ellipse(nu.x, nu.y + 17, 13, 5, 0, 0, 6.283); g.fill();
-
-  g.save();
-  g.translate(nu.x, nu.y + bobY);
-  drawBody(g, {
-    bodyColor: "#ffffff", edgeColor: "#e0b8c4", legColor: "#f2d5dd",
-    step: nu.step || 0, facing: { x: nu.dx || 0, y: nu.dy || 1 }, moving: nu.moving
-  });
-  g.fillStyle = "#ff8fa8";
-  roundRect(g, -1.8, 2, 3.6, 9, 1.4); g.fill();
-  roundRect(g, -4.5, 4.7, 9, 3.6, 1.4); g.fill();
-  const blink = ((performance.now() / 1000 + 3.1) % 4.4) < 0.12;
-  drawFace(g, { facing: { x: nu.dx || 0, y: nu.dy || 1 }, blink, skin: "#f6cfa6" });
-  g.fillStyle = "#ffffff";
-  g.beginPath(); g.arc(0, -16.5, 13.7, Math.PI + 0.12, -0.12); g.fill();
-  g.fillStyle = "#f2dde3";
-  roundRect(g, -13.4, -19.4, 26.8, 4, 2); g.fill();
-  g.fillStyle = "#ff8fa8";
-  roundRect(g, -1.2, -27.5, 2.4, 6, 1); g.fill();
-  roundRect(g, -3, -25.7, 6, 2.4, 1); g.fill();
-  g.restore();
-
-  // floating hearts while she comforts
-  if (nu.comfort > 0) {
-    const t = performance.now() / 300;
-    for (let i = 0; i < 2; i++) {
-      const ph = (t * 0.7 + i * 0.5) % 1;
-      g.save();
-      g.globalAlpha = 1 - ph;
-      g.fillStyle = "#ff8fa8";
-      const hx = nu.x + (i ? 12 : -12), hy = nu.y - 34 - ph * 16;
-      g.beginPath();
-      g.moveTo(hx, hy + 3);
-      g.bezierCurveTo(hx - 4.4, hy - 1, hx - 2, hy - 4.4, hx, hy - 1.2);
-      g.bezierCurveTo(hx + 2, hy - 4.4, hx + 4.4, hy - 1, hx, hy + 3);
-      g.fill();
-      g.restore();
-    }
-  }
-}
-
-/** Hair peeking out, then cap (or hijab), then face accessories. */
-function drawMedicHead(g, look, scrubColor, facing) {
-  const ex = facing.x * 2.6;
-
-  // hair that shows under or around the headwear
-  g.fillStyle = look.hair;
-  if (look.style === "puffs") {
-    g.beginPath(); g.arc(-12.5, -22, 5.6, 0, 6.283); g.fill();
-    g.beginPath(); g.arc(12.5, -22, 5.6, 0, 6.283); g.fill();
-  } else if (look.style === "curls") {
-    for (const ox of [-9, -4.5, 0, 4.5, 9]) {
-      g.beginPath(); g.arc(ox, -21.5, 3.1, 0, 6.283); g.fill();
-    }
-  } else if (look.style === "fringe") {
-    g.beginPath();
-    g.ellipse(-4, -21.5, 7.5, 3.4, -0.18, 0, 6.283); g.fill();
-    g.beginPath();
-    g.ellipse(5.5, -22, 5, 2.8, 0.22, 0, 6.283); g.fill();
-  }
-
-  {
-    // scrub cap with a little cross
-    g.fillStyle = shade(scrubColor, 1.06);
-    g.beginPath(); g.arc(0, -16.5, 13.7, Math.PI + 0.12, -0.12); g.fill();
-    g.fillStyle = shade(scrubColor, 0.88);
-    roundRect(g, -13.4, -19.4, 26.8, 4, 2); g.fill();
-    g.fillStyle = "rgba(255,255,255,.9)";
-    roundRect(g, -1.2, -27.5, 2.4, 6, 1); g.fill();
-    roundRect(g, -3, -25.7, 6, 2.4, 1); g.fill();
-    if (look.acc === "catcap") {
-      g.fillStyle = shade(scrubColor, 1.06);
-      g.beginPath(); g.moveTo(-11, -24); g.lineTo(-8.5, -33); g.lineTo(-3.5, -26.5); g.closePath(); g.fill();
-      g.beginPath(); g.moveTo(11, -24); g.lineTo(8.5, -33); g.lineTo(3.5, -26.5); g.closePath(); g.fill();
-      g.fillStyle = "#ffc9dd";
-      g.beginPath(); g.moveTo(-9.3, -26); g.lineTo(-8.6, -30.5); g.lineTo(-5.8, -26.8); g.closePath(); g.fill();
-      g.beginPath(); g.moveTo(9.3, -26); g.lineTo(8.6, -30.5); g.lineTo(5.8, -26.8); g.closePath(); g.fill();
-    }
-  }
-
-  // face accessories
-  if (look.acc === "glasses") {
-    g.strokeStyle = "rgba(60,50,45,.85)"; g.lineWidth = 1.4;
-    g.beginPath(); g.arc(-4.6 + ex, -13.5, 4.6, 0, 6.283); g.stroke();
-    g.beginPath(); g.arc(4.6 + ex, -13.5, 4.6, 0, 6.283); g.stroke();
-    g.beginPath(); g.moveTo(-0.2 + ex, -14.5); g.lineTo(0.2 + ex, -14.5); g.stroke();
-  } else if (look.acc === "freckles") {
-    g.fillStyle = "rgba(170,110,70,.55)";
-    for (const [ox, oy] of [[-8.6, -9.2], [-6.4, -8.2], [-9.6, -7.6], [8.6, -9.2], [6.4, -8.2], [9.6, -7.6]]) {
-      g.beginPath(); g.arc(ox, oy, 0.8, 0, 6.283); g.fill();
-    }
-  }
-}
-
-function drawPlayer(g, p) {
-  const moving = !!(p.moving);
-  const bob = Math.sin(p.bob) * 1.8;
-  const x = p.x, y = p.y + bob;
-  const facing = { x: p.dx || 0, y: p.dy || 1 };
-
-  // sprint trail
-  if (p.sprinting) {
-    g.save();
-    for (let i = 1; i <= 3; i++) {
-      g.globalAlpha = 0.16 / i;
-      g.fillStyle = p.color;
-      g.beginPath();
-      g.ellipse(x - facing.x * i * 9, y - facing.y * i * 9 + 2, 10, 12, 0, 0, 6.283);
-      g.fill();
-    }
-    g.restore();
-  }
-
-  g.fillStyle = "rgba(120,95,70,.24)";
-  g.beginPath(); g.ellipse(p.x + 2.5, p.y + 17, 13.5, 5, 0, 0, 6.283); g.fill();
-
-  g.save();
-  g.translate(x, y);
-  if (p.squash > 0) {
-    const k = Math.sin((p.squash / 0.18) * Math.PI) * 0.16;
-    g.scale(1 + k, 1 - k);
-  }
-
-  drawBody(g, {
-    bodyColor: p.color,
-    edgeColor: "rgba(12,22,34,.45)",
-    legColor: "#31445c",
-    step: p.step || 0, facing, moving
-  });
-
-  // little white cross badge on the tummy
-  g.fillStyle = "rgba(255,255,255,.92)";
-  roundRect(g, -1.8, 2, 3.6, 9, 1.4); g.fill();
-  roundRect(g, -4.5, 4.7, 9, 3.6, 1.4); g.fill();
-
-  const blink = ((performance.now() / 1000 + p.index * 2.3) % 4.6) < 0.12;
-  const look = p.look || CHARACTERS[p.index % CHARACTERS.length];
-  if (look.acc === "hijab") {
-    const hc = look.accColor || "#7fd8c8";
-    g.fillStyle = shade(hc, 0.86);                 // under-scarf shadow ring
-    g.beginPath(); g.arc(0, -15, 14.8, 0, 6.283); g.fill();
-    g.fillStyle = hc;
-    g.beginPath(); g.arc(0, -15.6, 14.2, 0, 6.283); g.fill();
-    drawFace(g, { facing, blink, skin: look.skin, headR: 10 });
-    g.fillStyle = hc;                              // chin wrap under the face
-    g.beginPath(); g.ellipse(0, -3.4, 7.4, 3.4, 0, 0, Math.PI); g.fill();
-    g.fillStyle = "rgba(255,255,255,.9)";          // little cross pin
-    roundRect(g, -1, -29, 2, 5, 1); g.fill();
-    roundRect(g, -2.5, -27.5, 5, 2, 1); g.fill();
-  } else {
-    drawFace(g, { facing, blink, skin: look.skin });
-    drawMedicHead(g, look, p.color, facing);
-  }
-
-  // player tag under the feet
-  g.fillStyle = "rgba(10,18,28,.5)";
-  roundRect(g, -8, 15.5, 16, 9, 4); g.fill();
-  text(g, "P" + (p.index + 1), 0, 22.6, 8.5, "rgba(255,255,255,.95)", "center");
-  g.restore();
-
-  // stamina, only while it matters
-  if (p.stamina !== undefined && p.stamina < Game.staminaMax - 0.02) {
-    const f = clamp(p.stamina / Game.staminaMax, 0, 1);
-    g.fillStyle = "rgba(14,22,34,.7)";
-    roundRect(g, x - 13, y + 27, 26, 4, 2); g.fill();
-    g.fillStyle = f > 0.25 ? "#8be9ff" : "#ff9a6a";
-    roundRect(g, x - 12, y + 28, 24 * f, 2, 1); g.fill();
-  }
-
-  // carried patient / item
-  if (p.patient) {
-    g.save();
-    g.translate(x, y - 50);
-    g.scale(0.76, 0.76);
-    drawPatient(g, p.patient, 0, 0, 1);
-    g.restore();
-  } else if (p.item) {
-    g.save();
-    g.globalAlpha = .22; g.fillStyle = "#000";
-    g.beginPath(); g.ellipse(x, y - 31, 12, 4, 0, 0, 6.283); g.fill();
-    g.restore();
-    const lift = Math.sin(p.bob * 0.6) * 1.2;
-    drawItemIcon(g, p.item.type, x, y - 40 + lift, 11);
-    if (p.item.type === "defib_charged") {
-      const f = clamp(p.item.charge / DEFIB_CHARGE_LIFE, 0, 1);
-      drawMeter(g, x - 15, y - 55, 30, 4, f);
-    }
-    if (p.item.type === "sample") {
-      text(g, "#" + (p.item.pid % 100), x + 15, y - 38, 10, "#ffd0d0", "left");
-    }
-  }
-
-  // work progress / hint / contextual prompts.
-  // Each player gets its own vertical lane so captions from two medics
-  // standing shoulder-to-shoulder never overlap.
-  const lane = p.index * 32;
-  if (p.work) {
-    const f = clamp(p.work.t / p.work.dur, 0, 1);
-    const bx = x - 26, by = y + 33 + lane;
-    g.fillStyle = "rgba(14,22,34,.82)";
-    roundRect(g, bx - 2, by - 2, 56, 11, 4); g.fill();
-    const gr = g.createLinearGradient(bx, 0, bx + 52, 0);
-    gr.addColorStop(0, "#ffd54a");
-    gr.addColorStop(1, "#fff3b0");
-    g.fillStyle = gr;
-    roundRect(g, bx, by, 52 * f, 7, 3); g.fill();
-    labelPill(g, p.work.label, x, by + 13, "#eaf2ff");
-  } else if (p.hintT > 0) {
-    g.save();
-    g.globalAlpha = clamp(p.hintT, 0, 1);
-    labelPill(g, p.hint, x, y + 30 + lane, "#ffd9a0");
-    g.restore();
-  } else if (p.promptE || p.promptQ) {
-    const keys = p.index === 0 ? ["E", "Q"] : ["/", "."];
-    let py2 = y + 30 + lane;
-    if (p.promptQ) { promptPill(g, keys[1], p.promptQ, x, py2, "#ffe28a"); py2 += 17; }
-    if (p.promptE) promptPill(g, keys[0], p.promptE, x, py2, "#a8dcff");
-  }
-
-  // a bouncing chevron pointing at the exit while carrying a healed patient
-  if (p.patient && p.patient.done) {
-    const ex = Game.world.exit.x * TILE + TILE / 2, ey = Game.world.exit.y * TILE + TILE / 2;
-    const ang = Math.atan2(ey - y, ex - x);
-    const rr = 34 + Math.sin(performance.now() / 160) * 4;
-    g.save();
-    g.translate(x + Math.cos(ang) * rr, y + Math.sin(ang) * rr);
-    g.rotate(ang);
-    g.fillStyle = "#3fbf72";
-    g.strokeStyle = "rgba(10,30,20,.5)"; g.lineWidth = 1.5;
-    g.beginPath();
-    g.moveTo(9, 0); g.lineTo(-5, -8); g.lineTo(-1, 0); g.lineTo(-5, 8);
-    g.closePath(); g.fill(); g.stroke();
-    g.restore();
-  }
-}
-
 /** A keycap + caption pill for contextual controls. */
 function promptPill(g, key, label, cx, top, keyColor) {
   g.font = 'bold 10px "Trebuchet MS", "Segoe UI", sans-serif';
@@ -3357,29 +3593,6 @@ function labelPill(g, str, cx, top, color) {
   g.fillStyle = "rgba(14,22,34,.85)";
   roundRect(g, cx - w / 2, top, w, 15, 5); g.fill();
   text(g, str, cx, top + 11, 11, color, "center");
-}
-
-function drawFloorItem(g, it) {
-  g.fillStyle = "rgba(20,32,48,.20)";
-  g.beginPath(); g.ellipse(it.x, it.y + 9, 11, 4, 0, 0, 6.283); g.fill();
-  const bob = Math.sin(performance.now() / 420 + it.id) * 1.4;
-  drawItemIcon(g, it.type, it.x, it.y + bob, 11);
-}
-
-/** Soft ring under whatever each medic is currently facing. */
-function drawFocusRings(g) {
-  for (const p of Game.players) {
-    const st = facingStation(Game.world, p, () => true);
-    if (!st) continue;
-    const t = performance.now() / 260;
-    g.save();
-    g.globalAlpha = 0.30 + 0.14 * Math.sin(t);
-    g.strokeStyle = p.color;
-    g.lineWidth = 2.5;
-    roundRect(g, st.x * TILE + 1, st.y * TILE + 1, TILE - 2, TILE - 2, 8);
-    g.stroke();
-    g.restore();
-  }
 }
 
 /* --- HUD ---------------------------------------------------------------- */
@@ -3595,30 +3808,23 @@ function drawBanner(g) {
 /* --- screens ------------------------------------------------------------ */
 
 function drawTitle(g) {
-  g.fillStyle = Paint.title;
+  // scrim only — the live 3D ward turns behind the menu
+  g.fillStyle = "rgba(8,13,22,.44)";
   g.fillRect(0, 0, W, H);
-
-  // ECG sweep across the lower third
-  g.save();
-  g.strokeStyle = "rgba(63,182,232,.28)"; g.lineWidth = 3; g.lineJoin = "round";
-  g.beginPath();
-  const t = performance.now() / 700;
-  for (let x = 0; x <= W; x += 6) {
-    const phase = (x / W * 6 + t) % 6;
-    let y = H * 0.955;
-    if (phase > 2.4 && phase < 3.0) y -= 80 * Math.sin((phase - 2.4) / 0.6 * Math.PI);
-    else if (phase >= 3.0 && phase < 3.3) y += 34;
-    if (x === 0) g.moveTo(x, y); else g.lineTo(x, y);
-  }
-  g.stroke(); g.restore();
+  const band = g.createLinearGradient(0, 0, 0, 210);
+  band.addColorStop(0, "rgba(8,13,22,.80)"); band.addColorStop(1, "rgba(8,13,22,0)");
+  g.fillStyle = band; g.fillRect(0, 0, W, 210);
+  const foot = g.createLinearGradient(0, H - 340, 0, H);
+  foot.addColorStop(0, "rgba(8,13,22,0)"); foot.addColorStop(1, "rgba(8,13,22,.92)");
+  g.fillStyle = foot; g.fillRect(0, H - 340, W, 340);
 
   const pulse = 1 + 0.012 * Math.sin(performance.now() / 420);
   g.save();
-  g.translate(W / 2, 140); g.scale(pulse, pulse);
+  g.translate(W / 2, 118); g.scale(pulse, pulse);
   text(g, "CODE BLUE!", 2, 4, 86, "rgba(0,0,0,.45)", "center");
   text(g, "CODE BLUE!", 0, 0, 86, "#48c3f0", "center");
   g.restore();
-  text(g, "a two-player emergency room", W / 2, 182, 19, PALETTE.dim, "center", "normal");
+  text(g, "a two-player emergency room", W / 2, 158, 19, PALETTE.dim, "center", "normal");
 
   const cards = [
     { x: 128, color: PALETTE.p1, title: "PLAYER 1",
@@ -3626,40 +3832,32 @@ function drawTitle(g) {
     { x: 664, color: PALETTE.p2, title: "PLAYER 2",
       rows: [["Move", "Arrow keys"], ["Pick up / put down", "/  slash"], ["Work station (hold)", ".  period"], ["Sprint (hold)", "Right Shift"]] }
   ];
+  const CY = 588, CH = 138;
   for (const c of cards) {
-    g.fillStyle = "rgba(255,255,255,.045)";
-    roundRect(g, c.x, 222, 488, 250, 16); g.fill();
-    g.strokeStyle = "rgba(255,255,255,.09)"; g.lineWidth = 1;
-    roundRect(g, c.x, 222, 488, 250, 16); g.stroke();
+    // opaque enough to read against the moving ward behind it
+    g.fillStyle = "rgba(9,15,25,.74)";
+    roundRect(g, c.x, CY, 488, CH, 16); g.fill();
+    g.strokeStyle = "rgba(255,255,255,.12)"; g.lineWidth = 1;
+    roundRect(g, c.x, CY, 488, CH, 16); g.stroke();
     g.fillStyle = c.color;
-    roundRect(g, c.x, 222, 488, 5, 3); g.fill();
-    text(g, c.title, c.x + 28, 262, 20, c.color);
+    roundRect(g, c.x, CY, 488, 5, 3); g.fill();
+    text(g, c.title, c.x + 26, CY + 34, 18, c.color);
     c.rows.forEach((r, i) => {
-      const y = 300 + i * 36;
-      text(g, r[0], c.x + 28, y, 15, PALETTE.dim, "left", "normal");
-      keyCap(g, r[1], c.x + 300, y - 14);
+      const y = CY + 66 + (i % 2) * 34;
+      const cx = c.x + 26 + Math.floor(i / 2) * 232;
+      text(g, r[0], cx, y, 13, PALETTE.dim, "left", "normal");
+      keyCap(g, r[1], cx + 128, y - 14);
     });
   }
 
   text(g, "Escape pauses · M mutes · treat patients, then wheel them to the green OUT tile",
-       W / 2, 512, 14, PALETTE.dim, "center", "normal");
+       W / 2, CY - 58, 14, PALETTE.dim, "center", "normal");
 
   const blink = (Math.sin(performance.now() / 320) + 1) / 2;
   g.save(); g.globalAlpha = 0.55 + 0.45 * blink;
-  text(g, "Press  1  solo          Press  2  co-op", W / 2, 570, 30, "#ffd54a", "center");
+  text(g, "Press  1  solo          Press  2  co-op", W / 2, CY - 20, 30, "#ffd54a", "center");
   g.restore();
 
-  const demo = (i, x, dxs) => ({
-    x, y: 680, dx: dxs, dy: 0, bob: performance.now() / 300 + i * 2,
-    step: performance.now() / 160 + i * 2, moving: true, stamina: STAMINA_MAX,
-    color: i === 0 ? PALETTE.p1 : PALETTE.p2, index: i,
-    item: null, patient: null, work: null, hintT: 0
-  });
-  g.save();
-  g.translate(W / 2, 680); g.scale(2.3, 2.3); g.translate(-W / 2, -680);
-  drawPlayer(g, demo(0, W / 2 - 42, 1));
-  drawPlayer(g, demo(1, W / 2 + 42, -1));
-  g.restore();
 }
 
 function keyCap(g, label, x, y) {
@@ -3673,8 +3871,15 @@ function keyCap(g, label, x, y) {
 }
 
 function drawCharSelect(g) {
-  g.fillStyle = Paint.title;
+  // only a whisper of scrim: the models behind are the point of this screen
+  g.fillStyle = "rgba(8,13,22,.12)";
   g.fillRect(0, 0, W, H);
+  const top = g.createLinearGradient(0, 0, 0, 200);
+  top.addColorStop(0, "rgba(8,13,22,.85)"); top.addColorStop(1, "rgba(8,13,22,0)");
+  g.fillStyle = top; g.fillRect(0, 0, W, 200);
+  const bot = g.createLinearGradient(0, H - 200, 0, H);
+  bot.addColorStop(0, "rgba(8,13,22,0)"); bot.addColorStop(1, "rgba(8,13,22,.85)");
+  g.fillStyle = bot; g.fillRect(0, H - 200, W, 200);
 
   text(g, "CHOOSE YOUR MEDIC", W / 2, 84, 40, PALETTE.text, "center");
   text(g, Game.playerCount === 2 ? "P1: A/D + E to lock in      P2: arrows + / to lock in"
@@ -3687,34 +3892,31 @@ function drawCharSelect(g) {
 
   for (let i = 0; i < CHARACTERS.length; i++) {
     const c = CHARACTERS[i];
-    const x = x0 + i * (cardW + gap), y = 170, h = 320;
+    const x = x0 + i * (cardW + gap), y = 172, h = 400;
     const p1Here = Game.charCursor[0] === i;
     const p2Here = Game.playerCount === 2 && Game.charCursor[1] === i;
 
-    g.fillStyle = "rgba(255,255,255,.05)";
-    roundRect(g, x, y, cardW, h, 16); g.fill();
+    // no flat fill over the model — just a floor glow under the selected medic
+    if (p1Here || p2Here) {
+      const glow = g.createRadialGradient(x + cardW / 2, y + h - 70, 4,
+                                          x + cardW / 2, y + h - 70, cardW * 0.62);
+      const c0 = p1Here && p2Here ? "255,213,74" : (p1Here ? "79,184,232" : "255,143,112");
+      glow.addColorStop(0, "rgba(" + c0 + ",.22)");
+      glow.addColorStop(1, "rgba(" + c0 + ",0)");
+      g.fillStyle = glow;
+      roundRect(g, x, y, cardW, h, 16); g.fill();
+    }
+    // name plate keeps the text legible over the model
+    g.fillStyle = "rgba(8,13,22,.74)";
+    roundRect(g, x + 8, y + h - 84, cardW - 16, 62, 12); g.fill();
     if (p1Here || p2Here) {
       g.strokeStyle = p1Here && p2Here ? "#ffd54a" : (p1Here ? PALETTE.p1 : PALETTE.p2);
       g.lineWidth = 4;
       roundRect(g, x - 2, y - 2, cardW + 4, h + 4, 18); g.stroke();
     }
 
-    // portrait: the actual in-game chibi at 2.6x, wearing this look
-    const demo = {
-      x: x + cardW / 2, y: y + 150, dx: 0, dy: 1,
-      bob: performance.now() / 320 + i * 1.3, step: 0, moving: false,
-      stamina: STAMINA_MAX, squash: 0, sprinting: false, hintT: 0,
-      color: p2Here && !p1Here ? PALETTE.p2 : PALETTE.p1,
-      index: p2Here && !p1Here ? 1 : 0,
-      look: c, item: null, patient: null, work: null
-    };
-    g.save();
-    g.translate(demo.x, demo.y); g.scale(2.6, 2.6); g.translate(-demo.x, -demo.y);
-    drawPlayer(g, demo);
-    g.restore();
-
-    text(g, c.name, x + cardW / 2, y + 250, 24, PALETTE.text, "center");
-    text(g, c.blurb, x + cardW / 2, y + 274, 13, PALETTE.dim, "center", "normal");
+    text(g, c.name, x + cardW / 2, y + h - 54, 23, PALETTE.text, "center");
+    text(g, c.blurb, x + cardW / 2, y + h - 34, 12, PALETTE.dim, "center", "normal");
 
     // lock-in ribbons
     const ribbon = (slot, color, ty) => {
@@ -3723,16 +3925,16 @@ function drawCharSelect(g) {
       roundRect(g, x + 14, ty, cardW - 28, 24, 8); g.fill();
       text(g, "P" + (slot + 1) + "  READY!", x + cardW / 2, ty + 17, 13, "#10202e", "center");
     };
-    ribbon(0, PALETTE.p1, y + h - 62);
-    ribbon(1, PALETTE.p2, y + h - 34);
+    ribbon(0, PALETTE.p1, y + h - 54);
+    ribbon(1, PALETTE.p2, y + h - 26);
   }
 
   const blink = 0.55 + 0.45 * Math.sin(performance.now() / 300);
   g.save(); g.globalAlpha = blink;
   text(g, Game.playerCount === 2 ? "both medics lock in to continue" : "lock in to continue",
-       W / 2, 560, 18, "#ffd54a", "center");
+       W / 2, 622, 18, "#ffd54a", "center");
   g.restore();
-  text(g, "Esc  back to title", W / 2, 596, 14, PALETTE.dim, "center", "normal");
+  text(g, "Esc  back to title", W / 2, 652, 14, PALETTE.dim, "center", "normal");
 }
 
 function drawPerks(g) {
@@ -4045,96 +4247,248 @@ function drawResults(g) {
   text(g, "E / Enter  continue          R  retry", W / 2, 674, 19, PALETTE.text, "center");
 }
 
-/* --- frame composition -------------------------------------------------- */
+
+/* ---------------------------------------------------------------------
+   World-space UI: 2D badges, bars and prompts projected from 3D.
+   --------------------------------------------------------------------- */
+
+function drawWorldUI(g) {
+  const world = Game.world;
+
+  // --- station status: stock pips and jam warnings ---
+  for (const st of world.stations) {
+    if (st.type === "bed") continue;
+    const info = STATIONS[st.type];
+    if (st.stock !== Infinity && st.stock !== undefined && info.stockMax) {
+      const s = projectToScreen(st.x + 0.5, 1.05, st.y + 0.5);
+      if (s) {
+        const max = Math.max(info.stockMax, st.stock);
+        const w = max * 8;
+        for (let i = 0; i < max; i++) {
+          g.fillStyle = i < st.stock ? "#eafff6" : "rgba(20,30,40,.55)";
+          roundRect(g, s.x - w / 2 + i * 8, s.y - 4, 5, 5, 1.5); g.fill();
+        }
+      }
+    }
+    if (st.jammed) {
+      const s = projectToScreen(st.x + 0.5, 1.35, st.y + 0.5);
+      if (s) {
+        g.save();
+        g.globalAlpha = 0.6 + 0.4 * Math.sin(performance.now() / 90);
+        fillRound(g, s.x - 13, s.y - 13, 26, 26, 8, PALETTE.warn);
+        text(g, "!", s.x, s.y + 7, 20, "#3a2a00", "center");
+        g.restore();
+      }
+    }
+  }
+
+  // --- focus rings on whatever each medic faces ---
+  for (const p of Game.players) {
+    const st = facingStation(world, p, () => true);
+    if (!st) continue;
+    const s = projectToScreen(st.x + 0.5, 0.02, st.y + 0.5);
+    if (!s) continue;
+    g.save();
+    g.globalAlpha = 0.34 + 0.16 * Math.sin(performance.now() / 260);
+    g.strokeStyle = p.color; g.lineWidth = 3;
+    g.beginPath(); g.ellipse(s.x, s.y, 26, 13, 0, 0, 6.283); g.stroke();
+    g.restore();
+  }
+
+  // --- patients ---
+  for (const pt of Game.patients) {
+    if (pt.state === "gone") continue;
+    const carried = pt.state === "carried";
+    const carrier = carried ? Game.players.find(q => q.patient === pt) : null;
+    if (carried && !carrier) continue;
+    const inBed = pt.station && pt.station.type === "bed";
+    const wx = (carried ? carrier.x : pt.x) * T2W;
+    const wz = (carried ? carrier.y : pt.y) * T2W;
+    const wy = carried ? 2.05 : (inBed ? bedTopY() + 1.02 : 1.12);
+    const s = projectToScreen(wx, wy, wz);
+    if (!s) continue;
+    drawPatientTag(g, pt, s.x, s.y, carried ? 0.8 : 1);
+  }
+
+  // --- medics: prompts, work bars, stamina ---
+  for (const p of Game.players) {
+    const s = projectToScreen(p.x * T2W, 0.02, p.y * T2W);
+    if (!s) continue;
+    const lane = p.index * 32;
+    if (p.stamina !== undefined && p.stamina < Game.staminaMax - 0.02) {
+      const f = clamp(p.stamina / Game.staminaMax, 0, 1);
+      g.fillStyle = "rgba(14,22,34,.7)";
+      roundRect(g, s.x - 13, s.y + 4, 26, 4, 2); g.fill();
+      g.fillStyle = f > 0.25 ? "#8be9ff" : "#ff9a6a";
+      roundRect(g, s.x - 12, s.y + 5, 24 * f, 2, 1); g.fill();
+    }
+    if (p.work) {
+      const f = clamp(p.work.t / p.work.dur, 0, 1);
+      const bx = s.x - 26, by = s.y + 12 + lane;
+      g.fillStyle = "rgba(14,22,34,.82)";
+      roundRect(g, bx - 2, by - 2, 56, 11, 4); g.fill();
+      const gr = g.createLinearGradient(bx, 0, bx + 52, 0);
+      gr.addColorStop(0, "#ffd54a"); gr.addColorStop(1, "#fff3b0");
+      g.fillStyle = gr;
+      roundRect(g, bx, by, 52 * f, 7, 3); g.fill();
+      labelPill(g, p.work.label, s.x, by + 13, "#eaf2ff");
+    } else if (p.hintT > 0) {
+      g.save();
+      g.globalAlpha = clamp(p.hintT, 0, 1);
+      labelPill(g, p.hint, s.x, s.y + 12 + lane, "#ffd9a0");
+      g.restore();
+    } else if (p.promptE || p.promptQ) {
+      const keys = p.index === 0 ? ["E", "Q"] : ["/", "."];
+      let py = s.y + 12 + lane;
+      if (p.promptQ) { promptPill(g, keys[1], p.promptQ, s.x, py, "#ffe28a"); py += 17; }
+      if (p.promptE) promptPill(g, keys[0], p.promptE, s.x, py, "#a8dcff");
+    }
+    // exit arrow while carrying someone treated
+    if (p.patient && p.patient.done) {
+      const ex = projectToScreen(world.exit.x + 0.5, 0.02, world.exit.y + 0.5);
+      if (ex) {
+        const ang = Math.atan2(ex.y - s.y, ex.x - s.x);
+        const rr = 46 + Math.sin(performance.now() / 160) * 5;
+        g.save();
+        g.translate(s.x + Math.cos(ang) * rr, s.y + Math.sin(ang) * rr);
+        g.rotate(ang);
+        g.fillStyle = "#3fbf72";
+        g.strokeStyle = "rgba(10,30,20,.5)"; g.lineWidth = 1.5;
+        g.beginPath();
+        g.moveTo(10, 0); g.lineTo(-6, -9); g.lineTo(-1, 0); g.lineTo(-6, 9);
+        g.closePath(); g.fill(); g.stroke();
+        g.restore();
+      }
+    }
+  }
+
+  // --- floating score popups ---
+  for (const p of Game.popups) {
+    const s = projectToScreen(p.x * T2W, 1.0 + p.t * 0.5, p.y * T2W);
+    if (!s) continue;
+    g.globalAlpha = clamp(1 - p.t / p.life, 0, 1) * clamp(p.t * 6, 0, 1);
+    const rise = 1 + 0.25 * clamp(1 - p.t * 4, 0, 1);
+    g.save();
+    g.translate(s.x, s.y); g.scale(rise, rise);
+    text(g, p.text, 1.5, 1.5, p.size, "rgba(8,12,18,.8)", "center");
+    text(g, p.text, 0, 0, p.size, p.color, "center");
+    g.restore();
+  }
+  g.globalAlpha = 1;
+}
+
+/** Badge, patience bar, step pips and need bubble above one patient. */
+function drawPatientTag(g, pt, x, y, scale) {
+  const frac = clamp(pt.patience / pt.patienceMax, 0, 1);
+  const a2 = AILMENTS[pt.ailment];
+  const R = 12.5 * scale;
+
+  g.fillStyle = "rgba(18,28,42,.28)";
+  g.beginPath(); g.arc(x + 1, y + 2, R, 0, 6.283); g.fill();
+  g.fillStyle = "rgba(255,255,255,.96)";
+  g.beginPath(); g.arc(x, y, R, 0, 6.283); g.fill();
+  g.beginPath();
+  g.moveTo(x - 4*scale, y + R * 0.76); g.lineTo(x + 4*scale, y + R * 0.76);
+  g.lineTo(x, y + R * 1.36); g.closePath(); g.fill();
+  g.strokeStyle = pt.vip ? "#e8b40b" : a2.color; g.lineWidth = 2.2;
+  g.beginPath(); g.arc(x, y, R, 0, 6.283); g.stroke();
+  drawAilmentIcon(g, pt.ailment, x, y, 8 * scale);
+  if (pt.revealed) {
+    g.fillStyle = "#b58bff";
+    g.beginPath(); g.arc(x + 10*scale, y - 9*scale, 3.6*scale, 0, 6.283); g.fill();
+    g.strokeStyle = "#fff"; g.lineWidth = 1; g.stroke();
+  }
+
+  // what they still need
+  const cur = pt.steps[pt.step];
+  if (!pt.done && cur && pt.state === "station") {
+    const nx = x + 21 * scale, ny = y + 3 * scale;
+    let draw = null;
+    if (cur.k === "bedside" && cur.need) draw = () => drawItemIcon(g, cur.need, nx, ny, 7 * scale);
+    else if (cur.k === "bedside" && cur.produce) draw = () => drawItemIcon(g, cur.produce, nx, ny, 7 * scale);
+    else if (cur.k === "atStation" && pt.station && pt.station.type !== cur.station) {
+      const col = STATIONS[cur.station].color;
+      draw = () => {
+        g.fillStyle = col;
+        roundRect(g, nx - 7*scale, ny - 7*scale, 14*scale, 14*scale, 4); g.fill();
+        g.strokeStyle = "rgba(255,255,255,.85)"; g.lineWidth = 1.6; g.lineCap = "round";
+        g.beginPath(); g.moveTo(nx - 3*scale, ny); g.lineTo(nx + 3*scale, ny); g.stroke();
+      };
+    }
+    if (draw) {
+      g.fillStyle = "rgba(255,255,255,.94)";
+      g.beginPath(); g.arc(nx, ny, 10 * scale, 0, 6.283); g.fill();
+      g.strokeStyle = "rgba(90,120,150,.7)"; g.lineWidth = 1.4;
+      g.beginPath(); g.arc(nx, ny, 10 * scale, 0, 6.283); g.stroke();
+      draw();
+    }
+  }
+
+  drawMeter(g, x - 17 * scale, y + R * 1.5, 34 * scale, 5, frac, pt.done);
+
+  const n = pt.steps.length;
+  if (n > 1 && !pt.done) {
+    for (let i = 0; i < n; i++) {
+      g.fillStyle = i < pt.step ? PALETTE.good : "rgba(255,255,255,.65)";
+      g.strokeStyle = "rgba(28,40,58,.75)"; g.lineWidth = 1;
+      g.beginPath();
+      g.arc(x - (n - 1) * 4.5 * scale + i * 9 * scale, y + R * 1.5 + 12, 3 * scale, 0, 6.283);
+      g.fill(); g.stroke();
+    }
+  }
+  if (pt.steps[pt.step] && pt.steps[pt.step].k === "lab") {
+    const t = performance.now() / 180;
+    g.strokeStyle = "#b58bff"; g.lineWidth = 2.6; g.lineCap = "round";
+    g.beginPath(); g.arc(x, y, R + 4, t, t + 2.2); g.stroke();
+  }
+}
+
+/* ---------------------------------------------------------------------
+   Frame composition
+   --------------------------------------------------------------------- */
 
 function render() {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, W, H);
-
-  if (Game.screen === "title") { drawTitle(ctx); return; }
-  if (Game.screen === "chars") { drawCharSelect(ctx); return; }
-  if (Game.screen === "select") { drawSelect(ctx); return; }
-  if (Game.screen === "perks") { drawPerks(ctx); return; }
-
-  ctx.fillStyle = "#0b1119";
-  ctx.fillRect(0, 0, W, H);
-
-  ctx.save();
-  const sh = Game.shake;
-  const ox = sh ? (Math.random() - 0.5) * sh : 0;
-  const oy = sh ? (Math.random() - 0.5) * sh : 0;
-  ctx.translate(PLAY_X + ox, PLAY_Y + oy);
-  ctx.beginPath(); ctx.rect(-ox, -oy, PLAY_W, PLAY_H); ctx.clip();
-
-  drawWorld(ctx);
-  drawFocusRings(ctx);
-
-  for (const it of Game.floorItems) drawFloorItem(ctx, it);
-
-  // depth-sorted entities
-  const drawables = [];
-  for (const pt of Game.patients) {
-    if (pt.state === "carried") continue;
-    drawables.push({ y: pt.y, fn: () => drawPatient(ctx, pt, pt.x, pt.y) });
+  if (!GL.ok) {
+    ctx.fillStyle = "#0d1117"; ctx.fillRect(0, 0, W, H);
+    text(ctx, "This game needs WebGL2.", W / 2, H / 2, 26, "#eaf2ff", "center");
+    return;
   }
-  for (const p of Game.players) drawables.push({ y: p.y, fn: () => drawPlayer(ctx, p) });
-  if (Game.nurse) drawables.push({ y: Game.nurse.y, fn: () => drawNurse(ctx, Game.nurse) });
-  drawables.sort((a, b) => a.y - b.y);
-  for (const d of drawables) d.fn();
 
-  for (const q of Game.particles) {
-    ctx.globalAlpha = clamp(1 - q.t / q.life, 0, 1);
-    ctx.fillStyle = q.color;
-    const s2 = 4 * (1 - q.t / q.life) + 1;
-    ctx.fillRect(q.x - s2 / 2, q.y - s2 / 2, s2, s2);
-  }
-  ctx.globalAlpha = 1;
+  const inWard = Game.screen === "play" || Game.screen === "paused" || Game.screen === "results";
 
-  // wall caps occlude whoever walks behind them
-  if (Game.world.caps) ctx.drawImage(Game.world.caps, 0, -WALL_H);
-
-  // lighting sits under the popups so text stays crisp
-  ctx.save();
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.translate(PLAY_X + ox, PLAY_Y + oy);
-  ctx.fillStyle = Paint.vignette;
-  ctx.fillRect(-ox, -oy, PLAY_W, PLAY_H);
-  ctx.restore();
-
-  for (const p of Game.popups) {
-    ctx.globalAlpha = clamp(1 - p.t / p.life, 0, 1) * clamp(p.t * 6, 0, 1);
-    const rise = 1 + 0.25 * clamp(1 - p.t * 4, 0, 1);
+  if (inWard && Game.world) {
+    CAM.shake = Game.shake;
+    renderWorld3D(0);
+    drawWorldUI(ctx);
+    if (Game.flashRed > 0) {
+      ctx.save(); ctx.globalAlpha = Game.flashRed * 0.45;
+      ctx.fillStyle = "#ff2d2d"; ctx.fillRect(PLAY_X, PLAY_Y, PLAY_W, PLAY_H); ctx.restore();
+    }
+    if (Game.flashGood > 0) {
+      ctx.save(); ctx.globalAlpha = Game.flashGood * 0.18;
+      ctx.fillStyle = "#8bffb0"; ctx.fillRect(PLAY_X, PLAY_Y, PLAY_W, PLAY_H); ctx.restore();
+    }
     ctx.save();
-    ctx.translate(p.x, p.y); ctx.scale(rise, rise);
-    text(ctx, p.text, 1.5, 1.5, p.size, "rgba(8,12,18,.8)", "center");
-    text(ctx, p.text, 0, 0, p.size, p.color, "center");
+    ctx.fillStyle = Paint.vignette;
+    ctx.translate(PLAY_X, PLAY_Y);
+    ctx.fillRect(0, 0, PLAY_W, PLAY_H);
     ctx.restore();
-  }
-  ctx.globalAlpha = 1;
-  ctx.restore();
-
-  if (Game.flashRed > 0) {
-    ctx.save();
-    ctx.globalAlpha = Game.flashRed * 0.5;
-    ctx.fillStyle = "#ff2d2d";
-    ctx.fillRect(PLAY_X, PLAY_Y, PLAY_W, PLAY_H);
-    ctx.restore();
-  }
-  if (Game.flashGood > 0) {
-    ctx.save();
-    ctx.globalAlpha = Game.flashGood * 0.20;
-    ctx.fillStyle = "#8bffb0";
-    ctx.fillRect(PLAY_X, PLAY_Y, PLAY_W, PLAY_H);
-    ctx.restore();
+    drawHUD(ctx);
+    drawLegend(ctx);
+    drawTutorial(ctx);
+    drawBanner(ctx);
+    if (Game.screen === "paused") drawPause(ctx);
+    if (Game.screen === "results") drawResults(ctx);
+    return;
   }
 
-  drawHUD(ctx);
-  drawLegend(ctx);
-  drawTutorial(ctx);
-  drawBanner(ctx);
-
-  if (Game.screen === "paused") drawPause(ctx);
-  if (Game.screen === "results") drawResults(ctx);
+  if (Game.screen === "title") { renderShowcase(); drawTitle(ctx); return; }
+  if (Game.screen === "chars") { renderPortraits(); drawCharSelect(ctx); return; }
+  clearGL(0.043, 0.058, 0.086);
+  if (Game.screen === "select") drawSelect(ctx);
+  else if (Game.screen === "perks") drawPerks(ctx);
 }
 
 /* ---------------------------------------------------------------------
@@ -4280,7 +4634,8 @@ function frame(now) {
 /* Dev/test hook: lets an automated playtest inspect and drive the game.
    Nothing in the game itself reads from this object. */
 window.CodeBlue = {
-  Game, LEVELS, AILMENTS, STATIONS, ITEMS,
+  Game, LEVELS, AILMENTS, STATIONS, ITEMS, GL, CAM,
+  projectToScreen,
   startLevel,
   state: () => ({
     screen: Game.screen,
