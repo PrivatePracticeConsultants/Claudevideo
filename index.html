@@ -2217,9 +2217,11 @@ function bakeBackground(world) {
       const r = radii(x, y);
       const southOpen = !isWall(x, y + 1);
 
-      // soft ambient shadow pooling around the base
-      g.fillStyle = "rgba(110,90,60,.16)";
-      roundRect4(g, px - 2, py + 3, TILE + 4, TILE + 5, r); g.fill();
+      // directional cast shadow (key light upper-left), in soft layers
+      for (const [ox, oy, al] of [[4, 5, 0.10], [7, 8, 0.07], [10, 11, 0.05]]) {
+        g.fillStyle = "rgba(95,75,50," + al + ")";
+        roundRect4(g, px + ox, py + oy, TILE, TILE, r); g.fill();
+      }
 
       if (southOpen) {
         // faked reflection of the wall on the polished floor below
@@ -2283,6 +2285,14 @@ function bakeBackground(world) {
       if (!isWall(x, y - 1)) {
         gc.fillStyle = "rgba(0,0,0,.08)";
         roundRect4(gc, px, py - WALL_H, TILE, 3, [r[0], r[1], 0, 0]); gc.fill();
+      }
+      if (!isWall(x - 1, y)) {
+        gc.fillStyle = "rgba(255,255,255,.16)";
+        roundRect4(gc, px, py - WALL_H, 3, TILE, [r[0], 0, 0, r[3]]); gc.fill();
+      }
+      if (!isWall(x + 1, y)) {
+        gc.fillStyle = "rgba(0,0,0,.07)";
+        roundRect4(gc, px + TILE - 3, py - WALL_H, 3, TILE, [0, r[1], r[2], 0]); gc.fill();
       }
     }
   }
@@ -2600,11 +2610,11 @@ function drawWorld(g) {
 function machineBody(g, x, y, w, h, top, bottom, edge) {
   const TOP_H = 9;                                        // visible top face
   // contact shadow hugging the base, wider than the body
-  const sh = g.createRadialGradient(x + w / 2, y + h + 2, 3, x + w / 2, y + h + 2, w * 0.62);
-  sh.addColorStop(0, "rgba(90,70,45,.30)");
+  const sh = g.createRadialGradient(x + w / 2 + 4, y + h + 2, 3, x + w / 2 + 4, y + h + 2, w * 0.66);
+  sh.addColorStop(0, "rgba(90,70,45,.32)");
   sh.addColorStop(1, "rgba(90,70,45,0)");
   g.fillStyle = sh;
-  g.beginPath(); g.ellipse(x + w / 2, y + h + 2, w * 0.62, 7, 0, 0, 6.283); g.fill();
+  g.beginPath(); g.ellipse(x + w / 2 + 4, y + h + 3, w * 0.66, 7.5, 0, 0, 6.283); g.fill();
 
   // front face: vertical shading, darker toward the ground
   const gr = g.createLinearGradient(0, y + TOP_H, 0, y + h);
@@ -2680,7 +2690,7 @@ function drawStation(g, st) {
 
 function drawBed(g, st, x, y) {
   // grounded contact shadow + little legs peeking out
-  const sh = g.createRadialGradient(x + TILE / 2, y + TILE - 2, 4, x + TILE / 2, y + TILE - 2, TILE * 0.62);
+  const sh = g.createRadialGradient(x + TILE / 2 + 4, y + TILE - 1, 4, x + TILE / 2 + 4, y + TILE - 1, TILE * 0.62);
   sh.addColorStop(0, "rgba(90,70,45,.30)");
   sh.addColorStop(1, "rgba(90,70,45,0)");
   g.fillStyle = sh;
@@ -2824,11 +2834,15 @@ function drawBody(g, opts) {
   gr.addColorStop(1, shade(bodyColor, 0.90));
   g.fillStyle = gr;
   g.beginPath(); g.ellipse(0, 5, 12.5, 10.5, 0, 0, 6.283); g.fill();
+  // rounded-form shading matching the head's key light
+  const bod = g.createRadialGradient(-4.5, 0.5, 2, 0, 5, 13.5);
+  bod.addColorStop(0, "rgba(255,255,255,.26)");
+  bod.addColorStop(0.55, "rgba(255,255,255,0)");
+  bod.addColorStop(1, "rgba(40,30,20,.16)");
+  g.fillStyle = bod;
+  g.beginPath(); g.ellipse(0, 5, 12.5, 10.5, 0, 0, 6.283); g.fill();
   g.strokeStyle = edgeColor; g.lineWidth = 1.8;
   g.beginPath(); g.ellipse(0, 5, 12.5, 10.5, 0, 0, 6.283); g.stroke();
-  // belly sheen
-  g.fillStyle = "rgba(255,255,255,.22)";
-  g.beginPath(); g.ellipse(-3.5, 1.5, 5, 3.4, -0.4, 0, 6.283); g.fill();
   // mitten arms that reach toward the facing direction
   const ax = facing.x * 6.5, ay = facing.y * 4.5;
   g.fillStyle = shade(bodyColor, 1.04);
@@ -2843,7 +2857,20 @@ function drawFace(g, opts) {
   const { facing, blink, mood, skin } = opts;
   const HY = -15, HR = opts.headR || 13.5;
   const spread = HR / 13.5;              // pull cheeks in for smaller face windows
+
+  // contact shadow of the head resting on the body
+  g.fillStyle = "rgba(90,60,40,.20)";
+  g.beginPath(); g.ellipse(0, HY + HR - 1, HR * 0.72, 3.6, 0, 0, 6.283); g.fill();
+
   g.fillStyle = skin;
+  g.beginPath(); g.arc(0, HY, HR, 0, 6.283); g.fill();
+  // sphere shading: soft key light from the upper-left
+  const sph = g.createRadialGradient(-HR * 0.38, HY - HR * 0.42, HR * 0.12, 0, HY, HR * 1.08);
+  sph.addColorStop(0, "rgba(255,255,255,.34)");
+  sph.addColorStop(0.5, "rgba(255,255,255,.06)");
+  sph.addColorStop(0.82, "rgba(140,85,55,0)");
+  sph.addColorStop(1, "rgba(140,85,55,.22)");
+  g.fillStyle = sph;
   g.beginPath(); g.arc(0, HY, HR, 0, 6.283); g.fill();
   g.strokeStyle = "rgba(150,100,75,.45)"; g.lineWidth = 1.6;
   g.beginPath(); g.arc(0, HY, HR, 0, 6.283); g.stroke();
@@ -2908,7 +2935,7 @@ function drawPatient(g, pt, x, y, scale) {
   g.scale(s, s);
 
   g.fillStyle = "rgba(120,95,70,.22)";
-  g.beginPath(); g.ellipse(0, 16.5, 13, 4.5, 0, 0, 6.283); g.fill();
+  g.beginPath(); g.ellipse(2.5, 16.5, 13, 4.5, 0, 0, 6.283); g.fill();
 
   if (pt.flash > 0) {
     g.save(); g.globalAlpha = clamp(pt.flash * 1.8, 0, .75);
@@ -2950,6 +2977,29 @@ function drawPatient(g, pt, x, y, scale) {
       const off = ((t + i * 0.5) % 1);
       g.beginPath(); g.arc(9 - i * 17, -20 + off * 12, 1.8, 0, 6.283); g.fill();
     }
+  }
+
+  // tucked in: bedded patients lie under the blanket, arms and all
+  if (pt.station && pt.station.type === "bed") {
+    const bl = g.createLinearGradient(0, 2, 0, 17);
+    bl.addColorStop(0, "#ffd4de");
+    bl.addColorStop(1, "#f7b8c8");
+    g.fillStyle = bl;
+    roundRect(g, -14, 2, 28, 15, 6); g.fill();
+    // rounded-form shading on the blanket itself
+    const bsh = g.createRadialGradient(-4, 4, 2, 0, 9, 16);
+    bsh.addColorStop(0, "rgba(255,255,255,.35)");
+    bsh.addColorStop(0.6, "rgba(255,255,255,0)");
+    bsh.addColorStop(1, "rgba(120,60,80,.14)");
+    g.fillStyle = bsh;
+    roundRect(g, -14, 2, 28, 15, 6); g.fill();
+    // folded white sheet edge at the chest
+    g.fillStyle = "#ffffff";
+    roundRect(g, -14, 2, 28, 4.5, 3); g.fill();
+    g.strokeStyle = "rgba(210,150,170,.7)"; g.lineWidth = 1.2;
+    g.setLineDash([3, 3]);
+    roundRect(g, -11.5, 8, 23, 6.5, 3); g.stroke();
+    g.setLineDash([]);
   }
   g.restore();
 
@@ -3159,7 +3209,7 @@ function drawPlayer(g, p) {
   }
 
   g.fillStyle = "rgba(120,95,70,.24)";
-  g.beginPath(); g.ellipse(p.x, p.y + 17, 13.5, 5, 0, 0, 6.283); g.fill();
+  g.beginPath(); g.ellipse(p.x + 2.5, p.y + 17, 13.5, 5, 0, 0, 6.283); g.fill();
 
   g.save();
   g.translate(x, y);
