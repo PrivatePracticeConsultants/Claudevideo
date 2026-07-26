@@ -1784,9 +1784,16 @@ function updatePatients(dt) {
   Game.patients = Game.patients.filter(p => p.state !== "gone");
 }
 
+const EASE_IN_SECS = 25;                 // opening window with no brutal cases
+
 function chooseAilment() {
-  const pool = Game.level.ailments;
-  // Weight the newest ailment of the level a little higher so it shows up.
+  let pool = Game.level.ailments;
+  // Ease into the shift: the first arrivals are never cardiac or mystery,
+  // so no seed can deal the two hardest chains as an opening hand.
+  if (Game.time < EASE_IN_SECS) {
+    const gentle = pool.filter(a => a !== "cardiac" && a !== "mystery");
+    if (gentle.length) pool = gentle;
+  }
   const r = Game.rng();
   const idx = Math.floor(r * pool.length);
   return pool[clamp(idx, 0, pool.length - 1)];
@@ -2100,42 +2107,98 @@ initPaints();
 
 /* --- static background bake --------------------------------------------- */
 
-/** Render floor, wall blobs and decor once per level — drawn to read as a
-    soft cartoon emergency room, not a tile grid. */
+/** Two-layer level bake.
+    bg:   floor (linoleum, light pools, reflections), wall FRONT faces,
+          contact shadows — everything entities walk in front of.
+    caps: wall TOP faces + rooftop decor, drawn AFTER entities so medics
+          walking behind a wall are genuinely occluded by it. */
+const WALL_H = 20;                       // visual wall height in px
+
 function bakeBackground(world) {
-  const c = document.createElement("canvas");
-  c.width = PLAY_W; c.height = PLAY_H;
-  const g = c.getContext("2d");
+  const bg = document.createElement("canvas");
+  bg.width = PLAY_W; bg.height = PLAY_H;
+  const g = bg.getContext("2d");
+  const caps = document.createElement("canvas");
+  caps.width = PLAY_W; caps.height = PLAY_H + WALL_H;
+  const gc = caps.getContext("2d");
+  gc.translate(0, WALL_H);               // room for caps that poke above row 0
   const rng = makeRng(world.def.seed ^ 0x9e3779b9);
 
   const isWall = (x, y) => { const cell = cellAt(world, x, y); return !cell || (cell.solid && !cell.station); };
+  const R = 11;
+  const radii = (x, y) => {
+    const n = isWall(x, y - 1), s2 = isWall(x, y + 1), w2 = isWall(x - 1, y), e2 = isWall(x + 1, y);
+    return [(!n && !w2) ? R : 0, (!n && !e2) ? R : 0, (!s2 && !e2) ? R : 0, (!s2 && !w2) ? R : 0];
+  };
 
-  // ---- seamless warm floor with soft speckles (no grid lines) ----
-  g.fillStyle = PALETTE.floor;
+  // ---- linoleum floor: warm base, sheen, speckle ----
+  const base = g.createLinearGradient(0, 0, 0, PLAY_H);
+  base.addColorStop(0, "#f3ead9");
+  base.addColorStop(0.5, "#faf3e7");
+  base.addColorStop(1, "#efe5d2");
+  g.fillStyle = base;
   g.fillRect(0, 0, PLAY_W, PLAY_H);
-  for (let i = 0; i < 130; i++) {
+
+  // ceiling light pools on the walkable floor
+  for (let ly = 2; ly < ROWS; ly += 5) {
+    for (let lx = 3; lx < COLS; lx += 6) {
+      if (!isWalkable(world, lx, ly)) continue;
+      const cx = lx * TILE + TILE / 2, cy = ly * TILE + TILE / 2;
+      const pool = g.createRadialGradient(cx, cy, 18, cx, cy, 130);
+      pool.addColorStop(0, "rgba(255,252,240,.34)");
+      pool.addColorStop(0.55, "rgba(255,250,235,.13)");
+      pool.addColorStop(1, "rgba(255,250,235,0)");
+      g.fillStyle = pool;
+      g.fillRect(cx - 130, cy - 130, 260, 260);
+    }
+  }
+
+  // polish streaks: long soft diagonal sheen lines
+  g.save();
+  g.globalAlpha = 0.05;
+  g.strokeStyle = "#ffffff";
+  g.lineWidth = 9;
+  g.lineCap = "round";
+  for (let i = 0; i < 7; i++) {
+    const sx = rng() * PLAY_W, sy = rng() * PLAY_H;
+    g.beginPath();
+    g.moveTo(sx, sy);
+    g.lineTo(sx + 140 + rng() * 160, sy - 40 - rng() * 60);
+    g.stroke();
+  }
+  g.restore();
+
+  // fine speckle
+  for (let i = 0; i < 480; i++) {
     const fx = rng() * PLAY_W, fy = rng() * PLAY_H;
     const t = tileOf(fx, fy);
     if (isWall(t.x, t.y)) continue;
-    g.fillStyle = rng() < 0.5 ? PALETTE.floorSpeck : "#f2e9d8";
+    g.fillStyle = rng() < 0.5 ? "rgba(180,160,130,.14)" : "rgba(255,255,255,.20)";
+    g.beginPath(); g.arc(fx, fy, 0.7 + rng() * 1.1, 0, 6.283); g.fill();
+  }
+  // a few larger soft scuffs
+  for (let i = 0; i < 40; i++) {
+    const fx = rng() * PLAY_W, fy = rng() * PLAY_H;
+    const t = tileOf(fx, fy);
+    if (isWall(t.x, t.y)) continue;
+    g.fillStyle = "rgba(190,170,140,.09)";
     g.beginPath();
-    g.ellipse(fx, fy, 3 + rng() * 7, 2 + rng() * 4, rng() * 3, 0, 6.283);
+    g.ellipse(fx, fy, 4 + rng() * 8, 2 + rng() * 4, rng() * 3, 0, 6.283);
     g.fill();
   }
 
-  // ---- hospital wayfinding line from the entrance to the exit ----
+  // ---- hospital wayfinding line ----
   const way = findPath(world, world.entrance, world.exit);
   if (way.length) {
     g.save();
-    g.strokeStyle = "rgba(255,143,163,.55)";
+    g.strokeStyle = "rgba(255,143,163,.5)";
     g.lineWidth = 5;
-    g.lineJoin = "round";
-    g.lineCap = "round";
+    g.lineJoin = "round"; g.lineCap = "round";
     g.beginPath();
     g.moveTo(world.entrance.x * TILE + TILE / 2, world.entrance.y * TILE + TILE / 2);
     for (const w2 of way) g.lineTo(w2.x, w2.y);
     g.stroke();
-    g.strokeStyle = "rgba(255,255,255,.5)";
+    g.strokeStyle = "rgba(255,255,255,.45)";
     g.lineWidth = 1.6;
     g.setLineDash([8, 10]);
     g.stroke();
@@ -2146,61 +2209,101 @@ function bakeBackground(world) {
   paintZone(g, world.entrance, "#5cb8e6", "IN");
   paintZone(g, world.exit, "#63cf8e", "OUT");
 
-  // ---- wall blobs: chunky sticker look, rounded only at convex corners ----
-  const R = 11, LIFT = 7;
-  const radii = (x, y) => {
-    const n = isWall(x, y - 1), s2 = isWall(x, y + 1), w2 = isWall(x - 1, y), e2 = isWall(x + 1, y);
-    return [(!n && !w2) ? R : 0, (!n && !e2) ? R : 0, (!s2 && !e2) ? R : 0, (!s2 && !w2) ? R : 0];
-  };
-  // soft cast shadow, then the darker underside, then the pastel top
-  for (const layer of ["shadow", "side", "top"]) {
-    for (let y = 0; y < ROWS; y++) {
-      for (let x = 0; x < COLS; x++) {
-        if (!isWall(x, y)) continue;
-        const px = x * TILE, py = y * TILE;
-        const r = radii(x, y);
-        if (layer === "shadow") {
-          g.fillStyle = "rgba(120,105,80,.18)";
-          roundRect4(g, px - 1, py + 4, TILE + 2, TILE + 4, r); g.fill();
-        } else if (layer === "side") {
-          g.fillStyle = PALETTE.wallSide;
-          roundRect4(g, px, py, TILE, TILE, r); g.fill();
-        } else {
-          g.fillStyle = PALETTE.wall;
-          roundRect4(g, px, py - LIFT, TILE, TILE, r); g.fill();
-        }
+  // ---- walls: ambient shadow, faked floor reflection, front face -> bg ----
+  for (let y = 0; y < ROWS; y++) {
+    for (let x = 0; x < COLS; x++) {
+      if (!isWall(x, y)) continue;
+      const px = x * TILE, py = y * TILE;
+      const r = radii(x, y);
+      const southOpen = !isWall(x, y + 1);
+
+      // soft ambient shadow pooling around the base
+      g.fillStyle = "rgba(110,90,60,.16)";
+      roundRect4(g, px - 2, py + 3, TILE + 4, TILE + 5, r); g.fill();
+
+      if (southOpen) {
+        // faked reflection of the wall on the polished floor below
+        const refl = g.createLinearGradient(0, py + TILE, 0, py + TILE + 13);
+        refl.addColorStop(0, "rgba(109,184,167,.20)");
+        refl.addColorStop(1, "rgba(109,184,167,0)");
+        g.fillStyle = refl;
+        g.fillRect(px + 1, py + TILE, TILE - 2, 13);
       }
     }
   }
-  // gentle highlight along every top-exposed edge
   for (let y = 0; y < ROWS; y++) {
     for (let x = 0; x < COLS; x++) {
-      if (!isWall(x, y) || isWall(x, y - 1)) continue;
+      if (!isWall(x, y)) continue;
+      const px = x * TILE, py = y * TILE;
       const r = radii(x, y);
-      g.fillStyle = "rgba(255,255,255,.30)";
-      roundRect4(g, x * TILE + 3, y * TILE - LIFT + 3, TILE - 6, 6, [r[0] ? 4 : 0, r[1] ? 4 : 0, 3, 3]);
-      g.fill();
+
+      // body of the wall within its own tile (visible sliver between cap and face)
+      g.fillStyle = PALETTE.wallSide;
+      roundRect4(g, px, py, TILE, TILE, r); g.fill();
+
+      // front (south) face with vertical shading + baseboard + contact AO
+      if (!isWall(x, y + 1)) {
+        const faceTop = py + TILE - WALL_H;
+        const face = g.createLinearGradient(0, faceTop, 0, py + TILE);
+        face.addColorStop(0, shade(PALETTE.wallSide, 1.12));
+        face.addColorStop(0.75, PALETTE.wallSide);
+        face.addColorStop(1, shade(PALETTE.wallSide, 0.82));
+        g.fillStyle = face;
+        roundRect4(g, px, faceTop, TILE, WALL_H, [0, 0, r[2], r[3]]); g.fill();
+        // baseboard
+        g.fillStyle = shade(PALETTE.wallSide, 0.68);
+        roundRect4(g, px, py + TILE - 4.5, TILE, 4.5, [0, 0, r[2], r[3]]); g.fill();
+        // contact AO on the floor
+        const ao = g.createLinearGradient(0, py + TILE, 0, py + TILE + 6);
+        ao.addColorStop(0, "rgba(60,45,25,.22)");
+        ao.addColorStop(1, "rgba(60,45,25,0)");
+        g.fillStyle = ao;
+        g.fillRect(px, py + TILE, TILE, 6);
+      }
     }
   }
 
-  bakeDecor(g, world, rng, isWall);
-  return c;
+  // ---- wall caps (top faces) -> overlay canvas ----
+  for (let y = 0; y < ROWS; y++) {
+    for (let x = 0; x < COLS; x++) {
+      if (!isWall(x, y)) continue;
+      const px = x * TILE, py = y * TILE;
+      const r = radii(x, y);
+      const capTop = g.createLinearGradient(0, py - WALL_H, 0, py + TILE - WALL_H);
+      capTop.addColorStop(0, shade(PALETTE.wall, 1.05));
+      capTop.addColorStop(1, shade(PALETTE.wall, 0.94));
+      gc.fillStyle = capTop;
+      roundRect4(gc, px, py - WALL_H, TILE, TILE, r); gc.fill();
+      // crisp lit edge along the cap's south rim (the "thickness" cue)
+      if (!isWall(x, y + 1)) {
+        gc.fillStyle = "rgba(255,255,255,.34)";
+        roundRect4(gc, px + 1, py + TILE - WALL_H - 3.5, TILE - 2, 3.5, [0, 0, Math.min(r[2], 4), Math.min(r[3], 4)]);
+        gc.fill();
+      }
+      if (!isWall(x, y - 1)) {
+        gc.fillStyle = "rgba(0,0,0,.08)";
+        roundRect4(gc, px, py - WALL_H, TILE, 3, [r[0], r[1], 0, 0]); gc.fill();
+      }
+    }
+  }
+
+  bakeDecor(gc, world, rng, isWall);
+  return { bg, caps };
 }
 
 /** Windows, plants, posters and a clock, placed deterministically on the
     wall blobs so every ward feels furnished. Purely cosmetic. */
 function bakeDecor(g, world, rng, isWall) {
-  const LIFT = 7;
   const spots = [];
   for (let y = 0; y < ROWS; y++)
     for (let x = 0; x < COLS; x++)
-      if (isWall(x, y) && (y === 0 || !isWall(x, y - 1))) spots.push({ x, y, boundary: y === 0 });
+      if (isWall(x, y)) spots.push({ x, y, boundary: y === 0 });
 
   let sinceDecor = 0;
   for (const sp of spots) {
     sinceDecor++;
     const cx = sp.x * TILE + TILE / 2;
-    const cy = sp.y * TILE + TILE / 2 - LIFT + (sp.boundary ? 5 : 0);
+    const cy = sp.y * TILE + TILE / 2 - WALL_H + (sp.boundary ? 5 : 0);
     const roll = rng();
     if (sp.boundary) {
       if (sp.x % 5 === 2) drawWindow(g, cx, cy);
@@ -2215,7 +2318,7 @@ function bakeDecor(g, world, rng, isWall) {
   // a big friendly red cross sign over the entrance
   const e = world.entrance;
   if (isWall(e.x, e.y - 1)) {
-    const cx = e.x * TILE + TILE / 2, cy = (e.y - 1) * TILE + TILE / 2 - LIFT;
+    const cx = e.x * TILE + TILE / 2, cy = (e.y - 1) * TILE + TILE / 2 - WALL_H + 6;
     g.fillStyle = "#ffffff";
     roundRect(g, cx - 12, cy - 12, 24, 24, 7); g.fill();
     g.strokeStyle = "rgba(0,0,0,.12)"; g.lineWidth = 1.5;
@@ -2484,24 +2587,48 @@ function drawItemIcon(g, type, x, y, r) {
 
 function drawWorld(g) {
   const world = Game.world;
-  if (!world.bg) world.bg = bakeBackground(world);
+  if (!world.bg) {
+    const baked = bakeBackground(world);
+    world.bg = baked.bg;
+    world.caps = baked.caps;
+  }
   g.drawImage(world.bg, 0, 0);
   for (const st of world.stations) drawStation(g, st);
 }
 
 /** Cabinet-style body shared by every machine. */
 function machineBody(g, x, y, w, h, top, bottom, edge) {
-  const gr = g.createLinearGradient(0, y, 0, y + h);
+  const TOP_H = 9;                                        // visible top face
+  // contact shadow hugging the base, wider than the body
+  const sh = g.createRadialGradient(x + w / 2, y + h + 2, 3, x + w / 2, y + h + 2, w * 0.62);
+  sh.addColorStop(0, "rgba(90,70,45,.30)");
+  sh.addColorStop(1, "rgba(90,70,45,0)");
+  g.fillStyle = sh;
+  g.beginPath(); g.ellipse(x + w / 2, y + h + 2, w * 0.62, 7, 0, 0, 6.283); g.fill();
+
+  // front face: vertical shading, darker toward the ground
+  const gr = g.createLinearGradient(0, y + TOP_H, 0, y + h);
   gr.addColorStop(0, top);
-  gr.addColorStop(1, bottom);
-  g.fillStyle = "rgba(120,95,70,.22)";
-  roundRect(g, x + 2, y + 5, w, h, 11); g.fill();         // soft drop shadow
+  gr.addColorStop(0.7, bottom);
+  gr.addColorStop(1, shade(bottom, 0.82));
   g.fillStyle = gr;
-  roundRect(g, x, y, w, h, 11); g.fill();
-  g.strokeStyle = edge; g.lineWidth = 2.2;
-  roundRect(g, x, y, w, h, 11); g.stroke();
-  g.fillStyle = "rgba(255,255,255,.30)";
-  roundRect(g, x + 4, y + 3, w - 8, 6, 4); g.fill();      // glossy top sheen
+  roundRect(g, x, y + TOP_H - 2, w, h - TOP_H + 2, 8); g.fill();
+
+  // top face: lighter, catching the ceiling light
+  const tp = g.createLinearGradient(0, y, 0, y + TOP_H + 3);
+  tp.addColorStop(0, shade(top, 1.16));
+  tp.addColorStop(1, top);
+  g.fillStyle = tp;
+  roundRect(g, x, y, w, TOP_H + 4, 8); g.fill();
+  // lit rim where top meets front
+  g.fillStyle = "rgba(255,255,255,.38)";
+  roundRect(g, x + 2, y + TOP_H + 1, w - 4, 2.2, 1); g.fill();
+
+  g.strokeStyle = edge; g.lineWidth = 2;
+  roundRect(g, x, y, w, h, 8); g.stroke();
+  // specular dot top-left
+  g.fillStyle = "rgba(255,255,255,.5)";
+  g.beginPath(); g.ellipse(x + 7, y + 4.5, 3.6, 1.8, -0.3, 0, 6.283); g.fill();
 }
 
 function drawStation(g, st) {
@@ -2552,10 +2679,18 @@ function drawStation(g, st) {
 }
 
 function drawBed(g, st, x, y) {
-  // soft shadow
-  g.fillStyle = "rgba(120,95,70,.20)";
-  roundRect(g, x + 4, y + 7, TILE - 6, TILE - 9, 9); g.fill();
-  // plush frame
+  // grounded contact shadow + little legs peeking out
+  const sh = g.createRadialGradient(x + TILE / 2, y + TILE - 2, 4, x + TILE / 2, y + TILE - 2, TILE * 0.62);
+  sh.addColorStop(0, "rgba(90,70,45,.30)");
+  sh.addColorStop(1, "rgba(90,70,45,0)");
+  g.fillStyle = sh;
+  g.beginPath(); g.ellipse(x + TILE / 2, y + TILE - 2, TILE * 0.6, 7, 0, 0, 6.283); g.fill();
+  g.fillStyle = "#b8a68e";
+  roundRect(g, x + 5, y + TILE - 6, 4, 5, 1.5); g.fill();
+  roundRect(g, x + TILE - 9, y + TILE - 6, 4, 5, 1.5); g.fill();
+  // frame side face (the bed has height now)
+  fillRound(g, x + 2, y + 6, TILE - 4, TILE - 9, 9, "#e4d9c8");
+  // plush frame top
   fillRound(g, x + 2, y + 2, TILE - 4, TILE - 6, 9, "#ffffff");
   g.strokeStyle = st.occupant ? "#7fb3e8" : "#e3d5c4";
   g.lineWidth = 2;
@@ -3904,6 +4039,9 @@ function render() {
     ctx.fillRect(q.x - s2 / 2, q.y - s2 / 2, s2, s2);
   }
   ctx.globalAlpha = 1;
+
+  // wall caps occlude whoever walks behind them
+  if (Game.world.caps) ctx.drawImage(Game.world.caps, 0, -WALL_H);
 
   // lighting sits under the popups so text stays crisp
   ctx.save();
