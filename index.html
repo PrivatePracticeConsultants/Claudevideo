@@ -482,7 +482,7 @@ const LEVELS = [
     spawnStart: 11.0, spawnEnd: 7.5,
     maxWaiting: 3,
     ailments: ["cut", "infection"],
-    stars: [1000, 1750, 2500],
+    stars: [3000, 5200, 7100],
     restock: false, jams: false, flatline: false,
         theme: { floor:"#f7efdd", floorAlt:"#f0e5cd", wall:"#a9e0d4", wallTop:"#c6ede3", base:"#7cc4b4",
              accent:"#5cb8e6", wood:"#d3a56c", leaf:"#5fb872", leaf2:"#83d290", pot:"#d98a5f",
@@ -490,21 +490,27 @@ const LEVELS = [
     props: ["bench","plant","chair","cooler","sign","rug"],
     map: [
       "################################",
-      "#..............................#",
-      "#.E...........####.......#######",
-      "#.....bb......####.......#######",
-      "#........................#######",
-      "#.....bb.........ss......#######",
-      "#..............................#",
-      "#.....bb.........mm............#",
-      "#..............................#",
-      "#.....bb.................#######",
-      "#.............####.......#######",
-      "#.O...........####.......#######",
-      "#........................#######",
-      "#..............................#",
-      "#..............................#",
+      "####........................####",
+      "####.E......................####",
+      "####...####.......####......####",
+      "####........................####",
+      "####...bb..........bb..ss...####",
+      "####........................####",
+      "####...bb..........bb..mm...####",
+      "####........................####",
+      "####...####.......####......####",
+      "####.O......................####",
+      "####........................####",
+      "################################",
+      "################################",
+      "################################",
       "################################"
+    
+    
+    
+    
+    
+    
     ]
   },
   {
@@ -516,7 +522,7 @@ const LEVELS = [
     spawnStart: 10.0, spawnEnd: 6.8,
     maxWaiting: 4,
     ailments: ["cut", "infection", "fracture"],
-    stars: [550, 950, 1350],
+    stars: [2350, 4050, 5550],
     restock: false, jams: false, flatline: false,
         theme: { floor:"#eef2f7", floorAlt:"#e5ebf3", wall:"#9fc3e4", wallTop:"#bcd8ef", base:"#6d9bc4",
              accent:"#5b8fd0", wood:"#c2a079", leaf:"#63b98a", leaf2:"#86cfa3", pot:"#c98466",
@@ -524,21 +530,27 @@ const LEVELS = [
     props: ["bench","screen","locker","plant","trolley","chair"],
     map: [
       "################################",
-      "#..............##..............#",
-      "#.E............##..............#",
-      "#.........ss...##..............#",
-      "#....bb........##..............#",
-      "#..............##..............#",
-      "#....bb........##.........mm...#",
-      "#..............................#",
-      "#..............................#",
-      "#....bb........##..............#",
-      "#..............##.........cc...#",
-      "#....x.........##..............#",
-      "#.O............##..............#",
-      "#..............##..............#",
-      "#..............................#",
+      "###.........................####",
+      "###.E.........#.............####",
+      "###...####....#....####.....####",
+      "###...........#.............####",
+      "###.xx...bb...#...bb....cc..####",
+      "###.ss...bb.......bb....cc..####",
+      "###...........#.............####",
+      "###.mm...bb...#...bb....ss..####",
+      "###.O....bb...#...bb........####",
+      "###...####....#....####.....####",
+      "###.........................####",
+      "################################",
+      "################################",
+      "################################",
       "################################"
+    
+    
+    
+    
+    
+    
     ]
   },
   {
@@ -546,33 +558,40 @@ const LEVELS = [
     blurb: "Cardiac cases. One defibrillator for the whole floor — and the shelves run dry.",
     seed: 90210,
     duration: 140,
-    patience: 70,
+    patience: 56,
     spawnStart: 9.2, spawnEnd: 6.2,
     maxWaiting: 5,
     ailments: ["cut", "infection", "fracture", "cardiac"],
-    stars: [650, 1100, 1550],
+    stars: [1700, 2950, 4050],
     restock: true, jams: false, flatline: true,
         theme: { floor:"#f4e9e4", floorAlt:"#ecdfd9", wall:"#e0a79f", wallTop:"#eec3bc", base:"#c17f76",
              accent:"#e2645f", wood:"#c08f63", leaf:"#5aa870", leaf2:"#7cc38d", pot:"#b06a54",
              locker:"#c39a92", crate:"#d3a97e", crate2:"#bf9268", curtain:"#eab8b0", rug:"#e8cfc8" },
     props: ["gurney","trolley","crates","ivpole","screen","sign"],
+    shutters: [{ x: 17, y: 11, dir: "h", len: 2, phase: 0.0 } ],
     map: [
       "################################",
-      "#...d......................ss..#",
-      "#.E............................#",
-      "#.....####...........####......#",
-      "#.....####...........####..mm..#",
-      "#..............................#",
-      "#.....bb.........bb............#",
-      "#..............................#",
-      "#..............................#",
-      "#.....bb.........bb........cc..#",
-      "#..............................#",
-      "#.....####...........####......#",
-      "#.O...####...........####..x...#",
-      "#.............f............h...#",
-      "#..............................#",
+      "###.........................####",
+      "###.E...ss...........xx.....####",
+      "###..##...####...####..##...####",
+      "###..bb....bb.....bb...bb...####",
+      "###..bb....bb.....bb...bb...####",
+      "###.........................####",
+      "###f.......................h####",
+      "###.........................####",
+      "###.O....cc.......mm...dd...####",
+      "###..##...####...####..##...####",
+      "###.........................####",
+      "################################",
+      "################################",
+      "################################",
       "################################"
+    
+    
+    
+    
+    
+    
     ]
   },
   {
@@ -580,33 +599,41 @@ const LEVELS = [
     blurb: "Mystery cases need the lab. The X-ray jams. Work both ends of the corridor.",
     seed: 55555,
     duration: 140,
-    patience: 55,
+    patience: 66,
     spawnStart: 8.6, spawnEnd: 5.8,
     maxWaiting: 5,
     ailments: ["cut", "infection", "fracture", "cardiac", "mystery"],
-    stars: [1550, 2650, 3900],
+    stars: [2100, 3650, 5000],
     restock: true, jams: true, flatline: true,
         theme: { floor:"#e9e6de", floorAlt:"#e0ddd4", wall:"#8fa398", wallTop:"#aab9b0", base:"#6a7d73",
              accent:"#7fb08d", wood:"#b08a5e", leaf:"#4f9d66", leaf2:"#6fb87f", pot:"#a5714f",
              locker:"#8b9d94", crate:"#c4a276", crate2:"#ae8d64", curtain:"#aec5b6", rug:"#d3d6cd" },
     props: ["locker","crates","trolley","sign","bench","ivpole"],
+    shutters: [{ x: 17, y: 7, dir: "h", len: 2, phase: 0.2 },
+               { x: 12, y: 9, dir: "h", len: 2, phase: 0.6 }],
     map: [
       "################################",
-      "#.E.....#..ss...##..mm...#.....#",
-      "#.......#.......##.......#.....#",
-      "#..bb...#.......##.......#..d..#",
-      "#.......#.......##.......#.....#",
-      "#..bb...#..f....##.......#.....#",
-      "#.......#.......##.......#.....#",
-      "#..............................#",
-      "#..............................#",
-      "#.......#.......##.......#.....#",
-      "#..bb...#.......##.......#.....#",
-      "#.......#..x....##..h....#.l...#",
-      "#..bb...#.......##.......#.....#",
-      "#.O.....#..c....##.......#.....#",
-      "#.......#.......##.......#.....#",
+      "###.........................####",
+      "###.E.ss...bb....bb....bb...####",
+      "###.........................####",
+      "###.mm.................cc...####",
+      "###.O.......................####",
+      "###########.....####.....#######",
+      "###.........................####",
+      "###.xx.....bb....bb....bb.ll####",
+      "###.........................####",
+      "###.f.......dd...........h..####",
+      "###.........................####",
+      "################################",
+      "################################",
+      "################################",
       "################################"
+    
+    
+    
+    
+    
+    
     ]
   },
   {
@@ -614,33 +641,40 @@ const LEVELS = [
     blurb: "Everything at once, everything far apart. Two coordinated medics only.",
     seed: 777001,
     duration: 140,
-    patience: 56,
+    patience: 66,
     spawnStart: 8.0, spawnEnd: 5.4,
     maxWaiting: 6,
     ailments: ["cut", "infection", "fracture", "cardiac", "mystery"],
-    stars: [1400, 2400, 3500],
+    stars: [1700, 2950, 4050],
     restock: true, jams: true, flatline: true,
         theme: { floor:"#e6eef4", floorAlt:"#dce6ee", wall:"#7fa8c9", wallTop:"#a2c4dd", base:"#57809f",
              accent:"#3fa9e8", wood:"#a98d68", leaf:"#4fa87e", leaf2:"#72c39a", pot:"#9c6f57",
              locker:"#7f9db4", crate:"#bfa079", crate2:"#a98a66", curtain:"#9dc2dd", rug:"#c6dae8" },
     props: ["ivpole","gurney","screen","trolley","locker","cooler"],
+    shutters: [{ x: 17, y: 9, dir: "h", len: 2, phase: 0.35 } ],
     map: [
       "################################",
-      "#..ss....#....d.....#.......mm.#",
-      "#.E......#..........#..........#",
-      "#........#..........#..........#",
-      "#..####..#####..#####..####....#",
-      "#..#........................#..#",
-      "#..#..bb......bb......bb....#..#",
-      "#..#........................#..#",
-      "#.....bb......bb......bb....#..#",
-      "#..#........................#..#",
-      "#..####..#####..#####..#####...#",
-      "#..........#........#..........#",
-      "#..f.......#...h....#.....l....#",
-      "#.O........#........#..........#",
-      "#....x.....#........#.....cc...#",
+      "###.........................####",
+      "###.E..ss.......xx........c.####",
+      "###.........................####",
+      "###...#####.....#####.......####",
+      "###...#..bb.....bb..#.......####",
+      "###.f.#..bb.....bb..#.....h.####",
+      "###...#.............#.......####",
+      "###.O.#####.....#####.......####",
+      "###.........................####",
+      "###.mm...ll......dd......m..####",
+      "###.........................####",
+      "################################",
+      "################################",
+      "################################",
       "################################"
+    
+    
+    
+    
+    
+    
     ]
   },
   {
@@ -648,33 +682,41 @@ const LEVELS = [
     blurb: "Two wards, one crossing. Whoever holds the middle holds the shift.",
     seed: 61001,
     duration: 140,
-    patience: 61,
+    patience: 52,
     spawnStart: 7.6, spawnEnd: 5.1,
     maxWaiting: 6,
     ailments: ["cut", "infection", "fracture", "cardiac", "mystery"],
-    stars: [1150, 1950, 2850],
+    stars: [2150, 3750, 5100],
     restock: true, jams: true, flatline: true,
         theme: { floor:"#f0ecf6", floorAlt:"#e7e2f0", wall:"#b1a3d6", wallTop:"#c9bee6", base:"#8878b4",
              accent:"#9b7fd4", wood:"#bd9a72", leaf:"#5cb079", leaf2:"#80c896", pot:"#a9739a",
              locker:"#a294c4", crate:"#cfae86", crate2:"#b8946c", curtain:"#c4b6e2", rug:"#ddd4ec" },
     props: ["screen","bench","plant","trolley","chair","vending"],
+    shutters: [{ x: 16, y: 8, dir: "h", len: 2, phase: 0.1 },
+               { x: 10, y: 9, dir: "v", len: 2, phase: 0.55 }],
     map: [
       "################################",
-      "#..............##..............#",
-      "#.E.........ss.##..............#",
-      "#.......##.....##.....##.......#",
-      "#....bb.##.....##..x..##.bb....#",
-      "#.......##..mm.##.....##.......#",
-      "#....bb........##..c...........#",
-      "#...........................f..#",
-      "#..............................#",
-      "#....bb........##..l...........#",
-      "#.......##.....##.....##.......#",
-      "#....bb.##.....##..h..##.bb....#",
-      "#.......##.....##.....##.......#",
-      "#.O.........d..##..............#",
-      "#..............##..............#",
+      "###.........................####",
+      "###.E......#................####",
+      "###.xx..bb.#...bb...cc......####",
+      "###.ss..bb.#...bb...mm......####",
+      "###........#................####",
+      "###.....bb.....bb...........####",
+      "###.O..........bb...........####",
+      "###........#................####",
+      "###.f...bb.#...bb...h.......####",
+      "###.ll.....#........dd......####",
+      "###........#................####",
+      "################################",
+      "################################",
+      "################################",
       "################################"
+    
+    
+    
+    
+    
+    
     ]
   },
   {
@@ -682,33 +724,40 @@ const LEVELS = [
     blurb: "Winding corridors and dead ends. Learn the routes or lose the run.",
     seed: 71002,
     duration: 140,
-    patience: 60,
+    patience: 62,
     spawnStart: 7.2, spawnEnd: 4.9,
     maxWaiting: 6,
     ailments: ["cut", "infection", "fracture", "cardiac", "mystery"],
-    stars: [1600, 2700, 3950],
+    stars: [1700, 2900, 4000],
     restock: true, jams: true, flatline: true,
         theme: { floor:"#f2e6d2", floorAlt:"#e9dbc4", wall:"#c9a06a", wallTop:"#dcbb8b", base:"#9c7343",
              accent:"#e0a13f", wood:"#a97645", leaf:"#5da05f", leaf2:"#7fbc7c", pot:"#a86b46",
              locker:"#bc9a72", crate:"#c79a63", crate2:"#b0854f", curtain:"#dcc39a", rug:"#e0cca8" },
     props: ["locker","crates","bench","plant","sign","screen"],
+    shutters: [{ x: 16, y: 10, dir: "h", len: 2, phase: 0.25 } ],
     map: [
       "################################",
-      "#.E..#.......#...#.......#...d.#",
-      "#....#.s.....#...#.......#.....#",
-      "#.bb.#....bb.#...#.bb..h.#.....#",
-      "#....#.......#...#.......#.....#",
-      "#....#.......#...#.......#.....#",
-      "#.bb.#...........#...#...#.....#",
-      "#....#.........x.#...#...#.....#",
-      "#..............c.#...#.........#",
-      "#........#...........#.........#",
-      "#........#...#.......#.........#",
-      "#........#...#.......#.l.......#",
-      "#......m.#bb.#....bb.#.........#",
-      "#.O......#...#.......#.......f.#",
-      "#........#...#.......#.........#",
+      "###.........................####",
+      "###.E..bb..##.......##...cc.####",
+      "###.ss.bb..##.......##...xx.####",
+      "###.##......................####",
+      "###.##..bb..##...bb..##.....####",
+      "###.O........##......##.....####",
+      "###.........................####",
+      "###.mm.##..bb...##...bb.....####",
+      "###.ll.##.......##...bb.....####",
+      "###.........................####",
+      "###.f...##..bb..##......dd.h####",
+      "################################",
+      "################################",
+      "################################",
       "################################"
+    
+    
+    
+    
+    
+    
     ]
   },
   {
@@ -716,33 +765,40 @@ const LEVELS = [
     blurb: "Sixteen beds and no excuses. Volume is the enemy here.",
     seed: 81003,
     duration: 140,
-    patience: 74,
+    patience: 65,
     spawnStart: 6.9, spawnEnd: 4.7,
     maxWaiting: 7,
     ailments: ["cut", "infection", "fracture", "cardiac", "mystery"],
-    stars: [1400, 2350, 3450],
+    stars: [1750, 3000, 4150],
     restock: true, jams: true, flatline: true,
         theme: { floor:"#f1ecdf", floorAlt:"#e8e2d2", wall:"#8fc9be", wallTop:"#aeddd4", base:"#5f9e92",
              accent:"#f0a541", wood:"#c69a68", leaf:"#57ac74", leaf2:"#7ac68e", pot:"#c07f52",
              locker:"#93bcb2", crate:"#d3ab7c", crate2:"#bd9366", curtain:"#b3d9d0", rug:"#dbe4d8" },
     props: ["bench","chair","sign","vending","cooler","plant","screen"],
+    shutters: [{ x: 19, y: 6, dir: "h", len: 2, phase: 0.4 } ],
     map: [
       "################################",
-      "#.E...ss................mm.....#",
-      "#..............................#",
-      "#..........bb......bb..........#",
-      "#......##..............##......#",
-      "#......##..bb......bb..##....x.#",
-      "#..............................#",
-      "#.............####...........c.#",
-      "#.............####.............#",
-      "#............................h.#",
-      "#......##..bb......bb..##......#",
-      "#......##..............##....l.#",
-      "#..........bb......bb..........#",
-      "#..............................#",
-      "#.O...d........f...............#",
+      "###.........................####",
+      "###...#######......#####....####",
+      "###.s....bb..bb..bb......xx.####",
+      "###.........................####",
+      "###f.#######.......#####...h####",
+      "###E........................####",
+      "###.O#######.......#####....####",
+      "###.........................####",
+      "###.m....bb..bb..bb......cc.####",
+      "###...#######......#####....####",
+      "###.ll..................dd..####",
+      "################################",
+      "################################",
+      "################################",
       "################################"
+    
+    
+    
+    
+    
+    
     ]
   },
   {
@@ -750,33 +806,41 @@ const LEVELS = [
     blurb: "Compact and relentless. Everything is close, nothing is calm.",
     seed: 91004,
     duration: 140,
-    patience: 48,
+    patience: 63,
     spawnStart: 6.6, spawnEnd: 4.5,
     maxWaiting: 7,
     ailments: ["cut", "infection", "fracture", "cardiac", "mystery"],
-    stars: [1650, 2800, 4100],
+    stars: [1550, 2650, 3650],
     restock: true, jams: true, flatline: true,
         theme: { floor:"#f6f3ec", floorAlt:"#ece8df", wall:"#dfe4e9", wallTop:"#f0f3f6", base:"#a9b4bf",
              accent:"#f2803c", wood:"#c99a63", leaf:"#5fb872", leaf2:"#83d290", pot:"#cf7d4f",
              locker:"#b8c3cd", crate:"#d9b483", crate2:"#c39a6a", curtain:"#d3dde6", rug:"#e4e8ec" },
     props: ["chair","bench","vending","trolley","gurney","sign","cooler"],
+    shutters: [{ x: 16, y: 7, dir: "h", len: 1, phase: 0.15 },
+               { x: 14, y: 11, dir: "h", len: 2, phase: 0.65 }],
     map: [
       "################################",
-      "#.E.........ss..d.mm...........#",
-      "#..............................#",
-      "#.......bb............bb.......#",
-      "####........................####",
-      "####........########........####",
-      "#............xc..hl............#",
-      "#....bb..................bb....#",
-      "#..............................#",
-      "#..............f...............#",
-      "####........########........####",
-      "####........................####",
-      "#.......bb............bb.......#",
-      "#..............................#",
-      "#.O............................#",
+      "###.........................####",
+      "###.ss...bb...bb...bb..bb...####",
+      "###.........................####",
+      "###.......########..........####",
+      "###.xx......................####",
+      "###.xx.....########.........####",
+      "###..............#####...O..####",
+      "###.mm.bb...bb..bb...bb.cc..####",
+      "###.........................####",
+      "###.f........ll.........h...####",
+      "###E....dd..................####",
+      "################################",
+      "################################",
+      "################################",
       "################################"
+    
+    
+    
+    
+    
+    
     ]
   },
   {
@@ -784,33 +848,41 @@ const LEVELS = [
     blurb: "Four wings, one hub, every machine as far away as it can be.",
     seed: 101005,
     duration: 140,
-    patience: 62,
+    patience: 52,
     spawnStart: 6.3, spawnEnd: 4.3,
     maxWaiting: 8,
     ailments: ["cut", "infection", "fracture", "cardiac", "mystery"],
-    stars: [1500, 2550, 3700],
+    stars: [1300, 2200, 3000],
     restock: true, jams: true, flatline: true,
         theme: { floor:"#dfe4e4", floorAlt:"#d5dbdb", wall:"#5f7d80", wallTop:"#7d9c9e", base:"#41595c",
              accent:"#f0b23f", wood:"#9c7a52", leaf:"#489a63", leaf2:"#69b57e", pot:"#8a5f45",
              locker:"#63817f", crate:"#ae8f66", crate2:"#977a55", curtain:"#7f9ea0", rug:"#c4cdcd" },
     props: ["gurney","ivpole","screen","locker","crates","trolley","sign"],
+    shutters: [{ x: 17, y: 9, dir: "h", len: 2, phase: 0.3 },
+               { x: 13, y: 11, dir: "h", len: 2, phase: 0.7 }],
     map: [
       "################################",
-      "#.E......#............#........#",
-      "#....ss..#..########..#..x.....#",
-      "#........#............#........#",
-      "#........#............#........#",
-      "#....mm......bb..bb......c.....#",
-      "#..............................#",
-      "#............bb..bb............#",
-      "#..............................#",
-      "#..f.........bb..bb......l.....#",
-      "#..............................#",
-      "#........#............#........#",
-      "#.....h..#..########..#..d.....#",
-      "#........#............#........#",
-      "#.O......#............#........#",
+      "###.........................####",
+      "###.E.ss....bb...bb....cc.s.####",
+      "###...mm...............xx...####",
+      "###.##.................###..####",
+      "###.....bb..###...bb........####",
+      "###.O.......ll..............####",
+      "###.........###...........f.####",
+      "###.....bb.......bb.......h.####",
+      "###.##.................###..####",
+      "###...dd....bb...bb....ll...####",
+      "###....................mm.c.####",
+      "################################",
+      "################################",
+      "################################",
       "################################"
+    
+    
+    
+    
+    
+    
     ]
   }
 ];
@@ -856,6 +928,187 @@ const CHAR_TO_STATION = {
   b: "bed", s: "supply", m: "medicine", x: "xray", c: "cast",
   h: "charger", l: "lab", d: "delivery", f: "defibrack"
 };
+
+
+/* ---------------------------------------------------------------------
+   Shutters — the ward fights back.
+
+   Overcooked levels are characters: the kitchen splits, slides and closes on
+   you. Every ward here was a fixed box, so once you learned the route there was
+   nothing left to react to. Shutters are fire doors on a cycle that close a
+   corridor for a few seconds, forcing the long way round — or a THROW across,
+   which finally gives that mechanic a reason to exist.
+
+   They live in a list rather than in the grid, so opening and closing is a flag
+   flip, and they never trap anyone: a closing shutter shoves whoever (and
+   whatever) is under it to the nearest open tile first.
+   --------------------------------------------------------------------- */
+
+const SHUTTER_OPEN = 11.0;        // seconds open
+const SHUTTER_SHUT = 4.6;         // seconds closed
+const SHUTTER_WARN = 1.6;         // amber warning before it drops
+
+function makeShutters(world, def) {
+  world.shutters = [];
+  if (!def.shutters) return;
+  for (const sp of def.shutters) {
+    const cells = [];
+    for (let i = 0; i < (sp.len || 1); i++) {
+      const x = sp.x + (sp.dir === "h" ? i : 0);
+      const y = sp.y + (sp.dir === "v" ? i : 0);
+      if (!inBounds(x, y)) continue;
+      const c = world.grid[y][x];
+      if (c.solid || c.entrance || c.exit) continue;    // only ever across open floor
+      cells.push({ x, y });
+    }
+    if (!cells.length) continue;
+    world.shutters.push({
+      cells, closed: false,
+      t: (sp.phase || 0) * (SHUTTER_OPEN + SHUTTER_SHUT),   // stagger them
+      period: SHUTTER_OPEN + SHUTTER_SHUT
+    });
+  }
+}
+
+function shutterBlocks(world, x, y) {
+  const list = world && world.shutters;
+  if (!list) return false;
+  for (let i = 0; i < list.length; i++) {
+    if (!list[i].closed) continue;
+    const cells = list[i].cells;
+    for (let j = 0; j < cells.length; j++)
+      if (cells[j].x === x && cells[j].y === y) return true;
+  }
+  return false;
+}
+
+/** Seconds until this shutter next changes state — drives the warning flash. */
+function shutterCountdown(sh) {
+  return sh.closed ? (sh.period - sh.t) : (SHUTTER_OPEN - sh.t);
+}
+
+function updateShutters(dt) {
+  const world = Game.world;
+  if (!world || !world.shutters || !world.shutters.length) return;
+  for (const sh of world.shutters) {
+    if (sh.cordon) continue;             // event cordons open and shut on their own clock
+    sh.t = (sh.t + dt) % sh.period;
+    const wantClosed = sh.t >= SHUTTER_OPEN;
+    if (wantClosed === sh.closed) continue;
+    if (wantClosed) closeBlockingCells(world, sh);
+    sh.closed = wantClosed;
+    for (const st of Game.staff) st.path = [];          // cached routes are now wrong
+    for (const pt of Game.patients) if (pt.state === "walking") pt.path = [];
+  }
+}
+
+/** Shove anything standing where a shutter or cordon is about to land. Nothing
+    may ever end up inside a blocked tile — that is how items go invisible and
+    medics get stuck. */
+function closeBlockingCells(world, sh) {
+  for (const c of sh.cells) {
+    const shove = (o) => {
+      if (o.x === undefined) return;
+      if (Math.floor(o.x / TILE) !== c.x || Math.floor(o.y / TILE) !== c.y) return;
+      const spot = nearestOpenTile(world, c.x, c.y);
+      if (!spot) return;
+      o.x = spot.x * TILE + TILE / 2;
+      o.y = spot.y * TILE + TILE / 2;
+      if (o.path) o.path = [];
+      if (o.vx !== undefined) { o.vx = 0; o.vy = 0; }
+    };
+    for (const p of Game.players) shove(p);
+    for (const st of Game.staff) shove(st);
+    for (const it of Game.floorItems) shove(it);
+    for (const pt of Game.patients) if (pt.state === "waiting" || pt.state === "walking") shove(pt);
+  }
+  Sound.play("jam");
+}
+
+/* ---- event cordons -------------------------------------------------------
+   A BAY CLOSED event ropes off a patch of floor for the duration, so the ward
+   you learned in the first minute is not the ward you finish in. Same safety
+   contract as the shutters: it may cost you a detour, it may never sever the
+   ward, strand a station, or seal anyone in. If no safe patch exists the event
+   simply does nothing rather than risking a softlock. */
+
+/** Would blocking `cells` leave every open tile and every station reachable? */
+function blockingIsSafe(world, cells) {
+  const blocked = new Set(cells.map(c => c.x + "," + c.y));
+  const free = (x, y) => isOpenFloor(world, x, y) && !blocked.has(x + "," + y);
+  let total = 0, start = null;
+  for (let y = 0; y < ROWS; y++)
+    for (let x = 0; x < COLS; x++)
+      if (free(x, y)) { total++; if (!start) start = { x, y }; }
+  if (!start) return false;
+  const seen = new Set([start.x + "," + start.y]);
+  const q = [start];
+  while (q.length) {
+    const cur = q.pop();
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const nx = cur.x + dx, ny = cur.y + dy, k = nx + "," + ny;
+      if (!seen.has(k) && free(nx, ny)) { seen.add(k); q.push({ x: nx, y: ny }); }
+    }
+  }
+  if (seen.size !== total) return false;
+  const reachable = (t) => [[1, 0], [-1, 0], [0, 1], [0, -1]]
+    .some(([dx, dy]) => seen.has((t.x + dx) + "," + (t.y + dy)));
+  if (!reachable(world.entrance) || !reachable(world.exit)) return false;
+  for (const st of world.stations) if (!reachable(st)) return false;
+  // and the medics must not be standing in it
+  for (const p of Game.players)
+    if (blocked.has(Math.floor(p.x / TILE) + "," + Math.floor(p.y / TILE))) return false;
+  return true;
+}
+
+/** Rope off a 2x2-ish patch somewhere in the middle of the ward. */
+function openCordon() {
+  const world = Game.world;
+  if (!world || !world.shutters) return false;
+  const spots = [];
+  for (let y = 1; y < ROWS - 1; y++)
+    for (let x = 1; x < COLS - 1; x++)
+      if (isOpenFloor(world, x, y)) spots.push({ x, y });
+  // shuffle deterministically off the shift RNG so replays stay reproducible
+  for (let i = spots.length - 1; i > 0; i--) {
+    const j = Math.floor(Game.rng() * (i + 1));
+    [spots[i], spots[j]] = [spots[j], spots[i]];
+  }
+  for (const s of spots) {
+    for (const shape of [[[0, 0], [1, 0], [0, 1], [1, 1]], [[0, 0], [1, 0]], [[0, 0], [0, 1]]]) {
+      const cells = shape.map(([dx, dy]) => ({ x: s.x + dx, y: s.y + dy }));
+      if (!cells.every(c => isOpenFloor(world, c.x, c.y))) continue;
+      if (!blockingIsSafe(world, cells)) continue;
+      const sh = { cells, closed: true, cordon: true, t: 0, period: 1 };
+      world.shutters.push(sh);
+      closeBlockingCells(world, sh);
+      for (const st of Game.staff) st.path = [];
+      for (const pt of Game.patients) if (pt.state === "walking") pt.path = [];
+      return true;
+    }
+  }
+  return false;
+}
+
+function clearCordons() {
+  const world = Game.world;
+  if (!world || !world.shutters) return;
+  world.shutters = world.shutters.filter(sh => !sh.cordon);
+  for (const st of Game.staff) st.path = [];
+  for (const pt of Game.patients) if (pt.state === "walking") pt.path = [];
+}
+
+function nearestOpenTile(world, x, y) {
+  for (let r = 1; r <= 5; r++) {
+    for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
+      if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+      const nx = x + dx, ny = y + dy;
+      const c = cellAt(world, nx, ny);
+      if (c && !c.solid && !shutterBlocks(world, nx, ny)) return { x: nx, y: ny };
+    }
+  }
+  return null;
+}
 
 function makeWorld(levelDef) {
   const world = {
@@ -907,6 +1160,7 @@ function makeWorld(levelDef) {
   if (!levelDef.builder && Game.perksActive && Game.perksActive.includes("bays")) addExtraBeds(world, 2);
 
   world.waitSlots = computeWaitSlots(world, Math.max(8, (levelDef.maxWaiting || 0) + 3));
+  makeShutters(world, levelDef);
   return world;
 }
 
@@ -923,14 +1177,14 @@ function addExtraBeds(world, n) {
     let open = 0;
     for (let y = 0; y < ROWS; y++)
       for (let x = 0; x < COLS; x++)
-        if (isWalkable(world, x, y)) open++;
+        if (isOpenFloor(world, x, y)) open++;
     let reached = 0;
     while (q.length) {
       const cur = q.shift();
       reached++;
       for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
         const nx = cur.x + dx, ny = cur.y + dy, k = nx + "," + ny;
-        if (!seen.has(k) && isWalkable(world, nx, ny)) { seen.add(k); q.push({ x: nx, y: ny }); }
+        if (!seen.has(k) && isOpenFloor(world, nx, ny)) { seen.add(k); q.push({ x: nx, y: ny }); }
       }
     }
     if (reached !== open) return false;
@@ -979,7 +1233,16 @@ function addExtraBeds(world, n) {
 const inBounds = (x, y) => x >= 0 && y >= 0 && x < COLS && y < ROWS;
 const cellAt = (world, tx, ty) => inBounds(tx, ty) ? world.grid[ty][tx] : null;
 const tileOf = (px, py) => ({ x: Math.floor(px / TILE), y: Math.floor(py / TILE) });
-const isWalkable = (world, tx, ty) => { const c = cellAt(world, tx, ty); return !!c && !c.solid; };
+/* Structural reachability — used by connectivity checks, wait-slot layout and
+   placement validation, which must judge the ward as if every shutter were
+   open, since they all reopen on a cycle. */
+const isOpenFloor = (world, tx, ty) => { const c = cellAt(world, tx, ty); return !!c && !c.solid; };
+
+/* Movement and pathing reachability — a closed shutter is a wall right now. */
+const isWalkable = (world, tx, ty) => {
+  const c = cellAt(world, tx, ty);
+  return !!c && !c.solid && !shutterBlocks(world, tx, ty);
+};
 
 /** Breadth-first flood from the entrance; the first N walkable tiles that are
     not the entrance/exit become the waiting-room slots. */
@@ -988,15 +1251,33 @@ function computeWaitSlots(world, n) {
   const seen = new Set([start.x + "," + start.y]);
   const q = [start];
   const out = [];
-  while (q.length && out.length < n) {
+  // Spacing matters now that the wards are dense: taking the first N tiles the
+  // flood reaches packs the whole queue into one corner, where the patients
+  // overlap each other and their badges become an unreadable pile. Keep them a
+  // tile apart, and only relax that if the ward genuinely cannot supply enough.
+  const spaced = (x, y, gap) =>
+    out.every(o => Math.abs(o.x - x) + Math.abs(o.y - y) >= gap);
+  const reach = [];
+  while (q.length) {
     const cur = q.shift();
     const c = cellAt(world, cur.x, cur.y);
-    if (c && !c.entrance && !c.exit) out.push({ x: cur.x, y: cur.y });
-    const nbrs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
-    for (const [dx, dy] of nbrs) {
+    if (c && !c.entrance && !c.exit) reach.push({ x: cur.x, y: cur.y });
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
       const nx = cur.x + dx, ny = cur.y + dy, key = nx + "," + ny;
-      if (!seen.has(key) && isWalkable(world, nx, ny)) { seen.add(key); q.push({ x: nx, y: ny }); }
+      if (!seen.has(key) && isOpenFloor(world, nx, ny)) { seen.add(key); q.push({ x: nx, y: ny }); }
     }
+  }
+  /* Spread them enough to read, but no further. A gap of 5 strung the queue
+     right across the top of the ward — you could not tell at a glance who was
+     waiting, and it looked like a bus stop rather than a waiting area. Three
+     keeps the queue a recognisable cluster by the door while still leaving the
+     badges legible; the narrower gaps are the fallback for tight wards. */
+  for (const gap of [3, 2, 1]) {
+    for (const t of reach) {
+      if (out.length >= n) break;
+      if (spaced(t.x, t.y, gap)) out.push(t);
+    }
+    if (out.length >= n) break;
   }
   return out;
 }
@@ -1156,6 +1437,8 @@ function makePatient(world, ailmentKey, level) {
   const sev = rollSeverity();
   let steps = a.steps.map(s => Object.assign({}, s));
   if (sev.key === "critical") steps = escalateSteps(steps, ailmentKey);
+  // a stretcher case: too heavy for one medic, so co-op has to converge
+  const stretcher = sev.key === "critical" && Game.levelIndex !== 0 && Game.rng() < 0.45;
 
   // a second condition, treated after the first
   let second = null;
@@ -1178,6 +1461,7 @@ function makePatient(world, ailmentKey, level) {
   const p = {
     vip,
     sev,
+    stretcher,
     second,
     id: nextId++,
     ailment: ailmentKey,
@@ -1268,7 +1552,11 @@ const EVENTS = [
   { key: "outbreak",  name: "OUTBREAK",          sub: "infections incoming", color: "#7fd06a", dur: 8 },
   { key: "flicker",   name: "POWER FLICKER",     sub: "equipment is sluggish", color: "#ffd54a", dur: 13 },
   { key: "rush",      name: "WALK-IN RUSH",      sub: "the doors keep opening", color: "#8be9ff", dur: 18 },
-  { key: "vip",       name: "VIP ARRIVAL",       sub: "double points, half the patience", color: "#e8b40b", dur: 6 }
+  { key: "vip",       name: "VIP ARRIVAL",       sub: "double points, half the patience", color: "#e8b40b", dur: 6 },
+  /* The five above all change WHO walks in. These two change the ROOM, which is
+     what stops a ward playing the same way twice. */
+  { key: "cordon",    name: "BAY CLOSED",        sub: "find another way round", color: "#ff9f43", dur: 20 },
+  { key: "leak",      name: "PIPE BURST",        sub: "mop it before it spreads", color: "#6fd3ff", dur: 12 }
 ];
 
 const ACHIEVEMENTS = [
@@ -1285,6 +1573,8 @@ const ACHIEVEMENTS = [
   { key: "overtime", name: "Overtime Hero",      blurb: "Three-star a ward on Overtime." },
   { key: "highfive", name: "Good Team",          blurb: "High-five your partner 10 times." },
   { key: "catch",    name: "Safe Hands",         blurb: "Catch 15 items thrown by your partner." },
+  { key: "turnover", name: "Housekeeping",        blurb: "Turn over 40 beds." },
+  { key: "teamlift", name: "Lift With Your Knees", blurb: "Make 12 two-person lifts." },
   { key: "century",  name: "Century",            blurb: "Treat 100 patients in total." },
   { key: "endless5", name: "Long Night",         blurb: "Survive five waves in Endless." }
 ];
@@ -1309,6 +1599,8 @@ function checkLiveAchievements() {
   if (Game.career.treated >= 100) unlockAch("century");
   if (Game.highFives >= 10) unlockAch("highfive");
   if ((Game.catches || 0) >= 15) unlockAch("catch");
+  if ((Game.turnovers || 0) >= 40) unlockAch("turnover");
+  if ((Game.teamLifts || 0) >= 12) unlockAch("teamlift");
   if (Game.endless && Game.wave >= 5) unlockAch("endless5");
 }
 
@@ -1387,6 +1679,8 @@ const Game = {
   pickupTimer: 0,
   highFives: 0,
   catches: 0,
+  turnovers: 0,
+  teamLifts: 0,
   highFiveCool: 0,
   toasts: [],              // achievement pop-ins
   xp: 0,
@@ -1603,6 +1897,36 @@ function facingFloorItem(p) {
 let SILENT_HINTS = false;
 function hint(p, msg) { if (SILENT_HINTS) return; p.hint = msg; p.hintT = 1.6; }
 
+
+/* ---------------------------------------------------------------------
+   Two-person lifts.
+
+   Nothing in this game previously REQUIRED two players — both medics could
+   run the whole loop independently, which is why co-op felt like two people
+   playing solo next to each other. Overcooked and Moving Out both lean on
+   things one player physically cannot do. A critical patient is a stretcher
+   case: one medic can get a hand under them, but they will not move until the
+   second medic takes the other end. Solo play still works because criticals
+   only appear from the third ward on and can be stabilised in the bed they
+   arrive next to — but in co-op it forces a genuine "come here, now" moment.
+   --------------------------------------------------------------------- */
+
+/** Does this patient need two pairs of hands? Only flagged stretcher cases —
+    gating every critical would make forced coordination a constant tax rather
+    than the "get over here NOW" moment it is supposed to be. */
+function needsTwoLift(pt) {
+  return !!(pt && pt.stretcher && !pt.done && Game.playerCount > 1);
+}
+
+/** The other medic, if they are close enough and free to help lift. */
+function liftPartnerFor(p, pt) {
+  for (const q of Game.players) {
+    if (q === p || q.patient || q.item) continue;
+    if (Math.hypot(q.x - pt.x, q.y - pt.y) <= 62) return q;
+  }
+  return null;
+}
+
 /** E / "/" — pick up, put down, place patients. */
 function doInteract(p) {
   const world = Game.world;
@@ -1610,8 +1934,10 @@ function doInteract(p) {
 
   // Carrying a patient: place them on a bed / X-ray, or set them down.
   if (p.patient) {
-    const target = facingStation(world, p, st => STATIONS[st.type].holdsPatient && !st.occupant);
+    const target = facingStation(world, p, st => STATIONS[st.type].holdsPatient &&
+                                                !st.occupant && !st.dirty);
     if (target) {
+      if (target.type === "bed") p.patient.lastBed = target;
       p.patient.state = "station";
       p.patient.station = target;
       p.patient.x = target.cx; p.patient.y = target.cy - 6;
@@ -1654,9 +1980,30 @@ function doInteract(p) {
   // bed/X-ray we face, the defib rack, then a floor item.
   const loose = facingPatient(p);
   if (loose) {
+    if (needsTwoLift(loose) && !liftPartnerFor(p, loose)) {
+      hint(p, "Too heavy — needs both medics");
+      loose.flash = 0.4;
+      Sound.play("error");
+      return;
+    }
     loose.state = "carried"; loose.path = []; loose.slot = null;
     p.patient = loose;
-    Sound.play("pickup");
+    if (needsTwoLift(loose)) {
+      Game.score += 30;
+      popup(loose.x, loose.y - 60, "TEAM LIFT  +30", "#ffd54a", true);
+      Game.teamLifts = (Game.teamLifts || 0) + 1;
+      Sound.play("clutch");
+      checkLiveAchievements();
+    } else Sound.play("pickup");
+    return;
+  }
+
+  // lifting a critical patient back off a bed or machine takes two as well
+  const occupied2 = facingStation(world, p, st => st.occupant);
+  if (occupied2 && needsTwoLift(occupied2.occupant) &&
+      !liftPartnerFor(p, occupied2.occupant)) {
+    hint(p, "Too heavy — needs both medics");
+    Sound.play("error");
     return;
   }
 
@@ -1706,8 +2053,13 @@ function freeSpotInFront(world, p) {
     only for the on-screen button prompt. */
 function previewInteract(p) {
   const world = Game.world;
+  {
+    const lp = facingPatient(p);
+    if (lp && !p.patient && !p.item && needsTwoLift(lp) && !liftPartnerFor(p, lp))
+      return "Needs both medics";
+  }
   if (p.patient) {
-    if (facingStation(world, p, st => STATIONS[st.type].holdsPatient && !st.occupant))
+    if (facingStation(world, p, st => STATIONS[st.type].holdsPatient && !st.occupant && !st.dirty))
       return p.patient.done ? null : "Place patient";
     return p.patient.done ? null : "Set down";
   }
@@ -1946,8 +2298,22 @@ function updatePlayer(p, dt) {
   // Use (held) — progress a job, cancel if the job identity changes.
   if (Keys[c.use]) {
     const job = findJob(p);
-    const sp = (!job && !p.item && !p.patient) ? spillAt(p.x, p.y) : null;
-    if (sp) {
+    const bedToClean = !job ? cleanableBed(world, p) : null;
+    const sp = (!job && !bedToClean && !p.item && !p.patient) ? spillAt(p.x, p.y) : null;
+    if (bedToClean) {
+      p.work = null;
+      bedToClean.clean += dt;
+      if (bedToClean.clean >= BED_CLEAN_TIME) {
+        bedToClean.dirty = false;
+        bedToClean.clean = 0;
+        bedToClean.flash = 0.5;
+        Game.score += TURNOVER_BONUS;
+        Game.turnovers = (Game.turnovers || 0) + 1;
+        popup(bedToClean.cx, bedToClean.cy - 26, "Bay ready  +" + TURNOVER_BONUS, "#8be9ff");
+        Sound.play("done");
+        checkLiveAchievements();
+      }
+    } else if (sp) {
       p.work = null;
       sp.mop += dt * 2;                    // net +1/s against the 0.6/s decay
       if (p.hintT <= 0) hint(p, "Cleaning up");
@@ -1990,8 +2356,9 @@ function updatePlayer(p, dt) {
     p.promptE = previewInteract(p);
     const job = findJob(p);
     p.promptQ = job ? job.label
+              : (cleanableBed(world, p) ? "Turn over bay"
               : (p.item ? "Throw"
-              : (!p.patient && spillAt(p.x, p.y) ? "Mop up" : null));
+              : (!p.patient && spillAt(p.x, p.y) ? "Mop up" : null)));
     SILENT_HINTS = false;
   } else {
     p.promptE = null; p.promptQ = null;
@@ -2133,10 +2500,47 @@ function collides(world, px, py) {
   return false;
 }
 
+
+/* ---------------------------------------------------------------------
+   Dirty beds — the dishes loop.
+
+   The clearest structural gap against Overcooked was that there was only ever
+   ONE thing worth doing: move the current patient along. Overcooked's dishes
+   work because they are a second, always-growing pressure competing for the
+   same hands, and because ignoring them eventually stops the main loop dead.
+   A bed a patient has just left must be turned over before the next one can
+   use it — so a good pair splits duties instead of both chasing the same
+   patient, and a bad pair drowns in beds they cannot use.
+   --------------------------------------------------------------------- */
+
+const BED_CLEAN_TIME = 1.4;       // seconds of holding Use to turn a bed over
+const TURNOVER_BONUS = 12;        // small, but it adds up over a shift
+
+/** Mark a bed as needing turnover. Called when a patient leaves it. */
+function soilBed(bed) {
+  if (!bed || bed.type !== "bed") return;
+  if (Game.levelIndex === 0 && !Game.builderMode) return;   // tutorial ward stays simple
+  bed.dirty = true;
+  bed.clean = 0;
+}
+
+function cleanableBed(world, p) {
+  if (p.item || p.patient) return null;
+  return facingStation(world, p, st => st.type === "bed" && st.dirty && !st.occupant);
+}
+
+/** How much of the ward is currently out of action. Drives the HUD warning. */
+function dirtyBedCount() {
+  const w = Game.world;
+  if (!w) return 0;
+  return w.beds.filter(b => b.dirty).length;
+}
+
 function dischargePatient(p) {
   const pt = p.patient;
   p.patient = null;
   pt.state = "gone";
+  if (pt.lastBed) { soilBed(pt.lastBed); pt.lastBed = null; }
 
   const a = AILMENTS[pt.ailment];
   const frac = pt.patience / pt.patienceMax;
@@ -2243,6 +2647,15 @@ function spillAt(px, py) {
   return Game.spills.find(s2 => s2.tx === tx && s2.ty === ty) || null;
 }
 
+function updateBeds(dt) {
+  const w = Game.world;
+  if (!w) return;
+  for (const b of w.beds) {
+    if (!b.dirty) { b.clean = 0; continue; }
+    b.clean = Math.max(0, (b.clean || 0) - dt * 0.55);   // walking off loses progress
+  }
+}
+
 function updateSpills(dt) {
   for (let i = Game.spills.length - 1; i >= 0; i--) {
     const sp = Game.spills[i];
@@ -2306,6 +2719,8 @@ function losePatient(pt) {
 
   // and they leave a mess behind them
   addSpill(Math.floor(pt.x / TILE), Math.floor(pt.y / TILE));
+  if (pt.station && pt.station.type === "bed") soilBed(pt.station);
+  else if (pt.lastBed) soilBed(pt.lastBed);
 
   // free whatever they occupied
   if (pt.station) { pt.station.occupant = null; pt.station = null; }
@@ -2636,11 +3051,19 @@ function updateEvents(dt) {
     if (Game.event.t >= Game.event.def.dur) {
       // wind the effects back down
       Game.spawnMul = 1; Game.workMul = 1; Game.dim = 0;
+      if (Game.event.def.key === "cordon") clearCordons();
       Game.event = null;
       Game.eventTimer = EVENT_GAP * (0.75 + Game.rng() * 0.6);
     } else if (Game.event.def.key === "flicker") {
       // lights stutter for the duration
       Game.dim = 0.35 + 0.25 * Math.sin(Game.event.t * 11);
+    } else if (Game.event.def.key === "leak") {
+      // the burst keeps producing puddles for as long as it runs
+      Game.leakTimer = (Game.leakTimer || 0) - dt;
+      if (Game.leakTimer <= 0) {
+        Game.leakTimer = 1.5;
+        splashSpill();
+      }
     }
     return;
   }
@@ -2670,6 +3093,30 @@ function updateEvents(dt) {
     case "flicker":   Game.workMul = 1.30; break;
     case "rush":      Game.spawnMul = 0.70; break;
     case "vip":       Game.forceVip = true; Game.spawnTimer = Math.min(Game.spawnTimer, 1.0); break;
+    case "cordon":
+      // if the ward has nowhere safe to rope off, drop the event rather than
+      // stand there announcing something that never happens
+      if (!openCordon()) { Game.event = null; Game.banner = null;
+                           Game.eventTimer = EVENT_GAP * 0.5; }
+      break;
+    case "leak":
+      Game.leakTimer = 0;
+      for (let i = 0; i < 3; i++) splashSpill();
+      break;
+  }
+}
+
+/** Drop a puddle on a random walkable tile that is not already wet. */
+function splashSpill() {
+  const world = Game.world;
+  if (!world) return;
+  for (let tries = 0; tries < 40; tries++) {
+    const tx = 1 + Math.floor(Game.rng() * (COLS - 2));
+    const ty = 1 + Math.floor(Game.rng() * (ROWS - 2));
+    if (!isWalkable(world, tx, ty)) continue;
+    if (Game.spills.some(s2 => s2.tx === tx && s2.ty === ty)) continue;
+    addSpill(tx, ty);
+    return;
   }
 }
 
@@ -2752,7 +3199,9 @@ function updatePlay(dt) {
   updateSpawning(dt);
   updateItems(dt);
   updateNurse(dt);
+  updateShutters(dt);
   updateThrownItems(dt);
+  updateBeds(dt);
   updateSpills(dt);
   updateDeterioration(dt);
   updateStaff(dt);
@@ -2791,11 +3240,24 @@ function endBuilderRun() {
   Sound.play("error");
 }
 
+/* Two medics do not score twice as much as one, but they do score a lot more:
+   measured over the ten wards, a solo run lands around 0.38-0.54 of the co-op
+   score on the same ward. Thresholds are authored for co-op, so a solo player
+   held to them could not earn the single star that unlocks the next ward —
+   the campaign was shut to them at ward one. Scale the ladder instead. */
+const SOLO_STAR_SCALE = 0.62;
+
+function starTargets(index) {
+  if (index < 0 || !LEVELS[index] || !LEVELS[index].stars) return [];
+  const th = LEVELS[index].stars;
+  if (Game.playerCount >= 2) return th;
+  return th.map(t => Math.round(t * SOLO_STAR_SCALE / 50) * 50);
+}
+
 function starsFor(index, score) {
   if (index < 0) return 0;
-  const th = LEVELS[index].stars;
   let s = 0;
-  for (const t of th) if (score >= t) s++;
+  for (const t of starTargets(index)) if (score >= t) s++;
   return s;
 }
 
@@ -2850,7 +3312,7 @@ function endLevel() {
     challenges: list.map((c, i) => ({ text: challengeText(c), met: met[i] })),
     newChallenges,
     difficulty: DIFFS[Game.difficulty].name,
-    name: LEVELS[Game.levelIndex].name, targets: LEVELS[Game.levelIndex].stars,
+    name: LEVELS[Game.levelIndex].name, targets: starTargets(Game.levelIndex),
     score: Game.score, treated: Game.treated, lost: Game.lost,
     bestCombo: Game.bestCombo, perfects: Game.perfects, clutches: Game.clutches,
     t: 0
@@ -3010,13 +3472,13 @@ function wardConnected(world) {
     const c = q.shift();
     for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
       const nx = c.x + dx, ny = c.y + dy, k = nx + "," + ny;
-      if (seen.has(k) || !isWalkable(world, nx, ny)) continue;
+      if (seen.has(k) || !isOpenFloor(world, nx, ny)) continue;
       seen.add(k); q.push({ x: nx, y: ny });
     }
   }
   let open = 0;
   for (let y = 0; y < ROWS; y++)
-    for (let x = 0; x < COLS; x++) if (isWalkable(world, x, y)) open++;
+    for (let x = 0; x < COLS; x++) if (isOpenFloor(world, x, y)) open++;
   if (seen.size !== open) return false;                 // an island got cut off
   if (!seen.has(world.exit.x + "," + world.exit.y)) return false;
   for (const st of world.stations) {                    // every machine usable
@@ -3150,7 +3612,7 @@ function updateStaff(dt) {
 }
 
 function freeBedFor(world) {
-  return world.beds.find(b => !b.occupant) || null;
+  return world.beds.find(b => !b.occupant && !b.dirty) || null;
 }
 
 function staffPorter(st, dt) {
@@ -4582,13 +5044,16 @@ function buildProps(mb, world, rng, isWall) {
   const taken = [];
   const far = (x, y, d) => taken.every(t => Math.abs(t.x - x) + Math.abs(t.y - y) >= d);
   let placed = 0;
-  const budget = 22 + Math.floor(rng() * 7);
+  /* A flat budget of ~24 left the wards reading barren once the maps shrank.
+     Scale it to the floor and tighten the spacing: props are non-blocking
+     scenery, so a busier room costs nothing but looks like a working ER. */
+  const budget = Math.round(cands.length * 0.34) + Math.floor(rng() * 5);
   for (const c of cands) {
     if (placed >= budget) break;
-    if (!far(c.x, c.y, c.wall ? 3 : 5)) continue;
+    if (!far(c.x, c.y, c.wall ? 2 : 3)) continue;
     const kind = kinds[Math.floor(rng() * kinds.length)];
     // freestanding tiles only take things that read fine in the open
-    const k = c.wall ? kind : (rng() < 0.6 ? "plant" : "sign");
+    const k = c.wall ? kind : (rng() < 0.5 ? "plant" : (rng() < 0.5 ? "sign" : "chair"));
     const fn = PROPS[k];
     if (!fn) continue;
     fn(mb, c.x + 0.5, c.y + 0.5, c.face === null ? rng() * 6.283 : c.face, col);
@@ -4938,9 +5403,34 @@ function buildCamera(aspect, orbit) {
 }
 
 /** Pull the camera back until the whole ward is inside the frame. */
-function fitCamera(aspect) {
+/** Frame the ward's CONTENT, not the 32x16 grid. The dense layouts carry solid
+    bands of wall top and bottom, and fitting the whole grid spent a third of
+    the screen on them — everything the player cares about ended up small and
+    pushed off-centre. */
+function wardBounds(world) {
+  let x0 = COLS, x1 = 0, y0 = ROWS, y1 = 0, any = false;
+  if (world) {
+    for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) {
+      const c = world.grid[y][x];
+      if (c.solid && !c.station) continue;         // plain wall: not content
+      any = true;
+      if (x < x0) x0 = x; if (x + 1 > x1) x1 = x + 1;
+      if (y < y0) y0 = y; if (y + 1 > y1) y1 = y + 1;
+    }
+  }
+  if (!any) return { x0: 0, x1: COLS, y0: 0, y1: ROWS };
+  // one tile of breathing room, clipped to the grid
+  return { x0: Math.max(0, x0 - 1), x1: Math.min(COLS, x1 + 1),
+           y0: Math.max(0, y0 - 1), y1: Math.min(ROWS, y1 + 1) };
+}
+
+function fitCamera(aspect, world) {
+  const bb = wardBounds(world || Game.world);
+  CAM.tx = (bb.x0 + bb.x1) / 2;
+  CAM.tz = (bb.y0 + bb.y1) / 2;
   const corners = [];
-  for (const x of [0, COLS]) for (const z of [0, ROWS]) for (const y of [0, WALL_Y + 0.6]) corners.push([x, y, z]);
+  for (const x of [bb.x0, bb.x1]) for (const z of [bb.y0, bb.y1])
+    for (const y of [0, WALL_Y + 0.6]) corners.push([x, y, z]);
   let lo = 12, hi = 70;
   for (let it = 0; it < 26; it++) {
     const mid = (lo + hi) / 2;
@@ -4986,10 +5476,17 @@ function drawSceneEntities() {
     if (st.type !== "bed") continue;
     const cx = st.x + 0.5, cz = st.y + 0.5;
     if (_pass !== "shadow") {
-      drawMesh(MESH.boxSoft, cx, 0.40, cz + 0.10, 0, 0.395, 0.085, 0.34,
-               rgb(st.occupant ? "#ff9fb6" : "#a8d4f5"));
+      const sheet = st.dirty ? "#b39a86" : (st.occupant ? "#ff9fb6" : "#a8d4f5");
+      drawMesh(MESH.boxSoft, cx, 0.40, cz + 0.10, 0, 0.395, 0.085, 0.34, rgb(sheet));
       drawMesh(MESH.boxSoft, cx, 0.45, cz - 0.20, 0, 0.395, 0.055, 0.09,
-               rgb("#ffffff"));
+               rgb(st.dirty ? "#c8b6a4" : "#ffffff"));
+      if (st.dirty) {
+        // rumpled linen piled at the foot: unmistakable at a glance
+        drawMesh(MESH.sphereLo, cx - 0.12, 0.52, cz + 0.24, 0.7,
+                 0.20, 0.09, 0.16, rgb("#cbb9a6"));
+        drawMesh(MESH.sphereLo, cx + 0.14, 0.50, cz + 0.16, 2.1,
+                 0.16, 0.08, 0.13, rgb("#bda995"));
+      }
     }
   }
 
@@ -4999,6 +5496,46 @@ function drawSceneEntities() {
     const t = performance.now() / 600 + it.id;
     const y = flying ? 0.52 : 0.16 + Math.sin(t) * 0.02;
     drawItem3D(it.type, it.x * T2W, y, it.y * T2W, flying ? (it.spin || 0) : t * 0.4);
+  }
+
+  // shutters: fire doors that drop across a corridor on a cycle
+  const shl = world.shutters || [];
+  for (const sh of shl) {
+    if (sh.cordon) {
+      // an event cordon is tape and cones, not a fire door — it has to read as
+      // temporary at a glance so nobody thinks the ward broke
+      for (const c of sh.cells) {
+        const cx = c.x + 0.5, cz = c.y + 0.5;
+        drawMesh(MESH.cone, cx, 0.22, cz, 0, 0.19, 0.22, 0.19, rgb("#ff7a2f"));
+        drawMesh(MESH.boxSoft, cx, 0.05, cz, 0, 0.24, 0.05, 0.24, rgb("#2a2f38"));
+        drawMesh(MESH.boxSoft, cx, 0.62, cz, 0, 0.48, 0.05, 0.05, rgb("#ffd54a"));
+        drawMesh(MESH.boxSoft, cx, 0.62, cz, Math.PI / 2, 0.48, 0.05, 0.05, rgb("#ffd54a"));
+      }
+      continue;
+    }
+    const left = shutterCountdown(sh);
+    const warning = !sh.closed && left < SHUTTER_WARN;
+    for (const c of sh.cells) {
+      const cx = c.x + 0.5, cz = c.y + 0.5;
+      // the rail is always there so the hazard is legible before it drops
+      drawMesh(MESH.boxSoft, cx, WALL_Y - 0.06, cz, 0, 0.48, 0.07, 0.16,
+               rgb("#6c7784"));
+      let h;                                  // how far the door has come down
+      if (sh.closed) h = 1;
+      else if (warning) h = 0.16 * (1 - left / SHUTTER_WARN);
+      else h = 0;
+      if (h <= 0.001) continue;
+      const full = WALL_Y - 0.12;
+      const drop = full * h;
+      drawMesh(MESH.boxSoft, cx, WALL_Y - 0.12 - drop / 2, cz, 0,
+               0.46, drop / 2, 0.10,
+               rgb(sh.closed ? "#d8a54a" : "#f0c46b"));
+      if (sh.closed) {
+        for (let i = 0; i < 3; i++)                 // hazard stripes
+          drawMesh(MESH.boxSoft, cx, 0.30 + i * 0.42, cz + 0.055, 0,
+                   0.44, 0.055, 0.02, rgb("#3a2a10"));
+      }
+    }
   }
 
   // spills: a dark glossy puddle with a mop-progress ring
@@ -5201,11 +5738,13 @@ function renderWorld3D(orbit) {
   if (!world.mesh) world.mesh = buildLevelMesh(world);
 
   // the ward camera owns its own framing; menus must not leak theirs in
-  CAM.tx = COLS / 2; CAM.ty = 0; CAM.tz = ROWS / 2; CAM.pitch = 0.93;
+  CAM.ty = 0; CAM.pitch = 0.93;
   if (!world.camDist) {
-    fitCamera(PLAY_W / PLAY_H);
-    world.camDist = CAM.dist * 0.93;      // crop the empty corners a little
+    fitCamera(PLAY_W / PLAY_H, world);
+    world.camDist = CAM.dist * 0.97;
+    world.camTx = CAM.tx; world.camTz = CAM.tz;
   }
+  CAM.tx = world.camTx; CAM.tz = world.camTz;
   CAM.dist = world.camDist;
 
   // ---- shadow pass ----
@@ -5298,9 +5837,9 @@ function renderShowcase() {
   const t = performance.now() / 9000;
   const keep = { d: CAM.dist, p: CAM.pitch, tx: CAM.tx, ty: CAM.ty, tz: CAM.tz };
   // framed as a hero shot in the upper-middle band, clear of the control panels
-  CAM.tx = COLS / 2; CAM.ty = -2.6; CAM.tz = ROWS / 2;
+  CAM.ty = -2.6;
   CAM.pitch = 0.80;
-  fitCamera(W / H);
+  fitCamera(W / H, _showcase);
   CAM.dist *= 1.16;
   buildCamera(W / H, Math.sin(t) * 0.42);
   Object.assign(CAM, { pitch: keep.p });
@@ -5689,6 +6228,20 @@ function hudCard(g, x, y, w, h, label) {
   if (label) text(g, label, x + 12, y + 16, 10, PALETTE.dim);
 }
 
+/** Beds out of action. Turns amber then red as the ward silts up, because a
+    player needs to feel the turnover debt before it strands them. */
+function hudDirtyBeds(g, x, y) {
+  const n = dirtyBedCount();
+  if (!n) return;
+  const total = Game.world ? Game.world.beds.length : 1;
+  const frac = n / Math.max(1, total);
+  const col = frac > 0.55 ? PALETTE.bad : (frac > 0.28 ? PALETTE.warn : PALETTE.dim);
+  g.save();
+  if (frac > 0.55) g.globalAlpha = 0.6 + 0.4 * Math.sin(performance.now() / 160);
+  text(g, "↻ " + n + " bay" + (n === 1 ? "" : "s"), x, y, 12, col);
+  g.restore();
+}
+
 function drawHUD(g) {
   g.fillStyle = Paint.hud;
   g.fillRect(0, 0, W, HUD_H);
@@ -5776,20 +6329,24 @@ function drawHUD(g) {
     hudCard(g, bx, 10, 250, HUD_H - 22, "WAVE " + (Game.builder ? Game.builder.wave : 1));
     text(g, "Best wave  " + (Game.builderBest || "—"), bx + 12, 52, 16, "#6fd3b4");
     text(g, "Treated " + Game.treated + "   Lost " + Game.lost, bx + 12, 74, 12, PALETTE.dim);
+    hudDirtyBeds(g, bx + 150, 74);
   } else if (Game.endless) {
     hudCard(g, bx, 10, 250, HUD_H - 22, "PERSONAL BEST");
     text(g, String(Game.endlessBest), bx + 12, 52, 26, "#ffd54a");
     text(g, "Treated " + Game.treated + "   Lost " + Game.lost, bx + 12, 74, 12, PALETTE.dim);
+    hudDirtyBeds(g, bx + 150, 74);
   } else {
     hudCard(g, bx, 10, 250, HUD_H - 22, "TARGETS");
-    for (let i = 0; i < (lvl.stars ? 3 : 0); i++) {
-      const th = lvl.stars[i];
+    const tgts = starTargets(Game.levelIndex);
+    for (let i = 0; i < tgts.length; i++) {
+      const th = tgts[i];
       const hit = Game.score >= th;
       const sx = bx + 14 + i * 78;
       drawStar(g, sx + 9, 46, 10, hit ? "#ffd54a" : "rgba(255,255,255,.15)");
       text(g, String(th), sx + 23, 51, 13, hit ? PALETTE.text : PALETTE.dim);
     }
     text(g, "Treated " + Game.treated + "   Lost " + Game.lost, bx + 12, 74, 12, PALETTE.dim);
+    hudDirtyBeds(g, bx + 150, 74);
   }
 
   text(g, (Sound.muted ? "M  muted" : "M  sound") + (Music.on ? "  ·  N  music" : "  ·  N  off"), W - 20, 26, 11, PALETTE.dim, "right");
@@ -6200,7 +6757,7 @@ const builderUnlocked = () => totalStars() >= BUILDER_UNLOCK;
    with the actual procedures.
    --------------------------------------------------------------------- */
 
-const HOWTO_PAGES = 3;
+const HOWTO_PAGES = 4;
 
 function drawHowTo(g) {
   g.fillStyle = Paint.title;
@@ -6208,11 +6765,13 @@ function drawHowTo(g) {
   const page = Game.howToPage || 0;
 
   text(g, "HOW TO PLAY", W / 2, 56, 34, PALETTE.text, "center");
-  const titles = ["Controls & the shift", "The five procedures", "Modes & extras"];
+  const titles = ["Controls & the shift", "The five procedures",
+                  "Working the floor", "Modes & extras"];
   text(g, titles[page], W / 2, 82, 16, PALETTE.dim, "center", "normal");
 
   if (page === 0) drawHowToControls(g);
   else if (page === 1) drawHowToProcedures(g);
+  else if (page === 2) drawHowToFloor(g);
   else drawHowToModes(g);
 
   for (let i = 0; i < HOWTO_PAGES; i++) {
@@ -6266,10 +6825,11 @@ function drawHowToControls(g) {
     "Ignore someone too long and they DETERIORATE into a critical case. Watch the queue, not just the beds.",
     "Three of the same condition in a row scores a SPECIALIST bonus — batching beats pure speed.",
     "Some patients arrive with TWO conditions: a second small badge below their icon. Treat both.",
-    "Spills slow you down. Stand in one with empty hands and hold Q to mop it up.",
-    "Two players: stand together, both press Q for a high five — refills sprint and keeps the chain alive."
+    "Every discharge leaves the bed rumpled and unusable. Empty hands + hold Q at it to turn it over.",
+    "A stretcher case marked 2 MEDICS will not move for one player — get your partner alongside and press E together.",
+    "Spills, jams, dry shelves, fire shutters and high fives are all explained on the WORKING THE FLOOR page."
   ];
-  fillRound(g, 96, 490, 1088, 206, 14, "rgba(255,255,255,.04)");
+  fillRound(g, 96, 490, 1088, 224, 14, "rgba(255,255,255,.04)");
   text(g, "WORTH KNOWING", 118, 514, 12, "#ffd54a");
   tips.forEach((t, i) => {
     text(g, "•  " + t, 118, 538 + i * 20, 12.5, PALETTE.dim, "left", "normal");
@@ -6308,33 +6868,109 @@ function drawHowToProcedures(g) {
        W / 2, 612, 13, PALETTE.dim, "center", "normal");
 }
 
+/* Page 3 — the things that happen *around* the five procedures. These are the
+   mechanics players lose runs to without ever being told about them, so each
+   gets a card of its own rather than a line in a tip list. */
+function drawHowToFloor(g) {
+  const cards = [
+    { col: "#c98a5a", title: "TURN OVER THE BED",
+      what: "A bed is left rumpled after every discharge and nobody new can lie in it.",
+      how: "Stand at a rumpled bed with EMPTY hands and hold Q to strip it. Fast turnovers pay a bonus.",
+      watch: "The bay counter at the top turns amber then red as dirty beds pile up. Red means you are about to run out of anywhere to put people." },
+    { col: "#ff8fa3", title: "TWO-MEDIC LIFTS",
+      what: "Some critical arrivals come in on a stretcher and wear a 2 MEDICS badge.",
+      how: "One of you cannot budge them. Bring your partner within arm's reach and press E — you lift together.",
+      watch: "Team lifts pay extra. Solo shifts carry stretcher cases normally, so this only bites in co-op." },
+    { col: "#f2b03c", title: "FIRE SHUTTERS",
+      what: "From the third ward on, a corridor door drops on a timer and seals that route.",
+      how: "Nothing to press — read the amber warning stripe and get through, or go the long way round.",
+      watch: "Shutters never trap you or cut the ward in two, but they will cost you a run if you commit to a doorway too late." }
+  ];
+  let x = 96;
+  for (const c of cards) {
+    fillRound(g, x, 106, 352, 260, 14, "rgba(255,255,255,.045)");
+    g.fillStyle = c.col; roundRect(g, x, 106, 352, 4, 2); g.fill();
+    text(g, c.title, x + 22, 140, 17, c.col);
+    wrapText(g, c.what, x + 22, 168, 308, 18, 13, PALETTE.text);
+    text(g, "DO THIS", x + 22, 226, 11, "#ffd54a");
+    wrapText(g, c.how, x + 22, 248, 308, 18, 13, PALETTE.dim);
+    text(g, "WATCH FOR", x + 22, 300, 11, "#ffd54a");
+    wrapText(g, c.watch, x + 22, 322, 308, 17, 12.5, PALETTE.dim);
+    x += 368;
+  }
+
+  const floor = [
+    ["Spills", "Stand in the puddle with empty hands and hold Q to mop. Walking through one halves your speed."],
+    ["Jammed machines", "A machine showing sparks does nothing. Empty hands, hold Q at it to clear the jam."],
+    ["Empty shelves", "A shelf that has run dry shows a crate icon. Collect a crate from the Delivery door, carry it over, hold Q to restock."],
+    ["Throwing", "Holding an item with no station to work? Press Q to hurl it in the way you are facing. Your partner catches it for a bonus; a wall just drops it."],
+    ["High five", "Two players standing together, both press Q: refills both sprint bars and keeps your combo chain alive."],
+    ["Deterioration", "Leave someone in the queue too long and they become a critical case — more work, less patience. The queue is the real clock."]
+  ];
+  fillRound(g, 96, 384, 1088, 216, 14, "rgba(255,255,255,.04)");
+  text(g, "KEEPING THE FLOOR MOVING", 118, 410, 12, "#ffd54a");
+  floor.forEach(([n, b], i) => {
+    const ey = 438 + i * 26;
+    text(g, n, 118, ey, 13.5, PALETTE.text);
+    g.font = 'bold 13.5px "Trebuchet MS", "Segoe UI", sans-serif';
+    text(g, b, 118 + g.measureText(n).width + 12, ey, 12.5, PALETTE.dim, "left", "normal");
+  });
+
+  fillRound(g, 96, 616, 1088, 74, 14, "rgba(255,213,74,.07)");
+  text(g, "IF YOU ONLY REMEMBER ONE THING", 118, 642, 12, "#ffd54a");
+  wrapText(g, "Beds are the bottleneck, not your legs. A bed that is dirty, or occupied by someone " +
+              "who is already finished, is a bed nobody can use — clear it before you go looking for the next patient.",
+           118, 666, 1044, 18, 13, PALETTE.text);
+}
+
 function drawHowToModes(g) {
   const modes = [
-    ["CAMPAIGN", "#48c3f0", "Ten handmade wards, three minutes each. Score sets your stars; stars unlock the next ward and your perks. Three shift challenges per ward give you a reason to come back."],
-    ["NIGHT SHIFT (ENDLESS)", "#c39bff", "No clock. Arrivals tighten forever and every tenth patient buys back a life. Unlocks at six stars."],
-    ["ER BUILDER (WAVES)", "#6fd3b4", "You design the department. Treat patients to earn credits, then between waves buy beds, machines and staff and place them wherever you like. Press start when your ER is ready. Waves escalate; the run ends when you run out of lives."]
+    ["CAMPAIGN", "#48c3f0", "Ten handmade wards, a little over two minutes each. Score sets your stars; stars unlock the next ward and your perks. Three shift challenges per ward give you a reason to come back."],
+    ["NIGHT SHIFT (ENDLESS)", "#c39bff", "No clock. Arrivals tighten forever and every tenth patient buys back a life. Open from the start — pick it on the shift select."],
+    ["ER BUILDER (WAVES)", "#6fd3b4", "You design the department. Ninety-second waves; treat patients to earn credits, then between waves buy beds, machines and staff and place them wherever you like. Press start when your ER is ready. Waves escalate; the run ends when you run out of lives. Also open from the start."]
   ];
   let y = 116;
   for (const [name, col, blurb] of modes) {
-    fillRound(g, 96, y, 1088, 92, 13, "rgba(255,255,255,.04)");
-    g.fillStyle = col; roundRect(g, 96, y, 5, 92, 2.5); g.fill();
-    text(g, name, 122, y + 30, 19, col);
-    wrapText(g, blurb, 122, y + 54, 1030, 19, 13, PALETTE.dim);
-    y += 104;
+    fillRound(g, 96, y, 1088, 84, 13, "rgba(255,255,255,.04)");
+    g.fillStyle = col; roundRect(g, 96, y, 5, 84, 2.5); g.fill();
+    text(g, name, 122, y + 28, 18, col);
+    wrapText(g, blurb, 122, y + 50, 1030, 18, 13, PALETTE.dim);
+    y += 94;
   }
   const extras = [
-    ["Shift events", "From the third ward on, a surge can hit mid-shift — an ambulance, an outbreak, a power flicker. Discharges pay extra while one runs."],
+    ["Shift events", "From the third ward on, something hits mid-shift: an ambulance, an outbreak, a power flicker, a VIP. Discharges pay extra while one runs."],
+    ["The ward moves", "Two of those change the room: BAY CLOSED ropes off floor for twenty seconds, PIPE BURST keeps dropping puddles. Neither ever cuts the ward in two."],
     ["Pickups", "Coffee makes you quicker; adrenaline makes sprinting free. Both sit on the floor and expire if ignored."],
     ["Difficulty", "Casual, Standard or Overtime — press T on the shift select. Overtime pays 1.45x."],
     ["Severity", "Every arrival is minor, standard or critical, and the mix gets nastier as the clock runs down."]
   ];
-  fillRound(g, 96, y, 1088, 140, 13, "rgba(255,255,255,.04)");
-  text(g, "ALSO IN PLAY", 118, y + 24, 12, "#ffd54a");
+  fillRound(g, 96, y, 1088, 143, 13, "rgba(255,255,255,.04)");
+  text(g, "ALSO IN PLAY", 118, y + 22, 12, "#ffd54a");
   extras.forEach(([n, b], i) => {
-    const ey = y + 50 + i * 24;
+    const ey = y + 46 + i * 21;
     text(g, n, 118, ey, 13, PALETTE.text);
     g.font = 'bold 13px "Trebuchet MS", "Segoe UI", sans-serif';
     text(g, b, 118 + g.measureText(n).width + 12, ey, 13, PALETTE.dim, "left", "normal");
+  });
+  y += 151;
+
+  /* Where the score actually comes from. Players were tuning their play
+     against a number they had never been shown the rules for. */
+  const bonuses = [
+    ["Chain", "Discharge again quickly and your combo climbs. The multiplier rides every payout, so a broken chain costs far more than one slow patient."],
+    ["Specialist", "Three of the same condition back to back."],
+    ["Team lift", "Both medics carrying one stretcher case."],
+    ["Turnover", "Strip a rumpled bed promptly after a discharge."],
+    ["Catch", "Your partner catches an item you threw."],
+    ["Lives", "Three. You lose one when somebody's patience runs out and they walk. At zero the shift ends there and then."]
+  ];
+  fillRound(g, 96, y, 1088, 176, 13, "rgba(255,255,255,.04)");
+  text(g, "WHERE THE SCORE COMES FROM", 118, y + 22, 12, "#ffd54a");
+  bonuses.forEach(([n, b], i) => {
+    const ey = y + 46 + i * 21;
+    text(g, n, 118, ey, 13, PALETTE.text);
+    g.font = 'bold 13px "Trebuchet MS", "Segoe UI", sans-serif';
+    text(g, b, 118 + g.measureText(n).width + 12, ey, 12.5, PALETTE.dim, "left", "normal");
   });
 }
 
@@ -6973,6 +7609,39 @@ function drawWorldUI(g) {
     }
   }
 
+  // --- shutters: warn before they drop ---
+  for (const sh of (world.shutters || [])) {
+    const left = shutterCountdown(sh);
+    if (sh.closed || left > SHUTTER_WARN) continue;
+    const c = sh.cells[Math.floor(sh.cells.length / 2)];
+    const s2 = projectToScreen(c.x + 0.5, 1.5, c.y + 0.5);
+    if (!s2) continue;
+    g.save();
+    g.globalAlpha = 0.55 + 0.45 * Math.sin(performance.now() / 90);
+    fillRound(g, s2.x - 30, s2.y - 10, 60, 20, 6, PALETTE.warn);
+    text(g, "CLOSING", s2.x, s2.y + 5, 11, "#3a2a00", "center");
+    g.restore();
+  }
+
+  // --- beds awaiting turnover ---
+  for (const bd of world.beds) {
+    if (!bd.dirty) continue;
+    const s2 = projectToScreen(bd.x + 0.5, 1.05, bd.y + 0.5);
+    if (!s2) continue;
+    if (bd.clean > 0.02) {
+      const f = clamp(bd.clean / BED_CLEAN_TIME, 0, 1);
+      fillRound(g, s2.x - 24, s2.y - 5, 48, 8, 3, "rgba(14,22,34,.82)");
+      g.fillStyle = "#8be9ff";
+      roundRect(g, s2.x - 23, s2.y - 4, 46 * f, 6, 2); g.fill();
+    } else {
+      g.save();
+      g.globalAlpha = 0.55 + 0.3 * Math.sin(performance.now() / 420 + bd.x);
+      fillRound(g, s2.x - 15, s2.y - 9, 30, 17, 5, "rgba(150,120,90,.92)");
+      text(g, "↻", s2.x, s2.y + 4, 14, "#2a1f14", "center");
+      g.restore();
+    }
+  }
+
   // --- spills: only worth a label while someone is cleaning one ---
   for (const sp of Game.spills) {
     if (sp.mop <= 0.02) continue;
@@ -7013,6 +7682,10 @@ function drawWorldUI(g) {
 
 /** Badge, patience bar, step pips and need bubble above one patient. */
 function drawPatientTag(g, pt, x, y, scale) {
+  // A patient standing near the top wall projects their badge above the play
+  // area, where it is clipped in half. Nudge it back inside.
+  const topLimit = PLAY_Y + 26 * scale;
+  if (y < topLimit) y = topLimit;
   const frac = clamp(pt.patience / pt.patienceMax, 0, 1);
   const a2 = AILMENTS[pt.ailment];
   const R = 12.5 * scale;
@@ -7082,6 +7755,16 @@ function drawPatientTag(g, pt, x, y, scale) {
     }
   }
 
+  if (needsTwoLift(pt) && !pt.done) {
+    const yy = y - R - 30 * scale;
+    g.font = 'bold ' + Math.round(9 * scale) + 'px "Trebuchet MS", "Segoe UI", sans-serif';
+    const lw = g.measureText("2 MEDICS").width + 12 * scale;
+    g.save();
+    g.globalAlpha = 0.7 + 0.3 * Math.sin(performance.now() / 200);
+    fillRound(g, x - lw / 2, yy, lw, 13 * scale, 4, "#ffd54a");
+    text(g, "2 MEDICS", x, yy + 10 * scale, 9 * scale, "#3a2a00", "center");
+    g.restore();
+  }
   if (pt.sev && pt.sev.name && !pt.done) {
     g.font = 'bold ' + Math.round(9 * scale) + 'px "Trebuchet MS", "Segoe UI", sans-serif';
     const tw = g.measureText(pt.sev.name).width + 10 * scale;
