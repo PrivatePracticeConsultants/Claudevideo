@@ -322,6 +322,33 @@ const CONTROLS = [
   { up: "ArrowUp", down: "ArrowDown", left: "ArrowLeft", right: "ArrowRight", interact: "Slash", use: "Period", sprint: "ShiftRight" }
 ];
 
+/* --- Playable medics: same plush body, distinct skin/hair/accessory.
+   Scrub color stays per-player-slot (P1 blue, P2 coral) so you always know
+   who you are; the character defines everything above the collar. */
+const CHARACTERS = [
+  { name: "Remy",  blurb: "freckles & curls",   skin: "#ffdcb8", hair: "#b5622e", style: "curls",  acc: "freckles" },
+  { name: "Amara", blurb: "calm under pressure", skin: "#8a5a3b", hair: "#3f3833", style: "none",   acc: "hijab", accColor: "#7fd8c8" },
+  { name: "Kenji", blurb: "reads every chart",  skin: "#f2c898", hair: "#2e2a28", style: "fringe", acc: "glasses" },
+  { name: "Zoe",   blurb: "double puff power",  skin: "#6b4630", hair: "#241f1c", style: "puffs",  acc: "none" },
+  { name: "Sol",   blurb: "sunshine on shift",  skin: "#e8b184", hair: "#f2d06b", style: "fringe", acc: "freckles" },
+  { name: "Nova",  blurb: "certified cat-napper", skin: "#ffe3c4", hair: "#ff9ec2", style: "fringe", acc: "catcap" }
+];
+
+/* --- Perks: unlocked by total stars, pick up to 2 before a shift. --- */
+const PERK_MAX_ACTIVE = 2;
+const PERKS = [
+  { key: "bays",    name: "Extra Bays",     stars: 3,
+    blurb: "Two more beds appear in every ward." },
+  { key: "nurse",   name: "Nurse Joy",      stars: 5,
+    blurb: "A helper nurse comforts waiting patients, restoring patience." },
+  { key: "shoes",   name: "Speedy Sneakers", stars: 8,
+    blurb: "Both medics move 8% faster with 40% more sprint stamina." },
+  { key: "shelves", name: "Big Shelves",    stars: 12,
+    blurb: "Supply shelves hold 2 extra and start full." },
+  { key: "charm",   name: "Lucky Charm",    stars: 18,
+    blurb: "Combo chains last 2.5s longer and PERFECT is easier to earn." }
+];
+
 const SWALLOW = new Set([
   "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space", "Slash", "Period",
   "KeyW", "KeyA", "KeyS", "KeyD", "KeyQ", "KeyE", "KeyN", "KeyM", "Escape", "ShiftLeft", "ShiftRight"
@@ -842,8 +869,76 @@ function makeWorld(levelDef) {
     world.grid.push(row);
   }
 
+  if (Game.perksActive && Game.perksActive.includes("bays")) addExtraBeds(world, 2);
+
   world.waitSlots = computeWaitSlots(world, Math.max(8, (levelDef.maxWaiting || 0) + 3));
   return world;
+}
+
+/** Extra Bays perk: convert up to n floor tiles beside existing beds into
+    beds — but only where doing so provably keeps the whole ward connected
+    and every station reachable. */
+function addExtraBeds(world, n) {
+  const rng = makeRng((world.def.seed ^ 0xBED5) >>> 0);
+
+  const floodOK = () => {
+    const seen = new Set();
+    const q = [world.entrance];
+    seen.add(world.entrance.x + "," + world.entrance.y);
+    let open = 0;
+    for (let y = 0; y < ROWS; y++)
+      for (let x = 0; x < COLS; x++)
+        if (isWalkable(world, x, y)) open++;
+    let reached = 0;
+    while (q.length) {
+      const cur = q.shift();
+      reached++;
+      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const nx = cur.x + dx, ny = cur.y + dy, k = nx + "," + ny;
+        if (!seen.has(k) && isWalkable(world, nx, ny)) { seen.add(k); q.push({ x: nx, y: ny }); }
+      }
+    }
+    if (reached !== open) return false;
+    for (const st of world.stations) {
+      let ok = false;
+      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]])
+        if (seen.has((st.x + dx) + "," + (st.y + dy))) ok = true;
+      if (!ok) return false;
+    }
+    return true;
+  };
+
+  const candidates = [];
+  for (const bed of world.beds) {
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const x = bed.x + dx, y = bed.y + dy;
+      const cell = cellAt(world, x, y);
+      if (!cell || cell.solid || cell.entrance || cell.exit) continue;
+      if (!candidates.some(c => c.x === x && c.y === y)) candidates.push({ x, y });
+    }
+  }
+  // deterministic shuffle from the level seed
+  for (let i = candidates.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    [candidates[i], candidates[j]] = [candidates[j], candidates[i]];
+  }
+
+  let placed = 0;
+  for (const cand of candidates) {
+    if (placed >= n) break;
+    const cell = world.grid[cand.y][cand.x];
+    const st = {
+      type: "bed", x: cand.x, y: cand.y,
+      cx: cand.x * TILE + TILE / 2, cy: cand.y * TILE + TILE / 2,
+      occupant: null, stock: Infinity, jammed: false, flash: 0, hasDefib: false, bonus: true
+    };
+    cell.solid = true; cell.station = st;
+    world.stations.push(st); world.beds.push(st);
+    if (floodOK()) { placed++; continue; }
+    // revert: this spot would pinch the ward shut
+    cell.solid = false; cell.station = null;
+    world.stations.pop(); world.beds.pop();
+  }
 }
 
 const inBounds = (x, y) => x >= 0 && y >= 0 && x < COLS && y < ROWS;
@@ -924,13 +1019,14 @@ function makePlayer(index, x, y) {
     item: null,
     patient: null,
     work: null,           // {key, t, dur, action}
-    stamina: STAMINA_MAX,
+    stamina: Game.staminaMax,
     sprinting: false,
     squash: 0,
     bob: 0,
     step: 0,              // walk-cycle phase
     hintT: 0, hint: "",
     color: index === 0 ? PALETTE.p1 : PALETTE.p2,
+    look: CHARACTERS[Game.chars[index] % CHARACTERS.length],
     ctrl: CONTROLS[index]
   };
 }
@@ -969,6 +1065,16 @@ function makePatient(world, ailmentKey, level) {
 const Game = {
   screen: "title",         // title | select | play | paused | results
   playerCount: 1,
+  chars: [0, 3],           // chosen roster index per player slot
+  charCursor: [0, 3],
+  charLocked: [false, false],
+  perksActive: [],         // keys of active perks (max PERK_MAX_ACTIVE)
+  perkCursor: 0,
+  nurse: null,
+  speedMul: 1,
+  staminaMax: STAMINA_MAX,
+  comboWindow: COMBO_WINDOW,
+  perfectAt: PERFECT_AT,
   world: null,
   levelIndex: 0,
   level: null,
@@ -1036,10 +1142,26 @@ function rankName() {
 const ENDLESS_UNLOCK = 6;
 const endlessUnlocked = () => totalStars() >= ENDLESS_UNLOCK;
 
+function enterCharSelect() {
+  Game.charLocked = [false, false];
+  Game.charCursor = [Game.chars[0], Game.chars[1]];
+  Game.screen = "chars";
+  Sound.play("menu");
+}
+
+const perkActive = (key) => Game.perksActive.includes(key);
+
 function startLevel(index) {
   const def = levelDef(index);
   Game.levelIndex = index;
   Game.level = def;
+
+  // perk effects are computed fresh every run
+  Game.speedMul = perkActive("shoes") ? 1.08 : 1;
+  Game.staminaMax = perkActive("shoes") ? STAMINA_MAX * 1.4 : STAMINA_MAX;
+  Game.comboWindow = perkActive("charm") ? COMBO_WINDOW + 2.5 : COMBO_WINDOW;
+  Game.perfectAt = perkActive("charm") ? 0.60 : PERFECT_AT;
+
   Game.world = makeWorld(def);
   Game.rng = makeRng(def.seed);
   Game.patients = [];
@@ -1071,6 +1193,14 @@ function startLevel(index) {
   Game.result = null;
   Game.tutorial = (index === 0) ? { stage: 0, t: 0 } : null;
 
+  if (perkActive("shelves")) {
+    for (const st of Game.world.stations) {
+      if (st.type === "supply" || st.type === "medicine") {
+        st.stock = STATIONS[st.type].stockMax + 2;
+      }
+    }
+  }
+
   // Drop the players near the exit, on open floor.
   const spawnTiles = findOpenTilesNear(Game.world, Game.world.exit, 2);
   Game.players = [];
@@ -1078,6 +1208,16 @@ function startLevel(index) {
     const t = spawnTiles[i] || spawnTiles[0] || { x: 1, y: 1 };
     Game.players.push(makePlayer(i, t.x * TILE + TILE / 2, t.y * TILE + TILE / 2));
   }
+  Game.nurse = null;
+  if (perkActive("nurse")) {
+    const t = spawnTiles[Game.playerCount] || spawnTiles[0] || { x: 1, y: 1 };
+    Game.nurse = {
+      x: t.x * TILE + TILE / 2, y: t.y * TILE + TILE / 2,
+      dx: 0, dy: 1, bob: 0, step: 0, moving: false,
+      path: [], target: null, comfort: 0, cooldown: 2
+    };
+  }
+
   Game.screen = "play";
   Sound.play("menu");
   Music.start();
@@ -1458,14 +1598,14 @@ function updatePlayer(p, dt) {
   if (wantSprint) {
     p.stamina = Math.max(0, p.stamina - dt);
   } else {
-    p.stamina = Math.min(STAMINA_MAX, p.stamina + dt * STAMINA_REGEN);
+    p.stamina = Math.min(Game.staminaMax, p.stamina + dt * STAMINA_REGEN);
   }
 
   if (moving) {
     const len = Math.hypot(mx, my);
     mx /= len; my /= len;
     p.dx = mx; p.dy = my;
-    let speed = p.patient ? SPEED_PATIENT : (p.item ? SPEED_ITEM : SPEED_FREE);
+    let speed = (p.patient ? SPEED_PATIENT : (p.item ? SPEED_ITEM : SPEED_FREE)) * Game.speedMul;
     if (wantSprint) speed *= p.patient ? SPRINT_MUL_PATIENT : SPRINT_MUL;
     moveWithCollision(world, p, mx * speed * dt, my * speed * dt);
     p.bob += dt * (wantSprint ? 15 : 11);
@@ -1550,13 +1690,13 @@ function dischargePatient(p) {
   const frac = pt.patience / pt.patienceMax;
   Game.combo = Game.comboTimer > 0 ? Game.combo + 1 : 1;
   Game.bestCombo = Math.max(Game.bestCombo, Game.combo);
-  Game.comboTimer = COMBO_WINDOW;
+  Game.comboTimer = Game.comboWindow;
   const mult = Math.min(COMBO_MAX, 1 + 0.25 * (Game.combo - 1));
 
   let base = a.score + Math.round(frac * 100);
   if (pt.vip) base *= 2;
   let callout = null, calloutColor = PALETTE.good;
-  if (frac >= PERFECT_AT) {
+  if (frac >= Game.perfectAt) {
     base += Math.round(a.score * 0.5);
     callout = "PERFECT!"; calloutColor = "#ffd54a";
     Game.perfects++;
@@ -1786,6 +1926,74 @@ function updateTutorial(dt) {
   }
 }
 
+/* Nurse Joy: wanders to the most-stressed settled patient and comforts
+   them, restoring a chunk of patience. She never treats — that's your job. */
+function updateNurse(dt) {
+  const nu = Game.nurse;
+  if (!nu) return;
+  nu.bob += dt * (nu.moving ? 11 : 2);
+  if (nu.cooldown > 0) nu.cooldown -= dt;
+
+  // validate current target
+  if (nu.target && (nu.target.state !== "station" || nu.target.done ||
+      nu.target.patience / nu.target.patienceMax > 0.92)) {
+    nu.target = null; nu.path = []; nu.comfort = 0;
+  }
+
+  // pick the most urgent settled patient
+  if (!nu.target && nu.cooldown <= 0) {
+    let best = null, bestFrac = 0.85;
+    for (const pt of Game.patients) {
+      if (pt.state !== "station" || pt.done) continue;
+      const frac = pt.patience / pt.patienceMax;
+      if (frac < bestFrac) { bestFrac = frac; best = pt; }
+    }
+    if (best) {
+      nu.target = best;
+      const here = tileOf(nu.x, nu.y);
+      const st = best.station;
+      let goal = null;
+      for (const [dx, dy] of [[0, 1], [1, 0], [-1, 0], [0, -1]]) {
+        if (isWalkable(Game.world, st.x + dx, st.y + dy)) { goal = { x: st.x + dx, y: st.y + dy }; break; }
+      }
+      nu.path = goal ? findPath(Game.world, here, goal) : [];
+      if (goal && !nu.path.length && (here.x !== goal.x || here.y !== goal.y)) {
+        nu.target = null;                       // unreachable from here
+      }
+    }
+  }
+
+  // walk the path
+  nu.moving = false;
+  if (nu.path.length) {
+    const tgt = nu.path[0];
+    const vx = tgt.x - nu.x, vy = tgt.y - nu.y;
+    const d = Math.hypot(vx, vy);
+    if (d < 4) nu.path.shift();
+    else {
+      const sp = 118 * dt;
+      nu.x += (vx / d) * sp; nu.y += (vy / d) * sp;
+      nu.dx = vx / d; nu.dy = vy / d;
+      nu.moving = true; nu.step = (nu.step || 0) + dt * 9;
+    }
+    return;
+  }
+
+  // beside the bed: comfort
+  if (nu.target) {
+    const st = nu.target.station;
+    if (!st || Math.hypot(st.cx - nu.x, st.cy - nu.y) > 70) { nu.target = null; return; }
+    nu.comfort += dt;
+    if (nu.comfort >= 1.3) {
+      const pt = nu.target;
+      pt.patience = Math.min(pt.patienceMax, pt.patience + pt.patienceMax * 0.28);
+      popup(pt.x, pt.y - 30, "+ \u2665", "#ff8fa8", false);
+      Sound.play("place");
+      nu.comfort = 0; nu.cooldown = 3.5; nu.target = null;
+    }
+  }
+}
+
 function updatePlay(dt) {
   Game.time += dt;
   for (const p of Game.players) updatePlayer(p, dt);
@@ -1795,6 +2003,7 @@ function updatePlay(dt) {
   updateWaves(dt);
   updateSpawning(dt);
   updateItems(dt);
+  updateNurse(dt);
   updateHeartMonitor(dt);
   updateTutorial(dt);
   updateEffects(dt);
@@ -2497,7 +2706,8 @@ function drawBody(g, opts) {
     mood 1 = beaming (closed happy eyes); low mood = worried brows. */
 function drawFace(g, opts) {
   const { facing, blink, mood, skin } = opts;
-  const HY = -15, HR = 13.5;
+  const HY = -15, HR = opts.headR || 13.5;
+  const spread = HR / 13.5;              // pull cheeks in for smaller face windows
   g.fillStyle = skin;
   g.beginPath(); g.arc(0, HY, HR, 0, 6.283); g.fill();
   g.strokeStyle = "rgba(150,100,75,.45)"; g.lineWidth = 1.6;
@@ -2535,8 +2745,8 @@ function drawFace(g, opts) {
 
   // rosy blush
   g.fillStyle = "rgba(255,125,140,.32)";
-  g.beginPath(); g.ellipse(-8.2 + ex * .5, HY + 5.5, 2.9, 1.9, 0, 0, 6.283); g.fill();
-  g.beginPath(); g.ellipse(8.2 + ex * .5, HY + 5.5, 2.9, 1.9, 0, 0, 6.283); g.fill();
+  g.beginPath(); g.ellipse(-8.2 * spread + ex * .5, HY + 5.5, 2.9, 1.9, 0, 0, 6.283); g.fill();
+  g.beginPath(); g.ellipse(8.2 * spread + ex * .5, HY + 5.5, 2.9, 1.9, 0, 0, 6.283); g.fill();
 
   // tiny mouth
   g.strokeStyle = "#a56a55"; g.lineWidth = 1.4; g.lineCap = "round";
@@ -2696,6 +2906,104 @@ function drawMeter(g, x, y, w, h, frac, done) {
   roundRect(g, x, y, Math.max(0, w * frac), h * 0.45, 2); g.fill();
 }
 
+/** The helper nurse: white scrubs, pink cross cap, hearts while comforting. */
+function drawNurse(g, nu) {
+  const bobY = Math.sin(nu.bob) * 1.6;
+  g.fillStyle = "rgba(120,95,70,.22)";
+  g.beginPath(); g.ellipse(nu.x, nu.y + 17, 13, 5, 0, 0, 6.283); g.fill();
+
+  g.save();
+  g.translate(nu.x, nu.y + bobY);
+  drawBody(g, {
+    bodyColor: "#ffffff", edgeColor: "#e0b8c4", legColor: "#f2d5dd",
+    step: nu.step || 0, facing: { x: nu.dx || 0, y: nu.dy || 1 }, moving: nu.moving
+  });
+  g.fillStyle = "#ff8fa8";
+  roundRect(g, -1.8, 2, 3.6, 9, 1.4); g.fill();
+  roundRect(g, -4.5, 4.7, 9, 3.6, 1.4); g.fill();
+  const blink = ((performance.now() / 1000 + 3.1) % 4.4) < 0.12;
+  drawFace(g, { facing: { x: nu.dx || 0, y: nu.dy || 1 }, blink, skin: "#f6cfa6" });
+  g.fillStyle = "#ffffff";
+  g.beginPath(); g.arc(0, -16.5, 13.7, Math.PI + 0.12, -0.12); g.fill();
+  g.fillStyle = "#f2dde3";
+  roundRect(g, -13.4, -19.4, 26.8, 4, 2); g.fill();
+  g.fillStyle = "#ff8fa8";
+  roundRect(g, -1.2, -27.5, 2.4, 6, 1); g.fill();
+  roundRect(g, -3, -25.7, 6, 2.4, 1); g.fill();
+  g.restore();
+
+  // floating hearts while she comforts
+  if (nu.comfort > 0) {
+    const t = performance.now() / 300;
+    for (let i = 0; i < 2; i++) {
+      const ph = (t * 0.7 + i * 0.5) % 1;
+      g.save();
+      g.globalAlpha = 1 - ph;
+      g.fillStyle = "#ff8fa8";
+      const hx = nu.x + (i ? 12 : -12), hy = nu.y - 34 - ph * 16;
+      g.beginPath();
+      g.moveTo(hx, hy + 3);
+      g.bezierCurveTo(hx - 4.4, hy - 1, hx - 2, hy - 4.4, hx, hy - 1.2);
+      g.bezierCurveTo(hx + 2, hy - 4.4, hx + 4.4, hy - 1, hx, hy + 3);
+      g.fill();
+      g.restore();
+    }
+  }
+}
+
+/** Hair peeking out, then cap (or hijab), then face accessories. */
+function drawMedicHead(g, look, scrubColor, facing) {
+  const ex = facing.x * 2.6;
+
+  // hair that shows under or around the headwear
+  g.fillStyle = look.hair;
+  if (look.style === "puffs") {
+    g.beginPath(); g.arc(-12.5, -22, 5.6, 0, 6.283); g.fill();
+    g.beginPath(); g.arc(12.5, -22, 5.6, 0, 6.283); g.fill();
+  } else if (look.style === "curls") {
+    for (const ox of [-9, -4.5, 0, 4.5, 9]) {
+      g.beginPath(); g.arc(ox, -21.5, 3.1, 0, 6.283); g.fill();
+    }
+  } else if (look.style === "fringe") {
+    g.beginPath();
+    g.ellipse(-4, -21.5, 7.5, 3.4, -0.18, 0, 6.283); g.fill();
+    g.beginPath();
+    g.ellipse(5.5, -22, 5, 2.8, 0.22, 0, 6.283); g.fill();
+  }
+
+  {
+    // scrub cap with a little cross
+    g.fillStyle = shade(scrubColor, 1.06);
+    g.beginPath(); g.arc(0, -16.5, 13.7, Math.PI + 0.12, -0.12); g.fill();
+    g.fillStyle = shade(scrubColor, 0.88);
+    roundRect(g, -13.4, -19.4, 26.8, 4, 2); g.fill();
+    g.fillStyle = "rgba(255,255,255,.9)";
+    roundRect(g, -1.2, -27.5, 2.4, 6, 1); g.fill();
+    roundRect(g, -3, -25.7, 6, 2.4, 1); g.fill();
+    if (look.acc === "catcap") {
+      g.fillStyle = shade(scrubColor, 1.06);
+      g.beginPath(); g.moveTo(-11, -24); g.lineTo(-8.5, -33); g.lineTo(-3.5, -26.5); g.closePath(); g.fill();
+      g.beginPath(); g.moveTo(11, -24); g.lineTo(8.5, -33); g.lineTo(3.5, -26.5); g.closePath(); g.fill();
+      g.fillStyle = "#ffc9dd";
+      g.beginPath(); g.moveTo(-9.3, -26); g.lineTo(-8.6, -30.5); g.lineTo(-5.8, -26.8); g.closePath(); g.fill();
+      g.beginPath(); g.moveTo(9.3, -26); g.lineTo(8.6, -30.5); g.lineTo(5.8, -26.8); g.closePath(); g.fill();
+    }
+  }
+
+  // face accessories
+  if (look.acc === "glasses") {
+    g.strokeStyle = "rgba(60,50,45,.85)"; g.lineWidth = 1.4;
+    g.beginPath(); g.arc(-4.6 + ex, -13.5, 4.6, 0, 6.283); g.stroke();
+    g.beginPath(); g.arc(4.6 + ex, -13.5, 4.6, 0, 6.283); g.stroke();
+    g.beginPath(); g.moveTo(-0.2 + ex, -14.5); g.lineTo(0.2 + ex, -14.5); g.stroke();
+  } else if (look.acc === "freckles") {
+    g.fillStyle = "rgba(170,110,70,.55)";
+    for (const [ox, oy] of [[-8.6, -9.2], [-6.4, -8.2], [-9.6, -7.6], [8.6, -9.2], [6.4, -8.2], [9.6, -7.6]]) {
+      g.beginPath(); g.arc(ox, oy, 0.8, 0, 6.283); g.fill();
+    }
+  }
+}
+
 function drawPlayer(g, p) {
   const moving = !!(p.moving);
   const bob = Math.sin(p.bob) * 1.8;
@@ -2738,16 +3046,23 @@ function drawPlayer(g, p) {
   roundRect(g, -4.5, 4.7, 9, 3.6, 1.4); g.fill();
 
   const blink = ((performance.now() / 1000 + p.index * 2.3) % 4.6) < 0.12;
-  drawFace(g, { facing, blink, skin: "#ffdcb8" });
-
-  // scrub cap snug over the big head, with a tiny cross on the front
-  g.fillStyle = shade(p.color, 1.06);
-  g.beginPath(); g.arc(0, -16.5, 13.7, Math.PI + 0.12, -0.12); g.fill();
-  g.fillStyle = shade(p.color, 0.88);
-  roundRect(g, -13.4, -19.4, 26.8, 4, 2); g.fill();
-  g.fillStyle = "rgba(255,255,255,.9)";
-  roundRect(g, -1.2, -27.5, 2.4, 6, 1); g.fill();
-  roundRect(g, -3, -25.7, 6, 2.4, 1); g.fill();
+  const look = p.look || CHARACTERS[p.index % CHARACTERS.length];
+  if (look.acc === "hijab") {
+    const hc = look.accColor || "#7fd8c8";
+    g.fillStyle = shade(hc, 0.86);                 // under-scarf shadow ring
+    g.beginPath(); g.arc(0, -15, 14.8, 0, 6.283); g.fill();
+    g.fillStyle = hc;
+    g.beginPath(); g.arc(0, -15.6, 14.2, 0, 6.283); g.fill();
+    drawFace(g, { facing, blink, skin: look.skin, headR: 10 });
+    g.fillStyle = hc;                              // chin wrap under the face
+    g.beginPath(); g.ellipse(0, -3.4, 7.4, 3.4, 0, 0, Math.PI); g.fill();
+    g.fillStyle = "rgba(255,255,255,.9)";          // little cross pin
+    roundRect(g, -1, -29, 2, 5, 1); g.fill();
+    roundRect(g, -2.5, -27.5, 5, 2, 1); g.fill();
+  } else {
+    drawFace(g, { facing, blink, skin: look.skin });
+    drawMedicHead(g, look, p.color, facing);
+  }
 
   // player tag under the feet
   g.fillStyle = "rgba(10,18,28,.5)";
@@ -2756,8 +3071,8 @@ function drawPlayer(g, p) {
   g.restore();
 
   // stamina, only while it matters
-  if (p.stamina !== undefined && p.stamina < STAMINA_MAX - 0.02) {
-    const f = clamp(p.stamina / STAMINA_MAX, 0, 1);
+  if (p.stamina !== undefined && p.stamina < Game.staminaMax - 0.02) {
+    const f = clamp(p.stamina / Game.staminaMax, 0, 1);
     g.fillStyle = "rgba(14,22,34,.7)";
     roundRect(g, x - 13, y + 27, 26, 4, 2); g.fill();
     g.fillStyle = f > 0.25 ? "#8be9ff" : "#ff9a6a";
@@ -2903,6 +3218,11 @@ function drawHUD(g) {
   // --- clock / level ---
   hudCard(g, 14, 10, 236, HUD_H - 22);
   text(g, (Game.endless ? "∞" : (Game.levelIndex + 1)) + "  " + lvl.name, 26, 30, 15, PALETTE.text);
+  Game.perksActive.forEach((k, i) => {
+    g.save(); g.translate(224 - i * 24, 26); g.scale(0.55, 0.55); g.translate(-224 + i * 24, -26);
+    drawPerkIcon(g, k, 224 - i * 24, 26, true);
+    g.restore();
+  });
   if (Game.endless) {
     text(g, fmtTime(Game.time), 26, 70, 32, "#8be9ff");
     text(g, "SURVIVED", 128, 70, 11, PALETTE.dim);
@@ -2945,7 +3265,7 @@ function drawHUD(g) {
 
   if (Game.combo > 1) {
     const mult = Math.min(COMBO_MAX, 1 + 0.25 * (Game.combo - 1));
-    const a = clamp(Game.comboTimer / COMBO_WINDOW, 0, 1);
+    const a = clamp(Game.comboTimer / Game.comboWindow, 0, 1);
     const cx = W / 2 + 138, cy = 46;
     g.save();
     g.globalAlpha = 0.45 + 0.55 * a;
@@ -3167,6 +3487,164 @@ function keyCap(g, label, x, y) {
   text(g, label, x + w / 2, y + 17, 14, PALETTE.text, "center");
 }
 
+function drawCharSelect(g) {
+  g.fillStyle = Paint.title;
+  g.fillRect(0, 0, W, H);
+
+  text(g, "CHOOSE YOUR MEDIC", W / 2, 84, 40, PALETTE.text, "center");
+  text(g, Game.playerCount === 2 ? "P1: A/D + E to lock in      P2: arrows + / to lock in"
+                                 : "A / D to browse      E to lock in",
+       W / 2, 118, 16, PALETTE.dim, "center", "normal");
+
+  const cardW = 190, gap = 16;
+  const total = CHARACTERS.length * cardW + (CHARACTERS.length - 1) * gap;
+  const x0 = (W - total) / 2;
+
+  for (let i = 0; i < CHARACTERS.length; i++) {
+    const c = CHARACTERS[i];
+    const x = x0 + i * (cardW + gap), y = 170, h = 320;
+    const p1Here = Game.charCursor[0] === i;
+    const p2Here = Game.playerCount === 2 && Game.charCursor[1] === i;
+
+    g.fillStyle = "rgba(255,255,255,.05)";
+    roundRect(g, x, y, cardW, h, 16); g.fill();
+    if (p1Here || p2Here) {
+      g.strokeStyle = p1Here && p2Here ? "#ffd54a" : (p1Here ? PALETTE.p1 : PALETTE.p2);
+      g.lineWidth = 4;
+      roundRect(g, x - 2, y - 2, cardW + 4, h + 4, 18); g.stroke();
+    }
+
+    // portrait: the actual in-game chibi at 2.6x, wearing this look
+    const demo = {
+      x: x + cardW / 2, y: y + 150, dx: 0, dy: 1,
+      bob: performance.now() / 320 + i * 1.3, step: 0, moving: false,
+      stamina: STAMINA_MAX, squash: 0, sprinting: false, hintT: 0,
+      color: p2Here && !p1Here ? PALETTE.p2 : PALETTE.p1,
+      index: p2Here && !p1Here ? 1 : 0,
+      look: c, item: null, patient: null, work: null
+    };
+    g.save();
+    g.translate(demo.x, demo.y); g.scale(2.6, 2.6); g.translate(-demo.x, -demo.y);
+    drawPlayer(g, demo);
+    g.restore();
+
+    text(g, c.name, x + cardW / 2, y + 250, 24, PALETTE.text, "center");
+    text(g, c.blurb, x + cardW / 2, y + 274, 13, PALETTE.dim, "center", "normal");
+
+    // lock-in ribbons
+    const ribbon = (slot, color, ty) => {
+      if (Game.charCursor[slot] !== i || !Game.charLocked[slot]) return;
+      g.fillStyle = color;
+      roundRect(g, x + 14, ty, cardW - 28, 24, 8); g.fill();
+      text(g, "P" + (slot + 1) + "  READY!", x + cardW / 2, ty + 17, 13, "#10202e", "center");
+    };
+    ribbon(0, PALETTE.p1, y + h - 62);
+    ribbon(1, PALETTE.p2, y + h - 34);
+  }
+
+  const blink = 0.55 + 0.45 * Math.sin(performance.now() / 300);
+  g.save(); g.globalAlpha = blink;
+  text(g, Game.playerCount === 2 ? "both medics lock in to continue" : "lock in to continue",
+       W / 2, 560, 18, "#ffd54a", "center");
+  g.restore();
+  text(g, "Esc  back to title", W / 2, 596, 14, PALETTE.dim, "center", "normal");
+}
+
+function drawPerks(g) {
+  g.fillStyle = Paint.title;
+  g.fillRect(0, 0, W, H);
+  const stars = totalStars();
+
+  text(g, "PERKS", W / 2, 90, 44, PALETTE.text, "center");
+  drawStar(g, W / 2 - 74, 122, 11, "#ffd54a");
+  text(g, stars + " stars earned", W / 2 - 58, 128, 16, "#ffd54a");
+  text(g, "pick up to " + PERK_MAX_ACTIVE + " to bring on shift", W / 2, 156, 15, PALETTE.dim, "center", "normal");
+
+  const rowH = 86, x0 = W / 2 - 380, w = 760, y0 = 190;
+  PERKS.forEach((pk, i) => {
+    const y = y0 + i * (rowH + 10);
+    const unlocked = stars >= pk.stars;
+    const active = Game.perksActive.includes(pk.key);
+    const sel = Game.perkCursor === i;
+
+    g.fillStyle = active ? "rgba(87,199,133,.14)" : "rgba(255,255,255,.05)";
+    roundRect(g, x0, y, w, rowH, 14); g.fill();
+    g.strokeStyle = sel ? "#ffd54a" : (active ? "rgba(87,199,133,.7)" : "rgba(255,255,255,.09)");
+    g.lineWidth = sel ? 4 : 1.5;
+    roundRect(g, x0, y, w, rowH, 14); g.stroke();
+
+    drawPerkIcon(g, pk.key, x0 + 44, y + rowH / 2, unlocked);
+    text(g, pk.name, x0 + 88, y + 36, 20, unlocked ? PALETTE.text : "#4a5666");
+    text(g, unlocked ? pk.blurb : "Unlocks at " + pk.stars + " stars  (you have " + stars + ")",
+         x0 + 88, y + 60, 14, unlocked ? PALETTE.dim : "#435060", "left", "normal");
+    if (active) {
+      g.fillStyle = "#57c785";
+      roundRect(g, x0 + w - 110, y + rowH / 2 - 14, 92, 28, 9); g.fill();
+      text(g, "ON SHIFT", x0 + w - 64, y + rowH / 2 + 5, 13, "#0e2417", "center");
+    } else if (unlocked) {
+      text(g, "E  equip", x0 + w - 64, y + rowH / 2 + 5, 13, PALETTE.dim, "center");
+    } else {
+      drawStar(g, x0 + w - 84, y + rowH / 2, 10, "rgba(255,255,255,.2)");
+      text(g, String(pk.stars), x0 + w - 64, y + rowH / 2 + 5, 15, "#4a5666");
+    }
+  });
+
+  text(g, "W / S  choose      E  equip / unequip      Esc or P  back",
+       W / 2, y0 + PERKS.length * (rowH + 10) + 34, 17, PALETTE.text, "center");
+}
+
+/** Little glyphs for each perk, drawn plush-style. */
+function drawPerkIcon(g, key, cx, cy, lit) {
+  g.save();
+  g.translate(cx, cy);
+  g.globalAlpha = lit ? 1 : 0.35;
+  switch (key) {
+    case "bays":
+      fillRound(g, -15, -10, 30, 22, 6, "#ffffff");
+      g.fillStyle = "#c9e6ff"; fillRound(g, -11, -6, 22, 6, 3, "#c9e6ff");
+      g.fillStyle = "#8fbfe8"; fillRound(g, -11, 2, 22, 7, 3, "#8fbfe8");
+      text(g, "+", 19, 7, 22, "#57c785", "center");
+      break;
+    case "nurse":
+      g.fillStyle = "#ffffff";
+      g.beginPath(); g.arc(0, -3, 11, 0, 6.283); g.fill();
+      g.fillStyle = "#ff8fa8";
+      roundRect(g, -1.6, -10, 3.2, 8, 1.2); g.fill();
+      roundRect(g, -4.5, -7.4, 9, 3.2, 1.2); g.fill();
+      g.beginPath();
+      g.moveTo(0, 13);
+      g.bezierCurveTo(-8, 5, -3.5, -1, 0, 4);
+      g.bezierCurveTo(3.5, -1, 8, 5, 0, 13);
+      g.fill();
+      break;
+    case "shoes":
+      fillRound(g, -14, -2, 24, 11, 5, "#7db2f2");
+      fillRound(g, -14, 5, 28, 5, 2.5, "#ffffff");
+      g.strokeStyle = "#dfe9f5"; g.lineWidth = 2; g.lineCap = "round";
+      g.beginPath(); g.moveTo(9, -8); g.lineTo(16, -8); g.stroke();
+      g.beginPath(); g.moveTo(7, -3); g.lineTo(14, -3); g.stroke();
+      break;
+    case "shelves":
+      fillRound(g, -14, -13, 28, 26, 5, "#6fd3b4");
+      g.fillStyle = "#eafff8";
+      for (let i = 0; i < 3; i++) { roundRect(g, -10, -9 + i * 8, 20, 5, 2); g.fill(); }
+      text(g, "+", 17, 6, 20, "#57c785", "center");
+      break;
+    case "charm":
+      g.fillStyle = "#57c785";
+      for (let i = 0; i < 4; i++) {
+        const ang = i * Math.PI / 2;
+        g.beginPath();
+        g.ellipse(Math.cos(ang) * 6.5, Math.sin(ang) * 6.5 - 1, 5.5, 4.4, ang, 0, 6.283);
+        g.fill();
+      }
+      g.strokeStyle = "#3d9e63"; g.lineWidth = 2; g.lineCap = "round";
+      g.beginPath(); g.moveTo(1, 4); g.quadraticCurveTo(3, 10, 7, 13); g.stroke();
+      break;
+  }
+  g.restore();
+}
+
 const SELECT_COLS = 5;
 const ENDLESS_SLOT = () => LEVELS.length;
 
@@ -3224,7 +3702,8 @@ function drawSelect(g) {
 
   const selDef = Game.selectIndex === ENDLESS_SLOT() ? ENDLESS : LEVELS[Game.selectIndex];
   text(g, selDef.blurb, W / 2, ey + 112, 16, PALETTE.dim, "center", "normal");
-  text(g, "A / D or ← →  choose     W / S or ↑ ↓  row     E or Enter  start     Esc  back",
+  text(g, "A / D  choose     W / S  row     E or Enter  start     P  perks" +
+       (Game.perksActive.length ? " (" + Game.perksActive.length + " on)" : "") + "     Esc  back",
        W / 2, ey + 144, 16, PALETTE.text, "center");
 
   const saveLevel = Game.level;
@@ -3388,7 +3867,9 @@ function render() {
   ctx.clearRect(0, 0, W, H);
 
   if (Game.screen === "title") { drawTitle(ctx); return; }
+  if (Game.screen === "chars") { drawCharSelect(ctx); return; }
   if (Game.screen === "select") { drawSelect(ctx); return; }
+  if (Game.screen === "perks") { drawPerks(ctx); return; }
 
   ctx.fillStyle = "#0b1119";
   ctx.fillRect(0, 0, W, H);
@@ -3412,6 +3893,7 @@ function render() {
     drawables.push({ y: pt.y, fn: () => drawPatient(ctx, pt, pt.x, pt.y) });
   }
   for (const p of Game.players) drawables.push({ y: p.y, fn: () => drawPlayer(ctx, p) });
+  if (Game.nurse) drawables.push({ y: Game.nurse.y, fn: () => drawNurse(ctx, Game.nurse) });
   drawables.sort((a, b) => a.y - b.y);
   for (const d of drawables) d.fn();
 
@@ -3477,9 +3959,39 @@ function handleScreenKeys() {
 
   switch (Game.screen) {
     case "title":
-      if (wasPressed("Digit1") || wasPressed("Numpad1")) { Game.playerCount = 1; Game.screen = "select"; Sound.play("menu"); }
-      if (wasPressed("Digit2") || wasPressed("Numpad2")) { Game.playerCount = 2; Game.screen = "select"; Sound.play("menu"); }
+      if (wasPressed("Digit1") || wasPressed("Numpad1")) { Game.playerCount = 1; enterCharSelect(); }
+      if (wasPressed("Digit2") || wasPressed("Numpad2")) { Game.playerCount = 2; enterCharSelect(); }
       break;
+
+    case "chars": {
+      const move = (slot, d) => {
+        if (Game.charLocked[slot]) return;
+        Game.charCursor[slot] = (Game.charCursor[slot] + d + CHARACTERS.length) % CHARACTERS.length;
+        Sound.play("menu");
+      };
+      if (wasPressed("KeyA")) move(0, -1);
+      if (wasPressed("KeyD")) move(0, 1);
+      if (wasPressed("KeyE")) {
+        Game.charLocked[0] = !Game.charLocked[0];
+        Sound.play(Game.charLocked[0] ? "done" : "drop");
+      }
+      if (Game.playerCount === 2) {
+        if (wasPressed("ArrowLeft")) move(1, -1);
+        if (wasPressed("ArrowRight")) move(1, 1);
+        if (wasPressed("Slash")) {
+          Game.charLocked[1] = !Game.charLocked[1];
+          Sound.play(Game.charLocked[1] ? "done" : "drop");
+        }
+      }
+      const ready = Game.charLocked[0] && (Game.playerCount === 1 || Game.charLocked[1]);
+      if (ready) {
+        Game.chars = [Game.charCursor[0], Game.charCursor[1]];
+        Game.screen = "select";
+        Sound.play("levelend");
+      }
+      if (wasPressed("Escape")) { Game.screen = "title"; Sound.play("menu"); }
+      break;
+    }
 
     case "select": {
       const last = ENDLESS_SLOT();
@@ -3509,7 +4021,30 @@ function handleScreenKeys() {
           startLevel(Game.selectIndex);
         } else Sound.play("error");
       }
+      if (wasPressed("KeyP")) { Game.screen = "perks"; Sound.play("menu"); }
       if (wasPressed("Escape")) { Game.screen = "title"; Sound.play("menu"); }
+      break;
+    }
+
+    case "perks": {
+      if (wasPressed("KeyW") || wasPressed("ArrowUp")) {
+        Game.perkCursor = (Game.perkCursor + PERKS.length - 1) % PERKS.length; Sound.play("menu");
+      }
+      if (wasPressed("KeyS") || wasPressed("ArrowDown")) {
+        Game.perkCursor = (Game.perkCursor + 1) % PERKS.length; Sound.play("menu");
+      }
+      if (wasPressed("KeyE") || wasPressed("Enter") || wasPressed("Slash")) {
+        const pk = PERKS[Game.perkCursor];
+        if (totalStars() < pk.stars) { Sound.play("error"); }
+        else if (Game.perksActive.includes(pk.key)) {
+          Game.perksActive = Game.perksActive.filter(k => k !== pk.key);
+          Sound.play("drop");
+        } else if (Game.perksActive.length < PERK_MAX_ACTIVE) {
+          Game.perksActive.push(pk.key);
+          Sound.play("done");
+        } else Sound.play("error");
+      }
+      if (wasPressed("Escape") || wasPressed("KeyP")) { Game.screen = "select"; Sound.play("menu"); }
       break;
     }
 
