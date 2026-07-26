@@ -166,14 +166,52 @@ function fmtTime(sec) {
 const Sound = {
   ctx: null,
   muted: false,
+  musicOff: false,          // N toggles this; M silences everything
+  master: null, sfxBus: null, musicBus: null, comp: null,
   init() {
     if (this.ctx) { if (this.ctx.state === "suspended") this.ctx.resume(); return; }
     const AC = window.AudioContext || window.webkitAudioContext;
     if (!AC) return;
-    try { this.ctx = new AC(); } catch (err) { this.ctx = null; }
+    try { this.ctx = new AC(); } catch (err) { this.ctx = null; return; }
+    /* A mix bus, so music can duck under an effect and the two can be balanced
+       against each other. Before this everything connected straight to
+       destination and a discharge fanfare fought the pad for the same headroom. */
+    try {
+      this.master = this.ctx.createGain(); this.master.gain.value = 0.90;
+      this.sfxBus = this.ctx.createGain(); this.sfxBus.gain.value = 1.0;
+      this.musicBus = this.ctx.createGain(); this.musicBus.gain.value = 0.62;
+      // a gentle ceiling: a lot of oscillators can stack on a busy discharge
+      this.comp = this.ctx.createDynamicsCompressor();
+      this.comp.threshold.value = -14; this.comp.ratio.value = 3.2;
+      this.sfxBus.connect(this.comp); this.musicBus.connect(this.comp);
+      this.comp.connect(this.master); this.master.connect(this.ctx.destination);
+    } catch (err) {
+      this.master = this.sfxBus = this.musicBus = null;   // fall back to direct
+    }
   },
-  /** One shaped oscillator blip. */
-  tone(freq, dur, type, vol, slideTo) {
+
+  /** Where a voice should connect: the SFX bus, the music bus, or straight out
+      if bus creation failed on this browser. */
+  out(bus) {
+    if (bus === "music" && this.musicBus) return this.musicBus;
+    if (this.sfxBus) return this.sfxBus;
+    return this.ctx.destination;
+  },
+
+  /** Pull the music down briefly so a fanfare or a siren reads clearly. */
+  duck(amount, hold) {
+    if (!this.musicBus || !this.ctx) return;
+    const g = this.musicBus.gain, t0 = this.ctx.currentTime;
+    const base = 0.62;
+    try {
+      g.cancelScheduledValues(t0);
+      g.setValueAtTime(Math.min(g.value, base), t0);
+      g.linearRampToValueAtTime(base * (1 - amount), t0 + 0.05);
+      g.linearRampToValueAtTime(base, t0 + 0.05 + (hold || 0.5));
+    } catch (err) { /* ducking is cosmetic; never let it break a sound */ }
+  },
+  /** One shaped oscillator blip. `bus` picks the mix path. */
+  tone(freq, dur, type, vol, slideTo, bus) {
     if (this.muted || !this.ctx) return;
     const t0 = this.ctx.currentTime;
     const osc = this.ctx.createOscillator();
@@ -184,10 +222,10 @@ const Sound = {
     g.gain.setValueAtTime(0.0001, t0);
     g.gain.exponentialRampToValueAtTime(vol || 0.12, t0 + 0.012);
     g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
-    osc.connect(g); g.connect(this.ctx.destination);
+    osc.connect(g); g.connect(this.out(bus));
     osc.start(t0); osc.stop(t0 + dur + 0.02);
   },
-  noise(dur, vol, freq) {
+  noise(dur, vol, freq, bus) {
     if (this.muted || !this.ctx) return;
     const n = Math.floor(this.ctx.sampleRate * dur);
     const buf = this.ctx.createBuffer(1, n, this.ctx.sampleRate);
@@ -196,11 +234,12 @@ const Sound = {
     const src = this.ctx.createBufferSource(); src.buffer = buf;
     const bp = this.ctx.createBiquadFilter(); bp.type = "bandpass"; bp.frequency.value = freq || 900;
     const g = this.ctx.createGain(); g.gain.value = vol || 0.1;
-    src.connect(bp); bp.connect(g); g.connect(this.ctx.destination);
+    src.connect(bp); bp.connect(g); g.connect(this.out(bus));
     src.start();
   },
   /** Discharge fanfare that climbs with the combo chain. */
   discharge(combo) {
+    this.duck(0.45, 0.55);
     const step = Math.min(9, Math.max(1, combo)) - 1;
     const root = 523.25 * Math.pow(2, step / 12);   // one semitone per chain link
     this.tone(root, 0.09, "triangle", 0.13);
@@ -224,6 +263,22 @@ const Sound = {
       case "error":    this.tone(150, 0.13, "sawtooth", 0.09, 90); break;
       case "shock":    this.noise(0.22, 0.16, 1800); this.tone(90, 0.25, "sawtooth", 0.10, 40); break;
       case "charge":   this.tone(300, 0.4, "sawtooth", 0.06, 1200); break;
+      /* Added with the mechanics that had no voice at all. A turnover, a team
+         lift, a catch and a mopped spill were all silent, which made them feel
+         like nothing had happened. */
+      case "turnover": this.noise(0.16, 0.07, 2600); this.tone(500, 0.10, "triangle", 0.07, 760); break;
+      case "teamlift": this.tone(180, 0.13, "triangle", 0.11, 300);
+                       setTimeout(() => this.tone(360, 0.16, "triangle", 0.11, 460), 90); break;
+      case "catch":    this.tone(760, 0.06, "square", 0.09, 1140); break;
+      case "throw":    this.noise(0.09, 0.05, 1400); this.tone(420, 0.08, "square", 0.06, 260); break;
+      case "mop":      this.noise(0.20, 0.055, 700); break;
+      case "splash":   this.noise(0.24, 0.08, 480); this.tone(200, 0.16, "sine", 0.05, 110); break;
+      case "restock":  this.tone(300, 0.09, "square", 0.08, 420);
+                       setTimeout(() => this.tone(460, 0.11, "square", 0.08, 620), 85); break;
+      case "shutter":  this.noise(0.30, 0.09, 260); this.tone(140, 0.34, "sawtooth", 0.07, 60); break;
+      case "warn":     this.tone(880, 0.07, "square", 0.05); break;
+      case "cordon":   this.tone(520, 0.09, "square", 0.07); 
+                       setTimeout(() => this.tone(520, 0.09, "square", 0.07), 150); break;
       case "flatline": this.tone(880, 1.1, "sine", 0.10); break;
       case "leave":    this.tone(300, 0.28, "square", 0.09, 120); break;
       case "lab":      this.tone(760, 0.12, "sine", 0.1, 520); setTimeout(() => this.tone(980, 0.18, "sine", 0.1), 120); break;
@@ -236,6 +291,7 @@ const Sound = {
         break;
       case "heart":    this.tone(120, 0.07, "sine", 0.09, 70); break;
       case "siren":
+        this.duck(0.55, 1.1);
         this.tone(720, 0.30, "sawtooth", 0.07, 980);
         setTimeout(() => this.tone(980, 0.30, "sawtooth", 0.07, 720), 300);
         break;
@@ -252,15 +308,24 @@ const Sound = {
   }
 };
 
-/* --- background music: a synthesized ambient loop -----------------------
-   Two detuned pads over a soft bass pulse; an off-beat tick layer fades in
-   while any patient is critical. Runs on a self-correcting setTimeout chain
-   against AudioContext time. Toggled with N; M (SFX mute) silences it too. */
+/* --- background music --------------------------------------------------
+   One ambient loop played everywhere, which is why the soundtrack felt like
+   wallpaper: the menus, a calm first ward and a ward you are losing all sounded
+   identical. There are now four beds — menu, shift, build and results — and the
+   shift bed has percussion plus an intensity that tracks how the run is
+   actually going, not just whether one patient happens to be critical.
+
+   Still zero assets: everything is oscillators and filtered noise, scheduled on
+   a self-correcting setTimeout chain against AudioContext time. N toggles music,
+   M silences everything.
+   --------------------------------------------------------------------- */
 const Music = {
   on: true,
   playing: false,
   timer: null,
   step: 0,
+  bed: "menu",
+
   start() {
     if (this.playing) return;
     this.playing = true;
@@ -268,36 +333,116 @@ const Music = {
     this.tick();
   },
   stop() { this.playing = false; if (this.timer) clearTimeout(this.timer); },
+
   note(freq, dur, type, vol) {
-    if (!this.on || Sound.muted || !Sound.ctx) return;
-    Sound.tone(freq, dur, type, vol);
+    if (!this.on || Sound.musicOff || Sound.muted || !Sound.ctx) return;
+    Sound.tone(freq, dur, type, vol, 0, "music");
   },
+  hit(dur, vol, freq) {
+    if (!this.on || Sound.musicOff || Sound.muted || !Sound.ctx) return;
+    Sound.noise(dur, vol, freq, "music");
+  },
+
+  /** Which bed belongs to the screen we are on. */
+  wantBed() {
+    const sc = Game.screen;
+    if (sc === "play") return "shift";
+    if (sc === "build") return "build";
+    if (sc === "results") return "results";
+    return "menu";
+  },
+
+  /** 0..1 — how hard this shift is going right now. Drives tempo and layers.
+      Built from the clock, the queue and lives lost together, because any one
+      of them alone misreads the moment: late-but-comfortable should not sound
+      the same as early-but-drowning. */
+  intensity() {
+    if (Game.screen !== "play") return 0;
+    const lvl = Game.level;
+    const clock = (lvl && isFinite(lvl.duration)) ? clamp(Game.time / lvl.duration, 0, 1)
+                                                 : clamp(Game.time / 240, 0, 1);
+    const waiting = Game.patients
+      ? Game.patients.filter(p => p.state === "waiting" || p.state === "walking").length : 0;
+    const queue = clamp(waiting / Math.max(3, (lvl && lvl.maxWaiting) || 6), 0, 1);
+    const lost = Game.livesMax ? clamp(1 - Game.lives / Game.livesMax, 0, 1) : 0;
+    const crit = Game.critical < CRIT_AT ? 0.25 : 0;
+    return clamp(0.30 * clock + 0.38 * queue + 0.30 * lost + crit, 0, 1);
+  },
+
   tick() {
     if (!this.playing) return;
-    const tense = Game.screen === "play" && Game.critical < CRIT_AT;
-    const stepDur = tense ? 0.21 : 0.25;            // eighth notes, ~120/96 bpm
-    const i = this.step % 32;
+    this.bed = this.wantBed();
+    const I = this.intensity();
+    let stepDur = 0.25;
+    try {
+      if (this.bed === "shift") stepDur = 0.250 - 0.062 * I;   // ~120 up to ~160 bpm
+      else if (this.bed === "build") stepDur = 0.30;
+      else if (this.bed === "results") stepDur = 0.27;
+      const i = this.step % 32;
+      const bar = Math.floor(i / 8);
 
-    // bass: a slow Am - F - C - G walk, one root per 8 steps
-    const roots = [110.0, 87.31, 130.81, 98.0];
-    if (i % 8 === 0) this.note(roots[Math.floor(i / 8)], 0.42, "sine", 0.045);
-    if (i % 8 === 4) this.note(roots[Math.floor(i / 8)] * 2, 0.2, "sine", 0.022);
+      if (this.bed === "menu") {
+        // warm, slow, nothing urgent: Am - F - C - G
+        const roots = [110.0, 87.31, 130.81, 98.0];
+        if (i % 8 === 0) {
+          const r = roots[bar];
+          this.note(r, 0.46, "sine", 0.045);
+          this.note(r * 3, 1.7, "triangle", 0.015);
+          this.note(r * 3 * 1.26, 1.7, "triangle", 0.012);
+        }
+        if (i % 8 === 4) this.note(roots[bar] * 2, 0.22, "sine", 0.022);
+        if (i === 6 || i === 22) {
+          const pent = [523.25, 587.33, 659.25, 783.99, 880.0];
+          this.note(pent[(this.step >> 3) % pent.length], 0.55, "sine", 0.013);
+        }
 
-    // pad: two detuned triangles on each chord change
-    if (i % 8 === 0) {
-      const r = roots[Math.floor(i / 8)] * 2;
-      this.note(r * 1.5, 1.6, "triangle", 0.016);
-      this.note(r * 1.498 * 1.26, 1.6, "triangle", 0.013);
+      } else if (this.bed === "shift") {
+        /* A driving version of the same progression, with the layers arriving as
+           the shift gets away from you. Percussion is what the old loop was
+           missing most — without a backbeat there was nothing to work to. */
+        const roots = [110.0, 87.31, 130.81, 98.0];
+        const r = roots[bar];
+        if (i % 8 === 0) this.note(r, 0.30, "sine", 0.050);
+        if (i % 8 === 3) this.note(r, 0.16, "sine", 0.030);
+        if (i % 8 === 6) this.note(r * 1.5, 0.16, "sine", 0.028);
+        // kick on the beat, snare on the backbeat once things warm up
+        if (i % 4 === 0) this.hit(0.09, 0.075, 120);
+        if (I > 0.22 && i % 8 === 4) this.hit(0.07, 0.045, 1500);
+        // hats: eighths, then sixteenth flutter when it gets loud
+        if (I > 0.12 && i % 2 === 1) this.hit(0.030, 0.020 + 0.016 * I, 7200);
+        if (I > 0.62 && i % 2 === 0) this.hit(0.022, 0.013, 9000);
+        // chord stab, arriving mid-pressure so there is somewhere left to go
+        if (I > 0.34 && i % 8 === 2) {
+          this.note(r * 3, 0.20, "triangle", 0.017);
+          this.note(r * 3 * 1.26, 0.20, "triangle", 0.014);
+        }
+        // and a held pad underneath the whole thing at full tilt
+        if (I > 0.78 && i % 16 === 0) this.note(r * 1.5, 2.2, "sawtooth", 0.010);
+        // the old flatline tick, kept: it is the clearest warning in the game
+        if (Game.critical < CRIT_AT && i % 2 === 1) this.note(2200, 0.03, "square", 0.018);
+
+      } else if (this.bed === "build") {
+        // between waves: unhurried, a workshop rather than a ward
+        const roots = [130.81, 174.61, 155.56, 196.0];
+        if (i % 8 === 0) {
+          this.note(roots[bar] / 2, 0.5, "sine", 0.040);
+          this.note(roots[bar] * 2, 1.5, "triangle", 0.013);
+        }
+        if (i % 4 === 2) this.note(roots[bar] * 3, 0.18, "sine", 0.014);
+        if (i % 8 === 5) this.hit(0.05, 0.018, 5200);
+
+      } else {
+        // results: a slow major cadence, so a finished shift lands
+        const cad = [130.81, 164.81, 196.0, 261.63];
+        if (i % 8 === 0) {
+          this.note(cad[bar], 0.9, "triangle", 0.034);
+          this.note(cad[bar] * 1.5, 0.9, "triangle", 0.022);
+        }
+        if (i % 8 === 4) this.note(cad[bar] * 2, 0.4, "sine", 0.018);
+      }
+    } catch (err) {
+      // music is decoration; a bad note must never take the frame loop with it
     }
-
-    // sparkle: an occasional high pentatonic ping on menus and calm play
-    if (!tense && (i === 6 || i === 22)) {
-      const pent = [523.25, 587.33, 659.25, 783.99, 880.0];
-      this.note(pent[(this.step >> 3) % pent.length], 0.5, "sine", 0.012);
-    }
-
-    // tension layer: off-beat ticks while someone is close to flatlining
-    if (tense && i % 2 === 1) this.note(2200, 0.03, "square", 0.018);
 
     this.step++;
     this.timer = setTimeout(() => this.tick(), stepDur * 1000);
@@ -308,8 +453,20 @@ const Music = {
    4. INPUT
    --------------------------------------------------------------------- */
 
-const Keys = Object.create(null);      // held state by event.code
+const Keys = Object.create(null);      // held state by event.code (either source)
+const KbHeld = Object.create(null);    // keyboard only, so pads can merge safely
 const Pressed = Object.create(null);   // edge-triggered, cleared each frame
+
+/* Pad prompts, shown in place of the keyboard caps for any slot holding a pad.
+   Kept beside CONTROLS and Pads.MAP so the three cannot drift apart. */
+const PAD_PROMPTS = [
+  ["Move", "Stick / D-pad"],
+  ["Pick up / put down", "A  /  cross"],
+  ["Work a station (hold)", "X  /  square"],
+  ["Sprint (hold)", "B or bumper"]
+];
+
+const WIPE_HOLD = 2.0;        // seconds to hold X before a save is erased
 
 const CONTROLS = [
   { up: "KeyW", down: "KeyS", left: "KeyA", right: "KeyD", interact: "KeyE", use: "KeyQ", sprint: "ShiftLeft" },
@@ -362,19 +519,103 @@ const SWALLOW = new Set([
 window.addEventListener("keydown", (e) => {
   if (SWALLOW.has(e.code)) e.preventDefault();
   if (!Keys[e.code]) Pressed[e.code] = true;
-  Keys[e.code] = true;
+  Keys[e.code] = true; KbHeld[e.code] = true;
   Sound.init();                          // browsers need a gesture before audio
 }, { passive: false });
 
 window.addEventListener("keyup", (e) => {
   if (SWALLOW.has(e.code)) e.preventDefault();
-  Keys[e.code] = false;
+  KbHeld[e.code] = false;
+  // a pad may still be asserting this code — only the keyboard's grip lifts here
+  if (!Pads.asserted[0][e.code] && !Pads.asserted[1][e.code]) Keys[e.code] = false;
 }, { passive: false });
 
-window.addEventListener("blur", () => { for (const k in Keys) Keys[k] = false; });
+window.addEventListener("blur", () => {
+  for (const k in Keys) Keys[k] = false;
+  for (const k in KbHeld) KbHeld[k] = false;
+});
 
 const wasPressed = (code) => !!Pressed[code];
 function clearPressed() { for (const k in Pressed) delete Pressed[k]; }
+
+/* ---------------------------------------------------------------------
+   4b. GAMEPADS
+
+   This is a couch co-op game where, until now, both players shared one
+   keyboard. Rather than thread a second input source through movement, menus
+   and every wasPressed() call site, a pad simply ASSERTS the same key codes its
+   slot already uses: pad 0 drives WASD/E/Q/Shift, pad 1 the arrows//./RShift.
+   Everything downstream — CONTROLS, the menus, the bot harnesses — is unchanged.
+
+   The merge has to be careful in one direction: releasing a pad button must not
+   clear a key a hand is physically holding. So the keyboard keeps its own held
+   map and a code stays down while either source asserts it.
+   --------------------------------------------------------------------- */
+
+const Pads = {
+  DEADZONE: 0.42,
+  /* Standard-mapping indices. Face buttons are laid out so the SAME thumb
+     position means the same verb on both pads. */
+  MAP: [
+    { code: "interact", btns: [0] },          // A / cross
+    { code: "use",      btns: [2] },          // X / square
+    { code: "sprint",   btns: [1, 4, 5, 6, 7] }, // B, shoulders, triggers
+    { code: "up",       btns: [12] },
+    { code: "down",     btns: [13] },
+    { code: "left",     btns: [14] },
+    { code: "right",    btns: [15] }
+  ],
+  slots: [],          // gamepad index per player slot, or -1
+  asserted: [{}, {}], // codes each slot's pad is currently holding down
+  count: 0,
+
+  connected() { return this.count; },
+
+  /** Which physical pads exist, in a stable order, mapped onto player slots. */
+  refresh() {
+    const list = (navigator.getGamepads ? navigator.getGamepads() : []) || [];
+    const live = [];
+    for (let i = 0; i < list.length; i++) if (list[i] && list[i].connected) live.push(i);
+    this.count = live.length;
+    this.slots = [live.length > 0 ? live[0] : -1, live.length > 1 ? live[1] : -1];
+    return list;
+  },
+
+  /** Fold pad state into Keys/Pressed. Called once per frame before the sim. */
+  poll() {
+    if (!navigator.getGamepads) return;
+    const list = this.refresh();
+    for (let slot = 0; slot < 2; slot++) {
+      const want = Object.create(null);
+      const idx = this.slots[slot];
+      const pad = idx >= 0 ? list[idx] : null;
+      const ctrl = CONTROLS[slot];
+      if (pad) {
+        const ax = pad.axes || [], bt = pad.buttons || [];
+        const down = (n) => !!(bt[n] && (bt[n].pressed || bt[n].value > 0.5));
+        for (const m of this.MAP)
+          if (m.btns.some(down)) want[ctrl[m.code]] = true;
+        // left stick, as digital directions — movement in this game is digital,
+        // so a deadzone is all the translation that is needed
+        const x = ax[0] || 0, y = ax[1] || 0;
+        if (x < -this.DEADZONE) want[ctrl.left] = true;
+        if (x > this.DEADZONE) want[ctrl.right] = true;
+        if (y < -this.DEADZONE) want[ctrl.up] = true;
+        if (y > this.DEADZONE) want[ctrl.down] = true;
+        // menu verbs, so a pad alone can get through the front end
+        if (down(9)) want.Escape = true;          // start
+        if (down(0)) want.Enter = true;           // A also confirms
+        if (down(1)) want.Escape = true;          // B also backs out
+      }
+      const had = this.asserted[slot];
+      for (const code in want)
+        if (!had[code]) { if (!Keys[code]) Pressed[code] = true; Keys[code] = true; }
+      for (const code in had)
+        if (!want[code] && !KbHeld[code]) Keys[code] = false;
+      this.asserted[slot] = want;
+    }
+  }
+};
 
 /* ---------------------------------------------------------------------
    5. DATA — items, ailments, stations, levels
@@ -1200,7 +1441,7 @@ function closeBlockingCells(world, sh) {
     for (const it of Game.floorItems) shove(it);
     for (const pt of Game.patients) if (pt.state === "waiting" || pt.state === "walking") shove(pt);
   }
-  Sound.play("jam");
+  Sound.play(sh.cordon ? "cordon" : "shutter");
 }
 
 /* ---- event cordons -------------------------------------------------------
@@ -1824,6 +2065,7 @@ function unlockAch(key) {
   const a = ACHIEVEMENTS.find(q => q.key === key);
   Game.toasts.push({ text: a ? a.name : key, t: 0, life: 3.6 });
   Sound.play("newbest");
+  Save.touch();
 }
 
 /** Checks that can fire mid-shift. */
@@ -1886,6 +2128,10 @@ const Game = {
   burst: 0,
   endless: false,
   endlessBest: 0,
+  builderBest: 0,
+  tutorialDone: false,
+  wipeHold: 0,
+  wipeDone: 0,
   heartTimer: 0,
   shake: 0,
   flashRed: 0,
@@ -1927,6 +2173,142 @@ const Game = {
   progress: LEVELS.map(() => ({ best: 0, stars: 0, unlocked: false, challenges: [false, false, false] }))
 };
 Game.progress[0].unlocked = true;
+
+/* ---------------------------------------------------------------------
+   SAVE
+
+   Forty-five stars of progression that evaporates when the tab closes is not a
+   product. This persists the things a player earns — and nothing about a shift
+   in flight, so a crash mid-ward can never write a corrupt run to disk.
+
+   localStorage is used where it works and quietly skipped where it does not:
+   it throws on file:// in some browsers, in private mode, and when a quota is
+   full. Every one of those cases has to degrade to "the game still plays",
+   never to a broken boot. A wrapper (Electron, Tauri, Steam) can point
+   Save.backend at a real file without touching anything else.
+   --------------------------------------------------------------------- */
+
+const Save = {
+  KEY: "codeblue.save.v1",
+  VERSION: 1,
+  available: false,
+  backend: null,          // { read(), write(str) } — swapped by a desktop wrapper
+  dirty: false,
+  _t: 0,
+
+  probe() {
+    if (this.backend) { this.available = true; return; }
+    try {
+      const k = this.KEY + ".probe";
+      window.localStorage.setItem(k, "1");
+      window.localStorage.removeItem(k);
+      this.backend = {
+        read: () => window.localStorage.getItem(Save.KEY),
+        write: (str) => window.localStorage.setItem(Save.KEY, str),
+        clear: () => window.localStorage.removeItem(Save.KEY)
+      };
+      this.available = true;
+    } catch (err) {
+      this.available = false;   // play on, just without a save
+    }
+  },
+
+  /** Only earned progress. Nothing from the shift currently being played. */
+  snapshot() {
+    return {
+      v: this.VERSION,
+      progress: Game.progress.map(p => ({
+        best: p.best | 0, stars: p.stars | 0, unlocked: !!p.unlocked,
+        challenges: (p.challenges || []).map(Boolean)
+      })),
+      achievements: Object.keys(Game.achievements).filter(k => Game.achievements[k]),
+      career: {
+        treated: Game.career.treated | 0, cardiac: Game.career.cardiac | 0,
+        mystery: Game.career.mystery | 0, shifts: Game.career.shifts | 0
+      },
+      xp: Game.xp | 0,
+      endlessBest: Game.endlessBest | 0,
+      builderBest: Game.builderBest | 0,
+      settings: {
+        difficulty: Game.difficulty | 0,
+        muted: !!Sound.muted,
+        musicOff: !!Sound.musicOff,
+        tutorialDone: !!Game.tutorialDone
+      }
+    };
+  },
+
+  write() {
+    if (!this.available) return false;
+    try { this.backend.write(JSON.stringify(this.snapshot())); this.dirty = false; return true; }
+    catch (err) { this.available = false; return false; }
+  },
+
+  /** Mark for a write on the next tick, so twenty stat changes in one frame do
+      not each serialise the whole save. */
+  touch() { this.dirty = true; },
+
+  tick(dt) {
+    if (!this.dirty) return;
+    this._t += dt;
+    if (this._t < 0.6) return;
+    this._t = 0;
+    this.write();
+  },
+
+  /** A malformed or hand-edited save must never stop the game booting: every
+      field is validated and anything unexpected falls back to the default. */
+  load() {
+    this.probe();
+    if (!this.available) return false;
+    let data = null;
+    try { data = JSON.parse(this.backend.read() || "null"); } catch (err) { data = null; }
+    if (!data || typeof data !== "object" || data.v !== this.VERSION) return false;
+
+    const nLv = Game.progress.length;
+    if (Array.isArray(data.progress)) {
+      for (let i = 0; i < nLv && i < data.progress.length; i++) {
+        const src = data.progress[i], dst = Game.progress[i];
+        if (!src || typeof src !== "object") continue;
+        dst.best = Math.max(0, src.best | 0);
+        dst.stars = clamp(src.stars | 0, 0, 3);
+        dst.unlocked = !!src.unlocked;
+        // Array.isArray, not truthiness: a save with challenges:"nope" would
+        // index the string and "n" is truthy, silently granting all three medals
+        const ch = Array.isArray(src.challenges) ? src.challenges : [];
+        dst.challenges = [0, 1, 2].map(k => !!ch[k]);
+      }
+    }
+    Game.progress[0].unlocked = true;         // ward one is always open
+    if (Array.isArray(data.achievements))
+      for (const k of data.achievements)
+        if (ACHIEVEMENTS.some(a => a.key === k)) Game.achievements[k] = true;
+    if (data.career && typeof data.career === "object")
+      for (const k of ["treated", "cardiac", "mystery", "shifts"])
+        Game.career[k] = Math.max(0, data.career[k] | 0);
+    Game.xp = Math.max(0, data.xp | 0);
+    Game.endlessBest = Math.max(0, data.endlessBest | 0);
+    Game.builderBest = Math.max(0, data.builderBest | 0);
+    const st = data.settings || {};
+    Game.difficulty = clamp(st.difficulty | 0, 0, DIFFS.length - 1);
+    Sound.muted = !!st.muted;
+    Sound.musicOff = !!st.musicOff;
+    Music.on = !Sound.musicOff;
+    Game.tutorialDone = !!st.tutorialDone;
+    return true;
+  },
+
+  wipe() {
+    Game.progress.forEach((p, i) => {
+      p.best = 0; p.stars = 0; p.unlocked = i === 0; p.challenges = [false, false, false];
+    });
+    Game.achievements = {};
+    Game.career = { treated: 0, cardiac: 0, mystery: 0, shifts: 0 };
+    Game.xp = 0; Game.endlessBest = 0; Game.builderBest = 0;
+    Game.tutorialDone = false;
+    if (this.available) { try { this.backend.clear(); } catch (err) { /* nothing to undo */ } }
+  }
+};
 
 function popup(x, y, str, color, big) {
   Game.popups.push({ x, y, text: str, color: color || "#fff", t: 0, life: big ? 1.5 : 1.1, size: big ? 22 : 15 });
@@ -2231,6 +2613,7 @@ function doInteract(p) {
     if (needsTwoLift(loose)) {
       Game.score += 30;
       popup(loose.x, loose.y - 60, "TEAM LIFT  +30", "#ffd54a", true);
+      Sound.play("teamlift");
       Game.teamLifts = (Game.teamLifts || 0) + 1;
       Sound.play("clutch");
       checkLiveAchievements();
@@ -2407,6 +2790,7 @@ function findJob(p) {
         key: "re" + st.x + "," + st.y, dur: r.dur, label: r.label,
         run: () => {
           st.stock = STATIONS[st.type].stockMax;
+          Sound.play("restock");
           p.item = null; st.flash = 0.4;
           popup(st.cx, st.cy - 24, "Restocked", PALETTE.good);
           Sound.play("done");
@@ -2550,6 +2934,7 @@ function updatePlayer(p, dt) {
         Game.score += TURNOVER_BONUS;
         Game.turnovers = (Game.turnovers || 0) + 1;
         popup(bedToClean.cx, bedToClean.cy - 26, "Bay ready  +" + TURNOVER_BONUS, "#8be9ff");
+        Sound.play("turnover");
         Sound.play("done");
         checkLiveAchievements();
       }
@@ -2621,6 +3006,7 @@ const THROW_DRAG  = 620;          // px/sec^2 slowdown
 const CATCH_R     = 30;
 
 function throwItem(p) {
+  Sound.play("throw");
   const it = p.item;
   if (!it) return false;
   p.item = null;
@@ -2669,6 +3055,7 @@ function updateThrownItems(dt) {
       if (fromPartner) {
         Game.score += 25;
         Game.catches = (Game.catches || 0) + 1;
+        Sound.play("catch");
         popup(p.x, p.y - 52, "NICE CATCH  +25", "#ffd54a", true);
         burst(p.x, p.y - 10, "#ffe066", 12);
         Sound.play("clutch");
@@ -2880,6 +3267,7 @@ function addSpill(tx, ty) {
   if (Game.spills.length > 10) return;
   Game.spills.push({ tx, ty, x: tx * TILE + TILE / 2, y: ty * TILE + TILE / 2,
                      t: 0, mop: 0, seed: Math.floor(Game.rng() * 1000) });
+  Sound.play("splash");
 }
 
 function spillAt(px, py) {
@@ -2902,6 +3290,7 @@ function updateSpills(dt) {
     sp.t += dt;
     if (sp.mop >= SPILL_MOP) {
       Game.spills.splice(i, 1);
+      Sound.play("mop");
       Game.score += 15;
       popup(sp.x, sp.y - 20, "Cleaned  +15", "#8be9ff");
       Sound.play("done");
@@ -3476,6 +3865,7 @@ function endBuilderRun() {
     spent: B.totalCredits, built: B.bought.length, staff: Game.staff.length,
     t: 0
   };
+  Save.touch();
   Game.screen = "results";
   Game.builderMode = false;
   Sound.play("error");
@@ -3524,7 +3914,8 @@ function endLevel() {
       bestCombo: Game.bestCombo, perfects: Game.perfects, clutches: Game.clutches,
       t: 0
     };
-    Game.screen = "results";
+    Save.touch();
+  Game.screen = "results";
     Sound.play(newBest ? "newbest" : "error");
     return;
   }
@@ -3559,6 +3950,7 @@ function endLevel() {
     bestCombo: Game.bestCombo, perfects: Game.perfects, clutches: Game.clutches,
     t: 0
   };
+  Save.touch();
   Game.screen = "results";
   Sound.play(failed ? "error" : (newBest ? "newbest" : "levelend"));
 }
@@ -6874,11 +7266,17 @@ function drawTitle(g) {
   text(g, "a two-player emergency room", W / 2, 158, 19, PALETTE.dim, "center", "normal");
 
   const cards = [
-    { x: 128, color: PALETTE.p1, title: "PLAYER 1",
+    { x: 128, color: PALETTE.p1, title: "PLAYER 1", slot: 0,
       rows: [["Move", "W A S D"], ["Pick up / put down", "E"], ["Work station (hold)", "Q"], ["Sprint (hold)", "Left Shift"]] },
-    { x: 664, color: PALETTE.p2, title: "PLAYER 2",
+    { x: 664, color: PALETTE.p2, title: "PLAYER 2", slot: 1,
       rows: [["Move", "Arrow keys"], ["Pick up / put down", "/  slash"], ["Work station (hold)", ".  period"], ["Sprint (hold)", "Right Shift"]] }
   ];
+  // show what is actually in their hands, per slot
+  for (const c of cards) {
+    if (Pads.slots[c.slot] < 0) continue;
+    c.title += "  ·  PAD";
+    c.rows = PAD_PROMPTS;
+  }
   const CY = 588, CH = 138;
   for (const c of cards) {
     // opaque enough to read against the moving ward behind it
@@ -6895,6 +7293,13 @@ function drawTitle(g) {
       text(g, r[0], cx, y, 13, PALETTE.dim, "left", "normal");
       keyCap(g, r[1], cx + 128, y - 14);
     });
+  }
+
+  if (Pads.connected()) {
+    const nP = Pads.connected();
+    text(g, nP === 1 ? "1 gamepad connected — it drives Player 1"
+                     : nP + " gamepads connected — in plug-in order",
+         W / 2, CY - 16, 14, "#6fd3b4", "center");
   }
 
   text(g, "Escape pauses · M mutes · press  H  for how to play",
@@ -7158,6 +7563,8 @@ function drawHowTo(g) {
 }
 
 function drawHowToControls(g) {
+  const padCard = { x: 96, color: "#6fd3b4", title: "EITHER PLAYER, ON A PAD",
+    rows: PAD_PROMPTS.concat([["Pause", "Start"]]) };
   const cards = [
     { x: 96, color: PALETTE.p1, title: "PLAYER 1",
       rows: [["Move", "W A S D"], ["Pick up / put down", "E"], ["Work a station (hold)", "Q"], ["Sprint (hold)", "Left Shift"]] },
@@ -7175,6 +7582,17 @@ function drawHowToControls(g) {
     });
   }
 
+  // gamepads, spelled out once for both slots
+  fillRound(g, 96, 262, 1088, 74, 14, "rgba(111,211,180,.07)");
+  g.fillStyle = padCard.color; roundRect(g, 96, 262, 1088, 4, 2); g.fill();
+  text(g, padCard.title + (Pads.connected() ? "   —   " + Pads.connected() + " connected" : ""),
+       118, 288, 13, padCard.color);
+  padCard.rows.forEach((r, i) => {
+    const cx = 118 + i * 216;
+    text(g, r[0], cx, 314, 12, PALETTE.dim, "left", "normal");
+    keyCap(g, r[1], cx, 320);
+  });
+
   const steps = [
     ["1", "Patients arrive at the blue IN door.", "Walk into them and press E to lift one onto your shoulders."],
     ["2", "Carry them to a free bed.", "Stand beside the bed facing it and press E to lay them down."],
@@ -7182,10 +7600,10 @@ function drawHowToControls(g) {
     ["4", "Wheel them out.", "Once the badge turns green, pick them up again and walk onto the green OUT tile."],
     ["!", "Critical cases need one extra hold.", "Stand at the bed with EMPTY hands and hold Q to Stabilise them."]
   ];
-  fillRound(g, 96, 268, 1088, 214, 14, "rgba(255,255,255,.04)");
-  text(g, "EVERY PATIENT, EVERY TIME", 118, 300, 12, "#ffd54a");
+  fillRound(g, 96, 348, 1088, 196, 14, "rgba(255,255,255,.04)");
+  text(g, "EVERY PATIENT, EVERY TIME", 118, 374, 12, "#ffd54a");
   steps.forEach((s2, i) => {
-    const y = 316 + i * 33;
+    const y = 394 + i * 30;
     g.fillStyle = "#48c3f0";
     g.beginPath(); g.arc(130, y - 5, 11, 0, 6.283); g.fill();
     text(g, s2[0], 130, y, 14, "#0d1117", "center");
@@ -7205,10 +7623,10 @@ function drawHowToControls(g) {
     "A stretcher case marked 2 MEDICS will not move for one player — get your partner alongside and press E together.",
     "Spills, jams, dry shelves, fire shutters and high fives are all explained on the WORKING THE FLOOR page."
   ];
-  fillRound(g, 96, 490, 1088, 224, 14, "rgba(255,255,255,.04)");
-  text(g, "WORTH KNOWING", 118, 514, 12, "#ffd54a");
+  fillRound(g, 96, 554, 1088, 168, 14, "rgba(255,255,255,.04)");
+  text(g, "WORTH KNOWING", 118, 576, 12, "#ffd54a");
   tips.forEach((t, i) => {
-    text(g, "•  " + t, 118, 538 + i * 20, 12.5, PALETTE.dim, "left", "normal");
+    text(g, "•  " + t, 118, 598 + i * 15.5, 11.5, PALETTE.dim, "left", "normal");
   });
 }
 
@@ -7560,7 +7978,26 @@ function drawMedalsScreen(g) {
     text(g, a.blurb, cx + 60, cy + 44, 13, on ? PALETTE.dim : "#44515f", "left", "normal");
   });
 
-  text(g, "Esc  back", W / 2, H - 44, 16, PALETTE.text, "center");
+  // save state, and the wipe. Saying whether progress is being kept matters:
+  // if localStorage is unavailable the player should know BEFORE they invest an
+  // evening in it, not after.
+  if (Game.wipeDone > 0) {
+    text(g, "Save erased.", W / 2, H - 62, 15, "#ff8f70", "center");
+  } else if (!Save.available) {
+    text(g, "Progress is not being saved — this browser is blocking local storage.",
+         W / 2, H - 62, 13, "#ff8f70", "center", "normal");
+  } else if (Game.wipeHold > 0) {
+    const f = clamp(Game.wipeHold / WIPE_HOLD, 0, 1);
+    g.fillStyle = "rgba(255,255,255,.10)";
+    roundRect(g, W / 2 - 120, H - 74, 240, 10, 5); g.fill();
+    g.fillStyle = "#ff8f70";
+    roundRect(g, W / 2 - 120, H - 74, 240 * f, 10, 5); g.fill();
+    text(g, "keep holding to erase everything", W / 2, H - 54, 13, "#ff8f70", "center", "normal");
+  } else {
+    text(g, "Progress saves automatically   ·   hold  X  to erase it",
+         W / 2, H - 62, 13, PALETTE.dim, "center", "normal");
+  }
+  text(g, "Esc  back", W / 2, H - 30, 16, PALETTE.text, "center");
 }
 
 function drawSelect(g) {
@@ -8271,8 +8708,11 @@ function render() {
    --------------------------------------------------------------------- */
 
 function handleScreenKeys() {
-  if (wasPressed("KeyM")) { Sound.muted = !Sound.muted; if (!Sound.muted) Sound.play("menu"); }
-  if (wasPressed("KeyN")) { Music.on = !Music.on; Sound.play("menu"); }
+  if (wasPressed("KeyM")) { Sound.muted = !Sound.muted; if (!Sound.muted) Sound.play("menu"); Save.touch(); }
+  if (wasPressed("KeyN")) {
+    Music.on = !Music.on; Sound.musicOff = !Music.on;
+    Sound.play("menu"); Save.touch();
+  }
 
   switch (Game.screen) {
     case "title":
@@ -8352,7 +8792,7 @@ function handleScreenKeys() {
       }
       if (wasPressed("KeyP")) { Game.screen = "perks"; Sound.play("menu"); }
       if (wasPressed("KeyT")) {
-        Game.difficulty = (Game.difficulty + 1) % DIFFS.length;
+        Game.difficulty = (Game.difficulty + 1) % DIFFS.length; Save.touch();
         Sound.play("menu");
       }
       if (wasPressed("KeyC")) {
@@ -8387,8 +8827,19 @@ function handleScreenKeys() {
     }
 
     case "medals": {
+      /* Wiping a save is the one irreversible thing in the game, so it is a
+         deliberate two-second hold rather than a keypress — and it is only
+         offered here, on the screen that shows what would be lost. */
+      if (Keys.KeyX && Save.available) {
+        Game.wipeHold = (Game.wipeHold || 0) + 1 / 60;
+        if (Game.wipeHold >= WIPE_HOLD) {
+          Save.wipe(); Game.wipeHold = 0; Game.wipeDone = 2.2;
+          Sound.play("error");
+        }
+      } else Game.wipeHold = 0;
+      if (Game.wipeDone > 0) Game.wipeDone -= 1 / 60;
       if (wasPressed("Escape") || wasPressed("KeyC") || wasPressed("KeyE") || wasPressed("Enter")) {
-        Game.screen = "select"; Sound.play("menu");
+        Game.screen = "select"; Sound.play("menu"); Game.wipeHold = 0;
       }
       break;
     }
@@ -8483,6 +8934,9 @@ function frame(now) {
   lastT = now;
 
   try {
+    // pads first: they assert the same key codes, so everything after this — the
+    // menus, movement, wasPressed — needs no knowledge that a pad exists
+    Pads.poll();
     handleScreenKeys();
 
     if (Game.screen === "play") updatePlay(dt);
@@ -8494,6 +8948,7 @@ function frame(now) {
     else if (Game.screen === "paused") { /* frozen */ }
 
     render();
+    Save.tick(dt);
     clearPressed();
     _frameErrs = 0;
   } catch (err) {
@@ -8553,6 +9008,12 @@ window.CodeBlue = {
     floorItems: Game.floorItems.map(i => ({ type: i.type, tx: Math.floor(i.x / TILE), ty: Math.floor(i.y / TILE) }))
   })
 };
+
+Save.load();
+/* A last-chance flush: the debounced write may not have fired yet when the tab
+   goes away. pagehide covers the cases visibilitychange and unload miss. */
+for (const ev of ["pagehide", "visibilitychange"])
+  window.addEventListener(ev, () => { if (Save.dirty) Save.write(); });
 
 requestAnimationFrame(frame);
 </script>
