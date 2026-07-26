@@ -2825,6 +2825,7 @@ uniform float uShadowTexel;
 uniform float uAmb;          // hemisphere fill strength
 uniform float uKey;          // sun strength
 uniform float uShadowOn;     // 0 on menu passes: no shadow map is valid there
+uniform float uFuzz;         // 1 = brushed fabric (the characters), 0 = hard surface
 uniform sampler2DShadow uShadow;
 out vec4 frag;
 
@@ -2851,7 +2852,11 @@ void main() {
   vec3 L = uLightDir;
 
   float ndl = dot(N, L);
-  float wrapped = clamp((ndl + 0.32) / 1.32, 0.0, 1.0);
+  // Fabric scatters light through its fibres, so the terminator is much softer
+  // than on a hard surface. Widening the wrap is most of what separates a
+  // plush toy from a painted plastic figurine.
+  float wrapAmt = mix(0.32, 0.78, uFuzz);
+  float wrapped = clamp((ndl + wrapAmt) / (1.0 + wrapAmt), 0.0, 1.0);
   float sh = shadowFactor();
 
   vec3 sky = vec3(0.74, 0.82, 0.94);
@@ -2860,10 +2865,19 @@ void main() {
   vec3 sun = vec3(1.00, 0.96, 0.89) * (wrapped * uKey) * (0.38 + 0.62 * sh);
 
   vec3 H = normalize(L + V);
-  float spec = pow(max(dot(N, H), 0.0), 46.0) * 0.32 * sh * step(0.02, ndl);
-  float rim = pow(1.0 - max(dot(N, V), 0.0), 3.2) * 0.20;
+  // fleece has no highlight to speak of; a broad sheen stands in for one
+  float specPow = mix(46.0, 9.0, uFuzz);
+  float specAmt = mix(0.32, 0.045, uFuzz);
+  float spec = pow(max(dot(N, H), 0.0), specPow) * specAmt * sh * step(0.02, ndl);
 
-  vec3 c = albedo * (amb + sun) + vec3(spec) + vec3(0.52, 0.70, 0.95) * rim;
+  // Peach fuzz: brushed fibres catch light at grazing angles, so the silhouette
+  // lifts in the material's OWN hue instead of the cool environment rim a hard
+  // surface gets. This is the velvet look, and it is what sells "soft toy".
+  float grazing = pow(1.0 - max(dot(N, V), 0.0), 2.6);
+  float rim = grazing * mix(0.20, 0.0, uFuzz);
+  vec3 fuzz = albedo * grazing * 0.62 * uFuzz * (0.45 + 0.55 * wrapped);
+
+  vec3 c = albedo * (amb + sun) + vec3(spec) + vec3(0.52, 0.70, 0.95) * rim + fuzz;
   c = mix(c, albedo * 1.15, uEmissive);
   // gentle filmic-ish shoulder so highlights do not clip harshly
   c = c / (c + vec3(0.92)) * 1.62;
@@ -2932,6 +2946,19 @@ function initGL(canvas3d) {
 
 let _pass = "main";
 
+/* Material mode for subsequent draws: 1 = brushed fabric, 0 = hard surface.
+   Set around character draws so the ward keeps its clean painted look. */
+let _fuzz = 0;
+function setFuzz(v) { _fuzz = v; }
+
+/* Fine stitching, tags, seams and the embroidered mouth are what sell these as
+   sewn toys close up, and are sub-pixel from the ward camera. Drawing them for
+   thirteen characters every frame cost 613 draw calls against ~145 before the
+   plush rebuild, so they are gated: on for portraits and the title showcase,
+   off in gameplay where nobody can see them. */
+let _charDetail = false;
+function setCharDetail(v) { _charDetail = v; }
+
 function drawMesh(mesh, px, py, pz, ry, sx, sy, sz, color, emissive) {
   const gl = GL.gl;
   m4TRS(GL._model, px, py, pz, ry || 0, sx, sy, sz);
@@ -2947,6 +2974,7 @@ function drawMesh(mesh, px, py, pz, ry, sx, sy, sz, color, emissive) {
     gl.uniformMatrix3fv(p.u.uNrmMat, false, GL._nrm);
     gl.uniform3fv(p.u.uTint, color || [1, 1, 1]);
     gl.uniform1f(p.u.uEmissive, emissive || 0);
+    gl.uniform1f(p.u.uFuzz, _fuzz);
   }
   gl.bindVertexArray(mesh.vao);
   gl.drawElements(gl.TRIANGLES, mesh.count, mesh.type, 0);
@@ -3401,59 +3429,148 @@ function drawCharacter3D(o) {
   const P = (lx, ly, lz) => [_lx(ox, ry, lx * S, lz * S), y0 + ly * S + bob, _lz(oz, ry, lx * S, lz * S)];
   const shadowPass = _pass === "shadow";
 
-  // feet
+  // Everything below is built to read as a sewn plush toy rather than a
+  // figurine: an oversized head on a squat body, stubby limbs, visible seams
+  // and panels, and fabric shading. setFuzz drives the cloth material; the
+  // ward around them stays hard-surfaced.
+  if (!shadowPass) setFuzz(1);
+
+  const darker = (c, k) => [c[0] * k, c[1] * k, c[2] * k];
+  const stitchCol = darker(body, 0.74);
+
+  // --- feet: chunky, splayed outward like a toy that has to stand up -------
   if (!o.tucked) {
-    let p = P(-0.15, 0.07, swing);
-    drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.11*S, 0.07*S, 0.14*S, rgb("#5b6b80"));
-    p = P(0.15, 0.07, -swing);
-    drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.11*S, 0.07*S, 0.14*S, rgb("#5b6b80"));
+    for (const sx of [-1, 1]) {
+      const p2 = P(sx * 0.175, 0.085, sx > 0 ? -swing : swing);
+      drawMesh(shadowPass ? MESH.sphereLo : MESH.sphere, p2[0], p2[1], p2[2],
+               ry + sx * 0.22, 0.135*S, 0.085*S, 0.165*S, rgb(look.shoe || "#5b6b80"));
+      if (!shadowPass && _charDetail) {
+        // a paler sole panel, the way a plush foot has a contrast underside
+        const p3 = P(sx * 0.175, 0.045, sx > 0 ? -swing : swing);
+        drawMesh(MESH.sphereLo, p3[0], p3[1], p3[2], ry + sx * 0.22,
+                 0.105*S, 0.038*S, 0.130*S, rgb("#eef3f8"));
+      }
+    }
   }
 
-  // torso
-  let p = P(0, 0.34, 0);
+  // --- torso: wide, short, soft ------------------------------------------
+  const TY = 0.335;
+  let p = P(0, TY, 0);
   drawMesh(shadowPass ? MESH.sphereLo : MESH.sphere, p[0], p[1], p[2], ry,
-           0.29*S, 0.28*S, 0.26*S, body);
+           0.325*S, 0.265*S, 0.295*S, body);
 
   if (!shadowPass) {
+    // belly panel: a slightly paler patch of the same cloth, sewn in
+    if (_charDetail) {
+    p = P(0, TY - 0.075, 0.205);
+    drawMesh(MESH.sphere, p[0], p[1], p[2], ry, 0.135*S, 0.095*S, 0.095*S,
+             [Math.min(1, body[0] * 1.06 + 0.02), Math.min(1, body[1] * 1.06 + 0.02),
+              Math.min(1, body[2] * 1.06 + 0.02)]);
+    // side seams, hugging the silhouette instead of standing off it
+    for (const sx of [-1, 1]) {
+      p = P(sx * 0.300, TY, 0);
+      drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.014*S, 0.215*S, 0.022*S, stitchCol);
+    }
+    }
+
     if (o.noCap) {
-      // patient gown: a soft collar and a tie down the front, no staff insignia
-      p = P(0, 0.545, 0.13);
-      drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.185*S, 0.045*S, 0.155*S,
+      // patient gown: collar and front tie
+      p = P(0, TY + 0.215, 0.11);
+      drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.205*S, 0.050*S, 0.165*S,
                rgb(look.trim || "#ffffff"));
-      p = P(0, 0.34, 0.255);
-      drawMesh(MESH.box, p[0], p[1], p[2], ry, 0.016*S, 0.115*S, 0.02*S,
+      p = P(0, TY + 0.085, 0.268);
+      drawMesh(MESH.boxSoft, p[0], p[1], p[2], ry, 0.015*S, 0.058*S, 0.018*S,
                rgb(look.trim || "#ffffff"));
     } else {
-      // chest cross
-      p = P(0, 0.36, 0.24);
-      drawMesh(MESH.box, p[0], p[1], p[2], ry, 0.030*S, 0.085*S, 0.02*S, rgb("#ffffff"));
-      drawMesh(MESH.box, p[0], p[1], p[2], ry, 0.075*S, 0.034*S, 0.02*S, rgb("#ffffff"));
+      // staff badge as a felt appliqué: a stitched patch with a cross on it
+      p = P(0, TY + 0.045, 0.235);
+      drawMesh(MESH.boxSoft, p[0], p[1], p[2], ry, 0.105*S, 0.105*S, 0.028*S,
+               rgb("#fdfdff"));
+      p = P(0, TY + 0.045, 0.262);
+      drawMesh(MESH.boxSoft, p[0], p[1], p[2], ry, 0.028*S, 0.072*S, 0.012*S, rgb("#ff7a86"));
+      drawMesh(MESH.boxSoft, p[0], p[1], p[2], ry, 0.072*S, 0.028*S, 0.012*S, rgb("#ff7a86"));
+      // stitch dots around the patch edge
+      for (const [dx, dy] of _charDetail
+            ? [[-1,-1],[1,-1],[-1,1],[1,1],[0,-1],[0,1],[-1,0],[1,0]] : []) {
+        const q = P(dx * 0.085, TY + 0.045 + dy * 0.085, 0.252);
+        drawMesh(MESH.sphereLo, q[0], q[1], q[2], ry, 0.011*S, 0.011*S, 0.011*S,
+                 rgb("#c9d3de"));
+      }
     }
-    // mitten hands
-    p = P(-0.30, 0.36 + swing * 0.4, 0.10);
-    drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.105*S, 0.105*S, 0.105*S, body);
-    p = P(0.30, 0.36 - swing * 0.4, 0.10);
-    drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.105*S, 0.105*S, 0.105*S, body);
+
+    // --- arms: one tapered plush limb per side, with a paler paw tip -------
+    const pawCol = [Math.min(1, body[0] * 1.12 + 0.04), Math.min(1, body[1] * 1.12 + 0.04),
+                    Math.min(1, body[2] * 1.12 + 0.04)];
+    for (const sx of [-1, 1]) {
+      const sw = sx > 0 ? -swing : swing;
+      const arm = P(sx * 0.320, TY - 0.010 + sw * 0.30, 0.055);
+      drawMesh(MESH.sphere, arm[0], arm[1], arm[2], ry + sx * 0.30,
+               0.125*S, 0.185*S, 0.125*S, body);
+      const paw = P(sx * 0.352, TY - 0.170 + sw * 0.62, 0.080);
+      drawMesh(MESH.sphere, paw[0], paw[1], paw[2], ry,
+               0.108*S, 0.100*S, 0.108*S, pawCol);
+    }
+
+    // --- hang tag at the hip seam: the detail that says "this is a toy" ---
+    if (_charDetail) {
+    const tagA = P(0.225, TY - 0.205, -0.185);
+    drawMesh(MESH.torus, tagA[0], tagA[1], tagA[2], ry + 0.3,
+             0.024*S, 0.024*S, 0.024*S, rgb("#d8d1bf"));
+    const tagB = P(0.225, TY - 0.268, -0.185);
+    drawMesh(MESH.boxSoft, tagB[0], tagB[1], tagB[2], ry + 0.3,
+             0.042*S, 0.048*S, 0.007*S, rgb("#fff8e6"));
+    drawMesh(MESH.boxSoft, tagB[0], tagB[1] + 0.016 * S, tagB[2], ry + 0.3,
+             0.026*S, 0.006*S, 0.004*S, rgb("#c9bda2"));
+    }
   }
 
-  // head
-  const HY = 0.80;
+  // --- head: oversized, the plush proportion ------------------------------
+  const HY = 0.845;
   p = P(0, HY, 0);
   drawMesh(shadowPass ? MESH.sphereLo : MESH.sphere, p[0], p[1], p[2], ry,
-           0.31*S, 0.31*S, 0.31*S, skin);
-  if (shadowPass) return;
+           0.375*S, 0.365*S, 0.365*S, skin);
+  if (shadowPass) { setFuzz(0); return; }
 
-  // eyes: dark bead + specular pip, set into the face
-  for (const sx of [-1, 1]) {
-    p = P(sx * 0.108, HY + 0.035, 0.288);
-    drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.060*S, 0.074*S, 0.052*S, rgb("#33292b"));
-    p = P(sx * 0.128, HY + 0.075, 0.300);
-    drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.026*S, 0.026*S, 0.026*S, rgb("#ffffff"), 0.9);
+  // soft ears, sewn on: cheap geometry, and the single biggest cuteness win
+  // in the whole model — they give the silhouette something to read at range.
+  // Skipped where headwear owns that space: a hijab covers the ears, and the
+  // cat cap's cones stand in for them.
+  const showEars = look.acc !== "hijab" && look.acc !== "catcap";
+  for (const sx of showEars ? [-1, 1] : []) {
+    p = P(sx * 0.335, HY + 0.115, -0.02);
+    drawMesh(MESH.sphere, p[0], p[1], p[2], ry, 0.115*S, 0.125*S, 0.075*S, skin);
+    p = P(sx * 0.345, HY + 0.108, 0.010);
+    drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.062*S, 0.070*S, 0.030*S,
+             rgb("#ffb3c0"));
   }
-  // blush
+
+  // --- face: toy eyes, stitched nose and smile ----------------------------
   for (const sx of [-1, 1]) {
-    p = P(sx * 0.215, HY - 0.055, 0.225);
-    drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.072*S, 0.046*S, 0.032*S, rgb("#ff9aab"));
+    // eye: glossy bead, slightly proud of the face so it catches light
+    p = P(sx * 0.125, HY + 0.030, 0.330);
+    drawMesh(MESH.sphere, p[0], p[1], p[2], ry, 0.072*S, 0.086*S, 0.062*S, rgb("#2b2225"));
+    // the big toy-eye catchlight, and a small secondary one
+    p = P(sx * 0.148, HY + 0.078, 0.352);
+    drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.030*S, 0.030*S, 0.030*S, rgb("#ffffff"), 0.95);
+    if (_charDetail) {
+      p = P(sx * 0.100, HY - 0.004, 0.352);
+      drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.014*S, 0.014*S, 0.014*S, rgb("#ffffff"), 0.8);
+    }
+  }
+  if (_charDetail) {
+    // stitched nose
+    p = P(0, HY - 0.055, 0.362);
+    drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.026*S, 0.020*S, 0.020*S, rgb("#c98a86"));
+    // embroidered smile: three beads in an arc reads as thread
+    for (const [dx, dy] of [[-0.058, -0.108], [0, -0.126], [0.058, -0.108]]) {
+      p = P(dx, HY + dy, 0.348);
+      drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.017*S, 0.014*S, 0.014*S, rgb("#b0716f"));
+    }
+  }
+  // blush: big, soft, unmissable
+  for (const sx of [-1, 1]) {
+    p = P(sx * 0.250, HY - 0.070, 0.268);
+    drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.092*S, 0.058*S, 0.040*S, rgb("#ff9aab"));
   }
 
   // hair
@@ -3496,55 +3613,68 @@ function drawCharacter3D(o) {
   }
 
   if (look.acc === "hijab") {
+    // A face-framing wrap, not a hood. Sized as one enclosing sphere it swallowed
+    // the whole head and only the eye beads poked through, which read as a
+    // balaclava. Built instead from a back-and-top shell, two cheek frames and a
+    // drape under the chin, so the face stays open the way a hijab actually sits.
     const hc = rgb(look.accColor || "#7fd8c8");
-    p = P(0, HY - 0.02, -0.04);
-    drawMesh(MESH.sphere, p[0], p[1], p[2], ry, 0.345*S, 0.345*S, 0.295*S, hc);
-    p = P(0, HY - 0.30, 0.02);
-    drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.20*S, 0.13*S, 0.16*S, hc);
+    p = P(0, HY + 0.015, -0.130);
+    drawMesh(MESH.sphere, p[0], p[1], p[2], ry, 0.408*S, 0.402*S, 0.330*S, hc);
+    for (const sx of [-1, 1]) {
+      p = P(sx * 0.300, HY - 0.070, 0.075);
+      drawMesh(MESH.sphere, p[0], p[1], p[2], ry, 0.125*S, 0.300*S, 0.235*S, hc);
+    }
+    p = P(0, HY + 0.235, 0.060);
+    drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.300*S, 0.135*S, 0.215*S, hc);
+    p = P(0, HY - 0.320, 0.020);
+    drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.235*S, 0.150*S, 0.195*S, hc);
   } else if (look.acc === "beanie") {
     const hc = rgb(look.accColor || "#e8846b");
-    p = P(0, HY + 0.145, -0.01);
-    drawMesh(MESH.dome, p[0], p[1], p[2], ry, 0.330*S, 0.270*S, 0.330*S, hc);
-    p = P(0, HY + 0.115, -0.01);
-    drawMesh(MESH.cyl, p[0], p[1], p[2], ry, 0.342*S, 0.070*S, 0.342*S, hc);
-    p = P(0, HY + 0.415, -0.01);
+    p = P(0, HY + 0.160, -0.01);
+    drawMesh(MESH.dome, p[0], p[1], p[2], ry, 0.392*S, 0.300*S, 0.388*S, hc);
+    p = P(0, HY + 0.125, -0.01);
+    drawMesh(MESH.cyl, p[0], p[1], p[2], ry, 0.404*S, 0.075*S, 0.400*S, hc);
+    p = P(0, HY + 0.470, -0.01);
     drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.075*S, 0.075*S, 0.075*S, hc);
   } else if (look.acc === "headwrap") {
     // gauze wrapped round the head — a patient who has already been seen to
     const hc = rgb("#fbf6ea");
-    p = P(0, HY + 0.075, -0.01);
-    drawMesh(MESH.cyl, p[0], p[1], p[2], ry, 0.330*S, 0.105*S, 0.330*S, hc);
-    p = P(0, HY + 0.175, -0.02);
-    drawMesh(MESH.dome, p[0], p[1], p[2], ry, 0.300*S, 0.170*S, 0.300*S, hc);
+    p = P(0, HY + 0.085, -0.01);
+    drawMesh(MESH.cyl, p[0], p[1], p[2], ry, 0.392*S, 0.115*S, 0.388*S, hc);
+    p = P(0, HY + 0.195, -0.02);
+    drawMesh(MESH.dome, p[0], p[1], p[2], ry, 0.362*S, 0.185*S, 0.358*S, hc);
   } else if (look.acc === "headband") {
-    p = P(0, HY + 0.155, -0.01);
-    drawMesh(MESH.cyl, p[0], p[1], p[2], ry, 0.318*S, 0.055*S, 0.318*S,
+    p = P(0, HY + 0.170, -0.01);
+    drawMesh(MESH.cyl, p[0], p[1], p[2], ry, 0.382*S, 0.060*S, 0.378*S,
              rgb(look.accColor || "#ff8fa8"));
   } else if (o.noCap) {
     // patients are not staff: no scrub cap, hair reads on its own
   } else {
     // scrub cap
     const cap = rgb(o.cap || "#8fd0f0");
-    p = P(0, HY + 0.135, -0.02);
-    drawMesh(MESH.dome, p[0], p[1], p[2], ry, 0.318*S, 0.245*S, 0.318*S, cap);
-    p = P(0, HY + 0.135, -0.02);
-    drawMesh(MESH.cyl, p[0], p[1], p[2], ry, 0.328*S, 0.048*S, 0.328*S, cap);
-    p = P(0, HY + 0.36, 0.0);
+    p = P(0, HY + 0.150, -0.02);
+    drawMesh(MESH.dome, p[0], p[1], p[2], ry, 0.382*S, 0.280*S, 0.378*S, cap);
+    p = P(0, HY + 0.150, -0.02);
+    drawMesh(MESH.cyl, p[0], p[1], p[2], ry, 0.392*S, 0.052*S, 0.388*S, cap);
+    p = P(0, HY + 0.405, 0.0);
     drawMesh(MESH.box, p[0], p[1], p[2], ry, 0.022*S, 0.055*S, 0.03*S, rgb("#ffffff"));
     drawMesh(MESH.box, p[0], p[1], p[2], ry, 0.055*S, 0.022*S, 0.03*S, rgb("#ffffff"));
     if (look.acc === "catcap") {
       for (const sx of [-1, 1]) {
-        p = P(sx * 0.20, HY + 0.42, -0.03);
-        drawMesh(MESH.cone, p[0], p[1], p[2], ry, 0.10*S, 0.17*S, 0.06*S, cap);
+        p = P(sx * 0.235, HY + 0.360, -0.03);
+        drawMesh(MESH.cone, p[0], p[1], p[2], ry, 0.115*S, 0.185*S, 0.075*S, cap);
+        p = P(sx * 0.235, HY + 0.330, 0.02);
+        drawMesh(MESH.cone, p[0], p[1], p[2], ry, 0.062*S, 0.100*S, 0.030*S, rgb("#ffb3c0"));
       }
     }
   }
   if (look.acc === "glasses") {
     for (const sx of [-1, 1]) {
-      p = P(sx * 0.112, HY + 0.045, 0.300);
-      drawMesh(MESH.torus, p[0], p[1], p[2], ry, 0.085*S, 0.085*S, 0.085*S, rgb("#4a4038"));
+      p = P(sx * 0.128, HY + 0.040, 0.330);
+      drawMesh(MESH.torus, p[0], p[1], p[2], ry, 0.098*S, 0.098*S, 0.098*S, rgb("#4a4038"));
     }
   }
+  setFuzz(0);
 }
 
 /* ---------------- item models ---------------- */
@@ -3829,6 +3959,7 @@ function drawNurse3D(nu) {
 /* ---------------- passes ---------------- */
 
 function renderWorld3D(orbit) {
+  setCharDetail(false);
   const gl = GL.gl;
   const world = Game.world;
   if (!world.mesh) world.mesh = buildLevelMesh(world);
@@ -3918,6 +4049,7 @@ function showcaseLanes(world) {
 /** Title backdrop: the ward, slowly orbiting, with a shift on the floor. */
 let _showcase = null;
 function renderShowcase() {
+  setCharDetail(true);
   const gl = GL.gl;
   if (!_showcase) {
     const keep = Game.perksActive;
@@ -3984,6 +4116,7 @@ function renderShowcase() {
 
 /** Six medics on a turntable for the character picker. */
 function renderPortraits() {
+  setCharDetail(true);
   const gl = GL.gl;
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   gl.viewport(0, 0, W, H);
@@ -5136,9 +5269,10 @@ function drawWorldUI(g) {
     const inBed = pt.station && pt.station.type === "bed";
     const wx = (carried ? carrier.x : pt.x) * T2W;
     const wz = (carried ? carrier.y : pt.y) * T2W;
-    // clear of the head, not painted across the face: a standing patient's
-    // crown sits near 1.9 world units at CHAR_SCALE, a tucked one much lower
-    const wy = carried ? 2.35 : (inBed ? bedTopY() + 1.30 : 2.20);
+    // clear of the head, not painted across it. The plush rebuild grew the head,
+    // so a standing patient's crown now sits near 2.1 world units at CHAR_SCALE
+    // and the badge has to clear the ears above that.
+    const wy = carried ? 2.72 : (inBed ? bedTopY() + 1.58 : 2.56);
     const s = projectToScreen(wx, wy, wz);
     if (!s) continue;
     drawPatientTag(g, pt, s.x, s.y, carried ? 0.8 : 1);
