@@ -81,19 +81,20 @@ const WAVE_EVERY = 40;                       // sec between ambulances
 const CRIT_AT = 0.28;                        // patience fraction that starts the heart monitor
 
 const PALETTE = {
-  floorA:   "#e9eef3",
-  floorB:   "#e0e7ee",
-  wall:     "#3d4a5c",
-  wallTop:  "#55647a",
-  hud:      "#141c27",
-  hudLine:  "#26374d",
-  text:     "#eaf2ff",
-  dim:      "#8ea3bd",
-  good:     "#4ec97a",
-  warn:     "#f2b134",
-  bad:      "#e4573d",
-  p1:       "#3fb6e8",
-  p2:       "#f2795f",
+  floor:     "#faf3e7",   // warm cream
+  floorSpeck:"#eee3cf",
+  wall:      "#a5dfd2",   // pastel teal blob top
+  wallSide:  "#6db8a7",   // its chunky underside
+  wallLine:  "#59a08f",
+  hud:       "#141c27",
+  hudLine:   "#26374d",
+  text:      "#eaf2ff",
+  dim:       "#8ea3bd",
+  good:      "#57c785",
+  warn:      "#f2b134",
+  bad:       "#e4573d",
+  p1:        "#4fb8e8",
+  p2:        "#ff8f70",
 };
 
 /* ---------------------------------------------------------------------
@@ -126,6 +127,23 @@ function roundRect(ctx, x, y, w, h, r) {
   ctx.arcTo(x + w, y + h, x, y + h, rr);
   ctx.arcTo(x, y + h, x, y, rr);
   ctx.arcTo(x, y, x + w, y, rr);
+  ctx.closePath();
+}
+
+/** Rounded rect with per-corner radii [tl, tr, br, bl] — lets wall blobs
+    round only their convex corners so clusters read as one soft shape. */
+function roundRect4(ctx, x, y, w, h, r) {
+  const [tl, tr, br, bl] = r;
+  ctx.beginPath();
+  ctx.moveTo(x + tl, y);
+  ctx.lineTo(x + w - tr, y);
+  if (tr) ctx.arcTo(x + w, y, x + w, y + tr, tr);
+  ctx.lineTo(x + w, y + h - br);
+  if (br) ctx.arcTo(x + w, y + h, x + w - br, y + h, br);
+  ctx.lineTo(x + bl, y + h);
+  if (bl) ctx.arcTo(x, y + h, x, y + h - bl, bl);
+  ctx.lineTo(x, y + tl);
+  if (tl) ctx.arcTo(x, y, x + tl, y, tl);
   ctx.closePath();
 }
 
@@ -346,14 +364,14 @@ const ITEMS = {
    adjacent tile. `holdsPatient` stations can have a patient placed on them. */
 const STATIONS = {
   bed:       { name: "Bed",            color: "#f7fbff", edge: "#9db6cf", holdsPatient: true },
-  supply:    { name: "Supply Shelf",   color: "#2fb59a", edge: "#1d7d6a", stockMax: 3 },
-  medicine:  { name: "Medicine Cabinet", color: "#3d78d8", edge: "#27508f", stockMax: 3 },
-  xray:      { name: "X-Ray",          color: "#4a5568", edge: "#2d3444", holdsPatient: true },
-  cast:      { name: "Cast Bench",     color: "#c8a86b", edge: "#8d7343" },
-  charger:   { name: "Charging Dock",  color: "#f2b134", edge: "#a97a15" },
-  lab:       { name: "Lab",            color: "#9b5de5", edge: "#6a35a8" },
-  delivery:  { name: "Delivery Door",  color: "#a9743f", edge: "#6f4a26" },
-  defibrack: { name: "Defib Rack",     color: "#e4573d", edge: "#9c3324" }
+  supply:    { name: "Supply Shelf",   color: "#6fd3b4", edge: "#3f9e82", stockMax: 3 },
+  medicine:  { name: "Medicine Cabinet", color: "#7db2f2", edge: "#4a7cc4", stockMax: 3 },
+  xray:      { name: "X-Ray",          color: "#93a3c0", edge: "#5d6c8a", holdsPatient: true },
+  cast:      { name: "Cast Bench",     color: "#eccb92", edge: "#b18d51" },
+  charger:   { name: "Charging Dock",  color: "#ffd166", edge: "#c9942a" },
+  lab:       { name: "Lab",            color: "#c39bf5", edge: "#8a5fd0" },
+  delivery:  { name: "Delivery Door",  color: "#d8a86b", edge: "#9c713a" },
+  defibrack: { name: "Defib Rack",     color: "#ff9a8a", edge: "#cf5f4e" }
 };
 
 /* Ailments.
@@ -1855,7 +1873,7 @@ function initPaints() {
   const v = ctx.createRadialGradient(PLAY_W / 2, PLAY_H / 2, PLAY_H * 0.30,
                                      PLAY_W / 2, PLAY_H / 2, PLAY_H * 0.95);
   v.addColorStop(0, "rgba(0,0,0,0)");
-  v.addColorStop(1, "rgba(6,10,18,0.26)");
+  v.addColorStop(1, "rgba(95,70,45,0.20)");
   Paint.vignette = v;
 
   const hud = ctx.createLinearGradient(0, 0, 0, HUD_H);
@@ -1873,126 +1891,225 @@ initPaints();
 
 /* --- static background bake --------------------------------------------- */
 
-/** Render floor, wall blocks and painted decals once per level. */
+/** Render floor, wall blobs and decor once per level — drawn to read as a
+    soft cartoon emergency room, not a tile grid. */
 function bakeBackground(world) {
   const c = document.createElement("canvas");
   c.width = PLAY_W; c.height = PLAY_H;
   const g = c.getContext("2d");
   const rng = makeRng(world.def.seed ^ 0x9e3779b9);
 
-  const solid = (x, y) => { const cell = cellAt(world, x, y); return !cell || cell.solid; };
   const isWall = (x, y) => { const cell = cellAt(world, x, y); return !cell || (cell.solid && !cell.station); };
 
-  // ---- floor ----
+  // ---- seamless warm floor with soft speckles (no grid lines) ----
+  g.fillStyle = PALETTE.floor;
+  g.fillRect(0, 0, PLAY_W, PLAY_H);
+  for (let i = 0; i < 130; i++) {
+    const fx = rng() * PLAY_W, fy = rng() * PLAY_H;
+    const t = tileOf(fx, fy);
+    if (isWall(t.x, t.y)) continue;
+    g.fillStyle = rng() < 0.5 ? PALETTE.floorSpeck : "#f2e9d8";
+    g.beginPath();
+    g.ellipse(fx, fy, 3 + rng() * 7, 2 + rng() * 4, rng() * 3, 0, 6.283);
+    g.fill();
+  }
+
+  // ---- hospital wayfinding line from the entrance to the exit ----
+  const way = findPath(world, world.entrance, world.exit);
+  if (way.length) {
+    g.save();
+    g.strokeStyle = "rgba(255,143,163,.55)";
+    g.lineWidth = 5;
+    g.lineJoin = "round";
+    g.lineCap = "round";
+    g.beginPath();
+    g.moveTo(world.entrance.x * TILE + TILE / 2, world.entrance.y * TILE + TILE / 2);
+    for (const w2 of way) g.lineTo(w2.x, w2.y);
+    g.stroke();
+    g.strokeStyle = "rgba(255,255,255,.5)";
+    g.lineWidth = 1.6;
+    g.setLineDash([8, 10]);
+    g.stroke();
+    g.setLineDash([]);
+    g.restore();
+  }
+
+  paintZone(g, world.entrance, "#5cb8e6", "IN");
+  paintZone(g, world.exit, "#63cf8e", "OUT");
+
+  // ---- wall blobs: chunky sticker look, rounded only at convex corners ----
+  const R = 11, LIFT = 7;
+  const radii = (x, y) => {
+    const n = isWall(x, y - 1), s2 = isWall(x, y + 1), w2 = isWall(x - 1, y), e2 = isWall(x + 1, y);
+    return [(!n && !w2) ? R : 0, (!n && !e2) ? R : 0, (!s2 && !e2) ? R : 0, (!s2 && !w2) ? R : 0];
+  };
+  // soft cast shadow, then the darker underside, then the pastel top
+  for (const layer of ["shadow", "side", "top"]) {
+    for (let y = 0; y < ROWS; y++) {
+      for (let x = 0; x < COLS; x++) {
+        if (!isWall(x, y)) continue;
+        const px = x * TILE, py = y * TILE;
+        const r = radii(x, y);
+        if (layer === "shadow") {
+          g.fillStyle = "rgba(120,105,80,.18)";
+          roundRect4(g, px - 1, py + 4, TILE + 2, TILE + 4, r); g.fill();
+        } else if (layer === "side") {
+          g.fillStyle = PALETTE.wallSide;
+          roundRect4(g, px, py, TILE, TILE, r); g.fill();
+        } else {
+          g.fillStyle = PALETTE.wall;
+          roundRect4(g, px, py - LIFT, TILE, TILE, r); g.fill();
+        }
+      }
+    }
+  }
+  // gentle highlight along every top-exposed edge
   for (let y = 0; y < ROWS; y++) {
     for (let x = 0; x < COLS; x++) {
-      const cell = world.grid[y][x];
-      if (isWall(x, y)) continue;
-      const px = x * TILE, py = y * TILE;
-      g.fillStyle = ((x + y) & 1) ? PALETTE.floorA : PALETTE.floorB;
-      g.fillRect(px, py, TILE, TILE);
-      // grout
-      g.strokeStyle = "rgba(120,145,170,.16)";
-      g.lineWidth = 1;
-      g.strokeRect(px + .5, py + .5, TILE - 1, TILE - 1);
-      // occasional scuff so the floor is not perfectly uniform
-      if (rng() < 0.07) {
-        g.fillStyle = "rgba(140,160,180,.10)";
-        const rw = 6 + rng() * 12, rh = 3 + rng() * 6;
-        g.beginPath();
-        g.ellipse(px + 8 + rng() * 24, py + 8 + rng() * 24, rw / 2, rh / 2, rng() * 3, 0, 6.283);
-        g.fill();
-      }
-      void cell;
+      if (!isWall(x, y) || isWall(x, y - 1)) continue;
+      const r = radii(x, y);
+      g.fillStyle = "rgba(255,255,255,.30)";
+      roundRect4(g, x * TILE + 3, y * TILE - LIFT + 3, TILE - 6, 6, [r[0] ? 4 : 0, r[1] ? 4 : 0, 3, 3]);
+      g.fill();
     }
   }
 
-  // ---- painted ward markings ----
-  paintCross(g, world);
-  paintZone(g, world.entrance, "#37a8d8", "IN");
-  paintZone(g, world.exit, "#3fbf72", "OUT");
-
-  // ---- wall blocks: base, top face, rim light, cast shadow ----
-  for (let y = 0; y < ROWS; y++) {
-    for (let x = 0; x < COLS; x++) {
-      if (!isWall(x, y)) continue;
-      const px = x * TILE, py = y * TILE;
-      // shadow onto the floor below
-      if (!solid(x, y + 1)) {
-        const sh = g.createLinearGradient(0, py + TILE, 0, py + TILE + 14);
-        sh.addColorStop(0, "rgba(20,30,45,.34)");
-        sh.addColorStop(1, "rgba(20,30,45,0)");
-        g.fillStyle = sh;
-        g.fillRect(px, py + TILE, TILE, 14);
-      }
-      g.fillStyle = PALETTE.wall;
-      g.fillRect(px, py, TILE, TILE);
-      // top face where nothing sits above
-      if (!isWall(x, y - 1)) {
-        g.fillStyle = PALETTE.wallTop;
-        g.fillRect(px, py, TILE, 9);
-        g.fillStyle = "rgba(255,255,255,.10)";
-        g.fillRect(px, py, TILE, 3);
-      }
-      // seams between wall tiles
-      g.strokeStyle = "rgba(0,0,0,.16)";
-      g.lineWidth = 1;
-      if (isWall(x + 1, y)) { g.beginPath(); g.moveTo(px + TILE - .5, py); g.lineTo(px + TILE - .5, py + TILE); g.stroke(); }
-      if (isWall(x, y + 1)) { g.beginPath(); g.moveTo(px, py + TILE - .5); g.lineTo(px + TILE, py + TILE - .5); g.stroke(); }
-      // outer edge darkening
-      g.strokeStyle = "rgba(8,14,22,.45)";
-      if (!isWall(x - 1, y)) { g.beginPath(); g.moveTo(px + .5, py); g.lineTo(px + .5, py + TILE); g.stroke(); }
-      if (!isWall(x + 1, y)) { g.beginPath(); g.moveTo(px + TILE - .5, py); g.lineTo(px + TILE - .5, py + TILE); g.stroke(); }
-      if (!isWall(x, y + 1)) { g.beginPath(); g.moveTo(px, py + TILE - .5); g.lineTo(px + TILE, py + TILE - .5); g.stroke(); }
-    }
-  }
+  bakeDecor(g, world, rng, isWall);
   return c;
 }
 
-/** A faint red cross painted on the floor of the largest open area. */
-function paintCross(g, world) {
-  let best = null, bestScore = -1, bestRoom = 0;
-  for (let y = 2; y < ROWS - 4; y++) {
-    for (let x = 2; x < COLS - 4; x++) {
-      let room = 0;
-      for (let oy = 0; oy < 4; oy++)
-        for (let ox = 0; ox < 4; ox++)
-          if (isWalkable(world, x + ox, y + oy)) room++;
-      // prefer roomy spots, and among equals the one nearest the middle
-      const away = Math.hypot(x + 2 - COLS / 2, y + 2 - ROWS / 2);
-      const score = room * 10 - away;
-      if (score > bestScore) { bestScore = score; bestRoom = room; best = { x, y }; }
+/** Windows, plants, posters and a clock, placed deterministically on the
+    wall blobs so every ward feels furnished. Purely cosmetic. */
+function bakeDecor(g, world, rng, isWall) {
+  const LIFT = 7;
+  const spots = [];
+  for (let y = 0; y < ROWS; y++)
+    for (let x = 0; x < COLS; x++)
+      if (isWall(x, y) && (y === 0 || !isWall(x, y - 1))) spots.push({ x, y, boundary: y === 0 });
+
+  let sinceDecor = 0;
+  for (const sp of spots) {
+    sinceDecor++;
+    const cx = sp.x * TILE + TILE / 2;
+    const cy = sp.y * TILE + TILE / 2 - LIFT + (sp.boundary ? 5 : 0);
+    const roll = rng();
+    if (sp.boundary) {
+      if (sp.x % 5 === 2) drawWindow(g, cx, cy);
+      else if (roll < 0.08) drawClock(g, cx, cy);
+      continue;
     }
+    if (sinceDecor < 3) continue;
+    if (roll < 0.16) { drawPlant(g, cx, cy); sinceDecor = 0; }
+    else if (roll < 0.28) { drawPoster(g, cx, cy, rng); sinceDecor = 0; }
   }
-  if (!best || bestRoom < 16) return;
-  const cx = (best.x + 2) * TILE, cy = (best.y + 2) * TILE;
-  g.save();
-  g.globalAlpha = 0.11;
-  g.fillStyle = "#c0392b";
-  const arm = 22, thick = 26;
-  g.fillRect(cx - thick / 2, cy - arm - thick / 2, thick, arm * 2 + thick);
-  g.fillRect(cx - arm - thick / 2, cy - thick / 2, arm * 2 + thick, thick);
-  g.restore();
+
+  // a big friendly red cross sign over the entrance
+  const e = world.entrance;
+  if (isWall(e.x, e.y - 1)) {
+    const cx = e.x * TILE + TILE / 2, cy = (e.y - 1) * TILE + TILE / 2 - LIFT;
+    g.fillStyle = "#ffffff";
+    roundRect(g, cx - 12, cy - 12, 24, 24, 7); g.fill();
+    g.strokeStyle = "rgba(0,0,0,.12)"; g.lineWidth = 1.5;
+    roundRect(g, cx - 12, cy - 12, 24, 24, 7); g.stroke();
+    g.fillStyle = "#ef5d6b";
+    roundRect(g, cx - 3.5, cy - 9, 7, 18, 2.5); g.fill();
+    roundRect(g, cx - 9, cy - 3.5, 18, 7, 2.5); g.fill();
+  }
+}
+
+function drawWindow(g, cx, cy) {
+  fillRound(g, cx - 13, cy - 11, 26, 22, 7, "#bfe6f7");
+  const sky = g.createLinearGradient(0, cy - 11, 0, cy + 11);
+  sky.addColorStop(0, "#a6ddf5");
+  sky.addColorStop(1, "#d6f0fb");
+  g.fillStyle = sky;
+  roundRect(g, cx - 11, cy - 9, 22, 18, 5); g.fill();
+  g.fillStyle = "#ffffff";                               // a puffy cloud
+  g.beginPath();
+  g.arc(cx - 3, cy + 1, 3.4, 0, 6.283);
+  g.arc(cx + 2, cy - 1, 4.2, 0, 6.283);
+  g.arc(cx + 6, cy + 2, 3, 0, 6.283);
+  g.fill();
+  g.strokeStyle = "#8fc6de"; g.lineWidth = 2;
+  roundRect(g, cx - 13, cy - 11, 26, 22, 7); g.stroke();
+}
+
+function drawPlant(g, cx, cy) {
+  g.fillStyle = "#e8946a";                               // pot
+  roundRect(g, cx - 7, cy + 2, 14, 9, 3); g.fill();
+  g.fillStyle = "#d17c50";
+  roundRect(g, cx - 8, cy, 16, 4, 2); g.fill();
+  g.fillStyle = "#7fce8f";                               // leaves
+  for (const [ox, oy, r] of [[-5, -6, 5], [5, -5, 5], [0, -10, 5.5], [0, -3, 5]]) {
+    g.beginPath(); g.arc(cx + ox, cy + oy, r, 0, 6.283); g.fill();
+  }
+  g.fillStyle = "#a4e0ae";
+  g.beginPath(); g.arc(cx - 2, cy - 8, 2.6, 0, 6.283); g.fill();
+}
+
+function drawPoster(g, cx, cy, rng) {
+  const kind = Math.floor(rng() * 3);
+  fillRound(g, cx - 10, cy - 12, 20, 24, 3, "#fffdf6");
+  g.strokeStyle = "rgba(90,110,120,.5)"; g.lineWidth = 1.5;
+  roundRect(g, cx - 10, cy - 12, 20, 24, 3); g.stroke();
+  if (kind === 0) {                                      // heart chart
+    g.strokeStyle = "#ef5d6b"; g.lineWidth = 1.8; g.lineJoin = "round";
+    g.beginPath();
+    g.moveTo(cx - 7, cy); g.lineTo(cx - 3, cy); g.lineTo(cx - 1, cy - 5);
+    g.lineTo(cx + 1, cy + 4); g.lineTo(cx + 3, cy); g.lineTo(cx + 7, cy);
+    g.stroke();
+  } else if (kind === 1) {                               // smiley face
+    g.fillStyle = "#ffd166";
+    g.beginPath(); g.arc(cx, cy - 2, 6, 0, 6.283); g.fill();
+    g.fillStyle = "#5a4a2a";
+    g.beginPath(); g.arc(cx - 2.2, cy - 3.5, 1, 0, 6.283); g.fill();
+    g.beginPath(); g.arc(cx + 2.2, cy - 3.5, 1, 0, 6.283); g.fill();
+    g.strokeStyle = "#5a4a2a"; g.lineWidth = 1.2;
+    g.beginPath(); g.arc(cx, cy - 1.5, 3, 0.4, Math.PI - 0.4); g.stroke();
+    g.fillStyle = "#8aa4b8";
+    g.fillRect(cx - 6, cy + 6, 12, 1.6);
+  } else {                                               // wash your paws
+    g.fillStyle = "#7db2f2";
+    g.beginPath(); g.arc(cx, cy - 3, 4.5, 0, 6.283); g.fill();
+    g.beginPath();
+    g.moveTo(cx, cy - 12); g.lineTo(cx - 4.4, cy - 4); g.lineTo(cx + 4.4, cy - 4);
+    g.closePath(); g.fill();
+    g.fillStyle = "#8aa4b8";
+    g.fillRect(cx - 6, cy + 4, 12, 1.6);
+    g.fillRect(cx - 4, cy + 7, 8, 1.6);
+  }
+}
+
+function drawClock(g, cx, cy) {
+  g.fillStyle = "#ffffff";
+  g.beginPath(); g.arc(cx, cy, 9, 0, 6.283); g.fill();
+  g.strokeStyle = "#7a8b99"; g.lineWidth = 2;
+  g.beginPath(); g.arc(cx, cy, 9, 0, 6.283); g.stroke();
+  g.strokeStyle = "#4a5a68"; g.lineWidth = 1.6; g.lineCap = "round";
+  g.beginPath(); g.moveTo(cx, cy); g.lineTo(cx, cy - 5.5); g.stroke();
+  g.beginPath(); g.moveTo(cx, cy); g.lineTo(cx + 4, cy + 1.5); g.stroke();
 }
 
 function paintZone(g, tile, color, label) {
   const x = tile.x * TILE, y = tile.y * TILE;
+  // a soft rounded doormat
+  fillRound(g, x + 2, y + 2, TILE - 4, TILE - 4, 10, color);
   g.save();
-  g.globalAlpha = 0.20;
-  g.fillStyle = color;
-  g.fillRect(x, y, TILE, TILE);
+  g.globalAlpha = 0.35;
+  fillRound(g, x + 5, y + 5, TILE - 10, TILE - 10, 8, "#ffffff");
   g.restore();
-  g.strokeStyle = color;
+  g.strokeStyle = "rgba(255,255,255,.85)";
   g.lineWidth = 2;
-  g.setLineDash([6, 4]);
-  g.strokeRect(x + 3.5, y + 3.5, TILE - 7, TILE - 7);
+  g.setLineDash([5, 5]);
+  roundRect(g, x + 4.5, y + 4.5, TILE - 9, TILE - 9, 8);
+  g.stroke();
   g.setLineDash([]);
-  g.font = 'bold 11px "Trebuchet MS", "Segoe UI", sans-serif';
+  g.font = 'bold 12px "Trebuchet MS", "Segoe UI", sans-serif';
   g.textAlign = "center";
-  g.fillStyle = color;
-  g.globalAlpha = 0.95;
+  g.fillStyle = "#ffffff";
+  g.strokeStyle = "rgba(0,60,40,.35)"; g.lineWidth = 3; g.lineJoin = "round";
+  g.strokeText(label, x + TILE / 2, y + TILE / 2 + 4);
   g.fillText(label, x + TILE / 2, y + TILE / 2 + 4);
-  g.globalAlpha = 1;
 }
 
 /* --- icons -------------------------------------------------------------- */
@@ -2168,14 +2285,14 @@ function machineBody(g, x, y, w, h, top, bottom, edge) {
   const gr = g.createLinearGradient(0, y, 0, y + h);
   gr.addColorStop(0, top);
   gr.addColorStop(1, bottom);
-  g.fillStyle = "rgba(18,28,42,.30)";
-  roundRect(g, x + 2, y + 5, w, h, 7); g.fill();          // drop shadow
+  g.fillStyle = "rgba(120,95,70,.22)";
+  roundRect(g, x + 2, y + 5, w, h, 11); g.fill();         // soft drop shadow
   g.fillStyle = gr;
-  roundRect(g, x, y, w, h, 7); g.fill();
-  g.strokeStyle = edge; g.lineWidth = 2;
-  roundRect(g, x, y, w, h, 7); g.stroke();
-  g.fillStyle = "rgba(255,255,255,.22)";
-  roundRect(g, x + 3, y + 3, w - 6, 5, 3); g.fill();      // top highlight
+  roundRect(g, x, y, w, h, 11); g.fill();
+  g.strokeStyle = edge; g.lineWidth = 2.2;
+  roundRect(g, x, y, w, h, 11); g.stroke();
+  g.fillStyle = "rgba(255,255,255,.30)";
+  roundRect(g, x + 4, y + 3, w - 8, 6, 4); g.fill();      // glossy top sheen
 }
 
 function drawStation(g, st) {
@@ -2226,30 +2343,32 @@ function drawStation(g, st) {
 }
 
 function drawBed(g, st, x, y) {
-  g.fillStyle = "rgba(18,28,42,.22)";
-  roundRect(g, x + 4, y + 8, TILE - 7, TILE - 10, 6); g.fill();
-  // frame
-  fillRound(g, x + 2, y + 3, TILE - 4, TILE - 7, 6, "#f9fcff");
-  g.strokeStyle = st.occupant ? "#6fa9d8" : "#c3d2e0";
+  // soft shadow
+  g.fillStyle = "rgba(120,95,70,.20)";
+  roundRect(g, x + 4, y + 7, TILE - 6, TILE - 9, 9); g.fill();
+  // plush frame
+  fillRound(g, x + 2, y + 2, TILE - 4, TILE - 6, 9, "#ffffff");
+  g.strokeStyle = st.occupant ? "#7fb3e8" : "#e3d5c4";
   g.lineWidth = 2;
-  roundRect(g, x + 2, y + 3, TILE - 4, TILE - 7, 6); g.stroke();
-  // mattress + pillow
-  const m = g.createLinearGradient(0, y + 6, 0, y + TILE - 5);
-  m.addColorStop(0, "#eaf3fb");
-  m.addColorStop(1, "#d4e5f4");
-  g.fillStyle = m;
-  roundRect(g, x + 5, y + 6, TILE - 10, TILE - 12, 4); g.fill();
-  g.fillStyle = "#ffffff";
-  roundRect(g, x + 7, y + 7, TILE - 14, 8, 3); g.fill();
-  // folded blanket
-  g.fillStyle = "#8fbde4";
-  roundRect(g, x + 5, y + TILE - 17, TILE - 10, 10, 3); g.fill();
-  g.strokeStyle = "rgba(255,255,255,.55)"; g.lineWidth = 1;
-  g.beginPath(); g.moveTo(x + 6, y + TILE - 13.5); g.lineTo(x + TILE - 6, y + TILE - 13.5); g.stroke();
-  // side rails
-  g.strokeStyle = "rgba(120,150,180,.55)"; g.lineWidth = 1.5;
-  g.beginPath(); g.moveTo(x + 3.5, y + 12); g.lineTo(x + 3.5, y + TILE - 12); g.stroke();
-  g.beginPath(); g.moveTo(x + TILE - 3.5, y + 12); g.lineTo(x + TILE - 3.5, y + TILE - 12); g.stroke();
+  roundRect(g, x + 2, y + 2, TILE - 4, TILE - 6, 9); g.stroke();
+  // big fluffy pillow
+  fillRound(g, x + 6, y + 5, TILE - 12, 10, 5, "#fdf8ef");
+  g.strokeStyle = "#e8dcc8"; g.lineWidth = 1.2;
+  roundRect(g, x + 6, y + 5, TILE - 12, 10, 5); g.stroke();
+  // pastel blanket with a stitched edge and a heart
+  const blanket = st.occupant ? "#ffc9d6" : "#c9e6ff";
+  fillRound(g, x + 4, y + 16, TILE - 8, TILE - 22, 6, blanket);
+  g.strokeStyle = "rgba(255,255,255,.85)"; g.lineWidth = 1.4;
+  g.setLineDash([3, 3]);
+  roundRect(g, x + 6.5, y + 18.5, TILE - 13, TILE - 27, 4); g.stroke();
+  g.setLineDash([]);
+  const hx = x + TILE / 2, hy = y + TILE - 12;
+  g.fillStyle = st.occupant ? "#ff8fa8" : "#8fbfe8";
+  g.beginPath();
+  g.moveTo(hx, hy + 3.4);
+  g.bezierCurveTo(hx - 5.5, hy - 1, hx - 2.6, hy - 5, hx, hy - 1.6);
+  g.bezierCurveTo(hx + 2.6, hy - 5, hx + 5.5, hy - 1, hx, hy + 3.4);
+  g.fill();
 }
 
 /** Lighten / darken a hex colour. */
@@ -2279,7 +2398,7 @@ function drawStationGlyph(g, st, cx, cy) {
       roundRect(g, -10, -3.5, 20, 7, 2); g.fill();
       break;
     case "xray":
-      g.fillStyle = "#1d2534";
+      g.fillStyle = "#46557a";
       roundRect(g, -13, -12, 26, 20, 3); g.fill();
       g.fillStyle = "#9fd8ff";
       g.globalAlpha = 0.85;
@@ -2343,54 +2462,93 @@ function drawStationGlyph(g, st, cx, cy) {
 /* --- entities ----------------------------------------------------------- */
 
 /** Shared rounded-body character with a walk cycle. */
+/** Chibi body: a soft egg-shaped tummy, stubby feet and mitten arms.
+    The head (drawFace) sits big on top — plush-toy proportions. */
 function drawBody(g, opts) {
   const { bodyColor, edgeColor, legColor, step, facing, moving } = opts;
-  const swing = moving ? Math.sin(step) * 4 : 0;
-  // legs
+  const swing = moving ? Math.sin(step) * 3.5 : 0;
+  // stubby feet
   g.fillStyle = legColor;
-  roundRect(g, -7, 7 + Math.max(0, swing), 5.5, 8 - Math.abs(swing) * .3, 2); g.fill();
-  roundRect(g, 1.5, 7 + Math.max(0, -swing), 5.5, 8 - Math.abs(swing) * .3, 2); g.fill();
-  // torso
-  const gr = g.createLinearGradient(0, -9, 0, 11);
-  gr.addColorStop(0, shade(bodyColor, 1.16));
-  gr.addColorStop(1, shade(bodyColor, 0.86));
+  g.beginPath(); g.ellipse(-5.5, 13.8 + Math.max(0, swing) * .5, 4.5, 3.1, 0, 0, 6.283); g.fill();
+  g.beginPath(); g.ellipse(5.5, 13.8 + Math.max(0, -swing) * .5, 4.5, 3.1, 0, 0, 6.283); g.fill();
+  g.strokeStyle = shade(legColor, 0.72); g.lineWidth = 1;
+  g.beginPath(); g.ellipse(-5.5, 13.8 + Math.max(0, swing) * .5, 4.5, 3.1, 0, 0, 6.283); g.stroke();
+  g.beginPath(); g.ellipse(5.5, 13.8 + Math.max(0, -swing) * .5, 4.5, 3.1, 0, 0, 6.283); g.stroke();
+  // round tummy
+  const gr = g.createLinearGradient(0, -6, 0, 15);
+  gr.addColorStop(0, shade(bodyColor, 1.10));
+  gr.addColorStop(1, shade(bodyColor, 0.90));
   g.fillStyle = gr;
-  roundRect(g, -11, -9, 22, 20, 8); g.fill();
-  g.strokeStyle = edgeColor; g.lineWidth = 1.6;
-  roundRect(g, -11, -9, 22, 20, 8); g.stroke();
-  // arms follow the facing direction, counter-swinging
-  g.fillStyle = shade(bodyColor, 0.94);
-  const ax = facing.x * 8, ay = facing.y * 6;
-  g.beginPath(); g.arc(-9.5 + ax, 2 + ay - swing * .5, 4.2, 0, 6.283); g.fill();
-  g.beginPath(); g.arc(9.5 + ax, 2 + ay + swing * .5, 4.2, 0, 6.283); g.fill();
-  g.strokeStyle = edgeColor; g.lineWidth = 1.2;
-  g.beginPath(); g.arc(-9.5 + ax, 2 + ay - swing * .5, 4.2, 0, 6.283); g.stroke();
-  g.beginPath(); g.arc(9.5 + ax, 2 + ay + swing * .5, 4.2, 0, 6.283); g.stroke();
+  g.beginPath(); g.ellipse(0, 5, 12.5, 10.5, 0, 0, 6.283); g.fill();
+  g.strokeStyle = edgeColor; g.lineWidth = 1.8;
+  g.beginPath(); g.ellipse(0, 5, 12.5, 10.5, 0, 0, 6.283); g.stroke();
+  // belly sheen
+  g.fillStyle = "rgba(255,255,255,.22)";
+  g.beginPath(); g.ellipse(-3.5, 1.5, 5, 3.4, -0.4, 0, 6.283); g.fill();
+  // mitten arms that reach toward the facing direction
+  const ax = facing.x * 6.5, ay = facing.y * 4.5;
+  g.fillStyle = shade(bodyColor, 1.04);
+  g.strokeStyle = edgeColor; g.lineWidth = 1.4;
+  g.beginPath(); g.arc(-11 + ax, 4 + ay - swing * .5, 4.4, 0, 6.283); g.fill(); g.stroke();
+  g.beginPath(); g.arc(11 + ax, 4 + ay + swing * .5, 4.4, 0, 6.283); g.fill(); g.stroke();
 }
 
+/** Big round chibi head: glossy tear-drop eyes, rosy blush, tiny mouth.
+    mood 1 = beaming (closed happy eyes); low mood = worried brows. */
 function drawFace(g, opts) {
   const { facing, blink, mood, skin } = opts;
+  const HY = -15, HR = 13.5;
   g.fillStyle = skin;
-  g.beginPath(); g.arc(0, -16, 9, 0, 6.283); g.fill();
-  g.strokeStyle = "rgba(90,60,40,.35)"; g.lineWidth = 1.2;
-  g.beginPath(); g.arc(0, -16, 9, 0, 6.283); g.stroke();
-  const ex = facing.x * 2.4, ey = facing.y * 1.8;
-  g.fillStyle = "#33302e";
-  if (blink) {
-    g.fillRect(-4.6 + ex, -15.6 + ey, 3, 1.3);
-    g.fillRect(1.6 + ex, -15.6 + ey, 3, 1.3);
+  g.beginPath(); g.arc(0, HY, HR, 0, 6.283); g.fill();
+  g.strokeStyle = "rgba(150,100,75,.45)"; g.lineWidth = 1.6;
+  g.beginPath(); g.arc(0, HY, HR, 0, 6.283); g.stroke();
+
+  const ex = facing.x * 2.6, ey = facing.y * 1.8;
+  const happy = mood !== undefined && mood >= 0.999;
+
+  if (happy) {
+    // beaming: closed arched eyes ( ^ ^ )
+    g.strokeStyle = "#4a3b32"; g.lineWidth = 2; g.lineCap = "round";
+    g.beginPath(); g.arc(-4.6, HY + 2, 2.8, Math.PI + 0.4, -0.4); g.stroke();
+    g.beginPath(); g.arc(4.6, HY + 2, 2.8, Math.PI + 0.4, -0.4); g.stroke();
+  } else if (blink) {
+    g.strokeStyle = "#4a3b32"; g.lineWidth = 1.8; g.lineCap = "round";
+    g.beginPath(); g.moveTo(-6.8 + ex, HY + 1.5 + ey); g.lineTo(-2.4 + ex, HY + 1.5 + ey); g.stroke();
+    g.beginPath(); g.moveTo(2.4 + ex, HY + 1.5 + ey); g.lineTo(6.8 + ex, HY + 1.5 + ey); g.stroke();
   } else {
-    g.beginPath(); g.arc(-3.1 + ex, -15 + ey, 1.6, 0, 6.283); g.fill();
-    g.beginPath(); g.arc(3.1 + ex, -15 + ey, 1.6, 0, 6.283); g.fill();
+    // glossy plush eyes: dark drop + big highlight + tiny sparkle
+    for (const sx of [-1, 1]) {
+      const cx = sx * 4.6 + ex, cy = HY + 1.5 + ey;
+      g.fillStyle = "#3d3230";
+      g.beginPath(); g.ellipse(cx, cy, 2.9, 3.8, 0, 0, 6.283); g.fill();
+      g.fillStyle = "#ffffff";
+      g.beginPath(); g.arc(cx - 1, cy - 1.4, 1.25, 0, 6.283); g.fill();
+      g.beginPath(); g.arc(cx + 0.9, cy + 1.1, 0.55, 0, 6.283); g.fill();
+    }
+    // worried brows when things are getting scary
+    if (mood !== undefined && mood < 0.3) {
+      g.strokeStyle = "#8a6a52"; g.lineWidth = 1.5; g.lineCap = "round";
+      g.beginPath(); g.moveTo(-7 + ex, HY - 4.5); g.lineTo(-2.8 + ex, HY - 3); g.stroke();
+      g.beginPath(); g.moveTo(7 + ex, HY - 4.5); g.lineTo(2.8 + ex, HY - 3); g.stroke();
+    }
   }
-  if (mood !== undefined) {
-    g.strokeStyle = "#9c6a55"; g.lineWidth = 1.3; g.lineCap = "round";
-    g.beginPath();
-    if (mood > 0.55) g.arc(0, -12.4, 3, 0.25, Math.PI - 0.25);            // content
-    else if (mood > 0.3) { g.moveTo(-2.6, -11.4); g.lineTo(2.6, -11.4); } // flat
-    else g.arc(0, -9.6, 3, Math.PI + 0.3, -0.3);                          // worried
-    g.stroke();
+
+  // rosy blush
+  g.fillStyle = "rgba(255,125,140,.32)";
+  g.beginPath(); g.ellipse(-8.2 + ex * .5, HY + 5.5, 2.9, 1.9, 0, 0, 6.283); g.fill();
+  g.beginPath(); g.ellipse(8.2 + ex * .5, HY + 5.5, 2.9, 1.9, 0, 0, 6.283); g.fill();
+
+  // tiny mouth
+  g.strokeStyle = "#a56a55"; g.lineWidth = 1.4; g.lineCap = "round";
+  g.beginPath();
+  if (happy) {
+    g.arc(0 + ex * .5, HY + 6, 3.4, 0.25, Math.PI - 0.25);
+  } else if (mood !== undefined && mood < 0.3) {
+    g.arc(0 + ex * .5, HY + 9.5, 2.4, Math.PI + 0.35, -0.35);   // small worried o
+  } else {
+    g.arc(0 + ex * .5, HY + 6, 2.2, 0.35, Math.PI - 0.35);      // soft smile
   }
+  g.stroke();
 }
 
 function drawPatient(g, pt, x, y, scale) {
@@ -2404,8 +2562,8 @@ function drawPatient(g, pt, x, y, scale) {
   g.translate(x, y + bobY);
   g.scale(s, s);
 
-  g.fillStyle = "rgba(20,32,48,.20)";
-  g.beginPath(); g.ellipse(0, 16, 12, 4.5, 0, 0, 6.283); g.fill();
+  g.fillStyle = "rgba(120,95,70,.22)";
+  g.beginPath(); g.ellipse(0, 16.5, 13, 4.5, 0, 0, 6.283); g.fill();
 
   if (pt.flash > 0) {
     g.save(); g.globalAlpha = clamp(pt.flash * 1.8, 0, .75);
@@ -2426,18 +2584,19 @@ function drawPatient(g, pt, x, y, scale) {
     legColor: "#c9d4e0",
     step: pt.bob * 1.6, facing: { x: 0, y: 1 }, moving: pt.state === "walking"
   });
-  // gown ties
-  g.strokeStyle = "rgba(150,170,195,.8)"; g.lineWidth = 1;
-  g.beginPath(); g.moveTo(-5, -4); g.lineTo(5, -4); g.stroke();
-
   const blink = ((performance.now() / 1000 + pt.id * 1.7) % 4.2) < 0.12;
   drawFace(g, {
     facing: { x: 0, y: 0.4 }, blink, mood: pt.done ? 1 : frac,
-    skin: pt.done ? "#f6d3ac" : (panic ? "#f3c39c" : "#f2c9a0")
+    skin: pt.done ? "#ffddb8" : (panic ? "#f8cba2" : "#fbd4a8")
   });
-  // hair
-  g.fillStyle = "#5b4635";
-  g.beginPath(); g.arc(0, -18, 9, Math.PI, 0); g.fill();
+  // fluffy mop of hair with a cowlick — varies a little per patient
+  const hairCol = ["#6b5140", "#3f3833", "#8a5a33", "#54646e"][pt.id % 4];
+  g.fillStyle = hairCol;
+  g.beginPath(); g.arc(0, -17.5, 13.6, Math.PI + 0.15, -0.15); g.fill();
+  g.beginPath(); g.arc(-7, -24, 4.4, 0, 6.283); g.fill();
+  g.beginPath(); g.arc(7, -24, 4.4, 0, 6.283); g.fill();
+  g.strokeStyle = hairCol; g.lineWidth = 2; g.lineCap = "round";
+  g.beginPath(); g.moveTo(1, -28.5); g.quadraticCurveTo(4, -33, 7.5, -31.5); g.stroke();
 
   if (panic) {                                   // sweat beads
     g.fillStyle = "rgba(140,205,255,.95)";
@@ -2450,7 +2609,7 @@ function drawPatient(g, pt, x, y, scale) {
   g.restore();
 
   // ailment badge
-  const badgeY = y - 34;
+  const badgeY = y - 44;
   const a2 = AILMENTS[pt.ailment];
   g.fillStyle = "rgba(18,28,42,.28)";
   g.beginPath(); g.arc(x + 1, badgeY + 2, 12.5, 0, 6.283); g.fill();
@@ -2503,7 +2662,7 @@ function drawPatient(g, pt, x, y, scale) {
     }
   }
 
-  drawMeter(g, x - 17, y + 19, 34, 5, frac, pt.done);
+  drawMeter(g, x - 17, y + 22, 34, 5, frac, pt.done);
 
   // step pips
   const n = pt.steps.length;
@@ -2511,7 +2670,7 @@ function drawPatient(g, pt, x, y, scale) {
     for (let i = 0; i < n; i++) {
       g.fillStyle = i < pt.step ? PALETTE.good : "rgba(255,255,255,.65)";
       g.strokeStyle = "rgba(28,40,58,.75)"; g.lineWidth = 1;
-      g.beginPath(); g.arc(x - (n - 1) * 4.5 + i * 9, y + 29, 3, 0, 6.283); g.fill(); g.stroke();
+      g.beginPath(); g.arc(x - (n - 1) * 4.5 + i * 9, y + 32, 3, 0, 6.283); g.fill(); g.stroke();
     }
   }
 
@@ -2556,8 +2715,8 @@ function drawPlayer(g, p) {
     g.restore();
   }
 
-  g.fillStyle = "rgba(20,32,48,.22)";
-  g.beginPath(); g.ellipse(p.x, p.y + 16, 13, 5, 0, 0, 6.283); g.fill();
+  g.fillStyle = "rgba(120,95,70,.24)";
+  g.beginPath(); g.ellipse(p.x, p.y + 17, 13.5, 5, 0, 0, 6.283); g.fill();
 
   g.save();
   g.translate(x, y);
@@ -2573,66 +2732,65 @@ function drawPlayer(g, p) {
     step: p.step || 0, facing, moving
   });
 
-  // v-neck
-  g.fillStyle = "rgba(255,255,255,.78)";
-  g.beginPath(); g.moveTo(-5, -9); g.lineTo(0, -1.5); g.lineTo(5, -9); g.closePath(); g.fill();
+  // little white cross badge on the tummy
+  g.fillStyle = "rgba(255,255,255,.92)";
+  roundRect(g, -1.8, 2, 3.6, 9, 1.4); g.fill();
+  roundRect(g, -4.5, 4.7, 9, 3.6, 1.4); g.fill();
 
   const blink = ((performance.now() / 1000 + p.index * 2.3) % 4.6) < 0.12;
-  drawFace(g, { facing, blink, skin: "#f7d3ad" });
+  drawFace(g, { facing, blink, skin: "#ffdcb8" });
 
-  // scrub cap
-  g.fillStyle = shade(p.color, 1.05);
-  g.beginPath(); g.arc(0, -18, 9.2, Math.PI, 0); g.fill();
-  g.fillStyle = shade(p.color, 0.9);
-  roundRect(g, -9.4, -19.5, 18.8, 3.4, 1.5); g.fill();
-  // surgical mask
-  g.fillStyle = "rgba(255,255,255,.92)";
-  roundRect(g, -5.4 + facing.x * 2.2, -12.6 + facing.y * 1.6, 10.8, 5.2, 2); g.fill();
-  g.strokeStyle = "rgba(160,180,200,.9)"; g.lineWidth = 0.9;
-  roundRect(g, -5.4 + facing.x * 2.2, -12.6 + facing.y * 1.6, 10.8, 5.2, 2); g.stroke();
+  // scrub cap snug over the big head, with a tiny cross on the front
+  g.fillStyle = shade(p.color, 1.06);
+  g.beginPath(); g.arc(0, -16.5, 13.7, Math.PI + 0.12, -0.12); g.fill();
+  g.fillStyle = shade(p.color, 0.88);
+  roundRect(g, -13.4, -19.4, 26.8, 4, 2); g.fill();
+  g.fillStyle = "rgba(255,255,255,.9)";
+  roundRect(g, -1.2, -27.5, 2.4, 6, 1); g.fill();
+  roundRect(g, -3, -25.7, 6, 2.4, 1); g.fill();
 
-  // player tag
-  g.fillStyle = "rgba(10,18,28,.55)";
-  roundRect(g, -8, 0.5, 16, 9, 3); g.fill();
-  text(g, "P" + (p.index + 1), 0, 7.6, 8.5, "rgba(255,255,255,.95)", "center");
+  // player tag under the feet
+  g.fillStyle = "rgba(10,18,28,.5)";
+  roundRect(g, -8, 15.5, 16, 9, 4); g.fill();
+  text(g, "P" + (p.index + 1), 0, 22.6, 8.5, "rgba(255,255,255,.95)", "center");
   g.restore();
 
   // stamina, only while it matters
   if (p.stamina !== undefined && p.stamina < STAMINA_MAX - 0.02) {
     const f = clamp(p.stamina / STAMINA_MAX, 0, 1);
     g.fillStyle = "rgba(14,22,34,.7)";
-    roundRect(g, x - 13, y + 20, 26, 4, 2); g.fill();
+    roundRect(g, x - 13, y + 27, 26, 4, 2); g.fill();
     g.fillStyle = f > 0.25 ? "#8be9ff" : "#ff9a6a";
-    roundRect(g, x - 12, y + 21, 24 * f, 2, 1); g.fill();
+    roundRect(g, x - 12, y + 28, 24 * f, 2, 1); g.fill();
   }
 
   // carried patient / item
   if (p.patient) {
     g.save();
-    g.translate(x, y - 42);
+    g.translate(x, y - 50);
     g.scale(0.76, 0.76);
     drawPatient(g, p.patient, 0, 0, 1);
     g.restore();
   } else if (p.item) {
     g.save();
     g.globalAlpha = .22; g.fillStyle = "#000";
-    g.beginPath(); g.ellipse(x, y - 25, 12, 4, 0, 0, 6.283); g.fill();
+    g.beginPath(); g.ellipse(x, y - 31, 12, 4, 0, 0, 6.283); g.fill();
     g.restore();
     const lift = Math.sin(p.bob * 0.6) * 1.2;
-    drawItemIcon(g, p.item.type, x, y - 33 + lift, 11);
+    drawItemIcon(g, p.item.type, x, y - 40 + lift, 11);
     if (p.item.type === "defib_charged") {
       const f = clamp(p.item.charge / DEFIB_CHARGE_LIFE, 0, 1);
-      drawMeter(g, x - 15, y - 48, 30, 4, f);
+      drawMeter(g, x - 15, y - 55, 30, 4, f);
     }
     if (p.item.type === "sample") {
-      text(g, "#" + (p.item.pid % 100), x + 15, y - 31, 10, "#ffd0d0", "left");
+      text(g, "#" + (p.item.pid % 100), x + 15, y - 38, 10, "#ffd0d0", "left");
     }
   }
 
   // work progress / hint / contextual prompts
   if (p.work) {
     const f = clamp(p.work.t / p.work.dur, 0, 1);
-    const bx = x - 26, by = y + 24;
+    const bx = x - 26, by = y + 33;
     g.fillStyle = "rgba(14,22,34,.82)";
     roundRect(g, bx - 2, by - 2, 56, 11, 4); g.fill();
     const gr = g.createLinearGradient(bx, 0, bx + 52, 0);
@@ -2644,11 +2802,11 @@ function drawPlayer(g, p) {
   } else if (p.hintT > 0) {
     g.save();
     g.globalAlpha = clamp(p.hintT, 0, 1);
-    labelPill(g, p.hint, x, y + 22, "#ffd9a0");
+    labelPill(g, p.hint, x, y + 30, "#ffd9a0");
     g.restore();
   } else if (p.promptE || p.promptQ) {
     const keys = p.index === 0 ? ["E", "Q"] : ["/", "."];
-    let py2 = y + 24;
+    let py2 = y + 30;
     if (p.promptQ) { promptPill(g, keys[1], p.promptQ, x, py2, "#ffe28a"); py2 += 17; }
     if (p.promptE) promptPill(g, keys[0], p.promptE, x, py2, "#a8dcff");
   }
@@ -2832,8 +2990,8 @@ function drawStar(g, x, y, r, color) {
 }
 
 const CHAIN_COLORS = {
-  supply: "#2fb59a", medicine: "#3d78d8", xray: "#4a5568", cast: "#c8a86b",
-  charger: "#f2b134", lab: "#9b5de5", defibrack: "#e4573d", bed: "#8fb8dd", "?": "#6b7b90"
+  supply: "#4bb695", medicine: "#5a93d8", xray: "#75849f", cast: "#c9a468",
+  charger: "#dfae3d", lab: "#a678e0", defibrack: "#e87765", bed: "#8fb8dd", "?": "#6b7b90"
 };
 
 function drawLegend(g) {
@@ -2984,15 +3142,15 @@ function drawTitle(g) {
   g.restore();
 
   const demo = (i, x, dxs) => ({
-    x, y: 690, dx: dxs, dy: 0, bob: performance.now() / 300 + i * 2,
+    x, y: 680, dx: dxs, dy: 0, bob: performance.now() / 300 + i * 2,
     step: performance.now() / 160 + i * 2, moving: true, stamina: STAMINA_MAX,
     color: i === 0 ? PALETTE.p1 : PALETTE.p2, index: i,
     item: null, patient: null, work: null, hintT: 0
   });
   g.save();
-  g.translate(W / 2, 690); g.scale(1.7, 1.7); g.translate(-W / 2, -690);
-  drawPlayer(g, demo(0, W / 2 - 52, 1));
-  drawPlayer(g, demo(1, W / 2 + 52, -1));
+  g.translate(W / 2, 680); g.scale(2.3, 2.3); g.translate(-W / 2, -680);
+  drawPlayer(g, demo(0, W / 2 - 42, 1));
+  drawPlayer(g, demo(1, W / 2 + 42, -1));
   g.restore();
 }
 
@@ -3092,19 +3250,19 @@ function drawLevelCard(g, i, x, y, cardW, cardH) {
   // mini map
   const mw = cardW - 28, mh = mw * (ROWS / COLS);
   const mx = x + 14, my = y + 42;
-  g.fillStyle = "#0a1017";
+  g.fillStyle = "#4e8172";
   roundRect(g, mx - 3, my - 3, mw + 6, mh + 6, 5); g.fill();
   const px = mw / COLS, py = mh / ROWS;
   for (let ty = 0; ty < ROWS; ty++) {
     for (let tx = 0; tx < COLS; tx++) {
       const ch = lvl.map[ty][tx];
       let col;
-      if (ch === "#") col = "#2b3646";
+      if (ch === "#") col = "#63a897";
       else if (ch === "b") col = "#ffffff";
-      else if (ch === "E") col = "#37a8d8";
-      else if (ch === "O") col = "#3fbf72";
+      else if (ch === "E") col = "#5cb8e6";
+      else if (ch === "O") col = "#63cf8e";
       else if (CHAR_TO_STATION[ch]) col = STATIONS[CHAR_TO_STATION[ch]].color;
-      else col = "#151f2b";
+      else col = "#efe6d4";
       g.fillStyle = locked ? "#1c222a" : col;
       g.fillRect(mx + tx * px, my + ty * py, Math.ceil(px), Math.ceil(py));
     }
