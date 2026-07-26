@@ -1059,6 +1059,7 @@ function makePlayer(index, x, y) {
     bob: 0,
     step: 0,              // walk-cycle phase
     hintT: 0, hint: "",
+    boost: null, boostT: 0,
     color: index === 0 ? PALETTE.p1 : PALETTE.p2,
     look: CHARACTERS[Game.chars[index] % CHARACTERS.length],
     ctrl: CONTROLS[index]
@@ -1068,7 +1069,8 @@ function makePlayer(index, x, y) {
 function makePatient(world, ailmentKey, level) {
   const a = AILMENTS[ailmentKey];
   // VIPs appear from level 3 on (and in endless): double points, thinner patience
-  const vip = (Game.levelIndex >= 2 || Game.endless) && Game.rng() < 0.10;
+  let vip = (Game.levelIndex >= 2 || Game.endless) && Game.rng() < 0.10;
+  if (Game.forceVip) { vip = true; Game.forceVip = false; }
   const p = {
     vip,
     id: nextId++,
@@ -1077,8 +1079,8 @@ function makePatient(world, ailmentKey, level) {
     step: 0,
     x: world.entrance.x * TILE + TILE / 2,
     y: world.entrance.y * TILE + TILE / 2,
-    patienceMax: level.patience * a.patienceMul * (vip ? 0.8 : 1),
-    patience: level.patience * a.patienceMul * (vip ? 0.8 : 1),
+    patienceMax: level.patience * a.patienceMul * (vip ? 0.8 : 1) * (Game.diff ? Game.diff.patience : 1),
+    patience: level.patience * a.patienceMul * (vip ? 0.8 : 1) * (Game.diff ? Game.diff.patience : 1),
     state: "walking",     // walking | waiting | carried | bed | station | leaving | gone
     path: [],
     slot: null,
@@ -1090,6 +1092,114 @@ function makePatient(world, ailmentKey, level) {
     flash: 0
   };
   return p;
+}
+
+
+/* ---------------------------------------------------------------------
+   Difficulty, shift challenges, events, achievements and rank.
+   --------------------------------------------------------------------- */
+
+/* Three ways to play the same ward. Casual exists so someone can learn the
+   game without losing a shift; Overtime is the mastery setting and pays for
+   the extra risk with a score multiplier. */
+const DIFFS = [
+  { key: "casual",   name: "Casual",   blurb: "Roomier patience, calmer arrivals, an extra life.",
+    patience: 1.35, spawn: 1.28, lives: 4, scoreMul: 0.80, color: "#6fd3b4" },
+  { key: "standard", name: "Standard", blurb: "The shift as designed.",
+    patience: 1.00, spawn: 1.00, lives: 3, scoreMul: 1.00, color: "#48c3f0" },
+  { key: "overtime", name: "Overtime", blurb: "Thinner patience, faster arrivals, two lives. Pays 1.45x.",
+    patience: 0.80, spawn: 0.84, lives: 2, scoreMul: 1.45, color: "#ff8f70" }
+];
+
+/* Three objectives per ward, checked when the shift ends. They are the reason
+   to come back to a level you have already cleared: a score you have beaten
+   stops motivating, a medal you are missing does not. */
+const CHALLENGES = [
+  [ { k: "noloss" },              { k: "chain", n: 4 },  { k: "treat", n: 14 } ],
+  [ { k: "noloss" },              { k: "perfect", n: 5 },{ k: "treat", n: 12 } ],
+  [ { k: "ailment", a: "cardiac", n: 3 }, { k: "chain", n: 4 }, { k: "maxlives" } ],
+  [ { k: "ailment", a: "mystery", n: 3 }, { k: "perfect", n: 5 }, { k: "treat", n: 12 } ],
+  [ { k: "noloss" },              { k: "chain", n: 5 },  { k: "treat", n: 14 } ],
+  [ { k: "clutch", n: 2 },        { k: "chain", n: 5 },  { k: "treat", n: 11 } ],
+  [ { k: "ailment", a: "cardiac", n: 4 }, { k: "maxlives" }, { k: "treat", n: 12 } ],
+  [ { k: "noloss" },              { k: "perfect", n: 6 },{ k: "treat", n: 13 } ],
+  [ { k: "clutch", n: 3 },        { k: "chain", n: 6 },  { k: "treat", n: 12 } ],
+  [ { k: "maxlives" },            { k: "chain", n: 6 },  { k: "treat", n: 12 } ]
+];
+
+function challengeText(c) {
+  switch (c.k) {
+    case "noloss":   return "Lose nobody";
+    case "maxlives": return "Finish without losing a life";
+    case "chain":    return "Reach a chain of x" + c.n;
+    case "treat":    return "Treat " + c.n + " patients";
+    case "perfect":  return c.n + " perfect discharges";
+    case "clutch":   return c.n + " clutch saves";
+    case "ailment":  return "Treat " + c.n + " " + AILMENTS[c.a].name.toLowerCase() + " cases";
+  }
+  return "?";
+}
+
+function challengeMet(c) {
+  switch (c.k) {
+    case "noloss":   return Game.lost === 0 && Game.treated > 0;
+    case "maxlives": return Game.lives >= Game.livesMax && Game.treated > 0;
+    case "chain":    return Game.bestCombo >= c.n;
+    case "treat":    return Game.treated >= c.n;
+    case "perfect":  return Game.perfects >= c.n;
+    case "clutch":   return Game.clutches >= c.n;
+    case "ailment":  return (Game.byAilment[c.a] || 0) >= c.n;
+  }
+  return false;
+}
+
+/* Shift events. From the third ward on, something happens mid-shift — the
+   point is that a level should not play out the same way twice. */
+const EVENTS = [
+  { key: "ambulance", name: "AMBULANCE INBOUND", sub: "three at once", color: "#ff8f70", dur: 6 },
+  { key: "outbreak",  name: "OUTBREAK",          sub: "infections incoming", color: "#7fd06a", dur: 8 },
+  { key: "flicker",   name: "POWER FLICKER",     sub: "equipment is sluggish", color: "#ffd54a", dur: 13 },
+  { key: "rush",      name: "WALK-IN RUSH",      sub: "the doors keep opening", color: "#8be9ff", dur: 18 },
+  { key: "vip",       name: "VIP ARRIVAL",       sub: "double points, half the patience", color: "#e8b40b", dur: 6 }
+];
+
+const ACHIEVEMENTS = [
+  { key: "first",    name: "First Shift Done",   blurb: "Finish any ward." },
+  { key: "chain5",   name: "In the Zone",        blurb: "Reach a chain of x5." },
+  { key: "chain10",  name: "Unbroken",           blurb: "Reach a chain of x10." },
+  { key: "flawless", name: "Flawless",           blurb: "Finish a ward without losing anyone." },
+  { key: "perfect8", name: "Bedside Manner",     blurb: "Eight perfect discharges in one shift." },
+  { key: "clutch5",  name: "Nick of Time",       blurb: "Five clutch saves in one shift." },
+  { key: "heart",    name: "Heartstarter",       blurb: "Treat 25 cardiac cases." },
+  { key: "sleuth",   name: "Diagnostician",      blurb: "Treat 20 mystery cases." },
+  { key: "stars15",  name: "Rising Star",        blurb: "Earn 15 stars." },
+  { key: "stars30",  name: "Chief of Medicine",  blurb: "Earn 30 stars." },
+  { key: "overtime", name: "Overtime Hero",      blurb: "Three-star a ward on Overtime." },
+  { key: "highfive", name: "Good Team",          blurb: "High-five your partner 10 times." },
+  { key: "century",  name: "Century",            blurb: "Treat 100 patients in total." },
+  { key: "endless5", name: "Long Night",         blurb: "Survive five waves in Endless." }
+];
+
+/** Award an achievement once, with a toast. */
+function unlockAch(key) {
+  if (Game.achievements[key]) return;
+  Game.achievements[key] = true;
+  const a = ACHIEVEMENTS.find(q => q.key === key);
+  Game.toasts.push({ text: a ? a.name : key, t: 0, life: 3.6 });
+  Sound.play("newbest");
+}
+
+/** Checks that can fire mid-shift. */
+function checkLiveAchievements() {
+  if (Game.bestCombo >= 5) unlockAch("chain5");
+  if (Game.bestCombo >= 10) unlockAch("chain10");
+  if (Game.perfects >= 8) unlockAch("perfect8");
+  if (Game.clutches >= 5) unlockAch("clutch5");
+  if (Game.career.cardiac >= 25) unlockAch("heart");
+  if (Game.career.mystery >= 20) unlockAch("sleuth");
+  if (Game.career.treated >= 100) unlockAch("century");
+  if (Game.highFives >= 10) unlockAch("highfive");
+  if (Game.endless && Game.wave >= 5) unlockAch("endless5");
 }
 
 /* ---------------------------------------------------------------------
@@ -1143,7 +1253,25 @@ const Game = {
   banner: null,            // {text, t}
   result: null,
   selectIndex: 0,
-  progress: LEVELS.map(() => ({ best: 0, stars: 0, unlocked: false }))
+  difficulty: 1,           // index into DIFFS
+  livesMax: 3,
+  byAilment: {},           // treated count per ailment, this shift
+  event: null,             // {def, t} — the shift event currently running
+  eventTimer: 0,
+  eventsSeen: [],
+  spawnMul: 1,             // event-driven arrival rate scale
+  workMul: 1,              // event-driven procedure slowdown
+  forceAilment: 0,         // how many upcoming arrivals the outbreak claims
+  forceVip: false,
+  pickups: [],             // coffee / adrenaline on the floor
+  pickupTimer: 0,
+  highFives: 0,
+  highFiveCool: 0,
+  toasts: [],              // achievement pop-ins
+  xp: 0,
+  achievements: {},
+  career: { treated: 0, cardiac: 0, mystery: 0, shifts: 0 },
+  progress: LEVELS.map(() => ({ best: 0, stars: 0, unlocked: false, challenges: [false, false, false] }))
 };
 Game.progress[0].unlocked = true;
 
@@ -1196,6 +1324,9 @@ function startLevel(index) {
   Game.comboWindow = perkActive("charm") ? COMBO_WINDOW + 2.5 : COMBO_WINDOW;
   Game.perfectAt = perkActive("charm") ? 0.60 : PERFECT_AT;
 
+  const D = DIFFS[Game.difficulty] || DIFFS[1];
+  Game.diff = D;
+
   Game.world = makeWorld(def);
   Game.rng = makeRng(def.seed);
   Game.patients = [];
@@ -1207,8 +1338,21 @@ function startLevel(index) {
   Game.score = 0;
   Game.scoreShown = 0;
   Game.critical = 1;
-  Game.lives = 3;
+  Game.livesMax = D.lives;
+  Game.lives = D.lives;
   Game.treated = 0;
+  Game.byAilment = {};
+  Game.event = null;
+  Game.eventTimer = EVENT_FIRST;
+  Game.eventsSeen = [];
+  Game.spawnMul = 1;
+  Game.workMul = 1;
+  Game.forceAilment = 0;
+  Game.forceVip = false;
+  Game.pickups = [];
+  Game.pickupTimer = PICKUP_FIRST;
+  Game.highFiveCool = 0;
+  Game.dim = 0;
   Game.lost = 0;
   Game.combo = 0;
   Game.comboTimer = 0;
@@ -1635,7 +1779,7 @@ function updatePlayer(p, dt) {
   const wantSprint = !!Keys[c.sprint] && moving && p.stamina > 0;
   p.sprinting = wantSprint;
   if (wantSprint) {
-    p.stamina = Math.max(0, p.stamina - dt);
+    if (p.boost !== "adrenaline") p.stamina = Math.max(0, p.stamina - dt);
   } else {
     p.stamina = Math.min(Game.staminaMax, p.stamina + dt * STAMINA_REGEN);
   }
@@ -1646,6 +1790,7 @@ function updatePlayer(p, dt) {
     p.dx = mx; p.dy = my;
     let speed = (p.patient ? SPEED_PATIENT : (p.item ? SPEED_ITEM : SPEED_FREE)) * Game.speedMul;
     if (wantSprint) speed *= p.patient ? SPRINT_MUL_PATIENT : SPRINT_MUL;
+    if (p.boost === "coffee") speed *= 1.30;
     moveWithCollision(world, p, mx * speed * dt, my * speed * dt);
     p.bob += dt * (wantSprint ? 15 : 11);
     p.step += dt * (wantSprint ? 13 : 9);
@@ -1662,7 +1807,8 @@ function updatePlayer(p, dt) {
     if (!job) {
       p.work = null;
     } else if (!p.work || p.work.key !== job.key) {
-      p.work = { key: job.key, t: 0, dur: job.dur, label: job.label, run: job.run, ptId: job.ptId, tick: 0 };
+      p.work = { key: job.key, t: 0, dur: job.dur * Game.workMul, label: job.label,
+                 run: job.run, ptId: job.ptId, tick: 0 };
     } else {
       p.work.run = job.run;                  // keep the closure fresh
       p.work.t += dt;
@@ -1745,9 +1891,14 @@ function dischargePatient(p) {
     Game.clutches++;
   }
 
-  const gained = Math.round(base * mult);
+  const gained = Math.round(base * mult * (Game.diff ? Game.diff.scoreMul : 1));
   Game.score += gained;
   Game.treated++;
+  Game.byAilment[pt.ailment] = (Game.byAilment[pt.ailment] || 0) + 1;
+  Game.career.treated++;
+  if (pt.ailment === "cardiac") Game.career.cardiac++;
+  if (pt.ailment === "mystery") Game.career.mystery++;
+  checkLiveAchievements();
   if (Game.endless && Game.treated % 10 === 0 && Game.lives < 3) {
     Game.lives++;
     popup(pt.x, pt.y - 92, "LIFE RESTORED", "#ff4d6d", true);
@@ -1827,6 +1978,10 @@ const EASE_IN_SECS = 25;                 // opening window with no brutal cases
 
 function chooseAilment() {
   let pool = Game.level.ailments;
+  if (Game.forceAilment > 0 && pool.includes("infection")) {
+    Game.forceAilment--;
+    return "infection";
+  }
   // Ease into the shift: the first arrivals are never cardiac or mystery,
   // so no seed can deal the two hardest chains as an opening hand.
   if (Game.time < EASE_IN_SECS) {
@@ -1844,10 +1999,11 @@ function currentSpawnInterval() {
   const lvl = Game.level;
   if (Game.endless) {
     // asymptotic squeeze: 8.5s at the start, closing on spawnEnd after ~4 min
-    return Math.max(lvl.spawnEnd, lvl.spawnStart - Game.time / 26);
+    return Math.max(lvl.spawnEnd, lvl.spawnStart - Game.time / 26)
+           * (Game.diff ? Game.diff.spawn : 1) * Game.spawnMul;
   }
   const t = clamp(Game.time / lvl.duration, 0, 1);
-  return lerp(lvl.spawnStart, lvl.spawnEnd, t);
+  return lerp(lvl.spawnStart, lvl.spawnEnd, t) * (Game.diff ? Game.diff.spawn : 1) * Game.spawnMul;
 }
 
 /** Ambulances arrive on a rhythm, dumping several patients at once. Gives the
@@ -1919,6 +2075,10 @@ function updateEffects(dt) {
   if (Game.flashGood > 0) Game.flashGood = Math.max(0, Game.flashGood - dt * 2.2);
   for (const st of Game.world.stations) if (st.flash > 0) st.flash -= dt;
   if (Game.banner) { Game.banner.t += dt; if (Game.banner.t > 3.2) Game.banner = null; }
+  for (let i = Game.toasts.length - 1; i >= 0; i--) {
+    Game.toasts[i].t += dt;
+    if (Game.toasts[i].t >= Game.toasts[i].life) Game.toasts.splice(i, 1);
+  }
   if (Game.comboTimer > 0) {
     Game.comboTimer -= dt;
     if (Game.comboTimer <= 0) {
@@ -2043,6 +2203,142 @@ function updateNurse(dt) {
   }
 }
 
+
+/* ---------------------------------------------------------------------
+   Shift events, pickups, and the co-op high five.
+   --------------------------------------------------------------------- */
+
+const EVENT_FIRST = 38;         // sec before the first event can fire
+const EVENT_GAP   = 34;         // and roughly how long between them after
+const PICKUP_FIRST = 26;
+const PICKUP_GAP   = 30;
+
+/** Pick a random open tile with nothing important on it. */
+function randomFreeTile(world) {
+  const cands = [];
+  for (let y = 1; y < ROWS - 1; y++)
+    for (let x = 1; x < COLS - 1; x++) {
+      if (!isWalkable(world, x, y)) continue;
+      if (x === world.entrance.x && y === world.entrance.y) continue;
+      if (x === world.exit.x && y === world.exit.y) continue;
+      cands.push({ x, y });
+    }
+  if (!cands.length) return null;
+  return cands[Math.floor(Game.rng() * cands.length)];
+}
+
+function updateEvents(dt) {
+  // no events on the two tutorial wards — learn the job before it gets weird
+  if (Game.levelIndex < 2 && !Game.endless) return;
+
+  if (Game.event) {
+    Game.event.t += dt;
+    if (Game.event.t >= Game.event.def.dur) {
+      // wind the effects back down
+      Game.spawnMul = 1; Game.workMul = 1; Game.dim = 0;
+      Game.event = null;
+      Game.eventTimer = EVENT_GAP * (0.75 + Game.rng() * 0.6);
+    } else if (Game.event.def.key === "flicker") {
+      // lights stutter for the duration
+      Game.dim = 0.35 + 0.25 * Math.sin(Game.event.t * 11);
+    }
+    return;
+  }
+
+  Game.eventTimer -= dt;
+  if (Game.eventTimer > 0) return;
+  // never fire one in the last stretch — a surprise you cannot answer is
+  // just a punishment
+  if (!Game.endless && Game.time > Game.level.duration - 30) return;
+
+  // prefer an event this shift has not shown yet
+  let pool = EVENTS.filter(e => !Game.eventsSeen.includes(e.key));
+  if (!pool.length) { Game.eventsSeen = []; pool = EVENTS.slice(); }
+  if (!Game.level.ailments.includes("infection"))
+    pool = pool.filter(e => e.key !== "outbreak") ;
+  if (!pool.length) pool = EVENTS.slice();
+  const def = pool[Math.floor(Game.rng() * pool.length)];
+  Game.eventsSeen.push(def.key);
+  Game.event = { def, t: 0 };
+  Game.banner = { text: def.name, sub: def.sub, t: 0, color: def.color };
+  Sound.play("siren");
+  Game.shake = Math.max(Game.shake, 6);
+
+  switch (def.key) {
+    case "ambulance": Game.burst = 3; Game.spawnTimer = Math.min(Game.spawnTimer, 0.6); break;
+    case "outbreak":  Game.forceAilment = 4; Game.spawnTimer = Math.min(Game.spawnTimer, 1.2); break;
+    case "flicker":   Game.workMul = 1.45; break;
+    case "rush":      Game.spawnMul = 0.55; break;
+    case "vip":       Game.forceVip = true; Game.spawnTimer = Math.min(Game.spawnTimer, 1.0); break;
+  }
+}
+
+/* Pickups: a small active-play reward for noticing something on the floor. */
+const PICKUP_KINDS = [
+  { key: "coffee",     name: "COFFEE!",     color: "#c98a5f", dur: 11 },
+  { key: "adrenaline", name: "ADRENALINE!", color: "#ff7ab8", dur: 9 }
+];
+
+function updatePickups(dt) {
+  Game.pickupTimer -= dt;
+  if (Game.pickupTimer <= 0 && Game.pickups.length < 2) {
+    const t = randomFreeTile(Game.world);
+    if (t) {
+      const kind = PICKUP_KINDS[Math.floor(Game.rng() * PICKUP_KINDS.length)];
+      Game.pickups.push({ kind, x: t.x * TILE + TILE / 2, y: t.y * TILE + TILE / 2, t: 0 });
+    }
+    Game.pickupTimer = PICKUP_GAP * (0.7 + Game.rng() * 0.7);
+  }
+  for (let i = Game.pickups.length - 1; i >= 0; i--) {
+    const pu = Game.pickups[i];
+    pu.t += dt;
+    if (pu.t > 26) { Game.pickups.splice(i, 1); continue; }   // stale, fades away
+    for (const p of Game.players) {
+      if (Math.hypot(p.x - pu.x, p.y - pu.y) > 30) continue;
+      applyBoost(p, pu.kind);
+      Game.pickups.splice(i, 1);
+      break;
+    }
+  }
+  // tick boosts down
+  for (const p of Game.players) {
+    if (p.boostT > 0) {
+      p.boostT -= dt;
+      if (p.boost === "adrenaline") p.stamina = Game.staminaMax;
+      if (p.boostT <= 0) { p.boostT = 0; p.boost = null; }
+    }
+  }
+}
+
+function applyBoost(p, kind) {
+  p.boost = kind.key;
+  p.boostT = kind.dur;
+  popup(p.x, p.y - 40, kind.name, kind.color, true);
+  burst(p.x, p.y, kind.color, 16);
+  Sound.play("newbest");
+  if (kind.key === "adrenaline") p.stamina = Game.staminaMax;
+}
+
+/** Both medics side by side, both hitting Use: refill and re-light the chain. */
+function updateHighFive(dt) {
+  if (Game.highFiveCool > 0) Game.highFiveCool -= dt;
+  if (Game.players.length < 2 || Game.highFiveCool > 0) return;
+  const [a, b] = Game.players;
+  if (Math.hypot(a.x - b.x, a.y - b.y) > 62) return;
+  if (!wasPressed(a.ctrl.use) || !wasPressed(b.ctrl.use)) return;
+
+  Game.highFiveCool = 5;
+  Game.highFives++;
+  for (const p of Game.players) { p.stamina = Game.staminaMax; p.squash = 0.3; }
+  if (Game.combo > 0) Game.comboTimer = Game.comboWindow;   // keeps the chain alive
+  Game.score += 120;
+  const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+  popup(mx, my - 52, "HIGH FIVE!  +120", "#ffd54a", true);
+  burst(mx, my - 20, "#ffe066", 22);
+  Sound.play("clutch");
+  checkLiveAchievements();
+}
+
 function updatePlay(dt) {
   Game.time += dt;
   for (const p of Game.players) updatePlayer(p, dt);
@@ -2050,6 +2346,9 @@ function updatePlay(dt) {
   for (const p of Game.players) if (p.work && p.work.ptId) Game.tendedIds.add(p.work.ptId);
   updatePatients(dt);
   updateWaves(dt);
+  updateEvents(dt);
+  updatePickups(dt);
+  updateHighFive(dt);
   updateSpawning(dt);
   updateItems(dt);
   updateNurse(dt);
@@ -2070,12 +2369,20 @@ function starsFor(index, score) {
 
 function endLevel() {
   const failed = Game.lives <= 0;
+  Game.career.shifts++;
+  // XP accrues from every shift, cleared or not, so a losing run still moves
+  // something forward
+  const xpGain = Math.round(Game.score / 10) + Game.treated * 5;
+  Game.xp += xpGain;
+  if (Game.treated > 0 && !failed) unlockAch("first");
+  if (Game.lost === 0 && Game.treated > 0 && !failed) unlockAch("flawless");
+  checkLiveAchievements();
 
   if (Game.endless) {
     const newBest = Game.score > Game.endlessBest;
     if (newBest) Game.endlessBest = Game.score;
     Game.result = {
-      failed, stars: 0, newBest, endless: true,
+      failed, stars: 0, newBest, endless: true, xpGain, challenges: null, newChallenges: 0,
       name: ENDLESS.name, targets: null,
       score: Game.score, treated: Game.treated, lost: Game.lost,
       survived: Game.time, wave: Game.wave,
@@ -2095,8 +2402,22 @@ function endLevel() {
   prog.stars = Math.max(prog.stars, stars);
   if (stars >= 1 && Game.levelIndex + 1 < LEVELS.length) Game.progress[Game.levelIndex + 1].unlocked = true;
 
+  // shift challenges: evaluated once, then remembered on the level card
+  const list = CHALLENGES[Game.levelIndex] || [];
+  const met = list.map(c => challengeMet(c));
+  let newChallenges = 0;
+  met.forEach((ok, i) => {
+    if (ok && !prog.challenges[i]) { prog.challenges[i] = true; newChallenges++; }
+  });
+  if (stars >= 3 && DIFFS[Game.difficulty].key === "overtime") unlockAch("overtime");
+  if (totalStars() >= 15) unlockAch("stars15");
+  if (totalStars() >= 30) unlockAch("stars30");
+
   Game.result = {
-    failed, stars, newBest, gainedStars,
+    failed, stars, newBest, gainedStars, xpGain,
+    challenges: list.map((c, i) => ({ text: challengeText(c), met: met[i] })),
+    newChallenges,
+    difficulty: DIFFS[Game.difficulty].name,
     name: LEVELS[Game.levelIndex].name, targets: LEVELS[Game.levelIndex].stars,
     score: Game.score, treated: Game.treated, lost: Game.lost,
     bestCombo: Game.bestCombo, perfects: Game.perfects, clutches: Game.clutches,
@@ -3350,6 +3671,25 @@ function drawSceneEntities() {
     drawItem3D(it.type, it.x * T2W, 0.16 + Math.sin(t) * 0.02, it.y * T2W, t * 0.4);
   }
 
+  // pickups sitting on the floor
+  for (const pu of Game.pickups) {
+    const t = performance.now() / 500 + pu.x;
+    const y = 0.30 + Math.sin(t) * 0.05;
+    const wx = pu.x * T2W, wz = pu.y * T2W;
+    if (pu.kind.key === "coffee") {
+      drawMesh(MESH.cyl, wx, y, wz, 0, 0.115, 0.16, 0.115, rgb("#f6f1e6"));
+      drawMesh(MESH.cyl, wx, y + 0.10, wz, 0, 0.10, 0.02, 0.10, rgb("#6b4a34"));
+      drawMesh(MESH.torus, wx + 0.14, y, wz, 0, 0.065, 0.065, 0.065, rgb("#f6f1e6"));
+    } else {
+      drawMesh(MESH.cyl, wx, y, wz, 0, 0.055, 0.24, 0.055, rgb("#ffe1ee"));
+      drawMesh(MESH.cyl, wx, y - 0.02, wz, 0, 0.050, 0.13, 0.050, rgb("#ff7ab8"));
+      drawMesh(MESH.cyl, wx, y + 0.20, wz, 0, 0.014, 0.14, 0.014, rgb("#dfe7ee"));
+    }
+    // a soft ring so it reads as "come and get me"
+    drawMesh(MESH.torus, wx, 0.03, wz, performance.now() / 700,
+             0.30, 0.30, 0.30, rgb(pu.kind.color), 0.6);
+  }
+
   // patients not being carried
   for (const pt of Game.patients) {
     if (pt.state === "carried") continue;
@@ -4133,6 +4473,61 @@ function drawTutorial(g) {
   g.restore();
 }
 
+
+/** Achievement pop-ins, stacked down the right edge. */
+function drawToasts(g) {
+  for (let i = Game.toasts.length - 1; i >= 0; i--) {
+    const t = Game.toasts[i];
+    const a = t.t < 0.3 ? t.t / 0.3 : clamp((t.life - t.t) / 0.5, 0, 1);
+    const y = PLAY_Y + 24 + i * 54;
+    g.save();
+    g.globalAlpha = a;
+    const w = 300, x = W - w - 24;
+    fillRound(g, x, y, w, 46, 12, "rgba(12,20,30,.94)");
+    g.strokeStyle = "#ffd54a"; g.lineWidth = 2;
+    roundRect(g, x, y, w, 46, 12); g.stroke();
+    drawStar(g, x + 26, y + 23, 12, "#ffd54a");
+    text(g, "ACHIEVEMENT", x + 48, y + 19, 10, "#ffd54a");
+    text(g, t.text, x + 48, y + 36, 15, PALETTE.text);
+    g.restore();
+  }
+}
+
+/** A small chip naming the event currently running, with its time left. */
+function drawEventChip(g) {
+  if (!Game.event) return;
+  const e = Game.event.def;
+  const left = clamp(1 - Game.event.t / e.dur, 0, 1);
+  const w = 216, x = W / 2 - w / 2, y = PLAY_Y + 8;
+  fillRound(g, x, y, w, 30, 9, "rgba(12,20,30,.88)");
+  g.strokeStyle = e.color; g.lineWidth = 1.5;
+  roundRect(g, x, y, w, 30, 9); g.stroke();
+  g.fillStyle = e.color;
+  roundRect(g, x + 6, y + 23, (w - 12) * left, 3, 1.5); g.fill();
+  text(g, e.name, x + w / 2, y + 18, 13, e.color, "center");
+}
+
+/** Three medals per ward, filled in as the shift challenges are met. */
+function drawMedals(g, list, done, x, y, r, count) {
+  const n = count || 3;
+  for (let i = 0; i < n; i++) {
+    const cx = x + i * (r * 2 + 6);
+    const on = done && done[i];
+    g.fillStyle = on ? "#ffd54a" : "rgba(255,255,255,.10)";
+    g.beginPath(); g.arc(cx, y, r, 0, 6.283); g.fill();
+    g.strokeStyle = on ? "#fff0b8" : "rgba(255,255,255,.16)";
+    g.lineWidth = 1.5;
+    g.beginPath(); g.arc(cx, y, r, 0, 6.283); g.stroke();
+    if (on) {
+      g.strokeStyle = "#8a6b00"; g.lineWidth = 2; g.lineCap = "round";
+      g.beginPath();
+      g.moveTo(cx - r * 0.42, y); g.lineTo(cx - r * 0.1, y + r * 0.36);
+      g.lineTo(cx + r * 0.46, y - r * 0.38);
+      g.stroke();
+    }
+  }
+}
+
 function drawBanner(g) {
   if (!Game.banner) return;
   const b = Game.banner, t = b.t;
@@ -4145,7 +4540,7 @@ function drawBanner(g) {
   const bw = 620, bx = W / 2 - bw / 2, by = PLAY_Y + 180;
   g.fillStyle = "rgba(10,16,24,.90)";
   roundRect(g, bx, by, bw, 112, 16); g.fill();
-  g.strokeStyle = urgent ? "#e4573d" : "rgba(63,182,232,.55)";
+  g.strokeStyle = urgent ? "#e4573d" : (b.color || "rgba(63,182,232,.55)");
   g.lineWidth = 3;
   roundRect(g, bx, by, bw, 112, 16); g.stroke();
   if (urgent) {
@@ -4154,7 +4549,7 @@ function drawBanner(g) {
     roundRect(g, bx, by, bw, 112, 16); g.fill();
     g.globalAlpha = alpha;
   }
-  text(g, b.text, W / 2, by + 54, 38, urgent ? "#ffd9d1" : PALETTE.text, "center");
+  text(g, b.text, W / 2, by + 54, 38, urgent ? "#ffd9d1" : (b.color || PALETTE.text), "center");
   text(g, b.sub, W / 2, by + 86, 15, PALETTE.dim, "center", "normal");
   g.restore();
 }
@@ -4389,6 +4784,37 @@ function drawPerkIcon(g, key, cx, cy, lit) {
 const SELECT_COLS = 5;
 const ENDLESS_SLOT = () => LEVELS.length;
 
+
+/** Career screen: achievements earned, plus the running career totals. */
+function drawMedalsScreen(g) {
+  g.fillStyle = Paint.title;
+  g.fillRect(0, 0, W, H);
+  text(g, "CAREER", W / 2, 62, 38, PALETTE.text, "center");
+
+  const got = ACHIEVEMENTS.filter(a => Game.achievements[a.key]).length;
+  text(g, got + " / " + ACHIEVEMENTS.length + " achievements   ·   " +
+       Game.career.treated + " patients treated   ·   " +
+       Game.career.shifts + " shifts   ·   " + Game.xp + " XP",
+       W / 2, 92, 16, PALETTE.dim, "center", "normal");
+
+  const cols = 2, cw = 560, ch = 58, gap = 16;
+  const x0 = W / 2 - (cols * cw + (cols - 1) * gap) / 2;
+  ACHIEVEMENTS.forEach((a, i) => {
+    const cx = x0 + (i % cols) * (cw + gap);
+    const cy = 124 + Math.floor(i / cols) * (ch + 10);
+    const on = !!Game.achievements[a.key];
+    fillRound(g, cx, cy, cw, ch, 12, on ? "rgba(255,213,74,.10)" : "rgba(255,255,255,.035)");
+    g.strokeStyle = on ? "rgba(255,213,74,.45)" : "rgba(255,255,255,.06)";
+    g.lineWidth = 1.5;
+    roundRect(g, cx, cy, cw, ch, 12); g.stroke();
+    drawStar(g, cx + 32, cy + ch / 2, 15, on ? "#ffd54a" : "rgba(255,255,255,.10)");
+    text(g, a.name, cx + 60, cy + 25, 17, on ? PALETTE.text : "#57657a");
+    text(g, a.blurb, cx + 60, cy + 44, 13, on ? PALETTE.dim : "#44515f", "left", "normal");
+  });
+
+  text(g, "Esc  back", W / 2, H - 44, 16, PALETTE.text, "center");
+}
+
 function drawSelect(g) {
   g.fillStyle = Paint.title;
   g.fillRect(0, 0, W, H);
@@ -4403,7 +4829,9 @@ function drawSelect(g) {
     { t: "·", c: PALETTE.dim },
     { t: rankName(), c: PALETTE.text },
     { t: "·", c: PALETTE.dim },
-    { t: Game.playerCount === 1 ? "Solo" : "Co-op", c: PALETTE.dim }
+    { t: Game.playerCount === 1 ? "Solo" : "Co-op", c: PALETTE.dim },
+    { t: "·", c: PALETTE.dim },
+    { t: DIFFS[Game.difficulty].name, c: DIFFS[Game.difficulty].color }
   ];
   const GAPX = 10, STARW = 26;
   let lineW = STARW;
@@ -4417,17 +4845,17 @@ function drawSelect(g) {
     g.font = 'bold 16px "Trebuchet MS", "Segoe UI", sans-serif';
   }
 
-  const cardW = 210, cardH = 178, gap = 18;
+  const cardW = 210, cardH = 192, gap = 14;
   const total = SELECT_COLS * cardW + (SELECT_COLS - 1) * gap;
   const x0 = (W - total) / 2;
 
   for (let i = 0; i < LEVELS.length; i++) {
     const col = i % SELECT_COLS, row = Math.floor(i / SELECT_COLS);
-    drawLevelCard(g, i, x0 + col * (cardW + gap), 118 + row * (cardH + gap), cardW, cardH);
+    drawLevelCard(g, i, x0 + col * (cardW + gap), 112 + row * (cardH + gap), cardW, cardH);
   }
 
   // endless card
-  const ex = W / 2 - 300, ey = 118 + 2 * (cardH + gap), ew = 600, eh = 74;
+  const ex = W / 2 - 300, ey = 112 + 2 * (cardH + gap), ew = 600, eh = 66;
   const selE = Game.selectIndex === ENDLESS_SLOT();
   const openE = endlessUnlocked();
   g.fillStyle = openE ? "rgba(155,93,229,.16)" : "rgba(255,255,255,.03)";
@@ -4442,10 +4870,28 @@ function drawSelect(g) {
        ex + 56, ey + 54, 14, PALETTE.dim, "left", "normal");
 
   const selDef = Game.selectIndex === ENDLESS_SLOT() ? ENDLESS : LEVELS[Game.selectIndex];
-  text(g, selDef.blurb, W / 2, ey + 112, 16, PALETTE.dim, "center", "normal");
-  text(g, "A / D  choose     W / S  row     E or Enter  start     P  perks" +
-       (Game.perksActive.length ? " (" + Game.perksActive.length + " on)" : "") + "     Esc  back",
-       W / 2, ey + 144, 16, PALETTE.text, "center");
+  text(g, selDef.blurb, W / 2, ey + 104, 16, PALETTE.dim, "center", "normal");
+
+  // the three shift challenges for whatever is highlighted
+  if (Game.selectIndex !== ENDLESS_SLOT()) {
+    const list = CHALLENGES[Game.selectIndex] || [];
+    const done = Game.progress[Game.selectIndex].challenges;
+    const cw = 700, cx = W / 2 - cw / 2, cy = ey + 118;
+    fillRound(g, cx, cy, cw, 62, 12, "rgba(255,255,255,.04)");
+    text(g, "SHIFT CHALLENGES", cx + 14, cy + 19, 11, "#ffd54a");
+    list.forEach((c, i) => {
+      const tx = cx + 14 + i * (cw - 28) / 3;
+      const on = done[i];
+      drawMedals(g, null, [on], tx + 7, cy + 42, 7, 1);
+      text(g, challengeText(c), tx + 20, cy + 46, 12,
+           on ? "#ffd54a" : PALETTE.dim, "left", "normal");
+    });
+  }
+
+  text(g, "A / D  choose    W / S  row    E  start    P  perks" +
+       (Game.perksActive.length ? " (" + Game.perksActive.length + ")" : "") +
+       "    T  " + DIFFS[Game.difficulty].name + "    C  medals    Esc  back",
+       W / 2, ey + 200, 15, PALETTE.text, "center");
 
   const saveLevel = Game.level;
   Game.level = selDef;
@@ -4505,6 +4951,7 @@ function drawLevelCard(g, i, x, y, cardW, cardH) {
   }
   text(g, locked ? "LOCKED" : "Best  " + prog.best, x + cardW / 2, my + mh + 40, 13,
     locked ? "#4a5666" : PALETTE.dim, "center", "normal");
+  if (!locked) drawMedals(g, null, prog.challenges, x + cardW / 2 - 20, my + mh + 56, 7);
 }
 
 function drawPause(g) {
@@ -4548,38 +4995,38 @@ function drawResults(g) {
   }
 
   g.fillStyle = "rgba(19,26,37,.96)";
-  roundRect(g, W / 2 - 330, 96, 660, 610, 20); g.fill();
+  roundRect(g, W / 2 - 330, 74, 660, 690, 20); g.fill();
   g.strokeStyle = r.failed ? "rgba(228,87,61,.45)" : "rgba(63,182,232,.40)";
   g.lineWidth = 2;
-  roundRect(g, W / 2 - 330, 96, 660, 610, 20); g.stroke();
+  roundRect(g, W / 2 - 330, 74, 660, 690, 20); g.stroke();
 
-  text(g, r.failed ? "SHIFT LOST" : "SHIFT OVER", W / 2, 162, 44, r.failed ? PALETTE.bad : PALETTE.text, "center");
-  text(g, r.name || "", W / 2, 190, 17, PALETTE.dim, "center", "normal");
+  text(g, r.failed ? "SHIFT LOST" : "SHIFT OVER", W / 2, 138, 44, r.failed ? PALETTE.bad : PALETTE.text, "center");
+  text(g, r.name || "", W / 2, 166, 17, PALETTE.dim, "center", "normal");
 
   if (r.endless) {
-    text(g, fmtTime(r.survived), W / 2, 262, 52, "#8be9ff", "center");
-    text(g, "SURVIVED  ·  " + r.wave + " waves", W / 2, 288, 14, PALETTE.dim, "center");
+    text(g, fmtTime(r.survived), W / 2, 236, 52, "#8be9ff", "center");
+    text(g, "SURVIVED  ·  " + r.wave + " waves", W / 2, 262, 14, PALETTE.dim, "center");
   } else {
     for (let i = 0; i < 3; i++) {
       const lit = i < r.stars && r.t > 0.4 + i * 0.35;
       const pop = lit ? 1 + 0.25 * Math.max(0, 1 - (r.t - (0.4 + i * 0.35)) * 4) : 1;
       g.save();
-      g.translate(W / 2 - 92 + i * 92, 268); g.scale(pop, pop);
+      g.translate(W / 2 - 92 + i * 92, 240); g.scale(pop, pop);
       drawStar(g, 0, 0, lit ? 38 : 32, lit ? "#ffd54a" : "rgba(255,255,255,.11)");
       g.restore();
     }
   }
 
-  text(g, String(r.score), W / 2, 372, 54, PALETTE.text, "center");
-  text(g, "FINAL SCORE", W / 2, 396, 13, PALETTE.dim, "center");
+  text(g, String(r.score), W / 2, 340, 54, PALETTE.text, "center");
+  text(g, "FINAL SCORE", W / 2, 364, 13, PALETTE.dim, "center");
   if (r.newBest) {
     const b = 0.6 + 0.4 * Math.sin(performance.now() / 180);
     g.save(); g.globalAlpha = b;
-    text(g, "NEW BEST!", W / 2, 424, 22, "#ffd54a", "center");
+    text(g, "NEW BEST!", W / 2, 392, 22, "#ffd54a", "center");
     g.restore();
   } else if (r.gainedStars > 0) {
     text(g, "+" + r.gainedStars + (r.gainedStars === 1 ? " NEW STAR" : " NEW STARS"),
-         W / 2, 424, 20, "#ffd54a", "center");
+         W / 2, 392, 20, "#ffd54a", "center");
   }
 
   const stats = [
@@ -4590,15 +5037,29 @@ function drawResults(g) {
     ["Clutch saves", String(r.clutches || 0)]
   ];
   stats.forEach((s2, i) => {
-    const y = 466 + i * 30;
+    const y = 430 + i * 30;
     text(g, s2[0], W / 2 - 250, y, 16, PALETTE.dim, "left", "normal");
     g.fillStyle = "rgba(255,255,255,.06)";
     g.fillRect(W / 2 - 250, y + 6, 500, 1);
     text(g, s2[1], W / 2 + 250, y, 16, PALETTE.text, "right");
   });
 
+  // shift challenges, ticked off
+  if (r.challenges) {
+    text(g, "SHIFT CHALLENGES", W / 2, 612, 11, "#ffd54a", "center");
+    r.challenges.forEach((c, i) => {
+      const cy = 632 + i * 21;
+      drawMedals(g, null, [c.met], W / 2 - 236, cy - 4, 7, 1);
+      text(g, c.text, W / 2 - 220, cy, 13, c.met ? "#ffd54a" : PALETTE.dim, "left", "normal");
+    });
+  }
+  if (r.xpGain) {
+    text(g, "+" + r.xpGain + " XP", W / 2 + 236, 632, 15, "#8be9ff", "right");
+    if (r.difficulty) text(g, r.difficulty, W / 2 + 236, 653, 12, PALETTE.dim, "right", "normal");
+  }
+
   if (r.targets) {
-    text(g, "Targets  " + r.targets.join("  /  "), W / 2, 634, 14, PALETTE.dim, "center", "normal");
+    text(g, "Targets  " + r.targets.join("  /  "), W / 2, 706, 14, PALETTE.dim, "center", "normal");
     // The near-miss line is the whole "one more go" hook: knowing you were 180
     // points off three stars is far more motivating than a bare target list.
     const next = r.targets[r.stars];
@@ -4608,11 +5069,11 @@ function drawResults(g) {
       g.save();
       g.globalAlpha = 0.75 + 0.25 * Math.sin(performance.now() / 300);
       text(g, gap > 0 ? gap + " more for " + label : "next up: " + label,
-           W / 2, 658, 16, "#ffd54a", "center");
+           W / 2, 728, 16, "#ffd54a", "center");
       g.restore();
     }
   }
-  text(g, "E / Enter  continue          R  retry", W / 2, 686, 19, PALETTE.text, "center");
+  text(g, "E / Enter  continue          R  retry", W / 2, 752, 19, PALETTE.text, "center");
 }
 
 
@@ -4685,6 +5146,17 @@ function drawWorldUI(g) {
     const s = projectToScreen(p.x * T2W, 0.02, p.y * T2W);
     if (!s) continue;
     const lane = p.index * 32;
+    if (p.boostT > 0) {
+      const k = PICKUP_KINDS.find(q => q.key === p.boost);
+      const col = k ? k.color : "#ffd54a";
+      g.save();
+      g.globalAlpha = p.boostT < 2 ? 0.45 + 0.55 * Math.abs(Math.sin(performance.now() / 110)) : 1;
+      fillRound(g, s.x - 26, s.y - 74, 52, 15, 7, "rgba(14,22,34,.82)");
+      g.fillStyle = col;
+      roundRect(g, s.x - 24, s.y - 72, 48 * clamp(p.boostT / (k ? k.dur : 10), 0, 1), 11, 5); g.fill();
+      text(g, p.boost === "coffee" ? "SPEED" : "ADRENALINE", s.x, s.y - 63, 9, "#10202e", "center");
+      g.restore();
+    }
     if (p.stamina !== undefined && p.stamina < Game.staminaMax - 0.02) {
       const f = clamp(p.stamina / Game.staminaMax, 0, 1);
       g.fillStyle = "rgba(14,22,34,.7)";
@@ -4845,10 +5317,19 @@ function render() {
     ctx.translate(PLAY_X, PLAY_Y);
     ctx.fillRect(0, 0, PLAY_W, PLAY_H);
     ctx.restore();
+    if (Game.dim > 0) {
+      ctx.save();
+      ctx.globalAlpha = clamp(Game.dim, 0, 0.7);
+      ctx.fillStyle = "#050b14";
+      ctx.fillRect(PLAY_X, PLAY_Y, PLAY_W, PLAY_H);
+      ctx.restore();
+    }
     drawHUD(ctx);
     drawLegend(ctx);
+    drawEventChip(ctx);
     drawTutorial(ctx);
     drawBanner(ctx);
+    drawToasts(ctx);
     if (Game.screen === "paused") drawPause(ctx);
     if (Game.screen === "results") drawResults(ctx);
     return;
@@ -4859,6 +5340,7 @@ function render() {
   clearGL(0.043, 0.058, 0.086);
   if (Game.screen === "select") drawSelect(ctx);
   else if (Game.screen === "perks") drawPerks(ctx);
+  else if (Game.screen === "medals") drawMedalsScreen(ctx);
 }
 
 /* ---------------------------------------------------------------------
@@ -4934,6 +5416,14 @@ function handleScreenKeys() {
         } else Sound.play("error");
       }
       if (wasPressed("KeyP")) { Game.screen = "perks"; Sound.play("menu"); }
+      if (wasPressed("KeyT")) {
+        Game.difficulty = (Game.difficulty + 1) % DIFFS.length;
+        Sound.play("menu");
+      }
+      if (wasPressed("KeyC")) {
+        checkLiveAchievements();          // catch anything earned but not yet ticked
+        Game.screen = "medals"; Sound.play("menu");
+      }
       if (wasPressed("Escape")) { Game.screen = "title"; Sound.play("menu"); }
       break;
     }
@@ -4957,6 +5447,13 @@ function handleScreenKeys() {
         } else Sound.play("error");
       }
       if (wasPressed("Escape") || wasPressed("KeyP")) { Game.screen = "select"; Sound.play("menu"); }
+      break;
+    }
+
+    case "medals": {
+      if (wasPressed("Escape") || wasPressed("KeyC") || wasPressed("KeyE") || wasPressed("Enter")) {
+        Game.screen = "select"; Sound.play("menu");
+      }
       break;
     }
 
