@@ -1152,7 +1152,12 @@ function makePatient(world, ailmentKey, level) {
   // a second condition, treated after the first
   let second = null;
   if (Game.rng() < comorbidChance()) {
-    const pool = (Game.level.ailments || []).filter(k => k !== ailmentKey && k !== "mystery");
+    // must go through treatableAilments for the same reason the primary
+    // condition does: in builder mode a chain the department has no equipment
+    // for is an unavoidable death, not a challenge. The primary was filtered
+    // in chooseAilment; drawing the comorbidity raw undid that.
+    let pool = (Game.level.ailments || []).filter(k => k !== ailmentKey && k !== "mystery");
+    pool = treatableAilments(pool);
     if (pool.length) {
       second = pool[Math.floor(Game.rng() * pool.length)];
       steps = steps.concat(AILMENTS[second].steps.map(s => Object.assign({}, s)));
@@ -1848,9 +1853,16 @@ function maybeJam(st) {
 }
 
 function revealMystery(pt) {
-  const pool = Game.level.ailments.filter(a => a !== "mystery");
+  // Same filter as arrivals: a lab result that names a condition this ward
+  // cannot treat is a guaranteed loss the player already paid lab work for.
+  // Normal builder ward: lab unlocks at wave 5, an X-ray is optional, so
+  // revealing "fracture" with no X-ray was an easy and unfair death.
+  let pool = Game.level.ailments.filter(a => a !== "mystery");
+  const ok = treatableAilments(pool);
+  if (ok.length) pool = ok;
   const key = pool[Math.floor(Game.rng() * pool.length)] || "cut";
   const a = AILMENTS[key];
+  pt.wasMystery = true;          // credit the case as the mystery it arrived as
   pt.ailment = key;
   pt.revealed = true;
   // rebuild the chain, keeping what the patient still legitimately has:
@@ -1997,8 +2009,16 @@ function throwItem(p) {
   const it = p.item;
   if (!it) return false;
   p.item = null;
-  it.x = p.x + p.dx * 16;
-  it.y = p.y + p.dy * 16;
+  // Release from the thrower's own tile, never 16px ahead: the player's radius
+  // is 13, so hugging a wall and throwing into it used to release the item
+  // INSIDE the solid tile, where the bounce test (which only checks the
+  // destination) could never free it — it came to rest at the centre of the
+  // wall, completely invisible. A wall-swallowed defib stalls every cardiac
+  // case on the level.
+  const ahead = { x: p.x + p.dx * 16, y: p.y + p.dy * 16 };
+  const at = tileOf(ahead.x, ahead.y);
+  if (isWalkable(Game.world, at.x, at.y)) { it.x = ahead.x; it.y = ahead.y; }
+  else { it.x = p.x; it.y = p.y; }
   it.vx = p.dx * THROW_SPEED;
   it.vy = p.dy * THROW_SPEED;
   it.spin = 0;
@@ -2061,7 +2081,23 @@ function updateThrownItems(dt) {
     if (sp > 0.001) { it.vx *= ns / sp; it.vy *= ns / sp; }
     if (ns < 6) {                                  // come to rest on a tile centre
       it.vx = 0; it.vy = 0;
-      const t = tileOf(it.x, it.y);
+      let t = tileOf(it.x, it.y);
+      if (!isWalkable(Game.world, t.x, t.y)) {
+        // never leave an item resting inside geometry: walk out to the nearest
+        // open tile so it is always visible and always reachable
+        let best = null, bestD = Infinity;
+        for (let r = 1; r <= 4 && !best; r++) {
+          for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
+            if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+            const nx = t.x + dx, ny = t.y + dy;
+            if (!isWalkable(Game.world, nx, ny)) continue;
+            const d = dx * dx + dy * dy;
+            if (d < bestD) { bestD = d; best = { x: nx, y: ny }; }
+          }
+          if (best) break;
+        }
+        if (best) t = best;
+      }
       it.x = t.x * TILE + TILE / 2;
       it.y = t.y * TILE + TILE / 2;
       it.thrownBy = undefined;
@@ -2134,7 +2170,13 @@ function dischargePatient(p) {
   const gained = Math.round(base * mult * surge * (Game.diff ? Game.diff.scoreMul : 1));
   Game.score += gained;
   Game.treated++;
-  Game.byAilment[pt.ailment] = (Game.byAilment[pt.ailment] || 0) + 1;
+  // A revealed mystery is reassigned to its true condition, so pt.ailment is
+  // never "mystery" at discharge. Crediting only that made the level-4
+  // challenge ("treat 3 mystery cases") and the Diagnostician achievement
+  // literally unachievable. Score both the mystery and what it turned out to be.
+  const credit = pt.wasMystery ? "mystery" : pt.ailment;
+  Game.byAilment[credit] = (Game.byAilment[credit] || 0) + 1;
+  if (pt.wasMystery) Game.byAilment[pt.ailment] = (Game.byAilment[pt.ailment] || 0) + 1;
   if (Game.builderMode && Game.builder) {
     const cr = Math.max(6, Math.round(gained / 7));
     Game.builder.credits += cr;
@@ -2143,7 +2185,7 @@ function dischargePatient(p) {
   }
   Game.career.treated++;
   if (pt.ailment === "cardiac") Game.career.cardiac++;
-  if (pt.ailment === "mystery") Game.career.mystery++;
+  if (pt.wasMystery || pt.ailment === "mystery") Game.career.mystery++;
   checkLiveAchievements();
   if (Game.endless && Game.treated % 10 === 0 && Game.lives < Game.livesMax) {
     Game.lives++;
@@ -2217,7 +2259,7 @@ function updateDeterioration(dt) {
     if (pt.done || pt.state === "gone" || pt.state === "carried") continue;
     if (!pt.sev || pt.sev.key === "critical") continue;
     const frac = pt.patience / pt.patienceMax;
-    if (frac > 0.34) continue;
+    if (frac > 0.34) { pt.deterT = 0; continue; }   // recovering resets the grace period
     pt.deterT = (pt.deterT || 0) + dt;
     if (pt.deterT < 1.6) continue;
     // escalate: harder, but worth much more, and they keep the patience they have
@@ -2304,6 +2346,7 @@ const EASE_IN_SECS = 25;                 // opening window with no brutal cases
    patients are diverted to another hospital and never arrive. Building the
    machine is what opens the (higher-scoring) case type. */
 function treatableAilments(pool) {
+  if (!Game.world) return pool;
   const have = (t) => Game.world.stations.some(q => q.type === t);
   return pool.filter(a => {
     if (a === "cut") return have("supply");
