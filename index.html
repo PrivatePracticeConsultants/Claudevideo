@@ -2787,10 +2787,13 @@ function drawPlayer(g, p) {
     }
   }
 
-  // work progress / hint / contextual prompts
+  // work progress / hint / contextual prompts.
+  // Each player gets its own vertical lane so captions from two medics
+  // standing shoulder-to-shoulder never overlap.
+  const lane = p.index * 32;
   if (p.work) {
     const f = clamp(p.work.t / p.work.dur, 0, 1);
-    const bx = x - 26, by = y + 33;
+    const bx = x - 26, by = y + 33 + lane;
     g.fillStyle = "rgba(14,22,34,.82)";
     roundRect(g, bx - 2, by - 2, 56, 11, 4); g.fill();
     const gr = g.createLinearGradient(bx, 0, bx + 52, 0);
@@ -2802,11 +2805,11 @@ function drawPlayer(g, p) {
   } else if (p.hintT > 0) {
     g.save();
     g.globalAlpha = clamp(p.hintT, 0, 1);
-    labelPill(g, p.hint, x, y + 30, "#ffd9a0");
+    labelPill(g, p.hint, x, y + 30 + lane, "#ffd9a0");
     g.restore();
   } else if (p.promptE || p.promptQ) {
     const keys = p.index === 0 ? ["E", "Q"] : ["/", "."];
-    let py2 = y + 30;
+    let py2 = y + 30 + lane;
     if (p.promptQ) { promptPill(g, keys[1], p.promptQ, x, py2, "#ffe28a"); py2 += 17; }
     if (p.promptE) promptPill(g, keys[0], p.promptE, x, py2, "#a8dcff");
   }
