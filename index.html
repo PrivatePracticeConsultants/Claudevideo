@@ -476,23 +476,50 @@ const CONTROLS = [
 /* --- Playable medics: same plush body, distinct skin/hair/accessory.
    Scrub color stays per-player-slot (P1 blue, P2 coral) so you always know
    who you are; the character defines everything above the collar. */
+/* One small mechanical difference each, so the picker is a decision and a co-op
+   pairing is a conversation rather than two identical medics in different hats.
+
+   Every trait is a trade, never a straight upgrade: the fast medic tires sooner,
+   the deft one walks slower. The numbers are deliberately small — big enough to
+   feel over a shift, small enough that no ward is gated behind a specific pick,
+   which is verified against the sim harness rather than asserted.
+
+   speedMul   on foot          workMul  procedure duration (lower = faster)
+   staminaMul sprint reserve   labMul   the lab/analyse step specifically
+   comboBonus extra seconds on the chain window
+   calmR      radius in pixels within which waiting patients fret more slowly */
+const TRAITS = {
+  quickfeet: { name: "Quick Feet",    blurb: "Fastest on her feet, first to run out of puff.",
+               speedMul: 1.085, staminaMul: 0.85 },
+  steady:    { name: "Steady Hands",  blurb: "Every procedure a little quicker; no hurry between them.",
+               workMul: 0.88, speedMul: 0.955 },
+  reader:    { name: "Chart Reader",  blurb: "Bloods come back fast. Mystery cases are his.",
+               labMul: 0.70, speedMul: 0.96 },
+  puff:      { name: "Double Puff",   blurb: "Sprints further than anyone, works a touch slower.",
+               staminaMul: 1.40, workMul: 1.07 },
+  sunshine:  { name: "Sunshine",      blurb: "People waiting near her stay calm.",
+               calmR: 150, calmMul: 0.86, workMul: 1.05 },
+  catnap:    { name: "Cat-Napper",    blurb: "Holds a combo chain together longer than she should.",
+               comboBonus: 2.2, speedMul: 0.94 }
+};
+
 /* Each medic owns a scrub colour. Six medics in the same cyan scrubs are one
    medic drawn six times — there is nothing to recognise and nothing to put on a
    mug. The scrubs are used on the picker and the title showcase; in the ward
    itself the body stays P1-blue / P2-orange, because knowing which blob is you
    at a glance beats knowing which character it is. */
 const CHARACTERS = [
-  { name: "Remy",  blurb: "freckles & curls",   skin: "#ffdcb8", hair: "#b5622e", style: "curls",  acc: "freckles",
+  { name: "Remy", trait: "quickfeet",  blurb: "freckles & curls",   skin: "#ffdcb8", hair: "#b5622e", style: "curls",  acc: "freckles",
     scrub: "#2fa9bd", cap: "#248fa0" },
-  { name: "Amara", blurb: "calm under pressure", skin: "#8a5a3b", hair: "#3f3833", style: "none",   acc: "hijab", accColor: "#5fc7b4",
+  { name: "Amara", trait: "steady", blurb: "calm under pressure", skin: "#8a5a3b", hair: "#3f3833", style: "none",   acc: "hijab", accColor: "#5fc7b4",
     scrub: "#6d5cd6", cap: "#5a4ac0" },
-  { name: "Kenji", blurb: "reads every chart",  skin: "#f2c898", hair: "#2e2a28", style: "fringe", acc: "glasses",
+  { name: "Kenji", trait: "reader", blurb: "reads every chart",  skin: "#f2c898", hair: "#2e2a28", style: "fringe", acc: "glasses",
     scrub: "#3a6fd0", cap: "#2f5cb4" },
-  { name: "Zoe",   blurb: "double puff power",  skin: "#6b4630", hair: "#241f1c", style: "puffs",  acc: "none",
+  { name: "Zoe", trait: "puff",   blurb: "double puff power",  skin: "#6b4630", hair: "#241f1c", style: "puffs",  acc: "none",
     scrub: "#e8654f", cap: "#cc5340" },
-  { name: "Sol",   blurb: "sunshine on shift",  skin: "#e8b184", hair: "#f2d06b", style: "fringe", acc: "freckles",
+  { name: "Sol", trait: "sunshine",   blurb: "sunshine on shift",  skin: "#e8b184", hair: "#f2d06b", style: "fringe", acc: "freckles",
     scrub: "#3fae6d", cap: "#329159" },
-  { name: "Nova",  blurb: "certified cat-napper", skin: "#ffe3c4", hair: "#ff9ec2", style: "fringe", acc: "catcap",
+  { name: "Nova", trait: "catnap",  blurb: "certified cat-napper", skin: "#ffe3c4", hair: "#ff9ec2", style: "fringe", acc: "catcap",
     scrub: "#e2679a", cap: "#c85582" }
 ];
 
@@ -1307,6 +1334,47 @@ const LEVELS = [
 ];
 
 /* Endless mode: no clock, spawns tighten forever, three lives, chase a best. */
+/* The teaching ward. A hint banner already ran on ward one, but ward one is a
+   real timed shift with arrivals and three lives: a player who is struggling can
+   lose it while still reading step two, which is the opposite of a tutorial. This
+   has no clock, no lives, no arrivals except the one the current step needs, and
+   nothing in it can be failed. It is offered on first boot and replayable with T. */
+const TUTORIAL = {
+  name: "Orientation",
+  blurb: "No clock, no pressure. Learn the job.",
+  seed: 777,
+  duration: Infinity,
+  tutorial: true,
+  patience: 1e6,                 // nobody ever walks out of the tutorial
+  spawnStart: 1e6, spawnEnd: 1e6,
+  maxWaiting: 1,
+  ailments: ["cut"],
+  stars: [0, 0, 0],
+  restock: false, jams: false, flatline: false,
+  theme: { floor:"#f7efdd", floorAlt:"#f0e5cd", wall:"#a9e0d4", wallTop:"#c6ede3", base:"#7cc4b4",
+           accent:"#5cb8e6", wood:"#d3a56c", leaf:"#5fb872", leaf2:"#83d290", pot:"#d98a5f",
+           locker:"#a7bccb", crate:"#dcb98c", crate2:"#c9a173", curtain:"#bfdcee", rug:"#d6e6f2" },
+  props: ["bench", "plant", "chair", "sign"],
+  map: [
+    "################################",
+    "################################",
+    "########................########",
+    "########.E..............########",
+    "########................########",
+    "########....bb....ss....########",
+    "########....bb....ss....########",
+    "########................########",
+    "########.O..............########",
+    "########................########",
+    "################################",
+    "################################",
+    "################################",
+    "################################",
+    "################################",
+    "################################"
+  ]
+};
+
 const ENDLESS = {
   name: "Night Shift",
   blurb: "No clock. No end. Spawns tighten forever — how long can you hold?",
@@ -1773,8 +1841,39 @@ function makePlayer(index, x, y) {
     boost: null, boostT: 0,
     color: index === 0 ? PALETTE.p1 : PALETTE.p2,
     look: CHARACTERS[Game.chars[index] % CHARACTERS.length],
-    ctrl: CONTROLS[index]
+    ctrl: CONTROLS[index],
+    trait: null                       // filled in by applyTraits()
   };
+}
+
+/** Resolve each player's trait into the multipliers the sim reads, and fold the
+    chain bonus into the shift. Called after the players exist, from startLevel. */
+function applyTraits() {
+  let comboBonus = 0;
+  for (const p of Game.players) {
+    const t = (p.look && TRAITS[p.look.trait]) || null;
+    p.trait = t;
+    p.speedMul = t && t.speedMul ? t.speedMul : 1;
+    p.workMul = t && t.workMul ? t.workMul : 1;
+    p.labMul = t && t.labMul ? t.labMul : 1;
+    p.staminaMax = Game.staminaMax * (t && t.staminaMul ? t.staminaMul : 1);
+    p.stamina = p.staminaMax;
+    // two Cat-Nappers do not stack: take the best bonus on the floor, or the
+    // second slot becomes a strictly-better pick than any other pairing
+    if (t && t.comboBonus) comboBonus = Math.max(comboBonus, t.comboBonus);
+  }
+  Game.comboWindow += comboBonus;
+}
+
+/** Slowest calming factor any Sunshine medic is applying to this patient. */
+function calmFactor(pt) {
+  let f = 1;
+  for (const p of Game.players) {
+    const t = p.trait;
+    if (!t || !t.calmR) continue;
+    if (Math.hypot(p.x - pt.x, p.y - pt.y) <= t.calmR) f = Math.min(f, t.calmMul);
+  }
+  return f;
 }
 
 
@@ -2322,7 +2421,10 @@ function burst(x, y, color, n) {
 }
 
 /** Campaign levels are 0..N-1; index -1 is the endless Night Shift. */
-function levelDef(index) { return index < 0 ? ENDLESS : LEVELS[index]; }
+function levelDef(index) {
+  if (index === -2) return TUTORIAL;
+  return index < 0 ? ENDLESS : LEVELS[index];
+}
 
 /** Total campaign stars, and the title the player has earned with them. */
 function totalStars() { return Game.progress.reduce((n, p) => n + p.stars, 0); }
@@ -2411,7 +2513,9 @@ function startLevel(index) {
   Game.flashGood = 0;
   Game.banner = { text: def.name, sub: def.blurb, t: 0 };
   Game.result = null;
-  Game.tutorial = (index === 0) ? { stage: 0, t: 0 } : null;
+  Game.tutorial = (index === -2)
+    ? { stage: 0, t: 0, moved: 0, sprinted: 0, spawned: false }
+    : null;
 
   if (perkActive("shelves")) {
     for (const st of Game.world.stations) {
@@ -2428,6 +2532,7 @@ function startLevel(index) {
     const t = spawnTiles[i] || spawnTiles[0] || { x: 1, y: 1 };
     Game.players.push(makePlayer(i, t.x * TILE + TILE / 2, t.y * TILE + TILE / 2));
   }
+  applyTraits();
   Game.nurse = null;
   if (perkActive("nurse")) {
     const t = spawnTiles[Game.playerCount] || spawnTiles[0] || { x: 1, y: 1 };
@@ -2802,6 +2907,7 @@ function findJob(p) {
       const pid = p.item.pid;
       return {
         key: "lab" + st.x + "," + st.y + ":" + (pid || 0), dur: r.dur, label: r.label,
+        isLab: true,                     // read by the Chart Reader trait
         run: () => {
           p.item = null;
           const pt = Game.patients.find(q => q.id === pid && q.state !== "gone");
@@ -2898,14 +3004,15 @@ function updatePlayer(p, dt) {
   if (wantSprint) {
     if (p.boost !== "adrenaline") p.stamina = Math.max(0, p.stamina - dt);
   } else {
-    p.stamina = Math.min(Game.staminaMax, p.stamina + dt * STAMINA_REGEN);
+    p.stamina = Math.min(p.staminaMax || Game.staminaMax, p.stamina + dt * STAMINA_REGEN);
   }
 
   if (moving) {
     const len = Math.hypot(mx, my);
     mx /= len; my /= len;
     p.dx = mx; p.dy = my;
-    let speed = (p.patient ? SPEED_PATIENT : (p.item ? SPEED_ITEM : SPEED_FREE)) * Game.speedMul;
+    let speed = (p.patient ? SPEED_PATIENT : (p.item ? SPEED_ITEM : SPEED_FREE))
+                * Game.speedMul * (p.speedMul || 1);
     if (wantSprint) speed *= p.patient ? SPRINT_MUL_PATIENT : SPRINT_MUL;
     if (p.boost === "coffee") speed *= 1.30;
     if (spillAt(p.x, p.y)) speed *= SPILL_SLOW;
@@ -2948,7 +3055,10 @@ function updatePlayer(p, dt) {
       // held key does not fire a stream of throws)
       if (p.item && wasPressed(c.use)) throwItem(p);
     } else if (!p.work || p.work.key !== job.key) {
-      p.work = { key: job.key, t: 0, dur: job.dur * Game.workMul, label: job.label,
+      // the lab step carries an explicit flag: its key is composed from the
+      // station coords and the patient id, so matching on the string never fired
+      const wm = (p.workMul || 1) * (job.isLab ? (p.labMul || 1) : 1);
+      p.work = { key: job.key, t: 0, dur: job.dur * Game.workMul * wm, label: job.label,
                  run: job.run, ptId: job.ptId, tick: 0 };
     } else {
       p.work.run = job.run;                  // keep the closure fresh
@@ -3368,6 +3478,7 @@ function updatePatients(dt) {
       const inBed = pt.station && pt.station.type === "bed";
       let rate = inBed ? 0.62 : (pt.state === "station" ? 0.8 : 1.0);
       if (Game.tendedIds && Game.tendedIds.has(pt.id)) rate *= 0.25;
+      rate *= calmFactor(pt);
       pt.patience -= dt * rate;
       if (pt.patience <= 0) { losePatient(pt); continue; }
     }
@@ -3460,6 +3571,10 @@ function updateWaves(dt) {
 
 function updateSpawning(dt) {
   const lvl = Game.level;
+  // The tutorial spawns exactly what the current step needs and nothing else.
+  // startLevel seeds spawnTimer at 2.0s, so without this an unplanned second
+  // patient walked in two seconds into the lesson.
+  if (lvl && lvl.tutorial) return;
   const waiting = Game.patients.filter(p => p.state === "waiting" || p.state === "walking").length;
   Game.spawnTimer -= dt;
   if (Game.spawnTimer > 0) return;
@@ -3546,30 +3661,107 @@ function updateHeartMonitor(dt) {
 
 /* First-shift tutorial: six short tips that each wait for the player to
    actually do the thing before moving on. Level 1 only. */
+/* The teaching script. Each step names one action, waits for that action to
+   actually happen, and cannot be failed or timed out. `spawn` runs once on
+   entering the step, so the ward only ever contains what the current step needs
+   — no arrivals piling up behind a player who is still reading. */
 const TUTORIAL_STEPS = [
-  { text: "Patients arrive at the blue IN door - walk up and press E to pick one up",
+  { text: "Walk around. P1 uses W A S D; P2 uses the arrow keys. On a pad, the stick.",
+    hint: "move in any direction",
+    done: (t) => t.moved > 90 },
+  { text: "Hold Shift to sprint. It drains, then refills when you stop.",
+    hint: "sprint for a moment",
+    done: (t) => t.sprinted > 30 },
+  { text: "Someone has arrived at the blue IN door. Walk into them and press E to lift them.",
+    spawn: "cut",
+    hint: "lift the patient",
+    grace: 75,
     done: () => Game.players.some(p => p.patient) },
-  { text: "Carry them to a bed and press E to tuck them in",
+  { text: "Carry them to a bed. Stand beside it, facing it, and press E to lay them down.",
+    hint: "put them in a bed",
+    grace: 75,
     done: () => Game.patients.some(pt => pt.state === "station") },
-  { text: "The bubble shows what they need - fetch it from the matching station",
+  { text: "Their badge asks for a bandage. Walk to a supply shelf and HOLD Q to take one.",
+    hint: "collect a bandage",
+    grace: 75,
     done: () => Game.players.some(p => p.item) },
-  { text: "Stand at the bed and HOLD the use key to treat them",
+  { text: "Carry it back to the bedside and HOLD Q to dress the wound.",
+    hint: "treat them",
+    grace: 75,
     done: () => Game.patients.some(pt => pt.done) || Game.treated > 0 },
-  { text: "Healed! Pick them up and walk them to the green OUT tile",
+  { text: "Badge is green. Pick them up again and walk onto the green OUT tile.",
+    hint: "discharge them",
+    grace: 75,
     done: () => Game.treated > 0 },
-  { text: "Quick discharges chain into combo multipliers. Good luck out there!",
-    done: () => Game.tutorial.t > 5 }
+  { text: "Every discharge leaves the bay rumpled. Empty hands, HOLD Q at the bed to strip it.",
+    hint: "turn the bay over",
+    grace: 75,
+    done: () => !Game.world || !Game.world.beds.some(b => b.dirty) },
+  { text: "That is the whole job. Every condition is the same loop with a longer chain.",
+    hint: "press E to finish",
+    grace: false,                        // this one waits for the player, always
+    done: () => wasPressed("KeyE") || wasPressed("Enter") || wasPressed("Slash") }
 ];
 
 function updateTutorial(dt) {
   const tut = Game.tutorial;
-  if (!tut || tut.stage >= TUTORIAL_STEPS.length) return;
+  if (!tut) return;
+  const step = TUTORIAL_STEPS[tut.stage];
+  if (!step) return;
   tut.t += dt;
-  if (tut.t > 2.0 && TUTORIAL_STEPS[tut.stage].done()) {
+
+  // progress counters for the movement steps, which have nothing else to watch
+  for (const p of Game.players) {
+    if (p.moving) tut.moved++;
+    if (p.moving && Keys[p.ctrl.sprint] && p.stamina > 0) tut.sprinted++;
+  }
+
+  // spawn this step's patient once, and only in the standalone tutorial ward
+  if (step.spawn && !tut.spawned && Game.level && Game.level.tutorial) {
+    tut.spawned = true;
+    const slot = Game.world.waitSlots[0];
+    const pt = makePatient(Game.world, step.spawn, Game.level);
+    if (slot) {
+      pt.slot = slot;
+      pt.path = findPath(Game.world, Game.world.entrance, slot);   // or they stand in the door
+    }
+    Game.patients.push(pt);
+    Sound.play("spawn");
+  }
+
+  /* A short floor on every step so an instruction cannot flash past — but only
+     where the player has something to read. The last step waits on a keypress,
+     so it must not consume one that arrived during the delay. */
+  /* A step must never be a dead end. The two input steps are the risk: a player
+     who does not realise they are being asked to sprint would sit there forever.
+     After a generous grace period the step passes itself — the lesson is worth
+     showing, it is not worth trapping anyone over. */
+  const patient = step.grace !== false && tut.t > (step.grace || 22);
+  if (tut.t > (step.spawn ? 0.6 : 1.1) && (step.done(tut) || patient)) {
     tut.stage++;
     tut.t = 0;
-    Sound.play("step");
+    tut.spawned = false;
+    Sound.play(tut.stage >= TUTORIAL_STEPS.length ? "levelend" : "done");
+    if (tut.stage >= TUTORIAL_STEPS.length && Game.level && Game.level.tutorial)
+      finishTutorial();
   }
+}
+
+/** Leaving the tutorial: remember it was done, and drop the player where they
+    can immediately act on what they just learned. */
+function finishTutorial() {
+  Game.tutorialDone = true;
+  Save.touch();
+  Game.tutorial = null;
+  /* Deliberately NOT clearing Game.world here. updateTutorial runs in the middle
+     of updatePlay, and nulling the world mid-frame crashed updateEffects on the
+     very same tick — the same shape of bug that once killed ward two. The next
+     startLevel disposes the mesh; leaving it alive for one more frame is free. */
+  Game.patients = [];
+  Game.floorItems = [];
+  Game.screen = "select";
+  Game.selectIndex = 0;
+  Sound.play("newbest");
 }
 
 /* Nurse Joy: wanders to the most-stressed settled patient and comforts
@@ -3781,7 +3973,7 @@ function updatePickups(dt) {
   for (const p of Game.players) {
     if (p.boostT > 0) {
       p.boostT -= dt;
-      if (p.boost === "adrenaline") p.stamina = Game.staminaMax;
+      if (p.boost === "adrenaline") p.stamina = p.staminaMax || Game.staminaMax;
       if (p.boostT <= 0) { p.boostT = 0; p.boost = null; }
     }
   }
@@ -3793,7 +3985,7 @@ function applyBoost(p, kind) {
   popup(p.x, p.y - 40, kind.name, kind.color, true);
   burst(p.x, p.y, kind.color, 16);
   Sound.play("newbest");
-  if (kind.key === "adrenaline") p.stamina = Game.staminaMax;
+  if (kind.key === "adrenaline") p.stamina = p.staminaMax || Game.staminaMax;
 }
 
 /** Both medics side by side, both hitting Use: refill and re-light the chain. */
@@ -3806,7 +3998,7 @@ function updateHighFive(dt) {
 
   Game.highFiveCool = 5;
   Game.highFives++;
-  for (const p of Game.players) { p.stamina = Game.staminaMax; p.squash = 0.3; }
+  for (const p of Game.players) { p.stamina = p.staminaMax || Game.staminaMax; p.squash = 0.3; }
   if (Game.combo > 0) Game.comboTimer = Game.comboWindow;   // keeps the chain alive
   Game.score += 120;
   const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
@@ -3837,6 +4029,7 @@ function updatePlay(dt) {
   updateStaff(dt);
   updateHeartMonitor(dt);
   updateTutorial(dt);
+  if (Game.screen !== "play") return;      // the tutorial may have just ended
   updateEffects(dt);
 
   if (Game.builderMode) {
@@ -4582,6 +4775,7 @@ function beginWave(n, fresh) {
     Game.players.push(makePlayer(i, e.x * TILE + TILE / 2 + (i ? 26 : -6),
                                     e.y * TILE + TILE / 2 + 30));
   }
+  applyTraits();
   Game.nurse = null;                        // builder mode uses Game.staff
   Game.screen = "play";
   Sound.play("levelend");
@@ -6537,8 +6731,8 @@ function renderShowcase() {
    numbers to put nameplates and grounding shadows in the right place, so they
    live here rather than being guessed twice. */
 const PORTRAIT = {
-  heroTop: 0.120, heroBot: 0.640,   // hero band, as fractions of canvas height
-  rowTop:  0.660, rowBot:  0.945,   // roster band
+  heroTop: 0.105, heroBot: 0.600,   // hero band, as fractions of canvas height
+  rowTop:  0.700, rowBot:  0.960,   // roster band
   /* Filled in by renderPortraits each frame: where the feet of the hero and of
      each roster medic actually landed on the canvas. The 2D layer draws contact
      shadows and nameplates from these rather than re-deriving them from world
@@ -6987,7 +7181,9 @@ function drawHUD(g) {
 
   // --- clock / level ---
   hudCard(g, 14, 10, 236, HUD_H - 22);
+  const isTut = !!(lvl && lvl.tutorial);
   text(g, Game.builderMode ? ("ER  " + lvl.name)
+        : isTut ? lvl.name
         : ((Game.endless ? "∞" : (Game.levelIndex + 1)) + "  " + lvl.name),
        26, 30, 15, PALETTE.text);
   Game.perksActive.forEach((k, i) => {
@@ -6995,7 +7191,11 @@ function drawHUD(g) {
     drawPerkIcon(g, k, 224 - i * 24, 26, true);
     g.restore();
   });
-  if (Game.endless) {
+  if (isTut) {
+    // no clock and no targets: an Infinity duration would render as garbage, and
+    // more to the point there is nothing here to race or to score
+    text(g, "LEARNING", 26, 70, 22, "#6fd3b4");
+  } else if (Game.endless) {
     text(g, fmtTime(Game.time), 26, 70, 32, "#8be9ff");
     text(g, "SURVIVED", 128, 70, 11, PALETTE.dim);
     text(g, "WAVE " + Game.wave, 128, 52, 12, PALETTE.warn);
@@ -7059,6 +7259,10 @@ function drawHUD(g) {
     text(g, "Best wave  " + (Game.builderBest || "—"), bx + 12, 52, 16, "#6fd3b4");
     text(g, "Treated " + Game.treated + "   Lost " + Game.lost, bx + 12, 74, 12, PALETTE.dim);
     hudDirtyBeds(g, bx + 150, 74);
+  } else if (isTut) {
+    hudCard(g, bx, 10, 250, HUD_H - 22, "ORIENTATION");
+    text(g, "Nothing here can be failed.", bx + 12, 52, 13, "#6fd3b4", "left", "normal");
+    text(g, "Esc to pause  ·  L to leave", bx + 12, 74, 12, PALETTE.dim, "left", "normal");
   } else if (Game.endless) {
     hudCard(g, bx, 10, 250, HUD_H - 22, "PERSONAL BEST");
     text(g, String(Game.endlessBest), bx + 12, 52, 26, "#ffd54a");
@@ -7144,23 +7348,34 @@ function drawTutorial(g) {
   const tut = Game.tutorial;
   if (!tut || tut.stage >= TUTORIAL_STEPS.length) return;
   if (Game.banner) return;                        // never fight the level banner
-  const msg = TUTORIAL_STEPS[tut.stage].text;
+  const step = TUTORIAL_STEPS[tut.stage];
+  const msg = step.text;
   const a = clamp(tut.t * 2.5, 0, 1);
   g.save();
   g.globalAlpha = a;
-  g.font = 'bold 15px "Trebuchet MS", "Segoe UI", sans-serif';
-  const w = g.measureText(msg).width + 84;
-  const bx = W / 2 - w / 2, by = PLAY_Y + 10;
-  g.fillStyle = "rgba(10,18,28,.88)";
-  roundRect(g, bx, by, w, 34, 10); g.fill();
-  g.strokeStyle = "rgba(63,182,232,.6)"; g.lineWidth = 1.5;
-  roundRect(g, bx, by, w, 34, 10); g.stroke();
+  g.font = 'bold 16px "Trebuchet MS", "Segoe UI", sans-serif';
+  const w = Math.min(W - 80, g.measureText(msg).width + 96);
+  const bx = W / 2 - w / 2, by = PLAY_Y + 12;
+  g.fillStyle = "rgba(10,18,28,.90)";
+  roundRect(g, bx, by, w, 56, 12); g.fill();
+  g.strokeStyle = "rgba(63,182,232,.65)"; g.lineWidth = 1.5;
+  roundRect(g, bx, by, w, 56, 12); g.stroke();
   const pulse = 0.7 + 0.3 * Math.sin(performance.now() / 240);
   g.fillStyle = "rgba(63,182,232," + pulse + ")";
-  g.beginPath(); g.arc(bx + 20, by + 17, 5, 0, 6.283); g.fill();
-  text(g, msg, bx + 36, by + 22, 15, "#dff0ff", "left");
-  text(g, (tut.stage + 1) + "/" + TUTORIAL_STEPS.length, bx + w - 14, by + 22, 11, PALETTE.dim, "right");
+  g.beginPath(); g.arc(bx + 22, by + 22, 6, 0, 6.283); g.fill();
+  text(g, msg, bx + 40, by + 27, 16, "#dff0ff", "left");
+  // the ask, restated in three words, because the sentence above is the WHY
+  if (step.hint) text(g, "\u2192  " + step.hint, bx + 40, by + 47, 12.5, "#8be9ff", "left", "normal");
+  text(g, (tut.stage + 1) + " / " + TUTORIAL_STEPS.length,
+       bx + w - 16, by + 27, 12, PALETTE.dim, "right");
   g.restore();
+
+  // a step counter as pips, so progress through the lesson is visible at a glance
+  const px = W / 2 - (TUTORIAL_STEPS.length - 1) * 7;
+  for (let i = 0; i < TUTORIAL_STEPS.length; i++) {
+    g.fillStyle = i < tut.stage ? "#6fd3b4" : (i === tut.stage ? "#ffd54a" : "rgba(255,255,255,.16)");
+    g.beginPath(); g.arc(px + i * 14, by + 70, 4, 0, 6.283); g.fill();
+  }
 }
 
 
@@ -7308,6 +7523,17 @@ function drawTitle(g) {
   const blink = (Math.sin(performance.now() / 320) + 1) / 2;
   g.save(); g.globalAlpha = 0.55 + 0.45 * blink;
   text(g, "Press  1  solo          Press  2  co-op", W / 2, CY - 20, 30, "#ffd54a", "center");
+  if (!Game.tutorialDone) {
+    // first boot: the loudest thing on the screen should be the thing that
+    // teaches you to play it
+    const pulse = 0.55 + 0.45 * Math.sin(performance.now() / 320);
+    g.save(); g.globalAlpha = pulse;
+    text(g, "New here?  Press  T  for a two-minute orientation \u2014 no clock, nothing to lose",
+         W / 2, CY - 48, 17, "#6fd3b4", "center");
+    g.restore();
+  } else {
+    text(g, "T  orientation", W / 2, CY - 48, 13, PALETTE.dim, "center", "normal");
+  }
   g.restore();
 
 }
@@ -7380,6 +7606,16 @@ function drawCharSelect(g) {
     text(g, c.blurb, f.pt.x, blurbY, solo ? 16 : 14, c.scrub, "center", "normal");
     if (who) text(g, who, f.pt.x, nameY - 32, 13,
                   who === "P1" ? PALETTE.p1 : PALETTE.p2, "center");
+    // the trait, spelled out: a pick you cannot read is not a choice
+    const tr = TRAITS[c.trait];
+    if (tr) {
+      const ty = blurbY + (solo ? 30 : 26);
+      const w = solo ? 420 : 300;
+      fillRound(g, f.pt.x - w / 2, ty - 17, w, solo ? 46 : 42, 10, hexA(c.scrub, 0.14));
+      text(g, tr.name.toUpperCase(), f.pt.x, ty, solo ? 14 : 12.5, "#ffd54a", "center");
+      text(g, tr.blurb, f.pt.x, ty + (solo ? 20 : 18), solo ? 13 : 11.5,
+           PALETTE.dim, "center", "normal");
+    }
   }
 
   // --- the roster row, keyed to where the models actually landed -----------
@@ -8716,6 +8952,7 @@ function handleScreenKeys() {
 
   switch (Game.screen) {
     case "title":
+      if (wasPressed("KeyT")) { Game.playerCount = 1; Game.chars = [0, 1]; startLevel(-2); }
       if (wasPressed("Digit1") || wasPressed("Numpad1")) { Game.playerCount = 1; enterCharSelect(); }
       if (wasPressed("Digit2") || wasPressed("Numpad2")) { Game.playerCount = 2; enterCharSelect(); }
       if (wasPressed("KeyH")) { Game.howToFrom = "title"; Game.screen = "howto"; Sound.play("menu"); }
