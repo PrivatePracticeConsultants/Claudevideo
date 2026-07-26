@@ -884,6 +884,173 @@ const LEVELS = [
     
     
     ]
+  },
+  {
+    name: "Night Rounds",
+    blurb: "A single long corridor with the bays off it. The med cabinet is at the wrong end.",
+    seed: 110011,
+    duration: 140,
+    patience: 60,
+    spawnStart: 6.6, spawnEnd: 4.6,
+    maxWaiting: 7,
+    ailments: ["cut", "infection", "fracture", "cardiac", "mystery"],
+    stars: [1850, 3250, 4450],
+    restock: true, jams: true, flatline: true,
+    theme: { floor:"#2f3a4a", floorAlt:"#28323f", wall:"#465a72", wallTop:"#5d7590", base:"#31404f", accent:"#7fb2e0", wood:"#8a6f4e", leaf:"#3f7f58", leaf2:"#579a70", locker:"#4e6378", crate:"#96794f", crate2:"#7f6644", curtain:"#5f7c96", pot:"#7a5340", rug:"#3c4a5c" },
+    props: ["locker", "trolley", "ivpole", "screen", "sign", "gurney"],
+    shutters: [{ x: 27, y: 8, dir: "v", len: 2, phase: 0.2 } ],
+    map: [
+      "################################",
+      "###.........................####",
+      "###.E.mm.................xx.####",
+      "###..####..####..####..####.####",
+      "###..#bb#..#bb#..#bb#..#bb#.####",
+      "###.........................####",
+      "###.O.......................####",
+      "###..#bb#..#bb#..#bb#..#bb#.####",
+      "###..####..####..####..####.####",
+      "###..ll....h.....dd....cc...####",
+      "###..ss.................f...####",
+      "###.........................####",
+      "################################",
+      "################################",
+      "################################",
+      "################################"
+    ]
+  },
+  {
+    name: "The Annexe",
+    blurb: "Somebody bolted a second wing on at right angles. Guess where the cast bench went.",
+    seed: 120012,
+    duration: 140,
+    patience: 65,
+    spawnStart: 6.4, spawnEnd: 4.4,
+    maxWaiting: 7,
+    ailments: ["cut", "infection", "fracture", "cardiac", "mystery"],
+    stars: [1400, 2400, 3250],
+    restock: true, jams: true, flatline: true,
+    theme: { floor:"#f2ead9", floorAlt:"#e8dfcc", wall:"#c08f6a", wallTop:"#d9ab86", base:"#8f6647", accent:"#e0763f", wood:"#b98a58", leaf:"#5aa06a", leaf2:"#7bbb87", locker:"#b9a389", crate:"#cfae7f", crate2:"#b8955f", curtain:"#e0cdb2", pot:"#a76b4c", rug:"#e3d6bd" },
+    props: ["bench", "crates", "plant", "chair", "sign", "cooler"],
+    shutters: [{ x: 16, y: 6, dir: "h", len: 2, phase: 0.45 } ],
+    map: [
+      "################################",
+      "###.........................####",
+      "###.E..ss....bb...bb....xx..####",
+      "###.....................xx..####",
+      "###..###############........####",
+      "###..#############.....bb...####",
+      "###.O...................bb...###",
+      "###..#############..........####",
+      "###..#############.....bb...####",
+      "###..#############.....bb...####",
+      "###..mm...ll..f..h.....cc...####",
+      "###.....dd..................####",
+      "################################",
+      "################################",
+      "################################",
+      "################################"
+    ]
+  },
+  {
+    name: "Overflow",
+    blurb: "Every bay they own, wedged in. The aisles are one medic wide.",
+    seed: 130013,
+    duration: 140,
+    patience: 69,
+    spawnStart: 6.2, spawnEnd: 4.2,
+    maxWaiting: 8,
+    ailments: ["cut", "infection", "fracture", "cardiac", "mystery"],
+    stars: [2150, 3700, 5050],
+    restock: true, jams: true, flatline: true,
+    theme: { floor:"#e6eef2", floorAlt:"#dae4ea", wall:"#7a93a8", wallTop:"#9ab0c2", base:"#566d80", accent:"#4fa8d8", wood:"#a58356", leaf:"#4e9c6b", leaf2:"#6fb886", locker:"#7f97aa", crate:"#bb9a6e", crate2:"#a2825a", curtain:"#a8bfd0", pot:"#8a6350", rug:"#cfdae2" },
+    props: ["gurney", "trolley", "ivpole", "screen", "crates", "locker"],
+    shutters: [{ x: 19, y: 7, dir: "v", len: 2, phase: 0.15 },
+               { x: 10, y: 7, dir: "v", len: 2, phase: 0.6 }],
+    map: [
+      "################################",
+      "###.........................####",
+      "###.E..ss.........mm....xx..####",
+      "###.........................####",
+      "###..bb.bb.bb....bb.bb......####",
+      "###.........................####",
+      "###.O.......................####",
+      "###..bb.bb.bb....bb.bb......####",
+      "###.........................####",
+      "###..f..ll....dd....h....cc.####",
+      "###.........................####",
+      "################################",
+      "################################",
+      "################################",
+      "################################",
+      "################################"
+    ]
+  },
+  {
+    name: "Trauma Bay",
+    blurb: "One big room, every machine stacked on the island in the middle.",
+    seed: 140014,
+    duration: 140,
+    patience: 54,
+    spawnStart: 6.0, spawnEnd: 4.1,
+    maxWaiting: 8,
+    ailments: ["cut", "infection", "fracture", "cardiac", "mystery"],
+    stars: [2100, 3600, 4900],
+    restock: true, jams: true, flatline: true,
+    theme: { floor:"#efe7e7", floorAlt:"#e4dada", wall:"#9c6f74", wallTop:"#bb8b90", base:"#6f4a4f", accent:"#e05f6e", wood:"#a97f5c", leaf:"#4f9a63", leaf2:"#6fb47f", locker:"#a08187", crate:"#c4a077", crate2:"#a98657", curtain:"#d3aeb2", pot:"#96604e", rug:"#ddcdcd" },
+    props: ["screen", "gurney", "ivpole", "bench", "sign", "trolley"],
+    shutters: [{ x: 14, y: 7, dir: "h", len: 2, phase: 0.3 } ],
+    map: [
+      "################################",
+      "###.........................####",
+      "###.E..bb....bb....bb..bb...####",
+      "###.........................####",
+      "###..ss.....xxcc........mm..####",
+      "###.........................####",
+      "###.O.......lldd............####",
+      "###.........................####",
+      "###....bb....bb....bb..bb...####",
+      "###..h.................ss...####",
+      "###.....................f...####",
+      "################################",
+      "################################",
+      "################################",
+      "################################",
+      "################################"
+    ]
+  },
+  {
+    name: "The Long Night",
+    blurb: "The whole hospital at once. Nothing is near anything.",
+    seed: 150015,
+    duration: 150,
+    patience: 51,
+    spawnStart: 5.8, spawnEnd: 3.9,
+    maxWaiting: 9,
+    ailments: ["cut", "infection", "fracture", "cardiac", "mystery"],
+    stars: [2150, 3700, 5050],
+    restock: true, jams: true, flatline: true,
+    theme: { floor:"#232b38", floorAlt:"#1d2531", wall:"#3d4c63", wallTop:"#54667f", base:"#2a3546", accent:"#c39bff", wood:"#7d6349", leaf:"#3a7350", leaf2:"#4f8d66", locker:"#455772", crate:"#8a6f4a", crate2:"#735c3d", curtain:"#4f6580", pot:"#6d4a3c", rug:"#2c3646" },
+    props: ["locker", "gurney", "crates", "screen", "ivpole", "trolley", "sign"],
+    shutters: [{ x: 14, y: 1, dir: "h", len: 2, phase: 0.1 },
+               { x: 23, y: 10, dir: "h", len: 2, phase: 0.55 }],
+    map: [
+      "################################",
+      "###.........................####",
+      "###.E..xx....bb...bb.....ss.####",
+      "###.........................####",
+      "###..####...........####....####",
+      "###..#bb#....mm.....#bb#..f.####",
+      "###.........................####",
+      "###.O.......................####",
+      "###..####...........####....####",
+      "###..#bb#....dd.....#bb#..h.####",
+      "###.........................####",
+      "###..ll.cc.............mm...####",
+      "################################",
+      "################################",
+      "################################",
+      "################################"
+    ]
   }
 ];
 
@@ -1032,9 +1199,17 @@ function closeBlockingCells(world, sh) {
    ward, strand a station, or seal anyone in. If no safe patch exists the event
    simply does nothing rather than risking a softlock. */
 
-/** Would blocking `cells` leave every open tile and every station reachable? */
+/** Would blocking `cells` leave every open tile and every station reachable?
+    Judged against the WORST case — the candidate cells plus every shutter shut
+    at once. Checking the cordon on its own was not enough: on wards with a
+    narrow corridor and a fire door, a cordon that was safe by itself severed
+    the ward the moment the shutter came down (276 severed frames on Night
+    Rounds, 22 on The Annexe). If it holds with everything shut it holds in
+    every state the ward can actually be in. */
 function blockingIsSafe(world, cells) {
   const blocked = new Set(cells.map(c => c.x + "," + c.y));
+  for (const sh of (world.shutters || []))
+    for (const c of sh.cells) blocked.add(c.x + "," + c.y);
   const free = (x, y) => isOpenFloor(world, x, y) && !blocked.has(x + "," + y);
   let total = 0, start = null;
   for (let y = 0; y < ROWS; y++)
@@ -1055,9 +1230,11 @@ function blockingIsSafe(world, cells) {
     .some(([dx, dy]) => seen.has((t.x + dx) + "," + (t.y + dy)));
   if (!reachable(world.entrance) || !reachable(world.exit)) return false;
   for (const st of world.stations) if (!reachable(st)) return false;
-  // and the medics must not be standing in it
+  // and no medic may be standing where the CORDON itself would land (a medic on
+  // an open shutter tile is fine — that is not what we are about to drop)
+  const cordonCells = new Set(cells.map(c => c.x + "," + c.y));
   for (const p of Game.players)
-    if (blocked.has(Math.floor(p.x / TILE) + "," + Math.floor(p.y / TILE))) return false;
+    if (cordonCells.has(Math.floor(p.x / TILE) + "," + Math.floor(p.y / TILE))) return false;
   return true;
 }
 
@@ -1470,9 +1647,9 @@ function makePatient(world, ailmentKey, level) {
     x: world.entrance.x * TILE + TILE / 2,
     y: world.entrance.y * TILE + TILE / 2,
     patienceMax: level.patience * a.patienceMul * (vip ? 0.8 : 1) * sev.patience * workMul
-                 * (Game.diff ? Game.diff.patience : 1),
+                 * (Game.diff ? Game.diff.patience : 1) * SOLO.patience(),
     patience:    level.patience * a.patienceMul * (vip ? 0.8 : 1) * sev.patience * workMul
-                 * (Game.diff ? Game.diff.patience : 1),
+                 * (Game.diff ? Game.diff.patience : 1) * SOLO.patience(),
     state: "walking",     // walking | waiting | carried | bed | station | leaving | gone
     path: [],
     slot: null,
@@ -1503,6 +1680,34 @@ const DIFFS = [
     patience: 0.80, spawn: 0.84, lives: 2, scoreMul: 1.45, color: "#ff8f70" }
 ];
 
+/* Every ward is authored and tuned for two medics, because that is the game it
+   is. One player is not half as effective, they are less than half: they cannot
+   split a fetch from a bedside hold, they cannot cover two ends of the ward,
+   and there is nobody to catch a thrown item or lift a stretcher case. Measured
+   over the campaign, a solo run lands around 0.38-0.54 of the co-op score on
+   the same ward.
+
+   Holding a solo player to co-op pressure therefore is not "the same shift,
+   harder" — it is a different, worse shift. So solo gets genuinely roomier
+   numbers rather than only a lower score bar: more patience, longer gaps
+   between arrivals, and a shorter queue before the doors hold. */
+const SOLO = {
+  /* Measured across the ten wards: slowing solo ARRIVALS down fixed the losses
+     but left the medic standing still — 13% idle on average and 35% on Triage,
+     which is a boring shift, not an easier one. Lengthening the FUSE instead
+     fixes the same losses and keeps idle at 7%. Solo was never short of time;
+     it was short of slack. So arrivals and queue length stay exactly as
+     authored, and the whole adjustment sits in patience plus one extra life. */
+  patienceMul: 1.45,        // a much longer fuse on every arrival
+  spawnMul:    1.00,        // arrivals unchanged — this is what kept it busy
+  waitingMul:  1.00,        // queue length unchanged, for the same reason
+  livesBonus:  1,           // one extra life: there is no partner to cover a slip
+  on:         () => Game.playerCount === 1,
+  patience:   () => (Game.playerCount === 1 ? SOLO.patienceMul : 1),
+  spawn:      () => (Game.playerCount === 1 ? SOLO.spawnMul : 1),
+  maxWaiting: (n) => (Game.playerCount === 1 ? Math.max(2, Math.round(n * SOLO.waitingMul)) : n)
+};
+
 /* Three objectives per ward, checked when the shift ends. They are the reason
    to come back to a level you have already cleared: a score you have beaten
    stops motivating, a medal you are missing does not. */
@@ -1516,10 +1721,31 @@ const CHALLENGES = [
   [ { k: "ailment", a: "cardiac", n: 4 }, { k: "maxlives" }, { k: "treat", n: 12 } ],
   [ { k: "noloss" },              { k: "perfect", n: 6 },{ k: "treat", n: 13 } ],
   [ { k: "clutch", n: 3 },        { k: "chain", n: 6 },  { k: "treat", n: 12 } ],
-  [ { k: "maxlives" },            { k: "chain", n: 6 },  { k: "treat", n: 12 } ]
+  [ { k: "maxlives" },            { k: "chain", n: 6 },  { k: "treat", n: 12 } ],
+  [ { k: "ailment", a: "infection", n: 4 }, { k: "chain", n: 5 }, { k: "treat", n: 12 } ],
+  [ { k: "ailment", a: "fracture", n: 4 },  { k: "noloss" },      { k: "treat", n: 12 } ],
+  [ { k: "clutch", n: 3 },        { k: "perfect", n: 6 }, { k: "treat", n: 13 } ],
+  [ { k: "ailment", a: "mystery", n: 4 },   { k: "chain", n: 6 }, { k: "maxlives" } ],
+  [ { k: "maxlives" },            { k: "clutch", n: 4 },  { k: "treat", n: 13 } ]
 ];
 
+/* Counted objectives are authored for two medics as well. Scale them for solo
+   so the medals are a stretch rather than arithmetic nobody can reach — and so
+   the text on the card always states the number actually being checked. */
+function challengeN(c) {
+  if (c.n === undefined) return undefined;
+  return Game.playerCount === 1 ? Math.max(2, Math.round(c.n * 0.72)) : c.n;
+}
+
 function challengeText(c) {
+  const n = challengeN(c);
+  switch (c.k) {
+    case "chain":    return "Reach a chain of x" + n;
+    case "treat":    return "Treat " + n + " patients";
+    case "perfect":  return n + " perfect discharges";
+    case "clutch":   return n + " clutch saves";
+    case "ailment":  return "Treat " + n + " " + AILMENTS[c.a].name.toLowerCase() + " cases";
+  }
   switch (c.k) {
     case "noloss":   return "Lose nobody";
     case "maxlives": return "Finish without losing a life";
@@ -1536,11 +1762,11 @@ function challengeMet(c) {
   switch (c.k) {
     case "noloss":   return Game.lost === 0 && Game.treated > 0;
     case "maxlives": return Game.lives >= Game.livesMax && Game.treated > 0;
-    case "chain":    return Game.bestCombo >= c.n;
-    case "treat":    return Game.treated >= c.n;
-    case "perfect":  return Game.perfects >= c.n;
-    case "clutch":   return Game.clutches >= c.n;
-    case "ailment":  return (Game.byAilment[c.a] || 0) >= c.n;
+    case "chain":    return Game.bestCombo >= challengeN(c);
+    case "treat":    return Game.treated >= challengeN(c);
+    case "perfect":  return Game.perfects >= challengeN(c);
+    case "clutch":   return Game.clutches >= challengeN(c);
+    case "ailment":  return (Game.byAilment[c.a] || 0) >= challengeN(c);
   }
   return false;
 }
@@ -1570,6 +1796,7 @@ const ACHIEVEMENTS = [
   { key: "sleuth",   name: "Diagnostician",      blurb: "Treat 20 mystery cases." },
   { key: "stars15",  name: "Rising Star",        blurb: "Earn 15 stars." },
   { key: "stars30",  name: "Chief of Medicine",  blurb: "Earn 30 stars." },
+  { key: "stars45",  name: "Whole Hospital",     blurb: "Earn all 45 stars." },
   { key: "overtime", name: "Overtime Hero",      blurb: "Three-star a ward on Overtime." },
   { key: "highfive", name: "Good Team",          blurb: "High-five your partner 10 times." },
   { key: "catch",    name: "Safe Hands",         blurb: "Catch 15 items thrown by your partner." },
@@ -1756,8 +1983,10 @@ function startLevel(index) {
   Game.score = 0;
   Game.scoreShown = 0;
   Game.critical = 1;
-  Game.livesMax = D.lives;
-  Game.lives = D.lives;
+  // solo carries an extra life: co-op can absorb one player's mistake, a lone
+  // medic cannot, and losing a life is what ends the shift
+  Game.livesMax = D.lives + (SOLO.on() ? SOLO.livesBonus : 0);
+  Game.lives = Game.livesMax;
   Game.treated = 0;
   Game.byAilment = {};
   Game.sameRun = 0; Game.lastAilment = null; Game.bestSpecialist = 0;
@@ -2810,10 +3039,11 @@ function currentSpawnInterval() {
   if (Game.endless) {
     // asymptotic squeeze: 8.5s at the start, closing on spawnEnd after ~4 min
     return Math.max(lvl.spawnEnd, lvl.spawnStart - Game.time / 26)
-           * (Game.diff ? Game.diff.spawn : 1) * Game.spawnMul;
+           * (Game.diff ? Game.diff.spawn : 1) * Game.spawnMul * SOLO.spawn();
   }
   const t = clamp(Game.time / lvl.duration, 0, 1);
-  return lerp(lvl.spawnStart, lvl.spawnEnd, t) * (Game.diff ? Game.diff.spawn : 1) * Game.spawnMul;
+  return lerp(lvl.spawnStart, lvl.spawnEnd, t)
+         * (Game.diff ? Game.diff.spawn : 1) * Game.spawnMul * SOLO.spawn();
 }
 
 /** Ambulances arrive on a rhythm, dumping several patients at once. Gives the
@@ -2834,7 +3064,7 @@ function updateSpawning(dt) {
   Game.spawnTimer -= dt;
   if (Game.spawnTimer > 0) return;
 
-  if (waiting >= lvl.maxWaiting) { Game.spawnTimer = 1.0; return; }
+  if (waiting >= SOLO.maxWaiting(lvl.maxWaiting)) { Game.spawnTimer = 1.0; return; }
 
   const free = Game.world.waitSlots.filter(s =>
     !Game.patients.some(p => p.slot && p.slot.x === s.x && p.slot.y === s.y));
@@ -3306,6 +3536,7 @@ function endLevel() {
   if (stars >= 3 && DIFFS[Game.difficulty].key === "overtime") unlockAch("overtime");
   if (totalStars() >= 15) unlockAch("stars15");
   if (totalStars() >= 30) unlockAch("stars30");
+  if (totalStars() >= LEVELS.length * 3) unlockAch("stars45");
 
   Game.result = {
     failed, stars, newBest, gainedStars, xpGain,
@@ -6925,7 +7156,7 @@ function drawHowToFloor(g) {
 
 function drawHowToModes(g) {
   const modes = [
-    ["CAMPAIGN", "#48c3f0", "Ten handmade wards, a little over two minutes each. Score sets your stars; stars unlock the next ward and your perks. Three shift challenges per ward give you a reason to come back."],
+    ["CAMPAIGN", "#48c3f0", "Fifteen handmade wards, a little over two minutes each. Score sets your stars; stars unlock the next ward and your perks. Three shift challenges per ward give you a reason to come back. Playing alone gets roomier patience, calmer arrivals, an extra life and its own score targets."],
     ["NIGHT SHIFT (ENDLESS)", "#c39bff", "No clock. Arrivals tighten forever and every tenth patient buys back a life. Open from the start — pick it on the shift select."],
     ["ER BUILDER (WAVES)", "#6fd3b4", "You design the department. Ninety-second waves; treat patients to earn credits, then between waves buy beds, machines and staff and place them wherever you like. Press start when your ER is ready. Waves escalate; the run ends when you run out of lives. Also open from the start."]
   ];
@@ -6962,7 +7193,7 @@ function drawHowToModes(g) {
     ["Team lift", "Both medics carrying one stretcher case."],
     ["Turnover", "Strip a rumpled bed promptly after a discharge."],
     ["Catch", "Your partner catches an item you threw."],
-    ["Lives", "Three. You lose one when somebody's patience runs out and they walk. At zero the shift ends there and then."]
+    ["Lives", "Three in co-op, four alone. You lose one when somebody's patience runs out and they walk. At zero the shift ends there and then."]
   ];
   fillRound(g, 96, y, 1088, 176, 13, "rgba(255,255,255,.04)");
   text(g, "WHERE THE SCORE COMES FROM", 118, y + 22, 12, "#ffd54a");
@@ -7206,7 +7437,7 @@ function drawSelect(g) {
     { t: "·", c: PALETTE.dim },
     { t: rankName(), c: PALETTE.text },
     { t: "·", c: PALETTE.dim },
-    { t: Game.playerCount === 1 ? "Solo" : "Co-op", c: PALETTE.dim },
+    { t: Game.playerCount === 1 ? "Solo — eased" : "Co-op", c: PALETTE.dim },
     { t: "·", c: PALETTE.dim },
     { t: DIFFS[Game.difficulty].name, c: DIFFS[Game.difficulty].color }
   ];
@@ -7214,25 +7445,40 @@ function drawSelect(g) {
   let lineW = STARW;
   for (const pp of parts) lineW += g.measureText(pp.t).width + GAPX;
   let lx = W / 2 - lineW / 2;
-  drawStar(g, lx + 8, 86, 11, "#ffd54a");
+  drawStar(g, lx + 8, 82, 11, "#ffd54a");
   lx += STARW;
   for (const pp of parts) {
-    text(g, pp.t, lx, 92, 16, pp.c);
+    text(g, pp.t, lx, 88, 16, pp.c);
     lx += g.measureText(pp.t).width + GAPX;
     g.font = 'bold 16px "Trebuchet MS", "Segoe UI", sans-serif';
   }
+  // say out loud that solo is a different set of numbers, so a player coming
+  // from co-op does not read the easier shift as something being broken
+  if (Game.playerCount === 1)
+    text(g, "Playing alone: patients wait longer, you get a fourth life, "
+          + "and the score targets are set for one medic.",
+         W / 2, 106, 12, "#6fd3b4", "center", "normal");
 
-  const cardW = 210, cardH = 192, gap = 14;
+  /* The grid used to assume exactly two rows, which broke the moment the
+     campaign grew past ten wards: the special-mode row was pinned to row 2 and
+     the cards ran off the bottom. Derive the card height from however many rows
+     the current LEVELS array needs, so adding wards never needs a layout edit
+     again. drawLevelCard lays its contents out from cardH for the same reason. */
+  const gap = 12;
+  const rows = Math.ceil(LEVELS.length / SELECT_COLS);
+  const gridTop = 118, gridBottom = H - 168;      // leaves room for the mode row
+  const cardH = Math.min(192, Math.floor((gridBottom - gridTop - (rows - 1) * gap) / rows));
+  const cardW = Math.min(210, Math.floor((1112 - (SELECT_COLS - 1) * gap) / SELECT_COLS));
   const total = SELECT_COLS * cardW + (SELECT_COLS - 1) * gap;
   const x0 = (W - total) / 2;
 
   for (let i = 0; i < LEVELS.length; i++) {
     const col = i % SELECT_COLS, row = Math.floor(i / SELECT_COLS);
-    drawLevelCard(g, i, x0 + col * (cardW + gap), 112 + row * (cardH + gap), cardW, cardH);
+    drawLevelCard(g, i, x0 + col * (cardW + gap), gridTop + row * (cardH + gap), cardW, cardH);
   }
 
   // the two special modes, side by side
-  const ey = 112 + 2 * (cardH + gap), ew = 452, eh = 66;
+  const ey = gridTop + rows * (cardH + gap) + 4, ew = 452, eh = 66;
   const ex = W / 2 - ew - 8;
   const bx2 = W / 2 + 8;
   const selB = Game.selectIndex === BUILDER_SLOT();
@@ -7305,15 +7551,24 @@ function drawLevelCard(g, i, x, y, cardW, cardH) {
   g.lineWidth = sel ? 4 : 1.5;
   roundRect(g, x, y, cardW, cardH, 13); g.stroke();
 
+  /* Everything below is measured off cardH so the card stays legible at any
+     grid size — the select screen shrinks the cards as the campaign grows. */
+  const tall = cardH >= 168;
+  const head = tall ? 30 : 25;
   const num = String(i + 1);
-  text(g, num, x + 14, y + 30, 22, locked ? "#3d4a5c" : "#48c3f0");
-  g.font = 'bold 22px "Trebuchet MS", "Segoe UI", sans-serif';
+  const numSize = tall ? 22 : 18, nameSize = tall ? 15 : 13;
+  text(g, num, x + 12, y + head, numSize, locked ? "#3d4a5c" : "#48c3f0");
+  g.font = 'bold ' + numSize + 'px "Trebuchet MS", "Segoe UI", sans-serif';
   const numW = g.measureText(num).width;
-  text(g, lvl.name, x + 20 + numW + 8, y + 29, 15, locked ? "#4a5666" : PALETTE.text);
+  text(g, lvl.name, x + 18 + numW + 6, y + head - 1, nameSize, locked ? "#4a5666" : PALETTE.text);
 
-  // mini map
-  const mw = cardW - 28, mh = mw * (ROWS / COLS);
-  const mx = x + 14, my = y + 42;
+  // mini map — sized to whatever vertical room is left under the header
+  const footer = tall ? 62 : 52;
+  const my = y + head + 12;
+  let mh = Math.max(30, cardH - (head + 12) - footer);
+  let mw = mh * (COLS / ROWS);
+  if (mw > cardW - 24) { mw = cardW - 24; mh = mw * (ROWS / COLS); }
+  const mx = x + (cardW - mw) / 2;
   g.fillStyle = "#4e8172";
   roundRect(g, mx - 3, my - 3, mw + 6, mh + 6, 5); g.fill();
   const px = mw / COLS, py = mh / ROWS;
@@ -7332,21 +7587,23 @@ function drawLevelCard(g, i, x, y, cardW, cardH) {
     }
   }
 
-  let ix = x + 18;
+  const fy = my + mh + (tall ? 18 : 15);
+  let ix = x + 16;
   for (const key of lvl.ailments) {
     g.globalAlpha = locked ? 0.25 : 1;
-    drawAilmentIcon(g, key, ix, my + mh + 18, 8);
+    drawAilmentIcon(g, key, ix, fy, tall ? 8 : 7);
     g.globalAlpha = 1;
-    ix += 21;
+    ix += tall ? 21 : 18;
   }
 
   for (let s2 = 0; s2 < 3; s2++) {
-    drawStar(g, x + cardW - 62 + s2 * 20, my + mh + 18, 9,
+    drawStar(g, x + cardW - 58 + s2 * 19, fy, tall ? 9 : 8,
       locked ? "#242c36" : (prog.stars > s2 ? "#ffd54a" : "rgba(255,255,255,.14)"));
   }
-  text(g, locked ? "LOCKED" : "Best  " + prog.best, x + cardW / 2, my + mh + 40, 13,
-    locked ? "#4a5666" : PALETTE.dim, "center", "normal");
-  if (!locked) drawMedals(g, null, prog.challenges, x + cardW / 2 - 20, my + mh + 56, 7);
+  text(g, locked ? "LOCKED" : "Best  " + prog.best, x + cardW / 2, fy + (tall ? 22 : 19),
+    tall ? 13 : 12, locked ? "#4a5666" : PALETTE.dim, "center", "normal");
+  if (!locked) drawMedals(g, null, prog.challenges, x + cardW / 2 - 20,
+                          fy + (tall ? 38 : 33), tall ? 7 : 6);
 }
 
 function drawPause(g) {
@@ -7926,7 +8183,13 @@ function handleScreenKeys() {
                  && Game.selectIndex + 1 < LEVELS.length) move(1);
       }
       if (wasPressed("KeyW") || wasPressed("ArrowUp")) {
-        if (special(Game.selectIndex)) { Game.selectIndex = Math.min(LEVELS.length - 1, SELECT_COLS + 2); Sound.play("menu"); }
+        // up from the mode row lands in the middle of the LAST grid row, not a
+        // hard-coded index that assumed a two-row campaign
+        if (special(Game.selectIndex)) {
+          const lastRow = Math.floor((LEVELS.length - 1) / SELECT_COLS);
+          Game.selectIndex = Math.min(LEVELS.length - 1, lastRow * SELECT_COLS + 2);
+          Sound.play("menu");
+        }
         else if (Game.selectIndex >= SELECT_COLS) move(-SELECT_COLS);
       }
       if (wasPressed("KeyS") || wasPressed("ArrowDown")) {
