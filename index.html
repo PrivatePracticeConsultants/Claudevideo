@@ -1308,7 +1308,7 @@ function rankName() {
   for (const x of RANKS) if (t >= x.at) r = x;
   return r.name;
 }
-const ENDLESS_UNLOCK = 6;
+const ENDLESS_UNLOCK = 0;   // open from the first boot
 const endlessUnlocked = () => totalStars() >= ENDLESS_UNLOCK;
 
 function enterCharSelect() {
@@ -1336,6 +1336,7 @@ function startLevel(index) {
   const D = DIFFS[Game.difficulty] || DIFFS[1];
   Game.diff = D;
 
+  if (Game.world) { glMeshDispose(Game.world.mesh); Game.world.mesh = null; }
   Game.world = makeWorld(def);
   Game.rng = makeRng(def.seed);
   Game.patients = [];
@@ -2703,6 +2704,7 @@ function placeStation(world, type, x, y) {
     return "That would block the way through";
   }
   world.waitSlots = computeWaitSlots(world, world.slotTarget || 8);
+  glMeshDispose(world.mesh);
   world.mesh = null;                                    // force a rebake
   return null;
 }
@@ -3023,6 +3025,7 @@ function beginWave(n, fresh) {
     Game.lives = Game.livesMax;
   } else {
     Game.builderWorld.def = def;           // new wave rules, same room
+    glMeshDispose(Game.builderWorld.mesh);
     Game.builderWorld.mesh = null;
     Game.livesMax = D.lives + Game.builder.extraLives;
     Game.lives = Math.min(Game.lives + 0, Game.livesMax);
@@ -3561,13 +3564,17 @@ function glProgram(gl, vs, fs) {
   return p;
 }
 
-/** Upload a MB into GPU buffers. */
+/** Upload a MB into GPU buffers. The mesh remembers its buffers so it can be
+    disposed when a ward is rebaked — before this, every rebake leaked its
+    predecessor's VAO and buffers for the life of the page. */
 function glMesh(mb) {
   const gl = GL.gl;
   const vao = gl.createVertexArray();
   gl.bindVertexArray(vao);
+  const bufs = [];
   const mk = (data, loc, size) => {
     const b = gl.createBuffer();
+    bufs.push(b);
     gl.bindBuffer(gl.ARRAY_BUFFER, b);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(data), gl.STATIC_DRAW);
     gl.enableVertexAttribArray(loc);
@@ -3576,12 +3583,24 @@ function glMesh(mb) {
   };
   mk(mb.p, 0, 3); mk(mb.n, 1, 3); mk(mb.c, 2, 3);
   const ib = gl.createBuffer();
+  bufs.push(ib);
   gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib);
   const big = mb.p.length / 3 > 65535;
   gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,
     big ? new Uint32Array(mb.i) : new Uint16Array(mb.i), gl.STATIC_DRAW);
   gl.bindVertexArray(null);
-  return { vao, count: mb.i.length, type: big ? gl.UNSIGNED_INT : gl.UNSIGNED_SHORT };
+  return { vao, bufs, count: mb.i.length, type: big ? gl.UNSIGNED_INT : gl.UNSIGNED_SHORT };
+}
+
+/** Free a mesh's GPU resources. Safe to call with null / after context loss. */
+function glMeshDispose(mesh) {
+  if (!mesh || !GL.gl) return;
+  const gl = GL.gl;
+  try {
+    if (mesh.bufs) for (const b of mesh.bufs) gl.deleteBuffer(b);
+    if (mesh.vao) gl.deleteVertexArray(mesh.vao);
+  } catch (e) { /* context may already be gone; leaking here is fine */ }
+  mesh.vao = null; mesh.bufs = null;
 }
 
 /* ---------------- shaders ---------------- */
@@ -5009,6 +5028,24 @@ window.addEventListener("resize", fitCanvas);
 fitCanvas();
 initGL(canvas3d);
 
+/* On real GPUs the driver can revoke the context at any moment (memory
+   pressure, driver reset, laptop GPU switch). Unhandled, every GL call fails
+   from then on and the game appears to crash. Handled: we pause rendering,
+   rebuild everything when the context comes back, and carry on. */
+canvas3d.addEventListener("webglcontextlost", (e) => {
+  e.preventDefault();                    // signal that we intend to restore
+  GL.ok = false;
+  GL.lost = true;
+});
+canvas3d.addEventListener("webglcontextrestored", () => {
+  initGL(canvas3d);                      // rebuilds programs, shadow map, primitives
+  // every cached VAO died with the old context — force rebakes everywhere
+  if (Game.world) Game.world.mesh = null;
+  if (Game.builderWorld) Game.builderWorld.mesh = null;
+  if (typeof _showcase !== "undefined" && _showcase) _showcase.mesh = null;
+  GL.lost = false;
+});
+
 /* --- cached paints ------------------------------------------------------ */
 
 const Paint = {};
@@ -5746,7 +5783,7 @@ function drawPerkIcon(g, key, cx, cy, lit) {
 const SELECT_COLS = 5;
 const ENDLESS_SLOT = () => LEVELS.length;
 const BUILDER_SLOT = () => LEVELS.length + 1;
-const BUILDER_UNLOCK = 3;
+const BUILDER_UNLOCK = 0;   // open from the first boot
 const builderUnlocked = () => totalStars() >= BUILDER_UNLOCK;
 
 
@@ -6622,7 +6659,15 @@ function render() {
   ctx.clearRect(0, 0, W, H);
   if (!GL.ok) {
     ctx.fillStyle = "#0d1117"; ctx.fillRect(0, 0, W, H);
-    text(ctx, "This game needs WebGL2.", W / 2, H / 2, 26, "#eaf2ff", "center");
+    if (GL.lost) {
+      const blink = 0.55 + 0.45 * Math.sin(performance.now() / 400);
+      ctx.save(); ctx.globalAlpha = blink;
+      text(ctx, "Graphics paused — restoring…", W / 2, H / 2, 26, "#eaf2ff", "center");
+      ctx.restore();
+      text(ctx, "The game state is safe.", W / 2, H / 2 + 34, 15, "#8a97a8", "center");
+    } else {
+      text(ctx, "This game needs WebGL2.", W / 2, H / 2, 26, "#eaf2ff", "center");
+    }
     return;
   }
 
@@ -6876,23 +6921,55 @@ function handleScreenKeys() {
 
 let lastT = performance.now();
 
+/* The frame loop is armored: any exception in update or render used to kill
+   requestAnimationFrame permanently — the game froze solid and only a reload
+   recovered (this is exactly how the builder-results bug presented). The loop
+   now ALWAYS re-arms, resets GL state after a bad frame, and if errors persist
+   it retreats to a fresh title screen instead of freezing. */
+let _frameErrs = 0, _frameErrSince = 0;
+
 function frame(now) {
+  requestAnimationFrame(frame);          // re-armed FIRST: the loop cannot die
   const dt = Math.min(0.05, (now - lastT) / 1000);
   lastT = now;
 
-  handleScreenKeys();
+  try {
+    handleScreenKeys();
 
-  if (Game.screen === "play") updatePlay(dt);
-  else if (Game.screen === "build") {
-    if (Game.builder) Game.builder.messageT += dt;
-    updateEffects(dt);
+    if (Game.screen === "play") updatePlay(dt);
+    else if (Game.screen === "build") {
+      if (Game.builder) Game.builder.messageT += dt;
+      updateEffects(dt);
+    }
+    else if (Game.screen === "results") { Game.result.t += dt; updateEffects(dt); }
+    else if (Game.screen === "paused") { /* frozen */ }
+
+    render();
+    clearPressed();
+    _frameErrs = 0;
+  } catch (err) {
+    _frameErrs++;
+    if (_frameErrs === 1) { _frameErrSince = now; console.error("frame error:", err); }
+    try {
+      const gl = GL.gl;
+      if (gl) {                          // a mid-pass throw can leave state dirty
+        gl.disable(gl.SCISSOR_TEST);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      }
+      clearPressed();
+      // time-based, not frame-based: at a struggling machine's low fps a frame
+      // count would take an age to trip
+      if (now - _frameErrSince > 4000 && _frameErrs > 8) {
+        console.error("persistent frame errors — returning to title");
+        Game.builderMode = false;
+        Game.staff = [];
+        Game.world = null;
+        Game.result = null;
+        Game.screen = "title";
+        _frameErrs = 0;
+      }
+    } catch (e2) { /* even the recovery must never kill the loop */ }
   }
-  else if (Game.screen === "results") { Game.result.t += dt; updateEffects(dt); }
-  else if (Game.screen === "paused") { /* frozen */ }
-
-  render();
-  clearPressed();
-  requestAnimationFrame(frame);
 }
 
 /* Dev/test hook: lets an automated playtest inspect and drive the game.
