@@ -319,13 +319,24 @@ const CONTROLS = [
 /* --- Playable medics: same plush body, distinct skin/hair/accessory.
    Scrub color stays per-player-slot (P1 blue, P2 coral) so you always know
    who you are; the character defines everything above the collar. */
+/* Each medic owns a scrub colour. Six medics in the same cyan scrubs are one
+   medic drawn six times — there is nothing to recognise and nothing to put on a
+   mug. The scrubs are used on the picker and the title showcase; in the ward
+   itself the body stays P1-blue / P2-orange, because knowing which blob is you
+   at a glance beats knowing which character it is. */
 const CHARACTERS = [
-  { name: "Remy",  blurb: "freckles & curls",   skin: "#ffdcb8", hair: "#b5622e", style: "curls",  acc: "freckles" },
-  { name: "Amara", blurb: "calm under pressure", skin: "#8a5a3b", hair: "#3f3833", style: "none",   acc: "hijab", accColor: "#7fd8c8" },
-  { name: "Kenji", blurb: "reads every chart",  skin: "#f2c898", hair: "#2e2a28", style: "fringe", acc: "glasses" },
-  { name: "Zoe",   blurb: "double puff power",  skin: "#6b4630", hair: "#241f1c", style: "puffs",  acc: "none" },
-  { name: "Sol",   blurb: "sunshine on shift",  skin: "#e8b184", hair: "#f2d06b", style: "fringe", acc: "freckles" },
-  { name: "Nova",  blurb: "certified cat-napper", skin: "#ffe3c4", hair: "#ff9ec2", style: "fringe", acc: "catcap" }
+  { name: "Remy",  blurb: "freckles & curls",   skin: "#ffdcb8", hair: "#b5622e", style: "curls",  acc: "freckles",
+    scrub: "#2fa9bd", cap: "#248fa0" },
+  { name: "Amara", blurb: "calm under pressure", skin: "#8a5a3b", hair: "#3f3833", style: "none",   acc: "hijab", accColor: "#5fc7b4",
+    scrub: "#6d5cd6", cap: "#5a4ac0" },
+  { name: "Kenji", blurb: "reads every chart",  skin: "#f2c898", hair: "#2e2a28", style: "fringe", acc: "glasses",
+    scrub: "#3a6fd0", cap: "#2f5cb4" },
+  { name: "Zoe",   blurb: "double puff power",  skin: "#6b4630", hair: "#241f1c", style: "puffs",  acc: "none",
+    scrub: "#e8654f", cap: "#cc5340" },
+  { name: "Sol",   blurb: "sunshine on shift",  skin: "#e8b184", hair: "#f2d06b", style: "fringe", acc: "freckles",
+    scrub: "#3fae6d", cap: "#329159" },
+  { name: "Nova",  blurb: "certified cat-napper", skin: "#ffe3c4", hair: "#ff9ec2", style: "fringe", acc: "catcap",
+    scrub: "#e2679a", cap: "#c85582" }
 ];
 
 /* --- Perks: unlocked by total stars, pick up to 2 before a shift. --- */
@@ -5508,17 +5519,27 @@ function drawCharacter3D(o) {
     // the whole head and only the eye beads poked through, which read as a
     // balaclava. Built instead from a back-and-top shell, two cheek frames and a
     // drape under the chin, so the face stays open the way a hijab actually sits.
-    const hc = rgb(look.accColor || "#7fd8c8");
-    p = P(0, HY + 0.015, -0.130);
-    drawMesh(MESH.sphere, p[0], p[1], p[2], ry, 0.408*S, 0.402*S, 0.330*S, hc);
+    const hc = rgb(look.accColor || "#5fc7b4");
+    // Every piece stays BEHIND the plane of the face. The previous version had
+    // the shell only a hair bigger than the head and the cheek frames sitting
+    // forward of the cheeks, so the fabric closed over the face and she read as
+    // a face behind frosted glass rather than a face being framed.
+    p = P(0, HY + 0.030, -0.175);
+    drawMesh(MESH.sphere, p[0], p[1], p[2], ry, 0.412*S, 0.408*S, 0.335*S, hc);
+    // narrow side panels, set back level with the ears
     for (const sx of [-1, 1]) {
-      p = P(sx * 0.300, HY - 0.070, 0.075);
-      drawMesh(MESH.sphere, p[0], p[1], p[2], ry, 0.125*S, 0.300*S, 0.235*S, hc);
+      p = P(sx * 0.330, HY - 0.075, -0.045);
+      drawMesh(MESH.sphere, p[0], p[1], p[2], ry, 0.095*S, 0.290*S, 0.265*S, hc);
     }
-    p = P(0, HY + 0.235, 0.060);
-    drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.300*S, 0.135*S, 0.215*S, hc);
-    p = P(0, HY - 0.320, 0.020);
-    drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.235*S, 0.150*S, 0.195*S, hc);
+    // crown, plus a forehead band so no scalp shows above the wrap: the shell is
+    // set back far enough that the top of the head peeked out in front of it
+    p = P(0, HY + 0.215, -0.055);
+    drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.320*S, 0.155*S, 0.285*S, hc);
+    p = P(0, HY + 0.150, 0.100);
+    drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.330*S, 0.170*S, 0.290*S, hc);
+    // and a drape that gathers at the neck rather than across the mouth
+    p = P(0, HY - 0.430, -0.040);
+    drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.255*S, 0.170*S, 0.225*S, hc);
   } else if (look.acc === "beanie") {
     const hc = rgb(look.accColor || "#e8846b");
     p = P(0, HY + 0.160, -0.01);
@@ -6120,7 +6141,41 @@ function renderShowcase() {
   CAM.tx = keep.tx; CAM.ty = keep.ty; CAM.tz = keep.tz;
 }
 
-/** Six medics on a turntable for the character picker. */
+/* Where the picker's portraits sit, in screen space. The 2D pass needs the same
+   numbers to put nameplates and grounding shadows in the right place, so they
+   live here rather than being guessed twice. */
+const PORTRAIT = {
+  heroTop: 0.120, heroBot: 0.640,   // hero band, as fractions of canvas height
+  rowTop:  0.660, rowBot:  0.945,   // roster band
+  /* Filled in by renderPortraits each frame: where the feet of the hero and of
+     each roster medic actually landed on the canvas. The 2D layer draws contact
+     shadows and nameplates from these rather than re-deriving them from world
+     spacing and camera distance — that guess is what put the pips across the
+     full width while the models sat clustered in the middle. */
+  heroFoot: { x: 640, y: 460 },
+  heroFeet: [],
+  rowFeet: []
+};
+
+/** Project a world point through the current camera into canvas pixels, for a
+    render band occupying [top, bot] of the canvas height. */
+function bandProject(wx, wy, wz, top, bot) {
+  const m = GL.viewProj;
+  const cw = m[3]*wx + m[7]*wy + m[11]*wz + m[15];
+  if (cw <= 0.001) return null;
+  const nx = (m[0]*wx + m[4]*wy + m[8]*wz + m[12]) / cw;
+  const ny = (m[1]*wx + m[5]*wy + m[9]*wz + m[13]) / cw;
+  return { x: (nx * 0.5 + 0.5) * W,
+           y: (top + (1 - (ny * 0.5 + 0.5)) * (bot - top)) * H };
+}
+
+/** The picker: one big hero medic for whoever is highlighted, and a small row
+    of all six underneath.
+    Six medics side by side at dist 15 rendered every plush detail at about
+    forty pixels tall — the seams, ears, blush and eye highlights that make them
+    worth looking at were all sub-pixel, and a flat 0.78 ambient on top left
+    them hazy enough to read as translucent. One hero at close range shows the
+    toy; the row still shows the roster. */
 function renderPortraits() {
   setCharDetail(true);
   const gl = GL.gl;
@@ -6132,18 +6187,18 @@ function renderPortraits() {
 
   const n = CHARACTERS.length;
   const keep = { d: CAM.dist, p: CAM.pitch, tx: CAM.tx, ty: CAM.ty, tz: CAM.tz };
-  CAM.tx = 0; CAM.ty = 0.30; CAM.tz = 0; CAM.pitch = 0.20; CAM.dist = 15.0;
-  buildCamera(W / H, 0);
   gl.useProgram(GL.prog);
   const u = GL.prog.u;
-  // portrait key light sits beside the camera so faces are lit, not silhouetted
-  const kl = Math.hypot(0.34, 0.60, 0.72);
+  // Key light beside the camera so faces are lit rather than silhouetted, and a
+  // much lower fill than before: at 0.78 ambient there was no light-to-dark
+  // falloff anywhere on the model, and a plush toy with no shading on it looks
+  // like frosted glass.
+  const kl = Math.hypot(0.40, 0.66, 0.70);
   m4Identity(GL.lightVP);
-  gl.uniform3fv(u.uCam, GL.camEye);
-  gl.uniform3f(u.uLightDir, -0.34/kl, 0.60/kl, 0.72/kl);
+  gl.uniform3f(u.uLightDir, -0.40/kl, 0.66/kl, 0.70/kl);
   gl.uniformMatrix4fv(u.uLightVP, false, GL.lightVP);
   gl.uniform1f(u.uShadowTexel, 1 / GL.SHADOW_RES);
-  gl.uniform1f(u.uAmb, 0.78); gl.uniform1f(u.uKey, 0.92);
+  gl.uniform1f(u.uAmb, 0.44); gl.uniform1f(u.uKey, 1.10);
   gl.uniform1f(u.uShadowOn, 0);
   gl.activeTexture(gl.TEXTURE0);
   gl.bindTexture(gl.TEXTURE_2D, GL.shadowTex);
@@ -6151,19 +6206,70 @@ function renderPortraits() {
   _pass = "main";
 
   const t = performance.now() / 1000;
-  for (let i = 0; i < n; i++) {
-    const sel = Game.charCursor[0] === i || (Game.playerCount === 2 && Game.charCursor[1] === i);
-    const spread = 2.5;
-    const wx = (i - (n - 1) / 2) * spread;
+  const hero = clamp(Game.charCursor[0] | 0, 0, n - 1);
+
+  /* Two viewport bands rather than one camera for both. Trying to place the
+     hero and the roster in the same frustum meant guessing a CAM.ty that put
+     each at the right screen height, and the 2D nameplates and contact shadows
+     then had to guess the same number again. A band per group makes both
+     positions exact. GL's y runs from the bottom, hence the flip. */
+  const band = (top, bot) => {
+    const h = Math.round((bot - top) * H);
+    gl.viewport(0, Math.round((1 - bot) * H), W, h);
+    return W / h;
+  };
+
+  /* The hero band shows whoever is highlighted, close enough to see the
+     stitching. In two-player it shows BOTH picks side by side — this is a co-op
+     game and P2 was previously choosing blind, with only a 60px roster portrait
+     to go on. When both players are on the same medic there is only one to show. */
+  const hero2 = Game.playerCount === 2 ? clamp(Game.charCursor[1] | 0, 0, n - 1) : hero;
+  const twoHeroes = Game.playerCount === 2 && hero2 !== hero;
+  let aspect = band(PORTRAIT.heroTop, PORTRAIT.heroBot);
+  CAM.tx = 0; CAM.ty = 0.86; CAM.tz = 0; CAM.pitch = 0.08;
+  CAM.dist = twoHeroes ? 8.2 : 5.6;
+  buildCamera(aspect, 0);
+  gl.uniform3fv(u.uCam, GL.camEye);
+  const heroSlots = twoHeroes ? [[hero, -1.35], [hero2, 1.35]] : [[hero, 0]];
+  PORTRAIT.heroFeet = [];
+  for (const [idx, hx] of heroSlots) {
+    const c = CHARACTERS[idx];
     drawCharacter3D({
-      wx, wz: 0, ry: Math.sin(t * 0.6 + i) * 0.5,
-      bob: t * 2 + i, step: 0, moving: false,
-      body: Game.charCursor[1] === i && Game.charCursor[0] !== i ? "#ff8f70" : "#4fb8e8",
-      cap: Game.charCursor[1] === i && Game.charCursor[0] !== i ? "#ff8f70" : "#4fb8e8",
-      look: CHARACTERS[i],
-      scale: sel ? 1.12 : 0.94
+      wx: hx, wz: 0, ry: Math.sin(t * 0.5 + idx) * 0.42,
+      bob: t * 1.6 + idx, step: 0, moving: false,
+      body: c.scrub, cap: c.cap, look: c, scale: 1.0
+    });
+    PORTRAIT.heroFeet.push({
+      idx,
+      pt: bandProject(hx, 0.02, 0, PORTRAIT.heroTop, PORTRAIT.heroBot)
+          || { x: W / 2, y: H * 0.6 }
     });
   }
+  PORTRAIT.heroFoot = PORTRAIT.heroFeet[0].pt;
+
+  // --- the roster, small, all six, so you can see who else there is --------
+  aspect = band(PORTRAIT.rowTop, PORTRAIT.rowBot);
+  CAM.tx = 0; CAM.ty = 0.60; CAM.tz = 0; CAM.pitch = 0.10; CAM.dist = 10.4;
+  buildCamera(aspect, 0);
+  gl.uniform3fv(u.uCam, GL.camEye);
+  PORTRAIT.rowFeet = [];
+  for (let i = 0; i < n; i++) {
+    const c = CHARACTERS[i];
+    const p1Here = Game.charCursor[0] === i;
+    const p2Here = Game.playerCount === 2 && Game.charCursor[1] === i;
+    const wx = (i - (n - 1) / 2) * 2.10;
+    drawCharacter3D({
+      wx, wz: 0,
+      ry: Math.sin(t * 0.6 + i) * 0.30,
+      bob: t * 2 + i, step: 0, moving: false,
+      body: c.scrub, cap: c.cap, look: c,
+      scale: (p1Here || p2Here) ? 0.92 : 0.74
+    });
+    PORTRAIT.rowFeet[i] = bandProject(wx, 0.02, 0, PORTRAIT.rowTop, PORTRAIT.rowBot)
+                          || { x: W / 2, y: H * 0.92 };
+  }
+
+  gl.viewport(0, 0, W, H);
   CAM.dist = keep.d; CAM.pitch = keep.p;
   CAM.tx = keep.tx; CAM.ty = keep.ty; CAM.tz = keep.tz;
 }
@@ -6812,70 +6918,109 @@ function keyCap(g, label, x, y) {
 }
 
 function drawCharSelect(g) {
-  // only a whisper of scrim: the models behind are the point of this screen
-  g.fillStyle = "rgba(8,13,22,.12)";
-  g.fillRect(0, 0, W, H);
-  const top = g.createLinearGradient(0, 0, 0, 200);
-  top.addColorStop(0, "rgba(8,13,22,.85)"); top.addColorStop(1, "rgba(8,13,22,0)");
-  g.fillStyle = top; g.fillRect(0, 0, W, 200);
-  const bot = g.createLinearGradient(0, H - 200, 0, H);
-  bot.addColorStop(0, "rgba(8,13,22,0)"); bot.addColorStop(1, "rgba(8,13,22,.85)");
-  g.fillStyle = bot; g.fillRect(0, H - 200, W, 200);
+  /* The 3D pass has already drawn a big hero medic and a small row of six. All
+     this layer does is ground them (a soft ellipse under each, so they sit on
+     something instead of floating in space), label them, and show the lock-in
+     state. Deliberately no panels over the models — they are the screen. */
+  const top = g.createLinearGradient(0, 0, 0, 170);
+  top.addColorStop(0, "rgba(8,13,22,.92)"); top.addColorStop(1, "rgba(8,13,22,0)");
+  g.fillStyle = top; g.fillRect(0, 0, W, 170);
+  const bot = g.createLinearGradient(0, H - 130, 0, H);
+  bot.addColorStop(0, "rgba(8,13,22,0)"); bot.addColorStop(1, "rgba(8,13,22,.90)");
+  g.fillStyle = bot; g.fillRect(0, H - 130, W, 130);
 
-  text(g, "CHOOSE YOUR MEDIC", W / 2, 84, 40, PALETTE.text, "center");
+  text(g, "CHOOSE YOUR MEDIC", W / 2, 68, 38, PALETTE.text, "center");
   text(g, Game.playerCount === 2 ? "P1: A/D + E to lock in      P2: arrows + / to lock in"
                                  : "A / D to browse      E to lock in",
-       W / 2, 118, 16, PALETTE.dim, "center", "normal");
+       W / 2, 98, 15, PALETTE.dim, "center", "normal");
 
-  const cardW = 190, gap = 16;
-  const total = CHARACTERS.length * cardW + (CHARACTERS.length - 1) * gap;
-  const x0 = (W - total) / 2;
+  const n = CHARACTERS.length;
+  const hero = clamp(Game.charCursor[0] | 0, 0, n - 1);
+  const hc = CHARACTERS[hero];
 
-  for (let i = 0; i < CHARACTERS.length; i++) {
+  /** Soft contact shadow. Without one, a lit model on a dark field reads as a
+      cut-out sticker rather than an object. */
+  const groundShade = (cx, cy, rx, alpha) => {
+    const gr = g.createRadialGradient(cx, cy, 1, cx, cy, rx);
+    gr.addColorStop(0, "rgba(0,0,0," + alpha + ")");
+    gr.addColorStop(0.55, "rgba(0,0,0," + alpha * 0.45 + ")");
+    gr.addColorStop(1, "rgba(0,0,0,0)");
+    g.save(); g.translate(cx, cy); g.scale(1, 0.30); g.translate(-cx, -cy);
+    g.fillStyle = gr; g.beginPath(); g.arc(cx, cy, rx, 0, 6.283); g.fill();
+    g.restore();
+  };
+
+  // --- heroes: a tinted pool in each medic's own scrub colour, then a shadow -
+  const feet = PORTRAIT.heroFeet && PORTRAIT.heroFeet.length
+             ? PORTRAIT.heroFeet : [{ idx: hero, pt: PORTRAIT.heroFoot }];
+  const solo = feet.length === 1;
+  for (const f of feet) {
+    const c = CHARACTERS[f.idx], hx = f.pt.x, hFloor = f.pt.y;
+    const rad = solo ? 230 : 155;
+    const pool = g.createRadialGradient(hx, hFloor, 6, hx, hFloor, rad);
+    pool.addColorStop(0, hexA(c.scrub, 0.24));
+    pool.addColorStop(1, hexA(c.scrub, 0));
+    g.save(); g.translate(hx, hFloor); g.scale(1, 0.30); g.translate(-hx, -hFloor);
+    g.fillStyle = pool; g.beginPath(); g.arc(hx, hFloor, rad, 0, 6.283); g.fill();
+    g.restore();
+    groundShade(hx, hFloor, solo ? 96 : 66, 0.6);
+  }
+
+  // --- hero names ----------------------------------------------------------
+  const nameY = H * PORTRAIT.heroBot + 6, blurbY = H * PORTRAIT.heroBot + 30;
+  for (const f of feet) {
+    const c = CHARACTERS[f.idx];
+    const who = feet.length > 1 ? (f.idx === Game.charCursor[0] ? "P1" : "P2") : null;
+    text(g, c.name.toUpperCase(), f.pt.x, nameY, solo ? 40 : 30, PALETTE.text, "center");
+    text(g, c.blurb, f.pt.x, blurbY, solo ? 16 : 14, c.scrub, "center", "normal");
+    if (who) text(g, who, f.pt.x, nameY - 32, 13,
+                  who === "P1" ? PALETTE.p1 : PALETTE.p2, "center");
+  }
+
+  // --- the roster row, keyed to where the models actually landed -----------
+  for (let i = 0; i < n; i++) {
+    const foot = PORTRAIT.rowFeet[i];
+    if (!foot) continue;
     const c = CHARACTERS[i];
-    const x = x0 + i * (cardW + gap), y = 172, h = 400;
+    const cx = foot.x, rowFloor = foot.y;
     const p1Here = Game.charCursor[0] === i;
     const p2Here = Game.playerCount === 2 && Game.charCursor[1] === i;
-
-    // no flat fill over the model — just a floor glow under the selected medic
-    if (p1Here || p2Here) {
-      const glow = g.createRadialGradient(x + cardW / 2, y + h - 70, 4,
-                                          x + cardW / 2, y + h - 70, cardW * 0.62);
-      const c0 = p1Here && p2Here ? "255,213,74" : (p1Here ? "79,184,232" : "255,143,112");
-      glow.addColorStop(0, "rgba(" + c0 + ",.22)");
-      glow.addColorStop(1, "rgba(" + c0 + ",0)");
-      g.fillStyle = glow;
-      roundRect(g, x, y, cardW, h, 16); g.fill();
-    }
-    // name plate keeps the text legible over the model
-    g.fillStyle = "rgba(8,13,22,.74)";
-    roundRect(g, x + 8, y + h - 84, cardW - 16, 62, 12); g.fill();
-    if (p1Here || p2Here) {
+    const on = p1Here || p2Here;
+    groundShade(cx, rowFloor, on ? 34 : 27, 0.55);
+    if (on) {
       g.strokeStyle = p1Here && p2Here ? "#ffd54a" : (p1Here ? PALETTE.p1 : PALETTE.p2);
-      g.lineWidth = 4;
-      roundRect(g, x - 2, y - 2, cardW + 4, h + 4, 18); g.stroke();
+      g.lineWidth = 3;
+      roundRect(g, cx - 30, rowFloor - 76, 60, 90, 12); g.stroke();
+    } else {
+      // a scrub-coloured pip so the roster reads as six people, not six poses
+      g.fillStyle = hexA(c.scrub, 0.85);
+      g.beginPath(); g.arc(cx, rowFloor + 14, 3.5, 0, 6.283); g.fill();
     }
-
-    text(g, c.name, x + cardW / 2, y + h - 54, 23, PALETTE.text, "center");
-    text(g, c.blurb, x + cardW / 2, y + h - 34, 12, PALETTE.dim, "center", "normal");
-
-    // lock-in ribbons
-    const ribbon = (slot, color, ty) => {
-      if (Game.charCursor[slot] !== i || !Game.charLocked[slot]) return;
-      g.fillStyle = color;
-      roundRect(g, x + 14, ty, cardW - 28, 24, 8); g.fill();
-      text(g, "P" + (slot + 1) + "  READY!", x + cardW / 2, ty + 17, 13, "#10202e", "center");
-    };
-    ribbon(0, PALETTE.p1, y + h - 54);
-    ribbon(1, PALETTE.p2, y + h - 26);
+    if (p1Here && Game.charLocked[0]) lockTag(g, "P1", PALETTE.p1, cx, rowFloor - 90);
+    if (p2Here && Game.charLocked[1])
+      lockTag(g, "P2", PALETTE.p2, cx, rowFloor - (p1Here && Game.charLocked[0] ? 114 : 90));
   }
 
   const blink = 0.55 + 0.45 * Math.sin(performance.now() / 300);
   g.save(); g.globalAlpha = blink;
   text(g, Game.playerCount === 2 ? "both medics lock in to continue" : "lock in to continue",
-       W / 2, 622, 18, "#ffd54a", "center");
+       W / 2, H - 46, 17, "#ffd54a", "center");
   g.restore();
-  text(g, "Esc  back to title", W / 2, 652, 14, PALETTE.dim, "center", "normal");
+  text(g, "Esc  back to title", W / 2, H - 22, 13, PALETTE.dim, "center", "normal");
+}
+
+/** A little READY! flag under a roster portrait. */
+function lockTag(g, who, color, cx, cy) {
+  g.fillStyle = color;
+  roundRect(g, cx - 40, cy - 12, 80, 22, 8); g.fill();
+  text(g, who + "  READY!", cx, cy + 4, 12, "#10202e", "center");
+}
+
+/** "#rrggbb" plus an alpha, as an rgba() string. */
+function hexA(hex, a) {
+  const h = hex.replace("#", "");
+  return "rgba(" + parseInt(h.slice(0, 2), 16) + "," + parseInt(h.slice(2, 4), 16)
+       + "," + parseInt(h.slice(4, 6), 16) + "," + a + ")";
 }
 
 function drawPerks(g) {
