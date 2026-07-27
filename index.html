@@ -1022,7 +1022,8 @@ const RECIPES = {
   lab: [{ need: "swab", out: null, dur: 2.6, labWork: true, label: "Sniff the swab" }],
   hatch: [{ need: null, out: "crate", dur: 1.4, label: "Collect supplies" }],
   wanddock: [],
-  basket: []
+  basket: [],
+  fusebox: []          // worked by its own code path, not by a recipe
 };
 
 /* --- Levels -------------------------------------------------------------
@@ -1128,7 +1129,7 @@ const LEVELS = [
         theme: { floor:"#f4e9e4", floorAlt:"#ecdfd9", wall:"#e0a79f", wallTop:"#eec3bc", base:"#c17f76",
              accent:"#e2645f", wood:"#c08f63", leaf:"#5aa870", leaf2:"#7cc38d", pot:"#b06a54",
              locker:"#c39a92", crate:"#d3a97e", crate2:"#bf9268", curtain:"#eab8b0", rug:"#e8cfc8" },
-    props: ["gurney","trolley","crates","ivpole","screen","sign"],
+    props: ["carrier","trolley","crates","scratchpost","screen","sign"],
     shutters: [{ x: 17, y: 11, dir: "h", len: 2, phase: 0.0 } ],
     map: [
       "################################",
@@ -1169,7 +1170,7 @@ const LEVELS = [
         theme: { floor:"#e9e6de", floorAlt:"#e0ddd4", wall:"#8fa398", wallTop:"#aab9b0", base:"#6a7d73",
              accent:"#7fb08d", wood:"#b08a5e", leaf:"#4f9d66", leaf2:"#6fb87f", pot:"#a5714f",
              locker:"#8b9d94", crate:"#c4a276", crate2:"#ae8d64", curtain:"#aec5b6", rug:"#d3d6cd" },
-    props: ["locker","crates","trolley","sign","bench","ivpole"],
+    props: ["locker","crates","trolley","sign","bench","scratchpost"],
     shutters: [{ x: 17, y: 7, dir: "h", len: 2, phase: 0.2 },
                { x: 12, y: 9, dir: "h", len: 2, phase: 0.6 }],
     map: [
@@ -1211,7 +1212,7 @@ const LEVELS = [
         theme: { floor:"#e6eef4", floorAlt:"#dce6ee", wall:"#7fa8c9", wallTop:"#a2c4dd", base:"#57809f",
              accent:"#3fa9e8", wood:"#a98d68", leaf:"#4fa87e", leaf2:"#72c39a", pot:"#9c6f57",
              locker:"#7f9db4", crate:"#bfa079", crate2:"#a98a66", curtain:"#9dc2dd", rug:"#c6dae8" },
-    props: ["ivpole","gurney","screen","trolley","locker","cooler"],
+    props: ["scratchpost","carrier","screen","trolley","locker","cooler"],
     shutters: [{ x: 17, y: 9, dir: "h", len: 2, phase: 0.35 } ],
     map: [
       "################################",
@@ -1276,7 +1277,7 @@ const LEVELS = [
   },
   {
     name: "The Warren",
-    blurb: "Winding corridors and dead ends. Learn the routes or lose the run.",
+    blurb: "Winding corridors and blind corners. Learn the routes or lose the run.",
     seed: 71002,
     duration: 140,
     patience: 62,
@@ -1358,7 +1359,7 @@ const LEVELS = [
         theme: { floor:"#f6f3ec", floorAlt:"#ece8df", wall:"#dfe4e9", wallTop:"#f0f3f6", base:"#a9b4bf",
              accent:"#f2803c", wood:"#c99a63", leaf:"#5fb872", leaf2:"#83d290", pot:"#cf7d4f",
              locker:"#b8c3cd", crate:"#d9b483", crate2:"#c39a6a", curtain:"#d3dde6", rug:"#e4e8ec" },
-    props: ["chair","bench","vending","trolley","gurney","sign","cooler"],
+    props: ["chair","bench","vending","trolley","carrier","sign","cooler"],
     shutters: [{ x: 16, y: 7, dir: "h", len: 1, phase: 0.15 },
                { x: 14, y: 11, dir: "h", len: 2, phase: 0.65 }],
     zones: [{ x: 17, y: 1, w: 10, h: 4, up: 20, down: 8, phase: 0.15 }],
@@ -1395,7 +1396,7 @@ const LEVELS = [
         theme: { floor:"#dfe4e4", floorAlt:"#d5dbdb", wall:"#5f7d80", wallTop:"#7d9c9e", base:"#41595c",
              accent:"#f0b23f", wood:"#9c7a52", leaf:"#489a63", leaf2:"#69b57e", pot:"#8a5f45",
              locker:"#63817f", crate:"#ae8f66", crate2:"#977a55", curtain:"#7f9ea0", rug:"#c4cdcd" },
-    props: ["gurney","ivpole","screen","locker","crates","trolley","sign"],
+    props: ["carrier","scratchpost","screen","locker","crates","trolley","sign"],
     shutters: [{ x: 17, y: 9, dir: "h", len: 2, phase: 0.3 },
                { x: 13, y: 11, dir: "h", len: 2, phase: 0.7 }],
     zones: [{ x: 4, y: 4, w: 9, h: 6, up: 19, down: 9, phase: 0.3 }],
@@ -1430,7 +1431,7 @@ const LEVELS = [
     stars: [1850, 3250, 4450],
     restock: true, jams: true, bigExit: true,
     theme: { floor:"#2f3a4a", floorAlt:"#28323f", wall:"#465a72", wallTop:"#5d7590", base:"#31404f", accent:"#7fb2e0", wood:"#8a6f4e", leaf:"#3f7f58", leaf2:"#579a70", locker:"#4e6378", crate:"#96794f", crate2:"#7f6644", curtain:"#5f7c96", pot:"#7a5340", rug:"#3c4a5c" },
-    props: ["locker", "trolley", "ivpole", "screen", "sign", "gurney"],
+    props: ["locker", "trolley", "scratchpost", "screen", "sign", "carrier"],
     shutters: [{ x: 27, y: 8, dir: "v", len: 2, phase: 0.2 } ],
     zones: [{ x: 18, y: 2, w: 9, h: 7, up: 18, down: 9, phase: 0.05 }],
     map: [
@@ -1500,7 +1501,7 @@ const LEVELS = [
     stars: [2150, 3700, 5050],
     restock: true, jams: true, bigExit: true,
     theme: { floor:"#e6eef2", floorAlt:"#dae4ea", wall:"#7a93a8", wallTop:"#9ab0c2", base:"#566d80", accent:"#4fa8d8", wood:"#a58356", leaf:"#4e9c6b", leaf2:"#6fb886", locker:"#7f97aa", crate:"#bb9a6e", crate2:"#a2825a", curtain:"#a8bfd0", pot:"#8a6350", rug:"#cfdae2" },
-    props: ["gurney", "trolley", "ivpole", "screen", "crates", "locker"],
+    props: ["carrier", "trolley", "scratchpost", "screen", "crates", "locker"],
     shutters: [{ x: 19, y: 7, dir: "v", len: 2, phase: 0.15 },
                { x: 10, y: 7, dir: "v", len: 2, phase: 0.6 },
                { x: 15, y: 10, dir: "h", len: 2, phase: 0.0, swing: true },
@@ -1537,7 +1538,7 @@ const LEVELS = [
     stars: [2100, 3600, 4900],
     restock: true, jams: true, bigExit: true,
     theme: { floor:"#efe7e7", floorAlt:"#e4dada", wall:"#9c6f74", wallTop:"#bb8b90", base:"#6f4a4f", accent:"#e05f6e", wood:"#a97f5c", leaf:"#4f9a63", leaf2:"#6fb47f", locker:"#a08187", crate:"#c4a077", crate2:"#a98657", curtain:"#d3aeb2", pot:"#96604e", rug:"#ddcdcd" },
-    props: ["screen", "gurney", "ivpole", "bench", "sign", "trolley"],
+    props: ["screen", "carrier", "scratchpost", "bench", "sign", "trolley"],
     shutters: [{ x: 14, y: 7, dir: "h", len: 2, phase: 0.3 },
                { x: 15, y: 5, dir: "h", len: 1, phase: 0.0, swing: true },
                { x: 20, y: 10, dir: "h", len: 2, phase: 0.5, swing: true }],
@@ -1573,7 +1574,7 @@ const LEVELS = [
     stars: [2150, 3700, 5050],
     restock: true, jams: true, bigExit: true,
     theme: { floor:"#232b38", floorAlt:"#1d2531", wall:"#3d4c63", wallTop:"#54667f", base:"#2a3546", accent:"#c39bff", wood:"#7d6349", leaf:"#3a7350", leaf2:"#4f8d66", locker:"#455772", crate:"#8a6f4a", crate2:"#735c3d", curtain:"#4f6580", pot:"#6d4a3c", rug:"#2c3646" },
-    props: ["locker", "gurney", "crates", "screen", "ivpole", "trolley", "sign"],
+    props: ["locker", "carrier", "crates", "screen", "scratchpost", "trolley", "sign"],
     shutters: [{ x: 14, y: 1, dir: "h", len: 2, phase: 0.1 },
                { x: 23, y: 10, dir: "h", len: 2, phase: 0.55 },
                { x: 18, y: 1, dir: "h", len: 2, phase: 0.0, swing: true },
@@ -1644,7 +1645,7 @@ const LEVELS = [
     stars: [2100, 3600, 4950],
     restock: true, jams: true, bigExit: true,
     theme: { floor:"#e9eef2", floorAlt:"#dee5ea", wall:"#7f93a6", wallTop:"#9db0c1", base:"#546678", accent:"#4fb0d8", wood:"#b08a5c", leaf:"#57a06d", leaf2:"#78bb86", locker:"#8ea4b5", crate:"#c9a97c", crate2:"#b08f5f", curtain:"#c2d4e0", pot:"#96604e", rug:"#d7e0e6" },
-    props: ["gurney", "ivpole", "screen", "sign", "bench", "trolley"],
+    props: ["carrier", "scratchpost", "screen", "sign", "bench", "trolley"],
     shutters: [{ x: 12, y: 8, dir: "v", len: 2, phase: 0.15 },
                { x: 15, y: 11, dir: "h", len: 2, phase: 0.45 }],
     map: [
@@ -1745,7 +1746,7 @@ const LEVELS = [
     stars: [2250, 3850, 5300],
     restock: true, jams: true, bigExit: true,
     theme: { floor:"#efe7e7", floorAlt:"#e4dada", wall:"#9c6f74", wallTop:"#bb8b90", base:"#6f4a4f", accent:"#e05f6e", wood:"#a97f5c", leaf:"#4f9a63", leaf2:"#6fb47f", locker:"#a08187", crate:"#c4a077", crate2:"#a98657", curtain:"#d3aeb2", pot:"#96604e", rug:"#ddcdcd" },
-    props: ["screen", "gurney", "ivpole", "bench", "sign", "trolley"],
+    props: ["screen", "carrier", "scratchpost", "bench", "sign", "trolley"],
     shutters: [{ x: 16, y: 8, dir: "h", len: 2, phase: 0.15 },
                { x: 12, y: 6, dir: "h", len: 2, phase: 0.0, swing: true }],
     map: [
@@ -1846,7 +1847,7 @@ const LEVELS = [
     stars: [1800, 3100, 4250],
     restock: true, jams: true, bigExit: true,
     theme: { floor:"#e8e4ee", floorAlt:"#ddd8e5", wall:"#77689a", wallTop:"#9587b5", base:"#4d4070", accent:"#b98bff", wood:"#a4855f", leaf:"#4f9a63", leaf2:"#6fb47f", locker:"#8b7fa8", crate:"#bfa079", crate2:"#a4875e", curtain:"#cbc0dd", pot:"#8d6250", rug:"#d9d3e4" },
-    props: ["screen", "locker", "vending", "sign", "ivpole", "crates"],
+    props: ["screen", "locker", "vending", "sign", "scratchpost", "crates"],
     shutters: [{ x: 19, y: 9, dir: "h", len: 2, phase: 0.15 },
                { x: 19, y: 3, dir: "h", len: 2, phase: 0.45 },
                { x: 8, y: 9, dir: "h", len: 2, phase: 0.0, swing: true }],
@@ -1916,7 +1917,7 @@ const LEVELS = [
     stars: [1450, 2500, 3400],
     restock: true, jams: true, bigExit: true,
     theme: { floor:"#e4e6ec", floorAlt:"#d8dbe3", wall:"#5d6478", wallTop:"#7c8398", base:"#383e50", accent:"#ff6b6b", wood:"#a4855f", leaf:"#4f9a63", leaf2:"#6fb47f", locker:"#787f94", crate:"#bfa079", crate2:"#a4875e", curtain:"#b8bdcc", pot:"#8d6250", rug:"#d0d4de" },
-    props: ["gurney", "ivpole", "screen", "trolley", "crates", "sign"],
+    props: ["carrier", "scratchpost", "screen", "trolley", "crates", "sign"],
     shutters: [{ x: 16, y: 11, dir: "h", len: 2, phase: 0.15 },
                { x: 19, y: 3, dir: "h", len: 2, phase: 0.0, swing: true }],
     zones: [{ x: 18, y: 2, w: 10, h: 4, up: 15, down: 8, phase: 0.25 }],
@@ -5268,23 +5269,23 @@ function builderWaveDef(n) {
      staff    — an NPC that does one job for you, placed where it starts
      passive  — a permanent run-wide upgrade                              */
 const SHOP = [
-  { key: "basket",      name: "Treatment Bay",    cost: 130, kind: "station", station: "basket",
+  { key: "basket",      name: "Treatment Basket", cost: 130, kind: "station", station: "basket",
     blurb: "Another basket. More baskets means more animals in progress at once." },
   { key: "grooming",   name: "Grooming Shelf",     cost: 90,  kind: "station", station: "grooming",
-    blurb: "Bandages, close to where you need them." },
-  { key: "remedy", name: "Medicine Cabinet", cost: 110, kind: "station", station: "remedy",
-    blurb: "Syringes for infections." },
+    blurb: "Towels and brushes, close to where you need them." },
+  { key: "remedy", name: "Remedy Cabinet",  cost: 110, kind: "station", station: "remedy",
+    blurb: "Drops for itchy ears, calming drops for the zoomies." },
   { key: "scanner",     name: "Scanner",    cost: 185, kind: "station", station: "scanner", from: 2,
     blurb: "Opens your doors to sprained hops (+175 each). Pairs with the bootie bench." },
   { key: "bootiebench",     name: "Bootie Bench",       cost: 120, kind: "station", station: "bootiebench", from: 2,
     blurb: "Turns a developed scan into a bootie." },
   { key: "wanddock",name: "Wand Dock",    cost: 195, kind: "station", station: "wanddock", from: 3,
-    blurb: "With a charger, opens your doors to cardiac cases (+195 each)." },
+    blurb: "With a grounding pad, opens your doors to static cling (+195 each)." },
   { key: "groundpad",  name: "Grounding Pad",    cost: 130, kind: "station", station: "groundpad", from: 3,
     blurb: "Charges the static wand. Put it near the baskets — the charge drains fast." },
-  { key: "lab",      name: "Path Lab",         cost: 175, kind: "station", station: "lab", from: 5,
-    blurb: "Opens your doors to mystery cases (+215 each)." },
-  { key: "hatch", name: "Delivery Door",    cost: 85,  kind: "station", station: "hatch", from: 4,
+  { key: "lab",      name: "Sniff Lab",        cost: 175, kind: "station", station: "lab", from: 5,
+    blurb: "Opens your doors to mystery munches (+215 each)." },
+  { key: "hatch", name: "Delivery Hatch",   cost: 85,  kind: "station", station: "hatch", from: 4,
     blurb: "Where crates come from, for restocking empty shelves." },
   { key: "bench",    name: "Waiting Bench",    cost: 70,  kind: "waitslot",
     blurb: "Two more places for animals to wait, so the doors stay open longer." },
@@ -6795,11 +6796,13 @@ const PROPS = {
     mbSphere(mb, cx - 0.13, 0.34, cz + 0.09, 0.15, 0.13, 0.15, rgb(col.leaf2 || "#7fcf8c"), 10, 7);
     mbSphere(mb, cx + 0.12, 0.36, cz - 0.08, 0.13, 0.12, 0.13, rgb(col.leaf2 || "#7fcf8c"), 10, 7);
   },
-  ivpole(mb, cx, cz) {
-    mbCylinder(mb, cx, 0.03, cz, 0.16, 0.16, 0.05, rgb(TH.metal), 10, true);
-    mbCylinder(mb, cx, 0.55, cz, 0.022, 0.022, 1.05, rgb("#dbe4ec"), 8, true);
-    mbRoundedBox(mb, cx + 0.10, 0.92, cz, 0.075, 0.11, 0.045, 0.035, rgb("#cfe9f7"), 2);
-    mbCylinder(mb, cx, 1.06, cz, 0.05, 0.05, 0.03, rgb(TH.metal), 8, true);
+  scratchpost(mb, cx, cz, ry, col) {
+    // carpeted base, sisal post, a perch on top and a dangling pompom
+    mbRoundedBox(mb, cx, 0.045, cz, 0.20, 0.045, 0.20, 0.04, rgb(col.rug || "#d8c7ae"), 2);
+    mbCylinder(mb, cx, 0.44, cz, 0.075, 0.075, 0.78, rgb("#c8a97e"), 10, true);
+    mbRoundedBox(mb, cx, 0.86, cz, 0.16, 0.035, 0.16, 0.05, rgb(col.curtain || "#cfe0d6"), 2);
+    mbCylinder(mb, cx + 0.13, 0.74, cz, 0.012, 0.012, 0.14, rgb("#b9a99a"), 6, true);
+    mbCylinder(mb, cx + 0.13, 0.64, cz, 0.045, 0.045, 0.045, rgb(col.accent || "#ff9aab"), 8, true);
   },
   trolley(mb, cx, cz, ry, col) {
     const body = rgb(col.accent || "#8fd0f0"), m = rgb(TH.metal);
@@ -6846,14 +6849,17 @@ const PROPS = {
     mbRoundedBox(mb, cx + 0.16, 0.13, cz + 0.08, 0.16, 0.13, 0.16, 0.03, c2, 2);
     mbRoundedBox(mb, cx - 0.06, 0.46, cz - 0.02, 0.15, 0.12, 0.15, 0.03, c2, 2);
   },
-  gurney(mb, cx, cz, ry) {
-    const m = rgb(TH.metal);
-    mbRoundedBox(mb, cx, 0.44, cz, 0.28, 0.055, 0.44, 0.05, rgb("#e9f1f8"), 2);
-    mbRoundedBox(mb, cx, 0.52, cz, 0.26, 0.035, 0.42, 0.05, rgb("#cfe0ee"), 2);
-    for (const [lx, lz] of [[-0.20,-0.32],[0.20,-0.32],[-0.20,0.32],[0.20,0.32]]) {
-      const q = _po(cx, cz, ry, lx, lz);
-      mbRoundedBox(mb, q[0], 0.22, q[1], 0.025, 0.22, 0.025, 0.015, m, 2);
-      mbCylinder(mb, q[0], 0.05, q[1], 0.045, 0.045, 0.045, rgb("#5d6b7a"), 8, true);
+  carrier(mb, cx, cz, ry, col) {
+    // two travel carriers stacked, doors facing out
+    const shell = rgb(col.crate || "#d8b48a"), door = rgb(TH.metal);
+    for (let i = 0; i < 2; i++) {
+      const y = 0.17 + i * 0.34, w = 0.26 - i * 0.02;
+      mbRoundedBox(mb, cx, y, cz, w, 0.16, w * 0.78, 0.05, shell, 2);
+      const q = _po(cx, cz, ry, 0, w * 0.79);
+      mbRoundedBox(mb, q[0], y, q[1], w * 0.62, 0.11, 0.02, 0.02, door, 2);
+      const h = _po(cx, cz, ry, 0, 0);
+      mbRoundedBox(mb, h[0], y + 0.185, h[1], 0.075, 0.022, 0.030, 0.02,
+                   rgb(col.base || "#7b6a55"), 2);
     }
   },
   screen(mb, cx, cz, ry, col) {
@@ -7559,7 +7565,7 @@ const TRIMS = ["#ffffff", "#f3f8ff", "#fff6e8"];
    --------------------------------------------------------------------- */
 const SPECIES = {
   cat:       { name: "cat",         ears: "point",  tail: "curl",   scale: 0.90,
-               furs: ["#f0a45c", "#8e8b86", "#3e3a38", "#f2ece2"], belly: "#fff3e2" },
+               furs: ["#f0a45c", "#8e8b86", "#3e3a38", "#f2ece2"], belly: "#fff3e2" , whiskers: true },
   dog:       { name: "dog",         ears: "flop",   tail: "stub",   scale: 0.98,
                furs: ["#c88a4e", "#6b5341", "#f3e4cd", "#3c3a3a"], belly: "#fff6e8",
                muzzle: 1.18 },
@@ -7572,11 +7578,11 @@ const SPECIES = {
   hedgehog:  { name: "hedgehog",    ears: "round",  tail: "none",   scale: 0.66,
                furs: ["#a08a72", "#8a7561"], belly: "#f6e9d8", spikes: true, muzzle: 1.12 },
   fox:       { name: "fox",         ears: "bigpoint", tail: "bush", scale: 0.88,
-               furs: ["#e8813c", "#d9692c"], belly: "#fff2e0" },
+               furs: ["#e8813c", "#d9692c"], belly: "#fff2e0" , whiskers: true },
   guineapig: { name: "guinea pig",  ears: "petal",  tail: "none",   scale: 0.70,
                furs: ["#d8b48a", "#f2ece2", "#6f5a48", "#e0a05a"], belly: "#fff4e6" },
   ferret:    { name: "ferret",      ears: "round",  tail: "long",   scale: 0.74,
-               furs: ["#e6d6b8", "#c2a887"], belly: "#fdf6e6", mask: true },
+               furs: ["#e6d6b8", "#c2a887"], belly: "#fdf6e6", mask: true , whiskers: true },
   tortoise:  { name: "tortoise",    ears: "none",   tail: "stub",   scale: 0.72,
                furs: ["#9fbf72", "#88a961"], belly: "#e7f0d2", shell: true }
 };
@@ -7724,9 +7730,9 @@ function drawAnimal3D(o) {
       drawMesh(MESH.cone, p[0], p[1], p[2], ry + sx * 0.25 + jaunty,
                0.072*S, (0.120 * big)*S, 0.050*S, earIn);
     } else if (sp.ears === "flop") {
-      p = P(sx * 0.300, HY + 0.090 - jaunty * 0.25, -0.02);
-      drawMesh(MESH.sphere, p[0], p[1], p[2], ry + sx * 0.15,
-               0.105*S, 0.195*S, 0.085*S, dark(fur, 0.90));
+      p = P(sx * 0.318, HY - 0.010 - jaunty * 0.25, 0.015);
+      drawMesh(MESH.sphere, p[0], p[1], p[2], ry + sx * 0.20,
+               0.115*S, 0.215*S, 0.095*S, dark(fur, 0.76));
     } else if (sp.ears === "long") {
       p = P(sx * 0.125, HY + 0.400 - jaunty * 0.10, -0.01);
       drawMesh(MESH.sphere, p[0], p[1], p[2], ry + sx * (0.12 + jaunty),
@@ -7799,32 +7805,37 @@ function drawAnimal3D(o) {
                dark(fur, 1.03));
     }
   }
-  // whiskers, on anything with a muzzle
-  if (_charDetail && !sp.beak) {
+  // whiskers, only where they belong: on everything they read as slack wire
+  if (_charDetail && sp.whiskers) {
     for (const sx of [-1, 1])
-      for (const dy of [-0.02, -0.055]) {
-        p = P(sx * 0.225, HY - 0.050 + dy, FZ + 0.020);
-        drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry + sx * 0.25,
-                 0.105*S, 0.006*S, 0.006*S, rgb("#fdf6ea"), 0.85);
+      for (const dy of [0.012, -0.020]) {
+        p = P(sx * 0.170, HY - 0.062 + dy, FZ + 0.030);
+        drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry + sx * 0.34,
+                 0.058*S, 0.005*S, 0.005*S, rgb("#fdf6ea"), 0.7);
       }
   }
   // blush: big, soft, unmissable — the same rule the nurses follow
   for (const sx of [-1, 1]) {
-    p = P(sx * 0.235, HY - 0.045, FZ - 0.055);
-    drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.088*S, 0.055*S, 0.040*S,
-             rgb("#ff9aab"), 0.9);
+    p = P(sx * 0.208, HY - 0.105, FZ - 0.010);
+    drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.068*S, 0.044*S, 0.030*S,
+             rgb("#ff9aab"), 0.72);
   }
 
   /* The collar is the state light. Treated animals turn green and get a tag,
      which reads instantly across a busy room without recolouring the fur —
      recolouring a cat green was the version that looked broken rather than
      finished. */
-  p = P(0, HY - 0.245, 0.045);
+  /* On the chest, not the neck. The head sits low enough on the body that a
+     ring at the join is buried in both — the first attempt poked out through
+     the FRONT of the face as a coloured band straight across the eyes on every
+     species. Here it reads as a bandana under the chin and never fouls the
+     face at any camera angle. */
+  p = P(0, HY - 0.375, 0.205);
   drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry,
-           0.255*S, 0.055*S, 0.235*S, rgb(o.done ? "#57c785" : look.collar));
+           0.205*S, 0.072*S, 0.120*S, rgb(o.done ? "#57c785" : look.collar));
   if (_charDetail) {                                  // the name tag hanging off it
-    p = P(0, HY - 0.315, 0.215);
-    drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.055*S, 0.065*S, 0.022*S,
+    p = P(0, HY - 0.450, 0.250);
+    drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.052*S, 0.062*S, 0.020*S,
              rgb(o.done ? "#bff5d4" : "#ffe9a8"));
   }
   setFuzz(0);
