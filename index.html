@@ -1237,9 +1237,9 @@ const LEVELS = [
     restock: true, jams: true, flatline: true,
     theme: { floor:"#f2ead9", floorAlt:"#e8dfcc", wall:"#c08f6a", wallTop:"#d9ab86", base:"#8f6647", accent:"#e0763f", wood:"#b98a58", leaf:"#5aa06a", leaf2:"#7bbb87", locker:"#b9a389", crate:"#cfae7f", crate2:"#b8955f", curtain:"#e0cdb2", pot:"#a76b4c", rug:"#e3d6bd" },
     props: ["bench", "crates", "plant", "chair", "sign", "cooler"],
-    shutters: [{ x: 16, y: 6, dir: "h", len: 2, phase: 0.45 } ,
+    shutters: [{ x: 16, y: 6, dir: "h", len: 2, phase: 0.45 },
                { x: 14, y: 3, dir: "h", len: 2, phase: 0.0, swing: true },
-               { x: 9, y: 6, dir: "h", len: 1, phase: 0.5, swing: true }],
+               { x: 24, y: 7, dir: "h", len: 2, phase: 0.5, swing: true }],
     zones: [{ x: 19, y: 4, w: 8, h: 6, up: 18, down: 9, phase: 0.45 }],
     map: [
       "################################",
@@ -1310,7 +1310,7 @@ const LEVELS = [
     restock: true, jams: true, flatline: true,
     theme: { floor:"#efe7e7", floorAlt:"#e4dada", wall:"#9c6f74", wallTop:"#bb8b90", base:"#6f4a4f", accent:"#e05f6e", wood:"#a97f5c", leaf:"#4f9a63", leaf2:"#6fb47f", locker:"#a08187", crate:"#c4a077", crate2:"#a98657", curtain:"#d3aeb2", pot:"#96604e", rug:"#ddcdcd" },
     props: ["screen", "gurney", "ivpole", "bench", "sign", "trolley"],
-    shutters: [{ x: 14, y: 7, dir: "h", len: 2, phase: 0.3 } ,
+    shutters: [{ x: 14, y: 7, dir: "h", len: 2, phase: 0.3 },
                { x: 15, y: 5, dir: "h", len: 1, phase: 0.0, swing: true },
                { x: 20, y: 10, dir: "h", len: 2, phase: 0.5, swing: true }],
     zones: [{ x: 10, y: 3, w: 9, h: 5, up: 16, down: 9, phase: 0.1 }, { x: 3, y: 7, w: 8, h: 4, up: 18, down: 8, phase: 0.55 }],
@@ -1697,8 +1697,12 @@ function updateShutters(dt) {
     sh.t = (sh.t + dt) % sh.period;
     const wantClosed = sh.t >= (sh.open || SHUTTER_OPEN);
     if (wantClosed === sh.closed) continue;
-    if (wantClosed) closeBlockingCells(world, sh);
+    /* Mark it shut BEFORE shoving anyone clear. nearestOpenTile skips blocked
+       cells, but a door that has not been flagged closed yet does not block —
+       so on a two-tile door it would happily "rescue" a medic from one half
+       onto the other half, and they rode the whole 4.6s closure inside it. */
     sh.closed = wantClosed;
+    if (wantClosed) closeBlockingCells(world, sh);
     for (const st of Game.staff) st.path = [];          // cached routes are now wrong
     for (const pt of Game.patients) if (pt.state === "walking") pt.path = [];
   }
@@ -2719,6 +2723,14 @@ function startLevel(index) {
   Game.diff = D;
 
   if (Game.world) { glMeshDispose(Game.world.mesh); Game.world.mesh = null; }
+  /* Patient and item ids restart with the shift, before anything in the new
+     world can claim one. Every holder of an old id — patients, floor items,
+     station contents, the players themselves — is rebuilt below, so nothing can
+     collide. Without this the counter carried across restarts, and two runs of
+     the same seed differed in the one field that is supposed to reproduce: the
+     Daily Shift's promise (same date, same shift) and every balance number
+     measured by replaying a seed both rest on a run repeating exactly. */
+  nextId = 1;
   Game.world = makeWorld(def);
   Game.rng = makeRng(def.seed);
   Game.patients = [];
@@ -8816,9 +8828,16 @@ function drawSelect(g) {
         + (dBest ? "   Best  " + dBest : ""),
        dx2 + 54, ey + 48, 12.5, PALETTE.dim, "left", "normal");
 
+  /* Every slot the cursor can reach needs an entry here. The Daily card was
+     added to the navigation and to the clamp above but not to this chain, so
+     highlighting it fell through to LEVELS[17] — undefined — and the screen
+     threw on .blurb every frame until the armour bailed to the title. The
+     trailing ENDLESS is a belt-and-braces default: a future slot that forgets
+     this list draws the wrong blurb instead of taking the screen down. */
   const selDef = Game.selectIndex === ENDLESS_SLOT() ? ENDLESS
                : Game.selectIndex === BUILDER_SLOT() ? builderWaveDef(1)
-               : LEVELS[Game.selectIndex];
+               : Game.selectIndex === DAILY_SLOT() ? dailyDef(plan)
+               : (LEVELS[Game.selectIndex] || ENDLESS);
   text(g, selDef.blurb, W / 2, ey + 104, 16, PALETTE.dim, "center", "normal");
 
   // the three shift challenges for whatever is highlighted
@@ -9508,13 +9527,17 @@ function handleScreenKeys() {
         Sound.play("menu");
       };
       const special = (i) => i >= LEVELS.length;
+      /* The mode row is endless | builder | daily, left to right, and it is
+         walked as a row rather than by naming the neighbours. The named-pair
+         version only knew endless→builder and builder→endless, so the Daily
+         card was drawn every frame and could not be selected by any key. */
       if (wasPressed("KeyA") || wasPressed("ArrowLeft")) {
-        if (Game.selectIndex === BUILDER_SLOT()) move(-1);
-        else if (!special(Game.selectIndex) && Game.selectIndex % SELECT_COLS !== 0) move(-1);
+        if (special(Game.selectIndex)) { if (Game.selectIndex > ENDLESS_SLOT()) move(-1); }
+        else if (Game.selectIndex % SELECT_COLS !== 0) move(-1);
       }
       if (wasPressed("KeyD") || wasPressed("ArrowRight")) {
-        if (Game.selectIndex === ENDLESS_SLOT()) move(1);
-        else if (!special(Game.selectIndex) && Game.selectIndex % SELECT_COLS !== SELECT_COLS - 1
+        if (special(Game.selectIndex)) { if (Game.selectIndex < DAILY_SLOT()) move(1); }
+        else if (Game.selectIndex % SELECT_COLS !== SELECT_COLS - 1
                  && Game.selectIndex + 1 < LEVELS.length) move(1);
       }
       if (wasPressed("KeyW") || wasPressed("ArrowUp")) {
