@@ -1599,6 +1599,347 @@ const LEVELS = [
       "################################",
       "################################"
     ]
+  },
+  {
+    name: "Split Shift",
+    blurb: "Two wards joined by two thin links. Pick a side and commit.",
+    seed: 91011,
+    duration: 145,
+    patience: 64,
+    spawnStart: 6.6, spawnEnd: 4.4,
+    maxWaiting: 7,
+    ailments: ["cut", "infection", "fracture", "cardiac", "mystery", "burn", "anaphylaxis", "concussion", "dislocation", "overdose"],
+    stars: [2200, 3750, 5150],
+    restock: true, jams: true, flatline: true,
+    theme: { floor:"#eef0e6", floorAlt:"#e4e7da", wall:"#8a9a78", wallTop:"#a8b795", base:"#5c6b4c", accent:"#e0a03f", wood:"#bd9260", leaf:"#5aa06a", leaf2:"#7bbb87", locker:"#9aa88c", crate:"#cfae7f", crate2:"#b8955f", curtain:"#ccd8bf", pot:"#a76b4c", rug:"#dde2d2" },
+    props: ["bench", "plant", "sign", "locker", "chair", "trolley"],
+    shutters: [{ x: 14, y: 8, dir: "h", len: 2, phase: 0.15 },
+               { x: 20, y: 8, dir: "h", len: 2, phase: 0.0, swing: true }],
+    map: [
+      "################################",
+      "################################",
+      "####.E......###....ll......#####",
+      "####..bb....###....bb......#####",
+      "####.......................#####",
+      "####..ss....###....xx......#####",
+      "####........###............#####",
+      "####..mm....###....cc......#####",
+      "####.......................#####",
+      "####..bb....###....bb..h...#####",
+      "####.O......###....dd..f...#####",
+      "################################",
+      "################################",
+      "################################",
+      "################################",
+      "################################"
+    ]
+  },
+  {
+    name: "The Spine",
+    blurb: "One long corridor and everything hanging off it. Keep it clear.",
+    seed: 91012,
+    duration: 145,
+    patience: 62,
+    spawnStart: 6.4, spawnEnd: 4.3,
+    maxWaiting: 7,
+    ailments: ["cut", "infection", "fracture", "cardiac", "mystery", "concussion", "dislocation", "overdose"],
+    stars: [2100, 3600, 4950],
+    restock: true, jams: true, flatline: true,
+    theme: { floor:"#e9eef2", floorAlt:"#dee5ea", wall:"#7f93a6", wallTop:"#9db0c1", base:"#546678", accent:"#4fb0d8", wood:"#b08a5c", leaf:"#57a06d", leaf2:"#78bb86", locker:"#8ea4b5", crate:"#c9a97c", crate2:"#b08f5f", curtain:"#c2d4e0", pot:"#96604e", rug:"#d7e0e6" },
+    props: ["gurney", "ivpole", "screen", "sign", "bench", "trolley"],
+    shutters: [{ x: 12, y: 8, dir: "v", len: 2, phase: 0.15 },
+               { x: 15, y: 11, dir: "h", len: 2, phase: 0.45 }],
+    map: [
+      "################################",
+      "################################",
+      "###..bb...##..bb...##..bb....###",
+      "###.ss....##.mm....##.xx.....###",
+      "###.###...##.###...##.###....###",
+      "###..........................###",
+      "##E..........................###",
+      "###..........................###",
+      "###.###...##.###...##.###....###",
+      "###.ll....##.dd....##.cc.....###",
+      "###..bb...##..bb...##..bb..h.###",
+      "###.O......................f.###",
+      "################################",
+      "################################",
+      "################################",
+      "################################"
+    ]
+  },
+  {
+    name: "Cold Storage",
+    blurb: "Half the department is on the failing circuit. Watch the lights.",
+    seed: 91013,
+    duration: 145,
+    patience: 60,
+    spawnStart: 6.3, spawnEnd: 4.2,
+    maxWaiting: 7,
+    ailments: ["cut", "infection", "fracture", "cardiac", "mystery", "burn", "anaphylaxis", "concussion", "dislocation", "overdose"],
+    stars: [1950, 3350, 4600],
+    restock: true, jams: true, flatline: true,
+    theme: { floor:"#e6ecef", floorAlt:"#dae2e6", wall:"#6f8790", wallTop:"#8ea6af", base:"#48606a", accent:"#54c7d8", wood:"#a8845c", leaf:"#4f9a63", leaf2:"#6fb47f", locker:"#84a0a8", crate:"#c0a179", crate2:"#a5885c", curtain:"#b9d0d6", pot:"#8d6250", rug:"#d3dee2" },
+    props: ["cooler", "crates", "locker", "screen", "sign", "vending"],
+    shutters: [{ x: 17, y: 8, dir: "h", len: 2, phase: 0.15 }],
+    zones: [{ x: 17, y: 2, w: 11, h: 4, up: 15, down: 8, phase: 0.2 },
+            { x: 4, y: 7, w: 10, h: 4, up: 17, down: 7, phase: 0.6 }],
+    map: [
+      "################################",
+      "################################",
+      "###.E.....##.....xx...bb.....###",
+      "###..bb...##.................###",
+      "###.......##.....cc...bb.....###",
+      "###..bb...##.................###",
+      "###.........................####",
+      "###.ss....##.....ll...bb.....###",
+      "###.......##.................###",
+      "###.mm....##.....h....bb.....###",
+      "###.dd.g..##.....f...........###",
+      "###.O.....##.................###",
+      "################################",
+      "################################",
+      "################################",
+      "################################"
+    ]
+  },
+  {
+    name: "The Carousel",
+    blurb: "A ring that only turns one way. Going back is the long way round.",
+    seed: 91014,
+    duration: 145,
+    patience: 63,
+    spawnStart: 6.5, spawnEnd: 4.4,
+    maxWaiting: 7,
+    ailments: ["cut", "infection", "fracture", "cardiac", "burn", "anaphylaxis", "concussion", "dislocation"],
+    stars: [2800, 4800, 6600],
+    restock: true, jams: true, flatline: true,
+    theme: { floor:"#f3ebdd", floorAlt:"#e9e0d0", wall:"#b58a63", wallTop:"#d0a681", base:"#86603f", accent:"#e07b3a", wood:"#b98a58", leaf:"#5aa06a", leaf2:"#7bbb87", locker:"#b5a086", crate:"#cfae7f", crate2:"#b8955f", curtain:"#dfcdb2", pot:"#a76b4c", rug:"#e2d5bc" },
+    props: ["crates", "bench", "plant", "cooler", "sign", "chair"],
+    map: [
+      "################################",
+      "################################",
+      "###.E......................#####",
+      "###.>>>>>>>>>>>>>>>>>>>>>..#####",
+      "###.^....................v.#####",
+      "###.^..bb...bb...bb..bb..v.#####",
+      "###.^....................v.#####",
+      "###.^..ss..mm..xx..ccdd..v.#####",
+      "###.^....................v.#####",
+      "###.^..bb...bb...h...f...v.#####",
+      "###.^....................v.#####",
+      "###.<<<<<<<<<<<<<<<<<<<<<<.#####",
+      "###.O......................#####",
+      "################################",
+      "################################",
+      "################################"
+    ]
+  },
+  {
+    name: "Bottleneck",
+    blurb: "Everything funnels through the middle. Someone has to give way.",
+    seed: 91015,
+    duration: 145,
+    patience: 61,
+    spawnStart: 6.2, spawnEnd: 4.1,
+    maxWaiting: 7,
+    ailments: ["cut", "infection", "fracture", "cardiac", "mystery", "burn", "anaphylaxis", "concussion", "dislocation", "overdose"],
+    stars: [2250, 3850, 5300],
+    restock: true, jams: true, flatline: true,
+    theme: { floor:"#efe7e7", floorAlt:"#e4dada", wall:"#9c6f74", wallTop:"#bb8b90", base:"#6f4a4f", accent:"#e05f6e", wood:"#a97f5c", leaf:"#4f9a63", leaf2:"#6fb47f", locker:"#a08187", crate:"#c4a077", crate2:"#a98657", curtain:"#d3aeb2", pot:"#96604e", rug:"#ddcdcd" },
+    props: ["screen", "gurney", "ivpole", "bench", "sign", "trolley"],
+    shutters: [{ x: 16, y: 8, dir: "h", len: 2, phase: 0.15 },
+               { x: 12, y: 6, dir: "h", len: 2, phase: 0.0, swing: true }],
+    map: [
+      "################################",
+      "################################",
+      "###.E..bb..bb..##..bb..bb....###",
+      "###............##............###",
+      "###.ss..mm.........xx..cc....###",
+      "###.####################.....###",
+      "###..........................###",
+      "###.####################.....###",
+      "###.ll..dd.........h...f.....###",
+      "###............##............###",
+      "###.O..bb..bb..##..bb..bb....###",
+      "################################",
+      "################################",
+      "################################",
+      "################################",
+      "################################"
+    ]
+  },
+  {
+    name: "The Wings",
+    blurb: "Three pods, one spine. Split up or watch a wing go under.",
+    seed: 91016,
+    duration: 145,
+    patience: 60,
+    spawnStart: 6.1, spawnEnd: 4.0,
+    maxWaiting: 8,
+    ailments: ["cut", "infection", "fracture", "cardiac", "mystery", "burn", "anaphylaxis", "concussion", "dislocation", "overdose"],
+    stars: [2550, 4350, 6000],
+    restock: true, jams: true, flatline: true,
+    theme: { floor:"#eaefe8", floorAlt:"#dfe6dc", wall:"#7a9a86", wallTop:"#98b6a3", base:"#4e6b58", accent:"#3fb98a", wood:"#b18a5f", leaf:"#57ac74", leaf2:"#7ac68e", locker:"#8fae9c", crate:"#c8a87c", crate2:"#ad8c60", curtain:"#c3d8ca", pot:"#96604e", rug:"#d6e0d4" },
+    props: ["bench", "plant", "chair", "sign", "locker", "cooler"],
+    shutters: [{ x: 14, y: 8, dir: "h", len: 2, phase: 0.15 },
+               { x: 21, y: 8, dir: "h", len: 2, phase: 0.45 }],
+    map: [
+      "################################",
+      "################################",
+      "###.E....##......##......##..###",
+      "###..bb..##..bb..##..bb..##..###",
+      "###......##......##......##..###",
+      "###.ss...##..xx..##..ll..##.h###",
+      "###..........................###",
+      "###.mm...##..cc..##..dd..##.f###",
+      "###......##......##......##..###",
+      "###..bb..##..bb..##..bb..##..###",
+      "###.O....##......##......##..###",
+      "################################",
+      "################################",
+      "################################",
+      "################################",
+      "################################"
+    ]
+  },
+  {
+    name: "Night Freight",
+    blurb: "The floor moves and the lights do not. Learn where it takes you.",
+    seed: 91017,
+    duration: 145,
+    patience: 62,
+    spawnStart: 6.3, spawnEnd: 4.2,
+    maxWaiting: 7,
+    ailments: ["cut", "infection", "fracture", "cardiac", "mystery", "burn", "concussion", "overdose"],
+    stars: [1900, 3250, 4450],
+    restock: true, jams: true, flatline: true,
+    theme: { floor:"#e7e9ee", floorAlt:"#dcdfe6", wall:"#6d7285", wallTop:"#8b90a4", base:"#464b5e", accent:"#8f7bd8", wood:"#a4855f", leaf:"#4f9a63", leaf2:"#6fb47f", locker:"#848aa0", crate:"#bfa079", crate2:"#a4875e", curtain:"#c0c4d4", pot:"#8d6250", rug:"#d4d8e2" },
+    props: ["crates", "locker", "trolley", "screen", "sign", "cooler"],
+    zones: [{ x: 4, y: 8, w: 11, h: 4, up: 16, down: 8, phase: 0.35 }],
+    map: [
+      "################################",
+      "################################",
+      "###.E...bb...bb......bb......###",
+      "###..........................###",
+      "###.>>>>>>>>>>>>>>>>>>>>>>>>.###",
+      "###..........................###",
+      "###.ss..mm...........xx..cc..###",
+      "###..........................###",
+      "###.<<<<<<<<<<<<<<<<<<<<<<<<.###",
+      "###..........................###",
+      "###.ll..dd..g........h...f...###",
+      "###.O...bb...bb......bb......###",
+      "################################",
+      "################################",
+      "################################",
+      "################################"
+    ]
+  },
+  {
+    name: "Brownout",
+    blurb: "Two dark bays, a locked middle and a breaker you will come to love.",
+    seed: 91018,
+    duration: 150,
+    patience: 58,
+    spawnStart: 6.0, spawnEnd: 3.9,
+    maxWaiting: 8,
+    ailments: ["cut", "infection", "fracture", "cardiac", "mystery", "burn", "anaphylaxis", "concussion", "dislocation", "overdose"],
+    stars: [1800, 3100, 4250],
+    restock: true, jams: true, flatline: true,
+    theme: { floor:"#e8e4ee", floorAlt:"#ddd8e5", wall:"#77689a", wallTop:"#9587b5", base:"#4d4070", accent:"#b98bff", wood:"#a4855f", leaf:"#4f9a63", leaf2:"#6fb47f", locker:"#8b7fa8", crate:"#bfa079", crate2:"#a4875e", curtain:"#cbc0dd", pot:"#8d6250", rug:"#d9d3e4" },
+    props: ["screen", "locker", "vending", "sign", "ivpole", "crates"],
+    shutters: [{ x: 19, y: 9, dir: "h", len: 2, phase: 0.15 },
+               { x: 19, y: 3, dir: "h", len: 2, phase: 0.45 },
+               { x: 8, y: 9, dir: "h", len: 2, phase: 0.0, swing: true }],
+    zones: [{ x: 4, y: 2, w: 10, h: 4, up: 14, down: 8, phase: 0.1 },
+            { x: 18, y: 7, w: 10, h: 4, up: 16, down: 7, phase: 0.55 }],
+    map: [
+      "################################",
+      "################################",
+      "###.E..bb..##......bb..bb....###",
+      "###........##................###",
+      "###.ss.mm..##......xx..cc....###",
+      "###........##................###",
+      "###.....................g....###",
+      "###........##................###",
+      "###.ll.dd..##......h...f.....###",
+      "###........##................###",
+      "###.O..bb..##......bb..bb....###",
+      "################################",
+      "################################",
+      "################################",
+      "################################",
+      "################################"
+    ]
+  },
+  {
+    name: "The Gallery",
+    blurb: "Nothing in the way and nowhere to hide. Pure distance management.",
+    seed: 91019,
+    duration: 150,
+    patience: 57,
+    spawnStart: 5.9, spawnEnd: 3.8,
+    maxWaiting: 8,
+    ailments: ["cut", "infection", "fracture", "cardiac", "mystery", "burn", "anaphylaxis", "concussion", "dislocation", "overdose"],
+    stars: [1450, 2500, 3400],
+    restock: true, jams: true, flatline: true,
+    theme: { floor:"#f4f0e4", floorAlt:"#eae5d6", wall:"#c2a06e", wallTop:"#dcbb8c", base:"#8f6d43", accent:"#f0a541", wood:"#c69a68", leaf:"#5aa06a", leaf2:"#7bbb87", locker:"#bda98a", crate:"#d3ab7c", crate2:"#bd9366", curtain:"#e2d3b6", pot:"#a76b4c", rug:"#e6dcc6" },
+    props: ["bench", "plant", "sign", "chair", "vending", "cooler"],
+    zones: [{ x: 11, y: 4, w: 9, h: 5, up: 18, down: 7, phase: 0.4 }],
+    map: [
+      "################################",
+      "################################",
+      "###.E....................s...###",
+      "###..bb..bb...bb..bb.....m...###",
+      "###......................g...###",
+      "###.x........................###",
+      "###.c.........bb..bb.........###",
+      "###.l........................###",
+      "###.d....................h...###",
+      "###..bb..bb...bb..bb.....f...###",
+      "###.O........................###",
+      "################################",
+      "################################",
+      "################################",
+      "################################",
+      "################################"
+    ]
+  },
+  {
+    name: "Last Call",
+    blurb: "Belts, doors, dark bays and everyone in the county. Good luck.",
+    seed: 91020,
+    duration: 155,
+    patience: 55,
+    spawnStart: 5.7, spawnEnd: 3.6,
+    maxWaiting: 8,
+    ailments: ["cut", "infection", "fracture", "cardiac", "mystery", "burn", "anaphylaxis", "concussion", "dislocation", "overdose"],
+    stars: [1450, 2500, 3400],
+    restock: true, jams: true, flatline: true,
+    theme: { floor:"#e4e6ec", floorAlt:"#d8dbe3", wall:"#5d6478", wallTop:"#7c8398", base:"#383e50", accent:"#ff6b6b", wood:"#a4855f", leaf:"#4f9a63", leaf2:"#6fb47f", locker:"#787f94", crate:"#bfa079", crate2:"#a4875e", curtain:"#b8bdcc", pot:"#8d6250", rug:"#d0d4de" },
+    props: ["gurney", "ivpole", "screen", "trolley", "crates", "sign"],
+    shutters: [{ x: 16, y: 11, dir: "h", len: 2, phase: 0.15 },
+               { x: 19, y: 3, dir: "h", len: 2, phase: 0.0, swing: true }],
+    zones: [{ x: 18, y: 2, w: 10, h: 4, up: 15, down: 8, phase: 0.25 }],
+    map: [
+      "################################",
+      "################################",
+      "###.E..bb..##......bb..bb....###",
+      "###........##................###",
+      "###.ss.mm..##......xx..cc....###",
+      "###..........................###",
+      "###.>>>>>>>>>>>>>>>>>>>>>>>>.###",
+      "###..........................###",
+      "###.<<<<<<<<<<<<<<<<<<<<<<<<.###",
+      "###..........................###",
+      "###.ll.dd..##...g..h...f.....###",
+      "###.O..bb..##......bb..bb....###",
+      "################################",
+      "################################",
+      "################################",
+      "################################"
+    ]
   }
 ];
 
@@ -2545,7 +2886,17 @@ const CHALLENGES = [
   [ { k: "ailment", a: "fracture", n: 4 },  { k: "noloss" },      { k: "treat", n: 12 } ],
   [ { k: "clutch", n: 3 },        { k: "perfect", n: 6 }, { k: "treat", n: 13 } ],
   [ { k: "ailment", a: "mystery", n: 4 },   { k: "chain", n: 6 }, { k: "maxlives" } ],
-  [ { k: "maxlives" },            { k: "clutch", n: 4 },  { k: "treat", n: 13 } ]
+  [ { k: "maxlives" },            { k: "clutch", n: 4 },  { k: "treat", n: 13 } ],
+  [ { k: "ailment", a: "overdose", n: 3 }, { k: "chain", n: 5 },  { k: "treat", n: 13 } ],
+  [ { k: "noloss" },              { k: "chain", n: 6 },  { k: "treat", n: 13 } ],
+  [ { k: "ailment", a: "concussion", n: 3 }, { k: "perfect", n: 5 }, { k: "maxlives" } ],
+  [ { k: "chain", n: 6 },         { k: "ailment", a: "dislocation", n: 3 }, { k: "treat", n: 13 } ],
+  [ { k: "noloss" },              { k: "clutch", n: 2 }, { k: "treat", n: 12 } ],
+  [ { k: "ailment", a: "burn", n: 4 }, { k: "chain", n: 5 }, { k: "treat", n: 14 } ],
+  [ { k: "perfect", n: 6 },       { k: "chain", n: 5 },  { k: "treat", n: 12 } ],
+  [ { k: "clutch", n: 3 },        { k: "ailment", a: "anaphylaxis", n: 4 }, { k: "maxlives" } ],
+  [ { k: "noloss" },              { k: "perfect", n: 7 }, { k: "treat", n: 15 } ],
+  [ { k: "maxlives" },            { k: "chain", n: 7 },  { k: "treat", n: 15 } ]
 ];
 
 /* Counted objectives are authored for two medics as well. Scale them for solo
@@ -2615,7 +2966,11 @@ const ACHIEVEMENTS = [
   { key: "sleuth",   name: "Diagnostician",      blurb: "Treat 20 mystery cases." },
   { key: "stars15",  name: "Rising Star",        blurb: "Earn 15 stars." },
   { key: "stars30",  name: "Chief of Medicine",  blurb: "Earn 30 stars." },
-  { key: "stars45",  name: "Whole Hospital",     blurb: "Earn all 45 stars." },
+  /* The blurb is computed: the campaign has gone from 10 wards to 15 to 25,
+     and a hard-coded "45 stars" was wrong twice. The key stays stable so
+     nobody loses an achievement they already earned. */
+  { key: "stars45",  name: "Whole Hospital",
+    blurb: "Earn all " + (LEVELS.length * 3) + " stars." },
   { key: "overtime", name: "Overtime Hero",      blurb: "Three-star a ward on Overtime." },
   { key: "highfive", name: "Good Team",          blurb: "High-five your partner 10 times." },
   { key: "catch",    name: "Safe Hands",         blurb: "Catch 15 items thrown by your partner." },
@@ -8130,38 +8485,90 @@ function drawLegend(g) {
   g.fillStyle = "rgba(63,182,232,.22)";
   g.fillRect(0, LEGEND_Y, W, 2);
 
-  const list = Game.level.ailments;
-  const colW = W / list.length;
+  /* This strip was laid out for five conditions across the full width. At ten
+     each column was half as wide as a four-step chain needs and the chips ran
+     straight over the neighbour — Cardiac's chain was being drawn on top of
+     Fracture's. Past five it now wraps to two rows, which keeps every chain
+     legible instead of trading them for a step count; the chain is the whole
+     reason the strip exists. Each cell is also clipped to its own slot, so no
+     future count can make one bleed into the next.
+
+     One row stacks (icon, name over score, chain below). Two rows put it all
+     on one line, because 32px of height cannot stack anything. */
+  const list = (Game.level && Game.level.ailments) || [];
+  if (!list.length) return;
+  const nRows = list.length > 5 ? 2 : 1;
+  const perRow = Math.ceil(list.length / nRows);
+  const colW = W / perRow;
+  const rowH = LEGEND_H / nRows;
+
   for (let i = 0; i < list.length; i++) {
     const key = list[i], a = AILMENTS[key];
-    const x0 = i * colW + 14;
-    const y0 = LEGEND_Y + 11;
-    if (i > 0) {
-      g.fillStyle = "rgba(255,255,255,.06)";
-      g.fillRect(i * colW - 2, LEGEND_Y + 8, 1, LEGEND_H - 16);
-    }
-    drawAilmentIcon(g, key, x0 + 11, y0 + 12, 11);
-    text(g, a.name, x0 + 27, y0 + 10, 13, a.color);
-    text(g, "+" + a.score, x0 + 27, y0 + 24, 10, PALETTE.dim);
+    if (!a) continue;
+    const col = i % perRow, row = Math.floor(i / perRow);
+    const cellX = col * colW, cellY = LEGEND_Y + row * rowH;
 
-    let cx = x0 + 27;
-    const cy = y0 + 34;
-    g.font = 'bold 10px "Trebuchet MS", "Segoe UI", sans-serif';
+    g.save();
+    g.beginPath();
+    g.rect(cellX, cellY, colW - 3, rowH);
+    g.clip();
+
+    if (col > 0) {
+      g.fillStyle = "rgba(255,255,255,.06)";
+      g.fillRect(cellX - 2, cellY + 5, 1, rowH - 10);
+    }
+    if (row > 0) {
+      g.fillStyle = "rgba(255,255,255,.05)";
+      g.fillRect(cellX, cellY, colW - 3, 1);
+    }
+
+    let textX, chainX, chainY, iconR;
+    if (nRows === 1) {
+      iconR = 11;
+      textX = cellX + 41;
+      g.font = "bold 13px \"Trebuchet MS\", \"Segoe UI\", sans-serif";
+      drawAilmentIcon(g, key, cellX + 25, cellY + 23, iconR);
+      text(g, a.name, textX, cellY + 21, 13, a.color);
+      text(g, "+" + a.score, textX, cellY + 35, 10, PALETTE.dim);
+      chainX = textX; chainY = cellY + 45;
+    } else {
+      iconR = 8;
+      textX = cellX + 24;
+      g.font = "bold 11.5px \"Trebuchet MS\", \"Segoe UI\", sans-serif";
+      drawAilmentIcon(g, key, cellX + 13, cellY + rowH / 2, iconR);
+      const nameW = g.measureText(a.name).width;
+      text(g, a.name, textX, cellY + rowH / 2 - 3, 11.5, a.color);
+      text(g, "+" + a.score, textX, cellY + rowH / 2 + 9, 9.5, PALETTE.dim);
+      chainX = textX + Math.max(nameW, 34) + 8;
+      chainY = cellY + rowH / 2 - 8;
+    }
+
+    g.font = "bold 10px \"Trebuchet MS\", \"Segoe UI\", sans-serif";
+    const boxes = a.chain.map(st => Math.max(nRows === 1 ? 32 : 26,
+                                             g.measureText(st.t).width) + 9);
+    const natural = boxes.reduce((s2, w2) => s2 + w2, 0) + 11 * (a.chain.length - 1);
+    const avail = colW - (chainX - cellX) - 7;
+    const squeeze = Math.max(0.58, Math.min(1, avail / Math.max(1, natural)));
+
+    g.save();
+    g.translate(chainX, chainY);
+    g.scale(squeeze, 1);
+    let cx = 0;
     for (let j = 0; j < a.chain.length; j++) {
-      const stp = a.chain[j];
-      const wBox = Math.max(32, g.measureText(stp.t).width) + 9;
-      const col = CHAIN_COLORS[stp.s] || "#555";
-      g.fillStyle = col;
-      roundRect(g, cx, cy, wBox, 16, 5); g.fill();
+      const stp = a.chain[j], wBox = boxes[j];
+      g.fillStyle = CHAIN_COLORS[stp.s] || "#555";
+      roundRect(g, cx, 0, wBox, 16, 5); g.fill();
       g.fillStyle = "rgba(255,255,255,.18)";
-      roundRect(g, cx, cy, wBox, 6, 4); g.fill();
-      text(g, stp.t, cx + wBox / 2, cy + 11, 10, "#ffffff", "center");
+      roundRect(g, cx, 0, wBox, 6, 4); g.fill();
+      text(g, stp.t, cx + wBox / 2, 11, 10, "#ffffff", "center");
       cx += wBox;
       if (j < a.chain.length - 1) {
-        text(g, "›", cx + 5, cy + 12, 13, PALETTE.dim, "center");
+        text(g, "\u203a", cx + 5, 12, 13, PALETTE.dim, "center");
         cx += 11;
       }
     }
+    g.restore();
+    g.restore();
   }
 }
 
