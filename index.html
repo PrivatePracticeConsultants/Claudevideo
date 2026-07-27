@@ -866,30 +866,34 @@ const Pads = {
    --------------------------------------------------------------------- */
 
 const ITEMS = {
-  bandage:       { name: "Bandage",  short: "BND" },
-  syringe:       { name: "Syringe",  short: "SYR" },
-  film:          { name: "Raw film", short: "FLM" },
-  xrayimg:       { name: "X-ray",    short: "IMG" },
-  cast:          { name: "Cast",     short: "CST" },
-  sample:        { name: "Blood",    short: "LAB" },
-  crate:         { name: "Supplies", short: "BOX" },
-  defib:         { name: "Defib",    short: "DEF" },
-  defib_charged: { name: "Defib +",  short: "DEF" }
+  towel:        { name: "Towel",       short: "TWL" },
+  drops:        { name: "Drops",       short: "DRP" },
+  plate:        { name: "Blank plate", short: "PLT" },
+  scan:         { name: "Scan",        short: "SCN" },
+  bootie:       { name: "Bootie",      short: "BOO" },
+  swab:         { name: "Fur swab",    short: "SWB" },
+  crate:        { name: "Supplies",    short: "BOX" },
+  wand:         { name: "Static wand", short: "WND" },
+  wand_charged: { name: "Wand +",      short: "WND" }
 };
 
 /* Station types. `solid` stations block movement and are worked from an
-   adjacent tile. `holdsPatient` stations can have a patient placed on them. */
+   adjacent tile. `holdsPatient` stations can have a patient placed on them.
+
+   Everything here is ordinary small-animal practice kit — which is exactly why
+   the clinic recast cost so little. A basket is a basket, a scanner is a
+   scanner, and every hand-built mesh carried straight over. */
 const STATIONS = {
-  bed:       { name: "Bed",            color: "#f7fbff", edge: "#9db6cf", holdsPatient: true },
-  breaker:   { name: "Breaker Panel",  color: "#f0b03c", edge: "#b07f22" },
-  supply:    { name: "Supply Shelf",   color: "#6fd3b4", edge: "#3f9e82", stockMax: 3 },
-  medicine:  { name: "Medicine Cabinet", color: "#7db2f2", edge: "#4a7cc4", stockMax: 3 },
-  xray:      { name: "X-Ray",          color: "#93a3c0", edge: "#5d6c8a", holdsPatient: true },
-  cast:      { name: "Cast Bench",     color: "#eccb92", edge: "#b18d51" },
-  charger:   { name: "Charging Dock",  color: "#ffd166", edge: "#c9942a" },
-  lab:       { name: "Lab",            color: "#c39bf5", edge: "#8a5fd0" },
-  delivery:  { name: "Delivery Door",  color: "#d8a86b", edge: "#9c713a" },
-  defibrack: { name: "Defib Rack",     color: "#ff9a8a", edge: "#cf5f4e" }
+  basket:      { name: "Basket",          color: "#fff6ea", edge: "#d3b48f", holdsPatient: true },
+  fusebox:     { name: "Fuse Box",        color: "#f0b03c", edge: "#b07f22" },
+  grooming:    { name: "Grooming Shelf",  color: "#6fd3b4", edge: "#3f9e82", stockMax: 3 },
+  remedy:      { name: "Remedy Cabinet",  color: "#7db2f2", edge: "#4a7cc4", stockMax: 3 },
+  scanner:     { name: "Scanner",         color: "#93a3c0", edge: "#5d6c8a", holdsPatient: true },
+  bootiebench: { name: "Bootie Bench",    color: "#eccb92", edge: "#b18d51" },
+  groundpad:   { name: "Grounding Pad",   color: "#ffd166", edge: "#c9942a" },
+  lab:         { name: "Sniff Lab",       color: "#c39bf5", edge: "#8a5fd0" },
+  hatch:       { name: "Delivery Hatch",  color: "#d8a86b", edge: "#9c713a" },
+  wanddock:    { name: "Wand Dock",       color: "#ff9a8a", edge: "#cf5f4e" }
 };
 
 /* Ailments.
@@ -900,104 +904,98 @@ const STATIONS = {
      k:'lab'       — completed remotely when someone analyses this patient's sample
    `chain` is the player-facing workflow shown in the HUD legend. */
 const AILMENTS = {
-  cut: {
-    name: "Laceration", color: "#e4573d", score: 80, patienceMul: 1.05,
-    steps: [{ k: "bedside", need: "bandage", dur: 1.3, label: "Apply bandage" }],
-    chain: [{ s: "supply", t: "Shelf" }, { s: "bed", t: "Bandage" }]
+  muddypaws: {
+    name: "Muddy Paws", color: "#b98a58", short: "MUD", score: 80, patienceMul: 1.05,
+    steps: [{ k: "bedside", need: "towel", dur: 1.3, label: "Wipe those paws" }],
+    chain: [{ s: "grooming", t: "Shelf" }, { s: "basket", t: "Wipe" }]
   },
-  infection: {
-    name: "Infection", color: "#4ec97a", score: 110, patienceMul: 1.0,
-    steps: [{ k: "bedside", need: "syringe", dur: 1.5, label: "Inject antibiotics" }],
-    chain: [{ s: "medicine", t: "Med Cab" }, { s: "bed", t: "Inject" }]
+  itchyears: {
+    name: "Itchy Ears", color: "#4ec97a", short: "ITCH", score: 110, patienceMul: 1.0,
+    steps: [{ k: "bedside", need: "drops", dur: 1.5, label: "Two drops each ear" }],
+    chain: [{ s: "remedy", t: "Remedies" }, { s: "basket", t: "Drops" }]
   },
-  fracture: {
-    name: "Fracture", color: "#c2b38e", score: 175, patienceMul: 1.45,
+  sprainedhop: {
+    name: "Sprained Hop", color: "#c2b38e", short: "HOP", score: 175, patienceMul: 1.45,
     steps: [
-      { k: "atStation", station: "xray", dur: 2.4, label: "X-ray the patient" },
-      { k: "bedside", need: "cast", dur: 2.0, label: "Apply cast" }
+      { k: "atStation", station: "scanner", dur: 2.4, label: "Scan the leg" },
+      { k: "bedside", need: "bootie", dur: 2.0, label: "Fit the bootie" }
     ],
-    chain: [{ s: "xray", t: "X-ray" }, { s: "xray", t: "Develop" }, { s: "cast", t: "Mix cast" }, { s: "bed", t: "Apply" }]
+    chain: [{ s: "scanner", t: "Scan" }, { s: "scanner", t: "Develop" },
+            { s: "bootiebench", t: "Cut bootie" }, { s: "basket", t: "Fit" }]
   },
-  cardiac: {
-    name: "Cardiac", color: "#ff4d6d", score: 195, patienceMul: 0.9,
-    steps: [{ k: "bedside", need: "defib_charged", dur: 1.2, label: "Defibrillate" }],
-    chain: [{ s: "defibrack", t: "Defib" }, { s: "charger", t: "Charge" }, { s: "bed", t: "Shock" }]
+  staticcling: {
+    name: "Static Cling", color: "#ffb703", short: "ZAP", score: 195, patienceMul: 0.9,
+    steps: [{ k: "bedside", need: "wand_charged", dur: 1.2, label: "Discharge the fluff" }],
+    chain: [{ s: "wanddock", t: "Wand" }, { s: "groundpad", t: "Ground it" },
+            { s: "basket", t: "Poof" }]
   },
-  mystery: {
-    name: "Mystery", color: "#b58bff", short: "???", score: 215, patienceMul: 1.55,
+  mysterymunch: {
+    name: "Mystery Munch", color: "#b58bff", short: "???", score: 215, patienceMul: 1.55,
     steps: [
-      { k: "bedside", produce: "sample", dur: 1.3, label: "Draw blood" },
-      { k: "lab", label: "Awaiting lab" }
+      { k: "bedside", produce: "swab", dur: 1.3, label: "Take a fur swab" },
+      { k: "lab", label: "Sniff lab working" }
     ],
-    chain: [{ s: "bed", t: "Draw" }, { s: "lab", t: "Analyse" }, { s: "?", t: "Then treat" }]
+    chain: [{ s: "basket", t: "Swab" }, { s: "lab", t: "Sniff" }, { s: "?", t: "Then treat" }]
   },
 
-  /* --- the second five -------------------------------------------------
-     Five ailments was the depth ceiling: eleven of the fifteen wards drew
-     from an identical case mix, so every ward past the fourth was the same
-     job in a different room. These five add no new stations and no new
-     items on purpose — that way they enrich all fifteen existing wards
-     instead of only the ones built for them, and each one asks for a
-     different SHAPE of work rather than a different label:
+  /* --- the second five ---------------------------------------------------
+     Five problems was the depth ceiling: eleven of the wards drew from an
+     identical case mix. These five add no new stations and no new items on
+     purpose, so they enrich every existing ward rather than only wards built
+     for them, and each asks for a different SHAPE of work:
 
-       burn         two items from two different stations — routing
-       anaphylaxis  one item, brutal clock — drop what you are doing
-       concussion   shares the X-ray front half, then diverges at the bench
-       dislocation  you must be there, empty-handed — no item to fetch
-       overdose     draw, lab, then treat — the longest chain in the game
+       stickypaws     two items from two different shelves — routing
+       zoomies        one item, brutal clock — drop what you are doing
+       socksituation  shares the scanner front half, then diverges
+       crickintail    you must be there, empty-handed — nothing to fetch
+       toomanytreats  swab, lab, then treat — the longest chain in the clinic
      --------------------------------------------------------------------- */
-  burn: {
-    name: "Burn", color: "#ff7518", short: "BRN", score: 165, patienceMul: 1.15,
+  stickypaws: {
+    name: "Sticky Situation", color: "#ff7518", short: "GOO", score: 165, patienceMul: 1.15,
     steps: [
-      { k: "bedside", need: "syringe", dur: 1.2, label: "Pain relief" },
-      { k: "bedside", need: "bandage", dur: 1.5, label: "Dress the burn" }
+      { k: "bedside", need: "drops", dur: 1.2, label: "Loosen the goo" },
+      { k: "bedside", need: "towel", dur: 1.5, label: "Towel it off" }
     ],
-    chain: [{ s: "medicine", t: "Med Cab" }, { s: "bed", t: "Relief" },
-            { s: "supply", t: "Shelf" }, { s: "bed", t: "Dress" }]
+    chain: [{ s: "remedy", t: "Remedies" }, { s: "basket", t: "Loosen" },
+            { s: "grooming", t: "Shelf" }, { s: "basket", t: "Towel" }]
   },
-  anaphylaxis: {
-    name: "Anaphylaxis", color: "#ffd93d", short: "ANA", score: 150, patienceMul: 0.62,
-    steps: [{ k: "bedside", need: "syringe", dur: 1.0, label: "Adrenaline, now" }],
-    chain: [{ s: "medicine", t: "Med Cab" }, { s: "bed", t: "Adrenaline" }]
+  zoomies: {
+    name: "The Zoomies", color: "#ffd93d", short: "ZOOM", score: 150, patienceMul: 0.62,
+    steps: [{ k: "bedside", need: "drops", dur: 1.0, label: "Calming drops, quick" }],
+    chain: [{ s: "remedy", t: "Remedies" }, { s: "basket", t: "Calm down" }]
   },
-  concussion: {
-    name: "Concussion", color: "#4a90d9", short: "CON", score: 175, patienceMul: 1.3,
+  socksituation: {
+    name: "Sock Situation", color: "#4a90d9", short: "SOCK", score: 175, patienceMul: 1.3,
     steps: [
-      { k: "atStation", station: "xray", dur: 2.2, label: "Scan the head" },
-      { k: "bedside", need: "xrayimg", dur: 1.6, label: "Read the scan" }
+      { k: "atStation", station: "scanner", dur: 2.2, label: "Scan the tummy" },
+      { k: "bedside", need: "scan", dur: 1.6, label: "Yep. That is a sock." }
     ],
-    chain: [{ s: "xray", t: "Scan" }, { s: "xray", t: "Develop" }, { s: "bed", t: "Read" }]
+    chain: [{ s: "scanner", t: "Scan" }, { s: "scanner", t: "Develop" }, { s: "basket", t: "Fish it out" }]
   },
-  dislocation: {
-    name: "Dislocation", color: "#7ad0c8", short: "DIS", score: 190, patienceMul: 1.35,
+  crickintail: {
+    name: "Crick in the Tail", color: "#7ad0c8", short: "TAIL", score: 190, patienceMul: 1.35,
     steps: [
-      { k: "atStation", station: "xray", dur: 2.2, label: "X-ray the joint" },
-      { k: "bedside", dur: 2.4, label: "Reset the joint" }
+      { k: "atStation", station: "scanner", dur: 2.2, label: "Scan the tail" },
+      { k: "bedside", dur: 2.4, label: "Gentle wiggle" }
     ],
-    chain: [{ s: "xray", t: "X-ray" }, { s: "bed", t: "Reset" }]
+    chain: [{ s: "scanner", t: "Scan" }, { s: "basket", t: "Wiggle" }]
   },
-  overdose: {
-    name: "Overdose", color: "#6d5bd0", short: "OD", score: 265, patienceMul: 1.6,
+  toomanytreats: {
+    name: "Too Many Treats", color: "#e06fa8", short: "TUM", score: 265, patienceMul: 1.6,
     steps: [
-      { k: "bedside", produce: "sample", dur: 1.3, label: "Draw blood" },
-      /* reveal:false is what separates this from a mystery. The lab step was
-         hard-wired to swap the patient's whole condition for a revealed one;
-         here the bloods come back naming what you already knew and the chain
-         simply carries on to the antidote. */
-      { k: "lab", reveal: false, label: "Awaiting toxicology" },
-      { k: "bedside", need: "syringe", dur: 1.5, label: "Give the antidote" }
+      { k: "bedside", produce: "swab", dur: 1.3, label: "Take a fur swab" },
+      /* reveal:false is what separates this from a Mystery Munch. The lab step
+         was hard-wired to swap the patient's whole problem for a revealed one;
+         here the swab comes back naming what you already knew and the chain
+         simply carries on to the tummy soother. */
+      { k: "lab", reveal: false, label: "Counting the crumbs" },
+      { k: "bedside", need: "drops", dur: 1.5, label: "Tummy soother" }
     ],
-    chain: [{ s: "bed", t: "Draw" }, { s: "lab", t: "Toxicology" },
-            { s: "medicine", t: "Antidote" }, { s: "bed", t: "Give" }]
+    chain: [{ s: "basket", t: "Swab" }, { s: "lab", t: "Crumbs" },
+            { s: "remedy", t: "Soother" }, { s: "basket", t: "Soothe" }]
   }
 };
 
-/* Short tags for the high-contrast option, so a ten-condition board never
-   depends on hue alone. The first five predate the field. */
-AILMENTS.cut.short = "CUT";
-AILMENTS.infection.short = "INF";
-AILMENTS.fracture.short = "FRC";
-AILMENTS.cardiac.short = "CAR";
 
 /* Station recipes, evaluated top-down; first match wins.
      need:      item the player must be holding (null = must be empty-handed)
@@ -1007,24 +1005,24 @@ AILMENTS.cardiac.short = "CAR";
      patientStep: advances the occupying patient's `atStation` step
      labWork:   analyses a blood sample */
 const RECIPES = {
-  supply: [
-    { need: "crate", out: null, dur: 1.5, restock: true, label: "Restock shelf" },
-    { need: null, out: "bandage", dur: 1.0, stock: true, label: "Take bandage" }
+  grooming: [
+    { need: "crate", out: null, dur: 1.5, restock: true, label: "Restock the shelf" },
+    { need: null, out: "towel", dur: 1.0, stock: true, label: "Take a towel" }
   ],
-  medicine: [
-    { need: "crate", out: null, dur: 1.5, restock: true, label: "Restock cabinet" },
-    { need: null, out: "syringe", dur: 1.6, stock: true, label: "Fill syringe" }
+  remedy: [
+    { need: "crate", out: null, dur: 1.5, restock: true, label: "Restock the cabinet" },
+    { need: null, out: "drops", dur: 1.6, stock: true, label: "Fill the dropper" }
   ],
-  xray: [
-    { need: "film", out: "xrayimg", dur: 1.5, label: "Develop film" },
-    { need: null, out: "film", dur: 2.4, patientStep: true, label: "X-ray patient" }
+  scanner: [
+    { need: "plate", out: "scan", dur: 1.5, label: "Develop the plate" },
+    { need: null, out: "plate", dur: 2.4, patientStep: true, label: "Scan them" }
   ],
-  cast: [{ need: "xrayimg", out: "cast", dur: 2.0, label: "Mix cast" }],
-  charger: [{ need: "defib", out: "defib_charged", dur: 1.8, label: "Charge defib" }],
-  lab: [{ need: "sample", out: null, dur: 2.6, labWork: true, label: "Analyse blood" }],
-  delivery: [{ need: null, out: "crate", dur: 1.4, label: "Collect supplies" }],
-  defibrack: [],
-  bed: []
+  bootiebench: [{ need: "scan", out: "bootie", dur: 2.0, label: "Cut a bootie" }],
+  groundpad: [{ need: "wand", out: "wand_charged", dur: 1.8, label: "Ground the wand" }],
+  lab: [{ need: "swab", out: null, dur: 2.6, labWork: true, label: "Sniff the swab" }],
+  hatch: [{ need: null, out: "crate", dur: 1.4, label: "Collect supplies" }],
+  wanddock: [],
+  basket: []
 };
 
 /* --- Levels -------------------------------------------------------------
@@ -1044,7 +1042,7 @@ const LEVELS = [
     patience: 78,
     spawnStart: 11.0, spawnEnd: 7.5,
     maxWaiting: 3,
-    ailments: ["cut", "infection"],
+    ailments: ["muddypaws", "itchyears"],
     stars: [3000, 5200, 7100],
     restock: false, jams: false, flatline: false,
         theme: { floor:"#f7efdd", floorAlt:"#f0e5cd", wall:"#a9e0d4", wallTop:"#c6ede3", base:"#7cc4b4",
@@ -1084,7 +1082,7 @@ const LEVELS = [
     patience: 70,
     spawnStart: 10.0, spawnEnd: 6.8,
     maxWaiting: 4,
-    ailments: ["cut", "infection", "fracture", "burn"],
+    ailments: ["muddypaws", "itchyears", "sprainedhop", "stickypaws"],
     stars: [2350, 4050, 5550],
     restock: false, jams: false, flatline: false,
         theme: { floor:"#eef2f7", floorAlt:"#e5ebf3", wall:"#9fc3e4", wallTop:"#bcd8ef", base:"#6d9bc4",
@@ -1124,7 +1122,7 @@ const LEVELS = [
     patience: 56,
     spawnStart: 9.2, spawnEnd: 6.2,
     maxWaiting: 5,
-    ailments: ["cut", "infection", "fracture", "cardiac", "burn", "anaphylaxis"],
+    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "stickypaws", "zoomies"],
     stars: [1700, 2950, 4050],
     restock: true, jams: false, flatline: true,
         theme: { floor:"#f4e9e4", floorAlt:"#ecdfd9", wall:"#e0a79f", wallTop:"#eec3bc", base:"#c17f76",
@@ -1165,7 +1163,7 @@ const LEVELS = [
     patience: 66,
     spawnStart: 8.6, spawnEnd: 5.8,
     maxWaiting: 5,
-    ailments: ["cut", "infection", "fracture", "cardiac", "mystery", "burn", "concussion"],
+    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "socksituation"],
     stars: [2100, 3650, 5000],
     restock: true, jams: true, flatline: true,
         theme: { floor:"#e9e6de", floorAlt:"#e0ddd4", wall:"#8fa398", wallTop:"#aab9b0", base:"#6a7d73",
@@ -1207,7 +1205,7 @@ const LEVELS = [
     patience: 66,
     spawnStart: 8.0, spawnEnd: 5.4,
     maxWaiting: 6,
-    ailments: ["cut", "infection", "fracture", "cardiac", "mystery", "burn", "anaphylaxis", "dislocation"],
+    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "crickintail"],
     stars: [1700, 2950, 4050],
     restock: true, jams: true, flatline: true,
         theme: { floor:"#e6eef4", floorAlt:"#dce6ee", wall:"#7fa8c9", wallTop:"#a2c4dd", base:"#57809f",
@@ -1248,7 +1246,7 @@ const LEVELS = [
     patience: 52,
     spawnStart: 7.6, spawnEnd: 5.1,
     maxWaiting: 6,
-    ailments: ["cut", "infection", "fracture", "cardiac", "mystery", "burn", "anaphylaxis", "concussion", "dislocation", "overdose"],
+    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats"],
     stars: [2150, 3750, 5100],
     restock: true, jams: true, flatline: true,
         theme: { floor:"#f0ecf6", floorAlt:"#e7e2f0", wall:"#b1a3d6", wallTop:"#c9bee6", base:"#8878b4",
@@ -1284,7 +1282,7 @@ const LEVELS = [
     patience: 62,
     spawnStart: 7.2, spawnEnd: 4.9,
     maxWaiting: 6,
-    ailments: ["cut", "infection", "fracture", "cardiac", "mystery", "concussion", "dislocation"],
+    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "socksituation", "crickintail"],
     stars: [1700, 2900, 4000],
     restock: true, jams: true, flatline: true,
         theme: { floor:"#f2e6d2", floorAlt:"#e9dbc4", wall:"#c9a06a", wallTop:"#dcbb8b", base:"#9c7343",
@@ -1319,7 +1317,7 @@ const LEVELS = [
     patience: 65,
     spawnStart: 6.9, spawnEnd: 4.7,
     maxWaiting: 7,
-    ailments: ["cut", "infection", "fracture", "cardiac", "mystery", "burn", "anaphylaxis"],
+    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies"],
     stars: [1750, 3000, 4150],
     restock: true, jams: true, flatline: true,
         theme: { floor:"#f1ecdf", floorAlt:"#e8e2d2", wall:"#8fc9be", wallTop:"#aeddd4", base:"#5f9e92",
@@ -1354,7 +1352,7 @@ const LEVELS = [
     patience: 63,
     spawnStart: 6.6, spawnEnd: 4.5,
     maxWaiting: 7,
-    ailments: ["cut", "infection", "fracture", "cardiac", "mystery", "burn", "anaphylaxis", "concussion", "dislocation", "overdose"],
+    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats"],
     stars: [1550, 2650, 3650],
     restock: true, jams: true, flatline: true,
         theme: { floor:"#f6f3ec", floorAlt:"#ece8df", wall:"#dfe4e9", wallTop:"#f0f3f6", base:"#a9b4bf",
@@ -1391,7 +1389,7 @@ const LEVELS = [
     patience: 52,
     spawnStart: 6.3, spawnEnd: 4.3,
     maxWaiting: 8,
-    ailments: ["cut", "infection", "fracture", "cardiac", "mystery", "burn", "anaphylaxis", "concussion", "dislocation", "overdose"],
+    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats"],
     stars: [1300, 2200, 3000],
     restock: true, jams: true, flatline: true,
         theme: { floor:"#dfe4e4", floorAlt:"#d5dbdb", wall:"#5f7d80", wallTop:"#7d9c9e", base:"#41595c",
@@ -1428,7 +1426,7 @@ const LEVELS = [
     patience: 60,
     spawnStart: 6.6, spawnEnd: 4.6,
     maxWaiting: 7,
-    ailments: ["cut", "infection", "fracture", "mystery", "concussion", "overdose"],
+    ailments: ["muddypaws", "itchyears", "sprainedhop", "mysterymunch", "socksituation", "toomanytreats"],
     stars: [1850, 3250, 4450],
     restock: true, jams: true, flatline: true,
     theme: { floor:"#2f3a4a", floorAlt:"#28323f", wall:"#465a72", wallTop:"#5d7590", base:"#31404f", accent:"#7fb2e0", wood:"#8a6f4e", leaf:"#3f7f58", leaf2:"#579a70", locker:"#4e6378", crate:"#96794f", crate2:"#7f6644", curtain:"#5f7c96", pot:"#7a5340", rug:"#3c4a5c" },
@@ -1462,7 +1460,7 @@ const LEVELS = [
     patience: 65,
     spawnStart: 6.4, spawnEnd: 4.4,
     maxWaiting: 7,
-    ailments: ["cut", "infection", "fracture", "cardiac", "mystery", "burn", "anaphylaxis", "dislocation"],
+    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "crickintail"],
     stars: [1400, 2400, 3250],
     restock: true, jams: true, flatline: true,
     theme: { floor:"#f2ead9", floorAlt:"#e8dfcc", wall:"#c08f6a", wallTop:"#d9ab86", base:"#8f6647", accent:"#e0763f", wood:"#b98a58", leaf:"#5aa06a", leaf2:"#7bbb87", locker:"#b9a389", crate:"#cfae7f", crate2:"#b8955f", curtain:"#e0cdb2", pot:"#a76b4c", rug:"#e3d6bd" },
@@ -1498,7 +1496,7 @@ const LEVELS = [
     patience: 69,
     spawnStart: 6.2, spawnEnd: 4.2,
     maxWaiting: 8,
-    ailments: ["cut", "infection", "fracture", "cardiac", "mystery", "burn", "anaphylaxis", "concussion", "dislocation", "overdose"],
+    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats"],
     stars: [2150, 3700, 5050],
     restock: true, jams: true, flatline: true,
     theme: { floor:"#e6eef2", floorAlt:"#dae4ea", wall:"#7a93a8", wallTop:"#9ab0c2", base:"#566d80", accent:"#4fa8d8", wood:"#a58356", leaf:"#4e9c6b", leaf2:"#6fb886", locker:"#7f97aa", crate:"#bb9a6e", crate2:"#a2825a", curtain:"#a8bfd0", pot:"#8a6350", rug:"#cfdae2" },
@@ -1535,7 +1533,7 @@ const LEVELS = [
     patience: 54,
     spawnStart: 6.0, spawnEnd: 4.1,
     maxWaiting: 8,
-    ailments: ["cut", "infection", "fracture", "cardiac", "burn", "anaphylaxis", "dislocation"],
+    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "stickypaws", "zoomies", "crickintail"],
     stars: [2100, 3600, 4900],
     restock: true, jams: true, flatline: true,
     theme: { floor:"#efe7e7", floorAlt:"#e4dada", wall:"#9c6f74", wallTop:"#bb8b90", base:"#6f4a4f", accent:"#e05f6e", wood:"#a97f5c", leaf:"#4f9a63", leaf2:"#6fb47f", locker:"#a08187", crate:"#c4a077", crate2:"#a98657", curtain:"#d3aeb2", pot:"#96604e", rug:"#ddcdcd" },
@@ -1571,7 +1569,7 @@ const LEVELS = [
     patience: 51,
     spawnStart: 5.8, spawnEnd: 3.9,
     maxWaiting: 9,
-    ailments: ["cut", "infection", "fracture", "cardiac", "mystery", "burn", "anaphylaxis", "concussion", "dislocation", "overdose"],
+    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats"],
     stars: [2150, 3700, 5050],
     restock: true, jams: true, flatline: true,
     theme: { floor:"#232b38", floorAlt:"#1d2531", wall:"#3d4c63", wallTop:"#54667f", base:"#2a3546", accent:"#c39bff", wood:"#7d6349", leaf:"#3a7350", leaf2:"#4f8d66", locker:"#455772", crate:"#8a6f4a", crate2:"#735c3d", curtain:"#4f6580", pot:"#6d4a3c", rug:"#2c3646" },
@@ -1608,7 +1606,7 @@ const LEVELS = [
     patience: 64,
     spawnStart: 6.6, spawnEnd: 4.4,
     maxWaiting: 7,
-    ailments: ["cut", "infection", "fracture", "cardiac", "mystery", "burn", "anaphylaxis", "concussion", "dislocation", "overdose"],
+    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats"],
     stars: [2200, 3750, 5150],
     restock: true, jams: true, flatline: true,
     theme: { floor:"#eef0e6", floorAlt:"#e4e7da", wall:"#8a9a78", wallTop:"#a8b795", base:"#5c6b4c", accent:"#e0a03f", wood:"#bd9260", leaf:"#5aa06a", leaf2:"#7bbb87", locker:"#9aa88c", crate:"#cfae7f", crate2:"#b8955f", curtain:"#ccd8bf", pot:"#a76b4c", rug:"#dde2d2" },
@@ -1642,7 +1640,7 @@ const LEVELS = [
     patience: 62,
     spawnStart: 6.4, spawnEnd: 4.3,
     maxWaiting: 7,
-    ailments: ["cut", "infection", "fracture", "cardiac", "mystery", "concussion", "dislocation", "overdose"],
+    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "socksituation", "crickintail", "toomanytreats"],
     stars: [2100, 3600, 4950],
     restock: true, jams: true, flatline: true,
     theme: { floor:"#e9eef2", floorAlt:"#dee5ea", wall:"#7f93a6", wallTop:"#9db0c1", base:"#546678", accent:"#4fb0d8", wood:"#b08a5c", leaf:"#57a06d", leaf2:"#78bb86", locker:"#8ea4b5", crate:"#c9a97c", crate2:"#b08f5f", curtain:"#c2d4e0", pot:"#96604e", rug:"#d7e0e6" },
@@ -1676,7 +1674,7 @@ const LEVELS = [
     patience: 60,
     spawnStart: 6.3, spawnEnd: 4.2,
     maxWaiting: 7,
-    ailments: ["cut", "infection", "fracture", "cardiac", "mystery", "burn", "anaphylaxis", "concussion", "dislocation", "overdose"],
+    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats"],
     stars: [1950, 3350, 4600],
     restock: true, jams: true, flatline: true,
     theme: { floor:"#e6ecef", floorAlt:"#dae2e6", wall:"#6f8790", wallTop:"#8ea6af", base:"#48606a", accent:"#54c7d8", wood:"#a8845c", leaf:"#4f9a63", leaf2:"#6fb47f", locker:"#84a0a8", crate:"#c0a179", crate2:"#a5885c", curtain:"#b9d0d6", pot:"#8d6250", rug:"#d3dee2" },
@@ -1711,7 +1709,7 @@ const LEVELS = [
     patience: 63,
     spawnStart: 6.5, spawnEnd: 4.4,
     maxWaiting: 7,
-    ailments: ["cut", "infection", "fracture", "cardiac", "burn", "anaphylaxis", "concussion", "dislocation"],
+    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "stickypaws", "zoomies", "socksituation", "crickintail"],
     stars: [2800, 4800, 6600],
     restock: true, jams: true, flatline: true,
     theme: { floor:"#f3ebdd", floorAlt:"#e9e0d0", wall:"#b58a63", wallTop:"#d0a681", base:"#86603f", accent:"#e07b3a", wood:"#b98a58", leaf:"#5aa06a", leaf2:"#7bbb87", locker:"#b5a086", crate:"#cfae7f", crate2:"#b8955f", curtain:"#dfcdb2", pot:"#a76b4c", rug:"#e2d5bc" },
@@ -1743,7 +1741,7 @@ const LEVELS = [
     patience: 61,
     spawnStart: 6.2, spawnEnd: 4.1,
     maxWaiting: 7,
-    ailments: ["cut", "infection", "fracture", "cardiac", "mystery", "burn", "anaphylaxis", "concussion", "dislocation", "overdose"],
+    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats"],
     stars: [2250, 3850, 5300],
     restock: true, jams: true, flatline: true,
     theme: { floor:"#efe7e7", floorAlt:"#e4dada", wall:"#9c6f74", wallTop:"#bb8b90", base:"#6f4a4f", accent:"#e05f6e", wood:"#a97f5c", leaf:"#4f9a63", leaf2:"#6fb47f", locker:"#a08187", crate:"#c4a077", crate2:"#a98657", curtain:"#d3aeb2", pot:"#96604e", rug:"#ddcdcd" },
@@ -1777,7 +1775,7 @@ const LEVELS = [
     patience: 60,
     spawnStart: 6.1, spawnEnd: 4.0,
     maxWaiting: 8,
-    ailments: ["cut", "infection", "fracture", "cardiac", "mystery", "burn", "anaphylaxis", "concussion", "dislocation", "overdose"],
+    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats"],
     stars: [2550, 4350, 6000],
     restock: true, jams: true, flatline: true,
     theme: { floor:"#eaefe8", floorAlt:"#dfe6dc", wall:"#7a9a86", wallTop:"#98b6a3", base:"#4e6b58", accent:"#3fb98a", wood:"#b18a5f", leaf:"#57ac74", leaf2:"#7ac68e", locker:"#8fae9c", crate:"#c8a87c", crate2:"#ad8c60", curtain:"#c3d8ca", pot:"#96604e", rug:"#d6e0d4" },
@@ -1811,7 +1809,7 @@ const LEVELS = [
     patience: 62,
     spawnStart: 6.3, spawnEnd: 4.2,
     maxWaiting: 7,
-    ailments: ["cut", "infection", "fracture", "cardiac", "mystery", "burn", "concussion", "overdose"],
+    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "socksituation", "toomanytreats"],
     stars: [1900, 3250, 4450],
     restock: true, jams: true, flatline: true,
     theme: { floor:"#e7e9ee", floorAlt:"#dcdfe6", wall:"#6d7285", wallTop:"#8b90a4", base:"#464b5e", accent:"#8f7bd8", wood:"#a4855f", leaf:"#4f9a63", leaf2:"#6fb47f", locker:"#848aa0", crate:"#bfa079", crate2:"#a4875e", curtain:"#c0c4d4", pot:"#8d6250", rug:"#d4d8e2" },
@@ -1844,7 +1842,7 @@ const LEVELS = [
     patience: 58,
     spawnStart: 6.0, spawnEnd: 3.9,
     maxWaiting: 8,
-    ailments: ["cut", "infection", "fracture", "cardiac", "mystery", "burn", "anaphylaxis", "concussion", "dislocation", "overdose"],
+    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats"],
     stars: [1800, 3100, 4250],
     restock: true, jams: true, flatline: true,
     theme: { floor:"#e8e4ee", floorAlt:"#ddd8e5", wall:"#77689a", wallTop:"#9587b5", base:"#4d4070", accent:"#b98bff", wood:"#a4855f", leaf:"#4f9a63", leaf2:"#6fb47f", locker:"#8b7fa8", crate:"#bfa079", crate2:"#a4875e", curtain:"#cbc0dd", pot:"#8d6250", rug:"#d9d3e4" },
@@ -1881,7 +1879,7 @@ const LEVELS = [
     patience: 57,
     spawnStart: 5.9, spawnEnd: 3.8,
     maxWaiting: 8,
-    ailments: ["cut", "infection", "fracture", "cardiac", "mystery", "burn", "anaphylaxis", "concussion", "dislocation", "overdose"],
+    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats"],
     stars: [1450, 2500, 3400],
     restock: true, jams: true, flatline: true,
     theme: { floor:"#f4f0e4", floorAlt:"#eae5d6", wall:"#c2a06e", wallTop:"#dcbb8c", base:"#8f6d43", accent:"#f0a541", wood:"#c69a68", leaf:"#5aa06a", leaf2:"#7bbb87", locker:"#bda98a", crate:"#d3ab7c", crate2:"#bd9366", curtain:"#e2d3b6", pot:"#a76b4c", rug:"#e6dcc6" },
@@ -1914,7 +1912,7 @@ const LEVELS = [
     patience: 55,
     spawnStart: 5.7, spawnEnd: 3.6,
     maxWaiting: 8,
-    ailments: ["cut", "infection", "fracture", "cardiac", "mystery", "burn", "anaphylaxis", "concussion", "dislocation", "overdose"],
+    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats"],
     stars: [1450, 2500, 3400],
     restock: true, jams: true, flatline: true,
     theme: { floor:"#e4e6ec", floorAlt:"#d8dbe3", wall:"#5d6478", wallTop:"#7c8398", base:"#383e50", accent:"#ff6b6b", wood:"#a4855f", leaf:"#4f9a63", leaf2:"#6fb47f", locker:"#787f94", crate:"#bfa079", crate2:"#a4875e", curtain:"#b8bdcc", pot:"#8d6250", rug:"#d0d4de" },
@@ -2021,7 +2019,7 @@ const TUTORIAL = {
   patience: 1e6,                 // nobody ever walks out of the tutorial
   spawnStart: 1e6, spawnEnd: 1e6,
   maxWaiting: 1,
-  ailments: ["cut"],
+  ailments: ["muddypaws"],
   stars: [0, 0, 0],
   restock: false, jams: false, flatline: false,
   theme: { floor:"#f7efdd", floorAlt:"#f0e5cd", wall:"#a9e0d4", wallTop:"#c6ede3", base:"#7cc4b4",
@@ -2057,8 +2055,8 @@ const ENDLESS = {
   patience: 52,
   spawnStart: 8.5, spawnEnd: 3.2,
   maxWaiting: 8,
-  ailments: ["cut", "infection", "fracture", "cardiac", "mystery",
-             "burn", "anaphylaxis", "concussion", "dislocation", "overdose"],
+  ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch",
+             "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats"],
   stars: [1500, 3200, 5400],
   restock: true, jams: true, flatline: true,
   map: [
@@ -2118,8 +2116,8 @@ function wardSystems(def) {
 }
 
 const CHAR_TO_STATION = {
-  b: "bed", s: "supply", m: "medicine", x: "xray", c: "cast",
-  h: "charger", l: "lab", d: "delivery", f: "defibrack", g: "breaker"
+  b: "basket", s: "grooming", m: "remedy", x: "scanner", c: "bootiebench",
+  h: "groundpad", l: "lab", d: "hatch", f: "wanddock", g: "fusebox"
 };
 
 
@@ -2444,12 +2442,12 @@ function makeWorld(levelDef) {
             : Infinity,
           jammed: false,
           flash: 0,
-          hasDefib: type === "defibrack"
+          hasDefib: type === "wanddock"
         };
         cell.solid = true;
         cell.station = st;
         world.stations.push(st);
-        if (type === "bed") world.beds.push(st);
+        if (type === "basket") world.beds.push(st);
       }
       row.push(cell);
     }
@@ -2520,7 +2518,7 @@ function addExtraBeds(world, n) {
     if (placed >= n) break;
     const cell = world.grid[cand.y][cand.x];
     const st = {
-      type: "bed", x: cand.x, y: cand.y,
+      type: "basket", x: cand.x, y: cand.y,
       cx: cand.x * TILE + TILE / 2, cy: cand.y * TILE + TILE / 2,
       occupant: null, stock: Infinity, jammed: false, flash: 0, hasDefib: false, bonus: true
     };
@@ -2626,7 +2624,7 @@ let nextId = 1;
 function makeItem(type, extra) {
   const it = { type, id: nextId++ };
   if (extra) Object.assign(it, extra);
-  if (type === "defib_charged") it.charge = DEFIB_CHARGE_LIFE;
+  if (type === "wand_charged") it.charge = DEFIB_CHARGE_LIFE;
   return it;
 }
 
@@ -2759,7 +2757,7 @@ function rollSeverity() {
    stuck at 100% and the life is gone. A hands-free stabilise step needs no
    scarce resource, works identically for all five conditions, and reads
    plainly at the bedside. */
-const STABILISE_STEP = { k: "bedside", dur: 1.7, label: "Stabilise" };
+const STABILISE_STEP = { k: "bedside", dur: 1.7, label: "Settle them down" };
 
 function escalateSteps(steps, ailKey) {
   return steps.concat([Object.assign({}, STABILISE_STEP)]);
@@ -2784,7 +2782,7 @@ function makePatient(world, ailmentKey, level) {
     // condition does: in builder mode a chain the department has no equipment
     // for is an unavoidable death, not a challenge. The primary was filtered
     // in chooseAilment; drawing the comorbidity raw undid that.
-    let pool = (Game.level.ailments || []).filter(k => k !== ailmentKey && k !== "mystery");
+    let pool = (Game.level.ailments || []).filter(k => k !== ailmentKey && k !== "mysterymunch");
     pool = treatableAilments(pool);
     if (pool.length) {
       second = pool[Math.floor(Game.rng() * pool.length)];
@@ -2874,27 +2872,27 @@ const SOLO = {
 const CHALLENGES = [
   [ { k: "noloss" },              { k: "chain", n: 4 },  { k: "treat", n: 14 } ],
   [ { k: "noloss" },              { k: "perfect", n: 5 },{ k: "treat", n: 12 } ],
-  [ { k: "ailment", a: "cardiac", n: 3 }, { k: "chain", n: 4 }, { k: "maxlives" } ],
-  [ { k: "ailment", a: "mystery", n: 3 }, { k: "perfect", n: 5 }, { k: "treat", n: 12 } ],
+  [ { k: "ailment", a: "staticcling", n: 3 }, { k: "chain", n: 4 }, { k: "maxlives" } ],
+  [ { k: "ailment", a: "mysterymunch", n: 3 }, { k: "perfect", n: 5 }, { k: "treat", n: 12 } ],
   [ { k: "noloss" },              { k: "chain", n: 5 },  { k: "treat", n: 14 } ],
   [ { k: "clutch", n: 2 },        { k: "chain", n: 5 },  { k: "treat", n: 11 } ],
-  [ { k: "ailment", a: "cardiac", n: 4 }, { k: "maxlives" }, { k: "treat", n: 12 } ],
+  [ { k: "ailment", a: "staticcling", n: 4 }, { k: "maxlives" }, { k: "treat", n: 12 } ],
   [ { k: "noloss" },              { k: "perfect", n: 6 },{ k: "treat", n: 13 } ],
   [ { k: "clutch", n: 3 },        { k: "chain", n: 6 },  { k: "treat", n: 12 } ],
   [ { k: "maxlives" },            { k: "chain", n: 6 },  { k: "treat", n: 12 } ],
-  [ { k: "ailment", a: "infection", n: 4 }, { k: "chain", n: 5 }, { k: "treat", n: 12 } ],
-  [ { k: "ailment", a: "fracture", n: 4 },  { k: "noloss" },      { k: "treat", n: 12 } ],
+  [ { k: "ailment", a: "itchyears", n: 4 }, { k: "chain", n: 5 }, { k: "treat", n: 12 } ],
+  [ { k: "ailment", a: "sprainedhop", n: 4 },  { k: "noloss" },      { k: "treat", n: 12 } ],
   [ { k: "clutch", n: 3 },        { k: "perfect", n: 6 }, { k: "treat", n: 13 } ],
-  [ { k: "ailment", a: "mystery", n: 4 },   { k: "chain", n: 6 }, { k: "maxlives" } ],
+  [ { k: "ailment", a: "mysterymunch", n: 4 },   { k: "chain", n: 6 }, { k: "maxlives" } ],
   [ { k: "maxlives" },            { k: "clutch", n: 4 },  { k: "treat", n: 13 } ],
-  [ { k: "ailment", a: "overdose", n: 3 }, { k: "chain", n: 5 },  { k: "treat", n: 13 } ],
+  [ { k: "ailment", a: "toomanytreats", n: 3 }, { k: "chain", n: 5 },  { k: "treat", n: 13 } ],
   [ { k: "noloss" },              { k: "chain", n: 6 },  { k: "treat", n: 13 } ],
-  [ { k: "ailment", a: "concussion", n: 3 }, { k: "perfect", n: 5 }, { k: "maxlives" } ],
-  [ { k: "chain", n: 6 },         { k: "ailment", a: "dislocation", n: 3 }, { k: "treat", n: 13 } ],
+  [ { k: "ailment", a: "socksituation", n: 3 }, { k: "perfect", n: 5 }, { k: "maxlives" } ],
+  [ { k: "chain", n: 6 },         { k: "ailment", a: "crickintail", n: 3 }, { k: "treat", n: 13 } ],
   [ { k: "noloss" },              { k: "clutch", n: 2 }, { k: "treat", n: 12 } ],
-  [ { k: "ailment", a: "burn", n: 4 }, { k: "chain", n: 5 }, { k: "treat", n: 14 } ],
+  [ { k: "ailment", a: "stickypaws", n: 4 }, { k: "chain", n: 5 }, { k: "treat", n: 14 } ],
   [ { k: "perfect", n: 6 },       { k: "chain", n: 5 },  { k: "treat", n: 12 } ],
-  [ { k: "clutch", n: 3 },        { k: "ailment", a: "anaphylaxis", n: 4 }, { k: "maxlives" } ],
+  [ { k: "clutch", n: 3 },        { k: "ailment", a: "zoomies", n: 4 }, { k: "maxlives" } ],
   [ { k: "noloss" },              { k: "perfect", n: 7 }, { k: "treat", n: 15 } ],
   [ { k: "maxlives" },            { k: "chain", n: 7 },  { k: "treat", n: 15 } ]
 ];
@@ -3234,7 +3232,7 @@ const Save = {
       for (const k of data.achievements)
         if (ACHIEVEMENTS.some(a => a.key === k)) Game.achievements[k] = true;
     if (data.career && typeof data.career === "object")
-      for (const k of ["treated", "cardiac", "mystery", "shifts"])
+      for (const k of ["treated", "staticcling", "mysterymunch", "shifts"])
         Game.career[k] = Math.max(0, data.career[k] | 0);
     Game.xp = Math.max(0, data.xp | 0);
     Game.endlessBest = Math.max(0, data.endlessBest | 0);
@@ -3422,7 +3420,7 @@ function startLevel(index) {
 
   if (perkActive("shelves")) {
     for (const st of Game.world.stations) {
-      if (st.type === "supply" || st.type === "medicine") {
+      if (st.type === "grooming" || st.type === "remedy") {
         st.stock = STATIONS[st.type].stockMax + 2;
       }
     }
@@ -3567,7 +3565,7 @@ function doInteract(p) {
     const target = facingStation(world, p, st => STATIONS[st.type].holdsPatient &&
                                                 !st.occupant && !st.dirty);
     if (target) {
-      if (target.type === "bed") p.patient.lastBed = target;
+      if (target.type === "basket") p.patient.lastBed = target;
       p.patient.state = "station";
       p.patient.station = target;
       p.patient.x = target.cx; p.patient.y = target.cy - 6;
@@ -3648,10 +3646,10 @@ function doInteract(p) {
     return;
   }
 
-  const rack = facingStation(world, p, st => st.type === "defibrack" && st.hasDefib);
+  const rack = facingStation(world, p, st => st.type === "wanddock" && st.hasDefib);
   if (rack) {
     rack.hasDefib = false;
-    p.item = makeItem("defib");
+    p.item = makeItem("wand");
     Sound.play("pickup");
     return;
   }
@@ -3695,13 +3693,13 @@ function previewInteract(p) {
     return p.patient.done ? null : "Set down";
   }
   if (p.item) {
-    const bedded = facingStation(world, p, st => st.occupant && st.type === "bed");
+    const bedded = facingStation(world, p, st => st.occupant && st.type === "basket");
     if (bedded) return null;                      // Q is the star here, keep E quiet
     return "Drop " + ITEMS[p.item.type].name.toLowerCase();
   }
   if (facingPatient(p)) return "Pick up patient";
   if (facingStation(world, p, st => st.occupant)) return "Pick up patient";
-  if (facingStation(world, p, st => st.type === "defibrack" && st.hasDefib)) return "Take defib";
+  if (facingStation(world, p, st => st.type === "wanddock" && st.hasDefib)) return "Take defib";
   const fi = facingFloorItem(p);
   if (fi) return "Pick up " + ITEMS[fi.type].name.toLowerCase();
   return null;
@@ -3727,7 +3725,7 @@ function findJobRaw(p) {
   if (p.patient) return null;   // hands full of patient
 
   // 1. Bedside work on the patient we are facing.
-  const bedStation = facingStation(world, p, st => st.occupant && st.type === "bed");
+  const bedStation = facingStation(world, p, st => st.occupant && st.type === "basket");
   if (bedStation) {
     const pt = bedStation.occupant;
     const step = pt.steps[pt.step];
@@ -3735,14 +3733,14 @@ function findJobRaw(p) {
       const holdsRight = step.need ? (p.item && p.item.type === step.need) : !p.item;
       if (holdsRight) {
         return {
-          key: "bed" + bedStation.x + "," + bedStation.y + ":" + pt.id + ":" + pt.step,
+          key: "basket" + bedStation.x + "," + bedStation.y + ":" + pt.id + ":" + pt.step,
           dur: step.dur,
           label: step.label,
           ptId: pt.id,
           run: () => {
             if (step.need) {
-              if (step.need === "defib_charged") {
-                p.item = makeItem("defib");         // discharged, still in hand
+              if (step.need === "wand_charged") {
+                p.item = makeItem("wand");         // discharged, still in hand
                 Sound.play("shock");
                 Game.shake = Math.max(Game.shake, 7);
                 burst(pt.x, pt.y, "#ffe066", 16);
@@ -3764,15 +3762,15 @@ function findJobRaw(p) {
   }
 
   // 2. The breaker panel, which has no recipe — it just buys the lights back.
-  const brk = facingStation(world, p, s => s.type === "breaker");
+  const brk = facingStation(world, p, s => s.type === "fusebox");
   if (brk) {
     const dark = (world.zones || []).some(z => !z.powered);
     if (!dark) hint(p, "Power is fine");
     else if (p.item) hint(p, "Free your hands to reset the breaker");
     else return {
-      key: "breaker" + brk.x + "," + brk.y,
+      key: "fusebox" + brk.x + "," + brk.y,
       dur: 1.6,
-      label: "Reset breaker",
+      label: "Flip the fuse box",
       run: () => {
         if (restorePower()) {
           brk.flash = 0.5;
@@ -3854,7 +3852,7 @@ function findJobRaw(p) {
             popup(pt.x, pt.y - 30, "Bloods back", AILMENTS[pt.ailment].color, true);
             Sound.play("lab");
             advancePatient(pt);
-          } else revealMystery(pt);
+          } else revealMunch(pt);
         }
       };
     }
@@ -3866,7 +3864,7 @@ function findJobRaw(p) {
         if (r.stock && st.stock !== Infinity) st.stock--;
         p.item = r.out ? makeItem(r.out) : null;
         st.flash = 0.3;
-        if (r.out === "defib_charged") Sound.play("charge"); else Sound.play("done");
+        if (r.out === "wand_charged") Sound.play("charge"); else Sound.play("done");
         maybeJam(st);
       }
     };
@@ -3876,7 +3874,7 @@ function findJobRaw(p) {
 
 function maybeJam(st) {
   if (!Game.level.jams) return;
-  if (st.type !== "xray") return;
+  if (st.type !== "scanner") return;
   if (Game.rng() < 0.28) {
     st.jammed = true;
     popup(st.cx, st.cy - 26, "JAMMED", PALETTE.warn);
@@ -3884,20 +3882,20 @@ function maybeJam(st) {
   }
 }
 
-function revealMystery(pt) {
+function revealMunch(pt) {
   // Same filter as arrivals: a lab result that names a condition this ward
   // cannot treat is a guaranteed loss the player already paid lab work for.
   // Normal builder ward: lab unlocks at wave 5, an X-ray is optional, so
-  // revealing "fracture" with no X-ray was an easy and unfair death.
+  // revealing "sprainedhop" with no X-ray was an easy and unfair death.
   /* Overdose is excluded alongside mystery: it opens with its own blood draw
      and lab run, so revealing it here would send the patient straight back to
      the lab you just used and read as the result not having landed. */
-  let pool = Game.level.ailments.filter(a => a !== "mystery" && a !== "overdose");
+  let pool = Game.level.ailments.filter(a => a !== "mysterymunch" && a !== "toomanytreats");
   const ok = treatableAilments(pool);
   if (ok.length) pool = ok;
-  const key = pool[Math.floor(Game.rng() * pool.length)] || "cut";
+  const key = pool[Math.floor(Game.rng() * pool.length)] || "muddypaws";
   const a = AILMENTS[key];
-  pt.wasMystery = true;          // credit the case as the mystery it arrived as
+  pt.wasMunch = true;          // credit the case as the mystery it arrived as
   pt.ailment = key;
   pt.revealed = true;
   // rebuild the chain, keeping what the patient still legitimately has:
@@ -4241,7 +4239,7 @@ const TURNOVER_BONUS = 12;        // small, but it adds up over a shift
 
 /** Mark a bed as needing turnover. Called when a patient leaves it. */
 function soilBed(bed) {
-  if (!bed || bed.type !== "bed") return;
+  if (!bed || bed.type !== "basket") return;
   if (Game.levelIndex === 0 && !Game.builderMode) return;   // tutorial ward stays simple
   bed.dirty = true;
   bed.clean = 0;
@@ -4249,7 +4247,7 @@ function soilBed(bed) {
 
 function cleanableBed(world, p) {
   if (p.item || p.patient) return null;
-  return facingStation(world, p, st => st.type === "bed" && st.dirty && !st.occupant);
+  return facingStation(world, p, st => st.type === "basket" && st.dirty && !st.occupant);
 }
 
 /** How much of the ward is currently out of action. Drives the HUD warning. */
@@ -4306,12 +4304,12 @@ function dischargePatient(p) {
   Game.score += gained;
   Game.treated++;
   // A revealed mystery is reassigned to its true condition, so pt.ailment is
-  // never "mystery" at discharge. Crediting only that made the level-4
+  // never "mysterymunch" at discharge. Crediting only that made the level-4
   // challenge ("treat 3 mystery cases") and the Diagnostician achievement
   // literally unachievable. Score both the mystery and what it turned out to be.
-  const credit = pt.wasMystery ? "mystery" : pt.ailment;
+  const credit = pt.wasMunch ? "mysterymunch" : pt.ailment;
   Game.byAilment[credit] = (Game.byAilment[credit] || 0) + 1;
-  if (pt.wasMystery) Game.byAilment[pt.ailment] = (Game.byAilment[pt.ailment] || 0) + 1;
+  if (pt.wasMunch) Game.byAilment[pt.ailment] = (Game.byAilment[pt.ailment] || 0) + 1;
   if (Game.builderMode && Game.builder) {
     const cr = Math.max(6, Math.round(gained / 7));
     Game.builder.credits += cr;
@@ -4319,8 +4317,8 @@ function dischargePatient(p) {
     popup(pt.x, pt.y - 108, "+" + cr + "c", "#6fd3b4");
   }
   Game.career.treated++;
-  if (pt.ailment === "cardiac") Game.career.cardiac++;
-  if (pt.wasMystery || pt.ailment === "mystery") Game.career.mystery++;
+  if (pt.ailment === "staticcling") Game.career.cardiac++;
+  if (pt.wasMunch || pt.ailment === "mysterymunch") Game.career.mystery++;
   checkLiveAchievements();
   if (Game.endless && Game.treated % 10 === 0 && Game.lives < Game.livesMax) {
     Game.lives++;
@@ -4444,7 +4442,7 @@ function losePatient(pt) {
 
   // and they leave a mess behind them
   addSpill(Math.floor(pt.x / TILE), Math.floor(pt.y / TILE));
-  if (pt.station && pt.station.type === "bed") soilBed(pt.station);
+  if (pt.station && pt.station.type === "basket") soilBed(pt.station);
   else if (pt.lastBed) soilBed(pt.lastBed);
 
   // free whatever they occupied
@@ -4461,7 +4459,7 @@ function updatePatients(dt) {
 
     // Patience: slower once they are settled in a bed.
     if (!pt.done) {
-      const inBed = pt.station && pt.station.type === "bed";
+      const inBed = pt.station && pt.station.type === "basket";
       let rate = inBed ? 0.62 : (pt.state === "station" ? 0.8 : 1.0);
       if (Game.tendedIds && Game.tendedIds.has(pt.id)) rate *= 0.25;
       rate *= calmFactor(pt);
@@ -4498,16 +4496,16 @@ function treatableAilments(pool) {
   if (!Game.world) return pool;
   const have = (t) => Game.world.stations.some(q => q.type === t);
   return pool.filter(a => {
-    if (a === "cut") return have("supply");
-    if (a === "infection") return have("medicine");
-    if (a === "fracture") return have("xray") && have("cast");
-    if (a === "cardiac") return have("defibrack") && have("charger");
-    if (a === "mystery") return have("lab");
-    if (a === "burn") return have("supply") && have("medicine");
-    if (a === "anaphylaxis") return have("medicine");
-    if (a === "concussion") return have("xray");
-    if (a === "dislocation") return have("xray");
-    if (a === "overdose") return have("lab") && have("medicine");
+    if (a === "muddypaws") return have("grooming");
+    if (a === "itchyears") return have("remedy");
+    if (a === "sprainedhop") return have("scanner") && have("bootiebench");
+    if (a === "staticcling") return have("wanddock") && have("groundpad");
+    if (a === "mysterymunch") return have("lab");
+    if (a === "stickypaws") return have("grooming") && have("remedy");
+    if (a === "zoomies") return have("remedy");
+    if (a === "socksituation") return have("scanner");
+    if (a === "crickintail") return have("scanner");
+    if (a === "toomanytreats") return have("lab") && have("remedy");
     return true;
   });
 }
@@ -4519,16 +4517,16 @@ function chooseAilment() {
      hand-edited level is one typo away from doing exactly that. The authoring
      is checked separately; this is the net under it. */
   let pool = treatableAilments(Game.level.ailments);
-  if (!pool.length) pool = Game.builderMode ? ["cut"] : Game.level.ailments;
-  if (Game.forceAilment > 0 && pool.includes("infection")) {
+  if (!pool.length) pool = Game.builderMode ? ["muddypaws"] : Game.level.ailments;
+  if (Game.forceAilment > 0 && pool.includes("itchyears")) {
     Game.forceAilment--;
-    return "infection";
+    return "itchyears";
   }
   // Ease into the shift: the first arrivals are never one of the long or
   // frantic chains, so no seed can deal the hardest hand as an opener.
   if (Game.time < EASE_IN_SECS) {
-    const gentle = pool.filter(a => a !== "cardiac" && a !== "mystery" &&
-                                    a !== "overdose" && a !== "anaphylaxis");
+    const gentle = pool.filter(a => a !== "staticcling" && a !== "mysterymunch" &&
+                                    a !== "toomanytreats" && a !== "zoomies");
     if (gentle.length) pool = gentle;
   }
   const r = Game.rng();
@@ -4597,10 +4595,10 @@ function updateSpawning(dt) {
 function updateItems(dt) {
   // Charged defibs lose their charge; loose defibs are never truly lost.
   const decay = (it) => {
-    if (it.type !== "defib_charged") return;
+    if (it.type !== "wand_charged") return;
     it.charge -= dt;
     if (it.charge <= 0) {
-      it.type = "defib";
+      it.type = "wand";
       delete it.charge;
       Sound.play("error");
     }
@@ -4666,7 +4664,7 @@ const TUTORIAL_STEPS = [
     hint: "sprint for a moment",
     done: (t) => t.sprinted > 30 },
   { text: "Someone has arrived at the blue IN door. Walk into them and press E to lift them.",
-    spawn: "cut",
+    spawn: "muddypaws",
     hint: "lift the patient",
     grace: 75,
     done: () => Game.players.some(p => p.patient) },
@@ -4900,7 +4898,7 @@ function updateEvents(dt) {
   // prefer an event this shift has not shown yet
   let pool = EVENTS.filter(e => !Game.eventsSeen.includes(e.key));
   if (!pool.length) { Game.eventsSeen = []; pool = EVENTS.slice(); }
-  if (!Game.level.ailments.includes("infection"))
+  if (!Game.level.ailments.includes("itchyears"))
     pool = pool.filter(e => e.key !== "outbreak") ;
   if (!pool.length) pool = EVENTS.slice();
   const def = pool[Math.floor(Game.rng() * pool.length)];
@@ -5218,14 +5216,14 @@ function builderWaveDef(n) {
      later waves are just the early ones with more beds. treatableAilments
      filters this again at spawn time against what has actually been built —
      naming a condition here is an intention, not a promise. */
-  const ail = ["cut", "infection"];
-  if (n >= 2) ail.push("fracture");
-  if (n >= 3) ail.push("cardiac", "anaphylaxis");
-  if (n >= 4) ail.push("burn");
-  if (n >= 5) ail.push("mystery");
-  if (n >= 6) ail.push("concussion");
-  if (n >= 7) ail.push("dislocation");
-  if (n >= 8) ail.push("overdose");
+  const ail = ["muddypaws", "itchyears"];
+  if (n >= 2) ail.push("sprainedhop");
+  if (n >= 3) ail.push("staticcling", "zoomies");
+  if (n >= 4) ail.push("stickypaws");
+  if (n >= 5) ail.push("mysterymunch");
+  if (n >= 6) ail.push("socksituation");
+  if (n >= 7) ail.push("crickintail");
+  if (n >= 8) ail.push("toomanytreats");
   const notes = [];
   if (n === 2) notes.push("fractures arriving");
   if (n === 3) notes.push("cardiac arrests and allergic reactions arriving");
@@ -5270,23 +5268,23 @@ function builderWaveDef(n) {
      staff    — an NPC that does one job for you, placed where it starts
      passive  — a permanent run-wide upgrade                              */
 const SHOP = [
-  { key: "bed",      name: "Treatment Bay",    cost: 130, kind: "station", station: "bed",
+  { key: "basket",      name: "Treatment Bay",    cost: 130, kind: "station", station: "basket",
     blurb: "Another bed. More beds means more patients in progress at once." },
-  { key: "supply",   name: "Supply Shelf",     cost: 90,  kind: "station", station: "supply",
+  { key: "grooming",   name: "Supply Shelf",     cost: 90,  kind: "station", station: "grooming",
     blurb: "Bandages, close to where you need them." },
-  { key: "medicine", name: "Medicine Cabinet", cost: 110, kind: "station", station: "medicine",
+  { key: "remedy", name: "Medicine Cabinet", cost: 110, kind: "station", station: "remedy",
     blurb: "Syringes for infections." },
-  { key: "xray",     name: "X-ray Machine",    cost: 185, kind: "station", station: "xray", from: 2,
+  { key: "scanner",     name: "X-ray Machine",    cost: 185, kind: "station", station: "scanner", from: 2,
     blurb: "Opens your doors to fracture cases (+175 each). Pairs with the cast mixer." },
-  { key: "cast",     name: "Cast Mixer",       cost: 120, kind: "station", station: "cast", from: 2,
+  { key: "bootiebench",     name: "Cast Mixer",       cost: 120, kind: "station", station: "bootiebench", from: 2,
     blurb: "Turns a developed X-ray into a cast." },
-  { key: "defibrack",name: "Defib Station",    cost: 195, kind: "station", station: "defibrack", from: 3,
+  { key: "wanddock",name: "Defib Station",    cost: 195, kind: "station", station: "wanddock", from: 3,
     blurb: "With a charger, opens your doors to cardiac cases (+195 each)." },
-  { key: "charger",  name: "Defib Charger",    cost: 130, kind: "station", station: "charger", from: 3,
+  { key: "groundpad",  name: "Defib Charger",    cost: 130, kind: "station", station: "groundpad", from: 3,
     blurb: "Charges a defib. Put it near the beds — the charge drains fast." },
   { key: "lab",      name: "Path Lab",         cost: 175, kind: "station", station: "lab", from: 5,
     blurb: "Opens your doors to mystery cases (+215 each)." },
-  { key: "delivery", name: "Delivery Door",    cost: 85,  kind: "station", station: "delivery", from: 4,
+  { key: "hatch", name: "Delivery Door",    cost: 85,  kind: "station", station: "hatch", from: 4,
     blurb: "Where crates come from, for restocking empty shelves." },
   { key: "bench",    name: "Waiting Bench",    cost: 70,  kind: "waitslot",
     blurb: "Two more places for patients to wait, so the doors stay open longer." },
@@ -5379,16 +5377,16 @@ function placeStation(world, type, x, y) {
       ? (Game.level && Game.level.restock ? STATIONS[type].stockMax : Infinity)
       : Infinity,
     jammed: false, flash: 0.6,
-    hasDefib: type === "defibrack"
+    hasDefib: type === "wanddock"
   };
   cell.solid = true; cell.station = st;
   world.stations.push(st);
-  if (type === "bed") world.beds.push(st);
+  if (type === "basket") world.beds.push(st);
 
   if (!wardConnected(world)) {                          // undo, cleanly
     cell.solid = false; cell.station = null;
     world.stations.pop();
-    if (type === "bed") world.beds.pop();
+    if (type === "basket") world.beds.pop();
     return "That would block the way through";
   }
   world.waitSlots = computeWaitSlots(world, world.slotTarget || 8);
@@ -5526,8 +5524,8 @@ function staffXrayTech(st, dt) {
   //    patient while holding an undeveloped film silently destroyed the film,
   //    leaving its fracture patient permanently untreatable
   const waiting = !st.item && Game.patients.find(q => q.state === "station" && q.station &&
-    q.station.type === "xray" && q.steps[q.step] &&
-    q.steps[q.step].k === "atStation" && q.steps[q.step].station === "xray");
+    q.station.type === "scanner" && q.steps[q.step] &&
+    q.steps[q.step].k === "atStation" && q.steps[q.step].station === "scanner");
   if (waiting) {
     const m = waiting.station;
     if (staffWalk(st, m.x, m.y, dt, true) === "arrived") {
@@ -5540,7 +5538,7 @@ function staffXrayTech(st, dt) {
         staffJob(st, "shoot" + waiting.id);
         if (staffWork(st, waiting.steps[waiting.step].dur, dt)) {
           advancePatient(waiting);
-          st.item = makeItem("film");                     // holds the exposed film
+          st.item = makeItem("plate");                     // holds the exposed film
           Sound.play("done");
         }
       }
@@ -5548,12 +5546,12 @@ function staffXrayTech(st, dt) {
     return;
   }
   // 2. develop a film they are holding, then leave the image by the machine
-  if (st.item && st.item.type === "film") {
-    const m = nearestStationOfType(st, "xray");
+  if (st.item && st.item.type === "plate") {
+    const m = nearestStationOfType(st, "scanner");
     if (!m) { staffDropItem(st); return; }
     staffJob(st, "develop");
     if (staffWalk(st, m.x, m.y, dt, true) === "arrived" && staffWork(st, 1.5, dt)) {
-      const img = makeItem("xrayimg");
+      const img = makeItem("scan");
       const spot = tileOf(st.x, st.y);
       img.x = spot.x * TILE + TILE / 2; img.y = spot.y * TILE + TILE / 2;
       Game.floorItems.push(img);
@@ -5570,8 +5568,8 @@ function staffLabTech(st, dt) {
   const hasLab = Game.world.stations.some(q => q.type === "lab");
   // do not lift a sample there is nowhere to take: better on the floor where a
   // player can carry it once a lab exists
-  const sample = hasLab ? Game.floorItems.find(i => i.type === "sample") : null;
-  if (st.item && st.item.type === "sample") {
+  const sample = hasLab ? Game.floorItems.find(i => i.type === "swab") : null;
+  if (st.item && st.item.type === "swab") {
     const lab = nearestStationOfType(st, "lab");
     if (!lab) { staffDropItem(st); return; }
     staffJob(st, "analyse");
@@ -5600,7 +5598,7 @@ function staffLabTech(st, dt) {
 
 function staffClerk(st, dt) {
   const empty = Game.world.stations.find(q =>
-    (q.type === "supply" || q.type === "medicine") && q.stock === 0);
+    (q.type === "grooming" || q.type === "remedy") && q.stock === 0);
   if (!empty) { if (st.item) staffDropItem(st); staffIdle(st, dt); return; }
   if (st.item && st.item.type === "crate") {
     staffJob(st, "restock" + empty.x + "," + empty.y);
@@ -5613,7 +5611,7 @@ function staffClerk(st, dt) {
     }
     return;
   }
-  const door = nearestStationOfType(st, "delivery");
+  const door = nearestStationOfType(st, "hatch");
   if (!door) { staffIdle(st, dt); return; }
   staffJob(st, "collect");
   if (staffWalk(st, door.x, door.y, dt, true) === "arrived" && staffWork(st, 1.4, dt)) {
@@ -5684,7 +5682,7 @@ function staffDropItem(st) {
 function runLabSample(item) {
   const pt = Game.patients.find(q => q.id === item.pid && q.state !== "gone");
   if (!pt) return false;
-  revealMystery(pt);
+  revealMunch(pt);
   return true;
 }
 
@@ -5746,14 +5744,14 @@ function beginWave(n, fresh) {
   // The wave that turns restocking on must come with a crate source: a ward
   // with dry shelves and no delivery door is a guaranteed slow loss, which is
   // a design bug rather than a challenge. The door arrives with the rule.
-  if (def.restock && !Game.world.stations.some(q => q.type === "delivery")) {
+  if (def.restock && !Game.world.stations.some(q => q.type === "hatch")) {
     const e = Game.world.entrance;
     outer:
     for (let r = 2; r < COLS; r++) {
       for (let y = Math.max(1, e.y - r); y <= Math.min(ROWS - 2, e.y + r); y++) {
         for (let x = Math.max(1, e.x - r); x <= Math.min(COLS - 2, e.x + r); x++) {
           if (Math.max(Math.abs(x - e.x), Math.abs(y - e.y)) !== r) continue;
-          if (placeStation(Game.world, "delivery", x, y) === null) break outer;
+          if (placeStation(Game.world, "hatch", x, y) === null) break outer;
         }
       }
     }
@@ -5767,7 +5765,7 @@ function beginWave(n, fresh) {
     if (STATIONS[st.type].stockMax !== undefined) {
       st.stock = def.restock ? STATIONS[st.type].stockMax : Infinity;
     }
-    if (st.type === "defibrack") st.hasDefib = true;
+    if (st.type === "wanddock") st.hasDefib = true;
   }
 
   Game.rng = makeRng(def.seed);
@@ -5853,7 +5851,7 @@ function rollOffers() {
   const B = Game.builder, world = Game.world;
   const have = (t) => world.stations.some(q => q.type === t);
   const staffCount = (r) => Game.staff.filter(q => q.role === r).length;
-  const bed = SHOP.find(q => q.key === "bed");
+  const bed = SHOP.find(q => q.key === "basket");
   const pool = [];
   for (const item of SHOP) {
     if (item === bed) continue;                                // staple slot
@@ -6626,7 +6624,7 @@ function buildLevelMesh(world) {
   /* ---- station bodies (dynamic bits are drawn per frame) ---- */
   for (const st of world.stations) {
     const cx = st.x + 0.5, cz = st.y + 0.5;
-    if (st.type === "bed") {
+    if (st.type === "basket") {
       mbRoundedBox(mb, cx, 0.10, cz, 0.30, 0.10, 0.42, 0.05, rgb(TH.metal), 2);   // chassis
       mbRoundedBox(mb, cx, 0.24, cz, 0.40, 0.09, 0.46, 0.07, rgb(TH.bedFrame), 3); // mattress
       mbRoundedBox(mb, cx, 0.38, cz - 0.28, 0.30, 0.06, 0.13, 0.05, rgb("#ffffff"), 3); // pillow
@@ -6634,7 +6632,7 @@ function buildLevelMesh(world) {
     } else {
       const info = STATIONS[st.type];
       const body = rgb(info.color), edge = rgb(info.edge);
-      const h = st.type === "delivery" ? 0.92 : 0.72;
+      const h = st.type === "hatch" ? 0.92 : 0.72;
       mbRoundedBox(mb, cx, h / 2, cz, 0.42, h / 2, 0.42, 0.10, body, 3);
       mbRoundedBox(mb, cx, h + 0.02, cz, 0.36, 0.03, 0.36, 0.03, edge, 2);   // top trim
       buildStationDetail(mb, st, cx, cz, h);
@@ -6647,37 +6645,37 @@ function buildLevelMesh(world) {
 function buildStationDetail(mb, st, cx, cz, h) {
   const white = rgb("#ffffff"), dark = rgb("#3c4657");
   switch (st.type) {
-    case "supply":
+    case "grooming":
       for (let i = 0; i < 3; i++) {
         mbRoundedBox(mb, cx, 0.20 + i * 0.20, cz + 0.40, 0.30, 0.045, 0.05, 0.02, white, 2);
       }
       break;
-    case "medicine":
+    case "remedy":
       mbRoundedBox(mb, cx, h * 0.62, cz + 0.42, 0.07, 0.20, 0.03, 0.02, white, 2);
       mbRoundedBox(mb, cx, h * 0.62, cz + 0.42, 0.20, 0.07, 0.03, 0.02, white, 2);
       break;
-    case "xray":
+    case "scanner":
       mbCylinder(mb, cx, h + 0.30, cz, 0.05, 0.05, 0.55, rgb(TH.metal), 10, true);
       mbRoundedBox(mb, cx, h + 0.58, cz, 0.26, 0.10, 0.20, 0.06, dark, 3);
       mbSphere(mb, cx, h + 0.50, cz + 0.10, 0.09, 0.09, 0.09, rgb("#cfeeff"), 12, 8);
       break;
-    case "cast":
+    case "bootiebench":
       mbCylinder(mb, cx, h + 0.10, cz, 0.22, 0.26, 0.20, rgb("#fdf6e6"), 16, true);
       break;
-    case "charger":
+    case "groundpad":
       mbRoundedBox(mb, cx, h + 0.16, cz, 0.10, 0.16, 0.05, 0.03, rgb("#fff3c4"), 2);
       break;
     case "lab":
       mbCylinder(mb, cx - 0.12, h + 0.14, cz, 0.06, 0.11, 0.28, rgb("#efe6ff"), 14, true);
       mbCylinder(mb, cx + 0.12, h + 0.10, cz + 0.06, 0.05, 0.09, 0.20, rgb("#dcc6ff"), 14, true);
       break;
-    case "delivery":
+    case "hatch":
       mbRoundedBox(mb, cx, h * 0.55, cz + 0.42, 0.34, 0.30, 0.03, 0.03, rgb("#f7e7d2"), 2);
       break;
-    case "defibrack":
+    case "wanddock":
       mbRoundedBox(mb, cx, h + 0.10, cz, 0.30, 0.10, 0.30, 0.05, rgb("#ffd9d1"), 2);
       break;
-    case "breaker":
+    case "fusebox":
       // a wall panel with switch rows, so it reads as electrical, not medical
       mbRoundedBox(mb, cx, h * 0.62, cz + 0.30, 0.26, 0.30, 0.10, 0.04, rgb("#2f3742"), 2);
       for (let i = 0; i < 3; i++)
@@ -7235,26 +7233,26 @@ function drawCharacter3D(o) {
 function drawItem3D(type, wx, wy, wz, spin) {
   const r = spin || 0;
   switch (type) {
-    case "bandage":
+    case "towel":
       drawMesh(MESH.boxSoft, wx, wy, wz, r, 0.13, 0.055, 0.09, rgb("#f8f2e0"));
       drawMesh(MESH.sphereLo, wx, wy, wz + 0.02, r, 0.05, 0.05, 0.05, rgb("#e7dcc0"));
       break;
-    case "syringe":
+    case "drops":
       drawMesh(MESH.cyl, wx, wy, wz, r, 0.045, 0.20, 0.045, rgb("#eef8ff"));
       drawMesh(MESH.cyl, wx, wy - 0.02, wz, r, 0.040, 0.10, 0.040, rgb("#3fa9e8"));
       drawMesh(MESH.cyl, wx, wy + 0.16, wz, r, 0.012, 0.12, 0.012, rgb("#dfe7ee"));
       break;
-    case "film":
+    case "plate":
       drawMesh(MESH.box, wx, wy, wz, r, 0.09, 0.12, 0.012, rgb("#333a48"));
       break;
-    case "xrayimg":
+    case "scan":
       drawMesh(MESH.box, wx, wy, wz, r, 0.09, 0.12, 0.012, rgb("#16324a"));
       drawMesh(MESH.box, wx, wy, wz + 0.014, r, 0.065, 0.09, 0.004, rgb("#a8dcff"), 0.55);
       break;
-    case "cast":
+    case "bootie":
       drawMesh(MESH.cyl, wx, wy, wz, r + 1.57, 0.09, 0.22, 0.09, rgb("#f5efdd"));
       break;
-    case "sample":
+    case "swab":
       drawMesh(MESH.cyl, wx, wy, wz, r, 0.045, 0.20, 0.045, rgb("#e6eef5"));
       drawMesh(MESH.cyl, wx, wy - 0.04, wz, r, 0.038, 0.11, 0.038, rgb("#c0392b"));
       drawMesh(MESH.cyl, wx, wy + 0.11, wz, r, 0.052, 0.04, 0.052, rgb("#8d99a8"));
@@ -7263,9 +7261,9 @@ function drawItem3D(type, wx, wy, wz, spin) {
       drawMesh(MESH.box, wx, wy, wz, r, 0.15, 0.13, 0.15, rgb("#c8974f"));
       drawMesh(MESH.box, wx, wy + 0.02, wz, r, 0.155, 0.02, 0.155, rgb("#87642f"));
       break;
-    case "defib":
-    case "defib_charged": {
-      const hot = type === "defib_charged";
+    case "wand":
+    case "wand_charged": {
+      const hot = type === "wand_charged";
       drawMesh(MESH.box, wx, wy, wz, r, 0.16, 0.10, 0.11, rgb(hot ? "#ffd84d" : "#d99f2c"), hot ? 0.35 : 0);
       drawMesh(MESH.box, wx - 0.08, wy + 0.11, wz, r, 0.05, 0.04, 0.05, rgb("#2e333b"));
       drawMesh(MESH.box, wx + 0.08, wy + 0.11, wz, r, 0.05, 0.04, 0.05, rgb("#2e333b"));
@@ -7366,7 +7364,7 @@ function drawSceneEntities() {
 
   // bed blankets (colour tracks occupancy)
   for (const st of world.stations) {
-    if (st.type !== "bed") continue;
+    if (st.type !== "basket") continue;
     const cx = st.x + 0.5, cz = st.y + 0.5;
     if (_pass !== "shadow") {
       const sheet = st.dirty ? "#b39a86" : (st.occupant ? "#ff9fb6" : "#a8d4f5");
@@ -7546,40 +7544,294 @@ const GOWNS = ["#9fc8ea", "#8fd6c0", "#f0b3c4", "#b9aee2", "#f2cf94",
                "#9fd3ee", "#c8dd97", "#eaa9a0"];
 const TRIMS = ["#ffffff", "#f3f8ff", "#fff6e8"];
 
+/* ---------------------------------------------------------------------
+   The patients.
+
+   Everyone who comes through the door is an animal, and they are the single
+   biggest reason this reads as a vet clinic rather than a reskin — so they get
+   their own model rather than a hat on the human one. Same plush language as
+   the nurses (oversized head, stubby limbs, fabric shading, big glossy toy
+   eyes) applied to a sitting animal silhouette, which is what makes a hamster
+   legible at the size it actually appears on screen.
+
+   Ten species, each recognisable from its outline alone at a glance: ears and
+   tail carry almost all of it, so those are what vary most.
+   --------------------------------------------------------------------- */
+const SPECIES = {
+  cat:       { name: "cat",         ears: "point",  tail: "curl",   scale: 0.90,
+               furs: ["#f0a45c", "#8e8b86", "#3e3a38", "#f2ece2"], belly: "#fff3e2" },
+  dog:       { name: "dog",         ears: "flop",   tail: "stub",   scale: 0.98,
+               furs: ["#c88a4e", "#6b5341", "#f3e4cd", "#3c3a3a"], belly: "#fff6e8",
+               muzzle: 1.18 },
+  rabbit:    { name: "rabbit",      ears: "long",   tail: "puff",   scale: 0.80,
+               furs: ["#f4ece1", "#b9a48d", "#7d6a5a", "#3a3330"], belly: "#fffaf2" },
+  hamster:   { name: "hamster",     ears: "round",  tail: "none",   scale: 0.66,
+               furs: ["#e8b878", "#f5e3c8", "#c98f5c"], belly: "#fff6e4", cheeks: true },
+  budgie:    { name: "budgie",      ears: "none",   tail: "feather", scale: 0.62,
+               furs: ["#7fd06a", "#6fb6f0", "#f2d64f"], belly: "#fdf6df", beak: true },
+  hedgehog:  { name: "hedgehog",    ears: "round",  tail: "none",   scale: 0.66,
+               furs: ["#a08a72", "#8a7561"], belly: "#f6e9d8", spikes: true, muzzle: 1.12 },
+  fox:       { name: "fox",         ears: "bigpoint", tail: "bush", scale: 0.88,
+               furs: ["#e8813c", "#d9692c"], belly: "#fff2e0" },
+  guineapig: { name: "guinea pig",  ears: "petal",  tail: "none",   scale: 0.70,
+               furs: ["#d8b48a", "#f2ece2", "#6f5a48", "#e0a05a"], belly: "#fff4e6" },
+  ferret:    { name: "ferret",      ears: "round",  tail: "long",   scale: 0.74,
+               furs: ["#e6d6b8", "#c2a887"], belly: "#fdf6e6", mask: true },
+  tortoise:  { name: "tortoise",    ears: "none",   tail: "stub",   scale: 0.72,
+               furs: ["#9fbf72", "#88a961"], belly: "#e7f0d2", shell: true }
+};
+const SPECIES_KEYS = Object.keys(SPECIES);
+const COLLARS = ["#ff8fa8", "#6fd3b4", "#7fb2ff", "#f0b03c", "#c39bf5", "#ff9a8a"];
+
+/** Stable per-patient look. Seeded off the id so a given arrival is always the
+    same animal — a patient that changed species between frames would be a very
+    strange clinic. */
 function patientLook(pt) {
   if (!pt._look) {
-    const r = makeRng((pt.id * 2654435761) >>> 0);
-    const pick = arr => arr[Math.floor(r() * arr.length)];
-    // a few children and a few older patients in every crowd
-    const ageRoll = r();
-    const age = ageRoll < 0.18 ? "child" : (ageRoll > 0.86 ? "senior" : "adult");
-    let style = pick(P_STYLES);
-    if (age === "child" && style === "bald") style = "fringe";
-    const acc = (() => {
-      const a2 = r();
-      if (age === "senior" && a2 < 0.45) return "glasses";
-      if (a2 < 0.12) return "glasses";
-      if (a2 < 0.22) return "beanie";
-      if (a2 < 0.30) return "headband";
-      if (a2 < 0.36) return "headwrap";
-      return "none";
-    })();
+    const r = makeRng(((pt.id + 7) * 2654435761) >>> 0);
+    const pick = (arr) => arr[Math.floor(r() * arr.length)];
+    const key = pick(SPECIES_KEYS);
+    const sp = SPECIES[key];
+    // a few very small ones and a few chunky ones in every waiting room
+    const size = r() < 0.22 ? 0.86 : (r() > 0.84 ? 1.12 : 1);
     pt._look = {
-      skin: pick(SKINS),
-      hair: age === "senior" && r() < 0.55 ? "#ddd8ce" : pick(HAIRS),
-      style, acc,
-      accColor: pick(["#ff8fa8", "#e8846b", "#7fd8c8", "#8fb6f0", "#f0c86b"]),
-      gown: pick(GOWNS),
-      trim: pick(TRIMS),
-      scale: age === "child" ? 0.72 : (age === "senior" ? 0.88 : 0.94),
-      age
+      species: key, sp,
+      fur: pick(sp.furs),
+      collar: pick(COLLARS),
+      scale: sp.scale * size,
+      floppy: r() < 0.5 ? -1 : 1,          // which ear sits at a jauntier angle
+      patch: r() < 0.34                    // a contrast patch over one eye
     };
   }
   return pt._look;
 }
 
+function drawAnimal3D(o) {
+  const look = o.look || patientLook({ id: 1 });
+  const sp = look.sp || SPECIES.cat;
+  const S = (o.scale || 1) * (look.scale || 1) * CHAR_SCALE;
+  const ox = o.wx, oz = o.wz, ry = o.ry || 0;
+  const y0 = o.y || 0;
+  const bob = Math.sin(o.bob || 0) * 0.014 * S;
+  const hop = o.moving ? Math.abs(Math.sin(o.step || 0)) * 0.045 * S : 0;
+  const P = (lx, ly, lz) => [_lx(ox, ry, lx * S, lz * S), y0 + ly * S + bob + hop,
+                             _lz(oz, ry, lx * S, lz * S)];
+  const shadowPass = _pass === "shadow";
+  if (!shadowPass) setFuzz(1);
+
+  const fur = rgb(look.fur || "#e8b878");
+  const belly = rgb(sp.belly || "#fff6e4");
+  const dark = (c, k) => [c[0] * k, c[1] * k, c[2] * k];
+  const SPH = shadowPass ? MESH.sphereLo : MESH.sphere;
+
+  // --- body: a sitting egg, wider at the base ----------------------------
+  const BY = 0.30;
+  let p = P(0, BY, 0);
+  drawMesh(SPH, p[0], p[1], p[2], ry, 0.330*S, 0.300*S, 0.300*S, fur);
+
+  if (sp.shell) {                                    // tortoise: a domed shell
+    p = P(0, BY + 0.10, -0.02);
+    drawMesh(MESH.dome, p[0], p[1], p[2], ry, 0.375*S, 0.300*S, 0.360*S, rgb("#8a6b3f"));
+    if (!shadowPass && _charDetail)
+      for (const [dx, dz] of [[0, -0.10], [-0.16, 0.02], [0.16, 0.02], [0, 0.16]]) {
+        p = P(dx, BY + 0.28, dz);
+        drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.070*S, 0.030*S, 0.070*S,
+                 rgb("#a98a53"));
+      }
+  }
+  if (sp.spikes && !shadowPass) {                    // hedgehog: a spiky back
+    for (let i = 0; i < 9; i++) {
+      const ang = (i / 9) * 6.283;
+      p = P(Math.cos(ang) * 0.19, BY + 0.20, Math.sin(ang) * 0.17 - 0.05);
+      drawMesh(MESH.cone, p[0], p[1], p[2], ry, 0.075*S, 0.135*S, 0.075*S,
+               rgb("#6f5c49"));
+    }
+  }
+
+  if (!shadowPass) {
+    // pale belly panel and two front paws resting on the floor
+    p = P(0, BY - 0.055, 0.240);
+    drawMesh(MESH.sphere, p[0], p[1], p[2], ry, 0.125*S, 0.115*S, 0.075*S, belly);
+    for (const sx of [-1, 1]) {
+      p = P(sx * 0.165, 0.055, 0.215);
+      drawMesh(MESH.sphere, p[0], p[1], p[2], ry, 0.105*S, 0.080*S, 0.135*S,
+               dark(fur, 1.06));
+      if (_charDetail) {
+        p = P(sx * 0.165, 0.075, 0.300);
+        drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.062*S, 0.040*S, 0.038*S, belly);
+      }
+    }
+    // haunches, so a sitting animal does not read as a ball
+    for (const sx of [-1, 1]) {
+      p = P(sx * 0.265, 0.115, -0.045);
+      drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.115*S, 0.115*S, 0.155*S,
+               dark(fur, 0.96));
+    }
+  }
+
+  // --- tail ---------------------------------------------------------------
+  if (!shadowPass) {
+    const tailCol = dark(fur, 0.97);
+    if (sp.tail === "curl") {
+      for (let i = 0; i < 4; i++) {
+        p = P(0.02, BY - 0.10 + i * 0.11, -0.30 - i * 0.035 + i * i * 0.012);
+        drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry,
+                 (0.070 - i * 0.008)*S, (0.070 - i * 0.008)*S, (0.070 - i * 0.008)*S, tailCol);
+      }
+    } else if (sp.tail === "bush") {
+      for (let i = 0; i < 4; i++) {
+        p = P(0, BY - 0.06 - i * 0.02, -0.32 - i * 0.13);
+        const k = 0.115 + i * 0.012;
+        drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, k*S, k*S, (k + 0.03)*S,
+                 i === 3 ? rgb("#fff3e4") : tailCol);
+      }
+    } else if (sp.tail === "long") {
+      for (let i = 0; i < 4; i++) {
+        p = P(0, BY - 0.12 - i * 0.03, -0.30 - i * 0.11);
+        drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry,
+                 0.058*S, 0.058*S, 0.075*S, tailCol);
+      }
+    } else if (sp.tail === "puff") {
+      p = P(0, BY - 0.12, -0.30);
+      drawMesh(MESH.sphere, p[0], p[1], p[2], ry, 0.115*S, 0.115*S, 0.100*S,
+               rgb("#fffaf2"));
+    } else if (sp.tail === "stub") {
+      p = P(0, BY + 0.02, -0.31);
+      drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.078*S, 0.078*S, 0.090*S, tailCol);
+    } else if (sp.tail === "feather") {
+      p = P(0, BY - 0.14, -0.30);
+      drawMesh(MESH.boxSoft, p[0], p[1], p[2], ry, 0.070*S, 0.022*S, 0.185*S,
+               dark(fur, 0.88));
+    }
+  }
+
+  // --- head: oversized, sat forward on the body ---------------------------
+  const HY = 0.735;
+  p = P(0, HY, 0.055);
+  drawMesh(SPH, p[0], p[1], p[2], ry, 0.325*S, 0.310*S, 0.305*S, fur);
+  if (shadowPass) { setFuzz(0); return; }
+
+  // --- ears: the strongest silhouette cue, so every species differs -------
+  const earIn = rgb("#ffc0cb");
+  for (const sx of [-1, 1]) {
+    const jaunty = sx === look.floppy ? 0.18 : 0;
+    if (sp.ears === "point" || sp.ears === "bigpoint") {
+      const big = sp.ears === "bigpoint" ? 1.35 : 1;
+      p = P(sx * 0.200, HY + 0.315, -0.01);
+      drawMesh(MESH.cone, p[0], p[1], p[2], ry + sx * 0.25 + jaunty,
+               0.125*S, (0.190 * big)*S, 0.095*S, fur);
+      p = P(sx * 0.200, HY + 0.290, 0.030);
+      drawMesh(MESH.cone, p[0], p[1], p[2], ry + sx * 0.25 + jaunty,
+               0.072*S, (0.120 * big)*S, 0.050*S, earIn);
+    } else if (sp.ears === "flop") {
+      p = P(sx * 0.300, HY + 0.090 - jaunty * 0.25, -0.02);
+      drawMesh(MESH.sphere, p[0], p[1], p[2], ry + sx * 0.15,
+               0.105*S, 0.195*S, 0.085*S, dark(fur, 0.90));
+    } else if (sp.ears === "long") {
+      p = P(sx * 0.125, HY + 0.400 - jaunty * 0.10, -0.01);
+      drawMesh(MESH.sphere, p[0], p[1], p[2], ry + sx * (0.12 + jaunty),
+               0.085*S, 0.280*S, 0.070*S, fur);
+      p = P(sx * 0.125, HY + 0.400 - jaunty * 0.10, 0.035);
+      drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry + sx * (0.12 + jaunty),
+               0.048*S, 0.205*S, 0.030*S, earIn);
+    } else if (sp.ears === "round") {
+      p = P(sx * 0.245, HY + 0.245, -0.02);
+      drawMesh(MESH.sphere, p[0], p[1], p[2], ry, 0.115*S, 0.115*S, 0.055*S,
+               dark(fur, 0.94));
+      p = P(sx * 0.245, HY + 0.245, 0.012);
+      drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.062*S, 0.062*S, 0.028*S, earIn);
+    } else if (sp.ears === "petal") {
+      p = P(sx * 0.290, HY + 0.130, -0.01);
+      drawMesh(MESH.sphere, p[0], p[1], p[2], ry + sx * 0.5,
+               0.135*S, 0.075*S, 0.060*S, dark(fur, 0.92));
+    }
+  }
+
+  // --- face ---------------------------------------------------------------
+  const FZ = 0.300;                                   // face plane, proud of the head
+  if (look.patch) {                                   // a contrast patch over one eye
+    p = P(look.floppy * 0.135, HY + 0.045, FZ - 0.02);
+    drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.125*S, 0.120*S, 0.055*S,
+             dark(fur, 0.72));
+  }
+  if (sp.mask) {                                      // ferret: a dark band
+    p = P(0, HY + 0.030, FZ - 0.03);
+    drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.255*S, 0.085*S, 0.070*S,
+             dark(fur, 0.66));
+  }
+  for (const sx of [-1, 1]) {
+    p = P(sx * 0.125, HY + 0.045, FZ);
+    drawMesh(MESH.sphere, p[0], p[1], p[2], ry, 0.078*S, 0.090*S, 0.062*S, rgb("#2b2225"));
+    p = P(sx * 0.148, HY + 0.092, FZ + 0.022);        // the big toy catchlight
+    drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.032*S, 0.032*S, 0.030*S,
+             rgb("#ffffff"), 0.95);
+    if (_charDetail) {
+      p = P(sx * 0.100, HY + 0.012, FZ + 0.022);
+      drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.015*S, 0.015*S, 0.014*S,
+               rgb("#ffffff"), 0.8);
+    }
+  }
+
+  // muzzle, nose and mouth — or a beak
+  const mz = sp.muzzle || 1;
+  if (sp.beak) {
+    p = P(0, HY - 0.055, FZ + 0.045);
+    drawMesh(MESH.cone, p[0], p[1], p[2], ry + Math.PI, 0.075*S, 0.105*S, 0.075*S,
+             rgb("#f0a83c"));
+  } else {
+    p = P(0, HY - 0.070, FZ + 0.015);
+    drawMesh(MESH.sphere, p[0], p[1], p[2], ry, (0.108 * mz)*S, (0.082 * mz)*S,
+             (0.072 * mz)*S, belly);
+    p = P(0, HY - 0.042, FZ + 0.055 * mz);
+    drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.034*S, 0.026*S, 0.026*S,
+             rgb("#c07a86"));
+    if (_charDetail)
+      for (const [dx, dy] of [[-0.052, -0.115], [0.052, -0.115]]) {
+        p = P(dx, HY + dy, FZ + 0.045);
+        drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.020*S, 0.014*S, 0.014*S,
+                 rgb("#b0716f"));
+      }
+  }
+  if (sp.cheeks) {                                    // hamster: full pouches
+    for (const sx of [-1, 1]) {
+      p = P(sx * 0.245, HY - 0.075, FZ - 0.045);
+      drawMesh(MESH.sphere, p[0], p[1], p[2], ry, 0.115*S, 0.100*S, 0.100*S,
+               dark(fur, 1.03));
+    }
+  }
+  // whiskers, on anything with a muzzle
+  if (_charDetail && !sp.beak) {
+    for (const sx of [-1, 1])
+      for (const dy of [-0.02, -0.055]) {
+        p = P(sx * 0.225, HY - 0.050 + dy, FZ + 0.020);
+        drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry + sx * 0.25,
+                 0.105*S, 0.006*S, 0.006*S, rgb("#fdf6ea"), 0.85);
+      }
+  }
+  // blush: big, soft, unmissable — the same rule the nurses follow
+  for (const sx of [-1, 1]) {
+    p = P(sx * 0.235, HY - 0.045, FZ - 0.055);
+    drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.088*S, 0.055*S, 0.040*S,
+             rgb("#ff9aab"), 0.9);
+  }
+
+  /* The collar is the state light. Treated animals turn green and get a tag,
+     which reads instantly across a busy room without recolouring the fur —
+     recolouring a cat green was the version that looked broken rather than
+     finished. */
+  p = P(0, HY - 0.245, 0.045);
+  drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry,
+           0.255*S, 0.055*S, 0.235*S, rgb(o.done ? "#57c785" : look.collar));
+  if (_charDetail) {                                  // the name tag hanging off it
+    p = P(0, HY - 0.315, 0.215);
+    drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.055*S, 0.065*S, 0.022*S,
+             rgb(o.done ? "#bff5d4" : "#ffe9a8"));
+  }
+  setFuzz(0);
+}
+
 function drawPatient3D(pt) {
-  const inBed = pt.station && pt.station.type === "bed";
+  const inBed = pt.station && pt.station.type === "basket";
   const wx = pt.x * T2W, wz = pt.y * T2W;
   const look = patientLook(pt);
   // Waiting patients turn to face the camera — they were rendered back-to, which
@@ -7591,22 +7843,18 @@ function drawPatient3D(pt) {
     const n = pt.path[0];
     ry = Math.atan2(n.x - pt.x, n.y - pt.y);
   }
-  drawCharacter3D({
+  drawAnimal3D({
     wx, wz,
     ry,
     y: inBed ? bedTopY() + 0.04 : 0,
     bob: pt.bob, step: pt.bob * 1.6, moving: pt.state === "walking",
-    body: pt.done ? "#b9edcb" : look.gown,
-    cap: pt.done ? "#8ce0a8" : "#dfe7f2",
     look,
-    noCap: true,                       // patients are not staff
-    tucked: inBed,
-    scale: look.scale
+    done: pt.done
   });
   if (inBed && _pass !== "shadow") {
-    // duvet drawn over the lower body
-    drawMesh(MESH.boxSoft, wx, bedTopY() + 0.13, wz + 0.14, 0,
-             0.385, 0.105, 0.30, rgb(pt.done ? "#93e5b0" : "#ff9fb6"));
+    // a folded blanket in the basket, tucked round the back of them
+    drawMesh(MESH.boxSoft, wx, bedTopY() + 0.11, wz - 0.16, 0,
+             0.360, 0.085, 0.190, rgb(pt.done ? "#93e5b0" : "#ffd9e2"));
   }
   if (pt.vip && _pass !== "shadow") {
     const t = performance.now() / 700;
@@ -7631,12 +7879,10 @@ function drawPlayer3D(p) {
 
   // carried patient rides on the shoulders; items float in front
   if (p.patient) {
-    drawCharacter3D({
+    drawAnimal3D({
       wx: _lx(wx, ry, 0, -0.12), wz: _lz(wz, ry, 0, -0.12), ry,
-      y: 1.16, bob: p.bob * 0.5, step: 0, moving: false,
-      body: p.patient.done ? "#b9edcb" : "#e9eff7",
-      cap: p.patient.done ? "#8ce0a8" : "#dfe7f2",
-      look: patientLook(p.patient), scale: 0.72
+      y: 1.10, bob: p.bob * 0.5, step: 0, moving: false,
+      look: patientLook(p.patient), scale: 0.72, done: p.patient.done
     });
   } else if (p.item) {
     const bobY = Math.sin(p.bob * 0.6) * 0.02;
@@ -7657,11 +7903,10 @@ function drawStaff3D(st) {
     drawItem3D(st.item.type, st.x * T2W, 1.30, st.y * T2W, performance.now() / 700);
   }
   if (_pass !== "shadow" && st.carrying) {
-    drawCharacter3D({
+    drawAnimal3D({
       wx: st.x * T2W, wz: st.y * T2W, ry,
-      y: 1.28, bob: st.bob * 0.6, step: 0, moving: false,
-      body: patientLook(st.carrying).gown, look: patientLook(st.carrying),
-      noCap: true, tucked: true, scale: 0.62
+      y: 1.22, bob: st.bob * 0.6, step: 0, moving: false,
+      look: patientLook(st.carrying), scale: 0.62, done: st.carrying.done
     });
   }
 }
@@ -8052,144 +8297,176 @@ initPaints();
 
 function drawAilmentIcon(g, key, x, y, r) {
   const a = AILMENTS[key];
+  if (!a) return;
   g.save();
   g.translate(x, y);
   g.fillStyle = a.color;
+  g.lineJoin = "round"; g.lineCap = "round";
   switch (key) {
-    case "cut":
-      g.strokeStyle = "#f7f2ea"; g.lineWidth = Math.max(3, r * 0.46); g.lineCap = "round";
-      g.beginPath(); g.moveTo(-r * .62, r * .62); g.lineTo(r * .62, -r * .62); g.stroke();
-      g.strokeStyle = a.color; g.lineWidth = Math.max(2, r * 0.30);
-      g.beginPath(); g.moveTo(-r * .62, r * .62); g.lineTo(r * .62, -r * .62); g.stroke();
-      g.beginPath(); g.moveTo(-r * .05, r * .72); g.lineTo(r * .58, r * .12); g.stroke();
-      break;
-    case "infection":
-      g.beginPath(); g.arc(0, 0, r * .74, 0, 6.283); g.fill();
-      g.strokeStyle = a.color; g.lineWidth = Math.max(1.4, r * .18); g.lineCap = "round";
-      for (let i = 0; i < 6; i++) {
-        const ang = i * 1.047;
-        g.beginPath();
-        g.moveTo(Math.cos(ang) * r * .68, Math.sin(ang) * r * .68);
-        g.lineTo(Math.cos(ang) * r * 1.02, Math.sin(ang) * r * 1.02);
-        g.stroke();
-      }
-      g.fillStyle = "#1d5c34";
-      for (const [ox, oy] of [[-.26, -.18], [.24, -.04], [-.04, .28]]) {
-        g.beginPath(); g.arc(ox * r * 2, oy * r * 2, r * .15, 0, 6.283); g.fill();
-      }
-      break;
-    case "fracture":
-      g.fillStyle = "#f3ecd9"; g.strokeStyle = "#6f6449"; g.lineWidth = 1.6; g.lineJoin = "round";
-      g.beginPath();
-      g.moveTo(-r * .75, -r * .30);
-      g.arc(-r * .75, -r * .18, r * .22, -1.6, 1.6, true);
-      g.lineTo(r * .55, r * .12);
-      g.arc(r * .75, r * .24, r * .22, -1.6, 1.6, false);
-      g.closePath();
-      g.fill(); g.stroke();
-      g.strokeStyle = "#c0392b"; g.lineWidth = Math.max(1.6, r * .22); g.lineCap = "round";
-      g.beginPath(); g.moveTo(r * .02, -r * .52); g.lineTo(-r * .12, r * .62); g.stroke();
-      break;
-    case "cardiac": {
-      const s = r * .95;
+    case "muddypaws": {                               // a little muddy pawprint
       g.fillStyle = a.color;
-      g.beginPath();
-      g.moveTo(0, s * .78);
-      g.bezierCurveTo(-s * 1.32, -s * .08, -s * .56, -s * 1.02, 0, -s * .34);
-      g.bezierCurveTo(s * .56, -s * 1.02, s * 1.32, -s * .08, 0, s * .78);
-      g.fill();
-      g.strokeStyle = "rgba(255,255,255,.35)"; g.lineWidth = 1;
-      g.stroke();
-      g.strokeStyle = "#fff"; g.lineWidth = Math.max(1.5, r * .17);
-      g.lineJoin = "round"; g.lineCap = "round";
-      g.beginPath();
-      g.moveTo(-s * .62, 0); g.lineTo(-s * .22, 0); g.lineTo(0, -s * .34);
-      g.lineTo(s * .18, s * .3); g.lineTo(s * .34, 0); g.lineTo(s * .62, 0);
-      g.stroke();
+      g.beginPath(); g.ellipse(0, r * .28, r * .52, r * .44, 0, 0, 6.283); g.fill();
+      for (const [ox, oy, rr] of [[-.62, -.42, .21], [-.22, -.66, .22],
+                                  [.22, -.66, .22], [.62, -.42, .21]]) {
+        g.beginPath(); g.ellipse(ox * r, oy * r, rr * r, rr * r * 1.15, 0, 0, 6.283); g.fill();
+      }
+      g.fillStyle = "rgba(255,255,255,.35)";
+      g.beginPath(); g.ellipse(-r * .14, r * .18, r * .16, r * .12, -.4, 0, 6.283); g.fill();
       break;
     }
-    case "mystery":
+    case "itchyears": {                               // one flopped ear, mid-scratch
+      g.fillStyle = a.color;
+      g.beginPath();
+      g.moveTo(0, r * .9);
+      g.bezierCurveTo(-r * .95, r * .4, -r * .8, -r * .95, -r * .05, -r * .75);
+      g.bezierCurveTo(r * .7, -r * .95, r * .8, r * .2, 0, r * .9);
+      g.fill();
+      g.fillStyle = "rgba(255,255,255,.4)";
+      g.beginPath();
+      g.moveTo(0, r * .52);
+      g.bezierCurveTo(-r * .45, r * .2, -r * .4, -r * .5, 0, -r * .38);
+      g.bezierCurveTo(r * .36, -r * .5, r * .4, r * .2, 0, r * .52);
+      g.fill();
+      g.strokeStyle = "#2f7a4c"; g.lineWidth = Math.max(1.3, r * .16);
+      for (let i = 0; i < 3; i++) {                   // itch squiggles
+        g.beginPath();
+        g.moveTo(r * (.72 + i * .12), -r * (.5 - i * .34));
+        g.lineTo(r * (1.02 + i * .12), -r * (.62 - i * .34));
+        g.stroke();
+      }
+      break;
+    }
+    case "sprainedhop": {                             // a bunny leg in a bootie
+      g.strokeStyle = "#f3ecd9"; g.lineWidth = Math.max(2.6, r * .36);
+      g.beginPath(); g.moveTo(-r * .5, -r * .8); g.lineTo(-r * .1, r * .1); g.stroke();
+      g.fillStyle = a.color;
+      fillRound(g, -r * .62, r * .06, r * 1.22, r * .74, r * .28, a.color);
+      g.strokeStyle = "rgba(90,70,40,.45)"; g.lineWidth = 1.2;
+      roundRect(g, -r * .62, r * .06, r * 1.22, r * .74, r * .28); g.stroke();
+      g.strokeStyle = "#fff"; g.lineWidth = Math.max(1.4, r * .16);
+      g.beginPath(); g.moveTo(-r * .34, r * .3); g.lineTo(r * .42, r * .3); g.stroke();
+      g.beginPath(); g.moveTo(-r * .34, r * .56); g.lineTo(r * .42, r * .56); g.stroke();
+      break;
+    }
+    case "staticcling": {                             // a fluff-ball throwing sparks
+      g.fillStyle = "#f4e3c8";
+      g.beginPath();
+      for (let i = 0; i < 14; i++) {                  // frizzed-out silhouette
+        const ang = (i / 14) * 6.283;
+        const rad = r * (i % 2 ? .58 : .84);
+        const px = Math.cos(ang) * rad, py = Math.sin(ang) * rad;
+        i ? g.lineTo(px, py) : g.moveTo(px, py);
+      }
+      g.closePath(); g.fill();
+      g.fillStyle = a.color;
+      for (const [sx, sy] of [[-1, -1], [1, -1], [1, 1]]) {
+        g.beginPath();
+        g.moveTo(sx * r * .72, sy * r * .58);
+        g.lineTo(sx * r * 1.16, sy * r * .70);
+        g.lineTo(sx * r * .86, sy * r * .92);
+        g.closePath(); g.fill();
+      }
+      g.fillStyle = "#4a3200";
+      g.beginPath(); g.arc(-r * .22, -r * .06, r * .10, 0, 6.283); g.fill();
+      g.beginPath(); g.arc(r * .22, -r * .06, r * .10, 0, 6.283); g.fill();
+      break;
+    }
+    case "mysterymunch": {                            // the question mark, kept
       g.beginPath(); g.arc(0, 0, r * .8, 0, 6.283); g.fill();
       g.strokeStyle = "rgba(255,255,255,.30)"; g.lineWidth = 1.2;
       g.beginPath(); g.arc(0, 0, r * .8, 0, 6.283); g.stroke();
       text(g, "?", 0, r * .46, r * 1.4, "#fff", "center");
       break;
-
-    case "burn": {                                    // a flame
+    }
+    case "stickypaws": {                              // a paw stuck in a honey drip
       g.fillStyle = a.color;
       g.beginPath();
-      g.moveTo(0, -r * 1.05);
-      g.bezierCurveTo(r * .82, -r * .3, r * .62, r * .5, 0, r * .95);
-      g.bezierCurveTo(-r * .62, r * .5, -r * .82, -r * .3, 0, -r * 1.05);
-      g.fill();
-      g.fillStyle = "#ffe08a";
-      g.beginPath();
-      g.moveTo(0, -r * .34);
-      g.bezierCurveTo(r * .40, r * .02, r * .30, r * .52, 0, r * .82);
-      g.bezierCurveTo(-r * .30, r * .52, -r * .40, r * .02, 0, -r * .34);
-      g.fill();
-      break;
-    }
-    case "anaphylaxis": {                             // urgent: warning wedge
-      g.fillStyle = a.color; g.lineJoin = "round";
-      g.beginPath();
-      g.moveTo(0, -r * 1.0); g.lineTo(r * .95, r * .72); g.lineTo(-r * .95, r * .72);
+      g.moveTo(-r * .86, -r * .5);
+      g.bezierCurveTo(-r * .5, r * .1, -r * .62, r * .86, 0, r * .92);
+      g.bezierCurveTo(r * .62, r * .86, r * .5, r * .1, r * .86, -r * .5);
       g.closePath(); g.fill();
-      g.strokeStyle = "rgba(90,60,0,.5)"; g.lineWidth = 1.2; g.stroke();
-      g.strokeStyle = "#4a3200"; g.lineWidth = Math.max(2, r * .24); g.lineCap = "round";
-      g.beginPath(); g.moveTo(0, -r * .40); g.lineTo(0, r * .16); g.stroke();
-      g.beginPath(); g.arc(0, r * .46, r * .13, 0, 6.283); g.fillStyle = "#4a3200"; g.fill();
-      break;
-    }
-    case "concussion": {                              // head in profile, seeing stars
-      g.fillStyle = a.color;
-      g.beginPath(); g.arc(-r * .12, r * .05, r * .74, 0, 6.283); g.fill();
-      g.strokeStyle = "rgba(255,255,255,.35)"; g.lineWidth = 1.1; g.stroke();
-      g.strokeStyle = "#fff"; g.lineWidth = Math.max(1.4, r * .17);
-      g.lineCap = "round";                            // the spiral of a rung bell
-      g.beginPath();
-      for (let i = 0; i <= 22; i++) {
-        const t2 = i / 22, ang = t2 * 7.6, rad = r * .10 + t2 * r * .40;
-        const px = -r * .12 + Math.cos(ang) * rad, py = r * .05 + Math.sin(ang) * rad;
-        i ? g.lineTo(px, py) : g.moveTo(px, py);
+      g.fillStyle = "#7a4a1c";
+      g.beginPath(); g.ellipse(0, r * .18, r * .34, r * .28, 0, 0, 6.283); g.fill();
+      for (const [ox, oy] of [[-.4, -.2], [-.14, -.4], [.14, -.4], [.4, -.2]]) {
+        g.beginPath(); g.ellipse(ox * r, oy * r, r * .13, r * .15, 0, 0, 6.283); g.fill();
       }
-      g.stroke();
+      g.fillStyle = "rgba(255,255,255,.45)";
+      g.beginPath(); g.ellipse(-r * .42, r * .5, r * .14, r * .09, -.5, 0, 6.283); g.fill();
       break;
     }
-    case "dislocation": {                             // a ball pulled out of its socket
-      g.strokeStyle = "#f3ecd9"; g.lineWidth = Math.max(2.4, r * .34); g.lineCap = "round";
-      g.beginPath(); g.moveTo(-r * .95, r * .62); g.lineTo(-r * .18, r * .02); g.stroke();
-      g.beginPath(); g.moveTo(r * .95, -r * .70); g.lineTo(r * .30, -r * .18); g.stroke();
-      g.fillStyle = "#f3ecd9";
-      g.beginPath(); g.arc(-r * .10, r * .10, r * .30, 0, 6.283); g.fill();
-      g.strokeStyle = a.color; g.lineWidth = Math.max(1.6, r * .20);
-      g.beginPath(); g.arc(r * .34, -r * .30, r * .38, 2.2, 5.2); g.stroke();
-      break;
-    }
-    case "overdose": {                                // a capsule
-      g.save(); g.rotate(-0.7);
+    case "zoomies": {                                 // motion lines and a blur
       g.fillStyle = a.color;
-      fillRound(g, -r * .92, -r * .42, r * 1.84, r * .84, r * .42, a.color);
-      g.fillStyle = "#efe8ff";
+      g.beginPath(); g.ellipse(r * .28, 0, r * .5, r * .42, 0, 0, 6.283); g.fill();
+      g.beginPath(); g.ellipse(r * .62, -r * .28, r * .24, r * .2, 0, 0, 6.283); g.fill();
+      g.fillStyle = "#4a3200";
+      g.beginPath(); g.arc(r * .70, -r * .32, r * .07, 0, 6.283); g.fill();
+      g.strokeStyle = a.color; g.lineWidth = Math.max(1.6, r * .2);
+      for (let i = 0; i < 3; i++) {
+        const yy = -r * .42 + i * r * .42;
+        g.beginPath();
+        g.moveTo(-r * 1.05, yy); g.lineTo(-r * (.35 - i * .1), yy);
+        g.stroke();
+      }
+      break;
+    }
+    case "socksituation": {                           // a stripey sock
+      g.save(); g.rotate(-0.5);
+      g.fillStyle = a.color;
       g.beginPath();
-      g.moveTo(0, -r * .42); g.lineTo(r * .50, -r * .42);
-      g.arc(r * .50, 0, r * .42, -1.5708, 1.5708); g.lineTo(0, r * .42);
+      g.moveTo(-r * .3, -r * .95);
+      g.lineTo(r * .3, -r * .95);
+      g.lineTo(r * .3, r * .2);
+      g.bezierCurveTo(r * .3, r * .78, -r * .95, r * .78, -r * .95, r * .3);
+      g.bezierCurveTo(-r * .95, r * .0, -r * .3, r * .1, -r * .3, r * .0);
       g.closePath(); g.fill();
-      g.strokeStyle = "rgba(20,10,50,.45)"; g.lineWidth = 1.2;
-      roundRect(g, -r * .92, -r * .42, r * 1.84, r * .84, r * .42); g.stroke();
+      g.fillStyle = "rgba(255,255,255,.75)";
+      g.fillRect(-r * .3, -r * .95, r * .6, r * .26);
+      g.fillRect(-r * .3, -r * .40, r * .6, r * .18);
       g.restore();
+      break;
+    }
+    case "crickintail": {                             // a kinked tail
+      g.strokeStyle = a.color;
+      g.lineWidth = Math.max(2.6, r * .34);
+      g.beginPath();
+      g.moveTo(-r * .82, r * .70);
+      g.quadraticCurveTo(-r * .1, r * .55, r * .05, -r * .1);
+      g.quadraticCurveTo(r * .18, -r * .72, r * .78, -r * .58);
+      g.stroke();
+      g.fillStyle = "#fff";
+      g.beginPath(); g.arc(r * .78, -r * .58, r * .2, 0, 6.283); g.fill();
+      g.strokeStyle = "#e4573d"; g.lineWidth = Math.max(1.3, r * .15);
+      for (const [ox, oy] of [[-.28, -.62], [.34, .18]]) {
+        g.beginPath();
+        g.moveTo(ox * r - r * .18, oy * r - r * .18);
+        g.lineTo(ox * r + r * .18, oy * r + r * .18);
+        g.stroke();
+      }
+      break;
+    }
+    case "toomanytreats": {                           // a round tum and one crumb
+      g.fillStyle = a.color;
+      g.beginPath(); g.arc(0, r * .12, r * .82, 0, 6.283); g.fill();
+      g.fillStyle = "rgba(255,255,255,.4)";
+      g.beginPath(); g.ellipse(-r * .26, -r * .18, r * .26, r * .18, -.5, 0, 6.283); g.fill();
+      g.fillStyle = "#7a4a1c";
+      g.beginPath();                                  // a bone-shaped biscuit
+      g.ellipse(r * .52, -r * .66, r * .18, r * .14, .5, 0, 6.283); g.fill();
+      g.beginPath();
+      g.ellipse(r * .86, -r * .9, r * .18, r * .14, .5, 0, 6.283); g.fill();
+      g.lineWidth = Math.max(2, r * .16); g.strokeStyle = "#7a4a1c";
+      g.beginPath(); g.moveTo(r * .56, -r * .70); g.lineTo(r * .82, -r * .86); g.stroke();
       break;
     }
   }
   g.restore();
 }
-
 function drawItemIcon(g, type, x, y, r) {
   g.save();
   g.translate(x, y);
   g.lineJoin = "round";
   switch (type) {
-    case "bandage":
+    case "towel":
       g.save(); g.rotate(-0.5);
       fillRound(g, -r, -r * .44, r * 2, r * .88, r * .32, "#f8f2e0");
       g.strokeStyle = "#cfc3a2"; g.lineWidth = 1.2;
@@ -8201,7 +8478,7 @@ function drawItemIcon(g, type, x, y, r) {
         for (let j = -1; j <= 1; j++)
           if (i || j) { g.beginPath(); g.arc(i * r * .16, j * r * .16, r * .05, 0, 6.283); g.fill(); }
       g.restore(); break;
-    case "syringe":
+    case "drops":
       g.save(); g.rotate(-0.62);
       fillRound(g, -r * .95, -r * .3, r * 1.5, r * .6, r * .18, "#eef8ff");
       g.fillStyle = "#3fa9e8"; fillRound(g, -r * .9, -r * .22, r * .85, r * .44, r * .1, "#3fa9e8");
@@ -8210,13 +8487,13 @@ function drawItemIcon(g, type, x, y, r) {
       g.strokeStyle = "#dfe7ee"; g.lineWidth = Math.max(1.6, r * .17); g.lineCap = "round";
       g.beginPath(); g.moveTo(r * .55, 0); g.lineTo(r * 1.1, 0); g.stroke();
       g.restore(); break;
-    case "film":
+    case "plate":
       fillRound(g, -r * .82, -r * .98, r * 1.64, r * 1.96, r * .2, "#333a48");
       g.fillStyle = "#4d576a"; g.fillRect(-r * .58, -r * .74, r * 1.16, r * 1.48);
       g.strokeStyle = "#232a36"; g.lineWidth = 1.4;
       roundRect(g, -r * .82, -r * .98, r * 1.64, r * 1.96, r * .2); g.stroke();
       break;
-    case "xrayimg": {
+    case "scan": {
       fillRound(g, -r * .82, -r * .98, r * 1.64, r * 1.96, r * .2, "#16324a");
       const gl = g.createLinearGradient(0, -r, 0, r);
       gl.addColorStop(0, "rgba(150,215,255,.55)");
@@ -8227,7 +8504,7 @@ function drawItemIcon(g, type, x, y, r) {
       g.beginPath(); g.moveTo(-r * .28, -r * .56); g.lineTo(r * .1, r * .06); g.lineTo(-r * .2, r * .6); g.stroke();
       break;
     }
-    case "cast":
+    case "bootie":
       fillRound(g, -r * .88, -r * .62, r * 1.76, r * 1.24, r * .5, "#f5efdd");
       g.strokeStyle = "#c8bb99"; g.lineWidth = 1.3;
       roundRect(g, -r * .88, -r * .62, r * 1.76, r * 1.24, r * .5); g.stroke();
@@ -8236,7 +8513,7 @@ function drawItemIcon(g, type, x, y, r) {
         g.beginPath(); g.moveTo(i * r * .48, -r * .6); g.lineTo(i * r * .48 - r * .22, r * .6); g.stroke();
       }
       break;
-    case "sample":
+    case "swab":
       fillRound(g, -r * .44, -r * .98, r * .88, r * 1.96, r * .3, "#e6eef5");
       fillRound(g, -r * .32, -r * .12, r * .64, r * .98, r * .2, "#c0392b");
       g.fillStyle = "rgba(255,255,255,.45)";
@@ -8252,9 +8529,9 @@ function drawItemIcon(g, type, x, y, r) {
       g.beginPath(); g.moveTo(0, -r * .82); g.lineTo(0, r * .82); g.stroke();
       roundRect(g, -r * .98, -r * .82, r * 1.96, r * 1.64, r * .18); g.stroke();
       break;
-    case "defib":
-    case "defib_charged": {
-      const hot = type === "defib_charged";
+    case "wand":
+    case "wand_charged": {
+      const hot = type === "wand_charged";
       fillRound(g, -r * 1.02, -r * .82, r * 2.04, r * 1.64, r * .26, hot ? "#ffd84d" : "#d99f2c");
       g.strokeStyle = hot ? "#b98800" : "#8e6613"; g.lineWidth = 1.4;
       roundRect(g, -r * 1.02, -r * .82, r * 2.04, r * 1.64, r * .26); g.stroke();
@@ -9218,7 +9495,7 @@ function drawHowToProcedures(g) {
       const label = c.t;
       g.font = 'bold 12px "Trebuchet MS", "Segoe UI", sans-serif';
       const w = g.measureText(label).width + 18;
-      const col = c.s === "bed" ? "#7db2f2" : (STATIONS[c.s] ? STATIONS[c.s].color : "#8a93a0");
+      const col = c.s === "basket" ? "#7db2f2" : (STATIONS[c.s] ? STATIONS[c.s].color : "#8a93a0");
       fillRound(g, cx, y + 22, w, 22, 7, col);
       text(g, label, cx + w / 2, y + 37, 12, "#10202e", "center");
       cx += w + 6;
@@ -9428,7 +9705,7 @@ function drawBuild(g) {
   // your department, at a glance
   const stats = [
     ["Beds", Game.world.beds.length],
-    ["Machines", Game.world.stations.filter(q => q.type !== "bed").length],
+    ["Machines", Game.world.stations.filter(q => q.type !== "basket").length],
     ["Staff", Game.staff.length],
     ["Waiting room", Game.world.waitSlots.length],
     ["Lives", Game.lives + " / " + Game.livesMax]
@@ -9499,7 +9776,7 @@ function drawShopIcon(g, item, x, y, r) {
   if (item.kind === "station") {
     const col = STATIONS[item.station] ? STATIONS[item.station].color : "#8fd0f0";
     fillRound(g, -r, -r * 0.8, r * 2, r * 1.6, r * 0.3, col);
-    if (item.station === "bed") {
+    if (item.station === "basket") {
       g.fillStyle = "#ffffff";
       fillRound(g, -r * 0.8, -r * 0.6, r * 1.6, r * 0.5, r * 0.2, "#ffffff");
     } else {
@@ -9643,7 +9920,7 @@ function drawSelect(g) {
   g.strokeStyle = selB ? "#ffd54a" : (openB ? "rgba(111,211,180,.6)" : "rgba(255,255,255,.07)");
   g.lineWidth = selB ? 4 : 1.5;
   roundRect(g, bx2, ey, ew, eh, 14); g.stroke();
-  drawShopIcon(g, { kind: "station", station: "bed" }, bx2 + 32, ey + 33, 14);
+  drawShopIcon(g, { kind: "station", station: "basket" }, bx2 + 32, ey + 33, 14);
   text(g, "ER BUILDER — waves", bx2 + 58, ey + 30, 18, openB ? PALETTE.text : "#4a5666");
   text(g, openB ? "Build the department between waves." + (Game.builderBest
                     ? "   Best wave  " + Game.builderBest : "")
@@ -9941,7 +10218,7 @@ function drawWorldUI(g) {
 
   // --- station status: stock pips and jam warnings ---
   for (const st of world.stations) {
-    if (st.type === "bed") continue;
+    if (st.type === "basket") continue;
     const info = STATIONS[st.type];
     if (st.stock !== Infinity && st.stock !== undefined && info.stockMax) {
       const s = projectToScreen(st.x + 0.5, 1.05, st.y + 0.5);
@@ -9985,7 +10262,7 @@ function drawWorldUI(g) {
     const carried = pt.state === "carried";
     const carrier = carried ? Game.players.find(q => q.patient === pt) : null;
     if (carried && !carrier) continue;
-    const inBed = pt.station && pt.station.type === "bed";
+    const inBed = pt.station && pt.station.type === "basket";
     const wx = (carried ? carrier.x : pt.x) * T2W;
     const wz = (carried ? carrier.y : pt.y) * T2W;
     // clear of the head, not painted across it. The plush rebuild grew the head,
