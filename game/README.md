@@ -1,11 +1,11 @@
 # LAST LINE
 
-Roguelite tower defense. Godot 4.x / GDScript.
+Roguelite tower defense. Godot 4.x / GDScript. **3D, and it runs in a browser.**
 
-**Status: phase P0 complete.** One map, one enemy, one platform, ten waves,
-win/lose — on a deterministic 30Hz simulation with the architecture the later
-phases need already in place. The design document is the master plan (v2); the
-phase ladder is §5.7 of it.
+**Status: phase P0 complete and audited.** One map, one enemy, one platform, ten
+waves, win/lose — on a deterministic 30Hz simulation with the architecture the
+later phases need already in place. The design document is the master plan (v2);
+the phase ladder is §5.7 of it.
 
 This tree is self-contained and shares nothing with MRF Explorer, the Python
 product that occupies the rest of this repository.
@@ -15,8 +15,18 @@ product that occupies the rest of this repository.
 Needs Godot 4.x (built and verified against 4.5).
 
 ```bash
-godot --path game                   # play
-GODOT=/path/to/godot ./game/run_tests.sh    # the suite, headless
+godot --path game                            # play
+GODOT=/path/to/godot ./game/run_tests.sh     # the suite, headless
+GODOT=/path/to/godot ./game/build_web.sh     # HTML5 build -> build/web/
+python3 game/tools/verify_web.py             # boot the web build in a real browser
+```
+
+The web build is single-threaded on purpose, so it needs no COOP/COEP headers and
+will run from any static host. It will **not** run from `file://` — browsers
+block wasm there. Serve it:
+
+```bash
+python3 -m http.server 8000 --directory build/web   # then open localhost:8000
 ```
 
 In game: click a pad to build · `1`/`2`/`3` speed · `space` pause · `F3` debug
@@ -29,7 +39,10 @@ finish; same seed + inputs produce an identical end state, test-proven.* Both
 halves are covered by `tests/cases/test_engagement.gd` and
 `tests/cases/test_determinism.gd`.
 
-The current suite is 69 tests / ~35,000 assertions, all green.
+The current suite is 84 tests / ~35,400 assertions, all green — including
+`test_audit.gd`, the regression tests for seven defects a deliberate
+break-it pass found after P0 was first written. Every one of them was a *silent*
+failure rather than a crash; `DECISIONS.md` (P0-17) has the table.
 
 ## Layout
 
@@ -41,9 +54,9 @@ core/       deterministic simulation — no Node, no scene tree, no engine time
   spatial_hash.gd   allocation-free broadphase for targeting queries
   state_hash.gd     bit-exact fingerprint of simulation state
 data/       every balance value in the game, as JSON
-render/     MultiMesh drawing + interpolation; debug overlay
+render/     3D drawing (MultiMesh + interpolation), camera, debug overlay
 ui/         HUD
-tools/      headless dev utilities (screenshot capture, render stress)
+tools/      headless dev utilities (screenshot capture, render stress, web verify)
 tests/      the suite; run_tests.gd is the headless entry point
 ```
 
@@ -61,6 +74,11 @@ there is much of a game.
 3. **No allocations in the per-tick path.** Everything spawned comes from a
    preallocated pool.
 4. **Entities render through MultiMesh**, never one node per entity.
+
+The renderer is 3D and the simulation is not — the sim's world is flat `(x, y)`
+and the renderer maps it to `(x, 0, y)`. Moving from 2D to 3D changed **no game
+logic at all**, which is the clearest evidence available that rule 1 is earning
+its keep.
 
 Rules 1 and 2 are enforced mechanically by `tests/cases/test_sim_purity.gd`,
 which fails the build on a stray `randf()`, `Vector2`, `pow()` or magic number in

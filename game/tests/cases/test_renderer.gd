@@ -6,15 +6,19 @@ extends TestCase
 ## 25 to 250 entities - but it needs a GPU context, so it cannot live in the
 ## headless suite. These tests check the structure that produces that result, so
 ## a regression to one-node-per-entity fails here first and cheaply.
+##
+## The renderer is 3D; the simulation is not, and none of these tests reach into
+## it. Sim (x, y) maps to world (x, 0, y) and the third dimension is presentation
+## only.
 
 var _tree: SceneTree
 var _sim: Sim
-var _renderer: SimRenderer
+var _renderer: SimRenderer3D
 
 func before_each() -> void:
 	_tree = Engine.get_main_loop() as SceneTree
 	_sim = SimFixture.fresh()
-	_renderer = SimRenderer.new()
+	_renderer = SimRenderer3D.new()
 	_tree.root.add_child(_renderer)
 	_renderer.setup(_sim, _theme())
 
@@ -23,39 +27,42 @@ func after_each() -> void:
 	_renderer.queue_free()
 
 func test_entities_render_through_exactly_three_multimesh_layers() -> void:
-	var layers := 0
-	for child in _renderer.get_children():
-		assert_true(child is MultiMeshInstance2D,
-			"the renderer must not own per-entity nodes; found a %s" % child.get_class())
-		layers += 1
-	assert_eq(layers, 3, "bodies, health bars and projectiles - three layers, three draw calls")
+	assert_eq(_layers().size(), 3, "bodies, health bars and projectiles - three layers")
 
 func test_instance_buffers_are_preallocated_to_the_pool_ceiling() -> void:
 	# Allocated once at setup. If instance_count were resized as entities spawn,
 	# the renderer would be reallocating GPU buffers mid-wave.
-	var children := _renderer.get_children()
-	assert_eq((children[0] as MultiMeshInstance2D).multimesh.instance_count, _sim.e_alive.size(), "enemy layer")
-	assert_eq((children[1] as MultiMeshInstance2D).multimesh.instance_count, _sim.e_alive.size(), "health bar layer")
-	assert_eq((children[2] as MultiMeshInstance2D).multimesh.instance_count, _sim.p_alive.size(), "projectile layer")
+	var layers := _layers()
+	assert_eq(layers[0].multimesh.instance_count, _sim.e_alive.size(), "enemy layer")
+	assert_eq(layers[1].multimesh.instance_count, _sim.e_alive.size(), "health bar layer")
+	assert_eq(layers[2].multimesh.instance_count, _sim.p_alive.size(), "projectile layer")
+
+func test_the_simulation_maps_onto_the_ground_plane() -> void:
+	# The whole reason the 2D renderer could be swapped for a 3D one without
+	# touching core/: the sim is flat, and height is presentation only.
+	var world := SimRenderer3D.to_world(120.0, 340.0, 9.0)
+	assert_almost_eq(world.x, 120.0, 0.0001, "sim x is world x")
+	assert_almost_eq(world.z, 340.0, 0.0001, "sim y is world z")
+	assert_almost_eq(world.y, 9.0, 0.0001, "world y is height, which the sim has no concept of")
 
 func test_visible_instance_count_tracks_live_entities() -> void:
 	# This is the mechanism that keeps draw cost proportional to what is on
 	# screen without touching allocation.
 	_renderer.update_visuals(0.0)
-	var children := _renderer.get_children()
-	assert_eq((children[0] as MultiMeshInstance2D).multimesh.visible_instance_count, 0, "nothing spawned yet")
+	var layers := _layers()
+	assert_eq(layers[0].multimesh.visible_instance_count, 0, "nothing spawned yet")
 
 	_sim._begin_wave(0)
 	for _i in 40:
 		_sim._spawn(0)
 	_renderer.update_visuals(0.0)
-	assert_eq((children[0] as MultiMeshInstance2D).multimesh.visible_instance_count, 40, "40 bodies drawn")
-	assert_eq((children[1] as MultiMeshInstance2D).multimesh.visible_instance_count, 40, "40 health bars drawn")
+	assert_eq(layers[0].multimesh.visible_instance_count, 40, "40 bodies drawn")
+	assert_eq(layers[1].multimesh.visible_instance_count, 40, "40 health bars drawn")
 
 	for i in 15:
 		_sim._despawn_enemy(i)
 	_renderer.update_visuals(0.0)
-	assert_eq((children[0] as MultiMeshInstance2D).multimesh.visible_instance_count, 25, "count follows despawns")
+	assert_eq(layers[0].multimesh.visible_instance_count, 25, "count follows despawns")
 
 func test_the_node_count_does_not_grow_with_entities() -> void:
 	# The actual regression this file exists to catch.
@@ -87,6 +94,15 @@ func test_interpolation_lands_between_the_two_ticks() -> void:
 
 	assert_almost_eq(mid_x, (start_x + end_x) * 0.5, 0.0001,
 		"half a tick of interpolation is half the distance along the path")
+
+## The MultiMesh layers, in setup order. Everything else the renderer owns is
+## static scenery, a camera or a light - none of which may scale with entities.
+func _layers() -> Array:
+	var found := []
+	for child in _renderer.get_children():
+		if child is MultiMeshInstance3D:
+			found.append(child)
+	return found
 
 func _theme() -> Dictionary:
 	var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string("res://data/theme.json"))

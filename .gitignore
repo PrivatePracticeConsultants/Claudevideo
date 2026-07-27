@@ -11,6 +11,8 @@ __pycache__/
 /data/out/
 # Godot
 game/.godot/
+# Web/desktop export output: ~37 MB of wasm, rebuilt by game/build_web.sh
+build/
 game/android/
 *.import
 bcbs_mo_mrf.egg-info/

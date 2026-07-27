@@ -96,6 +96,8 @@ var _integrity: int = 0
 var _kills: int = 0
 var _leaks: int = 0
 var _spawn_overflow: int = 0
+var _projectile_overflow: int = 0
+var _unknown_enemy_groups: int = 0
 var _rejected_commands: int = 0
 
 var _phase: int = PHASE_WAITING
@@ -367,10 +369,20 @@ func _build_pools() -> void:
 ## Queue a placement. Commands are addressed by tick, never by wall clock, so a
 ## recorded log replays identically at 1x, 3x or headless.
 func queue_place(at_tick: int, pad_index: int, blueprint_index: int) -> void:
-	_cmd_tick.append(at_tick)
-	_cmd_type.append(CMD_PLACE)
-	_cmd_a.append(pad_index)
-	_cmd_b.append(blueprint_index)
+	# Inserted in tick order rather than appended. The cursor that replays this
+	# log only moves forward, so an out-of-order append used to be applied at the
+	# wrong tick - silently, and differently between a live run and its replay,
+	# which is precisely the failure the determinism work exists to prevent.
+	# A command for a tick already past lands on the next one instead of being
+	# skipped; that is what a click during the current tick means anyway.
+	var at := maxi(at_tick, _tick)
+	var position := _cmd_tick.size()
+	while position > 0 and _cmd_tick[position - 1] > at:
+		position -= 1
+	_cmd_tick.insert(position, at)
+	_cmd_type.insert(position, CMD_PLACE)
+	_cmd_a.insert(position, pad_index)
+	_cmd_b.insert(position, blueprint_index)
 
 func command_count() -> int:
 	return _cmd_tick.size()
@@ -511,6 +523,11 @@ func _acquire_target(px: float, py: float, range_sq: float) -> int:
 
 func _fire(platform: int, target: int) -> void:
 	if _p_free_top == 0:
+		# The shot is lost because the pool is full. Count it rather than
+		# dropping it silently: a platform that appears to fire but deals no
+		# damage is exactly the kind of quietly-wrong number the honesty rules
+		# exist to prevent, and it would read as a balance mystery.
+		_projectile_overflow += 1
 		return
 	_p_free_top -= 1
 	var i := _p_free[_p_free_top]
@@ -534,10 +551,6 @@ func _advance_projectiles() -> void:
 			continue
 		p_prev_x[i] = p_x[i]
 		p_prev_y[i] = p_y[i]
-		p_life[i] -= 1
-		if p_life[i] <= 0:
-			_despawn_projectile(i)
-			continue
 		var target := p_target[i]
 		# The generation stamp is what stops a shot in flight from landing on a
 		# different enemy that inherited the dead one's pool slot. Shots aimed at
@@ -559,6 +572,11 @@ func _advance_projectiles() -> void:
 		var step_scale := p_speed[i] / dist
 		p_x[i] += dx * step_scale
 		p_y[i] += dy * step_scale
+		# Lifetime is spent after moving, so a projectile with N ticks of life
+		# actually travels N times. Decrementing first cost it its last tick.
+		p_life[i] -= 1
+		if p_life[i] <= 0:
+			_despawn_projectile(i)
 
 func _damage_enemy(index: int, amount: int) -> void:
 	e_hp[index] -= amount
@@ -618,16 +636,23 @@ func _begin_wave(index: int) -> void:
 	_g_count = groups.size()
 	for g in _g_count:
 		var group: Dictionary = groups[g]
-		_g_enemy_type[g] = _type_index(str(group["enemy"]))
-		_g_remaining[g] = int(group["count"])
+		var type_index := _type_index(str(group["enemy"]))
+		_g_enemy_type[g] = maxi(type_index, 0)
+		# Database rejects unknown enemy ids at load, so this is unreachable with
+		# validated data. If it ever happens, spawn nothing and count it -
+		# quietly substituting enemy type 0 would silently change the wave.
+		_g_remaining[g] = 0 if type_index < 0 else int(group["count"])
+		if type_index < 0:
+			_unknown_enemy_groups += 1
 		_g_interval[g] = int(group["spawn_interval_ticks"])
 		_g_next_tick[g] = _tick + int(group["start_delay_ticks"])
 
+## -1 when the id is unknown. Never falls back to a real type.
 func _type_index(id: String) -> int:
 	for i in _type_ids.size():
 		if _type_ids[i] == id:
 			return i
-	return 0
+	return -1
 
 func _spawn(type_index: int) -> void:
 	if _e_free_top == 0:
@@ -657,6 +682,12 @@ func _spawn(type_index: int) -> void:
 	e_live_count += 1
 
 func _despawn_enemy(index: int) -> void:
+	# Guard, not decoration: despawning an already-dead slot used to push a
+	# duplicate onto the free list and write one past its end, corrupting the
+	# pool. Reachable from any double-resolve (a leak and a kill on the same
+	# tick, or a future retarget path).
+	if e_alive[index] == 0:
+		return
 	e_alive[index] = 0
 	# Bump the generation so projectiles already aimed at this slot cannot hit
 	# whoever is spawned into it next.
@@ -666,6 +697,8 @@ func _despawn_enemy(index: int) -> void:
 	e_live_count -= 1
 
 func _despawn_projectile(index: int) -> void:
+	if p_alive[index] == 0:
+		return
 	p_alive[index] = 0
 	_p_free[_p_free_top] = index
 	_p_free_top += 1
@@ -692,6 +725,8 @@ func integrity_max() -> int: return int(_db.economy["starting_integrity"])
 func kills() -> int: return _kills
 func leaks() -> int: return _leaks
 func spawn_overflow() -> int: return _spawn_overflow
+func projectile_overflow() -> int: return _projectile_overflow
+func unknown_enemy_groups() -> int: return _unknown_enemy_groups
 func rejected_commands() -> int: return _rejected_commands
 func wave_number() -> int: return _wave_index + 1
 func wave_count() -> int: return _wave_count
@@ -741,6 +776,16 @@ func state_hash() -> int:
 	h = StateHash.mix_int(h, _kills)
 	h = StateHash.mix_int(h, _leaks)
 	h = StateHash.mix_int(h, _spawn_overflow)
+	h = StateHash.mix_int(h, _projectile_overflow)
+	h = StateHash.mix_int(h, _unknown_enemy_groups)
+	h = StateHash.mix_int(h, _cmd_cursor)
+	# The queued-but-unapplied tail of the command log is part of the state: two
+	# runs with identical boards and different pending input are not in the same
+	# place, and a hash that said they were would let a desync through.
+	h = StateHash.mix_bytes(h, _cmd_tick.to_byte_array())
+	h = StateHash.mix_bytes(h, _cmd_type.to_byte_array())
+	h = StateHash.mix_bytes(h, _cmd_a.to_byte_array())
+	h = StateHash.mix_bytes(h, _cmd_b.to_byte_array())
 	h = StateHash.mix_int(h, _rejected_commands)
 	h = StateHash.mix_int(h, _phase)
 	h = StateHash.mix_int(h, _wave_index)

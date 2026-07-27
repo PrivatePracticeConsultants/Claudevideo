@@ -1,30 +1,34 @@
-extends Node2D
+extends Node3D
 
 ## Entry point: owns the Sim, drives it at a fixed rate, and routes input into
 ## the command log.
 ##
 ## The important thing happening here is the separation the whole architecture
 ## rests on. The simulation advances in whole 30Hz ticks and knows nothing about
-## frames, `delta` or the scene tree; this node accumulates real time, spends it
-## in fixed steps, and hands the leftover fraction to the renderer as `alpha`.
-## Everything good downstream - replays, 3x speed for free, the headless balance
-## sim, Daily Contracts that match across devices - falls out of that split.
+## frames, `delta`, the scene tree, or the fact that it is now being drawn in 3D;
+## this node accumulates real time, spends it in fixed steps, and hands the
+## leftover fraction to the renderer as `alpha`. Everything good downstream -
+## replays, 3x speed for free, the headless balance sim, Daily Contracts that
+## match across devices - falls out of that split.
 
 const MAP_ID := "highway_01"
 const ENGAGEMENT_ID := "highway_01_act1"
 const THEME_PATH := "res://data/theme.json"
 
 ## Ceiling on catch-up steps per frame. Without it, one long stall (a breakpoint,
-## an alt-tab, a phone call) leaves a backlog that takes longer to simulate than
-## it does to accumulate, and the game never catches up - the classic spiral of
-## death. Past this we drop the backlog: running slow is recoverable, freezing
-## is not.
+## an alt-tab, a phone call, a browser tab going to the background) leaves a
+## backlog that takes longer to simulate than it does to accumulate, and the game
+## never catches up - the classic spiral of death. Past this we drop the backlog:
+## running slow is recoverable, freezing is not.
+##
+## This matters more on the web build than anywhere else, because a backgrounded
+## tab can hand back a delta measured in minutes.
 const MAX_STEPS_PER_FRAME := 12
-const PAD_CLICK_RADIUS := 26.0
+const PAD_CLICK_RADIUS := 34.0
 
 var _sim: Sim
 var _theme: Dictionary = {}
-var _renderer: SimRenderer
+var _renderer: SimRenderer3D
 var _overlay: DebugOverlay
 var _hud: Hud
 
@@ -48,9 +52,7 @@ func _ready() -> void:
 	_sim = Sim.new(db, 20260727)
 	_tick_period = 1.0 / float(_sim.tick_rate())
 
-	RenderingServer.set_default_clear_color(Color(str(_theme.get("background", "#0e1116"))))
-
-	_renderer = SimRenderer.new()
+	_renderer = SimRenderer3D.new()
 	add_child(_renderer)
 	_renderer.setup(_sim, _theme)
 
@@ -80,17 +82,16 @@ func _process(delta: float) -> void:
 	_renderer.update_visuals(alpha)
 	if _sim.t_count != _platforms_drawn:
 		_platforms_drawn = _sim.t_count
-		_renderer.queue_redraw()
+		_renderer.rebuild_static()
 	_hud.refresh(_speed, _paused)
 
 func _unhandled_input(event: InputEvent) -> void:
 	if _sim == null:
 		return
 	if event is InputEventMouseMotion:
-		var pad := _pad_at(get_global_mouse_position())
-		_renderer.set_hover(pad, _sim.blueprint_range(0) if pad >= 0 else 0.0)
+		_renderer.set_hover(_pad_under_cursor((event as InputEventMouseMotion).position))
 	elif event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
-		var pad := _pad_at(get_global_mouse_position())
+		var pad := _pad_under_cursor((event as InputEventMouseButton).position)
 		if pad >= 0:
 			# Placement goes through the command log rather than mutating the sim
 			# directly, so what the player did is exactly what a replay replays.
@@ -105,15 +106,29 @@ func _unhandled_input(event: InputEvent) -> void:
 			KEY_R: get_tree().reload_current_scene()
 			KEY_ESCAPE: get_tree().quit()
 
-## Nearest free pad within click range, or -1.
-func _pad_at(point: Vector2) -> int:
+## Cast the cursor onto the ground plane and find the nearest free pad to where
+## it lands. Picking against the plane rather than against collision shapes means
+## no physics bodies and no colliders to keep in sync with the simulation.
+func _pad_under_cursor(screen_point: Vector2) -> int:
+	var camera := _renderer.camera
+	if camera == null:
+		return -1
+	var ground := Plane(Vector3.UP, 0.0)
+	var hit: Variant = ground.intersects_ray(
+		camera.project_ray_origin(screen_point),
+		camera.project_ray_normal(screen_point))
+	if hit == null:
+		return -1
+	return _pad_at((hit as Vector3).x, (hit as Vector3).z)
+
+func _pad_at(sim_x: float, sim_y: float) -> int:
 	var best := -1
 	var best_distance := PAD_CLICK_RADIUS * PAD_CLICK_RADIUS
 	for i in _sim.pad_count():
 		if not _sim.pad_is_free(i):
 			continue
-		var dx := _sim.pad_x(i) - point.x
-		var dy := _sim.pad_y(i) - point.y
+		var dx := _sim.pad_x(i) - sim_x
+		var dy := _sim.pad_y(i) - sim_y
 		var distance := dx * dx + dy * dy
 		if distance < best_distance:
 			best_distance = distance
@@ -126,8 +141,10 @@ func _load_theme() -> Dictionary:
 
 func _show_fatal(message: String) -> void:
 	push_error(message)
+	var layer := CanvasLayer.new()
 	var label := Label.new()
 	label.position = Vector2(40, 40)
 	label.add_theme_font_size_override("font_size", 16)
 	label.text = "The game data could not be loaded:\n\n%s" % message
-	add_child(label)
+	layer.add_child(label)
+	add_child(layer)

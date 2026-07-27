@@ -9,6 +9,33 @@ backlog rather than a wish list.
 
 ---
 
+## Surfaced during the P0 audit / 3D move
+
+**Merge static scenery into one mesh** *(earliest: P1)*
+The 3D corridor is one `MeshInstance3D` per segment per wall, and every pad is
+its own cylinder — ~124 draw calls before a single entity exists, doubled by the
+shadow pass. Entities are already flat in draw-call cost, so this is now the
+larger number. Building the corridor as one `ArrayMesh` and the pads as a
+`MultiMesh` would cut it to a handful. Not urgent, but it should land before the
+device performance gate rather than after.
+
+**Cross-platform determinism check in CI** *(promoted from below — now the top
+outstanding correctness item)*
+The float64 discipline is reasoned about and linted, but never yet *proven*
+across operating systems. One CI job per OS running a fixed seed and log and
+comparing `state_hash()` would turn the argument into evidence. It is the only
+thing that would catch a libm difference before players do.
+
+**Range preview in 3D** *(earliest: P1)*
+The 2D renderer drew a range circle under the hovered pad; the 3D one currently
+only tracks which pad is hovered. A flattened torus or a projected decal on the
+ground plane restores it. Range preview on hover is table stakes per §3.6, so
+this is a genuine gap rather than a nice-to-have.
+
+**Project icon** *(earliest: P5)*
+`html/export_icon` has to stay `false` until the project defines one, or the web
+export fails with an unhelpful error. Worth fixing when there is art to use.
+
 ## Surfaced during P0
 
 **Ballistic lead prediction** *(earliest: P1)*
@@ -39,12 +66,6 @@ The command log is already a complete replay: it is tick-addressed, hashable, an
 close to free, and it would make bug reports reproducible ("attach your replay")
 and give the short-form-video pipeline in §7.2 a way to re-shoot a run at a
 different camera or speed.
-
-**Determinism check in CI across platforms** *(earliest: P4)*
-`state_hash()` on a fixed seed and log should be identical on Windows, macOS and
-Linux. Asserting that in CI is what would actually prove the float64 discipline
-holds, rather than trusting the reasoning behind it. Cheap, and it is the only
-thing that would catch a libm difference before players do.
 
 **Pad hover should show DPS contribution, not just range** *(earliest: P2)*
 Range preview is table stakes (§3.6). Showing what a platform would actually

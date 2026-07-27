@@ -153,6 +153,19 @@ func _validate_map() -> void:
 			var p: Variant = (path as Array)[i]
 			if typeof(p) != TYPE_DICTIONARY or not (p as Dictionary).has("x") or not (p as Dictionary).has("y"):
 				errors.append("Map waypoint %d must be an object with x and y." % i)
+				continue
+			if i == 0:
+				continue
+			# Two waypoints in the same place make a zero-length segment, and the
+			# sim normalises each segment by its own length. That divides by zero
+			# and poisons the direction table with NaN, which then spreads into
+			# enemy positions and targeting. Catch it here, where it is one clear
+			# message, instead of there, where it is a map full of enemies at
+			# coordinates that are not numbers.
+			var prev: Dictionary = (path as Array)[i - 1]
+			if is_equal_approx(float(prev["x"]), float((p as Dictionary)["x"])) \
+					and is_equal_approx(float(prev["y"]), float((p as Dictionary)["y"])):
+				errors.append("Map waypoints %d and %d are in the same place; every path segment must have length." % [i - 1, i])
 	var pads: Variant = map.get("pads")
 	if typeof(pads) != TYPE_ARRAY or (pads as Array).is_empty():
 		errors.append("Map %s needs at least one tower pad." % str(map.get("id", "?")))

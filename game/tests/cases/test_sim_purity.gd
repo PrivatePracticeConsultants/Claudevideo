@@ -68,9 +68,9 @@ func test_no_balance_constants_in_gameplay_code() -> void:
 	# 64 in PackedFloat64Array are type names, not numbers.
 	number.compile("(?<![A-Za-z0-9_.])(\\d+\\.\\d+|\\d+)")
 	for path in NUMERIC_FILES:
-		var stripped := _strip(_read(path))
-		for line_number in stripped.split("\n").size():
-			var line: String = stripped.split("\n")[line_number]
+		var lines := _strip(_read(path)).split("\n")
+		for line_number in lines.size():
+			var line: String = lines[line_number]
 			for m in number.search_all(line):
 				var literal := m.get_string()
 				if ALLOWED_NUMBERS.has(literal):

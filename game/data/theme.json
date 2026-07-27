@@ -17,5 +17,37 @@
   "text_dim": "#8b94a3",
   "good": "#5ad18f",
   "warn": "#ffb454",
-  "bad": "#ff6b5e"
+  "bad": "#ff6b5e",
+
+  "_camera_comment": "3/4 orthographic, per master plan section 6.1. Orthographic rather than perspective so a platform reads the same wherever it sits on the board - with perspective, identical towers at the near and far edge look different sizes, which makes range and coverage harder to judge. Angles are in degrees; size is the vertical extent of the view in world units.",
+  "camera": {
+    "pitch_degrees": -54.0,
+    "yaw_degrees": -14.0,
+    "distance": 2400.0,
+    "margin": 1.10
+  },
+  "_world_comment": "Heights are in world units on the Y axis; the simulation is flat and knows nothing about them.",
+  "world": {
+    "ground": "#151a22",
+    "corridor_height": 6.0,
+    "corridor_width": 46.0,
+    "wall_height": 22.0,
+    "wall_width": 10.0,
+    "wall": "#2b3442",
+    "pad_height": 8.0,
+    "pad_radius": 17.0,
+    "platform_height": 30.0,
+    "platform_radius": 11.0,
+    "enemy_height": 18.0,
+    "hp_bar_lift": 34.0,
+    "hp_bar_width": 26.0,
+    "hp_bar_height": 4.0,
+    "projectile_length": 16.0,
+    "projectile_width": 3.0,
+    "projectile_lift": 14.0,
+    "sun_pitch_degrees": -58.0,
+    "sun_yaw_degrees": 40.0,
+    "sun_energy": 1.15,
+    "ambient_energy": 0.55
+  }
 }

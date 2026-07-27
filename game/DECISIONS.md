@@ -4,7 +4,7 @@ Running log of choices that later phases inherit. Each entry says what was
 decided, why, and what would have to be true to revisit it. Append; don't
 rewrite history.
 
-Phase status: **P0 complete.** P1 not started.
+Phase status: **P0 complete, audited, and moved to 3D + HTML5.** P1 not started.
 
 ---
 
@@ -154,20 +154,102 @@ This is not final balance. It is a starting point for `tools/balance_sim.py`
 
 `tools/render_stress.gd` measures the P0 rendering constraint directly. Result:
 
-| entities (enemies + projectiles) | draw calls |
-|---|---|
-| 0 | 18 |
-| 50 | 22 |
-| 200 | 22 |
-| 500 | 22 |
+| entities (enemies + projectiles) | draw calls, 2D | draw calls, 3D |
+|---|---|---|
+| 0 | 18 | 124 |
+| 50 | 22 | 141 |
+| 200 | 22 | 141 |
+| 500 | 22 | 141 |
 
-Draw calls are flat from 25 to 250 enemies — that is the MultiMesh constraint
-holding. `tests/cases/test_renderer.gd` guards the structure that produces it in
-the headless suite.
+Draw calls are flat from 25 to 250 enemies in both renderers — that is the
+MultiMesh constraint holding. The three entity layers cost a fixed +4 (2D) or
++17 (3D) regardless of how many entities they draw.
+
+The 3D baseline of 124 is static scenery, not entities: the corridor is a mesh
+instance per segment per wall and every pad is its own cylinder, doubled by the
+shadow pass. Fine at this stage, worth merging into one mesh before the entity
+budget gets tight — logged in `post-launch.md`.
+
+`tests/cases/test_renderer.gd` guards the structure that produces this in the
+headless suite.
 
 Frame times from that tool are **llvmpipe software rasterisation** on a headless
 box and are not a device measurement. The 250-enemies-at-60fps-on-an-iPhone-11
 target has to be measured on the device, and that is P1's acceptance gate.
+
+## P0-15 · The renderer is 3D; the simulation is not
+
+The game renders in 3D with an orthographic 3/4 camera. **The simulation did not
+change by one line to support it.** Its world is flat `(x, y)` with no concept of
+height, and the renderer maps that to `(x, 0, y)` — the third dimension is
+presentation only, defined in exactly one place (`SimRenderer3D.to_world`).
+
+That is the payoff of keeping `core/` free of engine types, and it is worth
+stating plainly because it is the strongest available evidence that the
+architecture is right: swapping the entire presentation layer touched no game
+logic, and the determinism, economy, pathing and wave tests all stayed green
+without modification.
+
+Orthographic rather than perspective is a readability decision, not an
+aesthetic one. Under perspective, two identical turrets at the near and far edge
+of the board render at different sizes, which makes range and coverage harder to
+judge — in a genre where judging coverage *is* the game.
+
+The camera fits itself to the map's playable extent at startup and on every
+viewport resize, rather than using hand-tuned framing numbers. That was needed
+anyway for the web build, where the canvas is whatever size the browser window
+is, and it means the 12 maps in P4 will not each need camera tuning.
+
+Cost, measured: static scenery is ~124 draw calls, because the corridor is one
+mesh instance per segment per wall and each pad is its own cylinder. That is
+fine now and worth merging into a single mesh before the entity budget matters —
+logged in `post-launch.md`.
+
+## P0-16 · HTML5 export, single-threaded on purpose
+
+`variant/thread_support=false` selects Godot's "nothreads" web template. With
+threads on, the build requires `SharedArrayBuffer`, which browsers only grant to
+pages served with COOP/COEP cross-origin-isolation headers — ruling out itch.io,
+GitHub Pages and most plain static hosting. Single-threaded costs some
+performance and buys the ability to put a playtest link anywhere, which at this
+stage is worth far more.
+
+`html/export_icon` must stay `false` until the project defines an icon: with it
+`true` and no icon, Godot fails the entire export with only "configuration
+errors" and no further detail. That cost real time to diagnose and is the kind of
+thing nobody rediscovers cheaply.
+
+Verified by `tools/verify_web.py`, which serves the build from a **deliberately
+plain** static server with no special headers and drives it in real Chromium. A
+web export can build cleanly and still fail to run — wrong renderer, missing
+cross-origin isolation, a 404 on the wasm — and all of those look like success to
+the exporter and like a black rectangle to a playtester. Confirmed running:
+WebGL 2.0, single-threaded, `crossOriginIsolated: false`, no page errors.
+
+## P0-17 · Audit findings
+
+A deliberate attempt to break P0 found seven defects. All are fixed, and each has
+a regression test in `tests/cases/test_audit.gd`. Recorded here because the
+pattern in them is worth remembering: **every one was a silent failure**, not a
+crash — which is exactly the class this project's honesty rules exist to catch.
+
+| # | Defect | Why it mattered |
+|---|---|---|
+| 1 | Despawning an already-dead entity wrote **past the end of the free list** | Pool corruption. The worst of the seven, and the only one that was memory-unsafe. |
+| 2 | A repeated map waypoint made a zero-length segment, dividing by zero and writing **NaN** into the direction table | Whether the NaN reached an enemy depended on where a binary search landed — real, and intermittent. Now rejected at load. |
+| 3 | `_fire()` **silently dropped** shots when the projectile pool was full | A platform that appears to fire and deals no damage, with nothing recording it. Enemy spawns already had an overflow counter; projectiles did not. |
+| 4 | Commands appended **out of tick order** were applied at the wrong tick | The replay cursor only moves forward, so a live run and its replay could diverge — precisely what the determinism work exists to prevent. Now inserted in order. |
+| 5 | An unknown enemy id **silently resolved to enemy type 0** | A typo in a wave file would quietly spawn a different enemy than the one written. Now returns -1 and the group is skipped and counted. |
+| 6 | Projectiles spent their last tick of life **without moving** | Off-by-one; lifetime N gave N-1 ticks of travel. |
+| 7 | The state hash ignored **queued-but-unapplied commands** | Two runs with identical boards and different pending input hashed equal, which would let a desync through. |
+
+Two non-defect cleanups from the same pass: the renderer was parsing colours from
+strings *every frame* (a String allocation in the one place the project promises
+not to allocate — now resolved once at setup), and the HUD rebuilt its label
+string every frame regardless of whether anything changed.
+
+Balance was re-verified after the fixes and is unchanged: a naive fill still wins
+at 72/100 integrity with all damage in the last three waves.
 
 ## P0-14 · Deliberately not built in P0
 

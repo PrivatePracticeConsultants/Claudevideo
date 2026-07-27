@@ -41,7 +41,17 @@ func setup(sim: Sim, theme: Dictionary) -> void:
 	_banner.visible = false
 	add_child(_banner)
 
+## Rebuilt only when one of the displayed values actually changes. Formatting a
+## string every frame for a label that changes a few times a second is a per-frame
+## allocation the project can trivially avoid.
+var _last_signature: int = -1
+
 func refresh(speed: int, paused: bool) -> void:
+	var signature := hash([_sim.capital(), _sim.integrity(), _sim.wave_number(),
+		speed, paused, _sim.result()])
+	if signature == _last_signature:
+		return
+	_last_signature = signature
 	var cost := _sim.blueprint_cost(0)
 	var affordable := _sim.capital() >= cost
 	_stats.text = "CAPITAL $%d    INTEGRITY %d    WAVE %d/%d    %s    %s" % [
