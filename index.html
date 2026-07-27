@@ -760,14 +760,80 @@ const AILMENTS = {
     chain: [{ s: "defibrack", t: "Defib" }, { s: "charger", t: "Charge" }, { s: "bed", t: "Shock" }]
   },
   mystery: {
-    name: "Mystery", color: "#b58bff", score: 215, patienceMul: 1.55,
+    name: "Mystery", color: "#b58bff", short: "???", score: 215, patienceMul: 1.55,
     steps: [
       { k: "bedside", produce: "sample", dur: 1.3, label: "Draw blood" },
       { k: "lab", label: "Awaiting lab" }
     ],
     chain: [{ s: "bed", t: "Draw" }, { s: "lab", t: "Analyse" }, { s: "?", t: "Then treat" }]
+  },
+
+  /* --- the second five -------------------------------------------------
+     Five ailments was the depth ceiling: eleven of the fifteen wards drew
+     from an identical case mix, so every ward past the fourth was the same
+     job in a different room. These five add no new stations and no new
+     items on purpose — that way they enrich all fifteen existing wards
+     instead of only the ones built for them, and each one asks for a
+     different SHAPE of work rather than a different label:
+
+       burn         two items from two different stations — routing
+       anaphylaxis  one item, brutal clock — drop what you are doing
+       concussion   shares the X-ray front half, then diverges at the bench
+       dislocation  you must be there, empty-handed — no item to fetch
+       overdose     draw, lab, then treat — the longest chain in the game
+     --------------------------------------------------------------------- */
+  burn: {
+    name: "Burn", color: "#ff7518", short: "BRN", score: 165, patienceMul: 1.15,
+    steps: [
+      { k: "bedside", need: "syringe", dur: 1.2, label: "Pain relief" },
+      { k: "bedside", need: "bandage", dur: 1.5, label: "Dress the burn" }
+    ],
+    chain: [{ s: "medicine", t: "Med Cab" }, { s: "bed", t: "Relief" },
+            { s: "supply", t: "Shelf" }, { s: "bed", t: "Dress" }]
+  },
+  anaphylaxis: {
+    name: "Anaphylaxis", color: "#ffd93d", short: "ANA", score: 150, patienceMul: 0.62,
+    steps: [{ k: "bedside", need: "syringe", dur: 1.0, label: "Adrenaline, now" }],
+    chain: [{ s: "medicine", t: "Med Cab" }, { s: "bed", t: "Adrenaline" }]
+  },
+  concussion: {
+    name: "Concussion", color: "#4a90d9", short: "CON", score: 175, patienceMul: 1.3,
+    steps: [
+      { k: "atStation", station: "xray", dur: 2.2, label: "Scan the head" },
+      { k: "bedside", need: "xrayimg", dur: 1.6, label: "Read the scan" }
+    ],
+    chain: [{ s: "xray", t: "Scan" }, { s: "xray", t: "Develop" }, { s: "bed", t: "Read" }]
+  },
+  dislocation: {
+    name: "Dislocation", color: "#7ad0c8", short: "DIS", score: 190, patienceMul: 1.35,
+    steps: [
+      { k: "atStation", station: "xray", dur: 2.2, label: "X-ray the joint" },
+      { k: "bedside", dur: 2.4, label: "Reset the joint" }
+    ],
+    chain: [{ s: "xray", t: "X-ray" }, { s: "bed", t: "Reset" }]
+  },
+  overdose: {
+    name: "Overdose", color: "#6d5bd0", short: "OD", score: 265, patienceMul: 1.6,
+    steps: [
+      { k: "bedside", produce: "sample", dur: 1.3, label: "Draw blood" },
+      /* reveal:false is what separates this from a mystery. The lab step was
+         hard-wired to swap the patient's whole condition for a revealed one;
+         here the bloods come back naming what you already knew and the chain
+         simply carries on to the antidote. */
+      { k: "lab", reveal: false, label: "Awaiting toxicology" },
+      { k: "bedside", need: "syringe", dur: 1.5, label: "Give the antidote" }
+    ],
+    chain: [{ s: "bed", t: "Draw" }, { s: "lab", t: "Toxicology" },
+            { s: "medicine", t: "Antidote" }, { s: "bed", t: "Give" }]
   }
 };
+
+/* Short tags for the high-contrast option, so a ten-condition board never
+   depends on hue alone. The first five predate the field. */
+AILMENTS.cut.short = "CUT";
+AILMENTS.infection.short = "INF";
+AILMENTS.fracture.short = "FRC";
+AILMENTS.cardiac.short = "CAR";
 
 /* Station recipes, evaluated top-down; first match wins.
      need:      item the player must be holding (null = must be empty-handed)
@@ -854,7 +920,7 @@ const LEVELS = [
     patience: 70,
     spawnStart: 10.0, spawnEnd: 6.8,
     maxWaiting: 4,
-    ailments: ["cut", "infection", "fracture"],
+    ailments: ["cut", "infection", "fracture", "burn"],
     stars: [2350, 4050, 5550],
     restock: false, jams: false, flatline: false,
         theme: { floor:"#eef2f7", floorAlt:"#e5ebf3", wall:"#9fc3e4", wallTop:"#bcd8ef", base:"#6d9bc4",
@@ -894,7 +960,7 @@ const LEVELS = [
     patience: 56,
     spawnStart: 9.2, spawnEnd: 6.2,
     maxWaiting: 5,
-    ailments: ["cut", "infection", "fracture", "cardiac"],
+    ailments: ["cut", "infection", "fracture", "cardiac", "burn", "anaphylaxis"],
     stars: [1700, 2950, 4050],
     restock: true, jams: false, flatline: true,
         theme: { floor:"#f4e9e4", floorAlt:"#ecdfd9", wall:"#e0a79f", wallTop:"#eec3bc", base:"#c17f76",
@@ -935,7 +1001,7 @@ const LEVELS = [
     patience: 66,
     spawnStart: 8.6, spawnEnd: 5.8,
     maxWaiting: 5,
-    ailments: ["cut", "infection", "fracture", "cardiac", "mystery"],
+    ailments: ["cut", "infection", "fracture", "cardiac", "mystery", "burn", "concussion"],
     stars: [2100, 3650, 5000],
     restock: true, jams: true, flatline: true,
         theme: { floor:"#e9e6de", floorAlt:"#e0ddd4", wall:"#8fa398", wallTop:"#aab9b0", base:"#6a7d73",
@@ -977,7 +1043,7 @@ const LEVELS = [
     patience: 66,
     spawnStart: 8.0, spawnEnd: 5.4,
     maxWaiting: 6,
-    ailments: ["cut", "infection", "fracture", "cardiac", "mystery"],
+    ailments: ["cut", "infection", "fracture", "cardiac", "mystery", "burn", "anaphylaxis", "dislocation"],
     stars: [1700, 2950, 4050],
     restock: true, jams: true, flatline: true,
         theme: { floor:"#e6eef4", floorAlt:"#dce6ee", wall:"#7fa8c9", wallTop:"#a2c4dd", base:"#57809f",
@@ -1018,7 +1084,7 @@ const LEVELS = [
     patience: 52,
     spawnStart: 7.6, spawnEnd: 5.1,
     maxWaiting: 6,
-    ailments: ["cut", "infection", "fracture", "cardiac", "mystery"],
+    ailments: ["cut", "infection", "fracture", "cardiac", "mystery", "burn", "anaphylaxis", "concussion", "dislocation", "overdose"],
     stars: [2150, 3750, 5100],
     restock: true, jams: true, flatline: true,
         theme: { floor:"#f0ecf6", floorAlt:"#e7e2f0", wall:"#b1a3d6", wallTop:"#c9bee6", base:"#8878b4",
@@ -1054,7 +1120,7 @@ const LEVELS = [
     patience: 62,
     spawnStart: 7.2, spawnEnd: 4.9,
     maxWaiting: 6,
-    ailments: ["cut", "infection", "fracture", "cardiac", "mystery"],
+    ailments: ["cut", "infection", "fracture", "cardiac", "mystery", "concussion", "dislocation"],
     stars: [1700, 2900, 4000],
     restock: true, jams: true, flatline: true,
         theme: { floor:"#f2e6d2", floorAlt:"#e9dbc4", wall:"#c9a06a", wallTop:"#dcbb8b", base:"#9c7343",
@@ -1089,7 +1155,7 @@ const LEVELS = [
     patience: 65,
     spawnStart: 6.9, spawnEnd: 4.7,
     maxWaiting: 7,
-    ailments: ["cut", "infection", "fracture", "cardiac", "mystery"],
+    ailments: ["cut", "infection", "fracture", "cardiac", "mystery", "burn", "anaphylaxis"],
     stars: [1750, 3000, 4150],
     restock: true, jams: true, flatline: true,
         theme: { floor:"#f1ecdf", floorAlt:"#e8e2d2", wall:"#8fc9be", wallTop:"#aeddd4", base:"#5f9e92",
@@ -1124,7 +1190,7 @@ const LEVELS = [
     patience: 63,
     spawnStart: 6.6, spawnEnd: 4.5,
     maxWaiting: 7,
-    ailments: ["cut", "infection", "fracture", "cardiac", "mystery"],
+    ailments: ["cut", "infection", "fracture", "cardiac", "mystery", "burn", "anaphylaxis", "concussion", "dislocation", "overdose"],
     stars: [1550, 2650, 3650],
     restock: true, jams: true, flatline: true,
         theme: { floor:"#f6f3ec", floorAlt:"#ece8df", wall:"#dfe4e9", wallTop:"#f0f3f6", base:"#a9b4bf",
@@ -1161,7 +1227,7 @@ const LEVELS = [
     patience: 52,
     spawnStart: 6.3, spawnEnd: 4.3,
     maxWaiting: 8,
-    ailments: ["cut", "infection", "fracture", "cardiac", "mystery"],
+    ailments: ["cut", "infection", "fracture", "cardiac", "mystery", "burn", "anaphylaxis", "concussion", "dislocation", "overdose"],
     stars: [1300, 2200, 3000],
     restock: true, jams: true, flatline: true,
         theme: { floor:"#dfe4e4", floorAlt:"#d5dbdb", wall:"#5f7d80", wallTop:"#7d9c9e", base:"#41595c",
@@ -1198,7 +1264,7 @@ const LEVELS = [
     patience: 60,
     spawnStart: 6.6, spawnEnd: 4.6,
     maxWaiting: 7,
-    ailments: ["cut", "infection", "fracture", "cardiac", "mystery"],
+    ailments: ["cut", "infection", "fracture", "mystery", "concussion", "overdose"],
     stars: [1850, 3250, 4450],
     restock: true, jams: true, flatline: true,
     theme: { floor:"#2f3a4a", floorAlt:"#28323f", wall:"#465a72", wallTop:"#5d7590", base:"#31404f", accent:"#7fb2e0", wood:"#8a6f4e", leaf:"#3f7f58", leaf2:"#579a70", locker:"#4e6378", crate:"#96794f", crate2:"#7f6644", curtain:"#5f7c96", pot:"#7a5340", rug:"#3c4a5c" },
@@ -1232,7 +1298,7 @@ const LEVELS = [
     patience: 65,
     spawnStart: 6.4, spawnEnd: 4.4,
     maxWaiting: 7,
-    ailments: ["cut", "infection", "fracture", "cardiac", "mystery"],
+    ailments: ["cut", "infection", "fracture", "cardiac", "mystery", "burn", "anaphylaxis", "dislocation"],
     stars: [1400, 2400, 3250],
     restock: true, jams: true, flatline: true,
     theme: { floor:"#f2ead9", floorAlt:"#e8dfcc", wall:"#c08f6a", wallTop:"#d9ab86", base:"#8f6647", accent:"#e0763f", wood:"#b98a58", leaf:"#5aa06a", leaf2:"#7bbb87", locker:"#b9a389", crate:"#cfae7f", crate2:"#b8955f", curtain:"#e0cdb2", pot:"#a76b4c", rug:"#e3d6bd" },
@@ -1268,7 +1334,7 @@ const LEVELS = [
     patience: 69,
     spawnStart: 6.2, spawnEnd: 4.2,
     maxWaiting: 8,
-    ailments: ["cut", "infection", "fracture", "cardiac", "mystery"],
+    ailments: ["cut", "infection", "fracture", "cardiac", "mystery", "burn", "anaphylaxis", "concussion", "dislocation", "overdose"],
     stars: [2150, 3700, 5050],
     restock: true, jams: true, flatline: true,
     theme: { floor:"#e6eef2", floorAlt:"#dae4ea", wall:"#7a93a8", wallTop:"#9ab0c2", base:"#566d80", accent:"#4fa8d8", wood:"#a58356", leaf:"#4e9c6b", leaf2:"#6fb886", locker:"#7f97aa", crate:"#bb9a6e", crate2:"#a2825a", curtain:"#a8bfd0", pot:"#8a6350", rug:"#cfdae2" },
@@ -1305,7 +1371,7 @@ const LEVELS = [
     patience: 54,
     spawnStart: 6.0, spawnEnd: 4.1,
     maxWaiting: 8,
-    ailments: ["cut", "infection", "fracture", "cardiac", "mystery"],
+    ailments: ["cut", "infection", "fracture", "cardiac", "burn", "anaphylaxis", "dislocation"],
     stars: [2100, 3600, 4900],
     restock: true, jams: true, flatline: true,
     theme: { floor:"#efe7e7", floorAlt:"#e4dada", wall:"#9c6f74", wallTop:"#bb8b90", base:"#6f4a4f", accent:"#e05f6e", wood:"#a97f5c", leaf:"#4f9a63", leaf2:"#6fb47f", locker:"#a08187", crate:"#c4a077", crate2:"#a98657", curtain:"#d3aeb2", pot:"#96604e", rug:"#ddcdcd" },
@@ -1341,7 +1407,7 @@ const LEVELS = [
     patience: 51,
     spawnStart: 5.8, spawnEnd: 3.9,
     maxWaiting: 9,
-    ailments: ["cut", "infection", "fracture", "cardiac", "mystery"],
+    ailments: ["cut", "infection", "fracture", "cardiac", "mystery", "burn", "anaphylaxis", "concussion", "dislocation", "overdose"],
     stars: [2150, 3700, 5050],
     restock: true, jams: true, flatline: true,
     theme: { floor:"#232b38", floorAlt:"#1d2531", wall:"#3d4c63", wallTop:"#54667f", base:"#2a3546", accent:"#c39bff", wood:"#7d6349", leaf:"#3a7350", leaf2:"#4f8d66", locker:"#455772", crate:"#8a6f4a", crate2:"#735c3d", curtain:"#4f6580", pot:"#6d4a3c", rug:"#2c3646" },
@@ -1486,7 +1552,8 @@ const ENDLESS = {
   patience: 52,
   spawnStart: 8.5, spawnEnd: 3.2,
   maxWaiting: 8,
-  ailments: ["cut", "infection", "fracture", "cardiac", "mystery"],
+  ailments: ["cut", "infection", "fracture", "cardiac", "mystery",
+             "burn", "anaphylaxis", "concussion", "dislocation", "overdose"],
   stars: [1500, 3200, 5400],
   restock: true, jams: true, flatline: true,
   map: [
@@ -1726,6 +1793,16 @@ function closeBlockingCells(world, sh) {
     for (const p of Game.players) shove(p);
     for (const st of Game.staff) shove(st);
     for (const it of Game.floorItems) shove(it);
+    /* Pickups and spills sit on the floor with nothing carrying them, and were
+       the one category this loop forgot: a perk crate that a fire door landed
+       on became unreachable for the rest of the shift, and a spill under one
+       could never be mopped. */
+    for (const pu of Game.pickups) shove(pu);
+    /* A spill is keyed by tile and only one can exist per tile, so shoving one
+       could stack two on a square and leave the buried one un-moppable. It is
+       a hazard, not an objective — wiped out by the door is the honest
+       outcome and it keeps the one-per-tile rule true. */
+    Game.spills = Game.spills.filter(sp => !(sp.tx === c.x && sp.ty === c.y));
     for (const pt of Game.patients) if (pt.state === "waiting" || pt.state === "walking") shove(pt);
   }
   Sound.play(sh.cordon ? "cordon" : "shutter");
@@ -3211,7 +3288,16 @@ function findJobRaw(p) {
           p.item = null;
           const pt = Game.patients.find(q => q.id === pid && q.state !== "gone");
           if (!pt) { popup(st.cx, st.cy - 24, "Patient gone", PALETTE.dim); return; }
-          revealMystery(pt);
+          /* A lab step that names a condition the patient already has just
+             advances the chain. Only a mystery gets its whole condition
+             rewritten — running that path for an overdose would have swapped
+             the patient for a different ailment mid-treatment. */
+          const step = pt.steps[pt.step];
+          if (step && step.k === "lab" && step.reveal === false) {
+            popup(pt.x, pt.y - 30, "Bloods back", AILMENTS[pt.ailment].color, true);
+            Sound.play("lab");
+            advancePatient(pt);
+          } else revealMystery(pt);
         }
       };
     }
@@ -3246,7 +3332,10 @@ function revealMystery(pt) {
   // cannot treat is a guaranteed loss the player already paid lab work for.
   // Normal builder ward: lab unlocks at wave 5, an X-ray is optional, so
   // revealing "fracture" with no X-ray was an easy and unfair death.
-  let pool = Game.level.ailments.filter(a => a !== "mystery");
+  /* Overdose is excluded alongside mystery: it opens with its own blood draw
+     and lab run, so revealing it here would send the patient straight back to
+     the lab you just used and read as the result not having landed. */
+  let pool = Game.level.ailments.filter(a => a !== "mystery" && a !== "overdose");
   const ok = treatableAilments(pool);
   if (ok.length) pool = ok;
   const key = pool[Math.floor(Game.rng() * pool.length)] || "cut";
@@ -3857,25 +3946,32 @@ function treatableAilments(pool) {
     if (a === "fracture") return have("xray") && have("cast");
     if (a === "cardiac") return have("defibrack") && have("charger");
     if (a === "mystery") return have("lab");
+    if (a === "burn") return have("supply") && have("medicine");
+    if (a === "anaphylaxis") return have("medicine");
+    if (a === "concussion") return have("xray");
+    if (a === "dislocation") return have("xray");
+    if (a === "overdose") return have("lab") && have("medicine");
     return true;
   });
 }
 
 function chooseAilment() {
-  let pool = Game.level.ailments;
-  if (Game.builderMode) {
-    const ok = treatableAilments(pool);
-    if (ok.length) pool = ok;
-    else return "cut";                       // a bare ward still gets walk-ins
-  }
+  /* Filter to what this ward can actually treat on EVERY path, not just in the
+     builder. A campaign ward whose ailment list names a condition it has no
+     station for hands out guaranteed deaths, and a daily modifier or a
+     hand-edited level is one typo away from doing exactly that. The authoring
+     is checked separately; this is the net under it. */
+  let pool = treatableAilments(Game.level.ailments);
+  if (!pool.length) pool = Game.builderMode ? ["cut"] : Game.level.ailments;
   if (Game.forceAilment > 0 && pool.includes("infection")) {
     Game.forceAilment--;
     return "infection";
   }
-  // Ease into the shift: the first arrivals are never cardiac or mystery,
-  // so no seed can deal the two hardest chains as an opening hand.
+  // Ease into the shift: the first arrivals are never one of the long or
+  // frantic chains, so no seed can deal the hardest hand as an opener.
   if (Game.time < EASE_IN_SECS) {
-    const gentle = pool.filter(a => a !== "cardiac" && a !== "mystery");
+    const gentle = pool.filter(a => a !== "cardiac" && a !== "mystery" &&
+                                    a !== "overdose" && a !== "anaphylaxis");
     if (gentle.length) pool = gentle;
   }
   const r = Game.rng();
@@ -4186,12 +4282,20 @@ const EVENT_PAY   = 1.40;       // discharges are worth more while a surge runs
 const PICKUP_FIRST = 26;
 const PICKUP_GAP   = 30;
 
-/** Pick a random open tile with nothing important on it. */
+/** Pick a random open tile with nothing important on it.
+    Doorway tiles are excluded even when the door is currently open: anything
+    dropped in one is about to be standing in a closed fire door, and while
+    closeBlockingCells will now shove it clear, not putting it there in the
+    first place is better than relocating it a second after it appears. */
 function randomFreeTile(world) {
+  const doorCells = new Set();
+  for (const sh of (world.shutters || []))
+    for (const c of sh.cells) doorCells.add(c.x + "," + c.y);
   const cands = [];
   for (let y = 1; y < ROWS - 1; y++)
     for (let x = 1; x < COLS - 1; x++) {
       if (!isWalkable(world, x, y)) continue;
+      if (doorCells.has(x + "," + y)) continue;
       if (x === world.entrance.x && y === world.entrance.y) continue;
       if (x === world.exit.x && y === world.exit.y) continue;
       cands.push({ x, y });
@@ -4553,16 +4657,26 @@ const BUILDER_THEME = {
    whole procedure chain to juggle. Rates bottom out at values a built-up
    department can genuinely service. */
 function builderWaveDef(n) {
+  /* The department grows every wave, so the case mix has to keep pace or the
+     later waves are just the early ones with more beds. treatableAilments
+     filters this again at spawn time against what has actually been built —
+     naming a condition here is an intention, not a promise. */
   const ail = ["cut", "infection"];
   if (n >= 2) ail.push("fracture");
-  if (n >= 3) ail.push("cardiac");
+  if (n >= 3) ail.push("cardiac", "anaphylaxis");
+  if (n >= 4) ail.push("burn");
   if (n >= 5) ail.push("mystery");
+  if (n >= 6) ail.push("concussion");
+  if (n >= 7) ail.push("dislocation");
+  if (n >= 8) ail.push("overdose");
   const notes = [];
   if (n === 2) notes.push("fractures arriving");
-  if (n === 3) notes.push("cardiac arrests arriving");
-  if (n === 4) notes.push("shelves now run dry");
+  if (n === 3) notes.push("cardiac arrests and allergic reactions arriving");
+  if (n === 4) notes.push("burns arriving · shelves now run dry");
   if (n === 5) notes.push("mystery cases arriving");
-  if (n === 6) notes.push("equipment starts to jam");
+  if (n === 6) notes.push("head injuries arriving · equipment starts to jam");
+  if (n === 7) notes.push("dislocations arriving");
+  if (n === 8) notes.push("overdoses arriving");
   return {
     name: "Wave " + n,
     blurb: notes.length ? notes.join(" · ") : "Keep the department moving.",
@@ -7443,6 +7557,72 @@ function drawAilmentIcon(g, key, x, y, r) {
       g.beginPath(); g.arc(0, 0, r * .8, 0, 6.283); g.stroke();
       text(g, "?", 0, r * .46, r * 1.4, "#fff", "center");
       break;
+
+    case "burn": {                                    // a flame
+      g.fillStyle = a.color;
+      g.beginPath();
+      g.moveTo(0, -r * 1.05);
+      g.bezierCurveTo(r * .82, -r * .3, r * .62, r * .5, 0, r * .95);
+      g.bezierCurveTo(-r * .62, r * .5, -r * .82, -r * .3, 0, -r * 1.05);
+      g.fill();
+      g.fillStyle = "#ffe08a";
+      g.beginPath();
+      g.moveTo(0, -r * .34);
+      g.bezierCurveTo(r * .40, r * .02, r * .30, r * .52, 0, r * .82);
+      g.bezierCurveTo(-r * .30, r * .52, -r * .40, r * .02, 0, -r * .34);
+      g.fill();
+      break;
+    }
+    case "anaphylaxis": {                             // urgent: warning wedge
+      g.fillStyle = a.color; g.lineJoin = "round";
+      g.beginPath();
+      g.moveTo(0, -r * 1.0); g.lineTo(r * .95, r * .72); g.lineTo(-r * .95, r * .72);
+      g.closePath(); g.fill();
+      g.strokeStyle = "rgba(90,60,0,.5)"; g.lineWidth = 1.2; g.stroke();
+      g.strokeStyle = "#4a3200"; g.lineWidth = Math.max(2, r * .24); g.lineCap = "round";
+      g.beginPath(); g.moveTo(0, -r * .40); g.lineTo(0, r * .16); g.stroke();
+      g.beginPath(); g.arc(0, r * .46, r * .13, 0, 6.283); g.fillStyle = "#4a3200"; g.fill();
+      break;
+    }
+    case "concussion": {                              // head in profile, seeing stars
+      g.fillStyle = a.color;
+      g.beginPath(); g.arc(-r * .12, r * .05, r * .74, 0, 6.283); g.fill();
+      g.strokeStyle = "rgba(255,255,255,.35)"; g.lineWidth = 1.1; g.stroke();
+      g.strokeStyle = "#fff"; g.lineWidth = Math.max(1.4, r * .17);
+      g.lineCap = "round";                            // the spiral of a rung bell
+      g.beginPath();
+      for (let i = 0; i <= 22; i++) {
+        const t2 = i / 22, ang = t2 * 7.6, rad = r * .10 + t2 * r * .40;
+        const px = -r * .12 + Math.cos(ang) * rad, py = r * .05 + Math.sin(ang) * rad;
+        i ? g.lineTo(px, py) : g.moveTo(px, py);
+      }
+      g.stroke();
+      break;
+    }
+    case "dislocation": {                             // a ball pulled out of its socket
+      g.strokeStyle = "#f3ecd9"; g.lineWidth = Math.max(2.4, r * .34); g.lineCap = "round";
+      g.beginPath(); g.moveTo(-r * .95, r * .62); g.lineTo(-r * .18, r * .02); g.stroke();
+      g.beginPath(); g.moveTo(r * .95, -r * .70); g.lineTo(r * .30, -r * .18); g.stroke();
+      g.fillStyle = "#f3ecd9";
+      g.beginPath(); g.arc(-r * .10, r * .10, r * .30, 0, 6.283); g.fill();
+      g.strokeStyle = a.color; g.lineWidth = Math.max(1.6, r * .20);
+      g.beginPath(); g.arc(r * .34, -r * .30, r * .38, 2.2, 5.2); g.stroke();
+      break;
+    }
+    case "overdose": {                                // a capsule
+      g.save(); g.rotate(-0.7);
+      g.fillStyle = a.color;
+      fillRound(g, -r * .92, -r * .42, r * 1.84, r * .84, r * .42, a.color);
+      g.fillStyle = "#efe8ff";
+      g.beginPath();
+      g.moveTo(0, -r * .42); g.lineTo(r * .50, -r * .42);
+      g.arc(r * .50, 0, r * .42, -1.5708, 1.5708); g.lineTo(0, r * .42);
+      g.closePath(); g.fill();
+      g.strokeStyle = "rgba(20,10,50,.45)"; g.lineWidth = 1.2;
+      roundRect(g, -r * .92, -r * .42, r * 1.84, r * .84, r * .42); g.stroke();
+      g.restore();
+      break;
+    }
   }
   g.restore();
 }
@@ -9319,6 +9499,20 @@ function drawPatientTag(g, pt, x, y, scale) {
   }
 
   drawAilmentIcon(g, pt.ailment, x, y, 8 * scale);
+
+  /* With ten conditions on the board, hue is doing far more work than it can
+     carry for a colourblind player — two of them are greens and two are
+     purples. High-contrast marks puts the condition's three-letter tag under
+     the badge so the icon and the letters both stand alone. */
+  if (Options.marks) {
+    const tag = a2.short || pt.ailment.slice(0, 3).toUpperCase();
+    const w = 9 + tag.length * 6.2;
+    g.fillStyle = "rgba(10,16,26,.88)";
+    roundRect(g, x - w / 2, y + R * 1.42, w, 13, 4); g.fill();
+    g.strokeStyle = a2.color; g.lineWidth = 1.3;
+    roundRect(g, x - w / 2, y + R * 1.42, w, 13, 4); g.stroke();
+    text(g, tag, x, y + R * 1.42 + 10, 10, "#eaf2ff", "center");
+  }
 
   // a second condition rides in its own smaller badge below-left
   if (pt.second && !pt.done) {
