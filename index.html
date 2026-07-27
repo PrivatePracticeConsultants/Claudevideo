@@ -180,6 +180,7 @@ const Sound = {
       this.master = this.ctx.createGain(); this.master.gain.value = 0.90;
       this.sfxBus = this.ctx.createGain(); this.sfxBus.gain.value = 1.0;
       this.musicBus = this.ctx.createGain(); this.musicBus.gain.value = 0.62;
+      // Options.apply() resets these once the save has loaded
       // a gentle ceiling: a lot of oscillators can stack on a busy discharge
       this.comp = this.ctx.createDynamicsCompressor();
       this.comp.threshold.value = -14; this.comp.ratio.value = 3.2;
@@ -188,6 +189,10 @@ const Sound = {
     } catch (err) {
       this.master = this.sfxBus = this.musicBus = null;   // fall back to direct
     }
+    /* The context is created lazily on the first input, long after the save has
+       loaded — so the saved levels have to be re-applied HERE, or init() would
+       quietly stamp the defaults back over them. */
+    if (typeof Options !== "undefined") Options.apply();
   },
 
   /** Where a voice should connect: the SFX bus, the music bus, or straight out
@@ -202,7 +207,7 @@ const Sound = {
   duck(amount, hold) {
     if (!this.musicBus || !this.ctx) return;
     const g = this.musicBus.gain, t0 = this.ctx.currentTime;
-    const base = 0.62;
+    const base = (typeof Options !== "undefined") ? Options.music : 0.62;
     try {
       g.cancelScheduledValues(t0);
       g.setValueAtTime(Math.min(g.value, base), t0);
@@ -468,6 +473,43 @@ const PAD_PROMPTS = [
 
 const WIPE_HOLD = 2.0;        // seconds to hold X before a save is erased
 
+/* ---------------------------------------------------------------------
+   OPTIONS
+
+   There was no way to turn the volume down, stop the screen shaking, or play
+   without relying on colour — all of which are table stakes for something
+   being sold, and two of which are accessibility issues rather than polish.
+   Everything here persists through Save.
+   --------------------------------------------------------------------- */
+const Options = {
+  master: 0.9,        // 0..1
+  music: 0.62,
+  sfx: 1.0,
+  shake: true,        // camera kick on big events
+  marks: false,       // shape/letter tags so nothing depends on colour alone
+  stickyWork: false,  // tap to start a job instead of holding the key
+
+  apply() {
+    if (Sound.master) Sound.master.gain.value = this.master;
+    if (Sound.musicBus) Sound.musicBus.gain.value = this.music;
+    if (Sound.sfxBus) Sound.sfxBus.gain.value = this.sfx;
+  }
+};
+
+/* The option rows, declared once so the screen, the key handling and the save
+   can never disagree about what exists. */
+const OPTION_ROWS = [
+  { key: "master", name: "Master volume", kind: "level" },
+  { key: "music",  name: "Music",         kind: "level" },
+  { key: "sfx",    name: "Sound effects", kind: "level" },
+  { key: "shake",  name: "Screen shake",  kind: "bool",
+    blurb: "Camera kick on shocks, sirens and losses." },
+  { key: "marks",  name: "High-contrast marks", kind: "bool",
+    blurb: "Adds letters and shapes so nothing depends on colour alone." },
+  { key: "stickyWork", name: "Tap to work", kind: "bool",
+    blurb: "Tap the work key to start a job instead of holding it down." }
+];
+
 const CONTROLS = [
   { up: "KeyW", down: "KeyS", left: "KeyA", right: "KeyD", interact: "KeyE", use: "KeyQ", sprint: "ShiftLeft" },
   { up: "ArrowUp", down: "ArrowDown", left: "ArrowLeft", right: "ArrowRight", interact: "Slash", use: "Period", sprint: "ShiftRight" }
@@ -675,6 +717,7 @@ const ITEMS = {
    adjacent tile. `holdsPatient` stations can have a patient placed on them. */
 const STATIONS = {
   bed:       { name: "Bed",            color: "#f7fbff", edge: "#9db6cf", holdsPatient: true },
+  breaker:   { name: "Breaker Panel",  color: "#f0b03c", edge: "#b07f22" },
   supply:    { name: "Supply Shelf",   color: "#6fd3b4", edge: "#3f9e82", stockMax: 3 },
   medicine:  { name: "Medicine Cabinet", color: "#7db2f2", edge: "#4a7cc4", stockMax: 3 },
   xray:      { name: "X-Ray",          color: "#93a3c0", edge: "#5d6c8a", holdsPatient: true },
@@ -991,7 +1034,7 @@ const LEVELS = [
       "###.xx..bb.#...bb...cc......####",
       "###.ss..bb.#...bb...mm......####",
       "###........#................####",
-      "###.....bb.....bb...........####",
+      "###.....bb.....bb..>>>>>>>..####",
       "###.O..........bb...........####",
       "###........#................####",
       "###.f...bb.#...bb...h.......####",
@@ -1001,12 +1044,6 @@ const LEVELS = [
       "################################",
       "################################",
       "################################"
-    
-    
-    
-    
-    
-    
     ]
   },
   {
@@ -1033,21 +1070,15 @@ const LEVELS = [
       "###.##......................####",
       "###.##..bb..##...bb..##.....####",
       "###.O........##......##.....####",
-      "###.........................####",
+      "###...........>>>>>>........####",
       "###.mm.##..bb...##...bb.....####",
       "###.ll.##.......##...bb.....####",
-      "###.........................####",
+      "###...........<<<<<<........####",
       "###.f...##..bb..##......dd.h####",
       "################################",
       "################################",
       "################################",
       "################################"
-    
-    
-    
-    
-    
-    
     ]
   },
   {
@@ -1071,7 +1102,7 @@ const LEVELS = [
       "###.........................####",
       "###...#######......#####....####",
       "###.s....bb..bb..bb......xx.####",
-      "###.........................####",
+      "###................>>>>>>...####",
       "###f.#######.......#####...h####",
       "###E........................####",
       "###.O#######.......#####....####",
@@ -1083,12 +1114,6 @@ const LEVELS = [
       "################################",
       "################################",
       "################################"
-    
-    
-    
-    
-    
-    
     ]
   },
   {
@@ -1108,6 +1133,7 @@ const LEVELS = [
     props: ["chair","bench","vending","trolley","gurney","sign","cooler"],
     shutters: [{ x: 16, y: 7, dir: "h", len: 1, phase: 0.15 },
                { x: 14, y: 11, dir: "h", len: 2, phase: 0.65 }],
+    zones: [{ x: 17, y: 1, w: 10, h: 4, up: 20, down: 8, phase: 0.15 }],
     map: [
       "################################",
       "###.........................####",
@@ -1118,19 +1144,13 @@ const LEVELS = [
       "###.xx.....########.........####",
       "###..............#####...O..####",
       "###.mm.bb...bb..bb...bb.cc..####",
-      "###.........................####",
+      "###......................g..####",
       "###.f........ll.........h...####",
       "###E....dd..................####",
       "################################",
       "################################",
       "################################",
       "################################"
-    
-    
-    
-    
-    
-    
     ]
   },
   {
@@ -1150,9 +1170,10 @@ const LEVELS = [
     props: ["gurney","ivpole","screen","locker","crates","trolley","sign"],
     shutters: [{ x: 17, y: 9, dir: "h", len: 2, phase: 0.3 },
                { x: 13, y: 11, dir: "h", len: 2, phase: 0.7 }],
+    zones: [{ x: 4, y: 4, w: 9, h: 6, up: 19, down: 9, phase: 0.3 }],
     map: [
       "################################",
-      "###.........................####",
+      "###.....................g...####",
       "###.E.ss....bb...bb....cc.s.####",
       "###...mm...............xx...####",
       "###.##.................###..####",
@@ -1167,12 +1188,6 @@ const LEVELS = [
       "################################",
       "################################",
       "################################"
-    
-    
-    
-    
-    
-    
     ]
   },
   {
@@ -1189,6 +1204,7 @@ const LEVELS = [
     theme: { floor:"#2f3a4a", floorAlt:"#28323f", wall:"#465a72", wallTop:"#5d7590", base:"#31404f", accent:"#7fb2e0", wood:"#8a6f4e", leaf:"#3f7f58", leaf2:"#579a70", locker:"#4e6378", crate:"#96794f", crate2:"#7f6644", curtain:"#5f7c96", pot:"#7a5340", rug:"#3c4a5c" },
     props: ["locker", "trolley", "ivpole", "screen", "sign", "gurney"],
     shutters: [{ x: 27, y: 8, dir: "v", len: 2, phase: 0.2 } ],
+    zones: [{ x: 18, y: 2, w: 9, h: 7, up: 18, down: 9, phase: 0.05 }],
     map: [
       "################################",
       "###.........................####",
@@ -1201,7 +1217,7 @@ const LEVELS = [
       "###..####..####..####..####.####",
       "###..ll....h.....dd....cc...####",
       "###..ss.................f...####",
-      "###.........................####",
+      "###.g.......................####",
       "################################",
       "################################",
       "################################",
@@ -1221,15 +1237,18 @@ const LEVELS = [
     restock: true, jams: true, flatline: true,
     theme: { floor:"#f2ead9", floorAlt:"#e8dfcc", wall:"#c08f6a", wallTop:"#d9ab86", base:"#8f6647", accent:"#e0763f", wood:"#b98a58", leaf:"#5aa06a", leaf2:"#7bbb87", locker:"#b9a389", crate:"#cfae7f", crate2:"#b8955f", curtain:"#e0cdb2", pot:"#a76b4c", rug:"#e3d6bd" },
     props: ["bench", "crates", "plant", "chair", "sign", "cooler"],
-    shutters: [{ x: 16, y: 6, dir: "h", len: 2, phase: 0.45 } ],
+    shutters: [{ x: 16, y: 6, dir: "h", len: 2, phase: 0.45 } ,
+               { x: 14, y: 3, dir: "h", len: 2, phase: 0.0, swing: true },
+               { x: 9, y: 6, dir: "h", len: 1, phase: 0.5, swing: true }],
+    zones: [{ x: 19, y: 4, w: 8, h: 6, up: 18, down: 9, phase: 0.45 }],
     map: [
       "################################",
       "###.........................####",
       "###.E..ss....bb...bb....xx..####",
-      "###.....................xx..####",
+      "###..g..................xx..####",
       "###..###############........####",
       "###..#############.....bb...####",
-      "###.O...................bb...###",
+      "###.O.....>>>>>>>>......bb...###",
       "###..#############..........####",
       "###..#############.....bb...####",
       "###..#############.....bb...####",
@@ -1255,19 +1274,22 @@ const LEVELS = [
     theme: { floor:"#e6eef2", floorAlt:"#dae4ea", wall:"#7a93a8", wallTop:"#9ab0c2", base:"#566d80", accent:"#4fa8d8", wood:"#a58356", leaf:"#4e9c6b", leaf2:"#6fb886", locker:"#7f97aa", crate:"#bb9a6e", crate2:"#a2825a", curtain:"#a8bfd0", pot:"#8a6350", rug:"#cfdae2" },
     props: ["gurney", "trolley", "ivpole", "screen", "crates", "locker"],
     shutters: [{ x: 19, y: 7, dir: "v", len: 2, phase: 0.15 },
-               { x: 10, y: 7, dir: "v", len: 2, phase: 0.6 }],
+               { x: 10, y: 7, dir: "v", len: 2, phase: 0.6 },
+               { x: 15, y: 10, dir: "h", len: 2, phase: 0.0, swing: true },
+               { x: 20, y: 8, dir: "h", len: 2, phase: 0.5, swing: true }],
+    zones: [{ x: 4, y: 3, w: 10, h: 6, up: 17, down: 9, phase: 0.2 }, { x: 16, y: 6, w: 11, h: 5, up: 17, down: 8, phase: 0.65 }],
     map: [
       "################################",
       "###.........................####",
       "###.E..ss.........mm....xx..####",
       "###.........................####",
       "###..bb.bb.bb....bb.bb......####",
-      "###.........................####",
+      "###...................>>>>>>####",
       "###.O.......................####",
       "###..bb.bb.bb....bb.bb......####",
       "###.........................####",
       "###..f..ll....dd....h....cc.####",
-      "###.........................####",
+      "###.g.......................####",
       "################################",
       "################################",
       "################################",
@@ -1288,18 +1310,21 @@ const LEVELS = [
     restock: true, jams: true, flatline: true,
     theme: { floor:"#efe7e7", floorAlt:"#e4dada", wall:"#9c6f74", wallTop:"#bb8b90", base:"#6f4a4f", accent:"#e05f6e", wood:"#a97f5c", leaf:"#4f9a63", leaf2:"#6fb47f", locker:"#a08187", crate:"#c4a077", crate2:"#a98657", curtain:"#d3aeb2", pot:"#96604e", rug:"#ddcdcd" },
     props: ["screen", "gurney", "ivpole", "bench", "sign", "trolley"],
-    shutters: [{ x: 14, y: 7, dir: "h", len: 2, phase: 0.3 } ],
+    shutters: [{ x: 14, y: 7, dir: "h", len: 2, phase: 0.3 } ,
+               { x: 15, y: 5, dir: "h", len: 1, phase: 0.0, swing: true },
+               { x: 20, y: 10, dir: "h", len: 2, phase: 0.5, swing: true }],
+    zones: [{ x: 10, y: 3, w: 9, h: 5, up: 16, down: 9, phase: 0.1 }, { x: 3, y: 7, w: 8, h: 4, up: 18, down: 8, phase: 0.55 }],
     map: [
       "################################",
       "###.........................####",
       "###.E..bb....bb....bb..bb...####",
       "###.........................####",
       "###..ss.....xxcc........mm..####",
-      "###.........................####",
+      "###.............>>>>>>>>....####",
       "###.O.......lldd............####",
       "###.........................####",
       "###....bb....bb....bb..bb...####",
-      "###..h.................ss...####",
+      "###..h..............g..ss...####",
       "###.....................f...####",
       "################################",
       "################################",
@@ -1322,16 +1347,19 @@ const LEVELS = [
     theme: { floor:"#232b38", floorAlt:"#1d2531", wall:"#3d4c63", wallTop:"#54667f", base:"#2a3546", accent:"#c39bff", wood:"#7d6349", leaf:"#3a7350", leaf2:"#4f8d66", locker:"#455772", crate:"#8a6f4a", crate2:"#735c3d", curtain:"#4f6580", pot:"#6d4a3c", rug:"#2c3646" },
     props: ["locker", "gurney", "crates", "screen", "ivpole", "trolley", "sign"],
     shutters: [{ x: 14, y: 1, dir: "h", len: 2, phase: 0.1 },
-               { x: 23, y: 10, dir: "h", len: 2, phase: 0.55 }],
+               { x: 23, y: 10, dir: "h", len: 2, phase: 0.55 },
+               { x: 18, y: 1, dir: "h", len: 2, phase: 0.0, swing: true },
+               { x: 8, y: 10, dir: "h", len: 2, phase: 0.5, swing: true }],
+    zones: [{ x: 3, y: 3, w: 9, h: 7, up: 16, down: 10, phase: 0.25 }, { x: 18, y: 3, w: 9, h: 7, up: 16, down: 10, phase: 0.75 }],
     map: [
       "################################",
-      "###.........................####",
+      "###.................<<<<<...####",
       "###.E..xx....bb...bb.....ss.####",
-      "###.........................####",
+      "###.....................g...####",
       "###..####...........####....####",
       "###..#bb#....mm.....#bb#..f.####",
       "###.........................####",
-      "###.O.......................####",
+      "###.O.......>>>>>>>>>.......####",
       "###..####...........####....####",
       "###..#bb#....dd.....#bb#..h.####",
       "###.........................####",
@@ -1343,6 +1371,69 @@ const LEVELS = [
     ]
   }
 ];
+
+/* ---------------------------------------------------------------------
+   DAILY SHIFT
+
+   One ward, one modifier, the same for everybody, changing at midnight local
+   time. It costs almost nothing to build on top of the campaign and it is the
+   cheapest replayability hook there is: a reason to open the game on a day you
+   were not going to play a campaign ward.
+
+   Deliberately walled off from the campaign: it awards no stars, unlocks
+   nothing, and keeps its own best. Nothing here can be farmed for progress.
+   --------------------------------------------------------------------- */
+const DAILY_MODS = [
+  { key: "rush",    name: "Understaffed",  blurb: "Arrivals come 25% faster.",
+    apply: (d) => { d.spawnStart *= 0.75; d.spawnEnd *= 0.75; } },
+  { key: "brittle", name: "Short Fuses",   blurb: "Everyone is 20% less patient.",
+    apply: (d) => { d.patience *= 0.80; } },
+  { key: "crit",    name: "Major Trauma",  blurb: "Far more critical arrivals.",
+    apply: (d) => { d.critBias = 2.2; } },
+  { key: "long",    name: "Double Shift",  blurb: "Runs half as long again.",
+    apply: (d) => { d.duration = Math.round(d.duration * 1.5); } },
+  { key: "frugal",  name: "Supply Crunch", blurb: "Shelves run dry and machines jam.",
+    apply: (d) => { d.restock = true; d.jams = true; } },
+  { key: "power",   name: "Failing Grid",  blurb: "The whole ward browns out on a cycle.",
+    apply: (d) => { d.zones = [{ x: 3, y: 1, w: 26, h: 11, up: 15, down: 7, phase: 0.3 }]; } }
+];
+
+/** Days since the epoch in LOCAL time, so the shift turns over at midnight
+    where the player is rather than at some arbitrary UTC hour. */
+function dailyIndex(now) {
+  const d = now || new Date();
+  return Math.floor((d.getTime() - d.getTimezoneOffset() * 60000) / 86400000);
+}
+
+/** The ward and modifier for a given day. Pure function of the day number, so
+    two players on the same date get the same shift without a server. */
+function dailyPlan(dayIdx) {
+  const rnd = makeRng((dayIdx * 2654435761) >>> 0);
+  const ward = Math.floor(rnd() * LEVELS.length);
+  const mod = DAILY_MODS[Math.floor(rnd() * DAILY_MODS.length)];
+  return { day: dayIdx, ward, mod };
+}
+
+/** A one-off level def for today: the chosen ward with the modifier applied and
+    a fresh seed, so the arrival order differs from the campaign version. */
+function dailyDef(plan) {
+  const base = LEVELS[plan.ward];
+  const def = Object.assign({}, base);
+  def.name = base.name;
+  def.blurb = plan.mod.name + " — " + plan.mod.blurb;
+  def.seed = (base.seed ^ (plan.day * 40503)) >>> 0;
+  def.stars = [0, 0, 0];              // no stars: this must not feed progress
+  def.daily = true;
+  plan.mod.apply(def);
+  return def;
+}
+
+function startDaily() {
+  const plan = dailyPlan(dailyIndex());
+  Game.dailyDef = dailyDef(plan);
+  Game.dailyPlan = plan;
+  startLevel(-3);
+}
 
 /* Endless mode: no clock, spawns tighten forever, three lives, chase a best. */
 /* The teaching ward. A hint banner already ran on ward one, but ward one is a
@@ -1422,9 +1513,41 @@ const ENDLESS = {
    6. WORLD CONSTRUCTION
    --------------------------------------------------------------------- */
 
+/* ---------------------------------------------------------------------
+   WARD SYSTEMS
+
+   Wards 1-2 are still rooms. From ward 3 the building itself starts working
+   against you, and it escalates in tiers so the campaign gets structurally
+   harder rather than just faster:
+
+     tier 1 (3-5)   fire shutters — a route closes on a clock
+     tier 2 (6-8)   porter lanes  — the floor moves you
+     tier 3 (9-11)  brownouts     — a zone loses power and its machines crawl
+     tier 4 (12-15) swing doors   — the ward reconfigures itself, plus all above
+
+   Porter lanes are floor tiles with a direction. They are laid in the map with
+   > < ^ v, so they cost nothing structurally: still floor, still walkable,
+   still valid for wait slots and props and pathing.
+   --------------------------------------------------------------------- */
+const BELT_CHARS = { ">": [1, 0], "<": [-1, 0], "^": [0, -1], "v": [0, 1] };
+const BELT_SPEED = 78;              // px/s of drift, about a third of walk pace
+
+/** Which systems a ward runs, for the select card and the shift banner. */
+function wardSystems(def) {
+  if (!def || !def.map) return [];
+  const out = [];
+  const sh = def.shutters || [];
+  if (sh.some(x => !x.swing)) out.push({ key: "doors", name: "Fire doors", col: "#f0c46b" });
+  if (def.map.some(r => [...r].some(ch => BELT_CHARS[ch])))
+    out.push({ key: "lanes", name: "Porter lanes", col: "#6fd3ff" });
+  if ((def.zones || []).length) out.push({ key: "power", name: "Brownouts", col: "#f0b03c" });
+  if (sh.some(x => x.swing)) out.push({ key: "swing", name: "Swing doors", col: "#a9cfdd" });
+  return out;
+}
+
 const CHAR_TO_STATION = {
   b: "bed", s: "supply", m: "medicine", x: "xray", c: "cast",
-  h: "charger", l: "lab", d: "delivery", f: "defibrack"
+  h: "charger", l: "lab", d: "delivery", f: "defibrack", g: "breaker"
 };
 
 
@@ -1445,6 +1568,85 @@ const CHAR_TO_STATION = {
 const SHUTTER_OPEN = 11.0;        // seconds open
 const SHUTTER_SHUT = 4.6;         // seconds closed
 const SHUTTER_WARN = 1.6;         // amber warning before it drops
+/* Swing doors are the tier-4 system: the same blocking machinery as a fire
+   shutter, but on a long, near-even cycle and authored in antiphase PAIRS, so
+   one route opens exactly as the other closes. A shutter is an interruption;
+   a pair of these is a ward that keeps rearranging itself under you. */
+const SWING_OPEN = 9.0;
+const SWING_SHUT = 9.0;
+
+/* ---- brownouts --------------------------------------------------------
+   A rectangle of the ward loses power on a cycle. Nothing inside it stops
+   working, it all just crawls, and the lights drop — so the ward keeps playing
+   while the pressure moves somewhere new. A breaker panel lets a medic buy the
+   power back early, which is the point: it is an optional job that competes
+   with the patient in front of you. Zones never block movement, so unlike a
+   shutter or a cordon they cannot sever anything and need no safety check. */
+const BROWNOUT_WORK = 1.85;        // how much slower a machine runs unpowered
+
+function makeZones(world, def) {
+  world.zones = [];
+  if (!def.zones) return;
+  for (const z of def.zones) {
+    world.zones.push({
+      x: z.x, y: z.y, w: z.w, h: z.h,
+      up: z.up || 16, down: z.down || 9,
+      t: (z.phase || 0) * ((z.up || 16) + (z.down || 9)),
+      powered: true, warn: 0
+    });
+  }
+}
+
+function zoneAt(world, tx, ty) {
+  const list = world && world.zones;
+  if (!list) return null;
+  for (const z of list)
+    if (tx >= z.x && tx < z.x + z.w && ty >= z.y && ty < z.y + z.h) return z;
+  return null;
+}
+
+/** Work-time multiplier for a station, from the zone it stands in. */
+function zonePenalty(st) {
+  if (!st) return 1;
+  const z = zoneAt(Game.world, st.x, st.y);
+  return (z && !z.powered) ? BROWNOUT_WORK : 1;
+}
+
+function updateZones(dt) {
+  const world = Game.world;
+  if (!world || !world.zones || !world.zones.length) return;
+  for (const z of world.zones) {
+    const period = z.up + z.down;
+    z.t = (z.t + dt) % period;
+    const powered = z.t < z.up;
+    z.warn = (powered && z.up - z.t < 2.0) ? 1 : 0;
+    if (powered === z.powered) continue;
+    z.powered = powered;
+    Sound.play(powered ? "restock" : "jam");
+    if (!powered) {
+      Game.banner = Game.banner || { text: "POWER LOST", sub: "machines in the dark bay are crawling",
+                                     t: 0, color: "#f0b03c" };
+    }
+  }
+}
+
+/** Hold the breaker panel to bring every dark bay back at once. */
+function restorePower() {
+  const world = Game.world;
+  if (!world || !world.zones) return false;
+  let any = false;
+  for (const z of world.zones) {
+    if (z.powered) continue;
+    z.t = 0; z.powered = true; z.warn = 0; any = true;
+  }
+  if (any) {
+    Game.score += BREAKER_BONUS;
+    Sound.play("restock");
+    Sound.play("done");
+  }
+  return any;
+}
+const BREAKER_BONUS = 18;
 
 function makeShutters(world, def) {
   world.shutters = [];
@@ -1460,10 +1662,12 @@ function makeShutters(world, def) {
       cells.push({ x, y });
     }
     if (!cells.length) continue;
+    const open = sp.swing ? SWING_OPEN : SHUTTER_OPEN;
+    const shut = sp.swing ? SWING_SHUT : SHUTTER_SHUT;
     world.shutters.push({
-      cells, closed: false,
-      t: (sp.phase || 0) * (SHUTTER_OPEN + SHUTTER_SHUT),   // stagger them
-      period: SHUTTER_OPEN + SHUTTER_SHUT
+      cells, closed: false, swing: !!sp.swing, open,
+      t: (sp.phase || 0) * (open + shut),                   // stagger them
+      period: open + shut
     });
   }
 }
@@ -1482,7 +1686,7 @@ function shutterBlocks(world, x, y) {
 
 /** Seconds until this shutter next changes state — drives the warning flash. */
 function shutterCountdown(sh) {
-  return sh.closed ? (sh.period - sh.t) : (SHUTTER_OPEN - sh.t);
+  return sh.closed ? (sh.period - sh.t) : ((sh.open || SHUTTER_OPEN) - sh.t);
 }
 
 function updateShutters(dt) {
@@ -1491,7 +1695,7 @@ function updateShutters(dt) {
   for (const sh of world.shutters) {
     if (sh.cordon) continue;             // event cordons open and shut on their own clock
     sh.t = (sh.t + dt) % sh.period;
-    const wantClosed = sh.t >= SHUTTER_OPEN;
+    const wantClosed = sh.t >= (sh.open || SHUTTER_OPEN);
     if (wantClosed === sh.closed) continue;
     if (wantClosed) closeBlockingCells(world, sh);
     sh.closed = wantClosed;
@@ -1641,6 +1845,8 @@ function makeWorld(levelDef) {
         cell.entrance = true; world.entrance = { x, y };
       } else if (ch === "O") {
         cell.exit = true; world.exit = { x, y };
+      } else if (BELT_CHARS[ch]) {
+        cell.belt = BELT_CHARS[ch];         // floor that carries you along
       } else if (CHAR_TO_STATION[ch]) {
         const type = CHAR_TO_STATION[ch];
         const st = {
@@ -1664,11 +1870,14 @@ function makeWorld(levelDef) {
     world.grid.push(row);
   }
 
+  world.hasBelts = world.grid.some(row => row.some(c => c.belt));
+
   // builder wards grow through the shop, not through campaign perks
   if (!levelDef.builder && Game.perksActive && Game.perksActive.includes("bays")) addExtraBeds(world, 2);
 
   world.waitSlots = computeWaitSlots(world, Math.max(8, (levelDef.maxWaiting || 0) + 3));
   makeShutters(world, levelDef);
+  makeZones(world, levelDef);
   return world;
 }
 
@@ -1850,6 +2059,7 @@ function makePlayer(index, x, y) {
     step: 0,              // walk-cycle phase
     hintT: 0, hint: "",
     boost: null, boostT: 0,
+    workLatch: false,     // "Tap to work" latch; see updatePlayer
     color: index === 0 ? PALETTE.p1 : PALETTE.p2,
     look: CHARACTERS[Game.chars[index] % CHARACTERS.length],
     ctrl: CONTROLS[index],
@@ -1926,10 +2136,12 @@ function shiftProgress() {
 /** How likely a critical case is right now: ramps through the shift so the
     back half of a clock feels different from the front. */
 function criticalChance() {
-  if (Game.levelIndex === 0 && !Game.builderMode) return 0;      // tutorial ward stays plain
+  if (Game.levelIndex === 0 && !Game.builderMode && !Game.daily) return 0;   // ward one stays plain
   const t = shiftProgress();
   const wave = Game.builderMode && Game.builder ? Game.builder.wave : 0;
-  return clamp(0.06 + t * 0.22 + wave * 0.015, 0, 0.34);
+  // the Daily's Major Trauma modifier leans on this rather than on its own path
+  const bias = (Game.level && Game.level.critBias) || 1;
+  return clamp((0.06 + t * 0.22 + wave * 0.015) * bias, 0, 0.62);
 }
 
 function minorChance() {
@@ -2242,6 +2454,11 @@ const Game = {
   tutorialDone: false,
   wipeHold: 0,
   wipeDone: 0,
+  optionCursor: 0,
+  optionsFrom: "title",
+  daily: false,           // true while a Daily Shift is being played
+  dailyDef: null,
+  dailyBest: {},          // day index -> best score, so today's PB is shown
   heartTimer: 0,
   shake: 0,
   flashRed: 0,
@@ -2338,7 +2555,16 @@ const Save = {
       },
       xp: Game.xp | 0,
       endlessBest: Game.endlessBest | 0,
+      // only today's entry: keeping every past day would grow the save forever
+      dailyBest: (() => {
+        const k = String(dailyIndex());
+        return Game.dailyBest[k] ? { [k]: Game.dailyBest[k] | 0 } : {};
+      })(),
       builderBest: Game.builderBest | 0,
+      options: {
+        master: Options.master, music: Options.music, sfx: Options.sfx,
+        shake: !!Options.shake, marks: !!Options.marks, stickyWork: !!Options.stickyWork
+      },
       settings: {
         difficulty: Game.difficulty | 0,
         muted: !!Sound.muted,
@@ -2399,12 +2625,25 @@ const Save = {
     Game.xp = Math.max(0, data.xp | 0);
     Game.endlessBest = Math.max(0, data.endlessBest | 0);
     Game.builderBest = Math.max(0, data.builderBest | 0);
+    Game.dailyBest = {};
+    if (data.dailyBest && typeof data.dailyBest === "object")
+      for (const k of Object.keys(data.dailyBest))
+        if (/^-?\d+$/.test(k)) Game.dailyBest[k] = Math.max(0, data.dailyBest[k] | 0);
     const st = data.settings || {};
     Game.difficulty = clamp(st.difficulty | 0, 0, DIFFS.length - 1);
     Sound.muted = !!st.muted;
     Sound.musicOff = !!st.musicOff;
     Music.on = !Sound.musicOff;
     Game.tutorialDone = !!st.tutorialDone;
+    const op = data.options || {};
+    const lvl01 = (v, d) => (typeof v === "number" && isFinite(v)) ? clamp(v, 0, 1) : d;
+    Options.master = lvl01(op.master, Options.master);
+    Options.music = lvl01(op.music, Options.music);
+    Options.sfx = lvl01(op.sfx, Options.sfx);
+    if (typeof op.shake === "boolean") Options.shake = op.shake;
+    if (typeof op.marks === "boolean") Options.marks = op.marks;
+    if (typeof op.stickyWork === "boolean") Options.stickyWork = op.stickyWork;
+    Options.apply();
     return true;
   },
 
@@ -2414,7 +2653,7 @@ const Save = {
     });
     Game.achievements = {};
     Game.career = { treated: 0, cardiac: 0, mystery: 0, shifts: 0 };
-    Game.xp = 0; Game.endlessBest = 0; Game.builderBest = 0;
+    Game.xp = 0; Game.endlessBest = 0; Game.builderBest = 0; Game.dailyBest = {};
     Game.tutorialDone = false;
     if (this.available) { try { this.backend.clear(); } catch (err) { /* nothing to undo */ } }
   }
@@ -2434,6 +2673,7 @@ function burst(x, y, color, n) {
 /** Campaign levels are 0..N-1; index -1 is the endless Night Shift. */
 function levelDef(index) {
   if (index === -2) return TUTORIAL;
+  if (index === -3) return Game.dailyDef || TUTORIAL;
   return index < 0 ? ENDLESS : LEVELS[index];
 }
 
@@ -2463,6 +2703,7 @@ const perkActive = (key) => Game.perksActive.includes(key);
 
 function startLevel(index) {
   Game.builderMode = false;
+  Game.daily = (index === -3);      // set here so every path agrees, not just startDaily
   Game.staff = [];
   const def = levelDef(index);
   Game.levelIndex = index;
@@ -2522,7 +2763,12 @@ function startLevel(index) {
   Game.shake = 0;
   Game.flashRed = 0;
   Game.flashGood = 0;
-  Game.banner = { text: def.name, sub: def.blurb, t: 0 };
+  // name the ward's live systems on the way in, so a new mechanic never has to
+  // be discovered by losing to it
+  const sysNames = wardSystems(def).map(x => x.name);
+  Game.banner = { text: def.name, t: 0,
+                  sub: sysNames.length ? def.blurb + "   \u00b7   " + sysNames.join(" \u00b7 ")
+                                       : def.blurb };
   Game.result = null;
   Game.tutorial = (index === -2)
     ? { stage: 0, t: 0, moved: 0, sprinted: 0, spawned: false }
@@ -2819,7 +3065,18 @@ function previewInteract(p) {
 
 /** What (if anything) can this player work on right now? Returns a job
     descriptor: {key, dur, run} where run() applies the effect. */
+/** findJob, plus the brownout penalty of whichever station the job belongs to.
+    This wraps rather than tagging each return site: the station branch has half
+    a dozen exits and a missed one would silently ignore the brownout. */
 function findJob(p) {
+  const job = findJobRaw(p);
+  if (!job) return null;
+  const st = facingStation(Game.world, p, () => true);
+  if (st) job.zoneMul = zonePenalty(st);
+  return job;
+}
+
+function findJobRaw(p) {
   const world = Game.world;
   if (p.patient) return null;   // hands full of patient
 
@@ -2860,7 +3117,26 @@ function findJob(p) {
     }
   }
 
-  // 2. Station work.
+  // 2. The breaker panel, which has no recipe — it just buys the lights back.
+  const brk = facingStation(world, p, s => s.type === "breaker");
+  if (brk) {
+    const dark = (world.zones || []).some(z => !z.powered);
+    if (!dark) hint(p, "Power is fine");
+    else if (p.item) hint(p, "Free your hands to reset the breaker");
+    else return {
+      key: "breaker" + brk.x + "," + brk.y,
+      dur: 1.6,
+      label: "Reset breaker",
+      run: () => {
+        if (restorePower()) {
+          brk.flash = 0.5;
+          popup(brk.cx, brk.cy - 24, "Power back  +" + BREAKER_BONUS, "#ffd54a");
+        }
+      }
+    };
+  }
+
+  // 3. Station work.
   const st = facingStation(world, p, s => RECIPES[s.type] && RECIPES[s.type].length);
   if (!st) return null;
 
@@ -3035,10 +3311,16 @@ function updatePlayer(p, dt) {
   }
 
   // Interact (edge-triggered)
-  if (wasPressed(c.interact)) doInteract(p);
+  if (wasPressed(c.interact)) { p.workLatch = false; doInteract(p); }
 
-  // Use (held) — progress a job, cancel if the job identity changes.
-  if (Keys[c.use]) {
+  /* Use. Normally held; with "Tap to work" a tap latches it on, because
+     holding a key for several seconds at a time is a real barrier for some
+     hands. The latch drops the moment there is nothing to work on, so it can
+     never leave a medic silently stuck in a work state. */
+  if (Options.stickyWork && wasPressed(c.use)) p.workLatch = !p.workLatch;
+  if (!Options.stickyWork) p.workLatch = false;
+  const useHeld = Keys[c.use] || (Options.stickyWork && p.workLatch);
+  if (useHeld) {
     const job = findJob(p);
     const bedToClean = !job ? cleanableBed(world, p) : null;
     const sp = (!job && !bedToClean && !p.item && !p.patient) ? spillAt(p.x, p.y) : null;
@@ -3062,13 +3344,16 @@ function updatePlayer(p, dt) {
       if (p.hintT <= 0) hint(p, "Cleaning up");
     } else if (!job) {
       p.work = null;
+      // nothing to work on: drop the latch so a tap can never strand the medic
+      p.workLatch = false;
       // nothing to work and something in hand: throw it (edge-triggered so a
       // held key does not fire a stream of throws)
       if (p.item && wasPressed(c.use)) throwItem(p);
     } else if (!p.work || p.work.key !== job.key) {
       // the lab step carries an explicit flag: its key is composed from the
       // station coords and the patient id, so matching on the string never fired
-      const wm = (p.workMul || 1) * (job.isLab ? (p.labMul || 1) : 1);
+      const wm = (p.workMul || 1) * (job.isLab ? (p.labMul || 1) : 1)
+                 * (job.zoneMul || 1);
       p.work = { key: job.key, t: 0, dur: job.dur * Game.workMul * wm, label: job.label,
                  run: job.run, ptId: job.ptId, tick: 0 };
     } else {
@@ -3225,6 +3510,38 @@ function updateThrownItems(dt) {
       it.y = t.y * TILE + TILE / 2;
       it.thrownBy = undefined;
     }
+  }
+}
+
+/** The porter lane under a world position, or null. */
+function beltAt(world, px, py) {
+  const c = cellAt(world, Math.floor(px / TILE), Math.floor(py / TILE));
+  return (c && c.belt) ? c.belt : null;
+}
+
+/* Belts carry the MEDICS and any loose item on the floor, and deliberately not
+   patients or staff: both of those follow cached A* paths, and shoving them off
+   a path every frame would have them jittering against a route they keep
+   recomputing. Medics are player-steered and items are physics-y, so both take
+   the drift naturally. */
+function applyBelts(dt) {
+  const world = Game.world;
+  if (!world || !world.hasBelts) return;
+  for (const p of Game.players) {
+    const b = beltAt(world, p.x, p.y);
+    if (!b) continue;
+    // carrying a patient makes you harder to shove around
+    const grip = p.patient ? 0.62 : 1;
+    moveWithCollision(world, p, b[0] * BELT_SPEED * grip * dt,
+                                b[1] * BELT_SPEED * grip * dt);
+  }
+  for (const it of Game.floorItems) {
+    if (it.vx || it.vy) continue;                 // still in flight; let it land
+    const b = beltAt(world, it.x, it.y);
+    if (!b) continue;
+    const nx = it.x + b[0] * BELT_SPEED * 0.8 * dt;
+    const ny = it.y + b[1] * BELT_SPEED * 0.8 * dt;
+    if (isWalkable(world, Math.floor(nx / TILE), Math.floor(ny / TILE))) { it.x = nx; it.y = ny; }
   }
 }
 
@@ -4024,6 +4341,7 @@ function updatePlay(dt) {
   for (const p of Game.players) updatePlayer(p, dt);
   Game.tendedIds = new Set();
   for (const p of Game.players) if (p.work && p.work.ptId) Game.tendedIds.add(p.work.ptId);
+  applyBelts(dt);
   updatePatients(dt);
   updateWaves(dt);
   updateEvents(dt);
@@ -4033,6 +4351,7 @@ function updatePlay(dt) {
   updateItems(dt);
   updateNurse(dt);
   updateShutters(dt);
+  updateZones(dt);
   updateThrownItems(dt);
   updateBeds(dt);
   updateSpills(dt);
@@ -4106,6 +4425,28 @@ function endLevel() {
   if (Game.treated > 0 && !failed) unlockAch("first");
   if (Game.lost === 0 && Game.treated > 0 && !failed) unlockAch("flawless");
   checkLiveAchievements();
+
+  if (Game.daily) {
+    // The Daily keeps its own best and awards nothing else: no stars, no
+    // unlocks, no challenge medals. It must never be a shortcut through the
+    // campaign, only a reason to come back tomorrow.
+    const key = String(Game.dailyPlan ? Game.dailyPlan.day : dailyIndex());
+    const prev = Game.dailyBest[key] || 0;
+    const newBest = Game.score > prev;
+    if (newBest) Game.dailyBest[key] = Game.score;
+    Save.touch();
+    Game.result = {
+      failed, stars: 0, newBest, daily: true, xpGain, challenges: null, newChallenges: 0,
+      name: "Daily — " + (Game.level ? Game.level.name : ""), targets: null,
+      difficulty: DIFFS[Game.difficulty].name,
+      score: Game.score, treated: Game.treated, lost: Game.lost,
+      bestCombo: Game.bestCombo, perfects: Game.perfects, clutches: Game.clutches, t: 0
+    };
+    Save.touch();
+    Game.screen = "results";
+    Sound.play("levelend");
+    return;
+  }
 
   if (Game.endless) {
     const newBest = Game.score > Game.endlessBest;
@@ -5653,6 +5994,13 @@ function buildStationDetail(mb, st, cx, cz, h) {
     case "defibrack":
       mbRoundedBox(mb, cx, h + 0.10, cz, 0.30, 0.10, 0.30, 0.05, rgb("#ffd9d1"), 2);
       break;
+    case "breaker":
+      // a wall panel with switch rows, so it reads as electrical, not medical
+      mbRoundedBox(mb, cx, h * 0.62, cz + 0.30, 0.26, 0.30, 0.10, 0.04, rgb("#2f3742"), 2);
+      for (let i = 0; i < 3; i++)
+        mbRoundedBox(mb, cx - 0.11 + i * 0.11, h * 0.62, cz + 0.40,
+                     0.035, 0.075, 0.02, 0.01, rgb("#ffd54a"), 1);
+      break;
   }
 }
 
@@ -6377,6 +6725,19 @@ function drawSceneEntities() {
     }
     const left = shutterCountdown(sh);
     const warning = !sh.closed && left < SHUTTER_WARN;
+    if (sh.swing) {
+      // a hinged panel that swings through 90 degrees rather than dropping,
+      // so a reconfiguring ward never reads as a fire alarm
+      const f = sh.closed ? 1 - clamp(left / 0.6, 0, 1) : clamp(left / 0.6, 0, 1);
+      const ang = (Math.PI / 2) * (sh.closed ? f : f);
+      for (const c of sh.cells) {
+        const cx = c.x + 0.5, cz = c.y + 0.5;
+        drawMesh(MESH.boxSoft, cx, 0.34, cz, ang, 0.46, 0.34, 0.07,
+                 rgb(sh.closed ? "#7fb2c8" : "#a9cfdd"));
+        drawMesh(MESH.boxSoft, cx, 0.66, cz, ang, 0.40, 0.02, 0.075, rgb("#e8f4fa"));
+      }
+      continue;
+    }
     for (const c of sh.cells) {
       const cx = c.x + 0.5, cz = c.y + 0.5;
       // the rail is always there so the hazard is legible before it drops
@@ -6398,6 +6759,48 @@ function drawSceneEntities() {
                    0.44, 0.055, 0.02, rgb("#3a2a10"));
       }
     }
+  }
+
+  /* porter lanes: a low tread plate with chevrons that crawl along it, so the
+     direction reads without a legend and you can see it is running */
+  if (world.hasBelts) {
+    const th = world.def.theme || {};
+    const plate = rgb(th.locker || "#8fa4b5");
+    const chev = rgb("#6fd3ff");     // fixed: some ward accents are red
+    const flow = (performance.now() / 1000) % 1;
+    for (let ty = 0; ty < ROWS; ty++) {
+      for (let tx = 0; tx < COLS; tx++) {
+        const c = world.grid[ty][tx];
+        if (!c.belt) continue;
+        const cx = tx + 0.5, cz = ty + 0.5;
+        drawMesh(MESH.boxSoft, cx, 0.018, cz, 0, 0.5, 0.018, 0.5, plate);
+        for (let k = 0; k < 3; k++) {
+          const f = ((k / 3) + flow) % 1;                 // 0..1 along the tile
+          const ox = c.belt[0] * (f - 0.5), oz = c.belt[1] * (f - 0.5);
+          const along = c.belt[0] !== 0;
+          drawMesh(MESH.boxSoft, cx + ox, 0.040, cz + oz, 0,
+                   along ? 0.055 : 0.16, 0.012, along ? 0.16 : 0.055, chev);
+        }
+      }
+    }
+  }
+
+  /* brownout bays: the floor goes dark and an amber hazard glow creeps in, so
+     "this corner of the ward is in trouble" is legible from across the room */
+  for (const z of (world.zones || [])) {
+    if (z.powered && !z.warn) continue;
+    const cx = z.x + z.w / 2, cz = z.y + z.h / 2;
+    const pulse = z.powered
+      ? 0.10 + 0.10 * Math.sin(performance.now() / 90)     // warning flicker
+      : 0.30 + 0.05 * Math.sin(performance.now() / 420);
+    drawMesh(MESH.boxSoft, cx, 0.012, cz, 0, z.w / 2, 0.012, z.h / 2,
+             [0.02, 0.02, 0.05], pulse);
+    // a hazard border so the edge of the dark bay is unambiguous
+    const edge = z.powered ? rgb("#ffd54a") : rgb("#f0b03c");
+    for (const [ex, ez, sx, sz] of [
+      [cx, z.y, z.w / 2, 0.045], [cx, z.y + z.h, z.w / 2, 0.045],
+      [z.x, cz, 0.045, z.h / 2], [z.x + z.w, cz, 0.045, z.h / 2]])
+      drawMesh(MESH.boxSoft, ex, 0.05, ez, 0, sx, 0.05, sz, edge);
   }
 
   // spills: a dark glossy puddle with a mop-progress ring
@@ -7541,7 +7944,7 @@ function drawTitle(g) {
          W / 2, CY - 16, 14, "#6fd3b4", "center");
   }
 
-  text(g, "Escape pauses · M mutes · press  H  for how to play",
+  text(g, "Escape pauses · M mutes · H how to play · O options",
        W / 2, CY - 58, 14, PALETTE.dim, "center", "normal");
 
   const blink = (Math.sin(performance.now() / 320) + 1) / 2;
@@ -7688,6 +8091,49 @@ function hexA(hex, a) {
        + "," + parseInt(h.slice(4, 6), 16) + "," + a + ")";
 }
 
+function drawOptions(g) {
+  g.fillStyle = Paint.title;
+  g.fillRect(0, 0, W, H);
+  text(g, "OPTIONS", W / 2, 88, 42, PALETTE.text, "center");
+  text(g, "W / S choose      A / D adjust      Esc back",
+       W / 2, 120, 15, PALETTE.dim, "center", "normal");
+
+  const x0 = W / 2 - 380, w = 760, rowH = 74, y0 = 168;
+  OPTION_ROWS.forEach((row, i) => {
+    const y = y0 + i * (rowH + 8);
+    const sel = Game.optionCursor === i;
+    fillRound(g, x0, y, w, rowH, 13, sel ? "rgba(255,213,74,.10)" : "rgba(255,255,255,.045)");
+    g.strokeStyle = sel ? "#ffd54a" : "rgba(255,255,255,.09)";
+    g.lineWidth = sel ? 3 : 1.5;
+    roundRect(g, x0, y, w, rowH, 13); g.stroke();
+    text(g, row.name, x0 + 26, y + (row.blurb ? 30 : 44), 19, PALETTE.text);
+    if (row.blurb) text(g, row.blurb, x0 + 26, y + 52, 13, PALETTE.dim, "left", "normal");
+
+    const v = Options[row.key];
+    if (row.kind === "level") {
+      const bx = x0 + w - 250, by = y + rowH / 2 - 7;
+      g.fillStyle = "rgba(255,255,255,.10)";
+      roundRect(g, bx, by, 168, 14, 7); g.fill();
+      g.fillStyle = sel ? "#ffd54a" : "#6fd3b4";
+      roundRect(g, bx, by, Math.max(6, 168 * v), 14, 7); g.fill();
+      text(g, Math.round(v * 100) + "%", x0 + w - 34, y + rowH / 2 + 6, 16,
+           PALETTE.text, "right");
+    } else {
+      const on = !!v;
+      const bx = x0 + w - 132;
+      fillRound(g, bx, y + rowH / 2 - 15, 100, 30, 15,
+                on ? "rgba(111,211,180,.22)" : "rgba(255,255,255,.06)");
+      g.fillStyle = on ? "#6fd3b4" : "#66707d";
+      g.beginPath(); g.arc(on ? bx + 78 : bx + 22, y + rowH / 2, 11, 0, 6.283); g.fill();
+      text(g, on ? "ON" : "OFF", on ? bx + 30 : bx + 62, y + rowH / 2 + 5, 13,
+           on ? "#6fd3b4" : PALETTE.dim, "center");
+    }
+  });
+
+  text(g, Save.available ? "Saved automatically" : "Not saved — this browser blocks local storage",
+       W / 2, H - 44, 13, Save.available ? PALETTE.dim : "#ff8f70", "center", "normal");
+}
+
 function drawPerks(g) {
   g.fillStyle = Paint.title;
   g.fillRect(0, 0, W, H);
@@ -7786,6 +8232,7 @@ function drawPerkIcon(g, key, cx, cy, lit) {
 const SELECT_COLS = 5;
 const ENDLESS_SLOT = () => LEVELS.length;
 const BUILDER_SLOT = () => LEVELS.length + 1;
+const DAILY_SLOT = () => LEVELS.length + 2;
 const BUILDER_UNLOCK = 0;   // open from the first boot
 const builderUnlocked = () => totalStars() >= BUILDER_UNLOCK;
 
@@ -8265,7 +8712,7 @@ function drawSelect(g) {
   // are navigated by hand, so an out-of-range cursor is one edit away from
   // throwing on selDef.blurb. Clamping here keeps the screen drawable whatever
   // the navigation does.
-  Game.selectIndex = clamp(Game.selectIndex | 0, 0, BUILDER_SLOT());
+  Game.selectIndex = clamp(Game.selectIndex | 0, 0, DAILY_SLOT());
   g.fillStyle = Paint.title;
   g.fillRect(0, 0, W, H);
 
@@ -8320,9 +8767,11 @@ function drawSelect(g) {
   }
 
   // the two special modes, side by side
-  const ey = gridTop + rows * (cardH + gap) + 4, ew = 452, eh = 66;
-  const ex = W / 2 - ew - 8;
-  const bx2 = W / 2 + 8;
+  // three mode cards now: endless, builder, daily
+  const ey = gridTop + rows * (cardH + gap) + 4, ew = 356, eh = 66, egap = 12;
+  const ex = W / 2 - ew * 1.5 - egap;
+  const bx2 = W / 2 - ew / 2;
+  const dx2 = W / 2 + ew / 2 + egap;
   const selB = Game.selectIndex === BUILDER_SLOT();
   const openB = builderUnlocked();
   g.fillStyle = openB ? "rgba(111,211,180,.16)" : "rgba(255,255,255,.03)";
@@ -8349,6 +8798,23 @@ function drawSelect(g) {
   text(g, openE ? "No clock. Arrivals tighten forever.   Best  " + Game.endlessBest
                 : "Unlocks at " + ENDLESS_UNLOCK + " stars (you have " + stars + ")",
        ex + 56, ey + 50, 13, PALETTE.dim, "left", "normal");
+
+  /* Daily Shift: one ward, one modifier, the same for everyone today. Named on
+     the card so you can decide whether today's combination appeals before you
+     spend two minutes on it. */
+  const plan = dailyPlan(dailyIndex());
+  const selD = Game.selectIndex === DAILY_SLOT();
+  const dBest = Game.dailyBest[String(plan.day)] || 0;
+  g.fillStyle = "rgba(240,176,60,.16)";
+  roundRect(g, dx2, ey, ew, eh, 14); g.fill();
+  g.strokeStyle = selD ? "#ffd54a" : "rgba(240,176,60,.6)";
+  g.lineWidth = selD ? 4 : 1.5;
+  roundRect(g, dx2, ey, ew, eh, 14); g.stroke();
+  drawStar(g, dx2 + 30, ey + 33, 13, "#f0b03c");
+  text(g, "DAILY SHIFT", dx2 + 54, ey + 28, 17, PALETTE.text);
+  text(g, LEVELS[plan.ward].name + "  ·  " + plan.mod.name
+        + (dBest ? "   Best  " + dBest : ""),
+       dx2 + 54, ey + 48, 12.5, PALETTE.dim, "left", "normal");
 
   const selDef = Game.selectIndex === ENDLESS_SLOT() ? ENDLESS
                : Game.selectIndex === BUILDER_SLOT() ? builderWaveDef(1)
@@ -8438,6 +8904,15 @@ function drawLevelCard(g, i, x, y, cardW, cardH) {
     ix += tall ? 21 : 18;
   }
 
+  // the ward's live systems, so the escalation is visible before you commit
+  const sys = wardSystems(lvl);
+  sys.forEach((sy, k) => {
+    g.globalAlpha = locked ? 0.3 : 1;
+    g.fillStyle = sy.col;
+    roundRect(g, x + 16 + k * 12, fy + (tall ? 10 : 8), 8, 4, 2); g.fill();
+    g.globalAlpha = 1;
+  });
+
   for (let s2 = 0; s2 < 3; s2++) {
     drawStar(g, x + cardW - 58 + s2 * 19, fy, tall ? 9 : 8,
       locked ? "#242c36" : (prog.stars > s2 ? "#ffd54a" : "rgba(255,255,255,.14)"));
@@ -8456,7 +8931,8 @@ function drawPause(g) {
   roundRect(g, W / 2 - 250, 220, 500, 320, 18); g.stroke();
   text(g, "PAUSED", W / 2, 288, 42, PALETTE.text, "center");
   const rows = [["Esc", "resume"], ["R", "restart this shift"], ["H", "how to play"],
-                ["M", "sound " + (Sound.muted ? "on" : "off")], ["L", "back to level select"]];
+                ["M", "sound " + (Sound.muted ? "on" : "off")], ["O", "options"],
+                ["L", "back to level select"]];
   rows.forEach((r, i) => {
     const y = 336 + i * 40;
     keyCap(g, r[0], W / 2 - 150, y - 17);
@@ -8660,6 +9136,17 @@ function drawWorldUI(g) {
       roundRect(g, s.x - 24, s.y - 72, 48 * clamp(p.boostT / (k ? k.dur : 10), 0, 1), 11, 5); g.fill();
       text(g, p.boost === "coffee" ? "SPEED" : "ADRENALINE", s.x, s.y - 63, 9, "#10202e", "center");
       g.restore();
+    }
+    /* Which medic is yours is signalled only by scrub colour, which is exactly
+       the kind of thing that fails for a colourblind player in a two-player
+       game. With marks on, each one carries its slot number. */
+    if (Options.marks && Game.players.length > 1) {
+      const tag = "P" + (p.index + 1);
+      g.fillStyle = "rgba(10,16,26,.86)";
+      roundRect(g, s.x - 11, s.y - 40, 22, 15, 5); g.fill();
+      g.strokeStyle = p.color; g.lineWidth = 1.5;
+      roundRect(g, s.x - 11, s.y - 40, 22, 15, 5); g.stroke();
+      text(g, tag, s.x, s.y - 29, 11, "#eaf2ff", "center");
     }
     if (p.stamina !== undefined && p.stamina < Game.staminaMax - 0.02) {
       const f = clamp(p.stamina / Game.staminaMax, 0, 1);
@@ -8915,7 +9402,7 @@ function render() {
                  Game.screen === "results" || Game.screen === "build";
 
   if (inWard && Game.world) {
-    CAM.shake = Game.shake;
+    CAM.shake = Options.shake ? Game.shake : 0;
     renderWorld3D(0);
     if (Game.screen !== "build") drawWorldUI(ctx);
     if (Game.flashRed > 0) {
@@ -8960,6 +9447,7 @@ function render() {
   if (Game.screen === "select") drawSelect(ctx);
   else if (Game.screen === "perks") drawPerks(ctx);
   else if (Game.screen === "medals") drawMedalsScreen(ctx);
+  else if (Game.screen === "options") drawOptions(ctx);
   else if (Game.screen === "howto") drawHowTo(ctx);
 }
 
@@ -8977,6 +9465,7 @@ function handleScreenKeys() {
   switch (Game.screen) {
     case "title":
       if (wasPressed("KeyT")) { Game.playerCount = 1; Game.chars = [0, 1]; startLevel(-2); }
+      if (wasPressed("KeyO")) { Game.optionsFrom = "title"; Game.screen = "options"; Sound.play("menu"); }
       if (wasPressed("Digit1") || wasPressed("Numpad1")) { Game.playerCount = 1; enterCharSelect(); }
       if (wasPressed("Digit2") || wasPressed("Numpad2")) { Game.playerCount = 2; enterCharSelect(); }
       if (wasPressed("KeyH")) { Game.howToFrom = "title"; Game.screen = "howto"; Sound.play("menu"); }
@@ -9013,7 +9502,7 @@ function handleScreenKeys() {
     }
 
     case "select": {
-      const last = BUILDER_SLOT();
+      const last = DAILY_SLOT();
       const move = (d) => {
         Game.selectIndex = clamp(Game.selectIndex + d, 0, last);
         Sound.play("menu");
@@ -9047,6 +9536,8 @@ function handleScreenKeys() {
           if (endlessUnlocked()) startLevel(-1); else Sound.play("error");
         } else if (Game.selectIndex === BUILDER_SLOT()) {
           if (builderUnlocked()) startBuilderRun(); else Sound.play("error");
+        } else if (Game.selectIndex === DAILY_SLOT()) {
+          startDaily();
         } else if (Game.progress[Game.selectIndex].unlocked) {
           startLevel(Game.selectIndex);
         } else Sound.play("error");
@@ -9084,6 +9575,33 @@ function handleScreenKeys() {
         } else Sound.play("error");
       }
       if (wasPressed("Escape") || wasPressed("KeyP")) { Game.screen = "select"; Sound.play("menu"); }
+      break;
+    }
+
+    case "options": {
+      const n = OPTION_ROWS.length;
+      const mv = (d) => { Game.optionCursor = (Game.optionCursor + d + n) % n; Sound.play("menu"); };
+      if (wasPressed("KeyW") || wasPressed("ArrowUp")) mv(-1);
+      if (wasPressed("KeyS") || wasPressed("ArrowDown")) mv(1);
+      const row = OPTION_ROWS[Game.optionCursor];
+      const adjust = (d) => {
+        if (row.kind === "level") {
+          Options[row.key] = clamp(+(Options[row.key] + d * 0.1).toFixed(2), 0, 1);
+          Options.apply();
+          Sound.play("tick");            // audible, so a volume change is felt
+        } else {
+          Options[row.key] = !Options[row.key];
+          Sound.play(Options[row.key] ? "done" : "drop");
+        }
+        Save.touch();
+      };
+      if (wasPressed("KeyA") || wasPressed("ArrowLeft")) adjust(-1);
+      if (wasPressed("KeyD") || wasPressed("ArrowRight")) adjust(1);
+      if (wasPressed("KeyE") || wasPressed("Enter") || wasPressed("Slash"))
+        { if (row.kind === "bool") adjust(1); }
+      if (wasPressed("Escape") || wasPressed("KeyO")) {
+        Game.screen = Game.optionsFrom || "title"; Sound.play("menu");
+      }
       break;
     }
 
@@ -9159,6 +9677,7 @@ function handleScreenKeys() {
         startLevel(Game.levelIndex);
       }
       if (wasPressed("KeyH")) { Game.howToFrom = "paused"; Game.screen = "howto"; Sound.play("menu"); }
+      if (wasPressed("KeyO")) { Game.optionsFrom = "paused"; Game.screen = "options"; Sound.play("menu"); }
       if (wasPressed("KeyL")) { Game.builderMode = false; Game.screen = "select"; Sound.play("menu"); }
       break;
 
@@ -9271,6 +9790,7 @@ window.CodeBlue = {
 };
 
 Save.load();
+Options.apply();
 /* A last-chance flush: the debounced write may not have fired yet when the tab
    goes away. pagehide covers the cases visibilitychange and unload miss. */
 for (const ev of ["pagehide", "visibilitychange"])
