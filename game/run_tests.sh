@@ -22,4 +22,11 @@ fi
 # scene on a first run, which is harmless here.
 "$GODOT" --headless --path "$HERE" --import >/dev/null 2>&1 || true
 
+# --full plays every campaign level end to end instead of a sample. Minutes
+# rather than seconds; run it before a release, not on every change.
+if [ "${1:-}" = "--full" ]; then
+	export LASTLINE_FULL_CAMPAIGN=1
+	echo "Running with the full campaign (all levels played end to end)."
+fi
+
 exec "$GODOT" --headless --path "$HERE" --script res://tests/run_tests.gd

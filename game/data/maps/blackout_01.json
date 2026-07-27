@@ -1,0 +1,51 @@
+{
+  "_comment": "Act XI. Dense switchbacks with almost no shoulder. This is the level that forces you to buy ground. Buildable ground is a grid (data/building.json): cells beside the road start unlocked, the rest are bought with Capital.",
+  "id": "blackout_01",
+  "display_name": "Blackout Grid",
+  "bounds": {
+    "width": 2720,
+    "height": 1700
+  },
+  "path": [
+    {
+      "x": -80.0,
+      "y": 200.0
+    },
+    {
+      "x": 1000.0,
+      "y": 200.0
+    },
+    {
+      "x": 1000.0,
+      "y": 560.0
+    },
+    {
+      "x": 300.0,
+      "y": 560.0
+    },
+    {
+      "x": 300.0,
+      "y": 920.0
+    },
+    {
+      "x": 1400.0,
+      "y": 920.0
+    },
+    {
+      "x": 1400.0,
+      "y": 1280.0
+    },
+    {
+      "x": 500.0,
+      "y": 1280.0
+    },
+    {
+      "x": 500.0,
+      "y": 1600.0
+    },
+    {
+      "x": 2640.0,
+      "y": 1600.0
+    }
+  ]
+}

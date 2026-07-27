@@ -30,6 +30,36 @@
       "map": "lastline_01",
       "engagement": "lastline_01_act6",
       "name": "VI - The Last Line"
+    },
+    {
+      "map": "railyard_01",
+      "engagement": "railyard_01_act7",
+      "name": "VII - Rail Yard"
+    },
+    {
+      "map": "cooling_01",
+      "engagement": "cooling_01_act8",
+      "name": "VIII - Cooling Towers"
+    },
+    {
+      "map": "spine_01",
+      "engagement": "spine_01_act9",
+      "name": "IX - The Spine"
+    },
+    {
+      "map": "sprawl_01",
+      "engagement": "sprawl_01_act10",
+      "name": "X - Cargo Sprawl"
+    },
+    {
+      "map": "blackout_01",
+      "engagement": "blackout_01_act11",
+      "name": "XI - Blackout Grid"
+    },
+    {
+      "map": "terminus_01",
+      "engagement": "terminus_01_act12",
+      "name": "XII - Terminus"
     }
   ]
 }

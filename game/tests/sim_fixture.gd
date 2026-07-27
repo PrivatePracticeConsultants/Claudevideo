@@ -25,6 +25,30 @@ const MAX_TICKS := 90000
 ## each other.
 const SITE_STRIDE := 46.0
 
+## Which campaign levels the suite plays end to end.
+##
+## Playing all twelve is 24 full engagements, and the late ones are hundreds of
+## enemies across sixteen waves - minutes of wall clock for one test. That is too
+## slow to run on every change, and a suite people skip protects nothing. The
+## default is a spread across the difficulty curve (first, middle, last, plus the
+## two that most depend on buying ground); set LASTLINE_FULL_CAMPAIGN=1 to play
+## every level, which is what should run before a release.
+const SAMPLED_LEVELS := ["highway_01_act1", "refinery_01_act3", "lastline_01_act6",
+	"blackout_01_act11", "terminus_01_act12"]
+
+static func campaign_levels() -> Array:
+	var all := Database.load_levels()
+	if OS.get_environment("LASTLINE_FULL_CAMPAIGN") != "":
+		return all
+	var sampled := []
+	for level in all:
+		if SAMPLED_LEVELS.has(str(level["engagement"])):
+			sampled.append(level)
+	return sampled
+
+static func full_campaign_requested() -> bool:
+	return OS.get_environment("LASTLINE_FULL_CAMPAIGN") != ""
+
 static func database(map_id: String = MAP, engagement_id: String = ENGAGEMENT) -> Database:
 	return Database.load_engagement(map_id, engagement_id)
 

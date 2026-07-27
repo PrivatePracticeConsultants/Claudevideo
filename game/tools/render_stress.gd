@@ -28,7 +28,7 @@ func _run() -> void:
 	main._paused = true
 
 	print("enemies  projectiles  draw_calls  ms/frame")
-	for target in [0, 25, 100, 250]:
+	for target in [0, 25, 100, 250, 400]:
 		await _populate(sim, target)
 		# Warm up so shader compilation and buffer growth do not land in the
 		# sample.
@@ -61,9 +61,11 @@ func _populate(sim: Sim, target: int) -> void:
 		return
 	sim._begin_wave(0)
 	if sim.t_count == 0:
-		sim._try_place(0, 0)
+		sim._capital = 999999
+		var spot := SimFixture.a_site(sim)
+		sim._try_place(float(spot[0]), float(spot[1]), 0)
 	for i in target:
-		sim._spawn(0)
+		sim._spawn(sim.enemy_index("walker"))
 	# Spread them along the corridor so they are not all in one cell, and give
 	# each one an inbound projectile.
 	var spread := sim.path_length() / float(target)

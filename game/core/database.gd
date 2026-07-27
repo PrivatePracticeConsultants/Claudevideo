@@ -193,6 +193,10 @@ func _validate_engagement() -> void:
 	# reads exactly like one written before acts existed.
 	if engagement.has("starting_capital"):
 		_req_int(engagement, "starting_capital", "wave file", 0)
+	if engagement.has("starting_ground_reach"):
+		var reach := _req_num(engagement, "starting_ground_reach", "wave file", 0.0)
+		if reach <= float(building.get("min_distance_from_path", 0.0)):
+			errors.append("wave file: starting_ground_reach must exceed min_distance_from_path, or no ground starts owned.")
 	if engagement.has("platform_limit"):
 		_req_int(engagement, "platform_limit", "wave file", 1)
 	if engagement.has("act_hp_multiplier"):

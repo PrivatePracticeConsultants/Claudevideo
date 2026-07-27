@@ -46,14 +46,35 @@ func test_upgrading_is_what_carries_the_later_levels() -> void:
 	assert_lte(float(sim.t_count), float(sim.platform_limit()), "and respects the deployment limit")
 
 func test_every_campaign_level_is_winnable_and_losable() -> void:
-	for level in Database.load_levels():
+	# The single most valuable balance guard in the project: a change that makes
+	# a level impossible - or trivial - fails here rather than in play.
+	#
+	# Runs a sample of the campaign by default and all of it under
+	# LASTLINE_FULL_CAMPAIGN=1; see SimFixture.campaign_levels for why.
+	var levels := SimFixture.campaign_levels()
+	assert_gt(float(levels.size()), 0.0, "there are levels to check")
+	for level in levels:
 		var name := str(level["name"])
 		var won := SimFixture.for_level(str(level["map"]), str(level["engagement"]))
 		SimFixture.run_greedy(won)
 		assert_eq(won.result(), Sim.RESULT_WIN, "%s must be winnable by a competent run" % name)
+		assert_lte(float(won.t_count), float(won.platform_limit()),
+			"%s respects its deployment limit" % name)
 		var lost := SimFixture.for_level(str(level["map"]), str(level["engagement"]))
 		SimFixture.run_idle(lost)
 		assert_eq(lost.result(), Sim.RESULT_LOSS, "%s must be losable by an idle one" % name)
+
+func test_every_campaign_level_at_least_loads_and_starts() -> void:
+	# Cheap, so it covers ALL twelve even when the expensive test above is
+	# sampling. Catches a broken map or wave file immediately.
+	for level in Database.load_levels():
+		var db := Database.load_engagement(str(level["map"]), str(level["engagement"]))
+		assert_true(db.is_valid(), "%s: %s" % [level["name"], db.error_text()])
+		var sim := Sim.new(db, 1)
+		for _t in 300:
+			sim.step()
+		assert_false(sim.is_over(), "%s should still be running 10 seconds in" % level["name"])
+		assert_gt(sim.path_length(), 0.0, "%s has a path" % level["name"])
 
 func test_every_spawned_enemy_is_accounted_for() -> void:
 	# The honesty rule applied to the sim: an enemy either dies or leaks. If

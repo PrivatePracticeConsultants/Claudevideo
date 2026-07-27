@@ -2,9 +2,9 @@
 
 Roguelite tower defense. Godot 4.x / GDScript. **3D, and it runs in a browser.**
 
-**Status: P0 complete and audited, then extended well past it.** Six levels, two
-weapon families with four tiers each, three enemy classes, free placement on
-purchasable ground — on a deterministic 30Hz simulation. The design document is
+**Status: P0 complete and audited twice, then extended well past it.** Twelve
+levels, two weapon families with four tiers each, three enemy classes, free
+placement on purchasable ground — on a deterministic 30Hz simulation. The design document is
 the master plan (v2); the phase ladder is §5.7. Formally this is P0 plus much of
 P1/P2's content; the run layer (P3) is the next real milestone.
 
@@ -18,6 +18,7 @@ Needs Godot 4.x (built and verified against 4.5).
 ```bash
 godot --path game                            # play
 GODOT=/path/to/godot ./game/run_tests.sh     # the suite, headless
+GODOT=/path/to/godot ./game/run_tests.sh --full   # ...playing every level end to end
 GODOT=/path/to/godot ./game/build_web.sh     # HTML5 build -> build/web/
 python3 game/tools/verify_web.py             # boot the web build in a real browser
 ```
@@ -88,10 +89,15 @@ The suite includes `test_audit.gd` — regression tests for seven defects a
 deliberate break-it pass found after P0 was first written. Every one was a
 *silent* failure rather than a crash; `DECISIONS.md` (P0-17) has the table.
 
-Every campaign level is covered by a test that it is both winnable by a scripted
+Campaign levels are covered by a test that each is both winnable by a scripted
 competent policy and losable by an idle one, so a balance change that makes a
 level impossible — or trivial — fails the build instead of being discovered in
-play.
+play. It caught two unwinnable levels during authoring.
+
+That test plays a five-level sample of the curve by default, because playing all
+twelve is 24 full engagements and minutes of wall clock; `--full` plays every
+one, and is the pre-release run. A separate cheap test loads all twelve
+regardless, so a broken map or wave file fails immediately.
 
 ## Layout
 

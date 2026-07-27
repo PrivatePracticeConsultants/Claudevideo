@@ -1,0 +1,51 @@
+{
+  "_comment": "Act VIII. Two loops crossing in the middle. The crossing is the best ground on the board and the most expensive to reach. Buildable ground is a grid (data/building.json): cells beside the road start unlocked, the rest are bought with Capital.",
+  "id": "cooling_01",
+  "display_name": "Cooling Towers",
+  "bounds": {
+    "width": 2720,
+    "height": 1700
+  },
+  "path": [
+    {
+      "x": -80.0,
+      "y": 720.0
+    },
+    {
+      "x": 600.0,
+      "y": 720.0
+    },
+    {
+      "x": 600.0,
+      "y": 240.0
+    },
+    {
+      "x": 1400.0,
+      "y": 240.0
+    },
+    {
+      "x": 1400.0,
+      "y": 1200.0
+    },
+    {
+      "x": 2000.0,
+      "y": 1200.0
+    },
+    {
+      "x": 2000.0,
+      "y": 420.0
+    },
+    {
+      "x": 1100.0,
+      "y": 420.0
+    },
+    {
+      "x": 1100.0,
+      "y": 980.0
+    },
+    {
+      "x": 2640.0,
+      "y": 980.0
+    }
+  ]
+}

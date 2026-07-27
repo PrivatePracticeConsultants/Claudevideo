@@ -6,7 +6,7 @@ rewrite history.
 
 Phase status: **P0 complete and audited, then extended well past it** — 3D, HTML5, free
 placement, tower tiers, two weapon families, three enemy classes, purchasable
-ground, and a six-level campaign. Formally this is P0 plus most of P1/P2's
+ground, and a twelve-level campaign. Formally this is P0 plus most of P1/P2's
 content; the run layer (P3) is still absent.
 
 ---
@@ -342,6 +342,87 @@ an unloadable or empty test file is now a FAIL.
 
 Worth recording because it is the same failure class as everything in the audit —
 not a crash, just a number that silently got smaller.
+
+## P0-23 · The starting shoulder narrows in later levels
+
+`starting_ground_reach` is a per-engagement override for how far the free ground
+extends from the road.
+
+It exists because of an honest gap in the previous pass: buying ground was a
+mechanic nobody needed. With a wide starting band and a deployment limit well
+below the number of legal positions, expansion never paid for itself — it was an
+optimisation for expert play at best.
+
+Acts IX–XII narrow the band (150 → 125 units against a default of 200), so the
+free shoulder no longer holds enough turrets and buying ground becomes part of
+clearing the level rather than a flourish. Blackout Grid is authored around it
+outright.
+
+## P0-24 · Second audit — findings
+
+The adversarial pass over the systems added since the last audit (ten probes:
+degenerate ground reach, splash fractions above 1, over-large deployment limits,
+upgrading past the top tier, exact-price purchases, buying road cells, nonsense
+blueprint indices, pool ceilings, limit enforcement) found **no defects in the
+simulation**. Two process defects, though:
+
+**`tools/render_stress.gd` had silently rotted.** Placement gained a blueprint
+argument; the tool was never updated and simply stopped parsing. Nothing noticed
+because the dev tools sit outside both the test suite and the shipped web export.
+Fixed, and `tests/cases/test_tools_parse.gd` now compiles every script in the
+project so the class of failure cannot recur. It is the same shape as the runner
+bug in P0-22: not a crash, just something quietly not running.
+
+**Two levels were authored unwinnable.** Terminus could not be cleared even at
+55% of its intended HP, and Blackout Grid failed at the multiplier interpolation
+suggested. Both were caught — Terminus by the sweep, Blackout by
+`test_every_campaign_level_is_winnable_and_losable` — which is precisely the
+value of having balance under test rather than under judgement.
+
+## P0-25 · The campaign test samples by default
+
+Playing all twelve levels end to end is 24 full engagements, and the late ones
+are hundreds of enemies over sixteen waves — minutes of wall clock for a single
+test. A suite slow enough to skip protects nothing.
+
+The default is a five-level spread across the difficulty curve (first, middle,
+last, and the two that most depend on buying ground). `LASTLINE_FULL_CAMPAIGN=1`,
+or `./game/run_tests.sh --full`, plays every level; that is the pre-release run.
+
+A separate cheap test still loads **all twelve** and steps each for ten seconds,
+so a broken map or wave file fails immediately regardless of sampling.
+
+## P0-26 · Performance at the new ceiling, measured
+
+Simulation, worst case the campaign can produce (400 enemies, 36 turrets all at
+tier 4, on Terminus):
+
+| enemies | ms per tick | headroom vs the 33.3ms budget |
+|---|---|---|
+| 50 | 0.81 | 41x |
+| 150 | 0.88 | 38x |
+| 300 | 0.85 | 39x |
+| 400 | 0.70 | 48x |
+
+Flat with entity count, which is the spatial hash doing its job. This is a
+desktop-class CPU, not a phone — GDScript on an iPhone 11 should be assumed
+several times slower, which still leaves comfortable headroom, but the device
+measurement is still owed.
+
+Rendering, same board:
+
+| entities | draw calls |
+|---|---|
+| 0 | 141 |
+| 50 | 162 |
+| 200 | 162 |
+| 500 | 162 |
+| 800 | 162 |
+
+Still flat: the three entity layers cost a fixed +21 no matter how much is on
+screen. The 141 baseline is static scenery and now grows with map complexity
+(Terminus has 13 segments), which makes merging it the most valuable remaining
+optimisation.
 
 ## P0-14 · Deliberately not built in P0
 

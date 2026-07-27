@@ -290,7 +290,11 @@ func _build_path() -> void:
 
 func _load_build_rules() -> void:
 	_build_min_dist = float(_db.building["min_distance_from_path"])
-	_build_max_dist = float(_db.building["max_distance_from_path"])
+	# How far the free starting ground reaches. Overridable per engagement so a
+	# late level can hand you a narrow shoulder and make buying ground a real
+	# decision rather than an optimisation you never need.
+	_build_max_dist = float(_db.engagement.get("starting_ground_reach",
+		_db.building["max_distance_from_path"]))
 	_build_min_spacing = float(_db.building["min_platform_spacing"])
 	# The engagement may set its own deployment limit; the pool ceiling in
 	# sim.json is the hard upper bound regardless.
