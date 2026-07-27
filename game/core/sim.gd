@@ -205,6 +205,13 @@ var t_tier_slot: PackedInt32Array = PackedInt32Array()
 var t_cooldown: PackedInt32Array = PackedInt32Array()
 var t_x: PackedFloat64Array = PackedFloat64Array()
 var t_y: PackedFloat64Array = PackedFloat64Array()
+## Direction the turret last fired in, as a unit vector. Kept in the simulation
+## rather than recomputed by the renderer because it is a pure function of what
+## the turret did, and deriving it in the renderer would mean scanning every
+## enemy for every turret on every frame to answer a question the sim already
+## knew the answer to.
+var t_aim_x: PackedFloat64Array = PackedFloat64Array()
+var t_aim_y: PackedFloat64Array = PackedFloat64Array()
 var t_count: int = 0
 
 # Active-wave spawn cursors, sized to the widest wave in the data.
@@ -486,6 +493,8 @@ func _build_pools() -> void:
 	t_used.resize(_max_platforms)
 	t_blueprint.resize(_max_platforms)
 	t_tier.resize(_max_platforms)
+	t_aim_x.resize(_max_platforms)
+	t_aim_y.resize(_max_platforms)
 	t_tier_slot.resize(_max_platforms)
 	t_cooldown.resize(_max_platforms)
 	t_x.resize(_max_platforms)
@@ -633,6 +642,9 @@ func _try_place(x: float, y: float, blueprint_index: int) -> int:
 	t_cooldown[index] = 0
 	t_x[index] = x
 	t_y[index] = y
+	# Face along the corridor until it has something to shoot at.
+	t_aim_x[index] = 1.0
+	t_aim_y[index] = 0.0
 	_capital -= _tier_cost[slot]
 	return BUILD_OK
 
@@ -774,7 +786,19 @@ func _acquire_target(px: float, py: float, range_sq: float) -> int:
 				best_prog = e_prog[e]
 	return best
 
+## Point the turret at what it is shooting. Called before the pool check so the
+## barrel still swings even on the tick a shot is dropped for want of a slot.
+func _aim_at(platform: int, target: int) -> void:
+	var dx := e_x[target] - t_x[platform]
+	var dy := e_y[target] - t_y[platform]
+	var distance := sqrt(dx * dx + dy * dy)
+	if distance <= 0.0:
+		return
+	t_aim_x[platform] = dx / distance
+	t_aim_y[platform] = dy / distance
+
 func _fire(platform: int, target: int) -> void:
+	_aim_at(platform, target)
 	if _p_free_top == 0:
 		# The shot is lost because the pool is full. Count it rather than
 		# dropping it silently: a platform that appears to fire but deals no
@@ -1132,4 +1156,6 @@ func state_hash() -> int:
 	h = StateHash.mix_bytes(h, t_cooldown.to_byte_array())
 	h = StateHash.mix_bytes(h, t_x.to_byte_array())
 	h = StateHash.mix_bytes(h, t_y.to_byte_array())
+	h = StateHash.mix_bytes(h, t_aim_x.to_byte_array())
+	h = StateHash.mix_bytes(h, t_aim_y.to_byte_array())
 	return h

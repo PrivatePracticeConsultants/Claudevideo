@@ -2,9 +2,10 @@
 
 Roguelite tower defense. Godot 4.x / GDScript. **3D, and it runs in a browser.**
 
-**Status: P0 complete and audited twice, then extended well past it.** Twelve
-levels, two weapon families with four tiers each, three enemy classes, free
-placement on purchasable ground — on a deterministic 30Hz simulation. The design document is
+**Status: P0 complete and audited twice, then extended well past it.**
+Twenty-two levels, two weapon families with four tiers each, three enemy classes,
+free placement on purchasable ground — on a deterministic 30Hz simulation, drawn
+with real lighting, shadows and ambient occlusion. The design document is
 the master plan (v2); the phase ladder is §5.7. Formally this is P0 plus much of
 P1/P2's content; the run layer (P3) is the next real milestone.
 
@@ -98,6 +99,20 @@ That test plays a five-level sample of the curve by default, because playing all
 twelve is 24 full engagements and minutes of wall clock; `--full` plays every
 one, and is the pre-release run. A separate cheap test loads all twelve
 regardless, so a broken map or wave file fails immediately.
+
+## How it is drawn
+
+Perspective at a narrow field of view, a key light with shadows plus a cool fill,
+screen-space ambient occlusion, glow and filmic tonemapping. The narrow FOV is
+deliberate: wide enough for real depth, narrow enough that a turret at the far
+edge of the board is close to the same size as one near the camera, which is what
+keeps range and coverage judgeable.
+
+Everything that scales with entity count is instanced — one `MultiMesh` layer per
+enemy class (so class reads from silhouette, not only colour), plus health bars,
+projectiles, buildable cells, and the three parts of every turret. The corridor
+is a single generated mesh rather than a box per segment. Draw calls do not grow
+with how much is happening.
 
 ## Layout
 

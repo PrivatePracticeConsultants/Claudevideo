@@ -60,6 +60,56 @@
       "map": "terminus_01",
       "engagement": "terminus_01_act12",
       "name": "XII - Terminus"
+    },
+    {
+      "map": "foundry_01",
+      "engagement": "foundry_act13",
+      "name": "XIII - Foundry Line"
+    },
+    {
+      "map": "causeway_01",
+      "engagement": "causeway_act14",
+      "name": "XIV - Causeway"
+    },
+    {
+      "map": "substation_01",
+      "engagement": "substation_act15",
+      "name": "XV - Substation"
+    },
+    {
+      "map": "trenchline_01",
+      "engagement": "trenchline_act16",
+      "name": "XVI - Trench Line"
+    },
+    {
+      "map": "reactor_01",
+      "engagement": "reactor_act17",
+      "name": "XVII - Reactor Yard"
+    },
+    {
+      "map": "overpass_01",
+      "engagement": "overpass_act18",
+      "name": "XVIII - Overpass"
+    },
+    {
+      "map": "quarantine_01",
+      "engagement": "quarantine_act19",
+      "name": "XIX - Quarantine Zone"
+    },
+    {
+      "map": "blackice_01",
+      "engagement": "blackice_act20",
+      "name": "XX - Black Ice"
+    },
+    {
+      "map": "ascension_01",
+      "engagement": "ascension_act21",
+      "name": "XXI - Ascension"
+    },
+    {
+      "map": "lastlight_01",
+      "engagement": "lastlight_act22",
+      "name": "XXII - Last Light"
     }
   ]
 }

@@ -1,0 +1,43 @@
+{
+  "_comment": "Act XVIII. Stacked lanes with narrow shoulders. Vertical space you cannot use, horizontal space you must buy. Buildable ground is a grid (data/building.json): cells beside the road start unlocked, the rest are bought with Capital.",
+  "id": "overpass_01",
+  "display_name": "Overpass",
+  "bounds": {
+    "width": 3800,
+    "height": 2300
+  },
+  "path": [
+    {
+      "x": -80.0,
+      "y": 420.0
+    },
+    {
+      "x": 2200.0,
+      "y": 420.0
+    },
+    {
+      "x": 2200.0,
+      "y": 800.0
+    },
+    {
+      "x": 700.0,
+      "y": 800.0
+    },
+    {
+      "x": 700.0,
+      "y": 1180.0
+    },
+    {
+      "x": 2200.0,
+      "y": 1180.0
+    },
+    {
+      "x": 2200.0,
+      "y": 1560.0
+    },
+    {
+      "x": 3680.0,
+      "y": 1560.0
+    }
+  ]
+}

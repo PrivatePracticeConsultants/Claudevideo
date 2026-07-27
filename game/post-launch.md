@@ -11,7 +11,11 @@ backlog rather than a wish list.
 
 ## Surfaced during the P0 audit / 3D move
 
-**Merge static scenery into one mesh** *(earliest: P1)*
+**~~Merge static scenery into one mesh~~ — DONE.** The corridor is now a single
+`ArrayMesh` built from mitred quad strips, and turrets are instanced. Kept here
+for the record because the entry below explains what the problem was.
+
+**Original entry:** *Merge static scenery into one mesh* *(earliest: P1)*
 The 3D corridor is one `MeshInstance3D` per segment per wall, and every pad is
 its own cylinder — ~124 draw calls before a single entity exists, doubled by the
 shadow pass. Entities are already flat in draw-call cost, so this is now the

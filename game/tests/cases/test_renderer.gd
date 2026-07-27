@@ -26,8 +26,11 @@ func after_each() -> void:
 	_tree.root.remove_child(_renderer)
 	_renderer.queue_free()
 
-func test_entities_render_through_exactly_three_multimesh_layers() -> void:
-	assert_eq(_renderer.entity_layers().size(), 3, "bodies, health bars and projectiles")
+func test_entities_render_through_instanced_layers_only() -> void:
+	# One body layer per enemy class (so class is readable from silhouette, not
+	# only colour), plus health bars and projectiles.
+	assert_eq(_renderer.entity_layers().size(), _sim.enemy_type_count() + 2,
+		"a body layer per class, plus health bars and projectiles")
 	# The buildable-cell grid is a MultiMesh too, but a static one: its size is
 	# fixed by the map, not by how much is happening.
 	assert_ne(_renderer.cell_layer(), null, "the cell grid is also instanced, not per-cell nodes")
@@ -40,7 +43,9 @@ func test_entities_render_through_exactly_three_multimesh_layers() -> void:
 func test_instance_buffers_are_preallocated_to_the_pool_ceiling() -> void:
 	# Allocated once at setup. If instance_count were resized as entities spawn,
 	# the renderer would be reallocating GPU buffers mid-wave.
-	assert_eq(_renderer.enemy_layer().multimesh.instance_count, _sim.e_alive.size(), "enemy layer")
+	for i in _renderer.enemy_layer_count():
+		assert_eq(_renderer.enemy_layer(i).multimesh.instance_count, _sim.e_alive.size(),
+			"enemy layer %d" % i)
 	assert_eq(_renderer.hp_bar_layer().multimesh.instance_count, _sim.e_alive.size(), "health bar layer")
 	assert_eq(_renderer.projectile_layer().multimesh.instance_count, _sim.p_alive.size(), "projectile layer")
 	assert_eq(_renderer.cell_layer().multimesh.instance_count,
@@ -58,19 +63,19 @@ func test_visible_instance_count_tracks_live_entities() -> void:
 	# This is the mechanism that keeps draw cost proportional to what is on
 	# screen without touching allocation.
 	_renderer.update_visuals(0.0)
-	assert_eq(_renderer.enemy_layer().multimesh.visible_instance_count, 0, "nothing spawned yet")
+	assert_eq(_renderer.drawn_enemy_count(), 0, "nothing spawned yet")
 
 	_sim._begin_wave(0)
 	for _i in 40:
 		_sim._spawn(_sim.enemy_index("walker"))
 	_renderer.update_visuals(0.0)
-	assert_eq(_renderer.enemy_layer().multimesh.visible_instance_count, 40, "40 bodies drawn")
+	assert_eq(_renderer.drawn_enemy_count(), 40, "40 bodies drawn")
 	assert_eq(_renderer.hp_bar_layer().multimesh.visible_instance_count, 40, "40 health bars drawn")
 
 	for i in 15:
 		_sim._despawn_enemy(i)
 	_renderer.update_visuals(0.0)
-	assert_eq(_renderer.enemy_layer().multimesh.visible_instance_count, 25, "count follows despawns")
+	assert_eq(_renderer.drawn_enemy_count(), 25, "count follows despawns")
 
 func test_the_node_count_does_not_grow_with_entities() -> void:
 	# The actual regression this file exists to catch.

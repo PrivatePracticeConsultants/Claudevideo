@@ -6,7 +6,7 @@ rewrite history.
 
 Phase status: **P0 complete and audited, then extended well past it** — 3D, HTML5, free
 placement, tower tiers, two weapon families, three enemy classes, purchasable
-ground, and a twelve-level campaign. Formally this is P0 plus most of P1/P2's
+ground, and a twenty-two-level campaign. Formally this is P0 plus most of P1/P2's
 content; the run layer (P3) is still absent.
 
 ---
@@ -423,6 +423,123 @@ Still flat: the three entity layers cost a fixed +21 no matter how much is on
 screen. The 141 baseline is static scenery and now grows with map complexity
 (Terminus has 13 segments), which makes merging it the most valuable remaining
 optimisation.
+
+## P0-27 · Why it did not look 3D, and what fixed it
+
+The renderer had been 3D geometry from the start, but it read as a flat diagram.
+The causes were specific and none of them were the geometry:
+
+1. **Most surfaces were unshaded.** The ground and the corridor floor used
+   `SHADING_MODE_UNSHADED`, so no light touched them and nothing had a lit side
+   and a dark side.
+2. **The camera was orthographic**, which removes every parallax cue at once.
+3. **No ambient occlusion**, so nothing sat *in* the scene - objects floated on
+   it. Contact shadow at the base of a turret is most of what says "solid".
+4. **Flat albedo everywhere** - no metallic or roughness variation, so every
+   surface answered the light identically.
+5. **A steep 54-degree camera pitch**, which mostly shows you the tops of things.
+
+Fixed by: perspective at a narrow 30-degree field of view (narrow enough that a
+turret at the far edge is close to the same size as one near - the readability
+argument that originally chose orthographic - while still giving depth), a
+40-degree pitch so sides are visible, a key light with real shadows plus a cool
+fill, SSAO, glow, filmic tonemapping, distance fog, and PBR metallic/roughness
+per material class.
+
+Two things learned the hard way while tuning it:
+
+- **Generated meshes get double-sided materials.** The corridor is a strip mesh
+  and getting winding right on every face of every mitred corner is fiddly and
+  easy to regress; a back-facing wall renders as a black slot, which is exactly
+  what it did. Culling saves nothing on a few hundred triangles.
+- **High metallic on a coloured object under a bright key light renders white.**
+  The drones were set to 0.5 metallic and stopped reading as coloured at all.
+  Painted machines want low metallic.
+
+## P0-28 · Static scenery is now one mesh, not 140
+
+The corridor used to be one `BoxMesh` node per segment per wall, plus a disc at
+every corner - about 140 draw calls before a single entity existed, and visible
+seams wherever two boxes met. It is now built as quad strips into a single
+`ArrayMesh`, with the lateral offset at each waypoint taken perpendicular to the
+*average* of the incoming and outgoing segment directions, so corners mitre
+instead of overlapping.
+
+That was the largest outstanding optimisation in `post-launch.md`, and it turned
+out to also be the fix for how the corridor looked.
+
+Turrets moved to instanced layers at the same time (base, body, barrel), so the
+board's draw cost no longer grows with how much you have built.
+
+## P0-29 · Turret facing lives in the simulation
+
+`t_aim_x/t_aim_y` is set when a turret fires. It is genuinely part of what the
+turret did, it is deterministic, and it is in the state hash.
+
+The alternative - having the renderer work out what each turret is pointing at -
+means scanning every enemy for every turret on every frame to answer a question
+the simulation already knew the answer to. The *smoothing* stays in the renderer:
+the sim's aim snaps instantly and authoritatively, and how fast the barrel swings
+to follow is presentation.
+
+## P0-30 · Levels 13-22 are scaled from a tuned anchor, not hand-swept
+
+Sweeping each new level the way acts I-XII were swept would be hours of
+simulation. Instead they are derived from Terminus (act XII), which is tuned:
+
+    limit_n   = limit_(n-1) + 2
+    hp_n      = hp_(n-1) x (limit_n / limit_(n-1)) x 1.04
+    bounty_n  = hp_n x (terminus bounty / terminus hp)
+
+Player damage scales with the deployment limit, so scaling enemy health with the
+limit holds difficulty constant; the 1.04 is the actual escalation. Income has to
+track health or the later acts cannot fund the turrets they require.
+
+**The first attempt failed, and instructively.** Reusing Terminus's *wave list*
+as well as its multipliers gave every new level an opening wave of 34 Bulwark
+Haulers against an empty board. Nine leaks at 12 integrity each ends the level
+before wave 3, and all ten failed identically - same leak count, same kill count,
+within seconds of each other. That uniformity is what identified it as structural
+rather than a balance miss.
+
+The lesson generalises: **a tuned level's wave list is tuned as a whole,
+including its ramp.** Terminus survives that opening only because it is the shape
+Terminus was tuned around. The new acts generate their own ramp - light early
+waves, heavies withheld until wave 3, difficulty carried by the multipliers.
+
+## P0-31 · Acts XIII-XXII hold health constant; escalation comes from elsewhere
+
+The scaling formula in P0-30 was measured and found wrong twice, and the second
+failure is the interesting one.
+
+Act XIII wins **untouched at 100 integrity** with `act_hp_multiplier` 5.75, and
+loses outright at 7.00. The entire band between "takes no damage at all" and
+"unwinnable" is about 20% wide, and there is almost nothing in between — because
+a Bulwark Hauler either dies before the exit or it does not, and nine of them
+getting through is the whole integrity pool.
+
+Tuning ten levels along a 20%-wide edge, at roughly twenty minutes of simulation
+per data point, is not a good use of anything. So health is held at **6.0 across
+all ten**, a value verified inside the band at both ends of the run, and
+escalation is carried by the levers that are actually controllable:
+
+- wave density +5% per act,
+- Bulwark bias +6% per act,
+- deployment limit +2 per act,
+- and a narrowing starting shoulder (135 → 112 units), so later acts must buy
+  ground to have anywhere to put the turrets they are given.
+
+**Known limitation, stated plainly:** this leaves acts XIV-XXII comfortable. Act
+XIII finishes at 64 integrity with real pressure; XVII and XXII finish at 100.
+They are all winnable and all losable — verified, not assumed — but they are not
+tightly tuned. The honest fix is `tools/balance_sim.py` from P3 doing a proper
+per-level search; hand-sweeping twenty-two levels at this cost is not the answer.
+
+**A generator bug worth remembering:** the first version of the wave generator
+took `level_index` and never used it, so all ten acts shipped byte-identical wave
+lists. It showed up as exactly 3819 kills on three different levels with three
+different multipliers and three different maps. Identical numbers across
+supposedly-different things is the cheapest bug detector available.
 
 ## P0-14 · Deliberately not built in P0
 

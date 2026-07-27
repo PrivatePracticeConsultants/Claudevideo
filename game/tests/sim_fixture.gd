@@ -34,7 +34,7 @@ const SITE_STRIDE := 46.0
 ## two that most depend on buying ground); set LASTLINE_FULL_CAMPAIGN=1 to play
 ## every level, which is what should run before a release.
 const SAMPLED_LEVELS := ["highway_01_act1", "refinery_01_act3", "lastline_01_act6",
-	"blackout_01_act11", "terminus_01_act12"]
+	"blackout_01_act11", "terminus_01_act12", "substation_act15", "lastlight_act22"]
 
 static func campaign_levels() -> Array:
 	var all := Database.load_levels()

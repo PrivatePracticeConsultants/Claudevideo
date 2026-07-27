@@ -3,8 +3,8 @@
   "id": "spillway_01",
   "display_name": "Spillway Crossing",
   "bounds": {
-    "width": 2560,
-    "height": 1440
+    "width": 3456,
+    "height": 1944
   },
   "path": [
     {

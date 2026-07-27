@@ -131,7 +131,7 @@ func _process(delta: float) -> void:
 		_platforms_drawn = _sim.t_count
 		_tiers_drawn = tier_sum
 		_cells_drawn = _sim.cells_bought()
-		_renderer.rebuild_static()
+		_renderer.refresh_board()
 	_refresh_cursor()
 	_hud.refresh(_speed, _paused, _hover_platform, _blueprint, _cursor_can_buy)
 

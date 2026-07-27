@@ -3,20 +3,23 @@ extends Node3D
 
 ## Draws the simulation in 3D. Owns no game state and never writes to the Sim.
 ##
-## The simulation did not change by one line to support this. Its world is a flat
-## plane in (x, y) with no notion of height, so it maps directly onto the ground
-## plane as (x, 0, y) - the third dimension is presentation only. That is the
-## payoff of keeping core/ free of engine types: the renderer is replaceable.
+## The simulation has never changed to support anything in this file. Its world is
+## a flat plane in (x, y) with no notion of height, and the renderer maps it to
+## (x, 0, y); the third dimension is presentation only. That is the payoff of
+## keeping core/ free of engine types - the entire presentation layer has now been
+## replaced twice without touching a line of game logic.
 ##
-## Enemies, health bars and projectiles all go through MultiMeshInstance3D with
-## preallocated instance buffers, for the same reason the 2D version did: one
-## node per entity does not survive 250 enemies plus 700 projectiles on a phone.
-## Static geometry - ground, corridor, pads, platforms - is a handful of mesh
-## instances built once and rebuilt only when a platform is placed.
+## Everything that scales with entity count goes through MultiMeshInstance3D:
+## enemies (one layer per class, so each class can have its own silhouette),
+## health bars, projectiles, buildable cells, and the three parts of every turret.
+## Static scenery - ground and corridor - is built into single ArrayMeshes rather
+## than one node per segment. That is both a large draw-call saving and the reason
+## the corridor can have continuous, correctly-lit surfaces instead of a row of
+## boxes with visible seams.
 ##
-## Camera is orthographic at a 3/4 angle. Perspective would make identical towers
-## at the near and far edge of the board look like different sizes, which makes
-## coverage and range genuinely harder to read.
+## Lighting is a key light with shadows plus a cool fill, over a screen-space
+## ambient-occlusion and glow pass. The previous version drew most surfaces
+## unshaded, which is why it read as a diagram rather than a scene.
 
 ## Simulation (x, y) becomes world (x, 0, y). Kept as a named function rather
 ## than inlined so there is exactly one place this mapping is defined.
@@ -28,25 +31,31 @@ var _theme: Dictionary = {}
 var _world: Dictionary = {}
 
 var camera: Camera3D
-var _enemies: MultiMeshInstance3D
+var _enemy_layers: Array[MultiMeshInstance3D] = []
 var _hp_bars: MultiMeshInstance3D
 var _projectiles: MultiMeshInstance3D
-var _static_root: Node3D
 var _cells: MultiMeshInstance3D
+var _turret_bases: MultiMeshInstance3D
+var _turret_bodies: MultiMeshInstance3D
+var _turret_barrels: MultiMeshInstance3D
+var _scenery: Node3D
 var _cursor: Node3D
 var _cursor_disc: MeshInstance3D
 var _cursor_ghost: MeshInstance3D
 
-# Colours are resolved once at setup. Parsing them from strings inside the frame
-# loop - which the first version did - is a String allocation per colour per
-# frame in the one place the project promises not to allocate.
+# Resolved once at setup; parsing colours from strings inside the frame loop is a
+# String allocation per colour per frame in the one place we promise not to.
 var _enemy_color := Color.WHITE
 var _enemy_hurt_color := Color.WHITE
 var _bar_color := Color.WHITE
 var _bar_back_color := Color.WHITE
 
-# Reused every frame; Transform3D and Vector3 are value types, so writing
-# through these touches no heap.
+# Smoothed turret facing, so barrels swing rather than snap. Purely visual: the
+# simulation's aim is instant, and nothing here feeds back into it.
+var _barrel_angle: PackedFloat64Array = PackedFloat64Array()
+var _reference_radius: float = 1.0
+
+# Reused every frame; Transform3D and Basis are value types.
 var _xf := Transform3D()
 var _basis := Basis()
 
@@ -58,65 +67,103 @@ func setup(sim: Sim, theme: Dictionary) -> void:
 	_enemy_hurt_color = _color("enemy_hurt")
 	_bar_color = _color("hp_bar")
 	_bar_back_color = _color("hp_bar_back")
+	_barrel_angle.resize(sim.t_used.size())
+	# Height scales relative to the baseline drone, so classes stay in proportion
+	# to each other whatever their radii happen to be.
+	_reference_radius = maxf(sim.enemy_radius(maxi(sim.enemy_index("walker"), 0)), 0.001)
 
 	_build_environment()
-	_build_static_geometry()
+	_build_scenery()
+	_build_cell_layer()
+	_build_turret_layers()
+	_build_entity_layers()
+	refresh_board()
 
-	_enemies = _make_layer(sim.e_alive.size(), _lit_material())
-	_hp_bars = _make_layer(sim.e_alive.size(), _billboard_material())
-	_projectiles = _make_layer(sim.p_alive.size(), _glow_material(_color("projectile")))
-	add_child(_enemies)
-	add_child(_hp_bars)
-	add_child(_projectiles)
+# --- environment ---------------------------------------------------------------
 
 func _build_environment() -> void:
-	var cam_cfg: Dictionary = _theme.get("camera", {})
+	var cfg: Dictionary = _theme.get("camera", {})
 	camera = Camera3D.new()
-	camera.projection = Camera3D.PROJECTION_ORTHOGONAL
-	camera.size = float(cam_cfg.get("size", 980.0))
-	camera.near = 1.0
-	camera.far = 8000.0
+	if str(cfg.get("projection", "perspective")) == "orthogonal":
+		camera.projection = Camera3D.PROJECTION_ORTHOGONAL
+	else:
+		camera.projection = Camera3D.PROJECTION_PERSPECTIVE
+		camera.fov = float(cfg.get("fov_degrees", 26.0))
+	camera.near = 10.0
+	camera.far = 20000.0
 	camera.rotation_degrees = Vector3(
-		float(cam_cfg.get("pitch_degrees", -52.0)),
-		float(cam_cfg.get("yaw_degrees", -24.0)), 0.0)
+		float(cfg.get("pitch_degrees", -38.0)),
+		float(cfg.get("yaw_degrees", -22.0)), 0.0)
 	camera.current = true
 	add_child(camera)
+
 	var sun := DirectionalLight3D.new()
 	sun.rotation_degrees = Vector3(
-		float(_world.get("sun_pitch_degrees", -58.0)),
-		float(_world.get("sun_yaw_degrees", 40.0)), 0.0)
-	sun.light_energy = float(_world.get("sun_energy", 1.15))
+		float(_world.get("sun_pitch_degrees", -46.0)),
+		float(_world.get("sun_yaw_degrees", 35.0)), 0.0)
+	sun.light_energy = float(_world.get("sun_energy", 2.1))
+	sun.light_color = _color_of(_world.get("sun_colour", "#fff2dc"))
 	sun.shadow_enabled = true
+	sun.directional_shadow_mode = DirectionalLight3D.SHADOW_ORTHOGONAL
+	sun.directional_shadow_max_distance = 9000.0
+	sun.shadow_bias = 0.06
 	add_child(sun)
+
+	# A cool, shadowless fill from the opposite side. Without it the unlit faces
+	# of everything go to flat ambient and the geometry loses its edges.
+	var fill := DirectionalLight3D.new()
+	fill.rotation_degrees = Vector3(
+		float(_world.get("fill_pitch_degrees", -22.0)),
+		float(_world.get("fill_yaw_degrees", -145.0)), 0.0)
+	fill.light_energy = float(_world.get("fill_energy", 0.55))
+	fill.light_color = _color_of(_world.get("fill_colour", "#5f7fb8"))
+	fill.shadow_enabled = false
+	add_child(fill)
 
 	var env := Environment.new()
 	env.background_mode = Environment.BG_COLOR
 	env.background_color = _color("background")
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	env.ambient_light_color = _color("background").lightened(0.35)
-	env.ambient_light_energy = float(_world.get("ambient_energy", 0.55))
+	env.ambient_light_color = _color("background").lightened(0.45)
+	env.ambient_light_energy = float(_world.get("ambient_energy", 0.35))
+
+	# Contact shadows where geometry meets geometry. This is the single biggest
+	# contributor to a scene reading as solid rather than as flat shapes.
+	env.ssao_enabled = true
+	env.ssao_radius = float(_world.get("ssao_radius", 42.0))
+	env.ssao_intensity = float(_world.get("ssao_intensity", 2.4))
+
+	env.glow_enabled = true
+	env.glow_intensity = float(_world.get("glow_strength", 1.15))
+	env.glow_bloom = float(_world.get("glow_bloom", 0.25))
+	env.glow_blend_mode = Environment.GLOW_BLEND_MODE_ADDITIVE
+
+	# Depth fog pulls the far end of the corridor back and gives the board scale.
+	env.fog_enabled = true
+	env.fog_light_color = _color_of(_world.get("fog_colour", "#0d1219"))
+	env.fog_density = float(_world.get("fog_density", 0.00022))
+
+	env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
+	env.tonemap_exposure = float(_world.get("tonemap_exposure", 1.05))
+	env.tonemap_white = float(_world.get("tonemap_white", 3.0))
+
 	var world_env := WorldEnvironment.new()
 	world_env.environment = env
 	add_child(world_env)
 
 	_fit_camera()
-	# The browser canvas can be any size and can be resized at any moment, so
-	# framing is recomputed rather than assumed. This is also what stops a
-	# future map with different proportions from needing hand-tuned camera
-	# numbers.
-	#
-	# Guarded because the renderer is also constructed off-tree by the headless
-	# tests, where there is no viewport to ask.
+	# The browser canvas can be any size and can be resized at any moment.
+	# Guarded because the renderer is also built off-tree by the headless tests.
 	var viewport := get_viewport()
 	if viewport != null:
 		viewport.size_changed.connect(_fit_camera)
 
-## Frame the whole playable area: the corridor plus the band beside it that can
-## be built on, with a margin. Computed in the camera's own space, so it holds at any view angle and
-## any aspect ratio.
+## Frame the corridor plus the band beside it that can be built on, with a
+## margin. Computed in the camera's own space so it holds at any angle, aspect
+## ratio or projection.
 func _fit_camera() -> void:
-	var cam_cfg: Dictionary = _theme.get("camera", {})
-	var margin := float(cam_cfg.get("margin", 1.12))
+	var cfg: Dictionary = _theme.get("camera", {})
+	var margin := float(cfg.get("margin", 1.18))
 	var basis_inverse := camera.transform.basis.inverse()
 
 	var min_x := INF
@@ -128,8 +175,6 @@ func _fit_camera() -> void:
 		max_x = maxf(max_x, _sim.waypoint_x(i))
 		min_z = minf(min_z, _sim.waypoint_y(i))
 		max_z = maxf(max_z, _sim.waypoint_y(i))
-	# Platforms can be built out to max_distance_from_path on either side, so the
-	# buildable band is part of the playable area and has to be in frame.
 	var reach := _sim.build_max_distance()
 	min_x -= reach
 	max_x += reach
@@ -137,273 +182,365 @@ func _fit_camera() -> void:
 	max_z += reach
 
 	var centre := Vector3((min_x + max_x) * 0.5, 0.0, (min_z + max_z) * 0.5)
-	var local_half_width := 0.0
-	var local_half_height := 0.0
+	var half_width := 0.0
+	var half_height := 0.0
 	for corner in [Vector3(min_x, 0.0, min_z), Vector3(max_x, 0.0, min_z),
 			Vector3(min_x, 0.0, max_z), Vector3(max_x, 0.0, max_z)]:
 		var local: Vector3 = basis_inverse * ((corner as Vector3) - centre)
-		local_half_width = maxf(local_half_width, absf(local.x))
-		local_half_height = maxf(local_half_height, absf(local.y))
+		half_width = maxf(half_width, absf(local.x))
+		half_height = maxf(half_height, absf(local.y))
 
-	# Camera3D.size is the *vertical* extent under orthographic projection, so
-	# the horizontal requirement has to be converted through the aspect ratio.
 	var viewport := get_viewport()
-	var aspect := float(_theme.get("camera", {}).get("fallback_aspect", 16.0 / 9.0))
+	var aspect := float(cfg.get("fallback_aspect", 16.0 / 9.0))
 	if viewport != null:
 		var size := viewport.get_visible_rect().size
 		if size.y > 0.0:
 			aspect = size.x / size.y
-	camera.size = maxf(local_half_height * 2.0, local_half_width * 2.0 / maxf(aspect, 0.0001)) * margin
-	# Under orthographic projection distance does not change framing, only what
-	# the near plane clips; push the camera well clear of the board.
-	camera.position = centre + camera.transform.basis.z * float(cam_cfg.get("distance", 2400.0))
+	var needed := maxf(half_height * 2.0, half_width * 2.0 / maxf(aspect, 0.0001)) * margin
 
-## Ground, corridor and pads. Rebuilt only when a platform is placed, which is
-## why this is not in the frame path.
-func _build_static_geometry() -> void:
-	if _static_root != null:
-		# The cell grid lives outside _static_root because its MultiMesh is
-		# preallocated once; only the scenery is thrown away and rebuilt.
-		remove_child(_static_root)
-		_static_root.queue_free()
-	_static_root = Node3D.new()
-	add_child(_static_root)
+	if camera.projection == Camera3D.PROJECTION_ORTHOGONAL:
+		camera.size = needed
+		camera.position = centre + camera.transform.basis.z * float(cfg.get("distance", 4200.0))
+		return
+	# Perspective: pull back far enough that the required extent fits the frustum.
+	# tan() is fine here - this is presentation, not simulation.
+	var half_fov := deg_to_rad(camera.fov) * 0.5
+	var distance := maxf((needed * 0.5) / tan(half_fov), float(cfg.get("distance", 4200.0)) * 0.25)
+	camera.position = centre + camera.transform.basis.z * distance
 
-	var bounds: Dictionary = _sim._db.map["bounds"]
+# --- static scenery --------------------------------------------------------------
+
+## Ground and corridor, each a single mesh.
+##
+## The previous version emitted one BoxMesh node per path segment per wall plus a
+## disc at every corner - around 140 draw calls before a single entity existed,
+## and visible seams wherever two boxes met. Building the whole corridor as one
+## ArrayMesh with shared vertices removes both problems at once.
+func _build_scenery() -> void:
+	if _scenery != null:
+		remove_child(_scenery)
+		_scenery.queue_free()
+	_scenery = Node3D.new()
+	add_child(_scenery)
+
 	var ground := MeshInstance3D.new()
-	var ground_mesh := PlaneMesh.new()
-	# Generous overshoot: the corridor runs off both edges of the board by design.
-	ground_mesh.size = Vector2(float(bounds["width"]) * 3.0, float(bounds["height"]) * 3.0)
-	ground.mesh = ground_mesh
-	ground.material_override = _flat_material(_color_of(_world.get("ground", "#0b0e13")))
-	ground.position = Vector3(float(bounds["width"]) * 0.5, 0.0, float(bounds["height"]) * 0.5)
-	_static_root.add_child(ground)
+	var plane := PlaneMesh.new()
+	# Far larger than the board: at a shallow camera angle the horizon is a long
+	# way out, and a visible ground edge reads as a rendering bug.
+	plane.size = Vector2(_sim.bounds_width() * 14.0, _sim.bounds_height() * 14.0)
+	ground.mesh = plane
+	ground.material_override = _surface_material(_color_of(_world.get("ground", "#12161d")),
+		float(_world.get("ground_metallic", 0.0)), float(_world.get("ground_roughness", 0.95)))
+	ground.position = Vector3(_sim.bounds_width() * 0.5, 0.0, _sim.bounds_height() * 0.5)
+	_scenery.add_child(ground)
 
-	_build_band()
-	_build_corridor()
-	_build_platforms()
+	var road := MeshInstance3D.new()
+	road.mesh = _corridor_mesh()
+	road.material_override = _surface_material(_color("path"),
+		float(_world.get("path_metallic", 0.15)), float(_world.get("path_roughness", 0.8)))
+	_scenery.add_child(road)
 
-## The corridor is one box per path segment plus one at each interior corner to
-## fill the notch two boxes leave between them. Simple, and it means the walls
-## follow whatever path a map file defines without any authoring step.
-func _build_corridor() -> void:
-	var height := float(_world.get("corridor_height", 6.0))
-	var width := float(_world.get("corridor_width", 46.0))
-	var wall_height := float(_world.get("wall_height", 22.0))
-	var wall_width := float(_world.get("wall_width", 10.0))
-	var floor_material := _flat_material(_color("path"))
-	var wall_material := _lit_flat_material(_color_of(_world.get("wall", "#2b3442")))
+	var walls := MeshInstance3D.new()
+	walls.mesh = _wall_mesh()
+	walls.material_override = _surface_material(_color_of(_world.get("wall", "#39424f")),
+		float(_world.get("wall_metallic", 0.55)), float(_world.get("wall_roughness", 0.42)))
+	_scenery.add_child(walls)
 
-	for i in _sim.waypoint_count() - 1:
-		var ax := _sim.waypoint_x(i)
-		var az := _sim.waypoint_y(i)
-		var bx := _sim.waypoint_x(i + 1)
-		var bz := _sim.waypoint_y(i + 1)
-		var dx := bx - ax
-		var dz := bz - az
-		var length := sqrt(dx * dx + dz * dz)
-		var yaw := atan2(dx, dz)  # render-side only; the sim never uses trigonometry
-		var mid := Vector3((ax + bx) * 0.5, 0.0, (az + bz) * 0.5)
-
-		_add_box(_static_root, mid + Vector3(0.0, height * 0.5, 0.0),
-			Vector3(width, height, length), yaw, floor_material)
-		# A wall down each side of the segment, offset perpendicular to it.
-		var nx := dz / length
-		var nz := -dx / length
-		var offset := (width + wall_width) * 0.5
-		for side in [-1.0, 1.0]:
-			_add_box(_static_root,
-				mid + Vector3(nx * offset * side, wall_height * 0.5, nz * offset * side),
-				Vector3(wall_width, wall_height, length), yaw, wall_material)
-
-	for i in range(1, _sim.waypoint_count() - 1):
-		_add_box(_static_root, Vector3(_sim.waypoint_x(i), height * 0.5, _sim.waypoint_y(i)),
-			Vector3(width, height, width), 0.0, floor_material)
-
-## The buildable grid: ground you own, and the frontier you could buy next.
+## The corridor, as one mesh built from a handful of quad strips.
 ##
-## Drawn because free placement and purchasable ground are both invisible
-## otherwise - a rule the player discovers by clicking and being refused is a
-## badly taught rule.
+## A strip runs the length of the path between two "rails", where a rail is a
+## lateral offset from the centre line at a fixed height. Everything the corridor
+## needs is expressible that way: the road surface is a strip between its two
+## edges, a wall is a vertical strip plus a horizontal cap. Building it this way
+## rather than as one box per segment means corners mitre correctly and the whole
+## thing is a single draw call.
+func _corridor_mesh() -> ArrayMesh:
+	var half := float(_world.get("corridor_width", 76.0)) * 0.5
+	var surface := float(_world.get("corridor_height", 9.0))
+	var builder := _StripBuilder.new(_sim)
+	# Road surface, and a lip down each edge so it reads as a raised slab.
+	builder.strip(-half, surface, half, surface)
+	builder.strip(-half, 0.0, -half, surface)
+	builder.strip(half, surface, half, 0.0)
+	return builder.commit()
+
+func _wall_mesh() -> ArrayMesh:
+	var half := float(_world.get("corridor_width", 76.0)) * 0.5
+	var thickness := float(_world.get("wall_width", 16.0))
+	var height := float(_world.get("wall_height", 34.0))
+	var builder := _StripBuilder.new(_sim)
+	for side: float in [-1.0, 1.0]:
+		var inner := half * side
+		var outer := (half + thickness) * side
+		# Inner face (toward the road), top cap, outer face.
+		builder.strip(inner, 0.0, inner, height, side < 0.0)
+		builder.strip(inner, height, outer, height, side < 0.0)
+		builder.strip(outer, height, outer, 0.0, side < 0.0)
+	return builder.commit()
+
+## Accumulates quad strips along the path into one indexed mesh.
 ##
-## One MultiMesh, not one mesh instance per cell: a 30x17 grid is 500 cells and
-## a couple of hundred of them are visible at any time, which as individual nodes
-## would cost more draw calls than the entire rest of the scene.
-func _build_band() -> void:
-	var height := float(_world.get("band_height", 1.5))
-	var inset := float(_world.get("cell_inset", 3.0))
-	var size := _sim.cell_size() - inset
-	var owned := _color_of(_world.get("band", "#1e4034"))
-	var offered := _color_of(_world.get("band_offer", "#2a3550"))
+## Offsets are mitred at each waypoint - the lateral direction used is
+## perpendicular to the *average* of the incoming and outgoing segment
+## directions - so the outside of a corner does not tear open and the inside does
+## not overlap itself.
+class _StripBuilder:
+	var _sim: Sim
+	var _vertices := PackedVector3Array()
+	var _indices := PackedInt32Array()
+	var _nx := PackedFloat64Array()
+	var _nz := PackedFloat64Array()
 
-	if _cells == null:
-		var mesh := BoxMesh.new()
-		mesh.size = Vector3.ONE
-		var material := StandardMaterial3D.new()
-		material.vertex_color_use_as_albedo = true
-		material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-		material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-		mesh.material = material
-		var mm := MultiMesh.new()
-		mm.transform_format = MultiMesh.TRANSFORM_3D
-		mm.use_colors = true
-		mm.mesh = mesh
-		mm.instance_count = _sim.grid_cols() * _sim.grid_rows()
-		_cells = MultiMeshInstance3D.new()
-		_cells.multimesh = mm
-		add_child(_cells)
+	func _init(sim: Sim) -> void:
+		_sim = sim
+		var count := sim.waypoint_count()
+		_nx.resize(count)
+		_nz.resize(count)
+		for i in count:
+			var dx := 0.0
+			var dz := 0.0
+			if i > 0:
+				dx += sim.waypoint_x(i) - sim.waypoint_x(i - 1)
+				dz += sim.waypoint_y(i) - sim.waypoint_y(i - 1)
+			if i < count - 1:
+				dx += sim.waypoint_x(i + 1) - sim.waypoint_x(i)
+				dz += sim.waypoint_y(i + 1) - sim.waypoint_y(i)
+			var length := sqrt(dx * dx + dz * dz)
+			if length <= 0.0:
+				length = 1.0
+			_nx[i] = dz / length
+			_nz[i] = -dx / length
 
-	var mm_ref := _cells.multimesh
-	var shown := 0
-	for cy in _sim.grid_rows():
-		for cx in _sim.grid_cols():
-			var unlocked := _sim.cell_is_unlocked(cx, cy)
-			var offerable := _sim.cell_is_offerable(cx, cy)
-			if not unlocked and not offerable:
-				continue
-			var tint := owned if unlocked else offered
-			tint.a = float(_world.get("band_alpha", 0.5)) if unlocked \
-				else float(_world.get("band_offer_alpha", 0.28))
-			mm_ref.set_instance_transform(shown, Transform3D(
-				Basis().scaled(Vector3(size, height, size)),
-				to_world(_sim.cell_centre_x(cx), _sim.cell_centre_y(cy), height * 0.5)))
-			mm_ref.set_instance_color(shown, tint)
-			shown += 1
-	mm_ref.visible_instance_count = shown
+	func strip(offset_a: float, height_a: float, offset_b: float, height_b: float,
+			flip: bool = false) -> void:
+		var count := _sim.waypoint_count()
+		var base := _vertices.size()
+		for i in count:
+			var px := _sim.waypoint_x(i)
+			var pz := _sim.waypoint_y(i)
+			_vertices.append(Vector3(px + _nx[i] * offset_a, height_a, pz + _nz[i] * offset_a))
+			_vertices.append(Vector3(px + _nx[i] * offset_b, height_b, pz + _nz[i] * offset_b))
+		for i in count - 1:
+			var a := base + i * 2
+			var b := base + (i + 1) * 2
+			if flip:
+				_indices.append_array([a, a + 1, b, a + 1, b + 1, b])
+			else:
+				_indices.append_array([a, b, a + 1, a + 1, b, b + 1])
 
-## Built platforms. Size, height and colour all climb with tier, so a board reads
-## at a glance: a tall bright tower is where the damage is.
-func _build_platforms() -> void:
-	var base_height := float(_world.get("platform_height", 30.0))
-	var base_radius := float(_world.get("platform_radius", 11.0))
-	var per_tier := float(_world.get("platform_tier_growth", 0.28))
-	var top_colour := _color("platform_max_tier")
-	var base_colour := _color("platform")
+	func commit() -> ArrayMesh:
+		var mesh := ArrayMesh.new()
+		if _vertices.is_empty():
+			return mesh
+		var arrays := []
+		arrays.resize(Mesh.ARRAY_MAX)
+		arrays[Mesh.ARRAY_VERTEX] = _vertices
+		arrays[Mesh.ARRAY_INDEX] = _indices
+		var normals := PackedVector3Array()
+		normals.resize(_vertices.size())
+		normals.fill(Vector3.UP)
+		arrays[Mesh.ARRAY_NORMAL] = normals
+		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+		# Real normals from the geometry, so lighting follows the surfaces rather
+		# than the placeholder ups above.
+		var tool := SurfaceTool.new()
+		tool.create_from(mesh, 0)
+		tool.generate_normals()
+		mesh.clear_surfaces()
+		tool.commit(mesh)
+		return mesh
 
-	for i in _sim.t_count:
-		var tier := _sim.platform_tier(i)
-		var max_tier := maxi(_sim.platform_max_tier(_sim.platform_blueprint(i)) - 1, 1)
-		var growth := 1.0 + per_tier * float(tier)
-		var fraction := float(tier) / float(max_tier)
-		var family_colour: Color = base_colour if _sim.platform_splash(i) <= 0.0 \
-			else _color_of(_world.get("platform_cannon", "#c98a5b"))
-		var material := _lit_flat_material(family_colour.lerp(top_colour, fraction))
+# --- instanced layers -------------------------------------------------------------
 
-		var plinth := MeshInstance3D.new()
-		var disc := CylinderMesh.new()
-		disc.top_radius = base_radius * 1.5
-		disc.bottom_radius = base_radius * 1.6
-		disc.height = float(_world.get("pad_height", 8.0))
-		plinth.mesh = disc
-		plinth.material_override = _lit_flat_material(_color("pad_occupied"))
-		plinth.position = to_world(_sim.t_x[i], _sim.t_y[i], disc.height * 0.5)
-		_static_root.add_child(plinth)
-
-		var turret := MeshInstance3D.new()
-		var barrel := CylinderMesh.new()
-		barrel.top_radius = base_radius * growth * 0.65
-		barrel.bottom_radius = base_radius * growth
-		barrel.height = base_height * growth
-		turret.mesh = barrel
-		turret.material_override = material
-		turret.position = to_world(_sim.t_x[i], _sim.t_y[i], disc.height + barrel.height * 0.5)
-		_static_root.add_child(turret)
-
-func _add_box(parent: Node3D, centre: Vector3, size: Vector3, yaw: float, material: Material) -> void:
-	var node := MeshInstance3D.new()
-	var box := BoxMesh.new()
-	box.size = size
-	node.mesh = box
-	node.material_override = material
-	node.position = centre
-	node.rotation = Vector3(0.0, yaw, 0.0)
-	parent.add_child(node)
-
-func _make_layer(capacity: int, material: Material) -> MultiMeshInstance3D:
+func _build_cell_layer() -> void:
 	var mesh := BoxMesh.new()
 	mesh.size = Vector3.ONE
+	var material := StandardMaterial3D.new()
+	material.vertex_color_use_as_albedo = true
+	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	mesh.material = material
+	_cells = _instanced(mesh, _sim.grid_cols() * _sim.grid_rows())
+	add_child(_cells)
+
+func _build_turret_layers() -> void:
+	var limit := _sim.t_used.size()
+	var base := CylinderMesh.new()
+	base.top_radius = float(_world.get("platform_radius", 18.0)) * 1.45
+	base.bottom_radius = float(_world.get("platform_radius", 18.0)) * 1.6
+	base.height = float(_world.get("pad_height", 12.0))
+	base.material = _instanced_material()
+	_turret_bases = _instanced(base, limit)
+
+	var body := CylinderMesh.new()
+	body.top_radius = float(_world.get("platform_radius", 18.0)) * 0.7
+	body.bottom_radius = float(_world.get("platform_radius", 18.0))
+	body.height = float(_world.get("platform_height", 48.0))
+	body.material = _instanced_material()
+	_turret_bodies = _instanced(body, limit)
+
+	# A barrel makes the turret read as a machine with a front, and makes it
+	# obvious at a glance what each one is shooting at.
+	var barrel := BoxMesh.new()
+	barrel.size = Vector3.ONE
+	barrel.material = _instanced_material()
+	_turret_barrels = _instanced(barrel, limit)
+
+	add_child(_turret_bases)
+	add_child(_turret_bodies)
+	add_child(_turret_barrels)
+
+func _build_entity_layers() -> void:
+	# One layer per enemy class, so each can have its own silhouette. Class is
+	# readable from shape as well as colour, which section 6.1 of the plan makes
+	# a correctness requirement rather than a nicety.
+	_enemy_layers.clear()
+	for type_index in _sim.enemy_type_count():
+		var mesh := _enemy_mesh(_sim.enemy_id(type_index))
+		mesh.material = _instanced_material()
+		var layer := _instanced(mesh, _sim.e_alive.size())
+		_enemy_layers.append(layer)
+		add_child(layer)
+
+	var bar := BoxMesh.new()
+	bar.size = Vector3.ONE
+	var bar_material := StandardMaterial3D.new()
+	bar_material.vertex_color_use_as_albedo = true
+	bar_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	bar_material.disable_receive_shadows = true
+	bar.material = bar_material
+	_hp_bars = _instanced(bar, _sim.e_alive.size())
+	add_child(_hp_bars)
+
+	var tracer := BoxMesh.new()
+	tracer.size = Vector3.ONE
+	var tracer_material := StandardMaterial3D.new()
+	tracer_material.vertex_color_use_as_albedo = true
+	tracer_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	tracer_material.emission_enabled = true
+	tracer_material.emission = _color("projectile")
+	tracer_material.emission_energy_multiplier = 3.2
+	tracer.material = tracer_material
+	_projectiles = _instanced(tracer, _sim.p_alive.size())
+	add_child(_projectiles)
+
+## Distinct silhouettes per drone class. Skitters are small and pointed, Walkers
+## are boxy, Bulwarks are heavy slabs.
+func _enemy_mesh(enemy_id: String) -> Mesh:
+	match enemy_id:
+		"swarm":
+			var prism := PrismMesh.new()
+			prism.size = Vector3.ONE
+			return prism
+		"heavy":
+			var slab := BoxMesh.new()
+			slab.size = Vector3(1.15, 1.0, 1.4)
+			return slab
+		_:
+			var box := BoxMesh.new()
+			box.size = Vector3.ONE
+			return box
+
+func _instanced_material() -> StandardMaterial3D:
+	var material := StandardMaterial3D.new()
+	material.vertex_color_use_as_albedo = true
+	material.metallic = float(_world.get("enemy_metallic", 0.12))
+	material.roughness = float(_world.get("enemy_roughness", 0.62))
+	return material
+
+func _instanced(mesh: Mesh, capacity: int) -> MultiMeshInstance3D:
 	var mm := MultiMesh.new()
 	mm.transform_format = MultiMesh.TRANSFORM_3D
 	mm.use_colors = true
 	mm.mesh = mesh
-	mm.instance_count = capacity
+	mm.instance_count = maxi(capacity, 1)
 	mm.visible_instance_count = 0
 	var node := MultiMeshInstance3D.new()
 	node.multimesh = mm
+	node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 	# The corridor runs off the edge of the board; without a generous custom AABB
 	# Godot culls instances whose transforms it has not measured.
-	node.custom_aabb = AABB(Vector3(-4000, -400, -4000), Vector3(8000, 800, 8000))
+	node.custom_aabb = AABB(Vector3(-6000, -600, -6000), Vector3(14000, 1200, 14000))
 	return node
 
-## The three layers whose instance counts scale with entities. Named rather than
-## positional: the cell grid is a MultiMesh too, and anything keying off child
-## order silently breaks the moment another one is added.
-func entity_layers() -> Array:
-	return [_enemies, _hp_bars, _projectiles]
+# --- board state (turrets and owned ground) ---------------------------------------
 
-func enemy_layer() -> MultiMeshInstance3D: return _enemies
-func hp_bar_layer() -> MultiMeshInstance3D: return _hp_bars
-func projectile_layer() -> MultiMeshInstance3D: return _projectiles
-func cell_layer() -> MultiMeshInstance3D: return _cells
+## Rebuilt when the board changes - a turret placed or upgraded, or ground
+## bought. Not per frame.
+func refresh_board() -> void:
+	_refresh_cells()
+	_refresh_turrets()
 
-## Called when a platform is built, so the static geometry picks it up.
-func rebuild_static() -> void:
-	_build_static_geometry()
+func _refresh_cells() -> void:
+	var mm := _cells.multimesh
+	var height := float(_world.get("band_height", 2.0))
+	var size := _sim.cell_size() - float(_world.get("cell_inset", 5.0))
+	var owned := _color_of(_world.get("band", "#1e4034"))
+	var offered := _color_of(_world.get("band_offer", "#39506e"))
+	var shown := 0
+	for cy in _sim.grid_rows():
+		for cx in _sim.grid_cols():
+			var unlocked := _sim.cell_is_unlocked(cx, cy)
+			if not unlocked and not _sim.cell_is_offerable(cx, cy):
+				continue
+			var tint := owned if unlocked else offered
+			tint.a = float(_world.get("band_alpha", 0.55)) if unlocked \
+				else float(_world.get("band_offer_alpha", 0.3))
+			mm.set_instance_transform(shown, Transform3D(
+				Basis().scaled(Vector3(size, height, size)),
+				to_world(_sim.cell_centre_x(cx), _sim.cell_centre_y(cy), height * 0.5)))
+			mm.set_instance_color(shown, tint)
+			shown += 1
+	mm.visible_instance_count = shown
 
-## Show a ghost of what would be built (or the range of what is hovered) under
-## the cursor. `radius` <= 0 hides it.
-func set_build_cursor(x: float, y: float, radius: float, allowed: bool) -> void:
-	if _cursor == null:
-		_build_cursor_nodes()
-	if radius <= 0.0:
-		_cursor.visible = false
-		return
-	_cursor.visible = true
-	_cursor.position = to_world(x, y, float(_world.get("band_height", 1.5)) + 0.5)
-	var disc := _cursor_disc.mesh as CylinderMesh
-	disc.top_radius = radius
-	disc.bottom_radius = radius
-	var tint: Color = _color("good") if allowed else _color("bad")
-	tint.a = float(_world.get("cursor_alpha", 0.16))
-	(_cursor_disc.material_override as StandardMaterial3D).albedo_color = tint
-	var solid := tint
-	solid.a = 0.85
-	(_cursor_ghost.material_override as StandardMaterial3D).albedo_color = solid
+func _refresh_turrets() -> void:
+	var pad_height := float(_world.get("pad_height", 12.0))
+	var body_height := float(_world.get("platform_height", 48.0))
+	var growth := float(_world.get("platform_tier_growth", 0.28))
+	var top_colour := _color("platform_max_tier")
+	var ballistic := _color("platform")
+	var cannon := _color_of(_world.get("platform_cannon", "#c98a5b"))
+	var plinth := _color("pad_occupied")
 
-func _build_cursor_nodes() -> void:
-	_cursor = Node3D.new()
-	add_child(_cursor)
-	_cursor_disc = MeshInstance3D.new()
-	var disc := CylinderMesh.new()
-	disc.height = 1.0
-	_cursor_disc.mesh = disc
-	_cursor_disc.material_override = _transparent_material(Color.WHITE, 0.16)
-	_cursor.add_child(_cursor_disc)
-	_cursor_ghost = MeshInstance3D.new()
-	var ghost := CylinderMesh.new()
-	ghost.top_radius = float(_world.get("platform_radius", 11.0)) * 0.65
-	ghost.bottom_radius = float(_world.get("platform_radius", 11.0))
-	ghost.height = float(_world.get("platform_height", 30.0))
-	_cursor_ghost.mesh = ghost
-	_cursor_ghost.material_override = _transparent_material(Color.WHITE, 0.85)
-	_cursor_ghost.position = Vector3(0.0, ghost.height * 0.5, 0.0)
-	_cursor.add_child(_cursor_ghost)
+	var bases := _turret_bases.multimesh
+	var bodies := _turret_bodies.multimesh
+	for i in _sim.t_count:
+		var tier := _sim.platform_tier(i)
+		var max_tier := maxi(_sim.platform_max_tier(_sim.platform_blueprint(i)) - 1, 1)
+		var scale := 1.0 + growth * float(tier)
+		var fraction := float(tier) / float(max_tier)
+		var family: Color = cannon if _sim.platform_splash(i) > 0.0 else ballistic
+		var tint := family.lerp(top_colour, fraction)
 
-# --- per-frame -----------------------------------------------------------------
+		bases.set_instance_transform(i, Transform3D(Basis(),
+			to_world(_sim.t_x[i], _sim.t_y[i], pad_height * 0.5)))
+		bases.set_instance_color(i, plinth)
+
+		bodies.set_instance_transform(i, Transform3D(
+			Basis().scaled(Vector3(scale, scale, scale)),
+			to_world(_sim.t_x[i], _sim.t_y[i], pad_height + body_height * scale * 0.5)))
+		bodies.set_instance_color(i, tint)
+	bases.visible_instance_count = _sim.t_count
+	bodies.visible_instance_count = _sim.t_count
+
+# --- per frame ---------------------------------------------------------------------
 
 func update_visuals(alpha: float) -> void:
 	_update_enemies(alpha)
 	_update_projectiles(alpha)
+	_update_barrels()
 
 func _update_enemies(alpha: float) -> void:
-	var body_mm := _enemies.multimesh
 	var bar_mm := _hp_bars.multimesh
-	var enemy_height := float(_world.get("enemy_height", 18.0))
-	var bar_lift := float(_world.get("hp_bar_lift", 34.0))
-	var bar_width := float(_world.get("hp_bar_width", 26.0))
-	var bar_thickness := float(_world.get("hp_bar_height", 4.0))
-	var visible_count := 0
+	var enemy_height := float(_world.get("enemy_height", 26.0))
+	var bar_lift := float(_world.get("hp_bar_lift", 50.0))
+	var bar_width := float(_world.get("hp_bar_width", 38.0))
+	var bar_thickness := float(_world.get("hp_bar_height", 6.0))
+
+	var per_layer := PackedInt32Array()
+	per_layer.resize(_enemy_layers.size())
+	per_layer.fill(0)
+	var bars := 0
 
 	for i in _sim.e_alive.size():
 		if _sim.e_alive[i] == 0:
@@ -414,32 +551,43 @@ func _update_enemies(alpha: float) -> void:
 		_sim.sample_for_render(prog, _sim.e_offset[i])
 		var px := _sim.out_x()
 		var pz := _sim.out_y()
-		var size := _sim.enemy_radius(_sim.e_type[i]) * 2.0
+		var type_index: int = _sim.e_type[i]
+		# Footprint is the enemy's own radius; height scales with it so a Bulwark
+		# is visibly a bigger machine than a Skitter, not just a wider one.
+		var radius := _sim.enemy_radius(type_index)
+		var footprint := radius * 2.0
+		var height := enemy_height * (radius / _reference_radius)
 
-		_basis = Basis().scaled(Vector3(size, enemy_height, size))
-		_xf = Transform3D(_basis, Vector3(px, enemy_height * 0.5, pz))
-		body_mm.set_instance_transform(visible_count, _xf)
+		var layer := _enemy_layers[clampi(type_index, 0, _enemy_layers.size() - 1)]
+		var mm := layer.multimesh
+		var slot := per_layer[type_index]
+		mm.set_instance_transform(slot, Transform3D(
+			Basis().scaled(Vector3(footprint, height, footprint)),
+			Vector3(px, height * 0.5, pz)))
 
 		var hp_max: float = float(_sim.e_hp_max[i])
 		var fraction: float = 0.0 if hp_max <= 0.0 else clampf(float(_sim.e_hp[i]) / hp_max, 0.0, 1.0)
-		body_mm.set_instance_color(visible_count, _enemy_hurt_color.lerp(_enemy_color, fraction))
+		mm.set_instance_color(slot, _enemy_hurt_color.lerp(_enemy_color, fraction))
+		per_layer[type_index] = slot + 1
 
 		var filled := bar_width * fraction
-		_basis = Basis().scaled(Vector3(maxf(filled, 0.001), bar_thickness, bar_thickness))
-		_xf = Transform3D(_basis, Vector3(px - (bar_width - filled) * 0.5, bar_lift, pz))
-		bar_mm.set_instance_transform(visible_count, _xf)
-		bar_mm.set_instance_color(visible_count, _bar_color if fraction > 0.35 else _bar_back_color.lerp(_bar_color, 0.6))
+		bar_mm.set_instance_transform(bars, Transform3D(
+			Basis().scaled(Vector3(maxf(filled, 0.001), bar_thickness, bar_thickness)),
+			Vector3(px - (bar_width - filled) * 0.5, bar_lift, pz)))
+		bar_mm.set_instance_color(bars, _bar_color if fraction > 0.35 else _bar_back_color.lerp(_bar_color, 0.6))
+		bars += 1
 
-		visible_count += 1
-	body_mm.visible_instance_count = visible_count
-	bar_mm.visible_instance_count = visible_count
+	for index in _enemy_layers.size():
+		_enemy_layers[index].multimesh.visible_instance_count = per_layer[index]
+	bar_mm.visible_instance_count = bars
 
 func _update_projectiles(alpha: float) -> void:
 	var mm := _projectiles.multimesh
-	var length := float(_world.get("projectile_length", 16.0))
-	var width := float(_world.get("projectile_width", 3.0))
-	var lift := float(_world.get("projectile_lift", 14.0))
-	var visible_count := 0
+	var length := float(_world.get("projectile_length", 24.0))
+	var width := float(_world.get("projectile_width", 5.0))
+	var lift := float(_world.get("projectile_lift", 20.0))
+	var tint := _color("projectile")
+	var shown := 0
 
 	for i in _sim.p_alive.size():
 		if _sim.p_alive[i] == 0:
@@ -455,46 +603,146 @@ func _update_projectiles(alpha: float) -> void:
 		else:
 			dx /= travel
 			dz /= travel
-		# Build the basis straight from the direction vector - the tracer's long
-		# axis is Z, so Z is the direction and X is its perpendicular.
+		# A shell is fatter and shorter than a bullet, so the two families read
+		# differently in flight.
+		var is_shell := _sim.p_splash[i] > 0.0
+		var long_axis := length * (0.55 if is_shell else 1.0)
+		var girth := width * (2.0 if is_shell else 1.0)
 		_basis = Basis(
-			Vector3(dz * width, 0.0, -dx * width),
-			Vector3(0.0, width, 0.0),
-			Vector3(dx * length, 0.0, dz * length))
-		_xf = Transform3D(_basis, Vector3(px, lift, pz))
-		mm.set_instance_transform(visible_count, _xf)
-		mm.set_instance_color(visible_count, Color.WHITE)
-		visible_count += 1
-	mm.visible_instance_count = visible_count
+			Vector3(dz * girth, 0.0, -dx * girth),
+			Vector3(0.0, girth, 0.0),
+			Vector3(dx * long_axis, 0.0, dz * long_axis))
+		mm.set_instance_transform(shown, Transform3D(_basis, Vector3(px, lift, pz)))
+		mm.set_instance_color(shown, tint)
+		shown += 1
+	mm.visible_instance_count = shown
 
-# --- materials -----------------------------------------------------------------
+## Swing each barrel toward whatever its turret last fired at. Smoothed here
+## rather than in the simulation: the sim's aim is instant and authoritative, and
+## this is only how it looks.
+func _update_barrels() -> void:
+	var mm := _turret_barrels.multimesh
+	var pad_height := float(_world.get("pad_height", 12.0))
+	var body_height := float(_world.get("platform_height", 48.0))
+	var growth := float(_world.get("platform_tier_growth", 0.28))
+	var barrel_length := float(_world.get("barrel_length", 34.0))
+	var barrel_radius := float(_world.get("barrel_radius", 5.5))
+	var turn := float(_world.get("turret_turn_rate", 9.0))
+	var top_colour := _color("platform_max_tier")
+	var ballistic := _color("platform")
+	var cannon := _color_of(_world.get("platform_cannon", "#c98a5b"))
 
-func _lit_material() -> StandardMaterial3D:
-	var material := StandardMaterial3D.new()
-	material.vertex_color_use_as_albedo = true
-	material.roughness = 0.75
-	return material
+	for i in _sim.t_count:
+		var target := atan2(_sim.t_aim_x[i], _sim.t_aim_y[i])
+		var current: float = _barrel_angle[i] if i < _barrel_angle.size() else target
+		# Shortest way round, so a turret never spins the long way to track a
+		# target that crossed behind it.
+		var delta := wrapf(target - current, -PI, PI)
+		current = current + delta * clampf(turn * 0.0333, 0.0, 1.0)
+		if i < _barrel_angle.size():
+			_barrel_angle[i] = current
 
-func _billboard_material() -> StandardMaterial3D:
-	var material := StandardMaterial3D.new()
-	material.vertex_color_use_as_albedo = true
-	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	material.disable_receive_shadows = true
-	return material
+		var scale := 1.0 + growth * float(_sim.platform_tier(i))
+		var dx := sin(current)
+		var dz := cos(current)
+		var lift := pad_height + body_height * scale * 0.78
+		var reach := barrel_length * scale
+		var girth := barrel_radius * scale
+		_basis = Basis(
+			Vector3(dz * girth, 0.0, -dx * girth),
+			Vector3(0.0, girth, 0.0),
+			Vector3(dx * reach, 0.0, dz * reach))
+		mm.set_instance_transform(i, Transform3D(_basis,
+			Vector3(_sim.t_x[i] + dx * reach * 0.5, lift, _sim.t_y[i] + dz * reach * 0.5)))
+		var max_tier := maxi(_sim.platform_max_tier(_sim.platform_blueprint(i)) - 1, 1)
+		var family: Color = cannon if _sim.platform_splash(i) > 0.0 else ballistic
+		mm.set_instance_color(i, family.lerp(top_colour, float(_sim.platform_tier(i)) / float(max_tier)))
+	mm.visible_instance_count = _sim.t_count
 
-func _glow_material(tint: Color) -> StandardMaterial3D:
+# --- build cursor -------------------------------------------------------------------
+
+func set_build_cursor(x: float, y: float, radius: float, allowed: bool) -> void:
+	if _cursor == null:
+		_build_cursor_nodes()
+	if radius <= 0.0:
+		_cursor.visible = false
+		return
+	_cursor.visible = true
+	_cursor.position = to_world(x, y, float(_world.get("band_height", 2.0)) + 0.6)
+	var disc := _cursor_disc.mesh as CylinderMesh
+	disc.top_radius = radius
+	disc.bottom_radius = radius
+	var tint: Color = _color("good") if allowed else _color("bad")
+	tint.a = float(_world.get("cursor_alpha", 0.16))
+	(_cursor_disc.material_override as StandardMaterial3D).albedo_color = tint
+	var solid := tint
+	solid.a = 0.8
+	(_cursor_ghost.material_override as StandardMaterial3D).albedo_color = solid
+
+func _build_cursor_nodes() -> void:
+	_cursor = Node3D.new()
+	add_child(_cursor)
+	_cursor_disc = MeshInstance3D.new()
+	var disc := CylinderMesh.new()
+	disc.height = 1.0
+	_cursor_disc.mesh = disc
+	_cursor_disc.material_override = _transparent_material(Color.WHITE, 0.16)
+	_cursor_disc.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_cursor.add_child(_cursor_disc)
+	_cursor_ghost = MeshInstance3D.new()
+	var ghost := CylinderMesh.new()
+	ghost.top_radius = float(_world.get("platform_radius", 18.0)) * 0.7
+	ghost.bottom_radius = float(_world.get("platform_radius", 18.0))
+	ghost.height = float(_world.get("platform_height", 48.0))
+	_cursor_ghost.mesh = ghost
+	_cursor_ghost.material_override = _transparent_material(Color.WHITE, 0.8)
+	_cursor_ghost.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_cursor_ghost.position = Vector3(0.0, ghost.height * 0.5, 0.0)
+	_cursor.add_child(_cursor_ghost)
+
+# --- accessors used by tests ----------------------------------------------------------
+
+## The layers whose instance counts scale with entities. Named rather than
+## positional: the cell grid and the turret parts are MultiMeshes too, and
+## anything keying off child order breaks the moment another one is added.
+func entity_layers() -> Array:
+	var layers: Array = []
+	layers.append_array(_enemy_layers)
+	layers.append(_hp_bars)
+	layers.append(_projectiles)
+	return layers
+
+func enemy_layer(type_index: int = 0) -> MultiMeshInstance3D: return _enemy_layers[type_index]
+func enemy_layer_count() -> int: return _enemy_layers.size()
+func hp_bar_layer() -> MultiMeshInstance3D: return _hp_bars
+func projectile_layer() -> MultiMeshInstance3D: return _projectiles
+func cell_layer() -> MultiMeshInstance3D: return _cells
+func turret_layers() -> Array: return [_turret_bases, _turret_bodies, _turret_barrels]
+
+## Total enemies currently drawn, across every class layer.
+func drawn_enemy_count() -> int:
+	var total := 0
+	for layer in _enemy_layers:
+		total += layer.multimesh.visible_instance_count
+	return total
+
+## Kept for the call sites that still say "rebuild the static geometry".
+func rebuild_static() -> void:
+	refresh_board()
+
+# --- materials -------------------------------------------------------------------------
+
+func _surface_material(tint: Color, metallic: float, roughness: float) -> StandardMaterial3D:
 	var material := StandardMaterial3D.new()
 	material.albedo_color = tint
-	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	material.emission_enabled = true
-	material.emission = tint
-	material.emission_energy_multiplier = 1.6
-	return material
-
-func _flat_material(tint: Color) -> StandardMaterial3D:
-	var material := StandardMaterial3D.new()
-	material.albedo_color = tint
-	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	material.metallic = metallic
+	material.roughness = roughness
+	# Double-sided. The corridor is a generated strip mesh and getting the
+	# winding right on every face of every mitred corner is fiddly and easy to
+	# regress; a back-facing wall renders as a black slot, which is exactly what
+	# it did. Culling saves nothing here - it is one mesh of a few hundred
+	# triangles - so the robust option is the correct one.
+	material.cull_mode = BaseMaterial3D.CULL_DISABLED
 	return material
 
 func _transparent_material(tint: Color, alpha: float) -> StandardMaterial3D:
@@ -504,12 +752,6 @@ func _transparent_material(tint: Color, alpha: float) -> StandardMaterial3D:
 	material.albedo_color = colour
 	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	return material
-
-func _lit_flat_material(tint: Color) -> StandardMaterial3D:
-	var material := StandardMaterial3D.new()
-	material.albedo_color = tint
-	material.roughness = 0.7
 	return material
 
 func _color(key: String) -> Color:
