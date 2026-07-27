@@ -51,6 +51,15 @@
    1. CONSTANTS & CONFIG
    --------------------------------------------------------------------- */
 
+/* Demo build. One flag, flipped to true, produces the store-demo cut: the
+   tutorial plus the first three wards, with everything past them shown as
+   locked rather than hidden — a demo that hides the rest of the game sells
+   nothing. Left false here so the full build is the default and the demo can
+   never ship by accident. */
+const DEMO = false;
+const DEMO_WARDS = 3;
+const demoLocked = (i) => DEMO && i >= DEMO_WARDS;
+
 const W = 1280, H = 800;
 const TILE = 40, COLS = 32, ROWS = 16;
 const PLAY_X = 0, PLAY_Y = 96;              // play field origin inside canvas
@@ -488,6 +497,8 @@ const Options = {
   shake: true,        // camera kick on big events
   marks: false,       // shape/letter tags so nothing depends on colour alone
   stickyWork: false,  // tap to start a job instead of holding the key
+  autoPause: true,    // freeze the shift when the window or a pad goes away
+  perfHud: false,     // frame-time overlay, so a real machine can be measured
 
   apply() {
     if (Sound.master) Sound.master.gain.value = this.master;
@@ -507,13 +518,90 @@ const OPTION_ROWS = [
   { key: "marks",  name: "High-contrast marks", kind: "bool",
     blurb: "Adds letters and shapes so nothing depends on colour alone." },
   { key: "stickyWork", name: "Tap to work", kind: "bool",
-    blurb: "Tap the work key to start a job instead of holding it down." }
+    blurb: "Tap the work key to start a job instead of holding it down." },
+  { key: "autoPause", name: "Pause when I look away", kind: "bool",
+    blurb: "Freezes the shift if the window loses focus or a pad unplugs." },
+  { key: "perfHud", name: "Show frame rate", kind: "bool",
+    blurb: "Frames per second and frame time, top right." },
+  /* An action row, not a toggle. requestFullscreen is only honoured inside a
+     real user gesture, and this screen reads its keys a frame later from the
+     Pressed set — so the run() below is called from the keydown listener
+     itself. See the "options action rows" block in the input section. */
+  { key: "fullscreen", name: "Fullscreen", kind: "action",
+    blurb: "F11 works too, wherever you are.",
+    state: () => (isFullscreen() ? "ON" : "OFF"),
+    run: () => toggleFullscreen() },
+  { key: "controls", name: "Change controls", kind: "action",
+    blurb: "Rebind every key for both medics.",
+    state: () => "OPEN",
+    run: () => { Game.controlsFrom = "options"; Game.screen = "controls";
+                 Game.controlCursor = 0; Game.rebind = null; Sound.play("menu"); } },
+  { key: "resetControls", name: "Reset controls to default", kind: "action",
+    state: () => "RESET",
+    run: () => { resetControls(); Save.touch(); Sound.play("done"); } }
 ];
 
-const CONTROLS = [
+/* Two medics on one keyboard, and until now on one hard-coded keyboard. WASD
+   plus arrows is unplayable on AZERTY, on Dvorak, and for anyone who needs the
+   two players further apart than this layout puts them — and a game that cannot
+   be rebound is a game a chunk of players simply cannot play. CONTROLS keeps
+   its identity (the array and its two objects are mutated in place) because
+   movement, menus and the pad layer all hold references to it. */
+const CONTROL_ACTIONS = [
+  { key: "up",       name: "Up" },
+  { key: "down",     name: "Down" },
+  { key: "left",     name: "Left" },
+  { key: "right",    name: "Right" },
+  { key: "interact", name: "Pick up / drop" },
+  { key: "use",      name: "Work / throw" },
+  { key: "sprint",   name: "Sprint" }
+];
+const DEFAULT_CONTROLS = [
   { up: "KeyW", down: "KeyS", left: "KeyA", right: "KeyD", interact: "KeyE", use: "KeyQ", sprint: "ShiftLeft" },
   { up: "ArrowUp", down: "ArrowDown", left: "ArrowLeft", right: "ArrowRight", interact: "Slash", use: "Period", sprint: "ShiftRight" }
 ];
+const CONTROLS = DEFAULT_CONTROLS.map(c => Object.assign({}, c));
+
+/* Codes the rebinder refuses to hand out. Escape cancels the capture itself,
+   and the rest are the menu verbs — binding "Work" to Enter would leave the
+   player unable to confirm anything on the results screen. */
+const RESERVED_CODES = new Set(["Escape", "Enter", "NumpadEnter", "F1", "F3", "F5", "F11", "Tab"]);
+
+/** A key code as a player reads it, not as the browser spells it. */
+function keyLabel(code) {
+  if (!code) return "—";
+  const map = {
+    ArrowUp: "↑", ArrowDown: "↓", ArrowLeft: "←", ArrowRight: "→",
+    ShiftLeft: "L Shift", ShiftRight: "R Shift", ControlLeft: "L Ctrl", ControlRight: "R Ctrl",
+    AltLeft: "L Alt", AltRight: "R Alt", Space: "Space", Slash: "/", Period: ".",
+    Comma: ",", Semicolon: ";", Quote: "'", BracketLeft: "[", BracketRight: "]",
+    Backslash: "\\", Minus: "-", Equal: "=", Backquote: "`", CapsLock: "Caps"
+  };
+  if (map[code]) return map[code];
+  if (code.startsWith("Key")) return code.slice(3);
+  if (code.startsWith("Digit")) return code.slice(5);
+  if (code.startsWith("Numpad")) return "Num " + code.slice(6);
+  return code;
+}
+
+/** Bind one action, swapping with whoever already holds that key.
+    Swapping rather than clearing means no action is ever left unbound, which
+    is the state a player cannot recover from without opening this screen
+    again — and they may have just unbound the key that opens it. */
+function bindControl(slot, action, code) {
+  if (RESERVED_CODES.has(code)) return "reserved";
+  const old = CONTROLS[slot][action];
+  if (old === code) return "same";
+  for (let s = 0; s < CONTROLS.length; s++)
+    for (const a of CONTROL_ACTIONS)
+      if (CONTROLS[s][a.key] === code) CONTROLS[s][a.key] = old;
+  CONTROLS[slot][action] = code;
+  return "ok";
+}
+
+function resetControls() {
+  DEFAULT_CONTROLS.forEach((d, i) => Object.assign(CONTROLS[i], d));
+}
 
 /* --- Playable medics: same plush body, distinct skin/hair/accessory.
    Scrub color stays per-player-slot (P1 blue, P2 coral) so you always know
@@ -591,12 +679,81 @@ const SWALLOW = new Set([
   "KeyW", "KeyA", "KeyS", "KeyD", "KeyQ", "KeyE", "KeyN", "KeyM", "Escape", "ShiftLeft", "ShiftRight"
 ]);
 
+/* --- fullscreen ----------------------------------------------------------
+   Only ever called from inside a keydown listener: the browser grants
+   requestFullscreen in a user gesture and refuses it a frame later, which is
+   where every other key in this game is read. */
+function isFullscreen() {
+  return !!(document.fullscreenElement || document.webkitFullscreenElement);
+}
+function toggleFullscreen() {
+  try {
+    if (isFullscreen()) {
+      (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+    } else {
+      const el = document.documentElement;
+      (el.requestFullscreen || el.webkitRequestFullscreen).call(el);
+    }
+  } catch (err) { /* a browser that refuses is not a reason to stop playing */ }
+}
+document.addEventListener("fullscreenchange", fitCanvasSafe);
+document.addEventListener("webkitfullscreenchange", fitCanvasSafe);
+function fitCanvasSafe() { try { fitCanvas(); } catch (err) {} }
+
+/* --- auto-pause ----------------------------------------------------------
+   Alt-tabbing out of a timed shift used to keep the clock running: patients
+   walked out and lives were lost while the window was not even visible. The
+   same is true of a pad whose battery dies mid-shift. Both now stop the game
+   the way a human would expect, and say why. */
+function autoPause(reason) {
+  if (!Options.autoPause) return;
+  if (Game.screen !== "play") return;
+  Game.screen = "paused";
+  Game.pauseReason = reason;
+  try { Sound.play("menu"); } catch (err) {}
+}
+
 window.addEventListener("keydown", (e) => {
   if (SWALLOW.has(e.code)) e.preventDefault();
+
+  /* Rebinding swallows the key whole: it is a binding, not an input. Escape
+     cancels, and a reserved code is rejected with a message rather than
+     silently ignored. */
+  if (Game.rebind) {
+    e.preventDefault();
+    if (e.code === "Escape") { Game.rebind = null; Sound.play("drop"); return; }
+    const r = Game.rebind;
+    const res = bindControl(r.slot, r.action, e.code);
+    if (res === "reserved") {
+      Game.rebindMsg = keyLabel(e.code) + " is reserved for menus";
+      Sound.play("error");
+    } else {
+      Game.rebindMsg = "";
+      Game.rebind = null;
+      Save.touch();
+      Sound.play(res === "ok" ? "done" : "menu");
+    }
+    return;
+  }
+
+  /* Options action rows run HERE rather than in the frame handler, because
+     fullscreen is only granted inside the gesture. The code is then hidden
+     from Pressed so the frame handler cannot act on it twice. */
+  if (Game.screen === "options" && OPTION_CONFIRM.has(e.code)) {
+    const row = OPTION_ROWS[Game.optionCursor];
+    if (row && row.kind === "action") {
+      e.preventDefault();
+      Sound.init();
+      row.run();
+      return;
+    }
+  }
+
   if (!Keys[e.code]) Pressed[e.code] = true;
   Keys[e.code] = true; KbHeld[e.code] = true;
   Sound.init();                          // browsers need a gesture before audio
 }, { passive: false });
+const OPTION_CONFIRM = new Set(["KeyE", "Enter", "NumpadEnter", "Slash", "Space"]);
 
 window.addEventListener("keyup", (e) => {
   if (SWALLOW.has(e.code)) e.preventDefault();
@@ -608,6 +765,13 @@ window.addEventListener("keyup", (e) => {
 window.addEventListener("blur", () => {
   for (const k in Keys) Keys[k] = false;
   for (const k in KbHeld) KbHeld[k] = false;
+  autoPause("Window lost focus");
+});
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) autoPause("Game was hidden");
+});
+window.addEventListener("gamepaddisconnected", () => {
+  autoPause("Controller disconnected");
 });
 
 const wasPressed = (code) => !!Pressed[code];
@@ -2536,6 +2700,10 @@ const Game = {
   wipeHold: 0,
   wipeDone: 0,
   optionCursor: 0,
+  controlCursor: 0,        // row on the rebinding screen
+  rebind: null,            // { slot, action } while waiting for a key
+  rebindMsg: "",
+  pauseReason: "",         // why the shift froze, when it was not the player
   optionsFrom: "title",
   daily: false,           // true while a Daily Shift is being played
   dailyDef: null,
@@ -2644,8 +2812,18 @@ const Save = {
       builderBest: Game.builderBest | 0,
       options: {
         master: Options.master, music: Options.music, sfx: Options.sfx,
-        shake: !!Options.shake, marks: !!Options.marks, stickyWork: !!Options.stickyWork
+        shake: !!Options.shake, marks: !!Options.marks, stickyWork: !!Options.stickyWork,
+        autoPause: !!Options.autoPause, perfHud: !!Options.perfHud
       },
+      /* Rebound keys belong with the options, not the progress: wiping a save
+         should hand back a fresh career, not a keyboard the player cannot use.
+         Stored as a plain per-slot map so an unknown action in a future build
+         is ignored rather than throwing. */
+      controls: CONTROLS.map(c => {
+        const o = {};
+        for (const a of CONTROL_ACTIONS) o[a.key] = c[a.key];
+        return o;
+      }),
       settings: {
         difficulty: Game.difficulty | 0,
         muted: !!Sound.muted,
@@ -2724,6 +2902,30 @@ const Save = {
     if (typeof op.shake === "boolean") Options.shake = op.shake;
     if (typeof op.marks === "boolean") Options.marks = op.marks;
     if (typeof op.stickyWork === "boolean") Options.stickyWork = op.stickyWork;
+    if (typeof op.autoPause === "boolean") Options.autoPause = op.autoPause;
+    if (typeof op.perfHud === "boolean") Options.perfHud = op.perfHud;
+    /* Restore key bindings defensively: only strings, only known actions, and
+       never a reserved code. A hand-edited or truncated save must not be able
+       to leave an action unbound or steal Escape from the menus. */
+    resetControls();
+    if (Array.isArray(data.controls)) {
+      data.controls.slice(0, CONTROLS.length).forEach((row, slot) => {
+        if (!row || typeof row !== "object") return;
+        for (const a of CONTROL_ACTIONS) {
+          const code = row[a.key];
+          if (typeof code === "string" && code && !RESERVED_CODES.has(code))
+            CONTROLS[slot][a.key] = code;
+        }
+      });
+      // a duplicate across the two medics would silently disable one of them
+      const seen = new Set();
+      for (let slot = 0; slot < CONTROLS.length; slot++)
+        for (const a of CONTROL_ACTIONS) {
+          const c = CONTROLS[slot][a.key];
+          if (seen.has(c)) { resetControls(); slot = CONTROLS.length; break; }
+          seen.add(c);
+        }
+    }
     Options.apply();
     return true;
   },
@@ -8290,19 +8492,34 @@ function drawOptions(g) {
   text(g, "W / S choose      A / D adjust      Esc back",
        W / 2, 120, 15, PALETTE.dim, "center", "normal");
 
-  const x0 = W / 2 - 380, w = 760, rowH = 74, y0 = 168;
+  /* Row height is derived, not fixed: the list grew from six entries to ten
+     when rebinding, auto-pause, the frame meter and fullscreen arrived, and a
+     hard-coded 74 ran the last three rows off the bottom of the screen. */
+  const x0 = W / 2 - 380, w = 760, y0 = 158;
+  const avail = H - y0 - 64;
+  const step = Math.min(82, Math.floor(avail / OPTION_ROWS.length));
+  const rowH = step - 6;
   OPTION_ROWS.forEach((row, i) => {
-    const y = y0 + i * (rowH + 8);
+    const y = y0 + i * step;
     const sel = Game.optionCursor === i;
     fillRound(g, x0, y, w, rowH, 13, sel ? "rgba(255,213,74,.10)" : "rgba(255,255,255,.045)");
     g.strokeStyle = sel ? "#ffd54a" : "rgba(255,255,255,.09)";
     g.lineWidth = sel ? 3 : 1.5;
     roundRect(g, x0, y, w, rowH, 13); g.stroke();
-    text(g, row.name, x0 + 26, y + (row.blurb ? 30 : 44), 19, PALETTE.text);
-    if (row.blurb) text(g, row.blurb, x0 + 26, y + 52, 13, PALETTE.dim, "left", "normal");
+    text(g, row.name, x0 + 26, y + (row.blurb ? rowH * 0.42 : rowH / 2 + 7), 19, PALETTE.text);
+    if (row.blurb) text(g, row.blurb, x0 + 26, y + rowH * 0.78, 13, PALETTE.dim, "left", "normal");
 
     const v = Options[row.key];
-    if (row.kind === "level") {
+    if (row.kind === "action") {
+      const cap = row.state ? row.state() : "GO";
+      const bw = Math.max(78, 24 + cap.length * 11), bx = x0 + w - bw - 26;
+      fillRound(g, bx, y + rowH / 2 - 16, bw, 32, 9,
+                sel ? "rgba(255,213,74,.22)" : "rgba(255,255,255,.07)");
+      g.strokeStyle = sel ? "#ffd54a" : "rgba(255,255,255,.16)"; g.lineWidth = 1.4;
+      roundRect(g, bx, y + rowH / 2 - 16, bw, 32, 9); g.stroke();
+      text(g, cap, bx + bw / 2, y + rowH / 2 + 6, 15,
+           sel ? "#ffd54a" : PALETTE.text, "center");
+    } else if (row.kind === "level") {
       const bx = x0 + w - 250, by = y + rowH / 2 - 7;
       g.fillStyle = "rgba(255,255,255,.10)";
       roundRect(g, bx, by, 168, 14, 7); g.fill();
@@ -8324,6 +8541,54 @@ function drawOptions(g) {
 
   text(g, Save.available ? "Saved automatically" : "Not saved — this browser blocks local storage",
        W / 2, H - 44, 13, Save.available ? PALETTE.dim : "#ff8f70", "center", "normal");
+}
+
+/* The rebinding screen. Two columns, one per medic, seven actions each; the
+   cursor runs down player one and then down player two so W/S alone reaches
+   every row without a second axis to learn. */
+function drawControls(g) {
+  g.fillStyle = Paint.title;
+  g.fillRect(0, 0, W, H);
+  text(g, "CONTROLS", W / 2, 76, 40, PALETTE.text, "center");
+  text(g, Game.rebind ? "Press any key…   Esc cancels"
+                      : "W / S choose      E rebind      R restore defaults      Esc back",
+       W / 2, 108, 15, Game.rebind ? "#ffd54a" : PALETTE.dim, "center", "normal");
+  if (Game.rebindMsg)
+    text(g, Game.rebindMsg, W / 2, 130, 14, "#ff8f70", "center", "normal");
+
+  const n = CONTROL_ACTIONS.length;
+  const colW = 430, gap = 40, rowH = 52;
+  const left = W / 2 - colW - gap / 2, y0 = 170;
+  for (let slot = 0; slot < 2; slot++) {
+    const cx = slot === 0 ? left : left + colW + gap;
+    const label = "MEDIC " + (slot + 1) + (slot === 0 ? "  (left side)" : "  (right side)");
+    text(g, label, cx + 18, y0 - 16, 17, slot === 0 ? "#7fb2ff" : "#ff9a8a");
+    CONTROL_ACTIONS.forEach((act, i) => {
+      const idx = slot * n + i;
+      const y = y0 + i * (rowH + 6);
+      const sel = Game.controlCursor === idx;
+      const capturing = sel && !!Game.rebind;
+      fillRound(g, cx, y, colW, rowH, 11,
+                capturing ? "rgba(255,213,74,.18)"
+                          : sel ? "rgba(255,213,74,.09)" : "rgba(255,255,255,.045)");
+      g.strokeStyle = capturing ? "#ffd54a" : sel ? "rgba(255,213,74,.8)" : "rgba(255,255,255,.09)";
+      g.lineWidth = sel ? 3 : 1.5;
+      roundRect(g, cx, y, colW, rowH, 11); g.stroke();
+      text(g, act.name, cx + 18, y + rowH / 2 + 6, 17, PALETTE.text);
+
+      const code = CONTROLS[slot][act.key];
+      const cap = capturing ? "…" : keyLabel(code);
+      const bw = Math.max(64, 22 + cap.length * 11);
+      fillRound(g, cx + colW - bw - 14, y + rowH / 2 - 15, bw, 30, 8,
+                capturing ? "rgba(255,213,74,.25)" : "rgba(10,16,26,.55)");
+      g.strokeStyle = "rgba(255,255,255,.16)"; g.lineWidth = 1.2;
+      roundRect(g, cx + colW - bw - 14, y + rowH / 2 - 15, bw, 30, 8); g.stroke();
+      text(g, cap, cx + colW - 14 - bw / 2, y + rowH / 2 + 6, 16,
+           capturing ? "#ffd54a" : PALETTE.text, "center");
+    });
+  }
+  text(g, "Gamepads use their own layout and need no setup. Menu keys cannot be rebound.",
+       W / 2, H - 44, 13, PALETTE.dim, "center", "normal");
 }
 
 function drawPerks(g) {
@@ -9050,7 +9315,7 @@ function drawSelect(g) {
 function drawLevelCard(g, i, x, y, cardW, cardH) {
   const lvl = LEVELS[i], prog = Game.progress[i];
   const sel = i === Game.selectIndex;
-  const locked = !prog.unlocked;
+  const locked = !prog.unlocked || demoLocked(i);
 
   g.fillStyle = locked ? "rgba(255,255,255,.025)" : "rgba(255,255,255,.06)";
   roundRect(g, x, y, cardW, cardH, 13); g.fill();
@@ -9129,6 +9394,11 @@ function drawPause(g) {
   g.strokeStyle = "rgba(255,255,255,.10)"; g.lineWidth = 1.5;
   roundRect(g, W / 2 - 250, 220, 500, 320, 18); g.stroke();
   text(g, "PAUSED", W / 2, 288, 42, PALETTE.text, "center");
+  /* When the game paused itself, say so. A shift that froze on its own with no
+     explanation reads as a bug, and the two reasons it happens — alt-tab and a
+     pad going flat — are exactly the moments a player is not looking. */
+  if (Game.pauseReason)
+    text(g, Game.pauseReason, W / 2, 312, 15, "#ffd54a", "center", "normal");
   const rows = [["Esc", "resume"], ["R", "restart this shift"], ["H", "how to play"],
                 ["M", "sound " + (Sound.muted ? "on" : "off")], ["O", "options"],
                 ["L", "back to level select"]];
@@ -9661,6 +9931,7 @@ function render() {
   else if (Game.screen === "perks") drawPerks(ctx);
   else if (Game.screen === "medals") drawMedalsScreen(ctx);
   else if (Game.screen === "options") drawOptions(ctx);
+  else if (Game.screen === "controls") drawControls(ctx);
   else if (Game.screen === "howto") drawHowTo(ctx);
 }
 
@@ -9749,13 +10020,16 @@ function handleScreenKeys() {
         else if (!special(Game.selectIndex)) { Game.selectIndex = ENDLESS_SLOT(); Sound.play("menu"); }
       }
       if (wasPressed("KeyE") || wasPressed("Enter") || wasPressed("Slash")) {
+        /* In a demo build every mode past the first three wards is visible but
+           refuses to start. One gate, on the only path that begins a shift. */
         if (Game.selectIndex === ENDLESS_SLOT()) {
-          if (endlessUnlocked()) startLevel(-1); else Sound.play("error");
+          if (endlessUnlocked() && !DEMO) startLevel(-1); else Sound.play("error");
         } else if (Game.selectIndex === BUILDER_SLOT()) {
-          if (builderUnlocked()) startBuilderRun(); else Sound.play("error");
+          if (builderUnlocked() && !DEMO) startBuilderRun(); else Sound.play("error");
         } else if (Game.selectIndex === DAILY_SLOT()) {
-          startDaily();
-        } else if (Game.progress[Game.selectIndex].unlocked) {
+          if (!DEMO) startDaily(); else Sound.play("error");
+        } else if (Game.progress[Game.selectIndex].unlocked &&
+                   !demoLocked(Game.selectIndex)) {
           startLevel(Game.selectIndex);
         } else Sound.play("error");
       }
@@ -9822,6 +10096,28 @@ function handleScreenKeys() {
       break;
     }
 
+    case "controls": {
+      const n = CONTROL_ACTIONS.length * 2;
+      if (Game.rebind) break;                 // the keydown listener owns capture
+      const mv = (d) => { Game.controlCursor = (Game.controlCursor + d + n) % n; Sound.play("menu"); };
+      if (wasPressed("KeyW") || wasPressed("ArrowUp")) mv(-1);
+      if (wasPressed("KeyS") || wasPressed("ArrowDown")) mv(1);
+      if (wasPressed("KeyA") || wasPressed("ArrowLeft")) mv(-CONTROL_ACTIONS.length);
+      if (wasPressed("KeyD") || wasPressed("ArrowRight")) mv(CONTROL_ACTIONS.length);
+      if (wasPressed("KeyE") || wasPressed("Enter") || wasPressed("Slash")) {
+        Game.rebind = { slot: Math.floor(Game.controlCursor / CONTROL_ACTIONS.length),
+                        action: CONTROL_ACTIONS[Game.controlCursor % CONTROL_ACTIONS.length].key };
+        Game.rebindMsg = "";
+        Sound.play("menu");
+      }
+      if (wasPressed("KeyR")) { resetControls(); Save.touch(); Sound.play("done"); }
+      if (wasPressed("Escape")) {
+        Game.rebindMsg = "";
+        Game.screen = Game.controlsFrom || "options"; Sound.play("menu");
+      }
+      break;
+    }
+
     case "medals": {
       /* Wiping a save is the one irreversible thing in the game, so it is a
          deliberate two-second hold rather than a keypress — and it is only
@@ -9884,11 +10180,11 @@ function handleScreenKeys() {
     }
 
     case "play":
-      if (wasPressed("Escape")) { Game.screen = "paused"; Sound.play("menu"); }
+      if (wasPressed("Escape")) { Game.screen = "paused"; Game.pauseReason = ""; Sound.play("menu"); }
       break;
 
     case "paused":
-      if (wasPressed("Escape")) { Game.screen = "play"; Sound.play("menu"); }
+      if (wasPressed("Escape")) { Game.screen = "play"; Game.pauseReason = ""; Sound.play("menu"); }
       if (wasPressed("KeyR")) {
         if (Game.builderMode) { startBuilderRun(); break; }
         startLevel(Game.levelIndex);
@@ -9925,10 +10221,48 @@ let lastT = performance.now();
    it retreats to a fresh title screen instead of freezing. */
 let _frameErrs = 0, _frameErrSince = 0;
 
+/* Frame-time meter. This container renders through SwiftShader, which is
+   software rasterisation — nothing measured here says anything about a real
+   GPU. Shipping the meter is how the frame rate finally gets measured: on the
+   machine that matters, by the person who owns it. p95 rather than an average
+   because the number that ruins a shift is the worst frame, not the mean. */
+const Perf = {
+  ring: new Float32Array(180),
+  i: 0, n: 0, shown: 0, worst: 0, t: 0,
+  push(ms) {
+    this.ring[this.i] = ms;
+    this.i = (this.i + 1) % this.ring.length;
+    if (this.n < this.ring.length) this.n++;
+  },
+  sample(dt) {
+    this.t += dt;
+    if (this.t < 0.35 || !this.n) return;
+    this.t = 0;
+    const a = Array.prototype.slice.call(this.ring, 0, this.n).sort((x, y) => x - y);
+    this.shown = a[Math.floor(a.length / 2)];                 // median frame
+    this.worst = a[Math.min(a.length - 1, Math.floor(a.length * 0.95))];
+  },
+  draw(g) {
+    const fps = this.shown > 0 ? 1000 / this.shown : 0;
+    const col = fps >= 55 ? "#6fd3b4" : fps >= 30 ? "#ffd54a" : "#ff8f70";
+    const bw = 168, bx = W - bw - 14, by = 14;
+    g.fillStyle = "rgba(8,12,18,.72)";
+    roundRect(g, bx, by, bw, 46, 9); g.fill();
+    g.strokeStyle = "rgba(255,255,255,.12)"; g.lineWidth = 1;
+    roundRect(g, bx, by, bw, 46, 9); g.stroke();
+    text(g, Math.round(fps) + " fps", bx + 12, by + 22, 18, col);
+    text(g, this.shown.toFixed(1) + " ms   p95 " + this.worst.toFixed(1),
+         bx + 12, by + 38, 12, PALETTE.dim, "left", "normal");
+  }
+};
+
 function frame(now) {
   requestAnimationFrame(frame);          // re-armed FIRST: the loop cannot die
   const dt = Math.min(0.05, (now - lastT) / 1000);
+  const rawMs = now - lastT;
   lastT = now;
+  if (rawMs > 0 && rawMs < 1000) Perf.push(rawMs);
+  Perf.sample(dt);
 
   try {
     // pads first: they assert the same key codes, so everything after this — the
@@ -9945,6 +10279,8 @@ function frame(now) {
     else if (Game.screen === "paused") { /* frozen */ }
 
     render();
+    // last, and outside render(), so an overlay can never disturb what it measures
+    if (Options.perfHud) Perf.draw(ctx);
     Save.tick(dt);
     clearPressed();
     _frameErrs = 0;
