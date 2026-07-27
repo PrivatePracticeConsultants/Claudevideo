@@ -1,0 +1,12 @@
+{
+  "_comment": "P0 ships one enemy. The armour triangle (swarm/armored/shielded) and the modifier layer (flying/cloaked/splitter/leech/bulwark) are P1 - do not add fields for them here until then.",
+  "walker": {
+    "display_name": "Sentry Walker",
+    "base_hp": 55,
+    "speed_units_per_second": 55.0,
+    "leak_value": 4,
+    "base_bounty": 6,
+    "radius": 10.0,
+    "spawn_jitter_units": 14.0
+  }
+}

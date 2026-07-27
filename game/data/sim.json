@@ -1,0 +1,9 @@
+{
+  "_comment": "Engine-shaped limits for the deterministic simulation. Pool capacities are hard ceilings: the sim never grows an array at runtime, so these must exceed the worst case any wave file can produce.",
+  "tick_rate_hz": 30,
+  "max_enemies": 512,
+  "max_projectiles": 1024,
+  "max_platforms": 64,
+  "spatial_hash_cell_size": 96.0,
+  "spatial_hash_margin_cells": 4
+}

@@ -1,9 +1,17 @@
 .venv/
-data/raw/
-data/out/
 __pycache__/
 *.pyc
 .pytest_cache/
-data/
+# Anchored to the repo root on purpose: these are MRF Explorer's runtime store
+# dirs (config/mrfx.yaml resolves them relative to the repo root). Unanchored,
+# `data/` also swallowed game/data/, which is where every balance constant in
+# LAST LINE lives -- those JSON files must be tracked.
+/data/
+/data/raw/
+/data/out/
+# Godot
+game/.godot/
+game/android/
+*.import
 bcbs_mo_mrf.egg-info/
 config/registry_overrides.yaml

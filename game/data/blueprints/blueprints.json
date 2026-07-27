@@ -1,0 +1,20 @@
+{
+  "_comment": "P0 ships Ballistic T1 only. Tiers T2-T4 and the other four families (Cannon/Missile/Energy/Support) are P2/P1 respectively. The tier list is already an array so adding tiers is pure data.",
+  "ballistic": {
+    "display_name": "Ballistic",
+    "family": "ballistic",
+    "default_targeting": "first",
+    "tiers": [
+      {
+        "name": "Pistol Turret",
+        "cost": 100,
+        "damage": 10,
+        "range_units": 180.0,
+        "fire_interval_seconds": 0.5,
+        "projectile_speed_units_per_second": 900.0,
+        "projectile_hit_radius_units": 12.0,
+        "projectile_lifetime_seconds": 1.5
+      }
+    ]
+  }
+}

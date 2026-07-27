@@ -1,0 +1,21 @@
+{
+  "_comment": "Palette. In /data rather than in code for the same reason the balance numbers are: it gets tuned, and art direction should not require touching the renderer. Section 6.1 makes readability a correctness requirement rather than a nicety, so from P1 armour classes must be distinguished by SHAPE as well as by colour - never colour alone.",
+  "background": "#0e1116",
+  "path": "#232a34",
+  "path_edge": "#39414f",
+  "pad_free": "#2c6d50",
+  "pad_occupied": "#3d434e",
+  "pad_hover": "#5ad18f",
+  "range_preview": "#5ad18f",
+  "platform": "#7fa8d9",
+  "enemy": "#e8c34a",
+  "enemy_hurt": "#a8511f",
+  "hp_bar_back": "#12151a",
+  "hp_bar": "#6fdd8a",
+  "projectile": "#ffe9a8",
+  "text": "#dfe6f0",
+  "text_dim": "#8b94a3",
+  "good": "#5ad18f",
+  "warn": "#ffb454",
+  "bad": "#ff6b5e"
+}

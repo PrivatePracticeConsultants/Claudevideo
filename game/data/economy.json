@@ -1,0 +1,5 @@
+{
+  "_comment": "P0 engagement economy. Capital is engagement-scoped and integer-valued (no float money, ever - it would break determinism hashing for no benefit). Integrity is the lives pool; in P3 it becomes run-scoped Corridor Integrity and stops resetting between engagements.",
+  "starting_capital": 400,
+  "starting_integrity": 100
+}

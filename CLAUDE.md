@@ -8,7 +8,7 @@ to it.
 
 ## What this repo is
 
-Two tools live here:
+Three things live here, and only the first two are related:
 
 - **MRF Explorer (`mrfx/`)** — THE product. A local, single-user pipeline +
   dashboard that aggregates **negotiated commercial PT/OT/SLP therapy rates**
@@ -19,6 +19,10 @@ Two tools live here:
   compressed (up to ~200 GB uncompressed) — the whole design is shaped by that.
 - **`src/` + `run.py`** — an earlier, single-purpose BCBS-Missouri extractor.
   Reference only; **do not extend it.** All new work is in `mrfx/`.
+- **`game/`** — LAST LINE, a roguelite tower defense game in Godot 4 / GDScript.
+  Entirely unrelated to the MRF work: no shared code, data, or dependencies, and
+  nothing above this line applies to it. It has its own orientation docs —
+  `game/README.md` and `game/DECISIONS.md`. Currently at phase P0.
 
 The intended deployment is one non-technical user running `mrfx serve` on their
 own Windows machine — not a public service. Optimize for their experience and

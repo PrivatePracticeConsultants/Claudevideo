@@ -1,0 +1,20 @@
+{
+  "_comment": "Ten waves, the P0 acceptance engagement. Hand-authored: from P4 onward most waves come from tools/wave_generator.py against a difficulty budget, with roughly 30 signature waves authored by hand. Per the plan the spike sits in the last three waves so losses cluster late honestly, with no hidden difficulty adjustment anywhere.",
+  "engagement_id": "highway_01_act1",
+  "map_id": "highway_01",
+  "inter_wave_delay_ticks": 90,
+  "waves": [
+    { "groups": [ { "enemy": "walker", "count": 6,  "spawn_interval_ticks": 22, "start_delay_ticks": 0 } ] },
+    { "groups": [ { "enemy": "walker", "count": 8,  "spawn_interval_ticks": 20, "start_delay_ticks": 0 } ] },
+    { "groups": [ { "enemy": "walker", "count": 10, "spawn_interval_ticks": 20, "start_delay_ticks": 0 } ] },
+    { "groups": [ { "enemy": "walker", "count": 12, "spawn_interval_ticks": 18, "start_delay_ticks": 0 } ] },
+    { "groups": [ { "enemy": "walker", "count": 10, "spawn_interval_ticks": 12, "start_delay_ticks": 0 } ] },
+    { "groups": [ { "enemy": "walker", "count": 14, "spawn_interval_ticks": 16, "start_delay_ticks": 0 } ] },
+    { "groups": [ { "enemy": "walker", "count": 16, "spawn_interval_ticks": 15, "start_delay_ticks": 0 } ] },
+    { "groups": [ { "enemy": "walker", "count": 14, "spawn_interval_ticks": 10, "start_delay_ticks": 0 } ] },
+    { "groups": [ { "enemy": "walker", "count": 18, "spawn_interval_ticks": 11, "start_delay_ticks": 0 },
+                  { "enemy": "walker", "count": 6,  "spawn_interval_ticks": 20, "start_delay_ticks": 120 } ] },
+    { "groups": [ { "enemy": "walker", "count": 22, "spawn_interval_ticks": 9,  "start_delay_ticks": 0 },
+                  { "enemy": "walker", "count": 10, "spawn_interval_ticks": 14, "start_delay_ticks": 150 } ] }
+  ]
+}
