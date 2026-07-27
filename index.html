@@ -867,7 +867,9 @@ const Pads = {
 
 const ITEMS = {
   towel:        { name: "Towel",       short: "TWL" },
+  plaster:      { name: "Plaster",     short: "PLA" },
   drops:        { name: "Drops",       short: "DRP" },
+  vaccine:      { name: "Booster",     short: "VAC" },
   plate:        { name: "Blank plate", short: "PLT" },
   scan:         { name: "Scan",        short: "SCN" },
   bootie:       { name: "Bootie",      short: "BOO" },
@@ -993,6 +995,30 @@ const AILMENTS = {
     ],
     chain: [{ s: "basket", t: "Swab" }, { s: "lab", t: "Crumbs" },
             { s: "remedy", t: "Soother" }, { s: "basket", t: "Soothe" }]
+  },
+
+  /* --- two more, and the gentlest in the building -----------------------
+     A scrape wants cleaning before the plaster goes on, which is two trips to
+     the SAME shelf — a shape nothing else in the clinic has, since every other
+     two-item chain sends you to two different stations.
+
+     A booster is the only visit here where nothing is wrong at all. It pays
+     little and waits nearly twice as long as anything else, which makes it the
+     one case it is correct to leave sitting: the first real triage decision
+     rather than another thing to hurry over. */
+  littlescrape: {
+    name: "Little Scrape", color: "#f0788c", short: "OW", score: 130, patienceMul: 1.10,
+    steps: [
+      { k: "bedside", need: "towel", dur: 1.1, label: "Clean it up" },
+      { k: "bedside", need: "plaster", dur: 1.2, label: "Pop a plaster on" }
+    ],
+    chain: [{ s: "grooming", t: "Shelf" }, { s: "basket", t: "Clean" },
+            { s: "grooming", t: "Plaster" }, { s: "basket", t: "Pop it on" }]
+  },
+  boosterjab: {
+    name: "Booster Jab", color: "#5ec8a0", short: "JAB", score: 95, patienceMul: 1.90,
+    steps: [{ k: "bedside", need: "vaccine", dur: 1.3, label: "One quick booster" }],
+    chain: [{ s: "remedy", t: "Remedies" }, { s: "basket", t: "Booster" }]
   }
 };
 
@@ -1004,14 +1030,19 @@ const AILMENTS = {
      restock:   refills the shelf
      patientStep: advances the occupying patient's `atStation` step
      labWork:   analyses a blood sample */
+/* `outAny` exists because recipes are first-match-wins on an empty hand: a
+   station could only ever hand out ONE thing, so a shelf holding both towels
+   and plasters would forever give you towels. With outAny the shelf hands over
+   whichever of its stock the ward is actually waiting on, and says so on the
+   prompt. One shelf, one key, no submenu. */
 const RECIPES = {
   grooming: [
     { need: "crate", out: null, dur: 1.5, restock: true, label: "Restock the shelf" },
-    { need: null, out: "towel", dur: 1.0, stock: true, label: "Take a towel" }
+    { need: null, outAny: ["towel", "plaster"], dur: 1.0, stock: true, label: "Take a towel" }
   ],
   remedy: [
     { need: "crate", out: null, dur: 1.5, restock: true, label: "Restock the cabinet" },
-    { need: null, out: "drops", dur: 1.6, stock: true, label: "Fill the dropper" }
+    { need: null, outAny: ["drops", "vaccine"], dur: 1.5, stock: true, label: "Fill the dropper" }
   ],
   scanner: [
     { need: "plate", out: "scan", dur: 1.5, label: "Develop the plate" },
@@ -1043,7 +1074,7 @@ const LEVELS = [
     patience: 78,
     spawnStart: 11.0, spawnEnd: 7.5,
     maxWaiting: 3,
-    ailments: ["muddypaws", "itchyears"],
+    ailments: ["muddypaws", "itchyears", "boosterjab"],
     stars: [3000, 5200, 7100],
     restock: false, jams: false, bigExit: false,
         theme: { floor:"#f7efdd", floorAlt:"#f0e5cd", wall:"#a9e0d4", wallTop:"#c6ede3", base:"#7cc4b4",
@@ -1083,7 +1114,7 @@ const LEVELS = [
     patience: 70,
     spawnStart: 10.0, spawnEnd: 6.8,
     maxWaiting: 4,
-    ailments: ["muddypaws", "itchyears", "sprainedhop", "stickypaws"],
+    ailments: ["muddypaws", "itchyears", "sprainedhop", "stickypaws", "boosterjab", "littlescrape"],
     stars: [2350, 4050, 5550],
     restock: false, jams: false, bigExit: false,
         theme: { floor:"#eef2f7", floorAlt:"#e5ebf3", wall:"#9fc3e4", wallTop:"#bcd8ef", base:"#6d9bc4",
@@ -1123,7 +1154,7 @@ const LEVELS = [
     patience: 56,
     spawnStart: 9.2, spawnEnd: 6.2,
     maxWaiting: 5,
-    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "stickypaws", "zoomies"],
+    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "stickypaws", "zoomies", "boosterjab", "littlescrape"],
     stars: [1700, 2950, 4050],
     restock: true, jams: false, bigExit: true,
         theme: { floor:"#f4e9e4", floorAlt:"#ecdfd9", wall:"#e0a79f", wallTop:"#eec3bc", base:"#c17f76",
@@ -1164,7 +1195,7 @@ const LEVELS = [
     patience: 66,
     spawnStart: 8.6, spawnEnd: 5.8,
     maxWaiting: 5,
-    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "socksituation"],
+    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "socksituation", "boosterjab", "littlescrape"],
     stars: [2100, 3650, 5000],
     restock: true, jams: true, bigExit: true,
         theme: { floor:"#e9e6de", floorAlt:"#e0ddd4", wall:"#8fa398", wallTop:"#aab9b0", base:"#6a7d73",
@@ -1206,7 +1237,7 @@ const LEVELS = [
     patience: 66,
     spawnStart: 8.0, spawnEnd: 5.4,
     maxWaiting: 6,
-    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "crickintail"],
+    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "crickintail", "boosterjab", "littlescrape"],
     stars: [1700, 2950, 4050],
     restock: true, jams: true, bigExit: true,
         theme: { floor:"#e6eef4", floorAlt:"#dce6ee", wall:"#7fa8c9", wallTop:"#a2c4dd", base:"#57809f",
@@ -1247,7 +1278,7 @@ const LEVELS = [
     patience: 52,
     spawnStart: 7.6, spawnEnd: 5.1,
     maxWaiting: 6,
-    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats"],
+    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats", "boosterjab", "littlescrape"],
     stars: [2150, 3750, 5100],
     restock: true, jams: true, bigExit: true,
         theme: { floor:"#f0ecf6", floorAlt:"#e7e2f0", wall:"#b1a3d6", wallTop:"#c9bee6", base:"#8878b4",
@@ -1283,7 +1314,7 @@ const LEVELS = [
     patience: 62,
     spawnStart: 7.2, spawnEnd: 4.9,
     maxWaiting: 6,
-    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "socksituation", "crickintail"],
+    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "socksituation", "crickintail", "littlescrape"],
     stars: [1700, 2900, 4000],
     restock: true, jams: true, bigExit: true,
         theme: { floor:"#f2e6d2", floorAlt:"#e9dbc4", wall:"#c9a06a", wallTop:"#dcbb8b", base:"#9c7343",
@@ -1318,7 +1349,7 @@ const LEVELS = [
     patience: 65,
     spawnStart: 6.9, spawnEnd: 4.7,
     maxWaiting: 7,
-    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies"],
+    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "boosterjab", "littlescrape"],
     stars: [1750, 3000, 4150],
     restock: true, jams: true, bigExit: true,
         theme: { floor:"#f1ecdf", floorAlt:"#e8e2d2", wall:"#8fc9be", wallTop:"#aeddd4", base:"#5f9e92",
@@ -1353,7 +1384,7 @@ const LEVELS = [
     patience: 63,
     spawnStart: 6.6, spawnEnd: 4.5,
     maxWaiting: 7,
-    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats"],
+    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats", "boosterjab", "littlescrape"],
     stars: [1550, 2650, 3650],
     restock: true, jams: true, bigExit: true,
         theme: { floor:"#f6f3ec", floorAlt:"#ece8df", wall:"#dfe4e9", wallTop:"#f0f3f6", base:"#a9b4bf",
@@ -1390,7 +1421,7 @@ const LEVELS = [
     patience: 52,
     spawnStart: 6.3, spawnEnd: 4.3,
     maxWaiting: 8,
-    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats"],
+    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats", "boosterjab", "littlescrape"],
     stars: [1300, 2200, 3000],
     restock: true, jams: true, bigExit: true,
         theme: { floor:"#dfe4e4", floorAlt:"#d5dbdb", wall:"#5f7d80", wallTop:"#7d9c9e", base:"#41595c",
@@ -1427,7 +1458,7 @@ const LEVELS = [
     patience: 60,
     spawnStart: 6.6, spawnEnd: 4.6,
     maxWaiting: 7,
-    ailments: ["muddypaws", "itchyears", "sprainedhop", "mysterymunch", "socksituation", "toomanytreats"],
+    ailments: ["muddypaws", "itchyears", "sprainedhop", "mysterymunch", "socksituation", "toomanytreats", "littlescrape"],
     stars: [1850, 3250, 4450],
     restock: true, jams: true, bigExit: true,
     theme: { floor:"#2f3a4a", floorAlt:"#28323f", wall:"#465a72", wallTop:"#5d7590", base:"#31404f", accent:"#7fb2e0", wood:"#8a6f4e", leaf:"#3f7f58", leaf2:"#579a70", locker:"#4e6378", crate:"#96794f", crate2:"#7f6644", curtain:"#5f7c96", pot:"#7a5340", rug:"#3c4a5c" },
@@ -1461,7 +1492,7 @@ const LEVELS = [
     patience: 65,
     spawnStart: 6.4, spawnEnd: 4.4,
     maxWaiting: 7,
-    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "crickintail"],
+    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "crickintail", "boosterjab", "littlescrape"],
     stars: [1400, 2400, 3250],
     restock: true, jams: true, bigExit: true,
     theme: { floor:"#f2ead9", floorAlt:"#e8dfcc", wall:"#c08f6a", wallTop:"#d9ab86", base:"#8f6647", accent:"#e0763f", wood:"#b98a58", leaf:"#5aa06a", leaf2:"#7bbb87", locker:"#b9a389", crate:"#cfae7f", crate2:"#b8955f", curtain:"#e0cdb2", pot:"#a76b4c", rug:"#e3d6bd" },
@@ -1497,7 +1528,7 @@ const LEVELS = [
     patience: 69,
     spawnStart: 6.2, spawnEnd: 4.2,
     maxWaiting: 8,
-    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats"],
+    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats", "boosterjab", "littlescrape"],
     stars: [2150, 3700, 5050],
     restock: true, jams: true, bigExit: true,
     theme: { floor:"#e6eef2", floorAlt:"#dae4ea", wall:"#7a93a8", wallTop:"#9ab0c2", base:"#566d80", accent:"#4fa8d8", wood:"#a58356", leaf:"#4e9c6b", leaf2:"#6fb886", locker:"#7f97aa", crate:"#bb9a6e", crate2:"#a2825a", curtain:"#a8bfd0", pot:"#8a6350", rug:"#cfdae2" },
@@ -1534,7 +1565,7 @@ const LEVELS = [
     patience: 54,
     spawnStart: 6.0, spawnEnd: 4.1,
     maxWaiting: 8,
-    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "stickypaws", "zoomies", "crickintail"],
+    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "stickypaws", "zoomies", "crickintail", "boosterjab", "littlescrape"],
     stars: [2100, 3600, 4900],
     restock: true, jams: true, bigExit: true,
     theme: { floor:"#efe7e7", floorAlt:"#e4dada", wall:"#9c6f74", wallTop:"#bb8b90", base:"#6f4a4f", accent:"#e05f6e", wood:"#a97f5c", leaf:"#4f9a63", leaf2:"#6fb47f", locker:"#a08187", crate:"#c4a077", crate2:"#a98657", curtain:"#d3aeb2", pot:"#96604e", rug:"#ddcdcd" },
@@ -1570,7 +1601,7 @@ const LEVELS = [
     patience: 51,
     spawnStart: 5.8, spawnEnd: 3.9,
     maxWaiting: 9,
-    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats"],
+    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats", "boosterjab", "littlescrape"],
     stars: [2150, 3700, 5050],
     restock: true, jams: true, bigExit: true,
     theme: { floor:"#232b38", floorAlt:"#1d2531", wall:"#3d4c63", wallTop:"#54667f", base:"#2a3546", accent:"#c39bff", wood:"#7d6349", leaf:"#3a7350", leaf2:"#4f8d66", locker:"#455772", crate:"#8a6f4a", crate2:"#735c3d", curtain:"#4f6580", pot:"#6d4a3c", rug:"#2c3646" },
@@ -1607,7 +1638,7 @@ const LEVELS = [
     patience: 64,
     spawnStart: 6.6, spawnEnd: 4.4,
     maxWaiting: 7,
-    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats"],
+    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats", "boosterjab", "littlescrape"],
     stars: [2200, 3750, 5150],
     restock: true, jams: true, bigExit: true,
     theme: { floor:"#eef0e6", floorAlt:"#e4e7da", wall:"#8a9a78", wallTop:"#a8b795", base:"#5c6b4c", accent:"#e0a03f", wood:"#bd9260", leaf:"#5aa06a", leaf2:"#7bbb87", locker:"#9aa88c", crate:"#cfae7f", crate2:"#b8955f", curtain:"#ccd8bf", pot:"#a76b4c", rug:"#dde2d2" },
@@ -1641,7 +1672,7 @@ const LEVELS = [
     patience: 62,
     spawnStart: 6.4, spawnEnd: 4.3,
     maxWaiting: 7,
-    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "socksituation", "crickintail", "toomanytreats"],
+    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "socksituation", "crickintail", "toomanytreats", "littlescrape"],
     stars: [2100, 3600, 4950],
     restock: true, jams: true, bigExit: true,
     theme: { floor:"#e9eef2", floorAlt:"#dee5ea", wall:"#7f93a6", wallTop:"#9db0c1", base:"#546678", accent:"#4fb0d8", wood:"#b08a5c", leaf:"#57a06d", leaf2:"#78bb86", locker:"#8ea4b5", crate:"#c9a97c", crate2:"#b08f5f", curtain:"#c2d4e0", pot:"#96604e", rug:"#d7e0e6" },
@@ -1675,7 +1706,7 @@ const LEVELS = [
     patience: 60,
     spawnStart: 6.3, spawnEnd: 4.2,
     maxWaiting: 7,
-    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats"],
+    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats", "boosterjab", "littlescrape"],
     stars: [1950, 3350, 4600],
     restock: true, jams: true, bigExit: true,
     theme: { floor:"#e6ecef", floorAlt:"#dae2e6", wall:"#6f8790", wallTop:"#8ea6af", base:"#48606a", accent:"#54c7d8", wood:"#a8845c", leaf:"#4f9a63", leaf2:"#6fb47f", locker:"#84a0a8", crate:"#c0a179", crate2:"#a5885c", curtain:"#b9d0d6", pot:"#8d6250", rug:"#d3dee2" },
@@ -1710,7 +1741,7 @@ const LEVELS = [
     patience: 63,
     spawnStart: 6.5, spawnEnd: 4.4,
     maxWaiting: 7,
-    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "stickypaws", "zoomies", "socksituation", "crickintail"],
+    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "stickypaws", "zoomies", "socksituation", "crickintail", "boosterjab", "littlescrape"],
     stars: [2800, 4800, 6600],
     restock: true, jams: true, bigExit: true,
     theme: { floor:"#f3ebdd", floorAlt:"#e9e0d0", wall:"#b58a63", wallTop:"#d0a681", base:"#86603f", accent:"#e07b3a", wood:"#b98a58", leaf:"#5aa06a", leaf2:"#7bbb87", locker:"#b5a086", crate:"#cfae7f", crate2:"#b8955f", curtain:"#dfcdb2", pot:"#a76b4c", rug:"#e2d5bc" },
@@ -1742,7 +1773,7 @@ const LEVELS = [
     patience: 61,
     spawnStart: 6.2, spawnEnd: 4.1,
     maxWaiting: 7,
-    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats"],
+    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats", "boosterjab", "littlescrape"],
     stars: [2250, 3850, 5300],
     restock: true, jams: true, bigExit: true,
     theme: { floor:"#efe7e7", floorAlt:"#e4dada", wall:"#9c6f74", wallTop:"#bb8b90", base:"#6f4a4f", accent:"#e05f6e", wood:"#a97f5c", leaf:"#4f9a63", leaf2:"#6fb47f", locker:"#a08187", crate:"#c4a077", crate2:"#a98657", curtain:"#d3aeb2", pot:"#96604e", rug:"#ddcdcd" },
@@ -1776,7 +1807,7 @@ const LEVELS = [
     patience: 60,
     spawnStart: 6.1, spawnEnd: 4.0,
     maxWaiting: 8,
-    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats"],
+    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats", "boosterjab", "littlescrape"],
     stars: [2550, 4350, 6000],
     restock: true, jams: true, bigExit: true,
     theme: { floor:"#eaefe8", floorAlt:"#dfe6dc", wall:"#7a9a86", wallTop:"#98b6a3", base:"#4e6b58", accent:"#3fb98a", wood:"#b18a5f", leaf:"#57ac74", leaf2:"#7ac68e", locker:"#8fae9c", crate:"#c8a87c", crate2:"#ad8c60", curtain:"#c3d8ca", pot:"#96604e", rug:"#d6e0d4" },
@@ -1810,7 +1841,7 @@ const LEVELS = [
     patience: 62,
     spawnStart: 6.3, spawnEnd: 4.2,
     maxWaiting: 7,
-    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "socksituation", "toomanytreats"],
+    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "socksituation", "toomanytreats", "littlescrape"],
     stars: [1900, 3250, 4450],
     restock: true, jams: true, bigExit: true,
     theme: { floor:"#e7e9ee", floorAlt:"#dcdfe6", wall:"#6d7285", wallTop:"#8b90a4", base:"#464b5e", accent:"#8f7bd8", wood:"#a4855f", leaf:"#4f9a63", leaf2:"#6fb47f", locker:"#848aa0", crate:"#bfa079", crate2:"#a4875e", curtain:"#c0c4d4", pot:"#8d6250", rug:"#d4d8e2" },
@@ -1843,7 +1874,7 @@ const LEVELS = [
     patience: 58,
     spawnStart: 6.0, spawnEnd: 3.9,
     maxWaiting: 8,
-    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats"],
+    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats", "boosterjab", "littlescrape"],
     stars: [1800, 3100, 4250],
     restock: true, jams: true, bigExit: true,
     theme: { floor:"#e8e4ee", floorAlt:"#ddd8e5", wall:"#77689a", wallTop:"#9587b5", base:"#4d4070", accent:"#b98bff", wood:"#a4855f", leaf:"#4f9a63", leaf2:"#6fb47f", locker:"#8b7fa8", crate:"#bfa079", crate2:"#a4875e", curtain:"#cbc0dd", pot:"#8d6250", rug:"#d9d3e4" },
@@ -1880,7 +1911,7 @@ const LEVELS = [
     patience: 57,
     spawnStart: 5.9, spawnEnd: 3.8,
     maxWaiting: 8,
-    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats"],
+    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats", "boosterjab", "littlescrape"],
     stars: [1450, 2500, 3400],
     restock: true, jams: true, bigExit: true,
     theme: { floor:"#f4f0e4", floorAlt:"#eae5d6", wall:"#c2a06e", wallTop:"#dcbb8c", base:"#8f6d43", accent:"#f0a541", wood:"#c69a68", leaf:"#5aa06a", leaf2:"#7bbb87", locker:"#bda98a", crate:"#d3ab7c", crate2:"#bd9366", curtain:"#e2d3b6", pot:"#a76b4c", rug:"#e6dcc6" },
@@ -1913,7 +1944,7 @@ const LEVELS = [
     patience: 55,
     spawnStart: 5.7, spawnEnd: 3.6,
     maxWaiting: 8,
-    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats"],
+    ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats", "boosterjab", "littlescrape"],
     stars: [1450, 2500, 3400],
     restock: true, jams: true, bigExit: true,
     theme: { floor:"#e4e6ec", floorAlt:"#d8dbe3", wall:"#5d6478", wallTop:"#7c8398", base:"#383e50", accent:"#ff6b6b", wood:"#a4855f", leaf:"#4f9a63", leaf2:"#6fb47f", locker:"#787f94", crate:"#bfa079", crate2:"#a4875e", curtain:"#b8bdcc", pot:"#8d6250", rug:"#d0d4de" },
@@ -2057,7 +2088,8 @@ const ENDLESS = {
   spawnStart: 8.5, spawnEnd: 3.2,
   maxWaiting: 8,
   ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch",
-             "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats"],
+             "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats",
+             "littlescrape", "boosterjab"],
   stars: [1500, 3200, 5400],
   restock: true, jams: true, bigExit: true,
   map: [
@@ -3858,14 +3890,32 @@ function findJobRaw(p) {
       };
     }
 
+    /* Which of this station's outputs does the ward want? The first one some
+       animal in a basket is waiting on right now, else the first listed. The
+       label follows, so the prompt always names what you are about to pick up
+       rather than a generic "take something". */
+    let out = r.out, label = r.label;
+    if (r.outAny) {
+      out = r.outAny[0];
+      for (const cand of r.outAny) {
+        const wanted = Game.world.stations.some(q => {
+          if (!q.occupant) return false;
+          const step = q.occupant.steps[q.occupant.step];
+          return step && step.k === "bedside" && step.need === cand;
+        });
+        if (wanted) { out = cand; break; }
+      }
+      label = "Take the " + ITEMS[out].name.toLowerCase();
+    }
+
     // Plain transform / production recipe.
     return {
-      key: "st" + st.x + "," + st.y + ":" + r.label, dur: r.dur, label: r.label,
+      key: "st" + st.x + "," + st.y + ":" + label, dur: r.dur, label,
       run: () => {
         if (r.stock && st.stock !== Infinity) st.stock--;
-        p.item = r.out ? makeItem(r.out) : null;
+        p.item = out ? makeItem(out) : null;
         st.flash = 0.3;
-        if (r.out === "wand_charged") Sound.play("charge"); else Sound.play("done");
+        if (out === "wand_charged") Sound.play("charge"); else Sound.play("done");
         maybeJam(st);
       }
     };
@@ -4507,6 +4557,8 @@ function treatableAilments(pool) {
     if (a === "socksituation") return have("scanner");
     if (a === "crickintail") return have("scanner");
     if (a === "toomanytreats") return have("lab") && have("remedy");
+    if (a === "littlescrape") return have("grooming");
+    if (a === "boosterjab") return have("remedy");
     return true;
   });
 }
@@ -5217,8 +5269,8 @@ function builderWaveDef(n) {
      later waves are just the early ones with more beds. treatableAilments
      filters this again at spawn time against what has actually been built —
      naming a condition here is an intention, not a promise. */
-  const ail = ["muddypaws", "itchyears"];
-  if (n >= 2) ail.push("sprainedhop");
+  const ail = ["muddypaws", "itchyears", "boosterjab"];
+  if (n >= 2) ail.push("sprainedhop", "littlescrape");
   if (n >= 3) ail.push("staticcling", "zoomies");
   if (n >= 4) ail.push("stickypaws");
   if (n >= 5) ail.push("mysterymunch");
@@ -7285,6 +7337,16 @@ function drawItem3D(type, wx, wy, wz, spin) {
       drawMesh(MESH.cyl, wx, wy - 0.04, wz, r, 0.038, 0.11, 0.038, rgb("#c0392b"));
       drawMesh(MESH.cyl, wx, wy + 0.11, wz, r, 0.052, 0.04, 0.052, rgb("#8d99a8"));
       break;
+    case "plaster":
+      drawMesh(MESH.box, wx, wy, wz, r + 0.5, 0.15, 0.055, 0.02, rgb("#f0a8ae"));
+      drawMesh(MESH.box, wx, wy, wz + 0.014, r + 0.5, 0.045, 0.038, 0.006, rgb("#ffe9ec"));
+      break;
+    case "vaccine":
+      drawMesh(MESH.cyl, wx, wy, wz, r, 0.048, 0.14, 0.048, rgb("#eef8f2"));
+      drawMesh(MESH.cyl, wx, wy - 0.03, wz, r, 0.040, 0.085, 0.040, rgb("#5ec8a0"));
+      drawMesh(MESH.cyl, wx, wy + 0.10, wz, r, 0.056, 0.022, 0.056, rgb("#cfd9df"));
+      drawMesh(MESH.cyl, wx, wy - 0.15, wz, r, 0.008, 0.055, 0.008, rgb("#dfe7ee"));
+      break;
     case "crate":
       drawMesh(MESH.box, wx, wy, wz, r, 0.15, 0.13, 0.15, rgb("#c8974f"));
       drawMesh(MESH.box, wx, wy + 0.02, wz, r, 0.155, 0.02, 0.155, rgb("#87642f"));
@@ -8477,6 +8539,40 @@ function drawAilmentIcon(g, key, x, y, r) {
       }
       break;
     }
+    case "littlescrape": {                            // a plaster, criss-crossed
+      g.save(); g.rotate(-0.6);
+      g.fillStyle = a.color;
+      fillRound(g, -r * .95, -r * .34, r * 1.9, r * .68, r * .30, a.color);
+      g.fillStyle = "#ffe9ec";
+      g.beginPath(); g.ellipse(0, 0, r * .34, r * .26, 0, 0, 6.283); g.fill();
+      g.fillStyle = "rgba(255,255,255,.55)";
+      for (const ox of [-.62, .62])
+        for (const oy of [-.13, .13]) {
+          g.beginPath(); g.arc(ox * r, oy * r, r * .055, 0, 6.283); g.fill();
+        }
+      g.strokeStyle = "rgba(120,40,55,.35)"; g.lineWidth = 1.1;
+      roundRect(g, -r * .95, -r * .34, r * 1.9, r * .68, r * .30); g.stroke();
+      g.restore();
+      break;
+    }
+    case "boosterjab": {                              // a shield with a tick
+      g.fillStyle = a.color;
+      g.beginPath();
+      g.moveTo(0, -r * .95);
+      g.lineTo(r * .78, -r * .60);
+      g.lineTo(r * .78, r * .18);
+      g.quadraticCurveTo(r * .78, r * .78, 0, r * 1.0);
+      g.quadraticCurveTo(-r * .78, r * .78, -r * .78, r * .18);
+      g.lineTo(-r * .78, -r * .60);
+      g.closePath(); g.fill();
+      g.strokeStyle = "rgba(255,255,255,.30)"; g.lineWidth = 1.1; g.stroke();
+      g.strokeStyle = "#ffffff"; g.lineWidth = Math.max(2, r * .24);
+      g.lineCap = "round"; g.lineJoin = "round";
+      g.beginPath();
+      g.moveTo(-r * .34, r * .04); g.lineTo(-r * .06, r * .34); g.lineTo(r * .40, -r * .32);
+      g.stroke();
+      break;
+    }
     case "toomanytreats": {                           // a round tum and one crumb
       g.fillStyle = a.color;
       g.beginPath(); g.arc(0, r * .12, r * .82, 0, 6.283); g.fill();
@@ -8552,6 +8648,31 @@ function drawItemIcon(g, type, x, y, r) {
       g.fillStyle = "rgba(255,255,255,.45)";
       g.fillRect(-r * .26, -r * .8, r * .16, r * .6);
       g.fillStyle = "#8d99a8"; fillRound(g, -r * .52, -r * 1.06, r * 1.04, r * .34, r * .1, "#8d99a8");
+      break;
+    case "plaster":
+      g.save(); g.rotate(-0.6);
+      fillRound(g, -r * .95, -r * .34, r * 1.9, r * .68, r * .30, "#f0a8ae");
+      g.fillStyle = "#ffe9ec";
+      g.beginPath(); g.ellipse(0, 0, r * .34, r * .26, 0, 0, 6.283); g.fill();
+      g.fillStyle = "rgba(255,255,255,.55)";
+      for (const ox of [-.62, .62])
+        for (const oy of [-.13, .13]) { g.beginPath(); g.arc(ox * r, oy * r, r * .055, 0, 6.283); g.fill(); }
+      g.strokeStyle = "rgba(120,40,55,.35)"; g.lineWidth = 1.1;
+      roundRect(g, -r * .95, -r * .34, r * 1.9, r * .68, r * .30); g.stroke();
+      g.restore();
+      break;
+    case "vaccine":
+      g.save(); g.rotate(-0.62);
+      fillRound(g, -r * .55, -r * .90, r * 1.1, r * 1.55, r * .16, "#eef8f2");
+      g.fillStyle = "#5ec8a0";
+      fillRound(g, -r * .44, -r * .30, r * .88, r * .90, r * .10, "#5ec8a0");
+      g.fillStyle = "#cfd9df";
+      fillRound(g, -r * .62, -r * 1.05, r * 1.24, r * .26, r * .08, "#cfd9df");
+      g.strokeStyle = "#b9c8d6"; g.lineWidth = 1.1;
+      roundRect(g, -r * .55, -r * .90, r * 1.1, r * 1.55, r * .16); g.stroke();
+      g.strokeStyle = "#dfe7ee"; g.lineWidth = Math.max(1.5, r * .15); g.lineCap = "round";
+      g.beginPath(); g.moveTo(0, r * .66); g.lineTo(0, r * 1.15); g.stroke();
+      g.restore();
       break;
     case "crate":
       fillRound(g, -r * .98, -r * .82, r * 1.96, r * 1.64, r * .18, "#c8974f");
@@ -8854,21 +8975,28 @@ function drawLegend(g) {
     } else {
       iconR = 8;
       textX = cellX + 24;
-      g.font = "bold 11.5px \"Trebuchet MS\", \"Segoe UI\", sans-serif";
+      const nameSz = perRow >= 6 ? 10.5 : 11.5;
+      g.font = "bold " + nameSz + "px \"Trebuchet MS\", \"Segoe UI\", sans-serif";
       drawAilmentIcon(g, key, cellX + 13, cellY + rowH / 2, iconR);
       const nameW = g.measureText(a.name).width;
-      text(g, a.name, textX, cellY + rowH / 2 - 3, 11.5, a.color);
+      text(g, a.name, textX, cellY + rowH / 2 - 3, nameSz, a.color);
       text(g, "+" + a.score, textX, cellY + rowH / 2 + 9, 9.5, PALETTE.dim);
-      chainX = textX + Math.max(nameW, 34) + 8;
+      chainX = textX + Math.max(nameW, 30) + 6;
       chainY = cellY + rowH / 2 - 8;
     }
 
+    /* Past five per row the separators cost more than they explain: at twelve
+       conditions a four-chip chain has 213px to live in and three glyphs eat 33
+       of them. Chips butt together instead, which still reads as a sequence
+       because each is colour-coded by its station. */
+    const tightRow = perRow >= 6;
+    const sep = tightRow ? 3 : 11;
     g.font = "bold 10px \"Trebuchet MS\", \"Segoe UI\", sans-serif";
-    const boxes = a.chain.map(st => Math.max(nRows === 1 ? 32 : 26,
-                                             g.measureText(st.t).width) + 9);
-    const natural = boxes.reduce((s2, w2) => s2 + w2, 0) + 11 * (a.chain.length - 1);
-    const avail = colW - (chainX - cellX) - 7;
-    const squeeze = Math.max(0.58, Math.min(1, avail / Math.max(1, natural)));
+    const boxes = a.chain.map(st => Math.max(nRows === 1 ? 32 : (tightRow ? 22 : 26),
+                                             g.measureText(st.t).width) + (tightRow ? 6 : 9));
+    const natural = boxes.reduce((s2, w2) => s2 + w2, 0) + sep * (a.chain.length - 1);
+    const avail = colW - (chainX - cellX) - 6;
+    const squeeze = Math.max(tightRow ? 0.50 : 0.58, Math.min(1, avail / Math.max(1, natural)));
 
     g.save();
     g.translate(chainX, chainY);
@@ -8883,8 +9011,8 @@ function drawLegend(g) {
       text(g, stp.t, cx + wBox / 2, 11, 10, "#ffffff", "center");
       cx += wBox;
       if (j < a.chain.length - 1) {
-        text(g, "\u203a", cx + 5, 12, 13, PALETTE.dim, "center");
-        cx += 11;
+        if (!tightRow) text(g, "\u203a", cx + 5, 12, 13, PALETTE.dim, "center");
+        cx += sep;
       }
     }
     g.restore();
@@ -9675,7 +9803,9 @@ const HOWTO_STEPS = {
   zoomies:      "One dropper of calming drops, fast. They have almost no patience and they are already halfway up the curtains.",
   socksituation:"Scan them, develop the plate, then take the scan to the basket. Yes, it is a sock. It is always a sock.",
   crickintail:  "Scan the tail, then stand at the basket with EMPTY hands and hold Q for a gentle wiggle. Nothing to fetch.",
-  toomanytreats:"Swab them, run it to the sniff lab, then fetch a tummy soother from the remedy cabinet. The longest chain in the clinic."
+  toomanytreats:"Swab them, run it to the sniff lab, then fetch a tummy soother from the remedy cabinet. The longest chain in the clinic.",
+  littlescrape: "Two trips to the same shelf: a towel to clean it, then a plaster to go over the top. Nothing else sends you back to one station twice.",
+  boosterjab:   "Nothing is wrong with them. One booster from the remedy cabinet and they are away. Pays little and waits a long time — leave it if the room is on fire."
 };
 
 
