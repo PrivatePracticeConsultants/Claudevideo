@@ -143,7 +143,19 @@ class MrfxConfig(BaseModel):
     # the queue row to a manual "run this command" error. Honors
     # PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD (managed environments forbid re-fetching).
     render_auto_install: bool = True
-    download_timeout_seconds: float = Field(default=900.0, gt=0)
+    # Longest SILENCE tolerated mid-download before reconnecting — the maximum
+    # gap between bytes arriving, NOT a cap on total download time. A big file
+    # that keeps streaming, however slowly, never trips it.
+    #
+    # This was 900s, and it was the main reason downloads "stall": payer CDNs
+    # (Anthem's and UHC's especially) routinely accept a connection and then go
+    # silent mid-file, and every such episode parked a scarce downloader slot
+    # for a full 15 MINUTES before the retry machinery got a turn. Measured:
+    # time-to-detect tracks this value exactly. At 120s a dead connection is
+    # spotted ~7x sooner and the download resumes from its .part via a Range
+    # request, losing nothing. Nothing healthy pauses two minutes between
+    # chunks, so this costs working transfers nothing.
+    download_timeout_seconds: float = Field(default=120.0, gt=0)
     download_retries: int = Field(default=4, ge=0)
     # Wall-clock STALL deadline: give up on a download that has gone this many
     # seconds without any NET forward byte progress, even if individual retries

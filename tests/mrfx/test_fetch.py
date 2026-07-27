@@ -1990,3 +1990,80 @@ def test_speedtest_names_a_dead_link_instead_of_blaming_range_support(cfg, capsy
     assert rc == 1
     assert "HTTP 404" in out and "expire" in out
     assert "range requests" not in out          # don't misdiagnose it
+
+
+def test_silent_server_is_detected_fast_and_the_download_resumes(cfg, tmp_path):
+    """Payer CDNs (Anthem's, UHC's) routinely accept a connection and then go
+    SILENT mid-file. Time-to-detect equals download_timeout_seconds exactly —
+    it was 900s, so every such episode parked a scarce downloader slot for 15
+    minutes doing nothing, which is what "downloads stall out" actually was.
+    Detection must be fast AND lossless: reconnect, resume from the .part via
+    Range, keep every byte already on disk."""
+    import hashlib
+    import http.server as hs
+    import os as _os
+    import threading as _th
+    import time as _time
+
+    from mrfx.fetch import download
+
+    payload = _os.urandom(3_000_000)
+    expect = hashlib.sha256(payload).hexdigest()
+    state = {"n": 0, "starts": []}
+
+    class SilentThenGood(hs.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self):
+            rng = self.headers.get("Range", "")
+            start = int(rng[6:].split("-")[0]) if rng.startswith("bytes=") else 0
+            state["n"] += 1
+            state["starts"].append(start)
+            body = payload[start:]
+            self.send_response(206 if start else 200)
+            if start:
+                self.send_header("Content-Range",
+                                 f"bytes {start}-{len(payload) - 1}/{len(payload)}")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            if state["n"] == 1:                 # first attempt: partial, then hang
+                # MUST exceed the 1 MB read chunk — a connection that dies with
+                # less than one chunk buffered never yields it, so nothing
+                # reaches the .part and there is no partial to resume from
+                self.wfile.write(body[:1_500_000])
+                try:
+                    self.wfile.flush()
+                except Exception:               # noqa: BLE001 — client hung up
+                    pass
+                _time.sleep(60)
+                return
+            self.wfile.write(body)
+
+    httpd = hs.ThreadingHTTPServer(("127.0.0.1", 0), SilentThenGood)
+    _th.Thread(target=httpd.serve_forever, daemon=True).start()
+    cfg.download_timeout_seconds = 3.0
+    dest = tmp_path / "big.json"
+    try:
+        t0 = _time.monotonic()
+        sha, _url = download(cfg, f"http://127.0.0.1:{httpd.server_address[1]}/f.json",
+                             dest)
+        elapsed = _time.monotonic() - t0
+    finally:
+        httpd.shutdown()
+
+    assert sha == expect                        # every byte, correct order
+    assert dest.stat().st_size == len(payload)
+    # it RESUMED rather than restarting: the retry asked for a non-zero offset
+    assert state["n"] >= 2 and max(state["starts"]) > 0, state["starts"]
+    # and it noticed the silence on the timeout, not after some fixed long wait
+    assert elapsed < 30, f"took {elapsed:.1f}s — silence detection is not tracking the timeout"
+
+
+def test_download_timeout_default_is_short_enough_to_free_a_stalled_slot():
+    """Guards the value itself. This is a max GAP BETWEEN BYTES, not a cap on
+    total download time, so a slow-but-streaming file is unaffected — but every
+    minute of it is a minute a dead connection holds a downloader slot."""
+    from mrfx.config import MrfxConfig
+
+    assert MrfxConfig().download_timeout_seconds <= 180, (
+        "a silent CDN holds a downloader slot for this long; keep it small")

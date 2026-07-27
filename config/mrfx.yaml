@@ -135,6 +135,18 @@ parallel_downloads: 0
 # segment count with a LOWER parallel_downloads — e.g. segments 4, downloads 2.
 download_segments: 1
 
+# How long to wait for the NEXT piece of data before hanging up and
+# reconnecting. This is the gap BETWEEN bytes, not a limit on how long a file
+# may take — a big file that keeps streaming, however slowly, is never affected.
+#
+# This is the setting that governs "downloads stall". Payer CDNs regularly
+# accept a connection and then go silent mid-file; until this fires, that
+# download is holding one of your download slots doing nothing. It used to be
+# 900 (15 minutes per silent episode, per slot). When it fires the app
+# reconnects and resumes from exactly where it stopped — nothing is re-downloaded
+# and nothing is lost. Lower it (e.g. 60) if a payer's CDN drops out constantly.
+download_timeout_seconds: 120
+
 # Give up on a download that goes this many seconds with NO forward progress —
 # a flaky server (CDN) that keeps closing the connection early and won't resume.
 # Without this, one bad file can tie up a download slot for over an hour and

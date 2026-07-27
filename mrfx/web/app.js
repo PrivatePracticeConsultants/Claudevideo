@@ -16,6 +16,24 @@ const LATEST_MONTH_OPT =
 // and report must not disagree about which numbers carry a caveat.
 const THIN_PEERS = 5;
 
+// How long a download's byte counter may sit unchanged before we tell the user
+// the payer's server has gone quiet. Comfortably longer than a normal poll gap
+// so ordinary jitter never trips it.
+const STALL_HINT_SECONDS = 25;
+// url id -> {bytes, since}. Purely a display aid computed in the browser; the
+// server is not asked to track this and the download is untouched either way.
+const _stallSeen = new Map();
+
+function stalledFor(id, bytes) {
+  const now = Date.now();
+  const prev = _stallSeen.get(id);
+  if (!prev || prev.bytes !== bytes) {
+    _stallSeen.set(id, { bytes, since: now });
+    return 0;
+  }
+  return (now - prev.since) / 1000;
+}
+
 const state = {
   view: "explorer",
   grain: "tin",
@@ -2097,6 +2115,16 @@ async function loadUrlQueue() {
     if (u.status === "downloading" && u.bytes_total > 0) {
       statusCell += `<div class="progress"><div class="progress-fill" style="width:${Math.round(u.progress)}%"></div>
         <span class="progress-label">${(u.bytes_done / 1e6).toFixed(0)} / ${(u.bytes_total / 1e6).toFixed(0)} MB</span></div>`;
+      // A payer CDN that goes silent mid-file leaves the bar frozen at the same
+      // MB with no explanation, which reads as "the app has hung". It hasn't —
+      // it's waiting out the no-data timeout and will reconnect and resume from
+      // exactly here. Say so, so a normal (if annoying) CDN hiccup isn't
+      // mistaken for a crash.
+      const held = stalledFor(u.id, u.bytes_done);
+      if (held >= STALL_HINT_SECONDS) {
+        statusCell += `<div class="sub muted">no data for ${Math.round(held)}s —`
+          + ` waiting on the payer's server, will reconnect and resume</div>`;
+      }
     } else if (u.status === "ingesting") {
       statusCell += ` <span class="muted">(see file row below for chunk progress)</span>`;
     }

@@ -413,6 +413,25 @@ moves that number, in order of impact:
    connections when you open too many. If a server refuses range requests the
    app notices and quietly uses one connection, so turning this on is safe.
 
+   **If downloads look frozen rather than slow** — the MB counter sitting on
+   the same number for minutes — that's a payer CDN that accepted the
+   connection and then went quiet. It happens constantly with the big Blue and
+   UHC file hosts. The app waits `download_timeout_seconds` (120 by default)
+   for the next piece of data, then hangs up, reconnects, and carries on from
+   exactly where it stopped — nothing is re-downloaded. The Files tab now says
+   so on the row instead of leaving you staring at a stuck bar.
+
+   If a particular payer drops out constantly, lowering it makes the app give
+   up on each dead connection sooner:
+
+   ```yaml
+   download_timeout_seconds: 60
+   ```
+
+   Don't raise it. It is a limit on *silence*, not on how long a file may take,
+   so a slow-but-steady download is never affected by it — but every second of
+   it is a second a dead connection occupies one of your download slots.
+
    **Don't guess — measure it.** Copy one of the big links that's holding your
    queue up and run:
 
