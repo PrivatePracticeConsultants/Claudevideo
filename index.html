@@ -2910,19 +2910,19 @@ function challengeText(c) {
   const n = challengeN(c);
   switch (c.k) {
     case "chain":    return "Reach a chain of x" + n;
-    case "treat":    return "Treat " + n + " animals";
+    case "treat":    return "Send " + n + " animals home";
     case "perfect":  return n + " perfect send-offs";
     case "clutch":   return n + " clutch saves";
-    case "ailment":  return "Treat " + n + " " + AILMENTS[c.a].name.toLowerCase() + " cases";
+    case "ailment":  return "Sort out " + n + " " + AILMENTS[c.a].name.toLowerCase() + " cases";
   }
   switch (c.k) {
     case "noloss":   return "Everyone goes home happy";
     case "maxlives": return "Nobody trots off home";
     case "chain":    return "Reach a chain of x" + c.n;
-    case "treat":    return "Treat " + c.n + " animals";
+    case "treat":    return "Send " + c.n + " animals home";
     case "perfect":  return c.n + " perfect send-offs";
     case "clutch":   return c.n + " clutch saves";
-    case "ailment":  return "Treat " + c.n + " " + AILMENTS[c.a].name.toLowerCase() + " cases";
+    case "ailment":  return "Sort out " + c.n + " " + AILMENTS[c.a].name.toLowerCase() + " cases";
   }
   return "?";
 }
@@ -4044,7 +4044,7 @@ function updatePlayer(p, dt) {
     p.promptE = previewInteract(p);
     const job = findJob(p);
     p.promptQ = job ? job.label
-              : (cleanableBed(world, p) ? "Turn over bay"
+              : (cleanableBed(world, p) ? "Change the basket"
               : (p.item ? "Throw"
               : (!p.patient && spillAt(p.x, p.y) ? "Mop up" : null)));
     SILENT_HINTS = false;
@@ -7016,13 +7016,23 @@ function drawCharacter3D(o) {
       drawMesh(MESH.boxSoft, p[0], p[1], p[2], ry, 0.015*S, 0.058*S, 0.018*S,
                rgb(look.trim || "#ffffff"));
     } else {
-      // staff badge as a felt appliqué: a stitched patch with a cross on it
+      /* Staff badge as a felt appliqué: a stitched patch with a PAW on it.
+         It was a red cross, which is wrong for a vet clinic twice over — the
+         emblem is protected under the Geneva Conventions and its commercial
+         use is restricted in most of the countries this would sell in, so it
+         is not something to ship on a nurse's chest regardless of theme. */
       p = P(0, TY + 0.045, 0.235);
       drawMesh(MESH.boxSoft, p[0], p[1], p[2], ry, 0.105*S, 0.105*S, 0.028*S,
                rgb("#fdfdff"));
-      p = P(0, TY + 0.045, 0.262);
-      drawMesh(MESH.boxSoft, p[0], p[1], p[2], ry, 0.028*S, 0.072*S, 0.012*S, rgb("#ff7a86"));
-      drawMesh(MESH.boxSoft, p[0], p[1], p[2], ry, 0.072*S, 0.028*S, 0.012*S, rgb("#ff7a86"));
+      // sized and coloured to actually read against a near-white patch: the
+      // first attempt was pale pink on white and vanished at any distance
+      const paw = rgb("#e0566f");
+      p = P(0, TY + 0.020, 0.274);
+      drawMesh(MESH.sphereLo, p[0], p[1], p[2], ry, 0.052*S, 0.044*S, 0.012*S, paw);
+      for (const [ox, oy] of [[-0.052, 0.068], [-0.018, 0.088], [0.018, 0.088], [0.052, 0.068]]) {
+        const q = P(ox, TY + oy, 0.274);
+        drawMesh(MESH.sphereLo, q[0], q[1], q[2], ry, 0.020*S, 0.023*S, 0.011*S, paw);
+      }
       // stitch dots around the patch edge
       for (const [dx, dy] of _charDetail
             ? [[-1,-1],[1,-1],[-1,1],[1,1],[0,-1],[0,1],[-1,0],[1,0]] : []) {
@@ -8617,15 +8627,23 @@ function hudCard(g, x, y, w, h, label) {
 
 /** Baskets out of action. Turns amber then red as the ward silts up, because a
     player needs to feel the turnover debt before it strands them. */
-function hudDirtyBaskets(g, x, y) {
+/** The one running-totals line, drawn as a unit.
+    "Sent home 5   Trotted off 0" is a good deal wider than the "Treated / Lost"
+    it replaced, and it ran straight into the basket indicator that used to sit
+    at a hard-coded +150. Both live here now, measured, on the single row the
+    card has space for. */
+function hudCounters(g, bx) {
   const n = dirtyBedCount();
+  const left = "Sent home " + Game.treated + "   Trotted off " + Game.lost;
+  g.font = 'bold 11.5px "Trebuchet MS", "Segoe UI", sans-serif';
+  text(g, left, bx + 12, 72, 11.5, PALETTE.dim);
   if (!n) return;
   const total = Game.world ? Game.world.beds.length : 1;
   const frac = n / Math.max(1, total);
   const col = frac > 0.55 ? PALETTE.bad : (frac > 0.28 ? PALETTE.warn : PALETTE.dim);
   g.save();
   if (frac > 0.55) g.globalAlpha = 0.6 + 0.4 * Math.sin(performance.now() / 160);
-  text(g, "↻ " + n + " bay" + (n === 1 ? "" : "s"), x, y, 12, col);
+  text(g, "↻ " + n, bx + 20 + g.measureText(left).width, 72, 11.5, col);
   g.restore();
 }
 
@@ -8664,7 +8682,7 @@ function drawHUD(g) {
     text(g, "SURVIVED", 128, 70, 11, PALETTE.dim);
     text(g, "WAVE " + Game.wave, 128, 52, 12, PALETTE.warn);
     if (Game.waveTimer < 12)
-      text(g, "AMB " + Math.ceil(Game.waveTimer) + "s", 190, 52, 12, "#ff9a6a");
+      text(g, "VAN " + Math.ceil(Game.waveTimer) + "s", 190, 52, 12, "#ff9a6a");
   } else {
     const remain = Math.max(0, lvl.duration - Game.time);
     const urgent = remain < 30;
@@ -8674,7 +8692,7 @@ function drawHUD(g) {
     text(g, "TIME", 122, 70, 11, PALETTE.dim);
     if (Game.wave > 0) text(g, "WAVE " + Game.wave, 122, 52, 12, PALETTE.warn);
     if (Game.waveTimer < 12 && remain > Game.waveTimer)
-      text(g, "AMB " + Math.ceil(Game.waveTimer) + "s", 178, 52, 12, "#ff9a6a");
+      text(g, "VAN " + Math.ceil(Game.waveTimer) + "s", 178, 52, 12, "#ff9a6a");
   }
 
   // --- lives: as many hearts as this run actually has ---
@@ -8721,8 +8739,7 @@ function drawHUD(g) {
   if (Game.builderMode || (lvl && lvl.builder)) {
     hudCard(g, bx, 10, 250, HUD_H - 22, "WAVE " + (Game.builder ? Game.builder.wave : 1));
     text(g, "Best wave  " + (Game.builderBest || "—"), bx + 12, 52, 16, "#6fd3b4");
-    text(g, "Sent home " + Game.treated + "   Trotted off " + Game.lost, bx + 12, 74, 12, PALETTE.dim);
-    hudDirtyBaskets(g, bx + 150, 74);
+    hudCounters(g, bx);
   } else if (isTut) {
     hudCard(g, bx, 10, 250, HUD_H - 22, "ORIENTATION");
     text(g, "Nothing here can be failed.", bx + 12, 52, 13, "#6fd3b4", "left", "normal");
@@ -8730,8 +8747,7 @@ function drawHUD(g) {
   } else if (Game.endless) {
     hudCard(g, bx, 10, 250, HUD_H - 22, "PERSONAL BEST");
     text(g, String(Game.endlessBest), bx + 12, 52, 26, "#ffd54a");
-    text(g, "Sent home " + Game.treated + "   Trotted off " + Game.lost, bx + 12, 74, 12, PALETTE.dim);
-    hudDirtyBaskets(g, bx + 150, 74);
+    hudCounters(g, bx);
   } else {
     hudCard(g, bx, 10, 250, HUD_H - 22, "TARGETS");
     const tgts = starTargets(Game.levelIndex);
@@ -8742,8 +8758,7 @@ function drawHUD(g) {
       drawStar(g, sx + 9, 46, 10, hit ? "#ffd54a" : "rgba(255,255,255,.15)");
       text(g, String(th), sx + 23, 51, 13, hit ? PALETTE.text : PALETTE.dim);
     }
-    text(g, "Sent home " + Game.treated + "   Trotted off " + Game.lost, bx + 12, 74, 12, PALETTE.dim);
-    hudDirtyBaskets(g, bx + 150, 74);
+    hudCounters(g, bx);
   }
 
   text(g, (Sound.muted ? "M  muted" : "M  sound") + (Music.on ? "  ·  N  music" : "  ·  N  off"), W - 20, 26, 11, PALETTE.dim, "right");
@@ -10179,13 +10194,13 @@ function drawResults(g) {
 
   const stats = r.builder ? [
     ["Animals sent home", String(r.treated)],
-    ["Trotted off home", String(r.lost)],
+    ["Trotted off in a huff", String(r.lost)],
     ["Credits earned", String(r.spent || 0)],
     ["Things built", String(r.built || 0)],
     ["Staff hired", String(r.staff || 0)]
   ] : [
     ["Animals sent home", String(r.treated)],
-    ["Trotted off home", String(r.lost)],
+    ["Trotted off in a huff", String(r.lost)],
     ["Best chain", "x" + (r.bestCombo || 0)],
     ["Perfect send-offs", String(r.perfects || 0)],
     ["Clutch saves", String(r.clutches || 0)]
