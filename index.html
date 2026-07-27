@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Code Blue! — ER Co-op</title>
+<title>Fluff &amp; Fix — a two-player vet clinic</title>
 <style>
   html, body {
     margin: 0; padding: 0; height: 100%;
@@ -30,7 +30,7 @@
 <script>
 "use strict";
 /* =====================================================================
-   CODE BLUE! — a two-player couch co-op ER game.
+   FLUFF & FIX — a two-player couch co-op vet clinic.
    Single file, vanilla JS + Canvas, no dependencies.
 
    Sections:
@@ -40,7 +40,7 @@
      4. Input (shared keyboard, two control sets)
      5. Data (items, ailments, station recipes, levels)
      6. World construction (map parsing, pathfinding)
-     7. Entities (players, patients, items, stations)
+     7. Entities (players, animals, items, stations)
      8. Interaction resolution (interact key / use key)
      9. Simulation update
     10. Rendering (world, entities, HUD, screens)
@@ -293,7 +293,7 @@ const Sound = {
       case "warn":     this.tone(880, 0.07, "square", 0.05); break;
       case "cordon":   this.tone(520, 0.09, "square", 0.07); 
                        setTimeout(() => this.tone(520, 0.09, "square", 0.07), 150); break;
-      case "flatline": this.tone(880, 1.1, "sine", 0.10); break;
+      case "trotoff": this.tone(880, 1.1, "sine", 0.10); break;
       case "leave":    this.tone(300, 0.28, "square", 0.09, 120); break;
       case "lab":      this.tone(760, 0.12, "sine", 0.1, 520); setTimeout(() => this.tone(980, 0.18, "sine", 0.1), 120); break;
       case "menu":     this.tone(600, 0.05, "square", 0.07); break;
@@ -432,7 +432,7 @@ const Music = {
         }
         // and a held pad underneath the whole thing at full tilt
         if (I > 0.78 && i % 16 === 0) this.note(r * 1.5, 2.2, "sawtooth", 0.010);
-        // the old flatline tick, kept: it is the clearest warning in the game
+        // the old bigExit tick, kept: it is the clearest warning in the game
         if (Game.critical < CRIT_AT && i % 2 === 1) this.note(2200, 0.03, "square", 0.018);
 
       } else if (this.bed === "build") {
@@ -532,7 +532,7 @@ const OPTION_ROWS = [
     state: () => (isFullscreen() ? "ON" : "OFF"),
     run: () => toggleFullscreen() },
   { key: "controls", name: "Change controls", kind: "action",
-    blurb: "Rebind every key for both medics.",
+    blurb: "Rebind every key for both nurses.",
     state: () => "OPEN",
     run: () => { Game.controlsFrom = "options"; Game.screen = "controls";
                  Game.controlCursor = 0; Game.rebind = null; Sound.play("menu"); } },
@@ -617,7 +617,7 @@ function resetControls() {
    speedMul   on foot          workMul  procedure duration (lower = faster)
    staminaMul sprint reserve   labMul   the lab/analyse step specifically
    comboBonus extra seconds on the chain window
-   calmR      radius in pixels within which waiting patients fret more slowly */
+   calmR      radius in pixels within which waiting animals fret more slowly */
 const TRAITS = {
   /* The penalty side of every trade is HALF the size of the bonus side, and
      that is deliberate. The first tuning used symmetric trades, and an A/B on
@@ -649,7 +649,7 @@ const CHARACTERS = [
     scrub: "#2fa9bd", cap: "#248fa0" },
   { name: "Amara", trait: "steady", blurb: "calm under pressure", skin: "#8a5a3b", hair: "#3f3833", style: "none",   acc: "hijab", accColor: "#5fc7b4",
     scrub: "#6d5cd6", cap: "#5a4ac0" },
-  { name: "Kenji", trait: "reader", blurb: "reads every chart",  skin: "#f2c898", hair: "#2e2a28", style: "fringe", acc: "glasses",
+  { name: "Kenji", trait: "reader", blurb: "reads every notes card",  skin: "#f2c898", hair: "#2e2a28", style: "fringe", acc: "glasses",
     scrub: "#3a6fd0", cap: "#2f5cb4" },
   { name: "Zoe", trait: "puff",   blurb: "double puff power",  skin: "#6b4630", hair: "#241f1c", style: "puffs",  acc: "none",
     scrub: "#e8654f", cap: "#cc5340" },
@@ -662,14 +662,14 @@ const CHARACTERS = [
 /* --- Perks: unlocked by total stars, pick up to 2 before a shift. --- */
 const PERK_MAX_ACTIVE = 2;
 const PERKS = [
-  { key: "bays",    name: "Extra Bays",     stars: 3,
-    blurb: "Two more beds appear in every ward." },
-  { key: "nurse",   name: "Nurse Joy",      stars: 5,
-    blurb: "A helper nurse comforts waiting patients, restoring patience." },
+  { key: "bays",    name: "Extra Baskets",     stars: 3,
+    blurb: "Two more baskets appear in every room." },
+  { key: "nurse",   name: "Nurse Bramble",      stars: 5,
+    blurb: "A helper nurse fusses the animals in the queue, restoring patience." },
   { key: "shoes",   name: "Speedy Sneakers", stars: 8,
-    blurb: "Both medics move 8% faster with 40% more sprint stamina." },
+    blurb: "Both nurses move 8% faster with 40% more sprint stamina." },
   { key: "shelves", name: "Big Shelves",    stars: 12,
-    blurb: "Supply shelves hold 2 extra and start full." },
+    blurb: "Grooming shelves hold 2 extra and start full." },
   { key: "charm",   name: "Lucky Charm",    stars: 18,
     blurb: "Combo chains last 2.5s longer and PERFECT is easier to earn." }
 ];
@@ -701,7 +701,7 @@ document.addEventListener("webkitfullscreenchange", fitCanvasSafe);
 function fitCanvasSafe() { try { fitCanvas(); } catch (err) {} }
 
 /* --- auto-pause ----------------------------------------------------------
-   Alt-tabbing out of a timed shift used to keep the clock running: patients
+   Alt-tabbing out of a timed shift used to keep the clock running: animals
    walked out and lives were lost while the window was not even visible. The
    same is true of a pad whose battery dies mid-shift. Both now stop the game
    the way a human would expect, and say why. */
@@ -925,7 +925,7 @@ const AILMENTS = {
   },
   staticcling: {
     name: "Static Cling", color: "#ffb703", short: "ZAP", score: 195, patienceMul: 0.9,
-    steps: [{ k: "bedside", need: "wand_charged", dur: 1.2, label: "Discharge the fluff" }],
+    steps: [{ k: "bedside", need: "wand_charged", dur: 1.2, label: "Zap the fluff" }],
     chain: [{ s: "wanddock", t: "Wand" }, { s: "groundpad", t: "Ground it" },
             { s: "basket", t: "Poof" }]
   },
@@ -1036,7 +1036,7 @@ const RECIPES = {
 const LEVELS = [
   {
     name: "First Shift",
-    blurb: "Cuts and infections. Take your time — learn the room.",
+    blurb: "Muddy paws and itchy ears. Take your time — learn the room.",
     seed: 1337,
     duration: 140,
     patience: 78,
@@ -1044,7 +1044,7 @@ const LEVELS = [
     maxWaiting: 3,
     ailments: ["muddypaws", "itchyears"],
     stars: [3000, 5200, 7100],
-    restock: false, jams: false, flatline: false,
+    restock: false, jams: false, bigExit: false,
         theme: { floor:"#f7efdd", floorAlt:"#f0e5cd", wall:"#a9e0d4", wallTop:"#c6ede3", base:"#7cc4b4",
              accent:"#5cb8e6", wood:"#d3a56c", leaf:"#5fb872", leaf2:"#83d290", pot:"#d98a5f",
              locker:"#a7bccb", crate:"#dcb98c", crate2:"#c9a173", curtain:"#bfdcee", rug:"#d6e6f2" },
@@ -1075,8 +1075,8 @@ const LEVELS = [
     ]
   },
   {
-    name: "Twin Wards",
-    blurb: "Fractures arrive. The X-ray and the cast bench are on opposite sides.",
+    name: "Twin Rooms",
+    blurb: "Sprained hops arrive. The scanner and the bootie bench are on opposite sides.",
     seed: 24601,
     duration: 140,
     patience: 70,
@@ -1084,7 +1084,7 @@ const LEVELS = [
     maxWaiting: 4,
     ailments: ["muddypaws", "itchyears", "sprainedhop", "stickypaws"],
     stars: [2350, 4050, 5550],
-    restock: false, jams: false, flatline: false,
+    restock: false, jams: false, bigExit: false,
         theme: { floor:"#eef2f7", floorAlt:"#e5ebf3", wall:"#9fc3e4", wallTop:"#bcd8ef", base:"#6d9bc4",
              accent:"#5b8fd0", wood:"#c2a079", leaf:"#63b98a", leaf2:"#86cfa3", pot:"#c98466",
              locker:"#93aec6", crate:"#cfae86", crate2:"#bb9a72", curtain:"#a9c9e6", rug:"#cfe0ef" },
@@ -1115,8 +1115,8 @@ const LEVELS = [
     ]
   },
   {
-    name: "Crash Cart",
-    blurb: "Cardiac cases. One defibrillator for the whole floor — and the shelves run dry.",
+    name: "Fluff & Sparks",
+    blurb: "Static cling. One wand for the whole floor — and the shelves run dry.",
     seed: 90210,
     duration: 140,
     patience: 56,
@@ -1124,7 +1124,7 @@ const LEVELS = [
     maxWaiting: 5,
     ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "stickypaws", "zoomies"],
     stars: [1700, 2950, 4050],
-    restock: true, jams: false, flatline: true,
+    restock: true, jams: false, bigExit: true,
         theme: { floor:"#f4e9e4", floorAlt:"#ecdfd9", wall:"#e0a79f", wallTop:"#eec3bc", base:"#c17f76",
              accent:"#e2645f", wood:"#c08f63", leaf:"#5aa870", leaf2:"#7cc38d", pot:"#b06a54",
              locker:"#c39a92", crate:"#d3a97e", crate2:"#bf9268", curtain:"#eab8b0", rug:"#e8cfc8" },
@@ -1156,8 +1156,8 @@ const LEVELS = [
     ]
   },
   {
-    name: "The Gauntlet",
-    blurb: "Mystery cases need the lab. The X-ray jams. Work both ends of the corridor.",
+    name: "The Long Bench",
+    blurb: "Mystery munches need the sniff lab. The scanner jams. Work both ends.",
     seed: 55555,
     duration: 140,
     patience: 66,
@@ -1165,7 +1165,7 @@ const LEVELS = [
     maxWaiting: 5,
     ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "socksituation"],
     stars: [2100, 3650, 5000],
-    restock: true, jams: true, flatline: true,
+    restock: true, jams: true, bigExit: true,
         theme: { floor:"#e9e6de", floorAlt:"#e0ddd4", wall:"#8fa398", wallTop:"#aab9b0", base:"#6a7d73",
              accent:"#7fb08d", wood:"#b08a5e", leaf:"#4f9d66", leaf2:"#6fb87f", pot:"#a5714f",
              locker:"#8b9d94", crate:"#c4a276", crate2:"#ae8d64", curtain:"#aec5b6", rug:"#d3d6cd" },
@@ -1198,8 +1198,8 @@ const LEVELS = [
     ]
   },
   {
-    name: "Code Blue",
-    blurb: "Everything at once, everything far apart. Two coordinated medics only.",
+    name: "Full House",
+    blurb: "Everything at once, everything far apart. Two coordinated nurses only.",
     seed: 777001,
     duration: 140,
     patience: 66,
@@ -1207,7 +1207,7 @@ const LEVELS = [
     maxWaiting: 6,
     ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "crickintail"],
     stars: [1700, 2950, 4050],
-    restock: true, jams: true, flatline: true,
+    restock: true, jams: true, bigExit: true,
         theme: { floor:"#e6eef4", floorAlt:"#dce6ee", wall:"#7fa8c9", wallTop:"#a2c4dd", base:"#57809f",
              accent:"#3fa9e8", wood:"#a98d68", leaf:"#4fa87e", leaf2:"#72c39a", pot:"#9c6f57",
              locker:"#7f9db4", crate:"#bfa079", crate2:"#a98a66", curtain:"#9dc2dd", rug:"#c6dae8" },
@@ -1240,7 +1240,7 @@ const LEVELS = [
   },
   {
     name: "Double Trouble",
-    blurb: "Two wards, one crossing. Whoever holds the middle holds the shift.",
+    blurb: "Two rooms, one crossing. Whoever holds the middle holds the shift.",
     seed: 61001,
     duration: 140,
     patience: 52,
@@ -1248,7 +1248,7 @@ const LEVELS = [
     maxWaiting: 6,
     ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats"],
     stars: [2150, 3750, 5100],
-    restock: true, jams: true, flatline: true,
+    restock: true, jams: true, bigExit: true,
         theme: { floor:"#f0ecf6", floorAlt:"#e7e2f0", wall:"#b1a3d6", wallTop:"#c9bee6", base:"#8878b4",
              accent:"#9b7fd4", wood:"#bd9a72", leaf:"#5cb079", leaf2:"#80c896", pot:"#a9739a",
              locker:"#a294c4", crate:"#cfae86", crate2:"#b8946c", curtain:"#c4b6e2", rug:"#ddd4ec" },
@@ -1275,7 +1275,7 @@ const LEVELS = [
     ]
   },
   {
-    name: "The Maze",
+    name: "The Warren",
     blurb: "Winding corridors and dead ends. Learn the routes or lose the run.",
     seed: 71002,
     duration: 140,
@@ -1284,7 +1284,7 @@ const LEVELS = [
     maxWaiting: 6,
     ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "socksituation", "crickintail"],
     stars: [1700, 2900, 4000],
-    restock: true, jams: true, flatline: true,
+    restock: true, jams: true, bigExit: true,
         theme: { floor:"#f2e6d2", floorAlt:"#e9dbc4", wall:"#c9a06a", wallTop:"#dcbb8b", base:"#9c7343",
              accent:"#e0a13f", wood:"#a97645", leaf:"#5da05f", leaf2:"#7fbc7c", pot:"#a86b46",
              locker:"#bc9a72", crate:"#c79a63", crate2:"#b0854f", curtain:"#dcc39a", rug:"#e0cca8" },
@@ -1310,8 +1310,8 @@ const LEVELS = [
     ]
   },
   {
-    name: "Triage",
-    blurb: "Sixteen beds and no excuses. Volume is the enemy here.",
+    name: "Open Day",
+    blurb: "Sixteen baskets and no excuses. Volume is the enemy here.",
     seed: 81003,
     duration: 140,
     patience: 65,
@@ -1319,7 +1319,7 @@ const LEVELS = [
     maxWaiting: 7,
     ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies"],
     stars: [1750, 3000, 4150],
-    restock: true, jams: true, flatline: true,
+    restock: true, jams: true, bigExit: true,
         theme: { floor:"#f1ecdf", floorAlt:"#e8e2d2", wall:"#8fc9be", wallTop:"#aeddd4", base:"#5f9e92",
              accent:"#f0a541", wood:"#c69a68", leaf:"#57ac74", leaf2:"#7ac68e", pot:"#c07f52",
              locker:"#93bcb2", crate:"#d3ab7c", crate2:"#bd9366", curtain:"#b3d9d0", rug:"#dbe4d8" },
@@ -1354,7 +1354,7 @@ const LEVELS = [
     maxWaiting: 7,
     ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats"],
     stars: [1550, 2650, 3650],
-    restock: true, jams: true, flatline: true,
+    restock: true, jams: true, bigExit: true,
         theme: { floor:"#f6f3ec", floorAlt:"#ece8df", wall:"#dfe4e9", wallTop:"#f0f3f6", base:"#a9b4bf",
              accent:"#f2803c", wood:"#c99a63", leaf:"#5fb872", leaf2:"#83d290", pot:"#cf7d4f",
              locker:"#b8c3cd", crate:"#d9b483", crate2:"#c39a6a", curtain:"#d3dde6", rug:"#e4e8ec" },
@@ -1391,7 +1391,7 @@ const LEVELS = [
     maxWaiting: 8,
     ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats"],
     stars: [1300, 2200, 3000],
-    restock: true, jams: true, flatline: true,
+    restock: true, jams: true, bigExit: true,
         theme: { floor:"#dfe4e4", floorAlt:"#d5dbdb", wall:"#5f7d80", wallTop:"#7d9c9e", base:"#41595c",
              accent:"#f0b23f", wood:"#9c7a52", leaf:"#489a63", leaf2:"#69b57e", pot:"#8a5f45",
              locker:"#63817f", crate:"#ae8f66", crate2:"#977a55", curtain:"#7f9ea0", rug:"#c4cdcd" },
@@ -1420,7 +1420,7 @@ const LEVELS = [
   },
   {
     name: "Night Rounds",
-    blurb: "A single long corridor with the bays off it. The med cabinet is at the wrong end.",
+    blurb: "One long corridor with the pens off it. The remedy cabinet is at the wrong end.",
     seed: 110011,
     duration: 140,
     patience: 60,
@@ -1428,7 +1428,7 @@ const LEVELS = [
     maxWaiting: 7,
     ailments: ["muddypaws", "itchyears", "sprainedhop", "mysterymunch", "socksituation", "toomanytreats"],
     stars: [1850, 3250, 4450],
-    restock: true, jams: true, flatline: true,
+    restock: true, jams: true, bigExit: true,
     theme: { floor:"#2f3a4a", floorAlt:"#28323f", wall:"#465a72", wallTop:"#5d7590", base:"#31404f", accent:"#7fb2e0", wood:"#8a6f4e", leaf:"#3f7f58", leaf2:"#579a70", locker:"#4e6378", crate:"#96794f", crate2:"#7f6644", curtain:"#5f7c96", pot:"#7a5340", rug:"#3c4a5c" },
     props: ["locker", "trolley", "ivpole", "screen", "sign", "gurney"],
     shutters: [{ x: 27, y: 8, dir: "v", len: 2, phase: 0.2 } ],
@@ -1454,7 +1454,7 @@ const LEVELS = [
   },
   {
     name: "The Annexe",
-    blurb: "Somebody bolted a second wing on at right angles. Guess where the cast bench went.",
+    blurb: "Somebody bolted a second wing on at right angles. Guess where the bootie bench went.",
     seed: 120012,
     duration: 140,
     patience: 65,
@@ -1462,7 +1462,7 @@ const LEVELS = [
     maxWaiting: 7,
     ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "crickintail"],
     stars: [1400, 2400, 3250],
-    restock: true, jams: true, flatline: true,
+    restock: true, jams: true, bigExit: true,
     theme: { floor:"#f2ead9", floorAlt:"#e8dfcc", wall:"#c08f6a", wallTop:"#d9ab86", base:"#8f6647", accent:"#e0763f", wood:"#b98a58", leaf:"#5aa06a", leaf2:"#7bbb87", locker:"#b9a389", crate:"#cfae7f", crate2:"#b8955f", curtain:"#e0cdb2", pot:"#a76b4c", rug:"#e3d6bd" },
     props: ["bench", "crates", "plant", "chair", "sign", "cooler"],
     shutters: [{ x: 16, y: 6, dir: "h", len: 2, phase: 0.45 },
@@ -1490,7 +1490,7 @@ const LEVELS = [
   },
   {
     name: "Overflow",
-    blurb: "Every bay they own, wedged in. The aisles are one medic wide.",
+    blurb: "Every basket they own, wedged in. The aisles are one nurse wide.",
     seed: 130013,
     duration: 140,
     patience: 69,
@@ -1498,7 +1498,7 @@ const LEVELS = [
     maxWaiting: 8,
     ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats"],
     stars: [2150, 3700, 5050],
-    restock: true, jams: true, flatline: true,
+    restock: true, jams: true, bigExit: true,
     theme: { floor:"#e6eef2", floorAlt:"#dae4ea", wall:"#7a93a8", wallTop:"#9ab0c2", base:"#566d80", accent:"#4fa8d8", wood:"#a58356", leaf:"#4e9c6b", leaf2:"#6fb886", locker:"#7f97aa", crate:"#bb9a6e", crate2:"#a2825a", curtain:"#a8bfd0", pot:"#8a6350", rug:"#cfdae2" },
     props: ["gurney", "trolley", "ivpole", "screen", "crates", "locker"],
     shutters: [{ x: 19, y: 7, dir: "v", len: 2, phase: 0.15 },
@@ -1526,7 +1526,7 @@ const LEVELS = [
     ]
   },
   {
-    name: "Trauma Bay",
+    name: "The Island",
     blurb: "One big room, every machine stacked on the island in the middle.",
     seed: 140014,
     duration: 140,
@@ -1535,7 +1535,7 @@ const LEVELS = [
     maxWaiting: 8,
     ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "stickypaws", "zoomies", "crickintail"],
     stars: [2100, 3600, 4900],
-    restock: true, jams: true, flatline: true,
+    restock: true, jams: true, bigExit: true,
     theme: { floor:"#efe7e7", floorAlt:"#e4dada", wall:"#9c6f74", wallTop:"#bb8b90", base:"#6f4a4f", accent:"#e05f6e", wood:"#a97f5c", leaf:"#4f9a63", leaf2:"#6fb47f", locker:"#a08187", crate:"#c4a077", crate2:"#a98657", curtain:"#d3aeb2", pot:"#96604e", rug:"#ddcdcd" },
     props: ["screen", "gurney", "ivpole", "bench", "sign", "trolley"],
     shutters: [{ x: 14, y: 7, dir: "h", len: 2, phase: 0.3 },
@@ -1563,7 +1563,7 @@ const LEVELS = [
   },
   {
     name: "The Long Night",
-    blurb: "The whole hospital at once. Nothing is near anything.",
+    blurb: "The whole clinic at once. Nothing is near anything.",
     seed: 150015,
     duration: 150,
     patience: 51,
@@ -1571,7 +1571,7 @@ const LEVELS = [
     maxWaiting: 9,
     ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats"],
     stars: [2150, 3700, 5050],
-    restock: true, jams: true, flatline: true,
+    restock: true, jams: true, bigExit: true,
     theme: { floor:"#232b38", floorAlt:"#1d2531", wall:"#3d4c63", wallTop:"#54667f", base:"#2a3546", accent:"#c39bff", wood:"#7d6349", leaf:"#3a7350", leaf2:"#4f8d66", locker:"#455772", crate:"#8a6f4a", crate2:"#735c3d", curtain:"#4f6580", pot:"#6d4a3c", rug:"#2c3646" },
     props: ["locker", "gurney", "crates", "screen", "ivpole", "trolley", "sign"],
     shutters: [{ x: 14, y: 1, dir: "h", len: 2, phase: 0.1 },
@@ -1600,7 +1600,7 @@ const LEVELS = [
   },
   {
     name: "Split Shift",
-    blurb: "Two wards joined by two thin links. Pick a side and commit.",
+    blurb: "Two rooms joined by two thin links. Pick a side and commit.",
     seed: 91011,
     duration: 145,
     patience: 64,
@@ -1608,7 +1608,7 @@ const LEVELS = [
     maxWaiting: 7,
     ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats"],
     stars: [2200, 3750, 5150],
-    restock: true, jams: true, flatline: true,
+    restock: true, jams: true, bigExit: true,
     theme: { floor:"#eef0e6", floorAlt:"#e4e7da", wall:"#8a9a78", wallTop:"#a8b795", base:"#5c6b4c", accent:"#e0a03f", wood:"#bd9260", leaf:"#5aa06a", leaf2:"#7bbb87", locker:"#9aa88c", crate:"#cfae7f", crate2:"#b8955f", curtain:"#ccd8bf", pot:"#a76b4c", rug:"#dde2d2" },
     props: ["bench", "plant", "sign", "locker", "chair", "trolley"],
     shutters: [{ x: 14, y: 8, dir: "h", len: 2, phase: 0.15 },
@@ -1642,7 +1642,7 @@ const LEVELS = [
     maxWaiting: 7,
     ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "socksituation", "crickintail", "toomanytreats"],
     stars: [2100, 3600, 4950],
-    restock: true, jams: true, flatline: true,
+    restock: true, jams: true, bigExit: true,
     theme: { floor:"#e9eef2", floorAlt:"#dee5ea", wall:"#7f93a6", wallTop:"#9db0c1", base:"#546678", accent:"#4fb0d8", wood:"#b08a5c", leaf:"#57a06d", leaf2:"#78bb86", locker:"#8ea4b5", crate:"#c9a97c", crate2:"#b08f5f", curtain:"#c2d4e0", pot:"#96604e", rug:"#d7e0e6" },
     props: ["gurney", "ivpole", "screen", "sign", "bench", "trolley"],
     shutters: [{ x: 12, y: 8, dir: "v", len: 2, phase: 0.15 },
@@ -1667,8 +1667,8 @@ const LEVELS = [
     ]
   },
   {
-    name: "Cold Storage",
-    blurb: "Half the department is on the failing circuit. Watch the lights.",
+    name: "Cold Kennels",
+    blurb: "Half the clinic is on the failing circuit. Watch the lights.",
     seed: 91013,
     duration: 145,
     patience: 60,
@@ -1676,7 +1676,7 @@ const LEVELS = [
     maxWaiting: 7,
     ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats"],
     stars: [1950, 3350, 4600],
-    restock: true, jams: true, flatline: true,
+    restock: true, jams: true, bigExit: true,
     theme: { floor:"#e6ecef", floorAlt:"#dae2e6", wall:"#6f8790", wallTop:"#8ea6af", base:"#48606a", accent:"#54c7d8", wood:"#a8845c", leaf:"#4f9a63", leaf2:"#6fb47f", locker:"#84a0a8", crate:"#c0a179", crate2:"#a5885c", curtain:"#b9d0d6", pot:"#8d6250", rug:"#d3dee2" },
     props: ["cooler", "crates", "locker", "screen", "sign", "vending"],
     shutters: [{ x: 17, y: 8, dir: "h", len: 2, phase: 0.15 }],
@@ -1711,7 +1711,7 @@ const LEVELS = [
     maxWaiting: 7,
     ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "stickypaws", "zoomies", "socksituation", "crickintail"],
     stars: [2800, 4800, 6600],
-    restock: true, jams: true, flatline: true,
+    restock: true, jams: true, bigExit: true,
     theme: { floor:"#f3ebdd", floorAlt:"#e9e0d0", wall:"#b58a63", wallTop:"#d0a681", base:"#86603f", accent:"#e07b3a", wood:"#b98a58", leaf:"#5aa06a", leaf2:"#7bbb87", locker:"#b5a086", crate:"#cfae7f", crate2:"#b8955f", curtain:"#dfcdb2", pot:"#a76b4c", rug:"#e2d5bc" },
     props: ["crates", "bench", "plant", "cooler", "sign", "chair"],
     map: [
@@ -1743,7 +1743,7 @@ const LEVELS = [
     maxWaiting: 7,
     ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats"],
     stars: [2250, 3850, 5300],
-    restock: true, jams: true, flatline: true,
+    restock: true, jams: true, bigExit: true,
     theme: { floor:"#efe7e7", floorAlt:"#e4dada", wall:"#9c6f74", wallTop:"#bb8b90", base:"#6f4a4f", accent:"#e05f6e", wood:"#a97f5c", leaf:"#4f9a63", leaf2:"#6fb47f", locker:"#a08187", crate:"#c4a077", crate2:"#a98657", curtain:"#d3aeb2", pot:"#96604e", rug:"#ddcdcd" },
     props: ["screen", "gurney", "ivpole", "bench", "sign", "trolley"],
     shutters: [{ x: 16, y: 8, dir: "h", len: 2, phase: 0.15 },
@@ -1769,7 +1769,7 @@ const LEVELS = [
   },
   {
     name: "The Wings",
-    blurb: "Three pods, one spine. Split up or watch a wing go under.",
+    blurb: "Three pens, one spine. Split up or watch a wing go under.",
     seed: 91016,
     duration: 145,
     patience: 60,
@@ -1777,7 +1777,7 @@ const LEVELS = [
     maxWaiting: 8,
     ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats"],
     stars: [2550, 4350, 6000],
-    restock: true, jams: true, flatline: true,
+    restock: true, jams: true, bigExit: true,
     theme: { floor:"#eaefe8", floorAlt:"#dfe6dc", wall:"#7a9a86", wallTop:"#98b6a3", base:"#4e6b58", accent:"#3fb98a", wood:"#b18a5f", leaf:"#57ac74", leaf2:"#7ac68e", locker:"#8fae9c", crate:"#c8a87c", crate2:"#ad8c60", curtain:"#c3d8ca", pot:"#96604e", rug:"#d6e0d4" },
     props: ["bench", "plant", "chair", "sign", "locker", "cooler"],
     shutters: [{ x: 14, y: 8, dir: "h", len: 2, phase: 0.15 },
@@ -1811,7 +1811,7 @@ const LEVELS = [
     maxWaiting: 7,
     ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "socksituation", "toomanytreats"],
     stars: [1900, 3250, 4450],
-    restock: true, jams: true, flatline: true,
+    restock: true, jams: true, bigExit: true,
     theme: { floor:"#e7e9ee", floorAlt:"#dcdfe6", wall:"#6d7285", wallTop:"#8b90a4", base:"#464b5e", accent:"#8f7bd8", wood:"#a4855f", leaf:"#4f9a63", leaf2:"#6fb47f", locker:"#848aa0", crate:"#bfa079", crate2:"#a4875e", curtain:"#c0c4d4", pot:"#8d6250", rug:"#d4d8e2" },
     props: ["crates", "locker", "trolley", "screen", "sign", "cooler"],
     zones: [{ x: 4, y: 8, w: 11, h: 4, up: 16, down: 8, phase: 0.35 }],
@@ -1836,7 +1836,7 @@ const LEVELS = [
   },
   {
     name: "Brownout",
-    blurb: "Two dark bays, a locked middle and a breaker you will come to love.",
+    blurb: "Two dark pens, a locked middle and a fuse box you will come to love.",
     seed: 91018,
     duration: 150,
     patience: 58,
@@ -1844,7 +1844,7 @@ const LEVELS = [
     maxWaiting: 8,
     ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats"],
     stars: [1800, 3100, 4250],
-    restock: true, jams: true, flatline: true,
+    restock: true, jams: true, bigExit: true,
     theme: { floor:"#e8e4ee", floorAlt:"#ddd8e5", wall:"#77689a", wallTop:"#9587b5", base:"#4d4070", accent:"#b98bff", wood:"#a4855f", leaf:"#4f9a63", leaf2:"#6fb47f", locker:"#8b7fa8", crate:"#bfa079", crate2:"#a4875e", curtain:"#cbc0dd", pot:"#8d6250", rug:"#d9d3e4" },
     props: ["screen", "locker", "vending", "sign", "ivpole", "crates"],
     shutters: [{ x: 19, y: 9, dir: "h", len: 2, phase: 0.15 },
@@ -1881,7 +1881,7 @@ const LEVELS = [
     maxWaiting: 8,
     ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats"],
     stars: [1450, 2500, 3400],
-    restock: true, jams: true, flatline: true,
+    restock: true, jams: true, bigExit: true,
     theme: { floor:"#f4f0e4", floorAlt:"#eae5d6", wall:"#c2a06e", wallTop:"#dcbb8c", base:"#8f6d43", accent:"#f0a541", wood:"#c69a68", leaf:"#5aa06a", leaf2:"#7bbb87", locker:"#bda98a", crate:"#d3ab7c", crate2:"#bd9366", curtain:"#e2d3b6", pot:"#a76b4c", rug:"#e6dcc6" },
     props: ["bench", "plant", "sign", "chair", "vending", "cooler"],
     zones: [{ x: 11, y: 4, w: 9, h: 5, up: 18, down: 7, phase: 0.4 }],
@@ -1905,8 +1905,8 @@ const LEVELS = [
     ]
   },
   {
-    name: "Last Call",
-    blurb: "Belts, doors, dark bays and everyone in the county. Good luck.",
+    name: "Closing Time",
+    blurb: "Belts, doors, dark pens and every pet in the county. Good luck.",
     seed: 91020,
     duration: 155,
     patience: 55,
@@ -1914,7 +1914,7 @@ const LEVELS = [
     maxWaiting: 8,
     ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats"],
     stars: [1450, 2500, 3400],
-    restock: true, jams: true, flatline: true,
+    restock: true, jams: true, bigExit: true,
     theme: { floor:"#e4e6ec", floorAlt:"#d8dbe3", wall:"#5d6478", wallTop:"#7c8398", base:"#383e50", accent:"#ff6b6b", wood:"#a4855f", leaf:"#4f9a63", leaf2:"#6fb47f", locker:"#787f94", crate:"#bfa079", crate2:"#a4875e", curtain:"#b8bdcc", pot:"#8d6250", rug:"#d0d4de" },
     props: ["gurney", "ivpole", "screen", "trolley", "crates", "sign"],
     shutters: [{ x: 16, y: 11, dir: "h", len: 2, phase: 0.15 },
@@ -1957,13 +1957,13 @@ const DAILY_MODS = [
     apply: (d) => { d.spawnStart *= 0.75; d.spawnEnd *= 0.75; } },
   { key: "brittle", name: "Short Fuses",   blurb: "Everyone is 20% less patient.",
     apply: (d) => { d.patience *= 0.80; } },
-  { key: "crit",    name: "Major Trauma",  blurb: "Far more critical arrivals.",
+  { key: "crit",    name: "Grumpy Mood",   blurb: "Far more grumpy arrivals.",
     apply: (d) => { d.critBias = 2.2; } },
   { key: "long",    name: "Double Shift",  blurb: "Runs half as long again.",
     apply: (d) => { d.duration = Math.round(d.duration * 1.5); } },
   { key: "frugal",  name: "Supply Crunch", blurb: "Shelves run dry and machines jam.",
     apply: (d) => { d.restock = true; d.jams = true; } },
-  { key: "power",   name: "Failing Grid",  blurb: "The whole ward browns out on a cycle.",
+  { key: "power",   name: "Failing Grid",  blurb: "The whole clinic browns out on a cycle.",
     apply: (d) => { d.zones = [{ x: 3, y: 1, w: 26, h: 11, up: 15, down: 7, phase: 0.3 }]; } }
 ];
 
@@ -2021,7 +2021,7 @@ const TUTORIAL = {
   maxWaiting: 1,
   ailments: ["muddypaws"],
   stars: [0, 0, 0],
-  restock: false, jams: false, flatline: false,
+  restock: false, jams: false, bigExit: false,
   theme: { floor:"#f7efdd", floorAlt:"#f0e5cd", wall:"#a9e0d4", wallTop:"#c6ede3", base:"#7cc4b4",
            accent:"#5cb8e6", wood:"#d3a56c", leaf:"#5fb872", leaf2:"#83d290", pot:"#d98a5f",
            locker:"#a7bccb", crate:"#dcb98c", crate2:"#c9a173", curtain:"#bfdcee", rug:"#d6e6f2" },
@@ -2058,7 +2058,7 @@ const ENDLESS = {
   ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch",
              "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats"],
   stars: [1500, 3200, 5400],
-  restock: true, jams: true, flatline: true,
+  restock: true, jams: true, bigExit: true,
   map: [
     "################################",
     "#.E.....ss......d.....mm.......#",
@@ -2109,7 +2109,7 @@ function wardSystems(def) {
   const sh = def.shutters || [];
   if (sh.some(x => !x.swing)) out.push({ key: "doors", name: "Fire doors", col: "#f0c46b" });
   if (def.map.some(r => [...r].some(ch => BELT_CHARS[ch])))
-    out.push({ key: "lanes", name: "Porter lanes", col: "#6fd3ff" });
+    out.push({ key: "lanes", name: "Trolley lanes", col: "#6fd3ff" });
   if ((def.zones || []).length) out.push({ key: "power", name: "Brownouts", col: "#f0b03c" });
   if (sh.some(x => x.swing)) out.push({ key: "swing", name: "Swing doors", col: "#a9cfdd" });
   return out;
@@ -2457,7 +2457,7 @@ function makeWorld(levelDef) {
   world.hasBelts = world.grid.some(row => row.some(c => c.belt));
 
   // builder wards grow through the shop, not through campaign perks
-  if (!levelDef.builder && Game.perksActive && Game.perksActive.includes("bays")) addExtraBeds(world, 2);
+  if (!levelDef.builder && Game.perksActive && Game.perksActive.includes("bays")) addExtraBaskets(world, 2);
 
   world.waitSlots = computeWaitSlots(world, Math.max(8, (levelDef.maxWaiting || 0) + 3));
   makeShutters(world, levelDef);
@@ -2468,7 +2468,7 @@ function makeWorld(levelDef) {
 /** Extra Bays perk: convert up to n floor tiles beside existing beds into
     beds — but only where doing so provably keeps the whole ward connected
     and every station reachable. */
-function addExtraBeds(world, n) {
+function addExtraBaskets(world, n) {
   const rng = makeRng((world.def.seed ^ 0xBED5) >>> 0);
 
   const floodOK = () => {
@@ -2553,7 +2553,7 @@ function computeWaitSlots(world, n) {
   const q = [start];
   const out = [];
   // Spacing matters now that the wards are dense: taking the first N tiles the
-  // flood reaches packs the whole queue into one corner, where the patients
+  // flood reaches packs the whole queue into one corner, where the animals
   // overlap each other and their badges become an unreadable pile. Keep them a
   // tile apart, and only relax that if the ward genuinely cannot supply enough.
   const spaced = (x, y, gap) =>
@@ -2696,11 +2696,11 @@ function calmFactor(pt) {
    --------------------------------------------------------------------- */
 
 const SEVERITY = {
-  minor:    { key: "minor",    name: "MINOR",    patience: 1.40, score: 0.65,
+  minor:    { key: "minor",    name: "EASY",     patience: 1.40, score: 0.65,
               color: "#8fd6a0", ring: null },
   standard: { key: "standard", name: "",         patience: 1.00, score: 1.00,
               color: null, ring: null },
-  critical: { key: "critical", name: "CRITICAL", patience: 0.60, score: 1.85,
+  grumpy: { key: "grumpy", name: "GRUMPY",   patience: 0.60, score: 1.85,
               color: "#ff4d6d", ring: "#ff4d6d" }
 };
 
@@ -2741,7 +2741,7 @@ function comorbidChance() {
 
 function rollSeverity() {
   const r = Game.rng();
-  if (r < criticalChance()) return SEVERITY.critical;
+  if (r < criticalChance()) return SEVERITY.grumpy;
   if (r > 1 - minorChance()) return SEVERITY.minor;
   return SEVERITY.standard;
 }
@@ -2771,9 +2771,9 @@ function makePatient(world, ailmentKey, level) {
 
   const sev = rollSeverity();
   let steps = a.steps.map(s => Object.assign({}, s));
-  if (sev.key === "critical") steps = escalateSteps(steps, ailmentKey);
-  // a stretcher case: too heavy for one medic, so co-op has to converge
-  const stretcher = sev.key === "critical" && Game.levelIndex !== 0 && Game.rng() < 0.45;
+  if (sev.key === "grumpy") steps = escalateSteps(steps, ailmentKey);
+  // a two-nurse case: too heavy for one medic, so co-op has to converge
+  const stretcher = sev.key === "grumpy" && Game.levelIndex !== 0 && Game.rng() < 0.45;
 
   // a second condition, treated after the first
   let second = null;
@@ -2830,18 +2830,18 @@ function makePatient(world, ailmentKey, level) {
    game without losing a shift; Overtime is the mastery setting and pays for
    the extra risk with a score multiplier. */
 const DIFFS = [
-  { key: "casual",   name: "Casual",   blurb: "Roomier patience, calmer arrivals, an extra life.",
+  { key: "casual",   name: "Casual",   blurb: "Roomier patience, calmer arrivals, an extra go.",
     patience: 1.35, spawn: 1.28, lives: 4, scoreMul: 0.80, color: "#6fd3b4" },
   { key: "standard", name: "Standard", blurb: "The shift as designed.",
     patience: 1.00, spawn: 1.00, lives: 3, scoreMul: 1.00, color: "#48c3f0" },
-  { key: "overtime", name: "Overtime", blurb: "Thinner patience, faster arrivals, two lives. Pays 1.45x.",
+  { key: "overtime", name: "Overtime", blurb: "Thinner patience, faster arrivals, two goes. Pays 1.45x.",
     patience: 0.80, spawn: 0.84, lives: 2, scoreMul: 1.45, color: "#ff8f70" }
 ];
 
 /* Every ward is authored and tuned for two medics, because that is the game it
    is. One player is not half as effective, they are less than half: they cannot
    split a fetch from a bedside hold, they cannot cover two ends of the ward,
-   and there is nobody to catch a thrown item or lift a stretcher case. Measured
+   and there is nobody to catch a thrown item or lift a two-nurse case. Measured
    over the campaign, a solo run lands around 0.38-0.54 of the co-op score on
    the same ward.
 
@@ -2909,17 +2909,17 @@ function challengeText(c) {
   const n = challengeN(c);
   switch (c.k) {
     case "chain":    return "Reach a chain of x" + n;
-    case "treat":    return "Treat " + n + " patients";
-    case "perfect":  return n + " perfect discharges";
+    case "treat":    return "Treat " + n + " animals";
+    case "perfect":  return n + " perfect send-offs";
     case "clutch":   return n + " clutch saves";
     case "ailment":  return "Treat " + n + " " + AILMENTS[c.a].name.toLowerCase() + " cases";
   }
   switch (c.k) {
-    case "noloss":   return "Lose nobody";
-    case "maxlives": return "Finish without losing a life";
+    case "noloss":   return "Everyone goes home happy";
+    case "maxlives": return "Nobody trots off home";
     case "chain":    return "Reach a chain of x" + c.n;
-    case "treat":    return "Treat " + c.n + " patients";
-    case "perfect":  return c.n + " perfect discharges";
+    case "treat":    return "Treat " + c.n + " animals";
+    case "perfect":  return c.n + " perfect send-offs";
     case "clutch":   return c.n + " clutch saves";
     case "ailment":  return "Treat " + c.n + " " + AILMENTS[c.a].name.toLowerCase() + " cases";
   }
@@ -2942,40 +2942,40 @@ function challengeMet(c) {
 /* Shift events. From the third ward on, something happens mid-shift — the
    point is that a level should not play out the same way twice. */
 const EVENTS = [
-  { key: "ambulance", name: "AMBULANCE INBOUND", sub: "three at once", color: "#ff8f70", dur: 6 },
-  { key: "outbreak",  name: "OUTBREAK",          sub: "infections incoming", color: "#7fd06a", dur: 8 },
-  { key: "flicker",   name: "POWER FLICKER",     sub: "equipment is sluggish", color: "#ffd54a", dur: 13 },
-  { key: "rush",      name: "WALK-IN RUSH",      sub: "the doors keep opening", color: "#8be9ff", dur: 18 },
-  { key: "vip",       name: "VIP ARRIVAL",       sub: "double points, half the patience", color: "#e8b40b", dur: 6 },
+  { key: "puppyvan", name: "VAN OF PUPPIES",    sub: "three at once", color: "#ff8f70", dur: 6 },
+  { key: "outbreak",  name: "ITCHY SEASON",      sub: "everyone has ears", color: "#7fd06a", dur: 8 },
+  { key: "flicker",   name: "POWER FLICKER",     sub: "the machines are dozy", color: "#ffd54a", dur: 13 },
+  { key: "rush",      name: "WALK-IN RUSH",      sub: "the door keeps jingling", color: "#8be9ff", dur: 18 },
+  { key: "vip",       name: "SHOW CHAMPION",     sub: "double points, half the patience", color: "#e8b40b", dur: 6 },
   /* The five above all change WHO walks in. These two change the ROOM, which is
      what stops a ward playing the same way twice. */
-  { key: "cordon",    name: "BAY CLOSED",        sub: "find another way round", color: "#ff9f43", dur: 20 },
-  { key: "leak",      name: "PIPE BURST",        sub: "mop it before it spreads", color: "#6fd3ff", dur: 12 }
+  { key: "cordon",    name: "WET FLOOR",         sub: "find another way round", color: "#ff9f43", dur: 20 },
+  { key: "leak",      name: "WATER BOWL DOWN",   sub: "mop it before it spreads", color: "#6fd3ff", dur: 12 }
 ];
 
 const ACHIEVEMENTS = [
-  { key: "first",    name: "First Shift Done",   blurb: "Finish any ward." },
+  { key: "first",    name: "First Shift Done",   blurb: "Finish any room." },
   { key: "chain5",   name: "In the Zone",        blurb: "Reach a chain of x5." },
   { key: "chain10",  name: "Unbroken",           blurb: "Reach a chain of x10." },
-  { key: "flawless", name: "Flawless",           blurb: "Finish a ward without losing anyone." },
-  { key: "perfect8", name: "Bedside Manner",     blurb: "Eight perfect discharges in one shift." },
-  { key: "clutch5",  name: "Nick of Time",       blurb: "Five clutch saves in one shift." },
-  { key: "heart",    name: "Heartstarter",       blurb: "Treat 25 cardiac cases." },
-  { key: "sleuth",   name: "Diagnostician",      blurb: "Treat 20 mystery cases." },
+  { key: "flawless", name: "Flawless",           blurb: "Finish a room and send everyone home happy." },
+  { key: "perfect8", name: "Basket Manner",      blurb: "Eight perfect send-offs in one shift." },
+  { key: "clutch5",  name: "Nick of Time",       blurb: "Five last-second cheer-ups in one shift." },
+  { key: "heart",    name: "Static Buster",      blurb: "De-fluff 25 static cases." },
+  { key: "sleuth",   name: "Nose For It",        blurb: "Solve 20 mystery munches." },
   { key: "stars15",  name: "Rising Star",        blurb: "Earn 15 stars." },
-  { key: "stars30",  name: "Chief of Medicine",  blurb: "Earn 30 stars." },
+  { key: "stars30",  name: "Head Nurse",         blurb: "Earn 30 stars." },
   /* The blurb is computed: the campaign has gone from 10 wards to 15 to 25,
      and a hard-coded "45 stars" was wrong twice. The key stays stable so
      nobody loses an achievement they already earned. */
-  { key: "stars45",  name: "Whole Hospital",
+  { key: "stars45",  name: "Whole Clinic",
     blurb: "Earn all " + (LEVELS.length * 3) + " stars." },
-  { key: "overtime", name: "Overtime Hero",      blurb: "Three-star a ward on Overtime." },
+  { key: "overtime", name: "Overtime Hero",      blurb: "Three-star a room on Overtime." },
   { key: "highfive", name: "Good Team",          blurb: "High-five your partner 10 times." },
   { key: "catch",    name: "Safe Hands",         blurb: "Catch 15 items thrown by your partner." },
-  { key: "turnover", name: "Housekeeping",        blurb: "Turn over 40 beds." },
-  { key: "teamlift", name: "Lift With Your Knees", blurb: "Make 12 two-person lifts." },
-  { key: "century",  name: "Century",            blurb: "Treat 100 patients in total." },
-  { key: "endless5", name: "Long Night",         blurb: "Survive five waves in Endless." }
+  { key: "turnover", name: "Housekeeping",        blurb: "Change 40 baskets." },
+  { key: "teamlift", name: "Lift With Your Knees", blurb: "Make 12 two-nurse lifts." },
+  { key: "century",  name: "Century",            blurb: "Send 100 animals home in total." },
+  { key: "endless5", name: "Long Night",         blurb: "Survive five waves of the Night Shift." }
 ];
 
 /** Award an achievement once, with a toast. */
@@ -2994,8 +2994,8 @@ function checkLiveAchievements() {
   if (Game.bestCombo >= 10) unlockAch("chain10");
   if (Game.perfects >= 8) unlockAch("perfect8");
   if (Game.clutches >= 5) unlockAch("clutch5");
-  if (Game.career.cardiac >= 25) unlockAch("heart");
-  if (Game.career.mystery >= 20) unlockAch("sleuth");
+  if (Game.career.staticked >= 25) unlockAch("heart");
+  if (Game.career.munches >= 20) unlockAch("sleuth");
   if (Game.career.treated >= 100) unlockAch("century");
   if (Game.highFives >= 10) unlockAch("highfive");
   if ((Game.catches || 0) >= 15) unlockAch("catch");
@@ -3025,7 +3025,7 @@ const Game = {
   levelIndex: 0,
   level: null,
   players: [],
-  patients: [],
+  animals: [],
   floorItems: [],
   popups: [],
   particles: [],
@@ -3098,7 +3098,7 @@ const Game = {
   toasts: [],              // achievement pop-ins
   xp: 0,
   achievements: {},
-  career: { treated: 0, cardiac: 0, mystery: 0, shifts: 0 },
+  career: { treated: 0, staticked: 0, munches: 0, shifts: 0 },
   progress: LEVELS.map(() => ({ best: 0, stars: 0, unlocked: false, challenges: [false, false, false] }))
 };
 Game.progress[0].unlocked = true;
@@ -3152,8 +3152,8 @@ const Save = {
       })),
       achievements: Object.keys(Game.achievements).filter(k => Game.achievements[k]),
       career: {
-        treated: Game.career.treated | 0, cardiac: Game.career.cardiac | 0,
-        mystery: Game.career.mystery | 0, shifts: Game.career.shifts | 0
+        treated: Game.career.treated | 0, staticked: Game.career.staticked | 0,
+        munches: Game.career.munches | 0, shifts: Game.career.shifts | 0
       },
       xp: Game.xp | 0,
       endlessBest: Game.endlessBest | 0,
@@ -3288,7 +3288,7 @@ const Save = {
       p.best = 0; p.stars = 0; p.unlocked = i === 0; p.challenges = [false, false, false];
     });
     Game.achievements = {};
-    Game.career = { treated: 0, cardiac: 0, mystery: 0, shifts: 0 };
+    Game.career = { treated: 0, staticked: 0, munches: 0, shifts: 0 };
     Game.xp = 0; Game.endlessBest = 0; Game.builderBest = 0; Game.dailyBest = {};
     Game.tutorialDone = false;
     if (this.available) { try { this.backend.clear(); } catch (err) { /* nothing to undo */ } }
@@ -3316,8 +3316,8 @@ function levelDef(index) {
 /** Total campaign stars, and the title the player has earned with them. */
 function totalStars() { return Game.progress.reduce((n, p) => n + p.stars, 0); }
 const RANKS = [
-  { at: 0, name: "Intern" }, { at: 5, name: "Resident" }, { at: 12, name: "Attending" },
-  { at: 20, name: "Chief" }, { at: 27, name: "Legend" }
+  { at: 0, name: "Trainee" }, { at: 5, name: "Junior Nurse" }, { at: 12, name: "Senior Nurse" },
+  { at: 20, name: "Head Nurse" }, { at: 27, name: "Legend of the Lane" }
 ];
 function rankName() {
   const t = totalStars();
@@ -3356,7 +3356,7 @@ function startLevel(index) {
 
   if (Game.world) { glMeshDispose(Game.world.mesh); Game.world.mesh = null; }
   /* Patient and item ids restart with the shift, before anything in the new
-     world can claim one. Every holder of an old id — patients, floor items,
+     world can claim one. Every holder of an old id — animals, floor items,
      station contents, the players themselves — is rebuilt below, so nothing can
      collide. Without this the counter carried across restarts, and two runs of
      the same seed differed in the one field that is supposed to reproduce: the
@@ -3529,7 +3529,7 @@ function hint(p, msg) { if (SILENT_HINTS) return; p.hint = msg; p.hintT = 1.6; }
 /* ---------------------------------------------------------------------
    Two-person lifts.
 
-   Nothing in this game previously REQUIRED two players — both medics could
+   Nothing in this game previously REQUIRED two players — both nurses could
    run the whole loop independently, which is why co-op felt like two people
    playing solo next to each other. Overcooked and Moving Out both lean on
    things one player physically cannot do. A critical patient is a stretcher
@@ -3539,7 +3539,7 @@ function hint(p, msg) { if (SILENT_HINTS) return; p.hint = msg; p.hintT = 1.6; }
    arrive next to — but in co-op it forces a genuine "come here, now" moment.
    --------------------------------------------------------------------- */
 
-/** Does this patient need two pairs of hands? Only flagged stretcher cases —
+/** Does this patient need two pairs of hands? Only flagged two-nurse cases —
     gating every critical would make forced coordination a constant tax rather
     than the "get over here NOW" moment it is supposed to be. */
 function needsTwoLift(pt) {
@@ -3555,7 +3555,7 @@ function liftPartnerFor(p, pt) {
   return null;
 }
 
-/** E / "/" — pick up, put down, place patients. */
+/** E / "/" — pick up, put down, place animals. */
 function doInteract(p) {
   const world = Game.world;
   p.squash = 0.18;
@@ -3609,7 +3609,7 @@ function doInteract(p) {
   const loose = facingPatient(p);
   if (loose) {
     if (needsTwoLift(loose) && !liftPartnerFor(p, loose)) {
-      hint(p, "Too heavy — needs both medics");
+      hint(p, "Too heavy — needs both nurses");
       loose.flash = 0.4;
       Sound.play("error");
       return;
@@ -3631,7 +3631,7 @@ function doInteract(p) {
   const occupied2 = facingStation(world, p, st => st.occupant);
   if (occupied2 && needsTwoLift(occupied2.occupant) &&
       !liftPartnerFor(p, occupied2.occupant)) {
-    hint(p, "Too heavy — needs both medics");
+    hint(p, "Too heavy — needs both nurses");
     Sound.play("error");
     return;
   }
@@ -3685,11 +3685,11 @@ function previewInteract(p) {
   {
     const lp = facingPatient(p);
     if (lp && !p.patient && !p.item && needsTwoLift(lp) && !liftPartnerFor(p, lp))
-      return "Needs both medics";
+      return "Needs both nurses";
   }
   if (p.patient) {
     if (facingStation(world, p, st => STATIONS[st.type].holdsPatient && !st.occupant && !st.dirty))
-      return p.patient.done ? null : "Place patient";
+      return p.patient.done ? null : "Put them down";
     return p.patient.done ? null : "Set down";
   }
   if (p.item) {
@@ -3697,9 +3697,9 @@ function previewInteract(p) {
     if (bedded) return null;                      // Q is the star here, keep E quiet
     return "Drop " + ITEMS[p.item.type].name.toLowerCase();
   }
-  if (facingPatient(p)) return "Pick up patient";
-  if (facingStation(world, p, st => st.occupant)) return "Pick up patient";
-  if (facingStation(world, p, st => st.type === "wanddock" && st.hasDefib)) return "Take defib";
+  if (facingPatient(p)) return "Pick up animal";
+  if (facingStation(world, p, st => st.occupant)) return "Pick up animal";
+  if (facingStation(world, p, st => st.type === "wanddock" && st.hasDefib)) return "Take the wand";
   const fi = facingFloorItem(p);
   if (fi) return "Pick up " + ITEMS[fi.type].name.toLowerCase();
   return null;
@@ -3724,7 +3724,7 @@ function findJobRaw(p) {
   const world = Game.world;
   if (p.patient) return null;   // hands full of patient
 
-  // 1. Bedside work on the patient we are facing.
+  // 1. Basketside work on the patient we are facing.
   const bedStation = facingStation(world, p, st => st.occupant && st.type === "basket");
   if (bedStation) {
     const pt = bedStation.occupant;
@@ -3804,7 +3804,7 @@ function findJobRaw(p) {
 
     if (r.patientStep) {
       const pt = st.occupant;
-      if (!pt) { hint(p, "Put a patient on the " + STATIONS[st.type].name); continue; }
+      if (!pt) { hint(p, "Put an animal on the " + STATIONS[st.type].name); continue; }
       const step = pt.steps[pt.step];
       if (!step || step.k !== "atStation" || step.station !== st.type) { hint(p, "They don't need that"); continue; }
       return {
@@ -3842,7 +3842,7 @@ function findJobRaw(p) {
         run: () => {
           p.item = null;
           const pt = Game.patients.find(q => q.id === pid && q.state !== "gone");
-          if (!pt) { popup(st.cx, st.cy - 24, "Patient gone", PALETTE.dim); return; }
+          if (!pt) { popup(st.cx, st.cy - 24, "Already went home", PALETTE.dim); return; }
           /* A lab step that names a condition the patient already has just
              advances the chain. Only a mystery gets its whole condition
              rewritten — running that path for an overdose would have swapped
@@ -3905,7 +3905,7 @@ function revealMunch(pt) {
   let steps = a.steps.map(s => Object.assign({}, s));
   if (pt.second && AILMENTS[pt.second])
     steps = steps.concat(AILMENTS[pt.second].steps.map(s => Object.assign({}, s)));
-  if (pt.sev && pt.sev.key === "critical") steps = escalateSteps(steps, key);
+  if (pt.sev && pt.sev.key === "grumpy") steps = escalateSteps(steps, key);
   pt.steps = steps;
   pt.step = 0;
   pt.done = false;
@@ -4176,7 +4176,7 @@ function beltAt(world, px, py) {
 }
 
 /* Belts carry the MEDICS and any loose item on the floor, and deliberately not
-   patients or staff: both of those follow cached A* paths, and shoving them off
+   animals or staff: both of those follow cached A* paths, and shoving them off
    a path every frame would have them jittering against a route they keep
    recomputing. Medics are player-steered and items are physics-y, so both take
    the drift naturally. */
@@ -4317,8 +4317,8 @@ function dischargePatient(p) {
     popup(pt.x, pt.y - 108, "+" + cr + "c", "#6fd3b4");
   }
   Game.career.treated++;
-  if (pt.ailment === "staticcling") Game.career.cardiac++;
-  if (pt.wasMunch || pt.ailment === "mysterymunch") Game.career.mystery++;
+  if (pt.ailment === "staticcling") Game.career.staticked++;
+  if (pt.wasMunch || pt.ailment === "mysterymunch") Game.career.munches++;
   checkLiveAchievements();
   if (Game.endless && Game.treated % 10 === 0 && Game.lives < Game.livesMax) {
     Game.lives++;
@@ -4329,8 +4329,8 @@ function dischargePatient(p) {
   popup(pt.x, pt.y - 26, "+" + gained + (mult > 1 ? "  x" + fmtMult(mult) : ""), pt.vip ? "#ffd54a" : PALETTE.good, true);
   if (surge > 1) popup(pt.x, pt.y - 92, "SURGE PAY", Game.event.def.color);
   if (pt.vip) popup(pt.x, pt.y - 70, "VIP x2", "#ffd54a", true);
-  if (pt.sev && pt.sev.key === "critical")
-    popup(pt.x, pt.y - 112, "CRITICAL SAVE", "#ff4d6d", true);
+  if (pt.sev && pt.sev.key === "grumpy")
+    popup(pt.x, pt.y - 112, "WON THEM ROUND", "#ff4d6d", true);
   if (pt.second)
     popup(pt.x, pt.y - 150, "DOUBLE CASE", "#8be9ff", true);
   if (callout) popup(pt.x, pt.y - 52, callout, calloutColor, true);
@@ -4369,7 +4369,7 @@ function spillAt(px, py) {
   return Game.spills.find(s2 => s2.tx === tx && s2.ty === ty) || null;
 }
 
-function updateBeds(dt) {
+function updateBaskets(dt) {
   const w = Game.world;
   if (!w) return;
   for (const b of w.beds) {
@@ -4401,22 +4401,22 @@ function updateDeterioration(dt) {
   if (Game.levelIndex === 0 && !Game.builderMode) return;   // not on the tutorial ward
   for (const pt of Game.patients) {
     if (pt.done || pt.state === "gone" || pt.state === "carried") continue;
-    if (!pt.sev || pt.sev.key === "critical") continue;
+    if (!pt.sev || pt.sev.key === "grumpy") continue;
     const frac = pt.patience / pt.patienceMax;
     if (frac > 0.34) { pt.deterT = 0; continue; }   // recovering resets the grace period
     pt.deterT = (pt.deterT || 0) + dt;
     if (pt.deterT < 1.6) continue;
     // escalate: harder, but worth much more, and they keep the patience they have
-    pt.sev = SEVERITY.critical;
+    pt.sev = SEVERITY.grumpy;
     pt.escalated = true;
     pt.steps = escalateSteps(pt.steps, pt.ailment);
     pt.patienceMax = pt.patienceMax * 1.25;        // the extra work needs a little slack
     pt.patience = Math.max(pt.patience, pt.patienceMax * 0.30);
-    Game.banner = { text: "PATIENT DETERIORATING", sub: AILMENTS[pt.ailment].name + " has gone critical",
+    Game.banner = { text: "SOMEBODY IS GETTING GRUMPY", sub: AILMENTS[pt.ailment].name + " — and now they want a fuss made",
                     t: 0, urgent: true };
     Game.shake = Math.max(Game.shake, 8);
     Sound.play("siren");
-    popup(pt.x, pt.y - 90, "CRITICAL!", "#ff4d6d", true);
+    popup(pt.x, pt.y - 90, "GRUMPY!", "#ff4d6d", true);
   }
 }
 
@@ -4428,14 +4428,14 @@ function losePatient(pt) {
   const penalty = 60;
   Game.score = Math.max(0, Game.score - penalty);
 
-  if (Game.level.flatline) {
-    popup(pt.x, pt.y - 26, "FLATLINE  -" + penalty, PALETTE.bad, true);
+  if (Game.level.bigExit) {
+    popup(pt.x, pt.y - 26, "TROTTED OFF  -" + penalty, PALETTE.bad, true);
     Game.shake = 16;
     Game.flashRed = 0.5;
-    Sound.play("flatline");
+    Sound.play("trotoff");
     burst(pt.x, pt.y, PALETTE.bad, 20);
   } else {
-    popup(pt.x, pt.y - 26, "Stormed out  -" + penalty, PALETTE.bad, true);
+    popup(pt.x, pt.y - 26, "Went home  -" + penalty, PALETTE.bad, true);
     Game.shake = 6;
     Sound.play("leave");
   }
@@ -4467,7 +4467,7 @@ function updatePatients(dt) {
       if (pt.patience <= 0) { losePatient(pt); continue; }
     }
 
-    // Movement for patients that walk themselves in.
+    // Movement for animals that walk themselves in.
     if (pt.state === "walking") {
       if (pt.path.length) {
         const tgt = pt.path[0];
@@ -4490,7 +4490,7 @@ const EASE_IN_SECS = 25;                 // opening window with no brutal cases
 
 /* Which chains can this department physically run? In builder mode a case you
    have no equipment for is not a challenge, it is a guaranteed loss — so those
-   patients are diverted to another hospital and never arrive. Building the
+   animals are diverted to another hospital and never arrive. Building the
    machine is what opens the (higher-scoring) case type. */
 function treatableAilments(pool) {
   if (!Game.world) return pool;
@@ -4548,7 +4548,7 @@ function currentSpawnInterval() {
          * (Game.diff ? Game.diff.spawn : 1) * Game.spawnMul * SOLO.spawn();
 }
 
-/** Ambulances arrive on a rhythm, dumping several patients at once. Gives the
+/** Ambulances arrive on a rhythm, dumping several animals at once. Gives the
     shift a pulse of calm and panic instead of a flat grind. */
 function updateWaves(dt) {
   Game.waveTimer -= dt;
@@ -4556,7 +4556,7 @@ function updateWaves(dt) {
   Game.wave++;
   Game.waveTimer = WAVE_EVERY;
   Game.burst = 2 + Math.min(3, Math.floor(Game.wave / 2));
-  Game.banner = { text: "AMBULANCE INBOUND", sub: Game.burst + " patients arriving at once", t: 0, urgent: true };
+  Game.banner = { text: "VAN OF PUPPIES", sub: Game.burst + " animals arriving at once", t: 0, urgent: true };
   Sound.play("siren");
 }
 
@@ -4663,28 +4663,28 @@ const TUTORIAL_STEPS = [
   { text: "Hold Shift to sprint. It drains, then refills when you stop.",
     hint: "sprint for a moment",
     done: (t) => t.sprinted > 30 },
-  { text: "Someone has arrived at the blue IN door. Walk into them and press E to lift them.",
+  { text: "Someone has arrived at the blue IN door. Walk into them and press E to pick them up.",
     spawn: "muddypaws",
-    hint: "lift the patient",
+    hint: "lift the animal",
     grace: 75,
     done: () => Game.players.some(p => p.patient) },
-  { text: "Carry them to a bed. Stand beside it, facing it, and press E to lay them down.",
-    hint: "put them in a bed",
+  { text: "Carry them to a basket. Stand beside it, facing it, and press E to settle them in.",
+    hint: "settle them in a basket",
     grace: 75,
     done: () => Game.patients.some(pt => pt.state === "station") },
-  { text: "Their badge asks for a bandage. Walk to a supply shelf and HOLD Q to take one.",
-    hint: "collect a bandage",
+  { text: "Their badge asks for a towel. Walk to a grooming shelf and HOLD Q to take one.",
+    hint: "collect a towel",
     grace: 75,
     done: () => Game.players.some(p => p.item) },
-  { text: "Carry it back to the bedside and HOLD Q to dress the wound.",
+  { text: "Carry it back to the basket and HOLD Q to wipe those muddy paws.",
     hint: "treat them",
     grace: 75,
     done: () => Game.patients.some(pt => pt.done) || Game.treated > 0 },
   { text: "Badge is green. Pick them up again and walk onto the green OUT tile.",
-    hint: "discharge them",
+    hint: "send them home",
     grace: 75,
     done: () => Game.treated > 0 },
-  { text: "Every discharge leaves the bay rumpled. Empty hands, HOLD Q at the bed to strip it.",
+  { text: "Every send-off leaves the basket mucky. Empty hands, HOLD Q at the basket to change it.",
     hint: "turn the bay over",
     grace: 75,
     done: () => !Game.world || !Game.world.beds.some(b => b.dirty) },
@@ -4755,7 +4755,7 @@ function finishTutorial() {
   Sound.play("newbest");
 }
 
-/* Nurse Joy: wanders to the most-stressed settled patient and comforts
+/* Nurse Bramble: wanders to the most-stressed settled patient and comforts
    them, restoring a chunk of patience. She never treats — that's your job. */
 function updateNurse(dt) {
   const nu = Game.nurse;
@@ -4909,7 +4909,7 @@ function updateEvents(dt) {
   Game.shake = Math.max(Game.shake, 6);
 
   switch (def.key) {
-    case "ambulance": Game.burst = 2; Game.spawnTimer = Math.min(Game.spawnTimer, 0.6); break;
+    case "puppyvan": Game.burst = 2; Game.spawnTimer = Math.min(Game.spawnTimer, 0.6); break;
     case "outbreak":  Game.forceAilment = 3; Game.spawnTimer = Math.min(Game.spawnTimer, 1.2); break;
     case "flicker":   Game.workMul = 1.30; break;
     case "rush":      Game.spawnMul = 0.70; break;
@@ -4987,7 +4987,7 @@ function applyBoost(p, kind) {
   if (kind.key === "adrenaline") p.stamina = p.staminaMax || Game.staminaMax;
 }
 
-/** Both medics side by side, both hitting Use: refill and re-light the chain. */
+/** Both nurses side by side, both hitting Use: refill and re-light the chain. */
 function updateHighFive(dt) {
   if (Game.highFiveCool > 0) Game.highFiveCool -= dt;
   if (Game.players.length < 2 || Game.highFiveCool > 0) return;
@@ -5024,7 +5024,7 @@ function updatePlay(dt) {
   updateShutters(dt);
   updateZones(dt);
   updateThrownItems(dt);
-  updateBeds(dt);
+  updateBaskets(dt);
   updateSpills(dt);
   updateDeterioration(dt);
   updateStaff(dt);
@@ -5053,7 +5053,7 @@ function endBuilderRun() {
   Game.result = {
     failed: true, stars: 0, newBest: B.wave > prevBest,
     builder: true, wave: B.wave, xpGain, challenges: null,
-    name: "ER Builder — wave " + B.wave, targets: null,
+    name: "Clinic Builder — wave " + B.wave, targets: null,
     score: Game.score, treated: Game.treated, lost: Game.lost,
     bestCombo: Game.bestCombo, perfects: Game.perfects, clutches: Game.clutches,
     spent: B.totalCredits, built: B.bought.length, staff: Game.staff.length,
@@ -5176,7 +5176,7 @@ function endLevel() {
    ER BUILDER — wave mode.
 
    You design the department. Each wave is a three-minute shift; treating
-   patients earns credits, and between waves you spend them on beds,
+   animals earns credits, and between waves you spend them on beds,
    machines and staff and place them wherever you like on the floor. The
    ward PERSISTS across waves, so the run is the story of the ER you built.
    ===================================================================== */
@@ -5254,7 +5254,7 @@ function builderWaveDef(n) {
     stars: null,
     restock: n >= 4,
     jams: n >= 6,
-    flatline: n >= 3,
+    bigExit: n >= 3,
     theme: BUILDER_THEME,
     props: ["bench", "plant", "chair", "cooler", "sign", "locker"],
     map: BUILDER_MAP,
@@ -5269,36 +5269,36 @@ function builderWaveDef(n) {
      passive  — a permanent run-wide upgrade                              */
 const SHOP = [
   { key: "basket",      name: "Treatment Bay",    cost: 130, kind: "station", station: "basket",
-    blurb: "Another bed. More beds means more patients in progress at once." },
-  { key: "grooming",   name: "Supply Shelf",     cost: 90,  kind: "station", station: "grooming",
+    blurb: "Another basket. More baskets means more animals in progress at once." },
+  { key: "grooming",   name: "Grooming Shelf",     cost: 90,  kind: "station", station: "grooming",
     blurb: "Bandages, close to where you need them." },
   { key: "remedy", name: "Medicine Cabinet", cost: 110, kind: "station", station: "remedy",
     blurb: "Syringes for infections." },
-  { key: "scanner",     name: "X-ray Machine",    cost: 185, kind: "station", station: "scanner", from: 2,
-    blurb: "Opens your doors to fracture cases (+175 each). Pairs with the cast mixer." },
-  { key: "bootiebench",     name: "Cast Mixer",       cost: 120, kind: "station", station: "bootiebench", from: 2,
-    blurb: "Turns a developed X-ray into a cast." },
-  { key: "wanddock",name: "Defib Station",    cost: 195, kind: "station", station: "wanddock", from: 3,
+  { key: "scanner",     name: "Scanner",    cost: 185, kind: "station", station: "scanner", from: 2,
+    blurb: "Opens your doors to sprained hops (+175 each). Pairs with the bootie bench." },
+  { key: "bootiebench",     name: "Bootie Bench",       cost: 120, kind: "station", station: "bootiebench", from: 2,
+    blurb: "Turns a developed scan into a bootie." },
+  { key: "wanddock",name: "Wand Dock",    cost: 195, kind: "station", station: "wanddock", from: 3,
     blurb: "With a charger, opens your doors to cardiac cases (+195 each)." },
-  { key: "groundpad",  name: "Defib Charger",    cost: 130, kind: "station", station: "groundpad", from: 3,
-    blurb: "Charges a defib. Put it near the beds — the charge drains fast." },
+  { key: "groundpad",  name: "Grounding Pad",    cost: 130, kind: "station", station: "groundpad", from: 3,
+    blurb: "Charges the static wand. Put it near the baskets — the charge drains fast." },
   { key: "lab",      name: "Path Lab",         cost: 175, kind: "station", station: "lab", from: 5,
     blurb: "Opens your doors to mystery cases (+215 each)." },
   { key: "hatch", name: "Delivery Door",    cost: 85,  kind: "station", station: "hatch", from: 4,
     blurb: "Where crates come from, for restocking empty shelves." },
   { key: "bench",    name: "Waiting Bench",    cost: 70,  kind: "waitslot",
-    blurb: "Two more places for patients to wait, so the doors stay open longer." },
+    blurb: "Two more places for animals to wait, so the doors stay open longer." },
 
-  { key: "porter",   name: "Patient Coordinator", cost: 240, kind: "staff", role: "porter",
-    blurb: "Brings arrivals from the door to a free bed so you can stay on treatment." },
-  { key: "xraytech", name: "X-ray Technician",    cost: 225, kind: "staff", role: "xraytech", from: 2,
-    blurb: "Runs the X-ray and develops the film, leaving the image ready to collect." },
-  { key: "labtech",  name: "Lab Technician",      cost: 205, kind: "staff", role: "labtech", from: 5,
-    blurb: "Collects blood samples off the floor and runs them through the lab." },
+  { key: "porter",   name: "Front Desk", cost: 240, kind: "staff", role: "porter",
+    blurb: "Brings arrivals from the door to a free basket so you can stay on treatment." },
+  { key: "xraytech", name: "Scanner Tech",    cost: 225, kind: "staff", role: "xraytech", from: 2,
+    blurb: "Runs the scanner and develops the plate, leaving the scan ready to collect." },
+  { key: "labtech",  name: "Sniff Lab Tech",      cost: 205, kind: "staff", role: "labtech", from: 5,
+    blurb: "Collects fur swabs off the floor and runs them through the sniff lab." },
   { key: "clerk",    name: "Supply Clerk",        cost: 180, kind: "staff", role: "clerk", from: 4,
     blurb: "Fetches crates and restocks any shelf that runs dry." },
-  { key: "nurse",    name: "Comfort Nurse",       cost: 200, kind: "staff", role: "nurse",
-    blurb: "Sits with the most distressed waiting patient and buys you time." },
+  { key: "nurse",    name: "Cuddle Nurse",       cost: 200, kind: "staff", role: "nurse",
+    blurb: "Sits with the most upset animal in the queue and buys you time." },
 
   { key: "shoes",    name: "Grippy Sneakers",  cost: 150, kind: "passive",
     blurb: "Everyone moves 8% faster with 40% more sprint. Stacks up to three times." },
@@ -5309,13 +5309,13 @@ const SHOP = [
 ];
 
 const STAFF_LOOK = {
-  porter:   { body: "#7fb2e8", cap: "#7fb2e8", label: "COORD",
+  porter:   { body: "#7fb2e8", cap: "#7fb2e8", label: "FRONT",
               look: { skin: "#e8b184", hair: "#3f3833", style: "short", acc: "none" } },
-  xraytech: { body: "#b9a6e0", cap: "#b9a6e0", label: "X-RAY",
+  xraytech: { body: "#b9a6e0", cap: "#b9a6e0", label: "SCANS",
               look: { skin: "#8a5a3b", hair: "#241f1c", style: "bun", acc: "none" } },
   labtech:  { body: "#8fd6c0", cap: "#8fd6c0", label: "LAB",
               look: { skin: "#f2c898", hair: "#2e2a28", style: "fringe", acc: "glasses" } },
-  clerk:    { body: "#f0c86b", cap: "#f0c86b", label: "SUPPLY",
+  clerk:    { body: "#f0c86b", cap: "#f0c86b", label: "STOCK",
               look: { skin: "#c8865a", hair: "#5b4635", style: "curls", acc: "none" } },
   nurse:    { body: "#ffffff", cap: "#ffd7e0", label: "NURSE",
               look: { skin: "#f6cfa6", hair: "#8a5a33", style: "fringe", acc: "none" } }
@@ -5352,9 +5352,9 @@ function wardConnected(world) {
 
 /** Why can this tile not take a machine? Returns null when it can. */
 function placementProblem(world, x, y) {
-  if (x < 1 || y < 1 || x >= COLS - 1 || y >= ROWS - 1) return "Outside the ward";
+  if (x < 1 || y < 1 || x >= COLS - 1 || y >= ROWS - 1) return "Outside the clinic";
   const cell = cellAt(world, x, y);
-  if (!cell) return "Outside the ward";
+  if (!cell) return "Outside the clinic";
   if (cell.entrance || cell.exit) return "That is a doorway";
   if (cell.station) return "Something is already here";
   if (cell.solid) return "That is a wall";
@@ -5491,7 +5491,7 @@ function staffPorter(st, dt) {
     }
     return;
   }
-  // pick the most distressed arrival, but only if there is a bed to take them to
+  // pick the most upset arrival, but only if there is a bed to take them to
   if (!freeBedFor(Game.world)) { st.moving = false; st.target = null; return; }
   let best = null, bestFrac = 2;
   for (const pt of Game.patients) {
@@ -5556,7 +5556,7 @@ function staffXrayTech(st, dt) {
       img.x = spot.x * TILE + TILE / 2; img.y = spot.y * TILE + TILE / 2;
       Game.floorItems.push(img);
       st.item = null;
-      popup(img.x, img.y - 26, "X-ray ready", "#a8dcff");
+      popup(img.x, img.y - 26, "Scan ready", "#a8dcff");
       Sound.play("lab");
     }
     return;
@@ -7199,7 +7199,7 @@ function drawCharacter3D(o) {
     drawMesh(MESH.cyl, p[0], p[1], p[2], ry, 0.382*S, 0.060*S, 0.378*S,
              rgb(look.accColor || "#ff8fa8"));
   } else if (o.noCap) {
-    // patients are not staff: no scrub cap, hair reads on its own
+    // animals are not staff: no scrub cap, hair reads on its own
   } else {
     // scrub cap
     const cap = rgb(o.cap || "#8fd0f0");
@@ -7467,7 +7467,7 @@ function drawSceneEntities() {
   }
 
   /* brownout bays: the floor goes dark and an amber hazard glow creeps in, so
-     "this corner of the ward is in trouble" is legible from across the room */
+     "this corner of the clinic needs a hand" is legible from across the room */
   for (const z of (world.zones || [])) {
     if (z.powered && !z.warn) continue;
     const cx = z.x + z.w / 2, cz = z.y + z.h / 2;
@@ -7517,7 +7517,7 @@ function drawSceneEntities() {
              0.30, 0.30, 0.30, rgb(pu.kind.color), 0.6);
   }
 
-  // patients not being carried
+  // animals not being carried
   for (const pt of Game.patients) {
     if (pt.state === "carried") continue;
     drawPatient3D(pt);
@@ -7545,7 +7545,7 @@ const GOWNS = ["#9fc8ea", "#8fd6c0", "#f0b3c4", "#b9aee2", "#f2cf94",
 const TRIMS = ["#ffffff", "#f3f8ff", "#fff6e8"];
 
 /* ---------------------------------------------------------------------
-   The patients.
+   The animals.
 
    Everyone who comes through the door is an animal, and they are the single
    biggest reason this reads as a vet clinic rather than a reskin — so they get
@@ -7834,7 +7834,7 @@ function drawPatient3D(pt) {
   const inBed = pt.station && pt.station.type === "basket";
   const wx = pt.x * T2W, wz = pt.y * T2W;
   const look = patientLook(pt);
-  // Waiting patients turn to face the camera — they were rendered back-to, which
+  // Waiting animals turn to face the camera — they were rendered back-to, which
   // hid every face in the ward. Walkers face the way they are heading.
   let ry = 0;
   if (pt.state === "walking" && pt.path && pt.path.length) {
@@ -8604,9 +8604,9 @@ function hudCard(g, x, y, w, h, label) {
   if (label) text(g, label, x + 12, y + 16, 10, PALETTE.dim);
 }
 
-/** Beds out of action. Turns amber then red as the ward silts up, because a
+/** Baskets out of action. Turns amber then red as the ward silts up, because a
     player needs to feel the turnover debt before it strands them. */
-function hudDirtyBeds(g, x, y) {
+function hudDirtyBaskets(g, x, y) {
   const n = dirtyBedCount();
   if (!n) return;
   const total = Game.world ? Game.world.beds.length : 1;
@@ -8635,7 +8635,7 @@ function drawHUD(g) {
   // --- clock / level ---
   hudCard(g, 14, 10, 236, HUD_H - 22);
   const isTut = !!(lvl && lvl.tutorial);
-  text(g, Game.builderMode ? ("ER  " + lvl.name)
+  text(g, Game.builderMode ? ("CLINIC  " + lvl.name)
         : isTut ? lvl.name
         : ((Game.endless ? "∞" : (Game.levelIndex + 1)) + "  " + lvl.name),
        26, 30, 15, PALETTE.text);
@@ -8710,8 +8710,8 @@ function drawHUD(g) {
   if (Game.builderMode || (lvl && lvl.builder)) {
     hudCard(g, bx, 10, 250, HUD_H - 22, "WAVE " + (Game.builder ? Game.builder.wave : 1));
     text(g, "Best wave  " + (Game.builderBest || "—"), bx + 12, 52, 16, "#6fd3b4");
-    text(g, "Treated " + Game.treated + "   Lost " + Game.lost, bx + 12, 74, 12, PALETTE.dim);
-    hudDirtyBeds(g, bx + 150, 74);
+    text(g, "Sent home " + Game.treated + "   Trotted off " + Game.lost, bx + 12, 74, 12, PALETTE.dim);
+    hudDirtyBaskets(g, bx + 150, 74);
   } else if (isTut) {
     hudCard(g, bx, 10, 250, HUD_H - 22, "ORIENTATION");
     text(g, "Nothing here can be failed.", bx + 12, 52, 13, "#6fd3b4", "left", "normal");
@@ -8719,8 +8719,8 @@ function drawHUD(g) {
   } else if (Game.endless) {
     hudCard(g, bx, 10, 250, HUD_H - 22, "PERSONAL BEST");
     text(g, String(Game.endlessBest), bx + 12, 52, 26, "#ffd54a");
-    text(g, "Treated " + Game.treated + "   Lost " + Game.lost, bx + 12, 74, 12, PALETTE.dim);
-    hudDirtyBeds(g, bx + 150, 74);
+    text(g, "Sent home " + Game.treated + "   Trotted off " + Game.lost, bx + 12, 74, 12, PALETTE.dim);
+    hudDirtyBaskets(g, bx + 150, 74);
   } else {
     hudCard(g, bx, 10, 250, HUD_H - 22, "TARGETS");
     const tgts = starTargets(Game.levelIndex);
@@ -8731,8 +8731,8 @@ function drawHUD(g) {
       drawStar(g, sx + 9, 46, 10, hit ? "#ffd54a" : "rgba(255,255,255,.15)");
       text(g, String(th), sx + 23, 51, 13, hit ? PALETTE.text : PALETTE.dim);
     }
-    text(g, "Treated " + Game.treated + "   Lost " + Game.lost, bx + 12, 74, 12, PALETTE.dim);
-    hudDirtyBeds(g, bx + 150, 74);
+    text(g, "Sent home " + Game.treated + "   Trotted off " + Game.lost, bx + 12, 74, 12, PALETTE.dim);
+    hudDirtyBaskets(g, bx + 150, 74);
   }
 
   text(g, (Sound.muted ? "M  muted" : "M  sound") + (Music.on ? "  ·  N  music" : "  ·  N  off"), W - 20, 26, 11, PALETTE.dim, "right");
@@ -8751,9 +8751,14 @@ function drawStar(g, x, y, r, color) {
   g.closePath(); g.fill(); g.restore();
 }
 
+/* Keyed by STATION id. These are bare object keys, which is exactly why the
+   recast missed them at first — the chain chips silently fell back to grey
+   because every lookup missed. Worth a note: any future station rename has to
+   come through here too, and nothing will throw to tell you. */
 const CHAIN_COLORS = {
-  supply: "#4bb695", medicine: "#5a93d8", xray: "#75849f", cast: "#c9a468",
-  charger: "#dfae3d", lab: "#a678e0", defibrack: "#e87765", bed: "#8fb8dd", "?": "#6b7b90"
+  grooming: "#4bb695", remedy: "#5a93d8", scanner: "#75849f", bootiebench: "#c9a468",
+  groundpad: "#dfae3d", lab: "#a678e0", wanddock: "#e87765", basket: "#8fb8dd",
+  hatch: "#c98a5a", fusebox: "#dfae3d", "?": "#6b7b90"
 };
 
 function drawLegend(g) {
@@ -8980,10 +8985,10 @@ function drawTitle(g) {
   const pulse = 1 + 0.012 * Math.sin(performance.now() / 420);
   g.save();
   g.translate(W / 2, 118); g.scale(pulse, pulse);
-  text(g, "CODE BLUE!", 2, 4, 86, "rgba(0,0,0,.45)", "center");
-  text(g, "CODE BLUE!", 0, 0, 86, "#48c3f0", "center");
+  text(g, "FLUFF & FIX", 2, 4, 82, "rgba(0,0,0,.45)", "center");
+  text(g, "FLUFF & FIX", 0, 0, 82, "#f0a541", "center");
   g.restore();
-  text(g, "a two-player emergency room", W / 2, 158, 19, PALETTE.dim, "center", "normal");
+  text(g, "a two-player vet clinic", W / 2, 158, 19, PALETTE.dim, "center", "normal");
 
   const cards = [
     { x: 128, color: PALETTE.p1, title: "PLAYER 1", slot: 0,
@@ -9065,7 +9070,7 @@ function drawCharSelect(g) {
   bot.addColorStop(0, "rgba(8,13,22,0)"); bot.addColorStop(1, "rgba(8,13,22,.90)");
   g.fillStyle = bot; g.fillRect(0, H - 130, W, 130);
 
-  text(g, "CHOOSE YOUR MEDIC", W / 2, 68, 38, PALETTE.text, "center");
+  text(g, "CHOOSE YOUR NURSE", W / 2, 68, 38, PALETTE.text, "center");
   text(g, Game.playerCount === 2 ? "P1: A/D + E to lock in      P2: arrows + / to lock in"
                                  : "A / D to browse      E to lock in",
        W / 2, 98, 15, PALETTE.dim, "center", "normal");
@@ -9149,7 +9154,7 @@ function drawCharSelect(g) {
 
   const blink = 0.55 + 0.45 * Math.sin(performance.now() / 300);
   g.save(); g.globalAlpha = blink;
-  text(g, Game.playerCount === 2 ? "both medics lock in to continue" : "lock in to continue",
+  text(g, Game.playerCount === 2 ? "both nurses lock in to continue" : "lock in to continue",
        W / 2, H - 46, 17, "#ffd54a", "center");
   g.restore();
   text(g, "Esc  back to title", W / 2, H - 22, 13, PALETTE.dim, "center", "normal");
@@ -9245,7 +9250,7 @@ function drawControls(g) {
   const left = W / 2 - colW - gap / 2, y0 = 170;
   for (let slot = 0; slot < 2; slot++) {
     const cx = slot === 0 ? left : left + colW + gap;
-    const label = "MEDIC " + (slot + 1) + (slot === 0 ? "  (left side)" : "  (right side)");
+    const label = "NURSE " + (slot + 1) + (slot === 0 ? "  (left side)" : "  (right side)");
     text(g, label, cx + 18, y0 - 16, 17, slot === 0 ? "#7fb2ff" : "#ff9a8a");
     CONTROL_ACTIONS.forEach((act, i) => {
       const idx = slot * n + i;
@@ -9442,14 +9447,14 @@ function drawHowToControls(g) {
   });
 
   const steps = [
-    ["1", "Patients arrive at the blue IN door.", "Walk into them and press E to lift one onto your shoulders."],
-    ["2", "Carry them to a free bed.", "Stand beside the bed facing it and press E to lay them down."],
-    ["3", "Do what their badge asks.", "Fetch the item they need from a station (hold Q), carry it back, then hold Q at the bedside."],
-    ["4", "Wheel them out.", "Once the badge turns green, pick them up again and walk onto the green OUT tile."],
-    ["!", "Critical cases need one extra hold.", "Stand at the bed with EMPTY hands and hold Q to Stabilise them."]
+    ["1", "Animals arrive at the blue IN door.", "Walk into them and press E to scoop one up."],
+    ["2", "Carry them to a free basket.", "Stand beside the basket facing it and press E to settle them in."],
+    ["3", "Do what their badge asks.", "Fetch what they need from a station (hold Q), carry it back, then hold Q at the basket."],
+    ["4", "Walk them out.", "Once the badge turns green, pick them up again and walk onto the green OUT tile."],
+    ["!", "Grumpy animals need one extra fuss.", "Stand at the basket with EMPTY hands and hold Q to settle them."]
   ];
   fillRound(g, 96, 348, 1088, 196, 14, "rgba(255,255,255,.04)");
-  text(g, "EVERY PATIENT, EVERY TIME", 118, 374, 12, "#ffd54a");
+  text(g, "EVERY PET, EVERY TIME", 118, 374, 12, "#ffd54a");
   steps.forEach((s2, i) => {
     const y = 394 + i * 30;
     g.fillStyle = "#48c3f0";
@@ -9462,14 +9467,14 @@ function drawHowToControls(g) {
 
   const tips = [
     "THROW: holding an item with no station to work? Press Q to hurl it. Your partner catches it for a bonus.",
-    "CRITICAL cases (red pulsing ring) pay nearly double but drain fast and need an extra Stabilise hold.",
-    "MINOR cases (green tick) are cheap and forgiving — good filler between the hard ones.",
-    "Ignore someone too long and they DETERIORATE into a critical case. Watch the queue, not just the beds.",
-    "Three of the same condition in a row scores a SPECIALIST bonus — batching beats pure speed.",
-    "Some patients arrive with TWO conditions: a second small badge below their icon. Treat both.",
-    "Every discharge leaves the bed rumpled and unusable. Empty hands + hold Q at it to turn it over.",
-    "A stretcher case marked 2 MEDICS will not move for one player — get your partner alongside and press E together.",
-    "Spills, jams, dry shelves, fire shutters and high fives are all explained on the WORKING THE FLOOR page."
+    "GRUMPY animals (red pulsing ring) pay nearly double but run out of patience fast and need an extra settling hold.",
+    "EASY animals (green tick) are cheap and forgiving — good filler between the fussy ones.",
+    "Ignore someone too long and they GET GRUMPY. Watch the queue, not just the baskets.",
+    "Three of the same problem in a row scores a SPECIALIST bonus — batching beats pure speed.",
+    "Some animals arrive with TWO problems: a second small badge below their icon. Sort out both.",
+    "Every send-off leaves the basket mucky and unusable. Empty hands + hold Q at it to change it.",
+    "A two-nurse case marked 2 NURSES will not move for one player — get your partner alongside and press E together.",
+    "Spills, jams, dry shelves, corridor doors and high fives are all explained on the WORKING THE FLOOR page."
   ];
   fillRound(g, 96, 554, 1088, 168, 14, "rgba(255,255,255,.04)");
   text(g, "WORTH KNOWING", 118, 576, 12, "#ffd54a");
@@ -9516,17 +9521,17 @@ function drawHowToProcedures(g) {
 function drawHowToFloor(g) {
   const cards = [
     { col: "#c98a5a", title: "TURN OVER THE BED",
-      what: "A bed is left rumpled after every discharge and nobody new can lie in it.",
-      how: "Stand at a rumpled bed with EMPTY hands and hold Q to strip it. Fast turnovers pay a bonus.",
+      what: "A basket is left mucky after every send-off and nobody new can settle in it.",
+      how: "Stand at a mucky basket with EMPTY hands and hold Q to change it. Fast turnarounds pay a bonus.",
       watch: "The bay counter at the top turns amber then red as dirty beds pile up. Red means you are about to run out of anywhere to put people." },
-    { col: "#ff8fa3", title: "TWO-MEDIC LIFTS",
-      what: "Some critical arrivals come in on a stretcher and wear a 2 MEDICS badge.",
+    { col: "#ff8fa3", title: "TWO-NURSE LIFTS",
+      what: "Some grumpy arrivals come in on a trolley and wear a 2 NURSES badge.",
       how: "One of you cannot budge them. Bring your partner within arm's reach and press E — you lift together.",
-      watch: "Team lifts pay extra. Solo shifts carry stretcher cases normally, so this only bites in co-op." },
+      watch: "Team lifts pay extra. Solo shifts carry two-nurse cases normally, so this only bites in co-op." },
     { col: "#f2b03c", title: "FIRE SHUTTERS",
-      what: "From the third ward on, a corridor door drops on a timer and seals that route.",
+      what: "From the third room on, a corridor door drops on a timer and seals that route.",
       how: "Nothing to press — read the amber warning stripe and get through, or go the long way round.",
-      watch: "Shutters never trap you or cut the ward in two, but they will cost you a run if you commit to a doorway too late." }
+      watch: "Doors never trap you or cut the clinic in two, but they will cost you a run if you commit to a doorway too late." }
   ];
   let x = 96;
   for (const c of cards) {
@@ -9547,7 +9552,7 @@ function drawHowToFloor(g) {
     ["Empty shelves", "A shelf that has run dry shows a crate icon. Collect a crate from the Delivery door, carry it over, hold Q to restock."],
     ["Throwing", "Holding an item with no station to work? Press Q to hurl it in the way you are facing. Your partner catches it for a bonus; a wall just drops it."],
     ["High five", "Two players standing together, both press Q: refills both sprint bars and keeps your combo chain alive."],
-    ["Deterioration", "Leave someone in the queue too long and they become a critical case — more work, less patience. The queue is the real clock."]
+    ["Getting grumpy", "Leave someone in the queue too long and they get grumpy — more fussing, less patience. The queue is the real clock."]
   ];
   fillRound(g, 96, 384, 1088, 216, 14, "rgba(255,255,255,.04)");
   text(g, "KEEPING THE FLOOR MOVING", 118, 410, 12, "#ffd54a");
@@ -9560,8 +9565,8 @@ function drawHowToFloor(g) {
 
   fillRound(g, 96, 616, 1088, 74, 14, "rgba(255,213,74,.07)");
   text(g, "IF YOU ONLY REMEMBER ONE THING", 118, 642, 12, "#ffd54a");
-  wrapText(g, "Beds are the bottleneck, not your legs. A bed that is dirty, or occupied by someone " +
-              "who is already finished, is a bed nobody can use — clear it before you go looking for the next patient.",
+  wrapText(g, "Baskets are the bottleneck, not your legs. A basket that is mucky, or occupied by someone " +
+              "who is already finished, is a basket nobody can use — clear it before you go looking for the next arrival.",
            118, 666, 1044, 18, 13, PALETTE.text);
 }
 
@@ -9569,7 +9574,7 @@ function drawHowToModes(g) {
   const modes = [
     ["CAMPAIGN", "#48c3f0", "Fifteen handmade wards, a little over two minutes each. Score sets your stars; stars unlock the next ward and your perks. Three shift challenges per ward give you a reason to come back. Playing alone gets roomier patience, calmer arrivals, an extra life and its own score targets."],
     ["NIGHT SHIFT (ENDLESS)", "#c39bff", "No clock. Arrivals tighten forever and every tenth patient buys back a life. Open from the start — pick it on the shift select."],
-    ["ER BUILDER (WAVES)", "#6fd3b4", "You design the department. Ninety-second waves; treat patients to earn credits, then between waves buy beds, machines and staff and place them wherever you like. Press start when your ER is ready. Waves escalate; the run ends when you run out of lives. Also open from the start."]
+    ["CLINIC BUILDER (WAVES)", "#6fd3b4", "You design the department. Ninety-second waves; treat animals to earn credits, then between waves buy beds, machines and staff and place them wherever you like. Press start when your ER is ready. Waves escalate; the run ends when you run out of lives. Also open from the start."]
   ];
   let y = 116;
   for (const [name, col, blurb] of modes) {
@@ -9581,10 +9586,10 @@ function drawHowToModes(g) {
   }
   const extras = [
     ["Shift events", "From the third ward on, something hits mid-shift: an ambulance, an outbreak, a power flicker, a VIP. Discharges pay extra while one runs."],
-    ["The ward moves", "Two of those change the room: BAY CLOSED ropes off floor for twenty seconds, PIPE BURST keeps dropping puddles. Neither ever cuts the ward in two."],
+    ["The floor moves", "Two of those change the room: BAY CLOSED ropes off floor for twenty seconds, PIPE BURST keeps dropping puddles. Neither ever cuts the ward in two."],
     ["Pickups", "Coffee makes you quicker; adrenaline makes sprinting free. Both sit on the floor and expire if ignored."],
     ["Difficulty", "Casual, Standard or Overtime — press T on the shift select. Overtime pays 1.45x."],
-    ["Severity", "Every arrival is minor, standard or critical, and the mix gets nastier as the clock runs down."]
+    ["Moods", "Every arrival is easy, ordinary or grumpy, and the mix gets nippier as the clock runs down."]
   ];
   fillRound(g, 96, y, 1088, 143, 13, "rgba(255,255,255,.04)");
   text(g, "ALSO IN PLAY", 118, y + 22, 12, "#ffd54a");
@@ -9601,10 +9606,10 @@ function drawHowToModes(g) {
   const bonuses = [
     ["Chain", "Discharge again quickly and your combo climbs. The multiplier rides every payout, so a broken chain costs far more than one slow patient."],
     ["Specialist", "Three of the same condition back to back."],
-    ["Team lift", "Both medics carrying one stretcher case."],
-    ["Turnover", "Strip a rumpled bed promptly after a discharge."],
+    ["Team lift", "Both nurses carrying one two-nurse case."],
+    ["Turnover", "Change a mucky basket promptly after a send-off."],
     ["Catch", "Your partner catches an item you threw."],
-    ["Lives", "Three in co-op, four alone. You lose one when somebody's patience runs out and they walk. At zero the shift ends there and then."]
+    ["Patience", "Three in co-op, four alone. You lose one when an animal runs out of patience and trots off home. At zero the shift ends there and then."]
   ];
   fillRound(g, 96, y, 1088, 176, 13, "rgba(255,255,255,.04)");
   text(g, "WHERE THE SCORE COMES FROM", 118, y + 22, 12, "#ffd54a");
@@ -9619,12 +9624,18 @@ function drawHowToModes(g) {
 /* Plain-language one-liner per procedure. The chain chips above give the exact
    station order; this says what you are actually doing. */
 const HOWTO_STEPS = {
-  cut:      "Grab a bandage from a supply shelf, carry it to the bed, hold Q to dress the wound.",
-  infection:"Fill a syringe at a medicine cabinet, carry it over, hold Q to inject.",
-  fracture: "Carry the patient onto the X-ray and hold Q. Develop the film at the X-ray, mix the cast at the mixer, then apply it at the bed.",
-  cardiac:  "Take the defib off its rack, charge it at the charger, then shock them at the bed BEFORE the charge drains.",
-  mystery:  "Draw blood at the bed with empty hands, run the sample to the lab, wait for the result — then treat whatever it turns out to be."
+  muddypaws:    "Grab a towel from a grooming shelf, carry it to the basket, hold Q to wipe those paws.",
+  itchyears:    "Fill a dropper at a remedy cabinet, carry it over, hold Q for two drops in each ear.",
+  sprainedhop:  "Carry them onto the scanner and hold Q. Develop the plate at the scanner, cut a bootie at the bench, then fit it at the basket.",
+  staticcling:  "Take the wand off its dock, ground it at the pad, then zap the fluff at the basket BEFORE the charge drains.",
+  mysterymunch: "Swab them at the basket with empty hands, run the swab to the sniff lab, wait for the result — then treat whatever it turns out to be.",
+  stickypaws:   "Two trips: drops from the remedy cabinet to loosen the goo, then a towel from the grooming shelf to get it off.",
+  zoomies:      "One dropper of calming drops, fast. They have almost no patience and they are already halfway up the curtains.",
+  socksituation:"Scan them, develop the plate, then take the scan to the basket. Yes, it is a sock. It is always a sock.",
+  crickintail:  "Scan the tail, then stand at the basket with EMPTY hands and hold Q for a gentle wiggle. Nothing to fetch.",
+  toomanytreats:"Swab them, run it to the sniff lab, then fetch a tummy soother from the remedy cabinet. The longest chain in the clinic."
 };
+
 
 /** Word-wrap helper for the longer explanatory blocks. */
 function wrapText(g, str, x, y, maxW, lineH, size, color) {
@@ -9659,7 +9670,7 @@ function drawBuild(g) {
   top.addColorStop(0, "rgba(8,13,22,.92)"); top.addColorStop(1, "rgba(8,13,22,.35)");
   g.fillStyle = top; g.fillRect(0, 0, W, 150);
 
-  text(g, "BUILD YOUR ER", 40, 56, 32, "#6fd3b4");
+  text(g, "BUILD YOUR CLINIC", 40, 56, 32, "#6fd3b4");
   text(g, "Wave " + B.wave + " cleared  ·  next up wave " + (B.wave + 1),
        40, 82, 15, PALETTE.dim, "left", "normal");
 
@@ -9704,7 +9715,7 @@ function drawBuild(g) {
 
   // your department, at a glance
   const stats = [
-    ["Beds", Game.world.beds.length],
+    ["Baskets", Game.world.beds.length],
     ["Machines", Game.world.stations.filter(q => q.type !== "basket").length],
     ["Staff", Game.staff.length],
     ["Waiting room", Game.world.waitSlots.length],
@@ -9807,7 +9818,7 @@ function drawMedalsScreen(g) {
 
   const got = ACHIEVEMENTS.filter(a => Game.achievements[a.key]).length;
   text(g, got + " / " + ACHIEVEMENTS.length + " achievements   ·   " +
-       Game.career.treated + " patients treated   ·   " +
+       Game.career.treated + " animals sent home   ·   " +
        Game.career.shifts + " shifts   ·   " + Game.xp + " XP",
        W / 2, 92, 16, PALETTE.dim, "center", "normal");
 
@@ -9885,8 +9896,8 @@ function drawSelect(g) {
   // say out loud that solo is a different set of numbers, so a player coming
   // from co-op does not read the easier shift as something being broken
   if (Game.playerCount === 1)
-    text(g, "Playing alone: patients wait longer, you get a fourth life, "
-          + "and the score targets are set for one medic.",
+    text(g, "Playing alone: animals wait longer, you get a fourth life, "
+          + "and the score targets are set for one nurse.",
          W / 2, 106, 12, "#6fd3b4", "center", "normal");
 
   /* The grid used to assume exactly two rows, which broke the moment the
@@ -9921,7 +9932,7 @@ function drawSelect(g) {
   g.lineWidth = selB ? 4 : 1.5;
   roundRect(g, bx2, ey, ew, eh, 14); g.stroke();
   drawShopIcon(g, { kind: "station", station: "basket" }, bx2 + 32, ey + 33, 14);
-  text(g, "ER BUILDER — waves", bx2 + 58, ey + 30, 18, openB ? PALETTE.text : "#4a5666");
+  text(g, "CLINIC BUILDER — waves", bx2 + 58, ey + 30, 18, openB ? PALETTE.text : "#4a5666");
   text(g, openB ? "Build the department between waves." + (Game.builderBest
                     ? "   Best wave  " + Game.builderBest : "")
                 : "Unlocks at " + BUILDER_UNLOCK + " stars (you have " + stars + ")",
@@ -10156,16 +10167,16 @@ function drawResults(g) {
   }
 
   const stats = r.builder ? [
-    ["Patients treated", String(r.treated)],
-    ["Patients lost", String(r.lost)],
+    ["Animals sent home", String(r.treated)],
+    ["Trotted off home", String(r.lost)],
     ["Credits earned", String(r.spent || 0)],
     ["Things built", String(r.built || 0)],
     ["Staff hired", String(r.staff || 0)]
   ] : [
-    ["Patients treated", String(r.treated)],
-    ["Patients lost", String(r.lost)],
+    ["Animals sent home", String(r.treated)],
+    ["Trotted off home", String(r.lost)],
     ["Best chain", "x" + (r.bestCombo || 0)],
-    ["Perfect discharges", String(r.perfects || 0)],
+    ["Perfect send-offs", String(r.perfects || 0)],
     ["Clutch saves", String(r.clutches || 0)]
   ];
   stats.forEach((s2, i) => {
@@ -10256,7 +10267,7 @@ function drawWorldUI(g) {
     g.restore();
   }
 
-  // --- patients ---
+  // --- animals ---
   for (const pt of Game.patients) {
     if (pt.state === "gone") continue;
     const carried = pt.state === "carried";
@@ -10511,11 +10522,11 @@ function drawPatientTag(g, pt, x, y, scale) {
   if (needsTwoLift(pt) && !pt.done) {
     const yy = y - R - 30 * scale;
     g.font = 'bold ' + Math.round(9 * scale) + 'px "Trebuchet MS", "Segoe UI", sans-serif';
-    const lw = g.measureText("2 MEDICS").width + 12 * scale;
+    const lw = g.measureText("2 NURSES").width + 12 * scale;
     g.save();
     g.globalAlpha = 0.7 + 0.3 * Math.sin(performance.now() / 200);
     fillRound(g, x - lw / 2, yy, lw, 13 * scale, 4, "#ffd54a");
-    text(g, "2 MEDICS", x, yy + 10 * scale, 9 * scale, "#3a2a00", "center");
+    text(g, "2 NURSES", x, yy + 10 * scale, 9 * scale, "#3a2a00", "center");
     g.restore();
   }
   if (pt.sev && pt.sev.name && !pt.done) {
@@ -11013,7 +11024,7 @@ window.CodeBlue = {
       work: p.work ? { label: p.work.label, t: p.work.t, dur: p.work.dur } : null,
       hint: p.hintT > 0 ? p.hint : null
     })),
-    patients: Game.patients.map(p => ({
+    animals: Game.patients.map(p => ({
       id: p.id, ailment: p.ailment, state: p.state, step: p.step, steps: p.steps.length,
       done: p.done, x: p.x, y: p.y, tx: Math.floor(p.x / TILE), ty: Math.floor(p.y / TILE),
       patience: +(p.patience / p.patienceMax).toFixed(2)
