@@ -6532,6 +6532,7 @@ const MAT = {
   wallTop:  "#c2ebe1",
   base:     "#7cc4b4",
   bedFrame: "#fbfdff",
+  basketWeave: "#c9a878",
   bedSheet: "#eef5fc",
   metal:    "#c9d4de",
   accent:   "#ef5d6b"
@@ -6626,10 +6627,19 @@ function buildLevelMesh(world) {
   for (const st of world.stations) {
     const cx = st.x + 0.5, cz = st.y + 0.5;
     if (st.type === "basket") {
-      mbRoundedBox(mb, cx, 0.10, cz, 0.30, 0.10, 0.42, 0.05, rgb(TH.metal), 2);   // chassis
-      mbRoundedBox(mb, cx, 0.24, cz, 0.40, 0.09, 0.46, 0.07, rgb(TH.bedFrame), 3); // mattress
-      mbRoundedBox(mb, cx, 0.38, cz - 0.28, 0.30, 0.06, 0.13, 0.05, rgb("#ffffff"), 3); // pillow
-      mbRoundedBox(mb, cx, 0.30, cz + 0.47, 0.34, 0.16, 0.03, 0.03, rgb(TH.metal), 2); // footboard
+      /* A pet basket, not a hospital trolley: a low woven tub with a padded
+         rim you can see over, and a cushion inside. The rim is four boxes
+         rather than a ring because there is no subtractive primitive here —
+         and four boxes read as a woven basket anyway. */
+      const weave = rgb(TH.basketWeave || "#c9a878"), pad = rgb(TH.bedFrame);
+      mbRoundedBox(mb, cx, 0.055, cz, 0.42, 0.055, 0.44, 0.10, weave, 3);      // floor of the tub
+      mbRoundedBox(mb, cx, 0.16, cz, 0.34, 0.055, 0.36, 0.10, pad, 3);          // the cushion
+      for (const [ox, oz, hx, hz] of [[0, -0.40, 0.42, 0.055], [0, 0.40, 0.42, 0.055],
+                                      [-0.39, 0, 0.055, 0.45], [0.39, 0, 0.055, 0.45]])
+        mbRoundedBox(mb, cx + ox, 0.155, cz + oz, hx, 0.155, hz, 0.06, weave, 3);
+      // a folded blanket over one end, so a full basket still reads as soft
+      mbRoundedBox(mb, cx, 0.235, cz + 0.24, 0.30, 0.035, 0.11, 0.04,
+                   rgb(TH.curtain || "#ffd9e2"), 2);
     } else {
       const info = STATIONS[st.type];
       const body = rgb(info.color), edge = rgb(info.edge);
@@ -6652,8 +6662,10 @@ function buildStationDetail(mb, st, cx, cz, h) {
       }
       break;
     case "remedy":
-      mbRoundedBox(mb, cx, h * 0.62, cz + 0.42, 0.07, 0.20, 0.03, 0.02, white, 2);
-      mbRoundedBox(mb, cx, h * 0.62, cz + 0.42, 0.20, 0.07, 0.03, 0.02, white, 2);
+      // a dropper bottle on the door, not a cross
+      mbRoundedBox(mb, cx, h * 0.60, cz + 0.42, 0.09, 0.13, 0.03, 0.04, white, 2);
+      mbRoundedBox(mb, cx, h * 0.78, cz + 0.42, 0.035, 0.06, 0.03, 0.02, white, 2);
+      mbRoundedBox(mb, cx, h * 0.86, cz + 0.42, 0.06, 0.03, 0.03, 0.02, dark, 2);
       break;
     case "scanner":
       mbCylinder(mb, cx, h + 0.30, cz, 0.05, 0.05, 0.55, rgb(TH.metal), 10, true);
@@ -9046,30 +9058,34 @@ function drawTitle(g) {
     });
   }
 
-  if (Pads.connected()) {
-    const nP = Pads.connected();
-    text(g, nP === 1 ? "1 gamepad connected — it drives Player 1"
-                     : nP + " gamepads connected — in plug-in order",
-         W / 2, CY - 16, 14, "#6fd3b4", "center");
-  }
-
+  /* Four lines were being stacked inside forty pixels — the orientation prompt
+     was painted straight across "Press 1 solo", and the gamepad line four
+     pixels off it. One ladder, spaced by the size of the text on each rung. */
   text(g, "Escape pauses · M mutes · H how to play · O options",
-       W / 2, CY - 58, 14, PALETTE.dim, "center", "normal");
+       W / 2, CY - 92, 14, PALETTE.dim, "center", "normal");
 
-  const blink = (Math.sin(performance.now() / 320) + 1) / 2;
-  g.save(); g.globalAlpha = 0.55 + 0.45 * blink;
-  text(g, "Press  1  solo          Press  2  co-op", W / 2, CY - 20, 30, "#ffd54a", "center");
   if (!Game.tutorialDone) {
     // first boot: the loudest thing on the screen should be the thing that
     // teaches you to play it
     const pulse = 0.55 + 0.45 * Math.sin(performance.now() / 320);
     g.save(); g.globalAlpha = pulse;
     text(g, "New here?  Press  T  for a two-minute orientation \u2014 no clock, nothing to lose",
-         W / 2, CY - 48, 17, "#6fd3b4", "center");
+         W / 2, CY - 64, 17, "#6fd3b4", "center");
     g.restore();
   } else {
-    text(g, "T  orientation", W / 2, CY - 48, 13, PALETTE.dim, "center", "normal");
+    text(g, "T  orientation", W / 2, CY - 64, 13, PALETTE.dim, "center", "normal");
   }
+
+  if (Pads.connected()) {
+    const nP = Pads.connected();
+    text(g, nP === 1 ? "1 gamepad connected — it drives Player 1"
+                     : nP + " gamepads connected — in plug-in order",
+         W / 2, CY - 40, 14, "#6fd3b4", "center");
+  }
+
+  const blink = (Math.sin(performance.now() / 320) + 1) / 2;
+  g.save(); g.globalAlpha = 0.55 + 0.45 * blink;
+  text(g, "Press  1  solo          Press  2  co-op", W / 2, CY - 10, 30, "#ffd54a", "center");
   g.restore();
 
 }
@@ -9546,15 +9562,15 @@ function drawHowToProcedures(g) {
    gets a card of its own rather than a line in a tip list. */
 function drawHowToFloor(g) {
   const cards = [
-    { col: "#c98a5a", title: "TURN OVER THE BED",
+    { col: "#c98a5a", title: "CHANGE THE BASKET",
       what: "A basket is left mucky after every send-off and nobody new can settle in it.",
       how: "Stand at a mucky basket with EMPTY hands and hold Q to change it. Fast turnarounds pay a bonus.",
-      watch: "The bay counter at the top turns amber then red as dirty beds pile up. Red means you are about to run out of anywhere to put people." },
+      watch: "The basket counter at the top turns amber then red as mucky baskets pile up. Red means you are about to run out of anywhere to put anyone." },
     { col: "#ff8fa3", title: "TWO-NURSE LIFTS",
       what: "Some grumpy arrivals come in on a trolley and wear a 2 NURSES badge.",
       how: "One of you cannot budge them. Bring your partner within arm's reach and press E — you lift together.",
       watch: "Team lifts pay extra. Solo shifts carry two-nurse cases normally, so this only bites in co-op." },
-    { col: "#f2b03c", title: "FIRE SHUTTERS",
+    { col: "#f2b03c", title: "CORRIDOR DOORS",
       what: "From the third room on, a corridor door drops on a timer and seals that route.",
       how: "Nothing to press — read the amber warning stripe and get through, or go the long way round.",
       watch: "Doors never trap you or cut the clinic in two, but they will cost you a run if you commit to a doorway too late." }
@@ -9598,9 +9614,9 @@ function drawHowToFloor(g) {
 
 function drawHowToModes(g) {
   const modes = [
-    ["CAMPAIGN", "#48c3f0", "Fifteen handmade wards, a little over two minutes each. Score sets your stars; stars unlock the next ward and your perks. Three shift challenges per ward give you a reason to come back. Playing alone gets roomier patience, calmer arrivals, an extra life and its own score targets."],
-    ["NIGHT SHIFT (ENDLESS)", "#c39bff", "No clock. Arrivals tighten forever and every tenth patient buys back a life. Open from the start — pick it on the shift select."],
-    ["CLINIC BUILDER (WAVES)", "#6fd3b4", "You design the department. Ninety-second waves; treat animals to earn credits, then between waves buy beds, machines and staff and place them wherever you like. Press start when your ER is ready. Waves escalate; the run ends when you run out of lives. Also open from the start."]
+    ["CAMPAIGN", "#48c3f0", "Twenty-five handmade rooms, a little over two minutes each. Score sets your stars; stars unlock the next room and your perks. Three shift challenges per room give you a reason to come back. Playing alone gets roomier patience, calmer arrivals, an extra go and its own score targets."],
+    ["NIGHT SHIFT (ENDLESS)", "#c39bff", "No clock. Arrivals tighten forever and every tenth animal buys back a go. Open from the start — pick it on the shift select."],
+    ["CLINIC BUILDER (WAVES)", "#6fd3b4", "You design the clinic. Ninety-second waves; send animals home to earn credits, then between waves buy baskets, machines and staff and place them wherever you like. Press start when your clinic is ready. Waves escalate; the run ends when you run out of goes. Also open from the start."]
   ];
   let y = 116;
   for (const [name, col, blurb] of modes) {
@@ -9611,8 +9627,8 @@ function drawHowToModes(g) {
     y += 94;
   }
   const extras = [
-    ["Shift events", "From the third ward on, something hits mid-shift: an ambulance, an outbreak, a power flicker, a VIP. Discharges pay extra while one runs."],
-    ["The floor moves", "Two of those change the room: BAY CLOSED ropes off floor for twenty seconds, PIPE BURST keeps dropping puddles. Neither ever cuts the ward in two."],
+    ["Shift events", "From the third room on, something hits mid-shift: a van of puppies, itchy season, a power flicker, a show champion. Send-offs pay extra while one runs."],
+    ["The floor moves", "Two of those change the room: WET FLOOR ropes off a patch for twenty seconds, WATER BOWL DOWN keeps dropping puddles. Neither ever cuts the clinic in two."],
     ["Pickups", "Coffee makes you quicker; adrenaline makes sprinting free. Both sit on the floor and expire if ignored."],
     ["Difficulty", "Casual, Standard or Overtime — press T on the shift select. Overtime pays 1.45x."],
     ["Moods", "Every arrival is easy, ordinary or grumpy, and the mix gets nippier as the clock runs down."]
@@ -9630,7 +9646,7 @@ function drawHowToModes(g) {
   /* Where the score actually comes from. Players were tuning their play
      against a number they had never been shown the rules for. */
   const bonuses = [
-    ["Chain", "Discharge again quickly and your combo climbs. The multiplier rides every payout, so a broken chain costs far more than one slow patient."],
+    ["Chain", "Send another home quickly and your combo climbs. The multiplier rides every payout, so a broken chain costs far more than one slow animal."],
     ["Specialist", "Three of the same condition back to back."],
     ["Team lift", "Both nurses carrying one two-nurse case."],
     ["Turnover", "Change a mucky basket promptly after a send-off."],
