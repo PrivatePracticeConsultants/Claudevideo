@@ -27,15 +27,24 @@ func after_each() -> void:
 	_renderer.queue_free()
 
 func test_entities_render_through_exactly_three_multimesh_layers() -> void:
-	assert_eq(_layers().size(), 3, "bodies, health bars and projectiles - three layers")
+	assert_eq(_renderer.entity_layers().size(), 3, "bodies, health bars and projectiles")
+	# The buildable-cell grid is a MultiMesh too, but a static one: its size is
+	# fixed by the map, not by how much is happening.
+	assert_ne(_renderer.cell_layer(), null, "the cell grid is also instanced, not per-cell nodes")
+	for child in _renderer.get_children():
+		if child is MultiMeshInstance3D:
+			continue
+		assert_false(child is MeshInstance3D,
+			"loose per-entity meshes must not hang off the renderer root")
 
 func test_instance_buffers_are_preallocated_to_the_pool_ceiling() -> void:
 	# Allocated once at setup. If instance_count were resized as entities spawn,
 	# the renderer would be reallocating GPU buffers mid-wave.
-	var layers := _layers()
-	assert_eq(layers[0].multimesh.instance_count, _sim.e_alive.size(), "enemy layer")
-	assert_eq(layers[1].multimesh.instance_count, _sim.e_alive.size(), "health bar layer")
-	assert_eq(layers[2].multimesh.instance_count, _sim.p_alive.size(), "projectile layer")
+	assert_eq(_renderer.enemy_layer().multimesh.instance_count, _sim.e_alive.size(), "enemy layer")
+	assert_eq(_renderer.hp_bar_layer().multimesh.instance_count, _sim.e_alive.size(), "health bar layer")
+	assert_eq(_renderer.projectile_layer().multimesh.instance_count, _sim.p_alive.size(), "projectile layer")
+	assert_eq(_renderer.cell_layer().multimesh.instance_count,
+		_sim.grid_cols() * _sim.grid_rows(), "cell grid layer")
 
 func test_the_simulation_maps_onto_the_ground_plane() -> void:
 	# The whole reason the 2D renderer could be swapped for a 3D one without
@@ -49,34 +58,33 @@ func test_visible_instance_count_tracks_live_entities() -> void:
 	# This is the mechanism that keeps draw cost proportional to what is on
 	# screen without touching allocation.
 	_renderer.update_visuals(0.0)
-	var layers := _layers()
-	assert_eq(layers[0].multimesh.visible_instance_count, 0, "nothing spawned yet")
+	assert_eq(_renderer.enemy_layer().multimesh.visible_instance_count, 0, "nothing spawned yet")
 
 	_sim._begin_wave(0)
 	for _i in 40:
-		_sim._spawn(0)
+		_sim._spawn(_sim.enemy_index("walker"))
 	_renderer.update_visuals(0.0)
-	assert_eq(layers[0].multimesh.visible_instance_count, 40, "40 bodies drawn")
-	assert_eq(layers[1].multimesh.visible_instance_count, 40, "40 health bars drawn")
+	assert_eq(_renderer.enemy_layer().multimesh.visible_instance_count, 40, "40 bodies drawn")
+	assert_eq(_renderer.hp_bar_layer().multimesh.visible_instance_count, 40, "40 health bars drawn")
 
 	for i in 15:
 		_sim._despawn_enemy(i)
 	_renderer.update_visuals(0.0)
-	assert_eq(layers[0].multimesh.visible_instance_count, 25, "count follows despawns")
+	assert_eq(_renderer.enemy_layer().multimesh.visible_instance_count, 25, "count follows despawns")
 
 func test_the_node_count_does_not_grow_with_entities() -> void:
 	# The actual regression this file exists to catch.
 	var before := _tree.root.get_child_count() + _renderer.get_child_count()
 	_sim._begin_wave(0)
 	for _i in 200:
-		_sim._spawn(0)
+		_sim._spawn(_sim.enemy_index("walker"))
 	_renderer.update_visuals(0.5)
 	var after := _tree.root.get_child_count() + _renderer.get_child_count()
 	assert_eq(after, before, "200 enemies must not create 200 nodes")
 
 func test_interpolation_lands_between_the_two_ticks() -> void:
 	_sim._begin_wave(0)
-	_sim._spawn(0)
+	_sim._spawn(_sim.enemy_index("walker"))
 	var slot := 0
 	for i in _sim.e_alive.size():
 		if _sim.e_alive[i] == 1:
@@ -94,15 +102,6 @@ func test_interpolation_lands_between_the_two_ticks() -> void:
 
 	assert_almost_eq(mid_x, (start_x + end_x) * 0.5, 0.0001,
 		"half a tick of interpolation is half the distance along the path")
-
-## The MultiMesh layers, in setup order. Everything else the renderer owns is
-## static scenery, a camera or a light - none of which may scale with entities.
-func _layers() -> Array:
-	var found := []
-	for child in _renderer.get_children():
-		if child is MultiMeshInstance3D:
-			found.append(child)
-	return found
 
 func _theme() -> Dictionary:
 	var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string("res://data/theme.json"))

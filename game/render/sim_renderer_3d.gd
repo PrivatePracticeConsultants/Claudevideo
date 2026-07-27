@@ -32,6 +32,7 @@ var _enemies: MultiMeshInstance3D
 var _hp_bars: MultiMeshInstance3D
 var _projectiles: MultiMeshInstance3D
 var _static_root: Node3D
+var _cells: MultiMeshInstance3D
 var _cursor: Node3D
 var _cursor_disc: MeshInstance3D
 var _cursor_ghost: MeshInstance3D
@@ -161,6 +162,9 @@ func _fit_camera() -> void:
 ## why this is not in the frame path.
 func _build_static_geometry() -> void:
 	if _static_root != null:
+		# The cell grid lives outside _static_root because its MultiMesh is
+		# preallocated once; only the scenery is thrown away and rebuilt.
+		remove_child(_static_root)
 		_static_root.queue_free()
 	_static_root = Node3D.new()
 	add_child(_static_root)
@@ -216,51 +220,56 @@ func _build_corridor() -> void:
 		_add_box(_static_root, Vector3(_sim.waypoint_x(i), height * 0.5, _sim.waypoint_y(i)),
 			Vector3(width, height, width), 0.0, floor_material)
 
-## The strip of ground where platforms may be built: everything between
-## min_distance_from_path and max_distance_from_path, on both sides of the road.
+## The buildable grid: ground you own, and the frontier you could buy next.
 ##
-## Drawn because free placement is invisible otherwise. Without it the rule
-## "anywhere adjacent to the path" is something the player has to discover by
-## clicking around and being refused, which is a bad way to learn a rule.
+## Drawn because free placement and purchasable ground are both invisible
+## otherwise - a rule the player discovers by clicking and being refused is a
+## badly taught rule.
+##
+## One MultiMesh, not one mesh instance per cell: a 30x17 grid is 500 cells and
+## a couple of hundred of them are visible at any time, which as individual nodes
+## would cost more draw calls than the entire rest of the scene.
 func _build_band() -> void:
-	var inner := _sim.build_min_distance()
-	var outer := _sim.build_max_distance()
-	var width := outer - inner
 	var height := float(_world.get("band_height", 1.5))
-	var material := _transparent_material(_color_of(_world.get("band", "#1d3b30")),
-		float(_world.get("band_alpha", 0.5)))
+	var inset := float(_world.get("cell_inset", 3.0))
+	var size := _sim.cell_size() - inset
+	var owned := _color_of(_world.get("band", "#1e4034"))
+	var offered := _color_of(_world.get("band_offer", "#2a3550"))
 
-	for i in _sim.waypoint_count() - 1:
-		var ax := _sim.waypoint_x(i)
-		var az := _sim.waypoint_y(i)
-		var bx := _sim.waypoint_x(i + 1)
-		var bz := _sim.waypoint_y(i + 1)
-		var dx := bx - ax
-		var dz := bz - az
-		var length := sqrt(dx * dx + dz * dz)
-		var yaw := atan2(dx, dz)
-		var mid := Vector3((ax + bx) * 0.5, height * 0.5, (az + bz) * 0.5)
-		var nx := dz / length
-		var nz := -dx / length
-		var offset := inner + width * 0.5
-		for side in [-1.0, 1.0]:
-			_add_box(_static_root,
-				mid + Vector3(nx * offset * side, 0.0, nz * offset * side),
-				Vector3(width, height, length), yaw, material)
-	# Fill the wedge each corner leaves between two straight strips. A disc, not a
-	# square: a square reads as a patchwork of tiles rather than one continuous
-	# shoulder, and the corner is exactly where the player most needs to see that
-	# the buildable area is continuous.
-	for i in range(1, _sim.waypoint_count() - 1):
-		var fill := MeshInstance3D.new()
-		var disc := CylinderMesh.new()
-		disc.top_radius = outer
-		disc.bottom_radius = outer
-		disc.height = height
-		fill.mesh = disc
-		fill.material_override = material
-		fill.position = to_world(_sim.waypoint_x(i), _sim.waypoint_y(i), height * 0.5)
-		_static_root.add_child(fill)
+	if _cells == null:
+		var mesh := BoxMesh.new()
+		mesh.size = Vector3.ONE
+		var material := StandardMaterial3D.new()
+		material.vertex_color_use_as_albedo = true
+		material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		mesh.material = material
+		var mm := MultiMesh.new()
+		mm.transform_format = MultiMesh.TRANSFORM_3D
+		mm.use_colors = true
+		mm.mesh = mesh
+		mm.instance_count = _sim.grid_cols() * _sim.grid_rows()
+		_cells = MultiMeshInstance3D.new()
+		_cells.multimesh = mm
+		add_child(_cells)
+
+	var mm_ref := _cells.multimesh
+	var shown := 0
+	for cy in _sim.grid_rows():
+		for cx in _sim.grid_cols():
+			var unlocked := _sim.cell_is_unlocked(cx, cy)
+			var offerable := _sim.cell_is_offerable(cx, cy)
+			if not unlocked and not offerable:
+				continue
+			var tint := owned if unlocked else offered
+			tint.a = float(_world.get("band_alpha", 0.5)) if unlocked \
+				else float(_world.get("band_offer_alpha", 0.28))
+			mm_ref.set_instance_transform(shown, Transform3D(
+				Basis().scaled(Vector3(size, height, size)),
+				to_world(_sim.cell_centre_x(cx), _sim.cell_centre_y(cy), height * 0.5)))
+			mm_ref.set_instance_color(shown, tint)
+			shown += 1
+	mm_ref.visible_instance_count = shown
 
 ## Built platforms. Size, height and colour all climb with tier, so a board reads
 ## at a glance: a tall bright tower is where the damage is.
@@ -276,7 +285,9 @@ func _build_platforms() -> void:
 		var max_tier := maxi(_sim.platform_max_tier(_sim.platform_blueprint(i)) - 1, 1)
 		var growth := 1.0 + per_tier * float(tier)
 		var fraction := float(tier) / float(max_tier)
-		var material := _lit_flat_material(base_colour.lerp(top_colour, fraction))
+		var family_colour: Color = base_colour if _sim.platform_splash(i) <= 0.0 \
+			else _color_of(_world.get("platform_cannon", "#c98a5b"))
+		var material := _lit_flat_material(family_colour.lerp(top_colour, fraction))
 
 		var plinth := MeshInstance3D.new()
 		var disc := CylinderMesh.new()
@@ -324,6 +335,17 @@ func _make_layer(capacity: int, material: Material) -> MultiMeshInstance3D:
 	# Godot culls instances whose transforms it has not measured.
 	node.custom_aabb = AABB(Vector3(-4000, -400, -4000), Vector3(8000, 800, 8000))
 	return node
+
+## The three layers whose instance counts scale with entities. Named rather than
+## positional: the cell grid is a MultiMesh too, and anything keying off child
+## order silently breaks the moment another one is added.
+func entity_layers() -> Array:
+	return [_enemies, _hp_bars, _projectiles]
+
+func enemy_layer() -> MultiMeshInstance3D: return _enemies
+func hp_bar_layer() -> MultiMeshInstance3D: return _hp_bars
+func projectile_layer() -> MultiMeshInstance3D: return _projectiles
+func cell_layer() -> MultiMeshInstance3D: return _cells
 
 ## Called when a platform is built, so the static geometry picks it up.
 func rebuild_static() -> void:

@@ -81,7 +81,7 @@ func test_an_enemy_takes_the_expected_number_of_ticks_to_cross() -> void:
 	var db := SimFixture.database()
 	var sim := Sim.new(db, 4)
 	sim._begin_wave(0)
-	sim._spawn(0)
+	sim._spawn(sim.enemy_index("walker"))
 	var speed_per_tick := float((db.enemies["walker"] as Dictionary)["speed_units_per_second"]) / float(sim.tick_rate())
 	var expected := int(ceil(sim.path_length() / speed_per_tick))
 	var ticks := 0
@@ -96,7 +96,7 @@ func test_a_leak_costs_exactly_its_leak_value() -> void:
 	var starting := int(db.economy["starting_integrity"])
 	var sim := Sim.new(db, 4)
 	sim._begin_wave(0)
-	sim._spawn(0)
+	sim._spawn(sim.enemy_index("walker"))
 	while sim.e_live_count > 0 and sim.tick() < 10000:
 		sim._advance_enemies()
 		sim._tick += 1

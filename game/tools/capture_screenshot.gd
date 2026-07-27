@@ -48,30 +48,12 @@ func _run(target_wave: int, min_enemies: int, out_path: String, show_overlay: bo
 	main._paused = true
 	main._overlay.visible = show_overlay
 
-	# Same policy the acceptance tests use: take positions along the road up to
-	# the deployment limit, then upgrade. Enough to produce a board with
-	# something happening on it.
-	var sites := SimFixture.candidate_sites(sim)
-	var next_site := 0
-	var ticks := 0
-	while not sim.is_over() and ticks < MAX_TICKS:
-		if sim.t_count < sim.platform_limit() and next_site + 1 < sites.size():
-			if sim.can_build_at(float(sites[next_site]), float(sites[next_site + 1]), 0) == Sim.BUILD_OK:
-				sim.queue_place(sim.tick(), sites[next_site], sites[next_site + 1], 0)
-				next_site += 2
-		else:
-			var weakest := -1
-			var weakest_tier := 1 << 30
-			for i in sim.t_count:
-				if sim.can_upgrade(i) and sim.platform_tier(i) < weakest_tier:
-					weakest_tier = sim.platform_tier(i)
-					weakest = i
-			if weakest >= 0:
-				sim.queue_upgrade(sim.tick(), weakest)
-		sim.step()
-		ticks += 1
-		if sim.wave_number() >= target_wave and sim.e_live_count >= min_enemies:
-			break
+	# Drive with the *same* policy the acceptance tests use, rather than a copy.
+	# An earlier inlined copy of it had a bug the real one does not - it stalled
+	# retrying a site that had become permanently blocked, and produced
+	# screenshots of a losing board with two turrets on it. Duplicated policy is
+	# duplicated bugs.
+	SimFixture.run_greedy(sim, true, target_wave, min_enemies)
 
 	# Let the renderer rebuild its instance buffers from the new state.
 	for _i in 4:

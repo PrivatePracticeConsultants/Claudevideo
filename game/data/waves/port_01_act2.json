@@ -1,11 +1,11 @@
 {
-  "_comment": "Act II. Twelve waves against 3.6x the health, with 900 starting Capital to answer it. This is where upgrading stops being optional. Act multipliers and starting Capital follow master plan section 4.1; they override economy.json for this engagement.",
+  "_comment": "Act II. Skitter swarms arrive in wave 3. They are individually trivial and collectively not, which is the first argument for area damage. Act multipliers and starting Capital follow master plan section 4.1, retuned for standalone levels.",
   "engagement_id": "port_01_act2",
   "map_id": "port_01",
   "starting_capital": 650,
   "platform_limit": 16,
-  "act_hp_multiplier": 2.0,
-  "act_bounty_multiplier": 1.5,
+  "act_hp_multiplier": 2.02,
+  "act_bounty_multiplier": 1.4,
   "inter_wave_delay_ticks": 90,
   "waves": [
     {
@@ -31,19 +31,35 @@
     {
       "groups": [
         {
+          "enemy": "swarm",
+          "count": 16,
+          "spawn_interval_ticks": 7,
+          "start_delay_ticks": 0
+        }
+      ]
+    },
+    {
+      "groups": [
+        {
           "enemy": "walker",
           "count": 12,
           "spawn_interval_ticks": 18,
           "start_delay_ticks": 0
+        },
+        {
+          "enemy": "swarm",
+          "count": 12,
+          "spawn_interval_ticks": 8,
+          "start_delay_ticks": 90
         }
       ]
     },
     {
       "groups": [
         {
-          "enemy": "walker",
-          "count": 14,
-          "spawn_interval_ticks": 17,
+          "enemy": "swarm",
+          "count": 26,
+          "spawn_interval_ticks": 5,
           "start_delay_ticks": 0
         }
       ]
@@ -52,19 +68,15 @@
       "groups": [
         {
           "enemy": "walker",
-          "count": 13,
-          "spawn_interval_ticks": 12,
-          "start_delay_ticks": 0
-        }
-      ]
-    },
-    {
-      "groups": [
-        {
-          "enemy": "walker",
-          "count": 16,
+          "count": 15,
           "spawn_interval_ticks": 15,
           "start_delay_ticks": 0
+        },
+        {
+          "enemy": "swarm",
+          "count": 14,
+          "spawn_interval_ticks": 7,
+          "start_delay_ticks": 80
         }
       ]
     },
@@ -81,10 +93,16 @@
     {
       "groups": [
         {
-          "enemy": "walker",
-          "count": 16,
-          "spawn_interval_ticks": 10,
+          "enemy": "swarm",
+          "count": 34,
+          "spawn_interval_ticks": 4,
           "start_delay_ticks": 0
+        },
+        {
+          "enemy": "walker",
+          "count": 8,
+          "spawn_interval_ticks": 18,
+          "start_delay_ticks": 140
         }
       ]
     },
@@ -95,21 +113,27 @@
           "count": 20,
           "spawn_interval_ticks": 12,
           "start_delay_ticks": 0
+        },
+        {
+          "enemy": "swarm",
+          "count": 18,
+          "spawn_interval_ticks": 6,
+          "start_delay_ticks": 100
         }
       ]
     },
     {
       "groups": [
         {
-          "enemy": "walker",
-          "count": 18,
-          "spawn_interval_ticks": 9,
+          "enemy": "swarm",
+          "count": 40,
+          "spawn_interval_ticks": 4,
           "start_delay_ticks": 0
         },
         {
           "enemy": "walker",
-          "count": 8,
-          "spawn_interval_ticks": 18,
+          "count": 12,
+          "spawn_interval_ticks": 14,
           "start_delay_ticks": 120
         }
       ]
@@ -123,10 +147,10 @@
           "start_delay_ticks": 0
         },
         {
-          "enemy": "walker",
-          "count": 10,
-          "spawn_interval_ticks": 15,
-          "start_delay_ticks": 140
+          "enemy": "swarm",
+          "count": 24,
+          "spawn_interval_ticks": 5,
+          "start_delay_ticks": 110
         }
       ]
     },
@@ -135,14 +159,14 @@
         {
           "enemy": "walker",
           "count": 26,
-          "spawn_interval_ticks": 8,
+          "spawn_interval_ticks": 9,
           "start_delay_ticks": 0
         },
         {
-          "enemy": "walker",
-          "count": 12,
-          "spawn_interval_ticks": 13,
-          "start_delay_ticks": 160
+          "enemy": "swarm",
+          "count": 30,
+          "spawn_interval_ticks": 4,
+          "start_delay_ticks": 130
         }
       ]
     }

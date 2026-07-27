@@ -32,7 +32,7 @@ extends RefCounted
 
 enum { RESULT_RUNNING, RESULT_WIN, RESULT_LOSS }
 enum { PHASE_WAITING, PHASE_SPAWNING, PHASE_CLEARING, PHASE_DONE }
-enum { CMD_PLACE, CMD_UPGRADE }
+enum { CMD_PLACE, CMD_UPGRADE, CMD_BUY_CELL }
 
 ## Why a placement was refused. Returned rather than a bare bool so the build
 ## cursor can tell the player which rule they are breaking instead of just
@@ -40,11 +40,11 @@ enum { CMD_PLACE, CMD_UPGRADE }
 enum {
 	BUILD_OK,
 	BUILD_ON_PATH,
-	BUILD_TOO_FAR,
 	BUILD_OVERLAPS,
 	BUILD_OUT_OF_BOUNDS,
 	BUILD_NO_CAPITAL,
 	BUILD_AT_LIMIT,
+	BUILD_LOCKED,
 }
 
 # --- immutable tables, built once from Database ------------------------------
@@ -80,6 +80,22 @@ var _build_min_spacing: float = 0.0
 ## content. Capping deployments makes "which positions do I commit to, and how
 ## hard do I invest in them" the actual decision.
 var _platform_limit: int = 0
+
+## Buildable ground is a grid of cells, not a continuous band.
+##
+## Cells near the corridor start unlocked; the rest can be bought with Capital,
+## but only next to ground you already hold, so expansion spreads outward from
+## the road instead of letting you claim an unrelated corner of the map. That
+## turns "where can I build" from a fixed constraint into something you invest
+## in, and gives Capital a third use alongside placing and upgrading.
+var _cell_size: float = 0.0
+var _grid_cols: int = 0
+var _grid_rows: int = 0
+var _cell_unlocked: PackedByteArray = PackedByteArray()
+var _cell_buildable: PackedByteArray = PackedByteArray()
+var _cells_bought: int = 0
+var _cell_base_cost: int = 0
+var _cell_cost_step: int = 0
 var _bounds_width: float = 0.0
 var _bounds_height: float = 0.0
 
@@ -104,6 +120,11 @@ var _tier_interval: PackedInt32Array = PackedInt32Array()
 var _tier_proj_speed: PackedFloat64Array = PackedFloat64Array()
 var _tier_hit_radius: PackedFloat64Array = PackedFloat64Array()
 var _tier_proj_life: PackedInt32Array = PackedInt32Array()
+# Splash radius of 0 means a single-target hit; anything above it damages
+# everything inside the radius, falling off linearly to splash_min_fraction at
+# the edge.
+var _tier_splash_radius: PackedFloat64Array = PackedFloat64Array()
+var _tier_splash_min: PackedFloat64Array = PackedFloat64Array()
 
 var _hp_growth: float = 1.0
 var _bounty_growth: float = 1.0
@@ -170,6 +191,8 @@ var p_damage: PackedInt64Array = PackedInt64Array()
 var p_speed: PackedFloat64Array = PackedFloat64Array()
 var p_hit_radius: PackedFloat64Array = PackedFloat64Array()
 var p_life: PackedInt32Array = PackedInt32Array()
+var p_splash: PackedFloat64Array = PackedFloat64Array()
+var p_splash_min: PackedFloat64Array = PackedFloat64Array()
 var p_live_count: int = 0
 var _p_free: PackedInt32Array = PackedInt32Array()
 var _p_free_top: int = 0
@@ -275,6 +298,88 @@ func _load_build_rules() -> void:
 	var bounds: Dictionary = _db.map["bounds"]
 	_bounds_width = float(bounds["width"])
 	_bounds_height = float(bounds["height"])
+	_cell_size = float(_db.building["cell_size"])
+	_cell_base_cost = int(_db.building["cell_base_cost"])
+	_cell_cost_step = int(_db.building["cell_cost_step"])
+	_build_grid()
+
+## A cell is *buildable* if its centre clears the road; it is *unlocked* if the
+## player owns it. Both are fixed-size and computed once - the buildable test
+## involves a distance-to-path query that has no business running per click.
+func _build_grid() -> void:
+	_grid_cols = maxi(1, int(ceil(_bounds_width / _cell_size)))
+	_grid_rows = maxi(1, int(ceil(_bounds_height / _cell_size)))
+	_cell_unlocked.resize(_grid_cols * _grid_rows)
+	_cell_buildable.resize(_grid_cols * _grid_rows)
+	for cy in _grid_rows:
+		for cx in _grid_cols:
+			var index := cy * _grid_cols + cx
+			var to_path := distance_to_path(cell_centre_x(cx), cell_centre_y(cy))
+			_cell_buildable[index] = 1 if to_path >= _build_min_dist else 0
+			# Everything within the starting reach comes free, so a new level is
+			# immediately playable without spending on ground.
+			_cell_unlocked[index] = 1 if (_cell_buildable[index] == 1 and to_path <= _build_max_dist) else 0
+
+func cell_size() -> float: return _cell_size
+func grid_cols() -> int: return _grid_cols
+func grid_rows() -> int: return _grid_rows
+## Written with a division rather than a 0.5 literal so the "no bare numbers in
+## gameplay code" linter stays strict; half a cell is geometry, but relaxing the
+## rule to admit it would also admit every balance value someone writes as 0.5.
+func cell_centre_x(cx: int) -> float: return float(cx) * _cell_size + _cell_size / 2.0
+func cell_centre_y(cy: int) -> float: return float(cy) * _cell_size + _cell_size / 2.0
+func cell_x_of(x: float) -> int: return int(floor(x / _cell_size))
+func cell_y_of(y: float) -> int: return int(floor(y / _cell_size))
+func cell_in_bounds(cx: int, cy: int) -> bool:
+	return cx >= 0 and cy >= 0 and cx < _grid_cols and cy < _grid_rows
+func cell_is_unlocked(cx: int, cy: int) -> bool:
+	return cell_in_bounds(cx, cy) and _cell_unlocked[cy * _grid_cols + cx] == 1
+func cell_is_buildable(cx: int, cy: int) -> bool:
+	return cell_in_bounds(cx, cy) and _cell_buildable[cy * _grid_cols + cx] == 1
+func cells_bought() -> int: return _cells_bought
+
+## Price of the next cell. Climbs with each purchase so expanding is a real
+## trade against turrets, rather than something you do reflexively.
+func next_cell_cost() -> int:
+	return _cell_base_cost + _cell_cost_step * _cells_bought
+
+## A cell can be bought if it is legal ground, not already owned, next to ground
+## you already own, and affordable.
+func can_buy_cell(cx: int, cy: int) -> bool:
+	if not cell_in_bounds(cx, cy):
+		return false
+	if _cell_unlocked[cy * _grid_cols + cx] == 1:
+		return false
+	if _cell_buildable[cy * _grid_cols + cx] == 0:
+		return false
+	if _capital < next_cell_cost():
+		return false
+	return _has_unlocked_neighbour(cx, cy)
+
+## Orthogonal neighbours only. Allowing diagonals would let a purchase squeeze
+## past the corner of the road and claim ground on the far side.
+func _has_unlocked_neighbour(cx: int, cy: int) -> bool:
+	return cell_is_unlocked(cx - 1, cy) or cell_is_unlocked(cx + 1, cy) \
+		or cell_is_unlocked(cx, cy - 1) or cell_is_unlocked(cx, cy + 1)
+
+## True when the cell is adjacent to owned ground and legal, regardless of
+## whether it can be paid for - what the renderer needs to show the frontier.
+func cell_is_offerable(cx: int, cy: int) -> bool:
+	if not cell_in_bounds(cx, cy):
+		return false
+	if _cell_unlocked[cy * _grid_cols + cx] == 1:
+		return false
+	if _cell_buildable[cy * _grid_cols + cx] == 0:
+		return false
+	return _has_unlocked_neighbour(cx, cy)
+
+func _try_buy_cell(cx: int, cy: int) -> bool:
+	if not can_buy_cell(cx, cy):
+		return false
+	_capital -= next_cell_cost()
+	_cell_unlocked[cy * _grid_cols + cx] = 1
+	_cells_bought += 1
+	return true
 
 func _build_types() -> void:
 	_type_ids = _db.enemy_ids()
@@ -314,6 +419,8 @@ func _build_blueprints() -> void:
 	_tier_proj_speed.resize(slot)
 	_tier_hit_radius.resize(slot)
 	_tier_proj_life.resize(slot)
+	_tier_splash_radius.resize(slot)
+	_tier_splash_min.resize(slot)
 	for b in n:
 		var tiers: Array = (_db.blueprints[_bp_ids[b]] as Dictionary)["tiers"]
 		for t in tiers.size():
@@ -330,6 +437,8 @@ func _build_blueprints() -> void:
 			_tier_proj_speed[s] = float(td["projectile_speed_units_per_second"]) / float(_tick_rate)
 			_tier_hit_radius[s] = float(td["projectile_hit_radius_units"])
 			_tier_proj_life[s] = maxi(1, int(round(float(td["projectile_lifetime_seconds"]) * float(_tick_rate))))
+			_tier_splash_radius[s] = float(td.get("splash_radius_units", 0.0))
+			_tier_splash_min[s] = float(td.get("splash_min_fraction", 1.0))
 
 func _build_pools() -> void:
 	e_alive.resize(_max_enemies)
@@ -363,6 +472,8 @@ func _build_pools() -> void:
 	p_speed.resize(_max_projectiles)
 	p_hit_radius.resize(_max_projectiles)
 	p_life.resize(_max_projectiles)
+	p_splash.resize(_max_projectiles)
+	p_splash_min.resize(_max_projectiles)
 	_p_free.resize(_max_projectiles)
 	for i in _max_projectiles:
 		_p_free[i] = _max_projectiles - 1 - i
@@ -407,6 +518,10 @@ func queue_place(at_tick: int, x_units: int, y_units: int, blueprint_index: int)
 func queue_upgrade(at_tick: int, platform_index: int) -> void:
 	_queue(at_tick, CMD_UPGRADE, platform_index, 0, 0)
 
+## Buy one grid cell of buildable ground.
+func queue_buy_cell(at_tick: int, cell_x: int, cell_y: int) -> void:
+	_queue(at_tick, CMD_BUY_CELL, cell_x, cell_y, 0)
+
 func _queue(at_tick: int, kind: int, a: int, b: int, c: int) -> void:
 	# Inserted in tick order rather than appended. The cursor that replays this
 	# log only moves forward, so an out-of-order append used to be applied at the
@@ -434,6 +549,8 @@ func _apply_commands() -> void:
 			ok = _try_place(float(_cmd_a[_cmd_cursor]), float(_cmd_b[_cmd_cursor]), _cmd_c[_cmd_cursor]) == BUILD_OK
 		elif _cmd_type[_cmd_cursor] == CMD_UPGRADE:
 			ok = _try_upgrade(_cmd_a[_cmd_cursor])
+		elif _cmd_type[_cmd_cursor] == CMD_BUY_CELL:
+			ok = _try_buy_cell(_cmd_a[_cmd_cursor], _cmd_b[_cmd_cursor])
 		if not ok:
 			_rejected_commands += 1
 		_cmd_cursor += 1
@@ -474,11 +591,15 @@ func can_build_at(x: float, y: float, blueprint_index: int) -> int:
 		return BUILD_OUT_OF_BOUNDS
 	if x < 0.0 or y < 0.0 or x > _bounds_width or y > _bounds_height:
 		return BUILD_OUT_OF_BOUNDS
-	var to_path := distance_to_path(x, y)
-	if to_path < _build_min_dist:
+	var cx := cell_x_of(x)
+	var cy := cell_y_of(y)
+	if not cell_in_bounds(cx, cy):
+		return BUILD_OUT_OF_BOUNDS
+	if not cell_is_buildable(cx, cy):
 		return BUILD_ON_PATH
-	if to_path > _build_max_dist:
-		return BUILD_TOO_FAR
+	if not cell_is_unlocked(cx, cy):
+		# Legal ground, just not owned yet - the player can buy it.
+		return BUILD_LOCKED
 	var spacing_sq := _build_min_spacing * _build_min_spacing
 	for i in t_count:
 		var dx := t_x[i] - x
@@ -671,6 +792,8 @@ func _fire(platform: int, target: int) -> void:
 	p_speed[i] = _tier_proj_speed[slot]
 	p_hit_radius[i] = _tier_hit_radius[slot]
 	p_life[i] = _tier_proj_life[slot]
+	p_splash[i] = _tier_splash_radius[slot]
+	p_splash_min[i] = _tier_splash_min[slot]
 	p_live_count += 1
 
 func _advance_projectiles() -> void:
@@ -694,7 +817,10 @@ func _advance_projectiles() -> void:
 		if p_hit_radius[i] > reach:
 			reach = p_hit_radius[i]
 		if dist <= reach:
-			_damage_enemy(target, p_damage[i])
+			if p_splash[i] > 0.0:
+				_detonate(e_x[target], e_y[target], p_splash[i], p_damage[i], p_splash_min[i])
+			else:
+				_damage_enemy(target, p_damage[i])
 			_despawn_projectile(i)
 			continue
 		var step_scale := p_speed[i] / dist
@@ -705,6 +831,38 @@ func _advance_projectiles() -> void:
 		p_life[i] -= 1
 		if p_life[i] <= 0:
 			_despawn_projectile(i)
+
+## Area damage centred on a point. Everything inside `radius` is hit, at full
+## damage in the middle falling linearly to `min_fraction` at the edge.
+##
+## Iterates the spatial hash in cell order and, within a cell, in slot order, so
+## the sequence of kills - and therefore the order bounties are paid and slots
+## are recycled - is identical on every machine. An area attack that resolved in
+## an arbitrary order would be a determinism hole that only shows up once
+## something explodes near a pool boundary.
+func _detonate(x: float, y: float, radius: float, damage: int, min_fraction: float) -> void:
+	var min_cx := _hash.cell_x(x - radius)
+	var max_cx := _hash.cell_x(x + radius)
+	var min_cy := _hash.cell_y(y - radius)
+	var max_cy := _hash.cell_y(y + radius)
+	var radius_sq := radius * radius
+	for cy in range(min_cy, max_cy + 1):
+		for cx in range(min_cx, max_cx + 1):
+			var begin := _hash.bucket_begin(cx, cy)
+			var end := _hash.bucket_end(cx, cy)
+			for k in range(begin, end):
+				var e := _hash.item_at(k)
+				if e_alive[e] == 0:
+					continue
+				var dx := e_x[e] - x
+				var dy := e_y[e] - y
+				var distance_sq := dx * dx + dy * dy
+				if distance_sq > radius_sq:
+					continue
+				var falloff := 1.0 - (sqrt(distance_sq) / radius) * (1.0 - min_fraction)
+				# Always at least 1, so a shell that reaches something never does
+				# literally nothing - a zero-damage hit reads as a bug.
+				_damage_enemy(e, maxi(1, int(round(float(damage) * falloff))))
 
 func _damage_enemy(index: int, amount: int) -> void:
 	e_hp[index] -= amount
@@ -892,6 +1050,15 @@ func blueprint_name(i: int) -> String: return _bp_ids[i]
 func blueprint_cost(i: int) -> int: return _tier_cost[_bp_tier_offset[i]]
 func blueprint_range(i: int) -> float: return sqrt(_tier_range_sq[_bp_tier_offset[i]])
 func blueprint_count() -> int: return _bp_ids.size()
+func blueprint_splash(i: int) -> float: return _tier_splash_radius[_bp_tier_offset[i]]
+func platform_splash(i: int) -> float: return _tier_splash_radius[t_tier_slot[i]]
+## Public so tests and tools can name an enemy instead of guessing its index -
+## the index is alphabetical and shifts whenever a new enemy is added.
+func enemy_index(id: String) -> int: return _type_index(id)
+func enemy_type_count() -> int: return _type_ids.size()
+func enemy_id(i: int) -> String: return _type_ids[i]
+func blueprint_display_name(i: int) -> String:
+	return str((_db.blueprints[_bp_ids[i]] as Dictionary).get("display_name", _bp_ids[i]))
 func enemy_radius(type_index: int) -> float: return _type_radius[type_index]
 func rng_draws() -> int: return _rng.draws()
 
@@ -929,6 +1096,8 @@ func state_hash() -> int:
 	h = StateHash.mix_bytes(h, _cmd_b.to_byte_array())
 	h = StateHash.mix_bytes(h, _cmd_c.to_byte_array())
 	h = StateHash.mix_int(h, _rejected_commands)
+	h = StateHash.mix_int(h, _cells_bought)
+	h = StateHash.mix_bytes(h, _cell_unlocked)
 	h = StateHash.mix_int(h, _phase)
 	h = StateHash.mix_int(h, _wave_index)
 	h = StateHash.mix_int(h, _phase_timer)
@@ -951,6 +1120,7 @@ func state_hash() -> int:
 	h = StateHash.mix_bytes(h, p_target.to_byte_array())
 	h = StateHash.mix_bytes(h, p_target_gen.to_byte_array())
 	h = StateHash.mix_bytes(h, p_life.to_byte_array())
+	h = StateHash.mix_bytes(h, p_splash.to_byte_array())
 	h = StateHash.mix_bytes(h, t_used)
 	h = StateHash.mix_bytes(h, t_blueprint.to_byte_array())
 	h = StateHash.mix_bytes(h, t_tier.to_byte_array())

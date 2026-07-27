@@ -4,7 +4,10 @@ Running log of choices that later phases inherit. Each entry says what was
 decided, why, and what would have to be true to revisit it. Append; don't
 rewrite history.
 
-Phase status: **P0 complete, audited, and moved to 3D + HTML5.** P1 not started.
+Phase status: **P0 complete and audited, then extended well past it** — 3D, HTML5, free
+placement, tower tiers, two weapon families, three enemy classes, purchasable
+ground, and a six-level campaign. Formally this is P0 plus most of P1/P2's
+content; the run layer (P3) is still absent.
 
 ---
 
@@ -250,6 +253,95 @@ string every frame regardless of whether anything changed.
 
 Balance was re-verified after the fixes and is unchanged: a naive fill still wins
 at 72/100 integrity with all damage in the last three waves.
+
+## P0-18 · Fixed pads removed, and what had to replace them
+
+Placement is free-form: anywhere in the buildable band beside the road. That was
+a direct request, and it quietly broke the economy.
+
+With pads, positions were scarce, so once the good ones were taken the only way
+to spend Capital was to upgrade. With free placement there are ~150 legal
+positions and no scarcity at all — and the raw numbers say spreading always wins:
+
+| purchase | added DPS | cost | DPS per $ |
+|---|---|---|---|
+| new T1 | 20 | 100 | **0.200** |
+| T1 → T2 | +24 | 240 | 0.100 |
+| T2 → T3 | +54 | 560 | 0.096 |
+| T3 → T4 | +112 | 1300 | 0.086 |
+
+A new turret is always the better buy, so nothing would ever be upgraded and the
+whole tier ladder would be dead content. This was not a theory — the first sweep
+after free placement produced runs that were 100% tier 1.
+
+The fix is a per-engagement **deployment limit**. Once your allowance is placed,
+upgrading is the only way to spend, and the decision becomes *which* positions
+you commit to and how hard you invest in them. Fixed pads had been providing
+that scarcity for free; removing them meant putting it back deliberately.
+
+Revisit if: a future family makes coverage genuinely more valuable than density
+(Support auras would). The limit is per-engagement data, not a constant.
+
+## P0-19 · Buildable ground is a purchasable grid
+
+Cells beside the road start owned; the rest can be bought with Capital, but only
+orthogonally adjacent to ground already held, at a price that climbs with each
+purchase.
+
+Orthogonal-only is the load-bearing detail: with diagonals, a purchase can slip
+past the corner of the road and claim ground on the far side, which defeats the
+point of expansion being a commitment to a direction.
+
+Buildability is judged by the **cell centre**, not the click point. That is a
+visible simplification — a click 110 units from the road can be refused because
+its cell centre is 132 — but the alternative is a buildable region whose edge is
+invisible, and the grid is drawn on the ground precisely so the rule is legible.
+
+`BUILD_TOO_FAR` was deleted when this landed: distant ground is no longer
+forbidden, it is unowned, and a reason code nothing can return is a trap for the
+next person who checks for it.
+
+## P0-20 · Cannon: area damage, and the determinism it threatens
+
+The Cannon family lobs shells that damage everything within a radius, falling off
+linearly to `splash_min_fraction` at the edge, with a floor of 1 damage so a
+shell that visibly reaches something never does literally nothing.
+
+Area damage is the first mechanic that resolves against *several* entities from a
+single event, which makes it the first place iteration order can leak into the
+simulation. `_detonate` walks the spatial hash in cell order and, within a cell,
+in slot order — so the sequence of kills, and therefore the order bounties are
+paid and pool slots are recycled, is identical everywhere. Resolving a blast in
+arbitrary order would be a determinism hole that only surfaces when something
+explodes near a pool boundary, which is to say months later.
+
+Cannon is deliberately worse than Ballistic at single targets — lower DPS, slower
+rate of fire, shorter range. It is paid for in area, and against one Bulwark
+Hauler it is the wrong tool.
+
+## P0-21 · Three enemy classes, as an HP-and-payout ladder
+
+Skitter (fast, fragile, numerous), Sentry Walker (baseline), Bulwark Hauler
+(slow, very tough, 12 integrity per leak and a large bounty).
+
+This is explicitly **not** the armour triangle from plan section 3.5 — there are
+no damage-type resistances yet. Swarms punish an arsenal with no area damage and
+heavies punish one with no concentrated damage, which gives Cannon a reason to
+exist without inventing a counter system P1 will design properly.
+
+The alphabetical ordering of enemy ids is a live hazard: `enemy_ids()` sorts, so
+adding "heavy" silently moved index 0 from walker to heavy. Several tests changed
+meaning without failing. `enemy_index("walker")` now exists so nothing addresses
+an enemy by a number that shifts when content is added.
+
+## P0-22 · The test runner used to hide broken files
+
+A test file that failed to parse was logged and skipped, and the suite still
+exited 0 — the total quietly dropped from 89 to 83 and nothing went red. Fixed:
+an unloadable or empty test file is now a FAIL.
+
+Worth recording because it is the same failure class as everything in the audit —
+not a crash, just a number that silently got smaller.
 
 ## P0-14 · Deliberately not built in P0
 

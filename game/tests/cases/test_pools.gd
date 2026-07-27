@@ -11,7 +11,7 @@ func test_enemy_slots_are_recycled_rather_than_grown() -> void:
 	var sim := Sim.new(db, 1)
 	sim._begin_wave(0)
 	for _cycle in capacity * 3:
-		sim._spawn(0)
+		sim._spawn(sim.enemy_index("walker"))
 		assert_lte(float(sim.e_live_count), float(capacity), "live count never exceeds the pool")
 		sim._despawn_enemy(_first_live(sim))
 	assert_eq(sim.e_live_count, 0, "everything was returned to the pool")
@@ -24,7 +24,7 @@ func test_pool_exhaustion_is_counted_not_hidden() -> void:
 	var sim := Sim.new(db, 1)
 	sim._begin_wave(0)
 	for _i in 10:
-		sim._spawn(0)
+		sim._spawn(sim.enemy_index("walker"))
 	assert_eq(sim.e_live_count, 4, "the pool filled to its ceiling")
 	assert_eq(sim.spawn_overflow(), 6, "and the six it could not take were counted")
 
@@ -34,15 +34,16 @@ func test_a_projectile_cannot_hit_the_enemy_that_inherited_its_target_slot() -> 
 	# something that died before it landed.
 	var sim := SimFixture.fresh()
 	sim._begin_wave(0)
-	sim._spawn(0)
+	sim._spawn(sim.enemy_index("walker"))
 	var victim := _first_live(sim)
-	sim._try_place(120.0, 430.0, 0)
+	var spot := SimFixture.a_site(sim)
+	sim._try_place(float(spot[0]), float(spot[1]), 0)
 	sim._fire(0, victim)
 	assert_eq(sim.p_live_count, 1, "a shot is in flight")
 
 	var generation_before := sim.e_gen[victim]
 	sim._despawn_enemy(victim)
-	sim._spawn(0)
+	sim._spawn(sim.enemy_index("walker"))
 	var newcomer := _first_live(sim)
 	assert_eq(newcomer, victim, "fixture sanity: the slot really was reused")
 	assert_ne(sim.e_gen[newcomer], generation_before, "the generation stamp advanced")
@@ -56,8 +57,9 @@ func test_a_projectile_cannot_hit_the_enemy_that_inherited_its_target_slot() -> 
 func test_projectiles_expire_rather_than_leaking_slots() -> void:
 	var sim := SimFixture.fresh()
 	sim._begin_wave(0)
-	sim._spawn(0)
-	sim._try_place(120.0, 430.0, 0)
+	sim._spawn(sim.enemy_index("walker"))
+	var spot := SimFixture.a_site(sim)
+	sim._try_place(float(spot[0]), float(spot[1]), 0)
 	var target := _first_live(sim)
 	sim._fire(0, target)
 	# Kill the target so the shot is orphaned, then let it resolve.
@@ -76,11 +78,13 @@ func test_platforms_cannot_be_stacked_on_the_same_spot() -> void:
 	# Free placement replaced fixed pads, so min_platform_spacing is now the only
 	# thing stopping an unlimited tower of turrets on one square.
 	var sim := SimFixture.fresh()
-	assert_eq(sim._try_place(120.0, 430.0, 0), Sim.BUILD_OK, "the first one builds")
-	assert_eq(sim._try_place(120.0, 430.0, 0), Sim.BUILD_OVERLAPS, "the second is refused")
-	# Just outside the spacing radius is fine again.
-	var clear := 120.0 + sim.build_min_spacing() + 1.0
-	assert_eq(sim._try_place(clear, 430.0, 0), Sim.BUILD_OK, "far enough away is legal")
+	var spot := SimFixture.a_site(sim)
+	assert_eq(sim._try_place(float(spot[0]), float(spot[1]), 0), Sim.BUILD_OK, "the first one builds")
+	assert_eq(sim._try_place(float(spot[0]), float(spot[1]), 0), Sim.BUILD_OVERLAPS, "the second is refused")
+	# Far enough along the road is fine again.
+	var elsewhere := SimFixture.a_site(sim, 8)
+	assert_eq(sim._try_place(float(elsewhere[0]), float(elsewhere[1]), 0), Sim.BUILD_OK,
+		"a spot clear of the first is legal")
 
 func _first_live(sim: Sim) -> int:
 	for i in sim.e_alive.size():

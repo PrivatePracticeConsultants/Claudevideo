@@ -33,7 +33,7 @@ func setup(sim: Sim, theme: Dictionary) -> void:
 	_hint.position = Vector2(14, 686)
 	_hint.add_theme_font_size_override("font_size", 12)
 	_hint.add_theme_color_override("font_color", _color("text_dim"))
-	_hint.text = "click open ground beside the road to build  ·  click a turret to upgrade it  ·  1/2/3 speed  ·  space pause  ·  F3 debug  ·  R restart"
+	_hint.text = "click owned ground to build  ·  click a turret to upgrade  ·  click dim ground to buy it  ·  Q weapon  ·  1/2/3 speed  ·  space pause  ·  F3 debug  ·  R restart"
 	add_child(_hint)
 
 	_level = Label.new()
@@ -60,22 +60,28 @@ func set_level(name: String, index: int, total: int) -> void:
 	_is_last_level = index + 1 >= total
 	_level.text = _level_text
 
-func refresh(speed: int, paused: bool, hovered_platform: int = -1) -> void:
+func refresh(speed: int, paused: bool, hovered_platform: int = -1,
+		blueprint: int = 0, can_buy_ground: bool = false) -> void:
 	var signature := hash([_sim.capital(), _sim.integrity(), _sim.wave_number(),
-		speed, paused, _sim.result(), hovered_platform,
+		speed, paused, _sim.result(), hovered_platform, blueprint, can_buy_ground,
+		_sim.t_count, _sim.cells_bought(),
 		-1 if hovered_platform < 0 else _sim.platform_tier(hovered_platform)])
 	if signature == _last_signature:
 		return
 	_last_signature = signature
-	var cost := _sim.blueprint_cost(0)
+	var cost := _sim.blueprint_cost(blueprint)
 	var affordable := _sim.capital() >= cost
-	_stats.text = "CAPITAL $%d    INTEGRITY %d    WAVE %d/%d    %s    %s" % [
+	_stats.text = "CAPITAL $%d    INTEGRITY %d    WAVE %d/%d    TURRETS %d/%d    %s    %s" % [
 		_sim.capital(),
 		_sim.integrity(),
 		maxi(_sim.wave_number(), 1), _sim.wave_count(),
-		"%s $%d%s" % [_sim.blueprint_name(0).to_upper(), cost, "" if affordable else "  (short)"],
+		_sim.t_count, _sim.platform_limit(),
+		"[Q] %s $%d%s" % [_sim.blueprint_display_name(blueprint).to_upper(), cost,
+			"" if affordable else "  (short)"],
 		"PAUSED" if paused else "%dx" % speed,
 	]
+	if can_buy_ground:
+		_stats.text += "    BUY GROUND $%d" % _sim.next_cell_cost()
 	# Integrity is the run's real health bar, so it is the one number that
 	# changes colour as it goes.
 	var fraction := float(_sim.integrity()) / float(_sim.integrity_max())
@@ -87,10 +93,12 @@ func refresh(speed: int, paused: bool, hovered_platform: int = -1) -> void:
 	# are deciding whether to upgrade it.
 	if hovered_platform >= 0:
 		var tier := _sim.platform_tier(hovered_platform)
-		var blueprint := _sim.platform_blueprint(hovered_platform)
+		var family := _sim.platform_blueprint(hovered_platform)
 		var upgrade := _sim.upgrade_cost(hovered_platform)
 		var label := "%s  T%d  %.0f dps" % [
-			_sim.tier_name(blueprint, tier), tier + 1, _sim.platform_dps(hovered_platform)]
+			_sim.tier_name(family, tier), tier + 1, _sim.platform_dps(hovered_platform)]
+		if _sim.platform_splash(hovered_platform) > 0.0:
+			label += "  splash %.0f" % _sim.platform_splash(hovered_platform)
 		if upgrade < 0:
 			label += "   MAX TIER"
 		else:

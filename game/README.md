@@ -2,10 +2,11 @@
 
 Roguelite tower defense. Godot 4.x / GDScript. **3D, and it runs in a browser.**
 
-**Status: phase P0 complete and audited.** One map, one enemy, one platform, ten
-waves, win/lose — on a deterministic 30Hz simulation with the architecture the
-later phases need already in place. The design document is the master plan (v2);
-the phase ladder is §5.7 of it.
+**Status: P0 complete and audited, then extended well past it.** Six levels, two
+weapon families with four tiers each, three enemy classes, free placement on
+purchasable ground — on a deterministic 30Hz simulation. The design document is
+the master plan (v2); the phase ladder is §5.7. Formally this is P0 plus much of
+P1/P2's content; the run layer (P3) is the next real milestone.
 
 This tree is self-contained and shares nothing with MRF Explorer, the Python
 product that occupies the rest of this repository.
@@ -50,8 +51,31 @@ branch, `/docs` folder. Two things to know:
 
 `docs/.nojekyll` stops Pages running Jekyll over the build.
 
-In game: click a pad to build · `1`/`2`/`3` speed · `space` pause · `F3` debug
-overlay · `R` restart · `esc` quit.
+## How to play
+
+Drones walk the corridor end to end. Anything that reaches the far end costs
+Corridor Integrity — 1 for a Skitter, 4 for a Walker, 12 for a Bulwark Hauler.
+Hit zero and the level is lost.
+
+- **Click owned ground** (green) to build the selected weapon.
+- **Click a turret** to upgrade it a tier. Hovering shows its DPS and next cost.
+- **Click dim blue ground** to buy that cell, expanding where you can build.
+  Ground can only be bought next to ground you already hold, and each purchase
+  costs more than the last.
+- **`Q`** cycles weapon · **`1`/`2`/`3`** speed · **`space`** pause ·
+  **`F3`** debug overlay · **`R`** restart · **`N`** next level after a win.
+
+Two families answering different problems:
+
+| | Ballistic | Cannon |
+|---|---|---|
+| Damage | Single target | Area, falling off toward the edge |
+| Best against | Bulwark Haulers | Skitter swarms |
+| Tier 1 cost | $100 | $140 |
+
+You are capped at a **deployment limit** per level, so once your allowance is
+placed the only way to grow is to upgrade — which is what makes *where* you put
+them matter.
 
 ## What P0 actually guarantees
 
@@ -60,10 +84,14 @@ finish; same seed + inputs produce an identical end state, test-proven.* Both
 halves are covered by `tests/cases/test_engagement.gd` and
 `tests/cases/test_determinism.gd`.
 
-The current suite is 84 tests / ~35,400 assertions, all green — including
-`test_audit.gd`, the regression tests for seven defects a deliberate
-break-it pass found after P0 was first written. Every one of them was a *silent*
-failure rather than a crash; `DECISIONS.md` (P0-17) has the table.
+The suite includes `test_audit.gd` — regression tests for seven defects a
+deliberate break-it pass found after P0 was first written. Every one was a
+*silent* failure rather than a crash; `DECISIONS.md` (P0-17) has the table.
+
+Every campaign level is covered by a test that it is both winnable by a scripted
+competent policy and losable by an idle one, so a balance change that makes a
+level impossible — or trivial — fails the build instead of being discovered in
+play.
 
 ## Layout
 
@@ -75,6 +103,11 @@ core/       deterministic simulation — no Node, no scene tree, no engine time
   spatial_hash.gd   allocation-free broadphase for targeting queries
   state_hash.gd     bit-exact fingerprint of simulation state
 data/       every balance value in the game, as JSON
+  building.json     placement rules and the purchasable-ground grid
+  levels.json       campaign order
+  blueprints/       weapon families and their tiers
+  enemies/          drone classes
+  maps/ waves/      one file per map, one per engagement
 render/     3D drawing (MultiMesh + interpolation), camera, debug overlay
 ui/         HUD
 tools/      headless dev utilities (screenshot capture, render stress, web verify)

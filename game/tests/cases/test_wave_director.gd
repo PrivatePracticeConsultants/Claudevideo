@@ -56,22 +56,24 @@ func test_a_wave_does_not_begin_while_the_previous_one_is_still_on_the_board() -
 			last_wave = sim.wave_number()
 
 func test_waves_advance_one_at_a_time() -> void:
+	# Checked on an undefended run: the property belongs to the wave director, not
+	# to whether the player wins, and an idle run exercises it without depending
+	# on the balance of the day.
 	var sim := SimFixture.fresh()
-	var sites := SimFixture.candidate_sites(sim)
-	var next_site := 0
 	var last_wave := 0
 	var guard := 0
 	while not sim.is_over() and guard < SimFixture.MAX_TICKS:
-		if next_site + 1 < sites.size() \
-				and sim.can_build_at(float(sites[next_site]), float(sites[next_site + 1]), 0) == Sim.BUILD_OK:
-			sim.queue_place(sim.tick(), sites[next_site], sites[next_site + 1], 0)
-			next_site += 2
 		sim.step()
 		guard += 1
 		assert_lte(float(sim.wave_number() - last_wave), 1.0, "waves must not skip")
 		assert_gte(float(sim.wave_number()), float(last_wave), "waves must not go backwards")
 		last_wave = sim.wave_number()
-	assert_eq(last_wave, sim.wave_count(), "a won engagement reaches the final wave")
+
+func test_a_won_engagement_reaches_the_final_wave() -> void:
+	var sim := SimFixture.fresh()
+	SimFixture.run_greedy(sim)
+	assert_eq(sim.result(), Sim.RESULT_WIN, "the level is winnable")
+	assert_eq(sim.wave_number(), sim.wave_count(), "and a win means every wave was played")
 
 func test_the_engagement_ends_rather_than_running_forever() -> void:
 	var sim := SimFixture.fresh()

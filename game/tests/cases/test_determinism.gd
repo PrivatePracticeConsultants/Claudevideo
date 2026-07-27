@@ -30,10 +30,12 @@ func test_state_matches_at_every_checkpoint_not_just_the_end() -> void:
 	var a := SimFixture.fresh(777)
 	var b := SimFixture.fresh(777)
 	var bp := a.blueprint_index("ballistic")
-	a.queue_place(30, 120, 430, bp)
-	b.queue_place(30, 120, 430, bp)
-	a.queue_place(200, 120, 650, bp)
-	b.queue_place(200, 120, 650, bp)
+	var one := SimFixture.a_site(a, 0)
+	var two := SimFixture.a_site(a, 8)
+	a.queue_place(30, one[0], one[1], bp)
+	b.queue_place(30, one[0], one[1], bp)
+	a.queue_place(200, two[0], two[1], bp)
+	b.queue_place(200, two[0], two[1], bp)
 	for tick in 3000:
 		a.step()
 		b.step()
@@ -67,8 +69,9 @@ func test_hash_is_sensitive_to_a_single_changed_command() -> void:
 	var a := SimFixture.fresh(99)
 	var b := SimFixture.fresh(99)
 	var bp := a.blueprint_index("ballistic")
-	a.queue_place(10, 120, 430, bp)
-	b.queue_place(10, 124, 430, bp)  # four units over
+	var one := SimFixture.a_site(a, 0)
+	a.queue_place(10, one[0], one[1], bp)
+	b.queue_place(10, one[0] + 4, one[1], bp)  # four units over
 	for _i in 1200:
 		a.step()
 		b.step()

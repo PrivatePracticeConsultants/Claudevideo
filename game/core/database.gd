@@ -149,6 +149,12 @@ func _validate_blueprints() -> void:
 			_req_num(t, "projectile_speed_units_per_second", twhere, 0.0001)
 			_req_num(t, "projectile_hit_radius_units", twhere, 0.0001)
 			_req_num(t, "projectile_lifetime_seconds", twhere, 0.0001)
+			# Optional: absent means a single-target weapon.
+			if (t as Dictionary).has("splash_radius_units"):
+				_req_num(t, "splash_radius_units", twhere, 0.0)
+				var fraction := _req_num(t, "splash_min_fraction", twhere, 0.0)
+				if fraction > 1.0:
+					errors.append("%s: splash_min_fraction is a share of full damage and cannot exceed 1." % twhere)
 	if not found:
 		errors.append("blueprints.json defines no blueprints.")
 

@@ -21,13 +21,24 @@ func _initialize() -> void:
 	var started := Time.get_ticks_msec()
 
 	for path in files:
+		# A test file that will not parse must FAIL, loudly. Counting it as
+		# "nothing to run" is how a whole file of tests disappears from the suite
+		# without anyone noticing the total went down - which is exactly what
+		# happened once during this project.
 		var script: Script = load(path)
 		if script == null:
-			printerr("Could not load test script: %s" % path)
+			print("  FAIL  %s could not be loaded (parse error - see above)" % path.get_file())
 			failed += 1
+			total += 1
+			continue
+		var methods := script.get_script_method_list()
+		if methods.is_empty():
+			print("  FAIL  %s defines no tests" % path.get_file())
+			failed += 1
+			total += 1
 			continue
 		var case_name := path.get_file().get_basename()
-		for method in script.get_script_method_list():
+		for method in methods:
 			var method_name: String = method["name"]
 			if not method_name.begins_with("test_"):
 				continue

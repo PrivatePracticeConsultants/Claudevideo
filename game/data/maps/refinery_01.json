@@ -1,0 +1,43 @@
+{
+  "_comment": "Act III. A long spiral inward. The centre is worth buying ground for - a turret there can cover three passes of the road at once. Buildable ground is a grid (data/building.json): cells beside the road start unlocked, the rest are bought with Capital.",
+  "id": "refinery_01",
+  "display_name": "Refinery Loop",
+  "bounds": {
+    "width": 2560,
+    "height": 1440
+  },
+  "path": [
+    {
+      "x": -80.0,
+      "y": 240.0
+    },
+    {
+      "x": 1300.0,
+      "y": 240.0
+    },
+    {
+      "x": 1300.0,
+      "y": 1100.0
+    },
+    {
+      "x": 560.0,
+      "y": 1100.0
+    },
+    {
+      "x": 560.0,
+      "y": 660.0
+    },
+    {
+      "x": 1900.0,
+      "y": 660.0
+    },
+    {
+      "x": 1900.0,
+      "y": 1180.0
+    },
+    {
+      "x": 2640.0,
+      "y": 1180.0
+    }
+  ]
+}

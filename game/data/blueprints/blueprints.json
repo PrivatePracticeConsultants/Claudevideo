@@ -1,5 +1,5 @@
 {
-  "_comment": "Ballistic T1-T4. Names and costs are from master plan section 3.2. DPS climbs ~2.2x per tier (20 / 44 / 98 / 210), so T1->T4 is ~10.5x, matching the plan's stated tier scaling. Upgrading is deliberately more Capital-efficient per DPS than spreading thin, but a single upgraded platform still only covers one stretch of road - that tension between concentration and coverage is the whole placement decision. The other four families (Cannon/Missile/Energy/Support) are P1.",
+  "_comment": "Two families. Ballistic is cheap sustained single-target damage; Cannon lobs shells that damage everything inside a radius, falling off to splash_min_fraction at the edge. Costs and the ~2.2x DPS-per-tier ladder follow master plan section 3.2. Cannon deliberately has lower single-target DPS, a slower rate of fire and a shorter range than Ballistic at the same tier - it is paid for in area, and against one heavy target it is the wrong tool. Missile/Energy/Support are P1.",
   "ballistic": {
     "display_name": "Ballistic",
     "family": "ballistic",
@@ -44,6 +44,61 @@
         "projectile_speed_units_per_second": 1250.0,
         "projectile_hit_radius_units": 14.0,
         "projectile_lifetime_seconds": 1.5
+      }
+    ]
+  },
+  "cannon": {
+    "display_name": "Cannon",
+    "family": "cannon",
+    "default_targeting": "first",
+    "tiers": [
+      {
+        "name": "Mortar",
+        "cost": 140,
+        "damage": 14,
+        "range_units": 230.0,
+        "fire_interval_seconds": 1.15,
+        "projectile_speed_units_per_second": 430.0,
+        "projectile_hit_radius_units": 14.0,
+        "projectile_lifetime_seconds": 2.5,
+        "splash_radius_units": 62.0,
+        "splash_min_fraction": 0.4
+      },
+      {
+        "name": "Howitzer",
+        "cost": 320,
+        "damage": 24,
+        "range_units": 250.0,
+        "fire_interval_seconds": 0.9667,
+        "projectile_speed_units_per_second": 470.0,
+        "projectile_hit_radius_units": 15.0,
+        "projectile_lifetime_seconds": 2.5,
+        "splash_radius_units": 72.0,
+        "splash_min_fraction": 0.42
+      },
+      {
+        "name": "MLRS",
+        "cost": 740,
+        "damage": 40,
+        "range_units": 270.0,
+        "fire_interval_seconds": 0.8,
+        "projectile_speed_units_per_second": 520.0,
+        "projectile_hit_radius_units": 16.0,
+        "projectile_lifetime_seconds": 2.5,
+        "splash_radius_units": 84.0,
+        "splash_min_fraction": 0.45
+      },
+      {
+        "name": "Cluster Artillery",
+        "cost": 1650,
+        "damage": 66,
+        "range_units": 295.0,
+        "fire_interval_seconds": 0.6667,
+        "projectile_speed_units_per_second": 570.0,
+        "projectile_hit_radius_units": 18.0,
+        "projectile_lifetime_seconds": 2.5,
+        "splash_radius_units": 98.0,
+        "splash_min_fraction": 0.5
       }
     ]
   }

@@ -11,6 +11,11 @@ extends RefCounted
 const MAP := "highway_01"
 const ENGAGEMENT := "highway_01_act1"
 
+## Roughly how much of the arsenal is area damage. Not optimal play - just a mix
+## that exercises both families, so a level that is only clearable with one of
+## them shows up as a loss here.
+const CANNON_SHARE := 3
+
 ## Generous ceiling. It only exists so a bug that stalls the wave director fails
 ## as a test rather than hanging the suite forever.
 const MAX_TICKS := 90000
@@ -44,11 +49,25 @@ static func candidate_sites(sim: Sim) -> PackedInt32Array:
 			# Only keep spots that fail purely for affordability reasons, so the
 			# list is stable regardless of how much Capital happens to be in hand.
 			var verdict := sim.can_build_at(float(x), float(y), 0)
-			if verdict == Sim.BUILD_OK or verdict == Sim.BUILD_NO_CAPITAL:
+			if verdict == Sim.BUILD_OK or verdict == Sim.BUILD_NO_CAPITAL \
+					or verdict == Sim.BUILD_AT_LIMIT:
 				sites.append(x)
 				sites.append(y)
 		prog += SITE_STRIDE
 	return sites
+
+## A known-good buildable spot on the current map, as [x, y] in whole units.
+## `skip` picks a later one, far enough along the road not to collide with the
+## first. Tests ask for these rather than hardcoding coordinates, because a
+## coordinate that was valid stops being valid the moment a map is re-authored -
+## and it then fails as "the command was rejected", which looks like a logic bug.
+static func a_site(sim: Sim, skip: int = 0) -> PackedInt32Array:
+	var sites := candidate_sites(sim)
+	var index := mini(skip * 2, maxi(sites.size() - 2, 0))
+	var out := PackedInt32Array()
+	out.append(sites[index])
+	out.append(sites[index + 1])
+	return out
 
 ## A competent baseline: build along the road while there is somewhere to build
 ## and Capital to do it, otherwise pour Capital into upgrading the weakest
@@ -57,11 +76,17 @@ static func candidate_sites(sim: Sim) -> PackedInt32Array:
 ##
 ## Returns the command log, so a replay can be fed identical input and checked
 ## for a bit-identical outcome.
-static func run_greedy(sim: Sim, allow_upgrades: bool = true) -> Dictionary:
+## `stop_wave`/`stop_enemies` let a caller halt the run at an interesting moment
+## (the screenshot tool uses them). Default is to play to the end.
+static func run_greedy(sim: Sim, allow_upgrades: bool = true,
+		stop_wave: int = -1, stop_enemies: int = 0) -> Dictionary:
 	var log_tick := PackedInt32Array()
 	var log_kind := PackedInt32Array()
 	var log_a := PackedInt32Array()
 	var log_b := PackedInt32Array()
+	var log_c := PackedInt32Array()
+	var ballistic := sim.blueprint_index("ballistic")
+	var cannon := maxi(sim.blueprint_index("cannon"), 0)
 	var sites := candidate_sites(sim)
 	var next_site := 0
 	var ticks := 0
@@ -78,13 +103,16 @@ static func run_greedy(sim: Sim, allow_upgrades: bool = true) -> Dictionary:
 		if sim.t_count < sim.platform_limit() and next_site + 1 < sites.size():
 			var x := sites[next_site]
 			var y := sites[next_site + 1]
-			var verdict := sim.can_build_at(float(x), float(y), 0)
+			# Every third position is a Cannon, so swarm waves meet area damage.
+			var blueprint := cannon if (sim.t_count % CANNON_SHARE) == CANNON_SHARE - 1 else ballistic
+			var verdict := sim.can_build_at(float(x), float(y), blueprint)
 			if verdict == Sim.BUILD_OK:
-				sim.queue_place(sim.tick(), x, y, 0)
+				sim.queue_place(sim.tick(), x, y, blueprint)
 				log_tick.append(sim.tick())
 				log_kind.append(Sim.CMD_PLACE)
 				log_a.append(x)
 				log_b.append(y)
+				log_c.append(blueprint)
 				next_site += 2
 			elif verdict != Sim.BUILD_NO_CAPITAL:
 				next_site += 2  # permanently unusable now something sits nearby
@@ -96,10 +124,13 @@ static func run_greedy(sim: Sim, allow_upgrades: bool = true) -> Dictionary:
 				log_kind.append(Sim.CMD_UPGRADE)
 				log_a.append(target)
 				log_b.append(0)
+				log_c.append(0)
 		sim.step()
 		ticks += 1
-	return {"tick": log_tick, "kind": log_kind, "a": log_a, "b": log_b, "ticks": ticks,
-		"integrity_at_wave": integrity_at_wave}
+		if stop_wave > 0 and sim.wave_number() >= stop_wave and sim.e_live_count >= stop_enemies:
+			break
+	return {"tick": log_tick, "kind": log_kind, "a": log_a, "b": log_b, "c": log_c,
+		"ticks": ticks, "integrity_at_wave": integrity_at_wave}
 
 ## Lowest-tier platform that can be afforded right now; ties go to the lowest
 ## index so the choice is stable and replays stay aligned.
@@ -128,9 +159,10 @@ static func replay(sim: Sim, command_log: Dictionary) -> int:
 	var log_kind: PackedInt32Array = command_log["kind"]
 	var log_a: PackedInt32Array = command_log["a"]
 	var log_b: PackedInt32Array = command_log["b"]
+	var log_c: PackedInt32Array = command_log["c"]
 	for i in log_tick.size():
 		if log_kind[i] == Sim.CMD_PLACE:
-			sim.queue_place(log_tick[i], log_a[i], log_b[i], 0)
+			sim.queue_place(log_tick[i], log_a[i], log_b[i], log_c[i])
 		else:
 			sim.queue_upgrade(log_tick[i], log_a[i])
 	var ticks := 0

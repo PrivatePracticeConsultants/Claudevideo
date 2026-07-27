@@ -1,0 +1,35 @@
+{
+  "_comment": "Act V. Two long straights joined by a tight hairpin. The hairpin is the whole level; everything else is approach. Buildable ground is a grid (data/building.json): cells beside the road start unlocked, the rest are bought with Capital.",
+  "id": "spillway_01",
+  "display_name": "Spillway Crossing",
+  "bounds": {
+    "width": 2560,
+    "height": 1440
+  },
+  "path": [
+    {
+      "x": -80.0,
+      "y": 420.0
+    },
+    {
+      "x": 1600.0,
+      "y": 420.0
+    },
+    {
+      "x": 1600.0,
+      "y": 760.0
+    },
+    {
+      "x": 500.0,
+      "y": 760.0
+    },
+    {
+      "x": 500.0,
+      "y": 1080.0
+    },
+    {
+      "x": 2640.0,
+      "y": 1080.0
+    }
+  ]
+}

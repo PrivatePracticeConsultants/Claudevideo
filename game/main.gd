@@ -48,6 +48,11 @@ var _hover_platform: int = -1
 ## Nothing is drawn under the cursor until the pointer has actually been
 ## somewhere; otherwise a build ghost sits at the world origin on the first frame.
 var _cursor_live: bool = false
+var _blueprint: int = 0
+var _cursor_cell_x: int = 0
+var _cursor_cell_y: int = 0
+var _cursor_can_buy: bool = false
+var _cells_drawn: int = -1
 
 func _ready() -> void:
 	_theme = _load_theme()
@@ -79,6 +84,8 @@ func _start_level(index: int) -> void:
 	_paused = false
 	_hover_platform = -1
 	_cursor_live = false
+	_cells_drawn = -1
+	_blueprint = 0
 
 	# The seed is derived from the level so a given level always plays the same
 	# way. Run seeding arrives with the run layer in P3.
@@ -119,12 +126,14 @@ func _process(delta: float) -> void:
 	var tier_sum := 0
 	for i in _sim.t_count:
 		tier_sum += _sim.platform_tier(i)
-	if _sim.t_count != _platforms_drawn or tier_sum != _tiers_drawn:
+	if _sim.t_count != _platforms_drawn or tier_sum != _tiers_drawn \
+			or _sim.cells_bought() != _cells_drawn:
 		_platforms_drawn = _sim.t_count
 		_tiers_drawn = tier_sum
+		_cells_drawn = _sim.cells_bought()
 		_renderer.rebuild_static()
 	_refresh_cursor()
-	_hud.refresh(_speed, _paused, _hover_platform)
+	_hud.refresh(_speed, _paused, _hover_platform, _blueprint, _cursor_can_buy)
 
 func _unhandled_input(event: InputEvent) -> void:
 	if _sim == null:
@@ -137,10 +146,16 @@ func _unhandled_input(event: InputEvent) -> void:
 		# the sim directly, so what the player did is exactly what a replay
 		# replays. Clicking an existing platform upgrades it; clicking open
 		# ground builds.
+		# Click priority, most specific first: an existing turret means upgrade
+		# it; owned ground means build on it; unowned frontier ground means buy
+		# it. One button, and the meaning is always the most useful thing that
+		# could happen at that spot.
 		if _hover_platform >= 0:
 			_sim.queue_upgrade(_sim.tick(), _hover_platform)
+		elif _cursor_can_buy:
+			_sim.queue_buy_cell(_sim.tick(), _cursor_cell_x, _cursor_cell_y)
 		else:
-			_sim.queue_place(_sim.tick(), roundi(_cursor_sim_x), roundi(_cursor_sim_y), 0)
+			_sim.queue_place(_sim.tick(), roundi(_cursor_sim_x), roundi(_cursor_sim_y), _blueprint)
 	elif event is InputEventKey and event.pressed and not event.echo:
 		match (event as InputEventKey).keycode:
 			KEY_1: _speed = 1
@@ -148,6 +163,10 @@ func _unhandled_input(event: InputEvent) -> void:
 			KEY_3: _speed = 3
 			KEY_SPACE: _paused = not _paused
 			KEY_F3: _overlay.visible = not _overlay.visible
+			KEY_Q, KEY_TAB:
+				# Cycle the weapon to build. One key rather than a number per
+				# family, so it still works when there are five of them.
+				_blueprint = (_blueprint + 1) % _sim.blueprint_count()
 			KEY_R: _start_level(_level_index)
 			KEY_N:
 				# Advance on a win; on a loss this does nothing, so it cannot be
@@ -177,7 +196,10 @@ func _track_cursor(screen_point: Vector2) -> void:
 	_cursor_sim_x = (hit as Vector3).x
 	_cursor_sim_y = (hit as Vector3).z
 	_hover_platform = _sim.platform_at(_cursor_sim_x, _cursor_sim_y, PLATFORM_CLICK_RADIUS)
-	_cursor_valid = _sim.can_build_at(roundi(_cursor_sim_x), roundi(_cursor_sim_y), 0) == Sim.BUILD_OK
+	_cursor_cell_x = _sim.cell_x_of(_cursor_sim_x)
+	_cursor_cell_y = _sim.cell_y_of(_cursor_sim_y)
+	_cursor_can_buy = _hover_platform < 0 and _sim.can_buy_cell(_cursor_cell_x, _cursor_cell_y)
+	_cursor_valid = _sim.can_build_at(roundi(_cursor_sim_x), roundi(_cursor_sim_y), _blueprint) == Sim.BUILD_OK
 
 func _refresh_cursor() -> void:
 	if not _cursor_live:
@@ -188,10 +210,13 @@ func _refresh_cursor() -> void:
 		# tier is affordable.
 		_renderer.set_build_cursor(_sim.t_x[_hover_platform], _sim.t_y[_hover_platform],
 			_sim.platform_range(_hover_platform), _sim.can_upgrade(_hover_platform))
-	elif _cursor_valid:
-		_renderer.set_build_cursor(_cursor_sim_x, _cursor_sim_y, _sim.blueprint_range(0), true)
+	elif _cursor_can_buy:
+		# Buying ground shows the cell, not a weapon's range.
+		_renderer.set_build_cursor(_sim.cell_centre_x(_cursor_cell_x),
+			_sim.cell_centre_y(_cursor_cell_y), _sim.cell_size() * 0.5, true)
 	else:
-		_renderer.set_build_cursor(_cursor_sim_x, _cursor_sim_y, _sim.blueprint_range(0), false)
+		_renderer.set_build_cursor(_cursor_sim_x, _cursor_sim_y,
+			_sim.blueprint_range(_blueprint), _cursor_valid)
 
 func _load_theme() -> Dictionary:
 	var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string(THEME_PATH))

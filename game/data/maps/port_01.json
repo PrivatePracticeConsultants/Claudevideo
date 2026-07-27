@@ -1,43 +1,47 @@
 {
-  "_comment": "Act II. Tighter switchbacks. Several spots cover two lanes at once, which is where upgrading beats spreading. Platforms are not placed on authored pads: anywhere in the band alongside the corridor is legal, per data/building.json.",
+  "_comment": "Act II. Switchbacks with short legs. Several positions cover two lanes at once, which is where concentrating fire starts to beat spreading it. Buildable ground is a grid (data/building.json): cells beside the road start unlocked, the rest are bought with Capital.",
   "id": "port_01",
   "display_name": "Port Authority",
   "bounds": {
-    "width": 1920,
-    "height": 1080
+    "width": 2560,
+    "height": 1440
   },
   "path": [
     {
-      "x": -60.0,
-      "y": 240.0
+      "x": -80.0,
+      "y": 320.0
     },
     {
-      "x": 420.0,
-      "y": 240.0
+      "x": 560.0,
+      "y": 320.0
     },
     {
-      "x": 420.0,
-      "y": 700.0
+      "x": 560.0,
+      "y": 940.0
     },
     {
-      "x": 900.0,
-      "y": 700.0
+      "x": 1180.0,
+      "y": 940.0
     },
     {
-      "x": 900.0,
-      "y": 260.0
+      "x": 1180.0,
+      "y": 340.0
     },
     {
-      "x": 1380.0,
-      "y": 260.0
+      "x": 1760.0,
+      "y": 340.0
     },
     {
-      "x": 1380.0,
-      "y": 760.0
+      "x": 1760.0,
+      "y": 1020.0
     },
     {
-      "x": 1980.0,
-      "y": 760.0
+      "x": 2380.0,
+      "y": 1020.0
+    },
+    {
+      "x": 2640.0,
+      "y": 1020.0
     }
   ]
 }

@@ -1,10 +1,10 @@
 {
-  "_comment": "Act I. The teaching level: ten waves, generous economy, and a spike only in the last three. Act multipliers and starting Capital follow master plan section 4.1; they override economy.json for this engagement.",
+  "_comment": "Act I. Walkers only - the teaching level. Ten waves, generous economy, and the spike held back to the last three. Act multipliers and starting Capital follow master plan section 4.1, retuned for standalone levels.",
   "engagement_id": "highway_01_act1",
   "map_id": "highway_01",
   "starting_capital": 400,
   "platform_limit": 14,
-  "act_hp_multiplier": 1.4,
+  "act_hp_multiplier": 1.5,
   "act_bounty_multiplier": 1.0,
   "inter_wave_delay_ticks": 90,
   "waves": [
