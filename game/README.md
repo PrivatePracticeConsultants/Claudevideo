@@ -29,6 +29,27 @@ block wasm there. Serve it:
 python3 -m http.server 8000 --directory build/web   # then open localhost:8000
 ```
 
+### Playable link (GitHub Pages)
+
+A built copy is committed to `docs/play/` and served by GitHub Pages, so the game
+can be opened in a browser with no toolchain at all:
+
+**https://privatepracticeconsultants.github.io/Claudevideo/play/**
+
+Pages is configured to deploy from the `claude/roguelite-tower-defense-plan-vmprb4`
+branch, `/docs` folder. Two things to know:
+
+- `docs/play/` is a **build artifact checked into git** (~37 MB, almost all of it
+  the Godot wasm runtime). It is the price of a click-to-play link on a repo with
+  no CI. Refresh it with `./game/build_web.sh && cp build/web/* docs/play/`, and
+  avoid re-committing it casually — each rebuild adds another copy to history.
+  If this repo ever gets CI, building it there and publishing to a `gh-pages`
+  branch is the better arrangement.
+- If that branch is deleted after merging, the link dies. Repoint Pages at
+  whichever branch then holds `docs/`.
+
+`docs/.nojekyll` stops Pages running Jekyll over the build.
+
 In game: click a pad to build · `1`/`2`/`3` speed · `space` pause · `F3` debug
 overlay · `R` restart · `esc` quit.
 

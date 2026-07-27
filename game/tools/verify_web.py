@@ -55,11 +55,16 @@ def main():
     parser.add_argument("--build", default=os.path.join(REPO, "build", "web"))
     parser.add_argument("--shot", default=os.path.join(REPO, "build", "web_verify.png"))
     parser.add_argument("--port", type=int, default=8791)
+    parser.add_argument("--page", default="index.html",
+                        help="path to index.html relative to --build; use e.g. "
+                             "play/index.html to verify a subpath deployment "
+                             "like GitHub Pages serving docs/ with the game in "
+                             "docs/play/")
     parser.add_argument("--settle", type=float, default=8.0,
                         help="seconds of real gameplay to run before screenshotting")
     args = parser.parse_args()
 
-    index = os.path.join(args.build, "index.html")
+    index = os.path.join(args.build, args.page)
     if not os.path.exists(index):
         print(f"No build at {index}. Run game/build_web.sh first.", file=sys.stderr)
         return 2
@@ -90,7 +95,7 @@ def main():
             page = browser.new_page(viewport={"width": 1280, "height": 720})
             page.on("console", lambda m: logs.append(f"{m.type}: {m.text}"))
             page.on("pageerror", lambda e: errors.append(str(e)))
-            page.goto(f"http://127.0.0.1:{args.port}/index.html",
+            page.goto(f"http://127.0.0.1:{args.port}/{args.page}",
                       wait_until="load", timeout=60000)
 
             # Godot boots asynchronously: fetch wasm, compile, then start the
