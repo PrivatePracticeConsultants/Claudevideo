@@ -1,0 +1,20 @@
+{
+  "_comment": "Campaign order. Each entry is one level; winning advances to the next. The three tiers match the master plan's act structure (Highway / Port / Capital). This is a flat level list, not the branching route map from section 2.2 - that arrives with the run layer in P3, along with Corridor Integrity persisting across engagements.",
+  "levels": [
+    {
+      "map": "highway_01",
+      "engagement": "highway_01_act1",
+      "name": "I - Highway 17 Interchange"
+    },
+    {
+      "map": "port_01",
+      "engagement": "port_01_act2",
+      "name": "II - Port Authority"
+    },
+    {
+      "map": "capital_01",
+      "engagement": "capital_01_act3",
+      "name": "III - Capital Approach"
+    }
+  ]
+}

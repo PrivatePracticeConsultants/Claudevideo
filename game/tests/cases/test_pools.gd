@@ -36,7 +36,7 @@ func test_a_projectile_cannot_hit_the_enemy_that_inherited_its_target_slot() -> 
 	sim._begin_wave(0)
 	sim._spawn(0)
 	var victim := _first_live(sim)
-	sim._try_place(0, 0)
+	sim._try_place(120.0, 430.0, 0)
 	sim._fire(0, victim)
 	assert_eq(sim.p_live_count, 1, "a shot is in flight")
 
@@ -57,7 +57,7 @@ func test_projectiles_expire_rather_than_leaking_slots() -> void:
 	var sim := SimFixture.fresh()
 	sim._begin_wave(0)
 	sim._spawn(0)
-	sim._try_place(0, 0)
+	sim._try_place(120.0, 430.0, 0)
 	var target := _first_live(sim)
 	sim._fire(0, target)
 	# Kill the target so the shot is orphaned, then let it resolve.
@@ -72,12 +72,15 @@ func test_the_projectile_pool_survives_a_full_engagement() -> void:
 	assert_eq(sim.p_live_count, 0, "every shot fired was resolved by the end")
 	assert_eq(sim.e_live_count, 0, "and every enemy was resolved")
 
-func test_platforms_release_their_pads_only_when_expected() -> void:
+func test_platforms_cannot_be_stacked_on_the_same_spot() -> void:
+	# Free placement replaced fixed pads, so min_platform_spacing is now the only
+	# thing stopping an unlimited tower of turrets on one square.
 	var sim := SimFixture.fresh()
-	assert_true(sim.pad_is_free(3), "pads start free")
-	sim._try_place(3, 0)
-	assert_false(sim.pad_is_free(3), "and are held once built on")
-	assert_false(sim._try_place(3, 0), "a second build on the same pad fails")
+	assert_eq(sim._try_place(120.0, 430.0, 0), Sim.BUILD_OK, "the first one builds")
+	assert_eq(sim._try_place(120.0, 430.0, 0), Sim.BUILD_OVERLAPS, "the second is refused")
+	# Just outside the spacing radius is fine again.
+	var clear := 120.0 + sim.build_min_spacing() + 1.0
+	assert_eq(sim._try_place(clear, 430.0, 0), Sim.BUILD_OK, "far enough away is legal")
 
 func _first_live(sim: Sim) -> int:
 	for i in sim.e_alive.size():

@@ -1,20 +1,124 @@
 {
-  "_comment": "Ten waves, the P0 acceptance engagement. Hand-authored: from P4 onward most waves come from tools/wave_generator.py against a difficulty budget, with roughly 30 signature waves authored by hand. Per the plan the spike sits in the last three waves so losses cluster late honestly, with no hidden difficulty adjustment anywhere.",
+  "_comment": "Act I. The teaching level: ten waves, generous economy, and a spike only in the last three. Act multipliers and starting Capital follow master plan section 4.1; they override economy.json for this engagement.",
   "engagement_id": "highway_01_act1",
   "map_id": "highway_01",
+  "starting_capital": 400,
+  "platform_limit": 14,
+  "act_hp_multiplier": 1.4,
+  "act_bounty_multiplier": 1.0,
   "inter_wave_delay_ticks": 90,
   "waves": [
-    { "groups": [ { "enemy": "walker", "count": 6,  "spawn_interval_ticks": 22, "start_delay_ticks": 0 } ] },
-    { "groups": [ { "enemy": "walker", "count": 8,  "spawn_interval_ticks": 20, "start_delay_ticks": 0 } ] },
-    { "groups": [ { "enemy": "walker", "count": 10, "spawn_interval_ticks": 20, "start_delay_ticks": 0 } ] },
-    { "groups": [ { "enemy": "walker", "count": 12, "spawn_interval_ticks": 18, "start_delay_ticks": 0 } ] },
-    { "groups": [ { "enemy": "walker", "count": 10, "spawn_interval_ticks": 12, "start_delay_ticks": 0 } ] },
-    { "groups": [ { "enemy": "walker", "count": 14, "spawn_interval_ticks": 16, "start_delay_ticks": 0 } ] },
-    { "groups": [ { "enemy": "walker", "count": 16, "spawn_interval_ticks": 15, "start_delay_ticks": 0 } ] },
-    { "groups": [ { "enemy": "walker", "count": 14, "spawn_interval_ticks": 10, "start_delay_ticks": 0 } ] },
-    { "groups": [ { "enemy": "walker", "count": 18, "spawn_interval_ticks": 11, "start_delay_ticks": 0 },
-                  { "enemy": "walker", "count": 6,  "spawn_interval_ticks": 20, "start_delay_ticks": 120 } ] },
-    { "groups": [ { "enemy": "walker", "count": 22, "spawn_interval_ticks": 9,  "start_delay_ticks": 0 },
-                  { "enemy": "walker", "count": 10, "spawn_interval_ticks": 14, "start_delay_ticks": 150 } ] }
+    {
+      "groups": [
+        {
+          "enemy": "walker",
+          "count": 6,
+          "spawn_interval_ticks": 24,
+          "start_delay_ticks": 0
+        }
+      ]
+    },
+    {
+      "groups": [
+        {
+          "enemy": "walker",
+          "count": 8,
+          "spawn_interval_ticks": 22,
+          "start_delay_ticks": 0
+        }
+      ]
+    },
+    {
+      "groups": [
+        {
+          "enemy": "walker",
+          "count": 10,
+          "spawn_interval_ticks": 20,
+          "start_delay_ticks": 0
+        }
+      ]
+    },
+    {
+      "groups": [
+        {
+          "enemy": "walker",
+          "count": 12,
+          "spawn_interval_ticks": 18,
+          "start_delay_ticks": 0
+        }
+      ]
+    },
+    {
+      "groups": [
+        {
+          "enemy": "walker",
+          "count": 11,
+          "spawn_interval_ticks": 13,
+          "start_delay_ticks": 0
+        }
+      ]
+    },
+    {
+      "groups": [
+        {
+          "enemy": "walker",
+          "count": 14,
+          "spawn_interval_ticks": 16,
+          "start_delay_ticks": 0
+        }
+      ]
+    },
+    {
+      "groups": [
+        {
+          "enemy": "walker",
+          "count": 16,
+          "spawn_interval_ticks": 15,
+          "start_delay_ticks": 0
+        }
+      ]
+    },
+    {
+      "groups": [
+        {
+          "enemy": "walker",
+          "count": 15,
+          "spawn_interval_ticks": 11,
+          "start_delay_ticks": 0
+        }
+      ]
+    },
+    {
+      "groups": [
+        {
+          "enemy": "walker",
+          "count": 18,
+          "spawn_interval_ticks": 11,
+          "start_delay_ticks": 0
+        },
+        {
+          "enemy": "walker",
+          "count": 6,
+          "spawn_interval_ticks": 20,
+          "start_delay_ticks": 120
+        }
+      ]
+    },
+    {
+      "groups": [
+        {
+          "enemy": "walker",
+          "count": 22,
+          "spawn_interval_ticks": 9,
+          "start_delay_ticks": 0
+        },
+        {
+          "enemy": "walker",
+          "count": 10,
+          "spawn_interval_ticks": 14,
+          "start_delay_ticks": 150
+        }
+      ]
+    }
   ]
 }

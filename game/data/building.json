@@ -1,0 +1,6 @@
+{
+  "_comment": "Free-form placement rules. Platforms go anywhere in a band alongside the corridor, on either side, rather than on authored pads. min_distance_from_path keeps them off the road and its walls (corridor half-width 23 + wall 10 = 33). max_distance_from_path is what makes position a decision: far enough back and your range is wasted on empty ground. min_platform_spacing stops an infinite stack of turrets on one spot, and is the real constraint on how much firepower a corner can hold.",
+  "min_distance_from_path": 34.0,
+  "max_distance_from_path": 125.0,
+  "min_platform_spacing": 40.0
+}

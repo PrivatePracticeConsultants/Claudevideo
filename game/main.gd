@@ -11,9 +11,11 @@ extends Node3D
 ## replays, 3x speed for free, the headless balance sim, Daily Contracts that
 ## match across devices - falls out of that split.
 
-const MAP_ID := "highway_01"
-const ENGAGEMENT_ID := "highway_01_act1"
 const THEME_PATH := "res://data/theme.json"
+
+## How close a click has to be to an existing platform to mean "upgrade this"
+## rather than "build here". Larger than the platform itself so it is forgiving.
+const PLATFORM_CLICK_RADIUS := 30.0
 
 ## Ceiling on catch-up steps per frame. Without it, one long stall (a breakpoint,
 ## an alt-tab, a phone call, a browser tab going to the background) leaves a
@@ -24,7 +26,6 @@ const THEME_PATH := "res://data/theme.json"
 ## This matters more on the web build than anywhere else, because a backgrounded
 ## tab can hand back a delta measured in minutes.
 const MAX_STEPS_PER_FRAME := 12
-const PAD_CLICK_RADIUS := 34.0
 
 var _sim: Sim
 var _theme: Dictionary = {}
@@ -37,19 +38,51 @@ var _accumulator: float = 0.0
 var _speed: int = 1
 var _paused: bool = false
 var _platforms_drawn: int = 0
+var _tiers_drawn: int = 0
+var _levels: Array = []
+var _level_index: int = 0
+var _cursor_sim_x: float = 0.0
+var _cursor_sim_y: float = 0.0
+var _cursor_valid: bool = false
+var _hover_platform: int = -1
+## Nothing is drawn under the cursor until the pointer has actually been
+## somewhere; otherwise a build ghost sits at the world origin on the first frame.
+var _cursor_live: bool = false
 
 func _ready() -> void:
-	var db := Database.load_engagement(MAP_ID, ENGAGEMENT_ID)
+	_theme = _load_theme()
+	_levels = Database.load_levels()
+	if _levels.is_empty():
+		_show_fatal("data/levels.json lists no levels.")
+		return
+	_start_level(0)
+
+## Tear down and rebuild for a level. Everything is recreated rather than reset
+## because the Sim is immutable once constructed - its tables are built from the
+## map and engagement it was handed - and rebuilding is both simpler and harder
+## to get subtly wrong than a reset path nobody exercises.
+func _start_level(index: int) -> void:
+	_level_index = clampi(index, 0, _levels.size() - 1)
+	var level: Dictionary = _levels[_level_index]
+	var db := Database.load_engagement(str(level["map"]), str(level["engagement"]))
 	if not db.is_valid():
 		# A typo in a data file must produce a readable message, not a stack
 		# trace and a black window.
 		_show_fatal(db.error_text())
 		return
-	_theme = _load_theme()
 
-	# The seed is fixed for P0 so a session is reproducible while the sim is
-	# being built. Run seeding arrives with the run layer in P3.
-	_sim = Sim.new(db, 20260727)
+	for child in get_children():
+		child.queue_free()
+	_platforms_drawn = 0
+	_tiers_drawn = 0
+	_accumulator = 0.0
+	_paused = false
+	_hover_platform = -1
+	_cursor_live = false
+
+	# The seed is derived from the level so a given level always plays the same
+	# way. Run seeding arrives with the run layer in P3.
+	_sim = Sim.new(db, 20260727 + _level_index)
 	_tick_period = 1.0 / float(_sim.tick_rate())
 
 	_renderer = SimRenderer3D.new()
@@ -59,6 +92,7 @@ func _ready() -> void:
 	_hud = Hud.new()
 	add_child(_hud)
 	_hud.setup(_sim, _theme)
+	_hud.set_level(str(level["name"]), _level_index, _levels.size())
 
 	_overlay = DebugOverlay.new()
 	add_child(_overlay)
@@ -80,22 +114,33 @@ func _process(delta: float) -> void:
 
 	var alpha := 0.0 if _sim.is_over() else clampf(_accumulator / _tick_period, 0.0, 1.0)
 	_renderer.update_visuals(alpha)
-	if _sim.t_count != _platforms_drawn:
+	# Platform geometry is static, so it is rebuilt when the board changes -
+	# either a new platform, or an existing one changing tier.
+	var tier_sum := 0
+	for i in _sim.t_count:
+		tier_sum += _sim.platform_tier(i)
+	if _sim.t_count != _platforms_drawn or tier_sum != _tiers_drawn:
 		_platforms_drawn = _sim.t_count
+		_tiers_drawn = tier_sum
 		_renderer.rebuild_static()
-	_hud.refresh(_speed, _paused)
+	_refresh_cursor()
+	_hud.refresh(_speed, _paused, _hover_platform)
 
 func _unhandled_input(event: InputEvent) -> void:
 	if _sim == null:
 		return
 	if event is InputEventMouseMotion:
-		_renderer.set_hover(_pad_under_cursor((event as InputEventMouseMotion).position))
+		_track_cursor((event as InputEventMouseMotion).position)
 	elif event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
-		var pad := _pad_under_cursor((event as InputEventMouseButton).position)
-		if pad >= 0:
-			# Placement goes through the command log rather than mutating the sim
-			# directly, so what the player did is exactly what a replay replays.
-			_sim.queue_place(_sim.tick(), pad, 0)
+		_track_cursor((event as InputEventMouseButton).position)
+		# Every player action goes through the command log rather than mutating
+		# the sim directly, so what the player did is exactly what a replay
+		# replays. Clicking an existing platform upgrades it; clicking open
+		# ground builds.
+		if _hover_platform >= 0:
+			_sim.queue_upgrade(_sim.tick(), _hover_platform)
+		else:
+			_sim.queue_place(_sim.tick(), roundi(_cursor_sim_x), roundi(_cursor_sim_y), 0)
 	elif event is InputEventKey and event.pressed and not event.echo:
 		match (event as InputEventKey).keycode:
 			KEY_1: _speed = 1
@@ -103,37 +148,50 @@ func _unhandled_input(event: InputEvent) -> void:
 			KEY_3: _speed = 3
 			KEY_SPACE: _paused = not _paused
 			KEY_F3: _overlay.visible = not _overlay.visible
-			KEY_R: get_tree().reload_current_scene()
+			KEY_R: _start_level(_level_index)
+			KEY_N:
+				# Advance on a win; on a loss this does nothing, so it cannot be
+				# used to skip a level you have not beaten.
+				if _sim.result() == Sim.RESULT_WIN and _level_index + 1 < _levels.size():
+					_start_level(_level_index + 1)
 			KEY_ESCAPE: get_tree().quit()
 
-## Cast the cursor onto the ground plane and find the nearest free pad to where
-## it lands. Picking against the plane rather than against collision shapes means
-## no physics bodies and no colliders to keep in sync with the simulation.
-func _pad_under_cursor(screen_point: Vector2) -> int:
+## Cast the cursor onto the ground plane to find the simulation coordinates it
+## points at. Picking against the plane rather than against collision shapes
+## means no physics bodies and no colliders to keep in sync with the simulation.
+##
+## Coordinates are rounded to whole units when a command is issued, so the
+## command log stays integer-valued and a replay cannot drift by a fraction of a
+## pixel of mouse position.
+func _track_cursor(screen_point: Vector2) -> void:
 	var camera := _renderer.camera
 	if camera == null:
-		return -1
+		return
 	var ground := Plane(Vector3.UP, 0.0)
 	var hit: Variant = ground.intersects_ray(
 		camera.project_ray_origin(screen_point),
 		camera.project_ray_normal(screen_point))
 	if hit == null:
-		return -1
-	return _pad_at((hit as Vector3).x, (hit as Vector3).z)
+		return
+	_cursor_live = true
+	_cursor_sim_x = (hit as Vector3).x
+	_cursor_sim_y = (hit as Vector3).z
+	_hover_platform = _sim.platform_at(_cursor_sim_x, _cursor_sim_y, PLATFORM_CLICK_RADIUS)
+	_cursor_valid = _sim.can_build_at(roundi(_cursor_sim_x), roundi(_cursor_sim_y), 0) == Sim.BUILD_OK
 
-func _pad_at(sim_x: float, sim_y: float) -> int:
-	var best := -1
-	var best_distance := PAD_CLICK_RADIUS * PAD_CLICK_RADIUS
-	for i in _sim.pad_count():
-		if not _sim.pad_is_free(i):
-			continue
-		var dx := _sim.pad_x(i) - sim_x
-		var dy := _sim.pad_y(i) - sim_y
-		var distance := dx * dx + dy * dy
-		if distance < best_distance:
-			best_distance = distance
-			best = i
-	return best
+func _refresh_cursor() -> void:
+	if not _cursor_live:
+		_renderer.set_build_cursor(0.0, 0.0, 0.0, false)
+		return
+	if _hover_platform >= 0:
+		# Hovering a platform shows what it already covers, and whether the next
+		# tier is affordable.
+		_renderer.set_build_cursor(_sim.t_x[_hover_platform], _sim.t_y[_hover_platform],
+			_sim.platform_range(_hover_platform), _sim.can_upgrade(_hover_platform))
+	elif _cursor_valid:
+		_renderer.set_build_cursor(_cursor_sim_x, _cursor_sim_y, _sim.blueprint_range(0), true)
+	else:
+		_renderer.set_build_cursor(_cursor_sim_x, _cursor_sim_y, _sim.blueprint_range(0), false)
 
 func _load_theme() -> Dictionary:
 	var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string(THEME_PATH))

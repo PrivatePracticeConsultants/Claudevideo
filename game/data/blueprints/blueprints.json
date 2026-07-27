@@ -1,5 +1,5 @@
 {
-  "_comment": "P0 ships Ballistic T1 only. Tiers T2-T4 and the other four families (Cannon/Missile/Energy/Support) are P2/P1 respectively. The tier list is already an array so adding tiers is pure data.",
+  "_comment": "Ballistic T1-T4. Names and costs are from master plan section 3.2. DPS climbs ~2.2x per tier (20 / 44 / 98 / 210), so T1->T4 is ~10.5x, matching the plan's stated tier scaling. Upgrading is deliberately more Capital-efficient per DPS than spreading thin, but a single upgraded platform still only covers one stretch of road - that tension between concentration and coverage is the whole placement decision. The other four families (Cannon/Missile/Energy/Support) are P1.",
   "ballistic": {
     "display_name": "Ballistic",
     "family": "ballistic",
@@ -9,10 +9,40 @@
         "name": "Pistol Turret",
         "cost": 100,
         "damage": 10,
-        "range_units": 180.0,
+        "range_units": 200.0,
         "fire_interval_seconds": 0.5,
         "projectile_speed_units_per_second": 900.0,
         "projectile_hit_radius_units": 12.0,
+        "projectile_lifetime_seconds": 1.5
+      },
+      {
+        "name": "SMG Nest",
+        "cost": 240,
+        "damage": 16,
+        "range_units": 215.0,
+        "fire_interval_seconds": 0.3667,
+        "projectile_speed_units_per_second": 1000.0,
+        "projectile_hit_radius_units": 12.0,
+        "projectile_lifetime_seconds": 1.5
+      },
+      {
+        "name": "Minigun",
+        "cost": 560,
+        "damage": 26,
+        "range_units": 232.0,
+        "fire_interval_seconds": 0.2667,
+        "projectile_speed_units_per_second": 1100.0,
+        "projectile_hit_radius_units": 13.0,
+        "projectile_lifetime_seconds": 1.5
+      },
+      {
+        "name": "Gatling Autocannon",
+        "cost": 1300,
+        "damage": 42,
+        "range_units": 250.0,
+        "fire_interval_seconds": 0.2,
+        "projectile_speed_units_per_second": 1250.0,
+        "projectile_hit_radius_units": 14.0,
         "projectile_lifetime_seconds": 1.5
       }
     ]

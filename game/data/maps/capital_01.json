@@ -1,0 +1,51 @@
+{
+  "_comment": "Act III. A nine-segment slalom with short legs - lots of corners, but little room to sit back, so range matters less than raw throughput. Platforms are not placed on authored pads: anywhere in the band alongside the corridor is legal, per data/building.json.",
+  "id": "capital_01",
+  "display_name": "Capital Approach",
+  "bounds": {
+    "width": 1920,
+    "height": 1080
+  },
+  "path": [
+    {
+      "x": -60.0,
+      "y": 880.0
+    },
+    {
+      "x": 320.0,
+      "y": 880.0
+    },
+    {
+      "x": 320.0,
+      "y": 460.0
+    },
+    {
+      "x": 660.0,
+      "y": 460.0
+    },
+    {
+      "x": 660.0,
+      "y": 860.0
+    },
+    {
+      "x": 1020.0,
+      "y": 860.0
+    },
+    {
+      "x": 1020.0,
+      "y": 420.0
+    },
+    {
+      "x": 1380.0,
+      "y": 420.0
+    },
+    {
+      "x": 1380.0,
+      "y": 800.0
+    },
+    {
+      "x": 1980.0,
+      "y": 800.0
+    }
+  ]
+}

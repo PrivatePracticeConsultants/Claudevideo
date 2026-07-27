@@ -32,8 +32,9 @@ var _enemies: MultiMeshInstance3D
 var _hp_bars: MultiMeshInstance3D
 var _projectiles: MultiMeshInstance3D
 var _static_root: Node3D
-var _hover_ring: MeshInstance3D
-var _hover_pad: int = -1
+var _cursor: Node3D
+var _cursor_disc: MeshInstance3D
+var _cursor_ghost: MeshInstance3D
 
 # Colours are resolved once at setup. Parsing them from strings inside the frame
 # loop - which the first version did - is a String allocation per colour per
@@ -79,54 +80,6 @@ func _build_environment() -> void:
 		float(cam_cfg.get("yaw_degrees", -24.0)), 0.0)
 	camera.current = true
 	add_child(camera)
-	_fit_camera()
-	# The browser canvas can be any size and can be resized at any moment, so
-	# framing is recomputed rather than assumed. This is also what stops a
-	# future map with different proportions from needing hand-tuned camera
-	# numbers.
-	get_viewport().size_changed.connect(_fit_camera)
-
-## Frame the whole playable area: every path waypoint and every pad, with a
-## margin. Computed in the camera's own space, so it holds at any view angle and
-## any aspect ratio.
-func _fit_camera() -> void:
-	var cam_cfg: Dictionary = _theme.get("camera", {})
-	var margin := float(cam_cfg.get("margin", 1.12))
-	var basis_inverse := camera.transform.basis.inverse()
-
-	var min_x := INF
-	var max_x := -INF
-	var min_z := INF
-	var max_z := -INF
-	for i in _sim.waypoint_count():
-		min_x = minf(min_x, _sim.waypoint_x(i))
-		max_x = maxf(max_x, _sim.waypoint_x(i))
-		min_z = minf(min_z, _sim.waypoint_y(i))
-		max_z = maxf(max_z, _sim.waypoint_y(i))
-	for i in _sim.pad_count():
-		min_x = minf(min_x, _sim.pad_x(i))
-		max_x = maxf(max_x, _sim.pad_x(i))
-		min_z = minf(min_z, _sim.pad_y(i))
-		max_z = maxf(max_z, _sim.pad_y(i))
-
-	var centre := Vector3((min_x + max_x) * 0.5, 0.0, (min_z + max_z) * 0.5)
-	var local_half_width := 0.0
-	var local_half_height := 0.0
-	for corner in [Vector3(min_x, 0.0, min_z), Vector3(max_x, 0.0, min_z),
-			Vector3(min_x, 0.0, max_z), Vector3(max_x, 0.0, max_z)]:
-		var local: Vector3 = basis_inverse * ((corner as Vector3) - centre)
-		local_half_width = maxf(local_half_width, absf(local.x))
-		local_half_height = maxf(local_half_height, absf(local.y))
-
-	# Camera3D.size is the *vertical* extent under orthographic projection, so
-	# the horizontal requirement has to be converted through the aspect ratio.
-	var viewport := get_viewport().get_visible_rect().size
-	var aspect := 1.0 if viewport.y <= 0.0 else viewport.x / viewport.y
-	camera.size = maxf(local_half_height * 2.0, local_half_width * 2.0 / maxf(aspect, 0.0001)) * margin
-	# Under orthographic projection distance does not change framing, only what
-	# the near plane clips; push the camera well clear of the board.
-	camera.position = centre + camera.transform.basis.z * float(cam_cfg.get("distance", 2400.0))
-
 	var sun := DirectionalLight3D.new()
 	sun.rotation_degrees = Vector3(
 		float(_world.get("sun_pitch_degrees", -58.0)),
@@ -144,6 +97,65 @@ func _fit_camera() -> void:
 	var world_env := WorldEnvironment.new()
 	world_env.environment = env
 	add_child(world_env)
+
+	_fit_camera()
+	# The browser canvas can be any size and can be resized at any moment, so
+	# framing is recomputed rather than assumed. This is also what stops a
+	# future map with different proportions from needing hand-tuned camera
+	# numbers.
+	#
+	# Guarded because the renderer is also constructed off-tree by the headless
+	# tests, where there is no viewport to ask.
+	var viewport := get_viewport()
+	if viewport != null:
+		viewport.size_changed.connect(_fit_camera)
+
+## Frame the whole playable area: the corridor plus the band beside it that can
+## be built on, with a margin. Computed in the camera's own space, so it holds at any view angle and
+## any aspect ratio.
+func _fit_camera() -> void:
+	var cam_cfg: Dictionary = _theme.get("camera", {})
+	var margin := float(cam_cfg.get("margin", 1.12))
+	var basis_inverse := camera.transform.basis.inverse()
+
+	var min_x := INF
+	var max_x := -INF
+	var min_z := INF
+	var max_z := -INF
+	for i in _sim.waypoint_count():
+		min_x = minf(min_x, _sim.waypoint_x(i))
+		max_x = maxf(max_x, _sim.waypoint_x(i))
+		min_z = minf(min_z, _sim.waypoint_y(i))
+		max_z = maxf(max_z, _sim.waypoint_y(i))
+	# Platforms can be built out to max_distance_from_path on either side, so the
+	# buildable band is part of the playable area and has to be in frame.
+	var reach := _sim.build_max_distance()
+	min_x -= reach
+	max_x += reach
+	min_z -= reach
+	max_z += reach
+
+	var centre := Vector3((min_x + max_x) * 0.5, 0.0, (min_z + max_z) * 0.5)
+	var local_half_width := 0.0
+	var local_half_height := 0.0
+	for corner in [Vector3(min_x, 0.0, min_z), Vector3(max_x, 0.0, min_z),
+			Vector3(min_x, 0.0, max_z), Vector3(max_x, 0.0, max_z)]:
+		var local: Vector3 = basis_inverse * ((corner as Vector3) - centre)
+		local_half_width = maxf(local_half_width, absf(local.x))
+		local_half_height = maxf(local_half_height, absf(local.y))
+
+	# Camera3D.size is the *vertical* extent under orthographic projection, so
+	# the horizontal requirement has to be converted through the aspect ratio.
+	var viewport := get_viewport()
+	var aspect := float(_theme.get("camera", {}).get("fallback_aspect", 16.0 / 9.0))
+	if viewport != null:
+		var size := viewport.get_visible_rect().size
+		if size.y > 0.0:
+			aspect = size.x / size.y
+	camera.size = maxf(local_half_height * 2.0, local_half_width * 2.0 / maxf(aspect, 0.0001)) * margin
+	# Under orthographic projection distance does not change framing, only what
+	# the near plane clips; push the camera well clear of the board.
+	camera.position = centre + camera.transform.basis.z * float(cam_cfg.get("distance", 2400.0))
 
 ## Ground, corridor and pads. Rebuilt only when a platform is placed, which is
 ## why this is not in the frame path.
@@ -163,8 +175,9 @@ func _build_static_geometry() -> void:
 	ground.position = Vector3(float(bounds["width"]) * 0.5, 0.0, float(bounds["height"]) * 0.5)
 	_static_root.add_child(ground)
 
+	_build_band()
 	_build_corridor()
-	_build_pads()
+	_build_platforms()
 
 ## The corridor is one box per path segment plus one at each interior corner to
 ## fill the notch two boxes leave between them. Simple, and it means the walls
@@ -203,37 +216,86 @@ func _build_corridor() -> void:
 		_add_box(_static_root, Vector3(_sim.waypoint_x(i), height * 0.5, _sim.waypoint_y(i)),
 			Vector3(width, height, width), 0.0, floor_material)
 
-func _build_pads() -> void:
-	var pad_height := float(_world.get("pad_height", 8.0))
-	var pad_radius := float(_world.get("pad_radius", 17.0))
-	var platform_height := float(_world.get("platform_height", 30.0))
-	var platform_radius := float(_world.get("platform_radius", 11.0))
-	var free_material := _lit_flat_material(_color("pad_free"))
-	var used_material := _lit_flat_material(_color("pad_occupied"))
-	var turret_material := _lit_flat_material(_color("platform"))
+## The strip of ground where platforms may be built: everything between
+## min_distance_from_path and max_distance_from_path, on both sides of the road.
+##
+## Drawn because free placement is invisible otherwise. Without it the rule
+## "anywhere adjacent to the path" is something the player has to discover by
+## clicking around and being refused, which is a bad way to learn a rule.
+func _build_band() -> void:
+	var inner := _sim.build_min_distance()
+	var outer := _sim.build_max_distance()
+	var width := outer - inner
+	var height := float(_world.get("band_height", 1.5))
+	var material := _transparent_material(_color_of(_world.get("band", "#1d3b30")),
+		float(_world.get("band_alpha", 0.5)))
 
-	for i in _sim.pad_count():
-		var free := _sim.pad_is_free(i)
-		var base := MeshInstance3D.new()
-		var cylinder := CylinderMesh.new()
-		cylinder.top_radius = pad_radius
-		cylinder.bottom_radius = pad_radius
-		cylinder.height = pad_height
-		base.mesh = cylinder
-		base.material_override = free_material if free else used_material
-		base.position = to_world(_sim.pad_x(i), _sim.pad_y(i), pad_height * 0.5)
-		_static_root.add_child(base)
-		if free:
-			continue
-		# A built platform: a squat barrel on top of the pad.
+	for i in _sim.waypoint_count() - 1:
+		var ax := _sim.waypoint_x(i)
+		var az := _sim.waypoint_y(i)
+		var bx := _sim.waypoint_x(i + 1)
+		var bz := _sim.waypoint_y(i + 1)
+		var dx := bx - ax
+		var dz := bz - az
+		var length := sqrt(dx * dx + dz * dz)
+		var yaw := atan2(dx, dz)
+		var mid := Vector3((ax + bx) * 0.5, height * 0.5, (az + bz) * 0.5)
+		var nx := dz / length
+		var nz := -dx / length
+		var offset := inner + width * 0.5
+		for side in [-1.0, 1.0]:
+			_add_box(_static_root,
+				mid + Vector3(nx * offset * side, 0.0, nz * offset * side),
+				Vector3(width, height, length), yaw, material)
+	# Fill the wedge each corner leaves between two straight strips. A disc, not a
+	# square: a square reads as a patchwork of tiles rather than one continuous
+	# shoulder, and the corner is exactly where the player most needs to see that
+	# the buildable area is continuous.
+	for i in range(1, _sim.waypoint_count() - 1):
+		var fill := MeshInstance3D.new()
+		var disc := CylinderMesh.new()
+		disc.top_radius = outer
+		disc.bottom_radius = outer
+		disc.height = height
+		fill.mesh = disc
+		fill.material_override = material
+		fill.position = to_world(_sim.waypoint_x(i), _sim.waypoint_y(i), height * 0.5)
+		_static_root.add_child(fill)
+
+## Built platforms. Size, height and colour all climb with tier, so a board reads
+## at a glance: a tall bright tower is where the damage is.
+func _build_platforms() -> void:
+	var base_height := float(_world.get("platform_height", 30.0))
+	var base_radius := float(_world.get("platform_radius", 11.0))
+	var per_tier := float(_world.get("platform_tier_growth", 0.28))
+	var top_colour := _color("platform_max_tier")
+	var base_colour := _color("platform")
+
+	for i in _sim.t_count:
+		var tier := _sim.platform_tier(i)
+		var max_tier := maxi(_sim.platform_max_tier(_sim.platform_blueprint(i)) - 1, 1)
+		var growth := 1.0 + per_tier * float(tier)
+		var fraction := float(tier) / float(max_tier)
+		var material := _lit_flat_material(base_colour.lerp(top_colour, fraction))
+
+		var plinth := MeshInstance3D.new()
+		var disc := CylinderMesh.new()
+		disc.top_radius = base_radius * 1.5
+		disc.bottom_radius = base_radius * 1.6
+		disc.height = float(_world.get("pad_height", 8.0))
+		plinth.mesh = disc
+		plinth.material_override = _lit_flat_material(_color("pad_occupied"))
+		plinth.position = to_world(_sim.t_x[i], _sim.t_y[i], disc.height * 0.5)
+		_static_root.add_child(plinth)
+
 		var turret := MeshInstance3D.new()
 		var barrel := CylinderMesh.new()
-		barrel.top_radius = platform_radius * 0.65
-		barrel.bottom_radius = platform_radius
-		barrel.height = platform_height
+		barrel.top_radius = base_radius * growth * 0.65
+		barrel.bottom_radius = base_radius * growth
+		barrel.height = base_height * growth
 		turret.mesh = barrel
-		turret.material_override = turret_material
-		turret.position = to_world(_sim.pad_x(i), _sim.pad_y(i), pad_height + platform_height * 0.5)
+		turret.material_override = material
+		turret.position = to_world(_sim.t_x[i], _sim.t_y[i], disc.height + barrel.height * 0.5)
 		_static_root.add_child(turret)
 
 func _add_box(parent: Node3D, centre: Vector3, size: Vector3, yaw: float, material: Material) -> void:
@@ -267,11 +329,44 @@ func _make_layer(capacity: int, material: Material) -> MultiMeshInstance3D:
 func rebuild_static() -> void:
 	_build_static_geometry()
 
-func set_hover(pad_index: int) -> void:
-	_hover_pad = pad_index
+## Show a ghost of what would be built (or the range of what is hovered) under
+## the cursor. `radius` <= 0 hides it.
+func set_build_cursor(x: float, y: float, radius: float, allowed: bool) -> void:
+	if _cursor == null:
+		_build_cursor_nodes()
+	if radius <= 0.0:
+		_cursor.visible = false
+		return
+	_cursor.visible = true
+	_cursor.position = to_world(x, y, float(_world.get("band_height", 1.5)) + 0.5)
+	var disc := _cursor_disc.mesh as CylinderMesh
+	disc.top_radius = radius
+	disc.bottom_radius = radius
+	var tint: Color = _color("good") if allowed else _color("bad")
+	tint.a = float(_world.get("cursor_alpha", 0.16))
+	(_cursor_disc.material_override as StandardMaterial3D).albedo_color = tint
+	var solid := tint
+	solid.a = 0.85
+	(_cursor_ghost.material_override as StandardMaterial3D).albedo_color = solid
 
-func hovered_pad() -> int:
-	return _hover_pad
+func _build_cursor_nodes() -> void:
+	_cursor = Node3D.new()
+	add_child(_cursor)
+	_cursor_disc = MeshInstance3D.new()
+	var disc := CylinderMesh.new()
+	disc.height = 1.0
+	_cursor_disc.mesh = disc
+	_cursor_disc.material_override = _transparent_material(Color.WHITE, 0.16)
+	_cursor.add_child(_cursor_disc)
+	_cursor_ghost = MeshInstance3D.new()
+	var ghost := CylinderMesh.new()
+	ghost.top_radius = float(_world.get("platform_radius", 11.0)) * 0.65
+	ghost.bottom_radius = float(_world.get("platform_radius", 11.0))
+	ghost.height = float(_world.get("platform_height", 30.0))
+	_cursor_ghost.mesh = ghost
+	_cursor_ghost.material_override = _transparent_material(Color.WHITE, 0.85)
+	_cursor_ghost.position = Vector3(0.0, ghost.height * 0.5, 0.0)
+	_cursor.add_child(_cursor_ghost)
 
 # --- per-frame -----------------------------------------------------------------
 
@@ -377,6 +472,15 @@ func _glow_material(tint: Color) -> StandardMaterial3D:
 func _flat_material(tint: Color) -> StandardMaterial3D:
 	var material := StandardMaterial3D.new()
 	material.albedo_color = tint
+	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	return material
+
+func _transparent_material(tint: Color, alpha: float) -> StandardMaterial3D:
+	var material := StandardMaterial3D.new()
+	var colour := tint
+	colour.a = alpha
+	material.albedo_color = colour
+	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	return material
 

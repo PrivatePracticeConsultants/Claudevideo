@@ -22,6 +22,7 @@ var enemies: Dictionary = {}
 var blueprints: Dictionary = {}
 var map: Dictionary = {}
 var engagement: Dictionary = {}
+var building: Dictionary = {}
 
 var errors: PackedStringArray = PackedStringArray()
 
@@ -48,6 +49,7 @@ func _load_all(map_id: String, engagement_id: String) -> void:
 	scaling = _read_object("%s/scaling.json" % root)
 	enemies = _read_object("%s/enemies/enemies.json" % root)
 	blueprints = _read_object("%s/blueprints/blueprints.json" % root)
+	building = _read_object("%s/building.json" % root)
 	map = _read_object("%s/maps/%s.json" % [root, map_id])
 	engagement = _read_object("%s/waves/%s.json" % [root, engagement_id])
 	if not errors.is_empty():
@@ -81,6 +83,12 @@ func _validate() -> void:
 	_req_int(sim, "max_platforms", "sim.json", 1)
 	_req_num(sim, "spatial_hash_cell_size", "sim.json", 1.0)
 	_req_int(sim, "spatial_hash_margin_cells", "sim.json", 0)
+
+	_req_num(building, "min_distance_from_path", "building.json", 0.0)
+	_req_num(building, "max_distance_from_path", "building.json", 0.0)
+	_req_num(building, "min_platform_spacing", "building.json", 0.0)
+	if float(building.get("max_distance_from_path", 0.0)) <= float(building.get("min_distance_from_path", 0.0)):
+		errors.append("building.json: max_distance_from_path must exceed min_distance_from_path, or nowhere is buildable.")
 
 	_req_int(economy, "starting_capital", "economy.json", 0)
 	_req_int(economy, "starting_integrity", "economy.json", 1)
@@ -166,20 +174,6 @@ func _validate_map() -> void:
 			if is_equal_approx(float(prev["x"]), float((p as Dictionary)["x"])) \
 					and is_equal_approx(float(prev["y"]), float((p as Dictionary)["y"])):
 				errors.append("Map waypoints %d and %d are in the same place; every path segment must have length." % [i - 1, i])
-	var pads: Variant = map.get("pads")
-	if typeof(pads) != TYPE_ARRAY or (pads as Array).is_empty():
-		errors.append("Map %s needs at least one tower pad." % str(map.get("id", "?")))
-	else:
-		var seen := {}
-		for i in (pads as Array).size():
-			var pad: Variant = (pads as Array)[i]
-			if typeof(pad) != TYPE_DICTIONARY or not (pad as Dictionary).has("x") or not (pad as Dictionary).has("y"):
-				errors.append("Map pad %d must be an object with x and y." % i)
-				continue
-			var pid := str((pad as Dictionary).get("id", "pad_%d" % i))
-			if seen.has(pid):
-				errors.append("Map has two pads with id \"%s\"; pad ids must be unique." % pid)
-			seen[pid] = true
 	var bounds: Variant = map.get("bounds")
 	if typeof(bounds) != TYPE_DICTIONARY:
 		errors.append("Map %s needs \"bounds\" with width and height." % str(map.get("id", "?")))
@@ -189,6 +183,16 @@ func _validate_map() -> void:
 
 func _validate_engagement() -> void:
 	_req_int(engagement, "inter_wave_delay_ticks", "wave file", 0)
+	# Per-engagement overrides. Optional, so an engagement that does not scale
+	# reads exactly like one written before acts existed.
+	if engagement.has("starting_capital"):
+		_req_int(engagement, "starting_capital", "wave file", 0)
+	if engagement.has("platform_limit"):
+		_req_int(engagement, "platform_limit", "wave file", 1)
+	if engagement.has("act_hp_multiplier"):
+		_req_num(engagement, "act_hp_multiplier", "wave file", 0.0001)
+	if engagement.has("act_bounty_multiplier"):
+		_req_num(engagement, "act_bounty_multiplier", "wave file", 0.0001)
 	var waves: Variant = engagement.get("waves")
 	if typeof(waves) != TYPE_ARRAY or (waves as Array).is_empty():
 		errors.append("Wave file %s has no waves." % str(engagement.get("engagement_id", "?")))
@@ -277,6 +281,18 @@ func blueprint_ids() -> PackedStringArray:
 			out.append(id)
 	out.sort()
 	return out
+
+## The campaign level list. Read separately from an engagement because it names
+## which engagements exist, so it cannot be part of loading one.
+static func load_levels(data_root: String = DEFAULT_ROOT) -> Array:
+	var path := "%s/levels.json" % data_root
+	if not FileAccess.file_exists(path):
+		return []
+	var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string(path))
+	if typeof(parsed) != TYPE_DICTIONARY:
+		return []
+	var levels: Variant = (parsed as Dictionary).get("levels")
+	return levels if typeof(levels) == TYPE_ARRAY else []
 
 func tier_data(blueprint_id: String, tier_index: int) -> Dictionary:
 	var b: Dictionary = blueprints.get(blueprint_id, {})

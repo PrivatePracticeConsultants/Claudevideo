@@ -30,10 +30,10 @@ func test_state_matches_at_every_checkpoint_not_just_the_end() -> void:
 	var a := SimFixture.fresh(777)
 	var b := SimFixture.fresh(777)
 	var bp := a.blueprint_index("ballistic")
-	a.queue_place(30, 3, bp)
-	b.queue_place(30, 3, bp)
-	a.queue_place(200, 7, bp)
-	b.queue_place(200, 7, bp)
+	a.queue_place(30, 120, 430, bp)
+	b.queue_place(30, 120, 430, bp)
+	a.queue_place(200, 120, 650, bp)
+	b.queue_place(200, 120, 650, bp)
 	for tick in 3000:
 		a.step()
 		b.step()
@@ -56,7 +56,7 @@ func test_replaying_a_log_is_not_confused_by_command_ordering() -> void:
 	# one tick at a time. Both must land on the same board.
 	var recorded := SimFixture.fresh(4242)
 	var command_log := SimFixture.run_greedy(recorded)
-	assert_gt(float((command_log["pad"] as PackedInt32Array).size()), 0.0, "fixture sanity: some platforms were built")
+	assert_gt(float((command_log["a"] as PackedInt32Array).size()), 0.0, "fixture sanity: some commands were issued")
 	var replayed := SimFixture.fresh(4242)
 	SimFixture.replay(replayed, command_log)
 	assert_eq(replayed.t_count, recorded.t_count, "same number of platforms built")
@@ -67,8 +67,8 @@ func test_hash_is_sensitive_to_a_single_changed_command() -> void:
 	var a := SimFixture.fresh(99)
 	var b := SimFixture.fresh(99)
 	var bp := a.blueprint_index("ballistic")
-	a.queue_place(10, 0, bp)
-	b.queue_place(10, 1, bp)  # one pad over
+	a.queue_place(10, 120, 430, bp)
+	b.queue_place(10, 124, 430, bp)  # four units over
 	for _i in 1200:
 		a.step()
 		b.step()

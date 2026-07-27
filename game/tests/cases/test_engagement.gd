@@ -25,19 +25,35 @@ func test_the_difficulty_spike_lands_in_the_last_three_waves() -> void:
 	# way, not because of any hidden difficulty adjustment. Concretely, a
 	# competent run should take no damage at all until the back third.
 	var sim := SimFixture.fresh()
-	var bp := sim.blueprint_index("ballistic")
-	var next_pad := 0
-	var integrity_entering_wave_8 := -1
-	while not sim.is_over() and sim.tick() < SimFixture.MAX_TICKS:
-		if next_pad < sim.pad_count() and sim.capital() >= sim.blueprint_cost(bp):
-			sim.queue_place(sim.tick(), next_pad, bp)
-			next_pad += 1
-		sim.step()
-		if sim.wave_number() == 8 and integrity_entering_wave_8 < 0:
-			integrity_entering_wave_8 = sim.integrity()
-	assert_eq(integrity_entering_wave_8, 100, "waves 1-7 should cost a competent player nothing")
+	var log := SimFixture.run_greedy(sim)
+	var integrity_at_wave: PackedInt32Array = log["integrity_at_wave"]
+	assert_eq(sim.result(), Sim.RESULT_WIN, "the level is winnable by a competent run")
+	assert_gte(float(integrity_at_wave.size()), 8.0, "the run reached at least wave 8")
+	assert_eq(integrity_at_wave[7], 100, "waves 1-7 should cost a competent player nothing")
 	assert_lt(float(sim.integrity()), 100.0, "but the last three waves must actually bite")
-	assert_eq(sim.result(), Sim.RESULT_WIN, "...without being unwinnable")
+
+func test_upgrading_is_what_carries_the_later_levels() -> void:
+	# The deployment limit exists so the tier ladder matters. If a level could be
+	# cleared by tier-1 spam alone, upgrades would be dead content - so check the
+	# competent run actually reaches higher tiers.
+	var sim := SimFixture.for_level("port_01", "port_01_act2")
+	SimFixture.run_greedy(sim)
+	assert_eq(sim.result(), Sim.RESULT_WIN, "act II is winnable")
+	var highest := 0
+	for i in sim.t_count:
+		highest = maxi(highest, sim.platform_tier(i))
+	assert_gt(float(highest), 0.0, "a winning act II run upgrades past tier 1")
+	assert_lte(float(sim.t_count), float(sim.platform_limit()), "and respects the deployment limit")
+
+func test_every_campaign_level_is_winnable_and_losable() -> void:
+	for level in Database.load_levels():
+		var name := str(level["name"])
+		var won := SimFixture.for_level(str(level["map"]), str(level["engagement"]))
+		SimFixture.run_greedy(won)
+		assert_eq(won.result(), Sim.RESULT_WIN, "%s must be winnable by a competent run" % name)
+		var lost := SimFixture.for_level(str(level["map"]), str(level["engagement"]))
+		SimFixture.run_idle(lost)
+		assert_eq(lost.result(), Sim.RESULT_LOSS, "%s must be losable by an idle one" % name)
 
 func test_every_spawned_enemy_is_accounted_for() -> void:
 	# The honesty rule applied to the sim: an enemy either dies or leaks. If

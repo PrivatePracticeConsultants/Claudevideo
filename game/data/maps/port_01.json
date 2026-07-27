@@ -1,0 +1,43 @@
+{
+  "_comment": "Act II. Tighter switchbacks. Several spots cover two lanes at once, which is where upgrading beats spreading. Platforms are not placed on authored pads: anywhere in the band alongside the corridor is legal, per data/building.json.",
+  "id": "port_01",
+  "display_name": "Port Authority",
+  "bounds": {
+    "width": 1920,
+    "height": 1080
+  },
+  "path": [
+    {
+      "x": -60.0,
+      "y": 240.0
+    },
+    {
+      "x": 420.0,
+      "y": 240.0
+    },
+    {
+      "x": 420.0,
+      "y": 700.0
+    },
+    {
+      "x": 900.0,
+      "y": 700.0
+    },
+    {
+      "x": 900.0,
+      "y": 260.0
+    },
+    {
+      "x": 1380.0,
+      "y": 260.0
+    },
+    {
+      "x": 1380.0,
+      "y": 760.0
+    },
+    {
+      "x": 1980.0,
+      "y": 760.0
+    }
+  ]
+}

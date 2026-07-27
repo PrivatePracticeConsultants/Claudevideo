@@ -38,7 +38,7 @@ func test_dropped_shots_are_counted() -> void:
 	var sim := Sim.new(db, 1)
 	sim._begin_wave(0)
 	sim._spawn(0)
-	sim._try_place(0, 0)
+	sim._try_place(120.0, 430.0, 0)
 	for _i in 10:
 		sim._fire(0, 0)
 	assert_eq(sim.p_live_count, 3, "the pool filled to its ceiling")
@@ -77,7 +77,7 @@ func test_despawning_an_already_dead_projectile_is_harmless() -> void:
 	var sim := SimFixture.fresh()
 	sim._begin_wave(0)
 	sim._spawn(0)
-	sim._try_place(0, 0)
+	sim._try_place(120.0, 430.0, 0)
 	sim._fire(0, 0)
 	sim._despawn_projectile(0)
 	sim._despawn_projectile(0)
@@ -91,19 +91,19 @@ func test_commands_queued_out_of_order_still_apply_at_their_own_tick() -> void:
 	# live run and its replay, which is exactly what determinism is meant to rule
 	# out.
 	var sim := SimFixture.fresh()
-	sim.queue_place(100, 0, 0)
-	sim.queue_place(10, 1, 0)
+	sim.queue_place(100, 120, 430, 0)
+	sim.queue_place(10, 120, 650, 0)
 	for _i in 20:
 		sim.step()
 	assert_eq(sim.t_count, 1, "the tick-10 command landed at tick 10, not after the tick-100 one")
 
 func test_out_of_order_and_in_order_logs_produce_the_same_run() -> void:
 	var ordered := SimFixture.fresh(31337)
-	ordered.queue_place(10, 1, 0)
-	ordered.queue_place(100, 0, 0)
+	ordered.queue_place(10, 120, 650, 0)
+	ordered.queue_place(100, 120, 430, 0)
 	var shuffled := SimFixture.fresh(31337)
-	shuffled.queue_place(100, 0, 0)
-	shuffled.queue_place(10, 1, 0)
+	shuffled.queue_place(100, 120, 430, 0)
+	shuffled.queue_place(10, 120, 650, 0)
 	for _i in 1500:
 		ordered.step()
 		shuffled.step()
@@ -113,7 +113,7 @@ func test_a_command_for_a_past_tick_is_not_silently_dropped() -> void:
 	var sim := SimFixture.fresh()
 	for _i in 50:
 		sim.step()
-	sim.queue_place(5, 0, 0)  # already long gone
+	sim.queue_place(5, 120, 430, 0)  # already long gone
 	sim.step()
 	assert_eq(sim.t_count, 1, "it lands on the next tick rather than vanishing")
 
@@ -121,11 +121,11 @@ func test_same_tick_commands_keep_their_insertion_order() -> void:
 	# Both target the same pad, so only the first can win. Which one wins has to
 	# be stable or replays diverge.
 	var sim := SimFixture.fresh()
-	sim.queue_place(10, 4, 0)
-	sim.queue_place(10, 4, 0)
+	sim.queue_place(10, 120, 430, 0)
+	sim.queue_place(10, 120, 430, 0)
 	for _i in 15:
 		sim.step()
-	assert_eq(sim.t_count, 1, "the second is refused")
+	assert_eq(sim.t_count, 1, "the second is refused - it overlaps the first")
 	assert_eq(sim.rejected_commands(), 1, "and counted")
 
 # --- E. unknown enemy ids ------------------------------------------------------
@@ -161,7 +161,7 @@ func test_a_projectile_travels_for_its_whole_lifetime() -> void:
 	var sim := SimFixture.fresh()
 	sim._begin_wave(0)
 	sim._spawn(0)
-	sim._try_place(0, 0)
+	sim._try_place(120.0, 430.0, 0)
 	sim._fire(0, 0)
 	sim.p_life[0] = 1
 	var start_x := sim.p_x[0]
@@ -178,5 +178,5 @@ func test_the_state_hash_notices_pending_commands() -> void:
 	# same state, and a hash that says they are would let a desync through.
 	var a := SimFixture.fresh(5)
 	var b := SimFixture.fresh(5)
-	b.queue_place(9000, 0, 0)
+	b.queue_place(9000, 120, 430, 0)
 	assert_ne(b.state_hash(), a.state_hash(), "queued input is part of the state")

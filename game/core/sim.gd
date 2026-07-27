@@ -32,7 +32,20 @@ extends RefCounted
 
 enum { RESULT_RUNNING, RESULT_WIN, RESULT_LOSS }
 enum { PHASE_WAITING, PHASE_SPAWNING, PHASE_CLEARING, PHASE_DONE }
-enum { CMD_PLACE }
+enum { CMD_PLACE, CMD_UPGRADE }
+
+## Why a placement was refused. Returned rather than a bare bool so the build
+## cursor can tell the player which rule they are breaking instead of just
+## refusing to light up.
+enum {
+	BUILD_OK,
+	BUILD_ON_PATH,
+	BUILD_TOO_FAR,
+	BUILD_OVERLAPS,
+	BUILD_OUT_OF_BOUNDS,
+	BUILD_NO_CAPITAL,
+	BUILD_AT_LIMIT,
+}
 
 # --- immutable tables, built once from Database ------------------------------
 
@@ -53,10 +66,22 @@ var _seg_cum: PackedFloat64Array = PackedFloat64Array()
 var _seg_count: int = 0
 var _path_length: float = 0.0
 
-var _pad_x: PackedFloat64Array = PackedFloat64Array()
-var _pad_y: PackedFloat64Array = PackedFloat64Array()
-var _pad_ids: PackedStringArray = PackedStringArray()
-var _pad_count: int = 0
+# Placement is free-form: anywhere in a band alongside the corridor, rather than
+# on a fixed set of pads. These are the rules that define that band.
+var _build_min_dist: float = 0.0
+var _build_max_dist: float = 0.0
+var _build_min_spacing: float = 0.0
+## Deployment limit: how many platforms may exist at once in this engagement.
+##
+## This exists because free placement removed the natural scarcity that fixed
+## pads provided. With unlimited positions, a new tier-1 turret is always better
+## Capital-for-damage than upgrading an existing one (0.20 dps/$ against 0.13 and
+## falling), so nothing would ever be upgraded and the tier ladder would be dead
+## content. Capping deployments makes "which positions do I commit to, and how
+## hard do I invest in them" the actual decision.
+var _platform_limit: int = 0
+var _bounds_width: float = 0.0
+var _bounds_height: float = 0.0
 
 var _type_ids: PackedStringArray = PackedStringArray()
 var _type_base_hp: PackedInt64Array = PackedInt64Array()
@@ -82,6 +107,8 @@ var _tier_proj_life: PackedInt32Array = PackedInt32Array()
 
 var _hp_growth: float = 1.0
 var _bounty_growth: float = 1.0
+var _act_hp_mult: float = 1.0
+var _act_bounty_mult: float = 1.0
 var _inter_wave_delay: int = 0
 var _wave_count: int = 0
 
@@ -149,13 +176,13 @@ var _p_free_top: int = 0
 
 ## Platform storage.
 var t_used: PackedByteArray = PackedByteArray()
-var t_pad: PackedInt32Array = PackedInt32Array()
+var t_blueprint: PackedInt32Array = PackedInt32Array()
+var t_tier: PackedInt32Array = PackedInt32Array()
 var t_tier_slot: PackedInt32Array = PackedInt32Array()
 var t_cooldown: PackedInt32Array = PackedInt32Array()
 var t_x: PackedFloat64Array = PackedFloat64Array()
 var t_y: PackedFloat64Array = PackedFloat64Array()
 var t_count: int = 0
-var _pad_occupant: PackedInt32Array = PackedInt32Array()
 
 # Active-wave spawn cursors, sized to the widest wave in the data.
 var _g_enemy_type: PackedInt32Array = PackedInt32Array()
@@ -174,6 +201,7 @@ var _cmd_tick: PackedInt32Array = PackedInt32Array()
 var _cmd_type: PackedInt32Array = PackedInt32Array()
 var _cmd_a: PackedInt32Array = PackedInt32Array()
 var _cmd_b: PackedInt32Array = PackedInt32Array()
+var _cmd_c: PackedInt32Array = PackedInt32Array()
 var _cmd_cursor: int = 0
 
 var _hash: SpatialHash
@@ -193,12 +221,17 @@ func _init(db: Database, seed_value: int) -> void:
 	_max_platforms = int(db.sim["max_platforms"])
 	_hp_growth = float(db.scaling["hp_growth_per_wave"])
 	_bounty_growth = float(db.scaling["bounty_growth_per_wave"])
-	_capital = int(db.economy["starting_capital"])
+	# The engagement may override the engagement-scoped economy; master plan
+	# section 4.1 scales starting Capital by act so a tier-4 platform is
+	# reachable in a single fight by act three.
+	_capital = int(db.engagement.get("starting_capital", db.economy["starting_capital"]))
+	_act_hp_mult = float(db.engagement.get("act_hp_multiplier", 1.0))
+	_act_bounty_mult = float(db.engagement.get("act_bounty_multiplier", 1.0))
 	_integrity = int(db.economy["starting_integrity"])
 	_inter_wave_delay = int(db.engagement["inter_wave_delay_ticks"])
 	_wave_count = (db.engagement["waves"] as Array).size()
 	_build_path()
-	_build_pads()
+	_load_build_rules()
 	_build_types()
 	_build_blueprints()
 	_build_pools()
@@ -232,19 +265,16 @@ func _build_path() -> void:
 	_seg_cum[_seg_count] = cum
 	_path_length = cum
 
-func _build_pads() -> void:
-	var pads: Array = _db.map["pads"]
-	_pad_count = pads.size()
-	_pad_x.resize(_pad_count)
-	_pad_y.resize(_pad_count)
-	_pad_ids.resize(_pad_count)
-	_pad_occupant.resize(_pad_count)
-	for i in _pad_count:
-		var pad: Dictionary = pads[i]
-		_pad_x[i] = float(pad["x"])
-		_pad_y[i] = float(pad["y"])
-		_pad_ids[i] = str(pad.get("id", "pad_%d" % i))
-		_pad_occupant[i] = -1
+func _load_build_rules() -> void:
+	_build_min_dist = float(_db.building["min_distance_from_path"])
+	_build_max_dist = float(_db.building["max_distance_from_path"])
+	_build_min_spacing = float(_db.building["min_platform_spacing"])
+	# The engagement may set its own deployment limit; the pool ceiling in
+	# sim.json is the hard upper bound regardless.
+	_platform_limit = mini(int(_db.engagement.get("platform_limit", _max_platforms)), _max_platforms)
+	var bounds: Dictionary = _db.map["bounds"]
+	_bounds_width = float(bounds["width"])
+	_bounds_height = float(bounds["height"])
 
 func _build_types() -> void:
 	_type_ids = _db.enemy_ids()
@@ -339,7 +369,8 @@ func _build_pools() -> void:
 	_p_free_top = _max_projectiles
 
 	t_used.resize(_max_platforms)
-	t_pad.resize(_max_platforms)
+	t_blueprint.resize(_max_platforms)
+	t_tier.resize(_max_platforms)
 	t_tier_slot.resize(_max_platforms)
 	t_cooldown.resize(_max_platforms)
 	t_x.resize(_max_platforms)
@@ -357,18 +388,26 @@ func _build_pools() -> void:
 	var cell := float(_db.sim["spatial_hash_cell_size"])
 	# The path starts and ends off-screen, so pad the grid past the map bounds
 	# rather than assuming enemies stay in frame.
-	var pad_margin := cell * float(_db.sim["spatial_hash_margin_cells"])
+	var grid_margin := cell * float(_db.sim["spatial_hash_margin_cells"])
 	_hash = SpatialHash.new(
-		-pad_margin, -pad_margin,
-		float(bounds["width"]) + pad_margin * 2.0,
-		float(bounds["height"]) + pad_margin * 2.0,
+		-grid_margin, -grid_margin,
+		float(bounds["width"]) + grid_margin * 2.0,
+		float(bounds["height"]) + grid_margin * 2.0,
 		cell, _max_enemies)
 
 # --- command log -------------------------------------------------------------
 
 ## Queue a placement. Commands are addressed by tick, never by wall clock, so a
 ## recorded log replays identically at 1x, 3x or headless.
-func queue_place(at_tick: int, pad_index: int, blueprint_index: int) -> void:
+func queue_place(at_tick: int, x_units: int, y_units: int, blueprint_index: int) -> void:
+	_queue(at_tick, CMD_PLACE, x_units, y_units, blueprint_index)
+
+## Upgrade an existing platform one tier. Addressed by platform index, which is
+## stable because platforms are only ever appended.
+func queue_upgrade(at_tick: int, platform_index: int) -> void:
+	_queue(at_tick, CMD_UPGRADE, platform_index, 0, 0)
+
+func _queue(at_tick: int, kind: int, a: int, b: int, c: int) -> void:
 	# Inserted in tick order rather than appended. The cursor that replays this
 	# log only moves forward, so an out-of-order append used to be applied at the
 	# wrong tick - silently, and differently between a live run and its replay,
@@ -380,48 +419,137 @@ func queue_place(at_tick: int, pad_index: int, blueprint_index: int) -> void:
 	while position > 0 and _cmd_tick[position - 1] > at:
 		position -= 1
 	_cmd_tick.insert(position, at)
-	_cmd_type.insert(position, CMD_PLACE)
-	_cmd_a.insert(position, pad_index)
-	_cmd_b.insert(position, blueprint_index)
+	_cmd_type.insert(position, kind)
+	_cmd_a.insert(position, a)
+	_cmd_b.insert(position, b)
+	_cmd_c.insert(position, c)
 
 func command_count() -> int:
 	return _cmd_tick.size()
 
 func _apply_commands() -> void:
 	while _cmd_cursor < _cmd_tick.size() and _cmd_tick[_cmd_cursor] <= _tick:
+		var ok := false
 		if _cmd_type[_cmd_cursor] == CMD_PLACE:
-			if not _try_place(_cmd_a[_cmd_cursor], _cmd_b[_cmd_cursor]):
-				_rejected_commands += 1
+			ok = _try_place(float(_cmd_a[_cmd_cursor]), float(_cmd_b[_cmd_cursor]), _cmd_c[_cmd_cursor]) == BUILD_OK
+		elif _cmd_type[_cmd_cursor] == CMD_UPGRADE:
+			ok = _try_upgrade(_cmd_a[_cmd_cursor])
+		if not ok:
+			_rejected_commands += 1
 		_cmd_cursor += 1
 
-## Returns false (and changes nothing) if the pad is out of range, occupied, the
-## blueprint is unknown, capital is short, or the platform pool is full. A
-## rejected command is counted, never silently treated as success - the count is
-## part of the state hash so a desync in *what got built* is caught too.
-func _try_place(pad_index: int, blueprint_index: int) -> bool:
-	if pad_index < 0 or pad_index >= _pad_count:
-		return false
+## Shortest distance from a point to the corridor centre line.
+##
+## Projects onto each segment and clamps, so corners are handled correctly rather
+## than by measuring to the nearest waypoint. Uses sqrt only - no trigonometry -
+## so it is safe to call from inside the simulation.
+func distance_to_path(x: float, y: float) -> float:
+	var best := INF
+	for i in _seg_count:
+		var ax := _wp_x[i]
+		var ay := _wp_y[i]
+		var dx := _seg_dx[i]
+		var dy := _seg_dy[i]
+		var seg_length := _seg_cum[i + 1] - _seg_cum[i]
+		# Projection of (point - a) onto the unit segment direction, clamped to
+		# the segment so the nearest point is never past either end.
+		var t := (x - ax) * dx + (y - ay) * dy
+		if t < 0.0:
+			t = 0.0
+		elif t > seg_length:
+			t = seg_length
+		var px := ax + dx * t
+		var py := ay + dy * t
+		var ox := x - px
+		var oy := y - py
+		var distance := sqrt(ox * ox + oy * oy)
+		if distance < best:
+			best = distance
+	return best
+
+## Whether a platform may be built at this spot, and if not, which rule stops it.
+## Pure query - changes nothing - so the build cursor can call it every frame.
+func can_build_at(x: float, y: float, blueprint_index: int) -> int:
 	if blueprint_index < 0 or blueprint_index >= _bp_ids.size():
-		return false
-	if _pad_occupant[pad_index] != -1:
-		return false
-	if t_count >= _max_platforms:
-		return false
+		return BUILD_OUT_OF_BOUNDS
+	if x < 0.0 or y < 0.0 or x > _bounds_width or y > _bounds_height:
+		return BUILD_OUT_OF_BOUNDS
+	var to_path := distance_to_path(x, y)
+	if to_path < _build_min_dist:
+		return BUILD_ON_PATH
+	if to_path > _build_max_dist:
+		return BUILD_TOO_FAR
+	var spacing_sq := _build_min_spacing * _build_min_spacing
+	for i in t_count:
+		var dx := t_x[i] - x
+		var dy := t_y[i] - y
+		if dx * dx + dy * dy < spacing_sq:
+			return BUILD_OVERLAPS
+	if t_count >= _platform_limit:
+		return BUILD_AT_LIMIT
+	if _capital < _tier_cost[_bp_tier_offset[blueprint_index]]:
+		return BUILD_NO_CAPITAL
+	return BUILD_OK
+
+## Build a platform. Returns a BUILD_* reason; anything but BUILD_OK changes
+## nothing. A rejected command is counted, never silently treated as success -
+## the count is part of the state hash, so a desync in *what got built* is caught.
+func _try_place(x: float, y: float, blueprint_index: int) -> int:
+	var verdict := can_build_at(x, y, blueprint_index)
+	if verdict != BUILD_OK:
+		return verdict
 	var slot := _bp_tier_offset[blueprint_index]
-	var cost := _tier_cost[slot]
-	if _capital < cost:
-		return false
 	var index := t_count
 	t_count += 1
 	t_used[index] = 1
-	t_pad[index] = pad_index
+	t_blueprint[index] = blueprint_index
+	t_tier[index] = 0
 	t_tier_slot[index] = slot
 	t_cooldown[index] = 0
-	t_x[index] = _pad_x[pad_index]
-	t_y[index] = _pad_y[pad_index]
-	_pad_occupant[pad_index] = index
+	t_x[index] = x
+	t_y[index] = y
+	_capital -= _tier_cost[slot]
+	return BUILD_OK
+
+## Cost to take a platform to its next tier, or -1 if it is already at the top.
+func upgrade_cost(platform_index: int) -> int:
+	if platform_index < 0 or platform_index >= t_count:
+		return -1
+	var blueprint := t_blueprint[platform_index]
+	var next_tier := t_tier[platform_index] + 1
+	if next_tier >= _bp_tier_count[blueprint]:
+		return -1
+	return _tier_cost[_bp_tier_offset[blueprint] + next_tier]
+
+func can_upgrade(platform_index: int) -> bool:
+	var cost := upgrade_cost(platform_index)
+	return cost >= 0 and _capital >= cost
+
+## One tier up, paid for out of Capital. Cooldown is deliberately not reset: an
+## upgrade should not double as a free instant shot, or upgrading mid-wave would
+## be strictly better than upgrading between waves for reasons nobody intended.
+func _try_upgrade(platform_index: int) -> bool:
+	if not can_upgrade(platform_index):
+		return false
+	var cost := upgrade_cost(platform_index)
+	t_tier[platform_index] += 1
+	t_tier_slot[platform_index] = _bp_tier_offset[t_blueprint[platform_index]] + t_tier[platform_index]
 	_capital -= cost
 	return true
+
+## Index of the platform within `radius` of a point, nearest first, or -1.
+## Used for click-to-upgrade.
+func platform_at(x: float, y: float, radius: float) -> int:
+	var best := -1
+	var best_distance := radius * radius
+	for i in t_count:
+		var dx := t_x[i] - x
+		var dy := t_y[i] - y
+		var distance := dx * dx + dy * dy
+		if distance < best_distance:
+			best_distance = distance
+			best = i
+	return best
 
 # --- the tick ----------------------------------------------------------------
 
@@ -624,8 +752,8 @@ func _begin_wave(index: int) -> void:
 	# Exponential scaling, computed by repeated multiplication rather than pow().
 	# pow() is not bit-reproducible across libm implementations, and a one-ULP
 	# difference in enemy HP is a desync.
-	var hp_mult := 1.0
-	var bounty_mult := 1.0
+	var hp_mult := _act_hp_mult
+	var bounty_mult := _act_bounty_mult
 	for _i in index:
 		hp_mult *= _hp_growth
 		bounty_mult *= _bounty_growth
@@ -733,11 +861,23 @@ func wave_count() -> int: return _wave_count
 func phase() -> int: return _phase
 func tick_rate() -> int: return _tick_rate
 func path_length() -> float: return _path_length
-func pad_count() -> int: return _pad_count
-func pad_x(i: int) -> float: return _pad_x[i]
-func pad_y(i: int) -> float: return _pad_y[i]
-func pad_id(i: int) -> String: return _pad_ids[i]
-func pad_is_free(i: int) -> bool: return _pad_occupant[i] == -1
+func build_min_distance() -> float: return _build_min_dist
+func build_max_distance() -> float: return _build_max_dist
+func build_min_spacing() -> float: return _build_min_spacing
+func platform_limit() -> int: return _platform_limit
+func bounds_width() -> float: return _bounds_width
+func bounds_height() -> float: return _bounds_height
+func platform_tier(i: int) -> int: return t_tier[i]
+func platform_blueprint(i: int) -> int: return t_blueprint[i]
+func platform_max_tier(blueprint: int) -> int: return _bp_tier_count[blueprint]
+func platform_range(i: int) -> float: return sqrt(_tier_range_sq[t_tier_slot[i]])
+func platform_damage(i: int) -> int: return _tier_damage[t_tier_slot[i]]
+## Damage per second at this platform's current tier, for the inspect panel.
+func platform_dps(i: int) -> float:
+	return float(_tier_damage[t_tier_slot[i]]) * float(_tick_rate) / float(_tier_interval[t_tier_slot[i]])
+func tier_name(blueprint: int, tier: int) -> String:
+	var tiers: Array = (_db.blueprints[_bp_ids[blueprint]] as Dictionary)["tiers"]
+	return str((tiers[tier] as Dictionary)["name"])
 func waypoint_count() -> int: return _wp_x.size()
 ## Distance along the path at which waypoint `i` sits.
 func segment_start_distance(i: int) -> float: return _seg_cum[i]
@@ -751,6 +891,7 @@ func blueprint_index(id: String) -> int:
 func blueprint_name(i: int) -> String: return _bp_ids[i]
 func blueprint_cost(i: int) -> int: return _tier_cost[_bp_tier_offset[i]]
 func blueprint_range(i: int) -> float: return sqrt(_tier_range_sq[_bp_tier_offset[i]])
+func blueprint_count() -> int: return _bp_ids.size()
 func enemy_radius(type_index: int) -> float: return _type_radius[type_index]
 func rng_draws() -> int: return _rng.draws()
 
@@ -786,6 +927,7 @@ func state_hash() -> int:
 	h = StateHash.mix_bytes(h, _cmd_type.to_byte_array())
 	h = StateHash.mix_bytes(h, _cmd_a.to_byte_array())
 	h = StateHash.mix_bytes(h, _cmd_b.to_byte_array())
+	h = StateHash.mix_bytes(h, _cmd_c.to_byte_array())
 	h = StateHash.mix_int(h, _rejected_commands)
 	h = StateHash.mix_int(h, _phase)
 	h = StateHash.mix_int(h, _wave_index)
@@ -810,7 +952,10 @@ func state_hash() -> int:
 	h = StateHash.mix_bytes(h, p_target_gen.to_byte_array())
 	h = StateHash.mix_bytes(h, p_life.to_byte_array())
 	h = StateHash.mix_bytes(h, t_used)
-	h = StateHash.mix_bytes(h, t_pad.to_byte_array())
+	h = StateHash.mix_bytes(h, t_blueprint.to_byte_array())
+	h = StateHash.mix_bytes(h, t_tier.to_byte_array())
 	h = StateHash.mix_bytes(h, t_tier_slot.to_byte_array())
 	h = StateHash.mix_bytes(h, t_cooldown.to_byte_array())
+	h = StateHash.mix_bytes(h, t_x.to_byte_array())
+	h = StateHash.mix_bytes(h, t_y.to_byte_array())
 	return h

@@ -57,14 +57,15 @@ func test_a_wave_does_not_begin_while_the_previous_one_is_still_on_the_board() -
 
 func test_waves_advance_one_at_a_time() -> void:
 	var sim := SimFixture.fresh()
-	var bp := sim.blueprint_index("ballistic")
-	var next_pad := 0
+	var sites := SimFixture.candidate_sites(sim)
+	var next_site := 0
 	var last_wave := 0
 	var guard := 0
 	while not sim.is_over() and guard < SimFixture.MAX_TICKS:
-		if next_pad < sim.pad_count() and sim.capital() >= sim.blueprint_cost(bp):
-			sim.queue_place(sim.tick(), next_pad, bp)
-			next_pad += 1
+		if next_site + 1 < sites.size() \
+				and sim.can_build_at(float(sites[next_site]), float(sites[next_site + 1]), 0) == Sim.BUILD_OK:
+			sim.queue_place(sim.tick(), sites[next_site], sites[next_site + 1], 0)
+			next_site += 2
 		sim.step()
 		guard += 1
 		assert_lte(float(sim.wave_number() - last_wave), 1.0, "waves must not skip")

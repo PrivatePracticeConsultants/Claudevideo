@@ -56,10 +56,20 @@ func test_non_integer_where_integer_required_is_rejected() -> void:
 	db._req_int(db.economy, "starting_capital", "economy.json", 0)
 	assert_false(db.is_valid(), "fractional capital must be rejected, not truncated")
 
-func test_duplicate_pad_ids_are_rejected() -> void:
+func test_building_rules_must_leave_somewhere_to_build() -> void:
+	# max <= min means the buildable band has zero or negative width, so the
+	# whole map is unbuildable. That is a silent, total failure at runtime.
 	var db := Database.load_engagement(MAP, ENGAGEMENT)
 	db.errors = PackedStringArray()
-	var pads: Array = db.map["pads"]
-	(pads[1] as Dictionary)["id"] = (pads[0] as Dictionary)["id"]
-	db._validate_map()
-	assert_false(db.is_valid(), "duplicate pad ids must fail validation")
+	db.building["max_distance_from_path"] = 10.0
+	db.building["min_distance_from_path"] = 40.0
+	db._validate()
+	assert_false(db.is_valid(), "an empty buildable band must fail validation")
+	assert_true(db.error_text().contains("buildable"), "the error says what is wrong: %s" % db.error_text())
+
+func test_every_campaign_level_loads() -> void:
+	var levels := Database.load_levels()
+	assert_gt(float(levels.size()), 0.0, "levels.json lists levels")
+	for level in levels:
+		var db := Database.load_engagement(str(level["map"]), str(level["engagement"]))
+		assert_true(db.is_valid(), "level %s failed to load: %s" % [level["name"], db.error_text()])
