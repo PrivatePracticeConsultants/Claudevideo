@@ -722,9 +722,17 @@ func board_salvage() -> int:
 ## arriving at an act budgeted for 1,300, and 22,330 at one budgeted for 2,350.
 ## Unbounded, "continuity" would simply delete the economy from the fifth level
 ## onward.
+## Static because the ceiling that matters at the end of a board belongs to the
+## act you are about to open, not the one still on screen. The HUD has to quote
+## it there, and quoting a different number than the next act will honour is
+## exactly the kind of fiction the honesty rule exists to prevent.
+static func salvage_ceiling_of(db: Database) -> int:
+	return int(floor(float(db.engagement.get("starting_capital",
+		db.economy["starting_capital"]))
+		* float(db.economy.get("board_salvage_cap_share", 0.0))))
+
 func salvage_ceiling() -> int:
-	return int(floor(float(_db.engagement.get("starting_capital",
-		_db.economy["starting_capital"])) * _salvage_cap_share))
+	return salvage_ceiling_of(_db)
 
 ## Open an engagement with salvage from the board before it. Applied at
 ## construction like adopt(), so it is part of the state a replay starts from.

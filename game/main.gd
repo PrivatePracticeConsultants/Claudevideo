@@ -133,25 +133,34 @@ func _start_level(index: int, offered_carry: Dictionary) -> void:
 	_hud = Hud.new()
 	add_child(_hud)
 	_hud.setup(_sim, _theme)
+	var handover := _next_handover()
 	_hud.set_level(str(level["name"]), _level_index, _levels.size(),
-		_sim.t_count, _next_level_extends(), _sim.carry_dropped(),
-		_sim.carry_stood_down(), _sim.salvage_granted())
+		_sim.t_count, bool(handover[0]), _sim.carry_dropped(),
+		_sim.carry_stood_down(), _sim.salvage_granted(), int(handover[1]))
 
 	_overlay = DebugOverlay.new()
 	add_child(_overlay)
 	_overlay.setup(_sim, Color(str(_theme.get("text", "#dfe6f0"))))
 
-## Whether beating this level extends the same board rather than moving to a new
-## one. Read from the next level's own data, so the HUD cannot claim a hand-over
-## the sim would then refuse.
-func _next_level_extends() -> bool:
+## What beating this level hands to the next one, read from the next level's own
+## data so the HUD cannot claim a hand-over the sim would then refuse.
+##
+## Returns [extends_board, salvage_ceiling]. The ceiling is -1 when it does not
+## apply (no next level, or the next level extends this board and so takes the
+## turrets themselves). When it does apply it is the receiving act's, because
+## that is the number the player will actually be paid - the outgoing board's
+## raw worth is 17x larger at the first boundary and quoting it would be a lie.
+func _next_handover() -> Array:
 	if _level_index + 1 >= _levels.size():
-		return false
+		return [false, -1]
 	var next: Dictionary = _levels[_level_index + 1]
-	if str(next["map"]) != str((_levels[_level_index] as Dictionary)["map"]):
-		return false
 	var db := Database.load_engagement(str(next["map"]), str(next["engagement"]))
-	return db.is_valid() and bool(db.engagement.get("carries_forward", false))
+	if not db.is_valid():
+		return [false, -1]
+	var same_board := str(next["map"]) == str((_levels[_level_index] as Dictionary)["map"])
+	if same_board and bool(db.engagement.get("carries_forward", false)):
+		return [true, -1]
+	return [false, Sim.salvage_ceiling_of(db)]
 
 ## Where each board begins. Levels are grouped by map in campaign order, so a
 ## board boundary is simply where the map id changes.

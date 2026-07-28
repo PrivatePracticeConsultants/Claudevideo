@@ -21,6 +21,10 @@ var _is_last_level: bool = false
 ## what winning means - not "on to somewhere else" but "the road gets longer and
 ## everything you built stays" - so the banner has to say which.
 var _next_extends: bool = false
+## The most salvage the NEXT act will accept, or -1 where none applies. The board
+## you are finishing is worth far more than any one act will take, so the banner
+## has to quote the receiving ceiling or it promises money that never arrives.
+var _next_salvage_cap: int = -1
 
 func setup(sim: Sim, theme: Dictionary) -> void:
 	_sim = sim
@@ -71,7 +75,7 @@ var _last_signature: int = -1
 
 func set_level(name: String, index: int, total: int, inherited: int = 0,
 		next_extends: bool = false, dropped: int = 0, stood_down: int = 0,
-		salvage: int = 0) -> void:
+		salvage: int = 0, next_salvage_cap: int = -1) -> void:
 	_level_text = "%s      LEVEL %d/%d" % [name, index + 1, total]
 	if inherited > 0:
 		# Without this the inherited turrets read as a bug - a board you did not
@@ -91,6 +95,7 @@ func set_level(name: String, index: int, total: int, inherited: int = 0,
 		_level_text += "  ·  %d LOST TO THE NEW ROAD" % dropped
 	_is_last_level = index + 1 >= total
 	_next_extends = next_extends
+	_next_salvage_cap = next_salvage_cap
 	_level.text = _level_text
 
 func refresh(speed: int, paused: bool, hovered_platform: int = -1,
@@ -159,13 +164,21 @@ func refresh(speed: int, paused: bool, hovered_platform: int = -1,
 			_banner.text = "SECTOR HELD   ·   %d integrity   ·   N extends the corridor" % _sim.integrity()
 		else:
 			# A new board is a different map, so the turrets cannot come. Say it
-			# here rather than letting it look like the game ate them.
+			# here rather than letting it look like the game ate them - and say it
+			# in the figure that will actually be paid, not the board's raw worth.
 			_banner.text = "BOARD CLEARED   ·   %d integrity   ·   N moves to a new board, salvaging $%d" % [
-				_sim.integrity(), _sim.board_salvage()]
+				_sim.integrity(), quoted_salvage()]
 		_banner.add_theme_color_override("font_color", _color("good"))
 	else:
 		_banner.text = "CORRIDOR LOST   ·   wave %d/%d   ·   R to retry" % [_sim.wave_number(), _sim.wave_count()]
 		_banner.add_theme_color_override("font_color", _color("bad"))
+
+## What the next act will actually credit, which is the board's worth clamped to
+## that act's own ceiling. Public so a test can hold it against what the sim then
+## grants instead of trusting a string on screen.
+func quoted_salvage() -> int:
+	var worth := _sim.board_salvage()
+	return worth if _next_salvage_cap < 0 else mini(worth, _next_salvage_cap)
 
 func _refresh_preview() -> void:
 	if _sim.is_over():

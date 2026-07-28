@@ -1075,6 +1075,59 @@ act that continues a chain takes turrets and refuses salvage; an act that opens
 one takes salvage and refuses turrets. Both are applied at construction, so both
 are part of the state a replay starts from.
 
+## P0-51 · The banner was quoting a number the next act would not pay
+
+Found by re-reading the salvage path rather than by a test, which is the
+uncomfortable part. `board_salvage()` returns what the board you just finished is
+worth; the cap is applied by `grant_salvage()` on the act you are about to open.
+The end-of-board banner called the first of those. Measured across a chained
+campaign run:
+
+| boundary | board worth | next act's ceiling | actually paid |
+| --- | --- | --- | --- |
+| highway → port | $8,790 | $520 | $520 |
+| port → capital | $22,330 | $940 | $940 |
+| capital → refinery | $58,820 | $1,740 | $1,740 |
+| refinery → railyard | $96,445 | $2,300 | $2,300 |
+
+So the banner promised **$8,790 and the next screen credited $520** — a 17×
+overstatement, and the honesty rule broken by the one line that exists to reassure
+the player nothing was thrown away. The ceiling now travels with the quote:
+`Sim.salvage_ceiling_of(db)` is static so `main.gd` can read the *receiving*
+act's ceiling while the outgoing act is still on screen, and the HUD quotes
+`min(worth, ceiling)`.
+
+**What the same table says about the mechanic.** Every realistic finish is worth
+17–42× the ceiling, so the cap binds every single time: salvage is in practice a
+flat 40% top-up on the new board's budget, not a reward that tracks how well the
+last board was held. `test_a_weaker_finish_salvages_less` passes only because a
+one-turret board falls under the ceiling. Making it responsive is one data value —
+`board_salvage_fraction` around 0.02 of spend puts the first two boundaries under
+their ceilings and leaves the last two capped — but it moves opening Capital on
+board-opening acts, which are the anchored-easy point of every board, so it is a
+measured change and not a free one. Recorded here rather than done.
+
+## P0-52 · Twelve boards of four acts, not fewer boards of longer chains
+
+Asked directly, after salvage shipped: should boards become longer chains so
+turrets persist across more levels? No, and the evidence is from this session:
+
+- Turrets already persist across four consecutive levels with **zero dropped and
+  zero stood down**. That is the continuity that was asked for, and it is
+  verified, not assumed.
+- Salvage closes the boundary in the only currency that can cross a map.
+- Longer chains means *fewer distinct boards*. Map variety has been asked to grow
+  repeatedly; halving it to buy two more levels of persistence trades the thing
+  that was wanted often for the thing that was wanted once.
+- Every restructure this session invalidated the balance curve and cost six to
+  ten probe runs plus multiple full-suite runs, and each one introduced acts an
+  inherited board could clear unattended that then had to be hunted down. The
+  campaign is currently measured; that is worth something.
+
+If more persistence is wanted, the cheap dials are `CARRY_TIER_CAP` (how deeply a
+carried turret is refitted) and `board_salvage_cap_share` — single values, one
+probe run each, no structural risk.
+
 ## P0-14 · Deliberately not built in P0
 
 Not oversights — later phases, per §5.7. Anything tempting that came up is in

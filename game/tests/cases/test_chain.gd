@@ -263,6 +263,37 @@ func test_a_weaker_finish_salvages_less() -> void:
 	assert_lt(float(weak.board_salvage()), float(strong.board_salvage()),
 		"one turret is worth less than a full board")
 
+func test_the_quoted_salvage_is_the_amount_actually_paid() -> void:
+	# The end-of-board banner quotes a figure. It shipped quoting the outgoing
+	# board's raw worth while the next act paid its own capped share - measured at
+	# the first boundary, $8,790 promised against $520 delivered. A number on
+	# screen that the next screen contradicts is the honesty rule broken, so the
+	# quote is now taken from the receiving act's ceiling.
+	var pair := _board_boundary()
+	var finished := SimFixture.for_level(str(pair[0]["map"]), str(pair[0]["engagement"]))
+	SimFixture.run_greedy(finished)
+	var next_db := SimFixture.database(str(pair[1]["map"]), str(pair[1]["engagement"]))
+	var quoted := mini(finished.board_salvage(), Sim.salvage_ceiling_of(next_db))
+	var opened := SimFixture.start_act(pair[1], finished.board_snapshot())
+	assert_eq(quoted, opened.salvage_granted(),
+		"what the banner promises is what the next act credits")
+	# And again where the cap actually binds, which is the case that was wrong.
+	# A single act's fixture board is worth less than the ceiling, so the clamp
+	# has to be exercised with a board worth more than any act will take.
+	var rich := SimFixture.start_act(pair[1], {"salvage": 9999999})
+	assert_eq(mini(9999999, Sim.salvage_ceiling_of(next_db)), rich.salvage_granted(),
+		"a board worth more than the ceiling is quoted at the ceiling, not its worth")
+
+func test_the_static_and_instance_ceilings_agree() -> void:
+	# Two callers, one formula. If they ever diverge the banner starts lying again
+	# and nothing else notices.
+	var levels := Database.load_levels()
+	for level in [levels[0], levels[levels.size() / 2], levels[levels.size() - 1]]:
+		var sim := SimFixture.start_act(level, {})
+		var db := SimFixture.database(str(level["map"]), str(level["engagement"]))
+		assert_eq(Sim.salvage_ceiling_of(db), sim.salvage_ceiling(),
+			"%s quotes its own ceiling" % str(level["engagement"]))
+
 func test_salvage_is_part_of_the_state_hash() -> void:
 	var pair := _board_boundary()
 	var bare := SimFixture.start_act(pair[1], {})
