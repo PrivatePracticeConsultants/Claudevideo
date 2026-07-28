@@ -4,10 +4,10 @@
   "map_id": "highway_01",
   "path_waypoints": 6,
   "carries_forward": false,
-  "starting_capital": 400,
-  "platform_limit": 14,
+  "starting_capital": 700,
+  "platform_limit": 24,
   "starting_ground_reach": 200.0,
-  "act_hp_multiplier": 1.1,
+  "act_hp_multiplier": 1.13,
   "act_bounty_multiplier": 1.0,
   "inter_wave_delay_ticks": 90,
   "waves": [

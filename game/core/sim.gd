@@ -1110,9 +1110,25 @@ func _resolve_result() -> void:
 	if _integrity <= 0:
 		_integrity = 0
 		_result = RESULT_LOSS
+		_clear_projectiles()
 		return
 	if _phase == PHASE_DONE and e_live_count == 0:
 		_result = RESULT_WIN
+		_clear_projectiles()
+
+## Shots still in the air when the engagement ends have nothing left to hit, and
+## step() stops after this, so nothing would ever resolve them - they would sit
+## in the pool forever and the "every shot fired was resolved" invariant would be
+## quietly false.
+##
+## It only started mattering when the deployment limit went past a hundred: with
+## a couple of dozen turrets, the odds of a shot being mid-flight on the exact
+## tick the result resolves are low, and the test passed by luck rather than by
+## the invariant holding. With 118 turrets firing it happens nearly every time.
+func _clear_projectiles() -> void:
+	for i in _max_projectiles:
+		if p_alive[i] == 1:
+			_despawn_projectile(i)
 
 # --- inspection --------------------------------------------------------------
 
@@ -1180,6 +1196,12 @@ func enemy_id(i: int) -> String: return _type_ids[i]
 func blueprint_display_name(i: int) -> String:
 	return str((_db.blueprints[_bp_ids[i]] as Dictionary).get("display_name", _bp_ids[i]))
 func enemy_radius(type_index: int) -> float: return _type_radius[type_index]
+func enemy_speed(type_index: int) -> float: return _type_speed[type_index]
+func enemy_base_hp(type_index: int) -> int: return _type_base_hp[type_index]
+func enemy_base_bounty(type_index: int) -> int: return _type_base_bounty[type_index]
+func enemy_leak_value(type_index: int) -> int: return _type_leak[type_index]
+## Every drone class, in the order their indices run.
+func enemy_ids() -> PackedStringArray: return _type_ids
 func rng_draws() -> int: return _rng.draws()
 
 ## Sample a path position for rendering. Public because the renderer interpolates

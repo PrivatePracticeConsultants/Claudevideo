@@ -59,8 +59,20 @@ branch, `/docs` folder. Two things to know:
 ## How to play
 
 Drones walk the corridor end to end. Anything that reaches the far end costs
-Corridor Integrity — 1 for a Skitter, 4 for a Walker, 12 for a Bulwark Hauler.
-Hit zero and the level is lost.
+Corridor Integrity. Hit zero and the level is lost.
+
+| Drone | Health | Speed | Leak cost | Pays |
+|---|---|---|---|---|
+| Skitter Drone | 22 | 140 | 1 | $7 |
+| Sentry Walker | 55 | 90 | 4 | $16 |
+| Bulwark Hauler | 260 | 55 | 12 | $58 |
+| **Vanguard Lance** | **620** | **168** | 11 | $150 |
+
+The first three trade speed against health. The Lance does not — it is the
+fastest thing on the board *and* the toughest, so a turret gets less time on a
+target that needs more damage. A thin line of fire that held everything else
+lets Lances through. It arrives partway into the campaign, never opens a wave,
+and never makes up more than 3% of the drones in a level.
 
 - **Click owned ground** (green) to build the selected weapon.
 - **Click a turret** to upgrade it a tier. Hovering shows its DPS and next cost.
@@ -78,9 +90,9 @@ Two families answering different problems:
 | Best against | Bulwark Haulers | Skitter swarms |
 | Tier 1 cost | $100 | $140 |
 
-You are capped at a **deployment limit** per level, so once your allowance is
-placed the only way to grow is to upgrade — which is what makes *where* you put
-them matter.
+You are capped at a **deployment limit** per level — 24 turrets at the first,
+doubling every ten levels to 118 at the last. Once your allowance is placed the
+only way to grow is to upgrade, which is what makes *where* you put them matter.
 
 ### Boards that grow
 
@@ -104,6 +116,47 @@ bigger limit buys is room to extend coverage into the new stretch, not a clean
 slate on top of what is already standing.
 
 Retrying an act (`R`) restores the same inheritance, not an empty board.
+
+## Adding a weapon family
+
+Weapons are data. A new family is a new key in `data/blueprints/blueprints.json`
+and, if it needs a behaviour the sim does not already have, a field the sim reads.
+Nothing about the campaign, the HUD, the renderer or the tests needs to know it
+exists by name.
+
+A family is a `tiers` array — one entry per upgrade step — and every entry needs:
+
+```json
+"laser": {
+  "display_name": "Pulse Laser",
+  "tiers": [
+    { "name": "Mk I", "cost": 120, "damage": 8,
+      "range_units": 210.0, "fire_interval_seconds": 0.25,
+      "projectile_speed_units_per_second": 900.0,
+      "projectile_hit_radius_units": 6.0,
+      "projectile_lifetime_seconds": 1.5 }
+  ]
+}
+```
+
+`Database._validate_blueprints` enforces every one of those, so a typo is a
+plain-language load error rather than a turret that quietly does nothing. Two
+optional fields turn it into an area weapon: `splash_radius_units` and
+`splash_min_fraction` (the share of full damage at the blast edge). That is all
+the Cannon family is — it adds no code.
+
+Once the key exists it is immediately buildable: `Q` cycles every family the data
+defines, the HUD reads its name and cost from the same place, and the scripted
+test policy will start using it. Turrets currently share one silhouette across
+families and are tinted by tier (`SimRenderer3D._build_turret_layers`); a family
+that plays differently enough to need its own shape wants the same treatment
+`_enemy_mesh` gives drone classes.
+
+**If the behaviour is genuinely new** — slowing, chaining, damage over time — it
+needs sim support, and that means: state on the enemy pool (preallocated, never
+grown), the new field read in `Database`, the state folded into `state_hash()` so
+replays still prove out, and a test that the effect expires. Balance values stay
+in JSON; `tests/cases/test_sim_purity.gd` fails the build on a number in code.
 
 ## What P0 actually guarantees
 

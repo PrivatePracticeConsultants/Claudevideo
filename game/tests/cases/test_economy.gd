@@ -38,19 +38,43 @@ func test_placing_a_platform_costs_its_listed_price() -> void:
 	assert_eq(sim.t_count, 1, "and a platform exists")
 
 func test_a_placement_that_cannot_be_afforded_is_rejected_cleanly() -> void:
+	# Sites are sampled along the road closer together than min_platform_spacing,
+	# so consecutive ones reject *each other* once the first is built. Thin them
+	# out first, or this measures the spacing rule while claiming to measure the
+	# affordability one - which is how it started failing the moment the opening
+	# level could afford enough turrets to reach its own neighbours.
 	var sim := SimFixture.fresh()
-	var sites := SimFixture.candidate_sites(sim)
+	var spaced := _spaced_sites(sim)
 	var affordable := int(sim.capital() / sim.blueprint_cost(0))
-	var issued := 0
-	var i := 0
-	while issued < affordable + 3 and i + 1 < sites.size():
-		sim.queue_place(0, sites[i], sites[i + 1], 0)
-		issued += 1
-		i += 2
+	assert_gt(float(spaced.size() / 2), float(affordable + 3),
+		"fixture sanity: enough legal spots to overspend on")
+	for n in affordable + 3:
+		sim.queue_place(0, spaced[n * 2], spaced[n * 2 + 1], 0)
 	sim.step()
 	assert_eq(sim.t_count, affordable, "only what could be paid for was built")
 	assert_eq(sim.rejected_commands(), 3, "the rest were rejected, not silently dropped")
 	assert_gte(float(sim.capital()), 0.0, "capital never goes negative")
+
+## Candidate sites thinned so no two are within min_platform_spacing of each
+## other, i.e. spots that stay legal as they get built out.
+func _spaced_sites(sim: Sim) -> PackedInt32Array:
+	var all := SimFixture.candidate_sites(sim)
+	var out := PackedInt32Array()
+	var gap := sim.build_min_spacing()
+	for i in range(0, all.size() - 1, 2):
+		var x := float(all[i])
+		var y := float(all[i + 1])
+		var clear := true
+		for j in range(0, out.size() - 1, 2):
+			var dx := float(out[j]) - x
+			var dy := float(out[j + 1]) - y
+			if dx * dx + dy * dy < gap * gap:
+				clear = false
+				break
+		if clear:
+			out.append(all[i])
+			out.append(all[i + 1])
+	return out
 
 func test_building_on_the_road_is_refused() -> void:
 	var sim := SimFixture.fresh()

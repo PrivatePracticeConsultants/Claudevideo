@@ -4,10 +4,10 @@
   "map_id": "refinery_01",
   "path_waypoints": 6,
   "carries_forward": false,
-  "starting_capital": 5450,
-  "platform_limit": 32,
+  "starting_capital": 7700,
+  "platform_limit": 45,
   "starting_ground_reach": 166.0,
-  "act_hp_multiplier": 2.45,
+  "act_hp_multiplier": 1.43,
   "act_bounty_multiplier": 3.89,
   "inter_wave_delay_ticks": 90,
   "waves": [

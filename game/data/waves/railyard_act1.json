@@ -4,10 +4,10 @@
   "map_id": "railyard_01",
   "path_waypoints": 6,
   "carries_forward": false,
-  "starting_capital": 9900,
-  "platform_limit": 38,
+  "starting_capital": 14350,
+  "platform_limit": 55,
   "starting_ground_reach": 154.0,
-  "act_hp_multiplier": 2.9,
+  "act_hp_multiplier": 1.64,
   "act_bounty_multiplier": 4.92,
   "inter_wave_delay_ticks": 90,
   "waves": [

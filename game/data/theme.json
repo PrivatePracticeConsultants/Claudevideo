@@ -75,6 +75,8 @@
     "turret_turn_rate": 9.0,
     "enemy_metallic": 0.12,
     "enemy_roughness": 0.62,
+    "elite_glow": "#ff7a3c",
+    "elite_glow_energy": 1.6,
     "sun_colour": "#fff2dc",
     "fill_pitch_degrees": -22.0,
     "fill_yaw_degrees": -145.0,

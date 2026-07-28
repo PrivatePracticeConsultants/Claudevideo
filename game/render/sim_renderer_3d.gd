@@ -423,7 +423,7 @@ func _build_entity_layers() -> void:
 	_enemy_layers.clear()
 	for type_index in _sim.enemy_type_count():
 		var mesh := _enemy_mesh(_sim.enemy_id(type_index))
-		mesh.material = _instanced_material()
+		mesh.material = _instanced_material(_sim.enemy_id(type_index))
 		var layer := _instanced(mesh, _sim.e_alive.size())
 		_enemy_layers.append(layer)
 		add_child(layer)
@@ -451,7 +451,12 @@ func _build_entity_layers() -> void:
 	add_child(_projectiles)
 
 ## Distinct silhouettes per drone class. Skitters are small and pointed, Walkers
-## are boxy, Bulwarks are heavy slabs.
+## are boxy, Bulwarks are heavy slabs, Lances are long narrow darts.
+##
+## The Lance is the one that most needs to be identifiable at a glance: it is the
+## fastest thing on the board, so by the time you have read a health bar it has
+## covered ground nothing else could. Hence a silhouette nothing else shares and
+## an emissive skin on top of it.
 func _enemy_mesh(enemy_id: String) -> Mesh:
 	match enemy_id:
 		"swarm":
@@ -462,16 +467,31 @@ func _enemy_mesh(enemy_id: String) -> Mesh:
 			var slab := BoxMesh.new()
 			slab.size = Vector3(1.15, 1.0, 1.4)
 			return slab
+		"lance":
+			var dart := PrismMesh.new()
+			dart.size = Vector3(0.62, 1.0, 2.05)
+			return dart
 		_:
 			var box := BoxMesh.new()
 			box.size = Vector3.ONE
 			return box
 
-func _instanced_material() -> StandardMaterial3D:
+## Which classes glow. Reserved for the top of the ladder - if everything is lit
+## up, nothing is.
+const EMISSIVE_CLASSES := ["lance"]
+
+func _instanced_material(enemy_id: String = "") -> StandardMaterial3D:
 	var material := StandardMaterial3D.new()
 	material.vertex_color_use_as_albedo = true
 	material.metallic = float(_world.get("enemy_metallic", 0.12))
 	material.roughness = float(_world.get("enemy_roughness", 0.62))
+	if EMISSIVE_CLASSES.has(enemy_id):
+		# Emission is a flat add, so the per-instance damage tint still reads
+		# through it - a hurt Lance dims like everything else, it just never stops
+		# being the bright thing on the board.
+		material.emission_enabled = true
+		material.emission = _color_of(_world.get("elite_glow", "#ff7a3c"))
+		material.emission_energy_multiplier = float(_world.get("elite_glow_energy", 1.6))
 	return material
 
 func _instanced(mesh: Mesh, capacity: int) -> MultiMeshInstance3D:

@@ -1,5 +1,5 @@
 {
-  "_comment": "Three tiers of drone. Swarm is fast, fragile and numerous - it exists to punish an arsenal with no area damage, and is what the Cannon family answers. Walker is the baseline. Heavy is slow, very tough and pays out accordingly, and a leak costs three times as much, so letting one through is the single most expensive mistake available. The armour triangle (kinetic/energy resistances) and the flying/cloaked/splitter modifiers are still P1; this is an HP-and-payout ladder, not a counter system. Speeds were raised ~1.6x when boards doubled in length, so traversal time per act stayed comparable.",
+  "_comment": "Four tiers of drone. Swarm is fast, fragile and numerous - it exists to punish an arsenal with no area damage, and is what the Cannon family answers. Walker is the baseline. Heavy is slow, very tough and pays out accordingly, and a leak costs three times as much. Lance breaks the pattern the other three share: every one of them trades speed against health, and Lance is the fastest thing on the board AND the toughest. That is the whole point of it - a turret gets less time on a target that needs more damage, so a thin line of single-target fire that held everything else lets Lances through. It answers by spreading coverage or concentrating burst, not by adding one more turret. Lance leaks for slightly LESS than a Bulwark despite being the bigger machine, which looks backwards and is not: a Bulwark's 12 is priced for something you can reliably stop, and the Lance is priced for something you often cannot. Measured at 14 it was the only thing that ever decided a level - the final act killed 5,578 of 5,590 drones and still lost, on eight Lance leaks. Expected damage per Lance spawned is already the highest in the game without charging more for each one. The armour triangle (kinetic/energy resistances) and the flying/cloaked/splitter modifiers are still P1; this is an HP-and-payout ladder, not a counter system. Speeds were raised ~1.6x when boards doubled in length, so traversal time per act stayed comparable.",
   "swarm": {
     "display_name": "Skitter Drone",
     "base_hp": 22,
@@ -26,5 +26,14 @@
     "base_bounty": 58,
     "radius": 24.0,
     "spawn_jitter_units": 12.0
+  },
+  "lance": {
+    "display_name": "Vanguard Lance",
+    "base_hp": 620,
+    "speed_units_per_second": 168.0,
+    "leak_value": 11,
+    "base_bounty": 150,
+    "radius": 20.0,
+    "spawn_jitter_units": 9.0
   }
 }

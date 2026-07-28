@@ -13,12 +13,23 @@ extends SceneTree
 
 func _init() -> void:
 	var only := -1
+	var skip_before := 0
+	var stop_after := 1 << 30
 	var check_idle := false
 	var sweep := -1
 	var argv := OS.get_cmdline_user_args()
 	for i in argv.size():
 		if argv[i] == "--level" and i + 1 < argv.size():
 			only = int(argv[i + 1])
+		elif argv[i] == "--to" and i + 1 < argv.size():
+			# Stop after this level. Chains are played in order, so bounding both
+			# ends is what makes iterating on one board affordable.
+			stop_after = int(argv[i + 1])
+		elif argv[i] == "--from" and i + 1 < argv.size():
+			# Start the chain partway in. Only meaningful at a board-opening act,
+			# which inherits nothing - start anywhere else and the levels after it
+			# are handed a board the campaign would never have given them.
+			skip_before = int(argv[i + 1])
 		elif argv[i] == "--sweep" and i + 1 < argv.size():
 			sweep = int(argv[i + 1])
 		elif argv[i] == "--idle":
@@ -36,6 +47,10 @@ func _init() -> void:
 	for index in levels.size():
 		if only >= 0 and index != only:
 			continue
+		if index < skip_before:
+			continue
+		if index > stop_after:
+			break
 		var level: Dictionary = levels[index]
 		var db := Database.load_engagement(str(level["map"]), str(level["engagement"]))
 		if not db.errors.is_empty():

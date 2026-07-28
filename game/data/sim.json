@@ -1,9 +1,9 @@
 {
-  "_comment": "Engine-shaped limits for the deterministic simulation. Pool capacities are hard ceilings: the sim never grows an array at runtime, so these must exceed the worst case any wave file can produce.",
+  "_comment": "Engine-shaped limits for the deterministic simulation. Pool capacities are hard ceilings: the sim never grows an array at runtime, so these must exceed the worst case any wave file can produce. max_projectiles was raised from 2560 to 6144 at the same time and for the same reason: 118 tier-4 turrets put far more shots in the air at once than 60 did, and the old ceiling was measured overflowing by the end of a full engagement. max_platforms was raised from 64 to 144 when the deployment limit went to doubling every ten levels; it is a ceiling on the pool, not the per-level allowance, which comes from each wave file.",
   "tick_rate_hz": 30,
   "max_enemies": 1280,
-  "max_projectiles": 2560,
-  "max_platforms": 64,
+  "max_projectiles": 6144,
+  "max_platforms": 144,
   "spatial_hash_cell_size": 96.0,
   "spatial_hash_margin_cells": 4
 }

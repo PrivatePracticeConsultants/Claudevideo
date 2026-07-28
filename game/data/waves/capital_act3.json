@@ -4,10 +4,10 @@
   "map_id": "capital_01",
   "path_waypoints": 16,
   "carries_forward": true,
-  "starting_capital": 1800,
-  "platform_limit": 30,
+  "starting_capital": 2500,
+  "platform_limit": 42,
   "starting_ground_reach": 169.0,
-  "act_hp_multiplier": 2.96,
+  "act_hp_multiplier": 2.64,
   "act_bounty_multiplier": 3.52,
   "inter_wave_delay_ticks": 90,
   "waves": [

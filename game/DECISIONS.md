@@ -739,6 +739,69 @@ failure was silent. It cost nothing to find once something actually ran the
 renderer and read what it printed, and it would have cost nothing forever if
 nothing had.
 
+## P0-39 · The Vanguard Lance breaks the trade every other drone makes
+
+Skitters are fast and fragile; Bulwarks are slow and tough. Every class traded
+speed against health, which means one defensive answer — enough damage per
+second, placed anywhere — covered all of them. The Lance is the fastest thing on
+the board *and* the toughest, and that is the entire design: a turret gets less
+time on a target that needs more damage, so a thin line of fire that held
+everything else lets Lances through. It is answered by spreading coverage down
+the road or concentrating burst, not by adding one more turret.
+
+Three numbers moved during tuning, all by measurement:
+
+- **Share of head-count: 4.5% → 1.5%.** At 4.5% it was contributing a third of
+  the closing wave's health from 4.5% of its bodies, and every level from the
+  fourteenth on lost to exactly six leaks.
+- **Leak value: 18 → 14 → 11**, which is *below* a Bulwark's 12. That looks
+  backwards. A Bulwark's price is set for something you can reliably stop; the
+  Lance's is set for something you often cannot, so its expected cost per drone
+  spawned is already the highest in the game. At 14 it was the only thing that
+  ever decided a level — the final act killed 5,578 of 5,590 drones and lost.
+- **It never opens a wave and never appears before the campaign is well under
+  way.** A class this punishing arriving before the player has a board is not
+  difficulty, it is a wall.
+
+A rejected approach: renormalising health so the Lance held total demand
+constant, on the theory that it should change the *shape* of the threat and not
+its mass. It sounds principled and it gutted the roster — a 3% Lance share cut
+every other drone's health by a third to make room for itself. A new tier is
+supposed to make the late campaign harder. The health ramp stayed where
+measurement put it and the closing levels were re-measured instead.
+
+## P0-40 · The deployment limit doubles every ten levels
+
+Sixteen turrets on a board this size was reported as simply not enough to work
+with. The scripted policy winning anyway says more about the policy than about
+the game: it places optimally and instantly, and a person does neither, so
+"the greedy clears it" is a ceiling and not a description of play.
+
+The limit is now `24 × 2^(level/10)` — 24 at the first level, 48 by the
+eleventh, 118 at the twenty-fourth, against a pool ceiling raised from 64 to 144.
+Roughly twice the turrets is roughly twice the damage, so health and Capital
+follow the same ratio, with a deliberate 40% of the increase kept as slack rather
+than handed straight back: the point of the change was that the game had too
+little room, not that it was mistuned.
+
+Two things this broke, both caught by the suite rather than by play:
+
+- **Shots in flight when an engagement resolves were never resolved.** `step()`
+  stops after the result is set, so they sat in the pool forever and the "every
+  shot fired was resolved" invariant was quietly false. With a couple of dozen
+  turrets the odds of a shot being mid-flight on the exact resolving tick are
+  low and the test passed by luck; with 118 it happens nearly every time.
+  `_clear_projectiles()` now runs on resolution.
+- **A test that measured the spacing rule while claiming to measure
+  affordability.** Candidate build sites are sampled closer together than
+  `min_platform_spacing`, so consecutive ones reject each other once the first is
+  built. That never showed until the opening level could afford enough turrets to
+  reach its own neighbours.
+
+The within-chain health step also had to steepen (×1.22/×1.48 → ×1.70/×2.10):
+with 24 turrets carried onto a board whose next act adds two slots, the old step
+left the second act of the opening chain winnable by building nothing.
+
 ## P0-14 · Deliberately not built in P0
 
 Not oversights — later phases, per §5.7. Anything tempting that came up is in
