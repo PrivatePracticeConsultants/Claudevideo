@@ -994,6 +994,57 @@ Zoom is applied about the ground point under the cursor, so the thing you are
 looking at stays roughly where you are looking. None of it touches the
 simulation; `test_renderer` guards the clamps and the survives-a-refit property.
 
+## P0-49 · A turret per family, and terrain that reads as terrain
+
+Two complaints, both fair: weapons did not look like weapons, and terrain did not
+look like terrain. They had the same root cause — everything was drawn from the
+cheapest primitive that would do, and colour was carrying all the meaning.
+
+**Weapons.** All four families shared one silhouette (cylinder mount, cylinder
+housing, box barrel) and differed only in tint, so the arsenal read as one weapon
+in four colours. Each family now has its own mount, housing and muzzle:
+
+| | mount | housing | muzzle |
+|---|---|---|---|
+| Ballistic | hexagonal turntable | blocky receiver | one long slim barrel |
+| Cannon | wide, eight-sided | tapered, wide at the base | short fat bore, angled up |
+| Suppressor | squat, round | smooth drum | a coil ring — no barrel at all |
+| Railgun | low four-sided sled | narrow, long front-to-back | a very long thin rail, dead flat |
+
+Elevation is baked into the muzzle basis rather than applied as a separate
+rotation, so a mortar visibly lobs and a railgun visibly does not. Housings now
+turn with the barrel — a boxy receiver that never faces its target reads as a
+crate someone left there.
+
+This costs three MultiMesh layers per family instead of three in total. Draw
+calls went 23 → 29 and, measured, **stay flat from 25 to 400 entities**, which is
+the invariant that actually matters. One node per turret would not have been.
+
+**Terrain.** The ground was a single flat quad in one colour — under one
+directional light that is a slab, and no amount of tonemapping fixes it. It is
+now a mottled grid whose vertex colours vary from a hash of position, plus a
+graded verge either side of the road, a centre line down it, and scattered debris
+off it for scale.
+
+Three things worth recording:
+
+- **Hashed, not random.** The renderer has no business touching the simulation's
+  seeded RNG, and a board that looked different every time you restarted would be
+  its own kind of wrong.
+- **Relief only away from the road.** The ground rolls, but is dead flat
+  everywhere a turret could stand. The simulation is 2D and every placement rule
+  is a distance in the ground plane; relief under the playable band would put
+  turrets on slopes the rules know nothing about.
+- **The first pass made it worse.** Ground at `#12161d` with props scattered to
+  the horizon read as debris floating in a void — the props revealed how empty
+  the ground had always been. Lightening the ground, tightening props to within
+  620 units of the road, and dropping the buildable overlay's alpha from 0.55 to
+  0.34 fixed it. Screenshots each time; none of this is arguable from the code.
+
+`_ground_height` also needed an early-out: it called `distance_to_path` for all
+~9,400 vertices, which walks every path segment, and that is a visible hitch on a
+level load and worse on a phone.
+
 ## P0-14 · Deliberately not built in P0
 
 Not oversights — later phases, per §5.7. Anything tempting that came up is in

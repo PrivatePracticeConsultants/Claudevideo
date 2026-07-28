@@ -30,25 +30,19 @@ const SITE_STRIDE := 46.0
 
 ## Which campaign chains the suite plays end to end.
 ##
-## Levels are grouped into chains of three acts on one board, and a later act is
+## Levels are grouped into chains of four acts on one board, and a later act is
 ## entered carrying the previous act's turrets - so an act cannot be balance
 ## checked on its own. The unit of testing is therefore a whole chain.
 ##
-## Playing all eight is 24 full engagements, and the late ones are thousands of
-## enemies across sixteen waves - minutes of wall clock for one test. That is too
-## slow to run on every change, and a suite people skip protects nothing. The
-## default is a spread across the difficulty curve (the opening board, one from
-## the middle where buying ground starts to matter, and the last); set
-## LASTLINE_FULL_CAMPAIGN=1 to play every one, which is the pre-release run.
-## Two chains, not three: once the deployment limit doubled, a late act is a
-## 100-turret board and the sampled gate on its own outgrew the wall clock of a
-## single command. These are the two ends of the curve - the teaching board and
-## the one with every drone class on the longest road.
-## Chains are four acts now, and the late boards run to ten thousand drones each -
-## sampling the last one put the whole suite past the wall clock of a single
-## command. These two span the curve at a cost that still fits: the teaching board
-## and a mid-campaign one that fields every drone class the mid-game has.
-const SAMPLED_CHAINS := ["highway_01", "railyard_01"]
+## The default is a cheap tripwire, not full coverage. Measured: the chain test
+## alone is ~480s of a ~590s budget with a mid-late board in the sample, and a
+## suite that cannot finish is a suite nobody runs. These two are the teaching
+## board and one far enough in to field Bulwarks and matter.
+##
+## Everything past here is covered by LASTLINE_FULL_CAMPAIGN=1, the pre-release
+## run, and by tools/balance_probe.gd, which is played across all 48 acts before
+## a release.
+const SAMPLED_CHAINS := ["highway_01", "capital_01"]
 
 ## Every campaign level, grouped into chains, in campaign order.
 static func campaign_chains() -> Array:

@@ -35,9 +35,14 @@ var _enemy_layers: Array[MultiMeshInstance3D] = []
 var _hp_bars: MultiMeshInstance3D
 var _projectiles: MultiMeshInstance3D
 var _cells: MultiMeshInstance3D
-var _turret_bases: MultiMeshInstance3D
-var _turret_bodies: MultiMeshInstance3D
-var _turret_barrels: MultiMeshInstance3D
+## One set of part layers per weapon family, so a Railgun does not have to be a
+## recoloured Ballistic. Still MultiMesh throughout - this trades a fixed handful
+## of extra draw calls (three per family, four families) for silhouettes that
+## actually differ, and the count stays flat no matter how many turrets are down,
+## which is the rule that matters.
+var _turret_bases: Array[MultiMeshInstance3D] = []
+var _turret_bodies: Array[MultiMeshInstance3D] = []
+var _turret_barrels: Array[MultiMeshInstance3D] = []
 var _scenery: Node3D
 ## Held so the shadow range can be refitted whenever the framing changes. Boards
 ## differ by 50% in length and an act reveals a third of one, so a fixed range
@@ -265,16 +270,25 @@ func _build_scenery() -> void:
 	_scenery = Node3D.new()
 	add_child(_scenery)
 
-	var ground := MeshInstance3D.new()
-	var plane := PlaneMesh.new()
 	# Far larger than the board: at a shallow camera angle the horizon is a long
 	# way out, and a visible ground edge reads as a rendering bug.
-	plane.size = Vector2(_sim.bounds_width() * 14.0, _sim.bounds_height() * 14.0)
-	ground.mesh = plane
-	ground.material_override = _surface_material(_color_of(_world.get("ground", "#12161d")),
+	var ground := MeshInstance3D.new()
+	ground.mesh = _ground_mesh()
+	var ground_material := _surface_material(Color.WHITE,
 		float(_world.get("ground_metallic", 0.0)), float(_world.get("ground_roughness", 0.95)))
-	ground.position = Vector3(_sim.bounds_width() * 0.5, 0.0, _sim.bounds_height() * 0.5)
+	# Vertex colours carry the mottling; the base colour has to be white or it
+	# would multiply the variation away.
+	ground_material.vertex_color_use_as_albedo = true
+	ground.material_override = ground_material
 	_scenery.add_child(ground)
+
+	# Graded earth either side of the road, wider than the walls. Without it the
+	# corridor sits on the terrain like a sticker rather than being cut into it.
+	var verge := MeshInstance3D.new()
+	verge.mesh = _verge_mesh()
+	verge.material_override = _surface_material(_color_of(_world.get("verge", "#2a2f26")),
+		0.0, float(_world.get("verge_roughness", 0.98)))
+	_scenery.add_child(verge)
 
 	var road := MeshInstance3D.new()
 	road.mesh = _corridor_mesh()
@@ -282,11 +296,187 @@ func _build_scenery() -> void:
 		float(_world.get("path_metallic", 0.15)), float(_world.get("path_roughness", 0.8)))
 	_scenery.add_child(road)
 
+	# Lane markings down the middle. Cheap, and it is most of what makes a grey
+	# strip read as a road rather than as a wall lying down.
+	var markings := MeshInstance3D.new()
+	markings.mesh = _marking_mesh()
+	var marking_material := _surface_material(_color_of(_world.get("road_line", "#b9bcae")),
+		0.0, 0.7)
+	markings.material_override = marking_material
+	_scenery.add_child(markings)
+
 	var walls := MeshInstance3D.new()
 	walls.mesh = _wall_mesh()
 	walls.material_override = _surface_material(_color_of(_world.get("wall", "#39424f")),
 		float(_world.get("wall_metallic", 0.55)), float(_world.get("wall_roughness", 0.42)))
 	_scenery.add_child(walls)
+
+	var props := _prop_layer()
+	if props != null:
+		_scenery.add_child(props)
+
+## Ground as a mottled grid rather than one flat quad.
+##
+## A single plane under a single directional light is a slab of constant colour,
+## and no amount of tonemapping makes that read as terrain. This lays down a
+## coarse grid and varies each vertex's colour from a hash of its position, which
+## costs one mesh and gives the eye something to attach scale to.
+##
+## Hashed rather than random on purpose: the renderer has no business touching
+## the simulation's RNG, and a board that looked different every time you
+## restarted it would be its own kind of wrong.
+func _ground_mesh() -> ArrayMesh:
+	var width := _sim.bounds_width()
+	var depth := _sim.bounds_height()
+	# Enough overshoot that the horizon never shows an edge, but not so much that
+	# the whole grid is spent on ground nobody looks at: at 3x the board the
+	# mottling cells were ~900 units across and simply invisible.
+	var margin := maxf(width, depth) * float(_world.get("ground_overshoot", 1.6))
+	var cells := int(_world.get("ground_cells", 96))
+	var base := _color_of(_world.get("ground", "#12161d"))
+	var variation := float(_world.get("ground_variation", 0.16))
+
+	var vertices := PackedVector3Array()
+	var colours := PackedColorArray()
+	var indices := PackedInt32Array()
+	var step_x := (width + margin * 2.0) / float(cells)
+	var step_z := (depth + margin * 2.0) / float(cells)
+	for row in cells + 1:
+		for col in cells + 1:
+			var x := -margin + float(col) * step_x
+			var z := -margin + float(row) * step_z
+			vertices.append(Vector3(x, _ground_height(x, z), z))
+			var shade := 1.0 + (_hash_unit(col, row) - 0.5) * 2.0 * variation
+			colours.append(Color(base.r * shade, base.g * shade, base.b * shade))
+	for row in cells:
+		for col in cells:
+			var top_left := row * (cells + 1) + col
+			var top_right := top_left + 1
+			var bottom_left := top_left + cells + 1
+			var bottom_right := bottom_left + 1
+			indices.append_array([top_left, bottom_left, top_right,
+				top_right, bottom_left, bottom_right])
+
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = vertices
+	arrays[Mesh.ARRAY_COLOR] = colours
+	arrays[Mesh.ARRAY_INDEX] = indices
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	return mesh
+
+## How high the terrain sits at a point.
+##
+## Flat everywhere a turret could ever stand, and only then allowed to roll. The
+## simulation is 2D and every placement rule is a distance in the ground plane,
+## so relief under the playable band would put turrets on slopes the rules know
+## nothing about - floating on the high side, sunk on the low. Beyond that band
+## it costs nothing and it is the difference between terrain and a tabletop.
+func _ground_height(x: float, z: float) -> float:
+	var flat := _sim.build_max_distance() + float(_world.get("relief_clearance", 120.0))
+	# Most of this mesh is horizon, well outside the board. distance_to_path walks
+	# every segment, and calling it for all ~9,400 vertices is a visible hitch on
+	# a level load and worse on a phone - so anything outside the board's bounds
+	# by more than the flat band is answered without asking.
+	var beyond := 0.0
+	if x < -flat or z < -flat or x > _sim.bounds_width() + flat \
+			or z > _sim.bounds_height() + flat:
+		beyond = flat
+	else:
+		beyond = _sim.distance_to_path(x, z) - flat
+	if beyond <= 0.0:
+		return 0.0
+	var ramp := minf(beyond / float(_world.get("relief_ramp", 700.0)), 1.0)
+	var amplitude := float(_world.get("relief_height", 90.0))
+	# Two octaves at different scales, so it reads as landform rather than as a
+	# regular ripple.
+	var coarse := _hash_unit(int(x / 620.0), int(z / 620.0)) - 0.5
+	var fine := _hash_unit(int(x / 210.0) + 91, int(z / 210.0) + 47) - 0.5
+	return (coarse * 0.75 + fine * 0.25) * 2.0 * amplitude * ramp
+
+## Deterministic 0..1 noise from two integers. Not the simulation's Rng - this is
+## presentation, and pulling on the seeded stream from here would make what the
+## board looks like a function of what the board does.
+func _hash_unit(a: int, b: int) -> float:
+	var h := (a * 73856093) ^ (b * 19349663)
+	h = (h ^ (h >> 13)) * 1274126177
+	return float((h ^ (h >> 16)) & 0xFFFF) / 65535.0
+
+## A flat apron either side of the corridor, sitting just above the ground so it
+## reads as graded rather than as a decal.
+func _verge_mesh() -> ArrayMesh:
+	var half := float(_world.get("corridor_width", 76.0)) * 0.5
+	var reach := half + float(_world.get("wall_width", 16.0)) + float(_world.get("verge_width", 54.0))
+	var lift := float(_world.get("verge_height", 1.5))
+	var builder := _StripBuilder.new(_sim)
+	builder.strip(-reach, lift, reach, lift)
+	return builder.commit()
+
+## The centre line, as a thin raised strip down the middle of the road.
+func _marking_mesh() -> ArrayMesh:
+	var width := float(_world.get("road_line_width", 4.0))
+	var surface := float(_world.get("corridor_height", 9.0)) + 0.4
+	var builder := _StripBuilder.new(_sim)
+	builder.strip(-width, surface, width, surface)
+	return builder.commit()
+
+## Scattered debris off the road: one instanced layer, one draw call, placed from
+## the same positional hash the ground uses. It exists to give the terrain a
+## sense of scale - a board with nothing on it reads as a diagram however well it
+## is lit.
+func _prop_layer() -> MultiMeshInstance3D:
+	var spacing := float(_world.get("prop_spacing", 340.0))
+	var clearance := _sim.build_min_distance() + float(_world.get("prop_clearance", 30.0))
+	var size := float(_world.get("prop_size", 26.0))
+	var tint := _color_of(_world.get("prop_colour", "#333a30"))
+	var cols := int(_sim.bounds_width() / spacing)
+	var rows := int(_sim.bounds_height() / spacing)
+	if cols <= 0 or rows <= 0:
+		return null
+
+	var placed := PackedVector3Array()
+	for row in rows:
+		for col in cols:
+			# Jittered off the lattice, or it reads as a grid of crates.
+			var jx := (_hash_unit(col, row) - 0.5) * spacing * 0.8
+			var jz := (_hash_unit(row + 977, col + 331) - 0.5) * spacing * 0.8
+			var x := (float(col) + 0.5) * spacing + jx
+			var z := (float(row) + 0.5) * spacing + jz
+			var to_road := _sim.distance_to_path(x, z)
+			if to_road < clearance:
+				continue  # nothing standing where a turret or the road belongs
+			# ...and nothing way out in the dark either. Props are a scale cue for
+			# the ground you are playing on; scattered to the horizon they just
+			# read as debris floating in a void.
+			if to_road > float(_world.get("prop_reach", 620.0)):
+				continue
+			if _hash_unit(col + 17, row + 53) > float(_world.get("prop_density", 0.45)):
+				continue
+			placed.append(Vector3(x, 0.0, z))
+	if placed.is_empty():
+		return null
+
+	var block := BoxMesh.new()
+	block.size = Vector3.ONE
+	var material := _surface_material(Color.WHITE, 0.0,
+		float(_world.get("prop_roughness", 0.95)))
+	material.vertex_color_use_as_albedo = true
+	block.material = material
+	var layer := _instanced(block, placed.size())
+	var mm := layer.multimesh
+	for i in placed.size():
+		var spot := placed[i]
+		var scale := size * (0.55 + _hash_unit(int(spot.x), int(spot.z)))
+		var tall := scale * (0.4 + _hash_unit(int(spot.z), int(spot.x)) * 0.9)
+		var spin := _hash_unit(int(spot.z) + 7, int(spot.x) + 11) * PI
+		mm.set_instance_transform(i, Transform3D(
+			Basis(Vector3.UP, spin).scaled(Vector3(scale, tall, scale)),
+			Vector3(spot.x, tall * 0.5, spot.z)))
+		var shade := 0.82 + _hash_unit(int(spot.x) + 3, int(spot.z) + 5) * 0.36
+		mm.set_instance_color(i, Color(tint.r * shade, tint.g * shade, tint.b * shade))
+	mm.visible_instance_count = placed.size()
+	return layer
 
 ## The corridor, as one mesh built from a handful of quad strips.
 ##
@@ -405,32 +595,120 @@ func _build_cell_layer() -> void:
 	_cells = _instanced(mesh, _sim.grid_cols() * _sim.grid_rows())
 	add_child(_cells)
 
+## What each family is built out of. Read from behaviour where possible, but the
+## shapes themselves are authored: a mount, a housing and a muzzle, proportioned
+## so the four read apart at a glance and from directly above.
+##
+##   Ballistic  hexagonal mount, blocky housing, one long slim barrel
+##   Cannon     wide mount, tapered housing, short fat bore angled up
+##   Suppressor squat mount, drum housing, a coil ring instead of a barrel
+##   Railgun    low sled, narrow housing, a very long thin rail
 func _build_turret_layers() -> void:
 	var limit := _sim.t_used.size()
-	var base := CylinderMesh.new()
-	base.top_radius = float(_world.get("platform_radius", 18.0)) * 1.45
-	base.bottom_radius = float(_world.get("platform_radius", 18.0)) * 1.6
-	base.height = float(_world.get("pad_height", 12.0))
-	base.material = _instanced_material()
-	_turret_bases = _instanced(base, limit)
+	var radius := float(_world.get("platform_radius", 18.0))
+	var pad := float(_world.get("pad_height", 12.0))
+	var height := float(_world.get("platform_height", 48.0))
+	_turret_bases.clear()
+	_turret_bodies.clear()
+	_turret_barrels.clear()
 
-	var body := CylinderMesh.new()
-	body.top_radius = float(_world.get("platform_radius", 18.0)) * 0.7
-	body.bottom_radius = float(_world.get("platform_radius", 18.0))
-	body.height = float(_world.get("platform_height", 48.0))
-	body.material = _instanced_material()
-	_turret_bodies = _instanced(body, limit)
+	for family in _sim.blueprint_count():
+		var id := _sim.blueprint_name(family)
+		_turret_bases.append(_add_layer(_mount_mesh(id, radius, pad), limit))
+		_turret_bodies.append(_add_layer(_housing_mesh(id, radius, height), limit))
+		_turret_barrels.append(_add_layer(_muzzle_mesh(id), limit))
 
-	# A barrel makes the turret read as a machine with a front, and makes it
-	# obvious at a glance what each one is shooting at.
-	var barrel := BoxMesh.new()
-	barrel.size = Vector3.ONE
-	barrel.material = _instanced_material()
-	_turret_barrels = _instanced(barrel, limit)
+func _add_layer(mesh: Mesh, limit: int) -> MultiMeshInstance3D:
+	mesh.material = _instanced_material()
+	var layer := _instanced(mesh, limit)
+	add_child(layer)
+	return layer
 
-	add_child(_turret_bases)
-	add_child(_turret_bodies)
-	add_child(_turret_barrels)
+func _mount_mesh(id: String, radius: float, pad: float) -> Mesh:
+	var mount := CylinderMesh.new()
+	mount.height = pad
+	match id:
+		"railgun":
+			# A low sled rather than a turntable: the thing on top barely turns.
+			mount.top_radius = radius * 1.25
+			mount.bottom_radius = radius * 1.9
+			mount.radial_segments = 4
+		"cannon":
+			mount.top_radius = radius * 1.7
+			mount.bottom_radius = radius * 1.85
+			mount.radial_segments = 8
+		"suppressor":
+			mount.top_radius = radius * 1.3
+			mount.bottom_radius = radius * 1.5
+			mount.radial_segments = 12
+		_:
+			mount.top_radius = radius * 1.45
+			mount.bottom_radius = radius * 1.6
+			mount.radial_segments = 6
+	return mount
+
+func _housing_mesh(id: String, radius: float, height: float) -> Mesh:
+	match id:
+		"ballistic":
+			# Boxy: an autocannon receiver, not a turret dome.
+			var box := BoxMesh.new()
+			box.size = Vector3(radius * 1.5, height, radius * 1.9)
+			return box
+		"cannon":
+			# Tapered, wide at the base - it has to soak recoil.
+			var taper := CylinderMesh.new()
+			taper.top_radius = radius * 0.55
+			taper.bottom_radius = radius * 1.25
+			taper.height = height * 0.8
+			taper.radial_segments = 8
+			return taper
+		"suppressor":
+			# A drum. Nothing else on the board is a smooth vertical cylinder.
+			var drum := CylinderMesh.new()
+			drum.top_radius = radius * 0.85
+			drum.bottom_radius = radius * 0.85
+			drum.height = height * 0.9
+			drum.radial_segments = 16
+			return drum
+		_:
+			# Railgun: narrow and long front-to-back, all of it capacitor.
+			var sled := BoxMesh.new()
+			sled.size = Vector3(radius * 0.95, height * 0.72, radius * 2.3)
+			return sled
+
+func _muzzle_mesh(id: String) -> Mesh:
+	if id == "suppressor":
+		# No barrel at all - a coil ring. A weapon that does almost no damage
+		# should not be pointing a gun at anything.
+		var ring := TorusMesh.new()
+		ring.inner_radius = 0.34
+		ring.outer_radius = 0.5
+		ring.rings = 12
+		ring.ring_segments = 8
+		return ring
+	if id == "cannon":
+		var bore := CylinderMesh.new()
+		bore.top_radius = 0.5
+		bore.bottom_radius = 0.42
+		bore.height = 1.0
+		bore.radial_segments = 10
+		return bore
+	var rail := BoxMesh.new()
+	rail.size = Vector3.ONE
+	return rail
+
+## Muzzle proportions per family, as (length, girth, tilt-up in radians).
+## Authored next to the meshes they scale so the two cannot drift apart.
+func _muzzle_shape(id: String) -> Vector3:
+	match id:
+		"cannon":
+			return Vector3(0.62, 1.5, 0.62)   # short, fat, and lobbing upward
+		"railgun":
+			return Vector3(2.45, 0.52, 0.0)   # very long, very thin, dead flat
+		"suppressor":
+			return Vector3(0.5, 1.25, 0.0)    # a ring, not a barrel
+		_:
+			return Vector3(1.0, 1.0, 0.0)
 
 func _build_entity_layers() -> void:
 	# One layer per enemy class, so each can have its own silhouette. Class is
@@ -575,26 +853,41 @@ func _refresh_turrets() -> void:
 	var railgun := _color_of(_world.get("platform_railgun", "#d8d24f"))
 	var plinth := _color("pad_occupied")
 
-	var bases := _turret_bases.multimesh
-	var bodies := _turret_bodies.multimesh
+	# Turrets are grouped by family, so each family's layers only carry its own.
+	var filled := PackedInt32Array()
+	filled.resize(_turret_bases.size())
+	filled.fill(0)
+
 	for i in _sim.t_count:
+		var blueprint := _sim.platform_blueprint(i)
+		if blueprint < 0 or blueprint >= _turret_bases.size():
+			continue
+		var slot := filled[blueprint]
 		var tier := _sim.platform_tier(i)
-		var max_tier := maxi(_sim.platform_max_tier(_sim.platform_blueprint(i)) - 1, 1)
+		var max_tier := maxi(_sim.platform_max_tier(blueprint) - 1, 1)
 		var scale := 1.0 + growth * float(tier)
 		var fraction := float(tier) / float(max_tier)
-		var family := _family_colour(i, ballistic, cannon, suppressor, railgun)
-		var tint := family.lerp(top_colour, fraction)
+		var tint := _family_colour(i, ballistic, cannon, suppressor, railgun).lerp(
+			top_colour, fraction)
 
-		bases.set_instance_transform(i, Transform3D(Basis(),
+		var bases := _turret_bases[blueprint].multimesh
+		bases.set_instance_transform(slot, Transform3D(Basis(),
 			to_world(_sim.t_x[i], _sim.t_y[i], pad_height * 0.5)))
-		bases.set_instance_color(i, plinth)
+		bases.set_instance_color(slot, plinth)
 
-		bodies.set_instance_transform(i, Transform3D(
-			Basis().scaled(Vector3(scale, scale, scale)),
+		# Housings are turned to face the same way as the barrel, so a boxy
+		# receiver reads as pointing at something rather than as a stray crate.
+		var facing := _barrel_angle[i] if i < _barrel_angle.size() else 0.0
+		var bodies := _turret_bodies[blueprint].multimesh
+		bodies.set_instance_transform(slot, Transform3D(
+			Basis(Vector3.UP, facing).scaled(Vector3(scale, scale, scale)),
 			to_world(_sim.t_x[i], _sim.t_y[i], pad_height + body_height * scale * 0.5)))
-		bodies.set_instance_color(i, tint)
-	bases.visible_instance_count = _sim.t_count
-	bodies.visible_instance_count = _sim.t_count
+		bodies.set_instance_color(slot, tint)
+		filled[blueprint] = slot + 1
+
+	for family in _turret_bases.size():
+		_turret_bases[family].multimesh.visible_instance_count = filled[family]
+		_turret_bodies[family].multimesh.visible_instance_count = filled[family]
 
 # --- per frame ---------------------------------------------------------------------
 
@@ -694,7 +987,6 @@ func _update_projectiles(alpha: float) -> void:
 ## rather than in the simulation: the sim's aim is instant and authoritative, and
 ## this is only how it looks.
 func _update_barrels() -> void:
-	var mm := _turret_barrels.multimesh
 	var pad_height := float(_world.get("pad_height", 12.0))
 	var body_height := float(_world.get("platform_height", 48.0))
 	var growth := float(_world.get("platform_tier_growth", 0.28))
@@ -707,7 +999,14 @@ func _update_barrels() -> void:
 	var suppressor := _color_of(_world.get("platform_suppressor", "#4fc9d8"))
 	var railgun := _color_of(_world.get("platform_railgun", "#d8d24f"))
 
+	var filled := PackedInt32Array()
+	filled.resize(_turret_barrels.size())
+	filled.fill(0)
+
 	for i in _sim.t_count:
+		var blueprint := _sim.platform_blueprint(i)
+		if blueprint < 0 or blueprint >= _turret_barrels.size():
+			continue
 		var target := atan2(_sim.t_aim_x[i], _sim.t_aim_y[i])
 		var current: float = _barrel_angle[i] if i < _barrel_angle.size() else target
 		# Shortest way round, so a turret never spins the long way to track a
@@ -717,22 +1016,36 @@ func _update_barrels() -> void:
 		if i < _barrel_angle.size():
 			_barrel_angle[i] = current
 
+		var shape := _muzzle_shape(_sim.blueprint_name(blueprint))
 		var scale := 1.0 + growth * float(_sim.platform_tier(i))
 		var dx := sin(current)
 		var dz := cos(current)
+		var reach := barrel_length * scale * shape.x
+		var girth := barrel_radius * scale * shape.y
+		# Elevation is baked into the basis rather than applied as a separate
+		# rotation: a mortar that lobs its shells has to look like it does, and a
+		# railgun that does not has to look like it does not.
+		var rise := sin(shape.z)
+		var run := cos(shape.z)
 		var lift := pad_height + body_height * scale * 0.78
-		var reach := barrel_length * scale
-		var girth := barrel_radius * scale
 		_basis = Basis(
 			Vector3(dz * girth, 0.0, -dx * girth),
-			Vector3(0.0, girth, 0.0),
-			Vector3(dx * reach, 0.0, dz * reach))
-		mm.set_instance_transform(i, Transform3D(_basis,
-			Vector3(_sim.t_x[i] + dx * reach * 0.5, lift, _sim.t_y[i] + dz * reach * 0.5)))
-		var max_tier := maxi(_sim.platform_max_tier(_sim.platform_blueprint(i)) - 1, 1)
+			Vector3(-dx * rise * girth, run * girth, -dz * rise * girth),
+			Vector3(dx * run * reach, rise * reach, dz * run * reach))
+		var mm := _turret_barrels[blueprint].multimesh
+		var slot := filled[blueprint]
+		mm.set_instance_transform(slot, Transform3D(_basis, Vector3(
+			_sim.t_x[i] + dx * run * reach * 0.5,
+			lift + rise * reach * 0.5,
+			_sim.t_y[i] + dz * run * reach * 0.5)))
+		var max_tier := maxi(_sim.platform_max_tier(blueprint) - 1, 1)
 		var family := _family_colour(i, ballistic, cannon, suppressor, railgun)
-		mm.set_instance_color(i, family.lerp(top_colour, float(_sim.platform_tier(i)) / float(max_tier)))
-	mm.visible_instance_count = _sim.t_count
+		mm.set_instance_color(slot, family.lerp(top_colour,
+			float(_sim.platform_tier(i)) / float(max_tier)))
+		filled[blueprint] = slot + 1
+
+	for family_index in _turret_barrels.size():
+		_turret_barrels[family_index].multimesh.visible_instance_count = filled[family_index]
 
 ## Which family a turret belongs to, for tinting.
 ##

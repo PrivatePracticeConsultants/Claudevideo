@@ -221,6 +221,21 @@ cost something" band turned out to be about 16% wide.
 
 ## How it is drawn
 
+Each weapon family has its own mount, housing and muzzle — a Ballistic is a boxy
+receiver with a slim barrel, a Cannon a tapered mount with a short bore angled up
+to lob, a Suppressor a smooth drum with a coil ring and no barrel at all, a
+Railgun a low sled with a very long flat rail. Colour is a second cue, not the
+only one.
+
+The ground is a mottled grid rather than a flat quad, with a graded verge either
+side of the road, a centre line, and scattered debris for scale. It rolls in the
+distance and is dead flat anywhere a turret can stand: the simulation is 2D and
+every placement rule is a distance in the ground plane, so relief under the
+playable band would put turrets on slopes the rules know nothing about. All of it
+is hashed from position rather than randomised, so a board looks the same every
+time you open it.
+
+
 Perspective at a narrow field of view, a key light with shadows plus a cool fill,
 glow and filmic tonemapping — plus screen-space ambient occlusion **on Forward+
 only**. SSAO does not exist on the Compatibility renderer, which is what the web
