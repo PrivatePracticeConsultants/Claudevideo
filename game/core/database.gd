@@ -95,6 +95,9 @@ func _validate() -> void:
 
 	_req_num(scaling, "hp_growth_per_wave", "scaling.json", 0.0001)
 	_req_num(scaling, "bounty_growth_per_wave", "scaling.json", 0.0001)
+	# Required rather than defaulted, because the alternative is a balance value
+	# living as a literal in sim.gd, which the purity linter rightly refuses.
+	_req_num(scaling, "armour_max_bite", "scaling.json", 0.0)
 
 	_validate_enemies()
 	_validate_blueprints()
@@ -118,6 +121,22 @@ func _validate_enemies() -> void:
 		_req_int(e, "base_bounty", where, 0)
 		_req_num(e, "radius", where, 0.0001)
 		_req_num(e, "spawn_jitter_units", where, 0.0)
+		if (e as Dictionary).has("armour"):
+			_req_int(e, "armour", where, 0)
+		if (e as Dictionary).has("splits_into"):
+			var child := str((e as Dictionary).get("splits_into", ""))
+			if not enemies.has(child) or child.begins_with(_DOC_PREFIX):
+				errors.append("%s splits into unknown enemy \"%s\"." % [where, child])
+			elif child == id:
+				errors.append("%s splits into itself, which would never stop." % where)
+			elif not str((enemies[child] as Dictionary).get("splits_into", "")).is_empty():
+				# One hop only. A chain cannot then be a cycle, and the pool ceiling
+				# stays something the wave validator can compute in one multiply.
+				errors.append("%s splits into \"%s\", which itself splits. Splitting is one generation deep."
+					% [where, child])
+			_req_int(e, "split_count", where, 1)
+		elif (e as Dictionary).has("split_count"):
+			errors.append("%s has split_count but no splits_into, so nothing would ever hatch." % where)
 	if not found:
 		errors.append("enemies.json defines no enemies.")
 
@@ -290,7 +309,11 @@ func _validate_engagement() -> void:
 			var count := _req_int(group, "count", gwhere, 1)
 			_req_int(group, "spawn_interval_ticks", gwhere, 1)
 			_req_int(group, "start_delay_ticks", gwhere, 0)
-			in_wave += count
+			# A drone that breaks into others puts more on the board than the wave
+			# file lists. Counting only what is written would let a wave overrun the
+			# pool at the moment the last brood dies, which is the worst possible
+			# moment to start silently dropping drones.
+			in_wave += count * (1 + _split_yield(enemy_id))
 		peak = maxi(peak, in_wave)
 	# A wave that can out-spawn the enemy pool would silently drop enemies, which
 	# is exactly the kind of "the numbers are quietly wrong" failure that must not
@@ -298,6 +321,16 @@ func _validate_engagement() -> void:
 	var cap := int(sim.get("max_enemies", 0))
 	if peak > cap:
 		errors.append("A wave spawns %d enemies but sim.json max_enemies is %d. Raise max_enemies." % [peak, cap])
+
+## How many extra drones one of this type eventually puts on the board. 0 for
+## everything that simply dies.
+func _split_yield(enemy_id: String) -> int:
+	if not enemies.has(enemy_id):
+		return 0
+	var e: Dictionary = enemies[enemy_id]
+	if str(e.get("splits_into", "")).is_empty():
+		return 0
+	return maxi(0, int(e.get("split_count", 0)))
 
 # --- typed readers ----------------------------------------------------------
 

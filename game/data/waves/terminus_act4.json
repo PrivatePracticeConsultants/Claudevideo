@@ -15,7 +15,7 @@
       "groups": [
         {
           "enemy": "swarm",
-          "count": 267,
+          "count": 227,
           "spawn_interval_ticks": 3,
           "start_delay_ticks": 0
         },
@@ -24,6 +24,12 @@
           "count": 119,
           "spawn_interval_ticks": 9,
           "start_delay_ticks": 90
+        },
+        {
+          "enemy": "brood",
+          "count": 4,
+          "spawn_interval_ticks": 170,
+          "start_delay_ticks": 120
         }
       ]
     },
@@ -31,7 +37,7 @@
       "groups": [
         {
           "enemy": "swarm",
-          "count": 273,
+          "count": 233,
           "spawn_interval_ticks": 3,
           "start_delay_ticks": 0
         },
@@ -40,6 +46,12 @@
           "count": 122,
           "spawn_interval_ticks": 9,
           "start_delay_ticks": 90
+        },
+        {
+          "enemy": "brood",
+          "count": 4,
+          "spawn_interval_ticks": 174,
+          "start_delay_ticks": 120
         }
       ]
     },
@@ -47,7 +59,7 @@
       "groups": [
         {
           "enemy": "swarm",
-          "count": 247,
+          "count": 207,
           "spawn_interval_ticks": 3,
           "start_delay_ticks": 0
         },
@@ -62,6 +74,12 @@
           "count": 62,
           "spawn_interval_ticks": 26,
           "start_delay_ticks": 150
+        },
+        {
+          "enemy": "brood",
+          "count": 4,
+          "spawn_interval_ticks": 155,
+          "start_delay_ticks": 120
         }
       ]
     },
@@ -69,7 +87,7 @@
       "groups": [
         {
           "enemy": "swarm",
-          "count": 267,
+          "count": 227,
           "spawn_interval_ticks": 3,
           "start_delay_ticks": 0
         },
@@ -84,6 +102,12 @@
           "count": 68,
           "spawn_interval_ticks": 25,
           "start_delay_ticks": 150
+        },
+        {
+          "enemy": "brood",
+          "count": 4,
+          "spawn_interval_ticks": 170,
+          "start_delay_ticks": 120
         }
       ]
     },
@@ -91,7 +115,7 @@
       "groups": [
         {
           "enemy": "swarm",
-          "count": 294,
+          "count": 254,
           "spawn_interval_ticks": 3,
           "start_delay_ticks": 0
         },
@@ -106,6 +130,12 @@
           "count": 75,
           "spawn_interval_ticks": 25,
           "start_delay_ticks": 150
+        },
+        {
+          "enemy": "brood",
+          "count": 4,
+          "spawn_interval_ticks": 190,
+          "start_delay_ticks": 120
         }
       ]
     },
@@ -113,7 +143,7 @@
       "groups": [
         {
           "enemy": "swarm",
-          "count": 328,
+          "count": 278,
           "spawn_interval_ticks": 3,
           "start_delay_ticks": 0
         },
@@ -128,6 +158,12 @@
           "count": 83,
           "spawn_interval_ticks": 24,
           "start_delay_ticks": 150
+        },
+        {
+          "enemy": "brood",
+          "count": 5,
+          "spawn_interval_ticks": 166,
+          "start_delay_ticks": 120
         }
       ]
     },
@@ -135,7 +171,7 @@
       "groups": [
         {
           "enemy": "swarm",
-          "count": 367,
+          "count": 307,
           "spawn_interval_ticks": 3,
           "start_delay_ticks": 0
         },
@@ -150,6 +186,12 @@
           "count": 92,
           "spawn_interval_ticks": 23,
           "start_delay_ticks": 150
+        },
+        {
+          "enemy": "brood",
+          "count": 6,
+          "spawn_interval_ticks": 153,
+          "start_delay_ticks": 120
         }
       ]
     },
@@ -157,7 +199,7 @@
       "groups": [
         {
           "enemy": "swarm",
-          "count": 412,
+          "count": 352,
           "spawn_interval_ticks": 3,
           "start_delay_ticks": 0
         },
@@ -172,6 +214,12 @@
           "count": 103,
           "spawn_interval_ticks": 22,
           "start_delay_ticks": 150
+        },
+        {
+          "enemy": "brood",
+          "count": 6,
+          "spawn_interval_ticks": 176,
+          "start_delay_ticks": 120
         }
       ]
     },
@@ -179,7 +227,7 @@
       "groups": [
         {
           "enemy": "swarm",
-          "count": 462,
+          "count": 392,
           "spawn_interval_ticks": 3,
           "start_delay_ticks": 0
         },
@@ -194,6 +242,12 @@
           "count": 116,
           "spawn_interval_ticks": 21,
           "start_delay_ticks": 150
+        },
+        {
+          "enemy": "brood",
+          "count": 7,
+          "spawn_interval_ticks": 168,
+          "start_delay_ticks": 120
         }
       ]
     },
@@ -201,7 +255,7 @@
       "groups": [
         {
           "enemy": "swarm",
-          "count": 509,
+          "count": 429,
           "spawn_interval_ticks": 3,
           "start_delay_ticks": 0
         },
@@ -222,6 +276,12 @@
           "count": 14,
           "spawn_interval_ticks": 34,
           "start_delay_ticks": 210
+        },
+        {
+          "enemy": "brood",
+          "count": 8,
+          "spawn_interval_ticks": 160,
+          "start_delay_ticks": 120
         }
       ]
     },
@@ -229,7 +289,7 @@
       "groups": [
         {
           "enemy": "swarm",
-          "count": 564,
+          "count": 484,
           "spawn_interval_ticks": 3,
           "start_delay_ticks": 0
         },
@@ -256,6 +316,12 @@
           "count": 8,
           "spawn_interval_ticks": 43,
           "start_delay_ticks": 260
+        },
+        {
+          "enemy": "brood",
+          "count": 8,
+          "spawn_interval_ticks": 181,
+          "start_delay_ticks": 120
         }
       ]
     },
@@ -263,7 +329,7 @@
       "groups": [
         {
           "enemy": "swarm",
-          "count": 628,
+          "count": 538,
           "spawn_interval_ticks": 3,
           "start_delay_ticks": 0
         },
@@ -290,6 +356,12 @@
           "count": 10,
           "spawn_interval_ticks": 41,
           "start_delay_ticks": 260
+        },
+        {
+          "enemy": "brood",
+          "count": 9,
+          "spawn_interval_ticks": 179,
+          "start_delay_ticks": 120
         }
       ]
     },
@@ -297,7 +369,7 @@
       "groups": [
         {
           "enemy": "swarm",
-          "count": 697,
+          "count": 597,
           "spawn_interval_ticks": 3,
           "start_delay_ticks": 0
         },
@@ -324,6 +396,12 @@
           "count": 10,
           "spawn_interval_ticks": 39,
           "start_delay_ticks": 260
+        },
+        {
+          "enemy": "brood",
+          "count": 10,
+          "spawn_interval_ticks": 179,
+          "start_delay_ticks": 120
         }
       ]
     },
@@ -331,7 +409,7 @@
       "groups": [
         {
           "enemy": "swarm",
-          "count": 771,
+          "count": 651,
           "spawn_interval_ticks": 3,
           "start_delay_ticks": 0
         },
@@ -358,6 +436,12 @@
           "count": 11,
           "spawn_interval_ticks": 37,
           "start_delay_ticks": 260
+        },
+        {
+          "enemy": "brood",
+          "count": 12,
+          "spawn_interval_ticks": 162,
+          "start_delay_ticks": 120
         }
       ]
     },
@@ -365,7 +449,7 @@
       "groups": [
         {
           "enemy": "swarm",
-          "count": 849,
+          "count": 719,
           "spawn_interval_ticks": 3,
           "start_delay_ticks": 0
         },
@@ -392,6 +476,12 @@
           "count": 12,
           "spawn_interval_ticks": 36,
           "start_delay_ticks": 260
+        },
+        {
+          "enemy": "brood",
+          "count": 13,
+          "spawn_interval_ticks": 165,
+          "start_delay_ticks": 120
         }
       ]
     },
@@ -399,7 +489,7 @@
       "groups": [
         {
           "enemy": "swarm",
-          "count": 933,
+          "count": 793,
           "spawn_interval_ticks": 3,
           "start_delay_ticks": 0
         },
@@ -426,6 +516,12 @@
           "count": 13,
           "spawn_interval_ticks": 34,
           "start_delay_ticks": 260
+        },
+        {
+          "enemy": "brood",
+          "count": 14,
+          "spawn_interval_ticks": 169,
+          "start_delay_ticks": 120
         }
       ]
     }

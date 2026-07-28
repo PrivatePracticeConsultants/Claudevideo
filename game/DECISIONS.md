@@ -1128,6 +1128,155 @@ If more persistence is wanted, the cheap dials are `CARRY_TIER_CAP` (how deeply 
 carried turret is refitted) and `board_salvage_cap_share` — single values, one
 probe run each, no structural risk.
 
+## P0-53 · Targeting priority: the cheapest real decision a tower defence has
+
+Every turret shot whatever was furthest along the road. That is the right default
+and it is still the default — so nothing in the measured campaign moved — but it
+meant a line of forty turrets was one decision repeated forty times.
+
+Five orders: First, Last, Nearest, Toughest, Weakest. None is strictly better than
+another, which is the test a mechanic like this has to pass:
+
+- **Last** holds a leaker back for the guns behind it, and wastes a front line's
+  uptime doing it.
+- **Nearest** keeps a Suppressor's slow on whatever is closest to *it* rather than
+  closest to the exit.
+- **Toughest** puts a Railgun on the Siege Breaker and lets forty Skitters walk
+  past it.
+- **Weakest** is how a Cannon line clears chaff so the heavy guns are never
+  distracted.
+
+It is **simulation state, not a display preference** — it decides what gets shot —
+so it goes through the command log as `CMD_SET_PRIORITY`, is part of the state
+hash, and is proved to replay bit-identically. It also survives selling (the pool
+compaction moves it with the emplacement) and carries between acts, because tiers
+being refitted is a price and re-issuing thirty standing orders is just tedium.
+
+First keeps its own loop. It can reject a candidate on one float compare before
+touching its position, which the general path cannot — Nearest needs the distance
+it would be skipping. At 144 turrets against 2,048 drones that early-out is the
+difference between the profile that was measured and a slower one.
+
+## P0-54 · Armour and the Brood Carrier: the first drones that are not just bigger
+
+Five classes in, the enemy roster was an HP-and-payout ladder — every drone was
+the last one but more so. Two properties change that:
+
+**Armour comes off the hit, not off the health.** Flat, so it scales with how many
+rounds you need rather than how much damage you deal: armour is nearly nothing to
+a Railgun landing 640 and half of a tier-1 Autocannon's 10. It never reduces a hit
+below 1, because a weapon that literally cannot scratch something reads as broken
+rather than as a counter.
+
+It also **scales with the wave, and is capped as a share of the round**. Both
+halves are needed and the numbers say why. Health grows exponentially — by the
+last act of Terminus a drone carries 40× its base — so flat armour is a texture
+that exists for four levels and then evaporates. But uncapped scaling is worse: at
+the same point it would be 40, and a tier-4 Autocannon landing 42 would do 2.
+`armour_max_bite` (0.5) says armour may never take more than half a round, so it
+stays a reason to bring a bigger gun at every scale and never becomes a reason the
+small ones stop working.
+
+**The Brood Carrier splits.** 150 health plus three 22-health Skitters is 216
+effective against a Bulwark's 260, and it pays 61 against the Bulwark's 58 — so it
+is not a difficulty increase, it is a different shape at the same price. The
+design is the contradiction inside it: the weapon that kills the carrier well
+(one big round, past the armour) is the wrong weapon for what it leaves (three
+fast, fragile things), so a line that answers it has to be two things at once.
+And because splitting is on death and not on exit, letting one leak costs 5 and no
+Skitters — the only drone in the game where letting something through can be
+correct.
+
+**Splits are resolved at the end of the tick, not where the drone died.** Not
+style. Area damage and piercing walk the spatial hash, which was built at the top
+of the tick and still lists slots whose occupants have since been killed; hatching
+immediately can hand a child one of those slots, and the same blast then finds it
+alive and hits it too. Deterministic, but decided by the free list, which is no way
+to decide anything.
+
+**Seeded at a flat health budget.** Every carrier added to a wave removed ten
+Skitters (216 effective against 220), across the last four boards only — Lance
+arrives at level 18, Breaker at 26, Carrier at 33, which keeps the cadence the
+campaign already had. Measured after: all sixteen levels still win, and none of the
+four boards' act 4 can be cleared by its inherited board with no input (idle runs
+lose by 9, 9, 9 and 10 leaks).
+
+The pool validator counts `count × (1 + split_count)`. Counting only what the wave
+file lists would let a wave overrun `max_enemies` at the exact moment the last
+carrier dies, which is the worst possible time to start silently dropping drones.
+
+## P0-55 · Feedback: what the board was missing was not information, it was impact
+
+Muzzle flashes, impact sparks, blast rings, wrecks, and a camera shake when the
+corridor takes a hit. All of it decoration, and all of it derived by **diffing the
+simulation between ticks** rather than by the simulation reporting events: a shot
+fired is a cooldown that went up, an impact is a projectile slot that was alive and
+is not, a wreck is a drone slot that was alive and is not.
+
+That is the whole design. The sim never grows a render-facing event channel it
+would then have to hash, and an effect can never desync anything because there is
+nothing for it to desync. It also means the effects layer is optional — every
+headless test runs with none attached and nothing notices.
+
+Driven per TICK and not per frame, from main's step loop. At 4x a frame spans
+several ticks, and sampling only the one a frame lands on makes a firing line look
+like it is misfiring.
+
+One pooled MultiMesh of 1,024 billboards, so the project's rendering invariant
+holds: a hundred wrecks in one tick is still one draw call and not one node.
+
+**Two things only a screenshot could have said.** The first pass drew flat white
+squares — stickers on the board rather than light coming off it — and was fixed
+with a generated radial falloff texture (squared, because linear still shows a disc
+edge). The second was that a 26-unit flash on a 5,000-unit board is a few pixels,
+so `tools/capture_screenshot.gd` grew a `--zoom` flag; verifying this layer at
+full-board framing verifies nothing.
+
+Only a leak shakes the camera. If everything shakes the screen then nothing does,
+and a leak is the only event in the game that costs something you cannot get back.
+Shake is applied as an offset from a stored resting position rather than
+accumulated onto the live one, because a camera left displaced would silently
+break every screen-to-world pick after it — which is how you build in the wrong
+place.
+
+## P0-56 · Sound, synthesised in code
+
+There are no audio files in this repository and there is not going to be one. Every
+sample is generated at startup from filtered noise and swept sine tones, in about
+thirty lines of arithmetic. That buys three things worth more than fidelity: the
+web build stays the size it was, a family's sound is tuned by editing a number in
+`theme.json` the same way its colour is, and the game stops being silent.
+
+**The hard part is not synthesis, it is the throttle.** A hundred and forty-four
+turrets firing three times a second is four hundred shots a second; played
+faithfully that is not a firing line, it is white noise. Each kind of sound gets one
+voice every few tens of milliseconds and the rest are dropped — and the throttle is
+armed on the *decision*, not on a voice being found, or a sound dropped for want of
+a voice would be re-offered on the very next tick, defeating it exactly when the
+board is busiest. A leak is never throttled, because every one of them matters.
+
+Sound rides along with the same tick-diff the visual layer uses rather than working
+it out a second time, and the whole thing is muted with M.
+
+## P0-57 · A debrief, because winning without knowing why is not learning
+
+A tower defence tells you almost nothing about why you won. The board is a blur at
+4x and then it is a banner, and the next act's build decisions get made on a hunch.
+The debrief answers the one question those decisions actually turn on: which of
+your weapon families was doing the work.
+
+Damage is tracked per **family** and not per emplacement, and that is a correctness
+decision rather than a UI one. Selling compacts the platform pool by moving the last
+turret into the freed slot, so an emplacement index is only meaningful within a
+tick and a shot already in flight would credit whoever inherited the slot. A
+blueprint index never moves.
+
+**Overkill is not counted.** A Railgun round doing 640 to a drone with 12 health
+left is credited with 12. Claiming 640 would make the whole breakdown a fiction the
+moment anything died, and this file has a rule about numbers that cannot be
+explained. Families that never fired are omitted rather than printed as zeroes; a
+line of noughts is not information.
+
 ## P0-14 · Deliberately not built in P0
 
 Not oversights — later phases, per §5.7. Anything tempting that came up is in

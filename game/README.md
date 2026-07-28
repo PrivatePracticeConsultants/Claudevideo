@@ -5,9 +5,10 @@ Roguelite tower defense. Godot 4.x / GDScript. **3D, and it runs in a browser.**
 **Status: P0 complete and audited three times, then extended well past it.**
 Forty-eight levels — twelve boards played as four acts each, where every act
 opens more of the same road and keeps what you built on the last one — four
-weapon families with four tiers each, five drone classes, free placement on
-purchasable ground, saved progress, all on a deterministic 30Hz simulation drawn
-with real lighting, shadows and depth cueing. The design document is the master plan
+weapon families with four tiers each and five targeting orders apiece, six drone
+classes, free placement on purchasable ground, saved progress, synthesised sound,
+and an end-of-act debrief, all on a deterministic 30Hz simulation drawn with real
+lighting, shadows and depth cueing. The design document is the master plan
 (v2); the phase ladder is §5.7. Formally this is P0 plus much of P1/P2's content;
 the run layer (P3) is the next real milestone.
 
@@ -68,6 +69,7 @@ Corridor Integrity. Hit zero and the level is lost.
 | Bulwark Hauler | 260 | 55 | 12 | $58 | slow and very tough |
 | **Vanguard Lance** | **620** | **168** | 11 | $150 | fastest *and* tough |
 | **Siege Breaker** | **1400** | 78 | 16 | $300 | shrugs off 80% of slows |
+| **Brood Carrier** | 150 | 95 | 5 | $40 | armoured; breaks into 3 Skitters |
 
 The first three trade speed against health. The **Lance** does not — it is the
 fastest thing on the board *and* tougher than anything that is not slower than
@@ -75,9 +77,19 @@ it, so a turret gets less time on a target that needs more damage. A thin line o
 fire that held everything else lets Lances through.
 
 The **Breaker** exists because the Arc Suppressor does: once slowing everything
-was possible, slowing everything was the answer to everything. Both arrive
-partway into the campaign, never open a wave, and stay a small share of any
-level's head-count — they are elites, not populations.
+was possible, slowing everything was the answer to everything.
+
+The **Carrier** is the only drone that is not a point on the health ladder. It has
+armour, so cheap fast guns lose half of every round to it — and it breaks into
+three Skitters where it dies, which are faster than it was and want exactly the
+cheap fast guns that could not hurt the carrier. The weapon that kills it well is
+the wrong weapon for what it leaves. Because it splits on death and not on exit,
+letting one through costs 5 and no Skitters: the one drone in the game where a
+leak can be the right call.
+
+All three arrive partway into the campaign (levels 18, 26 and 33), never open a
+wave, and stay a small share of any level's head-count — they are elites, not
+populations.
 
 - **Click owned ground** (green) to build the selected weapon.
 - **Click a turret** to upgrade it a tier. Hovering shows its DPS and next cost.
@@ -85,14 +97,25 @@ level's head-count — they are elites, not populations.
   Ground can only be bought next to ground you already hold, and each purchase
   costs more than the last.
 - **Right-click a turret** to sell it back for 65% of everything spent on it.
+- **`T`** re-tasks the turret under the cursor: First (the default — whatever is
+  furthest along the road), Last, Nearest, Toughest, Weakest. None is strictly
+  better. *Last* holds a leaker back for the guns behind it and wastes a front
+  line's uptime; *Nearest* keeps a Suppressor's slow on what is closest to it
+  rather than to the exit; *Toughest* puts a Railgun on the Breaker and lets forty
+  Skitters past; *Weakest* is how a Cannon line clears chaff so the heavy guns are
+  never distracted. Orders carry between acts even though tiers do not.
 - **`E`** calls the next wave in early for a bounty — the gap between waves is
   when Capital accumulates, so it trades preparation for money.
 - **Scroll to zoom** on whatever the cursor is over, **middle-drag to pan**,
   **`Z`** to reset the view. Boards run to 16,000 units, so framing one end to
   end makes a turret a few pixels wide.
 - **`Q`** cycles weapon · **`1`–`4`** speed · **`space`** pause · **`[`**/**`]`**
-  move between unlocked boards · **`F3`** debug · **`R`** restart · **`N`** next
-  level after a win.
+  move between unlocked boards · **`M`** mute · **`F3`** debug · **`R`** restart ·
+  **`N`** next level after a win.
+
+When an act ends, the **debrief** under the banner says which of your weapon
+families actually did the work — damage landed and drones killed, per family, with
+overkill excluded. It is the one number the next act's build decisions turn on.
 
 Progress is saved per board, so the campaign resumes where you left it.
 
@@ -257,9 +280,27 @@ camera, which is what keeps range and coverage judgeable.
 
 Everything that scales with entity count is instanced — one `MultiMesh` layer per
 enemy class (so class reads from silhouette, not only colour), plus health bars,
-projectiles, buildable cells, and the three parts of every turret. The corridor
-is a single generated mesh rather than a box per segment. Draw calls do not grow
-with how much is happening.
+projectiles, buildable cells, the three parts of every turret, and the combat
+feedback layer. The corridor is a single generated mesh rather than a box per
+segment. Draw calls do not grow with how much is happening.
+
+Muzzle flashes, impact sparks, blast rings and wrecks are worked out by **diffing
+the simulation between ticks** — a shot fired is a cooldown that went up, a wreck
+is a drone slot that was alive and is not. The simulation never grows a
+render-facing event channel, and the effects layer is entirely optional: every
+headless test runs with none attached. A leak, and only a leak, shakes the camera.
+
+## How it sounds
+
+Synthesised in code. There are no audio files in this repository — every sample is
+generated at startup from filtered noise and swept sine tones, so the web build
+stays the size it was and a family's sound is tuned by editing a number in
+`theme.json` the same way its colour is.
+
+The interesting part is the throttle. A hundred and forty-four turrets firing three
+times a second is four hundred shots a second, which played faithfully is white
+noise rather than a firing line; each kind of sound gets one voice every few tens of
+milliseconds and the rest are dropped. A leak is never throttled. **`M`** mutes.
 
 ## Layout
 
@@ -276,9 +317,11 @@ data/       every balance value in the game, as JSON
   blueprints/       weapon families and their tiers
   enemies/          drone classes
   maps/ waves/      one file per map, one per engagement
-render/     3D drawing (MultiMesh + interpolation), camera, debug overlay
-ui/         HUD
-tools/      headless dev utilities (screenshot capture, render stress, web verify)
+render/     3D drawing (MultiMesh + interpolation), camera, effects, overlay
+audio/      sfx.gd — every sound in the game, synthesised at startup
+ui/         HUD, wave preview, end-of-act debrief
+tools/      headless dev utilities (screenshot capture, render stress, web verify,
+            balance_probe for the whole campaign, board_probe for one board)
 tests/      the suite; run_tests.gd is the headless entry point
 ```
 
@@ -317,6 +360,11 @@ these is the way it is, and what would justify changing it.
 xvfb-run -a godot --path game --rendering-driver opengl3 \
     --script res://tools/capture_screenshot.gd -- --wave 6 --overlay --out shot.png
 
+# ...and zoomed in, which is the only framing that shows anything a few
+# pixels wide - which is most of the feedback layer.
+xvfb-run -a godot --path game --rendering-driver opengl3 \
+    --script res://tools/capture_screenshot.gd -- --wave 9 --enemies 6 --zoom 8 --out shot.png
+
 # Verify draw calls stay flat as entity count climbs.
 xvfb-run -a godot --path game --rendering-driver opengl3 \
     --script res://tools/render_stress.gd
@@ -324,6 +372,11 @@ xvfb-run -a godot --path game --rendering-driver opengl3 \
 # Play the whole campaign chained, the way a player would, and print the table.
 # Reports rather than asserts - this is the tuning loop, not a gate.
 godot --headless --path game --script res://tools/balance_probe.gd
+godot --headless --path game --script res://tools/balance_probe.gd -- --from 32 --to 35 --idle
+
+# One board's four acts, idle-testing the last of them - the act that inherits
+# three acts of building is the one that can turn out to need no input at all.
+godot --headless --path game --script res://tools/board_probe.gd -- --from 44
 ```
 
 Scope discipline: ideas beyond the current phase go in `post-launch.md`, not into

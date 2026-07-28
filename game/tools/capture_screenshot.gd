@@ -21,6 +21,10 @@ func _initialize() -> void:
 	var min_enemies := 8
 	var out_path := "user://capture.png"
 	var show_overlay := false
+	# Zooming in is how you check the things that are a few pixels wide when a
+	# whole 5,000-unit act is framed at once - which is most of what the feedback
+	# layer draws.
+	var zoom_steps := 0
 	var args := OS.get_cmdline_user_args()
 	for i in args.size():
 		if args[i] == "--wave" and i + 1 < args.size():
@@ -29,11 +33,14 @@ func _initialize() -> void:
 			min_enemies = int(args[i + 1])
 		elif args[i] == "--out" and i + 1 < args.size():
 			out_path = args[i + 1]
+		elif args[i] == "--zoom" and i + 1 < args.size():
+			zoom_steps = int(args[i + 1])
 		elif args[i] == "--overlay":
 			show_overlay = true
-	_run(target_wave, min_enemies, out_path, show_overlay)
+	_run(target_wave, min_enemies, out_path, show_overlay, zoom_steps)
 
-func _run(target_wave: int, min_enemies: int, out_path: String, show_overlay: bool) -> void:
+func _run(target_wave: int, min_enemies: int, out_path: String, show_overlay: bool,
+		zoom_steps: int = 0) -> void:
 	await process_frame
 	var main: Node = load(MAIN_SCENE).instantiate()
 	root.add_child(main)
@@ -59,13 +66,48 @@ func _run(target_wave: int, min_enemies: int, out_path: String, show_overlay: bo
 	for _i in 4:
 		await process_frame
 
+	# run_greedy drives the sim directly, behind main's back, so the renderer has
+	# seen none of those ticks and its feedback layer has nothing to show. A few
+	# ticks fed through the normal path give it a before and an after to diff, so
+	# the capture includes muzzle flashes and wrecks rather than a board where
+	# nothing appears to be happening.
+	#
+	# Done last, and with main's own _process switched off, because effects age by
+	# real elapsed time: a frame in a software-rendered container can take a third
+	# of a second, which is longer than a muzzle flash exists for. Ageing them by
+	# zero freezes the instant rather than capturing whatever survived the stall.
+	# Zoom about whatever the board is busiest around, which is where anything
+	# worth looking at closely is happening.
+	if zoom_steps > 0:
+		var focus_x := 0.0
+		var focus_y := 0.0
+		var counted := 0
+		for i in sim.e_alive.size():
+			if sim.e_alive[i] == 1:
+				focus_x += sim.e_x[i]
+				focus_y += sim.e_y[i]
+				counted += 1
+		if counted > 0:
+			main._renderer.zoom_by(zoom_steps, SimRenderer3D.to_world(
+				focus_x / float(counted), focus_y / float(counted), 0.0))
+		await process_frame
+
+	main.set_process(false)
+	main._renderer.note_tick()
+	for _i in 3:
+		sim.step()
+		main._renderer.note_tick()
+	main._renderer.update_visuals(0.0, 0.0)
+	await process_frame
+
 	var image := root.get_texture().get_image()
 	var error := image.save_png(out_path)
 	if error != OK:
 		printerr("Could not write %s (error %d)" % [out_path, error])
 		quit(1)
 		return
-	print("captured %s  tick=%d wave=%d/%d enemies=%d projectiles=%d platforms=%d integrity=%d capital=%d" % [
+	print("captured %s  tick=%d wave=%d/%d enemies=%d projectiles=%d platforms=%d integrity=%d capital=%d effects=%d" % [
 		out_path, sim.tick(), sim.wave_number(), sim.wave_count(),
-		sim.e_live_count, sim.p_live_count, sim.t_count, sim.integrity(), sim.capital()])
+		sim.e_live_count, sim.p_live_count, sim.t_count, sim.integrity(), sim.capital(),
+		main._renderer.drawn_effect_count()])
 	quit(0)

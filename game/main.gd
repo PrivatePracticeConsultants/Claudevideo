@@ -42,6 +42,12 @@ var _theme: Dictionary = {}
 var _renderer: SimRenderer3D
 var _overlay: DebugOverlay
 var _hud: Hud
+## Synthesised at startup and kept across level changes - it holds no per-level
+## state, and regenerating its waveforms on every restart would be pure waste.
+var _sfx: Sfx
+## Result the debrief chord was last played for, so winning is announced once and
+## not on every frame of the banner.
+var _sounded_result: int = Sim.RESULT_RUNNING
 
 var _tick_period: float = 1.0
 var _accumulator: float = 0.0
@@ -82,6 +88,9 @@ func _ready() -> void:
 		_show_fatal("data/levels.json lists no levels.")
 		return
 	_index_boards()
+	_sfx = Sfx.new()
+	add_child(_sfx)
+	_sfx.setup(_theme)
 	_load_progress()
 	# Resume where they left off rather than at the start of a 36-level campaign.
 	_start_level(_board_starts[_boards_unlocked - 1], {})
@@ -101,6 +110,10 @@ func _start_level(index: int, offered_carry: Dictionary) -> void:
 		return
 
 	for child in get_children():
+		# Everything else is rebuilt per level; the sound is not, because its
+		# waveforms are generated once and belong to the session, not the act.
+		if child == _sfx:
+			continue
 		child.queue_free()
 	_platforms_drawn = 0
 	_tiers_drawn = 0
@@ -129,6 +142,10 @@ func _start_level(index: int, offered_carry: Dictionary) -> void:
 	_renderer = SimRenderer3D.new()
 	add_child(_renderer)
 	_renderer.setup(_sim, _theme)
+	# The renderer's tick diff is the only place that knows a shot was fired or a
+	# drone died, so sound rides along with it rather than deriving it twice.
+	_renderer.attach_audio(_sfx)
+	_sounded_result = Sim.RESULT_RUNNING
 
 	_hud = Hud.new()
 	add_child(_hud)
@@ -230,6 +247,11 @@ func _process(delta: float) -> void:
 		_accumulator += delta * float(_speed)
 		while _accumulator >= _tick_period and steps < MAX_STEPS_PER_FRAME:
 			_sim.step()
+			# The renderer diffs the board every tick to find what to flash, spark
+			# and blow up. Per tick and not per frame: at 4x a frame spans several
+			# ticks, and only sampling one of them makes a firing line look like it
+			# is misfiring.
+			_renderer.note_tick()
 			_accumulator -= _tick_period
 			steps += 1
 		if steps >= MAX_STEPS_PER_FRAME:
@@ -237,7 +259,7 @@ func _process(delta: float) -> void:
 	_overlay.note_steps(steps)
 
 	var alpha := 0.0 if _sim.is_over() else clampf(_accumulator / _tick_period, 0.0, 1.0)
-	_renderer.update_visuals(alpha)
+	_renderer.update_visuals(alpha, delta)
 	# Platform geometry is static, so it is rebuilt when the board changes -
 	# either a new platform, or an existing one changing tier.
 	var tier_sum := 0
@@ -251,6 +273,12 @@ func _process(delta: float) -> void:
 		_renderer.refresh_board()
 	_refresh_cursor()
 	_hud.refresh(_speed, _paused, _hover_platform, _blueprint, _cursor_can_buy)
+	if _sim.result() != _sounded_result:
+		_sounded_result = _sim.result()
+		if _sounded_result == Sim.RESULT_WIN:
+			_sfx.play(Sfx.WIN)
+		elif _sounded_result == Sim.RESULT_LOSS:
+			_sfx.play(Sfx.LOSS)
 
 func _unhandled_input(event: InputEvent) -> void:
 	if _sim == null:
@@ -302,6 +330,9 @@ func _unhandled_input(event: InputEvent) -> void:
 			_sim.queue_buy_cell(_sim.tick(), _cursor_cell_x, _cursor_cell_y)
 		else:
 			_sim.queue_place(_sim.tick(), roundi(_cursor_sim_x), roundi(_cursor_sim_y), _blueprint)
+		# Played on the click, not on the command succeeding: a click that the sim
+		# then refuses still deserves an acknowledgement that the game heard it.
+		_sfx.play(Sfx.BUILD)
 	elif event is InputEventKey and event.pressed and not event.echo:
 		match (event as InputEventKey).keycode:
 			KEY_1: _speed = 1
@@ -312,6 +343,15 @@ func _unhandled_input(event: InputEvent) -> void:
 				# Call the next wave in early for a bounty. Harmlessly rejected
 				# if there is no gap left to skip.
 				_sim.queue_send_wave(_sim.tick())
+			KEY_T:
+				# Re-task whatever the pointer is over. On the hovered turret rather
+				# than as a global mode: it is per-turret state, and a mode would mean
+				# the same keypress does something different depending on a thing you
+				# cannot see.
+				if _hover_platform >= 0:
+					var next := (_sim.platform_priority(_hover_platform) + 1) % Sim.target_mode_count()
+					_sim.queue_priority(_sim.tick(), _hover_platform, next)
+			KEY_M: _sfx.toggle_mute()
 			KEY_Z: _renderer.reset_view()
 			KEY_BRACKETLEFT: _select_board(-1)
 			KEY_BRACKETRIGHT: _select_board(1)

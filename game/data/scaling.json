@@ -1,5 +1,6 @@
 {
-  "_comment": "Master plan section 4.1. Both curves are exponential on purpose. HP climbs at 1.10 per wave against bounty at 1.05, so income falls behind HP by design and late waves force prioritisation. Act multipliers and threat_level scaling arrive in P3/P4 and are deliberately absent here.",
+  "_comment": "Master plan section 4.1. Both curves are exponential on purpose. HP climbs at 1.10 per wave against bounty at 1.05, so income falls behind HP by design and late waves force prioritisation. Act multipliers and threat_level scaling arrive in P3/P4 and are deliberately absent here. armour_max_bite is the most of a single hit that armour may absorb. Armour scales with the same per-wave curve as health, or it would be a texture that exists for four levels and then evaporates; the cap is what stops that scaling from turning a tier-4 Autocannon's 42 into 2 by the last act.",
   "hp_growth_per_wave": 1.10,
-  "bounty_growth_per_wave": 1.05
+  "bounty_growth_per_wave": 1.05,
+  "armour_max_bite": 0.5
 }

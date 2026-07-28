@@ -1,18 +1,20 @@
 class_name Hud
 extends CanvasLayer
 
-## Heads-up display: the numbers you need to play, what is coming next, and the
-## end-of-engagement banner.
+## Heads-up display: the numbers you need to play, what is coming next, the
+## end-of-engagement banner, and the debrief under it.
 ##
-## Most of section 3.6's table-stakes QoL now exists - sell, send-wave-early,
-## tier readouts, and a preview of the next wave. Still deliberately absent:
-## targeting-priority controls, and a build menu richer than one cycling key.
+## Section 3.6's table-stakes QoL is now all here - sell, send-wave-early, tier
+## readouts, a preview of the next wave, and per-turret targeting orders on the
+## turret you are hovering. Still deliberately absent: a build menu richer than
+## one cycling key.
 
 var _sim: Sim
 var _theme: Dictionary
 var _stats: Label
 var _hint: Label
 var _banner: Label
+var _debrief: Label
 var _level: Label
 var _preview: Label
 var _level_text: String = ""
@@ -41,7 +43,7 @@ func setup(sim: Sim, theme: Dictionary) -> void:
 	_hint.position = Vector2(14, 686)
 	_hint.add_theme_font_size_override("font_size", 12)
 	_hint.add_theme_color_override("font_color", _color("text_dim"))
-	_hint.text = "left-click: build / upgrade / buy ground  ·  right-click a turret: sell  ·  scroll: zoom  ·  middle-drag: pan  ·  Z reset view  ·  Q weapon  ·  E call wave early  ·  1-4 speed  ·  space pause  ·  [ ] board  ·  F3 debug  ·  R restart"
+	_hint.text = "left-click: build / upgrade / buy ground  ·  right-click a turret: sell  ·  T retarget  ·  scroll: zoom  ·  middle-drag: pan  ·  Z reset view  ·  Q weapon  ·  E call wave early  ·  1-4 speed  ·  space pause  ·  [ ] board  ·  M mute  ·  F3 debug  ·  R restart"
 	add_child(_hint)
 
 	_level = Label.new()
@@ -59,6 +61,19 @@ func setup(sim: Sim, theme: Dictionary) -> void:
 	_preview.add_theme_font_size_override("font_size", 14)
 	_preview.add_theme_color_override("font_color", _color("text_dim"))
 	add_child(_preview)
+
+	# What actually happened, once it is over. A tower defence gives you almost no
+	# feedback on WHY you won or lost - the board is a blur at 4x and then it is a
+	# banner - and "which of my four weapon families was doing the work" is the one
+	# question every build decision in the next act depends on.
+	_debrief = Label.new()
+	_debrief.position = Vector2(0, 372)
+	_debrief.size = Vector2(1280, 260)
+	_debrief.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_debrief.add_theme_font_size_override("font_size", 17)
+	_debrief.add_theme_color_override("font_color", _color("text"))
+	_debrief.visible = false
+	add_child(_debrief)
 
 	_banner = Label.new()
 	_banner.position = Vector2(0, 300)
@@ -103,7 +118,8 @@ func refresh(speed: int, paused: bool, hovered_platform: int = -1,
 	var signature := hash([_sim.capital(), _sim.integrity(), _sim.wave_number(),
 		speed, paused, _sim.result(), hovered_platform, blueprint, can_buy_ground,
 		_sim.t_count, _sim.cells_bought(), _sim.can_send_wave(), _sim.next_wave_number(),
-		-1 if hovered_platform < 0 else _sim.platform_tier(hovered_platform)])
+		-1 if hovered_platform < 0 else _sim.platform_tier(hovered_platform),
+		-1 if hovered_platform < 0 else _sim.platform_priority(hovered_platform)])
 	if signature == _last_signature:
 		return
 	_last_signature = signature
@@ -148,6 +164,11 @@ func refresh(speed: int, paused: bool, hovered_platform: int = -1,
 			label += "   MAX TIER"
 		else:
 			label += "   upgrade $%d%s" % [upgrade, "" if _sim.capital() >= upgrade else "  (short)"]
+		# What it is shooting at, and how to change it. Shown on the hovered turret
+		# rather than as a global mode, because it is per-turret state and reading it
+		# anywhere else would be reading someone else's orders.
+		label += "   [T] targets %s" % _sim.priority_name(
+			_sim.platform_priority(hovered_platform)).to_upper()
 		label += "   right-click: sell $%d" % _sim.sell_value(hovered_platform)
 		_stats.text = "CAPITAL $%d    INTEGRITY %d    WAVE %d/%d    %s" % [
 			_sim.capital(), _sim.integrity(),
@@ -155,8 +176,11 @@ func refresh(speed: int, paused: bool, hovered_platform: int = -1,
 
 	if not _sim.is_over():
 		_banner.visible = false
+		_debrief.visible = false
 		return
 	_banner.visible = true
+	_debrief.visible = true
+	_debrief.text = debrief_text()
 	if _sim.result() == Sim.RESULT_WIN:
 		if _is_last_level:
 			_banner.text = "CONTRACT COMPLETE   ·   %d integrity   ·   R to replay" % _sim.integrity()
@@ -172,6 +196,56 @@ func refresh(speed: int, paused: bool, hovered_platform: int = -1,
 	else:
 		_banner.text = "CORRIDOR LOST   ·   wave %d/%d   ·   R to retry" % [_sim.wave_number(), _sim.wave_count()]
 		_banner.add_theme_color_override("font_color", _color("bad"))
+
+## The end-of-act debrief, as text.
+##
+## Damage is per weapon FAMILY, which is both the honest unit (see Sim's
+## _family_damage - an emplacement index moves when you sell) and the useful one:
+## the decision it informs is "what should I build more of", not "which of my
+## hundred and forty-four turrets had the best afternoon". Families that never
+## fired are omitted rather than printed as zeroes; a line of noughts is not
+## information.
+func debrief_text() -> String:
+	var lines := PackedStringArray()
+	lines.append("%s DESTROYED   ·   %s LEAKED   ·   %d TURRETS STANDING   ·   $%s IN HAND" % [
+		_thousands(_sim.kills()), _thousands(_sim.leaks()), _sim.t_count,
+		_thousands(_sim.capital())])
+	var total := 0
+	for b in _sim.blueprint_count():
+		total += _sim.family_damage(b)
+	for b in _sim.blueprint_count():
+		var damage := _sim.family_damage(b)
+		if damage <= 0:
+			continue
+		lines.append("%-16s %12s damage  (%d%%)   %s kills" % [
+			_sim.blueprint_display_name(b).to_upper(), _thousands(damage),
+			int(round(float(damage) * 100.0 / float(maxi(total, 1)))),
+			_thousands(_sim.family_kills(b))])
+	if total <= 0:
+		lines.append("nothing fired a shot")
+	var tail := PackedStringArray()
+	if _sim.sold() > 0:
+		tail.append("%d sold" % _sim.sold())
+	if _sim.early_calls() > 0:
+		tail.append("%d waves called early" % _sim.early_calls())
+	if _sim.cells_bought() > 0:
+		tail.append("%d ground bought" % _sim.cells_bought())
+	if not tail.is_empty():
+		lines.append("  ·  ".join(tail))
+	return "\n".join(lines)
+
+## 1234567 -> "1,234,567". Godot has no thousands separator, and a seven-digit
+## damage figure is unreadable without one.
+func _thousands(value: int) -> String:
+	var digits := str(absi(value))
+	var out := ""
+	var count := 0
+	for i in range(digits.length() - 1, -1, -1):
+		out = digits[i] + out
+		count += 1
+		if count % 3 == 0 and i > 0:
+			out = "," + out
+	return ("-" if value < 0 else "") + out
 
 ## What the next act will actually credit, which is the board's worth clamped to
 ## that act's own ceiling. Public so a test can hold it against what the sim then

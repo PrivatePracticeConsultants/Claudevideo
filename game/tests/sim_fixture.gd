@@ -284,6 +284,8 @@ static func replay(sim: Sim, command_log: Dictionary) -> int:
 				sim.queue_sell(log_tick[i], log_a[i])
 			Sim.CMD_SEND_WAVE:
 				sim.queue_send_wave(log_tick[i])
+			Sim.CMD_SET_PRIORITY:
+				sim.queue_priority(log_tick[i], log_a[i], log_b[i])
 	var ticks := 0
 	while not sim.is_over() and ticks < MAX_TICKS:
 		sim.step()

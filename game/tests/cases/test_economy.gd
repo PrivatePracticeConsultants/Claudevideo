@@ -134,7 +134,7 @@ func test_a_kill_pays_its_bounty() -> void:
 	var before := sim.capital()
 	var bounty := sim.e_bounty[0]
 	assert_gt(float(bounty), 0.0, "wave 1 bounty is set")
-	sim._damage_enemy(0, sim.e_hp[0])
+	sim._damage_enemy(0, sim.e_hp[0], -1)
 	assert_eq(sim.capital(), before + bounty, "the kill paid exactly its bounty")
 	assert_eq(sim.kills(), 1, "and counted as a kill")
 
@@ -144,7 +144,7 @@ func test_partial_damage_pays_nothing() -> void:
 	sim._begin_wave(0)
 	sim._spawn(sim.enemy_index("walker"))
 	var before := sim.capital()
-	sim._damage_enemy(0, 1)
+	sim._damage_enemy(0, 1, -1)
 	assert_eq(sim.capital(), before, "wounding is not killing")
 	assert_eq(sim.e_live_count, 1, "the enemy is still alive")
 

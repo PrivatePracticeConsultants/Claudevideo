@@ -143,7 +143,7 @@ func test_a_railgun_round_damages_a_whole_line() -> void:
 	for n in 4:
 		before.append(sim.e_hp[n])
 	# Fire straight down the line they are standing in.
-	sim._lance_through(400.0, 500.0, 740.0, 500.0, 26.0, 5)
+	sim._lance_through(400.0, 500.0, 740.0, 500.0, 26.0, 5, -1)
 	var hit := 0
 	for n in 4:
 		if sim.e_hp[n] < before[n]:
@@ -158,5 +158,5 @@ func test_pierce_spares_anything_off_the_line() -> void:
 	sim.e_y[0] = 900.0
 	sim._hash.rebuild(sim.e_alive, sim.e_x, sim.e_y, sim.e_alive.size())
 	var before := sim.e_hp[0]
-	sim._lance_through(400.0, 500.0, 800.0, 500.0, 26.0, 50)
+	sim._lance_through(400.0, 500.0, 800.0, 500.0, 26.0, 50, -1)
 	assert_eq(sim.e_hp[0], before, "a drone 400 units off the lane is untouched")

@@ -67,6 +67,61 @@ func test_building_rules_must_leave_somewhere_to_build() -> void:
 	assert_false(db.is_valid(), "an empty buildable band must fail validation")
 	assert_true(db.error_text().contains("buildable"), "the error says what is wrong: %s" % db.error_text())
 
+func test_a_drone_that_splits_into_itself_is_rejected() -> void:
+	# It would never stop. Better a load error naming the file than a wave that
+	# fills the pool and then silently drops everything after it.
+	var db := Database.load_engagement(MAP, ENGAGEMENT)
+	db.errors = PackedStringArray()
+	(db.enemies["walker"] as Dictionary)["splits_into"] = "walker"
+	(db.enemies["walker"] as Dictionary)["split_count"] = 2
+	db._validate_enemies()
+	assert_false(db.is_valid(), "a self-splitting drone must fail to load")
+	assert_true(db.error_text().contains("itself"), "the error says why: %s" % db.error_text())
+
+func test_a_split_chain_deeper_than_one_generation_is_rejected() -> void:
+	# One hop means a cycle cannot be written, and means the wave validator can
+	# compute the pool ceiling in a single multiply.
+	var db := Database.load_engagement(MAP, ENGAGEMENT)
+	db.errors = PackedStringArray()
+	(db.enemies["walker"] as Dictionary)["splits_into"] = "brood"
+	(db.enemies["walker"] as Dictionary)["split_count"] = 2
+	db._validate_enemies()
+	assert_false(db.is_valid(), "splitting into something that splits must fail")
+	assert_true(db.error_text().contains("one generation"),
+		"the error states the rule: %s" % db.error_text())
+
+func test_a_split_into_nothing_is_rejected() -> void:
+	var db := Database.load_engagement(MAP, ENGAGEMENT)
+	db.errors = PackedStringArray()
+	(db.enemies["walker"] as Dictionary)["splits_into"] = "phantom"
+	(db.enemies["walker"] as Dictionary)["split_count"] = 2
+	db._validate_enemies()
+	assert_false(db.is_valid(), "splitting into an undefined drone must fail")
+	assert_true(db.error_text().contains("phantom"), "the error names it: %s" % db.error_text())
+
+func test_a_split_count_with_nothing_to_hatch_is_rejected() -> void:
+	var db := Database.load_engagement(MAP, ENGAGEMENT)
+	db.errors = PackedStringArray()
+	(db.enemies["walker"] as Dictionary)["split_count"] = 3
+	db._validate_enemies()
+	assert_false(db.is_valid(), "split_count without splits_into must fail")
+
+func test_the_pool_ceiling_counts_what_will_hatch() -> void:
+	# The wave file lists carriers, not the Skitters inside them. Counting only
+	# what is written would let a wave overrun the pool at the exact moment the
+	# last carrier dies - the worst possible time to start dropping drones.
+	var db := Database.load_engagement(MAP, ENGAGEMENT)
+	db.errors = PackedStringArray()
+	var yield_per := db._split_yield("brood")
+	assert_gt(float(yield_per), 0.0, "fixture sanity: a carrier does yield extras")
+	db.sim["max_enemies"] = float(1 + yield_per)
+	((db.engagement["waves"] as Array)[0] as Dictionary)["groups"] = [
+		{"enemy": "brood", "count": 2, "spawn_interval_ticks": 10, "start_delay_ticks": 0}
+	]
+	db._validate_engagement()
+	assert_false(db.is_valid(),
+		"two carriers need room for two carriers and everything they carry")
+
 func test_every_campaign_level_loads() -> void:
 	var levels := Database.load_levels()
 	assert_gt(float(levels.size()), 0.0, "levels.json lists levels")

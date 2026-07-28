@@ -30,7 +30,7 @@ func test_a_shell_damages_every_enemy_in_the_blast() -> void:
 		if sim.e_alive[i] == 1:
 			before.append(sim.e_hp[i])
 
-	sim._detonate(sim.e_x[0], sim.e_y[0], 400.0, 20, 1.0)
+	sim._detonate(sim.e_x[0], sim.e_y[0], 400.0, 20, 1.0, -1)
 	var damaged := 0
 	var index := 0
 	for i in sim.e_alive.size():
@@ -54,7 +54,7 @@ func test_damage_falls_off_with_distance() -> void:
 	sim._hash.rebuild(sim.e_alive, sim.e_x, sim.e_y, sim.e_alive.size())
 	var full := sim.e_hp[0]
 	var edge := sim.e_hp[1]
-	sim._detonate(500.0, 500.0, 100.0, 40, 0.25)
+	sim._detonate(500.0, 500.0, 100.0, 40, 0.25, -1)
 	var centre_damage := full - sim.e_hp[0]
 	var edge_damage := edge - sim.e_hp[1]
 	assert_gt(float(centre_damage), float(edge_damage), "the centre takes more than the edge")
@@ -70,7 +70,7 @@ func test_a_blast_never_deals_zero() -> void:
 	sim.e_y[0] = 599.0
 	sim._hash.rebuild(sim.e_alive, sim.e_x, sim.e_y, sim.e_alive.size())
 	var before := sim.e_hp[0]
-	sim._detonate(500.0, 500.0, 100.0, 1, 0.0)
+	sim._detonate(500.0, 500.0, 100.0, 1, 0.0, -1)
 	assert_lt(float(sim.e_hp[0]), float(before), "even a grazing hit removes at least 1 HP")
 
 func test_enemies_outside_the_radius_are_untouched() -> void:
@@ -81,7 +81,7 @@ func test_enemies_outside_the_radius_are_untouched() -> void:
 	sim.e_y[0] = 500.0
 	sim._hash.rebuild(sim.e_alive, sim.e_x, sim.e_y, sim.e_alive.size())
 	var before := sim.e_hp[0]
-	sim._detonate(1500.0, 1500.0, 100.0, 999, 1.0)
+	sim._detonate(1500.0, 1500.0, 100.0, 999, 1.0, -1)
 	assert_eq(sim.e_hp[0], before, "a blast on the far side of the map does nothing")
 
 func test_area_damage_stays_deterministic() -> void:

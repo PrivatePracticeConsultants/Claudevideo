@@ -32,7 +32,26 @@ extends RefCounted
 
 enum { RESULT_RUNNING, RESULT_WIN, RESULT_LOSS }
 enum { PHASE_WAITING, PHASE_SPAWNING, PHASE_CLEARING, PHASE_DONE }
-enum { CMD_PLACE, CMD_UPGRADE, CMD_BUY_CELL, CMD_SELL, CMD_SEND_WAVE }
+enum { CMD_PLACE, CMD_UPGRADE, CMD_BUY_CELL, CMD_SELL, CMD_SEND_WAVE, CMD_SET_PRIORITY }
+
+## What a turret shoots at when more than one thing is in range.
+##
+## FIRST is the default and is what every turret did before this existed, so
+## nothing in the campaign's measured balance moves unless the player asks for it.
+## The others are not strictly-better options; each is the wrong answer somewhere:
+## LAST holds a leaker back for the turrets behind it and wastes a front line's
+## uptime; NEAREST keeps a suppressor's slow on whatever is closest to it rather
+## than whatever is closest to the exit; TOUGHEST puts a railgun on the Breaker and
+## lets forty Skitters walk past it; WEAKEST is how a cannon line clears chaff so
+## the heavy guns are never distracted.
+enum { TARGET_FIRST, TARGET_LAST, TARGET_NEAREST, TARGET_TOUGHEST, TARGET_WEAKEST }
+const TARGET_MODE_NAMES := ["First", "Last", "Nearest", "Toughest", "Weakest"]
+
+## How many there are. A function and not a const because GDScript will not accept
+## `TARGET_MODE_NAMES.size()` in a constant expression, and writing the number out
+## would put a literal in a file whose whole point is that it has none.
+static func target_mode_count() -> int:
+	return TARGET_MODE_NAMES.size()
 
 ## Why a placement was refused. Returned rather than a bare bool so the build
 ## cursor can tell the player which rule they are breaking instead of just
@@ -110,6 +129,33 @@ var _type_jitter: PackedFloat64Array = PackedFloat64Array()
 ## How much of a suppression effect a drone shrugs off, 0 (none) to 1 (immune).
 ## Absent means 0, so every drone written before suppression existed reads right.
 var _type_slow_resist: PackedFloat64Array = PackedFloat64Array()
+## Flat damage subtracted from every hit this drone takes, before its health.
+##
+## Flat and not a percentage because that is what makes it a shape and not a
+## multiplier: armour 3 is nothing to a Railgun landing 640 and most of the round
+## to a tier-1 Autocannon landing 5. It is the answer to "one weapon does
+## everything" that a percentage resistance would not be, and it never reduces a
+## hit below 1 - a weapon that literally cannot scratch something reads as broken
+## rather than as a counter.
+## It scales with the wave the way health does, and is capped as a share of the
+## hit it is subtracting from.
+##
+## Both halves are needed. Flat armour in a game where health grows exponentially
+## is a texture that exists for four levels and then evaporates - by the last act
+## of Terminus a drone carries 40x its base health and 3 armour is nothing. But
+## armour that scales without a cap is worse: at the same point it would be 40,
+## and a tier-4 Autocannon landing 42 would do 2. The cap says armour may never
+## take more than `armour_max_bite` of a round, so it stays a reason to bring a
+## bigger gun at every scale and never becomes a reason the small ones stop
+## working.
+var _type_armour: PackedInt32Array = PackedInt32Array()
+var _type_armour_now: PackedInt32Array = PackedInt32Array()
+var _armour_max_bite: float = 0.0
+## What this drone leaves behind when it dies, and how many. -1 for the drones
+## that simply die. Validated one hop deep: a splitting type may only split into a
+## non-splitting one, which makes a cycle impossible to write.
+var _type_split_into: PackedInt32Array = PackedInt32Array()
+var _type_split_count: PackedInt32Array = PackedInt32Array()
 
 # Blueprint tiers are flattened to [tier_slot]; a blueprint's tier t lives at
 # _bp_tier_offset[b] + t. P0 only ever places tier 0, but the table already has
@@ -213,6 +259,20 @@ var e_live_count: int = 0
 var _e_free: PackedInt32Array = PackedInt32Array()
 var _e_free_top: int = 0
 
+## Drones that died this tick and owe children, resolved at the end of the tick
+## rather than where they died.
+##
+## Not a stylistic choice. Area damage and piercing walk the spatial hash, which
+## was built at the top of the tick and still lists slots whose occupants have
+## since been killed. Spawning a child immediately can hand it one of those stale
+## slots, and the very blast that killed its parent would then find it alive and
+## hit it too - deterministic, but arbitrary, and dependent on which slot the free
+## list happened to return. Deferring to the end of the tick means a brood always
+## emerges into the next tick's hash, whatever killed it.
+var _split_type: PackedInt32Array = PackedInt32Array()
+var _split_prog: PackedFloat64Array = PackedFloat64Array()
+var _split_pending: int = 0
+
 ## Projectile storage. `p_target_gen` is not redundant with `p_target`: slots are
 ## recycled, so without a generation stamp a projectile in flight can land on a
 ## brand-new enemy that happens to have been given the dead one's slot.
@@ -236,6 +296,9 @@ var p_pierce: PackedFloat64Array = PackedFloat64Array()
 ## there and the point it went off, so it has to remember its own origin.
 var p_from_x: PackedFloat64Array = PackedFloat64Array()
 var p_from_y: PackedFloat64Array = PackedFloat64Array()
+## Which weapon family fired it, for the damage tally. The blueprint index and not
+## the platform index: see _family_damage.
+var p_family: PackedInt32Array = PackedInt32Array()
 var p_live_count: int = 0
 var _p_free: PackedInt32Array = PackedInt32Array()
 var _p_free_top: int = 0
@@ -255,7 +318,22 @@ var t_y: PackedFloat64Array = PackedFloat64Array()
 ## knew the answer to.
 var t_aim_x: PackedFloat64Array = PackedFloat64Array()
 var t_aim_y: PackedFloat64Array = PackedFloat64Array()
+## Which enemy this turret picks when several are in range. Simulation state, not
+## a display preference: it decides what gets shot, so it is logged as a command,
+## hashed, and carried between acts along with the emplacement it belongs to.
+var t_priority: PackedInt32Array = PackedInt32Array()
 var t_count: int = 0
+
+## Damage actually landed, per weapon family, and drones killed per family.
+##
+## Per FAMILY rather than per emplacement on purpose: selling compacts the
+## platform pool by moving the last turret into the freed slot, so an emplacement
+## index is only meaningful within a tick and a shot already in flight would credit
+## whoever inherited the slot. A blueprint index never moves. Overkill is not
+## counted - a shot that does 640 to a drone with 12 left is credited with 12,
+## because the debrief exists to tell the truth about where the damage went.
+var _family_damage: PackedInt64Array = PackedInt64Array()
+var _family_kills: PackedInt32Array = PackedInt32Array()
 
 # Active-wave spawn cursors, sized to the widest wave in the data.
 var _g_enemy_type: PackedInt32Array = PackedInt32Array()
@@ -299,6 +377,7 @@ func _init(db: Database, seed_value: int) -> void:
 	_early_wave_bonus = int(db.economy.get("early_wave_bonus", 0))
 	_hp_growth = float(db.scaling["hp_growth_per_wave"])
 	_bounty_growth = float(db.scaling["bounty_growth_per_wave"])
+	_armour_max_bite = clampf(float(db.scaling["armour_max_bite"]), 0.0, 1.0)
 	# The engagement may override the engagement-scoped economy; master plan
 	# section 4.1 scales starting Capital by act so a tier-4 platform is
 	# reachable in a single fight by act three.
@@ -459,6 +538,10 @@ func _build_types() -> void:
 	_type_radius.resize(n)
 	_type_jitter.resize(n)
 	_type_slow_resist.resize(n)
+	_type_armour.resize(n)
+	_type_armour_now.resize(n)
+	_type_split_into.resize(n)
+	_type_split_count.resize(n)
 	_type_display.resize(n)
 	_type_hp_now.resize(n)
 	_type_bounty_now.resize(n)
@@ -471,7 +554,17 @@ func _build_types() -> void:
 		_type_radius[i] = float(e["radius"])
 		_type_jitter[i] = float(e["spawn_jitter_units"])
 		_type_slow_resist[i] = clampf(float(e.get("slow_resistance", 0.0)), 0.0, 1.0)
+		_type_armour[i] = maxi(0, int(e.get("armour", 0)))
 		_type_display[i] = str(e.get("display_name", _type_ids[i]))
+	# Second pass: a split target is named by id, and every id has to exist before
+	# any of them can be resolved.
+	for i in n:
+		var e: Dictionary = _db.enemies[_type_ids[i]]
+		var child := str(e.get("splits_into", ""))
+		_type_split_into[i] = -1 if child.is_empty() else _type_index(child)
+		_type_split_count[i] = 0 if _type_split_into[i] < 0 else maxi(0, int(e.get("split_count", 0)))
+		if _type_split_count[i] <= 0:
+			_type_split_into[i] = -1
 
 func _build_blueprints() -> void:
 	_bp_ids = _db.blueprint_ids()
@@ -538,6 +631,9 @@ func _build_pools() -> void:
 	e_x.resize(_max_enemies)
 	e_y.resize(_max_enemies)
 	_e_free.resize(_max_enemies)
+	# One entry per drone that could die this tick, which cannot exceed the pool.
+	_split_type.resize(_max_enemies)
+	_split_prog.resize(_max_enemies)
 	for i in _max_enemies:
 		# Free list is filled in reverse so slot 0 is handed out first; makes
 		# test expectations and debug output readable.
@@ -562,6 +658,7 @@ func _build_pools() -> void:
 	p_pierce.resize(_max_projectiles)
 	p_from_x.resize(_max_projectiles)
 	p_from_y.resize(_max_projectiles)
+	p_family.resize(_max_projectiles)
 	_p_free.resize(_max_projectiles)
 	for i in _max_projectiles:
 		_p_free[i] = _max_projectiles - 1 - i
@@ -576,6 +673,9 @@ func _build_pools() -> void:
 	t_cooldown.resize(_max_platforms)
 	t_x.resize(_max_platforms)
 	t_y.resize(_max_platforms)
+	t_priority.resize(_max_platforms)
+	_family_damage.resize(_bp_ids.size())
+	_family_kills.resize(_bp_ids.size())
 
 	var widest := 0
 	for wave in (_db.engagement["waves"] as Array):
@@ -613,6 +713,11 @@ func queue_sell(at_tick: int, platform_index: int) -> void:
 
 func queue_send_wave(at_tick: int) -> void:
 	_queue(at_tick, CMD_SEND_WAVE, 0, 0, 0)
+
+## Re-task a turret. Integer-valued and tick-addressed like every other command,
+## so a run that retargets mid-wave replays exactly.
+func queue_priority(at_tick: int, platform_index: int, mode: int) -> void:
+	_queue(at_tick, CMD_SET_PRIORITY, platform_index, mode, 0)
 
 ## Re-create a board carried forward from the previous level in a chain.
 ##
@@ -690,6 +795,10 @@ func adopt(platforms: Array, owned_cells: PackedInt32Array) -> void:
 			0, _bp_tier_count[blueprint] - 1)
 		t_tier[index] = tier
 		t_tier_slot[index] = _bp_tier_offset[blueprint] + tier
+		# Orders carry even though tiers do not. Refitting a gun is a cost; making
+		# the player re-issue every standing order is just tedium.
+		t_priority[index] = clampi(int(record.get("priority", TARGET_FIRST)),
+			0, target_mode_count() - 1)
 
 ## Placement that skips the price but honours every other rule. Only used by
 ## adopt(); a turret carried forward was already paid for.
@@ -749,7 +858,8 @@ func board_snapshot() -> Dictionary:
 	var platforms := []
 	for i in t_count:
 		platforms.append({"x": t_x[i], "y": t_y[i],
-			"blueprint": t_blueprint[i], "tier": t_tier[i]})
+			"blueprint": t_blueprint[i], "tier": t_tier[i],
+			"priority": t_priority[i]})
 	var cells := PackedInt32Array()
 	for cy in _grid_rows:
 		for cx in _grid_cols:
@@ -836,6 +946,8 @@ func _apply_commands() -> void:
 			ok = _try_sell(_cmd_a[_cmd_cursor])
 		elif _cmd_type[_cmd_cursor] == CMD_SEND_WAVE:
 			ok = _try_send_wave()
+		elif _cmd_type[_cmd_cursor] == CMD_SET_PRIORITY:
+			ok = _try_set_priority(_cmd_a[_cmd_cursor], _cmd_b[_cmd_cursor])
 		if not ok:
 			_rejected_commands += 1
 		_cmd_cursor += 1
@@ -917,6 +1029,8 @@ func _try_place(x: float, y: float, blueprint_index: int) -> int:
 	# Face along the corridor until it has something to shoot at.
 	t_aim_x[index] = 1.0
 	t_aim_y[index] = 0.0
+	# A recycled slot must not inherit the last occupant's orders.
+	t_priority[index] = TARGET_FIRST
 	_capital -= _tier_cost[slot]
 	return BUILD_OK
 
@@ -957,6 +1071,7 @@ func _try_sell(platform_index: int) -> bool:
 		t_y[platform_index] = t_y[last]
 		t_aim_x[platform_index] = t_aim_x[last]
 		t_aim_y[platform_index] = t_aim_y[last]
+		t_priority[platform_index] = t_priority[last]
 	t_used[last] = 0
 	t_count -= 1
 	_sold += 1
@@ -1004,6 +1119,19 @@ func _try_upgrade(platform_index: int) -> bool:
 	_capital -= cost
 	return true
 
+## Re-task one turret. Rejected rather than clamped for an unknown mode or a
+## platform that is not there: a command the sim quietly reinterprets is a command
+## that means something different on replay.
+func _try_set_priority(platform_index: int, mode: int) -> bool:
+	if platform_index < 0 or platform_index >= t_count:
+		return false
+	if mode < 0 or mode >= target_mode_count():
+		return false
+	if t_priority[platform_index] == mode:
+		return false
+	t_priority[platform_index] = mode
+	return true
+
 ## Index of the platform within `radius` of a point, nearest first, or -1.
 ## Used for click-to-upgrade.
 func platform_at(x: float, y: float, radius: float) -> int:
@@ -1028,6 +1156,7 @@ func step() -> void:
 	_hash.rebuild(e_alive, e_x, e_y, _max_enemies)
 	_update_platforms()
 	_advance_projectiles()
+	_resolve_splits()
 	_update_wave_director()
 	_resolve_result()
 	_tick += 1
@@ -1089,16 +1218,64 @@ func _update_platforms() -> void:
 		if t_cooldown[i] > 0:
 			t_cooldown[i] -= 1
 			continue
-		var target := _acquire_target(t_x[i], t_y[i], _tier_range_sq[t_tier_slot[i]])
+		var target := _acquire_target(t_x[i], t_y[i], _tier_range_sq[t_tier_slot[i]],
+			t_priority[i])
 		if target < 0:
 			continue
 		_fire(i, target)
 		t_cooldown[i] = _tier_interval[t_tier_slot[i]]
 
-## First priority: of everything in range, the enemy furthest along the path.
-## Ties break toward the lower slot index (strict >), which is stable and so
-## keeps replays aligned.
-func _acquire_target(px: float, py: float, range_sq: float) -> int:
+## Pick what this turret shoots. Ties break toward whatever the spatial hash walks
+## first (strict >), and that walk is cell-then-slot order, which is stable - so
+## ties resolve identically in a replay.
+func _acquire_target(px: float, py: float, range_sq: float, mode: int) -> int:
+	if mode == TARGET_FIRST:
+		return _acquire_first(px, py, range_sq)
+	var reach := sqrt(range_sq)
+	var min_cx := _hash.cell_x(px - reach)
+	var max_cx := _hash.cell_x(px + reach)
+	var min_cy := _hash.cell_y(py - reach)
+	var max_cy := _hash.cell_y(py + reach)
+	var best := -1
+	var best_score := -INF
+	for cy in range(min_cy, max_cy + 1):
+		for cx in range(min_cx, max_cx + 1):
+			var begin := _hash.bucket_begin(cx, cy)
+			var end := _hash.bucket_end(cx, cy)
+			for k in range(begin, end):
+				var e := _hash.item_at(k)
+				var dx := e_x[e] - px
+				var dy := e_y[e] - py
+				var distance_sq := dx * dx + dy * dy
+				if distance_sq > range_sq:
+					continue
+				# Every mode is expressed as "biggest score wins" so there is one
+				# comparison and one tie-break rule rather than five of each.
+				var score := 0.0
+				if mode == TARGET_LAST:
+					score = -e_prog[e]
+				elif mode == TARGET_NEAREST:
+					score = -distance_sq
+				elif mode == TARGET_TOUGHEST:
+					score = float(e_hp[e])
+				elif mode == TARGET_WEAKEST:
+					score = -float(e_hp[e])
+				else:
+					score = e_prog[e]
+				if score <= best_score:
+					continue
+				best = e
+				best_score = score
+	return best
+
+## The default, kept as its own loop because it is the hot one.
+##
+## Every turret in the campaign's measured balance uses it, and it can reject a
+## candidate on a single float compare before touching its position - which the
+## general path cannot, since NEAREST needs the distance it would be skipping.
+## At 144 turrets against 2,048 drones that early-out is the difference between
+## the profile that was measured and a slower one.
+func _acquire_first(px: float, py: float, range_sq: float) -> int:
 	var reach := sqrt(range_sq)
 	var min_cx := _hash.cell_x(px - reach)
 	var max_cx := _hash.cell_x(px + reach)
@@ -1163,6 +1340,7 @@ func _fire(platform: int, target: int) -> void:
 	p_pierce[i] = _tier_pierce[slot]
 	p_from_x[i] = t_x[platform]
 	p_from_y[i] = t_y[platform]
+	p_family[i] = t_blueprint[platform]
 	p_live_count += 1
 
 func _advance_projectiles() -> void:
@@ -1188,16 +1366,16 @@ func _advance_projectiles() -> void:
 		if dist <= reach:
 			if p_pierce[i] > 0.0:
 				_lance_through(p_from_x[i], p_from_y[i], e_x[target], e_y[target],
-					p_pierce[i], p_damage[i])
+					p_pierce[i], p_damage[i], p_family[i])
 			elif p_splash[i] > 0.0:
 				# Suppression lands on everything the blast reaches, which is what
 				# makes an area suppressor worth its cost against a wave rather
 				# than against one drone.
 				_detonate(e_x[target], e_y[target], p_splash[i], p_damage[i],
-					p_splash_min[i], p_slow_factor[i], p_slow_ticks[i])
+					p_splash_min[i], p_family[i], p_slow_factor[i], p_slow_ticks[i])
 			else:
 				_suppress(target, p_slow_factor[i], p_slow_ticks[i])
-				_damage_enemy(target, p_damage[i])
+				_damage_enemy(target, p_damage[i], p_family[i])
 			_despawn_projectile(i)
 			continue
 		var step_scale := p_speed[i] / dist
@@ -1218,7 +1396,7 @@ func _advance_projectiles() -> void:
 ## an arbitrary order would be a determinism hole that only shows up once
 ## something explodes near a pool boundary.
 func _detonate(x: float, y: float, radius: float, damage: int, min_fraction: float,
-		slow_factor: float = 1.0, slow_ticks: int = 0) -> void:
+		family: int, slow_factor: float = 1.0, slow_ticks: int = 0) -> void:
 	var min_cx := _hash.cell_x(x - radius)
 	var max_cx := _hash.cell_x(x + radius)
 	var min_cy := _hash.cell_y(y - radius)
@@ -1243,7 +1421,7 @@ func _detonate(x: float, y: float, radius: float, damage: int, min_fraction: flo
 				_suppress(e, slow_factor, slow_ticks)
 				# Always at least 1, so a shell that reaches something never does
 				# literally nothing - a zero-damage hit reads as a bug.
-				_damage_enemy(e, maxi(1, int(round(float(damage) * falloff))))
+				_damage_enemy(e, maxi(1, int(round(float(damage) * falloff))), family)
 
 ## Drag a drone's speed down for a while.
 ##
@@ -1278,7 +1456,7 @@ func _suppress(index: int, factor: float, ticks: int) -> void:
 ## reason `_detonate` does: an attack that resolved against several drones in an
 ## arbitrary sequence would pay bounties and recycle pool slots in that sequence.
 func _lance_through(from_x: float, from_y: float, to_x: float, to_y: float,
-		half_width: float, damage: int) -> void:
+		half_width: float, damage: int, family: int) -> void:
 	var dx := to_x - from_x
 	var dy := to_y - from_y
 	var length_sq := dx * dx + dy * dy
@@ -1305,15 +1483,50 @@ func _lance_through(from_x: float, from_y: float, to_x: float, to_y: float,
 				var oy := e_y[e] - (from_y + dy * t)
 				if ox * ox + oy * oy > width_sq:
 					continue
-				_damage_enemy(e, damage)
+				_damage_enemy(e, damage, family)
 
-func _damage_enemy(index: int, amount: int) -> void:
+## Land a hit, crediting the weapon family that fired it.
+##
+## Armour comes off the hit and not off the drone's health, which is the whole
+## point of it: it scales with how many hits you need rather than with how much
+## damage you deal, so it punishes a wall of cheap fast guns and barely troubles
+## one big one. Never below 1 - see _type_armour.
+func _damage_enemy(index: int, amount: int, family: int) -> void:
+	var armour := _type_armour_now[e_type[index]]
+	if armour > 0:
+		# Never below the cap, and never below 1.
+		var floor_damage := maxi(1, int(ceil(float(amount) * (1.0 - _armour_max_bite))))
+		amount = maxi(amount - armour, floor_damage)
+	# Overkill is real and the balance sim needs to see it, but it is not damage
+	# the debrief should claim was dealt.
+	var landed: int = amount if amount < e_hp[index] else e_hp[index]
 	e_hp[index] -= amount
+	if family >= 0:
+		_family_damage[family] += landed
 	if e_hp[index] > 0:
 		return
+	if family >= 0:
+		_family_kills[family] += 1
 	_capital += e_bounty[index]
 	_kills += 1
+	# Queued before the despawn, which frees the slot this reads from.
+	if _type_split_into[e_type[index]] >= 0 and _split_pending < _split_type.size():
+		_split_type[_split_pending] = e_type[index]
+		_split_prog[_split_pending] = e_prog[index]
+		_split_pending += 1
 	_despawn_enemy(index)
+
+## Hatch everything that died owing children.
+##
+## A child starts where its parent fell, so a brood broken open at the far end of
+## the road is a problem at the far end of the road. It inherits nothing else -
+## not health, not suppression - because it is a different drone.
+func _resolve_splits() -> void:
+	for i in _split_pending:
+		var parent := _split_type[i]
+		for _n in _type_split_count[parent]:
+			_spawn_at(_type_split_into[parent], _split_prog[i])
+	_split_pending = 0
 
 # --- wave director -----------------------------------------------------------
 
@@ -1361,6 +1574,7 @@ func _begin_wave(index: int) -> void:
 	for t in _type_ids.size():
 		_type_hp_now[t] = int(round(float(_type_base_hp[t]) * hp_mult))
 		_type_bounty_now[t] = int(round(float(_type_base_bounty[t]) * bounty_mult))
+		_type_armour_now[t] = int(round(float(_type_armour[t]) * hp_mult))
 	var groups: Array = ((_db.engagement["waves"] as Array)[index] as Dictionary)["groups"]
 	_g_count = groups.size()
 	for g in _g_count:
@@ -1384,6 +1598,11 @@ func _type_index(id: String) -> int:
 	return -1
 
 func _spawn(type_index: int) -> void:
+	_spawn_at(type_index, 0.0)
+
+## Put a drone on the road at a given distance along it. The wave director always
+## passes 0; a brood hatching passes wherever its parent died.
+func _spawn_at(type_index: int, prog: float) -> void:
 	if _e_free_top == 0:
 		# Cannot happen with validated data (Database rejects a wave wider than
 		# max_enemies), but if it ever does, count it rather than pretending the
@@ -1395,8 +1614,8 @@ func _spawn(type_index: int) -> void:
 	e_alive[i] = 1
 	e_hp[i] = _type_hp_now[type_index]
 	e_hp_max[i] = _type_hp_now[type_index]
-	e_prog[i] = 0.0
-	e_prev_prog[i] = 0.0
+	e_prog[i] = prog
+	e_prev_prog[i] = prog
 	# The only use of randomness in P0: a lateral scatter so a column of walkers
 	# reads as a crowd instead of one sprite. It goes through the seeded service
 	# like everything else, so it is part of what the determinism test proves.
@@ -1408,7 +1627,7 @@ func _spawn(type_index: int) -> void:
 	# A recycled slot must not inherit the last occupant's suppression.
 	e_slow_ticks[i] = 0
 	e_slow_factor[i] = 1.0
-	_sample_path(0.0, e_offset[i])
+	_sample_path(prog, e_offset[i])
 	e_x[i] = _out_x
 	e_y[i] = _out_y
 	e_live_count += 1
@@ -1539,6 +1758,18 @@ func enemy_base_bounty(type_index: int) -> int: return _type_base_bounty[type_in
 func enemy_leak_value(type_index: int) -> int: return _type_leak[type_index]
 ## Every drone class, in the order their indices run.
 func enemy_ids() -> PackedStringArray: return _type_ids
+func enemy_armour(type_index: int) -> int: return _type_armour[type_index]
+func enemy_splits_into(type_index: int) -> int: return _type_split_into[type_index]
+func enemy_split_count(type_index: int) -> int: return _type_split_count[type_index]
+func enemy_display_name(type_index: int) -> String: return _type_display[type_index]
+
+func platform_priority(i: int) -> int: return t_priority[i]
+func priority_name(mode: int) -> String:
+	return TARGET_MODE_NAMES[clampi(mode, 0, target_mode_count() - 1)]
+
+## Damage landed and drones killed by one weapon family this engagement.
+func family_damage(blueprint: int) -> int: return _family_damage[blueprint]
+func family_kills(blueprint: int) -> int: return _family_kills[blueprint]
 func rng_draws() -> int: return _rng.draws()
 
 ## Sample a path position for rendering. Public because the renderer interpolates
@@ -1616,4 +1847,12 @@ func state_hash() -> int:
 	h = StateHash.mix_bytes(h, t_y.to_byte_array())
 	h = StateHash.mix_bytes(h, t_aim_x.to_byte_array())
 	h = StateHash.mix_bytes(h, t_aim_y.to_byte_array())
+	h = StateHash.mix_bytes(h, t_priority.to_byte_array())
+	# Splits owed but not yet hatched are state: two runs that agree on every drone
+	# on the board and disagree on what is about to appear are not in the same place.
+	h = StateHash.mix_int(h, _split_pending)
+	h = StateHash.mix_bytes(h, _split_type.to_byte_array())
+	h = StateHash.mix_bytes(h, _split_prog.to_byte_array())
+	h = StateHash.mix_bytes(h, _family_damage.to_byte_array())
+	h = StateHash.mix_bytes(h, _family_kills.to_byte_array())
 	return h

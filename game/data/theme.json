@@ -108,12 +108,37 @@
     "ground_overshoot": 1.6,
     "relief_clearance": 120.0,
     "relief_ramp": 700.0,
-    "relief_height": 90.0
+    "relief_height": 90.0,
+    "platform_suppressor": "#4fc9d8",
+    "platform_railgun": "#d8d24f",
+    "flash": "#ffd9a0",
+    "flash_size": 26.0,
+    "flash_life": 0.07,
+    "impact": "#ffe6b0",
+    "impact_size": 15.0,
+    "impact_life": 0.11,
+    "blast": "#ff9a4a",
+    "blast_life": 0.3,
+    "wreck": "#ff7042",
+    "wreck_life": 0.26,
+    "shake_per_leak": 9.0,
+    "shake_max": 34.0,
+    "shake_decay": 44.0,
+    "shake_speed": 47.0
   },
   "platform_max_tier": "#ffcf6e",
   "platform_cannon": "#c98a5b",
   "platform_suppressor": "#4fc9d8",
   "platform_railgun": "#d8d24f",
   "band_alpha": 0.34,
-  "band_offer_alpha": 0.2
+  "band_offer_alpha": 0.2,
+  "_audio_comment": "Sound is synthesised in code from noise and swept sine tones - there are no audio files in this repository. master_db is deliberately low: this is a game you play for twenty minutes at a time with four hundred shots a second going off. The *_gap_seconds values are how long each kind of sound must wait before it may play again; shots are throttled hardest because there are two orders of magnitude more of them than anything else, and a leak is not throttled at all because every one of them matters. M mutes.",
+  "audio": {
+    "master_db": -14.0,
+    "start_muted": false,
+    "shot_gap_seconds": 0.075,
+    "blast_gap_seconds": 0.06,
+    "impact_gap_seconds": 0.05,
+    "wreck_gap_seconds": 0.045
+  }
 }

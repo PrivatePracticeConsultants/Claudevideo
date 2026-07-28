@@ -60,6 +60,9 @@ var _pan := Vector3.ZERO
 ## Base framing, recomputed by _fit_camera and reused when only zoom or pan moved.
 var _view_centre := Vector3.ZERO
 var _view_extent: float = 1.0
+## Where _fit_camera put the camera. Shake reads and restores this rather than
+## accumulating on the live position, which would drift.
+var _camera_home := Vector3.ZERO
 var _cursor: Node3D
 var _cursor_disc: MeshInstance3D
 var _cursor_ghost: MeshInstance3D
@@ -98,6 +101,7 @@ func setup(sim: Sim, theme: Dictionary) -> void:
 	_build_cell_layer()
 	_build_turret_layers()
 	_build_entity_layers()
+	_build_effect_layer()
 	refresh_board()
 
 # --- environment ---------------------------------------------------------------
@@ -237,6 +241,7 @@ func _fit_camera() -> void:
 	if camera.projection == Camera3D.PROJECTION_ORTHOGONAL:
 		camera.size = needed
 		camera.position = centre + camera.transform.basis.z * float(cfg.get("distance", 4200.0))
+		_camera_home = camera.position
 		_fit_shadows(needed)
 		return
 	# Perspective: pull back far enough that the required extent fits the frustum.
@@ -244,6 +249,10 @@ func _fit_camera() -> void:
 	var half_fov := deg_to_rad(camera.fov) * 0.5
 	var distance := maxf((needed * 0.5) / tan(half_fov), float(cfg.get("distance", 4200.0)) * 0.25)
 	camera.position = centre + camera.transform.basis.z * distance
+	# Where the camera belongs when nothing is shaking it. Shake is applied as an
+	# offset from here every frame, so a leak during a pan cannot leave the camera
+	# permanently displaced.
+	_camera_home = camera.position
 	_fit_shadows(distance + needed)
 
 ## Shadows are cast within a distance of the camera, so the range has to follow
@@ -765,6 +774,17 @@ func _enemy_mesh(enemy_id: String) -> Mesh:
 			var dart := PrismMesh.new()
 			dart.size = Vector3(0.62, 1.0, 2.05)
 			return dart
+		"brood":
+			# Eight-sided and bulging, like something with cargo in it. It has to
+			# read as "full" at a glance, because whether you pop it now or let it
+			# get further down the road is a decision and you only get to make it
+			# while you can still see which one it is.
+			var carrier := CylinderMesh.new()
+			carrier.top_radius = 0.34
+			carrier.bottom_radius = 0.62
+			carrier.height = 1.0
+			carrier.radial_segments = 8
+			return carrier
 		"breaker":
 			# Six-sided and squat: nothing else on the board is round, so a
 			# Breaker is identifiable from its outline alone even at 4x speed.
@@ -796,6 +816,246 @@ func _instanced_material(enemy_id: String = "") -> StandardMaterial3D:
 		material.emission = _color_of(_world.get("elite_glow", "#ff7a3c"))
 		material.emission_energy_multiplier = float(_world.get("elite_glow_energy", 1.6))
 	return material
+
+# --- combat feedback -----------------------------------------------------------
+#
+# Everything in this section is decoration and knows it. It reads the simulation
+# and never writes to it, it holds no state the simulation needs, and if it were
+# deleted the game would play exactly the same and feel considerably worse.
+#
+# It works by DIFFING the simulation between ticks rather than by having the
+# simulation report events. A shot fired is a cooldown that went up; an impact is
+# a projectile slot that was alive and is not; a wreck is a drone slot that was
+# alive and is not. That keeps the sim free of a render-facing event channel it
+# would then have to hash, and it means an effect can never desync anything
+# because there is nothing for it to desync.
+
+## One pooled MultiMesh, like everything else on screen - draw calls stay flat
+## whether one turret is firing or a hundred and forty-four are.
+const FX_CAPACITY := 1024
+enum { FX_FLASH, FX_SPARK, FX_BLAST, FX_WRECK }
+
+var _fx: MultiMeshInstance3D
+var _fx_pos: PackedVector3Array = PackedVector3Array()
+var _fx_age: PackedFloat32Array = PackedFloat32Array()
+var _fx_life: PackedFloat32Array = PackedFloat32Array()
+var _fx_size: PackedFloat32Array = PackedFloat32Array()
+var _fx_grow: PackedFloat32Array = PackedFloat32Array()
+var _fx_tint: PackedColorArray = PackedColorArray()
+var _fx_head: int = 0
+
+## What the board looked like at the end of the previous tick.
+var _was_alive_e: PackedByteArray = PackedByteArray()
+var _was_alive_p: PackedByteArray = PackedByteArray()
+var _was_cooldown: PackedInt32Array = PackedInt32Array()
+var _was_integrity: int = -1
+## Camera shake, in world units, decaying toward zero. Only a leak causes it: if
+## everything shakes the screen then nothing does, and a leak is the only event in
+## the game that costs something you cannot get back.
+var _shake: float = 0.0
+var _shake_phase: float = 0.0
+## Optional. The tick-to-tick diff below is the only place in the game that knows
+## a shot was fired or a drone died, so sound rides along with it rather than
+## working the same thing out a second time. Null everywhere it is not wanted -
+## every headless test runs with no audio attached and nothing here notices.
+var _sfx: Sfx = null
+
+func attach_audio(sfx: Sfx) -> void:
+	_sfx = sfx
+
+func _build_effect_layer() -> void:
+	var quad := QuadMesh.new()
+	quad.size = Vector2.ONE
+	var material := StandardMaterial3D.new()
+	material.vertex_color_use_as_albedo = true
+	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	# Additive, so fading is just fading the colour toward black and there is
+	# nothing to depth-sort. Muzzle flashes overlapping each other in a firing line
+	# is the correct look anyway.
+	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	material.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	material.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+	material.billboard_keep_scale = true
+	material.disable_receive_shadows = true
+	material.no_depth_test = false
+	# Without this every effect is a flat white square - a sticker on the board
+	# rather than light coming off it. Captured and looked at before it was added,
+	# which is the only way that particular problem is ever going to be noticed.
+	material.albedo_texture = _glow_texture()
+	quad.material = material
+	_fx = _instanced(quad, FX_CAPACITY)
+	_fx.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	add_child(_fx)
+
+	_fx_pos.resize(FX_CAPACITY)
+	_fx_age.resize(FX_CAPACITY)
+	_fx_life.resize(FX_CAPACITY)
+	_fx_size.resize(FX_CAPACITY)
+	_fx_grow.resize(FX_CAPACITY)
+	_fx_tint.resize(FX_CAPACITY)
+	for i in FX_CAPACITY:
+		_fx_age[i] = 1.0
+		_fx_life[i] = 0.0
+
+	_was_alive_e.resize(_sim.e_alive.size())
+	_was_alive_p.resize(_sim.p_alive.size())
+	_was_cooldown.resize(_sim.t_used.size())
+	_was_integrity = _sim.integrity()
+
+## A soft round glow, generated rather than shipped.
+##
+## Same reasoning as the sound: no binary assets in the repository, and the shape
+## of the falloff becomes something that can be reasoned about in one line instead
+## of opened in an image editor. Squared falloff rather than linear because a
+## linear one still has a visible disc edge.
+func _glow_texture() -> ImageTexture:
+	var size := 64
+	var image := Image.create(size, size, false, Image.FORMAT_RGBA8)
+	var half := float(size) * 0.5
+	for y in size:
+		for x in size:
+			var dx := (float(x) + 0.5 - half) / half
+			var dy := (float(y) + 0.5 - half) / half
+			var falloff := clampf(1.0 - sqrt(dx * dx + dy * dy), 0.0, 1.0)
+			image.set_pixel(x, y, Color(1.0, 1.0, 1.0, falloff * falloff))
+	return ImageTexture.create_from_image(image)
+
+## Call once per simulation tick, from whoever is driving step(). Per tick and not
+## per frame: at 4x speed a frame covers several ticks, and a muzzle flash that
+## only appears on the tick a frame happens to land on is a firing line that looks
+## like it is misfiring.
+func note_tick() -> void:
+	if _fx == null:
+		return
+	_note_muzzle_flashes()
+	_note_impacts()
+	_note_wrecks()
+	var integrity := _sim.integrity()
+	if _was_integrity >= 0 and integrity < _was_integrity:
+		_shake = minf(_shake + float(_world.get("shake_per_leak", 9.0)),
+			float(_world.get("shake_max", 34.0)))
+		if _sfx != null:
+			_sfx.play(Sfx.LEAK)
+	_was_integrity = integrity
+
+func _note_muzzle_flashes() -> void:
+	var reach := float(_world.get("barrel_length", 34.0))
+	var growth := float(_world.get("platform_tier_growth", 0.28))
+	var lift := float(_world.get("pad_height", 12.0)) + float(_world.get("platform_height", 48.0)) * 0.78
+	var tint := _color_of(_world.get("flash", "#ffd9a0"))
+	for i in _sim.t_count:
+		var cooldown := _sim.t_cooldown[i]
+		# A cooldown only ever counts down, one per tick. The one thing that can
+		# raise it is _fire().
+		var fired := i < _was_cooldown.size() and cooldown > _was_cooldown[i]
+		if i < _was_cooldown.size():
+			_was_cooldown[i] = cooldown
+		if not fired:
+			continue
+		var angle: float = _barrel_angle[i] if i < _barrel_angle.size() else 0.0
+		var scale := 1.0 + growth * float(_sim.platform_tier(i))
+		var shape := _muzzle_shape(_sim.blueprint_name(_sim.platform_blueprint(i)))
+		var out := reach * scale * shape.x
+		_emit(Vector3(_sim.t_x[i] + sin(angle) * out, lift * scale + sin(shape.z) * out * 0.5,
+			_sim.t_y[i] + cos(angle) * out),
+			float(_world.get("flash_size", 26.0)) * scale, 0.9,
+			float(_world.get("flash_life", 0.07)), tint)
+		if _sfx != null:
+			_sfx.play(Sfx.SHOT, _sim.blueprint_name(_sim.platform_blueprint(i)))
+	# Turrets sold this tick leave a stale cooldown behind; clearing the tail stops
+	# the next turret built into that slot flashing on its first frame.
+	for i in range(_sim.t_count, _was_cooldown.size()):
+		_was_cooldown[i] = 0
+
+func _note_impacts() -> void:
+	var lift := float(_world.get("projectile_lift", 20.0))
+	var spark := _color_of(_world.get("impact", "#ffe6b0"))
+	var blast := _color_of(_world.get("blast", "#ff9a4a"))
+	for i in _sim.p_alive.size():
+		var alive := _sim.p_alive[i]
+		var died := _was_alive_p[i] == 1 and alive == 0
+		_was_alive_p[i] = alive
+		if not died:
+			continue
+		var splash: float = _sim.p_splash[i]
+		if splash > 0.0:
+			# Sized to the actual blast radius, so what you see is what it hit.
+			_emit(Vector3(_sim.p_x[i], lift, _sim.p_y[i]), splash * 0.5, 2.0,
+				float(_world.get("blast_life", 0.3)), blast)
+			if _sfx != null:
+				_sfx.play(Sfx.BLAST)
+		else:
+			_emit(Vector3(_sim.p_x[i], lift, _sim.p_y[i]),
+				float(_world.get("impact_size", 15.0)), 1.1,
+				float(_world.get("impact_life", 0.11)), spark)
+			if _sfx != null:
+				_sfx.play(Sfx.IMPACT)
+
+func _note_wrecks() -> void:
+	var tint := _color_of(_world.get("wreck", "#ff7042"))
+	var height := float(_world.get("enemy_height", 26.0))
+	for i in _sim.e_alive.size():
+		var alive := _sim.e_alive[i]
+		var died := _was_alive_e[i] == 1 and alive == 0
+		_was_alive_e[i] = alive
+		if not died:
+			continue
+		var radius := _sim.enemy_radius(_sim.e_type[i])
+		_emit(Vector3(_sim.e_x[i], height * (radius / _reference_radius) * 0.5, _sim.e_y[i]),
+			radius * 2.2, 1.8, float(_world.get("wreck_life", 0.26)), tint)
+		if _sfx != null:
+			_sfx.play(Sfx.WRECK)
+
+## Claim the next slot in the ring. Oldest-first eviction, which at 1024 slots
+## means the only thing that can ever be cut short is an effect from a tick where
+## more than a thousand things happened at once - and on that tick nobody is
+## looking at any one of them.
+func _emit(position: Vector3, size: float, grow: float, life: float, tint: Color) -> void:
+	var i := _fx_head
+	_fx_head = (_fx_head + 1) % FX_CAPACITY
+	_fx_pos[i] = position
+	_fx_age[i] = 0.0
+	_fx_life[i] = life
+	_fx_size[i] = size
+	_fx_grow[i] = grow
+	_fx_tint[i] = tint
+
+## Age and draw. Expiry is by age, so a paused game holds its flashes rather than
+## freezing a half-faded one forever - delta is zero while paused.
+func _update_effects(delta: float) -> void:
+	var mm := _fx.multimesh
+	var shown := 0
+	for i in FX_CAPACITY:
+		if _fx_age[i] >= _fx_life[i]:
+			continue
+		_fx_age[i] += delta
+		if _fx_age[i] >= _fx_life[i]:
+			# Expired during this frame. The last frame of the fade is fully faded,
+			# so there is nothing to draw but a black quad.
+			continue
+		var t: float = clampf(_fx_age[i] / maxf(_fx_life[i], 0.0001), 0.0, 1.0)
+		var size: float = _fx_size[i] * (1.0 + _fx_grow[i] * t)
+		mm.set_instance_transform(shown, Transform3D(
+			Basis().scaled(Vector3(size, size, size)), _fx_pos[i]))
+		# Fade toward black rather than toward transparent: the blend is additive,
+		# so black IS invisible and there is no sorting to get wrong.
+		mm.set_instance_color(shown, _fx_tint[i] * (1.0 - t))
+		shown += 1
+		if shown >= FX_CAPACITY:
+			break
+	mm.visible_instance_count = shown
+
+## Nudge the camera when the corridor takes a hit. Decays on its own; the phase
+## walk keeps successive leaks from landing on the same offset.
+func _update_shake(delta: float) -> void:
+	if _shake <= 0.01:
+		_shake = 0.0
+		camera.position = _camera_home
+		return
+	_shake_phase += delta * float(_world.get("shake_speed", 47.0))
+	camera.position = _camera_home + Vector3(
+		sin(_shake_phase) * _shake, cos(_shake_phase * 1.37) * _shake * 0.6, 0.0)
+	_shake = maxf(_shake - delta * float(_world.get("shake_decay", 44.0)), 0.0)
 
 func _instanced(mesh: Mesh, capacity: int) -> MultiMeshInstance3D:
 	var mm := MultiMesh.new()
@@ -891,10 +1151,12 @@ func _refresh_turrets() -> void:
 
 # --- per frame ---------------------------------------------------------------------
 
-func update_visuals(alpha: float) -> void:
+func update_visuals(alpha: float, delta: float = 0.0) -> void:
 	_update_enemies(alpha)
 	_update_projectiles(alpha)
 	_update_barrels()
+	_update_effects(delta)
+	_update_shake(delta)
 
 func _update_enemies(alpha: float) -> void:
 	var bar_mm := _hp_bars.multimesh
@@ -1164,6 +1426,10 @@ func entity_layers() -> Array:
 func enemy_layer(type_index: int = 0) -> MultiMeshInstance3D: return _enemy_layers[type_index]
 func enemy_layer_count() -> int: return _enemy_layers.size()
 func hp_bar_layer() -> MultiMeshInstance3D: return _hp_bars
+func effect_layer() -> MultiMeshInstance3D: return _fx
+func drawn_effect_count() -> int: return _fx.multimesh.visible_instance_count
+func shake() -> float: return _shake
+func camera_home() -> Vector3: return _camera_home
 func projectile_layer() -> MultiMeshInstance3D: return _projectiles
 func cell_layer() -> MultiMeshInstance3D: return _cells
 func turret_layers() -> Array: return [_turret_bases, _turret_bodies, _turret_barrels]
