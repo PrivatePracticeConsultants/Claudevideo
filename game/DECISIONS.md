@@ -719,6 +719,26 @@ from the camera framing every time the camera is fitted, which also means an
 early act — which frames a third of the board — gets its depth resolution spent
 on the part you can actually see.
 
+## P0-38 · SSAO is asked for only where it exists
+
+`tools/render_stress.gd` turned up a warning that had been printing on every
+level load: *"Screen-space ambient occlusion (SSAO) can only be enabled when
+using the Forward+ renderer."* The web build runs Compatibility (WebGL 2 →
+OpenGL ES 3.0), which is how most people will actually play this — so the
+ambient occlusion the renderer notes described as "the single biggest
+contributor to a scene reading as solid" was off in the one place it mattered
+most, and the only evidence was a line in a console nobody opens.
+
+Now guarded on `RenderingServer.get_rendering_device() != null`, with the ambient
+term lifted 1.35× where SSAO is unavailable. That is not a substitute — nothing
+in Compatibility is — but it stops unlit faces crushing to flat colour without an
+occlusion pass to give them shape.
+
+The general lesson is the one P0-17 already recorded in a different costume: the
+failure was silent. It cost nothing to find once something actually ran the
+renderer and read what it printed, and it would have cost nothing forever if
+nothing had.
+
 ## P0-14 · Deliberately not built in P0
 
 Not oversights — later phases, per §5.7. Anything tempting that came up is in

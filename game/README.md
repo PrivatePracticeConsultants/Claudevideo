@@ -7,7 +7,7 @@ Twenty-four levels — eight boards played as three acts each, where every act
 opens more of the same road and keeps everything you built on the last one — two
 weapon families with four tiers each, three enemy classes, free placement on
 purchasable ground, all on a deterministic 30Hz simulation drawn with real
-lighting, shadows and ambient occlusion. The design document is the master plan
+lighting, shadows and depth cueing. The design document is the master plan
 (v2); the phase ladder is §5.7. Formally this is P0 plus much of P1/P2's content;
 the run layer (P3) is the next real milestone.
 
@@ -143,10 +143,15 @@ cost something" band turned out to be about 16% wide.
 ## How it is drawn
 
 Perspective at a narrow field of view, a key light with shadows plus a cool fill,
-screen-space ambient occlusion, glow and filmic tonemapping. The narrow FOV is
-deliberate: wide enough for real depth, narrow enough that a turret at the far
-edge of the board is close to the same size as one near the camera, which is what
-keeps range and coverage judgeable.
+glow and filmic tonemapping — plus screen-space ambient occlusion **on Forward+
+only**. SSAO does not exist on the Compatibility renderer, which is what the web
+build runs on (WebGL 2), so it is asked for only where it is real and the ambient
+term is lifted where it is not. Godot's own response to asking anyway was a
+console warning and no pixels.
+
+The narrow FOV is deliberate: wide enough for real depth, narrow enough that a
+turret at the far edge of the board is close to the same size as one near the
+camera, which is what keeps range and coverage judgeable.
 
 Everything that scales with entity count is instanced — one `MultiMesh` layer per
 enemy class (so class reads from silhouette, not only colour), plus health bars,

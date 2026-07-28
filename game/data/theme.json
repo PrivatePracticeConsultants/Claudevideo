@@ -52,6 +52,7 @@
     "sun_energy": 1.35,
     "shadow_range_margin": 1.25,
     "ambient_energy": 0.24,
+    "ambient_lift_without_ssao": 1.35,
     "band": "#1e4034",
     "band_alpha": 0.55,
     "band_height": 2.0,

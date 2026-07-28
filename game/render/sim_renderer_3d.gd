@@ -131,11 +131,22 @@ func _build_environment() -> void:
 	env.ambient_light_color = _color("background").lightened(0.45)
 	env.ambient_light_energy = float(_world.get("ambient_energy", 0.35))
 
-	# Contact shadows where geometry meets geometry. This is the single biggest
+	# Contact shadows where geometry meets geometry - the single biggest
 	# contributor to a scene reading as solid rather than as flat shapes.
-	env.ssao_enabled = true
-	env.ssao_radius = float(_world.get("ssao_radius", 42.0))
-	env.ssao_intensity = float(_world.get("ssao_intensity", 2.4))
+	#
+	# It only exists on the Forward+ renderer. The web build runs Compatibility
+	# (WebGL 2), so on the way most people will actually play this, SSAO is off
+	# and Godot says so in a warning nobody reads. Asking for it there produced a
+	# console warning per level load and no pixels, so it is asked for only where
+	# it is real, and the ambient term is lifted a little where it is not - not a
+	# substitute, but it stops unlit faces crushing to flat colour without the
+	# occlusion pass to give them shape.
+	if RenderingServer.get_rendering_device() != null:
+		env.ssao_enabled = true
+		env.ssao_radius = float(_world.get("ssao_radius", 42.0))
+		env.ssao_intensity = float(_world.get("ssao_intensity", 2.4))
+	else:
+		env.ambient_light_energy *= float(_world.get("ambient_lift_without_ssao", 1.35))
 
 	env.glow_enabled = true
 	env.glow_intensity = float(_world.get("glow_strength", 1.15))
