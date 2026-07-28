@@ -140,5 +140,6 @@
     "blast_gap_seconds": 0.06,
     "impact_gap_seconds": 0.05,
     "wreck_gap_seconds": 0.045
-  }
+  },
+  "scrim_alpha": 0.82
 }

@@ -1020,8 +1020,14 @@ func _emit(position: Vector3, size: float, grow: float, life: float, tint: Color
 	_fx_grow[i] = grow
 	_fx_tint[i] = tint
 
-## Age and draw. Expiry is by age, so a paused game holds its flashes rather than
-## freezing a half-faded one forever - delta is zero while paused.
+## Age and draw.
+##
+## Ageing is by elapsed time and not by frame count, which is what lets the
+## screenshot tool age everything by zero and capture the instant rather than
+## whatever survived a software renderer's half-second frame. Pausing the game
+## does NOT stop it: main keeps calling this with a real delta while paused, so
+## effects already in the air fade out and the board goes quiet, which is the
+## right thing for a decoration layer to do when the simulation stops.
 func _update_effects(delta: float) -> void:
 	var mm := _fx.multimesh
 	var shown := 0

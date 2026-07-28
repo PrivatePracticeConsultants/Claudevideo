@@ -15,6 +15,8 @@ var _stats: Label
 var _hint: Label
 var _banner: Label
 var _debrief: Label
+## Dim panel behind both, so the numbers are readable over a lit board.
+var _scrim: ColorRect
 var _level: Label
 var _preview: Label
 var _level_text: String = ""
@@ -62,13 +64,21 @@ func setup(sim: Sim, theme: Dictionary) -> void:
 	_preview.add_theme_color_override("font_color", _color("text_dim"))
 	add_child(_preview)
 
+	# Added before the banner and the debrief so it sits behind them. Both are read
+	# against a lit 3D board covered in turrets, and captured without it the
+	# debrief's numbers ran straight through a row of emplacements and were simply
+	# not legible.
+	_scrim = ColorRect.new()
+	_scrim.color = Color(_color("background"), float(_theme.get("scrim_alpha", 0.82)))
+	_scrim.visible = false
+	_scrim.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(_scrim)
+
 	# What actually happened, once it is over. A tower defence gives you almost no
 	# feedback on WHY you won or lost - the board is a blur at 4x and then it is a
 	# banner - and "which of my four weapon families was doing the work" is the one
 	# question every build decision in the next act depends on.
 	_debrief = Label.new()
-	_debrief.position = Vector2(0, 372)
-	_debrief.size = Vector2(1280, 260)
 	_debrief.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_debrief.add_theme_font_size_override("font_size", 17)
 	_debrief.add_theme_color_override("font_color", _color("text"))
@@ -76,12 +86,35 @@ func setup(sim: Sim, theme: Dictionary) -> void:
 	add_child(_debrief)
 
 	_banner = Label.new()
-	_banner.position = Vector2(0, 300)
-	_banner.size = Vector2(1280, 120)
 	_banner.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_banner.add_theme_font_size_override("font_size", 46)
+	_banner.add_theme_font_size_override("font_size", 38)
 	_banner.visible = false
 	add_child(_banner)
+
+	_layout()
+	# The window can be any size and the web canvas can change at any moment. The
+	# project stretches with aspect "expand", so extra width appears to the RIGHT
+	# of the 1280-unit baseline rather than around it - a panel hardcoded to 1280
+	# is off-centre on anything wider, which is most screens.
+	var viewport := get_viewport()
+	if viewport != null:
+		viewport.size_changed.connect(_layout)
+
+## Centre the end-of-engagement panel on whatever the viewport actually is.
+func _layout() -> void:
+	var width := 1280.0
+	var viewport := get_viewport()
+	if viewport != null:
+		width = maxf(viewport.get_visible_rect().size.x, 320.0)
+	_scrim.position = Vector2(0.0, BANNER_TOP - 22.0)
+	_scrim.size = Vector2(width, 268.0)
+	_banner.position = Vector2(0.0, BANNER_TOP)
+	_banner.size = Vector2(width, 70.0)
+	_debrief.position = Vector2(0.0, BANNER_TOP + 74.0)
+	_debrief.size = Vector2(width, 170.0)
+
+## Where the end-of-engagement panel starts, in the 720-unit baseline height.
+const BANNER_TOP := 292.0
 
 ## Rebuilt only when one of the displayed values actually changes. Formatting a
 ## string every frame for a label that changes a few times a second is a per-frame
@@ -177,9 +210,11 @@ func refresh(speed: int, paused: bool, hovered_platform: int = -1,
 	if not _sim.is_over():
 		_banner.visible = false
 		_debrief.visible = false
+		_scrim.visible = false
 		return
 	_banner.visible = true
 	_debrief.visible = true
+	_scrim.visible = true
 	_debrief.text = debrief_text()
 	if _sim.result() == Sim.RESULT_WIN:
 		if _is_last_level:

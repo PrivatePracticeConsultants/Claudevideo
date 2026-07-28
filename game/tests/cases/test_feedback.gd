@@ -84,9 +84,13 @@ func test_effects_expire() -> void:
 	assert_eq(_drawn(), 1, "there it is")
 	assert_eq(_drawn(2.0), 0, "and two seconds later it is gone")
 
-func test_a_paused_game_holds_its_effects() -> void:
-	# Ageing is by delta, and delta is zero while paused. A flash frozen half-faded
-	# forever would be worse than no flash.
+func test_ageing_is_by_elapsed_time_and_not_by_frame_count() -> void:
+	# Thirty frames of zero delta must not fade anything. This is what the
+	# screenshot tool relies on to capture the instant a shot goes off: a frame in
+	# a software-rendered container can take longer than a muzzle flash exists for,
+	# so it ages everything by zero and grabs that. Pausing the game is NOT this
+	# case - main keeps passing a real delta while paused, and effects in the air
+	# fade out, which is correct.
 	_sim._begin_wave(0)
 	_sim._spawn(_sim.enemy_index("walker"))
 	_renderer.note_tick()
