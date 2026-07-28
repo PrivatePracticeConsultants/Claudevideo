@@ -92,5 +92,6 @@
     "tonemap_white": 3.0
   },
   "platform_max_tier": "#ffcf6e",
-  "platform_cannon": "#c98a5b"
+  "platform_cannon": "#c98a5b",
+  "platform_suppressor": "#4fc9d8"
 }

@@ -155,6 +155,15 @@ func _validate_blueprints() -> void:
 				var fraction := _req_num(t, "splash_min_fraction", twhere, 0.0)
 				if fraction > 1.0:
 					errors.append("%s: splash_min_fraction is a share of full damage and cannot exceed 1." % twhere)
+			# Optional: absent means the weapon does not suppress. Both fields are
+			# required together, because either one alone is a weapon that either
+			# slows for no time or for a while by nothing - silently doing nothing
+			# is the failure mode these files exist to prevent.
+			if (t as Dictionary).has("slow_factor") or (t as Dictionary).has("slow_duration_seconds"):
+				var factor := _req_num(t, "slow_factor", twhere, 0.0)
+				_req_num(t, "slow_duration_seconds", twhere, 0.0)
+				if factor >= 1.0:
+					errors.append("%s: slow_factor multiplies drone speed, so it must be below 1 to slow anything." % twhere)
 	if not found:
 		errors.append("blueprints.json defines no blueprints.")
 

@@ -11,10 +11,12 @@ extends RefCounted
 const MAP := "highway_01"
 const ENGAGEMENT := "highway_act1"
 
-## Roughly how much of the arsenal is area damage. Not optimal play - just a mix
-## that exercises both families, so a level that is only clearable with one of
-## them shows up as a loss here.
+## The scripted arsenal mix, as "every Nth turret". Not optimal play - just a mix
+## that exercises every family, so a level clearable only with one of them shows
+## up as a loss here, and a family the policy never builds cannot quietly become
+## dead content no test would notice.
 const CANNON_SHARE := 3
+const SUPPRESSOR_SHARE := 5
 
 ## Generous ceiling. It only exists so a bug that stalls the wave director fails
 ## as a test rather than hanging the suite forever.
@@ -37,7 +39,11 @@ const SITE_STRIDE := 46.0
 ## default is a spread across the difficulty curve (the opening board, one from
 ## the middle where buying ground starts to matter, and the last); set
 ## LASTLINE_FULL_CAMPAIGN=1 to play every one, which is the pre-release run.
-const SAMPLED_CHAINS := ["highway_01", "railyard_01", "lastlight_01"]
+## Two chains, not three: once the deployment limit doubled, a late act is a
+## 100-turret board and the sampled gate on its own outgrew the wall clock of a
+## single command. These are the two ends of the curve - the teaching board and
+## the one with every drone class on the longest road.
+const SAMPLED_CHAINS := ["highway_01", "lastlight_01"]
 
 ## Every campaign level, grouped into chains, in campaign order.
 static func campaign_chains() -> Array:
@@ -160,6 +166,7 @@ static func run_greedy(sim: Sim, allow_upgrades: bool = true,
 	var log_c := PackedInt32Array()
 	var ballistic := sim.blueprint_index("ballistic")
 	var cannon := maxi(sim.blueprint_index("cannon"), 0)
+	var suppressor := maxi(sim.blueprint_index("suppressor"), 0)
 	var sites := candidate_sites(sim)
 	var next_site := 0
 	var ticks := 0
@@ -176,8 +183,14 @@ static func run_greedy(sim: Sim, allow_upgrades: bool = true,
 		if sim.t_count < sim.platform_limit() and next_site + 1 < sites.size():
 			var x := sites[next_site]
 			var y := sites[next_site + 1]
-			# Every third position is a Cannon, so swarm waves meet area damage.
-			var blueprint := cannon if (sim.t_count % CANNON_SHARE) == CANNON_SHARE - 1 else ballistic
+			# Every fifth position is a Suppressor and every third of the rest a
+			# Cannon, so swarm waves meet area damage and fast waves meet
+			# something that slows them down.
+			var blueprint := ballistic
+			if (sim.t_count % SUPPRESSOR_SHARE) == SUPPRESSOR_SHARE - 1:
+				blueprint = suppressor
+			elif (sim.t_count % CANNON_SHARE) == CANNON_SHARE - 1:
+				blueprint = cannon
 			var verdict := sim.can_build_at(float(x), float(y), blueprint)
 			if verdict == Sim.BUILD_OK:
 				sim.queue_place(sim.tick(), x, y, blueprint)

@@ -125,6 +125,11 @@ var _tier_proj_life: PackedInt32Array = PackedInt32Array()
 # the edge.
 var _tier_splash_radius: PackedFloat64Array = PackedFloat64Array()
 var _tier_splash_min: PackedFloat64Array = PackedFloat64Array()
+## Suppression: how far a hit drags a drone's speed down, and for how long.
+## A factor of 1.0 means "does not slow", which is what every weapon written
+## before suppression existed reads as.
+var _tier_slow_factor: PackedFloat64Array = PackedFloat64Array()
+var _tier_slow_ticks: PackedInt32Array = PackedInt32Array()
 
 var _hp_growth: float = 1.0
 var _bounty_growth: float = 1.0
@@ -174,6 +179,12 @@ var e_speed: PackedFloat64Array = PackedFloat64Array()
 var e_type: PackedInt32Array = PackedInt32Array()
 var e_bounty: PackedInt64Array = PackedInt64Array()
 var e_leak: PackedInt32Array = PackedInt32Array()
+## Suppression currently on this drone: ticks remaining, and the multiplier
+## applied to its speed while they last. Refreshed rather than stacked - the
+## strongest slow wins and re-arms the timer - because multiplying slows together
+## spirals to a standstill and makes one turret worth more than the ten around it.
+var e_slow_ticks: PackedInt32Array = PackedInt32Array()
+var e_slow_factor: PackedFloat64Array = PackedFloat64Array()
 var e_x: PackedFloat64Array = PackedFloat64Array()
 var e_y: PackedFloat64Array = PackedFloat64Array()
 var e_live_count: int = 0
@@ -196,6 +207,8 @@ var p_hit_radius: PackedFloat64Array = PackedFloat64Array()
 var p_life: PackedInt32Array = PackedInt32Array()
 var p_splash: PackedFloat64Array = PackedFloat64Array()
 var p_splash_min: PackedFloat64Array = PackedFloat64Array()
+var p_slow_factor: PackedFloat64Array = PackedFloat64Array()
+var p_slow_ticks: PackedInt32Array = PackedInt32Array()
 var p_live_count: int = 0
 var _p_free: PackedInt32Array = PackedInt32Array()
 var _p_free_top: int = 0
@@ -444,6 +457,8 @@ func _build_blueprints() -> void:
 	_tier_proj_life.resize(slot)
 	_tier_splash_radius.resize(slot)
 	_tier_splash_min.resize(slot)
+	_tier_slow_factor.resize(slot)
+	_tier_slow_ticks.resize(slot)
 	for b in n:
 		var tiers: Array = (_db.blueprints[_bp_ids[b]] as Dictionary)["tiers"]
 		for t in tiers.size():
@@ -462,6 +477,11 @@ func _build_blueprints() -> void:
 			_tier_proj_life[s] = maxi(1, int(round(float(td["projectile_lifetime_seconds"]) * float(_tick_rate))))
 			_tier_splash_radius[s] = float(td.get("splash_radius_units", 0.0))
 			_tier_splash_min[s] = float(td.get("splash_min_fraction", 1.0))
+			_tier_slow_factor[s] = float(td.get("slow_factor", 1.0))
+			# Seconds in the data file, ticks in the sim - the tick is the only
+			# clock in here, and a duration in seconds would drift with tick rate.
+			_tier_slow_ticks[s] = int(round(
+				float(td.get("slow_duration_seconds", 0.0)) * float(_tick_rate)))
 
 func _build_pools() -> void:
 	e_alive.resize(_max_enemies)
@@ -475,6 +495,8 @@ func _build_pools() -> void:
 	e_type.resize(_max_enemies)
 	e_bounty.resize(_max_enemies)
 	e_leak.resize(_max_enemies)
+	e_slow_ticks.resize(_max_enemies)
+	e_slow_factor.resize(_max_enemies)
 	e_x.resize(_max_enemies)
 	e_y.resize(_max_enemies)
 	_e_free.resize(_max_enemies)
@@ -497,6 +519,8 @@ func _build_pools() -> void:
 	p_life.resize(_max_projectiles)
 	p_splash.resize(_max_projectiles)
 	p_splash_min.resize(_max_projectiles)
+	p_slow_factor.resize(_max_projectiles)
+	p_slow_ticks.resize(_max_projectiles)
 	_p_free.resize(_max_projectiles)
 	for i in _max_projectiles:
 		_p_free[i] = _max_projectiles - 1 - i
@@ -793,7 +817,13 @@ func _advance_enemies() -> void:
 		if e_alive[i] == 0:
 			continue
 		e_prev_prog[i] = e_prog[i]
-		var prog := e_prog[i] + e_speed[i]
+		var step_distance := e_speed[i]
+		if e_slow_ticks[i] > 0:
+			step_distance *= e_slow_factor[i]
+			e_slow_ticks[i] -= 1
+			if e_slow_ticks[i] == 0:
+				e_slow_factor[i] = 1.0
+		var prog := e_prog[i] + step_distance
 		if prog >= _path_length:
 			# Leak. Integrity is the run's real health bar; this is the only
 			# place it ever decreases.
@@ -908,6 +938,8 @@ func _fire(platform: int, target: int) -> void:
 	p_life[i] = _tier_proj_life[slot]
 	p_splash[i] = _tier_splash_radius[slot]
 	p_splash_min[i] = _tier_splash_min[slot]
+	p_slow_factor[i] = _tier_slow_factor[slot]
+	p_slow_ticks[i] = _tier_slow_ticks[slot]
 	p_live_count += 1
 
 func _advance_projectiles() -> void:
@@ -932,8 +964,13 @@ func _advance_projectiles() -> void:
 			reach = p_hit_radius[i]
 		if dist <= reach:
 			if p_splash[i] > 0.0:
-				_detonate(e_x[target], e_y[target], p_splash[i], p_damage[i], p_splash_min[i])
+				# Suppression lands on everything the blast reaches, which is what
+				# makes an area suppressor worth its cost against a wave rather
+				# than against one drone.
+				_detonate(e_x[target], e_y[target], p_splash[i], p_damage[i],
+					p_splash_min[i], p_slow_factor[i], p_slow_ticks[i])
 			else:
+				_suppress(target, p_slow_factor[i], p_slow_ticks[i])
 				_damage_enemy(target, p_damage[i])
 			_despawn_projectile(i)
 			continue
@@ -954,7 +991,8 @@ func _advance_projectiles() -> void:
 ## are recycled - is identical on every machine. An area attack that resolved in
 ## an arbitrary order would be a determinism hole that only shows up once
 ## something explodes near a pool boundary.
-func _detonate(x: float, y: float, radius: float, damage: int, min_fraction: float) -> void:
+func _detonate(x: float, y: float, radius: float, damage: int, min_fraction: float,
+		slow_factor: float = 1.0, slow_ticks: int = 0) -> void:
 	var min_cx := _hash.cell_x(x - radius)
 	var max_cx := _hash.cell_x(x + radius)
 	var min_cy := _hash.cell_y(y - radius)
@@ -974,9 +1012,29 @@ func _detonate(x: float, y: float, radius: float, damage: int, min_fraction: flo
 				if distance_sq > radius_sq:
 					continue
 				var falloff := 1.0 - (sqrt(distance_sq) / radius) * (1.0 - min_fraction)
+				# Suppression before damage: applying it first keeps the order
+				# identical whether or not this blast kills the drone.
+				_suppress(e, slow_factor, slow_ticks)
 				# Always at least 1, so a shell that reaches something never does
 				# literally nothing - a zero-damage hit reads as a bug.
 				_damage_enemy(e, maxi(1, int(round(float(damage) * falloff))))
+
+## Drag a drone's speed down for a while.
+##
+## Refresh, never stack: the strongest slow currently on the drone wins and
+## re-arms its timer. Stacking multiplicatively would let a cluster of
+## suppressors pin a wave in place indefinitely, which turns one turret into the
+## answer to every question and is exactly the degenerate state the deployment
+## limit exists to prevent.
+func _suppress(index: int, factor: float, ticks: int) -> void:
+	if ticks <= 0 or factor >= 1.0:
+		return
+	if e_slow_ticks[index] > 0 and e_slow_factor[index] < factor:
+		# Already under a stronger slow; just re-arm its timer.
+		e_slow_ticks[index] = maxi(e_slow_ticks[index], ticks)
+		return
+	e_slow_factor[index] = factor
+	e_slow_ticks[index] = maxi(e_slow_ticks[index], ticks)
 
 func _damage_enemy(index: int, amount: int) -> void:
 	e_hp[index] -= amount
@@ -1076,6 +1134,9 @@ func _spawn(type_index: int) -> void:
 	e_type[i] = type_index
 	e_bounty[i] = _type_bounty_now[type_index]
 	e_leak[i] = _type_leak[type_index]
+	# A recycled slot must not inherit the last occupant's suppression.
+	e_slow_ticks[i] = 0
+	e_slow_factor[i] = 1.0
 	_sample_path(0.0, e_offset[i])
 	e_x[i] = _out_x
 	e_y[i] = _out_y
@@ -1187,6 +1248,9 @@ func blueprint_count() -> int: return _bp_ids.size()
 ## of the ladder without hardcoding four.
 func blueprint_tier_count(i: int) -> int: return _bp_tier_count[i]
 func blueprint_splash(i: int) -> float: return _tier_splash_radius[_bp_tier_offset[i]]
+func blueprint_slow_factor(i: int) -> float: return _tier_slow_factor[_bp_tier_offset[i]]
+func platform_slow_factor(i: int) -> float: return _tier_slow_factor[t_tier_slot[i]]
+func platform_slow_ticks(i: int) -> int: return _tier_slow_ticks[t_tier_slot[i]]
 func platform_splash(i: int) -> float: return _tier_splash_radius[t_tier_slot[i]]
 ## Public so tests and tools can name an enemy instead of guessing its index -
 ## the index is alphabetical and shifts whenever a new enemy is added.
@@ -1236,6 +1300,8 @@ func state_hash() -> int:
 	h = StateHash.mix_bytes(h, _cmd_type.to_byte_array())
 	h = StateHash.mix_bytes(h, _cmd_a.to_byte_array())
 	h = StateHash.mix_bytes(h, _cmd_b.to_byte_array())
+	h = StateHash.mix_bytes(h, e_slow_ticks.to_byte_array())
+	h = StateHash.mix_bytes(h, e_slow_factor.to_byte_array())
 	h = StateHash.mix_bytes(h, _cmd_c.to_byte_array())
 	h = StateHash.mix_int(h, _rejected_commands)
 	h = StateHash.mix_int(h, _cells_bought)

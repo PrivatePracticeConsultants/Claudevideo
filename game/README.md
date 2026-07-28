@@ -84,11 +84,17 @@ and never makes up more than 3% of the drones in a level.
 
 Two families answering different problems:
 
-| | Ballistic | Cannon |
-|---|---|---|
-| Damage | Single target | Area, falling off toward the edge |
-| Best against | Bulwark Haulers | Skitter swarms |
-| Tier 1 cost | $100 | $140 |
+| | Ballistic | Cannon | Arc Suppressor |
+|---|---|---|---|
+| Damage | Single target | Area, falling off toward the edge | Very low |
+| Does | Kills things | Kills crowds | Slows everything in the blast |
+| Best against | Bulwark Haulers | Skitter swarms | Vanguard Lances |
+| Tier 1 cost | $100 | $140 | $130 |
+
+The Suppressor barely damages anything. It is a force multiplier: a slowed drone
+spends longer inside everyone else's range, so a Suppressor makes the turrets
+around it worth more. Slows refresh rather than stack, so massing them does not
+pin a wave in place.
 
 You are capped at a **deployment limit** per level — 24 turrets at the first,
 doubling every ten levels to 118 at the last. Once your allowance is placed the

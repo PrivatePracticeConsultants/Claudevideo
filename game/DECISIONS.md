@@ -802,6 +802,45 @@ The within-chain health step also had to steepen (×1.22/×1.48 → ×1.70/×2.1
 with 24 turrets carried onto a board whose next act adds two slots, the old step
 left the second act of the opening chain winnable by building nothing.
 
+## P0-41 · The Arc Suppressor, and why slows refresh instead of stacking
+
+The third weapon family is the first that is not primarily about damage. It does
+roughly a fifth of a Ballistic's DPS and instead drags everything in a small
+blast radius down to a fraction of its speed. That makes it a force multiplier —
+every other turret on the board gets more time on target — and the direct answer
+to the Vanguard Lance, whose whole threat is crossing a firing arc too fast to be
+killed in it.
+
+**Slows refresh; they never stack.** The strongest slow currently on a drone wins
+and re-arms its timer. Stacking multiplicatively is the obvious implementation
+and it is a trap: a cluster of Suppressors would pin a wave in place
+indefinitely, which turns one turret into the answer to every question and is
+exactly the degenerate state the deployment limit exists to prevent.
+
+Suppression is sim state, so it plays by the sim's rules: preallocated arrays on
+the enemy pool, durations converted to ticks at load (seconds would drift with
+tick rate), cleared when a pool slot is recycled — the same hazard the generation
+stamp exists for, applied to status effects — and folded into `state_hash()`, or
+a desync in *who is slowed* would be invisible to the determinism test.
+
+One knock-on worth recording: the renderer picked a turret's family colour by
+asking "does it splash". The Suppressor splashes too, so every Suppressor
+rendered as a Cannon until the test was reordered to ask about slowing first.
+
+### It made the balance gate fail, correctly
+
+Suppression makes an **inherited** board stronger, because slowed drones give
+every turret already standing more time on target. The second act of the opening
+chain immediately became winnable by building nothing, and the gate caught it.
+
+Chasing it revealed the actual defect, which was not the Suppressor. Slack from
+the deployment-limit change (P0-40) had been set at 40% of the capacity increase,
+which left the opening acts roughly **four times** over-provisioned. That is
+harmless on its own and poisonous in a chain: the board an act hands forward then
+wins the next act unattended. Cutting the slack to 15% and steepening the
+within-chain step (×1.85/×2.35) fixed it at the source. The player's headroom
+comes from having far more turret slots, not from every act being loose.
+
 ## P0-14 · Deliberately not built in P0
 
 Not oversights — later phases, per §5.7. Anything tempting that came up is in
