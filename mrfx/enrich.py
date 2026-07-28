@@ -15,6 +15,7 @@ import time
 import zipfile
 from pathlib import Path
 
+import duckdb
 import httpx
 
 from .config import MrfxConfig
@@ -95,12 +96,24 @@ def _mark_dirty() -> None:
         _names_dirty = True
 
 
+class _RollupBusy(Exception):
+    """A rollup still owns the memory pool — defer this enrichment cycle."""
+
+
 def _wait_out_rollup(store: Store, stop: threading.Event, cap_seconds: float = 600.0) -> None:
     """Block the caller while a rollup is aggregating, so enrichment's
-    whole-store NPI scan doesn't run concurrently with a rollup delta (both
-    are heavy DuckDB scans; together they thrash the 8 GB pool and the HDD and
-    slow extraction). Capped so a genuinely stuck rollup can't pause names
-    forever — after the cap, enrichment proceeds and just shares the disk."""
+    whole-store NPI scan doesn't run concurrently with a rollup delta (both are
+    heavy DuckDB scans that thrash the pool and the HDD and slow extraction).
+
+    Raises _RollupBusy if the rollup is STILL running at the cap. It used to
+    fall through and proceed, on the reasoning that the two would "just share
+    the disk" — but DuckDB's memory_limit is a hard shared budget, not a
+    shareable bandwidth. A big-store rebuild holds essentially all of it for
+    HOURS (seen live at 167 partitions), so proceeding meant every cycle walked
+    into an exhausted pool and died — "failed to pin block of size 4.0 KiB
+    (7.4 GiB/7.4 GiB used)" on a query that needs almost nothing. Name
+    resolution is a background nicety with no deadline; the rollup is the thing
+    that has to finish. Defer and come back."""
     in_progress = getattr(store, "rollup_in_progress", None)
     if not callable(in_progress):
         return
@@ -108,6 +121,9 @@ def _wait_out_rollup(store: Store, stop: threading.Event, cap_seconds: float = 6
     while in_progress() and not stop.is_set() and waited < cap_seconds:
         stop.wait(2.0)
         waited += 2.0
+    if in_progress() and not stop.is_set():
+        raise _RollupBusy(
+            "the analytics rebuild is still using the memory budget")
 
 
 def _accepts_skip(fn) -> bool:
@@ -797,6 +813,19 @@ def start_persistent_enrichment(cfg: MrfxConfig, store: Store,
                 # and a poll of trickling NPIs can't rebuild every time.
                 run_enrichment(cfg, store, stop, final_refresh=first)
                 first = False
+            except _RollupBusy as e:
+                # EXPECTED contention, not a fault: names simply wait for the
+                # rebuild to release the memory pool. A traceback here reads as
+                # a crash to the user and buries real errors in the log.
+                log.info("name lookup paused — %s; retrying shortly", e)
+            except duckdb.OutOfMemoryException:
+                # Same situation reached by a different route (something else
+                # holds the pool). Self-healing, so say so in one calm line
+                # instead of a stack trace.
+                log.info("name lookup paused — DuckDB's memory budget is fully "
+                         "committed right now (usually an analytics rebuild); "
+                         "retrying shortly. Raise duckdb_memory_gb in "
+                         "config/mrfx.yaml if this persists once rebuilds finish.")
             except Exception:  # noqa: BLE001 — a bad cycle must not kill the loop
                 log.exception("enrichment cycle failed; retrying after a pause")
             # bulk runs re-read a multi-GB file each pass, so poll far less

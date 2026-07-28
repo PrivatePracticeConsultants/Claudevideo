@@ -1177,12 +1177,59 @@ def test_enrichment_yields_to_rollup(cfg, store):
     t.join(timeout=5)
     assert released, "enrichment must resume once the rollup clears"
 
-    # the cap prevents a stuck rollup from pausing names forever
+    # At the cap it DEFERS the cycle instead of proceeding. It used to fall
+    # through and run anyway, reasoning the two would "just share the disk" —
+    # but DuckDB's memory_limit is a hard shared budget, and a big-store rebuild
+    # holds essentially all of it for HOURS (seen live at 167 partitions). So
+    # every cycle walked into an exhausted pool and died with
+    # "failed to pin block of size 4.0 KiB (7.4 GiB/7.4 GiB used)" on a query
+    # needing almost nothing. Names have no deadline; the rollup must finish.
+    from mrfx.enrich import _RollupBusy
+
     store._rollup_active = True
     t0 = time.monotonic()
-    _wait_out_rollup(store, stop, cap_seconds=1)
-    assert time.monotonic() - t0 < 5  # returned at the cap, didn't hang
+    with pytest.raises(_RollupBusy):
+        _wait_out_rollup(store, stop, cap_seconds=1)
+    assert time.monotonic() - t0 < 5  # gave up at the cap, didn't hang
     store._rollup_active = False
+    # and with no rollup running it returns immediately, as before
+    _wait_out_rollup(store, stop, cap_seconds=1)
+
+
+def test_enrichment_loop_treats_memory_contention_as_a_pause_not_a_crash(
+        cfg, store, caplog, monkeypatch):
+    """A deferred cycle is EXPECTED contention, not a fault. Logging a traceback
+    for it reads as a crash to the user and buries real errors — the reported
+    symptom was a wall of OutOfMemoryException stack traces from a self-healing
+    situation."""
+    import logging
+    import threading
+
+    import duckdb
+
+    import mrfx.enrich as E
+
+    for boom in (E._RollupBusy("the analytics rebuild is still using it"),
+                 duckdb.OutOfMemoryException("failed to pin block of size 4.0 KiB")):
+        calls = {"n": 0}
+
+        def fake_run(cfg_, store_, stop_, final_refresh=False, _e=boom):
+            calls["n"] += 1
+            stop_.set()          # one cycle, then end the loop
+            raise _e
+
+        stop = threading.Event()
+        # monkeypatch (not a manual save/restore — the naive version restored
+        # the FAKE and leaked it into every later test in the run)
+        monkeypatch.setattr(E, "run_enrichment", fake_run)
+        with caplog.at_level(logging.INFO):
+            caplog.clear()
+            E.start_persistent_enrichment(cfg, store, stop)
+            stop.wait(3.0)
+        text = caplog.text
+        assert "paused" in text, text                 # calm, explanatory
+        assert "Traceback" not in text, text          # not dressed up as a crash
+        assert "enrichment cycle failed" not in text, text
 
 
 def test_summary_cached_and_single_flight(cfg, store):

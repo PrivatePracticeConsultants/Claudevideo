@@ -826,6 +826,17 @@ class Store:
                 self._memory_limit_gb = cap
             else:
                 self._memory_limit_gb = 4  # RAM size unknown: safe flat default
+        # State the budget at open. DuckDB reports OOM in GiB ("7.4 GiB/7.4 GiB
+        # used"), which does NOT visibly match the GB number in the config
+        # (8 GB == 7.45 GiB), so a user hitting the ceiling had no way to connect
+        # the error to the setting that causes it — or to know whether the value
+        # came from their config or was chosen automatically.
+        logging.getLogger(__name__).info(
+            "analytics memory budget: %d GB (%.1f GiB, as DuckDB reports it) — "
+            "%s; raise duckdb_memory_gb in config/mrfx.yaml if rebuilds run out",
+            self._memory_limit_gb, self._memory_limit_gb * 1e9 / (1 << 30),
+            "set by duckdb_memory_gb" if memory_limit_gb is not None
+            else "chosen automatically from this machine's RAM")
         # Global DuckDB thread count, set ONCE at open (see _apply_settings):
         # capped so rollup slices size as validated AND concurrent-query
         # contention stays bounded. Never below 1, never above the machine.
