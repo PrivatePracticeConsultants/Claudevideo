@@ -93,5 +93,6 @@
   },
   "platform_max_tier": "#ffcf6e",
   "platform_cannon": "#c98a5b",
-  "platform_suppressor": "#4fc9d8"
+  "platform_suppressor": "#4fc9d8",
+  "platform_railgun": "#d8d24f"
 }

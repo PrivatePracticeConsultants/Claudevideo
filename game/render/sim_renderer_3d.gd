@@ -471,6 +471,15 @@ func _enemy_mesh(enemy_id: String) -> Mesh:
 			var dart := PrismMesh.new()
 			dart.size = Vector3(0.62, 1.0, 2.05)
 			return dart
+		"breaker":
+			# Six-sided and squat: nothing else on the board is round, so a
+			# Breaker is identifiable from its outline alone even at 4x speed.
+			var bunker := CylinderMesh.new()
+			bunker.top_radius = 0.44
+			bunker.bottom_radius = 0.58
+			bunker.height = 1.0
+			bunker.radial_segments = 6
+			return bunker
 		_:
 			var box := BoxMesh.new()
 			box.size = Vector3.ONE
@@ -547,6 +556,7 @@ func _refresh_turrets() -> void:
 	var ballistic := _color("platform")
 	var cannon := _color_of(_world.get("platform_cannon", "#c98a5b"))
 	var suppressor := _color_of(_world.get("platform_suppressor", "#4fc9d8"))
+	var railgun := _color_of(_world.get("platform_railgun", "#d8d24f"))
 	var plinth := _color("pad_occupied")
 
 	var bases := _turret_bases.multimesh
@@ -556,7 +566,7 @@ func _refresh_turrets() -> void:
 		var max_tier := maxi(_sim.platform_max_tier(_sim.platform_blueprint(i)) - 1, 1)
 		var scale := 1.0 + growth * float(tier)
 		var fraction := float(tier) / float(max_tier)
-		var family := _family_colour(i, ballistic, cannon, suppressor)
+		var family := _family_colour(i, ballistic, cannon, suppressor, railgun)
 		var tint := family.lerp(top_colour, fraction)
 
 		bases.set_instance_transform(i, Transform3D(Basis(),
@@ -679,6 +689,7 @@ func _update_barrels() -> void:
 	var ballistic := _color("platform")
 	var cannon := _color_of(_world.get("platform_cannon", "#c98a5b"))
 	var suppressor := _color_of(_world.get("platform_suppressor", "#4fc9d8"))
+	var railgun := _color_of(_world.get("platform_railgun", "#d8d24f"))
 
 	for i in _sim.t_count:
 		var target := atan2(_sim.t_aim_x[i], _sim.t_aim_y[i])
@@ -703,7 +714,7 @@ func _update_barrels() -> void:
 		mm.set_instance_transform(i, Transform3D(_basis,
 			Vector3(_sim.t_x[i] + dx * reach * 0.5, lift, _sim.t_y[i] + dz * reach * 0.5)))
 		var max_tier := maxi(_sim.platform_max_tier(_sim.platform_blueprint(i)) - 1, 1)
-		var family := _family_colour(i, ballistic, cannon, suppressor)
+		var family := _family_colour(i, ballistic, cannon, suppressor, railgun)
 		mm.set_instance_color(i, family.lerp(top_colour, float(_sim.platform_tier(i)) / float(max_tier)))
 	mm.visible_instance_count = _sim.t_count
 
@@ -713,9 +724,12 @@ func _update_barrels() -> void:
 ## testing "does it splash" first would paint every Suppressor as a Cannon. Read
 ## from behaviour rather than from the blueprint's name, so a fourth family that
 ## slows or splashes inherits sensible colours without touching this.
-func _family_colour(index: int, ballistic: Color, cannon: Color, suppressor: Color) -> Color:
+func _family_colour(index: int, ballistic: Color, cannon: Color, suppressor: Color,
+		railgun: Color) -> Color:
 	if _sim.platform_slow_factor(index) < 1.0:
 		return suppressor
+	if _sim.platform_pierce(index) > 0.0:
+		return railgun
 	if _sim.platform_splash(index) > 0.0:
 		return cannon
 	return ballistic

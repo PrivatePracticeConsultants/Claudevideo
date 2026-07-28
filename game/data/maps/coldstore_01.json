@@ -1,0 +1,67 @@
+{
+  "_comment": "Cold Store. A wide loop around the freight yard. The long return leg gives everything you built on the way out a second pass, which is what makes suppression pay here.",
+  "id": "coldstore_01",
+  "display_name": "Cold Store",
+  "bounds": {
+    "width": 5900.0,
+    "height": 2400.0
+  },
+  "path": [
+    {
+      "x": -80.0,
+      "y": 1000.0
+    },
+    {
+      "x": 1150.0,
+      "y": 1000.0
+    },
+    {
+      "x": 1150.0,
+      "y": 300.0
+    },
+    {
+      "x": 2400.0,
+      "y": 300.0
+    },
+    {
+      "x": 2400.0,
+      "y": 1500.0
+    },
+    {
+      "x": 1350.0,
+      "y": 1500.0
+    },
+    {
+      "x": 1350.0,
+      "y": 2150.0
+    },
+    {
+      "x": 3400.0,
+      "y": 2150.0
+    },
+    {
+      "x": 3400.0,
+      "y": 900.0
+    },
+    {
+      "x": 4400.0,
+      "y": 900.0
+    },
+    {
+      "x": 4400.0,
+      "y": 1900.0
+    },
+    {
+      "x": 5200.0,
+      "y": 1900.0
+    },
+    {
+      "x": 5200.0,
+      "y": 1050.0
+    },
+    {
+      "x": 5780.0,
+      "y": 1050.0
+    }
+  ]
+}

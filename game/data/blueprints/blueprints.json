@@ -1,5 +1,5 @@
 {
-  "_comment": "Two families. Ballistic is cheap sustained single-target damage; Cannon lobs shells that damage everything inside a radius, falling off to splash_min_fraction at the edge. Costs and the ~2.2x DPS-per-tier ladder follow master plan section 3.2. Cannon deliberately has lower single-target DPS, a slower rate of fire and a shorter range than Ballistic at the same tier - it is paid for in area, and against one heavy target it is the wrong tool. Missile/Energy/Support are P1. Arc Suppressor is the third family and the first that is not primarily about damage: it does a fraction of what a Ballistic does and instead drags everything in a small blast radius down to a fraction of its speed. That is a force multiplier, not a killer - every other turret on the board gets more time on target - which makes it the direct answer to the Vanguard Lance, whose whole threat is that it crosses a firing arc too fast to be killed in it. Slows refresh rather than stack (see Sim._suppress), so a wall of Suppressors cannot pin a wave in place.",
+  "_comment": "Two families. Ballistic is cheap sustained single-target damage; Cannon lobs shells that damage everything inside a radius, falling off to splash_min_fraction at the edge. Costs and the ~2.2x DPS-per-tier ladder follow master plan section 3.2. Cannon deliberately has lower single-target DPS, a slower rate of fire and a shorter range than Ballistic at the same tier - it is paid for in area, and against one heavy target it is the wrong tool. Missile/Energy/Support are P1. Arc Suppressor is the third family and the first that is not primarily about damage: it does a fraction of what a Ballistic does and instead drags everything in a small blast radius down to a fraction of its speed. That is a force multiplier, not a killer - every other turret on the board gets more time on target - which makes it the direct answer to the Vanguard Lance, whose whole threat is that it crosses a firing arc too fast to be killed in it. Slows refresh rather than stack (see Sim._suppress), so a wall of Suppressors cannot pin a wave in place. Railgun is the fourth family and the answer to the Siege Breaker: enormous single-shot damage on a very slow cycle, the longest range in the game, and a round that does not stop at the first thing it hits - it damages everything within a lane of its flight path, at full damage the whole way. That makes it worth its cost against a column on a straight and close to worthless against a scattered swarm, which is the trade it is meant to present.",
   "ballistic": {
     "display_name": "Ballistic",
     "family": "ballistic",
@@ -160,6 +160,55 @@
         "splash_min_fraction": 0.66,
         "slow_factor": 0.4,
         "slow_duration_seconds": 1.9
+      }
+    ]
+  },
+  "railgun": {
+    "display_name": "Railgun",
+    "tiers": [
+      {
+        "name": "Rail I",
+        "cost": 260,
+        "damage": 93,
+        "range_units": 300.0,
+        "fire_interval_seconds": 2.1,
+        "projectile_speed_units_per_second": 2200.0,
+        "projectile_hit_radius_units": 8.0,
+        "projectile_lifetime_seconds": 1.0,
+        "pierce_width_units": 26.0
+      },
+      {
+        "name": "Rail II",
+        "cost": 600,
+        "damage": 175,
+        "range_units": 325.0,
+        "fire_interval_seconds": 1.9,
+        "projectile_speed_units_per_second": 2400.0,
+        "projectile_hit_radius_units": 9.0,
+        "projectile_lifetime_seconds": 1.0,
+        "pierce_width_units": 29.0
+      },
+      {
+        "name": "Rail III",
+        "cost": 1380,
+        "damage": 345,
+        "range_units": 350.0,
+        "fire_interval_seconds": 1.7,
+        "projectile_speed_units_per_second": 2600.0,
+        "projectile_hit_radius_units": 10.0,
+        "projectile_lifetime_seconds": 1.0,
+        "pierce_width_units": 32.0
+      },
+      {
+        "name": "Rail IV",
+        "cost": 3100,
+        "damage": 640,
+        "range_units": 380.0,
+        "fire_interval_seconds": 1.5,
+        "projectile_speed_units_per_second": 2800.0,
+        "projectile_hit_radius_units": 11.0,
+        "projectile_lifetime_seconds": 1.0,
+        "pierce_width_units": 36.0
       }
     ]
   }

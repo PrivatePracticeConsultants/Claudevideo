@@ -1,13 +1,12 @@
 class_name Hud
 extends CanvasLayer
 
-## Minimal P0 heads-up display: the four numbers you need to play, plus the
+## Heads-up display: the numbers you need to play, what is coming next, and the
 ## end-of-engagement banner.
 ##
-## Deliberately not here yet: targeting priority controls, send-wave-early, sell,
-## tier upgrades and full unit inspection are the table-stakes QoL from section
-## 3.6 and land with the economy in P2. The build menu is one blueprint because
-## there is one blueprint.
+## Most of section 3.6's table-stakes QoL now exists - sell, send-wave-early,
+## tier readouts, and a preview of the next wave. Still deliberately absent:
+## targeting-priority controls, and a build menu richer than one cycling key.
 
 var _sim: Sim
 var _theme: Dictionary
@@ -15,6 +14,7 @@ var _stats: Label
 var _hint: Label
 var _banner: Label
 var _level: Label
+var _preview: Label
 var _level_text: String = ""
 var _is_last_level: bool = false
 ## Whether the level after this one is the next act on the same board. It changes
@@ -37,7 +37,7 @@ func setup(sim: Sim, theme: Dictionary) -> void:
 	_hint.position = Vector2(14, 686)
 	_hint.add_theme_font_size_override("font_size", 12)
 	_hint.add_theme_color_override("font_color", _color("text_dim"))
-	_hint.text = "click owned ground to build  ·  click a turret to upgrade  ·  click dim ground to buy it  ·  Q weapon  ·  1/2/3 speed  ·  space pause  ·  F3 debug  ·  R restart"
+	_hint.text = "left-click: build / upgrade / buy ground  ·  right-click a turret: sell  ·  Q weapon  ·  E call wave early  ·  1-4 speed  ·  space pause  ·  [ ] board  ·  F3 debug  ·  R restart"
 	add_child(_hint)
 
 	_level = Label.new()
@@ -45,6 +45,16 @@ func setup(sim: Sim, theme: Dictionary) -> void:
 	_level.add_theme_font_size_override("font_size", 20)
 	_level.add_theme_color_override("font_color", _color("text_dim"))
 	add_child(_level)
+
+	# What is coming next. With five drone classes on the board, "what is in the
+	# next wave" is the difference between planning a board and guessing at one -
+	# and it is information the wave file already has, so withholding it is not
+	# difficulty, it is just opacity.
+	_preview = Label.new()
+	_preview.position = Vector2(14, 46)
+	_preview.add_theme_font_size_override("font_size", 14)
+	_preview.add_theme_color_override("font_color", _color("text_dim"))
+	add_child(_preview)
 
 	_banner = Label.new()
 	_banner.position = Vector2(0, 300)
@@ -60,12 +70,15 @@ func setup(sim: Sim, theme: Dictionary) -> void:
 var _last_signature: int = -1
 
 func set_level(name: String, index: int, total: int, inherited: int = 0,
-		next_extends: bool = false, dropped: int = 0) -> void:
+		next_extends: bool = false, dropped: int = 0, stood_down: int = 0) -> void:
 	_level_text = "%s      LEVEL %d/%d" % [name, index + 1, total]
 	if inherited > 0:
 		# Without this the inherited turrets read as a bug - a board you did not
 		# build, on a level you have not played.
 		_level_text += "      %d TURRETS HELD OVER" % inherited
+	if stood_down > 0:
+		# Not a loss - a cap. Saying so stops it reading as a bug.
+		_level_text += "  ·  %d STOOD DOWN" % stood_down
 	if dropped > 0:
 		# You can build beside road that has not been revealed yet. When it is
 		# revealed and runs through your turret, that turret is gone - and the
@@ -79,7 +92,7 @@ func refresh(speed: int, paused: bool, hovered_platform: int = -1,
 		blueprint: int = 0, can_buy_ground: bool = false) -> void:
 	var signature := hash([_sim.capital(), _sim.integrity(), _sim.wave_number(),
 		speed, paused, _sim.result(), hovered_platform, blueprint, can_buy_ground,
-		_sim.t_count, _sim.cells_bought(),
+		_sim.t_count, _sim.cells_bought(), _sim.can_send_wave(), _sim.next_wave_number(),
 		-1 if hovered_platform < 0 else _sim.platform_tier(hovered_platform)])
 	if signature == _last_signature:
 		return
@@ -97,6 +110,9 @@ func refresh(speed: int, paused: bool, hovered_platform: int = -1,
 	]
 	if can_buy_ground:
 		_stats.text += "    BUY GROUND $%d" % _sim.next_cell_cost()
+	if _sim.can_send_wave():
+		_stats.text += "    [E] CALL WAVE +$%d" % _sim.send_wave_bonus()
+	_refresh_preview()
 	# Integrity is the run's real health bar, so it is the one number that
 	# changes colour as it goes.
 	var fraction := float(_sim.integrity()) / float(_sim.integrity_max())
@@ -114,10 +130,15 @@ func refresh(speed: int, paused: bool, hovered_platform: int = -1,
 			_sim.tier_name(family, tier), tier + 1, _sim.platform_dps(hovered_platform)]
 		if _sim.platform_splash(hovered_platform) > 0.0:
 			label += "  splash %.0f" % _sim.platform_splash(hovered_platform)
+		if _sim.platform_slow_factor(hovered_platform) < 1.0:
+			label += "  slows to %d%%" % int(round(_sim.platform_slow_factor(hovered_platform) * 100.0))
+		if _sim.platform_pierce(hovered_platform) > 0.0:
+			label += "  pierces"
 		if upgrade < 0:
 			label += "   MAX TIER"
 		else:
 			label += "   upgrade $%d%s" % [upgrade, "" if _sim.capital() >= upgrade else "  (short)"]
+		label += "   right-click: sell $%d" % _sim.sell_value(hovered_platform)
 		_stats.text = "CAPITAL $%d    INTEGRITY %d    WAVE %d/%d    %s" % [
 			_sim.capital(), _sim.integrity(),
 			maxi(_sim.wave_number(), 1), _sim.wave_count(), label]
@@ -137,6 +158,20 @@ func refresh(speed: int, paused: bool, hovered_platform: int = -1,
 	else:
 		_banner.text = "CORRIDOR LOST   ·   wave %d/%d   ·   R to retry" % [_sim.wave_number(), _sim.wave_count()]
 		_banner.add_theme_color_override("font_color", _color("bad"))
+
+func _refresh_preview() -> void:
+	if _sim.is_over():
+		_preview.text = ""
+		return
+	var groups := _sim.next_wave_preview()
+	if groups.is_empty():
+		_preview.text = ""
+		return
+	var parts := PackedStringArray()
+	for entry in groups:
+		var pair: Array = entry
+		parts.append("%d x %s" % [int(pair[1]), str(pair[0])])
+	_preview.text = "INCOMING  wave %d:  %s" % [_sim.next_wave_number(), "  ·  ".join(parts)]
 
 func _color(key: String) -> Color:
 	return Color(str(_theme.get(key, "#ff00ff")))

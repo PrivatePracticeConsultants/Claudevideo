@@ -1,0 +1,75 @@
+{
+  "_comment": "Terminus. The last board in the campaign. Every drone class, every corner type, and the longest route in the game - if anything in your arsenal is dead weight, it shows here.",
+  "id": "terminus_02",
+  "display_name": "Terminus",
+  "bounds": {
+    "width": 5900.0,
+    "height": 2400.0
+  },
+  "path": [
+    {
+      "x": -80.0,
+      "y": 300.0
+    },
+    {
+      "x": 1250.0,
+      "y": 300.0
+    },
+    {
+      "x": 1250.0,
+      "y": 1150.0
+    },
+    {
+      "x": 400.0,
+      "y": 1150.0
+    },
+    {
+      "x": 400.0,
+      "y": 2000.0
+    },
+    {
+      "x": 1900.0,
+      "y": 2000.0
+    },
+    {
+      "x": 1900.0,
+      "y": 780.0
+    },
+    {
+      "x": 2900.0,
+      "y": 780.0
+    },
+    {
+      "x": 2900.0,
+      "y": 1750.0
+    },
+    {
+      "x": 2100.0,
+      "y": 1750.0
+    },
+    {
+      "x": 2100.0,
+      "y": 2250.0
+    },
+    {
+      "x": 3700.0,
+      "y": 2250.0
+    },
+    {
+      "x": 3700.0,
+      "y": 900.0
+    },
+    {
+      "x": 4700.0,
+      "y": 900.0
+    },
+    {
+      "x": 4700.0,
+      "y": 1950.0
+    },
+    {
+      "x": 5780.0,
+      "y": 1950.0
+    }
+  ]
+}

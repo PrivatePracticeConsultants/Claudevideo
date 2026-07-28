@@ -1,0 +1,67 @@
+{
+  "_comment": "Gantry Line. Long straights broken by tight switchbacks - the board the Railgun was authored against, because a piercing round down one of these runs is worth several turrets and a scattered swarm on the same board is worth none.",
+  "id": "gantry_01",
+  "display_name": "Gantry Line",
+  "bounds": {
+    "width": 5900.0,
+    "height": 2400.0
+  },
+  "path": [
+    {
+      "x": -80.0,
+      "y": 420.0
+    },
+    {
+      "x": 1450.0,
+      "y": 420.0
+    },
+    {
+      "x": 1450.0,
+      "y": 1180.0
+    },
+    {
+      "x": 600.0,
+      "y": 1180.0
+    },
+    {
+      "x": 600.0,
+      "y": 1980.0
+    },
+    {
+      "x": 2350.0,
+      "y": 1980.0
+    },
+    {
+      "x": 2350.0,
+      "y": 640.0
+    },
+    {
+      "x": 3250.0,
+      "y": 640.0
+    },
+    {
+      "x": 3250.0,
+      "y": 1560.0
+    },
+    {
+      "x": 4150.0,
+      "y": 1560.0
+    },
+    {
+      "x": 4150.0,
+      "y": 700.0
+    },
+    {
+      "x": 5000.0,
+      "y": 700.0
+    },
+    {
+      "x": 5000.0,
+      "y": 1800.0
+    },
+    {
+      "x": 5780.0,
+      "y": 1800.0
+    }
+  ]
+}

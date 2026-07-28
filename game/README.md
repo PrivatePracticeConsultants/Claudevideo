@@ -2,12 +2,12 @@
 
 Roguelite tower defense. Godot 4.x / GDScript. **3D, and it runs in a browser.**
 
-**Status: P0 complete and audited twice, then extended well past it.**
-Twenty-four levels — eight boards played as three acts each, where every act
-opens more of the same road and keeps everything you built on the last one — two
-weapon families with four tiers each, three enemy classes, free placement on
-purchasable ground, all on a deterministic 30Hz simulation drawn with real
-lighting, shadows and depth cueing. The design document is the master plan
+**Status: P0 complete and audited three times, then extended well past it.**
+Thirty-six levels — twelve boards played as three acts each, where every act
+opens more of the same road and keeps what you built on the last one — four
+weapon families with four tiers each, five drone classes, free placement on
+purchasable ground, saved progress, all on a deterministic 30Hz simulation drawn
+with real lighting, shadows and depth cueing. The design document is the master plan
 (v2); the phase ladder is §5.7. Formally this is P0 plus much of P1/P2's content;
 the run layer (P3) is the next real milestone.
 
@@ -61,44 +61,61 @@ branch, `/docs` folder. Two things to know:
 Drones walk the corridor end to end. Anything that reaches the far end costs
 Corridor Integrity. Hit zero and the level is lost.
 
-| Drone | Health | Speed | Leak cost | Pays |
-|---|---|---|---|---|
-| Skitter Drone | 22 | 140 | 1 | $7 |
-| Sentry Walker | 55 | 90 | 4 | $16 |
-| Bulwark Hauler | 260 | 55 | 12 | $58 |
-| **Vanguard Lance** | **620** | **168** | 11 | $150 |
+| Drone | Health | Speed | Leak cost | Pays | |
+|---|---|---|---|---|---|
+| Skitter Drone | 22 | 140 | 1 | $7 | fast, fragile, numerous |
+| Sentry Walker | 55 | 90 | 4 | $16 | the baseline |
+| Bulwark Hauler | 260 | 55 | 12 | $58 | slow and very tough |
+| **Vanguard Lance** | **620** | **168** | 11 | $150 | fastest *and* tough |
+| **Siege Breaker** | **1400** | 78 | 16 | $300 | shrugs off 80% of slows |
 
-The first three trade speed against health. The Lance does not — it is the
-fastest thing on the board *and* the toughest, so a turret gets less time on a
-target that needs more damage. A thin line of fire that held everything else
-lets Lances through. It arrives partway into the campaign, never opens a wave,
-and never makes up more than 3% of the drones in a level.
+The first three trade speed against health. The **Lance** does not — it is the
+fastest thing on the board *and* tougher than anything that is not slower than
+it, so a turret gets less time on a target that needs more damage. A thin line of
+fire that held everything else lets Lances through.
+
+The **Breaker** exists because the Arc Suppressor does: once slowing everything
+was possible, slowing everything was the answer to everything. Both arrive
+partway into the campaign, never open a wave, and stay a small share of any
+level's head-count — they are elites, not populations.
 
 - **Click owned ground** (green) to build the selected weapon.
 - **Click a turret** to upgrade it a tier. Hovering shows its DPS and next cost.
 - **Click dim blue ground** to buy that cell, expanding where you can build.
   Ground can only be bought next to ground you already hold, and each purchase
   costs more than the last.
-- **`Q`** cycles weapon · **`1`/`2`/`3`** speed · **`space`** pause ·
-  **`F3`** debug overlay · **`R`** restart · **`N`** next level after a win.
+- **Right-click a turret** to sell it back for 65% of everything spent on it.
+- **`E`** calls the next wave in early for a bounty — the gap between waves is
+  when Capital accumulates, so it trades preparation for money.
+- **`Q`** cycles weapon · **`1`–`4`** speed · **`space`** pause · **`[`**/**`]`**
+  move between unlocked boards · **`F3`** debug · **`R`** restart · **`N`** next
+  level after a win.
 
-Two families answering different problems:
+Progress is saved per board, so the campaign resumes where you left it.
 
-| | Ballistic | Cannon | Arc Suppressor |
-|---|---|---|---|
-| Damage | Single target | Area, falling off toward the edge | Very low |
-| Does | Kills things | Kills crowds | Slows everything in the blast |
-| Best against | Bulwark Haulers | Skitter swarms | Vanguard Lances |
-| Tier 1 cost | $100 | $140 | $130 |
+Four families answering different problems:
+
+| | Ballistic | Cannon | Arc Suppressor | Railgun |
+|---|---|---|---|---|
+| Damage | Single target | Area, falls off to the edge | Very low | Enormous, very slow |
+| Does | Kills things | Kills crowds | Slows the blast radius | Pierces a whole lane |
+| Best against | Bulwark Haulers | Skitter swarms | Vanguard Lances | Siege Breakers, columns |
+| Tier 1 cost | $100 | $140 | $130 | $260 |
 
 The Suppressor barely damages anything. It is a force multiplier: a slowed drone
 spends longer inside everyone else's range, so a Suppressor makes the turrets
 around it worth more. Slows refresh rather than stack, so massing them does not
 pin a wave in place.
 
+The Railgun is the opposite trade: one very slow, very long-ranged shot that
+tears down a whole lane at full damage. Worth several turrets against a column on
+a straight, and close to worthless against a scattered swarm.
+
 You are capped at a **deployment limit** per level — 24 turrets at the first,
-doubling every ten levels to 118 at the last. Once your allowance is placed the
-only way to grow is to upgrade, which is what makes *where* you put them matter.
+doubling every ten levels up to the pool ceiling of 144. It is also capped by how
+much road the act has actually revealed, so act I of a board is a smaller board
+than act III. Once your allowance is placed the only way to grow is to upgrade,
+which is what makes *where* you put them matter.
 
 ### Boards that grow
 
@@ -117,9 +134,10 @@ Two things do not carry, and both are load-bearing:
   next one for you: measured, *every* carrying act in the campaign could be
   cleared by building nothing at all.
 
-Inherited turrets count against the new act's deployment limit, so what the
-bigger limit buys is room to extend coverage into the new stretch, not a clean
-slate on top of what is already standing.
+Inherited turrets count against the new act's deployment limit, and an
+inheritance may fill at most **55%** of it — the rest are stood down. That is not
+only balance: it guarantees there is always room to build past what you were
+handed, which is the difference between continuing a board and being given one.
 
 Retrying an act (`R`) restores the same inheritance, not an empty board.
 

@@ -841,6 +841,91 @@ wins the next act unattended. Cutting the slack to 15% and steepening the
 within-chain step (×1.85/×2.35) fixed it at the source. The player's headroom
 comes from having far more turret slots, not from every act being loose.
 
+## P0-42 · Thirty-six levels, and the two things that broke at that scale
+
+Twelve boards, three acts each. Two structural defects only appeared once the
+campaign was this long, and both were caught by measurement rather than play.
+
+**A limit is only real if there is somewhere to put the turrets.** The
+deployment limit doubles on absolute level index (P0-40) and hit 144 well before
+the campaign ended — but the first act of a board reveals only a third of its
+road. `terminus_act1` was handed 144 slots for 5,380 units of corridor, fielded
+63, and lost a level authored for the full allowance. The limit is now also
+capped by revealed road length (`ROAD_PER_TURRET`), which makes act 1 and act 3
+of a board differ naturally instead of by accident.
+
+**Stretching a curve is not the same as extending it.** Head-count, health and
+economy are resampled from a 22-level measured campaign onto N points. Going from
+24 points to 36 stretched the threat curve while the limit kept doubling on
+absolute index, so the middle of the campaign got far more turrets against barely
+more drones — **eleven acts became winnable by building nothing at all**. Fixed
+by curving the board ramp (`BOARD_RAMP_CURVE`) and scaling head-count with the
+slot count, so more turrets means a busier board rather than only a safer one.
+
+Both pool ceilings moved with it: `max_enemies` 1,280 → 2,048 (heaviest authored
+wave is 1,621 drones) and `max_projectiles` 2,560 → 8,192. `Database` refuses to
+load a wave that would breach either, which is how the first one surfaced — as a
+clear load error naming the number, not as spawns silently going missing.
+
+## P0-43 · An inheritance is bounded in size as well as in quality
+
+P0-37 capped what a carried board could be worth per turret. At 78 slots that was
+not enough: eight mid-campaign acts went back to being idle-winnable, because
+seventy-eight tier-2 turrets arriving free is a board regardless of how modest
+each one is.
+
+An inheritance may now occupy at most `carry_limit_share` (0.55) of the new act's
+deployment limit; the rest are **stood down** and counted separately from turrets
+lost to the extended corridor, so the HUD can say which happened. The share is
+below 1 for a reason beyond balance: it guarantees there is always room to build
+past what you inherited, which is the difference between continuing a board and
+being handed one.
+
+## P0-44 · The fourth family, the fifth class, and why each answers the last
+
+The roster is now a chain of answers rather than a ladder of numbers:
+
+- **Arc Suppressor** slows things → answers the **Vanguard Lance**, whose threat
+  is crossing a firing arc too fast to be killed in it.
+- **Siege Breaker** shrugs off 80% of any suppression → answers the Suppressor,
+  because once slowing everything was possible, slowing everything was the answer
+  to everything.
+- **Railgun** fires a piercing round down a lane at full damage the whole way →
+  answers the Breaker, and a column on a straight, and is close to worthless
+  against a scattered swarm.
+
+Priced deliberately *worse* per dollar than Ballistic (0.138 dps/$ against 0.162
+at tier 4): the Railgun pays a premium for range and pierce, and a family that
+was strictly better per dollar would end the arsenal rather than extend it.
+
+## P0-45 · Playability: what a 36-level campaign needs that a demo does not
+
+Five additions, in the order they mattered:
+
+1. **Progress is saved, per board.** Restarting a 36-level campaign from level 1
+   every session makes the back half unreachable. Progress is per *board*, not
+   per level, because later acts are entered carrying earlier ones — dropping a
+   player into act 3 of a board they have never played hands them a level
+   authored against turrets they do not have. `[` and `]` move between unlocked
+   boards. A missing or corrupt save is a new campaign, never a crash.
+2. **Sell, at a partial refund.** Free placement with no undo is punishing in a
+   way nothing in the design intends. The refund is 65% of everything spent
+   including upgrades, so relocating stays a real cost.
+3. **Next-wave preview.** With five drone classes, what is coming is the
+   difference between planning a board and guessing at one — and the wave file
+   already knows. Withholding it is not difficulty.
+4. **Call the next wave early, for a pro-rata bounty.** The gap between waves is
+   when Capital accumulates and turrets get built, so calling one in trades
+   preparation for money. That is a decision, not a convenience.
+5. **4× speed.** Sixteen-wave acts on a 16,000-unit road are long.
+
+Sell and call-early are simulation state and go through the command log like
+everything else. That immediately mattered: the replay helper understood only
+`PLACE` and `UPGRADE` and fell through to "upgrade" for anything else, so a log
+containing a sell would have replayed as a different game. Caught in the audit,
+not by a test — the tests could not see it because the scripted policy never
+emits those commands.
+
 ## P0-14 · Deliberately not built in P0
 
 Not oversights — later phases, per §5.7. Anything tempting that came up is in

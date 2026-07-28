@@ -13,6 +13,16 @@ extends Node3D
 
 const THEME_PATH := "res://data/theme.json"
 
+## Campaign progress. Not simulation state and deliberately nowhere near it: the
+## sim stays a pure function of data, seed and command log, and what the player
+## has unlocked is none of its business.
+##
+## Progress is per BOARD, not per level, because a board is a chain - its later
+## acts are entered carrying the earlier ones and are not winnable from a
+## standing start. Dropping a player into act 3 of a board they have never played
+## would hand them a level authored against turrets they do not have.
+const PROGRESS_PATH := "user://progress.json"
+
 ## How close a click has to be to an existing platform to mean "upgrade this"
 ## rather than "build here". Larger than the platform itself so it is forgiving.
 const PLATFORM_CLICK_RADIUS := 30.0
@@ -57,6 +67,10 @@ var _cells_drawn: int = -1
 ## same inheritance rather than handing you a clean slate - retrying act 3 should
 ## not quietly delete what acts 1 and 2 built.
 var _incoming_carry: Dictionary = {}
+## How many boards the player has unlocked, at least one.
+var _boards_unlocked: int = 1
+## First level index of each board, in campaign order.
+var _board_starts: PackedInt32Array = PackedInt32Array()
 
 func _ready() -> void:
 	_theme = _load_theme()
@@ -64,7 +78,10 @@ func _ready() -> void:
 	if _levels.is_empty():
 		_show_fatal("data/levels.json lists no levels.")
 		return
-	_start_level(0, {})
+	_index_boards()
+	_load_progress()
+	# Resume where they left off rather than at the start of a 36-level campaign.
+	_start_level(_board_starts[_boards_unlocked - 1], {})
 
 ## Tear down and rebuild for a level. Everything is recreated rather than reset
 ## because the Sim is immutable once constructed - its tables are built from the
@@ -110,7 +127,8 @@ func _start_level(index: int, offered_carry: Dictionary) -> void:
 	add_child(_hud)
 	_hud.setup(_sim, _theme)
 	_hud.set_level(str(level["name"]), _level_index, _levels.size(),
-		_sim.t_count, _next_level_extends(), _sim.carry_dropped())
+		_sim.t_count, _next_level_extends(), _sim.carry_dropped(),
+		_sim.carry_stood_down())
 
 	_overlay = DebugOverlay.new()
 	add_child(_overlay)
@@ -127,6 +145,66 @@ func _next_level_extends() -> bool:
 		return false
 	var db := Database.load_engagement(str(next["map"]), str(next["engagement"]))
 	return db.is_valid() and bool(db.engagement.get("carries_forward", false))
+
+## Where each board begins. Levels are grouped by map in campaign order, so a
+## board boundary is simply where the map id changes.
+func _index_boards() -> void:
+	_board_starts = PackedInt32Array()
+	var seen := ""
+	for index in _levels.size():
+		var map_id := str((_levels[index] as Dictionary)["map"])
+		if map_id != seen:
+			_board_starts.append(index)
+			seen = map_id
+	if _board_starts.is_empty():
+		_board_starts.append(0)
+
+func _board_of(level_index: int) -> int:
+	var board := 0
+	for i in _board_starts.size():
+		if _board_starts[i] <= level_index:
+			board = i
+	return board
+
+func _is_last_act_of_board(level_index: int) -> bool:
+	var board := _board_of(level_index)
+	var next_start := _levels.size() if board + 1 >= _board_starts.size() \
+		else _board_starts[board + 1]
+	return level_index + 1 >= next_start
+
+func _load_progress() -> void:
+	# A missing or corrupt file means a new campaign, never a crash. Progress is a
+	# convenience; losing it must not cost anyone the game.
+	_boards_unlocked = 1
+	if not FileAccess.file_exists(PROGRESS_PATH):
+		return
+	var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string(PROGRESS_PATH))
+	if typeof(parsed) != TYPE_DICTIONARY:
+		return
+	_boards_unlocked = clampi(int((parsed as Dictionary).get("boards_unlocked", 1)),
+		1, _board_starts.size())
+
+func _save_progress() -> void:
+	var file := FileAccess.open(PROGRESS_PATH, FileAccess.WRITE)
+	if file == null:
+		return  # read-only or sandboxed storage; play on regardless
+	file.store_string(JSON.stringify({"boards_unlocked": _boards_unlocked}))
+	file.close()
+
+## Beating the last act of a board opens the next one.
+func _note_win() -> void:
+	if not _is_last_act_of_board(_level_index):
+		return
+	var next_board := _board_of(_level_index) + 1
+	if next_board < _board_starts.size() and next_board + 1 > _boards_unlocked:
+		_boards_unlocked = next_board + 1
+		_save_progress()
+
+## Jump to another unlocked board. Always to its FIRST act, because that is the
+## only act in a chain authored to be entered with an empty board.
+func _select_board(delta: int) -> void:
+	var board := clampi(_board_of(_level_index) + delta, 0, _boards_unlocked - 1)
+	_start_level(_board_starts[board], {})
 
 func _process(delta: float) -> void:
 	if _sim == null:
@@ -163,6 +241,15 @@ func _unhandled_input(event: InputEvent) -> void:
 		return
 	if event is InputEventMouseMotion:
 		_track_cursor((event as InputEventMouseMotion).position)
+	elif event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_RIGHT:
+		# Right-click sells. Free placement with no undo is punishing in a way
+		# nothing in the design intends: a misread of the road costs the turret
+		# AND the slot, and the deployment limit means you cannot just build
+		# another somewhere better.
+		_track_cursor((event as InputEventMouseButton).position)
+		if _hover_platform >= 0:
+			_sim.queue_sell(_sim.tick(), _hover_platform)
+			_hover_platform = -1
 	elif event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
 		_track_cursor((event as InputEventMouseButton).position)
 		# Every player action goes through the command log rather than mutating
@@ -184,6 +271,13 @@ func _unhandled_input(event: InputEvent) -> void:
 			KEY_1: _speed = 1
 			KEY_2: _speed = 2
 			KEY_3: _speed = 3
+			KEY_4: _speed = 4
+			KEY_E:
+				# Call the next wave in early for a bounty. Harmlessly rejected
+				# if there is no gap left to skip.
+				_sim.queue_send_wave(_sim.tick())
+			KEY_BRACKETLEFT: _select_board(-1)
+			KEY_BRACKETRIGHT: _select_board(1)
 			KEY_SPACE: _paused = not _paused
 			KEY_F3: _overlay.visible = not _overlay.visible
 			KEY_Q, KEY_TAB:
@@ -195,6 +289,7 @@ func _unhandled_input(event: InputEvent) -> void:
 				# Advance on a win; on a loss this does nothing, so it cannot be
 				# used to skip a level you have not beaten.
 				if _sim.result() == Sim.RESULT_WIN and _level_index + 1 < _levels.size():
+					_note_win()
 					# Hand the finished board forward; the next act takes it only
 					# if it continues this chain.
 					_start_level(_level_index + 1, _sim.board_snapshot())

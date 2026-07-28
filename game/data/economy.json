@@ -1,5 +1,8 @@
 {
-  "_comment": "P0 engagement economy. Capital is engagement-scoped and integer-valued (no float money, ever - it would break determinism hashing for no benefit). Integrity is the lives pool; in P3 it becomes run-scoped Corridor Integrity and stops resetting between engagements.",
+  "_comment": "P0 engagement economy. Capital is engagement-scoped and integer-valued (no float money, ever - it would break determinism hashing for no benefit). Integrity is the lives pool; in P3 it becomes run-scoped Corridor Integrity and stops resetting between engagements. sell_refund_fraction is below 1 on purpose: relocating a turret should cost something, or placement stops being a decision. early_wave_bonus is paid pro rata for the slice of the inter-wave gap given up, so calling a wave in early trades preparation time for money. carry_limit_share bounds how much of a new act's deployment limit an inherited board may occupy - the tier cap in Sim bounds how GOOD an inheritance is, this bounds how BIG. Without it, a board carried forward at 78 slots is thousands of DPS arriving for free and the act plays itself.",
   "starting_capital": 400,
-  "starting_integrity": 100
+  "starting_integrity": 100,
+  "sell_refund_fraction": 0.65,
+  "early_wave_bonus": 140,
+  "carry_limit_share": 0.55
 }

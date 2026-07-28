@@ -47,10 +47,13 @@ func test_a_carried_board_arrives_intact() -> void:
 
 	var second := SimFixture.for_level("highway_01", "highway_act2")
 	second.adopt(snapshot["platforms"], snapshot["cells"])
-	assert_eq(second.t_count, first.t_count, "every turret carried forward")
-	assert_eq(second.carry_dropped(), 0, "none were dropped")
+	assert_eq(second.t_count, mini(first.t_count, second.carry_ceiling()),
+		"every turret that fits carried forward")
+	assert_eq(second.carry_dropped(), 0, "none were dropped by the corridor")
 	var stepped_down := 0
-	for i in first.t_count:
+	# Only as far as the inheritance ceiling: past that the turrets were stood
+	# down, which is a different thing from being carried badly.
+	for i in second.t_count:
 		assert_almost_eq(second.t_x[i], first.t_x[i], 0.0001, "turret %d kept its place" % i)
 		assert_eq(second.platform_blueprint(i), first.platform_blueprint(i),
 			"turret %d kept its weapon" % i)
@@ -96,9 +99,12 @@ func test_carried_turrets_count_against_the_new_limit() -> void:
 	SimFixture.run_greedy(first)
 	var second := SimFixture.for_level("highway_01", "highway_act2")
 	second.adopt(first.board_snapshot()["platforms"], PackedInt32Array())
-	assert_eq(second.t_count, first.t_count, "carried turrets are on the board")
-	assert_lte(float(second.t_count), float(second.platform_limit()),
-		"and inside the new limit")
+	assert_eq(second.t_count, mini(first.t_count, second.carry_ceiling()),
+		"carried turrets are on the board, up to the inheritance ceiling")
+	assert_lte(float(second.t_count), float(second.carry_ceiling()),
+		"which is a share of the new limit, not all of it")
+	assert_lt(float(second.carry_ceiling()), float(second.platform_limit()),
+		"so there is always room to build past what was inherited")
 	assert_gt(float(second.platform_limit()), float(first.platform_limit()),
 		"which is larger than the previous act's")
 

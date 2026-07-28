@@ -16,6 +16,10 @@ func _lance(sim: Sim) -> int:
 	return sim.enemy_index("lance")
 
 func test_the_lance_exists_and_breaks_the_speed_health_trade() -> void:
+	# The Lance is the fastest thing on the board, full stop, and tougher than
+	# anything that is not slower than it. The Siege Breaker arrived later and is
+	# heavier still - but it is also slower, so it does not break the trade the
+	# Lance breaks. That distinction is the point of both classes.
 	var sim := SimFixture.fresh()
 	var lance := _lance(sim)
 	assert_gte(float(lance), 0.0, "the Lance is defined")
@@ -25,8 +29,9 @@ func test_the_lance_exists_and_breaks_the_speed_health_trade() -> void:
 		var other := sim.enemy_index(str(id))
 		assert_gt(sim.enemy_speed(lance), sim.enemy_speed(other),
 			"the Lance outruns the %s" % id)
-		assert_gt(float(sim.enemy_base_hp(lance)), float(sim.enemy_base_hp(other)),
-			"and outlasts the %s" % id)
+		if sim.enemy_base_hp(other) > sim.enemy_base_hp(lance):
+			assert_lt(sim.enemy_speed(other), sim.enemy_speed(lance),
+				"anything tougher than a Lance must be slower than one, or the Lance is redundant")
 
 func test_a_leak_is_priced_below_a_bulwark_on_purpose() -> void:
 	# This looks backwards and is not. A Bulwark's leak value is priced for
@@ -42,15 +47,18 @@ func test_a_leak_is_priced_below_a_bulwark_on_purpose() -> void:
 	assert_gt(float(lance), float((db.enemies["walker"] as Dictionary)["leak_value"]),
 		"but far more than a Walker leak")
 
-func test_it_pays_out_more_than_anything_else() -> void:
+func test_payout_tracks_how_hard_something_is_to_stop() -> void:
+	# Bounty is not a free parameter: across the whole roster, the tougher drone
+	# has to pay better, or a class exists that is strictly worse to meet.
 	var sim := SimFixture.fresh()
-	var lance := _lance(sim)
-	for id in sim.enemy_ids():
-		if str(id) == "lance":
-			continue
-		assert_gt(float(sim.enemy_base_bounty(lance)),
-			float(sim.enemy_base_bounty(sim.enemy_index(str(id)))),
-			"a Lance pays better than a %s" % id)
+	for a_id in sim.enemy_ids():
+		for b_id in sim.enemy_ids():
+			var a := sim.enemy_index(str(a_id))
+			var b := sim.enemy_index(str(b_id))
+			if sim.enemy_base_hp(a) <= sim.enemy_base_hp(b):
+				continue
+			assert_gt(float(sim.enemy_base_bounty(a)), float(sim.enemy_base_bounty(b)),
+				"%s is tougher than %s and must pay better" % [a_id, b_id])
 
 func test_the_opening_campaign_never_sees_one() -> void:
 	# A class this punishing arriving before the player has a board is not

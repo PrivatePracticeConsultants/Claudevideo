@@ -15,7 +15,7 @@
       "groups": [
         {
           "enemy": "walker",
-          "count": 7,
+          "count": 12,
           "spawn_interval_ticks": 24,
           "start_delay_ticks": 0
         }
@@ -25,7 +25,7 @@
       "groups": [
         {
           "enemy": "walker",
-          "count": 7,
+          "count": 12,
           "spawn_interval_ticks": 23,
           "start_delay_ticks": 0
         }
@@ -35,7 +35,7 @@
       "groups": [
         {
           "enemy": "walker",
-          "count": 8,
+          "count": 14,
           "spawn_interval_ticks": 22,
           "start_delay_ticks": 0
         }
@@ -45,7 +45,7 @@
       "groups": [
         {
           "enemy": "walker",
-          "count": 10,
+          "count": 17,
           "spawn_interval_ticks": 21,
           "start_delay_ticks": 0
         }
@@ -55,7 +55,7 @@
       "groups": [
         {
           "enemy": "walker",
-          "count": 12,
+          "count": 20,
           "spawn_interval_ticks": 20,
           "start_delay_ticks": 0
         }
@@ -65,7 +65,7 @@
       "groups": [
         {
           "enemy": "walker",
-          "count": 14,
+          "count": 24,
           "spawn_interval_ticks": 18,
           "start_delay_ticks": 0
         }
@@ -75,7 +75,7 @@
       "groups": [
         {
           "enemy": "walker",
-          "count": 17,
+          "count": 29,
           "spawn_interval_ticks": 17,
           "start_delay_ticks": 0
         }
@@ -85,7 +85,7 @@
       "groups": [
         {
           "enemy": "walker",
-          "count": 20,
+          "count": 35,
           "spawn_interval_ticks": 16,
           "start_delay_ticks": 0
         }
@@ -95,7 +95,7 @@
       "groups": [
         {
           "enemy": "walker",
-          "count": 24,
+          "count": 42,
           "spawn_interval_ticks": 15,
           "start_delay_ticks": 0
         }
@@ -105,7 +105,7 @@
       "groups": [
         {
           "enemy": "walker",
-          "count": 28,
+          "count": 49,
           "spawn_interval_ticks": 14,
           "start_delay_ticks": 0
         }

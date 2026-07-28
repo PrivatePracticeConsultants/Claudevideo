@@ -4,10 +4,10 @@
   "map_id": "reactor_01",
   "path_waypoints": 10,
   "carries_forward": true,
-  "starting_capital": 12900,
+  "starting_capital": 9750,
   "platform_limit": 90,
-  "starting_ground_reach": 127.0,
-  "act_hp_multiplier": 5.59,
+  "starting_ground_reach": 152.0,
+  "act_hp_multiplier": 4.68,
   "act_bounty_multiplier": 4.92,
   "inter_wave_delay_ticks": 90,
   "waves": [
@@ -15,14 +15,14 @@
       "groups": [
         {
           "enemy": "swarm",
-          "count": 103,
+          "count": 164,
           "spawn_interval_ticks": 3,
           "start_delay_ticks": 0
         },
         {
           "enemy": "walker",
-          "count": 46,
-          "spawn_interval_ticks": 9,
+          "count": 71,
+          "spawn_interval_ticks": 6,
           "start_delay_ticks": 90
         }
       ]
@@ -31,101 +31,19 @@
       "groups": [
         {
           "enemy": "swarm",
-          "count": 106,
+          "count": 140,
           "spawn_interval_ticks": 3,
           "start_delay_ticks": 0
         },
         {
           "enemy": "walker",
-          "count": 47,
-          "spawn_interval_ticks": 9,
+          "count": 61,
+          "spawn_interval_ticks": 6,
           "start_delay_ticks": 90
-        }
-      ]
-    },
-    {
-      "groups": [
-        {
-          "enemy": "swarm",
-          "count": 95,
-          "spawn_interval_ticks": 3,
-          "start_delay_ticks": 0
         },
         {
-          "enemy": "walker",
+          "enemy": "heavy",
           "count": 43,
-          "spawn_interval_ticks": 9,
-          "start_delay_ticks": 90
-        },
-        {
-          "enemy": "heavy",
-          "count": 26,
-          "spawn_interval_ticks": 26,
-          "start_delay_ticks": 150
-        }
-      ]
-    },
-    {
-      "groups": [
-        {
-          "enemy": "swarm",
-          "count": 104,
-          "spawn_interval_ticks": 3,
-          "start_delay_ticks": 0
-        },
-        {
-          "enemy": "walker",
-          "count": 46,
-          "spawn_interval_ticks": 8,
-          "start_delay_ticks": 90
-        },
-        {
-          "enemy": "heavy",
-          "count": 29,
-          "spawn_interval_ticks": 25,
-          "start_delay_ticks": 150
-        }
-      ]
-    },
-    {
-      "groups": [
-        {
-          "enemy": "swarm",
-          "count": 116,
-          "spawn_interval_ticks": 3,
-          "start_delay_ticks": 0
-        },
-        {
-          "enemy": "walker",
-          "count": 52,
-          "spawn_interval_ticks": 8,
-          "start_delay_ticks": 90
-        },
-        {
-          "enemy": "heavy",
-          "count": 31,
-          "spawn_interval_ticks": 24,
-          "start_delay_ticks": 150
-        }
-      ]
-    },
-    {
-      "groups": [
-        {
-          "enemy": "swarm",
-          "count": 130,
-          "spawn_interval_ticks": 3,
-          "start_delay_ticks": 0
-        },
-        {
-          "enemy": "walker",
-          "count": 58,
-          "spawn_interval_ticks": 8,
-          "start_delay_ticks": 90
-        },
-        {
-          "enemy": "heavy",
-          "count": 36,
           "spawn_interval_ticks": 23,
           "start_delay_ticks": 150
         }
@@ -135,19 +53,19 @@
       "groups": [
         {
           "enemy": "swarm",
-          "count": 147,
+          "count": 152,
           "spawn_interval_ticks": 3,
           "start_delay_ticks": 0
         },
         {
           "enemy": "walker",
           "count": 66,
-          "spawn_interval_ticks": 8,
+          "spawn_interval_ticks": 6,
           "start_delay_ticks": 90
         },
         {
           "enemy": "heavy",
-          "count": 40,
+          "count": 47,
           "spawn_interval_ticks": 22,
           "start_delay_ticks": 150
         }
@@ -157,36 +75,14 @@
       "groups": [
         {
           "enemy": "swarm",
-          "count": 166,
+          "count": 171,
           "spawn_interval_ticks": 3,
           "start_delay_ticks": 0
         },
         {
           "enemy": "walker",
           "count": 74,
-          "spawn_interval_ticks": 8,
-          "start_delay_ticks": 90
-        },
-        {
-          "enemy": "heavy",
-          "count": 46,
-          "spawn_interval_ticks": 22,
-          "start_delay_ticks": 150
-        }
-      ]
-    },
-    {
-      "groups": [
-        {
-          "enemy": "swarm",
-          "count": 188,
-          "spawn_interval_ticks": 3,
-          "start_delay_ticks": 0
-        },
-        {
-          "enemy": "walker",
-          "count": 84,
-          "spawn_interval_ticks": 7,
+          "spawn_interval_ticks": 6,
           "start_delay_ticks": 90
         },
         {
@@ -201,27 +97,43 @@
       "groups": [
         {
           "enemy": "swarm",
-          "count": 210,
+          "count": 195,
           "spawn_interval_ticks": 3,
           "start_delay_ticks": 0
         },
         {
           "enemy": "walker",
-          "count": 94,
-          "spawn_interval_ticks": 7,
+          "count": 84,
+          "spawn_interval_ticks": 5,
           "start_delay_ticks": 90
         },
         {
           "enemy": "heavy",
-          "count": 58,
+          "count": 60,
+          "spawn_interval_ticks": 21,
+          "start_delay_ticks": 150
+        }
+      ]
+    },
+    {
+      "groups": [
+        {
+          "enemy": "swarm",
+          "count": 225,
+          "spawn_interval_ticks": 3,
+          "start_delay_ticks": 0
+        },
+        {
+          "enemy": "walker",
+          "count": 97,
+          "spawn_interval_ticks": 5,
+          "start_delay_ticks": 90
+        },
+        {
+          "enemy": "heavy",
+          "count": 69,
           "spawn_interval_ticks": 20,
           "start_delay_ticks": 150
-        },
-        {
-          "enemy": "lance",
-          "count": 3,
-          "spawn_interval_ticks": 33,
-          "start_delay_ticks": 210
         }
       ]
     },
@@ -229,27 +141,21 @@
       "groups": [
         {
           "enemy": "swarm",
-          "count": 236,
+          "count": 259,
           "spawn_interval_ticks": 3,
           "start_delay_ticks": 0
         },
         {
           "enemy": "walker",
-          "count": 105,
-          "spawn_interval_ticks": 7,
+          "count": 112,
+          "spawn_interval_ticks": 5,
           "start_delay_ticks": 90
         },
         {
           "enemy": "heavy",
-          "count": 65,
+          "count": 80,
           "spawn_interval_ticks": 19,
           "start_delay_ticks": 150
-        },
-        {
-          "enemy": "lance",
-          "count": 4,
-          "spawn_interval_ticks": 32,
-          "start_delay_ticks": 210
         }
       ]
     },
@@ -257,27 +163,21 @@
       "groups": [
         {
           "enemy": "swarm",
-          "count": 264,
+          "count": 299,
           "spawn_interval_ticks": 3,
           "start_delay_ticks": 0
         },
         {
           "enemy": "walker",
-          "count": 118,
-          "spawn_interval_ticks": 7,
+          "count": 129,
+          "spawn_interval_ticks": 5,
           "start_delay_ticks": 90
         },
         {
           "enemy": "heavy",
-          "count": 73,
+          "count": 92,
           "spawn_interval_ticks": 18,
           "start_delay_ticks": 150
-        },
-        {
-          "enemy": "lance",
-          "count": 4,
-          "spawn_interval_ticks": 30,
-          "start_delay_ticks": 210
         }
       ]
     },
@@ -285,27 +185,43 @@
       "groups": [
         {
           "enemy": "swarm",
-          "count": 294,
+          "count": 344,
           "spawn_interval_ticks": 3,
           "start_delay_ticks": 0
         },
         {
           "enemy": "walker",
-          "count": 131,
-          "spawn_interval_ticks": 6,
+          "count": 149,
+          "spawn_interval_ticks": 5,
           "start_delay_ticks": 90
         },
         {
           "enemy": "heavy",
-          "count": 81,
+          "count": 105,
+          "spawn_interval_ticks": 18,
+          "start_delay_ticks": 150
+        }
+      ]
+    },
+    {
+      "groups": [
+        {
+          "enemy": "swarm",
+          "count": 393,
+          "spawn_interval_ticks": 3,
+          "start_delay_ticks": 0
+        },
+        {
+          "enemy": "walker",
+          "count": 170,
+          "spawn_interval_ticks": 5,
+          "start_delay_ticks": 90
+        },
+        {
+          "enemy": "heavy",
+          "count": 120,
           "spawn_interval_ticks": 17,
           "start_delay_ticks": 150
-        },
-        {
-          "enemy": "lance",
-          "count": 5,
-          "spawn_interval_ticks": 29,
-          "start_delay_ticks": 210
         }
       ]
     },
@@ -313,27 +229,21 @@
       "groups": [
         {
           "enemy": "swarm",
-          "count": 326,
+          "count": 447,
           "spawn_interval_ticks": 3,
           "start_delay_ticks": 0
         },
         {
           "enemy": "walker",
-          "count": 146,
-          "spawn_interval_ticks": 6,
+          "count": 193,
+          "spawn_interval_ticks": 5,
           "start_delay_ticks": 90
         },
         {
           "enemy": "heavy",
-          "count": 90,
+          "count": 137,
           "spawn_interval_ticks": 16,
           "start_delay_ticks": 150
-        },
-        {
-          "enemy": "lance",
-          "count": 5,
-          "spawn_interval_ticks": 27,
-          "start_delay_ticks": 210
         }
       ]
     },
@@ -341,27 +251,43 @@
       "groups": [
         {
           "enemy": "swarm",
-          "count": 361,
+          "count": 505,
           "spawn_interval_ticks": 3,
           "start_delay_ticks": 0
         },
         {
           "enemy": "walker",
-          "count": 161,
-          "spawn_interval_ticks": 6,
+          "count": 218,
+          "spawn_interval_ticks": 4,
           "start_delay_ticks": 90
         },
         {
           "enemy": "heavy",
-          "count": 99,
+          "count": 155,
           "spawn_interval_ticks": 15,
           "start_delay_ticks": 150
+        }
+      ]
+    },
+    {
+      "groups": [
+        {
+          "enemy": "swarm",
+          "count": 568,
+          "spawn_interval_ticks": 3,
+          "start_delay_ticks": 0
         },
         {
-          "enemy": "lance",
-          "count": 6,
-          "spawn_interval_ticks": 26,
-          "start_delay_ticks": 210
+          "enemy": "walker",
+          "count": 246,
+          "spawn_interval_ticks": 4,
+          "start_delay_ticks": 90
+        },
+        {
+          "enemy": "heavy",
+          "count": 174,
+          "spawn_interval_ticks": 14,
+          "start_delay_ticks": 150
         }
       ]
     }

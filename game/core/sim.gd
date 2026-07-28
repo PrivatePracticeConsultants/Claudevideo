@@ -32,7 +32,7 @@ extends RefCounted
 
 enum { RESULT_RUNNING, RESULT_WIN, RESULT_LOSS }
 enum { PHASE_WAITING, PHASE_SPAWNING, PHASE_CLEARING, PHASE_DONE }
-enum { CMD_PLACE, CMD_UPGRADE, CMD_BUY_CELL }
+enum { CMD_PLACE, CMD_UPGRADE, CMD_BUY_CELL, CMD_SELL, CMD_SEND_WAVE }
 
 ## Why a placement was refused. Returned rather than a bare bool so the build
 ## cursor can tell the player which rule they are breaking instead of just
@@ -100,12 +100,16 @@ var _bounds_width: float = 0.0
 var _bounds_height: float = 0.0
 
 var _type_ids: PackedStringArray = PackedStringArray()
+var _type_display: PackedStringArray = PackedStringArray()
 var _type_base_hp: PackedInt64Array = PackedInt64Array()
 var _type_speed: PackedFloat64Array = PackedFloat64Array()
 var _type_leak: PackedInt32Array = PackedInt32Array()
 var _type_base_bounty: PackedInt64Array = PackedInt64Array()
 var _type_radius: PackedFloat64Array = PackedFloat64Array()
 var _type_jitter: PackedFloat64Array = PackedFloat64Array()
+## How much of a suppression effect a drone shrugs off, 0 (none) to 1 (immune).
+## Absent means 0, so every drone written before suppression existed reads right.
+var _type_slow_resist: PackedFloat64Array = PackedFloat64Array()
 
 # Blueprint tiers are flattened to [tier_slot]; a blueprint's tier t lives at
 # _bp_tier_offset[b] + t. P0 only ever places tier 0, but the table already has
@@ -130,6 +134,10 @@ var _tier_splash_min: PackedFloat64Array = PackedFloat64Array()
 ## before suppression existed reads as.
 var _tier_slow_factor: PackedFloat64Array = PackedFloat64Array()
 var _tier_slow_ticks: PackedInt32Array = PackedInt32Array()
+## Half-width of the lane a piercing shot damages along its flight path. Zero
+## means the shot stops at whatever it hit, which is every weapon written before
+## the Railgun existed.
+var _tier_pierce: PackedFloat64Array = PackedFloat64Array()
 
 var _hp_growth: float = 1.0
 var _bounty_growth: float = 1.0
@@ -152,9 +160,18 @@ var _spawn_overflow: int = 0
 var _projectile_overflow: int = 0
 var _unknown_enemy_groups: int = 0
 var _rejected_commands: int = 0
+## Turrets sold and waves called early. Both are hashed: they change Capital, so
+## a desync in either is a desync in what the player could afford.
+var _sold: int = 0
+var _early_calls: int = 0
+var _sell_refund: float = 0.0
+var _early_wave_bonus: int = 0
 ## Turrets carried from the previous act that no longer fit - almost always
 ## because the extended corridor now runs where they stood.
 var _carry_dropped: int = 0
+## Turrets that fit fine but exceeded the share of the new limit an inheritance
+## may occupy.
+var _carry_stood_down: int = 0
 
 var _phase: int = PHASE_WAITING
 var _wave_index: int = -1
@@ -209,6 +226,11 @@ var p_splash: PackedFloat64Array = PackedFloat64Array()
 var p_splash_min: PackedFloat64Array = PackedFloat64Array()
 var p_slow_factor: PackedFloat64Array = PackedFloat64Array()
 var p_slow_ticks: PackedInt32Array = PackedInt32Array()
+var p_pierce: PackedFloat64Array = PackedFloat64Array()
+## Where the shot was fired from. A piercing round damages the whole lane between
+## there and the point it went off, so it has to remember its own origin.
+var p_from_x: PackedFloat64Array = PackedFloat64Array()
+var p_from_y: PackedFloat64Array = PackedFloat64Array()
 var p_live_count: int = 0
 var _p_free: PackedInt32Array = PackedInt32Array()
 var _p_free_top: int = 0
@@ -265,6 +287,9 @@ func _init(db: Database, seed_value: int) -> void:
 	_max_enemies = int(db.sim["max_enemies"])
 	_max_projectiles = int(db.sim["max_projectiles"])
 	_max_platforms = int(db.sim["max_platforms"])
+	_sell_refund = float(db.economy.get("sell_refund_fraction", 0.0))
+	_carry_limit_share = float(db.economy.get("carry_limit_share", 1.0))
+	_early_wave_bonus = int(db.economy.get("early_wave_bonus", 0))
 	_hp_growth = float(db.scaling["hp_growth_per_wave"])
 	_bounty_growth = float(db.scaling["bounty_growth_per_wave"])
 	# The engagement may override the engagement-scoped economy; master plan
@@ -426,6 +451,8 @@ func _build_types() -> void:
 	_type_base_bounty.resize(n)
 	_type_radius.resize(n)
 	_type_jitter.resize(n)
+	_type_slow_resist.resize(n)
+	_type_display.resize(n)
 	_type_hp_now.resize(n)
 	_type_bounty_now.resize(n)
 	for i in n:
@@ -436,6 +463,8 @@ func _build_types() -> void:
 		_type_base_bounty[i] = int(e["base_bounty"])
 		_type_radius[i] = float(e["radius"])
 		_type_jitter[i] = float(e["spawn_jitter_units"])
+		_type_slow_resist[i] = clampf(float(e.get("slow_resistance", 0.0)), 0.0, 1.0)
+		_type_display[i] = str(e.get("display_name", _type_ids[i]))
 
 func _build_blueprints() -> void:
 	_bp_ids = _db.blueprint_ids()
@@ -459,6 +488,7 @@ func _build_blueprints() -> void:
 	_tier_splash_min.resize(slot)
 	_tier_slow_factor.resize(slot)
 	_tier_slow_ticks.resize(slot)
+	_tier_pierce.resize(slot)
 	for b in n:
 		var tiers: Array = (_db.blueprints[_bp_ids[b]] as Dictionary)["tiers"]
 		for t in tiers.size():
@@ -477,6 +507,7 @@ func _build_blueprints() -> void:
 			_tier_proj_life[s] = maxi(1, int(round(float(td["projectile_lifetime_seconds"]) * float(_tick_rate))))
 			_tier_splash_radius[s] = float(td.get("splash_radius_units", 0.0))
 			_tier_splash_min[s] = float(td.get("splash_min_fraction", 1.0))
+			_tier_pierce[s] = float(td.get("pierce_width_units", 0.0))
 			_tier_slow_factor[s] = float(td.get("slow_factor", 1.0))
 			# Seconds in the data file, ticks in the sim - the tick is the only
 			# clock in here, and a duration in seconds would drift with tick rate.
@@ -521,6 +552,9 @@ func _build_pools() -> void:
 	p_splash_min.resize(_max_projectiles)
 	p_slow_factor.resize(_max_projectiles)
 	p_slow_ticks.resize(_max_projectiles)
+	p_pierce.resize(_max_projectiles)
+	p_from_x.resize(_max_projectiles)
+	p_from_y.resize(_max_projectiles)
 	_p_free.resize(_max_projectiles)
 	for i in _max_projectiles:
 		_p_free[i] = _max_projectiles - 1 - i
@@ -567,6 +601,12 @@ func queue_place(at_tick: int, x_units: int, y_units: int, blueprint_index: int)
 func queue_upgrade(at_tick: int, platform_index: int) -> void:
 	_queue(at_tick, CMD_UPGRADE, platform_index, 0, 0)
 
+func queue_sell(at_tick: int, platform_index: int) -> void:
+	_queue(at_tick, CMD_SELL, platform_index, 0, 0)
+
+func queue_send_wave(at_tick: int) -> void:
+	_queue(at_tick, CMD_SEND_WAVE, 0, 0, 0)
+
 ## Re-create a board carried forward from the previous level in a chain.
 ##
 ## Turrets and owned ground persist between acts on the same map; Capital does
@@ -590,6 +630,18 @@ func queue_upgrade(at_tick: int, platform_index: int) -> void:
 ## inheritance had removed: what to re-invest in, now that the road is longer than
 ## the board that held it.
 const CARRY_TIER_CAP := 1
+
+## And no more than a share of the new act's deployment limit comes back, read
+## from economy.json.
+##
+## The tier cap bounds how GOOD an inheritance can be; this bounds how BIG. Both
+## are needed, and the second only became obvious once the limit started doubling
+## every ten levels: at 78 slots, a board carried forward at tier 2 is nearly
+## three thousand DPS arriving for free, and eight acts in the middle of the
+## campaign went back to being winnable by building nothing. Capping the count
+## keeps the inheritance meaningful at any board size instead of at the one size
+## it was tuned against, and it always leaves room to rebuild past what you kept.
+var _carry_limit_share: float = 0.0
 ##
 ## Applied at construction, before any command runs, so it is part of the initial
 ## state a replay starts from. Anything that no longer fits - a turret whose spot
@@ -601,7 +653,13 @@ func adopt(platforms: Array, owned_cells: PackedInt32Array) -> void:
 		var cy := owned_cells[i + 1]
 		if cell_in_bounds(cx, cy) and cell_is_buildable(cx, cy):
 			_cell_unlocked[cy * _grid_cols + cx] = 1
+	var ceiling := maxi(1, int(floor(float(_platform_limit) * _carry_limit_share)))
 	for entry in platforms:
+		if t_count >= ceiling:
+			# Everything past the ceiling is stood down, not lost to the corridor -
+			# counted separately so the HUD can say which happened.
+			_carry_stood_down += 1
+			continue
 		var record: Dictionary = entry
 		var x := float(record["x"])
 		var y := float(record["y"])
@@ -640,6 +698,45 @@ func board_snapshot() -> Dictionary:
 	return {"platforms": platforms, "cells": cells}
 
 func carry_dropped() -> int: return _carry_dropped
+func carry_stood_down() -> int: return _carry_stood_down
+## Most turrets an inheritance may put on the board this act.
+func carry_ceiling() -> int:
+	return maxi(1, int(floor(float(_platform_limit) * _carry_limit_share)))
+func sold() -> int: return _sold
+func early_calls() -> int: return _early_calls
+## Whether a wave can be called early right now, for the HUD.
+func can_send_wave() -> bool: return _phase == PHASE_WAITING and _phase_timer > 0
+## What calling the next wave in right now would pay.
+func send_wave_bonus() -> int:
+	if not can_send_wave():
+		return 0
+	return int(floor(float(_early_wave_bonus) * float(_phase_timer)
+		/ float(maxi(_inter_wave_delay, 1))))
+
+## What the next wave is made of, as [[display_name, count], ...] in the order
+## the groups arrive.
+##
+## Pure query. With five drone classes on the board, "what is coming" is the
+## difference between planning a board and guessing at one, and it is information
+## the wave file already has - withholding it is not difficulty.
+func next_wave_preview() -> Array:
+	var index := _wave_index + 1 if _phase != PHASE_SPAWNING else _wave_index
+	var waves: Array = _db.engagement["waves"]
+	if index < 0 or index >= waves.size():
+		return []
+	var out := []
+	for group in ((waves[index] as Dictionary)["groups"] as Array):
+		var g: Dictionary = group
+		var type_index := _type_index(str(g["enemy"]))
+		if type_index < 0:
+			continue
+		out.append([_type_display[type_index], int(g["count"])])
+	return out
+
+## Which wave the preview describes, 1-based.
+func next_wave_number() -> int:
+	var index := _wave_index + 1 if _phase != PHASE_SPAWNING else _wave_index
+	return mini(index + 1, _wave_count)
 
 ## Buy one grid cell of buildable ground.
 func queue_buy_cell(at_tick: int, cell_x: int, cell_y: int) -> void:
@@ -674,6 +771,10 @@ func _apply_commands() -> void:
 			ok = _try_upgrade(_cmd_a[_cmd_cursor])
 		elif _cmd_type[_cmd_cursor] == CMD_BUY_CELL:
 			ok = _try_buy_cell(_cmd_a[_cmd_cursor], _cmd_b[_cmd_cursor])
+		elif _cmd_type[_cmd_cursor] == CMD_SELL:
+			ok = _try_sell(_cmd_a[_cmd_cursor])
+		elif _cmd_type[_cmd_cursor] == CMD_SEND_WAVE:
+			ok = _try_send_wave()
 		if not ok:
 			_rejected_commands += 1
 		_cmd_cursor += 1
@@ -757,6 +858,64 @@ func _try_place(x: float, y: float, blueprint_index: int) -> int:
 	t_aim_y[index] = 0.0
 	_capital -= _tier_cost[slot]
 	return BUILD_OK
+
+## What selling a turret pays back. A fraction of everything spent on it,
+## including upgrades - selling a tier-4 refunds a share of all four tiers, not
+## of the last one.
+func sell_value(platform_index: int) -> int:
+	if platform_index < 0 or platform_index >= t_count:
+		return 0
+	var blueprint := t_blueprint[platform_index]
+	var spent := 0
+	for tier in t_tier[platform_index] + 1:
+		spent += _tier_cost[_bp_tier_offset[blueprint] + tier]
+	return int(floor(float(spent) * _sell_refund))
+
+## Take a turret off the board and refund part of what it cost.
+##
+## Free placement without an undo is punishing in a way nothing in the design
+## intends: a misread of the road costs you the turret AND the ground, and the
+## deployment limit means you cannot simply build another. The refund is partial
+## so relocating stays a real cost rather than a free retry.
+##
+## The pool is compacted by moving the last turret into the freed slot, which is
+## why platform indices are only meaningful within a tick. Commands are
+## tick-addressed and applied in order, so a replay sees the identical sequence.
+func _try_sell(platform_index: int) -> bool:
+	if platform_index < 0 or platform_index >= t_count:
+		return false
+	_capital += sell_value(platform_index)
+	var last := t_count - 1
+	if platform_index != last:
+		t_used[platform_index] = t_used[last]
+		t_blueprint[platform_index] = t_blueprint[last]
+		t_tier[platform_index] = t_tier[last]
+		t_tier_slot[platform_index] = t_tier_slot[last]
+		t_cooldown[platform_index] = t_cooldown[last]
+		t_x[platform_index] = t_x[last]
+		t_y[platform_index] = t_y[last]
+		t_aim_x[platform_index] = t_aim_x[last]
+		t_aim_y[platform_index] = t_aim_y[last]
+	t_used[last] = 0
+	t_count -= 1
+	_sold += 1
+	return true
+
+## Start the next wave now instead of waiting out the gap between waves.
+##
+## Pays a bounty for the time given up, which is what makes it a decision rather
+## than a convenience: the gap is when Capital accumulates and turrets get built,
+## so calling a wave early trades preparation for money.
+func _try_send_wave() -> bool:
+	if _phase != PHASE_WAITING or _phase_timer <= 0:
+		return false
+	# Scaled by how much of the gap is being skipped, so calling a wave with one
+	# tick left does not pay the same as calling it immediately.
+	_capital += int(floor(float(_early_wave_bonus) * float(_phase_timer)
+		/ float(maxi(_inter_wave_delay, 1))))
+	_early_calls += 1
+	_phase_timer = 0
+	return true
 
 ## Cost to take a platform to its next tier, or -1 if it is already at the top.
 func upgrade_cost(platform_index: int) -> int:
@@ -940,6 +1099,9 @@ func _fire(platform: int, target: int) -> void:
 	p_splash_min[i] = _tier_splash_min[slot]
 	p_slow_factor[i] = _tier_slow_factor[slot]
 	p_slow_ticks[i] = _tier_slow_ticks[slot]
+	p_pierce[i] = _tier_pierce[slot]
+	p_from_x[i] = t_x[platform]
+	p_from_y[i] = t_y[platform]
 	p_live_count += 1
 
 func _advance_projectiles() -> void:
@@ -963,7 +1125,10 @@ func _advance_projectiles() -> void:
 		if p_hit_radius[i] > reach:
 			reach = p_hit_radius[i]
 		if dist <= reach:
-			if p_splash[i] > 0.0:
+			if p_pierce[i] > 0.0:
+				_lance_through(p_from_x[i], p_from_y[i], e_x[target], e_y[target],
+					p_pierce[i], p_damage[i])
+			elif p_splash[i] > 0.0:
 				# Suppression lands on everything the blast reaches, which is what
 				# makes an area suppressor worth its cost against a wave rather
 				# than against one drone.
@@ -1029,12 +1194,57 @@ func _detonate(x: float, y: float, radius: float, damage: int, min_fraction: flo
 func _suppress(index: int, factor: float, ticks: int) -> void:
 	if ticks <= 0 or factor >= 1.0:
 		return
+	# Resistance pulls the multiplier back toward 1.0 - toward "not slowed" -
+	# rather than shortening the duration, so a resistant drone is visibly still
+	# moving instead of stopping and starting.
+	var resist := _type_slow_resist[e_type[index]]
+	if resist > 0.0:
+		factor = factor + (1.0 - factor) * resist
+		if factor >= 1.0:
+			return
 	if e_slow_ticks[index] > 0 and e_slow_factor[index] < factor:
 		# Already under a stronger slow; just re-arm its timer.
 		e_slow_ticks[index] = maxi(e_slow_ticks[index], ticks)
 		return
 	e_slow_factor[index] = factor
 	e_slow_ticks[index] = maxi(e_slow_ticks[index], ticks)
+
+## Damage everything within `half_width` of the line the shot travelled.
+##
+## Full damage the whole way down the lane - a piercing round does not fall off,
+## which is what makes it worth its very slow fire rate against a column on a
+## straight. Walks the spatial hash in cell order then slot order for the same
+## reason `_detonate` does: an attack that resolved against several drones in an
+## arbitrary sequence would pay bounties and recycle pool slots in that sequence.
+func _lance_through(from_x: float, from_y: float, to_x: float, to_y: float,
+		half_width: float, damage: int) -> void:
+	var dx := to_x - from_x
+	var dy := to_y - from_y
+	var length_sq := dx * dx + dy * dy
+	if length_sq <= 0.0:
+		return
+	var min_cx := _hash.cell_x(minf(from_x, to_x) - half_width)
+	var max_cx := _hash.cell_x(maxf(from_x, to_x) + half_width)
+	var min_cy := _hash.cell_y(minf(from_y, to_y) - half_width)
+	var max_cy := _hash.cell_y(maxf(from_y, to_y) + half_width)
+	var width_sq := half_width * half_width
+	for cy in range(min_cy, max_cy + 1):
+		for cx in range(min_cx, max_cx + 1):
+			var begin := _hash.bucket_begin(cx, cy)
+			var end := _hash.bucket_end(cx, cy)
+			for k in range(begin, end):
+				var e := _hash.item_at(k)
+				if e_alive[e] == 0:
+					continue
+				# Distance from the drone to the segment, clamped to its ends so a
+				# shot does not reach past where it actually went off.
+				var t := ((e_x[e] - from_x) * dx + (e_y[e] - from_y) * dy) / length_sq
+				t = clampf(t, 0.0, 1.0)
+				var ox := e_x[e] - (from_x + dx * t)
+				var oy := e_y[e] - (from_y + dy * t)
+				if ox * ox + oy * oy > width_sq:
+					continue
+				_damage_enemy(e, damage)
 
 func _damage_enemy(index: int, amount: int) -> void:
 	e_hp[index] -= amount
@@ -1249,6 +1459,8 @@ func blueprint_count() -> int: return _bp_ids.size()
 func blueprint_tier_count(i: int) -> int: return _bp_tier_count[i]
 func blueprint_splash(i: int) -> float: return _tier_splash_radius[_bp_tier_offset[i]]
 func blueprint_slow_factor(i: int) -> float: return _tier_slow_factor[_bp_tier_offset[i]]
+func blueprint_pierce(i: int) -> float: return _tier_pierce[_bp_tier_offset[i]]
+func platform_pierce(i: int) -> float: return _tier_pierce[t_tier_slot[i]]
 func platform_slow_factor(i: int) -> float: return _tier_slow_factor[t_tier_slot[i]]
 func platform_slow_ticks(i: int) -> int: return _tier_slow_ticks[t_tier_slot[i]]
 func platform_splash(i: int) -> float: return _tier_splash_radius[t_tier_slot[i]]
@@ -1304,8 +1516,11 @@ func state_hash() -> int:
 	h = StateHash.mix_bytes(h, e_slow_factor.to_byte_array())
 	h = StateHash.mix_bytes(h, _cmd_c.to_byte_array())
 	h = StateHash.mix_int(h, _rejected_commands)
+	h = StateHash.mix_int(h, _sold)
+	h = StateHash.mix_int(h, _early_calls)
 	h = StateHash.mix_int(h, _cells_bought)
 	h = StateHash.mix_int(h, _carry_dropped)
+	h = StateHash.mix_int(h, _carry_stood_down)
 	h = StateHash.mix_bytes(h, _cell_unlocked)
 	h = StateHash.mix_int(h, _phase)
 	h = StateHash.mix_int(h, _wave_index)

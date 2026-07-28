@@ -120,6 +120,66 @@
       "map": "lastlight_01",
       "engagement": "lastlight_act3",
       "name": "XXIV - Last Light: Full Route"
+    },
+    {
+      "map": "gantry_01",
+      "engagement": "gantry_act1",
+      "name": "XXV - Gantry Line: Approach"
+    },
+    {
+      "map": "gantry_01",
+      "engagement": "gantry_act2",
+      "name": "XXVI - Gantry Line: Extension"
+    },
+    {
+      "map": "gantry_01",
+      "engagement": "gantry_act3",
+      "name": "XXVII - Gantry Line: Full Route"
+    },
+    {
+      "map": "coldstore_01",
+      "engagement": "coldstore_act1",
+      "name": "XXVIII - Cold Store: Approach"
+    },
+    {
+      "map": "coldstore_01",
+      "engagement": "coldstore_act2",
+      "name": "XXIX - Cold Store: Extension"
+    },
+    {
+      "map": "coldstore_01",
+      "engagement": "coldstore_act3",
+      "name": "XXX - Cold Store: Full Route"
+    },
+    {
+      "map": "highline_01",
+      "engagement": "highline_act1",
+      "name": "XXXI - The Highline: Approach"
+    },
+    {
+      "map": "highline_01",
+      "engagement": "highline_act2",
+      "name": "XXXII - The Highline: Extension"
+    },
+    {
+      "map": "highline_01",
+      "engagement": "highline_act3",
+      "name": "XXXIII - The Highline: Full Route"
+    },
+    {
+      "map": "terminus_02",
+      "engagement": "terminus_act1",
+      "name": "XXXIV - Terminus: Approach"
+    },
+    {
+      "map": "terminus_02",
+      "engagement": "terminus_act2",
+      "name": "XXXV - Terminus: Extension"
+    },
+    {
+      "map": "terminus_02",
+      "engagement": "terminus_act3",
+      "name": "XXXVI - Terminus: Full Route"
     }
   ]
 }

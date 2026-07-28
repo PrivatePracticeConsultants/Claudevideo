@@ -17,6 +17,7 @@ const ENGAGEMENT := "highway_act1"
 ## dead content no test would notice.
 const CANNON_SHARE := 3
 const SUPPRESSOR_SHARE := 5
+const RAILGUN_SHARE := 7
 
 ## Generous ceiling. It only exists so a bug that stalls the wave director fails
 ## as a test rather than hanging the suite forever.
@@ -116,22 +117,36 @@ static func for_level(map_id: String, engagement_id: String, seed_value: int = 1
 ## Every legal-looking spot alongside the road, as flat [x, y, x, y, ...] in
 ## whole units. Ordered along the path so a policy consuming them in order builds
 ## from the entrance outward, which is roughly what a person does.
+## Offsets from the road to try at each step, as a fraction of the way from
+## min_distance_from_path to max_distance_from_path.
+##
+## Several rather than one, because the band of ground an act STARTS owning
+## narrows as the campaign goes on. A single mid-band offset stops landing on
+## owned ground somewhere around level 30, and the policy then quietly finds
+## half the sites it should - measured as the 34th level fielding 63 turrets
+## against a limit of 144, and losing. Trying nearer offsets first keeps coverage
+## tight to the road, which is also what a person does.
+const SITE_OFFSETS := [0.35, 0.5, 0.7, 0.9]
+
 static func candidate_sites(sim: Sim) -> PackedInt32Array:
 	var sites := PackedInt32Array()
-	var offset := (sim.build_min_distance() + sim.build_max_distance()) * 0.5
+	var near := sim.build_min_distance()
+	var span := sim.build_max_distance() - near
 	var prog := 0.0
 	while prog <= sim.path_length():
-		for side in [-1.0, 1.0]:
-			sim.sample_for_render(prog, offset * side)
-			var x := roundi(sim.out_x())
-			var y := roundi(sim.out_y())
-			# Only keep spots that fail purely for affordability reasons, so the
-			# list is stable regardless of how much Capital happens to be in hand.
-			var verdict := sim.can_build_at(float(x), float(y), 0)
-			if verdict == Sim.BUILD_OK or verdict == Sim.BUILD_NO_CAPITAL \
-					or verdict == Sim.BUILD_AT_LIMIT:
-				sites.append(x)
-				sites.append(y)
+		for side: float in [-1.0, 1.0]:
+			for fraction: float in SITE_OFFSETS:
+				sim.sample_for_render(prog, (near + span * fraction) * side)
+				var x := roundi(sim.out_x())
+				var y := roundi(sim.out_y())
+				# Only keep spots that fail purely for affordability reasons, so
+				# the list is stable regardless of how much Capital is in hand.
+				var verdict := sim.can_build_at(float(x), float(y), 0)
+				if verdict == Sim.BUILD_OK or verdict == Sim.BUILD_NO_CAPITAL \
+						or verdict == Sim.BUILD_AT_LIMIT:
+					sites.append(x)
+					sites.append(y)
+					break  # one spot per side per step; the rest are too close
 		prog += SITE_STRIDE
 	return sites
 
@@ -167,6 +182,7 @@ static func run_greedy(sim: Sim, allow_upgrades: bool = true,
 	var ballistic := sim.blueprint_index("ballistic")
 	var cannon := maxi(sim.blueprint_index("cannon"), 0)
 	var suppressor := maxi(sim.blueprint_index("suppressor"), 0)
+	var railgun := maxi(sim.blueprint_index("railgun"), 0)
 	var sites := candidate_sites(sim)
 	var next_site := 0
 	var ticks := 0
@@ -187,7 +203,9 @@ static func run_greedy(sim: Sim, allow_upgrades: bool = true,
 			# Cannon, so swarm waves meet area damage and fast waves meet
 			# something that slows them down.
 			var blueprint := ballistic
-			if (sim.t_count % SUPPRESSOR_SHARE) == SUPPRESSOR_SHARE - 1:
+			if (sim.t_count % RAILGUN_SHARE) == RAILGUN_SHARE - 1:
+				blueprint = railgun
+			elif (sim.t_count % SUPPRESSOR_SHARE) == SUPPRESSOR_SHARE - 1:
 				blueprint = suppressor
 			elif (sim.t_count % CANNON_SHARE) == CANNON_SHARE - 1:
 				blueprint = cannon
@@ -247,10 +265,22 @@ static func replay(sim: Sim, command_log: Dictionary) -> int:
 	var log_b: PackedInt32Array = command_log["b"]
 	var log_c: PackedInt32Array = command_log["c"]
 	for i in log_tick.size():
-		if log_kind[i] == Sim.CMD_PLACE:
-			sim.queue_place(log_tick[i], log_a[i], log_b[i], log_c[i])
-		else:
-			sim.queue_upgrade(log_tick[i], log_a[i])
+		# Every command kind, not just the two the greedy policy happens to emit.
+		# An `else: upgrade` fallback silently replays a sell as an upgrade, which
+		# is a desync that would look like a simulation bug rather than a fixture
+		# one - and the determinism tests would have been proving nothing about
+		# any log containing the newer commands.
+		match log_kind[i]:
+			Sim.CMD_PLACE:
+				sim.queue_place(log_tick[i], log_a[i], log_b[i], log_c[i])
+			Sim.CMD_UPGRADE:
+				sim.queue_upgrade(log_tick[i], log_a[i])
+			Sim.CMD_BUY_CELL:
+				sim.queue_buy_cell(log_tick[i], log_a[i], log_b[i])
+			Sim.CMD_SELL:
+				sim.queue_sell(log_tick[i], log_a[i])
+			Sim.CMD_SEND_WAVE:
+				sim.queue_send_wave(log_tick[i])
 	var ticks := 0
 	while not sim.is_over() and ticks < MAX_TICKS:
 		sim.step()
