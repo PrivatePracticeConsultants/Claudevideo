@@ -147,6 +147,9 @@ var _spawn_overflow: int = 0
 var _projectile_overflow: int = 0
 var _unknown_enemy_groups: int = 0
 var _rejected_commands: int = 0
+## Turrets carried from the previous act that no longer fit - almost always
+## because the extended corridor now runs where they stood.
+var _carry_dropped: int = 0
 
 var _phase: int = PHASE_WAITING
 var _wave_index: int = -1
@@ -270,8 +273,17 @@ func _init(db: Database, seed_value: int) -> void:
 
 # --- construction ------------------------------------------------------------
 
+## The corridor, optionally only partly revealed.
+##
+## A map file holds the full route; an engagement may use only the first N
+## waypoints of it. That is what lets a chain of levels share one board and
+## extend it: the prefix is byte-identical between acts, so everything already
+## built beside it stays exactly where it was and stays useful.
 func _build_path() -> void:
-	var path: Array = _db.map["path"]
+	var full: Array = _db.map["path"]
+	var revealed := int(_db.engagement.get("path_waypoints", full.size()))
+	revealed = clampi(revealed, 2, full.size())
+	var path: Array = full.slice(0, revealed)
 	var n := path.size()
 	_wp_x.resize(n)
 	_wp_y.resize(n)
@@ -530,6 +542,80 @@ func queue_place(at_tick: int, x_units: int, y_units: int, blueprint_index: int)
 ## stable because platforms are only ever appended.
 func queue_upgrade(at_tick: int, platform_index: int) -> void:
 	_queue(at_tick, CMD_UPGRADE, platform_index, 0, 0)
+
+## Re-create a board carried forward from the previous level in a chain.
+##
+## Turrets and owned ground persist between acts on the same map; Capital does
+## not, because engagement-scoped Capital is what makes each act's spending a
+## fresh decision. Carried turrets DO count against the new act's deployment
+## limit, so a bigger limit is what buys you room to extend rather than a clean
+## slate.
+##
+## They also arrive REFITTED: one tier down, and never above tier 2. That is not
+## a tax for its own sake - it is the difference between a chain and a cutscene.
+## An act that inherits a finished tier-4 board is won by that board with no input
+## at all: measured, every single carrying act in the campaign was cleared by an
+## idle run, and raising the next act's health by half did not touch it, because
+## a tier-4 turret is an order of magnitude past the tier-1 one it grew from.
+## Stepping down alone fixed fourteen of sixteen; the cap fixes the rest
+## structurally rather than by tuning, because it bounds what an inheritance can
+## be worth no matter how comfortably the previous act was won.
+##
+## What survives is what the chain is actually for - your placements, your weapon
+## choices, the ground you bought. What comes back is the decision the
+## inheritance had removed: what to re-invest in, now that the road is longer than
+## the board that held it.
+const CARRY_TIER_CAP := 1
+##
+## Applied at construction, before any command runs, so it is part of the initial
+## state a replay starts from. Anything that no longer fits - a turret whose spot
+## the extended corridor now runs through - is dropped and counted rather than
+## silently relocated.
+func adopt(platforms: Array, owned_cells: PackedInt32Array) -> void:
+	for i in range(0, owned_cells.size(), 2):
+		var cx := owned_cells[i]
+		var cy := owned_cells[i + 1]
+		if cell_in_bounds(cx, cy) and cell_is_buildable(cx, cy):
+			_cell_unlocked[cy * _grid_cols + cx] = 1
+	for entry in platforms:
+		var record: Dictionary = entry
+		var x := float(record["x"])
+		var y := float(record["y"])
+		var blueprint := int(record["blueprint"])
+		# Free: it was paid for in the act it was built in.
+		if _place_without_charge(x, y, blueprint) != BUILD_OK:
+			_carry_dropped += 1
+			continue
+		var index := t_count - 1
+		var tier := clampi(mini(int(record["tier"]) - 1, CARRY_TIER_CAP),
+			0, _bp_tier_count[blueprint] - 1)
+		t_tier[index] = tier
+		t_tier_slot[index] = _bp_tier_offset[blueprint] + tier
+
+## Placement that skips the price but honours every other rule. Only used by
+## adopt(); a turret carried forward was already paid for.
+func _place_without_charge(x: float, y: float, blueprint_index: int) -> int:
+	var held := _capital
+	_capital = _tier_cost[_bp_tier_offset[blueprint_index]]
+	var verdict := _try_place(x, y, blueprint_index)
+	_capital = held
+	return verdict
+
+## What to hand to the next act in this chain.
+func board_snapshot() -> Dictionary:
+	var platforms := []
+	for i in t_count:
+		platforms.append({"x": t_x[i], "y": t_y[i],
+			"blueprint": t_blueprint[i], "tier": t_tier[i]})
+	var cells := PackedInt32Array()
+	for cy in _grid_rows:
+		for cx in _grid_cols:
+			if _cell_unlocked[cy * _grid_cols + cx] == 1:
+				cells.append(cx)
+				cells.append(cy)
+	return {"platforms": platforms, "cells": cells}
+
+func carry_dropped() -> int: return _carry_dropped
 
 ## Buy one grid cell of buildable ground.
 func queue_buy_cell(at_tick: int, cell_x: int, cell_y: int) -> void:
@@ -1065,6 +1151,9 @@ func tier_name(blueprint: int, tier: int) -> String:
 	var tiers: Array = (_db.blueprints[_bp_ids[blueprint]] as Dictionary)["tiers"]
 	return str((tiers[tier] as Dictionary)["name"])
 func waypoint_count() -> int: return _wp_x.size()
+## How much of the map's full route this engagement uses.
+func revealed_waypoints() -> int: return _wp_x.size()
+func full_waypoints() -> int: return (_db.map["path"] as Array).size()
 ## Distance along the path at which waypoint `i` sits.
 func segment_start_distance(i: int) -> float: return _seg_cum[i]
 func waypoint_x(i: int) -> float: return _wp_x[i]
@@ -1078,6 +1167,9 @@ func blueprint_name(i: int) -> String: return _bp_ids[i]
 func blueprint_cost(i: int) -> int: return _tier_cost[_bp_tier_offset[i]]
 func blueprint_range(i: int) -> float: return sqrt(_tier_range_sq[_bp_tier_offset[i]])
 func blueprint_count() -> int: return _bp_ids.size()
+## How many tiers a weapon family has. Exposed so callers reason about the top
+## of the ladder without hardcoding four.
+func blueprint_tier_count(i: int) -> int: return _bp_tier_count[i]
 func blueprint_splash(i: int) -> float: return _tier_splash_radius[_bp_tier_offset[i]]
 func platform_splash(i: int) -> float: return _tier_splash_radius[t_tier_slot[i]]
 ## Public so tests and tools can name an enemy instead of guessing its index -
@@ -1125,6 +1217,7 @@ func state_hash() -> int:
 	h = StateHash.mix_bytes(h, _cmd_c.to_byte_array())
 	h = StateHash.mix_int(h, _rejected_commands)
 	h = StateHash.mix_int(h, _cells_bought)
+	h = StateHash.mix_int(h, _carry_dropped)
 	h = StateHash.mix_bytes(h, _cell_unlocked)
 	h = StateHash.mix_int(h, _phase)
 	h = StateHash.mix_int(h, _wave_index)

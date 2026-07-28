@@ -82,15 +82,28 @@ func test_the_engagement_ends_rather_than_running_forever() -> void:
 	assert_true(sim.is_over(), "and reached a terminal state")
 
 func test_start_delays_within_a_wave_are_honoured() -> void:
-	# Wave 9 and 10 each have a second group on a delay; the delayed group must
-	# not appear at the same instant as the first.
-	var db := SimFixture.database()
+	# A delayed group must not appear at the same instant as the group it follows.
+	#
+	# The wave is searched for rather than hardcoded: the opening level is Walkers
+	# only with nothing staged behind them - which is the point of a teaching level
+	# - and any fixed index goes stale the moment a level is re-authored.
+	for level in Database.load_levels():
+		var db := Database.load_engagement(str(level["map"]), str(level["engagement"]))
+		var waves: Array = db.engagement["waves"]
+		for index in waves.size():
+			var groups: Array = (waves[index] as Dictionary)["groups"]
+			if groups.size() < 2:
+				continue
+			var delay := int((groups[1] as Dictionary)["start_delay_ticks"])
+			if delay <= 0:
+				continue
+			_assert_delay_holds(db, index, groups, delay)
+			return
+	fail("fixture sanity: no campaign wave stages a group behind another")
+
+func _assert_delay_holds(db: Database, index: int, groups: Array, delay: int) -> void:
 	var sim := Sim.new(db, 1)
-	sim._begin_wave(8)
-	var groups: Array = ((db.engagement["waves"] as Array)[8] as Dictionary)["groups"]
-	assert_eq(groups.size(), 2, "fixture sanity: wave 9 has a delayed second group")
-	var delay := int((groups[1] as Dictionary)["start_delay_ticks"])
-	assert_gt(float(delay), 0.0, "fixture sanity: the second group is delayed")
+	sim._begin_wave(index)
 	var first_group_count := int((groups[0] as Dictionary)["count"])
 	var spawned_before_delay := 0
 	for _i in delay:

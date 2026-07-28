@@ -50,6 +50,7 @@
     "sun_pitch_degrees": -46.0,
     "sun_yaw_degrees": 35.0,
     "sun_energy": 1.35,
+    "shadow_range_margin": 1.25,
     "ambient_energy": 0.24,
     "band": "#1e4034",
     "band_alpha": 0.55,

@@ -9,7 +9,7 @@ extends RefCounted
 ## that a policy can drive thousands of runs unattended.
 
 const MAP := "highway_01"
-const ENGAGEMENT := "highway_01_act1"
+const ENGAGEMENT := "highway_act1"
 
 ## Roughly how much of the arsenal is area damage. Not optimal play - just a mix
 ## that exercises both families, so a level that is only clearable with one of
@@ -25,29 +25,78 @@ const MAX_TICKS := 90000
 ## each other.
 const SITE_STRIDE := 46.0
 
-## Which campaign levels the suite plays end to end.
+## Which campaign chains the suite plays end to end.
 ##
-## Playing all twelve is 24 full engagements, and the late ones are hundreds of
+## Levels are grouped into chains of three acts on one board, and a later act is
+## entered carrying the previous act's turrets - so an act cannot be balance
+## checked on its own. The unit of testing is therefore a whole chain.
+##
+## Playing all eight is 24 full engagements, and the late ones are thousands of
 ## enemies across sixteen waves - minutes of wall clock for one test. That is too
 ## slow to run on every change, and a suite people skip protects nothing. The
-## default is a spread across the difficulty curve (first, middle, last, plus the
-## two that most depend on buying ground); set LASTLINE_FULL_CAMPAIGN=1 to play
-## every level, which is what should run before a release.
-const SAMPLED_LEVELS := ["highway_01_act1", "refinery_01_act3", "lastline_01_act6",
-	"blackout_01_act11", "terminus_01_act12", "substation_act15", "lastlight_act22"]
+## default is a spread across the difficulty curve (the opening board, one from
+## the middle where buying ground starts to matter, and the last); set
+## LASTLINE_FULL_CAMPAIGN=1 to play every one, which is the pre-release run.
+const SAMPLED_CHAINS := ["highway_01", "railyard_01", "lastlight_01"]
 
-static func campaign_levels() -> Array:
-	var all := Database.load_levels()
-	if OS.get_environment("LASTLINE_FULL_CAMPAIGN") != "":
-		return all
-	var sampled := []
-	for level in all:
-		if SAMPLED_LEVELS.has(str(level["engagement"])):
-			sampled.append(level)
-	return sampled
+## Every campaign level, grouped into chains, in campaign order.
+static func campaign_chains() -> Array:
+	var full := full_campaign_requested()
+	var chains := []
+	var index := {}
+	for level in Database.load_levels():
+		var map_id := str(level["map"])
+		if not full and not SAMPLED_CHAINS.has(map_id):
+			continue
+		if not index.has(map_id):
+			index[map_id] = chains.size()
+			chains.append([])
+		(chains[int(index[map_id])] as Array).append(level)
+	return chains
 
 static func full_campaign_requested() -> bool:
 	return OS.get_environment("LASTLINE_FULL_CAMPAIGN") != ""
+
+## Play a chain the way the game hands it to a player: act by act, each one
+## inheriting what the last act left standing.
+##
+## Stops at the first act that is not won, because there is nothing to carry
+## forward from a loss. Returns one entry per act played:
+##   {level, sim, won, inherited, incoming}
+## where `incoming` is the board this act was handed - which is what makes the
+## idle side of the balance gate answerable (see `idle_run`).
+static func play_chain(levels: Array) -> Array:
+	var results := []
+	var carry := {}
+	for level in levels:
+		var incoming := carry
+		var sim := start_act(level, incoming, 20260727 + results.size())
+		var inherited := sim.t_count
+		run_greedy(sim)
+		var won := sim.result() == Sim.RESULT_WIN
+		results.append({"level": level, "sim": sim, "won": won,
+			"inherited": inherited, "incoming": incoming})
+		if not won:
+			break
+		carry = sim.board_snapshot()
+	return results
+
+## One act, opened with the board offered to it. An act that starts a chain
+## refuses the offer, exactly as main.gd does.
+static func start_act(level: Dictionary, offered: Dictionary,
+		seed_value: int = 12345) -> Sim:
+	var db := database(str(level["map"]), str(level["engagement"]))
+	var sim := Sim.new(db, seed_value)
+	if bool(db.engagement.get("carries_forward", false)) and not offered.is_empty():
+		sim.adopt(offered.get("platforms", []), offered.get("cells", PackedInt32Array()))
+	return sim
+
+## Build nothing for a whole act, starting from the board it was handed. An act
+## that an inherited board clears unattended is not an act, it is a cutscene.
+static func idle_run(level: Dictionary, incoming: Dictionary, seed_value: int = 12345) -> Sim:
+	var sim := start_act(level, incoming, seed_value)
+	run_idle(sim)
+	return sim
 
 static func database(map_id: String = MAP, engagement_id: String = ENGAGEMENT) -> Database:
 	return Database.load_engagement(map_id, engagement_id)

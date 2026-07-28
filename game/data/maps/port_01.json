@@ -1,47 +1,67 @@
 {
-  "_comment": "Act II. Switchbacks with short legs. Several positions cover two lanes at once, which is where concentrating fire starts to beat spreading it. Buildable ground is a grid (data/building.json): cells beside the road start unlocked, the rest are bought with Capital.",
+  "_comment": "Switchbacks with short legs. Several positions cover two lanes at once, which is where concentrating fire starts to beat spreading it. Played as a three-act chain: each act reveals more of this route (path_waypoints in the wave file) while everything built in the previous act stays put. Buildable ground is a grid - cells beside the road start unlocked, the rest are bought.",
   "id": "port_01",
   "display_name": "Port Authority",
   "bounds": {
-    "width": 3456,
-    "height": 1944
+    "width": 5900,
+    "height": 2400
   },
   "path": [
     {
       "x": -80.0,
-      "y": 320.0
+      "y": 400.0
     },
     {
-      "x": 560.0,
-      "y": 320.0
+      "x": 700.0,
+      "y": 400.0
     },
     {
-      "x": 560.0,
-      "y": 940.0
+      "x": 700.0,
+      "y": 1200.0
     },
     {
-      "x": 1180.0,
-      "y": 940.0
+      "x": 1500.0,
+      "y": 1200.0
     },
     {
-      "x": 1180.0,
-      "y": 340.0
+      "x": 1500.0,
+      "y": 400.0
     },
     {
-      "x": 1760.0,
-      "y": 340.0
+      "x": 2300.0,
+      "y": 400.0
     },
     {
-      "x": 1760.0,
-      "y": 1020.0
+      "x": 2300.0,
+      "y": 1400.0
     },
     {
-      "x": 2380.0,
-      "y": 1020.0
+      "x": 3100.0,
+      "y": 1400.0
     },
     {
-      "x": 2640.0,
-      "y": 1020.0
+      "x": 3100.0,
+      "y": 500.0
+    },
+    {
+      "x": 3900.0,
+      "y": 500.0
+    },
+    {
+      "x": 3900.0,
+      "y": 1600.0
+    },
+    {
+      "x": 4700.0,
+      "y": 1600.0
+    },
+    {
+      "x": 4700.0,
+      "y": 600.0
+    },
+    {
+      "x": 5700.0,
+      "y": 600.0
     }
   ]
 }

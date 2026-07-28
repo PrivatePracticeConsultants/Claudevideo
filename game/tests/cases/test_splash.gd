@@ -109,9 +109,9 @@ func test_splash_is_what_makes_swarm_waves_survivable() -> void:
 	# Skitter swarms exist to punish an arsenal with no area damage. Check that
 	# claim rather than asserting it: the same level, same seed, built entirely
 	# out of single-target turrets, should do measurably worse.
-	var mixed := SimFixture.for_level("port_01", "port_01_act2")
+	var mixed := SimFixture.for_level("port_01", "port_act2")
 	SimFixture.run_greedy(mixed)
-	var single := SimFixture.for_level("port_01", "port_01_act2")
+	var single := SimFixture.for_level("port_01", "port_act2")
 	_build_single_target_only(single)
 	assert_gte(float(mixed.integrity()), float(single.integrity()),
 		"a mixed arsenal should not do worse than pure single-target against swarms")

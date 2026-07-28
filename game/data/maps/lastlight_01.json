@@ -1,59 +1,75 @@
 {
-  "_comment": "Act XXII. The final contract. The longest road on the biggest board, and no slack anywhere. Buildable ground is a grid (data/building.json): cells beside the road start unlocked, the rest are bought with Capital.",
+  "_comment": "The final board: the longest road, every drone class, and no slack anywhere. Played as a three-act chain: each act reveals more of this route (path_waypoints in the wave file) while everything built in the previous act stays put. Buildable ground is a grid - cells beside the road start unlocked, the rest are bought.",
   "id": "lastlight_01",
   "display_name": "Last Light",
   "bounds": {
-    "width": 3800,
-    "height": 2300
+    "width": 5900,
+    "height": 2400
   },
   "path": [
     {
       "x": -80.0,
-      "y": 320.0
+      "y": 360.0
     },
     {
-      "x": 1000.0,
-      "y": 320.0
+      "x": 1200.0,
+      "y": 360.0
     },
     {
-      "x": 1000.0,
-      "y": 950.0
+      "x": 1200.0,
+      "y": 1100.0
     },
     {
-      "x": 350.0,
-      "y": 950.0
+      "x": 400.0,
+      "y": 1100.0
     },
     {
-      "x": 350.0,
-      "y": 1600.0
-    },
-    {
-      "x": 1600.0,
-      "y": 1600.0
-    },
-    {
-      "x": 1600.0,
-      "y": 700.0
-    },
-    {
-      "x": 2400.0,
-      "y": 700.0
-    },
-    {
-      "x": 2400.0,
-      "y": 1450.0
+      "x": 400.0,
+      "y": 1900.0
     },
     {
       "x": 1900.0,
-      "y": 1450.0
+      "y": 1900.0
     },
     {
       "x": 1900.0,
-      "y": 1950.0
+      "y": 700.0
     },
     {
-      "x": 3680.0,
-      "y": 1950.0
+      "x": 2800.0,
+      "y": 700.0
+    },
+    {
+      "x": 2800.0,
+      "y": 1700.0
+    },
+    {
+      "x": 2250.0,
+      "y": 1700.0
+    },
+    {
+      "x": 2250.0,
+      "y": 2150.0
+    },
+    {
+      "x": 3600.0,
+      "y": 2150.0
+    },
+    {
+      "x": 3600.0,
+      "y": 900.0
+    },
+    {
+      "x": 4500.0,
+      "y": 900.0
+    },
+    {
+      "x": 4500.0,
+      "y": 1900.0
+    },
+    {
+      "x": 5700.0,
+      "y": 1900.0
     }
   ]
 }

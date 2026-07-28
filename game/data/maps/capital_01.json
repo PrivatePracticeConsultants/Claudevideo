@@ -1,55 +1,75 @@
 {
-  "_comment": "Act IV. A nine-segment slalom with short legs - lots of corners, but little room to sit back, so throughput matters more than range. Buildable ground is a grid (data/building.json): cells beside the road start unlocked, the rest are bought with Capital.",
+  "_comment": "A slalom of short teeth. Range is wasted here; rate of fire wins. Played as a three-act chain: each act reveals more of this route (path_waypoints in the wave file) while everything built in the previous act stays put. Buildable ground is a grid - cells beside the road start unlocked, the rest are bought.",
   "id": "capital_01",
   "display_name": "Capital Approach",
   "bounds": {
-    "width": 3456,
-    "height": 1944
+    "width": 5900,
+    "height": 2400
   },
   "path": [
     {
       "x": -80.0,
-      "y": 1180.0
+      "y": 1200.0
     },
     {
-      "x": 440.0,
-      "y": 1180.0
+      "x": 600.0,
+      "y": 1200.0
     },
     {
-      "x": 440.0,
-      "y": 560.0
+      "x": 600.0,
+      "y": 500.0
     },
     {
-      "x": 900.0,
-      "y": 560.0
+      "x": 1200.0,
+      "y": 500.0
     },
     {
-      "x": 900.0,
-      "y": 1160.0
+      "x": 1200.0,
+      "y": 1500.0
     },
     {
-      "x": 1360.0,
-      "y": 1160.0
+      "x": 1800.0,
+      "y": 1500.0
     },
     {
-      "x": 1360.0,
-      "y": 480.0
+      "x": 1800.0,
+      "y": 500.0
     },
     {
-      "x": 1840.0,
-      "y": 480.0
+      "x": 2400.0,
+      "y": 500.0
     },
     {
-      "x": 1840.0,
-      "y": 1140.0
+      "x": 2400.0,
+      "y": 1500.0
     },
     {
-      "x": 2360.0,
-      "y": 1140.0
+      "x": 3000.0,
+      "y": 1500.0
     },
     {
-      "x": 2640.0,
-      "y": 1140.0
+      "x": 3000.0,
+      "y": 500.0
+    },
+    {
+      "x": 3600.0,
+      "y": 500.0
+    },
+    {
+      "x": 3600.0,
+      "y": 1500.0
+    },
+    {
+      "x": 4300.0,
+      "y": 1500.0
+    },
+    {
+      "x": 4300.0,
+      "y": 600.0
+    },
+    {
+      "x": 5700.0,
+      "y": 600.0
     }
   ]
 }

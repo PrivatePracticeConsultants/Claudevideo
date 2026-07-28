@@ -15,11 +15,17 @@ func test_starting_capital_and_integrity_come_from_data() -> void:
 	assert_eq(sim.integrity(), int(db.economy["starting_integrity"]), "integrity is loaded, not hardcoded")
 
 func test_an_engagement_can_override_starting_capital() -> void:
-	# Act II and III start richer, per section 4.1, so a tier-4 platform is
-	# reachable in a single fight by act three.
-	var act1 := SimFixture.for_level("highway_01", "highway_01_act1")
-	var act3 := SimFixture.for_level("capital_01", "capital_01_act4")
-	assert_gt(float(act3.capital()), float(act1.capital()), "later acts start with more Capital")
+	# Later boards start richer, per section 4.1, so a tier-4 turret is reachable
+	# in a single fight by the end of the campaign. Compared board-opening act to
+	# board-opening act: within a chain the later acts start *poorer*, because
+	# they inherit a board and are buying an extension rather than an army.
+	var first := SimFixture.for_level("highway_01", "highway_act1")
+	var last := SimFixture.for_level("lastlight_01", "lastlight_act1")
+	assert_gt(float(last.capital()), float(first.capital()),
+		"later boards start with more Capital")
+	var inheriting := SimFixture.for_level("lastlight_01", "lastlight_act3")
+	assert_lt(float(inheriting.capital()), float(last.capital()),
+		"an act that inherits a board is funded for the extension, not for the board")
 
 func test_placing_a_platform_costs_its_listed_price() -> void:
 	var sim := SimFixture.fresh()
@@ -55,11 +61,30 @@ func test_building_on_the_road_is_refused() -> void:
 func test_ground_far_from_the_road_is_locked_rather_than_forbidden() -> void:
 	# Distant ground is not illegal, it is unowned - the player can buy their way
 	# out to it one cell at a time.
+	# "Far" has to mean far from the *whole* route, not far from the segment the
+	# sample was taken on. Offsetting perpendicular to one segment can land inside
+	# the owned band of another one where the road bends, which is how this test
+	# started failing the moment the boards got longer and curvier.
 	var sim := SimFixture.fresh()
-	var far := sim.build_max_distance() + 120.0
-	sim.sample_for_render(sim.path_length() * 0.5, far)
-	assert_eq(sim.can_build_at(sim.out_x(), sim.out_y(), 0), Sim.BUILD_LOCKED,
-		"far ground is locked, not permanently refused")
+	var found := false
+	var prog := 0.0
+	while prog <= sim.path_length() and not found:
+		for side: float in [1.0, -1.0]:
+			sim.sample_for_render(prog, (sim.build_max_distance() + 120.0) * side)
+			var x := sim.out_x()
+			var y := sim.out_y()
+			if sim.distance_to_path(x, y) <= sim.build_max_distance():
+				continue
+			# ...and still on the board, or the answer is "out of bounds" and the
+			# question about ownership never gets asked.
+			if x < 0.0 or y < 0.0 or x > sim.bounds_width() or y > sim.bounds_height():
+				continue
+			assert_eq(sim.can_build_at(x, y, 0), Sim.BUILD_LOCKED,
+				"far ground is locked, not permanently refused")
+			found = true
+			break
+		prog += 200.0
+	assert_true(found, "fixture sanity: the board has ground outside the owned band")
 
 func test_out_of_bounds_placements_are_rejected() -> void:
 	var sim := SimFixture.fresh()

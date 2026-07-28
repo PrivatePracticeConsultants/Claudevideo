@@ -163,6 +163,7 @@ func _validate_map() -> void:
 	if typeof(path) != TYPE_ARRAY or (path as Array).size() < 2:
 		errors.append("Map %s needs a \"path\" of at least 2 waypoints." % str(map.get("id", "?")))
 	else:
+		var before := errors.size()
 		for i in (path as Array).size():
 			var p: Variant = (path as Array)[i]
 			if typeof(p) != TYPE_DICTIONARY or not (p as Dictionary).has("x") or not (p as Dictionary).has("y"):
@@ -180,6 +181,10 @@ func _validate_map() -> void:
 			if is_equal_approx(float(prev["x"]), float((p as Dictionary)["x"])) \
 					and is_equal_approx(float(prev["y"]), float((p as Dictionary)["y"])):
 				errors.append("Map waypoints %d and %d are in the same place; every path segment must have length." % [i - 1, i])
+		# Only when every waypoint is a well-formed pair - otherwise this would
+		# read fields that are not there and turn a clear message into a crash.
+		if errors.size() == before:
+			_check_route_crowding(path as Array)
 	var bounds: Variant = map.get("bounds")
 	if typeof(bounds) != TYPE_DICTIONARY:
 		errors.append("Map %s needs \"bounds\" with width and height." % str(map.get("id", "?")))
@@ -187,12 +192,57 @@ func _validate_map() -> void:
 		_req_num(bounds, "width", "map bounds", 1.0)
 		_req_num(bounds, "height", "map bounds", 1.0)
 
+## Two stretches of road that pass close to each other leave a strip of ground
+## that is inside neither's buildable band - dead space that looks like a
+## corridor you should be able to defend and is not. Below twice the
+## no-build radius the corridor walls themselves overlap and it renders as one
+## fused blob. Caught here because it is invisible in the JSON: a map author sees
+## a list of coordinates, not the shape they make.
+func _check_route_crowding(path: Array) -> void:
+	var clearance := float(building.get("min_distance_from_path", 0.0)) * 2.0
+	if clearance <= 0.0:
+		return
+	for i in path.size() - 1:
+		for j in range(i + 2, path.size() - 1):
+			var gap := _segment_gap(path[i], path[i + 1], path[j], path[j + 1])
+			if gap < clearance:
+				errors.append(("Map %s: segments %d and %d pass within %.0f units of "
+					+ "each other; the road must keep at least %.0f from itself.")
+					% [str(map.get("id", "?")), i, j, gap, clearance])
+				return  # one clear message beats a wall of them
+
+func _segment_gap(a: Variant, b: Variant, c: Variant, d: Variant) -> float:
+	var ax := float((a as Dictionary)["x"]); var ay := float((a as Dictionary)["y"])
+	var bx := float((b as Dictionary)["x"]); var by := float((b as Dictionary)["y"])
+	var cx := float((c as Dictionary)["x"]); var cy := float((c as Dictionary)["y"])
+	var dx := float((d as Dictionary)["x"]); var dy := float((d as Dictionary)["y"])
+	# Endpoint-to-segment is exact for the non-crossing case and a safe
+	# over-estimate for the crossing one, which a route should never do anyway.
+	return minf(
+		minf(_point_gap(ax, ay, cx, cy, dx, dy), _point_gap(bx, by, cx, cy, dx, dy)),
+		minf(_point_gap(cx, cy, ax, ay, bx, by), _point_gap(dx, dy, ax, ay, bx, by)))
+
+func _point_gap(px: float, py: float, ax: float, ay: float, bx: float, by: float) -> float:
+	var vx := bx - ax
+	var vy := by - ay
+	var length_sq := vx * vx + vy * vy
+	var t := 0.0 if length_sq <= 0.0 else clampf(((px - ax) * vx + (py - ay) * vy) / length_sq, 0.0, 1.0)
+	var qx := px - (ax + vx * t)
+	var qy := py - (ay + vy * t)
+	return sqrt(qx * qx + qy * qy)
+
 func _validate_engagement() -> void:
 	_req_int(engagement, "inter_wave_delay_ticks", "wave file", 0)
 	# Per-engagement overrides. Optional, so an engagement that does not scale
 	# reads exactly like one written before acts existed.
 	if engagement.has("starting_capital"):
 		_req_int(engagement, "starting_capital", "wave file", 0)
+	if engagement.has("path_waypoints"):
+		var revealed := _req_int(engagement, "path_waypoints", "wave file", 2)
+		var available: int = (map.get("path", []) as Array).size()
+		if revealed > available:
+			errors.append("wave file: path_waypoints is %d but the map only has %d waypoints."
+				% [revealed, available])
 	if engagement.has("starting_ground_reach"):
 		var reach := _req_num(engagement, "starting_ground_reach", "wave file", 0.0)
 		if reach <= float(building.get("min_distance_from_path", 0.0)):

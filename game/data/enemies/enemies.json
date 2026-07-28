@@ -1,9 +1,9 @@
 {
-  "_comment": "Three tiers of drone. Swarm is fast, fragile and numerous - it exists to punish an arsenal with no area damage, and is what the Cannon family answers. Walker is the baseline. Heavy is slow, very tough and pays out accordingly, and a leak costs three times as much, so letting one through is the single most expensive mistake available. The armour triangle (kinetic/energy resistances) and the flying/cloaked/splitter modifiers are still P1; this is an HP-and-payout ladder, not a counter system.",
+  "_comment": "Three tiers of drone. Swarm is fast, fragile and numerous - it exists to punish an arsenal with no area damage, and is what the Cannon family answers. Walker is the baseline. Heavy is slow, very tough and pays out accordingly, and a leak costs three times as much, so letting one through is the single most expensive mistake available. The armour triangle (kinetic/energy resistances) and the flying/cloaked/splitter modifiers are still P1; this is an HP-and-payout ladder, not a counter system. Speeds were raised ~1.6x when boards doubled in length, so traversal time per act stayed comparable.",
   "swarm": {
     "display_name": "Skitter Drone",
     "base_hp": 22,
-    "speed_units_per_second": 86.0,
+    "speed_units_per_second": 140.0,
     "leak_value": 1,
     "base_bounty": 7,
     "radius": 11.0,
@@ -12,7 +12,7 @@
   "walker": {
     "display_name": "Sentry Walker",
     "base_hp": 55,
-    "speed_units_per_second": 55.0,
+    "speed_units_per_second": 90.0,
     "leak_value": 4,
     "base_bounty": 16,
     "radius": 16.0,
@@ -21,7 +21,7 @@
   "heavy": {
     "display_name": "Bulwark Hauler",
     "base_hp": 260,
-    "speed_units_per_second": 34.0,
+    "speed_units_per_second": 55.0,
     "leak_value": 12,
     "base_bounty": 58,
     "radius": 24.0,

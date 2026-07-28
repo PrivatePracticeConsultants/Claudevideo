@@ -3,11 +3,13 @@
 Roguelite tower defense. Godot 4.x / GDScript. **3D, and it runs in a browser.**
 
 **Status: P0 complete and audited twice, then extended well past it.**
-Twenty-two levels, two weapon families with four tiers each, three enemy classes,
-free placement on purchasable ground — on a deterministic 30Hz simulation, drawn
-with real lighting, shadows and ambient occlusion. The design document is
-the master plan (v2); the phase ladder is §5.7. Formally this is P0 plus much of
-P1/P2's content; the run layer (P3) is the next real milestone.
+Twenty-four levels — eight boards played as three acts each, where every act
+opens more of the same road and keeps everything you built on the last one — two
+weapon families with four tiers each, three enemy classes, free placement on
+purchasable ground, all on a deterministic 30Hz simulation drawn with real
+lighting, shadows and ambient occlusion. The design document is the master plan
+(v2); the phase ladder is §5.7. Formally this is P0 plus much of P1/P2's content;
+the run layer (P3) is the next real milestone.
 
 This tree is self-contained and shares nothing with MRF Explorer, the Python
 product that occupies the rest of this repository.
@@ -79,6 +81,18 @@ You are capped at a **deployment limit** per level, so once your allowance is
 placed the only way to grow is to upgrade — which is what makes *where* you put
 them matter.
 
+### Boards that grow
+
+Each board is three acts. Act I runs the first stretch of the road; act II opens
+more of it; act III runs the whole thing. **The road already revealed never
+moves**, so every turret and every cell of ground you bought is still there, still
+covering what it covered, when the corridor extends. Capital does not carry —
+each act's spending is its own decision — and inherited turrets count against the
+new act's deployment limit, so what the bigger limit buys you is room to extend
+coverage rather than a clean slate. Act I of a new board always starts clean.
+
+Retrying an act (`R`) restores the same inheritance, not an empty board.
+
 ## What P0 actually guarantees
 
 The acceptance gate for this phase was: *play a ten-wave engagement start to
@@ -90,15 +104,21 @@ The suite includes `test_audit.gd` — regression tests for seven defects a
 deliberate break-it pass found after P0 was first written. Every one was a
 *silent* failure rather than a crash; `DECISIONS.md` (P0-17) has the table.
 
-Campaign levels are covered by a test that each is both winnable by a scripted
+Campaign content is covered by a test that every chain is winnable by a scripted
 competent policy and losable by an idle one, so a balance change that makes a
 level impossible — or trivial — fails the build instead of being discovered in
-play. It caught two unwinnable levels during authoring.
+play. It caught two unwinnable levels during authoring, and later caught a
+generated curve whose *opening* level threw 2,223 drones at a 14-turret board.
 
-That test plays a five-level sample of the curve by default, because playing all
-twelve is 24 full engagements and minutes of wall clock; `--full` plays every
-one, and is the pre-release run. A separate cheap test loads all twelve
-regardless, so a broken map or wave file fails immediately.
+It plays whole chains rather than single levels, because an act in the middle of
+a chain is entered carrying the previous act's board — judging it from a standing
+start would measure a game nobody plays. The losable half is correspondingly
+strict: an act must still be losable **from the board it inherits**.
+
+That test plays three of the eight chains by default, because playing all of them
+is 24 full engagements and minutes of wall clock; `--full` plays every one, and is
+the pre-release run. A separate cheap test loads all twenty-four regardless, so a
+broken map or wave file fails immediately.
 
 ## How it is drawn
 
@@ -173,6 +193,10 @@ xvfb-run -a godot --path game --rendering-driver opengl3 \
 # Verify draw calls stay flat as entity count climbs.
 xvfb-run -a godot --path game --rendering-driver opengl3 \
     --script res://tools/render_stress.gd
+
+# Play the whole campaign chained, the way a player would, and print the table.
+# Reports rather than asserts - this is the tuning loop, not a gate.
+godot --headless --path game --script res://tools/balance_probe.gd
 ```
 
 Scope discipline: ideas beyond the current phase go in `post-launch.md`, not into

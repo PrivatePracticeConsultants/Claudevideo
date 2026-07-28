@@ -17,6 +17,10 @@ var _banner: Label
 var _level: Label
 var _level_text: String = ""
 var _is_last_level: bool = false
+## Whether the level after this one is the next act on the same board. It changes
+## what winning means - not "on to somewhere else" but "the road gets longer and
+## everything you built stays" - so the banner has to say which.
+var _next_extends: bool = false
 
 func setup(sim: Sim, theme: Dictionary) -> void:
 	_sim = sim
@@ -55,9 +59,20 @@ func setup(sim: Sim, theme: Dictionary) -> void:
 ## allocation the project can trivially avoid.
 var _last_signature: int = -1
 
-func set_level(name: String, index: int, total: int) -> void:
+func set_level(name: String, index: int, total: int, inherited: int = 0,
+		next_extends: bool = false, dropped: int = 0) -> void:
 	_level_text = "%s      LEVEL %d/%d" % [name, index + 1, total]
+	if inherited > 0:
+		# Without this the inherited turrets read as a bug - a board you did not
+		# build, on a level you have not played.
+		_level_text += "      %d TURRETS HELD OVER" % inherited
+	if dropped > 0:
+		# You can build beside road that has not been revealed yet. When it is
+		# revealed and runs through your turret, that turret is gone - and the
+		# honesty rule says you get told, not left to notice.
+		_level_text += "  ·  %d LOST TO THE NEW ROAD" % dropped
 	_is_last_level = index + 1 >= total
+	_next_extends = next_extends
 	_level.text = _level_text
 
 func refresh(speed: int, paused: bool, hovered_platform: int = -1,
@@ -114,6 +129,8 @@ func refresh(speed: int, paused: bool, hovered_platform: int = -1,
 	if _sim.result() == Sim.RESULT_WIN:
 		if _is_last_level:
 			_banner.text = "CONTRACT COMPLETE   ·   %d integrity   ·   R to replay" % _sim.integrity()
+		elif _next_extends:
+			_banner.text = "SECTOR HELD   ·   %d integrity   ·   N extends the corridor" % _sim.integrity()
 		else:
 			_banner.text = "CORRIDOR HELD   ·   %d integrity   ·   N for next level" % _sim.integrity()
 		_banner.add_theme_color_override("font_color", _color("good"))

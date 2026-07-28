@@ -1,115 +1,125 @@
 {
-  "_comment": "Campaign order; winning a level advances to the next. A flat list, not the branching route map from section 2.2 - that arrives with the run layer in P3 along with Corridor Integrity persisting across engagements.",
+  "_comment": "Campaign order. Eight boards, three acts each. An act reveals more of its board's route than the one before and inherits its turrets and owned ground; act 1 of a board always starts clean.",
   "levels": [
     {
       "map": "highway_01",
-      "engagement": "highway_01_act1",
-      "name": "I - Highway 17 Interchange"
+      "engagement": "highway_act1",
+      "name": "I - Highway 17 Interchange: Approach"
+    },
+    {
+      "map": "highway_01",
+      "engagement": "highway_act2",
+      "name": "II - Highway 17 Interchange: Extension"
+    },
+    {
+      "map": "highway_01",
+      "engagement": "highway_act3",
+      "name": "III - Highway 17 Interchange: Full Route"
     },
     {
       "map": "port_01",
-      "engagement": "port_01_act2",
-      "name": "II - Port Authority"
+      "engagement": "port_act1",
+      "name": "IV - Port Authority: Approach"
     },
     {
-      "map": "refinery_01",
-      "engagement": "refinery_01_act3",
-      "name": "III - Refinery Loop"
+      "map": "port_01",
+      "engagement": "port_act2",
+      "name": "V - Port Authority: Extension"
+    },
+    {
+      "map": "port_01",
+      "engagement": "port_act3",
+      "name": "VI - Port Authority: Full Route"
     },
     {
       "map": "capital_01",
-      "engagement": "capital_01_act4",
-      "name": "IV - Capital Approach"
+      "engagement": "capital_act1",
+      "name": "VII - Capital Approach: Approach"
     },
     {
-      "map": "spillway_01",
-      "engagement": "spillway_01_act5",
-      "name": "V - Spillway Crossing"
+      "map": "capital_01",
+      "engagement": "capital_act2",
+      "name": "VIII - Capital Approach: Extension"
     },
     {
-      "map": "lastline_01",
-      "engagement": "lastline_01_act6",
-      "name": "VI - The Last Line"
+      "map": "capital_01",
+      "engagement": "capital_act3",
+      "name": "IX - Capital Approach: Full Route"
+    },
+    {
+      "map": "refinery_01",
+      "engagement": "refinery_act1",
+      "name": "X - Refinery Row: Approach"
+    },
+    {
+      "map": "refinery_01",
+      "engagement": "refinery_act2",
+      "name": "XI - Refinery Row: Extension"
+    },
+    {
+      "map": "refinery_01",
+      "engagement": "refinery_act3",
+      "name": "XII - Refinery Row: Full Route"
     },
     {
       "map": "railyard_01",
-      "engagement": "railyard_01_act7",
-      "name": "VII - Rail Yard"
+      "engagement": "railyard_act1",
+      "name": "XIII - Railyard Junction: Approach"
     },
     {
-      "map": "cooling_01",
-      "engagement": "cooling_01_act8",
-      "name": "VIII - Cooling Towers"
+      "map": "railyard_01",
+      "engagement": "railyard_act2",
+      "name": "XIV - Railyard Junction: Extension"
     },
     {
-      "map": "spine_01",
-      "engagement": "spine_01_act9",
-      "name": "IX - The Spine"
+      "map": "railyard_01",
+      "engagement": "railyard_act3",
+      "name": "XV - Railyard Junction: Full Route"
     },
     {
-      "map": "sprawl_01",
-      "engagement": "sprawl_01_act10",
-      "name": "X - Cargo Sprawl"
+      "map": "spillway_01",
+      "engagement": "spillway_act1",
+      "name": "XVI - Spillway Works: Approach"
     },
     {
-      "map": "blackout_01",
-      "engagement": "blackout_01_act11",
-      "name": "XI - Blackout Grid"
+      "map": "spillway_01",
+      "engagement": "spillway_act2",
+      "name": "XVII - Spillway Works: Extension"
     },
     {
-      "map": "terminus_01",
-      "engagement": "terminus_01_act12",
-      "name": "XII - Terminus"
-    },
-    {
-      "map": "foundry_01",
-      "engagement": "foundry_act13",
-      "name": "XIII - Foundry Line"
-    },
-    {
-      "map": "causeway_01",
-      "engagement": "causeway_act14",
-      "name": "XIV - Causeway"
-    },
-    {
-      "map": "substation_01",
-      "engagement": "substation_act15",
-      "name": "XV - Substation"
-    },
-    {
-      "map": "trenchline_01",
-      "engagement": "trenchline_act16",
-      "name": "XVI - Trench Line"
+      "map": "spillway_01",
+      "engagement": "spillway_act3",
+      "name": "XVIII - Spillway Works: Full Route"
     },
     {
       "map": "reactor_01",
-      "engagement": "reactor_act17",
-      "name": "XVII - Reactor Yard"
+      "engagement": "reactor_act1",
+      "name": "XIX - Reactor Perimeter: Approach"
     },
     {
-      "map": "overpass_01",
-      "engagement": "overpass_act18",
-      "name": "XVIII - Overpass"
+      "map": "reactor_01",
+      "engagement": "reactor_act2",
+      "name": "XX - Reactor Perimeter: Extension"
     },
     {
-      "map": "quarantine_01",
-      "engagement": "quarantine_act19",
-      "name": "XIX - Quarantine Zone"
-    },
-    {
-      "map": "blackice_01",
-      "engagement": "blackice_act20",
-      "name": "XX - Black Ice"
-    },
-    {
-      "map": "ascension_01",
-      "engagement": "ascension_act21",
-      "name": "XXI - Ascension"
+      "map": "reactor_01",
+      "engagement": "reactor_act3",
+      "name": "XXI - Reactor Perimeter: Full Route"
     },
     {
       "map": "lastlight_01",
-      "engagement": "lastlight_act22",
-      "name": "XXII - Last Light"
+      "engagement": "lastlight_act1",
+      "name": "XXII - Last Light: Approach"
+    },
+    {
+      "map": "lastlight_01",
+      "engagement": "lastlight_act2",
+      "name": "XXIII - Last Light: Extension"
+    },
+    {
+      "map": "lastlight_01",
+      "engagement": "lastlight_act3",
+      "name": "XXIV - Last Light: Full Route"
     }
   ]
 }

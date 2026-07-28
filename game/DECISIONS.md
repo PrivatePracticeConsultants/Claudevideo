@@ -6,7 +6,8 @@ rewrite history.
 
 Phase status: **P0 complete and audited, then extended well past it** — 3D, HTML5, free
 placement, tower tiers, two weapon families, three enemy classes, purchasable
-ground, and a twenty-two-level campaign. Formally this is P0 plus most of P1/P2's
+ground, and a twenty-four-level campaign of boards that grow across three-act
+chains. Formally this is P0 plus most of P1/P2's
 content; the run layer (P3) is still absent.
 
 ---
@@ -540,6 +541,183 @@ took `level_index` and never used it, so all ten acts shipped byte-identical wav
 lists. It showed up as exactly 3819 kills on three different levels with three
 different multipliers and three different maps. Identical numbers across
 supposedly-different things is the cheapest bug detector available.
+
+## P0-32 · Boards grow across a chain, and keep what you built
+
+Eight boards, each played as three acts. An act reveals only the first N
+waypoints of its map's route (`path_waypoints`); the next act reveals more. Every
+turret and every cell of bought ground carries forward.
+
+The load-bearing property is that **the revealed prefix never moves**. Acts share
+a route by taking prefixes of the same waypoint list, so the road an act-1 turret
+was covering is in exactly the same place in act 3 — which is the only reason
+inheriting that turret makes sense. Route extensions are authored to head into
+fresh ground rather than double back over where you have already built, so a
+carried turret is not orphaned by the corridor being rerouted through it.
+`adopt()` still drops and counts anything that no longer fits, because "authored
+not to happen" is not the same as "cannot happen".
+
+What carries and what does not:
+
+- **Turrets and owned ground carry.** They were paid for in the act that built
+  them, and charging again would make continuing a chain strictly worse than
+  starting one.
+- **Capital does not.** Engagement-scoped Capital is what makes each act's
+  spending a fresh decision; carrying it would compound into a runaway.
+- **Carried turrets count against the new act's deployment limit.** The limit
+  rises by 4 per act, so what a new act buys you is room to *extend* coverage
+  into the new stretch — not a clean slate on top of everything already standing.
+  That is the whole strategic point: your act-1 decisions are still on the board
+  in act 3, good ones and bad ones alike.
+
+Carry-over is applied at construction, before any command runs, so it is part of
+the initial state a replay starts from. Without that, every chained act would
+desync — covered by `test_chain.test_a_carried_board_still_replays_identically`.
+
+Restarting an act restores the same inheritance rather than a clean board:
+retrying act 3 must not quietly delete what acts 1 and 2 built.
+
+## P0-33 · Drone speeds rose with route length
+
+Routes roughly doubled (full routes are now 10,500–15,400 units against
+4,500–9,500 before). At the old speeds a single drone took minutes to walk one,
+which made under-defended waves drag and made the headless suite unworkably slow.
+
+Speeds went up ~1.6x (Skitter 86→140, Walker 55→90, Bulwark 34→55) so traversal
+time per act stayed comparable to what was already tuned. This is a case where a
+number that looks like pure balance is really about pacing and test throughput.
+
+## P0-34 · The 24-act curve is resampled from the proven one, corrected once
+
+The first attempt at authoring 24 chained acts generated the whole curve from a
+formula. It produced a campaign whose *opening* level threw 2,223 drones at a
+14-turret board with $400 — fifteen times the head-count of the level it
+replaced, at four times the health multiplier. Every act was end-game soup and
+the first two thirds of the difficulty curve had stopped existing.
+
+The fix was to stop inventing. The 22-level campaign that preceded the chain
+rework had been tuned level by level against a scripted-competent policy, so it
+is the only measured data in the project. The 24 acts resample it: head-count
+(148 → 5,591), starting Capital, bounty, and — this was the part the formula got
+most wrong — the **per-class spawn intervals, shares and entry points**, lifted
+from the old wave files rather than authored. Spawn *interval* turned out to
+dominate head-count: pacing 148 walkers at 13 ticks instead of the proven 24
+turned a winnable level into 9 kills and 25 leaks, with the same drones.
+
+### The one correction
+
+Exactly one change of this rework invalidates that data, and it invalidates all
+of it by the same factor. P0-33 raised drone speeds 1.64× so a doubled route did
+not mean a five-minute walk. **A drone moving 1.64× faster spends 1.64× less time
+inside a turret's range, so the same turret does 1.64× less damage to it before
+it is past.** Arrival rate is unchanged (spawn intervals are in ticks) and so is
+income (bounty per drone, and the number of drones). Health is the only quantity
+that has to move.
+
+Measured before the correction, with the old health numbers carried over intact:
+the first fourteen levels were unwinnable and the last nine were untouchable —
+`highway_act1` finished 9 kills / 25 leaks / 5 turrets built, while
+`spillway_act1` finished 100 integrity, zero leaks, 44 turrets all at tier 4.
+That is what a 1.64× error looks like from both ends at once.
+
+### Where the correction stops applying
+
+Time-on-target is the binding constraint only while the board is DPS-starved,
+which is the whole early campaign. Late, the deployment limit and the inherited
+board leave a surplus, and the correction over-corrects: level 15 was measured
+winning *without taking a scratch* at health ×6.0, well past the corrected
+ceiling of ×3.66. So the corrected curve is trusted up to the point it saturates
+and health keeps climbing from there to a top found by running it, not argued
+for.
+
+A rejected alternative: solving health and economy from a target
+capacity-to-demand ratio. It is a defensible model — capacity is slots × the DPS
+of the tier you are meant to reach, demand is peak health arriving per second,
+and the probe does discriminate on that ratio (0.26 loses by nine leaks, 0.36
+wins untouched). But head-count grows superlinearly against a linear capacity, so
+the solved health curve fell *below* 1.0 mid-campaign and jumped at every tier
+boundary. Resampling something that was measured beat modelling something that
+was not.
+
+The generator is a throwaway script, not a checked-in tool: the data files are
+the source of truth and are meant to be hand-editable afterwards.
+
+## P0-37 · An inherited board arrives refitted, or the chain is a cutscene
+
+Carrying a board forward was supposed to mean "your act-1 decisions are still on
+the board in act 3". What it actually meant, once measured, was that **every
+carrying act in the campaign could be won by building nothing at all** — the
+board inherited from the previous act cleared the next one unattended. Sixteen of
+sixteen.
+
+The cause is the tier ladder, not the carry. An act ends with its turrets at tier
+4; a tier-4 ballistic is 210 DPS against the 20 it grew from. Inheriting that
+intact hands the next act ten times the board it is authored against, and no
+plausible difficulty step closes a 10× gap — raising the next act's health by
+half did not move a single one of the sixteen.
+
+So a carried turret arrives **one tier down, and never above tier 2**
+(`Sim.CARRY_TIER_CAP`). Measured effect, on the same campaign:
+
+| | acts won by an idle run |
+|---|---|
+| carried intact | 16 of 16 |
+| carried one tier down | 2 of 16 |
+| ...and capped at tier 2 | **0 of 16** |
+
+The step-down does most of the work; the cap is what makes it structural rather
+than tuned, because it bounds what an inheritance can be worth *however*
+comfortably the previous act was won. That matters: the flawless margin at the
+end of an act turned out to be well over 2×, not the 10–15% assumed.
+
+What survives is what the chain is for — placements, weapon choices, and the
+ground bought to reach them. What comes back is the decision the inheritance had
+removed: what to re-invest in, now that the road is longer than the board that
+held it. Thematically it is a refit; mechanically it is the reason act 2 is a
+level.
+
+## P0-35 · The balance gate plays chains, not levels
+
+`test_every_campaign_level_is_winnable_and_losable` became wrong the moment
+boards carried forward. It opened each level from a standing start — but act 3 is
+authored against the turrets act 2 leaves behind, and its own Capital is smaller
+*because* of them. Judged alone it looked unwinnable; judged in sequence it is
+the level it was designed as.
+
+So the unit of testing is now a whole chain (`test_every_campaign_chain_is_winnable_and_losable`),
+and the losable half got stronger with it: an act must be losable **from the
+board it inherits**, not from an empty one. An act that an inherited board clears
+unattended is not an act, it is a cutscene.
+
+The geometric premise the whole mechanic rests on — that an extension heads into
+fresh ground rather than rerouting through what you already built — is measured
+rather than asserted. Sampling every legal build spot in each act's band and
+re-checking it against the next act's longer corridor, **exactly 2 spots per
+board are lost, 0.4–1.2% of the band, and never to a segment that already
+existed**. Those two are the pair either side of the old end-of-route, which is
+inherent to a road that now continues. `test_chain` fails above 4%.
+
+## P0-36 · Two things the longer boards broke quietly
+
+Both found by measuring the new maps rather than by playing them, and both are
+now guarded so they cannot come back.
+
+**A route that crowded itself.** Every waypoint list is legal JSON and every
+segment has length, so nothing rejected `lastlight_01` — but two of its stretches
+passed within 100 units of each other. The no-build radius is 58 per side, so the
+strip between them was buildable from neither, and the corridor walls (54 units
+of half-width each) overlapped into one fused blob. Fixed by moving the offending
+leg out to 350, and `Database` now rejects any map whose non-adjacent segments
+come within twice `min_distance_from_path`. The measured clearances are 200–800
+units; the check fails below 116.
+
+**Shadows that stopped halfway across the board.** `directional_shadow_max_distance`
+was a fixed 9,000 — fine for the boards it was written against, not for a 14,900-unit
+route framed end to end. The far third of the last act rendered unshadowed, which
+reads as two different scenes joined down the middle. The range is now refitted
+from the camera framing every time the camera is fitted, which also means an
+early act — which frames a third of the board — gets its depth resolution spent
+on the part you can actually see.
 
 ## P0-14 · Deliberately not built in P0
 

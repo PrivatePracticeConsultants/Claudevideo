@@ -1,0 +1,251 @@
+{
+  "_comment": "Port Authority, act 2 of 3 (Extension). Continues the chain: the corridor extends and everything built in the previous act is still standing. The engagement runs the first 10 of 14 waypoints. Head-count, pacing, drone mix, health and economy are all resampled from the 22-level campaign that preceded the chain rework - the only curve measured winnable-and-losable level by level.",
+  "engagement_id": "port_act2",
+  "map_id": "port_01",
+  "path_waypoints": 10,
+  "carries_forward": true,
+  "starting_capital": 1000,
+  "platform_limit": 22,
+  "starting_ground_reach": 185.0,
+  "act_hp_multiplier": 1.89,
+  "act_bounty_multiplier": 2.2,
+  "inter_wave_delay_ticks": 90,
+  "waves": [
+    {
+      "groups": [
+        {
+          "enemy": "swarm",
+          "count": 23,
+          "spawn_interval_ticks": 5,
+          "start_delay_ticks": 0
+        },
+        {
+          "enemy": "walker",
+          "count": 11,
+          "spawn_interval_ticks": 13,
+          "start_delay_ticks": 90
+        }
+      ]
+    },
+    {
+      "groups": [
+        {
+          "enemy": "swarm",
+          "count": 22,
+          "spawn_interval_ticks": 5,
+          "start_delay_ticks": 0
+        },
+        {
+          "enemy": "walker",
+          "count": 10,
+          "spawn_interval_ticks": 13,
+          "start_delay_ticks": 90
+        },
+        {
+          "enemy": "heavy",
+          "count": 4,
+          "spawn_interval_ticks": 42,
+          "start_delay_ticks": 150
+        }
+      ]
+    },
+    {
+      "groups": [
+        {
+          "enemy": "swarm",
+          "count": 24,
+          "spawn_interval_ticks": 5,
+          "start_delay_ticks": 0
+        },
+        {
+          "enemy": "walker",
+          "count": 11,
+          "spawn_interval_ticks": 12,
+          "start_delay_ticks": 90
+        },
+        {
+          "enemy": "heavy",
+          "count": 5,
+          "spawn_interval_ticks": 40,
+          "start_delay_ticks": 150
+        }
+      ]
+    },
+    {
+      "groups": [
+        {
+          "enemy": "swarm",
+          "count": 28,
+          "spawn_interval_ticks": 5,
+          "start_delay_ticks": 0
+        },
+        {
+          "enemy": "walker",
+          "count": 13,
+          "spawn_interval_ticks": 12,
+          "start_delay_ticks": 90
+        },
+        {
+          "enemy": "heavy",
+          "count": 6,
+          "spawn_interval_ticks": 39,
+          "start_delay_ticks": 150
+        }
+      ]
+    },
+    {
+      "groups": [
+        {
+          "enemy": "swarm",
+          "count": 33,
+          "spawn_interval_ticks": 5,
+          "start_delay_ticks": 0
+        },
+        {
+          "enemy": "walker",
+          "count": 15,
+          "spawn_interval_ticks": 11,
+          "start_delay_ticks": 90
+        },
+        {
+          "enemy": "heavy",
+          "count": 7,
+          "spawn_interval_ticks": 37,
+          "start_delay_ticks": 150
+        }
+      ]
+    },
+    {
+      "groups": [
+        {
+          "enemy": "swarm",
+          "count": 40,
+          "spawn_interval_ticks": 4,
+          "start_delay_ticks": 0
+        },
+        {
+          "enemy": "walker",
+          "count": 18,
+          "spawn_interval_ticks": 11,
+          "start_delay_ticks": 90
+        },
+        {
+          "enemy": "heavy",
+          "count": 8,
+          "spawn_interval_ticks": 36,
+          "start_delay_ticks": 150
+        }
+      ]
+    },
+    {
+      "groups": [
+        {
+          "enemy": "swarm",
+          "count": 47,
+          "spawn_interval_ticks": 4,
+          "start_delay_ticks": 0
+        },
+        {
+          "enemy": "walker",
+          "count": 21,
+          "spawn_interval_ticks": 10,
+          "start_delay_ticks": 90
+        },
+        {
+          "enemy": "heavy",
+          "count": 10,
+          "spawn_interval_ticks": 34,
+          "start_delay_ticks": 150
+        }
+      ]
+    },
+    {
+      "groups": [
+        {
+          "enemy": "swarm",
+          "count": 55,
+          "spawn_interval_ticks": 4,
+          "start_delay_ticks": 0
+        },
+        {
+          "enemy": "walker",
+          "count": 25,
+          "spawn_interval_ticks": 10,
+          "start_delay_ticks": 90
+        },
+        {
+          "enemy": "heavy",
+          "count": 12,
+          "spawn_interval_ticks": 33,
+          "start_delay_ticks": 150
+        }
+      ]
+    },
+    {
+      "groups": [
+        {
+          "enemy": "swarm",
+          "count": 64,
+          "spawn_interval_ticks": 4,
+          "start_delay_ticks": 0
+        },
+        {
+          "enemy": "walker",
+          "count": 29,
+          "spawn_interval_ticks": 9,
+          "start_delay_ticks": 90
+        },
+        {
+          "enemy": "heavy",
+          "count": 14,
+          "spawn_interval_ticks": 32,
+          "start_delay_ticks": 150
+        }
+      ]
+    },
+    {
+      "groups": [
+        {
+          "enemy": "swarm",
+          "count": 75,
+          "spawn_interval_ticks": 4,
+          "start_delay_ticks": 0
+        },
+        {
+          "enemy": "walker",
+          "count": 34,
+          "spawn_interval_ticks": 9,
+          "start_delay_ticks": 90
+        },
+        {
+          "enemy": "heavy",
+          "count": 16,
+          "spawn_interval_ticks": 30,
+          "start_delay_ticks": 150
+        }
+      ]
+    },
+    {
+      "groups": [
+        {
+          "enemy": "swarm",
+          "count": 86,
+          "spawn_interval_ticks": 4,
+          "start_delay_ticks": 0
+        },
+        {
+          "enemy": "walker",
+          "count": 39,
+          "spawn_interval_ticks": 8,
+          "start_delay_ticks": 90
+        },
+        {
+          "enemy": "heavy",
+          "count": 19,
+          "spawn_interval_ticks": 29,
+          "start_delay_ticks": 150
+        }
+      ]
+    }
+  ]
+}

@@ -1,35 +1,67 @@
 {
-  "_comment": "Act V. Two long straights joined by a tight hairpin. The hairpin is the whole level; everything else is approach. Buildable ground is a grid (data/building.json): cells beside the road start unlocked, the rest are bought with Capital.",
+  "_comment": "Two long straights joined by a hairpin. The hairpin is the level; everything else is approach. Played as a three-act chain: each act reveals more of this route (path_waypoints in the wave file) while everything built in the previous act stays put. Buildable ground is a grid - cells beside the road start unlocked, the rest are bought.",
   "id": "spillway_01",
   "display_name": "Spillway Crossing",
   "bounds": {
-    "width": 3456,
-    "height": 1944
+    "width": 5900,
+    "height": 2400
   },
   "path": [
     {
       "x": -80.0,
-      "y": 420.0
+      "y": 500.0
     },
     {
       "x": 1600.0,
-      "y": 420.0
+      "y": 500.0
     },
     {
       "x": 1600.0,
-      "y": 760.0
+      "y": 900.0
     },
     {
       "x": 500.0,
-      "y": 760.0
+      "y": 900.0
     },
     {
       "x": 500.0,
-      "y": 1080.0
+      "y": 1300.0
     },
     {
-      "x": 2640.0,
-      "y": 1080.0
+      "x": 2200.0,
+      "y": 1300.0
+    },
+    {
+      "x": 2200.0,
+      "y": 1700.0
+    },
+    {
+      "x": 1100.0,
+      "y": 1700.0
+    },
+    {
+      "x": 1100.0,
+      "y": 2050.0
+    },
+    {
+      "x": 3300.0,
+      "y": 2050.0
+    },
+    {
+      "x": 3300.0,
+      "y": 1100.0
+    },
+    {
+      "x": 4300.0,
+      "y": 1100.0
+    },
+    {
+      "x": 4300.0,
+      "y": 1900.0
+    },
+    {
+      "x": 5700.0,
+      "y": 1900.0
     }
   ]
 }

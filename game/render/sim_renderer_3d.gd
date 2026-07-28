@@ -39,6 +39,11 @@ var _turret_bases: MultiMeshInstance3D
 var _turret_bodies: MultiMeshInstance3D
 var _turret_barrels: MultiMeshInstance3D
 var _scenery: Node3D
+## Held so the shadow range can be refitted whenever the framing changes. Boards
+## differ by 50% in length and an act reveals a third of one, so a fixed range
+## either wastes depth resolution on a small act or cuts shadows off halfway
+## across a big one.
+var _sun: DirectionalLight3D
 var _cursor: Node3D
 var _cursor_disc: MeshInstance3D
 var _cursor_ghost: MeshInstance3D
@@ -97,17 +102,16 @@ func _build_environment() -> void:
 	camera.current = true
 	add_child(camera)
 
-	var sun := DirectionalLight3D.new()
-	sun.rotation_degrees = Vector3(
+	_sun = DirectionalLight3D.new()
+	_sun.rotation_degrees = Vector3(
 		float(_world.get("sun_pitch_degrees", -46.0)),
 		float(_world.get("sun_yaw_degrees", 35.0)), 0.0)
-	sun.light_energy = float(_world.get("sun_energy", 2.1))
-	sun.light_color = _color_of(_world.get("sun_colour", "#fff2dc"))
-	sun.shadow_enabled = true
-	sun.directional_shadow_mode = DirectionalLight3D.SHADOW_ORTHOGONAL
-	sun.directional_shadow_max_distance = 9000.0
-	sun.shadow_bias = 0.06
-	add_child(sun)
+	_sun.light_energy = float(_world.get("sun_energy", 2.1))
+	_sun.light_color = _color_of(_world.get("sun_colour", "#fff2dc"))
+	_sun.shadow_enabled = true
+	_sun.directional_shadow_mode = DirectionalLight3D.SHADOW_ORTHOGONAL
+	_sun.shadow_bias = 0.06
+	add_child(_sun)
 
 	# A cool, shadowless fill from the opposite side. Without it the unlit faces
 	# of everything go to flat ambient and the geometry loses its edges.
@@ -201,12 +205,23 @@ func _fit_camera() -> void:
 	if camera.projection == Camera3D.PROJECTION_ORTHOGONAL:
 		camera.size = needed
 		camera.position = centre + camera.transform.basis.z * float(cfg.get("distance", 4200.0))
+		_fit_shadows(needed)
 		return
 	# Perspective: pull back far enough that the required extent fits the frustum.
 	# tan() is fine here - this is presentation, not simulation.
 	var half_fov := deg_to_rad(camera.fov) * 0.5
 	var distance := maxf((needed * 0.5) / tan(half_fov), float(cfg.get("distance", 4200.0)) * 0.25)
 	camera.position = centre + camera.transform.basis.z * distance
+	_fit_shadows(distance + needed)
+
+## Shadows are cast within a distance of the camera, so the range has to follow
+## the framing. Too short and the far half of a long act renders unshadowed -
+## which reads as two different scenes joined down the middle.
+func _fit_shadows(reach: float) -> void:
+	if _sun == null:
+		return
+	_sun.directional_shadow_max_distance = maxf(reach, 1.0) * float(
+		(_world.get("shadow_range_margin", 1.25)))
 
 # --- static scenery --------------------------------------------------------------
 

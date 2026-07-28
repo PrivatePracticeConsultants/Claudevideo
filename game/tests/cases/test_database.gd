@@ -5,7 +5,7 @@ extends TestCase
 ## as its success path.
 
 const MAP := "highway_01"
-const ENGAGEMENT := "highway_01_act1"
+const ENGAGEMENT := "highway_act1"
 
 func test_ships_data_loads_clean() -> void:
 	var db := Database.load_engagement(MAP, ENGAGEMENT)

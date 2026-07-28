@@ -53,6 +53,10 @@ var _cursor_cell_x: int = 0
 var _cursor_cell_y: int = 0
 var _cursor_can_buy: bool = false
 var _cells_drawn: int = -1
+## The board this level started from. Held so restarting an act restores the
+## same inheritance rather than handing you a clean slate - retrying act 3 should
+## not quietly delete what acts 1 and 2 built.
+var _incoming_carry: Dictionary = {}
 
 func _ready() -> void:
 	_theme = _load_theme()
@@ -60,13 +64,13 @@ func _ready() -> void:
 	if _levels.is_empty():
 		_show_fatal("data/levels.json lists no levels.")
 		return
-	_start_level(0)
+	_start_level(0, {})
 
 ## Tear down and rebuild for a level. Everything is recreated rather than reset
 ## because the Sim is immutable once constructed - its tables are built from the
 ## map and engagement it was handed - and rebuilding is both simpler and harder
 ## to get subtly wrong than a reset path nobody exercises.
-func _start_level(index: int) -> void:
+func _start_level(index: int, offered_carry: Dictionary) -> void:
 	_level_index = clampi(index, 0, _levels.size() - 1)
 	var level: Dictionary = _levels[_level_index]
 	var db := Database.load_engagement(str(level["map"]), str(level["engagement"]))
@@ -90,6 +94,12 @@ func _start_level(index: int) -> void:
 	# The seed is derived from the level so a given level always plays the same
 	# way. Run seeding arrives with the run layer in P3.
 	_sim = Sim.new(db, 20260727 + _level_index)
+	# An act that continues a chain inherits the previous act's turrets and
+	# ground. One that opens a chain never does, whatever it was handed.
+	_incoming_carry = offered_carry if bool(db.engagement.get("carries_forward", false)) else {}
+	if not _incoming_carry.is_empty():
+		_sim.adopt(_incoming_carry.get("platforms", []),
+			_incoming_carry.get("cells", PackedInt32Array()))
 	_tick_period = 1.0 / float(_sim.tick_rate())
 
 	_renderer = SimRenderer3D.new()
@@ -99,11 +109,24 @@ func _start_level(index: int) -> void:
 	_hud = Hud.new()
 	add_child(_hud)
 	_hud.setup(_sim, _theme)
-	_hud.set_level(str(level["name"]), _level_index, _levels.size())
+	_hud.set_level(str(level["name"]), _level_index, _levels.size(),
+		_sim.t_count, _next_level_extends(), _sim.carry_dropped())
 
 	_overlay = DebugOverlay.new()
 	add_child(_overlay)
 	_overlay.setup(_sim, Color(str(_theme.get("text", "#dfe6f0"))))
+
+## Whether beating this level extends the same board rather than moving to a new
+## one. Read from the next level's own data, so the HUD cannot claim a hand-over
+## the sim would then refuse.
+func _next_level_extends() -> bool:
+	if _level_index + 1 >= _levels.size():
+		return false
+	var next: Dictionary = _levels[_level_index + 1]
+	if str(next["map"]) != str((_levels[_level_index] as Dictionary)["map"]):
+		return false
+	var db := Database.load_engagement(str(next["map"]), str(next["engagement"]))
+	return db.is_valid() and bool(db.engagement.get("carries_forward", false))
 
 func _process(delta: float) -> void:
 	if _sim == null:
@@ -167,12 +190,14 @@ func _unhandled_input(event: InputEvent) -> void:
 				# Cycle the weapon to build. One key rather than a number per
 				# family, so it still works when there are five of them.
 				_blueprint = (_blueprint + 1) % _sim.blueprint_count()
-			KEY_R: _start_level(_level_index)
+			KEY_R: _start_level(_level_index, _incoming_carry)
 			KEY_N:
 				# Advance on a win; on a loss this does nothing, so it cannot be
 				# used to skip a level you have not beaten.
 				if _sim.result() == Sim.RESULT_WIN and _level_index + 1 < _levels.size():
-					_start_level(_level_index + 1)
+					# Hand the finished board forward; the next act takes it only
+					# if it continues this chain.
+					_start_level(_level_index + 1, _sim.board_snapshot())
 			KEY_ESCAPE: get_tree().quit()
 
 ## Cast the cursor onto the ground plane to find the simulation coordinates it
