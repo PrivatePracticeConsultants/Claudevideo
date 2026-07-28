@@ -926,6 +926,74 @@ containing a sell would have replayed as a different game. Caught in the audit,
 not by a test — the tests could not see it because the scripted policy never
 emits those commands.
 
+## P0-46 · Deleting the player's turrets was the wrong price
+
+P0-43 capped how much of a new act's deployment limit an inheritance could
+occupy, at 55%. It worked — it was the thing that finally stopped eight
+mid-campaign acts winning themselves — and it was wrong, because the way it
+worked was by **deleting turrets the player had built and paid for**. It was
+reported as a bug the first time anyone played it, which is the correct reaction:
+nothing in the design says a level can take your board away.
+
+The cap is gone (`carry_limit_share` is 1.0). The same job is now done by
+refitting a carried turret all the way back to tier 1 rather than to tier 2 —
+the price is paid in tiers, which the game already has an economy for, instead of
+in emplacements, which it does not.
+
+Measured on the same campaign, acts winnable by an idle run:
+
+| | idle-winnable acts |
+|---|---|
+| carried intact | all of them |
+| refit to tier 2, capped at 55% of the limit | 0, but turrets vanished |
+| **refit to tier 1, everything carries** | **0** |
+
+Two things this exposed that are worth keeping in mind:
+
+- **On the opening boards a refit costs nothing**, because the board being
+  carried is already all tier 1. Those chains are held up by the threat step
+  alone, which is why `ACT_STEP` had to rise to 2.50 for act II.
+- **Easing health globally makes carrying acts *more* idle-winnable, not less.**
+  An inherited board's strength comes from the deployment limit and its tier;
+  neither scales with health. So every time the top of the curve came down to fix
+  the final act, the second act of the opening chain went back to winning itself.
+  `BOARD_OPENING_HP` is now a fixed anchor for exactly this reason. I reasoned
+  the opposite of this out loud and the probe corrected me.
+
+## P0-47 · Forty-eight levels on the same twelve boards
+
+A fourth act per board. Act III already opens the whole route, so **act IV adds
+no road** — it is the only act in a chain whose corridor is identical to the one
+before it, and it escalates through the deployment limit, head-count and drone
+mix instead. That is the honest shape of "more levels without more map", and it
+is worth naming rather than dressing up.
+
+Act IV sits only ~4% above act III in health. Steeper simply lost: at ×3.40 both
+`coldstore_act4` and `highline_act4` died on seven leaks, because act III of the
+later boards already finishes in the sixties and there is nowhere above that to
+go. The escalation that still had room was slots and bodies.
+
+## P0-48 · Zoom and pan, because the board outgrew the frame
+
+Boards run to 16,000 units. Framed end to end, a turret is a few pixels and the
+range preview that makes placement legible is meaningless.
+
+Zoom is a **multiplier on the fitted extent** and pan is an **offset from the
+fitted centre**, rather than an absolute camera transform. That matters because
+`_fit_camera` reruns on every viewport resize and every time a chain extends the
+corridor: expressed absolutely, the view the player chose would be thrown away by
+any window resize. Expressed relatively, the auto-fit keeps owning the base
+framing and the player's choice rides on top of it.
+
+Both are clamped — zoom to `[0.18, 1.0]`, pan to the framed extent scaled by how
+far in you are, so there is no panning at all when the whole board is visible.
+Unbounded versions of either are how you end up inside the ground plane or
+looking at a board you cannot find again.
+
+Zoom is applied about the ground point under the cursor, so the thing you are
+looking at stays roughly where you are looking. None of it touches the
+simulation; `test_renderer` guards the clamps and the survives-a-refit property.
+
 ## P0-14 · Deliberately not built in P0
 
 Not oversights — later phases, per §5.7. Anything tempting that came up is in

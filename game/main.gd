@@ -71,6 +71,9 @@ var _incoming_carry: Dictionary = {}
 var _boards_unlocked: int = 1
 ## First level index of each board, in campaign order.
 var _board_starts: PackedInt32Array = PackedInt32Array()
+## Middle-drag camera panning.
+var _dragging: bool = false
+var _drag_from := Vector2.ZERO
 
 func _ready() -> void:
 	_theme = _load_theme()
@@ -241,6 +244,26 @@ func _unhandled_input(event: InputEvent) -> void:
 		return
 	if event is InputEventMouseMotion:
 		_track_cursor((event as InputEventMouseMotion).position)
+	elif event is InputEventMouseButton and (event.button_index == MOUSE_BUTTON_WHEEL_UP \
+			or event.button_index == MOUSE_BUTTON_WHEEL_DOWN) and event.pressed:
+		# Zoom about whatever the pointer is over, so the thing you are looking at
+		# stays where you are looking. Purely presentational - the simulation has
+		# no idea a camera exists.
+		_track_cursor((event as InputEventMouseButton).position)
+		var steps := 1 if event.button_index == MOUSE_BUTTON_WHEEL_UP else -1
+		_renderer.zoom_by(steps, SimRenderer3D.to_world(_cursor_sim_x, _cursor_sim_y, 0.0))
+	elif event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_MIDDLE:
+		_dragging = event.pressed
+		_drag_from = (event as InputEventMouseButton).position
+	elif event is InputEventMouseMotion and _dragging:
+		# Drag the ground, not the camera: convert both pointer positions to world
+		# space and move by the difference, so the board tracks the cursor exactly
+		# at any zoom.
+		var motion := event as InputEventMouseMotion
+		var from_world := _ground_at(_drag_from)
+		var to_world := _ground_at(motion.position)
+		_renderer.pan_by(from_world - to_world)
+		_drag_from = motion.position
 	elif event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_RIGHT:
 		# Right-click sells. Free placement with no undo is punishing in a way
 		# nothing in the design intends: a misread of the road costs the turret
@@ -276,6 +299,7 @@ func _unhandled_input(event: InputEvent) -> void:
 				# Call the next wave in early for a bounty. Harmlessly rejected
 				# if there is no gap left to skip.
 				_sim.queue_send_wave(_sim.tick())
+			KEY_Z: _renderer.reset_view()
 			KEY_BRACKETLEFT: _select_board(-1)
 			KEY_BRACKETRIGHT: _select_board(1)
 			KEY_SPACE: _paused = not _paused
@@ -294,6 +318,17 @@ func _unhandled_input(event: InputEvent) -> void:
 					# if it continues this chain.
 					_start_level(_level_index + 1, _sim.board_snapshot())
 			KEY_ESCAPE: get_tree().quit()
+
+## Where a screen position lands on the ground plane, in world space. Returns the
+## origin if the ray runs parallel to the ground, which only happens if the camera
+## is edge-on and nothing sensible could be reported anyway.
+func _ground_at(screen_point: Vector2) -> Vector3:
+	var camera := _renderer.camera
+	if camera == null:
+		return Vector3.ZERO
+	var hit: Variant = Plane(Vector3.UP, 0.0).intersects_ray(
+		camera.project_ray_origin(screen_point), camera.project_ray_normal(screen_point))
+	return Vector3.ZERO if hit == null else hit as Vector3
 
 ## Cast the cursor onto the ground plane to find the simulation coordinates it
 ## points at. Picking against the plane rather than against collision shapes

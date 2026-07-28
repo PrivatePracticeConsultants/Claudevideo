@@ -44,7 +44,11 @@ const SITE_STRIDE := 46.0
 ## 100-turret board and the sampled gate on its own outgrew the wall clock of a
 ## single command. These are the two ends of the curve - the teaching board and
 ## the one with every drone class on the longest road.
-const SAMPLED_CHAINS := ["highway_01", "lastlight_01"]
+## Chains are four acts now, and the late boards run to ten thousand drones each -
+## sampling the last one put the whole suite past the wall clock of a single
+## command. These two span the curve at a cost that still fits: the teaching board
+## and a mid-campaign one that fields every drone class the mid-game has.
+const SAMPLED_CHAINS := ["highway_01", "railyard_01"]
 
 ## Every campaign level, grouped into chains, in campaign order.
 static func campaign_chains() -> Array:

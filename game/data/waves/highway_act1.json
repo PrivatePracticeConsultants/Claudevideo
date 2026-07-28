@@ -7,7 +7,7 @@
   "starting_capital": 700,
   "platform_limit": 24,
   "starting_ground_reach": 200.0,
-  "act_hp_multiplier": 1.6,
+  "act_hp_multiplier": 1.73,
   "act_bounty_multiplier": 1.0,
   "inter_wave_delay_ticks": 90,
   "waves": [

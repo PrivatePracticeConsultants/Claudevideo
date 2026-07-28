@@ -44,6 +44,17 @@ var _scenery: Node3D
 ## either wastes depth resolution on a small act or cuts shadows off halfway
 ## across a big one.
 var _sun: DirectionalLight3D
+
+## Camera zoom and pan, on top of whatever framing _fit_camera worked out.
+##
+## Kept as a multiplier and an offset rather than as an absolute camera position,
+## so the auto-fit still owns the base framing: the window can be resized, or a
+## chain can extend the corridor, and the view the player chose survives it.
+var _zoom: float = 1.0
+var _pan := Vector3.ZERO
+## Base framing, recomputed by _fit_camera and reused when only zoom or pan moved.
+var _view_centre := Vector3.ZERO
+var _view_extent: float = 1.0
 var _cursor: Node3D
 var _cursor_disc: MeshInstance3D
 var _cursor_ghost: MeshInstance3D
@@ -197,6 +208,10 @@ func _fit_camera() -> void:
 	max_z += reach
 
 	var centre := Vector3((min_x + max_x) * 0.5, 0.0, (min_z + max_z) * 0.5)
+	# Pan is clamped to the framed area, so the board can never be driven off
+	# screen entirely - getting lost in empty space is not a camera control.
+	_view_centre = centre
+	_view_extent = maxf(max_x - min_x, max_z - min_z) * 0.5
 	var half_width := 0.0
 	var half_height := 0.0
 	for corner in [Vector3(min_x, 0.0, min_z), Vector3(max_x, 0.0, min_z),
@@ -211,7 +226,8 @@ func _fit_camera() -> void:
 		var size := viewport.get_visible_rect().size
 		if size.y > 0.0:
 			aspect = size.x / size.y
-	var needed := maxf(half_height * 2.0, half_width * 2.0 / maxf(aspect, 0.0001)) * margin
+	var needed := maxf(half_height * 2.0, half_width * 2.0 / maxf(aspect, 0.0001)) * margin * _zoom
+	centre += _pan
 
 	if camera.projection == Camera3D.PROJECTION_ORTHOGONAL:
 		camera.size = needed
@@ -733,6 +749,51 @@ func _family_colour(index: int, ballistic: Color, cannon: Color, suppressor: Col
 	if _sim.platform_splash(index) > 0.0:
 		return cannon
 	return ballistic
+
+## --- camera control --------------------------------------------------------
+##
+## Boards run to 16,000 units and a whole act framed at once makes a single
+## turret about four pixels wide. Zoom is a multiplier on the fitted extent -
+## below 1 is closer in - and pan slides the framed centre around, clamped so the
+## board cannot be driven off screen.
+const ZOOM_MIN := 0.18
+const ZOOM_MAX := 1.0
+const ZOOM_STEP := 0.86
+
+## Zoom about a world point rather than about the screen centre, so the thing
+## under the cursor stays roughly under the cursor. `focus` is where the pointer
+## is on the ground plane; pass the current centre to zoom about the middle.
+func zoom_by(steps: int, focus: Vector3) -> void:
+	var before := _zoom
+	_zoom = clampf(_zoom * pow(ZOOM_STEP, float(steps)), ZOOM_MIN, ZOOM_MAX)
+	if is_equal_approx(before, _zoom):
+		return
+	# Move the centre toward the focus in proportion to how much closer we got.
+	var shift := (focus - (_view_centre + _pan)) * (1.0 - _zoom / before)
+	_pan += Vector3(shift.x, 0.0, shift.z)
+	_clamp_pan()
+	_fit_camera()
+
+func pan_by(delta: Vector3) -> void:
+	_pan += Vector3(delta.x, 0.0, delta.z)
+	_clamp_pan()
+	_fit_camera()
+
+func reset_view() -> void:
+	_zoom = 1.0
+	_pan = Vector3.ZERO
+	_fit_camera()
+
+func zoom() -> float:
+	return _zoom
+
+## How far the eye may wander from the framed centre: further the closer you are,
+## because at full zoom-out there is nothing off screen worth looking at.
+func _clamp_pan() -> void:
+	var reach := _view_extent * (1.0 - _zoom)
+	_pan.x = clampf(_pan.x, -reach, reach)
+	_pan.z = clampf(_pan.z, -reach, reach)
+	_pan.y = 0.0
 
 # --- build cursor -------------------------------------------------------------------
 

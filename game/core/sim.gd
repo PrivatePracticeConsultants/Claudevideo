@@ -615,21 +615,24 @@ func queue_send_wave(at_tick: int) -> void:
 ## limit, so a bigger limit is what buys you room to extend rather than a clean
 ## slate.
 ##
-## They also arrive REFITTED: one tier down, and never above tier 2. That is not
+## They all arrive, and they all arrive REFITTED - back to tier 1. That is not
 ## a tax for its own sake - it is the difference between a chain and a cutscene.
 ## An act that inherits a finished tier-4 board is won by that board with no input
 ## at all: measured, every single carrying act in the campaign was cleared by an
 ## idle run, and raising the next act's health by half did not touch it, because
 ## a tier-4 turret is an order of magnitude past the tier-1 one it grew from.
-## Stepping down alone fixed fourteen of sixteen; the cap fixes the rest
-## structurally rather than by tuning, because it bounds what an inheritance can
-## be worth no matter how comfortably the previous act was won.
+## Stepping down one tier fixed fourteen of sixteen. The remaining two were
+## chased for a while with a cap on how MANY turrets could carry, which worked
+## and was wrong: it deleted turrets the player had paid for, and that was
+## reported as a bug the first time anyone played it. Refitting to tier 1 does
+## the same job by costing tiers instead of emplacements, which is a price paid
+## in the currency the game already has.
 ##
 ## What survives is what the chain is actually for - your placements, your weapon
 ## choices, the ground you bought. What comes back is the decision the
 ## inheritance had removed: what to re-invest in, now that the road is longer than
 ## the board that held it.
-const CARRY_TIER_CAP := 1
+const CARRY_TIER_CAP := 0
 
 ## And no more than a share of the new act's deployment limit comes back, read
 ## from economy.json.
@@ -665,8 +668,15 @@ func adopt(platforms: Array, owned_cells: PackedInt32Array) -> void:
 		var y := float(record["y"])
 		var blueprint := int(record["blueprint"])
 		# Free: it was paid for in the act it was built in.
-		if _place_without_charge(x, y, blueprint) != BUILD_OK:
-			_carry_dropped += 1
+		var verdict := _place_without_charge(x, y, blueprint)
+		if verdict != BUILD_OK:
+			# Two different things, and the player deserves to know which. A turret
+			# the extended corridor now runs through is gone; one that simply did
+			# not fit under the new act's deployment limit is stood down.
+			if verdict == BUILD_AT_LIMIT:
+				_carry_stood_down += 1
+			else:
+				_carry_dropped += 1
 			continue
 		var index := t_count - 1
 		var tier := clampi(mini(int(record["tier"]) - 1, CARRY_TIER_CAP),

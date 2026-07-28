@@ -111,3 +111,67 @@ func test_interpolation_lands_between_the_two_ticks() -> void:
 func _theme() -> Dictionary:
 	var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string("res://data/theme.json"))
 	return parsed if typeof(parsed) == TYPE_DICTIONARY else {}
+
+# --- camera control ----------------------------------------------------------
+#
+# Boards run to 16,000 units, and a whole act framed at once makes a single
+# turret a few pixels wide. Zoom and pan are presentation only - nothing here
+# touches the simulation - but they sit on top of the auto-fit, and the auto-fit
+# reruns on every window resize and every time a chain extends the corridor. The
+# thing worth guarding is that the view the player chose survives all of that.
+
+func test_the_view_starts_fitted() -> void:
+	assert_almost_eq(_renderer.zoom(), 1.0, 0.0001,
+		"a level opens framed on its whole revealed corridor")
+
+func test_zooming_in_moves_the_camera_closer() -> void:
+	var before := _renderer.camera.position
+	_renderer.zoom_by(3, Vector3.ZERO)
+	assert_lt(_renderer.zoom(), 1.0, "zoom went in")
+	assert_lt(_renderer.camera.position.distance_to(Vector3.ZERO),
+		before.distance_to(Vector3.ZERO), "and the camera actually moved in")
+
+func test_zoom_is_bounded_at_both_ends() -> void:
+	# Unbounded zoom is how you end up inside the ground plane, or looking at a
+	# board the size of a pixel with no way to find it again.
+	for _i in 60:
+		_renderer.zoom_by(1, Vector3.ZERO)
+	assert_gte(_renderer.zoom(), SimRenderer3D.ZOOM_MIN, "cannot zoom past the near limit")
+	for _i in 120:
+		_renderer.zoom_by(-1, Vector3.ZERO)
+	assert_lte(_renderer.zoom(), SimRenderer3D.ZOOM_MAX,
+		"and cannot zoom out past the fitted framing")
+
+func test_panning_is_clamped_so_the_board_cannot_be_lost() -> void:
+	_renderer.zoom_by(4, Vector3.ZERO)
+	_renderer.pan_by(Vector3(900000.0, 0.0, 900000.0))
+	var far_corner := _renderer.camera.position
+	_renderer.pan_by(Vector3(900000.0, 0.0, 900000.0))
+	assert_almost_eq(_renderer.camera.position.x, far_corner.x, 0.001,
+		"panning past the clamp does nothing more")
+	assert_almost_eq(_renderer.camera.position.z, far_corner.z, 0.001,
+		"in either axis")
+
+func test_there_is_no_panning_at_full_zoom_out() -> void:
+	# Nothing is off screen when the whole board is framed, so drifting the eye
+	# around could only lose it.
+	var fitted := _renderer.camera.position
+	_renderer.pan_by(Vector3(5000.0, 0.0, 5000.0))
+	assert_almost_eq(_renderer.camera.position.x, fitted.x, 0.001, "the view holds")
+	assert_almost_eq(_renderer.camera.position.z, fitted.z, 0.001, "in both axes")
+
+func test_the_view_survives_a_refit() -> void:
+	# _fit_camera reruns on every viewport change; if it reset zoom, every window
+	# resize would throw away where the player was looking.
+	_renderer.zoom_by(3, Vector3.ZERO)
+	var chosen := _renderer.zoom()
+	_renderer._fit_camera()
+	assert_almost_eq(_renderer.zoom(), chosen, 0.0001, "zoom is preserved across a refit")
+
+func test_resetting_returns_to_the_fitted_view() -> void:
+	var fitted := _renderer.camera.position
+	_renderer.zoom_by(4, Vector3(1000.0, 0.0, 1000.0))
+	_renderer.reset_view()
+	assert_almost_eq(_renderer.zoom(), 1.0, 0.0001, "back to fitted")
+	assert_almost_eq(_renderer.camera.position.x, fitted.x, 0.001, "and back to where it was")
+	assert_almost_eq(_renderer.camera.position.z, fitted.z, 0.001, "in both axes")

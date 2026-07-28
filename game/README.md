@@ -3,7 +3,7 @@
 Roguelite tower defense. Godot 4.x / GDScript. **3D, and it runs in a browser.**
 
 **Status: P0 complete and audited three times, then extended well past it.**
-Thirty-six levels — twelve boards played as three acts each, where every act
+Forty-eight levels — twelve boards played as four acts each, where every act
 opens more of the same road and keeps what you built on the last one — four
 weapon families with four tiers each, five drone classes, free placement on
 purchasable ground, saved progress, all on a deterministic 30Hz simulation drawn
@@ -87,6 +87,9 @@ level's head-count — they are elites, not populations.
 - **Right-click a turret** to sell it back for 65% of everything spent on it.
 - **`E`** calls the next wave in early for a bounty — the gap between waves is
   when Capital accumulates, so it trades preparation for money.
+- **Scroll to zoom** on whatever the cursor is over, **middle-drag to pan**,
+  **`Z`** to reset the view. Boards run to 16,000 units, so framing one end to
+  end makes a turret a few pixels wide.
 - **`Q`** cycles weapon · **`1`–`4`** speed · **`space`** pause · **`[`**/**`]`**
   move between unlocked boards · **`F3`** debug · **`R`** restart · **`N`** next
   level after a win.
@@ -119,25 +122,24 @@ which is what makes *where* you put them matter.
 
 ### Boards that grow
 
-Each board is three acts. Act I runs the first stretch of the road; act II opens
-more of it; act III runs the whole thing. **The road already revealed never
-moves**, so every turret and every cell of ground you bought is still there, still
-covering what it covered, when the corridor extends. Act I of a new board always
-starts clean.
+Each board is four acts. Act I runs the first stretch of the road; act II opens
+more of it; act III runs the whole thing; act IV runs it again under far heavier
+pressure. **The road already revealed never moves**, so every turret and every
+cell of ground you bought is still there, still covering what it covered, when
+the corridor extends. Act I of a new board always starts clean.
 
-Two things do not carry, and both are load-bearing:
+**Every turret you built carries forward.** Two things do not:
 
 - **Capital.** Each act's spending is its own decision.
-- **Tiers.** Turrets arrive **refitted** — one tier down, never above tier 2. You
-  keep your placements, your weapon choices and your ground; you re-earn the
-  depth. Without this an act that ended tier-4 across the board simply wins the
-  next one for you: measured, *every* carrying act in the campaign could be
-  cleared by building nothing at all.
+- **Tiers.** Turrets arrive **refitted**, back to tier 1. You keep every
+  placement, every weapon choice and all your ground; you re-earn the depth.
+  Without it an act that ended tier-4 across the board simply wins the next one
+  for you — measured, *every* carrying act in the campaign could be cleared by
+  building nothing at all.
 
-Inherited turrets count against the new act's deployment limit, and an
-inheritance may fill at most **55%** of it — the rest are stood down. That is not
-only balance: it guarantees there is always room to build past what you were
-handed, which is the difference between continuing a board and being given one.
+The price is deliberately paid in tiers rather than in emplacements. An earlier
+version capped how many turrets could carry and deleted the rest; it balanced
+fine and was the wrong trade.
 
 Retrying an act (`R`) restores the same inheritance, not an empty board.
 

@@ -23,8 +23,14 @@ func test_an_engagement_can_override_starting_capital() -> void:
 	var last := SimFixture.for_level("lastlight_01", "lastlight_act1")
 	assert_gt(float(last.capital()), float(first.capital()),
 		"later boards start with more Capital")
+	# Per turret slot, not in absolute terms: a later act has a much larger
+	# deployment limit, so it can be funded for less per slot and still hold more
+	# Capital than the act that opened the board.
+	var opener := SimFixture.for_level("lastlight_01", "lastlight_act1")
 	var inheriting := SimFixture.for_level("lastlight_01", "lastlight_act3")
-	assert_lt(float(inheriting.capital()), float(last.capital()),
+	var per_slot_open := float(opener.capital()) / float(opener.platform_limit())
+	var per_slot_inherit := float(inheriting.capital()) / float(inheriting.platform_limit())
+	assert_lt(per_slot_inherit, per_slot_open,
 		"an act that inherits a board is funded for the extension, not for the board")
 
 func test_placing_a_platform_costs_its_listed_price() -> void:

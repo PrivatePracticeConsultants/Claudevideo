@@ -99,12 +99,10 @@ func test_carried_turrets_count_against_the_new_limit() -> void:
 	SimFixture.run_greedy(first)
 	var second := SimFixture.for_level("highway_01", "highway_act2")
 	second.adopt(first.board_snapshot()["platforms"], PackedInt32Array())
-	assert_eq(second.t_count, mini(first.t_count, second.carry_ceiling()),
-		"carried turrets are on the board, up to the inheritance ceiling")
-	assert_lte(float(second.t_count), float(second.carry_ceiling()),
-		"which is a share of the new limit, not all of it")
-	assert_lt(float(second.carry_ceiling()), float(second.platform_limit()),
-		"so there is always room to build past what was inherited")
+	assert_eq(second.t_count, first.t_count,
+		"every turret carries - what an inheritance costs is tiers, not emplacements")
+	assert_lt(float(second.t_count), float(second.platform_limit()),
+		"and the new act's limit still leaves room to build past what was inherited")
 	assert_gt(float(second.platform_limit()), float(first.platform_limit()),
 		"which is larger than the previous act's")
 
