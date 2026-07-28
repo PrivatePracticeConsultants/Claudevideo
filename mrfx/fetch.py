@@ -288,12 +288,16 @@ def _client(cfg: MrfxConfig, verify=None, ua: str | None = None) -> httpx.Client
 
 class DownloadError(Exception):
     def __init__(self, msg: str, status: int | None = None, retryable: bool = False,
-                 oversize: bool = False, canceled: bool = False):
+                 oversize: bool = False, canceled: bool = False,
+                 set_aside: bool = False):
         super().__init__(msg)
         self.status = status
         self.retryable = retryable
         self.oversize = oversize  # tripped confirm_over_gb — not a real failure
         self.canceled = canceled  # user pressed "stop downloads" — not an error
+        # hit the wall-clock cap while STILL MAKING PROGRESS: it yielded its
+        # slot on purpose and should resume by itself, not sit awaiting a human
+        self.set_aside = set_aside
 
 
 # Concurrent downloads must never COLLECTIVELY overcommit the disk. The single
@@ -952,17 +956,18 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                "drop the downloaded file into data/inbox/. Other files keep "
                "downloading in the meantime.")
     elif _over_time_cap():
-        # a slow-but-progressing download that ran past the wall-clock cap:
-        # set aside so it can't keep starving the parsers, bytes kept for resume
+        # A slow-but-PROGRESSING download that ran past the wall-clock cap. It
+        # yielded its slot on purpose so other files get a turn — that is the
+        # cap doing its job, not a failure, and it must resume BY ITSELF.
+        # (set_aside below requeues it; see fetch_url_record.)
         got = f"{highwater / 1e6:.0f} MB" if highwater else "no data"
         span = f"{max_budget / 60:.0f} min" if max_budget >= 60 else f"{int(max_budget)} s"
-        msg = (f"set aside after {span} still downloading ({got} so far) so it "
-               "can't keep blocking other files from ingesting — the connection "
-               "is too slow to finish it in a reasonable time. The bytes so far "
-               "are kept: press retry to resume it (ideally on a faster "
-               "connection), raise download_max_seconds in config/mrfx.yaml if "
-               "this is a genuinely huge file worth the wait, or open the link in "
-               "your browser and drop the file into data/inbox/.")
+        msg = (f"paused after {span} and {got} downloaded so other files get a "
+               "turn — it goes back in the queue and resumes from here "
+               "automatically, nothing is re-downloaded. If one huge file is all "
+               "you need, raise download_max_seconds in config/mrfx.yaml so it "
+               "gets a longer run at a time.")
+        raise DownloadError(msg, retryable=True, set_aside=True)
     else:
         msg = f"download failed after {connections} attempts: {last_exc}"
     if "CERTIFICATE_VERIFY_FAILED" in str(last_exc):
@@ -1435,6 +1440,19 @@ def fetch_url_record(cfg: MrfxConfig, store: Store, rec: dict) -> bool:
             log.warning("disk is full — pausing this downloader for 60s "
                         "(free up space; the queue resumes by itself)")
             time.sleep(60)
+            return False
+        if e.set_aside:
+            # The wall-clock cap fired on a file that WAS still progressing. It
+            # stepped aside so others could run — the whole point of the cap —
+            # so it belongs back in the queue, not parked in 'failed' waiting
+            # for someone to notice and press retry. Marking it failed meant a
+            # genuinely large file advanced only when a human happened to click,
+            # i.e. one 3-hour slice per check-in ("3 files every couple of
+            # days"). Requeued, it resumes from its .part on the next pass.
+            # It cannot spin: a file that STOPS progressing trips the stall
+            # deadline instead, which is a real failure and ends it.
+            store.update_url(url_id, status="queued", error=str(e))
+            log.info("url %s: %s", url, e)
             return False
         store.update_url(url_id, status="oversize" if e.oversize else "failed", error=str(e))
         # duplicates may have deferred to this row in an earlier life (it

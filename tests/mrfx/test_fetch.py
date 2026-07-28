@@ -1627,9 +1627,14 @@ def test_wall_clock_cap_sets_aside_a_too_slow_download(cfg):
             download(cfg, url, dest)
         elapsed = _time.monotonic() - t0
         assert elapsed < 30, f"cap did not fire ({elapsed:.0f}s)"
-        assert "set aside" in str(ei.value)
         assert getattr(ei.value, "retryable", False) is True
         assert part.exists()   # partial kept for resume
+        # flagged so the caller REQUEUES it rather than parking it in 'failed':
+        # this file was still progressing and only yielded its slot, so it must
+        # resume by itself instead of waiting for a human to press retry
+        assert getattr(ei.value, "set_aside", False) is True
+        assert "resumes from here automatically" in str(ei.value)
+        assert "press retry" not in str(ei.value).lower()
     finally:
         httpd.shutdown()
 
@@ -2067,3 +2072,66 @@ def test_download_timeout_default_is_short_enough_to_free_a_stalled_slot():
 
     assert MrfxConfig().download_timeout_seconds <= 180, (
         "a silent CDN holds a downloader slot for this long; keep it small")
+
+
+def test_slow_big_file_requeues_itself_instead_of_waiting_for_a_human(cfg, store, tmp_path):
+    """The wall-clock cap exists so ONE slow file can't hog a downloader slot —
+    it steps aside so others get a turn. But it marked the row 'failed', so the
+    file only advanced when a human noticed and pressed retry: one cap-length
+    slice per check-in, which is how a large file turned into "3 files every
+    couple of days". A file that was still PROGRESSING must go back in the queue
+    and resume by itself."""
+    import http.server as hs
+    import os as _os
+    import threading as _th
+    import time as _time
+
+    from mrfx.fetch import fetch_url_record
+
+    payload = _os.urandom(4_000_000)
+    seen_ranges = []
+
+    class Slow(hs.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self):
+            rng = self.headers.get("Range", "")
+            start = int(rng[6:].split("-")[0]) if rng.startswith("bytes=") else 0
+            seen_ranges.append(start)
+            body = payload[start:]
+            self.send_response(206 if start else 200)
+            if start:
+                self.send_header("Content-Range",
+                                 f"bytes {start}-{len(payload) - 1}/{len(payload)}")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            for i in range(0, len(body), 1 << 20):     # steady, but slow
+                self.wfile.write(body[i:i + (1 << 20)])
+                _time.sleep(0.5)
+
+        def log_message(self, *a):
+            pass
+
+    httpd = hs.ThreadingHTTPServer(("127.0.0.1", 0), Slow)
+    _th.Thread(target=httpd.serve_forever, daemon=True).start()
+    cfg.download_max_seconds = 1.0        # cap fires almost immediately
+    cfg.download_stall_seconds = 0        # isolate the CAP, not the stall path
+    url = f"http://127.0.0.1:{httpd.server_address[1]}/huge.json.gz"
+    try:
+        store.enqueue_url(url, dedup_key=url)
+        rec = store.next_queued_url()
+        assert rec is not None
+        fetch_url_record(cfg, store, rec)
+        row = [u for u in store.list_urls() if u["id"] == rec["id"]][0]
+    finally:
+        httpd.shutdown()
+
+    # requeued for another pass — NOT parked awaiting a human
+    assert row["status"] == "queued", row
+    assert "resumes from here automatically" in (row["error"] or "")
+    assert "press retry" not in (row["error"] or "").lower()
+
+    # and the bytes it did fetch are kept, so the next pass resumes rather
+    # than starting over (that is what makes repeated passes converge)
+    parts = list(cfg.downloads_dir.glob("*.part"))
+    assert parts and parts[0].stat().st_size > 0, "partial bytes must survive"
