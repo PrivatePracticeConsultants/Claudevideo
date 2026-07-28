@@ -1,8 +1,10 @@
 {
-  "_comment": "P0 engagement economy. Capital is engagement-scoped and integer-valued (no float money, ever - it would break determinism hashing for no benefit). Integrity is the lives pool; in P3 it becomes run-scoped Corridor Integrity and stops resetting between engagements. sell_refund_fraction is below 1 on purpose: relocating a turret should cost something, or placement stops being a decision. early_wave_bonus is paid pro rata for the slice of the inter-wave gap given up, so calling a wave in early trades preparation time for money. carry_limit_share is 1.0: every turret you built carries forward. It was 0.55 for one revision, which stopped an inherited board winning the next act unattended and did it by deleting turrets the player had paid for - reported immediately, and rightly. The same job is now done by how deeply a carried turret is refitted, which costs tiers rather than emplacements.",
+  "_comment": "P0 engagement economy. Capital is engagement-scoped and integer-valued (no float money, ever - it would break determinism hashing for no benefit). Integrity is the lives pool; in P3 it becomes run-scoped Corridor Integrity and stops resetting between engagements. sell_refund_fraction is below 1 on purpose: relocating a turret should cost something, or placement stops being a decision. early_wave_bonus is paid pro rata for the slice of the inter-wave gap given up, so calling a wave in early trades preparation time for money. carry_limit_share is 1.0: every turret you built carries forward. It was 0.55 for one revision, which stopped an inherited board winning the next act unattended and did it by deleting turrets the player had paid for - reported immediately, and rightly. The same job is now done by how deeply a carried turret is refitted, which costs tiers rather than emplacements. board_salvage_fraction is what a finished board converts into when the campaign moves to a different map. Turrets cannot cross - a coordinate on one board means nothing on another - but the work can, and arriving at a new board with nothing to show for the last one reads as the game deleting your progress. Opening Capital on a board-opening act is reduced to match what a competent finish salvages, so this is continuity rather than a bonus.",
   "starting_capital": 400,
   "starting_integrity": 100,
   "sell_refund_fraction": 0.65,
   "early_wave_bonus": 140,
-  "carry_limit_share": 1.0
+  "carry_limit_share": 1.0,
+  "board_salvage_fraction": 0.5,
+  "board_salvage_cap_share": 0.4
 }

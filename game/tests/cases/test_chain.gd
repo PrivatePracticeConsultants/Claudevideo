@@ -195,3 +195,79 @@ func _first_offerable(sim: Sim) -> Vector2i:
 			if sim.can_buy_cell(cx, cy):
 				return Vector2i(cx, cy)
 	return Vector2i(-1, -1)
+
+# --- crossing to a new board -------------------------------------------------
+#
+# A chain carries turrets. A board boundary cannot: a coordinate on one board
+# means nothing on another, and there is no honest way to move an emplacement
+# between maps. What crosses instead is what the board was worth.
+#
+# This exists because arriving at a new board with nothing to show for the last
+# one reads as the game deleting your progress - which is exactly how it was
+# reported.
+
+func _board_boundary() -> Array:
+	# The first pair of consecutive levels on different maps.
+	var levels := Database.load_levels()
+	for i in levels.size() - 1:
+		if str(levels[i]["map"]) != str(levels[i + 1]["map"]):
+			return [levels[i], levels[i + 1]]
+	return []
+
+func test_a_finished_board_is_worth_something() -> void:
+	var sim := SimFixture.for_level("highway_01", "highway_act1")
+	SimFixture.run_greedy(sim)
+	assert_gt(float(sim.t_count), 0.0, "fixture sanity: a board was built")
+	assert_gt(float(sim.board_salvage()), 0.0, "and it salvages for something")
+
+func test_salvage_crosses_a_board_boundary() -> void:
+	var pair := _board_boundary()
+	assert_eq(pair.size(), 2, "fixture sanity: the campaign changes board somewhere")
+	var finished := SimFixture.for_level(str(pair[0]["map"]), str(pair[0]["engagement"]))
+	SimFixture.run_greedy(finished)
+	var opened := SimFixture.start_act(pair[1], finished.board_snapshot())
+	assert_eq(opened.t_count, 0, "turrets cannot cross to another map")
+	assert_gt(float(opened.salvage_granted()), 0.0, "but what they were worth does")
+
+func test_salvage_is_bounded_by_the_new_act_s_own_budget() -> void:
+	# Measured before this bound existed: a finished board was worth 8,790 Capital
+	# arriving at an act budgeted for 1,300, and 22,330 at one budgeted for 2,350.
+	# Unbounded continuity is just deleting the economy.
+	var pair := _board_boundary()
+	var opened := SimFixture.start_act(pair[1], {"salvage": 9999999})
+	assert_gt(float(opened.salvage_ceiling()), 0.0, "there is a ceiling")
+	assert_eq(opened.salvage_granted(), opened.salvage_ceiling(),
+		"an absurd amount is clamped to it, not banked")
+	# And the ceiling is proportional, so it stays meaningful late instead of
+	# being decisive early and irrelevant by the end.
+	var levels := Database.load_levels()
+	var late := SimFixture.start_act(levels[levels.size() - 1], {"salvage": 9999999})
+	assert_gt(float(late.salvage_ceiling()), float(opened.salvage_ceiling()),
+		"a later board salvages into a bigger budget")
+
+func test_the_first_level_salvages_nothing() -> void:
+	# There is no previous board. It must not start richer for that reason.
+	var levels := Database.load_levels()
+	var opened := SimFixture.start_act(levels[0], {})
+	assert_eq(opened.salvage_granted(), 0, "the opening level is handed nothing")
+
+func test_a_weaker_finish_salvages_less() -> void:
+	# The point of tying it to the board: it is continuity, not a flat bonus.
+	var pair := _board_boundary()
+	var strong := SimFixture.for_level(str(pair[0]["map"]), str(pair[0]["engagement"]))
+	SimFixture.run_greedy(strong)
+	var weak := SimFixture.for_level(str(pair[0]["map"]), str(pair[0]["engagement"]))
+	var spot := SimFixture.a_site(weak)
+	weak.queue_place(0, spot[0], spot[1], 0)
+	weak.step()
+	assert_lt(float(weak.board_salvage()), float(strong.board_salvage()),
+		"one turret is worth less than a full board")
+
+func test_salvage_is_part_of_the_state_hash() -> void:
+	var pair := _board_boundary()
+	var bare := SimFixture.start_act(pair[1], {})
+	var funded := SimFixture.start_act(pair[1], {"salvage": 500})
+	assert_ne(funded.state_hash(), bare.state_hash(),
+		"opening with salvage is a different starting state")
+	assert_eq(funded.capital(), bare.capital() + funded.salvage_granted(),
+		"and the Capital arrived")

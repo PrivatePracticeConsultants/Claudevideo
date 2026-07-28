@@ -114,12 +114,16 @@ func _start_level(index: int, offered_carry: Dictionary) -> void:
 	# The seed is derived from the level so a given level always plays the same
 	# way. Run seeding arrives with the run layer in P3.
 	_sim = Sim.new(db, 20260727 + _level_index)
-	# An act that continues a chain inherits the previous act's turrets and
-	# ground. One that opens a chain never does, whatever it was handed.
-	_incoming_carry = offered_carry if bool(db.engagement.get("carries_forward", false)) else {}
+	# A chain carries turrets and ground; a board boundary carries what they were
+	# worth, because a coordinate on one board means nothing on another.
+	# Held either way so restarting the act restores the same opening position.
+	_incoming_carry = offered_carry
 	if not _incoming_carry.is_empty():
-		_sim.adopt(_incoming_carry.get("platforms", []),
-			_incoming_carry.get("cells", PackedInt32Array()))
+		if bool(db.engagement.get("carries_forward", false)):
+			_sim.adopt(_incoming_carry.get("platforms", []),
+				_incoming_carry.get("cells", PackedInt32Array()))
+		else:
+			_sim.grant_salvage(int(_incoming_carry.get("salvage", 0)))
 	_tick_period = 1.0 / float(_sim.tick_rate())
 
 	_renderer = SimRenderer3D.new()
@@ -131,7 +135,7 @@ func _start_level(index: int, offered_carry: Dictionary) -> void:
 	_hud.setup(_sim, _theme)
 	_hud.set_level(str(level["name"]), _level_index, _levels.size(),
 		_sim.t_count, _next_level_extends(), _sim.carry_dropped(),
-		_sim.carry_stood_down())
+		_sim.carry_stood_down(), _sim.salvage_granted())
 
 	_overlay = DebugOverlay.new()
 	add_child(_overlay)

@@ -70,12 +70,17 @@ func setup(sim: Sim, theme: Dictionary) -> void:
 var _last_signature: int = -1
 
 func set_level(name: String, index: int, total: int, inherited: int = 0,
-		next_extends: bool = false, dropped: int = 0, stood_down: int = 0) -> void:
+		next_extends: bool = false, dropped: int = 0, stood_down: int = 0,
+		salvage: int = 0) -> void:
 	_level_text = "%s      LEVEL %d/%d" % [name, index + 1, total]
 	if inherited > 0:
 		# Without this the inherited turrets read as a bug - a board you did not
 		# build, on a level you have not played.
 		_level_text += "      %d TURRETS HELD OVER" % inherited
+	if salvage > 0:
+		# A new board cannot take your turrets, so it takes what they were worth.
+		# Saying so is the difference between continuity and apparent deletion.
+		_level_text += "      $%d SALVAGED FROM THE LAST BOARD" % salvage
 	if stood_down > 0:
 		# Not a loss - a cap. Saying so stops it reading as a bug.
 		_level_text += "  ·  %d STOOD DOWN" % stood_down
@@ -153,7 +158,10 @@ func refresh(speed: int, paused: bool, hovered_platform: int = -1,
 		elif _next_extends:
 			_banner.text = "SECTOR HELD   ·   %d integrity   ·   N extends the corridor" % _sim.integrity()
 		else:
-			_banner.text = "CORRIDOR HELD   ·   %d integrity   ·   N for next level" % _sim.integrity()
+			# A new board is a different map, so the turrets cannot come. Say it
+			# here rather than letting it look like the game ate them.
+			_banner.text = "BOARD CLEARED   ·   %d integrity   ·   N moves to a new board, salvaging $%d" % [
+				_sim.integrity(), _sim.board_salvage()]
 		_banner.add_theme_color_override("font_color", _color("good"))
 	else:
 		_banner.text = "CORRIDOR LOST   ·   wave %d/%d   ·   R to retry" % [_sim.wave_number(), _sim.wave_count()]

@@ -172,6 +172,11 @@ var _carry_dropped: int = 0
 ## Turrets that fit fine but exceeded the share of the new limit an inheritance
 ## may occupy.
 var _carry_stood_down: int = 0
+## Capital carried in from the previous board. Hashed because it changes what
+## could be afforded, which changes everything downstream of it.
+var _salvage_granted: int = 0
+var _salvage_fraction: float = 0.0
+var _salvage_cap_share: float = 0.0
 
 var _phase: int = PHASE_WAITING
 var _wave_index: int = -1
@@ -289,6 +294,8 @@ func _init(db: Database, seed_value: int) -> void:
 	_max_platforms = int(db.sim["max_platforms"])
 	_sell_refund = float(db.economy.get("sell_refund_fraction", 0.0))
 	_carry_limit_share = float(db.economy.get("carry_limit_share", 1.0))
+	_salvage_fraction = float(db.economy.get("board_salvage_fraction", 0.0))
+	_salvage_cap_share = float(db.economy.get("board_salvage_cap_share", 0.0))
 	_early_wave_bonus = int(db.economy.get("early_wave_bonus", 0))
 	_hp_growth = float(db.scaling["hp_growth_per_wave"])
 	_bounty_growth = float(db.scaling["bounty_growth_per_wave"])
@@ -693,6 +700,42 @@ func _place_without_charge(x: float, y: float, blueprint_index: int) -> int:
 	_capital = held
 	return verdict
 
+## What a finished board is worth in Capital.
+##
+## Turrets cannot cross to another board - a coordinate on Highway means nothing
+## on Port - but the work that went into them can. This is what the emplacements
+## get stripped down to when a chain ends and a new one begins, so the next board
+## is opened with what the last one earned rather than from nothing.
+func board_salvage() -> int:
+	var total := 0
+	for i in t_count:
+		var blueprint := t_blueprint[i]
+		for tier in t_tier[i] + 1:
+			total += _tier_cost[_bp_tier_offset[blueprint] + tier]
+	return int(floor(float(total) * _salvage_fraction))
+
+## The most salvage this engagement will accept.
+##
+## A share of its own opening budget, so it scales with the campaign instead of
+## being a flat number that is decisive early and irrelevant late. Bounded at all
+## because it has to be: measured, a finished board is worth 8,790 Capital
+## arriving at an act budgeted for 1,300, and 22,330 at one budgeted for 2,350.
+## Unbounded, "continuity" would simply delete the economy from the fifth level
+## onward.
+func salvage_ceiling() -> int:
+	return int(floor(float(_db.engagement.get("starting_capital",
+		_db.economy["starting_capital"])) * _salvage_cap_share))
+
+## Open an engagement with salvage from the board before it. Applied at
+## construction like adopt(), so it is part of the state a replay starts from.
+func grant_salvage(amount: int) -> void:
+	if amount <= 0:
+		return
+	_salvage_granted = mini(amount, salvage_ceiling())
+	_capital += _salvage_granted
+
+func salvage_granted() -> int: return _salvage_granted
+
 ## What to hand to the next act in this chain.
 func board_snapshot() -> Dictionary:
 	var platforms := []
@@ -705,7 +748,7 @@ func board_snapshot() -> Dictionary:
 			if _cell_unlocked[cy * _grid_cols + cx] == 1:
 				cells.append(cx)
 				cells.append(cy)
-	return {"platforms": platforms, "cells": cells}
+	return {"platforms": platforms, "cells": cells, "salvage": board_salvage()}
 
 func carry_dropped() -> int: return _carry_dropped
 func carry_stood_down() -> int: return _carry_stood_down
@@ -1531,6 +1574,7 @@ func state_hash() -> int:
 	h = StateHash.mix_int(h, _cells_bought)
 	h = StateHash.mix_int(h, _carry_dropped)
 	h = StateHash.mix_int(h, _carry_stood_down)
+	h = StateHash.mix_int(h, _salvage_granted)
 	h = StateHash.mix_bytes(h, _cell_unlocked)
 	h = StateHash.mix_int(h, _phase)
 	h = StateHash.mix_int(h, _wave_index)

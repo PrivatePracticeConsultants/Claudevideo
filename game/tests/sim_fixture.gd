@@ -92,8 +92,13 @@ static func start_act(level: Dictionary, offered: Dictionary,
 		seed_value: int = 12345) -> Sim:
 	var db := database(str(level["map"]), str(level["engagement"]))
 	var sim := Sim.new(db, seed_value)
-	if bool(db.engagement.get("carries_forward", false)) and not offered.is_empty():
+	if offered.is_empty():
+		return sim
+	if bool(db.engagement.get("carries_forward", false)):
 		sim.adopt(offered.get("platforms", []), offered.get("cells", PackedInt32Array()))
+	else:
+		# A new board. The turrets cannot come, so what they were worth does.
+		sim.grant_salvage(int(offered.get("salvage", 0)))
 	return sim
 
 ## Build nothing for a whole act, starting from the board it was handed. An act

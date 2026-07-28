@@ -143,6 +143,14 @@ fine and was the wrong trade.
 
 Retrying an act (`R`) restores the same inheritance, not an empty board.
 
+### Crossing to a new board
+
+Boards are different maps, so turrets genuinely cannot follow — a coordinate on
+Highway means nothing on Port. What follows is what they were worth: a finished
+board **salvages into the opening Capital** of the next one, capped at 40% of
+that act's own budget so it scales with the campaign rather than swamping it. A
+board finished strongly opens the next one richer than one scraped through.
+
 ## Adding a weapon family
 
 Weapons are data. A new family is a new key in `data/blueprints/blueprints.json`

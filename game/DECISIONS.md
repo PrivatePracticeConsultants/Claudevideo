@@ -1045,6 +1045,36 @@ Three things worth recording:
 ~9,400 vertices, which walks every path segment, and that is a visible hitch on a
 level load and worse on a phone.
 
+## P0-50 · Crossing to a new board carries money, because it cannot carry turrets
+
+Reported while playing: *"why does it delete my existing weapons when I enter
+into a new level?"* Measured first rather than assumed, and the answer split in
+two:
+
+- **Within a board, nothing was being deleted.** Acts I→II→III→IV carry every
+  turret — 24 → 26 → 28 → 30 built, with 24, 26 and 28 carried, and zero dropped
+  or stood down. That half was working.
+- **Crossing to a new board, everything went.** Level 4 is a different *map*;
+  a coordinate on Highway means nothing on Port, and there is no honest way to
+  move an emplacement between them.
+
+So the turrets could not follow, but what they were worth could. A finished board
+now salvages into the opening Capital of the next one, and the end-of-board
+banner says so instead of leaving it to be discovered.
+
+**It has to be bounded, and the numbers say why.** At 50% of everything spent, a
+finished board is worth **8,790 Capital arriving at an act budgeted for 1,300**,
+and **22,330 at one budgeted for 2,350**. Unbounded, "continuity" is just
+deleting the economy from the fifth level onward. Salvage is therefore capped at
+40% of the receiving act's own opening budget — proportional, so it stays
+meaningful late instead of being decisive early and irrelevant by the end, and
+still tied to how well the last board was actually finished.
+
+The condition is the exact inverse of the carry rule, which is the neat part: an
+act that continues a chain takes turrets and refuses salvage; an act that opens
+one takes salvage and refuses turrets. Both are applied at construction, so both
+are part of the state a replay starts from.
+
 ## P0-14 · Deliberately not built in P0
 
 Not oversights — later phases, per §5.7. Anything tempting that came up is in
