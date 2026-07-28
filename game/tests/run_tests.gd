@@ -3,13 +3,34 @@ extends SceneTree
 ## Headless test entry point.
 ##
 ##   godot --headless --path game --script res://tests/run_tests.gd
+##   ... -- --case test_engagement       # one file, by name
 ##
 ## Exits non-zero when anything fails, so it drops straight into CI.
+##
+## The filter exists because the full-campaign run (LASTLINE_FULL_CAMPAIGN=1) is
+## 24 engagements played end to end and outgrew the wall-clock budget of a single
+## invocation. Being able to run the expensive gate on its own is the difference
+## between running it before a release and not running it.
 
 const CASE_DIR := "res://tests/cases"
 
 func _initialize() -> void:
+	var only := ""
+	var argv := OS.get_cmdline_user_args()
+	for i in argv.size():
+		if argv[i] == "--case" and i + 1 < argv.size():
+			only = argv[i + 1]
 	var files := _discover(CASE_DIR)
+	if not only.is_empty():
+		var kept := PackedStringArray()
+		for path in files:
+			if path.get_file().get_basename() == only:
+				kept.append(path)
+		if kept.is_empty():
+			printerr("No test case named %s in %s" % [only, CASE_DIR])
+			quit(1)
+			return
+		files = kept
 	if files.is_empty():
 		printerr("No test cases found in %s" % CASE_DIR)
 		quit(1)

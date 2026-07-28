@@ -22,6 +22,7 @@ Needs Godot 4.x (built and verified against 4.5).
 godot --path game                            # play
 GODOT=/path/to/godot ./game/run_tests.sh     # the suite, headless
 GODOT=/path/to/godot ./game/run_tests.sh --full   # ...playing every level end to end
+GODOT=/path/to/godot ./game/run_tests.sh -- --case test_engagement   # one file
 GODOT=/path/to/godot ./game/build_web.sh     # HTML5 build -> build/web/
 python3 game/tools/verify_web.py             # boot the web build in a real browser
 ```
@@ -86,10 +87,21 @@ them matter.
 Each board is three acts. Act I runs the first stretch of the road; act II opens
 more of it; act III runs the whole thing. **The road already revealed never
 moves**, so every turret and every cell of ground you bought is still there, still
-covering what it covered, when the corridor extends. Capital does not carry —
-each act's spending is its own decision — and inherited turrets count against the
-new act's deployment limit, so what the bigger limit buys you is room to extend
-coverage rather than a clean slate. Act I of a new board always starts clean.
+covering what it covered, when the corridor extends. Act I of a new board always
+starts clean.
+
+Two things do not carry, and both are load-bearing:
+
+- **Capital.** Each act's spending is its own decision.
+- **Tiers.** Turrets arrive **refitted** — one tier down, never above tier 2. You
+  keep your placements, your weapon choices and your ground; you re-earn the
+  depth. Without this an act that ended tier-4 across the board simply wins the
+  next one for you: measured, *every* carrying act in the campaign could be
+  cleared by building nothing at all.
+
+Inherited turrets count against the new act's deployment limit, so what the
+bigger limit buys is room to extend coverage into the new stretch, not a clean
+slate on top of what is already standing.
 
 Retrying an act (`R`) restores the same inheritance, not an empty board.
 
@@ -116,9 +128,17 @@ start would measure a game nobody plays. The losable half is correspondingly
 strict: an act must still be losable **from the board it inherits**.
 
 That test plays three of the eight chains by default, because playing all of them
-is 24 full engagements and minutes of wall clock; `--full` plays every one, and is
-the pre-release run. A separate cheap test loads all twenty-four regardless, so a
-broken map or wave file fails immediately.
+is 24 full engagements — **over ten minutes of CPU**, more than some sandboxes
+allow in one command. `--full` plays every one and is the pre-release run; give it
+room, and use `-- --case test_engagement` to run that gate on its own. A separate
+cheap test loads all twenty-four regardless, so a broken map or wave file fails
+immediately.
+
+`tools/balance_probe.gd` is the same measurement in a form you can watch: it plays
+the whole campaign chained and prints a table, and `--sweep <level>` replays one
+level across a range of health multipliers. That sweep is how the campaign's two
+anchors were set, and it is the only sane way to tune a game whose "won, but it
+cost something" band turned out to be about 16% wide.
 
 ## How it is drawn
 
