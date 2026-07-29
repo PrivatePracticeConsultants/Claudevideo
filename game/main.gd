@@ -69,6 +69,16 @@ var _cursor_cell_x: int = 0
 var _cursor_cell_y: int = 0
 var _cursor_can_buy: bool = false
 var _cells_drawn: int = -1
+## Modules drafted so far on this board, and the three currently on offer.
+##
+## Held here rather than in the Sim because they outlive any one act: the Sim is
+## rebuilt from scratch every level and a draft has to survive that. They reset
+## when the campaign moves to a new board - a board is a contract, and a run that
+## accumulated every module across forty-eight levels would end as one obvious
+## stack rather than as a series of decisions.
+var _held_modules: PackedStringArray = PackedStringArray()
+var _offer: PackedStringArray = PackedStringArray()
+
 ## The board this level started from. Held so restarting an act restores the
 ## same inheritance rather than handing you a clean slate - retrying act 3 should
 ## not quietly delete what acts 1 and 2 built.
@@ -135,8 +145,17 @@ func _start_level(index: int, offered_carry: Dictionary) -> void:
 		if bool(db.engagement.get("carries_forward", false)):
 			_sim.adopt(_incoming_carry.get("platforms", []),
 				_incoming_carry.get("cells", PackedInt32Array()))
+			# Damage carries with the emplacements. Without it a sloppy act I costs
+			# nothing in act IV, and each act of a chain is a fresh start wearing a
+			# chain's clothes. A new board starts whole - see inherit_integrity.
+			if bool(db.economy.get("integrity_persists_in_chain", false)):
+				_sim.inherit_integrity(int(_incoming_carry.get("integrity", 0)))
 		else:
 			_sim.grant_salvage(int(_incoming_carry.get("salvage", 0)))
+	# Fitted before anything else runs, so a module is part of the state a replay
+	# starts from rather than an event partway through it.
+	if not _held_modules.is_empty():
+		_sim.apply_modules(_held_modules)
 	_tick_period = 1.0 / float(_sim.tick_rate())
 
 	_renderer = SimRenderer3D.new()
@@ -150,7 +169,10 @@ func _start_level(index: int, offered_carry: Dictionary) -> void:
 	_hud = Hud.new()
 	add_child(_hud)
 	_hud.setup(_sim, _theme)
+	_offer = PackedStringArray()
 	var handover := _next_handover()
+	# Before set_level, which folds the held modules into the level line.
+	_hud.set_modules(_held_modules)
 	_hud.set_level(str(level["name"]), _level_index, _levels.size(),
 		_sim.t_count, bool(handover[0]), _sim.carry_dropped(),
 		_sim.carry_stood_down(), _sim.salvage_granted(), int(handover[1]))
@@ -276,6 +298,8 @@ func _process(delta: float) -> void:
 	if _sim.result() != _sounded_result:
 		_sounded_result = _sim.result()
 		if _sounded_result == Sim.RESULT_WIN:
+			_offer = _draw_offer()
+			_hud.set_offer(_offer)
 			_sfx.play(Sfx.WIN)
 		elif _sounded_result == Sim.RESULT_LOSS:
 			_sfx.play(Sfx.LOSS)
@@ -335,9 +359,18 @@ func _unhandled_input(event: InputEvent) -> void:
 		_sfx.play(Sfx.BUILD)
 	elif event is InputEventKey and event.pressed and not event.echo:
 		match (event as InputEventKey).keycode:
-			KEY_1: _speed = 1
-			KEY_2: _speed = 2
-			KEY_3: _speed = 3
+			# 1-3 double as the module draft while an offer is standing, which it
+			# only ever is on a won act - so during play they are speed and nothing
+			# else.
+			KEY_1:
+				if _offer.is_empty(): _speed = 1
+				else: _take_module(0)
+			KEY_2:
+				if _offer.is_empty(): _speed = 2
+				else: _take_module(1)
+			KEY_3:
+				if _offer.is_empty(): _speed = 3
+				else: _take_module(2)
 			KEY_4: _speed = 4
 			KEY_E:
 				# Call the next wave in early for a bounty. Harmlessly rejected
@@ -369,8 +402,50 @@ func _unhandled_input(event: InputEvent) -> void:
 					_note_win()
 					# Hand the finished board forward; the next act takes it only
 					# if it continues this chain.
+					# A new board is a new contract: the draft resets with it.
+					if not bool(_next_handover()[0]):
+						_held_modules = PackedStringArray()
 					_start_level(_level_index + 1, _sim.board_snapshot())
 			KEY_ESCAPE: get_tree().quit()
+
+## Three modules to choose between, drawn without replacement.
+##
+## Empty when this win does not continue a chain: a module fitted on the last act
+## of a board would be discarded before it ever fired, which is a choice with no
+## consequence and reads as the game losing track.
+##
+## Seeded by the level rather than by the clock, so the same act always offers the
+## same three. That is what makes a draft a decision you can plan a board around
+## instead of a slot machine you reload until it gives you the one you wanted.
+const OFFER_SIZE := 3
+
+func _draw_offer() -> PackedStringArray:
+	var out := PackedStringArray()
+	if not bool(_next_handover()[0]):
+		return out
+	var pool := PackedStringArray()
+	for id in Database.load_modules():
+		if not _held_modules.has(id):
+			pool.append(id)
+	var rng := Rng.new(20260729 + _level_index * 7919)
+	while out.size() < OFFER_SIZE and pool.size() > 0:
+		var pick := rng.next_below(pool.size())
+		out.append(pool[pick])
+		pool.remove_at(pick)
+	return out
+
+## Fit one of the three. Rejected unless there is an offer standing and the act
+## was actually won, so the keys do nothing during play.
+func _take_module(index: int) -> void:
+	if _offer.is_empty() or index < 0 or index >= _offer.size():
+		return
+	if _sim.result() != Sim.RESULT_WIN:
+		return
+	_held_modules.append(_offer[index])
+	_offer = PackedStringArray()
+	_hud.set_offer(_offer)
+	_hud.set_modules(_held_modules)
+	_sfx.play(Sfx.BUILD)
 
 ## Where a screen position lands on the ground plane, in world space. Returns the
 ## origin if the ray runs parallel to the ground, which only happens if the camera

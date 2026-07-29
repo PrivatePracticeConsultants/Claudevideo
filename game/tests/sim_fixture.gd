@@ -96,6 +96,8 @@ static func start_act(level: Dictionary, offered: Dictionary,
 		return sim
 	if bool(db.engagement.get("carries_forward", false)):
 		sim.adopt(offered.get("platforms", []), offered.get("cells", PackedInt32Array()))
+		if bool(db.economy.get("integrity_persists_in_chain", false)):
+			sim.inherit_integrity(int(offered.get("integrity", 0)))
 	else:
 		# A new board. The turrets cannot come, so what they were worth does.
 		sim.grant_salvage(int(offered.get("salvage", 0)))

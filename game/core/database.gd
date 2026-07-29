@@ -23,6 +23,7 @@ var blueprints: Dictionary = {}
 var map: Dictionary = {}
 var engagement: Dictionary = {}
 var building: Dictionary = {}
+var modules: Dictionary = {}
 
 var errors: PackedStringArray = PackedStringArray()
 
@@ -50,6 +51,7 @@ func _load_all(map_id: String, engagement_id: String) -> void:
 	enemies = _read_object("%s/enemies/enemies.json" % root)
 	blueprints = _read_object("%s/blueprints/blueprints.json" % root)
 	building = _read_object("%s/building.json" % root)
+	modules = _read_object("%s/modules/modules.json" % root)
 	map = _read_object("%s/maps/%s.json" % [root, map_id])
 	engagement = _read_object("%s/waves/%s.json" % [root, engagement_id])
 	if not errors.is_empty():
@@ -104,10 +106,48 @@ func _validate() -> void:
 	_req_num(economy, "support_cap_damage", "economy.json", 0.0)
 	_req_num(economy, "support_cap_range", "economy.json", 0.0)
 
+	_validate_modules()
 	_validate_enemies()
 	_validate_blueprints()
 	_validate_map()
 	_validate_engagement()
+
+## Every module must actually do something, and only things the simulation knows
+## how to apply. A module with a typo'd effect key would load, offer, be picked,
+## and change nothing - the exact silent-nothing failure this file exists for.
+const MODULE_EFFECTS := ["fire_rate", "damage", "range", "support_radius",
+	"capital", "interest_cap", "sell_refund", "integrity", "jam_resist",
+	"upgrade_discount"]
+
+func _validate_modules() -> void:
+	var found := false
+	for id in modules.keys():
+		if id.begins_with(_DOC_PREFIX):
+			continue
+		found = true
+		var where := "modules.json -> %s" % id
+		var m: Variant = modules[id]
+		if typeof(m) != TYPE_DICTIONARY:
+			errors.append("%s must be an object." % where)
+			continue
+		if str((m as Dictionary).get("display_name", "")).is_empty():
+			errors.append("%s needs a display_name - it is offered by name." % where)
+		if str((m as Dictionary).get("description", "")).is_empty():
+			errors.append("%s needs a description - a choice you cannot read is not a choice." % where)
+		var effects := 0
+		for key in (m as Dictionary).keys():
+			if key == "display_name" or key == "description" or key.begins_with(_DOC_PREFIX):
+				continue
+			if not MODULE_EFFECTS.has(key):
+				errors.append("%s has unknown effect \"%s\". Known: %s"
+					% [where, key, ", ".join(MODULE_EFFECTS)])
+				continue
+			_req_num(m, key, where, 0.0001)
+			effects += 1
+		if effects == 0:
+			errors.append("%s does nothing." % where)
+	if not found:
+		errors.append("modules.json defines no modules.")
 
 func _validate_enemies() -> void:
 	var found := false
@@ -427,6 +467,36 @@ static func load_levels(data_root: String = DEFAULT_ROOT) -> Array:
 		return []
 	var levels: Variant = (parsed as Dictionary).get("levels")
 	return levels if typeof(levels) == TYPE_ARRAY else []
+
+## Every module id, in file order with the doc key skipped. Static because the
+## draft is made by the layer above the simulation, which has no Database of its
+## own and does not need one to ask what exists.
+static func load_modules(data_root: String = DEFAULT_ROOT) -> PackedStringArray:
+	var out := PackedStringArray()
+	var path := "%s/modules/modules.json" % data_root
+	if not FileAccess.file_exists(path):
+		return out
+	var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string(path))
+	if typeof(parsed) != TYPE_DICTIONARY:
+		return out
+	for id in (parsed as Dictionary).keys():
+		if not str(id).begins_with(_DOC_PREFIX):
+			out.append(str(id))
+	return out
+
+## A module's display name and one-line description, for whoever is offering it.
+static func module_text(id: String, data_root: String = DEFAULT_ROOT) -> PackedStringArray:
+	var out := PackedStringArray()
+	var path := "%s/modules/modules.json" % data_root
+	var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string(path))
+	if typeof(parsed) != TYPE_DICTIONARY:
+		return out
+	var m: Variant = (parsed as Dictionary).get(id)
+	if typeof(m) != TYPE_DICTIONARY:
+		return out
+	out.append(str((m as Dictionary).get("display_name", id)))
+	out.append(str((m as Dictionary).get("description", "")))
+	return out
 
 func tier_data(blueprint_id: String, tier_index: int) -> Dictionary:
 	var b: Dictionary = blueprints.get(blueprint_id, {})

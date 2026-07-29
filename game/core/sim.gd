@@ -272,6 +272,18 @@ var _carry_stood_down: int = 0
 ## Capital carried in from the previous board. Hashed because it changes what
 ## could be afforded, which changes everything downstream of it.
 var _salvage_granted: int = 0
+## Whether this act opened on the integrity the last one ended with rather than
+## on a full bar. Hashed, because it changes how much room the board has.
+var _integrity_inherited: bool = false
+## Modules drafted earlier in this chain, and what they add up to. All applied at
+## construction; nothing here changes once the act has started.
+var _module_ids: PackedStringArray = PackedStringArray()
+var _module_rate: float = 0.0
+var _module_damage: float = 0.0
+var _module_range: float = 0.0
+var _upgrade_discount: float = 0.0
+var _jam_resist: float = 0.0
+var _integrity_max: int = 0
 var _salvage_fraction: float = 0.0
 var _salvage_cap_share: float = 0.0
 ## Interest paid on Capital still in hand when a wave begins.
@@ -471,6 +483,7 @@ func _init(db: Database, seed_value: int) -> void:
 	_act_hp_mult = float(db.engagement.get("act_hp_multiplier", 1.0))
 	_act_bounty_mult = float(db.engagement.get("act_bounty_multiplier", 1.0))
 	_integrity = int(db.economy["starting_integrity"])
+	_integrity_max = _integrity
 	_inter_wave_delay = int(db.engagement["inter_wave_delay_ticks"])
 	_wave_count = (db.engagement["waves"] as Array).size()
 	_build_path()
@@ -997,6 +1010,62 @@ static func salvage_ceiling_of(db: Database) -> int:
 func salvage_ceiling() -> int:
 	return salvage_ceiling_of(_db)
 
+## Fit the modules drafted earlier in this chain.
+##
+## Applied at construction, before any command runs, like adopt() and
+## grant_salvage() - so a module is part of the state a replay starts from rather
+## than an event partway through it. Unknown ids are ignored rather than rejected:
+## the offer is made by the layer above, and a module removed from the data file
+## between two runs must not make a saved chain unplayable.
+##
+## Effects are read by name and applied to the tables the simulation already had.
+## Nothing here is a special case in the tick - a module is a different number in
+## a table the tick was already reading, which is why adding one is a data change.
+func apply_modules(ids: PackedStringArray) -> void:
+	for id in ids:
+		if not _db.modules.has(id):
+			continue
+		var m: Dictionary = _db.modules[id]
+		_module_ids.append(id)
+		_module_rate += float(m.get("fire_rate", 0.0))
+		_module_damage += float(m.get("damage", 0.0))
+		_module_range += float(m.get("range", 0.0))
+		_capital += int(m.get("capital", 0))
+		_interest_cap += int(m.get("interest_cap", 0))
+		_sell_refund += float(m.get("sell_refund", 0.0))
+		_integrity_max += int(m.get("integrity", 0))
+		_integrity += int(m.get("integrity", 0))
+		_upgrade_discount = clampf(_upgrade_discount + float(m.get("upgrade_discount", 0.0)), 0.0, 0.9)
+		_jam_resist = clampf(_jam_resist + float(m.get("jam_resist", 0.0)), 0.0, 1.0)
+		var reach := float(m.get("support_radius", 0.0))
+		if reach > 0.0:
+			# Squared, because the table is squared - a 30% longer radius is a 69%
+			# larger radius_sq, and applying the raw fraction here would quietly be
+			# a much smaller buff than the module claims.
+			var growth := (1.0 + reach) * (1.0 + reach)
+			for b in _bp_support_radius_sq.size():
+				_bp_support_radius_sq[b] *= growth
+	_links_dirty = true
+
+func modules() -> PackedStringArray: return _module_ids
+func module_rate_bonus() -> float: return _module_rate
+func module_damage_bonus() -> float: return _module_damage
+func module_range_bonus() -> float: return _module_range
+
+## Open an engagement on the integrity the last act ended with.
+##
+## Applied at construction like adopt() and grant_salvage(), so it is part of the
+## state a replay starts from. Only ever within a chain: a new board is a new
+## contract and starts whole, or a bad run three boards ago would follow you
+## forever with no way to recover it.
+func inherit_integrity(value: int) -> void:
+	if value <= 0:
+		return
+	_integrity = mini(value, _integrity_max)
+	_integrity_inherited = true
+
+func integrity_inherited() -> bool: return _integrity_inherited
+
 ## Open an engagement with salvage from the board before it. Applied at
 ## construction like adopt(), so it is part of the state a replay starts from.
 func grant_salvage(amount: int) -> void:
@@ -1020,7 +1089,8 @@ func board_snapshot() -> Dictionary:
 			if _cell_unlocked[cy * _grid_cols + cx] == 1:
 				cells.append(cx)
 				cells.append(cy)
-	return {"platforms": platforms, "cells": cells, "salvage": board_salvage()}
+	return {"platforms": platforms, "cells": cells, "salvage": board_salvage(),
+		"integrity": _integrity, "modules": _module_ids}
 
 func carry_dropped() -> int: return _carry_dropped
 func carry_stood_down() -> int: return _carry_stood_down
@@ -1265,7 +1335,8 @@ func upgrade_cost(platform_index: int) -> int:
 	var next_tier := t_tier[platform_index] + 1
 	if next_tier >= _bp_tier_count[blueprint]:
 		return -1
-	return _tier_cost[_bp_tier_offset[blueprint] + next_tier]
+	return maxi(1, int(round(float(_tier_cost[_bp_tier_offset[blueprint] + next_tier])
+		* (1.0 - _upgrade_discount))))
 
 func can_upgrade(platform_index: int) -> bool:
 	var cost := upgrade_cost(platform_index)
@@ -1432,13 +1503,17 @@ func _refresh_links() -> void:
 			if _link_pairs.size() < MAX_DRAWN_LINKS * 2:
 				_link_pairs.append(i)
 				_link_pairs.append(j)
-		t_rate_mult[i] = 1.0 + minf(rate, _support_cap_rate)
-		t_damage_mult[i] = 1.0 + minf(damage, _support_cap_damage)
-		t_range_mult[i] = 1.0 + minf(reach, _support_cap_range)
+		# Links are capped; modules are not part of that cap, because they are paid
+		# for with a draft rather than with placement and capping them together
+		# would make a module worthless on exactly the well-built board that earned
+		# it.
+		t_rate_mult[i] = 1.0 + minf(rate, _support_cap_rate) + _module_rate
+		t_damage_mult[i] = 1.0 + minf(damage, _support_cap_damage) + _module_damage
+		t_range_mult[i] = 1.0 + minf(reach, _support_cap_range) + _module_range
 	for i in range(t_count, _max_platforms):
-		t_rate_mult[i] = 1.0
-		t_damage_mult[i] = 1.0
-		t_range_mult[i] = 1.0
+		t_rate_mult[i] = 1.0 + _module_rate
+		t_damage_mult[i] = 1.0 + _module_damage
+		t_range_mult[i] = 1.0 + _module_range
 
 ## Links are drawn, and past a certain density drawing more of them communicates
 ## nothing. The multipliers are always computed in full; only the drawing is
@@ -1512,7 +1587,7 @@ func _jam_around(index: int, type_index: int) -> void:
 		if dx * dx + dy * dy > radius_sq:
 			continue
 		# Refreshed, not stacked, exactly like suppression on a drone.
-		t_disabled[i] = maxi(t_disabled[i], ticks)
+		t_disabled[i] = maxi(t_disabled[i], int(round(float(ticks) * (1.0 - _jam_resist))))
 
 func _update_platforms() -> void:
 	for i in t_count:
@@ -2009,7 +2084,7 @@ func result() -> int: return _result
 func is_over() -> bool: return _result != RESULT_RUNNING
 func capital() -> int: return _capital
 func integrity() -> int: return _integrity
-func integrity_max() -> int: return int(_db.economy["starting_integrity"])
+func integrity_max() -> int: return _integrity_max
 func kills() -> int: return _kills
 func leaks() -> int: return _leaks
 func spawn_overflow() -> int: return _spawn_overflow
@@ -2163,6 +2238,10 @@ func state_hash() -> int:
 	h = StateHash.mix_int(h, _carry_stood_down)
 	h = StateHash.mix_int(h, _salvage_granted)
 	h = StateHash.mix_int(h, _interest_paid)
+	h = StateHash.mix_int(h, 1 if _integrity_inherited else 0)
+	h = StateHash.mix_int(h, _module_ids.size())
+	for id in _module_ids:
+		h = StateHash.mix_bytes(h, id.to_utf8_buffer())
 	h = StateHash.mix_bytes(h, _cell_unlocked)
 	h = StateHash.mix_int(h, _phase)
 	h = StateHash.mix_int(h, _wave_index)

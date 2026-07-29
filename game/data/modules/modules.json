@@ -1,0 +1,53 @@
+{
+  "_comment": "Modules are the between-acts choice: after winning an act that continues a chain, three of these are offered and one is kept for the rest of the board. They reset when the campaign moves to a new board, because a board is a contract and a run that could accumulate every module across forty-eight levels would end as a single obvious stack rather than as a series of decisions. Each one deliberately touches a DIFFERENT system - rate, damage, reach, refunds, interest, opening Capital, integrity, the support-link radius, jam resistance - so a draft is a question about what this board actually needs rather than a comparison of three numbers on the same axis. Effects are modest on purpose: three or four of them across a chain should feel like a build, not like a difficulty setting. Anything that reads as strictly-best in every draft has failed and should be re-tuned rather than removed, because a module nobody ever picks is dead content and a module everybody picks is not a choice.",
+  "coolant_loop": {
+    "display_name": "Coolant Loop",
+    "description": "Every turret fires 12% faster.",
+    "fire_rate": 0.12
+  },
+  "rail_mass": {
+    "display_name": "Rail Mass",
+    "description": "Every turret hits 12% harder.",
+    "damage": 0.12
+  },
+  "long_optics": {
+    "display_name": "Long Optics",
+    "description": "Every turret reaches 10% further.",
+    "range": 0.10
+  },
+  "link_relay": {
+    "display_name": "Link Relay",
+    "description": "Support links reach 30% further.",
+    "support_radius": 0.30
+  },
+  "forward_depot": {
+    "display_name": "Forward Depot",
+    "description": "Open each act with $260 more.",
+    "capital": 260
+  },
+  "reserve_fund": {
+    "display_name": "Reserve Fund",
+    "description": "Interest pays up to $70 more per wave.",
+    "interest_cap": 70
+  },
+  "salvage_rig": {
+    "display_name": "Salvage Rig",
+    "description": "Selling refunds 15% more of what was spent.",
+    "sell_refund": 0.15
+  },
+  "corridor_hardening": {
+    "display_name": "Corridor Hardening",
+    "description": "The corridor holds 20 more Integrity.",
+    "integrity": 20
+  },
+  "counter_jam": {
+    "display_name": "Counter-Jam Suite",
+    "description": "Static Jammers silence turrets for half as long.",
+    "jam_resist": 0.5
+  },
+  "field_refit": {
+    "display_name": "Field Refit",
+    "description": "Upgrades cost 15% less.",
+    "upgrade_discount": 0.15
+  }
+}

@@ -25,6 +25,12 @@ var _is_last_level: bool = false
 ## what winning means - not "on to somewhere else" but "the road gets longer and
 ## everything you built stays" - so the banner has to say which.
 var _next_extends: bool = false
+## Modules held on this board, and the three offered for winning this act. The
+## offer is the only piece of UI in the game that asks for an answer rather than
+## reporting one, so it goes where the eye already is - directly under the banner.
+var _modules: PackedStringArray = PackedStringArray()
+var _offer: PackedStringArray = PackedStringArray()
+
 ## The most salvage the NEXT act will accept, or -1 where none applies. The board
 ## you are finishing is worth far more than any one act will take, so the banner
 ## has to quote the receiving ceiling or it promises money that never arrives.
@@ -125,6 +131,13 @@ func set_level(name: String, index: int, total: int, inherited: int = 0,
 		next_extends: bool = false, dropped: int = 0, stood_down: int = 0,
 		salvage: int = 0, next_salvage_cap: int = -1) -> void:
 	_level_text = "%s      LEVEL %d/%d" % [name, index + 1, total]
+	if not _modules.is_empty():
+		var names := PackedStringArray()
+		for id in _modules:
+			var text := Database.module_text(id)
+			if not text.is_empty():
+				names.append(text[0].to_upper())
+		_level_text += "      %s" % "  ·  ".join(names)
 	if inherited > 0:
 		# Without this the inherited turrets read as a bug - a board you did not
 		# build, on a level you have not played.
@@ -145,6 +158,27 @@ func set_level(name: String, index: int, total: int, inherited: int = 0,
 	_next_extends = next_extends
 	_next_salvage_cap = next_salvage_cap
 	_level.text = _level_text
+
+func set_modules(ids: PackedStringArray) -> void:
+	_modules = ids
+	_last_signature = -1
+
+func set_offer(ids: PackedStringArray) -> void:
+	_offer = ids
+	_last_signature = -1
+
+## The three on offer, as the lines the player chooses between.
+func offer_text() -> String:
+	if _offer.is_empty():
+		return ""
+	var lines := PackedStringArray()
+	lines.append("FIT ONE MODULE FOR THE REST OF THIS BOARD")
+	for i in _offer.size():
+		var text := Database.module_text(_offer[i])
+		if text.size() < 2:
+			continue
+		lines.append("[%d]  %s  -  %s" % [i + 1, text[0].to_upper(), text[1]])
+	return "\n".join(lines)
 
 func refresh(speed: int, paused: bool, hovered_platform: int = -1,
 		blueprint: int = 0, can_buy_ground: bool = false) -> void:
@@ -230,7 +264,10 @@ func refresh(speed: int, paused: bool, hovered_platform: int = -1,
 	_banner.visible = true
 	_debrief.visible = true
 	_scrim.visible = true
-	_debrief.text = debrief_text()
+	# The offer replaces the debrief while it is standing. Both at once is a wall
+	# of text at the one moment the player is being asked to decide something, and
+	# the debrief is still there the moment they have chosen.
+	_debrief.text = offer_text() if not _offer.is_empty() else debrief_text()
 	if _sim.result() == Sim.RESULT_WIN:
 		if _is_last_level:
 			_banner.text = "CONTRACT COMPLETE   ·   %d integrity   ·   R to replay" % _sim.integrity()
