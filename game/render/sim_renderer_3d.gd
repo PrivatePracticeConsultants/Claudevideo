@@ -1072,11 +1072,59 @@ func _build_turret_layers() -> void:
 		_turret_bodies.append(_add_layer(_housing_mesh(id, radius, height), limit))
 		_turret_barrels.append(_add_layer(_muzzle_mesh(id), limit))
 
+## Assign a material to either kind of mesh. A PrimitiveMesh takes it as a
+## property; an ArrayMesh - which everything welded by _merged() is - only takes
+## it per surface, and assigning the property it does not have fails at runtime.
+## Found by screenshot: fifty-one freshly assembled turrets rendering as nothing
+## at all, because every mesh assignment in this file predated _merged().
+func _skin(mesh: Mesh, material: Material) -> void:
+	if mesh is PrimitiveMesh:
+		(mesh as PrimitiveMesh).material = material
+	else:
+		for surface in mesh.get_surface_count():
+			(mesh as ArrayMesh).surface_set_material(surface, material)
+
 func _add_layer(mesh: Mesh, limit: int) -> MultiMeshInstance3D:
-	mesh.material = _instanced_material()
+	# Turrets get their own surface, not the drones': machined metal, so the sun
+	# actually picks out the assemblies the meshes now have. Values live in
+	# theme.json like every other look decision.
+	var material := StandardMaterial3D.new()
+	material.vertex_color_use_as_albedo = true
+	material.metallic = float(_world.get("turret_metallic", 0.55))
+	material.roughness = float(_world.get("turret_roughness", 0.38))
+	_skin(mesh, material)
 	var layer := _instanced(mesh, limit)
 	add_child(layer)
 	return layer
+
+## Several primitives welded into one ArrayMesh, so a silhouette can have greebles
+## without costing a second draw call. The parts keep their own normals; nothing
+## here needs a shared smooth surface.
+##
+## This is the whole graphics-quality strategy in one function: the budget is
+## draw calls, not triangles, so detail is bought by making each instanced mesh
+## richer rather than by adding instances.
+func _merged(parts: Array) -> ArrayMesh:
+	var tool := SurfaceTool.new()
+	tool.begin(Mesh.PRIMITIVE_TRIANGLES)
+	for part: Array in parts:
+		tool.append_from(part[0] as Mesh, 0, part[1] as Transform3D)
+	return tool.commit()
+
+static func _at(x: float, y: float, z: float, scale: Vector3 = Vector3.ONE,
+		rot: Vector3 = Vector3.ZERO) -> Transform3D:
+	var basis := Basis.from_euler(rot).scaled(scale)
+	return Transform3D(basis, Vector3(x, y, z))
+
+## A cylinder whose axis runs along Z instead of Y, because barrels point
+## forward and Godot's cylinders point up.
+static func _zcyl(top: float, bottom: float, length: float, segments: int = 10) -> Mesh:
+	var cyl := CylinderMesh.new()
+	cyl.top_radius = top
+	cyl.bottom_radius = bottom
+	cyl.height = length
+	cyl.radial_segments = segments
+	return cyl
 
 func _mount_mesh(id: String, radius: float, pad: float) -> Mesh:
 	var mount := CylinderMesh.new()
@@ -1099,57 +1147,172 @@ func _mount_mesh(id: String, radius: float, pad: float) -> Mesh:
 			mount.top_radius = radius * 1.45
 			mount.bottom_radius = radius * 1.6
 			mount.radial_segments = 6
-	return mount
+	# Every mount stands on a wider foundation slab with a collar where the
+	# housing seats - the cheap two-primitive difference between "a shape on the
+	# grass" and "a thing that was installed".
+	var slab := CylinderMesh.new()
+	slab.top_radius = mount.bottom_radius * 1.18
+	slab.bottom_radius = mount.bottom_radius * 1.28
+	slab.height = pad * 0.35
+	slab.radial_segments = mount.radial_segments
+	var collar := TorusMesh.new()
+	collar.inner_radius = mount.top_radius * 0.8
+	collar.outer_radius = mount.top_radius * 1.02
+	collar.rings = 12
+	collar.ring_segments = 5
+	return _merged([
+		[mount, _at(0.0, 0.0, 0.0)],
+		[slab, _at(0.0, -pad * 0.36, 0.0)],
+		[collar, _at(0.0, pad * 0.5, 0.0)],
+	])
 
+## Each housing is a small assembly now, not one primitive. Same silhouette
+## logic as before - the four families must read apart from directly above -
+## just with the detail a machine would actually have.
 func _housing_mesh(id: String, radius: float, height: float) -> Mesh:
+	var r := radius
+	var h := height
 	match id:
 		"ballistic":
-			# Boxy: an autocannon receiver, not a turret dome.
-			var box := BoxMesh.new()
-			box.size = Vector3(radius * 1.5, height, radius * 1.9)
-			return box
-		"cannon":
-			# Tapered, wide at the base - it has to soak recoil.
-			var taper := CylinderMesh.new()
-			taper.top_radius = radius * 0.55
-			taper.bottom_radius = radius * 1.25
-			taper.height = height * 0.8
-			taper.radial_segments = 8
-			return taper
-		"suppressor":
-			# A drum. Nothing else on the board is a smooth vertical cylinder.
+			# An autocannon receiver: boxy, with an ammunition drum slung on the
+			# left and an optics block on top. Asymmetry is deliberate - real guns
+			# are fed from somewhere.
+			var receiver := BoxMesh.new()
+			receiver.size = Vector3(r * 1.4, h, r * 1.9)
+			var optics := BoxMesh.new()
+			optics.size = Vector3(r * 0.5, h * 0.28, r * 0.6)
 			var drum := CylinderMesh.new()
-			drum.top_radius = radius * 0.85
-			drum.bottom_radius = radius * 0.85
-			drum.height = height * 0.9
+			drum.top_radius = r * 0.38
+			drum.bottom_radius = r * 0.38
+			drum.height = r * 0.5
+			drum.radial_segments = 10
+			return _merged([
+				[receiver, _at(0.0, 0.0, 0.0)],
+				[optics, _at(r * 0.3, h * 0.6, -r * 0.35)],
+				[drum, _at(-r * 0.85, -h * 0.1, 0.0,
+					Vector3.ONE, Vector3(0.0, 0.0, PI * 0.5))],
+			])
+		"cannon":
+			# The recoil-soaking taper, with a collar where the tube meets it and
+			# two haunches bracing the back. Reads as artillery, not a bollard.
+			var taper := CylinderMesh.new()
+			taper.top_radius = r * 0.55
+			taper.bottom_radius = r * 1.25
+			taper.height = h * 0.8
+			taper.radial_segments = 10
+			var collar := TorusMesh.new()
+			collar.inner_radius = r * 0.5
+			collar.outer_radius = r * 0.75
+			collar.rings = 12
+			collar.ring_segments = 6
+			var haunch := BoxMesh.new()
+			haunch.size = Vector3(r * 0.4, h * 0.5, r * 0.7)
+			return _merged([
+				[taper, _at(0.0, 0.0, 0.0)],
+				[collar, _at(0.0, h * 0.34, 0.0)],
+				[haunch, _at(-r * 0.8, -h * 0.14, -r * 0.5)],
+				[haunch, _at(r * 0.8, -h * 0.14, -r * 0.5)],
+			])
+		"suppressor":
+			# The drum, wound: three coil rings around it and a cap on top. It is
+			# an electrical machine and now looks wound rather than extruded.
+			var drum := CylinderMesh.new()
+			drum.top_radius = r * 0.8
+			drum.bottom_radius = r * 0.8
+			drum.height = h * 0.9
 			drum.radial_segments = 16
-			return drum
+			var winding := TorusMesh.new()
+			winding.inner_radius = r * 0.76
+			winding.outer_radius = r * 0.94
+			winding.rings = 16
+			winding.ring_segments = 5
+			var cap := CylinderMesh.new()
+			cap.top_radius = r * 0.34
+			cap.bottom_radius = r * 0.55
+			cap.height = h * 0.2
+			cap.radial_segments = 10
+			var parts := [[drum, _at(0.0, 0.0, 0.0)], [cap, _at(0.0, h * 0.55, 0.0)]]
+			for level: float in [-0.28, 0.0, 0.28]:
+				parts.append([winding, _at(0.0, h * level, 0.0)])
+			return _merged(parts)
 		_:
-			# Railgun: narrow and long front-to-back, all of it capacitor.
+			# Railgun: the sled, twin capacitor banks running its whole length, and
+			# a heat-sink stack at the back. Everything about it says "stored
+			# charge", which is what the two-second fire interval is.
 			var sled := BoxMesh.new()
-			sled.size = Vector3(radius * 0.95, height * 0.72, radius * 2.3)
-			return sled
+			sled.size = Vector3(r * 0.95, h * 0.6, r * 2.3)
+			var bank := _zcyl(r * 0.26, r * 0.26, r * 2.0, 10)
+			var fin := BoxMesh.new()
+			fin.size = Vector3(r * 0.8, h * 0.36, r * 0.1)
+			var parts := [
+				[sled, _at(0.0, -h * 0.06, 0.0)],
+				[bank, _at(-r * 0.3, h * 0.32, 0.0)],
+				[bank, _at(r * 0.3, h * 0.32, 0.0)],
+			]
+			for step in 3:
+				parts.append([fin, _at(0.0, h * 0.1, -r * (0.85 + 0.14 * float(step)))])
+			return _merged(parts)
 
+## Muzzles are authored inside a unit cube, Z forward - the per-frame transform
+## scales X/Y by girth and Z by reach, so everything here is proportion.
 func _muzzle_mesh(id: String) -> Mesh:
 	if id == "suppressor":
-		# No barrel at all - a coil ring. A weapon that does almost no damage
-		# should not be pointing a gun at anything.
+		# No barrel at all - a coil ring with a focus hub floating in it. A weapon
+		# that does almost no damage should not be pointing a gun at anything.
 		var ring := TorusMesh.new()
 		ring.inner_radius = 0.34
 		ring.outer_radius = 0.5
 		ring.rings = 12
 		ring.ring_segments = 8
-		return ring
+		var hub := SphereMesh.new()
+		hub.radius = 0.16
+		hub.height = 0.32
+		hub.radial_segments = 8
+		hub.rings = 4
+		return _merged([[ring, _at(0.0, 0.0, 0.0)], [hub, _at(0.0, 0.0, 0.0)]])
 	if id == "cannon":
-		var bore := CylinderMesh.new()
-		bore.top_radius = 0.5
-		bore.bottom_radius = 0.42
-		bore.height = 1.0
-		bore.radial_segments = 10
-		return bore
-	var rail := BoxMesh.new()
-	rail.size = Vector3.ONE
-	return rail
+		# A proper bore pointing forward, with a muzzle ring at the mouth and a
+		# breech block behind it, instead of the bare tapered tube.
+		var bore := _zcyl(0.4, 0.46, 0.9, 10)
+		var mouth := TorusMesh.new()
+		mouth.inner_radius = 0.36
+		mouth.outer_radius = 0.5
+		mouth.rings = 10
+		mouth.ring_segments = 5
+		var breech := BoxMesh.new()
+		breech.size = Vector3(0.66, 0.66, 0.3)
+		return _merged([
+			[bore, _at(0.0, 0.0, 0.05)],
+			[mouth, _at(0.0, 0.0, 0.48, Vector3.ONE, Vector3(PI * 0.5, 0.0, 0.0))],
+			[breech, _at(0.0, 0.0, -0.4)],
+		])
+	if id == "railgun":
+		# Twin rails with spacers and an emitter head: the projectile rides the
+		# gap, so the gap is the thing the silhouette is built around.
+		var rail := BoxMesh.new()
+		rail.size = Vector3(0.16, 0.3, 1.0)
+		var spacer := BoxMesh.new()
+		spacer.size = Vector3(0.56, 0.2, 0.08)
+		var head := BoxMesh.new()
+		head.size = Vector3(0.6, 0.44, 0.12)
+		var parts := [
+			[rail, _at(-0.2, 0.0, 0.0)],
+			[rail, _at(0.2, 0.0, 0.0)],
+			[head, _at(0.0, 0.0, 0.44)],
+		]
+		for z: float in [-0.32, 0.0, 0.32]:
+			parts.append([spacer, _at(0.0, 0.0, z)])
+		return _merged(parts)
+	# Ballistic: twin barrels and a muzzle brake, which is what an autocannon
+	# with a 0.5s fire interval would actually need.
+	var barrel := _zcyl(0.14, 0.17, 0.94, 8)
+	var brake := BoxMesh.new()
+	brake.size = Vector3(0.72, 0.34, 0.16)
+	return _merged([
+		[barrel, _at(-0.19, 0.0, 0.0)],
+		[barrel, _at(0.19, 0.0, 0.0)],
+		[brake, _at(0.0, 0.0, 0.42)],
+	])
 
 ## Muzzle proportions per family, as (length, girth, tilt-up in radians).
 ## Authored next to the meshes they scale so the two cannot drift apart.
@@ -1171,7 +1334,7 @@ func _build_entity_layers() -> void:
 	_enemy_layers.clear()
 	for type_index in _sim.enemy_type_count():
 		var mesh := _enemy_mesh(_sim.enemy_id(type_index))
-		mesh.material = _instanced_material(_sim.enemy_id(type_index))
+		_skin(mesh, _instanced_material(_sim.enemy_id(type_index)))
 		var layer := _instanced(mesh, _sim.e_alive.size())
 		_enemy_layers.append(layer)
 		add_child(layer)
@@ -1208,52 +1371,131 @@ func _build_entity_layers() -> void:
 func _enemy_mesh(enemy_id: String) -> Mesh:
 	match enemy_id:
 		"swarm":
-			var prism := PrismMesh.new()
-			prism.size = Vector3.ONE
-			return prism
+			# A pointed body with a swept tail fin: something built to be fast and
+			# nothing else. The old silhouette was the bare prism.
+			var body := PrismMesh.new()
+			body.size = Vector3(0.8, 0.7, 1.0)
+			var fin := PrismMesh.new()
+			fin.size = Vector3(0.1, 0.55, 0.5)
+			return _merged([
+				[body, _at(0.0, 0.0, 0.0)],
+				[fin, _at(0.0, 0.35, -0.35)],
+			])
+		"walker":
+			# A hull with a sensor head and shoulder plates either side - the
+			# baseline drone, and the one every other silhouette is read against.
+			var hull := BoxMesh.new()
+			hull.size = Vector3(0.8, 0.7, 1.0)
+			var head := BoxMesh.new()
+			head.size = Vector3(0.4, 0.3, 0.34)
+			var plate := BoxMesh.new()
+			plate.size = Vector3(0.16, 0.5, 0.8)
+			return _merged([
+				[hull, _at(0.0, -0.1, 0.0)],
+				[head, _at(0.0, 0.34, 0.28)],
+				[plate, _at(-0.5, 0.0, -0.05)],
+				[plate, _at(0.5, 0.0, -0.05)],
+			])
 		"heavy":
+			# The slab, now visibly ARMOURED: a sloped glacis at the front and
+			# layered top plates. It wears Plated in the damage matrix, so it
+			# should look like the thing the matrix says it is.
 			var slab := BoxMesh.new()
-			slab.size = Vector3(1.15, 1.0, 1.4)
-			return slab
+			slab.size = Vector3(1.15, 0.8, 1.25)
+			var glacis := PrismMesh.new()
+			glacis.size = Vector3(1.15, 0.55, 0.5)
+			var plate := BoxMesh.new()
+			plate.size = Vector3(0.95, 0.16, 0.9)
+			return _merged([
+				[slab, _at(0.0, -0.1, -0.1)],
+				[glacis, _at(0.0, -0.06, 0.62, Vector3.ONE, Vector3(PI * 0.5, 0.0, 0.0))],
+				[plate, _at(0.0, 0.38, -0.15)],
+				[plate, _at(0.0, 0.52, -0.25, Vector3(0.8, 1.0, 0.8))],
+			])
 		"lance":
+			# The dart, with swept side blades. Still the longest, narrowest thing
+			# on the board - the blades widen the glow without blunting the point.
 			var dart := PrismMesh.new()
-			dart.size = Vector3(0.62, 1.0, 2.05)
-			return dart
+			dart.size = Vector3(0.55, 0.6, 2.05)
+			var blade := PrismMesh.new()
+			blade.size = Vector3(0.12, 0.4, 1.1)
+			return _merged([
+				[dart, _at(0.0, 0.0, 0.0)],
+				[blade, _at(-0.34, 0.0, -0.4)],
+				[blade, _at(0.34, 0.0, -0.4)],
+			])
 		"mender":
-			# Small, low and rounded - nothing else on the board is, and a drone you
-			# have to pick out of a crowd has to be findable in that crowd.
+			# The pod, orbited by its tool ring. It heals the drones around it, and
+			# a floating halo is the shape of "projects something outward".
 			var pod := SphereMesh.new()
-			pod.radius = 0.5
-			pod.height = 1.0
-			pod.radial_segments = 10
-			pod.rings = 5
-			return pod
+			pod.radius = 0.42
+			pod.height = 0.84
+			pod.radial_segments = 12
+			pod.rings = 6
+			var halo := TorusMesh.new()
+			halo.inner_radius = 0.5
+			halo.outer_radius = 0.6
+			halo.rings = 14
+			halo.ring_segments = 5
+			return _merged([
+				[pod, _at(0.0, 0.0, 0.0)],
+				[halo, _at(0.0, 0.12, 0.0)],
+			])
 		"jammer":
-			# A tall thin mast. It is the only thing that reaches for your turrets, so
-			# it looks like the only thing with an antenna.
+			# The mast, now carrying the dish it jams with and a tip emitter. The
+			# only drone that attacks the board still reads as the only antenna.
 			var mast := PrismMesh.new()
-			mast.size = Vector3(0.75, 1.55, 0.75)
-			return mast
+			mast.size = Vector3(0.6, 1.45, 0.6)
+			var dish := TorusMesh.new()
+			dish.inner_radius = 0.18
+			dish.outer_radius = 0.42
+			dish.rings = 10
+			dish.ring_segments = 5
+			var tip := SphereMesh.new()
+			tip.radius = 0.14
+			tip.height = 0.28
+			tip.radial_segments = 8
+			tip.rings = 4
+			return _merged([
+				[mast, _at(0.0, 0.0, 0.0)],
+				[dish, _at(0.0, 0.35, 0.2, Vector3.ONE, Vector3(PI * 0.42, 0.0, 0.0))],
+				[tip, _at(0.0, 0.78, 0.0)],
+			])
 		"brood":
-			# Eight-sided and bulging, like something with cargo in it. It has to
-			# read as "full" at a glance, because whether you pop it now or let it
-			# get further down the road is a decision and you only get to make it
-			# while you can still see which one it is.
+			# Eight-sided and bulging, and the bulge is now a visible belly: it has
+			# to read as FULL at a glance, because whether you pop it now or later
+			# is a decision you only get while you can still see which one it is.
 			var carrier := CylinderMesh.new()
 			carrier.top_radius = 0.34
-			carrier.bottom_radius = 0.62
-			carrier.height = 1.0
+			carrier.bottom_radius = 0.58
+			carrier.height = 0.9
 			carrier.radial_segments = 8
-			return carrier
+			var belly := SphereMesh.new()
+			belly.radius = 0.42
+			belly.height = 0.6
+			belly.radial_segments = 10
+			belly.rings = 5
+			return _merged([
+				[carrier, _at(0.0, 0.05, 0.0)],
+				[belly, _at(0.0, -0.28, 0.0)],
+			])
 		"breaker":
-			# Six-sided and squat: nothing else on the board is round, so a
-			# Breaker is identifiable from its outline alone even at 4x speed.
+			# Six-sided and squat, with a ram jutting forward and a spine plate on
+			# top. It is the thing built to walk through fire, and now looks it.
 			var bunker := CylinderMesh.new()
 			bunker.top_radius = 0.44
 			bunker.bottom_radius = 0.58
-			bunker.height = 1.0
+			bunker.height = 0.85
 			bunker.radial_segments = 6
-			return bunker
+			var ram := PrismMesh.new()
+			ram.size = Vector3(0.7, 0.45, 0.5)
+			var spine := BoxMesh.new()
+			spine.size = Vector3(0.2, 0.24, 0.9)
+			return _merged([
+				[bunker, _at(0.0, 0.0, 0.0)],
+				[ram, _at(0.0, -0.16, 0.55, Vector3.ONE, Vector3(PI * 0.5, 0.0, 0.0))],
+				[spine, _at(0.0, 0.5, -0.1)],
+			])
 		_:
 			var box := BoxMesh.new()
 			box.size = Vector3.ONE

@@ -1683,6 +1683,41 @@ inheritance; the late-campaign spread is Lastlight IV at 25 Integrity, Terminus
 IV at 20, Gantry IV and Coldstore IV at 52, Highline IV at 52. Every opening act
 still loses to a do-nothing run.
 
+## P0-67 · Detail is bought with triangles, not draw calls
+
+Asked for cooler weapons and more realistic enemies. The constraint that shaped
+the answer is the project's oldest render invariant: draw calls stay flat no
+matter how much is on screen, because everything that scales goes through a
+MultiMesh. So the quality lever is not more objects - it is making the ONE mesh
+each layer instances richer. `_merged()` welds a handful of primitives into a
+single ArrayMesh with SurfaceTool, and every turret part and drone class went
+from one primitive to a small assembly:
+
+- Ballistic: receiver + optics block + slung ammunition drum, twin barrels with
+  a muzzle brake. Cannon: the recoil taper + collar + bracing haunches, a real
+  forward-pointing bore with a muzzle ring. Suppressor: the drum wound with
+  three coil rings, the muzzle ring gaining a floating focus hub. Railgun: sled
+  + twin capacitor banks + heat-sink stack, twin rails with spacers where the
+  bare unit box used to be. Mounts all stand on a foundation slab with a seat
+  collar now - the difference between "a shape on the grass" and "installed".
+- Drones: the Skitter gets a swept tail fin, the Walker a sensor head and
+  shoulder plates, the Bulwark a sloped glacis and layered top plates (it wears
+  Plated in the matrix; it should look like it), the Lance swept side blades,
+  the Mender its tool halo, the Jammer the dish it jams with, the Brood a
+  visible cargo belly, the Breaker a ram and spine plate.
+- Turrets got their own material - machined metal at 0.55 metallic - instead of
+  borrowing the drones' matte skin. Both live in theme.json.
+
+Measured: draw calls flat at 38 from 0 to 400 enemies, which is the invariant;
+~110ms a frame on the software rasteriser, within noise of the pre-change 109.
+
+**The screenshot bug of the day:** fifty-one freshly assembled turrets rendered
+as NOTHING - `ArrayMesh` has no `material` property, unlike every PrimitiveMesh
+the file had ever assigned one to, so the assignment failed and the layers drew
+uncoloured nothing. Every mesh now goes through `_skin()`, which does it per
+surface. The tests all passed while the board was invisible; the screenshot did
+not.
+
 ## P0-14 · Deliberately not built in P0
 
 Not oversights — later phases, per §5.7. Anything tempting that came up is in
