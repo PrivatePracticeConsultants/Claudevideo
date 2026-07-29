@@ -25,6 +25,8 @@ func _initialize() -> void:
 	# whole 5,000-unit act is framed at once - which is most of what the feedback
 	# layer draws.
 	var zoom_steps := 0
+	# Which campaign level to capture. -1 keeps whatever the game opens on.
+	var level := -1
 	var args := OS.get_cmdline_user_args()
 	for i in args.size():
 		if args[i] == "--wave" and i + 1 < args.size():
@@ -35,17 +37,22 @@ func _initialize() -> void:
 			out_path = args[i + 1]
 		elif args[i] == "--zoom" and i + 1 < args.size():
 			zoom_steps = int(args[i + 1])
+		elif args[i] == "--level" and i + 1 < args.size():
+			level = int(args[i + 1])
 		elif args[i] == "--overlay":
 			show_overlay = true
-	_run(target_wave, min_enemies, out_path, show_overlay, zoom_steps)
+	_run(target_wave, min_enemies, out_path, show_overlay, zoom_steps, level)
 
 func _run(target_wave: int, min_enemies: int, out_path: String, show_overlay: bool,
-		zoom_steps: int = 0) -> void:
+		zoom_steps: int = 0, level: int = -1) -> void:
 	await process_frame
 	var main: Node = load(MAIN_SCENE).instantiate()
 	root.add_child(main)
 	await process_frame
 
+	if level >= 0:
+		main._start_level(level, {})
+		await process_frame
 	if main.get("_sim") == null:
 		printerr("The game failed to start; data did not load.")
 		quit(1)

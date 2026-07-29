@@ -110,6 +110,7 @@ func _validate() -> void:
 	_validate_enemies()
 	_validate_blueprints()
 	_validate_map()
+	_validate_routes()
 	_validate_engagement()
 
 ## Every module must actually do something, and only things the simulation knows
@@ -298,6 +299,52 @@ func _validate_map() -> void:
 ## no-build radius the corridor walls themselves overlap and it renders as one
 ## fused blob. Caught here because it is invisible in the JSON: a map author sees
 ## a list of coordinates, not the shape they make.
+## Extra roads on a board. Each is a COMPLETE route from the same gate to the same
+## exit, not a branch off the main one - which is what lets a drone's position stay
+## a single distance along a single polyline.
+##
+## Both endpoints are checked because a fork that starts or ends somewhere else is
+## not a fork, it is a second level sharing a map: drones would appear out of thin
+## air or leak somewhere the player was never told to defend.
+const ROUTE_ENDPOINT_TOLERANCE := 1.0
+
+func _validate_routes() -> void:
+	var main: Variant = map.get("path")
+	if typeof(main) != TYPE_ARRAY or (main as Array).size() < 2:
+		return
+	var extras: Variant = map.get("alternate_paths", [])
+	if typeof(extras) != TYPE_ARRAY:
+		errors.append("map: alternate_paths must be an array of routes.")
+		return
+	for r in (extras as Array).size():
+		var route: Variant = (extras as Array)[r]
+		var where := "map: alternate_paths[%d]" % r
+		if typeof(route) != TYPE_ARRAY or (route as Array).size() < 2:
+			errors.append("%s needs at least two waypoints." % where)
+			continue
+		for i in (route as Array).size():
+			var point: Variant = (route as Array)[i]
+			if typeof(point) != TYPE_DICTIONARY:
+				errors.append("%s waypoint %d must be an object." % [where, i])
+				continue
+			_req_num(point, "x", "%s waypoint %d" % [where, i], -1000000.0)
+			_req_num(point, "y", "%s waypoint %d" % [where, i], -1000000.0)
+		if not _same_point((route as Array)[0], (main as Array)[0]):
+			errors.append("%s starts somewhere the main road does not - a fork leaves the same gate." % where)
+		if not _same_point((route as Array)[-1], (main as Array)[-1]):
+			errors.append("%s ends somewhere the main road does not - a fork rejoins at the same exit." % where)
+	var weights: Variant = map.get("route_weights", [])
+	if typeof(weights) == TYPE_ARRAY and (weights as Array).size() > 0 \
+			and (weights as Array).size() != 1 + (extras as Array).size():
+		errors.append("map: route_weights has %d entries for %d routes."
+			% [(weights as Array).size(), 1 + (extras as Array).size()])
+
+func _same_point(a: Variant, b: Variant) -> bool:
+	if typeof(a) != TYPE_DICTIONARY or typeof(b) != TYPE_DICTIONARY:
+		return false
+	return absf(float((a as Dictionary).get("x", 0.0)) - float((b as Dictionary).get("x", 0.0))) <= ROUTE_ENDPOINT_TOLERANCE \
+		and absf(float((a as Dictionary).get("y", 0.0)) - float((b as Dictionary).get("y", 0.0))) <= ROUTE_ENDPOINT_TOLERANCE
+
 func _check_route_crowding(path: Array) -> void:
 	var clearance := float(building.get("min_distance_from_path", 0.0)) * 2.0
 	if clearance <= 0.0:

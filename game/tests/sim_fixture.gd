@@ -137,21 +137,36 @@ static func candidate_sites(sim: Sim) -> PackedInt32Array:
 	var sites := PackedInt32Array()
 	var near := sim.build_min_distance()
 	var span := sim.build_max_distance() - near
+	# Every road on the board, not just the one it was authored around. A board
+	# with a fork has two roads to hold, and a policy that only ever sees the first
+	# of them measures a level nobody would play that way - it lost terminus act
+	# III by eighty leaks while building a perfect line beside a road that only
+	# two thirds of the traffic was using.
+	#
+	# Interleaved by distance rather than route by route, so the policy spreads
+	# across both roads as it builds outward instead of finishing one and starting
+	# the other.
 	var prog := 0.0
-	while prog <= sim.path_length():
-		for side: float in [-1.0, 1.0]:
-			for fraction: float in SITE_OFFSETS:
-				sim.sample_for_render(prog, (near + span * fraction) * side)
-				var x := roundi(sim.out_x())
-				var y := roundi(sim.out_y())
-				# Only keep spots that fail purely for affordability reasons, so
-				# the list is stable regardless of how much Capital is in hand.
-				var verdict := sim.can_build_at(float(x), float(y), 0)
-				if verdict == Sim.BUILD_OK or verdict == Sim.BUILD_NO_CAPITAL \
-						or verdict == Sim.BUILD_AT_LIMIT:
-					sites.append(x)
-					sites.append(y)
-					break  # one spot per side per step; the rest are too close
+	var longest := 0.0
+	for r in sim.route_count():
+		longest = maxf(longest, sim.route_length(r))
+	while prog <= longest:
+		for r in sim.route_count():
+			if prog > sim.route_length(r):
+				continue
+			for side: float in [-1.0, 1.0]:
+				for fraction: float in SITE_OFFSETS:
+					sim.sample_for_render(prog, (near + span * fraction) * side, r)
+					var x := roundi(sim.out_x())
+					var y := roundi(sim.out_y())
+					# Only keep spots that fail purely for affordability reasons, so
+					# the list is stable regardless of how much Capital is in hand.
+					var verdict := sim.can_build_at(float(x), float(y), 0)
+					if verdict == Sim.BUILD_OK or verdict == Sim.BUILD_NO_CAPITAL \
+							or verdict == Sim.BUILD_AT_LIMIT:
+						sites.append(x)
+						sites.append(y)
+						break  # one spot per side per step; the rest are too close
 		prog += SITE_STRIDE
 	return sites
 
@@ -263,7 +278,12 @@ static func run_idle(sim: Sim) -> int:
 	return ticks
 
 ## Replay a recorded log into a fresh simulation, queuing everything up front.
-static func replay(sim: Sim, command_log: Dictionary) -> int:
+##
+## `stop_after` bounds how far it runs. Determinism is a claim about the state at
+## a given tick, so comparing two replays at tick 2,500 proves exactly what
+## comparing them at the end does - and on the campaign's largest act, playing all
+## sixteen waves twice over is five minutes of a suite that has to finish in ten.
+static func replay(sim: Sim, command_log: Dictionary, stop_after: int = MAX_TICKS) -> int:
 	var log_tick: PackedInt32Array = command_log["tick"]
 	var log_kind: PackedInt32Array = command_log["kind"]
 	var log_a: PackedInt32Array = command_log["a"]
@@ -289,7 +309,8 @@ static func replay(sim: Sim, command_log: Dictionary) -> int:
 			Sim.CMD_SET_PRIORITY:
 				sim.queue_priority(log_tick[i], log_a[i], log_b[i])
 	var ticks := 0
-	while not sim.is_over() and ticks < MAX_TICKS:
+	var limit := mini(stop_after, MAX_TICKS)
+	while not sim.is_over() and ticks < limit:
 		sim.step()
 		ticks += 1
 	return ticks

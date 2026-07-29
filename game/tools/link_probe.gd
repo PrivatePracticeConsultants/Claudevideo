@@ -19,6 +19,8 @@ func _init() -> void:
 		var level: Dictionary = levels[index]
 		var sim := SimFixture.start_act(level, {}, 20260727 + index)
 		SimFixture.run_greedy(sim)
+		# The drawn pair list is built on demand; nothing has asked for it here.
+		sim.rebuild_link_pairs(SimRenderer3D.MAX_DRAWN_LINKS)
 		var tiers := PackedInt32Array()
 		tiers.resize(4)
 		var linked := 0

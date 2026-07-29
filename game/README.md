@@ -5,10 +5,11 @@ Roguelite tower defense. Godot 4.x / GDScript. **3D, and it runs in a browser.**
 **Status: P0 complete and audited three times, then extended well past it.**
 Forty-eight levels — twelve boards played as four acts each, where every act
 opens more of the same road and keeps what you built on the last one — four
-weapon families with four tiers each and five targeting orders apiece, six drone
-classes, free placement on purchasable ground, saved progress, synthesised sound,
-and an end-of-act debrief, all on a deterministic 30Hz simulation drawn with real
-lighting, shadows and depth cueing. The design document is the master plan
+weapon families with four tiers each, five targeting orders apiece and support
+links between them, eight drone classes, a module drafted between acts, free
+placement on purchasable ground, saved progress, synthesised sound, and an
+end-of-act debrief, all on a deterministic 30Hz simulation drawn with real
+lighting, shadows and depth cueing. The last board has two roads. The design document is the master plan
 (v2); the phase ladder is §5.7. Formally this is P0 plus much of P1/P2's content;
 the run layer (P3) is the next real milestone.
 
@@ -70,6 +71,8 @@ Corridor Integrity. Hit zero and the level is lost.
 | **Vanguard Lance** | **620** | **168** | 11 | $150 | fastest *and* tough |
 | **Siege Breaker** | **1400** | 78 | 16 | $300 | shrugs off 80% of slows |
 | **Brood Carrier** | 150 | 95 | 5 | $40 | armoured; breaks into 3 Skitters |
+| **Field Mender** | 90 | 104 | 3 | $30 | heals everything around it |
+| **Static Jammer** | 340 | 122 | 7 | $110 | silences turrets it passes |
 
 The first three trade speed against health. The **Lance** does not — it is the
 fastest thing on the board *and* tougher than anything that is not slower than
@@ -87,9 +90,17 @@ the wrong weapon for what it leaves. Because it splits on death and not on exit,
 letting one through costs 5 and no Skitters: the one drone in the game where a
 leak can be the right call.
 
-All three arrive partway into the campaign (levels 18, 26 and 33), never open a
-wave, and stay a small share of any level's head-count — they are elites, not
-populations.
+The **Mender** and the **Jammer** are the two support classes, and neither is a
+point on the ladder. The Mender puts health back into everything around it and
+never into itself — it is small, quick and cheap, so *First* and *Toughest* walk
+straight past it. It is the drone the targeting orders exist for. The Jammer is
+the only thing in the game that attacks *your board*: it silences turrets it
+passes, and a jammed turret's cooldown does not advance either, so the silence
+costs exactly the uptime it looks like it costs.
+
+All five arrive partway into the campaign (levels 13, 18, 25, 26 and 33), never
+open a wave, and stay a small share of any level's head-count — they are elites,
+not populations.
 
 - **Click owned ground** (green) to build the selected weapon.
 - **Click a turret** to upgrade it a tier. Hovering shows its DPS and next cost.
@@ -111,7 +122,8 @@ populations.
   end makes a turret a few pixels wide.
 - **`Q`** cycles weapon · **`1`–`4`** speed · **`space`** pause · **`[`**/**`]`**
   move between unlocked boards · **`M`** mute · **`F3`** debug · **`R`** restart ·
-  **`N`** next level after a win.
+  **`N`** next level after a win. On a won act, **`1`**–**`3`** fit a module
+  instead of setting speed.
 
 When an act ends, the **debrief** under the banner says which of your weapon
 families actually did the work — damage landed and drones killed, per family, with
@@ -137,8 +149,28 @@ The Railgun is the opposite trade: one very slow, very long-ranged shot that
 tears down a whole lane at full damage. Worth several turrets against a column on
 a straight, and close to worthless against a scattered swarm.
 
+### Support links
+
+Every family projects a bonus onto turrets **of other families** nearby —
+Autocannon lends reach, Mortar and Railgun lend damage, Suppressor lends rate of
+fire. Only other families, which is the point: four Autocannons in a row get
+nothing from each other, and a mixed line is worth considerably more than the sum
+of its parts. The lines drawn between your turrets are the links; hover one to see
+what it is receiving.
+
+Nothing is projected at tier 1. Upgrading a Suppressor makes the four guns around
+it better as well as itself, which is the first reason in the game to spend on a
+turret that is not your best one.
+
+### Money
+
+Capital left in hand when a wave begins earns 5% back, up to $90. It is not much
+— it is enough that "hold two waves and buy the better thing" is a real
+alternative to spending everything the moment it arrives.
+
 You are capped at a **deployment limit** per level — 24 turrets at the first,
-doubling every ten levels up to the pool ceiling of 144. It is also capped by how
+doubling every ten levels up to the pool ceiling of 208 (144 on single-road
+boards; the forked acts get more because there is more road to stand beside). It is also capped by how
 much road the act has actually revealed, so act I of a board is a smaller board
 than act III. Once your allowance is placed the only way to grow is to upgrade,
 which is what makes *where* you put them matter.
@@ -164,7 +196,28 @@ The price is deliberately paid in tiers rather than in emplacements. An earlier
 version capped how many turrets could carry and deleted the rest; it balanced
 fine and was the wrong trade.
 
+Corridor Integrity carries between the acts of a board too, so a sloppy act I
+costs something in act IV. It resets when the campaign moves to a new board.
+
 Retrying an act (`R`) restores the same inheritance, not an empty board.
+
+### The module draft
+
+Win an act that continues a chain and three **modules** are offered — press `1`,
+`2` or `3` to fit one for the rest of the board. Ten in the pool, each touching a
+different system: fire rate, damage, reach, the support-link radius, opening
+Capital, the interest ceiling, sell refunds, Integrity, jam resistance, upgrade
+cost. The offer is seeded by the level, so the same act always offers the same
+three — a draft is something you plan a board around, not a slot machine. They
+reset with the board.
+
+### Two roads
+
+The last board forks. Both roads leave the same gate and reach the same exit, and
+three drones take the long way for every one that takes the short one — so the
+fork is not a second copy of the problem, it is a shorter deadline. Coverage has
+to be divided, and the deployment limit means a turret cannot watch both. It opens
+at act III, when the corridor is fully revealed.
 
 ### Crossing to a new board
 
@@ -314,8 +367,9 @@ core/       deterministic simulation — no Node, no scene tree, no engine time
 data/       every balance value in the game, as JSON
   building.json     placement rules and the purchasable-ground grid
   levels.json       campaign order
-  blueprints/       weapon families and their tiers
+  blueprints/       weapon families, their tiers, and their support links
   enemies/          drone classes
+  modules/          the between-acts draft pool
   maps/ waves/      one file per map, one per engagement
 render/     3D drawing (MultiMesh + interpolation), camera, effects, overlay
 audio/      sfx.gd — every sound in the game, synthesised at startup
@@ -377,6 +431,10 @@ godot --headless --path game --script res://tools/balance_probe.gd -- --from 32 
 # One board's four acts, idle-testing the last of them - the act that inherits
 # three acts of building is the one that can turn out to need no input at all.
 godot --headless --path game --script res://tools/board_probe.gd -- --from 44
+
+# What the support links are actually worth in a real game, rather than in a
+# unit test - how many turrets ended up linked, and to what effect.
+godot --headless --path game --script res://tools/link_probe.gd
 ```
 
 Scope discipline: ideas beyond the current phase go in `post-launch.md`, not into

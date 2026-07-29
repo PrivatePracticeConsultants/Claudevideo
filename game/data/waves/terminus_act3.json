@@ -5,7 +5,7 @@
   "path_waypoints": 16,
   "carries_forward": true,
   "starting_capital": 14700,
-  "platform_limit": 144,
+  "platform_limit": 208,
   "starting_ground_reach": 114.0,
   "act_hp_multiplier": 9.2,
   "act_bounty_multiplier": 4.92,

@@ -82,8 +82,41 @@ var _wp_y: PackedFloat64Array = PackedFloat64Array()
 var _seg_dx: PackedFloat64Array = PackedFloat64Array()
 var _seg_dy: PackedFloat64Array = PackedFloat64Array()
 var _seg_cum: PackedFloat64Array = PackedFloat64Array()
+## Per-segment length, stored rather than derived from consecutive _seg_cum
+## entries. Cumulative distance restarts at zero for each route, so the difference
+## across a route boundary is meaningless - and the placement rules walk every
+## segment in the board without caring which route it belongs to.
+var _seg_len: PackedFloat64Array = PackedFloat64Array()
+## Each segment's start point, so the placement scan can walk every segment on the
+## board in one flat loop without mapping indices back to routes.
+var _seg_ax: PackedFloat64Array = PackedFloat64Array()
+var _seg_ay: PackedFloat64Array = PackedFloat64Array()
 var _seg_count: int = 0
 var _path_length: float = 0.0
+
+## A board may carry more than one complete route from the gate to the exit.
+##
+## Modelled as N complete routes rather than as a graph with branch nodes, and
+## that is the whole reason this was affordable: a drone's position stays one
+## scalar distance along one polyline, the placement rules stay "distance to the
+## nearest segment", and nothing in the tick learned what a junction is. What it
+## costs is that the routes are authored whole and share only their endpoints -
+## which is exactly what a fork that rejoins looks like anyway.
+##
+## The point of it is that coverage has to be DIVIDED. A single road rewards one
+## long line; two roads mean every turret is choosing which one it watches, and
+## the deployment limit means it cannot watch both.
+var _route_first_wp: PackedInt32Array = PackedInt32Array()
+var _route_wp_count: PackedInt32Array = PackedInt32Array()
+var _route_first_seg: PackedInt32Array = PackedInt32Array()
+var _route_seg_count: PackedInt32Array = PackedInt32Array()
+var _route_length: PackedFloat64Array = PackedFloat64Array()
+var _route_count: int = 1
+## Flat lookup of route-per-spawn, one entry per unit of weight, so a board can
+## send two drones down the long way for every one down the short way without any
+## arithmetic at spawn time.
+var _route_pick: PackedInt32Array = PackedInt32Array()
+var _spawn_cursor: int = 0
 
 # Placement is free-form: anywhere in a band alongside the corridor, rather than
 # on a fixed set of pads. These are the rules that define that band.
@@ -327,6 +360,10 @@ var e_leak: PackedInt32Array = PackedInt32Array()
 ## spirals to a standstill and makes one turret worth more than the ten around it.
 var e_slow_ticks: PackedInt32Array = PackedInt32Array()
 var e_slow_factor: PackedFloat64Array = PackedFloat64Array()
+## Which of the board's routes this drone is walking. Assigned at spawn and
+## never changed: the routes are complete roads, not a graph, so there is no
+## junction at which changing it would mean anything.
+var e_route: PackedInt32Array = PackedInt32Array()
 var e_x: PackedFloat64Array = PackedFloat64Array()
 var e_y: PackedFloat64Array = PackedFloat64Array()
 var e_live_count: int = 0
@@ -345,6 +382,7 @@ var _e_free_top: int = 0
 ## emerges into the next tick's hash, whatever killed it.
 var _split_type: PackedInt32Array = PackedInt32Array()
 var _split_prog: PackedFloat64Array = PackedFloat64Array()
+var _split_route: PackedInt32Array = PackedInt32Array()
 var _split_pending: int = 0
 
 ## Projectile storage. `p_target_gen` is not redundant with `p_target`: slots are
@@ -416,6 +454,13 @@ var _link_pairs: PackedInt32Array = PackedInt32Array()
 ## is twenty thousand compares - nothing once in a while, and far too much every
 ## tick.
 var _links_dirty: bool = true
+## Which turret changed, or -1 for "recompute everything". Two changes before a
+## recompute fall back to -1, which is correct and costs nothing: commands are
+## applied once per tick and the recompute runs on the same tick.
+var _links_touched: int = -1
+## The furthest any family's link reaches, so a partial recompute knows how wide
+## its neighbourhood is.
+var _max_support_radius: float = 0.0
 
 ## Damage actually landed, per weapon family, and drones killed per family.
 ##
@@ -506,29 +551,88 @@ func _build_path() -> void:
 	var full: Array = _db.map["path"]
 	var revealed := int(_db.engagement.get("path_waypoints", full.size()))
 	revealed = clampi(revealed, 2, full.size())
-	var path: Array = full.slice(0, revealed)
-	var n := path.size()
-	_wp_x.resize(n)
-	_wp_y.resize(n)
-	for i in n:
-		var p: Dictionary = path[i]
-		_wp_x[i] = float(p["x"])
-		_wp_y[i] = float(p["y"])
-	_seg_count = n - 1
-	_seg_dx.resize(_seg_count)
-	_seg_dy.resize(_seg_count)
-	_seg_cum.resize(_seg_count + 1)
-	var cum := 0.0
-	for i in _seg_count:
-		var dx := _wp_x[i + 1] - _wp_x[i]
-		var dy := _wp_y[i + 1] - _wp_y[i]
-		var length := sqrt(dx * dx + dy * dy)
-		_seg_dx[i] = dx / length
-		_seg_dy[i] = dy / length
-		_seg_cum[i] = cum
-		cum += length
-	_seg_cum[_seg_count] = cum
-	_path_length = cum
+	# Route 0 is the road the board was authored around; anything in
+	# "alternate_paths" is a fork that leaves the gate with it and rejoins at the
+	# exit. Absent means one route, which is what every board written before forks
+	# existed has, and it costs those boards nothing.
+	var routes := [full.slice(0, revealed)]
+	# A fork opens only once the corridor is fully revealed - acts I and II of a
+	# board are one road, acts III and IV are two.
+	#
+	# The alternative was revealing a proportional prefix of each fork, and it does
+	# not work: a fork is authored to leave the gate and rejoin at the exit, so a
+	# prefix of one ends in the middle of nowhere and everything walking it leaks
+	# there. Opening at full reveal is both simpler and a better escalation - the
+	# board you have learned to hold suddenly has a second way in.
+	if revealed >= full.size():
+		for extra: Array in (_db.map.get("alternate_paths", []) as Array):
+			routes.append(extra)
+
+	_route_count = routes.size()
+	_route_first_wp.resize(_route_count)
+	_route_wp_count.resize(_route_count)
+	_route_first_seg.resize(_route_count)
+	_route_seg_count.resize(_route_count)
+	_route_length.resize(_route_count)
+
+	var total_wp := 0
+	var total_seg := 0
+	for route: Array in routes:
+		total_wp += route.size()
+		total_seg += route.size() - 1
+	_wp_x.resize(total_wp)
+	_wp_y.resize(total_wp)
+	_seg_dx.resize(total_seg)
+	_seg_dy.resize(total_seg)
+	_seg_cum.resize(total_seg)
+	_seg_len.resize(total_seg)
+	_seg_ax.resize(total_seg)
+	_seg_ay.resize(total_seg)
+
+	var wp := 0
+	var seg := 0
+	for r in _route_count:
+		var route: Array = routes[r]
+		_route_first_wp[r] = wp
+		_route_wp_count[r] = route.size()
+		_route_first_seg[r] = seg
+		_route_seg_count[r] = route.size() - 1
+		for i in route.size():
+			var p: Dictionary = route[i]
+			_wp_x[wp + i] = float(p["x"])
+			_wp_y[wp + i] = float(p["y"])
+		var cum := 0.0
+		for i in route.size() - 1:
+			var dx := _wp_x[wp + i + 1] - _wp_x[wp + i]
+			var dy := _wp_y[wp + i + 1] - _wp_y[wp + i]
+			var length := sqrt(dx * dx + dy * dy)
+			_seg_dx[seg + i] = dx / length
+			_seg_dy[seg + i] = dy / length
+			_seg_cum[seg + i] = cum
+			_seg_len[seg + i] = length
+			_seg_ax[seg + i] = _wp_x[wp + i]
+			_seg_ay[seg + i] = _wp_y[wp + i]
+			cum += length
+		_route_length[r] = cum
+		wp += route.size()
+		seg += route.size() - 1
+	_seg_count = total_seg
+	# The longest route is what "how far is it to the exit" means for anything that
+	# needs one number - the camera fit, and the deployment limit's road budget.
+	_path_length = 0.0
+	for r in _route_count:
+		_path_length = maxf(_path_length, _route_length[r])
+
+	# Spawn shares, expanded to a flat table so picking one is an index rather than
+	# a search. A route with no declared weight carries one share.
+	_route_pick = PackedInt32Array()
+	var weights: Array = _db.map.get("route_weights", [])
+	for r in _route_count:
+		var weight := 1
+		if r < weights.size():
+			weight = maxi(1, int(weights[r]))
+		for _w in weight:
+			_route_pick.append(r)
 
 func _load_build_rules() -> void:
 	_build_min_dist = float(_db.building["min_distance_from_path"])
@@ -730,6 +834,7 @@ func _build_blueprints() -> void:
 		_bp_support_damage[b] = float(support.get("damage_bonus", 0.0))
 		_bp_support_range[b] = float(support.get("range_bonus", 0.0))
 		_bp_support_tier_scale[b] = float(support.get("tier_scaling", 0.0))
+		_max_support_radius = maxf(_max_support_radius, radius)
 	var slot := 0
 	for b in n:
 		var tiers: Array = (_db.blueprints[_bp_ids[b]] as Dictionary)["tiers"]
@@ -787,12 +892,14 @@ func _build_pools() -> void:
 	e_leak.resize(_max_enemies)
 	e_slow_ticks.resize(_max_enemies)
 	e_slow_factor.resize(_max_enemies)
+	e_route.resize(_max_enemies)
 	e_x.resize(_max_enemies)
 	e_y.resize(_max_enemies)
 	_e_free.resize(_max_enemies)
 	# One entry per drone that could die this tick, which cannot exceed the pool.
 	_split_type.resize(_max_enemies)
 	_split_prog.resize(_max_enemies)
+	_split_route.resize(_max_enemies)
 	for i in _max_enemies:
 		# Free list is filled in reverse so slot 0 is handed out first; makes
 		# test expectations and debug output readable.
@@ -965,7 +1072,7 @@ func adopt(platforms: Array, owned_cells: PackedInt32Array) -> void:
 		# the player re-issue every standing order is just tedium.
 		t_priority[index] = clampi(int(record.get("priority", TARGET_FIRST)),
 			0, target_mode_count() - 1)
-	_links_dirty = true
+	_mark_links_dirty(-1)
 
 ## Placement that skips the price but honours every other rule. Only used by
 ## adopt(); a turret carried forward was already paid for.
@@ -1035,7 +1142,9 @@ func apply_modules(ids: PackedStringArray) -> void:
 		_sell_refund += float(m.get("sell_refund", 0.0))
 		_integrity_max += int(m.get("integrity", 0))
 		_integrity += int(m.get("integrity", 0))
-		_upgrade_discount = clampf(_upgrade_discount + float(m.get("upgrade_discount", 0.0)), 0.0, 0.9)
+		# Clamped at 1.0 rather than at some arbitrary share: upgrade_cost floors at
+		# 1 anyway, so a full discount is cheap and not free.
+		_upgrade_discount = clampf(_upgrade_discount + float(m.get("upgrade_discount", 0.0)), 0.0, 1.0)
 		_jam_resist = clampf(_jam_resist + float(m.get("jam_resist", 0.0)), 0.0, 1.0)
 		var reach := float(m.get("support_radius", 0.0))
 		if reach > 0.0:
@@ -1045,7 +1154,8 @@ func apply_modules(ids: PackedStringArray) -> void:
 			var growth := (1.0 + reach) * (1.0 + reach)
 			for b in _bp_support_radius_sq.size():
 				_bp_support_radius_sq[b] *= growth
-	_links_dirty = true
+			_max_support_radius *= (1.0 + reach)
+	_mark_links_dirty(-1)
 
 func modules() -> PackedStringArray: return _module_ids
 func module_rate_bonus() -> float: return _module_rate
@@ -1186,12 +1296,15 @@ func _apply_commands() -> void:
 ## so it is safe to call from inside the simulation.
 func distance_to_path(x: float, y: float) -> float:
 	var best := INF
+	# Every segment of every route. A board with two roads has to be buildable
+	# beside both, and "how close is the nearest road" is the same question
+	# whichever road answers it.
 	for i in _seg_count:
-		var ax := _wp_x[i]
-		var ay := _wp_y[i]
+		var ax := _seg_ax[i]
+		var ay := _seg_ay[i]
 		var dx := _seg_dx[i]
 		var dy := _seg_dy[i]
-		var seg_length := _seg_cum[i + 1] - _seg_cum[i]
+		var seg_length := _seg_len[i]
 		# Projection of (point - a) onto the unit segment direction, clamped to
 		# the segment so the nearest point is never past either end.
 		var t := (x - ax) * dx + (y - ay) * dy
@@ -1262,7 +1375,7 @@ func _try_place(x: float, y: float, blueprint_index: int) -> int:
 	t_rate_mult[index] = 1.0
 	t_damage_mult[index] = 1.0
 	t_range_mult[index] = 1.0
-	_links_dirty = true
+	_mark_links_dirty(index)
 	_capital -= _tier_cost[slot]
 	return BUILD_OK
 
@@ -1308,7 +1421,9 @@ func _try_sell(platform_index: int) -> bool:
 	t_used[last] = 0
 	t_count -= 1
 	_sold += 1
-	_links_dirty = true
+	# Selling compacts the pool, so indices move and a partial recompute cannot
+	# know whose neighbourhood changed. Full, and rare.
+	_mark_links_dirty(-1)
 	return true
 
 ## Start the next wave now instead of waiting out the gap between waves.
@@ -1352,7 +1467,7 @@ func _try_upgrade(platform_index: int) -> bool:
 	t_tier[platform_index] += 1
 	t_tier_slot[platform_index] = _bp_tier_offset[t_blueprint[platform_index]] + t_tier[platform_index]
 	# A tier changes what this turret PROJECTS, not just what it does.
-	_links_dirty = true
+	_mark_links_dirty(platform_index)
 	_capital -= cost
 	return true
 
@@ -1412,7 +1527,7 @@ func _advance_enemies() -> void:
 			if e_slow_ticks[i] == 0:
 				e_slow_factor[i] = 1.0
 		var prog := e_prog[i] + step_distance
-		if prog >= _path_length:
+		if prog >= _route_length[e_route[i]]:
 			# Leak. Integrity is the run's real health bar; this is the only
 			# place it ever decreases.
 			_integrity -= e_leak[i]
@@ -1420,23 +1535,25 @@ func _advance_enemies() -> void:
 			_despawn_enemy(i)
 			continue
 		e_prog[i] = prog
-		_sample_path(prog, e_offset[i])
+		_sample_path(prog, e_offset[i], e_route[i])
 		e_x[i] = _out_x
 		e_y[i] = _out_y
 
 ## Position of a point `prog` units along the path, pushed `offset` units
 ## perpendicular to the current segment. Writes to _out_x/_out_y instead of
 ## returning, to keep the hot path allocation-free.
-func _sample_path(prog: float, offset: float) -> void:
+func _sample_path(prog: float, offset: float, route: int = 0) -> void:
+	var first := _route_first_seg[route]
+	var count := _route_seg_count[route]
 	var clamped := prog
 	if clamped < 0.0:
 		clamped = 0.0
-	elif clamped > _path_length:
-		clamped = _path_length
+	elif clamped > _route_length[route]:
+		clamped = _route_length[route]
 	# Binary search the cumulative table. The path has a handful of segments, so
 	# this is a few compares and costs less than maintaining a per-enemy cursor.
-	var lo := 0
-	var hi := _seg_count - 1
+	var lo := first
+	var hi := first + count - 1
 	while lo < hi:
 		var mid := (lo + hi + 1) >> 1
 		if _seg_cum[mid] <= clamped:
@@ -1447,8 +1564,8 @@ func _sample_path(prog: float, offset: float) -> void:
 	var dx := _seg_dx[lo]
 	var dy := _seg_dy[lo]
 	# Perpendicular of a unit vector is (-dy, dx) - no trigonometry needed.
-	_out_x = _wp_x[lo] + dx * t - dy * offset
-	_out_y = _wp_y[lo] + dy * t + dx * offset
+	_out_x = _seg_ax[lo] + dx * t - dy * offset
+	_out_y = _seg_ay[lo] + dy * t + dx * offset
 
 ## Recompute what every turret is getting from its neighbours.
 ##
@@ -1460,65 +1577,119 @@ func _sample_path(prog: float, offset: float) -> void:
 ## clamped, so the answer does not depend on which turret the loop happens to
 ## reach first. That is what makes it safe to leave out of the tick's ordering
 ## rules entirely.
+func _mark_links_dirty(index: int) -> void:
+	_links_touched = index if not _links_dirty else -1
+	_links_dirty = true
+
 func _refresh_links() -> void:
 	if not _links_dirty:
 		return
 	_links_dirty = false
-	_link_pairs.clear()
-	for i in t_count:
-		var rate := 0.0
-		var damage := 0.0
-		var reach := 0.0
-		var mine := t_blueprint[i]
-		for j in t_count:
-			if j == i:
+	if _links_touched < 0:
+		for i in t_count:
+			_recompute_link(i)
+	else:
+		# Only the turret that changed and whatever it can reach. Placing or
+		# upgrading turret k changes what k projects and what k receives, and
+		# nothing else in the board moved - so recomputing all of them is O(n^2)
+		# work to produce n-minus-a-handful identical answers.
+		#
+		# Measured, and not a micro-optimisation: at 208 emplacements the full
+		# recompute is 43,264 compares, the scripted policy changes the board a few
+		# thousand times an act, and the suite went from under eight minutes to over
+		# ten on that alone.
+		_recompute_link(_links_touched)
+		var reach := _max_support_radius
+		for i in t_count:
+			if i == _links_touched:
 				continue
-			var theirs := t_blueprint[j]
-			# The rule the whole mechanic rests on: a family projects onto other
-			# families only, so a clustered line of one weapon gets nothing.
-			if theirs == mine:
-				continue
-			var radius_sq := _bp_support_radius_sq[theirs]
-			if radius_sq <= 0.0:
-				continue
-			var dx := t_x[j] - t_x[i]
-			var dy := t_y[j] - t_y[i]
-			if dx * dx + dy * dy > radius_sq:
-				continue
-			# Nothing at tier 1, and that is the load-bearing part.
-			#
-			# It reads as flavour - the coupling hardware arrives with the first
-			# refit - and it is really a balance rule. A board carried into the next
-			# act arrives refitted to tier 1, so an inheritance projects nothing at
-			# all until it is re-invested in. Measured with links live at tier 1,
-			# twenty-four inherited turrets cleared the whole of Highway act II with
-			# no input: the act became a cutscene. It also gives the player the first
-			# reason in the game to upgrade a turret that is not their best one.
-			var scale := _bp_support_tier_scale[theirs] * float(t_tier[j])
-			if scale <= 0.0:
-				continue
-			rate += _bp_support_rate[theirs] * scale
-			damage += _bp_support_damage[theirs] * scale
-			reach += _bp_support_range[theirs] * scale
-			if _link_pairs.size() < MAX_DRAWN_LINKS * 2:
-				_link_pairs.append(i)
-				_link_pairs.append(j)
-		# Links are capped; modules are not part of that cap, because they are paid
-		# for with a draft rather than with placement and capping them together
-		# would make a module worthless on exactly the well-built board that earned
-		# it.
-		t_rate_mult[i] = 1.0 + minf(rate, _support_cap_rate) + _module_rate
-		t_damage_mult[i] = 1.0 + minf(damage, _support_cap_damage) + _module_damage
-		t_range_mult[i] = 1.0 + minf(reach, _support_cap_range) + _module_range
+			var dx := t_x[i] - t_x[_links_touched]
+			var dy := t_y[i] - t_y[_links_touched]
+			if dx * dx + dy * dy <= reach * reach:
+				_recompute_link(i)
+	_links_touched = -1
 	for i in range(t_count, _max_platforms):
 		t_rate_mult[i] = 1.0 + _module_rate
 		t_damage_mult[i] = 1.0 + _module_damage
 		t_range_mult[i] = 1.0 + _module_range
 
-## Links are drawn, and past a certain density drawing more of them communicates
-## nothing. The multipliers are always computed in full; only the drawing is
-## bounded.
-const MAX_DRAWN_LINKS := 900
+## What one turret is getting from its neighbours.
+##
+## Order-independent by construction: every contribution is summed and the total
+## clamped, so the answer does not depend on which turret the loop happens to
+## reach first. That is what makes it safe to leave out of the tick's ordering
+## rules entirely, and what makes the partial recompute above sound.
+func _recompute_link(i: int) -> void:
+	var rate := 0.0
+	var damage := 0.0
+	var reach := 0.0
+	var mine := t_blueprint[i]
+	for j in t_count:
+		if j == i:
+			continue
+		var theirs := t_blueprint[j]
+		# The rule the whole mechanic rests on: a family projects onto other
+		# families only, so a clustered line of one weapon gets nothing.
+		if theirs == mine:
+			continue
+		var radius_sq := _bp_support_radius_sq[theirs]
+		if radius_sq <= 0.0:
+			continue
+		var dx := t_x[j] - t_x[i]
+		var dy := t_y[j] - t_y[i]
+		if dx * dx + dy * dy > radius_sq:
+			continue
+		# Nothing at tier 1, and that is the load-bearing part.
+		#
+		# It reads as flavour - the coupling hardware arrives with the first refit -
+		# and it is really a balance rule. A board carried into the next act arrives
+		# refitted to tier 1, so an inheritance projects nothing at all until it is
+		# re-invested in. Measured with links live at tier 1, twenty-four inherited
+		# turrets cleared the whole of Highway act II with no input: the act became
+		# a cutscene. It also gives the player the first reason in the game to
+		# upgrade a turret that is not their best one.
+		var scale := _bp_support_tier_scale[theirs] * float(t_tier[j])
+		if scale <= 0.0:
+			continue
+		rate += _bp_support_rate[theirs] * scale
+		damage += _bp_support_damage[theirs] * scale
+		reach += _bp_support_range[theirs] * scale
+	# Links are capped; modules are not part of that cap, because they are paid for
+	# with a draft rather than with placement, and capping them together would make
+	# a module worthless on exactly the well-built board that earned it.
+	t_rate_mult[i] = 1.0 + minf(rate, _support_cap_rate) + _module_rate
+	t_damage_mult[i] = 1.0 + minf(damage, _support_cap_damage) + _module_damage
+	t_range_mult[i] = 1.0 + minf(reach, _support_cap_range) + _module_range
+
+## The pairs the renderer draws, rebuilt on demand rather than kept in step.
+##
+## Deliberately not maintained by _refresh_links: the drawing is wanted a handful
+## of times a second when the board visibly changes, and the multipliers are wanted
+## thirty times a second whether anything is on screen or not. Tying the two put an
+## O(turrets squared) list build in the simulation's hot path for the benefit of a
+## renderer that may not exist.
+## `limit` is the caller's drawing budget: past a certain density another line
+## communicates nothing, and the number belongs to whoever is doing the drawing
+## rather than to the simulation, which computes every multiplier in full whether
+## anything is on screen or not.
+func rebuild_link_pairs(limit: int) -> void:
+	_link_pairs.clear()
+	for i in t_count:
+		var mine := t_blueprint[i]
+		for j in t_count:
+			if j == i or t_blueprint[j] == mine:
+				continue
+			var radius_sq := _bp_support_radius_sq[t_blueprint[j]]
+			if radius_sq <= 0.0 or _bp_support_tier_scale[t_blueprint[j]] * float(t_tier[j]) <= 0.0:
+				continue
+			var dx := t_x[j] - t_x[i]
+			var dy := t_y[j] - t_y[i]
+			if dx * dx + dy * dy > radius_sq:
+				continue
+			if _link_pairs.size() >= limit * 2:
+				return
+			_link_pairs.append(i)
+			_link_pairs.append(j)
 
 ## Menders and jammers, both of which pulse on a fixed cadence rather than every
 ## tick.
@@ -1899,6 +2070,7 @@ func _damage_enemy(index: int, amount: int, family: int) -> void:
 	if _type_split_into[e_type[index]] >= 0 and _split_pending < _split_type.size():
 		_split_type[_split_pending] = e_type[index]
 		_split_prog[_split_pending] = e_prog[index]
+		_split_route[_split_pending] = e_route[index]
 		_split_pending += 1
 	_despawn_enemy(index)
 
@@ -1911,7 +2083,7 @@ func _resolve_splits() -> void:
 	for i in _split_pending:
 		var parent := _split_type[i]
 		for _n in _type_split_count[parent]:
-			_spawn_at(_type_split_into[parent], _split_prog[i])
+			_spawn_at(_type_split_into[parent], _split_prog[i], _split_route[i])
 	_split_pending = 0
 
 # --- wave director -----------------------------------------------------------
@@ -1993,12 +2165,21 @@ func _type_index(id: String) -> int:
 			return i
 	return -1
 
+## Send a drone out of the gate, down whichever road is next in the rotation.
+##
+## The rotation is a flat table of route indices expanded from the map's weights,
+## walked by a counter, so it is deterministic and needs no arithmetic at spawn
+## time. Deliberately not random: a fork whose traffic split wandered run to run
+## would make "how much do I put on the left road" unanswerable.
 func _spawn(type_index: int) -> void:
-	_spawn_at(type_index, 0.0)
+	var route := _route_pick[_spawn_cursor % _route_pick.size()]
+	_spawn_cursor += 1
+	_spawn_at(type_index, 0.0, route)
 
-## Put a drone on the road at a given distance along it. The wave director always
-## passes 0; a brood hatching passes wherever its parent died.
-func _spawn_at(type_index: int, prog: float) -> void:
+## Put a drone on a road at a given distance along it. The wave director always
+## passes 0; a brood hatching passes wherever its parent died, on its parent's
+## road - the wreck is on the road it was travelling.
+func _spawn_at(type_index: int, prog: float, route: int = 0) -> void:
 	if _e_free_top == 0:
 		# Cannot happen with validated data (Database rejects a wave wider than
 		# max_enemies), but if it ever does, count it rather than pretending the
@@ -2023,7 +2204,8 @@ func _spawn_at(type_index: int, prog: float) -> void:
 	# A recycled slot must not inherit the last occupant's suppression.
 	e_slow_ticks[i] = 0
 	e_slow_factor[i] = 1.0
-	_sample_path(prog, e_offset[i])
+	e_route[i] = clampi(route, 0, _route_count - 1)
+	_sample_path(prog, e_offset[i], e_route[i])
 	e_x[i] = _out_x
 	e_y[i] = _out_y
 	e_live_count += 1
@@ -2116,10 +2298,24 @@ func platform_rate_bonus(i: int) -> float: return t_rate_mult[i] - 1.0
 func platform_damage_bonus(i: int) -> float: return t_damage_mult[i] - 1.0
 func platform_range_bonus(i: int) -> float: return t_range_mult[i] - 1.0
 ## How many other turrets are lending this one anything.
+##
+## Counted directly rather than read off the renderer's pair list, because that
+## list is built on demand and is empty in any run with no renderer attached -
+## which is every headless test and every balance probe.
 func platform_link_count(i: int) -> int:
 	var count := 0
-	for k in range(0, _link_pairs.size(), 2):
-		if _link_pairs[k] == i:
+	var mine := t_blueprint[i]
+	for j in t_count:
+		if j == i or t_blueprint[j] == mine:
+			continue
+		var radius_sq := _bp_support_radius_sq[t_blueprint[j]]
+		if radius_sq <= 0.0:
+			continue
+		if _bp_support_tier_scale[t_blueprint[j]] * float(t_tier[j]) <= 0.0:
+			continue
+		var dx := t_x[j] - t_x[i]
+		var dy := t_y[j] - t_y[i]
+		if dx * dx + dy * dy <= radius_sq:
 			count += 1
 	return count
 func link_count() -> int: return _link_pairs.size() / 2
@@ -2137,12 +2333,27 @@ func platform_dps(i: int) -> float:
 func tier_name(blueprint: int, tier: int) -> String:
 	var tiers: Array = (_db.blueprints[_bp_ids[blueprint]] as Dictionary)["tiers"]
 	return str((tiers[tier] as Dictionary)["name"])
-func waypoint_count() -> int: return _wp_x.size()
+## The board's roads. Route 0 is the one the board was authored around; a board
+## with no forks has exactly this one and nothing else changes.
+func route_count() -> int: return _route_count
+func route_waypoint_count(r: int) -> int: return _route_wp_count[r]
+func route_waypoint_x(r: int, i: int) -> float: return _wp_x[_route_first_wp[r] + i]
+func route_waypoint_y(r: int, i: int) -> float: return _wp_y[_route_first_wp[r] + i]
+func route_length(r: int) -> float: return _route_length[r]
+func enemy_route(i: int) -> int: return e_route[i]
+
+func waypoint_count() -> int: return _route_wp_count[0]
 ## How much of the map's full route this engagement uses.
-func revealed_waypoints() -> int: return _wp_x.size()
+func revealed_waypoints() -> int: return _route_wp_count[0]
 func full_waypoints() -> int: return (_db.map["path"] as Array).size()
 ## Distance along the path at which waypoint `i` sits.
-func segment_start_distance(i: int) -> float: return _seg_cum[i]
+## Distance along route 0 at which waypoint i sits. The last waypoint has no
+## segment of its own, so it answers with the route's whole length - which is what
+## "the distance to the exit" means and what every caller wants.
+func segment_start_distance(i: int) -> float:
+	if i >= _route_seg_count[0]:
+		return _route_length[0]
+	return _seg_cum[_route_first_seg[0] + i]
 func waypoint_x(i: int) -> float: return _wp_x[i]
 func waypoint_y(i: int) -> float: return _wp_y[i]
 func blueprint_index(id: String) -> int:
@@ -2197,8 +2408,8 @@ func rng_draws() -> int: return _rng.draws()
 
 ## Sample a path position for rendering. Public because the renderer interpolates
 ## `prog` between ticks and then asks where that lands.
-func sample_for_render(prog: float, offset: float) -> void:
-	_sample_path(prog, offset)
+func sample_for_render(prog: float, offset: float, route: int = 0) -> void:
+	_sample_path(prog, offset, clampi(route, 0, _route_count - 1))
 func out_x() -> float: return _out_x
 func out_y() -> float: return _out_y
 
@@ -2259,6 +2470,8 @@ func state_hash() -> int:
 	h = StateHash.mix_bytes(h, e_x.to_byte_array())
 	h = StateHash.mix_bytes(h, e_y.to_byte_array())
 	h = StateHash.mix_bytes(h, e_type.to_byte_array())
+	h = StateHash.mix_bytes(h, e_route.to_byte_array())
+	h = StateHash.mix_int(h, _spawn_cursor)
 	h = StateHash.mix_bytes(h, p_alive)
 	h = StateHash.mix_bytes(h, p_x.to_byte_array())
 	h = StateHash.mix_bytes(h, p_y.to_byte_array())

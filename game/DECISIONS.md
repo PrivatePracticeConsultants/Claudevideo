@@ -1277,6 +1277,147 @@ moment anything died, and this file has a rule about numbers that cannot be
 explained. Families that never fired are omitted rather than printed as zeroes; a
 line of noughts is not information.
 
+## P0-58 · Interest, so that holding Capital is a thing you can do
+
+Capital not spent the instant it arrived was Capital wasted, which made "build
+now" beat "build better in two waves" unconditionally. 5% of what is in hand when
+a wave begins, capped at $90, nothing on the opening wave.
+
+Both bounds matter. Uncapped, a percentage of an unbounded pile is an unbounded
+pile, and the correct play late in a long act becomes building nothing and
+banking - the exact opposite of the decision it was added to create. Paying on
+wave one would just be a bigger starting purse.
+
+## P0-59 · Support links: a family reaches other families only
+
+Placement decided coverage and nothing else. Every weapon family now projects a
+bonus onto turrets **of other families** within its radius: Autocannon lends
+reach, Mortar and Railgun lend damage, Suppressor lends rate of fire.
+
+The other-families rule is the whole mechanic. Without it this is a flat damage
+bonus with extra steps; with it, four Autocannons in a row get nothing from each
+other and a mixed line is worth more than the sum of its parts.
+
+**Nothing is projected at tier 1, and that is a balance rule wearing flavour's
+clothes.** A board carried into the next act arrives refitted to tier 1, so an
+inheritance projects nothing until it is re-invested in. Measured with links live
+at tier 1: twenty-four inherited turrets cleared the whole of Highway act II with
+no input at all — the act became a cutscene. Gating it fixed that, and gave the
+player the first reason in the game to upgrade a turret that is not their best
+one.
+
+Measured in real play, which is the check that matters for a mechanic that could
+easily have existed only in a unit test:
+
+| level | turrets | linked | links | best | mean rate |
+| --- | --- | --- | --- | --- | --- |
+| highway_act1 | 24 | 13 | 22 | +14% range | — |
+| capital_act1 | 40 | 40 | 139 | +23% rate, +26% dmg | +12.0% |
+| railyard_act1 | 61 | 61 | 291 | at the caps | +17.8% |
+| reactor_act3 | 144 | 144 | 651 | at the caps | +17.0% |
+
+Capped by **total** rather than by number of sources, because "the first three
+contributors in index order" is deterministic and arbitrary, and a rule nobody
+can predict is not a rule anyone can play around.
+
+**The recompute had to become incremental.** It is O(turrets²) and runs when the
+board changes; at 208 emplacements that is 43,264 compares, the scripted policy
+changes the board a few thousand times an act, and the suite went from under
+eight minutes to over ten on that alone. Placing or upgrading turret k changes
+only what k projects and what k receives, so the recompute now touches k and
+whatever lies within the widest support radius of it. Selling still does a full
+pass, because it compacts the pool and indices move.
+
+## P0-60 · Two drones with jobs
+
+Every drone before these was answered by pointing more guns at the road.
+
+**Field Mender** puts health back into everything around it and never into
+itself — a drone that outheals your line while also being the toughest thing in
+it is a wall, not a puzzle. It is small, quick and cheap, so First and Toughest
+walk straight past it. It is the first thing in the game that makes the targeting
+orders worth having.
+
+Its bounty sits on the ladder where its 90 health says it belongs, not where its
+importance does. Priced above the Brood Carrier it broke the roster's one hard
+rule — the tougher drone pays better — and the suite caught it. Paying over the
+odds for a Mender would also make the drone you most want dead the one you most
+want to farm.
+
+**Static Jammer** is the only thing in the game that attacks the *board*. It
+silences turrets it passes, and a jammed turret's cooldown does not advance
+either, so the silence costs exactly the uptime it looks like it costs. It makes
+"where is my line thinnest" a question whose answer changes while you watch.
+
+Both seeded as elites at a flat threat budget: a Mender priced at four Sentry
+Walkers rather than its own two, a Jammer at two Bulwarks. Deliberate
+over-estimates — adding difficulty by accident is far harder to notice than
+removing it.
+
+## P0-61 · Integrity that carries, and a module draft
+
+Integrity now persists between the acts of one board. Before it, a sloppy act I
+cost nothing in act IV and a chain was four fresh starts wearing a chain's
+clothes. It never crosses to a new board: a board is a contract, and a bad run
+three boards ago following you forever with no way to recover it is a punishment
+rather than a decision.
+
+**Honest about the measurement.** The scripted policy almost never leaks, so
+persistence is nearly invisible to the probe — Highline still runs
+100/100/100/100. It is a real change for a human player, who does leak, and the
+probe cannot tell you that. What the probe can say is that it breaks nothing.
+
+**Modules** are the between-acts choice: three offered after a win that continues
+a chain, one kept for the rest of the board. Ten in the pool, each deliberately
+touching a different system, so a draft is a question about what this board needs
+rather than a comparison of three numbers on one axis.
+
+The offer is seeded by the level and not by the clock, so the same act always
+offers the same three — that is what makes a draft something you can plan around
+instead of a slot machine you reload. Everything is applied at construction, like
+an inherited board and like salvage, so nothing in the tick has a special case
+for modules: a module is a different number in a table the tick was already
+reading, which is why adding one is a data change.
+
+Link radius is grown by the **square** of the fraction, because the table it lands
+in is squared — applying the raw 30% there would have been a quietly much smaller
+buff than the module claims.
+
+## P0-62 · Forks: N complete routes, not a graph
+
+Terminus is the first board with two roads. They are modelled as **two complete
+routes from the same gate to the same exit**, not as a branch node in a graph,
+and that is the whole reason it was affordable: a drone's position stays one
+scalar distance along one polyline, the placement rules stay "distance to the
+nearest segment", and nothing in the tick learned what a junction is.
+
+What it buys is that coverage has to be **divided**. One road rewards one long
+line; two roads mean every turret chooses which one it watches, and the
+deployment limit means it cannot watch both. The fork is 10,477 units against the
+main road's 15,950, so it is not a second copy of the same problem — it is a
+shorter deadline, and `route_weights` sends three drones the long way for every
+one that takes it.
+
+**A fork opens only at full reveal.** The alternative was revealing a proportional
+prefix of each, and it does not work: a fork is authored to leave the gate and
+rejoin at the exit, so a prefix of one ends in the middle of nowhere and
+everything walking it leaks there. Acts I and II are one road; III and IV are two,
+which is also a better escalation — the board you have learned to hold suddenly
+has a second way in.
+
+**Two things the measurement forced.**
+
+The scripted policy only knew about road 0, so it built a perfect line beside a
+road carrying two thirds of the traffic and lost act III by eighty leaks. That is
+a fixture bug, not a balance result — a policy that cannot see half the board
+measures a level nobody would play that way. Fixed, the same act lost by sixteen.
+
+Sixteen leaks was a real result, and the answer was not to make the fork weaker.
+The deployment limit has always been bounded by how much road there is to stand
+beside, and a forked act carries 26,427 units against a single road's 15,950 —
+so `max_platforms` went from 144 to 208 and the two forked acts got a limit to
+match. They then won at full Integrity.
+
 ## P0-14 · Deliberately not built in P0
 
 Not oversights — later phases, per §5.7. Anything tempting that came up is in

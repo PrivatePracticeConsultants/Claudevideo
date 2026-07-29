@@ -206,11 +206,12 @@ func _fit_camera() -> void:
 	var max_x := -INF
 	var min_z := INF
 	var max_z := -INF
-	for i in _sim.waypoint_count():
-		min_x = minf(min_x, _sim.waypoint_x(i))
-		max_x = maxf(max_x, _sim.waypoint_x(i))
-		min_z = minf(min_z, _sim.waypoint_y(i))
-		max_z = maxf(max_z, _sim.waypoint_y(i))
+	for r in _sim.route_count():
+		for i in _sim.route_waypoint_count(r):
+			min_x = minf(min_x, _sim.route_waypoint_x(r, i))
+			max_x = maxf(max_x, _sim.route_waypoint_x(r, i))
+			min_z = minf(min_z, _sim.route_waypoint_y(r, i))
+			max_z = maxf(max_z, _sim.route_waypoint_y(r, i))
 	var reach := _sim.build_max_distance()
 	min_x -= reach
 	max_x += reach
@@ -420,7 +421,9 @@ func _verge_mesh() -> ArrayMesh:
 	var reach := half + float(_world.get("wall_width", 16.0)) + float(_world.get("verge_width", 54.0))
 	var lift := float(_world.get("verge_height", 1.5))
 	var builder := _StripBuilder.new(_sim)
-	builder.strip(-reach, lift, reach, lift)
+	for r in _sim.route_count():
+		builder.use_route(r)
+		builder.strip(-reach, lift, reach, lift)
 	return builder.commit()
 
 ## The centre line, as a thin raised strip down the middle of the road.
@@ -428,7 +431,9 @@ func _marking_mesh() -> ArrayMesh:
 	var width := float(_world.get("road_line_width", 4.0))
 	var surface := float(_world.get("corridor_height", 9.0)) + 0.4
 	var builder := _StripBuilder.new(_sim)
-	builder.strip(-width, surface, width, surface)
+	for r in _sim.route_count():
+		builder.use_route(r)
+		builder.strip(-width, surface, width, surface)
 	return builder.commit()
 
 ## Scattered debris off the road: one instanced layer, one draw call, placed from
@@ -500,10 +505,12 @@ func _corridor_mesh() -> ArrayMesh:
 	var half := float(_world.get("corridor_width", 76.0)) * 0.5
 	var surface := float(_world.get("corridor_height", 9.0))
 	var builder := _StripBuilder.new(_sim)
-	# Road surface, and a lip down each edge so it reads as a raised slab.
-	builder.strip(-half, surface, half, surface)
-	builder.strip(-half, 0.0, -half, surface)
-	builder.strip(half, surface, half, 0.0)
+	for r in _sim.route_count():
+		builder.use_route(r)
+		# Road surface, and a lip down each edge so it reads as a raised slab.
+		builder.strip(-half, surface, half, surface)
+		builder.strip(-half, 0.0, -half, surface)
+		builder.strip(half, surface, half, 0.0)
 	return builder.commit()
 
 func _wall_mesh() -> ArrayMesh:
@@ -511,13 +518,15 @@ func _wall_mesh() -> ArrayMesh:
 	var thickness := float(_world.get("wall_width", 16.0))
 	var height := float(_world.get("wall_height", 34.0))
 	var builder := _StripBuilder.new(_sim)
-	for side: float in [-1.0, 1.0]:
-		var inner := half * side
-		var outer := (half + thickness) * side
-		# Inner face (toward the road), top cap, outer face.
-		builder.strip(inner, 0.0, inner, height, side < 0.0)
-		builder.strip(inner, height, outer, height, side < 0.0)
-		builder.strip(outer, height, outer, 0.0, side < 0.0)
+	for r in _sim.route_count():
+		builder.use_route(r)
+		for side: float in [-1.0, 1.0]:
+			var inner := half * side
+			var outer := (half + thickness) * side
+			# Inner face (toward the road), top cap, outer face.
+			builder.strip(inner, 0.0, inner, height, side < 0.0)
+			builder.strip(inner, height, outer, height, side < 0.0)
+			builder.strip(outer, height, outer, 0.0, side < 0.0)
 	return builder.commit()
 
 ## Accumulates quad strips along the path into one indexed mesh.
@@ -533,20 +542,33 @@ class _StripBuilder:
 	var _nx := PackedFloat64Array()
 	var _nz := PackedFloat64Array()
 
-	func _init(sim: Sim) -> void:
+	## Which of the board's roads this ribbon follows. A board with one road builds
+	## exactly what it always did; a board with a fork builds one ribbon per route
+	## into the same mesh, so two roads still cost one draw call.
+	var _route: int = 0
+
+	func _init(sim: Sim, route: int = 0) -> void:
 		_sim = sim
-		var count := sim.waypoint_count()
+		use_route(route)
+
+	## Point the builder at another of the board's roads, keeping everything
+	## accumulated so far. One builder walked across every route produces one mesh,
+	## so a board with a fork still draws its corridor in a single call.
+	func use_route(route: int) -> void:
+		var sim := _sim
+		_route = route
+		var count := sim.route_waypoint_count(route)
 		_nx.resize(count)
 		_nz.resize(count)
 		for i in count:
 			var dx := 0.0
 			var dz := 0.0
 			if i > 0:
-				dx += sim.waypoint_x(i) - sim.waypoint_x(i - 1)
-				dz += sim.waypoint_y(i) - sim.waypoint_y(i - 1)
+				dx += sim.route_waypoint_x(route, i) - sim.route_waypoint_x(route, i - 1)
+				dz += sim.route_waypoint_y(route, i) - sim.route_waypoint_y(route, i - 1)
 			if i < count - 1:
-				dx += sim.waypoint_x(i + 1) - sim.waypoint_x(i)
-				dz += sim.waypoint_y(i + 1) - sim.waypoint_y(i)
+				dx += sim.route_waypoint_x(route, i + 1) - sim.route_waypoint_x(route, i)
+				dz += sim.route_waypoint_y(route, i + 1) - sim.route_waypoint_y(route, i)
 			var length := sqrt(dx * dx + dz * dz)
 			if length <= 0.0:
 				length = 1.0
@@ -555,11 +577,11 @@ class _StripBuilder:
 
 	func strip(offset_a: float, height_a: float, offset_b: float, height_b: float,
 			flip: bool = false) -> void:
-		var count := _sim.waypoint_count()
+		var count := _sim.route_waypoint_count(_route)
 		var base := _vertices.size()
 		for i in count:
-			var px := _sim.waypoint_x(i)
-			var pz := _sim.waypoint_y(i)
+			var px := _sim.route_waypoint_x(_route, i)
+			var pz := _sim.route_waypoint_y(_route, i)
 			_vertices.append(Vector3(px + _nx[i] * offset_a, height_a, pz + _nz[i] * offset_a))
 			_vertices.append(Vector3(px + _nx[i] * offset_b, height_b, pz + _nz[i] * offset_b))
 		for i in count - 1:
@@ -848,6 +870,10 @@ func _instanced_material(enemy_id: String = "") -> StandardMaterial3D:
 
 ## One pooled MultiMesh, like everything else on screen - draw calls stay flat
 ## whether one turret is firing or a hundred and forty-four are.
+## Past a certain density another link line communicates nothing, so the drawing
+## is bounded even though every multiplier behind it is computed in full.
+const MAX_DRAWN_LINKS := 900
+
 const FX_CAPACITY := 1024
 enum { FX_FLASH, FX_SPARK, FX_BLAST, FX_WRECK }
 
@@ -1122,11 +1148,16 @@ func _build_link_layer() -> void:
 	material.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
 	material.disable_receive_shadows = true
 	bar.material = material
-	_links = _instanced(bar, Sim.MAX_DRAWN_LINKS)
+	_links = _instanced(bar, MAX_DRAWN_LINKS)
 	_links.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(_links)
 
 func _refresh_link_lines() -> void:
+	# The pair list is built on demand rather than kept in step by the simulation:
+	# drawing is wanted a handful of times a second when the board visibly changes,
+	# and the multipliers are wanted thirty times a second whether anything is on
+	# screen or not.
+	_sim.rebuild_link_pairs(MAX_DRAWN_LINKS)
 	var mm := _links.multimesh
 	var lift := float(_world.get("link_lift", 9.0))
 	var width := float(_world.get("link_width", 3.0))
@@ -1137,7 +1168,7 @@ func _refresh_link_lines() -> void:
 	var railgun := _color_of(_world.get("platform_railgun", "#d8d24f"))
 	var shown := 0
 	for k in _sim.link_count():
-		if shown >= Sim.MAX_DRAWN_LINKS:
+		if shown >= MAX_DRAWN_LINKS:
 			break
 		var to := _sim.link_from(k)
 		var from := _sim.link_to(k)
@@ -1261,7 +1292,7 @@ func _update_enemies(alpha: float) -> void:
 		# Interpolate distance-along-path, then resolve it to a position, so
 		# enemies round corners instead of cutting across them.
 		var prog: float = _sim.e_prev_prog[i] + (_sim.e_prog[i] - _sim.e_prev_prog[i]) * alpha
-		_sim.sample_for_render(prog, _sim.e_offset[i])
+		_sim.sample_for_render(prog, _sim.e_offset[i], _sim.enemy_route(i))
 		var px := _sim.out_x()
 		var pz := _sim.out_y()
 		var type_index: int = _sim.e_type[i]

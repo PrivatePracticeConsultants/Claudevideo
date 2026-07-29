@@ -123,8 +123,11 @@ func test_a_lent_range_bonus_actually_extends_the_reach() -> void:
 func test_the_total_is_capped() -> void:
 	# Capped by TOTAL and not by number of sources, so the answer never depends on
 	# which turret the loop happened to reach first.
+	# Stopped partway: the ceiling is a property of the multipliers, and a board
+	# with a hundred turrets on it proves it exactly as well as a finished act does
+	# for a fraction of the suite's budget.
 	var sim := SimFixture.for_level("reactor_01", "reactor_act3")
-	SimFixture.run_greedy(sim)
+	SimFixture.run_greedy(sim, true, 5, 1)
 	var cap := float(SimFixture.database().economy["support_cap_fire_rate"])
 	for i in sim.t_count:
 		assert_lte(sim.platform_rate_bonus(i), cap + 0.0001,

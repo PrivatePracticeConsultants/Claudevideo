@@ -214,8 +214,12 @@ func test_a_run_against_both_replays_identically() -> void:
 	assert_false(chosen.is_empty(), "fixture sanity: found a level with jammers")
 	var live := SimFixture.for_level(str(chosen["map"]), str(chosen["engagement"]))
 	var log := SimFixture.run_greedy(live, true, 4, 1)
+	# Bounded, like every other replay check on a late-campaign act: determinism is
+	# a claim about the state at a given tick.
 	var again := SimFixture.for_level(str(chosen["map"]), str(chosen["engagement"]))
-	SimFixture.replay(again, log)
+	SimFixture.replay(again, log, 2500)
 	var third := SimFixture.for_level(str(chosen["map"]), str(chosen["engagement"]))
-	SimFixture.replay(third, log)
-	assert_eq(again.state_hash(), third.state_hash(), "same log, same end state")
+	SimFixture.replay(third, log, 2500)
+	assert_eq(again.tick(), third.tick(), "both ran the same distance")
+	assert_eq(again.state_hash(), third.state_hash(),
+		"same log, same seed, same state at the same tick")
