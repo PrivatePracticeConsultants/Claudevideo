@@ -195,8 +195,8 @@ func test_selling_carries_the_order_with_the_compaction() -> void:
 		"and it is the survivor's own order, in its new slot")
 
 func test_orders_carry_to_the_next_act() -> void:
-	# Tiers are refitted between acts; orders are not. Making the player re-issue
-	# every standing order on a thirty-turret board is tedium, not difficulty.
+	# Everything about a turret carries between acts - tier and standing order
+	# alike. Making the player re-issue thirty orders would be tedium.
 	var levels := Database.load_levels()
 	var pair := []
 	for i in levels.size() - 1:

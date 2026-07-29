@@ -1634,6 +1634,55 @@ line running off the right edge of a 1280-wide window and losing the Shielded
 drones at the end — the ones that most needed reading — which is why enemies grew
 a `short_name` and the preview groups by class instead of tagging every group.
 
+## P0-66 · Tiers carry, and the waves absorb the price
+
+Reported: "Every time I go to a new level, it resets the levels of my weapons.
+Let's not do that."
+
+That reset was P0-51's deliberate answer to the cutscene problem - an act that
+inherits a finished tier-4 board is won by that board with no input at all - and
+the reasoning still holds. The experience does not. A tier is the most expensive
+thing a player buys; buying one knowing it expires at the act boundary is a worse
+decision than not buying it, which turns the game's main money sink into a trap.
+`CARRY_TIER_CAP` was deleted outright - the purity linter rightly refused an
+unbounded sentinel pretending to be a balance value - and the price moved off the
+player and onto the waves: acts II-IV are now authored against a board that
+arrives intact.
+
+**The gate had to change with it, honestly.** "Losable by building nothing from
+the inheritance" stopped having a yes: the last act of a chain arrives holding a
+full-limit, full-tier board, and there is nothing a competent run can add that an
+idle one lacks. Demanding that gate is demanding the inheritance be broken, which
+is the thing that was just reported as a bug. The gate is now: winnable by the
+competent run, and losable from a CLEAN start - the claim that the waves demand
+the board the chain builds.
+
+**What the re-measurement taught, in order:**
+
+1. The lift needed is act-position-graded, not flat: inheriting an act I board
+   (mostly tier 1-2) is worth little; inheriting an act III board (all tier 4) is
+   worth the whole tier ladder, which is 8-10x DPS family by family. Acts II got
+   x1.4 health, acts III x2.4, acts IV x3.4 on the measured baseline - then
+   per-board corrections downward where the probe lost.
+2. `max_enemies` 2048 -> 4096. The load-time pool validator caught three late
+   acts whose lifted peak head-count would have silently dropped drones at the
+   worst moment - exactly the failure it was built to catch.
+3. **Chained integrity is a real difficulty channel now.** Terminus IV kept
+   losing by exactly 4 leaks at wildly different health values, and the reason
+   was upstream: act III was ending at 52 Integrity, and the finale inherits
+   that. Softening the finale could not fix arriving wounded. Act III was eased
+   until it ends at 100, and the finale was tuned from there - it now wins at 20
+   Integrity with 5 leaks, still the closest act in the game.
+4. The escalation test had to learn what an affix is: Highway IV reads x12.89
+   raw against act III's x14.58, but it is Swift - as played it is the harder
+   act. The test now compares effective values (hp and count with affix
+   multipliers folded in) instead of raw file numbers.
+
+Measured after: 48/48 won by the scripted run playing each chain with its real
+inheritance; the late-campaign spread is Lastlight IV at 25 Integrity, Terminus
+IV at 20, Gantry IV and Coldstore IV at 52, Highline IV at 52. Every opening act
+still loses to a do-nothing run.
+
 ## P0-14 · Deliberately not built in P0
 
 Not oversights — later phases, per §5.7. Anything tempting that came up is in

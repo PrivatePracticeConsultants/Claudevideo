@@ -115,7 +115,7 @@ not populations.
   line's uptime; *Nearest* keeps a Suppressor's slow on what is closest to it
   rather than to the exit; *Toughest* puts a Railgun on the Breaker and lets forty
   Skitters past; *Weakest* is how a Cannon line clears chaff so the heavy guns are
-  never distracted. Orders carry between acts even though tiers do not.
+  never distracted. Orders carry between acts, and so do tiers.
 - **`E`** calls the next wave in early for a bounty — the gap between waves is
   when Capital accumulates, so it trades preparation for money.
 - **Scroll to zoom** on whatever the cursor is over, **middle-drag to pan**,
@@ -233,24 +233,24 @@ still there, still covering exactly what it covered. Act I of a new board always
 starts clean.
 
 What escalates between acts is **what walks the road**: more drones, and tougher
-ones. Terminus act I sends 4,890 drones at ×1.25 health; act IV sends 12,090 at
-×9.55. Acts used to escalate partly by revealing more road and raising the
+ones. Terminus act I sends 4,890 drones at ×1.25 health; act IV sends 10,555 at
+×9.57 — and that health figure is against a board that arrives with every tier
+you bought still on it. Acts used to escalate partly by revealing more road and raising the
 limit, and that was the wrong feeling — the board kept moving out from under a
 line that was already built, so holding meant stretching rather than
 reinforcing.
 
-**Every turret you built carries forward.** Two things do not:
+**Everything you built carries forward — placements, weapons, tiers, targeting
+orders, ground.** Only Capital resets, so each act's spending is its own
+decision.
 
-- **Capital.** Each act's spending is its own decision.
-- **Tiers.** Turrets arrive **refitted**, back to tier 1. You keep every
-  placement, every weapon choice and all your ground; you re-earn the depth.
-  Without it an act that ended tier-4 across the board simply wins the next one
-  for you — measured, *every* carrying act in the campaign could be cleared by
-  building nothing at all.
-
-The price is deliberately paid in tiers rather than in emplacements. An earlier
-version capped how many turrets could carry and deleted the rest; it balanced
-fine and was the wrong trade.
+Turrets used to arrive refitted back to tier 1, and that rule died on contact
+with a player: "every time I go to a new level it resets the levels of my
+weapons." A tier is the most expensive thing you buy, and buying it knowing it
+expires at the act boundary is a worse decision than not buying it. The waves
+absorbed the price instead — acts II–IV are sized for a board that arrives
+intact, which is why an act IV health multiplier reads 10× where an act I reads
+1.5×.
 
 Corridor Integrity carries between the acts of a board too, so a sloppy act I
 costs something in act IV. It resets when the campaign moves to a new board.

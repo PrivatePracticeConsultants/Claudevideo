@@ -17,6 +17,8 @@ func _init() -> void:
 	var stop_after := 1 << 30
 	var check_idle := false
 	var sweep := -1
+	var save_path := ""
+	var load_path := ""
 	var argv := OS.get_cmdline_user_args()
 	for i in argv.size():
 		if argv[i] == "--level" and i + 1 < argv.size():
@@ -32,6 +34,12 @@ func _init() -> void:
 			skip_before = int(argv[i + 1])
 		elif argv[i] == "--sweep" and i + 1 < argv.size():
 			sweep = int(argv[i + 1])
+		elif argv[i] == "--save-board" and i + 1 < argv.size():
+			# After each won act, persist the hand-over. Pairs with --load-board to
+			# split a chain across processes - see _save_board.
+			save_path = argv[i + 1]
+		elif argv[i] == "--load-board" and i + 1 < argv.size():
+			load_path = argv[i + 1]
 		elif argv[i] == "--idle":
 			check_idle = true
 	if sweep >= 0:
@@ -43,6 +51,8 @@ func _init() -> void:
 	print("%-4s%-18s%9s%8s%8s%8s%8s%7s%7s" % ["#", "engagement", "result",
 		"integ", "kills", "leaks", "built", "tier4", "carry"])
 	var carry := {}
+	if not load_path.is_empty():
+		carry = _load_board(load_path)
 	var losses := 0
 	for index in levels.size():
 		if only >= 0 and index != only:
@@ -84,8 +94,47 @@ func _init() -> void:
 				losses += 1
 
 		carry = sim.board_snapshot() if won else {}
+		if not save_path.is_empty() and won:
+			_save_board(save_path, carry)
 	print("levels not won: %d" % losses)
 	quit(0)
+
+## Persist the chain's hand-over so a later invocation can resume mid-chain.
+##
+## Exists because a chain's cost grew past a single process's wall-clock budget
+## once acts were sized for boards that carry their tiers: four late acts is now
+## ~12,000 drones each. Without this, the only way to measure act IV was to
+## replay acts I-III first, every time.
+func _save_board(path: String, board: Dictionary) -> void:
+	var out := {"platforms": board.get("platforms", []), "salvage": board.get("salvage", 0),
+		"integrity": board.get("integrity", 0), "cells": Array(board.get("cells", PackedInt32Array()))}
+	var fh := FileAccess.open(path, FileAccess.WRITE)
+	fh.store_string(JSON.stringify(out))
+	fh.close()
+	print("     (board saved to %s)" % path)
+
+func _load_board(path: String) -> Dictionary:
+	var fh := FileAccess.open(path, FileAccess.READ)
+	if fh == null:
+		printerr("cannot read %s" % path)
+		return {}
+	var data: Variant = JSON.parse_string(fh.get_as_text())
+	fh.close()
+	if typeof(data) != TYPE_DICTIONARY:
+		return {}
+	var board: Dictionary = data
+	var cells := PackedInt32Array()
+	for v: Variant in (board.get("cells", []) as Array):
+		cells.append(int(v))
+	board["cells"] = cells
+	# JSON round-trips ints as floats; the sim indexes blueprints by int.
+	var platforms: Array = board.get("platforms", [])
+	for i in platforms.size():
+		var p: Dictionary = platforms[i]
+		for key in ["blueprint", "tier", "priority"]:
+			if p.has(key):
+				p[key] = int(p[key])
+	return board
 
 ## Replay one level across a range of health multipliers.
 ##

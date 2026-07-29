@@ -1,9 +1,10 @@
 {
   "_comment": "Engine-shaped limits for the deterministic simulation. Pool capacities are hard ceilings: the sim never grows an array at runtime, so these must exceed the worst case any wave file can produce - and Database refuses to load a wave that would breach one rather than letting spawns vanish. max_enemies went 1280 -> 2048 when head-count started scaling with the deployment limit; the heaviest authored wave is 1,621 drones. max_projectiles went 2560 -> 8192 for the same reason at the other end: 144 turrets put far more shots in the air than 60 did. Both loops are O(pool) per tick regardless of how much is alive, so these are a real cost and not free headroom. max_platforms rose from 144 to 208 when the first forked board arrived: Terminus acts III and IV carry 26,427 units of road against the 15,950 a single-road board has, and the deployment limit has always been bounded by how much road there is to stand beside. Holding it at 144 measured as a loss by sixteen leaks with a perfect line on both roads - the turrets were not the problem, there were not enough of them.",
   "tick_rate_hz": 30,
-  "max_enemies": 2048,
+  "max_enemies": 4096,
   "max_projectiles": 8192,
   "max_platforms": 208,
   "spatial_hash_cell_size": 96.0,
-  "spatial_hash_margin_cells": 4
+  "spatial_hash_margin_cells": 4,
+  "_max_enemies_why": "Raised from 2048 when turrets started carrying their tiers between acts. An act that inherits an intact tier-4 board needs waves sized for one, and the peak simultaneous head-count went past the old ceiling on three late acts - which the wave validator caught at load, by design, instead of silently dropping drones at tick four thousand."
 }

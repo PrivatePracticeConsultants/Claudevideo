@@ -40,20 +40,34 @@ func test_the_escalation_is_in_the_waves() -> void:
 			continue
 		var here := Database.load_engagement(str(levels[i]["map"]), str(levels[i]["engagement"]))
 		var next := Database.load_engagement(str(levels[i + 1]["map"]), str(levels[i + 1]["engagement"]))
+		# As the acts are actually PLAYED: affixes multiply health and head-count
+		# at load, so an act whose raw hp multiplier dipped but whose Resilient
+		# affix more than makes it up really is the tougher act. Comparing the raw
+		# file numbers here once failed a finale that was measurably the hardest
+		# act in the game.
 		var grew_count := _drone_count(next) > _drone_count(here)
-		var grew_health := float(next.engagement.get("act_hp_multiplier", 1.0)) \
-			> float(here.engagement.get("act_hp_multiplier", 1.0))
+		var grew_health := _effective_hp(next) > _effective_hp(here)
 		assert_true(grew_count or grew_health,
 			"%s is no harder than the act before it - %d drones at x%.2f health against %d at x%.2f"
 				% [str(levels[i + 1]["engagement"]), _drone_count(next),
-					float(next.engagement.get("act_hp_multiplier", 1.0)),
-					_drone_count(here), float(here.engagement.get("act_hp_multiplier", 1.0))])
+					_effective_hp(next), _drone_count(here), _effective_hp(here)])
+
+func _effective_hp(db: Database) -> float:
+	var total := float(db.engagement.get("act_hp_multiplier", 1.0))
+	for id: Variant in (db.engagement.get("affixes", []) as Array):
+		total *= maxf(0.0, float((db.affixes.get(str(id), {}) as Dictionary)
+			.get("hp_multiplier", 1.0)))
+	return total
 
 func _drone_count(db: Database) -> int:
 	var total := 0
+	var mult := 1.0
+	for id: Variant in (db.engagement.get("affixes", []) as Array):
+		mult *= maxf(0.0, float((db.affixes.get(str(id), {}) as Dictionary)
+			.get("count_multiplier", 1.0)))
 	for wave: Dictionary in (db.engagement["waves"] as Array):
 		for group: Dictionary in (wave["groups"] as Array):
-			total += int(group["count"])
+			total += maxi(1, int(round(float(group["count"]) * mult)))
 	return total
 
 func test_the_revealed_prefix_never_moves() -> void:
@@ -81,40 +95,38 @@ func test_a_carried_board_arrives_intact() -> void:
 
 	var second := SimFixture.for_level("highway_01", "highway_act2")
 	second.adopt(snapshot["platforms"], snapshot["cells"])
-	assert_eq(second.t_count, mini(first.t_count, second.carry_ceiling()),
-		"every turret that fits carried forward")
+	assert_eq(second.t_count, first.t_count, "every turret carried forward")
 	assert_eq(second.carry_dropped(), 0, "none were dropped by the corridor")
-	var stepped_down := 0
-	# Only as far as the inheritance ceiling: past that the turrets were stood
-	# down, which is a different thing from being carried badly.
+	var upgraded := 0
 	for i in second.t_count:
 		assert_almost_eq(second.t_x[i], first.t_x[i], 0.0001, "turret %d kept its place" % i)
 		assert_eq(second.platform_blueprint(i), first.platform_blueprint(i),
 			"turret %d kept its weapon" % i)
-		assert_eq(second.platform_tier(i),
-			clampi(mini(first.platform_tier(i) - 1, Sim.CARRY_TIER_CAP), 0, 99),
-			"turret %d arrives refitted" % i)
+		assert_eq(second.platform_tier(i), first.platform_tier(i),
+			"turret %d kept its tier" % i)
 		if first.platform_tier(i) > 0:
-			stepped_down += 1
-	assert_gt(float(stepped_down), 0.0,
-		"fixture sanity: act 1 upgraded something, so the tier step is exercised")
+			upgraded += 1
+	assert_gt(float(upgraded), 0.0,
+		"fixture sanity: act 1 upgraded something, so tier carry is exercised")
 
-func test_a_finished_board_cannot_be_inherited_finished() -> void:
-	# The property the whole chain rests on being a game: however comfortably an
-	# act was won, what the next one inherits is bounded. Without this an act that
-	# ended tier-4 across the board wins the following act with no input at all -
-	# measured on every carrying act in the campaign before the cap existed.
+func test_an_upgraded_turret_stays_upgraded() -> void:
+	# The reversal of the rule this test used to assert. For most of the project a
+	# carried turret arrived refitted to tier 1, because an act that inherits a
+	# finished board is won by that board with no input at all. That reasoning was
+	# sound and the experience was not: "every time I go to a new level it resets
+	# the levels of my weapons" - a tier is the most expensive thing a player
+	# buys, and buying it knowing it expires is worse than not buying it. The
+	# price moved into the waves: acts II-IV are authored against a board that
+	# arrives INTACT, and the idle gate now asks that an act be losable from a
+	# clean start rather than from an inheritance.
 	var sim := SimFixture.for_level("highway_01", "highway_act2")
 	var top := sim.blueprint_tier_count(sim.blueprint_index("ballistic")) - 1
-	assert_gt(float(top), float(Sim.CARRY_TIER_CAP),
-		"fixture sanity: there are tiers above the carry cap")
 	var spot := SimFixture.a_site(sim)
 	sim.adopt([{"x": float(spot[0]), "y": float(spot[1]),
 		"blueprint": sim.blueprint_index("ballistic"), "tier": top}],
 		PackedInt32Array())
 	assert_eq(sim.t_count, 1, "the turret carried")
-	assert_eq(sim.platform_tier(0), Sim.CARRY_TIER_CAP,
-		"a top-tier turret arrives capped, not intact")
+	assert_eq(sim.platform_tier(0), top, "a top-tier turret arrives at top tier")
 
 func test_carrying_a_board_costs_nothing() -> void:
 	# Those turrets were paid for in the act that built them. Charging again

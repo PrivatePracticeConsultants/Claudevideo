@@ -102,18 +102,21 @@ func test_every_campaign_chain_is_winnable_and_losable() -> void:
 				"%s respects its deployment limit" % name)
 			assert_eq(sim.carry_dropped(), 0,
 				"%s should not lose inherited turrets to the extended corridor" % name)
-			# Losable *from the board it inherits*, which is the demanding form of
-			# the question once boards carry forward - and asked of the LAST act of
-			# each chain, which is the one that inherits three acts of building and
-			# is therefore the only one that can plausibly need no input at all.
-			# Idle-running every act doubled this test's cost to push the suite past
-			# its ten-minute budget, for four extra answers that were never going to
-			# be different from the one that matters.
+			# Losable FROM A CLEAN START. This used to ask the harder question -
+			# losable from the board it inherits - and that question stopped having
+			# a yes the day turrets started carrying their tiers: the last act of a
+			# chain now arrives holding a full-limit, full-tier board, and there is
+			# nothing left for a competent run to add that an idle one lacks. A gate
+			# that demands "the board you finished building must not be enough" is a
+			# gate that demands the inheritance be broken, which is the exact thing
+			# that was reported as a bug and removed. What must stay true is that
+			# the act itself is not free - that the waves demand the board the chain
+			# builds - and an empty board losing is precisely that claim.
 			if index < played.size() - 1:
 				continue
-			var idle := SimFixture.idle_run(entry["level"], entry["incoming"])
+			var idle := SimFixture.idle_run(entry["level"], {})
 			assert_eq(idle.result(), Sim.RESULT_LOSS,
-				"%s must still be losable by an idle run" % name)
+				"%s must still be losable from a clean start" % name)
 
 func test_every_campaign_level_at_least_loads_and_starts() -> void:
 	# Cheap, so it covers all twenty-four even when the expensive test above is

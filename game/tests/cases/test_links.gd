@@ -71,10 +71,10 @@ func test_a_different_family_next_door_is_worth_something() -> void:
 	assert_eq(sim.platform_link_count(0), 1, "one source")
 
 func test_nothing_is_projected_at_tier_one() -> void:
-	# Flavour says the coupling arrives with the first refit. The reason is that a
-	# board carried into the next act arrives refitted to tier 1, and measured with
-	# links live at tier 1, twenty-four inherited turrets cleared the whole of
-	# Highway act II with no input at all.
+	# Flavour says the coupling arrives with the first refit. Mechanically it
+	# keeps a fresh board's opening spree from linking itself into a lattice
+	# before anything has been upgraded - measured with links live at tier 1,
+	# twenty-four tier-1 turrets cleared the whole of Highway act II unattended.
 	var sim := SimFixture.fresh()
 	var families := _families(sim)
 	_pair(sim, families[0], families[2], 0)
@@ -151,9 +151,10 @@ func test_selling_the_neighbour_takes_the_bonus_with_it() -> void:
 	assert_eq(sim.t_count, 1, "the neighbour is gone")
 	assert_eq(sim.platform_rate_bonus(0), 0.0, "and so is what it was lending")
 
-func test_a_carried_board_arrives_projecting_nothing() -> void:
-	# Because it arrives refitted to tier 1. This is the property that keeps an
-	# inheritance from clearing the next act unattended.
+func test_a_carried_board_arrives_projecting_what_it_projected() -> void:
+	# Tiers carry between acts now, so the lattice carries with them - a support
+	# web the player invested in is part of "what you built", and what you built
+	# is what you keep. The acts are authored against that.
 	var levels := Database.load_levels()
 	var pair := []
 	for i in levels.size() - 1:
@@ -165,9 +166,13 @@ func test_a_carried_board_arrives_projecting_nothing() -> void:
 	var second := SimFixture.start_act(pair[1], first.board_snapshot())
 	second.step()
 	assert_gt(float(second.t_count), 0.0, "fixture sanity: a board carried")
+	var receiving := 0
 	for i in second.t_count:
-		assert_eq(second.platform_rate_bonus(i), 0.0,
-			"inherited turret %d lends and receives nothing" % i)
+		if second.platform_rate_bonus(i) > 0.0 or second.platform_damage_bonus(i) > 0.0 \
+				or second.platform_range_bonus(i) > 0.0:
+			receiving += 1
+	assert_gt(float(receiving), 0.0,
+		"an inherited board with upgraded neighbours still projects its links")
 
 # --- interest -----------------------------------------------------------------
 

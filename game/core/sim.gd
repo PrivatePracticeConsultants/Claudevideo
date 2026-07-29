@@ -1112,24 +1112,27 @@ func queue_priority(at_tick: int, platform_index: int, mode: int) -> void:
 ## limit, so a bigger limit is what buys you room to extend rather than a clean
 ## slate.
 ##
-## They all arrive, and they all arrive REFITTED - back to tier 1. That is not
-## a tax for its own sake - it is the difference between a chain and a cutscene.
-## An act that inherits a finished tier-4 board is won by that board with no input
-## at all: measured, every single carrying act in the campaign was cleared by an
-## idle run, and raising the next act's health by half did not touch it, because
-## a tier-4 turret is an order of magnitude past the tier-1 one it grew from.
-## Stepping down one tier fixed fourteen of sixteen. The remaining two were
-## chased for a while with a cap on how MANY turrets could carry, which worked
-## and was wrong: it deleted turrets the player had paid for, and that was
-## reported as a bug the first time anyone played it. Refitting to tier 1 does
-## the same job by costing tiers instead of emplacements, which is a price paid
-## in the currency the game already has.
+## They all arrive, and they arrive AT THE TIER THEY WERE BUILT TO. Nothing is
+## refitted, nothing is stood down, nothing is taken back.
 ##
-## What survives is what the chain is actually for - your placements, your weapon
-## choices, the ground you bought. What comes back is the decision the
-## inheritance had removed: what to re-invest in, now that the road is longer than
-## the board that held it.
-const CARRY_TIER_CAP := 0
+## This was the other way round for most of the project's life, and the reasoning
+## was sound as far as it went: an act that inherits a finished tier-4 board is
+## won by that board with no input at all, and measured, every carrying act in the
+## campaign was cleared by an idle run. Refitting to tier 1 fixed that in one line.
+##
+## It also made upgrading feel like renting. Reported directly: "every time I go to
+## a new level it resets the levels of my weapons" - and that is exactly what it
+## did. A tier is the most expensive thing a player buys, and buying it knowing it
+## expires at the end of the act is a worse decision than not buying it.
+##
+## So the price moved off the player and onto the waves. Acts II-IV are now
+## authored against a board that arrives INTACT, which is a different and more
+## honest contract: what you built is what you have, and what is coming is sized
+## for it. The cutscene problem is still real and still measured the same way -
+## `tools/balance_probe.gd`, act by act - it is just answered by making the
+## drones worth the guns rather than by taking the guns away. There is no cap
+## constant any more because there is nothing to cap: the only clamp left is
+## structural, to the tiers the blueprint actually has.
 
 ## And no more than a share of the new act's deployment limit comes back, read
 ## from economy.json.
@@ -1176,12 +1179,13 @@ func adopt(platforms: Array, owned_cells: PackedInt32Array) -> void:
 				_carry_dropped += 1
 			continue
 		var index := t_count - 1
-		var tier := clampi(mini(int(record["tier"]) - 1, CARRY_TIER_CAP),
-			0, _bp_tier_count[blueprint] - 1)
+		# The tier as it was built, clamped only to what this blueprint HAS - a
+		# structural guard against a save from a build with more tiers, not a tax.
+		var tier := clampi(int(record["tier"]), 0, _bp_tier_count[blueprint] - 1)
 		t_tier[index] = tier
 		t_tier_slot[index] = _bp_tier_offset[blueprint] + tier
-		# Orders carry even though tiers do not. Refitting a gun is a cost; making
-		# the player re-issue every standing order is just tedium.
+		# Orders carry too. Making the player re-issue every standing order would be
+		# tedium on top of tedium.
 		t_priority[index] = clampi(int(record.get("priority", TARGET_FIRST)),
 			0, target_mode_count() - 1)
 	_mark_links_dirty(-1)
