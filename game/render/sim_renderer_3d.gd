@@ -146,10 +146,29 @@ func _build_environment() -> void:
 	add_child(fill)
 
 	var env := Environment.new()
-	env.background_mode = Environment.BG_COLOR
-	env.background_color = _color("background")
+	# A sky rather than a background colour. The board used to sit in a flat void
+	# with fog fading into it, and the single biggest thing wrong with how this
+	# looked was that there was no horizon to fade INTO - the ground just stopped
+	# and the same colour continued upward. A gradient sky costs one material and
+	# gives the fog something to be.
+	var sky_material := ProceduralSkyMaterial.new()
+	sky_material.sky_top_color = _color_of(_world.get("sky_top", "#1b2a3d"))
+	sky_material.sky_horizon_color = _color_of(_world.get("sky_horizon", "#4c5a63"))
+	sky_material.ground_bottom_color = _color_of(_world.get("sky_ground", "#171c1b"))
+	sky_material.ground_horizon_color = _color_of(_world.get("sky_horizon", "#4c5a63"))
+	sky_material.sky_energy_multiplier = float(_world.get("sky_energy", 1.0))
+	sky_material.ground_energy_multiplier = float(_world.get("sky_energy", 1.0))
+	sky_material.sun_angle_max = float(_world.get("sky_sun_size", 12.0))
+	sky_material.sun_curve = float(_world.get("sky_sun_curve", 0.12))
+	var sky := Sky.new()
+	sky.sky_material = sky_material
+	env.sky = sky
+	env.background_mode = Environment.BG_SKY
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	env.ambient_light_color = _color("background").lightened(0.45)
+	# Tinted toward the horizon rather than toward the old background: everything
+	# outdoors is lit as much by the sky as by the sun, and an ambient term the
+	# colour of night on a daylit board is why the unlit faces used to go muddy.
+	env.ambient_light_color = _color_of(_world.get("sky_horizon", "#4c5a63")).lightened(0.15)
 	env.ambient_light_energy = float(_world.get("ambient_energy", 0.35))
 
 	# Contact shadows where geometry meets geometry - the single biggest
@@ -175,9 +194,14 @@ func _build_environment() -> void:
 	env.glow_blend_mode = Environment.GLOW_BLEND_MODE_ADDITIVE
 
 	# Depth fog pulls the far end of the corridor back and gives the board scale.
+	# Fog the colour of the sky it fades into. It used to be near-black against a
+	# near-black background, which worked while there was no horizon and turned
+	# every distant thing into a silhouette of nothing the moment there was one -
+	# captured with hills and a treeline out there, none of it was visible at all.
 	env.fog_enabled = true
-	env.fog_light_color = _color_of(_world.get("fog_colour", "#0d1219"))
-	env.fog_density = float(_world.get("fog_density", 0.00022))
+	env.fog_light_color = _color_of(_world.get("fog_colour", "#7d8b92"))
+	env.fog_density = float(_world.get("fog_density", 0.00007))
+	env.fog_sky_affect = float(_world.get("fog_sky_affect", 0.35))
 
 	env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
 	env.tonemap_exposure = float(_world.get("tonemap_exposure", 1.05))
@@ -280,6 +304,7 @@ func _build_scenery() -> void:
 		_scenery.queue_free()
 	_scenery = Node3D.new()
 	add_child(_scenery)
+	_tall_scenery.clear()
 
 	# Far larger than the board: at a shallow camera angle the horizon is a long
 	# way out, and a visible ground edge reads as a rendering bug.
@@ -326,6 +351,25 @@ func _build_scenery() -> void:
 	if props != null:
 		_scenery.add_child(props)
 
+	# Everything from here out is landscape rather than board: it is beyond the
+	# band anything can be built in, it never moves, and none of it is a game
+	# object. It exists because a corridor with nothing around it reads as a
+	# diagram of a corridor.
+	#
+	# There is no distant ridge line, and there was one for an afternoon. The
+	# camera sits at -38 degrees with a 26 degree field of view, so the TOP of the
+	# frame still points 25 degrees below horizontal: the horizon is not merely
+	# off-screen at this framing, it is geometrically unreachable, and a ring of
+	# mountains out there was four hundred vertices no player will ever see.
+	# Showing it would mean pitching the camera to about -13, which is nearly
+	# side-on and not a tower defence board any more. Everything below is therefore
+	# on the ground plane, which is the only thing in frame.
+	for layer in _tree_layers():
+		_scenery.add_child(layer)
+	var rocks := _rock_layer()
+	if rocks != null:
+		_scenery.add_child(rocks)
+
 ## Ground as a mottled grid rather than one flat quad.
 ##
 ## A single plane under a single directional light is a slab of constant colour,
@@ -344,8 +388,18 @@ func _ground_mesh() -> ArrayMesh:
 	# mottling cells were ~900 units across and simply invisible.
 	var margin := maxf(width, depth) * float(_world.get("ground_overshoot", 1.6))
 	var cells := int(_world.get("ground_cells", 96))
-	var base := _color_of(_world.get("ground", "#12161d"))
 	var variation := float(_world.get("ground_variation", 0.16))
+	# Three bands, blended by where a vertex is rather than painted on: bare
+	# ground beside the road where everything has been driven over, grass beyond
+	# it, and rock on anything that has climbed. One flat colour with hashed shade
+	# is what the ground used to be, and it read as a sheet of paper however well
+	# it was lit - a surface tells you what it is by CHANGING, and this is the
+	# cheapest honest change available.
+	var verge_soil := _color_of(_world.get("ground_verge", "#4a4436"))
+	var grass := _color_of(_world.get("ground", "#3d4739"))
+	var rock := _color_of(_world.get("ground_rock", "#585b55"))
+	var soil_reach := _sim.build_max_distance() + float(_world.get("ground_soil_reach", 200.0))
+	var rock_from := float(_world.get("ground_rock_height", 55.0))
 
 	var vertices := PackedVector3Array()
 	var colours := PackedColorArray()
@@ -356,9 +410,16 @@ func _ground_mesh() -> ArrayMesh:
 		for col in cells + 1:
 			var x := -margin + float(col) * step_x
 			var z := -margin + float(row) * step_z
-			vertices.append(Vector3(x, _ground_height(x, z), z))
+			var y := _ground_height(x, z)
+			vertices.append(Vector3(x, y, z))
+			var to_road := _road_distance(x, z, soil_reach)
+			var tint := verge_soil.lerp(grass, clampf(to_road / maxf(soil_reach, 1.0), 0.0, 1.0))
+			# Height, not slope: slope needs neighbours and this is one pass. The
+			# relief only rises away from the road anyway, so height is standing in
+			# for exactly the thing slope would have told us.
+			tint = tint.lerp(rock, clampf(absf(y) / maxf(rock_from, 1.0), 0.0, 1.0) * 0.75)
 			var shade := 1.0 + (_hash_unit(col, row) - 0.5) * 2.0 * variation
-			colours.append(Color(base.r * shade, base.g * shade, base.b * shade))
+			colours.append(Color(tint.r * shade, tint.g * shade, tint.b * shade))
 	for row in cells:
 		for col in cells:
 			var top_left := row * (cells + 1) + col
@@ -405,6 +466,242 @@ func _ground_height(x: float, z: float) -> float:
 	var coarse := _hash_unit(int(x / 620.0), int(z / 620.0)) - 0.5
 	var fine := _hash_unit(int(x / 210.0) + 91, int(z / 210.0) + 47) - 0.5
 	return (coarse * 0.75 + fine * 0.25) * 2.0 * amplitude * ramp
+
+## How far the ground mesh reaches past the board on every side. Trees, boulders
+## and the far ridge are all placed against this, so they meet the ground rather
+## than floating past its edge.
+func _ground_margin() -> float:
+	return maxf(_sim.bounds_width(), _sim.bounds_height()) \
+		* float(_world.get("ground_overshoot", 1.6))
+
+## Distance to the nearest road, with the same early-out _ground_height uses.
+##
+## distance_to_path walks every segment of every route, and the landscape asks
+## this question tens of thousands of times at level load. Anything comfortably
+## outside the board is answered without asking, because the only thing the
+## answer is used for out there is "is this clear of the road", and it always is.
+func _road_distance(x: float, z: float, far_enough: float) -> float:
+	if x < -far_enough or z < -far_enough or x > _sim.bounds_width() + far_enough \
+			or z > _sim.bounds_height() + far_enough:
+		return far_enough
+	return _sim.distance_to_path(x, z)
+
+## The camera's view direction flattened onto the ground, as a unit 2D vector.
+## Landscape uses it to answer "is this behind the board", which is the only
+## question that decides whether a two-hundred-unit tree is scenery or an
+## obstruction.
+func _view_axis() -> Vector2:
+	var forward := -camera.transform.basis.z
+	var flat := Vector2(forward.x, forward.z)
+	if flat.length() < 0.0001:
+		return Vector2(0.0, 1.0)
+	return flat.normalized()
+
+## How far along the view axis anything tall is allowed to start.
+##
+## Measured from the board's CENTRE and not its nearest corner. The corner was the
+## obvious answer and it is wrong: on a board four thousand units across, the
+## nearest corner is most of the frame away from the far one, so "not in front of
+## the corner" still left room for a hundred-and-ninety-unit conifer in the
+## bottom-left of the screen with the board visible through the gaps. Behind the
+## centre line clears the whole foreground, and the foreground is the play area
+## anyway.
+func _board_near_limit() -> float:
+	var view := _view_axis()
+	var centre := Vector2(_sim.bounds_width() * 0.5, _sim.bounds_height() * 0.5)
+	return centre.x * view.x + centre.y * view.y \
+		+ maxf(_sim.bounds_width(), _sim.bounds_height()) \
+		* float(_world.get("scenery_setback", 0.15))
+
+## Trunks and canopies, as two instanced layers.
+##
+## Clustered rather than scattered: a coarse lattice decides which patches of
+## ground are wooded at all, and trees are only placed inside those. Uniform
+## scatter reads as an orchard, and an orchard is not what anything looks like.
+##
+## Nothing grows inside the band a turret can be built in, or within a margin of
+## it. A tree standing where you are trying to read whether a cell is buildable is
+## not atmosphere, it is an obstruction - and the simulation has no idea it is
+## there, so it must never be able to hide anything the rules care about.
+## Where the tall scenery ended up.
+##
+## Kept because a MultiMesh's instance buffer lives in the RenderingServer and
+## cannot be read back in a headless run - `get_instance_transform` answers with
+## zeroes there. Without this the rule that nothing tall stands in front of the
+## board is untestable anywhere it could be run automatically, which for a rule
+## about occlusion is exactly backwards.
+var _tall_scenery: PackedVector3Array = PackedVector3Array()
+
+func tall_scenery() -> PackedVector3Array: return _tall_scenery
+
+func _tree_layers() -> Array:
+	var spacing := float(_world.get("tree_spacing", 230.0))
+	var clearance := _sim.build_max_distance() + float(_world.get("tree_clearance", 130.0))
+	var forest_cell := float(_world.get("forest_cell", 1100.0))
+	var forest_share := float(_world.get("forest_share", 0.42))
+	var density := float(_world.get("tree_density", 0.62))
+	var limit := int(_world.get("tree_limit", 4200))
+	var margin := _ground_margin()
+
+	# Nothing in front of the board, ever.
+	#
+	# "Behind" is measured along the camera's own view axis rather than by a
+	# compass direction, and the near limit is the nearest of the board's four
+	# corners - so a tree can stand level with the closest thing the player is
+	# looking at, and never between them and it. Captured without this, a hundred
+	# and ninety unit conifers stood in the foreground with the board visible
+	# through the gaps: correct placement, and unplayable.
+	var near_limit := _board_near_limit()
+	var view := _view_axis()
+
+	var spots := PackedVector3Array()
+	var cols := int((_sim.bounds_width() + margin * 2.0) / spacing)
+	var rows := int((_sim.bounds_height() + margin * 2.0) / spacing)
+	for row in rows:
+		for col in cols:
+			if spots.size() >= limit:
+				break
+			var x := -margin + (float(col) + 0.5) * spacing \
+				+ (_hash_unit(col, row) - 0.5) * spacing * 0.85
+			var z := -margin + (float(row) + 0.5) * spacing \
+				+ (_hash_unit(row + 613, col + 149) - 0.5) * spacing * 0.85
+			if x * view.x + z * view.y < near_limit:
+				continue
+			# Is this patch of ground wooded at all?
+			if _hash_unit(int(floor(x / forest_cell)) + 401,
+					int(floor(z / forest_cell)) + 809) > forest_share:
+				continue
+			if _hash_unit(col + 29, row + 71) > density:
+				continue
+			if _road_distance(x, z, clearance) < clearance:
+				continue
+			spots.append(Vector3(x, _ground_height(x, z), z))
+	if spots.is_empty():
+		return []
+	_tall_scenery.append_array(spots)
+
+	var trunk_mesh := CylinderMesh.new()
+	trunk_mesh.top_radius = 0.34
+	trunk_mesh.bottom_radius = 0.5
+	trunk_mesh.height = 1.0
+	trunk_mesh.radial_segments = 5
+	trunk_mesh.rings = 0
+	var trunk_material := _surface_material(Color.WHITE, 0.0, 1.0)
+	trunk_material.vertex_color_use_as_albedo = true
+	trunk_mesh.material = trunk_material
+
+	# A cone. Conifers read at distance in a way a rounded canopy does not, and at
+	# this camera pitch distance is where almost all of them are.
+	var canopy_mesh := CylinderMesh.new()
+	canopy_mesh.top_radius = 0.0
+	canopy_mesh.bottom_radius = 0.5
+	canopy_mesh.height = 1.0
+	canopy_mesh.radial_segments = 6
+	canopy_mesh.rings = 1
+	var canopy_material := _surface_material(Color.WHITE, 0.0,
+		float(_world.get("canopy_roughness", 0.98)))
+	canopy_material.vertex_color_use_as_albedo = true
+	canopy_mesh.material = canopy_material
+
+	var trunks := _instanced(trunk_mesh, spots.size())
+	var canopies := _instanced(canopy_mesh, spots.size())
+	var shadows := GeometryInstance3D.SHADOW_CASTING_SETTING_ON \
+		if bool(_world.get("tree_shadows", true)) \
+		else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	trunks.cast_shadow = shadows
+	canopies.cast_shadow = shadows
+
+	var height := float(_world.get("tree_height", 190.0))
+	var girth := float(_world.get("tree_girth", 26.0))
+	var bark := _color_of(_world.get("tree_bark", "#3a2f26"))
+	var leaf := _color_of(_world.get("tree_leaf", "#2f4a2c"))
+	var leaf_far := _color_of(_world.get("tree_leaf_far", "#3c5740"))
+	for i in spots.size():
+		var spot := spots[i]
+		var seed_a := _hash_unit(int(spot.x) + 13, int(spot.z) + 91)
+		var seed_b := _hash_unit(int(spot.z) + 57, int(spot.x) + 23)
+		var tall := height * (0.6 + seed_a * 0.85)
+		var wide := girth * (0.7 + seed_b * 0.7)
+		var spin := seed_b * TAU
+		var trunk_height := tall * 0.34
+		trunks.multimesh.set_instance_transform(i, Transform3D(
+			Basis(Vector3.UP, spin).scaled(Vector3(wide * 0.5, trunk_height, wide * 0.5)),
+			Vector3(spot.x, spot.y + trunk_height * 0.5, spot.z)))
+		trunks.multimesh.set_instance_color(i,
+			bark.lerp(Color.WHITE, seed_a * 0.12))
+		canopies.multimesh.set_instance_transform(i, Transform3D(
+			Basis(Vector3.UP, spin).scaled(Vector3(wide, tall * 0.82, wide)),
+			Vector3(spot.x, spot.y + trunk_height + tall * 0.41, spot.z)))
+		# Two greens mixed by hash, so a hillside is not one flat colour.
+		canopies.multimesh.set_instance_color(i, leaf.lerp(leaf_far, seed_b))
+	trunks.multimesh.visible_instance_count = spots.size()
+	canopies.multimesh.visible_instance_count = spots.size()
+	return [trunks, canopies]
+
+## Boulders, further out than the debris beside the road and much larger.
+##
+## Between the props and the trees they are what stops the middle distance being
+## an empty green sheet between a road and a treeline.
+func _rock_layer() -> MultiMeshInstance3D:
+	var spacing := float(_world.get("rock_spacing", 520.0))
+	var clearance := _sim.build_max_distance() + float(_world.get("rock_clearance", 90.0))
+	var density := float(_world.get("rock_density", 0.3))
+	var limit := int(_world.get("rock_limit", 900))
+	var margin := _ground_margin() * 0.6
+	var size := float(_world.get("rock_size", 62.0))
+	var tint := _color_of(_world.get("rock_colour", "#4a4d47"))
+
+	var near_limit := _board_near_limit()
+	var view := _view_axis()
+	var spots := PackedVector3Array()
+	var cols := int((_sim.bounds_width() + margin * 2.0) / spacing)
+	var rows := int((_sim.bounds_height() + margin * 2.0) / spacing)
+	for row in rows:
+		for col in cols:
+			if spots.size() >= limit:
+				break
+			if _hash_unit(col + 211, row + 307) > density:
+				continue
+			var x := -margin + (float(col) + 0.5) * spacing \
+				+ (_hash_unit(col + 5, row + 9) - 0.5) * spacing * 0.7
+			var z := -margin + (float(row) + 0.5) * spacing \
+				+ (_hash_unit(row + 83, col + 41) - 0.5) * spacing * 0.7
+			# Squat enough to be harmless in the foreground, but they still read
+			# better ranged behind the board than scattered around the viewer.
+			if x * view.x + z * view.y < near_limit:
+				continue
+			if _road_distance(x, z, clearance) < clearance:
+				continue
+			spots.append(Vector3(x, _ground_height(x, z), z))
+	if spots.is_empty():
+		return null
+	_tall_scenery.append_array(spots)
+
+	# Few enough segments that it is faceted, which is what makes it read as rock
+	# rather than as a ball.
+	var mesh := SphereMesh.new()
+	mesh.radius = 0.5
+	mesh.height = 1.0
+	mesh.radial_segments = 6
+	mesh.rings = 3
+	var material := _surface_material(Color.WHITE, 0.0,
+		float(_world.get("rock_roughness", 0.95)))
+	material.vertex_color_use_as_albedo = true
+	mesh.material = material
+	var layer := _instanced(mesh, spots.size())
+	for i in spots.size():
+		var spot := spots[i]
+		var a := _hash_unit(int(spot.x) + 71, int(spot.z) + 13)
+		var b := _hash_unit(int(spot.z) + 37, int(spot.x) + 61)
+		var scale := size * (0.5 + a * 1.1)
+		# Squashed and sunk, so they sit in the ground instead of resting on it.
+		var flat := scale * (0.42 + b * 0.45)
+		layer.multimesh.set_instance_transform(i, Transform3D(
+			Basis(Vector3.UP, b * TAU).scaled(Vector3(scale, flat, scale * (0.7 + a * 0.5))),
+			Vector3(spot.x, spot.y + flat * 0.22, spot.z)))
+		layer.multimesh.set_instance_color(i, tint.lerp(Color.WHITE, a * 0.28))
+	layer.multimesh.visible_instance_count = spots.size()
+	return layer
 
 ## Deterministic 0..1 noise from two integers. Not the simulation's Rng - this is
 ## presentation, and pulling on the seeded stream from here would make what the

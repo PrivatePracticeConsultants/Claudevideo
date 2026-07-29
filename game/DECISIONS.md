@@ -1418,6 +1418,55 @@ beside, and a forked act carries 26,427 units against a single road's 15,950 —
 so `max_platforms` went from 144 to 208 and the two forked acts got a limit to
 match. They then won at full Integrity.
 
+## P0-63 · A landscape, and the horizon that cannot be in it
+
+Asked for trees, terrain, "an environment that actually looks more realistic".
+The board was a road and a dark green sheet with some debris on it.
+
+What went in: a graded terrain palette (bare soil beside the road, grass beyond
+it, rock on anything that has climbed, blended by position rather than painted
+on), a clustered treeline, scattered boulders, a gradient sky, and fog retuned to
+the colour of what it fades into. All of it instanced — 2,777 trees on Highway
+are two MultiMesh layers, not 2,777 nodes.
+
+**The thing worth recording is what was cut.** A ring of hills went in first and
+came straight back out. The camera sits at −38° with a 26° field of view, so the
+*top* of the frame still points 25° below horizontal: the horizon is not
+off-screen at this framing, it is geometrically unreachable, and four hundred
+vertices of mountain range were being drawn for nobody. Putting it in view would
+mean pitching the camera to roughly −13°, which is nearly side-on and not a tower
+defence board any more. Everything that stayed is on the ground plane, because the
+ground plane is the entire frame.
+
+**Three things only a screenshot could say**, in the order they were found:
+
+1. Fog the colour of the old background (near-black) turned every distant thing
+   into a silhouette of nothing the moment there *was* something distant. Retuned
+   to the sky's horizon colour, then dropped from 0.00022 to 0.000008 because the
+   first correction made the near ground milky.
+2. Trees placed "not on the road" stood in the foreground with the board visible
+   through the gaps. Correct placement, unplayable frame. The rule is now measured
+   along the camera's own view axis — and *behind the board's centre*, not behind
+   its nearest corner, which was the obvious answer and still left room for a
+   conifer in the bottom-left of a four-thousand-unit board.
+3. The buildable-ground overlay was authored dark for a dark board. On lit terrain
+   the same colours read as holes cut in the grass, and owned ground and ground
+   you can buy stopped being distinguishable. Both went light and thin, then were
+   re-separated by hue rather than by darkness.
+
+**Cost, measured on a software rasteriser** — a worst case, not a GPU: 57ms a
+frame before, 91ms with the landscape, 84ms with tree shadows off. Draw calls stay
+flat at 35 from 25 entities to 400, which is the invariant that actually matters.
+`tree_shadows` is the first switch to reach for if a real device struggles and
+`tree_limit` is the second.
+
+**A note on testing scenery.** The rule that nothing tall stands in front of the
+board, or on ground a turret could use, is exactly the kind of thing that should
+be a test — and a MultiMesh's instance buffer lives in the RenderingServer and
+reads back as zeroes in a headless run, so the obvious test passed while proving
+nothing. The renderer now keeps the placement list it built, and the tests check
+that.
+
 ## P0-14 · Deliberately not built in P0
 
 Not oversights — later phases, per §5.7. Anything tempting that came up is in

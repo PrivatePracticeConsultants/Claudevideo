@@ -108,6 +108,53 @@ func test_interpolation_lands_between_the_two_ticks() -> void:
 	assert_almost_eq(mid_x, (start_x + end_x) * 0.5, 0.0001,
 		"half a tick of interpolation is half the distance along the path")
 
+func test_the_landscape_is_instanced_like_everything_else() -> void:
+	# Trees, boulders and debris are thousands of objects. The project's rendering
+	# rule is that draw calls do not grow with how much is on screen, and scenery
+	# is the easiest place to break it by reaching for one node per tree.
+	var meshes := 0
+	var multimeshes := 0
+	for child in _renderer.get_children():
+		if child is Node3D and child.get_child_count() > 0:
+			for grandchild in child.get_children():
+				if grandchild is MultiMeshInstance3D:
+					multimeshes += 1
+				elif grandchild is MeshInstance3D:
+					meshes += 1
+	assert_gt(float(multimeshes), 2.0,
+		"the scattered scenery is instanced: %d instanced layers" % multimeshes)
+	# Ground, verge, road, markings and walls are one mesh each and always will be:
+	# they are single surfaces, not populations.
+	assert_lte(float(meshes), 8.0,
+		"the fixed scenery is a handful of single meshes, not one per object")
+
+func test_nothing_tall_stands_between_the_camera_and_the_board() -> void:
+	# A hundred-and-fifty-unit conifer in the foreground is not atmosphere, it is
+	# an obstruction - and the simulation has no idea it is there, so it must never
+	# be able to hide anything the rules care about. Captured with an earlier rule
+	# that only kept trees off the ROAD, the board was visible through the gaps in
+	# a treeline standing in front of it.
+	#
+	# Checked against the placement list rather than the MultiMesh buffers: those
+	# live in the RenderingServer and read back as zeroes in a headless run, which
+	# would have made this test pass while proving nothing.
+	var limit := _renderer._board_near_limit()
+	var view := _renderer._view_axis()
+	var tall := _renderer.tall_scenery()
+	assert_gt(float(tall.size()), 0.0, "fixture sanity: there is tall scenery to check")
+	for at in tall:
+		assert_gte(at.x * view.x + at.z * view.y, limit - 1.0,
+			"scenery at %s stands in front of the board" % str(at))
+
+func test_nothing_tall_stands_on_ground_a_turret_could_use() -> void:
+	# The simulation has no idea a tree is there, so a tree must never be able to
+	# hide anything the rules care about - and every square of ground within the
+	# build band is something the rules care about.
+	var clear := _sim.build_max_distance()
+	for at in _renderer.tall_scenery():
+		assert_gt(_sim.distance_to_path(at.x, at.z), clear,
+			"scenery at %s stands inside the buildable band" % str(at))
+
 func _theme() -> Dictionary:
 	var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string("res://data/theme.json"))
 	return parsed if typeof(parsed) == TYPE_DICTIONARY else {}

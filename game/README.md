@@ -311,13 +311,23 @@ to lob, a Suppressor a smooth drum with a coil ring and no barrel at all, a
 Railgun a low sled with a very long flat rail. Colour is a second cue, not the
 only one.
 
-The ground is a mottled grid rather than a flat quad, with a graded verge either
-side of the road, a centre line, and scattered debris for scale. It rolls in the
-distance and is dead flat anywhere a turret can stand: the simulation is 2D and
-every placement rule is a distance in the ground plane, so relief under the
-playable band would put turrets on slopes the rules know nothing about. All of it
-is hashed from position rather than randomised, so a board looks the same every
-time you open it.
+The board sits in a landscape. The ground is a graded terrain rather than a flat
+quad — bare soil beside the road where everything has been driven over, grass
+beyond it, rock on anything that has climbed — with a clustered treeline, boulders
+and scattered debris around it. It rolls in the distance and is dead flat anywhere
+a turret can stand: the simulation is 2D and every placement rule is a distance in
+the ground plane, so relief under the playable band would put turrets on slopes
+the rules know nothing about. All of it is hashed from position rather than
+randomised, so a board looks the same every time you open it.
+
+Nothing tall stands in front of the board or on ground a turret could use. The
+simulation has no idea a tree is there, so a tree must never be able to hide
+anything the rules care about — that is a tested property, not a convention.
+
+There is no horizon, and that is not an oversight: at −38° with a 26° field of
+view the top of the frame still points 25° below horizontal, so the sky is
+geometrically unreachable at this framing. Everything you can see is on the
+ground plane.
 
 
 Perspective at a narrow field of view, a key light with shadows plus a cool fill,
