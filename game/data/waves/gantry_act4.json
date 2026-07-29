@@ -1,8 +1,7 @@
 {
-  "_comment": "Gantry Line, act 4 of 3 (Siege). Continues the chain: the corridor extends and everything built in the previous act is still standing. The engagement runs the whole route - the same corridor act III opened, under far heavier pressure. Head-count, pacing, drone mix, health and economy are all resampled from the 22-level campaign that preceded the chain rework - the only curve measured winnable-and-losable level by level.",
+  "_comment": "Gantry Line, act 4 of 4 (Siege). Continues the chain: same road, same limit, same ground, and everything built in the previous act is still standing. What escalates is the waves - 9814 drones at x9.29 health here. Head-count, pacing, drone mix, health and economy are all resampled from the 22-level campaign that preceded the chain rework - the only curve measured winnable-and-losable level by level.",
   "engagement_id": "gantry_act4",
   "map_id": "gantry_01",
-  "path_waypoints": 14,
   "carries_forward": true,
   "starting_capital": 10300,
   "platform_limit": 144,

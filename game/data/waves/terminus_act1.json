@@ -1,12 +1,11 @@
 {
-  "_comment": "Terminus, act 1 of 3 (Approach). Opens the chain on a fresh board. The engagement runs the first 6 of 16 waypoints. Head-count, pacing, drone mix, health and economy are all resampled from the 22-level campaign that preceded the chain rework - the only curve measured winnable-and-losable level by level.",
+  "_comment": "Terminus, act 1 of 4 (Approach). Opens the chain on a fresh board, and every act of this board runs this same road at this same deployment limit. What escalates is the waves - 4890 drones at x1.25 health here. Head-count, pacing, drone mix, health and economy are all resampled from the 22-level campaign that preceded the chain rework - the only curve measured winnable-and-losable level by level.",
   "engagement_id": "terminus_act1",
   "map_id": "terminus_02",
-  "path_waypoints": 6,
   "carries_forward": false,
   "starting_capital": 15050,
-  "platform_limit": 61,
-  "starting_ground_reach": 118.0,
+  "platform_limit": 208,
+  "starting_ground_reach": 112.0,
   "act_hp_multiplier": 1.25,
   "act_bounty_multiplier": 4.92,
   "inter_wave_delay_ticks": 90,
@@ -705,5 +704,6 @@
         }
       ]
     }
-  ]
+  ],
+  "forks_open": true
 }

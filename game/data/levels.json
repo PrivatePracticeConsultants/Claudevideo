@@ -9,12 +9,12 @@
     {
       "map": "highway_01",
       "engagement": "highway_act2",
-      "name": "II - Highway 17 Interchange: Extension"
+      "name": "II - Highway 17 Interchange: Pressure"
     },
     {
       "map": "highway_01",
       "engagement": "highway_act3",
-      "name": "III - Highway 17 Interchange: Full Route"
+      "name": "III - Highway 17 Interchange: Assault"
     },
     {
       "map": "highway_01",
@@ -29,12 +29,12 @@
     {
       "map": "port_01",
       "engagement": "port_act2",
-      "name": "VI - Port Authority: Extension"
+      "name": "VI - Port Authority: Pressure"
     },
     {
       "map": "port_01",
       "engagement": "port_act3",
-      "name": "VII - Port Authority: Full Route"
+      "name": "VII - Port Authority: Assault"
     },
     {
       "map": "port_01",
@@ -49,12 +49,12 @@
     {
       "map": "capital_01",
       "engagement": "capital_act2",
-      "name": "X - Capital Approach: Extension"
+      "name": "X - Capital Approach: Pressure"
     },
     {
       "map": "capital_01",
       "engagement": "capital_act3",
-      "name": "XI - Capital Approach: Full Route"
+      "name": "XI - Capital Approach: Assault"
     },
     {
       "map": "capital_01",
@@ -69,12 +69,12 @@
     {
       "map": "refinery_01",
       "engagement": "refinery_act2",
-      "name": "XIV - Refinery Row: Extension"
+      "name": "XIV - Refinery Row: Pressure"
     },
     {
       "map": "refinery_01",
       "engagement": "refinery_act3",
-      "name": "XV - Refinery Row: Full Route"
+      "name": "XV - Refinery Row: Assault"
     },
     {
       "map": "refinery_01",
@@ -89,12 +89,12 @@
     {
       "map": "railyard_01",
       "engagement": "railyard_act2",
-      "name": "XVIII - Railyard Junction: Extension"
+      "name": "XVIII - Railyard Junction: Pressure"
     },
     {
       "map": "railyard_01",
       "engagement": "railyard_act3",
-      "name": "XIX - Railyard Junction: Full Route"
+      "name": "XIX - Railyard Junction: Assault"
     },
     {
       "map": "railyard_01",
@@ -109,12 +109,12 @@
     {
       "map": "spillway_01",
       "engagement": "spillway_act2",
-      "name": "XXII - Spillway Works: Extension"
+      "name": "XXII - Spillway Works: Pressure"
     },
     {
       "map": "spillway_01",
       "engagement": "spillway_act3",
-      "name": "XXIII - Spillway Works: Full Route"
+      "name": "XXIII - Spillway Works: Assault"
     },
     {
       "map": "spillway_01",
@@ -129,12 +129,12 @@
     {
       "map": "reactor_01",
       "engagement": "reactor_act2",
-      "name": "XXVI - Reactor Perimeter: Extension"
+      "name": "XXVI - Reactor Perimeter: Pressure"
     },
     {
       "map": "reactor_01",
       "engagement": "reactor_act3",
-      "name": "XXVII - Reactor Perimeter: Full Route"
+      "name": "XXVII - Reactor Perimeter: Assault"
     },
     {
       "map": "reactor_01",
@@ -149,12 +149,12 @@
     {
       "map": "lastlight_01",
       "engagement": "lastlight_act2",
-      "name": "XXX - Last Light: Extension"
+      "name": "XXX - Last Light: Pressure"
     },
     {
       "map": "lastlight_01",
       "engagement": "lastlight_act3",
-      "name": "XXXI - Last Light: Full Route"
+      "name": "XXXI - Last Light: Assault"
     },
     {
       "map": "lastlight_01",
@@ -169,12 +169,12 @@
     {
       "map": "gantry_01",
       "engagement": "gantry_act2",
-      "name": "XXXIV - Gantry Line: Extension"
+      "name": "XXXIV - Gantry Line: Pressure"
     },
     {
       "map": "gantry_01",
       "engagement": "gantry_act3",
-      "name": "XXXV - Gantry Line: Full Route"
+      "name": "XXXV - Gantry Line: Assault"
     },
     {
       "map": "gantry_01",
@@ -189,12 +189,12 @@
     {
       "map": "coldstore_01",
       "engagement": "coldstore_act2",
-      "name": "XXXVIII - Cold Store: Extension"
+      "name": "XXXVIII - Cold Store: Pressure"
     },
     {
       "map": "coldstore_01",
       "engagement": "coldstore_act3",
-      "name": "XXXIX - Cold Store: Full Route"
+      "name": "XXXIX - Cold Store: Assault"
     },
     {
       "map": "coldstore_01",
@@ -209,12 +209,12 @@
     {
       "map": "highline_01",
       "engagement": "highline_act2",
-      "name": "XLII - The Highline: Extension"
+      "name": "XLII - The Highline: Pressure"
     },
     {
       "map": "highline_01",
       "engagement": "highline_act3",
-      "name": "XLIII - The Highline: Full Route"
+      "name": "XLIII - The Highline: Assault"
     },
     {
       "map": "highline_01",
@@ -229,12 +229,12 @@
     {
       "map": "terminus_02",
       "engagement": "terminus_act2",
-      "name": "XLVI - Terminus: Extension"
+      "name": "XLVI - Terminus: Pressure"
     },
     {
       "map": "terminus_02",
       "engagement": "terminus_act3",
-      "name": "XLVII - Terminus: Full Route"
+      "name": "XLVII - Terminus: Assault"
     },
     {
       "map": "terminus_02",

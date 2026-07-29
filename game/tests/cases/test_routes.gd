@@ -14,7 +14,7 @@ extends TestCase
 
 const FORKED_MAP := "terminus_02"
 const FORKED_ACT := "terminus_act3"
-const UNFORKED_ACT := "terminus_act1"
+const FORKED_ACTS := ["terminus_act1", "terminus_act2", "terminus_act3", "terminus_act4"]
 
 func test_a_board_without_a_fork_has_exactly_one_road() -> void:
 	# Every board written before forks existed must be untouched by them.
@@ -24,18 +24,20 @@ func test_a_board_without_a_fork_has_exactly_one_road() -> void:
 
 func test_the_forked_board_has_two() -> void:
 	var sim := SimFixture.for_level(FORKED_MAP, FORKED_ACT)
-	assert_eq(sim.route_count(), 2, "two roads once the corridor is fully revealed")
+	assert_eq(sim.route_count(), 2, "two roads")
 	assert_gt(sim.route_length(0), 0.0, "the main road has length")
 	assert_gt(sim.route_length(1), 0.0, "and so does the fork")
 
-func test_a_fork_opens_only_once_the_corridor_is_fully_revealed() -> void:
-	# A fork is authored to leave the gate and rejoin at the exit, so a proportional
-	# prefix of one ends in the middle of nowhere and everything walking it leaks
-	# there. Acts I and II are one road; III and IV are two.
-	var early := SimFixture.for_level(FORKED_MAP, UNFORKED_ACT)
-	assert_lt(float(early.revealed_waypoints()), float(early.full_waypoints()),
-		"fixture sanity: act I does not reveal the whole road")
-	assert_eq(early.route_count(), 1, "so it is a single-road act")
+func test_a_fork_belongs_to_the_board_not_to_an_act() -> void:
+	# It used to open partway through the chain, on the act where the corridor
+	# finished revealing. That was measured as unplayable once every act ran the
+	# whole road: the act inheriting a full board was already at its deployment
+	# limit, so the second road arrived with no turrets left to answer it - 68
+	# leaks, integrity 0, on an act that had been winnable. A fork is a fact about
+	# the board now, so a player learns it once and it never moves.
+	for eid: String in FORKED_ACTS:
+		var sim := SimFixture.for_level(FORKED_MAP, eid)
+		assert_eq(sim.route_count(), 2, "%s should run both roads" % eid)
 
 func test_both_roads_leave_the_gate_and_reach_the_exit() -> void:
 	var sim := SimFixture.for_level(FORKED_MAP, FORKED_ACT)

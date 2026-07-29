@@ -1,12 +1,11 @@
 {
-  "_comment": "Terminus, act 2 of 3 (Extension). Continues the chain: the corridor extends and everything built in the previous act is still standing. The engagement runs the first 11 of 16 waypoints. Head-count, pacing, drone mix, health and economy are all resampled from the 22-level campaign that preceded the chain rework - the only curve measured winnable-and-losable level by level.",
+  "_comment": "Terminus, act 2 of 4 (Pressure). Continues the chain: same road, same limit, same ground, and everything built in the previous act is still standing. What escalates is the waves - 9109 drones at x5.76 health here. Head-count, pacing, drone mix, health and economy are all resampled from the 22-level campaign that preceded the chain rework - the only curve measured winnable-and-losable level by level.",
   "engagement_id": "terminus_act2",
   "map_id": "terminus_02",
-  "path_waypoints": 11,
   "carries_forward": true,
-  "starting_capital": 15450,
-  "platform_limit": 112,
-  "starting_ground_reach": 116.0,
+  "starting_capital": 12700,
+  "platform_limit": 208,
+  "starting_ground_reach": 112.0,
   "act_hp_multiplier": 5.76,
   "act_bounty_multiplier": 4.92,
   "inter_wave_delay_ticks": 90,
@@ -705,5 +704,6 @@
         }
       ]
     }
-  ]
+  ],
+  "forks_open": true
 }

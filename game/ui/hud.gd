@@ -175,9 +175,10 @@ func set_level(name: String, index: int, total: int, inherited: int = 0,
 		# Not a loss - a cap. Saying so stops it reading as a bug.
 		_level_text += "  ·  %d STOOD DOWN" % stood_down
 	if dropped > 0:
-		# You can build beside road that has not been revealed yet. When it is
-		# revealed and runs through your turret, that turret is gone - and the
-		# honesty rule says you get told, not left to notice.
+		# A turret standing where the next act's road runs is gone, and the
+		# honesty rule says you get told rather than left to notice. Every act of
+		# a board now runs the same road, so this cannot fire today; it stays
+		# because the day a board does reshape itself, silence would be the bug.
 		_level_text += "  ·  %d LOST TO THE NEW ROAD" % dropped
 	_is_last_level = index + 1 >= total
 	_next_extends = next_extends
@@ -297,7 +298,10 @@ func refresh(speed: int, paused: bool, hovered_platform: int = -1,
 		if _is_last_level:
 			_banner.text = "CONTRACT COMPLETE   ·   %d integrity   ·   R to replay" % _sim.integrity()
 		elif _next_extends:
-			_banner.text = "SECTOR HELD   ·   %d integrity   ·   N extends the corridor" % _sim.integrity()
+			# The board is the same board next act - same road, same ground, same
+			# turrets. What changes is what walks it, so say that instead of the
+			# old promise that the corridor would grow.
+			_banner.text = "SECTOR HELD   ·   %d integrity   ·   N holds the same ground, heavier drones" % _sim.integrity()
 		else:
 			# A new board is a different map, so the turrets cannot come. Say it
 			# here rather than letting it look like the game ate them - and say it

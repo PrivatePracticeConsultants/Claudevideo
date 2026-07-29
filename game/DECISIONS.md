@@ -1467,6 +1467,67 @@ reads back as zeroes in a headless run, so the obvious test passed while proving
 nothing. The renderer now keeps the placement list it built, and the tests check
 that.
 
+## P0-64 · The board stops moving; the waves get worse
+
+Reported: "I don't like that it pushes back the levels of my game more each new
+round. Could we have it be that the enemies just get more difficult so that I'm
+forced to build more?"
+
+That was three mechanics being felt as one. An act was harder than the act before
+it because (a) it revealed a longer prefix of the map's road, (b) it raised the
+deployment limit, and (c) it sent more and tougher drones. Only (c) is
+escalation. (a) and (b) together mean the board keeps growing out from under a
+line that is already built, so holding it is *stretching* rather than
+reinforcing — which is exactly what was reported.
+
+**The road, the deployment limit and the owned ground are now act IV's from act I
+onward.** Four acts, one board. `path_waypoints` is gone from every wave file; the
+key still works, so a future board may still use it, but nothing does.
+
+**What was deliberately NOT done: rewrite the difficulty curve.** The first
+attempt replaced every act's measured health multiplier and head-count with an
+invented ramp scaled off act IV (`0.52/0.74/0.93/1.0`). Highway act I — the
+gentlest level in the game — went to 29 leaks and a loss, and all four Highway
+acts lost. Reverted. The change that shipped only removes the reveal and unifies
+the limit; every hp multiplier and every drone count stays exactly as it was
+measured. **A lift is applied FROM the measured baseline, not instead of it.**
+
+Three things the measurement then found, each fixed with one number:
+
+1. **Highway act II became idle-winnable.** It now inherits a full-size board on
+   the full road, and 397 drones at ×4.09 could not get past it untouched.
+   Lifted to 457 at ×4.70 — from the measured figure, ×1.15 on both — and it
+   loses to a do-nothing run again. Nothing else in the campaign idle-survived.
+2. **Terminus act III collapsed: 68 leaks, Integrity 0.** The fork used to open
+   "once the corridor is fully revealed", which was act III. With a uniform
+   limit, act III arrives already holding 208 of its 208 turrets, so the second
+   road opened with nothing left to answer it. A fork is now a property of the
+   board (`forks_open`), true in all four Terminus acts. The board you learn is
+   the board you get.
+3. **Every act's budget was tuned against its own old limit.** With one limit the
+   rule "an inheriting act starts poorer than the act that opened the board"
+   stopped falling out of the data, so acts II–IV are clamped to their own
+   board's act IV budget — the leanest figure that board was ever measured with,
+   always below its opener's. Highway act I is the one opener funded up (700 →
+   875, the ratio its limit moved by): every other opener was measured reaching
+   its full limit *at tier 4*, so its budget was never the constraint, while
+   Highway's reached the limit at tier 1, and the competent run was down to 96
+   Integrity by wave 8 — in the opening act of the game, the one act that must
+   not.
+
+Measured after: 48 of 48 levels won by the scripted competent run, 0 leaks on
+every one. No act idle-survives — checked act by act across the first six
+boards, and on the last act of every chain by the suite. 287 tests, 0 failed.
+
+**A test that encodes a removed mechanic is worse than no test.** `test_chain`
+asserted that each act extends the corridor and reveals more waypoints, and
+`test_routes` asserted that a fork opens only at full reveal. Both were true, both
+were now the opposite of the design, and both had to be rewritten rather than
+deleted: `test_chain` now asserts the road, limit and reveal are *identical*
+across a chain, and — the assertion that was missing all along — that every
+consecutive pair of acts in the campaign brings more drones or tougher ones. The
+escalation is the whole mechanic now, so it is asserted rather than assumed.
+
 ## P0-14 · Deliberately not built in P0
 
 Not oversights — later phases, per §5.7. Anything tempting that came up is in

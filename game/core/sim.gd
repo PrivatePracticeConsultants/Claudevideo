@@ -556,15 +556,14 @@ func _build_path() -> void:
 	# exit. Absent means one route, which is what every board written before forks
 	# existed has, and it costs those boards nothing.
 	var routes := [full.slice(0, revealed)]
-	# A fork opens only once the corridor is fully revealed - acts I and II of a
-	# board are one road, acts III and IV are two.
+	# A fork opens when the engagement says so.
 	#
-	# The alternative was revealing a proportional prefix of each fork, and it does
-	# not work: a fork is authored to leave the gate and rejoin at the exit, so a
-	# prefix of one ends in the middle of nowhere and everything walking it leaks
-	# there. Opening at full reveal is both simpler and a better escalation - the
-	# board you have learned to hold suddenly has a second way in.
-	if revealed >= full.size():
+	# It used to open "once the corridor is fully revealed", which stopped being a
+	# useful signal the moment every act ran the whole road. Asking the act
+	# directly says the same thing without depending on a reveal that no longer
+	# varies - acts I and II of Terminus are one road, acts III and IV are two,
+	# and the board you have learned to hold suddenly has a second way in.
+	if bool(_db.engagement.get("forks_open", false)):
 		for extra: Array in (_db.map.get("alternate_paths", []) as Array):
 			routes.append(extra)
 

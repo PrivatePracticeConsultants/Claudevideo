@@ -1,8 +1,7 @@
 {
-  "_comment": "Capital Approach, act 4 of 3 (Siege). Continues the chain: the corridor extends and everything built in the previous act is still standing. The engagement runs the whole route - the same corridor act III opened, under far heavier pressure. Head-count, pacing, drone mix, health and economy are all resampled from the 22-level campaign that preceded the chain rework - the only curve measured winnable-and-losable level by level.",
+  "_comment": "Capital Approach, act 4 of 4 (Siege). Continues the chain: same road, same limit, same ground, and everything built in the previous act is still standing. What escalates is the waves - 1830 drones at x5.04 health here. Head-count, pacing, drone mix, health and economy are all resampled from the 22-level campaign that preceded the chain rework - the only curve measured winnable-and-losable level by level.",
   "engagement_id": "capital_act4",
   "map_id": "capital_01",
-  "path_waypoints": 16,
   "carries_forward": true,
   "starting_capital": 1300,
   "platform_limit": 51,

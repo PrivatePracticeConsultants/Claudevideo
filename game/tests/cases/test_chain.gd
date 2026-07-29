@@ -1,27 +1,60 @@
 extends TestCase
 
-## Boards that grow across a chain of acts, keeping what you built.
+## Boards that hold across a chain of acts, keeping what you built.
 ##
-## Two mechanics working together: an act reveals only part of its map's route,
-## and a later act in the same chain inherits the earlier act's turrets and
-## ground. The inheritance is only sound because the revealed prefix is
-## identical between acts - if the corridor moved, a carried turret would end up
-## somewhere that made no sense.
+## An act inherits the previous act's turrets and ground, and the board itself -
+## road, deployment limit, owned ground - is the same board every act. What
+## escalates is what walks it.
+##
+## It did not start that way. Acts used to reveal a longer prefix of the map's
+## route and raise the deployment limit as they went, so a later act was harder
+## partly because the board had moved out from under the line you had already
+## built. That was reported as not feeling like difficulty: holding meant
+## stretching rather than reinforcing. The reveal is gone; head-count and health
+## carry the escalation on their own.
 
 func _chain() -> Array:
 	# Three acts of the opening board.
 	return ["highway_act1", "highway_act2", "highway_act3"]
 
-func test_later_acts_reveal_more_of_the_same_route() -> void:
-	var previous := 0.0
-	var previous_waypoints := 0
+func test_every_act_of_a_board_runs_the_same_road() -> void:
+	# The replacement for "each act reveals more". A carried turret is useful in
+	# act 3 because act 3's road is act 1's road, not a superset of it.
+	var first := SimFixture.for_level("highway_01", _chain()[0])
 	for eid in _chain():
 		var sim := SimFixture.for_level("highway_01", eid)
-		assert_gt(sim.path_length(), previous, "%s extends the corridor" % eid)
-		assert_gt(float(sim.revealed_waypoints()), float(previous_waypoints),
-			"%s reveals more waypoints" % eid)
-		previous = sim.path_length()
-		previous_waypoints = sim.revealed_waypoints()
+		assert_almost_eq(sim.path_length(), first.path_length(), 0.0001,
+			"%s runs a different length of road" % eid)
+		assert_eq(sim.revealed_waypoints(), first.revealed_waypoints(),
+			"%s opens a different number of waypoints" % eid)
+		assert_eq(sim.platform_limit(), first.platform_limit(),
+			"%s deploys a different number of turrets" % eid)
+
+func test_the_escalation_is_in_the_waves() -> void:
+	# What is left to get harder, checked on every chain in the campaign rather
+	# than a sample: a later act brings more drones or tougher ones, and never
+	# fewer of both. This is the whole mechanic, so it is asserted, not assumed.
+	var levels := Database.load_levels()
+	for i in levels.size() - 1:
+		if str(levels[i]["map"]) != str(levels[i + 1]["map"]):
+			continue
+		var here := Database.load_engagement(str(levels[i]["map"]), str(levels[i]["engagement"]))
+		var next := Database.load_engagement(str(levels[i + 1]["map"]), str(levels[i + 1]["engagement"]))
+		var grew_count := _drone_count(next) > _drone_count(here)
+		var grew_health := float(next.engagement.get("act_hp_multiplier", 1.0)) \
+			> float(here.engagement.get("act_hp_multiplier", 1.0))
+		assert_true(grew_count or grew_health,
+			"%s is no harder than the act before it - %d drones at x%.2f health against %d at x%.2f"
+				% [str(levels[i + 1]["engagement"]), _drone_count(next),
+					float(next.engagement.get("act_hp_multiplier", 1.0)),
+					_drone_count(here), float(here.engagement.get("act_hp_multiplier", 1.0))])
+
+func _drone_count(db: Database) -> int:
+	var total := 0
+	for wave: Dictionary in (db.engagement["waves"] as Array):
+		for group: Dictionary in (wave["groups"] as Array):
+			total += int(group["count"])
+	return total
 
 func test_the_revealed_prefix_never_moves() -> void:
 	# The load-bearing property. Everything built in act 1 stays useful in act 3
@@ -34,10 +67,11 @@ func test_the_revealed_prefix_never_moves() -> void:
 		assert_almost_eq(last.waypoint_y(i), first.waypoint_y(i), 0.0001,
 			"waypoint %d moved between acts" % i)
 
-func test_the_full_route_is_longer_than_any_single_act() -> void:
-	var last := SimFixture.for_level("highway_01", "highway_act3")
-	assert_eq(last.revealed_waypoints(), last.full_waypoints(),
-		"the final act opens the whole route")
+func test_every_act_opens_the_whole_route() -> void:
+	for eid in _chain():
+		var sim := SimFixture.for_level("highway_01", eid)
+		assert_eq(sim.revealed_waypoints(), sim.full_waypoints(),
+			"%s runs less than the whole route" % eid)
 
 func test_a_carried_board_arrives_intact() -> void:
 	var first := SimFixture.for_level("highway_01", "highway_act1")
@@ -92,19 +126,18 @@ func test_carrying_a_board_costs_nothing() -> void:
 	second.adopt(first.board_snapshot()["platforms"], PackedInt32Array())
 	assert_eq(second.capital(), before, "inherited turrets are free")
 
-func test_carried_turrets_count_against_the_new_limit() -> void:
-	# A bigger deployment limit is meant to buy room to extend coverage, not a
-	# clean slate on top of everything already standing.
+func test_carried_turrets_count_against_the_limit() -> void:
+	# The deployment limit is the same every act, so an inheritance spends it. A
+	# clean slate on top of everything already standing would make the limit
+	# meaningless from act 2 onward.
 	var first := SimFixture.for_level("highway_01", "highway_act1")
 	SimFixture.run_greedy(first)
 	var second := SimFixture.for_level("highway_01", "highway_act2")
 	second.adopt(first.board_snapshot()["platforms"], PackedInt32Array())
 	assert_eq(second.t_count, first.t_count,
 		"every turret carries - what an inheritance costs is tiers, not emplacements")
-	assert_lt(float(second.t_count), float(second.platform_limit()),
-		"and the new act's limit still leaves room to build past what was inherited")
-	assert_gt(float(second.platform_limit()), float(first.platform_limit()),
-		"which is larger than the previous act's")
+	assert_lte(float(second.t_count), float(second.platform_limit()),
+		"and they are counted against the act's own limit")
 
 func test_owned_ground_carries_forward() -> void:
 	var first := SimFixture.for_level("highway_01", "highway_act1")
@@ -148,18 +181,17 @@ func test_a_carried_board_still_replays_identically() -> void:
 	SimFixture.replay(replayed, log)
 	assert_eq(replayed.state_hash(), recorded.state_hash(), "a chained act replays bit-exactly")
 
-## What "the extension heads into fresh ground" means, measured rather than
-## asserted in a comment.
+## Nothing a later act does may invalidate where you were allowed to build.
 ##
-## Carrying a board forward is only worth anything if the new stretch of road
-## does not run back through where you already built. Sample the whole band an
-## act could legally build in, then check how much of it the *next* act's longer
-## corridor invalidates. Some loss is inherent - the two spots either side of the
-## old end-of-route are now beside a road that continues - but a route that
-## doubled back would wipe out a large slice, and that is what this catches.
+## This was written when acts revealed a longer route and the risk was a route
+## that doubled back over the board you had. The road no longer changes, so the
+## tolerance should now be met with room to spare - which is exactly why it is
+## worth keeping. It is the check that would fail first if a future act ever
+## quietly reshaped a board again, and it covers every board rather than a
+## sample because it is pure geometry with no simulation in it.
 const DOUBLE_BACK_TOLERANCE := 0.04
 
-func test_extending_a_route_does_not_run_it_through_your_board() -> void:
+func test_a_later_act_does_not_run_the_road_through_your_board() -> void:
 	# Pure geometry, no simulation, so this covers every board rather than a
 	# sample.
 	var acts := Database.load_levels()
@@ -186,7 +218,7 @@ func test_extending_a_route_does_not_run_it_through_your_board() -> void:
 		assert_gt(float(legal), 20.0,
 			"%s should have a band to build in" % str(acts[i]["engagement"]))
 		assert_lte(float(lost), float(legal) * DOUBLE_BACK_TOLERANCE,
-			"%s loses %d of %d build spots when the route extends - the extension is doubling back over the board"
+			"%s loses %d of %d build spots to the next act's road - the board reshaped under the line"
 				% [str(acts[i]["engagement"]), lost, legal])
 
 func _first_offerable(sim: Sim) -> Vector2i:

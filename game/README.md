@@ -168,20 +168,26 @@ Capital left in hand when a wave begins earns 5% back, up to $90. It is not much
 — it is enough that "hold two waves and buy the better thing" is a real
 alternative to spending everything the moment it arrives.
 
-You are capped at a **deployment limit** per level — 24 turrets at the first,
-doubling every ten levels up to the pool ceiling of 208 (144 on single-road
-boards; the forked acts get more because there is more road to stand beside). It is also capped by how
-much road the act has actually revealed, so act I of a board is a smaller board
-than act III. Once your allowance is placed the only way to grow is to upgrade,
-which is what makes *where* you put them matter.
+You are capped at a **deployment limit** per board — 30 turrets on the first,
+rising board by board to the pool ceiling of 208 (118–144 on the later
+single-road boards; the forked board gets more because there is more road to
+stand beside). It is the same limit in every act of a board, so the ceiling is
+something you learn once. Once your allowance is placed the only way to grow is
+to upgrade, which is what makes *where* you put them matter.
 
-### Boards that grow
+### Boards that hold
 
-Each board is four acts. Act I runs the first stretch of the road; act II opens
-more of it; act III runs the whole thing; act IV runs it again under far heavier
-pressure. **The road already revealed never moves**, so every turret and every
-cell of ground you bought is still there, still covering what it covered, when
-the corridor extends. Act I of a new board always starts clean.
+Each board is four acts, and all four are the **same board** — same road, same
+deployment limit, same ground you own. Every turret and every cell you bought is
+still there, still covering exactly what it covered. Act I of a new board always
+starts clean.
+
+What escalates between acts is **what walks the road**: more drones, and tougher
+ones. Terminus act I sends 4,890 drones at ×1.25 health; act IV sends 12,090 at
+×9.55. Acts used to escalate partly by revealing more road and raising the
+limit, and that was the wrong feeling — the board kept moving out from under a
+line that was already built, so holding meant stretching rather than
+reinforcing.
 
 **Every turret you built carries forward.** Two things do not:
 
@@ -216,8 +222,13 @@ reset with the board.
 The last board forks. Both roads leave the same gate and reach the same exit, and
 three drones take the long way for every one that takes the short one — so the
 fork is not a second copy of the problem, it is a shorter deadline. Coverage has
-to be divided, and the deployment limit means a turret cannot watch both. It opens
-at act III, when the corridor is fully revealed.
+to be divided, and the deployment limit means a turret cannot watch both. Both
+roads are open from act I: a fork is a fact about the board, not a surprise
+sprung on an act. It used to open partway through the chain, and that stopped
+working the moment every act ran the whole road — the act inheriting a full
+board was already at its deployment limit, so the second road arrived with no
+turrets left to answer it. Measured: 68 leaks and Integrity 0 on an act that had
+been winnable.
 
 ### Crossing to a new board
 
