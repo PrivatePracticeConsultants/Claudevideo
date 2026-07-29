@@ -7,7 +7,9 @@
     "leak_value": 1,
     "base_bounty": 7,
     "radius": 11.0,
-    "spawn_jitter_units": 22.0
+    "spawn_jitter_units": 22.0,
+    "armour_class": "light",
+    "short_name": "Skitter"
   },
   "walker": {
     "display_name": "Sentry Walker",
@@ -16,7 +18,9 @@
     "leak_value": 4,
     "base_bounty": 16,
     "radius": 16.0,
-    "spawn_jitter_units": 18.0
+    "spawn_jitter_units": 18.0,
+    "armour_class": "light",
+    "short_name": "Sentry"
   },
   "heavy": {
     "display_name": "Bulwark Hauler",
@@ -25,7 +29,9 @@
     "leak_value": 12,
     "base_bounty": 58,
     "radius": 24.0,
-    "spawn_jitter_units": 12.0
+    "spawn_jitter_units": 12.0,
+    "armour_class": "plated",
+    "short_name": "Bulwark"
   },
   "mender": {
     "display_name": "Field Mender",
@@ -37,7 +43,9 @@
     "spawn_jitter_units": 13.0,
     "repair_per_pulse": 16,
     "repair_interval_seconds": 0.8,
-    "repair_radius_units": 170.0
+    "repair_radius_units": 170.0,
+    "armour_class": "shielded",
+    "short_name": "Mender"
   },
   "lance": {
     "display_name": "Vanguard Lance",
@@ -46,7 +54,9 @@
     "leak_value": 11,
     "base_bounty": 150,
     "radius": 20.0,
-    "spawn_jitter_units": 9.0
+    "spawn_jitter_units": 9.0,
+    "armour_class": "light",
+    "short_name": "Lance"
   },
   "brood": {
     "display_name": "Brood Carrier",
@@ -58,7 +68,9 @@
     "spawn_jitter_units": 12.0,
     "armour": 1,
     "splits_into": "swarm",
-    "split_count": 3
+    "split_count": 3,
+    "armour_class": "plated",
+    "short_name": "Brood"
   },
   "breaker": {
     "display_name": "Siege Breaker",
@@ -68,7 +80,9 @@
     "base_bounty": 300,
     "radius": 27.0,
     "spawn_jitter_units": 8.0,
-    "slow_resistance": 0.8
+    "slow_resistance": 0.8,
+    "armour_class": "plated",
+    "short_name": "Breaker"
   },
   "jammer": {
     "display_name": "Static Jammer",
@@ -80,6 +94,8 @@
     "spawn_jitter_units": 10.0,
     "jam_seconds": 0.7,
     "jam_interval_seconds": 2.0,
-    "jam_radius_units": 210.0
+    "jam_radius_units": 210.0,
+    "armour_class": "shielded",
+    "short_name": "Jammer"
   }
 }

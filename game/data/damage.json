@@ -1,0 +1,39 @@
+{
+  "_comment": "What a weapon is good against. Every blueprint fires one damage type; every drone wears one armour class; this matrix is the multiplier where they meet. It exists because without it a turret family is only ever 'better' or 'worse' and the answer to every board is the same shopping list - the deployment limit is spent on whatever has the best numbers, and composition is not a decision. With it, what is walking towards you determines what is worth building.",
+  "_why_three": "Three classes and three types, not four. Four families share three types on purpose: Ballistic and Railgun are both kinetic, and what separates them is the OTHER axis that already exists - flat armour comes off each hit, so a wall of cheap fast guns is punished by it and one big slow gun is barely troubled. A fourth damage type would have bought nothing that armour does not already say.",
+  "_why_these_numbers": "1.35 / 1.0 / 0.65 - a favourable matchup is worth roughly two-for-one against an unfavourable one, which is enough that bringing the wrong gun to a wave is felt, and not so much that a mono-family board simply dies. The floor is deliberately not zero: a bad answer is a bad answer, not no answer.",
+  "classes": {
+    "light": {
+      "display_name": "Light",
+      "_comment": "Unarmoured chassis - fast, cheap, and dangerous in numbers. Kinetic tears it apart."
+    },
+    "plated": {
+      "display_name": "Plated",
+      "_comment": "Slab armour. Shrugs off small-arms fire; explosive is what opens it."
+    },
+    "shielded": {
+      "display_name": "Shielded",
+      "_comment": "Field-screened. Blast pressure washes over it and energy weapons collapse it. Every drone with a support role wears one, so the answer to a healed or jammed board is a gun rather than patience."
+    }
+  },
+  "types": {
+    "kinetic": {
+      "display_name": "Kinetic",
+      "light": 1.35,
+      "plated": 0.65,
+      "shielded": 1.0
+    },
+    "explosive": {
+      "display_name": "Explosive",
+      "light": 1.0,
+      "plated": 1.35,
+      "shielded": 0.65
+    },
+    "energy": {
+      "display_name": "Energy",
+      "light": 0.65,
+      "plated": 1.0,
+      "shielded": 1.35
+    }
+  }
+}

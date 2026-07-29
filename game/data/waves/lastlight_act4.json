@@ -528,5 +528,9 @@
         }
       ]
     }
+  ],
+  "affixes": [
+    "hardened",
+    "massed"
   ]
 }

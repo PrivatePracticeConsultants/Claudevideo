@@ -528,5 +528,8 @@
         }
       ]
     }
+  ],
+  "affixes": [
+    "hardened"
   ]
 }

@@ -4,12 +4,13 @@ Roguelite tower defense. Godot 4.x / GDScript. **3D, and it runs in a browser.**
 
 **Status: P0 complete and audited three times, then extended well past it.**
 Forty-eight levels — twelve boards played as four acts each, where every act
-opens more of the same road and keeps what you built on the last one — four
-weapon families with four tiers each, five targeting orders apiece and support
-links between them, eight drone classes, a module drafted between acts, free
-placement on purchasable ground, saved progress, synthesised sound, and an
-end-of-act debrief, all on a deterministic 30Hz simulation drawn with real
-lighting, shadows and depth cueing. The last board has two roads. The design document is the master plan
+runs the same road and keeps what you built on the last one, and the escalation
+is in what walks it — four weapon families with four tiers each, five targeting
+orders apiece and support links between them, eight drone classes, three damage
+types against three armour classes, named per-act affixes, a module drafted
+between acts, free placement on purchasable ground, saved progress, synthesised
+sound, and an end-of-act debrief, all on a deterministic 30Hz simulation drawn
+with real lighting, shadows and depth cueing. The last board has two roads. The design document is the master plan
 (v2); the phase ladder is §5.7. Formally this is P0 plus much of P1/P2's content;
 the run layer (P3) is the next real milestone.
 
@@ -63,16 +64,16 @@ branch, `/docs` folder. Two things to know:
 Drones walk the corridor end to end. Anything that reaches the far end costs
 Corridor Integrity. Hit zero and the level is lost.
 
-| Drone | Health | Speed | Leak cost | Pays | |
-|---|---|---|---|---|---|
-| Skitter Drone | 22 | 140 | 1 | $7 | fast, fragile, numerous |
-| Sentry Walker | 55 | 90 | 4 | $16 | the baseline |
-| Bulwark Hauler | 260 | 55 | 12 | $58 | slow and very tough |
-| **Vanguard Lance** | **620** | **168** | 11 | $150 | fastest *and* tough |
-| **Siege Breaker** | **1400** | 78 | 16 | $300 | shrugs off 80% of slows |
-| **Brood Carrier** | 150 | 95 | 5 | $40 | armoured; breaks into 3 Skitters |
-| **Field Mender** | 90 | 104 | 3 | $30 | heals everything around it |
-| **Static Jammer** | 340 | 122 | 7 | $110 | silences turrets it passes |
+| Drone | Armour | Health | Speed | Leak cost | Pays | |
+|---|---|---|---|---|---|---|
+| Skitter Drone | Light | 22 | 140 | 1 | $7 | fast, fragile, numerous |
+| Sentry Walker | Light | 55 | 90 | 4 | $16 | the baseline |
+| Bulwark Hauler | Plated | 260 | 55 | 12 | $58 | slow and very tough |
+| **Vanguard Lance** | Light | **620** | **168** | 11 | $150 | fastest *and* tough |
+| **Siege Breaker** | Plated | **1400** | 78 | 16 | $300 | shrugs off 80% of slows |
+| **Brood Carrier** | Plated | 150 | 95 | 5 | $40 | armoured; breaks into 3 Skitters |
+| **Field Mender** | Shielded | 90 | 104 | 3 | $30 | heals everything around it |
+| **Static Jammer** | Shielded | 340 | 122 | 7 | $110 | silences turrets it passes |
 
 The first three trade speed against health. The **Lance** does not — it is the
 fastest thing on the board *and* tougher than anything that is not slower than
@@ -82,8 +83,8 @@ fire that held everything else lets Lances through.
 The **Breaker** exists because the Arc Suppressor does: once slowing everything
 was possible, slowing everything was the answer to everything.
 
-The **Carrier** is the only drone that is not a point on the health ladder. It has
-armour, so cheap fast guns lose half of every round to it — and it breaks into
+The **Carrier** is the only drone that is not a point on the health ladder. It is
+Plated *and* wears flat armour, so cheap fast kinetic guns lose twice over to it — and it breaks into
 three Skitters where it dies, which are faster than it was and want exactly the
 cheap fast guns that could not hurt the carrier. The weapon that kills it well is
 the wrong weapon for what it leaves. Because it splits on death and not on exit,
@@ -135,10 +136,57 @@ Four families answering different problems:
 
 | | Ballistic | Cannon | Arc Suppressor | Railgun |
 |---|---|---|---|---|
+| Fires | Kinetic | Explosive | Energy | Kinetic |
 | Damage | Single target | Area, falls off to the edge | Very low | Enormous, very slow |
 | Does | Kills things | Kills crowds | Slows the blast radius | Pierces a whole lane |
-| Best against | Bulwark Haulers | Skitter swarms | Vanguard Lances | Siege Breakers, columns |
+| Best against | Skitter swarms | Bulwark Haulers, Breakers | Menders, Jammers | Columns, and plate at range |
 | Tier 1 cost | $100 | $140 | $130 | $260 |
+
+### What a gun is good against
+
+Every gun fires one **damage type** and every drone wears one **armour class**.
+Where they meet is worth 1.35x, 1.0x or 0.65x — a favourable matchup is roughly
+two-for-one against an unfavourable one.
+
+| | Light | Plated | Shielded |
+|---|---|---|---|
+| **Kinetic** (Ballistic, Railgun) | **1.35** | 0.65 | 1.0 |
+| **Explosive** (Cannon) | 1.0 | **1.35** | 0.65 |
+| **Energy** (Arc Suppressor) | 0.65 | 1.0 | **1.35** |
+
+Three types for four guns, on purpose. Ballistic and Railgun are both kinetic and
+are separated by the *other* axis: flat armour comes off each **hit**, so a wall
+of cheap fast rounds is punished by it and one big slow round is barely troubled.
+
+The floor is deliberately not zero. A bad matchup is a bad answer, not no answer
+— no wave should teach you that a family you have already paid for does nothing.
+
+Both support classes are Shielded, which is what makes "bring an Arc line and
+re-task it onto the Menders" a plan rather than a hope. The wave preview above
+the board groups the next wave **by armour class**, so the decision is readable
+before the money is spent.
+
+### Act affixes
+
+An act can carry named modifiers, announced beside the level name before the
+first wave walks:
+
+| | |
+|---|---|
+| **Hardened** | +3 armour off every hit |
+| **Swift** | everything moves 22% faster |
+| **Resilient** | +25% health across the board |
+| **Relentless** | the gap between waves is cut to 55% |
+| **Screened** | slowing fields bite far less |
+| **Massed** | 30% more drones, and each pays 15% less |
+| **Austere** | bounties are cut to 75% |
+
+Authored per act, never rolled. A modifier you cannot see coming is a surprise,
+not a decision — this game is deterministic on purpose, so an act can be learned,
+lost to, and beaten. Each board has one **signature** affix that stays the same
+across its acts, so a player learns "Refinery is the Screened board" rather than
+re-reading a list every act. They arrive gradually: acts I–III of the first three
+boards carry none at all, and only the last six boards' act IVs carry two.
 
 The Suppressor barely damages anything. It is a force multiplier: a slowed drone
 spends longer inside everyone else's range, so a Suppressor makes the turrets

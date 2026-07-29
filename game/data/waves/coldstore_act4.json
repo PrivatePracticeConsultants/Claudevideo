@@ -652,5 +652,9 @@
         }
       ]
     }
+  ],
+  "affixes": [
+    "resilient",
+    "relentless"
   ]
 }

@@ -33,10 +33,21 @@ func test_damage_is_credited_to_the_family_that_did_it() -> void:
 	var cannon := _sim.blueprint_index("cannon")
 	_sim._begin_wave(0)
 	_sim._spawn(_sim.enemy_index("heavy"))
+	# A Bulwark Hauler is Plated, so the two families do not land what they fired:
+	# kinetic is at a disadvantage into plate and explosive is what opens it. The
+	# expectation is computed from the same table the hit path reads, so this
+	# stays a test of WHO was credited rather than a copy of today's numbers.
+	var plated := _sim.enemy_armour_class(_sim.enemy_index("heavy"))
+	var expect_ballistic := int(round(30.0
+		* _sim.matchup(_sim.blueprint_damage_type(ballistic), plated)))
+	var expect_cannon := int(round(12.0
+		* _sim.matchup(_sim.blueprint_damage_type(cannon), plated)))
+	assert_gt(float(expect_cannon), 12.0, "fixture sanity: explosive is favoured into plate")
+	assert_lt(float(expect_ballistic), 30.0, "fixture sanity: kinetic is not")
 	_sim._damage_enemy(0, 30, ballistic)
 	_sim._damage_enemy(0, 12, cannon)
-	assert_eq(_sim.family_damage(ballistic), 30, "the Autocannon's thirty")
-	assert_eq(_sim.family_damage(cannon), 12, "and the Mortar's twelve")
+	assert_eq(_sim.family_damage(ballistic), expect_ballistic, "the Autocannon's share")
+	assert_eq(_sim.family_damage(cannon), expect_cannon, "and the Mortar's")
 
 func test_overkill_is_not_counted_as_damage_dealt() -> void:
 	# A railgun round doing 640 to something with 12 health left did 12. Claiming

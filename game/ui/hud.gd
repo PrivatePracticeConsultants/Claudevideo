@@ -156,6 +156,15 @@ func set_level(name: String, index: int, total: int, inherited: int = 0,
 		next_extends: bool = false, dropped: int = 0, stood_down: int = 0,
 		salvage: int = 0, next_salvage_cap: int = -1) -> void:
 	_level_text = "%s      LEVEL %d/%d" % [name, index + 1, total]
+	# Named where the level is named, because an affix is part of what this act IS
+	# rather than something that happens during it. An unannounced modifier is a
+	# surprise; an announced one is a decision about what to build.
+	var affixes := _sim.affix_ids()
+	if not affixes.is_empty():
+		var badges := PackedStringArray()
+		for id in affixes:
+			badges.append(_sim.affix_name(id).to_upper())
+		_level_text += "      « %s »" % "  ·  ".join(badges)
 	if not _modules.is_empty():
 		var names := PackedStringArray()
 		for id in _modules:
@@ -223,8 +232,12 @@ func refresh(speed: int, paused: bool, hovered_platform: int = -1,
 		_sim.integrity(),
 		maxi(_sim.wave_number(), 1), _sim.wave_count(),
 		_sim.t_count, _sim.platform_limit(),
-		"[Q] %s $%d%s" % [_sim.blueprint_display_name(blueprint).to_upper(), cost,
-			"" if affordable else "  (short)"],
+		# The damage type sits next to the price because that is the moment the
+		# choice is made: the preview says what is coming, this says what this $200
+		# is good against.
+		"[Q] %s %s $%d%s" % [_sim.blueprint_display_name(blueprint).to_upper(),
+			_sim.damage_type_name(_sim.blueprint_damage_type(blueprint)).to_upper(),
+			cost, "" if affordable else "  (short)"],
 		"PAUSED" if paused else "%dx" % speed,
 	]
 	if can_buy_ground:
@@ -378,11 +391,32 @@ func _refresh_preview() -> void:
 	if groups.is_empty():
 		_preview.text = ""
 		return
-	var parts := PackedStringArray()
+	# Grouped by armour class, not by group, because the armour class is the
+	# question the preview now exists to answer: which of your four families is
+	# the next $200 worth spending on. Tagging every group instead was tried and
+	# ran off the right-hand edge of a 1280-wide window, which lost the Shielded
+	# drones at the end - the ones that most needed reading.
+	var by_class := {}
+	var order := PackedInt32Array()
 	for entry in groups:
-		var pair: Array = entry
-		parts.append("%d x %s" % [int(pair[1]), str(pair[0])])
-	_preview.text = "INCOMING  wave %d:  %s" % [_sim.next_wave_number(), "  ·  ".join(parts)]
+		var group: Array = entry
+		var armour_class := int(group[2])
+		if not by_class.has(armour_class):
+			# Plain Arrays, not Packed ones. A PackedStringArray held inside a
+			# Dictionary is a VALUE: appending to a local copy of it drops the
+			# append on the floor, silently, and the preview reads "LIGHT 371 ()".
+			# Found in a screenshot, which is the only place it was visible.
+			by_class[armour_class] = [0, []]
+			order.append(armour_class)
+		var bucket: Array = by_class[armour_class]
+		bucket[0] = int(bucket[0]) + int(group[1])
+		(bucket[1] as Array).append("%d %s" % [int(group[1]), str(group[0])])
+	var parts := PackedStringArray()
+	for armour_class in order:
+		var bucket: Array = by_class[armour_class]
+		parts.append("%s %d (%s)" % [_sim.armour_class_name(armour_class).to_upper(),
+			int(bucket[0]), ", ".join(bucket[1] as Array)])
+	_preview.text = "INCOMING  wave %d:   %s" % [_sim.next_wave_number(), "    ".join(parts)]
 
 func _color(key: String) -> Color:
 	return Color(str(_theme.get(key, "#ff00ff")))

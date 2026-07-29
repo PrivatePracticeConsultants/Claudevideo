@@ -1528,6 +1528,83 @@ across a chain, and — the assertion that was missing all along — that every
 consecutive pair of acts in the campaign brings more drones or tougher ones. The
 escalation is the whole mechanic now, so it is asserted rather than assumed.
 
+## P0-65 · Two systems that make composition a decision
+
+Asked for more complexity, more difficulty and more strategy, with the choice of
+what left to me.
+
+The honest diagnosis first: **the campaign had four weapon families and one
+shopping list.** Nothing in the game asked what you brought, only how much of it,
+so the deployment limit went on whatever had the best numbers and "which family"
+was never a question with a wave-dependent answer. Support links pushed weakly
+towards mixing; nothing pushed towards mixing *this* way for *this* wave.
+
+**1. A damage type against an armour class.** Three types (Kinetic, Explosive,
+Energy), three classes (Light, Plated, Shielded), one 3x3 matrix in `damage.json`,
+one multiply in `_damage_enemy`. 1.35 / 1.0 / 0.65 — a favourable matchup is worth
+about two-for-one, enough to feel and not enough to kill a mono-family board.
+
+Three decisions inside it worth keeping:
+
+- **Three types for four guns.** Ballistic and Railgun are both Kinetic, and the
+  axis that separates them already existed: flat armour comes off each HIT, so a
+  wall of cheap fast rounds is punished by it and one big slow round is not. A
+  fourth damage type would have bought nothing armour was not already saying.
+- **The matrix scales the shot BEFORE armour bites.** The other order punishes a
+  bad matchup twice, and the two systems are meant to ask different questions —
+  the matrix asks what you brought, armour asks how big it is. The order is
+  pinned by a test, not by this paragraph.
+- **The floor is 1, not 0.** A round that rounded to nothing would make a family
+  you have already paid for unusable rather than unwise.
+- **Both support classes are Shielded.** That is what turns "kill the Menders
+  first" from a hope into a plan with a price: bring an Energy line, re-task it.
+
+**2. Act affixes.** Named modifiers on everything an act sends — Hardened, Swift,
+Resilient, Relentless, Screened, Massed, Austere — announced beside the level name
+before the first wave walks. Every one is a multiplier or a flat bonus on a value
+the simulation already had, applied once at load, so **nothing an affix does
+happens in a tick**: no runtime cost and no way to desync a replay.
+
+Authored per act, never rolled. A modifier you cannot see coming is a surprise,
+not a decision, and this game is deterministic so an act can be learned, lost to,
+and beaten. Each board has one *signature* affix that stays the same across its
+acts — "Refinery is the Screened board" is something you learn once.
+
+**What the measurement changed, in order:**
+
+1. **Two affixes on early act IVs is one system too many.** The first assignment
+   gave every board a signature at act III and two at act IV. Highway IV and Port
+   IV both LOST. The first three boards are where the triangle is being learned;
+   stacking a modifier on that is two new things at once. The ramp is now: boards
+   1–3 one affix and only at act IV, boards 4–6 a signature from act III, boards
+   7–12 from act II with a second at act IV.
+2. **The triangle made the early acts EASIER, not harder.** Highway's opening
+   waves are all Light and the scripted policy leads with Ballistic, so Kinetic's
+   1.35 handed act II back to a do-nothing run. Lifted x1.18 on both axes, then
+   acts III and IV lifted above it (x1.25/x1.35 health, x1.20/x1.30 head-count) to
+   keep a board's curve monotone — which `test_chain` now asserts, so it could not
+   have been left broken quietly.
+3. **The finale was over-tuned at Relentless + Resilient**: 7 leaks, Integrity 0,
+   with all 208 turrets at tier 4 — unbeatable by the scripted run, carried board
+   and all. Swapped to **Relentless + Austere**, which squeezes the economy rather
+   than adding another raw-power multiplier, and it now wins at 20 Integrity with
+   5 leaks. The closest act in the game, which is what a finale should be.
+
+Measured after: 48 of 48 won by the scripted competent run. The campaign now has
+five genuinely close acts instead of none — Port IV at 40 Integrity, Coldstore IV
+at 52, Highline IV at 84, Highway IV at 88, Terminus IV at 20. No act
+idle-survives. 317 tests, 0 failed.
+
+**A screenshot caught what no test could.** The wave preview groups the incoming
+wave by armour class, and it shipped for one build reading `LIGHT 371 ()` — a
+`PackedStringArray` held inside a `Dictionary` is a VALUE in GDScript, so
+appending to a local copy of it drops the append on the floor, silently. Every
+assertion about the preview would have passed; the string was simply empty. The
+buckets are plain `Array`s now. The same capture found the first version of the
+line running off the right edge of a 1280-wide window and losing the Shielded
+drones at the end — the ones that most needed reading — which is why enemies grew
+a `short_name` and the preview groups by class instead of tagging every group.
+
 ## P0-14 · Deliberately not built in P0
 
 Not oversights — later phases, per §5.7. Anything tempting that came up is in

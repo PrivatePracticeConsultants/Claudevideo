@@ -50,7 +50,8 @@
       "radius_units": 195.0,
       "range_bonus": 0.1,
       "tier_scaling": 0.45
-    }
+    },
+    "damage_type": "kinetic"
   },
   "cannon": {
     "display_name": "Cannon",
@@ -110,7 +111,8 @@
       "radius_units": 215.0,
       "damage_bonus": 0.11,
       "tier_scaling": 0.45
-    }
+    },
+    "damage_type": "explosive"
   },
   "suppressor": {
     "display_name": "Arc Suppressor",
@@ -176,7 +178,8 @@
       "radius_units": 240.0,
       "fire_rate_bonus": 0.13,
       "tier_scaling": 0.45
-    }
+    },
+    "damage_type": "energy"
   },
   "railgun": {
     "display_name": "Railgun",
@@ -230,6 +233,7 @@
       "radius_units": 165.0,
       "damage_bonus": 0.15,
       "tier_scaling": 0.45
-    }
+    },
+    "damage_type": "kinetic"
   }
 }

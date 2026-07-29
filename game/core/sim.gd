@@ -153,6 +153,10 @@ var _bounds_height: float = 0.0
 
 var _type_ids: PackedStringArray = PackedStringArray()
 var _type_display: PackedStringArray = PackedStringArray()
+## The one-word version, for the wave preview - which now names an armour class
+## as well as a drone and ran off the right-hand edge of a 1280-wide window
+## saying both in full.
+var _type_short: PackedStringArray = PackedStringArray()
 var _type_base_hp: PackedInt64Array = PackedInt64Array()
 var _type_speed: PackedFloat64Array = PackedFloat64Array()
 var _type_leak: PackedInt32Array = PackedInt32Array()
@@ -184,6 +188,32 @@ var _type_slow_resist: PackedFloat64Array = PackedFloat64Array()
 var _type_armour: PackedInt32Array = PackedInt32Array()
 var _type_armour_now: PackedInt32Array = PackedInt32Array()
 var _armour_max_bite: float = 0.0
+## What a weapon is good against.
+##
+## Every drone wears one armour class and every blueprint fires one damage type;
+## `_matchup` is the multiplier where they meet, flattened to
+## `damage_type * class_count + armour_class` so the hit path is one index and one
+## multiply rather than a dictionary lookup.
+##
+## This is the difference between four turret families and one shopping list.
+## Without it the deployment limit is spent on whatever family has the best
+## numbers and composition is not a decision anybody makes; with it, what is
+## walking towards you decides what is worth building. The other axis - flat
+## armour, which comes off each HIT - is what separates the two kinetic families
+## from each other, so three types cover four guns without any of them being a
+## copy.
+var _bp_damage_type: PackedInt32Array = PackedInt32Array()
+var _type_armour_class: PackedInt32Array = PackedInt32Array()
+var _matchup: PackedFloat64Array = PackedFloat64Array()
+var _armour_class_count: int = 0
+var _damage_type_ids: PackedStringArray = PackedStringArray()
+var _armour_class_ids: PackedStringArray = PackedStringArray()
+## This act's named modifiers, and what they add up to. See _load_affixes.
+var _affix_ids: PackedStringArray = PackedStringArray()
+var _affix_armour_bonus: int = 0
+var _affix_speed_mult: float = 1.0
+var _affix_count_mult: float = 1.0
+var _affix_slow_resist_bonus: float = 0.0
 ## What this drone leaves behind when it dies, and how many. -1 for the drones
 ## that simply die. Validated one hop deep: a splitting type may only split into a
 ## non-splitting one, which makes a cycle impossible to write.
@@ -531,6 +561,9 @@ func _init(db: Database, seed_value: int) -> void:
 	_integrity_max = _integrity
 	_inter_wave_delay = int(db.engagement["inter_wave_delay_ticks"])
 	_wave_count = (db.engagement["waves"] as Array).size()
+	# Before the types and the blueprints, because both read what these set up.
+	_load_affixes()
+	_build_matchups()
 	_build_path()
 	_load_build_rules()
 	_build_types()
@@ -540,6 +573,63 @@ func _init(db: Database, seed_value: int) -> void:
 	_phase_timer = _inter_wave_delay
 
 # --- construction ------------------------------------------------------------
+
+## What this act's named modifiers add up to.
+##
+## An affix is a multiplier or a flat bonus on a value the simulation already
+## had, applied once, here. Nothing an affix does happens in a tick - which is
+## why the whole system costs nothing at runtime and cannot desync a replay.
+##
+## Authored in the wave file rather than rolled, because a modifier you cannot
+## see coming is a surprise and not a decision. The HUD announces them before the
+## first wave walks.
+func _load_affixes() -> void:
+	_affix_ids = PackedStringArray()
+	_affix_armour_bonus = 0
+	_affix_speed_mult = 1.0
+	_affix_count_mult = 1.0
+	_affix_slow_resist_bonus = 0.0
+	var listed: Array = _db.engagement.get("affixes", []) as Array
+	for entry: Variant in listed:
+		var id := str(entry)
+		var affix: Dictionary = _db.affixes.get(id, {}) as Dictionary
+		if affix.is_empty():
+			# Validated at load, so unreachable with good data. Skipping an unknown
+			# id rather than substituting one keeps a typo from silently becoming a
+			# different act.
+			continue
+		_affix_ids.append(id)
+		_affix_armour_bonus += maxi(0, int(affix.get("armour_bonus", 0)))
+		_affix_speed_mult *= maxf(0.0, float(affix.get("speed_multiplier", 1.0)))
+		_affix_count_mult *= maxf(0.0, float(affix.get("count_multiplier", 1.0)))
+		_affix_slow_resist_bonus += maxf(0.0, float(affix.get("slow_resistance_bonus", 0.0)))
+		_act_hp_mult *= maxf(0.0, float(affix.get("hp_multiplier", 1.0)))
+		_act_bounty_mult *= maxf(0.0, float(affix.get("bounty_multiplier", 1.0)))
+		_inter_wave_delay = maxi(1, int(round(float(_inter_wave_delay)
+			* maxf(0.0, float(affix.get("wave_delay_multiplier", 1.0))))))
+
+## The damage-type by armour-class table, flattened.
+##
+## Both orderings come from the data file's own key order, which is the same rule
+## every other id list in here follows: the file is the authority on what exists
+## and in what order, so a matchup cannot silently move when a class is added.
+func _build_matchups() -> void:
+	_damage_type_ids = PackedStringArray()
+	_armour_class_ids = PackedStringArray()
+	for id: String in (_db.damage.get("classes", {}) as Dictionary).keys():
+		if not id.begins_with("_"):
+			_armour_class_ids.append(id)
+	for id: String in (_db.damage.get("types", {}) as Dictionary).keys():
+		if not id.begins_with("_"):
+			_damage_type_ids.append(id)
+	_armour_class_count = _armour_class_ids.size()
+	_matchup.resize(_damage_type_ids.size() * _armour_class_count)
+	for t in _damage_type_ids.size():
+		var row: Dictionary = (_db.damage["types"] as Dictionary)[_damage_type_ids[t]]
+		for c in _armour_class_count:
+			# Absent means neutral. The validator requires every pair, so this is
+			# belt and braces rather than a policy.
+			_matchup[t * _armour_class_count + c] = float(row.get(_armour_class_ids[c], 1.0))
 
 ## The corridor, optionally only partly revealed.
 ##
@@ -742,6 +832,7 @@ func _build_types() -> void:
 	_type_slow_resist.resize(n)
 	_type_armour.resize(n)
 	_type_armour_now.resize(n)
+	_type_armour_class.resize(n)
 	_type_split_into.resize(n)
 	_type_split_count.resize(n)
 	_type_repair.resize(n)
@@ -752,18 +843,21 @@ func _build_types() -> void:
 	_type_jam_radius_sq.resize(n)
 	_type_jam_interval.resize(n)
 	_type_display.resize(n)
+	_type_short.resize(n)
 	_type_hp_now.resize(n)
 	_type_bounty_now.resize(n)
 	for i in n:
 		var e: Dictionary = _db.enemies[_type_ids[i]]
 		_type_base_hp[i] = int(e["base_hp"])
-		_type_speed[i] = float(e["speed_units_per_second"]) / float(_tick_rate)
+		_type_speed[i] = float(e["speed_units_per_second"]) * _affix_speed_mult / float(_tick_rate)
 		_type_leak[i] = int(e["leak_value"])
 		_type_base_bounty[i] = int(e["base_bounty"])
 		_type_radius[i] = float(e["radius"])
 		_type_jitter[i] = float(e["spawn_jitter_units"])
-		_type_slow_resist[i] = clampf(float(e.get("slow_resistance", 0.0)), 0.0, 1.0)
-		_type_armour[i] = maxi(0, int(e.get("armour", 0)))
+		_type_slow_resist[i] = clampf(float(e.get("slow_resistance", 0.0))
+			+ _affix_slow_resist_bonus, 0.0, 1.0)
+		_type_armour[i] = maxi(0, int(e.get("armour", 0))) + _affix_armour_bonus
+		_type_armour_class[i] = maxi(0, _class_index(str(e.get("armour_class", ""))))
 		# Seconds and units in the data file; ticks and squared units in here,
 		# because the tick is the only clock and a square root is the only thing a
 		# distance compare would otherwise need.
@@ -783,6 +877,7 @@ func _build_types() -> void:
 		_type_jam_interval[i] = maxi(1, int(round(
 			float(e.get("jam_interval_seconds", 1.0)) * float(_tick_rate))))
 		_type_display[i] = str(e.get("display_name", _type_ids[i]))
+		_type_short[i] = str(e.get("short_name", _type_display[i]))
 	# Second pass: a split target is named by id, and every id has to exist before
 	# any of them can be resolved.
 	for i in n:
@@ -813,6 +908,21 @@ func _build_types() -> void:
 func _has_role(type_index: int) -> bool:
 	return _type_repair[type_index] > 0 or _type_jam_ticks[type_index] > 0
 
+## -1 when the id is unknown, like every other id lookup in here. The caller
+## clamps to 0, because an unclassed drone should still be shootable - the
+## validator is what stops one existing.
+func _class_index(id: String) -> int:
+	for i in _armour_class_ids.size():
+		if _armour_class_ids[i] == id:
+			return i
+	return -1
+
+func _damage_type_index(id: String) -> int:
+	for i in _damage_type_ids.size():
+		if _damage_type_ids[i] == id:
+			return i
+	return -1
+
 func _build_blueprints() -> void:
 	_bp_ids = _db.blueprint_ids()
 	var n := _bp_ids.size()
@@ -823,7 +933,10 @@ func _build_blueprints() -> void:
 	_bp_support_damage.resize(n)
 	_bp_support_range.resize(n)
 	_bp_support_tier_scale.resize(n)
+	_bp_damage_type.resize(n)
 	for b in n:
+		_bp_damage_type[b] = maxi(0, _damage_type_index(
+			str((_db.blueprints[_bp_ids[b]] as Dictionary).get("damage_type", ""))))
 		# Absent means the family projects nothing, so a weapon written before
 		# links existed reads exactly right.
 		var support: Dictionary = (_db.blueprints[_bp_ids[b]] as Dictionary).get("support", {})
@@ -1237,7 +1350,12 @@ func next_wave_preview() -> Array:
 		var type_index := _type_index(str(g["enemy"]))
 		if type_index < 0:
 			continue
-		out.append([_type_display[type_index], int(g["count"])])
+		# The count as the act will actually send it, affix included. The preview
+		# quoting the file while the director spawns something else would be a
+		# number on screen the next thirty seconds contradicts.
+		out.append([_type_short[type_index],
+			maxi(1, int(round(float(g["count"]) * _affix_count_mult))),
+			_type_armour_class[type_index]])
 	return out
 
 ## Which wave the preview describes, 1-based.
@@ -2048,6 +2166,17 @@ func _lance_through(from_x: float, from_y: float, to_x: float, to_y: float,
 ## damage you deal, so it punishes a wall of cheap fast guns and barely troubles
 ## one big one. Never below 1 - see _type_armour.
 func _damage_enemy(index: int, amount: int, family: int) -> void:
+	# The matchup scales the SHOT, before armour bites into it. The other order was
+	# tried on paper and thrown out: armour subtracted from an already-halved round
+	# punishes a bad matchup twice, and the two systems are meant to ask different
+	# questions - the matrix asks what you brought, armour asks how big it is.
+	#
+	# Never below 1. A wrong answer is a bad answer, not no answer, and a shot that
+	# rounds to zero would make a family unusable rather than unwise.
+	if family >= 0:
+		amount = maxi(1, int(round(float(amount)
+			* _matchup[_bp_damage_type[family] * _armour_class_count
+				+ _type_armour_class[e_type[index]]])))
 	var armour := _type_armour_now[e_type[index]]
 	if armour > 0:
 		# Never below the cap, and never below 1.
@@ -2151,7 +2280,8 @@ func _begin_wave(index: int) -> void:
 		# Database rejects unknown enemy ids at load, so this is unreachable with
 		# validated data. If it ever happens, spawn nothing and count it -
 		# quietly substituting enemy type 0 would silently change the wave.
-		_g_remaining[g] = 0 if type_index < 0 else int(group["count"])
+		_g_remaining[g] = 0 if type_index < 0 else maxi(1,
+			int(round(float(group["count"]) * _affix_count_mult)))
 		if type_index < 0:
 			_unknown_enemy_groups += 1
 		_g_interval[g] = int(group["spawn_interval_ticks"])
@@ -2392,6 +2522,47 @@ func enemy_armour(type_index: int) -> int: return _type_armour[type_index]
 func enemy_splits_into(type_index: int) -> int: return _type_split_into[type_index]
 func enemy_split_count(type_index: int) -> int: return _type_split_count[type_index]
 func enemy_display_name(type_index: int) -> String: return _type_display[type_index]
+func enemy_short_name(type_index: int) -> String: return _type_short[type_index]
+
+## What a weapon is good against, and what a drone is. Indices into
+## damage_type_ids() / armour_class_ids(); matchup() is the multiplier between
+## them, which is what the HUD quotes so the number on screen is the number the
+## hit path uses.
+func blueprint_damage_type(blueprint: int) -> int: return _bp_damage_type[blueprint]
+func enemy_armour_class(type_index: int) -> int: return _type_armour_class[type_index]
+func damage_type_ids() -> PackedStringArray: return _damage_type_ids
+func armour_class_ids() -> PackedStringArray: return _armour_class_ids
+func matchup(damage_type: int, armour_class: int) -> float:
+	return _matchup[damage_type * _armour_class_count + armour_class]
+## Armour as this wave scales it, and the share of a round armour may never take.
+## Public so a test can compute what a hit should have done from the same numbers
+## the hit path used, rather than restating today's balance in an assertion.
+func enemy_armour_now(type_index: int) -> int: return _type_armour_now[type_index]
+func armour_max_bite() -> float: return _armour_max_bite
+## Health and bounty as the current wave scales them, the slow resistance an
+## affix may have raised, and the gap between waves an affix may have shortened.
+## Public because an affix is invisible unless something can read the number it
+## moved, and "invisible modifier" is the failure mode affixes are built to avoid.
+func enemy_hp_now(type_index: int) -> int: return _type_hp_now[type_index]
+func enemy_bounty_now(type_index: int) -> int: return _type_bounty_now[type_index]
+func enemy_slow_resistance(type_index: int) -> float: return _type_slow_resist[type_index]
+func inter_wave_delay() -> int: return _inter_wave_delay
+## What the wave director still has queued, per group of the current wave.
+func group_count() -> int: return _g_count
+func group_remaining(g: int) -> int: return _g_remaining[g]
+func damage_type_name(i: int) -> String:
+	return str(((_db.damage["types"] as Dictionary)[_damage_type_ids[i]] as Dictionary)
+		.get("display_name", _damage_type_ids[i]))
+func armour_class_name(i: int) -> String:
+	return str(((_db.damage["classes"] as Dictionary)[_armour_class_ids[i]] as Dictionary)
+		.get("display_name", _armour_class_ids[i]))
+
+## This act's named modifiers, in the order the wave file listed them.
+func affix_ids() -> PackedStringArray: return _affix_ids
+func affix_name(id: String) -> String:
+	return str((_db.affixes.get(id, {}) as Dictionary).get("display_name", id))
+func affix_blurb(id: String) -> String:
+	return str((_db.affixes.get(id, {}) as Dictionary).get("blurb", ""))
 
 func platform_priority(i: int) -> int: return t_priority[i]
 func platform_jammed(i: int) -> bool: return t_disabled[i] > 0

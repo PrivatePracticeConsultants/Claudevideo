@@ -458,5 +458,9 @@
         }
       ]
     }
+  ],
+  "affixes": [
+    "swift",
+    "relentless"
   ]
 }

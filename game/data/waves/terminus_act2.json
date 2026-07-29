@@ -705,5 +705,8 @@
       ]
     }
   ],
-  "forks_open": true
+  "forks_open": true,
+  "affixes": [
+    "relentless"
+  ]
 }

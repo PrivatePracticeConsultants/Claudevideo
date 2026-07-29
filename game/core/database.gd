@@ -24,6 +24,8 @@ var map: Dictionary = {}
 var engagement: Dictionary = {}
 var building: Dictionary = {}
 var modules: Dictionary = {}
+var damage: Dictionary = {}
+var affixes: Dictionary = {}
 
 var errors: PackedStringArray = PackedStringArray()
 
@@ -52,6 +54,8 @@ func _load_all(map_id: String, engagement_id: String) -> void:
 	blueprints = _read_object("%s/blueprints/blueprints.json" % root)
 	building = _read_object("%s/building.json" % root)
 	modules = _read_object("%s/modules/modules.json" % root)
+	damage = _read_object("%s/damage.json" % root)
+	affixes = _read_object("%s/affixes/affixes.json" % root)
 	map = _read_object("%s/maps/%s.json" % [root, map_id])
 	engagement = _read_object("%s/waves/%s.json" % [root, engagement_id])
 	if not errors.is_empty():
@@ -107,6 +111,8 @@ func _validate() -> void:
 	_req_num(economy, "support_cap_range", "economy.json", 0.0)
 
 	_validate_modules()
+	_validate_damage()
+	_validate_affixes()
 	_validate_enemies()
 	_validate_blueprints()
 	_validate_map()
@@ -150,6 +156,81 @@ func _validate_modules() -> void:
 	if not found:
 		errors.append("modules.json defines no modules.")
 
+## Every affix must move a number the simulation actually reads, and only those.
+## An affix with a typo'd key would be listed on an act, announced in the HUD,
+## and change nothing - a lie on screen, which is worse than a crash.
+const AFFIX_EFFECTS := ["armour_bonus", "speed_multiplier", "hp_multiplier",
+	"bounty_multiplier", "wave_delay_multiplier", "slow_resistance_bonus",
+	"count_multiplier"]
+
+## The damage matrix has to be COMPLETE. A missing pair would silently read as
+## neutral, and "this gun is neutral against that drone" is a design decision
+## nobody would have made on purpose.
+func _validate_damage() -> void:
+	var classes := _ids_of(damage.get("classes", {}))
+	var types := _ids_of(damage.get("types", {}))
+	if classes.is_empty():
+		errors.append("damage.json defines no armour classes.")
+	if types.is_empty():
+		errors.append("damage.json defines no damage types.")
+	for c in classes:
+		var body: Variant = (damage["classes"] as Dictionary)[c]
+		if typeof(body) != TYPE_DICTIONARY or str((body as Dictionary).get("display_name", "")).is_empty():
+			errors.append("damage.json -> classes -> %s needs a display_name - the HUD names it." % c)
+	for t in types:
+		var where := "damage.json -> types -> %s" % t
+		var row: Variant = (damage["types"] as Dictionary)[t]
+		if typeof(row) != TYPE_DICTIONARY:
+			errors.append("%s must be an object." % where)
+			continue
+		if str((row as Dictionary).get("display_name", "")).is_empty():
+			errors.append("%s needs a display_name - the HUD names it." % where)
+		for c in classes:
+			if not (row as Dictionary).has(c):
+				errors.append("%s has no multiplier against \"%s\". Every pair must be stated." % [where, c])
+				continue
+			_req_num(row as Dictionary, c, where, 0.0)
+		for key in (row as Dictionary).keys():
+			if key == "display_name" or key.begins_with(_DOC_PREFIX):
+				continue
+			if not classes.has(key):
+				errors.append("%s names armour class \"%s\", which does not exist." % [where, key])
+
+func _validate_affixes() -> void:
+	for id in affixes.keys():
+		if id.begins_with(_DOC_PREFIX):
+			continue
+		var where := "affixes.json -> %s" % id
+		var a: Variant = affixes[id]
+		if typeof(a) != TYPE_DICTIONARY:
+			errors.append("%s must be an object." % where)
+			continue
+		if str((a as Dictionary).get("display_name", "")).is_empty():
+			errors.append("%s needs a display_name - it is announced by name." % where)
+		if str((a as Dictionary).get("blurb", "")).is_empty():
+			errors.append("%s needs a blurb - an announced modifier nobody can read is a surprise." % where)
+		var effects := 0
+		for key in (a as Dictionary).keys():
+			if key == "display_name" or key == "blurb" or key.begins_with(_DOC_PREFIX):
+				continue
+			if not AFFIX_EFFECTS.has(key):
+				errors.append("%s has unknown effect \"%s\". Known: %s"
+					% [where, key, ", ".join(AFFIX_EFFECTS)])
+				continue
+			_req_num(a as Dictionary, key, where, 0.0)
+			effects += 1
+		if effects == 0:
+			errors.append("%s does nothing." % where)
+
+func _ids_of(source: Variant) -> PackedStringArray:
+	var out := PackedStringArray()
+	if typeof(source) != TYPE_DICTIONARY:
+		return out
+	for id in (source as Dictionary).keys():
+		if not id.begins_with(_DOC_PREFIX):
+			out.append(id)
+	return out
+
 func _validate_enemies() -> void:
 	var found := false
 	for id in enemies.keys():
@@ -169,6 +250,16 @@ func _validate_enemies() -> void:
 		_req_num(e, "spawn_jitter_units", where, 0.0)
 		if (e as Dictionary).has("armour"):
 			_req_int(e, "armour", where, 0)
+		# Required, not defaulted. A drone with no armour class would quietly take
+		# whatever class index 0 happens to be, and "this one is Light because
+		# nobody said otherwise" is exactly the unexplainable balance value this
+		# file exists to prevent.
+		var armour_class := str((e as Dictionary).get("armour_class", ""))
+		if armour_class.is_empty():
+			errors.append("%s has no armour_class. Every drone must state what it wears: %s"
+				% [where, ", ".join(_ids_of(damage.get("classes", {})))])
+		elif not _ids_of(damage.get("classes", {})).has(armour_class):
+			errors.append("%s wears unknown armour class \"%s\"." % [where, armour_class])
 		# Both halves of each pair are required together: healing with no radius
 		# heals nothing, and a radius with no amount is a drone that appears to be
 		# a mender and is not. Silently doing nothing is the failure mode this file
@@ -209,6 +300,15 @@ func _validate_blueprints() -> void:
 		if typeof(b) != TYPE_DICTIONARY:
 			errors.append("%s must be an object." % where)
 			continue
+		# Required for the same reason a drone's armour class is: an untyped gun
+		# would silently fire whatever type index 0 is, and be strong and weak
+		# against things nobody chose.
+		var damage_type := str((b as Dictionary).get("damage_type", ""))
+		if damage_type.is_empty():
+			errors.append("%s has no damage_type. Every gun must state what it fires: %s"
+				% [where, ", ".join(_ids_of(damage.get("types", {})))])
+		elif not _ids_of(damage.get("types", {})).has(damage_type):
+			errors.append("%s fires unknown damage type \"%s\"." % [where, damage_type])
 		if (b as Dictionary).has("support"):
 			var support: Variant = (b as Dictionary)["support"]
 			var swhere := "%s support" % where
@@ -400,6 +500,22 @@ func _validate_engagement() -> void:
 		_req_num(engagement, "act_hp_multiplier", "wave file", 0.0001)
 	if engagement.has("act_bounty_multiplier"):
 		_req_num(engagement, "act_bounty_multiplier", "wave file", 0.0001)
+	if engagement.has("affixes"):
+		var listed: Variant = engagement["affixes"]
+		if typeof(listed) != TYPE_ARRAY:
+			errors.append("wave file: affixes must be a list of affix ids.")
+		else:
+			var seen := {}
+			for entry: Variant in (listed as Array):
+				var id := str(entry)
+				if not affixes.has(id) or id.begins_with(_DOC_PREFIX):
+					errors.append("wave file: unknown affix \"%s\". Known: %s"
+						% [id, ", ".join(_ids_of(affixes))])
+				elif seen.has(id):
+					# Twice would apply twice, which is a different act than the one
+					# whoever wrote the list was describing.
+					errors.append("wave file: affix \"%s\" is listed twice." % id)
+				seen[id] = true
 	var waves: Variant = engagement.get("waves")
 	if typeof(waves) != TYPE_ARRAY or (waves as Array).is_empty():
 		errors.append("Wave file %s has no waves." % str(engagement.get("engagement_id", "?")))
@@ -432,7 +548,11 @@ func _validate_engagement() -> void:
 			# file lists. Counting only what is written would let a wave overrun the
 			# pool at the moment the last brood dies, which is the worst possible
 			# moment to start silently dropping drones.
-			in_wave += count * (1 + _split_yield(enemy_id))
+			# ...and an affix that multiplies head-count puts more on the board than
+			# the group lists, so the ceiling has to be checked against the act as it
+			# will actually be played, not as it was written.
+			in_wave += int(ceil(float(count) * _affix_count_multiplier())) \
+				* (1 + _split_yield(enemy_id))
 		peak = maxi(peak, in_wave)
 	# A wave that can out-spawn the enemy pool would silently drop enemies, which
 	# is exactly the kind of "the numbers are quietly wrong" failure that must not
@@ -440,6 +560,15 @@ func _validate_engagement() -> void:
 	var cap := int(sim.get("max_enemies", 0))
 	if peak > cap:
 		errors.append("A wave spawns %d enemies but sim.json max_enemies is %d. Raise max_enemies." % [peak, cap])
+
+## What this act's affixes do to every group's head-count, multiplied together.
+## 1.0 when the act has none, which is most of them.
+func _affix_count_multiplier() -> float:
+	var total := 1.0
+	for entry: Variant in (engagement.get("affixes", []) as Array):
+		total *= maxf(0.0, float((affixes.get(str(entry), {}) as Dictionary)
+			.get("count_multiplier", 1.0)))
+	return total
 
 ## How many extra drones one of this type eventually puts on the board. 0 for
 ## everything that simply dies.

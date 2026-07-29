@@ -1,0 +1,41 @@
+{
+  "_comment": "Act affixes: a named, announced modifier on everything an act sends. They exist so that two acts with the same drone list are not the same problem twice - a Swift act wants range and reach, a Hardened act wants damage per shot rather than shots per second, a Relentless act takes the between-wave breathing room away from a plan that needed it.",
+  "_why_not_random": "Authored per act in the wave file, not rolled at runtime. A modifier a player cannot see coming is not strategy, it is a surprise, and this game is deterministic on purpose: the same act is the same act, so it can be learned, lost to, and beaten.",
+  "_how_they_apply": "Every field here is a multiplier or a flat bonus on a value the simulation already had, applied once when the act loads. Nothing here changes what happens in a tick - which is exactly why the whole system costs nothing at runtime and cannot desync a replay.",
+  "hardened": {
+    "display_name": "Hardened",
+    "blurb": "Reinforced plate - armour comes off every hit",
+    "armour_bonus": 3
+  },
+  "swift": {
+    "display_name": "Swift",
+    "blurb": "Overdriven drives - everything arrives sooner",
+    "speed_multiplier": 1.22
+  },
+  "resilient": {
+    "display_name": "Resilient",
+    "blurb": "Field-hardened hulls - more health across the board",
+    "hp_multiplier": 1.25
+  },
+  "relentless": {
+    "display_name": "Relentless",
+    "blurb": "No pause between waves worth the name",
+    "wave_delay_multiplier": 0.55
+  },
+  "screened": {
+    "display_name": "Screened",
+    "blurb": "Inertial screens - slowing fields barely bite",
+    "slow_resistance_bonus": 0.6
+  },
+  "massed": {
+    "display_name": "Massed",
+    "blurb": "Every group is bigger, and every kill pays less",
+    "count_multiplier": 1.3,
+    "bounty_multiplier": 0.85
+  },
+  "austere": {
+    "display_name": "Austere",
+    "blurb": "Salvage crews stripped the wrecks - bounties are thin",
+    "bounty_multiplier": 0.75
+  }
+}
