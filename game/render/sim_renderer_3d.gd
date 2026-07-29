@@ -312,9 +312,22 @@ func _build_scenery() -> void:
 	ground.mesh = _ground_mesh()
 	var ground_material := _surface_material(Color.WHITE,
 		float(_world.get("ground_metallic", 0.0)), float(_world.get("ground_roughness", 0.95)))
-	# Vertex colours carry the mottling; the base colour has to be white or it
+	# Vertex colours carry the broad mottling; the base colour has to be white or it
 	# would multiply the variation away.
 	ground_material.vertex_color_use_as_albedo = true
+	# ...and generated noise carries the fine detail. Vertex colour on a 128-cell
+	# grid varies every ~195 units, which at this camera distance is cloud rather
+	# than surface. The texture and its normal map are what make the ground read as
+	# something with a texture instead of as a tinted polygon.
+	var detail := int(_world.get("ground_detail_size", 128))
+	ground_material.albedo_texture = _detail_albedo(detail,
+		float(_world.get("ground_detail_contrast", 0.45)))
+	ground_material.normal_enabled = true
+	ground_material.normal_texture = _detail_normal(detail,
+		float(_world.get("ground_detail_relief", 3.2)))
+	ground_material.normal_scale = float(_world.get("ground_normal_scale", 1.0))
+	ground_material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+	ground_material.texture_repeat = true
 	ground.material_override = ground_material
 	_scenery.add_child(ground)
 
@@ -403,7 +416,9 @@ func _ground_mesh() -> ArrayMesh:
 
 	var vertices := PackedVector3Array()
 	var colours := PackedColorArray()
+	var uvs := PackedVector2Array()
 	var indices := PackedInt32Array()
+	var tile := maxf(float(_world.get("ground_tile", 900.0)), 1.0)
 	var step_x := (width + margin * 2.0) / float(cells)
 	var step_z := (depth + margin * 2.0) / float(cells)
 	for row in cells + 1:
@@ -412,6 +427,9 @@ func _ground_mesh() -> ArrayMesh:
 			var z := -margin + float(row) * step_z
 			var y := _ground_height(x, z)
 			vertices.append(Vector3(x, y, z))
+			# World-space UVs, so the surface detail is the same size everywhere and
+			# does not stretch with the board.
+			uvs.append(Vector2(x / tile, z / tile))
 			var to_road := _road_distance(x, z, soil_reach)
 			var tint := verge_soil.lerp(grass, clampf(to_road / maxf(soil_reach, 1.0), 0.0, 1.0))
 			# Height, not slope: slope needs neighbours and this is one pass. The
@@ -433,10 +451,91 @@ func _ground_mesh() -> ArrayMesh:
 	arrays.resize(Mesh.ARRAY_MAX)
 	arrays[Mesh.ARRAY_VERTEX] = vertices
 	arrays[Mesh.ARRAY_COLOR] = colours
+	arrays[Mesh.ARRAY_TEX_UV] = uvs
 	arrays[Mesh.ARRAY_INDEX] = indices
 	var mesh := ArrayMesh.new()
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	# Normals, which this mesh shipped without.
+	#
+	# Not a refinement - a bug. Without an ARRAY_NORMAL the ground was handed to
+	# the lighting with no surface direction at all, so every hill on it was shaded
+	# identically to the flat ground beside it. The relief had been there for
+	# months and could not be seen, and no amount of colour work was ever going to
+	# fix that. Tangents come with them, because the detail normal map below is
+	# meaningless without a tangent basis to apply it in.
+	var tool := SurfaceTool.new()
+	tool.create_from(mesh, 0)
+	tool.generate_normals()
+	tool.generate_tangents()
+	mesh.clear_surfaces()
+	tool.commit(mesh)
 	return mesh
+
+## Tileable value noise, as a height field.
+##
+## Generated rather than shipped, for the same reason the sound effects are: no
+## binary assets, and the shape of the surface becomes something that can be
+## reasoned about in ten lines instead of opened in an image editor. Three octaves
+## on a wrapping lattice, so the texture tiles seamlessly at any scale.
+func _noise_field(size: int, seed_offset: int) -> PackedFloat32Array:
+	var field := PackedFloat32Array()
+	field.resize(size * size)
+	var octaves := [4, 9, 19]
+	var weights := [0.55, 0.3, 0.15]
+	for o in octaves.size():
+		var lattice: int = octaves[o]
+		var weight: float = weights[o]
+		for y in size:
+			for x in size:
+				var fx := float(x) / float(size) * float(lattice)
+				var fy := float(y) / float(size) * float(lattice)
+				var x0 := int(floor(fx))
+				var y0 := int(floor(fy))
+				var tx := fx - float(x0)
+				var ty := fy - float(y0)
+				# Smoothstep, or the lattice shows as diamonds.
+				tx = tx * tx * (3.0 - 2.0 * tx)
+				ty = ty * ty * (3.0 - 2.0 * ty)
+				var a00 := _hash_unit((x0 % lattice) + seed_offset, (y0 % lattice) + o * 31)
+				var a10 := _hash_unit(((x0 + 1) % lattice) + seed_offset, (y0 % lattice) + o * 31)
+				var a01 := _hash_unit((x0 % lattice) + seed_offset, ((y0 + 1) % lattice) + o * 31)
+				var a11 := _hash_unit(((x0 + 1) % lattice) + seed_offset, ((y0 + 1) % lattice) + o * 31)
+				var top: float = a00 + (a10 - a00) * tx
+				var bottom: float = a01 + (a11 - a01) * tx
+				field[y * size + x] += (top + (bottom - top) * ty) * weight
+	return field
+
+## The noise as a greyscale texture, centred on 1.0 so it multiplies the vertex
+## colour rather than replacing it.
+func _detail_albedo(size: int, contrast: float) -> ImageTexture:
+	var field := _noise_field(size, 0)
+	var image := Image.create(size, size, false, Image.FORMAT_RGB8)
+	for y in size:
+		for x in size:
+			var v := 1.0 + (field[y * size + x] - 0.5) * contrast
+			image.set_pixel(x, y, Color(v, v, v))
+	return ImageTexture.create_from_image(image)
+
+## A normal map from the same field.
+##
+## This is what makes a flat polygon look like it has a surface. Central
+## differences for the slope, encoded the way a tangent-space normal map is: XY in
+## red and green about a half-grey rest, Z in blue.
+func _detail_normal(size: int, strength: float) -> ImageTexture:
+	var field := _noise_field(size, 0)
+	var image := Image.create(size, size, false, Image.FORMAT_RGB8)
+	for y in size:
+		for x in size:
+			var left := field[y * size + ((x - 1 + size) % size)]
+			var right := field[y * size + ((x + 1) % size)]
+			var up := field[((y - 1 + size) % size) * size + x]
+			var down := field[((y + 1) % size) * size + x]
+			var nx := (left - right) * strength
+			var ny := (up - down) * strength
+			var length := sqrt(nx * nx + ny * ny + 1.0)
+			image.set_pixel(x, y, Color(
+				nx / length * 0.5 + 0.5, ny / length * 0.5 + 0.5, 1.0 / length * 0.5 + 0.5))
+	return ImageTexture.create_from_image(image)
 
 ## How high the terrain sits at a point.
 ##
@@ -603,13 +702,27 @@ func _tree_layers() -> Array:
 	canopy_material.vertex_color_use_as_albedo = true
 	canopy_mesh.material = canopy_material
 
+	# ...and a rounded one for the broadleaves. A forest of one silhouette reads as
+	# a texture rather than as trees; two is enough for the eye to stop counting.
+	var broad_mesh := SphereMesh.new()
+	broad_mesh.radius = 0.5
+	broad_mesh.height = 1.0
+	broad_mesh.radial_segments = 7
+	broad_mesh.rings = 4
+	broad_mesh.material = canopy_material
+
 	var trunks := _instanced(trunk_mesh, spots.size())
 	var canopies := _instanced(canopy_mesh, spots.size())
+	var broadleaves := _instanced(broad_mesh, spots.size())
 	var shadows := GeometryInstance3D.SHADOW_CASTING_SETTING_ON \
 		if bool(_world.get("tree_shadows", true)) \
 		else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	trunks.cast_shadow = shadows
 	canopies.cast_shadow = shadows
+	broadleaves.cast_shadow = shadows
+	var broad_share := float(_world.get("broadleaf_share", 0.35))
+	var conifer_count := 0
+	var broad_count := 0
 
 	var height := float(_world.get("tree_height", 190.0))
 	var girth := float(_world.get("tree_girth", 26.0))
@@ -629,14 +742,26 @@ func _tree_layers() -> Array:
 			Vector3(spot.x, spot.y + trunk_height * 0.5, spot.z)))
 		trunks.multimesh.set_instance_color(i,
 			bark.lerp(Color.WHITE, seed_a * 0.12))
-		canopies.multimesh.set_instance_transform(i, Transform3D(
-			Basis(Vector3.UP, spin).scaled(Vector3(wide, tall * 0.82, wide)),
-			Vector3(spot.x, spot.y + trunk_height + tall * 0.41, spot.z)))
 		# Two greens mixed by hash, so a hillside is not one flat colour.
-		canopies.multimesh.set_instance_color(i, leaf.lerp(leaf_far, seed_b))
+		var tint := leaf.lerp(leaf_far, seed_b)
+		if _hash_unit(int(spot.x) + 401, int(spot.z) + 137) < broad_share:
+			# Broadleaf: a squatter, wider crown sitting lower on its trunk.
+			broadleaves.multimesh.set_instance_transform(broad_count, Transform3D(
+				Basis(Vector3.UP, spin).scaled(
+					Vector3(wide * 1.55, tall * 0.58, wide * 1.55)),
+				Vector3(spot.x, spot.y + trunk_height + tall * 0.26, spot.z)))
+			broadleaves.multimesh.set_instance_color(broad_count, tint)
+			broad_count += 1
+		else:
+			canopies.multimesh.set_instance_transform(conifer_count, Transform3D(
+				Basis(Vector3.UP, spin).scaled(Vector3(wide, tall * 0.82, wide)),
+				Vector3(spot.x, spot.y + trunk_height + tall * 0.41, spot.z)))
+			canopies.multimesh.set_instance_color(conifer_count, tint)
+			conifer_count += 1
 	trunks.multimesh.visible_instance_count = spots.size()
-	canopies.multimesh.visible_instance_count = spots.size()
-	return [trunks, canopies]
+	canopies.multimesh.visible_instance_count = conifer_count
+	broadleaves.multimesh.visible_instance_count = broad_count
+	return [trunks, canopies, broadleaves]
 
 ## Boulders, further out than the debris beside the road and much larger.
 ##

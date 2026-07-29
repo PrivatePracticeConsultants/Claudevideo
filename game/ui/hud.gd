@@ -17,6 +17,10 @@ var _banner: Label
 var _debrief: Label
 ## Dim panel behind both, so the numbers are readable over a lit board.
 var _scrim: ColorRect
+## Dark strips behind the top and bottom text bands, so the HUD survives whatever
+## the terrain happens to be doing underneath it.
+var _top_bar: ColorRect
+var _bottom_bar: ColorRect
 var _level: Label
 var _preview: Label
 var _level_text: String = ""
@@ -40,6 +44,23 @@ func setup(sim: Sim, theme: Dictionary) -> void:
 	_sim = sim
 	_theme = theme
 	layer = 1
+
+	# Dark strips behind the two text bands, added before anything else so they sit
+	# underneath it.
+	#
+	# The HUD's colours were chosen against a board that was a dark sheet in a dark
+	# void. The terrain is now lit ground with sunlight on it, and captured without
+	# these the level name and the whole control hint line were simply illegible -
+	# pale grey text on pale green grass. Text that has to survive an arbitrary
+	# background needs a background of its own.
+	_top_bar = ColorRect.new()
+	_top_bar.color = Color(_color("background"), float(_theme.get("hud_bar_alpha", 0.55)))
+	_top_bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(_top_bar)
+	_bottom_bar = ColorRect.new()
+	_bottom_bar.color = Color(_color("background"), float(_theme.get("hud_bar_alpha", 0.55)))
+	_bottom_bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(_bottom_bar)
 
 	_stats = Label.new()
 	_stats.position = Vector2(14, 640)
@@ -112,6 +133,10 @@ func _layout() -> void:
 	var viewport := get_viewport()
 	if viewport != null:
 		width = maxf(viewport.get_visible_rect().size.x, 320.0)
+	_top_bar.position = Vector2.ZERO
+	_top_bar.size = Vector2(width, 76.0)
+	_bottom_bar.position = Vector2(0.0, 626.0)
+	_bottom_bar.size = Vector2(width, 94.0)
 	_scrim.position = Vector2(0.0, BANNER_TOP - 22.0)
 	_scrim.size = Vector2(width, 268.0)
 	_banner.position = Vector2(0.0, BANNER_TOP)
