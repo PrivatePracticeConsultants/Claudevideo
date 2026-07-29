@@ -234,6 +234,6 @@
       "damage_bonus": 0.15,
       "tier_scaling": 0.45
     },
-    "damage_type": "kinetic"
+    "damage_type": "energy"
   }
 }

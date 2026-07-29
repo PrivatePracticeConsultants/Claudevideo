@@ -1,6 +1,6 @@
 {
   "_comment": "What a weapon is good against. Every blueprint fires one damage type; every drone wears one armour class; this matrix is the multiplier where they meet. It exists because without it a turret family is only ever 'better' or 'worse' and the answer to every board is the same shopping list - the deployment limit is spent on whatever has the best numbers, and composition is not a decision. With it, what is walking towards you determines what is worth building.",
-  "_why_three": "Three classes and three types, not four. Four families share three types on purpose: Ballistic and Railgun are both kinetic, and what separates them is the OTHER axis that already exists - flat armour comes off each hit, so a wall of cheap fast guns is punished by it and one big slow gun is barely troubled. A fourth damage type would have bought nothing that armour does not already say.",
+  "_why_three": "Three classes and three types, not four. Two families share a type on purpose - the Arc Suppressor and the Railgun are both Energy, and they are nothing like each other: one is a four-damage slowing field, the other is a ninety-three-damage lance through a whole lane. Ballistic and Cannon are separated the same way by the OTHER axis that already exists: flat armour comes off each HIT, so a wall of cheap fast rounds is punished by it and one big slow round is barely troubled. A fourth damage type would have bought nothing the arsenal was not already saying.",
   "_why_these_numbers": "1.35 / 1.0 / 0.65 - a favourable matchup is worth roughly two-for-one against an unfavourable one, which is enough that bringing the wrong gun to a wave is felt, and not so much that a mono-family board simply dies. The floor is deliberately not zero: a bad answer is a bad answer, not no answer.",
   "classes": {
     "light": {
@@ -13,7 +13,7 @@
     },
     "shielded": {
       "display_name": "Shielded",
-      "_comment": "Field-screened. Blast pressure washes over it and energy weapons collapse it. Every drone with a support role wears one, so the answer to a healed or jammed board is a gun rather than patience."
+      "_comment": "Field-screened. Blast pressure washes over it and energy weapons collapse it. Every drone with a support role wears one, so the answer to a healed or jammed board is a gun rather than patience - and the gun is the Railgun, which is the point. An earlier assignment left the Arc Suppressor as the only Energy weapon in the game, so 'bring the right gun' against a 340-health Static Jammer meant bringing four damage a shot. The matrix said yes and the numbers said no; there is a test for it now."
     }
   },
   "types": {

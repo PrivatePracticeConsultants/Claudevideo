@@ -2500,6 +2500,12 @@ func blueprint_tier_count(i: int) -> int: return _bp_tier_count[i]
 func blueprint_splash(i: int) -> float: return _tier_splash_radius[_bp_tier_offset[i]]
 func blueprint_slow_factor(i: int) -> float: return _tier_slow_factor[_bp_tier_offset[i]]
 func blueprint_pierce(i: int) -> float: return _tier_pierce[_bp_tier_offset[i]]
+## Tier-1 damage per second. Public so a test can ask whether the gun the matrix
+## favours into an armour class is a gun worth bringing, which is a different
+## question from whether the matrix has a number above 1.0 in that cell.
+func blueprint_dps(i: int) -> float:
+	var slot := _bp_tier_offset[i]
+	return float(_tier_damage[slot]) * float(_tick_rate) / float(maxi(1, _tier_interval[slot]))
 func platform_pierce(i: int) -> float: return _tier_pierce[t_tier_slot[i]]
 func platform_slow_factor(i: int) -> float: return _tier_slow_factor[t_tier_slot[i]]
 func platform_slow_ticks(i: int) -> int: return _tier_slow_ticks[t_tier_slot[i]]

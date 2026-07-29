@@ -206,3 +206,31 @@ func _total_health(sim: Sim) -> int:
 		if sim.e_alive[i] == 1:
 			total += sim.e_hp[i]
 	return total
+
+func test_a_class_is_not_answered_only_by_the_weakest_gun_in_the_game() -> void:
+	# The hole the first version of this file had, and the reason the audit found
+	# it rather than the suite. `test_the_support_drones_are_answerable_by_a_gun`
+	# only asked whether the matrix has a number above 1.0 against Shielded. It
+	# did - the Arc Suppressor's - and the Arc Suppressor does FOUR damage. A
+	# Static Jammer has 340 health. "Bring the right gun" was a sentence with no
+	# gun behind it.
+	#
+	# So: for every armour class, something FAVOURED into it has to hit harder
+	# than the feeblest gun in the game. No magic threshold - the comparison is
+	# against the arsenal's own floor.
+	var sim := _sim()
+	var floor_dps := 999999.0
+	for b in sim.blueprint_count():
+		floor_dps = minf(floor_dps, sim.blueprint_dps(b))
+	for c in sim.armour_class_ids().size():
+		var best_favoured := -1.0
+		var best_name := ""
+		for b in sim.blueprint_count():
+			if sim.matchup(sim.blueprint_damage_type(b), c) <= 1.0:
+				continue
+			if sim.blueprint_dps(b) > best_favoured:
+				best_favoured = sim.blueprint_dps(b)
+				best_name = sim.blueprint_display_name(b)
+		assert_gt(best_favoured, floor_dps,
+			"%s is answered by %s, which is the weakest gun in the arsenal - the matrix says bring it and the numbers say it cannot"
+				% [sim.armour_class_name(c), best_name])

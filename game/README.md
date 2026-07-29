@@ -136,10 +136,10 @@ Four families answering different problems:
 
 | | Ballistic | Cannon | Arc Suppressor | Railgun |
 |---|---|---|---|---|
-| Fires | Kinetic | Explosive | Energy | Kinetic |
+| Fires | Kinetic | Explosive | Energy | Energy |
 | Damage | Single target | Area, falls off to the edge | Very low | Enormous, very slow |
 | Does | Kills things | Kills crowds | Slows the blast radius | Pierces a whole lane |
-| Best against | Skitter swarms | Bulwark Haulers, Breakers | Menders, Jammers | Columns, and plate at range |
+| Best against | Skitter swarms | Bulwark Haulers, Breakers | Menders, Jammers | Menders, Jammers, columns |
 | Tier 1 cost | $100 | $140 | $130 | $260 |
 
 ### What a gun is good against
@@ -150,19 +150,21 @@ two-for-one against an unfavourable one.
 
 | | Light | Plated | Shielded |
 |---|---|---|---|
-| **Kinetic** (Ballistic, Railgun) | **1.35** | 0.65 | 1.0 |
+| **Kinetic** (Ballistic) | **1.35** | 0.65 | 1.0 |
 | **Explosive** (Cannon) | 1.0 | **1.35** | 0.65 |
-| **Energy** (Arc Suppressor) | 0.65 | 1.0 | **1.35** |
+| **Energy** (Arc Suppressor, Railgun) | 0.65 | 1.0 | **1.35** |
 
-Three types for four guns, on purpose. Ballistic and Railgun are both kinetic and
-are separated by the *other* axis: flat armour comes off each **hit**, so a wall
+Three types for four guns, on purpose. The Arc Suppressor and the Railgun share
+Energy and are nothing like each other — a four-damage slowing field and a
+ninety-three-damage lance through a whole lane. Ballistic and Cannon are pulled
+apart by the *other* axis instead: flat armour comes off each **hit**, so a wall
 of cheap fast rounds is punished by it and one big slow round is barely troubled.
 
 The floor is deliberately not zero. A bad matchup is a bad answer, not no answer
 — no wave should teach you that a family you have already paid for does nothing.
 
-Both support classes are Shielded, which is what makes "bring an Arc line and
-re-task it onto the Menders" a plan rather than a hope. The wave preview above
+Both support classes are Shielded, which is what makes "put a Railgun on the
+Menders and set it to *Weakest*" a plan rather than a hope. The wave preview above
 the board groups the next wave **by armour class**, so the decision is readable
 before the money is spent.
 

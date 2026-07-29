@@ -1595,6 +1595,35 @@ five genuinely close acts instead of none — Port IV at 40 Integrity, Coldstore
 at 52, Highline IV at 84, Highway IV at 88, Terminus IV at 20. No act
 idle-survives. 317 tests, 0 failed.
 
+**The audit pass found a hole the feature's own tests were blind to.** The rule
+"both support classes are Shielded, so bring the right gun" was checked by
+`test_the_support_drones_are_answerable_by_a_gun`, which asked whether the matrix
+had a number above 1.0 against Shielded. It did — the Arc Suppressor's — and the
+Arc Suppressor does **four damage a shot**. A Static Jammer has 340 health. The
+sentence had no gun behind it: the matrix said yes and the arithmetic said no.
+
+The fix is that the **Railgun is Energy**, not Kinetic. It is now the precision
+anti-support gun — ninety-three damage a shot into the class both support drones
+wear — which is what "pick the Mender out and kill it" was always supposed to
+mean. It also fixes the thing that was wrong on the other side: a Railgun
+described as the answer to Siege Breakers was 0.65 into them while it was Kinetic.
+Cannon is the anti-plate answer now, which is what artillery is for.
+
+The test that could not see it has been replaced by one that can, and it needs no
+magic threshold: **for every armour class, something favoured into it must hit
+harder than the feeblest gun in the arsenal.** The comparison is against the
+arsenal's own floor, so it stays true whatever the numbers become.
+
+The re-measurement after that swap moved the campaign around and is the reason
+Terminus IV ended up with three affixes: Relentless + Austere had been tuned
+against Kinetic Railguns and read as a 100-Integrity walkover once they were
+Energy. Relentless + Resilient + Austere brings it to **4 Integrity and 6 leaks**
+— the hardest act in the game, which is what a finale is for. The middle boards'
+finales gained Austere too; it thins bounties without adding raw power, and the
+measurable effect is exactly the intended one — Refinery IV still holds, with 52
+of its 68 turrets at tier 4 instead of all 68. You can no longer afford
+everything.
+
 **A screenshot caught what no test could.** The wave preview groups the incoming
 wave by armour class, and it shipped for one build reading `LIGHT 371 ()` — a
 `PackedStringArray` held inside a `Dictionary` is a VALUE in GDScript, so
