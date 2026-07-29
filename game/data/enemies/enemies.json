@@ -1,5 +1,5 @@
 {
-  "_comment": "Four tiers of drone. Swarm is fast, fragile and numerous - it exists to punish an arsenal with no area damage, and is what the Cannon family answers. Walker is the baseline. Heavy is slow, very tough and pays out accordingly, and a leak costs three times as much. Lance breaks the pattern the other three share: every one of them trades speed against health, and Lance is the fastest thing on the board AND the toughest. That is the whole point of it - a turret gets less time on a target that needs more damage, so a thin line of single-target fire that held everything else lets Lances through. It answers by spreading coverage or concentrating burst, not by adding one more turret. Lance leaks for slightly LESS than a Bulwark despite being the bigger machine, which looks backwards and is not: a Bulwark's 12 is priced for something you can reliably stop, and the Lance is priced for something you often cannot. Measured at 14 it was the only thing that ever decided a level - the final act killed 5,578 of 5,590 drones and still lost, on eight Lance leaks. Expected damage per Lance spawned is already the highest in the game without charging more for each one. Siege Breaker is the fifth and last class, and it exists because of the Arc Suppressor. Once slowing everything became possible, slowing everything became the answer to everything - so the Breaker shrugs off 80% of any suppression put on it. It is the heaviest drone in the game and only moderately quick; what makes it dangerous is that the tool you built to handle Lances barely touches it. Brood Carrier is the sixth class and the first that is not a point on the HP ladder at all. It has armour, so cheap fast guns lose half of every round to it, and it breaks into three Skitters where it dies - which are faster than it was and want exactly the cheap fast guns that could not hurt the carrier. That is the whole design: the weapon that kills it well is the wrong weapon for what it leaves, so a line that answers it has to be two things at once. Killing one early costs you three Skitters at the start of the road; letting it leak costs 5 and no Skitters at all, which makes it the one drone where letting something through can be correct. Its 150 plus three Skitters at 22 is 216 effective health against a Bulwark's 260, and it pays 61 all told against the Bulwark's 58. The armour triangle (kinetic/energy resistances) and the flying/cloaked modifiers are still P1; the rest of this file is an HP-and-payout ladder, not a counter system. Speeds were raised ~1.6x when boards doubled in length, so traversal time per act stayed comparable.",
+  "_comment": "Four tiers of drone. Swarm is fast, fragile and numerous - it exists to punish an arsenal with no area damage, and is what the Cannon family answers. Walker is the baseline. Heavy is slow, very tough and pays out accordingly, and a leak costs three times as much. Lance breaks the pattern the other three share: every one of them trades speed against health, and Lance is the fastest thing on the board AND the toughest. That is the whole point of it - a turret gets less time on a target that needs more damage, so a thin line of single-target fire that held everything else lets Lances through. It answers by spreading coverage or concentrating burst, not by adding one more turret. Lance leaks for slightly LESS than a Bulwark despite being the bigger machine, which looks backwards and is not: a Bulwark's 12 is priced for something you can reliably stop, and the Lance is priced for something you often cannot. Measured at 14 it was the only thing that ever decided a level - the final act killed 5,578 of 5,590 drones and still lost, on eight Lance leaks. Expected damage per Lance spawned is already the highest in the game without charging more for each one. Siege Breaker is the fifth and last class, and it exists because of the Arc Suppressor. Once slowing everything became possible, slowing everything became the answer to everything - so the Breaker shrugs off 80% of any suppression put on it. It is the heaviest drone in the game and only moderately quick; what makes it dangerous is that the tool you built to handle Lances barely touches it. Brood Carrier is the sixth class and the first that is not a point on the HP ladder at all. It has armour, so cheap fast guns lose half of every round to it, and it breaks into three Skitters where it dies - which are faster than it was and want exactly the cheap fast guns that could not hurt the carrier. That is the whole design: the weapon that kills it well is the wrong weapon for what it leaves, so a line that answers it has to be two things at once. Killing one early costs you three Skitters at the start of the road; letting it leak costs 5 and no Skitters at all, which makes it the one drone where letting something through can be correct. Its 150 plus three Skitters at 22 is 216 effective health against a Bulwark's 260, and it pays 61 all told against the Bulwark's 58. Field Mender and Static Jammer are the two support classes, and neither is a point on the ladder either. The Mender puts health back into everything around it and never into itself, which is deliberate: a drone that outheals your line while also being the toughest thing in it is a wall, not a puzzle. It is small, quick and cheap, so First and Toughest walk straight past it - it is the drone the targeting orders exist for. The Jammer is the only thing in the game that attacks the BOARD: it silences turrets it passes for a fraction of a second at a time, and a jammed turret's cooldown does not advance either, so the silence costs exactly the uptime it looks like it costs. It makes 'where is my line thinnest' a question whose answer changes while you watch. The armour triangle (kinetic/energy resistances) and the flying/cloaked modifiers are still P1; the rest of this file is an HP-and-payout ladder, not a counter system. Speeds were raised ~1.6x when boards doubled in length, so traversal time per act stayed comparable.",
   "swarm": {
     "display_name": "Skitter Drone",
     "base_hp": 22,
@@ -26,6 +26,18 @@
     "base_bounty": 58,
     "radius": 24.0,
     "spawn_jitter_units": 12.0
+  },
+  "mender": {
+    "display_name": "Field Mender",
+    "base_hp": 90,
+    "speed_units_per_second": 104.0,
+    "leak_value": 3,
+    "base_bounty": 45,
+    "radius": 15.0,
+    "spawn_jitter_units": 13.0,
+    "repair_per_pulse": 16,
+    "repair_interval_seconds": 0.8,
+    "repair_radius_units": 170.0
   },
   "lance": {
     "display_name": "Vanguard Lance",
@@ -57,5 +69,17 @@
     "radius": 27.0,
     "spawn_jitter_units": 8.0,
     "slow_resistance": 0.8
+  },
+  "jammer": {
+    "display_name": "Static Jammer",
+    "base_hp": 340,
+    "speed_units_per_second": 122.0,
+    "leak_value": 7,
+    "base_bounty": 110,
+    "radius": 19.0,
+    "spawn_jitter_units": 10.0,
+    "jam_seconds": 0.7,
+    "jam_interval_seconds": 2.0,
+    "jam_radius_units": 210.0
   }
 }

@@ -102,6 +102,7 @@ func setup(sim: Sim, theme: Dictionary) -> void:
 	_build_turret_layers()
 	_build_entity_layers()
 	_build_effect_layer()
+	_build_link_layer()
 	refresh_board()
 
 # --- environment ---------------------------------------------------------------
@@ -774,6 +775,21 @@ func _enemy_mesh(enemy_id: String) -> Mesh:
 			var dart := PrismMesh.new()
 			dart.size = Vector3(0.62, 1.0, 2.05)
 			return dart
+		"mender":
+			# Small, low and rounded - nothing else on the board is, and a drone you
+			# have to pick out of a crowd has to be findable in that crowd.
+			var pod := SphereMesh.new()
+			pod.radius = 0.5
+			pod.height = 1.0
+			pod.radial_segments = 10
+			pod.rings = 5
+			return pod
+		"jammer":
+			# A tall thin mast. It is the only thing that reaches for your turrets, so
+			# it looks like the only thing with an antenna.
+			var mast := PrismMesh.new()
+			mast.size = Vector3(0.75, 1.55, 0.75)
+			return mast
 		"brood":
 			# Eight-sided and bulging, like something with cargo in it. It has to
 			# read as "full" at a glance, because whether you pop it now or let it
@@ -836,6 +852,8 @@ const FX_CAPACITY := 1024
 enum { FX_FLASH, FX_SPARK, FX_BLAST, FX_WRECK }
 
 var _fx: MultiMeshInstance3D
+## Support-link lines. Static between board changes, like the turrets themselves.
+var _links: MultiMeshInstance3D
 var _fx_pos: PackedVector3Array = PackedVector3Array()
 var _fx_age: PackedFloat32Array = PackedFloat32Array()
 var _fx_life: PackedFloat32Array = PackedFloat32Array()
@@ -1085,6 +1103,67 @@ func _instanced(mesh: Mesh, capacity: int) -> MultiMeshInstance3D:
 func refresh_board() -> void:
 	_refresh_cells()
 	_refresh_turrets()
+	_refresh_link_lines()
+
+## The line between two turrets that are lending each other something.
+##
+## Drawn because a mechanic you cannot see is not a mechanic. Support links change
+## where you put things and what you upgrade, and both of those decisions are made
+## by looking at the board - so the board has to say which turrets are actually
+## reaching each other rather than leaving it to be inferred from a hover readout
+## one turret at a time.
+func _build_link_layer() -> void:
+	var bar := BoxMesh.new()
+	bar.size = Vector3.ONE
+	var material := StandardMaterial3D.new()
+	material.vertex_color_use_as_albedo = true
+	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	material.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	material.disable_receive_shadows = true
+	bar.material = material
+	_links = _instanced(bar, Sim.MAX_DRAWN_LINKS)
+	_links.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	add_child(_links)
+
+func _refresh_link_lines() -> void:
+	var mm := _links.multimesh
+	var lift := float(_world.get("link_lift", 9.0))
+	var width := float(_world.get("link_width", 3.0))
+	var alpha := float(_world.get("link_alpha", 0.5))
+	var ballistic := _color("platform")
+	var cannon := _color_of(_world.get("platform_cannon", "#c98a5b"))
+	var suppressor := _color_of(_world.get("platform_suppressor", "#4fc9d8"))
+	var railgun := _color_of(_world.get("platform_railgun", "#d8d24f"))
+	var shown := 0
+	for k in _sim.link_count():
+		if shown >= Sim.MAX_DRAWN_LINKS:
+			break
+		var to := _sim.link_from(k)
+		var from := _sim.link_to(k)
+		var dx := _sim.t_x[to] - _sim.t_x[from]
+		var dz := _sim.t_y[to] - _sim.t_y[from]
+		var span := sqrt(dx * dx + dz * dz)
+		if span < 0.001:
+			continue
+		dx /= span
+		dz /= span
+		_basis = Basis(
+			Vector3(dz * width, 0.0, -dx * width),
+			Vector3(0.0, width, 0.0),
+			Vector3(dx * span, 0.0, dz * span))
+		mm.set_instance_transform(shown, Transform3D(_basis, Vector3(
+			(_sim.t_x[from] + _sim.t_x[to]) * 0.5, lift,
+			(_sim.t_y[from] + _sim.t_y[to]) * 0.5)))
+		# Tinted by the family DOING the lending, so a glance says what kind of
+		# help is flowing and in which direction the upgrade money should go.
+		var tint := _family_colour(from, ballistic, cannon, suppressor, railgun)
+		# Additive blend, so brightness IS the alpha: scale the colour and leave the
+		# alpha channel alone. Multiplying the whole Color by the fade (which is what
+		# this did first) dimmed it twice and the lines all but vanished.
+		mm.set_instance_color(shown, Color(tint.r * alpha, tint.g * alpha, tint.b * alpha, 1.0))
+		shown += 1
+	mm.visible_instance_count = shown
 
 func _refresh_cells() -> void:
 	var mm := _cells.multimesh
@@ -1308,8 +1387,13 @@ func _update_barrels() -> void:
 			_sim.t_y[i] + dz * run * reach * 0.5)))
 		var max_tier := maxi(_sim.platform_max_tier(blueprint) - 1, 1)
 		var family := _family_colour(i, ballistic, cannon, suppressor, railgun)
-		mm.set_instance_color(slot, family.lerp(top_colour,
-			float(_sim.platform_tier(i)) / float(max_tier)))
+		var tint := family.lerp(top_colour, float(_sim.platform_tier(i)) / float(max_tier))
+		# A jammed turret is not firing and has to look like it is not firing, or
+		# the player reads a hole in their line as bad luck.
+		if _sim.platform_jammed(i):
+			tint = tint.lerp(_color_of(_world.get("jammed", "#2a3038")),
+				float(_world.get("jammed_blend", 0.72)))
+		mm.set_instance_color(slot, tint)
 		filled[blueprint] = slot + 1
 
 	for family_index in _turret_barrels.size():
@@ -1433,6 +1517,8 @@ func enemy_layer(type_index: int = 0) -> MultiMeshInstance3D: return _enemy_laye
 func enemy_layer_count() -> int: return _enemy_layers.size()
 func hp_bar_layer() -> MultiMeshInstance3D: return _hp_bars
 func effect_layer() -> MultiMeshInstance3D: return _fx
+func link_layer() -> MultiMeshInstance3D: return _links
+func drawn_link_count() -> int: return _links.multimesh.visible_instance_count
 func drawn_effect_count() -> int: return _fx.multimesh.visible_instance_count
 func shake() -> float: return _shake
 func camera_home() -> Vector3: return _camera_home

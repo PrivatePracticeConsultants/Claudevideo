@@ -21,7 +21,7 @@
         },
         {
           "enemy": "walker",
-          "count": 119,
+          "count": 111,
           "spawn_interval_ticks": 9,
           "start_delay_ticks": 90
         },
@@ -30,6 +30,12 @@
           "count": 4,
           "spawn_interval_ticks": 170,
           "start_delay_ticks": 120
+        },
+        {
+          "enemy": "mender",
+          "count": 2,
+          "spawn_interval_ticks": 499,
+          "start_delay_ticks": 150
         }
       ]
     },
@@ -43,7 +49,7 @@
         },
         {
           "enemy": "walker",
-          "count": 122,
+          "count": 114,
           "spawn_interval_ticks": 9,
           "start_delay_ticks": 90
         },
@@ -52,6 +58,12 @@
           "count": 4,
           "spawn_interval_ticks": 174,
           "start_delay_ticks": 120
+        },
+        {
+          "enemy": "mender",
+          "count": 2,
+          "spawn_interval_ticks": 513,
+          "start_delay_ticks": 150
         }
       ]
     },
@@ -65,13 +77,13 @@
         },
         {
           "enemy": "walker",
-          "count": 110,
+          "count": 102,
           "spawn_interval_ticks": 9,
           "start_delay_ticks": 90
         },
         {
           "enemy": "heavy",
-          "count": 62,
+          "count": 58,
           "spawn_interval_ticks": 26,
           "start_delay_ticks": 150
         },
@@ -80,6 +92,18 @@
           "count": 4,
           "spawn_interval_ticks": 155,
           "start_delay_ticks": 120
+        },
+        {
+          "enemy": "mender",
+          "count": 2,
+          "spawn_interval_ticks": 459,
+          "start_delay_ticks": 150
+        },
+        {
+          "enemy": "jammer",
+          "count": 2,
+          "spawn_interval_ticks": 754,
+          "start_delay_ticks": 220
         }
       ]
     },
@@ -93,13 +117,13 @@
         },
         {
           "enemy": "walker",
-          "count": 119,
+          "count": 111,
           "spawn_interval_ticks": 8,
           "start_delay_ticks": 90
         },
         {
           "enemy": "heavy",
-          "count": 68,
+          "count": 64,
           "spawn_interval_ticks": 25,
           "start_delay_ticks": 150
         },
@@ -108,6 +132,18 @@
           "count": 4,
           "spawn_interval_ticks": 170,
           "start_delay_ticks": 120
+        },
+        {
+          "enemy": "mender",
+          "count": 2,
+          "spawn_interval_ticks": 444,
+          "start_delay_ticks": 150
+        },
+        {
+          "enemy": "jammer",
+          "count": 2,
+          "spawn_interval_ticks": 800,
+          "start_delay_ticks": 220
         }
       ]
     },
@@ -121,13 +157,13 @@
         },
         {
           "enemy": "walker",
-          "count": 131,
+          "count": 123,
           "spawn_interval_ticks": 8,
           "start_delay_ticks": 90
         },
         {
           "enemy": "heavy",
-          "count": 75,
+          "count": 71,
           "spawn_interval_ticks": 25,
           "start_delay_ticks": 150
         },
@@ -136,6 +172,18 @@
           "count": 4,
           "spawn_interval_ticks": 190,
           "start_delay_ticks": 120
+        },
+        {
+          "enemy": "mender",
+          "count": 2,
+          "spawn_interval_ticks": 492,
+          "start_delay_ticks": 150
+        },
+        {
+          "enemy": "jammer",
+          "count": 2,
+          "spawn_interval_ticks": 887,
+          "start_delay_ticks": 220
         }
       ]
     },
@@ -149,13 +197,13 @@
         },
         {
           "enemy": "walker",
-          "count": 146,
+          "count": 134,
           "spawn_interval_ticks": 8,
           "start_delay_ticks": 90
         },
         {
           "enemy": "heavy",
-          "count": 83,
+          "count": 79,
           "spawn_interval_ticks": 24,
           "start_delay_ticks": 150
         },
@@ -164,6 +212,18 @@
           "count": 5,
           "spawn_interval_ticks": 166,
           "start_delay_ticks": 120
+        },
+        {
+          "enemy": "mender",
+          "count": 3,
+          "spawn_interval_ticks": 357,
+          "start_delay_ticks": 150
+        },
+        {
+          "enemy": "jammer",
+          "count": 2,
+          "spawn_interval_ticks": 948,
+          "start_delay_ticks": 220
         }
       ]
     },
@@ -177,13 +237,13 @@
         },
         {
           "enemy": "walker",
-          "count": 164,
+          "count": 152,
           "spawn_interval_ticks": 8,
           "start_delay_ticks": 90
         },
         {
           "enemy": "heavy",
-          "count": 92,
+          "count": 86,
           "spawn_interval_ticks": 23,
           "start_delay_ticks": 150
         },
@@ -192,6 +252,18 @@
           "count": 6,
           "spawn_interval_ticks": 153,
           "start_delay_ticks": 120
+        },
+        {
+          "enemy": "mender",
+          "count": 3,
+          "spawn_interval_ticks": 405,
+          "start_delay_ticks": 150
+        },
+        {
+          "enemy": "jammer",
+          "count": 3,
+          "spawn_interval_ticks": 659,
+          "start_delay_ticks": 220
         }
       ]
     },
@@ -205,13 +277,13 @@
         },
         {
           "enemy": "walker",
-          "count": 184,
+          "count": 168,
           "spawn_interval_ticks": 8,
           "start_delay_ticks": 90
         },
         {
           "enemy": "heavy",
-          "count": 103,
+          "count": 97,
           "spawn_interval_ticks": 22,
           "start_delay_ticks": 150
         },
@@ -220,6 +292,18 @@
           "count": 6,
           "spawn_interval_ticks": 176,
           "start_delay_ticks": 120
+        },
+        {
+          "enemy": "mender",
+          "count": 4,
+          "spawn_interval_ticks": 336,
+          "start_delay_ticks": 150
+        },
+        {
+          "enemy": "jammer",
+          "count": 3,
+          "spawn_interval_ticks": 711,
+          "start_delay_ticks": 220
         }
       ]
     },
@@ -233,13 +317,13 @@
         },
         {
           "enemy": "walker",
-          "count": 206,
+          "count": 190,
           "spawn_interval_ticks": 7,
           "start_delay_ticks": 90
         },
         {
           "enemy": "heavy",
-          "count": 116,
+          "count": 110,
           "spawn_interval_ticks": 21,
           "start_delay_ticks": 150
         },
@@ -248,6 +332,18 @@
           "count": 7,
           "spawn_interval_ticks": 168,
           "start_delay_ticks": 120
+        },
+        {
+          "enemy": "mender",
+          "count": 4,
+          "spawn_interval_ticks": 332,
+          "start_delay_ticks": 150
+        },
+        {
+          "enemy": "jammer",
+          "count": 3,
+          "spawn_interval_ticks": 770,
+          "start_delay_ticks": 220
         }
       ]
     },
@@ -261,13 +357,13 @@
         },
         {
           "enemy": "walker",
-          "count": 227,
+          "count": 207,
           "spawn_interval_ticks": 7,
           "start_delay_ticks": 90
         },
         {
           "enemy": "heavy",
-          "count": 128,
+          "count": 120,
           "spawn_interval_ticks": 20,
           "start_delay_ticks": 150
         },
@@ -282,6 +378,18 @@
           "count": 8,
           "spawn_interval_ticks": 160,
           "start_delay_ticks": 120
+        },
+        {
+          "enemy": "mender",
+          "count": 5,
+          "spawn_interval_ticks": 289,
+          "start_delay_ticks": 150
+        },
+        {
+          "enemy": "jammer",
+          "count": 4,
+          "spawn_interval_ticks": 600,
+          "start_delay_ticks": 220
         }
       ]
     },
@@ -295,13 +403,13 @@
         },
         {
           "enemy": "walker",
-          "count": 252,
+          "count": 232,
           "spawn_interval_ticks": 7,
           "start_delay_ticks": 90
         },
         {
           "enemy": "heavy",
-          "count": 142,
+          "count": 134,
           "spawn_interval_ticks": 19,
           "start_delay_ticks": 150
         },
@@ -322,6 +430,18 @@
           "count": 8,
           "spawn_interval_ticks": 181,
           "start_delay_ticks": 120
+        },
+        {
+          "enemy": "mender",
+          "count": 5,
+          "spawn_interval_ticks": 324,
+          "start_delay_ticks": 150
+        },
+        {
+          "enemy": "jammer",
+          "count": 4,
+          "spawn_interval_ticks": 636,
+          "start_delay_ticks": 220
         }
       ]
     },
@@ -335,13 +455,13 @@
         },
         {
           "enemy": "walker",
-          "count": 280,
+          "count": 256,
           "spawn_interval_ticks": 7,
           "start_delay_ticks": 90
         },
         {
           "enemy": "heavy",
-          "count": 158,
+          "count": 148,
           "spawn_interval_ticks": 18,
           "start_delay_ticks": 150
         },
@@ -362,6 +482,18 @@
           "count": 9,
           "spawn_interval_ticks": 179,
           "start_delay_ticks": 120
+        },
+        {
+          "enemy": "mender",
+          "count": 6,
+          "spawn_interval_ticks": 298,
+          "start_delay_ticks": 150
+        },
+        {
+          "enemy": "jammer",
+          "count": 5,
+          "spawn_interval_ticks": 532,
+          "start_delay_ticks": 220
         }
       ]
     },
@@ -375,13 +507,13 @@
         },
         {
           "enemy": "walker",
-          "count": 311,
+          "count": 287,
           "spawn_interval_ticks": 7,
           "start_delay_ticks": 90
         },
         {
           "enemy": "heavy",
-          "count": 176,
+          "count": 166,
           "spawn_interval_ticks": 18,
           "start_delay_ticks": 150
         },
@@ -402,6 +534,18 @@
           "count": 10,
           "spawn_interval_ticks": 179,
           "start_delay_ticks": 120
+        },
+        {
+          "enemy": "mender",
+          "count": 6,
+          "spawn_interval_ticks": 334,
+          "start_delay_ticks": 150
+        },
+        {
+          "enemy": "jammer",
+          "count": 5,
+          "spawn_interval_ticks": 597,
+          "start_delay_ticks": 220
         }
       ]
     },
@@ -415,13 +559,13 @@
         },
         {
           "enemy": "walker",
-          "count": 344,
+          "count": 316,
           "spawn_interval_ticks": 6,
           "start_delay_ticks": 90
         },
         {
           "enemy": "heavy",
-          "count": 194,
+          "count": 182,
           "spawn_interval_ticks": 17,
           "start_delay_ticks": 150
         },
@@ -442,6 +586,18 @@
           "count": 12,
           "spawn_interval_ticks": 162,
           "start_delay_ticks": 120
+        },
+        {
+          "enemy": "mender",
+          "count": 7,
+          "spawn_interval_ticks": 270,
+          "start_delay_ticks": 150
+        },
+        {
+          "enemy": "jammer",
+          "count": 6,
+          "spawn_interval_ticks": 515,
+          "start_delay_ticks": 220
         }
       ]
     },
@@ -455,13 +611,13 @@
         },
         {
           "enemy": "walker",
-          "count": 379,
+          "count": 347,
           "spawn_interval_ticks": 6,
           "start_delay_ticks": 90
         },
         {
           "enemy": "heavy",
-          "count": 214,
+          "count": 200,
           "spawn_interval_ticks": 16,
           "start_delay_ticks": 150
         },
@@ -482,6 +638,18 @@
           "count": 13,
           "spawn_interval_ticks": 165,
           "start_delay_ticks": 120
+        },
+        {
+          "enemy": "mender",
+          "count": 8,
+          "spawn_interval_ticks": 260,
+          "start_delay_ticks": 150
+        },
+        {
+          "enemy": "jammer",
+          "count": 7,
+          "spawn_interval_ticks": 457,
+          "start_delay_ticks": 220
         }
       ]
     },
@@ -495,13 +663,13 @@
         },
         {
           "enemy": "walker",
-          "count": 416,
+          "count": 380,
           "spawn_interval_ticks": 6,
           "start_delay_ticks": 90
         },
         {
           "enemy": "heavy",
-          "count": 235,
+          "count": 221,
           "spawn_interval_ticks": 15,
           "start_delay_ticks": 150
         },
@@ -522,6 +690,18 @@
           "count": 14,
           "spawn_interval_ticks": 169,
           "start_delay_ticks": 120
+        },
+        {
+          "enemy": "mender",
+          "count": 9,
+          "spawn_interval_ticks": 253,
+          "start_delay_ticks": 150
+        },
+        {
+          "enemy": "jammer",
+          "count": 7,
+          "spawn_interval_ticks": 473,
+          "start_delay_ticks": 220
         }
       ]
     }

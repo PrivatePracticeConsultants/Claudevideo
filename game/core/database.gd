@@ -98,6 +98,11 @@ func _validate() -> void:
 	# Required rather than defaulted, because the alternative is a balance value
 	# living as a literal in sim.gd, which the purity linter rightly refuses.
 	_req_num(scaling, "armour_max_bite", "scaling.json", 0.0)
+	_req_num(economy, "interest_per_wave", "economy.json", 0.0)
+	_req_int(economy, "interest_cap", "economy.json", 0)
+	_req_num(economy, "support_cap_fire_rate", "economy.json", 0.0)
+	_req_num(economy, "support_cap_damage", "economy.json", 0.0)
+	_req_num(economy, "support_cap_range", "economy.json", 0.0)
 
 	_validate_enemies()
 	_validate_blueprints()
@@ -123,6 +128,18 @@ func _validate_enemies() -> void:
 		_req_num(e, "spawn_jitter_units", where, 0.0)
 		if (e as Dictionary).has("armour"):
 			_req_int(e, "armour", where, 0)
+		# Both halves of each pair are required together: healing with no radius
+		# heals nothing, and a radius with no amount is a drone that appears to be
+		# a mender and is not. Silently doing nothing is the failure mode this file
+		# exists to prevent.
+		if (e as Dictionary).has("repair_per_pulse") or (e as Dictionary).has("repair_radius_units"):
+			_req_int(e, "repair_per_pulse", where, 1)
+			_req_num(e, "repair_radius_units", where, 0.0001)
+			_req_num(e, "repair_interval_seconds", where, 0.0001)
+		if (e as Dictionary).has("jam_seconds") or (e as Dictionary).has("jam_radius_units"):
+			_req_num(e, "jam_seconds", where, 0.0001)
+			_req_num(e, "jam_radius_units", where, 0.0001)
+			_req_num(e, "jam_interval_seconds", where, 0.0001)
 		if (e as Dictionary).has("splits_into"):
 			var child := str((e as Dictionary).get("splits_into", ""))
 			if not enemies.has(child) or child.begins_with(_DOC_PREFIX):
@@ -151,6 +168,21 @@ func _validate_blueprints() -> void:
 		if typeof(b) != TYPE_DICTIONARY:
 			errors.append("%s must be an object." % where)
 			continue
+		if (b as Dictionary).has("support"):
+			var support: Variant = (b as Dictionary)["support"]
+			var swhere := "%s support" % where
+			if typeof(support) != TYPE_DICTIONARY:
+				errors.append("%s must be an object." % swhere)
+			else:
+				# A radius of zero reaches nothing, and a link with no bonus is a
+				# link that does nothing - both are almost certainly a typo, and
+				# both would be invisible at runtime.
+				_req_num(support, "radius_units", swhere, 0.0001)
+				var total := float((support as Dictionary).get("fire_rate_bonus", 0.0)) \
+					+ float((support as Dictionary).get("damage_bonus", 0.0)) \
+					+ float((support as Dictionary).get("range_bonus", 0.0))
+				if total <= 0.0:
+					errors.append("%s has a radius but grants nothing." % swhere)
 		var tiers: Variant = b.get("tiers")
 		if typeof(tiers) != TYPE_ARRAY or (tiers as Array).is_empty():
 			errors.append("%s needs a non-empty \"tiers\" array." % where)

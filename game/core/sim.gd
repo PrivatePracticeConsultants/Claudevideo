@@ -156,6 +156,57 @@ var _armour_max_bite: float = 0.0
 ## non-splitting one, which makes a cycle impossible to write.
 var _type_split_into: PackedInt32Array = PackedInt32Array()
 var _type_split_count: PackedInt32Array = PackedInt32Array()
+## Health this drone puts back into the OTHER drones around it, per tick, and how
+## far that reaches.
+##
+## The first enemy property that makes the targeting orders added alongside it
+## worth having. Everything before this could be answered by pointing more guns at
+## the road; a mender has to be picked out and killed, and it is small and cheap,
+## so First and Toughest walk straight past it. It never heals itself - a drone
+## that outheals your line while also being the toughest thing in it is not a
+## puzzle, it is a wall.
+var _type_repair: PackedInt32Array = PackedInt32Array()
+var _type_repair_now: PackedInt32Array = PackedInt32Array()
+var _type_repair_interval: PackedInt32Array = PackedInt32Array()
+var _type_repair_radius_sq: PackedFloat64Array = PackedFloat64Array()
+## Ticks of silence this drone imposes on turrets it passes, and how far.
+##
+## The first drone that attacks the BOARD rather than walking past it. Everything
+## else in the game is a health bar moving along a road; a jammer makes the
+## question "where is my line thinnest" have an answer that changes while you
+## watch it.
+var _type_jam_ticks: PackedInt32Array = PackedInt32Array()
+var _type_jam_radius_sq: PackedFloat64Array = PackedFloat64Array()
+var _type_jam_interval: PackedInt32Array = PackedInt32Array()
+## False for every engagement whose drone roster has neither, which is most of the
+## campaign - and it skips a 2,048-slot scan per tick for all of them.
+var _has_support_drones: bool = false
+
+## What a weapon family projects onto the turrets around it.
+##
+## The rule that makes this a decision rather than a bonus: a family's link only
+## reaches turrets of a DIFFERENT family. Four Autocannons in a row get nothing
+## from each other; an Autocannon flanked by a Mortar and a Suppressor is worth
+## considerably more than the sum of its parts. Placement already decided
+## coverage; this makes it decide composition too, on a board where the
+## deployment limit means every emplacement is a choice you cannot take back
+## cheaply.
+##
+## The bonus scales with the GRANTING turret's tier, so upgrading a Suppressor
+## makes the four guns around it better as well as itself - which is the first
+## reason in the game to upgrade something that is not your best gun.
+var _bp_support_radius_sq: PackedFloat64Array = PackedFloat64Array()
+var _bp_support_rate: PackedFloat64Array = PackedFloat64Array()
+var _bp_support_damage: PackedFloat64Array = PackedFloat64Array()
+var _bp_support_range: PackedFloat64Array = PackedFloat64Array()
+var _bp_support_tier_scale: PackedFloat64Array = PackedFloat64Array()
+## Ceilings on what one turret can receive, summed over every source reaching it.
+## Capped by TOTAL rather than by source count, because "the first three
+## contributors in index order" is deterministic and arbitrary, and a rule nobody
+## can predict is not a rule anyone can play around.
+var _support_cap_rate: float = 0.0
+var _support_cap_damage: float = 0.0
+var _support_cap_range: float = 0.0
 
 # Blueprint tiers are flattened to [tier_slot]; a blueprint's tier t lives at
 # _bp_tier_offset[b] + t. P0 only ever places tier 0, but the table already has
@@ -223,6 +274,17 @@ var _carry_stood_down: int = 0
 var _salvage_granted: int = 0
 var _salvage_fraction: float = 0.0
 var _salvage_cap_share: float = 0.0
+## Interest paid on Capital still in hand when a wave begins.
+##
+## The point is not the money, it is the decision. Without it, every Capital not
+## spent the instant it arrives is Capital wasted, so "build now" beats "build
+## better in two waves" unconditionally and there is no reason to ever hold
+## anything. Capped, because a percentage of an unbounded pile is an unbounded
+## pile: uncapped, the correct play late in a long act becomes building nothing
+## and banking, which is the opposite of the decision it was added to create.
+var _interest_rate: float = 0.0
+var _interest_cap: int = 0
+var _interest_paid: int = 0
 
 var _phase: int = PHASE_WAITING
 var _wave_index: int = -1
@@ -322,7 +384,26 @@ var t_aim_y: PackedFloat64Array = PackedFloat64Array()
 ## a display preference: it decides what gets shot, so it is logged as a command,
 ## hashed, and carried between acts along with the emplacement it belongs to.
 var t_priority: PackedInt32Array = PackedInt32Array()
+## Ticks this turret is jammed for. It does not fire and its cooldown does not
+## advance, so a jamming pass costs exactly the uptime it looks like it costs.
+var t_disabled: PackedInt32Array = PackedInt32Array()
+## What the turrets around this one are worth to it, as multipliers on its own
+## tier stats. All 1.0 for a turret standing on its own. Derived state, recomputed
+## when the board changes rather than per tick - it can only change when something
+## is placed, upgraded or sold.
+var t_rate_mult: PackedFloat64Array = PackedFloat64Array()
+var t_damage_mult: PackedFloat64Array = PackedFloat64Array()
+var t_range_mult: PackedFloat64Array = PackedFloat64Array()
 var t_count: int = 0
+
+## Which turrets are linked to which, flat [a, b, a, b, ...], for the renderer to
+## draw. Derived, so it is not hashed - the multipliers it produces are, which is
+## what actually decides anything.
+var _link_pairs: PackedInt32Array = PackedInt32Array()
+## Set when the board changes. The recompute is O(turrets squared), which at 144
+## is twenty thousand compares - nothing once in a while, and far too much every
+## tick.
+var _links_dirty: bool = true
 
 ## Damage actually landed, per weapon family, and drones killed per family.
 ##
@@ -378,6 +459,11 @@ func _init(db: Database, seed_value: int) -> void:
 	_hp_growth = float(db.scaling["hp_growth_per_wave"])
 	_bounty_growth = float(db.scaling["bounty_growth_per_wave"])
 	_armour_max_bite = clampf(float(db.scaling["armour_max_bite"]), 0.0, 1.0)
+	_interest_rate = maxf(0.0, float(db.economy.get("interest_per_wave", 0.0)))
+	_interest_cap = maxi(0, int(db.economy.get("interest_cap", 0)))
+	_support_cap_rate = maxf(0.0, float(db.economy.get("support_cap_fire_rate", 0.0)))
+	_support_cap_damage = maxf(0.0, float(db.economy.get("support_cap_damage", 0.0)))
+	_support_cap_range = maxf(0.0, float(db.economy.get("support_cap_range", 0.0)))
 	# The engagement may override the engagement-scoped economy; master plan
 	# section 4.1 scales starting Capital by act so a tier-4 platform is
 	# reachable in a single fight by act three.
@@ -542,6 +628,13 @@ func _build_types() -> void:
 	_type_armour_now.resize(n)
 	_type_split_into.resize(n)
 	_type_split_count.resize(n)
+	_type_repair.resize(n)
+	_type_repair_now.resize(n)
+	_type_repair_interval.resize(n)
+	_type_repair_radius_sq.resize(n)
+	_type_jam_ticks.resize(n)
+	_type_jam_radius_sq.resize(n)
+	_type_jam_interval.resize(n)
 	_type_display.resize(n)
 	_type_hp_now.resize(n)
 	_type_bounty_now.resize(n)
@@ -555,6 +648,24 @@ func _build_types() -> void:
 		_type_jitter[i] = float(e["spawn_jitter_units"])
 		_type_slow_resist[i] = clampf(float(e.get("slow_resistance", 0.0)), 0.0, 1.0)
 		_type_armour[i] = maxi(0, int(e.get("armour", 0)))
+		# Seconds and units in the data file; ticks and squared units in here,
+		# because the tick is the only clock and a square root is the only thing a
+		# distance compare would otherwise need.
+		#
+		# Repair is a PULSE and not a per-tick trickle: at 30 ticks a second, any
+		# healing rate a person would write reads as zero once divided down and
+		# rounded to an integer, and integer health is not negotiable.
+		_type_repair[i] = maxi(0, int(e.get("repair_per_pulse", 0)))
+		_type_repair_interval[i] = maxi(1, int(round(
+			float(e.get("repair_interval_seconds", 1.0)) * float(_tick_rate))))
+		var repair_radius := float(e.get("repair_radius_units", 0.0))
+		_type_repair_radius_sq[i] = repair_radius * repair_radius
+		_type_jam_ticks[i] = maxi(0, int(round(
+			float(e.get("jam_seconds", 0.0)) * float(_tick_rate))))
+		var jam_radius := float(e.get("jam_radius_units", 0.0))
+		_type_jam_radius_sq[i] = jam_radius * jam_radius
+		_type_jam_interval[i] = maxi(1, int(round(
+			float(e.get("jam_interval_seconds", 1.0)) * float(_tick_rate))))
 		_type_display[i] = str(e.get("display_name", _type_ids[i]))
 	# Second pass: a split target is named by id, and every id has to exist before
 	# any of them can be resolved.
@@ -565,12 +676,47 @@ func _build_types() -> void:
 		_type_split_count[i] = 0 if _type_split_into[i] < 0 else maxi(0, int(e.get("split_count", 0)))
 		if _type_split_count[i] <= 0:
 			_type_split_into[i] = -1
+	# Third pass: does THIS engagement field anything with a support role?
+	#
+	# Asked of the engagement's own wave list rather than of the roster, because
+	# the roster always contains a Mender and the question being answered is
+	# whether this level pays for a per-tick scan of the whole enemy pool. Most of
+	# the campaign fields neither, and most of the campaign should not pay for
+	# them. Split children count: a carrier that hatched menders would still need
+	# the scan, even though nothing spawned one directly.
+	_has_support_drones = false
+	for wave: Dictionary in (_db.engagement["waves"] as Array):
+		for group: Dictionary in (wave["groups"] as Array):
+			var t := _type_index(str(group["enemy"]))
+			if t < 0:
+				continue
+			if _has_role(t) or (_type_split_into[t] >= 0 and _has_role(_type_split_into[t])):
+				_has_support_drones = true
+				return
+
+func _has_role(type_index: int) -> bool:
+	return _type_repair[type_index] > 0 or _type_jam_ticks[type_index] > 0
 
 func _build_blueprints() -> void:
 	_bp_ids = _db.blueprint_ids()
 	var n := _bp_ids.size()
 	_bp_tier_offset.resize(n)
 	_bp_tier_count.resize(n)
+	_bp_support_radius_sq.resize(n)
+	_bp_support_rate.resize(n)
+	_bp_support_damage.resize(n)
+	_bp_support_range.resize(n)
+	_bp_support_tier_scale.resize(n)
+	for b in n:
+		# Absent means the family projects nothing, so a weapon written before
+		# links existed reads exactly right.
+		var support: Dictionary = (_db.blueprints[_bp_ids[b]] as Dictionary).get("support", {})
+		var radius := float(support.get("radius_units", 0.0))
+		_bp_support_radius_sq[b] = radius * radius
+		_bp_support_rate[b] = float(support.get("fire_rate_bonus", 0.0))
+		_bp_support_damage[b] = float(support.get("damage_bonus", 0.0))
+		_bp_support_range[b] = float(support.get("range_bonus", 0.0))
+		_bp_support_tier_scale[b] = float(support.get("tier_scaling", 0.0))
 	var slot := 0
 	for b in n:
 		var tiers: Array = (_db.blueprints[_bp_ids[b]] as Dictionary)["tiers"]
@@ -674,6 +820,13 @@ func _build_pools() -> void:
 	t_x.resize(_max_platforms)
 	t_y.resize(_max_platforms)
 	t_priority.resize(_max_platforms)
+	t_disabled.resize(_max_platforms)
+	t_rate_mult.resize(_max_platforms)
+	t_damage_mult.resize(_max_platforms)
+	t_range_mult.resize(_max_platforms)
+	t_rate_mult.fill(1.0)
+	t_damage_mult.fill(1.0)
+	t_range_mult.fill(1.0)
 	_family_damage.resize(_bp_ids.size())
 	_family_kills.resize(_bp_ids.size())
 
@@ -799,6 +952,7 @@ func adopt(platforms: Array, owned_cells: PackedInt32Array) -> void:
 		# the player re-issue every standing order is just tedium.
 		t_priority[index] = clampi(int(record.get("priority", TARGET_FIRST)),
 			0, target_mode_count() - 1)
+	_links_dirty = true
 
 ## Placement that skips the price but honours every other rule. Only used by
 ## adopt(); a turret carried forward was already paid for.
@@ -873,6 +1027,9 @@ func carry_stood_down() -> int: return _carry_stood_down
 ## Most turrets an inheritance may put on the board this act.
 func carry_ceiling() -> int:
 	return maxi(1, int(floor(float(_platform_limit) * _carry_limit_share)))
+func interest_paid() -> int: return _interest_paid
+func interest_rate() -> float: return _interest_rate
+func interest_cap() -> int: return _interest_cap
 func sold() -> int: return _sold
 func early_calls() -> int: return _early_calls
 ## Whether a wave can be called early right now, for the HUD.
@@ -1031,6 +1188,11 @@ func _try_place(x: float, y: float, blueprint_index: int) -> int:
 	t_aim_y[index] = 0.0
 	# A recycled slot must not inherit the last occupant's orders.
 	t_priority[index] = TARGET_FIRST
+	t_disabled[index] = 0
+	t_rate_mult[index] = 1.0
+	t_damage_mult[index] = 1.0
+	t_range_mult[index] = 1.0
+	_links_dirty = true
 	_capital -= _tier_cost[slot]
 	return BUILD_OK
 
@@ -1072,9 +1234,11 @@ func _try_sell(platform_index: int) -> bool:
 		t_aim_x[platform_index] = t_aim_x[last]
 		t_aim_y[platform_index] = t_aim_y[last]
 		t_priority[platform_index] = t_priority[last]
+		t_disabled[platform_index] = t_disabled[last]
 	t_used[last] = 0
 	t_count -= 1
 	_sold += 1
+	_links_dirty = true
 	return true
 
 ## Start the next wave now instead of waiting out the gap between waves.
@@ -1116,6 +1280,8 @@ func _try_upgrade(platform_index: int) -> bool:
 	var cost := upgrade_cost(platform_index)
 	t_tier[platform_index] += 1
 	t_tier_slot[platform_index] = _bp_tier_offset[t_blueprint[platform_index]] + t_tier[platform_index]
+	# A tier changes what this turret PROJECTS, not just what it does.
+	_links_dirty = true
 	_capital -= cost
 	return true
 
@@ -1152,8 +1318,10 @@ func step() -> void:
 	if _result != RESULT_RUNNING:
 		return
 	_apply_commands()
+	_refresh_links()
 	_advance_enemies()
 	_hash.rebuild(e_alive, e_x, e_y, _max_enemies)
+	_update_support_drones()
 	_update_platforms()
 	_advance_projectiles()
 	_resolve_splits()
@@ -1211,19 +1379,162 @@ func _sample_path(prog: float, offset: float) -> void:
 	_out_x = _wp_x[lo] + dx * t - dy * offset
 	_out_y = _wp_y[lo] + dy * t + dx * offset
 
+## Recompute what every turret is getting from its neighbours.
+##
+## O(turrets squared) and guarded by a dirty flag, because it can only change when
+## something is placed, upgraded or sold. At 144 turrets that is twenty thousand
+## compares - nothing once in a while, and far too much thirty times a second.
+##
+## Order-independent by construction: every contribution is summed and the total
+## clamped, so the answer does not depend on which turret the loop happens to
+## reach first. That is what makes it safe to leave out of the tick's ordering
+## rules entirely.
+func _refresh_links() -> void:
+	if not _links_dirty:
+		return
+	_links_dirty = false
+	_link_pairs.clear()
+	for i in t_count:
+		var rate := 0.0
+		var damage := 0.0
+		var reach := 0.0
+		var mine := t_blueprint[i]
+		for j in t_count:
+			if j == i:
+				continue
+			var theirs := t_blueprint[j]
+			# The rule the whole mechanic rests on: a family projects onto other
+			# families only, so a clustered line of one weapon gets nothing.
+			if theirs == mine:
+				continue
+			var radius_sq := _bp_support_radius_sq[theirs]
+			if radius_sq <= 0.0:
+				continue
+			var dx := t_x[j] - t_x[i]
+			var dy := t_y[j] - t_y[i]
+			if dx * dx + dy * dy > radius_sq:
+				continue
+			# Nothing at tier 1, and that is the load-bearing part.
+			#
+			# It reads as flavour - the coupling hardware arrives with the first
+			# refit - and it is really a balance rule. A board carried into the next
+			# act arrives refitted to tier 1, so an inheritance projects nothing at
+			# all until it is re-invested in. Measured with links live at tier 1,
+			# twenty-four inherited turrets cleared the whole of Highway act II with
+			# no input: the act became a cutscene. It also gives the player the first
+			# reason in the game to upgrade a turret that is not their best one.
+			var scale := _bp_support_tier_scale[theirs] * float(t_tier[j])
+			if scale <= 0.0:
+				continue
+			rate += _bp_support_rate[theirs] * scale
+			damage += _bp_support_damage[theirs] * scale
+			reach += _bp_support_range[theirs] * scale
+			if _link_pairs.size() < MAX_DRAWN_LINKS * 2:
+				_link_pairs.append(i)
+				_link_pairs.append(j)
+		t_rate_mult[i] = 1.0 + minf(rate, _support_cap_rate)
+		t_damage_mult[i] = 1.0 + minf(damage, _support_cap_damage)
+		t_range_mult[i] = 1.0 + minf(reach, _support_cap_range)
+	for i in range(t_count, _max_platforms):
+		t_rate_mult[i] = 1.0
+		t_damage_mult[i] = 1.0
+		t_range_mult[i] = 1.0
+
+## Links are drawn, and past a certain density drawing more of them communicates
+## nothing. The multipliers are always computed in full; only the drawing is
+## bounded.
+const MAX_DRAWN_LINKS := 900
+
+## Menders and jammers, both of which pulse on a fixed cadence rather than every
+## tick.
+##
+## The cadence is taken from the tick counter rather than from per-drone timers,
+## so two menders that spawned four hundred ticks apart still pulse together. That
+## is one fewer piece of per-entity state to recycle correctly, and a wave of
+## menders pulsing in unison reads better than a continuous mush anyway.
+func _update_support_drones() -> void:
+	if not _has_support_drones:
+		return
+	for i in _max_enemies:
+		if e_alive[i] == 0:
+			continue
+		var type_index := e_type[i]
+		if _type_repair_now[type_index] > 0 and _tick % _type_repair_interval[type_index] == 0:
+			_repair_around(i, type_index)
+		if _type_jam_ticks[type_index] > 0 and _tick % _type_jam_interval[type_index] == 0:
+			_jam_around(i, type_index)
+
+## Put health back into everything nearby except the mender itself.
+##
+## Never itself: a drone that outheals your line while also being the toughest
+## thing in it is not a puzzle, it is a wall. Walks the hash in cell-then-slot
+## order like every other area effect, so the order health is restored in is the
+## same on every machine.
+func _repair_around(index: int, type_index: int) -> void:
+	var radius_sq := _type_repair_radius_sq[type_index]
+	if radius_sq <= 0.0:
+		return
+	var amount := _type_repair_now[type_index]
+	var radius := sqrt(radius_sq)
+	var min_cx := _hash.cell_x(e_x[index] - radius)
+	var max_cx := _hash.cell_x(e_x[index] + radius)
+	var min_cy := _hash.cell_y(e_y[index] - radius)
+	var max_cy := _hash.cell_y(e_y[index] + radius)
+	for cy in range(min_cy, max_cy + 1):
+		for cx in range(min_cx, max_cx + 1):
+			var begin := _hash.bucket_begin(cx, cy)
+			var end := _hash.bucket_end(cx, cy)
+			for k in range(begin, end):
+				var other := _hash.item_at(k)
+				if other == index or e_alive[other] == 0:
+					continue
+				if e_hp[other] >= e_hp_max[other]:
+					continue
+				var dx := e_x[other] - e_x[index]
+				var dy := e_y[other] - e_y[index]
+				if dx * dx + dy * dy > radius_sq:
+					continue
+				e_hp[other] = mini(e_hp[other] + amount, e_hp_max[other])
+
+## Silence every turret within reach for a while.
+##
+## Turrets are not in the spatial hash - nothing has ever needed to query them by
+## position - and at a deployment limit of 144 a linear scan is cheaper than
+## maintaining a second broadphase for one drone class.
+func _jam_around(index: int, type_index: int) -> void:
+	var radius_sq := _type_jam_radius_sq[type_index]
+	if radius_sq <= 0.0:
+		return
+	var ticks := _type_jam_ticks[type_index]
+	for i in t_count:
+		var dx := t_x[i] - e_x[index]
+		var dy := t_y[i] - e_y[index]
+		if dx * dx + dy * dy > radius_sq:
+			continue
+		# Refreshed, not stacked, exactly like suppression on a drone.
+		t_disabled[i] = maxi(t_disabled[i], ticks)
+
 func _update_platforms() -> void:
 	for i in t_count:
 		if t_used[i] == 0:
 			continue
+		if t_disabled[i] > 0:
+			# The cooldown deliberately does NOT advance while jammed, so a second
+			# of silence costs a second of fire rather than being partly absorbed by
+			# a cooldown that was going to tick down anyway.
+			t_disabled[i] -= 1
+			continue
 		if t_cooldown[i] > 0:
 			t_cooldown[i] -= 1
 			continue
-		var target := _acquire_target(t_x[i], t_y[i], _tier_range_sq[t_tier_slot[i]],
-			t_priority[i])
+		var target := _acquire_target(t_x[i], t_y[i], platform_range_sq(i), t_priority[i])
 		if target < 0:
 			continue
 		_fire(i, target)
-		t_cooldown[i] = _tier_interval[t_tier_slot[i]]
+		# At least one tick: the sim cannot fire twice in a tick, and a rate bonus
+		# that rounded an interval to zero would be a turret that never cools down.
+		t_cooldown[i] = maxi(1, int(round(
+			float(_tier_interval[t_tier_slot[i]]) / t_rate_mult[i])))
 
 ## Pick what this turret shoots. Ties break toward whatever the spatial hash walks
 ## first (strict >), and that walk is cell-then-slot order, which is stable - so
@@ -1329,7 +1640,7 @@ func _fire(platform: int, target: int) -> void:
 	p_prev_y[i] = p_y[i]
 	p_target[i] = target
 	p_target_gen[i] = e_gen[target]
-	p_damage[i] = _tier_damage[slot]
+	p_damage[i] = maxi(1, int(round(float(_tier_damage[slot]) * t_damage_mult[platform])))
 	p_speed[i] = _tier_proj_speed[slot]
 	p_hit_radius[i] = _tier_hit_radius[slot]
 	p_life[i] = _tier_proj_life[slot]
@@ -1561,6 +1872,13 @@ func _update_wave_director() -> void:
 			pass
 
 func _begin_wave(index: int) -> void:
+	# Paid before the wave, on what survived the last one, so the choice it creates
+	# is made during the gap - which is when every other build decision is made too.
+	# Not on the opening wave: that would just be a bigger starting purse.
+	if index > 0 and _interest_rate > 0.0:
+		var earned := mini(int(floor(float(_capital) * _interest_rate)), _interest_cap)
+		_capital += earned
+		_interest_paid += earned
 	_wave_index = index
 	_phase = PHASE_SPAWNING
 	# Exponential scaling, computed by repeated multiplication rather than pow().
@@ -1575,6 +1893,9 @@ func _begin_wave(index: int) -> void:
 		_type_hp_now[t] = int(round(float(_type_base_hp[t]) * hp_mult))
 		_type_bounty_now[t] = int(round(float(_type_base_bounty[t]) * bounty_mult))
 		_type_armour_now[t] = int(round(float(_type_armour[t]) * hp_mult))
+		# Healing tracks health, or a mender stops mattering the moment the drones
+		# around it are worth more than it can put back.
+		_type_repair_now[t] = int(round(float(_type_repair[t]) * hp_mult))
 	var groups: Array = ((_db.engagement["waves"] as Array)[index] as Dictionary)["groups"]
 	_g_count = groups.size()
 	for g in _g_count:
@@ -1709,11 +2030,35 @@ func bounds_height() -> float: return _bounds_height
 func platform_tier(i: int) -> int: return t_tier[i]
 func platform_blueprint(i: int) -> int: return t_blueprint[i]
 func platform_max_tier(blueprint: int) -> int: return _bp_tier_count[blueprint]
-func platform_range(i: int) -> float: return sqrt(_tier_range_sq[t_tier_slot[i]])
-func platform_damage(i: int) -> int: return _tier_damage[t_tier_slot[i]]
+## Reach including whatever the neighbours are lending it. Everything that asks
+## "how far does this turret shoot" - targeting, the HUD, the range ring under the
+## cursor - goes through these, or the ring would promise coverage the turret does
+## not have.
+func platform_range_sq(i: int) -> float:
+	return _tier_range_sq[t_tier_slot[i]] * t_range_mult[i] * t_range_mult[i]
+func platform_range(i: int) -> float: return sqrt(platform_range_sq(i))
+func platform_rate_bonus(i: int) -> float: return t_rate_mult[i] - 1.0
+func platform_damage_bonus(i: int) -> float: return t_damage_mult[i] - 1.0
+func platform_range_bonus(i: int) -> float: return t_range_mult[i] - 1.0
+## How many other turrets are lending this one anything.
+func platform_link_count(i: int) -> int:
+	var count := 0
+	for k in range(0, _link_pairs.size(), 2):
+		if _link_pairs[k] == i:
+			count += 1
+	return count
+func link_count() -> int: return _link_pairs.size() / 2
+func link_from(i: int) -> int: return _link_pairs[i * 2]
+func link_to(i: int) -> int: return _link_pairs[i * 2 + 1]
+func blueprint_support_radius(b: int) -> float: return sqrt(_bp_support_radius_sq[b])
+func platform_damage(i: int) -> int:
+	return maxi(1, int(round(float(_tier_damage[t_tier_slot[i]]) * t_damage_mult[i])))
 ## Damage per second at this platform's current tier, for the inspect panel.
+## Damage per second as this turret actually fires it, links included. Shown on
+## hover, so it has to be the real number and not the catalogue one.
 func platform_dps(i: int) -> float:
-	return float(_tier_damage[t_tier_slot[i]]) * float(_tick_rate) / float(_tier_interval[t_tier_slot[i]])
+	var interval := maxi(1, int(round(float(_tier_interval[t_tier_slot[i]]) / t_rate_mult[i])))
+	return float(platform_damage(i)) * float(_tick_rate) / float(interval)
 func tier_name(blueprint: int, tier: int) -> String:
 	var tiers: Array = (_db.blueprints[_bp_ids[blueprint]] as Dictionary)["tiers"]
 	return str((tiers[tier] as Dictionary)["name"])
@@ -1764,6 +2109,9 @@ func enemy_split_count(type_index: int) -> int: return _type_split_count[type_in
 func enemy_display_name(type_index: int) -> String: return _type_display[type_index]
 
 func platform_priority(i: int) -> int: return t_priority[i]
+func platform_jammed(i: int) -> bool: return t_disabled[i] > 0
+func enemy_repair(type_index: int) -> int: return _type_repair_now[type_index]
+func enemy_jam_ticks(type_index: int) -> int: return _type_jam_ticks[type_index]
 func priority_name(mode: int) -> String:
 	return TARGET_MODE_NAMES[clampi(mode, 0, target_mode_count() - 1)]
 
@@ -1814,6 +2162,7 @@ func state_hash() -> int:
 	h = StateHash.mix_int(h, _carry_dropped)
 	h = StateHash.mix_int(h, _carry_stood_down)
 	h = StateHash.mix_int(h, _salvage_granted)
+	h = StateHash.mix_int(h, _interest_paid)
 	h = StateHash.mix_bytes(h, _cell_unlocked)
 	h = StateHash.mix_int(h, _phase)
 	h = StateHash.mix_int(h, _wave_index)
@@ -1848,6 +2197,10 @@ func state_hash() -> int:
 	h = StateHash.mix_bytes(h, t_aim_x.to_byte_array())
 	h = StateHash.mix_bytes(h, t_aim_y.to_byte_array())
 	h = StateHash.mix_bytes(h, t_priority.to_byte_array())
+	h = StateHash.mix_bytes(h, t_disabled.to_byte_array())
+	h = StateHash.mix_bytes(h, t_rate_mult.to_byte_array())
+	h = StateHash.mix_bytes(h, t_damage_mult.to_byte_array())
+	h = StateHash.mix_bytes(h, t_range_mult.to_byte_array())
 	# Splits owed but not yet hatched are state: two runs that agree on every drone
 	# on the board and disagree on what is about to appear are not in the same place.
 	h = StateHash.mix_int(h, _split_pending)

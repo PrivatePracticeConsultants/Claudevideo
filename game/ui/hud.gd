@@ -197,6 +197,21 @@ func refresh(speed: int, paused: bool, hovered_platform: int = -1,
 			label += "   MAX TIER"
 		else:
 			label += "   upgrade $%d%s" % [upgrade, "" if _sim.capital() >= upgrade else "  (short)"]
+		# What the neighbours are worth to it. Without this the mechanic is a number
+		# that changes for reasons the player cannot see, which is worse than not
+		# having it: the links are drawn on the board, and this says what they add up
+		# to on the turret you are actually looking at.
+		var links := _sim.platform_link_count(hovered_platform)
+		if links > 0:
+			var parts := PackedStringArray()
+			if _sim.platform_rate_bonus(hovered_platform) > 0.0:
+				parts.append("+%d%% rate" % int(round(_sim.platform_rate_bonus(hovered_platform) * 100.0)))
+			if _sim.platform_damage_bonus(hovered_platform) > 0.0:
+				parts.append("+%d%% dmg" % int(round(_sim.platform_damage_bonus(hovered_platform) * 100.0)))
+			if _sim.platform_range_bonus(hovered_platform) > 0.0:
+				parts.append("+%d%% range" % int(round(_sim.platform_range_bonus(hovered_platform) * 100.0)))
+			if not parts.is_empty():
+				label += "   LINKED x%d  %s" % [links, " ".join(parts)]
 		# What it is shooting at, and how to change it. Shown on the hovered turret
 		# rather than as a global mode, because it is per-turret state and reading it
 		# anywhere else would be reading someone else's orders.

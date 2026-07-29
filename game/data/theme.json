@@ -124,7 +124,12 @@
     "shake_per_leak": 9.0,
     "shake_max": 34.0,
     "shake_decay": 44.0,
-    "shake_speed": 47.0
+    "shake_speed": 47.0,
+    "link_lift": 17.0,
+    "link_width": 3.5,
+    "link_alpha": 0.62,
+    "jammed": "#2a3038",
+    "jammed_blend": 0.72
   },
   "platform_max_tier": "#ffcf6e",
   "platform_cannon": "#c98a5b",
