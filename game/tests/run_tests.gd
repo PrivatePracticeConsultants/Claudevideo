@@ -59,11 +59,14 @@ func _initialize() -> void:
 			total += 1
 			continue
 		var case_name := path.get_file().get_basename()
+		var before_case := assertions
+		var tests_here := 0
 		for method in methods:
 			var method_name: String = method["name"]
 			if not method_name.begins_with("test_"):
 				continue
 			total += 1
+			tests_here += 1
 			var instance: TestCase = script.new()
 			instance.before_each()
 			instance.call(method_name)
@@ -76,6 +79,18 @@ func _initialize() -> void:
 				print("  FAIL  %s.%s" % [case_name, method_name])
 				for f in instance.failures:
 					print("          %s" % f)
+
+		# A file whose tests ran and asserted NOTHING is not a passing file.
+		#
+		# This exists because it happened: a type-inference error stopped
+		# sim_renderer_3d.gd compiling, every renderer test's setup died quietly,
+		# and the suite reported "16 tests, 1 assertion, 0 failed" - a green run
+		# over a build whose renderer would not load. Counting tests is not the
+		# same as checking anything, and only the assertion count knew.
+		if tests_here > 0 and assertions == before_case:
+			print("  FAIL  %s ran %d tests and asserted nothing - its setup is broken"
+				% [case_name, tests_here])
+			failed += 1
 
 	var elapsed := Time.get_ticks_msec() - started
 	print("")

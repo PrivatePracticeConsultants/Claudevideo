@@ -236,6 +236,8 @@ func _build_environment() -> void:
 	var viewport := get_viewport()
 	if viewport != null:
 		viewport.size_changed.connect(_fit_camera)
+		viewport.size_changed.connect(_fit_render_scale)
+	_fit_render_scale()
 
 ## Frame the corridor plus the band beside it that can be built on, with a
 ## margin. Computed in the camera's own space so it holds at any angle, aspect
@@ -299,6 +301,91 @@ func _fit_camera() -> void:
 	# permanently displaced.
 	_camera_home = camera.position
 	_fit_shadows(distance + needed)
+
+## Keep the 3D pass at a bounded pixel count however big the window is.
+##
+## The web export resizes its canvas to the window in CSS pixels TIMES the
+## display's pixel ratio, so a 1600x900 browser window on a HiDPI screen is a
+## 3200x1800 render target - four times the pixels this scene was designed and
+## profiled at, every one of them paying for per-pixel fog, a normal-mapped
+## ground and a shadow lookup. That is invisible from the command line and reads
+## to a player as "it feels a little laggy".
+##
+## `scaling_3d_scale` renders the 3D at a fraction and upscales it; the HUD is
+## canvas_items and stays crisp at full resolution either way. The budget is a
+## pixel COUNT rather than a resolution, so it does the right thing for any
+## window shape, and it never scales UP - a small window renders at 1:1.
+func _fit_render_scale() -> void:
+	var viewport := get_viewport()
+	if viewport == null:
+		return
+	var size := viewport.get_visible_rect().size
+	var pixels := maxf(size.x * size.y, 1.0)
+	# Explicitly typed: indexing a const Array yields a Variant, and `:=` cannot
+	# infer from it. Inferring here failed to COMPILE the whole renderer, and the
+	# suite reported "0 failed" for sixteen tests that asserted almost nothing.
+	var share: float = QUALITY_PIXEL_SHARE[_quality]
+	var budget := maxf(float(_world.get("render_pixel_budget", 1280.0 * 720.0)), 1.0) * share
+	var floor_scale := clampf(float(_world.get("render_scale_floor", 0.6)), 0.1, 1.0)
+	viewport.scaling_3d_mode = Viewport.SCALING_3D_MODE_BILINEAR
+	viewport.scaling_3d_scale = clampf(sqrt(budget / pixels), floor_scale, 1.0)
+
+## Quality levels, because I cannot profile the machine this is played on.
+##
+## Everything measurable was measured and fixed; what is left is fill rate, which
+## depends entirely on the GPU in front of the player. Rather than guess at a
+## setting that suits every device, the expensive things are bundled into three
+## steps the player can cycle with F2 - and the step is remembered, because
+## nobody wants to set it again every level.
+enum { QUALITY_HIGH, QUALITY_BALANCED, QUALITY_FAST }
+const QUALITY_NAMES := ["HIGH", "BALANCED", "FAST"]
+## Share of the pixel budget each level renders 3D at.
+const QUALITY_PIXEL_SHARE := [1.0, 0.65, 0.4]
+## What each step gives up, in the order it costs least to lose. Measured in a
+## browser on one board: treeline shadows and drone shadows together are worth
+## about a fifth of the frame, the whole shadow pass about a quarter, and the
+## scenery about a third. HIGH keeps everything; BALANCED keeps the scenery and
+## the board's own shadows but not the treeline's; FAST keeps neither.
+var _quality: int = QUALITY_BALANCED
+var _scenery_layers: Array[MultiMeshInstance3D] = []
+
+func quality() -> int: return _quality
+func set_quality(level: int) -> void:
+	_quality = clampi(level, 0, QUALITY_NAMES.size() - 1)
+	apply_quality()
+func quality_name() -> String: return QUALITY_NAMES[_quality]
+
+## Cycle to the next level and apply it. Everything it touches is a render
+## decision - the simulation never sees this, so a replay is unaffected and two
+## players on different settings are playing the identical game.
+func cycle_quality() -> int:
+	_quality = (_quality + 1) % QUALITY_NAMES.size()
+	apply_quality()
+	return _quality
+
+func apply_quality() -> void:
+	_fit_render_scale()
+	if _sun != null:
+		# Shadows are the second most expensive thing after raw fill, and the
+		# board still reads without them - the corridor and the turrets are
+		# distinguishable by silhouette and colour alone.
+		# Measured in a browser on one board: the whole shadow pass is worth about a
+		# quarter of the frame and the scenery about a third. BALANCED gives up the
+		# cheaper-looking of the two - a board without shadows still reads, because
+		# the corridor and the turrets are distinguishable by silhouette and colour;
+		# a board without scenery reads as a diagram. FAST gives up both.
+		_sun.shadow_enabled = _quality == QUALITY_HIGH
+	var tree_shadows := _quality == QUALITY_HIGH and bool(_world.get("tree_shadows", true))
+	for node: MultiMeshInstance3D in _scenery_layers:
+		node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON \
+			if tree_shadows else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		# Scenery is the cheapest thing to give up entirely: it is decoration by
+		# definition and nothing about play depends on a treeline.
+		node.visible = _quality != QUALITY_FAST
+	for layer in _enemy_layers:
+		layer.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON \
+			if (_quality == QUALITY_HIGH and bool(_world.get("drone_shadows", true))) \
+			else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
 ## Shadows are cast within a distance of the camera, so the range has to follow
 ## the framing. Too short and the far half of a long act renders unshadowed -
@@ -396,11 +483,17 @@ func _build_scenery() -> void:
 	# Showing it would mean pitching the camera to about -13, which is nearly
 	# side-on and not a tower defence board any more. Everything below is therefore
 	# on the ground plane, which is the only thing in frame.
+	# Collected as they are added so the quality switch can reach them: these are
+	# the layers it is cheapest to give up, being decoration by definition.
+	_scenery_layers.clear()
 	for layer in _tree_layers():
 		_scenery.add_child(layer)
+		_scenery_layers.append(layer)
 	var rocks := _rock_layer()
 	if rocks != null:
 		_scenery.add_child(rocks)
+		_scenery_layers.append(rocks)
+	apply_quality()
 
 ## Ground as a mottled grid rather than one flat quad.
 ##
@@ -1087,9 +1180,11 @@ func _build_turret_layers() -> void:
 
 	for family in _sim.blueprint_count():
 		var id := _sim.blueprint_name(family)
-		_turret_bases.append(_add_layer(_mount_mesh(id, radius, pad), limit))
-		_turret_bodies.append(_add_layer(_housing_mesh(id, radius, height), limit))
-		_turret_barrels.append(_add_layer(_muzzle_mesh(id), limit))
+		# The board's own furniture: these three earn a shadow, because a turret
+		# without one looks pasted onto the ground rather than standing on it.
+		_turret_bases.append(_shadowed(_add_layer(_mount_mesh(id, radius, pad), limit)))
+		_turret_bodies.append(_shadowed(_add_layer(_housing_mesh(id, radius, height), limit)))
+		_turret_barrels.append(_shadowed(_add_layer(_muzzle_mesh(id), limit)))
 
 ## Assign a material to either kind of mesh. A PrimitiveMesh takes it as a
 ## property; an ArrayMesh - which everything welded by _merged() is - only takes
@@ -1102,6 +1197,12 @@ func _skin(mesh: Mesh, material: Material) -> void:
 	else:
 		for surface in mesh.get_surface_count():
 			(mesh as ArrayMesh).surface_set_material(surface, material)
+
+## Opt a layer back in to casting shadows. See _instanced for why the default is
+## the other way round.
+func _shadowed(node: MultiMeshInstance3D) -> MultiMeshInstance3D:
+	node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	return node
 
 func _add_layer(mesh: Mesh, limit: int) -> MultiMeshInstance3D:
 	# Turrets get their own surface, not the drones': machined metal, so the sun
@@ -1382,6 +1483,11 @@ func _build_entity_layers() -> void:
 		var mesh := _enemy_mesh(_sim.enemy_id(type_index))
 		_skin(mesh, _instanced_material(_sim.enemy_id(type_index)))
 		var layer := _instanced(mesh, _sim.e_alive.size())
+		# Drones too - a shadow is most of what makes one read as a solid object
+		# moving over ground rather than a sprite sliding across it. Switchable,
+		# because on a slow device this is the next thing to give up after trees.
+		if bool(_world.get("drone_shadows", true)):
+			_shadowed(layer)
 		_enemy_layers.append(layer)
 		add_child(layer)
 
@@ -1856,7 +1962,12 @@ func _instanced(mesh: Mesh, capacity: int) -> MultiMeshInstance3D:
 	mm.visible_instance_count = 0
 	var node := MultiMeshInstance3D.new()
 	node.multimesh = mm
-	node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	# Shadows OFF by default, on for the layers that earn them. It was on for
+	# everything, which meant the health bars, the tracers and the transparent
+	# ground overlay were all being rendered a second time into the shadow map -
+	# for objects that are unshaded decorations and cast nothing a player could
+	# ever see. The shadow pass is the most expensive thing in this scene.
+	node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	# The corridor runs off the edge of the board; without a generous custom AABB
 	# Godot culls instances whose transforms it has not measured.
 	node.custom_aabb = AABB(Vector3(-6000, -600, -6000), Vector3(14000, 1200, 14000))

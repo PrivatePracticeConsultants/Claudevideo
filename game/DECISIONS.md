@@ -1904,6 +1904,56 @@ runner treats "this file defines no tests" as a FAILURE rather than as nothing
 to run. That rule was written after a whole file of tests once vanished
 silently; this is the second time it has paid for itself.
 
+## P0-72 · The lag I could not reproduce, and the switch that answers it
+
+"Still a little laggy." Everything in P0-70 was real and is still fixed, but it
+was all CPU, profiled on the desktop build. The game is played as single-threaded
+wasm in a browser, so this time the thing measured was the thing experienced:
+frames actually presented in Chromium, on a real board, at 1280x720.
+
+**The honest limit of this investigation: the container has no GPU.** Chromium
+here runs on SwiftShader, which is fill-rate bound in a way no real device is, so
+its absolute numbers are meaningless and only the DIFFERENCES between
+configurations mean anything. Isolated, on one board: scenery is worth about a
+third of the frame, the shadow pass about a quarter, and the rest is raw fill.
+
+Two real fixes came out of it, plus one admission.
+
+**1. Shadow casting was on for everything.** `_instanced()` set
+SHADOW_CASTING_SETTING_ON for every MultiMesh layer, which meant the health bars,
+the tracers and the transparent ground overlay were each rendered a second time
+into the shadow map - unshaded decorations casting shadows nobody can see. The
+default is OFF now and turrets and drones opt back in.
+
+**2. The web canvas renders at window size TIMES the display's pixel ratio.**
+`canvasResizePolicy: 2` means a 1600x900 browser window on a HiDPI screen is a
+3200x1800 render target: four times the pixels this scene was designed and
+profiled at, every one paying for per-pixel fog, a normal-mapped ground and a
+shadow lookup. Invisible from a command line, and it reads to a player as exactly
+"a little laggy". `scaling_3d_scale` now holds the 3D pass to a pixel BUDGET
+rather than a resolution, so it does the right thing at any window shape and
+never scales up. The HUD is canvas_items and stays crisp regardless.
+
+**3. And the admission: I cannot profile the machine this is played on.** So the
+expensive things are bundled into three steps on F2, remembered with progress
+because nobody wants to find that setting twice. Measured in-browser on one board,
+median frame time: HIGH ~450ms, BALANCED ~367ms, FAST ~183ms - a 2.5x spread, and
+the ordering is what matters since the absolute numbers are SwiftShader's.
+BALANCED gives up the shadow pass and keeps the scenery, because a board without
+shadows still reads and a board without scenery is a diagram; FAST gives up both.
+None of it touches the simulation, so a replay is unaffected and two players on
+different settings are playing the identical game.
+
+**The harness hole this opened, which mattered more than the lag.** A type
+inference error - `var budget := ... * QUALITY_PIXEL_SHARE[_quality]`, where
+indexing a const Array yields a Variant - stopped `sim_renderer_3d.gd` compiling.
+Every renderer test's setup died quietly and the suite printed **"16 tests, 1
+assertion, 0 failed"**: a green run over a build whose renderer would not load.
+Counting tests is not the same as checking anything, and only the assertion count
+knew. The runner now fails a file that runs tests and asserts NOTHING. That is
+the third time a guard of this shape has caught something the tests themselves
+could not see.
+
 ## P0-14 · Deliberately not built in P0
 
 Not oversights — later phases, per §5.7. Anything tempting that came up is in

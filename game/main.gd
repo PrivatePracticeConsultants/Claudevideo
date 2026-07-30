@@ -177,6 +177,7 @@ func _start_level(index: int, offered_carry: Dictionary) -> void:
 		_sim.t_count, bool(handover[0]), _sim.carry_dropped(),
 		_sim.carry_stood_down(), _sim.salvage_granted(), int(handover[1]))
 
+	_renderer.set_quality(_saved_quality)
 	_overlay = DebugOverlay.new()
 	add_child(_overlay)
 	_overlay.setup(_sim, Color(str(_theme.get("text", "#dfe6f0"))))
@@ -227,6 +228,11 @@ func _is_last_act_of_board(level_index: int) -> bool:
 		else _board_starts[board + 1]
 	return level_index + 1 >= next_start
 
+## The quality level read from the save, applied to each level's renderer as it
+## is built. Held here rather than in the renderer because the renderer is
+## rebuilt per level and the preference is not.
+var _saved_quality: int = SimRenderer3D.QUALITY_BALANCED
+
 func _load_progress() -> void:
 	# A missing or corrupt file means a new campaign, never a crash. Progress is a
 	# convenience; losing it must not cost anyone the game.
@@ -238,12 +244,18 @@ func _load_progress() -> void:
 		return
 	_boards_unlocked = clampi(int((parsed as Dictionary).get("boards_unlocked", 1)),
 		1, _board_starts.size())
+	_saved_quality = clampi(int((parsed as Dictionary).get("quality",
+		SimRenderer3D.QUALITY_BALANCED)), 0, SimRenderer3D.QUALITY_NAMES.size() - 1)
 
 func _save_progress() -> void:
 	var file := FileAccess.open(PROGRESS_PATH, FileAccess.WRITE)
 	if file == null:
 		return  # read-only or sandboxed storage; play on regardless
-	file.store_string(JSON.stringify({"boards_unlocked": _boards_unlocked}))
+	# Quality rides along with progress: it is a per-machine preference, and being
+	# asked to find it again every session is the same annoyance as being asked to
+	# re-issue every targeting order.
+	file.store_string(JSON.stringify({"boards_unlocked": _boards_unlocked,
+		"quality": _renderer.quality() if _renderer != null else 1}))
 	file.close()
 
 ## Beating the last act of a board opens the next one.
@@ -400,6 +412,12 @@ func _unhandled_input(event: InputEvent) -> void:
 				if _hover_platform >= 0:
 					_sim.queue_doctrine(_sim.tick(), _hover_platform,
 						0 if event.keycode == KEY_G else 1)
+			KEY_F2:
+				# Graphics quality. Bundled rather than a menu of switches, and
+				# remembered, because the answer to "is this smooth on my machine"
+				# is one the player has to find and should only have to find once.
+				_renderer.cycle_quality()
+				_save_progress()
 			KEY_M: _sfx.toggle_mute()
 			KEY_Z: _renderer.reset_view()
 			KEY_BRACKETLEFT: _select_board(-1)

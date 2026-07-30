@@ -188,7 +188,12 @@
     "jammer_glow": "#c76bff",
     "support_glow_energy": 1.1,
     "overcharged": "#ffe27a",
-    "overcharged_blend": 0.6
+    "overcharged_blend": 0.6,
+    "_shadow_budget": "The shadow pass renders the whole scene a second time, and it is the most expensive thing in this game on a browser GPU. Trees are 5,000 instances and were casting; drones are hundreds. Both are switchable and tree_shadows is the first to give up - the board reads fine without treeline shadows and does not without turret ones.",
+    "drone_shadows": true,
+    "_render_scale": "How many pixels the 3D pass is allowed. The web canvas resizes to the window times the display pixel ratio, so a HiDPI screen quietly asks for four times the pixels this scene was profiled at. The budget bounds that; the floor stops a very large window from scaling so far down that the board turns to mush. The HUD is unaffected.",
+    "render_pixel_budget": 921600,
+    "render_scale_floor": 0.6
   },
   "platform_max_tier": "#ffcf6e",
   "platform_cannon": "#c98a5b",

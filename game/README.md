@@ -149,6 +149,11 @@ in every run.
 - **Scroll to zoom** on whatever the cursor is over, **middle-drag to pan**,
   **`Z`** to reset the view. Boards run to 16,000 units, so framing one end to
   end makes a turret a few pixels wide.
+- **`F2`** cycles graphics quality: **High** / **Balanced** / **Fast**.
+  Balanced drops the shadow pass, Fast drops the scenery too, and both cut the
+  3D render resolution. Measured in a browser, Fast is about 2.5x the frame
+  rate of High. The setting is remembered, and it never touches the simulation
+  — two players on different settings are playing the identical game.
 - **`Q`** cycles weapon · **`1`–`4`** speed · **`space`** pause · **`[`**/**`]`**
   move between unlocked boards · **`M`** mute · **`F3`** debug · **`R`** restart ·
   **`N`** next level after a win. On a won act, **`1`**–**`3`** fit a module
