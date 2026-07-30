@@ -28,7 +28,21 @@ GODOT=/path/to/godot ./game/run_tests.sh --full   # ...playing every level end t
 GODOT=/path/to/godot ./game/run_tests.sh -- --case test_engagement   # one file
 GODOT=/path/to/godot ./game/build_web.sh     # HTML5 build -> build/web/
 python3 game/tools/verify_web.py             # boot the web build in a real browser
+
+# Desktop build. Needs the matching export templates installed.
+godot --headless --path game --export-release "Linux" ../build/linux/lastline.x86_64
+godot --headless --path game --export-release "Windows" ../build/windows/lastline.exe
 ```
+
+**The desktop build looks better than the web build, and it is not close.**
+Desktop runs the Forward+ renderer, which has SSAO, high-quality shadow
+filtering and a real HDR bloom; the web build runs Compatibility, which has
+none of them, because Forward+ does not target WebGL. That is a browser limit
+rather than a Godot one — the same wall stops Unity's WebGL export, and Unreal
+has had no web target at all since 4.27. `project.godot` sets
+`rendering_method=forward_plus` with a `.web` override back to
+`gl_compatibility`, so one project serves both and nothing in `render/`
+hard-codes which one it got.
 
 The web build is single-threaded on purpose, so it needs no COOP/COEP headers and
 will run from any static host. It will **not** run from `file://` — browsers
@@ -150,10 +164,18 @@ in every run.
   **`Z`** to reset the view. Boards run to 16,000 units, so framing one end to
   end makes a turret a few pixels wide.
 - **`F2`** cycles graphics quality: **High** / **Balanced** / **Fast**.
-  Balanced drops the shadow pass, Fast drops the scenery too, and both cut the
-  3D render resolution. Measured in a browser, Fast is about 2.5x the frame
-  rate of High. The setting is remembered, and it never touches the simulation
-  — two players on different settings are playing the identical game.
+  Each rung gives up one thing at a time. High has everything. Balanced drops
+  the shadow pass and the surface normal maps, keeping the albedo and roughness
+  variation that stops surfaces reading as plastic. Fast drops the scenery and
+  the generated surfaces entirely. All three cut the 3D render resolution to a
+  pixel budget. Measured in a browser on one board: **667 ms / 383 ms / 183 ms**
+  per frame — Fast is about 3.6x the frame rate of High. The setting is
+  remembered, and it never touches the simulation — two players on different
+  settings are playing the identical game.
+
+  Those numbers come from a machine with no GPU, so only their ordering and
+  their ratios mean anything. **If the game feels slow, press `F2` until it says
+  FAST.**
 - **`Q`** cycles weapon · **`1`–`4`** speed · **`space`** pause · **`[`**/**`]`**
   move between unlocked boards · **`M`** mute · **`F3`** debug · **`R`** restart ·
   **`N`** next level after a win. On a won act, **`1`**–**`3`** fit a module
@@ -435,6 +457,26 @@ the ground plane, so relief under the playable band would put turrets on slopes
 the rules know nothing about. All of it is hashed from position rather than
 randomised, so a board looks the same every time you open it.
 
+### Surfaces
+
+Every surface family — ground, verge, road, wall, turret, drone, rock, bark,
+canopy, prop — carries a generated albedo variation, normal map and roughness
+map, built from one noise field per family by `render/material_library.gd` and
+directed by `data/materials.json`. Nothing is shipped as an image; the same rule
+as the sound effects.
+
+The field that does most of the work is `lattice_x` against `lattice_y`. Equal
+counts give isotropic grit, which is soil, stone and concrete. Unequal counts
+stretch the noise along one axis, and that single asymmetry is the whole
+difference between asphalt dragged along the road, brushed metal on a turret
+housing and the vertical grain of bark. Panel grooves do the rest: noise alone
+reads as rock however it is tuned, because nothing in nature repeats on a grid,
+so manufactured things get seams and natural ones are tested not to have any.
+
+The maps are generated once for the **session**, not per level — a level load
+that rebuilt them would freeze for about a quarter of a second on each of the 48
+acts. `tools/material_probe.gd` reports what they cost.
+
 Nothing tall stands in front of the board or on ground a turret could use. The
 simulation has no idea a tree is there, so a tree must never be able to hide
 anything the rules care about — that is a tested property, not a convention.
@@ -549,6 +591,9 @@ xvfb-run -a godot --path game --rendering-driver opengl3 \
 # separately, so the answer is WHICH stage rather than how much.
 xvfb-run -a godot --path game --rendering-driver opengl3 \
     --script res://tools/frame_profile.gd -- --level 46 --wave 10
+
+# What the generated surface maps cost, per family, and proof the cache is one.
+godot --headless --path game --script res://tools/material_probe.gd
 
 # Verify draw calls stay flat as entity count climbs.
 xvfb-run -a godot --path game --rendering-driver opengl3 \

@@ -1,0 +1,298 @@
+{
+  "_comment": [
+    "Procedural surface families. render/material_library.gd turns each of these",
+    "into an albedo variation, a normal map and a roughness map from one shared",
+    "noise field. This file is the art direction: nothing here is balance, and",
+    "nothing here can change what the simulation does.",
+    "",
+    "The knobs, and what each one is FOR:",
+    "  size          texture edge in pixels. Cost is O(size^2 x octaves) at load,",
+    "                so big surfaces the camera gets close to earn 128 and small",
+    "                instanced parts do not.",
+    "  lattice_x/y   noise cells per octave, per axis. EQUAL counts give isotropic",
+    "                grit - soil, stone, concrete. UNEQUAL counts stretch the",
+    "                noise along one axis, which is what makes asphalt look",
+    "                dragged, metal look brushed and bark look grained. This is",
+    "                the single most important field here.",
+    "  weights       how much each octave contributes. Front-loaded gives broad",
+    "                soft variation; flatter gives busy fine detail.",
+    "  contrast      how far the albedo swings either side of neutral.",
+    "  relief        normal-map strength. High enough to catch the light, low",
+    "                enough that it does not read as crumpled foil.",
+    "  roughness     the surface's actual roughness - the texture carries the",
+    "                absolute value, so this is the centre of the baked range.",
+    "  roughness_swing  how much it varies. This is what makes a highlight look",
+    "                like it is on worn metal rather than on plastic.",
+    "  panel_x/y     grooves per axis, and panel_depth how deep. Manufactured",
+    "                things get seams; natural things must not, because a grid is",
+    "                the one thing noise can never produce.",
+    "  uv_scale      how many times the map tiles across the mesh's UVs.",
+    "  normal_scale  final multiplier on the normal map, per family.",
+    "  seed          shifts the field so two families with identical settings are",
+    "                still different surfaces."
+  ],
+  "families": {
+    "ground": {
+      "size": 128,
+      "lattice_x": [
+        4,
+        9,
+        19
+      ],
+      "lattice_y": [
+        4,
+        9,
+        19
+      ],
+      "weights": [
+        0.55,
+        0.3,
+        0.15
+      ],
+      "contrast": 0.45,
+      "relief": 3.2,
+      "roughness": 0.95,
+      "roughness_swing": 0.1,
+      "uv_scale": 1.0,
+      "normal_scale": 1.0,
+      "seed": 0
+    },
+    "verge": {
+      "size": 96,
+      "lattice_x": [
+        5,
+        12,
+        24
+      ],
+      "lattice_y": [
+        5,
+        12,
+        24
+      ],
+      "weights": [
+        0.5,
+        0.32,
+        0.18
+      ],
+      "contrast": 0.4,
+      "relief": 3.0,
+      "roughness": 0.96,
+      "roughness_swing": 0.08,
+      "uv_scale": 26.0,
+      "normal_scale": 1.1,
+      "seed": 17
+    },
+    "road": {
+      "size": 128,
+      "lattice_x": [
+        7,
+        17,
+        36
+      ],
+      "lattice_y": [
+        3,
+        8,
+        17
+      ],
+      "weights": [
+        0.42,
+        0.34,
+        0.24
+      ],
+      "contrast": 0.3,
+      "relief": 2.4,
+      "roughness": 0.82,
+      "roughness_swing": 0.26,
+      "uv_scale": 34.0,
+      "normal_scale": 0.85,
+      "seed": 41
+    },
+    "wall": {
+      "size": 96,
+      "lattice_x": [
+        6,
+        13,
+        27
+      ],
+      "lattice_y": [
+        6,
+        13,
+        27
+      ],
+      "weights": [
+        0.46,
+        0.32,
+        0.22
+      ],
+      "contrast": 0.34,
+      "relief": 2.8,
+      "roughness": 0.5,
+      "roughness_swing": 0.3,
+      "panel_x": 4,
+      "panel_y": 2,
+      "panel_depth": 0.45,
+      "uv_scale": 15.0,
+      "normal_scale": 1.2,
+      "seed": 73
+    },
+    "turret": {
+      "size": 96,
+      "lattice_x": [
+        8,
+        20,
+        40
+      ],
+      "lattice_y": [
+        3,
+        7,
+        14
+      ],
+      "weights": [
+        0.4,
+        0.34,
+        0.26
+      ],
+      "contrast": 0.22,
+      "relief": 2.2,
+      "roughness": 0.42,
+      "roughness_swing": 0.34,
+      "panel_x": 3,
+      "panel_y": 0,
+      "panel_depth": 0.22,
+      "uv_scale": 1.5,
+      "normal_scale": 1.0,
+      "seed": 109
+    },
+    "enemy": {
+      "size": 64,
+      "lattice_x": [
+        5,
+        11,
+        22
+      ],
+      "lattice_y": [
+        4,
+        9,
+        18
+      ],
+      "weights": [
+        0.44,
+        0.33,
+        0.23
+      ],
+      "contrast": 0.3,
+      "relief": 2.6,
+      "roughness": 0.6,
+      "roughness_swing": 0.3,
+      "panel_x": 0,
+      "panel_y": 2,
+      "panel_depth": 0.24,
+      "uv_scale": 1.4,
+      "normal_scale": 1.15,
+      "seed": 151
+    },
+    "rock": {
+      "size": 64,
+      "lattice_x": [
+        3,
+        8,
+        17
+      ],
+      "lattice_y": [
+        3,
+        8,
+        17
+      ],
+      "weights": [
+        0.58,
+        0.28,
+        0.14
+      ],
+      "contrast": 0.42,
+      "relief": 3.6,
+      "roughness": 0.94,
+      "roughness_swing": 0.12,
+      "uv_scale": 1.5,
+      "normal_scale": 1.3,
+      "seed": 197
+    },
+    "bark": {
+      "size": 64,
+      "lattice_x": [
+        3,
+        6,
+        12
+      ],
+      "lattice_y": [
+        9,
+        22,
+        44
+      ],
+      "weights": [
+        0.4,
+        0.34,
+        0.26
+      ],
+      "contrast": 0.44,
+      "relief": 3.4,
+      "roughness": 0.97,
+      "roughness_swing": 0.08,
+      "uv_scale": 1.2,
+      "normal_scale": 1.25,
+      "seed": 233
+    },
+    "canopy": {
+      "size": 64,
+      "lattice_x": [
+        6,
+        14,
+        28
+      ],
+      "lattice_y": [
+        6,
+        14,
+        28
+      ],
+      "weights": [
+        0.5,
+        0.3,
+        0.2
+      ],
+      "contrast": 0.5,
+      "relief": 3.0,
+      "roughness": 0.98,
+      "roughness_swing": 0.06,
+      "uv_scale": 1.4,
+      "normal_scale": 1.1,
+      "seed": 281
+    },
+    "prop": {
+      "size": 64,
+      "lattice_x": [
+        5,
+        11,
+        23
+      ],
+      "lattice_y": [
+        5,
+        11,
+        23
+      ],
+      "weights": [
+        0.48,
+        0.31,
+        0.21
+      ],
+      "contrast": 0.36,
+      "relief": 2.8,
+      "roughness": 0.88,
+      "roughness_swing": 0.18,
+      "panel_x": 2,
+      "panel_y": 2,
+      "panel_depth": 0.3,
+      "uv_scale": 1.3,
+      "normal_scale": 1.1,
+      "seed": 331
+    }
+  }
+}

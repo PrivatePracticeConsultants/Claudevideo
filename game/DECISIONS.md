@@ -1965,3 +1965,108 @@ Not oversights — later phases, per §5.7. Anything tempting that came up is in
   Salvage, Depots, bosses (P3) — P0's integrity is engagement-scoped
 - Modules and the modifier pipeline (P2/P4)
 - Save/load, Intel, Commanders, Daily Contract (P5)
+
+## P0-73 · Forward+ on the desktop, Compatibility on the web, and one glow tuned twice
+
+The question was whether a different engine would give better graphics. It would
+not, and the project's own config says why: `renderer/rendering_method` was
+`gl_compatibility` everywhere, so the desktop build was giving up SSAO, real HDR
+bloom and high-quality shadow filtering in order to match a limit that only the
+web build actually has. Forward+ does not target WebGL, so that is a browser
+ceiling rather than a Godot one — Unity's WebGL export meets the same wall, and
+Unreal has had no web target since 4.27.
+
+So the base method is now `forward_plus`, with `.web` and `.mobile` pinned to
+`gl_compatibility`. Those two overrides are ENGINE defaults, not ours: a project
+that writes neither still reports `gl_compatibility` on those platforms, which
+was verified by deleting both lines and asking. They are written out anyway so
+the split is visible to whoever opens the file instead of being a property of a
+Godot version. Verified from both ends — the exported Linux binary logs
+`Vulkan 1.4.318 - Forward+`, and the web build logs
+`WebGL 2.0 ... - Compatibility`.
+
+The first Forward+ frame was worse than what it replaced. The whole board washed
+out to near-white: the road markings, the treeline and the turrets all
+disappeared. The cause was `glow_bloom`, which adds a constant fraction of EVERY
+pixel back into the image whether it is bright or not. Compatibility approximates
+glow and largely ignores that term; Forward+ runs a real HDR bloom and honours
+it. The 0.85/0.1 that reads as a gentle lift on the web build is a full-screen
+wash on Forward+.
+
+The fix is not one set of numbers that offends neither renderer. It is `_lit()`,
+which prefers a `<key>_hdr` entry from the theme when a RenderingDevice exists
+and falls back to the plain key otherwise, so a value stays a single number until
+the two renderers actually disagree about it. Only glow has needed a second entry
+so far: on Forward+ the constant term goes to zero and `glow_hdr_threshold` does
+the work, so only genuinely overbright things — muzzle flashes, tracers, the
+emissive bands on menders and jammers — bloom, which is what the glow was for.
+
+Worth recording as a general shape: a renderer swap is not a settings-preserving
+operation. Every value tuned by eye was tuned against one renderer's
+interpretation of it.
+
+## P0-74 · Ten procedural surfaces, and a quality ladder that has three rungs because the measurement said so
+
+Everything on the board except the ground was a flat colour. That survives at a
+distance and fails the moment anything is near the camera: a wall, a turret and a
+rock lit identically are three shades of one material, and the eye reads the
+whole board as plastic. `render/material_library.gd` now generates, per named
+family, an albedo variation, a tangent-space normal map and a roughness map from
+one shared noise field, and `data/materials.json` holds the art direction for ten
+families — ground, verge, road, wall, turret, enemy, rock, bark, canopy, prop.
+
+Generated, never shipped, for the same reason as the sound effects: no binary
+assets, and a surface becomes something reasoned about in a JSON block instead of
+opened in an image editor.
+
+The one field that does most of the work is `lattice_x` against `lattice_y`.
+Equal counts give isotropic grit — soil, stone, concrete. Unequal counts stretch
+the noise along an axis, and that single asymmetry is the entire difference
+between asphalt dragged along the road, brushed metal on a turret housing, and
+the vertical grain of bark. Three families, one generator, no resemblance.
+Grooves (`panel_x`/`panel_y`) do the other half: noise alone reads as rock
+however it is tuned, because nothing in nature repeats on a grid, so manufactured
+things get seams and natural ones are asserted not to have any.
+
+Three things this got wrong first, all caught by measuring rather than by
+looking:
+
+- **Panel grooves on a welded cylinder read as corrugation, not machining.**
+  Horizontal seams wrap a turret housing and come out looking like flexible hose.
+  Vertical seams run along it and read as panel joins. `panel_y` is now 0 on the
+  turret family.
+- **The library was being rebuilt on every level load.** `main.gd` constructs a
+  fresh `SimRenderer3D` per act and frees everything else, so a renderer-owned
+  library regenerated all ten families each time — 270 ms measured, on 48 acts.
+  It is now held for the session and handed in, exactly as `_sfx` already was for
+  the same reason and with the same comment. The second pass over all ten
+  families measures 0.10 ms, which is what a cache is supposed to look like.
+- **The tier switch configured nodes and then threw them away.** Surface maps are
+  baked into materials, and a material already handed to a MeshInstance does not
+  re-read its textures, so changing tier has to rebuild every node that owns one
+  — and it has to do that BEFORE the shadow and visibility flags are applied, not
+  after.
+
+Then the cost, measured in a browser rather than guessed, on one board:
+
+| tier | maps | frame time | vs before the art pass |
+|---|---|---|---|
+| HIGH | albedo + normal + roughness | 667 ms | +48% |
+| BALANCED | albedo + roughness | 383 ms | +4% |
+| FAST | none | 183 ms | unchanged |
+
+That table is why the ladder has three rungs instead of a switch. All three maps
+cost roughly what the shadow pass costs, and nearly all of it is the normal map —
+the one that has to be decoded and re-based per pixel where the others are plain
+fetches. BALANCED drops it and keeps the albedo and roughness variation, which is
+most of what stops a surface reading as plastic, for 4%. FAST was already
+unchanged because it had stopped paying before the art pass existed.
+
+Same caveat as P0-72 and it has not stopped being true: this container has no
+GPU, so the absolutes are SwiftShader numbers and only the ORDERING and the
+RATIOS mean anything. Software rasterisation penalises texture sampling harder
+than real hardware does, so 48% and 4% are more likely to be ceilings than floors
+on a machine with a GPU.
+
+`tools/material_probe.gd` reports the per-family generation cost and proves the
+cache is one, because none of the above is visible from a screenshot.

@@ -30,6 +30,17 @@ var _sim: Sim
 var _theme: Dictionary = {}
 var _world: Dictionary = {}
 
+## Procedural surface maps, shared by every material that wants one. Generated
+## once and outlives the board - see material_library.gd.
+var _materials: MaterialLibrary
+
+## True on the Forward+ renderer, false on Compatibility (the web build) and in
+## the headless tests. Asked once here rather than at each use, because the
+## answer cannot change while the process is running and because it is the same
+## question in every case: is there a RenderingDevice, and therefore SSAO, real
+## HDR bloom and high-quality shadow filtering?
+var _hdr: bool = RenderingServer.get_rendering_device() != null
+
 var camera: Camera3D
 var _enemy_layers: Array[MultiMeshInstance3D] = []
 var _hp_bars: MultiMeshInstance3D
@@ -94,10 +105,21 @@ var _reference_radius: float = 1.0
 var _xf := Transform3D()
 var _basis := Basis()
 
-func setup(sim: Sim, theme: Dictionary) -> void:
+## The library is normally passed IN, because it belongs to the session rather
+## than to the board - see main.gd, which holds it across levels the same way it
+## holds the generated sound. Building one here is the fallback for the tests and
+## the dev tools, which make a renderer and nothing else.
+func setup(sim: Sim, theme: Dictionary, materials: MaterialLibrary = null) -> void:
 	_sim = sim
 	_theme = theme
 	_world = theme.get("world", {})
+	if materials != null:
+		_materials = materials
+		# The session's library may have been built at a different tier - a level
+		# loaded after the player pressed F2. Align it before any material asks.
+		_materials.set_detail(_material_detail())
+	elif _materials == null:
+		_materials = MaterialLibrary.new(_world, _load_families(), _material_detail())
 	_enemy_color = _color("enemy")
 	_enemy_hurt_color = _color("enemy_hurt")
 	var class_colors: Dictionary = _world.get("enemy_class_colors", {}) as Dictionary
@@ -200,16 +222,29 @@ func _build_environment() -> void:
 	# it is real, and the ambient term is lifted a little where it is not - not a
 	# substitute, but it stops unlit faces crushing to flat colour without the
 	# occlusion pass to give them shape.
-	if RenderingServer.get_rendering_device() != null:
+	if _hdr:
 		env.ssao_enabled = true
 		env.ssao_radius = float(_world.get("ssao_radius", 42.0))
 		env.ssao_intensity = float(_world.get("ssao_intensity", 2.4))
 	else:
 		env.ambient_light_energy *= float(_world.get("ambient_lift_without_ssao", 1.35))
 
+	# Glow is the one setting the two renderers flatly disagree about, so it is
+	# tuned twice. Compatibility approximates glow; Forward+ runs a real HDR
+	# bloom and actually honours glow_bloom, which adds a constant fraction of
+	# EVERY pixel - bright or not - back into the image. The 0.85/0.1 that reads
+	# as a gentle lift on the web build washed the entire board to white the
+	# first time Forward+ ran it: captured, and the road markings, the treeline
+	# and the turrets had all disappeared into it.
+	#
+	# So on Forward+ the constant term goes to zero and the threshold does the
+	# work instead - only pixels that are genuinely overbright (muzzle flashes,
+	# tracers, the emissive bands on menders and jammers) bloom, which is what
+	# the glow was ever for.
 	env.glow_enabled = true
-	env.glow_intensity = float(_world.get("glow_strength", 1.15))
-	env.glow_bloom = float(_world.get("glow_bloom", 0.25))
+	env.glow_intensity = _lit("glow_strength", 1.15)
+	env.glow_bloom = _lit("glow_bloom", 0.25)
+	env.glow_hdr_threshold = _lit("glow_threshold", 1.0)
 	env.glow_blend_mode = Environment.GLOW_BLEND_MODE_ADDITIVE
 
 	# Depth fog pulls the far end of the corridor back and gives the board scale.
@@ -365,6 +400,18 @@ func cycle_quality() -> int:
 
 func apply_quality() -> void:
 	_fit_render_scale()
+	# Surface maps are baked INTO materials, and a material already handed to a
+	# MeshInstance does not re-read its textures - so changing the tier has to
+	# rebuild everything that owns one. Done FIRST, because it replaces the very
+	# nodes whose shadow and visibility flags are set below; the other order
+	# configured the old nodes and then threw them away, which showed up as FAST
+	# still drawing scenery for one tier change.
+	#
+	# Guarded on the tier actually moving. This is a full board and layer
+	# rebuild, and running it on every apply_quality() would make a window
+	# resize as expensive as a level load.
+	if _materials != null and _materials.set_detail(_material_detail()):
+		_rebuild_materials()
 	if _sun != null:
 		# Shadows are the second most expensive thing after raw fill, and the
 		# board still reads without them - the corridor and the turrets are
@@ -386,6 +433,29 @@ func apply_quality() -> void:
 		layer.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON \
 			if (_quality == QUALITY_HIGH and bool(_world.get("drone_shadows", true))) \
 			else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+
+## Throw away every node that owns a generated material and build it again.
+##
+## Only the detail tier calls this. The layers are rebuilt rather than patched
+## because a MultiMesh's material lives on its mesh, and the meshes are welded
+## per family at build time - reaching in to swap a texture on each would mean
+## keeping a second index of every surface, which is exactly the kind of cached
+## thing that goes stale silently.
+##
+## The old nodes have to be removed, not just forgotten: _build_turret_layers
+## and _build_entity_layers clear their arrays and add_child() fresh layers, so
+## dropping the references alone would leave the previous set on the tree,
+## drawing stale instances forever.
+func _rebuild_materials() -> void:
+	for group in [_turret_bases, _turret_bodies, _turret_barrels, _enemy_layers]:
+		for layer: MultiMeshInstance3D in group:
+			remove_child(layer)
+			layer.queue_free()
+	# _build_scenery() frees and replaces the whole _scenery subtree itself.
+	_build_scenery()
+	_build_turret_layers()
+	_build_entity_layers()
+	refresh_board()
 
 ## Shadows are cast within a distance of the camera, so the range has to follow
 ## the framing. Too short and the far half of a long act renders unshadowed -
@@ -416,24 +486,21 @@ func _build_scenery() -> void:
 	# way out, and a visible ground edge reads as a rendering bug.
 	var ground := MeshInstance3D.new()
 	ground.mesh = _ground_mesh()
-	var ground_material := _surface_material(Color.WHITE,
-		float(_world.get("ground_metallic", 0.0)), float(_world.get("ground_roughness", 0.95)))
 	# Vertex colours carry the broad mottling; the base colour has to be white or it
 	# would multiply the variation away.
+	#
+	# ...and the generated "ground" family carries the fine detail. Vertex colour
+	# on a 128-cell grid varies every ~195 units, which at this camera distance is
+	# cloud rather than surface. The texture and its normal map are what make the
+	# ground read as something with a texture instead of as a tinted polygon.
+	#
+	# The ground's UVs are world-space and already scaled by ground_tile, so this
+	# is the one family whose uv_scale must stay 1.0 - the mesh has done the
+	# tiling. Everything else tiles through the material.
+	var ground_material := _surface_material(Color.WHITE,
+		float(_world.get("ground_metallic", 0.0)), float(_world.get("ground_roughness", 0.95)),
+		"ground")
 	ground_material.vertex_color_use_as_albedo = true
-	# ...and generated noise carries the fine detail. Vertex colour on a 128-cell
-	# grid varies every ~195 units, which at this camera distance is cloud rather
-	# than surface. The texture and its normal map are what make the ground read as
-	# something with a texture instead of as a tinted polygon.
-	var detail := int(_world.get("ground_detail_size", 128))
-	ground_material.albedo_texture = _detail_albedo(detail,
-		float(_world.get("ground_detail_contrast", 0.45)))
-	ground_material.normal_enabled = true
-	ground_material.normal_texture = _detail_normal(detail,
-		float(_world.get("ground_detail_relief", 3.2)))
-	ground_material.normal_scale = float(_world.get("ground_normal_scale", 1.0))
-	ground_material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
-	ground_material.texture_repeat = true
 	ground.material_override = ground_material
 	_scenery.add_child(ground)
 
@@ -442,13 +509,16 @@ func _build_scenery() -> void:
 	var verge := MeshInstance3D.new()
 	verge.mesh = _verge_mesh()
 	verge.material_override = _surface_material(_color_of(_world.get("verge", "#2a2f26")),
-		0.0, float(_world.get("verge_roughness", 0.98)))
+		0.0, float(_world.get("verge_roughness", 0.98)), "verge")
 	_scenery.add_child(verge)
 
 	var road := MeshInstance3D.new()
 	road.mesh = _corridor_mesh()
+	# The road family's noise is stretched along X against Y, so the aggregate
+	# reads as dragged in the direction of travel rather than as even gravel.
 	road.material_override = _surface_material(_color("path"),
-		float(_world.get("path_metallic", 0.15)), float(_world.get("path_roughness", 0.8)))
+		float(_world.get("path_metallic", 0.15)), float(_world.get("path_roughness", 0.8)),
+		"road")
 	_scenery.add_child(road)
 
 	# Lane markings down the middle. Cheap, and it is most of what makes a grey
@@ -462,8 +532,11 @@ func _build_scenery() -> void:
 
 	var walls := MeshInstance3D.new()
 	walls.mesh = _wall_mesh()
+	# Panel seams, which is the whole reason walls do not read as cliffs: the
+	# noise alone would make them stone whatever colour they were given.
 	walls.material_override = _surface_material(_color_of(_world.get("wall", "#39424f")),
-		float(_world.get("wall_metallic", 0.55)), float(_world.get("wall_roughness", 0.42)))
+		float(_world.get("wall_metallic", 0.55)), float(_world.get("wall_roughness", 0.42)),
+		"wall")
 	_scenery.add_child(walls)
 
 	var props := _prop_layer()
@@ -582,72 +655,6 @@ func _ground_mesh() -> ArrayMesh:
 	mesh.clear_surfaces()
 	tool.commit(mesh)
 	return mesh
-
-## Tileable value noise, as a height field.
-##
-## Generated rather than shipped, for the same reason the sound effects are: no
-## binary assets, and the shape of the surface becomes something that can be
-## reasoned about in ten lines instead of opened in an image editor. Three octaves
-## on a wrapping lattice, so the texture tiles seamlessly at any scale.
-func _noise_field(size: int, seed_offset: int) -> PackedFloat32Array:
-	var field := PackedFloat32Array()
-	field.resize(size * size)
-	var octaves := [4, 9, 19]
-	var weights := [0.55, 0.3, 0.15]
-	for o in octaves.size():
-		var lattice: int = octaves[o]
-		var weight: float = weights[o]
-		for y in size:
-			for x in size:
-				var fx := float(x) / float(size) * float(lattice)
-				var fy := float(y) / float(size) * float(lattice)
-				var x0 := int(floor(fx))
-				var y0 := int(floor(fy))
-				var tx := fx - float(x0)
-				var ty := fy - float(y0)
-				# Smoothstep, or the lattice shows as diamonds.
-				tx = tx * tx * (3.0 - 2.0 * tx)
-				ty = ty * ty * (3.0 - 2.0 * ty)
-				var a00 := _hash_unit((x0 % lattice) + seed_offset, (y0 % lattice) + o * 31)
-				var a10 := _hash_unit(((x0 + 1) % lattice) + seed_offset, (y0 % lattice) + o * 31)
-				var a01 := _hash_unit((x0 % lattice) + seed_offset, ((y0 + 1) % lattice) + o * 31)
-				var a11 := _hash_unit(((x0 + 1) % lattice) + seed_offset, ((y0 + 1) % lattice) + o * 31)
-				var top: float = a00 + (a10 - a00) * tx
-				var bottom: float = a01 + (a11 - a01) * tx
-				field[y * size + x] += (top + (bottom - top) * ty) * weight
-	return field
-
-## The noise as a greyscale texture, centred on 1.0 so it multiplies the vertex
-## colour rather than replacing it.
-func _detail_albedo(size: int, contrast: float) -> ImageTexture:
-	var field := _noise_field(size, 0)
-	var image := Image.create(size, size, false, Image.FORMAT_RGB8)
-	for y in size:
-		for x in size:
-			var v := 1.0 + (field[y * size + x] - 0.5) * contrast
-			image.set_pixel(x, y, Color(v, v, v))
-	return ImageTexture.create_from_image(image)
-
-## A normal map from the same field.
-##
-## This is what makes a flat polygon look like it has a surface. Central
-## differences for the slope, encoded the way a tangent-space normal map is: XY in
-## red and green about a half-grey rest, Z in blue.
-func _detail_normal(size: int, strength: float) -> ImageTexture:
-	var field := _noise_field(size, 0)
-	var image := Image.create(size, size, false, Image.FORMAT_RGB8)
-	for y in size:
-		for x in size:
-			var left := field[y * size + ((x - 1 + size) % size)]
-			var right := field[y * size + ((x + 1) % size)]
-			var up := field[((y - 1 + size) % size) * size + x]
-			var down := field[((y + 1) % size) * size + x]
-			var nx := (left - right) * strength
-			var ny := (up - down) * strength
-			var length := sqrt(nx * nx + ny * ny + 1.0)
-			image.set_pixel(x, y, Color(
-				nx / length * 0.5 + 0.5, ny / length * 0.5 + 0.5, 1.0 / length * 0.5 + 0.5))
-	return ImageTexture.create_from_image(image)
 
 ## How high the terrain sits at a point.
 ##
@@ -797,7 +804,10 @@ func _tree_layers() -> Array:
 	trunk_mesh.height = 1.0
 	trunk_mesh.radial_segments = 5
 	trunk_mesh.rings = 0
-	var trunk_material := _surface_material(Color.WHITE, 0.0, 1.0)
+	# Bark: the same generator as everything else, with the lattice counts
+	# swapped so the noise stretches UP the trunk instead of around it. That one
+	# asymmetry is the entire difference between bark and gravel.
+	var trunk_material := _surface_material(Color.WHITE, 0.0, 1.0, "bark")
 	trunk_material.vertex_color_use_as_albedo = true
 	trunk_mesh.material = trunk_material
 
@@ -810,7 +820,7 @@ func _tree_layers() -> Array:
 	canopy_mesh.radial_segments = 6
 	canopy_mesh.rings = 1
 	var canopy_material := _surface_material(Color.WHITE, 0.0,
-		float(_world.get("canopy_roughness", 0.98)))
+		float(_world.get("canopy_roughness", 0.98)), "canopy")
 	canopy_material.vertex_color_use_as_albedo = true
 	canopy_mesh.material = canopy_material
 
@@ -922,7 +932,7 @@ func _rock_layer() -> MultiMeshInstance3D:
 	mesh.radial_segments = 6
 	mesh.rings = 3
 	var material := _surface_material(Color.WHITE, 0.0,
-		float(_world.get("rock_roughness", 0.95)))
+		float(_world.get("rock_roughness", 0.95)), "rock")
 	material.vertex_color_use_as_albedo = true
 	mesh.material = material
 	var layer := _instanced(mesh, spots.size())
@@ -1009,7 +1019,7 @@ func _prop_layer() -> MultiMeshInstance3D:
 	var block := BoxMesh.new()
 	block.size = Vector3.ONE
 	var material := _surface_material(Color.WHITE, 0.0,
-		float(_world.get("prop_roughness", 0.95)))
+		float(_world.get("prop_roughness", 0.95)), "prop")
 	material.vertex_color_use_as_albedo = true
 	block.material = material
 	var layer := _instanced(block, placed.size())
@@ -1212,6 +1222,12 @@ func _add_layer(mesh: Mesh, limit: int) -> MultiMeshInstance3D:
 	material.vertex_color_use_as_albedo = true
 	material.metallic = float(_world.get("turret_metallic", 0.55))
 	material.roughness = float(_world.get("turret_roughness", 0.38))
+	# Brushed metal and panel seams. The turret family's noise is stretched 8:3,
+	# which is what makes the housings read as machined rather than cast - and
+	# the roughness map is what makes the sun catch the worn edges instead of
+	# sliding evenly across the whole assembly.
+	if _materials != null:
+		_materials.apply(material, "turret")
 	_skin(mesh, material)
 	var layer := _instanced(mesh, limit)
 	add_child(layer)
@@ -1662,6 +1678,12 @@ func _instanced_material(enemy_id: String = "") -> StandardMaterial3D:
 	material.vertex_color_use_as_albedo = true
 	material.metallic = float(_world.get("enemy_metallic", 0.12))
 	material.roughness = float(_world.get("enemy_roughness", 0.62))
+	# Plated carapace. Every drone class shares one family and stays its own
+	# colour, because the per-instance damage tint multiplies through the albedo
+	# map - the shell gains a surface without any class losing the colour the
+	# player identifies it by.
+	if _materials != null:
+		_materials.apply(material, "enemy")
 	if EMISSIVE_CLASSES.has(enemy_id):
 		# Emission is a flat add, so the per-instance damage tint still reads
 		# through it - a hurt Lance dims like everything else, it just never stops
@@ -2461,11 +2483,53 @@ func rebuild_static() -> void:
 
 # --- materials -------------------------------------------------------------------------
 
-func _surface_material(tint: Color, metallic: float, roughness: float) -> StandardMaterial3D:
+const MATERIALS_PATH := "res://data/materials.json"
+
+## The surface families, or an empty set if the file is missing or malformed.
+##
+## Deliberately forgiving. Every other data file in this project is load-bearing
+## and a typo in one has to stop the program with a plain message, because a
+## silently-wrong number is a wrong game. This one is not: a family that fails to
+## load costs a texture, and a renderer that refuses to start over a texture is a
+## worse outcome than a flat-shaded wall.
+func _load_families() -> Dictionary:
+	if not FileAccess.file_exists(MATERIALS_PATH):
+		return {}
+	var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string(MATERIALS_PATH))
+	if typeof(parsed) != TYPE_DICTIONARY:
+		push_warning("materials.json did not parse; surfaces will be flat")
+		return {}
+	var families: Variant = (parsed as Dictionary).get("families", {})
+	if typeof(families) != TYPE_DICTIONARY:
+		return {}
+	return families as Dictionary
+
+## Which detail tier the current quality level implies.
+##
+## One rung each, because the surface maps turned out to be worth roughly what
+## the shadows are: measured in a browser, all three maps cost 48% of the frame
+## at HIGH and 9% at BALANCED, and FAST was unchanged because it had already
+## stopped paying for them. So BALANCED keeps the albedo and roughness variation
+## - most of the look - and gives up the normal map, which is the expensive one.
+func _material_detail() -> int:
+	match _quality:
+		QUALITY_FAST:
+			return MaterialLibrary.DETAIL_PLAIN
+		QUALITY_BALANCED:
+			return MaterialLibrary.DETAIL_SIMPLE
+		_:
+			return MaterialLibrary.DETAIL_FULL
+
+## A material for a static board surface, optionally carrying a generated
+## surface family. Passing no family keeps the old flat behaviour exactly.
+func _surface_material(tint: Color, metallic: float, roughness: float,
+		family: String = "") -> StandardMaterial3D:
 	var material := StandardMaterial3D.new()
 	material.albedo_color = tint
 	material.metallic = metallic
 	material.roughness = roughness
+	if family != "" and _materials != null:
+		_materials.apply(material, family)
 	# Double-sided. The corridor is a generated strip mesh and getting the
 	# winding right on every face of every mitred corner is fiddly and easy to
 	# regress; a back-facing wall renders as a black slot, which is exactly what
@@ -2482,6 +2546,18 @@ func _transparent_material(tint: Color, alpha: float) -> StandardMaterial3D:
 	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	return material
+
+## A lighting value that may be tuned once per renderer.
+##
+## Returns "<key>_hdr" from the theme when running on Forward+ and that key
+## exists, and plain "<key>" otherwise. The point is that a value can stay a
+## single number for as long as both renderers agree about it, and only the ones
+## that genuinely differ - so far, glow - pay for a second entry. A theme with no
+## _hdr keys at all behaves exactly as it did before this existed.
+func _lit(key: String, fallback: float) -> float:
+	if _hdr and _world.has(key + "_hdr"):
+		return float(_world[key + "_hdr"])
+	return float(_world.get(key, fallback))
 
 func _color(key: String) -> Color:
 	return Color(str(_theme.get(key, "#ff00ff")))

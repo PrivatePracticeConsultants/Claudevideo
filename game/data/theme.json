@@ -193,7 +193,11 @@
     "drone_shadows": true,
     "_render_scale": "How many pixels the 3D pass is allowed. The web canvas resizes to the window times the display pixel ratio, so a HiDPI screen quietly asks for four times the pixels this scene was profiled at. The budget bounds that; the floor stops a very large window from scaling so far down that the board turns to mush. The HUD is unaffected.",
     "render_pixel_budget": 921600,
-    "render_scale_floor": 0.6
+    "render_scale_floor": 0.6,
+    "glow_strength_hdr": 0.55,
+    "glow_bloom_hdr": 0.0,
+    "glow_threshold": 1.0,
+    "glow_threshold_hdr": 0.95
   },
   "platform_max_tier": "#ffcf6e",
   "platform_cannon": "#c98a5b",

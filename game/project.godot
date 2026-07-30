@@ -9,7 +9,7 @@ config_version=5
 config/name="LAST LINE"
 config/description="Roguelite tower defense. Phase P0."
 run/main_scene="res://main.tscn"
-config/features=PackedStringArray("4.5", "GL Compatibility")
+config/features=PackedStringArray("4.5", "Forward Plus")
 
 [display]
 
@@ -20,5 +20,21 @@ window/stretch/aspect="expand"
 
 [rendering]
 
-renderer/rendering_method="gl_compatibility"
+; Desktop runs Forward+, the web build runs Compatibility, and that split is the
+; whole point: SSAO, high-quality shadow filtering and the better glow pass only
+; exist on Forward+, and Forward+ does not target WebGL. Pinning the base method
+; to forward_plus therefore costs the web build nothing - the ".web" override
+; below is what the web export actually reads.
+;
+; The ".web" and ".mobile" overrides are ENGINE defaults, not ours: a project
+; that writes neither still reports gl_compatibility on those platforms
+; (verified against 4.5 with both lines deleted). They are written out anyway so
+; that the split is visible to whoever opens this file, rather than being a
+; property of a Godot version.
+;
+; The renderer decides this at load, so nothing in render/ hard-codes it.
+; sim_renderer_3d.gd asks RenderingServer.get_rendering_device() != null and
+; enables SSAO only where a RenderingDevice exists.
+renderer/rendering_method="forward_plus"
 renderer/rendering_method.mobile="gl_compatibility"
+renderer/rendering_method.web="gl_compatibility"

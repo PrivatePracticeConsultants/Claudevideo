@@ -12,6 +12,7 @@ extends Node3D
 ## match across devices - falls out of that split.
 
 const THEME_PATH := "res://data/theme.json"
+const MATERIALS_PATH := "res://data/materials.json"
 
 ## Campaign progress. Not simulation state and deliberately nowhere near it: the
 ## sim stays a pure function of data, seed and command log, and what the player
@@ -39,6 +40,8 @@ const MAX_STEPS_PER_FRAME := 12
 
 var _sim: Sim
 var _theme: Dictionary = {}
+## Generated surface maps, held for the session rather than the board.
+var _materials: MaterialLibrary
 var _renderer: SimRenderer3D
 var _overlay: DebugOverlay
 var _hud: Hud
@@ -160,7 +163,12 @@ func _start_level(index: int, offered_carry: Dictionary) -> void:
 
 	_renderer = SimRenderer3D.new()
 	add_child(_renderer)
-	_renderer.setup(_sim, _theme)
+	# The surface maps are generated, and generating them takes about a quarter
+	# of a second - so they are built once for the session and handed to each
+	# board's renderer, exactly like the sound above. Rebuilt per level they
+	# would be a visible freeze on every one of the 48 acts, which is a strange
+	# way to spend a graphics upgrade.
+	_renderer.setup(_sim, _theme, _material_library())
 	# The renderer's tick diff is the only place that knows a shot was fired or a
 	# drone died, so sound rides along with it rather than deriving it twice.
 	_renderer.attach_audio(_sfx)
@@ -538,6 +546,24 @@ func _refresh_cursor() -> void:
 func _load_theme() -> Dictionary:
 	var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string(THEME_PATH))
 	return parsed if typeof(parsed) == TYPE_DICTIONARY else {}
+
+## The session's surface maps, generated on first use and kept thereafter.
+##
+## A RefCounted rather than a Node, so it is not swept up by the queue_free()
+## pass that clears the previous board - the only thing keeping it alive is this
+## reference, which is the point.
+func _material_library() -> MaterialLibrary:
+	if _materials == null:
+		var families := {}
+		var parsed: Variant = JSON.parse_string(
+			FileAccess.get_file_as_string(MATERIALS_PATH))
+		if typeof(parsed) == TYPE_DICTIONARY:
+			var listed: Variant = (parsed as Dictionary).get("families", {})
+			if typeof(listed) == TYPE_DICTIONARY:
+				families = listed
+		# The tier is applied by the renderer, which is the thing that knows it.
+		_materials = MaterialLibrary.new(_theme.get("world", {}), families)
+	return _materials
 
 func _show_fatal(message: String) -> void:
 	push_error(message)
