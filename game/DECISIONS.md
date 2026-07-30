@@ -2070,3 +2070,71 @@ on a machine with a GPU.
 
 `tools/material_probe.gd` reports the per-family generation cost and proves the
 cache is one, because none of the above is visible from a screenshot.
+
+## P0-75 · "Missing frames": what the measurement actually said, and the one real bug it found
+
+Reported as dropped frames rather than a low frame rate, which is a different
+claim and needs a different measurement — an average cannot show a stutter,
+because a steady 40 ms and an alternating 20/60 ms have the same one and feel
+nothing alike. `tools/frame_jitter.py` records every rAF delta over a long
+window, after a warm-up so level load and shader compilation are not counted as
+stutter, and reports the shape.
+
+The answer, on this machine, was that there is no stutter to find:
+
+| tier | median | p99 | max | frames over 2x median | median frame-to-frame change |
+|---|---|---|---|---|---|
+| BALANCED | 649.9 ms | 733.2 | 733.2 | 0 (0.0%) | 25.1 ms (3.9%) |
+| FAST | 283.3 ms | 333.3 | 333.3 | 0 (0.0%) | 0.0 ms (0.0%) |
+| HIGH | 1066.6 ms | 1200.0 | 1200.0 | 0 (0.0%) | 0.0 ms (0.0%) |
+
+Frame delivery is perfectly uniform. Every value is also an exact multiple of
+16.67 ms, which is the tell: rAF is locked to the display, so a frame that costs
+283 ms is presented on one refresh out of seventeen and the other sixteen show
+the previous image again. That IS "missing frames" in the literal sense, and it
+is a consequence of being slower than the display rather than a scheduling fault
+— nothing here is going to be fixed by smoothing.
+
+So the rest of the pass was spent eliminating the hardware-independent causes
+rather than guessing at hardware I do not have. Checked and cleared: the tick
+loop is a correct fixed-timestep accumulator; enemy motion is interpolated on
+distance-along-path, so it rounds corners rather than cutting them; the HUD is
+signature-gated and rebuilds no text unless something changed; sound plays from
+a pre-allocated, throttled voice pool with no per-shot allocation; draw calls
+stay flat at 22 from 0 to 400 entities, so the per-family materials did not cost
+the MultiMesh invariant. Steady-state CPU is 1.3 ms of `update_visuals` plus
+0.73 ms per simulation tick.
+
+One real bug, and it was in the accumulator:
+
+```gdscript
+if steps >= MAX_STEPS_PER_FRAME:
+    _accumulator = 0.0        # drops the backlog AND the sub-tick phase
+```
+
+The phase is exactly what `alpha` is. Zeroing it meant every capped frame
+rendered at `alpha` 0, so on a machine slow enough to hit the cap, interpolation
+stopped happening precisely when it was most needed and everything on the board
+snapped from tick position to tick position. `fmod(_accumulator, _tick_period)`
+drops the whole ticks that cannot be afforded and keeps the fraction. Dropping
+the backlog was always right; dropping the phase never was.
+
+And one real hitch, which is the thing most likely to be perceived as a skip
+because it lands on a click. Rebuilding the ground overlay swept all 2,960 cells
+asking the simulation three questions about each — `cell_is_unlocked`,
+`cell_is_offerable`, `cell_premium` — each of which made more calls of its own.
+Around twenty thousand cross-object dispatches per ground purchase, measured at
+8.9 ms: half a frame at 60 Hz spent on dispatch rather than on work. The flags
+are now read as arrays and rejected on directly, and 15.2 ms → 12.4 ms for a
+ground purchase, 8.9 ms → 6.6 ms for the sweep itself.
+
+Deliberately NOT done: re-deriving the adjacency rule in the renderer. The cheap
+array reads reject most of the grid, and whether a cell can actually be offered
+is still asked through `cell_is_offerable()`, which owns that rule. An overlay
+free to disagree with what the player can really buy would be a worse bug than
+any frame it saved.
+
+`F3` now reports the worst frame in the last second and a count of frames that
+took over twice the typical one, because the average it reported before could
+not have shown any of this — and because the next report of this kind should
+arrive as numbers from the machine that has the problem.

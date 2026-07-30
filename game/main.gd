@@ -297,7 +297,16 @@ func _process(delta: float) -> void:
 			_accumulator -= _tick_period
 			steps += 1
 		if steps >= MAX_STEPS_PER_FRAME:
-			_accumulator = 0.0
+			# Drop the WHOLE ticks we could not afford, and keep the fraction.
+			#
+			# This used to zero the accumulator outright, which threw away the
+			# sub-tick phase along with the backlog - and that phase is exactly
+			# what `alpha` is. Every capped frame therefore rendered at alpha 0,
+			# so on a machine slow enough to cap, interpolation stopped happening
+			# precisely when it was needed most and everything on the board
+			# visibly snapped from tick position to tick position. Dropping the
+			# backlog is still right; dropping the phase never was.
+			_accumulator = fmod(_accumulator, _tick_period)
 	_overlay.note_steps(steps)
 
 	var alpha := 0.0 if _sim.is_over() else clampf(_accumulator / _tick_period, 0.0, 1.0)

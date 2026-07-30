@@ -176,6 +176,10 @@ in every run.
   Those numbers come from a machine with no GPU, so only their ordering and
   their ratios mean anything. **If the game feels slow, press `F2` until it says
   FAST.**
+- **`F3`** shows the debug readout, including the **worst frame** in the last
+  second and how many frames took over twice the typical one. If the game feels
+  like it is skipping rather than merely slow, those two numbers are the ones
+  worth reporting — an average frame time cannot tell the difference.
 - **`Q`** cycles weapon · **`1`–`4`** speed · **`space`** pause · **`[`**/**`]`**
   move between unlocked boards · **`M`** mute · **`F3`** debug · **`R`** restart ·
   **`N`** next level after a win. On a won act, **`1`**–**`3`** fit a module
@@ -591,6 +595,11 @@ xvfb-run -a godot --path game --rendering-driver opengl3 \
 # separately, so the answer is WHICH stage rather than how much.
 xvfb-run -a godot --path game --rendering-driver opengl3 \
     --script res://tools/frame_profile.gd -- --level 46 --wave 10
+
+# Frame-time DISTRIBUTION in a browser: p99, worst, and how many frames took
+# over twice the typical one. An average cannot show a stutter - a steady 40ms
+# and an alternating 20/60ms have the same one and feel nothing alike.
+python3 game/tools/frame_jitter.py
 
 # What the generated surface maps cost, per family, and proof the cache is one.
 godot --headless --path game --script res://tools/material_probe.gd

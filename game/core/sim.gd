@@ -917,6 +917,23 @@ func cell_is_unlocked(cx: int, cy: int) -> bool:
 	return cell_in_bounds(cx, cy) and _cell_unlocked[cy * _grid_cols + cx] == 1
 func cell_is_buildable(cx: int, cy: int) -> bool:
 	return cell_in_bounds(cx, cy) and _cell_buildable[cy * _grid_cols + cx] == 1
+
+## The raw cell flags, row-major, for callers that sweep the WHOLE grid.
+##
+## Public for the same reason e_alive and t_x are: the renderer rebuilds the
+## ground overlay over every cell on the board whenever ground is bought, and on
+## the largest maps that is 2,960 cells. Asking through cell_is_unlocked() and
+## friends cost three cross-object calls each - measured at 8.9ms per purchase,
+## which is half a frame at 60Hz spent on dispatch rather than on work.
+##
+## These are a cheap REJECT, not a replacement for the rules. Whether a cell can
+## actually be offered still has to be asked through cell_is_offerable(), which
+## owns the adjacency rule; an overlay that re-derived that rule for itself would
+## be free to disagree with what the player can really buy. Packed arrays are
+## copy-on-write, so returning them copies nothing.
+func cell_unlocked_flags() -> PackedByteArray: return _cell_unlocked
+func cell_buildable_flags() -> PackedByteArray: return _cell_buildable
+func cell_premium_ids() -> PackedInt32Array: return _cell_premium
 func cells_bought() -> int: return _cells_bought
 
 ## Price of the next cell. Climbs with each purchase so expanding is a real

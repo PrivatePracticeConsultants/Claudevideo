@@ -2081,9 +2081,28 @@ func _refresh_cells() -> void:
 	var mm := _cells.multimesh
 	var height := float(_world.get("band_height", 2.0))
 	var size := _sim.cell_size() - float(_world.get("cell_inset", 5.0))
+	# Every one of these was being looked up INSIDE the loop below, which runs
+	# once per cell on the board - 2,960 of them on the largest maps. Two
+	# Dictionary lookups and two float conversions per cell is around six
+	# thousand of each per ground purchase, for four values that cannot change
+	# while the loop runs. The four possible tints are finished here, alpha and
+	# all, so the body only chooses between them.
+	var owned_alpha := float(_world.get("band_alpha", 0.55))
+	var offer_alpha := float(_world.get("band_offer_alpha", 0.3))
 	var owned := _color_of(_world.get("band", "#1e4034"))
+	owned.a = owned_alpha
 	var offered := _color_of(_world.get("band_offer", "#39506e"))
-	var premium := _color_of(_world.get("band_premium", "#c9a227"))
+	offered.a = offer_alpha
+	# Premium ground gets its own colour at full strength - scarce tiles whose
+	# whole point is being seen and fought over.
+	var premium_owned := _color_of(_world.get("band_premium", "#c9a227"))
+	premium_owned.a = owned_alpha
+	var premium_offered := premium_owned
+	premium_offered.a = offer_alpha
+	# Every cell is the same size, so the basis is built once instead of 2,960
+	# times.
+	var cell_basis := Basis().scaled(Vector3(size, height, size))
+	var lift := height * 0.5
 	var shown := 0
 	# Centres are computed arithmetically rather than through cell_centre_x/y: this
 	# loop runs over every cell on the board and a GDScript call per axis per cell
@@ -2092,22 +2111,38 @@ func _refresh_cells() -> void:
 	# buildable, so it added a call per cell and rejected almost nothing.
 	var cell_size := _sim.cell_size()
 	var half := cell_size * 0.5
+	# Read the flags as arrays and reject on them, instead of asking the sim three
+	# questions about every cell on the board. That was three cross-object calls
+	# per cell - each of which made more of its own - around twenty thousand
+	# dispatches per ground purchase, and it measured 8.9ms: half a frame at 60Hz,
+	# spent at the exact moment the player clicked.
+	#
+	# The cheap tests are the array reads. Whether a cell can actually be OFFERED
+	# is still asked through cell_is_offerable(), which owns the adjacency rule -
+	# and it is now only asked about cells that are buildable ground to begin
+	# with, which is a thin band beside the road rather than the whole grid. An
+	# overlay that re-derived that rule for itself would be free to disagree with
+	# what the player can really buy, which is worse than any frame it would save.
+	var unlocked_flags := _sim.cell_unlocked_flags()
+	var buildable_flags := _sim.cell_buildable_flags()
+	var premium_ids := _sim.cell_premium_ids()
+	var cols := _sim.grid_cols()
 	for cy in _sim.grid_rows():
 		var centre_z := float(cy) * cell_size + half
-		for cx in _sim.grid_cols():
-			var unlocked := _sim.cell_is_unlocked(cx, cy)
-			if not unlocked and not _sim.cell_is_offerable(cx, cy):
-				continue
-			# Premium ground gets its own colour at full strength - scarce tiles
-			# whose whole point is being seen and fought over.
+		var row := cy * cols
+		for cx in cols:
+			var index := row + cx
+			var unlocked := unlocked_flags[index] == 1
+			if not unlocked:
+				if buildable_flags[index] == 0:
+					continue
+				if not _sim.cell_is_offerable(cx, cy):
+					continue
 			var tint := owned if unlocked else offered
-			if _sim.cell_premium(cx, cy) >= 0:
-				tint = premium
-			tint.a = float(_world.get("band_alpha", 0.55)) if unlocked \
-				else float(_world.get("band_offer_alpha", 0.3))
-			mm.set_instance_transform(shown, Transform3D(
-				Basis().scaled(Vector3(size, height, size)),
-				to_world(float(cx) * cell_size + half, centre_z, height * 0.5)))
+			if premium_ids[index] >= 0:
+				tint = premium_owned if unlocked else premium_offered
+			mm.set_instance_transform(shown, Transform3D(cell_basis,
+				to_world(float(cx) * cell_size + half, centre_z, lift)))
 			mm.set_instance_color(shown, tint)
 			shown += 1
 	mm.visible_instance_count = shown

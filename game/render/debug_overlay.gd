@@ -32,6 +32,19 @@ var _steps_this_frame: int = 0
 var _peak_enemies: int = 0
 var _peak_projectiles: int = 0
 
+## Frame-time SHAPE, not the average.
+##
+## The average was the only thing reported here, and an average cannot show a
+## stutter: a steady 40ms and an alternating 20/60ms have the same one and feel
+## nothing alike. What a player calls "missing frames" is the long tail, so the
+## worst frame in each sample window is kept, along with a count of frames that
+## took more than twice the window's typical frame. Both reset per window, so
+## the readout describes the last second rather than the whole session.
+var _worst_ms: float = 0.0
+var _worst_shown: float = 0.0
+var _long_frames: int = 0
+var _long_shown: int = 0
+
 func setup(sim: Sim, text_color: Color) -> void:
 	_sim = sim
 	layer = 2
@@ -54,8 +67,19 @@ func _process(delta: float) -> void:
 		return
 	_frames += 1
 	_elapsed += delta
+	var frame_ms := delta * 1000.0
+	_worst_ms = maxf(_worst_ms, frame_ms)
+	# Measured against the PREVIOUS window's average, because the current one is
+	# not known until it ends. A hitch lasting longer than a window would want a
+	# real histogram; this is a readout, not a profiler.
+	if _fps > 0.0 and frame_ms > 2.0 * (1000.0 / _fps):
+		_long_frames += 1
 	if _elapsed >= SAMPLE_INTERVAL:
 		_fps = float(_frames) / _elapsed
+		_worst_shown = _worst_ms
+		_long_shown = _long_frames
+		_worst_ms = 0.0
+		_long_frames = 0
 		var objects := int(Performance.get_monitor(Performance.OBJECT_COUNT))
 		var memory := int(Performance.get_monitor(Performance.MEMORY_STATIC))
 		_objects_delta = objects - _last_objects
@@ -67,6 +91,7 @@ func _process(delta: float) -> void:
 	_label.text = "\n".join([
 		"F3  debug",
 		"fps            %.1f  (frame %.2f ms)" % [_fps, 0.0 if _fps <= 0.0 else 1000.0 / _fps],
+		"worst frame    %.1f ms   long frames %d/s" % [_worst_shown, _long_shown],
 		"sim steps/frame %d" % _steps_this_frame,
 		"tick           %d" % _sim.tick(),
 		"enemies        %d  (peak %d)" % [_sim.e_live_count, _peak_enemies],
