@@ -384,6 +384,12 @@ func _unhandled_input(event: InputEvent) -> void:
 				if _hover_platform >= 0:
 					var next := (_sim.platform_priority(_hover_platform) + 1) % Sim.target_mode_count()
 					_sim.queue_priority(_sim.tick(), _hover_platform, next)
+			KEY_O:
+				# Overcharge the hovered turret: a few seconds of surge, then a
+				# long per-turret cooldown. The sim refuses it cleanly if it is
+				# jammed, already surging, cooling down, or unaffordable.
+				if _hover_platform >= 0:
+					_sim.queue_overcharge(_sim.tick(), _hover_platform)
 			KEY_M: _sfx.toggle_mute()
 			KEY_Z: _renderer.reset_view()
 			KEY_BRACKETLEFT: _select_board(-1)

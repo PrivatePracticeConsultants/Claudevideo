@@ -308,6 +308,8 @@ static func replay(sim: Sim, command_log: Dictionary, stop_after: int = MAX_TICK
 				sim.queue_send_wave(log_tick[i])
 			Sim.CMD_SET_PRIORITY:
 				sim.queue_priority(log_tick[i], log_a[i], log_b[i])
+			Sim.CMD_OVERCHARGE:
+				sim.queue_overcharge(log_tick[i], log_a[i])
 	var ticks := 0
 	var limit := mini(stop_after, MAX_TICKS)
 	while not sim.is_over() and ticks < limit:

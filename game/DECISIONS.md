@@ -1718,6 +1718,40 @@ uncoloured nothing. Every mesh now goes through `_skin()`, which does it per
 surface. The tests all passed while the board was invisible; the screenshot did
 not.
 
+## P0-68 · Spikes in the stream, and the one active ability
+
+Asked for more dynamic play and more strategy, choice of features mine. The gap
+both fill: between waves the game is all decisions, and during a wave it is
+none - you watch the line you built be right or wrong. Nothing asked for a
+decision at combat speed.
+
+**Champions** put the spike in the stream: every 20th spawn of a big wave group
+arrives at 4.5x health, 5x bounty, half again as large and white-hot. A steady
+stream is answered by a steady line; a spike is answered by a targeting order or
+by fire worth holding. Split children never champion - the spike is the carrier,
+not its litter - and small elite groups never reach a 20th spawn, so Breakers do
+not silently double. Deterministic by construction: the counter is per-group.
+
+**Overcharge** is the answer at combat speed: O on a turret, $120, a few seconds
+at 2.2x rate and 1.6x damage, then that turret is spent for 24s. It is a
+command like any other - tick-addressed, logged, replayed, hashed - and it is
+refused while jammed, because the counter to a Jammer is killing the Jammer,
+not paying to ignore it. The surge keeps burning while jammed, which is exactly
+the play a Jammer wants to make against a surging turret.
+
+Champions are also a tax the measurement had to collect: ~5% of a big group's
+head-count arrives 4.5x tougher, and at champion_hp_mult 7.0 (the first guess)
+Port IV and Capital IV both LOSS'd and Capital III fell to 8 Integrity. The
+knob came down to 4.5 and four acts got small per-act corrections; 48/48 wins
+again, with the campaign's late spread now Lastlight IV at 8 Integrity, Capital
+IV at 40, Terminus IV at 73.
+
+Enemies also got their identity said in colour, not just silhouette: one colour
+per class (warm yellows/oranges for Light, greys and bronzes for Plated), cold
+glows on the two Shielded support drones - the ones the player is told to pick
+out of a crowd at 4x speed. Champions render 1.5x and tint white-hot; an
+overcharged turret glows the same heat the whole time its surge runs.
+
 ## P0-14 · Deliberately not built in P0
 
 Not oversights — later phases, per §5.7. Anything tempting that came up is in

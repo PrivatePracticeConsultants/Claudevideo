@@ -1,6 +1,10 @@
 {
   "_comment": "Master plan section 4.1. Both curves are exponential on purpose. HP climbs at 1.10 per wave against bounty at 1.05, so income falls behind HP by design and late waves force prioritisation. Act multipliers and threat_level scaling arrive in P3/P4 and are deliberately absent here. armour_max_bite is the most of a single hit that armour may absorb. Armour scales with the same per-wave curve as health, or it would be a texture that exists for four levels and then evaporates; the cap is what stops that scaling from turning a tier-4 Autocannon's 42 into 2 by the last act.",
-  "hp_growth_per_wave": 1.10,
+  "hp_growth_per_wave": 1.1,
   "bounty_growth_per_wave": 1.05,
-  "armour_max_bite": 0.5
+  "armour_max_bite": 0.5,
+  "_champions": "Champion drones: every Nth spawn of a sufficiently large wave group arrives as a champion - several times the health, several times the bounty, drawn half again as large and white-hot. They exist to put SPIKES inside a wave: a steady stream is answered by a steady line, and a stream with a champion in it every twenty drones is answered by targeting orders - Toughest finds them - and by held fire worth holding. Deterministic by construction: the Nth spawn is the Nth spawn in every run of the same seed.",
+  "champion_every": 20,
+  "champion_hp_mult": 4.5,
+  "champion_bounty_mult": 5.0
 }

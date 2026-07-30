@@ -32,7 +32,7 @@ extends RefCounted
 
 enum { RESULT_RUNNING, RESULT_WIN, RESULT_LOSS }
 enum { PHASE_WAITING, PHASE_SPAWNING, PHASE_CLEARING, PHASE_DONE }
-enum { CMD_PLACE, CMD_UPGRADE, CMD_BUY_CELL, CMD_SELL, CMD_SEND_WAVE, CMD_SET_PRIORITY }
+enum { CMD_PLACE, CMD_UPGRADE, CMD_BUY_CELL, CMD_SELL, CMD_SEND_WAVE, CMD_SET_PRIORITY, CMD_OVERCHARGE }
 
 ## What a turret shoots at when more than one thing is in range.
 ##
@@ -188,6 +188,28 @@ var _type_slow_resist: PackedFloat64Array = PackedFloat64Array()
 var _type_armour: PackedInt32Array = PackedInt32Array()
 var _type_armour_now: PackedInt32Array = PackedInt32Array()
 var _armour_max_bite: float = 0.0
+## Champions: every Nth spawn of a big enough wave group arrives with several
+## times the health and bounty, so a stream has SPIKES in it. A steady stream is
+## answered by a steady line; a spike is answered by a targeting order and by
+## fire worth holding. The counter is per-group and deterministic - the Nth
+## spawn is the Nth spawn in every replay.
+var _champion_every: int = 0
+var _champion_hp_mult: float = 1.0
+var _champion_bounty_mult: float = 1.0
+var _g_spawned: PackedInt32Array = PackedInt32Array()
+var e_champion: PackedByteArray = PackedByteArray()
+## Overcharge: the one ACTIVE ability. A command spends Capital to push one
+## turret hard for a few seconds, after which that turret is spent for a long
+## cooldown. Everything else the player does is placement; this is the lever
+## that answers a champion IN the wave rather than before it.
+var _overcharge_cost: int = 0
+var _overcharge_ticks: int = 0
+var _overcharge_cd_ticks: int = 0
+var _overcharge_rate: float = 1.0
+var _overcharge_damage: float = 1.0
+var t_overcharge: PackedInt32Array = PackedInt32Array()
+var t_overcharge_cd: PackedInt32Array = PackedInt32Array()
+var _overcharges: int = 0
 ## What a weapon is good against.
 ##
 ## Every drone wears one armour class and every blueprint fires one damage type;
@@ -546,6 +568,16 @@ func _init(db: Database, seed_value: int) -> void:
 	_hp_growth = float(db.scaling["hp_growth_per_wave"])
 	_bounty_growth = float(db.scaling["bounty_growth_per_wave"])
 	_armour_max_bite = clampf(float(db.scaling["armour_max_bite"]), 0.0, 1.0)
+	_champion_every = maxi(2, int(db.scaling["champion_every"]))
+	_champion_hp_mult = maxf(1.0, float(db.scaling["champion_hp_mult"]))
+	_champion_bounty_mult = maxf(1.0, float(db.scaling["champion_bounty_mult"]))
+	_overcharge_cost = maxi(0, int(db.economy["overcharge_cost"]))
+	_overcharge_ticks = maxi(1, int(round(
+		float(db.economy["overcharge_duration_seconds"]) * float(_tick_rate))))
+	_overcharge_cd_ticks = maxi(1, int(round(
+		float(db.economy["overcharge_cooldown_seconds"]) * float(_tick_rate))))
+	_overcharge_rate = maxf(1.0, float(db.economy["overcharge_rate_mult"]))
+	_overcharge_damage = maxf(1.0, float(db.economy["overcharge_damage_mult"]))
 	_interest_rate = maxf(0.0, float(db.economy.get("interest_per_wave", 0.0)))
 	_interest_cap = maxi(0, int(db.economy.get("interest_cap", 0)))
 	_support_cap_rate = maxf(0.0, float(db.economy.get("support_cap_fire_rate", 0.0)))
@@ -1005,6 +1037,7 @@ func _build_pools() -> void:
 	e_slow_ticks.resize(_max_enemies)
 	e_slow_factor.resize(_max_enemies)
 	e_route.resize(_max_enemies)
+	e_champion.resize(_max_enemies)
 	e_x.resize(_max_enemies)
 	e_y.resize(_max_enemies)
 	_e_free.resize(_max_enemies)
@@ -1052,6 +1085,8 @@ func _build_pools() -> void:
 	t_x.resize(_max_platforms)
 	t_y.resize(_max_platforms)
 	t_priority.resize(_max_platforms)
+	t_overcharge.resize(_max_platforms)
+	t_overcharge_cd.resize(_max_platforms)
 	t_disabled.resize(_max_platforms)
 	t_rate_mult.resize(_max_platforms)
 	t_damage_mult.resize(_max_platforms)
@@ -1067,6 +1102,7 @@ func _build_pools() -> void:
 		widest = maxi(widest, ((wave as Dictionary)["groups"] as Array).size())
 	_g_enemy_type.resize(widest)
 	_g_remaining.resize(widest)
+	_g_spawned.resize(widest)
 	_g_interval.resize(widest)
 	_g_next_tick.resize(widest)
 
@@ -1103,6 +1139,9 @@ func queue_send_wave(at_tick: int) -> void:
 ## so a run that retargets mid-wave replays exactly.
 func queue_priority(at_tick: int, platform_index: int, mode: int) -> void:
 	_queue(at_tick, CMD_SET_PRIORITY, platform_index, mode, 0)
+
+func queue_overcharge(at_tick: int, platform_index: int) -> void:
+	_queue(at_tick, CMD_OVERCHARGE, platform_index, 0, 0)
 
 ## Re-create a board carried forward from the previous level in a chain.
 ##
@@ -1406,6 +1445,8 @@ func _apply_commands() -> void:
 			ok = _try_send_wave()
 		elif _cmd_type[_cmd_cursor] == CMD_SET_PRIORITY:
 			ok = _try_set_priority(_cmd_a[_cmd_cursor], _cmd_b[_cmd_cursor])
+		elif _cmd_type[_cmd_cursor] == CMD_OVERCHARGE:
+			ok = _try_overcharge(_cmd_a[_cmd_cursor])
 		if not ok:
 			_rejected_commands += 1
 		_cmd_cursor += 1
@@ -1490,9 +1531,11 @@ func _try_place(x: float, y: float, blueprint_index: int) -> int:
 	# Face along the corridor until it has something to shoot at.
 	t_aim_x[index] = 1.0
 	t_aim_y[index] = 0.0
-	# A recycled slot must not inherit the last occupant's orders.
+	# A recycled slot must not inherit the last occupant's orders - or its surge.
 	t_priority[index] = TARGET_FIRST
 	t_disabled[index] = 0
+	t_overcharge[index] = 0
+	t_overcharge_cd[index] = 0
 	t_rate_mult[index] = 1.0
 	t_damage_mult[index] = 1.0
 	t_range_mult[index] = 1.0
@@ -1539,6 +1582,8 @@ func _try_sell(platform_index: int) -> bool:
 		t_aim_y[platform_index] = t_aim_y[last]
 		t_priority[platform_index] = t_priority[last]
 		t_disabled[platform_index] = t_disabled[last]
+		t_overcharge[platform_index] = t_overcharge[last]
+		t_overcharge_cd[platform_index] = t_overcharge_cd[last]
 	t_used[last] = 0
 	t_count -= 1
 	_sold += 1
@@ -1603,6 +1648,24 @@ func _try_set_priority(platform_index: int, mode: int) -> bool:
 	if t_priority[platform_index] == mode:
 		return false
 	t_priority[platform_index] = mode
+	return true
+
+## Refused - and counted as refused, like every bad command - when the turret is
+## already surging, still cooling from the last surge, jammed, or unaffordable.
+## A jammed turret cannot be overcharged on purpose: the counter to a Jammer is
+## killing the Jammer, not paying to ignore it.
+func _try_overcharge(platform_index: int) -> bool:
+	if platform_index < 0 or platform_index >= t_count:
+		return false
+	if t_overcharge[platform_index] > 0 or t_overcharge_cd[platform_index] > 0:
+		return false
+	if t_disabled[platform_index] > 0:
+		return false
+	if _capital < _overcharge_cost:
+		return false
+	_capital -= _overcharge_cost
+	t_overcharge[platform_index] = _overcharge_ticks
+	_overcharges += 1
 	return true
 
 ## Index of the platform within `radius` of a point, nearest first, or -1.
@@ -1885,6 +1948,15 @@ func _update_platforms() -> void:
 	for i in t_count:
 		if t_used[i] == 0:
 			continue
+		# Overcharge burns down in real time whatever else the turret is doing -
+		# jamming a turret does not pause its surge, which is exactly the play a
+		# Jammer wants to make against one.
+		if t_overcharge[i] > 0:
+			t_overcharge[i] -= 1
+			if t_overcharge[i] == 0:
+				t_overcharge_cd[i] = _overcharge_cd_ticks
+		elif t_overcharge_cd[i] > 0:
+			t_overcharge_cd[i] -= 1
 		if t_disabled[i] > 0:
 			# The cooldown deliberately does NOT advance while jammed, so a second
 			# of silence costs a second of fire rather than being partly absorbed by
@@ -1900,8 +1972,9 @@ func _update_platforms() -> void:
 		_fire(i, target)
 		# At least one tick: the sim cannot fire twice in a tick, and a rate bonus
 		# that rounded an interval to zero would be a turret that never cools down.
+		var rate := t_rate_mult[i] * (_overcharge_rate if t_overcharge[i] > 0 else 1.0)
 		t_cooldown[i] = maxi(1, int(round(
-			float(_tier_interval[t_tier_slot[i]]) / t_rate_mult[i])))
+			float(_tier_interval[t_tier_slot[i]]) / rate)))
 
 ## Pick what this turret shoots. Ties break toward whatever the spatial hash walks
 ## first (strict >), and that walk is cell-then-slot order, which is stable - so
@@ -2007,7 +2080,8 @@ func _fire(platform: int, target: int) -> void:
 	p_prev_y[i] = p_y[i]
 	p_target[i] = target
 	p_target_gen[i] = e_gen[target]
-	p_damage[i] = maxi(1, int(round(float(_tier_damage[slot]) * t_damage_mult[platform])))
+	p_damage[i] = maxi(1, int(round(float(_tier_damage[slot]) * t_damage_mult[platform]
+		* (_overcharge_damage if t_overcharge[platform] > 0 else 1.0))))
 	p_speed[i] = _tier_proj_speed[slot]
 	p_hit_radius[i] = _tier_hit_radius[slot]
 	p_life[i] = _tier_proj_life[slot]
@@ -2233,7 +2307,12 @@ func _update_wave_director() -> void:
 					continue
 				pending = true
 				if _tick >= _g_next_tick[g]:
-					_spawn(_g_enemy_type[g])
+					_g_spawned[g] += 1
+					# The Nth of a group big enough to hide one in. Split children
+					# and small elite groups never champion - a spike inside a
+					# stream is a decision; a doubled Breaker is just a bigger number.
+					_spawn(_g_enemy_type[g],
+						_g_spawned[g] % _champion_every == 0)
 					_g_remaining[g] -= 1
 					_g_next_tick[g] = _tick + _g_interval[g]
 			if not pending:
@@ -2290,6 +2369,7 @@ func _begin_wave(index: int) -> void:
 			_unknown_enemy_groups += 1
 		_g_interval[g] = int(group["spawn_interval_ticks"])
 		_g_next_tick[g] = _tick + int(group["start_delay_ticks"])
+		_g_spawned[g] = 0
 
 ## -1 when the id is unknown. Never falls back to a real type.
 func _type_index(id: String) -> int:
@@ -2304,15 +2384,15 @@ func _type_index(id: String) -> int:
 ## walked by a counter, so it is deterministic and needs no arithmetic at spawn
 ## time. Deliberately not random: a fork whose traffic split wandered run to run
 ## would make "how much do I put on the left road" unanswerable.
-func _spawn(type_index: int) -> void:
+func _spawn(type_index: int, champion: bool = false) -> void:
 	var route := _route_pick[_spawn_cursor % _route_pick.size()]
 	_spawn_cursor += 1
-	_spawn_at(type_index, 0.0, route)
+	_spawn_at(type_index, 0.0, route, champion)
 
 ## Put a drone on a road at a given distance along it. The wave director always
 ## passes 0; a brood hatching passes wherever its parent died, on its parent's
 ## road - the wreck is on the road it was travelling.
-func _spawn_at(type_index: int, prog: float, route: int = 0) -> void:
+func _spawn_at(type_index: int, prog: float, route: int = 0, champion: bool = false) -> void:
 	if _e_free_top == 0:
 		# Cannot happen with validated data (Database rejects a wave wider than
 		# max_enemies), but if it ever does, count it rather than pretending the
@@ -2338,6 +2418,12 @@ func _spawn_at(type_index: int, prog: float, route: int = 0) -> void:
 	e_slow_ticks[i] = 0
 	e_slow_factor[i] = 1.0
 	e_route[i] = clampi(route, 0, _route_count - 1)
+	e_champion[i] = 1 if champion else 0
+	if champion:
+		# Health AND ceiling, so its bar reads full; bounty scales with the threat.
+		e_hp[i] = int(round(float(e_hp[i]) * _champion_hp_mult))
+		e_hp_max[i] = e_hp[i]
+		e_bounty[i] = int(round(float(e_bounty[i]) * _champion_bounty_mult))
 	_sample_path(prog, e_offset[i], e_route[i])
 	e_x[i] = _out_x
 	e_y[i] = _out_y
@@ -2575,6 +2661,11 @@ func affix_blurb(id: String) -> String:
 	return str((_db.affixes.get(id, {}) as Dictionary).get("blurb", ""))
 
 func platform_priority(i: int) -> int: return t_priority[i]
+func platform_overcharge_ticks(i: int) -> int: return t_overcharge[i]
+func platform_overcharge_cooldown(i: int) -> int: return t_overcharge_cd[i]
+func overcharge_cost() -> int: return _overcharge_cost
+func overcharges_used() -> int: return _overcharges
+func enemy_is_champion(i: int) -> bool: return e_champion[i] == 1
 func platform_jammed(i: int) -> bool: return t_disabled[i] > 0
 func enemy_repair(type_index: int) -> int: return _type_repair_now[type_index]
 func enemy_jam_ticks(type_index: int) -> int: return _type_jam_ticks[type_index]
@@ -2651,6 +2742,10 @@ func state_hash() -> int:
 	h = StateHash.mix_bytes(h, e_y.to_byte_array())
 	h = StateHash.mix_bytes(h, e_type.to_byte_array())
 	h = StateHash.mix_bytes(h, e_route.to_byte_array())
+	h = StateHash.mix_bytes(h, e_champion)
+	h = StateHash.mix_bytes(h, t_overcharge.to_byte_array())
+	h = StateHash.mix_bytes(h, t_overcharge_cd.to_byte_array())
+	h = StateHash.mix_int(h, _overcharges)
 	h = StateHash.mix_int(h, _spawn_cursor)
 	h = StateHash.mix_bytes(h, p_alive)
 	h = StateHash.mix_bytes(h, p_x.to_byte_array())

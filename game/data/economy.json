@@ -12,5 +12,11 @@
   "support_cap_fire_rate": 0.26,
   "support_cap_damage": 0.26,
   "support_cap_range": 0.2,
-  "integrity_persists_in_chain": true
+  "integrity_persists_in_chain": true,
+  "_overcharge": "Overcharge: the one ACTIVE ability in the game. Press O over a turret and for a few seconds it fires harder and faster; then that turret is spent for a long cooldown, and the Capital is gone either way. It exists because everything else the player does is placement - this is the only lever that answers a champion or a breakthrough IN the wave rather than before it. Priced so spamming it is strictly worse than upgrading.",
+  "overcharge_cost": 120,
+  "overcharge_duration_seconds": 5.0,
+  "overcharge_cooldown_seconds": 24.0,
+  "overcharge_rate_mult": 2.2,
+  "overcharge_damage_mult": 1.6
 }

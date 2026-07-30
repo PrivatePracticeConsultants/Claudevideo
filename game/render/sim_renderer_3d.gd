@@ -71,6 +71,13 @@ var _cursor_ghost: MeshInstance3D
 # String allocation per colour per frame in the one place we promise not to.
 var _enemy_color := Color.WHITE
 var _enemy_hurt_color := Color.WHITE
+## One base colour per drone class, indexed by enemy type. Class was readable
+## from silhouette; now it is readable from colour too, and the colours rhyme
+## with the armour classes the wave preview groups by.
+var _enemy_class_colors: PackedColorArray = PackedColorArray()
+var _champion_scale := 1.5
+var _champion_tint := Color.WHITE
+var _champion_blend := 0.65
 var _bar_color := Color.WHITE
 var _bar_back_color := Color.WHITE
 
@@ -89,6 +96,14 @@ func setup(sim: Sim, theme: Dictionary) -> void:
 	_world = theme.get("world", {})
 	_enemy_color = _color("enemy")
 	_enemy_hurt_color = _color("enemy_hurt")
+	var class_colors: Dictionary = _world.get("enemy_class_colors", {}) as Dictionary
+	_enemy_class_colors.resize(sim.enemy_type_count())
+	for t in sim.enemy_type_count():
+		_enemy_class_colors[t] = _color_of(class_colors.get(sim.enemy_id(t), ""))\
+			if class_colors.has(sim.enemy_id(t)) else _enemy_color
+	_champion_scale = maxf(1.0, float(_world.get("champion_scale", 1.5)))
+	_champion_tint = _color_of(_world.get("champion_tint", "#fff3d6"))
+	_champion_blend = clampf(float(_world.get("champion_blend", 0.65)), 0.0, 1.0)
 	_bar_color = _color("hp_bar")
 	_bar_back_color = _color("hp_bar_back")
 	_barrel_angle.resize(sim.t_used.size())
@@ -1503,7 +1518,7 @@ func _enemy_mesh(enemy_id: String) -> Mesh:
 
 ## Which classes glow. Reserved for the top of the ladder - if everything is lit
 ## up, nothing is.
-const EMISSIVE_CLASSES := ["lance"]
+const EMISSIVE_CLASSES := ["lance", "mender", "jammer"]
 
 func _instanced_material(enemy_id: String = "") -> StandardMaterial3D:
 	var material := StandardMaterial3D.new()
@@ -1513,10 +1528,19 @@ func _instanced_material(enemy_id: String = "") -> StandardMaterial3D:
 	if EMISSIVE_CLASSES.has(enemy_id):
 		# Emission is a flat add, so the per-instance damage tint still reads
 		# through it - a hurt Lance dims like everything else, it just never stops
-		# being the bright thing on the board.
+		# being the bright thing on the board. The two Shielded support drones get
+		# their own cold glows, because they are the ones the player is told to
+		# pick out of a crowd and a glow is what makes that possible at 4x speed.
 		material.emission_enabled = true
-		material.emission = _color_of(_world.get("elite_glow", "#ff7a3c"))
-		material.emission_energy_multiplier = float(_world.get("elite_glow_energy", 1.6))
+		if enemy_id == "mender":
+			material.emission = _color_of(_world.get("mender_glow", "#2ef0a8"))
+			material.emission_energy_multiplier = float(_world.get("support_glow_energy", 1.1))
+		elif enemy_id == "jammer":
+			material.emission = _color_of(_world.get("jammer_glow", "#c76bff"))
+			material.emission_energy_multiplier = float(_world.get("support_glow_energy", 1.1))
+		else:
+			material.emission = _color_of(_world.get("elite_glow", "#ff7a3c"))
+			material.emission_energy_multiplier = float(_world.get("elite_glow_energy", 1.6))
 	return material
 
 # --- combat feedback -----------------------------------------------------------
@@ -1965,6 +1989,13 @@ func _update_enemies(alpha: float) -> void:
 		var radius := _sim.enemy_radius(type_index)
 		var footprint := radius * 2.0
 		var height := enemy_height * (radius / _reference_radius)
+		# A champion is half again the machine, and tinted white-hot. The size is
+		# render-only - its hitbox is its class's - which is fine because nothing
+		# in the sim aims by silhouette.
+		var champion := _sim.enemy_is_champion(i)
+		if champion:
+			footprint *= _champion_scale
+			height *= _champion_scale
 
 		var layer := _enemy_layers[clampi(type_index, 0, _enemy_layers.size() - 1)]
 		var mm := layer.multimesh
@@ -1975,7 +2006,11 @@ func _update_enemies(alpha: float) -> void:
 
 		var hp_max: float = float(_sim.e_hp_max[i])
 		var fraction: float = 0.0 if hp_max <= 0.0 else clampf(float(_sim.e_hp[i]) / hp_max, 0.0, 1.0)
-		mm.set_instance_color(slot, _enemy_hurt_color.lerp(_enemy_color, fraction))
+		var base := _enemy_class_colors[clampi(type_index, 0, _enemy_class_colors.size() - 1)]
+		var shade := _enemy_hurt_color.lerp(base, fraction)
+		if champion:
+			shade = shade.lerp(_champion_tint, _champion_blend)
+		mm.set_instance_color(slot, shade)
 		per_layer[type_index] = slot + 1
 
 		var filled := bar_width * fraction
@@ -2084,10 +2119,14 @@ func _update_barrels() -> void:
 		var family := _family_colour(i, ballistic, cannon, suppressor, railgun)
 		var tint := family.lerp(top_colour, float(_sim.platform_tier(i)) / float(max_tier))
 		# A jammed turret is not firing and has to look like it is not firing, or
-		# the player reads a hole in their line as bad luck.
+		# the player reads a hole in their line as bad luck. An overcharged one is
+		# firing harder than anything else on the board, and glows like it.
 		if _sim.platform_jammed(i):
 			tint = tint.lerp(_color_of(_world.get("jammed", "#2a3038")),
 				float(_world.get("jammed_blend", 0.72)))
+		elif _sim.platform_overcharge_ticks(i) > 0:
+			tint = tint.lerp(_color_of(_world.get("overcharged", "#ffe27a")),
+				float(_world.get("overcharged_blend", 0.6)))
 		mm.set_instance_color(slot, tint)
 		filled[blueprint] = slot + 1
 

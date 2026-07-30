@@ -104,6 +104,14 @@ func _validate() -> void:
 	# Required rather than defaulted, because the alternative is a balance value
 	# living as a literal in sim.gd, which the purity linter rightly refuses.
 	_req_num(scaling, "armour_max_bite", "scaling.json", 0.0)
+	_req_int(scaling, "champion_every", "scaling.json", 2)
+	_req_num(scaling, "champion_hp_mult", "scaling.json", 1.0)
+	_req_num(scaling, "champion_bounty_mult", "scaling.json", 1.0)
+	_req_int(economy, "overcharge_cost", "economy.json", 0)
+	_req_num(economy, "overcharge_duration_seconds", "economy.json", 0.0001)
+	_req_num(economy, "overcharge_cooldown_seconds", "economy.json", 0.0001)
+	_req_num(economy, "overcharge_rate_mult", "economy.json", 1.0)
+	_req_num(economy, "overcharge_damage_mult", "economy.json", 1.0)
 	_req_num(economy, "interest_per_wave", "economy.json", 0.0)
 	_req_int(economy, "interest_cap", "economy.json", 0)
 	_req_num(economy, "support_cap_fire_rate", "economy.json", 0.0)

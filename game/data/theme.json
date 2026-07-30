@@ -169,7 +169,26 @@
     "ground_detail_contrast": 0.45,
     "ground_detail_relief": 3.2,
     "ground_normal_scale": 1.0,
-    "broadleaf_share": 0.35
+    "broadleaf_share": 0.35,
+    "_enemy_class_colors": "One colour per drone class, so the wave preview's armour grouping has a visual echo on the road: yellows/oranges are Light, greys/bronzes are Plated, and anything glowing cold is Shielded support. Hurt drones still lerp toward enemy_hurt.",
+    "enemy_class_colors": {
+      "swarm": "#e8c34a",
+      "walker": "#d98a3f",
+      "heavy": "#97a1b4",
+      "lance": "#ff8a4c",
+      "mender": "#43e0ae",
+      "jammer": "#b975ec",
+      "brood": "#c96a52",
+      "breaker": "#8f6f3f"
+    },
+    "champion_scale": 1.5,
+    "champion_tint": "#fff3d6",
+    "champion_blend": 0.65,
+    "mender_glow": "#2ef0a8",
+    "jammer_glow": "#c76bff",
+    "support_glow_energy": 1.1,
+    "overcharged": "#ffe27a",
+    "overcharged_blend": 0.6
   },
   "platform_max_tier": "#ffcf6e",
   "platform_cannon": "#c98a5b",

@@ -103,6 +103,13 @@ All five arrive partway into the campaign (levels 13, 18, 25, 26 and 33), never
 open a wave, and stay a small share of any level's head-count — they are elites,
 not populations.
 
+**Champions.** Every 20th drone of a large wave group arrives as a champion:
+about 4.5× the health, 5× the bounty, drawn half again as large and white-hot.
+They put spikes inside a stream — a steady stream is answered by a steady line,
+a spike is answered by a targeting order (*Toughest* finds them) or by an
+overcharge. Deterministic, like everything else: the Nth spawn is the Nth spawn
+in every run.
+
 - **Click owned ground** (green) to build the selected weapon.
 - **Click a turret** to upgrade it a tier. Hovering shows its DPS and next cost.
 - **Click dim blue ground** to buy that cell, expanding where you can build.
@@ -116,6 +123,11 @@ not populations.
   rather than to the exit; *Toughest* puts a Railgun on the Breaker and lets forty
   Skitters past; *Weakest* is how a Cannon line clears chaff so the heavy guns are
   never distracted. Orders carry between acts, and so do tiers.
+- **`O`** **overcharges** the turret under the cursor for $120: a few seconds of
+  much faster, harder fire, then a long per-turret cooldown. The only active
+  ability in the game — everything else is placement. It exists to answer a
+  **champion** in the wave rather than before it, and it is refused while the
+  turret is jammed: the counter to a Jammer is killing the Jammer.
 - **`E`** calls the next wave in early for a bounty — the gap between waves is
   when Capital accumulates, so it trades preparation for money.
 - **Scroll to zoom** on whatever the cursor is over, **middle-drag to pan**,
