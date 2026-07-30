@@ -116,6 +116,11 @@ var _route_count: int = 1
 ## send two drones down the long way for every one down the short way without any
 ## arithmetic at spawn time.
 var _route_pick: PackedInt32Array = PackedInt32Array()
+## Which routes currently carry traffic. Breach routes start closed; a Breach
+## Borer that survives long enough to reach its tunnel point opens one for the
+## rest of the act.
+var _route_open: PackedByteArray = PackedByteArray()
+var _breaches_opened: int = 0
 var _spawn_cursor: int = 0
 
 # Placement is free-form: anywhere in a band alongside the corridor, rather than
@@ -280,6 +285,9 @@ var p_flags: PackedByteArray = PackedByteArray()
 ## copy.
 var _bp_damage_type: PackedInt32Array = PackedInt32Array()
 var _type_armour_class: PackedInt32Array = PackedInt32Array()
+## Where along its road a Borer goes under, as a share of the route's length. 0
+## for everything that simply walks.
+var _type_tunnel_at: PackedFloat64Array = PackedFloat64Array()
 var _matchup: PackedFloat64Array = PackedFloat64Array()
 var _armour_class_count: int = 0
 var _damage_type_ids: PackedStringArray = PackedStringArray()
@@ -320,6 +328,7 @@ var _type_jam_interval: PackedInt32Array = PackedInt32Array()
 ## False for every engagement whose drone roster has neither, which is most of the
 ## campaign - and it skips a 2,048-slot scan per tick for all of them.
 var _has_support_drones: bool = false
+var _has_borers: bool = false
 
 ## What a weapon family projects onto the turrets around it.
 ##
@@ -756,8 +765,21 @@ func _build_path() -> void:
 	if bool(_db.engagement.get("forks_open", false)):
 		for extra: Array in (_db.map.get("alternate_paths", []) as Array):
 			routes.append(extra)
+	# Breach routes exist from the first tick and carry no traffic until a Borer
+	# opens one. They are built rather than added later ON PURPOSE: the geometry
+	# has to be there for the buildable band to include it, so a player can spend
+	# slots covering a road that is not open yet. That is the whole decision - pay
+	# now for a breach that may never happen, or kill the Borer and save the money.
+	var first_breach := routes.size()
+	if bool(_db.engagement.get("breaches_armed", false)):
+		for extra: Array in (_db.map.get("breach_paths", []) as Array):
+			routes.append(extra)
 
 	_route_count = routes.size()
+	_route_open.resize(_route_count)
+	for r in _route_count:
+		_route_open[r] = 0 if r >= first_breach else 1
+	_breaches_opened = 0
 	_route_first_wp.resize(_route_count)
 	_route_wp_count.resize(_route_count)
 	_route_first_seg.resize(_route_count)
@@ -812,16 +834,25 @@ func _build_path() -> void:
 	for r in _route_count:
 		_path_length = maxf(_path_length, _route_length[r])
 
-	# Spawn shares, expanded to a flat table so picking one is an index rather than
-	# a search. A route with no declared weight carries one share.
+	_rebuild_route_rotation()
+
+## Spawn shares, expanded to a flat table so picking one is an index rather than a
+## search. A route with no declared weight carries one share; a closed breach
+## route carries none until it opens.
+func _rebuild_route_rotation() -> void:
 	_route_pick = PackedInt32Array()
 	var weights: Array = _db.map.get("route_weights", [])
 	for r in _route_count:
+		if _route_open[r] == 0:
+			continue
 		var weight := 1
 		if r < weights.size():
 			weight = maxi(1, int(weights[r]))
 		for _w in weight:
 			_route_pick.append(r)
+	# The cursor is reset so the split after a breach opens is the authored one
+	# from its first drone rather than wherever the old rotation happened to be.
+	_spawn_cursor = 0
 
 func _load_build_rules() -> void:
 	_build_min_dist = float(_db.building["min_distance_from_path"])
@@ -944,6 +975,7 @@ func _build_types() -> void:
 	_type_armour.resize(n)
 	_type_armour_now.resize(n)
 	_type_armour_class.resize(n)
+	_type_tunnel_at.resize(n)
 	_type_split_into.resize(n)
 	_type_split_count.resize(n)
 	_type_repair.resize(n)
@@ -969,6 +1001,9 @@ func _build_types() -> void:
 			+ _affix_slow_resist_bonus, 0.0, 1.0)
 		_type_armour[i] = maxi(0, int(e.get("armour", 0))) + _affix_armour_bonus
 		_type_armour_class[i] = maxi(0, _class_index(str(e.get("armour_class", ""))))
+		# A share of the road, not a distance: routes differ in length and "tunnels
+		# two thirds of the way down" is the same decision on every board.
+		_type_tunnel_at[i] = clampf(float(e.get("tunnels_at_progress", 0.0)), 0.0, 1.0)
 		# Seconds and units in the data file; ticks and squared units in here,
 		# because the tick is the only clock and a square root is the only thing a
 		# distance compare would otherwise need.
@@ -1006,6 +1041,12 @@ func _build_types() -> void:
 	# the campaign fields neither, and most of the campaign should not pay for
 	# them. Split children count: a carrier that hatched menders would still need
 	# the scan, even though nothing spawned one directly.
+	_has_borers = false
+	for wave: Dictionary in (_db.engagement["waves"] as Array):
+		for group: Dictionary in (wave["groups"] as Array):
+			var bt := _type_index(str(group["enemy"]))
+			if bt >= 0 and _type_tunnel_at[bt] > 0.0:
+				_has_borers = true
 	_has_support_drones = false
 	for wave: Dictionary in (_db.engagement["waves"] as Array):
 		for group: Dictionary in (wave["groups"] as Array):
@@ -1846,9 +1887,42 @@ func step() -> void:
 	_update_platforms()
 	_advance_projectiles()
 	_resolve_splits()
+	_open_breaches()
 	_update_wave_director()
 	_resolve_result()
 	_tick += 1
+
+## A Borer that has walked far enough goes under, and the road it opens stays open
+## for the rest of the act.
+##
+## Deliberately NOT a leak: it never reaches the exit, so Integrity is untouched.
+## What it costs is the map. Killing it before it reaches its tunnel point is the
+## entire counterplay, which makes it the first drone where killing something
+## FAST ENOUGH matters rather than just killing it.
+func _open_breaches() -> void:
+	if not _has_borers:
+		return
+	for i in _e_high:
+		if e_alive[i] == 0:
+			continue
+		var at := _type_tunnel_at[e_type[i]]
+		if at <= 0.0:
+			continue
+		if e_prog[i] < _route_length[e_route[i]] * at:
+			continue
+		_despawn_enemy(i)
+		_open_next_breach()
+
+## Open the lowest-numbered closed route. Lowest rather than nearest or random:
+## a board's breaches open in the order the map file lists them, so learning a
+## board teaches which road opens first.
+func _open_next_breach() -> void:
+	for r in _route_count:
+		if _route_open[r] == 0:
+			_route_open[r] = 1
+			_breaches_opened += 1
+			_rebuild_route_rotation()
+			return
 
 func _advance_enemies() -> void:
 	for i in _e_high:
@@ -2978,6 +3052,20 @@ func _claim_projectile_slot() -> int:
 		_p_high = slot + 1
 	return slot
 
+## Which roads carry traffic, and how many breaches have been opened this act.
+## The renderer draws a closed route as a ghost so the player can see where one
+## could open, and the HUD says when one has.
+func route_is_open(r: int) -> bool: return _route_open[r] == 1
+func fields_borers() -> bool: return _has_borers
+func closed_routes() -> int:
+	var closed := 0
+	for r in _route_count:
+		if _route_open[r] == 0:
+			closed += 1
+	return closed
+func breaches_opened() -> int: return _breaches_opened
+func enemy_tunnels_at(type_index: int) -> float: return _type_tunnel_at[type_index]
+
 func enemy_slot_bound() -> int: return _e_high
 func projectile_slot_bound() -> int: return _p_high
 func platform_jammed(i: int) -> bool: return t_disabled[i] > 0
@@ -3066,6 +3154,8 @@ func state_hash() -> int:
 	h = StateHash.mix_bytes(h, p_source.to_byte_array())
 	h = StateHash.mix_bytes(h, p_flags)
 	h = StateHash.mix_int(h, _rig_income_paid)
+	h = StateHash.mix_bytes(h, _route_open)
+	h = StateHash.mix_int(h, _breaches_opened)
 	h = StateHash.mix_int(h, _spawn_cursor)
 	h = StateHash.mix_bytes(h, p_alive)
 	h = StateHash.mix_bytes(h, p_x.to_byte_array())

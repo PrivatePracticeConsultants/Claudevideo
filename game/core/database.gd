@@ -304,6 +304,10 @@ func _validate_premium() -> void:
 		if float((k as Dictionary).get("range_bonus", 0.0)) <= 0.0 \
 				and float((k as Dictionary).get("fire_rate_bonus", 0.0)) <= 0.0:
 			errors.append("%s grants nothing." % where)
+	# A breach route is a complete road like a fork: same gate, same exit.
+	for route: Variant in (map.get("breach_paths", []) as Array):
+		if typeof(route) != TYPE_ARRAY or (route as Array).size() < 2:
+			errors.append("map breach_paths entries must be routes of at least two waypoints.")
 	for entry: Variant in (map.get("premium_cells", []) as Array):
 		if typeof(entry) != TYPE_ARRAY or (entry as Array).size() != 3:
 			errors.append("map premium_cells entries must be [cx, cy, kind].")
@@ -353,6 +357,15 @@ func _validate_enemies() -> void:
 			_req_num(e, "jam_seconds", where, 0.0001)
 			_req_num(e, "jam_radius_units", where, 0.0001)
 			_req_num(e, "jam_interval_seconds", where, 0.0001)
+		# A Borer's tunnel point is a share of its road, so it must be inside it.
+		# Zero would be a drone that tunnels before it has walked anywhere, and 1.0
+		# one that tunnels at the exit, where it may as well have leaked.
+		if (e as Dictionary).has("tunnels_at_progress"):
+			var at := _req_num(e, "tunnels_at_progress", where, 0.0001)
+			if at >= 1.0:
+				errors.append("%s tunnels at or past the exit, which is just a leak." % where)
+			if int((e as Dictionary).get("leak_value", 0)) != 0:
+				errors.append("%s tunnels rather than leaking, so its leak_value must be 0." % where)
 		if (e as Dictionary).has("splits_into"):
 			var child := str((e as Dictionary).get("splits_into", ""))
 			if not enemies.has(child) or child.begins_with(_DOC_PREFIX):

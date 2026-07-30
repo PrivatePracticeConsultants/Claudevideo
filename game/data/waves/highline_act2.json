@@ -655,5 +655,6 @@
   ],
   "affixes": [
     "screened"
-  ]
+  ],
+  "breaches_armed": true
 }

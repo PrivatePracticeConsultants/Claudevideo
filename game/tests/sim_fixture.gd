@@ -143,15 +143,25 @@ static func candidate_sites(sim: Sim) -> PackedInt32Array:
 	# III by eighty leaks while building a perfect line beside a road that only
 	# two thirds of the traffic was using.
 	#
+	# OPEN roads only. A dormant breach road is drawn and buildable so a player CAN
+	# prepare for it, but a scripted policy that spreads its whole allowance across
+	# a road nothing walks is thinner everywhere that matters - measured, it cost
+	# Lastlight act III nine leaks and the level, on an act with no Borer in it at
+	# all. What a human does about a dormant road is a decision; what this policy
+	# does is defend the traffic.
+	#
 	# Interleaved by distance rather than route by route, so the policy spreads
 	# across both roads as it builds outward instead of finishing one and starting
 	# the other.
 	var prog := 0.0
 	var longest := 0.0
 	for r in sim.route_count():
-		longest = maxf(longest, sim.route_length(r))
+		if sim.route_is_open(r):
+			longest = maxf(longest, sim.route_length(r))
 	while prog <= longest:
 		for r in sim.route_count():
+			if not sim.route_is_open(r):
+				continue
 			if prog > sim.route_length(r):
 				continue
 			for side: float in [-1.0, 1.0]:

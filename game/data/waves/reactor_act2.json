@@ -473,5 +473,6 @@
   ],
   "affixes": [
     "swift"
-  ]
+  ],
+  "breaches_armed": true
 }

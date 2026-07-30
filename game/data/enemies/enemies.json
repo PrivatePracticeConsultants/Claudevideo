@@ -97,5 +97,19 @@
     "jam_radius_units": 210.0,
     "armour_class": "shielded",
     "short_name": "Jammer"
+  },
+  "borer": {
+    "display_name": "Breach Borer",
+    "short_name": "Borer",
+    "_comment": "Walks two thirds of the road and then goes UNDER it, opening a dormant breach route that carries traffic for the rest of the act. It never reaches the exit, so it costs no Integrity - what it costs is the map. Killing it before it tunnels is the whole counterplay, and it is the first drone in the game where killing something fast enough matters rather than just killing it. Slow, Plated and expensive to stop in a hurry, so the answer is a prepared explosive line rather than a reaction.",
+    "base_hp": 900,
+    "speed_units_per_second": 62.0,
+    "leak_value": 0,
+    "base_bounty": 210,
+    "radius": 25.0,
+    "spawn_jitter_units": 8.0,
+    "armour_class": "plated",
+    "armour": 2,
+    "tunnels_at_progress": 0.66
   }
 }

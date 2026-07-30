@@ -615,5 +615,6 @@
   ],
   "affixes": [
     "massed"
-  ]
+  ],
+  "breaches_armed": true
 }

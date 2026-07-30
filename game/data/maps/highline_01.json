@@ -70,5 +70,34 @@
       10,
       "power_tap"
     ]
+  ],
+  "_breach_paths": "Dormant roads, run along whichever lane of the board sits furthest from every existing road. They exist from the first tick of every act so the geometry never appears under a line already built, and so the buildable band includes them - a player can spend slots covering a road that is not open yet. A Breach Borer that survives to its tunnel point opens one for the rest of the act. Placed at the edge because a breach through the middle stole 3-8%% of the main road's build sites and cost Lastlight act III the level.",
+  "breach_paths": [
+    [
+      {
+        "x": -80.0,
+        "y": 1650.0
+      },
+      {
+        "x": 388.8,
+        "y": 40.0
+      },
+      {
+        "x": 1971.0,
+        "y": 40.0
+      },
+      {
+        "x": 3729.0,
+        "y": 40.0
+      },
+      {
+        "x": 5311.2,
+        "y": 40.0
+      },
+      {
+        "x": 5780.0,
+        "y": 1900.0
+      }
+    ]
   ]
 }

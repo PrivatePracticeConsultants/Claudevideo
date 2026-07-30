@@ -74,6 +74,7 @@ Corridor Integrity. Hit zero and the level is lost.
 | **Brood Carrier** | Plated | 150 | 95 | 5 | $40 | armoured; breaks into 3 Skitters |
 | **Field Mender** | Shielded | 90 | 104 | 3 | $30 | heals everything around it |
 | **Static Jammer** | Shielded | 340 | 122 | 7 | $110 | silences turrets it passes |
+| **Breach Borer** | Plated | **900** | 62 | 0 | $210 | tunnels; opens a new road |
 
 The first three trade speed against health. The **Lance** does not — it is the
 fastest thing on the board *and* tougher than anything that is not slower than
@@ -102,6 +103,21 @@ costs exactly the uptime it looks like it costs.
 All five arrive partway into the campaign (levels 13, 18, 25, 26 and 33), never
 open a wave, and stay a small share of any level's head-count — they are elites,
 not populations.
+
+**The Breach Borer.** The only drone that costs you the **map** instead of
+Integrity. It walks two thirds of its road, goes under, and opens a dormant
+**breach road** that carries traffic for the rest of the act. It never reaches
+the exit, so it takes no Integrity — what it takes is a whole new stretch of
+road to hold.
+
+The breach road is drawn and buildable from the first tick of every act on that
+board, so nothing ever appears under a line you already built, and you can spend
+slots covering a road that may never open. That is the decision: pay now for a
+road that might stay shut, or back yourself to kill the Borer before it tunnels.
+It is 900 health, Plated and armoured, so the answer is a prepared explosive line
+rather than a reaction — the first drone where killing something *fast enough*
+matters rather than just killing it. Armed on act IV of the last six boards; the
+HUD says **BREACH ARMED** when one is coming.
 
 **Champions.** Every 20th drone of a large wave group arrives as a champion:
 about 4.5× the health, 5× the bounty, drawn half again as large and white-hot.

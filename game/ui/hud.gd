@@ -165,6 +165,15 @@ func set_level(name: String, index: int, total: int, inherited: int = 0,
 		for id in affixes:
 			badges.append(_sim.affix_name(id).to_upper())
 		_level_text += "      « %s »" % "  ·  ".join(badges)
+	# A dormant road is a question the player has to be TOLD is a question: cover
+	# it now, or kill the Borer and never need to. Warned about only when a Borer
+	# is actually coming - the road is present on every act of these boards so
+	# nothing ever materialises under a line already built, and a dormant road
+	# with nothing to open it is scenery rather than a decision.
+	if _sim.breaches_opened() > 0:
+		_level_text += "      BREACH OPEN"
+	elif _sim.fields_borers():
+		_level_text += "      BREACH ARMED"
 	if not _modules.is_empty():
 		var names := PackedStringArray()
 		for id in _modules:

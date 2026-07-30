@@ -223,6 +223,12 @@
           "count": 3,
           "spawn_interval_ticks": 948,
           "start_delay_ticks": 220
+        },
+        {
+          "enemy": "borer",
+          "count": 1,
+          "spawn_interval_ticks": 60,
+          "start_delay_ticks": 30
         }
       ]
     },
@@ -709,5 +715,6 @@
   "affixes": [
     "resilient",
     "austere"
-  ]
+  ],
+  "breaches_armed": true
 }

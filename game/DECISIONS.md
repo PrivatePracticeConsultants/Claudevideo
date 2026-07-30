@@ -1857,6 +1857,53 @@ failed. And a "skip cells that are not buildable" reject in the ground overlay
 is recorded as REJECTED: it measured slower, because most of the band beside the
 road is buildable and it added a call per cell to reject almost nothing.
 
+## P0-71 · A drone that costs you the map
+
+Asked for more strategy, and for something like "a tunneling enemy that starts
+making a new part of the map". The architecture took it almost as-is: routes are
+already N complete gate-to-exit polylines, so a new road is a route the wave
+director is not yet using.
+
+**The Breach Borer** walks two thirds of its road, goes under, and opens a
+dormant breach route for the rest of the act. It never reaches the exit, so it
+costs no Integrity - it costs the MAP. Killing it before its tunnel point is the
+whole counterplay, which makes it the first drone where killing something FAST
+ENOUGH matters rather than just killing it.
+
+**The road is a fact about the board, not about the act.** Breach geometry is
+present from the first tick of every act on an armed board, for two reasons that
+both had to be learned the hard way:
+
+1. Armed on act IV only, act IV dropped SIX inherited turrets on load - the road
+   materialised where they stood. That is exactly what P0-64 forbids, and the
+   probe's `carry 138` was the only sign of it.
+2. The dormant road has to be inside the buildable band before it opens, or the
+   player cannot prepare, and an unpreparable threat is not a decision.
+
+**Where the road runs is a balance value.** The first breaches bulged through the
+middle of the board and stole 3-8% of the main road's build sites - enough that
+Lastlight act III LOST with nine leaks, on an act with no Borer in it at all.
+Re-routed along whichever lane sits furthest from every existing road, the loss
+is under 1.1%, all of it at the shared gate and exit, which is unavoidable.
+
+**And the fixture had to learn what a dormant road is.** With the geometry
+present, the scripted policy spread its whole allowance across three roads when
+only two carried traffic - thinner everywhere that mattered, and Lastlight III
+still lost. `candidate_sites` now samples OPEN roads only. What a human does
+about a dormant road is a decision; what the policy does is defend the traffic.
+
+Measured after: 48/48 still won. The breach is felt where it should be - Reactor
+IV drops from 100 Integrity to 67, Lastlight IV to 35, Gantry IV to 57 - because
+the scripted bot never kills the Borer in time and the road opens on it. A human
+who reads BREACH ARMED and puts a Cannon line on the approach keeps it shut.
+
+**The parse error that nearly shipped.** A triple-quote inside a patch ate the
+closing quote of a HUD string. `hud.gd` stopped parsing, which means the GAME
+would not have started - and the only reason it was caught is that the test
+runner treats "this file defines no tests" as a FAILURE rather than as nothing
+to run. That rule was written after a whole file of tests once vanished
+silently; this is the second time it has paid for itself.
+
 ## P0-14 · Deliberately not built in P0
 
 Not oversights — later phases, per §5.7. Anything tempting that came up is in

@@ -24,7 +24,9 @@ func test_a_board_without_a_fork_has_exactly_one_road() -> void:
 
 func test_the_forked_board_has_two() -> void:
 	var sim := SimFixture.for_level(FORKED_MAP, FORKED_ACT)
-	assert_eq(sim.route_count(), 2, "two roads")
+	# Two roads CARRYING TRAFFIC. Terminus also holds a dormant breach road that
+	# only a Breach Borer opens, and counting it here would be counting scenery.
+	assert_eq(sim.route_count() - sim.closed_routes(), 2, "two roads")
 	assert_gt(sim.route_length(0), 0.0, "the main road has length")
 	assert_gt(sim.route_length(1), 0.0, "and so does the fork")
 
@@ -37,7 +39,10 @@ func test_a_fork_belongs_to_the_board_not_to_an_act() -> void:
 	# the board now, so a player learns it once and it never moves.
 	for eid: String in FORKED_ACTS:
 		var sim := SimFixture.for_level(FORKED_MAP, eid)
-		assert_eq(sim.route_count(), 2, "%s should run both roads" % eid)
+		# OPEN roads, not total: act IV also carries a dormant breach road that a
+		# Breach Borer can open, and a road nothing walks yet is not a fork.
+		var open_roads := sim.route_count() - sim.closed_routes()
+		assert_eq(open_roads, 2, "%s should run both roads" % eid)
 
 func test_both_roads_leave_the_gate_and_reach_the_exit() -> void:
 	var sim := SimFixture.for_level(FORKED_MAP, FORKED_ACT)
