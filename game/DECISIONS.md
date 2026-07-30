@@ -1752,6 +1752,44 @@ glows on the two Shielded support drones - the ones the player is told to pick
 out of a crowd at 4x speed. Champions render 1.5x and tint white-hot; an
 overcharged turret glows the same heat the whole time its surge runs.
 
+## P0-69 · The strategy layer: whether, which, where, and worth protecting
+
+"It feels very simple" - and the measurement agreed: the scripted player, which
+never retargets, never overcharges and never reads the matrix, was winning all
+48 levels. Every system so far made the game richer without ever making the
+dumb plan FAIL. Strategy only exists where "carpet the road, upgrade
+everything, any order" loses. Four systems, one per missing dimension:
+
+- **Salvage Rig** - WHETHER to build a gun. A blueprint whose tiers carry
+  `income_per_wave` instead of ballistics: it earns at the top of each wave
+  (never the first - it must be risked before it pays), stands against the same
+  deployment limit, and earns nothing while jammed, so the Jammer threatens an
+  economy board exactly as much as a gun line. The validator refuses a tier
+  with both damage and income - a gun that prints money answers every trade at
+  once.
+- **Doctrines** - WHICH gun it becomes. At top tier, one of two permanent
+  specializations per family, free (it is the identity half of the tier-4
+  purchase, not another purchase), refused on second thoughts - an either/or
+  you can undo is a menu. AP Core is the interesting one: rounds that ignore
+  flat armour, the one way a wall of small rounds ever answers plate, bought by
+  giving up Shredder's rate.
+- **Premium ground** - WHERE it stands. Three or four authored gold cells per
+  map (+25% range or +30% rate), placed by a script that walks the road and
+  offsets into the buildable band. Scarce on purpose; a fork's good tiles do
+  not split evenly.
+- **Veterancy** - which guns are WORTH PROTECTING. Kills earn ranks, ranks earn
+  +5% damage each, ranks die with a sell and carry between acts. Kill credit
+  rides the projectile's source slot; after a sell compacts the pool an
+  in-flight round can credit the swapped-in turret - deterministic, rare, and
+  bounded to one kill count, which is recorded here rather than hidden.
+
+None of it moved the balance gate: the scripted player builds no rigs, chooses
+no doctrines, and only stands on premium ground by accident, so 48/48 stands
+measured and every new lever is pure upside a human can reach for. All four are
+commands or data through the same pipeline - logged, replayed, hashed - and
+test_strategy holds the contract: 15 tests, including bit-exact replay of rig
+placement and doctrine choice.
+
 ## P0-14 · Deliberately not built in P0
 
 Not oversights — later phases, per §5.7. Anything tempting that came up is in

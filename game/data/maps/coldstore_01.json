@@ -63,5 +63,28 @@
       "x": 5780.0,
       "y": 1050.0
     }
+  ],
+  "_premium_cells": "Authored premium ground: scarce tiles that make the turret on them better. Placed beside the road at spaced intervals so 'who gets the hill' is a real opening decision.",
+  "premium_cells": [
+    [
+      20,
+      5,
+      "high_ground"
+    ],
+    [
+      20,
+      17,
+      "power_tap"
+    ],
+    [
+      39,
+      28,
+      "high_ground"
+    ],
+    [
+      53,
+      14,
+      "power_tap"
+    ]
   ]
 }

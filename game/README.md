@@ -122,7 +122,7 @@ in every run.
   line's uptime; *Nearest* keeps a Suppressor's slow on what is closest to it
   rather than to the exit; *Toughest* puts a Railgun on the Breaker and lets forty
   Skitters past; *Weakest* is how a Cannon line clears chaff so the heavy guns are
-  never distracted. Orders carry between acts, and so do tiers.
+  never distracted. Orders, tiers, doctrines and veteran ranks all carry between acts.
 - **`O`** **overcharges** the turret under the cursor for $120: a few seconds of
   much faster, harder fire, then a long per-turret cooldown. The only active
   ability in the game — everything else is placement. It exists to answer a
@@ -210,6 +210,27 @@ pin a wave in place.
 The Railgun is the opposite trade: one very slow, very long-ranged shot that
 tears down a whole lane at full damage. Worth several turrets against a column on
 a straight, and close to worthless against a scattered swarm.
+
+### The strategy layer
+
+Four systems, one purpose: making "carpet the road and upgrade everything" stop
+being the answer.
+
+- **Salvage Rig** (`Q` cycles to it) — occupies a deployment slot, fires
+  nothing, pays Capital at the top of every wave (not the first). Every rig is
+  a gun you didn't build. A jammed rig pays nothing, so an economy board fears
+  Jammers more than a gun line does.
+- **Doctrines** — at tier 4, `G`/`H` picks one of two permanent specializations
+  per turret: Ballistic *Shredder* (rate) or *AP Core* (rounds ignore flat
+  armour); Cannon *Siege Shells* (blast) or *Core Breaker* (payload);
+  Suppressor *Stasis Web* (deeper slow) or *Overload Coil* (damage); Railgun
+  *Long Lance* (reach) or *Cyclotron* (rate). Chosen once, kept for the board.
+- **Premium ground** — gold cells, a handful per map: High Ground (+25% range)
+  and Power Taps (+30% fire rate). Who gets the hill is the opening decision,
+  and at the fork the good tiles don't split evenly.
+- **Veterancy** — a turret's kills earn ranks (40/150/400), each +5% damage.
+  Ranks carry between acts and die with a sell: specific guns become worth
+  protecting.
 
 ### Support links
 

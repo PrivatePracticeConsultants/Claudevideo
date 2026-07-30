@@ -390,6 +390,13 @@ func _unhandled_input(event: InputEvent) -> void:
 				# jammed, already surging, cooling down, or unaffordable.
 				if _hover_platform >= 0:
 					_sim.queue_overcharge(_sim.tick(), _hover_platform)
+			KEY_G, KEY_H:
+				# Choose the hovered tier-4 turret's doctrine: G the first, H the
+				# second. Permanent - the sim refuses seconds thoughts, wrong
+				# tiers and families without doctrines, all silently.
+				if _hover_platform >= 0:
+					_sim.queue_doctrine(_sim.tick(), _hover_platform,
+						0 if event.keycode == KEY_G else 1)
 			KEY_M: _sfx.toggle_mute()
 			KEY_Z: _renderer.reset_view()
 			KEY_BRACKETLEFT: _select_board(-1)

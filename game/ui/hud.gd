@@ -72,7 +72,7 @@ func setup(sim: Sim, theme: Dictionary) -> void:
 	_hint.position = Vector2(14, 686)
 	_hint.add_theme_font_size_override("font_size", 12)
 	_hint.add_theme_color_override("font_color", _color("text_dim"))
-	_hint.text = "left-click: build / upgrade / buy ground  ·  right-click a turret: sell  ·  T retarget  ·  O overcharge  ·  scroll: zoom  ·  middle-drag: pan  ·  Z reset view  ·  Q weapon  ·  E call wave early  ·  1-4 speed  ·  space pause  ·  [ ] board  ·  M mute  ·  F3 debug  ·  R restart"
+	_hint.text = "left-click: build / upgrade / buy ground  ·  right-click a turret: sell  ·  T retarget  ·  O overcharge  ·  G/H doctrine at T4  ·  scroll: zoom  ·  middle-drag: pan  ·  Z reset view  ·  Q weapon  ·  E call wave early  ·  1-4 speed  ·  space pause  ·  [ ] board  ·  M mute  ·  F3 debug  ·  R restart"
 	add_child(_hint)
 
 	_level = Label.new()

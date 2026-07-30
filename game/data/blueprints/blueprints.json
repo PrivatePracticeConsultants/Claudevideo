@@ -51,7 +51,21 @@
       "range_bonus": 0.1,
       "tier_scaling": 0.45
     },
-    "damage_type": "kinetic"
+    "damage_type": "kinetic",
+    "doctrines": [
+      {
+        "id": "shredder",
+        "display_name": "Shredder",
+        "fire_rate": 0.5,
+        "_comment": "Half again the rate: the anti-Light answer, doubled down."
+      },
+      {
+        "id": "ap_core",
+        "display_name": "AP Core",
+        "armour_ignore": 1.0,
+        "_comment": "Rounds ignore flat armour entirely - the one way a wall of small rounds answers plate."
+      }
+    ]
   },
   "cannon": {
     "display_name": "Cannon",
@@ -112,7 +126,21 @@
       "damage_bonus": 0.11,
       "tier_scaling": 0.45
     },
-    "damage_type": "explosive"
+    "damage_type": "explosive",
+    "doctrines": [
+      {
+        "id": "siege_shells",
+        "display_name": "Siege Shells",
+        "splash_radius": 0.45,
+        "_comment": "Half again the blast. Crowds stop being crowds."
+      },
+      {
+        "id": "core_breaker",
+        "display_name": "Core Breaker",
+        "damage": 0.5,
+        "_comment": "Half again the payload per shell - the single-target artillery answer."
+      }
+    ]
   },
   "suppressor": {
     "display_name": "Arc Suppressor",
@@ -179,7 +207,21 @@
       "fire_rate_bonus": 0.13,
       "tier_scaling": 0.45
     },
-    "damage_type": "energy"
+    "damage_type": "energy",
+    "doctrines": [
+      {
+        "id": "stasis_web",
+        "display_name": "Stasis Web",
+        "slow_power": 0.5,
+        "_comment": "The slow bites half again as deep. Swift acts hate it."
+      },
+      {
+        "id": "overload_coil",
+        "display_name": "Overload Coil",
+        "damage": 1.5,
+        "_comment": "The coil finally hurts: 2.5x its (tiny) damage."
+      }
+    ]
   },
   "railgun": {
     "display_name": "Railgun",
@@ -234,6 +276,46 @@
       "damage_bonus": 0.15,
       "tier_scaling": 0.45
     },
-    "damage_type": "energy"
+    "damage_type": "energy",
+    "doctrines": [
+      {
+        "id": "long_lance",
+        "display_name": "Long Lance",
+        "range": 0.3,
+        "_comment": "A third more reach - one gun covers two roads at the fork."
+      },
+      {
+        "id": "cyclotron",
+        "display_name": "Cyclotron",
+        "fire_rate": 0.45,
+        "_comment": "The two-second gap closes to 1.4. Champions stop arriving between shots."
+      }
+    ]
+  },
+  "rig": {
+    "display_name": "Salvage Rig",
+    "_comment": "The gun you did not build. A rig occupies a deployment slot and shoots nothing; it pays Capital at the top of every wave instead. Every rig is a bet that the line can hold one gun short - the classic economy-versus-army decision the deployment limit exists to make sharp. Tiers deepen the income the way tiers deepen damage, and salvage/sell value works like every other emplacement.",
+    "tiers": [
+      {
+        "name": "Rig I",
+        "cost": 110,
+        "income_per_wave": 16
+      },
+      {
+        "name": "Rig II",
+        "cost": 160,
+        "income_per_wave": 30
+      },
+      {
+        "name": "Rig III",
+        "cost": 260,
+        "income_per_wave": 54
+      },
+      {
+        "name": "Rig IV",
+        "cost": 420,
+        "income_per_wave": 96
+      }
+    ]
   }
 }

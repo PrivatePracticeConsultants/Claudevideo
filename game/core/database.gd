@@ -118,6 +118,20 @@ func _validate() -> void:
 	_req_num(economy, "support_cap_damage", "economy.json", 0.0)
 	_req_num(economy, "support_cap_range", "economy.json", 0.0)
 
+	if scaling.has("veteran_kills"):
+		var ranks: Variant = scaling["veteran_kills"]
+		if typeof(ranks) != TYPE_ARRAY or (ranks as Array).is_empty():
+			errors.append("scaling.json: veteran_kills must be a non-empty ascending list of kill counts.")
+		else:
+			var last := 0
+			for r: Variant in (ranks as Array):
+				if int(r) <= last:
+					errors.append("scaling.json: veteran_kills must strictly ascend.")
+					break
+				last = int(r)
+		_req_num(scaling, "veteran_damage_per_rank", "scaling.json", 0.0001)
+	_validate_doctrines()
+	_validate_premium()
 	_validate_modules()
 	_validate_damage()
 	_validate_affixes()
@@ -239,6 +253,65 @@ func _ids_of(source: Variant) -> PackedStringArray:
 			out.append(id)
 	return out
 
+## A doctrine is a permanent either/or at the top tier, so both halves must exist,
+## be named, and do something the simulation knows how to apply.
+const DOCTRINE_EFFECTS := ["fire_rate", "damage", "range", "splash_radius",
+	"slow_power", "armour_ignore"]
+
+func _validate_doctrines() -> void:
+	for id in blueprints.keys():
+		if id.begins_with(_DOC_PREFIX):
+			continue
+		var b: Variant = blueprints[id]
+		if typeof(b) != TYPE_DICTIONARY or not (b as Dictionary).has("doctrines"):
+			continue
+		var where := "blueprints.json -> %s doctrines" % id
+		var pair: Variant = (b as Dictionary)["doctrines"]
+		if typeof(pair) != TYPE_ARRAY or (pair as Array).size() != 2:
+			errors.append("%s must be exactly two options - an either/or, not a menu." % where)
+			continue
+		for option: Variant in (pair as Array):
+			if typeof(option) != TYPE_DICTIONARY:
+				errors.append("%s options must be objects." % where)
+				continue
+			var o := option as Dictionary
+			if str(o.get("display_name", "")).is_empty():
+				errors.append("%s option needs a display_name - it is chosen by name." % where)
+			var effects := 0
+			for key in o.keys():
+				if key == "id" or key == "display_name" or key.begins_with(_DOC_PREFIX):
+					continue
+				if not DOCTRINE_EFFECTS.has(key):
+					errors.append("%s has unknown effect \"%s\". Known: %s"
+						% [where, key, ", ".join(DOCTRINE_EFFECTS)])
+					continue
+				_req_num(o, key, where, 0.0001)
+				effects += 1
+			if effects == 0:
+				errors.append("%s option does nothing." % where)
+
+func _validate_premium() -> void:
+	for kind in (building.get("premium_kinds", {}) as Dictionary).keys():
+		if kind.begins_with(_DOC_PREFIX):
+			continue
+		var where := "building.json -> premium_kinds -> %s" % kind
+		var k: Variant = (building["premium_kinds"] as Dictionary)[kind]
+		if typeof(k) != TYPE_DICTIONARY:
+			errors.append("%s must be an object." % where)
+			continue
+		if str((k as Dictionary).get("display_name", "")).is_empty():
+			errors.append("%s needs a display_name." % where)
+		if float((k as Dictionary).get("range_bonus", 0.0)) <= 0.0 \
+				and float((k as Dictionary).get("fire_rate_bonus", 0.0)) <= 0.0:
+			errors.append("%s grants nothing." % where)
+	for entry: Variant in (map.get("premium_cells", []) as Array):
+		if typeof(entry) != TYPE_ARRAY or (entry as Array).size() != 3:
+			errors.append("map premium_cells entries must be [cx, cy, kind].")
+			continue
+		var kind := str((entry as Array)[2])
+		if not (building.get("premium_kinds", {}) as Dictionary).has(kind):
+			errors.append("map premium cell names unknown kind \"%s\"." % kind)
+
 func _validate_enemies() -> void:
 	var found := false
 	for id in enemies.keys():
@@ -311,11 +384,16 @@ func _validate_blueprints() -> void:
 		# Required for the same reason a drone's armour class is: an untyped gun
 		# would silently fire whatever type index 0 is, and be strong and weak
 		# against things nobody chose.
+		var income := false
+		var tiers_peek: Variant = (b as Dictionary).get("tiers")
+		if typeof(tiers_peek) == TYPE_ARRAY and not (tiers_peek as Array).is_empty() \
+				and typeof((tiers_peek as Array)[0]) == TYPE_DICTIONARY:
+			income = ((tiers_peek as Array)[0] as Dictionary).has("income_per_wave")
 		var damage_type := str((b as Dictionary).get("damage_type", ""))
-		if damage_type.is_empty():
+		if damage_type.is_empty() and not income:
 			errors.append("%s has no damage_type. Every gun must state what it fires: %s"
 				% [where, ", ".join(_ids_of(damage.get("types", {})))])
-		elif not _ids_of(damage.get("types", {})).has(damage_type):
+		elif not damage_type.is_empty() and not _ids_of(damage.get("types", {})).has(damage_type):
 			errors.append("%s fires unknown damage type \"%s\"." % [where, damage_type])
 		if (b as Dictionary).has("support"):
 			var support: Variant = (b as Dictionary)["support"]
@@ -343,6 +421,14 @@ func _validate_blueprints() -> void:
 				errors.append("%s must be an object." % twhere)
 				continue
 			_req_int(t, "cost", twhere, 0)
+			# An income tier is a rig: it earns instead of firing, so the whole
+			# ballistic block is absent ON PURPOSE. Mixing the two in one tier is
+			# refused - a gun that also prints money answers every trade at once.
+			if (t as Dictionary).has("income_per_wave"):
+				_req_int(t, "income_per_wave", twhere, 1)
+				if (t as Dictionary).has("damage"):
+					errors.append("%s has both damage and income_per_wave - a tier earns or fires, never both." % twhere)
+				continue
 			_req_int(t, "damage", twhere, 1)
 			_req_num(t, "range_units", twhere, 0.0001)
 			_req_num(t, "fire_interval_seconds", twhere, 0.0001)

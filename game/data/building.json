@@ -5,5 +5,16 @@
   "min_platform_spacing": 56.0,
   "cell_size": 80.0,
   "cell_base_cost": 150,
-  "cell_cost_step": 55
+  "cell_cost_step": 55,
+  "_premium": "Premium ground: a handful of authored cells per map that make the turret standing on them better. Scarce on purpose - 'who gets the hill' is the opening decision of a board, and at the fork the good tiles do not split evenly.",
+  "premium_kinds": {
+    "high_ground": {
+      "display_name": "High Ground",
+      "range_bonus": 0.25
+    },
+    "power_tap": {
+      "display_name": "Power Tap",
+      "fire_rate_bonus": 0.3
+    }
+  }
 }

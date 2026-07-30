@@ -32,7 +32,7 @@ extends RefCounted
 
 enum { RESULT_RUNNING, RESULT_WIN, RESULT_LOSS }
 enum { PHASE_WAITING, PHASE_SPAWNING, PHASE_CLEARING, PHASE_DONE }
-enum { CMD_PLACE, CMD_UPGRADE, CMD_BUY_CELL, CMD_SELL, CMD_SEND_WAVE, CMD_SET_PRIORITY, CMD_OVERCHARGE }
+enum { CMD_PLACE, CMD_UPGRADE, CMD_BUY_CELL, CMD_SELL, CMD_SEND_WAVE, CMD_SET_PRIORITY, CMD_OVERCHARGE, CMD_DOCTRINE }
 
 ## What a turret shoots at when more than one thing is in range.
 ##
@@ -210,6 +210,38 @@ var _overcharge_damage: float = 1.0
 var t_overcharge: PackedInt32Array = PackedInt32Array()
 var t_overcharge_cd: PackedInt32Array = PackedInt32Array()
 var _overcharges: int = 0
+## The Salvage Rig: a tier whose income_per_wave is non-zero earns instead of
+## firing. Every rig is a gun you did not build - the guns-versus-economy trade
+## the deployment limit exists to make sharp.
+var _tier_income: PackedInt32Array = PackedInt32Array()
+var _rig_income_paid: int = 0
+## Doctrines: a permanent either/or chosen at a turret's top tier. -1 unchosen.
+## Effects are flat multipliers/flags read at fire time; choosing is a command,
+## so it is logged, replayed and hashed like everything else.
+var t_doctrine: PackedInt32Array = PackedInt32Array()
+var _doc_rate: PackedFloat64Array = PackedFloat64Array()
+var _doc_damage: PackedFloat64Array = PackedFloat64Array()
+var _doc_range: PackedFloat64Array = PackedFloat64Array()
+var _doc_splash: PackedFloat64Array = PackedFloat64Array()
+var _doc_slow: PackedFloat64Array = PackedFloat64Array()
+var _doc_armour_ignore: PackedByteArray = PackedByteArray()
+var _doc_name: PackedStringArray = PackedStringArray()
+var _bp_has_doctrines: PackedByteArray = PackedByteArray()
+## Premium ground: a few authored cells make the turret standing on them better.
+## -1 for ordinary ground, else an index into the kind tables.
+var _cell_premium: PackedInt32Array = PackedInt32Array()
+var _premium_kind_ids: PackedStringArray = PackedStringArray()
+var _premium_range: PackedFloat64Array = PackedFloat64Array()
+var _premium_rate: PackedFloat64Array = PackedFloat64Array()
+var t_site: PackedInt32Array = PackedInt32Array()
+## Veterancy: kills per turret, ranks from scaling.json, small damage per rank.
+## Selling a veteran throws the ranks away, which is the point.
+var t_kills: PackedInt32Array = PackedInt32Array()
+var _veteran_kills: PackedInt32Array = PackedInt32Array()
+var _veteran_damage: float = 0.0
+var p_source: PackedInt32Array = PackedInt32Array()
+## Bit 0: this round ignores flat armour (AP Core doctrine).
+var p_flags: PackedByteArray = PackedByteArray()
 ## What a weapon is good against.
 ##
 ## Every drone wears one armour class and every blueprint fires one damage type;
@@ -578,6 +610,20 @@ func _init(db: Database, seed_value: int) -> void:
 		float(db.economy["overcharge_cooldown_seconds"]) * float(_tick_rate))))
 	_overcharge_rate = maxf(1.0, float(db.economy["overcharge_rate_mult"]))
 	_overcharge_damage = maxf(1.0, float(db.economy["overcharge_damage_mult"]))
+	_veteran_kills = PackedInt32Array()
+	for r: Variant in (db.scaling.get("veteran_kills", []) as Array):
+		_veteran_kills.append(int(r))
+	_veteran_damage = maxf(0.0, float(db.scaling.get("veteran_damage_per_rank", 0.0)))
+	_premium_kind_ids = PackedStringArray()
+	_premium_range = PackedFloat64Array()
+	_premium_rate = PackedFloat64Array()
+	for kind: String in (db.building.get("premium_kinds", {}) as Dictionary).keys():
+		if kind.begins_with("_"):
+			continue
+		var body: Dictionary = (db.building["premium_kinds"] as Dictionary)[kind]
+		_premium_kind_ids.append(kind)
+		_premium_range.append(maxf(0.0, float(body.get("range_bonus", 0.0))))
+		_premium_rate.append(maxf(0.0, float(body.get("fire_rate_bonus", 0.0))))
 	_interest_rate = maxf(0.0, float(db.economy.get("interest_per_wave", 0.0)))
 	_interest_cap = maxi(0, int(db.economy.get("interest_cap", 0)))
 	_support_cap_rate = maxf(0.0, float(db.economy.get("support_cap_fire_rate", 0.0)))
@@ -790,6 +836,17 @@ func _build_grid() -> void:
 			# Everything within the starting reach comes free, so a new level is
 			# immediately playable without spending on ground.
 			_cell_unlocked[index] = 1 if (_cell_buildable[index] == 1 and to_path <= _build_max_dist) else 0
+	# Premium ground last, because it is sparse and authored: a handful of cells
+	# per map that make the turret standing on them better. Unknown kinds were
+	# rejected at load; out-of-grid entries are simply ignored.
+	_cell_premium.resize(_grid_cols * _grid_rows)
+	_cell_premium.fill(-1)
+	for entry: Variant in (_db.map.get("premium_cells", []) as Array):
+		var cx := int((entry as Array)[0])
+		var cy := int((entry as Array)[1])
+		var kind := _premium_kind_ids.find(str((entry as Array)[2]))
+		if cx >= 0 and cx < _grid_cols and cy >= 0 and cy < _grid_rows and kind >= 0:
+			_cell_premium[cy * _grid_cols + cx] = kind
 
 func cell_size() -> float: return _cell_size
 func grid_cols() -> int: return _grid_cols
@@ -966,6 +1023,26 @@ func _build_blueprints() -> void:
 	_bp_support_range.resize(n)
 	_bp_support_tier_scale.resize(n)
 	_bp_damage_type.resize(n)
+	_bp_has_doctrines.resize(n)
+	_doc_rate.resize(n * 2)
+	_doc_damage.resize(n * 2)
+	_doc_range.resize(n * 2)
+	_doc_splash.resize(n * 2)
+	_doc_slow.resize(n * 2)
+	_doc_armour_ignore.resize(n * 2)
+	_doc_name.resize(n * 2)
+	for b in n:
+		var pair: Array = (_db.blueprints[_bp_ids[b]] as Dictionary).get("doctrines", []) as Array
+		_bp_has_doctrines[b] = 1 if pair.size() == 2 else 0
+		for d in mini(pair.size(), 2):
+			var o: Dictionary = pair[d]
+			_doc_rate[b * 2 + d] = maxf(0.0, float(o.get("fire_rate", 0.0)))
+			_doc_damage[b * 2 + d] = maxf(0.0, float(o.get("damage", 0.0)))
+			_doc_range[b * 2 + d] = maxf(0.0, float(o.get("range", 0.0)))
+			_doc_splash[b * 2 + d] = maxf(0.0, float(o.get("splash_radius", 0.0)))
+			_doc_slow[b * 2 + d] = maxf(0.0, float(o.get("slow_power", 0.0)))
+			_doc_armour_ignore[b * 2 + d] = 1 if float(o.get("armour_ignore", 0.0)) > 0.0 else 0
+			_doc_name[b * 2 + d] = str(o.get("display_name", ""))
 	for b in n:
 		_bp_damage_type[b] = maxi(0, _damage_type_index(
 			str((_db.blueprints[_bp_ids[b]] as Dictionary).get("damage_type", ""))))
@@ -997,12 +1074,22 @@ func _build_blueprints() -> void:
 	_tier_slow_factor.resize(slot)
 	_tier_slow_ticks.resize(slot)
 	_tier_pierce.resize(slot)
+	_tier_income.resize(slot)
 	for b in n:
 		var tiers: Array = (_db.blueprints[_bp_ids[b]] as Dictionary)["tiers"]
 		for t in tiers.size():
 			var td: Dictionary = tiers[t]
 			var s := _bp_tier_offset[b] + t
 			_tier_cost[s] = int(td["cost"])
+			# An income tier is a rig. It earns at the top of each wave and never
+			# fires, so every ballistic field stays at its do-nothing default and
+			# the update loop skips it on income alone.
+			_tier_income[s] = maxi(0, int(td.get("income_per_wave", 0)))
+			if _tier_income[s] > 0:
+				_tier_interval[s] = 1
+				_tier_splash_min[s] = 1.0
+				_tier_slow_factor[s] = 1.0
+				continue
 			_tier_damage[s] = int(td["damage"])
 			var r := float(td["range_units"])
 			_tier_range_sq[s] = r * r
@@ -1070,6 +1157,8 @@ func _build_pools() -> void:
 	p_from_x.resize(_max_projectiles)
 	p_from_y.resize(_max_projectiles)
 	p_family.resize(_max_projectiles)
+	p_source.resize(_max_projectiles)
+	p_flags.resize(_max_projectiles)
 	_p_free.resize(_max_projectiles)
 	for i in _max_projectiles:
 		_p_free[i] = _max_projectiles - 1 - i
@@ -1087,6 +1176,9 @@ func _build_pools() -> void:
 	t_priority.resize(_max_platforms)
 	t_overcharge.resize(_max_platforms)
 	t_overcharge_cd.resize(_max_platforms)
+	t_doctrine.resize(_max_platforms)
+	t_site.resize(_max_platforms)
+	t_kills.resize(_max_platforms)
 	t_disabled.resize(_max_platforms)
 	t_rate_mult.resize(_max_platforms)
 	t_damage_mult.resize(_max_platforms)
@@ -1142,6 +1234,9 @@ func queue_priority(at_tick: int, platform_index: int, mode: int) -> void:
 
 func queue_overcharge(at_tick: int, platform_index: int) -> void:
 	_queue(at_tick, CMD_OVERCHARGE, platform_index, 0, 0)
+
+func queue_doctrine(at_tick: int, platform_index: int, choice: int) -> void:
+	_queue(at_tick, CMD_DOCTRINE, platform_index, choice, 0)
 
 ## Re-create a board carried forward from the previous level in a chain.
 ##
@@ -1223,6 +1318,8 @@ func adopt(platforms: Array, owned_cells: PackedInt32Array) -> void:
 		var tier := clampi(int(record["tier"]), 0, _bp_tier_count[blueprint] - 1)
 		t_tier[index] = tier
 		t_tier_slot[index] = _bp_tier_offset[blueprint] + tier
+		t_doctrine[index] = int(record.get("doctrine", -1))
+		t_kills[index] = maxi(0, int(record.get("kills", 0)))
 		# Orders carry too. Making the player re-issue every standing order would be
 		# tedium on top of tedium.
 		t_priority[index] = clampi(int(record.get("priority", TARGET_FIRST)),
@@ -1347,7 +1444,8 @@ func board_snapshot() -> Dictionary:
 	for i in t_count:
 		platforms.append({"x": t_x[i], "y": t_y[i],
 			"blueprint": t_blueprint[i], "tier": t_tier[i],
-			"priority": t_priority[i]})
+			"priority": t_priority[i], "doctrine": t_doctrine[i],
+			"kills": t_kills[i]})
 	var cells := PackedInt32Array()
 	for cy in _grid_rows:
 		for cx in _grid_cols:
@@ -1447,6 +1545,8 @@ func _apply_commands() -> void:
 			ok = _try_set_priority(_cmd_a[_cmd_cursor], _cmd_b[_cmd_cursor])
 		elif _cmd_type[_cmd_cursor] == CMD_OVERCHARGE:
 			ok = _try_overcharge(_cmd_a[_cmd_cursor])
+		elif _cmd_type[_cmd_cursor] == CMD_DOCTRINE:
+			ok = _try_doctrine(_cmd_a[_cmd_cursor], _cmd_b[_cmd_cursor])
 		if not ok:
 			_rejected_commands += 1
 		_cmd_cursor += 1
@@ -1536,6 +1636,14 @@ func _try_place(x: float, y: float, blueprint_index: int) -> int:
 	t_disabled[index] = 0
 	t_overcharge[index] = 0
 	t_overcharge_cd[index] = 0
+	t_doctrine[index] = -1
+	t_kills[index] = 0
+	# What ground it stands on. Premium is a property of the CELL, so it is
+	# looked up once here and never drifts with the turret.
+	var cx := int(floor(x / _cell_size))
+	var cy := int(floor(y / _cell_size))
+	t_site[index] = _cell_premium[cy * _grid_cols + cx] \
+		if cx >= 0 and cx < _grid_cols and cy >= 0 and cy < _grid_rows else -1
 	t_rate_mult[index] = 1.0
 	t_damage_mult[index] = 1.0
 	t_range_mult[index] = 1.0
@@ -1584,6 +1692,9 @@ func _try_sell(platform_index: int) -> bool:
 		t_disabled[platform_index] = t_disabled[last]
 		t_overcharge[platform_index] = t_overcharge[last]
 		t_overcharge_cd[platform_index] = t_overcharge_cd[last]
+		t_doctrine[platform_index] = t_doctrine[last]
+		t_site[platform_index] = t_site[last]
+		t_kills[platform_index] = t_kills[last]
 	t_used[last] = 0
 	t_count -= 1
 	_sold += 1
@@ -1666,6 +1777,24 @@ func _try_overcharge(platform_index: int) -> bool:
 	_capital -= _overcharge_cost
 	t_overcharge[platform_index] = _overcharge_ticks
 	_overcharges += 1
+	return true
+
+## A doctrine is free, once, permanent, and only at the top tier - it is the
+## identity half of the tier-4 purchase, not another purchase. Irreversible on
+## purpose: an either/or you can undo is a menu.
+func _try_doctrine(platform_index: int, choice: int) -> bool:
+	if platform_index < 0 or platform_index >= t_count:
+		return false
+	if choice < 0 or choice > 1:
+		return false
+	var blueprint := t_blueprint[platform_index]
+	if _bp_has_doctrines[blueprint] == 0:
+		return false
+	if t_doctrine[platform_index] >= 0:
+		return false
+	if t_tier[platform_index] < _bp_tier_count[blueprint] - 1:
+		return false
+	t_doctrine[platform_index] = choice
 	return true
 
 ## Index of the platform within `radius` of a point, nearest first, or -1.
@@ -1966,15 +2095,18 @@ func _update_platforms() -> void:
 		if t_cooldown[i] > 0:
 			t_cooldown[i] -= 1
 			continue
+		# A rig earns instead of firing - its pay-out happens at wave start, so
+		# the per-tick loop simply has nothing to do with it.
+		if _tier_income[t_tier_slot[i]] > 0:
+			continue
 		var target := _acquire_target(t_x[i], t_y[i], platform_range_sq(i), t_priority[i])
 		if target < 0:
 			continue
 		_fire(i, target)
 		# At least one tick: the sim cannot fire twice in a tick, and a rate bonus
 		# that rounded an interval to zero would be a turret that never cools down.
-		var rate := t_rate_mult[i] * (_overcharge_rate if t_overcharge[i] > 0 else 1.0)
 		t_cooldown[i] = maxi(1, int(round(
-			float(_tier_interval[t_tier_slot[i]]) / rate)))
+			float(_tier_interval[t_tier_slot[i]]) / _effective_rate(i))))
 
 ## Pick what this turret shoots. Ties break toward whatever the spatial hash walks
 ## first (strict >), and that walk is cell-then-slot order, which is stable - so
@@ -2080,14 +2212,30 @@ func _fire(platform: int, target: int) -> void:
 	p_prev_y[i] = p_y[i]
 	p_target[i] = target
 	p_target_gen[i] = e_gen[target]
-	p_damage[i] = maxi(1, int(round(float(_tier_damage[slot]) * t_damage_mult[platform]
-		* (_overcharge_damage if t_overcharge[platform] > 0 else 1.0))))
+	p_damage[i] = maxi(1, int(round(float(_tier_damage[slot]) * _effective_damage(platform))))
+	p_source[i] = platform
+	var flags := 0
+	if t_doctrine[platform] >= 0:
+		var d := t_blueprint[platform] * 2 + t_doctrine[platform]
+		if _doc_armour_ignore[d] == 1:
+			flags |= 1
+	p_flags[i] = flags
 	p_speed[i] = _tier_proj_speed[slot]
 	p_hit_radius[i] = _tier_hit_radius[slot]
 	p_life[i] = _tier_proj_life[slot]
 	p_splash[i] = _tier_splash_radius[slot]
+	if t_doctrine[platform] >= 0:
+		var dd := t_blueprint[platform] * 2 + t_doctrine[platform]
+		p_splash[i] *= 1.0 + _doc_splash[dd]
 	p_splash_min[i] = _tier_splash_min[slot]
 	p_slow_factor[i] = _tier_slow_factor[slot]
+	if t_doctrine[platform] >= 0 and p_slow_factor[i] < 1.0:
+		# Deepen the slow by the doctrine's share of what it already takes off:
+		# a 0.62 factor at slow_power 0.5 becomes 0.43, and a non-slowing round
+		# stays non-slowing.
+		var dd2 := t_blueprint[platform] * 2 + t_doctrine[platform]
+		p_slow_factor[i] = clampf(1.0 - (1.0 - p_slow_factor[i])
+			* (1.0 + _doc_slow[dd2]), 0.0, 1.0)
 	p_slow_ticks[i] = _tier_slow_ticks[slot]
 	p_pierce[i] = _tier_pierce[slot]
 	p_from_x[i] = t_x[platform]
@@ -2118,16 +2266,18 @@ func _advance_projectiles() -> void:
 		if dist <= reach:
 			if p_pierce[i] > 0.0:
 				_lance_through(p_from_x[i], p_from_y[i], e_x[target], e_y[target],
-					p_pierce[i], p_damage[i], p_family[i])
+					p_pierce[i], p_damage[i], p_family[i], p_source[i], p_flags[i] & 1 == 1)
 			elif p_splash[i] > 0.0:
 				# Suppression lands on everything the blast reaches, which is what
 				# makes an area suppressor worth its cost against a wave rather
 				# than against one drone.
 				_detonate(e_x[target], e_y[target], p_splash[i], p_damage[i],
-					p_splash_min[i], p_family[i], p_slow_factor[i], p_slow_ticks[i])
+					p_splash_min[i], p_family[i], p_slow_factor[i], p_slow_ticks[i],
+					p_source[i], p_flags[i] & 1 == 1)
 			else:
 				_suppress(target, p_slow_factor[i], p_slow_ticks[i])
-				_damage_enemy(target, p_damage[i], p_family[i])
+				_damage_enemy(target, p_damage[i], p_family[i], p_source[i],
+					p_flags[i] & 1 == 1)
 			_despawn_projectile(i)
 			continue
 		var step_scale := p_speed[i] / dist
@@ -2148,7 +2298,8 @@ func _advance_projectiles() -> void:
 ## an arbitrary order would be a determinism hole that only shows up once
 ## something explodes near a pool boundary.
 func _detonate(x: float, y: float, radius: float, damage: int, min_fraction: float,
-		family: int, slow_factor: float = 1.0, slow_ticks: int = 0) -> void:
+		family: int, slow_factor: float = 1.0, slow_ticks: int = 0,
+		source: int = -1, pierce_armour: bool = false) -> void:
 	var min_cx := _hash.cell_x(x - radius)
 	var max_cx := _hash.cell_x(x + radius)
 	var min_cy := _hash.cell_y(y - radius)
@@ -2173,7 +2324,8 @@ func _detonate(x: float, y: float, radius: float, damage: int, min_fraction: flo
 				_suppress(e, slow_factor, slow_ticks)
 				# Always at least 1, so a shell that reaches something never does
 				# literally nothing - a zero-damage hit reads as a bug.
-				_damage_enemy(e, maxi(1, int(round(float(damage) * falloff))), family)
+				_damage_enemy(e, maxi(1, int(round(float(damage) * falloff))), family,
+					source, pierce_armour)
 
 ## Drag a drone's speed down for a while.
 ##
@@ -2208,7 +2360,8 @@ func _suppress(index: int, factor: float, ticks: int) -> void:
 ## reason `_detonate` does: an attack that resolved against several drones in an
 ## arbitrary sequence would pay bounties and recycle pool slots in that sequence.
 func _lance_through(from_x: float, from_y: float, to_x: float, to_y: float,
-		half_width: float, damage: int, family: int) -> void:
+		half_width: float, damage: int, family: int,
+		source: int = -1, pierce_armour: bool = false) -> void:
 	var dx := to_x - from_x
 	var dy := to_y - from_y
 	var length_sq := dx * dx + dy * dy
@@ -2235,7 +2388,7 @@ func _lance_through(from_x: float, from_y: float, to_x: float, to_y: float,
 				var oy := e_y[e] - (from_y + dy * t)
 				if ox * ox + oy * oy > width_sq:
 					continue
-				_damage_enemy(e, damage, family)
+				_damage_enemy(e, damage, family, source, pierce_armour)
 
 ## Land a hit, crediting the weapon family that fired it.
 ##
@@ -2243,7 +2396,8 @@ func _lance_through(from_x: float, from_y: float, to_x: float, to_y: float,
 ## point of it: it scales with how many hits you need rather than with how much
 ## damage you deal, so it punishes a wall of cheap fast guns and barely troubles
 ## one big one. Never below 1 - see _type_armour.
-func _damage_enemy(index: int, amount: int, family: int) -> void:
+func _damage_enemy(index: int, amount: int, family: int, source: int = -1,
+		pierce_armour: bool = false) -> void:
 	# The matchup scales the SHOT, before armour bites into it. The other order was
 	# tried on paper and thrown out: armour subtracted from an already-halved round
 	# punishes a bad matchup twice, and the two systems are meant to ask different
@@ -2255,7 +2409,7 @@ func _damage_enemy(index: int, amount: int, family: int) -> void:
 		amount = maxi(1, int(round(float(amount)
 			* _matchup[_bp_damage_type[family] * _armour_class_count
 				+ _type_armour_class[e_type[index]]])))
-	var armour := _type_armour_now[e_type[index]]
+	var armour := 0 if pierce_armour else _type_armour_now[e_type[index]]
 	if armour > 0:
 		# Never below the cap, and never below 1.
 		var floor_damage := maxi(1, int(ceil(float(amount) * (1.0 - _armour_max_bite))))
@@ -2270,6 +2424,11 @@ func _damage_enemy(index: int, amount: int, family: int) -> void:
 		return
 	if family >= 0:
 		_family_kills[family] += 1
+	# Veterancy: the turret that landed the killing round keeps the credit. After
+	# a sell compacts the pool an in-flight round can credit the turret that was
+	# swapped into the slot - deterministic, rare, and bounded to one kill count.
+	if source >= 0 and source < t_count:
+		t_kills[source] += 1
 	_capital += e_bounty[index]
 	_kills += 1
 	# Queued before the despawn, which frees the slot this reads from.
@@ -2337,6 +2496,16 @@ func _begin_wave(index: int) -> void:
 		var earned := mini(int(floor(float(_capital) * _interest_rate)), _interest_cap)
 		_capital += earned
 		_interest_paid += earned
+	# Rigs pay alongside interest, at the same moment and for the same reason:
+	# the gap is when the money means a decision. Not on the opening wave either,
+	# or a rig would partly refund itself before anything was risked.
+	if index > 0:
+		for i in t_count:
+			if t_used[i] == 1 and t_disabled[i] == 0:
+				var income := _tier_income[t_tier_slot[i]]
+				if income > 0:
+					_capital += income
+					_rig_income_paid += income
 	_wave_index = index
 	_phase = PHASE_SPAWNING
 	# Exponential scaling, computed by repeated multiplication rather than pow().
@@ -2510,8 +2679,38 @@ func platform_max_tier(blueprint: int) -> int: return _bp_tier_count[blueprint]
 ## "how far does this turret shoot" - targeting, the HUD, the range ring under the
 ## cursor - goes through these, or the ring would promise coverage the turret does
 ## not have.
+## Every multiplier that touches a shot, in one place each, so the HUD, the
+## targeting loop and the projectile all read the same arithmetic: links,
+## modules, overcharge, doctrine, premium ground and veterancy.
+func _effective_rate(i: int) -> float:
+	var rate := t_rate_mult[i] * (_overcharge_rate if t_overcharge[i] > 0 else 1.0)
+	if t_doctrine[i] >= 0:
+		rate *= 1.0 + _doc_rate[t_blueprint[i] * 2 + t_doctrine[i]]
+	if t_site[i] >= 0:
+		rate *= 1.0 + _premium_rate[t_site[i]]
+	return rate
+
+func _effective_damage(i: int) -> float:
+	var mult := t_damage_mult[i] * (_overcharge_damage if t_overcharge[i] > 0 else 1.0)
+	if t_doctrine[i] >= 0:
+		mult *= 1.0 + _doc_damage[t_blueprint[i] * 2 + t_doctrine[i]]
+	mult *= 1.0 + _veteran_damage * float(platform_rank(i))
+	return mult
+
+func platform_rank(i: int) -> int:
+	var rank := 0
+	for threshold in _veteran_kills:
+		if t_kills[i] >= threshold:
+			rank += 1
+	return rank
+
 func platform_range_sq(i: int) -> float:
-	return _tier_range_sq[t_tier_slot[i]] * t_range_mult[i] * t_range_mult[i]
+	var mult := t_range_mult[i]
+	if t_doctrine[i] >= 0:
+		mult *= 1.0 + _doc_range[t_blueprint[i] * 2 + t_doctrine[i]]
+	if t_site[i] >= 0:
+		mult *= 1.0 + _premium_range[t_site[i]]
+	return _tier_range_sq[t_tier_slot[i]] * mult * mult
 func platform_range(i: int) -> float: return sqrt(platform_range_sq(i))
 func platform_rate_bonus(i: int) -> float: return t_rate_mult[i] - 1.0
 func platform_damage_bonus(i: int) -> float: return t_damage_mult[i] - 1.0
@@ -2662,6 +2861,21 @@ func affix_blurb(id: String) -> String:
 
 func platform_priority(i: int) -> int: return t_priority[i]
 func platform_overcharge_ticks(i: int) -> int: return t_overcharge[i]
+func platform_doctrine(i: int) -> int: return t_doctrine[i]
+func platform_kills(i: int) -> int: return t_kills[i]
+func platform_site(i: int) -> int: return t_site[i]
+func blueprint_has_doctrines(b: int) -> bool: return _bp_has_doctrines[b] == 1
+func doctrine_name(blueprint: int, choice: int) -> String:
+	return _doc_name[blueprint * 2 + clampi(choice, 0, 1)]
+func blueprint_income(b: int) -> int: return _tier_income[_bp_tier_offset[b]]
+func platform_income(i: int) -> int: return _tier_income[t_tier_slot[i]]
+func rig_income_paid() -> int: return _rig_income_paid
+func premium_kind_ids() -> PackedStringArray: return _premium_kind_ids
+func premium_kind_name(kind: int) -> String:
+	return str(((_db.building["premium_kinds"] as Dictionary)[_premium_kind_ids[kind]]
+		as Dictionary).get("display_name", _premium_kind_ids[kind]))
+func cell_premium(cx: int, cy: int) -> int:
+	return _cell_premium[cy * _grid_cols + cx]
 func platform_overcharge_cooldown(i: int) -> int: return t_overcharge_cd[i]
 func overcharge_cost() -> int: return _overcharge_cost
 func overcharges_used() -> int: return _overcharges
@@ -2746,6 +2960,12 @@ func state_hash() -> int:
 	h = StateHash.mix_bytes(h, t_overcharge.to_byte_array())
 	h = StateHash.mix_bytes(h, t_overcharge_cd.to_byte_array())
 	h = StateHash.mix_int(h, _overcharges)
+	h = StateHash.mix_bytes(h, t_doctrine.to_byte_array())
+	h = StateHash.mix_bytes(h, t_site.to_byte_array())
+	h = StateHash.mix_bytes(h, t_kills.to_byte_array())
+	h = StateHash.mix_bytes(h, p_source.to_byte_array())
+	h = StateHash.mix_bytes(h, p_flags)
+	h = StateHash.mix_int(h, _rig_income_paid)
 	h = StateHash.mix_int(h, _spawn_cursor)
 	h = StateHash.mix_bytes(h, p_alive)
 	h = StateHash.mix_bytes(h, p_x.to_byte_array())

@@ -6,5 +6,12 @@
   "_champions": "Champion drones: every Nth spawn of a sufficiently large wave group arrives as a champion - several times the health, several times the bounty, drawn half again as large and white-hot. They exist to put SPIKES inside a wave: a steady stream is answered by a steady line, and a stream with a champion in it every twenty drones is answered by targeting orders - Toughest finds them - and by held fire worth holding. Deterministic by construction: the Nth spawn is the Nth spawn in every run of the same seed.",
   "champion_every": 20,
   "champion_hp_mult": 4.5,
-  "champion_bounty_mult": 5.0
+  "champion_bounty_mult": 5.0,
+  "_veterancy": "A turret that has killed keeps getting better at it: each rank adds a small damage bonus. Ranks are kills, kills are deterministic, and selling a veteran throws the ranks away - which is the point: specific guns become worth protecting.",
+  "veteran_kills": [
+    40,
+    150,
+    400
+  ],
+  "veteran_damage_per_rank": 0.05
 }

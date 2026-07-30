@@ -135,5 +135,28 @@
   "route_weights": [
     3,
     1
+  ],
+  "_premium_cells": "Authored premium ground: scarce tiles that make the turret on them better. Placed beside the road at spaced intervals so 'who gets the hill' is a real opening decision.",
+  "premium_cells": [
+    [
+      6,
+      12,
+      "high_ground"
+    ],
+    [
+      25,
+      16,
+      "power_tap"
+    ],
+    [
+      27,
+      20,
+      "high_ground"
+    ],
+    [
+      47,
+      15,
+      "power_tap"
+    ]
   ]
 }

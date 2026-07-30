@@ -1188,6 +1188,24 @@ func _housing_mesh(id: String, radius: float, height: float) -> Mesh:
 	var r := radius
 	var h := height
 	match id:
+		"rig":
+			# A derrick: A-frame legs and a crossbeam. It has to read as NOT A
+			# WEAPON from across the board - money standing where a gun could be.
+			var leg := BoxMesh.new()
+			leg.size = Vector3(r * 0.28, h * 1.1, r * 0.28)
+			var beam := BoxMesh.new()
+			beam.size = Vector3(r * 1.7, h * 0.16, r * 0.34)
+			var tank := CylinderMesh.new()
+			tank.top_radius = r * 0.55
+			tank.bottom_radius = r * 0.55
+			tank.height = h * 0.42
+			tank.radial_segments = 10
+			return _merged([
+				[leg, _at(-r * 0.62, 0.0, 0.0, Vector3.ONE, Vector3(0.0, 0.0, 0.22))],
+				[leg, _at(r * 0.62, 0.0, 0.0, Vector3.ONE, Vector3(0.0, 0.0, -0.22))],
+				[beam, _at(0.0, h * 0.5, 0.0)],
+				[tank, _at(0.0, -h * 0.28, 0.0)],
+			])
 		"ballistic":
 			# An autocannon receiver: boxy, with an ammunition drum slung on the
 			# left and an optics block on top. Asymmetry is deliberate - real guns
@@ -1271,6 +1289,15 @@ func _housing_mesh(id: String, radius: float, height: float) -> Mesh:
 ## Muzzles are authored inside a unit cube, Z forward - the per-frame transform
 ## scales X/Y by girth and Z by reach, so everything here is proportion.
 func _muzzle_mesh(id: String) -> Mesh:
+	if id == "rig":
+		# The pump wheel where a barrel would be. It spins with the aim code and
+		# that is fine - a rig "aims" at nothing and the wheel just turns.
+		var wheel := TorusMesh.new()
+		wheel.inner_radius = 0.2
+		wheel.outer_radius = 0.42
+		wheel.rings = 10
+		wheel.ring_segments = 5
+		return wheel
 	if id == "suppressor":
 		# No barrel at all - a coil ring with a focus hub floating in it. A weapon
 		# that does almost no damage should not be pointing a gun at anything.
@@ -1890,13 +1917,18 @@ func _refresh_cells() -> void:
 	var size := _sim.cell_size() - float(_world.get("cell_inset", 5.0))
 	var owned := _color_of(_world.get("band", "#1e4034"))
 	var offered := _color_of(_world.get("band_offer", "#39506e"))
+	var premium := _color_of(_world.get("band_premium", "#c9a227"))
 	var shown := 0
 	for cy in _sim.grid_rows():
 		for cx in _sim.grid_cols():
 			var unlocked := _sim.cell_is_unlocked(cx, cy)
 			if not unlocked and not _sim.cell_is_offerable(cx, cy):
 				continue
+			# Premium ground gets its own colour at full strength - scarce tiles
+			# whose whole point is being seen and fought over.
 			var tint := owned if unlocked else offered
+			if _sim.cell_premium(cx, cy) >= 0:
+				tint = premium
 			tint.a = float(_world.get("band_alpha", 0.55)) if unlocked \
 				else float(_world.get("band_offer_alpha", 0.3))
 			mm.set_instance_transform(shown, Transform3D(
@@ -2141,6 +2173,8 @@ func _update_barrels() -> void:
 ## slows or splashes inherits sensible colours without touching this.
 func _family_colour(index: int, ballistic: Color, cannon: Color, suppressor: Color,
 		railgun: Color) -> Color:
+	if _sim.platform_income(index) > 0:
+		return _color_of(_world.get("platform_rig", "#7fb069"))
 	if _sim.platform_slow_factor(index) < 1.0:
 		return suppressor
 	if _sim.platform_pierce(index) > 0.0:
