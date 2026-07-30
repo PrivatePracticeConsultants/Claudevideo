@@ -53,14 +53,40 @@ func cell_y(y: float) -> int:
 	return clampi(int(floor((y - _origin_y) * _inv_cell)), 0, _rows - 1)
 
 ## Refill from struct-of-arrays entity storage. `alive` is a byte per slot.
+## The box every item in the hash is inside. Degenerate (min > max) when empty,
+## so every reach test against it correctly fails.
+var _min_x: float = INF
+var _max_x: float = -INF
+var _min_y: float = INF
+var _max_y: float = -INF
+
+func min_x() -> float: return _min_x
+func max_x() -> float: return _max_x
+func min_y() -> float: return _min_y
+func max_y() -> float: return _max_y
+
 func rebuild(alive: PackedByteArray, xs: PackedFloat64Array, ys: PackedFloat64Array, slot_count: int) -> void:
 	var cells := _cols * _rows
 	_cell_start.fill(0)
 	_item_count = 0
+	# The bounding box of everything in the hash, measured in the pass that is
+	# already reading every position. It belongs HERE rather than beside the call:
+	# turret targeting uses it as a cheap "is anything even near me" reject, and a
+	# box that could go stale independently of the hash is a silent wrong answer.
+	# Owned by the hash, it is exactly as fresh as the hash is, always.
+	_min_x = INF
+	_max_x = -INF
+	_min_y = INF
+	_max_y = -INF
 
 	# Pass 1: count per cell (stored shifted by one, so the prefix sum below
 	# lands directly on the start offsets).
 	for i in slot_count:
+		if alive[i] == 1:
+			_min_x = minf(_min_x, xs[i])
+			_max_x = maxf(_max_x, xs[i])
+			_min_y = minf(_min_y, ys[i])
+			_max_y = maxf(_max_y, ys[i])
 		if alive[i] == 0:
 			continue
 		var c := cell_y(ys[i]) * _cols + cell_x(xs[i])

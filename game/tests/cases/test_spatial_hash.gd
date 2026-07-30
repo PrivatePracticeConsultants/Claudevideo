@@ -77,3 +77,26 @@ func test_an_empty_grid_reports_nothing() -> void:
 	grid.rebuild(alive, px, py, CAPACITY)
 	assert_eq(grid.item_count(), 0, "no entities, no items")
 	assert_eq(grid.bucket_begin(0, 0), grid.bucket_end(0, 0), "every bucket is empty")
+
+func test_the_rebuild_reports_the_box_everything_is_inside() -> void:
+	# Turret targeting uses this box as a cheap "is anything even near me" reject,
+	# which took the per-tick platform update from 4.3ms to 0.4ms on a 208-turret
+	# board. A box that were ever too SMALL would make turrets stop firing at
+	# drones they can reach, so it is pinned here rather than trusted.
+	var hash := SpatialHash.new(0.0, 0.0, 4000.0, 3000.0, 96.0, 64)
+	var alive := PackedByteArray([1, 0, 1, 1])
+	var xs := PackedFloat64Array([120.0, 9999.0, 480.0, 300.0])
+	var ys := PackedFloat64Array([200.0, 9999.0, 640.0, 100.0])
+	hash.rebuild(alive, xs, ys, 4)
+	assert_almost_eq(hash.min_x(), 120.0, 0.0001, "leftmost live x")
+	assert_almost_eq(hash.max_x(), 480.0, 0.0001, "rightmost live x")
+	assert_almost_eq(hash.min_y(), 100.0, 0.0001, "topmost live y")
+	assert_almost_eq(hash.max_y(), 640.0, 0.0001, "bottommost live y")
+
+func test_an_empty_rebuild_reports_a_box_nothing_can_reach() -> void:
+	# Degenerate rather than zero-sized: a box at the origin would make turrets
+	# near the origin scan every tick for nothing.
+	var hash := SpatialHash.new(0.0, 0.0, 4000.0, 3000.0, 96.0, 64)
+	hash.rebuild(PackedByteArray([0, 0]), PackedFloat64Array([1.0, 2.0]),
+		PackedFloat64Array([1.0, 2.0]), 2)
+	assert_gt(hash.min_x(), hash.max_x(), "min past max, so every reach test fails")

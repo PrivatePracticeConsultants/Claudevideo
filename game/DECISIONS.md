@@ -1790,6 +1790,73 @@ commands or data through the same pipeline - logged, replayed, hashed - and
 test_strategy holds the contract: 15 tests, including bit-exact replay of rig
 placement and doctrine choice.
 
+## P0-70 · The lag was looking for nothing, 20,000 times a tick
+
+Reported: "the game feels a little laggy." Profiled rather than guessed, with a
+new tool (`tools/frame_profile.gd`) that times each stage separately, because
+"feels laggy" is not a number and the existing render-stress tool only counts
+draw calls. On Terminus act III with 208 turrets and 30 drones alive:
+
+    renderer.note_tick (per tick)   1.82ms      x4 at 4x speed
+    renderer.update_visuals         1.94ms
+    renderer.refresh_board         16.28ms      on every click
+    sim.step                        5.50ms      x4 at 4x speed
+
+A 60fps frame is 16.6ms. At 4x speed the sim alone wanted 22ms, so the game
+could not keep up and `MAX_STEPS_PER_FRAME` silently clamped it - the lag was
+real and the cause was almost entirely **sweeping empty pool slots**.
+
+The pools are 4,096 enemies and 8,192 projectiles. Every tick swept all of both,
+plus the renderer's three diff loops - roughly 20,000 iterations a tick to find
+thirty live things, four times a frame. Three fixes, all cost-only:
+
+1. **Live high-water bounds.** The free lists hand out the LOWEST free index
+   first, so live slots cluster at the bottom and a high-water mark bounds every
+   sweep tightly. It resets exactly when a pool empties. note_tick 1.82ms ->
+   0.07ms; `_advance_enemies` 0.06ms.
+2. **An exact reject before the hash walk.** 208 turrets each scanned a 7x7
+   neighbourhood of hash cells whether or not anything was near them. The
+   spatial hash now reports the bounding box of everything in it - measured in
+   the pass already reading every position - and a turret whose reach does not
+   touch that box provably has no target. `_update_platforms` 4.29ms -> 0.14ms,
+   and `sim.step` 5.50ms -> 0.49ms.
+3. **Splitting the board rebuild by trigger, and bucketing the links.**
+   `rebuild_link_pairs` was the obvious double loop: 43,264 iterations at 208
+   turrets, 8.4ms, on every placement AND every upgrade. Only turrets that
+   actually lend are collected, and they are bucketed on the build grid that
+   already exists. The ground overlay - 6.9ms sweeping every cell - now redraws
+   only when ground is BOUGHT, which is the only thing that can change it.
+   A turret click went 16.3ms -> 4.6ms.
+
+Steady state at 4x is now ~3ms a frame against a 16.6ms budget, and the test
+suite came along for the ride: test_engagement 220s -> 73s, test_brood 128s ->
+20s.
+
+**Three attempts at this were wrong, in the same way each time: a bound or a
+cached value that could go stale independently of the thing it described.** All
+three were caught by the audit, and the fixes are structural rather than careful:
+
+- The enemy box started as a sim field measured beside the hash rebuild. Any test
+  or future code that moved a drone without stepping got a stale box and turrets
+  that would not fire - which is exactly how `test_a_jammed_turret_does_not_fire`
+  failed. The box now lives ON the hash, computed inside `rebuild()`, so it is
+  exactly as fresh as the hash is, always.
+- The high-water mark was raised inside `_fire()` rather than at the claim, so a
+  test that took a projectile slot off the free list the same way `_fire()` does
+  was invisible to the renderer. Claiming a slot is now one function that raises
+  the mark, and nothing else pops those lists.
+- The renderer's diff loops first used "this tick's bound or last tick's", which
+  is correct only if `note_tick` runs every single tick. A test calling it twice
+  caught it. They now keep a bound that only grows and drops to zero after a
+  sweep that found the pool already drained - correct at any cadence.
+
+**Proof it is cost-only, not behaviour:** the same probe run against the stashed
+pre-optimisation tree returns identical results, act for act, kill for kill -
+Port IV at 88 integrity and 1,436 kills both before and after. 350 tests, 0
+failed. And a "skip cells that are not buildable" reject in the ground overlay
+is recorded as REJECTED: it measured slower, because most of the band beside the
+road is buildable and it added a call per cell to reject almost nothing.
+
 ## P0-14 · Deliberately not built in P0
 
 Not oversights — later phases, per §5.7. Anything tempting that came up is in

@@ -56,8 +56,7 @@ func test_a_shot_landing_leaves_an_impact() -> void:
 	# renderer notices a slot going from alive to dead, whatever emptied it.
 	# Claimed off the free list exactly as _fire() does, so despawning it returns
 	# a slot the pool actually handed out.
-	_sim._p_free_top -= 1
-	var slot: int = _sim._p_free[_sim._p_free_top]
+	var slot: int = _sim._claim_projectile_slot()
 	_sim.p_alive[slot] = 1
 	_sim.p_x[slot] = _sim.e_x[0]
 	_sim.p_y[slot] = _sim.e_y[0]

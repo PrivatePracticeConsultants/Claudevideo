@@ -289,10 +289,13 @@ func _process(delta: float) -> void:
 		tier_sum += _sim.platform_tier(i)
 	if _sim.t_count != _platforms_drawn or tier_sum != _tiers_drawn \
 			or _sim.cells_bought() != _cells_drawn:
+		# Whether the GROUND changed is passed through, so buying a turret does not
+		# pay to redraw an overlay only a ground purchase can alter.
+		var ground_changed := _sim.cells_bought() != _cells_drawn
 		_platforms_drawn = _sim.t_count
 		_tiers_drawn = tier_sum
 		_cells_drawn = _sim.cells_bought()
-		_renderer.refresh_board()
+		_renderer.refresh_board(ground_changed)
 	_refresh_cursor()
 	_hud.refresh(_speed, _paused, _hover_platform, _blueprint, _cursor_can_buy)
 	if _sim.result() != _sounded_result:

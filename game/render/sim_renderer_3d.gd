@@ -75,6 +75,10 @@ var _enemy_hurt_color := Color.WHITE
 ## from silhouette; now it is readable from colour too, and the colours rhyme
 ## with the armour classes the wave preview groups by.
 var _enemy_class_colors: PackedColorArray = PackedColorArray()
+## Last tick's pool bounds, so the diff loops cover slots that were alive then
+## and are not now. See _note_wrecks.
+var _last_e_bound: int = 0
+var _last_p_bound: int = 0
 var _champion_scale := 1.5
 var _champion_tint := Color.WHITE
 var _champion_blend := 0.65
@@ -1658,6 +1662,8 @@ func _build_effect_layer() -> void:
 
 	_was_alive_e.resize(_sim.e_alive.size())
 	_was_alive_p.resize(_sim.p_alive.size())
+	_last_e_bound = 0
+	_last_p_bound = 0
 	_was_cooldown.resize(_sim.t_used.size())
 	_was_integrity = _sim.integrity()
 
@@ -1730,7 +1736,13 @@ func _note_impacts() -> void:
 	var lift := float(_world.get("projectile_lift", 20.0))
 	var spark := _color_of(_world.get("impact", "#ffe6b0"))
 	var blast := _color_of(_world.get("blast", "#ff9a4a"))
-	for i in _sim.p_alive.size():
+	# Same grow-until-drained rule as _note_wrecks: an impact IS a projectile
+	# leaving the pool, so the sweep must outlive the pool emptying.
+	_last_p_bound = maxi(_last_p_bound, _sim.projectile_slot_bound())
+	# Nothing left alive means every death up to the bound is inspected by this
+	# sweep, so the bound can start again from zero afterwards.
+	var drained := _sim.p_live_count == 0
+	for i in _last_p_bound:
 		var alive := _sim.p_alive[i]
 		var died := _was_alive_p[i] == 1 and alive == 0
 		_was_alive_p[i] = alive
@@ -1749,11 +1761,22 @@ func _note_impacts() -> void:
 				float(_world.get("impact_life", 0.11)), spark)
 			if _sfx != null:
 				_sfx.play(Sfx.IMPACT)
+	if drained:
+		_last_p_bound = 0
 
 func _note_wrecks() -> void:
 	var tint := _color_of(_world.get("wreck", "#ff7042"))
 	var height := float(_world.get("enemy_height", 26.0))
-	for i in _sim.e_alive.size():
+	# A DIFF loop, so it cannot use the sim's live bound directly: the bound resets
+	# to zero on the death that empties the pool, and that death is precisely the
+	# one this function exists to draw. So the renderer keeps its OWN bound that
+	# only grows, and drops to zero only after a sweep that found nothing left
+	# alive - which means every death up to it has just been processed. Deliberately
+	# not "this tick's bound or last tick's": that version was correct only if
+	# note_tick ran on every single tick, and a test that called it once caught it.
+	_last_e_bound = maxi(_last_e_bound, _sim.enemy_slot_bound())
+	var drained := _sim.e_live_count == 0
+	for i in _last_e_bound:
 		var alive := _sim.e_alive[i]
 		var died := _was_alive_e[i] == 1 and alive == 0
 		_was_alive_e[i] = alive
@@ -1764,6 +1787,8 @@ func _note_wrecks() -> void:
 			radius * 2.2, 1.8, float(_world.get("wreck_life", 0.26)), tint)
 		if _sfx != null:
 			_sfx.play(Sfx.WRECK)
+	if drained:
+		_last_e_bound = 0
 
 ## Claim the next slot in the ring. Oldest-first eviction, which at 1024 slots
 ## means the only thing that can ever be cut short is an effect from a tick where
@@ -1841,8 +1866,16 @@ func _instanced(mesh: Mesh, capacity: int) -> MultiMeshInstance3D:
 
 ## Rebuilt when the board changes - a turret placed or upgraded, or ground
 ## bought. Not per frame.
-func refresh_board() -> void:
-	_refresh_cells()
+##
+## Split by trigger, because the two halves cost very different amounts and are
+## caused by different things: the ground overlay sweeps every cell on the board
+## (7.5ms at 74x40) and only changes when ground is BOUGHT, while turrets and
+## their link lines change on every placement and every upgrade. Rebuilding both
+## on either was a 12ms hitch on every click - most of it redrawing an overlay
+## that had not changed.
+func refresh_board(ground_changed: bool = true) -> void:
+	if ground_changed:
+		_refresh_cells()
 	_refresh_turrets()
 	_refresh_link_lines()
 
@@ -1919,7 +1952,15 @@ func _refresh_cells() -> void:
 	var offered := _color_of(_world.get("band_offer", "#39506e"))
 	var premium := _color_of(_world.get("band_premium", "#c9a227"))
 	var shown := 0
+	# Centres are computed arithmetically rather than through cell_centre_x/y: this
+	# loop runs over every cell on the board and a GDScript call per axis per cell
+	# is measurable. A "skip cells that are not buildable" reject was tried here
+	# and made it SLOWER - on these boards most of the band beside the road is
+	# buildable, so it added a call per cell and rejected almost nothing.
+	var cell_size := _sim.cell_size()
+	var half := cell_size * 0.5
 	for cy in _sim.grid_rows():
+		var centre_z := float(cy) * cell_size + half
 		for cx in _sim.grid_cols():
 			var unlocked := _sim.cell_is_unlocked(cx, cy)
 			if not unlocked and not _sim.cell_is_offerable(cx, cy):
@@ -1933,7 +1974,7 @@ func _refresh_cells() -> void:
 				else float(_world.get("band_offer_alpha", 0.3))
 			mm.set_instance_transform(shown, Transform3D(
 				Basis().scaled(Vector3(size, height, size)),
-				to_world(_sim.cell_centre_x(cx), _sim.cell_centre_y(cy), height * 0.5)))
+				to_world(float(cx) * cell_size + half, centre_z, height * 0.5)))
 			mm.set_instance_color(shown, tint)
 			shown += 1
 	mm.visible_instance_count = shown
@@ -2006,7 +2047,9 @@ func _update_enemies(alpha: float) -> void:
 	per_layer.fill(0)
 	var bars := 0
 
-	for i in _sim.e_alive.size():
+	# Bounded by the sim's live high-water mark, not by the pool size: the pool is
+	# 4,096 slots and a busy board has a few hundred live.
+	for i in _sim.enemy_slot_bound():
 		if _sim.e_alive[i] == 0:
 			continue
 		# Interpolate distance-along-path, then resolve it to a position, so
@@ -2064,7 +2107,7 @@ func _update_projectiles(alpha: float) -> void:
 	var tint := _color("projectile")
 	var shown := 0
 
-	for i in _sim.p_alive.size():
+	for i in _sim.projectile_slot_bound():
 		if _sim.p_alive[i] == 0:
 			continue
 		var px: float = _sim.p_prev_x[i] + (_sim.p_x[i] - _sim.p_prev_x[i]) * alpha

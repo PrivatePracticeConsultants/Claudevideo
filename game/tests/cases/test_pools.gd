@@ -91,3 +91,68 @@ func _first_live(sim: Sim) -> int:
 		if sim.e_alive[i] == 1:
 			return i
 	return -1
+
+# --- the live-slot bounds ------------------------------------------------------
+#
+# The tick and the renderer both sweep to a high-water bound instead of to the
+# pool size, which took sim.step from 4.9ms to 0.5ms. A bound that was ever too
+# LOW would silently stop simulating something that is alive - the worst class of
+# bug this project can ship - so it is pinned from both directions here.
+
+func test_the_enemy_bound_covers_every_live_slot() -> void:
+	var sim := SimFixture.fresh()
+	SimFixture.run_greedy(sim, true, 6, 12)
+	var highest := -1
+	var live := 0
+	for i in sim.e_alive.size():
+		if sim.e_alive[i] == 1:
+			highest = i
+			live += 1
+	assert_gt(float(live), 0.0, "fixture sanity: drones are on the board")
+	assert_gt(float(sim.enemy_slot_bound()), float(highest),
+		"the bound is past the highest live enemy slot")
+	assert_lte(float(sim.enemy_slot_bound()), float(sim.e_alive.size()),
+		"and never past the pool")
+
+func test_the_projectile_bound_covers_every_live_slot() -> void:
+	var sim := SimFixture.fresh()
+	SimFixture.run_greedy(sim, true, 6, 12)
+	var highest := -1
+	for i in sim.p_alive.size():
+		if sim.p_alive[i] == 1:
+			highest = i
+	if highest < 0:
+		return  # nothing in flight on this exact tick; the enemy case covers the rule
+	assert_gt(float(sim.projectile_slot_bound()), float(highest),
+		"the bound is past the highest live projectile slot")
+
+func test_the_bound_holds_through_a_whole_act() -> void:
+	# Every tick, not one sampled moment: the bound is maintained incrementally,
+	# so the interesting failures are transient.
+	var replay := SimFixture.fresh()
+	# Driven by the greedy policy's own commands is unnecessary here - what is
+	# under test is pool bookkeeping, and the wave director alone exercises spawn,
+	# leak, split and despawn on every tick of a real act.
+	for _t in 2000:
+		replay.step()
+		var bound := replay.enemy_slot_bound()
+		for i in range(bound, replay.e_alive.size()):
+			if replay.e_alive[i] == 1:
+				assert_true(false, "a live enemy sits above the bound at tick %d" % replay.tick())
+				return
+		var pbound := replay.projectile_slot_bound()
+		for i in range(pbound, replay.p_alive.size()):
+			if replay.p_alive[i] == 1:
+				assert_true(false, "a live projectile sits above the bound at tick %d" % replay.tick())
+				return
+	assert_true(true, "the bound held every tick of the act")
+
+func test_an_emptied_pool_resets_the_bound() -> void:
+	var sim := SimFixture.fresh()
+	sim._begin_wave(0)
+	sim._spawn_at(sim.enemy_index("walker"), 40.0)
+	assert_gt(float(sim.enemy_slot_bound()), 0.0, "a spawn raises the bound")
+	for i in sim.e_alive.size():
+		if sim.e_alive[i] == 1:
+			sim._despawn_enemy(i)
+	assert_eq(sim.enemy_slot_bound(), 0, "an empty pool costs nothing to sweep")

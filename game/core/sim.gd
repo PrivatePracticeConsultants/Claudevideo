@@ -210,6 +210,28 @@ var _overcharge_damage: float = 1.0
 var t_overcharge: PackedInt32Array = PackedInt32Array()
 var t_overcharge_cd: PackedInt32Array = PackedInt32Array()
 var _overcharges: int = 0
+## How far into each pool anything live can possibly be, as a slot count.
+##
+## The pools are 4,096 enemies and 8,192 projectiles, and the tick used to sweep
+## all of both to find the thirty things actually alive - ~20,000 loop iterations
+## a tick, four ticks a frame at 4x speed. Measured at 5.5ms per step on a late
+## board, which is a third of a 60fps frame spent looking for nothing.
+##
+## The free lists hand out the LOWEST free index first (`_e_free[i] = max-1-i`,
+## popped from the top), so live slots cluster at the bottom and a high-water
+## mark bounds every sweep tightly. It is an over-estimate between the moment a
+## high slot frees and the moment the pool empties, never an under-estimate -
+## which is the only direction that is safe, because a bound that was too low
+## would silently stop simulating something that is alive. There is a test for
+## exactly that.
+var _e_high: int = 0
+var _p_high: int = 0
+## The box every live drone is inside lives on the spatial hash - see
+## SpatialHash.rebuild. 208 turrets each scanning a 7x7 neighbourhood of hash
+## cells measured 4.3ms a tick, and on a 4,000-unit board with thirty drones in
+## one stretch of road most of those turrets provably have nothing in range.
+## Testing a turret's reach against the box first is an EXACT early-out, so it
+## changes cost and nothing else.
 ## The Salvage Rig: a tier whose income_per_wave is non-zero earns instead of
 ## firing. Every rig is a gun you did not build - the guns-versus-economy trade
 ## the deployment limit exists to make sharp.
@@ -1819,7 +1841,7 @@ func step() -> void:
 	_apply_commands()
 	_refresh_links()
 	_advance_enemies()
-	_hash.rebuild(e_alive, e_x, e_y, _max_enemies)
+	_hash.rebuild(e_alive, e_x, e_y, _e_high)
 	_update_support_drones()
 	_update_platforms()
 	_advance_projectiles()
@@ -1829,7 +1851,7 @@ func step() -> void:
 	_tick += 1
 
 func _advance_enemies() -> void:
-	for i in _max_enemies:
+	for i in _e_high:
 		if e_alive[i] == 0:
 			continue
 		e_prev_prog[i] = e_prog[i]
@@ -1986,15 +2008,54 @@ func _recompute_link(i: int) -> void:
 ## rather than to the simulation, which computes every multiplier in full whether
 ## anything is on screen or not.
 func rebuild_link_pairs(limit: int) -> void:
+	# Was the obvious double loop over every turret, which is 43,264 iterations at
+	# 208 turrets and measured 8ms - a visible hitch on every placement and every
+	# upgrade, since that is when the board is redrawn. Two changes, no behaviour
+	# difference: only turrets that actually LEND anything can be the far end of a
+	# link, so they are collected once; and they are bucketed by the widest support
+	# radius in the game, so each turret looks at its own 3x3 neighbourhood instead
+	# of at all 208. Pair order is preserved - outer loop ascending i, inner
+	# ascending j - because the draw order and the limit cutoff depend on it.
 	_link_pairs.clear()
+	var lenders := PackedInt32Array()
+	for j in t_count:
+		var radius_sq := _bp_support_radius_sq[t_blueprint[j]]
+		if radius_sq > 0.0 and _bp_support_tier_scale[t_blueprint[j]] * float(t_tier[j]) > 0.0:
+			lenders.append(j)
+	if lenders.is_empty():
+		return
+	# Bucketed on the BUILD grid that already exists, so there is no new cell size
+	# and no new key encoding - the grid's own row stride is the key. A Vector2i key
+	# was tried and the purity linter refused it, correctly: Vector2 is float32 and
+	# has no business anywhere near this file, int variant or not.
+	var span := maxi(1, int(ceil(_max_support_radius / _cell_size)))
+	var buckets := {}
+	for j in lenders:
+		var key := _cell_of(t_x[j], t_y[j])
+		if not buckets.has(key):
+			buckets[key] = PackedInt32Array()
+		var bucket: PackedInt32Array = buckets[key]
+		bucket.append(j)
+		buckets[key] = bucket
 	for i in t_count:
 		var mine := t_blueprint[i]
-		for j in t_count:
+		var cx := int(floor(t_x[i] / _cell_size))
+		var cy := int(floor(t_y[i] / _cell_size))
+		# Ascending j within the neighbourhood, so the emitted order matches what
+		# the flat double loop produced.
+		var near := PackedInt32Array()
+		for oy in range(cy - span, cy + span + 1):
+			for ox in range(cx - span, cx + span + 1):
+				var key := oy * _grid_cols + ox
+				if buckets.has(key):
+					near.append_array(buckets[key] as PackedInt32Array)
+		var ordered := Array(near)
+		ordered.sort()
+		for entry: int in ordered:
+			var j := entry
 			if j == i or t_blueprint[j] == mine:
 				continue
 			var radius_sq := _bp_support_radius_sq[t_blueprint[j]]
-			if radius_sq <= 0.0 or _bp_support_tier_scale[t_blueprint[j]] * float(t_tier[j]) <= 0.0:
-				continue
 			var dx := t_x[j] - t_x[i]
 			var dy := t_y[j] - t_y[i]
 			if dx * dx + dy * dy > radius_sq:
@@ -2003,6 +2064,7 @@ func rebuild_link_pairs(limit: int) -> void:
 				return
 			_link_pairs.append(i)
 			_link_pairs.append(j)
+
 
 ## Menders and jammers, both of which pulse on a fixed cadence rather than every
 ## tick.
@@ -2014,7 +2076,7 @@ func rebuild_link_pairs(limit: int) -> void:
 func _update_support_drones() -> void:
 	if not _has_support_drones:
 		return
-	for i in _max_enemies:
+	for i in _e_high:
 		if e_alive[i] == 0:
 			continue
 		var type_index := e_type[i]
@@ -2099,7 +2161,16 @@ func _update_platforms() -> void:
 		# the per-tick loop simply has nothing to do with it.
 		if _tier_income[t_tier_slot[i]] > 0:
 			continue
-		var target := _acquire_target(t_x[i], t_y[i], platform_range_sq(i), t_priority[i])
+		# Exact early-out before the hash walk: if the turret's reach does not
+		# touch the box every drone is inside, there is provably nothing to find.
+		# A skip here is indistinguishable from a failed acquire - neither touches
+		# the cooldown - so behaviour is identical and only the cost changes.
+		var range_sq := platform_range_sq(i)
+		var reach := sqrt(range_sq)
+		if t_x[i] + reach < _hash.min_x() or t_x[i] - reach > _hash.max_x() \
+				or t_y[i] + reach < _hash.min_y() or t_y[i] - reach > _hash.max_y():
+			continue
+		var target := _acquire_target(t_x[i], t_y[i], range_sq, t_priority[i])
 		if target < 0:
 			continue
 		_fire(i, target)
@@ -2202,8 +2273,7 @@ func _fire(platform: int, target: int) -> void:
 		# exist to prevent, and it would read as a balance mystery.
 		_projectile_overflow += 1
 		return
-	_p_free_top -= 1
-	var i := _p_free[_p_free_top]
+	var i := _claim_projectile_slot()
 	var slot := t_tier_slot[platform]
 	p_alive[i] = 1
 	p_x[i] = t_x[platform]
@@ -2244,7 +2314,7 @@ func _fire(platform: int, target: int) -> void:
 	p_live_count += 1
 
 func _advance_projectiles() -> void:
-	for i in _max_projectiles:
+	for i in _p_high:
 		if p_alive[i] == 0:
 			continue
 		p_prev_x[i] = p_x[i]
@@ -2568,8 +2638,7 @@ func _spawn_at(type_index: int, prog: float, route: int = 0, champion: bool = fa
 		# enemy existed.
 		_spawn_overflow += 1
 		return
-	_e_free_top -= 1
-	var i := _e_free[_e_free_top]
+	var i := _claim_enemy_slot()
 	e_alive[i] = 1
 	e_hp[i] = _type_hp_now[type_index]
 	e_hp_max[i] = _type_hp_now[type_index]
@@ -2612,6 +2681,8 @@ func _despawn_enemy(index: int) -> void:
 	_e_free[_e_free_top] = index
 	_e_free_top += 1
 	e_live_count -= 1
+	if e_live_count == 0:
+		_e_high = 0
 
 func _despawn_projectile(index: int) -> void:
 	if p_alive[index] == 0:
@@ -2620,6 +2691,8 @@ func _despawn_projectile(index: int) -> void:
 	_p_free[_p_free_top] = index
 	_p_free_top += 1
 	p_live_count -= 1
+	if p_live_count == 0:
+		_p_high = 0
 
 func _resolve_result() -> void:
 	# Loss is checked first: if the last enemy of the last wave leaks and that
@@ -2643,7 +2716,7 @@ func _resolve_result() -> void:
 ## tick the result resolves are low, and the test passed by luck rather than by
 ## the invariant holding. With 118 turrets firing it happens nearly every time.
 func _clear_projectiles() -> void:
-	for i in _max_projectiles:
+	for i in _p_high:
 		if p_alive[i] == 1:
 			_despawn_projectile(i)
 
@@ -2880,6 +2953,33 @@ func platform_overcharge_cooldown(i: int) -> int: return t_overcharge_cd[i]
 func overcharge_cost() -> int: return _overcharge_cost
 func overcharges_used() -> int: return _overcharges
 func enemy_is_champion(i: int) -> bool: return e_champion[i] == 1
+## An upper bound on live slot indices in each pool. Every sweep - in here and in
+## the renderer - runs to these instead of to the pool size. See _e_high.
+## Take a slot off a free list AND raise that pool's high-water mark, in one
+## place so the two cannot come apart. They were apart for one build - the mark
+## was raised inside _fire() rather than at the claim - and a test that claimed a
+## projectile slot the same way _fire() does went unnoticed by the renderer.
+## Anything that hands out a slot goes through here.
+## A position's build-grid cell as one integer, using the grid's own row stride.
+func _cell_of(x: float, y: float) -> int:
+	return int(floor(y / _cell_size)) * _grid_cols + int(floor(x / _cell_size))
+
+func _claim_enemy_slot() -> int:
+	_e_free_top -= 1
+	var slot := _e_free[_e_free_top]
+	if slot + 1 > _e_high:
+		_e_high = slot + 1
+	return slot
+
+func _claim_projectile_slot() -> int:
+	_p_free_top -= 1
+	var slot := _p_free[_p_free_top]
+	if slot + 1 > _p_high:
+		_p_high = slot + 1
+	return slot
+
+func enemy_slot_bound() -> int: return _e_high
+func projectile_slot_bound() -> int: return _p_high
 func platform_jammed(i: int) -> bool: return t_disabled[i] > 0
 func enemy_repair(type_index: int) -> int: return _type_repair_now[type_index]
 func enemy_jam_ticks(type_index: int) -> int: return _type_jam_ticks[type_index]

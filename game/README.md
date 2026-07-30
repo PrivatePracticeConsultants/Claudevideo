@@ -523,6 +523,12 @@ xvfb-run -a godot --path game --rendering-driver opengl3 \
 xvfb-run -a godot --path game --rendering-driver opengl3 \
     --script res://tools/capture_screenshot.gd -- --wave 9 --enemies 6 --zoom 8 --out shot.png
 
+# Where a frame actually goes, stage by stage, on a real board. Times the CPU
+# side - the per-tick diff, the per-frame instance fill, the board rebuild -
+# separately, so the answer is WHICH stage rather than how much.
+xvfb-run -a godot --path game --rendering-driver opengl3 \
+    --script res://tools/frame_profile.gd -- --level 46 --wave 10
+
 # Verify draw calls stay flat as entity count climbs.
 xvfb-run -a godot --path game --rendering-driver opengl3 \
     --script res://tools/render_stress.gd
