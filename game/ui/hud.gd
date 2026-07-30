@@ -9,8 +9,14 @@ extends CanvasLayer
 ## turret you are hovering. Still deliberately absent: a build menu richer than
 ## one cycling key.
 
+## How long a flash() notice stays up.
+const NOTICE_SECONDS := 6.0
+
 var _sim: Sim
 var _theme: Dictionary
+var _notice: Label
+var _notice_text: String = ""
+var _notice_left: float = 0.0
 var _stats: Label
 var _hint: Label
 var _banner: Label
@@ -85,6 +91,15 @@ func setup(sim: Sim, theme: Dictionary) -> void:
 	# next wave" is the difference between planning a board and guessing at one -
 	# and it is information the wave file already has, so withholding it is not
 	# difficulty, it is just opacity.
+	# Sits between the level title and the wave preview, and is hidden unless it
+	# has something to say.
+	_notice = Label.new()
+	_notice.position = Vector2(14, 68)
+	_notice.add_theme_font_size_override("font_size", 14)
+	_notice.add_theme_color_override("font_color", _color("warn"))
+	_notice.visible = false
+	add_child(_notice)
+
 	_preview = Label.new()
 	_preview.position = Vector2(14, 46)
 	_preview.add_theme_font_size_override("font_size", 14)
@@ -206,6 +221,27 @@ func set_level(name: String, index: int, total: int, inherited: int = 0,
 func set_modules(ids: PackedStringArray) -> void:
 	_modules = ids
 	_last_signature = -1
+
+## A short-lived notice, shown under the level title and then gone.
+##
+## For things the game did on the player's behalf rather than things they chose.
+## Deliberately not the banner: the banner is for the act's result and taking it
+## over for a settings message would step on the one thing that must always be
+## readable.
+func flash(message: String) -> void:
+	_notice_text = message
+	_notice_left = NOTICE_SECONDS
+	if _notice != null:
+		_notice.text = message
+		_notice.visible = true
+
+func _process(delta: float) -> void:
+	if _notice_left <= 0.0:
+		return
+	_notice_left -= delta
+	if _notice_left <= 0.0 and _notice != null:
+		_notice.visible = false
+		_notice_text = ""
 
 func set_offer(ids: PackedStringArray) -> void:
 	_offer = ids

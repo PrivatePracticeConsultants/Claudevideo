@@ -40,6 +40,17 @@ var _peak_projectiles: int = 0
 ## worst frame in each sample window is kept, along with a count of frames that
 ## took more than twice the window's typical frame. Both reset per window, so
 ## the readout describes the last second rather than the whole session.
+## What the frame is actually being rendered ON, and at what settings.
+##
+## Added because a report of "11.5 fps on wave 1 with two turrets" is not enough
+## to act on: a board that empty costs the same as a full one - the cost is
+## static fill - so the useful questions are which tier is running, how far the
+## 3D pass has already been scaled down, and whether there is a GPU behind any of
+## it at all. An adapter reading "SwiftShader" or "llvmpipe" means the browser is
+## rendering in software, and no amount of tuning in here will fix that.
+var _quality_line: String = ""
+var _adapter: String = ""
+
 var _worst_ms: float = 0.0
 var _worst_shown: float = 0.0
 var _long_frames: int = 0
@@ -55,10 +66,20 @@ func setup(sim: Sim, text_color: Color) -> void:
 	add_child(_label)
 	_last_objects = int(Performance.get_monitor(Performance.OBJECT_COUNT))
 	_last_memory = int(Performance.get_monitor(Performance.MEMORY_STATIC))
+	# Asked once. It cannot change while the process runs, and on the web build
+	# the call is not free.
+	_adapter = "%s (%s)" % [RenderingServer.get_video_adapter_name(),
+		RenderingServer.get_video_adapter_vendor()]
 	visible = false
 
 func note_steps(steps: int) -> void:
 	_steps_this_frame = steps
+
+## Told rather than asked, so the overlay keeps knowing nothing about the
+## renderer's internals.
+func note_quality(name: String, scale: float, auto_dropped: bool) -> void:
+	_quality_line = "%s   3D scale %.2f%s" % [name, scale,
+		"   (auto-reduced)" if auto_dropped else ""]
 
 func _process(delta: float) -> void:
 	_peak_enemies = maxi(_peak_enemies, _sim.e_live_count)
@@ -92,6 +113,8 @@ func _process(delta: float) -> void:
 		"F3  debug",
 		"fps            %.1f  (frame %.2f ms)" % [_fps, 0.0 if _fps <= 0.0 else 1000.0 / _fps],
 		"worst frame    %.1f ms   long frames %d/s" % [_worst_shown, _long_shown],
+		"quality        %s" % _quality_line,
+		"gpu            %s" % _adapter,
 		"sim steps/frame %d" % _steps_this_frame,
 		"tick           %d" % _sim.tick(),
 		"enemies        %d  (peak %d)" % [_sim.e_live_count, _peak_enemies],

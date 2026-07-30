@@ -384,6 +384,11 @@ const QUALITY_PIXEL_SHARE := [1.0, 0.65, 0.4]
 var _quality: int = QUALITY_BALANCED
 var _scenery_layers: Array[MultiMeshInstance3D] = []
 
+## The fraction the 3D pass is currently rendered at, for the debug readout.
+func render_scale() -> float:
+	var viewport := get_viewport()
+	return 1.0 if viewport == null else viewport.scaling_3d_scale
+
 func quality() -> int: return _quality
 func set_quality(level: int) -> void:
 	_quality = clampi(level, 0, QUALITY_NAMES.size() - 1)

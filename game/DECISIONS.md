@@ -2138,3 +2138,64 @@ any frame it saved.
 took over twice the typical one, because the average it reported before could
 not have shown any of this — and because the next report of this kind should
 arrive as numbers from the machine that has the problem.
+
+## P0-76 · The game now notices it is running badly, and says what it is running on
+
+The F3 readout came back from the machine that has the problem:
+
+```
+fps 11.5 (frame 86.68 ms)   worst frame 93.2 ms   long frames 0/s
+sim steps/frame 3   platforms 2   enemies 12   draw calls 24
+```
+
+Three things fall out of that, and together they close the question P0-75 left
+open.
+
+**It is not a stutter.** Worst frame 93.2 ms against an 86.7 ms average, zero
+long frames. That is uniform slowness, which is exactly the shape P0-75 measured
+here and could not reproduce as anything else. Nothing is hitching; the frames
+are all just expensive.
+
+**It is not the board.** 11.5 fps on wave 1 of level 5 with TWO platforms and
+twelve drones. `tools/render_stress.gd` already said the same thing from the
+other direction - 130 ms/frame with zero enemies on screen - so entity count is
+close to irrelevant and the cost is static fill. Every optimisation aimed at
+entities, targeting or the tick loop was therefore never going to move this
+number, which is worth knowing before spending another day on one.
+
+**It is very probably not a GPU at all.** Eleven frames a second on an almost
+empty scene at roughly 920,000 pixels is not what any hardware accelerator does.
+It is what a software rasteriser does. So the overlay now reports
+`RenderingServer.get_video_adapter_name()` and its vendor, because "llvmpipe",
+"SwiftShader" or "Software" in that line means the browser is not using the GPU
+and nothing tunable in this repo will fix it - and reading it takes two seconds
+where guessing at it took two rounds. It also reports the current tier and the
+3D scale, since neither was visible and both change what every other number in
+the readout means.
+
+The fix for the general case is that the game no longer waits to be told. F2
+only ever helped a player who knew F2 existed. `_govern_quality()` watches the
+real frame time and steps the tier down after sustained slowness, saving the
+result so it survives a reload.
+
+Three rules, all of them about not fighting the player:
+
+- **It only steps DOWN.** Stepping back up on a quiet moment gives a game that
+  oscillates between tiers, and a stutter caused by the fix is worse than the
+  one it fixed.
+- **F2 ends it for the session.** An explicit choice is an explicit choice,
+  including the choice to run HIGH on a machine that cannot hold it.
+- **It waits for SUSTAINED slowness** - five seconds by default, and any single
+  good frame resets the count. A level load, a shader compile and a backgrounded
+  tab all produce enormous single frames, and none of them mean the player
+  should silently lose their graphics.
+
+Both thresholds are in `theme.json` like every other tuneable, and the tests pin
+the boundary rather than the happy path: 25 fps against a 24 fps floor must never
+trip, 60 fps must never trip, one four-second frame among good ones must be
+forgiven, and a run of slow frames broken by a single good one must start over.
+
+Verified in the real game rather than only in the harness - this container is
+slow enough to be its own test case. Starting from a cleared progress file and
+running for 45 seconds, `progress.json` came back `{"boards_unlocked":1,
+"quality":2}`: it stepped BALANCED to FAST by itself and persisted it.

@@ -176,10 +176,20 @@ in every run.
   Those numbers come from a machine with no GPU, so only their ordering and
   their ratios mean anything. **If the game feels slow, press `F2` until it says
   FAST.**
+
+  You should not normally have to. If the frame rate stays below 24 fps for
+  five seconds the game steps the tier down by itself and says so, and it
+  remembers. It only ever steps *down*, and pressing `F2` once turns the
+  automatic behaviour off for the session — an explicit choice wins, including
+  the choice to run HIGH on a machine that struggles with it.
 - **`F3`** shows the debug readout, including the **worst frame** in the last
-  second and how many frames took over twice the typical one. If the game feels
-  like it is skipping rather than merely slow, those two numbers are the ones
-  worth reporting — an average frame time cannot tell the difference.
+  second, how many frames took over twice the typical one, the current quality
+  tier and 3D scale, and the **GPU** actually being used. Those are the numbers
+  worth reporting if it runs badly — an average frame time cannot tell slowness
+  from stutter, and if the `gpu` line says `llvmpipe`, `SwiftShader` or
+  `Software`, the browser is not using the graphics card at all and no setting
+  in the game will fix that. (In Chrome: check `chrome://gpu`, and make sure
+  "Use graphics acceleration when available" is on in Settings → System.)
 - **`Q`** cycles weapon · **`1`–`4`** speed · **`space`** pause · **`[`**/**`]`**
   move between unlocked boards · **`M`** mute · **`F3`** debug · **`R`** restart ·
   **`N`** next level after a win. On a won act, **`1`**–**`3`** fit a module

@@ -94,6 +94,27 @@ var _board_starts: PackedInt32Array = PackedInt32Array()
 var _dragging: bool = false
 var _drag_from := Vector2.ZERO
 
+## Automatic quality reduction.
+##
+## F2 only helps a player who knows it exists. The readout that prompted this
+## showed 11.5 fps on wave 1 of level 5 with two turrets on the board - a board
+## that empty costs the same as a full one, because the cost is static fill - and
+## nothing about that situation was going to improve by itself. So the game now
+## notices it is running badly and steps itself down.
+##
+## Three rules, and they are all about not fighting the player:
+##   - It only ever steps DOWN. Stepping back up on a quiet moment would produce
+##     a game that oscillates, and a stutter caused by the fix is worse than the
+##     thing it fixed.
+##   - Pressing F2 ends it for the session. An explicit choice is an explicit
+##     choice, including the choice to run HIGH on a machine that cannot.
+##   - It waits several seconds of SUSTAINED slowness. Level loads, the first
+##     frames after a shader compile and a backgrounded tab are all briefly slow
+##     and none of them mean the settings are wrong.
+var _slow_for: float = 0.0
+var _auto_quality: bool = true
+var _auto_dropped: bool = false
+
 func _ready() -> void:
 	_theme = _load_theme()
 	_levels = Database.load_levels()
@@ -308,6 +329,8 @@ func _process(delta: float) -> void:
 			# backlog is still right; dropping the phase never was.
 			_accumulator = fmod(_accumulator, _tick_period)
 	_overlay.note_steps(steps)
+	_govern_quality(delta)
+	_overlay.note_quality(_renderer.quality_name(), _renderer.render_scale(), _auto_dropped)
 
 	var alpha := 0.0 if _sim.is_over() else clampf(_accumulator / _tick_period, 0.0, 1.0)
 	_renderer.update_visuals(alpha, delta)
@@ -434,6 +457,11 @@ func _unhandled_input(event: InputEvent) -> void:
 				# remembered, because the answer to "is this smooth on my machine"
 				# is one the player has to find and should only have to find once.
 				_renderer.cycle_quality()
+				# An explicit choice ends the automatic one, including the choice
+				# to run HIGH on a machine that cannot hold it. Anything else means
+				# the game overrules the player five seconds after they decide.
+				_auto_quality = false
+				_auto_dropped = false
 				_save_progress()
 			KEY_M: _sfx.toggle_mute()
 			KEY_Z: _renderer.reset_view()
@@ -551,6 +579,42 @@ func _refresh_cursor() -> void:
 	else:
 		_renderer.set_build_cursor(_cursor_sim_x, _cursor_sim_y,
 			_sim.blueprint_range(_blueprint), _cursor_valid)
+
+## Step the quality down if the game has been running badly for a while.
+##
+## Deliberately crude. It is a safety net for a machine that cannot hold the
+## current settings, not a frame pacer, and every extra rule is another way for
+## it to be wrong about a situation it cannot see.
+func _govern_quality(delta: float) -> void:
+	if not _auto_quality or _renderer == null:
+		return
+	var world: Dictionary = _theme.get("world", {})
+	var floor_fps := float(world.get("auto_quality_fps", 24.0))
+	var patience := float(world.get("auto_quality_seconds", 5.0))
+	# delta is the frame that just happened, so this is the real frame time
+	# including everything the renderer did - not a sampled average that would
+	# take a second to notice a problem and another to forget it.
+	if delta > 1.0 / maxf(floor_fps, 1.0):
+		_slow_for += delta
+	else:
+		# Any good frame resets it. A single slow frame is a hitch, and hitches are
+		# not what this is for.
+		_slow_for = 0.0
+	if _slow_for < patience:
+		return
+	_slow_for = 0.0
+	var next := _renderer.quality() + 1
+	if next >= SimRenderer3D.QUALITY_NAMES.size():
+		# Already at the bottom. Stop asking - there is nothing left to give up,
+		# and re-testing every five seconds would cost the very frames it is
+		# trying to save.
+		_auto_quality = false
+		return
+	_renderer.set_quality(next)
+	_auto_dropped = true
+	_save_progress()
+	if _hud != null:
+		_hud.flash("GRAPHICS REDUCED TO %s  -  F2 to change" % _renderer.quality_name())
 
 func _load_theme() -> Dictionary:
 	var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string(THEME_PATH))
