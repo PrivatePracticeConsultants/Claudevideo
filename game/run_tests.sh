@@ -26,7 +26,19 @@ fi
 # rather than seconds; run it before a release, not on every change.
 if [ "${1:-}" = "--full" ]; then
 	export LASTLINE_FULL_CAMPAIGN=1
+	# Consumed here, not passed on: it is an environment switch, and the runner
+	# would not know what to do with it.
+	shift
 	echo "Running with the full campaign (all levels played end to end)."
 fi
 
-exec "$GODOT" --headless --path "$HERE" --script res://tests/run_tests.gd
+# Remaining arguments are forwarded, which is what makes
+#
+#   ./game/run_tests.sh -- --case test_materials
+#
+# select one file. This script used to end the command line here and drop them
+# on the floor, so that documented invocation silently ran the WHOLE suite -
+# six minutes instead of five seconds, with no indication the filter had been
+# ignored. The runner has always understood --case; nothing was ever handing it
+# one.
+exec "$GODOT" --headless --path "$HERE" --script res://tests/run_tests.gd "$@"

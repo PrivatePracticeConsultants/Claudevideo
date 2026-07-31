@@ -17,6 +17,13 @@ the run layer (P3) is the next real milestone.
 This tree is self-contained and shares nothing with MRF Explorer, the Python
 product that occupies the rest of this repository.
 
+> **Picking this up cold, or handing it to another agent?** Read
+> **`AGENTS.md`** first. It is the operational handoff: the environment traps
+> that will otherwise cost you an hour, the invariants that are mechanically
+> enforced, the working method this codebase expects, and what is currently
+> open. This file explains what the game *is*; `AGENTS.md` explains how to work
+> on it, and `DECISIONS.md` explains why it is the way it is.
+
 ## Run it
 
 Needs Godot 4.x (built and verified against 4.5).
@@ -548,15 +555,23 @@ core/       deterministic simulation — no Node, no scene tree, no engine time
 data/       every balance value in the game, as JSON
   building.json     placement rules and the purchasable-ground grid
   levels.json       campaign order
+  theme.json        colours, lighting, camera, quality thresholds
+  materials.json    procedural surface families (the art direction)
   blueprints/       weapon families, their tiers, and their support links
   enemies/          drone classes
   modules/          the between-acts draft pool
   maps/ waves/      one file per map, one per engagement
-render/     3D drawing (MultiMesh + interpolation), camera, effects, overlay
+render/
+  sim_renderer_3d.gd  3D drawing (MultiMesh + interpolation), camera, effects,
+                      the three quality tiers
+  material_library.gd generated albedo / normal / roughness maps, per family
+  debug_overlay.gd    F3: fps, worst frame, long frames, quality, GPU, pools
 audio/      sfx.gd — every sound in the game, synthesised at startup
-ui/         HUD, wave preview, end-of-act debrief
-tools/      headless dev utilities (screenshot capture, render stress, web verify,
-            balance_probe for the whole campaign, board_probe for one board)
+ui/         HUD, wave preview, end-of-act debrief, transient notices
+tools/      headless dev utilities — screenshot capture, render stress, frame
+            profile, material probe, link probe, balance_probe for the whole
+            campaign, board_probe for one board, and two Python tools that
+            drive a real browser (verify_web, frame_jitter)
 tests/      the suite; run_tests.gd is the headless entry point
 ```
 

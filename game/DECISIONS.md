@@ -2199,3 +2199,52 @@ Verified in the real game rather than only in the harness - this container is
 slow enough to be its own test case. Starting from a cleared progress file and
 running for 45 seconds, `progress.json` came back `{"boards_unlocked":1,
 "quality":2}`: it stepped BALANCED to FAST by itself and persisted it.
+
+## P0-77 · A vendor-neutral handoff, and the documented test filter that never worked
+
+The game had to become something another agent — from any vendor — could pick up
+and run with. Two problems stood in the way.
+
+**The repository routed newcomers to the wrong project.** The root `AGENTS.md`,
+which is the file most agent tooling reads first, described only MRF Explorer
+and never mentioned `game/` at all. Anyone landing here for the game would have
+been sent to `CLAUDE.md` and `docs/AI_HANDOFF.md` and ended up in a Python
+transparency-in-coverage pipeline. It is now a router: two unrelated projects, a
+table saying which is which, and the explicit warning that the invariants of one
+say nothing about the other.
+
+**`game/AGENTS.md` is new** and is the operational document: the environment
+traps, the enforced invariants, every command, the layout, the working method,
+current state, and the one open investigation. It deliberately does not repeat
+`README.md` (what the game is) or this file (why it is that way) — it covers the
+things that are true but written down nowhere, which is where an hour goes.
+
+Writing it turned up a real bug, which is the argument for writing these by
+running every command rather than by remembering them.
+
+`run_tests.sh` ended with:
+
+```bash
+exec "$GODOT" --headless --path "$HERE" --script res://tests/run_tests.gd
+```
+
+No `"$@"`. So the invocation advertised in both `README.md` and the runner's own
+doc comment —
+
+```bash
+./game/run_tests.sh -- --case test_materials
+```
+
+— silently dropped the filter and ran the entire suite. Six minutes instead of
+five seconds, with nothing to indicate the argument had been ignored; it just
+looked like the suite was slow. The runner has understood `--case` since it was
+written. Nothing was ever handing it one. Fixed by forwarding the remaining
+arguments, with `--full` shifted off first since it is an environment switch.
+Verified: `--case test_auto_quality` now runs 7 tests in 369 ms.
+
+That failure has the shape this project keeps rediscovering, in a new place: a
+thing that reported success while doing nothing. The green suite over a
+non-compiling renderer (P0-72) and the frame counter that could not tell
+slowness from stutter (P0-75) are the same bug wearing different clothes. A
+documented command nobody had checked against its own implementation is simply
+the documentation-shaped version of it.
