@@ -144,6 +144,7 @@ func setup(sim: Sim, theme: Dictionary, materials: MaterialLibrary = null) -> vo
 	_build_cell_layer()
 	_build_turret_layers()
 	_build_entity_layers()
+	_build_tracer_layers()
 	_build_effect_layer()
 	_build_link_layer()
 	refresh_board()
@@ -1843,6 +1844,10 @@ var _fx_life: PackedFloat32Array = PackedFloat32Array()
 var _fx_size: PackedFloat32Array = PackedFloat32Array()
 var _fx_grow: PackedFloat32Array = PackedFloat32Array()
 var _fx_tint: PackedColorArray = PackedColorArray()
+## Which layer each live slot draws into. See FX_GLOW / FX_IMPACT.
+var _fx_kind: PackedInt32Array = PackedInt32Array()
+enum { FX_GLOW, FX_IMPACT }
+var _fx_impact: MultiMeshInstance3D
 var _fx_head: int = 0
 
 ## What the board looked like at the end of the previous tick.
@@ -1863,6 +1868,37 @@ var _sfx: Sfx = null
 
 func attach_audio(sfx: Sfx) -> void:
 	_sfx = sfx
+
+## Which tracer art each weapon family fires. Named by art rather than damage
+## type because the Suppressor and the Railgun are both Energy and look nothing
+## alike in flight. A family with no entry (the Rig never fires) or missing art
+## falls back to the generated tracer quad.
+const TRACER_ART := {
+	"ballistic": "proj_kinetic",
+	"cannon": "proj_explosive",
+	"railgun": "proj_energy",
+	"suppressor": "proj_arc",
+}
+
+## One sprite layer per weapon family, or null where the family keeps the
+## generated tracer. Indexed by blueprint, same as every other per-family array.
+var _tracer_layers: Array = []
+
+func _build_tracer_layers() -> void:
+	_tracer_layers.clear()
+	for family in _sim.blueprint_count():
+		var id := _sim.blueprint_name(family)
+		var art: Texture2D = null
+		if TRACER_ART.has(id):
+			art = _sprite(SPRITE_FX_DIR, TRACER_ART[id])
+		if art == null:
+			_tracer_layers.append(null)
+			continue
+		var plane := _sprite_plane()
+		plane.material = _sprite_material(art)
+		var layer := _instanced(plane, _sim.p_alive.size())
+		add_child(layer)
+		_tracer_layers.append(layer)
 
 func _build_effect_layer() -> void:
 	var quad := QuadMesh.new()
@@ -1888,7 +1924,31 @@ func _build_effect_layer() -> void:
 	_fx.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(_fx)
 
+	# A second layer for hits, wearing the authored spark burst instead of the
+	# soft glow. Same pool, same ageing, same additive fade - the slots carry a
+	# kind and the draw sweep deals each live slot to its own layer. One extra
+	# draw call, and a hit stops being a smear of light and becomes debris.
+	_fx_impact = null
+	var burst := _sprite(SPRITE_FX_DIR, "proj_impact")
+	if burst != null:
+		var impact_quad := QuadMesh.new()
+		impact_quad.size = Vector2.ONE
+		var impact_material := StandardMaterial3D.new()
+		impact_material.vertex_color_use_as_albedo = true
+		impact_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		impact_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		impact_material.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+		impact_material.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+		impact_material.billboard_keep_scale = true
+		impact_material.disable_receive_shadows = true
+		impact_material.albedo_texture = burst
+		impact_quad.material = impact_material
+		_fx_impact = _instanced(impact_quad, FX_CAPACITY)
+		_fx_impact.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		add_child(_fx_impact)
+
 	_fx_pos.resize(FX_CAPACITY)
+	_fx_kind.resize(FX_CAPACITY)
 	_fx_age.resize(FX_CAPACITY)
 	_fx_life.resize(FX_CAPACITY)
 	_fx_size.resize(FX_CAPACITY)
@@ -1990,13 +2050,13 @@ func _note_impacts() -> void:
 		if splash > 0.0:
 			# Sized to the actual blast radius, so what you see is what it hit.
 			_emit(Vector3(_sim.p_x[i], lift, _sim.p_y[i]), splash * 0.5, 2.0,
-				float(_world.get("blast_life", 0.3)), blast)
+				float(_world.get("blast_life", 0.3)), blast, FX_IMPACT)
 			if _sfx != null:
 				_sfx.play(Sfx.BLAST)
 		else:
 			_emit(Vector3(_sim.p_x[i], lift, _sim.p_y[i]),
 				float(_world.get("impact_size", 15.0)), 1.1,
-				float(_world.get("impact_life", 0.11)), spark)
+				float(_world.get("impact_life", 0.11)), spark, FX_IMPACT)
 			if _sfx != null:
 				_sfx.play(Sfx.IMPACT)
 	if drained:
@@ -2032,7 +2092,8 @@ func _note_wrecks() -> void:
 ## means the only thing that can ever be cut short is an effect from a tick where
 ## more than a thousand things happened at once - and on that tick nobody is
 ## looking at any one of them.
-func _emit(position: Vector3, size: float, grow: float, life: float, tint: Color) -> void:
+func _emit(position: Vector3, size: float, grow: float, life: float, tint: Color,
+		kind: int = FX_GLOW) -> void:
 	var i := _fx_head
 	_fx_head = (_fx_head + 1) % FX_CAPACITY
 	_fx_pos[i] = position
@@ -2041,6 +2102,9 @@ func _emit(position: Vector3, size: float, grow: float, life: float, tint: Color
 	_fx_size[i] = size
 	_fx_grow[i] = grow
 	_fx_tint[i] = tint
+	# Falls back to the glow when the authored burst is not on disk, so a
+	# checkout with no assets/ still shows every hit.
+	_fx_kind[i] = kind if _fx_impact != null else FX_GLOW
 
 ## Age and draw.
 ##
@@ -2052,7 +2116,9 @@ func _emit(position: Vector3, size: float, grow: float, life: float, tint: Color
 ## right thing for a decoration layer to do when the simulation stops.
 func _update_effects(delta: float) -> void:
 	var mm := _fx.multimesh
+	var impact_mm: MultiMesh = _fx_impact.multimesh if _fx_impact != null else null
 	var shown := 0
+	var impacts := 0
 	for i in FX_CAPACITY:
 		if _fx_age[i] >= _fx_life[i]:
 			continue
@@ -2063,15 +2129,23 @@ func _update_effects(delta: float) -> void:
 			continue
 		var t: float = clampf(_fx_age[i] / maxf(_fx_life[i], 0.0001), 0.0, 1.0)
 		var size: float = _fx_size[i] * (1.0 + _fx_grow[i] * t)
-		mm.set_instance_transform(shown, Transform3D(
-			Basis().scaled(Vector3(size, size, size)), _fx_pos[i]))
+		var xf := Transform3D(Basis().scaled(Vector3(size, size, size)), _fx_pos[i])
 		# Fade toward black rather than toward transparent: the blend is additive,
 		# so black IS invisible and there is no sorting to get wrong.
-		mm.set_instance_color(shown, _fx_tint[i] * (1.0 - t))
-		shown += 1
-		if shown >= FX_CAPACITY:
+		var faded: Color = _fx_tint[i] * (1.0 - t)
+		if impact_mm != null and _fx_kind[i] == FX_IMPACT:
+			impact_mm.set_instance_transform(impacts, xf)
+			impact_mm.set_instance_color(impacts, faded)
+			impacts += 1
+		else:
+			mm.set_instance_transform(shown, xf)
+			mm.set_instance_color(shown, faded)
+			shown += 1
+		if shown + impacts >= FX_CAPACITY:
 			break
 	mm.visible_instance_count = shown
+	if impact_mm != null:
+		impact_mm.visible_instance_count = impacts
 
 ## Nudge the camera when the corridor takes a hit. Decays on its own; the phase
 ## walk keeps successive leaks from landing on the same offset.
@@ -2415,8 +2489,19 @@ func _update_projectiles(alpha: float) -> void:
 	var length := float(_world.get("projectile_length", 24.0))
 	var width := float(_world.get("projectile_width", 5.0))
 	var lift := float(_world.get("projectile_lift", 20.0))
+	var span := float(_world.get("projectile_sprite_span", 58.0))
+	# The sim spawns a projectile at the turret's CENTRE, and a quad centred on
+	# that position pokes out of the back of the mount on the frame it fires -
+	# which is exactly what it looked like. The drawn centre is advanced along
+	# the velocity so the art's tail clears the turret's own picture and the shot
+	# reads as leaving the barrel. Render-only: the sim's position, and therefore
+	# what a shot actually hits, is untouched.
+	var advance := float(_world.get("projectile_muzzle_advance", 36.0))
 	var tint := _color("projectile")
 	var shown := 0
+	var per_family := PackedInt32Array()
+	per_family.resize(_tracer_layers.size())
+	per_family.fill(0)
 
 	for i in _sim.projectile_slot_bound():
 		if _sim.p_alive[i] == 0:
@@ -2432,6 +2517,23 @@ func _update_projectiles(alpha: float) -> void:
 		else:
 			dx /= travel
 			dz /= travel
+
+		var family: int = _sim.p_family[i]
+		var art_layer: MultiMeshInstance3D = null
+		if family >= 0 and family < _tracer_layers.size():
+			art_layer = _tracer_layers[family]
+		if art_layer != null:
+			# Authored tracer, turned to its heading and leaning with everything
+			# else. White, because the art carries its own colour.
+			var slot := per_family[family]
+			per_family[family] = slot + 1
+			var heading := atan2(dx, dz) + _forward_of(TRACER_ART[_sim.blueprint_name(family)])
+			art_layer.multimesh.set_instance_transform(slot, Transform3D(
+				_lean * Basis(Vector3.UP, heading).scaled(Vector3(span, 1.0, span)),
+				Vector3(px + dx * advance, lift, pz + dz * advance)))
+			art_layer.multimesh.set_instance_color(slot, Color.WHITE)
+			continue
+
 		# A shell is fatter and shorter than a bullet, so the two families read
 		# differently in flight.
 		var is_shell := _sim.p_splash[i] > 0.0
@@ -2445,6 +2547,9 @@ func _update_projectiles(alpha: float) -> void:
 		mm.set_instance_color(shown, tint)
 		shown += 1
 	mm.visible_instance_count = shown
+	for family in _tracer_layers.size():
+		if _tracer_layers[family] != null:
+			_tracer_layers[family].multimesh.visible_instance_count = per_family[family]
 
 ## Swing each barrel toward whatever its turret last fired at. Smoothed here
 ## rather than in the simulation: the sim's aim is instant and authoritative, and
@@ -2680,7 +2785,15 @@ func hp_bar_layer() -> MultiMeshInstance3D: return _hp_bars
 func effect_layer() -> MultiMeshInstance3D: return _fx
 func link_layer() -> MultiMeshInstance3D: return _links
 func drawn_link_count() -> int: return _links.multimesh.visible_instance_count
-func drawn_effect_count() -> int: return _fx.multimesh.visible_instance_count
+## Every effect currently drawn, across BOTH layers. The impact layer split
+## made the single-layer count a lie: a landed shot drew on the impact layer,
+## this still answered zero, and the feedback test rightly failed - the test
+## was correct and the accessor was stale.
+func drawn_effect_count() -> int:
+	var total := _fx.multimesh.visible_instance_count
+	if _fx_impact != null:
+		total += _fx_impact.multimesh.visible_instance_count
+	return total
 func shake() -> float: return _shake
 func camera_home() -> Vector3: return _camera_home
 func projectile_layer() -> MultiMeshInstance3D: return _projectiles
@@ -2703,6 +2816,7 @@ func rebuild_static() -> void:
 const MATERIALS_PATH := "res://data/materials.json"
 const SPRITE_TURRET_DIR := "res://assets/art/turrets/"
 const SPRITE_DRONE_DIR := "res://assets/art/drones/"
+const SPRITE_FX_DIR := "res://assets/art/fx/"
 
 ## Authored sprites, by the id the game already holds - blueprint id for a
 ## turret, enemy id for a drone. Empty when the art is not present, and every

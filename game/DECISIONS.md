@@ -2508,3 +2508,46 @@ Worth knowing for sizing: a turret spans 74 world units, which is 154 screen
 pixels at the closest zoom the camera allows - so 500px is oversampled about
 3x. The Titan is the exception at ~700 screen pixels, and it is the reason the
 sheet is not simply downscaled.
+
+## P0-83 · Tracer art per family, hits that spark, and shots that leave the barrel
+
+"The turrets have projectiles coming out of the back" - reported from play, and
+the cause was one line: the tracer quad's long axis is scaled about its CENTRE,
+and the simulation spawns a projectile at the turret's centre. On the frame a
+shot fires, half the quad therefore pokes out of the back of the mount. The old
+24-unit tracer buried the artefact inside the old small turret art; the new
+500px sprites made it plain.
+
+Fixed in the renderer only: the drawn centre is advanced along the velocity
+(`projectile_muzzle_advance`) so the art's tail clears the turret's picture and
+the shot reads as leaving the barrel. The simulation's position - and therefore
+what a shot actually hits - is untouched, which is the standing rule: the sim
+never bends for how something looks.
+
+The authored tracers went in per FAMILY, not per damage type - the Suppressor
+and the Railgun are both Energy and look nothing alike in flight. `p_family`
+already carried the firing blueprint on every projectile (it was added for
+veterancy), so routing each round to its family's art layer cost one lookup.
+Facing was measured off the art like the turrets before it, with one twist: the
+explosive shell measures BACKWARDS, because its brightest pixels are its
+exhaust flame and the bright-centroid method finds the tail. Its stored offset
+is the measurement plus 180 - worth writing down, because re-measuring it will
+"correct" it the wrong way.
+
+Hits wear the authored spark burst on a second effect layer sharing the one
+pool: slots carry a kind, the draw sweep deals each live slot to its layer, one
+extra draw call. The burst also earns its keep as a mask - the muzzle advance
+means a tracer's tip can overshoot the target by a frame at impact, and the
+burst is what the eye sees instead.
+
+The suite caught a stale accessor rather than a bug: `drawn_effect_count()`
+returned only the glow layer, so "a shot landing leaves an impact" failed with
+the impact drawn plainly on screen. The TEST was right. The accessor now sums
+both layers. Same lesson as the frame counter and the test filter before it: a
+counter that no longer counts the whole population is a lie with a green light
+on it.
+
+Audit: 403 tests, 62,309 assertions, 0 failed. Draw calls flat at 16 with 400
+entities and tracers live. Browser frame distribution, zero long frames at
+every tier: FAST 300ms / BALANCED 550ms / HIGH 1042ms (SwiftShader - ordering
+and ratios only).

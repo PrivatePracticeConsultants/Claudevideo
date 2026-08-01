@@ -222,10 +222,17 @@
       "cannon": -35.0,
       "railgun": -43.4,
       "rig": 36.1,
-      "suppressor": 23.1
+      "suppressor": 23.1,
+      "proj_kinetic": -44.2,
+      "proj_explosive": -47.7,
+      "proj_energy": -49.3,
+      "proj_arc": -42.0
     },
     "_sprite_rotate_drones": "Whether drone sprites turn to face the way they are walking. FALSE for this sheet, because its drones are drawn as front-facing characters standing upright, not as top-down machines - rotating a standing mech to walk east lays it on its side. Turrets still rotate: they are drawn from above and their barrels are the whole point. If a future sheet draws drones top-down, set this true and they will track their lane again.",
-    "sprite_rotate_drones": false
+    "sprite_rotate_drones": false,
+    "_projectile_sprite": "Tracer art. span is the drawn quad's edge in world units; muzzle_advance pushes the drawn centre forward along the velocity so the tail clears the turret's own artwork - the sim spawns a projectile at the turret's CENTRE, and a centred quad at that position pokes out of the back of the mount, which is exactly what it looked like.",
+    "projectile_sprite_span": 58.0,
+    "projectile_muzzle_advance": 36.0
   },
   "platform_max_tier": "#ffcf6e",
   "platform_cannon": "#c98a5b",
