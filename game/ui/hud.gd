@@ -368,7 +368,11 @@ func refresh(speed: int, paused: bool, hovered_platform: int = -1,
 				_sim.integrity(), quoted_salvage()]
 		_banner.add_theme_color_override("font_color", _color("good"))
 	else:
-		_banner.text = "CORRIDOR LOST   ·   wave %d/%d   ·   R to retry" % [_sim.wave_number(), _sim.wave_count()]
+		# The board's own noun. "Corridor lost" on a board with no corridor reads
+		# as a bug in the game rather than as a defeat.
+		_banner.text = "%s LOST   ·   wave %d/%d   ·   R to retry" % [
+			"STATION" if _sim.is_outpost() else "CORRIDOR",
+			_sim.wave_number(), _sim.wave_count()]
 		_banner.add_theme_color_override("font_color", _color("bad"))
 
 ## The end-of-act debrief, as text.

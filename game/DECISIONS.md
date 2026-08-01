@@ -2248,3 +2248,53 @@ non-compiling renderer (P0-72) and the frame counter that could not tell
 slowness from stutter (P0-75) are the same bug wearing different clothes. A
 documented command nobody had checked against its own implementation is simply
 the documentation-shaped version of it.
+
+## P0-78 · Ares Station: a base-defense mode that is a route generator, not a second simulation
+
+Prompted by Ares Outpost (francisstudio.itch.io): a base in the middle, waves
+converging from all sides, bosses on a cadence. The decision that made it
+affordable is that the mode is a different way of PRODUCING routes, not a
+different simulation. An outpost map declares a `base`, a ring of authored
+`gates`, and three radii; `_build_outpost_path()` emits one two-point route per
+gate, `_commit_routes()` — extracted from the corridor path builder so there is
+exactly one implementation of what a route is — turns them into the same flat
+segment tables every corridor board uses. Enemies still carry one scalar
+distance along one polyline; leaking at the end of the route IS reaching the
+station. Sampling, targeting, broods, the spatial hash, the state hash and
+replay are untouched, and the replay test on the siege passes without any
+outpost-specific work.
+
+The gates are authored positions, not points on a circle — computing them would
+need trigonometry the sim may not use, and hand placement lets a board have a
+cheap side and a dear side, which is the whole opening decision. Ground is a
+ring: `cell_buildable` rejects inside `core_radius` (the station) and outside
+`build_radius`; the free start is `start_radius`. "Endless" waves are expanded
+into a concrete list at LOAD by `_expand_endless()` — archetypes cycle by index
+so wave 12 is learnable, bosses land every fifth wave on top of their wave, and
+growth compounds by repeated multiplication, not pow(). The tick never learns
+the mode exists; a replay of a siege is a replay of a fixed list.
+
+What the measurement said, tuning it:
+
+- The greedy probe sampled sites gate-first and placed 4 turrets of a 34 limit:
+  on this board the unlocked ground is the ring at the END of every route.
+  Sampling now runs base-outward on outpost boards. 4 built → 34.
+- Money alone made it worse (kills fund the economy; gentler waves paid less).
+- At 40 waves the probe hit the deployment limit — 48/48 built — and still
+  drowned. Per-lane duty cycle means a turret here does roughly a sixth of a
+  corridor turret's work, while wave mass compounds. The verifiable length is
+  14 waves: WIN, 1,369 of 2,600 hull left, 33 built. Leaky and held, which is
+  what a siege should feel like. Longer sieges wait on teaching the probe to
+  buy ground (post-launch).
+- Two existing gates caught the first wave authoring: Lances landed on wave 2
+  and reached 8% of head count. The data changed, not the tests.
+- One name-proxy died: "opens a chain" was tested as "engagement ends in act1",
+  and the siege is a single-act board. The test now derives it from being the
+  first level on its map.
+
+New content riding along: `titan` and `harbinger` boss classes — slow, plated,
+enormous (radius 74/96 against the Bulwark's 24) and worth a fortune, because a
+boss that is merely a big number is a spike, and slow-plus-bounty makes it a
+siege that funds the answer to the next one. The station mesh is welded
+primitives like everything else, low and wide so it never occludes the lanes
+converging on it.

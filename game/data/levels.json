@@ -240,6 +240,11 @@
       "map": "terminus_02",
       "engagement": "terminus_act4",
       "name": "XLVIII - Terminus: Siege"
+    },
+    {
+      "map": "outpost_01",
+      "engagement": "outpost_siege",
+      "name": "XLIX - Ares Station: Siege"
     }
   ]
 }

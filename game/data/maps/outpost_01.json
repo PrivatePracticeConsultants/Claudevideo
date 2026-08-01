@@ -1,0 +1,87 @@
+{
+  "_comment": "ARES STATION - the first outpost board. Defended from the middle instead of along a road: the base sits at the centre of the map and eight lanes converge on it from the perimeter. There is no 'path' here; core/sim.gd generates one route per gate, and everything downstream - sampling, targeting, broods, the state hash - is the same code the corridor boards run.",
+  "_why_eight_gates": "Eight, not four, and not twelve. Four lets one ring of turrets cover everything and the board is solved on the first act. Twelve spreads the deployment limit so thin that nothing is ever defended and the answer is always 'build more', which is not a decision. Eight means a full ring is unaffordable at the starting limit, so the opening question is WHICH approaches you concede - and the wave callout tells you which ones matter this wave.",
+  "_why_the_gates_are_uneven": "The gates are NOT evenly spaced on a circle. Two pairs sit close together on the north and south-west, so those approaches can be covered by one well-placed cluster, and the east gate stands alone and expensive. A perfectly symmetric board has exactly one correct layout, rotated; an uneven one has a cheap side and a dear side, and choosing between them is the game.",
+  "id": "outpost_01",
+  "display_name": "Ares Station",
+  "bounds": {
+    "width": 4800.0,
+    "height": 4800.0
+  },
+  "base": {
+    "x": 2400.0,
+    "y": 2400.0
+  },
+  "_radii": "core_radius is the outpost footprint - no building on the station itself. build_radius is the edge of the board's usable ground; beyond it the lanes are open approach nobody defends. start_radius is what comes free, and it is deliberately tight: the opening act is fought in a small ring and expanding outward is what the ground money is for.",
+  "core_radius": 300.0,
+  "build_radius": 1750.0,
+  "start_radius": 900.0,
+  "gates": [
+    {
+      "x": 2400.0,
+      "y": 60.0
+    },
+    {
+      "x": 3060.0,
+      "y": 180.0
+    },
+    {
+      "x": 4740.0,
+      "y": 2400.0
+    },
+    {
+      "x": 4060.0,
+      "y": 3900.0
+    },
+    {
+      "x": 2400.0,
+      "y": 4740.0
+    },
+    {
+      "x": 1200.0,
+      "y": 4300.0
+    },
+    {
+      "x": 780.0,
+      "y": 3960.0
+    },
+    {
+      "x": 60.0,
+      "y": 2400.0
+    }
+  ],
+  "_route_weights": "Traffic is not split evenly. The north pair and the lone east gate carry the most, so the expensive side to defend is also the busy one - covering east is a real investment rather than a formality.",
+  "route_weights": [
+    3,
+    3,
+    4,
+    2,
+    2,
+    2,
+    2,
+    3
+  ],
+  "_premium_cells": "Four hills, one per quadrant, all of them outside the free starting ring. Every one is a reason to expand in a particular direction before the wave that punishes not having.",
+  "premium_cells": [
+    [
+      21,
+      14,
+      "high_ground"
+    ],
+    [
+      27,
+      21,
+      "high_ground"
+    ],
+    [
+      21,
+      28,
+      "high_ground"
+    ],
+    [
+      14,
+      21,
+      "high_ground"
+    ]
+  ]
+}

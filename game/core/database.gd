@@ -60,7 +60,82 @@ func _load_all(map_id: String, engagement_id: String) -> void:
 	engagement = _read_object("%s/waves/%s.json" % [root, engagement_id])
 	if not errors.is_empty():
 		return
+	# Before validation, so the expanded waves are validated like authored ones -
+	# a generator that produced a malformed wave would otherwise sail through.
+	_expand_endless()
 	_validate()
+
+## Turn an "endless" block into a concrete list of waves.
+##
+## An endless siege is a wave LIST like any other; the only difference is that
+## nobody typed it. Expanding it here, once, at load, means the tick knows
+## nothing about endless mode - _begin_wave still reads engagement["waves"][i],
+## wave_count() still answers, the debrief still works, and a replay of an
+## endless run is a replay of a fixed wave list. A generator running inside the
+## tick would have been a second source of truth about what wave 40 contains.
+##
+## Deterministic by construction: the shape of wave N is a function of N and the
+## data, with no randomness anywhere. Two players on wave 40 face the same wave.
+func _expand_endless() -> void:
+	var block: Variant = engagement.get("endless")
+	if typeof(block) != TYPE_DICTIONARY:
+		return
+	var spec: Dictionary = block
+	var archetypes: Variant = spec.get("archetypes", [])
+	if typeof(archetypes) != TYPE_ARRAY or (archetypes as Array).is_empty():
+		errors.append("waves/%s: endless needs at least one archetype."
+			% str(engagement.get("engagement_id", "?")))
+		return
+	var total := maxi(int(spec.get("waves", 0)), 1)
+	var boss_every := maxi(int(spec.get("boss_every", 0)), 0)
+	var bosses: Array = spec.get("bosses", [])
+	var growth := float(spec.get("count_growth", 1.0))
+	var interval_floor := maxi(int(spec.get("spawn_interval_floor", 1)), 1)
+	var interval_decay := float(spec.get("spawn_interval_decay", 1.0))
+
+	var waves: Array = []
+	for index in total:
+		# Archetypes cycle rather than being drawn: "wave 12 is always a Rush" is
+		# something a player can learn and plan against, where a shuffled order is
+		# only ever survived.
+		var archetype: Dictionary = (archetypes as Array)[index % (archetypes as Array).size()]
+		var groups: Array = []
+		# Counts and spawn intervals ramp by repeated multiplication rather than
+		# pow(), matching the simulation's own scaling for the same reason: pow()
+		# is not bit-reproducible across libm and this feeds enemy counts.
+		var count_mult := 1.0
+		var interval_mult := 1.0
+		for _i in index:
+			count_mult *= growth
+			interval_mult *= interval_decay
+		for entry: Variant in (archetype.get("groups", []) as Array):
+			var group: Dictionary = entry
+			groups.append({
+				"enemy": str(group.get("enemy", "")),
+				"count": maxi(1, int(round(float(group.get("count", 1)) * count_mult))),
+				"spawn_interval_ticks": maxi(interval_floor,
+					int(round(float(group.get("spawn_interval_ticks", 30)) * interval_mult))),
+				"start_delay_ticks": int(group.get("start_delay_ticks", 0)),
+			})
+		# A boss ON TOP of the wave, not instead of it. A boss alone is a damage
+		# check with nothing to protect it; a boss walking in behind its own wave
+		# is the thing that makes the wave hard.
+		var boss_index := -1
+		if boss_every > 0 and not bosses.is_empty() and (index + 1) % boss_every == 0:
+			boss_index = ((index + 1) / boss_every - 1) % bosses.size()
+			var boss: Dictionary = bosses[boss_index]
+			groups.append({
+				"enemy": str(boss.get("enemy", "")),
+				"count": maxi(1, int(boss.get("count", 1))),
+				"spawn_interval_ticks": maxi(1, int(boss.get("spawn_interval_ticks", 60))),
+				"start_delay_ticks": int(boss.get("start_delay_ticks", 0)),
+			})
+		waves.append({
+			"groups": groups,
+			"name": str(archetype.get("name", "ASSAULT")),
+			"boss": boss_index >= 0,
+		})
+	engagement["waves"] = waves
 
 func _read_object(path: String) -> Dictionary:
 	if not FileAccess.file_exists(path):
@@ -467,6 +542,12 @@ func _validate_blueprints() -> void:
 		errors.append("blueprints.json defines no blueprints.")
 
 func _validate_map() -> void:
+	# An outpost board has no road. It declares a base and a ring of gates, and
+	# the lanes are generated from them, so requiring a "path" here would reject a
+	# perfectly valid map for lacking a thing its shape does not have.
+	if map.has("base") or map.has("gates"):
+		_validate_outpost()
+		return
 	var path: Variant = map.get("path")
 	if typeof(path) != TYPE_ARRAY or (path as Array).size() < 2:
 		errors.append("Map %s needs a \"path\" of at least 2 waypoints." % str(map.get("id", "?")))
@@ -514,6 +595,44 @@ func _validate_map() -> void:
 ## not a fork, it is a second level sharing a map: drones would appear out of thin
 ## air or leak somewhere the player was never told to defend.
 const ROUTE_ENDPOINT_TOLERANCE := 1.0
+
+## An outpost board: a base to defend and the gates they come from.
+##
+## Validated strictly, because every one of these is load-bearing geometry and a
+## typo in any of them produces a board that looks fine and cannot be played -
+## gates inside the core, a build ring narrower than the core, a base with no way
+## in. A readable message now is worth more than a mystery later.
+func _validate_outpost() -> void:
+	var where := "Map %s" % str(map.get("id", "?"))
+	if not map.has("base"):
+		errors.append("%s declares gates but no \"base\" for them to converge on." % where)
+	else:
+		var base: Variant = map.get("base")
+		if typeof(base) != TYPE_DICTIONARY:
+			errors.append("%s: \"base\" must be an object with x and y." % where)
+		else:
+			_req_num(base as Dictionary, "x", "%s base" % where, -1000000.0)
+			_req_num(base as Dictionary, "y", "%s base" % where, -1000000.0)
+	var gates: Variant = map.get("gates")
+	if typeof(gates) != TYPE_ARRAY or (gates as Array).is_empty():
+		errors.append("%s needs at least one gate - a base nothing can reach is not a level." % where)
+	else:
+		for i in (gates as Array).size():
+			var gate: Variant = (gates as Array)[i]
+			if typeof(gate) != TYPE_DICTIONARY:
+				errors.append("%s gate %d must be an object with x and y." % [where, i])
+				continue
+			_req_num(gate as Dictionary, "x", "%s gate %d" % [where, i], -1000000.0)
+			_req_num(gate as Dictionary, "y", "%s gate %d" % [where, i], -1000000.0)
+	var core := float(map.get("core_radius", 0.0))
+	var build := float(map.get("build_radius", 0.0))
+	var start := float(map.get("start_radius", 0.0))
+	if build <= core:
+		errors.append("%s: build_radius (%.0f) must exceed core_radius (%.0f), or there is nowhere to build."
+			% [where, build, core])
+	if start < core or start > build:
+		errors.append("%s: start_radius (%.0f) must sit between core_radius (%.0f) and build_radius (%.0f)."
+			% [where, start, core, build])
 
 func _validate_routes() -> void:
 	var main: Variant = map.get("path")

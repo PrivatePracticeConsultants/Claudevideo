@@ -544,6 +544,19 @@ func _build_scenery() -> void:
 		"wall")
 	_scenery.add_child(walls)
 
+	# The station, on outpost boards. It is the thing being defended, so it is the
+	# one piece of scenery that is not decoration: without it the eight lanes
+	# converge on a patch of empty ground and there is nothing on screen to
+	# explain what losing hull means.
+	if _sim.is_outpost():
+		var station := MeshInstance3D.new()
+		station.mesh = _station_mesh()
+		station.position = to_world(_sim.base_x(), _sim.base_y(), 0.0)
+		# Not through _shadowed(), which is typed for the instanced layers; this
+		# is the one plain MeshInstance3D on the board.
+		station.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+		_scenery.add_child(station)
+
 	var props := _prop_layer()
 	if props != null:
 		_scenery.add_child(props)
@@ -989,6 +1002,45 @@ func _marking_mesh() -> ArrayMesh:
 ## the same positional hash the ground uses. It exists to give the terrain a
 ## sense of scale - a board with nothing on it reads as a diagram however well it
 ## is lit.
+## The outpost: a tiered drum with a ring of buttresses around it.
+##
+## Built from the same welded primitives as everything else, and deliberately
+## LOW and WIDE rather than tall. Anything tall in the middle of the board would
+## occlude the lanes converging on it from the camera's side, and the one thing
+## this mesh must never do is hide the drones walking towards it.
+func _station_mesh() -> ArrayMesh:
+	var radius := maxf(_sim.outpost_core_radius(), 1.0)
+	var height := radius * float(_world.get("station_height_share", 0.42))
+	var parts := []
+	var drum := CylinderMesh.new()
+	drum.top_radius = radius * 0.78
+	drum.bottom_radius = radius
+	drum.height = height
+	drum.radial_segments = 16
+	parts.append([drum, _at(0.0, height * 0.5, 0.0)])
+	var cap := CylinderMesh.new()
+	cap.top_radius = radius * 0.34
+	cap.bottom_radius = radius * 0.62
+	cap.height = height * 0.8
+	cap.radial_segments = 12
+	parts.append([cap, _at(0.0, height * 1.3, 0.0)])
+	# Four buttresses on the axes. Not eight-to-match-the-gates on purpose: a
+	# silhouette that mirrors the lane layout makes the two read as one shape, and
+	# the lanes are the thing that has to stay legible.
+	var arm := BoxMesh.new()
+	arm.size = Vector3(radius * 0.3, height * 0.7, radius * 1.5)
+	for i in 4:
+		var offset := radius * 0.62
+		var turn := float(i) * PI * 0.5
+		parts.append([arm, _at(0.0, height * 0.35, 0.0, Vector3.ONE, Vector3(0.0, turn, 0.0))
+			* Transform3D(Basis(), Vector3(0.0, 0.0, offset))])
+	var mesh := _merged(parts)
+	var material := _surface_material(_color_of(_world.get("station", "#8d97a8")),
+		float(_world.get("station_metallic", 0.6)), float(_world.get("station_roughness", 0.4)),
+		"wall")
+	_skin(mesh, material)
+	return mesh
+
 func _prop_layer() -> MultiMeshInstance3D:
 	var spacing := float(_world.get("prop_spacing", 340.0))
 	var clearance := _sim.build_min_distance() + float(_world.get("prop_clearance", 30.0))

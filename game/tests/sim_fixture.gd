@@ -158,15 +158,23 @@ static func candidate_sites(sim: Sim) -> PackedInt32Array:
 	for r in sim.route_count():
 		if sim.route_is_open(r):
 			longest = maxf(longest, sim.route_length(r))
+	# On an outpost board the sampling runs from the BASE outward, not from the
+	# gate inward. Every route ends at the base, and the ground that starts
+	# unlocked is the ring around it - sampled gate-first, almost every early
+	# site is locked ground, the policy places four turrets and loses. Measured:
+	# 4 built of a 34 limit and 226 leaks before this; the same policy after it
+	# fills the ring first, which is what a player does.
+	var from_base := sim.is_outpost()
 	while prog <= longest:
 		for r in sim.route_count():
 			if not sim.route_is_open(r):
 				continue
 			if prog > sim.route_length(r):
 				continue
+			var at := sim.route_length(r) - prog if from_base else prog
 			for side: float in [-1.0, 1.0]:
 				for fraction: float in SITE_OFFSETS:
-					sim.sample_for_render(prog, (near + span * fraction) * side, r)
+					sim.sample_for_render(at, (near + span * fraction) * side, r)
 					var x := roundi(sim.out_x())
 					var y := roundi(sim.out_y())
 					# Only keep spots that fail purely for affordability reasons, so

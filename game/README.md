@@ -377,6 +377,17 @@ board was already at its deployment limit, so the second road arrived with no
 turrets left to answer it. Measured: 68 leaks and Integrity 0 on an act that had
 been winnable.
 
+### Ares Station (level XLIX)
+
+The last board is not a corridor. The station sits in the middle, eight lanes
+converge on it from authored gates, and building happens in a ring around the
+core — start inside the free ring, buy outward. Integrity is a hull, not a leak
+counter: early leaks are the cost of conceding an approach, which is the whole
+opening decision on a board you cannot fully cover. Waves are generated from
+five cycling archetypes with a boss every fifth wave — the Titan first, then
+the Harbinger — arriving on top of their waves, not instead of them. Fourteen
+waves, probe-verified winnable and leaky.
+
 ### Crossing to a new board
 
 Boards are different maps, so turrets genuinely cannot follow — a coordinate on

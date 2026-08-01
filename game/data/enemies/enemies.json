@@ -111,5 +111,28 @@
     "armour_class": "plated",
     "armour": 2,
     "tunnels_at_progress": 0.66
+  },
+  "_bosses": "Bosses. Two things make one, and neither is a big number: it is SLOW, so it is on the board long enough to be a siege rather than a spike, and it is worth a fortune, so surviving one funds the answer to the next. Both are plated - a boss that ignored the damage triangle would make the arsenal irrelevant exactly when the arsenal matters most. The radius is what sells it; at 74 and 96 units these dwarf a Bulwark's 24 and read as a wall walking towards the station.",
+  "titan": {
+    "display_name": "Ancient Titan",
+    "base_hp": 4200,
+    "speed_units_per_second": 30.0,
+    "leak_value": 45,
+    "base_bounty": 900,
+    "radius": 74.0,
+    "spawn_jitter_units": 0.0,
+    "armour_class": "plated",
+    "short_name": "Titan"
+  },
+  "harbinger": {
+    "display_name": "Harbinger",
+    "base_hp": 7600,
+    "speed_units_per_second": 24.0,
+    "leak_value": 70,
+    "base_bounty": 1600,
+    "radius": 96.0,
+    "spawn_jitter_units": 0.0,
+    "armour_class": "plated",
+    "short_name": "Harbinger"
   }
 }

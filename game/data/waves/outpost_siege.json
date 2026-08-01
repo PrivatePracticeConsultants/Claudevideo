@@ -1,0 +1,135 @@
+{
+  "_comment": "ARES STATION - endless siege. The first engagement that does not list its waves. It declares an 'endless' block and core/database.gd expands it into a concrete wave list at load, so the simulation never learns that endless mode exists: _begin_wave still reads waves[i], wave_count() still answers, the debrief still works, and a replay of an endless run is a replay of a fixed list.",
+  "_why_expanded_at_load": "The alternative was a generator running inside the tick, which would have been a second source of truth about what wave 40 contains - and the first thing to disagree with a replay. Expanded once, up front, there is only ever one wave list.",
+  "_why_the_archetypes_cycle": "Cycled by index, not drawn at random. 'Wave 12 is always a Breakthrough' is something a player can learn, plan an opening around, and be punished for forgetting. A shuffled order can only ever be survived, and it makes the whole mode a reaction test.",
+  "engagement_id": "outpost_siege",
+  "map_id": "outpost_01",
+  "carries_forward": false,
+  "starting_capital": 1700,
+  "platform_limit": 48,
+  "starting_ground_reach": 780,
+  "_starting_integrity": "The station's hull. Eight lanes converge here and early leaks are not a failure state, they are the cost of conceding an approach on purpose - which is the whole opening decision. At the corridor's 100 the mode ends on wave two before that decision exists.",
+  "starting_integrity": 2600,
+  "act_hp_multiplier": 1.0,
+  "act_bounty_multiplier": 1.0,
+  "inter_wave_delay_ticks": 240,
+  "endless": {
+    "_waves": "14, matching the campaign's act lengths, with the Titan on wave 5 and the Harbinger on 10. It was authored at 40 and the balance probe could not win it: the scripted policy hit the deployment limit (48/48 built) and still drowned, because per-lane duty cycle means a turret here does about a sixth of a corridor turret's work while wave mass compounds. Probed at 14: WIN, 1369 of 2600 hull left, 33 built - leaky and held, which is what a siege should feel like. Longer sieges want the probe taught to buy ground; see post-launch.md.",
+    "waves": 14,
+    "_count_growth": "1.115 per wave compounding: wave 40 sends about 70x the bodies of wave 1. Steep, but the bounty and the interest ramp with it, and every fifth wave hands over a boss bounty worth several waves of income.",
+    "count_growth": 1.06,
+    "_spawn_interval": "Intervals contract as counts grow, so a late wave is not merely longer - it arrives together. The floor stops the contraction from collapsing into a single-tick dump that no rate of fire could ever answer.",
+    "spawn_interval_decay": 0.972,
+    "spawn_interval_floor": 5,
+    "_boss_every": "Every fifth wave, and the two bosses alternate, so the first Harbinger lands on wave 10 with a Titan already survived on wave 5. Bosses arrive ON TOP of their wave rather than instead of it - a boss alone is a damage check with nothing protecting it.",
+    "boss_every": 5,
+    "bosses": [
+      {
+        "enemy": "titan",
+        "count": 1,
+        "spawn_interval_ticks": 60,
+        "start_delay_ticks": 90
+      },
+      {
+        "enemy": "harbinger",
+        "count": 1,
+        "spawn_interval_ticks": 60,
+        "start_delay_ticks": 110
+      }
+    ],
+    "_archetypes": "Five shapes, cycling. Each one asks a different question of the same board: can you kill a lot of small things, can you kill one big thing, can you kill the thing keeping the others alive, and can you do any of it while jammed.",
+    "archetypes": [
+      {
+        "name": "ASSAULT",
+        "groups": [
+          {
+            "enemy": "walker",
+            "count": 7,
+            "spawn_interval_ticks": 26,
+            "start_delay_ticks": 0
+          },
+          {
+            "enemy": "swarm",
+            "count": 6,
+            "spawn_interval_ticks": 14,
+            "start_delay_ticks": 60
+          }
+        ]
+      },
+      {
+        "name": "SWARM",
+        "groups": [
+          {
+            "enemy": "swarm",
+            "count": 22,
+            "spawn_interval_ticks": 9,
+            "start_delay_ticks": 0
+          }
+        ]
+      },
+      {
+        "name": "ARMOURED",
+        "groups": [
+          {
+            "enemy": "heavy",
+            "count": 5,
+            "spawn_interval_ticks": 40,
+            "start_delay_ticks": 0
+          },
+          {
+            "enemy": "breaker",
+            "count": 2,
+            "spawn_interval_ticks": 55,
+            "start_delay_ticks": 90
+          }
+        ]
+      },
+      {
+        "name": "SHIELDED",
+        "groups": [
+          {
+            "enemy": "heavy",
+            "count": 5,
+            "spawn_interval_ticks": 38,
+            "start_delay_ticks": 0
+          },
+          {
+            "enemy": "mender",
+            "count": 2,
+            "spawn_interval_ticks": 60,
+            "start_delay_ticks": 40
+          },
+          {
+            "enemy": "jammer",
+            "count": 2,
+            "spawn_interval_ticks": 70,
+            "start_delay_ticks": 100
+          }
+        ]
+      },
+      {
+        "name": "BREAKTHROUGH",
+        "groups": [
+          {
+            "enemy": "brood",
+            "count": 4,
+            "spawn_interval_ticks": 45,
+            "start_delay_ticks": 0
+          },
+          {
+            "enemy": "walker",
+            "count": 9,
+            "spawn_interval_ticks": 18,
+            "start_delay_ticks": 60
+          },
+          {
+            "enemy": "lance",
+            "count": 2,
+            "spawn_interval_ticks": 44,
+            "start_delay_ticks": 150
+          }
+        ]
+      }
+    ]
+  }
+}

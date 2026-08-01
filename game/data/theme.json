@@ -199,7 +199,11 @@
     "glow_threshold": 1.0,
     "glow_threshold_hdr": 0.95,
     "auto_quality_fps": 24.0,
-    "auto_quality_seconds": 5.0
+    "auto_quality_seconds": 5.0,
+    "station": "#8d97a8",
+    "station_metallic": 0.6,
+    "station_roughness": 0.4,
+    "station_height_share": 0.42
   },
   "platform_max_tier": "#ffcf6e",
   "platform_cannon": "#c98a5b",

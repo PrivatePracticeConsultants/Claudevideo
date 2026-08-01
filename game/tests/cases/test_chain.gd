@@ -169,10 +169,16 @@ func test_owned_ground_carries_forward() -> void:
 func test_an_opening_act_inherits_nothing() -> void:
 	# Chains must not leak into each other: act 1 of a board is always a fresh
 	# start, whatever the previous chain ended with.
+	# "Opens a chain" means "is the first level on its board", not "is named
+	# act1" - the name was a proxy that held until Ares Station arrived as a
+	# single-act board whose one engagement is called a siege.
+	var seen_maps := {}
 	for level in Database.load_levels():
 		var db := Database.load_engagement(str(level["map"]), str(level["engagement"]))
 		var continues := bool(db.engagement.get("carries_forward", false))
-		if str(level["engagement"]).ends_with("act1"):
+		var opens: bool = not seen_maps.has(str(level["map"]))
+		seen_maps[str(level["map"])] = true
+		if opens:
 			assert_false(continues, "%s opens a chain and must not carry" % level["name"])
 		else:
 			assert_true(continues, "%s continues a chain and should carry" % level["name"])

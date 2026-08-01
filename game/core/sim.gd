@@ -127,6 +127,27 @@ var _spawn_cursor: int = 0
 # on a fixed set of pads. These are the rules that define that band.
 var _build_min_dist: float = 0.0
 var _build_max_dist: float = 0.0
+
+## Outpost mode: a board defended from the middle rather than along a road.
+##
+## The whole mode is a different way of PRODUCING routes, not a different
+## simulation. Enemies still walk a polyline, still carry one scalar distance
+## along it, and still leak at the end of it - the end is simply the base, in the
+## middle, and there are several lanes converging on it instead of one crossing
+## the board. Everything downstream of _build_path() is untouched: sampling,
+## targeting, broods hatching onto their parent's lane, the spatial hash, the
+## state hash, replay.
+##
+## That is the entire reason this was affordable. A flow field over player-built
+## walls is the other way to do it and would have replaced most of the tick.
+var _outpost: bool = false
+var _base_x: float = 0.0
+var _base_y: float = 0.0
+## Ground closer to the base than this is the outpost itself and cannot be built
+## on; ground further than the build radius is off the board.
+var _outpost_core_radius: float = 0.0
+var _outpost_build_radius: float = 0.0
+var _outpost_start_radius: float = 0.0
 var _build_min_spacing: float = 0.0
 ## Deployment limit: how many platforms may exist at once in this engagement.
 ##
@@ -666,7 +687,11 @@ func _init(db: Database, seed_value: int) -> void:
 	_capital = int(db.engagement.get("starting_capital", db.economy["starting_capital"]))
 	_act_hp_mult = float(db.engagement.get("act_hp_multiplier", 1.0))
 	_act_bounty_mult = float(db.engagement.get("act_bounty_multiplier", 1.0))
-	_integrity = int(db.economy["starting_integrity"])
+	# The engagement may override the hull. A corridor's integrity is a leak
+	# counter - a hundred, and every drone that walks off the end costs one of
+	# them. A station's is a health bar with eight lanes pointed at it, and
+	# reusing the corridor's number there would end the mode on wave two.
+	_integrity = int(db.engagement.get("starting_integrity", db.economy["starting_integrity"]))
 	_integrity_max = _integrity
 	_inter_wave_delay = int(db.engagement["inter_wave_delay_ticks"])
 	_wave_count = (db.engagement["waves"] as Array).size()
@@ -747,6 +772,14 @@ func _build_matchups() -> void:
 ## extend it: the prefix is byte-identical between acts, so everything already
 ## built beside it stays exactly where it was and stays useful.
 func _build_path() -> void:
+	# Outpost boards declare a base and a ring of gates instead of a road, and the
+	# lanes are generated from them. Read here rather than in the constructor
+	# because this is the first thing that needs to know, and the flag has to be
+	# set before the routes are built.
+	_outpost = _db.map.has("base") and _db.map.has("gates")
+	if _outpost:
+		_build_outpost_path()
+		return
 	var full: Array = _db.map["path"]
 	var revealed := int(_db.engagement.get("path_waypoints", full.size()))
 	revealed = clampi(revealed, 2, full.size())
@@ -774,7 +807,32 @@ func _build_path() -> void:
 	if bool(_db.engagement.get("breaches_armed", false)):
 		for extra: Array in (_db.map.get("breach_paths", []) as Array):
 			routes.append(extra)
+	_commit_routes(routes, first_breach)
 
+## Approach lanes for an outpost board: one straight run from each gate to the
+## base, generated from the map rather than authored as polylines.
+##
+## Two waypoints each, because a spoke is a straight line and a bend in it would
+## be decoration that every distance query then has to walk. The gates are
+## authored positions rather than points on a circle - computing them would need
+## trigonometry, which the simulation may not use, and placing them by hand lets
+## a board have an undefended side on purpose.
+##
+## No breaches here: every lane is open from the first tick, which is what
+## first_breach == size() means to _commit_routes.
+func _build_outpost_path() -> void:
+	var base: Dictionary = _db.map["base"]
+	_base_x = float(base["x"])
+	_base_y = float(base["y"])
+	var routes := []
+	for entry: Variant in (_db.map["gates"] as Array):
+		routes.append([entry as Dictionary, base])
+	_commit_routes(routes, routes.size())
+
+## Turn a list of waypoint lists into the flat segment tables everything else
+## reads. Shared by both board shapes so there is exactly one implementation of
+## what a route IS - the outpost mode differs only in where its routes came from.
+func _commit_routes(routes: Array, first_breach: int) -> void:
 	_route_count = routes.size()
 	_route_open.resize(_route_count)
 	for r in _route_count:
@@ -856,6 +914,11 @@ func _rebuild_route_rotation() -> void:
 
 func _load_build_rules() -> void:
 	_build_min_dist = float(_db.building["min_distance_from_path"])
+	# Outpost radii live on the map, because they are the board's shape rather
+	# than a rule about building - a wider ring is a different board.
+	_outpost_core_radius = float(_db.map.get("core_radius", 0.0))
+	_outpost_build_radius = float(_db.map.get("build_radius", 0.0))
+	_outpost_start_radius = float(_db.map.get("start_radius", 0.0))
 	# How far the free starting ground reaches. Overridable per engagement so a
 	# late level can hand you a narrow shoulder and make buying ground a real
 	# decision rather than an optimisation you never need.
@@ -884,11 +947,32 @@ func _build_grid() -> void:
 	for cy in _grid_rows:
 		for cx in _grid_cols:
 			var index := cy * _grid_cols + cx
-			var to_path := distance_to_path(cell_centre_x(cx), cell_centre_y(cy))
+			var centre_x := cell_centre_x(cx)
+			var centre_y := cell_centre_y(cy)
+			var to_path := distance_to_path(centre_x, centre_y)
 			_cell_buildable[index] = 1 if to_path >= _build_min_dist else 0
 			# Everything within the starting reach comes free, so a new level is
 			# immediately playable without spending on ground.
-			_cell_unlocked[index] = 1 if (_cell_buildable[index] == 1 and to_path <= _build_max_dist) else 0
+			var reach := to_path
+			if _outpost:
+				# On an outpost board "how far from the road" is the wrong question -
+				# every lane is a spoke, so measuring from them would confine building
+				# to narrow strips beside each one and leave the ground between them
+				# unusable. What bounds the board here is the base: you may build in
+				# the ring around it, out to the build radius, and the ring grows
+				# outward as you buy ground rather than sideways from a road.
+				#
+				# Staying off the lanes themselves is still the min-distance rule
+				# above, unchanged, which is why a spoke reads as a road you cannot
+				# stand on rather than as a line on the floor.
+				var dx := centre_x - _base_x
+				var dy := centre_y - _base_y
+				var to_base := sqrt(dx * dx + dy * dy)
+				if to_base < _outpost_core_radius or to_base > _outpost_build_radius:
+					_cell_buildable[index] = 0
+				reach = to_base
+			_cell_unlocked[index] = 1 if (_cell_buildable[index] == 1
+				and reach <= (_outpost_start_radius if _outpost else _build_max_dist)) else 0
 	# Premium ground last, because it is sparse and authored: a handful of cells
 	# per map that make the turret standing on them better. Unknown kinds were
 	# rejected at load; out-of-grid entries are simply ignored.
@@ -2917,6 +3001,13 @@ func tier_name(blueprint: int, tier: int) -> String:
 	return str((tiers[tier] as Dictionary)["name"])
 ## The board's roads. Route 0 is the one the board was authored around; a board
 ## with no forks has exactly this one and nothing else changes.
+## Is this a board defended from the middle?
+func is_outpost() -> bool: return _outpost
+func base_x() -> float: return _base_x
+func base_y() -> float: return _base_y
+func outpost_core_radius() -> float: return _outpost_core_radius
+func outpost_build_radius() -> float: return _outpost_build_radius
+
 func route_count() -> int: return _route_count
 func route_waypoint_count(r: int) -> int: return _route_wp_count[r]
 func route_waypoint_x(r: int, i: int) -> float: return _wp_x[_route_first_wp[r] + i]
