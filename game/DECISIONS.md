@@ -2551,3 +2551,40 @@ Audit: 403 tests, 62,309 assertions, 0 failed. Draw calls flat at 16 with 400
 entities and tracers live. Browser frame distribution, zero long frames at
 every tier: FAST 300ms / BALANCED 550ms / HIGH 1042ms (SwiftShader - ordering
 and ratios only).
+
+## P0-84 · Pinned bases, rotating heads: the real fix for firing out of the back
+
+The muzzle-advance fix (P0-83) treated a symptom. The disease was that the WHOLE
+turret sprite rotated to track its target: three-quarter-view art turned
+in-plane draws upside down the moment a turret aims down-screen - base in the
+air, gun underneath - so shots read as leaving the back of the mount no matter
+where the tracer started. The player's suggested structure was the correct and
+classic one: pin the base, spin only the gun.
+
+The art is one image per turret, but the composition is consistent - gun
+assembly above, round drum below - so the slicer now cuts each turret at a
+per-family split line into `<id>_base.png` and `<id>_head.png`. The one idea
+that makes the renderer side trivial: both halves are RE-CENTRED so the head's
+pivot (the centre of the drum's top face) sits at the canvas centre. A quad
+rotates about its centre, so baking the pivot into the image turns "rotate the
+head about its mount" into a plain basis rotation - no per-frame offset
+arithmetic, no pivot maths at draw time. The halves land on a larger canvas as a
+result, and the span ratio is read off the textures rather than stored anywhere
+it could go stale.
+
+The base layer never turns; the head layer carries the measured barrel offset
+and the per-frame tracking. Split mode is all-or-nothing across families and
+falls back to whole-sprite rotation if any half is missing, which keeps old
+checkouts and partial art drops working.
+
+A head rotated in-plane is still three-quarter art - a gun aiming down-screen is
+seen slightly from below - but a compact gun assembly reads fine that way, which
+is exactly why every classic tower defense draws its turret heads as separable
+pieces. What does NOT survive in-plane rotation is a whole turret with a
+grounded base, and now nothing asks it to.
+
+Audit: 403 tests, 62,309 assertions, 0 failed. Draw calls flat at 17 across 0 to
+400 entities - the five base layers cost exactly one call. Browser frame
+distribution, zero long frames at every tier: FAST 183ms / BALANCED 383ms /
+HIGH 667ms - every tier measurably faster than the previous run, though on
+SwiftShader only the ordering and the zero-long-frame result are trustworthy.

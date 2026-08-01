@@ -1268,9 +1268,42 @@ func _build_turret_layers() -> void:
 		if _sprite(SPRITE_TURRET_DIR, _sim.blueprint_name(family)) == null:
 			_sprite_turrets = false
 			break
+	# Split art - a pinned base and a head that turns - is preferred over the
+	# whole-sprite rotation, and it is all-or-nothing for the same reason the
+	# sprites themselves are. Rotating the WHOLE picture was the bug a player
+	# actually reported: a turret aiming down-screen drew its entire art upside
+	# down, base in the air, so every shot read as leaving the back of the mount
+	# whatever the tracer did. Only the gun should ever turn.
+	_sprite_turret_split = _sprite_turrets
+	if _sprite_turrets:
+		for family in _sim.blueprint_count():
+			var id := _sim.blueprint_name(family)
+			if _sprite(SPRITE_TURRET_DIR, id + "_base") == null \
+					or _sprite(SPRITE_TURRET_DIR, id + "_head") == null:
+				_sprite_turret_split = false
+				break
 
+	_turret_sprite_factor.resize(_sim.blueprint_count())
 	for family in _sim.blueprint_count():
 		var id := _sim.blueprint_name(family)
+		_turret_sprite_factor[family] = 1.0
+		if _sprite_turret_split:
+			# The split halves live on a larger canvas, re-centred so the head's
+			# pivot is the canvas centre. Drawing them at the single art's span
+			# would shrink the turret by that ratio, so the ratio rides along -
+			# read off the textures rather than stored anywhere it could go stale.
+			var whole := _sprite(SPRITE_TURRET_DIR, id)
+			var head := _sprite(SPRITE_TURRET_DIR, id + "_head")
+			_turret_sprite_factor[family] = float(head.get_width()) / float(whole.get_width())
+			var base_plane := _sprite_plane()
+			base_plane.material = _sprite_material(_sprite(SPRITE_TURRET_DIR, id + "_base"))
+			_turret_bases.append(_instanced(base_plane, limit))
+			add_child(_turret_bases[_turret_bases.size() - 1])
+			var head_plane := _sprite_plane()
+			head_plane.material = _sprite_material(head)
+			_turret_bodies.append(_instanced(head_plane, limit))
+			add_child(_turret_bodies[_turret_bodies.size() - 1])
+			continue
 		if _sprite_turrets:
 			# One layer instead of three. The sprite is the whole emplacement, so
 			# the mount and the muzzle are inside the picture and the thing that
@@ -2369,12 +2402,20 @@ func _refresh_turrets() -> void:
 			# Flat on the ground, turned to face its target. Tier still reads as
 			# size, and the tint is left WHITE so the authored colours survive -
 			# a family tint multiplied over painted art only ever muddies it.
-			var span := sprite_span * scale
+			var span := sprite_span * scale * _turret_sprite_factor[blueprint]
 			var forward := _forward_of(_sim.blueprint_name(blueprint))
 			bodies.set_instance_transform(slot, Transform3D(
 				_lean * Basis(Vector3.UP, facing + forward).scaled(Vector3(span, 1.0, span)),
-				to_world(_sim.t_x[i], _sim.t_y[i], sprite_lift + span * _lean_lift)))
+				to_world(_sim.t_x[i], _sim.t_y[i],
+					sprite_lift + (2.0 if _sprite_turret_split else 0.0) + span * _lean_lift)))
 			bodies.set_instance_color(slot, Color.WHITE)
+			if _sprite_turret_split:
+				# The base never turns. That is the entire point of the split.
+				var base_mm := _turret_bases[blueprint].multimesh
+				base_mm.set_instance_transform(slot, Transform3D(
+					_lean * Basis().scaled(Vector3(span, 1.0, span)),
+					to_world(_sim.t_x[i], _sim.t_y[i], sprite_lift + span * _lean_lift)))
+				base_mm.set_instance_color(slot, Color.WHITE)
 		else:
 			var bases := _turret_bases[blueprint].multimesh
 			bases.set_instance_transform(slot, Transform3D(Basis(),
@@ -2578,7 +2619,8 @@ func _turn_turret_sprites(turn: float) -> void:
 		if i < _barrel_angle.size():
 			_barrel_angle[i] = current
 		var mm := _turret_bodies[blueprint].multimesh
-		var reach := span * (1.0 + growth * float(_sim.platform_tier(i)))
+		var reach := span * (1.0 + growth * float(_sim.platform_tier(i))) \
+			* _turret_sprite_factor[blueprint]
 		var xf := mm.get_instance_transform(slot)
 		xf.basis = _lean * Basis(Vector3.UP,
 			current + _forward_of(_sim.blueprint_name(blueprint))).scaled(
@@ -2827,6 +2869,10 @@ var _sprites: Dictionary = {}
 ## Whether the turret families are being drawn as sprites. Read in several
 ## places that have to agree, so it is answered once.
 var _sprite_turrets: bool = false
+## Whether the turret art is split into pinned base + rotating head.
+var _sprite_turret_split: bool = false
+## Split-canvas to single-canvas span ratio, per family. 1.0 when unsplit.
+var _turret_sprite_factor: PackedFloat32Array = PackedFloat32Array()
 ## And whether the drone classes are. Answered per class at build time and
 ## collapsed to one flag, because the transform loop runs per drone per frame
 ## and must not be branching on a dictionary lookup in there.

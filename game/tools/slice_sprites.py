@@ -182,6 +182,56 @@ def key_cell(cell):
     return out
 
 
+## Where each turret's art divides into a pinned base and a rotating head, as
+## fractions of the trimmed sprite's height. split is the drum's top edge - the
+## head is everything above it, the base everything below. pivot is the point
+## the head turns about: the centre of the drum's top face, which in this
+## three-quarter art sits below the split because the drum top is an ellipse
+## seen at an angle. Per family because the railgun's long barrel and the
+## suppressor's coil stack sit differently on their drums.
+TURRET_SPLIT = {
+    "ballistic": {"split": 0.54, "pivot": 0.60},
+    "cannon": {"split": 0.54, "pivot": 0.60},
+    "railgun": {"split": 0.56, "pivot": 0.62},
+    "rig": {"split": 0.52, "pivot": 0.58},
+    "suppressor": {"split": 0.52, "pivot": 0.58},
+}
+
+
+def split_turret(keyed, spec, folder, name):
+    """One turret image -> a pinned base and a head that rotates about a pivot.
+
+    Both halves are re-centred so the PIVOT sits at the canvas centre: a quad
+    is rotated about its centre, so baking the pivot into the image is what
+    makes "rotate the head" a plain basis rotation with no per-frame offset
+    arithmetic. The base gets the same treatment so the two halves keep their
+    authored composition when drawn at the same point.
+    """
+    side = keyed.size[0]
+    split_y = int(side * spec["split"])
+    pivot_y = int(side * spec["pivot"])
+
+    head = keyed.copy()
+    head_px = head.load()
+    base = keyed.copy()
+    base_px = base.load()
+    for y in range(side):
+        for x in range(side):
+            if y < split_y:
+                base_px[x, y] = (0, 0, 0, 0)
+            else:
+                head_px[x, y] = (0, 0, 0, 0)
+
+    canvas = 2 * max(pivot_y, side - pivot_y) + 8
+    offset = ((canvas - side) // 2, canvas // 2 - pivot_y)
+    for half, suffix in ((base, "base"), (head, "head")):
+        out = Image.new("RGBA", (canvas, canvas), (0, 0, 0, 0))
+        out.paste(half, offset)
+        out.save(os.path.normpath(os.path.join(folder, "%s_%s.png" % (name, suffix))))
+    print("%-16s %-12s split at %.0f%%, pivot %.0f%%, canvas %d"
+          % (name + "_*", "turrets", spec["split"] * 100, spec["pivot"] * 100, canvas))
+
+
 def trim_square(image, pad_ratio=0.04):
     """Crop to the art, then pad back out to a square so nothing is distorted."""
     box = image.getbbox()
@@ -222,6 +272,8 @@ def slice_sheet(sheet, layout, root, labelled):
             os.makedirs(folder, exist_ok=True)
             keyed.save(os.path.normpath(os.path.join(folder, "%s.png" % name)))
             print("%-16s %-12s %dx%d" % (name, kind, keyed.size[0], keyed.size[1]))
+            if name in TURRET_SPLIT:
+                split_turret(keyed, TURRET_SPLIT[name], folder, name)
 
 
 def main() -> int:
