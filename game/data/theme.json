@@ -203,7 +203,12 @@
     "station": "#8d97a8",
     "station_metallic": 0.6,
     "station_roughness": 0.4,
-    "station_height_share": 0.42
+    "station_height_share": 0.42,
+    "sprite_cutout": 0.35,
+    "turret_sprite_span": 74.0,
+    "turret_sprite_lift": 3.0,
+    "drone_sprite_scale": 2.3,
+    "drone_sprite_lift": 15.0
   },
   "platform_max_tier": "#ffcf6e",
   "platform_cannon": "#c98a5b",

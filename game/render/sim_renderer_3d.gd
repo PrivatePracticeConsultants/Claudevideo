@@ -1245,8 +1245,27 @@ func _build_turret_layers() -> void:
 	_turret_bodies.clear()
 	_turret_barrels.clear()
 
+	# Sprites only if EVERY family has one. A board that mixed authored turrets
+	# with generated ones would read as two games; and the three-layer mount /
+	# housing / barrel split only makes sense for the generated meshes, so this
+	# is all-or-nothing by construction rather than by preference.
+	_sprite_turrets = true
+	for family in _sim.blueprint_count():
+		if _sprite(SPRITE_TURRET_DIR, _sim.blueprint_name(family)) == null:
+			_sprite_turrets = false
+			break
+
 	for family in _sim.blueprint_count():
 		var id := _sim.blueprint_name(family)
+		if _sprite_turrets:
+			# One layer instead of three. The sprite is the whole emplacement, so
+			# the mount and the muzzle are inside the picture and the thing that
+			# turns to track a target is the entire assembly.
+			var plane := _sprite_plane()
+			plane.material = _sprite_material(_sprite(SPRITE_TURRET_DIR, id))
+			_turret_bodies.append(_instanced(plane, limit))
+			add_child(_turret_bodies[_turret_bodies.size() - 1])
+			continue
 		# The board's own furniture: these three earn a shadow, because a turret
 		# without one looks pasted onto the ground rather than standing on it.
 		_turret_bases.append(_shadowed(_add_layer(_mount_mesh(id, radius, pad), limit)))
@@ -1552,10 +1571,31 @@ func _build_entity_layers() -> void:
 	# readable from shape as well as colour, which section 6.1 of the plan makes
 	# a correctness requirement rather than a nicety.
 	_enemy_layers.clear()
+	# All classes or none, decided before any layer is built. Reading it off the
+	# first class alone was wrong twice over: it made the answer depend on which
+	# drone happens to be listed first, and a board that drew some classes as
+	# sprites and the rest as meshes would read as two games at once.
+	_sprite_drones = true
 	for type_index in _sim.enemy_type_count():
-		var mesh := _enemy_mesh(_sim.enemy_id(type_index))
-		_skin(mesh, _instanced_material(_sim.enemy_id(type_index)))
-		var layer := _instanced(mesh, _sim.e_alive.size())
+		if _sprite(SPRITE_DRONE_DIR, _sim.enemy_id(type_index)) == null:
+			_sprite_drones = false
+			break
+
+	for type_index in _sim.enemy_type_count():
+		var id := _sim.enemy_id(type_index)
+		var art := _sprite(SPRITE_DRONE_DIR, id)
+		var layer: MultiMeshInstance3D
+		if art != null:
+			# One authored sprite on a flat quad. Two triangles instead of the
+			# welded assembly this class used to be, which is most of why the
+			# art pass came out cheaper than the meshes it replaced.
+			var plane := _sprite_plane()
+			plane.material = _sprite_material(art)
+			layer = _instanced(plane, _sim.e_alive.size())
+		else:
+			var mesh := _enemy_mesh(id)
+			_skin(mesh, _instanced_material(id))
+			layer = _instanced(mesh, _sim.e_alive.size())
 		# Drones too - a shadow is most of what makes one read as a solid object
 		# moving over ground rather than a sprite sliding across it. Switchable,
 		# because on a slow device this is the next thing to give up after trees.
@@ -2216,13 +2256,17 @@ func _refresh_turrets() -> void:
 	var plinth := _color("pad_occupied")
 
 	# Turrets are grouped by family, so each family's layers only carry its own.
+	# Counted off the BODY layers: in sprite mode the mount and muzzle layers do
+	# not exist, and the body is the whole emplacement.
 	var filled := PackedInt32Array()
-	filled.resize(_turret_bases.size())
+	filled.resize(_turret_bodies.size())
 	filled.fill(0)
+	var sprite_span := float(_world.get("turret_sprite_span", 96.0))
+	var sprite_lift := float(_world.get("turret_sprite_lift", 3.0))
 
 	for i in _sim.t_count:
 		var blueprint := _sim.platform_blueprint(i)
-		if blueprint < 0 or blueprint >= _turret_bases.size():
+		if blueprint < 0 or blueprint >= _turret_bodies.size():
 			continue
 		var slot := filled[blueprint]
 		var tier := _sim.platform_tier(i)
@@ -2232,23 +2276,33 @@ func _refresh_turrets() -> void:
 		var tint := _family_colour(i, ballistic, cannon, suppressor, railgun).lerp(
 			top_colour, fraction)
 
-		var bases := _turret_bases[blueprint].multimesh
-		bases.set_instance_transform(slot, Transform3D(Basis(),
-			to_world(_sim.t_x[i], _sim.t_y[i], pad_height * 0.5)))
-		bases.set_instance_color(slot, plinth)
-
-		# Housings are turned to face the same way as the barrel, so a boxy
-		# receiver reads as pointing at something rather than as a stray crate.
 		var facing := _barrel_angle[i] if i < _barrel_angle.size() else 0.0
 		var bodies := _turret_bodies[blueprint].multimesh
-		bodies.set_instance_transform(slot, Transform3D(
-			Basis(Vector3.UP, facing).scaled(Vector3(scale, scale, scale)),
-			to_world(_sim.t_x[i], _sim.t_y[i], pad_height + body_height * scale * 0.5)))
-		bodies.set_instance_color(slot, tint)
+		if _sprite_turrets:
+			# Flat on the ground, turned to face its target. Tier still reads as
+			# size, and the tint is left WHITE so the authored colours survive -
+			# a family tint multiplied over painted art only ever muddies it.
+			var span := sprite_span * scale
+			bodies.set_instance_transform(slot, Transform3D(
+				Basis(Vector3.UP, facing).scaled(Vector3(span, 1.0, span)),
+				to_world(_sim.t_x[i], _sim.t_y[i], sprite_lift)))
+			bodies.set_instance_color(slot, Color.WHITE)
+		else:
+			var bases := _turret_bases[blueprint].multimesh
+			bases.set_instance_transform(slot, Transform3D(Basis(),
+				to_world(_sim.t_x[i], _sim.t_y[i], pad_height * 0.5)))
+			bases.set_instance_color(slot, plinth)
+			# Housings are turned to face the same way as the barrel, so a boxy
+			# receiver reads as pointing at something rather than as a stray crate.
+			bodies.set_instance_transform(slot, Transform3D(
+				Basis(Vector3.UP, facing).scaled(Vector3(scale, scale, scale)),
+				to_world(_sim.t_x[i], _sim.t_y[i], pad_height + body_height * scale * 0.5)))
+			bodies.set_instance_color(slot, tint)
 		filled[blueprint] = slot + 1
 
-	for family in _turret_bases.size():
-		_turret_bases[family].multimesh.visible_instance_count = filled[family]
+	for family in _turret_bodies.size():
+		if not _turret_bases.is_empty():
+			_turret_bases[family].multimesh.visible_instance_count = filled[family]
 		_turret_bodies[family].multimesh.visible_instance_count = filled[family]
 
 # --- per frame ---------------------------------------------------------------------
@@ -2263,6 +2317,8 @@ func update_visuals(alpha: float, delta: float = 0.0) -> void:
 func _update_enemies(alpha: float) -> void:
 	var bar_mm := _hp_bars.multimesh
 	var enemy_height := float(_world.get("enemy_height", 26.0))
+	var drone_span := float(_world.get("drone_sprite_scale", 3.1))
+	var drone_lift := float(_world.get("drone_sprite_lift", 4.0))
 	var bar_lift := float(_world.get("hp_bar_lift", 50.0))
 	var bar_width := float(_world.get("hp_bar_width", 38.0))
 	var bar_thickness := float(_world.get("hp_bar_height", 6.0))
@@ -2300,9 +2356,20 @@ func _update_enemies(alpha: float) -> void:
 		var layer := _enemy_layers[clampi(type_index, 0, _enemy_layers.size() - 1)]
 		var mm := layer.multimesh
 		var slot := per_layer[type_index]
-		mm.set_instance_transform(slot, Transform3D(
-			Basis().scaled(Vector3(footprint, height, footprint)),
-			Vector3(px, height * 0.5, pz)))
+		if _sprite_drones:
+			# Flat on the ground and turned to face the way it is walking, so the
+			# art's own "forward" - every asset is drawn facing up - points down
+			# the lane. Sized off the class radius alone: a sprite has no height
+			# to scale, and the picture already carries the proportions.
+			var span := footprint * drone_span
+			mm.set_instance_transform(slot, Transform3D(
+				Basis(Vector3.UP, atan2(_sim.out_dx(), _sim.out_dy())).scaled(
+					Vector3(span, 1.0, span)),
+				Vector3(px, drone_lift, pz)))
+		else:
+			mm.set_instance_transform(slot, Transform3D(
+				Basis().scaled(Vector3(footprint, height, footprint)),
+				Vector3(px, height * 0.5, pz)))
 
 		var hp_max: float = float(_sim.e_hp_max[i])
 		var fraction: float = 0.0 if hp_max <= 0.0 else clampf(float(_sim.e_hp[i]) / hp_max, 0.0, 1.0)
@@ -2363,6 +2430,35 @@ func _update_projectiles(alpha: float) -> void:
 ## Swing each barrel toward whatever its turret last fired at. Smoothed here
 ## rather than in the simulation: the sim's aim is instant and authoritative, and
 ## this is only how it looks.
+## Track targets with the sprite layers.
+##
+## Rewrites only the basis, keeping the translation the board refresh already
+## wrote - so this stays a per-frame rotation rather than a second place that
+## decides where a turret stands.
+func _turn_turret_sprites(turn: float) -> void:
+	var growth := float(_world.get("platform_tier_growth", 0.28))
+	var span := float(_world.get("turret_sprite_span", 96.0))
+	var filled := PackedInt32Array()
+	filled.resize(_turret_bodies.size())
+	filled.fill(0)
+	for i in _sim.t_count:
+		var blueprint := _sim.platform_blueprint(i)
+		if blueprint < 0 or blueprint >= _turret_bodies.size():
+			continue
+		var slot := filled[blueprint]
+		filled[blueprint] = slot + 1
+		var target := atan2(_sim.t_aim_x[i], _sim.t_aim_y[i])
+		var current: float = _barrel_angle[i] if i < _barrel_angle.size() else target
+		var delta := wrapf(target - current, -PI, PI)
+		current = current + delta * clampf(turn * 0.0333, 0.0, 1.0)
+		if i < _barrel_angle.size():
+			_barrel_angle[i] = current
+		var mm := _turret_bodies[blueprint].multimesh
+		var reach := span * (1.0 + growth * float(_sim.platform_tier(i)))
+		var xf := mm.get_instance_transform(slot)
+		xf.basis = Basis(Vector3.UP, current).scaled(Vector3(reach, 1.0, reach))
+		mm.set_instance_transform(slot, xf)
+
 func _update_barrels() -> void:
 	var pad_height := float(_world.get("pad_height", 12.0))
 	var body_height := float(_world.get("platform_height", 48.0))
@@ -2375,6 +2471,14 @@ func _update_barrels() -> void:
 	var cannon := _color_of(_world.get("platform_cannon", "#c98a5b"))
 	var suppressor := _color_of(_world.get("platform_suppressor", "#4fc9d8"))
 	var railgun := _color_of(_world.get("platform_railgun", "#d8d24f"))
+
+	# In sprite mode there is no separate muzzle to turn - the whole emplacement
+	# is one picture - so the tracking is applied to the body layer and nothing
+	# else in this function runs. The angle is still smoothed the same way, so a
+	# sprite turret swings onto a target exactly as a built one did.
+	if _sprite_turrets:
+		_turn_turret_sprites(turn)
+		return
 
 	var filled := PackedInt32Array()
 	filled.resize(_turret_barrels.size())
@@ -2576,6 +2680,75 @@ func rebuild_static() -> void:
 # --- materials -------------------------------------------------------------------------
 
 const MATERIALS_PATH := "res://data/materials.json"
+const SPRITE_TURRET_DIR := "res://assets/art/turrets/"
+const SPRITE_DRONE_DIR := "res://assets/art/drones/"
+
+## Authored sprites, by the id the game already holds - blueprint id for a
+## turret, enemy id for a drone. Empty when the art is not present, and every
+## call site falls back to the generated meshes, so the game still runs from a
+## checkout with no assets/ directory.
+var _sprites: Dictionary = {}
+
+## Whether the turret families are being drawn as sprites. Read in several
+## places that have to agree, so it is answered once.
+var _sprite_turrets: bool = false
+## And whether the drone classes are. Answered per class at build time and
+## collapsed to one flag, because the transform loop runs per drone per frame
+## and must not be branching on a dictionary lookup in there.
+var _sprite_drones: bool = false
+
+## Load a sprite, or null if the art for this id was never authored.
+##
+## Cached including the misses: ResourceLoader.exists() is a filesystem question
+## and asking it per layer per level load is a hitch nobody would ever find.
+func _sprite(dir: String, id: String) -> Texture2D:
+	var key := dir + id
+	if _sprites.has(key):
+		return _sprites[key]
+	var path := "%s%s.png" % [dir, id]
+	var texture: Texture2D = null
+	if ResourceLoader.exists(path):
+		texture = ResourceLoader.load(path) as Texture2D
+	_sprites[key] = texture
+	return texture
+
+## A horizontal quad, one unit across, lying on the ground.
+##
+## PlaneMesh with FACE_Y rather than a QuadMesh rotated into place: the mesh is
+## shared by every instance of a layer and baking the orientation in means the
+## per-instance basis is free to carry only what actually varies, which is
+## facing and scale.
+func _sprite_plane() -> PlaneMesh:
+	var plane := PlaneMesh.new()
+	plane.size = Vector2.ONE
+	plane.orientation = PlaneMesh.FACE_Y
+	return plane
+
+## The material an authored sprite is drawn with.
+##
+## Unshaded, and that is a decision rather than a shortcut. The art already has
+## its light painted in - a rim from the upper left on every asset - and lighting
+## it a second time with the board's sun turned the mid-tones muddy and made the
+## drones read as grey blobs at distance. It is also the cheapest shading mode
+## there is, which matters on a build that is fill-bound.
+##
+## ALPHA_SCISSOR rather than alpha blending, for the same reason: blended sprites
+## have to be depth-sorted and they pay for every overlapping pixel. A cutout
+## costs one discard and never sorts. The threshold is low enough to keep the
+## Mender's glow arcs and the Suppressor's lightning, which are the two assets
+## that would notice.
+func _sprite_material(texture: Texture2D) -> StandardMaterial3D:
+	var material := StandardMaterial3D.new()
+	material.albedo_texture = texture
+	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
+	material.alpha_scissor_threshold = float(_world.get("sprite_cutout", 0.35))
+	# The damage flash and the family tint still ride on the instance colour.
+	material.vertex_color_use_as_albedo = true
+	material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+	return material
+
 
 ## The surface families, or an empty set if the file is missing or malformed.
 ##

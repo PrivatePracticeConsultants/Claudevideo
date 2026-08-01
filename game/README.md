@@ -577,6 +577,9 @@ render/
                       the three quality tiers
   material_library.gd generated albedo / normal / roughness maps, per family
   debug_overlay.gd    F3: fps, worst frame, long frames, quality, GPU, pools
+assets/art/ the authored entity sprites — five turret families, eleven drone
+            classes — sliced from one sheet by tools/slice_sprites.py. The only
+            binary assets in the project; surfaces and sound are still generated
 audio/      sfx.gd — every sound in the game, synthesised at startup
 ui/         HUD, wave preview, end-of-act debrief, transient notices
 tools/      headless dev utilities — screenshot capture, render stress, frame

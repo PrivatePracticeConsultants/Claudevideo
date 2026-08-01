@@ -7,7 +7,7 @@ tests will not catch. It is vendor-neutral — nothing here assumes any particul
 assistant.
 
 **Read this file in full, then `README.md` (what the game is), then skim
-`DECISIONS.md` (why everything is the way it is).** `DECISIONS.md` is 77 numbered
+`DECISIONS.md` (why everything is the way it is).** `DECISIONS.md` is 79 numbered
 entries and it is the single most valuable document here: each one records a
 decision, the measurement behind it, and in many cases the wrong answer that was
 tried first. Before you "fix" something that looks odd, search that file for it.
@@ -25,7 +25,7 @@ Ignore `CLAUDE.md`, `docs/AI_HANDOFF.md`, `mrfx/`, `src/`, `run.py` entirely.
 GODOT=/path/to/godot ./game/run_tests.sh
 ```
 
-Expect **387 tests, 62,220 assertions, 0 failed**, in roughly 4–6 minutes. If
+Expect **403 tests, 62,309 assertions, 0 failed**, in roughly 4–6 minutes. If
 you get that, your environment is good. If you get parse errors about
 identifiers not being declared, read §2.1 — you almost certainly ran Godot
 directly instead of through the script.
@@ -118,16 +118,23 @@ Because comments are stripped first, a doc comment may freely name `Vector2` or
 `render/`, `ui/`, `audio/`, `tools/` and `tests/` are **not** linted at all. Use
 `Vector3`, trigonometry and literals freely there.
 
-### 2.6 No binary assets, ever
+### 2.6 Generated assets — with one deliberate exception
 
-There are no images, no audio files, no models in this repository. Every texture
-is generated at runtime by `render/material_library.gd`; every sound is
-synthesised at startup by `audio/sfx.gd`; every mesh is built from Godot
-primitives welded with `SurfaceTool`.
+Almost everything is generated: every **surface** texture by
+`render/material_library.gd`, every **sound** by `audio/sfx.gd`, and all board
+geometry from Godot primitives welded with `SurfaceTool`. If you need a new
+surface, add a family to `data/materials.json` — do not add an image.
 
-This is a hard constraint, not a preference. If you need a new surface, add a
-family to `data/materials.json`. If you think you need an image file, you have
-misunderstood the constraint — re-read `DECISIONS.md` P0-74.
+**The exception is entity art.** `assets/art/` holds sixteen authored sprites —
+five turret families and eleven drone classes — and they are what the game
+draws for turrets and drones. They are sliced from a single authored sheet by
+`tools/slice_sprites.py`, which is committed so that re-exporting the sheet is
+one command rather than an archaeology exercise.
+
+Do **not** "restore" procedural entity meshes over them. The generated meshes
+still exist and are still the fallback when a sprite is missing, which is what
+keeps a checkout with no `assets/` running — but the sprites are the intended
+look, and they measured *cheaper* than the meshes they replaced (P0-79).
 
 ### 2.7 Two renderers, and they disagree
 

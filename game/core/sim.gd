@@ -79,6 +79,8 @@ var _max_platforms: int
 # trigonometric function from the hot loop.
 var _wp_x: PackedFloat64Array = PackedFloat64Array()
 var _wp_y: PackedFloat64Array = PackedFloat64Array()
+var _out_dx: float = 0.0
+var _out_dy: float = 0.0
 var _seg_dx: PackedFloat64Array = PackedFloat64Array()
 var _seg_dy: PackedFloat64Array = PackedFloat64Array()
 var _seg_cum: PackedFloat64Array = PackedFloat64Array()
@@ -2076,6 +2078,14 @@ func _sample_path(prog: float, offset: float, route: int = 0) -> void:
 	# Perpendicular of a unit vector is (-dy, dx) - no trigonometry needed.
 	_out_x = _seg_ax[lo] + dx * t - dy * offset
 	_out_y = _seg_ay[lo] + dy * t + dx * offset
+	# The direction of travel comes free - it is the segment's own unit vector,
+	# already in hand. Published rather than recomputed because the renderer needs
+	# it to turn a sprite to face the way it is walking, and the alternative was
+	# sampling the path a second time per drone per frame. The ANGLE is the
+	# renderer's business: atan2 is not bit-reproducible across libm and has no
+	# place in here.
+	_out_dx = dx
+	_out_dy = dy
 
 ## Recompute what every turret is getting from its neighbours.
 ##
@@ -3193,6 +3203,9 @@ func sample_for_render(prog: float, offset: float, route: int = 0) -> void:
 	_sample_path(prog, offset, clampi(route, 0, _route_count - 1))
 func out_x() -> float: return _out_x
 func out_y() -> float: return _out_y
+## Unit direction of travel at the last sampled point.
+func out_dx() -> float: return _out_dx
+func out_dy() -> float: return _out_dy
 
 ## Bit-exact fingerprint of the whole simulation.
 ##

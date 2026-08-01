@@ -66,7 +66,19 @@ with sync_playwright() as p:
     page.click("canvas")
     time.sleep(2)
 
-    for label, presses in [("BALANCED", 0), ("FAST", 1), ("HIGH", 1)]:
+    # Take the quality tier away from the auto governor BEFORE it can act.
+    #
+    # main.gd steps the tier down after five seconds below the fps floor and F2
+    # ends that for the session - so on a machine slow enough to trip it, a probe
+    # that warmed up first was measuring whatever the governor had settled on and
+    # labelling it whatever it expected. That produced FAST slower than HIGH,
+    # which is impossible and was the tell. Pressing F2 here, while the tier is
+    # still the saved default (BALANCED), disables the governor and lands
+    # deterministically on FAST; every press after that cycles the known order.
+    page.keyboard.press("F2")
+    time.sleep(1)
+
+    for label, presses in [("FAST", 0), ("HIGH", 1), ("BALANCED", 1)]:
         for _ in range(presses):
             page.keyboard.press("F2")
         time.sleep(WARMUP_S)

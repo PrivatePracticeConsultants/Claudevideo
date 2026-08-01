@@ -2298,3 +2298,73 @@ boss that is merely a big number is a spike, and slow-plus-bounty makes it a
 siege that funds the answer to the next one. The station mesh is welded
 primitives like everything else, low and wide so it never occludes the lanes
 converging on it.
+
+## P0-79 · Authored art replaces the generated meshes, and it made the game faster
+
+Sixteen sprites arrived as one 4x4 sheet - five turret families and eleven drone
+classes, top-down, facing up. They are now what the game draws.
+
+**This repeals the no-binary-assets rule for entities.** That rule earned its
+keep for a long time and is still right for surfaces (`material_library.gd` is
+untouched, and the ground, road, walls and scenery are still generated). But it
+was a constraint adopted because there was no art, not a principle - and holding
+it in front of art this much better than anything a noise field will produce
+would have been dogma. `game/AGENTS.md` is amended in the same commit, because a
+handoff document that still says "there are no images in this repository" would
+send the next person to regenerate over the assets.
+
+**The slicer is committed, not run by hand.** `tools/slice_sprites.py` cuts the
+sheet and keys it. Two things in it are less obvious than they look:
+
+- The backdrop is not one colour - it samples 107 to 124 - so a global colour key
+  either leaves a halo or eats the art's own greys, and the Breaker is almost
+  entirely mid-grey. Background is instead found by flood filling inward from
+  each cell's border: a pixel is background only if it is grey-ish *and*
+  connected to the edge, so the Breaker's grey is protected by its own outline.
+- That leaves pockets. The Mender's glow arcs loop round and seal backdrop
+  inside them, which shipped as opaque grey holes. Anything within ALPHA_LOW of
+  the backdrop is indistinguishable from it and can be cleared regardless of
+  connectivity - measured, only 2.2% of the Breaker's body sits that close - but
+  bounded by region size, because a lone near-grey pixel is a highlight and
+  clearing those would punch speckle.
+
+Edge alpha ramps with distance-from-backdrop and the colour is then solved back
+out of the blend (F = (C - (1-a)B) / a), which is what stops a grey fringe
+reading as a dirty outline on a dark board.
+
+**In the renderer** each layer simply gets a textured quad instead of a welded
+mesh. Turret families collapse from three layers to one: the sprite is the whole
+emplacement, so the mount and muzzle are inside the picture and the thing that
+turns to track a target is the entire assembly. Sprites are UNSHADED - the art
+has its light painted in, and lighting it a second time with the board's sun
+turned the mid-tones muddy - and cut out with ALPHA_SCISSOR rather than blended,
+because blended sprites must be depth-sorted and pay for every overlapping
+pixel.
+
+The direction a drone faces needed the segment's unit vector, which
+`sample_for_render` already had in hand and was throwing away. It is published
+as `out_dx`/`out_dy` rather than recomputed, and the ANGLE is taken in the
+renderer: `atan2` is not bit-reproducible across libm and has no business in the
+simulation.
+
+**It is cheaper than what it replaced**, which was the hope rather than the
+expectation. Same tool, same scene, `tools/render_stress.gd`:
+
+| | draw calls | ms/frame at 0 entities | at 400 entities |
+|---|---|---|---|
+| welded meshes | 16 → 22 | 130.14 | 141.15 |
+| authored sprites | 12 → 16 | **84.05** | **88.98** |
+
+Two triangles per entity instead of a welded assembly, and four fewer layers.
+Browser frame times after the swap, with zero long frames at every tier: FAST
+333ms, BALANCED 633ms, HIGH 1133ms (software rasteriser - ordering and ratios
+only).
+
+**One bug found, and it was mine from the previous phase.** The jitter probe
+reported FAST *slower* than HIGH, which is impossible. The auto-quality governor
+was stepping the tier down during the probe's warm-up and the probe was
+labelling whatever it landed on. `tools/frame_jitter.py` now presses F2 before
+warm-up - taking the tier away from the governor while it is still the saved
+default - so the labels are deterministic again. Worth recording as a shape: a
+feature that adapts at runtime silently invalidates every measurement tool that
+assumed it did not.
