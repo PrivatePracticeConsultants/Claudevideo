@@ -2409,3 +2409,51 @@ a fix: the assets are drawn at a true 90-degree overhead, which shows no sides.
 Art drawn from roughly 60-65 degrees of elevation shows some of each unit's
 flank and reads with volume even before the lean. That is a prompt change for
 the next sheet, not something the renderer can recover.
+
+## P0-81 · The sprites looked pixelated, and two of the three causes were silent
+
+Three things were degrading the authored art, and only the third was visible as
+a decision anyone had made.
+
+**Mipmaps were never generated.** `_sprite_material()` asks for
+`TEXTURE_FILTER_LINEAR_WITH_MIPMAPS`, and Godot's default PNG import sets
+`mipmaps/generate=false`. Asking for a filter that needs mipmaps against a
+texture that has none does not warn - it silently falls back to plain linear, so
+every minified sprite aliased and crawled. That is the exact failure mode this
+project keeps meeting: a request that reports success while doing nothing.
+
+**Godot was about to VRAM-compress them behind our backs.** The imports carried
+`detect_3d/compress_to=1`, which re-imports a 2D-imported texture with block
+compression the first time it is used in 3D. Nothing had triggered it yet, so
+the art in the repo was lossless and the art on a colleague's next checkout
+would not have been - a difference that appears at import time, not in any diff.
+Set to 0.
+
+**The 3D pass was upscaled at every tier.** One `render_scale_floor` of 0.6 meant
+that on any window larger than 720p the whole 3D pass rendered at 60% and was
+bilinearly upscaled - including HIGH. The floor is now per tier
+(`render_scale_floors`, 0.9 / 0.75 / 0.6), because the tier is already where the
+player says what they will pay, and the resolution they are shown belongs to it.
+Below 720p none of them bind, which is why this was invisible in every
+screenshot taken here and obvious to someone playing on a real monitor.
+
+Enabling mipmaps made it FASTER, which was not the expectation - minified
+sampling gets its texture cache back. Same tool, same scene:
+
+| | ms/frame at 0 entities | at 400 |
+|---|---|---|
+| sprites, no mipmaps | 84.05 | 88.98 |
+| sprites, mipmapped | **72.51** | **81.79** |
+
+Browser frame times at 1920x1080, where the new floors actually bind, zero long
+frames at every tier: FAST 567ms, BALANCED 950ms, HIGH 1517ms. Software
+rasteriser, so ordering and ratios only.
+
+The honest trade: raising the floors costs frames on a large screen, and it is
+the auto governor (P0-76) that keeps that safe - a machine that cannot hold HIGH
+at 0.9 is stepped down to a tier whose floor it can. Clarity and frame rate are
+the same dial, and the player already has it.
+
+What is left is source resolution: the sheet is 1024x1024 for sixteen assets, so
+each is about 250 pixels square. That is ample at normal zoom and soft when
+zoomed right in, and no import setting recovers it - it wants a larger sheet.

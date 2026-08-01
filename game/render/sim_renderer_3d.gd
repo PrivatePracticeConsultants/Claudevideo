@@ -363,7 +363,18 @@ func _fit_render_scale() -> void:
 	# suite reported "0 failed" for sixteen tests that asserted almost nothing.
 	var share: float = QUALITY_PIXEL_SHARE[_quality]
 	var budget := maxf(float(_world.get("render_pixel_budget", 1280.0 * 720.0)), 1.0) * share
-	var floor_scale := clampf(float(_world.get("render_scale_floor", 0.6)), 0.1, 1.0)
+	# The floor follows the tier rather than being one number for all three.
+	#
+	# A single 0.6 floor meant that on any screen bigger than 720p EVERY tier
+	# rendered the 3D pass at 60% and bilinearly upscaled it - including HIGH -
+	# and the authored sprites came back through that looking, in a word,
+	# pixelated. The tier is already the place where the player says how much
+	# they are willing to pay; the resolution they are shown belongs to it too.
+	var floors: Array = _world.get("render_scale_floors", [0.9, 0.75, 0.6])
+	var floor_scale := 0.6
+	if _quality < floors.size():
+		floor_scale = float(floors[_quality])
+	floor_scale = clampf(floor_scale, 0.1, 1.0)
 	viewport.scaling_3d_mode = Viewport.SCALING_3D_MODE_BILINEAR
 	viewport.scaling_3d_scale = clampf(sqrt(budget / pixels), floor_scale, 1.0)
 

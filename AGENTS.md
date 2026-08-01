@@ -40,7 +40,7 @@ cost you an hour, the invariants that are mechanically enforced, the working
 method the codebase expects, and what is currently open.
 
 Then `game/README.md` (what the game is and how it is built) and
-`game/DECISIONS.md` (why every non-obvious thing is the way it is — 80 entries,
+`game/DECISIONS.md` (why every non-obvious thing is the way it is — 81 entries,
 each one a decision with the measurement behind it).
 
 ---

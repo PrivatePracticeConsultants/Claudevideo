@@ -209,7 +209,13 @@
     "turret_sprite_lift": 3.0,
     "drone_sprite_scale": 2.3,
     "drone_sprite_lift": 15.0,
-    "sprite_lean_degrees": 28.0
+    "sprite_lean_degrees": 28.0,
+    "_render_scale_floors": "Lowest 3D render scale per quality tier, HIGH/BALANCED/FAST. Below this the pass is upscaled to the window and the authored sprites read as pixelated - which is the whole reason this is per-tier rather than one number. HIGH stays near native; FAST is allowed to get blurry because it is the tier for a machine that is struggling.",
+    "render_scale_floors": [
+      0.9,
+      0.75,
+      0.6
+    ]
   },
   "platform_max_tier": "#ffcf6e",
   "platform_cannon": "#c98a5b",
