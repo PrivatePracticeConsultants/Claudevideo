@@ -22,7 +22,10 @@ of the blend (C = a*F + (1-a)*B, so F = (C - (1-a)B) / a). That is what keeps
 the Mender's green arcs and the Suppressor's lightning as glow rather than as a
 grey smear.
 
-    python3 game/tools/slice_sprites.py <sheet.png>
+    python3 game/tools/slice_sprites.py <sheet.png>                 # the 4x4 entity sheet
+    python3 game/tools/slice_sprites.py <sheet.png> --labels        # ...with caption text baked in
+    python3 game/tools/slice_sprites.py <sheet.png> --projectiles   # the 2x2 projectile sheet
+    python3 game/tools/slice_sprites.py <image.png> --single <name> # one image -> one sprite
 """
 import sys, os
 from collections import deque
@@ -38,6 +41,21 @@ LAYOUT = [
     ["brood", "breaker", "borer", "titan"],
 ]
 TURRETS = {"ballistic", "cannon", "railgun", "rig", "suppressor"}
+
+## The 2x2 projectile sheet, row-major. Named by the art each tracer uses rather
+## than by damage type, because the Suppressor and the Railgun are both Energy
+## and look nothing alike in flight.
+PROJECTILE_LAYOUT = [
+    ["proj_kinetic", "proj_explosive"],
+    ["proj_energy", "proj_arc"],
+]
+
+## Share of each cell's height cut off the BOTTOM before keying, when the sheet
+## has caption text baked into it. The captions sit in a band under each
+## subject; the flood fill cannot remove them - white text is nothing like the
+## backdrop - so they would ship inside the sprite as stray words. Cropping the
+## band is cruder than detecting text and better than shipping it.
+LABEL_BAND = 0.16
 
 # Distance from the local backdrop at which a pixel becomes fully opaque, and
 # below which it is fully transparent. Generous at the bottom because the
@@ -167,29 +185,53 @@ def trim_square(image, pad_ratio=0.04):
     return square
 
 
+def slice_sheet(sheet, layout, root, labelled):
+    rows = len(layout)
+    cols = len(layout[0])
+    cell_w = sheet.size[0] // cols
+    cell_h = sheet.size[1] // rows
+    print("%-16s %-12s %s" % ("sprite", "kind", "size"))
+    for r, row in enumerate(layout):
+        for c, name in enumerate(row):
+            bottom = (r + 1) * cell_h
+            if labelled:
+                bottom -= int(cell_h * LABEL_BAND)
+            cell = sheet.crop((c * cell_w, r * cell_h, (c + 1) * cell_w, bottom))
+            keyed = trim_square(key_cell(cell))
+            if name in TURRETS:
+                kind = "turrets"
+            elif name.startswith("proj_"):
+                kind = "fx"
+            else:
+                kind = "drones"
+            folder = os.path.join(root, kind)
+            os.makedirs(folder, exist_ok=True)
+            keyed.save(os.path.normpath(os.path.join(folder, "%s.png" % name)))
+            print("%-16s %-12s %dx%d" % (name, kind, keyed.size[0], keyed.size[1]))
+
+
 def main() -> int:
     if len(sys.argv) < 2:
         print(__doc__)
         return 2
-    sheet = Image.open(sys.argv[1]).convert("RGB")
-    rows = len(LAYOUT)
-    cols = len(LAYOUT[0])
-    cell_w = sheet.size[0] // cols
-    cell_h = sheet.size[1] // rows
+    args = sys.argv[1:]
     root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "assets", "art")
-    os.makedirs(os.path.join(root, "turrets"), exist_ok=True)
-    os.makedirs(os.path.join(root, "drones"), exist_ok=True)
+    sheet = Image.open(args[0]).convert("RGB")
 
-    print("%-12s %-9s %s" % ("sprite", "kind", "size"))
-    for r, row in enumerate(LAYOUT):
-        for c, name in enumerate(row):
-            cell = sheet.crop((c * cell_w, r * cell_h,
-                               (c + 1) * cell_w, (r + 1) * cell_h))
-            keyed = trim_square(key_cell(cell))
-            kind = "turrets" if name in TURRETS else "drones"
-            path = os.path.normpath(os.path.join(root, kind, "%s.png" % name))
-            keyed.save(path)
-            print("%-12s %-9s %dx%d" % (name, kind, keyed.size[0], keyed.size[1]))
+    if "--single" in args:
+        name = args[args.index("--single") + 1]
+        keyed = trim_square(key_cell(sheet))
+        os.makedirs(root, exist_ok=True)
+        path = os.path.normpath(os.path.join(root, "%s.png" % name))
+        keyed.save(path)
+        print("%-16s %-12s %dx%d" % (name, "art", keyed.size[0], keyed.size[1]))
+        return 0
+
+    if "--projectiles" in args:
+        slice_sheet(sheet, PROJECTILE_LAYOUT, root, labelled=True)
+        return 0
+
+    slice_sheet(sheet, LAYOUT, root, labelled="--labels" in args)
     return 0
 
 

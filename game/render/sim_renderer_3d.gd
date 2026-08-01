@@ -2296,8 +2296,9 @@ func _refresh_turrets() -> void:
 			# size, and the tint is left WHITE so the authored colours survive -
 			# a family tint multiplied over painted art only ever muddies it.
 			var span := sprite_span * scale
+			var forward := _forward_of(_sim.blueprint_name(blueprint))
 			bodies.set_instance_transform(slot, Transform3D(
-				_lean * Basis(Vector3.UP, facing).scaled(Vector3(span, 1.0, span)),
+				_lean * Basis(Vector3.UP, facing + forward).scaled(Vector3(span, 1.0, span)),
 				to_world(_sim.t_x[i], _sim.t_y[i], sprite_lift + span * _lean_lift)))
 			bodies.set_instance_color(slot, Color.WHITE)
 		else:
@@ -2376,8 +2377,9 @@ func _update_enemies(alpha: float) -> void:
 			# to scale, and the picture already carries the proportions.
 			var span := footprint * drone_span
 			mm.set_instance_transform(slot, Transform3D(
-				_lean * Basis(Vector3.UP, atan2(_sim.out_dx(), _sim.out_dy())).scaled(
-					Vector3(span, 1.0, span)),
+				_lean * Basis(Vector3.UP,
+					atan2(_sim.out_dx(), _sim.out_dy()) + _forward_of(_sim.enemy_id(type_index))
+				).scaled(Vector3(span, 1.0, span)),
 				Vector3(px, drone_lift + span * _lean_lift, pz)))
 		else:
 			mm.set_instance_transform(slot, Transform3D(
@@ -2469,7 +2471,9 @@ func _turn_turret_sprites(turn: float) -> void:
 		var mm := _turret_bodies[blueprint].multimesh
 		var reach := span * (1.0 + growth * float(_sim.platform_tier(i)))
 		var xf := mm.get_instance_transform(slot)
-		xf.basis = _lean * Basis(Vector3.UP, current).scaled(Vector3(reach, 1.0, reach))
+		xf.basis = _lean * Basis(Vector3.UP,
+			current + _forward_of(_sim.blueprint_name(blueprint))).scaled(
+			Vector3(reach, 1.0, reach))
 		mm.set_instance_transform(slot, xf)
 
 func _update_barrels() -> void:
@@ -2711,6 +2715,24 @@ var _sprite_turrets: bool = false
 var _sprite_drones: bool = false
 ## The lean, computed once from the camera. See _sprite_lean().
 var _lean := Basis()
+
+## Which way each sprite's art actually points, as radians to ADD to its facing.
+##
+## The game turns sprites so that the picture's "up" points where the entity is
+## going or aiming - which is only right when the art was drawn facing the top
+## of the frame. Authored sheets do not reliably do that: the second sheet's
+## turrets point left and its drones face the viewer. This is the correction,
+## read from theme.json ("sprite_forward_degrees", id -> degrees) so a new sheet
+## is a data edit rather than a code change. Missing id means zero.
+var _forward: Dictionary = {}
+
+func _forward_of(id: String) -> float:
+	if _forward.has(id):
+		return float(_forward[id])
+	var table: Dictionary = _world.get("sprite_forward_degrees", {})
+	var radians := deg_to_rad(float(table.get(id, 0.0)))
+	_forward[id] = radians
+	return radians
 ## How far a leaning sprite has to be raised, as a share of its own span, to keep
 ## its lower edge from sinking into the ground it is standing on.
 var _lean_lift: float = 0.0
