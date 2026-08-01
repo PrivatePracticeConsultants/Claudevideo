@@ -2457,3 +2457,54 @@ the same dial, and the player already has it.
 What is left is source resolution: the sheet is 1024x1024 for sixteen assets, so
 each is about 250 pixels square. That is ample at normal zoom and soft when
 zoomed right in, and no import setting recovers it - it wants a larger sheet.
+
+## P0-82 · The second art drop, and two things the first sheet had hidden
+
+Sixteen entities re-authored at 2048x2048 and 60-65 degrees of elevation, plus a
+projectile sheet and an impact burst. Each sprite is now ~500px where the first
+sheet gave ~250, and the units read with real volume instead of as flat plates.
+
+**Grid divider lines broke the keying, and only one sprite survived.** The new
+sheets draw visible lines between cells. Cropping on the exact cell boundary put
+those lines on the new image's border - which is precisely where backdrop_of()
+samples - so the backdrop was read as the LINE colour, every real backdrop pixel
+then sat further than FILL_TOLERANCE from it, the flood fill spread nowhere, and
+fifteen of sixteen sprites came out with an opaque rectangle of sky around them.
+`CELL_INSET` trims 3% off each side before anything looks at the cell. Caught by
+compositing the sliced output over a dark checker, which is now the standard
+check: sprites keyed against their own backdrop look perfect in isolation and
+obviously wrong the moment they are over something dark.
+
+**The art's own orientation is per asset, and it is not "up".** This sheet draws
+turret barrels up-and-RIGHT at 35-43 degrees and the rig's crane up-LEFT.
+Measured rather than guessed - the opaque pixel furthest from each sprite's
+centre of mass, against straight up - and stored in theme.json as
+`sprite_forward_degrees`. Without it every turret would have fired about 40
+degrees wide of its target while still hitting, because aiming is simulation and
+the barrel is decoration; the bug would have looked like bad art rather than bad
+data.
+
+**The drones are front-facing characters, not top-down machines.** A standing
+mech rotated to walk east lies on its side. `sprite_rotate_drones` is false for
+this sheet: drones keep a fixed upright facing and only turrets track. Turrets
+are drawn from above and their barrels are the whole point, so they still turn.
+If a future sheet draws drones from overhead, one flag puts the tracking back.
+
+Cost, same tool and scene as P0-81, which had ~250px sprites:
+
+| | draw calls | ms/frame at 0 | at 400 |
+|---|---|---|---|
+| 250px sprites | 12 → 16 | 72.51 | 81.79 |
+| 500px sprites | 12 → 16 | 76.75 | 87.61 |
+
+Deliberately NOT optimised away. 33.6 MB of texture before mipmaps is nothing to
+a real GPU, and this box has no GPU - SwiftShader has no texture units and
+over-charges for sampling far beyond what hardware does. Optimising a 6% figure
+measured on a software rasteriser is the exact mistake this project has been
+careful about all the way through. Recorded so the trade is visible if a real
+device ever disagrees.
+
+Worth knowing for sizing: a turret spans 74 world units, which is 154 screen
+pixels at the closest zoom the camera allows - so 500px is oversampled about
+3x. The Titan is the exception at ~700 screen pixels, and it is the reason the
+sheet is not simply downscaled.

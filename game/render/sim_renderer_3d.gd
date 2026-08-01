@@ -2333,6 +2333,7 @@ func _update_enemies(alpha: float) -> void:
 	var enemy_height := float(_world.get("enemy_height", 26.0))
 	var drone_span := float(_world.get("drone_sprite_scale", 3.1))
 	var drone_lift := float(_world.get("drone_sprite_lift", 4.0))
+	var drone_rotates := bool(_world.get("sprite_rotate_drones", true))
 	var bar_lift := float(_world.get("hp_bar_lift", 50.0))
 	var bar_width := float(_world.get("hp_bar_width", 38.0))
 	var bar_thickness := float(_world.get("hp_bar_height", 6.0))
@@ -2376,9 +2377,12 @@ func _update_enemies(alpha: float) -> void:
 			# the lane. Sized off the class radius alone: a sprite has no height
 			# to scale, and the picture already carries the proportions.
 			var span := footprint * drone_span
+			var heading := 0.0
+			if drone_rotates:
+				heading = atan2(_sim.out_dx(), _sim.out_dy())
 			mm.set_instance_transform(slot, Transform3D(
 				_lean * Basis(Vector3.UP,
-					atan2(_sim.out_dx(), _sim.out_dy()) + _forward_of(_sim.enemy_id(type_index))
+					heading + _forward_of(_sim.enemy_id(type_index))
 				).scaled(Vector3(span, 1.0, span)),
 				Vector3(px, drone_lift + span * _lean_lift, pz)))
 		else:

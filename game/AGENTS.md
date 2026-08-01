@@ -7,7 +7,7 @@ tests will not catch. It is vendor-neutral — nothing here assumes any particul
 assistant.
 
 **Read this file in full, then `README.md` (what the game is), then skim
-`DECISIONS.md` (why everything is the way it is).** `DECISIONS.md` is 81 numbered
+`DECISIONS.md` (why everything is the way it is).** `DECISIONS.md` is 82 numbered
 entries and it is the single most valuable document here: each one records a
 decision, the measurement behind it, and in many cases the wrong answer that was
 tried first. Before you "fix" something that looks odd, search that file for it.

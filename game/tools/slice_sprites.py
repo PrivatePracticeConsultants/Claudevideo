@@ -57,6 +57,17 @@ PROJECTILE_LAYOUT = [
 ## band is cruder than detecting text and better than shipping it.
 LABEL_BAND = 0.16
 
+## Fraction of a cell trimmed off every side before anything else looks at it.
+##
+## The authored sheets draw visible divider LINES between cells. Cropping on the
+## exact cell boundary puts those lines on the new image's border, which is
+## precisely where backdrop_of() samples - so the backdrop was read as the line
+## colour, every real backdrop pixel then sat further than FILL_TOLERANCE from
+## it, the flood fill spread nowhere, and fifteen of sixteen sprites shipped
+## with an opaque rectangle of sky around them. Trimming a little off first is
+## the whole fix.
+CELL_INSET = 0.03
+
 # Distance from the local backdrop at which a pixel becomes fully opaque, and
 # below which it is fully transparent. Generous at the bottom because the
 # backdrop is noisy; tight at the top so glow survives.
@@ -193,10 +204,13 @@ def slice_sheet(sheet, layout, root, labelled):
     print("%-16s %-12s %s" % ("sprite", "kind", "size"))
     for r, row in enumerate(layout):
         for c, name in enumerate(row):
-            bottom = (r + 1) * cell_h
+            inset_x = int(cell_w * CELL_INSET)
+            inset_y = int(cell_h * CELL_INSET)
+            bottom = (r + 1) * cell_h - inset_y
             if labelled:
                 bottom -= int(cell_h * LABEL_BAND)
-            cell = sheet.crop((c * cell_w, r * cell_h, (c + 1) * cell_w, bottom))
+            cell = sheet.crop((c * cell_w + inset_x, r * cell_h + inset_y,
+                               (c + 1) * cell_w - inset_x, bottom))
             keyed = trim_square(key_cell(cell))
             if name in TURRETS:
                 kind = "turrets"

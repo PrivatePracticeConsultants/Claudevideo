@@ -215,7 +215,17 @@
       0.9,
       0.75,
       0.6
-    ]
+    ],
+    "_sprite_forward_degrees": "Where each turret's weapon actually points in its own picture, as degrees to subtract so it ends up aiming at its target. Measured off the art rather than guessed: the tip furthest from the sprite's centre of mass, against straight-up. This sheet draws its barrels up-and-right at 35-43 degrees and the rig's crane up-left, so without this every turret would fire about 40 degrees wide.",
+    "sprite_forward_degrees": {
+      "ballistic": -38.7,
+      "cannon": -35.0,
+      "railgun": -43.4,
+      "rig": 36.1,
+      "suppressor": 23.1
+    },
+    "_sprite_rotate_drones": "Whether drone sprites turn to face the way they are walking. FALSE for this sheet, because its drones are drawn as front-facing characters standing upright, not as top-down machines - rotating a standing mech to walk east lays it on its side. Turrets still rotate: they are drawn from above and their barrels are the whole point. If a future sheet draws drones top-down, set this true and they will track their lane again.",
+    "sprite_rotate_drones": false
   },
   "platform_max_tier": "#ffcf6e",
   "platform_cannon": "#c98a5b",
