@@ -2368,3 +2368,44 @@ warm-up - taking the tier away from the governor while it is still the saved
 default - so the labels are deterministic again. Worth recording as a shape: a
 feature that adapts at runtime silently invalidates every measurement tool that
 assumed it did not.
+
+## P0-80 · The sprites were pancakes, and it was the renderer's fault
+
+Reported as "because these are 2D while the map is 3D, it appears like
+pancakes", which was exactly right and worth taking apart, because the instinct
+was to fix it in the art and the art was not the problem.
+
+A sprite lying flat on the ground, seen by a camera pitched at -40 degrees, sits
+50 degrees off square-on: a circle renders 64% as tall as it is wide, and with
+no thickness at all the result reads as a decal painted on the floor rather than
+an object standing on it.
+
+The fix is to lean each sprite back toward the camera. At 28 degrees against a
+40 degree camera the sprite is 22 degrees off square-on instead of 50, so it
+keeps its proportions and gains the read of something upright. It costs nothing
+- same two triangles, a different basis - and it needs no new art.
+
+Two details that are not obvious:
+
+- **The lean is applied OUTSIDE the facing rotation**, `_lean * Basis(UP,
+  facing)`. The other order swings the lean around with the barrel, so a turret
+  appears to wobble as it tracks.
+- **The axis is the camera's own right-hand vector**, derived from its yaw. It
+  is fixed, because this camera never rotates, so it is computed once at setup
+  rather than per sprite per frame.
+
+The first attempt leaned them the wrong way - `-tilt` instead of `+tilt` - which
+took them from 50 degrees off square-on to 78 and rendered the board as a field
+of edge-on slivers. Captured, and that screenshot is the entire reason it cost
+one attempt instead of an afternoon of arguing about basis conventions. Worth
+recording as a habit rather than a bug: for anything geometric, render it and
+look before reasoning about whether it is right.
+
+Leaning pivots about the sprite's centre, so each one is also raised by
+`0.5 * sin(lean)` of its own span to keep its lower edge out of the ground.
+
+The remaining half of the problem IS art, and it is a re-generation rather than
+a fix: the assets are drawn at a true 90-degree overhead, which shows no sides.
+Art drawn from roughly 60-65 degrees of elevation shows some of each unit's
+flank and reads with volume even before the lean. That is a prompt change for
+the next sheet, not something the renderer can recover.

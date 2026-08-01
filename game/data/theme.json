@@ -208,7 +208,8 @@
     "turret_sprite_span": 74.0,
     "turret_sprite_lift": 3.0,
     "drone_sprite_scale": 2.3,
-    "drone_sprite_lift": 15.0
+    "drone_sprite_lift": 15.0,
+    "sprite_lean_degrees": 28.0
   },
   "platform_max_tier": "#ffcf6e",
   "platform_cannon": "#c98a5b",

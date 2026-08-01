@@ -138,6 +138,8 @@ func setup(sim: Sim, theme: Dictionary, materials: MaterialLibrary = null) -> vo
 	_reference_radius = maxf(sim.enemy_radius(maxi(sim.enemy_index("walker"), 0)), 0.001)
 
 	_build_environment()
+	_lean = _sprite_lean()
+	_lean_lift = 0.5 * sin(deg_to_rad(float(_world.get("sprite_lean_degrees", 28.0))))
 	_build_scenery()
 	_build_cell_layer()
 	_build_turret_layers()
@@ -2284,8 +2286,8 @@ func _refresh_turrets() -> void:
 			# a family tint multiplied over painted art only ever muddies it.
 			var span := sprite_span * scale
 			bodies.set_instance_transform(slot, Transform3D(
-				Basis(Vector3.UP, facing).scaled(Vector3(span, 1.0, span)),
-				to_world(_sim.t_x[i], _sim.t_y[i], sprite_lift)))
+				_lean * Basis(Vector3.UP, facing).scaled(Vector3(span, 1.0, span)),
+				to_world(_sim.t_x[i], _sim.t_y[i], sprite_lift + span * _lean_lift)))
 			bodies.set_instance_color(slot, Color.WHITE)
 		else:
 			var bases := _turret_bases[blueprint].multimesh
@@ -2363,9 +2365,9 @@ func _update_enemies(alpha: float) -> void:
 			# to scale, and the picture already carries the proportions.
 			var span := footprint * drone_span
 			mm.set_instance_transform(slot, Transform3D(
-				Basis(Vector3.UP, atan2(_sim.out_dx(), _sim.out_dy())).scaled(
+				_lean * Basis(Vector3.UP, atan2(_sim.out_dx(), _sim.out_dy())).scaled(
 					Vector3(span, 1.0, span)),
-				Vector3(px, drone_lift, pz)))
+				Vector3(px, drone_lift + span * _lean_lift, pz)))
 		else:
 			mm.set_instance_transform(slot, Transform3D(
 				Basis().scaled(Vector3(footprint, height, footprint)),
@@ -2456,7 +2458,7 @@ func _turn_turret_sprites(turn: float) -> void:
 		var mm := _turret_bodies[blueprint].multimesh
 		var reach := span * (1.0 + growth * float(_sim.platform_tier(i)))
 		var xf := mm.get_instance_transform(slot)
-		xf.basis = Basis(Vector3.UP, current).scaled(Vector3(reach, 1.0, reach))
+		xf.basis = _lean * Basis(Vector3.UP, current).scaled(Vector3(reach, 1.0, reach))
 		mm.set_instance_transform(slot, xf)
 
 func _update_barrels() -> void:
@@ -2696,6 +2698,11 @@ var _sprite_turrets: bool = false
 ## collapsed to one flag, because the transform loop runs per drone per frame
 ## and must not be branching on a dictionary lookup in there.
 var _sprite_drones: bool = false
+## The lean, computed once from the camera. See _sprite_lean().
+var _lean := Basis()
+## How far a leaning sprite has to be raised, as a share of its own span, to keep
+## its lower edge from sinking into the ground it is standing on.
+var _lean_lift: float = 0.0
 
 ## Load a sprite, or null if the art for this id was never authored.
 ##
@@ -2711,6 +2718,36 @@ func _sprite(dir: String, id: String) -> Texture2D:
 		texture = ResourceLoader.load(path) as Texture2D
 	_sprites[key] = texture
 	return texture
+
+## The axis a sprite leans back around, and how far.
+##
+## Sprites lying flat on the ground are foreshortened by the camera's pitch -
+## at -40 degrees a circle becomes 64% as tall as it is wide - and with no
+## thickness at all they read as decals painted on the floor. "Pancakes" was the
+## word, and it was the right one.
+##
+## Leaning each sprite back toward the camera fixes most of it for free: at a 28
+## degree lean against a 40 degree camera the sprite sits 22 degrees off
+## square-on instead of 50, so it keeps its proportions AND reads as something
+## standing up. The lean happens about the camera's own right-hand axis, which
+## is fixed because this camera never rotates - so it is computed once, here,
+## rather than per sprite per frame.
+##
+## Applied OUTSIDE the facing rotation: a turret still turns in the ground plane
+## to track a target, and then the whole thing leans. The other order would swing
+## the lean around with the barrel and make the turret wobble as it tracked.
+func _sprite_lean() -> Basis:
+	var yaw := deg_to_rad(float((_theme.get("camera", {}) as Dictionary).get(
+		"yaw_degrees", -22.0)))
+	var tilt := deg_to_rad(float(_world.get("sprite_lean_degrees", 28.0)))
+	# The camera's right-hand axis in world space, from its yaw alone.
+	var axis := Vector3(cos(yaw), 0.0, -sin(yaw)).normalized()
+	# Positive, and that sign is the whole thing. The first attempt leaned the
+	# sprites AWAY from the camera, taking them from 50 degrees off square-on to
+	# 78 and rendering the board as a field of edge-on slivers. Captured, which is
+	# the only reason it took one attempt rather than an afternoon of arguing
+	# about basis conventions.
+	return Basis(axis, tilt)
 
 ## A horizontal quad, one unit across, lying on the ground.
 ##
