@@ -3908,9 +3908,15 @@ function findJobRaw(p) {
       label = "Take the " + ITEMS[out].name.toLowerCase();
     }
 
-    // Plain transform / production recipe.
+    /* Plain transform / production recipe. For outAny the key must NOT embed
+       the chosen item: the choice can flip mid-hold (an animal wanting the
+       other item settles into a basket while you stand there), and a changed
+       key restarts the hold from zero. The key stays stable, the label tracks
+       what you will get, and run() re-reads the choice through the fresh
+       closure the work loop already keeps — so the item you receive always
+       matches the label showing at the moment it completes. */
     return {
-      key: "st" + st.x + "," + st.y + ":" + label, dur: r.dur, label,
+      key: "st" + st.x + "," + st.y + ":" + (r.outAny ? "outAny" : label), dur: r.dur, label,
       run: () => {
         if (r.stock && st.stock !== Infinity) st.stock--;
         p.item = out ? makeItem(out) : null;
@@ -10952,6 +10958,8 @@ function handleScreenKeys() {
       if (wasPressed("KeyS") || wasPressed("ArrowDown")) mv(1);
       const row = OPTION_ROWS[Game.optionCursor];
       const adjust = (d) => {
+        if (row.kind === "action") return;   // actions confirm; A/D must not
+                                             // toggle a garbage Options key
         if (row.kind === "level") {
           Options[row.key] = clamp(+(Options[row.key] + d * 0.1).toFixed(2), 0, 1);
           Options.apply();
@@ -10964,8 +10972,19 @@ function handleScreenKeys() {
       };
       if (wasPressed("KeyA") || wasPressed("ArrowLeft")) adjust(-1);
       if (wasPressed("KeyD") || wasPressed("ArrowRight")) adjust(1);
-      if (wasPressed("KeyE") || wasPressed("Enter") || wasPressed("Slash"))
-        { if (row.kind === "bool") adjust(1); }
+      if (wasPressed("KeyE") || wasPressed("Enter") || wasPressed("Slash")) {
+        if (row.kind === "bool") adjust(1);
+        /* Action rows normally run inside the keydown listener, because
+           fullscreen needs a real browser gesture. A GAMEPAD never fires
+           keyboard events — it asserts Pressed directly — so for a pad this
+           is the only path, and without it a pad user could not open the
+           rebinding screen at all. No double-fire for keyboards: the listener
+           swallows these codes on action rows before Pressed is ever set.
+           (Fullscreen from a pad is attempted and may be refused by the
+           browser — pad input does not count as a user activation — which the
+           try/catch inside it already absorbs.) */
+        else if (row.kind === "action") { Sound.init(); row.run(); }
+      }
       if (wasPressed("Escape") || wasPressed("KeyO")) {
         Game.screen = Game.optionsFrom || "title"; Sound.play("menu");
       }
