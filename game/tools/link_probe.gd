@@ -8,7 +8,15 @@ extends SceneTree
 ## measurement rather than a hope.
 ##
 ##   godot --headless --path game --script res://tools/link_probe.gd
-
+##
+## Read the mid-chain rows with care. Every level here is played from a CLEAN
+## start, which is not how acts 2-4 are met in play - they arrive carrying the
+## previous act's board, tiers included. From nothing, the greedy policy spends
+## on width rather than height, and a board of all-tier-1 turrets reports zero
+## links and +0% across the board. That is correct, not a bug: a lender needs
+## `tier_scaling * t_tier > 0` and t_tier is zero-based, so links begin at tier
+## 2. reactor_act3 is the row that looks alarming and is not - the balance probe
+## enters it carrying 144 tier-4 turrets.
 const SAMPLE := [0, 8, 16, 26]
 
 func _init() -> void:

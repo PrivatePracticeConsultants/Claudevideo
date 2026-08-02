@@ -2711,3 +2711,109 @@ long frames at every tier: FAST 200ms / BALANCED 417ms / HIGH 717ms. Those
 medians are NOT comparable with the previous release's; that was a different
 container on a different day, and only a same-session A/B says anything about a
 change. The zero-long-frames result and the tier ordering are what transfer.
+
+## P0-87 · Audit: what the shipped build was actually carrying
+
+A full audit, and the largest finding was not in the code.
+
+**Every player was downloading the authoring sheets.** `assets/art/_source_*.png`
+are the four sheets the sprites were cut from. They live next to their output so
+a sheet can be re-sliced without hunting for it; nothing in the game ever loads
+them. But `export_presets.cfg` only excluded `tests/*, tools/*`, so Godot
+imported all four and packed them. **index.pck 20.1 MB -> 9.3 MB**, more than
+half the download, for art nobody sees.
+
+That is the kind of saving that is worthless if it quietly drops a real sprite,
+and a missing sprite does not error - the renderer falls back to the generated
+mesh. Checking the pck's own file table would have been the obvious proof and
+the parser read zero files against pack format 3, which is exactly the sort of
+"tool reports nothing, nothing looks wrong" answer this project keeps getting
+caught by. So it was proved from the outside instead: drive the real browser
+build, place turrets, zoom in, photograph one. The painted Ballistic renders.
+
+**Documented counts had drifted.** README and AGENTS.md both said 48 levels /
+12 boards / four weapon families / eight drone classes. HEAD is 49 levels across
+13 boards (outpost mode added one), five turret families, and eleven drone
+classes - the README's drone table did not list the Titan or the Harbinger at
+all. All corrected against the data files rather than against memory.
+
+**Dead config, and a document pointing straight at it.** theme.json still set
+`render_scale_floor`, singular, long after the code moved to a per-tier
+`render_scale_floors` array - and AGENTS.md named that dead key as the first
+lever to reach for when the game is slow. Seven more orphans went with it
+(`pad_radius`, `platform_metallic`, `platform_roughness`, four `ground_detail_*`
+left behind when material_library stopped reading its `world` argument).
+
+A knob that does nothing is worse than no knob, so it is now asserted:
+test_art_import.gd fails on any `world` key that no reader file mentions. It
+understands the one dynamic case - `_lit()` builds `<key>_hdr` at runtime for
+the Forward+ overrides - and it was verified by planting a dead key and watching
+it fail. The reverse also turned up: `band_premium` and `platform_rig` were read
+from the theme but never present in it, so the renderer's inline defaults were
+the real values. Added at those exact values, so nothing changes on screen.
+
+**Not fixed, on purpose.** `proj_impact.png` is 1857x1857 and is drawn at 15 to
+60 world units - about thirty times oversampled, and still the largest texture
+in the game. It no longer costs download size now the pck has shrunk, and
+resizing it changes shipped art, so it is a decision to make rather than a thing
+to quietly do. Likewise the 38 inline `_world.get(key, default)` defaults that
+disagree with theme.json: harmless while the file wins, a silent revert to a
+stale look if a key is ever deleted, and a pattern spanning the whole renderer
+rather than a bug to unpick mid-audit.
+
+**And the thing only the deep run could see: the siege could not be lost.**
+`run_tests.sh --full` plays all thirteen chains instead of the sampled two, and
+it failed on `XLIX - Ares Station: Siege must still be losable from a clean
+start`. Measured: an idle run - not one turret placed - finished the siege with
+**1196 of 2600 hull left**. The level was free.
+
+The cause is a half-finished edit. The siege was authored at 40 waves, the
+balance probe could not win it, and it was cut to 14 (P0-84's note records
+exactly that). The hull was not rescaled with it. The stale note in the wave
+file even quoted the tell without anyone reading it as one: a competent run
+finishing with "1369 of 2600 hull left" is almost the same number as the idle
+run's 1196 - 37 turrets were buying 173 hull.
+
+Re-measured properly across five seeds before touching anything:
+
+| run | drain | turrets |
+|---|---|---|
+| idle | 1404, every seed | 0 |
+| competent | 926 - 991 | 37 of 48 |
+
+Idle drain is seed-independent, which makes sense: everything reaches the core,
+so the total is just what the waves are worth. That puts the safe window at
+992-1404, and `starting_integrity` is now **1200** - mid-window, about 17%
+margin either side. Verified: idle LOSES on all five seeds, competent WINS with
+209-274 hull left.
+
+The narrow spread is left as a design smell rather than papered over. Thirty-seven
+turrets buying back only 29% of the leak means this level reads as a
+hull-endurance check more than a defence-building one; giving turrets more
+leverage on a per-lane map is the open question, and it is recorded in the wave
+file next to the number rather than in someone's head.
+
+Two guards added to `test_outpost.gd`, at sampled-suite cost, so this is caught
+on every run rather than in a pre-release one: the siege must fall to an idle
+run, and must hold for a competent one. Verified by putting 2600 back and
+watching the first one fail.
+
+Other probes, all clean, and two rows that look alarming and are not - both now
+documented where they are printed, so the next reader does not chase them:
+
+- `board_probe` prints `idle -> SURVIVED (trivial)` for highway_act4. That idle
+  run starts from the INHERITED board, which test_engagement deliberately
+  stopped asserting when turrets began carrying their tiers.
+- `link_probe` shows reactor_act3 with 104 turrets and zero links. A lender
+  needs `tier_scaling * t_tier > 0` and t_tier is zero-based, so links begin at
+  tier 2; the probe plays mid-chain acts from a CLEAN start, where the greedy
+  policy builds wide rather than tall. Nothing meets that act that way in play.
+
+`balance_probe` over all 49 levels: no losses. `frame_profile` at the worst
+board (level 46, wave 10, 208 turrets): `sim.step` 0.485 ms and
+`update_visuals` 0.473 ms, both far inside budget; `refresh_board` is 4.1 ms on
+a placement and 8.1 ms on a ground purchase, split 3.95 ms `_refresh_cells` /
+3.46 ms `_refresh_link_lines` - the cells half is now the larger one, and
+AGENTS.md had been blaming the link lines alone at ~5 ms.
+
+Audit: 415 tests, 62,565 assertions, 0 failed on the sampled suite.

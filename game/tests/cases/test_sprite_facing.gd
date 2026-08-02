@@ -48,6 +48,15 @@ func after_each() -> void:
 	_tree.root.remove_child(_renderer)
 	_renderer.queue_free()
 
+func test_the_renderer_actually_took_the_split_path() -> void:
+	# Split art is all-or-nothing: one missing half drops all five families back
+	# to rotating the whole picture, base and all. That fallback is deliberate -
+	# it keeps a partial art drop running - but it is also silent, and it is the
+	# exact thing that made a turret aiming down-screen draw upside down. If it
+	# is ever taken on the shipped art, that is a broken build, not a fallback.
+	assert_true(_renderer.turret_art_is_split(),
+		"the shipped turret art must load as pinned base + turning gun")
+
 func test_the_plane_still_puts_the_textures_top_edge_at_minus_z() -> void:
 	# The load-bearing engine fact. If a Godot release ever changes it, every
 	# sprite in the game silently turns around, and this is the line that says so.

@@ -253,7 +253,7 @@ xvfb-run -a godot --path game --rendering-driver opengl3 \
 # Draw calls vs entity count — the MultiMesh invariant.
 xvfb-run -a godot --path game --rendering-driver opengl3 --script res://tools/render_stress.gd
 
-# Play the whole 48-level campaign headless and print the table. Reports, does not assert.
+# Play the whole campaign headless and print the table. Reports, does not assert.
 godot --headless --path game --script res://tools/balance_probe.gd
 godot --headless --path game --script res://tools/balance_probe.gd -- --from 32 --to 35 --idle
 
@@ -346,10 +346,12 @@ Pages takes 30–90 seconds. Do not report a link as updated before those match.
 
 ## 7. Where things stand
 
-**Complete and audited:** 48 levels across 12 boards played as 4 acts each; four
-weapon families with four tiers, five targeting orders and support links; eight
-drone classes including champions, menders, jammers, a splitter and a Breach
-Borer that opens new road mid-act; three damage types against three armour
+**Complete and audited:** 49 levels — 48 campaign levels across 12 boards played
+as 4 acts each, plus a standalone eight-gate siege on a 13th (outpost mode);
+five turret families (four weapons with four tiers, plus the Salvage Rig) with
+five targeting orders and support links; eleven drone classes including
+champions, menders, jammers, a splitter, a Breach Borer that opens new road
+mid-act, and two siege-only bosses; three damage types against three armour
 classes; per-act affixes; a module drafted between acts; purchasable ground with
 premium tiles; overcharge, doctrines, rigs and veterancy; saved progress;
 synthesised sound; an end-of-act debrief; procedural surfaces on ten material
@@ -388,18 +390,24 @@ What is established:
   real GPU and it is still ~11 fps, that is a genuinely different problem.
 
 If you continue this: the remaining levers are all fill-rate — `render_pixel_budget`
-and `render_scale_floor` in `theme.json`, the transparent ground overlay, the
-scenery layer, and the shadow pass. Measure with `tools/frame_jitter.py` (shape)
-and `tools/frame_profile.gd` (CPU stages), not with the frame counter.
+and `render_scale_floors` in `theme.json` (plural, one floor per quality tier;
+the old singular `render_scale_floor` this line used to name was dead config and
+has been deleted), the transparent ground overlay, the scenery layer, and the
+shadow pass. Measure with `tools/frame_jitter.py` (shape) and
+`tools/frame_profile.gd` (CPU stages), not with the frame counter.
 
 ### Known rough edges
 
 - `tests/framework.gd` is a hand-rolled test harness because GUT could not be
   fetched. Porting to GUT is a clean, self-contained job if you want it —
   nothing else depends on `framework.gd`.
-- `_refresh_link_lines` is ~5 ms on a 208-turret board and fires on every turret
-  placement. Reduced but not eliminated; the remaining cost is inside
-  `rebuild_link_pairs`.
+- `refresh_board` is 4.1 ms on a turret placement and 8.1 ms when ground is
+  bought, on a 208-turret board (level 46, wave 10, `tools/frame_profile.gd`).
+  It fires on the click, not per frame, so it is a hitch rather than a frame
+  cost. The two halves are `_refresh_cells` at 3.95 ms and `_refresh_link_lines`
+  at 3.46 ms — note the cells half is now the larger one, and earlier versions
+  of this file blamed the link lines alone at ~5 ms. Re-measure before
+  optimising either.
 - The quality ladder's numbers in `README.md` come from a GPU-less machine and
   are labelled as such. Re-measure on real hardware before trusting them.
 

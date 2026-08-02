@@ -169,3 +169,36 @@ func test_an_endless_block_with_no_archetypes_is_rejected() -> void:
 	db.engagement["endless"] = {"waves": 10, "archetypes": []}
 	db._expand_endless()
 	assert_false(db.is_valid(), "an endless mode with nothing to send is not a mode")
+
+func test_the_siege_cannot_be_won_by_doing_nothing() -> void:
+	# The siege shipped unlosable. It was authored at 40 waves, the balance probe
+	# could not win it, it was cut to 14 - and the hull was not rescaled with it.
+	# An idle run, not one turret placed, finished with 1196 of 2600 left.
+	#
+	# Only LASTLINE_FULL_CAMPAIGN=1 exercises the outpost chain, so the guard
+	# that existed found this months late, in a pre-release run. This is the same
+	# assertion at sampled-suite cost: one level, one idle run, every time.
+	var level := {}
+	for entry in Database.load_levels():
+		if str(entry["engagement"]) == ENGAGEMENT:
+			level = entry
+	assert_false(level.is_empty(), "the siege level is in levels.json")
+
+	var idle := SimFixture.idle_run(level, {})
+	assert_eq(idle.result(), Sim.RESULT_LOSS,
+		"a siege nobody defends must fall; %d hull left" % idle.integrity())
+
+func test_the_siege_is_still_winnable_by_defending_it() -> void:
+	# The other half, and the reason the hull is not simply set to 1. Measured
+	# across five seeds: an idle run leaks exactly 1404 (seed-independent -
+	# everything reaches the core, so the total is just what the waves are
+	# worth), a competent run leaks 926-991. The hull sits at 1200, mid-window.
+	var level := {}
+	for entry in Database.load_levels():
+		if str(entry["engagement"]) == ENGAGEMENT:
+			level = entry
+	var sim: Sim = SimFixture.start_act(level, {}, 20260727)
+	SimFixture.run_greedy(sim)
+	assert_eq(sim.result(), Sim.RESULT_WIN,
+		"a defended siege must hold; %d hull left" % sim.integrity())
+	assert_gt(float(sim.integrity()), 0.0, "won with hull to spare")

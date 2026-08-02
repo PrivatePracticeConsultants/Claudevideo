@@ -99,3 +99,40 @@ func _sidecars(from: String) -> PackedStringArray:
 		name = dir.get_next()
 	dir.list_dir_end()
 	return found
+
+## --- theme.json hygiene -------------------------------------------------------
+##
+## Not about art imports, but the same failure: config that quietly stops
+## meaning anything. `render_scale_floor` sat in theme.json long after the code
+## moved to a per-tier `render_scale_floors` array, and AGENTS.md went on naming
+## it as the lever to reach for when the game is slow. A dead knob that a
+## document still points at is worse than no knob.
+const THEME := "res://data/theme.json"
+
+## Files that may read a theme key. Anything not listed here cannot, by design -
+## the simulation never sees the theme at all.
+const READERS := ["res://render/sim_renderer_3d.gd", "res://render/material_library.gd",
+	"res://render/debug_overlay.gd", "res://main.gd"]
+
+func test_no_theme_key_has_stopped_meaning_anything() -> void:
+	var theme: Variant = JSON.parse_string(FileAccess.get_file_as_string(THEME))
+	assert_eq(typeof(theme), TYPE_DICTIONARY, "theme.json must parse")
+	var world: Dictionary = (theme as Dictionary).get("world", {})
+	assert_true(world.size() > 40, "expected the world block, found %d keys" % world.size())
+
+	var source := ""
+	for path in READERS:
+		source += FileAccess.get_file_as_string(path)
+	for key in world:
+		# Keys starting with _ are the file's own prose, documenting the key
+		# below them; they are never read.
+		if str(key).begins_with("_"):
+			continue
+		if source.contains("\"%s\"" % key):
+			continue
+		# _lit() builds "<key>_hdr" at runtime for the Forward+ overrides, so
+		# those are read even though the literal never appears.
+		if str(key).ends_with("_hdr") and source.contains("\"%s\"" % str(key).trim_suffix("_hdr")):
+			continue
+		fail("theme.json sets world.%s and nothing reads it - either wire it up "
+			% key + "or delete it before someone tunes it and wonders why nothing moved")

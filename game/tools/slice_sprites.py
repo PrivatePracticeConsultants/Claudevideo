@@ -1,11 +1,13 @@
-"""Cut the authored sprite sheet into one keyed PNG per game entity.
+"""Cut the authored sprite sheets into one keyed PNG per game entity.
 
-The art arrives as a single 4x4 sheet on a grey backdrop. This turns it into the
-sixteen transparent sprites the renderer loads, and it is committed rather than
-run once by hand so that re-exporting the sheet is a one-command job instead of
-an archaeology exercise.
+Three sheets have been authored, and each needs a different cut, so each gets a
+mode: a 4x4 grid of drones and one-piece turrets, a 2x2 grid of tracers, and the
+detached turret sheet of bare drums and separate guns that the game's turrets
+actually come from (see mount_turrets). This is committed rather than run once
+by hand so that re-exporting a sheet is a one-command job instead of an
+archaeology exercise.
 
-Two things here are less obvious than they look.
+Two things about the KEYING are less obvious than they look.
 
 **The background is not one colour.** It samples between 107 and 124 across the
 sheet, so a global colour key would either leave a grey halo or eat the grey

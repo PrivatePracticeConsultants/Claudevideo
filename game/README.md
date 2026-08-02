@@ -3,14 +3,16 @@
 Roguelite tower defense. Godot 4.x / GDScript. **3D, and it runs in a browser.**
 
 **Status: P0 complete and audited three times, then extended well past it.**
-Forty-eight levels — twelve boards played as four acts each, where every act
-runs the same road and keeps what you built on the last one, and the escalation
-is in what walks it — four weapon families with four tiers each, five targeting
-orders apiece and support links between them, eight drone classes, three damage
-types against three armour classes, named per-act affixes, a module drafted
-between acts, free placement on purchasable ground, saved progress, synthesised
-sound, and an end-of-act debrief, all on a deterministic 30Hz simulation drawn
-with real lighting, shadows and depth cueing. The last board has two roads. The design document is the master plan
+Forty-nine levels — twelve boards played as four acts each, plus a standalone
+siege on a thirteenth. In the campaign every act runs the same road and keeps
+what you built on the last one, and the escalation is in what walks it — five
+turret families (four weapons with four tiers each, plus the Salvage Rig) with
+five targeting orders apiece and support links between them, eleven drone
+classes, three damage types against three armour classes, named per-act affixes,
+a module drafted between acts, free placement on purchasable ground, saved
+progress, synthesised sound, and an end-of-act debrief, all on a deterministic
+30Hz simulation drawn with real lighting, shadows and depth cueing. The last
+campaign board has two roads; the siege has eight. The design document is the master plan
 (v2); the phase ladder is §5.7. Formally this is P0 plus much of P1/P2's content;
 the run layer (P3) is the next real milestone.
 
@@ -96,6 +98,12 @@ Corridor Integrity. Hit zero and the level is lost.
 | **Field Mender** | Shielded | 90 | 104 | 3 | $30 | heals everything around it |
 | **Static Jammer** | Shielded | 340 | 122 | 7 | $110 | silences turrets it passes |
 | **Breach Borer** | Plated | **900** | 62 | 0 | $210 | tunnels; opens a new road |
+| **Ancient Titan** | Plated | **4200** | 30 | 45 | $900 | siege boss |
+| **Harbinger** | Plated | **7600** | 24 | 70 | $1600 | siege boss |
+
+The last two are siege-only: they never appear in the campaign, and the wave
+file names them once each because the `endless` block cycles bosses on top of
+the normal wave rather than listing them out.
 
 The first three trade speed against health. The **Lance** does not — it is the
 fastest thing on the board *and* tougher than anything that is not slower than
