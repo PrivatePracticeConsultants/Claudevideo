@@ -2816,4 +2816,14 @@ a placement and 8.1 ms on a ground purchase, split 3.95 ms `_refresh_cells` /
 3.46 ms `_refresh_link_lines` - the cells half is now the larger one, and
 AGENTS.md had been blaming the link lines alone at ~5 ms.
 
-Audit: 415 tests, 62,565 assertions, 0 failed on the sampled suite.
+Audit: 415 tests, 62,565 assertions, 0 failed on the sampled suite; the deep
+run that found the siege - `run_tests.sh --full`, all thirteen chains - re-run
+after the fix at 417 tests, 62,716 assertions, 0 failed in 17 minutes.
+
+Worth saying plainly, because it happened twice in one session: both of the
+findings above came from checks that do not run by default. The siege needed
+`--full`, which is a pre-release run; the import settings needed somebody to
+notice that `.import` was in `.gitignore`. The sampled suite was green
+throughout, and would have stayed green through a release. If `--full` is not
+made a release gate, it should at least be run whenever a level's wave file
+changes - that single edit is what left the siege free.
