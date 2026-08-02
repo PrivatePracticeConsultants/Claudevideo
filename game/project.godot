@@ -10,6 +10,10 @@ config/name="LAST LINE"
 config/description="Roguelite tower defense. Phase P0."
 run/main_scene="res://main.tscn"
 config/features=PackedStringArray("4.5", "Forward Plus")
+; The project had no icon at all until now, which is why the web preset carried
+; html/export_icon=false with an apology attached - Godot fails the whole export
+; with a bare "configuration errors" if that is true and this is unset.
+config/icon="res://icon.png"
 
 [display]
 

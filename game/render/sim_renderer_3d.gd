@@ -145,6 +145,7 @@ func setup(sim: Sim, theme: Dictionary, materials: MaterialLibrary = null) -> vo
 	_build_turret_layers()
 	_build_entity_layers()
 	_build_tracer_layers()
+	_build_muzzle_layers()
 	_build_effect_layer()
 	_build_link_layer()
 	refresh_board()
@@ -564,11 +565,34 @@ func _build_scenery() -> void:
 	# explain what losing hull means.
 	if _sim.is_outpost():
 		var station := MeshInstance3D.new()
-		station.mesh = _station_mesh()
-		station.position = to_world(_sim.base_x(), _sim.base_y(), 0.0)
+		var painted := _sprite(SPRITE_WORLD_DIR, "station")
+		var lift := 0.0
+		if painted != null:
+			# The authored station, on a leaning quad like every other sprite.
+			# It is the largest sprite on the board by an order of magnitude -
+			# roughly nine turret drums across - which makes it the one most
+			# exposed to reading as a decal. What saves it is that the art is
+			# drawn from about the same elevation as the turret drums, so the
+			# lean lands it in the same imagined space as everything around it.
+			var span := _sim.outpost_core_radius() * 2.0 \
+				* float(_world.get("station_sprite_span", 1.35))
+			var plane := _sprite_plane()
+			plane.material = _sprite_material(painted)
+			station.mesh = plane
+			station.scale = Vector3(span, 1.0, span)
+			station.basis = _lean * station.basis
+			lift = float(_world.get("station_sprite_lift", 2.0)) + span * _lean_lift
+		else:
+			# Kept, and not as dead code: this is what a checkout with no assets/
+			# draws, and the whole sprite layer is written to fall back rather
+			# than to fail.
+			station.mesh = _station_mesh()
+		station.position = to_world(_sim.base_x(), _sim.base_y(), lift)
 		# Not through _shadowed(), which is typed for the instanced layers; this
-		# is the one plain MeshInstance3D on the board.
-		station.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+		# is the one plain MeshInstance3D on the board. A leaning cutout casts a
+		# shadow shaped like a leaning cutout, so the painted station does not.
+		station.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON \
+			if painted == null else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		_scenery.add_child(station)
 
 	var props := _prop_layer()
@@ -1874,9 +1898,13 @@ var _fx_life: PackedFloat32Array = PackedFloat32Array()
 var _fx_size: PackedFloat32Array = PackedFloat32Array()
 var _fx_grow: PackedFloat32Array = PackedFloat32Array()
 var _fx_tint: PackedColorArray = PackedColorArray()
-## Which layer each live slot draws into. See FX_GLOW / FX_IMPACT.
+## Which layer each live slot draws into. See FX_GLOW / FX_IMPACT / FX_MUZZLE.
 var _fx_kind: PackedInt32Array = PackedInt32Array()
-enum { FX_GLOW, FX_IMPACT }
+enum { FX_GLOW, FX_IMPACT, FX_MUZZLE }
+## Only FX_MUZZLE reads these: which way the gun was pointing, and which
+## family's layer the flash belongs in.
+var _fx_angle: PackedFloat32Array = PackedFloat32Array()
+var _fx_family: PackedInt32Array = PackedInt32Array()
 var _fx_impact: MultiMeshInstance3D
 var _fx_head: int = 0
 
@@ -1913,6 +1941,39 @@ const TRACER_ART := {
 ## One sprite layer per weapon family, or null where the family keeps the
 ## generated tracer. Indexed by blueprint, same as every other per-family array.
 var _tracer_layers: Array = []
+
+## The authored muzzle flash per family, same idea as TRACER_ART. Hits already
+## wore painted debris while shots wore a generated soft glow, and side by side
+## the asymmetry read as the gun firing a light bulb.
+const MUZZLE_ART := {
+	"ballistic": "muzzle_kinetic",
+	"cannon": "muzzle_explosive",
+	"railgun": "muzzle_energy",
+	"suppressor": "muzzle_arc",
+}
+
+## One flash layer per family, or null where the family keeps the glow. Unlike
+## the impact burst these are NOT billboards: a flash is drawn pointing up its
+## own picture and has to be turned to match where the gun is aiming, so it lies
+## on the ground plane and leans with everything else.
+var _muzzle_layers: Array = []
+
+func _build_muzzle_layers() -> void:
+	_muzzle_layers.clear()
+	for family in _sim.blueprint_count():
+		var id := _sim.blueprint_name(family)
+		var art: Texture2D = null
+		if MUZZLE_ART.has(id):
+			art = _sprite(SPRITE_FX_DIR, MUZZLE_ART[id])
+		if art == null:
+			_muzzle_layers.append(null)
+			continue
+		var plane := _sprite_plane()
+		plane.material = _sprite_material(art, true)
+		var layer := _instanced(plane, FX_CAPACITY)
+		layer.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		add_child(layer)
+		_muzzle_layers.append(layer)
 
 func _build_tracer_layers() -> void:
 	_tracer_layers.clear()
@@ -1979,6 +2040,8 @@ func _build_effect_layer() -> void:
 
 	_fx_pos.resize(FX_CAPACITY)
 	_fx_kind.resize(FX_CAPACITY)
+	_fx_angle.resize(FX_CAPACITY)
+	_fx_family.resize(FX_CAPACITY)
 	_fx_age.resize(FX_CAPACITY)
 	_fx_life.resize(FX_CAPACITY)
 	_fx_size.resize(FX_CAPACITY)
@@ -2036,6 +2099,10 @@ func _note_muzzle_flashes() -> void:
 	var growth := float(_world.get("platform_tier_growth", 0.28))
 	var lift := float(_world.get("pad_height", 12.0)) + float(_world.get("platform_height", 48.0)) * 0.78
 	var tint := _color_of(_world.get("flash", "#ffd9a0"))
+	var muzzle_span := float(_world.get("muzzle_sprite_span", 62.0))
+	var muzzle_lift := float(_world.get("muzzle_sprite_lift", 22.0))
+	var muzzle_reach := float(_world.get("muzzle_reach_scale", 1.5))
+	var muzzle_linger := float(_world.get("muzzle_life_scale", 1.6))
 	for i in _sim.t_count:
 		var cooldown := _sim.t_cooldown[i]
 		# A cooldown only ever counts down, one per tick. The one thing that can
@@ -2049,10 +2116,25 @@ func _note_muzzle_flashes() -> void:
 		var scale := 1.0 + growth * float(_sim.platform_tier(i))
 		var shape := _muzzle_shape(_sim.blueprint_name(_sim.platform_blueprint(i)))
 		var out := reach * scale * shape.x
-		_emit(Vector3(_sim.t_x[i] + sin(angle) * out, lift * scale + sin(shape.z) * out * 0.5,
-			_sim.t_y[i] + cos(angle) * out),
-			float(_world.get("flash_size", 26.0)) * scale, 0.9,
-			float(_world.get("flash_life", 0.07)), tint)
+		var family := _sim.platform_blueprint(i)
+		var painted := family >= 0 and family < _muzzle_layers.size() \
+			and _muzzle_layers[family] != null
+		if painted:
+			# The authored flash is its own picture with its own colour, so it is
+			# drawn WHITE and left alone - tinting painted art only muddies it,
+			# the same reason the turret sprites are not tinted either. It also
+			# sits further out and flatter, because it is the flash leaving the
+			# muzzle rather than a ball of light hanging over the mount.
+			_emit(Vector3(_sim.t_x[i] + sin(angle) * out * muzzle_reach,
+				muzzle_lift, _sim.t_y[i] + cos(angle) * out * muzzle_reach),
+				muzzle_span * scale, 0.35,
+				float(_world.get("flash_life", 0.07)) * muzzle_linger,
+				Color.WHITE, FX_MUZZLE, angle, family)
+		else:
+			_emit(Vector3(_sim.t_x[i] + sin(angle) * out, lift * scale + sin(shape.z) * out * 0.5,
+				_sim.t_y[i] + cos(angle) * out),
+				float(_world.get("flash_size", 26.0)) * scale, 0.9,
+				float(_world.get("flash_life", 0.07)), tint)
 		if _sfx != null:
 			_sfx.play(Sfx.SHOT, _sim.blueprint_name(_sim.platform_blueprint(i)))
 	# Turrets sold this tick leave a stale cooldown behind; clearing the tail stops
@@ -2123,7 +2205,7 @@ func _note_wrecks() -> void:
 ## more than a thousand things happened at once - and on that tick nobody is
 ## looking at any one of them.
 func _emit(position: Vector3, size: float, grow: float, life: float, tint: Color,
-		kind: int = FX_GLOW) -> void:
+		kind: int = FX_GLOW, angle: float = 0.0, family: int = -1) -> void:
 	var i := _fx_head
 	_fx_head = (_fx_head + 1) % FX_CAPACITY
 	_fx_pos[i] = position
@@ -2132,9 +2214,17 @@ func _emit(position: Vector3, size: float, grow: float, life: float, tint: Color
 	_fx_size[i] = size
 	_fx_grow[i] = grow
 	_fx_tint[i] = tint
-	# Falls back to the glow when the authored burst is not on disk, so a
-	# checkout with no assets/ still shows every hit.
-	_fx_kind[i] = kind if _fx_impact != null else FX_GLOW
+	_fx_angle[i] = angle
+	_fx_family[i] = family
+	# Falls back to the glow when the authored art is not on disk, so a checkout
+	# with no assets/ still shows every shot and every hit. Each kind checks its
+	# OWN layer: a sheet that has tracers but no flashes is a real state.
+	if kind == FX_IMPACT and _fx_impact == null:
+		kind = FX_GLOW
+	elif kind == FX_MUZZLE and (family < 0 or family >= _muzzle_layers.size()
+			or _muzzle_layers[family] == null):
+		kind = FX_GLOW
+	_fx_kind[i] = kind
 
 ## Age and draw.
 ##
@@ -2149,6 +2239,11 @@ func _update_effects(delta: float) -> void:
 	var impact_mm: MultiMesh = _fx_impact.multimesh if _fx_impact != null else null
 	var shown := 0
 	var impacts := 0
+	# One running count per family layer, same shape as the turret refresh: a
+	# flash is drawn by its own family's layer, so they cannot share a counter.
+	var flashes := PackedInt32Array()
+	flashes.resize(_muzzle_layers.size())
+	flashes.fill(0)
 	for i in FX_CAPACITY:
 		if _fx_age[i] >= _fx_life[i]:
 			continue
@@ -2163,7 +2258,22 @@ func _update_effects(delta: float) -> void:
 		# Fade toward black rather than toward transparent: the blend is additive,
 		# so black IS invisible and there is no sorting to get wrong.
 		var faded: Color = _fx_tint[i] * (1.0 - t)
-		if impact_mm != null and _fx_kind[i] == FX_IMPACT:
+		if _fx_kind[i] == FX_MUZZLE:
+			# Turned to match the gun, and leaned like every other ground sprite.
+			# The flash art is drawn pointing up its own picture, so it goes
+			# through the same facing correction the barrel itself does - if it
+			# did not, a flash would sit square to the board while the gun that
+			# made it pointed somewhere else.
+			var family: int = _fx_family[i]
+			var slot: int = flashes[family]
+			var flash_mm: MultiMesh = _muzzle_layers[family].multimesh
+			flash_mm.set_instance_transform(slot, Transform3D(
+				_lean * Basis(Vector3.UP, sprite_facing(
+					MUZZLE_ART[_sim.blueprint_name(family)], _fx_angle[i])
+				).scaled(Vector3(size, 1.0, size)), _fx_pos[i]))
+			flash_mm.set_instance_color(slot, faded)
+			flashes[family] = slot + 1
+		elif impact_mm != null and _fx_kind[i] == FX_IMPACT:
 			impact_mm.set_instance_transform(impacts, xf)
 			impact_mm.set_instance_color(impacts, faded)
 			impacts += 1
@@ -2176,6 +2286,9 @@ func _update_effects(delta: float) -> void:
 	mm.visible_instance_count = shown
 	if impact_mm != null:
 		impact_mm.visible_instance_count = impacts
+	for family in _muzzle_layers.size():
+		if _muzzle_layers[family] != null:
+			_muzzle_layers[family].multimesh.visible_instance_count = flashes[family]
 
 ## Nudge the camera when the corridor takes a hit. Decays on its own; the phase
 ## walk keeps successive leaks from landing on the same offset.
@@ -2824,9 +2937,17 @@ func drawn_link_count() -> int: return _links.multimesh.visible_instance_count
 ## this still answered zero, and the feedback test rightly failed - the test
 ## was correct and the accessor was stale.
 func drawn_effect_count() -> int:
+	# EVERY layer the pool can deal into, not just the glow. This accessor has
+	# already been wrong once: when hits moved to their own layer it kept
+	# counting the glow alone, so a feedback test failed while the burst was
+	# drawing perfectly. A count that only knows about some of its layers is a
+	# count that reports zero while the screen is full.
 	var total := _fx.multimesh.visible_instance_count
 	if _fx_impact != null:
 		total += _fx_impact.multimesh.visible_instance_count
+	for layer in _muzzle_layers:
+		if layer != null:
+			total += layer.multimesh.visible_instance_count
 	return total
 func shake() -> float: return _shake
 func camera_home() -> Vector3: return _camera_home
@@ -2875,6 +2996,8 @@ const MATERIALS_PATH := "res://data/materials.json"
 const SPRITE_TURRET_DIR := "res://assets/art/turrets/"
 const SPRITE_DRONE_DIR := "res://assets/art/drones/"
 const SPRITE_FX_DIR := "res://assets/art/fx/"
+## One-off board pieces that are neither a unit nor an effect.
+const SPRITE_WORLD_DIR := "res://assets/art/world/"
 
 ## Authored sprites, by the id the game already holds - blueprint id for a
 ## turret, enemy id for a drone. Empty when the art is not present, and every
@@ -2997,12 +3120,22 @@ func _sprite_plane() -> PlaneMesh:
 ## costs one discard and never sorts. The threshold is low enough to keep the
 ## Mender's glow arcs and the Suppressor's lightning, which are the two assets
 ## that would notice.
-func _sprite_material(texture: Texture2D) -> StandardMaterial3D:
+func _sprite_material(texture: Texture2D, additive: bool = false) -> StandardMaterial3D:
 	var material := StandardMaterial3D.new()
 	material.albedo_texture = texture
 	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
-	material.alpha_scissor_threshold = float(_world.get("sprite_cutout", 0.35))
+	if additive:
+		# Light, not a decal. Additive so the flash fades by fading toward black
+		# with nothing to depth-sort, which is how every other effect in this
+		# renderer fades - a scissor cutout would pop out of existence instead,
+		# and two guns firing into the same space would z-fight over which
+		# flash is in front.
+		material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		material.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+		material.disable_receive_shadows = true
+	else:
+		material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
+		material.alpha_scissor_threshold = float(_world.get("sprite_cutout", 0.35))
 	# The damage flash and the family tint still ride on the instance colour.
 	material.vertex_color_use_as_albedo = true
 	material.cull_mode = BaseMaterial3D.CULL_DISABLED

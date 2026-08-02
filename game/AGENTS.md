@@ -7,7 +7,7 @@ tests will not catch. It is vendor-neutral — nothing here assumes any particul
 assistant.
 
 **Read this file in full, then `README.md` (what the game is), then skim
-`DECISIONS.md` (why everything is the way it is).** `DECISIONS.md` is 84 numbered
+`DECISIONS.md` (why everything is the way it is).** `DECISIONS.md` is 88 numbered
 entries and it is the single most valuable document here: each one records a
 decision, the measurement behind it, and in many cases the wrong answer that was
 tried first. Before you "fix" something that looks odd, search that file for it.
@@ -25,7 +25,7 @@ Ignore `CLAUDE.md`, `docs/AI_HANDOFF.md`, `mrfx/`, `src/`, `run.py` entirely.
 GODOT=/path/to/godot ./game/run_tests.sh
 ```
 
-Expect **403 tests, 62,309 assertions, 0 failed**, in roughly 4–6 minutes. If
+Expect **417 tests, 62,579 assertions, 0 failed**, in roughly 6 minutes. If
 you get that, your environment is good. If you get parse errors about
 identifiers not being declared, read §2.1 — you almost certainly ran Godot
 directly instead of through the script.
@@ -126,16 +126,25 @@ geometry from Godot primitives welded with `SurfaceTool`. If you need a new
 surface, add a family to `data/materials.json` — do not add an image.
 
 **The exception is entity art.** `assets/art/` holds the authored sprites —
-eleven drone classes, four tracers, and five turret families as a pinned
-`<id>_base.png` plus a turning `<id>_head.png` — and they are what the game
-draws. They are cut from authored sheets by `tools/slice_sprites.py`, committed
+eleven drone classes, four tracers, four muzzle flashes, the siege station, and
+five turret families as a pinned `<id>_base.png` plus a turning `<id>_head.png` —
+and they are what the game draws. They are cut from authored sheets by `tools/slice_sprites.py`, committed
 so that re-exporting a sheet is one command rather than an archaeology exercise:
 
 ```bash
 python3 game/tools/slice_sprites.py <sheet.png>                 # the 4x4 entity sheet
 python3 game/tools/slice_sprites.py <sheet.png> --projectiles   # the 2x2 tracer sheet
 python3 game/tools/slice_sprites.py <sheet.png> --turret-pairs  # bare drums + detached guns
+python3 game/tools/slice_sprites.py <sheet.png> --muzzle        # the 2x2 muzzle flash sheet
+python3 game/tools/slice_sprites.py <img.png> --single world/station
+python3 game/tools/slice_sprites.py <img.png> --icon            # -> game/icon.png, opaque
 ```
+
+Every mode scrubs a corner square first: the generator signs each sheet with a
+small white sparkle, and on a single-subject image that speck drags the trim
+bounding box into the corner and leaves the subject small and off-centre. It is
+removed by POSITION, never by size — see P0-87 for the two ways size got it
+wrong.
 
 Do **not** "restore" procedural entity meshes over them. The generated meshes
 still exist and are still the fallback when a sprite is missing, which is what

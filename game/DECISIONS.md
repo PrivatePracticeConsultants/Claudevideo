@@ -2827,3 +2827,61 @@ notice that `.import` was in `.gitignore`. The sampled suite was green
 throughout, and would have stayed green through a release. If `--full` is not
 made a release gate, it should at least be run whenever a level's wave file
 changes - that single edit is what left the siege free.
+
+## P0-87 · The station, the flashes, and an icon — plus a corner the generator signs
+
+Three assets that were still generated in code, and one keying bug that only
+showed up because two of them were single-subject images.
+
+**The signature.** Every sheet the generator produces carries a small
+four-pointed white sparkle in a corner. It is not art, and keying leaves it fully
+opaque. On a grid sheet that is invisible - it lands in a gutter. On a
+single-subject image it is not cosmetic at all: `trim_square` takes the bounding
+box of everything opaque, so a speck in the corner drags the box out and the
+subject ends up small and off-centre in its own canvas.
+
+The first attempt removed opaque islands below a share of the largest one, and
+got it wrong on **both** ends: it deleted the Kinetic flash's detached spark dots
+(real art, ~300px each) and kept the sparkle (~3,400px, comfortably over any
+threshold that spared the sparks). Size was never the signal. Measured, the stamp
+lands in the same place every time - bbox (1760,1760)-(1855,1855) on a 2048
+sheet, 9.4% in from the right and bottom - so it is removed by POSITION, with a
+corner square scrubbed to the local backdrop before anything else looks at the
+sheet. A square and not a margin strip, because the station's artwork reaches
+11.2% in from the right edge but only high up; requiring both axes is what keeps
+it. Islands are still dropped at 16px and below, which is dust and cannot be art.
+
+The second attempt then painted a solid orange square over the Explosive flash
+and a white one over the Arc, because it sampled the fill colour by walking
+INWARD from each corner - straight into the artwork. Sampling the extreme corner
+is right: the margin every sheet is authored with guarantees it is backdrop.
+
+**The icon is not keyed at all.** Its greys and blues sit within a few values of
+the backdrop, so the flood fill chews holes in the shield and the dust pass
+shakes the fragments off; it came out speckled along one edge. An app icon does
+not want transparency anyway - a solid field reads better in a browser tab than a
+floating emblem. So `--icon` finds the subject by keying, throws the key away,
+and keeps only its bounding box to centre an opaque crop. The project has had
+`html/export_icon=false` with an apology attached since the web export existed,
+because Godot fails the whole export if it is true and no icon is set. Both are
+fixed.
+
+**The muzzle flashes are per family and they turn.** Hits already wore painted
+debris while shots wore a generated soft glow, and side by side the asymmetry
+read as the gun firing a light bulb. Unlike the impact burst these are not
+billboards: a flash is drawn pointing up its own picture and has to be turned to
+match the gun, so it lies on the ground plane, leans with everything else, and
+goes through the same `sprite_facing` correction the barrel does. Their
+`sprite_barrel_degrees` are all 0.0 - after P0-85, "drawn pointing up" is the
+cheap case. `drawn_effect_count()` now sums all three kinds; it has already been
+wrong once this way, reporting zero while the screen was full.
+
+**The station is the largest sprite on the board by an order of magnitude** -
+about nine turret drums across - and it exposed something the small sprites never
+did. A leaning quad that big has real depth spread: its lower edge sat at ground
+level, so the road quads at corridor height won the depth test and eight roads
+drew straight over the building they converge on. Lifting it 14 units - 1.7% of
+its own span, invisible - puts its base above the roads and they pass under it.
+It does not cast a shadow: a leaning cutout casts a shadow shaped like a leaning
+cutout. `_station_mesh()` is kept and is not dead code; it is what a checkout
+with no `assets/` draws.

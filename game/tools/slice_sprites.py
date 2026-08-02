@@ -28,6 +28,8 @@ grey smear.
     python3 game/tools/slice_sprites.py <sheet.png> --labels        # ...with caption text baked in
     python3 game/tools/slice_sprites.py <sheet.png> --projectiles   # the 2x2 projectile sheet
     python3 game/tools/slice_sprites.py <sheet.png> --turret-pairs  # bare bases + detached guns
+    python3 game/tools/slice_sprites.py <sheet.png> --muzzle        # the 2x2 muzzle flash sheet
+    python3 game/tools/slice_sprites.py <sheet.png> --icon          # -> game/icon.png, opaque
     python3 game/tools/slice_sprites.py <image.png> --single <name> # one image -> one sprite
 """
 import sys, os, math
@@ -51,6 +53,19 @@ TURRETS = {"ballistic", "cannon", "railgun", "rig", "suppressor"}
 PROJECTILE_LAYOUT = [
     ["proj_kinetic", "proj_explosive"],
     ["proj_energy", "proj_arc"],
+]
+
+## The muzzle flash sheet, same 2x2 shape and the same four damage flavours, but
+## NOT the same cut: the tracer sheet was authored with a caption under each cell
+## and this one was not, so it must be sliced without LABEL_BAND or the bottom
+## sixth of every flash is thrown away. That is the entire reason it is a
+## separate mode rather than another --projectiles call.
+##
+## Every flash is drawn pointing UP, which after P0-85 is the cheap case: their
+## sprite_barrel_degrees are all 0.0 and the renderer's half turn does the rest.
+MUZZLE_LAYOUT = [
+    ["muzzle_kinetic", "muzzle_explosive"],
+    ["muzzle_energy", "muzzle_arc"],
 ]
 
 ## Share of each cell's height cut off the BOTTOM before keying, when the sheet
@@ -328,6 +343,91 @@ def mount_turrets(sheet, root):
           % (MOUNT_CANVAS, 2.0 * half, per_base_width))
 
 
+## The generator stamps a small four-pointed white sparkle into a corner of every
+## sheet it produces. It is a signature, not art, and keying leaves it fully
+## opaque - which on a single-subject image is not cosmetic: trim_square takes
+## the bounding box of everything opaque, so a speck in the corner drags the box
+## out and the subject ends up small and off-centre in its own canvas.
+##
+## It is removed by POSITION rather than by size, and that is the whole lesson
+## here. The first attempt dropped opaque islands below a share of the largest
+## one, which is exactly backwards on both ends: it deleted the Kinetic flash's
+## detached spark dots (real art, ~300px each) and kept the sparkle (~3,400px,
+## comfortably over any threshold that spared the sparks). Measured, the stamp
+## sits at the same place every time - bbox (1760,1760)-(1855,1855) on a 2048
+## sheet, 9.4% in from the right and bottom - so a corner square covers it with
+## room to spare and cannot touch a subject that respects its margin.
+##
+## A corner SQUARE, not a margin strip: the station's artwork reaches 11.2% in
+## from the right edge, but only high up. Requiring both axes is what keeps it.
+SIGNATURE_CORNER = 0.16
+
+## Opaque islands at or below this many pixels are anti-aliasing dust shaken off
+## the keying, never art. Deliberately tiny - the smallest real detail on any
+## sheet so far is a Kinetic spark at ~300px, so there is an order of magnitude
+## of daylight and no judgement call to get wrong.
+DUST_PIXELS = 16
+
+
+def scrub_signature(sheet):
+    """Paint over the generator's corner sparkle, before anything else looks."""
+    sheet = sheet.convert("RGB")
+    w, h = sheet.size
+    box = int(min(w, h) * SIGNATURE_CORNER)
+    px = sheet.load()
+    for corner_x, corner_y in ((0, 0), (w - box, 0), (0, h - box), (w - box, h - box)):
+        # Sampled from the EXTREME corner, a few pixels in. That point is
+        # guaranteed backdrop by the margin every sheet is authored with,
+        # whereas sampling inward from the corner lands in the artwork - which
+        # is how the first version painted a solid orange square over the
+        # Explosive flash and a white one over the Arc. Per corner rather than
+        # once, so a backdrop that drifts across the sheet is still patched with
+        # its own local colour and the flood fill meets no seam.
+        edge = 3
+        sample_x = edge if corner_x == 0 else w - 1 - edge
+        sample_y = edge if corner_y == 0 else h - 1 - edge
+        fill = px[sample_x, sample_y]
+        for y in range(corner_y, corner_y + box):
+            for x in range(corner_x, corner_x + box):
+                px[x, y] = fill
+    return sheet
+
+
+def dedust(image):
+    """Drop opaque islands too small to be anything but keying dust."""
+    w, h = image.size
+    px = image.load()
+    seen = bytearray(w * h)
+    dropped = 0
+    for start_y in range(h):
+        for start_x in range(w):
+            at = start_y * w + start_x
+            if seen[at] or px[start_x, start_y][3] == 0:
+                continue
+            island = []
+            stack = [(start_x, start_y)]
+            seen[at] = 1
+            while stack:
+                x, y = stack.pop()
+                island.append((x, y))
+                for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    nx, ny = x + dx, y + dy
+                    if nx < 0 or ny < 0 or nx >= w or ny >= h:
+                        continue
+                    step = ny * w + nx
+                    if seen[step] or px[nx, ny][3] == 0:
+                        continue
+                    seen[step] = 1
+                    stack.append((nx, ny))
+            if len(island) <= DUST_PIXELS:
+                dropped += len(island)
+                for x, y in island:
+                    px[x, y] = (0, 0, 0, 0)
+    if dropped:
+        print("    removed %d px of keying dust" % dropped)
+    return image
+
+
 def trim_square(image, pad_ratio=0.04):
     """Crop to the art, then pad back out to a square so nothing is distorted."""
     box = image.getbbox()
@@ -357,7 +457,7 @@ def slice_sheet(sheet, layout, root, labelled):
                 bottom -= int(cell_h * LABEL_BAND)
             cell = sheet.crop((c * cell_w + inset_x, r * cell_h + inset_y,
                                (c + 1) * cell_w - inset_x, bottom))
-            keyed = trim_square(key_cell(cell))
+            keyed = capped(trim_square(dedust(key_cell(cell))))
             if name in TURRETS:
                 # The entity sheet's turrets are the old one-piece art. They are
                 # still cut so the sheet round-trips, but the game's turrets now
@@ -365,7 +465,7 @@ def slice_sheet(sheet, layout, root, labelled):
                 # a one-piece picture over that composite would leave a base and
                 # head that no longer share their canvas with it.
                 kind = "turrets_onepiece"
-            elif name.startswith("proj_"):
+            elif name.startswith("proj_") or name.startswith("muzzle_"):
                 kind = "fx"
             else:
                 kind = "drones"
@@ -375,18 +475,88 @@ def slice_sheet(sheet, layout, root, labelled):
             print("%-16s %-12s %dx%d" % (name, kind, keyed.size[0], keyed.size[1]))
 
 
+## Ceiling on a saved sprite's longest edge.
+##
+## The authored sheets are 2048 square and a subject can come off one at 900px
+## or more, which is far past anything the game draws. A muzzle flash is 62 world
+## units, about 17 screen pixels at the default framing; a 950px texture for it
+## is thirty times more than the sampler will ever ask for, and it is paid for in
+## the download and in VRAM on every machine. 512 leaves several times the
+## headroom the deepest zoom needs.
+##
+## The station gets its own, larger ceiling because it is drawn 5-8x wider than
+## anything else on the board - roughly nine turret drums across - so the same
+## number would be visibly soft on the one asset a player looks straight at.
+MAX_SPRITE_PX = 512
+MAX_STATION_PX = 1024
+
+
+def capped(image, ceiling=MAX_SPRITE_PX):
+    """Shrink to the ceiling, keeping it square. Never enlarges."""
+    side = max(image.size)
+    if side <= ceiling:
+        return image
+    scale = ceiling / float(side)
+    return image.resize((max(1, int(round(image.size[0] * scale))),
+                         max(1, int(round(image.size[1] * scale)))), Image.LANCZOS)
+
+
+## Side of the app icon written by --icon. 512 is what Godot wants for a project
+## icon and comfortably more than a browser tab needs.
+ICON_SIDE = 512
+## Share of the emblem's own size left as breathing room around it.
+ICON_MARGIN = 0.14
+
+
+def make_icon(sheet, out_path):
+    """The icon sheet -> a square, OPAQUE app icon.
+
+    Deliberately not keyed. The emblem is drawn in greys and blues that sit
+    within a few values of the backdrop, so the flood fill chews holes in the
+    shield and the dust pass then shakes the fragments off - it came out
+    speckled along one edge. An app icon does not want transparency anyway: a
+    solid field reads better in a browser tab and against a desktop launcher
+    than a floating emblem does. So the backdrop stays and becomes the icon's
+    own background.
+
+    The subject is still FOUND by keying, because that is the honest way to
+    centre the crop on the artwork rather than on the middle of the canvas -
+    the key is thrown away afterwards and only its bounding box is kept.
+    """
+    box = dedust(key_cell(sheet)).getbbox()
+    if box is None:
+        box = (0, 0, sheet.size[0], sheet.size[1])
+    centre_x = (box[0] + box[2]) // 2
+    centre_y = (box[1] + box[3]) // 2
+    reach = int(max(box[2] - box[0], box[3] - box[1]) * (1.0 + ICON_MARGIN) / 2)
+    # Pulled back inside the sheet if the margin would run off an edge, so the
+    # crop stays square and the emblem stays centred in it.
+    reach = min(reach, centre_x, centre_y,
+                sheet.size[0] - centre_x, sheet.size[1] - centre_y)
+    crop = sheet.crop((centre_x - reach, centre_y - reach,
+                       centre_x + reach, centre_y + reach))
+    icon = crop.resize((ICON_SIDE, ICON_SIDE), Image.LANCZOS).convert("RGB")
+    icon.save(out_path)
+    print("%-16s %-12s %dx%d  (opaque, cropped to the emblem)"
+          % ("icon", "project", ICON_SIDE, ICON_SIDE))
+
+
 def main() -> int:
     if len(sys.argv) < 2:
         print(__doc__)
         return 2
     args = sys.argv[1:]
     root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "assets", "art")
-    sheet = Image.open(args[0]).convert("RGB")
+    sheet = scrub_signature(Image.open(args[0]))
 
     if "--single" in args:
+        # Accepts "name" or "folder/name", so a one-off subject can land in the
+        # same directory layout the renderer already looks in.
         name = args[args.index("--single") + 1]
-        keyed = trim_square(key_cell(sheet))
-        os.makedirs(root, exist_ok=True)
+        ceiling = MAX_STATION_PX if name.endswith("station") else MAX_SPRITE_PX
+        keyed = capped(trim_square(dedust(key_cell(sheet))), ceiling)
+        folder = os.path.join(root, os.path.dirname(name))
+        os.makedirs(folder, exist_ok=True)
         path = os.path.normpath(os.path.join(root, "%s.png" % name))
         keyed.save(path)
         print("%-16s %-12s %dx%d" % (name, "art", keyed.size[0], keyed.size[1]))
@@ -394,6 +564,18 @@ def main() -> int:
 
     if "--projectiles" in args:
         slice_sheet(sheet, PROJECTILE_LAYOUT, root, labelled=True)
+        return 0
+
+    if "--muzzle" in args:
+        slice_sheet(sheet, MUZZLE_LAYOUT, root, labelled=False)
+        return 0
+
+    if "--icon" in args:
+        # Not under assets/: this is the project icon, not a sprite the renderer
+        # ever loads, and it must sit where project.godot points.
+        # root is <project>/assets/art, so two levels up is the project folder,
+        # which is where project.godot's config/icon resolves from.
+        make_icon(sheet, os.path.normpath(os.path.join(root, "..", "..", "icon.png")))
         return 0
 
     if "--turret-pairs" in args:
