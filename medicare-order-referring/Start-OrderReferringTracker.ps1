@@ -411,8 +411,15 @@ function Set-Busy([bool]$On, [string]$Message) {
 }
 
 function Show-ErrorBox([string]$Message) {
-    [void][System.Windows.MessageBox]::Show($window, $Message, 'Order & Referring Tracker',
+    [void][System.Windows.MessageBox]::Show($window, $Message, 'Medicare Order & Referring Tracker',
         [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning)
+}
+
+# Yes/No confirmation, used before the big one-time dataset downloads.
+function Confirm-Box([string]$Message) {
+    ([System.Windows.MessageBox]::Show($window, $Message, 'Medicare Order & Referring Tracker',
+        [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)) -eq
+        [System.Windows.MessageBoxResult]::Yes
 }
 
 # Runs a script block with parameters in a background runspace so the window
@@ -831,6 +838,9 @@ $script:LkNotes = @(
 
 $ui.RmDownloadButton.Add_Click({
     if ($script:Busy) { return }
+    if (-not (Confirm-Box ("This one-time download is about 356 MB and needs roughly 1.7 GB " +
+        "of free disk space while it unpacks. It can take several minutes on a slow connection." +
+        "`n`nStart the download now?"))) { return }
     $ui.RmSummary.Text = 'Downloading... this tab will report when the dataset is ready.'
     Invoke-Async -Kind 'rm-download' -Params @{ RmModulePath = $script:RmModulePath } `
         -BusyMessage 'Downloading the CMS shared-patient dataset (~356 MB; this can take several minutes)...' `
@@ -980,6 +990,9 @@ function Export-PgWithDialog {
 
 $ui.PgDownloadButton.Add_Click({
     if ($script:Busy) { return }
+    if (-not (Confirm-Box ("This one-time download is about 510 MB and needs roughly 1 GB " +
+        "of free disk space while it unpacks. It can take several minutes on a slow connection." +
+        "`n`nStart the download now?"))) { return }
     $ui.PgSummary.Text = 'Downloading... this tab will report when the dataset is ready.'
     Invoke-Async -Kind 'pg-download' -Params @{ PgModulePath = $script:PgModulePath } `
         -BusyMessage 'Downloading the CMS clinic-group reassignment dataset (~510 MB; this can take several minutes)...' `
@@ -1307,7 +1320,7 @@ try {
         try {
             [void][System.Windows.MessageBox]::Show($window,
                 "Something went wrong, but the app is still running:`n`n$($e.Exception.Message)",
-                'Order & Referring Tracker',
+                'Medicare Order & Referring Tracker',
                 [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning)
         } catch { }
         $e.Handled = $true

@@ -3,20 +3,31 @@
 *No technical knowledge needed. Total setup time: about 10 minutes, most of it
 waiting for downloads.*
 
+> **Please note:** this is an independent tool, **not affiliated with CMS**. It
+> uses public CMS data (no patient information) and is provided as-is. The
+> referral data is from 2015 (the newest CMS makes public). Double-check
+> anything you'll use for a billing or compliance decision against the official
+> CMS source.
+
 ---
 
 ## 1. One-time setup
 
-1. **Get the folder onto your computer.** You need the whole
+1. **Extract the ZIP first.** If you received this as a ZIP file, right-click
+   the downloaded ZIP, choose **Extract All…**, and then open the extracted
+   folder. **The tool will NOT run from inside the zip** — Windows opens zips
+   in a read-only preview, and the app can't create its data files there.
+2. **Get the folder onto your computer.** You need the whole
    `medicare-order-referring` folder (the one this file is in). Put it
    anywhere you like — your Desktop or `C:\` is fine. Don't move or rename
    the files inside it.
-2. That's it. There is nothing to install. The app uses PowerShell, which is
+3. That's it. There is nothing to install. The app uses PowerShell, which is
    already part of Windows.
 
 > **If Windows shows a blue "Windows protected your PC" box** the first time
 > you run it: click **More info**, then **Run anyway**. That warning appears
-> for any program Windows hasn't seen before.
+> for any program Windows hasn't seen before. If instead you see a smaller
+> **"Open File - Security Warning"** box, just click **Run**.
 
 ---
 
@@ -83,6 +94,42 @@ Every data download is kept as a dated snapshot. Pick two snapshots, click
 not — the previous name is shown so you can tell it apart from a real
 eligibility change). Exportable like everything else.
 
+### Tab 4 — Referral map (2015)
+*"Who sends patients to the rehab providers in my area?"*
+
+One-time setup for this tab: click **Download CMS dataset** (~356 MB — the
+newest public CMS provider-to-provider data; takes a few minutes).
+
+Then:
+1. Type a ZIP code — or a prefix like `630*` to cover a wider area — and
+   click **Map referral sources**.
+2. **Top table:** every outpatient rehab provider in that area, ranked by
+   referral *volume* (the SharedPatients number adds up each source's patients,
+   so treat it as a ranking score, not a count of distinct people).
+3. **Click any row** and the bottom table shows *who fed them those
+   patients* — names, specialties, cities, and patient counts.
+4. Export either table with the buttons.
+
+**Read this before trusting the numbers:**
+- This data is from **2015** — the newest CMS ever released publicly. It
+  shows the *structure* of your referral market (who the big referrers are
+  and whom they historically fed), **not this year's volumes**.
+- A provider marked **"No (NPI issued 2019)"** in the last column didn't
+  exist yet in 2015 — their zero means "too new," not "no referrals."
+- Private clinics show up under their **individual therapists' names**
+  (that's how CMS built the file); hospital rehab departments show up as
+  organizations.
+- Labs and hospitals sometimes appear as "sources" just because patients
+  visited them around the same time. Judge sources by specialty: an
+  orthopedic surgeon feeding a physical therapist is a real referral
+  pattern; a lab is not.
+
+**Tip — Export specialty mix:** the **Export specialty mix** button breaks your
+referral sources into a specialty profile ("45% orthopedic surgery, 20% primary
+care…"). Select a clinic first to profile just that clinic, or leave it
+unselected for the whole ZIP — handy for seeing where a practice's funnel comes
+from.
+
 ### Tab 5 — Practice groups
 *"Which rehab practices operate in my area, and who's on their team — right now?"*
 
@@ -138,42 +185,6 @@ renamed, or unchanged. It turns the one-time Batch check into ongoing
 monitoring, so a referrer who loses eligibility is a phone call, not a surprise
 denial. Export the report.
 
-**Tip on the Referral map tab:** the **Export specialty mix** button breaks your
-referral sources into a specialty profile ("45% orthopedic surgery, 20% primary
-care…"). Select a clinic first to profile just that clinic, or leave it
-unselected for the whole ZIP — handy for seeing where a practice's funnel comes
-from.
-
-### Tab 4 — Referral map (2015)
-*"Who sends patients to the rehab providers in my area?"*
-
-One-time setup for this tab: click **Download CMS dataset** (~356 MB — the
-newest public CMS provider-to-provider data; takes a few minutes).
-
-Then:
-1. Type a ZIP code — or a prefix like `630*` to cover a wider area — and
-   click **Map referral sources**.
-2. **Top table:** every outpatient rehab provider in that area, ranked by
-   referral *volume* (the SharedPatients number adds up each source's patients,
-   so treat it as a ranking score, not a count of distinct people).
-3. **Click any row** and the bottom table shows *who fed them those
-   patients* — names, specialties, cities, and patient counts.
-4. Export either table with the buttons.
-
-**Read this before trusting the numbers:**
-- This data is from **2015** — the newest CMS ever released publicly. It
-  shows the *structure* of your referral market (who the big referrers are
-  and whom they historically fed), **not this year's volumes**.
-- A provider marked **"No (NPI issued 2019)"** in the last column didn't
-  exist yet in 2015 — their zero means "too new," not "no referrals."
-- Private clinics show up under their **individual therapists' names**
-  (that's how CMS built the file); hospital rehab departments show up as
-  organizations.
-- Labs and hospitals sometimes appear as "sources" just because patients
-  visited them around the same time. Judge sources by specialty: an
-  orthopedic surgeon feeding a physical therapist is a real referral
-  pattern; a lab is not.
-
 ---
 
 ## 5. Keeping everything current automatically (optional)
@@ -187,7 +198,14 @@ Import-Module .\OrderReferring; Install-OrfUpdateTask -At 07:00
 ```
 
 Windows will now quietly check for a new Medicare list every morning at 7:00
-and download it only when there actually is one. To turn it off later:
+and download it only when there actually is one.
+
+> **If you see "Access is denied"** when running that command, close PowerShell,
+> then reopen it as administrator (right-click **Windows PowerShell** →
+> **Run as administrator**) and paste the command again. Creating a scheduled
+> task sometimes needs administrator rights.
+
+To turn it off later:
 
 ```powershell
 Import-Module .\OrderReferring; Uninstall-OrfUpdateTask

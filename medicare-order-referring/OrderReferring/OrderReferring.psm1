@@ -1161,8 +1161,18 @@ function Install-OrfUpdateTask {
     $trigger = New-ScheduledTaskTrigger -Daily -At $At
     $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable `
         -DontStopOnIdleEnd -ExecutionTimeLimit (New-TimeSpan -Hours 2)
-    Register-ScheduledTask -TaskName 'OrderReferringTracker-Update' `
-        -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null
+    try {
+        Register-ScheduledTask -TaskName 'OrderReferringTracker-Update' `
+            -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null
+    } catch {
+        $msg = "$($_.Exception.Message)"
+        if ($msg -match 'denied|Access is denied|0x80070005') {
+            throw ("Access was denied while registering the scheduled task. " +
+                "Close PowerShell, reopen it as administrator (right-click Windows " +
+                "PowerShell -> Run as administrator), and run this command again.")
+        }
+        throw
+    }
     Write-Host "Scheduled task 'OrderReferringTracker-Update' registered: daily check at $At."
 }
 

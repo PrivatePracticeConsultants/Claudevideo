@@ -6,6 +6,16 @@ public dataset — the roster of every provider currently eligible to order and
 refer for Medicare beneficiaries (~2 million providers, refreshed by CMS
 roughly **twice a week**).
 
+> **Disclaimer.** This is an independent tool. It is **not affiliated with,
+> endorsed by, or sponsored by CMS** or any government agency. It works entirely
+> with **public** CMS data (provider NPIs and enrollment/eligibility — no patient
+> data) and the public NPPES registry, provided **as-is with no warranty**. The
+> shared-patient (referral) data is CMS's newest public release, which is from
+> **2015** — treat it as market structure, not current volumes. Always verify
+> anything used for a billing, compliance, or contracting decision against the
+> official CMS source. Every export includes a `.methodology.txt` sidecar naming
+> the exact data release it came from.
+
 ## Read this first: what this data can and cannot tell you
 
 The Order & Referring file is an **eligibility roster**. For each NPI it lists
@@ -38,15 +48,17 @@ What it *can* do, accurately:
 
 ## Quick start (Windows)
 
-1. Copy this folder anywhere (e.g. `C:\OrderReferringTracker`).
-2. Double-click **`Start Order and Referring Tracker.cmd`**.
-3. Click **Check for updates** — the current CMS file (~70 MB) downloads and
+1. If you got this as a ZIP, **right-click it → Extract All…** first, then open
+   the extracted folder. The tool will **not** run from inside the zip preview.
+2. Copy this folder anywhere (e.g. `C:\OrderReferringTracker`).
+3. Double-click **`Start Order and Referring Tracker.cmd`**.
+4. Click **Check for updates** — the current CMS file (~70 MB) downloads and
    loads. The status bar shows the release date and provider count.
 
 That's it. No installation; works with the PowerShell built into Windows
 (and with PowerShell 7 if you have it).
 
-### The six tabs
+### The seven tabs
 
 | Tab | What it does |
 | --- | --- |
@@ -165,6 +177,10 @@ CMS publishes on a ~3.5-day cycle. Two ways to stay current:
 Import-Module .\OrderReferring
 Install-OrfUpdateTask -At 07:00   # Windows Scheduled Task; remove with Uninstall-OrfUpdateTask
 ```
+
+If this returns **"Access is denied"**, run PowerShell as administrator
+(right-click **Windows PowerShell** → **Run as administrator**) and retry —
+registering a scheduled task can require elevation.
 
 Old snapshots are kept (default: the 8 most recent, ~70 MB each) so the
 change-tracking always has history; adjust with `Set-OrfConfig -KeepSnapshots N`.
