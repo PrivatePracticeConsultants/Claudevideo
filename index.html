@@ -1315,7 +1315,7 @@ const LEVELS = [
     spawnStart: 7.2, spawnEnd: 4.9,
     maxWaiting: 6,
     ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "socksituation", "crickintail", "littlescrape"],
-    stars: [1700, 2900, 4000],
+    stars: [2850, 4850, 6700],
     restock: true, jams: true, bigExit: true,
         theme: { floor:"#f2e6d2", floorAlt:"#e9dbc4", wall:"#c9a06a", wallTop:"#dcbb8b", base:"#9c7343",
              accent:"#e0a13f", wood:"#a97645", leaf:"#5da05f", leaf2:"#7fbc7c", pot:"#a86b46",
@@ -1422,7 +1422,7 @@ const LEVELS = [
     spawnStart: 6.3, spawnEnd: 4.3,
     maxWaiting: 8,
     ailments: ["muddypaws", "itchyears", "sprainedhop", "staticcling", "mysterymunch", "stickypaws", "zoomies", "socksituation", "crickintail", "toomanytreats", "boosterjab", "littlescrape"],
-    stars: [1300, 2200, 3000],
+    stars: [2250, 3850, 5300],
     restock: true, jams: true, bigExit: true,
         theme: { floor:"#dfe4e4", floorAlt:"#d5dbdb", wall:"#5f7d80", wallTop:"#7d9c9e", base:"#41595c",
              accent:"#f0b23f", wood:"#9c7a52", leaf:"#489a63", leaf2:"#69b57e", pot:"#8a5f45",
@@ -6671,6 +6671,17 @@ function buildLevelMesh(world) {
   }
   world.wallRects = rects;
 
+  /* ---- porter-lane plates ----
+     The plate under a belt never moves, but it was being issued as its own
+     draw call every frame for every belt tile — on The Carousel that is ~90
+     calls of pure overhead, and the belt rooms measured 2.3x the median draw
+     count because of it. Only the chevrons actually scroll. */
+  for (let ty = 0; ty < ROWS; ty++)
+    for (let tx = 0; tx < COLS; tx++)
+      if (world.grid[ty][tx].belt)
+        mbRoundedBox(mb, tx + 0.5, 0.018, ty + 0.5, 0.5, 0.018, 0.5, 0.05,
+                     rgb(TH.locker || "#8fa4b5"), 2);
+
   /* ---- wall decor + floor furniture ---- */
   buildDecor(mb, world, rng, isWall);
   buildProps(mb, world, rng, isWall);
@@ -7536,15 +7547,13 @@ function drawSceneEntities() {
      direction reads without a legend and you can see it is running */
   if (world.hasBelts) {
     const th = world.def.theme || {};
-    const plate = rgb(th.locker || "#8fa4b5");
     const chev = rgb("#6fd3ff");     // fixed: some ward accents are red
     const flow = (performance.now() / 1000) % 1;
     for (let ty = 0; ty < ROWS; ty++) {
       for (let tx = 0; tx < COLS; tx++) {
         const c = world.grid[ty][tx];
         if (!c.belt) continue;
-        const cx = tx + 0.5, cz = ty + 0.5;
-        drawMesh(MESH.boxSoft, cx, 0.018, cz, 0, 0.5, 0.018, 0.5, plate);
+        const cx = tx + 0.5, cz = ty + 0.5;      // plate is baked; only chevrons move
         for (let k = 0; k < 3; k++) {
           const f = ((k / 3) + flow) % 1;                 // 0..1 along the tile
           const ox = c.belt[0] * (f - 0.5), oz = c.belt[1] * (f - 0.5);
