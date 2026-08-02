@@ -1283,18 +1283,15 @@ func _build_turret_layers() -> void:
 				_sprite_turret_split = false
 				break
 
-	_turret_sprite_factor.resize(_sim.blueprint_count())
 	for family in _sim.blueprint_count():
 		var id := _sim.blueprint_name(family)
-		_turret_sprite_factor[family] = 1.0
 		if _sprite_turret_split:
-			# The split halves live on a larger canvas, re-centred so the head's
-			# pivot is the canvas centre. Drawing them at the single art's span
-			# would shrink the turret by that ratio, so the ratio rides along -
-			# read off the textures rather than stored anywhere it could go stale.
-			var whole := _sprite(SPRITE_TURRET_DIR, id)
+			# Base and head are written onto ONE shared square canvas by the
+			# slicer, each with its own mounting point at the canvas centre.
+			# That is what lets both draw at the same span with no per-family
+			# correction: the base is pinned there, the head turns about it, and
+			# the gun stays in its socket at every angle.
 			var head := _sprite(SPRITE_TURRET_DIR, id + "_head")
-			_turret_sprite_factor[family] = float(head.get_width()) / float(whole.get_width())
 			var base_plane := _sprite_plane()
 			base_plane.material = _sprite_material(_sprite(SPRITE_TURRET_DIR, id + "_base"))
 			_turret_bases.append(_instanced(base_plane, limit))
@@ -2402,7 +2399,7 @@ func _refresh_turrets() -> void:
 			# Flat on the ground, turned to face its target. Tier still reads as
 			# size, and the tint is left WHITE so the authored colours survive -
 			# a family tint multiplied over painted art only ever muddies it.
-			var span := sprite_span * scale * _turret_sprite_factor[blueprint]
+			var span := sprite_span * scale
 			var forward := _forward_of(_sim.blueprint_name(blueprint))
 			bodies.set_instance_transform(slot, Transform3D(
 				_lean * Basis(Vector3.UP, facing + forward).scaled(Vector3(span, 1.0, span)),
@@ -2487,18 +2484,14 @@ func _update_enemies(alpha: float) -> void:
 		var mm := layer.multimesh
 		var slot := per_layer[type_index]
 		if _sprite_drones:
-			# Flat on the ground and turned to face the way it is walking, so the
-			# art's own "forward" - every asset is drawn facing up - points down
-			# the lane. Sized off the class radius alone: a sprite has no height
-			# to scale, and the picture already carries the proportions.
+			# Flat on the ground. Sized off the class radius alone: a sprite has
+			# no height to scale, and the picture already carries the
+			# proportions. Whether it also TURNS to face down the lane is the
+			# sheet's business - see drone_facing.
 			var span := footprint * drone_span
-			var heading := 0.0
-			if drone_rotates:
-				heading = atan2(_sim.out_dx(), _sim.out_dy())
+			var heading := drone_facing(type_index, drone_rotates)
 			mm.set_instance_transform(slot, Transform3D(
-				_lean * Basis(Vector3.UP,
-					heading + _forward_of(_sim.enemy_id(type_index))
-				).scaled(Vector3(span, 1.0, span)),
+				_lean * Basis(Vector3.UP, heading).scaled(Vector3(span, 1.0, span)),
 				Vector3(px, drone_lift + span * _lean_lift, pz)))
 		else:
 			mm.set_instance_transform(slot, Transform3D(
@@ -2619,8 +2612,7 @@ func _turn_turret_sprites(turn: float) -> void:
 		if i < _barrel_angle.size():
 			_barrel_angle[i] = current
 		var mm := _turret_bodies[blueprint].multimesh
-		var reach := span * (1.0 + growth * float(_sim.platform_tier(i))) \
-			* _turret_sprite_factor[blueprint]
+		var reach := span * (1.0 + growth * float(_sim.platform_tier(i)))
 		var xf := mm.get_instance_transform(slot)
 		xf.basis = _lean * Basis(Vector3.UP,
 			current + _forward_of(_sim.blueprint_name(blueprint))).scaled(
@@ -2841,6 +2833,30 @@ func camera_home() -> Vector3: return _camera_home
 func projectile_layer() -> MultiMeshInstance3D: return _projectiles
 func cell_layer() -> MultiMeshInstance3D: return _cells
 func turret_layers() -> Array: return [_turret_bases, _turret_bodies, _turret_barrels]
+## The lean applied to every sprite, so a test can take it back off and check
+## that leaning a turret toward the camera does not also steer it.
+func sprite_lean() -> Basis: return _lean
+## Whether the turret art is the detached kind: pinned base, turning gun.
+func turret_art_is_split() -> bool: return _sprite_turret_split
+## Whether drones are drawn as authored sprites rather than generated meshes.
+func drone_art_is_sprites() -> bool: return _sprite_drones
+## Total rotation applied to a sprite of this id aiming along `facing`, radians.
+## The single place the aiming convention is expressed, so a test can assert on
+## it without restating it - a test that restates the formula only proves the
+## formula equals itself.
+func sprite_facing(id: String, facing: float) -> float:
+	return facing + _forward_of(id)
+
+## Total rotation applied to a drone sprite of this class, radians.
+##
+## Zero - not half a turn - when the sheet's drones do not rotate. The facing
+## correction only means "turn the art's forward to where it is going", so on a
+## sprite nobody turns there is nothing to correct, and adding the offset anyway
+## draws every drone on the board upside down.
+func drone_facing(type_index: int, rotates: bool) -> float:
+	if not rotates:
+		return 0.0
+	return _forward_of(_sim.enemy_id(type_index)) + atan2(_sim.out_dx(), _sim.out_dy())
 
 ## Total enemies currently drawn, across every class layer.
 func drawn_enemy_count() -> int:
@@ -2871,8 +2887,6 @@ var _sprites: Dictionary = {}
 var _sprite_turrets: bool = false
 ## Whether the turret art is split into pinned base + rotating head.
 var _sprite_turret_split: bool = false
-## Split-canvas to single-canvas span ratio, per family. 1.0 when unsplit.
-var _turret_sprite_factor: PackedFloat32Array = PackedFloat32Array()
 ## And whether the drone classes are. Answered per class at build time and
 ## collapsed to one flag, because the transform loop runs per drone per frame
 ## and must not be branching on a dictionary lookup in there.
@@ -2880,21 +2894,33 @@ var _sprite_drones: bool = false
 ## The lean, computed once from the camera. See _sprite_lean().
 var _lean := Basis()
 
-## Which way each sprite's art actually points, as radians to ADD to its facing.
-##
-## The game turns sprites so that the picture's "up" points where the entity is
-## going or aiming - which is only right when the art was drawn facing the top
-## of the frame. Authored sheets do not reliably do that: the second sheet's
-## turrets point left and its drones face the viewer. This is the correction,
-## read from theme.json ("sprite_forward_degrees", id -> degrees) so a new sheet
-## is a data edit rather than a code change. Missing id means zero.
+## Cached per id, because this runs per turret and per tracer per frame.
 var _forward: Dictionary = {}
+
+## HALF A TURN. This is the engine's convention, not the artist's, and getting it
+## wrong is what made turrets fire out of the back of the mount twice.
+##
+## Measured, not reasoned about: PlaneMesh with FACE_Y puts the texture's top
+## edge (v=0) at local -Z, and Basis(Vector3.UP, a) sends -Z to
+## (-sin a, 0, -cos a). Facing is atan2(aim_x, aim_y) and to_world maps sim
+## (x, y) to world (X, Z), so at a = facing the art's top points at
+## (-aim_x, 0, -aim_y) - exactly AWAY from the target. Half a turn puts it back.
+##
+## It lives here rather than folded into the data because it is a property of
+## Godot's plane, identical for every sprite ever authored. Folded into the data
+## it was invisible, and each new sheet's offsets were measured against art that
+## was already drawing backwards - so the numbers absorbed part of the error and
+## every family ended up wrong by a different amount.
+const SPRITE_HALF_TURN := PI
 
 func _forward_of(id: String) -> float:
 	if _forward.has(id):
 		return float(_forward[id])
-	var table: Dictionary = _world.get("sprite_forward_degrees", {})
-	var radians := deg_to_rad(float(table.get(id, 0.0)))
+	# theme.json holds only the honest measurement: where the barrel points in
+	# the picture, clockwise from the top of the frame, which is a thing you can
+	# check by looking. Missing id means the art was drawn pointing up.
+	var table: Dictionary = _world.get("sprite_barrel_degrees", {})
+	var radians := SPRITE_HALF_TURN + deg_to_rad(float(table.get(id, 0.0)))
 	_forward[id] = radians
 	return radians
 ## How far a leaning sprite has to be raised, as a share of its own span, to keep

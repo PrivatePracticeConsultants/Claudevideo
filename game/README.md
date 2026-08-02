@@ -577,9 +577,13 @@ render/
                       the three quality tiers
   material_library.gd generated albedo / normal / roughness maps, per family
   debug_overlay.gd    F3: fps, worst frame, long frames, quality, GPU, pools
-assets/art/ the authored entity sprites — five turret families, eleven drone
-            classes — sliced from one sheet by tools/slice_sprites.py. The only
-            binary assets in the project; surfaces and sound are still generated
+assets/art/ the authored entity sprites — eleven drone classes, four tracers,
+            and five turret families as a pinned base plus a turning gun — cut
+            from the authored sheets by tools/slice_sprites.py. The only binary
+            assets in the project; surfaces and sound are still generated. The
+            .import sidecars beside them are source, not build output: the
+            sprites need mipmaps on and detect-3D compression off, and both
+            Godot defaults are wrong for flat art on a minified quad
 audio/      sfx.gd — every sound in the game, synthesised at startup
 ui/         HUD, wave preview, end-of-act debrief, transient notices
 tools/      headless dev utilities — screenshot capture, render stress, frame

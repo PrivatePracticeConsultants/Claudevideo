@@ -125,16 +125,44 @@ Almost everything is generated: every **surface** texture by
 geometry from Godot primitives welded with `SurfaceTool`. If you need a new
 surface, add a family to `data/materials.json` — do not add an image.
 
-**The exception is entity art.** `assets/art/` holds sixteen authored sprites —
-five turret families and eleven drone classes — and they are what the game
-draws for turrets and drones. They are sliced from a single authored sheet by
-`tools/slice_sprites.py`, which is committed so that re-exporting the sheet is
-one command rather than an archaeology exercise.
+**The exception is entity art.** `assets/art/` holds the authored sprites —
+eleven drone classes, four tracers, and five turret families as a pinned
+`<id>_base.png` plus a turning `<id>_head.png` — and they are what the game
+draws. They are cut from authored sheets by `tools/slice_sprites.py`, committed
+so that re-exporting a sheet is one command rather than an archaeology exercise:
+
+```bash
+python3 game/tools/slice_sprites.py <sheet.png>                 # the 4x4 entity sheet
+python3 game/tools/slice_sprites.py <sheet.png> --projectiles   # the 2x2 tracer sheet
+python3 game/tools/slice_sprites.py <sheet.png> --turret-pairs  # bare drums + detached guns
+```
 
 Do **not** "restore" procedural entity meshes over them. The generated meshes
 still exist and are still the fallback when a sprite is missing, which is what
 keeps a checkout with no `assets/` running — but the sprites are the intended
 look, and they measured *cheaper* than the meshes they replaced (P0-79).
+
+Two things about this art are load-bearing and have each been got wrong more
+than once. Read P0-85 and P0-86 in `DECISIONS.md` before touching either.
+
+- **Which way a sprite points.** `theme.json`'s `sprite_barrel_degrees` holds
+  ONLY where the barrel points in the picture, clockwise from the top of the
+  frame — something you verify by opening the PNG. The half turn Godot's
+  `PlaneMesh(FACE_Y)` needs is `SPRITE_HALF_TURN` in the renderer, once. Do not
+  fold the engine convention back into the data; that is precisely what hid a
+  180° error across three releases, with every family absorbing a different
+  share of it.
+- **Texture import settings.** Sprites live minified on flat quads, so they need
+  `mipmaps/generate=true` and `detect_3d/compress_to=0`. Both Godot defaults are
+  wrong and both fail *silently*. `[importer_defaults]` in `project.godot` makes
+  a fresh import correct, the `.import` sidecars are committed (they are source,
+  not build output — do not re-add them to `.gitignore`), and
+  `tests/cases/test_art_import.gd` fails if either drifts.
+
+One trap when testing any of this: under `--headless` the dummy rendering server
+does not keep MultiMesh instance buffers. `set_instance_transform` is accepted
+and `get_instance_transform` returns the identity, always. A test that reads
+transforms back passes whatever the renderer does.
 
 ### 2.7 Two renderers, and they disagree
 
@@ -351,7 +379,8 @@ What is established:
 - Already eliminated as causes: the tick loop (correct fixed-timestep
   accumulator), interpolation (enemies interpolate on distance-along-path), the
   HUD (signature-gated, no per-frame string churn), audio (pre-allocated
-  throttled voice pool), and draw calls (flat at 22).
+  throttled voice pool), and draw calls (flat — 17 as of the detached turret
+  art, and flat is the point rather than the number).
 - Strong hypothesis, **not yet confirmed**: the browser is rendering in
   software. 11.5 fps on an almost-empty scene at ~920k pixels is not hardware
   behaviour. F3 now reports the video adapter for exactly this reason. The next

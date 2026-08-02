@@ -205,7 +205,8 @@
     "station_roughness": 0.4,
     "station_height_share": 0.42,
     "sprite_cutout": 0.35,
-    "turret_sprite_span": 74.0,
+    "_turret_sprite_span": "Edge of a turret's drawn quad in world units. It is much larger than the drum looks because the base and the gun share one square canvas that has to hold the gun at EVERY angle - the Ballistic's gatling reaches furthest, so it sizes the canvas and the drum ends up filling 57% of it. 112 is the value that leaves the drum the same 64 world units across it was before the art was detached.",
+    "turret_sprite_span": 112.0,
     "turret_sprite_lift": 3.0,
     "drone_sprite_scale": 2.3,
     "drone_sprite_lift": 15.0,
@@ -216,23 +217,23 @@
       0.75,
       0.6
     ],
-    "_sprite_forward_degrees": "Where each turret's weapon actually points in its own picture, as degrees to subtract so it ends up aiming at its target. Measured off the art rather than guessed: the tip furthest from the sprite's centre of mass, against straight-up. This sheet draws its barrels up-and-right at 35-43 degrees and the rig's crane up-left, so without this every turret would fire about 40 degrees wide.",
-    "sprite_forward_degrees": {
-      "ballistic": -38.7,
-      "cannon": -35.0,
-      "railgun": -43.4,
-      "rig": 36.1,
-      "suppressor": 23.1,
-      "proj_kinetic": -44.2,
-      "proj_explosive": -47.7,
-      "proj_energy": -49.3,
-      "proj_arc": -42.0
+    "_sprite_barrel_degrees": "Where each sprite's business end points IN ITS OWN PICTURE: degrees clockwise from the top of the frame, so 0 is drawn pointing up, 90 pointing right. Nothing about the engine is folded in here - the renderer adds the half turn Godot's plane needs (see SPRITE_HALF_TURN) - so every number below is something you can verify by opening the PNG and looking at it. The detached turret sheet draws the Ballistic's gatling and the Cannon's barrel straight up, the Railgun's rails and the Suppressor's coil straight right, and the Rig's crane boom up-and-right; the four tracers are all drawn flying up-and-right at about 44, measured as the principal axis of their alpha. Ids not listed were drawn pointing up.",
+    "sprite_barrel_degrees": {
+      "ballistic": 0.0,
+      "cannon": 0.0,
+      "railgun": 90.0,
+      "rig": 62.2,
+      "suppressor": 90.0,
+      "proj_kinetic": 43.9,
+      "proj_explosive": 42.5,
+      "proj_energy": 44.9,
+      "proj_arc": 44.5
     },
     "_sprite_rotate_drones": "Whether drone sprites turn to face the way they are walking. FALSE for this sheet, because its drones are drawn as front-facing characters standing upright, not as top-down machines - rotating a standing mech to walk east lays it on its side. Turrets still rotate: they are drawn from above and their barrels are the whole point. If a future sheet draws drones top-down, set this true and they will track their lane again.",
     "sprite_rotate_drones": false,
     "_projectile_sprite": "Tracer art. span is the drawn quad's edge in world units; muzzle_advance pushes the drawn centre forward along the velocity so the tail clears the turret's own artwork - the sim spawns a projectile at the turret's CENTRE, and a centred quad at that position pokes out of the back of the mount, which is exactly what it looked like.",
     "projectile_sprite_span": 58.0,
-    "projectile_muzzle_advance": 36.0
+    "projectile_muzzle_advance": 42.0
   },
   "platform_max_tier": "#ffcf6e",
   "platform_cannon": "#c98a5b",

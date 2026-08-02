@@ -14,6 +14,12 @@ game/.godot/
 # Web/desktop export output: ~37 MB of wasm, rebuilt by game/build_web.sh
 build/
 game/android/
-*.import
+# NOT *.import. Godot's .import sidecars are source, not build output: they hold
+# each texture's import settings, and the game's sprites need two non-default
+# ones (mipmaps on, detect-3D VRAM compression off - see tests/cases/
+# test_art_import.gd). Ignoring them meant a fresh clone re-imported with the
+# defaults and shipped shimmering, block-compressed art, which is exactly how
+# that bug came back after being fixed. project.godot's [importer_defaults]
+# makes a fresh import correct; committing these keeps it that way.
 bcbs_mo_mrf.egg-info/
 config/registry_overrides.yaml

@@ -18,6 +18,36 @@ window/size/viewport_height=720
 window/stretch/mode="canvas_items"
 window/stretch/aspect="expand"
 
+[importer_defaults]
+
+; What Godot writes into a texture's .import the FIRST time it sees it, so a
+; fresh clone imports the sprites correctly instead of importing them wrong and
+; waiting to be noticed.
+;
+; Every sprite in this game is a texture on a quad lying almost flat in a 3D
+; scene, so it is permanently minified, and both engine defaults are wrong for
+; that - silently, which is the problem:
+;
+;   mipmaps/generate defaults false. The renderer asks for LINEAR_WITH_MIPMAPS;
+;   with no mip chain Godot does not warn, it just falls back to plain linear.
+;   The art shimmers and reads as pixelated. Turning mipmaps on also measured
+;   FASTER (84.0 -> 72.5 ms a frame) - a minified texture with no mips thrashes
+;   the sampler cache.
+;
+;   detect_3d/compress_to defaults 1. The first time a texture is used in 3D,
+;   Godot REWRITES its own .import to VRAM compression. On flat cel-shaded art
+;   with hard outlines that is visible block noise, and it happens on whatever
+;   machine ran the game last.
+;
+; Both were fixed by hand once and both came back, because the .import files
+; were gitignored and the next clone regenerated the defaults. This is the
+; durable half of that fix; the sidecars are now committed too, and
+; tests/cases/test_art_import.gd fails if either setting drifts.
+texture={
+"detect_3d/compress_to": 0,
+"mipmaps/generate": true
+}
+
 [rendering]
 
 ; Desktop runs Forward+, the web build runs Compatibility, and that split is the

@@ -2588,3 +2588,126 @@ Audit: 403 tests, 62,309 assertions, 0 failed. Draw calls flat at 17 across 0 to
 distribution, zero long frames at every tier: FAST 183ms / BALANCED 383ms /
 HIGH 667ms - every tier measurably faster than the previous run, though on
 SwiftShader only the ordering and the zero-long-frame result are trustworthy.
+
+## P0-85 · Firing out of the back, third time: the bug was never in the art
+
+The player reported it twice and I fixed the wrong thing twice. P0-83 pushed the
+tracer forward along its velocity so it stopped poking out of the mount. P0-84
+pinned the base and rotated only the gun, because a whole rotated turret drew
+upside down when it aimed down-screen. Both were real bugs. Neither was THE bug,
+and after each one the guns still pointed somewhere other than at the target.
+
+The third look started from the plane's own vertex data instead of from the art:
+
+    PlaneMesh(FACE_Y): the texture's top edge (v=0) is at local -Z.
+    Basis(Vector3.UP, a) sends -Z to (-sin a, 0, -cos a).
+    facing is atan2(aim_x, aim_y); to_world maps sim (x, y) to world (X, Z).
+
+So rotating by `facing` alone points the art's top edge at `(-aim_x, 0, -aim_y)`:
+exactly backwards, for every sprite, since the day sprites were introduced. The
+renderer needed half a turn it never had.
+
+**Why it survived two fixes and three releases.** The correction lived entirely
+in data, as `sprite_forward_degrees`. Each sheet's offsets were measured by
+eye against art that was already drawing backwards, so each family absorbed a
+different share of the same 180 degrees - and no two were wrong by the same
+amount. That is why it never looked like one bug. The Railgun's offset happened
+to land on a value that is correct mod 360, so the Railgun looked right; the
+Cannon was about 100 degrees off; the Rig was off by something else again. A
+board of turrets each wrong by a different amount reads as sloppy art, not as a
+single missing constant, and it is not a thing you can spot by staring at a
+screenshot - which is exactly what I did, twice.
+
+**The fix is a split of responsibility, not a new number.** `theme.json` now
+holds `sprite_barrel_degrees`: where the business end points IN ITS OWN PICTURE,
+clockwise from the top of the frame. Nothing about Godot is folded in - every
+number is checkable by opening the PNG. The engine's half turn is
+`SPRITE_HALF_TURN` in the renderer, stated once, next to the derivation above.
+Data that mixes a measurement with an engine convention cannot be verified
+against either.
+
+`tests/cases/test_sprite_facing.gd` asserts the whole chain from the plane's
+vertex data outward, for every id and every direction on the compass, and
+includes a test that half a turn from correct FAILS - the check that the check
+works. Confirmed by reverting `SPRITE_HALF_TURN` to zero: 4 of 7 tests fail with
+40 assertions naming the exact angles.
+
+**One thing the half turn broke on the way in.** Drones do not rotate on this
+sheet (`sprite_rotate_drones` is false, P0-82), but the offset was still being
+added to their zero heading - which had been harmless while the offset was zero
+and became half a turn the moment it was not. Every drone on the board would have
+drawn upside down. A correction only means "turn the art's forward to where it is
+going"; on a sprite nobody turns, there is nothing to correct.
+
+**A note for the next person who tries to test this by reading transforms.**
+Under `--headless` the dummy rendering server does not keep the instance buffer:
+`set_instance_transform` is accepted and `get_instance_transform` returns the
+identity, always, for every layer. A test written that way passes whatever the
+renderer does. Both facing tests therefore ask the renderer what rotation it
+WILL apply (`sprite_facing`, `drone_facing` - the single place each convention is
+expressed) rather than reading back what it did.
+
+## P0-86 · The turret sheet, detached - and the import settings that kept reverting
+
+Cutting a pinned base out of a one-piece turret picture (P0-84) was always going
+to be approximate: any horizontal split line runs through the gun's own shadow
+and its mounting yoke, so the base kept a slice of barrel and the head lost the
+collar it should pivot on. The third art drop is the parts separately - bare
+drums and detached guns - and the slicer mounts them.
+
+That sheet is not a grid: nine bare bases in a 3x3 block, one gun in the corner
+of it, and four more down a ragged right-hand column whose cells are four
+different heights. So `TURRET_PAIR_CELLS` is pixel rectangles measured off the
+delivered image, scaled if it is ever re-exported at another size. Inventing a
+grid that is not there is how P0-82 shipped fifteen sprites in opaque rectangles.
+
+Three numbers per family, all read off a 10% grid drawn over the trimmed art
+rather than guessed: `hub` (the centre of the socket in the drum's top face, well
+above the middle, because the drum is painted from sixty degrees up and most of
+the picture is the near wall), `pivot` (the centre of the gun's turntable collar)
+and `span` (the gun's width as a share of the drum's - the one taste number).
+
+**One canvas for all five families, not one each.** The canvas is what the
+renderer draws at a single span, so a family with a roomier canvas would quietly
+draw a smaller drum than its neighbour: five turrets at five sizes, from a
+constant that reads as if it set one. The Ballistic's gatling reaches furthest
+past its collar and therefore sizes the canvas for everybody - 512px holding
+1.76 base widths, so the drum fills 57% of it. `turret_sprite_span` went 74 ->
+112 to leave the drum the same 64 world units it was before. With base and head
+sharing one canvas and one anchor, the per-family span ratio the renderer used to
+compute from texture widths is gone: it is 1.0 by construction now.
+
+**The import settings that kept coming back.** `mipmaps/generate=false` and
+`detect_3d/compress_to=1` are both wrong for art that lives minified on a flat
+quad, and both fail silently - the first makes the renderer's LINEAR_WITH_MIPMAPS
+degrade to plain linear with no warning, the second lets Godot rewrite its own
+sidecar to VRAM compression the first time the texture is used in 3D. P0-81 fixed
+them. They were wrong again.
+
+The reason is dull and was the whole problem: `.import` was in `.gitignore`. Those
+sidecars are source, not build output, and ignoring them meant every fresh clone
+re-imported with the defaults. P0-81's fix reached the sprites the entity sheet
+produced; the five tracers and the ten split halves were generated afterwards,
+got fresh default sidecars, and shipped that way. Fixed three ways so it stays
+fixed: `[importer_defaults]` in project.godot so a first import is already
+correct (verified by deleting a sidecar and re-importing), the sidecars committed,
+and `tests/cases/test_art_import.gd` failing if either setting drifts on any
+drawn sprite.
+
+Audit: 413 tests, 62,562 assertions, 0 failed. Draw calls flat at 17 across 0 to
+400 entities (18 before; one fewer layer). Cost measured as a matched A/B in one
+session, two runs of `render_stress.gd` each, because a single run right after a
+browser test read 25% high and would have been reported as a regression:
+
+| entities | before | after |
+|---|---|---|
+| 0 | 40.29, 41.36 | 43.09, 46.19 |
+| 100 | 44.73, 43.34 | 42.91, 42.38 |
+| 400 | 51.41, 57.05 | 45.22, 47.25 |
+
+Faster where it matters - a busy board - and about 3ms slower on an empty one,
+which is the mipmap chains becoming resident. Browser frame distribution, zero
+long frames at every tier: FAST 200ms / BALANCED 417ms / HIGH 717ms. Those
+medians are NOT comparable with the previous release's; that was a different
+container on a different day, and only a same-session A/B says anything about a
+change. The zero-long-frames result and the tier ordering are what transfer.

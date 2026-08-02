@@ -25,9 +25,10 @@ grey smear.
     python3 game/tools/slice_sprites.py <sheet.png>                 # the 4x4 entity sheet
     python3 game/tools/slice_sprites.py <sheet.png> --labels        # ...with caption text baked in
     python3 game/tools/slice_sprites.py <sheet.png> --projectiles   # the 2x2 projectile sheet
+    python3 game/tools/slice_sprites.py <sheet.png> --turret-pairs  # bare bases + detached guns
     python3 game/tools/slice_sprites.py <image.png> --single <name> # one image -> one sprite
 """
-import sys, os
+import sys, os, math
 from collections import deque
 from PIL import Image
 
@@ -182,54 +183,147 @@ def key_cell(cell):
     return out
 
 
-## Where each turret's art divides into a pinned base and a rotating head, as
-## fractions of the trimmed sprite's height. split is the drum's top edge - the
-## head is everything above it, the base everything below. pivot is the point
-## the head turns about: the centre of the drum's top face, which in this
-## three-quarter art sits below the split because the drum top is an ellipse
-## seen at an angle. Per family because the railgun's long barrel and the
-## suppressor's coil stack sit differently on their drums.
-TURRET_SPLIT = {
-    "ballistic": {"split": 0.54, "pivot": 0.60},
-    "cannon": {"split": 0.54, "pivot": 0.60},
-    "railgun": {"split": 0.56, "pivot": 0.62},
-    "rig": {"split": 0.52, "pivot": 0.58},
-    "suppressor": {"split": 0.52, "pivot": 0.58},
+## --- the detached turret sheet -------------------------------------------------
+##
+## Cutting a pinned base out of a single turret picture never worked. The art
+## was drawn as one object, so any horizontal split line runs through the gun's
+## own shadow and its mounting yoke: the base kept a slice of barrel and the
+## head lost the collar it should pivot on. The fix was to ask for the parts
+## separately - bare bases and detached guns - and mount them here.
+##
+## That sheet is NOT a regular grid. Bare bases sit in a 3x3 block on the left;
+## the five guns are one cell of that block plus a ragged column down the right
+## whose four cells are four different heights. So the cells are pixel
+## rectangles measured off the delivered image rather than a row/column count.
+## Inventing a grid that is not there is exactly how the previous sheet shipped
+## fifteen of sixteen sprites with an opaque rectangle of sky around them.
+TURRET_PAIR_SHEET = (1408, 768)
+
+## id -> (bare base cell, detached gun cell), in TURRET_PAIR_SHEET pixels.
+## Bases are matched to families by what the paint says: grey riveted for the
+## workhorse Ballistic, orange for the explosive Cannon, blue for the energy
+## Railgun, hazard stripes for the industrial Rig, brass for the Suppressor's
+## coil.
+TURRET_PAIR_CELLS = {
+    "ballistic": ((6, 4, 348, 258), (707, 4, 1049, 258)),
+    "cannon": ((707, 516, 1049, 765), (1060, 4, 1402, 305)),
+    "railgun": ((707, 266, 1049, 509), (1060, 313, 1402, 455)),
+    "rig": ((6, 516, 348, 765), (1060, 462, 1402, 605)),
+    "suppressor": ((358, 266, 699, 509), (1060, 612, 1402, 765)),
 }
 
+## Where the two parts meet, and how big the gun is.
+##
+## hub is the centre of the dark socket in the base's top face, as a fraction of
+## the KEYED AND TRIMMED base. It sits well above the middle because the drum is
+## painted from about sixty degrees up, so most of the picture is the near wall
+## below the deck. pivot is the centre of the gun's turntable collar, same
+## convention. span is the gun's drawn width as a fraction of the base's - the
+## one number here that is taste rather than measurement, chosen so the collar
+## covers the drum's raised deck without the barrel dwarfing the mount.
+##
+## All three fractions were read off a 10% grid drawn over the trimmed art, not
+## guessed. Getting hub wrong makes the gun float off its drum; getting pivot
+## wrong makes it wobble as it turns.
+TURRET_MOUNT = {
+    "ballistic": {"hub": (0.50, 0.18), "pivot": (0.50, 0.69), "span": 0.55},
+    "cannon": {"hub": (0.50, 0.31), "pivot": (0.50, 0.50), "span": 0.55},
+    "railgun": {"hub": (0.49, 0.25), "pivot": (0.25, 0.46), "span": 1.05},
+    "rig": {"hub": (0.50, 0.30), "pivot": (0.13, 0.70), "span": 0.85},
+    "suppressor": {"hub": (0.50, 0.28), "pivot": (0.18, 0.50), "span": 0.90},
+}
 
-def split_turret(keyed, spec, folder, name):
-    """One turret image -> a pinned base and a head that rotates about a pivot.
+## Side of the square canvas every mounted part is written onto, and the slack
+## left around the furthest-reaching corner so a spinning gun never clips its
+## own edge.
+MOUNT_CANVAS = 512
+MOUNT_PAD = 0.03
 
-    Both halves are re-centred so the PIVOT sits at the canvas centre: a quad
-    is rotated about its centre, so baking the pivot into the image is what
-    makes "rotate the head" a plain basis rotation with no per-frame offset
-    arithmetic. The base gets the same treatment so the two halves keep their
-    authored composition when drawn at the same point.
+
+def _keyed_part(sheet, rect, scale):
+    """One cell of the detached sheet, keyed and cropped to its own artwork."""
+    box = tuple(int(round(rect[i] * scale[i % 2])) for i in range(4))
+    keyed = key_cell(sheet.crop(box))
+    bounds = keyed.getbbox()
+    return keyed if bounds is None else keyed.crop(bounds)
+
+
+def _mount_reach(parts):
+    """Half-width of the canvas both parts must share, in base-widths.
+
+    ONE canvas for all five families, not one each. The canvas is what the
+    renderer draws at a single span, so a family with a roomier canvas would
+    quietly draw a smaller drum than its neighbour - five turrets at five sizes
+    from a constant that reads as if it set one. The Ballistic's gatling is the
+    family that decides it: the barrels reach further past their collar than
+    anything else on the sheet.
     """
-    side = keyed.size[0]
-    split_y = int(side * spec["split"])
-    pivot_y = int(side * spec["pivot"])
+    reach = 0.0
+    for name, (base, gun) in parts.items():
+        spec = TURRET_MOUNT[name]
+        hub_x, hub_y = spec["hub"]
+        base_h = base.size[1] / float(base.size[0])
+        reach = max(reach, hub_x, 1.0 - hub_x, hub_y * base_h, (1.0 - hub_y) * base_h)
+        span = spec["span"]
+        gun_h = span * gun.size[1] / float(gun.size[0])
+        pivot_x, pivot_y = spec["pivot"]
+        # A rotating quad sweeps a circle through its furthest CORNER, so the
+        # corner distances are what has to fit - not the four edge distances.
+        for dx in (pivot_x * span, (1.0 - pivot_x) * span):
+            for dy in (pivot_y * gun_h, (1.0 - pivot_y) * gun_h):
+                reach = max(reach, math.hypot(dx, dy))
+    return reach * (1.0 + MOUNT_PAD)
 
-    head = keyed.copy()
-    head_px = head.load()
-    base = keyed.copy()
-    base_px = base.load()
-    for y in range(side):
-        for x in range(side):
-            if y < split_y:
-                base_px[x, y] = (0, 0, 0, 0)
-            else:
-                head_px[x, y] = (0, 0, 0, 0)
 
-    canvas = 2 * max(pivot_y, side - pivot_y) + 8
-    offset = ((canvas - side) // 2, canvas // 2 - pivot_y)
-    for half, suffix in ((base, "base"), (head, "head")):
-        out = Image.new("RGBA", (canvas, canvas), (0, 0, 0, 0))
-        out.paste(half, offset)
-        out.save(os.path.normpath(os.path.join(folder, "%s_%s.png" % (name, suffix))))
-    print("%-16s %-12s split at %.0f%%, pivot %.0f%%, canvas %d"
-          % (name + "_*", "turrets", spec["split"] * 100, spec["pivot"] * 100, canvas))
+def _mount_layer(part, anchor, width_px):
+    """One part on an empty canvas, its anchor point at the canvas centre.
+
+    A quad turns about its own centre, so putting the pivot there is what makes
+    "aim the gun" a plain basis rotation with no per-frame offset arithmetic.
+    The base gets the same treatment with its hub as the anchor, which is what
+    keeps the gun sitting in the socket while only the gun moves.
+    """
+    height_px = max(1, int(round(width_px * part.size[1] / float(part.size[0]))))
+    scaled = part.resize((max(1, width_px), height_px), Image.LANCZOS)
+    layer = Image.new("RGBA", (MOUNT_CANVAS, MOUNT_CANVAS), (0, 0, 0, 0))
+    centre = MOUNT_CANVAS // 2
+    layer.paste(scaled, (centre - int(round(anchor[0] * scaled.size[0])),
+                         centre - int(round(anchor[1] * scaled.size[1]))))
+    return layer
+
+
+def mount_turrets(sheet, root):
+    """The detached sheet -> a pinned base, a turning gun, and a flat composite."""
+    scale = (sheet.size[0] / float(TURRET_PAIR_SHEET[0]),
+             sheet.size[1] / float(TURRET_PAIR_SHEET[1]))
+    parts = {}
+    for name, (base_rect, gun_rect) in TURRET_PAIR_CELLS.items():
+        parts[name] = (_keyed_part(sheet, base_rect, scale),
+                       _keyed_part(sheet, gun_rect, scale))
+
+    half = _mount_reach(parts)
+    per_base_width = MOUNT_CANVAS / (2.0 * half)
+    folder = os.path.join(root, "turrets")
+    os.makedirs(folder, exist_ok=True)
+
+    print("%-16s %-12s %s" % ("sprite", "kind", "size"))
+    for name in sorted(parts):
+        base, gun = parts[name]
+        spec = TURRET_MOUNT[name]
+        base_layer = _mount_layer(base, spec["hub"], int(round(per_base_width)))
+        gun_layer = _mount_layer(gun, spec["pivot"],
+                                 int(round(spec["span"] * per_base_width)))
+        written = (("%s_base" % name, base_layer), ("%s_head" % name, gun_layer),
+                   # The flat composite is the fallback the renderer falls back
+                   # to when split art is missing, and it is written from the
+                   # SAME canvas so a family cannot end up drawn at two sizes.
+                   (name, Image.alpha_composite(base_layer, gun_layer)))
+        for out_name, image in written:
+            image.save(os.path.normpath(os.path.join(folder, "%s.png" % out_name)))
+            print("%-16s %-12s %dx%d"
+                  % (out_name, "turrets", image.size[0], image.size[1]))
+    print("canvas %d px = %.2f base widths; base drawn at %.0f px"
+          % (MOUNT_CANVAS, 2.0 * half, per_base_width))
 
 
 def trim_square(image, pad_ratio=0.04):
@@ -263,7 +357,12 @@ def slice_sheet(sheet, layout, root, labelled):
                                (c + 1) * cell_w - inset_x, bottom))
             keyed = trim_square(key_cell(cell))
             if name in TURRETS:
-                kind = "turrets"
+                # The entity sheet's turrets are the old one-piece art. They are
+                # still cut so the sheet round-trips, but the game's turrets now
+                # come from the detached sheet - see mount_turrets - and writing
+                # a one-piece picture over that composite would leave a base and
+                # head that no longer share their canvas with it.
+                kind = "turrets_onepiece"
             elif name.startswith("proj_"):
                 kind = "fx"
             else:
@@ -272,8 +371,6 @@ def slice_sheet(sheet, layout, root, labelled):
             os.makedirs(folder, exist_ok=True)
             keyed.save(os.path.normpath(os.path.join(folder, "%s.png" % name)))
             print("%-16s %-12s %dx%d" % (name, kind, keyed.size[0], keyed.size[1]))
-            if name in TURRET_SPLIT:
-                split_turret(keyed, TURRET_SPLIT[name], folder, name)
 
 
 def main() -> int:
@@ -295,6 +392,10 @@ def main() -> int:
 
     if "--projectiles" in args:
         slice_sheet(sheet, PROJECTILE_LAYOUT, root, labelled=True)
+        return 0
+
+    if "--turret-pairs" in args:
+        mount_turrets(sheet, root)
         return 0
 
     slice_sheet(sheet, LAYOUT, root, labelled="--labels" in args)
