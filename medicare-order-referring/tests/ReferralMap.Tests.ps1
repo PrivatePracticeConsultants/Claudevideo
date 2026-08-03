@@ -289,3 +289,181 @@ Describe 'Scan engine safety' {
         { [RmEngine]::ScanInbound($bogus, $set) } | Should -Throw
     }
 }
+
+Describe 'Hop Teaming (CareSet) import and queries' {
+    BeforeAll {
+        # Fixture delivery zip shaped like the real one: a folder, macOS cruft,
+        # docs, and the Hop Teaming CSV (header + 5 data rows).
+        $script:HopRows = @(
+            'from_npi,to_npi,patient_count,transaction_count,average_day_wait,std_day_wait'
+            '8000000001,9000000001,45,50,12.5,10.0'    # doctor -> clinic org
+            '8000000002,9000000001,20,20,30.0,20.0'    # ortho  -> clinic org
+            '8000000001,9000000002,12,13,7.5,5.0'      # doctor -> individual PT
+            '9000000001,8000000001,99,99,50.0,1.0'     # OUTBOUND from clinic
+            '8000000001,7000000000,50,50,1.0,1.0'      # unrelated pair
+        )
+        $script:HopZip = Join-Path $script:WorkDir 'DocGraph_2022_NonCommercial.zip'
+        Remove-Item $script:HopZip -ErrorAction SilentlyContinue
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $z = [System.IO.Compression.ZipFile]::Open($script:HopZip, 'Create')
+        try {
+            foreach ($pair in @(
+                @('DocGraph_2022_NonCommercial/DocGraph_Hop_Teaming_2022.csv', ($script:HopRows -join "`n")),
+                @('DocGraph_2022_NonCommercial/DocGraph Readme.pdf', 'not a real pdf'),
+                @('__MACOSX/DocGraph_2022_NonCommercial/._DocGraph_Hop_Teaming_2022.csv', 'apple cruft')
+            )) {
+                $entry = $z.CreateEntry($pair[0])
+                $w = New-Object System.IO.StreamWriter($entry.Open())
+                $w.Write($pair[1]); $w.Dispose()
+            }
+        } finally { $z.Dispose() }
+    }
+
+    It 'imports the delivery zip, detects the year, and activates the dataset' {
+        $r = Import-RmDataset -Path $script:HopZip
+        $r.Imported | Should -BeTrue
+        $r.Year | Should -Be 2022
+        $r.RowCount | Should -Be 5          # header not counted
+        $s = Get-RmStatus
+        $s.Source | Should -Be 'hop-teaming'
+        $s.Year | Should -Be 2022
+        $s.DatasetReady | Should -BeTrue
+        $s.Label | Should -BeLike '*Hop Teaming 2022*'
+    }
+
+    It 'maps a ZIP from the hop data with hop-specific columns and totals' {
+        $map = Get-RmReferralMap -Zip 99999 -SkipEnrichment
+        $org = @($map.Clinics | Where-Object NPI -eq '9000000001')[0]
+        $org.SharedPatients | Should -Be 65                 # 45 + 20
+        $org.ReferralSources | Should -Be 2
+        $pt = @($map.Clinics | Where-Object NPI -eq '9000000002')[0]
+        $pt.SharedPatients | Should -Be 12
+        # Hop rows carry AvgDayWait, not SameDay
+        $top = @($map.Sources)[0]
+        $top.PSObject.Properties['AvgDayWait'] | Should -Not -BeNullOrEmpty
+        $top.PSObject.Properties['SameDay'] | Should -BeNullOrEmpty
+        $org.PSObject.Properties['SameDay'] | Should -BeNullOrEmpty
+        @($map.Sources | Where-Object { $_.SourceNPI -eq '8000000001' -and $_.ClinicNPI -eq '9000000001' })[0].AvgDayWait |
+            Should -Be 12.5
+    }
+
+    It 'uses the full-year window for the vintage flag (source-aware)' {
+        # 9000000005 was enumerated 2015-11-10: AFTER the CMS 2015 Sep-1 cutoff
+        # (flagged No elsewhere) but long before the 2022 hop window ends.
+        $map = Get-RmReferralMap -Zip 99999 -SkipEnrichment
+        @($map.Clinics | Where-Object NPI -eq '9000000005')[0].ExistedInDataYear | Should -Be 'Yes'
+    }
+
+    It 'carries CareSet-specific methodology notes' {
+        $map = Get-RmReferralMap -Zip 99999 -SkipEnrichment
+        (@($map.Notes) -join ' ') | Should -BeLike '*DocGraph Hop Teaming 2022*'
+        (@($map.Notes) -join ' ') | Should -BeLike '*CareSet*'
+        (@($map.Notes) -join ' ') | Should -BeLike '*Medicare Advantage*'
+        (@($map.Notes) -join ' ') | Should -Not -BeLike '*Jan?Sep 2015*'
+    }
+
+    It 'returns provider-360 activity with AvgDayWait and the data year' {
+        $act = Get-RmProviderReferralActivity -Npi 9000000001 -SkipEnrichment
+        $act.Year | Should -Be 2022
+        @($act.Inbound).Count | Should -Be 2
+        @($act.Inbound)[0].SharedPatients | Should -Be 45
+        @($act.Inbound)[0].AvgDayWait | Should -Be 12.5
+        @($act.Outbound).Count | Should -Be 1
+        @($act.Outbound)[0].NPI | Should -Be '8000000001'
+    }
+
+    It 'rolls hop volume up to buckets (group footprint bridge)' {
+        $fp = @(Get-RmInboundByBucket -TargetToBucket @{ '9000000001' = 'G1'; '9000000002' = 'G1' } -SkipEnrichment)
+        $fp.Count | Should -Be 1
+        $fp[0].SharedPatients | Should -Be 77               # 45 + 20 + 12
+    }
+
+    It 'imports a bare csv only with an explicit -Year when the name has none, and copies (not moves) it' {
+        $mystery = Join-Path $script:WorkDir 'mystery.csv'
+        Set-Content -Path $mystery -Value ($script:HopRows -join "`n") -Encoding ascii -NoNewline
+        { Import-RmDataset -Path $mystery } | Should -Throw '*-Year*'
+        (Import-RmDataset -Path $mystery -Year 2021).Year | Should -Be 2021
+        (Get-RmStatus).Year | Should -Be 2021
+        Test-Path $mystery | Should -BeTrue                 # user's file untouched
+    }
+
+    It 'rejects a non-hop file and leaves the active dataset unchanged' {
+        $bad = Join-Path $script:WorkDir 'bad-format.csv'
+        Set-Content -Path $bad -Value "a,b,c`n1,2,3" -Encoding ascii -NoNewline
+        { Import-RmDataset -Path $bad } | Should -Throw '*does not look like*'
+        (Get-RmStatus).Year | Should -Be 2021               # unchanged
+        @(Get-ChildItem $env:RM_DATA_DIR -Filter '*.tmp*') | Should -BeNullOrEmpty
+    }
+
+    It 'switches back to the CMS dataset via Save-RmDataset and restores CMS behavior' {
+        (Save-RmDataset).Downloaded | Should -BeFalse       # file already on disk
+        $s = Get-RmStatus
+        $s.Source | Should -Be 'cms-pspp'
+        $s.Year | Should -Be 2015
+        $map = Get-RmReferralMap -Zip 99999 -SkipEnrichment
+        # CMS columns are back...
+        @($map.Sources)[0].PSObject.Properties['SameDay'] | Should -Not -BeNullOrEmpty
+        # ...and the 2015 Sep-1 cutoff flags the late-2015 NPI again.
+        @($map.Clinics | Where-Object NPI -eq '9000000005')[0].ExistedInDataYear |
+            Should -Be 'No (NPI issued 2015-11-10)'
+    }
+}
+
+Describe 'Dataset switcher and multi-year trend' {
+    # State from the previous Describe: CMS 2015 active, with hop_teaming_2022
+    # and hop_teaming_2021 also on disk.
+    It 'lists every dataset on disk with exactly one active' {
+        $sets = @(Get-RmAvailableDatasets)
+        @($sets | Where-Object { $_.Source -eq 'hop-teaming' } | ForEach-Object Year) | Sort-Object |
+            Should -Be @(2021, 2022)
+        @($sets | Where-Object { $_.Source -eq 'cms-pspp' }).Count | Should -BeGreaterOrEqual 1
+        @($sets | Where-Object Active).Count | Should -Be 1
+        @($sets | Where-Object Active)[0].Source | Should -Be 'cms-pspp'
+    }
+
+    It 'switches the active dataset instantly and preserves the cached row count' {
+        $r = Set-RmActiveDataset -Source hop-teaming -Year 2022
+        $r.Activated | Should -BeTrue
+        $s = Get-RmStatus
+        $s.Source | Should -Be 'hop-teaming'
+        $s.Year | Should -Be 2022
+        $s.RowCount | Should -Be 5    # from the .rows sidecar, no re-count
+        @(Get-RmAvailableDatasets | Where-Object Active)[0].Year | Should -Be 2022
+    }
+
+    It 'refuses to activate a dataset that is not on disk' {
+        { Set-RmActiveDataset -Source hop-teaming -Year 2019 } | Should -Throw '*is on disk*'
+        (Get-RmStatus).Year | Should -Be 2022   # unchanged
+    }
+
+    It 'builds a year-over-year trend across all imported hop years' {
+        $t = Get-RmProviderTrend -Npi 9000000001 -SkipEnrichment
+        @($t.Years) | Should -Be @(2021, 2022)
+        $rows = @($t.Rows)
+        $rows.Count | Should -Be 2
+        foreach ($r in $rows) {
+            $r.InboundSources | Should -Be 2
+            $r.InboundPatients | Should -Be 65      # 45 + 20
+            $r.OutboundTargets | Should -Be 1
+            $r.OutboundPatients | Should -Be 99
+            $r.TopSources | Should -BeLike '*8000000001*'
+        }
+        (@($t.Notes) -join ' ') | Should -BeLike '*intentionally excluded*'
+        (@($t.Notes) -join ' ') | Should -BeLike '*Medicare Advantage*'
+    }
+
+    It 'requires at least two imported hop years' {
+        $emptyDir = Join-Path $script:WorkDir 'empty-store'
+        New-Item -ItemType Directory -Path $emptyDir -Force | Out-Null
+        $savedDir = (Get-RmConfig).DataDir
+        try {
+            Set-RmConfig -DataDir $emptyDir
+            { Get-RmProviderTrend -Npi 9000000001 -SkipEnrichment } | Should -Throw '*at least TWO*'
+        } finally { Set-RmConfig -DataDir $savedDir }
+    }
+
+    It 'restores the CMS dataset as active for anything running after this file' {
+        (Set-RmActiveDataset -Source cms-pspp -Year 2015).Activated | Should -BeTrue
+        (Get-RmStatus).Source | Should -Be 'cms-pspp'
+    }
+}

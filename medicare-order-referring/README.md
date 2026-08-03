@@ -7,14 +7,18 @@ refer for Medicare beneficiaries (~2 million providers, refreshed by CMS
 roughly **twice a week**).
 
 > **Disclaimer.** This is an independent tool. It is **not affiliated with,
-> endorsed by, or sponsored by CMS** or any government agency. It works entirely
-> with **public** CMS data (provider NPIs and enrollment/eligibility — no patient
-> data) and the public NPPES registry, provided **as-is with no warranty**. The
-> shared-patient (referral) data is CMS's newest public release, which is from
-> **2015** — treat it as market structure, not current volumes. Always verify
-> anything used for a billing, compliance, or contracting decision against the
-> official CMS source. Every export includes a `.methodology.txt` sidecar naming
-> the exact data release it came from.
+> endorsed by, or sponsored by CMS, any government agency, or CareSet
+> Systems**. It works with **public** CMS data (provider NPIs and
+> enrollment/eligibility — no patient data), the public NPPES registry, and —
+> optionally — **DocGraph Hop Teaming** data the user licenses from CareSet
+> Systems, provided **as-is with no warranty**. The free shared-patient
+> (referral) data is CMS's newest public release (**2015**); imported CareSet
+> years run through **2022**. Either way, treat it as market structure, not
+> current volumes. CareSet's research releases carry a **CC BY-NC-SA 4.0
+> non-commercial license** — commercial use requires a commercial license from
+> CareSet. Always verify anything used for a billing, compliance, or
+> contracting decision against the official source. Every export includes a
+> `.methodology.txt` sidecar naming the exact data release it came from.
 
 ## Read this first: what this data can and cannot tell you
 
@@ -65,9 +69,9 @@ That's it. No installation; works with the PowerShell built into Windows
 | **Search providers** | Find providers by name and/or NPI prefix; optionally require eligibility flags (e.g. only Part B–eligible). Export results. |
 | **Batch NPI check** | Paste any text containing NPIs, or load a `.txt`/`.csv` file — every 10-digit NPI is extracted, checksum-validated, and checked against the CMS list. Statuses: `ELIGIBLE (on CMS list)`, `NOT ON LIST`, `INVALID NPI`. Export results. |
 | **What changed** | Compare any two downloaded snapshots: providers Added / Removed / Changed (eligibility flag flips) / Renamed (name change only, flags unchanged — the old name is shown in an OldName column). Export results. |
-| **Referral map (2015)** | Enter a ZIP (or prefix like `630*`): every outpatient rehab provider there is ranked by how many Medicare patients each source provider fed into them, per the CMS shared-patient data. Select a provider to see their referral sources by name/specialty/volume. Export both tables. |
+| **Referral map** | Enter a ZIP (or prefix like `630*`): every outpatient rehab provider there is ranked by how many Medicare patients each source provider fed into them, per the active shared-patient dataset — the free CMS 2015 release, or any imported CareSet Hop Teaming year (2016–2022). The tab title shows the active year; an **Active data** dropdown switches instantly between everything on disk. Select a provider to see their referral sources by name/specialty/volume. Export both tables. |
 | **Practice groups** | Enter a ZIP: the outpatient-rehab **practice groups** operating there, each with its therapist roster, ranked by local presence. Built from the CMS clinic-group reassignment file — **current** data, and it fills the gap where private-practice clinics were invisible in the referral map. Optionally add each group's **2015 referral footprint** (its local therapists' historical shared-patient pull, rolled up to the group). Export groups and rosters. |
-| **Provider lookup** | Enter any NPI for a single-provider profile that composes every dataset: current eligibility + flags, specialty and location (NPPES), practice-group memberships, and 2015 referral activity — both who shared patients *into* them and who they shared patients *onward to*. Export the inbound and outbound lists. |
+| **Provider lookup** | Enter any NPI for a single-provider profile that composes every dataset: current eligibility + flags, specialty and location (NPPES), practice-group memberships, and referral activity from the active dataset — both who shared patients *into* them and who they shared patients *onward to*. With 2+ imported CareSet years, a **Referral trend** button builds a year-over-year table (inbound/outbound volume and top sources per year). Export everything. |
 | **Watchlist** | Save your referring providers' NPIs once; after each bi-weekly CMS update, one click shows — for just your referrers — their current eligibility and what changed since the previous update (dropped, flags flipped, renamed). Ongoing monitoring instead of a one-time check. Export the report. |
 
 The **Referral map** tab also has an **Export specialty mix** button: it breaks the
@@ -77,16 +81,39 @@ unselected for the whole ZIP.
 
 ## The Referral map tab: what it is and its limits
 
-The referral map is built on the **CMS Physician Shared Patient Patterns** FOIA
-release — the only public CMS data that links provider pairs. The newest public
-release covers **January–September 2015**, so this maps the *structure* of a
-referral market (who the high-volume feeders are, which providers they feed),
-**not current volumes**. It needs a one-time ~356 MB download (~1.7 GB on disk).
+The referral map runs on either of two shared-patient datasets:
+
+- **CMS Physician Shared Patient Patterns** (FOIA release) — the only *free
+  public* provider-pair data; newest release covers **January–September 2015**.
+  One-time ~356 MB download (~1.7 GB on disk).
+- **DocGraph Hop Teaming** (CareSet Systems) — the same kind of data rebuilt
+  annually by CareSet from 100% of Medicare FFS Part A+B claims, with releases
+  through **2022**. The user obtains the delivery zip from CareSet and imports
+  it with **Import CareSet file…** (or `Import-RmDataset`); each year needs
+  **7–11 GB on disk**. Verified against the real 2016–2022 deliveries: all
+  seven years share one CSV layout, and 2016 + 2022 were imported end-to-end
+  (140.9M and 210.3M pairs respectively).
+
+Either way this maps the *structure* of a referral market (who the high-volume
+feeders are, which providers they feed) for the data year, **not current
+volumes**. The **Active data** dropdown switches between everything on disk
+instantly; the tab title, vintage flags, summaries, and every export's
+methodology sidecar follow the active dataset. On CareSet data the sources
+table gains **AvgDayWait** (mean days between the two visits — a short wait
+looks like a referral, a months-long wait like co-occurring care) and drops the
+CMS-only SameDay column. With two or more imported years, the Provider lookup
+tab can build a **year-over-year referral trend** for any NPI (Hop Teaming
+years only — the 2015 CMS file uses a different window and is deliberately
+excluded from trends so the comparison stays honest; note that Medicare
+Advantage growth also pulls patients out of FFS data over time).
 
 How it works: your ZIP is swept against the live NPPES registry for PT/rehab
-clinic organizations and individual PT/OT/SLP providers; the 34.9M-row CMS file
-is then scanned for every pair where one of them saw a Medicare patient within
-30 days *after* the source provider did.
+clinic organizations and individual PT/OT/SLP providers; the active pair file
+(34.9M rows for CMS 2015, 140–210M rows for the CareSet years) is then
+streamed for every pair where one of them saw a Medicare patient *after* the
+source provider (within 30 days for the CMS file; CareSet's directed "hop"
+method for Hop Teaming). Expect a scan to take a few minutes on the larger
+years — the app stays responsive and says what it's doing.
 
 Honest limitations (also written into every export's methodology sidecar):
 
@@ -198,6 +225,13 @@ Search-OrfProvider -Name 'smith john' -RequireFlag PARTB
 Test-OrfNpi -Path .\my-referrers.csv        # batch-verify your referral list
 Compare-OrfSnapshot                         # diff the two newest snapshots
 Search-OrfProvider -RequireFlag HHA | Export-OrfResult -Path hha-eligible.csv
+
+Import-Module .\ReferralMap
+Import-RmDataset -Path .\DocGraph_2022_NonCommercial.zip   # add a CareSet year
+Get-RmAvailableDatasets                     # everything on disk, active marked
+Set-RmActiveDataset -Source hop-teaming -Year 2021         # instant switch
+Get-RmReferralMap -Zip 85351                # map a ZIP on the active dataset
+Get-RmProviderTrend -Npi 1234567893         # year-over-year (2+ imported years)
 ```
 
 Data lives in `%LOCALAPPDATA%\OrderReferringTracker` (override with the
@@ -222,11 +256,13 @@ anything, and a validation failure keeps your existing snapshot untouched.
 
 ## Tests
 
-The test suite (75 tests across three modules: download/update/validation/
+The test suite (90 tests across three modules: download/update/validation/
 idempotency, crash-recovery state repair, older-release and retention safety,
 schema-drift tolerance, CSV formula-injection neutralization, download-URL and
 zip-slip rejection, search, batch check, snapshot diff/rename detection,
-referral-map discovery/paging/scan/enrichment/vintage-flags, group referral
+referral-map discovery/paging/scan/enrichment/vintage-flags, CareSet Hop
+Teaming import/format-detection/rejection, dataset switching, source-aware
+vintage windows and methodology notes, multi-year trend, group referral
 footprint, provider-360 inbound/outbound activity, practice-group Latin-1
 loading/matching/roster/membership/export, exports) runs against local HTTP
 test doubles of the CMS hosts and the NPPES API — no external traffic:
@@ -238,4 +274,9 @@ Invoke-Pester .\tests -Output Detailed     # requires the Pester module
 Verified end-to-end against the real CMS releases of 2026-07-14 and
 2026-07-17 (2,011,708 → 2,014,209 providers; 2,662 added / 161 removed /
 696 changed): full two-release download + diff in ~27 s, snapshot load ~3 s,
-searches instant.
+searches instant. The CareSet path was verified against the real 2016–2022
+deliveries: every year's format validated, 2016 (140.9M pairs) and 2021/2022
+(206.6M / 210.3M pairs) fully imported; a live ZIP map on 2022 data returned
+46 clinics / 856 source relationships in ~6 minutes, and a two-year trend
+(2021→2022) for a real clinic ran in ~3 minutes with the map and trend
+agreeing on identical totals.

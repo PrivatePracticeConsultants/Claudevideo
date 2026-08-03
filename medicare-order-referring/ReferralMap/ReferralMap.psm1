@@ -1,20 +1,25 @@
 ﻿# ReferralMap.psm1 — regional referral-source mapping for outpatient rehab
-# clinics, built on the CMS Physician Shared Patient Patterns FOIA data
-# (2009–2015) joined with the live NPPES registry.
+# clinics, joined with the live NPPES registry. Two dataset sources:
+#
+#  - CMS Physician Shared Patient Patterns FOIA data (2009–2015): free public
+#    download, headerless 5-field CSV, newest release Jan–Sep 2015.
+#  - DocGraph Hop Teaming (CareSet Systems): annual releases years newer than
+#    2015, licensed from CareSet and imported from a local file the user
+#    obtained (6-field CSV with a header: from_npi,to_npi,patient_count,
+#    transaction_count,average_day_wait,std_day_wait; full calendar year).
 #
 # What it answers: for a ZIP code, which providers were the top-volume FEEDERS
 # of Medicare patients into each outpatient rehab clinic in that area — i.e.
-# rows of the CMS file where the clinic is NPI-2 (saw the patient AFTER the
-# source provider, within the interval window).
+# rows where the clinic is the SECOND provider in the pair (saw the patient
+# after the source provider).
 #
 # Honesty notes baked into every output:
-#  - The newest public release of this data covers Jan–Sep 2015. It maps the
-#    STRUCTURE of a referral market, not current volumes.
-#  - "Shared patients" is CMS's privacy-preserving referral proxy (same patient
-#    seen by both providers within N days); pairs under 11 patients/year are
-#    excluded by CMS, so small referrers are invisible.
-#  - Same-day pairs are assigned by CMS to the lower NPI, so direction for
-#    same-day activity is ambiguous; same-day counts are shown separately.
+#  - Both sources map the STRUCTURE of a referral market for the file's year,
+#    not this year's volumes; the notes state the active dataset's vintage.
+#  - "Shared patients" is a privacy-preserving referral proxy (same patient
+#    seen by both providers in sequence); pairs under 11 patients in the
+#    window are excluded per CMS policy, so small referrers are invisible.
+#  - Direction is claims sequence, not literal referrals — judge by specialty.
 #
 # Works on Windows PowerShell 5.1 and PowerShell 7+.
 
@@ -117,16 +122,61 @@ public class RmEdge
     public int PairCount;
     public int BeneCount;
     public int SameDayCount;
+    public double AvgDayWait;   // Hop Teaming only; 0 for CMS files
 }
 
 public static class RmEngine
 {
-    // Streams the CMS shared-patient file (headerless CSV: NPI1,NPI2,PairCount,
-    // BeneCount,SameDayCount) and returns rows matching a set of NPIs on one
-    // column. matchColumn 1 = NPI2 (inbound: who the patient was seen by SECOND,
-    // i.e. the recipient); 0 = NPI1 (outbound: the initiator). Throws with a
+    // Dataset layouts. CMS: headerless 5-field CSV NPI1,NPI2,PairCount,
+    // BeneCount,SameDayCount. HopTeaming (CareSet DocGraph): 6-field CSV with
+    // a header row: from_npi,to_npi,patient_count,transaction_count,
+    // average_day_wait,std_day_wait.
+    public const int FormatCms = 0;
+    public const int FormatHopTeaming = 1;
+
+    // Parses one line into an edge, or returns null for a line that is not a
+    // data row (the Hop Teaming header). Throws on a wrong field count.
+    private static RmEdge ParseLine(string line, int format, string path, long lineNo)
+    {
+        string[] f = line.Split(',');
+        int want = (format == FormatHopTeaming) ? 6 : 5;
+        if (f.Length != want)
+            throw new InvalidDataException(
+                "Line " + lineNo + " of '" + path + "' has " + f.Length +
+                " fields; expected " + want + ". This does not look like a " +
+                (format == FormatHopTeaming ? "DocGraph Hop Teaming" : "CMS shared-patient") + " file.");
+        if (format == FormatHopTeaming && lineNo == 1 && f[0].TrimStart('\uFEFF').Trim().ToLowerInvariant() == "from_npi")
+            return null;   // header row
+        RmEdge e = new RmEdge();
+        e.SourceNpi = f[0].Trim();
+        e.TargetNpi = f[1].Trim();
+        int v;
+        if (format == FormatHopTeaming)
+        {
+            e.BeneCount = int.TryParse(f[2].Trim(), out v) ? v : 0;         // patient_count
+            e.PairCount = int.TryParse(f[3].Trim(), out v) ? v : 0;         // transaction_count
+            e.SameDayCount = 0;                                             // not in this file
+            double d;
+            // InvariantCulture: the file uses '.' decimals; a machine with a
+            // ','-decimal locale must not misread 52.3 as 523.
+            e.AvgDayWait = double.TryParse(f[4].Trim(), System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out d) ? d : 0.0;
+        }
+        else
+        {
+            e.PairCount = int.TryParse(f[2].Trim(), out v) ? v : 0;
+            e.BeneCount = int.TryParse(f[3].Trim(), out v) ? v : 0;
+            e.SameDayCount = int.TryParse(f[4].Trim(), out v) ? v : 0;
+            e.AvgDayWait = 0.0;
+        }
+        return e;
+    }
+
+    // Streams the dataset file and returns rows matching a set of NPIs on one
+    // column. matchColumn 1 = the SECOND provider in the pair (inbound: the
+    // recipient); 0 = the FIRST (outbound: the initiator). Throws with a
     // plain message on a malformed file rather than returning wrong numbers.
-    private static List<RmEdge> Scan(string path, HashSet<string> match, int matchColumn)
+    private static List<RmEdge> Scan(string path, HashSet<string> match, int matchColumn, int format)
     {
         List<RmEdge> edges = new List<RmEdge>();
         long lineNo = 0;
@@ -138,25 +188,17 @@ public static class RmEngine
             {
                 lineNo++;
                 if (line.Length == 0) continue;
-                string[] f = line.Split(',');
-                if (f.Length != 5)
+                RmEdge e;
+                try { e = ParseLine(line, format, path, lineNo); }
+                catch (InvalidDataException)
                 {
                     badLines++;
-                    if (lineNo <= 5)
-                        throw new InvalidDataException(
-                            "Line " + lineNo + " of '" + path + "' has " + f.Length +
-                            " fields; expected 5 (NPI1,NPI2,PairCount,BeneCount,SameDayCount). " +
-                            "This does not look like a CMS shared-patient file.");
+                    if (lineNo <= 5) throw;
                     continue;
                 }
-                if (!match.Contains(f[matchColumn].Trim())) continue;
-                RmEdge e = new RmEdge();
-                e.SourceNpi = f[0].Trim();
-                e.TargetNpi = f[1].Trim();
-                int v;
-                e.PairCount = int.TryParse(f[2].Trim(), out v) ? v : 0;
-                e.BeneCount = int.TryParse(f[3].Trim(), out v) ? v : 0;
-                e.SameDayCount = int.TryParse(f[4].Trim(), out v) ? v : 0;
+                if (e == null) continue;   // header row
+                string key = (matchColumn == 1) ? e.TargetNpi : e.SourceNpi;
+                if (!match.Contains(key)) continue;
                 edges.Add(e);
             }
         }
@@ -170,20 +212,28 @@ public static class RmEngine
     }
 
     // Rows where a target NPI is the SECOND provider (received the patient).
+    public static List<RmEdge> ScanInbound(string path, HashSet<string> targets, int format)
+    {
+        return Scan(path, targets, 1, format);
+    }
     public static List<RmEdge> ScanInbound(string path, HashSet<string> targets)
     {
-        return Scan(path, targets, 1);
+        return Scan(path, targets, 1, FormatCms);
     }
 
     // Rows where a source NPI is the FIRST provider (initiated / sent onward).
+    public static List<RmEdge> ScanOutbound(string path, HashSet<string> sources, int format)
+    {
+        return Scan(path, sources, 0, format);
+    }
     public static List<RmEdge> ScanOutbound(string path, HashSet<string> sources)
     {
-        return Scan(path, sources, 0);
+        return Scan(path, sources, 0, FormatCms);
     }
 
     // Rows where an NPI in 'set' appears in EITHER column — one pass for a
     // single-provider 360 view (inbound + outbound together).
-    public static List<RmEdge> ScanEither(string path, HashSet<string> set)
+    public static List<RmEdge> ScanEither(string path, HashSet<string> set, int format)
     {
         List<RmEdge> edges = new List<RmEdge>();
         long lineNo = 0, badLines = 0;
@@ -194,23 +244,16 @@ public static class RmEngine
             {
                 lineNo++;
                 if (line.Length == 0) continue;
-                string[] f = line.Split(',');
-                if (f.Length != 5)
+                RmEdge e;
+                try { e = ParseLine(line, format, path, lineNo); }
+                catch (InvalidDataException)
                 {
                     badLines++;
-                    if (lineNo <= 5)
-                        throw new InvalidDataException("Line " + lineNo + " of '" + path +
-                            "' is malformed; this does not look like a CMS shared-patient file.");
+                    if (lineNo <= 5) throw;
                     continue;
                 }
-                string a = f[0].Trim(), b = f[1].Trim();
-                if (!set.Contains(a) && !set.Contains(b)) continue;
-                RmEdge e = new RmEdge();
-                e.SourceNpi = a; e.TargetNpi = b;
-                int v;
-                e.PairCount = int.TryParse(f[2].Trim(), out v) ? v : 0;
-                e.BeneCount = int.TryParse(f[3].Trim(), out v) ? v : 0;
-                e.SameDayCount = int.TryParse(f[4].Trim(), out v) ? v : 0;
+                if (e == null) continue;
+                if (!set.Contains(e.SourceNpi) && !set.Contains(e.TargetNpi)) continue;
                 edges.Add(e);
             }
         }
@@ -218,6 +261,10 @@ public static class RmEngine
         if (badLines > lineNo / 100)
             throw new InvalidDataException("The file '" + path + "' had too many malformed lines.");
         return edges;
+    }
+    public static List<RmEdge> ScanEither(string path, HashSet<string> set)
+    {
+        return ScanEither(path, set, FormatCms);
     }
 
     // Counts lines quickly (used to validate a freshly extracted dataset).
@@ -279,11 +326,14 @@ function Write-RmCsvFile {
 
 # The last date of MEDICARE SERVICE that can appear in a given release. A
 # provider whose NPI was issued after this could not be in the file, so their
-# zero counts mean "did not exist yet", not "no referrals". The 2015 file was
-# cut off mid-year (services through ~Sep 1, 2015); earlier years span the full
-# calendar year. Source: CMS shared-patient methodology date-range table.
-function Get-RmDataWindowEnd([int]$Year) {
-    if ($Year -eq 2015) { [datetime]'2015-09-01' } else { [datetime]("{0}-12-31" -f $Year) }
+# zero counts mean "did not exist yet", not "no referrals". The CMS 2015 file
+# was cut off mid-year (services through ~Sep 1, 2015); earlier CMS years and
+# all Hop Teaming years span the full calendar year. Sources: CMS shared-
+# patient methodology date-range table; CareSet DocGraph readme ("Shared
+# patients in time Jan 1 - Dec 31").
+function Get-RmDataWindowEnd([int]$Year, [string]$Source = 'cms-pspp') {
+    if ($Source -eq 'cms-pspp' -and $Year -eq 2015) { [datetime]'2015-09-01' }
+    else { [datetime]("{0}-12-31" -f $Year) }
 }
 
 function Initialize-RmDataDir {
@@ -307,9 +357,75 @@ function Clear-RmStaleTemp {
 }
 
 function Get-RmDatasetPath {
-    <# .SYNOPSIS Path where the extracted shared-patient file lives (may not exist yet). #>
+    <# .SYNOPSIS Path where the extracted CMS shared-patient file lives (may not exist yet). #>
     param([int]$Year = $script:RmConfig.Year, [int]$Interval = $script:RmConfig.Interval)
     Join-Path $script:RmConfig.DataDir ('pspp_{0}_days{1}.txt' -f $Year, $Interval)
+}
+
+function Get-RmDatasetMetaPath { Join-Path $script:RmConfig.DataDir 'dataset-meta.json' }
+
+# Records which dataset is ACTIVE (the one queries scan). Written atomically by
+# Save-RmDataset (CMS download) and Import-RmDataset (CareSet file).
+function Write-RmDatasetMeta([hashtable]$Meta) {
+    Initialize-RmDataDir | Out-Null
+    $p = Get-RmDatasetMetaPath
+    $tmp = $p + '.tmp'
+    $Meta | ConvertTo-Json -Compress | Set-Content -LiteralPath $tmp -Encoding UTF8
+    Move-Item -LiteralPath $tmp -Destination $p -Force
+}
+
+function Read-RmDatasetMeta {
+    $p = Get-RmDatasetMetaPath
+    if (-not (Test-Path -LiteralPath $p)) { return $null }
+    try { Get-Content -LiteralPath $p -Raw -Encoding UTF8 | ConvertFrom-Json }
+    catch {
+        # A corrupt meta must never kill queries — fall back to the legacy CMS
+        # dataset resolution below.
+        Write-Warning "Dataset metadata was unreadable and will be ignored: $($_.Exception.Message)"
+        $null
+    }
+}
+
+function Get-RmDatasetInfo {
+    <#
+    .SYNOPSIS
+      Resolves the ACTIVE shared-patient dataset: its path, source
+      ('cms-pspp' or 'hop-teaming'), year, engine format id, and a
+      display label. Falls back to the legacy CMS path (no metadata file)
+      so installs that predate Hop Teaming support keep working.
+    #>
+    $meta = Read-RmDatasetMeta
+    if ($null -ne $meta) {
+        $file = [string](Get-RmProp $meta 'FileName')
+        $path = if ($file) { Join-Path $script:RmConfig.DataDir $file } else { $null }
+        if ($path -and (Test-Path -LiteralPath $path)) {
+            $src  = [string](Get-RmProp $meta 'Source')
+            $year = [int](Get-RmProp $meta 'Year')
+            $isHop = $src -eq 'hop-teaming'
+            return [pscustomobject]@{
+                Ready  = $true
+                Source = $src
+                Year   = $year
+                Path   = $path
+                Format = if ($isHop) { [RmEngine]::FormatHopTeaming } else { [RmEngine]::FormatCms }
+                Rows   = [long](Get-RmProp $meta 'RowCount')
+                Label  = if ($isHop) { "DocGraph Hop Teaming $year (CareSet)" }
+                         else { "CMS shared-patient $year/$([int](Get-RmProp $meta 'Interval'))-day" }
+            }
+        }
+        # Meta points at a file that no longer exists — fall through.
+    }
+    # Legacy resolution: the configured CMS dataset file, if present.
+    $legacy = Get-RmDatasetPath
+    [pscustomobject]@{
+        Ready  = (Test-Path -LiteralPath $legacy)
+        Source = 'cms-pspp'
+        Year   = [int]$script:RmConfig.Year
+        Path   = $legacy
+        Format = [RmEngine]::FormatCms
+        Rows   = 0
+        Label  = 'CMS shared-patient {0}/{1}-day' -f $script:RmConfig.Year, $script:RmConfig.Interval
+    }
 }
 
 function Get-RmNppesCachePath { Join-Path $script:RmConfig.DataDir 'nppes-cache.json' }
@@ -399,9 +515,16 @@ function Save-RmDataset {
     Initialize-RmDataDir | Out-Null
     $target = Get-RmDatasetPath -Year $Year -Interval $Interval
     if ((Test-Path -LiteralPath $target) -and -not $Force) {
+        # Re-activate the CMS dataset (a Hop Teaming import may be active) —
+        # clicking "Download CMS dataset" is also how the user switches back.
+        Write-RmDatasetMeta @{
+            Source = 'cms-pspp'; Year = $Year; Interval = $Interval
+            FileName = (Split-Path -Leaf $target)
+            RowCount = 0; ActivatedAt = (Get-Date).ToString('s')
+        }
         return [pscustomobject]@{
             Downloaded = $false; Path = $target
-            Message = "Dataset $Year/${Interval}-day already present."
+            Message = "Dataset $Year/${Interval}-day already present (now the active dataset)."
         }
     }
 
@@ -454,22 +577,240 @@ function Save-RmDataset {
     }
 
     $rows = [RmEngine]::CountLines($target)
+    try { Set-Content -LiteralPath ($target + '.rows') -Value $rows -Encoding ascii } catch { }
+    Write-RmDatasetMeta @{
+        Source = 'cms-pspp'; Year = $Year; Interval = $Interval
+        FileName = (Split-Path -Leaf $target)
+        RowCount = $rows; ActivatedAt = (Get-Date).ToString('s')
+    }
     [pscustomobject]@{
         Downloaded = $true; Path = $target; RowCount = $rows
         Message = "Downloaded CMS shared-patient data $Year/${Interval}-day: $('{0:N0}' -f $rows) provider pairs."
     }
 }
 
+function Get-RmAvailableDatasets {
+    <#
+    .SYNOPSIS
+      Lists every shared-patient dataset present on disk — downloaded CMS
+      files and imported CareSet Hop Teaming files — and marks the active one.
+    #>
+    $d = $script:RmConfig.DataDir
+    if (-not (Test-Path -LiteralPath $d)) { return @() }
+    $active = Get-RmDatasetInfo
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($f in @(Get-ChildItem -LiteralPath $d -File -ErrorAction SilentlyContinue)) {
+        $src = $null; $year = 0; $interval = 0
+        if ($f.Name -match '^pspp_(\d{4})_days(\d+)\.txt$') {
+            $src = 'cms-pspp'; $year = [int]$Matches[1]; $interval = [int]$Matches[2]
+        } elseif ($f.Name -match '^hop_teaming_(\d{4})\.csv$') {
+            $src = 'hop-teaming'; $year = [int]$Matches[1]
+        } else { continue }
+        $rows = [long]0
+        $rowsFile = $f.FullName + '.rows'
+        if (Test-Path -LiteralPath $rowsFile) {
+            try { $rows = [long](Get-Content -LiteralPath $rowsFile -First 1) } catch { $rows = 0 }
+        }
+        $out.Add([pscustomobject]@{
+            Source   = $src
+            Year     = $year
+            Interval = $interval
+            Path     = $f.FullName
+            Bytes    = $f.Length
+            RowCount = $rows
+            Label    = if ($src -eq 'hop-teaming') { "DocGraph Hop Teaming $year (CareSet)" }
+                       else { "CMS shared-patient $year/${interval}-day" }
+            Active   = ($active.Ready -and $active.Path -eq $f.FullName)
+        })
+    }
+    @($out | Sort-Object -Property @{Expression = 'Year'; Descending = $true},
+                                   @{Expression = 'Source'; Descending = $false})
+}
+
+function Set-RmActiveDataset {
+    <#
+    .SYNOPSIS
+      Switches which on-disk dataset the referral queries use, without any
+      re-download or re-import. Pick one returned by Get-RmAvailableDatasets.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidateSet('cms-pspp', 'hop-teaming')][string]$Source,
+        [Parameter(Mandatory)][ValidateRange(2009, 2100)][int]$Year,
+        [int]$Interval = $script:RmConfig.Interval
+    )
+    $file = if ($Source -eq 'hop-teaming') { 'hop_teaming_{0}.csv' -f $Year }
+            else { 'pspp_{0}_days{1}.txt' -f $Year, $Interval }
+    $path = Join-Path $script:RmConfig.DataDir $file
+    if (-not (Test-Path -LiteralPath $path)) {
+        throw "No $Source dataset for $Year is on disk ($file). Download or import it first."
+    }
+    $rows = [long]0
+    if (Test-Path -LiteralPath ($path + '.rows')) {
+        try { $rows = [long](Get-Content -LiteralPath ($path + '.rows') -First 1) } catch { $rows = 0 }
+    }
+    $meta = @{
+        Source = $Source; Year = $Year; FileName = $file
+        RowCount = $rows; ActivatedAt = (Get-Date).ToString('s')
+    }
+    if ($Source -eq 'cms-pspp') { $meta.Interval = $Interval }
+    Write-RmDatasetMeta $meta
+    [pscustomobject]@{
+        Activated = $true; Source = $Source; Year = $Year; Path = $path
+        Message = "Active referral dataset is now $((Get-RmDatasetInfo).Label)."
+    }
+}
+
+function Import-RmDataset {
+    <#
+    .SYNOPSIS
+      Imports a DocGraph Hop Teaming dataset (CareSet Systems) from a local
+      file the user obtained from CareSet — either the delivery .zip or the
+      extracted .csv. Validates the format, installs it into the data dir
+      atomically, and makes it the ACTIVE dataset for all referral queries.
+    .PARAMETER Path
+      The CareSet file: DocGraph_<year>_....zip or DocGraph_Hop_Teaming_<year>.csv.
+    .PARAMETER Year
+      The data year. Usually detected from the file name; required if the
+      file name contains no recognizable year.
+    .NOTES
+      The Hop Teaming CSV is large (the 2022 file is ~8 GB extracted, ~210M
+      rows), so the import streams and never loads the file into memory.
+      A failed import never damages the currently active dataset.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [ValidateRange(2009, 2100)][int]$Year
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        throw "The file '$Path' does not exist. Pick the .zip you downloaded from CareSet (or the .csv inside it)."
+    }
+    Initialize-RmDataDir | Out-Null
+    $ProgressPreference = 'SilentlyContinue'
+    Clear-RmStaleTemp
+    $runId = [guid]::NewGuid().ToString('N')
+    $ext = [System.IO.Path]::GetExtension($Path).ToLowerInvariant()
+    $csvTmp = $null          # temp copy this function owns and may delete
+    $csvSource = $null       # the CSV to validate (may be the user's own file)
+    $originalName = Split-Path -Leaf $Path
+
+    try {
+        if ($ext -eq '.zip') {
+            # Extract ONLY the Hop Teaming CSV entry — the zip also carries
+            # docs and macOS cruft, and the CSV alone can be ~8 GB.
+            Assert-RmSafeZip $Path
+            Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+            $zip = [System.IO.Compression.ZipFile]::OpenRead($Path)
+            try {
+                $candidates = @($zip.Entries | Where-Object {
+                    $_.Name -match '\.csv$' -and $_.FullName -notmatch '(^|/)__MACOSX/' -and
+                    $_.Name -notmatch '^\.'
+                })
+                $entry = @($candidates | Where-Object { $_.Name -match '(?i)hop[_ ]?teaming' })
+                if ($entry.Count -eq 0) { $entry = @($candidates | Sort-Object Length -Descending) }
+                if ($entry.Count -eq 0) {
+                    throw "No .csv file found inside '$originalName' — this does not look like a CareSet DocGraph delivery zip."
+                }
+                $originalName = $entry[0].Name
+                $csvTmp = Join-Path $script:RmConfig.DataDir ("import_{0}.csv.tmp" -f $runId)
+                Write-Verbose "Extracting '$($entry[0].FullName)' ($([math]::Round($entry[0].Length/1GB,1)) GB)..."
+                [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry[0], $csvTmp, $true)
+            } finally { $zip.Dispose() }
+            $csvSource = $csvTmp
+        } elseif ($ext -in @('.csv', '.txt')) {
+            $csvSource = $Path
+        } else {
+            throw "Unsupported file type '$ext'. Pick the CareSet .zip or the extracted .csv."
+        }
+
+        # Validate the format FIRST (before the year check): a user who picked
+        # the wrong file entirely should hear "this is not a Hop Teaming file",
+        # not a confusing complaint about the file name's missing year.
+        $probe = [System.IO.File]::OpenText($csvSource)
+        try {
+            $header = $probe.ReadLine()
+            if ($null -eq $header) { throw "The file is empty." }
+            $cols = @(($header -replace "^\uFEFF", '').Trim().ToLowerInvariant() -split ',')
+            $expected = @('from_npi', 'to_npi', 'patient_count', 'transaction_count',
+                          'average_day_wait', 'std_day_wait')
+            if (@(Compare-Object $cols $expected -SyncWindow 0).Count -ne 0) {
+                throw ("The file's header is '$header' — expected '$($expected -join ',')'. " +
+                       "This does not look like a DocGraph Hop Teaming file. " +
+                       "(CMS shared-patient files are added with the Download button instead.)")
+            }
+            for ($i = 0; $i -lt 3; $i++) {
+                $line = $probe.ReadLine()
+                if ($null -eq $line) { break }   # tiny files are fine
+                $f = @($line -split ',')
+                if ($f.Count -ne 6 -or $f[0] -notmatch '^\d{10}$' -or $f[1] -notmatch '^\d{10}$') {
+                    throw "Data line $($i+2) ('$line') does not look like a Hop Teaming row (from_npi,to_npi,counts...)."
+                }
+            }
+        } finally { $probe.Close() }
+
+        # Detect the year from the file name unless given explicitly.
+        if (-not $PSBoundParameters.ContainsKey('Year')) {
+            if ($originalName -match '(20\d{2})') { $Year = [int]$Matches[1] }
+            else {
+                throw ("Could not tell the data year from the file name '$originalName'. " +
+                       "Re-run with -Year (e.g. Import-RmDataset -Path ... -Year 2022).")
+            }
+        }
+
+        # Promote atomically. If the source is the user's own .csv, COPY it
+        # (never move a file the user gave us); a zip extraction temp is ours
+        # to move.
+        $target = Join-Path $script:RmConfig.DataDir ('hop_teaming_{0}.csv' -f $Year)
+        if ($csvSource -eq $csvTmp) {
+            Move-Item -LiteralPath $csvTmp -Destination $target -Force
+            $csvTmp = $null
+        } else {
+            $copyTmp = Join-Path $script:RmConfig.DataDir ("import_{0}.copy.tmp" -f $runId)
+            Copy-Item -LiteralPath $csvSource -Destination $copyTmp -Force
+            Move-Item -LiteralPath $copyTmp -Destination $target -Force
+        }
+
+        $lines = [RmEngine]::CountLines($target)
+        $rows = [long]([math]::Max(0, $lines - 1))   # minus the header row
+        # Cache the row count beside the file so a later dataset SWITCH does
+        # not have to re-count 200M+ lines (cosmetic if it goes missing).
+        try { Set-Content -LiteralPath ($target + '.rows') -Value $rows -Encoding ascii } catch { }
+        Write-RmDatasetMeta @{
+            Source = 'hop-teaming'; Year = $Year
+            FileName = (Split-Path -Leaf $target)
+            RowCount = $rows; OriginalFile = $originalName
+            ActivatedAt = (Get-Date).ToString('s')
+        }
+        [pscustomobject]@{
+            Imported = $true; Path = $target; Year = $Year; RowCount = $rows
+            Message = "Imported DocGraph Hop Teaming $Year (CareSet): $('{0:N0}' -f $rows) provider pairs. It is now the active referral dataset."
+        }
+    } catch {
+        throw ("Importing the CareSet dataset failed; the active dataset was not changed. " +
+               "Details: $($_.Exception.Message)")
+    } finally {
+        if ($csvTmp -and (Test-Path -LiteralPath $csvTmp)) {
+            Remove-Item -LiteralPath $csvTmp -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Get-RmStatus {
-    <# .SYNOPSIS Shows which shared-patient dataset files are on disk. #>
-    $target = Get-RmDatasetPath
+    <# .SYNOPSIS Shows the ACTIVE shared-patient dataset (CMS download or
+       imported CareSet Hop Teaming file). #>
+    $info = Get-RmDatasetInfo
     [pscustomobject]@{
         DataDir      = $script:RmConfig.DataDir
-        Year         = $script:RmConfig.Year
-        Interval     = $script:RmConfig.Interval
-        DatasetPath  = $target
-        DatasetReady = (Test-Path -LiteralPath $target)
-        DatasetBytes = if (Test-Path -LiteralPath $target) { (Get-Item -LiteralPath $target).Length } else { 0 }
+        Source       = $info.Source
+        Year         = $info.Year
+        Interval     = $script:RmConfig.Interval   # CMS download setting only
+        Label        = $info.Label
+        DatasetPath  = $info.Path
+        DatasetReady = $info.Ready
+        DatasetBytes = if ($info.Ready) { (Get-Item -LiteralPath $info.Path).Length } else { 0 }
+        RowCount     = $info.Rows
     }
 }
 
@@ -627,6 +968,45 @@ function Get-RmProviderDetail {
 # The main query
 # ---------------------------------------------------------------------------
 
+# The honesty contract in text form: methodology/limitation notes for the
+# ACTIVE dataset, used by the map result and every export sidecar. Branches by
+# source because the two files were built differently and mislead differently.
+function Get-RmMethodologyNotes {
+    param([Parameter(Mandatory)]$Info, [switch]$OrganizationsOnly)
+    $y = $Info.Year
+    $clinicTaxNote = 'Clinic list = NPPES providers with a practice location in the requested ZIP holding taxonomies: ' +
+        (@($script:RmClinicTaxonomies.Values) + $(if (-not $OrganizationsOnly) { @($script:RmIndividualTaxonomies.Values) } else { @() }) -join ', ') + '.'
+    if ($Info.Source -eq 'hop-teaming') {
+        @(
+            "Source: DocGraph Hop Teaming $y, produced by CareSet Systems from 100% of Medicare Fee-for-Service Part A and Part B claims (data 'DocGraph' from CareSet; CC BY-NC-SA 4.0 non-commercial license unless you hold a commercial license from CareSet)."
+            "The file covers services from $y-01-01 to $y-12-31. It shows the structure of the referral market in $y, NOT this year's volumes."
+            'SharedPatients in the SOURCES table = patient_count: distinct Medicare FFS patients who saw the source provider and then that clinic (a directed shared-patient "hop"; a referral proxy, not billed referrals). SharedEvents = transaction_count: total from->to switches, so one patient bouncing back and forth counts each time.'
+            'SharedPatients in the CLINICS table = the SUM of those per-source counts, NOT a unique-patient total: a patient sent by three sources is counted three times. Treat it as relative referral VOLUME, not a headcount of distinct patients.'
+            "Pairs sharing fewer than 11 distinct patients in $y are excluded per CMS privacy policy, so low-volume referrers are invisible."
+            'AvgDayWait = average days from the source visit to the clinic visit. Short waits (days-weeks) look like referrals; waits of months look like loosely-related care. Direction is claims sequence, not a literal referral: CareSet notes a "referee" can appear to send patients to their "referrer". Judge pairs by specialty — an orthopedic surgeon feeding a PT is referral-like; a lab is not.'
+            'Medicare FFS only: Medicare Advantage (Part C), Medicaid, and commercial/employer plans are NOT included — in most markets that is a large share of patients, so these volumes understate total flow. Pediatric/OB specialties barely appear.'
+            $clinicTaxNote
+            'NPPES reflects providers and addresses as of TODAY. Providers whose NPI was issued after the data year are flagged in ExistedInDataYear — their zero counts mean "did not exist yet", not "no referrals". Clinics that moved or re-enumerated since the data year can also show zero; a ZIP prefix search (e.g. 630*) widens the net.'
+            'Unlike the 2015 CMS file, ORGANIZATION NPIs (including private-practice LLCs) do appear in Hop Teaming alongside individual therapists — verified on real 2022 data where rehab-practice org NPIs were top recipients. A clinic''s volume can still be SPLIT between its organization NPI and its therapists'' individual NPIs; the ZIP sweep includes both automatically, but per-provider numbers may understate a practice''s total.'
+        )
+    } else {
+        @(
+            ("Source: CMS Physician Shared Patient Patterns (FOIA release), year {0}, {1}-day interval." -f
+                $y, $script:RmConfig.Interval)
+            $(if ($y -eq 2015) { 'The 2015 file covers claims from 2015-01-01 to 2015-09-01 — the NEWEST free public release of this data (newer years exist as DocGraph Hop Teaming files from CareSet, which this app can import). It shows the historical structure of the referral market, NOT current volumes.' }
+              else { 'This is historical data; it shows the structure of the referral market at that time, NOT current volumes.' })
+            'SharedPatients in the SOURCES table = unique Medicare beneficiaries that source provider shared with that one clinic within the interval window (CMS referral proxy; not billed referrals).'
+            'SharedPatients in the CLINICS table = the SUM of those per-source counts, NOT a unique-patient total: a patient sent by three sources is counted three times. Treat it as relative referral VOLUME, not a headcount of distinct patients.'
+            'Pairs sharing fewer than 11 patients within the file''s window are excluded by CMS, so low-volume referrers are invisible. (For 2015 that window is ~8 months, Jan–Sep, not a full year.)'
+            'Same-day pairs are attributed by CMS to the LOWER NPI as the initiator. This scan only captures rows where the clinic is the SECOND provider, so same-day activity in which the clinic holds the lower NPI is not counted — the SameDay column is a partial, direction-ambiguous subset, useful only as a rough signal.'
+            'Shared-patient pairs also capture co-occurring care — labs, imaging, and hospitals seen in the same window appear as "sources" without having referred anyone. Interpret sources by specialty: an orthopedic surgeon feeding a PT is referral-like; a lab is not.'
+            $clinicTaxNote
+            'NPPES reflects providers and addresses as of TODAY. Providers whose NPI was issued after the data year are flagged in ExistedInDataYear — their zero counts mean "did not exist yet", not "no referrals". Clinics that moved or re-enumerated since the data year can also show zero; a ZIP prefix search (e.g. 630*) widens the net.'
+            'IMPORTANT: private-practice ORGANIZATION NPIs rarely appear in this file. CMS built the pairs from performing (rendering) provider NPIs on office claims and facility NPIs on institutional claims — a private clinic''s billing/group NPI is generally not included. Private practices therefore show up through their INDIVIDUAL therapists; hospital rehab departments show up as organizations. (Verified: 130 pre-2015 PT-chain org NPIs matched 0 rows, while a 244-therapist national sample matched 280 inbound rows.)'
+        )
+    }
+}
+
 function Get-RmReferralMap {
     <#
     .SYNOPSIS
@@ -649,11 +1029,14 @@ function Get-RmReferralMap {
         [switch]$SkipEnrichment   # NPI-only output when offline
     )
 
-    $dataset = Get-RmDatasetPath
-    if (-not (Test-Path -LiteralPath $dataset)) {
-        throw ("The CMS shared-patient dataset is not downloaded yet. Run Save-RmDataset " +
-               "(or click 'Download CMS dataset' in the app) first — it is a one-time ~356 MB download.")
+    $info = Get-RmDatasetInfo
+    if (-not $info.Ready) {
+        throw ("No shared-patient dataset is available yet. Either click 'Download CMS dataset' " +
+               "(free 2015 data, ~356 MB) or import a CareSet DocGraph Hop Teaming file " +
+               "with 'Import CareSet file' / Import-RmDataset.")
     }
+    $dataset = $info.Path
+    $isHop = $info.Source -eq 'hop-teaming'
 
     Write-Verbose "Finding rehab providers in ZIP $Zip via NPPES..."
     $clinics = @(Find-RmClinic -Zip $Zip -OrganizationsOnly:$OrganizationsOnly)
@@ -662,11 +1045,11 @@ function Get-RmReferralMap {
                $(if (-not $OrganizationsOnly) { ", individual PT/OT/SLPs" }) +
                ") with a practice location in ZIP '$Zip'. Try a broader prefix like '$($Zip.Substring(0,3))*'.")
     }
-    Write-Verbose "Found $($clinics.Count) rehab providers. Scanning shared-patient file..."
+    Write-Verbose "Found $($clinics.Count) rehab providers. Scanning $($info.Label)..."
 
     $targets = New-Object 'System.Collections.Generic.HashSet[string]'
     foreach ($c in $clinics) { [void]$targets.Add($c.NPI) }
-    $edges = [RmEngine]::ScanInbound($dataset, $targets)
+    $edges = [RmEngine]::ScanInbound($dataset, $targets, $info.Format)
     Write-Verbose "Scan complete: $($edges.Count) inbound edges."
 
     $clinicByNpi = @{}
@@ -698,10 +1081,14 @@ function Get-RmReferralMap {
         }
     }
 
+    # Column set differs honestly by source: the CMS file has a SameDay count;
+    # Hop Teaming instead has AvgDayWait (mean days from source visit to
+    # clinic visit — small waits look like referrals, long ones like
+    # co-occurring care).
     $sources = @($edges | Sort-Object BeneCount -Descending | ForEach-Object {
         $d = if ($detail.ContainsKey($_.SourceNpi)) { $detail[$_.SourceNpi] } else { $null }
         $clinic = $clinicByNpi[$_.TargetNpi]
-        [pscustomobject]@{
+        $row = [ordered]@{
             SourceNPI       = $_.SourceNpi
             SourceName      = if ($d) { $d.Name } else { '' }
             SourceSpecialty = if ($d) { $d.Specialty } else { '' }
@@ -711,8 +1098,9 @@ function Get-RmReferralMap {
             ClinicName      = $clinic.Name
             SharedPatients  = $_.BeneCount
             SharedEvents    = $_.PairCount
-            SameDay         = $_.SameDayCount
         }
+        if ($isHop) { $row['AvgDayWait'] = $_.AvgDayWait } else { $row['SameDay'] = $_.SameDayCount }
+        [pscustomobject]$row
     })
 
     $byClinic = @{}
@@ -729,9 +1117,9 @@ function Get-RmReferralMap {
     # SERVICE in the file cannot appear in it. Flag those honestly instead of
     # letting their zero rows read as "no referrals". Dates are PARSED, not
     # string-compared — a format change from NPPES must yield '' (unknown),
-    # never a wrong Yes/No. The 2015 file was cut off ~Sep 1, 2015, so a
-    # provider enumerated in, say, Nov 2015 could not appear.
-    $dataWindowEnd = Get-RmDataWindowEnd $script:RmConfig.Year
+    # never a wrong Yes/No. The CMS 2015 file was cut off ~Sep 1, 2015; Hop
+    # Teaming files span the full calendar year.
+    $dataWindowEnd = Get-RmDataWindowEnd $info.Year $info.Source
     $clinicRows = @($clinics | ForEach-Object {
         $enumDate = [datetime]::MinValue
         $parsed = -not [string]::IsNullOrEmpty($_.Enumerated) -and
@@ -742,7 +1130,7 @@ function Get-RmReferralMap {
         $existed = if (-not $parsed) { '' }
                    elseif ($enumDate -le $dataWindowEnd) { 'Yes' }
                    else { "No (NPI issued $($_.Enumerated))" }
-        [pscustomobject]@{
+        $row = [ordered]@{
             NPI             = $_.NPI
             Name            = $_.Name
             Type            = $_.Type
@@ -752,28 +1140,16 @@ function Get-RmReferralMap {
             Zip             = $_.Zip
             ReferralSources = if ($agg) { $agg.Sources } else { 0 }
             SharedPatients  = if ($agg) { $agg.Benes } else { 0 }
-            SameDay         = if ($agg) { $agg.SameDay } else { 0 }
-            ExistedInDataYear = $existed
         }
+        if (-not $isHop) { $row['SameDay'] = if ($agg) { $agg.SameDay } else { 0 } }
+        $row['ExistedInDataYear'] = $existed
+        [pscustomobject]$row
     } | Sort-Object -Property @{Expression = 'SharedPatients'; Descending = $true},
                               @{Expression = 'Name'; Descending = $false})
     $notYetEnumerated = @($clinicRows | Where-Object { $_.ExistedInDataYear -like 'No*' }).Count
 
-    $notes = @(
-        ("Source: CMS Physician Shared Patient Patterns (FOIA release), year {0}, {1}-day interval." -f
-            $script:RmConfig.Year, $script:RmConfig.Interval)
-        $(if ($script:RmConfig.Year -eq 2015) { 'The 2015 file covers claims from 2015-01-01 to 2015-09-01 — the NEWEST public release of this data. It shows the historical structure of the referral market, NOT current volumes.' }
-          else { 'This is historical data; it shows the structure of the referral market at that time, NOT current volumes.' })
-        'SharedPatients in the SOURCES table = unique Medicare beneficiaries that source provider shared with that one clinic within the interval window (CMS referral proxy; not billed referrals).'
-        'SharedPatients in the CLINICS table = the SUM of those per-source counts, NOT a unique-patient total: a patient sent by three sources is counted three times. Treat it as relative referral VOLUME, not a headcount of distinct patients.'
-        'Pairs sharing fewer than 11 patients within the file''s window are excluded by CMS, so low-volume referrers are invisible. (For 2015 that window is ~8 months, Jan–Sep, not a full year.)'
-        'Same-day pairs are attributed by CMS to the LOWER NPI as the initiator. This scan only captures rows where the clinic is the SECOND provider, so same-day activity in which the clinic holds the lower NPI is not counted — the SameDay column is a partial, direction-ambiguous subset, useful only as a rough signal.'
-        'Shared-patient pairs also capture co-occurring care — labs, imaging, and hospitals seen in the same window appear as "sources" without having referred anyone. Interpret sources by specialty: an orthopedic surgeon feeding a PT is referral-like; a lab is not.'
-        'Clinic list = NPPES providers with a practice location in the requested ZIP holding taxonomies: ' +
-            (@($script:RmClinicTaxonomies.Values) + $(if (-not $OrganizationsOnly) { @($script:RmIndividualTaxonomies.Values) } else { @() }) -join ', ') + '.'
-        'NPPES reflects providers and addresses as of TODAY. Providers whose NPI was issued after the data year are flagged in ExistedInDataYear — their zero counts mean "did not exist yet", not "no referrals". Clinics that moved or re-enumerated since the data year can also show zero; a ZIP prefix search (e.g. 630*) widens the net.'
-        'IMPORTANT: private-practice ORGANIZATION NPIs rarely appear in this file. CMS built the pairs from performing (rendering) provider NPIs on office claims and facility NPIs on institutional claims — a private clinic''s billing/group NPI is generally not included. Private practices therefore show up through their INDIVIDUAL therapists; hospital rehab departments show up as organizations. (Verified: 130 pre-2015 PT-chain org NPIs matched 0 rows, while a 244-therapist national sample matched 280 inbound rows.)'
-        $(if ($notYetEnumerated -gt 0) { '{0} of {1} providers found in this ZIP were issued their NPI after the {2} file''s service window ended, so they cannot appear in it (ExistedInDataYear = No).' -f $notYetEnumerated, $clinicRows.Count, $script:RmConfig.Year })
+    $notes = @(Get-RmMethodologyNotes -Info $info -OrganizationsOnly:$OrganizationsOnly) + @(
+        $(if ($notYetEnumerated -gt 0) { '{0} of {1} providers found in this ZIP were issued their NPI after the {2} file''s service window ended, so they cannot appear in it (ExistedInDataYear = No).' -f $notYetEnumerated, $clinicRows.Count, $info.Year })
         $(if ($enrichNote) { $enrichNote })
     ) | Where-Object { $_ }
 
@@ -807,14 +1183,14 @@ function Get-RmInboundByBucket {
         [int]$TopPerBucket = 10,
         [switch]$SkipEnrichment
     )
-    $dataset = Get-RmDatasetPath
-    if (-not (Test-Path -LiteralPath $dataset)) {
-        throw "The CMS shared-patient dataset is not downloaded yet (Referral map tab)."
+    $info = Get-RmDatasetInfo
+    if (-not $info.Ready) {
+        throw "No shared-patient dataset is available yet (Referral map tab: download the CMS dataset or import a CareSet file)."
     }
     $targets = New-Object 'System.Collections.Generic.HashSet[string]'
     foreach ($k in $TargetToBucket.Keys) { [void]$targets.Add([string]$k) }
     if ($targets.Count -eq 0) { return @() }
-    $edges = [RmEngine]::ScanInbound($dataset, $targets)
+    $edges = [RmEngine]::ScanInbound($info.Path, $targets, $info.Format)
 
     # bucket -> @{ Benes; Sources = @{ srcNpi -> benes } }. One target NPI may
     # map to several buckets (a therapist in more than one group); credit each.
@@ -886,13 +1262,14 @@ function Get-RmProviderReferralActivity {
         [int]$Top = 25,
         [switch]$SkipEnrichment
     )
-    $dataset = Get-RmDatasetPath
-    if (-not (Test-Path -LiteralPath $dataset)) {
-        throw "The CMS shared-patient dataset is not downloaded yet (Referral map tab)."
+    $info = Get-RmDatasetInfo
+    if (-not $info.Ready) {
+        throw "No shared-patient dataset is available yet (Referral map tab: download the CMS dataset or import a CareSet file)."
     }
+    $isHop = $info.Source -eq 'hop-teaming'
     $set = New-Object 'System.Collections.Generic.HashSet[string]'
     [void]$set.Add($Npi)
-    $edges = [RmEngine]::ScanEither($dataset, $set)
+    $edges = [RmEngine]::ScanEither($info.Path, $set, $info.Format)
 
     $inbound  = @($edges | Where-Object { $_.TargetNpi -eq $Npi } | Sort-Object BeneCount -Descending)
     $outbound = @($edges | Where-Object { $_.SourceNpi -eq $Npi } | Sort-Object BeneCount -Descending)
@@ -908,18 +1285,105 @@ function Get-RmProviderReferralActivity {
     $mk = {
         param($otherNpi, $e)
         $d = if ($detail.ContainsKey($otherNpi)) { $detail[$otherNpi] } else { $null }
-        [pscustomobject]@{
+        $row = [ordered]@{
             NPI            = $otherNpi
             Name           = if ($d) { $d.Name } else { '' }
             Specialty      = if ($d) { $d.Specialty } else { '' }
             SharedPatients = $e.BeneCount
-            SameDay        = $e.SameDayCount
         }
+        if ($isHop) { $row['AvgDayWait'] = $e.AvgDayWait } else { $row['SameDay'] = $e.SameDayCount }
+        [pscustomobject]$row
     }
     [pscustomobject]@{
         Npi      = $Npi
+        Year     = $info.Year
+        Source   = $info.Source
         Inbound  = @($inbound  | ForEach-Object { & $mk $_.SourceNpi $_ })
         Outbound = @($outbound | ForEach-Object { & $mk $_.TargetNpi $_ })
+    }
+}
+
+function Get-RmProviderTrend {
+    <#
+    .SYNOPSIS
+      Year-over-year referral trend for ONE provider NPI, scanned across every
+      imported DocGraph Hop Teaming year on disk. Returns one row per year:
+      inbound/outbound totals, distinct partners, and the top inbound sources.
+    .NOTES
+      Uses ONLY Hop Teaming years — they share one methodology (full calendar
+      year, directed hops), so years are comparable. The CMS 2015 file is
+      deliberately excluded: its ~8-month window and 30-day interval produce
+      numbers on a different scale, and mixing them in would fake a trend.
+      Each year is a full streaming scan of that year's file, so expect
+      minutes per year.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidatePattern('^\d{10}$')][string]$Npi,
+        [int]$TopSources = 3,
+        [switch]$SkipEnrichment
+    )
+    $years = @(Get-RmAvailableDatasets | Where-Object { $_.Source -eq 'hop-teaming' } | Sort-Object Year)
+    if ($years.Count -lt 2) {
+        throw ("A trend needs at least TWO imported Hop Teaming years (found $($years.Count)). " +
+               "Import more years with 'Import CareSet file' / Import-RmDataset.")
+    }
+    $set = New-Object 'System.Collections.Generic.HashSet[string]'
+    [void]$set.Add($Npi)
+
+    $rows = New-Object System.Collections.Generic.List[object]
+    $allTopNpis = New-Object 'System.Collections.Generic.HashSet[string]'
+    $perYearTop = @{}
+    foreach ($y in $years) {
+        Write-Verbose "Scanning $($y.Label)..."
+        $edges = [RmEngine]::ScanEither($y.Path, $set, [RmEngine]::FormatHopTeaming)
+        $inb  = @($edges | Where-Object { $_.TargetNpi -eq $Npi })
+        $outb = @($edges | Where-Object { $_.SourceNpi -eq $Npi })
+        $inbVol = 0; foreach ($e in $inb) { $inbVol += $e.BeneCount }
+        $outVol = 0; foreach ($e in $outb) { $outVol += $e.BeneCount }
+        $top = @($inb | Sort-Object BeneCount -Descending | Select-Object -First $TopSources)
+        $perYearTop[$y.Year] = $top
+        foreach ($t in $top) { [void]$allTopNpis.Add($t.SourceNpi) }
+        $rows.Add([pscustomobject]@{
+            Year            = $y.Year
+            InboundSources  = $inb.Count
+            InboundPatients = $inbVol
+            OutboundTargets = $outb.Count
+            OutboundPatients = $outVol
+            TopSources      = ''   # filled after enrichment below
+        })
+    }
+
+    # One enrichment pass across all years' top sources (cached on disk).
+    $detail = @{}
+    if (-not $SkipEnrichment -and $allTopNpis.Count -gt 0) {
+        $detail = Get-RmProviderDetail -Npi @($allTopNpis)
+    }
+    foreach ($r in $rows) {
+        $tops = foreach ($t in $perYearTop[$r.Year]) {
+            $d = if ($detail.ContainsKey($t.SourceNpi)) { $detail[$t.SourceNpi] } else { $null }
+            $nm = if ($d -and $d.Name) { $d.Name } else { $t.SourceNpi }
+            "$nm ($($t.BeneCount))"
+        }
+        $r.TopSources = @($tops) -join '; '
+    }
+
+    $notes = @(
+        "Source: DocGraph Hop Teaming years $(@($years | ForEach-Object { $_.Year }) -join ', '), produced by CareSet Systems from Medicare FFS Part A+B claims (data 'DocGraph' from CareSet)."
+        'One row per data year. InboundPatients = sum of patient_count over every pair where this NPI was seen SECOND (patients shared INTO this provider); OutboundPatients = seen FIRST. A referral proxy, not billed referrals.'
+        'Years are comparable to each other (same methodology, full calendar years), but pairs under 11 patients are excluded per CMS policy in EVERY year — a partner dropping to zero may just mean they fell under 11.'
+        'Medicare FFS only: Medicare Advantage growth over these years shifts patients OUT of this data — a declining trend can reflect MA enrollment shift as well as lost referrals. Read direction by specialty; co-occurring care (labs, hospitals) appears too.'
+        'The CMS 2015 FOIA file is intentionally excluded from trends: different window (~8 months) and methodology — its numbers are not on the same scale.'
+    )
+    # NOTE: built with explicit arrays, not @($rows) — the @() to-object-array
+    # binder can throw a spurious 'Argument types do not match' on a generic
+    # List at this call site (engine binder edge case, observed on pwsh 7.6).
+    $yearArr = foreach ($y in $years) { $y.Year }
+    [pscustomobject]@{
+        Npi   = $Npi
+        Years = [int[]]$yearArr
+        Rows  = $rows.ToArray()
+        Notes = $notes
     }
 }
 
@@ -1010,7 +1474,9 @@ function Export-RmResult {
 
 Export-ModuleMember -Function @(
     'Get-RmConfig', 'Set-RmConfig', 'Get-RmStatus', 'Get-RmDatasetPath',
-    'Save-RmDataset', 'Find-RmClinic', 'Get-RmProviderDetail',
+    'Get-RmDatasetInfo', 'Get-RmAvailableDatasets', 'Set-RmActiveDataset',
+    'Save-RmDataset', 'Import-RmDataset',
+    'Find-RmClinic', 'Get-RmProviderDetail',
     'Get-RmReferralMap', 'Get-RmInboundByBucket', 'Get-RmProviderReferralActivity',
-    'Get-RmSourceSpecialtyMix', 'Export-RmResult', 'Clear-RmStaleTemp'
+    'Get-RmProviderTrend', 'Get-RmSourceSpecialtyMix', 'Export-RmResult', 'Clear-RmStaleTemp'
 )

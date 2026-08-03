@@ -3,11 +3,15 @@
 *No technical knowledge needed. Total setup time: about 10 minutes, most of it
 waiting for downloads.*
 
-> **Please note:** this is an independent tool, **not affiliated with CMS**. It
-> uses public CMS data (no patient information) and is provided as-is. The
-> referral data is from 2015 (the newest CMS makes public). Double-check
-> anything you'll use for a billing or compliance decision against the official
-> CMS source.
+> **Please note:** this is an independent tool, **not affiliated with CMS or
+> CareSet Systems**. It uses public CMS data plus, optionally, DocGraph Hop
+> Teaming data licensed from CareSet (no patient information in either), and
+> is provided as-is. The free referral data is from 2015; imported CareSet
+> years run through 2022. CareSet's standard research license is
+> **non-commercial (CC BY-NC-SA 4.0)** — if you use the data in paid
+> consulting work, confirm your license terms with CareSet. Double-check
+> anything you'll use for a billing or compliance decision against the
+> official source.
 
 ---
 
@@ -94,11 +98,29 @@ Every data download is kept as a dated snapshot. Pick two snapshots, click
 not — the previous name is shown so you can tell it apart from a real
 eligibility change). Exportable like everything else.
 
-### Tab 4 — Referral map (2015)
+### Tab 4 — Referral map
 *"Who sends patients to the rehab providers in my area?"*
 
-One-time setup for this tab: click **Download CMS dataset** (~356 MB — the
-newest public CMS provider-to-provider data; takes a few minutes).
+This tab can run on **two kinds of data** — the tab's title shows which year
+is active:
+
+- **Free CMS data (2015):** click **Download CMS dataset** (~356 MB one-time).
+  The newest data CMS gives away publicly.
+- **Newer CareSet data (2016–2022, licensed):** if you have DocGraph Hop
+  Teaming files from CareSet Systems, click **Import CareSet file…**, pick the
+  downloaded `.zip` (no need to unzip it), and wait a few minutes. Each year
+  is large — roughly **7–11 GB of disk space per imported year**.
+
+> **Keep your CareSet zips safe.** The download links CareSet emails are
+> personal order links that can expire. Save the original zips on an external
+> drive or backup — each zip contains its own checksum file (`.csv.md5`) so
+> you can always verify a copy is intact.
+
+**Switching years:** the **Active data** dropdown lists every dataset you've
+downloaded or imported. Switching is instant — nothing re-downloads — and the
+tab title, footprint button, and all exports follow the active year. Any
+results on screen are cleared so numbers from different years can't get mixed
+up.
 
 Then:
 1. Type a ZIP code — or a prefix like `630*` to cover a wider area — and
@@ -111,18 +133,23 @@ Then:
 4. Export either table with the buttons.
 
 **Read this before trusting the numbers:**
-- This data is from **2015** — the newest CMS ever released publicly. It
-  shows the *structure* of your referral market (who the big referrers are
-  and whom they historically fed), **not this year's volumes**.
-- A provider marked **"No (NPI issued 2019)"** in the last column didn't
-  exist yet in 2015 — their zero means "too new," not "no referrals."
-- Private clinics show up under their **individual therapists' names**
-  (that's how CMS built the file); hospital rehab departments show up as
-  organizations.
+- The data shows the *structure* of your referral market **for its data
+  year** (who the big referrers are and whom they fed), **not this year's
+  volumes**. Every export's methodology file states the exact year and source.
+- A provider marked **"No (NPI issued …)"** in the last column didn't exist
+  yet in the data year — their zero means "too new," not "no referrals."
+- On CareSet data, the **AvgDayWait** column is the average days between the
+  source visit and the clinic visit: a few days-to-weeks looks like a real
+  referral; several months looks like loosely-related care.
+- The CareSet years cover Medicare **fee-for-service only** — Medicare
+  Advantage patients (a large share in most markets) are not in the data, so
+  volumes understate the total flow.
 - Labs and hospitals sometimes appear as "sources" just because patients
   visited them around the same time. Judge sources by specialty: an
   orthopedic surgeon feeding a physical therapist is a real referral
   pattern; a lab is not.
+- Pairs sharing fewer than 11 patients in the window are excluded (a CMS
+  privacy rule in every year), so small referrers are invisible.
 
 **Tip — Export specialty mix:** the **Export specialty mix** button breaks your
 referral sources into a specialty profile ("45% orthopedic surgery, 20% primary
@@ -174,6 +201,17 @@ Both referral tables export. Whatever optional datasets you haven't downloaded
 are simply noted as unavailable — the rest still show. It's the quickest way to
 size up a referrer, a competitor, or a prospect.
 
+**Referral trend (multi-year):** if you've imported **two or more** CareSet
+years on the Referral map tab, this button builds a year-by-year table for the
+NPI — how many sources fed them patients each year, total inbound and outbound
+volume, and each year's top sources. It's how you see a clinic growing,
+shrinking, or losing a key referrer over time. Fair warning: it re-scans every
+year's file, so it takes **several minutes per imported year** — start it and
+get a coffee. Two honest caveats baked into the export: a source dropping to
+zero may just mean the pair fell under the 11-patient privacy floor, and
+Medicare Advantage growth pulls patients out of this data over time, which can
+look like decline.
+
 ### Tab 7 — Watchlist
 *"Did any of MY referrers change in the latest update?"*
 
@@ -216,7 +254,11 @@ Import-Module .\OrderReferring; Uninstall-OrfUpdateTask
 ## 6. Where your files live
 
 - **Downloaded data** is stored in `C:\Users\<you>\AppData\Local\OrderReferringTracker`
-  — you never need to touch it. Deleting that folder just means re-downloading.
+  — you never need to touch it. Deleting that folder just means re-downloading
+  (or re-importing from your saved CareSet zips). Imported CareSet years are
+  the big items in there: **7–11 GB per year** — if disk space gets tight,
+  delete an imported year's `hop_teaming_<year>.csv` from the `referral-map`
+  subfolder and re-import it later from your archived zip.
 - **Exports** go wherever you choose in the save dialog. Every export comes
   with a small `.methodology.txt` companion file that records exactly which
   data release the numbers came from — keep it with the spreadsheet so the
