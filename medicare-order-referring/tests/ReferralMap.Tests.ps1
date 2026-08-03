@@ -628,3 +628,71 @@ Describe 'Referral geography and heat map' {
         @($g.Rows).Count | Should -Be 0
     }
 }
+
+Describe 'Group referral benchmark' {
+    # Synthetic groups over the fixture NPIs (CMS 2015 active from earlier):
+    # G1 = the org clinic (inbound 45+20=65), G2 = the individual PT (12+11=23).
+    BeforeAll {
+        $script:GbMap = @{ '9000000001' = 'G1'; '9000000002' = 'G2' }
+        $script:GbNames = @{ 'G1' = 'ALPHA REHAB GROUP'; 'G2' = 'BETA THERAPY' }
+    }
+
+    It 'ranks groups by rolled-up member volume with share of measured total' {
+        $gb = Get-RmGroupBenchmark -TargetToBucket $script:GbMap -BucketNames $script:GbNames -SkipEnrichment
+        $rows = @($gb.Buckets)
+        $rows.Count | Should -Be 2
+        $rows[0].Bucket | Should -Be 'G1'
+        $rows[0].Rank | Should -Be 1
+        $rows[0].GroupName | Should -Be 'ALPHA REHAB GROUP'
+        $rows[0].InboundPatients | Should -Be 65
+        $rows[0].SharePct | Should -Be ([math]::Round(100.0 * 65 / 88, 1))
+        $rows[0].Sources | Should -Be 2
+        $rows[1].Rank | Should -Be 2
+        $rows[1].InboundPatients | Should -Be 23
+    }
+
+    It 'returns the full edge list with distinct members fed per source' {
+        $gb = Get-RmGroupBenchmark -TargetToBucket $script:GbMap -BucketNames $script:GbNames -SkipEnrichment
+        $edges = @($gb.Edges)
+        # 2 sources feed G1, 2 feed G2 (8000000001 feeds both groups)
+        $edges.Count | Should -Be 4
+        @($edges | Where-Object { $_.Bucket -eq 'G1' -and $_.SourceNPI -eq '8000000001' })[0].SharedPatients | Should -Be 45
+        @($edges | Where-Object { $_.Bucket -eq 'G2' -and $_.SourceNPI -eq '8000000003' })[0].SharedPatients | Should -Be 11
+        # each fixture source feeds exactly one member NPI per group
+        @($edges | ForEach-Object MembersFed | Sort-Object -Unique) | Should -Be @(1)
+    }
+
+    It 'credits an NPI in two groups to both (list-valued map)' {
+        $map = @{ '9000000001' = @('G1', 'G3') }
+        $gb = Get-RmGroupBenchmark -TargetToBucket $map -SkipEnrichment
+        @($gb.Buckets).Count | Should -Be 2
+        @($gb.Buckets | ForEach-Object InboundPatients | Sort-Object -Unique) | Should -Be @(65)
+        # equal volumes -> deterministic rank by bucket key
+        @($gb.Buckets)[0].Bucket | Should -Be 'G1'
+    }
+
+    It 'computes group-level missed sources from the edges' {
+        $gb = Get-RmGroupBenchmark -TargetToBucket $script:GbMap -BucketNames $script:GbNames -SkipEnrichment
+        # G2's missed: 8000000002 feeds only G1; 8000000001 feeds both -> not missed
+        $missed = @(Get-RmGroupMissedSources -Edges @($gb.Edges) -Bucket 'G2')
+        $missed.Count | Should -Be 1
+        $missed[0].SourceNPI | Should -Be '8000000002'
+        $missed[0].PatientsToOtherGroups | Should -Be 20
+        $missed[0].GroupsFed | Should -Be 1
+        # G1's missed: 8000000003 feeds only G2
+        @(Get-RmGroupMissedSources -Edges @($gb.Edges) -Bucket 'G1')[0].SourceNPI | Should -Be '8000000003'
+    }
+
+    It 'carries group-specific methodology notes' {
+        $gb = Get-RmGroupBenchmark -TargetToBucket $script:GbMap -SkipEnrichment
+        (@($gb.Notes) -join ' ') | Should -BeLike '*GROUP BENCHMARK METHOD*'
+        (@($gb.Notes) -join ' ') | Should -BeLike '*MembersFed*'
+        (@($gb.Notes) -join ' ') | Should -BeLike '*ORGANIZATION NPI*'
+    }
+
+    It 'returns an empty result for an empty map' {
+        $gb = Get-RmGroupBenchmark -TargetToBucket @{} -SkipEnrichment
+        @($gb.Buckets).Count | Should -Be 0
+        @($gb.Edges).Count | Should -Be 0
+    }
+}

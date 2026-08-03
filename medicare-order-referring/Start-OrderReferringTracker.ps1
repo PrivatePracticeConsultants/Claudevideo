@@ -376,17 +376,25 @@ $xaml = @'
           <DataGrid Grid.Row="2" x:Name="PgGroupGrid" IsReadOnly="True" AutoGenerateColumns="True"
                     CanUserAddRows="False" GridLinesVisibility="Horizontal"
                     HeadersVisibility="Column" EnableRowVirtualization="True"/>
-          <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="0,6,0,4">
+          <WrapPanel Grid.Row="3" Orientation="Horizontal" Margin="0,6,0,4">
             <TextBlock x:Name="PgRosterLabel" FontWeight="SemiBold" Foreground="#1F3B57" Text="Therapist roster (select a group above to filter):"
                        VerticalAlignment="Center"/>
-            <Button x:Name="PgFootprintButton" Content="Add 2015 referral footprint" Padding="10,4"
+            <Button x:Name="PgFootprintButton" Content="Add referral benchmark" Padding="10,4"
                     Margin="14,0,0,0" IsEnabled="False"
-                    ToolTip="Roll each group's LOCAL therapists' historical shared-patient volume up to the group (needs a dataset on the Referral map tab)."/>
+                    ToolTip="Roll each group's LOCAL therapists' shared-patient volume up to the group: rank, market share, every source feeding each group, and per-group missed sources (needs a dataset on the Referral map tab)."/>
+            <TextBlock Text="Show:" VerticalAlignment="Center" Margin="12,0,4,0"/>
+            <ComboBox x:Name="PgViewCombo" MinWidth="150" Height="26" SelectedIndex="0" IsEnabled="False"
+                      ToolTip="What the lower table shows for the selected group">
+              <ComboBoxItem Content="Therapist roster"/>
+              <ComboBoxItem Content="Referral sources"/>
+              <ComboBoxItem Content="Missed sources"/>
+            </ComboBox>
             <Button x:Name="PgExportGroupsButton" Content="Export groups..." Padding="10,4"
                     Margin="8,0,0,0" IsEnabled="False"/>
-            <Button x:Name="PgExportRosterButton" Content="Export rosters..." Padding="10,4"
-                    Margin="8,0,0,0" IsEnabled="False"/>
-          </StackPanel>
+            <Button x:Name="PgExportRosterButton" Content="Export view..." Padding="10,4"
+                    Margin="8,0,0,0" IsEnabled="False"
+                    ToolTip="Exports whatever the lower table currently shows (roster, referral sources, or missed sources)."/>
+          </WrapPanel>
           <DataGrid Grid.Row="4" x:Name="PgRosterGrid" IsReadOnly="True" AutoGenerateColumns="True"
                     CanUserAddRows="False" GridLinesVisibility="Horizontal"
                     HeadersVisibility="Column" EnableRowVirtualization="True"/>
@@ -512,7 +520,7 @@ foreach ($name in @(
     'BmSearchGrid', 'BmRegionLabel', 'BmExportRegionButton', 'BmRegionGrid',
     'BmMissedLabel', 'BmExportMissedButton', 'BmMissedGrid', 'BmSummary',
     'PgZipBox', 'PgRunButton', 'PgDownloadButton', 'PgDataStatus', 'PgGroupGrid',
-    'PgRosterLabel', 'PgFootprintButton', 'PgExportGroupsButton', 'PgExportRosterButton',
+    'PgRosterLabel', 'PgFootprintButton', 'PgViewCombo', 'PgExportGroupsButton', 'PgExportRosterButton',
     'PgRosterGrid', 'PgSummary',
     'LkNpiBox', 'LkRunButton', 'LkTrendButton', 'LkExportTrendButton',
     'LkGeoButton', 'LkSaveMapButton', 'LkDetail',
@@ -1011,7 +1019,7 @@ function Update-RmStatus {
     $script:RmDataLabel = [string]$status.Label
     $script:RmRowsLabel = if ($status.RowCount -gt 0) { '~{0:N0}' -f $status.RowCount } else { '~35M' }
     $ui.RmTab.Header = "Referral map ($($status.Year))"
-    $ui.PgFootprintButton.Content = "Add $($status.Year) referral footprint"
+    $ui.PgFootprintButton.Content = "Add $($status.Year) referral benchmark"
     # Dataset switcher: one item per dataset on disk, active one selected.
     # Guarded so the programmatic rebuild can't trigger a switch of its own.
     $script:RmComboUpdating = $true
@@ -1393,7 +1401,7 @@ $ui.BmExportMissedButton.Add_Click({
 
 # The footprint column is named for the ACTIVE referral dataset's year
 # (LocalReferrals2015, LocalReferrals2022, ...) so exports stay self-describing.
-function Get-PgGroupCols { @('GroupName', 'State', 'TherapistsInZip', 'RosterSize', "LocalReferrals$($script:RmYear)", 'GroupPacId') }
+function Get-PgGroupCols { @('Rank', 'GroupName', 'State', 'TherapistsInZip', 'RosterSize', "LocalReferrals$($script:RmYear)", 'SharePct', 'GroupPacId') }
 $script:PgRosterCols = @('GroupName', 'GroupPacId', 'NPI', 'FirstName', 'LastName', 'Specialty', 'InThisZip')
 $script:PgFootprintSources = @{}   # group PAC ID -> top-sources array (after footprint run)
 $script:PgFootprintYear = $null    # data year the footprint was computed from
@@ -1466,13 +1474,16 @@ $ui.PgRunButton.Add_Click({
             $pg = $result[0]
             $script:PgResult = $pg
             $script:PgFootprintSources = @{}   # cleared for the new ZIP
+            $script:PgBench = $null
+            $script:PgViewRows = @()
+            $script:PgViewKind = 'roster'
+            $ui.PgViewCombo.SelectedIndex = 0
+            $ui.PgViewCombo.IsEnabled = $false
             $groups = @($pg.Groups)
             $rosters = @($pg.Rosters)
             $ui.PgGroupGrid.ItemsSource = (ConvertTo-DataTable -Rows $groups -Columns (Get-PgGroupCols)).DefaultView
-            $ui.PgRosterGrid.ItemsSource = (ConvertTo-DataTable -Rows $rosters -Columns $script:PgRosterCols).DefaultView
-            $ui.PgRosterLabel.Text = 'Therapist roster — all groups (select a group above to filter):'
+            Update-PgBottomView   # binds the roster view and syncs export state
             $ui.PgExportGroupsButton.IsEnabled = ($groups.Count -gt 0)
-            $ui.PgExportRosterButton.IsEnabled = ($rosters.Count -gt 0)
             # The footprint bridge needs the Referral map (shared-patient) dataset.
             $ui.PgFootprintButton.IsEnabled = ($groups.Count -gt 0 -and (Get-RmStatus).DatasetReady)
             $ui.PgSummary.Text = ("ZIP $($pg.Zip): $($pg.TherapistCount) individual therapists found; " +
@@ -1488,37 +1499,76 @@ $ui.PgRunButton.Add_Click({
         }
 })
 
-$ui.PgGroupGrid.Add_SelectionChanged({
+# What the lower table shows: therapist roster, the selected group's referral
+# sources, or its missed sources. One helper keeps the grid, label, and export
+# state consistent no matter which control changed.
+$script:PgBench = $null          # Get-RmGroupBenchmark result after the benchmark runs
+$script:PgViewRows = @()         # rows currently shown below (whatever the view)
+$script:PgViewKind = 'roster'
+
+function Update-PgBottomView {
     if (-not $script:PgResult) { return }
-    $row = $ui.PgGroupGrid.SelectedItem
-    if ($row -is [System.Data.DataRowView]) {
-        $pac = [string]$row.Row['GroupPacId']
-        $name = [string]$row.Row['GroupName']
-        $filtered = @($script:PgResult.Rosters | Where-Object { $_.GroupPacId -eq $pac })
-        $ui.PgRosterGrid.ItemsSource = (ConvertTo-DataTable -Rows $filtered -Columns $script:PgRosterCols).DefaultView
-        $label = "Roster for $name — $($filtered.Count) therapist(s)."
-        # If a footprint was computed, show THIS group's top historical sources, keyed
-        # by the unique PAC ID (group names are not unique).
-        if ($script:PgFootprintSources.ContainsKey($pac)) {
+    $sel = $ui.PgGroupGrid.SelectedItem
+    $pac = $null; $name = $null
+    if ($sel -is [System.Data.DataRowView]) {
+        $pac = [string]$sel.Row['GroupPacId']
+        $name = [string]$sel.Row['GroupName']
+    }
+    $view = $ui.PgViewCombo.SelectedIndex
+    if ($view -gt 0 -and -not $script:PgBench) { $view = 0 }   # sources views need the benchmark
+    $fpY = if ($script:PgFootprintYear) { $script:PgFootprintYear } else { $script:RmYear }
+
+    if ($view -eq 1) {
+        $script:PgViewKind = 'sources'
+        $rows = if ($pac) { @($script:PgBench.Edges | Where-Object { $_.Bucket -eq $pac }) }
+                else { @($script:PgBench.Edges) }
+        $script:PgViewRows = $rows
+        $ui.PgRosterGrid.ItemsSource = (ConvertTo-DataTable -Rows $rows `
+            -Columns @('GroupName','SourceNPI','SourceName','SourceSpecialty','SharedPatients','MembersFed')).DefaultView
+        $ui.PgRosterLabel.Text = if ($pac) { "Referral sources feeding $name ($fpY) — $($rows.Count):" }
+                                 else { "Referral sources by group ($fpY) — select a group to filter ($($rows.Count) rows):" }
+    } elseif ($view -eq 2) {
+        $script:PgViewKind = 'missed'
+        if (-not $pac) {
+            $script:PgViewRows = @()
+            $ui.PgRosterGrid.ItemsSource = $null
+            $ui.PgRosterLabel.Text = 'Missed sources: select a group above first.'
+        } else {
+            $rows = @(Get-RmGroupMissedSources -Edges @($script:PgBench.Edges) -Bucket $pac)
+            $script:PgViewRows = $rows
+            $ui.PgRosterGrid.ItemsSource = (ConvertTo-DataTable -Rows $rows `
+                -Columns @('SourceNPI','SourceName','SourceSpecialty','PatientsToOtherGroups','GroupsFed')).DefaultView
+            $ui.PgRosterLabel.Text = "Missed sources — feeding OTHER groups but not $name ($fpY) — $($rows.Count):"
+        }
+    } else {
+        $script:PgViewKind = 'roster'
+        $rows = if ($pac) { @($script:PgResult.Rosters | Where-Object { $_.GroupPacId -eq $pac }) }
+                else { @($script:PgResult.Rosters) }
+        $script:PgViewRows = $rows
+        $ui.PgRosterGrid.ItemsSource = (ConvertTo-DataTable -Rows $rows -Columns $script:PgRosterCols).DefaultView
+        $label = if ($pac) { "Roster for $name — $($rows.Count) therapist(s)." }
+                 else { 'Therapist roster — all groups (select a group above to filter):' }
+        if ($pac -and $script:PgFootprintSources.ContainsKey($pac)) {
             $tops = @($script:PgFootprintSources[$pac] | Select-Object -First 3 |
                 ForEach-Object { "$($_.SourceName) ($($_.SharedPatients))" })
-            $fpY = if ($script:PgFootprintYear) { $script:PgFootprintYear } else { $script:RmYear }
-            if ($tops.Count) { $label += "  Top $fpY sources for local therapists: " + ($tops -join ', ') + '.' }
+            if ($tops.Count) { $label += "  Top $fpY sources: " + ($tops -join ', ') + '.' }
         }
         $ui.PgRosterLabel.Text = $label
-    } else {
-        $ui.PgRosterGrid.ItemsSource = (ConvertTo-DataTable -Rows @($script:PgResult.Rosters) -Columns $script:PgRosterCols).DefaultView
-        $ui.PgRosterLabel.Text = 'Therapist roster — all groups (select a group above to filter):'
     }
-})
+    $ui.PgExportRosterButton.IsEnabled = (@($script:PgViewRows).Count -gt 0)
+}
+
+$ui.PgGroupGrid.Add_SelectionChanged({ Update-PgBottomView })
+$ui.PgViewCombo.Add_SelectionChanged({ if ($script:PgResult) { Update-PgBottomView } })
 
 $ui.PgFootprintButton.Add_Click({
     if ($script:Busy -or -not $script:PgResult) { return }
-    # Roll each group's LOCAL (in-ZIP) therapists' inbound volume (from the active
-    # referral dataset's year) up to the
+    # Roll each group's LOCAL (in-ZIP) therapists' inbound volume up to the
     # group. Key by GroupPacId (UNIQUE) — group names are not unique, and one
     # therapist can be in several groups, so the map value is a LIST of PAC IDs.
     $map = @{}
+    $names = @{}
+    foreach ($g in @($script:PgResult.Groups)) { $names[[string]$g.GroupPacId] = [string]$g.GroupName }
     foreach ($r in $script:PgResult.Rosters) {
         if ($r.InThisZip -eq 'Y') {
             $npi = [string]$r.NPI
@@ -1526,33 +1576,48 @@ $ui.PgFootprintButton.Add_Click({
             if (-not $map[$npi].Contains([string]$r.GroupPacId)) { $map[$npi].Add([string]$r.GroupPacId) }
         }
     }
-    if ($map.Count -eq 0) { Show-ErrorBox 'No in-ZIP therapists to compute a footprint for.'; return }
+    if ($map.Count -eq 0) { Show-ErrorBox 'No in-ZIP therapists to compute a benchmark for.'; return }
     $fpYear = $script:RmYear
-    Invoke-Async -Kind 'pg-footprint' -Params @{ RmModulePath = $script:RmModulePath; Map = $map } `
-        -BusyMessage "Rolling $fpYear referral volume up to each practice group (scanning $script:RmRowsLabel shared-patient pairs)..." `
-        -WorkerScript 'param($RmModulePath, $Map) Import-Module $RmModulePath; Get-RmInboundByBucket -TargetToBucket $Map -TopPerBucket 10' `
+    Invoke-Async -Kind 'pg-benchmark' -Params @{ RmModulePath = $script:RmModulePath; Map = $map; Names = $names } `
+        -BusyMessage "Benchmarking the groups on $fpYear referral volume (scanning $script:RmRowsLabel shared-patient pairs, then naming the sources)..." `
+        -WorkerScript 'param($RmModulePath, $Map, $Names) Import-Module $RmModulePath; Get-RmGroupBenchmark -TargetToBucket $Map -BucketNames $Names' `
         -OnDone {
             param($result)
-            $fp = @($result)
-            $byPac = @{}
-            foreach ($b in $fp) { $byPac[$b.Bucket] = $b; $script:PgFootprintSources[$b.Bucket] = @($b.TopSources) }
+            $bench = $result[0]
+            $script:PgBench = $bench
             $script:PgFootprintYear = $fpYear
-            # Augment each group row (matched by unique PAC ID) and rebind.
-            $augmented = foreach ($g in @($script:PgResult.Groups)) {
-                $val = if ($byPac.ContainsKey($g.GroupPacId)) { $byPac[$g.GroupPacId].SharedPatients } else { 0 }
-                $g | Add-Member -NotePropertyName "LocalReferrals$fpYear" -NotePropertyValue $val -Force -PassThru
+            $byPac = @{}
+            foreach ($b in @($bench.Buckets)) { $byPac[$b.Bucket] = $b }
+            # Top-3 label sources per group from the full edge list.
+            $script:PgFootprintSources = @{}
+            foreach ($b in @($bench.Buckets)) {
+                $script:PgFootprintSources[$b.Bucket] = @($bench.Edges |
+                    Where-Object { $_.Bucket -eq $b.Bucket } | Select-Object -First 3)
             }
-            $script:PgResult.Groups = @($augmented)
-            $ui.PgGroupGrid.ItemsSource = (ConvertTo-DataTable -Rows @($augmented) -Columns (Get-PgGroupCols)).DefaultView
-            $withVol = @($fp | Where-Object { $_.SharedPatients -gt 0 }).Count
-            $ui.PgSummary.Text = ("$fpYear referral footprint added: $withVol group(s) had local therapists with " +
-                "shared-patient volume. Select a group to see its top sources. Reminder: $fpYear vintage; a source " +
-                'is a shared-patient proxy (labs/hospitals appear too — read by specialty).')
-            Set-Status 'Referral footprint computed.'
+            # Augment each group row (matched by unique PAC ID), then show the
+            # LEADERBOARD: groups ranked by rolled-up referral volume.
+            $augmented = foreach ($g in @($script:PgResult.Groups)) {
+                $hit = if ($byPac.ContainsKey($g.GroupPacId)) { $byPac[$g.GroupPacId] } else { $null }
+                $g | Add-Member -NotePropertyName 'Rank' -NotePropertyValue $(if ($hit) { $hit.Rank } else { $null }) -Force
+                $g | Add-Member -NotePropertyName 'SharePct' -NotePropertyValue $(if ($hit) { $hit.SharePct } else { 0 }) -Force
+                $g | Add-Member -NotePropertyName "LocalReferrals$fpYear" -NotePropertyValue $(if ($hit) { $hit.InboundPatients } else { 0 }) -Force -PassThru
+            }
+            $sorted = @($augmented | Sort-Object -Property @{Expression = "LocalReferrals$fpYear"; Descending = $true},
+                                                           @{Expression = 'GroupName'; Descending = $false})
+            $script:PgResult.Groups = $sorted
+            $ui.PgGroupGrid.ItemsSource = (ConvertTo-DataTable -Rows $sorted -Columns (Get-PgGroupCols)).DefaultView
+            $ui.PgViewCombo.IsEnabled = $true
+            Update-PgBottomView
+            $withVol = @($bench.Buckets | Where-Object { $_.InboundPatients -gt 0 }).Count
+            $top = if (@($bench.Buckets).Count -gt 0) { @($bench.Buckets)[0] } else { $null }
+            $ui.PgSummary.Text = ("$fpYear group benchmark: $withVol group(s) had measured referral volume." +
+                $(if ($top -and $top.InboundPatients -gt 0) { " #1 is $($top.GroupName) with $('{0:N0}' -f $top.InboundPatients) patients ($($top.SharePct)% of measured group volume) from $($top.Sources) source(s)." } else { '' }) +
+                " Use 'Show' to flip the lower table between each group's roster, its referral sources, and its missed sources. Reminder: $fpYear vintage; a source is a shared-patient proxy (labs/hospitals appear too — read by specialty).")
+            Set-Status 'Group benchmark computed.'
         } `
         -OnFail {
             param($message)
-            Show-ErrorBox "Footprint failed: $message"
+            Show-ErrorBox "Group benchmark failed: $message"
         }
 })
 
@@ -1564,10 +1629,27 @@ $ui.PgExportGroupsButton.Add_Click({
 })
 
 $ui.PgExportRosterButton.Add_Click({
-    if (-not $script:PgResult) { return }
-    Export-PgWithDialog -Rows @($script:PgResult.Rosters) `
-        -SuggestedName "practice-group-rosters-$($script:PgResult.Zip.TrimEnd('*')).csv" `
-        -Description "Therapist rosters for practice groups in ZIP $($script:PgResult.Zip) (CMS clinic-group reassignment data)"
+    if (-not $script:PgResult -or @($script:PgViewRows).Count -eq 0) { return }
+    $zipTag = $script:PgResult.Zip.TrimEnd('*')
+    switch ($script:PgViewKind) {
+        'sources' {
+            Export-RmWithDialog -Rows @($script:PgViewRows) `
+                -SuggestedName "group-referral-sources-$zipTag.csv" `
+                -Description "Referral sources feeding practice groups in ZIP $($script:PgResult.Zip), rolled up from member therapists ($script:RmDataLabel)" `
+                -Notes @($script:PgBench.Notes)
+        }
+        'missed' {
+            Export-RmWithDialog -Rows @($script:PgViewRows) `
+                -SuggestedName "group-missed-sources-$zipTag.csv" `
+                -Description "Sources feeding OTHER practice groups in ZIP $($script:PgResult.Zip) but not the selected group ($script:RmDataLabel)" `
+                -Notes @($script:PgBench.Notes)
+        }
+        default {
+            Export-PgWithDialog -Rows @($script:PgViewRows) `
+                -SuggestedName "practice-group-rosters-$zipTag.csv" `
+                -Description "Therapist rosters for practice groups in ZIP $($script:PgResult.Zip) (CMS clinic-group reassignment data)"
+        }
+    }
 })
 
 # ---------------------------------------------------------------------------

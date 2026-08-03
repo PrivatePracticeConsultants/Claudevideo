@@ -203,12 +203,28 @@ only one or two local therapists is a multi-site chain, not a big local clinic �
 rank by `TherapistsInZip` for local size. And this is *who practices together*,
 not *who refers to whom*.
 
-**Optional — "Add … referral footprint":** if you have a dataset on the Referral
-map tab, this button (labeled with the active year) fills in a `LocalReferrals<year>` column showing each
-group's historical referral pull (its local therapists' 2015 shared-patient
-volume, added up). Click a group afterward to see its top referral sources. It's
-how a private practice — invisible in the referral map by itself — gets a
-referral footprint.
+**The group leaderboard — "Add referral benchmark":** if you have a dataset on
+the Referral map tab, this button rolls every group's *local* therapists'
+referral volume up to the group and turns the top table into a **leaderboard**:
+each group gets a `Rank`, a `LocalReferrals<year>` patient count, and a
+`SharePct` (its slice of all the groups' measured volume). This directly
+answers *"which provider groups receive the most referrals here?"*
+
+Then use the **Show** dropdown to flip the lower table, per selected group:
+
+- **Therapist roster** — who's on the team (the default view).
+- **Referral sources** — every provider feeding that group, with patients and
+  `MembersFed` (how many of the group's therapists that source feeds — several
+  means a deep relationship, not one friendly doctor).
+- **Missed sources** — providers feeding *other* groups in the ZIP but not
+  this one, ranked by the volume they send elsewhere. Pick your own group and
+  this is your outreach list.
+
+**Export view…** saves whatever the lower table currently shows, with the
+methodology file. Two honest caveats: a group's *organization* NPI can carry
+extra volume not counted here (benchmark it on the Practice benchmark tab),
+and "missed" can also mean the relationship exists but fell under the
+11-patient privacy floor.
 
 ### Tab 7 — Provider lookup
 *"Tell me everything about this one provider."*

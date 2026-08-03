@@ -1257,6 +1257,181 @@ function Get-RmInboundByBucket {
     }
 }
 
+function Get-RmGroupBenchmark {
+    <#
+    .SYNOPSIS
+      Group-level referral benchmark: rolls inbound shared-patient volume up
+      from individual member NPIs to their PRACTICE GROUPS, ranks the groups,
+      and returns the full source->group edge list so each group's feeders
+      (and the sources it is missing) can be examined and exported.
+    .PARAMETER TargetToBucket
+      Hashtable: member NPI (string) -> group key, or a LIST of group keys
+      when one NPI belongs to several groups (credited to each). Use a stable
+      unique key (the group PAC ID), not a display name.
+    .PARAMETER BucketNames
+      Optional hashtable: group key -> display name for the output rows.
+    .NOTES
+      Rank and share compare the buckets you passed in — typically each
+      group's IN-ZIP members — so a national chain is measured by its local
+      presence, not its nationwide roster.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable]$TargetToBucket,
+        [hashtable]$BucketNames = @{},
+        [switch]$SkipEnrichment
+    )
+    $info = Get-RmDatasetInfo
+    if (-not $info.Ready) {
+        throw "No shared-patient dataset is available yet (Referral map tab: download the CMS dataset or import a CareSet file)."
+    }
+    $targets = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($k in $TargetToBucket.Keys) { [void]$targets.Add([string]$k) }
+    if ($targets.Count -eq 0) {
+        return [pscustomobject]@{ Year = $info.Year; Label = $info.Label; Buckets = @(); Edges = @(); Notes = @() }
+    }
+    $edges = [RmEngine]::ScanInbound($info.Path, $targets, $info.Format)
+
+    # bucket -> aggregate; (bucket, source) -> patients + distinct members fed.
+    $buckets = @{}
+    $bySrc = @{}
+    foreach ($e in $edges) {
+        foreach ($label in @($TargetToBucket[$e.TargetNpi])) {
+            if (-not $label) { continue }
+            $lbl = [string]$label
+            if (-not $buckets.ContainsKey($lbl)) {
+                $buckets[$lbl] = [pscustomobject]@{
+                    Patients = 0
+                    Sources = (New-Object 'System.Collections.Generic.HashSet[string]')
+                    Members = (New-Object 'System.Collections.Generic.HashSet[string]')
+                }
+            }
+            $b = $buckets[$lbl]
+            $b.Patients += $e.BeneCount
+            [void]$b.Sources.Add($e.SourceNpi)
+            [void]$b.Members.Add($e.TargetNpi)
+            $key = $lbl + '|' + $e.SourceNpi
+            if (-not $bySrc.ContainsKey($key)) {
+                $bySrc[$key] = [pscustomobject]@{
+                    Bucket = $lbl; SourceNpi = $e.SourceNpi; Patients = 0
+                    Members = (New-Object 'System.Collections.Generic.HashSet[string]')
+                }
+            }
+            $bySrc[$key].Patients += $e.BeneCount
+            [void]$bySrc[$key].Members.Add($e.TargetNpi)
+        }
+    }
+
+    # Enrich source names/specialties, biggest feeders first (cached on disk).
+    $detail = @{}
+    if (-not $SkipEnrichment -and $bySrc.Count -gt 0) {
+        $volBySrc = @{}
+        foreach ($v in $bySrc.Values) {
+            if (-not $volBySrc.ContainsKey($v.SourceNpi)) { $volBySrc[$v.SourceNpi] = 0 }
+            $volBySrc[$v.SourceNpi] += $v.Patients
+        }
+        $enrichList = @($volBySrc.GetEnumerator() | Sort-Object Value -Descending |
+            Select-Object -First $script:RmConfig.EnrichCap | ForEach-Object { $_.Key })
+        if ($volBySrc.Count -gt @($enrichList).Count) {
+            Write-Warning ("Named the top $(@($enrichList).Count) of $($volBySrc.Count) distinct sources " +
+                "by volume; the rest show NPI only. Raise with Set-RmConfig -EnrichCap.")
+        }
+        $detail = Get-RmProviderDetail -Npi @($enrichList)
+    }
+
+    # Ranked group table with share of the measured group volume.
+    $total = 0; foreach ($b in $buckets.Values) { $total += $b.Patients }
+    $bucketRows = New-Object System.Collections.Generic.List[object]
+    $rank = 0
+    foreach ($lbl in ($buckets.Keys | Sort-Object -Property @{Expression = { $buckets[$_].Patients }; Descending = $true},
+                                                            @{Expression = { $_ }; Descending = $false})) {
+        $rank++
+        $b = $buckets[$lbl]
+        $bucketRows.Add([pscustomobject]@{
+            Rank            = $rank
+            Bucket          = $lbl
+            GroupName       = if ($BucketNames.ContainsKey($lbl)) { [string]$BucketNames[$lbl] } else { $lbl }
+            InboundPatients = $b.Patients
+            SharePct        = if ($total -gt 0) { [math]::Round(100.0 * $b.Patients / $total, 1) } else { 0 }
+            Sources         = $b.Sources.Count
+            MembersWithVolume = $b.Members.Count
+        })
+    }
+
+    $edgeRows = @($bySrc.Values | ForEach-Object {
+        $d = if ($detail.ContainsKey($_.SourceNpi)) { $detail[$_.SourceNpi] } else { $null }
+        [pscustomobject]@{
+            Bucket          = $_.Bucket
+            GroupName       = if ($BucketNames.ContainsKey($_.Bucket)) { [string]$BucketNames[$_.Bucket] } else { $_.Bucket }
+            SourceNPI       = $_.SourceNpi
+            SourceName      = if ($d) { $d.Name } else { '' }
+            SourceSpecialty = if ($d) { $d.Specialty } else { '' }
+            SharedPatients  = $_.Patients
+            MembersFed      = $_.Members.Count
+        }
+    } | Sort-Object -Property @{Expression = 'SharedPatients'; Descending = $true},
+                              @{Expression = 'SourceNPI'; Descending = $false})
+
+    $notes = @(Get-RmMethodologyNotes -Info $info) + @(
+        ''
+        "GROUP BENCHMARK METHOD: inbound shared-patient volume of each group's member therapist NPIs (as passed in — typically the IN-ZIP members), summed per group on $($info.Label)."
+        'Rank and SharePct compare the listed groups against each other; the share is of MEASURED group volume (sum semantics: a patient sent by three sources counts three times).'
+        'MembersFed = how many of the group''s member therapists that source fed (11+ patient pairs each). A source feeding several members is a deep relationship, not a fluke.'
+        'A group''s ORGANIZATION NPI can carry additional volume not shown here (benchmark it separately on the Practice benchmark tab); solo therapists without a group are not in this table.'
+    ) | Where-Object { $null -ne $_ }
+
+    # .ToArray(), not @($list) — see the trend function: the @() binder can
+    # throw a spurious 'Argument types do not match' on a generic List here.
+    [pscustomobject]@{
+        Year    = $info.Year
+        Label   = $info.Label
+        Buckets = $bucketRows.ToArray()
+        Edges   = $edgeRows
+        Notes   = @($notes)
+    }
+}
+
+function Get-RmGroupMissedSources {
+    <#
+    .SYNOPSIS
+      From a Get-RmGroupBenchmark edge list: the sources feeding OTHER groups
+      with NO measured pair into the given group — the group-level outreach
+      list. "Missed" can also mean a pair exists but fell under the 11-patient
+      privacy floor.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Edges,
+        [Parameter(Mandatory)][string]$Bucket
+    )
+    $mine = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($e in @($Edges | Where-Object { $_.Bucket -eq $Bucket })) { [void]$mine.Add($e.SourceNPI) }
+    $agg = @{}
+    foreach ($e in @($Edges | Where-Object { $_.Bucket -ne $Bucket })) {
+        if ($mine.Contains($e.SourceNPI)) { continue }
+        if (-not $agg.ContainsKey($e.SourceNPI)) {
+            $agg[$e.SourceNPI] = [pscustomobject]@{
+                SourceNPI = $e.SourceNPI; SourceName = $e.SourceName
+                SourceSpecialty = $e.SourceSpecialty
+                PatientsToOtherGroups = 0
+                Groups = (New-Object 'System.Collections.Generic.HashSet[string]')
+            }
+        }
+        $agg[$e.SourceNPI].PatientsToOtherGroups += [int]$e.SharedPatients
+        [void]$agg[$e.SourceNPI].Groups.Add($e.Bucket)
+    }
+    @($agg.Values | ForEach-Object {
+        [pscustomobject]@{
+            SourceNPI             = $_.SourceNPI
+            SourceName            = $_.SourceName
+            SourceSpecialty       = $_.SourceSpecialty
+            PatientsToOtherGroups = $_.PatientsToOtherGroups
+            GroupsFed             = $_.Groups.Count
+        }
+    } | Sort-Object -Property @{Expression = 'PatientsToOtherGroups'; Descending = $true},
+                              @{Expression = 'SourceNPI'; Descending = $false})
+}
+
 function Get-RmProviderReferralActivity {
     <#
     .SYNOPSIS
@@ -2119,7 +2294,8 @@ Export-ModuleMember -Function @(
     'Get-RmDatasetInfo', 'Get-RmAvailableDatasets', 'Set-RmActiveDataset',
     'Save-RmDataset', 'Import-RmDataset',
     'Find-RmClinic', 'Find-RmPractice', 'Get-RmProviderDetail',
-    'Get-RmReferralMap', 'Get-RmInboundByBucket', 'Get-RmProviderReferralActivity',
+    'Get-RmReferralMap', 'Get-RmInboundByBucket', 'Get-RmGroupBenchmark', 'Get-RmGroupMissedSources',
+    'Get-RmProviderReferralActivity',
     'Get-RmProviderTrend', 'Get-RmPracticeBenchmark', 'Get-RmSourceSpecialtyMix',
     'Get-RmReferralGeography', 'Export-RmReferralMapHtml',
     'Export-RmResult', 'Clear-RmStaleTemp'
