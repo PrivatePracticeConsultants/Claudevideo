@@ -129,10 +129,10 @@ $xaml = @'
       </Grid>
     </Border>
 
-    <TabControl Grid.Row="1" x:Name="Tabs" Background="White" BorderBrush="#D5DBE1">
+    <TabControl Grid.Row="1" x:Name="Tabs" Background="White" BorderBrush="#D5DBE1" Padding="6">
 
       <!-- ============ Search tab ============ -->
-      <TabItem Header="  Search providers  ">
+      <TabItem Header="Search providers">
         <Grid Margin="10">
           <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -179,7 +179,7 @@ $xaml = @'
       </TabItem>
 
       <!-- ============ Batch check tab ============ -->
-      <TabItem Header="  Batch NPI check  ">
+      <TabItem Header="Batch NPI check">
         <Grid Margin="10">
           <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -187,7 +187,7 @@ $xaml = @'
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
           </Grid.RowDefinitions>
-          <TextBlock Grid.Row="0" TextWrapping="Wrap" Foreground="#333" Margin="0,0,0,6"
+          <TextBlock Grid.Row="0" TextWrapping="Wrap" Foreground="#4A5560" Margin="0,0,0,8"
               Text="Paste NPIs below (any format — one per line, comma-separated, or a whole spreadsheet column), or load a file. Each NPI is validated and checked against the current CMS eligible-to-order/refer list. Use this to verify the referring providers from your own EMR or billing records."/>
           <Grid Grid.Row="1">
             <Grid.ColumnDefinitions>
@@ -213,7 +213,7 @@ $xaml = @'
       </TabItem>
 
       <!-- ============ Changes tab ============ -->
-      <TabItem Header="  What changed  ">
+      <TabItem Header="What changed">
         <Grid Margin="10">
           <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -248,7 +248,7 @@ $xaml = @'
         </Grid>
       </TabItem>
       <!-- ============ Referral map tab ============ -->
-      <TabItem x:Name="RmTab" Header="  Referral map (2015)  ">
+      <TabItem x:Name="RmTab" Header="Referral map (2015)">
         <Grid Margin="10">
           <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -258,7 +258,7 @@ $xaml = @'
             <RowDefinition Height="6*"/>
             <RowDefinition Height="Auto"/>
           </Grid.RowDefinitions>
-          <TextBlock Grid.Row="0" x:Name="RmIntroText" TextWrapping="Wrap" Foreground="#333" Margin="0,0,0,6"
+          <TextBlock Grid.Row="0" x:Name="RmIntroText" TextWrapping="Wrap" Foreground="#4A5560" Margin="0,0,0,8"
               Text="Enter a ZIP code to see which providers historically fed the most Medicare patients into each outpatient rehab clinic in that area. Built from the newest public CMS shared-patient release (Jan–Sep 2015, 30-day window) joined with the live NPPES registry — it maps the structure of the referral market, not current volumes."/>
           <WrapPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,6">
             <TextBlock Text="ZIP:" VerticalAlignment="Center" Margin="0,0,6,0"/>
@@ -301,7 +301,7 @@ $xaml = @'
       </TabItem>
 
       <!-- ============ Practice benchmark tab ============ -->
-      <TabItem Header="  Practice benchmark  ">
+      <TabItem Header="Practice benchmark">
         <Grid Margin="10">
           <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -313,7 +313,7 @@ $xaml = @'
             <RowDefinition Height="4*"/>
             <RowDefinition Height="Auto"/>
           </Grid.RowDefinitions>
-          <TextBlock Grid.Row="0" TextWrapping="Wrap" Foreground="#333" Margin="0,0,0,6"
+          <TextBlock Grid.Row="0" TextWrapping="Wrap" Foreground="#4A5560" Margin="0,0,0,8"
               Text="Search for a practice (or paste its NPI), pick it from the results, and benchmark it against every other outpatient rehab provider in its ZIP: its rank, its share of the region's referral volume, and the sources feeding its competitors but not it. Uses whichever dataset is active on the Referral map tab."/>
           <WrapPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,6">
             <TextBlock Text="Practice name or NPI:" VerticalAlignment="Center" Margin="0,0,6,0"/>
@@ -353,7 +353,7 @@ $xaml = @'
       </TabItem>
 
       <!-- ============ Practice groups tab ============ -->
-      <TabItem Header="  Practice groups  ">
+      <TabItem Header="Practice groups">
         <Grid Margin="10">
           <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -363,7 +363,7 @@ $xaml = @'
             <RowDefinition Height="6*"/>
             <RowDefinition Height="Auto"/>
           </Grid.RowDefinitions>
-          <TextBlock Grid.Row="0" TextWrapping="Wrap" Foreground="#333" Margin="0,0,0,6"
+          <TextBlock Grid.Row="0" TextWrapping="Wrap" Foreground="#4A5560" Margin="0,0,0,8"
               Text="Enter a ZIP to see the outpatient-rehab PRACTICE GROUPS operating there, each with its therapist roster. Built from the CMS clinic-group reassignment file (current, updated ~monthly) joined with the live NPPES registry. This is who practices where NOW — it fills the gap where private-practice clinics were invisible in the referral-map tab."/>
           <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,6">
             <TextBlock Text="ZIP:" VerticalAlignment="Center" Margin="0,0,6,0"/>
@@ -399,7 +399,7 @@ $xaml = @'
       </TabItem>
 
       <!-- ============ Provider 360 lookup tab ============ -->
-      <TabItem Header="  Provider lookup  ">
+      <TabItem Header="Provider lookup">
         <Grid Margin="10">
           <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -410,7 +410,7 @@ $xaml = @'
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
           </Grid.RowDefinitions>
-          <TextBlock Grid.Row="0" TextWrapping="Wrap" Foreground="#333" Margin="0,0,0,6"
+          <TextBlock Grid.Row="0" TextWrapping="Wrap" Foreground="#4A5560" Margin="0,0,0,8"
               Text="Enter any NPI for a single-provider profile that pulls together every dataset in this app: current eligibility and specialty, practice-group memberships, and their historical referral activity (who sent them patients, and who they sent onward). Optional data is shown when downloaded on the other tabs."/>
           <WrapPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,6">
             <TextBlock Text="NPI:" VerticalAlignment="Center" Margin="0,0,6,0"/>
@@ -449,7 +449,7 @@ $xaml = @'
       </TabItem>
 
       <!-- ============ Watchlist tab ============ -->
-      <TabItem Header="  Watchlist  ">
+      <TabItem Header="Watchlist">
         <Grid Margin="10">
           <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -457,7 +457,7 @@ $xaml = @'
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
           </Grid.RowDefinitions>
-          <TextBlock Grid.Row="0" TextWrapping="Wrap" Foreground="#333" Margin="0,0,0,6"
+          <TextBlock Grid.Row="0" TextWrapping="Wrap" Foreground="#4A5560" Margin="0,0,0,8"
               Text="Save your referring providers' NPIs once, then after each bi-weekly CMS update click Check to see — for just YOUR referrers — their current eligibility and what changed since the previous update (dropped, flags flipped, or renamed). Turns the one-time batch check into ongoing monitoring."/>
           <Grid Grid.Row="1" Margin="0,0,0,6">
             <Grid.ColumnDefinitions>
@@ -523,6 +523,35 @@ foreach ($name in @(
 )) {
     $ui[$name] = $window.FindName($name)
     if (-not $ui[$name]) { throw "Internal error: UI element '$name' not found." }
+}
+
+# Professional number display in every grid: thousands separators and right
+# alignment for numeric columns, applied as columns auto-generate. Purely
+# cosmetic and wrapped accordingly — a formatting quirk must never break the
+# data bind itself.
+$script:RightAlignStyle = $null
+try {
+    $script:RightAlignStyle = New-Object System.Windows.Style([System.Windows.Controls.TextBlock])
+    $script:RightAlignStyle.Setters.Add((New-Object System.Windows.Setter(
+        [System.Windows.Controls.TextBlock]::TextAlignmentProperty, [System.Windows.TextAlignment]::Right)))
+} catch { }
+$script:NumberFormatHandler = {
+    param($sender, $e)
+    try {
+        if ($e.Column -isnot [System.Windows.Controls.DataGridTextColumn]) { return }
+        $t = $e.PropertyType
+        $isInt = ($t -eq [int] -or $t -eq [long])
+        $isDouble = ($t -eq [double])
+        if (-not ($isInt -or $isDouble)) { return }
+        if ($e.PropertyName -eq 'Year') { return }   # "2,022" would be silly
+        $e.Column.Binding.StringFormat = if ($isDouble) { 'N1' } else { 'N0' }
+        if ($script:RightAlignStyle) { $e.Column.ElementStyle = $script:RightAlignStyle }
+    } catch { }
+}
+foreach ($gname in @('SearchGrid', 'BatchGrid', 'ChangesGrid', 'RmClinicGrid', 'RmSourceGrid',
+                     'BmSearchGrid', 'BmRegionGrid', 'BmMissedGrid', 'PgGroupGrid', 'PgRosterGrid',
+                     'LkInboundGrid', 'LkOutboundGrid', 'WlGrid')) {
+    $ui[$gname].Add_AutoGeneratingColumn($script:NumberFormatHandler)
 }
 
 # ---------------------------------------------------------------------------
@@ -981,7 +1010,7 @@ function Update-RmStatus {
     $script:RmYear = [int]$status.Year
     $script:RmDataLabel = [string]$status.Label
     $script:RmRowsLabel = if ($status.RowCount -gt 0) { '~{0:N0}' -f $status.RowCount } else { '~35M' }
-    $ui.RmTab.Header = "  Referral map ($($status.Year))  "
+    $ui.RmTab.Header = "Referral map ($($status.Year))"
     $ui.PgFootprintButton.Content = "Add $($status.Year) referral footprint"
     # Dataset switcher: one item per dataset on disk, active one selected.
     # Guarded so the programmatic rebuild can't trigger a switch of its own.
