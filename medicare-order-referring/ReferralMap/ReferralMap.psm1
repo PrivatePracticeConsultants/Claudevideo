@@ -2170,6 +2170,183 @@ function Get-RmReferralGeography {
     }
 }
 
+function Get-RmSourceAnalysis {
+    <#
+    .SYNOPSIS
+      In-depth referral-source analysis for ONE organization/provider NPI on
+      the active dataset: every inbound source ranked with share and
+      cumulative share, geography (distance from the practice), specialty
+      mix, concentration metrics (top-1/top-5 dependence, HHI), and — on
+      CareSet data — a referral-lag profile. Feed the result to
+      Export-RmSourceReportHtml for the client-ready report.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidatePattern('^\d{10}$')][string]$Npi,
+        [string]$CentroidPath
+    )
+    $info = Get-RmDatasetInfo
+    if (-not $info.Ready) {
+        throw "No shared-patient dataset is available yet (Referral map tab: download the CMS dataset or import a CareSet file)."
+    }
+    $isHop = $info.Source -eq 'hop-teaming'
+    $centroids = Get-RmCentroids $CentroidPath
+
+    # The practice itself.
+    $resp = Invoke-RmNppes ('number={0}' -f $Npi)
+    $hits = @(Get-RmProp $resp 'results')
+    if ($hits.Count -eq 0) { throw "NPI $Npi was not found in the NPPES registry (deactivated, or a typo)." }
+    $r0 = $hits[0]
+    $basic = Get-RmProp $r0 'basic'
+    $isOrg = ((Get-RmProp $r0 'enumeration_type') -eq 'NPI-2')
+    $pracName = if ($isOrg) { [string](Get-RmProp $basic 'organization_name') }
+                else { ('{0} {1}' -f (Get-RmProp $basic 'first_name'), (Get-RmProp $basic 'last_name')).Trim() }
+    $loc = @(@(Get-RmProp $r0 'addresses') | Where-Object { (Get-RmProp $_ 'address_purpose') -eq 'LOCATION' })
+    $postal = if ($loc.Count) { [string](Get-RmProp $loc[0] 'postal_code') } else { '' }
+    $pracZip = if ($postal.Length -ge 5) { $postal.Substring(0, 5) } else { '' }
+    $pracLoc = if ($pracZip -and $centroids.ContainsKey($pracZip)) { $centroids[$pracZip] } else { $null }
+
+    Write-Verbose "Scanning $($info.Label) for all inbound pairs of $Npi..."
+    $set = New-Object 'System.Collections.Generic.HashSet[string]'
+    [void]$set.Add($Npi)
+    $edges = @([RmEngine]::ScanInbound($info.Path, $set, $info.Format) | Sort-Object BeneCount -Descending)
+    $total = 0; foreach ($e in $edges) { $total += $e.BeneCount }
+
+    # Locate/name every source (cached; volume-capped like the heat map).
+    $srcNpis = @($edges | ForEach-Object { $_.SourceNpi })
+    $capNote = $null
+    if ($srcNpis.Count -gt $script:RmConfig.EnrichCap) {
+        $capNote = ("Named/located the top {0} of {1} sources by volume; the rest show NPI only. " +
+            "Raise with Set-RmConfig -EnrichCap.") -f $script:RmConfig.EnrichCap, $srcNpis.Count
+        Write-Warning $capNote
+        $srcNpis = @($srcNpis | Select-Object -First $script:RmConfig.EnrichCap)
+    }
+    $detail = if ($srcNpis.Count -gt 0) { Get-RmProviderDetail -Npi $srcNpis -RequireZip } else { @{} }
+
+    # Per-source ranked rows with share, cumulative share, and distance.
+    $rank = 0; $cum = 0.0
+    $srcRows = New-Object System.Collections.Generic.List[object]
+    foreach ($e in $edges) {
+        $rank++
+        $cum += $e.BeneCount
+        $d = if ($detail.ContainsKey($e.SourceNpi)) { $detail[$e.SourceNpi] } else { $null }
+        $zip = if ($d -and $null -ne $d.PSObject.Properties['Zip'] -and ([string]$d.Zip) -match '^\d{5}$') { [string]$d.Zip } else { '' }
+        $dist = if ($zip -and $pracLoc -and $centroids.ContainsKey($zip)) {
+            Get-RmMilesBetween $pracLoc[0] $pracLoc[1] $centroids[$zip][0] $centroids[$zip][1]
+        } else { $null }
+        $row = [ordered]@{
+            Rank            = $rank
+            SourceNPI       = $e.SourceNpi
+            SourceName      = if ($d) { $d.Name } else { '' }
+            SourceSpecialty = if ($d) { $d.Specialty } else { '' }
+            City            = if ($d) { $d.City } else { '' }
+            State           = if ($d) { $d.State } else { '' }
+            SharedPatients  = $e.BeneCount
+            PctOfVolume     = if ($total -gt 0) { [math]::Round(100.0 * $e.BeneCount / $total, 1) } else { 0 }
+            CumulativePct   = if ($total -gt 0) { [math]::Round(100.0 * $cum / $total, 1) } else { 0 }
+            DistanceMiles   = if ($null -ne $dist) { $dist } else { '' }
+        }
+        if ($isHop) { $row['AvgDayWait'] = $e.AvgDayWait }
+        $srcRows.Add([pscustomobject]$row)
+    }
+    $sources = $srcRows.ToArray()
+
+    # Concentration metrics. HHI on shares (0-10,000): sum of squared
+    # percentage shares — the antitrust-style concentration index.
+    $hhi = 0.0
+    foreach ($e in $edges) {
+        if ($total -gt 0) { $share = 100.0 * $e.BeneCount / $total; $hhi += $share * $share }
+    }
+    $top1 = if ($sources.Count -ge 1) { $sources[0].PctOfVolume } else { 0 }
+    $top5 = 0.0; foreach ($x in @($sources | Select-Object -First 5)) { $top5 += $x.PctOfVolume }
+    $top10 = 0.0; foreach ($x in @($sources | Select-Object -First 10)) { $top10 += $x.PctOfVolume }
+    $concLabel = if ($hhi -ge 2500) { 'HIGH — dependent on a few relationships' }
+                 elseif ($hhi -ge 1500) { 'MODERATE' }
+                 else { 'LOW — a diversified referral base' }
+
+    # Distance bands (volume-weighted).
+    $bandDefs = @(
+        @{ Label = '0-5 mi'; Min = 0.0; Max = 5.0 }
+        @{ Label = '5-10 mi'; Min = 5.0; Max = 10.0 }
+        @{ Label = '10-25 mi'; Min = 10.0; Max = 25.0 }
+        @{ Label = '25-50 mi'; Min = 25.0; Max = 50.0 }
+        @{ Label = '50+ mi'; Min = 50.0; Max = [double]::MaxValue }
+    )
+    $distBands = foreach ($b in $bandDefs) {
+        $vol = 0
+        foreach ($srcRow in $sources) {
+            # type check, NOT -ne '': PowerShell coerces '' to 0 next to a
+            # number, so a legitimate 0.0-mile distance would look 'unknown'.
+            if ($srcRow.DistanceMiles -is [double]) {
+                $dv = [double]$srcRow.DistanceMiles
+                if ($dv -ge $b.Min -and $dv -lt $b.Max) { $vol += $srcRow.SharedPatients }
+            }
+        }
+        [pscustomobject]@{ Band = $b.Label; SharedPatients = $vol
+                           Pct = if ($total -gt 0) { [math]::Round(100.0 * $vol / $total, 1) } else { 0 } }
+    }
+    $unknownDist = 0
+    foreach ($srcRow in $sources) {
+        if ($srcRow.DistanceMiles -isnot [double]) { $unknownDist += $srcRow.SharedPatients }
+    }
+    $distBands = @($distBands) + @([pscustomobject]@{ Band = 'Not locatable'; SharedPatients = $unknownDist
+        Pct = if ($total -gt 0) { [math]::Round(100.0 * $unknownDist / $total, 1) } else { 0 } })
+
+    # Referral-lag profile (hop only, volume-weighted by patient count).
+    $waitBands = @()
+    if ($isHop) {
+        $waitDefs = @(
+            @{ Label = '0-7 days'; Min = 0.0; Max = 7.0; Read = 'tight referral loop' }
+            @{ Label = '8-30 days'; Min = 7.0; Max = 30.0; Read = 'typical referral window' }
+            @{ Label = '31-90 days'; Min = 30.0; Max = 90.0; Read = 'loose / episodic' }
+            @{ Label = '90+ days'; Min = 90.0; Max = [double]::MaxValue; Read = 'likely co-occurring care' }
+        )
+        $waitBands = foreach ($b in $waitDefs) {
+            $vol = 0
+            foreach ($e in $edges) {
+                if ($e.AvgDayWait -ge $b.Min -and $e.AvgDayWait -lt $b.Max) { $vol += $e.BeneCount }
+            }
+            [pscustomobject]@{ Band = $b.Label; Reading = $b.Read; SharedPatients = $vol
+                               Pct = if ($total -gt 0) { [math]::Round(100.0 * $vol / $total, 1) } else { 0 } }
+        }
+    }
+
+    $mix = if ($sources.Count) { @(Get-RmSourceSpecialtyMix -Rows $sources) } else { @() }
+
+    $notes = @(Get-RmMethodologyNotes -Info $info) + @(
+        ''
+        "SOURCE ANALYSIS METHOD: every inbound pair of NPI $Npi ($pracName) in $($info.Label), ranked by shared patients. PctOfVolume/CumulativePct are shares of this practice's total inbound volume."
+        'CONCENTRATION: HHI = sum of squared percentage shares (0-10,000); above ~2,500 is highly concentrated — losing one relationship materially moves the total. Top-1/5/10 dependence reads the same risk directly.'
+        'Distances are straight-line miles between ZIP-area centroids (US Census) using TODAY''s NPPES practice addresses — a source that moved is measured where it is now.'
+        $(if ($isHop) { 'REFERRAL-LAG PROFILE: average days from source visit to this practice''s visit, volume-weighted. Short lags look like referrals; 90+ days usually means co-occurring care (labs, hospitals), not referral flow.' })
+        $(if ($capNote) { $capNote })
+    ) | Where-Object { $null -ne $_ -and $_ -ne $false }
+
+    [pscustomobject]@{
+        Npi          = $Npi
+        Practice     = [pscustomobject]@{
+            Name = $pracName; Zip = $pracZip
+            City = if ($loc.Count) { [string](Get-RmProp $loc[0] 'city') } else { '' }
+            State = if ($loc.Count) { [string](Get-RmProp $loc[0] 'state') } else { '' }
+        }
+        Year         = $info.Year
+        Label        = $info.Label
+        IsHop        = $isHop
+        TotalPatients = $total
+        SourceCount  = $sources.Count
+        Top1Pct      = [double]$top1
+        Top5Pct      = [math]::Round($top5, 1)
+        Top10Pct     = [math]::Round($top10, 1)
+        HHI          = [int][math]::Round($hhi, 0)
+        Concentration = $concLabel
+        Sources      = $sources
+        SpecialtyMix = @($mix)
+        DistanceBands = @($distBands)
+        WaitBands    = @($waitBands)
+        Notes        = @($notes)
+    }
+}
+
 function Export-RmReferralMapHtml {
     <#
     .SYNOPSIS
@@ -2414,6 +2591,258 @@ legend.addTo(map);
     [pscustomobject]@{ Path = $Path; Points = @($points).Count; TotalPatients = $g.TotalPatients }
 }
 
+function Export-RmSourceReportHtml {
+    <#
+    .SYNOPSIS
+      Renders a Get-RmSourceAnalysis result as a self-contained, print-ready
+      HTML report: KPI cards, top-source bar chart, specialty donut,
+      concentration (Pareto) curve, distance and referral-lag profiles, the
+      ranked source table, auto-written findings, and full methodology.
+      Pure inline SVG/CSS — no external resources at all.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Analysis,
+        [Parameter(Mandatory)][string]$Path
+    )
+    $a = $Analysis
+    function _h([string]$t) { [System.Net.WebUtility]::HtmlEncode($t) }
+
+    # ---- Chart 1: top-15 sources horizontal bars -------------------------
+    $top = @($a.Sources | Select-Object -First 15)
+    $maxV = 1; foreach ($t in $top) { if ($t.SharedPatients -gt $maxV) { $maxV = $t.SharedPatients } }
+    $barH = 24; $gap = 8; $w = 980; $labelW = 330; $chartW = $w - $labelW - 90
+    $h = ($top.Count * ($barH + $gap)) + 10
+    $bars = New-Object System.Text.StringBuilder
+    $y = 4
+    foreach ($t in $top) {
+        $bw = [int][math]::Max(2, $chartW * $t.SharedPatients / $maxV)
+        $nm = if ($t.SourceName) { $t.SourceName } else { $t.SourceNPI }
+        # 322px label column at 12.5px all-caps ≈ 40 chars before the text
+        # would overflow the viewBox and be hard-clipped on the left.
+        if ($nm.Length -gt 40) { $nm = $nm.Substring(0, 39) + '…' }
+        [void]$bars.Append(('<text x="{0}" y="{1}" text-anchor="end" class="blbl">{2}</text>' -f ($labelW - 8), ($y + 16), (_h $nm)))
+        [void]$bars.Append(('<rect x="{0}" y="{1}" width="{2}" height="{3}" rx="3" class="bar"/>' -f $labelW, $y, $bw, $barH))
+        [void]$bars.Append(('<text x="{0}" y="{1}" class="bval">{2}  ({3}%)</text>' -f ($labelW + $bw + 6), ($y + 16), ('{0:N0}' -f $t.SharedPatients), $t.PctOfVolume))
+        $y += $barH + $gap
+    }
+    $barSvg = ('<svg viewBox="0 0 {0} {1}" role="img" aria-label="Top referral sources">{2}</svg>' -f $w, $h, $bars.ToString())
+
+    # ---- Chart 2: specialty donut (top 6 + other) ------------------------
+    $palette = @('#2c5f8a', '#4f7ca6', '#7fa3c2', '#aec6da', '#c98f3d', '#7d8a96', '#c4cdd5')
+    $mixTop = @($a.SpecialtyMix | Select-Object -First 6)
+    $mixSum = 0.0; foreach ($m in $mixTop) { $mixSum += [double]$m.PctOfVolume }
+    $otherPct = if ($mixTop.Count) { [math]::Max(0, [math]::Round(100.0 - $mixSum, 1)) } else { 0 }
+    $segs = @($mixTop | ForEach-Object { [pscustomobject]@{ Label = $_.Specialty; Pct = [double]$_.PctOfVolume } })
+    if ($otherPct -gt 0.05) { $segs = @($segs) + @([pscustomobject]@{ Label = 'Other'; Pct = $otherPct }) }
+    $r = 70; $circ = 2 * [math]::PI * $r
+    $donut = New-Object System.Text.StringBuilder
+    $off = 0.0; $i = 0
+    foreach ($sg in $segs) {
+        $len = $circ * $sg.Pct / 100.0
+        $circleFmt = '<circle cx="110" cy="110" r="{0}" fill="none" stroke="{1}" stroke-width="34" ' +
+            'stroke-dasharray="{2:0.##} {3:0.##}" stroke-dashoffset="{4:0.##}" transform="rotate(-90 110 110)"/>'
+        [void]$donut.Append(($circleFmt -f $r, $palette[$i % $palette.Count], $len, ($circ - $len), (-1 * $off)))
+        $off += $len; $i++
+    }
+    $legend = New-Object System.Text.StringBuilder
+    $ly = 30; $i = 0
+    foreach ($sg in $segs) {
+        $ll = $sg.Label; if ($ll.Length -gt 34) { $ll = $ll.Substring(0, 33) + '…' }
+        [void]$legend.Append(('<rect x="240" y="{0}" width="12" height="12" rx="2" fill="{1}"/>' -f ($ly - 10), $palette[$i % $palette.Count]))
+        [void]$legend.Append(('<text x="258" y="{0}" class="blbl">{1} — {2}%</text>' -f $ly, (_h $ll), $sg.Pct))
+        $ly += 22; $i++
+    }
+    $donutFmt = '<svg viewBox="0 0 620 220" role="img" aria-label="Specialty mix">{0}{1}' +
+        '<text x="110" y="105" text-anchor="middle" class="dbig">{2}</text>' +
+        '<text x="110" y="126" text-anchor="middle" class="dsm">specialties</text></svg>'
+    $donutSvg = $donutFmt -f $donut.ToString(), $legend.ToString(), @($a.SpecialtyMix).Count
+
+    # ---- Chart 3: concentration (Pareto) curve ---------------------------
+    $pw = 460; $ph = 200; $padL = 46; $padB = 28
+    $n = [math]::Min(50, @($a.Sources).Count)
+    $pts = New-Object System.Text.StringBuilder
+    for ($i = 0; $i -lt $n; $i++) {
+        $x = $padL + (($pw - $padL - 10) * ($i + 1) / [math]::Max(1, $n))
+        $yv = ($ph - $padB) - (($ph - $padB - 12) * ([double]@($a.Sources)[$i].CumulativePct / 100.0))
+        [void]$pts.Append(('{0:0.#},{1:0.#} ' -f $x, $yv))
+    }
+    $gridLines = New-Object System.Text.StringBuilder
+    foreach ($pct in 25, 50, 75, 100) {
+        $gy = ($ph - $padB) - (($ph - $padB - 12) * $pct / 100.0)
+        [void]$gridLines.Append(('<line x1="{0}" y1="{1:0.#}" x2="{2}" y2="{1:0.#}" class="grid"/>' -f $padL, $gy, ($pw - 10)))
+        [void]$gridLines.Append(('<text x="{0}" y="{1:0.#}" text-anchor="end" class="axlbl">{2}%</text>' -f ($padL - 6), ($gy + 4), $pct))
+    }
+    $paretoFmt = '<svg viewBox="0 0 {0} {1}" role="img" aria-label="Cumulative concentration">{2}' +
+        '<polyline points="{3}" class="curve"/>' +
+        '<text x="{4}" y="{5}" class="axlbl">sources, ranked by volume (top {6})</text></svg>'
+    $paretoSvg = $paretoFmt -f $pw, $ph, $gridLines.ToString(), $pts.ToString().Trim(), $padL, ($ph - 8), $n
+
+    # ---- Chart 4/5: distance + wait band columns -------------------------
+    function _bandSvg($bands, $aria) {
+        $bw2 = 460; $bh = 190; $bpad = 40
+        $bandList = @($bands)
+        $maxP = 1.0; foreach ($b in $bandList) { if ($b.Pct -gt $maxP) { $maxP = [double]$b.Pct } }
+        $colW = [int](($bw2 - $bpad - 10) / [math]::Max(1, $bandList.Count)) - 14
+        $sb = New-Object System.Text.StringBuilder
+        $x = $bpad + 6
+        foreach ($b in $bandList) {
+            $colH = [int][math]::Max(2, ($bh - 58) * ([double]$b.Pct / $maxP))
+            $cy = ($bh - 34) - $colH
+            [void]$sb.Append(('<rect x="{0}" y="{1}" width="{2}" height="{3}" rx="3" class="bar"/>' -f $x, $cy, $colW, $colH))
+            [void]$sb.Append(('<text x="{0}" y="{1}" text-anchor="middle" class="bval">{2}%</text>' -f ($x + [int]($colW / 2)), ($cy - 5), $b.Pct))
+            [void]$sb.Append(('<text x="{0}" y="{1}" text-anchor="middle" class="axlbl">{2}</text>' -f ($x + [int]($colW / 2)), ($bh - 16), (_h ([string]$b.Band))))
+            $x += $colW + 14
+        }
+        ('<svg viewBox="0 0 {0} {1}" role="img" aria-label="{2}">{3}</svg>' -f $bw2, $bh, $aria, $sb.ToString())
+    }
+    $distSvg = _bandSvg $a.DistanceBands 'Referral volume by distance'
+    $waitSvg = if ($a.IsHop -and @($a.WaitBands).Count) { _bandSvg $a.WaitBands 'Referral volume by lag' } else { '' }
+
+    # ---- Auto-written findings ------------------------------------------
+    $s1 = if (@($a.Sources).Count) { @($a.Sources)[0] } else { $null }   # @()[0] throws under StrictMode
+    $near = 0.0; foreach ($b in @($a.DistanceBands)) { if ($b.Band -in '0-5 mi', '5-10 mi') { $near += $b.Pct } }
+    $findings = @(
+        "The practice drew $('{0:N0}' -f $a.TotalPatients) shared Medicare patients from $('{0:N0}' -f $a.SourceCount) distinct sources in $($a.Year)."
+        $(if ($s1) { "The single largest source, $(if ($s1.SourceName) { $s1.SourceName } else { "NPI $($s1.SourceNPI)" }), accounts for $($s1.PctOfVolume)% of inbound volume; the top five account for $($a.Top5Pct)% and the top ten for $($a.Top10Pct)%." })
+        "Source concentration is $($a.Concentration) (HHI $('{0:N0}' -f $a.HHI) on a 0-10,000 scale)."
+        $(if ($near -gt 0) { "$([math]::Round($near,1))% of measured volume originates within 10 miles of the practice." })
+        $(if ($a.IsHop -and @($a.WaitBands).Count) {
+            $fast = 0.0; foreach ($b in @($a.WaitBands)) { if ($b.Band -in '0-7 days', '8-30 days') { $fast += $b.Pct } }
+            "$([math]::Round($fast,1))% of volume arrives within 30 days of the source visit (referral-like); the remainder reflects looser or co-occurring care patterns." })
+    ) | Where-Object { $_ }
+    $findingsHtml = (@($findings) | ForEach-Object { '<li>' + (_h ([string]$_)) + '</li>' }) -join "`n"
+
+    # ---- Tables ----------------------------------------------------------
+    $srcRowsHtml = (@($a.Sources | Select-Object -First 25) | ForEach-Object {
+        $extra = if ($a.IsHop) { '<td class="num">{0:N1}</td>' -f [double]$_.AvgDayWait } else { '' }
+        $rowFmt = '<tr><td class="num">{0}</td><td class="mono">{1}</td><td>{2}</td><td>{3}</td><td>{4}</td>' +
+         '<td class="num">{5}</td><td class="num">{6}%</td><td class="num">{7}%</td><td class="num">{8}</td>{9}</tr>'
+        $rowFmt -f
+            $_.Rank, (_h ([string]$_.SourceNPI)), (_h ([string]$_.SourceName)), (_h ([string]$_.SourceSpecialty)),
+            (_h (("{0}, {1}" -f $_.City, $_.State).Trim(', ').Trim())),
+            ('{0:N0}' -f $_.SharedPatients), $_.PctOfVolume, $_.CumulativePct, $_.DistanceMiles, $extra
+    }) -join "`n"
+    $srcTableNote = if (@($a.Sources).Count -gt 25) {
+        "Showing the top 25 of $('{0:N0}' -f @($a.Sources).Count) sources — the full table is in the CSV saved beside this report."
+    } else { '' }
+    $waitTh = if ($a.IsHop) { '<th class="num">Avg lag (days)</th>' } else { '' }
+    $notesHtml = (@($a.Notes) | Where-Object { $_ } | ForEach-Object { '<li>' + (_h ([string]$_)) + '</li>' }) -join "`n"
+    $generated = (Get-Date).ToString('MMMM d, yyyy')
+
+    $html = @"
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Referral Source Analysis — $(_h $a.Practice.Name)</title>
+<style>
+  :root { --ink:#1c2b3a; --sub:#5b6b7a; --line:#dde3e9; --accent:#2c5f8a; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:#eef1f4; color:var(--ink);
+         font-family:"Segoe UI", -apple-system, "Helvetica Neue", Arial, sans-serif; }
+  .wrap { max-width:1080px; margin:0 auto; padding:20px 22px 34px; }
+  header { display:flex; flex-wrap:wrap; align-items:baseline; gap:8px 14px; }
+  header h1 { margin:0; font-size:22px; font-weight:650; letter-spacing:-.2px; }
+  .badge { background:var(--accent); color:#fff; font-size:11.5px; font-weight:600;
+           padding:3px 10px; border-radius:99px; white-space:nowrap; }
+  .sub { color:var(--sub); font-size:13px; margin:4px 0 16px; }
+  .stats { display:flex; flex-wrap:wrap; gap:12px; margin:0 0 16px; }
+  .stat { background:#fff; border:1px solid var(--line); border-radius:8px;
+          padding:11px 16px; min-width:148px; box-shadow:0 1px 2px rgba(16,32,48,.05); }
+  .stat b { display:block; font-size:20px; font-weight:650; letter-spacing:-.3px; }
+  .stat span { font-size:11px; color:var(--sub); text-transform:uppercase; letter-spacing:.4px; }
+  .stat.warn b { color:#a94420; }
+  .card { background:#fff; border:1px solid var(--line); border-radius:8px;
+          box-shadow:0 1px 2px rgba(16,32,48,.05); margin-bottom:16px; padding:0 0 8px; }
+  .card h2 { margin:0; padding:13px 18px 8px; font-size:14.5px; font-weight:600; }
+  .card .body { padding:4px 18px 8px; }
+  .duo { display:flex; flex-wrap:wrap; gap:16px; }
+  .duo > div { flex:1 1 460px; }
+  svg { width:100%; height:auto; display:block; }
+  .bar { fill:var(--accent); }
+  .blbl { font-size:12.5px; fill:#33475c; }
+  .bval { font-size:11.5px; fill:#5b6b7a; }
+  .dbig { font-size:26px; font-weight:650; fill:#1c2b3a; }
+  .dsm { font-size:11px; fill:#5b6b7a; }
+  .grid { stroke:#e3e9ee; stroke-width:1; }
+  .axlbl { font-size:10.5px; fill:#7b8794; }
+  .curve { fill:none; stroke:var(--accent); stroke-width:2.5; }
+  .findings { font-size:13.5px; line-height:1.65; margin:2px 0 6px; padding-left:22px; }
+  .findings li { margin-bottom:4px; }
+  table { border-collapse:collapse; width:100%; font-size:12.6px; }
+  th, td { border-top:1px solid var(--line); padding:6px 12px; text-align:left; }
+  th { background:#f2f5f8; color:#33475c; font-weight:600; font-size:11px;
+       text-transform:uppercase; letter-spacing:.4px; border-top:none; }
+  tr:nth-child(even) td { background:#f8fafc; }
+  td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
+  td.mono { font-variant-numeric:tabular-nums; }
+  .tablenote { padding:8px 18px 10px; color:var(--sub); font-size:12px; }
+  details { margin:0; } summary { cursor:pointer; padding:13px 18px; font-size:14.5px; font-weight:600; }
+  .notes { font-size:12px; color:#4a5a68; line-height:1.55; margin:0; padding:0 22px 14px 36px; }
+  .notes li { margin-bottom:5px; }
+  footer { color:var(--sub); font-size:11.5px; margin-top:4px; }
+  @media print { body { background:#fff; } .card { box-shadow:none; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <h1>Referral Source Analysis</h1>
+  <span class="badge">$(_h $a.Label)</span>
+</header>
+<p class="sub"><b>$(_h $a.Practice.Name)</b> &mdash; NPI $($a.Npi), $(_h ("$($a.Practice.City), $($a.Practice.State) $($a.Practice.Zip)")).
+Inbound Medicare shared-patient volume, $($a.Year).</p>
+<div class="stats">
+  <div class="stat"><b>$('{0:N0}' -f $a.TotalPatients)</b><span>Shared patients</span></div>
+  <div class="stat"><b>$('{0:N0}' -f $a.SourceCount)</b><span>Referral sources</span></div>
+  <div class="stat"><b>$($a.Top1Pct)%</b><span>From top source</span></div>
+  <div class="stat"><b>$($a.Top5Pct)%</b><span>Top-5 dependence</span></div>
+  <div class="stat$(if ($a.HHI -ge 2500) { ' warn' })"><b>$('{0:N0}' -f $a.HHI)</b><span>Concentration (HHI)</span></div>
+</div>
+<div class="card"><h2>Key findings</h2><div class="body"><ul class="findings">
+$findingsHtml
+</ul></div></div>
+<div class="card"><h2>Top referral sources</h2><div class="body">$barSvg</div></div>
+<div class="duo">
+  <div class="card"><h2>Specialty mix of the referral base</h2><div class="body">$donutSvg</div></div>
+  <div class="card"><h2>Concentration curve (cumulative share)</h2><div class="body">$paretoSvg</div></div>
+</div>
+<div class="duo">
+  <div class="card"><h2>Volume by distance from the practice</h2><div class="body">$distSvg</div></div>
+  $(if ($waitSvg) { '<div class="card"><h2>Volume by referral lag (days from source visit)</h2><div class="body">' + $waitSvg + '</div></div>' })
+</div>
+<div class="card">
+  <h2>Source detail</h2>
+  <table>
+    <tr><th class="num">#</th><th>NPI</th><th>Source</th><th>Specialty</th><th>Location</th>
+        <th class="num">Patients</th><th class="num">% of vol</th><th class="num">Cum %</th><th class="num">Miles</th>$waitTh</tr>
+    $srcRowsHtml
+  </table>
+  $(if ($srcTableNote) { "<div class='tablenote'>$srcTableNote</div>" })
+</div>
+<div class="card">
+  <details>
+    <summary>Methodology &amp; limitations</summary>
+    <ul class="notes">
+      $notesHtml
+    </ul>
+  </details>
+</div>
+<footer>Generated $generated by the Medicare Order &amp; Referring Tracker &middot; ZIP centroids: US Census 2023 ZCTA gazetteer &middot; Provider identities: NPPES registry</footer>
+</div>
+</body>
+</html>
+"@
+    $dir = Split-Path -Parent $Path
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    $enc = New-Object System.Text.UTF8Encoding($true)
+    [System.IO.File]::WriteAllText(
+        $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path), $html, $enc)
+    [pscustomobject]@{ Path = $Path; Sources = @($a.Sources).Count; TotalPatients = $a.TotalPatients }
+}
+
 function Get-RmSourceSpecialtyMix {
     <#
     .SYNOPSIS
@@ -2510,5 +2939,6 @@ Export-ModuleMember -Function @(
     'Get-RmProviderReferralActivity',
     'Get-RmProviderTrend', 'Get-RmPracticeBenchmark', 'Get-RmSourceSpecialtyMix',
     'Get-RmReferralGeography', 'Export-RmReferralMapHtml',
+    'Get-RmSourceAnalysis', 'Export-RmSourceReportHtml',
     'Export-RmResult', 'Clear-RmStaleTemp'
 )

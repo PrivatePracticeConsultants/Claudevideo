@@ -807,3 +807,77 @@ Describe 'Radius search' {
         $plain.Zip | Should -Be '99999'
     }
 }
+
+Describe 'Source analysis report' {
+    BeforeAll {
+        $script:SaCsv = Join-Path $script:WorkDir 'sa-centroids.csv'
+        Set-Content -Path $script:SaCsv -Encoding ascii -Value @(
+            'zip,lat,lon'
+            '99999,40.0000,-90.0000'
+            '86442,35.1000,-114.6000'
+        )
+    }
+
+    It 'computes shares, cumulative shares, and concentration (CMS active)' {
+        $sa = Get-RmSourceAnalysis -Npi 9000000001 -CentroidPath $script:SaCsv
+        $sa.TotalPatients | Should -Be 65
+        $sa.SourceCount | Should -Be 2
+        $sa.Top1Pct | Should -Be 69.2
+        $sa.Top5Pct | Should -Be 100
+        # HHI from unrounded shares: (45/65*100)^2 + (20/65*100)^2 = 5740
+        $sa.HHI | Should -Be 5740
+        $sa.Concentration | Should -BeLike 'HIGH*'
+        $rows = @($sa.Sources)
+        $rows[0].Rank | Should -Be 1
+        $rows[0].CumulativePct | Should -Be 69.2
+        $rows[1].CumulativePct | Should -Be 100
+        @($sa.SpecialtyMix).Count | Should -Be 2
+    }
+
+    It 'buckets volume into distance bands from real source ZIPs' {
+        $sa = Get-RmSourceAnalysis -Npi 9000000001 -CentroidPath $script:SaCsv
+        $b = @($sa.DistanceBands)
+        @($b | Where-Object Band -eq '0-5 mi')[0].SharedPatients | Should -Be 45
+        @($b | Where-Object Band -eq '50+ mi')[0].SharedPatients | Should -Be 20
+        @($b | Where-Object Band -eq 'Not locatable')[0].SharedPatients | Should -Be 0
+        (@($b) | Measure-Object Pct -Sum).Sum | Should -Be 100
+    }
+
+    It 'adds the referral-lag profile on hop data' {
+        Set-RmActiveDataset -Source hop-teaming -Year 2022 | Out-Null
+        try {
+            $sa = Get-RmSourceAnalysis -Npi 9000000001 -CentroidPath $script:SaCsv
+            $sa.IsHop | Should -BeTrue
+            $w = @($sa.WaitBands)
+            @($w | Where-Object Band -eq '8-30 days')[0].SharedPatients | Should -Be 45   # 12.5d avg
+            @($w | Where-Object Band -eq '31-90 days')[0].SharedPatients | Should -Be 20  # 30.0d avg
+            @($sa.Sources)[0].PSObject.Properties['AvgDayWait'] | Should -Not -BeNullOrEmpty
+        } finally { Set-RmActiveDataset -Source cms-pspp -Year 2015 | Out-Null }
+    }
+
+    It 'renders the self-contained report with charts, findings, and methodology' {
+        $sa = Get-RmSourceAnalysis -Npi 9000000001 -CentroidPath $script:SaCsv
+        $out = Join-Path $script:WorkDir 'source-report.html'
+        $r = Export-RmSourceReportHtml -Analysis $sa -Path $out
+        $r.Sources | Should -Be 2
+        $html = Get-Content $out -Raw
+        $html | Should -BeLike '*Referral Source Analysis*'
+        ([regex]::Matches($html, '<svg ')).Count | Should -BeGreaterOrEqual 4
+        $html | Should -BeLike '*Concentration (HHI)*'
+        $html | Should -BeLike '*DAVID DOCTOR*'
+        $html | Should -BeLike '*Key findings*'
+        $html | Should -BeLike '*SOURCE ANALYSIS METHOD*'
+        # fully self-contained: no external fetches at all
+        $html | Should -Not -BeLike '*http*://*unpkg*'
+        $html | Should -Not -BeLike '*<script src*'
+    }
+
+    It 'reports an honest empty analysis for an NPI with no inbound pairs' {
+        $sa = Get-RmSourceAnalysis -Npi 8000000002 -CentroidPath $script:SaCsv
+        $sa.TotalPatients | Should -Be 0
+        $sa.SourceCount | Should -Be 0
+        $out = Join-Path $script:WorkDir 'empty-report.html'
+        (Export-RmSourceReportHtml -Analysis $sa -Path $out).Sources | Should -Be 0
+        (Get-Content $out -Raw) | Should -BeLike '*0*Shared patients*'
+    }
+}

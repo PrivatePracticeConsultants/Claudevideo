@@ -278,6 +278,17 @@ to it. First run on a big practice takes a few minutes (one registry lookup
 per source — cached, so the second run is fast). One caveat: locations are
 today's NPPES addresses, so a source that moved is drawn where it is now.
 
+**Source analysis (the client-ready report):** click **Source analysis…** for
+an in-depth look at one organization's referral base, then **Save report
+(HTML)…** for a polished, fully self-contained report you can open, print, or
+email to a client: key metrics up top (total patients, source count, top-source
+and top-5 dependence, and an HHI concentration score that flags when a practice
+is dangerously dependent on a few relationships), auto-written findings, a
+top-sources chart, the specialty mix of the referral base, a concentration
+curve, volume by distance from the practice, and — on CareSet data — a
+referral-lag profile that separates true referral flow from co-occurring care.
+A full ranked source spreadsheet and methodology file are saved next to it.
+
 **Referral trend (multi-year):** if you've imported **two or more** CareSet
 years on the Referral map tab, this button builds a year-by-year table for the
 NPI — how many sources fed them patients each year, total inbound and outbound

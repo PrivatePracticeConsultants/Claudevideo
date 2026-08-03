@@ -448,6 +448,9 @@ $xaml = @'
             <Button x:Name="LkGeoButton" Content="Referral heat map..." Padding="10,5" Margin="10,0,0,0"
                     ToolTip="Where this NPI's inbound referrals come from: every source located by practice ZIP, aggregated into a density table and an interactive map you can open in your browser."/>
             <Button x:Name="LkSaveMapButton" Content="Save map (HTML)..." Padding="10,4" Margin="8,0,0,0" IsEnabled="False"/>
+            <Button x:Name="LkAnalysisButton" Content="Source analysis..." Padding="10,5" Margin="10,0,0,0"
+                    ToolTip="A client-ready deep dive on this NPI's referral sources: concentration metrics (HHI, top-5 dependence), specialty mix, distance profile, referral-lag profile on CareSet data, charts, and auto-written findings."/>
+            <Button x:Name="LkSaveReportButton" Content="Save report (HTML)..." Padding="10,4" Margin="8,0,0,0" IsEnabled="False"/>
           </WrapPanel>
           <Border Grid.Row="2" Background="White" BorderBrush="#D5DBE1" BorderThickness="1"
                   CornerRadius="4" Padding="10" Margin="0,0,0,8">
@@ -540,7 +543,7 @@ foreach ($name in @(
     'PgRosterLabel', 'PgFootprintButton', 'PgViewCombo', 'PgTrendButton', 'PgExportGroupsButton', 'PgExportRosterButton',
     'PgRosterGrid', 'PgSummary',
     'LkNpiBox', 'LkRunButton', 'LkTrendButton', 'LkExportTrendButton',
-    'LkGeoButton', 'LkSaveMapButton', 'LkDetail',
+    'LkGeoButton', 'LkSaveMapButton', 'LkAnalysisButton', 'LkSaveReportButton', 'LkDetail',
     'LkInboundLabel', 'LkExportInboundButton',
     'LkInboundGrid', 'LkOutboundLabel', 'LkExportOutboundButton', 'LkOutboundGrid',
     'RmExportMixButton',
@@ -615,7 +618,7 @@ function Set-Busy([bool]$On, [string]$Message) {
                      $ui.RmRunButton, $ui.RmDownloadButton, $ui.RmImportButton, $ui.RmDatasetCombo, $ui.RmRadiusCombo,
                      $ui.BmSearchButton,
                      $ui.PgRunButton, $ui.PgDownloadButton, $ui.PgFootprintButton,
-                     $ui.LkRunButton, $ui.LkTrendButton, $ui.LkGeoButton, $ui.WlCheckButton)) {
+                     $ui.LkRunButton, $ui.LkTrendButton, $ui.LkGeoButton, $ui.LkAnalysisButton, $ui.WlCheckButton)) {
         $b.IsEnabled = -not $On
     }
     $window.Cursor = if ($On) { [System.Windows.Input.Cursors]::Wait } else { $null }
@@ -1802,6 +1805,7 @@ $ui.LkRunButton.Add_Click({
     $ui.LkExportOutboundButton.IsEnabled = $false
     $ui.LkExportTrendButton.IsEnabled = $false   # inbound grid is about to be replaced
     $ui.LkSaveMapButton.IsEnabled = $false
+    $ui.LkSaveReportButton.IsEnabled = $false
     Invoke-Async -Kind 'lk-run' -Params @{
             RmModulePath = $script:RmModulePath; PgModulePath = $script:PgModulePath
             Npi = $npi; HasRm = $hasRm; HasPg = $hasPg
@@ -1898,6 +1902,7 @@ $ui.LkTrendButton.Add_Click({
         "($(@($hopYears | ForEach-Object Year) -join ', ')). The app stays responsive; " +
         "the result appears in the table below and can be exported."))) { return }
     $ui.LkSaveMapButton.IsEnabled = $false
+    $ui.LkSaveReportButton.IsEnabled = $false
     Invoke-Async -Kind 'lk-trend' -Params @{ RmModulePath = $script:RmModulePath; Npi = $npi } `
         -BusyMessage "Building the multi-year referral trend for $npi (one full scan per year — several minutes per year)..." `
         -WorkerScript 'param($RmModulePath, $Npi) Import-Module $RmModulePath; Get-RmProviderTrend -Npi $Npi' `
@@ -1948,6 +1953,7 @@ $ui.LkGeoButton.Add_Click({
     }
     $ui.LkSaveMapButton.IsEnabled = $false
     $ui.LkExportTrendButton.IsEnabled = $false
+    $ui.LkSaveReportButton.IsEnabled = $false
     Invoke-Async -Kind 'lk-geo' -Params @{ RmModulePath = $script:RmModulePath; Npi = $npi } `
         -BusyMessage "Mapping where $npi's referrals come from — scanning $script:RmRowsLabel pairs, then locating each source in NPPES (first run on a big practice can take several minutes; lookups are cached)..." `
         -WorkerScript 'param($RmModulePath, $Npi) Import-Module $RmModulePath; Get-RmReferralGeography -Npi $Npi' `
@@ -1997,6 +2003,71 @@ $ui.LkSaveMapButton.Add_Click({
         }
     } catch {
         Show-ErrorBox "Saving the map failed: $($_.Exception.Message)"
+    }
+})
+
+# Source analysis: the client-ready deep dive on one org's referral base.
+$script:LkAnalysis = $null
+
+$ui.LkAnalysisButton.Add_Click({
+    if ($script:Busy) { return }
+    $npi = $ui.LkNpiBox.Text.Trim()
+    if ($npi -notmatch '^\d{10}$') { Show-ErrorBox 'Enter a full 10-digit NPI first.'; return }
+    if (-not (Get-RmStatus).DatasetReady) {
+        Show-ErrorBox ("No referral dataset is available yet - on the Referral map tab, click " +
+            "'Download CMS dataset' (free 2015 data) or 'Import CareSet file' first.")
+        return
+    }
+    $ui.LkSaveReportButton.IsEnabled = $false
+    $ui.LkSaveMapButton.IsEnabled = $false
+    $ui.LkExportTrendButton.IsEnabled = $false
+    Invoke-Async -Kind 'lk-analysis' -Params @{ RmModulePath = $script:RmModulePath; Npi = $npi } `
+        -BusyMessage "Analyzing $npi's referral sources — scanning $script:RmRowsLabel pairs, then naming and locating each source (first run on a big practice can take several minutes; lookups are cached)..." `
+        -WorkerScript 'param($RmModulePath, $Npi) Import-Module $RmModulePath; Get-RmSourceAnalysis -Npi $Npi' `
+        -OnDone {
+            param($result)
+            $sa = $result[0]
+            $script:LkAnalysis = $sa
+            $rows = @($sa.Sources | Select-Object -First 25)
+            if (@($sa.Sources).Count -eq 0) {
+                $ui.LkInboundGrid.ItemsSource = $null
+                $ui.LkInboundLabel.Text = "No measured inbound pairs for $($sa.Npi) in the $($sa.Year) data (pairs under 11 patients are excluded)."
+                Set-Status 'Source analysis: nothing to analyze.'
+                return
+            }
+            $cols = @('Rank','SourceNPI','SourceName','SourceSpecialty','City','State','SharedPatients','PctOfVolume','CumulativePct','DistanceMiles')
+            if ($sa.IsHop) { $cols += 'AvgDayWait' }
+            $ui.LkInboundGrid.ItemsSource = (ConvertTo-DataTable -Rows $rows -Columns $cols).DefaultView
+            $ui.LkInboundLabel.Text = ("Source analysis for $($sa.Practice.Name) ($($sa.Npi)), $($sa.Year): " +
+                "$('{0:N0}' -f $sa.TotalPatients) patients from $('{0:N0}' -f $sa.SourceCount) sources - " +
+                "top-5 dependence $($sa.Top5Pct)%, concentration $($sa.Concentration) (HHI $('{0:N0}' -f $sa.HHI)). Top 25 shown:")
+            $ui.LkSaveReportButton.IsEnabled = $true
+            Set-Status "Source analysis ready - click 'Save report (HTML)...' for the full report with charts."
+        } `
+        -OnFail {
+            param($message)
+            Show-ErrorBox "Source analysis failed: $message"
+        }
+})
+
+$ui.LkSaveReportButton.Add_Click({
+    if ($script:Busy -or -not $script:LkAnalysis) { return }
+    $dialog = New-Object Microsoft.Win32.SaveFileDialog
+    $dialog.Filter = 'Analysis report (*.html)|*.html'
+    $dialog.FileName = "source-analysis-$($script:LkAnalysis.Npi).html"
+    if (-not $dialog.ShowDialog($window)) { return }
+    try {
+        $r = Export-RmSourceReportHtml -Analysis $script:LkAnalysis -Path $dialog.FileName
+        $csvPath = [System.IO.Path]::ChangeExtension($dialog.FileName, '.csv')
+        @($script:LkAnalysis.Sources) |
+            Export-RmResult -Path $csvPath -Notes @($script:LkAnalysis.Notes) `
+                -Description "Full ranked referral-source table for NPI $($script:LkAnalysis.Npi) ($script:RmDataLabel)" | Out-Null
+        Set-Status "Report saved: $($r.Path) + full source CSV + methodology."
+        if (Confirm-Box "Report saved.`n`nOpen it in your browser now? (It is fully self-contained - charts and all.)") {
+            try { Start-Process $r.Path } catch { Show-ErrorBox "Could not open the browser: $($_.Exception.Message)" }
+        }
+    } catch {
+        Show-ErrorBox "Saving the report failed: $($_.Exception.Message)"
     }
 })
 
