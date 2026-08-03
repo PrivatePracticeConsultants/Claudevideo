@@ -227,6 +227,18 @@ Both referral tables export. Whatever optional datasets you haven't downloaded
 are simply noted as unavailable — the rest still show. It's the quickest way to
 size up a referrer, a competitor, or a prospect.
 
+**Referral heat map:** click **Referral heat map…** to see *where* an NPI's
+referrals come from geographically. The app scans every inbound referral pair,
+looks up each source provider's practice ZIP, and shows a density table
+(patients per ZIP, % of volume, miles from the practice, top source). Then
+**Save map (HTML)…** writes an interactive map — one circle per ZIP, sized and
+colored by referral volume, your practice starred — and offers to open it in
+your browser (the background map needs internet; the circles and table are
+saved in the file). A density spreadsheet and methodology file are saved next
+to it. First run on a big practice takes a few minutes (one registry lookup
+per source — cached, so the second run is fast). One caveat: locations are
+today's NPPES addresses, so a source that moved is drawn where it is now.
+
 **Referral trend (multi-year):** if you've imported **two or more** CareSet
 years on the Referral map tab, this button builds a year-by-year table for the
 NPI — how many sources fed them patients each year, total inbound and outbound

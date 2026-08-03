@@ -324,7 +324,7 @@ $xaml = @'
           </Grid.RowDefinitions>
           <TextBlock Grid.Row="0" TextWrapping="Wrap" Foreground="#333" Margin="0,0,0,6"
               Text="Enter any NPI for a single-provider profile that pulls together every dataset in this app: current eligibility and specialty, practice-group memberships, and their historical referral activity (who sent them patients, and who they sent onward). Optional data is shown when downloaded on the other tabs."/>
-          <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,6">
+          <WrapPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,6">
             <TextBlock Text="NPI:" VerticalAlignment="Center" Margin="0,0,6,0"/>
             <TextBox x:Name="LkNpiBox" Width="140" Height="28" VerticalContentAlignment="Center"
                      MaxLength="10" ToolTip="A full 10-digit NPI"/>
@@ -332,7 +332,10 @@ $xaml = @'
             <Button x:Name="LkTrendButton" Content="Referral trend (multi-year)..." Padding="10,5" Margin="10,0,0,0"
                     ToolTip="Year-over-year referral totals for this NPI across every imported CareSet Hop Teaming year. Each year is a full file scan, so this takes minutes per year."/>
             <Button x:Name="LkExportTrendButton" Content="Export trend..." Padding="10,4" Margin="8,0,0,0" IsEnabled="False"/>
-          </StackPanel>
+            <Button x:Name="LkGeoButton" Content="Referral heat map..." Padding="10,5" Margin="10,0,0,0"
+                    ToolTip="Where this NPI's inbound referrals come from: every source located by practice ZIP, aggregated into a density table and an interactive map you can open in your browser."/>
+            <Button x:Name="LkSaveMapButton" Content="Save map (HTML)..." Padding="10,4" Margin="8,0,0,0" IsEnabled="False"/>
+          </WrapPanel>
           <Border Grid.Row="2" Background="White" BorderBrush="#D5DBE1" BorderThickness="1"
                   CornerRadius="4" Padding="10" Margin="0,0,0,8">
             <TextBlock x:Name="LkDetail" TextWrapping="Wrap" Foreground="#222"
@@ -420,7 +423,8 @@ foreach ($name in @(
     'PgZipBox', 'PgRunButton', 'PgDownloadButton', 'PgDataStatus', 'PgGroupGrid',
     'PgRosterLabel', 'PgFootprintButton', 'PgExportGroupsButton', 'PgExportRosterButton',
     'PgRosterGrid', 'PgSummary',
-    'LkNpiBox', 'LkRunButton', 'LkTrendButton', 'LkExportTrendButton', 'LkDetail',
+    'LkNpiBox', 'LkRunButton', 'LkTrendButton', 'LkExportTrendButton',
+    'LkGeoButton', 'LkSaveMapButton', 'LkDetail',
     'LkInboundLabel', 'LkExportInboundButton',
     'LkInboundGrid', 'LkOutboundLabel', 'LkExportOutboundButton', 'LkOutboundGrid',
     'RmExportMixButton',
@@ -466,7 +470,7 @@ function Set-Busy([bool]$On, [string]$Message) {
                      $ui.RmRunButton, $ui.RmDownloadButton, $ui.RmImportButton, $ui.RmDatasetCombo,
                      $ui.BmSearchButton,
                      $ui.PgRunButton, $ui.PgDownloadButton, $ui.PgFootprintButton,
-                     $ui.LkRunButton, $ui.LkTrendButton, $ui.WlCheckButton)) {
+                     $ui.LkRunButton, $ui.LkTrendButton, $ui.LkGeoButton, $ui.WlCheckButton)) {
         $b.IsEnabled = -not $On
     }
     $window.Cursor = if ($On) { [System.Windows.Input.Cursors]::Wait } else { $null }
@@ -1479,6 +1483,7 @@ $ui.LkRunButton.Add_Click({
     $ui.LkExportInboundButton.IsEnabled = $false
     $ui.LkExportOutboundButton.IsEnabled = $false
     $ui.LkExportTrendButton.IsEnabled = $false   # inbound grid is about to be replaced
+    $ui.LkSaveMapButton.IsEnabled = $false
     Invoke-Async -Kind 'lk-run' -Params @{
             RmModulePath = $script:RmModulePath; PgModulePath = $script:PgModulePath
             Npi = $npi; HasRm = $hasRm; HasPg = $hasPg
@@ -1574,6 +1579,7 @@ $ui.LkTrendButton.Add_Click({
         "Each year is a full scan of that year's file, so this can take several minutes per year " +
         "($(@($hopYears | ForEach-Object Year) -join ', ')). The app stays responsive; " +
         "the result appears in the table below and can be exported."))) { return }
+    $ui.LkSaveMapButton.IsEnabled = $false
     Invoke-Async -Kind 'lk-trend' -Params @{ RmModulePath = $script:RmModulePath; Npi = $npi } `
         -BusyMessage "Building the multi-year referral trend for $npi (one full scan per year — several minutes per year)..." `
         -WorkerScript 'param($RmModulePath, $Npi) Import-Module $RmModulePath; Get-RmProviderTrend -Npi $Npi' `
@@ -1605,6 +1611,75 @@ $ui.LkExportTrendButton.Add_Click({
         -SuggestedName "referral-trend-$($script:LkTrend.Npi).csv" `
         -Description "Year-over-year referral trend for NPI $($script:LkTrend.Npi) (DocGraph Hop Teaming, CareSet)" `
         -Notes @($script:LkTrend.Notes)
+})
+
+# Referral heat map: all inbound pairs for one NPI, located by each source's
+# NPPES practice ZIP, shown as a density table here and saved as an
+# interactive HTML map. First run on a big practice is slow (one NPPES lookup
+# per new source, cached forever after).
+$script:LkGeo = $null
+
+$ui.LkGeoButton.Add_Click({
+    if ($script:Busy) { return }
+    $npi = $ui.LkNpiBox.Text.Trim()
+    if ($npi -notmatch '^\d{10}$') { Show-ErrorBox 'Enter a full 10-digit NPI first.'; return }
+    if (-not (Get-RmStatus).DatasetReady) {
+        Show-ErrorBox ("No referral dataset is available yet - on the Referral map tab, click " +
+            "'Download CMS dataset' (free 2015 data) or 'Import CareSet file' first.")
+        return
+    }
+    $ui.LkSaveMapButton.IsEnabled = $false
+    $ui.LkExportTrendButton.IsEnabled = $false
+    Invoke-Async -Kind 'lk-geo' -Params @{ RmModulePath = $script:RmModulePath; Npi = $npi } `
+        -BusyMessage "Mapping where $npi's referrals come from — scanning $script:RmRowsLabel pairs, then locating each source in NPPES (first run on a big practice can take several minutes; lookups are cached)..." `
+        -WorkerScript 'param($RmModulePath, $Npi) Import-Module $RmModulePath; Get-RmReferralGeography -Npi $Npi' `
+        -OnDone {
+            param($result)
+            $geo = $result[0]
+            $script:LkGeo = $geo
+            $rows = @($geo.Rows)
+            if ($rows.Count -eq 0) {
+                $ui.LkInboundGrid.ItemsSource = $null
+                $ui.LkInboundLabel.Text = "No measured inbound pairs for $($geo.Npi) in the $($geo.Year) data (pairs under 11 patients are excluded)."
+                Set-Status 'Heat map: nothing to draw.'
+                return
+            }
+            $ui.LkInboundGrid.ItemsSource = (ConvertTo-DataTable -Rows $rows `
+                -Columns @('Zip','City','State','Sources','SharedPatients','PctOfVolume','DistanceMiles','TopSource')).DefaultView
+            $notMapped = $geo.TotalPatients - $geo.MappedPatients
+            $ui.LkInboundLabel.Text = ("Referral density by source ZIP for $($geo.Practice.Name) ($($geo.Npi)), $($geo.Year) data — " +
+                "$('{0:N0}' -f $geo.TotalPatients) patients across $($rows.Count) ZIP group(s)" +
+                $(if ($notMapped -gt 0) { " ($('{0:N0}' -f $notMapped) not locatable)" }) + ':')
+            $ui.LkSaveMapButton.IsEnabled = $true
+            Set-Status "Heat map data ready - click 'Save map (HTML)...' to write and open the interactive map."
+        } `
+        -OnFail {
+            param($message)
+            Show-ErrorBox "Heat map failed: $message"
+        }
+})
+
+$ui.LkSaveMapButton.Add_Click({
+    if ($script:Busy -or -not $script:LkGeo) { return }
+    $dialog = New-Object Microsoft.Win32.SaveFileDialog
+    $dialog.Filter = 'Interactive map (*.html)|*.html'
+    $dialog.FileName = "referral-map-$($script:LkGeo.Npi).html"
+    if (-not $dialog.ShowDialog($window)) { return }
+    try {
+        $r = Export-RmReferralMapHtml -Geography $script:LkGeo -Path $dialog.FileName
+        # The density table + methodology sidecar ride along next to the map.
+        $csvPath = [System.IO.Path]::ChangeExtension($dialog.FileName, '.csv')
+        @($script:LkGeo.Rows) | Select-Object Zip, City, State, Sources, SharedPatients,
+            PctOfVolume, DistanceMiles, TopSource |
+            Export-RmResult -Path $csvPath -Notes @($script:LkGeo.Notes) `
+                -Description "Referral density by source ZIP for NPI $($script:LkGeo.Npi) ($script:RmDataLabel)" | Out-Null
+        Set-Status "Map saved: $($r.Path) ($($r.Points) ZIP circles) + density CSV + methodology."
+        if (Confirm-Box "Map saved.`n`nOpen it in your browser now? (Drawing the background map needs an internet connection.)") {
+            try { Start-Process $r.Path } catch { Show-ErrorBox "Could not open the browser: $($_.Exception.Message)" }
+        }
+    } catch {
+        Show-ErrorBox "Saving the map failed: $($_.Exception.Message)"
+    }
 })
 
 # ---------------------------------------------------------------------------

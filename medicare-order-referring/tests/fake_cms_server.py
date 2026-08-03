@@ -64,8 +64,10 @@ PAGED = [provider(f'86{i:08d}', 'NPI-1', ('PT', f'PAGE{i}'), ['225100000X'], '88
 SOURCES = {
     '8000000001': provider('8000000001', 'NPI-1', ('DAVID', 'DOCTOR'), ['207Q00000X'],
                            '999990000', primary_desc='Family Medicine'),
+    # In a DIFFERENT ZIP than the clinics — the geography tests need at least
+    # two distinct source ZIP groups.
     '8000000002': provider('8000000002', 'NPI-1', ('OLIVIA', 'ORTHO'), ['207X00000X'],
-                           '999990000', primary_desc='Orthopaedic Surgery'),
+                           '864420000', primary_desc='Orthopaedic Surgery'),
     # 8000000003 deliberately absent -> "(NPI deactivated or not found)"
 }
 

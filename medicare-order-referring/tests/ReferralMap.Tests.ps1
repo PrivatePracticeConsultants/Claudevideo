@@ -543,3 +543,85 @@ Describe 'Practice search and benchmark' {
         $bm.Practice.Name | Should -Be 'TEST REHAB CLINIC LLC'
     }
 }
+
+Describe 'Referral geography and heat map' {
+    BeforeAll {
+        # Tiny centroid fixture: the two source ZIPs plus the clinic's own.
+        $script:CentroidCsv = Join-Path $script:WorkDir 'centroids.csv'
+        Set-Content -Path $script:CentroidCsv -Encoding ascii -Value @(
+            'zip,lat,lon'
+            '99999,40.0000,-90.0000'
+            '86442,35.1000,-114.6000'
+        )
+        # Wipe the NPPES cache so the RequireZip upgrade path is exercised
+        # deterministically below.
+        Remove-Item (Join-Path $env:RM_DATA_DIR 'nppes-cache.json') -ErrorAction SilentlyContinue
+    }
+
+    It 'upgrades old cache entries that lack a Zip (RequireZip re-fetch)' {
+        # Seed a pre-Zip-era cache entry, as an old install would have.
+        $old = @{ '8000000001' = [pscustomobject]@{ Name='DAVID DOCTOR'; Specialty='Family Medicine'; City='TESTVILLE'; State='MO' } }
+        $old | ConvertTo-Json -Compress | Set-Content (Join-Path $env:RM_DATA_DIR 'nppes-cache.json') -Encoding UTF8
+        $d = Get-RmProviderDetail -Npi @('8000000001') -RequireZip
+        $d['8000000001'].Zip | Should -Be '99999'
+    }
+
+    It 'aggregates inbound volume by source ZIP with distance and share' {
+        $g = Get-RmReferralGeography -Npi 9000000001 -CentroidPath $script:CentroidCsv
+        $g.TotalPatients | Should -Be 65
+        $g.MappedPatients | Should -Be 65
+        $rows = @($g.Rows)
+        $rows.Count | Should -Be 2
+        $rows[0].Zip | Should -Be '99999'          # 45 > 20
+        $rows[0].SharedPatients | Should -Be 45
+        $rows[0].PctOfVolume | Should -Be 69.2
+        $rows[0].DistanceMiles | Should -Be 0      # same ZIP as the practice
+        $rows[1].Zip | Should -Be '86442'
+        $rows[1].SharedPatients | Should -Be 20
+        # 40.0,-90.0 to 35.1,-114.6 is ~1,400 miles — sanity band, not exact
+        [double]$rows[1].DistanceMiles | Should -BeGreaterThan 1200
+        [double]$rows[1].DistanceMiles | Should -BeLessThan 1600
+        $g.Practice.Name | Should -Be 'TEST REHAB CLINIC LLC'
+        $g.Practice.Lat | Should -Be 40.0
+    }
+
+    It 'groups sources that cannot be located and keeps totals honest' {
+        # 9000000002's feeders: 8000000001 (12, ZIP 99999) + 8000000003 (11,
+        # absent from NPPES -> no ZIP).
+        $g = Get-RmReferralGeography -Npi 9000000002 -CentroidPath $script:CentroidCsv
+        $g.TotalPatients | Should -Be 23
+        $g.MappedPatients | Should -Be 12
+        $unloc = @($g.Rows | Where-Object Zip -eq '(not located)')[0]
+        $unloc.SharedPatients | Should -Be 11
+        $unloc.Lat | Should -BeNullOrEmpty
+    }
+
+    It 'writes a self-viewing HTML map with the points and methodology' {
+        $g = Get-RmReferralGeography -Npi 9000000001 -CentroidPath $script:CentroidCsv
+        $out = Join-Path $script:WorkDir 'heatmap.html'
+        $r = Export-RmReferralMapHtml -Geography $g -Path $out
+        $r.Points | Should -Be 2
+        $html = Get-Content $out -Raw
+        $html | Should -BeLike '*circleMarker*'
+        $html | Should -BeLike '*"z":"99999"*'
+        $html | Should -BeLike '*"z":"86442"*'
+        $html | Should -BeLike '*TEST REHAB CLINIC LLC*'
+        $html | Should -BeLike '*GEOGRAPHY METHOD*'
+        $html | Should -BeLike '*openstreetmap*'
+    }
+
+    It 'works on the hop dataset too' {
+        Set-RmActiveDataset -Source hop-teaming -Year 2022 | Out-Null
+        try {
+            $g = Get-RmReferralGeography -Npi 9000000001 -CentroidPath $script:CentroidCsv
+            $g.TotalPatients | Should -Be 65       # hop fixture: 45 + 20
+            (@($g.Notes) -join ' ') | Should -BeLike '*Hop Teaming 2022*'
+        } finally { Set-RmActiveDataset -Source cms-pspp -Year 2015 | Out-Null }
+    }
+
+    It 'returns an honest empty result for an NPI with no inbound pairs' {
+        $g = Get-RmReferralGeography -Npi 8000000002 -CentroidPath $script:CentroidCsv
+        $g.TotalPatients | Should -Be 0
+        @($g.Rows).Count | Should -Be 0
+    }
+}

@@ -904,16 +904,22 @@ function Get-RmProviderDetail {
     .SYNOPSIS
       Looks up name/specialty/location for NPIs via NPPES, using the on-disk
       cache. Returns a hashtable NPI -> detail object.
+    .PARAMETER RequireZip
+      Treat cached entries that predate the Zip field as misses so they are
+      re-fetched with their practice ZIP (the geography map needs it). Old
+      caches upgrade in place; nothing is thrown away.
     #>
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string[]]$Npi)
+    param([Parameter(Mandatory)][string[]]$Npi, [switch]$RequireZip)
 
     $cache = Read-RmNppesCache
     $result = @{}
     # Only look up well-formed NPIs — the source NPIs come from an external data
     # file and must never be concatenated into a URL or cache key unvalidated.
     $missing = @($Npi | Sort-Object -Unique |
-        Where-Object { (Test-RmNpiShape $_) -and -not $cache.ContainsKey($_) })
+        Where-Object { (Test-RmNpiShape $_) -and (
+            -not $cache.ContainsKey($_) -or
+            ($RequireZip -and $null -eq $cache[$_].PSObject.Properties['Zip'])) })
     $n = 0
     $consecutiveFailures = 0
     foreach ($id in $missing) {
@@ -932,7 +938,7 @@ function Get-RmProviderDetail {
             $results = @(Get-RmProp $resp 'results')
             if ($results.Count -eq 0) {
                 $cache[$id] = [pscustomobject]@{
-                    Name = '(NPI deactivated or not found)'; Specialty = ''; City = ''; State = '' }
+                    Name = '(NPI deactivated or not found)'; Specialty = ''; City = ''; State = ''; Zip = '' }
             } else {
                 $r = $results[0]
                 $basic = Get-RmProp $r 'basic'
@@ -941,24 +947,26 @@ function Get-RmProviderDetail {
                         else { ('{0} {1}' -f (Get-RmProp $basic 'first_name'), (Get-RmProp $basic 'last_name')).Trim() }
                 $primary = @(@(Get-RmProp $r 'taxonomies') | Where-Object { (Get-RmProp $_ 'primary') -eq $true })
                 $loc = @(@(Get-RmProp $r 'addresses') | Where-Object { (Get-RmProp $_ 'address_purpose') -eq 'LOCATION' })
+                $postal = if ($loc.Count) { [string](Get-RmProp $loc[0] 'postal_code') } else { '' }
                 $cache[$id] = [pscustomobject]@{
                     Name      = $name
                     Specialty = if ($primary.Count) { [string](Get-RmProp $primary[0] 'desc') } else { '' }
                     City      = if ($loc.Count) { [string](Get-RmProp $loc[0] 'city') } else { '' }
                     State     = if ($loc.Count) { [string](Get-RmProp $loc[0] 'state') } else { '' }
+                    Zip       = if ($postal.Length -ge 5) { $postal.Substring(0, 5) } else { $postal }
                 }
             }
         } catch {
             # Leave uncached so a later run can retry; report honestly for now.
             $consecutiveFailures++
-            $result[$id] = [pscustomobject]@{ Name = '(lookup failed)'; Specialty = ''; City = ''; State = '' }
+            $result[$id] = [pscustomobject]@{ Name = '(lookup failed)'; Specialty = ''; City = ''; State = ''; Zip = '' }
         }
     }
     if ($missing.Count -gt 0) { Write-RmNppesCache $cache }
     foreach ($id in $Npi) {
         if (-not $result.ContainsKey($id)) {
             $result[$id] = if ($cache.ContainsKey($id)) { $cache[$id] }
-                           else { [pscustomobject]@{ Name = '(lookup failed)'; Specialty = ''; City = ''; State = '' } }
+                           else { [pscustomobject]@{ Name = '(lookup failed)'; Specialty = ''; City = ''; State = ''; Zip = '' } }
         }
     }
     $result
@@ -1606,6 +1614,321 @@ function Get-RmPracticeBenchmark {
     }
 }
 
+# ---------------------------------------------------------------------------
+# Referral geography (heat map)
+# ---------------------------------------------------------------------------
+
+# ZIP -> lat/lon centroids (US Census 2023 ZCTA gazetteer, public domain),
+# shipped beside the module (~34k rows) and loaded once per process.
+$script:RmCentroids = $null
+function Get-RmCentroids([string]$CentroidPath) {
+    if ($null -ne $script:RmCentroids -and -not $CentroidPath) { return $script:RmCentroids }
+    $path = if ($CentroidPath) { $CentroidPath } else { Join-Path $PSScriptRoot 'zcta-centroids.csv' }
+    $map = @{}
+    if (Test-Path -LiteralPath $path) {
+        $reader = New-Object System.IO.StreamReader($path)
+        try {
+            [void]$reader.ReadLine()   # header
+            while ($null -ne ($line = $reader.ReadLine())) {
+                $f = $line.Split(',')
+                if ($f.Length -eq 3) { $map[$f[0]] = @([double]$f[1], [double]$f[2]) }
+            }
+        } finally { $reader.Dispose() }
+    } else {
+        Write-Warning "ZIP centroid table not found at '$path' — the density table still works, but nothing can be drawn on a map."
+    }
+    if (-not $CentroidPath) { $script:RmCentroids = $map }
+    $map
+}
+
+function Get-RmMilesBetween([double]$Lat1, [double]$Lon1, [double]$Lat2, [double]$Lon2) {
+    # Haversine, radius in statute miles.
+    $rad = [math]::PI / 180
+    $dLat = ($Lat2 - $Lat1) * $rad
+    $dLon = ($Lon2 - $Lon1) * $rad
+    $a = [math]::Sin($dLat / 2) * [math]::Sin($dLat / 2) +
+         [math]::Cos($Lat1 * $rad) * [math]::Cos($Lat2 * $rad) *
+         [math]::Sin($dLon / 2) * [math]::Sin($dLon / 2)
+    [math]::Round(3958.8 * 2 * [math]::Atan2([math]::Sqrt($a), [math]::Sqrt(1 - $a)), 1)
+}
+
+function Get-RmReferralGeography {
+    <#
+    .SYNOPSIS
+      For ONE provider/practice NPI: where its inbound referrals come from,
+      geographically. Scans ALL of the NPI's inbound pairs on the active
+      dataset, locates each source provider's practice ZIP via NPPES, and
+      aggregates patient volume per ZIP with distance from the practice.
+      Feed the result to Export-RmReferralMapHtml for an interactive map.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidatePattern('^\d{10}$')][string]$Npi,
+        [string]$CentroidPath
+    )
+    $info = Get-RmDatasetInfo
+    if (-not $info.Ready) {
+        throw "No shared-patient dataset is available yet (Referral map tab: download the CMS dataset or import a CareSet file)."
+    }
+    $centroids = Get-RmCentroids $CentroidPath
+
+    # The practice itself (map anchor).
+    $resp = Invoke-RmNppes ('number={0}' -f $Npi)
+    $hits = @(Get-RmProp $resp 'results')
+    if ($hits.Count -eq 0) { throw "NPI $Npi was not found in the NPPES registry (deactivated, or a typo)." }
+    $r0 = $hits[0]
+    $basic = Get-RmProp $r0 'basic'
+    $isOrg = ((Get-RmProp $r0 'enumeration_type') -eq 'NPI-2')
+    $pracName = if ($isOrg) { [string](Get-RmProp $basic 'organization_name') }
+                else { ('{0} {1}' -f (Get-RmProp $basic 'first_name'), (Get-RmProp $basic 'last_name')).Trim() }
+    $loc = @(@(Get-RmProp $r0 'addresses') | Where-Object { (Get-RmProp $_ 'address_purpose') -eq 'LOCATION' })
+    $postal = if ($loc.Count) { [string](Get-RmProp $loc[0] 'postal_code') } else { '' }
+    $pracZip = if ($postal.Length -ge 5) { $postal.Substring(0, 5) } else { '' }
+    $pracLoc = if ($pracZip -and $centroids.ContainsKey($pracZip)) { $centroids[$pracZip] } else { $null }
+
+    Write-Verbose "Scanning $($info.Label) for all inbound pairs of $Npi..."
+    $set = New-Object 'System.Collections.Generic.HashSet[string]'
+    [void]$set.Add($Npi)
+    $edges = @([RmEngine]::ScanInbound($info.Path, $set, $info.Format))
+
+    # Locate every source (cached; capped like the other NPPES-heavy paths).
+    $srcNpis = @($edges | ForEach-Object { $_.SourceNpi } | Sort-Object -Unique)
+    $capNote = $null
+    if ($srcNpis.Count -gt $script:RmConfig.EnrichCap) {
+        # Cap by VOLUME so the biggest feeders are always located.
+        $volByNpi = @{}
+        foreach ($e in $edges) {
+            if (-not $volByNpi.ContainsKey($e.SourceNpi)) { $volByNpi[$e.SourceNpi] = 0 }
+            $volByNpi[$e.SourceNpi] += $e.BeneCount
+        }
+        $keep = @($volByNpi.GetEnumerator() | Sort-Object Value -Descending |
+            Select-Object -First $script:RmConfig.EnrichCap | ForEach-Object { $_.Key })
+        $capNote = ("Located the top {0} of {1} distinct sources by volume; the rest are grouped " +
+            "under '(not located)'. Raise the cap with Set-RmConfig -EnrichCap.") -f @($keep).Count, $srcNpis.Count
+        Write-Warning $capNote
+        $srcNpis = $keep
+    }
+    $detail = if ($srcNpis.Count -gt 0) { Get-RmProviderDetail -Npi @($srcNpis) -RequireZip } else { @{} }
+
+    # Aggregate per source ZIP.
+    $byZip = @{}
+    $totalPatients = 0
+    foreach ($e in $edges) {
+        $totalPatients += $e.BeneCount
+        $d = if ($detail.ContainsKey($e.SourceNpi)) { $detail[$e.SourceNpi] } else { $null }
+        $zipRaw = if ($d -and $null -ne $d.PSObject.Properties['Zip']) { [string]$d.Zip } else { '' }
+        $zip = if ($zipRaw -match '^\d{5}$') { $zipRaw } else { '(not located)' }
+        if (-not $byZip.ContainsKey($zip)) {
+            $byZip[$zip] = [pscustomobject]@{
+                Patients = 0; Sources = 0; City = ''; State = ''
+                TopName = ''; TopVol = 0
+            }
+        }
+        $b = $byZip[$zip]
+        $b.Patients += $e.BeneCount
+        $b.Sources += 1
+        if ($d -and -not $b.City -and $d.City) { $b.City = $d.City; $b.State = $d.State }
+        $srcVol = $e.BeneCount
+        if ($srcVol -gt $b.TopVol) {
+            $b.TopVol = $srcVol
+            $b.TopName = if ($d -and $d.Name) { $d.Name } else { $e.SourceNpi }
+        }
+    }
+
+    $rows = foreach ($zip in $byZip.Keys) {
+        $b = $byZip[$zip]
+        $hasGeo = $centroids.ContainsKey($zip)
+        $dist = if ($hasGeo -and $pracLoc) {
+            Get-RmMilesBetween $pracLoc[0] $pracLoc[1] $centroids[$zip][0] $centroids[$zip][1]
+        } else { $null }
+        [pscustomobject]@{
+            Zip            = $zip
+            City           = $b.City
+            State          = $b.State
+            Sources        = $b.Sources
+            SharedPatients = $b.Patients
+            PctOfVolume    = if ($totalPatients -gt 0) { [math]::Round(100.0 * $b.Patients / $totalPatients, 1) } else { 0 }
+            DistanceMiles  = if ($null -ne $dist) { $dist } else { '' }
+            TopSource      = $b.TopName
+            Lat            = if ($hasGeo) { $centroids[$zip][0] } else { $null }
+            Lon            = if ($hasGeo) { $centroids[$zip][1] } else { $null }
+        }
+    }
+    $rows = @($rows | Sort-Object -Property @{Expression = 'SharedPatients'; Descending = $true},
+                                            @{Expression = 'Zip'; Descending = $false})
+    $mappable = @($rows | Where-Object { $null -ne $_.Lat })
+    $mappedPatients = 0; foreach ($m in $mappable) { $mappedPatients += $m.SharedPatients }
+
+    $notes = @(Get-RmMethodologyNotes -Info $info) + @(
+        ''
+        "GEOGRAPHY METHOD: every inbound pair of NPI $Npi ($pracName) in $($info.Label), aggregated by each SOURCE provider's practice-location ZIP from today's NPPES registry."
+        'Locations are TODAY''s NPPES practice addresses — a source that moved since the data year is drawn where it is now, and NPPES addresses are self-reported (sometimes stale, sometimes an administrative office rather than the clinic).'
+        'Coordinates are US Census 2023 ZCTA centroids (ZIP-code areas approximate USPS ZIPs). Sources whose ZIP could not be resolved or mapped are grouped under ''(not located)'' in the table and are not drawn.'
+        $(if ($capNote) { $capNote })
+    ) | Where-Object { $null -ne $_ -and $_ -ne $false }
+
+    [pscustomobject]@{
+        Npi             = $Npi
+        Practice        = [pscustomobject]@{
+            Name = $pracName; Zip = $pracZip
+            City = if ($loc.Count) { [string](Get-RmProp $loc[0] 'city') } else { '' }
+            State = if ($loc.Count) { [string](Get-RmProp $loc[0] 'state') } else { '' }
+            Lat = if ($pracLoc) { $pracLoc[0] } else { $null }
+            Lon = if ($pracLoc) { $pracLoc[1] } else { $null }
+        }
+        Year            = $info.Year
+        Label           = $info.Label
+        Rows            = $rows
+        TotalPatients   = $totalPatients
+        MappedPatients  = $mappedPatients
+        Notes           = @($notes)
+    }
+}
+
+function Export-RmReferralMapHtml {
+    <#
+    .SYNOPSIS
+      Writes a Get-RmReferralGeography result as a self-viewing HTML heat map:
+      one circle per source ZIP, sized and colored by referral volume, with
+      the practice starred. Open it in any browser (the base map tiles load
+      from OpenStreetMap, so viewing needs an internet connection).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Geography,
+        [Parameter(Mandatory)][string]$Path
+    )
+    $g = $Geography
+    $points = @($g.Rows | Where-Object { $null -ne $_.Lat } | ForEach-Object {
+        [ordered]@{
+            z = $_.Zip; lat = [double]$_.Lat; lon = [double]$_.Lon
+            p = [int]$_.SharedPatients; s = [int]$_.Sources
+            city = [string]$_.City; st = [string]$_.State
+            d = [string]$_.DistanceMiles; top = [string]$_.TopSource
+            pct = [double]$_.PctOfVolume
+        }
+    })
+    $pointsJson = ConvertTo-Json -InputObject @($points) -Compress -Depth 4
+    $practiceJson = ConvertTo-Json -InputObject ([ordered]@{
+        name = [string]$g.Practice.Name; zip = [string]$g.Practice.Zip
+        city = [string]$g.Practice.City; st = [string]$g.Practice.State
+        lat = $g.Practice.Lat; lon = $g.Practice.Lon
+    }) -Compress
+    $titleText = "Referral sources of $($g.Practice.Name) ($($g.Npi)) — $($g.Label)"
+    $notMapped = $g.TotalPatients - $g.MappedPatients
+    $notesHtml = (@($g.Notes) | ForEach-Object {
+        '<li>' + ([System.Net.WebUtility]::HtmlEncode([string]$_)) + '</li>' }) -join "`n"
+    $tableRows = (@($g.Rows) | Select-Object -First 30 | ForEach-Object {
+        '<tr><td>{0}</td><td>{1}</td><td>{2}</td><td class="num">{3}</td><td class="num">{4}</td><td class="num">{5}%</td><td class="num">{6}</td><td>{7}</td></tr>' -f
+            [System.Net.WebUtility]::HtmlEncode([string]$_.Zip),
+            [System.Net.WebUtility]::HtmlEncode([string]$_.City),
+            [System.Net.WebUtility]::HtmlEncode([string]$_.State),
+            $_.Sources, $_.SharedPatients, $_.PctOfVolume, $_.DistanceMiles,
+            [System.Net.WebUtility]::HtmlEncode([string]$_.TopSource) }) -join "`n"
+
+    $html = @"
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>$([System.Net.WebUtility]::HtmlEncode($titleText))</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  body { margin:0; font-family: Segoe UI, Arial, sans-serif; color:#222; }
+  header { padding:10px 16px; background:#20415e; color:#fff; }
+  header h1 { margin:0; font-size:17px; } header p { margin:4px 0 0; font-size:12px; color:#cfe0f0; }
+  #map { height:62vh; }
+  .legend { background:#fff; padding:8px 10px; border-radius:4px; box-shadow:0 1px 4px rgba(0,0,0,.3); font-size:12px; line-height:18px; }
+  .legend i { width:12px; height:12px; display:inline-block; border-radius:50%; margin-right:6px; vertical-align:-2px; }
+  section { padding:12px 16px; }
+  table { border-collapse:collapse; font-size:12.5px; }
+  th, td { border-bottom:1px solid #ddd; padding:4px 10px 4px 0; text-align:left; }
+  td.num { text-align:right; padding-right:16px; }
+  .notes { font-size:11.5px; color:#555; max-width:1000px; }
+  .offline { padding:8px 16px; background:#fff3cd; font-size:12px; display:none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>$([System.Net.WebUtility]::HtmlEncode($titleText))</h1>
+  <p>$('{0:N0}' -f $g.TotalPatients) inbound shared patients across $(@($g.Rows).Count) source ZIP group(s); $('{0:N0}' -f $g.MappedPatients) mappable$(if ($notMapped -gt 0) { ", $('{0:N0}' -f $notMapped) not locatable" }). Circle size and color = referral volume from that ZIP.</p>
+</header>
+<div id="offline" class="offline">The base map could not load (no internet?). The circles and table below still work.</div>
+<div id="map"></div>
+<section>
+  <h3 style="margin:4px 0 8px;">Top source ZIPs</h3>
+  <table>
+    <tr><th>ZIP</th><th>City</th><th>St</th><th>Sources</th><th>Patients</th><th>% of volume</th><th>Miles</th><th>Top source</th></tr>
+    $tableRows
+  </table>
+  <h3 style="margin:16px 0 6px;">How to read this (methodology)</h3>
+  <ul class="notes">
+    $notesHtml
+  </ul>
+</section>
+<script>
+var pts = $pointsJson;
+var prac = $practiceJson;
+var maxP = 1; pts.forEach(function(p){ if (p.p > maxP) maxP = p.p; });
+var center = (prac.lat !== null) ? [prac.lat, prac.lon]
+           : (pts.length ? [pts[0].lat, pts[0].lon] : [39.5, -98.35]);
+var map = L.map('map').setView(center, 10);
+var tiles = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+  { maxZoom: 18, attribution: '&copy; OpenStreetMap contributors' });
+tiles.on('tileerror', function(){ document.getElementById('offline').style.display='block'; });
+tiles.addTo(map);
+function color(v) {
+  var t = Math.sqrt(v / maxP);           // sqrt so mid-size ZIPs stay visible
+  var r = Math.round(43 + t * (215 - 43));
+  var g = Math.round(131 + t * (25 - 131));
+  var b = Math.round(186 + t * (28 - 186));
+  return 'rgb(' + r + ',' + g + ',' + b + ')';
+}
+function radius(v) { return 6 + 30 * Math.sqrt(v / maxP); }
+var group = [];
+pts.forEach(function(p) {
+  var c = L.circleMarker([p.lat, p.lon], {
+    radius: radius(p.p), color: '#333', weight: 1,
+    fillColor: color(p.p), fillOpacity: 0.75
+  }).addTo(map);
+  c.bindPopup('<b>ZIP ' + p.z + '</b> ' + p.city + ', ' + p.st +
+    '<br/>' + p.p.toLocaleString() + ' patients (' + p.pct + '% of volume) from ' + p.s + ' source(s)' +
+    (p.d ? '<br/>' + p.d + ' miles from the practice' : '') +
+    (p.top ? '<br/>Top source: ' + p.top : ''));
+  group.push(c);
+});
+if (prac.lat !== null) {
+  var star = L.marker([prac.lat, prac.lon], { title: prac.name }).addTo(map);
+  star.bindPopup('<b>' + prac.name + '</b><br/>' + prac.city + ', ' + prac.st + ' ' + prac.zip + '<br/>(the practice)');
+  group.push(star);
+}
+if (group.length > 1) { map.fitBounds(L.featureGroup(group).getBounds().pad(0.15)); }
+var legend = L.control({position:'bottomright'});
+legend.onAdd = function() {
+  var div = L.DomUtil.create('div', 'legend');
+  div.innerHTML = '<b>Patients from ZIP</b><br/>' +
+    '<i style="background:' + color(maxP) + '"></i>' + maxP.toLocaleString() + ' (max)<br/>' +
+    '<i style="background:' + color(maxP/4) + '"></i>~' + Math.round(maxP/4).toLocaleString() + '<br/>' +
+    '<i style="background:' + color(maxP/20) + '"></i>~' + Math.round(maxP/20).toLocaleString() + '<br/>' +
+    'Marker = the practice';
+  return div;
+};
+legend.addTo(map);
+</script>
+</body>
+</html>
+"@
+    $dir = Split-Path -Parent $Path
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    # UTF-8 with BOM so browsers and Notepad agree about the encoding on WinPS 5.1 too.
+    $enc = New-Object System.Text.UTF8Encoding($true)
+    [System.IO.File]::WriteAllText(
+        $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path), $html, $enc)
+    [pscustomobject]@{ Path = $Path; Points = @($points).Count; TotalPatients = $g.TotalPatients }
+}
+
 function Get-RmSourceSpecialtyMix {
     <#
     .SYNOPSIS
@@ -1698,5 +2021,6 @@ Export-ModuleMember -Function @(
     'Find-RmClinic', 'Find-RmPractice', 'Get-RmProviderDetail',
     'Get-RmReferralMap', 'Get-RmInboundByBucket', 'Get-RmProviderReferralActivity',
     'Get-RmProviderTrend', 'Get-RmPracticeBenchmark', 'Get-RmSourceSpecialtyMix',
+    'Get-RmReferralGeography', 'Export-RmReferralMapHtml',
     'Export-RmResult', 'Clear-RmStaleTemp'
 )
