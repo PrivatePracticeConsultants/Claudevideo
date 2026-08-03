@@ -1816,15 +1816,42 @@ function Export-RmReferralMapHtml {
     }) -Compress
     $titleText = "Referral sources of $($g.Practice.Name) ($($g.Npi)) — $($g.Label)"
     $notMapped = $g.TotalPatients - $g.MappedPatients
-    $notesHtml = (@($g.Notes) | ForEach-Object {
+    $totSources = 0; foreach ($row in @($g.Rows)) { $totSources += $row.Sources }
+    $topShare = if (@($g.Rows).Count -gt 0) { [double]@($g.Rows)[0].PctOfVolume } else { 0 }
+    $topZipLabel = if (@($g.Rows).Count -gt 0) {
+        $t = @($g.Rows)[0]
+        if ($t.Zip -eq '(not located)') { 'not located' }
+        elseif ($t.City) { "$($t.Zip) ($($t.City))" } else { $t.Zip }
+    } else { '—' }
+    $generated = (Get-Date).ToString('MMMM d, yyyy')
+    $notesHtml = (@($g.Notes) | Where-Object { $_ } | ForEach-Object {
         '<li>' + ([System.Net.WebUtility]::HtmlEncode([string]$_)) + '</li>' }) -join "`n"
     $tableRows = (@($g.Rows) | Select-Object -First 30 | ForEach-Object {
-        '<tr><td>{0}</td><td>{1}</td><td>{2}</td><td class="num">{3}</td><td class="num">{4}</td><td class="num">{5}%</td><td class="num">{6}</td><td>{7}</td></tr>' -f
+        '<tr><td class="mono">{0}</td><td>{1}</td><td>{2}</td><td class="num">{3}</td><td class="num">{4}</td><td class="num">{5}%</td><td class="num">{6}</td><td>{7}</td></tr>' -f
             [System.Net.WebUtility]::HtmlEncode([string]$_.Zip),
             [System.Net.WebUtility]::HtmlEncode([string]$_.City),
             [System.Net.WebUtility]::HtmlEncode([string]$_.State),
-            $_.Sources, $_.SharedPatients, $_.PctOfVolume, $_.DistanceMiles,
+            ('{0:N0}' -f $_.Sources), ('{0:N0}' -f $_.SharedPatients), $_.PctOfVolume, $_.DistanceMiles,
             [System.Net.WebUtility]::HtmlEncode([string]$_.TopSource) }) -join "`n"
+    $tableNote = if (@($g.Rows).Count -gt 30) {
+        "Showing the top 30 of $(@($g.Rows).Count) ZIP groups — the full table is in the CSV saved beside this map."
+    } else { '' }
+
+    # Leaflet is BUNDLED with the app and inlined here so the saved map is one
+    # self-contained file (email-able; no CDN dependency). Only the background
+    # tiles need internet. Inserted by LITERAL replacement after the
+    # here-string expands — 147 KB of minified JS must never go through
+    # PowerShell string interpolation. CDN fallback if the bundle is missing.
+    $lfDir = Join-Path $PSScriptRoot 'leaflet'
+    $lfJsPath = Join-Path $lfDir 'leaflet.min.js'
+    $lfCssPath = Join-Path $lfDir 'leaflet.css'
+    if ((Test-Path -LiteralPath $lfJsPath) -and (Test-Path -LiteralPath $lfCssPath)) {
+        $cssBlock = '<style>' + [System.IO.File]::ReadAllText($lfCssPath) + '</style>'
+        $jsBlock = '<script>' + [System.IO.File]::ReadAllText($lfJsPath) + '</script>'
+    } else {
+        $cssBlock = '<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>'
+        $jsBlock = '<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>'
+    }
 
     $html = @"
 <!DOCTYPE html>
@@ -1833,44 +1860,101 @@ function Export-RmReferralMapHtml {
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>$([System.Net.WebUtility]::HtmlEncode($titleText))</title>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+__LEAFLET_CSS_BLOCK__
+__LEAFLET_JS_BLOCK__
 <style>
-  body { margin:0; font-family: Segoe UI, Arial, sans-serif; color:#222; }
-  header { padding:10px 16px; background:#20415e; color:#fff; }
-  header h1 { margin:0; font-size:17px; } header p { margin:4px 0 0; font-size:12px; color:#cfe0f0; }
-  #map { height:62vh; }
-  .legend { background:#fff; padding:8px 10px; border-radius:4px; box-shadow:0 1px 4px rgba(0,0,0,.3); font-size:12px; line-height:18px; }
-  .legend i { width:12px; height:12px; display:inline-block; border-radius:50%; margin-right:6px; vertical-align:-2px; }
-  section { padding:12px 16px; }
-  table { border-collapse:collapse; font-size:12.5px; }
-  th, td { border-bottom:1px solid #ddd; padding:4px 10px 4px 0; text-align:left; }
-  td.num { text-align:right; padding-right:16px; }
-  .notes { font-size:11.5px; color:#555; max-width:1000px; }
-  .offline { padding:8px 16px; background:#fff3cd; font-size:12px; display:none; }
+  :root { --ink:#1c2b3a; --sub:#5b6b7a; --line:#dde3e9; --accent:#2c5f8a; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:#eef1f4; color:var(--ink);
+         font-family:"Segoe UI", -apple-system, "Helvetica Neue", Arial, sans-serif; }
+  .wrap { max-width:1180px; margin:0 auto; padding:18px 20px 30px; }
+  header { display:flex; flex-wrap:wrap; align-items:baseline; gap:8px 14px; margin-bottom:4px; }
+  header h1 { margin:0; font-size:21px; font-weight:600; letter-spacing:-.2px; }
+  .badge { background:var(--accent); color:#fff; font-size:11.5px; font-weight:600;
+           padding:3px 9px; border-radius:99px; white-space:nowrap; }
+  .sub { color:var(--sub); font-size:13px; margin:2px 0 14px; }
+  .stats { display:flex; flex-wrap:wrap; gap:12px; margin:0 0 14px; }
+  .stat { background:#fff; border:1px solid var(--line); border-radius:8px;
+          padding:10px 16px; min-width:150px; box-shadow:0 1px 2px rgba(16,32,48,.05); }
+  .stat b { display:block; font-size:20px; font-weight:650; letter-spacing:-.3px; }
+  .stat span { font-size:11.5px; color:var(--sub); text-transform:uppercase; letter-spacing:.4px; }
+  .card { background:#fff; border:1px solid var(--line); border-radius:8px;
+          box-shadow:0 1px 2px rgba(16,32,48,.05); overflow:hidden; margin-bottom:16px; }
+  #map { height:60vh; min-height:420px; }
+  .offline { padding:9px 14px; background:#fff6da; color:#6b5619; font-size:12.5px;
+             border-bottom:1px solid #eadfb6; display:none; }
+  .card h2 { margin:0; padding:12px 16px 10px; font-size:14.5px; font-weight:600; }
+  table { border-collapse:collapse; width:100%; font-size:12.8px; }
+  th, td { border-top:1px solid var(--line); padding:6px 14px; text-align:left; }
+  th { background:#f2f5f8; color:#33475c; font-weight:600; font-size:11.5px;
+       text-transform:uppercase; letter-spacing:.4px; border-top:none; }
+  tr:nth-child(even) td { background:#f8fafc; }
+  td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
+  td.mono { font-variant-numeric:tabular-nums; }
+  .tablenote { padding:8px 16px 12px; color:var(--sub); font-size:12px; }
+  details { margin:2px 0 0; }
+  summary { cursor:pointer; padding:12px 16px; font-size:14.5px; font-weight:600; }
+  .notes { font-size:12px; color:#4a5a68; line-height:1.55; margin:0; padding:0 20px 14px 34px; }
+  .notes li { margin-bottom:5px; }
+  footer { color:var(--sub); font-size:11.5px; margin-top:6px; }
+  .legend { background:#fff; padding:9px 12px; border-radius:6px;
+            box-shadow:0 1px 5px rgba(0,0,0,.25); font-size:12px; line-height:19px; }
+  .legend i { width:12px; height:12px; display:inline-block; border-radius:50%;
+              margin-right:6px; vertical-align:-2px; }
+  .prac-pin { width:22px; height:22px; border-radius:50%; background:#c62828;
+              border:3px solid #fff; box-shadow:0 1px 6px rgba(0,0,0,.45); }
+  @media print { #map { height:480px; } .badge { border:1px solid var(--accent); } }
 </style>
 </head>
 <body>
+<div class="wrap">
 <header>
-  <h1>$([System.Net.WebUtility]::HtmlEncode($titleText))</h1>
-  <p>$('{0:N0}' -f $g.TotalPatients) inbound shared patients across $(@($g.Rows).Count) source ZIP group(s); $('{0:N0}' -f $g.MappedPatients) mappable$(if ($notMapped -gt 0) { ", $('{0:N0}' -f $notMapped) not locatable" }). Circle size and color = referral volume from that ZIP.</p>
+  <h1>$([System.Net.WebUtility]::HtmlEncode([string]$g.Practice.Name))</h1>
+  <span class="badge">$([System.Net.WebUtility]::HtmlEncode([string]$g.Label))</span>
 </header>
-<div id="offline" class="offline">The base map could not load (no internet?). The circles and table below still work.</div>
-<div id="map"></div>
-<section>
-  <h3 style="margin:4px 0 8px;">Top source ZIPs</h3>
+<p class="sub">Where this practice's Medicare referrals came from in $($g.Year) &mdash;
+NPI $($g.Npi), $([System.Net.WebUtility]::HtmlEncode("$($g.Practice.City), $($g.Practice.State) $($g.Practice.Zip)")).
+Circle size and color show referral volume from each source ZIP.</p>
+<div class="stats">
+  <div class="stat"><b>$('{0:N0}' -f $g.TotalPatients)</b><span>Shared patients</span></div>
+  <div class="stat"><b>$('{0:N0}' -f $totSources)</b><span>Source relationships</span></div>
+  <div class="stat"><b>$('{0:N0}' -f @($g.Rows).Count)</b><span>Source ZIP areas</span></div>
+  <div class="stat"><b>$topShare%</b><span>From top ZIP ($([System.Net.WebUtility]::HtmlEncode($topZipLabel)))</span></div>
+</div>
+<div class="card">
+  <div id="offline" class="offline">The background map could not load (no internet connection?). The circles, popups, and table below still work.</div>
+  <div id="map"></div>
+</div>
+<div class="card">
+  <h2>Top source ZIP areas</h2>
   <table>
-    <tr><th>ZIP</th><th>City</th><th>St</th><th>Sources</th><th>Patients</th><th>% of volume</th><th>Miles</th><th>Top source</th></tr>
+    <tr><th>ZIP</th><th>City</th><th>St</th><th class="num">Sources</th><th class="num">Patients</th><th class="num">% of volume</th><th class="num">Miles</th><th>Top source in ZIP</th></tr>
     $tableRows
   </table>
-  <h3 style="margin:16px 0 6px;">How to read this (methodology)</h3>
-  <ul class="notes">
-    $notesHtml
-  </ul>
-</section>
+  $(if ($tableNote) { "<div class='tablenote'>$tableNote</div>" })
+</div>
+<div class="card">
+  <details>
+    <summary>How to read this map (methodology &amp; limitations)</summary>
+    <ul class="notes">
+      $notesHtml
+    </ul>
+  </details>
+</div>
+<footer>Generated $generated by the Medicare Order &amp; Referring Tracker &middot;
+$('{0:N0}' -f $g.MappedPatients) of $('{0:N0}' -f $g.TotalPatients) patients mappable$(if ($notMapped -gt 0) { " ($('{0:N0}' -f $notMapped) from sources without a locatable ZIP)" }) &middot;
+Base map &copy; OpenStreetMap contributors &middot; ZIP centroids: US Census 2023 ZCTA gazetteer</footer>
+</div>
 <script>
 var pts = $pointsJson;
 var prac = $practiceJson;
+// If the map library itself failed to load (no internet), say so instead of
+// showing an empty white box — the stats and table above still stand alone.
+if (typeof L === 'undefined') {
+  document.getElementById('offline').style.display = 'block';
+  document.getElementById('map').style.height = '0';
+  throw new Error('Leaflet unavailable (offline)');
+}
 var maxP = 1; pts.forEach(function(p){ if (p.p > maxP) maxP = p.p; });
 var center = (prac.lat !== null) ? [prac.lat, prac.lon]
            : (pts.length ? [pts[0].lat, pts[0].lon] : [39.5, -98.35]);
@@ -1890,21 +1974,36 @@ function radius(v) { return 6 + 30 * Math.sqrt(v / maxP); }
 var group = [];
 pts.forEach(function(p) {
   var c = L.circleMarker([p.lat, p.lon], {
-    radius: radius(p.p), color: '#333', weight: 1,
-    fillColor: color(p.p), fillOpacity: 0.75
+    radius: radius(p.p), color: '#26333e', weight: 1,
+    fillColor: color(p.p), fillOpacity: 0.72
   }).addTo(map);
-  c.bindPopup('<b>ZIP ' + p.z + '</b> ' + p.city + ', ' + p.st +
+  c.bindPopup('<b>ZIP ' + p.z + '</b> &mdash; ' + p.city + ', ' + p.st +
     '<br/>' + p.p.toLocaleString() + ' patients (' + p.pct + '% of volume) from ' + p.s + ' source(s)' +
     (p.d ? '<br/>' + p.d + ' miles from the practice' : '') +
     (p.top ? '<br/>Top source: ' + p.top : ''));
   group.push(c);
 });
 if (prac.lat !== null) {
-  var star = L.marker([prac.lat, prac.lon], { title: prac.name }).addTo(map);
+  var star = L.marker([prac.lat, prac.lon], { title: prac.name,
+    icon: L.divIcon({ className: 'prac-pin', iconSize: [22, 22], iconAnchor: [11, 11] }) }).addTo(map);
   star.bindPopup('<b>' + prac.name + '</b><br/>' + prac.city + ', ' + prac.st + ' ' + prac.zip + '<br/>(the practice)');
   group.push(star);
 }
-if (group.length > 1) { map.fitBounds(L.featureGroup(group).getBounds().pad(0.15)); }
+// Frame the core market, not the outliers: fit the highest-volume ZIPs that
+// cover ~90% of mapped volume (a single snowbird source 1,400 miles away
+// must not zoom the whole map out to a national view). Outliers stay on the
+// map — zoom out to see them; the table lists them regardless.
+var fitPts = pts.slice().sort(function(a, b){ return b.p - a.p; });
+var mappedTotal = 0; fitPts.forEach(function(p){ mappedTotal += p.p; });
+var fitGroup = []; var acc = 0;
+for (var i = 0; i < fitPts.length; i++) {
+  fitGroup.push(L.latLng(fitPts[i].lat, fitPts[i].lon));
+  acc += fitPts[i].p;
+  if (acc >= mappedTotal * 0.9) break;
+}
+if (prac.lat !== null) { fitGroup.push(L.latLng(prac.lat, prac.lon)); }
+if (fitGroup.length > 1) { map.fitBounds(L.latLngBounds(fitGroup).pad(0.18)); }
+else if (group.length > 1) { map.fitBounds(L.featureGroup(group).getBounds().pad(0.15)); }
 var legend = L.control({position:'bottomright'});
 legend.onAdd = function() {
   var div = L.DomUtil.create('div', 'legend');
@@ -1920,6 +2019,7 @@ legend.addTo(map);
 </body>
 </html>
 "@
+    $html = $html.Replace('__LEAFLET_CSS_BLOCK__', $cssBlock).Replace('__LEAFLET_JS_BLOCK__', $jsBlock)
     $dir = Split-Path -Parent $Path
     if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
     # UTF-8 with BOM so browsers and Notepad agree about the encoding on WinPS 5.1 too.

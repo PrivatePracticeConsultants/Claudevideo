@@ -608,6 +608,9 @@ Describe 'Referral geography and heat map' {
         $html | Should -BeLike '*TEST REHAB CLINIC LLC*'
         $html | Should -BeLike '*GEOGRAPHY METHOD*'
         $html | Should -BeLike '*openstreetmap*'
+        # Leaflet must be INLINED (self-contained file), not a CDN reference
+        $html | Should -BeLike '*Leaflet 1.9.4*'
+        $html | Should -Not -BeLike '*unpkg.com*'
     }
 
     It 'works on the hop dataset too' {

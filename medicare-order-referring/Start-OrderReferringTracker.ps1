@@ -29,8 +29,78 @@ $xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Medicare Order &amp; Referring Tracker"
-        Width="980" Height="680" MinWidth="820" MinHeight="520"
-        WindowStartupLocation="CenterScreen" Background="#F4F6F8">
+        Width="1010" Height="700" MinWidth="820" MinHeight="520"
+        WindowStartupLocation="CenterScreen" Background="#EEF1F4"
+        FontFamily="Segoe UI" FontSize="12.5">
+  <Window.Resources>
+    <!-- App-wide design system: flat accent buttons, quiet bordered inputs,
+         zebra-striped grids with slate headers. Textbook WPF only. -->
+    <Style TargetType="Button">
+      <Setter Property="Background" Value="#2C5F8A"/>
+      <Setter Property="Foreground" Value="White"/>
+      <Setter Property="BorderBrush" Value="#24506F"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="Padding" Value="12,5"/>
+      <Setter Property="MinHeight" Value="28"/>
+      <Setter Property="SnapsToDevicePixels" Value="True"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="bd" Background="{TemplateBinding Background}"
+                    BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="4">
+              <ContentPresenter Margin="{TemplateBinding Padding}"
+                                HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="bd" Property="Background" Value="#3A75A8"/>
+              </Trigger>
+              <Trigger Property="IsPressed" Value="True">
+                <Setter TargetName="bd" Property="Background" Value="#1F476B"/>
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter TargetName="bd" Property="Background" Value="#C9D1D8"/>
+                <Setter TargetName="bd" Property="BorderBrush" Value="#BAC3CB"/>
+                <Setter Property="Foreground" Value="#717B84"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style TargetType="DataGrid">
+      <Setter Property="Background" Value="White"/>
+      <Setter Property="BorderBrush" Value="#D5DBE1"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="RowHeight" Value="26"/>
+      <Setter Property="AlternatingRowBackground" Value="#F5F8FA"/>
+      <Setter Property="HorizontalGridLinesBrush" Value="#E8ECEF"/>
+      <Setter Property="VerticalGridLinesBrush" Value="#EDF0F3"/>
+      <Setter Property="RowHeaderWidth" Value="0"/>
+    </Style>
+    <Style TargetType="DataGridColumnHeader">
+      <Setter Property="Background" Value="#EDF1F5"/>
+      <Setter Property="Foreground" Value="#1F3B57"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="Padding" Value="8,5"/>
+      <Setter Property="BorderBrush" Value="#D5DBE1"/>
+      <Setter Property="BorderThickness" Value="0,0,1,1"/>
+    </Style>
+    <Style TargetType="TabItem">
+      <Setter Property="Padding" Value="10,6"/>
+      <Setter Property="FontSize" Value="13"/>
+    </Style>
+    <Style TargetType="TextBox">
+      <Setter Property="Padding" Value="4,2"/>
+      <Setter Property="VerticalContentAlignment" Value="Center"/>
+      <Setter Property="BorderBrush" Value="#B9C2CA"/>
+    </Style>
+    <Style TargetType="ComboBox">
+      <Setter Property="Padding" Value="6,3"/>
+    </Style>
+  </Window.Resources>
   <Grid Margin="10">
     <Grid.RowDefinitions>
       <RowDefinition Height="Auto"/>
@@ -100,8 +170,11 @@ $xaml = @'
           <DataGrid Grid.Row="2" x:Name="SearchGrid" IsReadOnly="True" AutoGenerateColumns="True"
                     CanUserAddRows="False" GridLinesVisibility="Horizontal"
                     HeadersVisibility="Column" EnableRowVirtualization="True"/>
-          <TextBlock Grid.Row="3" x:Name="SearchSummary" Margin="0,6,0,0" Foreground="#333"
+          <Border Grid.Row="3" Background="White" BorderBrush="#D5DBE1" BorderThickness="1"
+                  CornerRadius="4" Padding="9,7" Margin="0,8,0,0">
+            <TextBlock x:Name="SearchSummary" Foreground="#26333E" TextWrapping="Wrap"
                      Text="Enter a name or NPI and click Search."/>
+          </Border>
         </Grid>
       </TabItem>
 
@@ -132,7 +205,10 @@ $xaml = @'
           <DataGrid Grid.Row="2" x:Name="BatchGrid" IsReadOnly="True" AutoGenerateColumns="True"
                     CanUserAddRows="False" GridLinesVisibility="Horizontal" Margin="0,8,0,0"
                     HeadersVisibility="Column" EnableRowVirtualization="True"/>
-          <TextBlock Grid.Row="3" x:Name="BatchSummary" Margin="0,6,0,0" Foreground="#333" Text=""/>
+          <Border Grid.Row="3" Background="White" BorderBrush="#D5DBE1" BorderThickness="1"
+                  CornerRadius="4" Padding="9,7" Margin="0,8,0,0">
+            <TextBlock x:Name="BatchSummary" Foreground="#26333E" TextWrapping="Wrap" Text=""/>
+          </Border>
         </Grid>
       </TabItem>
 
@@ -164,8 +240,11 @@ $xaml = @'
           <DataGrid Grid.Row="1" x:Name="ChangesGrid" IsReadOnly="True" AutoGenerateColumns="True"
                     CanUserAddRows="False" GridLinesVisibility="Horizontal" Margin="0,8,0,0"
                     HeadersVisibility="Column" EnableRowVirtualization="True"/>
-          <TextBlock Grid.Row="2" x:Name="ChangesSummary" Margin="0,6,0,0" Foreground="#333"
+          <Border Grid.Row="2" Background="White" BorderBrush="#D5DBE1" BorderThickness="1"
+                  CornerRadius="4" Padding="9,7" Margin="0,8,0,0">
+            <TextBlock x:Name="ChangesSummary" Foreground="#26333E" TextWrapping="Wrap"
               Text="Snapshots accumulate automatically each time CMS publishes an update. Two or more are needed to compare."/>
+          </Border>
         </Grid>
       </TabItem>
       <!-- ============ Referral map tab ============ -->
@@ -200,7 +279,7 @@ $xaml = @'
                     CanUserAddRows="False" GridLinesVisibility="Horizontal"
                     HeadersVisibility="Column" EnableRowVirtualization="True"/>
           <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="0,6,0,4">
-            <TextBlock x:Name="RmSourceLabel" Text="Referral sources (select a clinic above to filter):"
+            <TextBlock x:Name="RmSourceLabel" FontWeight="SemiBold" Foreground="#1F3B57" Text="Referral sources (select a clinic above to filter):"
                        VerticalAlignment="Center"/>
             <Button x:Name="RmExportClinicsButton" Content="Export clinics..." Padding="10,4"
                     Margin="14,0,0,0" IsEnabled="False"/>
@@ -213,8 +292,11 @@ $xaml = @'
           <DataGrid Grid.Row="4" x:Name="RmSourceGrid" IsReadOnly="True" AutoGenerateColumns="True"
                     CanUserAddRows="False" GridLinesVisibility="Horizontal"
                     HeadersVisibility="Column" EnableRowVirtualization="True"/>
-          <TextBlock Grid.Row="5" x:Name="RmSummary" Margin="0,6,0,0" Foreground="#333" TextWrapping="Wrap"
+          <Border Grid.Row="5" Background="White" BorderBrush="#D5DBE1" BorderThickness="1"
+                  CornerRadius="4" Padding="9,7" Margin="0,8,0,0">
+            <TextBlock x:Name="RmSummary" Foreground="#26333E" TextWrapping="Wrap"
               Text="One-time setup: click 'Download CMS dataset' (~356 MB download, ~1.7 GB on disk)."/>
+          </Border>
         </Grid>
       </TabItem>
 
@@ -249,21 +331,24 @@ $xaml = @'
                     CanUserAddRows="False" GridLinesVisibility="Horizontal"
                     HeadersVisibility="Column" EnableRowVirtualization="True"/>
           <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="0,6,0,4">
-            <TextBlock x:Name="BmRegionLabel" Text="Region ranking (run a benchmark to fill):" VerticalAlignment="Center"/>
+            <TextBlock x:Name="BmRegionLabel" FontWeight="SemiBold" Foreground="#1F3B57" Text="Region ranking (run a benchmark to fill):" VerticalAlignment="Center"/>
             <Button x:Name="BmExportRegionButton" Content="Export ranking..." Padding="10,4" Margin="12,0,0,0" IsEnabled="False"/>
           </StackPanel>
           <DataGrid Grid.Row="4" x:Name="BmRegionGrid" IsReadOnly="True" AutoGenerateColumns="True"
                     CanUserAddRows="False" GridLinesVisibility="Horizontal"
                     HeadersVisibility="Column" EnableRowVirtualization="True"/>
           <StackPanel Grid.Row="5" Orientation="Horizontal" Margin="0,6,0,4">
-            <TextBlock x:Name="BmMissedLabel" Text="Missed sources (feeding competitors, not this practice):" VerticalAlignment="Center"/>
+            <TextBlock x:Name="BmMissedLabel" FontWeight="SemiBold" Foreground="#1F3B57" Text="Missed sources (feeding competitors, not this practice):" VerticalAlignment="Center"/>
             <Button x:Name="BmExportMissedButton" Content="Export missed sources..." Padding="10,4" Margin="12,0,0,0" IsEnabled="False"/>
           </StackPanel>
           <DataGrid Grid.Row="6" x:Name="BmMissedGrid" IsReadOnly="True" AutoGenerateColumns="True"
                     CanUserAddRows="False" GridLinesVisibility="Horizontal"
                     HeadersVisibility="Column" EnableRowVirtualization="True"/>
-          <TextBlock Grid.Row="7" x:Name="BmSummary" Margin="0,6,0,0" Foreground="#333" TextWrapping="Wrap"
+          <Border Grid.Row="7" Background="White" BorderBrush="#D5DBE1" BorderThickness="1"
+                  CornerRadius="4" Padding="9,7" Margin="0,8,0,0">
+            <TextBlock x:Name="BmSummary" Foreground="#26333E" TextWrapping="Wrap"
               Text="Needs a referral dataset (Referral map tab) and an internet connection for the NPPES search."/>
+          </Border>
         </Grid>
       </TabItem>
 
@@ -292,7 +377,7 @@ $xaml = @'
                     CanUserAddRows="False" GridLinesVisibility="Horizontal"
                     HeadersVisibility="Column" EnableRowVirtualization="True"/>
           <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="0,6,0,4">
-            <TextBlock x:Name="PgRosterLabel" Text="Therapist roster (select a group above to filter):"
+            <TextBlock x:Name="PgRosterLabel" FontWeight="SemiBold" Foreground="#1F3B57" Text="Therapist roster (select a group above to filter):"
                        VerticalAlignment="Center"/>
             <Button x:Name="PgFootprintButton" Content="Add 2015 referral footprint" Padding="10,4"
                     Margin="14,0,0,0" IsEnabled="False"
@@ -305,8 +390,11 @@ $xaml = @'
           <DataGrid Grid.Row="4" x:Name="PgRosterGrid" IsReadOnly="True" AutoGenerateColumns="True"
                     CanUserAddRows="False" GridLinesVisibility="Horizontal"
                     HeadersVisibility="Column" EnableRowVirtualization="True"/>
-          <TextBlock Grid.Row="5" x:Name="PgSummary" Margin="0,6,0,0" Foreground="#333" TextWrapping="Wrap"
+          <Border Grid.Row="5" Background="White" BorderBrush="#D5DBE1" BorderThickness="1"
+                  CornerRadius="4" Padding="9,7" Margin="0,8,0,0">
+            <TextBlock x:Name="PgSummary" Foreground="#26333E" TextWrapping="Wrap"
               Text="One-time setup: click 'Download CMS dataset' (~510 MB download). This tab needs no other data."/>
+          </Border>
         </Grid>
       </TabItem>
 
@@ -342,7 +430,7 @@ $xaml = @'
                        Text="Enter an NPI and click Look up provider."/>
           </Border>
           <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="0,4,0,4">
-            <TextBlock x:Name="LkInboundLabel" VerticalAlignment="Center"
+            <TextBlock x:Name="LkInboundLabel" FontWeight="SemiBold" Foreground="#1F3B57" VerticalAlignment="Center"
                        Text="Referral sources (who shared patients INTO them):"/>
             <Button x:Name="LkExportInboundButton" Content="Export..." Padding="10,4" Margin="12,0,0,0" IsEnabled="False"/>
           </StackPanel>
@@ -350,7 +438,7 @@ $xaml = @'
                     CanUserAddRows="False" GridLinesVisibility="Horizontal"
                     HeadersVisibility="Column" EnableRowVirtualization="True"/>
           <StackPanel Grid.Row="5" Orientation="Horizontal" Margin="0,4,0,4">
-            <TextBlock x:Name="LkOutboundLabel" VerticalAlignment="Center"
+            <TextBlock x:Name="LkOutboundLabel" FontWeight="SemiBold" Foreground="#1F3B57" VerticalAlignment="Center"
                        Text="Referral destinations (who they shared patients ONWARD to):"/>
             <Button x:Name="LkExportOutboundButton" Content="Export..." Padding="10,4" Margin="12,0,0,0" IsEnabled="False"/>
           </StackPanel>
@@ -388,8 +476,11 @@ $xaml = @'
           <DataGrid Grid.Row="2" x:Name="WlGrid" IsReadOnly="True" AutoGenerateColumns="True"
                     CanUserAddRows="False" GridLinesVisibility="Horizontal"
                     HeadersVisibility="Column" EnableRowVirtualization="True"/>
-          <TextBlock Grid.Row="3" x:Name="WlSummary" Margin="0,6,0,0" Foreground="#333" TextWrapping="Wrap"
+          <Border Grid.Row="3" Background="White" BorderBrush="#D5DBE1" BorderThickness="1"
+                  CornerRadius="4" Padding="9,7" Margin="0,8,0,0">
+            <TextBlock x:Name="WlSummary" Foreground="#26333E" TextWrapping="Wrap"
               Text="Paste NPIs, click Save watchlist, then Check now. Needs the Order &amp; Referring data (Search tab) downloaded."/>
+          </Border>
         </Grid>
       </TabItem>
     </TabControl>
