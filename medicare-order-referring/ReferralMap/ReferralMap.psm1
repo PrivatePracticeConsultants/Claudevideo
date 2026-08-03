@@ -828,23 +828,36 @@ function Find-RmClinic {
     #>
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)][ValidatePattern('^\d{3,5}\*?$')][string]$Zip,
+        [ValidatePattern('^\d{3,5}\*?$')][string]$Zip,
+        [ValidateCount(1, 2000)][string[]]$ZipList,   # exact 5-digit ZIPs (radius search)
         [switch]$OrganizationsOnly
     )
+    if (-not $Zip -and -not $ZipList) { throw 'Provide -Zip or -ZipList.' }
 
-    $zipPrefix = $Zip.TrimEnd('*')
     $allowed = @{}
     foreach ($kv in $script:RmClinicTaxonomies.GetEnumerator()) { $allowed[$kv.Key] = $kv.Value }
     if (-not $OrganizationsOnly) {
         foreach ($kv in $script:RmIndividualTaxonomies.GetEnumerator()) { $allowed[$kv.Key] = $kv.Value }
     }
 
+    # Radius searches query each ZIP exactly (complete, and safely under
+    # NPPES's 1,200-per-query ceiling) instead of one wide prefix.
+    # @() around the WHOLE if: assignment from if{} unrolls one-element arrays
+    # to a scalar, and .Count on a string throws under StrictMode (the same
+    # gotcha the watchlist hit once).
+    $zipQueries = @(if ($ZipList) { $ZipList | Where-Object { $_ -match '^\d{5}$' } | Sort-Object -Unique }
+                    else { $Zip })
     $found = @{}
+    $zqN = 0
+    foreach ($zq in $zipQueries) {
+    $zqN++
+    if ($zipQueries.Count -gt 1) { Write-Verbose "NPPES sweep $zqN of $($zipQueries.Count): ZIP $zq" }
+    $zipPrefix = $zq.TrimEnd('*')
     foreach ($term in $script:RmSearchTerms) {
         $skip = 0
         while ($true) {
             $q = 'postal_code={0}&taxonomy_description={1}&limit=200&skip={2}' -f
-                [uri]::EscapeDataString($Zip), [uri]::EscapeDataString($term), $skip
+                [uri]::EscapeDataString($zq), [uri]::EscapeDataString($term), $skip
             $resp = Invoke-RmNppes $q
             $results = @(Get-RmProp $resp 'results')
             foreach ($r in $results) {
@@ -888,13 +901,14 @@ function Find-RmClinic {
             if ($skip -ge 1000) {
                 # NPPES refuses to page past skip=1000; a full last page means
                 # there are probably more providers we cannot see.
-                Write-Warning ("NPPES returned its maximum of 1,200 results for '$term' in '$Zip' — " +
+                Write-Warning ("NPPES returned its maximum of 1,200 results for '$term' in '$zq' — " +
                     "the provider list may be incomplete. Use a narrower ZIP (a full 5-digit ZIP " +
                     "instead of a prefix) to make sure nothing is missed.")
                 break
             }
             $skip += 200
         }
+    }
     }
     $found.Values | Sort-Object Name
 }
@@ -1033,8 +1047,10 @@ function Get-RmReferralMap {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][ValidatePattern('^\d{3,5}\*?$')][string]$Zip,
+        [ValidateRange(0, 50)][double]$RadiusMiles = 0,
         [switch]$OrganizationsOnly,
-        [switch]$SkipEnrichment   # NPI-only output when offline
+        [switch]$SkipEnrichment,   # NPI-only output when offline
+        [string]$CentroidPath      # test override for the radius table
     )
 
     $info = Get-RmDatasetInfo
@@ -1046,12 +1062,33 @@ function Get-RmReferralMap {
     $dataset = $info.Path
     $isHop = $info.Source -eq 'hop-teaming'
 
-    Write-Verbose "Finding rehab providers in ZIP $Zip via NPPES..."
-    $clinics = @(Find-RmClinic -Zip $Zip -OrganizationsOnly:$OrganizationsOnly)
+    # Radius mode: turn the center ZIP into the full list of ZIPs whose
+    # centroid falls inside the circle, then sweep NPPES per ZIP (complete —
+    # no reliance on prefix shapes or the 1,200-result prefix ceiling).
+    $radiusZips = $null
+    $centerLoc = $null
+    if ($RadiusMiles -gt 0) {
+        if ($Zip -notmatch '^\d{5}$') {
+            throw "A radius search needs a full 5-digit center ZIP (got '$Zip'); prefixes like 630* only work with radius 0."
+        }
+        $radiusZips = @(Get-RmZipsInRadius -Zip $Zip -RadiusMiles $RadiusMiles -CentroidPath $CentroidPath)
+        $cents = Get-RmCentroids $CentroidPath
+        $centerLoc = $cents[$Zip]
+        Write-Verbose "Radius $RadiusMiles mi around $Zip covers $($radiusZips.Count) ZIP(s)."
+    }
+
+    Write-Verbose "Finding rehab providers via NPPES..."
+    $clinics = if ($radiusZips) {
+        @(Find-RmClinic -ZipList $radiusZips -OrganizationsOnly:$OrganizationsOnly)
+    } else {
+        @(Find-RmClinic -Zip $Zip -OrganizationsOnly:$OrganizationsOnly)
+    }
     if ($clinics.Count -eq 0) {
         throw ("NPPES lists no outpatient rehab providers (PT/rehab clinics" +
                $(if (-not $OrganizationsOnly) { ", individual PT/OT/SLPs" }) +
-               ") with a practice location in ZIP '$Zip'. Try a broader prefix like '$($Zip.Substring(0,3))*'.")
+               ") with a practice location in " +
+               $(if ($radiusZips) { "the $RadiusMiles-mile radius around ZIP '$Zip'. Try a larger radius." }
+                 else { "ZIP '$Zip'. Try a broader prefix like '$($Zip.Substring(0,3))*' or a radius search." }))
     }
     Write-Verbose "Found $($clinics.Count) rehab providers. Scanning $($info.Label)..."
 
@@ -1146,9 +1183,16 @@ function Get-RmReferralMap {
             City            = $_.City
             State           = $_.State
             Zip             = $_.Zip
-            ReferralSources = if ($agg) { $agg.Sources } else { 0 }
-            SharedPatients  = if ($agg) { $agg.Benes } else { 0 }
         }
+        if ($null -ne $centerLoc) {
+            $cz = [string]$_.Zip
+            $cents2 = Get-RmCentroids $CentroidPath
+            $row['DistanceMiles'] = if ($cz -match '^\d{5}$' -and $cents2.ContainsKey($cz)) {
+                Get-RmMilesBetween $centerLoc[0] $centerLoc[1] $cents2[$cz][0] $cents2[$cz][1]
+            } else { '' }
+        }
+        $row['ReferralSources'] = if ($agg) { $agg.Sources } else { 0 }
+        $row['SharedPatients']  = if ($agg) { $agg.Benes } else { 0 }
         if (-not $isHop) { $row['SameDay'] = if ($agg) { $agg.SameDay } else { 0 } }
         $row['ExistedInDataYear'] = $existed
         [pscustomobject]$row
@@ -1157,12 +1201,13 @@ function Get-RmReferralMap {
     $notYetEnumerated = @($clinicRows | Where-Object { $_.ExistedInDataYear -like 'No*' }).Count
 
     $notes = @(Get-RmMethodologyNotes -Info $info -OrganizationsOnly:$OrganizationsOnly) + @(
+        $(if ($radiusZips) { "RADIUS SEARCH: providers were swept from the $($radiusZips.Count) ZIP code(s) whose US-Census area centroid lies within $RadiusMiles straight-line miles of ZIP $Zip's centroid. DistanceMiles is centroid-to-centroid, not driving distance; PO-box-only ZIPs (absent from the Census table) are not swept." })
         $(if ($notYetEnumerated -gt 0) { '{0} of {1} providers found in this ZIP were issued their NPI after the {2} file''s service window ended, so they cannot appear in it (ExistedInDataYear = No).' -f $notYetEnumerated, $clinicRows.Count, $info.Year })
         $(if ($enrichNote) { $enrichNote })
     ) | Where-Object { $_ }
 
     [pscustomobject]@{
-        Zip     = $Zip
+        Zip     = if ($radiusZips) { "$Zip+${RadiusMiles}mi" } else { $Zip }
         Clinics = $clinicRows
         Sources = $sources
         Notes   = @($notes)
@@ -1963,6 +2008,35 @@ function Get-RmMilesBetween([double]$Lat1, [double]$Lon1, [double]$Lat2, [double
     [math]::Round(3958.8 * 2 * [math]::Atan2([math]::Sqrt($a), [math]::Sqrt(1 - $a)), 1)
 }
 
+function Get-RmZipsInRadius {
+    <#
+    .SYNOPSIS
+      All ZIP codes whose Census-centroid falls within the given radius of a
+      center ZIP's centroid (straight-line miles). The center ZIP is always
+      included. Radius 0 returns just the center ZIP.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidatePattern('^\d{5}$')][string]$Zip,
+        [Parameter(Mandatory)][ValidateRange(0, 50)][double]$RadiusMiles,
+        [string]$CentroidPath
+    )
+    $centroids = Get-RmCentroids $CentroidPath
+    if (-not $centroids.ContainsKey($Zip)) {
+        throw ("ZIP $Zip is not in the Census ZIP-area table (PO-box-only and very new ZIPs are missing). " +
+               "Try a neighboring ZIP with street addresses.")
+    }
+    if ($RadiusMiles -le 0) { return @($Zip) }
+    $c = $centroids[$Zip]
+    $hits = New-Object System.Collections.Generic.List[string]
+    foreach ($k in $centroids.Keys) {
+        if ((Get-RmMilesBetween $c[0] $c[1] $centroids[$k][0] $centroids[$k][1]) -le $RadiusMiles) {
+            $hits.Add($k)
+        }
+    }
+    @($hits.ToArray() | Sort-Object)
+}
+
 function Get-RmReferralGeography {
     <#
     .SYNOPSIS
@@ -2430,6 +2504,7 @@ Export-ModuleMember -Function @(
     'Get-RmDatasetInfo', 'Get-RmAvailableDatasets', 'Set-RmActiveDataset',
     'Save-RmDataset', 'Import-RmDataset',
     'Find-RmClinic', 'Find-RmPractice', 'Get-RmProviderDetail',
+    'Get-RmZipsInRadius',
     'Get-RmReferralMap', 'Get-RmInboundByBucket', 'Get-RmGroupBenchmark', 'Get-RmGroupMissedSources',
     'Get-RmGroupTrend',
     'Get-RmProviderReferralActivity',

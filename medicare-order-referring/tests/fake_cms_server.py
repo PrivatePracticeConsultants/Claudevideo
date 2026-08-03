@@ -54,6 +54,9 @@ MAILING_ONLY = provider('9000000004', 'NPI-2', 'ELSEWHERE PT CENTER', ['261QP200
 # A malformed short location postal code (these exist in the live registry):
 # must not crash discovery. Reachable only via a prefix search like 999*.
 SHORT_POSTAL = provider('9000000006', 'NPI-1', ('SHORT', 'ZIPCODE'), ['225100000X'], '9999')
+# A PT in the NEIGHBORING ZIP 99998 — reachable only by an exact-ZIP query
+# (radius search); a plain 99999 search must NOT return it.
+NEIGHBOR = provider('9000000007', 'NPI-1', ('NEXTDOOR', 'NEIGHBOR'), ['225100000X'], '999980000')
 
 # ZIP 88888: a paging fixture — 201 individual PTs so the client must fetch a
 # full 200-row page and then a second page.
@@ -111,7 +114,7 @@ class Handler(BaseHTTPRequestHandler):
             q = {k: v[0] for k, v in parse_qs(url.query).items()}
             if 'number' in q:
                 hit = SOURCES.get(q['number'])
-                for p in IN_ZIP + [MAILING_ONLY, SHORT_POSTAL] + PAGED + PG_THERAPISTS:
+                for p in IN_ZIP + [MAILING_ONLY, SHORT_POSTAL, NEIGHBOR] + PAGED + PG_THERAPISTS:
                     if p['number'] == q['number']:
                         hit = p
                 results = [hit] if hit else []
@@ -145,6 +148,8 @@ class Handler(BaseHTTPRequestHandler):
             results = []
             if term == 'Physical Therapy' and '99999'.startswith(prefix[:5]) and skip == 0:
                 results = IN_ZIP + [MAILING_ONLY, SHORT_POSTAL]
+            elif term == 'Physical Therapist' and prefix == '99998' and skip == 0:
+                results = [NEIGHBOR]
             elif term == 'Physical Therapist' and '88888'.startswith(prefix[:5]):
                 results = PAGED[skip:skip + 200]
             elif term == 'Physical Therapist' and '77777'.startswith(prefix[:5]) and skip == 0:

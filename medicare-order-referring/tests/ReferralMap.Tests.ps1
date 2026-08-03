@@ -755,3 +755,55 @@ Describe 'Group outbound, specialty mix, and group trend' {
         } finally { Set-RmConfig -DataDir $savedDir }
     }
 }
+
+Describe 'Radius search' {
+    BeforeAll {
+        # Fixture centroids: 99998 is ~6.9 straight-line miles from 99999
+        # (0.1 deg latitude at same longitude); 86442 is ~1,400 miles away.
+        $script:RadCsv = Join-Path $script:WorkDir 'radius-centroids.csv'
+        Set-Content -Path $script:RadCsv -Encoding ascii -Value @(
+            'zip,lat,lon'
+            '99999,40.0000,-90.0000'
+            '99998,40.1000,-90.0000'
+            '86442,35.1000,-114.6000'
+        )
+    }
+
+    It 'computes the ZIPs inside the circle (center always included)' {
+        @(Get-RmZipsInRadius -Zip 99999 -RadiusMiles 0 -CentroidPath $script:RadCsv) | Should -Be @('99999')
+        @(Get-RmZipsInRadius -Zip 99999 -RadiusMiles 10 -CentroidPath $script:RadCsv) | Should -Be @('99998', '99999')
+        @(Get-RmZipsInRadius -Zip 99999 -RadiusMiles 5 -CentroidPath $script:RadCsv) | Should -Be @('99999')
+        { Get-RmZipsInRadius -Zip 12345 -RadiusMiles 10 -CentroidPath $script:RadCsv } | Should -Throw '*not in the Census*'
+    }
+
+    It 'Find-RmClinic -ZipList sweeps each ZIP exactly and merges results' {
+        $clinics = @(Find-RmClinic -ZipList @('99998', '99999'))
+        @($clinics | ForEach-Object NPI) -contains '9000000007' | Should -BeTrue    # the neighbor
+        @($clinics | ForEach-Object NPI) -contains '9000000001' | Should -BeTrue    # the 99999 org
+        # exact-ZIP semantics: a plain 99999 search must NOT include the neighbor
+        @(@(Find-RmClinic -Zip 99999) | ForEach-Object NPI) -contains '9000000007' | Should -BeFalse
+    }
+
+    It 'radius map includes the neighbor with a DistanceMiles column and radius notes' {
+        $map = Get-RmReferralMap -Zip 99999 -RadiusMiles 10 -SkipEnrichment -CentroidPath $script:RadCsv
+        $map.Zip | Should -Be '99999+10mi'
+        $rows = @($map.Clinics)
+        @($rows | Where-Object NPI -eq '9000000007').Count | Should -Be 1
+        $n = @($rows | Where-Object NPI -eq '9000000007')[0]
+        # 0.1 degree latitude is ~6.9 miles
+        [double]$n.DistanceMiles | Should -BeGreaterThan 6
+        [double]$n.DistanceMiles | Should -BeLessThan 8
+        @($rows | Where-Object NPI -eq '9000000001')[0].DistanceMiles | Should -Be 0
+        # ranking and totals unchanged for the 99999 crew
+        @($rows | Where-Object NPI -eq '9000000001')[0].SharedPatients | Should -Be 65
+        (@($map.Notes) -join ' ') | Should -BeLike '*RADIUS SEARCH*'
+        (@($map.Notes) -join ' ') | Should -BeLike '*not driving distance*'
+    }
+
+    It 'rejects a prefix center and keeps plain searches column-stable' {
+        { Get-RmReferralMap -Zip '999*' -RadiusMiles 10 -CentroidPath $script:RadCsv } | Should -Throw '*full 5-digit*'
+        $plain = Get-RmReferralMap -Zip 99999 -SkipEnrichment
+        @($plain.Clinics)[0].PSObject.Properties['DistanceMiles'] | Should -BeNullOrEmpty
+        $plain.Zip | Should -Be '99999'
+    }
+}

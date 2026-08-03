@@ -264,6 +264,19 @@ $xaml = @'
             <TextBlock Text="ZIP:" VerticalAlignment="Center" Margin="0,0,6,0"/>
             <TextBox x:Name="RmZipBox" Width="100" Height="28" VerticalContentAlignment="Center"
                      MaxLength="6" ToolTip="5-digit ZIP, or a prefix like 630* for a wider area"/>
+            <TextBlock Text="Radius:" VerticalAlignment="Center" Margin="10,0,4,0"/>
+            <ComboBox x:Name="RmRadiusCombo" MinWidth="110" Height="28" SelectedIndex="0"
+                      ToolTip="Sweep every ZIP whose center lies within this many straight-line miles of the ZIP you typed. Wide radii in metro areas sweep many ZIPs and take longer.">
+              <ComboBoxItem Content="Exact ZIP"/>
+              <ComboBoxItem Content="5 miles"/>
+              <ComboBoxItem Content="10 miles"/>
+              <ComboBoxItem Content="15 miles"/>
+              <ComboBoxItem Content="20 miles"/>
+              <ComboBoxItem Content="25 miles"/>
+              <ComboBoxItem Content="30 miles"/>
+              <ComboBoxItem Content="40 miles"/>
+              <ComboBoxItem Content="50 miles"/>
+            </ComboBox>
             <CheckBox x:Name="RmOrgOnly" Content="Clinics (organizations) only" VerticalAlignment="Center"
                       Margin="14,0,0,0" ToolTip="Unchecked: also includes individual PT/OT/SLP providers (solo practices bill under individual NPIs)"/>
             <Button x:Name="RmRunButton" Content="Map referral sources" Padding="14,5" Margin="14,0,0,0"/>
@@ -516,7 +529,7 @@ foreach ($name in @(
     'NpiListBox', 'LoadNpiFileButton', 'BatchCheckButton', 'ExportBatchButton', 'BatchGrid', 'BatchSummary',
     'OldSnapCombo', 'NewSnapCombo', 'ChangeTypeCombo', 'CompareButton', 'ExportChangesButton',
     'ChangesGrid', 'ChangesSummary',
-    'RmTab', 'RmIntroText', 'RmZipBox', 'RmOrgOnly', 'RmRunButton', 'RmDownloadButton',
+    'RmTab', 'RmIntroText', 'RmZipBox', 'RmRadiusCombo', 'RmOrgOnly', 'RmRunButton', 'RmDownloadButton',
     'RmImportButton', 'RmDatasetCombo', 'RmDataStatus',
     'RmClinicGrid', 'RmSourceLabel', 'RmExportClinicsButton', 'RmExportSourcesButton',
     'RmSourceGrid', 'RmSummary',
@@ -599,7 +612,7 @@ function Set-Busy([bool]$On, [string]$Message) {
     $script:Busy = $On
     foreach ($b in @($ui.UpdateButton, $ui.SearchButton, $ui.BatchCheckButton,
                      $ui.CompareButton, $ui.LoadNpiFileButton,
-                     $ui.RmRunButton, $ui.RmDownloadButton, $ui.RmImportButton, $ui.RmDatasetCombo,
+                     $ui.RmRunButton, $ui.RmDownloadButton, $ui.RmImportButton, $ui.RmDatasetCombo, $ui.RmRadiusCombo,
                      $ui.BmSearchButton,
                      $ui.PgRunButton, $ui.PgDownloadButton, $ui.PgFootprintButton,
                      $ui.LkRunButton, $ui.LkTrendButton, $ui.LkGeoButton, $ui.WlCheckButton)) {
@@ -1178,11 +1191,19 @@ $ui.RmDatasetCombo.Add_SelectionChanged({
     }
 })
 
+$script:RmRadiusValues = @(0, 5, 10, 15, 20, 25, 30, 40, 50)
+
 $ui.RmRunButton.Add_Click({
     if ($script:Busy) { return }
     $zip = $ui.RmZipBox.Text.Trim()
     if ($zip -notmatch '^\d{3,5}\*?$' -or ($zip -match '^\d{1,4}$' -and $zip.Length -lt 5)) {
         Show-ErrorBox 'Enter a 5-digit ZIP code, or a prefix ending in * (e.g. 630*) for a wider area.'
+        return
+    }
+    $idx = [Math]::Max(0, $ui.RmRadiusCombo.SelectedIndex)
+    $radius = if ($idx -lt $script:RmRadiusValues.Count) { $script:RmRadiusValues[$idx] } else { 0 }
+    if ($radius -gt 0 -and $zip -notmatch '^\d{5}$') {
+        Show-ErrorBox 'A radius search needs a full 5-digit center ZIP. Prefixes like 630* only work with "Exact ZIP".'
         return
     }
     if (-not (Get-RmStatus).DatasetReady) {
@@ -1191,13 +1212,15 @@ $ui.RmRunButton.Add_Click({
         return
     }
     $year = $script:RmYear
+    $areaLabel = if ($radius -gt 0) { "$zip +$radius mi" } else { $zip }
     Invoke-Async -Kind 'rm-run' -Params @{
             RmModulePath = $script:RmModulePath
             Zip = $zip
+            Radius = $radius
             OrgOnly = [bool]$ui.RmOrgOnly.IsChecked
         } `
-        -BusyMessage "Mapping referral sources for $zip — NPPES lookup, then a scan of $script:RmRowsLabel provider pairs (this can take several minutes on the larger datasets)..." `
-        -WorkerScript 'param($RmModulePath, $Zip, $OrgOnly) Import-Module $RmModulePath; Get-RmReferralMap -Zip $Zip -OrganizationsOnly:$OrgOnly' `
+        -BusyMessage "Mapping referral sources for $areaLabel — NPPES sweep$(if ($radius -gt 0) { ' of every ZIP in the radius (minutes for wide radii in metro areas)' }), then a scan of $script:RmRowsLabel provider pairs (this can take several minutes on the larger datasets)..." `
+        -WorkerScript 'param($RmModulePath, $Zip, $Radius, $OrgOnly) Import-Module $RmModulePath; Get-RmReferralMap -Zip $Zip -RadiusMiles $Radius -OrganizationsOnly:$OrgOnly' `
         -OnDone {
             param($result)
             $map = $result[0]

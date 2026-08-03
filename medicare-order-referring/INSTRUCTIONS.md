@@ -123,8 +123,13 @@ results on screen are cleared so numbers from different years can't get mixed
 up.
 
 Then:
-1. Type a ZIP code — or a prefix like `630*` to cover a wider area — and
-   click **Map referral sources**.
+1. Type a ZIP code and pick a **Radius** (up to 50 miles) — every ZIP whose
+   center falls inside the circle gets swept, and the results gain a
+   **DistanceMiles** column so you can see how far each provider sits from
+   your center ZIP. "Exact ZIP" searches just the one ZIP, and a prefix like
+   `630*` still works for whole-prefix areas. Wide radii in metro areas sweep
+   dozens of ZIPs, so give those a few extra minutes. Click **Map referral
+   sources**.
 2. **Top table:** every outpatient rehab provider in that area, ranked by
    referral *volume* (the SharedPatients number adds up each source's patients,
    so treat it as a ranking score, not a count of distinct people).
@@ -133,6 +138,8 @@ Then:
 4. Export either table with the buttons.
 
 **Read this before trusting the numbers:**
+- Radius distances are straight-line miles between ZIP-area centers (US
+  Census), not driving distance; ZIPs that are PO-box-only aren't swept.
 - The data shows the *structure* of your referral market **for its data
   year** (who the big referrers are and whom they fed), **not this year's
   volumes**. Every export's methodology file states the exact year and source.
