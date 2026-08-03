@@ -696,3 +696,62 @@ Describe 'Group referral benchmark' {
         @($gb.Edges).Count | Should -Be 0
     }
 }
+
+Describe 'Group outbound, specialty mix, and group trend' {
+    BeforeAll {
+        $script:GtMap = @{ '9000000001' = 'G1'; '9000000002' = 'G2' }
+        $script:GtNames = @{ 'G1' = 'ALPHA REHAB GROUP'; 'G2' = 'BETA THERAPY' }
+    }
+
+    It 'returns outbound edges from the same single scan (CMS active)' {
+        $gb = Get-RmGroupBenchmark -TargetToBucket $script:GtMap -BucketNames $script:GtNames -SkipEnrichment
+        # fixture outbound: 9000000001 -> 8000000001 (99 benes); 9000000002 sends nothing
+        $out = @($gb.OutboundEdges)
+        $out.Count | Should -Be 1
+        $out[0].Bucket | Should -Be 'G1'
+        $out[0].DestNPI | Should -Be '8000000001'
+        $out[0].SharedPatients | Should -Be 99
+        $out[0].MembersSending | Should -Be 1
+        # inbound contract unchanged by the rework
+        @($gb.Buckets)[0].InboundPatients | Should -Be 65
+        (@($gb.Notes) -join ' ') | Should -BeLike '*OUTBOUND rows*'
+    }
+
+    It 'specialty mix rolls up directly from the benchmark edge rows' {
+        $gb = Get-RmGroupBenchmark -TargetToBucket $script:GtMap -BucketNames $script:GtNames
+        $g1 = @($gb.Edges | Where-Object { $_.Bucket -eq 'G1' })
+        $mix = @(Get-RmSourceSpecialtyMix -Rows $g1)
+        # G1 fed by Family Medicine (45) + Orthopaedic Surgery (20)
+        $mix.Count | Should -Be 2
+        $mix[0].Specialty | Should -Be 'Family Medicine'
+        $mix[0].SharedPatients | Should -Be 45
+        $mix[0].PctOfVolume | Should -Be ([math]::Round(100.0 * 45 / 65, 1))
+    }
+
+    It 'builds a group trend across all imported hop years' {
+        # hop_teaming_2021 + 2022 fixtures are on disk from earlier describes
+        $t = Get-RmGroupTrend -MemberNpi @('9000000001', '9000000002') -GroupName 'ALPHA REHAB GROUP' -SkipEnrichment
+        @($t.Years) | Should -Be @(2021, 2022)
+        $rows = @($t.Rows)
+        $rows.Count | Should -Be 2
+        foreach ($r in $rows) {
+            $r.InboundPatients | Should -Be 77      # org 65 + PT 12 in the hop fixture
+            $r.InboundSources | Should -Be 2
+            $r.MembersWithVolume | Should -Be 2
+            $r.TopSources | Should -BeLike '*8000000001*'
+        }
+        (@($t.Notes) -join ' ') | Should -BeLike '*TODAY''s roster*'
+        (@($t.Notes) -join ' ') | Should -BeLike '*intentionally excluded*'
+    }
+
+    It 'group trend refuses bad input and single-year stores' {
+        { Get-RmGroupTrend -MemberNpi @('not-an-npi') } | Should -Throw '*well-formed*'
+        $emptyDir = Join-Path $script:WorkDir 'gt-empty'
+        New-Item -ItemType Directory -Path $emptyDir -Force | Out-Null
+        $savedDir = (Get-RmConfig).DataDir
+        try {
+            Set-RmConfig -DataDir $emptyDir
+            { Get-RmGroupTrend -MemberNpi @('9000000001') } | Should -Throw '*at least TWO*'
+        } finally { Set-RmConfig -DataDir $savedDir }
+    }
+}

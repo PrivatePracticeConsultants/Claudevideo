@@ -388,7 +388,11 @@ $xaml = @'
               <ComboBoxItem Content="Therapist roster"/>
               <ComboBoxItem Content="Referral sources"/>
               <ComboBoxItem Content="Missed sources"/>
+              <ComboBoxItem Content="Sent patients to (outbound)"/>
+              <ComboBoxItem Content="Source specialty mix"/>
             </ComboBox>
+            <Button x:Name="PgTrendButton" Content="Group trend..." Padding="10,4" Margin="8,0,0,0" IsEnabled="False"
+                    ToolTip="Year-over-year referral totals for the SELECTED group's local therapists across every imported CareSet year. One full file scan per year - minutes per year."/>
             <Button x:Name="PgExportGroupsButton" Content="Export groups..." Padding="10,4"
                     Margin="8,0,0,0" IsEnabled="False"/>
             <Button x:Name="PgExportRosterButton" Content="Export view..." Padding="10,4"
@@ -520,7 +524,7 @@ foreach ($name in @(
     'BmSearchGrid', 'BmRegionLabel', 'BmExportRegionButton', 'BmRegionGrid',
     'BmMissedLabel', 'BmExportMissedButton', 'BmMissedGrid', 'BmSummary',
     'PgZipBox', 'PgRunButton', 'PgDownloadButton', 'PgDataStatus', 'PgGroupGrid',
-    'PgRosterLabel', 'PgFootprintButton', 'PgViewCombo', 'PgExportGroupsButton', 'PgExportRosterButton',
+    'PgRosterLabel', 'PgFootprintButton', 'PgViewCombo', 'PgTrendButton', 'PgExportGroupsButton', 'PgExportRosterButton',
     'PgRosterGrid', 'PgSummary',
     'LkNpiBox', 'LkRunButton', 'LkTrendButton', 'LkExportTrendButton',
     'LkGeoButton', 'LkSaveMapButton', 'LkDetail',
@@ -1540,6 +1544,25 @@ function Update-PgBottomView {
                 -Columns @('SourceNPI','SourceName','SourceSpecialty','PatientsToOtherGroups','GroupsFed')).DefaultView
             $ui.PgRosterLabel.Text = "Missed sources — feeding OTHER groups but not $name ($fpY) — $($rows.Count):"
         }
+    } elseif ($view -eq 3) {
+        $script:PgViewKind = 'outbound'
+        $rows = if ($pac) { @($script:PgBench.OutboundEdges | Where-Object { $_.Bucket -eq $pac }) }
+                else { @($script:PgBench.OutboundEdges) }
+        $script:PgViewRows = $rows
+        $ui.PgRosterGrid.ItemsSource = (ConvertTo-DataTable -Rows $rows `
+            -Columns @('GroupName','DestNPI','DestName','DestSpecialty','SharedPatients','MembersSending')).DefaultView
+        $ui.PgRosterLabel.Text = if ($pac) { "Where $name sent patients onward ($fpY) — $($rows.Count) destination(s):" }
+                                 else { "Outbound destinations by group ($fpY) — select a group to filter ($($rows.Count) rows):" }
+    } elseif ($view -eq 4) {
+        $script:PgViewKind = 'mix'
+        $srcRows = if ($pac) { @($script:PgBench.Edges | Where-Object { $_.Bucket -eq $pac }) }
+                   else { @($script:PgBench.Edges) }
+        $rows = if ($srcRows.Count) { @(Get-RmSourceSpecialtyMix -Rows $srcRows) } else { @() }
+        $script:PgViewRows = $rows
+        $ui.PgRosterGrid.ItemsSource = (ConvertTo-DataTable -Rows $rows `
+            -Columns @('Specialty','Sources','SharedPatients','PctOfVolume')).DefaultView
+        $ui.PgRosterLabel.Text = if ($pac) { "Referral-source specialty mix for $name ($fpY):" }
+                                 else { "Referral-source specialty mix — all groups combined ($fpY):" }
     } else {
         $script:PgViewKind = 'roster'
         $rows = if ($pac) { @($script:PgResult.Rosters | Where-Object { $_.GroupPacId -eq $pac }) }
@@ -1556,6 +1579,9 @@ function Update-PgBottomView {
         $ui.PgRosterLabel.Text = $label
     }
     $ui.PgExportRosterButton.IsEnabled = (@($script:PgViewRows).Count -gt 0)
+    # Group trend needs a selected group and 2+ imported CareSet years.
+    $hopYears = @(Get-RmAvailableDatasets | Where-Object { $_.Source -eq 'hop-teaming' })
+    $ui.PgTrendButton.IsEnabled = ($null -ne $pac -and $hopYears.Count -ge 2 -and -not $script:Busy)
 }
 
 $ui.PgGroupGrid.Add_SelectionChanged({ Update-PgBottomView })
@@ -1621,6 +1647,55 @@ $ui.PgFootprintButton.Add_Click({
         }
 })
 
+$script:PgTrendNotes = @()
+
+$ui.PgTrendButton.Add_Click({
+    if ($script:Busy -or -not $script:PgResult) { return }
+    $sel = $ui.PgGroupGrid.SelectedItem
+    if ($sel -isnot [System.Data.DataRowView]) { Show-ErrorBox 'Select a group in the top table first.'; return }
+    $pac = [string]$sel.Row['GroupPacId']
+    $name = [string]$sel.Row['GroupName']
+    $members = @($script:PgResult.Rosters |
+        Where-Object { $_.GroupPacId -eq $pac -and $_.InThisZip -eq 'Y' } |
+        ForEach-Object { [string]$_.NPI } | Sort-Object -Unique)
+    if ($members.Count -eq 0) { Show-ErrorBox "No in-ZIP therapists on record for $name."; return }
+    $hopYears = @(Get-RmAvailableDatasets | Where-Object { $_.Source -eq 'hop-teaming' })
+    if ($hopYears.Count -lt 2) {
+        Show-ErrorBox ("A group trend needs at least two imported CareSet Hop Teaming years " +
+            "(you have $($hopYears.Count)). Import more years on the Referral map tab first.")
+        return
+    }
+    if (-not (Confirm-Box ("Build a $(@($hopYears).Count)-year referral trend for $name " +
+        "($($members.Count) local therapist(s))?`n`nEach year is a full scan of that year's file — " +
+        "several minutes per year ($(@($hopYears | ForEach-Object Year) -join ', ')). " +
+        "The result appears in the lower table and can be exported."))) { return }
+    Invoke-Async -Kind 'pg-trend' -Params @{ RmModulePath = $script:RmModulePath; Members = $members; Name = $name } `
+        -BusyMessage "Building the multi-year trend for $name (one full scan per year - several minutes per year)..." `
+        -WorkerScript 'param($RmModulePath, $Members, $Name) Import-Module $RmModulePath; Get-RmGroupTrend -MemberNpi $Members -GroupName $Name' `
+        -OnDone {
+            param($result)
+            $trend = $result[0]
+            $rows = @($trend.Rows)
+            $script:PgViewKind = 'grouptrend'
+            $script:PgViewRows = $rows
+            $script:PgTrendNotes = @($trend.Notes)
+            $ui.PgRosterGrid.ItemsSource = (ConvertTo-DataTable -Rows $rows `
+                -Columns @('Year','InboundSources','InboundPatients','MembersWithVolume','TopSources')).DefaultView
+            $ui.PgRosterLabel.Text = "Referral trend for $($trend.GroupName) by year (Hop Teaming $(@($trend.Years) -join ', ')):"
+            $ui.PgExportRosterButton.IsEnabled = ($rows.Count -gt 0)
+            $first = $rows[0]; $last = $rows[$rows.Count - 1]
+            $dir = if ($last.InboundPatients -gt $first.InboundPatients) { 'grew' }
+                   elseif ($last.InboundPatients -lt $first.InboundPatients) { 'shrank' } else { 'held steady' }
+            Set-Status ("Group trend complete: inbound volume $dir from $($first.InboundPatients) ($($first.Year)) " +
+                "to $($last.InboundPatients) ($($last.Year)). FFS-only data - Medicare Advantage shift also moves " +
+                "these numbers. Change the 'Show' dropdown to return to the other views.")
+        } `
+        -OnFail {
+            param($message)
+            Show-ErrorBox "Group trend failed: $message"
+        }
+})
+
 $ui.PgExportGroupsButton.Add_Click({
     if (-not $script:PgResult) { return }
     Export-PgWithDialog -Rows @($script:PgResult.Groups) `
@@ -1643,6 +1718,24 @@ $ui.PgExportRosterButton.Add_Click({
                 -SuggestedName "group-missed-sources-$zipTag.csv" `
                 -Description "Sources feeding OTHER practice groups in ZIP $($script:PgResult.Zip) but not the selected group ($script:RmDataLabel)" `
                 -Notes @($script:PgBench.Notes)
+        }
+        'outbound' {
+            Export-RmWithDialog -Rows @($script:PgViewRows) `
+                -SuggestedName "group-outbound-$zipTag.csv" `
+                -Description "Where practice groups in ZIP $($script:PgResult.Zip) sent patients onward, rolled up from member therapists ($script:RmDataLabel)" `
+                -Notes @($script:PgBench.Notes)
+        }
+        'mix' {
+            Export-RmWithDialog -Rows @($script:PgViewRows) `
+                -SuggestedName "group-specialty-mix-$zipTag.csv" `
+                -Description "Referral-source specialty mix for practice groups in ZIP $($script:PgResult.Zip) ($script:RmDataLabel)" `
+                -Notes (@($script:PgBench.Notes) + @('', 'Specialty mix: the group''s referral sources grouped by NPPES primary specialty; PctOfVolume is each specialty''s share of the group''s inbound shared-patient volume.'))
+        }
+        'grouptrend' {
+            Export-RmWithDialog -Rows @($script:PgViewRows) `
+                -SuggestedName "group-trend-$zipTag.csv" `
+                -Description "Year-over-year referral trend for the selected practice group (DocGraph Hop Teaming, CareSet)" `
+                -Notes @($script:PgTrendNotes)
         }
         default {
             Export-PgWithDialog -Rows @($script:PgViewRows) `

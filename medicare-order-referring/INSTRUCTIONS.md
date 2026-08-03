@@ -219,6 +219,21 @@ Then use the **Show** dropdown to flip the lower table, per selected group:
 - **Missed sources** — providers feeding *other* groups in the ZIP but not
   this one, ranked by the volume they send elsewhere. Pick your own group and
   this is your outreach list.
+- **Sent patients to (outbound)** — where the group's therapists sent
+  patients *onward*: the physicians, imaging centers, and hospitals that own
+  the post-therapy hand-offs (`MembersSending` = how many therapists send
+  there). Destinations inside the same group are internal continuity of
+  care, not a referral out.
+- **Source specialty mix** — the group's referral funnel by specialty
+  ("62% orthopedic surgery, 18% primary care…"), with each specialty's share
+  of the group's volume.
+
+**Group trend… :** with a group selected and **two or more** CareSet years
+imported, this button builds the group's year-over-year story — inbound
+patients, distinct sources, and top feeders per year, rolled up from its
+local therapists. Minutes per year (it re-scans each file), and one caveat
+baked into the export: it applies *today's* roster to every year, so a
+therapist who joined recently contributes zeros in earlier years.
 
 **Export view…** saves whatever the lower table currently shows, with the
 methodology file. Two honest caveats: a group's *organization* NPI can carry

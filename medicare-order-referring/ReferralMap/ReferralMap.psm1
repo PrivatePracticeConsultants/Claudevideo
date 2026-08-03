@@ -1288,9 +1288,14 @@ function Get-RmGroupBenchmark {
     $targets = New-Object 'System.Collections.Generic.HashSet[string]'
     foreach ($k in $TargetToBucket.Keys) { [void]$targets.Add([string]$k) }
     if ($targets.Count -eq 0) {
-        return [pscustomobject]@{ Year = $info.Year; Label = $info.Label; Buckets = @(); Edges = @(); Notes = @() }
+        return [pscustomobject]@{ Year = $info.Year; Label = $info.Label; Buckets = @(); Edges = @(); OutboundEdges = @(); Notes = @() }
     }
-    $edges = [RmEngine]::ScanInbound($info.Path, $targets, $info.Format)
+    # ONE both-directions pass: rows where a member RECEIVED (inbound — the
+    # ranking basis) and rows where a member was seen FIRST (outbound — where
+    # the groups send patients onward). Same scan cost as inbound alone.
+    $all = [RmEngine]::ScanEither($info.Path, $targets, $info.Format)
+    $edges = @($all | Where-Object { $targets.Contains($_.TargetNpi) })
+    $outEdges = @($all | Where-Object { $targets.Contains($_.SourceNpi) })
 
     # bucket -> aggregate; (bucket, source) -> patients + distinct members fed.
     $buckets = @{}
@@ -1322,13 +1327,36 @@ function Get-RmGroupBenchmark {
         }
     }
 
-    # Enrich source names/specialties, biggest feeders first (cached on disk).
+    # (bucket, destination) -> patients + distinct members SENDING (outbound).
+    $byDst = @{}
+    foreach ($e in $outEdges) {
+        foreach ($label in @($TargetToBucket[$e.SourceNpi])) {
+            if (-not $label) { continue }
+            $lbl = [string]$label
+            $key = $lbl + '|' + $e.TargetNpi
+            if (-not $byDst.ContainsKey($key)) {
+                $byDst[$key] = [pscustomobject]@{
+                    Bucket = $lbl; DestNpi = $e.TargetNpi; Patients = 0
+                    Members = (New-Object 'System.Collections.Generic.HashSet[string]')
+                }
+            }
+            $byDst[$key].Patients += $e.BeneCount
+            [void]$byDst[$key].Members.Add($e.SourceNpi)
+        }
+    }
+
+    # Enrich names/specialties for sources AND destinations, biggest first
+    # (cached on disk; one shared cap).
     $detail = @{}
-    if (-not $SkipEnrichment -and $bySrc.Count -gt 0) {
+    if (-not $SkipEnrichment -and ($bySrc.Count -gt 0 -or $byDst.Count -gt 0)) {
         $volBySrc = @{}
         foreach ($v in $bySrc.Values) {
             if (-not $volBySrc.ContainsKey($v.SourceNpi)) { $volBySrc[$v.SourceNpi] = 0 }
             $volBySrc[$v.SourceNpi] += $v.Patients
+        }
+        foreach ($v in $byDst.Values) {
+            if (-not $volBySrc.ContainsKey($v.DestNpi)) { $volBySrc[$v.DestNpi] = 0 }
+            $volBySrc[$v.DestNpi] += $v.Patients
         }
         $enrichList = @($volBySrc.GetEnumerator() | Sort-Object Value -Descending |
             Select-Object -First $script:RmConfig.EnrichCap | ForEach-Object { $_.Key })
@@ -1372,22 +1400,130 @@ function Get-RmGroupBenchmark {
     } | Sort-Object -Property @{Expression = 'SharedPatients'; Descending = $true},
                               @{Expression = 'SourceNPI'; Descending = $false})
 
+    $outRows = @($byDst.Values | ForEach-Object {
+        $d = if ($detail.ContainsKey($_.DestNpi)) { $detail[$_.DestNpi] } else { $null }
+        [pscustomobject]@{
+            Bucket          = $_.Bucket
+            GroupName       = if ($BucketNames.ContainsKey($_.Bucket)) { [string]$BucketNames[$_.Bucket] } else { $_.Bucket }
+            DestNPI         = $_.DestNpi
+            DestName        = if ($d) { $d.Name } else { '' }
+            DestSpecialty   = if ($d) { $d.Specialty } else { '' }
+            SharedPatients  = $_.Patients
+            MembersSending  = $_.Members.Count
+        }
+    } | Sort-Object -Property @{Expression = 'SharedPatients'; Descending = $true},
+                              @{Expression = 'DestNPI'; Descending = $false})
+
     $notes = @(Get-RmMethodologyNotes -Info $info) + @(
         ''
         "GROUP BENCHMARK METHOD: inbound shared-patient volume of each group's member therapist NPIs (as passed in — typically the IN-ZIP members), summed per group on $($info.Label)."
         'Rank and SharePct compare the listed groups against each other; the share is of MEASURED group volume (sum semantics: a patient sent by three sources counts three times).'
         'MembersFed = how many of the group''s member therapists that source fed (11+ patient pairs each). A source feeding several members is a deep relationship, not a fluke.'
         'A group''s ORGANIZATION NPI can carry additional volume not shown here (benchmark it separately on the Practice benchmark tab); solo therapists without a group are not in this table.'
+        'OUTBOUND rows = where the groups'' members were seen FIRST and the patient went ONWARD (post-therapy hand-offs: physicians, imaging, hospitals — and sometimes members of the same or another listed group, which is internal continuity of care, not a referral out). MembersSending = distinct member therapists sending to that destination.'
     ) | Where-Object { $null -ne $_ }
 
     # .ToArray(), not @($list) — see the trend function: the @() binder can
     # throw a spurious 'Argument types do not match' on a generic List here.
     [pscustomobject]@{
-        Year    = $info.Year
-        Label   = $info.Label
-        Buckets = $bucketRows.ToArray()
-        Edges   = $edgeRows
-        Notes   = @($notes)
+        Year          = $info.Year
+        Label         = $info.Label
+        Buckets       = $bucketRows.ToArray()
+        Edges         = $edgeRows
+        OutboundEdges = $outRows
+        Notes         = @($notes)
+    }
+}
+
+function Get-RmGroupTrend {
+    <#
+    .SYNOPSIS
+      Year-over-year referral trend for a PRACTICE GROUP: the group's member
+      therapist NPIs are scanned across every imported DocGraph Hop Teaming
+      year and rolled up per year — inbound volume, distinct sources, members
+      with volume, and each year's top sources.
+    .NOTES
+      Hop Teaming years only (the CMS 2015 file uses a different window and
+      is excluded so the trend stays honest); needs 2+ imported years. One
+      full file scan per year — expect minutes per year. Pass the same member
+      set you benchmark with (typically the group's IN-ZIP members) and note
+      that roster CHANGES over time are invisible here: today's members are
+      scanned in every year, so a therapist who joined in 2021 contributes
+      zeros before that.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidateCount(1, 10000)][string[]]$MemberNpi,
+        [string]$GroupName = '',
+        [int]$TopSources = 3,
+        [switch]$SkipEnrichment
+    )
+    $years = @(Get-RmAvailableDatasets | Where-Object { $_.Source -eq 'hop-teaming' } | Sort-Object Year)
+    if ($years.Count -lt 2) {
+        throw ("A trend needs at least TWO imported Hop Teaming years (found $($years.Count)). " +
+               "Import more years with 'Import CareSet file' / Import-RmDataset.")
+    }
+    $set = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($n in $MemberNpi) { if (Test-RmNpiShape $n) { [void]$set.Add($n) } }
+    if ($set.Count -eq 0) { throw 'No well-formed member NPIs were provided.' }
+
+    $rows = New-Object System.Collections.Generic.List[object]
+    $allTopNpis = New-Object 'System.Collections.Generic.HashSet[string]'
+    $perYearTop = @{}
+    foreach ($y in $years) {
+        Write-Verbose "Scanning $($y.Label) for $($set.Count) member NPIs..."
+        $edges = @([RmEngine]::ScanInbound($y.Path, $set, [RmEngine]::FormatHopTeaming))
+        $vol = 0
+        $srcs = New-Object 'System.Collections.Generic.HashSet[string]'
+        $members = New-Object 'System.Collections.Generic.HashSet[string]'
+        $bySrc = @{}
+        foreach ($e in $edges) {
+            $vol += $e.BeneCount
+            [void]$srcs.Add($e.SourceNpi)
+            [void]$members.Add($e.TargetNpi)
+            if (-not $bySrc.ContainsKey($e.SourceNpi)) { $bySrc[$e.SourceNpi] = 0 }
+            $bySrc[$e.SourceNpi] += $e.BeneCount
+        }
+        $top = @($bySrc.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First $TopSources)
+        $perYearTop[$y.Year] = $top
+        foreach ($t in $top) { [void]$allTopNpis.Add($t.Key) }
+        $rows.Add([pscustomobject]@{
+            Year              = $y.Year
+            InboundSources    = $srcs.Count
+            InboundPatients   = $vol
+            MembersWithVolume = $members.Count
+            TopSources        = ''   # filled after enrichment below
+        })
+    }
+
+    $detail = @{}
+    if (-not $SkipEnrichment -and $allTopNpis.Count -gt 0) {
+        $detail = Get-RmProviderDetail -Npi @($allTopNpis)
+    }
+    foreach ($r in $rows) {
+        $tops = foreach ($t in $perYearTop[$r.Year]) {
+            $d = if ($detail.ContainsKey($t.Key)) { $detail[$t.Key] } else { $null }
+            $nm = if ($d -and $d.Name) { $d.Name } else { $t.Key }
+            "$nm ($($t.Value))"
+        }
+        $r.TopSources = @($tops) -join '; '
+    }
+
+    $yearArr = foreach ($y in $years) { $y.Year }
+    $notes = @(
+        "Source: DocGraph Hop Teaming years $($yearArr -join ', '), produced by CareSet Systems from Medicare FFS Part A+B claims (data 'DocGraph' from CareSet)."
+        "Group trend for$(if ($GroupName) { " $GroupName —" }) $($set.Count) member therapist NPIs, rolled up per year: InboundPatients = shared patients INTO any member; InboundSources = distinct feeding providers; MembersWithVolume = members with any measured volume that year."
+        'The member list is TODAY''s roster applied to every year — a therapist who joined recently contributes zeros in earlier years (roster churn is invisible in this data), and pairs under 11 patients are excluded in every year.'
+        'Medicare FFS only: Medicare Advantage growth pulls patients out of this data over time — decline can reflect MA shift as well as lost referrals. The CMS 2015 file is intentionally excluded (different window/methodology).'
+    )
+    # .ToArray()/explicit array — see Get-RmProviderTrend: @(List) can trip the
+    # engine's to-object-array binder here.
+    [pscustomobject]@{
+        GroupName = $GroupName
+        Members   = $set.Count
+        Years     = [int[]]$yearArr
+        Rows      = $rows.ToArray()
+        Notes     = @($notes)
     }
 }
 
@@ -2295,6 +2431,7 @@ Export-ModuleMember -Function @(
     'Save-RmDataset', 'Import-RmDataset',
     'Find-RmClinic', 'Find-RmPractice', 'Get-RmProviderDetail',
     'Get-RmReferralMap', 'Get-RmInboundByBucket', 'Get-RmGroupBenchmark', 'Get-RmGroupMissedSources',
+    'Get-RmGroupTrend',
     'Get-RmProviderReferralActivity',
     'Get-RmProviderTrend', 'Get-RmPracticeBenchmark', 'Get-RmSourceSpecialtyMix',
     'Get-RmReferralGeography', 'Export-RmReferralMapHtml',
