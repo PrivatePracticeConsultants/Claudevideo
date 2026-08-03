@@ -157,7 +157,33 @@ care…"). Select a clinic first to profile just that clinic, or leave it
 unselected for the whole ZIP — handy for seeing where a practice's funnel comes
 from.
 
-### Tab 5 — Practice groups
+### Tab 5 — Practice benchmark
+*"How does this clinic stack up against everyone else around it?"*
+
+Works on whichever dataset is active on the Referral map tab.
+
+1. Type part of a **practice name** (or a therapist's last name, or paste a
+   full 10-digit NPI), optionally a 2-letter state, and click **Search NPPES**.
+2. **Pick the practice** from the results. One thing to know: solo practices
+   usually live under the owner's *Individual* NPI, while clinics and chains
+   are *Organization* NPIs — if you see both for the same practice, benchmark
+   both (their referral volume is split between them).
+3. Click **Benchmark selected**. The app finds every outpatient rehab provider
+   in that practice's ZIP (tick **Wider area** for the whole 3-digit ZIP
+   region) and scans the referral data. You get:
+   - **The bottom-line sentence:** its rank in the region, its inbound
+     volume, and its share of the region's measured referral volume.
+   - **Region ranking table:** every competitor ranked, with a **>> YOU**
+     marker on your practice's row.
+   - **Missed sources:** the providers who feed patients to your competitors
+     but have *no* measured flow into this practice — sorted by how many
+     patients they send elsewhere. For a consultant, this is the outreach
+     call list.
+4. Export both tables; the methodology file spells out the caveats (the
+   biggest: "missed" can also mean the relationship exists but fell under
+   the 11-patient privacy floor).
+
+### Tab 6 — Practice groups
 *"Which rehab practices operate in my area, and who's on their team — right now?"*
 
 One-time setup: click **Download CMS dataset** (~510 MB; this tab needs no other
@@ -177,14 +203,14 @@ only one or two local therapists is a multi-site chain, not a big local clinic �
 rank by `TherapistsInZip` for local size. And this is *who practices together*,
 not *who refers to whom*.
 
-**Optional — "Add 2015 referral footprint":** if you've downloaded the Referral
-map dataset too, this button fills in a `LocalReferrals2015` column showing each
+**Optional — "Add … referral footprint":** if you have a dataset on the Referral
+map tab, this button (labeled with the active year) fills in a `LocalReferrals<year>` column showing each
 group's historical referral pull (its local therapists' 2015 shared-patient
 volume, added up). Click a group afterward to see its top referral sources. It's
 how a private practice — invisible in the referral map by itself — gets a
 referral footprint.
 
-### Tab 6 — Provider lookup
+### Tab 7 — Provider lookup
 *"Tell me everything about this one provider."*
 
 Type any 10-digit NPI and click **Look up provider**. The app pulls together
@@ -212,7 +238,7 @@ zero may just mean the pair fell under the 11-patient privacy floor, and
 Medicare Advantage growth pulls patients out of this data over time, which can
 look like decline.
 
-### Tab 7 — Watchlist
+### Tab 8 — Watchlist
 *"Did any of MY referrers change in the latest update?"*
 
 Paste your referring providers' NPIs into the box and click **Save watchlist**

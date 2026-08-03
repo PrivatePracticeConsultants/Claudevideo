@@ -62,7 +62,7 @@ What it *can* do, accurately:
 That's it. No installation; works with the PowerShell built into Windows
 (and with PowerShell 7 if you have it).
 
-### The seven tabs
+### The eight tabs
 
 | Tab | What it does |
 | --- | --- |
@@ -70,7 +70,8 @@ That's it. No installation; works with the PowerShell built into Windows
 | **Batch NPI check** | Paste any text containing NPIs, or load a `.txt`/`.csv` file — every 10-digit NPI is extracted, checksum-validated, and checked against the CMS list. Statuses: `ELIGIBLE (on CMS list)`, `NOT ON LIST`, `INVALID NPI`. Export results. |
 | **What changed** | Compare any two downloaded snapshots: providers Added / Removed / Changed (eligibility flag flips) / Renamed (name change only, flags unchanged — the old name is shown in an OldName column). Export results. |
 | **Referral map** | Enter a ZIP (or prefix like `630*`): every outpatient rehab provider there is ranked by how many Medicare patients each source provider fed into them, per the active shared-patient dataset — the free CMS 2015 release, or any imported CareSet Hop Teaming year (2016–2022). The tab title shows the active year; an **Active data** dropdown switches instantly between everything on disk. Select a provider to see their referral sources by name/specialty/volume. Export both tables. |
-| **Practice groups** | Enter a ZIP: the outpatient-rehab **practice groups** operating there, each with its therapist roster, ranked by local presence. Built from the CMS clinic-group reassignment file — **current** data, and it fills the gap where private-practice clinics were invisible in the referral map. Optionally add each group's **2015 referral footprint** (its local therapists' historical shared-patient pull, rolled up to the group). Export groups and rosters. |
+| **Practice benchmark** | Search a practice by name (or NPI) in NPPES, then benchmark it against every outpatient rehab provider in its ZIP (or 3-digit region) on the active dataset: rank, inbound volume, share of the region's measured referral volume, a ranked competitor table with the practice marked, and **missed sources** — providers feeding competitors with no measured flow into the practice. Export both tables. |
+| **Practice groups** | Enter a ZIP: the outpatient-rehab **practice groups** operating there, each with its therapist roster, ranked by local presence. Built from the CMS clinic-group reassignment file — **current** data, and it fills the gap where private-practice clinics were invisible in the referral map. Optionally add each group's **referral footprint** for the active dataset's year (its local therapists' historical shared-patient pull, rolled up to the group). Export groups and rosters. |
 | **Provider lookup** | Enter any NPI for a single-provider profile that composes every dataset: current eligibility + flags, specialty and location (NPPES), practice-group memberships, and referral activity from the active dataset — both who shared patients *into* them and who they shared patients *onward to*. With 2+ imported CareSet years, a **Referral trend** button builds a year-over-year table (inbound/outbound volume and top sources per year). Export everything. |
 | **Watchlist** | Save your referring providers' NPIs once; after each bi-weekly CMS update, one click shows — for just your referrers — their current eligibility and what changed since the previous update (dropped, flags flipped, renamed). Ongoing monitoring instead of a one-time check. Export the report. |
 
@@ -117,14 +118,16 @@ years — the app stays responsive and says what it's doing.
 
 Honest limitations (also written into every export's methodology sidecar):
 
-- **2015 vintage.** Providers whose NPI was issued later are flagged
-  (`ExistedInDataYear = No`) so their zeros aren't misread as "no referrals".
-- **Private-practice organization NPIs rarely appear** — CMS built the pairs
-  from *performing* (rendering) NPIs on office claims and *facility* NPIs on
-  institutional claims, so private clinics show up through their individual
-  therapists, while hospital rehab departments appear as organizations.
-  (Verified: 130 pre-2015 PT-chain org NPIs matched 0 rows; a 244-therapist
-  national sample matched 280 inbound rows.)
+- **Vintage.** Providers whose NPI was issued after the active data year are
+  flagged (`ExistedInDataYear = No`) so their zeros aren't misread as "no
+  referrals".
+- **Org-NPI coverage differs by source.** In the CMS 2015 file,
+  private-practice organization NPIs rarely appear (verified: 130 pre-2015
+  PT-chain org NPIs matched 0 rows), so private clinics show up through their
+  individual therapists. In the CareSet years, org NPIs — including
+  private-practice LLCs — do appear (verified on real 2022 data), but a
+  practice's volume can be SPLIT between its org NPI and its therapists'
+  individual NPIs.
 - **Shared-patient ≠ referral.** Labs, imaging, and hospitals appear as
   "sources" simply from co-occurring care. Interpret by specialty: an
   orthopedic surgeon feeding a PT is referral-like; a lab is not.
@@ -143,8 +146,8 @@ the repo history.
 
 ## The Practice groups tab: the current-data companion
 
-Where the referral map is 2015 and can't see private-practice organization NPIs,
-this tab is **current** and organizes providers by their practice group. It uses
+Where the referral map is historical (2015–2022 depending on the active
+dataset), this tab is **current** and organizes providers by their practice group. It uses
 the CMS *Revalidation Clinic Group Practice Reassignment* file (updated ~monthly,
 ~510 MB one-time download), which records which individual therapists reassign
 their Medicare benefits to which group practice. Joined with the live NPPES
@@ -163,16 +166,16 @@ Honest limits (also in every export sidecar):
 - This is enrollment/affiliation data, **not** referrals or claims. It shows who
   practices together, not who refers to whom.
 
-### The bridge: a group's 2015 referral footprint
+### The bridge: a group's referral footprint
 
-The **Add 2015 referral footprint** button ties the two ZIP tools together. It
-takes each practice group's *local* (in-ZIP) therapists, sums their 2015 inbound
-shared-patient volume from the referral-map dataset, and rolls it up to the
+The **Add … referral footprint** button (labeled with the active year) ties the two ZIP tools together. It
+takes each practice group's *local* (in-ZIP) therapists, sums their inbound
+shared-patient volume from the active referral-map dataset, and rolls it up to the
 group — so a private practice that never appeared as an organization in the
 shared-patient file finally gets a referral footprint through its therapists.
-The `LocalReferrals2015` column fills in, and selecting a group shows its top
-2015 referral sources. (Needs the Referral map dataset downloaded; same 2015
-vintage and shared-patient caveats apply.)
+The `LocalReferrals<year>` column fills in, and selecting a group shows its top
+referral sources. (Needs a Referral map dataset; the active year's vintage
+and shared-patient caveats apply.)
 
 ## The Provider lookup tab: one NPI, every dataset
 
@@ -183,7 +186,7 @@ Enter any NPI and the app assembles a single profile from all four sources:
 - **NPPES** — name, primary specialty, and practice city/state (live).
 - **Practice groups** — which group(s) the NPI reassigns benefits to (if that
   dataset is downloaded).
-- **Referral map (2015)** — inbound (who shared patients into them) and outbound
+- **Referral map (active dataset)** — inbound (who shared patients into them) and outbound
   (who they shared patients onward to), each ranked and name/specialty-enriched
   (if that dataset is downloaded).
 

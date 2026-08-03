@@ -115,6 +115,26 @@ class Handler(BaseHTTPRequestHandler):
                 results = [hit] if hit else []
                 self._json({'result_count': len(results), 'results': results})
                 return
+            # Name search (used by Find-RmPractice): organization_name for
+            # orgs, last_name for individuals; optional state filter. Mirrors
+            # NPPES contains/wildcard behavior loosely.
+            if 'organization_name' in q or 'last_name' in q:
+                term = (q.get('organization_name') or q.get('last_name', '')).lower().rstrip('*')
+                state = q.get('state', '')
+                want_org = 'organization_name' in q
+                results = []
+                for p in IN_ZIP + [MAILING_ONLY, SHORT_POSTAL] + PG_THERAPISTS:
+                    b = p['basic']
+                    name = b.get('organization_name') if want_org else b.get('last_name')
+                    if not name or term not in name.lower():
+                        continue
+                    loc_states = [a['state'] for a in p['addresses']
+                                  if a['address_purpose'] == 'LOCATION']
+                    if state and state not in loc_states:
+                        continue
+                    results.append(p)
+                self._json({'result_count': len(results), 'results': results})
+                return
             # ZIP matching mirrors NPPES: the fixture's ZIP must START WITH the
             # query prefix (query '999*' matches fixtures in 99999).
             prefix = q.get('postal_code', '').rstrip('*')

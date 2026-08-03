@@ -1387,6 +1387,225 @@ function Get-RmProviderTrend {
     }
 }
 
+function Find-RmPractice {
+    <#
+    .SYNOPSIS
+      Searches the live NPPES registry for a practice by name — organizations
+      (clinic/group names) and individual providers (last name) — or looks up
+      a pasted 10-digit NPI directly. Returns candidate rows for the user to
+      pick from before benchmarking.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidateLength(2, 100)][string]$Name,
+        [ValidatePattern('^[A-Za-z]{2}$')][string]$State
+    )
+    $term = $Name.Trim()
+    $stateQ = if ($State) { '&state=' + $State.ToUpperInvariant() } else { '' }
+    $raw = New-Object System.Collections.Generic.List[object]
+    if ($term -match '^\d{10}$') {
+        $resp = Invoke-RmNppes ('number={0}' -f $term)
+        foreach ($r in @(Get-RmProp $resp 'results')) { $raw.Add($r) }
+    } else {
+        # NPPES wildcard: trailing * needs 2+ leading characters. Two queries —
+        # practices are org NPIs, but solo practices live under the owner's
+        # individual NPI, so search both and merge.
+        $enc = [uri]::EscapeDataString($term.TrimEnd('*')) + '*'
+        foreach ($field in 'organization_name', 'last_name') {
+            $resp = Invoke-RmNppes ('{0}={1}{2}&limit=50' -f $field, $enc, $stateQ)
+            foreach ($r in @(Get-RmProp $resp 'results')) { $raw.Add($r) }
+        }
+    }
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]'
+    $rows = foreach ($r in $raw) {
+        $npi = [string](Get-RmProp $r 'number')
+        if (-not (Test-RmNpiShape $npi) -or -not $seen.Add($npi)) { continue }
+        $basic = Get-RmProp $r 'basic'
+        $isOrg = ((Get-RmProp $r 'enumeration_type') -eq 'NPI-2')
+        $loc = @(@(Get-RmProp $r 'addresses') | Where-Object { (Get-RmProp $_ 'address_purpose') -eq 'LOCATION' })
+        $postal = if ($loc.Count) { [string](Get-RmProp $loc[0] 'postal_code') } else { '' }
+        $primary = @(@(Get-RmProp $r 'taxonomies') | Where-Object { (Get-RmProp $_ 'primary') -eq $true })
+        [pscustomobject]@{
+            NPI       = $npi
+            Name      = if ($isOrg) { [string](Get-RmProp $basic 'organization_name') }
+                        else { ('{0} {1}' -f (Get-RmProp $basic 'first_name'), (Get-RmProp $basic 'last_name')).Trim() }
+            Type      = if ($isOrg) { 'Organization' } else { 'Individual' }
+            Specialty = if ($primary.Count) { [string](Get-RmProp $primary[0] 'desc') } else { '' }
+            City      = if ($loc.Count) { [string](Get-RmProp $loc[0] 'city') } else { '' }
+            State     = if ($loc.Count) { [string](Get-RmProp $loc[0] 'state') } else { '' }
+            Zip       = if ($postal.Length -ge 5) { $postal.Substring(0, 5) } else { $postal }
+        }
+    }
+    @($rows | Sort-Object -Property @{Expression = 'Type'; Descending = $false},
+                                    @{Expression = 'Name'; Descending = $false})
+}
+
+function Get-RmPracticeBenchmark {
+    <#
+    .SYNOPSIS
+      Benchmarks ONE practice (org NPI or individual therapist NPI) against
+      every outpatient rehab provider in its region on the active dataset:
+      rank by inbound shared-patient volume, share of the region's measured
+      volume, and the region's top sources that feed COMPETITORS but not the
+      practice ("missed sources").
+    .PARAMETER Npi
+      The practice to benchmark. Its practice-location ZIP (from NPPES)
+      defines the region unless -Zip is given.
+    .PARAMETER WiderArea
+      Use the ZIP's 3-digit prefix (e.g. 630*) instead of the exact ZIP.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidatePattern('^\d{10}$')][string]$Npi,
+        [ValidatePattern('^\d{3,5}\*?$')][string]$Zip,
+        [switch]$WiderArea,
+        [switch]$OrganizationsOnly,
+        [switch]$SkipEnrichment
+    )
+    $info = Get-RmDatasetInfo
+    if (-not $info.Ready) {
+        throw ("No shared-patient dataset is available yet. Download the CMS dataset or " +
+               "import a CareSet file on the Referral map tab first.")
+    }
+    $isHop = $info.Source -eq 'hop-teaming'
+
+    # Resolve the practice from NPPES.
+    $resp = Invoke-RmNppes ('number={0}' -f $Npi)
+    $hits = @(Get-RmProp $resp 'results')
+    if ($hits.Count -eq 0) {
+        throw "NPI $Npi was not found in the NPPES registry (deactivated, or a typo)."
+    }
+    $r0 = $hits[0]
+    $basic = Get-RmProp $r0 'basic'
+    $isOrg = ((Get-RmProp $r0 'enumeration_type') -eq 'NPI-2')
+    $pracName = if ($isOrg) { [string](Get-RmProp $basic 'organization_name') }
+                else { ('{0} {1}' -f (Get-RmProp $basic 'first_name'), (Get-RmProp $basic 'last_name')).Trim() }
+    $loc = @(@(Get-RmProp $r0 'addresses') | Where-Object { (Get-RmProp $_ 'address_purpose') -eq 'LOCATION' })
+    $postal = if ($loc.Count) { [string](Get-RmProp $loc[0] 'postal_code') } else { '' }
+    $zip5 = if ($postal.Length -ge 5) { $postal.Substring(0, 5) } else { '' }
+    $primary = @(@(Get-RmProp $r0 'taxonomies') | Where-Object { (Get-RmProp $_ 'primary') -eq $true })
+    $enumerated = [string](Get-RmProp $basic 'enumeration_date')
+
+    $regionZip = if ($Zip) { $Zip }
+                 elseif ($zip5 -match '^\d{5}$') { if ($WiderArea) { $zip5.Substring(0, 3) + '*' } else { $zip5 } }
+                 else { throw "NPPES lists no usable practice-location ZIP for $Npi — pass -Zip explicitly." }
+
+    # The regional map (competitors + their sources) on the active dataset.
+    $map = Get-RmReferralMap -Zip $regionZip -OrganizationsOnly:$OrganizationsOnly -SkipEnrichment:$SkipEnrichment
+    $clinics = @($map.Clinics)
+    $sources = @($map.Sources)
+    $addedManually = $false
+
+    # A practice outside the rehab-taxonomy sweep (e.g. a multi-specialty
+    # clinic, or org type excluded by -OrganizationsOnly) must still be
+    # benchmarkable: scan its own inbound volume and slot it into the table.
+    if (-not @($clinics | Where-Object { $_.NPI -eq $Npi })) {
+        $addedManually = $true
+        $set = New-Object 'System.Collections.Generic.HashSet[string]'
+        [void]$set.Add($Npi)
+        $own = @([RmEngine]::ScanInbound($info.Path, $set, $info.Format))
+        $ownVol = 0; foreach ($e in $own) { $ownVol += $e.BeneCount }
+        $row = [ordered]@{
+            NPI = $Npi; Name = $pracName
+            Type = if ($isOrg) { 'Organization' } else { 'Individual' }
+            Taxonomy = if ($primary.Count) { [string](Get-RmProp $primary[0] 'desc') } else { '' }
+            City = if ($loc.Count) { [string](Get-RmProp $loc[0] 'city') } else { '' }
+            State = if ($loc.Count) { [string](Get-RmProp $loc[0] 'state') } else { '' }
+            Zip = $zip5
+            ReferralSources = $own.Count; SharedPatients = $ownVol
+        }
+        if (-not $isHop) { $row['SameDay'] = 0 }
+        $row['ExistedInDataYear'] = ''
+        $clinics = @($clinics) + @([pscustomobject]$row)
+        foreach ($e in ($own | Sort-Object BeneCount -Descending)) {
+            $srow = [ordered]@{
+                SourceNPI = $e.SourceNpi; SourceName = ''; SourceSpecialty = ''
+                SourceCity = ''; SourceState = ''
+                ClinicNPI = $Npi; ClinicName = $pracName
+                SharedPatients = $e.BeneCount; SharedEvents = $e.PairCount
+            }
+            if ($isHop) { $srow['AvgDayWait'] = $e.AvgDayWait } else { $srow['SameDay'] = $e.SameDayCount }
+            $sources = @($sources) + @([pscustomobject]$srow)
+        }
+    }
+
+    # Rank + share, with a visible marker column for the practice's row.
+    $ranked = @($clinics | Sort-Object -Property @{Expression = 'SharedPatients'; Descending = $true},
+                                                 @{Expression = 'Name'; Descending = $false})
+    $rank = 0; $total = 0
+    for ($i = 0; $i -lt $ranked.Count; $i++) {
+        $total += [int]$ranked[$i].SharedPatients
+        if ($ranked[$i].NPI -eq $Npi) { $rank = $i + 1 }
+    }
+    $mine = @($ranked | Where-Object { $_.NPI -eq $Npi })[0]
+    $share = if ($total -gt 0) { [math]::Round(100.0 * $mine.SharedPatients / $total, 1) } else { 0 }
+    $rankedOut = @($ranked | ForEach-Object {
+        $row = [ordered]@{ You = if ($_.NPI -eq $Npi) { '>> YOU' } else { '' } }
+        foreach ($p in $_.PSObject.Properties) { $row[$p.Name] = $p.Value }
+        [pscustomobject]$row
+    })
+
+    # Missed sources: providers feeding competitors in this region with NO
+    # measured pair into the practice. Ranked by their volume to competitors.
+    $mySources = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($s in @($sources | Where-Object { $_.ClinicNPI -eq $Npi })) { [void]$mySources.Add($s.SourceNPI) }
+    $bySource = @{}
+    foreach ($s in @($sources | Where-Object { $_.ClinicNPI -ne $Npi })) {
+        if ($s.SourceNPI -eq $Npi -or $mySources.Contains($s.SourceNPI)) { continue }
+        if (-not $bySource.ContainsKey($s.SourceNPI)) {
+            $bySource[$s.SourceNPI] = [pscustomobject]@{
+                SourceNPI = $s.SourceNPI; SourceName = $s.SourceName
+                SourceSpecialty = $s.SourceSpecialty
+                PatientsToCompetitors = 0
+                Competitors = (New-Object 'System.Collections.Generic.HashSet[string]')
+            }
+        }
+        $b = $bySource[$s.SourceNPI]
+        $b.PatientsToCompetitors += [int]$s.SharedPatients
+        [void]$b.Competitors.Add($s.ClinicNPI)
+    }
+    $missed = @($bySource.Values | ForEach-Object {
+        [pscustomobject]@{
+            SourceNPI             = $_.SourceNPI
+            SourceName            = $_.SourceName
+            SourceSpecialty       = $_.SourceSpecialty
+            PatientsToCompetitors = $_.PatientsToCompetitors
+            CompetitorsFed        = $_.Competitors.Count
+        }
+    } | Sort-Object -Property @{Expression = 'PatientsToCompetitors'; Descending = $true},
+                              @{Expression = 'SourceNPI'; Descending = $false} |
+        Select-Object -First 50)
+
+    $notes = @($map.Notes) + @(
+        ''
+        "BENCHMARK METHOD: rank and share compare NPI $Npi ($pracName) against the NPPES-listed outpatient rehab providers in '$regionZip' on $($info.Label)."
+        'MarketSharePct = this practice''s inbound shared-patient volume as a share of the SUM across all listed providers. Because that sum counts a patient once per source relationship, treat it as share of measured referral VOLUME, not share of patients.'
+        'A practice''s volume is often SPLIT between its organization NPI and its therapists'' individual NPIs. Benchmark the org NPI and the key therapists separately for the full picture; the Practice groups tab lists a group''s therapist roster.'
+        'Missed sources = providers with a measured pair (11+ patients) into at least one competitor and NO measured pair into this practice. "Missed" can also mean the pair exists but fell under the 11-patient privacy floor.'
+        $(if ($addedManually) { "NOTE: NPI $Npi did not match the rehab-clinic taxonomy sweep for '$regionZip' (different taxonomy or location); its row was added from a direct scan, and ExistedInDataYear is blank." })
+    ) | Where-Object { $null -ne $_ }
+
+    [pscustomobject]@{
+        Npi            = $Npi
+        Practice       = [pscustomobject]@{
+            Name = $pracName; Type = if ($isOrg) { 'Organization' } else { 'Individual' }
+            City = if ($loc.Count) { [string](Get-RmProp $loc[0] 'city') } else { '' }
+            State = if ($loc.Count) { [string](Get-RmProp $loc[0] 'state') } else { '' }
+            Zip = $zip5; Enumerated = $enumerated
+        }
+        Zip            = $regionZip
+        Year           = $info.Year
+        Rank           = $rank
+        OfTotal        = $ranked.Count
+        InboundPatients = [int]$mine.SharedPatients
+        ReferralSources = [int]$mine.ReferralSources
+        MarketSharePct = $share
+        Clinics        = $rankedOut
+        MissedSources  = $missed
+        Notes          = @($notes)
+    }
+}
+
 function Get-RmSourceSpecialtyMix {
     <#
     .SYNOPSIS
@@ -1476,7 +1695,8 @@ Export-ModuleMember -Function @(
     'Get-RmConfig', 'Set-RmConfig', 'Get-RmStatus', 'Get-RmDatasetPath',
     'Get-RmDatasetInfo', 'Get-RmAvailableDatasets', 'Set-RmActiveDataset',
     'Save-RmDataset', 'Import-RmDataset',
-    'Find-RmClinic', 'Get-RmProviderDetail',
+    'Find-RmClinic', 'Find-RmPractice', 'Get-RmProviderDetail',
     'Get-RmReferralMap', 'Get-RmInboundByBucket', 'Get-RmProviderReferralActivity',
-    'Get-RmProviderTrend', 'Get-RmSourceSpecialtyMix', 'Export-RmResult', 'Clear-RmStaleTemp'
+    'Get-RmProviderTrend', 'Get-RmPracticeBenchmark', 'Get-RmSourceSpecialtyMix',
+    'Export-RmResult', 'Clear-RmStaleTemp'
 )

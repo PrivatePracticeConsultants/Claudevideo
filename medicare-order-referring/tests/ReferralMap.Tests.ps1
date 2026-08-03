@@ -467,3 +467,79 @@ Describe 'Dataset switcher and multi-year trend' {
         (Get-RmStatus).Source | Should -Be 'cms-pspp'
     }
 }
+
+Describe 'Practice search and benchmark' {
+    # State from previous Describes: CMS 2015 active; hop 2021+2022 on disk.
+    It 'finds a practice by organization name' {
+        $rows = @(Find-RmPractice -Name 'REHAB' -State MO)
+        @($rows | Where-Object NPI -eq '9000000001').Count | Should -Be 1
+        $rows[0].Type | Should -Be 'Organization'
+        $rows[0].Zip | Should -Be '99999'
+    }
+    It 'finds an individual by last name and dedupes across queries' {
+        $rows = @(Find-RmPractice -Name 'THERAPIST')
+        @($rows | Where-Object NPI -eq '9000000002').Count | Should -Be 1
+        @($rows | ForEach-Object NPI | Group-Object | Where-Object Count -gt 1) | Should -BeNullOrEmpty
+    }
+    It 'accepts a pasted 10-digit NPI as the search term' {
+        $rows = @(Find-RmPractice -Name '9000000001')
+        $rows.Count | Should -Be 1
+        $rows[0].Name | Should -Be 'TEST REHAB CLINIC LLC'
+    }
+
+    It 'benchmarks the org against its region: rank, share, and the You marker' {
+        $bm = Get-RmPracticeBenchmark -Npi 9000000001 -SkipEnrichment
+        $bm.Zip | Should -Be '99999'
+        $bm.Rank | Should -Be 1
+        $bm.InboundPatients | Should -Be 65
+        # region volume: org 65 + individual PT (12+11=23) = 88
+        $bm.MarketSharePct | Should -Be ([math]::Round(100.0 * 65 / 88, 1))
+        @($bm.Clinics)[0].You | Should -Be '>> YOU'
+        @($bm.Clinics | Where-Object { $_.You -and $_.NPI -ne '9000000001' }) | Should -BeNullOrEmpty
+    }
+
+    It 'reports missed sources: feeding competitors only, not shared feeders' {
+        $bm = Get-RmPracticeBenchmark -Npi 9000000001 -SkipEnrichment
+        $missed = @($bm.MissedSources)
+        # 8000000003 feeds only the individual PT (11 patients) -> missed
+        @($missed | Where-Object SourceNPI -eq '8000000003').Count | Should -Be 1
+        # 8000000001 feeds BOTH the org and the PT -> not missed
+        @($missed | Where-Object SourceNPI -eq '8000000001') | Should -BeNullOrEmpty
+        # 8000000002 feeds only the org itself -> not missed for the org
+        @($missed | Where-Object SourceNPI -eq '8000000002') | Should -BeNullOrEmpty
+    }
+
+    It 'benchmarks the underdog correctly (rank 2, its feeders excluded from missed)' {
+        $bm = Get-RmPracticeBenchmark -Npi 9000000002 -SkipEnrichment
+        $bm.Rank | Should -Be 2
+        $bm.InboundPatients | Should -Be 23
+        # 8000000002 feeds only the org -> a missed source for the PT
+        @($bm.MissedSources | Where-Object SourceNPI -eq '8000000002').Count | Should -Be 1
+        @($bm.MissedSources | Where-Object SourceNPI -eq '8000000001') | Should -BeNullOrEmpty
+    }
+
+    It 'works on the hop dataset with hop columns and carries benchmark notes' {
+        Set-RmActiveDataset -Source hop-teaming -Year 2022 | Out-Null
+        try {
+            $bm = Get-RmPracticeBenchmark -Npi 9000000001 -SkipEnrichment
+            # hop fixture: org 45+20=65, PT 12 -> total 77
+            $bm.MarketSharePct | Should -Be ([math]::Round(100.0 * 65 / 77, 1))
+            @($bm.Clinics)[0].PSObject.Properties['SameDay'] | Should -BeNullOrEmpty
+            (@($bm.Notes) -join ' ') | Should -BeLike '*BENCHMARK METHOD*'
+            (@($bm.Notes) -join ' ') | Should -BeLike '*11-patient privacy floor*'
+        } finally { Set-RmActiveDataset -Source cms-pspp -Year 2015 | Out-Null }
+    }
+
+    It 'throws a friendly error for an NPI unknown to NPPES' {
+        { Get-RmPracticeBenchmark -Npi 1234567890 -SkipEnrichment } | Should -Throw '*not found in the NPPES registry*'
+    }
+
+    It 'contract: the GUI OnDone reads these exact properties' {
+        $bm = Get-RmPracticeBenchmark -Npi 9000000001 -SkipEnrichment
+        foreach ($p in 'Npi','Practice','Zip','Year','Rank','OfTotal','InboundPatients',
+                       'ReferralSources','MarketSharePct','Clinics','MissedSources','Notes') {
+            $bm.PSObject.Properties[$p] | Should -Not -BeNullOrEmpty -Because $p
+        }
+        $bm.Practice.Name | Should -Be 'TEST REHAB CLINIC LLC'
+    }
+}

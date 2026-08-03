@@ -218,6 +218,55 @@ $xaml = @'
         </Grid>
       </TabItem>
 
+      <!-- ============ Practice benchmark tab ============ -->
+      <TabItem Header="  Practice benchmark  ">
+        <Grid Margin="10">
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="3*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="4*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="4*"/>
+            <RowDefinition Height="Auto"/>
+          </Grid.RowDefinitions>
+          <TextBlock Grid.Row="0" TextWrapping="Wrap" Foreground="#333" Margin="0,0,0,6"
+              Text="Search for a practice (or paste its NPI), pick it from the results, and benchmark it against every other outpatient rehab provider in its ZIP: its rank, its share of the region's referral volume, and the sources feeding its competitors but not it. Uses whichever dataset is active on the Referral map tab."/>
+          <WrapPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,6">
+            <TextBlock Text="Practice name or NPI:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+            <TextBox x:Name="BmNameBox" Width="220" Height="28" VerticalContentAlignment="Center"
+                     ToolTip="Part of the practice/clinic name, a therapist's last name, or a full 10-digit NPI"/>
+            <TextBlock Text="State:" VerticalAlignment="Center" Margin="10,0,4,0"/>
+            <TextBox x:Name="BmStateBox" Width="46" Height="28" VerticalContentAlignment="Center" MaxLength="2"
+                     CharacterCasing="Upper" ToolTip="Optional 2-letter state to narrow the search"/>
+            <Button x:Name="BmSearchButton" Content="Search NPPES" Padding="12,5" Margin="10,0,0,0"/>
+            <Button x:Name="BmRunButton" Content="Benchmark selected" Padding="12,5" Margin="14,0,0,0" IsEnabled="False"/>
+            <CheckBox x:Name="BmWiderArea" Content="Wider area (3-digit ZIP prefix)" VerticalAlignment="Center"
+                      Margin="12,0,0,0" ToolTip="Compare across the whole 3-digit ZIP region instead of the practice's exact ZIP"/>
+          </WrapPanel>
+          <DataGrid Grid.Row="2" x:Name="BmSearchGrid" IsReadOnly="True" AutoGenerateColumns="True"
+                    CanUserAddRows="False" GridLinesVisibility="Horizontal"
+                    HeadersVisibility="Column" EnableRowVirtualization="True"/>
+          <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="0,6,0,4">
+            <TextBlock x:Name="BmRegionLabel" Text="Region ranking (run a benchmark to fill):" VerticalAlignment="Center"/>
+            <Button x:Name="BmExportRegionButton" Content="Export ranking..." Padding="10,4" Margin="12,0,0,0" IsEnabled="False"/>
+          </StackPanel>
+          <DataGrid Grid.Row="4" x:Name="BmRegionGrid" IsReadOnly="True" AutoGenerateColumns="True"
+                    CanUserAddRows="False" GridLinesVisibility="Horizontal"
+                    HeadersVisibility="Column" EnableRowVirtualization="True"/>
+          <StackPanel Grid.Row="5" Orientation="Horizontal" Margin="0,6,0,4">
+            <TextBlock x:Name="BmMissedLabel" Text="Missed sources (feeding competitors, not this practice):" VerticalAlignment="Center"/>
+            <Button x:Name="BmExportMissedButton" Content="Export missed sources..." Padding="10,4" Margin="12,0,0,0" IsEnabled="False"/>
+          </StackPanel>
+          <DataGrid Grid.Row="6" x:Name="BmMissedGrid" IsReadOnly="True" AutoGenerateColumns="True"
+                    CanUserAddRows="False" GridLinesVisibility="Horizontal"
+                    HeadersVisibility="Column" EnableRowVirtualization="True"/>
+          <TextBlock Grid.Row="7" x:Name="BmSummary" Margin="0,6,0,0" Foreground="#333" TextWrapping="Wrap"
+              Text="Needs a referral dataset (Referral map tab) and an internet connection for the NPPES search."/>
+        </Grid>
+      </TabItem>
+
       <!-- ============ Practice groups tab ============ -->
       <TabItem Header="  Practice groups  ">
         <Grid Margin="10">
@@ -365,6 +414,9 @@ foreach ($name in @(
     'RmImportButton', 'RmDatasetCombo', 'RmDataStatus',
     'RmClinicGrid', 'RmSourceLabel', 'RmExportClinicsButton', 'RmExportSourcesButton',
     'RmSourceGrid', 'RmSummary',
+    'BmNameBox', 'BmStateBox', 'BmSearchButton', 'BmRunButton', 'BmWiderArea',
+    'BmSearchGrid', 'BmRegionLabel', 'BmExportRegionButton', 'BmRegionGrid',
+    'BmMissedLabel', 'BmExportMissedButton', 'BmMissedGrid', 'BmSummary',
     'PgZipBox', 'PgRunButton', 'PgDownloadButton', 'PgDataStatus', 'PgGroupGrid',
     'PgRosterLabel', 'PgFootprintButton', 'PgExportGroupsButton', 'PgExportRosterButton',
     'PgRosterGrid', 'PgSummary',
@@ -412,6 +464,7 @@ function Set-Busy([bool]$On, [string]$Message) {
     foreach ($b in @($ui.UpdateButton, $ui.SearchButton, $ui.BatchCheckButton,
                      $ui.CompareButton, $ui.LoadNpiFileButton,
                      $ui.RmRunButton, $ui.RmDownloadButton, $ui.RmImportButton, $ui.RmDatasetCombo,
+                     $ui.BmSearchButton,
                      $ui.PgRunButton, $ui.PgDownloadButton, $ui.PgFootprintButton,
                      $ui.LkRunButton, $ui.LkTrendButton, $ui.WlCheckButton)) {
         $b.IsEnabled = -not $On
@@ -1088,6 +1141,126 @@ $ui.RmExportMixButton.Add_Click({
         'Specialty mix: referral sources grouped by NPPES primary specialty. PctOfVolume is each specialty''s share of total shared-patient volume. Read with the usual caveat — labs/imaging/hospitals appear as "sources" from co-occurring care.')
     Export-RmWithDialog -Rows $mix -SuggestedName "specialty-mix-$($script:RmResult.Zip.TrimEnd('*')).csv" `
         -Description "Referral-source specialty mix for $scope ($script:RmDataLabel)" -Notes $notes
+})
+
+# ---------------------------------------------------------------------------
+# Practice benchmark tab
+# ---------------------------------------------------------------------------
+
+$script:BmSearchRows = @()
+$script:BmResult = $null
+
+# The benchmark button needs BOTH a target (grid selection or a pasted NPI)
+# and not-busy; Set-Busy doesn't manage it, so keep its state here.
+function Update-BmRunEnabled {
+    $hasTarget = ($ui.BmSearchGrid.SelectedItem -is [System.Data.DataRowView]) -or
+                 ($ui.BmNameBox.Text.Trim() -match '^\d{10}$')
+    $ui.BmRunButton.IsEnabled = ($hasTarget -and -not $script:Busy)
+}
+
+$ui.BmSearchButton.Add_Click({
+    if ($script:Busy) { return }
+    $term = $ui.BmNameBox.Text.Trim()
+    if ($term.Length -lt 2) {
+        Show-ErrorBox 'Type at least two letters of the practice name (or a full 10-digit NPI).'
+        return
+    }
+    $state = $ui.BmStateBox.Text.Trim()
+    if ($state -and $state -notmatch '^[A-Za-z]{2}$') {
+        Show-ErrorBox "State must be two letters (e.g. MO) — or leave it empty."
+        return
+    }
+    Invoke-Async -Kind 'bm-search' -Params @{
+            RmModulePath = $script:RmModulePath; Term = $term; State = $state
+        } `
+        -BusyMessage "Searching NPPES for '$term'..." `
+        -WorkerScript 'param($RmModulePath, $Term, $State)
+            Import-Module $RmModulePath
+            if ($State) { @(Find-RmPractice -Name $Term -State $State) } else { @(Find-RmPractice -Name $Term) }' `
+        -OnDone {
+            param($result)
+            $rows = @($result | Where-Object { $null -ne $_ })
+            $script:BmSearchRows = $rows
+            $ui.BmSearchGrid.ItemsSource = (ConvertTo-DataTable -Rows $rows `
+                -Columns @('NPI','Name','Type','Specialty','City','State','Zip')).DefaultView
+            $ui.BmSummary.Text = if ($rows.Count -eq 0) {
+                "NPPES found nothing for '$($ui.BmNameBox.Text.Trim())'. Try fewer letters, drop the state, or paste the NPI directly."
+            } else {
+                "$($rows.Count) match(es). Select the practice, then click 'Benchmark selected'. Solo practices are usually the owner's Individual NPI; chains and clinics are Organization NPIs."
+            }
+            Update-BmRunEnabled
+            Set-Status 'NPPES search complete.'
+        } `
+        -OnFail { param($message) Show-ErrorBox $message }
+})
+
+$ui.BmSearchGrid.Add_SelectionChanged({ Update-BmRunEnabled })
+$ui.BmNameBox.Add_TextChanged({ if (-not $script:Busy) { Update-BmRunEnabled } })
+
+$ui.BmRunButton.Add_Click({
+    if ($script:Busy) { return }
+    $sel = $ui.BmSearchGrid.SelectedItem
+    $npi = if ($sel -is [System.Data.DataRowView]) { [string]$sel.Row['NPI'] }
+           elseif ($ui.BmNameBox.Text.Trim() -match '^\d{10}$') { $ui.BmNameBox.Text.Trim() }
+           else { $null }
+    if (-not $npi) { Show-ErrorBox 'Select a practice from the search results first (or paste its 10-digit NPI).'; return }
+    if (-not (Get-RmStatus).DatasetReady) {
+        Show-ErrorBox ("No referral dataset is available yet - on the Referral map tab, click " +
+            "'Download CMS dataset' (free 2015 data) or 'Import CareSet file' first.")
+        return
+    }
+    $ui.BmRunButton.IsEnabled = $false
+    Invoke-Async -Kind 'bm-run' -Params @{
+            RmModulePath = $script:RmModulePath; Npi = $npi
+            Wider = [bool]$ui.BmWiderArea.IsChecked
+        } `
+        -BusyMessage "Benchmarking $npi against its region — NPPES sweep, then a scan of $script:RmRowsLabel provider pairs (several minutes on the larger datasets)..." `
+        -WorkerScript 'param($RmModulePath, $Npi, $Wider)
+            Import-Module $RmModulePath
+            Get-RmPracticeBenchmark -Npi $Npi -WiderArea:$Wider' `
+        -OnDone {
+            param($result)
+            $bm = $result[0]
+            $script:BmResult = $bm
+            $clinics = @($bm.Clinics)
+            $missed = @($bm.MissedSources)
+            $clinicCols = Get-RmDisplayColumns $clinics @('You','NPI','Name','Type','City','State','Zip','ReferralSources','SharedPatients','ExistedInDataYear')
+            $ui.BmRegionGrid.ItemsSource = (ConvertTo-DataTable -Rows $clinics -Columns $clinicCols).DefaultView
+            $ui.BmMissedGrid.ItemsSource = (ConvertTo-DataTable -Rows $missed `
+                -Columns (Get-RmDisplayColumns $missed @('SourceNPI','SourceName','SourceSpecialty','PatientsToCompetitors','CompetitorsFed'))).DefaultView
+            $ui.BmRegionLabel.Text = "Region ranking for '$($bm.Zip)' — $($bm.OfTotal) provider(s), $($bm.Year) data:"
+            $ui.BmMissedLabel.Text = "Missed sources — feeding competitors in '$($bm.Zip)' but not this practice ($($missed.Count)):"
+            $ui.BmExportRegionButton.IsEnabled = ($clinics.Count -gt 0)
+            $ui.BmExportMissedButton.IsEnabled = ($missed.Count -gt 0)
+            $ui.BmSummary.Text = ("$($bm.Practice.Name) ($($bm.Npi)): rank $($bm.Rank) of $($bm.OfTotal) in '$($bm.Zip)' " +
+                "with $('{0:N0}' -f $bm.InboundPatients) inbound shared patients from $($bm.ReferralSources) source(s) — " +
+                "$($bm.MarketSharePct)% of the region's measured referral volume ($($bm.Year) data, $script:RmDataLabel). " +
+                $(if ($missed.Count -gt 0) { "Top missed source: $(@($missed)[0].SourceName) ($(@($missed)[0].PatientsToCompetitors) patients to $(@($missed)[0].CompetitorsFed) competitor(s))." } else { 'No missed sources - every measured feeder in the region already shares patients with this practice.' }) +
+                ' Remember: an org NPI and its therapists'' individual NPIs split volume - benchmark both.')
+            Update-BmRunEnabled
+            Set-Status "Benchmark for $($bm.Npi) complete."
+        } `
+        -OnFail {
+            param($message)
+            Update-BmRunEnabled
+            Show-ErrorBox $message
+        }
+})
+
+$ui.BmExportRegionButton.Add_Click({
+    if (-not $script:BmResult) { return }
+    Export-RmWithDialog -Rows @($script:BmResult.Clinics) `
+        -SuggestedName "benchmark-region-$($script:BmResult.Npi).csv" `
+        -Description "Region ranking around practice $($script:BmResult.Npi) in '$($script:BmResult.Zip)' ($script:RmDataLabel)" `
+        -Notes @($script:BmResult.Notes)
+})
+
+$ui.BmExportMissedButton.Add_Click({
+    if (-not $script:BmResult) { return }
+    Export-RmWithDialog -Rows @($script:BmResult.MissedSources) `
+        -SuggestedName "benchmark-missed-sources-$($script:BmResult.Npi).csv" `
+        -Description "Sources feeding competitors of practice $($script:BmResult.Npi) in '$($script:BmResult.Zip)' but not the practice itself ($script:RmDataLabel)" `
+        -Notes @($script:BmResult.Notes)
 })
 
 # ---------------------------------------------------------------------------
