@@ -2370,8 +2370,17 @@ function Get-RmSourceAnalysis {
         if ($total -gt 0) { $share = 100.0 * $e.BeneCount / $total; $hhi += $share * $share }
     }
     $top1 = if ($sources.Count -ge 1) { $sources[0].PctOfVolume } else { 0 }
-    $top5 = 0.0; foreach ($x in @($sources | Select-Object -First 5)) { $top5 += $x.PctOfVolume }
-    $top10 = 0.0; foreach ($x in @($sources | Select-Object -First 10)) { $top10 += $x.PctOfVolume }
+    # From RAW volumes, rounded once — summing the already-rounded per-row
+    # percentages drifts by up to ~0.25pp (the year-over-year code always
+    # did it this way; the audit found this path summing rounded shares).
+    $top5v = 0; $top10v = 0; $iTop = 0
+    foreach ($e in $edges) {
+        $iTop++
+        if ($iTop -le 5) { $top5v += $e.BeneCount }
+        if ($iTop -le 10) { $top10v += $e.BeneCount } else { break }
+    }
+    $top5 = if ($total -gt 0) { 100.0 * $top5v / $total } else { 0 }
+    $top10 = if ($total -gt 0) { 100.0 * $top10v / $total } else { 0 }
     # With no measured sources there is nothing to be concentrated OR
     # diversified — never let an empty scan read as a favorable finding.
     $concLabel = if ($srcRows.Count -eq 0) { 'n/a — no measured sources' }
@@ -3053,8 +3062,13 @@ function Export-RmSourceReportHtml {
     # ---- Chart 2: specialty donut (top 6 + other) ------------------------
     $palette = @('#2c5f8a', '#4f7ca6', '#7fa3c2', '#aec6da', '#c98f3d', '#7d8a96', '#c4cdd5')
     $mixTop = @($a.SpecialtyMix | Select-Object -First 6)
-    $mixSum = 0.0; foreach ($m in $mixTop) { $mixSum += [double]$m.PctOfVolume }
-    $otherPct = if ($mixTop.Count) { [math]::Max(0, [math]::Round(100.0 - $mixSum, 1)) } else { 0 }
+    # "Other" from raw VOLUMES, rounded once (100 minus a sum of rounded
+    # slice percentages drifts; the audit flagged the pattern).
+    $mixTotVol = 0; foreach ($m in @($a.SpecialtyMix)) { $mixTotVol += [int]$m.SharedPatients }
+    $mixTopVol = 0; foreach ($m in $mixTop) { $mixTopVol += [int]$m.SharedPatients }
+    $otherPct = if ($mixTop.Count -and $mixTotVol -gt 0) {
+        [math]::Max(0, [math]::Round(100.0 * ($mixTotVol - $mixTopVol) / $mixTotVol, 1))
+    } else { 0 }
     $segs = @($mixTop | ForEach-Object { [pscustomobject]@{ Label = $_.Specialty; Pct = [double]$_.PctOfVolume } })
     if ($otherPct -gt 0.05) { $segs = @($segs) + @([pscustomobject]@{ Label = 'Other'; Pct = $otherPct }) }
     $r = 70; $circ = 2 * [math]::PI * $r
@@ -3312,17 +3326,21 @@ $lossRows
 
     # ---- Auto-written findings ------------------------------------------
     $s1 = if (@($a.Sources).Count) { @($a.Sources)[0] } else { $null }   # @()[0] throws under StrictMode
-    $near = 0.0; foreach ($b in @($a.DistanceBands)) { if ($b.Band -in '0-5 mi', '5-10 mi') { $near += $b.Pct } }
+    # From band VOLUMES rounded once, not a sum of the bands' rounded
+    # percentages (that pattern drifts; the audit flagged it).
+    $nearVol = 0; foreach ($b in @($a.DistanceBands)) { if ($b.Band -in '0-5 mi', '5-10 mi') { $nearVol += [int]$b.SharedPatients } }
+    $near = if ($a.TotalPatients -gt 0) { [math]::Round(100.0 * $nearVol / $a.TotalPatients, 1) } else { 0 }
     $findings = @(
         "The practice drew $('{0:N0}' -f $a.TotalPatients) shared Medicare patients from $('{0:N0}' -f $a.SourceCount) distinct sources in $($a.Year)."
         $(if ($s1) { "The single largest source, $(if ($s1.SourceName) { $s1.SourceName } else { "NPI $($s1.SourceNPI)" }), accounts for $($s1.PctOfVolume)% of inbound volume; the top five account for $($a.Top5Pct)% and the top ten for $($a.Top10Pct)%." })
         $(if ($hasVolume) { "Source concentration is $($a.Concentration) (HHI $('{0:N0}' -f $a.HHI) on a 0-10,000 scale)." })
         $(if ($hasVolume) {
-            if ($near -gt 0) { "$([math]::Round($near,1))% of measured volume originates within 10 miles of the practice." }
+            if ($near -gt 0) { "$near% of measured volume originates within 10 miles of the practice." }
             else { 'None of the measured volume originates within 10 miles — this practice draws from a wider region than its immediate area.' } })
         $(if ($hasVolume -and $a.IsHop -and @($a.WaitBands).Count) {
-            $fast = 0.0; foreach ($b in @($a.WaitBands)) { if ($b.Band -in '0-7 days', '8-30 days') { $fast += $b.Pct } }
-            "$([math]::Round($fast,1))% of volume arrives within 30 days of the source visit (referral-like); the remainder reflects looser or co-occurring care patterns." })
+            $fastVol = 0; foreach ($b in @($a.WaitBands)) { if ($b.Band -in '0-7 days', '8-30 days') { $fastVol += [int]$b.SharedPatients } }
+            $fast = [math]::Round(100.0 * $fastVol / $a.TotalPatients, 1)
+            "$fast% of volume arrives within 30 days of the source visit (referral-like); the remainder reflects looser or co-occurring care patterns." })
         $(if ($comp -and $comp.Rank -and $a.TotalPatients -gt 0) {
             "Among $('{0:N0}' -f $comp.ProviderCount) outpatient rehab providers within $($comp.RadiusMiles) miles, the practice ranks #$($comp.Rank) by inbound Medicare referral volume, holding $($comp.SharePct)% of the area's measured volume." })
         $(if ($comp -and $a.TotalPatients -eq 0) {

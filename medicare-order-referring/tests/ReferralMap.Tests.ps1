@@ -1172,6 +1172,49 @@ Describe 'Source analysis report' {
         }
     }
 
+    It 'puts a source at exactly 5.0 miles into the 5-10 band (edges are half-open)' {
+        # 0.0724 deg of latitude ≈ 5.0 miles: the rounded distance lands
+        # exactly on the band edge, and the contract is [min, max).
+        $edgeCsv = Join-Path $script:WorkDir 'edge-centroids.csv'
+        Set-Content -Path $edgeCsv -Encoding ascii -Value @(
+            'zip,lat,lon'
+            '99999,40.0000,-90.0000'
+            '86442,40.0724,-90.0000'
+        )
+        $sa = Get-RmSourceAnalysis -Npi 9000000001 -SkipCompetitors -CentroidPath $edgeCsv
+        $ortho = @($sa.Sources | Where-Object SourceNPI -eq '8000000002')[0]
+        [double]$ortho.DistanceMiles | Should -Be 5.0
+        $b = @($sa.DistanceBands)
+        @($b | Where-Object Band -eq '0-5 mi')[0].SharedPatients | Should -Be 45    # the 0.0-mile source
+        @($b | Where-Object Band -eq '5-10 mi')[0].SharedPatients | Should -Be 20   # the 5.0-mile source
+    }
+
+    It 'reports a single-source practice as maximum concentration (HHI 10,000)' {
+        Set-RmActiveDataset -Source hop-teaming -Year 2022 | Out-Null
+        try {
+            $sa = Get-RmSourceAnalysis -Npi 9000000002 -SkipCompetitors -CentroidPath $script:SaCsv
+            $sa.SourceCount | Should -Be 1
+            $sa.HHI | Should -Be 10000
+            $sa.Top1Pct | Should -Be 100
+            $sa.Concentration | Should -BeLike 'HIGH*'
+            @($sa.Sources)[0].CumulativePct | Should -Be 100
+        } finally { Set-RmActiveDataset -Source cms-pspp -Year 2015 | Out-Null }
+    }
+
+    It 'volume-weights AvgDayWait when merging a source across member NPIs' {
+        Set-RmActiveDataset -Source hop-teaming -Year 2022 | Out-Null
+        try {
+            $sa = Get-RmSourceAnalysis -Npi @('9000000001', '9000000002') -SkipCompetitors -CentroidPath $script:SaCsv
+            # 8000000001 feeds both members: (45x12.5 + 12x7.5) / 57 = 11.447 -> 11.4
+            $m = @($sa.Sources | Where-Object SourceNPI -eq '8000000001')[0]
+            [double]$m.AvgDayWait | Should -Be 11.4
+            # and the merged edge lands in the 8-30 day band with its full 57
+            $w = @($sa.WaitBands)
+            @($w | Where-Object Band -eq '8-30 days')[0].SharedPatients | Should -Be 57
+            @($w | Where-Object Band -eq '31-90 days')[0].SharedPatients | Should -Be 20
+        } finally { Set-RmActiveDataset -Source cms-pspp -Year 2015 | Out-Null }
+    }
+
     It 'scales to a full seven-year span (2016-2022) for large and small practices' {
         # The real deliverable spans 2016-2022. Build seven years in an
         # isolated store and check the whole chain: per-year rows in order,
