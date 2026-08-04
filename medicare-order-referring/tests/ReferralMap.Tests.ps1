@@ -1212,6 +1212,14 @@ Describe 'Source analysis report' {
         $html | Should -Not -BeLike '*<script src*'                # library inlined, not fetched
         $html | Should -Not -BeLike '*unpkg*'
         $html.Length | Should -BeGreaterThan 150000                # the bundle is actually inside
+        $html | Should -BeLike '*Patients from ZIP*'               # volume legend control
+        $html | Should -BeLike '*Red pin = the practice*'
+        $html | Should -BeLike '*legend.addTo(map)*'
+        # the chart-svg rule must stay SCOPED: a global "svg {" rule collapses
+        # Leaflet's attribute-sized overlay to 0x0 and hides every circle
+        # (found by probing rendered geometry — the map looked empty).
+        $html | Should -BeLike '*.body svg {*'
+        ($html -split "`n" | Where-Object { $_ -match '^\s*svg \{' }).Count | Should -Be 0
         # zero-volume report: no map section, no library payload
         $sk = Get-RmSourceAnalysis -Npi 8000000002 -SkipCompetitors -CentroidPath $script:SaCsv
         $out2 = Join-Path $script:WorkDir 'geo-empty-report.html'

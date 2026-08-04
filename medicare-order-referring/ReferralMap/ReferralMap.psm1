@@ -3463,6 +3463,17 @@ $lossRows
   }
   if (prac.lat !== null) { fit.push(L.latLng(prac.lat, prac.lon)); }
   if (fit.length > 1) { map.fitBounds(L.latLngBounds(fit).pad(0.18)); }
+  var legend = L.control({position:'bottomright'});
+  legend.onAdd = function() {
+    var div = L.DomUtil.create('div', 'legend');
+    div.innerHTML = '<b>Patients from ZIP</b><br/>' +
+      '<i style="background:' + color(maxP) + '"></i>' + maxP.toLocaleString() + ' (max)<br/>' +
+      '<i style="background:' + color(maxP/4) + '"></i>~' + Math.round(maxP/4).toLocaleString() + '<br/>' +
+      '<i style="background:' + color(maxP/20) + '"></i>~' + Math.round(maxP/20).toLocaleString() + '<br/>' +
+      'Red pin = the practice';
+    return div;
+  };
+  legend.addTo(map);
 })();
 </script>
 "@
@@ -3564,7 +3575,10 @@ __RM_LEAFLET_JS__
   .card .body { padding:4px 18px 8px; }
   .duo { display:flex; flex-wrap:wrap; gap:16px; }
   .duo > div { flex:1 1 460px; }
-  svg { width:100%; height:auto; display:block; }
+  /* Chart SVGs only — scoped to .body so Leaflet's attribute-sized overlay
+     pane is untouched (a global svg rule collapsed it to 0x0 and made every
+     map circle invisible; found by probing the rendered geometry). */
+  .body svg { width:100%; height:auto; display:block; }
   .bar { fill:var(--accent); }
   .blbl { font-size:12.5px; fill:#33475c; }
   .bval { font-size:11.5px; fill:#5b6b7a; }
@@ -3598,6 +3612,10 @@ __RM_LEAFLET_JS__
              border-bottom:1px solid #eadfb6; display:none; }
   .prac-pin { width:22px; height:22px; border-radius:50%; background:#c62828;
               border:3px solid #fff; box-shadow:0 1px 6px rgba(0,0,0,.45); }
+  .legend { background:#fff; padding:9px 12px; border-radius:6px;
+            box-shadow:0 1px 5px rgba(0,0,0,.25); font-size:12px; line-height:19px; }
+  .legend i { width:12px; height:12px; display:inline-block; border-radius:50%;
+              margin-right:6px; vertical-align:-2px; }
   td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
   td.mono { font-variant-numeric:tabular-nums; }
   .tablenote { padding:8px 18px 10px; color:var(--sub); font-size:12px; }
