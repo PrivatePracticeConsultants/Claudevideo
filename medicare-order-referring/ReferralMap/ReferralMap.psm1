@@ -2348,7 +2348,10 @@ function Get-RmSourceAnalysis {
     $top1 = if ($sources.Count -ge 1) { $sources[0].PctOfVolume } else { 0 }
     $top5 = 0.0; foreach ($x in @($sources | Select-Object -First 5)) { $top5 += $x.PctOfVolume }
     $top10 = 0.0; foreach ($x in @($sources | Select-Object -First 10)) { $top10 += $x.PctOfVolume }
-    $concLabel = if ($hhi -ge 2500) { 'HIGH — dependent on a few relationships' }
+    # With no measured sources there is nothing to be concentrated OR
+    # diversified — never let an empty scan read as a favorable finding.
+    $concLabel = if ($srcRows.Count -eq 0) { 'n/a — no measured sources' }
+                 elseif ($hhi -ge 2500) { 'HIGH — dependent on a few relationships' }
                  elseif ($hhi -ge 1500) { 'MODERATE' }
                  else { 'LOW — a diversified referral base' }
 
@@ -2807,6 +2810,10 @@ function Export-RmSourceReportHtml {
     )
     $a = $Analysis
     function _h([string]$t) { [System.Net.WebUtility]::HtmlEncode($t) }
+    # With no measured inbound volume every source-side chart would be an
+    # empty box and every derived metric meaningless; the report explains the
+    # situation instead of rendering blanks that look broken.
+    $hasVolume = ($a.TotalPatients -gt 0) -and (@($a.Sources).Count -gt 0)
 
     # ---- Chart 1: top-15 sources horizontal bars -------------------------
     $top = @($a.Sources | Select-Object -First 15)
@@ -2903,7 +2910,15 @@ function Export-RmSourceReportHtml {
     $comp = if ($a.PSObject.Properties['Competitive']) { $a.Competitive } else { $null }
     $compHtml = ''
     if ($comp -and @($comp.Peers).Count) {
-        $cpTop = @($comp.Peers | Select-Object -First 10)
+        # Chart and table only providers with measured volume (plus this
+        # practice, always). In a small market most listed providers have
+        # none, and a column of zero-length bars is noise, not information —
+        # the count of those providers is stated in the note instead.
+        $cpShown = @($comp.Peers | Where-Object { [int]$_.SharedPatients -gt 0 -or $_.You })
+        $cpTop = @($cpShown | Select-Object -First 10)
+        if (-not @($cpTop | Where-Object { $_.You }).Count) {
+            $cpTop = @($cpTop) + @($cpShown | Where-Object { $_.You } | Select-Object -First 1)
+        }
         $cpMax = 1; foreach ($p in $cpTop) { if ($p.SharedPatients -gt $cpMax) { $cpMax = $p.SharedPatients } }
         $cpBars = New-Object System.Text.StringBuilder
         $cy = 4
@@ -2921,7 +2936,7 @@ function Export-RmSourceReportHtml {
         $cpSvg = ('<svg viewBox="0 0 {0} {1}" role="img" aria-label="Competitive landscape">{2}</svg>' -f $w, ($cpTop.Count * ($barH + $gap) + 10), $cpBars.ToString())
         $cpRowFmt = '<tr{0}><td class="num">{1}</td><td>{2}</td><td>{3}</td><td>{4}</td>' +
             '<td class="num">{5}</td><td class="num">{6}</td><td class="num">{7}</td><td class="num">{8}%</td></tr>'
-        $cpRows = (@($comp.Peers) | ForEach-Object {
+        $cpRows = (@($cpShown) | ForEach-Object {
             $tag = if ($_.You) { ' class="you"' } else { '' }
             $nmCell = (_h ([string]$_.Name)) + $(if ($_.You) { ' <span class="youtag">YOU</span>' } else { '' })
             $miles = if ($_.DistanceMiles -is [double]) { '{0:N1}' -f $_.DistanceMiles } else { '' }
@@ -2930,11 +2945,10 @@ function Export-RmSourceReportHtml {
                 (_h (("{0}, {1} {2}" -f $_.City, $_.State, $_.Zip).Trim(', ').Trim())),
                 $miles, ('{0:N0}' -f $_.ReferralSources), ('{0:N0}' -f $_.SharedPatients), $_.SharePct
         }) -join "`n"
-        $cpNote = if ($comp.ProviderCount -gt @($comp.Peers).Count) {
-            "Top $(@($comp.Peers).Count) of $('{0:N0}' -f $comp.ProviderCount) outpatient rehab providers within $($comp.RadiusMiles) miles ($('{0:N0}' -f $comp.ProvidersWithVolume) with measured volume)."
-        } else {
-            "All $('{0:N0}' -f $comp.ProviderCount) outpatient rehab providers within $($comp.RadiusMiles) miles ($('{0:N0}' -f $comp.ProvidersWithVolume) with measured volume)."
-        }
+        $cpHidden = [math]::Max(0, $comp.ProviderCount - @($cpShown).Count)
+        $cpNote = ("$('{0:N0}' -f $comp.ProviderCount) outpatient rehab providers are listed within $($comp.RadiusMiles) miles; " +
+            "$('{0:N0}' -f $comp.ProvidersWithVolume) have measured referral volume in $($a.Year).") +
+            $(if ($cpHidden -gt 0) { " The other $('{0:N0}' -f $cpHidden) are not shown here — every pair they had (if any) fell under the 11-patient privacy floor." })
         $compHtml = @"
 <div class="card"><h2>Competitive landscape &mdash; inbound referral volume within $($comp.RadiusMiles) miles</h2>
 <div class="body">$cpSvg</div>
@@ -2954,9 +2968,11 @@ function Export-RmSourceReportHtml {
     $findings = @(
         "The practice drew $('{0:N0}' -f $a.TotalPatients) shared Medicare patients from $('{0:N0}' -f $a.SourceCount) distinct sources in $($a.Year)."
         $(if ($s1) { "The single largest source, $(if ($s1.SourceName) { $s1.SourceName } else { "NPI $($s1.SourceNPI)" }), accounts for $($s1.PctOfVolume)% of inbound volume; the top five account for $($a.Top5Pct)% and the top ten for $($a.Top10Pct)%." })
-        "Source concentration is $($a.Concentration) (HHI $('{0:N0}' -f $a.HHI) on a 0-10,000 scale)."
-        $(if ($near -gt 0) { "$([math]::Round($near,1))% of measured volume originates within 10 miles of the practice." })
-        $(if ($a.IsHop -and @($a.WaitBands).Count) {
+        $(if ($hasVolume) { "Source concentration is $($a.Concentration) (HHI $('{0:N0}' -f $a.HHI) on a 0-10,000 scale)." })
+        $(if ($hasVolume) {
+            if ($near -gt 0) { "$([math]::Round($near,1))% of measured volume originates within 10 miles of the practice." }
+            else { 'None of the measured volume originates within 10 miles — this practice draws from a wider region than its immediate area.' } })
+        $(if ($hasVolume -and $a.IsHop -and @($a.WaitBands).Count) {
             $fast = 0.0; foreach ($b in @($a.WaitBands)) { if ($b.Band -in '0-7 days', '8-30 days') { $fast += $b.Pct } }
             "$([math]::Round($fast,1))% of volume arrives within 30 days of the source visit (referral-like); the remainder reflects looser or co-occurring care patterns." })
         $(if ($comp -and $comp.Rank -and $a.TotalPatients -gt 0) {
@@ -3033,6 +3049,7 @@ function Export-RmSourceReportHtml {
   .curve { fill:none; stroke:var(--accent); stroke-width:2.5; }
   .findings { font-size:13.5px; line-height:1.65; margin:2px 0 6px; padding-left:22px; }
   .findings li { margin-bottom:4px; }
+  .empty { font-size:13.5px; line-height:1.6; margin:2px 0 10px; color:#33475c; }
   table { border-collapse:collapse; width:100%; font-size:12.6px; }
   th, td { border-top:1px solid var(--line); padding:6px 12px; text-align:left; }
   th { background:#f2f5f8; color:#33475c; font-weight:600; font-size:11px;
@@ -3063,14 +3080,15 @@ Inbound Medicare shared-patient volume, $($a.Year).</p>
 <div class="stats">
   <div class="stat"><b>$('{0:N0}' -f $a.TotalPatients)</b><span>Shared patients</span></div>
   <div class="stat"><b>$('{0:N0}' -f $a.SourceCount)</b><span>Referral sources</span></div>
-  <div class="stat"><b>$($a.Top1Pct)%</b><span>From top source</span></div>
-  <div class="stat"><b>$($a.Top5Pct)%</b><span>Top-5 dependence</span></div>
-  <div class="stat$(if ($a.HHI -ge 2500) { ' warn' })"><b>$('{0:N0}' -f $a.HHI)</b><span>Concentration (HHI)</span></div>
+  <div class="stat"><b>$(if ($hasVolume) { "$($a.Top1Pct)%" } else { '&mdash;' })</b><span>From top source</span></div>
+  <div class="stat"><b>$(if ($hasVolume) { "$($a.Top5Pct)%" } else { '&mdash;' })</b><span>Top-5 dependence</span></div>
+  <div class="stat$(if ($hasVolume -and $a.HHI -ge 2500) { ' warn' })"><b>$(if ($hasVolume) { '{0:N0}' -f $a.HHI } else { '&mdash;' })</b><span>Concentration (HHI)</span></div>
 $(if ($comp -and $comp.Rank) { '  <div class="stat"><b>#' + $comp.Rank + ' of ' + ('{0:N0}' -f $comp.ProviderCount) + '</b><span>Rank within ' + $comp.RadiusMiles + ' mi</span></div>' })
 </div>
 <div class="card"><h2>Key findings</h2><div class="body"><ul class="findings">
 $findingsHtml
 </ul></div></div>
+$(if ($hasVolume) { @"
 <div class="card"><h2>Top referral sources</h2><div class="body">$barSvg</div></div>
 <div class="duo">
   <div class="card"><h2>Specialty mix of the referral base</h2><div class="body">$donutSvg</div></div>
@@ -3080,7 +3098,22 @@ $findingsHtml
   <div class="card"><h2>Volume by distance from the practice</h2><div class="body">$distSvg</div></div>
   $(if ($waitSvg) { '<div class="card"><h2>Volume by referral lag (days from source visit)</h2><div class="body">' + $waitSvg + '</div></div>' })
 </div>
+"@ } else { @"
+<div class="card"><h2>No measured referral volume for this practice</h2><div class="body">
+<p class="empty">The $($a.Year) file records <b>no inbound shared-patient pairs</b> for this NPI, so there is nothing to chart:
+source, specialty, distance and referral-lag breakdowns are omitted rather than drawn empty.</p>
+<p class="empty">This does <b>not</b> mean the practice received no referrals. The common explanations are:</p>
+<ul class="findings">
+  <li><b>The 11-patient privacy floor.</b> Any source that shared fewer than 11 distinct Medicare patients with this practice during the year is removed from the data at the source. A smaller practice can have its entire referral base fall below that line.</li>
+  <li><b>Volume billed under a different NPI.</b> Claims may run through the therapists' individual NPIs rather than the organization NPI (or the reverse). Re-run the analysis with all of the practice's NPIs entered together to combine them.</li>
+  <li><b>Medicare Fee-for-Service only.</b> Medicare Advantage, commercial, and self-pay patients are not in this data at all.</li>
+  <li><b>The NPI was not yet active</b> in $($a.Year), or the practice enumerated a newer NPI since.</li>
+</ul>
+<p class="empty">The competitive landscape below is still measured and useful: it shows which providers in the same area <i>do</i> carry measured volume.</p>
+</div></div>
+"@ })
 $compHtml
+$(if ($hasVolume) { @"
 <div class="card">
   <h2>Source detail</h2>
   <table>
@@ -3090,6 +3123,7 @@ $compHtml
   </table>
   $(if ($srcTableNote) { "<div class='tablenote'>$srcTableNote</div>" })
 </div>
+"@ })
 <div class="card">
   <details>
     <summary>Methodology &amp; limitations</summary>

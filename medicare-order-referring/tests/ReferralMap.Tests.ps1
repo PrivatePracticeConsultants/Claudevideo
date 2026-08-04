@@ -914,9 +914,22 @@ Describe 'Source analysis report' {
         $sa = Get-RmSourceAnalysis -Npi 8000000002 -CentroidPath $script:SaCsv
         $sa.TotalPatients | Should -Be 0
         $sa.SourceCount | Should -Be 0
+        # never call an empty scan "diversified" — there is nothing to spread
+        $sa.Concentration | Should -BeLike 'n/a*'
         $out = Join-Path $script:WorkDir 'empty-report.html'
         (Export-RmSourceReportHtml -Analysis $sa -Path $out).Sources | Should -Be 0
-        (Get-Content $out -Raw) | Should -BeLike '*0*Shared patients*'
+        $html = Get-Content $out -Raw
+        $html | Should -BeLike '*0*Shared patients*'
+        # explains the situation instead of drawing empty charts
+        $html | Should -BeLike '*No measured referral volume*'
+        $html | Should -BeLike '*11-patient privacy floor*'
+        $html | Should -BeLike '*billed under a different NPI*'
+        $html | Should -Not -BeLike '*diversified referral base*'
+        $html | Should -Not -BeLike '*Concentration curve*'
+        $html | Should -Not -BeLike '*Specialty mix*'
+        $html | Should -Not -BeLike '*Source detail*'
+        # the concentration KPI cards read as not-applicable, not as 0%
+        $html | Should -BeLike '*&mdash;*Top-5 dependence*'
     }
 
     It 'ranks the practice against every rehab provider within the radius' {
@@ -1025,6 +1038,24 @@ Describe 'Source analysis report' {
         @($c.Peers)[15].You | Should -Be '>> YOU'
         $out = Join-Path $script:WorkDir 'zero-volume-report.html'
         Export-RmSourceReportHtml -Analysis $sa -Path $out | Out-Null
-        (Get-Content $out -Raw) | Should -BeLike '*no measured inbound volume*'
+        $html = Get-Content $out -Raw
+        $html | Should -BeLike '*no measured inbound volume*'
+        # a market where nobody has measured volume: the peer table lists only
+        # this practice and says plainly how many providers were left out.
+        ([regex]::Matches($html, '<tr class="you">')).Count | Should -Be 1
+        $html | Should -BeLike '*200*are not shown here*'
+        $html | Should -BeLike '*privacy floor*'
+    }
+
+    It 'peer chart and table drop zero-volume providers but keep the practice' {
+        # In ZIP 99999 only 2 of 4 listed providers have measured volume.
+        $sa = Get-RmSourceAnalysis -Npi 9000000001 -CentroidPath $script:CompCsv
+        $out = Join-Path $script:WorkDir 'peer-filter-report.html'
+        Export-RmSourceReportHtml -Analysis $sa -Path $out | Out-Null
+        $html = Get-Content $out -Raw
+        $html | Should -Not -BeLike '*NEXTDOOR NEIGHBOR*'     # listed, but no measured volume
+        $html | Should -BeLike '*2*have measured referral volume*'
+        $html | Should -BeLike '*2*are not shown here*'
+        ([regex]::Matches($html, '<tr class="you">')).Count | Should -Be 1
     }
 }
