@@ -1247,6 +1247,7 @@ $ui.RmRunButton.Add_Click({
                 "$withVolume had inbound shared-patient volume in the $year data " +
                 "($('{0:N0}' -f $sources.Count) source relationships)." +
                 $(if ($tooNew -gt 0) { " $tooNew did not have an NPI yet in $year (their zeros mean 'did not exist', not 'no referrals')." } else { '' }) +
+                $(if ($map.PSObject.Properties['CoverageNote'] -and $map.CoverageNote) { " " + $map.CoverageNote } else { '' }) +
                 " Reminder: $year vintage — market structure, not current volumes; pairs under 11 patients are excluded per CMS privacy policy. Tip: a prefix like 630* widens the area.")
             Set-Status "Referral map for $($map.Zip) complete."
         } `

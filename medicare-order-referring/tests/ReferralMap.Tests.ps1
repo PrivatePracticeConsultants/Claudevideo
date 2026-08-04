@@ -1108,6 +1108,30 @@ Describe 'Local rosters (NPPES bulk index + Care Compare groups)' {
     }
 }
 
+Describe 'Thin-data honesty (a near-empty ZIP is explained, not silent)' {
+    It 'explains low measured volume instead of leaving it looking broken' {
+        # ZIP 88888 holds 201 fixture PTs and NOT ONE has a measured pair -
+        # exactly the shape that made a real user ask "are we missing data?".
+        $map = Get-RmReferralMap -Zip 88888 -SkipEnrichment
+        @($map.Clinics).Count | Should -BeGreaterThan 5
+        $map.ProvidersWithVolume | Should -Be 0
+        $map.CoverageNote | Should -Not -BeNullOrEmpty
+        $map.CoverageNote | Should -BeLike '*LOW MEASURED VOLUME*'
+        $map.CoverageNote | Should -BeLike '*complete*'      # says the SEARCH is fine
+        $map.CoverageNote | Should -BeLike '*under 11 shared patients*'
+        $map.CoverageNote | Should -BeLike '*fee-for-service*'
+        (@($map.Notes) -join ' ') | Should -BeLike '*LOW MEASURED VOLUME*'
+    }
+
+    It 'stays quiet when volume is normal' {
+        # ZIP 99999: most listed providers DO have measured volume.
+        $map = Get-RmReferralMap -Zip 99999 -SkipEnrichment
+        $map.ProvidersWithVolume | Should -BeGreaterThan 0
+        $map.CoverageNote | Should -BeNullOrEmpty
+        (@($map.Notes) -join ' ') | Should -Not -BeLike '*LOW MEASURED VOLUME*'
+    }
+}
+
 Describe 'Taxonomy scope (outpatient PT/OT/speech only)' {
     # Audited against NUCC v25.1: subspecialty therapists are IN (they are
     # therapists), assistants/physicians/cardiac/substance rehab are OUT.

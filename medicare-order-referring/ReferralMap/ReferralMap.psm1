@@ -1497,7 +1497,27 @@ function Get-RmReferralMap {
                               @{Expression = 'Name'; Descending = $false})
     $notYetEnumerated = @($clinicRows | Where-Object { $_.ExistedInDataYear -like 'No*' }).Count
 
+    # A ZIP full of therapists but almost no measured volume looks exactly
+    # like a broken search. Explain it instead: state the coverage plainly
+    # and, when we can, name the local Medicare market that caused it.
+    $withVol = @($clinicRows | Where-Object { [int]$_.SharedPatients -gt 0 }).Count
+    $coverageNote = $null
+    if ($clinicRows.Count -ge 5 -and $withVol -le [math]::Ceiling($clinicRows.Count * 0.25)) {
+        $mkt = $null
+        try {
+            $z5note = if ($Zip -match '^\d{5}$') { $Zip } elseif ($radiusZips) { [string]@($radiusZips)[0] } else { '' }
+            if ($z5note) { $mkt = Get-RmCountyMarket -Zip $z5note }
+        } catch { $mkt = $null }
+        $coverageNote = ("LOW MEASURED VOLUME: $withVol of $($clinicRows.Count) providers found here have ANY measured referral pair in $($info.Year). " +
+            "The provider list is complete — this is the DATA being thin, not the search. Two reasons dominate: " +
+            "(1) pairs under 11 shared patients are deleted before publication, which erases most relationships in a low-volume area; " +
+            "(2) the file covers Medicare fee-for-service only.") +
+            $(if ($mkt) { " In $($mkt.County), $($mkt.State), $($mkt.MaPct)% of $('{0:N0}' -f $mkt.TotalBenes) Medicare beneficiaries are in Medicare Advantage and invisible here, leaving about $('{0:N0}' -f $mkt.FfsBenes) fee-for-service beneficiaries countywide." }) +
+            " Try a radius search to see the wider market."
+    }
+
     $notes = @(Get-RmMethodologyNotes -Info $info -OrganizationsOnly:$OrganizationsOnly) + @(
+        $(if ($coverageNote) { $coverageNote })
         $(if ($radiusZips) { "RADIUS SEARCH: providers were swept from the $($radiusZips.Count) ZIP code(s) whose US-Census area centroid lies within $RadiusMiles straight-line miles of ZIP $Zip's centroid. DistanceMiles is centroid-to-centroid, not driving distance; PO-box-only ZIPs (absent from the Census table) are not swept." })
         $(if ($notYetEnumerated -gt 0) { '{0} of {1} providers found in this ZIP were issued their NPI after the {2} file''s service window ended, so they cannot appear in it (ExistedInDataYear = No).' -f $notYetEnumerated, $clinicRows.Count, $info.Year })
         $(if ($enrichNote) { $enrichNote })
@@ -1507,6 +1527,8 @@ function Get-RmReferralMap {
         Zip     = if ($radiusZips) { "$Zip+${RadiusMiles}mi" } else { $Zip }
         Clinics = $clinicRows
         Sources = $sources
+        ProvidersWithVolume = $withVol
+        CoverageNote = $coverageNote      # $null unless volume is thin
         Notes   = @($notes)
     }
 }
