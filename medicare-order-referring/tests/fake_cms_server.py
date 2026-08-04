@@ -131,6 +131,30 @@ PG_THERAPISTS = [
 ]
 
 
+# data.cms.gov open-data doubles: Medicare Monthly Enrollment (by county
+# FIPS) and Physician & Other Practitioners by Provider and Service (by NPI).
+ENROLLMENT = {
+    '99001': [
+        {'YEAR': '2024', 'MONTH': 'Year', 'BENE_FIPS_CD': '99001', 'BENE_COUNTY_DESC': 'Test County',
+         'BENE_STATE_ABRVTN': 'MO', 'TOT_BENES': '10000', 'ORGNL_MDCR_BENES': '6500', 'MA_AND_OTH_BENES': '3500'},
+        {'YEAR': '2025', 'MONTH': 'Year', 'BENE_FIPS_CD': '99001', 'BENE_COUNTY_DESC': 'Test County',
+         'BENE_STATE_ABRVTN': 'MO', 'TOT_BENES': '12000', 'ORGNL_MDCR_BENES': '7000', 'MA_AND_OTH_BENES': '5000'},
+    ],
+}
+SERVICES = {
+    '9000000001': [
+        {'Rndrng_NPI': '9000000001', 'HCPCS_Cd': '97110', 'Tot_Srvcs': '350', 'Tot_Benes': '60',
+         'Rndrng_Prvdr_Type': 'Physical Therapist'},
+        {'Rndrng_NPI': '9000000001', 'HCPCS_Cd': '97140', 'Tot_Srvcs': '150', 'Tot_Benes': '40',
+         'Rndrng_Prvdr_Type': 'Physical Therapist'},
+        # an E/M code that must NOT count as therapy
+        {'Rndrng_NPI': '9000000001', 'HCPCS_Cd': '99213', 'Tot_Srvcs': '25', 'Tot_Benes': '20',
+         'Rndrng_Prvdr_Type': 'Physical Therapist'},
+    ],
+    # 9000000002 deliberately absent -> org-bills-under-individuals case
+}
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
@@ -145,6 +169,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         url = urlparse(self.path)
+        if '/dataset/' in url.path and url.path.endswith('/data'):
+            q = {k: v[0] for k, v in parse_qs(url.query).items()}
+            if 'd7fabe1e' in url.path:
+                fips = q.get('filter[BENE_FIPS_CD]', '')
+                self._json(ENROLLMENT.get(fips, []))
+            else:
+                npi = q.get('filter[Rndrng_NPI]', '')
+                self._json(SERVICES.get(npi, []))
+            return
         if url.path.startswith('/foia/'):
             f = SITE / url.path[len('/foia/'):]
             if f.is_file():

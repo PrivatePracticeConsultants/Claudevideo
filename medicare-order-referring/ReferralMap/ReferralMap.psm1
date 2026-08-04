@@ -46,6 +46,12 @@ $script:RmConfig = [ordered]@{
     # NPPES registry API base; overridable for tests via RM_NPPES_URL.
     NppesUrl = if ($env:RM_NPPES_URL) { $env:RM_NPPES_URL }
                else { 'https://npiregistry.cms.hhs.gov/api/' }
+    # data.cms.gov open-data API base (keyless); overridable for tests.
+    # Serves the Medicare Monthly Enrollment (county market size + Medicare
+    # Advantage share) and Physician & Other Practitioners (real billed
+    # therapy services) datasets.
+    CmsApiBase = if ($env:RM_CMS_API_BASE) { $env:RM_CMS_API_BASE }
+                 else { 'https://data.cms.gov/data-api/v1/dataset' }
     DataDir  = if ($env:RM_DATA_DIR) {
                    $env:RM_DATA_DIR
                } elseif ($env:LOCALAPPDATA) {
@@ -113,12 +119,14 @@ function Set-RmConfig {
         [string]$DataDir,
         [ValidateRange(2009, 2015)][int]$Year,
         [ValidateSet(30, 60, 90, 180)][int]$Interval,
-        [ValidateRange(0, 100000)][int]$EnrichCap
+        [ValidateRange(0, 100000)][int]$EnrichCap,
+        [string]$CmsApiBase
     )
     if ($DataDir)  { $script:RmConfig.DataDir = $DataDir }
     if ($Year)     { $script:RmConfig.Year = $Year }
     if ($Interval) { $script:RmConfig.Interval = $Interval }
     if ($PSBoundParameters.ContainsKey('EnrichCap')) { $script:RmConfig.EnrichCap = $EnrichCap }
+    if ($CmsApiBase) { $script:RmConfig.CmsApiBase = $CmsApiBase }
 }
 
 # ---------------------------------------------------------------------------
@@ -2267,7 +2275,8 @@ function Get-RmSourceAnalysis {
         [Parameter(Mandatory)][ValidateCount(1, 50)][ValidatePattern('^\d{10}$')][string[]]$Npi,
         [ValidateRange(1, 50)][double]$CompetitorRadiusMiles = 10,
         [switch]$SkipCompetitors,
-        [string]$CentroidPath
+        [string]$CentroidPath,
+        [string]$CrosswalkPath     # test override for the ZIP->county table
     )
     $info = Get-RmDatasetInfo
     if (-not $info.Ready) {
@@ -2573,6 +2582,28 @@ function Get-RmSourceAnalysis {
         }
     }
 
+    # Supplemental market context + real billed-services profile (both
+    # keyless CMS open-data APIs, cached). Enrichment only: any failure
+    # degrades to a note and never blocks the analysis.
+    $market = $null; $svcProfile = $null; $suppNote = $null
+    if (-not $SkipCompetitors) {   # same switch: skip in fast/offline runs
+        try {
+            if ($pracZip -match '^\d{5}$') { $market = Get-RmCountyMarket -Zip $pracZip -CrosswalkPath $CrosswalkPath }
+        } catch { $suppNote = "MARKET CONTEXT unavailable: $($_.Exception.Message)"; Write-Warning $suppNote }
+        try {
+            $svcAll = Get-RmServiceProfile -Npi $npiList
+            $svcAgg = [pscustomobject]@{
+                TherapyServices = 0; MinDistinctPatients = 0; NpisWithClaims = 0; ClaimsSpecialty = '' }
+            foreach ($v in $svcAll.Values) {
+                $svcAgg.TherapyServices += [int]$v.TherapyServices
+                $svcAgg.MinDistinctPatients += [int]$v.MinDistinctPatients
+                if ($v.HasAnyClaims) { $svcAgg.NpisWithClaims++ }
+                if (-not $svcAgg.ClaimsSpecialty -and $v.ClaimsSpecialty) { $svcAgg.ClaimsSpecialty = $v.ClaimsSpecialty }
+            }
+            $svcProfile = $svcAgg
+        } catch { $suppNote = "BILLED-SERVICES PROFILE unavailable: $($_.Exception.Message)"; Write-Warning $suppNote }
+    }
+
     $notes = @(Get-RmMethodologyNotes -Info $info) + @(
         ''
         "SOURCE ANALYSIS METHOD: every inbound pair of NPI $primary ($pracName) in $($info.Label), ranked by shared patients. PctOfVolume/CumulativePct are shares of this practice's total inbound volume."
@@ -2584,6 +2615,9 @@ function Get-RmSourceAnalysis {
         $(if ($landscape) { "COMPETITIVE LANDSCAPE: peers are the NPPES-listed outpatient rehab providers (the same PT/OT/SLP taxonomy sweep the Referral map uses) whose practice location falls in the $($landscape.ZipCount) ZIP(s) within $($landscape.RadiusMiles) straight-line miles of ZIP $pracZip, ranked by inbound shared-patient volume on $($info.Label). Share of area volume = a provider's inbound volume over the SUM across all listed providers — share of measured referral VOLUME, not of patients." })
         $(if ($landscape) { 'A practice''s volume is often SPLIT between its organization NPI and its therapists'' individual NPIs, so a group can rank below its true combined volume. Benchmark the org NPI and its key therapists separately for the full picture.' })
         $(if ($landscapeNote) { $landscapeNote })
+        $(if ($market) { "MARKET CONTEXT: county Medicare enrollment from CMS's Medicare Monthly Enrollment dataset (calendar $($market.Year), latest full year). Original Medicare (FFS) beneficiaries are the population this file can see; Medicare Advantage members ($($market.MaPct)% of $($market.County)) are invisible to it." })
+        $(if ($svcProfile) { 'BILLED-SERVICES PROFILE: actual Medicare Part B claims from CMS''s Physician & Other Practitioners dataset (latest annual release; therapy = HCPCS 97xxx/92xxx). CAUTION: this dataset suppresses provider-procedure lines under 11 beneficiaries, so small caseloads are invisible here too, and services bill under the RENDERING NPI — organizations that bill through their therapists'' individual NPIs legitimately show no claims here. Distinct-patient counts are a FLOOR (patients overlap across procedure codes).' })
+        $(if ($suppNote) { $suppNote })
         $(if ($capNote) { $capNote })
     ) | Where-Object { $null -ne $_ -and $_ -ne $false }
 
@@ -2614,6 +2648,8 @@ function Get-RmSourceAnalysis {
         WaitBands    = @($waitBands)
         Geo          = @($geoRows)          # per-ZIP roll-up for the heat map
         GeoUnmappedPatients = $geoUnmapped  # volume with no locatable source ZIP
+        Market       = $market              # county Medicare market (CMS enrollment); $null offline
+        ServiceProfile = $svcProfile        # real billed therapy claims (CMS P&S); $null offline
         Competitive  = $landscape     # $null when skipped or the sweep failed
         Trend        = $null          # filled by Add-RmSourceTrend
         Notes        = @($notes)
@@ -3497,6 +3533,20 @@ $lossRows
             $fastVol = 0; foreach ($b in @($a.WaitBands)) { if ($b.Band -in '0-7 days', '8-30 days') { $fastVol += [int]$b.SharedPatients } }
             $fast = [math]::Round(100.0 * $fastVol / $a.TotalPatients, 1)
             "$fast% of volume arrives within 30 days of the source visit (referral-like); the remainder reflects looser or co-occurring care patterns." })
+        $(if ($a.PSObject.Properties['Market'] -and $a.Market) {
+            $mk = $a.Market
+            $perK = if ($mk.FfsBenes -gt 0 -and $a.TotalPatients -gt 0) { [math]::Round(1000.0 * $a.TotalPatients / $mk.FfsBenes, 1) } else { $null }
+            "The practice's county ($($mk.County), $($mk.State)) had $('{0:N0}' -f $mk.TotalBenes) Medicare beneficiaries in $($mk.Year); $($mk.MaPct)% were in Medicare Advantage and are invisible to this data." +
+            $(if ($perK) { " Measured volume equals $perK referrals per 1,000 Original-Medicare beneficiaries countywide." }) })
+        $(if ($a.PSObject.Properties['ServiceProfile'] -and $a.ServiceProfile) {
+            $sp = $a.ServiceProfile
+            if ($sp.TherapyServices -gt 0) {
+                "CMS claims data shows $('{0:N0}' -f $sp.TherapyServices) billed Medicare therapy services under $(if ($sp.NpisWithClaims -eq 1) { 'this NPI' } else { "$($sp.NpisWithClaims) of these NPIs" }) in the latest annual release, reaching at least $('{0:N0}' -f $sp.MinDistinctPatients) distinct patients."
+            } elseif ($sp.NpisWithClaims -eq 0) {
+                'CMS claims data shows no directly-billed Part B therapy lines above its 11-beneficiary line floor under ' +
+                $(if ($a.NpiCount -gt 1) { 'these NPIs' } else { 'this NPI' }) +
+                ' — organizations typically bill under their therapists'' individual NPIs (add those NPIs for a combined view).'
+            } })
         $(if ($comp -and $comp.Rank -and $a.TotalPatients -gt 0) {
             "Among $('{0:N0}' -f $comp.ProviderCount) outpatient rehab providers within $($comp.RadiusMiles) miles, the practice ranks #$($comp.Rank) by inbound Medicare referral volume, holding $($comp.SharePct)% of the area's measured volume." })
         $(if ($comp -and $a.TotalPatients -eq 0) {
@@ -3706,6 +3756,136 @@ $(if ($hasVolume) { @"
     [pscustomobject]@{ Path = $Path; Sources = @($a.Sources).Count; TotalPatients = $a.TotalPatients }
 }
 
+# ---------------------------------------------------------------------------
+# Supplemental open data (data.cms.gov, keyless): county Medicare market
+# size + MA share, and real billed therapy services per provider. Both are
+# cosmetic ENRICHMENT — a failed fetch degrades to a note, never an error.
+# ---------------------------------------------------------------------------
+
+$script:RmZctaCounty = $null
+function Get-RmZctaCountyFips([string]$Zip, [string]$CrosswalkPath) {
+    # ZIP -> county FIPS via the bundled US Census 2020 ZCTA-county
+    # relationship table (largest-land-overlap county per ZCTA).
+    if ($null -eq $script:RmZctaCounty -or $CrosswalkPath) {
+        $path = if ($CrosswalkPath) { $CrosswalkPath } else { Join-Path $PSScriptRoot 'zcta-county.csv' }
+        $t = @{}
+        foreach ($line in [System.IO.File]::ReadLines($path)) {
+            $p = $line.Split(',')
+            if ($p.Count -ge 2 -and $p[0] -match '^\d{5}$') { $t[$p[0]] = $p[1] }
+        }
+        if ($CrosswalkPath) { return $(if ($t.ContainsKey($Zip)) { $t[$Zip] } else { $null }) }
+        $script:RmZctaCounty = $t
+    }
+    if ($script:RmZctaCounty.ContainsKey($Zip)) { $script:RmZctaCounty[$Zip] } else { $null }
+}
+
+function Invoke-RmCmsApi([string]$DatasetId, [string]$Query) {
+    $url = '{0}/{1}/data?{2}' -f $script:RmConfig.CmsApiBase, $DatasetId, $Query
+    $delays = @(0, 2, 5); $lastMsg = ''
+    foreach ($delay in $delays) {
+        if ($delay) { Start-Sleep -Seconds $delay }
+        try {
+            $resp = Invoke-RestMethod -Uri $url -TimeoutSec 60 -ErrorAction Stop
+            # Newer PowerShell emits a JSON array as ONE non-enumerated
+            # object; pipe it so callers' @(...) reliably sees N row items
+            # (this exact wrap made row filters see nothing in testing).
+            return @($resp | ForEach-Object { $_ })
+        } catch { $lastMsg = $_.Exception.Message }
+    }
+    throw "The CMS open-data API (data.cms.gov) could not be reached after $($delays.Count) attempts. Details: $lastMsg"
+}
+
+function Get-RmCountyMarket {
+    <#
+    .SYNOPSIS
+      County Medicare market context for a practice ZIP, from CMS's Medicare
+      Monthly Enrollment dataset: total beneficiaries, Original-Medicare
+      (FFS) vs Medicare Advantage split, latest full year. Cached on disk.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidatePattern('^\d{5}$')][string]$Zip,
+        [string]$CrosswalkPath
+    )
+    $fips = Get-RmZctaCountyFips $Zip $CrosswalkPath
+    if (-not $fips) { return $null }
+    $cachePath = Join-Path $script:RmConfig.DataDir 'market-cache.json'
+    $cache = @{}
+    if (Test-Path -LiteralPath $cachePath) {
+        try { $j = Get-Content -LiteralPath $cachePath -Raw -Encoding UTF8 | ConvertFrom-Json
+              foreach ($p in $j.PSObject.Properties) { $cache[$p.Name] = $p.Value } } catch {}
+    }
+    if ($cache.ContainsKey($fips)) { return $cache[$fips] }
+    $rows = @(Invoke-RmCmsApi 'd7fabe1e-d19b-4333-9eff-e80e0643f2fd' `
+        ('filter[BENE_FIPS_CD]={0}&filter[MONTH]=Year&size=50' -f $fips))
+    $rows = @($rows | Where-Object { [string]$_.TOT_BENES -match '^\d+$' } | Sort-Object { [int]$_.YEAR })
+    if (-not $rows.Count) { return $null }
+    $r = $rows[$rows.Count - 1]
+    $tot = [int]$r.TOT_BENES
+    $ma = if (([string]$r.MA_AND_OTH_BENES) -match '^\d+$') { [int]$r.MA_AND_OTH_BENES } else { 0 }
+    $ffs = if (([string]$r.ORGNL_MDCR_BENES) -match '^\d+$') { [int]$r.ORGNL_MDCR_BENES } else { 0 }
+    $m = [pscustomobject]@{
+        Fips = $fips; County = [string]$r.BENE_COUNTY_DESC; State = [string]$r.BENE_STATE_ABRVTN
+        Year = [int]$r.YEAR; TotalBenes = $tot; FfsBenes = $ffs; MaBenes = $ma
+        MaPct = if ($tot -gt 0) { [math]::Round(100.0 * $ma / $tot, 1) } else { 0 }
+    }
+    $cache[$fips] = $m
+    try {
+        New-Item -ItemType Directory -Path $script:RmConfig.DataDir -Force | Out-Null
+        $cache | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $cachePath -Encoding UTF8
+    } catch {}
+    $m
+}
+
+function Get-RmServiceProfile {
+    <#
+    .SYNOPSIS
+      Real billed Medicare Part B therapy activity for one or more NPIs,
+      from CMS's Physician & Other Practitioners (by Provider and Service)
+      dataset — actual claims, no 11-patient pair floor. Therapy = HCPCS
+      97xxx (PT/OT) and 92xxx speech codes. Organizations that bill under
+      their therapists' individual NPIs legitimately show nothing here.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][ValidateCount(1, 60)][ValidatePattern('^\d{10}$')][string[]]$Npi)
+    $cachePath = Join-Path $script:RmConfig.DataDir 'services-cache.json'
+    $cache = @{}
+    if (Test-Path -LiteralPath $cachePath) {
+        try { $j = Get-Content -LiteralPath $cachePath -Raw -Encoding UTF8 | ConvertFrom-Json
+              foreach ($p in $j.PSObject.Properties) { $cache[$p.Name] = $p.Value } } catch {}
+    }
+    $dirty = $false
+    $out = @{}
+    foreach ($n in @($Npi | Sort-Object -Unique)) {
+        if ($cache.ContainsKey($n)) { $out[$n] = $cache[$n]; continue }
+        $rows = @(Invoke-RmCmsApi '92396110-2aed-4d63-a6a2-5d6207d46a29' `
+            ('filter[Rndrng_NPI]={0}&size=200' -f $n))
+        $svc = 0; $maxBene = 0; $codes = 0; $type = ''
+        foreach ($r in $rows) {
+            $code = [string]$r.HCPCS_Cd
+            if ($code -notmatch '^(97|92)') { continue }
+            $codes++
+            $svc += [int][double]$r.Tot_Srvcs
+            if ([int]$r.Tot_Benes -gt $maxBene) { $maxBene = [int]$r.Tot_Benes }
+            if (-not $type) { $type = [string]$r.Rndrng_Prvdr_Type }
+        }
+        $p = [pscustomobject]@{
+            Npi = $n; TherapyServices = $svc; TherapyCodes = $codes
+            MinDistinctPatients = $maxBene   # max single-code bene count = a FLOOR, benes overlap across codes
+            ClaimsSpecialty = $type
+            HasAnyClaims = ($rows.Count -gt 0)
+        }
+        $cache[$n] = $p; $out[$n] = $p; $dirty = $true
+    }
+    if ($dirty) {
+        try {
+            New-Item -ItemType Directory -Path $script:RmConfig.DataDir -Force | Out-Null
+            $cache | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $cachePath -Encoding UTF8
+        } catch {}
+    }
+    $out
+}
+
 function Get-RmSourceSpecialtyMix {
     <#
     .SYNOPSIS
@@ -3804,5 +3984,6 @@ Export-ModuleMember -Function @(
     'Get-RmReferralGeography', 'Export-RmReferralMapHtml',
     'Get-RmSourceAnalysis', 'Export-RmSourceReportHtml',
     'Get-RmSourceTrend', 'Add-RmSourceTrend',
+    'Get-RmCountyMarket', 'Get-RmServiceProfile',
     'Export-RmResult', 'Clear-RmStaleTemp'
 )

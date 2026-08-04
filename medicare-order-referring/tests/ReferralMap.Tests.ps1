@@ -52,6 +52,7 @@ BeforeAll {
     # --- Module under test, pointed at the doubles ------------------------
     $env:RM_FOIA_URL_TEMPLATE = "$base/foia/pspp-{0}-days{1}.zip"
     $env:RM_NPPES_URL = "$base/nppes/"
+    $env:RM_CMS_API_BASE = "$base/dataset"
     $env:RM_DATA_DIR = Join-Path $script:WorkDir 'store'
     Import-Module (Join-Path $script:Root 'ReferralMap/ReferralMap.psm1') -Force
 }
@@ -59,7 +60,7 @@ BeforeAll {
 AfterAll {
     if ($script:Server -and -not $script:Server.HasExited) { $script:Server.Kill() }
     Remove-Item -Recurse -Force $script:WorkDir -ErrorAction SilentlyContinue
-    Remove-Item Env:RM_FOIA_URL_TEMPLATE, Env:RM_NPPES_URL, Env:RM_DATA_DIR -ErrorAction SilentlyContinue
+    Remove-Item Env:RM_FOIA_URL_TEMPLATE, Env:RM_NPPES_URL, Env:RM_CMS_API_BASE, Env:RM_DATA_DIR -ErrorAction SilentlyContinue
 }
 
 Describe 'Dataset download' {
@@ -813,6 +814,68 @@ Describe 'Radius search' {
         $plain = Get-RmReferralMap -Zip 99999 -SkipEnrichment
         @($plain.Clinics)[0].PSObject.Properties['DistanceMiles'] | Should -BeNullOrEmpty
         $plain.Zip | Should -Be '99999'
+    }
+}
+
+Describe 'Supplemental market and billed-services data (CMS open data)' {
+    BeforeAll {
+        # ZIP->county fixture: the test ZIP maps to fixture county 99001.
+        $script:XwCsv = Join-Path $script:WorkDir 'xw.csv'
+        Set-Content -Path $script:XwCsv -Encoding ascii -Value @('zip,fips', '99999,99001')
+        $script:MkSaCsv = Join-Path $script:WorkDir 'mk-centroids.csv'
+        Set-Content -Path $script:MkSaCsv -Encoding ascii -Value @(
+            'zip,lat,lon', '99999,40.0000,-90.0000', '86442,35.1000,-114.6000')
+    }
+
+    It 'county market: latest full year, MA share, and a disk cache' {
+        $m = Get-RmCountyMarket -Zip 99999 -CrosswalkPath $script:XwCsv
+        $m.County | Should -Be 'Test County'
+        $m.Year | Should -Be 2025                      # picks the LATEST year row
+        $m.TotalBenes | Should -Be 12000
+        $m.FfsBenes | Should -Be 7000
+        $m.MaPct | Should -Be 41.7                     # 5000/12000
+        (Test-Path (Join-Path $env:RM_DATA_DIR 'market-cache.json')) | Should -BeTrue
+        (Get-RmCountyMarket -Zip 99999 -CrosswalkPath $script:XwCsv).TotalBenes | Should -Be 12000
+    }
+
+    It 'service profile counts ONLY therapy codes and floors distinct patients' {
+        $p = (Get-RmServiceProfile -Npi 9000000001)['9000000001']
+        $p.TherapyServices | Should -Be 500            # 350 + 150; the 99213 E/M row is excluded
+        $p.TherapyCodes | Should -Be 2
+        $p.MinDistinctPatients | Should -Be 60         # max single-code benes = a floor, never a sum
+        $p.HasAnyClaims | Should -BeTrue
+        $none = (Get-RmServiceProfile -Npi 9000000002)['9000000002']
+        $none.HasAnyClaims | Should -BeFalse
+        $none.TherapyServices | Should -Be 0
+    }
+
+    It 'analysis carries both blocks and the report writes the findings' {
+        $sa = Get-RmSourceAnalysis -Npi 9000000001 -CentroidPath $script:MkSaCsv -CrosswalkPath $script:XwCsv
+        $sa.Market.MaPct | Should -Be 41.7
+        $sa.ServiceProfile.TherapyServices | Should -Be 500
+        (@($sa.Notes) -join ' ') | Should -BeLike '*MARKET CONTEXT*'
+        (@($sa.Notes) -join ' ') | Should -BeLike '*BILLED-SERVICES PROFILE*'
+        $out = Join-Path $script:WorkDir 'market-report.html'
+        Export-RmSourceReportHtml -Analysis $sa -Path $out | Out-Null
+        $html = Get-Content $out -Raw
+        $html | Should -BeLike '*41.7% were in Medicare Advantage*'
+        $html | Should -BeLike '*500*billed Medicare therapy services*'
+        $html | Should -BeLike '*per 1,000 Original-Medicare beneficiaries*'
+    }
+
+    It 'a dead API degrades to a note - the analysis never fails' {
+        # A crosswalk mapping to an UNCACHED county, so the API is really hit
+        # (the disk cache would otherwise — correctly — answer for 99001).
+        $xw2 = Join-Path $script:WorkDir 'xw2.csv'
+        Set-Content -Path $xw2 -Encoding ascii -Value @('zip,fips', '99999,99002')
+        $savedBase = (Get-RmConfig).CmsApiBase
+        try {
+            Set-RmConfig -CmsApiBase 'http://127.0.0.1:1/dataset'
+            $sa = Get-RmSourceAnalysis -Npi 9000000001 -CentroidPath $script:MkSaCsv -CrosswalkPath $xw2
+            $sa.TotalPatients | Should -Be 65          # the core analysis is intact
+            $sa.Market | Should -BeNullOrEmpty
+            (@($sa.Notes) -join ' ') | Should -BeLike '*unavailable*'
+        } finally { Set-RmConfig -CmsApiBase $savedBase }
     }
 }
 
