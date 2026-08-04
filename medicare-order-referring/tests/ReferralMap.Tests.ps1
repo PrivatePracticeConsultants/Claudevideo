@@ -486,6 +486,14 @@ Describe 'Practice search and benchmark' {
         $rows.Count | Should -Be 1
         $rows[0].Name | Should -Be 'TEST REHAB CLINIC LLC'
     }
+    It 'retries a transiently-dropped NPPES connection instead of failing' {
+        # The fake registry drops every odd request for this NPI without a
+        # response — one retry must recover (a mid-sweep TLS blip once killed
+        # a 10-minute competitive sweep; this guards the retry fix).
+        $rows = @(Find-RmPractice -Name '4999999999')
+        $rows.Count | Should -Be 1
+        $rows[0].Name | Should -Be 'FLAKY NETWORK'
+    }
 
     It 'benchmarks the org against its region: rank, share, and the You marker' {
         $bm = Get-RmPracticeBenchmark -Npi 9000000001 -SkipEnrichment

@@ -63,6 +63,13 @@ NEIGHBOR = provider('9000000007', 'NPI-1', ('NEXTDOOR', 'NEIGHBOR'), ['225100000
 PAGED = [provider(f'86{i:08d}', 'NPI-1', ('PT', f'PAGE{i}'), ['225100000X'], '888880000')
          for i in range(201)]
 
+# A flaky NPI: every ODD request for it drops the connection without a
+# response (simulates a failed TLS handshake mid-sweep); even requests
+# succeed. Exercises the client's retry-with-backoff.
+FLAKY_NPI = '4999999999'
+FLAKY = provider(FLAKY_NPI, 'NPI-1', ('FLAKY', 'NETWORK'), ['225100000X'], '999990000')
+flaky_state = {'count': 0}
+
 # Source providers looked up by number= during enrichment.
 SOURCES = {
     '8000000001': provider('8000000001', 'NPI-1', ('DAVID', 'DOCTOR'), ['207Q00000X'],
@@ -112,6 +119,13 @@ class Handler(BaseHTTPRequestHandler):
             return
         if url.path.rstrip('/').endswith('/nppes'):
             q = {k: v[0] for k, v in parse_qs(url.query).items()}
+            if q.get('number') == FLAKY_NPI:
+                flaky_state['count'] += 1
+                if flaky_state['count'] % 2 == 1:
+                    self.close_connection = True    # drop without a response
+                    return
+                self._json({'result_count': 1, 'results': [FLAKY]})
+                return
             if 'number' in q:
                 hit = SOURCES.get(q['number'])
                 for p in IN_ZIP + [MAILING_ONLY, SHORT_POSTAL, NEIGHBOR] + PAGED + PG_THERAPISTS:

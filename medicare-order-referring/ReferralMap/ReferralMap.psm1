@@ -486,12 +486,22 @@ function Assert-RmSafeZip([string]$ZipPath) {
 
 function Invoke-RmNppes([string]$Query) {
     $url = '{0}?version=2.1&{1}' -f $script:RmConfig.NppesUrl, $Query
-    try {
-        Invoke-RestMethod -Uri $url -TimeoutSec 60 -ErrorAction Stop
-    } catch {
-        throw ("The NPPES registry (npiregistry.cms.hhs.gov) could not be reached. " +
-               "Check your internet connection. Details: $($_.Exception.Message)")
+    # One transient hiccup (dropped TLS handshake, brief Wi-Fi blip) must not
+    # kill a long multi-ZIP sweep that is 20 minutes in: 3 attempts with a
+    # short backoff before the friendly failure surfaces to the caller.
+    $delays = @(0, 2, 5)
+    $lastMsg = ''
+    foreach ($delay in $delays) {
+        if ($delay) { Start-Sleep -Seconds $delay }
+        try {
+            return Invoke-RestMethod -Uri $url -TimeoutSec 60 -ErrorAction Stop
+        } catch {
+            $lastMsg = $_.Exception.Message
+            Write-Verbose "NPPES request failed (will retry): $lastMsg"
+        }
     }
+    throw ("The NPPES registry (npiregistry.cms.hhs.gov) could not be reached " +
+           "after $($delays.Count) attempts. Check your internet connection. Details: $lastMsg")
 }
 
 # ---------------------------------------------------------------------------
