@@ -1522,6 +1522,84 @@ Describe 'Source analysis report' {
         $html2.Length | Should -BeLessThan 150000
     }
 
+    It 'computes per-ZIP market capture: my volume vs the area total' {
+        # Peer 9000000002 draws 12 patients from source 8000000001 in ZIP
+        # 99999; this practice draws 45 from the same ZIP. Capture there is
+        # 45/57. ZIP 86442 feeds only this practice -> 100%.
+        Set-RmActiveDataset -Source hop-teaming -Year 2022 | Out-Null
+        $xw = Join-Path $script:WorkDir 'xw-cap.csv'
+        Set-Content -Path $xw -Encoding ascii -Value @('zip,fips', '99999,99001')
+        try {
+            $sa = Get-RmSourceAnalysis -Npi 9000000001 -CentroidPath $script:SaCsv -CrosswalkPath $xw
+            $mkt = @($sa.GeoMarket)
+            $mkt.Count | Should -BeGreaterThan 0
+            $z1 = @($mkt | Where-Object Zip -eq '99999')[0]
+            $z1.MyPatients | Should -Be 45
+            $z1.AreaPatients | Should -Be 57       # 45 mine + 12 to the peer
+            $z1.CapturePct | Should -Be 78.9
+            $z2 = @($mkt | Where-Object Zip -eq '86442')[0]
+            $z2.CapturePct | Should -Be 100        # nobody else draws from there
+            # every ZIP's own volume must equal the Geo roll-up for that ZIP
+            foreach ($m in $mkt) {
+                $g = @($sa.Geo | Where-Object Zip -eq $m.Zip)
+                $mine = if ($g.Count) { [int]$g[0].SharedPatients } else { 0 }
+                $m.MyPatients | Should -Be $mine
+                $m.AreaPatients | Should -BeGreaterOrEqual $m.MyPatients
+            }
+        } finally { Set-RmActiveDataset -Source cms-pspp -Year 2015 | Out-Null }
+    }
+
+    It 'names the actual providers behind each mapped ZIP' {
+        $sa = Get-RmSourceAnalysis -Npi 9000000001 -SkipCompetitors -CentroidPath $script:SaCsv
+        $z = @($sa.Geo | Where-Object Zip -eq '99999')[0]
+        @($z.TopProviders).Count | Should -BeGreaterThan 0
+        @($z.TopProviders)[0].Name | Should -Be 'DAVID DOCTOR'
+        @($z.TopProviders)[0].Patients | Should -Be 45
+    }
+
+    It 'renders the layer switcher, capture legend, rings, and named popups' {
+        Set-RmActiveDataset -Source hop-teaming -Year 2022 | Out-Null
+        $xw = Join-Path $script:WorkDir 'xw-cap2.csv'
+        Set-Content -Path $xw -Encoding ascii -Value @('zip,fips', '99999,99001')
+        try {
+            $sa = Get-RmSourceAnalysis -Npi 9000000001 -CentroidPath $script:SaCsv -CrosswalkPath $xw
+            $out = Join-Path $script:WorkDir 'map-layers.html'
+            Export-RmSourceReportHtml -Analysis $sa -Path $out | Out-Null
+            $html = Get-Content $out -Raw
+            $html | Should -BeLike '*data-layer="mine"*'
+            $html | Should -BeLike '*data-layer="capture"*'
+            $html | Should -BeLike '*Your share of ZIP volume*'
+            $html | Should -BeLike '*open market*'
+            $html | Should -BeLike '*Distance rings*'
+            $html | Should -BeLike '*Top sources here*'
+            $html | Should -BeLike '*DAVID DOCTOR*'
+            $html | Should -BeLike '*Area vol*'          # capture columns in the table
+            $html | Should -BeLike '*outreach target*'
+            $html | Should -Not -BeLike '*<script src*'  # still self-contained
+        } finally { Set-RmActiveDataset -Source cms-pspp -Year 2015 | Out-Null }
+    }
+
+    It 'skips the capture layer honestly when no local index is available' {
+        # No NPPES bulk index in this store -> the area comparison cannot be
+        # computed without thousands of API calls, so it must be SKIPPED and
+        # said so, never estimated.
+        $noIdx = Join-Path $script:WorkDir 'no-index-store'
+        New-Item -ItemType Directory -Path $noIdx -Force | Out-Null
+        Copy-Item (Join-Path $env:RM_DATA_DIR 'hop_teaming_2022.csv') $noIdx -ErrorAction SilentlyContinue
+        Copy-Item (Join-Path $env:RM_DATA_DIR 'dataset-meta.json') $noIdx -ErrorAction SilentlyContinue
+        $saved = (Get-RmConfig).DataDir
+        try {
+            Set-RmConfig -DataDir $noIdx
+            $sa = Get-RmSourceAnalysis -Npi 9000000001 -SkipCompetitors -CentroidPath $script:SaCsv
+            @($sa.GeoMarket).Count | Should -Be 0
+            $out = Join-Path $script:WorkDir 'no-capture.html'
+            Export-RmSourceReportHtml -Analysis $sa -Path $out | Out-Null
+            $html = Get-Content $out -Raw
+            $html | Should -Not -BeLike '*data-layer="capture"*'
+            $html | Should -BeLike '*need the local NPPES index*'
+        } finally { Set-RmConfig -DataDir $saved }
+    }
+
     It 'puts a source at exactly 5.0 miles into the 5-10 band (edges are half-open)' {
         # 0.0724 deg of latitude ≈ 5.0 miles: the rounded distance lands
         # exactly on the band edge, and the contract is [min, max).

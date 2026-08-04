@@ -1,4 +1,4 @@
-# How to use the Medicare Order & Referring Tracker — plain-English guide
+﻿# How to use the Medicare Order & Referring Tracker — plain-English guide
 
 *No technical knowledge needed. Total setup time: about 10 minutes, most of it
 waiting for downloads.*
@@ -291,6 +291,17 @@ practice pinned, with a top-ZIP table — the map software is built into the
 file; only the street background needs an internet connection, and the page
 says so plainly if it can't load), and — on CareSet data — a
 referral-lag profile that separates true referral flow from co-occurring care.
+**Using the heat map:** the map has two views. **My referral volume** sizes and
+colors each ZIP by how many patients it sends *you*. **Market capture rate**
+(needs the local NPPES index, see below) is the outreach view: it sizes each ZIP
+by the total therapy volume that ZIP sends to *any* comparable provider within
+the radius, and colors it by your share — red means a real market you barely
+touch, green means you already own it. Tick **Competitor locations** to see where
+rival practices sit, and **Distance rings** for 5/10/25-mile context. Click any
+circle to see the named providers in that ZIP with their volumes — that is your
+call list. The table underneath carries the same numbers, including each ZIP's
+area volume and your capture rate.
+
 The report also includes a **competitive landscape**: every outpatient rehab
 provider within 10 miles of the practice, ranked by inbound Medicare referral
 volume, with the analyzed practice's rank and share of area volume, its top

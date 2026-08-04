@@ -2585,10 +2585,20 @@ function Get-RmSourceAnalysis {
                     Patients = 0; Sources = 0
                     Top = $(if ($d -and $d.Name) { [string]$d.Name } else { $e.SourceNpi })
                     Dist = $dist
+                    Members = (New-Object System.Collections.Generic.List[object])
                 }
             }
             $byZip[$zip].Patients += $e.BeneCount
             $byZip[$zip].Sources += 1
+            # Keep the top few actual providers per ZIP: clicking a circle
+            # should name the outreach targets, not just a count.
+            if ($byZip[$zip].Members.Count -lt 6) {
+                $byZip[$zip].Members.Add([pscustomobject]@{
+                    Name = $(if ($d -and $d.Name) { [string]$d.Name } else { "NPI $($e.SourceNpi)" })
+                    Specialty = $(if ($d) { [string]$d.Specialty } else { '' })
+                    Patients = $e.BeneCount
+                })
+            }
         } else {
             $geoUnmapped += $e.BeneCount
         }
@@ -2617,6 +2627,7 @@ function Get-RmSourceAnalysis {
             DistanceMiles = if ($null -ne $b.Dist) { $b.Dist } else { '' }
             Lat = $centroids[$z][0]; Lon = $centroids[$z][1]
             TopSource = $b.Top
+            TopProviders = @($b.Members.ToArray())
         }
     } | Sort-Object -Property @{Expression = 'SharedPatients'; Descending = $true},
                               @{Expression = 'Zip'; Descending = $false})
@@ -2703,6 +2714,7 @@ function Get-RmSourceAnalysis {
     # to a note; it never kills the main analysis.
     $landscape = $null
     $landscapeNote = $null
+    $geoMarket = @()
     if (-not $SkipCompetitors) {
         try {
             if ($pracZip -notmatch '^\d{5}$') {
@@ -2724,9 +2736,15 @@ function Get-RmSourceAnalysis {
             $others = New-Object 'System.Collections.Generic.HashSet[string]'
             foreach ($p in $peers) { if (-not $memberSet.Contains($p.NPI)) { [void]$others.Add($p.NPI) } }
             $peerAgg = @{}
+            $areaBySource = @{}   # source NPI -> patients sent to COMPETITORS
             if ($others.Count -gt 0) {
                 Write-Verbose "Scanning $($info.Label) for $($others.Count) peer providers..."
                 foreach ($e in @([RmEngine]::ScanInbound($info.Path, $others, $info.Format))) {
+                    # Market-capture layer: how much therapy volume each
+                    # source sends to the AREA (competitors), so the map can
+                    # show the practice's capture rate per source ZIP.
+                    if ($areaBySource.ContainsKey($e.SourceNpi)) { $areaBySource[$e.SourceNpi] += $e.BeneCount }
+                    else { $areaBySource[$e.SourceNpi] = $e.BeneCount }
                     if (-not $peerAgg.ContainsKey($e.TargetNpi)) {
                         $peerAgg[$e.TargetNpi] = [pscustomobject]@{ Benes = 0; Sources = 0 }
                     }
@@ -2803,6 +2821,64 @@ function Get-RmSourceAnalysis {
                 Peers               = $peersOut
                 Competitors         = @($outRows.ToArray() | Where-Object { -not $_.You } | Select-Object -First 5)
                 SecondaryOnlyExcluded = $secondaryOnly
+            }
+
+            # ---- Market-capture map layer -------------------------------
+            # For every source ZIP: total therapy volume it sends into the
+            # area vs the share this practice captures. Needs the LOCAL
+            # NPPES index (thousands of source ZIPs in one scan); without it
+            # the layer is skipped rather than firing thousands of API
+            # lookups.
+            if ((Test-Path -LiteralPath (Get-RmNppesIndexPath)) -and $areaBySource.Count -gt 0) {
+                $srcWant = New-Object 'System.Collections.Generic.HashSet[string]'
+                foreach ($k in $areaBySource.Keys) { [void]$srcWant.Add($k) }
+                foreach ($srcRow2 in $sources) { [void]$srcWant.Add([string]$srcRow2.SourceNPI) }
+                Write-Verbose "Market-capture layer: locating $($srcWant.Count) source provider(s) locally..."
+                $srcZip = @{}
+                # Sources already enriched (this practice's own, cached on
+                # disk) are authoritative and free; the index fills in the
+                # competitor-only sources. Using the index ALONE silently
+                # dropped known sources whose ZIP was already in hand.
+                $zipCache = Read-RmNppesCache
+                foreach ($k in $srcWant) {
+                    if ($zipCache.ContainsKey($k)) {
+                        $cz = [string](Get-RmProp $zipCache[$k] 'Zip')
+                        if ($cz -match '^\d{5}$') { $srcZip[$k] = $cz }
+                    }
+                }
+                foreach ($line in @([RmEngine]::ScanRosterIndex((Get-RmNppesIndexPath), $srcWant, 0))) {
+                    $ff = $line.Split('|')
+                    if ($ff.Count -lt 10) { continue }
+                    if ($srcZip.ContainsKey($ff[0])) { continue }
+                    $pz = $ff[7]
+                    if ($pz.Length -ge 5) { $srcZip[$ff[0]] = $pz.Substring(0, 5) }
+                }
+                $areaByZip = @{}
+                foreach ($kv in $areaBySource.GetEnumerator()) {
+                    $z = if ($srcZip.ContainsKey($kv.Key)) { $srcZip[$kv.Key] } else { '' }
+                    if (-not $z -or -not $centroids.ContainsKey($z)) { continue }
+                    if ($areaByZip.ContainsKey($z)) { $areaByZip[$z] += $kv.Value } else { $areaByZip[$z] = $kv.Value }
+                }
+                $mineByZip = @{}
+                foreach ($gr in $geoRows) { $mineByZip[[string]$gr.Zip] = [int]$gr.SharedPatients }
+                $allZips = New-Object 'System.Collections.Generic.HashSet[string]'
+                foreach ($z in $areaByZip.Keys) { [void]$allZips.Add($z) }
+                foreach ($z in $mineByZip.Keys) { [void]$allZips.Add($z) }
+                $marketRows = foreach ($z in $allZips) {
+                    $mineV = if ($mineByZip.ContainsKey($z)) { $mineByZip[$z] } else { 0 }
+                    $compV = if ($areaByZip.ContainsKey($z)) { $areaByZip[$z] } else { 0 }
+                    $areaV = $mineV + $compV
+                    [pscustomobject]@{
+                        Zip = $z
+                        MyPatients = $mineV
+                        AreaPatients = $areaV
+                        CapturePct = if ($areaV -gt 0) { [math]::Round(100.0 * $mineV / $areaV, 1) } else { 0 }
+                        Lat = $centroids[$z][0]; Lon = $centroids[$z][1]
+                        DistanceMiles = if ($pracLoc) { Get-RmMilesBetween $pracLoc[0] $pracLoc[1] $centroids[$z][0] $centroids[$z][1] } else { '' }
+                    }
+                }
+                $geoMarket = @($marketRows | Sort-Object -Property @{Expression = 'AreaPatients'; Descending = $true},
+                                                                  @{Expression = 'Zip'; Descending = $false})
             }
         } catch {
             $landscapeNote = "COMPETITIVE LANDSCAPE unavailable for this run: $($_.Exception.Message)"
@@ -2882,6 +2958,7 @@ function Get-RmSourceAnalysis {
         DistanceBands = @($distBands)
         WaitBands    = @($waitBands)
         Geo          = @($geoRows)          # per-ZIP roll-up for the heat map
+        GeoMarket    = @($geoMarket)        # per-ZIP area volume + capture rate
         GeoUnmappedPatients = $geoUnmapped  # volume with no locatable source ZIP
         Market       = $market              # county Medicare market (CMS enrollment); $null offline
         ServiceProfile = $svcProfile        # real billed therapy claims (CMS P&S); $null offline
@@ -3197,6 +3274,14 @@ __LEAFLET_JS_BLOCK__
             box-shadow:0 1px 5px rgba(0,0,0,.25); font-size:12px; line-height:19px; }
   .legend i { width:12px; height:12px; display:inline-block; border-radius:50%;
               margin-right:6px; vertical-align:-2px; }
+  .maptools { display:flex; flex-wrap:wrap; align-items:center; gap:8px;
+              padding:9px 16px; border-bottom:1px solid var(--line); background:#f7f9fb; }
+  .mtlabel { font-size:12px; color:var(--sub); text-transform:uppercase; letter-spacing:.4px; }
+  .mtbtn { font:inherit; font-size:12.5px; padding:4px 11px; border-radius:99px; cursor:pointer;
+           border:1px solid var(--line); background:#fff; color:#33475c; }
+  .mtbtn.active { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600; }
+  .mtchk { font-size:12.5px; color:#33475c; display:inline-flex; align-items:center; gap:5px; }
+  @media print { .maptools { display:none; } }
   .prac-pin { width:22px; height:22px; border-radius:50%; background:#c62828;
               border:3px solid #fff; box-shadow:0 1px 6px rgba(0,0,0,.45); }
   @media print { #map { height:480px; } .badge { border:1px solid var(--accent); } }
@@ -3651,53 +3736,91 @@ $lossRows
             $lfCss = '<style>' + [System.IO.File]::ReadAllText($lfCssPath) + '</style>'
             $lfJs = '<script>' + [System.IO.File]::ReadAllText($lfJsPath) + '</script>'
             $geoPts = @($geo | ForEach-Object {
+                $prov = @($_.TopProviders | ForEach-Object {
+                    [ordered]@{ n = [string]$_.Name; s = [string]$_.Specialty; p = [int]$_.Patients } })
                 [ordered]@{
                     z = $_.Zip; lat = [double]$_.Lat; lon = [double]$_.Lon
                     p = [int]$_.SharedPatients; s = [int]$_.Sources
                     city = [string]$_.City; st = [string]$_.State
                     d = [string]$_.DistanceMiles; top = [string]$_.TopSource
                     pct = [double]$_.PctOfVolume
+                    prov = @($prov)
                 }
             })
-            $geoJson = ConvertTo-Json -InputObject @($geoPts) -Compress -Depth 4
+            $geoJson = ConvertTo-Json -InputObject @($geoPts) -Compress -Depth 5
             $geoPrac = ConvertTo-Json -InputObject ([ordered]@{
                 name = [string]$a.Practice.Name; zip = [string]$a.Practice.Zip
                 city = [string]$a.Practice.City; st = [string]$a.Practice.State
                 lat = $a.Practice.Lat; lon = $a.Practice.Lon
             }) -Compress
+            # Market-capture layer + competitor pins (present only when the
+            # local NPPES index made them computable).
+            $mkt = if ($a.PSObject.Properties['GeoMarket']) { @($a.GeoMarket) } else { @() }
+            $mktJson = ConvertTo-Json -Compress -Depth 4 -InputObject @(@($mkt) | ForEach-Object {
+                [ordered]@{ z = $_.Zip; lat = [double]$_.Lat; lon = [double]$_.Lon
+                            mine = [int]$_.MyPatients; area = [int]$_.AreaPatients
+                            cap = [double]$_.CapturePct
+                            d = [string]$_.DistanceMiles }
+            })
+            $compPts = @()
+            if ($comp) {
+                $compPts = @(@($comp.Peers | Where-Object { -not $_.You -and [int]$_.SharedPatients -gt 0 }) | ForEach-Object {
+                    [ordered]@{ n = [string]$_.Name; z = [string]$_.Zip; p = [int]$_.SharedPatients
+                                city = [string]$_.City; st = [string]$_.State }
+                })
+            }
+            $compJson = ConvertTo-Json -Compress -Depth 4 -InputObject @($compPts)
             $geoMapped = 0; foreach ($gr in $geo) { $geoMapped += [int]$gr.SharedPatients }
             $geoUn = if ($a.PSObject.Properties['GeoUnmappedPatients']) { [int]$a.GeoUnmappedPatients } else { 0 }
-            $zipRowsHtml = (@($geo | Select-Object -First 10) | ForEach-Object {
-                '<tr><td class="mono">{0}</td><td>{1}</td><td>{2}</td><td class="num">{3}</td><td class="num">{4}</td><td class="num">{5}%</td><td class="num">{6}</td><td>{7}</td></tr>' -f
-                    (_h ([string]$_.Zip)), (_h ([string]$_.City)), (_h ([string]$_.State)),
+            $zipRowsHtml = (@($geo | Select-Object -First 15) | ForEach-Object {
+                $z = [string]$_.Zip
+                $mrow = @($mkt | Where-Object { $_.Zip -eq $z })
+                $capCell = if ($mrow.Count) { ('{0}%' -f $mrow[0].CapturePct) } else { '&ndash;' }
+                $areaCell = if ($mrow.Count) { '{0:N0}' -f $mrow[0].AreaPatients } else { '&ndash;' }
+                '<tr><td class="mono">{0}</td><td>{1}</td><td>{2}</td><td class="num">{3}</td><td class="num">{4}</td><td class="num">{5}%</td><td class="num">{6}</td><td class="num">{7}</td><td>{8}</td></tr>' -f
+                    (_h $z), (_h ([string]$_.City)), (_h ([string]$_.State)),
                     ('{0:N0}' -f $_.Sources), ('{0:N0}' -f $_.SharedPatients), $_.PctOfVolume,
-                    $(if ($_.DistanceMiles -is [double]) { '{0:N1}' -f $_.DistanceMiles } else { '' }),
-                    (_h ([string]$_.TopSource))
+                    $areaCell, $capCell, (_h ([string]$_.TopSource))
             }) -join "`n"
-            $zipNote = "Top $([math]::Min(10, $geo.Count)) of $('{0:N0}' -f $geo.Count) source ZIP areas; " +
+            $zipNote = "Top $([math]::Min(15, $geo.Count)) of $('{0:N0}' -f $geo.Count) source ZIP areas; " +
                 "$('{0:N0}' -f $geoMapped) of $('{0:N0}' -f $a.TotalPatients) patients mappable" +
                 $(if ($geoUn -gt 0) { " ($('{0:N0}' -f $geoUn) from sources without a locatable ZIP)" }) + '.'
+            $capNoteHtml = if (@($mkt).Count) {
+                'AREA / CAPTURE columns: total therapy volume that ZIP sends to ANY comparable provider within the radius, and this practice''s share of it. A big ZIP with a low capture rate is an outreach target.'
+            } else {
+                'Capture-rate columns need the local NPPES index (see INSTRUCTIONS: Import-RmNppesBulk) — without it the area-wide comparison is skipped rather than estimated.'
+            }
             $geoCardHtml = @"
 <div class="card">
   <h2>Referral geography &mdash; where the volume comes from</h2>
   <div id="rm-offline" class="offline">The background street map could not load (no internet connection?). The circles and the table below still work.</div>
+  <div class="maptools">
+    <span class="mtlabel">Show:</span>
+    <button type="button" class="mtbtn active" data-layer="mine">My referral volume</button>
+    $(if (@($mkt).Count) { '<button type="button" class="mtbtn" data-layer="capture">Market capture rate</button>' })
+    $(if (@($compPts).Count) { '<label class="mtchk"><input type="checkbox" id="rm-comp"/> Competitor locations</label>' })
+    <label class="mtchk"><input type="checkbox" id="rm-rings" checked/> Distance rings</label>
+  </div>
   <div id="rm-map"></div>
   <table>
-    <tr><th>ZIP</th><th>City</th><th>St</th><th class="num">Sources</th><th class="num">Patients</th><th class="num">% of vol</th><th class="num">Miles</th><th>Top source in ZIP</th></tr>
+    <tr><th>ZIP</th><th>City</th><th>St</th><th class="num">Sources</th><th class="num">My patients</th><th class="num">% of vol</th><th class="num">Area vol</th><th class="num">Capture</th><th>Top source in ZIP</th></tr>
     $zipRowsHtml
   </table>
-  <div class="tablenote">$zipNote Circle size and color show referral volume per source ZIP; the red pin is the practice. Drawing the street background needs an internet connection — everything else in this report works without one.</div>
+  <div class="tablenote">$zipNote $capNoteHtml Click any circle for the named providers in that ZIP. Drawing the street background needs an internet connection &mdash; everything else in this report works without one.</div>
 </div>
 <script>
 (function(){
   var pts = $geoJson;
   var prac = $geoPrac;
+  var mkt = $mktJson;
+  var comps = $compJson;
   if (typeof L === 'undefined') {
     document.getElementById('rm-offline').style.display = 'block';
     document.getElementById('rm-map').style.height = '0';
     return;
   }
   var maxP = 1; pts.forEach(function(p){ if (p.p > maxP) maxP = p.p; });
+  var maxA = 1; mkt.forEach(function(m){ if (m.area > maxA) maxA = m.area; });
   var center = (prac.lat !== null) ? [prac.lat, prac.lon]
              : (pts.length ? [pts[0].lat, pts[0].lon] : [39.5, -98.35]);
   var map = L.map('rm-map').setView(center, 10);
@@ -3705,25 +3828,121 @@ $lossRows
     { maxZoom: 18, attribution: '&copy; OpenStreetMap contributors' });
   tiles.on('tileerror', function(){ document.getElementById('rm-offline').style.display='block'; });
   tiles.addTo(map);
-  function color(v) {
+  function volColor(v) {
     var t = Math.sqrt(v / maxP);
     return 'rgb(' + Math.round(43 + t*172) + ',' + Math.round(131 - t*106) + ',' + Math.round(186 - t*158) + ')';
   }
+  // Capture rate: red = you capture little of a real market (opportunity),
+  // green = you already own it. Deliberately NOT the volume ramp, so the
+  // two layers can never be mistaken for each other.
+  function capColor(pct) {
+    if (pct >= 60) return '#1a7f4b';
+    if (pct >= 30) return '#7cb342';
+    if (pct >= 15) return '#f9a825';
+    if (pct >= 5)  return '#ef6c00';
+    return '#c62828';
+  }
+  function esc(x) { return String(x == null ? '' : x).replace(/[<>&]/g, function(ch){
+    return ch === '<' ? '&lt;' : ch === '>' ? '&gt;' : '&amp;'; }); }
+
+  var mineLayer = L.layerGroup(), capLayer = L.layerGroup(),
+      compLayer = L.layerGroup(), ringLayer = L.layerGroup();
+
   pts.forEach(function(p) {
+    var lines = (p.prov || []).map(function(x){
+      return '&bull; ' + esc(x.n) + (x.s ? ' <i>(' + esc(x.s) + ')</i>' : '') + ' &mdash; ' + x.p.toLocaleString(); });
     L.circleMarker([p.lat, p.lon], {
       radius: 6 + 30 * Math.sqrt(p.p / maxP), color: '#26333e', weight: 1,
-      fillColor: color(p.p), fillOpacity: 0.72
-    }).addTo(map).bindPopup('<b>ZIP ' + p.z + '</b> &mdash; ' + p.city + ', ' + p.st +
-      '<br/>' + p.p.toLocaleString() + ' patients (' + p.pct + '% of volume) from ' + p.s + ' source(s)' +
+      fillColor: volColor(p.p), fillOpacity: 0.72
+    }).addTo(mineLayer).bindPopup('<b>ZIP ' + p.z + '</b> &mdash; ' + esc(p.city) + ', ' + esc(p.st) +
+      '<br/>' + p.p.toLocaleString() + ' patients (' + p.pct + '% of your volume) from ' + p.s + ' source(s)' +
       (p.d ? '<br/>' + p.d + ' miles from the practice' : '') +
-      (p.top ? '<br/>Top source: ' + p.top : ''));
+      (lines.length ? '<br/><br/><b>Top sources here:</b><br/>' + lines.join('<br/>') : ''));
   });
+
+  mkt.forEach(function(m) {
+    var lost = m.area - m.mine;
+    L.circleMarker([m.lat, m.lon], {
+      radius: 6 + 30 * Math.sqrt(m.area / maxA), color: '#26333e', weight: 1,
+      fillColor: capColor(m.cap), fillOpacity: 0.75
+    }).addTo(capLayer).bindPopup('<b>ZIP ' + m.z + '</b>' +
+      '<br/>Area therapy volume: ' + m.area.toLocaleString() +
+      '<br/>Yours: ' + m.mine.toLocaleString() + ' (<b>' + m.cap + '%</b>)' +
+      '<br/>To other providers: ' + lost.toLocaleString() +
+      (m.d ? '<br/>' + m.d + ' miles from the practice' : ''));
+  });
+
+  comps.forEach(function(c) {
+    var pt = null;
+    for (var i = 0; i < mkt.length; i++) { if (mkt[i].z === c.z) { pt = mkt[i]; break; } }
+    if (!pt) { for (var k = 0; k < pts.length; k++) { if (pts[k].z === c.z) { pt = pts[k]; break; } } }
+    if (!pt) return;
+    L.circleMarker([pt.lat, pt.lon], { radius: 5, color: '#4a148c', weight: 2,
+      fillColor: '#ce93d8', fillOpacity: 0.9 })
+      .addTo(compLayer).bindPopup('<b>' + esc(c.n) + '</b><br/>' + esc(c.city) + ', ' + esc(c.st) +
+        '<br/>' + c.p.toLocaleString() + ' inbound patients (competitor)');
+  });
+
+  if (prac.lat !== null) {
+    [5, 10, 25].forEach(function(mi) {
+      L.circle([prac.lat, prac.lon], { radius: mi * 1609.34, fill: false,
+        color: '#5b6b7a', weight: 1, dashArray: '4 5', opacity: 0.65 }).addTo(ringLayer);
+    });
+    ringLayer.addTo(map);
+  }
+  mineLayer.addTo(map);
+
   if (prac.lat !== null) {
     L.marker([prac.lat, prac.lon], { title: prac.name,
       icon: L.divIcon({ className: 'prac-pin', iconSize: [22, 22], iconAnchor: [11, 11] }) })
-      .addTo(map).bindPopup('<b>' + prac.name + '</b><br/>' + prac.city + ', ' + prac.st + ' ' + prac.zip + '<br/>(the practice)');
+      .addTo(map).bindPopup('<b>' + esc(prac.name) + '</b><br/>' + esc(prac.city) + ', ' + esc(prac.st) + ' ' + prac.zip + '<br/>(the practice)');
   }
-  // Frame the ~90%-of-volume core market, never one distant outlier.
+
+  var legend = L.control({position:'bottomright'});
+  var mode = 'mine';
+  function legendHtml() {
+    if (mode === 'capture') {
+      return '<b>Your share of ZIP volume</b><br/>' +
+        '<i style="background:#c62828"></i>under 5% &mdash; open market<br/>' +
+        '<i style="background:#ef6c00"></i>5-15%<br/>' +
+        '<i style="background:#f9a825"></i>15-30%<br/>' +
+        '<i style="background:#7cb342"></i>30-60%<br/>' +
+        '<i style="background:#1a7f4b"></i>60%+ &mdash; you own it<br/>' +
+        'Circle size = total area volume';
+    }
+    return '<b>Patients from ZIP</b><br/>' +
+      '<i style="background:' + volColor(maxP) + '"></i>' + maxP.toLocaleString() + ' (max)<br/>' +
+      '<i style="background:' + volColor(maxP/4) + '"></i>~' + Math.round(maxP/4).toLocaleString() + '<br/>' +
+      '<i style="background:' + volColor(maxP/20) + '"></i>~' + Math.round(maxP/20).toLocaleString() + '<br/>' +
+      'Red pin = the practice';
+  }
+  legend.onAdd = function() {
+    var div = L.DomUtil.create('div', 'legend');
+    div.id = 'rm-legend';
+    div.innerHTML = legendHtml();
+    return div;
+  };
+  legend.addTo(map);
+
+  var btns = document.querySelectorAll('.mtbtn');
+  for (var b = 0; b < btns.length; b++) {
+    btns[b].addEventListener('click', function() {
+      for (var q = 0; q < btns.length; q++) { btns[q].className = 'mtbtn'; }
+      this.className = 'mtbtn active';
+      mode = this.getAttribute('data-layer');
+      if (mode === 'capture') { map.removeLayer(mineLayer); capLayer.addTo(map); }
+      else { map.removeLayer(capLayer); mineLayer.addTo(map); }
+      var el = document.getElementById('rm-legend');
+      if (el) { el.innerHTML = legendHtml(); }
+    });
+  }
+  var cchk = document.getElementById('rm-comp');
+  if (cchk) { cchk.addEventListener('change', function() {
+    if (this.checked) { compLayer.addTo(map); } else { map.removeLayer(compLayer); } }); }
+  var rchk = document.getElementById('rm-rings');
+  if (rchk) { rchk.addEventListener('change', function() {
+    if (this.checked) { ringLayer.addTo(map); } else { map.removeLayer(ringLayer); } }); }
+
   var fitPts = pts.slice().sort(function(x, y){ return y.p - x.p; });
   var tot = 0; fitPts.forEach(function(p){ tot += p.p; });
   var fit = []; var acc = 0;
@@ -3734,17 +3953,6 @@ $lossRows
   }
   if (prac.lat !== null) { fit.push(L.latLng(prac.lat, prac.lon)); }
   if (fit.length > 1) { map.fitBounds(L.latLngBounds(fit).pad(0.18)); }
-  var legend = L.control({position:'bottomright'});
-  legend.onAdd = function() {
-    var div = L.DomUtil.create('div', 'legend');
-    div.innerHTML = '<b>Patients from ZIP</b><br/>' +
-      '<i style="background:' + color(maxP) + '"></i>' + maxP.toLocaleString() + ' (max)<br/>' +
-      '<i style="background:' + color(maxP/4) + '"></i>~' + Math.round(maxP/4).toLocaleString() + '<br/>' +
-      '<i style="background:' + color(maxP/20) + '"></i>~' + Math.round(maxP/20).toLocaleString() + '<br/>' +
-      'Red pin = the practice';
-    return div;
-  };
-  legend.addTo(map);
 })();
 </script>
 "@
@@ -3901,6 +4109,14 @@ __RM_LEAFLET_JS__
             box-shadow:0 1px 5px rgba(0,0,0,.25); font-size:12px; line-height:19px; }
   .legend i { width:12px; height:12px; display:inline-block; border-radius:50%;
               margin-right:6px; vertical-align:-2px; }
+  .maptools { display:flex; flex-wrap:wrap; align-items:center; gap:8px;
+              padding:9px 16px; border-bottom:1px solid var(--line); background:#f7f9fb; }
+  .mtlabel { font-size:12px; color:var(--sub); text-transform:uppercase; letter-spacing:.4px; }
+  .mtbtn { font:inherit; font-size:12.5px; padding:4px 11px; border-radius:99px; cursor:pointer;
+           border:1px solid var(--line); background:#fff; color:#33475c; }
+  .mtbtn.active { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600; }
+  .mtchk { font-size:12.5px; color:#33475c; display:inline-flex; align-items:center; gap:5px; }
+  @media print { .maptools { display:none; } }
   td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
   td.mono { font-variant-numeric:tabular-nums; }
   .tablenote { padding:8px 18px 10px; color:var(--sub); font-size:12px; }
