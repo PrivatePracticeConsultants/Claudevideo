@@ -285,7 +285,11 @@ email to a client: key metrics up top (total patients, source count, top-source
 and top-5 dependence, and an HHI concentration score that flags when a practice
 is dangerously dependent on a few relationships), auto-written findings, a
 top-sources chart, the specialty mix of the referral base, a concentration
-curve, volume by distance from the practice, and — on CareSet data — a
+curve, volume by distance from the practice, an embedded **referral-geography
+heat map** (one circle per source ZIP, sized and colored by volume, your
+practice pinned, with a top-ZIP table — the map software is built into the
+file; only the street background needs an internet connection, and the page
+says so plainly if it can't load), and — on CareSet data — a
 referral-lag profile that separates true referral flow from co-occurring care.
 The report also includes a **competitive landscape**: every outpatient rehab
 provider within 10 miles of the practice, ranked by inbound Medicare referral

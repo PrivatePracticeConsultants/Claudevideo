@@ -2105,7 +2105,8 @@ $ui.LkSaveReportButton.Add_Click({
             $extra = ' + by-year CSV + movers CSV'
         }
         Set-Status "Report saved: $($r.Path) + full source CSV$extra + methodology."
-        if (Confirm-Box "Report saved.`n`nOpen it in your browser now? (It is fully self-contained - charts and all.)") {
+        if (Confirm-Box ("Report saved.`n`nOpen it in your browser now? (Charts, map, and data are all built in - " +
+                "only the map's street background needs an internet connection.)")) {
             try { Start-Process $r.Path } catch { Show-ErrorBox "Could not open the browser: $($_.Exception.Message)" }
         }
     } catch {

@@ -1172,6 +1172,56 @@ Describe 'Source analysis report' {
         }
     }
 
+    It 'rolls sources up by ZIP for the embedded heat map (no extra scan)' {
+        $sa = Get-RmSourceAnalysis -Npi 9000000001 -SkipCompetitors -CentroidPath $script:SaCsv
+        $geo = @($sa.Geo)
+        $geo.Count | Should -Be 2
+        $geo[0].Zip | Should -Be '99999'                 # 45 patients beats 20
+        $geo[0].SharedPatients | Should -Be 45
+        $geo[0].Sources | Should -Be 1
+        $geo[0].PctOfVolume | Should -Be 69.2
+        $geo[0].TopSource | Should -Be 'DAVID DOCTOR'
+        $geo[0].Lat | Should -Be 40.0                    # fixture centroid
+        $geo[1].Zip | Should -Be '86442'
+        $geo[1].SharedPatients | Should -Be 20
+        $sa.GeoUnmappedPatients | Should -Be 0
+        $sa.Practice.Lat | Should -Be 40.0               # the practice pin
+    }
+
+    It 'merges member NPIs into the same ZIP roll-up and counts unlocatable volume' {
+        # 8000000003 has no NPPES record -> its 11 patients are unmappable.
+        $sa = Get-RmSourceAnalysis -Npi @('9000000001', '9000000002') -SkipCompetitors -CentroidPath $script:SaCsv
+        $geo = @($sa.Geo)
+        @($geo | Where-Object Zip -eq '99999')[0].SharedPatients | Should -Be 57   # merged 45+12
+        $sa.GeoUnmappedPatients | Should -Be 11
+        $mapped = 0; foreach ($g in $geo) { $mapped += $g.SharedPatients }
+        ($mapped + $sa.GeoUnmappedPatients) | Should -Be $sa.TotalPatients         # every patient accounted for
+    }
+
+    It 'embeds the heat map in the report with the bundled library and offline guard' {
+        $sa = Get-RmSourceAnalysis -Npi 9000000001 -SkipCompetitors -CentroidPath $script:SaCsv
+        $out = Join-Path $script:WorkDir 'geo-report.html'
+        Export-RmSourceReportHtml -Analysis $sa -Path $out | Out-Null
+        $html = Get-Content $out -Raw
+        $html | Should -BeLike '*Referral geography*'
+        $html | Should -BeLike '*id="rm-map"*'
+        $html | Should -BeLike '*typeof L === ''undefined''*'      # offline guard
+        $html | Should -BeLike '*"z":"99999"*'                     # circle data embedded
+        $html | Should -BeLike '*prac-pin*'
+        $html | Should -Not -BeLike '*__RM_LEAFLET*'               # placeholders resolved
+        $html | Should -Not -BeLike '*<script src*'                # library inlined, not fetched
+        $html | Should -Not -BeLike '*unpkg*'
+        $html.Length | Should -BeGreaterThan 150000                # the bundle is actually inside
+        # zero-volume report: no map section, no library payload
+        $sk = Get-RmSourceAnalysis -Npi 8000000002 -SkipCompetitors -CentroidPath $script:SaCsv
+        $out2 = Join-Path $script:WorkDir 'geo-empty-report.html'
+        Export-RmSourceReportHtml -Analysis $sk -Path $out2 | Out-Null
+        $html2 = Get-Content $out2 -Raw
+        $html2 | Should -Not -BeLike '*id="rm-map"*'
+        $html2 | Should -Not -BeLike '*__RM_LEAFLET*'
+        $html2.Length | Should -BeLessThan 150000
+    }
+
     It 'puts a source at exactly 5.0 miles into the 5-10 band (edges are half-open)' {
         # 0.0724 deg of latitude ≈ 5.0 miles: the rounded distance lands
         # exactly on the band edge, and the contract is [min, max).

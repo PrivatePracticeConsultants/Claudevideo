@@ -2335,9 +2335,14 @@ function Get-RmSourceAnalysis {
     }
     $detail = if ($srcNpis.Count -gt 0) { Get-RmProviderDetail -Npi $srcNpis -RequireZip } else { @{} }
 
-    # Per-source ranked rows with share, cumulative share, and distance.
+    # Per-source ranked rows with share, cumulative share, and distance —
+    # and, in the same pass, the per-ZIP geography roll-up the report's
+    # embedded heat map draws (no extra scan; edges are volume-sorted, so
+    # the first source seen in a ZIP is that ZIP's top source).
     $rank = 0; $cum = 0.0
     $srcRows = New-Object System.Collections.Generic.List[object]
+    $byZip = @{}
+    $geoUnmapped = 0
     foreach ($e in $edges) {
         $rank++
         $cum += $e.BeneCount
@@ -2346,6 +2351,21 @@ function Get-RmSourceAnalysis {
         $dist = if ($zip -and $pracLoc -and $centroids.ContainsKey($zip)) {
             Get-RmMilesBetween $pracLoc[0] $pracLoc[1] $centroids[$zip][0] $centroids[$zip][1]
         } else { $null }
+        if ($zip -and $centroids.ContainsKey($zip)) {
+            if (-not $byZip.ContainsKey($zip)) {
+                $byZip[$zip] = [pscustomobject]@{
+                    City = $(if ($d) { [string]$d.City } else { '' })
+                    State = $(if ($d) { [string]$d.State } else { '' })
+                    Patients = 0; Sources = 0
+                    Top = $(if ($d -and $d.Name) { [string]$d.Name } else { $e.SourceNpi })
+                    Dist = $dist
+                }
+            }
+            $byZip[$zip].Patients += $e.BeneCount
+            $byZip[$zip].Sources += 1
+        } else {
+            $geoUnmapped += $e.BeneCount
+        }
         $row = [ordered]@{
             Rank            = $rank
             SourceNPI       = $e.SourceNpi
@@ -2362,6 +2382,18 @@ function Get-RmSourceAnalysis {
         $srcRows.Add([pscustomobject]$row)
     }
     $sources = $srcRows.ToArray()
+    $geoRows = @($byZip.GetEnumerator() | ForEach-Object {
+        $z = $_.Key; $b = $_.Value
+        [pscustomobject]@{
+            Zip = $z; City = $b.City; State = $b.State
+            Sources = $b.Sources; SharedPatients = $b.Patients
+            PctOfVolume = if ($total -gt 0) { [math]::Round(100.0 * $b.Patients / $total, 1) } else { 0 }
+            DistanceMiles = if ($null -ne $b.Dist) { $b.Dist } else { '' }
+            Lat = $centroids[$z][0]; Lon = $centroids[$z][1]
+            TopSource = $b.Top
+        }
+    } | Sort-Object -Property @{Expression = 'SharedPatients'; Descending = $true},
+                              @{Expression = 'Zip'; Descending = $false})
 
     # Concentration metrics. HHI on shares (0-10,000): sum of squared
     # percentage shares — the antitrust-style concentration index.
@@ -2563,6 +2595,8 @@ function Get-RmSourceAnalysis {
             Name = $pracName; Zip = $pracZip
             City = if ($loc.Count) { [string](Get-RmProp $loc[0] 'city') } else { '' }
             State = if ($loc.Count) { [string](Get-RmProp $loc[0] 'state') } else { '' }
+            Lat = if ($pracLoc) { $pracLoc[0] } else { $null }
+            Lon = if ($pracLoc) { $pracLoc[1] } else { $null }
         }
         Year         = $info.Year
         Label        = $info.Label
@@ -2578,6 +2612,8 @@ function Get-RmSourceAnalysis {
         SpecialtyMix = @($mix)
         DistanceBands = @($distBands)
         WaitBands    = @($waitBands)
+        Geo          = @($geoRows)          # per-ZIP roll-up for the heat map
+        GeoUnmappedPatients = $geoUnmapped  # volume with no locatable source ZIP
         Competitive  = $landscape     # $null when skipped or the sweep failed
         Trend        = $null          # filled by Add-RmSourceTrend
         Notes        = @($notes)
@@ -3024,8 +3060,10 @@ function Export-RmSourceReportHtml {
       Renders a Get-RmSourceAnalysis result as a self-contained, print-ready
       HTML report: KPI cards, top-source bar chart, specialty donut,
       concentration (Pareto) curve, distance and referral-lag profiles, the
-      ranked source table, auto-written findings, and full methodology.
-      Pure inline SVG/CSS — no external resources at all.
+      ranked source table, auto-written findings, full methodology, and an
+      embedded referral-geography heat map (bundled Leaflet, inlined).
+      Everything works offline except the map's street background tiles;
+      the page says so plainly when they cannot load.
     #>
     [CmdletBinding()]
     param(
@@ -3324,6 +3362,113 @@ $lossRows
 "@
     }
 
+    # ---- Referral geography heat map (bundled Leaflet, inlined) ----------
+    # Same embedding rules as the standalone map: the library is inserted by
+    # LITERAL replacement after the here-string expands (147 KB of minified
+    # JS must never pass through string interpolation), and a typeof-L guard
+    # explains an offline background instead of showing a broken white box.
+    # Unlike the standalone map there is NO CDN fallback — this report's
+    # contract is fully-self-contained, so a missing bundle skips the map.
+    $geo = if ($a.PSObject.Properties['Geo']) { @($a.Geo) } else { @() }
+    $geoCardHtml = ''
+    $lfCss = ''; $lfJs = ''
+    if ($hasVolume -and $geo.Count -gt 0) {
+        $lfDir = Join-Path $PSScriptRoot 'leaflet'
+        $lfJsPath = Join-Path $lfDir 'leaflet.min.js'
+        $lfCssPath = Join-Path $lfDir 'leaflet.css'
+        if ((Test-Path -LiteralPath $lfJsPath) -and (Test-Path -LiteralPath $lfCssPath)) {
+            $lfCss = '<style>' + [System.IO.File]::ReadAllText($lfCssPath) + '</style>'
+            $lfJs = '<script>' + [System.IO.File]::ReadAllText($lfJsPath) + '</script>'
+            $geoPts = @($geo | ForEach-Object {
+                [ordered]@{
+                    z = $_.Zip; lat = [double]$_.Lat; lon = [double]$_.Lon
+                    p = [int]$_.SharedPatients; s = [int]$_.Sources
+                    city = [string]$_.City; st = [string]$_.State
+                    d = [string]$_.DistanceMiles; top = [string]$_.TopSource
+                    pct = [double]$_.PctOfVolume
+                }
+            })
+            $geoJson = ConvertTo-Json -InputObject @($geoPts) -Compress -Depth 4
+            $geoPrac = ConvertTo-Json -InputObject ([ordered]@{
+                name = [string]$a.Practice.Name; zip = [string]$a.Practice.Zip
+                city = [string]$a.Practice.City; st = [string]$a.Practice.State
+                lat = $a.Practice.Lat; lon = $a.Practice.Lon
+            }) -Compress
+            $geoMapped = 0; foreach ($gr in $geo) { $geoMapped += [int]$gr.SharedPatients }
+            $geoUn = if ($a.PSObject.Properties['GeoUnmappedPatients']) { [int]$a.GeoUnmappedPatients } else { 0 }
+            $zipRowsHtml = (@($geo | Select-Object -First 10) | ForEach-Object {
+                '<tr><td class="mono">{0}</td><td>{1}</td><td>{2}</td><td class="num">{3}</td><td class="num">{4}</td><td class="num">{5}%</td><td class="num">{6}</td><td>{7}</td></tr>' -f
+                    (_h ([string]$_.Zip)), (_h ([string]$_.City)), (_h ([string]$_.State)),
+                    ('{0:N0}' -f $_.Sources), ('{0:N0}' -f $_.SharedPatients), $_.PctOfVolume,
+                    $(if ($_.DistanceMiles -is [double]) { '{0:N1}' -f $_.DistanceMiles } else { '' }),
+                    (_h ([string]$_.TopSource))
+            }) -join "`n"
+            $zipNote = "Top $([math]::Min(10, $geo.Count)) of $('{0:N0}' -f $geo.Count) source ZIP areas; " +
+                "$('{0:N0}' -f $geoMapped) of $('{0:N0}' -f $a.TotalPatients) patients mappable" +
+                $(if ($geoUn -gt 0) { " ($('{0:N0}' -f $geoUn) from sources without a locatable ZIP)" }) + '.'
+            $geoCardHtml = @"
+<div class="card">
+  <h2>Referral geography &mdash; where the volume comes from</h2>
+  <div id="rm-offline" class="offline">The background street map could not load (no internet connection?). The circles and the table below still work.</div>
+  <div id="rm-map"></div>
+  <table>
+    <tr><th>ZIP</th><th>City</th><th>St</th><th class="num">Sources</th><th class="num">Patients</th><th class="num">% of vol</th><th class="num">Miles</th><th>Top source in ZIP</th></tr>
+    $zipRowsHtml
+  </table>
+  <div class="tablenote">$zipNote Circle size and color show referral volume per source ZIP; the red pin is the practice. Drawing the street background needs an internet connection — everything else in this report works without one.</div>
+</div>
+<script>
+(function(){
+  var pts = $geoJson;
+  var prac = $geoPrac;
+  if (typeof L === 'undefined') {
+    document.getElementById('rm-offline').style.display = 'block';
+    document.getElementById('rm-map').style.height = '0';
+    return;
+  }
+  var maxP = 1; pts.forEach(function(p){ if (p.p > maxP) maxP = p.p; });
+  var center = (prac.lat !== null) ? [prac.lat, prac.lon]
+             : (pts.length ? [pts[0].lat, pts[0].lon] : [39.5, -98.35]);
+  var map = L.map('rm-map').setView(center, 10);
+  var tiles = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+    { maxZoom: 18, attribution: '&copy; OpenStreetMap contributors' });
+  tiles.on('tileerror', function(){ document.getElementById('rm-offline').style.display='block'; });
+  tiles.addTo(map);
+  function color(v) {
+    var t = Math.sqrt(v / maxP);
+    return 'rgb(' + Math.round(43 + t*172) + ',' + Math.round(131 - t*106) + ',' + Math.round(186 - t*158) + ')';
+  }
+  pts.forEach(function(p) {
+    L.circleMarker([p.lat, p.lon], {
+      radius: 6 + 30 * Math.sqrt(p.p / maxP), color: '#26333e', weight: 1,
+      fillColor: color(p.p), fillOpacity: 0.72
+    }).addTo(map).bindPopup('<b>ZIP ' + p.z + '</b> &mdash; ' + p.city + ', ' + p.st +
+      '<br/>' + p.p.toLocaleString() + ' patients (' + p.pct + '% of volume) from ' + p.s + ' source(s)' +
+      (p.d ? '<br/>' + p.d + ' miles from the practice' : '') +
+      (p.top ? '<br/>Top source: ' + p.top : ''));
+  });
+  if (prac.lat !== null) {
+    L.marker([prac.lat, prac.lon], { title: prac.name,
+      icon: L.divIcon({ className: 'prac-pin', iconSize: [22, 22], iconAnchor: [11, 11] }) })
+      .addTo(map).bindPopup('<b>' + prac.name + '</b><br/>' + prac.city + ', ' + prac.st + ' ' + prac.zip + '<br/>(the practice)');
+  }
+  // Frame the ~90%-of-volume core market, never one distant outlier.
+  var fitPts = pts.slice().sort(function(x, y){ return y.p - x.p; });
+  var tot = 0; fitPts.forEach(function(p){ tot += p.p; });
+  var fit = []; var acc = 0;
+  for (var i = 0; i < fitPts.length; i++) {
+    fit.push(L.latLng(fitPts[i].lat, fitPts[i].lon));
+    acc += fitPts[i].p;
+    if (acc >= tot * 0.9) break;
+  }
+  if (prac.lat !== null) { fit.push(L.latLng(prac.lat, prac.lon)); }
+  if (fit.length > 1) { map.fitBounds(L.latLngBounds(fit).pad(0.18)); }
+})();
+</script>
+"@
+        }
+    }
+
     # ---- Auto-written findings ------------------------------------------
     $s1 = if (@($a.Sources).Count) { @($a.Sources)[0] } else { $null }   # @()[0] throws under StrictMode
     # From band VOLUMES rounded once, not a sum of the bands' rounded
@@ -3394,6 +3539,8 @@ $lossRows
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>Referral Source Analysis — $(_h $a.Practice.Name)</title>
+__RM_LEAFLET_CSS__
+__RM_LEAFLET_JS__
 <style>
   :root { --ink:#1c2b3a; --sub:#5b6b7a; --line:#dde3e9; --accent:#2c5f8a; }
   * { box-sizing:border-box; }
@@ -3446,6 +3593,11 @@ $lossRows
   .youtag { background:var(--accent); color:#fff; font-size:9.5px; font-weight:700;
             padding:1px 6px; border-radius:99px; vertical-align:1px; letter-spacing:.5px; }
   .barmuted { fill:#9db4c6; }
+  #rm-map { height:52vh; min-height:380px; }
+  .offline { padding:9px 14px; background:#fff6da; color:#6b5619; font-size:12.5px;
+             border-bottom:1px solid #eadfb6; display:none; }
+  .prac-pin { width:22px; height:22px; border-radius:50%; background:#c62828;
+              border:3px solid #fff; box-shadow:0 1px 6px rgba(0,0,0,.45); }
   td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
   td.mono { font-variant-numeric:tabular-nums; }
   .tablenote { padding:8px 18px 10px; color:var(--sub); font-size:12px; }
@@ -3485,6 +3637,7 @@ $(if ($hasVolume) { @"
   <div class="card"><h2>Volume by distance from the practice</h2><div class="body">$distSvg</div></div>
   $(if ($waitSvg) { '<div class="card"><h2>Volume by referral lag (days from source visit)</h2><div class="body">' + $waitSvg + '</div></div>' })
 </div>
+$geoCardHtml
 "@ } else { @"
 <div class="card"><h2>No measured referral volume for this practice</h2><div class="body">
 <p class="empty">The $($a.Year) file records <b>no inbound shared-patient pairs</b> for this NPI, so there is nothing to chart:
@@ -3525,6 +3678,8 @@ $(if ($hasVolume) { @"
 </body>
 </html>
 "@
+    # LITERAL replacement — the Leaflet bundle must never be interpolated.
+    $html = $html.Replace('__RM_LEAFLET_CSS__', $lfCss).Replace('__RM_LEAFLET_JS__', $lfJs)
     $dir = Split-Path -Parent $Path
     if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
     $enc = New-Object System.Text.UTF8Encoding($true)
