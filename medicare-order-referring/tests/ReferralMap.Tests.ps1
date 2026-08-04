@@ -1021,6 +1021,41 @@ Describe 'Local rosters (NPPES bulk index + Care Compare groups)' {
         Import-RmNppesBulk -Path $script:NppesCsv | Out-Null
     }
 
+    It 'excludes secondary-taxonomy-only providers from the RANKING, not discovery' {
+        # A hospital listing therapy in a spare slot is a real provider but
+        # not a comparable therapy practice: live, one such hospital showed
+        # 319,024 inbound patients (all service lines) and took "#1 therapy
+        # provider", halving the analyzed practice's apparent share.
+        $hosp = Join-Path $script:WorkDir 'npi-hospital.csv'
+        $hdr = '"NPI","Entity Type Code","Provider Organization Name (Legal Business Name)","Provider Last Name (Legal Name)","Provider First Name","Provider Business Practice Location Address City Name","Provider Business Practice Location Address State Name","Provider Business Practice Location Address Postal Code","Healthcare Provider Taxonomy Code_1","Provider Enumeration Date",' +
+            ((2..15 | ForEach-Object { '"Healthcare Provider Taxonomy Code_' + $_ + '"' }) -join ',')
+        Set-Content -Path $hosp -Encoding utf8 -Value @(
+            $hdr
+            # primary = therapy clinic -> comparable, ranked
+            '"9000000001","2","TEST REHAB CLINIC LLC","","","TESTVILLE","MO","999991234","261QP2000X","06/15/2008",' + (',' * 13)
+            # primary = acute care hospital, therapy only in a spare slot
+            '"9000000009","2","BIG GENERAL HOSPITAL","","","TESTVILLE","MO","999990000","282N00000X","01/01/2000",' + (',' * 12) + '"261QP2000X"'
+        )
+        Import-RmNppesBulk -Path $hosp | Out-Null
+        try {
+            # DISCOVERY still finds both...
+            $all = @(Find-RmClinic -Zip 99999)
+            @($all | ForEach-Object NPI) | Sort-Object | Should -Be @('9000000001', '9000000009')
+            @($all | Where-Object NPI -eq '9000000009')[0].PrimaryInScope | Should -BeFalse
+            @($all | Where-Object NPI -eq '9000000001')[0].PrimaryInScope | Should -BeTrue
+            # ...but the RANKING counts only comparable therapy practices
+            $xw = Join-Path $script:WorkDir 'xw-h.csv'
+            Set-Content -Path $xw -Encoding ascii -Value @('zip,fips', '99999,99001')
+            $cent = Join-Path $script:WorkDir 'cent-h.csv'
+            Set-Content -Path $cent -Encoding ascii -Value @('zip,lat,lon', '99999,40.0000,-90.0000')
+            $sa = Get-RmSourceAnalysis -Npi 9000000001 -CentroidPath $cent -CrosswalkPath $xw
+            $sa.Competitive | Should -Not -BeNullOrEmpty   # the sweep must actually have run
+            @($sa.Competitive.Peers | Where-Object NPI -eq '9000000009').Count | Should -Be 0
+            $sa.Competitive.SecondaryOnlyExcluded | Should -Be 1
+            (@($sa.Notes) -join ' ') | Should -BeLike '*COMPARABILITY*secondary*'
+        } finally { Import-RmNppesBulk -Path $script:NppesCsv | Out-Null }
+    }
+
     It 'fails LOUDLY if a future file layout drops a column' {
         $wrong = Join-Path $script:WorkDir 'wrong-columns.csv'
         Set-Content -Path $wrong -Encoding ascii -Value @('a,b,c', '1,2,3')

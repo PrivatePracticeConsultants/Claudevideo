@@ -1051,13 +1051,13 @@ function Find-RmClinic {
             # ANY taxonomy slot may carry the in-scope code (primary at 8,
             # secondaries from 10 on) — matching only the primary silently
             # dropped real therapy providers.
-            $label = $null; $matchedCode = ''
+            $label = $null; $matchedCode = ''; $primaryInScope = $false
             foreach ($ti in @(8) + @(10..($f.Count - 1))) {
                 if ($ti -ge $f.Count) { break }
                 $code = $f[$ti]
                 if (-not $code) { continue }
                 $label = & $resolveTax $code ''
-                if ($label) { $matchedCode = $code; break }
+                if ($label) { $matchedCode = $code; $primaryInScope = ($ti -eq 8); break }
             }
             if (-not $label) { continue }
             $isOrg = $f[1] -eq '2'
@@ -1068,6 +1068,11 @@ function Find-RmClinic {
                 Taxonomy = Get-RmTaxonomyName $matchedCode
                 City = $f[5]; State = $f[6]; Zip = $z5
                 Enumerated = if ($f[9] -match '^(\d{2})/(\d{2})/(\d{4})$') { "$($Matches[3])-$($Matches[1])-$($Matches[2])" } else { $f[9] }
+                # TRUE when therapy is the provider's PRIMARY taxonomy. A
+                # hospital that merely lists a therapy taxonomy in a spare
+                # slot is a real provider but NOT a comparable therapy
+                # practice — its inbound volume spans every service line.
+                PrimaryInScope = $primaryInScope
             }
         }
         Write-Verbose "Bulk sweep found $($found2.Count) provider(s)."
@@ -1107,10 +1112,10 @@ function Find-RmClinic {
                 # "Physical Therapy" also returns PT Assistants, and
                 # "Rehabilitation" returns physiatrists; both are excluded).
                 $taxes = @(Get-RmProp $r 'taxonomies')
-                $taxLabel = $null
+                $taxLabel = $null; $primaryInScope = $false
                 foreach ($tx in $taxes) {
                     $taxLabel = & $resolveTax ([string](Get-RmProp $tx 'code')) ([string](Get-RmProp $tx 'desc'))
-                    if ($taxLabel) { break }
+                    if ($taxLabel) { $primaryInScope = ((Get-RmProp $tx 'primary') -eq $true); break }
                 }
                 if (-not $taxLabel) { continue }
 
@@ -1139,6 +1144,7 @@ function Find-RmClinic {
                     State      = [string](Get-RmProp $loc[0] 'state')
                     Zip        = $postal.Substring(0, [Math]::Min(5, $postal.Length))
                     Enumerated = [string](Get-RmProp $basic 'enumeration_date')
+                    PrimaryInScope = $primaryInScope
                 }
             }
             if ($results.Count -lt 200) { break }
@@ -2688,7 +2694,17 @@ function Get-RmSourceAnalysis {
             }
             $rzips = @(Get-RmZipsInRadius -Zip $pracZip -RadiusMiles $CompetitorRadiusMiles -CentroidPath $CentroidPath)
             Write-Verbose "Competitive sweep: $($rzips.Count) ZIP(s) within $CompetitorRadiusMiles mi of $pracZip..."
-            $peers = @(Find-RmClinic -ZipList $rzips)
+            $peersAll = @(Find-RmClinic -ZipList $rzips)
+            # Rank only COMPARABLE therapy practices: a provider whose
+            # PRIMARY taxonomy is in scope. Hospitals and multi-specialty
+            # organizations that merely list a therapy taxonomy in a spare
+            # slot are real, but their inbound volume covers every service
+            # line — including one live put a 319,024-patient hospital at
+            # "#1 therapy provider" and halved this practice's apparent
+            # share. They are counted and disclosed, not ranked.
+            $peers = @($peersAll | Where-Object {
+                $null -eq $_.PSObject.Properties['PrimaryInScope'] -or $_.PrimaryInScope })
+            $secondaryOnly = @($peersAll).Count - @($peers).Count
             $others = New-Object 'System.Collections.Generic.HashSet[string]'
             foreach ($p in $peers) { if (-not $memberSet.Contains($p.NPI)) { [void]$others.Add($p.NPI) } }
             $peerAgg = @{}
@@ -2770,6 +2786,7 @@ function Get-RmSourceAnalysis {
                 SharePct            = if ($regionTotal -gt 0) { [math]::Round(100.0 * $total / $regionTotal, 1) } else { 0 }
                 Peers               = $peersOut
                 Competitors         = @($outRows.ToArray() | Where-Object { -not $_.You } | Select-Object -First 5)
+                SecondaryOnlyExcluded = $secondaryOnly
             }
         } catch {
             $landscapeNote = "COMPETITIVE LANDSCAPE unavailable for this run: $($_.Exception.Message)"
@@ -2809,6 +2826,7 @@ function Get-RmSourceAnalysis {
         $(if ($isHop) { 'REFERRAL-LAG PROFILE: average days from source visit to this practice''s visit, volume-weighted. Short lags look like referrals; 90+ days usually means co-occurring care (labs, hospitals), not referral flow.' })
         $(if ($landscape) { "COMPETITIVE LANDSCAPE: peers are the NPPES-listed outpatient rehab providers (the same PT/OT/SLP taxonomy sweep the Referral map uses) whose practice location falls in the $($landscape.ZipCount) ZIP(s) within $($landscape.RadiusMiles) straight-line miles of ZIP $pracZip, ranked by inbound shared-patient volume on $($info.Label). Share of area volume = a provider's inbound volume over the SUM across all listed providers — share of measured referral VOLUME, not of patients." })
         $(if ($landscape) { 'A practice''s volume is often SPLIT between its organization NPI and its therapists'' individual NPIs, so a group can rank below its true combined volume. Benchmark the org NPI and its key therapists separately for the full picture.' })
+        $(if ($landscape -and $landscape.SecondaryOnlyExcluded -gt 0) { "COMPARABILITY: $($landscape.SecondaryOnlyExcluded) provider(s) in the radius list a therapy taxonomy only in a SECONDARY slot — typically hospitals and multi-specialty organizations. They are excluded from the ranking because their inbound volume spans every service line, not therapy, and including them would overstate the market and understate this practice's share." })
         $(if ($landscapeNote) { $landscapeNote })
         $(if ($market) { "MARKET CONTEXT: county Medicare enrollment from CMS's Medicare Monthly Enrollment dataset (calendar $($market.Year), latest full year). Original Medicare (FFS) beneficiaries are the population this file can see; Medicare Advantage members ($($market.MaPct)% of $($market.County)) are invisible to it." })
         $(if ($svcProfile) { 'BILLED-SERVICES PROFILE: actual Medicare Part B claims from CMS''s Physician & Other Practitioners dataset (latest annual release; therapy = HCPCS 97xxx/92xxx). CAUTION: this dataset suppresses provider-procedure lines under 11 beneficiaries, so small caseloads are invisible here too, and services bill under the RENDERING NPI — organizations that bill through their therapists'' individual NPIs legitimately show no claims here. Distinct-patient counts are a FLOOR (patients overlap across procedure codes).' })
