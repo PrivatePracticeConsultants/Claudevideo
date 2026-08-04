@@ -994,6 +994,52 @@ Describe 'Local rosters (NPPES bulk index + Care Compare groups)' {
         @($r.Files).Count | Should -Be 3
     }
 
+    It 'survives the shapes real government CSVs actually contain' {
+        # Embedded commas/quotes/pipes, a truncated row, a short ZIP, and
+        # therapy only in the LAST taxonomy slot — all seen in live files.
+        $hostile = Join-Path $script:WorkDir 'npi-hostile.csv'
+        $hdr = '"NPI","Entity Type Code","Provider Organization Name (Legal Business Name)","Provider Last Name (Legal Name)","Provider First Name","Provider Business Practice Location Address City Name","Provider Business Practice Location Address State Name","Provider Business Practice Location Address Postal Code","Healthcare Provider Taxonomy Code_1","Provider Enumeration Date",' +
+            ((2..15 | ForEach-Object { '"Healthcare Provider Taxonomy Code_' + $_ + '"' }) -join ',')
+        Set-Content -Path $hostile -Encoding utf8 -Value @(
+            $hdr
+            '"1000000001","2","SMITH, JONES & CO. ""THE REHAB PLACE""","","","ST. LOUIS","MO","631010000","261QP2000X","01/01/2010",' + (',' * 13)
+            '"1000000002","2","PIPE|RISK REHAB","","","ROLLA","MO","654010000","261QP2000X","01/01/2010",' + (',' * 13)
+            '"1000000003","1","","NOZIP","NELL","ROLLA","MO","654","","",' + (',' * 13)
+            '"1000000004","1","","SHORT","SAM","ROLLA","MO"'
+            '"1000000005","1","","LASTSLOT","LEE","ROLLA","MO","654010000","207Q00000X","05/05/2020",' + (',' * 12) + '"235Z00000X"'
+        )
+        (Import-RmNppesBulk -Path $hostile).Rows | Should -Be 5
+        @(@(Find-RmClinic -Zip 63101) | Where-Object NPI -eq '1000000001')[0].Name |
+            Should -Be 'SMITH, JONES & CO. "THE REHAB PLACE"'
+        $rolla = @(Find-RmClinic -Zip 65401)
+        # a literal pipe (the index delimiter) must not split the row
+        @($rolla | Where-Object NPI -eq '1000000002')[0].Name | Should -Be 'PIPE/RISK REHAB'
+        @($rolla | Where-Object NPI -eq '1000000005').Count | Should -Be 1   # last taxonomy slot
+        @($rolla | Where-Object NPI -eq '1000000003').Count | Should -Be 0   # short ZIP, no taxonomy
+        @($rolla | Where-Object NPI -eq '1000000004').Count | Should -Be 0   # truncated row
+        # restore the roster the other tests in this Describe rely on
+        Import-RmNppesBulk -Path $script:NppesCsv | Out-Null
+    }
+
+    It 'fails LOUDLY if a future file layout drops a column' {
+        $wrong = Join-Path $script:WorkDir 'wrong-columns.csv'
+        Set-Content -Path $wrong -Encoding ascii -Value @('a,b,c', '1,2,3')
+        { Import-RmNppesBulk -Path $wrong } | Should -Throw '*column not found*'
+        { Import-RmCareCompare -Path $wrong } | Should -Throw '*column not found*'
+        { Import-RmEnrollment -Path $wrong } | Should -Throw '*column not found*'
+    }
+
+    It 'a corrupt or missing index degrades quietly instead of crashing' {
+        $dac = Join-Path $env:RM_DATA_DIR 'care-compare-index.psv'
+        $savedDac = if (Test-Path $dac) { Get-Content $dac -Raw } else { $null }
+        try {
+            Set-Content -Path $dac -Value "garbage`nnot|a|real|row" -Encoding ascii
+            @(Get-RmAffiliatedNpi -Npi 7700000002) | Should -BeNullOrEmpty
+            Remove-Item $dac -Force
+            @(Get-RmAffiliatedNpi -Npi 7700000002) | Should -BeNullOrEmpty
+        } finally { if ($savedDac) { Set-Content -Path $dac -Value $savedDac -NoNewline -Encoding utf8 } }
+    }
+
     It 'the analysis note lists affiliated NPIs not yet combined' {
         # 9000000001 is not in the DAC fixture: no note, no error. Then a
         # fixture where the analyzed NPI has group-mates.
