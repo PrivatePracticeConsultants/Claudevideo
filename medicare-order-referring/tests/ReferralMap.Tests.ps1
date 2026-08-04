@@ -1137,6 +1137,130 @@ Describe 'Source analysis report' {
         (Get-Content $out2 -Raw) | Should -Not -BeLike '*Year-over-year performance*'
     }
 
+    It 'handles a practice with no volume in its early years (newer practice)' {
+        # 9000000005 (NEW GRAD) has no pairs in 2021/2022; a synthetic 2023
+        # gives it its first volume. Leading zero years must be called out,
+        # and growth reported from the first ACTIVE year rather than from a
+        # zero base (which would otherwise be an undefined percentage).
+        $src = Join-Path $script:WorkDir 'DocGraph_Hop_Teaming_2023.csv'
+        Set-Content -Path $src -Encoding ascii -NoNewline -Value (@(
+            'from_npi,to_npi,patient_count,transaction_count,average_day_wait,std_day_wait'
+            '8000000001,9000000005,25,25,9.0,4.0'
+        ) -join "`n")
+        Import-RmDataset -Path $src | Out-Null
+        $imported = Join-Path $env:RM_DATA_DIR 'DocGraph_Hop_Teaming_2023.csv'
+        try {
+            $t = Get-RmSourceTrend -Npi 9000000005 -SkipEnrichment
+            $rows = @($t.Years)
+            $rows[0].SharedPatients | Should -Be 0
+            $rows[$rows.Count - 1].SharedPatients | Should -Be 25
+            $t.VolumeChangePct | Should -Be ''          # undefined from a zero base
+            $t.ActiveFromYear | Should -Be 2023
+            $t.ActiveChangePct | Should -Be ''          # only one active year
+            (@($t.Notes) -join ' ') | Should -BeLike '*NO MEASURED VOLUME IN 2021, 2022*'
+            # the report must not claim a percentage it cannot compute
+            $sa = Get-RmSourceAnalysis -Npi 9000000005 -SkipCompetitors -CentroidPath $script:SaCsv
+            $sa.Trend = $t
+            $out = Join-Path $script:WorkDir 'newer-practice-report.html'
+            Export-RmSourceReportHtml -Analysis $sa -Path $out | Out-Null
+            $html = Get-Content $out -Raw
+            $html | Should -BeLike '*Year-over-year performance*'
+            $html | Should -Not -BeLike '*volume grew *%*'
+        } finally {
+            Remove-Item $imported, "$imported.rows" -Force -ErrorAction SilentlyContinue
+            Set-RmActiveDataset -Source cms-pspp -Year 2015 | Out-Null
+        }
+    }
+
+    It 'scales to a full seven-year span (2016-2022) for large and small practices' {
+        # The real deliverable spans 2016-2022. Build seven years in an
+        # isolated store and check the whole chain: per-year rows in order,
+        # six retention transitions, first-vs-last movers across the span,
+        # and a report whose charts carry one column per year.
+        $sevenDir = Join-Path $script:WorkDir 'seven-years'
+        New-Item -ItemType Directory -Path $sevenDir -Force | Out-Null
+        # Big practice 9000000001 grows 100 -> 400; small practice 9000000002
+        # holds ~12; one source joins in 2019, another leaves after 2020.
+        $plan = @{
+            2016 = @('8000000001,9000000001,100,100,10.0,5.0', '8000000002,9000000001,40,40,20.0,5.0', '8000000003,9000000002,12,12,8.0,3.0')
+            2017 = @('8000000001,9000000001,150,150,10.0,5.0', '8000000002,9000000001,45,45,20.0,5.0', '8000000003,9000000002,12,12,8.0,3.0')
+            2018 = @('8000000001,9000000001,200,200,10.0,5.0', '8000000002,9000000001,50,50,20.0,5.0', '8000000003,9000000002,13,13,8.0,3.0')
+            2019 = @('8000000001,9000000001,250,250,10.0,5.0', '8000000002,9000000001,55,55,20.0,5.0', '8000000009,9000000001,30,30,15.0,5.0', '8000000003,9000000002,14,14,8.0,3.0')
+            2020 = @('8000000001,9000000001,300,300,10.0,5.0', '8000000002,9000000001,60,60,20.0,5.0', '8000000009,9000000001,35,35,15.0,5.0', '8000000003,9000000002,15,15,8.0,3.0')
+            2021 = @('8000000001,9000000001,350,350,10.0,5.0', '8000000009,9000000001,40,40,15.0,5.0', '8000000003,9000000002,11,11,8.0,3.0')
+            2022 = @('8000000001,9000000001,400,400,10.0,5.0', '8000000009,9000000001,45,45,15.0,5.0', '8000000003,9000000002,12,12,8.0,3.0')
+        }
+        foreach ($y in $plan.Keys) {
+            Set-Content -Path (Join-Path $sevenDir "hop_teaming_$y.csv") -Encoding ascii -NoNewline -Value (@(
+                'from_npi,to_npi,patient_count,transaction_count,average_day_wait,std_day_wait') + $plan[$y] -join "`n")
+        }
+        $saved = (Get-RmConfig).DataDir
+        try {
+            Set-RmConfig -DataDir $sevenDir
+            $t = Get-RmSourceTrend -Npi 9000000001 -SkipEnrichment
+            $rows = @($t.Years)
+            $rows.Count | Should -Be 7
+            @($rows | ForEach-Object Year) | Should -Be @(2016, 2017, 2018, 2019, 2020, 2021, 2022)
+            $rows[0].SharedPatients | Should -Be 140          # 100 + 40
+            $rows[6].SharedPatients | Should -Be 445          # 400 + 45
+            $t.FirstYear | Should -Be 2016
+            $t.LastYear | Should -Be 2022
+            $t.VolumeChangePct | Should -Be 217.9             # 140 -> 445
+            # six transitions, each with its own retention reading
+            @($rows | Where-Object { $_.RetentionPct -ne '' }).Count | Should -Be 6
+            @($rows | Where-Object Year -eq 2019)[0].NewSources | Should -Be 1     # 8000000009 joins
+            @($rows | Where-Object Year -eq 2021)[0].LostSources | Should -Be 1    # 8000000002 leaves
+            @($rows | Where-Object Year -eq 2021)[0].RetentionPct | Should -Be 66.7
+            $byNpi = @{}; foreach ($m in @($t.Movers)) { $byNpi[$m.SourceNPI] = $m }
+            $byNpi['8000000001'].Change | Should -Be 300      # 100 -> 400 across the span
+            $byNpi['8000000002'].Status | Should -Be 'Lost'
+            $byNpi['8000000009'].Status | Should -Be 'New'
+
+            # a SMALL practice over the same seven years
+            $ts = Get-RmSourceTrend -Npi 9000000002 -SkipEnrichment
+            @($ts.Years).Count | Should -Be 7
+            @($ts.Years)[0].SharedPatients | Should -Be 12
+            @($ts.Years)[6].SharedPatients | Should -Be 12
+            $ts.VolumeChangePct | Should -Be 0
+            @(@($ts.Years) | Where-Object { $_.RetentionPct -eq 100 }).Count | Should -Be 6
+
+            # and the report renders one column per year in both charts
+            $sa = Get-RmSourceAnalysis -Npi 9000000001 -SkipCompetitors -CentroidPath $script:SaCsv
+            $sa.Trend = $t
+            $out = Join-Path $script:WorkDir 'seven-year-report.html'
+            Export-RmSourceReportHtml -Analysis $sa -Path $out | Out-Null
+            $html = Get-Content $out -Raw
+            foreach ($y in 2016, 2017, 2018, 2019, 2020, 2021, 2022) {
+                $html | Should -BeLike "*>$y<*"
+            }
+            $html | Should -BeLike '*Year-over-year performance &mdash; 2016 to 2022*'
+        } finally { Set-RmConfig -DataDir $saved }
+    }
+
+    It 'recovers CareSet years from disk when the metadata file is gone' {
+        # Meta deleted (or the data folder copied to a new machine): the app
+        # must adopt the newest CareSet file on disk instead of claiming the
+        # user has no data. Real case — it stranded a store during testing.
+        $recDir = Join-Path $script:WorkDir 'meta-recover'
+        New-Item -ItemType Directory -Path $recDir -Force | Out-Null
+        foreach ($y in 2021, 2022) {
+            Set-Content -Path (Join-Path $recDir "hop_teaming_$y.csv") -Encoding ascii -NoNewline `
+                -Value ($script:HopRows -join "`n")
+        }
+        $saved = (Get-RmConfig).DataDir
+        try {
+            Set-RmConfig -DataDir $recDir                     # note: no dataset-meta.json
+            $info = Get-RmDatasetInfo
+            $info.Ready | Should -BeTrue
+            $info.Source | Should -Be 'hop-teaming'
+            $info.Year | Should -Be 2022                      # newest wins
+            (Get-RmStatus).DatasetReady | Should -BeTrue
+            # and real queries work off the recovered dataset
+            $sa = Get-RmSourceAnalysis -Npi 9000000001 -SkipCompetitors -CentroidPath $script:SaCsv
+            $sa.TotalPatients | Should -Be 65
+        } finally { Set-RmConfig -DataDir $saved }
+    }
+
     It 'refuses a year-over-year run with a single imported year' {
         $emptyDir = Join-Path $script:WorkDir 'st-empty'
         New-Item -ItemType Directory -Path $emptyDir -Force | Out-Null

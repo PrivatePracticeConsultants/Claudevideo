@@ -295,6 +295,13 @@ always shown, even when it ranks below the top 15; equal volumes share a
 rank). A full ranked source spreadsheet and methodology file are saved next
 to it.
 
+**Getting all your years in:** the year-over-year section compares whatever
+CareSet years are in your data folder, so import each year once (Referral map
+tab → **Import CareSet file**, one file at a time). Import them all and the
+analysis spans 2016–2022; import two and it compares those two. Keep the
+original downloads somewhere safe — CareSet download links expire, and once a
+link goes dead the only copy is the one you saved.
+
 **Year-over-year performance:** tick **Include year-over-year** before clicking
 **Source analysis…** and the report gains a performance section covering every
 CareSet year you've imported: a column chart of referral volume per year with

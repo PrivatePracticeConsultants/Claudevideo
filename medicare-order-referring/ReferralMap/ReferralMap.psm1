@@ -432,6 +432,30 @@ function Get-RmDatasetInfo {
         }
         # Meta points at a file that no longer exists — fall through.
     }
+    # No usable metadata. Before giving up, RECOVER from what is actually on
+    # disk: if CareSet years are sitting there (meta deleted, corrupted, or
+    # the folder was copied to a new machine), adopt the newest one instead
+    # of telling the user they have no data. Cosmetic recovery only — it
+    # never overwrites a valid meta.
+    $hop = @(Get-ChildItem -LiteralPath $script:RmConfig.DataDir -Filter 'hop_teaming_*.csv' -File -ErrorAction SilentlyContinue |
+        ForEach-Object {
+            if ($_.Name -match '^hop_teaming_(\d{4})\.csv$') {
+                [pscustomobject]@{ Year = [int]$Matches[1]; Path = $_.FullName }
+            }
+        } | Sort-Object Year -Descending)
+    if ($hop.Count -gt 0) {
+        $pick = $hop[0]
+        Write-Verbose "No dataset metadata; recovered $($pick.Path) from disk."
+        return [pscustomobject]@{
+            Ready  = $true
+            Source = 'hop-teaming'
+            Year   = $pick.Year
+            Path   = $pick.Path
+            Format = [RmEngine]::FormatHopTeaming
+            Rows   = 0
+            Label  = "DocGraph Hop Teaming $($pick.Year) (CareSet)"
+        }
+    }
     # Legacy resolution: the configured CMS dataset file, if present.
     $legacy = Get-RmDatasetPath
     [pscustomobject]@{
@@ -2687,13 +2711,25 @@ function Get-RmSourceTrend {
         [math]::Round(100.0 * ($lastRow.SharedPatients - $firstRow.SharedPatients) / $firstRow.SharedPatients, 1)
     } else { '' }
 
+    # Leading years with nothing measured are the norm for a newer practice.
+    # Say so, and measure growth from the first year that HAS volume too —
+    # otherwise a 2019 practice looks like it did nothing until 2019.
+    $leadingZero = New-Object System.Collections.Generic.List[object]
+    foreach ($r in $rows) { if ($r.SharedPatients -le 0) { $leadingZero.Add($r.Year) } else { break } }
+    $withVol = @($rows | Where-Object { $_.SharedPatients -gt 0 })
+    $activeFrom = if ($withVol.Count) { $withVol[0].Year } else { $null }
+    $activeChangePct = if ($withVol.Count -ge 2 -and $withVol[0].SharedPatients -gt 0) {
+        [math]::Round(100.0 * ($withVol[$withVol.Count - 1].SharedPatients - $withVol[0].SharedPatients) / $withVol[0].SharedPatients, 1)
+    } else { '' }
+
     $notes = @(
         "YEAR-OVER-YEAR METHOD: the same inbound scan repeated on each imported CareSet year ($(@($years | ForEach-Object { $_.Year }) -join ', ')), so the years are directly comparable (identical methodology, full calendar years)."
         'Retention is measured against the PRIOR year: Retained = sources present in both years, New = present this year only, Lost = present last year only. RetentionPct = Retained as a share of LAST year''s source count.'
         'A source "lost" may simply have fallen under the 11-patient privacy floor rather than stopped referring — treat small movements as noise and read the direction of the whole base.'
         'Medicare FFS only: Medicare Advantage enrollment grew over these years, moving patients OUT of this data. A gentle decline can reflect that shift rather than lost referrals; compare against the area trend before concluding.'
         'The CMS 2015 FOIA file is intentionally excluded: a different (~8-month) window and methodology, not on the same scale.'
-    )
+        $(if ($leadingZero.Count) { "NO MEASURED VOLUME IN $($leadingZero -join ', '): the practice may not have been enumerated or billing Medicare yet in those years, or every pair it had fell under the 11-patient floor. Growth is therefore also reported from $activeFrom, the first year with measured volume." })
+    ) | Where-Object { $_ }
 
     [pscustomobject]@{
         Npi          = $npiList[0]
@@ -2702,6 +2738,8 @@ function Get-RmSourceTrend {
         FirstYear    = $firstY
         LastYear     = $lastY
         VolumeChangePct = $volChangePct
+        ActiveFromYear  = $activeFrom          # first year with measured volume
+        ActiveChangePct = $activeChangePct     # growth measured from that year
         Movers       = $movers
         Gained       = @($movers | Where-Object { $_.Change -gt 0 } | Select-Object -First 10)
         Lost         = @($movers | Where-Object { $_.Change -lt 0 } |
@@ -3123,9 +3161,10 @@ function Export-RmSourceReportHtml {
                 $miles, ('{0:N0}' -f $_.ReferralSources), ('{0:N0}' -f $_.SharedPatients), $_.SharePct
         }) -join "`n"
         $cpHidden = [math]::Max(0, $comp.ProviderCount - @($cpShown).Count)
-        $cpNote = ("$('{0:N0}' -f $comp.ProviderCount) outpatient rehab providers are listed within $($comp.RadiusMiles) miles; " +
-            "$('{0:N0}' -f $comp.ProvidersWithVolume) have measured referral volume in $($a.Year).") +
-            $(if ($cpHidden -gt 0) { " The other $('{0:N0}' -f $cpHidden) are not shown here — every pair they had (if any) fell under the 11-patient privacy floor." })
+        $cpNote = ("$('{0:N0}' -f $comp.ProviderCount) outpatient rehab provider$(if ($comp.ProviderCount -ne 1) { 's' }) " +
+            "$(if ($comp.ProviderCount -eq 1) { 'is' } else { 'are' }) listed within $($comp.RadiusMiles) miles; " +
+            "$('{0:N0}' -f $comp.ProvidersWithVolume) $(if ($comp.ProvidersWithVolume -eq 1) { 'has' } else { 'have' }) measured referral volume in $($a.Year).") +
+            $(if ($cpHidden -gt 0) { " The other $('{0:N0}' -f $cpHidden) $(if ($cpHidden -eq 1) { 'is' } else { 'are' }) not shown here — every pair they had (if any) fell under the 11-patient privacy floor." })
         $compHtml = @"
 <div class="card"><h2>Competitive landscape &mdash; inbound referral volume within $($comp.RadiusMiles) miles</h2>
 <div class="body">$cpSvg</div>
@@ -3159,7 +3198,14 @@ function Export-RmSourceReportHtml {
             $colH = [int][math]::Max(1, $plotH * $r.SharedPatients / $maxVol)
             $cy = $th - $tpadB - $colH
             [void]$tsb.Append(('<rect x="{0:0.#}" y="{1}" width="{2}" height="{3}" rx="3" class="bar"/>' -f ($cx - $colW / 2.0), $cy, $colW, $colH))
-            [void]$tsb.Append(('<text x="{0:0.#}" y="{1}" text-anchor="middle" class="bval">{2}</text>' -f $cx, ($cy - 6), ('{0:N0}' -f $r.SharedPatients)))
+            # Value INSIDE the column top when there is room: the source-count
+            # line runs above the columns and would otherwise strike through
+            # a label sitting just outside them.
+            if ($colH -ge 26) {
+                [void]$tsb.Append(('<text x="{0:0.#}" y="{1}" text-anchor="middle" class="bin">{2}</text>' -f $cx, ($cy + 17), ('{0:N0}' -f $r.SharedPatients)))
+            } else {
+                [void]$tsb.Append(('<text x="{0:0.#}" y="{1}" text-anchor="middle" class="bval">{2}</text>' -f $cx, ($cy - 6), ('{0:N0}' -f $r.SharedPatients)))
+            }
             [void]$tsb.Append(('<text x="{0:0.#}" y="{1}" text-anchor="middle" class="axlbl">{2}</text>' -f $cx, ($th - $tpadB + 16), $r.Year))
             $ly2 = $th - $tpadB - ($plotH * $r.SourceCount / $maxSrc)
             [void]$linePts.Append(('{0:0.#},{1:0.#} ' -f $cx, $ly2))
@@ -3288,6 +3334,9 @@ $lossRows
             $dir = if ($tr.VolumeChangePct -gt 0) { 'grew' } elseif ($tr.VolumeChangePct -lt 0) { 'declined' } else { 'held flat' }
             $mag = [math]::Abs($tr.VolumeChangePct)
             "Measured referral volume $dir $mag% from $($tr.FirstYear) to $($tr.LastYear) ($('{0:N0}' -f $t0.SharedPatients) to $('{0:N0}' -f $t1.SharedPatients) patients), while the distinct-source count went from $('{0:N0}' -f $t0.SourceCount) to $('{0:N0}' -f $t1.SourceCount)." })
+        $(if ($tr -and $tr.PSObject.Properties['ActiveChangePct'] -and $tr.VolumeChangePct -eq '' -and $tr.ActiveChangePct -ne '') {
+            $dir2 = if ($tr.ActiveChangePct -gt 0) { 'grew' } elseif ($tr.ActiveChangePct -lt 0) { 'declined' } else { 'held flat' }
+            "No volume was measured before $($tr.ActiveFromYear); from that first active year to $($tr.LastYear), measured referral volume $dir2 $([math]::Abs($tr.ActiveChangePct))%." })
         $(if ($tr -and @($tr.Years).Count -ge 2) {
             $tl = @($tr.Years)[@($tr.Years).Count - 1]
             if ($tl.RetentionPct -ne '') {
@@ -3362,6 +3411,7 @@ $lossRows
   .curve2 { fill:none; stroke:#c98f3d; stroke-width:2; }
   .dot2 { fill:#c98f3d; }
   .lbl2 { font-size:10.5px; fill:#9a6d2c; }
+  .bin { font-size:11.5px; fill:#ffffff; font-weight:600; }
   .segKept { fill:#2c5f8a; } .segNew { fill:#6f9bbd; } .segLost { fill:#c2ccd4; }
   .sub2 { margin:2px 0 0; padding:6px 18px 0; font-size:12.5px; font-weight:600; color:#33475c; }
   td.up { color:#1d6b45; font-weight:600; }
