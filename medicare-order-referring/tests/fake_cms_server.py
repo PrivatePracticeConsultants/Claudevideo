@@ -73,7 +73,10 @@ TAX_IN = [
              primary_desc='Physical Therapist Orthopedic'),
     provider('6600000002', 'NPI-1', ('HANNA', 'HANDOT'), ['225XH1200X'], '666660000',
              primary_desc='Occupational Therapist Hand'),
-    provider('6600000003', 'NPI-1', ('SIMONE', 'SLP'), ['235Z00000X'], '666660000'),
+    # Live NPPES returns this description with a trailing separator; the
+    # client must tidy it before showing it to a client.
+    provider('6600000003', 'NPI-1', ('SIMONE', 'SLP'), ['235Z00000X'], '666660000',
+             primary_desc='Speech-Language Pathologist, '),
     provider('6600000004', 'NPI-2', 'SPEECH WORKS CLINIC LLC', ['261QH0700X'], '666660000'),
     provider('6600000005', 'NPI-2', 'OUTPATIENT CORF CENTER', ['261QR0401X'], '666660000'),
 ]

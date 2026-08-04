@@ -872,7 +872,11 @@ function Find-RmClinic {
         if ($OrganizationsOnly -or $code.Length -lt 4) { return $null }
         $base = $script:RmIndividualTaxonomyPrefixes[$code.Substring(0, 4)]
         if (-not $base) { return $null }
-        if ($desc) { $desc } else { $base }
+        # NPPES descriptions for un-specialized codes carry a trailing
+        # separator ("Speech-Language Pathologist, "); tidy it so grids and
+        # client reports never show a dangling comma.
+        $clean = if ($desc) { $desc.Trim().TrimEnd(',', ' ', '-').Trim() } else { '' }
+        if ($clean) { $clean } else { $base }
     }
 
     # Radius searches query each ZIP exactly (complete, and safely under

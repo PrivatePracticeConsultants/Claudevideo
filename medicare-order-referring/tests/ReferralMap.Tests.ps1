@@ -827,6 +827,8 @@ Describe 'Taxonomy scope (outpatient PT/OT/speech only)' {
         }
         # subspecialty labels come through honestly from the registry
         @($c | Where-Object NPI -eq '6600000001')[0].Taxonomy | Should -Be 'Physical Therapist Orthopedic'
+        # NPPES sends "Speech-Language Pathologist, " — no dangling separator
+        @($c | Where-Object NPI -eq '6600000003')[0].Taxonomy | Should -Be 'Speech-Language Pathologist'
         @($c | Where-Object NPI -eq '6600000004')[0].Taxonomy | Should -BeLike '*Hearing and Speech*'
         @($c | Where-Object NPI -eq '6600000005')[0].Taxonomy | Should -BeLike '*CORF*'
     }
