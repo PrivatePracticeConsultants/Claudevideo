@@ -885,9 +885,12 @@ Describe 'Local rosters (NPPES bulk index + Care Compare groups)' {
         # CSV, columns resolved by name).
         $script:NppesCsv = Join-Path $script:WorkDir 'npidata_pfile_20050523-20260712.csv'
         Set-Content -Path $script:NppesCsv -Encoding ascii -Value @(
-            '"NPI","Entity Type Code","Provider Organization Name (Legal Business Name)","Provider Last Name (Legal Name)","Provider First Name","Provider Business Practice Location Address City Name","Provider Business Practice Location Address State Name","Provider Business Practice Location Address Postal Code","Healthcare Provider Taxonomy Code_1","Provider Enumeration Date"'
-            '"7700000001","2","BULK REHAB PARTNERS, LLC","","","ROLLA","MO","654010000","261QP2000X","06/15/2008"'
-            '"7700000002","1","","BULKPT","BOB","ROLLA","MO","654011234","225100000X","01/02/2015"'
+            ('"NPI","Entity Type Code","Provider Organization Name (Legal Business Name)","Provider Last Name (Legal Name)","Provider First Name","Provider Business Practice Location Address City Name","Provider Business Practice Location Address State Name","Provider Business Practice Location Address Postal Code","Healthcare Provider Taxonomy Code_1","Provider Enumeration Date",' + ((2..15 | ForEach-Object { '"Healthcare Provider Taxonomy Code_' + $_ + '"' }) -join ','))
+            '"7700000001","2","BULK REHAB PARTNERS, LLC","","","ROLLA","MO","654010000","261QP2000X","06/15/2008","",""'
+            '"7700000002","1","","BULKPT","BOB","ROLLA","MO","654011234","225100000X","01/02/2015","",""'
+            # therapy only as a SECONDARY taxonomy (primary is out of scope):
+            # a live 10-mile sweep missed 43 real providers shaped like this.
+            '"7700000007","1","","SECONDTAX","SAM","ROLLA","MO","654010000","208100000X","03/03/2019","225100000X",""'
         )
         $script:DacCsv = Join-Path $script:WorkDir 'DAC_fixture.csv'
         Set-Content -Path $script:DacCsv -Encoding ascii -Value @(
@@ -902,7 +905,7 @@ Describe 'Local rosters (NPPES bulk index + Care Compare groups)' {
 
     It 'builds the NPPES index and answers lookups OFFLINE with NUCC names' {
         $r = Import-RmNppesBulk -Path $script:NppesCsv
-        $r.Rows | Should -Be 2
+        $r.Rows | Should -Be 3
         # kill the live registry: bulk must answer alone
         try {
             $script:RmSaved = (Get-RmConfig).NppesUrl
@@ -923,6 +926,72 @@ Describe 'Local rosters (NPPES bulk index + Care Compare groups)' {
         @($aff | ForEach-Object NPI) | Sort-Object | Should -Be @('7700000003', '7700000004')
         $aff[0].Group | Should -Be 'BULK REHAB PARTNERS'
         @(Get-RmAffiliatedNpi -Npi 7700000006).Count | Should -Be 0   # solo in its group
+    }
+
+    It 'peer discovery uses the bulk index (complete, offline, no API cap)' {
+        # ZIP 65401 providers exist ONLY in the bulk index, never in the API
+        # double — so finding them proves the local sweep is doing the work.
+        (Get-RmConfig).NppesUrl | Out-Null
+        $saved = (Get-RmConfig).NppesUrl
+        try {
+            (Get-RmConfig).NppesUrl = 'http://127.0.0.1:1/nppes/'
+            $c = @(Find-RmClinic -Zip 65401)
+            @($c | ForEach-Object NPI) | Sort-Object | Should -Be @('7700000001', '7700000002', '7700000007')
+            # matched on a SECONDARY taxonomy, and labeled by the code that matched
+            @($c | Where-Object NPI -eq '7700000007')[0].Taxonomy | Should -BeLike '*Physical Therapist*'
+            @($c | Where-Object NPI -eq '7700000001')[0].Type | Should -Be 'Organization'
+            @($c | Where-Object NPI -eq '7700000001')[0].Taxonomy | Should -BeLike '*Physical Therapy*'
+            # enumeration date is normalized to the ISO form the vintage
+            # check parses (NPPES bulk ships MM/DD/YYYY)
+            @($c | Where-Object NPI -eq '7700000002')[0].Enumerated | Should -Be '2015-01-02'
+            # ...and OrganizationsOnly still filters by clinic taxonomy
+            @(@(Find-RmClinic -Zip 65401 -OrganizationsOnly) | ForEach-Object NPI) | Should -Be @('7700000001')
+        } finally { (Get-RmConfig).NppesUrl = $saved }
+    }
+
+    It 'falls back to the live registry where the bulk index has no coverage' {
+        # A stale monthly file must never make a real ZIP look empty: ZIP
+        # 99999 is absent from the bulk index but present in the registry.
+        $c = @(Find-RmClinic -Zip 99999)
+        @($c | ForEach-Object NPI) -contains '9000000001' | Should -BeTrue
+        $c.Count | Should -BeGreaterThan 1
+    }
+
+    It 'county market resolves from the local enrollment index (offline)' {
+        $enr = Join-Path $script:WorkDir 'enrollment.csv'
+        Set-Content -Path $enr -Encoding ascii -Value @(
+            'BENE_FIPS_CD,YEAR,MONTH,BENE_COUNTY_DESC,BENE_STATE_ABRVTN,TOT_BENES,ORGNL_MDCR_BENES,MA_AND_OTH_BENES'
+            '99003,2024,Year,Local County,MO,8000,5000,3000'
+            '99003,2025,Year,Local County,MO,9000,5000,4000'
+            '99003,2025,January,Local County,MO,8900,4990,3910'   # monthly rows ignored
+        )
+        (Import-RmEnrollment -Path $enr).Rows | Should -Be 3
+        $xw = Join-Path $script:WorkDir 'xw3.csv'
+        Set-Content -Path $xw -Encoding ascii -Value @('zip,fips', '99999,99003')
+        $savedBase = (Get-RmConfig).CmsApiBase
+        try {
+            Set-RmConfig -CmsApiBase 'http://127.0.0.1:1/dataset'   # API dead: index must answer
+            $m = Get-RmCountyMarket -Zip 99999 -CrosswalkPath $xw
+            $m.County | Should -Be 'Local County'
+            $m.Year | Should -Be 2025
+            $m.TotalBenes | Should -Be 9000
+            $m.MaPct | Should -Be 44.4
+        } finally { Set-RmConfig -CmsApiBase $savedBase }
+    }
+
+    It 'the resource downloader writes a checksummed manifest' {
+        $dest = Join-Path $script:WorkDir 'resources'
+        $r = Save-RmLocalResources -Destination $dest
+        Test-Path $r.Manifest | Should -BeTrue
+        $man = Get-Content $r.Manifest -Raw
+        $man | Should -BeLike '*NPPES bulk provider file*'
+        $man | Should -BeLike '*Care Compare clinician file*'
+        $man | Should -BeLike '*Medicare Monthly Enrollment*'
+        $man | Should -BeLike '*sha256:*'
+        # the NPPES file has no stable direct link: reported, never guessed
+        @($r.Files | Where-Object Key -eq 'nppes')[0].Status | Should -BeLike 'MANUAL*'
+        # a download failure is reported per-file, never thrown
+        @($r.Files).Count | Should -Be 3
     }
 
     It 'the analysis note lists affiliated NPIs not yet combined' {

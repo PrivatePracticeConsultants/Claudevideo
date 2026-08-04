@@ -321,8 +321,26 @@ because its shorter window would fake a trend. Read declines carefully: a
 referrer can vanish simply by falling under the 11-patient floor, and Medicare
 Advantage growth moves patients out of this data entirely.
 
-**Optional power-ups (two big free CMS files):** both are one-time imports
-from PowerShell (open PowerShell in the app folder first):
+**Keep every supporting file on your own machine.** Government download links
+move and expire (the 2016–2020 CareSet links already did). One command
+downloads what it can and writes a manifest listing every file, its size, a
+SHA-256 checksum, its source URL, and what it's for:
+
+```powershell
+Import-Module .\ReferralMap
+Save-RmLocalResources -Destination "C:\MedicareData\resources" -Verbose
+```
+
+Read `MANIFEST.txt` in that folder afterwards: anything marked **MANUAL**
+needs a click (the NPPES monthly file has no fixed link — its name carries a
+date), and everything else is already downloaded. Keep that folder backed up
+alongside your CareSet year files, and the app never depends on a URL again.
+Small reference data (ZIP centroids, ZIP→county crosswalk, taxonomy names,
+and the offline map library) is already **bundled inside the app** — nothing
+to download for those.
+
+**Optional power-ups (three big free CMS files):** one-time imports from
+PowerShell (open PowerShell in the app folder first):
 
 - **Care Compare clinician file** — lets the Source analysis automatically
   list the other therapy clinicians in your practice group, so you know
@@ -330,12 +348,21 @@ from PowerShell (open PowerShell in the app folder first):
   "National Downloadable File" CSV from
   https://data.cms.gov/provider-data/dataset/mj5m-pzi6 (~800 MB), then run:
   `Import-Module .\ReferralMap; Import-RmCareCompare -Path "C:\path\DAC_NationalDownloadableFile.csv"`
-- **NPPES bulk file** — makes all provider name/location lookups run locally
-  and instantly instead of calling the registry one NPI at a time. Download
-  the monthly "NPPES Data Dissemination" zip from
+- **NPPES bulk file** — the biggest single upgrade. Provider lookups run
+  locally and instantly, and **competitor sweeps become complete**: the live
+  registry caps each query at 1,200 results and searches by description
+  phrase, while the local file is swept in full. A real 10-mile sweep around
+  Sun City took **11 seconds instead of ~11 minutes**. Download the monthly
+  "NPPES Data Dissemination" zip from
   https://download.cms.gov/nppes/NPI_Files.html (~1 GB; do NOT unzip it),
   then run: `Import-RmNppesBulk -Path "C:\path\NPPES_Data_Dissemination_....zip"`
-  The live registry stays as a fallback for anything the monthly file misses.
+  Re-import each month to stay current. The live registry stays as a fallback
+  for any area the monthly file doesn't cover, so a stale file never makes a
+  real ZIP look empty.
+- **Medicare Monthly Enrollment** — makes county market context (beneficiary
+  counts and the Medicare Advantage share) work with no internet. Download
+  the CSV from https://data.cms.gov/dataset/d7fabe1e-d19b-4333-9eff-e80e0643f2fd
+  then run: `Import-RmEnrollment -Path "C:\path\Medicare Monthly Enrollment Data.csv"`
 
 **Smaller practices — combine your NPIs:** a practice's Medicare volume is
 often split between its **organization NPI** and its therapists' **individual

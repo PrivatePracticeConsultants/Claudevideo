@@ -1025,6 +1025,60 @@ function Find-RmClinic {
         if ($clean) { $clean } else { $base }
     }
 
+    # Local NPPES bulk index, when imported: ONE streaming pass finds every
+    # provider in the requested ZIP(s). This is strictly more accurate than
+    # the live API path — no 1,200-result ceiling, no phrase-search gaps,
+    # no rate limits — and it works offline.
+    $bulkIdx = Get-RmNppesIndexPath
+    if (Test-Path -LiteralPath $bulkIdx) {
+        $zipWanted = New-Object 'System.Collections.Generic.HashSet[string]'
+        $prefixes = New-Object System.Collections.Generic.List[string]
+        foreach ($z in @(if ($ZipList) { $ZipList } else { @($Zip) })) {
+            $zz = [string]$z
+            if ($zz -match '^\d{5}$') { [void]$zipWanted.Add($zz) } else { $prefixes.Add($zz.TrimEnd('*')) }
+        }
+        Write-Verbose "NPPES bulk index: sweeping $($zipWanted.Count) ZIP(s)$(if ($prefixes.Count) { " + $($prefixes.Count) prefix(es)" })..."
+        $found2 = @{}
+        foreach ($line in [System.IO.File]::ReadLines($bulkIdx)) {
+            $f = $line.Split('|')
+            if ($f.Count -lt 10) { continue }
+            $postal = $f[7]
+            if ($postal.Length -lt 5) { continue }
+            $z5 = $postal.Substring(0, 5)
+            $hit = $zipWanted.Contains($z5)
+            if (-not $hit) { foreach ($p in $prefixes) { if ($z5.StartsWith($p)) { $hit = $true; break } } }
+            if (-not $hit) { continue }
+            # ANY taxonomy slot may carry the in-scope code (primary at 8,
+            # secondaries from 10 on) — matching only the primary silently
+            # dropped real therapy providers.
+            $label = $null; $matchedCode = ''
+            foreach ($ti in @(8) + @(10..($f.Count - 1))) {
+                if ($ti -ge $f.Count) { break }
+                $code = $f[$ti]
+                if (-not $code) { continue }
+                $label = & $resolveTax $code ''
+                if ($label) { $matchedCode = $code; break }
+            }
+            if (-not $label) { continue }
+            $isOrg = $f[1] -eq '2'
+            $found2[$f[0]] = [pscustomobject]@{
+                NPI = $f[0]
+                Name = if ($isOrg) { $f[2] } else { ("$($f[4]) $($f[3])").Trim() }
+                Type = if ($isOrg) { 'Organization' } else { 'Individual' }
+                Taxonomy = Get-RmTaxonomyName $matchedCode
+                City = $f[5]; State = $f[6]; Zip = $z5
+                Enumerated = if ($f[9] -match '^(\d{2})/(\d{2})/(\d{4})$') { "$($Matches[3])-$($Matches[1])-$($Matches[2])" } else { $f[9] }
+            }
+        }
+        Write-Verbose "Bulk sweep found $($found2.Count) provider(s)."
+        # Only ADOPT the local answer when it actually covers the request.
+        # An empty result means the monthly file predates these providers
+        # (or the ZIP is new), so fall through to the live registry rather
+        # than silently reporting "no providers here".
+        if ($found2.Count -gt 0) { return @($found2.Values | Sort-Object Name) }
+        Write-Verbose 'Bulk index had no providers for this area; falling back to the live registry.'
+    }
+
     # Radius searches query each ZIP exactly (complete, and safely under
     # NPPES's 1,200-per-query ceiling) instead of one wide prefix.
     # @() around the WHOLE if: assignment from if{} unrolls one-element arrays
@@ -3963,8 +4017,25 @@ function Get-RmCountyMarket {
               foreach ($p in $j.PSObject.Properties) { $cache[$p.Name] = $p.Value } } catch {}
     }
     if ($cache.ContainsKey($fips)) { return $cache[$fips] }
-    $rows = @(Invoke-RmCmsApi 'd7fabe1e-d19b-4333-9eff-e80e0643f2fd' `
-        ('filter[BENE_FIPS_CD]={0}&filter[MONTH]=Year&size=50' -f $fips))
+    # Local enrollment index first (works with no internet); the API is the
+    # fallback when the user has not imported the file.
+    $rows = @()
+    $enrollIdx = Get-RmEnrollmentIndexPath
+    if (Test-Path -LiteralPath $enrollIdx) {
+        $want = New-Object 'System.Collections.Generic.HashSet[string]'
+        [void]$want.Add($fips)
+        foreach ($line in @([RmEngine]::ScanRosterIndex($enrollIdx, $want, 0))) {
+            $f = $line.Split('|')
+            if ($f.Count -lt 8 -or $f[2] -ne 'Year') { continue }
+            $rows += [pscustomobject]@{
+                YEAR = $f[1]; BENE_COUNTY_DESC = $f[3]; BENE_STATE_ABRVTN = $f[4]
+                TOT_BENES = $f[5]; ORGNL_MDCR_BENES = $f[6]; MA_AND_OTH_BENES = $f[7] }
+        }
+    }
+    if (-not $rows.Count) {
+        $rows = @(Invoke-RmCmsApi 'd7fabe1e-d19b-4333-9eff-e80e0643f2fd' `
+            ('filter[BENE_FIPS_CD]={0}&filter[MONTH]=Year&size=50' -f $fips))
+    }
     $rows = @($rows | Where-Object { [string]$_.TOT_BENES -match '^\d+$' } | Sort-Object { [int]$_.YEAR })
     if (-not $rows.Count) { return $null }
     $r = $rows[$rows.Count - 1]
@@ -4069,12 +4140,17 @@ function Import-RmNppesBulk {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$Path)
     Initialize-RmDataDir | Out-Null
+    # Fields 0-9 are fixed; SECONDARY taxonomies are appended (10+) so field
+    # positions stay stable. All 15 taxonomy slots are indexed because a
+    # provider can hold therapy as a secondary taxonomy — indexing only the
+    # primary made a live 10-mile sweep miss 43 of 1,778 real providers.
     $cols = @('NPI', 'Entity Type Code', 'Provider Organization Name (Legal Business Name)',
         'Provider Last Name (Legal Name)', 'Provider First Name',
         'Provider Business Practice Location Address City Name',
         'Provider Business Practice Location Address State Name',
         'Provider Business Practice Location Address Postal Code',
-        'Healthcare Provider Taxonomy Code_1', 'Provider Enumeration Date')
+        'Healthcare Provider Taxonomy Code_1', 'Provider Enumeration Date') +
+        @(2..15 | ForEach-Object { "Healthcare Provider Taxonomy Code_$_" })
     $src = $Path; $tmpExtract = $null
     try {
         $tmpOut = (Get-RmNppesIndexPath) + '.tmp'
@@ -4150,6 +4226,111 @@ function Get-RmAffiliatedNpi {
         }
     }
     @($out.Values | Sort-Object Name)
+}
+
+function Get-RmEnrollmentIndexPath { Join-Path $script:RmConfig.DataDir 'enrollment-index.psv' }
+
+function Import-RmEnrollment {
+    <#
+    .SYNOPSIS
+      Builds the local county-market index from CMS's Medicare Monthly
+      Enrollment CSV, so market context (beneficiaries, Medicare Advantage
+      share) works with NO internet connection.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Path)
+    Initialize-RmDataDir | Out-Null
+    $cols = @('BENE_FIPS_CD', 'YEAR', 'MONTH', 'BENE_COUNTY_DESC', 'BENE_STATE_ABRVTN',
+        'TOT_BENES', 'ORGNL_MDCR_BENES', 'MA_AND_OTH_BENES')
+    $tmpOut = (Get-RmEnrollmentIndexPath) + '.tmp'
+    $rows = [RmEngine]::BuildRosterIndex($Path, $tmpOut, $cols)
+    Move-Item -LiteralPath $tmpOut -Destination (Get-RmEnrollmentIndexPath) -Force
+    [pscustomobject]@{ Rows = $rows; Path = Get-RmEnrollmentIndexPath
+        Message = "Enrollment index built: $('{0:N0}' -f $rows) county-month rows. County market context now works offline." }
+}
+
+# Every supporting resource the app can download, with the local file name
+# it is stored under. Kept in ONE place so the downloader, the manifest and
+# the docs cannot drift apart.
+$script:RmResources = @(
+    [ordered]@{ Key = 'nppes'; Name = 'NPPES bulk provider file'
+        Url = 'https://download.cms.gov/nppes/NPI_Files.html'
+        File = 'NPPES_Data_Dissemination.zip'; ApproxMB = 1100
+        Note = 'Monthly full registry. Import with Import-RmNppesBulk (streams from the zip; do not unzip).'
+        Direct = $false }
+    [ordered]@{ Key = 'carecompare'; Name = 'Care Compare clinician file (DAC)'
+        Url = 'https://data.cms.gov/provider-data/sites/default/files/resources/52c3f098d7e56028a298fd297cb0b38d_1782750575/DAC_NationalDownloadableFile.csv'
+        File = 'DAC_NationalDownloadableFile.csv'; ApproxMB = 800
+        Note = 'Clinician-to-group membership. Import with Import-RmCareCompare.'
+        Direct = $true }
+    [ordered]@{ Key = 'enrollment'; Name = 'Medicare Monthly Enrollment'
+        Url = 'https://data.cms.gov/data-api/v1/dataset/d7fabe1e-d19b-4333-9eff-e80e0643f2fd/data?size=5000&offset=0'
+        File = 'medicare-monthly-enrollment.csv'; ApproxMB = 60
+        Note = 'County beneficiaries + Medicare Advantage share. Import with Import-RmEnrollment.'
+        Direct = $true; Csv = $true }
+)
+
+function Save-RmLocalResources {
+    <#
+    .SYNOPSIS
+      Downloads every supporting data file to a LOCAL folder and writes a
+      manifest (size, SHA-256, date, source URL) so the app never depends on
+      a URL staying alive. Files already present are skipped unless -Force.
+    .NOTES
+      The NPPES bulk file has no stable direct URL (the file name carries a
+      date), so it is reported as a manual step with its page link rather
+      than guessed at.
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$Destination,
+        [switch]$Force
+    )
+    $dest = if ($Destination) { $Destination } else { Join-Path $script:RmConfig.DataDir 'resources' }
+    New-Item -ItemType Directory -Path $dest -Force | Out-Null
+    $manifestPath = Join-Path $dest 'MANIFEST.txt'
+    $lines = New-Object System.Collections.Generic.List[object]
+    $lines.Add("Medicare Order & Referring Tracker - local resource manifest")
+    $lines.Add("Written $(Get-Date -Format 'yyyy-MM-dd HH:mm')")
+    $lines.Add('')
+    $results = New-Object System.Collections.Generic.List[object]
+    foreach ($res in $script:RmResources) {
+        $target = Join-Path $dest $res.File
+        $status = ''
+        if (-not $res.Direct) {
+            $status = 'MANUAL - no stable direct link'
+        } elseif ((Test-Path -LiteralPath $target) -and -not $Force) {
+            $status = 'already present'
+        } else {
+            try {
+                Write-Verbose "Downloading $($res.Name) (~$($res.ApproxMB) MB)..."
+                $tmp = "$target.part"
+                Invoke-WebRequest -Uri $res.Url -OutFile $tmp -TimeoutSec 1800 -UseBasicParsing -ErrorAction Stop
+                Move-Item -LiteralPath $tmp -Destination $target -Force
+                $status = 'downloaded'
+            } catch {
+                $status = "FAILED: $($_.Exception.Message)"
+                Write-Warning "$($res.Name): $status"
+            }
+        }
+        $size = if (Test-Path -LiteralPath $target) { (Get-Item -LiteralPath $target).Length } else { 0 }
+        $sha = if ($size -gt 0) { (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash } else { '' }
+        $results.Add([pscustomobject]@{
+            Key = $res.Key; Name = $res.Name; File = $res.File; Path = $target
+            Status = $status; Bytes = $size; Sha256 = $sha; Url = $res.Url })
+        $lines.Add("$($res.Name)")
+        $lines.Add("  file:   $($res.File)")
+        $lines.Add("  status: $status")
+        $lines.Add("  bytes:  $('{0:N0}' -f $size)")
+        $lines.Add("  sha256: $sha")
+        $lines.Add("  source: $($res.Url)")
+        $lines.Add("  use:    $($res.Note)")
+        $lines.Add('')
+    }
+    $lines.Add('Bundled with the app (no download needed): ZIP centroids (US Census ZCTA gazetteer),')
+    $lines.Add('ZIP-to-county crosswalk, NUCC taxonomy names, and the offline map library.')
+    $lines | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+    [pscustomobject]@{ Destination = $dest; Manifest = $manifestPath; Files = @($results.ToArray()) }
 }
 
 function Get-RmSourceSpecialtyMix {
@@ -4252,5 +4433,6 @@ Export-ModuleMember -Function @(
     'Get-RmSourceTrend', 'Add-RmSourceTrend',
     'Get-RmCountyMarket', 'Get-RmServiceProfile',
     'Import-RmNppesBulk', 'Import-RmCareCompare', 'Get-RmAffiliatedNpi',
+    'Import-RmEnrollment', 'Save-RmLocalResources',
     'Export-RmResult', 'Clear-RmStaleTemp'
 )
