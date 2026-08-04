@@ -2743,8 +2743,14 @@ function Get-RmSourceAnalysis {
                     # Market-capture layer: how much therapy volume each
                     # source sends to the AREA (competitors), so the map can
                     # show the practice's capture rate per source ZIP.
-                    if ($areaBySource.ContainsKey($e.SourceNpi)) { $areaBySource[$e.SourceNpi] += $e.BeneCount }
-                    else { $areaBySource[$e.SourceNpi] = $e.BeneCount }
+                    # The practice's OWN onward flow to a competitor is not a
+                    # source opportunity - counting it inflated the home
+                    # ZIP's area volume (caught by independent recompute).
+                    # It still counts toward that competitor's inbound total.
+                    if (-not $memberSet.Contains($e.SourceNpi)) {
+                        if ($areaBySource.ContainsKey($e.SourceNpi)) { $areaBySource[$e.SourceNpi] += $e.BeneCount }
+                        else { $areaBySource[$e.SourceNpi] = $e.BeneCount }
+                    }
                     if (-not $peerAgg.ContainsKey($e.TargetNpi)) {
                         $peerAgg[$e.TargetNpi] = [pscustomobject]@{ Benes = 0; Sources = 0 }
                     }

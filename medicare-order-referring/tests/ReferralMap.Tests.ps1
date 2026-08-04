@@ -1539,6 +1539,10 @@ Describe 'Source analysis report' {
             $z1.CapturePct | Should -Be 78.9
             $z2 = @($mkt | Where-Object Zip -eq '86442')[0]
             $z2.CapturePct | Should -Be 100        # nobody else draws from there
+            # The practice's OWN outbound to a peer (9000000001 -> 8000000001
+            # exists in the fixture) must NOT inflate its home ZIP's area
+            # volume - you cannot win referrals from yourself.
+            $z1.AreaPatients | Should -Be 57       # not 57 + the self edge
             # every ZIP's own volume must equal the Geo roll-up for that ZIP
             foreach ($m in $mkt) {
                 $g = @($sa.Geo | Where-Object Zip -eq $m.Zip)
