@@ -302,6 +302,120 @@ public static class RmEngine
         }
         return n;
     }
+
+    // ---- Roster indexes (NPPES bulk file / Care Compare DAC) -------------
+    // Both rosters are large quoted CSVs; both are reduced ONCE at import to
+    // a compact pipe-delimited index that later runs SCAN (streaming, like
+    // the dataset engine) instead of loading into memory.
+
+    private static List<string> SplitCsv(string line)
+    {
+        List<string> fields = new List<string>();
+        StringBuilder cur = new StringBuilder();
+        bool q = false;
+        for (int i = 0; i < line.Length; i++)
+        {
+            char c = line[i];
+            if (q)
+            {
+                if (c == '"')
+                {
+                    if (i + 1 < line.Length && line[i + 1] == '"') { cur.Append('"'); i++; }
+                    else q = false;
+                }
+                else cur.Append(c);
+            }
+            else if (c == '"') q = true;
+            else if (c == ',') { fields.Add(cur.ToString()); cur.Length = 0; }
+            else cur.Append(c);
+        }
+        fields.Add(cur.ToString());
+        return fields;
+    }
+
+    private static string Clean(string s)
+    {
+        return s == null ? "" : s.Replace("|", "/").Trim();
+    }
+
+    // Projects named columns of a huge quoted CSV into a compact pipe file.
+    // Column indexes are resolved from the HEADER by name, so a layout shift
+    // in a future release fails loudly instead of silently mis-mapping.
+    public static long BuildRosterIndex(string src, string dest, string[] wantedColumns)
+    {
+        using (StreamReader r = new StreamReader(src, Encoding.UTF8, true, 1 << 20))
+        {
+            return BuildRosterIndexCore(r, dest, wantedColumns);
+        }
+    }
+
+    // Streams the roster straight out of a zip ENTRY STREAM the caller
+    // opens (PowerShell owns the zip handling) - the NPPES inner CSV is
+    // 11+ GB and must never be extracted to disk first.
+    public static long BuildRosterIndexFromStream(Stream src, string dest, string[] wantedColumns)
+    {
+        StreamReader r = new StreamReader(src, Encoding.UTF8, true, 1 << 20);
+        return BuildRosterIndexCore(r, dest, wantedColumns);
+    }
+
+    private static long BuildRosterIndexCore(StreamReader r, string dest, string[] wantedColumns)
+    {
+        long rows = 0;
+        using (r)
+        using (StreamWriter w = new StreamWriter(dest, false, new UTF8Encoding(false), 1 << 20))
+        {
+            string header = r.ReadLine();
+            if (header == null) throw new Exception("empty file");
+            List<string> cols = SplitCsv(header);
+            int[] idx = new int[wantedColumns.Length];
+            for (int i = 0; i < wantedColumns.Length; i++)
+            {
+                idx[i] = -1;
+                for (int j = 0; j < cols.Count; j++)
+                    if (string.Equals(cols[j].Trim(), wantedColumns[i], StringComparison.OrdinalIgnoreCase)) { idx[i] = j; break; }
+                if (idx[i] < 0) throw new Exception("column not found: " + wantedColumns[i]);
+            }
+            string line;
+            StringBuilder outLine = new StringBuilder();
+            while ((line = r.ReadLine()) != null)
+            {
+                List<string> f = SplitCsv(line);
+                outLine.Length = 0;
+                for (int i = 0; i < idx.Length; i++)
+                {
+                    if (i > 0) outLine.Append('|');
+                    outLine.Append(idx[i] < f.Count ? Clean(f[idx[i]]) : "");
+                }
+                w.WriteLine(outLine.ToString());
+                rows++;
+            }
+        }
+        return rows;
+    }
+
+    // Streams a compact index and returns every line whose FIELD matches one
+    // of the wanted values. One pass, memory bounded by the match count.
+    public static List<string> ScanRosterIndex(string path, HashSet<string> wanted, int fieldIndex)
+    {
+        List<string> hits = new List<string>();
+        using (StreamReader r = new StreamReader(path, Encoding.UTF8, false, 1 << 20))
+        {
+            string line;
+            while ((line = r.ReadLine()) != null)
+            {
+                int start = 0; int fi = 0; string val = null;
+                while (fi <= fieldIndex)
+                {
+                    int p = line.IndexOf('|', start);
+                    if (fi == fieldIndex) { val = p < 0 ? line.Substring(start) : line.Substring(start, p - start); break; }
+                    if (p < 0) break;
+                    start = p + 1; fi++;
+                }
+                if (val != null && wanted.Contains(val)) hits.Add(line);
+            }
+        }
+        return hits;
+    }
 }
 '@
 }
@@ -1010,6 +1124,33 @@ function Get-RmProviderDetail {
         Where-Object { (Test-RmNpiShape $_) -and (
             -not $cache.ContainsKey($_) -or
             ($RequireZip -and $null -eq $cache[$_].PSObject.Properties['Zip'])) })
+
+    # Local NPPES bulk index first (one streaming scan answers every miss at
+    # once, offline); anything it cannot answer falls through to the live
+    # registry exactly as before.
+    $bulkIdx = Get-RmNppesIndexPath
+    if ($missing.Count -gt 0 -and (Test-Path -LiteralPath $bulkIdx)) {
+        $want = New-Object 'System.Collections.Generic.HashSet[string]'
+        foreach ($m in $missing) { [void]$want.Add($m) }
+        Write-Verbose "NPPES bulk index: scanning for $($want.Count) provider(s)..."
+        $dirtyBulk = $false
+        foreach ($line in @([RmEngine]::ScanRosterIndex($bulkIdx, $want, 0))) {
+            $f = $line.Split('|')
+            if ($f.Count -lt 10) { continue }
+            $isOrg = $f[1] -eq '2'
+            $postal = $f[7]
+            $cache[$f[0]] = [pscustomobject]@{
+                Name      = if ($isOrg) { $f[2] } else { ("$($f[4]) $($f[3])").Trim() }
+                Specialty = Get-RmTaxonomyName $f[8]
+                City      = $f[5]; State = $f[6]
+                Zip       = if ($postal.Length -ge 5) { $postal.Substring(0, 5) } else { $postal }
+            }
+            $dirtyBulk = $true
+        }
+        if ($dirtyBulk) { Write-RmNppesCache $cache }
+        $missing = @($missing | Where-Object { -not $cache.ContainsKey($_) -or
+            ($RequireZip -and $null -eq $cache[$_].PSObject.Properties['Zip']) })
+    }
     $n = 0
     $consecutiveFailures = 0
     foreach ($id in $missing) {
@@ -2617,6 +2758,12 @@ function Get-RmSourceAnalysis {
         $(if ($landscapeNote) { $landscapeNote })
         $(if ($market) { "MARKET CONTEXT: county Medicare enrollment from CMS's Medicare Monthly Enrollment dataset (calendar $($market.Year), latest full year). Original Medicare (FFS) beneficiaries are the population this file can see; Medicare Advantage members ($($market.MaPct)% of $($market.County)) are invisible to it." })
         $(if ($svcProfile) { 'BILLED-SERVICES PROFILE: actual Medicare Part B claims from CMS''s Physician & Other Practitioners dataset (latest annual release; therapy = HCPCS 97xxx/92xxx). CAUTION: this dataset suppresses provider-procedure lines under 11 beneficiaries, so small caseloads are invisible here too, and services bill under the RENDERING NPI — organizations that bill through their therapists'' individual NPIs legitimately show no claims here. Distinct-patient counts are a FLOOR (patients overlap across procedure codes).' })
+        $(try {
+            $aff = @(Get-RmAffiliatedNpi -Npi $primary | Where-Object { $npiList -notcontains $_.NPI })
+            if ($aff.Count) {
+                $names = @($aff | Select-Object -First 12 | ForEach-Object { "$($_.Name) ($($_.NPI))" }) -join ', '
+                "AFFILIATED CLINICIANS (Care Compare): $($aff.Count) other therapy clinician(s) share this practice's group and are NOT in this analysis: $names$(if ($aff.Count -gt 12) { ', ...' }). Volume billed under their NPIs is missing here - paste their NPIs together with this one for the combined picture."
+            } } catch { $null })
         $(if ($suppNote) { $suppNote })
         $(if ($capNote) { $capNote })
     ) | Where-Object { $null -ne $_ -and $_ -ne $false }
@@ -3886,6 +4033,125 @@ function Get-RmServiceProfile {
     $out
 }
 
+# ---------------------------------------------------------------------------
+# Local rosters: NPPES bulk file (offline provider lookups) and Care Compare
+# DAC file (clinician -> practice-group membership, for suggesting which
+# NPIs to combine). Both import once to compact pipe-delimited indexes.
+# ---------------------------------------------------------------------------
+
+function Get-RmNppesIndexPath { Join-Path $script:RmConfig.DataDir 'nppes-index.psv' }
+function Get-RmDacIndexPath { Join-Path $script:RmConfig.DataDir 'care-compare-index.psv' }
+
+$script:RmNuccNames = $null
+function Get-RmTaxonomyName([string]$Code) {
+    if ($null -eq $script:RmNuccNames) {
+        $t = @{}
+        $p = Join-Path $PSScriptRoot 'nucc-taxonomy.csv'
+        if (Test-Path -LiteralPath $p) {
+            foreach ($line in [System.IO.File]::ReadLines($p)) {
+                $i = $line.IndexOf(',')
+                if ($i -gt 0) { $t[$line.Substring(0, $i)] = $line.Substring($i + 1) }
+            }
+        }
+        $script:RmNuccNames = $t
+    }
+    if ($Code -and $script:RmNuccNames.ContainsKey($Code)) { $script:RmNuccNames[$Code] } else { $Code }
+}
+
+function Import-RmNppesBulk {
+    <#
+    .SYNOPSIS
+      Builds the local NPPES lookup index from the monthly NPPES Data
+      Dissemination file (the ~1 GB zip from download.cms.gov/nppes, or the
+      extracted npidata_pfile CSV). One streaming pass; afterwards provider
+      lookups run offline against the index instead of the live registry.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Path)
+    Initialize-RmDataDir | Out-Null
+    $cols = @('NPI', 'Entity Type Code', 'Provider Organization Name (Legal Business Name)',
+        'Provider Last Name (Legal Name)', 'Provider First Name',
+        'Provider Business Practice Location Address City Name',
+        'Provider Business Practice Location Address State Name',
+        'Provider Business Practice Location Address Postal Code',
+        'Healthcare Provider Taxonomy Code_1', 'Provider Enumeration Date')
+    $src = $Path; $tmpExtract = $null
+    try {
+        $tmpOut = (Get-RmNppesIndexPath) + '.tmp'
+        if ([System.IO.Path]::GetExtension($Path).ToLowerInvariant() -eq '.zip') {
+            # Stream the 11+ GB inner CSV straight out of the zip - it is
+            # never extracted (it would not fit on a small disk).
+            Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+            $zip = [System.IO.Compression.ZipFile]::OpenRead($Path)
+            try {
+                $entry = @($zip.Entries | Where-Object { $_.Name -match '^npidata_pfile_[\d-]+\.csv$' } |
+                    Sort-Object Length -Descending)
+                if (-not $entry.Count) { throw "No npidata_pfile CSV found inside '$Path' - is this the NPPES Data Dissemination zip?" }
+                $stream = $entry[0].Open()
+                try { $rows = [RmEngine]::BuildRosterIndexFromStream($stream, $tmpOut, $cols) }
+                finally { $stream.Dispose() }
+            } finally { $zip.Dispose() }
+        } else {
+            $rows = [RmEngine]::BuildRosterIndex($src, $tmpOut, $cols)
+        }
+        Move-Item -LiteralPath $tmpOut -Destination (Get-RmNppesIndexPath) -Force
+        [pscustomobject]@{ Rows = $rows; Path = Get-RmNppesIndexPath
+            Message = "NPPES bulk index built: $('{0:N0}' -f $rows) providers. Lookups now run locally (the live registry stays as fallback)." }
+    } finally {
+        if ($tmpExtract -and (Test-Path -LiteralPath $tmpExtract)) { Remove-Item -LiteralPath $tmpExtract -Force }
+    }
+}
+
+function Import-RmCareCompare {
+    <#
+    .SYNOPSIS
+      Builds the practice-group membership index from CMS's Care Compare
+      "Doctors and Clinicians National Downloadable File" (DAC CSV). Used to
+      suggest which NPIs belong to the same group for a combined analysis.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Path)
+    Initialize-RmDataDir | Out-Null
+    $cols = @('NPI', 'org_pac_id', 'Facility Name', 'pri_spec',
+        'Provider Last Name', 'Provider First Name', 'City/Town', 'State')
+    $tmpOut = (Get-RmDacIndexPath) + '.tmp'
+    $rows = [RmEngine]::BuildRosterIndex($Path, $tmpOut, $cols)
+    Move-Item -LiteralPath $tmpOut -Destination (Get-RmDacIndexPath) -Force
+    [pscustomobject]@{ Rows = $rows; Path = Get-RmDacIndexPath
+        Message = "Care Compare index built: $('{0:N0}' -f $rows) clinician rows. The Source analysis can now suggest affiliated NPIs to combine." }
+}
+
+function Get-RmAffiliatedNpi {
+    <#
+    .SYNOPSIS
+      Therapy clinicians sharing a practice group (Care Compare org_pac_id)
+      with the given NPI - the NPIs worth combining in one analysis.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][ValidatePattern('^\d{10}$')][string]$Npi)
+    $idx = Get-RmDacIndexPath
+    if (-not (Test-Path -LiteralPath $idx)) { return @() }
+    $mine = New-Object 'System.Collections.Generic.HashSet[string]'
+    [void]$mine.Add($Npi)
+    $pacs = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($line in @([RmEngine]::ScanRosterIndex($idx, $mine, 0))) {
+        $f = $line.Split('|')
+        if ($f.Count -ge 2 -and $f[1]) { [void]$pacs.Add($f[1]) }
+    }
+    if (-not $pacs.Count) { return @() }
+    $out = @{}
+    foreach ($line in @([RmEngine]::ScanRosterIndex($idx, $pacs, 1))) {
+        $f = $line.Split('|')
+        if ($f.Count -lt 8 -or $f[0] -eq $Npi -or $out.ContainsKey($f[0])) { continue }
+        if ($f[3] -notmatch '(?i)physical therap|occupational therap|speech') { continue }
+        $out[$f[0]] = [pscustomobject]@{
+            NPI = $f[0]; Name = ("$($f[5]) $($f[4])").Trim(); Specialty = $f[3]
+            Group = $f[2]; City = $f[6]; State = $f[7]
+        }
+    }
+    @($out.Values | Sort-Object Name)
+}
+
 function Get-RmSourceSpecialtyMix {
     <#
     .SYNOPSIS
@@ -3985,5 +4251,6 @@ Export-ModuleMember -Function @(
     'Get-RmSourceAnalysis', 'Export-RmSourceReportHtml',
     'Get-RmSourceTrend', 'Add-RmSourceTrend',
     'Get-RmCountyMarket', 'Get-RmServiceProfile',
+    'Import-RmNppesBulk', 'Import-RmCareCompare', 'Get-RmAffiliatedNpi',
     'Export-RmResult', 'Clear-RmStaleTemp'
 )

@@ -879,6 +879,71 @@ Describe 'Supplemental market and billed-services data (CMS open data)' {
     }
 }
 
+Describe 'Local rosters (NPPES bulk index + Care Compare groups)' {
+    BeforeAll {
+        # Tiny NPPES bulk fixture in the REAL dissemination layout (quoted
+        # CSV, columns resolved by name).
+        $script:NppesCsv = Join-Path $script:WorkDir 'npidata_pfile_20050523-20260712.csv'
+        Set-Content -Path $script:NppesCsv -Encoding ascii -Value @(
+            '"NPI","Entity Type Code","Provider Organization Name (Legal Business Name)","Provider Last Name (Legal Name)","Provider First Name","Provider Business Practice Location Address City Name","Provider Business Practice Location Address State Name","Provider Business Practice Location Address Postal Code","Healthcare Provider Taxonomy Code_1","Provider Enumeration Date"'
+            '"7700000001","2","BULK REHAB PARTNERS, LLC","","","ROLLA","MO","654010000","261QP2000X","06/15/2008"'
+            '"7700000002","1","","BULKPT","BOB","ROLLA","MO","654011234","225100000X","01/02/2015"'
+        )
+        $script:DacCsv = Join-Path $script:WorkDir 'DAC_fixture.csv'
+        Set-Content -Path $script:DacCsv -Encoding ascii -Value @(
+            'NPI,Ind_PAC_ID,Provider Last Name,Provider First Name,pri_spec,Facility Name,org_pac_id,City/Town,State'
+            '7700000002,1111,BULKPT,BOB,PHYSICAL THERAPY,BULK REHAB PARTNERS,5555,ROLLA,MO'
+            '7700000003,2222,SECOND,SUE,OCCUPATIONAL THERAPY,BULK REHAB PARTNERS,5555,ROLLA,MO'
+            '7700000004,3333,THIRD,TOM,SPEECH LANGUAGE PATHOLOGIST,BULK REHAB PARTNERS,5555,ROLLA,MO'
+            '7700000005,4444,DOCTOR,DAN,INTERNAL MEDICINE,BULK REHAB PARTNERS,5555,ROLLA,MO'
+            '7700000006,5551,OTHER,OLA,PHYSICAL THERAPY,ELSEWHERE PT,7777,SALEM,MO'
+        )
+    }
+
+    It 'builds the NPPES index and answers lookups OFFLINE with NUCC names' {
+        $r = Import-RmNppesBulk -Path $script:NppesCsv
+        $r.Rows | Should -Be 2
+        # kill the live registry: bulk must answer alone
+        try {
+            $script:RmSaved = (Get-RmConfig).NppesUrl
+            (Get-RmConfig).NppesUrl = 'http://127.0.0.1:1/nppes/'
+            $d = Get-RmProviderDetail -Npi @('7700000001', '7700000002') -RequireZip
+            $d['7700000001'].Name | Should -Be 'BULK REHAB PARTNERS, LLC'
+            $d['7700000001'].Zip | Should -Be '65401'
+            $d['7700000001'].Specialty | Should -BeLike '*Physical Therapy*'   # NUCC name, not a bare code
+            $d['7700000002'].Name | Should -Be 'BOB BULKPT'
+        } finally { (Get-RmConfig).NppesUrl = $script:RmSaved }
+    }
+
+    It 'suggests affiliated therapy clinicians from the Care Compare index' {
+        (Import-RmCareCompare -Path $script:DacCsv).Rows | Should -Be 5
+        $aff = @(Get-RmAffiliatedNpi -Npi 7700000002)
+        # same group 5555, therapy only: SUE + TOM in; the internist and the
+        # other-group PT stay out
+        @($aff | ForEach-Object NPI) | Sort-Object | Should -Be @('7700000003', '7700000004')
+        $aff[0].Group | Should -Be 'BULK REHAB PARTNERS'
+        @(Get-RmAffiliatedNpi -Npi 7700000006).Count | Should -Be 0   # solo in its group
+    }
+
+    It 'the analysis note lists affiliated NPIs not yet combined' {
+        # 9000000001 is not in the DAC fixture: no note, no error. Then a
+        # fixture where the analyzed NPI has group-mates.
+        $sa = Get-RmSourceAnalysis -Npi 9000000001 -SkipCompetitors -CentroidPath $script:SaCsv
+        (@($sa.Notes) -join ' ') | Should -Not -BeLike '*AFFILIATED CLINICIANS*'
+        Set-Content -Path $script:DacCsv -Encoding ascii -Value @(
+            'NPI,Ind_PAC_ID,Provider Last Name,Provider First Name,pri_spec,Facility Name,org_pac_id,City/Town,State'
+            '9000000001,1111,CLINIC,TEST,PHYSICAL THERAPY,TEST REHAB,5555,TESTVILLE,MO'
+            '9000000002,2222,THERAPIST,PAT,PHYSICAL THERAPY,TEST REHAB,5555,TESTVILLE,MO'
+        )
+        Import-RmCareCompare -Path $script:DacCsv | Out-Null
+        $sa2 = Get-RmSourceAnalysis -Npi 9000000001 -SkipCompetitors -CentroidPath $script:SaCsv
+        (@($sa2.Notes) -join ' ') | Should -BeLike '*AFFILIATED CLINICIANS*PAT THERAPIST (9000000002)*'
+        # ...and combining them clears the suggestion
+        $sa3 = Get-RmSourceAnalysis -Npi @('9000000001', '9000000002') -SkipCompetitors -CentroidPath $script:SaCsv
+        (@($sa3.Notes) -join ' ') | Should -Not -BeLike '*AFFILIATED CLINICIANS*'
+    }
+}
+
 Describe 'Taxonomy scope (outpatient PT/OT/speech only)' {
     # Audited against NUCC v25.1: subspecialty therapists are IN (they are
     # therapists), assistants/physicians/cardiac/substance rehab are OUT.

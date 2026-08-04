@@ -321,6 +321,22 @@ because its shorter window would fake a trend. Read declines carefully: a
 referrer can vanish simply by falling under the 11-patient floor, and Medicare
 Advantage growth moves patients out of this data entirely.
 
+**Optional power-ups (two big free CMS files):** both are one-time imports
+from PowerShell (open PowerShell in the app folder first):
+
+- **Care Compare clinician file** — lets the Source analysis automatically
+  list the other therapy clinicians in your practice group, so you know
+  exactly which NPIs to paste together for a combined analysis. Download the
+  "National Downloadable File" CSV from
+  https://data.cms.gov/provider-data/dataset/mj5m-pzi6 (~800 MB), then run:
+  `Import-Module .\ReferralMap; Import-RmCareCompare -Path "C:\path\DAC_NationalDownloadableFile.csv"`
+- **NPPES bulk file** — makes all provider name/location lookups run locally
+  and instantly instead of calling the registry one NPI at a time. Download
+  the monthly "NPPES Data Dissemination" zip from
+  https://download.cms.gov/nppes/NPI_Files.html (~1 GB; do NOT unzip it),
+  then run: `Import-RmNppesBulk -Path "C:\path\NPPES_Data_Dissemination_....zip"`
+  The live registry stays as a fallback for anything the monthly file misses.
+
 **Smaller practices — combine your NPIs:** a practice's Medicare volume is
 often split between its **organization NPI** and its therapists' **individual
 NPIs**, and pairs under 11 patients are excluded from the data entirely — both
