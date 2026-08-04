@@ -451,6 +451,8 @@ $xaml = @'
             <Button x:Name="LkAnalysisButton" Content="Source analysis..." Padding="10,5" Margin="10,0,0,0"
                     ToolTip="A client-ready deep dive on this NPI's referral sources: concentration metrics (HHI, top-5 dependence), specialty mix, distance profile, referral-lag profile on CareSet data, charts, and auto-written findings."/>
             <Button x:Name="LkSaveReportButton" Content="Save report (HTML)..." Padding="10,4" Margin="8,0,0,0" IsEnabled="False"/>
+            <CheckBox x:Name="LkTrendCheck" Content="Include year-over-year" VerticalAlignment="Center" Margin="12,0,0,0"
+                      ToolTip="Also measure performance across EVERY imported CareSet year: volume and source count per year, source retention (kept / new / lost), and the biggest gains and declines. Adds a full scan per year, so it takes several minutes longer."/>
           </WrapPanel>
           <Border Grid.Row="2" Background="White" BorderBrush="#D5DBE1" BorderThickness="1"
                   CornerRadius="4" Padding="10" Margin="0,0,0,8">
@@ -543,7 +545,7 @@ foreach ($name in @(
     'PgRosterLabel', 'PgFootprintButton', 'PgViewCombo', 'PgTrendButton', 'PgExportGroupsButton', 'PgExportRosterButton',
     'PgRosterGrid', 'PgSummary',
     'LkNpiBox', 'LkRunButton', 'LkTrendButton', 'LkExportTrendButton',
-    'LkGeoButton', 'LkSaveMapButton', 'LkAnalysisButton', 'LkSaveReportButton', 'LkDetail',
+    'LkGeoButton', 'LkSaveMapButton', 'LkAnalysisButton', 'LkSaveReportButton', 'LkTrendCheck', 'LkDetail',
     'LkInboundLabel', 'LkExportInboundButton',
     'LkInboundGrid', 'LkOutboundLabel', 'LkExportOutboundButton', 'LkOutboundGrid',
     'RmExportMixButton',
@@ -2028,10 +2030,19 @@ $ui.LkAnalysisButton.Add_Click({
     $ui.LkSaveReportButton.IsEnabled = $false
     $ui.LkSaveMapButton.IsEnabled = $false
     $ui.LkExportTrendButton.IsEnabled = $false
+    # Year-over-year is opt-in: it adds a full scan PER imported year.
+    $wantTrend = [bool]$ui.LkTrendCheck.IsChecked
+    $hopYears = @(Get-RmAvailableDatasets | Where-Object { $_.Source -eq 'hop-teaming' })
+    if ($wantTrend -and $hopYears.Count -lt 2) {
+        Show-ErrorBox ("Year-over-year needs at least TWO imported CareSet years (found $($hopYears.Count)). " +
+            "Import another year on the Referral map tab, or clear the checkbox.")
+        return
+    }
     $who = $npis[0] + $(if ($npis.Count -gt 1) { " (+$($npis.Count - 1) more, combined)" } else { '' })
-    Invoke-Async -Kind 'lk-analysis' -Params @{ RmModulePath = $script:RmModulePath; Npi = $npis } `
-        -BusyMessage "Analyzing $who's referral sources — scanning $script:RmRowsLabel pairs, naming and locating each source, then sweeping competitors within 10 miles (first run on a big practice can take several minutes; lookups are cached)..." `
-        -WorkerScript 'param($RmModulePath, $Npi) Import-Module $RmModulePath; Get-RmSourceAnalysis -Npi $Npi' `
+    $trendBit = if ($wantTrend) { " Then repeating the scan across all $($hopYears.Count) imported years for the year-over-year section — several minutes per year." } else { '' }
+    Invoke-Async -Kind 'lk-analysis' -Params @{ RmModulePath = $script:RmModulePath; Npi = $npis; WithTrend = $wantTrend } `
+        -BusyMessage ("Analyzing $who's referral sources — scanning $script:RmRowsLabel pairs, naming and locating each source, then sweeping competitors within 10 miles (first run on a big practice can take several minutes; lookups are cached).$trendBit") `
+        -WorkerScript 'param($RmModulePath, $Npi, $WithTrend) Import-Module $RmModulePath; $sa = Get-RmSourceAnalysis -Npi $Npi; if ($WithTrend) { $sa = Add-RmSourceTrend -Analysis $sa }; $sa' `
         -OnDone {
             param($result)
             $sa = $result[0]
@@ -2051,10 +2062,15 @@ $ui.LkAnalysisButton.Add_Click({
                 " Rank #$($sa.Competitive.Rank) of $('{0:N0}' -f $sa.Competitive.ProviderCount) rehab providers within $($sa.Competitive.RadiusMiles) mi."
             } else { '' }
             $combinedBit = if ($sa.NpiCount -gt 1) { " + $($sa.NpiCount - 1) affiliated NPI(s)" } else { '' }
+            $trendBit2 = if ($sa.PSObject.Properties['Trend'] -and $sa.Trend -and @($sa.Trend.Years).Count -ge 2) {
+                $t = $sa.Trend
+                $d = if ($t.VolumeChangePct -gt 0) { 'up' } elseif ($t.VolumeChangePct -lt 0) { 'down' } else { 'flat' }
+                " Year-over-year $($t.FirstYear)-$($t.LastYear): volume $d $([math]::Abs($t.VolumeChangePct))%."
+            } else { '' }
             $ui.LkInboundLabel.Text = ("Source analysis for $($sa.Practice.Name) ($($sa.Npi)$combinedBit), $($sa.Year): " +
                 "$('{0:N0}' -f $sa.TotalPatients) patients from $('{0:N0}' -f $sa.SourceCount) sources - " +
                 "top-5 dependence $($sa.Top5Pct)%, concentration $($sa.Concentration) (HHI $('{0:N0}' -f $sa.HHI))." +
-                $rankBit + " Top 25 sources shown:")
+                $rankBit + $trendBit2 + " Top 25 sources shown:")
             $ui.LkSaveReportButton.IsEnabled = $true
             Set-Status "Source analysis ready - click 'Save report (HTML)...' for the full report with charts."
         } `
@@ -2076,7 +2092,19 @@ $ui.LkSaveReportButton.Add_Click({
         @($script:LkAnalysis.Sources) |
             Export-RmResult -Path $csvPath -Notes @($script:LkAnalysis.Notes) `
                 -Description "Full ranked referral-source table for NPI $($script:LkAnalysis.Npi) ($script:RmDataLabel)" | Out-Null
-        Set-Status "Report saved: $($r.Path) + full source CSV + methodology."
+        $extra = ''
+        if ($script:LkAnalysis.PSObject.Properties['Trend'] -and $script:LkAnalysis.Trend) {
+            $tPath = [System.IO.Path]::ChangeExtension($dialog.FileName, '.by-year.csv')
+            @($script:LkAnalysis.Trend.Years) |
+                Export-RmResult -Path $tPath -Notes @($script:LkAnalysis.Trend.Notes) `
+                    -Description "Year-over-year referral performance for NPI $($script:LkAnalysis.Npi)" | Out-Null
+            $mPath = [System.IO.Path]::ChangeExtension($dialog.FileName, '.movers.csv')
+            @($script:LkAnalysis.Trend.Movers) |
+                Export-RmResult -Path $mPath -Notes @($script:LkAnalysis.Trend.Notes) `
+                    -Description "Per-source change, $($script:LkAnalysis.Trend.FirstYear) to $($script:LkAnalysis.Trend.LastYear), for NPI $($script:LkAnalysis.Npi)" | Out-Null
+            $extra = ' + by-year CSV + movers CSV'
+        }
+        Set-Status "Report saved: $($r.Path) + full source CSV$extra + methodology."
         if (Confirm-Box "Report saved.`n`nOpen it in your browser now? (It is fully self-contained - charts and all.)") {
             try { Start-Process $r.Path } catch { Show-ErrorBox "Could not open the browser: $($_.Exception.Message)" }
         }

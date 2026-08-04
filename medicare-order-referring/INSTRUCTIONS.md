@@ -295,6 +295,21 @@ always shown, even when it ranks below the top 15; equal volumes share a
 rank). A full ranked source spreadsheet and methodology file are saved next
 to it.
 
+**Year-over-year performance:** tick **Include year-over-year** before clicking
+**Source analysis…** and the report gains a performance section covering every
+CareSet year you've imported: a column chart of referral volume per year with
+the distinct-source count tracked over it, a **source-retention** chart showing
+how many referrers were kept, gained, and lost each year, a per-year table
+(volume, sources, concentration, top-5 dependence, retention, largest source),
+and **biggest gains / biggest declines** tables naming the referrers that grew
+or fell away between your first and last year. Two extra spreadsheets are saved
+beside the report (`.by-year.csv` and `.movers.csv`). This repeats the full
+scan once per year, so it adds several minutes per year — it's off by default.
+Only CareSet years are compared; the 2015 CMS file is deliberately excluded
+because its shorter window would fake a trend. Read declines carefully: a
+referrer can vanish simply by falling under the 11-patient floor, and Medicare
+Advantage growth moves patients out of this data entirely.
+
 **Smaller practices — combine your NPIs:** a practice's Medicare volume is
 often split between its **organization NPI** and its therapists' **individual
 NPIs**, and pairs under 11 patients are excluded from the data entirely — both

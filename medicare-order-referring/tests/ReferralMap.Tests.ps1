@@ -1047,6 +1047,98 @@ Describe 'Source analysis report' {
         $html | Should -BeLike '*privacy floor*'
     }
 
+    It 'measures year-over-year performance across every imported year' {
+        # Fixture store holds hop 2021 and 2022 with identical rows, so the
+        # per-year numbers must match and retention must be a clean 100%.
+        $t = Get-RmSourceTrend -Npi 9000000001 -SkipEnrichment
+        $rows = @($t.Years)
+        $rows.Count | Should -Be 2
+        $rows[0].Year | Should -Be 2021
+        $rows[1].Year | Should -Be 2022
+        foreach ($r in $rows) {
+            $r.SharedPatients | Should -Be 65      # 45 + 20, internal flows out
+            $r.SourceCount | Should -Be 2
+            $r.HHI | Should -Be 5740
+        }
+        $rows[0].RetentionPct | Should -Be ''      # no prior year to compare
+        $rows[1].RetentionPct | Should -Be 100
+        $rows[1].RetainedSources | Should -Be 2
+        $rows[1].NewSources | Should -Be 0
+        $rows[1].LostSources | Should -Be 0
+        $t.VolumeChangePct | Should -Be 0
+        $t.FirstYear | Should -Be 2021
+        $t.LastYear | Should -Be 2022
+        @($t.Movers | Where-Object Status -eq 'Steady').Count | Should -Be 2
+        (@($t.Notes) -join ' ') | Should -BeLike '*YEAR-OVER-YEAR METHOD*'
+    }
+
+    It 'classifies gained, lost, and changed sources between the first and last year' {
+        # A third hop year (2023) with one source grown, one dropped, one new.
+        $src23 = Join-Path $script:WorkDir 'DocGraph_Hop_Teaming_2023.csv'
+        Set-Content -Path $src23 -Encoding ascii -NoNewline -Value (@(
+            'from_npi,to_npi,patient_count,transaction_count,average_day_wait,std_day_wait'
+            '8000000001,9000000001,60,65,10.0,5.0'      # grew 45 -> 60
+            '8000000009,9000000001,30,30,20.0,5.0'      # brand new
+        ) -join "`n")                                   # 8000000002 (20) is gone
+        Import-RmDataset -Path $src23 | Out-Null
+        $y23 = Join-Path $env:RM_DATA_DIR 'DocGraph_Hop_Teaming_2023.csv'
+        try {
+            $t = Get-RmSourceTrend -Npi 9000000001 -SkipEnrichment
+            $rows = @($t.Years)
+            $rows.Count | Should -Be 3
+            $last = $rows[2]
+            $last.Year | Should -Be 2023
+            $last.SharedPatients | Should -Be 90
+            $last.NewSources | Should -Be 1
+            $last.LostSources | Should -Be 1
+            $last.RetainedSources | Should -Be 1
+            $last.RetentionPct | Should -Be 50
+            $t.VolumeChangePct | Should -Be 38.5      # 65 -> 90
+            $byNpi = @{}; foreach ($m in @($t.Movers)) { $byNpi[$m.SourceNPI] = $m }
+            $byNpi['8000000001'].Status | Should -Be 'Grew'
+            $byNpi['8000000001'].Change | Should -Be 15
+            $byNpi['8000000002'].Status | Should -Be 'Lost'
+            $byNpi['8000000002'].Change | Should -Be -20
+            $byNpi['8000000009'].Status | Should -Be 'New'
+            @($t.Gained)[0].SourceNPI | Should -Be '8000000009'   # +30 tops +15
+            @($t.Lost)[0].SourceNPI | Should -Be '8000000002'
+        } finally {
+            Remove-Item $y23, "$y23.rows" -Force -ErrorAction SilentlyContinue
+            Set-RmActiveDataset -Source cms-pspp -Year 2015 | Out-Null   # restore state for later tests
+        }
+    }
+
+    It 'renders the year-over-year section with charts and mover tables' {
+        $sa = Get-RmSourceAnalysis -Npi 9000000001 -SkipCompetitors -CentroidPath $script:SaCsv
+        $sa = Add-RmSourceTrend -Analysis $sa -SkipEnrichment
+        $sa.Trend | Should -Not -BeNullOrEmpty
+        $out = Join-Path $script:WorkDir 'trend-report.html'
+        Export-RmSourceReportHtml -Analysis $sa -Path $out | Out-Null
+        $html = Get-Content $out -Raw
+        $html | Should -BeLike '*Year-over-year performance*'
+        $html | Should -BeLike '*Referral-source retention*'
+        $html | Should -BeLike '*Biggest gains*'
+        $html | Should -BeLike '*Biggest declines*'
+        $html | Should -BeLike '*YEAR-OVER-YEAR METHOD*'          # notes merged in
+        ([regex]::Matches($html, '<svg ')).Count | Should -BeGreaterOrEqual 6
+        $html | Should -Not -BeLike '*<script src*'
+        # a report WITHOUT a trend must not grow the section
+        $plain = Get-RmSourceAnalysis -Npi 9000000001 -SkipCompetitors -CentroidPath $script:SaCsv
+        $out2 = Join-Path $script:WorkDir 'no-trend-report.html'
+        Export-RmSourceReportHtml -Analysis $plain -Path $out2 | Out-Null
+        (Get-Content $out2 -Raw) | Should -Not -BeLike '*Year-over-year performance*'
+    }
+
+    It 'refuses a year-over-year run with a single imported year' {
+        $emptyDir = Join-Path $script:WorkDir 'st-empty'
+        New-Item -ItemType Directory -Path $emptyDir -Force | Out-Null
+        $saved = (Get-RmConfig).DataDir
+        try {
+            Set-RmConfig -DataDir $emptyDir
+            { Get-RmSourceTrend -Npi 9000000001 } | Should -Throw '*at least TWO*'
+        } finally { Set-RmConfig -DataDir $saved }
+    }
+
     It 'peer chart and table drop zero-volume providers but keep the practice' {
         # In ZIP 99999 only 2 of 4 listed providers have measured volume.
         $sa = Get-RmSourceAnalysis -Npi 9000000001 -CentroidPath $script:CompCsv

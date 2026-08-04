@@ -2546,8 +2546,170 @@ function Get-RmSourceAnalysis {
         DistanceBands = @($distBands)
         WaitBands    = @($waitBands)
         Competitive  = $landscape     # $null when skipped or the sweep failed
+        Trend        = $null          # filled by Add-RmSourceTrend
         Notes        = @($notes)
     }
+}
+
+function Get-RmSourceTrend {
+    <#
+    .SYNOPSIS
+      Year-over-year referral PERFORMANCE for one practice (or several NPIs
+      combined) across every imported CareSet year: volume, distinct sources,
+      concentration, and — the part a single year cannot show — which
+      referrers were kept, gained, and lost each year, plus the biggest
+      movers between the first and last year.
+    .NOTES
+      Hop Teaming years only: they share one methodology, so they are
+      comparable. The CMS 2015 file is excluded on purpose (~8-month window,
+      different scale) — mixing it in would fake a trend. Each year is a full
+      streaming scan, so expect minutes per year.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidateCount(1, 50)][ValidatePattern('^\d{10}$')][string[]]$Npi,
+        [switch]$SkipEnrichment
+    )
+    $years = @(Get-RmAvailableDatasets | Where-Object { $_.Source -eq 'hop-teaming' } | Sort-Object Year)
+    if ($years.Count -lt 2) {
+        throw ("A year-over-year analysis needs at least TWO imported CareSet years (found $($years.Count)). " +
+               "Import more years with 'Import CareSet file' / Import-RmDataset.")
+    }
+    $memberSet = New-Object 'System.Collections.Generic.HashSet[string]'
+    $npiList = @($Npi | Where-Object { $memberSet.Add($_) })
+
+    # Per-year: merge across member NPIs exactly like the single-year
+    # analysis (internal handoffs out, one row per external source).
+    $perYear = @{}
+    foreach ($y in $years) {
+        Write-Verbose "Scanning $($y.Label) for $($npiList.Count) NPI(s)..."
+        $bySrc = @{}
+        foreach ($e in @([RmEngine]::ScanInbound($y.Path, $memberSet, [RmEngine]::FormatHopTeaming))) {
+            if ($memberSet.Contains($e.SourceNpi)) { continue }
+            if (-not $bySrc.ContainsKey($e.SourceNpi)) { $bySrc[$e.SourceNpi] = 0 }
+            $bySrc[$e.SourceNpi] += $e.BeneCount
+        }
+        $perYear[$y.Year] = $bySrc
+    }
+
+    # Name the sources that matter (union of each year's top 25, capped).
+    $wanted = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($y in $years) {
+        foreach ($kv in @($perYear[$y.Year].GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 25)) {
+            [void]$wanted.Add($kv.Key)
+        }
+    }
+    $detail = @{}
+    if (-not $SkipEnrichment -and $wanted.Count -gt 0) {
+        $detail = Get-RmProviderDetail -Npi @($wanted)
+    }
+
+    # One row per year, with retention measured against the PRIOR year.
+    $rows = New-Object System.Collections.Generic.List[object]
+    $prevKeys = $null
+    foreach ($y in $years) {
+        $bySrc = $perYear[$y.Year]
+        $total = 0; foreach ($v in $bySrc.Values) { $total += $v }
+        $ranked = @($bySrc.GetEnumerator() | Sort-Object Value -Descending)
+        $hhi = 0.0
+        foreach ($kv in $ranked) { if ($total -gt 0) { $s = 100.0 * $kv.Value / $total; $hhi += $s * $s } }
+        $top1 = if ($ranked.Count -and $total -gt 0) { [math]::Round(100.0 * $ranked[0].Value / $total, 1) } else { 0 }
+        $t5 = 0; foreach ($kv in @($ranked | Select-Object -First 5)) { $t5 += $kv.Value }
+        $keys = New-Object 'System.Collections.Generic.HashSet[string]'
+        foreach ($k in $bySrc.Keys) { [void]$keys.Add($k) }
+        $new = 0; $lost = 0; $kept = 0
+        if ($null -ne $prevKeys) {
+            foreach ($k in $keys) { if ($prevKeys.Contains($k)) { $kept++ } else { $new++ } }
+            foreach ($k in $prevKeys) { if (-not $keys.Contains($k)) { $lost++ } }
+        }
+        $topName = if ($ranked.Count) {
+            $d = if ($detail.ContainsKey($ranked[0].Key)) { $detail[$ranked[0].Key] } else { $null }
+            if ($d -and $d.Name) { $d.Name } else { $ranked[0].Key }
+        } else { '' }
+        $rows.Add([pscustomobject]@{
+            Year            = $y.Year
+            SharedPatients  = $total
+            SourceCount     = $ranked.Count
+            Top1Pct         = $top1
+            Top5Pct         = if ($total -gt 0) { [math]::Round(100.0 * $t5 / $total, 1) } else { 0 }
+            HHI             = [int][math]::Round($hhi, 0)
+            NewSources      = $new
+            RetainedSources = $kept
+            LostSources     = $lost
+            RetentionPct    = if ($null -ne $prevKeys -and $prevKeys.Count -gt 0) {
+                                  [math]::Round(100.0 * $kept / $prevKeys.Count, 1) } else { '' }
+            TopSource       = $topName
+        })
+        $prevKeys = $keys
+    }
+
+    # Biggest movers, first year vs last year.
+    $firstY = $years[0].Year; $lastY = $years[$years.Count - 1].Year
+    $first = $perYear[$firstY]; $last = $perYear[$lastY]
+    $allSrc = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($k in $first.Keys) { [void]$allSrc.Add($k) }
+    foreach ($k in $last.Keys) { [void]$allSrc.Add($k) }
+    $movers = foreach ($k in $allSrc) {
+        $a0 = if ($first.ContainsKey($k)) { $first[$k] } else { 0 }
+        $b0 = if ($last.ContainsKey($k)) { $last[$k] } else { 0 }
+        $d = if ($detail.ContainsKey($k)) { $detail[$k] } else { $null }
+        [pscustomobject]@{
+            SourceNPI       = $k
+            SourceName      = if ($d) { $d.Name } else { '' }
+            SourceSpecialty = if ($d) { $d.Specialty } else { '' }
+            FirstYear       = $a0
+            LastYear        = $b0
+            Change          = $b0 - $a0
+            Status          = if ($a0 -eq 0) { 'New' } elseif ($b0 -eq 0) { 'Lost' }
+                              elseif ($b0 -gt $a0) { 'Grew' } elseif ($b0 -lt $a0) { 'Shrank' } else { 'Steady' }
+        }
+    }
+    $movers = @($movers | Sort-Object -Property @{Expression = 'Change'; Descending = $true},
+                                                @{Expression = 'SourceNPI'; Descending = $false})
+
+    $firstRow = $rows[0]; $lastRow = $rows[$rows.Count - 1]
+    $volChangePct = if ($firstRow.SharedPatients -gt 0) {
+        [math]::Round(100.0 * ($lastRow.SharedPatients - $firstRow.SharedPatients) / $firstRow.SharedPatients, 1)
+    } else { '' }
+
+    $notes = @(
+        "YEAR-OVER-YEAR METHOD: the same inbound scan repeated on each imported CareSet year ($(@($years | ForEach-Object { $_.Year }) -join ', ')), so the years are directly comparable (identical methodology, full calendar years)."
+        'Retention is measured against the PRIOR year: Retained = sources present in both years, New = present this year only, Lost = present last year only. RetentionPct = Retained as a share of LAST year''s source count.'
+        'A source "lost" may simply have fallen under the 11-patient privacy floor rather than stopped referring — treat small movements as noise and read the direction of the whole base.'
+        'Medicare FFS only: Medicare Advantage enrollment grew over these years, moving patients OUT of this data. A gentle decline can reflect that shift rather than lost referrals; compare against the area trend before concluding.'
+        'The CMS 2015 FOIA file is intentionally excluded: a different (~8-month) window and methodology, not on the same scale.'
+    )
+
+    [pscustomobject]@{
+        Npi          = $npiList[0]
+        NpiList      = @($npiList)
+        Years        = @($rows.ToArray())
+        FirstYear    = $firstY
+        LastYear     = $lastY
+        VolumeChangePct = $volChangePct
+        Movers       = $movers
+        Gained       = @($movers | Where-Object { $_.Change -gt 0 } | Select-Object -First 10)
+        Lost         = @($movers | Where-Object { $_.Change -lt 0 } |
+                            Sort-Object Change | Select-Object -First 10)
+        Notes        = @($notes)
+    }
+}
+
+function Add-RmSourceTrend {
+    <#
+    .SYNOPSIS
+      Attaches a Get-RmSourceTrend result to a Get-RmSourceAnalysis result so
+      one report can carry both the deep single-year view and the
+      year-over-year performance. Returns the analysis object.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Analysis,
+        [switch]$SkipEnrichment
+    )
+    $npis = if ($Analysis.PSObject.Properties['NpiList']) { @($Analysis.NpiList) } else { @($Analysis.Npi) }
+    $Analysis.Trend = Get-RmSourceTrend -Npi $npis -SkipEnrichment:$SkipEnrichment
+    $Analysis
 }
 
 function Export-RmReferralMapHtml {
@@ -2962,6 +3124,130 @@ function Export-RmSourceReportHtml {
 "@
     }
 
+    # ---- Year-over-year performance (when a trend is attached) -----------
+    $tr = if ($a.PSObject.Properties['Trend']) { $a.Trend } else { $null }
+    $trendHtml = ''
+    if ($tr -and @($tr.Years).Count -ge 2) {
+        $ty = @($tr.Years)
+        # Chart A: volume columns per year with a source-count line over them.
+        $tw = 620; $th = 250; $tpadL = 52; $tpadB = 42; $tpadT = 22
+        $maxVol = 1; foreach ($r in $ty) { if ($r.SharedPatients -gt $maxVol) { $maxVol = $r.SharedPatients } }
+        $maxSrc = 1; foreach ($r in $ty) { if ($r.SourceCount -gt $maxSrc) { $maxSrc = $r.SourceCount } }
+        $slotW = ($tw - $tpadL - 16) / [math]::Max(1, $ty.Count)
+        $colW = [int][math]::Min(58, $slotW * 0.6)
+        $tsb = New-Object System.Text.StringBuilder
+        $linePts = New-Object System.Text.StringBuilder
+        $plotH = $th - $tpadB - $tpadT
+        for ($i = 0; $i -lt $ty.Count; $i++) {
+            $r = $ty[$i]
+            $cx = $tpadL + ($slotW * $i) + ($slotW / 2.0)
+            $colH = [int][math]::Max(1, $plotH * $r.SharedPatients / $maxVol)
+            $cy = $th - $tpadB - $colH
+            [void]$tsb.Append(('<rect x="{0:0.#}" y="{1}" width="{2}" height="{3}" rx="3" class="bar"/>' -f ($cx - $colW / 2.0), $cy, $colW, $colH))
+            [void]$tsb.Append(('<text x="{0:0.#}" y="{1}" text-anchor="middle" class="bval">{2}</text>' -f $cx, ($cy - 6), ('{0:N0}' -f $r.SharedPatients)))
+            [void]$tsb.Append(('<text x="{0:0.#}" y="{1}" text-anchor="middle" class="axlbl">{2}</text>' -f $cx, ($th - $tpadB + 16), $r.Year))
+            $ly2 = $th - $tpadB - ($plotH * $r.SourceCount / $maxSrc)
+            [void]$linePts.Append(('{0:0.#},{1:0.#} ' -f $cx, $ly2))
+        }
+        # the source-count line + its dots, drawn over the columns
+        [void]$tsb.Append(('<polyline points="{0}" class="curve2"/>' -f $linePts.ToString().Trim()))
+        for ($i = 0; $i -lt $ty.Count; $i++) {
+            $r = $ty[$i]
+            $cx = $tpadL + ($slotW * $i) + ($slotW / 2.0)
+            $ly2 = $th - $tpadB - ($plotH * $r.SourceCount / $maxSrc)
+            [void]$tsb.Append(('<circle cx="{0:0.#}" cy="{1:0.#}" r="3.5" class="dot2"/>' -f $cx, $ly2))
+            [void]$tsb.Append(('<text x="{0:0.#}" y="{1:0.#}" text-anchor="middle" class="lbl2">{2}</text>' -f $cx, ($ly2 - 9), $r.SourceCount))
+        }
+        [void]$tsb.Append(('<text x="6" y="{0}" class="axlbl">patients</text>' -f ($tpadT - 8)))
+        [void]$tsb.Append(('<text x="{0}" y="{1}" text-anchor="end" class="lbl2">— distinct sources</text>' -f ($tw - 6), ($tpadT - 8)))
+        $trVolSvg = ('<svg viewBox="0 0 {0} {1}" role="img" aria-label="Referral volume by year">{2}</svg>' -f $tw, $th, $tsb.ToString())
+
+        # Chart B: source retention per year (retained / new / lost).
+        $rsb = New-Object System.Text.StringBuilder
+        $rYears = @($ty | Select-Object -Skip 1)      # year 1 has no prior year
+        if ($rYears.Count) {
+            $rw = 620; $rh = 210; $rpadL = 52; $rpadB = 40; $rpadT = 20
+            $maxStack = 1
+            foreach ($r in $rYears) { $s = $r.RetainedSources + $r.NewSources + $r.LostSources; if ($s -gt $maxStack) { $maxStack = $s } }
+            $rslot = ($rw - $rpadL - 16) / [math]::Max(1, $rYears.Count)
+            $rcolW = [int][math]::Min(46, $rslot * 0.5)
+            $rplotH = $rh - $rpadB - $rpadT
+            for ($i = 0; $i -lt $rYears.Count; $i++) {
+                $r = $rYears[$i]
+                $cx = $rpadL + ($rslot * $i) + ($rslot / 2.0)
+                $yTop = $rh - $rpadB
+                foreach ($seg in @(
+                    @{ V = $r.RetainedSources; C = 'segKept' }
+                    @{ V = $r.NewSources; C = 'segNew' }
+                    @{ V = $r.LostSources; C = 'segLost' })) {
+                    if ($seg.V -le 0) { continue }
+                    $segH = [int][math]::Max(1, $rplotH * $seg.V / $maxStack)
+                    $yTop -= $segH
+                    [void]$rsb.Append(('<rect x="{0:0.#}" y="{1}" width="{2}" height="{3}" class="{4}"/>' -f ($cx - $rcolW / 2.0), $yTop, $rcolW, $segH, $seg.C))
+                }
+                [void]$rsb.Append(('<text x="{0:0.#}" y="{1}" text-anchor="middle" class="axlbl">{2}</text>' -f $cx, ($rh - $rpadB + 16), $r.Year))
+                if ($r.RetentionPct -ne '') {
+                    [void]$rsb.Append(('<text x="{0:0.#}" y="{1}" text-anchor="middle" class="bval">{2}% kept</text>' -f $cx, ($yTop - 6), $r.RetentionPct))
+                }
+            }
+            foreach ($lg in @(
+                @{ X = $rpadL; T = 'retained'; C = 'segKept' }
+                @{ X = $rpadL + 96; T = 'new'; C = 'segNew' }
+                @{ X = $rpadL + 168; T = 'lost'; C = 'segLost' })) {
+                [void]$rsb.Append(('<rect x="{0}" y="{1}" width="10" height="10" rx="2" class="{2}"/>' -f $lg.X, ($rpadT - 16), $lg.C))
+                [void]$rsb.Append(('<text x="{0}" y="{1}" class="axlbl">{2}</text>' -f ($lg.X + 15), ($rpadT - 7), $lg.T))
+            }
+            $trRetSvg = ('<svg viewBox="0 0 {0} {1}" role="img" aria-label="Source retention by year">{2}</svg>' -f $rw, $rh, $rsb.ToString())
+        } else { $trRetSvg = '' }
+
+        $yrRowFmt = '<tr><td class="num">{0}</td><td class="num">{1}</td><td class="num">{2}</td>' +
+            '<td class="num">{3}</td><td class="num">{4}</td><td class="num">{5}</td><td class="num">{6}</td><td>{7}</td></tr>'
+        $yrRows = (@($ty) | ForEach-Object {
+            $yrRowFmt -f $_.Year, ('{0:N0}' -f $_.SharedPatients), ('{0:N0}' -f $_.SourceCount),
+                ('{0:N0}' -f $_.HHI), $_.Top5Pct,
+                $(if ($_.RetentionPct -eq '') { '&ndash;' } else { "$($_.RetentionPct)%" }),
+                ('{0:N0}' -f $_.NewSources), (_h ([string]$_.TopSource))
+        }) -join "`n"
+
+        $movFmt = '<tr><td>{0}</td><td>{1}</td><td class="num">{2}</td><td class="num">{3}</td><td class="num {4}">{5}</td></tr>'
+        function _movRows($rowsIn) {
+            (@($rowsIn) | ForEach-Object {
+                $nm = if ($_.SourceName) { $_.SourceName } else { "NPI $($_.SourceNPI)" }
+                $cls = if ($_.Change -gt 0) { 'up' } else { 'down' }
+                $sign = if ($_.Change -gt 0) { '+' } else { '' }
+                $movFmt -f (_h ([string]$nm)), (_h ([string]$_.SourceSpecialty)),
+                    ('{0:N0}' -f $_.FirstYear), ('{0:N0}' -f $_.LastYear), $cls, ($sign + ('{0:N0}' -f $_.Change))
+            }) -join "`n"
+        }
+        $gainRows = _movRows $tr.Gained
+        $lossRows = _movRows $tr.Lost
+        $movHead = '<tr><th>Source</th><th>Specialty</th><th class="num">' + $tr.FirstYear +
+            '</th><th class="num">' + $tr.LastYear + '</th><th class="num">Change</th></tr>'
+
+        $trendHtml = @"
+<div class="card"><h2>Year-over-year performance &mdash; $($tr.FirstYear) to $($tr.LastYear)</h2>
+<div class="body">$trVolSvg</div>
+$(if ($trRetSvg) { '<h3 class="sub2">Referral-source retention (vs the prior year)</h3><div class="body">' + $trRetSvg + '</div>' })
+<table>
+  <tr><th class="num">Year</th><th class="num">Patients</th><th class="num">Sources</th><th class="num">HHI</th>
+      <th class="num">Top-5 %</th><th class="num">Kept</th><th class="num">New</th><th>Largest source</th></tr>
+  $yrRows
+</table>
+<div class="tablenote">Kept = share of the previous year's sources still present. Sources under 11 shared patients are excluded every year, so a source can appear or vanish by crossing that floor rather than by winning or losing the relationship.</div>
+</div>
+<div class="duo">
+  <div class="card"><h2>Biggest gains, $($tr.FirstYear) &rarr; $($tr.LastYear)</h2>
+    <table>$movHead
+$gainRows
+    </table></div>
+  <div class="card"><h2>Biggest declines, $($tr.FirstYear) &rarr; $($tr.LastYear)</h2>
+    <table>$movHead
+$lossRows
+    </table></div>
+</div>
+"@
+    }
+
     # ---- Auto-written findings ------------------------------------------
     $s1 = if (@($a.Sources).Count) { @($a.Sources)[0] } else { $null }   # @()[0] throws under StrictMode
     $near = 0.0; foreach ($b in @($a.DistanceBands)) { if ($b.Band -in '0-5 mi', '5-10 mi') { $near += $b.Pct } }
@@ -2981,6 +3267,15 @@ function Export-RmSourceReportHtml {
             "The file shows no measured inbound volume for this practice — every pair (if any) fell under the 11-patient privacy floor. $('{0:N0}' -f $comp.ProvidersWithVolume) of $('{0:N0}' -f $comp.ProviderCount) area providers do show measured volume." })
         $(if ($a.TotalPatients -gt 0 -and $a.TotalPatients -lt 1000) {
             'Note: pairs under 11 patients are excluded at the source, so a modest measured total usually understates the real referral base — and volume may sit under individual therapist NPIs (a combined multi-NPI analysis captures both).' })
+        $(if ($tr -and @($tr.Years).Count -ge 2 -and $tr.VolumeChangePct -ne '') {
+            $t0 = @($tr.Years)[0]; $t1 = @($tr.Years)[@($tr.Years).Count - 1]
+            $dir = if ($tr.VolumeChangePct -gt 0) { 'grew' } elseif ($tr.VolumeChangePct -lt 0) { 'declined' } else { 'held flat' }
+            $mag = [math]::Abs($tr.VolumeChangePct)
+            "Measured referral volume $dir $mag% from $($tr.FirstYear) to $($tr.LastYear) ($('{0:N0}' -f $t0.SharedPatients) to $('{0:N0}' -f $t1.SharedPatients) patients), while the distinct-source count went from $('{0:N0}' -f $t0.SourceCount) to $('{0:N0}' -f $t1.SourceCount)." })
+        $(if ($tr -and @($tr.Years).Count -ge 2) {
+            $tl = @($tr.Years)[@($tr.Years).Count - 1]
+            if ($tl.RetentionPct -ne '') {
+                "In $($tl.Year) the practice kept $($tl.RetentionPct)% of the prior year's referral sources, added $('{0:N0}' -f $tl.NewSources) and lost $('{0:N0}' -f $tl.LostSources)." } })
         $(if ($comp -and @($comp.Competitors).Count) {
             $c1 = @($comp.Competitors)[0]
             if ([int]$c1.SharedPatients -gt 0) {
@@ -3005,7 +3300,8 @@ function Export-RmSourceReportHtml {
         "Showing the top 25 of $('{0:N0}' -f @($a.Sources).Count) sources — the full table is in the CSV saved beside this report."
     } else { '' }
     $waitTh = if ($a.IsHop) { '<th class="num">Avg lag (days)</th>' } else { '' }
-    $notesHtml = (@($a.Notes) | Where-Object { $_ } | ForEach-Object { '<li>' + (_h ([string]$_)) + '</li>' }) -join "`n"
+    $allNotes = @($a.Notes) + $(if ($tr) { @('') + @($tr.Notes) } else { @() })
+    $notesHtml = (@($allNotes) | Where-Object { $_ } | ForEach-Object { '<li>' + (_h ([string]$_)) + '</li>' }) -join "`n"
     $generated = (Get-Date).ToString('MMMM d, yyyy')
 
     $html = @"
@@ -3047,6 +3343,13 @@ function Export-RmSourceReportHtml {
   .grid { stroke:#e3e9ee; stroke-width:1; }
   .axlbl { font-size:10.5px; fill:#7b8794; }
   .curve { fill:none; stroke:var(--accent); stroke-width:2.5; }
+  .curve2 { fill:none; stroke:#c98f3d; stroke-width:2; }
+  .dot2 { fill:#c98f3d; }
+  .lbl2 { font-size:10.5px; fill:#9a6d2c; }
+  .segKept { fill:#2c5f8a; } .segNew { fill:#6f9bbd; } .segLost { fill:#c2ccd4; }
+  .sub2 { margin:2px 0 0; padding:6px 18px 0; font-size:12.5px; font-weight:600; color:#33475c; }
+  td.up { color:#1d6b45; font-weight:600; }
+  td.down { color:#a94420; font-weight:600; }
   .findings { font-size:13.5px; line-height:1.65; margin:2px 0 6px; padding-left:22px; }
   .findings li { margin-bottom:4px; }
   .empty { font-size:13.5px; line-height:1.6; margin:2px 0 10px; color:#33475c; }
@@ -3112,6 +3415,7 @@ source, specialty, distance and referral-lag breakdowns are omitted rather than 
 <p class="empty">The competitive landscape below is still measured and useful: it shows which providers in the same area <i>do</i> carry measured volume.</p>
 </div></div>
 "@ })
+$trendHtml
 $compHtml
 $(if ($hasVolume) { @"
 <div class="card">
@@ -3242,5 +3546,6 @@ Export-ModuleMember -Function @(
     'Get-RmProviderTrend', 'Get-RmPracticeBenchmark', 'Get-RmSourceSpecialtyMix',
     'Get-RmReferralGeography', 'Export-RmReferralMapHtml',
     'Get-RmSourceAnalysis', 'Export-RmSourceReportHtml',
+    'Get-RmSourceTrend', 'Add-RmSourceTrend',
     'Export-RmResult', 'Clear-RmStaleTemp'
 )
