@@ -880,4 +880,66 @@ Describe 'Source analysis report' {
         (Export-RmSourceReportHtml -Analysis $sa -Path $out).Sources | Should -Be 0
         (Get-Content $out -Raw) | Should -BeLike '*0*Shared patients*'
     }
+
+    It 'ranks the practice against every rehab provider within the radius' {
+        # 99998 is ~6.9 mi from 99999, so the default 10-mile sweep must pull
+        # in the neighbor; 86442 stays ~1,400 mi away.
+        $script:CompCsv = Join-Path $script:WorkDir 'comp-centroids.csv'
+        Set-Content -Path $script:CompCsv -Encoding ascii -Value @(
+            'zip,lat,lon'
+            '99999,40.0000,-90.0000'
+            '99998,40.1000,-90.0000'
+            '86442,35.1000,-114.6000'
+        )
+        $sa = Get-RmSourceAnalysis -Npi 9000000001 -CentroidPath $script:CompCsv
+        $c = $sa.Competitive
+        $c | Should -Not -BeNullOrEmpty
+        $c.RadiusMiles | Should -Be 10
+        $c.ZipCount | Should -Be 2            # 99999 + 99998
+        $c.ProviderCount | Should -Be 4       # org, individual PT, new grad, neighbor
+        $c.ProvidersWithVolume | Should -Be 2
+        $c.Rank | Should -Be 1
+        $c.RegionPatients | Should -Be 88     # 65 (org) + 23 (individual PT)
+        $c.SharePct | Should -Be 73.9
+        $peers = @($c.Peers)
+        $peers[0].You | Should -Be '>> YOU'
+        $peers[0].DistanceMiles | Should -Be 0
+        $peers[1].NPI | Should -Be '9000000002'
+        $peers[1].SharedPatients | Should -Be 23
+        $peers[1].SharePct | Should -Be 26.1
+        $nb = @($peers | Where-Object NPI -eq '9000000007')[0]
+        [double]$nb.DistanceMiles | Should -BeGreaterThan 6      # the neighbor, located
+        [double]$nb.DistanceMiles | Should -BeLessThan 8
+        @($c.Competitors)[0].NPI | Should -Be '9000000002'       # top competitor excludes self
+        (@($sa.Notes) -join ' ') | Should -BeLike '*COMPETITIVE LANDSCAPE*'
+    }
+
+    It 'renders the competitive card; -SkipCompetitors skips sweep and card' {
+        $sa = Get-RmSourceAnalysis -Npi 9000000001 -CentroidPath $script:CompCsv
+        $out = Join-Path $script:WorkDir 'comp-report.html'
+        Export-RmSourceReportHtml -Analysis $sa -Path $out | Out-Null
+        $html = Get-Content $out -Raw
+        $html | Should -BeLike '*Competitive landscape*'
+        $html | Should -BeLike '*Rank within 10 mi*'
+        $html | Should -BeLike '*>YOU<*'                         # highlighted own row
+        $html | Should -BeLike '*ranks #1*'                      # auto-written finding
+        ([regex]::Matches($html, '<svg ')).Count | Should -BeGreaterOrEqual 5
+        $sk = Get-RmSourceAnalysis -Npi 9000000001 -SkipCompetitors -CentroidPath $script:CompCsv
+        $sk.Competitive | Should -BeNullOrEmpty
+        $out2 = Join-Path $script:WorkDir 'skip-report.html'
+        Export-RmSourceReportHtml -Analysis $sk -Path $out2 | Out-Null
+        (Get-Content $out2 -Raw) | Should -Not -BeLike '*Competitive landscape*'
+    }
+
+    It 'degrades honestly when the area has no other rehab providers' {
+        # 8000000002 sits in ZIP 86442 where the registry lists no rehab
+        # providers at all: the landscape is self-only, never an error.
+        $sa = Get-RmSourceAnalysis -Npi 8000000002 -CentroidPath $script:CompCsv
+        $c = $sa.Competitive
+        $c.ProviderCount | Should -Be 1
+        $c.Rank | Should -Be 1
+        $c.RegionPatients | Should -Be 0
+        $c.SharePct | Should -Be 0
+        @($c.Competitors).Count | Should -Be 0
+    }
 }

@@ -2177,12 +2177,20 @@ function Get-RmSourceAnalysis {
       the active dataset: every inbound source ranked with share and
       cumulative share, geography (distance from the practice), specialty
       mix, concentration metrics (top-1/top-5 dependence, HHI), and — on
-      CareSet data — a referral-lag profile. Feed the result to
+      CareSet data — a referral-lag profile. Also sweeps the practice's
+      competitive landscape: every outpatient rehab provider within
+      -CompetitorRadiusMiles straight-line miles, ranked by inbound volume,
+      with the practice's own rank and share. Feed the result to
       Export-RmSourceReportHtml for the client-ready report.
+    .PARAMETER CompetitorRadiusMiles
+      Radius for the competitive sweep (default 10). -SkipCompetitors skips
+      the sweep entirely (faster; Competitive comes back $null).
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][ValidatePattern('^\d{10}$')][string]$Npi,
+        [ValidateRange(1, 50)][double]$CompetitorRadiusMiles = 10,
+        [switch]$SkipCompetitors,
         [string]$CentroidPath
     )
     $info = Get-RmDatasetInfo
@@ -2313,12 +2321,107 @@ function Get-RmSourceAnalysis {
 
     $mix = if ($sources.Count) { @(Get-RmSourceSpecialtyMix -Rows $sources) } else { @() }
 
+    # Competitive landscape: the same NPPES outpatient-rehab taxonomy sweep
+    # the Referral map uses, over every ZIP whose centroid falls within the
+    # radius, then ONE engine pass for the peers' inbound volumes. The
+    # analyzed practice's own row reuses the volumes computed above — the
+    # three code paths must agree by construction. A sweep failure degrades
+    # to a note; it never kills the main analysis.
+    $landscape = $null
+    $landscapeNote = $null
+    if (-not $SkipCompetitors) {
+        try {
+            if ($pracZip -notmatch '^\d{5}$') {
+                throw "NPPES lists no usable 5-digit practice-location ZIP for $Npi, so the radius cannot be centered."
+            }
+            $rzips = @(Get-RmZipsInRadius -Zip $pracZip -RadiusMiles $CompetitorRadiusMiles -CentroidPath $CentroidPath)
+            Write-Verbose "Competitive sweep: $($rzips.Count) ZIP(s) within $CompetitorRadiusMiles mi of $pracZip..."
+            $peers = @(Find-RmClinic -ZipList $rzips)
+            $others = New-Object 'System.Collections.Generic.HashSet[string]'
+            foreach ($p in $peers) { if ($p.NPI -ne $Npi) { [void]$others.Add($p.NPI) } }
+            $peerAgg = @{}
+            if ($others.Count -gt 0) {
+                Write-Verbose "Scanning $($info.Label) for $($others.Count) peer providers..."
+                foreach ($e in @([RmEngine]::ScanInbound($info.Path, $others, $info.Format))) {
+                    if (-not $peerAgg.ContainsKey($e.TargetNpi)) {
+                        $peerAgg[$e.TargetNpi] = [pscustomobject]@{ Benes = 0; Sources = 0 }
+                    }
+                    $peerAgg[$e.TargetNpi].Benes += $e.BeneCount
+                    $peerAgg[$e.TargetNpi].Sources += 1
+                }
+            }
+            # The analyzed practice always gets a row, built from its OWN scan
+            # above (even when its taxonomy is outside the rehab sweep).
+            $rows = New-Object System.Collections.Generic.List[object]
+            $rows.Add([pscustomobject]@{
+                NPI = $Npi; Name = $pracName
+                Type = if ($isOrg) { 'Organization' } else { 'Individual' }
+                City = if ($loc.Count) { [string](Get-RmProp $loc[0] 'city') } else { '' }
+                State = if ($loc.Count) { [string](Get-RmProp $loc[0] 'state') } else { '' }
+                Zip = $pracZip; DistanceMiles = [double]0
+                ReferralSources = $edges.Count; SharedPatients = $total
+            })
+            foreach ($p in $peers) {
+                if ($p.NPI -eq $Npi) { continue }
+                $agg = if ($peerAgg.ContainsKey($p.NPI)) { $peerAgg[$p.NPI] } else { $null }
+                $pz = [string]$p.Zip
+                $rows.Add([pscustomobject]@{
+                    NPI = $p.NPI; Name = $p.Name; Type = $p.Type
+                    City = $p.City; State = $p.State; Zip = $pz
+                    DistanceMiles = if ($pz -match '^\d{5}$' -and $pracLoc -and $centroids.ContainsKey($pz)) {
+                        Get-RmMilesBetween $pracLoc[0] $pracLoc[1] $centroids[$pz][0] $centroids[$pz][1]
+                    } else { '' }
+                    ReferralSources = $(if ($agg) { $agg.Sources } else { 0 })
+                    SharedPatients  = $(if ($agg) { $agg.Benes } else { 0 })
+                })
+            }
+            $regionTotal = 0; foreach ($rw in $rows) { $regionTotal += [int]$rw.SharedPatients }
+            $rankedPeers = @($rows.ToArray() |
+                Sort-Object -Property @{Expression = 'SharedPatients'; Descending = $true},
+                                      @{Expression = 'Name'; Descending = $false})
+            $myRank = 0; $withVol = 0
+            $outRows = New-Object System.Collections.Generic.List[object]
+            for ($i = 0; $i -lt $rankedPeers.Count; $i++) {
+                $rp = $rankedPeers[$i]
+                if ($rp.NPI -eq $Npi) { $myRank = $i + 1 }
+                if ([int]$rp.SharedPatients -gt 0) { $withVol++ }
+                $outRows.Add([pscustomobject]@{
+                    Rank = $i + 1
+                    You  = if ($rp.NPI -eq $Npi) { '>> YOU' } else { '' }
+                    NPI = $rp.NPI; Name = $rp.Name; Type = $rp.Type
+                    City = $rp.City; State = $rp.State; Zip = $rp.Zip
+                    DistanceMiles = $rp.DistanceMiles
+                    ReferralSources = $rp.ReferralSources
+                    SharedPatients = $rp.SharedPatients
+                    SharePct = if ($regionTotal -gt 0) { [math]::Round(100.0 * $rp.SharedPatients / $regionTotal, 1) } else { 0 }
+                })
+            }
+            $landscape = [pscustomobject]@{
+                RadiusMiles         = $CompetitorRadiusMiles
+                ZipCount            = $rzips.Count
+                ProviderCount       = $rankedPeers.Count
+                ProvidersWithVolume = $withVol
+                RegionPatients      = $regionTotal
+                Rank                = $myRank
+                SharePct            = if ($regionTotal -gt 0) { [math]::Round(100.0 * $total / $regionTotal, 1) } else { 0 }
+                Peers               = @($outRows.ToArray() | Select-Object -First 15)
+                Competitors         = @($outRows.ToArray() | Where-Object { -not $_.You } | Select-Object -First 5)
+            }
+        } catch {
+            $landscapeNote = "COMPETITIVE LANDSCAPE unavailable for this run: $($_.Exception.Message)"
+            Write-Warning $landscapeNote
+        }
+    }
+
     $notes = @(Get-RmMethodologyNotes -Info $info) + @(
         ''
         "SOURCE ANALYSIS METHOD: every inbound pair of NPI $Npi ($pracName) in $($info.Label), ranked by shared patients. PctOfVolume/CumulativePct are shares of this practice's total inbound volume."
         'CONCENTRATION: HHI = sum of squared percentage shares (0-10,000); above ~2,500 is highly concentrated — losing one relationship materially moves the total. Top-1/5/10 dependence reads the same risk directly.'
         'Distances are straight-line miles between ZIP-area centroids (US Census) using TODAY''s NPPES practice addresses — a source that moved is measured where it is now.'
         $(if ($isHop) { 'REFERRAL-LAG PROFILE: average days from source visit to this practice''s visit, volume-weighted. Short lags look like referrals; 90+ days usually means co-occurring care (labs, hospitals), not referral flow.' })
+        $(if ($landscape) { "COMPETITIVE LANDSCAPE: peers are the NPPES-listed outpatient rehab providers (the same PT/OT/SLP taxonomy sweep the Referral map uses) whose practice location falls in the $($landscape.ZipCount) ZIP(s) within $($landscape.RadiusMiles) straight-line miles of ZIP $pracZip, ranked by inbound shared-patient volume on $($info.Label). Share of area volume = a provider's inbound volume over the SUM across all listed providers — share of measured referral VOLUME, not of patients." })
+        $(if ($landscape) { 'A practice''s volume is often SPLIT between its organization NPI and its therapists'' individual NPIs, so a group can rank below its true combined volume. Benchmark the org NPI and its key therapists separately for the full picture.' })
+        $(if ($landscapeNote) { $landscapeNote })
         $(if ($capNote) { $capNote })
     ) | Where-Object { $null -ne $_ -and $_ -ne $false }
 
@@ -2343,6 +2446,7 @@ function Get-RmSourceAnalysis {
         SpecialtyMix = @($mix)
         DistanceBands = @($distBands)
         WaitBands    = @($waitBands)
+        Competitive  = $landscape     # $null when skipped or the sweep failed
         Notes        = @($notes)
     }
 }
@@ -2699,6 +2803,55 @@ function Export-RmSourceReportHtml {
     $distSvg = _bandSvg $a.DistanceBands 'Referral volume by distance'
     $waitSvg = if ($a.IsHop -and @($a.WaitBands).Count) { _bandSvg $a.WaitBands 'Referral volume by lag' } else { '' }
 
+    # ---- Chart 6 + table: competitive landscape (when the sweep ran) -----
+    $comp = if ($a.PSObject.Properties['Competitive']) { $a.Competitive } else { $null }
+    $compHtml = ''
+    if ($comp -and @($comp.Peers).Count) {
+        $cpTop = @($comp.Peers | Select-Object -First 10)
+        $cpMax = 1; foreach ($p in $cpTop) { if ($p.SharedPatients -gt $cpMax) { $cpMax = $p.SharedPatients } }
+        $cpBars = New-Object System.Text.StringBuilder
+        $cy = 4
+        foreach ($p in $cpTop) {
+            $cbw = [int][math]::Max(2, $chartW * $p.SharedPatients / $cpMax)
+            $cnm = [string]$p.Name
+            if ($p.You) { $cnm += ' (you)' }
+            if ($cnm.Length -gt 40) { $cnm = $cnm.Substring(0, 39) + '…' }
+            $cls = if ($p.You) { 'bar' } else { 'barmuted' }
+            [void]$cpBars.Append(('<text x="{0}" y="{1}" text-anchor="end" class="blbl">{2}</text>' -f ($labelW - 8), ($cy + 16), (_h $cnm)))
+            [void]$cpBars.Append(('<rect x="{0}" y="{1}" width="{2}" height="{3}" rx="3" class="{4}"/>' -f $labelW, $cy, $cbw, $barH, $cls))
+            [void]$cpBars.Append(('<text x="{0}" y="{1}" class="bval">{2}  ({3}%)</text>' -f ($labelW + $cbw + 6), ($cy + 16), ('{0:N0}' -f $p.SharedPatients), $p.SharePct))
+            $cy += $barH + $gap
+        }
+        $cpSvg = ('<svg viewBox="0 0 {0} {1}" role="img" aria-label="Competitive landscape">{2}</svg>' -f $w, ($cpTop.Count * ($barH + $gap) + 10), $cpBars.ToString())
+        $cpRowFmt = '<tr{0}><td class="num">{1}</td><td>{2}</td><td>{3}</td><td>{4}</td>' +
+            '<td class="num">{5}</td><td class="num">{6}</td><td class="num">{7}</td><td class="num">{8}%</td></tr>'
+        $cpRows = (@($comp.Peers) | ForEach-Object {
+            $tag = if ($_.You) { ' class="you"' } else { '' }
+            $nmCell = (_h ([string]$_.Name)) + $(if ($_.You) { ' <span class="youtag">YOU</span>' } else { '' })
+            $miles = if ($_.DistanceMiles -is [double]) { '{0:N1}' -f $_.DistanceMiles } else { '' }
+            $cpRowFmt -f $tag, $_.Rank, $nmCell,
+                (_h ([string]$_.Type)),
+                (_h (("{0}, {1} {2}" -f $_.City, $_.State, $_.Zip).Trim(', ').Trim())),
+                $miles, ('{0:N0}' -f $_.ReferralSources), ('{0:N0}' -f $_.SharedPatients), $_.SharePct
+        }) -join "`n"
+        $cpNote = if ($comp.ProviderCount -gt @($comp.Peers).Count) {
+            "Top $(@($comp.Peers).Count) of $('{0:N0}' -f $comp.ProviderCount) outpatient rehab providers within $($comp.RadiusMiles) miles ($('{0:N0}' -f $comp.ProvidersWithVolume) with measured volume)."
+        } else {
+            "All $('{0:N0}' -f $comp.ProviderCount) outpatient rehab providers within $($comp.RadiusMiles) miles ($('{0:N0}' -f $comp.ProvidersWithVolume) with measured volume)."
+        }
+        $compHtml = @"
+<div class="card"><h2>Competitive landscape &mdash; inbound referral volume within $($comp.RadiusMiles) miles</h2>
+<div class="body">$cpSvg</div>
+<table>
+  <tr><th class="num">#</th><th>Practice</th><th>Type</th><th>Location</th>
+      <th class="num">Miles</th><th class="num">Sources</th><th class="num">Patients</th><th class="num">Area share</th></tr>
+  $cpRows
+</table>
+<div class="tablenote">$cpNote A practice's volume can be split across its organization and individual therapist NPIs.</div>
+</div>
+"@
+    }
+
     # ---- Auto-written findings ------------------------------------------
     $s1 = if (@($a.Sources).Count) { @($a.Sources)[0] } else { $null }   # @()[0] throws under StrictMode
     $near = 0.0; foreach ($b in @($a.DistanceBands)) { if ($b.Band -in '0-5 mi', '5-10 mi') { $near += $b.Pct } }
@@ -2710,6 +2863,15 @@ function Export-RmSourceReportHtml {
         $(if ($a.IsHop -and @($a.WaitBands).Count) {
             $fast = 0.0; foreach ($b in @($a.WaitBands)) { if ($b.Band -in '0-7 days', '8-30 days') { $fast += $b.Pct } }
             "$([math]::Round($fast,1))% of volume arrives within 30 days of the source visit (referral-like); the remainder reflects looser or co-occurring care patterns." })
+        $(if ($comp -and $comp.Rank) {
+            "Among $('{0:N0}' -f $comp.ProviderCount) outpatient rehab providers within $($comp.RadiusMiles) miles, the practice ranks #$($comp.Rank) by inbound Medicare referral volume, holding $($comp.SharePct)% of the area's measured volume." })
+        $(if ($comp -and @($comp.Competitors).Count) {
+            $c1 = @($comp.Competitors)[0]
+            if ([int]$c1.SharedPatients -gt 0) {
+                "Its largest competitor is $($c1.Name) (#$($c1.Rank) in the area) with $('{0:N0}' -f $c1.SharedPatients) shared patients — $($c1.SharePct)% of area volume."
+            } else {
+                'No other provider in the area shows measured inbound volume (pairs under 11 patients are excluded from the data).'
+            } })
     ) | Where-Object { $_ }
     $findingsHtml = (@($findings) | ForEach-Object { '<li>' + (_h ([string]$_)) + '</li>' }) -join "`n"
 
@@ -2776,6 +2938,10 @@ function Export-RmSourceReportHtml {
   th { background:#f2f5f8; color:#33475c; font-weight:600; font-size:11px;
        text-transform:uppercase; letter-spacing:.4px; border-top:none; }
   tr:nth-child(even) td { background:#f8fafc; }
+  tr.you td { background:#e4eef6; font-weight:600; }
+  .youtag { background:var(--accent); color:#fff; font-size:9.5px; font-weight:700;
+            padding:1px 6px; border-radius:99px; vertical-align:1px; letter-spacing:.5px; }
+  .barmuted { fill:#9db4c6; }
   td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
   td.mono { font-variant-numeric:tabular-nums; }
   .tablenote { padding:8px 18px 10px; color:var(--sub); font-size:12px; }
@@ -2800,6 +2966,7 @@ Inbound Medicare shared-patient volume, $($a.Year).</p>
   <div class="stat"><b>$($a.Top1Pct)%</b><span>From top source</span></div>
   <div class="stat"><b>$($a.Top5Pct)%</b><span>Top-5 dependence</span></div>
   <div class="stat$(if ($a.HHI -ge 2500) { ' warn' })"><b>$('{0:N0}' -f $a.HHI)</b><span>Concentration (HHI)</span></div>
+$(if ($comp -and $comp.Rank) { '  <div class="stat"><b>#' + $comp.Rank + ' of ' + ('{0:N0}' -f $comp.ProviderCount) + '</b><span>Rank within ' + $comp.RadiusMiles + ' mi</span></div>' })
 </div>
 <div class="card"><h2>Key findings</h2><div class="body"><ul class="findings">
 $findingsHtml
@@ -2813,6 +2980,7 @@ $findingsHtml
   <div class="card"><h2>Volume by distance from the practice</h2><div class="body">$distSvg</div></div>
   $(if ($waitSvg) { '<div class="card"><h2>Volume by referral lag (days from source visit)</h2><div class="body">' + $waitSvg + '</div></div>' })
 </div>
+$compHtml
 <div class="card">
   <h2>Source detail</h2>
   <table>

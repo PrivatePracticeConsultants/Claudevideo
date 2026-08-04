@@ -2022,7 +2022,7 @@ $ui.LkAnalysisButton.Add_Click({
     $ui.LkSaveMapButton.IsEnabled = $false
     $ui.LkExportTrendButton.IsEnabled = $false
     Invoke-Async -Kind 'lk-analysis' -Params @{ RmModulePath = $script:RmModulePath; Npi = $npi } `
-        -BusyMessage "Analyzing $npi's referral sources — scanning $script:RmRowsLabel pairs, then naming and locating each source (first run on a big practice can take several minutes; lookups are cached)..." `
+        -BusyMessage "Analyzing $npi's referral sources — scanning $script:RmRowsLabel pairs, naming and locating each source, then sweeping competitors within 10 miles (first run on a big practice can take several minutes; lookups are cached)..." `
         -WorkerScript 'param($RmModulePath, $Npi) Import-Module $RmModulePath; Get-RmSourceAnalysis -Npi $Npi' `
         -OnDone {
             param($result)
@@ -2038,9 +2038,14 @@ $ui.LkAnalysisButton.Add_Click({
             $cols = @('Rank','SourceNPI','SourceName','SourceSpecialty','City','State','SharedPatients','PctOfVolume','CumulativePct','DistanceMiles')
             if ($sa.IsHop) { $cols += 'AvgDayWait' }
             $ui.LkInboundGrid.ItemsSource = (ConvertTo-DataTable -Rows $rows -Columns $cols).DefaultView
+            # Competitive is $null when the sweep failed (analysis still valid).
+            $rankBit = if ($sa.PSObject.Properties['Competitive'] -and $sa.Competitive -and $sa.Competitive.Rank) {
+                " Rank #$($sa.Competitive.Rank) of $('{0:N0}' -f $sa.Competitive.ProviderCount) rehab providers within $($sa.Competitive.RadiusMiles) mi."
+            } else { '' }
             $ui.LkInboundLabel.Text = ("Source analysis for $($sa.Practice.Name) ($($sa.Npi)), $($sa.Year): " +
                 "$('{0:N0}' -f $sa.TotalPatients) patients from $('{0:N0}' -f $sa.SourceCount) sources - " +
-                "top-5 dependence $($sa.Top5Pct)%, concentration $($sa.Concentration) (HHI $('{0:N0}' -f $sa.HHI)). Top 25 shown:")
+                "top-5 dependence $($sa.Top5Pct)%, concentration $($sa.Concentration) (HHI $('{0:N0}' -f $sa.HHI))." +
+                $rankBit + " Top 25 sources shown:")
             $ui.LkSaveReportButton.IsEnabled = $true
             Set-Status "Source analysis ready - click 'Save report (HTML)...' for the full report with charts."
         } `

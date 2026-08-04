@@ -287,6 +287,12 @@ is dangerously dependent on a few relationships), auto-written findings, a
 top-sources chart, the specialty mix of the referral base, a concentration
 curve, volume by distance from the practice, and — on CareSet data — a
 referral-lag profile that separates true referral flow from co-occurring care.
+The report also includes a **competitive landscape**: every outpatient rehab
+provider within 10 miles of the practice, ranked by inbound Medicare referral
+volume, with the analyzed practice's rank and share of area volume, its top
+competitors, and a top-15 table (the practice's own row highlighted). Keep in
+mind a group's volume is often split between its organization NPI and its
+therapists' individual NPIs — check both for the full picture.
 A full ranked source spreadsheet and methodology file are saved next to it.
 
 **Referral trend (multi-year):** if you've imported **two or more** CareSet
