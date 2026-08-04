@@ -115,6 +115,11 @@ SOURCES = {
     '8000000002': provider('8000000002', 'NPI-1', ('OLIVIA', 'ORTHO'), ['207X00000X'],
                            '864420000', primary_desc='Orthopaedic Surgery'),
     # 8000000003 deliberately absent -> "(NPI deactivated or not found)"
+    # A source that appears only in a LATER trend year: it sits outside every
+    # year's top-25 enrichment slice, so naming it proves the trend enriches
+    # its biggest movers too.
+    '8000000009': provider('8000000009', 'NPI-2', 'NEWCOMER IMAGING LLC', ['261QR0400X'],
+                           '999990000', primary_desc='Clinic/Center Rehabilitation'),
 }
 
 # ZIP 77777: individual therapists for the PracticeGroups tests. Two belong to a

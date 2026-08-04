@@ -1060,7 +1060,11 @@ Describe 'Source analysis report' {
             $r.SourceCount | Should -Be 2
             $r.HHI | Should -Be 5740
         }
-        $rows[0].RetentionPct | Should -Be ''      # no prior year to compare
+        # first year has no prior year: blank, never a measured-looking 0
+        $rows[0].RetentionPct | Should -Be ''
+        $rows[0].NewSources | Should -Be ''
+        $rows[0].RetainedSources | Should -Be ''
+        $rows[0].LostSources | Should -Be ''
         $rows[1].RetentionPct | Should -Be 100
         $rows[1].RetainedSources | Should -Be 2
         $rows[1].NewSources | Should -Be 0
@@ -1102,6 +1106,10 @@ Describe 'Source analysis report' {
             $byNpi['8000000009'].Status | Should -Be 'New'
             @($t.Gained)[0].SourceNPI | Should -Be '8000000009'   # +30 tops +15
             @($t.Lost)[0].SourceNPI | Should -Be '8000000002'
+            # movers must be NAMED even when they sit outside a year's top 25
+            $named = Get-RmSourceTrend -Npi 9000000001
+            @(@($named.Gained) | Where-Object SourceNPI -eq '8000000009')[0].SourceName |
+                Should -Be 'NEWCOMER IMAGING LLC'
         } finally {
             Remove-Item $y23, "$y23.rows" -Force -ErrorAction SilentlyContinue
             Set-RmActiveDataset -Source cms-pspp -Year 2015 | Out-Null   # restore state for later tests

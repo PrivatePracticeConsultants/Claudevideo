@@ -2592,13 +2592,26 @@ function Get-RmSourceTrend {
         $perYear[$y.Year] = $bySrc
     }
 
-    # Name the sources that matter (union of each year's top 25, capped).
+    # Name the sources that matter: each year's top 25 PLUS the biggest
+    # first-to-last movers. Without the movers a source that grew from
+    # nothing into a major referrer would show as a bare NPI in the very
+    # table meant to name it.
+    $firstY0 = $years[0].Year; $lastY0 = $years[$years.Count - 1].Year
     $wanted = New-Object 'System.Collections.Generic.HashSet[string]'
     foreach ($y in $years) {
         foreach ($kv in @($perYear[$y.Year].GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 25)) {
             [void]$wanted.Add($kv.Key)
         }
     }
+    $deltas = @{}
+    foreach ($k in @($perYear[$firstY0].Keys) + @($perYear[$lastY0].Keys)) {
+        if ($deltas.ContainsKey($k)) { continue }
+        $v0 = if ($perYear[$firstY0].ContainsKey($k)) { $perYear[$firstY0][$k] } else { 0 }
+        $v1 = if ($perYear[$lastY0].ContainsKey($k)) { $perYear[$lastY0][$k] } else { 0 }
+        $deltas[$k] = $v1 - $v0
+    }
+    foreach ($kv in @($deltas.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 15)) { [void]$wanted.Add($kv.Key) }
+    foreach ($kv in @($deltas.GetEnumerator() | Sort-Object Value | Select-Object -First 15)) { [void]$wanted.Add($kv.Key) }
     $detail = @{}
     if (-not $SkipEnrichment -and $wanted.Count -gt 0) {
         $detail = Get-RmProviderDetail -Npi @($wanted)
@@ -2633,9 +2646,11 @@ function Get-RmSourceTrend {
             Top1Pct         = $top1
             Top5Pct         = if ($total -gt 0) { [math]::Round(100.0 * $t5 / $total, 1) } else { 0 }
             HHI             = [int][math]::Round($hhi, 0)
-            NewSources      = $new
-            RetainedSources = $kept
-            LostSources     = $lost
+            # First year has no prior year to compare against: blank, never
+            # 0 — "0 new" would read as a measured result rather than "n/a".
+            NewSources      = if ($null -ne $prevKeys) { $new } else { '' }
+            RetainedSources = if ($null -ne $prevKeys) { $kept } else { '' }
+            LostSources     = if ($null -ne $prevKeys) { $lost } else { '' }
             RetentionPct    = if ($null -ne $prevKeys -and $prevKeys.Count -gt 0) {
                                   [math]::Round(100.0 * $kept / $prevKeys.Count, 1) } else { '' }
             TopSource       = $topName
@@ -3206,7 +3221,8 @@ function Export-RmSourceReportHtml {
             $yrRowFmt -f $_.Year, ('{0:N0}' -f $_.SharedPatients), ('{0:N0}' -f $_.SourceCount),
                 ('{0:N0}' -f $_.HHI), $_.Top5Pct,
                 $(if ($_.RetentionPct -eq '') { '&ndash;' } else { "$($_.RetentionPct)%" }),
-                ('{0:N0}' -f $_.NewSources), (_h ([string]$_.TopSource))
+                $(if ($_.NewSources -eq '') { '&ndash;' } else { '{0:N0}' -f $_.NewSources }),
+                (_h ([string]$_.TopSource))
         }) -join "`n"
 
         $movFmt = '<tr><td>{0}</td><td>{1}</td><td class="num">{2}</td><td class="num">{3}</td><td class="num {4}">{5}</td></tr>'
