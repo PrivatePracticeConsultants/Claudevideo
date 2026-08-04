@@ -1118,12 +1118,22 @@ function Find-RmClinic {
                 # "Physical Therapy" also returns PT Assistants, and
                 # "Rehabilitation" returns physiatrists; both are excluded).
                 $taxes = @(Get-RmProp $r 'taxonomies')
-                $taxLabel = $null; $primaryInScope = $false
+                $taxLabel = $null
                 foreach ($tx in $taxes) {
                     $taxLabel = & $resolveTax ([string](Get-RmProp $tx 'code')) ([string](Get-RmProp $tx 'desc'))
-                    if ($taxLabel) { $primaryInScope = ((Get-RmProp $tx 'primary') -eq $true); break }
+                    if ($taxLabel) { break }
                 }
                 if (-not $taxLabel) { continue }
+                # Scope of the PRIMARY taxonomy specifically - not of the
+                # first in-scope one found. A provider can list the same
+                # taxonomy twice with the primary flag on the SECOND entry,
+                # which made a real PT read as secondary-only and vanish
+                # from the competitive ranking.
+                $primaryTx = @($taxes | Where-Object { (Get-RmProp $_ 'primary') -eq $true })
+                $primaryInScope = $false
+                if ($primaryTx.Count) {
+                    $primaryInScope = [bool](& $resolveTax ([string](Get-RmProp $primaryTx[0] 'code')) ([string](Get-RmProp $primaryTx[0] 'desc')))
+                }
 
                 # Practice LOCATION must actually be in the requested ZIP
                 # (NPPES also matches mailing addresses).

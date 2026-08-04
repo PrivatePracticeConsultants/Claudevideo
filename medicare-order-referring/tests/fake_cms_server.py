@@ -1,4 +1,4 @@
-"""Local test double for the two external services the ReferralMap module
+﻿"""Local test double for the two external services the ReferralMap module
 talks to: the CMS FOIA download host and the NPPES registry API.
 
 Usage: python3 fake_cms_server.py <port> <site_dir>
@@ -14,8 +14,10 @@ from urllib.parse import urlparse, parse_qs
 SITE = Path(sys.argv[2])
 
 def provider(npi, kind, name_or_names, taxonomies, location_zip, mailing_zip=None,
-             primary_desc=None, enumerated='2008-06-15'):
-    """taxonomies: list of codes; first one is primary."""
+             primary_desc=None, enumerated='2008-06-15', primary_index=0):
+    """taxonomies: list of codes. primary_index says WHICH one carries the
+    primary flag - real registry records sometimes list the same taxonomy
+    twice with the flag on the second entry."""
     basic = {'enumeration_date': enumerated}
     if kind == 'NPI-2':
         basic['organization_name'] = name_or_names
@@ -30,7 +32,7 @@ def provider(npi, kind, name_or_names, taxonomies, location_zip, mailing_zip=Non
     }]
     taxes = []
     for i, code in enumerate(taxonomies):
-        taxes.append({'code': code, 'desc': primary_desc or code, 'primary': i == 0})
+        taxes.append({'code': code, 'desc': primary_desc or code, 'primary': i == primary_index})
     return {
         'number': npi, 'enumeration_type': kind, 'basic': basic,
         'addresses': addresses, 'taxonomies': taxes,
@@ -49,6 +51,11 @@ IN_ZIP = [
     provider('9000000005', 'NPI-1', ('NEW', 'GRAD'), ['225100000X'], '999990000',
              enumerated='2015-11-10'),
 ]
+# ZIP 55555, isolated so it perturbs no other fixture count: a PT listing
+# Physical Therapist TWICE with the primary flag on the SECOND entry (a real
+# NPPES shape). Must count as PRIMARY-scope therapy, not secondary-only.
+DUPE_TAX = provider('9000000008', 'NPI-1', ('DUPE', 'TAXONOMY'),
+                    ['225100000X', '225100000X'], '555550000', primary_index=1)
 MAILING_ONLY = provider('9000000004', 'NPI-2', 'ELSEWHERE PT CENTER', ['261QP2000X'],
                         '111110000', mailing_zip='999990000')
 # A malformed short location postal code (these exist in the live registry):
@@ -202,7 +209,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if 'number' in q:
                 hit = SOURCES.get(q['number'])
-                for p in IN_ZIP + [MAILING_ONLY, SHORT_POSTAL, NEIGHBOR] + PAGED + PG_THERAPISTS + TAX_IN + TAX_OUT:
+                for p in IN_ZIP + [MAILING_ONLY, SHORT_POSTAL, NEIGHBOR, DUPE_TAX] + PAGED + PG_THERAPISTS + TAX_IN + TAX_OUT:
                     if p['number'] == q['number']:
                         hit = p
                 results = [hit] if hit else []
@@ -242,6 +249,8 @@ class Handler(BaseHTTPRequestHandler):
                 results = PAGED[skip:skip + 200]
             elif term == 'Physical Therapist' and '77777'.startswith(prefix[:5]) and skip == 0:
                 results = PG_THERAPISTS
+            elif '55555'.startswith(prefix[:5]) and skip == 0:
+                results = [DUPE_TAX] if term in ('Physical Therapist', 'Physical Therapy') else []
             elif '66666'.startswith(prefix[:5]) and skip == 0:
                 results = TAX_BY_TERM.get(term, [])
             self._json({'result_count': len(results), 'results': results})

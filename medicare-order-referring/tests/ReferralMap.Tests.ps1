@@ -1060,6 +1060,16 @@ Describe 'Local rosters (NPPES bulk index + Care Compare groups)' {
         } finally { Import-RmNppesBulk -Path $script:NppesCsv | Out-Null }
     }
 
+    It 'reads the PRIMARY flag, not the first in-scope taxonomy (API path)' {
+        # 9000000008 lists Physical Therapist twice with the primary flag on
+        # the SECOND entry - live, this shape made a real PT (Jennifer
+        # Elswick) read as secondary-only and vanish from the ranking.
+        $c = @(Find-RmClinic -Zip 55555)
+        $dupe = @($c | Where-Object NPI -eq '9000000008')
+        $dupe.Count | Should -Be 1
+        $dupe[0].PrimaryInScope | Should -BeTrue
+    }
+
     It 'fails LOUDLY if a future file layout drops a column' {
         $wrong = Join-Path $script:WorkDir 'wrong-columns.csv'
         Set-Content -Path $wrong -Encoding ascii -Value @('a,b,c', '1,2,3')
