@@ -7,3 +7,4 @@ __pycache__/
 data/
 bcbs_mo_mrf.egg-info/
 config/registry_overrides.yaml
+testResults.xml
