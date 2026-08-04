@@ -60,21 +60,38 @@ $script:RmConfig = [ordered]@{
     EnrichCap = 400
 }
 
-# Taxonomy codes that define "outpatient rehab clinic" for this tool.
+# Taxonomy codes that define "outpatient rehab clinic" for this tool: the
+# scope is outpatient PT, OT, and speech therapy. Audited against the full
+# NUCC taxonomy table (v25.1, nucc.org).
 # COUPLING WARNING: if you add a code here, you MUST also make sure at least
 # one entry in $script:RmSearchTerms below phrase-matches that taxonomy's NPPES
 # description, or providers with the new code will silently never be found —
 # NPPES only supports description phrase search, and e.g. 'Physical Therapist'
 # and 'Physical Therapy' are DIFFERENT phrases (this exact miss happened once:
 # 4 vs 45 providers found in one ZIP).
+# Clinic codes stay EXACT-match: the 261QR04 stem also carries Cardiac
+# Facilities (261QR0404X) and Substance Use Disorder (261QR0405X) rehab,
+# which are OUT of scope. 261QH0700X is NUCC's only speech-clinic code
+# (outpatient speech practices enumerate under it); it can also cover
+# hearing/audiology clinics — the honest label makes that visible.
 $script:RmClinicTaxonomies = @{
     '261QP2000X' = 'Clinic/Center: Physical Therapy'
     '261QR0400X' = 'Clinic/Center: Rehabilitation'
+    '261QR0401X' = 'Clinic/Center: Rehabilitation, CORF (outpatient)'
+    '261QH0700X' = 'Clinic/Center: Hearing and Speech'
 }
-$script:RmIndividualTaxonomies = @{
-    '225100000X' = 'Physical Therapist'
-    '225X00000X' = 'Occupational Therapist'
-    '235Z00000X' = 'Speech-Language Pathologist'
+# Individual PT/OT/SLP are matched by CODE PREFIX, so board-certified
+# subspecialty enumerations (Orthopedic PT 2251X0800X, Hand OT 225XH1200X,
+# Pediatric PT 2251P0200X, ...) are included — a specialist who lists ONLY
+# the subspecialty code is still a therapist. The prefixes split cleanly in
+# NUCC: PT assistants are 2252*, OT assistants 224Z*, speech-language
+# ASSISTANTS 2355* — all on different stems, all excluded. Physiatrists
+# (Physical Medicine & Rehabilitation, 2081*) are physicians — referral
+# SOURCES, not competitors — and stay excluded too.
+$script:RmIndividualTaxonomyPrefixes = @{
+    '2251' = 'Physical Therapist'
+    '225X' = 'Occupational Therapist'
+    '235Z' = 'Speech-Language Pathologist'
 }
 # NPPES taxonomy_description search terms used to sweep a ZIP (results are then
 # filtered to the exact codes above). NPPES phrase-matches descriptions, so
@@ -82,7 +99,7 @@ $script:RmIndividualTaxonomies = @{
 # are DIFFERENT searches — both are needed.
 $script:RmSearchTerms = @('Physical Therapist', 'Physical Therapy',
                           'Occupational Therapist', 'Speech-Language Pathologist',
-                          'Rehabilitation')
+                          'Rehabilitation', 'Hearing and Speech')
 
 function Get-RmConfig {
     <# .SYNOPSIS Returns the referral-map configuration. #>
@@ -844,10 +861,18 @@ function Find-RmClinic {
     )
     if (-not $Zip -and -not $ZipList) { throw 'Provide -Zip or -ZipList.' }
 
-    $allowed = @{}
-    foreach ($kv in $script:RmClinicTaxonomies.GetEnumerator()) { $allowed[$kv.Key] = $kv.Value }
-    if (-not $OrganizationsOnly) {
-        foreach ($kv in $script:RmIndividualTaxonomies.GetEnumerator()) { $allowed[$kv.Key] = $kv.Value }
+    # Label for an in-scope code, $null when out of scope. Clinic codes are
+    # exact (the 261QR04 stem also carries cardiac/substance-use rehab, out
+    # of scope); individual PT/OT/SLP match by prefix so subspecialty
+    # enumerations count. The label prefers NPPES's own description so a
+    # subspecialty shows honestly (e.g. "Physical Therapist Orthopedic").
+    $resolveTax = {
+        param($code, $desc)
+        if ($script:RmClinicTaxonomies.ContainsKey($code)) { return $script:RmClinicTaxonomies[$code] }
+        if ($OrganizationsOnly -or $code.Length -lt 4) { return $null }
+        $base = $script:RmIndividualTaxonomyPrefixes[$code.Substring(0, 4)]
+        if (-not $base) { return $null }
+        if ($desc) { $desc } else { $base }
     }
 
     # Radius searches query each ZIP exactly (complete, and safely under
@@ -874,11 +899,16 @@ function Find-RmClinic {
                 $npi = [string](Get-RmProp $r 'number')
                 if ($found.ContainsKey($npi)) { continue }
 
-                # Exact taxonomy filter (search terms are fuzzy — e.g. "Physical
-                # Therapy" also returns PT Assistants, which we exclude).
+                # Code-level taxonomy filter (search terms are fuzzy — e.g.
+                # "Physical Therapy" also returns PT Assistants, and
+                # "Rehabilitation" returns physiatrists; both are excluded).
                 $taxes = @(Get-RmProp $r 'taxonomies')
-                $matched = @($taxes | Where-Object { $allowed.ContainsKey([string](Get-RmProp $_ 'code')) })
-                if ($matched.Count -eq 0) { continue }
+                $taxLabel = $null
+                foreach ($tx in $taxes) {
+                    $taxLabel = & $resolveTax ([string](Get-RmProp $tx 'code')) ([string](Get-RmProp $tx 'desc'))
+                    if ($taxLabel) { break }
+                }
+                if (-not $taxLabel) { continue }
 
                 # Practice LOCATION must actually be in the requested ZIP
                 # (NPPES also matches mailing addresses).
@@ -900,7 +930,7 @@ function Find-RmClinic {
                     NPI        = $npi
                     Name       = $name
                     Type       = if ($isOrg) { 'Organization' } else { 'Individual' }
-                    Taxonomy   = $allowed[[string](Get-RmProp $matched[0] 'code')]
+                    Taxonomy   = $taxLabel
                     City       = [string](Get-RmProp $loc[0] 'city')
                     State      = [string](Get-RmProp $loc[0] 'state')
                     Zip        = $postal.Substring(0, [Math]::Min(5, $postal.Length))
@@ -1007,7 +1037,11 @@ function Get-RmMethodologyNotes {
     param([Parameter(Mandatory)]$Info, [switch]$OrganizationsOnly)
     $y = $Info.Year
     $clinicTaxNote = 'Clinic list = NPPES providers with a practice location in the requested ZIP holding taxonomies: ' +
-        (@($script:RmClinicTaxonomies.Values) + $(if (-not $OrganizationsOnly) { @($script:RmIndividualTaxonomies.Values) } else { @() }) -join ', ') + '.'
+        (@($script:RmClinicTaxonomies.Values) +
+         $(if (-not $OrganizationsOnly) {
+             @($script:RmIndividualTaxonomyPrefixes.Values | ForEach-Object { "$_ (incl. subspecialties)" })
+           } else { @() }) -join ', ') +
+        '. Excluded on purpose: PT/OT/speech ASSISTANTS, physiatrists (physicians), cardiac and substance-use rehab, inpatient rehab units/hospitals.'
     if ($Info.Source -eq 'hop-teaming') {
         @(
             "Source: DocGraph Hop Teaming $y, produced by CareSet Systems from 100% of Medicare Fee-for-Service Part A and Part B claims (data 'DocGraph' from CareSet; CC BY-NC-SA 4.0 non-commercial license unless you hold a commercial license from CareSet)."
@@ -2198,7 +2232,11 @@ function Get-RmSourceAnalysis {
     #>
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)][ValidatePattern('^\d{10}$')][string]$Npi,
+        # One NPI, or SEVERAL to analyze as one combined practice (org NPI +
+        # therapist NPIs) — the answer to volume being split across NPIs,
+        # which hits small practices hardest. The FIRST NPI is the primary:
+        # it names the practice and centers the geography.
+        [Parameter(Mandatory)][ValidateCount(1, 50)][ValidatePattern('^\d{10}$')][string[]]$Npi,
         [ValidateRange(1, 50)][double]$CompetitorRadiusMiles = 10,
         [switch]$SkipCompetitors,
         [string]$CentroidPath
@@ -2210,10 +2248,15 @@ function Get-RmSourceAnalysis {
     $isHop = $info.Source -eq 'hop-teaming'
     $centroids = Get-RmCentroids $CentroidPath
 
-    # The practice itself.
-    $resp = Invoke-RmNppes ('number={0}' -f $Npi)
+    # Dedupe, keeping the caller's order (first stays primary).
+    $memberSet = New-Object 'System.Collections.Generic.HashSet[string]'
+    $npiList = @($Npi | Where-Object { $memberSet.Add($_) })
+    $primary = $npiList[0]
+
+    # The practice itself (the primary NPI).
+    $resp = Invoke-RmNppes ('number={0}' -f $primary)
     $hits = @(Get-RmProp $resp 'results')
-    if ($hits.Count -eq 0) { throw "NPI $Npi was not found in the NPPES registry (deactivated, or a typo)." }
+    if ($hits.Count -eq 0) { throw "NPI $primary was not found in the NPPES registry (deactivated, or a typo)." }
     $r0 = $hits[0]
     $basic = Get-RmProp $r0 'basic'
     $isOrg = ((Get-RmProp $r0 'enumeration_type') -eq 'NPI-2')
@@ -2224,10 +2267,33 @@ function Get-RmSourceAnalysis {
     $pracZip = if ($postal.Length -ge 5) { $postal.Substring(0, 5) } else { '' }
     $pracLoc = if ($pracZip -and $centroids.ContainsKey($pracZip)) { $centroids[$pracZip] } else { $null }
 
-    Write-Verbose "Scanning $($info.Label) for all inbound pairs of $Npi..."
-    $set = New-Object 'System.Collections.Generic.HashSet[string]'
-    [void]$set.Add($Npi)
-    $edges = @([RmEngine]::ScanInbound($info.Path, $set, $info.Format) | Sort-Object BeneCount -Descending)
+    Write-Verbose "Scanning $($info.Label) for all inbound pairs of $($npiList -join ', ')..."
+    # One engine pass over all member NPIs; then (a) drop flows BETWEEN
+    # members — internal handoffs are not external referrals — and (b) merge
+    # a source feeding several members into ONE row with summed volume
+    # (AvgDayWait becomes the volume-weighted mean). For a single NPI both
+    # steps are no-ops.
+    $rawEdges = @([RmEngine]::ScanInbound($info.Path, $memberSet, $info.Format))
+    $mergedBySrc = @{}
+    foreach ($e in $rawEdges) {
+        if ($memberSet.Contains($e.SourceNpi)) { continue }
+        if (-not $mergedBySrc.ContainsKey($e.SourceNpi)) {
+            $mergedBySrc[$e.SourceNpi] = [pscustomobject]@{
+                SourceNpi = $e.SourceNpi; BeneCount = 0; PairCount = 0
+                AvgDayWait = [double]0; _WaitWeighted = [double]0
+            }
+        }
+        $m = $mergedBySrc[$e.SourceNpi]
+        $m.BeneCount += $e.BeneCount
+        $m.PairCount += $e.PairCount
+        if ($isHop) { $m._WaitWeighted += [double]$e.AvgDayWait * $e.BeneCount }
+    }
+    foreach ($m in $mergedBySrc.Values) {
+        if ($isHop -and $m.BeneCount -gt 0) { $m.AvgDayWait = [math]::Round($m._WaitWeighted / $m.BeneCount, 1) }
+    }
+    $edges = @($mergedBySrc.Values |
+        Sort-Object -Property @{Expression = 'BeneCount'; Descending = $true},
+                              @{Expression = 'SourceNpi'; Descending = $false})
     $total = 0; foreach ($e in $edges) { $total += $e.BeneCount }
 
     # Locate/name every source (cached; volume-capped like the heat map).
@@ -2348,7 +2414,7 @@ function Get-RmSourceAnalysis {
             Write-Verbose "Competitive sweep: $($rzips.Count) ZIP(s) within $CompetitorRadiusMiles mi of $pracZip..."
             $peers = @(Find-RmClinic -ZipList $rzips)
             $others = New-Object 'System.Collections.Generic.HashSet[string]'
-            foreach ($p in $peers) { if ($p.NPI -ne $Npi) { [void]$others.Add($p.NPI) } }
+            foreach ($p in $peers) { if (-not $memberSet.Contains($p.NPI)) { [void]$others.Add($p.NPI) } }
             $peerAgg = @{}
             if ($others.Count -gt 0) {
                 Write-Verbose "Scanning $($info.Label) for $($others.Count) peer providers..."
@@ -2364,7 +2430,7 @@ function Get-RmSourceAnalysis {
             # above (even when its taxonomy is outside the rehab sweep).
             $rows = New-Object System.Collections.Generic.List[object]
             $rows.Add([pscustomobject]@{
-                NPI = $Npi; Name = $pracName
+                NPI = $primary; Name = $pracName
                 Type = if ($isOrg) { 'Organization' } else { 'Individual' }
                 City = if ($loc.Count) { [string](Get-RmProp $loc[0] 'city') } else { '' }
                 State = if ($loc.Count) { [string](Get-RmProp $loc[0] 'state') } else { '' }
@@ -2372,7 +2438,7 @@ function Get-RmSourceAnalysis {
                 ReferralSources = $edges.Count; SharedPatients = $total
             })
             foreach ($p in $peers) {
-                if ($p.NPI -eq $Npi) { continue }
+                if ($memberSet.Contains($p.NPI)) { continue }
                 $agg = if ($peerAgg.ContainsKey($p.NPI)) { $peerAgg[$p.NPI] } else { $null }
                 $pz = [string]$p.Zip
                 $rows.Add([pscustomobject]@{
@@ -2389,15 +2455,20 @@ function Get-RmSourceAnalysis {
             $rankedPeers = @($rows.ToArray() |
                 Sort-Object -Property @{Expression = 'SharedPatients'; Descending = $true},
                                       @{Expression = 'Name'; Descending = $false})
+            # Competition ("1224") ranking: equal volumes share a rank, so a
+            # small practice with zero measured volume gets the honest tie
+            # rank instead of an arbitrary alphabetical position.
             $myRank = 0; $withVol = 0
+            $curRank = 0; $prevVol = -1
             $outRows = New-Object System.Collections.Generic.List[object]
             for ($i = 0; $i -lt $rankedPeers.Count; $i++) {
                 $rp = $rankedPeers[$i]
-                if ($rp.NPI -eq $Npi) { $myRank = $i + 1 }
+                if ([int]$rp.SharedPatients -ne $prevVol) { $curRank = $i + 1; $prevVol = [int]$rp.SharedPatients }
+                if ($rp.NPI -eq $primary) { $myRank = $curRank }
                 if ([int]$rp.SharedPatients -gt 0) { $withVol++ }
                 $outRows.Add([pscustomobject]@{
-                    Rank = $i + 1
-                    You  = if ($rp.NPI -eq $Npi) { '>> YOU' } else { '' }
+                    Rank = $curRank
+                    You  = if ($rp.NPI -eq $primary) { '>> YOU' } else { '' }
                     NPI = $rp.NPI; Name = $rp.Name; Type = $rp.Type
                     City = $rp.City; State = $rp.State; Zip = $rp.Zip
                     DistanceMiles = $rp.DistanceMiles
@@ -2405,6 +2476,13 @@ function Get-RmSourceAnalysis {
                     SharedPatients = $rp.SharedPatients
                     SharePct = if ($regionTotal -gt 0) { [math]::Round(100.0 * $rp.SharedPatients / $regionTotal, 1) } else { 0 }
                 })
+            }
+            # The practice's own row is ALWAYS shown, appended after the top
+            # 15 when it ranks below them (small practices would otherwise
+            # never see themselves in their own report).
+            $peersOut = @($outRows.ToArray() | Select-Object -First 15)
+            if (-not @($peersOut | Where-Object { $_.You }).Count) {
+                $peersOut = @($peersOut) + @($outRows.ToArray() | Where-Object { $_.You } | Select-Object -First 1)
             }
             $landscape = [pscustomobject]@{
                 RadiusMiles         = $CompetitorRadiusMiles
@@ -2414,7 +2492,7 @@ function Get-RmSourceAnalysis {
                 RegionPatients      = $regionTotal
                 Rank                = $myRank
                 SharePct            = if ($regionTotal -gt 0) { [math]::Round(100.0 * $total / $regionTotal, 1) } else { 0 }
-                Peers               = @($outRows.ToArray() | Select-Object -First 15)
+                Peers               = $peersOut
                 Competitors         = @($outRows.ToArray() | Where-Object { -not $_.You } | Select-Object -First 5)
             }
         } catch {
@@ -2425,7 +2503,9 @@ function Get-RmSourceAnalysis {
 
     $notes = @(Get-RmMethodologyNotes -Info $info) + @(
         ''
-        "SOURCE ANALYSIS METHOD: every inbound pair of NPI $Npi ($pracName) in $($info.Label), ranked by shared patients. PctOfVolume/CumulativePct are shares of this practice's total inbound volume."
+        "SOURCE ANALYSIS METHOD: every inbound pair of NPI $primary ($pracName) in $($info.Label), ranked by shared patients. PctOfVolume/CumulativePct are shares of this practice's total inbound volume."
+        $(if ($npiList.Count -gt 1) { "COMBINED ANALYSIS: inbound volume is merged across $($npiList.Count) NPIs ($($npiList -join ', ')). A source feeding several of them counts ONCE with summed volume; patient flows BETWEEN these NPIs are excluded as internal handoffs. Geography and the competitive radius are centered on the primary NPI ($primary)." })
+        $(if ($total -gt 0 -and $total -lt 1000) { 'SMALL-PRACTICE NOTE: pairs under 11 distinct patients are excluded at the source, so a modest measured total usually UNDERSTATES the real referral base. Volume may also sit under the therapists'' individual NPIs — run a combined analysis (paste the org NPI plus the therapist NPIs together) for the full picture.' })
         'CONCENTRATION: HHI = sum of squared percentage shares (0-10,000); above ~2,500 is highly concentrated — losing one relationship materially moves the total. Top-1/5/10 dependence reads the same risk directly.'
         'Distances are straight-line miles between ZIP-area centroids (US Census) using TODAY''s NPPES practice addresses — a source that moved is measured where it is now.'
         $(if ($isHop) { 'REFERRAL-LAG PROFILE: average days from source visit to this practice''s visit, volume-weighted. Short lags look like referrals; 90+ days usually means co-occurring care (labs, hospitals), not referral flow.' })
@@ -2436,7 +2516,9 @@ function Get-RmSourceAnalysis {
     ) | Where-Object { $null -ne $_ -and $_ -ne $false }
 
     [pscustomobject]@{
-        Npi          = $Npi
+        Npi          = $primary
+        NpiList      = @($npiList)
+        NpiCount     = $npiList.Count
         Practice     = [pscustomobject]@{
             Name = $pracName; Zip = $pracZip
             City = if ($loc.Count) { [string](Get-RmProp $loc[0] 'city') } else { '' }
@@ -2857,7 +2939,7 @@ function Export-RmSourceReportHtml {
       <th class="num">Miles</th><th class="num">Sources</th><th class="num">Patients</th><th class="num">Area share</th></tr>
   $cpRows
 </table>
-<div class="tablenote">$cpNote A practice's volume can be split across its organization and individual therapist NPIs.</div>
+<div class="tablenote">$cpNote The analyzed practice's own row is always shown, even when it ranks below the top 15. Equal volumes share a rank. A practice's volume can be split across its organization and individual therapist NPIs.</div>
 </div>
 "@
     }
@@ -2873,8 +2955,12 @@ function Export-RmSourceReportHtml {
         $(if ($a.IsHop -and @($a.WaitBands).Count) {
             $fast = 0.0; foreach ($b in @($a.WaitBands)) { if ($b.Band -in '0-7 days', '8-30 days') { $fast += $b.Pct } }
             "$([math]::Round($fast,1))% of volume arrives within 30 days of the source visit (referral-like); the remainder reflects looser or co-occurring care patterns." })
-        $(if ($comp -and $comp.Rank) {
+        $(if ($comp -and $comp.Rank -and $a.TotalPatients -gt 0) {
             "Among $('{0:N0}' -f $comp.ProviderCount) outpatient rehab providers within $($comp.RadiusMiles) miles, the practice ranks #$($comp.Rank) by inbound Medicare referral volume, holding $($comp.SharePct)% of the area's measured volume." })
+        $(if ($comp -and $a.TotalPatients -eq 0) {
+            "The file shows no measured inbound volume for this practice — every pair (if any) fell under the 11-patient privacy floor. $('{0:N0}' -f $comp.ProvidersWithVolume) of $('{0:N0}' -f $comp.ProviderCount) area providers do show measured volume." })
+        $(if ($a.TotalPatients -gt 0 -and $a.TotalPatients -lt 1000) {
+            'Note: pairs under 11 patients are excluded at the source, so a modest measured total usually understates the real referral base — and volume may sit under individual therapist NPIs (a combined multi-NPI analysis captures both).' })
         $(if ($comp -and @($comp.Competitors).Count) {
             $c1 = @($comp.Competitors)[0]
             if ([int]$c1.SharedPatients -gt 0) {
@@ -2968,7 +3054,7 @@ function Export-RmSourceReportHtml {
   <h1>Referral Source Analysis</h1>
   <span class="badge">$(_h $a.Label)</span>
 </header>
-<p class="sub"><b>$(_h $a.Practice.Name)</b> &mdash; NPI $($a.Npi), $(_h ("$($a.Practice.City), $($a.Practice.State) $($a.Practice.Zip)")).
+<p class="sub"><b>$(_h $a.Practice.Name)</b> &mdash; NPI $($a.Npi)$(if ($a.PSObject.Properties['NpiCount'] -and $a.NpiCount -gt 1) { " (+$($a.NpiCount - 1) affiliated NPI$(if ($a.NpiCount -gt 2) { 's' }) combined)" }), $(_h ("$($a.Practice.City), $($a.Practice.State) $($a.Practice.Zip)")).
 Inbound Medicare shared-patient volume, $($a.Year).</p>
 <div class="stats">
   <div class="stat"><b>$('{0:N0}' -f $a.TotalPatients)</b><span>Shared patients</span></div>

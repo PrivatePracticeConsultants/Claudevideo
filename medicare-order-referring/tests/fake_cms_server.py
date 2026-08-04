@@ -63,6 +63,39 @@ NEIGHBOR = provider('9000000007', 'NPI-1', ('NEXTDOOR', 'NEIGHBOR'), ['225100000
 PAGED = [provider(f'86{i:08d}', 'NPI-1', ('PT', f'PAGE{i}'), ['225100000X'], '888880000')
          for i in range(201)]
 
+# ZIP 66666: taxonomy-audit fixtures. In scope: a subspecialty-only
+# orthopedic PT, a hand OT, an SLP, a speech clinic (261QH0700X), a CORF
+# (261QR0401X). Out-of-scope look-alikes the same fuzzy terms return:
+# PT assistant, speech-language ASSISTANT, physiatrist, cardiac rehab,
+# substance-use rehab, rehabilitation counselor.
+TAX_IN = [
+    provider('6600000001', 'NPI-1', ('OSCAR', 'ORTHOPT'), ['2251X0800X'], '666660000',
+             primary_desc='Physical Therapist Orthopedic'),
+    provider('6600000002', 'NPI-1', ('HANNA', 'HANDOT'), ['225XH1200X'], '666660000',
+             primary_desc='Occupational Therapist Hand'),
+    provider('6600000003', 'NPI-1', ('SIMONE', 'SLP'), ['235Z00000X'], '666660000'),
+    provider('6600000004', 'NPI-2', 'SPEECH WORKS CLINIC LLC', ['261QH0700X'], '666660000'),
+    provider('6600000005', 'NPI-2', 'OUTPATIENT CORF CENTER', ['261QR0401X'], '666660000'),
+]
+TAX_OUT = [
+    provider('6600000006', 'NPI-1', ('PAULA', 'PTASSIST'), ['225200000X'], '666660000'),
+    provider('6600000007', 'NPI-1', ('SANDY', 'SLPASSIST'), ['2355S0801X'], '666660000'),
+    provider('6600000008', 'NPI-1', ('PHIL', 'PHYSIATRIST'), ['208100000X'], '666660000'),
+    provider('6600000009', 'NPI-2', 'CARDIAC REHAB CENTER', ['261QR0404X'], '666660000'),
+    provider('6600000010', 'NPI-2', 'SUBSTANCE REHAB CENTER', ['261QR0405X'], '666660000'),
+    provider('6600000011', 'NPI-1', ('RITA', 'COUNSELOR'), ['225C00000X'], '666660000'),
+]
+# Which fuzzy NPPES term surfaces which fixture (loosely mirrors NPPES's
+# description phrase matching; the CLIENT must filter by code).
+TAX_BY_TERM = {
+    'Physical Therapist': [TAX_IN[0]],
+    'Physical Therapy': [TAX_OUT[0]],
+    'Occupational Therapist': [TAX_IN[1]],
+    'Speech-Language Pathologist': [TAX_IN[2], TAX_OUT[1]],
+    'Hearing and Speech': [TAX_IN[3]],
+    'Rehabilitation': [TAX_IN[4], TAX_OUT[2], TAX_OUT[3], TAX_OUT[4], TAX_OUT[5]],
+}
+
 # A flaky NPI: every ODD request for it drops the connection without a
 # response (simulates a failed TLS handshake mid-sweep); even requests
 # succeed. Exercises the client's retry-with-backoff.
@@ -128,7 +161,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if 'number' in q:
                 hit = SOURCES.get(q['number'])
-                for p in IN_ZIP + [MAILING_ONLY, SHORT_POSTAL, NEIGHBOR] + PAGED + PG_THERAPISTS:
+                for p in IN_ZIP + [MAILING_ONLY, SHORT_POSTAL, NEIGHBOR] + PAGED + PG_THERAPISTS + TAX_IN + TAX_OUT:
                     if p['number'] == q['number']:
                         hit = p
                 results = [hit] if hit else []
@@ -168,6 +201,8 @@ class Handler(BaseHTTPRequestHandler):
                 results = PAGED[skip:skip + 200]
             elif term == 'Physical Therapist' and '77777'.startswith(prefix[:5]) and skip == 0:
                 results = PG_THERAPISTS
+            elif '66666'.startswith(prefix[:5]) and skip == 0:
+                results = TAX_BY_TERM.get(term, [])
             self._json({'result_count': len(results), 'results': results})
             return
         self.send_response(404)

@@ -816,6 +816,34 @@ Describe 'Radius search' {
     }
 }
 
+Describe 'Taxonomy scope (outpatient PT/OT/speech only)' {
+    # Audited against NUCC v25.1: subspecialty therapists are IN (they are
+    # therapists), assistants/physicians/cardiac/substance rehab are OUT.
+    It 'includes subspecialty PT and OT, SLPs, speech clinics, and CORFs' {
+        $c = @(Find-RmClinic -Zip 66666)
+        $npis = @($c | ForEach-Object NPI)
+        foreach ($want in '6600000001', '6600000002', '6600000003', '6600000004', '6600000005') {
+            $npis -contains $want | Should -BeTrue -Because "NPI $want fits the PT/OT/speech scope"
+        }
+        # subspecialty labels come through honestly from the registry
+        @($c | Where-Object NPI -eq '6600000001')[0].Taxonomy | Should -Be 'Physical Therapist Orthopedic'
+        @($c | Where-Object NPI -eq '6600000004')[0].Taxonomy | Should -BeLike '*Hearing and Speech*'
+        @($c | Where-Object NPI -eq '6600000005')[0].Taxonomy | Should -BeLike '*CORF*'
+    }
+    It 'excludes assistants, physiatrists, cardiac/substance rehab, and counselors' {
+        $c = @(Find-RmClinic -Zip 66666)
+        $npis = @($c | ForEach-Object NPI)
+        foreach ($no in '6600000006', '6600000007', '6600000008', '6600000009', '6600000010', '6600000011') {
+            $npis -contains $no | Should -BeFalse -Because "NPI $no is outside the PT/OT/speech scope"
+        }
+        $c.Count | Should -Be 5
+    }
+    It 'OrganizationsOnly keeps only the clinic-taxonomy codes' {
+        @(@(Find-RmClinic -Zip 66666 -OrganizationsOnly) | ForEach-Object NPI) | Sort-Object |
+            Should -Be @('6600000004', '6600000005')
+    }
+}
+
 Describe 'Source analysis report' {
     BeforeAll {
         $script:SaCsv = Join-Path $script:WorkDir 'sa-centroids.csv'
@@ -898,6 +926,7 @@ Describe 'Source analysis report' {
             '99999,40.0000,-90.0000'
             '99998,40.1000,-90.0000'
             '86442,35.1000,-114.6000'
+            '88888,41.0000,-90.0000'
         )
         $sa = Get-RmSourceAnalysis -Npi 9000000001 -CentroidPath $script:CompCsv
         $c = $sa.Competitive
@@ -949,5 +978,51 @@ Describe 'Source analysis report' {
         $c.RegionPatients | Should -Be 0
         $c.SharePct | Should -Be 0
         @($c.Competitors).Count | Should -Be 0
+    }
+
+    It 'combines multiple NPIs and excludes internal patient flows' {
+        # 8000000001->9000000001 (45) and 9000000001->8000000001 (99) become
+        # INTERNAL once both NPIs are members; only 8000000002's 20 remain.
+        $sa = Get-RmSourceAnalysis -Npi @('9000000001', '8000000001') -CentroidPath $script:CompCsv
+        $sa.NpiCount | Should -Be 2
+        $sa.Npi | Should -Be '9000000001'                       # first = primary
+        $sa.TotalPatients | Should -Be 20
+        $sa.SourceCount | Should -Be 1
+        @($sa.Sources)[0].SourceNPI | Should -Be '8000000002'
+        (@($sa.Notes) -join ' ') | Should -BeLike '*COMBINED ANALYSIS*'
+        (@($sa.Notes) -join ' ') | Should -BeLike '*SMALL-PRACTICE NOTE*'   # 20 < 1000
+    }
+
+    It 'merges a source feeding two member NPIs into one summed row' {
+        $sa = Get-RmSourceAnalysis -Npi @('9000000001', '9000000002') -SkipCompetitors -CentroidPath $script:CompCsv
+        # 8000000001 feeds both members (45 + 12 = 57); plus 20 and 11.
+        $sa.TotalPatients | Should -Be 88
+        $sa.SourceCount | Should -Be 3
+        $top = @($sa.Sources)[0]
+        $top.SourceNPI | Should -Be '8000000001'
+        $top.SharedPatients | Should -Be 57
+        $top.PctOfVolume | Should -Be 64.8
+    }
+
+    It 'ties share a rank instead of an arbitrary alphabetical position' {
+        # 9000000005 (zero measured volume) must tie with the other
+        # zero-volume providers at rank 3 (after 65 and 23), not sort-order.
+        $sa = Get-RmSourceAnalysis -Npi 9000000005 -CentroidPath $script:CompCsv
+        $sa.Competitive.Rank | Should -Be 3
+        @(@($sa.Competitive.Peers) | Where-Object { $_.You }).Count | Should -Be 1
+    }
+
+    It 'always shows the practice row even when it ranks below the top 15' {
+        # ZIP 88888 holds 201 fixture PTs, all with zero measured volume:
+        # everyone ties at rank 1, the table shows top 15 + the practice.
+        $sa = Get-RmSourceAnalysis -Npi 8600000199 -CentroidPath $script:CompCsv
+        $c = $sa.Competitive
+        $c.ProviderCount | Should -Be 201
+        $c.Rank | Should -Be 1
+        @($c.Peers).Count | Should -Be 16
+        @($c.Peers)[15].You | Should -Be '>> YOU'
+        $out = Join-Path $script:WorkDir 'zero-volume-report.html'
+        Export-RmSourceReportHtml -Analysis $sa -Path $out | Out-Null
+        (Get-Content $out -Raw) | Should -BeLike '*no measured inbound volume*'
     }
 }

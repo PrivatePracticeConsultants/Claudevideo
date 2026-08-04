@@ -2011,8 +2011,15 @@ $script:LkAnalysis = $null
 
 $ui.LkAnalysisButton.Add_Click({
     if ($script:Busy) { return }
-    $npi = $ui.LkNpiBox.Text.Trim()
-    if ($npi -notmatch '^\d{10}$') { Show-ErrorBox 'Enter a full 10-digit NPI first.'; return }
+    # Unlike the other lookup buttons, analysis accepts SEVERAL NPIs pasted
+    # together (org + therapist NPIs) and combines them into one practice —
+    # the fix for volume split across NPIs, which hits small practices hardest.
+    $npis = @([regex]::Matches($ui.LkNpiBox.Text, '\d{10}') | ForEach-Object { $_.Value } | Select-Object -Unique)
+    if ($npis.Count -eq 0) {
+        Show-ErrorBox ('Enter a full 10-digit NPI first. Tip: paste SEVERAL NPIs (separated by ' +
+            'spaces or commas) to analyze an org NPI plus its therapist NPIs as one combined practice.')
+        return
+    }
     if (-not (Get-RmStatus).DatasetReady) {
         Show-ErrorBox ("No referral dataset is available yet - on the Referral map tab, click " +
             "'Download CMS dataset' (free 2015 data) or 'Import CareSet file' first.")
@@ -2021,8 +2028,9 @@ $ui.LkAnalysisButton.Add_Click({
     $ui.LkSaveReportButton.IsEnabled = $false
     $ui.LkSaveMapButton.IsEnabled = $false
     $ui.LkExportTrendButton.IsEnabled = $false
-    Invoke-Async -Kind 'lk-analysis' -Params @{ RmModulePath = $script:RmModulePath; Npi = $npi } `
-        -BusyMessage "Analyzing $npi's referral sources — scanning $script:RmRowsLabel pairs, naming and locating each source, then sweeping competitors within 10 miles (first run on a big practice can take several minutes; lookups are cached)..." `
+    $who = $npis[0] + $(if ($npis.Count -gt 1) { " (+$($npis.Count - 1) more, combined)" } else { '' })
+    Invoke-Async -Kind 'lk-analysis' -Params @{ RmModulePath = $script:RmModulePath; Npi = $npis } `
+        -BusyMessage "Analyzing $who's referral sources — scanning $script:RmRowsLabel pairs, naming and locating each source, then sweeping competitors within 10 miles (first run on a big practice can take several minutes; lookups are cached)..." `
         -WorkerScript 'param($RmModulePath, $Npi) Import-Module $RmModulePath; Get-RmSourceAnalysis -Npi $Npi' `
         -OnDone {
             param($result)
@@ -2042,7 +2050,8 @@ $ui.LkAnalysisButton.Add_Click({
             $rankBit = if ($sa.PSObject.Properties['Competitive'] -and $sa.Competitive -and $sa.Competitive.Rank) {
                 " Rank #$($sa.Competitive.Rank) of $('{0:N0}' -f $sa.Competitive.ProviderCount) rehab providers within $($sa.Competitive.RadiusMiles) mi."
             } else { '' }
-            $ui.LkInboundLabel.Text = ("Source analysis for $($sa.Practice.Name) ($($sa.Npi)), $($sa.Year): " +
+            $combinedBit = if ($sa.NpiCount -gt 1) { " + $($sa.NpiCount - 1) affiliated NPI(s)" } else { '' }
+            $ui.LkInboundLabel.Text = ("Source analysis for $($sa.Practice.Name) ($($sa.Npi)$combinedBit), $($sa.Year): " +
                 "$('{0:N0}' -f $sa.TotalPatients) patients from $('{0:N0}' -f $sa.SourceCount) sources - " +
                 "top-5 dependence $($sa.Top5Pct)%, concentration $($sa.Concentration) (HHI $('{0:N0}' -f $sa.HHI))." +
                 $rankBit + " Top 25 sources shown:")

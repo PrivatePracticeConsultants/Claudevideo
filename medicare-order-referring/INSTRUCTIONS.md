@@ -290,10 +290,29 @@ referral-lag profile that separates true referral flow from co-occurring care.
 The report also includes a **competitive landscape**: every outpatient rehab
 provider within 10 miles of the practice, ranked by inbound Medicare referral
 volume, with the analyzed practice's rank and share of area volume, its top
-competitors, and a top-15 table (the practice's own row highlighted). Keep in
-mind a group's volume is often split between its organization NPI and its
-therapists' individual NPIs — check both for the full picture.
-A full ranked source spreadsheet and methodology file are saved next to it.
+competitors, and a top-15 table (the practice's own row highlighted — and
+always shown, even when it ranks below the top 15; equal volumes share a
+rank). A full ranked source spreadsheet and methodology file are saved next
+to it.
+
+**Smaller practices — combine your NPIs:** a practice's Medicare volume is
+often split between its **organization NPI** and its therapists' **individual
+NPIs**, and pairs under 11 patients are excluded from the data entirely — both
+hit small practices hardest. To get the full picture, paste **several NPIs
+into the NPI box** (separated by spaces or commas — e.g. the org NPI plus each
+therapist's NPI) and click **Source analysis…**: the volumes are combined into
+one practice, a source feeding several of your NPIs is counted once with
+summed volume, and patient flows *between* your own NPIs are excluded as
+internal. The report header shows how many NPIs were combined.
+
+**Who counts as a "rehab provider":** the provider sweep is scoped to
+outpatient PT, OT, and speech therapy — PT/OT/SLP individual providers
+**including board-certified subspecialties** (orthopedic, hand, pediatric,
+sports…), PT clinics, rehabilitation clinics, outpatient CORFs, and hearing &
+speech clinics. Deliberately excluded: PT/OT/speech **assistants**,
+physiatrists (physicians — they're referral *sources*), cardiac and
+substance-use rehab, and inpatient rehab units/hospitals. Every export's
+methodology file states this scope.
 
 **Referral trend (multi-year):** if you've imported **two or more** CareSet
 years on the Referral map tab, this button builds a year-by-year table for the
