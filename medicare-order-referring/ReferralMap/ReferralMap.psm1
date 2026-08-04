@@ -1051,15 +1051,21 @@ function Find-RmClinic {
             # ANY taxonomy slot may carry the in-scope code (primary at 8,
             # secondaries from 10 on) — matching only the primary silently
             # dropped real therapy providers.
-            $label = $null; $matchedCode = ''; $primaryInScope = $false
-            foreach ($ti in @(8) + @(10..($f.Count - 1))) {
+            $label = $null; $matchedCode = ''
+            $taxEnd = [math]::Min($f.Count - 1, 23)   # codes live at 8, 10..23; switches at 24+
+            foreach ($ti in @(8) + @(10..$taxEnd)) {
                 if ($ti -ge $f.Count) { break }
                 $code = $f[$ti]
                 if (-not $code) { continue }
                 $label = & $resolveTax $code ''
-                if ($label) { $matchedCode = $code; $primaryInScope = ($ti -eq 8); break }
+                if ($label) { $matchedCode = $code; break }
             }
             if (-not $label) { continue }
+            # PRIMARY = the slot whose Switch_N is 'Y' (slot ORDER is not
+            # primacy - see the importer note). Older indexes without switch
+            # fields fall back to slot 1.
+            $primaryCode = Get-RmIndexPrimaryCode $f
+            $primaryInScope = [bool](& $resolveTax $primaryCode '')
             $isOrg = $f[1] -eq '2'
             $found2[$f[0]] = [pscustomobject]@{
                 NPI = $f[0]
@@ -1201,7 +1207,7 @@ function Get-RmProviderDetail {
             $postal = $f[7]
             $cache[$f[0]] = [pscustomobject]@{
                 Name      = if ($isOrg) { $f[2] } else { ("$($f[4]) $($f[3])").Trim() }
-                Specialty = Get-RmTaxonomyName $f[8]
+                Specialty = Get-RmTaxonomyName (Get-RmIndexPrimaryCode $f)
                 City      = $f[5]; State = $f[6]
                 Zip       = if ($postal.Length -ge 5) { $postal.Substring(0, 5) } else { $postal }
             }
@@ -4129,6 +4135,21 @@ function Get-RmServiceProfile {
 # ---------------------------------------------------------------------------
 
 function Get-RmNppesIndexPath { Join-Path $script:RmConfig.DataDir 'nppes-index.psv' }
+
+function Get-RmIndexPrimaryCode([string[]]$f) {
+    # Index layout: code_1 at 8, codes 2-15 at 10..23, Switch_1..15 at 24..38.
+    # Returns the code whose switch is 'Y'; falls back to slot 1 when the
+    # index predates switch fields or no slot is flagged.
+    for ($k = 1; $k -le 15; $k++) {
+        $si = 23 + $k
+        if ($si -ge $f.Count) { break }
+        if ($f[$si] -eq 'Y') {
+            $ci = if ($k -eq 1) { 8 } else { 8 + $k }
+            if ($ci -lt $f.Count -and $f[$ci]) { return $f[$ci] }
+        }
+    }
+    if ($f.Count -gt 8) { $f[8] } else { '' }
+}
 function Get-RmDacIndexPath { Join-Path $script:RmConfig.DataDir 'care-compare-index.psv' }
 
 $script:RmNuccNames = $null
@@ -4168,7 +4189,12 @@ function Import-RmNppesBulk {
         'Provider Business Practice Location Address State Name',
         'Provider Business Practice Location Address Postal Code',
         'Healthcare Provider Taxonomy Code_1', 'Provider Enumeration Date') +
-        @(2..15 | ForEach-Object { "Healthcare Provider Taxonomy Code_$_" })
+        @(2..15 | ForEach-Object { "Healthcare Provider Taxonomy Code_$_" }) +
+        @(1..15 | ForEach-Object { "Healthcare Provider Primary Taxonomy Switch_$_" })
+        # Switch_N = 'Y' marks which slot is the PRIMARY taxonomy. Slot ORDER
+        # does not: Banner Boswell hospital carries a rehab-clinic code in
+        # slot 1 with 'Y' on its hospital code - treating slot 1 as primary
+        # put a 319,024-patient hospital atop a therapy ranking.
     $src = $Path; $tmpExtract = $null
     try {
         $tmpOut = (Get-RmNppesIndexPath) + '.tmp'

@@ -885,7 +885,7 @@ Describe 'Local rosters (NPPES bulk index + Care Compare groups)' {
         # CSV, columns resolved by name).
         $script:NppesCsv = Join-Path $script:WorkDir 'npidata_pfile_20050523-20260712.csv'
         Set-Content -Path $script:NppesCsv -Encoding ascii -Value @(
-            ('"NPI","Entity Type Code","Provider Organization Name (Legal Business Name)","Provider Last Name (Legal Name)","Provider First Name","Provider Business Practice Location Address City Name","Provider Business Practice Location Address State Name","Provider Business Practice Location Address Postal Code","Healthcare Provider Taxonomy Code_1","Provider Enumeration Date",' + ((2..15 | ForEach-Object { '"Healthcare Provider Taxonomy Code_' + $_ + '"' }) -join ','))
+            ('"NPI","Entity Type Code","Provider Organization Name (Legal Business Name)","Provider Last Name (Legal Name)","Provider First Name","Provider Business Practice Location Address City Name","Provider Business Practice Location Address State Name","Provider Business Practice Location Address Postal Code","Healthcare Provider Taxonomy Code_1","Provider Enumeration Date",' + ((2..15 | ForEach-Object { '"Healthcare Provider Taxonomy Code_' + $_ + '"' }) -join ',') + ',' + ((1..15 | ForEach-Object { '"Healthcare Provider Primary Taxonomy Switch_' + $_ + '"' }) -join ','))
             '"7700000001","2","BULK REHAB PARTNERS, LLC","","","ROLLA","MO","654010000","261QP2000X","06/15/2008","",""'
             '"7700000002","1","","BULKPT","BOB","ROLLA","MO","654011234","225100000X","01/02/2015","",""'
             # therapy only as a SECONDARY taxonomy (primary is out of scope):
@@ -999,7 +999,8 @@ Describe 'Local rosters (NPPES bulk index + Care Compare groups)' {
         # therapy only in the LAST taxonomy slot — all seen in live files.
         $hostile = Join-Path $script:WorkDir 'npi-hostile.csv'
         $hdr = '"NPI","Entity Type Code","Provider Organization Name (Legal Business Name)","Provider Last Name (Legal Name)","Provider First Name","Provider Business Practice Location Address City Name","Provider Business Practice Location Address State Name","Provider Business Practice Location Address Postal Code","Healthcare Provider Taxonomy Code_1","Provider Enumeration Date",' +
-            ((2..15 | ForEach-Object { '"Healthcare Provider Taxonomy Code_' + $_ + '"' }) -join ',')
+            ((2..15 | ForEach-Object { '"Healthcare Provider Taxonomy Code_' + $_ + '"' }) -join ',') + ',' +
+            ((1..15 | ForEach-Object { '"Healthcare Provider Primary Taxonomy Switch_' + $_ + '"' }) -join ',')
         Set-Content -Path $hostile -Encoding utf8 -Value @(
             $hdr
             '"1000000001","2","SMITH, JONES & CO. ""THE REHAB PLACE""","","","ST. LOUIS","MO","631010000","261QP2000X","01/01/2010",' + (',' * 13)
@@ -1028,13 +1029,16 @@ Describe 'Local rosters (NPPES bulk index + Care Compare groups)' {
         # provider", halving the analyzed practice's apparent share.
         $hosp = Join-Path $script:WorkDir 'npi-hospital.csv'
         $hdr = '"NPI","Entity Type Code","Provider Organization Name (Legal Business Name)","Provider Last Name (Legal Name)","Provider First Name","Provider Business Practice Location Address City Name","Provider Business Practice Location Address State Name","Provider Business Practice Location Address Postal Code","Healthcare Provider Taxonomy Code_1","Provider Enumeration Date",' +
-            ((2..15 | ForEach-Object { '"Healthcare Provider Taxonomy Code_' + $_ + '"' }) -join ',')
+            ((2..15 | ForEach-Object { '"Healthcare Provider Taxonomy Code_' + $_ + '"' }) -join ',') + ',' +
+            ((1..15 | ForEach-Object { '"Healthcare Provider Primary Taxonomy Switch_' + $_ + '"' }) -join ',')
         Set-Content -Path $hosp -Encoding utf8 -Value @(
             $hdr
-            # primary = therapy clinic -> comparable, ranked
-            '"9000000001","2","TEST REHAB CLINIC LLC","","","TESTVILLE","MO","999991234","261QP2000X","06/15/2008",' + (',' * 13)
-            # primary = acute care hospital, therapy only in a spare slot
-            '"9000000009","2","BIG GENERAL HOSPITAL","","","TESTVILLE","MO","999990000","282N00000X","01/01/2000",' + (',' * 12) + '"261QP2000X"'
+            # primary = therapy clinic (Switch_1 = Y) -> comparable, ranked
+            '"9000000001","2","TEST REHAB CLINIC LLC","","","TESTVILLE","MO","999991234","261QP2000X","06/15/2008",' + (',' * 14) + '"Y"'
+            # the BOSWELL SHAPE: a rehab-clinic code in SLOT 1 but the
+            # primary switch on the HOSPITAL code in slot 2 - slot order
+            # must never be read as primacy
+            '"9000000009","2","BIG GENERAL HOSPITAL","","","TESTVILLE","MO","999990000","261QR0400X","01/01/2000","282N00000X",' + (',' * 13) + '"N","Y"'
         )
         Import-RmNppesBulk -Path $hosp | Out-Null
         try {
