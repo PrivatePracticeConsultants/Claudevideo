@@ -103,6 +103,17 @@ $script:RmIndividualTaxonomyPrefixes = @{
 # filtered to the exact codes above). NPPES phrase-matches descriptions, so
 # "Physical Therapist" (individuals) and "Physical Therapy" (clinics/centers)
 # are DIFFERENT searches — both are needed.
+# NUCC 261Q00000X is the GENERIC "Clinic/Center" code - it says a provider is
+# an ambulatory clinic and nothing about what it treats. Chains use it heavily:
+# 277 of Athletico's 426 clinic NPIs carry it as PRIMARY with their real PT
+# code in a spare slot, and ranking on primary alone therefore dropped 65% of
+# the largest chain in the market out of every competitor table. A generic
+# clinic that ALSO carries a therapy taxonomy is a therapy clinic. Measured
+# nationally, this readmits 910 providers of the 27,742 holding this primary,
+# only 2.5% of them hospital-named - it does not reopen the door to hospitals,
+# which is what ranking-on-primary exists to prevent.
+$script:RmGenericClinicTaxonomy = '261Q00000X'
+
 $script:RmSearchTerms = @('Physical Therapist', 'Physical Therapy',
                           'Occupational Therapist', 'Speech-Language Pathologist',
                           'Rehabilitation', 'Hearing and Speech')
@@ -1177,6 +1188,11 @@ function Find-RmClinic {
             # fields fall back to slot 1.
             $primaryCode = Get-RmIndexPrimaryCode $f
             $primaryInScope = [bool](& $resolveTax $primaryCode '')
+            if (-not $primaryInScope -and $primaryCode -eq $script:RmGenericClinicTaxonomy) {
+                # Generic "Clinic/Center" primary + a real therapy code in
+                # another slot ($label proved one is present) = comparable.
+                $primaryInScope = $true
+            }
             $isOrg = $f[1] -eq '2'
             $found2[$f[0]] = [pscustomobject]@{
                 NPI = $f[0]
@@ -1244,6 +1260,10 @@ function Find-RmClinic {
                 $primaryInScope = $false
                 if ($primaryTx.Count) {
                     $primaryInScope = [bool](& $resolveTax ([string](Get-RmProp $primaryTx[0] 'code')) ([string](Get-RmProp $primaryTx[0] 'desc')))
+                    if (-not $primaryInScope -and
+                        [string](Get-RmProp $primaryTx[0] 'code') -eq $script:RmGenericClinicTaxonomy) {
+                        $primaryInScope = $true   # see RmGenericClinicTaxonomy
+                    }
                 }
 
                 # Practice LOCATION must actually be in the requested ZIP
@@ -3114,7 +3134,7 @@ function Get-RmSourceAnalysis {
         $(if ($isHop) { 'REFERRAL-LAG PROFILE: average days from source visit to this practice''s visit, volume-weighted. Short lags look like referrals; 90+ days usually means co-occurring care (labs, hospitals), not referral flow.' })
         $(if ($landscape) { "COMPETITIVE LANDSCAPE: peers are the NPPES-listed outpatient rehab providers (the same PT/OT/SLP taxonomy sweep the Referral map uses) whose practice location falls in the $($landscape.ZipCount) ZIP(s) within $($landscape.RadiusMiles) straight-line miles of ZIP $pracZip, ranked by inbound shared-patient volume on $($info.Label). Share of area volume = a provider's inbound volume over the SUM across all listed providers — share of measured referral VOLUME, not of patients." })
         $(if ($landscape) { 'A practice''s volume is often SPLIT between its organization NPI and its therapists'' individual NPIs, so a group can rank below its true combined volume. Benchmark the org NPI and its key therapists separately for the full picture.' })
-        $(if ($landscape -and $landscape.SecondaryOnlyExcluded -gt 0) { "COMPARABILITY: $($landscape.SecondaryOnlyExcluded) provider(s) in the radius list a therapy taxonomy only in a SECONDARY slot — typically hospitals and multi-specialty organizations. They are excluded from the ranking because their inbound volume spans every service line, not therapy, and including them would overstate the market and understate this practice's share." })
+        $(if ($landscape -and $landscape.SecondaryOnlyExcluded -gt 0) { "COMPARABILITY: $($landscape.SecondaryOnlyExcluded) provider(s) in the radius list a therapy taxonomy only in a SECONDARY slot — typically hospitals and multi-specialty organizations. They are excluded from the ranking because their inbound volume spans every service line, not therapy, and including them would overstate the market and understate this practice's share. A provider whose primary is the GENERIC 'Clinic/Center' code but which also carries a real therapy taxonomy is NOT excluded - that combination is how large chains register their clinics (277 of Athletico's 426), and dropping them hid most of the biggest competitor in some markets." })
         $(if ($landscapeNote) { $landscapeNote })
         $(if ($market) { "MARKET CONTEXT: county Medicare enrollment from CMS's Medicare Monthly Enrollment dataset (calendar $($market.Year), latest full year). Original Medicare (FFS) beneficiaries are the population this file can see; Medicare Advantage members ($($market.MaPct)% of $($market.County)) are invisible to it." })
         $(if ($svcProfile) { 'BILLED-SERVICES PROFILE: actual Medicare Part B claims from CMS''s Physician & Other Practitioners dataset (latest annual release; therapy = HCPCS 97xxx/92xxx). CAUTION: this dataset suppresses provider-procedure lines under 11 beneficiaries, so small caseloads are invisible here too, and services bill under the RENDERING NPI — organizations that bill through their therapists'' individual NPIs legitimately show no claims here. Distinct-patient counts are a FLOOR (patients overlap across procedure codes).' })

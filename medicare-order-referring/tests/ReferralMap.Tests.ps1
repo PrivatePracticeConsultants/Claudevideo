@@ -1204,6 +1204,69 @@ Describe 'Organization breakdown (chain volume by NPI and address)' {
     }
 }
 
+Describe 'Generic Clinic/Center primary (chains must still be rankable)' {
+    BeforeAll {
+        # Three shapes that all list a therapy taxonomy somewhere:
+        #   GENERIC  - primary 261Q00000X + PT secondary  = how Athletico
+        #              registers 277 of its 426 clinics; MUST rank
+        #   HOSPITAL - primary hospital + PT secondary               ; must NOT
+        #   PLAINPT  - primary PT                                    ; must rank
+        $script:GenericCsv = Join-Path $script:WorkDir 'npi-generic.csv'
+        Set-Content -Path $script:GenericCsv -Encoding utf8 -Value @(
+            $script:NppesHdr
+            '"8500000001","2","GENERIC CLINIC CHAIN LLC","","","TESTVILLE","MO","999991234","261Q00000X","01/01/2010","225100000X"' + (',' * 13) + '"Y"'
+            '"8500000002","2","BIG HOSPITAL SYSTEM","","","TESTVILLE","MO","999991234","282N00000X","01/01/2010","225100000X"' + (',' * 13) + '"Y"'
+            '"8500000003","2","PLAIN PT CLINIC LLC","","","TESTVILLE","MO","999991234","225100000X","01/01/2010",' + (',' * 14) + '"Y"'
+        )
+        Import-RmNppesBulk -Path $script:GenericCsv | Out-Null
+    }
+    AfterAll { Import-RmNppesBulk -Path $script:NppesCsv | Out-Null }
+
+    # PrimaryInScope lives on the DISCOVERY rows (what the competitive
+    # ranking filters on), not on the map's display rows - asserting against
+    # the map returned $null and made the hospital case pass vacuously.
+    It 'ranks a generic Clinic/Center that also carries a therapy taxonomy' {
+        InModuleScope ReferralMap {
+            $rows = @(Find-RmClinic -Zip 99999)
+            $g = @($rows | Where-Object NPI -eq '8500000001')[0]
+            $g | Should -Not -BeNullOrEmpty -Because 'a generic clinic with a PT code must be discovered'
+            $g.PrimaryInScope | Should -BeTrue -Because 'this is how chains register clinics; excluding them hid 65% of Athletico'
+        }
+    }
+
+    It 'still refuses a hospital that merely lists therapy in a spare slot' {
+        InModuleScope ReferralMap {
+            $rows = @(Find-RmClinic -Zip 99999)
+            $h = @($rows | Where-Object NPI -eq '8500000002')[0]
+            $h | Should -Not -BeNullOrEmpty -Because 'the hospital must be found, just not ranked'
+            $h.PrimaryInScope | Should -BeOfType [bool]
+            $h.PrimaryInScope | Should -BeFalse -Because 'a hospital''s inbound volume spans every service line'
+        }
+    }
+
+    It 'leaves a plain therapy primary exactly as it was' {
+        InModuleScope ReferralMap {
+            $rows = @(Find-RmClinic -Zip 99999)
+            @($rows | Where-Object NPI -eq '8500000003')[0].PrimaryInScope | Should -BeTrue
+        }
+    }
+
+    It 'does not admit a generic clinic with NO therapy taxonomy at all' {
+        # discovery requires an in-scope code in SOME slot, so it never
+        # reaches the ranking question
+        $csv = Join-Path $script:WorkDir 'npi-generic-only.csv'
+        Set-Content -Path $csv -Encoding utf8 -Value @(
+            $script:NppesHdr
+            '"8500000004","2","GENERIC ONLY CLINIC LLC","","","TESTVILLE","MO","999991234","261Q00000X","01/01/2010",' + (',' * 14) + '"Y"'
+        )
+        Import-RmNppesBulk -Path $csv | Out-Null
+        try {
+            $map = Get-RmReferralMap -Zip 99999 -SkipEnrichment
+            @($map.Clinics | Where-Object NPI -eq '8500000004').Count | Should -Be 0
+        } finally { Import-RmNppesBulk -Path $script:GenericCsv | Out-Null }
+    }
+}
+
 Describe 'Chain flag (an asterisk on multi-site companies)' {
     BeforeAll {
         # BIGCHAIN registers the SAME legal name five times - one org NPI per

@@ -268,6 +268,16 @@ organization NPIs across 310 cities**, and a single Oak Brook NPI carries
 one clinic plausibly draws. That one addressless NPI is 90.6% of the chain's
 measured volume, which is exactly why the by-address view exists.
 
+One filtering rule worth knowing, because it decides who appears as your
+competitor: rankings compare **therapy practices**, so a provider whose
+*primary* registration is something else — a hospital, a home-health agency, a
+behavioral clinic — is listed but not ranked, since its referral volume covers
+every service line. The exception is the generic **"Clinic/Center"** code:
+chains register clinics under it with their real PT code in a spare slot
+(**277 of Athletico's 426**), so a generic clinic that also carries a therapy
+taxonomy *is* ranked. Without that exception, 65% of the largest chain in some
+markets was missing from every competitor table.
+
 Two honest limits:
 
 - The flag counts a **name**. A *generic* name shared by unrelated
