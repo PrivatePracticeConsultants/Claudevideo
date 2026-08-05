@@ -2143,7 +2143,8 @@ $ui.ChAddrButton.Add_Click({
             $ui.ChSummary.Text = ("This counts care billed under INDIVIDUAL clinician NPIs. A further " +
                 "$('{0:N0}' -f $r.OrgNpiPatients) patients are billed under the organization's own NPI(s), which carry no " +
                 "service address and are NOT spread across the sites - treat the two as separate views." + $overlapBit +
-                " Export for the full table with methodology.")
+                " These are the locations enrolled under a name matching your search: chains also register clinics under regional " +
+                "legal names, so try a shorter fragment if a site you expect is missing. Export for the full table with methodology.")
             $ui.ChExportButton.IsEnabled = $true
             Set-Status "Per-location breakdown ready - $('{0:N0}' -f $r.AttributedPatients) patients across $($r.AddressesWithVolume) location(s)."
         } `

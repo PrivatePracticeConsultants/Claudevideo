@@ -4952,6 +4952,7 @@ function Get-RmLocationReferrals {
         $(if ($double -gt 0) { "DOUBLE COUNTING: some clinicians are listed at more than one address, and the data cannot say which visit happened where, so their volume is credited to EACH of their sites. The address rows therefore sum to $('{0:N0}' -f $rowTotal) while the clinicians behind them hold $('{0:N0}' -f $totVol) - $('{0:N0}' -f $double) patients of overlap. AttributedPatients is the de-duplicated figure; per row, SharedSitePatients shows how much of that site's number is also counted elsewhere." })
         'A clinician with no measured volume either bills through the group NPI or had every pair fall under the 11-patient floor; CliniciansWithVolume shows how many of a site''s roster are actually visible.'
         'Care Compare reflects TODAY''s rosters while the referral data is historical - a clinician who moved is credited to the address they are listed at now.'
+        "NAME MATCH: addresses are found by matching '$Name' against Care Compare's facility name. Chains often enroll clinics under REGIONAL legal names ('<Brand> of Carolina, LLC'), and those sites will be missing unless you search the name they enrolled under - so treat $($byAddr.Count) as the locations matching this search, not necessarily every clinic the brand operates. Searching a shorter fragment widens the net."
     ) | Where-Object { $_ }
 
     [pscustomobject]@{

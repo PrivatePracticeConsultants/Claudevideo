@@ -1267,6 +1267,9 @@ Describe 'Address-level referrals (the multi-site workaround)' {
             $r.PSObject.Properties['OrgNpiPatients'] | Should -Not -BeNullOrEmpty
             (@($r.Notes) -join ' ') | Should -BeLike '*no address and is NOT distributed*'
             (@($r.Notes) -join ' ') | Should -BeLike '*ADDRESS-LEVEL METHOD*'
+            # Chains enroll clinics under regional legal names, so a name
+            # search finds SOME of the brand's sites, not provably all.
+            (@($r.Notes) -join ' ') | Should -BeLike '*NAME MATCH*'
         } finally { Set-RmActiveDataset -Source cms-pspp -Year 2015 | Out-Null }
     }
 

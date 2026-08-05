@@ -301,6 +301,11 @@ Three honest caveats, all repeated in the export sidecar:
 3. Care Compare reflects **today's** rosters while the referral data is
    historical, so a therapist who has since moved is credited to the address
    they are listed at now.
+4. You get the locations enrolled under a name matching what you typed. Chains
+   also register clinics under regional legal names (`ATI Physical Therapy of
+   Carolina, LLC`), so if a site you expect is missing, search a shorter
+   fragment. A live run on `ATI PHYSICAL THERAPY` returned 20 addresses — the
+   ones enrolled under exactly that name, not the brand's whole footprint.
 
 **Export…** saves whichever view is on screen with its methodology file.
 
