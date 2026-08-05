@@ -127,6 +127,11 @@ SOURCES = {
     # its biggest movers too.
     '8000000009': provider('8000000009', 'NPI-2', 'NEWCOMER IMAGING LLC', ['261QR0400X'],
                            '999990000', primary_desc='Clinic/Center Rehabilitation'),
+    # An individual PT who shows up as a "source" of the clinic org: the
+    # practice-therapist reclassification must fold her into the org's own
+    # patient base instead of ranking her as a referrer.
+    '8000000011': provider('8000000011', 'NPI-1', ('PIPER', 'PHYSIO'), ['225100000X'],
+                           '999990000', primary_desc='Physical Therapist'),
 }
 
 # ZIP 77777: individual therapists for the PracticeGroups tests. Two belong to a

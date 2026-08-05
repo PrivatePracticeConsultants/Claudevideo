@@ -2541,10 +2541,17 @@ $ui.LkAnalysisButton.Add_Click({
             $sa = $result[0]
             $script:LkAnalysis = $sa
             $rows = @($sa.Sources | Select-Object -First 25)
+            $therBit = if ($sa.PSObject.Properties['TherapistPatients'] -and [int]$sa.TherapistPatients -gt 0) {
+                $tv = @($sa.TherapistRows | Where-Object { $_.Staff -like 'VERIFIED*' }).Count
+                (" {0:N0} patients billed by the practice's own {1} PT/OT/SLP clinician(s) ({2} verified on its Care Compare roster) are counted in its patient base, NOT as referral sources." -f `
+                    [int]$sa.TherapistPatients, @($sa.TherapistRows).Count, $tv)
+            } else { '' }
             if (@($sa.Sources).Count -eq 0) {
                 $ui.LkInboundGrid.ItemsSource = $null
-                $ui.LkInboundLabel.Text = "No measured inbound pairs for $($sa.Npi) in the $($sa.Year) data (pairs under 11 patients are excluded)."
-                Set-Status 'Source analysis: nothing to analyze.'
+                $ui.LkInboundLabel.Text = ("No measured EXTERNAL inbound pairs for $($sa.Npi) in the $($sa.Year) data " +
+                    "(pairs under 11 patients are excluded).") + $therBit
+                Set-Status 'Source analysis: no external sources to analyze.'
+                if ($therBit) { $ui.LkSaveReportButton.IsEnabled = $true }
                 return
             }
             $cols = @('Rank','SourceNPI','SourceName','SourceSpecialty','City','State','SharedPatients','PctOfVolume','CumulativePct','DistanceMiles')
@@ -2560,10 +2567,11 @@ $ui.LkAnalysisButton.Add_Click({
                 $d = if ($t.VolumeChangePct -gt 0) { 'up' } elseif ($t.VolumeChangePct -lt 0) { 'down' } else { 'flat' }
                 " Year-over-year $($t.FirstYear)-$($t.LastYear): volume $d $([math]::Abs($t.VolumeChangePct))%."
             } else { '' }
+            $extPat = if ($sa.PSObject.Properties['ReferralPatients']) { [int]$sa.ReferralPatients } else { [int]$sa.TotalPatients }
             $ui.LkInboundLabel.Text = ("Source analysis for $($sa.Practice.Name) ($($sa.Npi)$combinedBit), $($sa.Year): " +
-                "$('{0:N0}' -f $sa.TotalPatients) patients from $('{0:N0}' -f $sa.SourceCount) sources - " +
+                "$('{0:N0}' -f $extPat) patients from $('{0:N0}' -f $sa.SourceCount) external referral sources - " +
                 "top-5 dependence $($sa.Top5Pct)%, concentration $($sa.Concentration) (HHI $('{0:N0}' -f $sa.HHI))." +
-                $rankBit + $trendBit2 + " Top 25 sources shown:")
+                $therBit + $rankBit + $trendBit2 + " Top 25 sources shown:")
             $ui.LkSaveReportButton.IsEnabled = $true
             if ($sa.PSObject.Properties['DistantNote'] -and $sa.DistantNote) {
                 $ui.LkInboundLabel.Text += ' ' + $sa.DistantNote
@@ -2675,6 +2683,12 @@ $ui.LkFullReportButton.Add_Click({
                         Export-RmResult -Path ([System.IO.Path]::ChangeExtension($script:LkFullPath, '.by-year.csv')) `
                             -Notes @($r.Analysis.Trend.Notes) `
                             -Description "Year-over-year referral performance for NPI $($r.Analysis.Npi)" | Out-Null
+                }
+                if ($r.Analysis.PSObject.Properties['TherapistRows'] -and @($r.Analysis.TherapistRows).Count) {
+                    @($r.Analysis.TherapistRows) |
+                        Export-RmResult -Path ([System.IO.Path]::ChangeExtension($script:LkFullPath, '.practice-therapists.csv')) `
+                            -Notes @($r.Analysis.Notes) `
+                            -Description "The practice's own PT/OT/SLP clinicians found in the raw file as 'sources' of NPI $($r.Analysis.Npi) - counted in its patient base, not as referrers" | Out-Null
                 }
                 $ui.LkSaveReportButton.IsEnabled = $true
                 Set-Status "One-stop report saved: $($rep.Path) (+ CSV sidecars with methodology)."

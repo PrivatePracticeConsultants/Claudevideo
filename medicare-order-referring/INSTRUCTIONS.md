@@ -456,9 +456,18 @@ today's NPPES addresses, so a source that moved is drawn where it is now.
 **Source analysis (the client-ready report):** click **Source analysis…** for
 an in-depth look at one organization's referral base, then **Save report
 (HTML)…** for a polished, fully self-contained report you can open, print, or
-email to a client: key metrics up top (total patients, source count, top-source
-and top-5 dependence, and an HHI concentration score that flags when a practice
-is dangerously dependent on a few relationships), auto-written findings, a
+email to a client: key metrics up top (measured patient base, external source
+count, top-source and top-5 dependence, and an HHI concentration score that
+flags when a practice is dangerously dependent on a few relationships),
+auto-written findings,
+**Practice therapists are not "referral sources":** an organization's own
+PT/OT/SLPs bill under their personal NPIs, so the raw CMS file lists them among
+the org's biggest "sources". The analysis folds every individual
+PT/OT/SLP source into the practice's own patient base automatically — they
+appear in their own labeled section (with a Care Compare roster check marking
+verified staff), never in the referral ranking, so the source list shows only
+the physicians, hospitals, and other true referrers you could actually win or
+lose. a
 top-sources chart, the specialty mix of the referral base, a concentration
 curve, volume by distance from the practice, an embedded **referral-geography
 heat map** (one circle per source ZIP, sized and colored by volume, your

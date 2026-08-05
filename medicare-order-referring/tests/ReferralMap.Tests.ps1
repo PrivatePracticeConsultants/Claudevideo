@@ -1950,7 +1950,7 @@ Describe 'Source analysis report' {
         $out = Join-Path $script:WorkDir 'empty-report.html'
         (Export-RmSourceReportHtml -Analysis $sa -Path $out).Sources | Should -Be 0
         $html = Get-Content $out -Raw
-        $html | Should -BeLike '*0*Shared patients*'
+        $html | Should -BeLike '*0*Measured patient base*'
         # explains the situation instead of drawing empty charts
         $html | Should -BeLike '*No measured referral volume*'
         $html | Should -BeLike '*11-patient privacy floor*'
@@ -2682,3 +2682,77 @@ Describe 'Best-practice regressions: intra-group flows, data-quality guards, cac
     }
 
 }
+
+Describe 'Practice-therapist reclassification' {
+    # A transient hop year so the pinned numbers of every other fixture stay
+    # untouched: one external doctor, one individual PT (the org's own
+    # clinician), and one therapy ORGANIZATION (a competitor relationship,
+    # which must STAY in the source list).
+    BeforeAll {
+        $src30 = Join-Path $script:WorkDir 'DocGraph_Hop_Teaming_2030.csv'
+        Set-Content -Path $src30 -Encoding ascii -NoNewline -Value (@(
+            'from_npi,to_npi,patient_count,transaction_count,average_day_wait,std_day_wait'
+            '8000000001,9000000001,45,50,12.5,10.0'    # family-medicine doctor: external
+            '8000000011,9000000001,80,90,3.0,1.0'      # individual PT: practice therapist
+            '8000000009,9000000001,30,30,20.0,5.0'     # rehab clinic ORG: competitor, stays
+        ) -join "`n")
+        Import-RmDataset -Path $src30 | Out-Null
+        $script:Sa30 = Get-RmSourceAnalysis -Npi 9000000001 -SkipCompetitors -CentroidPath $script:SaCsv
+    }
+    AfterAll {
+        Remove-Item (Join-Path $env:RM_DATA_DIR 'hop_teaming_2030.csv') -Force -ErrorAction SilentlyContinue
+        Remove-Item (Join-Path $env:RM_DATA_DIR 'hop_teaming_2030.csv.rows') -Force -ErrorAction SilentlyContinue
+        Set-RmActiveDataset -Source cms-pspp -Year 2015 | Out-Null
+    }
+
+    It 'folds an individual PT source into the practice patient base, not the referral ranking' {
+        $sa = $script:Sa30
+        $sa.TotalPatients | Should -Be 155                   # full measured base
+        $sa.ReferralPatients | Should -Be 75                 # doctor 45 + rehab org 30
+        $sa.TherapistPatients | Should -Be 80                # the PT
+        ($sa.ReferralPatients + $sa.TherapistPatients) | Should -Be $sa.TotalPatients
+        $sa.SourceCount | Should -Be 2
+        @($sa.Sources | Where-Object SourceNPI -eq '8000000011').Count | Should -Be 0
+        $t = @($sa.TherapistRows)
+        $t.Count | Should -Be 1
+        $t[0].SourceNPI | Should -Be '8000000011'
+        $t[0].SharedPatients | Should -Be 80
+        # No Care Compare index in the test store: labeled by discipline, not
+        # invented as verified staff.
+        $t[0].Staff | Should -Be 'same discipline'
+        (@($sa.Notes) -join ' ') | Should -BeLike '*PRACTICE THERAPISTS*'
+    }
+
+    It 'keeps therapy ORGANIZATIONS in the source list (competitor flow is real)' {
+        @($script:Sa30.Sources | Where-Object SourceNPI -eq '8000000009').Count | Should -Be 1
+    }
+
+    It 'computes shares and concentration on EXTERNAL sources only' {
+        $sa = $script:Sa30
+        $s1 = @($sa.Sources)[0]
+        $s1.SourceNPI | Should -Be '8000000001'
+        $s1.PctOfVolume | Should -Be 60                      # 45 of 75, not 45 of 155
+        $sa.Top1Pct | Should -Be 60
+        $sa.HHI | Should -Be ([int][math]::Round((60.0*60) + (40.0*40)))
+    }
+
+    It 'renders the practice-therapist section in the report' {
+        $out = Join-Path $script:WorkDir 'ther-report.html'
+        Export-RmSourceReportHtml -Analysis $script:Sa30 -Path $out | Out-Null
+        $html = Get-Content $out -Raw
+        $html | Should -BeLike '*Practice therapists*'
+        $html | Should -BeLike '*PIPER PHYSIO*'
+        $html | Should -BeLike '*Measured patient base*'
+        $html | Should -BeLike '*not external referrals*'
+    }
+
+    It 'hands FULL per-source totals to the trend so the reused year matches raw years' {
+        $sa = Add-RmSourceTrend -Analysis $script:Sa30 -SkipEnrichment
+        $y30 = @($sa.Trend.Years | Where-Object Year -eq 2030)[0]
+        # The trend is raw per year; the reused 2030 row must carry the
+        # therapist volume or it would dip below its neighbours by exactly 80.
+        $y30.SharedPatients | Should -Be 155
+        $y30.SourceCount | Should -Be 3
+    }
+}
+
