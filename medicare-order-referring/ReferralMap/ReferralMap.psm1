@@ -299,6 +299,55 @@ public static class RmEngine
         return edges;
     }
 
+    // ONE pass serving the whole source analysis: rows where the practice is
+    // either endpoint (inbound analysis AND outbound destinations) plus rows
+    // where a COMPETITOR received the patient (ranking and market capture).
+    // The analysis used to make three separate passes over the same 8 GB for
+    // these; the caller routes each row by checking the same two sets.
+    public static List<RmEdge> ScanCombined(string path, HashSet<string> members,
+        HashSet<string> peers, int format)
+    {
+        List<RmEdge> edges = new List<RmEdge>();
+        long lineNo = 0, badLines = 0;
+        int wantCommas = ((format == FormatHopTeaming) ? 6 : 5) - 1;
+        using (StreamReader reader = new StreamReader(path, Encoding.ASCII, false, 1 << 20))
+        {
+            string line;
+            while ((line = reader.ReadLine()) != null)
+            {
+                lineNo++;
+                if (line.Length == 0) continue;
+                if (lineNo <= 5)
+                {
+                    RmEdge e0;
+                    try { e0 = ParseLine(line, format, path, lineNo); }
+                    catch (InvalidDataException) { throw; }
+                    if (e0 == null) continue;
+                    if (members.Contains(e0.SourceNpi) || members.Contains(e0.TargetNpi)
+                        || (peers != null && peers.Contains(e0.TargetNpi))) edges.Add(e0);
+                    continue;
+                }
+                if (CommaCount(line) != wantCommas) { badLines++; continue; }
+                string tgt = FieldAt(line, 1);
+                bool hit = (tgt != null) && (members.Contains(tgt) || (peers != null && peers.Contains(tgt)));
+                if (!hit)
+                {
+                    string src = FieldAt(line, 0);
+                    hit = (src != null) && members.Contains(src);
+                }
+                if (!hit) continue;
+                RmEdge e;
+                try { e = ParseLine(line, format, path, lineNo); }
+                catch (InvalidDataException) { badLines++; continue; }
+                if (e != null) edges.Add(e);
+            }
+        }
+        if (lineNo == 0) throw new InvalidDataException("The file '" + path + "' is empty.");
+        if (badLines > lineNo / 100)
+            throw new InvalidDataException("The file '" + path + "' had too many malformed lines.");
+        return edges;
+    }
+
     // Rows where a target NPI is the SECOND provider (received the patient).
     public static List<RmEdge> ScanInbound(string path, HashSet<string> targets, int format)
     {
@@ -2859,13 +2908,67 @@ function Get-RmSourceAnalysis {
     $pracZip = if ($postal.Length -ge 5) { $postal.Substring(0, 5) } else { '' }
     $pracLoc = if ($pracZip -and $centroids.ContainsKey($pracZip)) { $centroids[$pracZip] } else { $null }
 
-    Write-Verbose "Scanning $($info.Label) for all inbound pairs of $($npiList -join ', ')..."
-    # One engine pass over all member NPIs; then (a) drop flows BETWEEN
-    # members — internal handoffs are not external referrals — and (b) merge
-    # a source feeding several members into ONE row with summed volume
-    # (AvgDayWait becomes the volume-weighted mean). For a single NPI both
-    # steps are no-ops.
-    $rawEdges = @([RmEngine]::ScanInbound($info.Path, $memberSet, $info.Format))
+    # Discover the competitor set BEFORE scanning: it depends only on the
+    # practice's NPPES ZIP, so knowing it up front lets ONE pass feed the
+    # analysis, the outbound view and the competitive layer. A failure here
+    # must not sink the analysis, exactly as when the sweep ran later.
+    $peersAll = @(); $peers = @(); $secondaryOnly = 0
+    $others = New-Object 'System.Collections.Generic.HashSet[string]'
+    $rzips = @(); $sweepError = $null
+    $outboundRows = @()   # NOT $outRows: that name is the competitive peer list below
+    if (-not $SkipCompetitors) {
+        try {
+            if ($pracZip -notmatch '^\d{5}$') {
+                throw "NPPES lists no usable 5-digit practice-location ZIP for $Npi, so the radius cannot be centered."
+            }
+            $rzips = @(Get-RmZipsInRadius -Zip $pracZip -RadiusMiles $CompetitorRadiusMiles -CentroidPath $CentroidPath)
+            Write-Verbose "Competitive sweep: $($rzips.Count) ZIP(s) within $CompetitorRadiusMiles mi of $pracZip..."
+            $peersAll = @(Find-RmClinic -ZipList $rzips)
+            # Rank only COMPARABLE therapy practices: a provider whose
+            # PRIMARY taxonomy is in scope. Hospitals and multi-specialty
+            # organizations that merely list a therapy taxonomy in a spare
+            # slot are real, but their inbound volume covers every service
+            # line — including one live put a 319,024-patient hospital at
+            # "#1 therapy provider" and halved this practice's apparent
+            # share. They are counted and disclosed, not ranked.
+            $peers = @($peersAll | Where-Object {
+                $null -eq $_.PSObject.Properties['PrimaryInScope'] -or $_.PrimaryInScope })
+            $secondaryOnly = @($peersAll).Count - @($peers).Count
+            foreach ($p in $peers) { if (-not $memberSet.Contains($p.NPI)) { [void]$others.Add($p.NPI) } }
+        } catch {
+            $sweepError = $_.Exception.Message
+            Write-Warning "COMPETITIVE LANDSCAPE unavailable: $sweepError"
+            $others = New-Object 'System.Collections.Generic.HashSet[string]'
+        }
+    }
+
+    Write-Verbose "Scanning $($info.Label): $($npiList.Count) member NPI(s) + $($others.Count) competitor(s) in ONE pass..."
+    # ONE engine pass now serves three consumers: inbound pairs for the
+    # analysis, outbound pairs for the destinations view, and competitor
+    # inbound for ranking and market capture — the same 8 GB used to be read
+    # three times. Then (a) drop flows BETWEEN members — internal handoffs
+    # are not external referrals — and (b) merge a source feeding several
+    # members into ONE row with summed volume (AvgDayWait becomes the
+    # volume-weighted mean). For a single NPI both steps are no-ops.
+    $allEdges = @([RmEngine]::ScanCombined($info.Path, $memberSet, $others, $info.Format))
+    $rawEdges = New-Object System.Collections.Generic.List[object]
+    $peerEdges = New-Object System.Collections.Generic.List[object]
+    $outEdges = New-Object System.Collections.Generic.List[object]
+    foreach ($e in $allEdges) {
+        if ($memberSet.Contains($e.TargetNpi)) { $rawEdges.Add($e) }
+        elseif ($others.Contains($e.TargetNpi)) { $peerEdges.Add($e) }
+        if ($memberSet.Contains($e.SourceNpi) -and -not $memberSet.Contains($e.TargetNpi)) { $outEdges.Add($e) }
+    }
+    # Outbound destinations, merged across member NPIs (volume-weighted wait),
+    # so the one-stop report no longer needs its own pass for them.
+    $outBySrc = @{}
+    foreach ($e in $outEdges) {
+        if (-not $outBySrc.ContainsKey($e.TargetNpi)) {
+            $outBySrc[$e.TargetNpi] = [pscustomobject]@{ N = 0; W = [double]0 }
+        }
+        $outBySrc[$e.TargetNpi].N += $e.BeneCount
+        $outBySrc[$e.TargetNpi].W += ([double]$e.AvgDayWait * $e.BeneCount)
+    }
     $mergedBySrc = @{}
     foreach ($e in $rawEdges) {
         if ($memberSet.Contains($e.SourceNpi)) { continue }
@@ -2898,6 +3001,26 @@ function Get-RmSourceAnalysis {
         $srcNpis = @($srcNpis | Select-Object -First $script:RmConfig.EnrichCap)
     }
     $detail = if ($srcNpis.Count -gt 0) { Get-RmProviderDetail -Npi $srcNpis -RequireZip } else { @{} }
+
+    # Outbound rows, named from the top destinations only (the same cached
+    # lookup the sources use, so a handful of extra NPIs at most).
+    if ($outBySrc.Count -gt 0) {
+        $topOut = @($outBySrc.GetEnumerator() | Sort-Object { $_.Value.N } -Descending | Select-Object -First 25)
+        $outNpis = @($topOut | ForEach-Object { $_.Key } | Where-Object { -not $detail.ContainsKey($_) })
+        $outDetail = if ($outNpis.Count -gt 0) { Get-RmProviderDetail -Npi $outNpis } else { @{} }
+        $outboundRows = @($topOut | ForEach-Object {
+            $d = if ($detail.ContainsKey($_.Key)) { $detail[$_.Key] }
+                 elseif ($outDetail.ContainsKey($_.Key)) { $outDetail[$_.Key] } else { $null }
+            $row = [ordered]@{
+                NPI = $_.Key
+                Name = if ($d) { [string]$d.Name } else { '' }
+                Specialty = if ($d) { [string]$d.Specialty } else { '' }
+                SharedPatients = $_.Value.N
+            }
+            if ($isHop -and $_.Value.N -gt 0) { $row['AvgDayWait'] = [math]::Round($_.Value.W / $_.Value.N, 1) }
+            [pscustomobject]$row
+        })
+    }
 
     # Per-source ranked rows with share, cumulative share, and distance —
     # and, in the same pass, the per-ZIP geography roll-up the report's
@@ -3055,29 +3178,12 @@ function Get-RmSourceAnalysis {
     $geoMarket = @()
     if (-not $SkipCompetitors) {
         try {
-            if ($pracZip -notmatch '^\d{5}$') {
-                throw "NPPES lists no usable 5-digit practice-location ZIP for $Npi, so the radius cannot be centered."
-            }
-            $rzips = @(Get-RmZipsInRadius -Zip $pracZip -RadiusMiles $CompetitorRadiusMiles -CentroidPath $CentroidPath)
-            Write-Verbose "Competitive sweep: $($rzips.Count) ZIP(s) within $CompetitorRadiusMiles mi of $pracZip..."
-            $peersAll = @(Find-RmClinic -ZipList $rzips)
-            # Rank only COMPARABLE therapy practices: a provider whose
-            # PRIMARY taxonomy is in scope. Hospitals and multi-specialty
-            # organizations that merely list a therapy taxonomy in a spare
-            # slot are real, but their inbound volume covers every service
-            # line — including one live put a 319,024-patient hospital at
-            # "#1 therapy provider" and halved this practice's apparent
-            # share. They are counted and disclosed, not ranked.
-            $peers = @($peersAll | Where-Object {
-                $null -eq $_.PSObject.Properties['PrimaryInScope'] -or $_.PrimaryInScope })
-            $secondaryOnly = @($peersAll).Count - @($peers).Count
-            $others = New-Object 'System.Collections.Generic.HashSet[string]'
-            foreach ($p in $peers) { if (-not $memberSet.Contains($p.NPI)) { [void]$others.Add($p.NPI) } }
+            if ($sweepError) { throw $sweepError }
             $peerAgg = @{}
             $areaBySource = @{}   # source NPI -> patients sent to COMPETITORS
             if ($others.Count -gt 0) {
-                Write-Verbose "Scanning $($info.Label) for $($others.Count) peer providers..."
-                foreach ($e in @([RmEngine]::ScanInbound($info.Path, $others, $info.Format))) {
+                # Already read above, in the same pass as the practice.
+                foreach ($e in $peerEdges) {
                     # Market-capture layer: how much therapy volume each
                     # source sends to the AREA (competitors), so the map can
                     # show the practice's capture rate per source ZIP.
@@ -3310,6 +3416,7 @@ function Get-RmSourceAnalysis {
         GeoUnmappedPatients = $geoUnmapped  # volume with no locatable source ZIP
         Market       = $market              # county Medicare market (CMS enrollment); $null offline
         ServiceProfile = $svcProfile        # real billed therapy claims (CMS P&S); $null offline
+        Outbound     = @($outboundRows)   # free: the same pass carried both directions
         Competitive  = $landscape     # $null when skipped or the sweep failed
         Trend        = $null          # filled by Add-RmSourceTrend
         Notes        = @($notes)

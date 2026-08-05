@@ -609,6 +609,8 @@ $xaml = @'
                        Foreground="#1F6FB2" Background="#E4EAF0" BorderThickness="0"/>
           <TextBlock x:Name="BusyMessage" TextWrapping="Wrap" FontSize="13" Foreground="#26333E"
                      Text="Starting..." Margin="0,0,0,12"/>
+          <TextBlock x:Name="BusyStep" TextWrapping="Wrap" FontSize="12.5" FontWeight="SemiBold"
+                     Foreground="#1F6FB2" Text="" Margin="0,0,0,8"/>
           <TextBlock x:Name="BusyElapsed" FontSize="12.5" FontWeight="SemiBold" Foreground="#4A5560"
                      Text="Elapsed 0:00"/>
           <TextBlock TextWrapping="Wrap" FontSize="11.5" Foreground="#6B7681" Margin="0,10,0,0"
@@ -624,7 +626,7 @@ $window = [System.Windows.Markup.XamlReader]::Parse($xaml)
 $ui = @{}
 foreach ($name in @(
     'StatusText', 'UpdateButton', 'UpdateHint', 'Tabs',
-    'BusyOverlay', 'BusyTitle', 'BusyBar', 'BusyMessage', 'BusyElapsed',
+    'BusyOverlay', 'BusyTitle', 'BusyBar', 'BusyMessage', 'BusyStep', 'BusyElapsed',
     'NameBox', 'NpiBox', 'SearchButton', 'ExportSearchButton',
     'FlagPartB', 'FlagDme', 'FlagHha', 'FlagPmd', 'FlagHospice', 'SearchGrid', 'SearchSummary',
     'NpiListBox', 'LoadNpiFileButton', 'BatchCheckButton', 'ExportBatchButton', 'BatchGrid', 'BatchSummary',
@@ -716,6 +718,10 @@ function Set-Status([string]$Text) { $ui.StatusText.Text = $Text }
 # Purely cosmetic, so every path is wrapped: a formatting slip in the
 # progress display must never take down the work it is describing.
 $script:BusyStart = $null
+# Workers run in their own runspace, so a SYNCHRONIZED hashtable is how a
+# long job tells the window which step it is on. Cosmetic only: every read
+# is guarded, and a worker that never writes to it simply shows nothing.
+$script:BusyProgress = [hashtable]::Synchronized(@{})
 # A quick job that finishes in a fraction of a second should not make the
 # screen flash - reveal only once the work has clearly outlasted a click.
 $script:BusyRevealAfterMs = 600
@@ -730,11 +736,15 @@ $script:BusyTimer.Add_Tick({
             $ui.BusyOverlay.Visibility = [System.Windows.Visibility]::Visible
         }
         $ui.BusyElapsed.Text = 'Elapsed {0}:{1:00}' -f [int]$e.TotalMinutes, $e.Seconds
+        $step = [string]$script:BusyProgress['Step']
+        if ($step -and $ui.BusyStep.Text -ne $step) { $ui.BusyStep.Text = $step }
     } catch { }
 })
 
 function Show-BusyOverlay([string]$Message, [string]$Title) {
     try {
+        $script:BusyProgress['Step'] = ''
+        $ui.BusyStep.Text = ''
         $ui.BusyTitle.Text = if ($Title) { $Title } else { 'Working...' }
         $ui.BusyMessage.Text = if ($Message) { $Message } else { 'Working...' }
         $ui.BusyElapsed.Text = 'Elapsed 0:00'
@@ -820,9 +830,11 @@ function Invoke-Async {
         [hashtable]$Params = @{},
         [Parameter(Mandatory)][scriptblock]$OnDone,
         [Parameter(Mandatory)][scriptblock]$OnFail,
-        [string]$BusyMessage
+        [string]$BusyMessage,
+        [switch]$WithProgress      # worker declares a $Progress parameter
     )
     Set-Busy $true $BusyMessage (Get-BusyTitle $Kind)
+    if ($WithProgress) { $Params = $Params.Clone(); $Params['Progress'] = $script:BusyProgress }
     $rs = [runspacefactory]::CreateRunspace()
     $rs.Open()
     $ps = [powershell]::Create()
@@ -1823,15 +1835,19 @@ $ui.PgFootprintButton.Add_Click({
         }
     }
     if ($map.Count -eq 0) { Show-ErrorBox 'No in-ZIP therapists to compute a benchmark for.'; return }
-    $fpYear = $script:RmYear
+    # $script:, not a local: OnDone runs later, from the job pump, where this
+    # handler's locals are gone. As a local this arrived EMPTY, naming the
+    # column 'LocalReferrals' instead of 'LocalReferrals2022' and sorting on
+    # a property that then did not exist. (Same class as the one-stop
+    # report's $outPath; a static check now fails the build on it.)
+    $script:PgFootprintYear = $script:RmYear
     Invoke-Async -Kind 'pg-benchmark' -Params @{ RmModulePath = $script:RmModulePath; Map = $map; Names = $names } `
-        -BusyMessage "Benchmarking the groups on $fpYear referral volume (scanning $script:RmRowsLabel shared-patient pairs, then naming the sources)..." `
+        -BusyMessage "Benchmarking the groups on $($script:PgFootprintYear) referral volume (scanning $script:RmRowsLabel shared-patient pairs, then naming the sources)..." `
         -WorkerScript 'param($RmModulePath, $Map, $Names) Import-Module $RmModulePath; Get-RmGroupBenchmark -TargetToBucket $Map -BucketNames $Names' `
         -OnDone {
             param($result)
             $bench = $result[0]
             $script:PgBench = $bench
-            $script:PgFootprintYear = $fpYear
             $byPac = @{}
             foreach ($b in @($bench.Buckets)) { $byPac[$b.Bucket] = $b }
             # Top-3 label sources per group from the full edge list.
@@ -1846,9 +1862,9 @@ $ui.PgFootprintButton.Add_Click({
                 $hit = if ($byPac.ContainsKey($g.GroupPacId)) { $byPac[$g.GroupPacId] } else { $null }
                 $g | Add-Member -NotePropertyName 'Rank' -NotePropertyValue $(if ($hit) { $hit.Rank } else { $null }) -Force
                 $g | Add-Member -NotePropertyName 'SharePct' -NotePropertyValue $(if ($hit) { $hit.SharePct } else { 0 }) -Force
-                $g | Add-Member -NotePropertyName "LocalReferrals$fpYear" -NotePropertyValue $(if ($hit) { $hit.InboundPatients } else { 0 }) -Force -PassThru
+                $g | Add-Member -NotePropertyName "LocalReferrals$($script:PgFootprintYear)" -NotePropertyValue $(if ($hit) { $hit.InboundPatients } else { 0 }) -Force -PassThru
             }
-            $sorted = @($augmented | Sort-Object -Property @{Expression = "LocalReferrals$fpYear"; Descending = $true},
+            $sorted = @($augmented | Sort-Object -Property @{Expression = "LocalReferrals$($script:PgFootprintYear)"; Descending = $true},
                                                            @{Expression = 'GroupName'; Descending = $false})
             $script:PgResult.Groups = $sorted
             $ui.PgGroupGrid.ItemsSource = (ConvertTo-DataTable -Rows $sorted -Columns (Get-PgGroupCols)).DefaultView
@@ -1856,9 +1872,9 @@ $ui.PgFootprintButton.Add_Click({
             Update-PgBottomView
             $withVol = @($bench.Buckets | Where-Object { $_.InboundPatients -gt 0 }).Count
             $top = if (@($bench.Buckets).Count -gt 0) { @($bench.Buckets)[0] } else { $null }
-            $ui.PgSummary.Text = ("$fpYear group benchmark: $withVol group(s) had measured referral volume." +
+            $ui.PgSummary.Text = ("$($script:PgFootprintYear) group benchmark: $withVol group(s) had measured referral volume." +
                 $(if ($top -and $top.InboundPatients -gt 0) { " #1 is $($top.GroupName) with $('{0:N0}' -f $top.InboundPatients) patients ($($top.SharePct)% of measured group volume) from $($top.Sources) source(s)." } else { '' }) +
-                " Use 'Show' to flip the lower table between each group's roster, its referral sources, and its missed sources. Reminder: $fpYear vintage; a source is a shared-patient proxy (labs/hospitals appear too — read by specialty).")
+                " Use 'Show' to flip the lower table between each group's roster, its referral sources, and its missed sources. Reminder: $($script:PgFootprintYear) vintage; a source is a shared-patient proxy (labs/hospitals appear too — read by specialty).")
             Set-Status 'Group benchmark computed.'
         } `
         -OnFail {
@@ -2511,22 +2527,27 @@ $ui.LkFullReportButton.Add_Click({
     $dialog.Filter = 'Provider report (*.html)|*.html'
     $dialog.FileName = "provider-report-$($npis[0]).html"
     if (-not $dialog.ShowDialog($window)) { return }
-    $outPath = $dialog.FileName
+    # $script:, NOT a local. OnDone runs minutes later from the job pump, by
+    # which time this handler has returned and its locals are gone - a local
+    # $outPath arrived at Export-RmSourceReportHtml as an empty string and
+    # threw away the whole scan. Every other handler here uses $script: for
+    # exactly this reason.
+    $script:LkFullPath = $dialog.FileName
 
     # Trend is automatic in the one-stop report whenever 2+ CareSet years
     # exist - that is what one-stop means. It costs a full scan per year.
     $hopYears = @(Get-RmAvailableDatasets | Where-Object { $_.Source -eq 'hop-teaming' })
     $withTrend = ($hopYears.Count -ge 2)
     # Eligibility from the in-memory snapshot (same as Look up provider).
-    $eligLine = 'Order & Referring eligibility: (data not loaded - use the Search tab''s "Check for updates" first.)'
+    $script:LkFullElig = 'Order & Referring eligibility: (data not loaded - use the Search tab''s "Check for updates" first.)'
     if ($script:Data) {
         $chk = @($npis[0] | Test-OrfNpi -Data $script:Data)[0]
         if ($chk.Status -like 'ELIGIBLE*') {
-            $eligLine = "ELIGIBLE to order & refer - PartB=$($chk.PartB) DME=$($chk.DME) HHA=$($chk.HHA) PMD=$($chk.PMD) Hospice=$($chk.Hospice)"
+            $script:LkFullElig = "ELIGIBLE to order & refer - PartB=$($chk.PartB) DME=$($chk.DME) HHA=$($chk.HHA) PMD=$($chk.PMD) Hospice=$($chk.Hospice)"
         } elseif ($chk.Status -eq 'NOT ON LIST') {
-            $eligLine = 'NOT on the current Medicare order-&-referring eligibility list.'
+            $script:LkFullElig = 'NOT on the current Medicare order-&-referring eligibility list.'
         } else {
-            $eligLine = "Eligibility check: $($chk.Status)"
+            $script:LkFullElig = "Eligibility check: $($chk.Status)"
         }
     }
     $who = $npis[0] + $(if ($npis.Count -gt 1) { " (+$($npis.Count - 1) more, combined)" } else { '' })
@@ -2536,41 +2557,52 @@ $ui.LkFullReportButton.Add_Click({
             Npi = $npis; WithTrend = $withTrend; HasPg = (Get-PgStatus).DatasetReady
         } `
         -BusyMessage ("Building the one-stop report for $who - full source analysis, heat map, competitive sweep, outbound scan$(if ($withTrend) { ', trendlines' }).$trendBit Lookups are cached, so re-runs are much faster.") `
-        -WorkerScript 'param($RmModulePath, $PgModulePath, $Npi, $WithTrend, $HasPg)
+        -WithProgress `
+        -WorkerScript 'param($RmModulePath, $PgModulePath, $Npi, $WithTrend, $HasPg, $Progress)
             Import-Module $RmModulePath
+            $total = if ($WithTrend) { 4 } else { 3 }
+            $Progress[''Step''] = "Step 1 of $total - scanning referral sources and competitors..."
             $sa = Get-RmSourceAnalysis -Npi $Npi
-            if ($WithTrend) { $sa = Add-RmSourceTrend -Analysis $sa }
-            $act = Get-RmProviderReferralActivity -Npi $Npi[0]
+            # Outbound now rides along in the analysis pass; no extra scan.
+            $outbound = @($sa.Outbound)
+            $step = 2
+            if ($WithTrend) {
+                $Progress[''Step''] = "Step $step of $total - measuring year over year (one pass per extra year)..."
+                $sa = Add-RmSourceTrend -Analysis $sa
+                $step++
+            }
+            $Progress[''Step''] = "Step $step of $total - naming the provider and its practice groups..."
             $detail = (Get-RmProviderDetail -Npi @($Npi[0]))[$Npi[0]]
             $groups = $null
             if ($HasPg) { Import-Module $PgModulePath; $groups = @(Get-PgMembershipForNpi -Npi $Npi[0]) }
-            [pscustomobject]@{ Analysis = $sa; Outbound = @($act.Outbound); Detail = $detail; Groups = $groups }' `
+            $Progress[''Step''] = "Step $total of $total - writing the report..."
+            [pscustomobject]@{ Analysis = $sa; Outbound = $outbound; Detail = $detail; Groups = $groups }' `
         -OnDone {
             param($result)
             $r = $result[0]
             $script:LkAnalysis = $r.Analysis   # the plain save button stays usable
             try {
                 $renderArgs = @{
-                    Analysis = $r.Analysis; Path = $outPath
-                    Provider = $r.Detail; EligibilityLine = $eligLine
+                    Analysis = $r.Analysis; Path = $script:LkFullPath
+                    Provider = $r.Detail; EligibilityLine = $script:LkFullElig
                     Outbound = @($r.Outbound)
                 }
                 if ($null -ne $r.Groups) { $renderArgs['Groups'] = @($r.Groups) }
                 $rep = Export-RmSourceReportHtml @renderArgs
                 # CSV sidecars: the full source table, outbound, and trend.
-                $csvPath = [System.IO.Path]::ChangeExtension($outPath, '.sources.csv')
+                $csvPath = [System.IO.Path]::ChangeExtension($script:LkFullPath, '.sources.csv')
                 @($r.Analysis.Sources) |
                     Export-RmResult -Path $csvPath -Notes @($r.Analysis.Notes) `
                         -Description "Full ranked referral-source table for NPI $($r.Analysis.Npi) ($script:RmDataLabel)" | Out-Null
                 if (@($r.Outbound).Count) {
                     @($r.Outbound) |
-                        Export-RmResult -Path ([System.IO.Path]::ChangeExtension($outPath, '.outbound.csv')) `
+                        Export-RmResult -Path ([System.IO.Path]::ChangeExtension($script:LkFullPath, '.outbound.csv')) `
                             -Notes @($r.Analysis.Notes) `
                             -Description "Outbound destinations for NPI $($r.Analysis.Npi) ($script:RmDataLabel)" | Out-Null
                 }
                 if ($r.Analysis.PSObject.Properties['Trend'] -and $r.Analysis.Trend) {
                     @($r.Analysis.Trend.Years) |
-                        Export-RmResult -Path ([System.IO.Path]::ChangeExtension($outPath, '.by-year.csv')) `
+                        Export-RmResult -Path ([System.IO.Path]::ChangeExtension($script:LkFullPath, '.by-year.csv')) `
                             -Notes @($r.Analysis.Trend.Notes) `
                             -Description "Year-over-year referral performance for NPI $($r.Analysis.Npi)" | Out-Null
                 }
@@ -2580,7 +2612,13 @@ $ui.LkFullReportButton.Add_Click({
                     try { Start-Process $rep.Path } catch { Show-ErrorBox "Could not open the browser: $($_.Exception.Message)" }
                 }
             } catch {
-                Show-ErrorBox "The analysis finished but writing the report failed: $($_.Exception.Message)"
+                # The expensive part already succeeded and is held in
+                # $script:LkAnalysis, so enable the plain save button: the
+                # user retries the WRITE, not the scan.
+                $ui.LkSaveReportButton.IsEnabled = $true
+                Show-ErrorBox ("The analysis finished but writing the report failed: $($_.Exception.Message)`n`n" +
+                    "Nothing was lost - the analysis is still loaded. Use 'Save report (HTML)...' to write it " +
+                    "somewhere else without re-running the scan.")
             }
         } `
         -OnFail { param($message) Show-ErrorBox "Full report failed: $message" }
