@@ -379,6 +379,16 @@ Three honest caveats, all repeated in the export sidecar:
 3. Care Compare reflects **today's** rosters while the referral data is
    historical, so a therapist who has since moved is credited to the address
    they are listed at now.
+   A related gate worth knowing: Care Compare lists only clinicians with an
+   approved **Medicare enrollment** and Medicare claims inside a 12-month
+   lookback. It is **not** gated on MIPS — quality-program reporting has no
+   effect on who appears anywhere in this app — but cash-pay and non-Medicare
+   therapists never appear on this roster, and historical volume from
+   clinicians who have since left Medicare cannot be placed at an address
+   (measured in one metro market at roughly 18% of individual-therapist
+   volume). The by-NPI and org-NPI views have no such gate: discovery runs on
+   NPPES, which lists every provider with an NPI, and the volumes come from
+   claims, not from any reporting program.
 4. You get the locations enrolled under a name matching what you typed, and
    **brands are usually enrolled under a different legal name**. ATI Physical
    Therapy's clinics are registered as `ATI HOLDINGS, LLC`: searching the brand

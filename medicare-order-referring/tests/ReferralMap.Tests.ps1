@@ -159,6 +159,16 @@ Describe 'Referral map' {
         @($map.Sources)[0].SourceName | Should -Be ''
         @($map.Clinics)[0].SharedPatients | Should -Be 65
     }
+    It 'states that MIPS participation never gates who appears' {
+        # claims-based volumes + NPPES-based discovery: quality-program
+        # reporting has no effect, and the note must say so on BOTH paths
+        $map = Get-RmReferralMap -Zip 99999 -SkipEnrichment
+        (@($map.Notes) -join ' ') | Should -BeLike '*not from quality-program reporting*'
+        (@($map.Notes) -join ' ') | Should -BeLike '*MIPS*'
+        # the hop path's copy is asserted in the CareSet Describe, where the
+        # 2022 fixture actually exists
+    }
+
     It 'carries honest methodology notes' {
         ($script:Map.Notes -join ' ') | Should -Match '2015'
         ($script:Map.Notes -join ' ') | Should -Match 'NOT current volumes'
@@ -359,6 +369,11 @@ Describe 'Hop Teaming (CareSet) import and queries' {
         # (flagged No elsewhere) but long before the 2022 hop window ends.
         $map = Get-RmReferralMap -Zip 99999 -SkipEnrichment
         @($map.Clinics | Where-Object NPI -eq '9000000005')[0].ExistedInDataYear | Should -Be 'Yes'
+    }
+
+    It 'states the claims-not-MIPS gate on the CareSet path too' {
+        $map = Get-RmReferralMap -Zip 99999 -SkipEnrichment
+        (@($map.Notes) -join ' ') | Should -BeLike '*not from quality-program reporting*'
     }
 
     It 'carries CareSet-specific methodology notes' {
@@ -1604,6 +1619,9 @@ Describe 'Address-level referrals (the multi-site workaround)' {
             $r.PSObject.Properties['OrgNpiPatients'] | Should -Not -BeNullOrEmpty
             (@($r.Notes) -join ' ') | Should -BeLike '*no address and is NOT distributed*'
             (@($r.Notes) -join ' ') | Should -BeLike '*ADDRESS-LEVEL METHOD*'
+            # the roster gate: Medicare enrollment + 12-month claims, NOT MIPS
+            (@($r.Notes) -join ' ') | Should -BeLike '*ROSTER GATE*'
+            (@($r.Notes) -join ' ') | Should -BeLike '*NOT gated on MIPS*'
             # Chains enroll clinics under regional legal names, so a name
             # search finds SOME of the brand's sites, not provably all.
             (@($r.Notes) -join ' ') | Should -BeLike '*NAME MATCH*'
