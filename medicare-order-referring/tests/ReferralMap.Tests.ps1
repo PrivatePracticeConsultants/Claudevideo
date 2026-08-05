@@ -1198,6 +1198,37 @@ Describe 'Organization breakdown (chain volume by NPI and address)' {
         $n | Should -BeLike '*REGIONAL entities*'
     }
 
+    It 'treats the spaces a user types as optional (Ivy Rehab vs IVYREHAB)' {
+        # NPPES enrolls the brand as one word; the brand writes two. Both
+        # spellings must find the same chain.
+        $spaced = Get-RmProviderFamily -Name 'CHAIN REHAB'
+        $spaced.Npis | Should -Be 3
+        (Get-RmProviderFamily -Name 'CHAINREHAB').Npis | Should -Be 3
+    }
+
+    It 'reports a spacing-only near miss instead of silently absorbing it' {
+        # 'VIRTUA CHAINREHAB' does NOT contain needle 'CHAINREHAB' as typed
+        # spacing... actually it does. Use the real shape: a hyphenated JV
+        # whose key splits the brand ('VIRTUA CHAIN REHAB' vs CHAINREHAB).
+        $jv = Join-Path $script:WorkDir 'npi-jv.csv'
+        Set-Content -Path $jv -Encoding utf8 -Value @(
+            $script:NppesHdr
+            '"8100000001","2","CHAINREHAB NETWORK, INC.","","","HOBOKEN","NJ","070301111","261QP2000X","01/01/2010",' + (',' * 14) + '"Y"'
+            '"8100000004","2","VIRTUA-CHAIN REHAB LLC","","","MARLTON","NJ","080531111","261QP2000X","01/01/2013",' + (',' * 14) + '"Y"'
+        )
+        Import-RmNppesBulk -Path $jv | Out-Null
+        try {
+            $fam = Get-RmProviderFamily -Name 'CHAINREHAB'
+            # the JV is NOT absorbed (compacting stored names would also
+            # merge ATHLETIC ORTHOPEDIC into ATHLETICO)...
+            @($fam.Rows | ForEach-Object NPI) | Should -Not -Contain '8100000004'
+            # ...but it is NAMED so the user can chase it
+            (@($fam.Notes) -join ' ') | Should -BeLike '*SPACING NEAR-MISS*VIRTUA-CHAIN REHAB LLC*'
+            # and searching with the space finds it directly
+            @((Get-RmProviderFamily -Name 'CHAIN REHAB').Rows | ForEach-Object NPI) | Should -Contain '8100000004'
+        } finally { Import-RmNppesBulk -Path $script:ChainCsv | Out-Null }
+    }
+
     It 'filters by state and rejects a nonsense search' {
         (Get-RmProviderFamily -Name 'CHAINREHAB' -State NH).Npis | Should -Be 1
         { Get-RmProviderFamily -Name 'ZZZNOSUCHCHAIN' } | Should -Throw '*No organization NPIs match*'
@@ -1217,6 +1248,9 @@ Describe 'Generic Clinic/Center primary (chains must still be rankable)' {
             '"8500000001","2","GENERIC CLINIC CHAIN LLC","","","TESTVILLE","MO","999991234","261Q00000X","01/01/2010","225100000X"' + (',' * 13) + '"Y"'
             '"8500000002","2","BIG HOSPITAL SYSTEM","","","TESTVILLE","MO","999991234","282N00000X","01/01/2010","225100000X"' + (',' * 13) + '"Y"'
             '"8500000003","2","PLAIN PT CLINIC LLC","","","TESTVILLE","MO","999991234","225100000X","01/01/2010",' + (',' * 14) + '"Y"'
+            '"8500000005","2","MULTISPEC THERAPY CO LLC","","","TESTVILLE","MO","999991234","261QM1300X","01/01/2010","225100000X"' + (',' * 13) + '"Y"'
+            '"8500000006","2","LEGACY SPECIALIST PT LLC","","","TESTVILLE","MO","999991234","174400000X","01/01/2010","2251H1200X"' + (',' * 13) + '"Y"'
+            '"8500000007","2","PURE SPECIALIST GROUP LLC","","","TESTVILLE","MO","999991234","174400000X","01/01/2010",' + (',' * 14) + '"Y"'
         )
         Import-RmNppesBulk -Path $script:GenericCsv | Out-Null
     }
@@ -1231,6 +1265,22 @@ Describe 'Generic Clinic/Center primary (chains must still be rankable)' {
             $g = @($rows | Where-Object NPI -eq '8500000001')[0]
             $g | Should -Not -BeNullOrEmpty -Because 'a generic clinic with a PT code must be discovered'
             $g.PrimaryInScope | Should -BeTrue -Because 'this is how chains register clinics; excluding them hid 65% of Athletico'
+        }
+    }
+
+    It 'ranks the other two non-specific primaries the audit found' {
+        InModuleScope ReferralMap {
+            $rows = @(Find-RmClinic -Zip 99999)
+            # 261QM1300X Multi-Specialty + PT code = the EmpowerMe shape
+            @($rows | Where-Object NPI -eq '8500000005')[0].PrimaryInScope | Should -BeTrue
+            # 174400000X legacy Specialist + PT code = the Apex shape
+            @($rows | Where-Object NPI -eq '8500000006')[0].PrimaryInScope | Should -BeTrue
+        }
+    }
+
+    It 'a legacy Specialist with NO therapy code anywhere stays out entirely' {
+        InModuleScope ReferralMap {
+            @(Find-RmClinic -Zip 99999 | Where-Object NPI -eq '8500000007').Count | Should -Be 0
         }
     }
 

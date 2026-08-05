@@ -272,11 +272,23 @@ One filtering rule worth knowing, because it decides who appears as your
 competitor: rankings compare **therapy practices**, so a provider whose
 *primary* registration is something else — a hospital, a home-health agency, a
 behavioral clinic — is listed but not ranked, since its referral volume covers
-every service line. The exception is the generic **"Clinic/Center"** code:
-chains register clinics under it with their real PT code in a spare slot
-(**277 of Athletico's 426**), so a generic clinic that also carries a therapy
-taxonomy *is* ranked. Without that exception, 65% of the largest chain in some
-markets was missing from every competitor table.
+every service line. The exception is a primary that says
+*nothing specific* — the generic **"Clinic/Center"** code, **"Multi-Specialty
+Clinic"**, or the legacy **"Specialist"** code: chains and therapy companies
+register clinics under these with their real PT code in a spare slot (**277 of
+Athletico's 426**; Apex Physical Therapy; EmpowerMe), so a non-specific
+primary that also carries a therapy taxonomy *is* ranked. Without that
+exception, 65% of the largest chain — and, in St Louis, the would-be #3 and
+#4 practices — were missing from every competitor table. Measured nationally,
+the three codes readmit 1,820 providers, under 3% of them hospital-named.
+
+One more forgiveness worth knowing: **spaces in the name you type are
+optional**. NPPES enrolls the brand as `IVYREHAB` while the brand writes
+`Ivy Rehab`; both spellings now find the same chain. The reverse (ignoring
+spaces inside *stored* names) is deliberately not automatic — compacting
+`ATHLETIC ORTHOPEDIC` creates `ATHLETICO`, which is how an unrelated knee
+clinic ends up inside a chain — so such near-misses are named in the notes
+("matches only when spaces are ignored") for you to search directly.
 
 Two honest limits:
 

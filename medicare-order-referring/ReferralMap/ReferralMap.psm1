@@ -112,7 +112,19 @@ $script:RmIndividualTaxonomyPrefixes = @{
 # nationally, this readmits 910 providers of the 27,742 holding this primary,
 # only 2.5% of them hospital-named - it does not reopen the door to hospitals,
 # which is what ranking-on-primary exists to prevent.
-$script:RmGenericClinicTaxonomy = '261Q00000X'
+# A Fable-pass volume audit found the same pattern behind two more codes:
+# in St Louis, Apex Physical Therapy (16,872 patients, would rank #3) sat
+# on 174400000X "Specialist" - a legacy code NUCC itself calls non-specific
+# - and EmpowerMe Rehabilitation Missouri (15,605, would rank #4) on
+# 261QM1300X "Multi-Specialty Clinic", which is exactly how a PT+OT+SLP
+# company reads to a form. Nationally the three codes readmit 910 + 328 +
+# 582 providers, 0.3-2.6% of them hospital-named; the legacy 193x group
+# codes were measured too and recover zero, so they are not here.
+$script:RmGenericPrimaryTaxonomies = @{
+    '261Q00000X' = 'Clinic/Center (non-specific)'
+    '261QM1300X' = 'Clinic/Center: Multi-Specialty'
+    '174400000X' = 'Specialist (legacy, non-specific)'
+}
 
 $script:RmSearchTerms = @('Physical Therapist', 'Physical Therapy',
                           'Occupational Therapist', 'Speech-Language Pathologist',
@@ -1188,7 +1200,7 @@ function Find-RmClinic {
             # fields fall back to slot 1.
             $primaryCode = Get-RmIndexPrimaryCode $f
             $primaryInScope = [bool](& $resolveTax $primaryCode '')
-            if (-not $primaryInScope -and $primaryCode -eq $script:RmGenericClinicTaxonomy) {
+            if (-not $primaryInScope -and $script:RmGenericPrimaryTaxonomies.ContainsKey($primaryCode)) {
                 # Generic "Clinic/Center" primary + a real therapy code in
                 # another slot ($label proved one is present) = comparable.
                 $primaryInScope = $true
@@ -1261,8 +1273,8 @@ function Find-RmClinic {
                 if ($primaryTx.Count) {
                     $primaryInScope = [bool](& $resolveTax ([string](Get-RmProp $primaryTx[0] 'code')) ([string](Get-RmProp $primaryTx[0] 'desc')))
                     if (-not $primaryInScope -and
-                        [string](Get-RmProp $primaryTx[0] 'code') -eq $script:RmGenericClinicTaxonomy) {
-                        $primaryInScope = $true   # see RmGenericClinicTaxonomy
+                        $script:RmGenericPrimaryTaxonomies.ContainsKey([string](Get-RmProp $primaryTx[0] 'code'))) {
+                        $primaryInScope = $true   # see RmGenericPrimaryTaxonomies
                     }
                 }
 
@@ -3134,7 +3146,7 @@ function Get-RmSourceAnalysis {
         $(if ($isHop) { 'REFERRAL-LAG PROFILE: average days from source visit to this practice''s visit, volume-weighted. Short lags look like referrals; 90+ days usually means co-occurring care (labs, hospitals), not referral flow.' })
         $(if ($landscape) { "COMPETITIVE LANDSCAPE: peers are the NPPES-listed outpatient rehab providers (the same PT/OT/SLP taxonomy sweep the Referral map uses) whose practice location falls in the $($landscape.ZipCount) ZIP(s) within $($landscape.RadiusMiles) straight-line miles of ZIP $pracZip, ranked by inbound shared-patient volume on $($info.Label). Share of area volume = a provider's inbound volume over the SUM across all listed providers — share of measured referral VOLUME, not of patients." })
         $(if ($landscape) { 'A practice''s volume is often SPLIT between its organization NPI and its therapists'' individual NPIs, so a group can rank below its true combined volume. Benchmark the org NPI and its key therapists separately for the full picture.' })
-        $(if ($landscape -and $landscape.SecondaryOnlyExcluded -gt 0) { "COMPARABILITY: $($landscape.SecondaryOnlyExcluded) provider(s) in the radius list a therapy taxonomy only in a SECONDARY slot — typically hospitals and multi-specialty organizations. They are excluded from the ranking because their inbound volume spans every service line, not therapy, and including them would overstate the market and understate this practice's share. A provider whose primary is the GENERIC 'Clinic/Center' code but which also carries a real therapy taxonomy is NOT excluded - that combination is how large chains register their clinics (277 of Athletico's 426), and dropping them hid most of the biggest competitor in some markets." })
+        $(if ($landscape -and $landscape.SecondaryOnlyExcluded -gt 0) { "COMPARABILITY: $($landscape.SecondaryOnlyExcluded) provider(s) in the radius list a therapy taxonomy only in a SECONDARY slot — typically hospitals and multi-specialty organizations. They are excluded from the ranking because their inbound volume spans every service line, not therapy, and including them would overstate the market and understate this practice's share. A provider whose primary is a NON-SPECIFIC code - generic 'Clinic/Center', 'Multi-Specialty Clinic', or the legacy 'Specialist' - but which also carries a real therapy taxonomy is NOT excluded: those registrations are how chains and therapy companies fill in forms (277 of Athletico's 426 clinics, Apex Physical Therapy, EmpowerMe), and dropping them hid top-5 competitors in some markets." })
         $(if ($landscapeNote) { $landscapeNote })
         $(if ($market) { "MARKET CONTEXT: county Medicare enrollment from CMS's Medicare Monthly Enrollment dataset (calendar $($market.Year), latest full year). Original Medicare (FFS) beneficiaries are the population this file can see; Medicare Advantage members ($($market.MaPct)% of $($market.County)) are invisible to it." })
         $(if ($svcProfile) { 'BILLED-SERVICES PROFILE: actual Medicare Part B claims from CMS''s Physician & Other Practitioners dataset (latest annual release; therapy = HCPCS 97xxx/92xxx). CAUTION: this dataset suppresses provider-procedure lines under 11 beneficiaries, so small caseloads are invisible here too, and services bill under the RENDERING NPI — organizations that bill through their therapists'' individual NPIs legitimately show no claims here. Distinct-patient counts are a FLOOR (patients overlap across procedure codes).' })
@@ -5080,6 +5092,24 @@ function Get-RmOrgNameKey([string]$Name) {
     [regex]::Replace($n, '\s+', ' ').Trim()
 }
 
+# Matching a user-typed organization name against stored name keys.
+# Brands are inconsistent about spacing - NPPES holds 60 'IVYREHAB ...'
+# entities and one 'VIRTUA IVY REHAB', and the brand itself writes
+# 'Ivy Rehab' - so every space the USER types is treated as optional:
+# 'IVY REHAB' matches both 'IVY REHAB ...' and 'IVYREHAB ...'. The reverse
+# (ignoring spaces inside the STORED name) is deliberately NOT matched -
+# compacting 'ATHLETIC ORTHOPEDIC' makes it contain 'ATHLETICO', which is
+# how an unrelated knee clinic ends up inside a chain - but such
+# compact-only near-misses are COUNTED so callers can surface them as
+# suggestions instead of silently dropping them.
+function Get-RmNameMatcher([string]$Needle) {
+    $rx = [regex]::Escape($Needle) -replace '\\ ', ' ?'
+    [pscustomobject]@{
+        Regex = [regex]::new($rx)
+        Compact = ($Needle -replace ' ', '')
+    }
+}
+
 function Get-RmProviderFamily {
     <#
     .SYNOPSIS
@@ -5106,13 +5136,20 @@ function Get-RmProviderFamily {
     if (-not $needle) { throw "Enter part of an organization name (letters or numbers)." }
 
     $members = @{}
+    $m0 = Get-RmNameMatcher $needle
+    $nearMiss = New-Object 'System.Collections.Generic.HashSet[string]'
     $idx = Get-RmNppesIndexPath
     if (Test-Path -LiteralPath $idx) {
         foreach ($line in [System.IO.File]::ReadLines($idx)) {
             $f = $line.Split('|')
             if ($f.Count -lt 10 -or $f[1] -ne '2' -or -not $f[2]) { continue }
             $key = Get-RmOrgNameKey $f[2]
-            if ($key -notlike "*$needle*") { continue }
+            if (-not $m0.Regex.IsMatch($key)) {
+                # spacing-only near miss (e.g. VIRTUA-IVY REHAB when the
+                # needle is IVYREHAB): report it, never absorb it.
+                if (($key -replace ' ', '').Contains($m0.Compact)) { [void]$nearMiss.Add($f[2]) }
+                continue
+            }
             if ($State -and $f[6] -ne $State.ToUpperInvariant()) { continue }
             $members[$f[0]] = [pscustomobject]@{
                 NPI = $f[0]; Name = $f[2]; FamilyKey = $key
@@ -5178,6 +5215,12 @@ function Get-RmProviderFamily {
         "MultiSiteNPI = 'Yes (registry)' when NPPES lists extra practice locations for that NPI; 'Likely (scale)' when it draws $($script:RmSingleSiteSourceCeiling)+ distinct referring providers, which no single outpatient site plausibly does (a large one-location practice measured 379)."
         'Chains also enumerate REGIONAL entities under slightly different names (e.g. "<Brand> New Hampshire, LLC"); those appear as separate rows here when the name still matches, and under their own FamilyKey.'
         'A blank volume means that NPI has no measured pair in this data year - commonly a location that bills through a sibling NPI, or one whose pairs all fell under the 11-patient floor.'
+        $(if ($nearMiss.Count) {
+            "SPACING NEAR-MISS: $($nearMiss.Count) organization(s) match only when spaces are ignored and were NOT included: " +
+            ((@($nearMiss) | Select-Object -First 5) -join '; ') +
+            $(if ($nearMiss.Count -gt 5) { '; ...' }) +
+            '. Search that exact name to include it - ignoring spaces automatically would also merge unrelated names (compacting ATHLETIC ORTHOPEDIC creates ATHLETICO).'
+        })
         $(if (@($rows | Where-Object { $_.Chain }).Count) { Get-RmChainNote })
     ) | Where-Object { $_ }
     [pscustomobject]@{
@@ -5278,10 +5321,16 @@ function Get-RmLocationReferrals {
     if (-not $needle) { throw "Enter part of an organization name (letters or numbers)." }
 
     $byAddr = @{}; $npiAddrs = @{}
+    $m1 = Get-RmNameMatcher $needle
+    $addrNearMiss = New-Object 'System.Collections.Generic.HashSet[string]'
     foreach ($line in [System.IO.File]::ReadLines($idx)) {
         $f = $line.Split('|')
         if ($f.Count -lt 10) { continue }
-        if ((Get-RmOrgNameKey $f[2]) -notlike "*$needle*") { continue }
+        $k0 = Get-RmOrgNameKey $f[2]
+        if (-not $m1.Regex.IsMatch($k0)) {
+            if ($k0 -and ($k0 -replace ' ', '').Contains($m1.Compact)) { [void]$addrNearMiss.Add($f[2]) }
+            continue
+        }
         if ($State -and $f[7] -ne $State.ToUpperInvariant()) { continue }
         $z5 = if ($f[9].Length -ge 5) { $f[9].Substring(0, 5) } else { $f[9] }
         if ($Zip -and $z5 -ne $Zip) { continue }
@@ -5383,6 +5432,11 @@ function Get-RmLocationReferrals {
             '. These are suggestions from a shared leading word, not a proven link; nothing was merged into the figures above.'
         })
         'RANGE PER SITE: SharedPatients credits a multi-site clinician in full to every site they are listed at, so it is the UPPER bound for a location. ExclusivePatients counts only clinicians who work at that one site, so it is the LOWER bound. A site whose two figures are close is measured cleanly; a wide gap means its number leans on shared staff.'
+        $(if ($addrNearMiss.Count) {
+            "SPACING NEAR-MISS: $($addrNearMiss.Count) facility name(s) match only when spaces are ignored and were NOT included: " +
+            ((@($addrNearMiss) | Select-Object -First 5) -join '; ') +
+            $(if ($addrNearMiss.Count -gt 5) { '; ...' }) + '. Search that exact name to include it.'
+        })
     ) | Where-Object { $_ }
 
     [pscustomobject]@{
