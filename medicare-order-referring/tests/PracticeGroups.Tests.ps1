@@ -143,3 +143,35 @@ Describe 'Export' {
         (Get-Content $res.Methodology -Raw) | Should -Match 'reassignment'
     }
 }
+
+Describe 'Malformed-file refusal' {
+    It 'refuses a reassignment file whose body is mostly damaged rows' {
+        $bad = Join-Path $script:WorkDir 'damaged-reassignment.csv'
+        Set-Content -Path $bad -Encoding ascii -NoNewline -Value (@(
+            '"Group PAC ID","Group Legal Business Name","Group State Code","Individual PAC ID","Individual NPI","Individual First Name","Individual Last Name","Individual Specialty Description"'
+            '"1111","GOOD THERAPY GROUP","MO","2","1000000001","AMY","SMITH","Physical Therapy"'
+            '"2222","TRUNCATED'
+        ) -join "`n")
+        $g = $null; $n = $null
+        # 1 damaged row out of 2 blows the same 1% budget the shared-patient
+        # engine applies: refuse loudly, never silently understate rosters.
+        { [PgEngine]::Load($bad, @('physical therap'), [ref]$g, [ref]$n) } |
+            Should -Throw '*malformed*'
+    }
+
+    It 'still tolerates a stray short row within the 1% budget' {
+        $ok = Join-Path $script:WorkDir 'stray-row-reassignment.csv'
+        $lines = New-Object System.Collections.Generic.List[string]
+        $lines.Add('"Group PAC ID","Group Legal Business Name","Group State Code","Individual PAC ID","Individual NPI","Individual First Name","Individual Last Name","Individual Specialty Description"')
+        for ($i = 0; $i -lt 200; $i++) {
+            $lines.Add(('"1111","GOOD THERAPY GROUP","MO","2","10000000{0:00}","AMY","SMITH","Physical Therapy"' -f ($i % 100)))
+        }
+        $lines.Add('"2222","TRUNCATED')
+        Set-Content -Path $ok -Encoding ascii -NoNewline -Value ($lines -join "`n")
+        $g = $null; $n = $null
+        [PgEngine]::Load($ok, @('physical therap'), [ref]$g, [ref]$n)
+        $g.Count | Should -Be 1
+        $g['1111'].Members.Count | Should -Be 200
+    }
+}
+

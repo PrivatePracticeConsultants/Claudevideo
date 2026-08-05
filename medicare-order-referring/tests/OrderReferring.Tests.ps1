@@ -392,3 +392,18 @@ Describe 'Older-release and state safety' {
         $status.LocalRowCount | Should -Be 3
     }
 }
+
+Describe 'Download URL host pinning' {
+    It 'refuses catalog download URLs that are not CMS hosts' {
+        & (Get-Module OrderReferring) {
+            # The catalog is remote data; a poisoned entry must not be able to
+            # point the downloader at another origin.
+            { Assert-OrfSafeDownloadUrl 'https://evil.example.com/x.csv' } | Should -Throw '*CMS hosts*'
+            { Assert-OrfSafeDownloadUrl 'file:///C:/x.csv' } | Should -Throw
+            { Assert-OrfSafeDownloadUrl 'https://data.cms.gov/x.csv' } | Should -Not -Throw
+            { Assert-OrfSafeDownloadUrl 'https://downloads.cms.gov/x.csv' } | Should -Not -Throw
+            { Assert-OrfSafeDownloadUrl 'http://127.0.0.1:8080/x.csv' } | Should -Not -Throw
+        }
+    }
+}
+

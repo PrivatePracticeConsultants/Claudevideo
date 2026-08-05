@@ -163,11 +163,13 @@ public static class PgEngine
                 if (i > maxIdx) maxIdx = i;
 
             string line;
+            long total = 0, bad = 0;
             while ((line = reader.ReadLine()) != null)
             {
                 if (line.Length == 0) continue;
+                total++;
                 List<string> f = SplitCsvLine(line);
-                if (f.Count <= maxIdx) continue;   // tolerate a stray short row
+                if (f.Count <= maxIdx) { bad++; continue; }   // tolerate a STRAY short row (budgeted below)
                 string spec = f[IdxSpecialty].Trim();
                 string specLower = spec.ToLowerInvariant();
                 bool therapy = false;
@@ -197,6 +199,14 @@ public static class PgEngine
                 if (!npiToGroups.TryGetValue(npi, out gl)) { gl = new List<string>(1); npiToGroups.Add(npi, gl); }
                 if (!gl.Contains(gpac)) gl.Add(gpac);
             }
+            // Same malformed-line budget as the shared-patient engine: a
+            // truncated or corrupted body must REFUSE to load, not silently
+            // understate every roster it was asked about.
+            if (total == 0) throw new InvalidDataException(
+                "The reassignment file '" + path + "' has a header but no data rows.");
+            if (bad > total / 100) throw new InvalidDataException(
+                "The reassignment file '" + path + "' had " + bad + " malformed rows out of " + total +
+                "; refusing to report rosters from a file that damaged. Re-download the dataset.");
         }
     }
 
@@ -323,6 +333,17 @@ function Save-PgDataset {
     Clear-PgStaleTemp
     $url = Get-PgCatalogCsvUrl
     Assert-PgSafeUrl $url
+    # Fail a guaranteed-to-fail download NOW, not 510 MB in: advisory free-
+    # space probe (silently skipped on exotic paths, never blocks real work).
+    $free = $null; $driveRoot = ''
+    try {
+        $driveRoot = [System.IO.Path]::GetPathRoot([System.IO.Path]::GetFullPath($script:PgConfig.DataDir))
+        if ($driveRoot) { $free = (New-Object System.IO.DriveInfo($driveRoot)).AvailableFreeSpace }
+    } catch { }
+    if ($null -ne $free -and $free -lt 1GB) {
+        throw ("Not enough disk space to download the ~510 MB practice-group dataset: only " +
+               "{0:N1} GB free on {1}. Free up space and try again." -f ($free / 1GB), $driveRoot)
+    }
     $tmp = '{0}.{1}.tmp' -f $target, [guid]::NewGuid().ToString('N')
     try {
         Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing -TimeoutSec 7200 -ErrorAction Stop

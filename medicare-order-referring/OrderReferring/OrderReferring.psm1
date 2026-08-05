@@ -380,25 +380,36 @@ function ConvertTo-OrfSafeCsvRecord {
 function Write-OrfCsvFile {
     param([object[]]$Rows, [string]$Path)
     $full = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+    # Temp-then-rename: a run killed mid-write must never leave a truncated
+    # CSV that reads as complete (the change log lives forever; an export
+    # would be trusted downstream).
+    $tmp = $full + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
     $enc = New-Object System.Text.UTF8Encoding($true)
-    $sw = New-Object System.IO.StreamWriter($full, $false, $enc)
+    $sw = New-Object System.IO.StreamWriter($tmp, $false, $enc)
     try {
         $Rows | ConvertTo-OrfSafeCsvRecord | ConvertTo-Csv -NoTypeInformation |
             ForEach-Object { $sw.WriteLine($_) }
-    } finally { $sw.Dispose() }
+        $sw.Dispose(); $sw = $null
+        Move-Item -LiteralPath $tmp -Destination $full -Force
+    } finally {
+        if ($sw) { $sw.Dispose() }
+        if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
+    }
 }
 
-# Downloads must come from https (or http://localhost, for the test doubles).
-# The catalog is remote data — its downloadURL must never be able to point the
-# tool at file:// paths or arbitrary schemes.
+# Downloads must come from CMS's own hosts over https (or localhost, for the
+# test doubles) — the same pin the ReferralMap and PracticeGroups downloaders
+# apply. The catalog is remote data: a poisoned downloadURL must not be able
+# to point the tool at another origin, a file:// path, or any other scheme.
 function Assert-OrfSafeDownloadUrl([string]$Url) {
     $u = $null
     if (-not [uri]::TryCreate($Url, [System.UriKind]::Absolute, [ref]$u)) {
         throw "The CMS catalog supplied an unusable download URL: '$Url'."
     }
-    if ($u.Scheme -ne 'https' -and -not ($u.Scheme -eq 'http' -and $u.IsLoopback)) {
-        throw ("Refusing to download from '$Url': only https:// sources " +
-               "(or http://localhost for testing) are allowed.")
+    $okHost = $u.Host -eq 'downloads.cms.gov' -or $u.Host -eq 'data.cms.gov' -or $u.IsLoopback
+    if (($u.Scheme -ne 'https' -and -not ($u.Scheme -eq 'http' -and $u.IsLoopback)) -or -not $okHost) {
+        throw ("Refusing to download from '$Url': only https CMS hosts " +
+               "(downloads.cms.gov / data.cms.gov, or localhost for testing) are allowed.")
     }
 }
 
@@ -451,7 +462,8 @@ function Read-OrfState {
 
 function Write-OrfState([object]$State) {
     $paths = Initialize-OrfDataDir
-    $tmp = $paths.StateFile + '.tmp'
+    # GUID temp: the GUI and the scheduled update task can run at once.
+    $tmp = $paths.StateFile + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
     $State | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $tmp -Encoding UTF8
     Move-Item -LiteralPath $tmp -Destination $paths.StateFile -Force
 }
@@ -975,7 +987,7 @@ function Set-OrfWatchlist {
         $list = Get-OrfNpiFromText -Text ($buf -join "`n")
         Initialize-OrfDataDir | Out-Null
         $path = Get-OrfWatchlistPath
-        $tmp = $path + '.tmp'
+        $tmp = $path + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
         ([ordered]@{ Npis = @($list); UpdatedAt = (Get-Date).ToString('o') } | ConvertTo-Json -Depth 3) |
             Set-Content -LiteralPath $tmp -Encoding UTF8
         Move-Item -LiteralPath $tmp -Destination $path -Force

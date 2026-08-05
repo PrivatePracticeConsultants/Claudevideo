@@ -199,23 +199,39 @@ public static class RmEngine
         RmEdge e = new RmEdge();
         e.SourceNpi = f[0].Trim();
         e.TargetNpi = f[1].Trim();
+        // A count that does not parse is a MALFORMED row, not a zero - a
+        // silent 0 would deflate volumes invisibly (e.g. a future release
+        // that stars suppressed pairs). Throwing routes the row into the
+        // same badLines budget as a wrong field count.
         int v;
+        double d;
         if (format == FormatHopTeaming)
         {
-            e.BeneCount = int.TryParse(f[2].Trim(), out v) ? v : 0;         // patient_count
-            e.PairCount = int.TryParse(f[3].Trim(), out v) ? v : 0;         // transaction_count
+            if (!int.TryParse(f[2].Trim(), out v)) throw new InvalidDataException(
+                "Line " + lineNo + " of '" + path + "' has a non-numeric patient_count ('" + f[2].Trim() + "').");
+            e.BeneCount = v;
+            if (!int.TryParse(f[3].Trim(), out v)) throw new InvalidDataException(
+                "Line " + lineNo + " of '" + path + "' has a non-numeric transaction_count ('" + f[3].Trim() + "').");
+            e.PairCount = v;
             e.SameDayCount = 0;                                             // not in this file
-            double d;
             // InvariantCulture: the file uses '.' decimals; a machine with a
             // ','-decimal locale must not misread 52.3 as 523.
-            e.AvgDayWait = double.TryParse(f[4].Trim(), System.Globalization.NumberStyles.Float,
-                System.Globalization.CultureInfo.InvariantCulture, out d) ? d : 0.0;
+            if (!double.TryParse(f[4].Trim(), System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out d)) throw new InvalidDataException(
+                "Line " + lineNo + " of '" + path + "' has a non-numeric average_day_wait ('" + f[4].Trim() + "').");
+            e.AvgDayWait = d;
         }
         else
         {
-            e.PairCount = int.TryParse(f[2].Trim(), out v) ? v : 0;
-            e.BeneCount = int.TryParse(f[3].Trim(), out v) ? v : 0;
-            e.SameDayCount = int.TryParse(f[4].Trim(), out v) ? v : 0;
+            if (!int.TryParse(f[2].Trim(), out v)) throw new InvalidDataException(
+                "Line " + lineNo + " of '" + path + "' has a non-numeric pair count ('" + f[2].Trim() + "').");
+            e.PairCount = v;
+            if (!int.TryParse(f[3].Trim(), out v)) throw new InvalidDataException(
+                "Line " + lineNo + " of '" + path + "' has a non-numeric patient count ('" + f[3].Trim() + "').");
+            e.BeneCount = v;
+            if (!int.TryParse(f[4].Trim(), out v)) throw new InvalidDataException(
+                "Line " + lineNo + " of '" + path + "' has a non-numeric same-day count ('" + f[4].Trim() + "').");
+            e.SameDayCount = v;
             e.AvgDayWait = 0.0;
         }
         return e;
@@ -834,9 +850,13 @@ function Clear-RmStaleTemp {
     $d = $script:RmConfig.DataDir
     if (-not (Test-Path -LiteralPath $d)) { return }
     $cutoff = (Get-Date).AddMinutes(-$OlderThanMinutes)
-    Get-ChildItem -LiteralPath $d -Filter '*.tmp' -Force -ErrorAction SilentlyContinue |
-        Where-Object { $_.LastWriteTime -lt $cutoff } |
-        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    # *.part covers download partials (local-resource downloads); everything
+    # else temp in this dir is *.tmp. Same mtime guard spares active writes.
+    foreach ($pat in @('*.tmp', '*.part')) {
+        Get-ChildItem -LiteralPath $d -Filter $pat -Force -ErrorAction SilentlyContinue |
+            Where-Object { $_.LastWriteTime -lt $cutoff } |
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function Get-RmDatasetPath {
@@ -852,7 +872,9 @@ function Get-RmDatasetMetaPath { Join-Path $script:RmConfig.DataDir 'dataset-met
 function Write-RmDatasetMeta([hashtable]$Meta) {
     Initialize-RmDataDir | Out-Null
     $p = Get-RmDatasetMetaPath
-    $tmp = $p + '.tmp'
+    # GUID temp: the GUI and a scheduled task can both be running; a shared
+    # fixed temp name would let one clobber the other mid-write.
+    $tmp = $p + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
     $Meta | ConvertTo-Json -Compress | Set-Content -LiteralPath $tmp -Encoding UTF8
     Move-Item -LiteralPath $tmp -Destination $p -Force
 }
@@ -946,7 +968,28 @@ function Read-RmNppesCache {
             # ANSI-misdecoded under a later Windows PowerShell 5.1 run (which
             # would permanently corrupt cached non-ASCII provider names).
             $json = Get-Content -LiteralPath $p -Raw -Encoding UTF8 | ConvertFrom-Json
-            foreach ($prop in $json.PSObject.Properties) { $cache[$prop.Name] = $prop.Value }
+            # NPPES is LIVE registry data, so cached answers expire: 30 days
+            # for a found provider, 7 for "deactivated or not found" (which
+            # providers routinely recover from - re-activation, late
+            # enumeration). Without a TTL, a provider who moved stayed at the
+            # old address in every future report until someone deleted this
+            # file by hand. Entries from caches that predate the stamp count
+            # as expired and refresh once (one local-index scan, or the API).
+            $now = [DateTime]::UtcNow
+            foreach ($prop in $json.PSObject.Properties) {
+                $v = $prop.Value
+                $age = $null
+                if ($null -ne $v.PSObject.Properties['FetchedAt']) {
+                    try {
+                        $t = [DateTime]::Parse([string]$v.FetchedAt,
+                            [System.Globalization.CultureInfo]::InvariantCulture,
+                            [System.Globalization.DateTimeStyles]::RoundtripKind)
+                        $age = ($now - $t.ToUniversalTime()).TotalDays
+                    } catch { }
+                }
+                $ttl = if ([string](Get-RmProp $v 'Name') -eq '(NPI deactivated or not found)') { 7 } else { 30 }
+                if ($null -ne $age -and $age -le $ttl) { $cache[$prop.Name] = $v }
+            }
         } catch {
             Write-Warning "NPPES cache was unreadable and will be rebuilt: $($_.Exception.Message)"
         }
@@ -957,12 +1000,27 @@ function Read-RmNppesCache {
 function Write-RmNppesCache([hashtable]$Cache) {
     Initialize-RmDataDir | Out-Null
     $p = Get-RmNppesCachePath
-    $tmp = $p + '.tmp'
+    $tmp = $p + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
     $Cache | ConvertTo-Json -Depth 5 -Compress | Set-Content -LiteralPath $tmp -Encoding UTF8
     Move-Item -LiteralPath $tmp -Destination $p -Force
 }
 
 function Test-RmNpiShape([string]$Npi) { $Npi -match '^\d{10}$' }
+
+# A multi-GB download or extraction that is GUARANTEED to die on a full disk
+# should die NOW with the number the user needs, not hours in. The probe is
+# advisory: on exotic paths (UNC shares) it silently skips rather than block.
+function Assert-RmDiskSpace([string]$Dir, [long]$NeededBytes, [string]$What) {
+    $free = $null; $root = ''
+    try {
+        $root = [System.IO.Path]::GetPathRoot([System.IO.Path]::GetFullPath($Dir))
+        if ($root) { $free = (New-Object System.IO.DriveInfo($root)).AvailableFreeSpace }
+    } catch { }
+    if ($null -ne $free -and $free -lt $NeededBytes) {
+        throw ("Not enough disk space for {0}: it needs about {1:N1} GB free on {2}, but only {3:N1} GB is available. Free up space and try again." -f `
+            $What, ($NeededBytes / 1GB), $root, ($free / 1GB))
+    }
+}
 
 # The FOIA download must come from CMS over https (or a loopback host for the
 # test doubles) — the URL template is overridable, so validate before fetching.
@@ -1052,6 +1110,8 @@ function Save-RmDataset {
     $runId = [guid]::NewGuid().ToString('N')
     $url = $script:RmConfig.FoiaUrlTemplate -f $Year, $Interval
     Assert-RmSafeUrl $url
+    # ~356 MB zip + ~1.7 GB extracted + the promoted copy's headroom.
+    Assert-RmDiskSpace $script:RmConfig.DataDir 4GB 'downloading and extracting the CMS shared-patient file'
     $zipPath = Join-Path $script:RmConfig.DataDir ('pspp_{0}_days{1}.{2}.zip.tmp' -f $Year, $Interval, $runId)
     $extractDir = Join-Path $script:RmConfig.DataDir ('extract_{0}_{1}.{2}.tmp' -f $Year, $Interval, $runId)
     try {
@@ -1232,6 +1292,8 @@ function Import-RmDataset {
                 }
                 $originalName = $entry[0].Name
                 $csvTmp = Join-Path $script:RmConfig.DataDir ("import_{0}.csv.tmp" -f $runId)
+                Assert-RmDiskSpace $script:RmConfig.DataDir ([long]($entry[0].Length + 512MB)) `
+                    "extracting the $([math]::Round($entry[0].Length/1GB,1)) GB Hop Teaming file"
                 Write-Verbose "Extracting '$($entry[0].FullName)' ($([math]::Round($entry[0].Length/1GB,1)) GB)..."
                 [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry[0], $csvTmp, $true)
             } finally { $zip.Dispose() }
@@ -1285,6 +1347,9 @@ function Import-RmDataset {
             $csvTmp = $null
         } else {
             $copyTmp = Join-Path $script:RmConfig.DataDir ("import_{0}.copy.tmp" -f $runId)
+            $srcLen = (Get-Item -LiteralPath $csvSource).Length
+            Assert-RmDiskSpace $script:RmConfig.DataDir ([long]($srcLen + 512MB)) `
+                "copying the $([math]::Round($srcLen/1GB,1)) GB Hop Teaming file into the data folder"
             Copy-Item -LiteralPath $csvSource -Destination $copyTmp -Force
             Move-Item -LiteralPath $copyTmp -Destination $target -Force
         }
@@ -1573,6 +1638,7 @@ function Get-RmProviderDetail {
                 Specialty = Get-RmTaxonomyName (Get-RmIndexPrimaryCode $f)
                 City      = $f[5]; State = $f[6]
                 Zip       = if ($postal.Length -ge 5) { $postal.Substring(0, 5) } else { $postal }
+                FetchedAt = [DateTime]::UtcNow.ToString('o')
             }
             $dirtyBulk = $true
         }
@@ -1598,7 +1664,8 @@ function Get-RmProviderDetail {
             $results = @(Get-RmProp $resp 'results')
             if ($results.Count -eq 0) {
                 $cache[$id] = [pscustomobject]@{
-                    Name = '(NPI deactivated or not found)'; Specialty = ''; City = ''; State = ''; Zip = '' }
+                    Name = '(NPI deactivated or not found)'; Specialty = ''; City = ''; State = ''; Zip = ''
+                    FetchedAt = [DateTime]::UtcNow.ToString('o') }
             } else {
                 $r = $results[0]
                 $basic = Get-RmProp $r 'basic'
@@ -1614,6 +1681,7 @@ function Get-RmProviderDetail {
                     City      = if ($loc.Count) { [string](Get-RmProp $loc[0] 'city') } else { '' }
                     State     = if ($loc.Count) { [string](Get-RmProp $loc[0] 'state') } else { '' }
                     Zip       = if ($postal.Length -ge 5) { $postal.Substring(0, 5) } else { $postal }
+                    FetchedAt = [DateTime]::UtcNow.ToString('o')
                 }
             }
         } catch {
@@ -1971,11 +2039,17 @@ function Get-RmInboundByBucket {
 
     # bucket -> @{ Benes; Sources = @{ srcNpi -> benes } }. One target NPI may
     # map to several buckets (a therapist in more than one group); credit each.
+    # A source who is a member of the SAME bucket is an internal handoff
+    # (PT->OT co-treatment), not an external referral - same rule as the
+    # single-practice analysis. Members of OTHER buckets stay: a competitor
+    # group sending patients here is a real external source.
     $buckets = @{}
     foreach ($e in $edges) {
+        $srcBuckets = @($TargetToBucket[$e.SourceNpi])
         foreach ($label in @($TargetToBucket[$e.TargetNpi])) {
             if (-not $label) { continue }
             $lbl = [string]$label
+            if ($srcBuckets -contains $lbl) { continue }   # internal to this bucket
             if (-not $buckets.ContainsKey($lbl)) {
                 $buckets[$lbl] = [pscustomobject]@{ Benes = 0; Sources = @{} }
             }
@@ -2067,12 +2141,19 @@ function Get-RmGroupBenchmark {
     $outEdges = @($all | Where-Object { $targets.Contains($_.SourceNpi) })
 
     # bucket -> aggregate; (bucket, source) -> patients + distinct members fed.
+    # Same-bucket sources are internal handoffs (PT->OT inside one group) and
+    # are excluded from the group's inbound figures - the ranking must compare
+    # EXTERNAL referral pull, and a big group would otherwise out-rank a small
+    # one partly on its own internal co-treatment. Members of OTHER listed
+    # groups still count: that is real cross-group flow.
     $buckets = @{}
     $bySrc = @{}
     foreach ($e in $edges) {
+        $srcBuckets = @($TargetToBucket[$e.SourceNpi])
         foreach ($label in @($TargetToBucket[$e.TargetNpi])) {
             if (-not $label) { continue }
             $lbl = [string]$label
+            if ($srcBuckets -contains $lbl) { continue }   # internal to this bucket
             if (-not $buckets.ContainsKey($lbl)) {
                 $buckets[$lbl] = [pscustomobject]@{
                     Patients = 0
@@ -2185,7 +2266,7 @@ function Get-RmGroupBenchmark {
 
     $notes = @(Get-RmMethodologyNotes -Info $info) + @(
         ''
-        "GROUP BENCHMARK METHOD: inbound shared-patient volume of each group's member therapist NPIs (as passed in — typically the IN-ZIP members), summed per group on $($info.Label)."
+        "GROUP BENCHMARK METHOD: inbound shared-patient volume of each group's member therapist NPIs (as passed in — typically the IN-ZIP members), summed per group on $($info.Label). Handoffs BETWEEN members of the same group (PT→OT co-treatment) are internal care, not referrals, and are excluded from InboundPatients, Sources, and the ranking; flow from members of a DIFFERENT listed group still counts as external."
         'Rank and SharePct compare the listed groups against each other; the share is of MEASURED group volume (sum semantics: a patient sent by three sources counts three times).'
         'MembersFed = how many of the group''s member therapists that source fed (11+ patient pairs each). A source feeding several members is a deep relationship, not a fluke.'
         'A group''s ORGANIZATION NPI can carry additional volume not shown here (benchmark it separately on the Practice benchmark tab); solo therapists without a group are not in this table.'
@@ -2247,6 +2328,9 @@ function Get-RmGroupTrend {
         $members = New-Object 'System.Collections.Generic.HashSet[string]'
         $bySrc = @{}
         foreach ($e in $edges) {
+            # Member-to-member handoffs are internal, not inbound referrals -
+            # the same exclusion the single-practice analysis and trend apply.
+            if ($set.Contains($e.SourceNpi)) { continue }
             $vol += $e.BeneCount
             [void]$srcs.Add($e.SourceNpi)
             [void]$members.Add($e.TargetNpi)
@@ -2281,7 +2365,7 @@ function Get-RmGroupTrend {
     $yearArr = foreach ($y in $years) { $y.Year }
     $notes = @(
         "Source: DocGraph Hop Teaming years $($yearArr -join ', '), produced by CareSet Systems from Medicare FFS Part A+B claims (data 'DocGraph' from CareSet)."
-        "Group trend for$(if ($GroupName) { " $GroupName —" }) $($set.Count) member therapist NPIs, rolled up per year: InboundPatients = shared patients INTO any member; InboundSources = distinct feeding providers; MembersWithVolume = members with any measured volume that year."
+        "Group trend for$(if ($GroupName) { " $GroupName —" }) $($set.Count) member therapist NPIs, rolled up per year: InboundPatients = shared patients INTO any member from OUTSIDE the group (member-to-member handoffs are internal care and excluded, matching the analysis tabs); InboundSources = distinct outside feeding providers; MembersWithVolume = members with any measured outside volume that year."
         'The member list is TODAY''s roster applied to every year — a therapist who joined recently contributes zeros in earlier years (roster churn is invisible in this data), and pairs under 11 patients are excluded in every year.'
         'Medicare FFS only: Medicare Advantage growth pulls patients out of this data over time — decline can reflect MA shift as well as lost referrals. The CMS 2015 file is intentionally excluded (different window/methodology).'
     )
@@ -2621,12 +2705,17 @@ function Get-RmPracticeBenchmark {
     }
 
     # Rank + share, with a visible marker column for the practice's row.
+    # Competition ("1224") ranking, matching the analysis-report landscape:
+    # equal volumes share a rank, so a zero-volume practice reads as tied
+    # with its equals rather than placed by the alphabet.
     $ranked = @($clinics | Sort-Object -Property @{Expression = 'SharedPatients'; Descending = $true},
                                                  @{Expression = 'Name'; Descending = $false})
     $rank = 0; $total = 0
+    $curRank = 0; $prevVol = -1
     for ($i = 0; $i -lt $ranked.Count; $i++) {
         $total += [int]$ranked[$i].SharedPatients
-        if ($ranked[$i].NPI -eq $Npi) { $rank = $i + 1 }
+        if ([int]$ranked[$i].SharedPatients -ne $prevVol) { $curRank = $i + 1; $prevVol = [int]$ranked[$i].SharedPatients }
+        if ($ranked[$i].NPI -eq $Npi) { $rank = $curRank }
     }
     $mine = @($ranked | Where-Object { $_.NPI -eq $Npi })[0]
     $share = if ($total -gt 0) { [math]::Round(100.0 * $mine.SharedPatients / $total, 1) } else { 0 }
@@ -2992,7 +3081,7 @@ function Get-RmSourceAnalysis {
     # three times. Then (a) drop flows BETWEEN members — internal handoffs
     # are not external referrals — and (b) merge a source feeding several
     # members into ONE row with summed volume (AvgDayWait becomes the
-    # volume-weighted mean). For a single NPI both steps are no-ops.
+    # transaction-weighted pooled mean). For a single NPI both steps are no-ops.
     $allEdges = @([RmEngine]::ScanCombined($info.Path, $memberSet, $others, $info.Format))
     $rawEdges = New-Object System.Collections.Generic.List[object]
     $peerEdges = New-Object System.Collections.Generic.List[object]
@@ -3002,15 +3091,19 @@ function Get-RmSourceAnalysis {
         elseif ($others.Contains($e.TargetNpi)) { $peerEdges.Add($e) }
         if ($memberSet.Contains($e.SourceNpi) -and -not $memberSet.Contains($e.TargetNpi)) { $outEdges.Add($e) }
     }
-    # Outbound destinations, merged across member NPIs (volume-weighted wait),
-    # so the one-stop report no longer needs its own pass for them.
+    # Outbound destinations, merged across member NPIs, so the one-stop report
+    # no longer needs its own pass for them. average_day_wait in the file is a
+    # per-TRANSACTION mean, so pooling weights by transaction_count (PairCount)
+    # - that exactly reconstructs the mean over all underlying events, where
+    # patient-weighting would drift whenever one patient bounces repeatedly.
     $outBySrc = @{}
     foreach ($e in $outEdges) {
         if (-not $outBySrc.ContainsKey($e.TargetNpi)) {
-            $outBySrc[$e.TargetNpi] = [pscustomobject]@{ N = 0; W = [double]0 }
+            $outBySrc[$e.TargetNpi] = [pscustomobject]@{ N = 0; W = [double]0; T = [long]0 }
         }
         $outBySrc[$e.TargetNpi].N += $e.BeneCount
-        $outBySrc[$e.TargetNpi].W += ([double]$e.AvgDayWait * $e.BeneCount)
+        $outBySrc[$e.TargetNpi].W += ([double]$e.AvgDayWait * $e.PairCount)
+        $outBySrc[$e.TargetNpi].T += $e.PairCount
     }
     $mergedBySrc = @{}
     foreach ($e in $rawEdges) {
@@ -3024,10 +3117,10 @@ function Get-RmSourceAnalysis {
         $m = $mergedBySrc[$e.SourceNpi]
         $m.BeneCount += $e.BeneCount
         $m.PairCount += $e.PairCount
-        if ($isHop) { $m._WaitWeighted += [double]$e.AvgDayWait * $e.BeneCount }
+        if ($isHop) { $m._WaitWeighted += [double]$e.AvgDayWait * $e.PairCount }
     }
     foreach ($m in $mergedBySrc.Values) {
-        if ($isHop -and $m.BeneCount -gt 0) { $m.AvgDayWait = [math]::Round($m._WaitWeighted / $m.BeneCount, 1) }
+        if ($isHop -and $m.PairCount -gt 0) { $m.AvgDayWait = [math]::Round($m._WaitWeighted / $m.PairCount, 1) }
     }
     $edges = @($mergedBySrc.Values |
         Sort-Object -Property @{Expression = 'BeneCount'; Descending = $true},
@@ -3060,7 +3153,7 @@ function Get-RmSourceAnalysis {
                 Specialty = if ($d) { [string]$d.Specialty } else { '' }
                 SharedPatients = $_.Value.N
             }
-            if ($isHop -and $_.Value.N -gt 0) { $row['AvgDayWait'] = [math]::Round($_.Value.W / $_.Value.N, 1) }
+            if ($isHop -and $_.Value.T -gt 0) { $row['AvgDayWait'] = [math]::Round($_.Value.W / $_.Value.T, 1) }
             [pscustomobject]$row
         })
     }
@@ -3073,6 +3166,7 @@ function Get-RmSourceAnalysis {
     $srcRows = New-Object System.Collections.Generic.List[object]
     $byZip = @{}
     $geoUnmapped = 0
+    $geoMappedNpis = New-Object 'System.Collections.Generic.HashSet[string]'
     foreach ($e in $edges) {
         $rank++
         $cum += $e.BeneCount
@@ -3082,6 +3176,7 @@ function Get-RmSourceAnalysis {
             Get-RmMilesBetween $pracLoc[0] $pracLoc[1] $centroids[$zip][0] $centroids[$zip][1]
         } else { $null }
         if ($zip -and $centroids.ContainsKey($zip)) {
+            [void]$geoMappedNpis.Add($e.SourceNpi)
             if (-not $byZip.ContainsKey($zip)) {
                 $byZip[$zip] = [pscustomobject]@{
                     City = $(if ($d) { [string]$d.City } else { '' })
@@ -3240,8 +3335,8 @@ function Get-RmSourceAnalysis {
     if ($isHop) {
         $waitDefs = @(
             @{ Label = '0-7 days'; Min = 0.0; Max = 7.0; Read = 'tight referral loop' }
-            @{ Label = '8-30 days'; Min = 7.0; Max = 30.0; Read = 'typical referral window' }
-            @{ Label = '31-90 days'; Min = 30.0; Max = 90.0; Read = 'loose / episodic' }
+            @{ Label = '7-30 days'; Min = 7.0; Max = 30.0; Read = 'typical referral window' }
+            @{ Label = '30-90 days'; Min = 30.0; Max = 90.0; Read = 'loose / episodic' }
             @{ Label = '90+ days'; Min = 90.0; Max = [double]::MaxValue; Read = 'likely co-occurring care' }
         )
         $waitBands = foreach ($b in $waitDefs) {
@@ -3404,6 +3499,21 @@ function Get-RmSourceAnalysis {
                 }
                 $mineByZip = @{}
                 foreach ($gr in $geoRows) { $mineByZip[[string]$gr.Zip] = [int]$gr.SharedPatients }
+                # CapturePct's numerator and denominator must share one
+                # inclusion rule: competitor volume is located via the full
+                # index sweep, so the practice's own sources BEYOND the
+                # enrichment cap (absent from $geoRows) are located by that
+                # same sweep and folded in - otherwise a 400+-source practice
+                # under-reports its own capture in tail ZIPs.
+                foreach ($srcRow3 in $sources) {
+                    $sn = [string]$srcRow3.SourceNPI
+                    if ($geoMappedNpis.Contains($sn)) { continue }
+                    if (-not $srcZip.ContainsKey($sn)) { continue }
+                    $z3 = $srcZip[$sn]
+                    if (-not $centroids.ContainsKey($z3)) { continue }
+                    if ($mineByZip.ContainsKey($z3)) { $mineByZip[$z3] += [int]$srcRow3.SharedPatients }
+                    else { $mineByZip[$z3] = [int]$srcRow3.SharedPatients }
+                }
                 $allZips = New-Object 'System.Collections.Generic.HashSet[string]'
                 foreach ($z in $areaByZip.Keys) { [void]$allZips.Add($z) }
                 foreach ($z in $mineByZip.Keys) { [void]$allZips.Add($z) }
@@ -3443,7 +3553,13 @@ function Get-RmSourceAnalysis {
                 TherapyServices = 0; MinDistinctPatients = 0; NpisWithClaims = 0; ClaimsSpecialty = '' }
             foreach ($v in $svcAll.Values) {
                 $svcAgg.TherapyServices += [int]$v.TherapyServices
-                $svcAgg.MinDistinctPatients += [int]$v.MinDistinctPatients
+                # MAX, not sum: each per-NPI figure is a floor on that NPI's
+                # distinct patients, but patients overlap across the NPIs of
+                # one practice, so summed floors overstate the union. The max
+                # is the largest bound that is still guaranteed true.
+                if ([int]$v.MinDistinctPatients -gt $svcAgg.MinDistinctPatients) {
+                    $svcAgg.MinDistinctPatients = [int]$v.MinDistinctPatients
+                }
                 if ($v.HasAnyClaims) { $svcAgg.NpisWithClaims++ }
                 if (-not $svcAgg.ClaimsSpecialty -and $v.ClaimsSpecialty) { $svcAgg.ClaimsSpecialty = $v.ClaimsSpecialty }
             }
@@ -3456,7 +3572,7 @@ function Get-RmSourceAnalysis {
         "SOURCE ANALYSIS METHOD: every inbound pair of NPI $primary ($pracName) in $($info.Label), ranked by shared patients. PctOfVolume/CumulativePct are shares of this practice's total inbound volume."
         $(if ($npiList.Count -gt 1) { "COMBINED ANALYSIS: inbound volume is merged across $($npiList.Count) NPIs ($($npiList -join ', ')). A source feeding several of them counts ONCE with summed volume; patient flows BETWEEN these NPIs are excluded as internal handoffs. Geography and the competitive radius are centered on the primary NPI ($primary)." })
         $(if ($total -gt 0 -and $total -lt 1000) { 'SMALL-PRACTICE NOTE: pairs under 11 distinct patients are excluded at the source, so a modest measured total usually UNDERSTATES the real referral base. Volume may also sit under the therapists'' individual NPIs — run a combined analysis (paste the org NPI plus the therapist NPIs together) for the full picture.' })
-        'CONCENTRATION: HHI = sum of squared percentage shares (0-10,000); above ~2,500 is highly concentrated — losing one relationship materially moves the total. Top-1/5/10 dependence reads the same risk directly.'
+        'CONCENTRATION: HHI = sum of squared percentage shares (0-10,000); above ~2,500 is highly concentrated — losing one relationship materially moves the total. Top-1/5/10 dependence reads the same risk directly. Both are computed on MEASURED (11+ patient) pairs only: sub-floor referrers are invisible, which inflates the measured shares, so true concentration is LOWER whenever many small sources exist — treat a high reading on a short source list with caution.'
         'Distances are straight-line miles between ZIP-area centroids (US Census) using TODAY''s NPPES practice addresses — a source that moved is measured where it is now.'
         $(if ($isHop) { 'REFERRAL-LAG PROFILE: average days from source visit to this practice''s visit, volume-weighted. Short lags look like referrals; 90+ days usually means co-occurring care (labs, hospitals), not referral flow.' })
         $(if ($landscape) { "COMPETITIVE LANDSCAPE: peers are the NPPES-listed outpatient rehab providers (the same PT/OT/SLP taxonomy sweep the Referral map uses) whose practice location falls in the $($landscape.ZipCount) ZIP(s) within $($landscape.RadiusMiles) straight-line miles of ZIP $pracZip, ranked by inbound shared-patient volume on $($info.Label). Share of area volume = a provider's inbound volume over the SUM across all listed providers — share of measured referral VOLUME, not of patients." })
@@ -3593,8 +3709,14 @@ function Get-RmSourceTrend {
     }
 
     # One row per year, with retention measured against the PRIOR year.
+    # Retention only means "annual churn" when the prior IMPORTED year is the
+    # prior CALENDAR year - a user holding 2019 and 2022 must not read "kept
+    # 40%" as one year's churn when it spans three. Across a gap the columns
+    # go blank (like the first year) and a note names the gap.
     $rows = New-Object System.Collections.Generic.List[object]
     $prevKeys = $null
+    $prevYear = $null
+    $gapPairs = New-Object System.Collections.Generic.List[string]
     foreach ($y in $years) {
         $bySrc = $perYear[$y.Year]
         $total = 0; foreach ($v in $bySrc.Values) { $total += $v }
@@ -3606,7 +3728,11 @@ function Get-RmSourceTrend {
         $keys = New-Object 'System.Collections.Generic.HashSet[string]'
         foreach ($k in $bySrc.Keys) { [void]$keys.Add($k) }
         $new = 0; $lost = 0; $kept = 0
-        if ($null -ne $prevKeys) {
+        $consecutive = ($null -ne $prevKeys -and ([int]$y.Year - [int]$prevYear) -eq 1)
+        if ($null -ne $prevKeys -and -not $consecutive) {
+            $gapPairs.Add("$prevYear->$($y.Year)")
+        }
+        if ($consecutive) {
             foreach ($k in $keys) { if ($prevKeys.Contains($k)) { $kept++ } else { $new++ } }
             foreach ($k in $prevKeys) { if (-not $keys.Contains($k)) { $lost++ } }
         }
@@ -3621,16 +3747,18 @@ function Get-RmSourceTrend {
             Top1Pct         = $top1
             Top5Pct         = if ($total -gt 0) { [math]::Round(100.0 * $t5 / $total, 1) } else { 0 }
             HHI             = [int][math]::Round($hhi, 0)
-            # First year has no prior year to compare against: blank, never
+            # First year has no prior year to compare against — and a year
+            # after an import GAP has no prior CALENDAR year: blank, never
             # 0 — "0 new" would read as a measured result rather than "n/a".
-            NewSources      = if ($null -ne $prevKeys) { $new } else { '' }
-            RetainedSources = if ($null -ne $prevKeys) { $kept } else { '' }
-            LostSources     = if ($null -ne $prevKeys) { $lost } else { '' }
-            RetentionPct    = if ($null -ne $prevKeys -and $prevKeys.Count -gt 0) {
+            NewSources      = if ($consecutive) { $new } else { '' }
+            RetainedSources = if ($consecutive) { $kept } else { '' }
+            LostSources     = if ($consecutive) { $lost } else { '' }
+            RetentionPct    = if ($consecutive -and $prevKeys.Count -gt 0) {
                                   [math]::Round(100.0 * $kept / $prevKeys.Count, 1) } else { '' }
             TopSource       = $topName
         })
         $prevKeys = $keys
+        $prevYear = $y.Year
     }
 
     # Biggest movers, first year vs last year.
@@ -3674,8 +3802,9 @@ function Get-RmSourceTrend {
     } else { '' }
 
     $notes = @(
-        "YEAR-OVER-YEAR METHOD: the same inbound scan repeated on each imported CareSet year ($(@($years | ForEach-Object { $_.Year }) -join ', ')), so the years are directly comparable (identical methodology, full calendar years)."
-        'Retention is measured against the PRIOR year: Retained = sources present in both years, New = present this year only, Lost = present last year only. RetentionPct = Retained as a share of LAST year''s source count.'
+        "YEAR-OVER-YEAR METHOD: the same inbound scan repeated on each imported CareSet year ($(@($years | ForEach-Object { $_.Year }) -join ', ')) — same file format and same STATED methodology, full calendar years. (CareSet does not version its hop construction in the file itself, so a between-release methodology change cannot be detected here.)"
+        'Retention is measured against the PRIOR CALENDAR year: Retained = sources present in both years, New = present this year only, Lost = present last year only. RetentionPct = Retained as a share of LAST year''s source count.'
+        $(if ($gapPairs.Count) { "IMPORT GAP: the imported years are not consecutive ($($gapPairs -join ', ')). Retention/New/Lost are blank after a gap - churn measured across several years is not comparable to annual churn. Import the in-between years to fill them in." })
         'A source "lost" may simply have fallen under the 11-patient privacy floor rather than stopped referring — treat small movements as noise and read the direction of the whole base.'
         'Medicare FFS only: Medicare Advantage enrollment grew over these years, moving patients OUT of this data. A gentle decline can reflect that shift rather than lost referrals; compare against the area trend before concluding.'
         'The CMS 2015 FOIA file is intentionally excluded: a different (~8-month) window and methodology, not on the same scale.'
@@ -4597,14 +4726,24 @@ $lossRows
             if ($near -gt 0) { "$near% of measured volume originates within 10 miles of the practice." }
             else { 'None of the measured volume originates within 10 miles — this practice draws from a wider region than its immediate area.' } })
         $(if ($hasVolume -and $a.IsHop -and @($a.WaitBands).Count) {
-            $fastVol = 0; foreach ($b in @($a.WaitBands)) { if ($b.Band -in '0-7 days', '8-30 days') { $fastVol += [int]$b.SharedPatients } }
+            $fastVol = 0; foreach ($b in @($a.WaitBands)) { if ($b.Band -in '0-7 days', '7-30 days') { $fastVol += [int]$b.SharedPatients } }
             $fast = [math]::Round(100.0 * $fastVol / $a.TotalPatients, 1)
             "$fast% of volume arrives within 30 days of the source visit (referral-like); the remainder reflects looser or co-occurring care patterns." })
         $(if ($a.PSObject.Properties['Market'] -and $a.Market) {
             $mk = $a.Market
-            $perK = if ($mk.FfsBenes -gt 0 -and $a.TotalPatients -gt 0) { [math]::Round(1000.0 * $a.TotalPatients / $mk.FfsBenes, 1) } else { $null }
+            # Divide data-year volume by SAME-year FFS enrollment when that
+            # year is on hand (FFS shrinks as MA grows, so the latest year's
+            # denominator would flatter the rate); fall back to the latest
+            # year, saying so. Old disk caches predate FfsByYear.
+            $den = 0; $denYear = 0
+            if ($mk.PSObject.Properties['FfsByYear'] -and $mk.FfsByYear) {
+                $p = $mk.FfsByYear.PSObject.Properties[[string]$a.Year]
+                if ($p -and ([string]$p.Value) -match '^\d+$' -and [int]$p.Value -gt 0) { $den = [int]$p.Value; $denYear = [int]$a.Year }
+            }
+            if (-not $den -and $mk.FfsBenes -gt 0) { $den = [int]$mk.FfsBenes; $denYear = [int]$mk.Year }
+            $perK = if ($den -gt 0 -and $a.TotalPatients -gt 0) { [math]::Round(1000.0 * $a.TotalPatients / $den, 1) } else { $null }
             "The practice's county ($($mk.County), $($mk.State)) had $('{0:N0}' -f $mk.TotalBenes) Medicare beneficiaries in $($mk.Year); $($mk.MaPct)% were in Medicare Advantage and are invisible to this data." +
-            $(if ($perK) { " Measured volume equals $perK referrals per 1,000 Original-Medicare beneficiaries countywide." }) })
+            $(if ($perK) { " Measured shared-patient volume equals $perK per 1,000 Original-Medicare beneficiaries countywide ($denYear enrollment$(if ($denYear -ne [int]$a.Year) { " — the $($a.Year) county figure was not on hand, so the rate mixes years" }); sum semantics, so a patient with several sources counts once per source)." }) })
         $(if ($a.PSObject.Properties['ServiceProfile'] -and $a.ServiceProfile) {
             $sp = $a.ServiceProfile
             if ($sp.TherapyServices -gt 0) {
@@ -4922,15 +5061,27 @@ function Get-RmCountyMarket {
     $tot = [int]$r.TOT_BENES
     $ma = if (([string]$r.MA_AND_OTH_BENES) -match '^\d+$') { [int]$r.MA_AND_OTH_BENES } else { 0 }
     $ffs = if (([string]$r.ORGNL_MDCR_BENES) -match '^\d+$') { [int]$r.ORGNL_MDCR_BENES } else { 0 }
+    # Every year's FFS count rides along so a caller can divide data-year
+    # volume by SAME-year enrollment instead of the latest year's (FFS shrinks
+    # as MA grows, so a mismatched denominator biases the rate). Stored as an
+    # object, not a hashtable, so the disk-cached (JSON) and fresh shapes read
+    # identically via .PSObject.Properties.
+    $fy = [ordered]@{}
+    foreach ($row in $rows) {
+        if (([string]$row.ORGNL_MDCR_BENES) -match '^\d+$') { $fy[[string][int]$row.YEAR] = [int]$row.ORGNL_MDCR_BENES }
+    }
     $m = [pscustomobject]@{
         Fips = $fips; County = [string]$r.BENE_COUNTY_DESC; State = [string]$r.BENE_STATE_ABRVTN
         Year = [int]$r.YEAR; TotalBenes = $tot; FfsBenes = $ffs; MaBenes = $ma
         MaPct = if ($tot -gt 0) { [math]::Round(100.0 * $ma / $tot, 1) } else { 0 }
+        FfsByYear = [pscustomobject]$fy
     }
     $cache[$fips] = $m
     try {
         New-Item -ItemType Directory -Path $script:RmConfig.DataDir -Force | Out-Null
-        $cache | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $cachePath -Encoding UTF8
+        $ctmp = $cachePath + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
+        $cache | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $ctmp -Encoding UTF8
+        Move-Item -LiteralPath $ctmp -Destination $cachePath -Force
     } catch {}
     $m
 }
@@ -4978,7 +5129,9 @@ function Get-RmServiceProfile {
     if ($dirty) {
         try {
             New-Item -ItemType Directory -Path $script:RmConfig.DataDir -Force | Out-Null
-            $cache | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $cachePath -Encoding UTF8
+            $ctmp = $cachePath + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
+        $cache | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $ctmp -Encoding UTF8
+        Move-Item -LiteralPath $ctmp -Destination $cachePath -Force
         } catch {}
     }
     $out
@@ -5036,7 +5189,7 @@ function Get-RmChainIndex {
         }
         if ($stale) {
             Write-Verbose 'Building the chain table from the NPPES index (one time)...'
-            $tmp = "$cp.tmp"
+            $tmp = $cp + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
             [void][RmEngine]::BuildChainIndex($p, $tmp)
             Move-Item -LiteralPath $tmp -Destination $cp -Force
         }
@@ -5237,7 +5390,7 @@ function Import-RmNppesBulk {
         # put a 319,024-patient hospital atop a therapy ranking.
     $src = $Path; $tmpExtract = $null
     try {
-        $tmpOut = (Get-RmNppesIndexPath) + '.tmp'
+        $tmpOut = (Get-RmNppesIndexPath) + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
         if ([System.IO.Path]::GetExtension($Path).ToLowerInvariant() -eq '.zip') {
             # Stream the 11+ GB inner CSV straight out of the zip - it is
             # never extracted (it would not fit on a small disk).
@@ -5262,7 +5415,7 @@ function Import-RmNppesBulk {
         # since Get-RmChainIndex rebuilds on demand anyway.
         $script:RmChainIdx = $null
         try {
-            $ctmp = (Get-RmChainIndexPath) + '.tmp'
+            $ctmp = (Get-RmChainIndexPath) + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
             [void][RmEngine]::BuildChainIndex((Get-RmNppesIndexPath), $ctmp)
             Move-Item -LiteralPath $ctmp -Destination (Get-RmChainIndexPath) -Force
         } catch {
@@ -5292,10 +5445,11 @@ function Import-RmNppesBulk {
                                     if ($counts.ContainsKey($k)) { $counts[$k]++ } else { $counts[$k] = 1 }
                                 }
                             }
-                            $sw2 = New-Object System.IO.StreamWriter((Get-RmNppesLocIndexPath) + '.tmp', $false, (New-Object System.Text.UTF8Encoding($false)))
+                            $locOutTmp = (Get-RmNppesLocIndexPath) + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
+                            $sw2 = New-Object System.IO.StreamWriter($locOutTmp, $false, (New-Object System.Text.UTF8Encoding($false)))
                             try { foreach ($kv in $counts.GetEnumerator()) { $sw2.WriteLine($kv.Key + '|' + $kv.Value); $locRows++ } }
                             finally { $sw2.Dispose() }
-                            Move-Item -LiteralPath ((Get-RmNppesLocIndexPath) + '.tmp') -Destination (Get-RmNppesLocIndexPath) -Force
+                            Move-Item -LiteralPath $locOutTmp -Destination (Get-RmNppesLocIndexPath) -Force
                             Remove-Item -LiteralPath $locTmp -Force -ErrorAction SilentlyContinue
                         } finally { $st2.Dispose() }
                     }
@@ -5322,7 +5476,7 @@ function Import-RmCareCompare {
     $cols = @('NPI', 'org_pac_id', 'Facility Name', 'pri_spec',
         'Provider Last Name', 'Provider First Name', 'City/Town', 'State',
         'adr_ln_1', 'ZIP Code')   # appended: existing field indexes stay valid
-    $tmpOut = (Get-RmDacIndexPath) + '.tmp'
+    $tmpOut = (Get-RmDacIndexPath) + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
     $rows = [RmEngine]::BuildRosterIndex($Path, $tmpOut, $cols)
     Move-Item -LiteralPath $tmpOut -Destination (Get-RmDacIndexPath) -Force
     [pscustomobject]@{ Rows = $rows; Path = Get-RmDacIndexPath
@@ -5374,7 +5528,7 @@ function Import-RmEnrollment {
     Initialize-RmDataDir | Out-Null
     $cols = @('BENE_FIPS_CD', 'YEAR', 'MONTH', 'BENE_COUNTY_DESC', 'BENE_STATE_ABRVTN',
         'TOT_BENES', 'ORGNL_MDCR_BENES', 'MA_AND_OTH_BENES')
-    $tmpOut = (Get-RmEnrollmentIndexPath) + '.tmp'
+    $tmpOut = (Get-RmEnrollmentIndexPath) + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
     $rows = [RmEngine]::BuildRosterIndex($Path, $tmpOut, $cols)
     Move-Item -LiteralPath $tmpOut -Destination (Get-RmEnrollmentIndexPath) -Force
     [pscustomobject]@{ Rows = $rows; Path = Get-RmEnrollmentIndexPath
@@ -5521,15 +5675,27 @@ function Save-RmLocalResources {
         } elseif ((Test-Path -LiteralPath $target) -and -not $Force) {
             $status = 'already present'
         } else {
+            $tmp = '{0}.{1}.part' -f $target, [guid]::NewGuid().ToString('N')
             try {
                 Write-Verbose "Downloading $($res.Name) (~$($res.ApproxMB) MB)..."
-                $tmp = "$target.part"
-                Invoke-WebRequest -Uri $res.Url -OutFile $tmp -TimeoutSec 1800 -UseBasicParsing -ErrorAction Stop
+                # One retry: a Wi-Fi blip 700 MB into an 800 MB file should
+                # not cost the user the whole download session.
+                try {
+                    Invoke-WebRequest -Uri $res.Url -OutFile $tmp -TimeoutSec 1800 -UseBasicParsing -ErrorAction Stop
+                } catch {
+                    Write-Warning "$($res.Name): download interrupted ($($_.Exception.Message)); retrying once..."
+                    Start-Sleep -Seconds 3
+                    Invoke-WebRequest -Uri $res.Url -OutFile $tmp -TimeoutSec 1800 -UseBasicParsing -ErrorAction Stop
+                }
                 Move-Item -LiteralPath $tmp -Destination $target -Force
                 $status = 'downloaded'
             } catch {
                 $status = "FAILED: $($_.Exception.Message)"
                 Write-Warning "$($res.Name): $status"
+            } finally {
+                # An abandoned partial is NOT swept by the *.tmp cleanup, so
+                # never leave one - it would sit there at up to 800 MB forever.
+                if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
             }
         }
         $size = if (Test-Path -LiteralPath $target) { (Get-Item -LiteralPath $target).Length } else { 0 }
@@ -5872,13 +6038,14 @@ function Get-RmLocationReferrals {
     $double = $rowTotal - $totVol
     # The organization's OWN NPI volume, reported separately - it has no
     # service address and must never be spread across the sites.
-    $orgVol = 0; $orgNpis = 0
+    $orgVol = 0; $orgNpis = 0; $orgMeasured = $false
     # -State:'' would trip the pattern validator, so bind it only when set.
     $famArgs = @{ Name = $Name }
     if ($State) { $famArgs['State'] = $State }
     try {
         $fam = Get-RmProviderFamily @famArgs
         $orgVol = [int]$fam.TotalPatients; $orgNpis = [int]$fam.Npis
+        $orgMeasured = $true
     } catch { }
 
     $related = @()
@@ -5887,7 +6054,11 @@ function Get-RmLocationReferrals {
     $notes = @(Get-RmMethodologyNotes -Info $info) + @(
         ''
         "ADDRESS-LEVEL METHOD: Care Compare lists which clinicians practice at each street address of '$Name'. Those clinicians bill under their OWN NPIs, so their measured referral volume on $($info.Label) can be summed per address. This is the only way to get per-location figures - an organization NPI carries no service address."
-        "COVERAGE: this counts care billed under INDIVIDUAL clinician NPIs. Volume billed under the organization's own NPI(s) ($('{0:N0}' -f $orgVol) patients across $orgNpis NPI(s) here) has no address and is NOT distributed across sites - treat the two as separate views of the same organization."
+        $(if ($orgMeasured) {
+            "COVERAGE: this counts care billed under INDIVIDUAL clinician NPIs. Volume billed under the organization's own NPI(s) ($('{0:N0}' -f $orgVol) patients across $orgNpis NPI(s) here) has no address and is NOT distributed across sites - treat the two as separate views of the same organization."
+        } else {
+            "COVERAGE: this counts care billed under INDIVIDUAL clinician NPIs. Volume billed under the organization's own NPI(s) could not be measured for this search (no matching organization NPIs were found) - if the organization bills under its own NPI, that volume is additional to the figures here and is NOT distributed across sites."
+        })
         $(if ($double -gt 0) { "DOUBLE COUNTING: some clinicians are listed at more than one address, and the data cannot say which visit happened where, so their volume is credited to EACH of their sites. The address rows therefore sum to $('{0:N0}' -f $rowTotal) while the clinicians behind them hold $('{0:N0}' -f $totVol) - $('{0:N0}' -f $double) patients of overlap. AttributedPatients is the de-duplicated figure; per row, SharedSitePatients shows how much of that site's number is also counted elsewhere." })
         'A clinician with no measured volume either bills through the group NPI or had every pair fall under the 11-patient floor; CliniciansWithVolume shows how many of a site''s roster are actually visible.'
         'ROSTER GATE: Care Compare lists only clinicians with an approved Medicare enrollment record and Medicare claims inside a 12-month lookback. It is NOT gated on MIPS - quality-program reporting has no effect on who appears - but cash-pay and non-Medicare clinicians never appear, and historical volume from clinicians who have since left Medicare cannot be placed at an address (measured in one metro market at roughly 18% of individual-therapist volume). The org-NPI and by-NPI views do not have this gate.'

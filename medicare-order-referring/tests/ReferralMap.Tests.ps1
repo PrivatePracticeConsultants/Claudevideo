@@ -1617,7 +1617,12 @@ Describe 'Address-level referrals (the multi-site workaround)' {
             # row sum and never quietly merged with the org NPI's volume.
             $r.AttributedPatients | Should -Be 111
             $r.PSObject.Properties['OrgNpiPatients'] | Should -Not -BeNullOrEmpty
-            (@($r.Notes) -join ' ') | Should -BeLike '*no address and is NOT distributed*'
+            # The fixture has no matching org NPI, so the COVERAGE note must
+            # say it COULD NOT BE MEASURED - never a made-up "0 patients
+            # across 0 NPI(s)" stated as fact.
+            (@($r.Notes) -join ' ') | Should -BeLike '*NOT distributed across sites*'
+            (@($r.Notes) -join ' ') | Should -BeLike '*could not be measured*'
+            (@($r.Notes) -join ' ') | Should -Not -BeLike '*0 patients across 0 NPI*'
             (@($r.Notes) -join ' ') | Should -BeLike '*ADDRESS-LEVEL METHOD*'
             # the roster gate: Medicare enrollment + 12-month claims, NOT MIPS
             (@($r.Notes) -join ' ') | Should -BeLike '*ROSTER GATE*'
@@ -1880,8 +1885,8 @@ Describe 'Source analysis report' {
             $sa = Get-RmSourceAnalysis -Npi 9000000001 -CentroidPath $script:SaCsv
             $sa.IsHop | Should -BeTrue
             $w = @($sa.WaitBands)
-            @($w | Where-Object Band -eq '8-30 days')[0].SharedPatients | Should -Be 45   # 12.5d avg
-            @($w | Where-Object Band -eq '31-90 days')[0].SharedPatients | Should -Be 20  # 30.0d avg
+            @($w | Where-Object Band -eq '7-30 days')[0].SharedPatients | Should -Be 45   # 12.5d avg
+            @($w | Where-Object Band -eq '30-90 days')[0].SharedPatients | Should -Be 20  # 30.0d avg
             @($sa.Sources)[0].PSObject.Properties['AvgDayWait'] | Should -Not -BeNullOrEmpty
         } finally { Set-RmActiveDataset -Source cms-pspp -Year 2015 | Out-Null }
     }
@@ -2422,17 +2427,20 @@ Describe 'Source analysis report' {
         } finally { Set-RmActiveDataset -Source cms-pspp -Year 2015 | Out-Null }
     }
 
-    It 'volume-weights AvgDayWait when merging a source across member NPIs' {
+    It 'transaction-weights AvgDayWait when merging a source across member NPIs' {
         Set-RmActiveDataset -Source hop-teaming -Year 2022 | Out-Null
         try {
             $sa = Get-RmSourceAnalysis -Npi @('9000000001', '9000000002') -SkipCompetitors -CentroidPath $script:SaCsv
-            # 8000000001 feeds both members: (45x12.5 + 12x7.5) / 57 = 11.447 -> 11.4
+            # average_day_wait is a per-TRANSACTION mean, so the pool weights
+            # by transaction_count - that exactly reconstructs the mean over
+            # all events. 8000000001 feeds both members:
+            # (12.5x50 + 7.5x13) / (50+13) = 722.5/63 = 11.468 -> 11.5
             $m = @($sa.Sources | Where-Object SourceNPI -eq '8000000001')[0]
-            [double]$m.AvgDayWait | Should -Be 11.4
-            # and the merged edge lands in the 8-30 day band with its full 57
+            [double]$m.AvgDayWait | Should -Be 11.5
+            # and the merged edge lands in the 7-30 day band with its full 57
             $w = @($sa.WaitBands)
-            @($w | Where-Object Band -eq '8-30 days')[0].SharedPatients | Should -Be 57
-            @($w | Where-Object Band -eq '31-90 days')[0].SharedPatients | Should -Be 20
+            @($w | Where-Object Band -eq '7-30 days')[0].SharedPatients | Should -Be 57
+            @($w | Where-Object Band -eq '30-90 days')[0].SharedPatients | Should -Be 20
         } finally { Set-RmActiveDataset -Source cms-pspp -Year 2015 | Out-Null }
     }
 
@@ -2546,4 +2554,131 @@ Describe 'Source analysis report' {
         $html | Should -BeLike '*2*are not shown here*'
         ([regex]::Matches($html, '<tr class="you">')).Count | Should -Be 1
     }
+}
+
+Describe 'Best-practice regressions: intra-group flows, data-quality guards, cache TTL' {
+    BeforeAll {
+        # A prior trend test leaves hop_teaming_2023.csv in the store; clear
+        # it so year-set assertions here see exactly 2021 + 2022.
+        Remove-Item (Join-Path $env:RM_DATA_DIR 'hop_teaming_2023.csv') -Force -ErrorAction SilentlyContinue
+        Remove-Item (Join-Path $env:RM_DATA_DIR 'hop_teaming_2023.csv.rows') -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'excludes same-group handoffs from group benchmark inbound but keeps cross-group flow' {
+        Set-RmActiveDataset -Source hop-teaming -Year 2022 | Out-Null
+        try {
+            # ONE holds both ends of two fixture edges (8000000001->9000000001
+            # 45 pts, and the reverse 99 pts): internal care, not referrals.
+            # TWO's inbound comes from a member of ONE: cross-group, external.
+            $map = @{ '9000000001' = 'ONE'; '8000000001' = 'ONE'; '9000000002' = 'TWO' }
+            $gb = Get-RmGroupBenchmark -TargetToBucket $map -SkipEnrichment
+            $one = @($gb.Buckets | Where-Object Bucket -eq 'ONE')[0]
+            $one.InboundPatients | Should -Be 20     # only 8000000002's edge survives
+            $one.Sources | Should -Be 1
+            $two = @($gb.Buckets | Where-Object Bucket -eq 'TWO')[0]
+            $two.InboundPatients | Should -Be 12     # cross-group flow still counts
+            @($gb.Edges | Where-Object { $_.Bucket -eq 'ONE' -and $_.SourceNPI -eq '8000000001' }).Count | Should -Be 0
+            (@($gb.Notes) -join ' ') | Should -BeLike '*internal*excluded*'
+        } finally { Set-RmActiveDataset -Source cms-pspp -Year 2015 | Out-Null }
+    }
+
+    It 'excludes same-group handoffs from the ZIP-footprint buckets' {
+        Set-RmActiveDataset -Source hop-teaming -Year 2022 | Out-Null
+        try {
+            $fp = @(Get-RmInboundByBucket -TargetToBucket @{ '9000000001' = 'G1'; '8000000001' = 'G1' } -SkipEnrichment)
+            $fp.Count | Should -Be 1
+            $fp[0].SharedPatients | Should -Be 20    # 45 and 99 are internal to G1
+        } finally { Set-RmActiveDataset -Source cms-pspp -Year 2015 | Out-Null }
+    }
+
+    It 'excludes member-to-member handoffs from the group trend' {
+        $t = Get-RmGroupTrend -MemberNpi @('9000000001', '8000000001') -SkipEnrichment
+        foreach ($row in @($t.Rows)) {
+            $row.InboundPatients | Should -Be 20
+            $row.InboundSources | Should -Be 1
+        }
+        (@($t.Notes) -join ' ') | Should -BeLike '*member-to-member handoffs are internal*'
+    }
+
+    It 'blanks retention across an import gap instead of calling 3-year churn annual' {
+        $src19 = Join-Path $script:WorkDir 'DocGraph_Hop_Teaming_2019.csv'
+        Set-Content -Path $src19 -Encoding ascii -NoNewline -Value (@(
+            'from_npi,to_npi,patient_count,transaction_count,average_day_wait,std_day_wait'
+            '8000000001,9000000001,40,45,12.0,9.0'
+        ) -join "`n")
+        Import-RmDataset -Path $src19 | Out-Null
+        try {
+            $t = Get-RmSourceTrend -Npi 9000000001 -SkipEnrichment
+            $rows = @($t.Years)
+            $rows.Count | Should -Be 3
+            $rows[0].Year | Should -Be 2019
+            $rows[1].Year | Should -Be 2021
+            # 2019 -> 2021 spans a missing year: retention is blank, like a
+            # first year, never a number that reads as annual churn.
+            $rows[1].RetentionPct | Should -Be ''
+            $rows[1].NewSources | Should -Be ''
+            $rows[1].LostSources | Should -Be ''
+            # 2021 -> 2022 is consecutive: retention still measured.
+            $rows[2].RetentionPct | Should -Be 100
+            (@($t.Notes) -join ' ') | Should -BeLike '*IMPORT GAP*2019->2021*'
+        } finally {
+            Remove-Item (Join-Path $env:RM_DATA_DIR 'hop_teaming_2019.csv') -Force -ErrorAction SilentlyContinue
+            Remove-Item (Join-Path $env:RM_DATA_DIR 'hop_teaming_2019.csv.rows') -Force -ErrorAction SilentlyContinue
+            Set-RmActiveDataset -Source cms-pspp -Year 2015 | Out-Null
+        }
+    }
+
+    It 'treats a non-numeric count as a malformed row, never a silent zero' {
+        # Strict window: corruption in the first data rows throws immediately.
+        $bad1 = Join-Path $script:WorkDir 'bad-numeric-early.csv'
+        Set-Content -Path $bad1 -Encoding ascii -NoNewline -Value (@(
+            'from_npi,to_npi,patient_count,transaction_count,average_day_wait,std_day_wait'
+            '8000000001,9000000001,*,50,12.5,10.0'
+        ) -join "`n")
+        $set = New-Object 'System.Collections.Generic.HashSet[string]'
+        [void]$set.Add('9000000001')
+        { [RmEngine]::ScanInbound($bad1, $set, [RmEngine]::FormatHopTeaming) } |
+            Should -Throw '*non-numeric*'
+        # Past the strict window, bad matched rows count toward the 1% budget
+        # and a file over budget is refused outright.
+        $lines = New-Object System.Collections.Generic.List[string]
+        $lines.Add('from_npi,to_npi,patient_count,transaction_count,average_day_wait,std_day_wait')
+        for ($i = 0; $i -lt 96; $i++) { $lines.Add('8000000001,9000000001,10,10,5.0,1.0') }
+        for ($i = 0; $i -lt 3; $i++) { $lines.Add('8000000001,9000000001,SUPPRESSED,10,5.0,1.0') }
+        $bad2 = Join-Path $script:WorkDir 'bad-numeric-late.csv'
+        Set-Content -Path $bad2 -Encoding ascii -NoNewline -Value ($lines -join "`n")
+        { [RmEngine]::ScanInbound($bad2, $set, [RmEngine]::FormatHopTeaming) } |
+            Should -Throw '*refusing to report*'
+    }
+
+    It 'expires stale NPPES cache entries so live registry data refreshes' {
+        & (Get-Module ReferralMap) {
+            $p = Get-RmNppesCachePath
+            $saved = if (Test-Path -LiteralPath $p) { Get-Content -LiteralPath $p -Raw -Encoding UTF8 } else { $null }
+            try {
+                $now = [DateTime]::UtcNow
+                @{
+                    '1000000001' = @{ Name = 'FRESH PT'; Specialty = 'PT'; City = ''; State = ''; Zip = '63101'
+                                      FetchedAt = $now.ToString('o') }
+                    '1000000002' = @{ Name = 'STALE PT'; Specialty = 'PT'; City = ''; State = ''; Zip = '63101'
+                                      FetchedAt = $now.AddDays(-40).ToString('o') }
+                    '1000000003' = @{ Name = '(NPI deactivated or not found)'; Specialty = ''; City = ''; State = ''; Zip = ''
+                                      FetchedAt = $now.AddDays(-8).ToString('o') }
+                    '1000000004' = @{ Name = '(NPI deactivated or not found)'; Specialty = ''; City = ''; State = ''; Zip = ''
+                                      FetchedAt = $now.AddDays(-3).ToString('o') }
+                    '1000000005' = @{ Name = 'PRE-TTL PT'; Specialty = 'PT'; City = ''; State = ''; Zip = '63101' }
+                } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $p -Encoding UTF8
+                $c = Read-RmNppesCache
+                $c.ContainsKey('1000000001') | Should -BeTrue    # fresh: kept
+                $c.ContainsKey('1000000002') | Should -BeFalse   # 40 days: expired
+                $c.ContainsKey('1000000003') | Should -BeFalse   # negative, 8 days: expired
+                $c.ContainsKey('1000000004') | Should -BeTrue    # negative, 3 days: kept
+                $c.ContainsKey('1000000005') | Should -BeFalse   # pre-TTL entry: expired once, then re-stamped
+            } finally {
+                if ($null -ne $saved) { Set-Content -LiteralPath $p -Value $saved -Encoding UTF8 }
+                else { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }
+            }
+        }
+    }
+
 }

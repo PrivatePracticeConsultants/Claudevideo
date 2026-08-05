@@ -735,7 +735,8 @@ $script:BusyTimer.Add_Tick({
         if ($ui.BusyOverlay.Visibility -ne [System.Windows.Visibility]::Visible) {
             $ui.BusyOverlay.Visibility = [System.Windows.Visibility]::Visible
         }
-        $ui.BusyElapsed.Text = 'Elapsed {0}:{1:00}' -f [int]$e.TotalMinutes, $e.Seconds
+        # Floor, not [int]: [int] rounds-to-even, so 90s would show "2:30".
+        $ui.BusyElapsed.Text = 'Elapsed {0}:{1:00}' -f [math]::Floor($e.TotalMinutes), $e.Seconds
         $step = [string]$script:BusyProgress['Step']
         if ($step -and $ui.BusyStep.Text -ne $step) { $ui.BusyStep.Text = $step }
     } catch { }
@@ -799,6 +800,7 @@ $script:BusyTitles = @{
     'load'         = 'Loading the provider snapshot...'
     'update'       = 'Downloading the CMS provider file...'
     'compare'      = 'Comparing snapshots...'
+    'export'       = 'Writing the export file...'
     'rm-run'       = 'Mapping referral sources...'
     'rm-download'  = 'Downloading the referral dataset...'
     'rm-import'    = 'Importing the CareSet file...'
@@ -835,18 +837,34 @@ function Invoke-Async {
     )
     Set-Busy $true $BusyMessage (Get-BusyTitle $Kind)
     if ($WithProgress) { $Params = $Params.Clone(); $Params['Progress'] = $script:BusyProgress }
-    $rs = [runspacefactory]::CreateRunspace()
-    $rs.Open()
-    $ps = [powershell]::Create()
-    $ps.Runspace = $rs
-    [void]$ps.AddScript($WorkerScript)
-    foreach ($k in $Params.Keys) { [void]$ps.AddParameter($k, $Params[$k]) }
-    $job = [pscustomobject]@{
-        Kind = $Kind; PS = $ps; RS = $rs
-        Handle = $ps.BeginInvoke()
-        OnDone = $OnDone; OnFail = $OnFail
+    # If anything below throws (out of memory, runspace pool exhaustion), the
+    # overlay must come DOWN and the user must see why - otherwise the app
+    # sits busy forever with no job to complete.
+    $rs = $null; $ps = $null
+    try {
+        $rs = [runspacefactory]::CreateRunspace()
+        $rs.Open()
+        $ps = [powershell]::Create()
+        $ps.Runspace = $rs
+        # Workers run with Stop semantics like the host script: a failing
+        # cmdlet must hit the worker's catch (and its plain-language message),
+        # not limp on and fail later with a raw exception from the next call.
+        [void]$ps.AddScript('$ErrorActionPreference = ''Stop''')
+        [void]$ps.AddStatement()
+        [void]$ps.AddScript($WorkerScript)
+        foreach ($k in $Params.Keys) { [void]$ps.AddParameter($k, $Params[$k]) }
+        $job = [pscustomobject]@{
+            Kind = $Kind; PS = $ps; RS = $rs
+            Handle = $ps.BeginInvoke()
+            OnDone = $OnDone; OnFail = $OnFail
+        }
+        [void]$script:Jobs.Add($job)
+    } catch {
+        if ($ps) { try { $ps.Dispose() } catch { } }
+        if ($rs) { try { $rs.Dispose() } catch { } }
+        Set-Busy $false $null
+        Show-ErrorBox "Could not start the background task: $($_.Exception.Message)"
     }
-    [void]$script:Jobs.Add($job)
 }
 
 $timer = New-Object System.Windows.Threading.DispatcherTimer
@@ -855,15 +873,22 @@ $timer.Add_Tick({
     $done = @($script:Jobs | Where-Object { $_.Handle.IsCompleted })
     foreach ($job in $done) {
         $script:Jobs.Remove($job)
-        $result = $null; $failure = $null
+        $result = $null; $failure = $null; $notice = $null
         try {
             $output = $job.PS.EndInvoke($job.Handle)
+            # Worker warnings (e.g. "NPPES lookups failed; results show NPIs
+            # without names") explain otherwise-confusing results, so they go
+            # to the status bar, not just the console behind the window.
+            if ($job.PS.Streams.Warning.Count -gt 0) {
+                $notice = [string]$job.PS.Streams.Warning[0].Message
+            }
             # A worker SUCCEEDED if it produced output — an incidental
             # non-terminating error record (e.g. an antivirus briefly locking
             # the change-log file) must not discard a completed result.
             if ($output.Count -gt 0) {
                 $result = $output
                 if ($job.PS.Streams.Error.Count -gt 0) {
+                    if (-not $notice) { $notice = [string]($job.PS.Streams.Error[0].ToString()) }
                     Write-Warning ("Background task '$($job.Kind)' reported warnings: " +
                         (($job.PS.Streams.Error | ForEach-Object { $_.ToString() }) -join '; '))
                 }
@@ -884,6 +909,9 @@ $timer.Add_Tick({
         } catch {
             Show-ErrorBox "Unexpected error: $($_.Exception.Message)"
         }
+        # After the handler's own "...complete" status: the warning is the
+        # more informative line, so it wins the status bar.
+        if ($notice -and -not $failure) { Set-Status "Note: $notice" }
     }
 })
 $timer.Start()
@@ -896,11 +924,18 @@ function ConvertTo-DataTable {
     param([object[]]$Rows, [string[]]$Columns)
     $table = New-Object System.Data.DataTable
     foreach ($c in $Columns) {
+        # Type from the first NON-NULL value (capped probe): typing from row 0
+        # alone made a leading $null (e.g. an un-benchmarked group's Rank)
+        # degrade the whole column to string, resurrecting the lexical
+        # "9 above 65" sort this function exists to prevent.
         $type = [string]
-        if ($Rows.Count -gt 0) {
-            $v0 = $Rows[0].$c
+        $probe = [Math]::Min($Rows.Count, 50)
+        for ($pi = 0; $pi -lt $probe; $pi++) {
+            $v0 = $Rows[$pi].$c
+            if ($null -eq $v0 -or ($v0 -is [string] -and $v0 -eq '')) { continue }
             if ($v0 -is [int] -or $v0 -is [long]) { $type = [int64] }
             elseif ($v0 -is [double]) { $type = [double] }   # e.g. AvgDayWait — must sort numerically
+            break
         }
         [void]$table.Columns.Add($c, $type)
     }
@@ -918,6 +953,15 @@ function ConvertTo-DataTable {
     # against a stream of DataRows and WPF's grid bind would fail with
     # "Value cannot be null. Parameter name: key". The comma keeps it a DataTable.
     , $table
+}
+
+function Test-NpiChecksum([string]$Npi) {
+    # CMS check digit (Luhn over the 9 identifier digits with the implicit
+    # 80840 prefix - the same validator the Search tab uses). A mistyped NPI
+    # must fail HERE in milliseconds: letting it through buys a minutes-long
+    # 8 GB scan that ends in "no measured pairs", which reads as a data fact
+    # instead of a typo.
+    try { [OrfEngine]::IsValidNpi($Npi) } catch { $true }   # helper failure never blocks
 }
 
 function Get-CappedNote([int]$Total) {
@@ -1075,8 +1119,32 @@ $ui.SearchButton.Add_Click({
 })
 
 $ui.ExportSearchButton.Add_Click({
-    Export-WithDialog -Rows @($script:LastSearchResults | ConvertTo-OrfRecord) `
-        -SuggestedName 'provider-search.csv' -Description $script:LastSearchDesc
+    # A flags-only search legitimately matches hundreds of thousands of
+    # providers, and materializing the records used to run ON THE UI THREAD -
+    # the window froze with no busy overlay for the whole write. The dialog
+    # still comes first; the conversion and write run as a background job.
+    if ($script:Busy) { return }
+    $rows = @($script:LastSearchResults)
+    if ($rows.Count -eq 0) { Show-ErrorBox 'Nothing to export yet — run a search/check first.'; return }
+    $dialog = New-Object Microsoft.Win32.SaveFileDialog
+    $dialog.Filter = 'CSV files (*.csv)|*.csv'
+    $dialog.FileName = 'provider-search.csv'
+    if (-not $dialog.ShowDialog($window)) { return }
+    Invoke-Async -Kind 'export' -Params @{
+            ModulePath = $script:ModulePath; Rows = $rows
+            Path = $dialog.FileName; Description = $script:LastSearchDesc
+            Snapshot = $script:LoadedSnapshotFile
+        } `
+        -BusyMessage "Writing $('{0:N0}' -f $rows.Count) rows (with methodology sidecar)..." `
+        -WorkerScript 'param($ModulePath, $Rows, $Path, $Description, $Snapshot)
+            Import-Module $ModulePath
+            $Rows | ConvertTo-OrfRecord | Export-OrfResult -Path $Path -Description $Description -DataSnapshotFile $Snapshot' `
+        -OnDone {
+            param($result)
+            $r = $result[0]
+            Set-Status "Exported $('{0:N0}' -f $r.Rows) rows to $($r.Path) (with methodology sidecar)."
+        } `
+        -OnFail { param($message) Show-ErrorBox "Export failed: $message" }
 })
 
 $ui.LoadNpiFileButton.Add_Click({
@@ -1572,6 +1640,7 @@ $ui.BmRunButton.Add_Click({
            elseif ($ui.BmNameBox.Text.Trim() -match '^\d{10}$') { $ui.BmNameBox.Text.Trim() }
            else { $null }
     if (-not $npi) { Show-ErrorBox 'Select a practice from the search results first (or paste its 10-digit NPI).'; return }
+    if (-not (Test-NpiChecksum $npi)) { Show-ErrorBox 'That NPI fails its check digit — one digit is mistyped. Double-check the number and try again.'; return }
     if (-not (Get-RmStatus).DatasetReady) {
         Show-ErrorBox ("No referral dataset is available yet - on the Referral map tab, click " +
             "'Download CMS dataset' (free 2015 data) or 'Import CareSet file' first.")
@@ -1703,7 +1772,7 @@ $ui.PgRunButton.Add_Click({
         return
     }
     Invoke-Async -Kind 'pg-run' -Params @{ PgModulePath = $script:PgModulePath; Zip = $zip } `
-        -BusyMessage "Finding practice groups for $zip — NPPES lookup, then matching against the reassignment roster (first run also loads ~510 MB into memory)..." `
+        -BusyMessage "Finding practice groups for $zip — NPPES lookup, then matching against the reassignment roster (loading the ~510 MB roster is most of the wait)..." `
         -WorkerScript 'param($PgModulePath, $Zip) Import-Module $PgModulePath; Get-PgGroupsInZip -Zip $Zip' `
         -OnDone {
             param($result)
@@ -1716,7 +1785,6 @@ $ui.PgRunButton.Add_Click({
             $ui.PgViewCombo.SelectedIndex = 0
             $ui.PgViewCombo.IsEnabled = $false
             $groups = @($pg.Groups)
-            $rosters = @($pg.Rosters)
             $ui.PgGroupGrid.ItemsSource = (ConvertTo-DataTable -Rows $groups -Columns (Get-PgGroupCols)).DefaultView
             Update-PgBottomView   # binds the roster view and syncs export state
             $ui.PgExportGroupsButton.IsEnabled = ($groups.Count -gt 0)
@@ -1991,6 +2059,7 @@ $ui.LkRunButton.Add_Click({
     if ($script:Busy) { return }
     $npi = $ui.LkNpiBox.Text.Trim()
     if ($npi -notmatch '^\d{10}$') { Show-ErrorBox 'Enter a full 10-digit NPI.'; return }
+    if (-not (Test-NpiChecksum $npi)) { Show-ErrorBox 'That NPI fails its check digit — one digit is mistyped. Double-check the number and try again.'; return }
 
     # Eligibility comes from the in-memory O&R snapshot (main session); the
     # heavy NPPES + shared-patient + group work runs in a worker.
@@ -2101,6 +2170,7 @@ $ui.LkTrendButton.Add_Click({
     if ($script:Busy) { return }
     $npi = $ui.LkNpiBox.Text.Trim()
     if ($npi -notmatch '^\d{10}$') { Show-ErrorBox 'Enter a full 10-digit NPI first.'; return }
+    if (-not (Test-NpiChecksum $npi)) { Show-ErrorBox 'That NPI fails its check digit — one digit is mistyped. Double-check the number and try again.'; return }
     $hopYears = @(Get-RmAvailableDatasets | Where-Object { $_.Source -eq 'hop-teaming' })
     if ($hopYears.Count -lt 2) {
         Show-ErrorBox ("A trend needs at least two imported CareSet Hop Teaming years " +
@@ -2156,6 +2226,7 @@ $ui.LkGeoButton.Add_Click({
     if ($script:Busy) { return }
     $npi = $ui.LkNpiBox.Text.Trim()
     if ($npi -notmatch '^\d{10}$') { Show-ErrorBox 'Enter a full 10-digit NPI first.'; return }
+    if (-not (Test-NpiChecksum $npi)) { Show-ErrorBox 'That NPI fails its check digit — one digit is mistyped. Double-check the number and try again.'; return }
     if (-not (Get-RmStatus).DatasetReady) {
         Show-ErrorBox ("No referral dataset is available yet - on the Referral map tab, click " +
             "'Download CMS dataset' (free 2015 data) or 'Import CareSet file' first.")
@@ -2449,6 +2520,11 @@ $ui.LkAnalysisButton.Add_Click({
             'spaces or commas) to analyze an org NPI plus its therapist NPIs as one combined practice.')
         return
     }
+    $badNpis = @($npis | Where-Object { -not (Test-NpiChecksum $_) })
+    if ($badNpis.Count) {
+        Show-ErrorBox ("These NPI(s) fail their check digit (one digit is mistyped): " + ($badNpis -join ', ') + '. Fix them and try again.')
+        return
+    }
     if (-not (Get-RmStatus).DatasetReady) {
         Show-ErrorBox ("No referral dataset is available yet - on the Referral map tab, click " +
             "'Download CMS dataset' (free 2015 data) or 'Import CareSet file' first.")
@@ -2517,6 +2593,11 @@ $ui.LkFullReportButton.Add_Click({
     if ($npis.Count -eq 0) {
         Show-ErrorBox ('Enter a full 10-digit NPI first. Tip: paste SEVERAL NPIs (separated by spaces ' +
             'or commas) to build one combined report for an org NPI plus its therapist NPIs.')
+        return
+    }
+    $badNpis = @($npis | Where-Object { -not (Test-NpiChecksum $_) })
+    if ($badNpis.Count) {
+        Show-ErrorBox ("These NPI(s) fail their check digit (one digit is mistyped): " + ($badNpis -join ', ') + '. Fix them and try again.')
         return
     }
     if (-not (Get-RmStatus).DatasetReady) {
@@ -2758,8 +2839,13 @@ try {
 # background jobs so a partial download does not linger.
 $window.Add_Closed({
     $timer.Stop()
+    $script:BusyTimer.Stop()
     foreach ($job in @($script:Jobs)) {
-        try { $job.PS.Stop(); $job.PS.Dispose(); $job.RS.Dispose() } catch { }
+        # BeginStop, not Stop: a worker deep inside a single engine call over
+        # an 8 GB file cannot be interrupted, and a synchronous Stop() would
+        # hold the closing window hostage until the pass ends. The process
+        # exits right after ShowDialog returns, reclaiming the threads.
+        try { [void]$job.PS.BeginStop($null, $null) } catch { }
     }
     $script:Jobs.Clear()
 })

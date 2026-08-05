@@ -222,7 +222,10 @@ the Referral map tab, this button rolls every group's *local* therapists'
 referral volume up to the group and turns the top table into a **leaderboard**:
 each group gets a `Rank`, a `LocalReferrals<year>` patient count, and a
 `SharePct` (its slice of all the groups' measured volume). This directly
-answers *"which provider groups receive the most referrals here?"*
+answers *"which provider groups receive the most referrals here?"* Handoffs
+**between members of the same group** (a PT sending a patient to the group's
+own OT) are internal care, not referrals, and are excluded from these figures —
+so a big group can't out-rank a small one on its own co-treatment.
 
 Then use the **Show** dropdown to flip the lower table, per selected group:
 
