@@ -5006,6 +5006,28 @@ $script:RmResources = @(
         Direct = $true; Csv = $true }
 )
 
+# One picture of which supporting indexes exist locally, for the GUI's
+# setup section. File sizes, not row counts - counting a 687 MB file takes
+# seconds and this must be instant on tab load.
+function Get-RmLocalDataStatus {
+    $probe = {
+        param($Path)
+        if (Test-Path -LiteralPath $Path) {
+            $fi = Get-Item -LiteralPath $Path
+            [pscustomobject]@{ Present = $true; SizeMB = [math]::Round($fi.Length / 1MB, 1)
+                               Updated = $fi.LastWriteTime.ToString('yyyy-MM-dd') }
+        } else {
+            [pscustomobject]@{ Present = $false; SizeMB = 0; Updated = '' }
+        }
+    }
+    [pscustomobject]@{
+        Nppes       = & $probe (Get-RmNppesIndexPath)      # discovery, chain flags, market capture
+        CareCompare = & $probe (Get-RmDacIndexPath)        # by-address breakdown, affiliated NPIs
+        Enrollment  = & $probe (Get-RmEnrollmentIndexPath) # county market with no internet
+        ChainTable  = & $probe (Get-RmChainIndexPath)      # derived from the NPPES index
+    }
+}
+
 function Save-RmLocalResources {
     <#
     .SYNOPSIS
@@ -5316,8 +5338,9 @@ function Get-RmLocationReferrals {
     }
     $idx = Get-RmDacIndexPath
     if (-not (Test-Path -LiteralPath $idx)) {
-        throw ("Address-level figures need the Care Compare clinician file. Download the National Downloadable File " +
-               "from https://data.cms.gov/provider-data/dataset/mj5m-pzi6 and run Import-RmCareCompare -Path <csv>.")
+        throw ("Address-level figures need the Care Compare clinician file. Click 'Download supporting data' on the " +
+               "Multi-site chains tab (or run Import-RmCareCompare -Path <csv> against the National Downloadable File " +
+               "from https://data.cms.gov/provider-data/dataset/mj5m-pzi6).")
     }
     $needle = Get-RmOrgNameKey $Name
     if (-not $needle) { throw "Enter part of an organization name (letters or numbers)." }
@@ -5561,6 +5584,6 @@ Export-ModuleMember -Function @(
     'Import-RmNppesBulk', 'Import-RmCareCompare', 'Get-RmAffiliatedNpi',
     'Get-RmProviderFamily', 'Get-RmLocationReferrals', 'Get-RmRelatedOrgNames',
     'Get-RmChainMark', 'Get-RmChainDetail', 'Get-RmNameSiblingGroups',
-    'Import-RmEnrollment', 'Save-RmLocalResources',
+    'Import-RmEnrollment', 'Save-RmLocalResources', 'Get-RmLocalDataStatus',
     'Export-RmResult', 'Clear-RmStaleTemp'
 )

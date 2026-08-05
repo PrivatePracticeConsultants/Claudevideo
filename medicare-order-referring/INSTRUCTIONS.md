@@ -315,6 +315,17 @@ organization NPIs, and the biggest of them draws 4,204 distinct referring
 providers — no single clinic does that, so that number is really dozens of
 clinics added together. This tab pulls a chain apart two ways.
 
+**One-time setup, on this tab.** The blue bar at the top shows which local
+data files you have. Click **Download supporting data** to fetch and index the
+Care Compare clinician file (~800 MB) and the Medicare enrollment file
+(~60 MB) — that enables the by-address breakdown and offline county-market
+data. The NPPES registry file (~1.1 GB) has no stable download link, so grab
+it yourself from `download.cms.gov/nppes` (the monthly "NPPES Data
+Dissemination" zip) and click **Import NPPES bulk zip** — that one powers the
+chain asterisks, multi-site detection, offline provider discovery, and the
+market-capture map layer, across every tab. Without it those features stay
+quietly off; the status bar says so rather than letting you wonder.
+
 Type part of the chain's name (`IVYREHAB`, `ATI PHYSICAL THERAPY`, `SELECT
 PHYSICAL THERAPY`…), optionally a state, then pick a breakdown.
 

@@ -1690,6 +1690,47 @@ Describe 'Address-level referrals (the multi-site workaround)' {
     }
 }
 
+Describe 'Local data status (the GUI setup line)' {
+    It 'reports presence, size, and date for every supporting index' {
+        $d = Get-RmLocalDataStatus
+        foreach ($k in 'Nppes', 'CareCompare', 'Enrollment', 'ChainTable') {
+            $d.PSObject.Properties[$k] | Should -Not -BeNullOrEmpty
+            $d.$k.PSObject.Properties['Present'] | Should -Not -BeNullOrEmpty
+        }
+        # this test store HAS an NPPES index and a DAC index from earlier
+        $d.Nppes.Present | Should -BeTrue
+        # fixture indexes are tiny - a few KB rounds to 0.0 MB - so assert
+        # the date, which is set whenever the file exists
+        $d.Nppes.Updated | Should -Not -BeNullOrEmpty
+        $d.CareCompare.Present | Should -BeTrue
+    }
+
+    It 'reports everything missing in an empty store, without throwing' {
+        $bare = Join-Path $script:WorkDir 'status-empty-store'
+        New-Item -ItemType Directory -Path $bare -Force | Out-Null
+        $saved = (Get-RmConfig).DataDir
+        try {
+            Set-RmConfig -DataDir $bare
+            $d = Get-RmLocalDataStatus
+            $d.Nppes.Present | Should -BeFalse
+            $d.CareCompare.Present | Should -BeFalse
+            $d.Enrollment.Present | Should -BeFalse
+        } finally { Set-RmConfig -DataDir $saved }
+    }
+
+    It 'the by-address refusal now points at the GUI button' {
+        $bare = Join-Path $script:WorkDir 'status-empty-store2'
+        New-Item -ItemType Directory -Path $bare -Force | Out-Null
+        Copy-Item (Join-Path $env:RM_DATA_DIR 'hop_teaming_2022.csv') $bare -ErrorAction SilentlyContinue
+        Copy-Item (Join-Path $env:RM_DATA_DIR 'dataset-meta.json') $bare -ErrorAction SilentlyContinue
+        $saved = (Get-RmConfig).DataDir
+        try {
+            Set-RmConfig -DataDir $bare
+            { Get-RmLocationReferrals -Name 'CHAINREHAB' } | Should -Throw "*Download supporting data*"
+        } finally { Set-RmConfig -DataDir $saved }
+    }
+}
+
 Describe 'Thin-data honesty (a near-empty ZIP is explained, not silent)' {
     It 'explains low measured volume instead of leaving it looking broken' {
         # ZIP 88888 holds 201 fixture PTs and NOT ONE has a measured pair -

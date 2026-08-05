@@ -430,12 +430,24 @@ $xaml = @'
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
           </Grid.RowDefinitions>
           <TextBlock Grid.Row="0" TextWrapping="Wrap" Foreground="#4A5560" Margin="0,0,0,8"
               Text="Break a chain (Ivy Rehab, ATI, Select, Athletico...) down into its parts. BY NPI lists every organization NPI trading under that name with its registered address and measured volume. BY ADDRESS goes further: it uses the Care Compare roster to find the clinicians at each street address and sums THEIR referral volume, which is the only way to get per-location figures - an organization NPI carries no service address."/>
-          <WrapPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,6">
+          <Border Grid.Row="1" Background="#F4F8FB" BorderBrush="#C9D8E4" BorderThickness="1"
+                  CornerRadius="4" Padding="8,6" Margin="0,0,0,8">
+            <WrapPanel Orientation="Horizontal">
+              <TextBlock x:Name="ChDataStatus" VerticalAlignment="Center" Foreground="#26333E"
+                         Text="Checking local data..." Margin="0,0,10,0"/>
+              <Button x:Name="ChSetupButton" Content="Download supporting data..." Padding="10,4"
+                      ToolTip="One-time: downloads the Care Compare clinician file (~800 MB) and the Medicare enrollment file (~60 MB) from CMS and builds the local indexes. Enables the by-address breakdown, affiliated-NPI suggestions, and offline county market data."/>
+              <Button x:Name="ChNppesButton" Content="Import NPPES bulk zip..." Padding="10,4" Margin="8,0,0,0"
+                      ToolTip="Pick the NPPES Data Dissemination zip (~1.1 GB, from download.cms.gov/nppes - no stable link, so it cannot be auto-downloaded). Builds the registry index that powers chain flags (*), multi-site detection, offline provider discovery, and the market-capture map layer."/>
+            </WrapPanel>
+          </Border>
+          <WrapPanel Grid.Row="2" Orientation="Horizontal" Margin="0,0,0,6">
             <TextBlock Text="Organization name:" VerticalAlignment="Center" Margin="0,0,6,0"/>
             <TextBox x:Name="ChNameBox" Width="220" Height="28" VerticalContentAlignment="Center"
                      ToolTip="Part of the chain's name, e.g. IVYREHAB or ATI PHYSICAL THERAPY"/>
@@ -448,18 +460,18 @@ $xaml = @'
             <Button x:Name="ChNpiButton" Content="Break down by NPI" Padding="12,5" Margin="14,0,0,0"
                     ToolTip="Every organization NPI under this name: registered address, measured referral volume, and whether that NPI covers several sites."/>
             <Button x:Name="ChAddrButton" Content="Break down by ADDRESS" Padding="12,5" Margin="8,0,0,0"
-                    ToolTip="Per-location referral volume, built from the individual clinicians Care Compare lists at each street address. Needs the Care Compare file (Practice groups tab: Download CMS dataset)."/>
+                    ToolTip="Per-location referral volume, built from the individual clinicians Care Compare lists at each street address. Needs the Care Compare file - one click on 'Download supporting data' above."/>
             <Button x:Name="ChExportButton" Content="Export..." Padding="10,4" Margin="10,0,0,0" IsEnabled="False"/>
           </WrapPanel>
-          <TextBlock Grid.Row="2" x:Name="ChLabel" FontWeight="SemiBold" Foreground="#1F3B57" Margin="0,2,0,4"
+          <TextBlock Grid.Row="3" x:Name="ChLabel" FontWeight="SemiBold" Foreground="#1F3B57" Margin="0,2,0,4"
                      TextWrapping="Wrap" Text="Enter a chain name and pick a breakdown."/>
-          <DataGrid Grid.Row="3" x:Name="ChGrid" IsReadOnly="True" AutoGenerateColumns="True"
+          <DataGrid Grid.Row="4" x:Name="ChGrid" IsReadOnly="True" AutoGenerateColumns="True"
                     CanUserAddRows="False" GridLinesVisibility="Horizontal"
                     HeadersVisibility="Column" EnableRowVirtualization="True"/>
-          <Border Grid.Row="4" Background="White" BorderBrush="#D5DBE1" BorderThickness="1"
+          <Border Grid.Row="5" Background="White" BorderBrush="#D5DBE1" BorderThickness="1"
                   CornerRadius="4" Padding="9,7" Margin="0,8,0,0">
             <TextBlock x:Name="ChSummary" Foreground="#26333E" TextWrapping="Wrap"
-              Text="Needs a referral dataset (Referral map tab). The by-address breakdown also needs the Care Compare clinician file from the Practice groups tab."/>
+              Text="Needs a referral dataset (Referral map tab). The by-address breakdown needs the Care Compare clinician file - the 'Download supporting data' button above fetches and indexes it."/>
           </Border>
         </Grid>
       </TabItem>
@@ -614,6 +626,7 @@ foreach ($name in @(
     'PgZipBox', 'PgRunButton', 'PgDownloadButton', 'PgDataStatus', 'PgGroupGrid',
     'PgRosterLabel', 'PgFootprintButton', 'PgViewCombo', 'PgTrendButton', 'PgExportGroupsButton', 'PgExportRosterButton',
     'PgRosterGrid', 'PgSummary',
+    'ChDataStatus', 'ChSetupButton', 'ChNppesButton',
     'ChNameBox', 'ChStateBox', 'ChZipBox', 'ChNpiButton', 'ChAddrButton', 'ChExportButton',
     'ChLabel', 'ChGrid', 'ChSummary',
     'LkNpiBox', 'LkRunButton', 'LkTrendButton', 'LkExportTrendButton',
@@ -732,7 +745,7 @@ function Set-Busy([bool]$On, [string]$Message, [string]$Title) {
                      $ui.RmRunButton, $ui.RmDownloadButton, $ui.RmImportButton, $ui.RmDatasetCombo, $ui.RmRadiusCombo,
                      $ui.BmSearchButton,
                      $ui.PgRunButton, $ui.PgDownloadButton, $ui.PgFootprintButton,
-                     $ui.ChNpiButton, $ui.ChAddrButton,
+                     $ui.ChNpiButton, $ui.ChAddrButton, $ui.ChSetupButton, $ui.ChNppesButton,
                      $ui.LkRunButton, $ui.LkTrendButton, $ui.LkGeoButton, $ui.LkAnalysisButton, $ui.WlCheckButton)) {
         $b.IsEnabled = -not $On
     }
@@ -771,6 +784,8 @@ $script:BusyTitles = @{
     'pg-download'  = 'Downloading the practice-group dataset...'
     'pg-benchmark' = 'Building the group referral benchmark...'
     'pg-trend'     = 'Measuring this group year over year...'
+    'ch-setup'     = 'Downloading and indexing the supporting data...'
+    'ch-nppes'     = 'Indexing the NPPES registry file...'
     'ch-npi'       = 'Breaking the chain down by NPI...'
     'ch-addr'      = 'Building per-location referral figures...'
     'lk-run'       = 'Looking up this provider...'
@@ -2166,6 +2181,83 @@ $ui.LkSaveMapButton.Add_Click({
 # ---------------------------------------------------------------------------
 $script:ChResult = $null
 $script:ChKind = ''
+
+# The status line is the honest inventory of which local indexes exist -
+# blank chain flags and a refused by-address run both trace back to here.
+function Update-ChDataStatus {
+    try {
+        $d = Get-RmLocalDataStatus
+        $bit = {
+            param($Label, $St)
+            if ($St.Present) { "$Label OK ($($St.SizeMB) MB, $($St.Updated))" } else { "$Label missing" }
+        }
+        $ui.ChDataStatus.Text = ('Local data: ' +
+            (& $bit 'NPPES registry' $d.Nppes) + ' | ' +
+            (& $bit 'Care Compare' $d.CareCompare) + ' | ' +
+            (& $bit 'Enrollment' $d.Enrollment) + '.')
+        if (-not $d.Nppes.Present -or -not $d.CareCompare.Present) {
+            $ui.ChDataStatus.Text += ' Missing pieces disable chain flags (*) or the by-address breakdown.'
+        }
+    } catch { $ui.ChDataStatus.Text = 'Local data status unavailable.' }
+}
+Update-ChDataStatus
+
+$ui.ChSetupButton.Add_Click({
+    if ($script:Busy) { return }
+    if (-not (Confirm-Box ("This downloads two CMS files and builds local indexes:`n`n" +
+        "  - Care Compare clinician file (~800 MB)`n  - Medicare Monthly Enrollment (~60 MB)`n`n" +
+        "One-time, resumable (already-downloaded files are kept). Continue?"))) { return }
+    Invoke-Async -Kind 'ch-setup' -Params @{ RmModulePath = $script:RmModulePath } `
+        -BusyMessage 'Downloading the Care Compare (~800 MB) and enrollment (~60 MB) files from CMS, then building the local indexes. The download is the slow part - expect several minutes on a fast connection.' `
+        -WorkerScript 'param($RmModulePath) Import-Module $RmModulePath
+            $res = Save-RmLocalResources
+            $done = @{}
+            foreach ($r in @($res)) {
+                if ($r.Key -eq ''carecompare'' -and $r.Bytes -gt 0) {
+                    Import-RmCareCompare -Path $r.Path | Out-Null; $done[''carecompare''] = $true
+                }
+                if ($r.Key -eq ''enrollment'' -and $r.Bytes -gt 0) {
+                    Import-RmEnrollment -Path $r.Path | Out-Null; $done[''enrollment''] = $true
+                }
+            }
+            [pscustomobject]@{ Results = @($res); CareCompare = [bool]$done[''carecompare'']; Enrollment = [bool]$done[''enrollment''] }' `
+        -OnDone {
+            param($result)
+            $r = $result[0]
+            Update-ChDataStatus
+            $failed = @($r.Results | Where-Object { $_.Status -like 'FAILED*' })
+            if ($failed.Count) {
+                Show-ErrorBox ("Some downloads failed - what worked was kept:`n`n" +
+                    (@($failed | ForEach-Object { "$($_.Name): $($_.Status)" }) -join "`n"))
+            }
+            $bits = @()
+            if ($r.CareCompare) { $bits += 'Care Compare indexed (by-address breakdown enabled)' }
+            if ($r.Enrollment) { $bits += 'enrollment indexed (county market works offline)' }
+            Set-Status $(if ($bits.Count) { 'Supporting data ready: ' + ($bits -join '; ') + '.' }
+                         else { 'Supporting data: nothing new to import.' })
+        } `
+        -OnFail { param($message) Update-ChDataStatus; Show-ErrorBox "Supporting-data setup failed: $message" }
+})
+
+$ui.ChNppesButton.Add_Click({
+    if ($script:Busy) { return }
+    $dialog = New-Object Microsoft.Win32.OpenFileDialog
+    $dialog.Filter = 'NPPES Data Dissemination (*.zip)|*.zip|NPPES csv (*.csv)|*.csv'
+    $dialog.Title = 'Pick the NPPES Data Dissemination file (download.cms.gov/nppes)'
+    if (-not $dialog.ShowDialog($window)) { return }
+    Invoke-Async -Kind 'ch-nppes' -Params @{ RmModulePath = $script:RmModulePath; File = $dialog.FileName } `
+        -BusyMessage 'Indexing the NPPES registry (streams the 11 GB file straight out of the zip) and building the chain table. Typically 10-20 minutes; one-time per monthly file.' `
+        -WorkerScript 'param($RmModulePath, $File) Import-Module $RmModulePath; Import-RmNppesBulk -Path $File' `
+        -OnDone {
+            param($result)
+            Update-ChDataStatus
+            $r = $result[0]
+            Set-Status ("NPPES indexed: $('{0:N0}' -f $r.Rows) providers" +
+                $(if ($r.PSObject.Properties['SecondaryLocationRows'] -and $r.SecondaryLocationRows) { ", $('{0:N0}' -f $r.SecondaryLocationRows) secondary-location records" }) +
+                '. Chain flags (*), multi-site detection, offline discovery, and the market-capture layer are now active.')
+        } `
+        -OnFail { param($message) Update-ChDataStatus; Show-ErrorBox "NPPES import failed: $message" }
+})
 
 function Get-ChSearchArgs {
     $name = $ui.ChNameBox.Text.Trim()
