@@ -403,6 +403,19 @@ Three honest caveats, all repeated in the export sidecar:
 ### Tab 8 — Provider lookup
 *"Tell me everything about this one provider."*
 
+**The one button to know: "Full report (one-stop)…"** Type the NPI (or paste
+several — org NPI plus therapists — to combine them), click it, pick where to
+save, and everything this app knows lands in ONE self-contained document: the
+complete referral-source analysis with metrics (HHI, top-5 dependence,
+distance and referral-lag profiles), the embedded geography heat map with the
+market-capture layer, **year-over-year trendlines across every imported
+CareSet year** (automatic when two or more years are on disk), the provider's
+Medicare ordering/referring eligibility, practice-group memberships, outbound
+destinations (where their patients go next), the competitive landscape within
+10 miles, auto-written findings, and the full methodology. CSV sidecars ride
+along (sources, outbound, by-year) so the numbers behind every chart are
+reusable. The other buttons below remain for piecemeal looks.
+
 Type any 10-digit NPI and click **Look up provider**. The app pulls together
 everything it knows into one profile:
 

@@ -3654,7 +3654,13 @@ function Export-RmSourceReportHtml {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]$Analysis,
-        [Parameter(Mandatory)][string]$Path
+        [Parameter(Mandatory)][string]$Path,
+        # One-stop extras. Each section renders only when its data is given,
+        # so every existing caller keeps producing the same report.
+        [object]$Provider,          # identity: Name/Specialty/City/State
+        [string]$EligibilityLine,   # the Order & Referring status sentence
+        [object[]]$Groups,          # practice-group memberships
+        [object[]]$Outbound         # onward destinations (who they send to)
     )
     $a = $Analysis
     function _h([string]$t) { [System.Net.WebUtility]::HtmlEncode($t) }
@@ -3823,6 +3829,49 @@ function Export-RmSourceReportHtml {
 
     # ---- Year-over-year performance (when a trend is attached) -----------
     $tr = if ($a.PSObject.Properties['Trend']) { $a.Trend } else { $null }
+    # ---- One-stop sections: provider profile + outbound destinations -----
+    $profileHtml = ''
+    # @($null).Count is 1, so a bare @(...).Count check would render these
+    # sections for every existing caller - guard on null explicitly.
+    $groupsGiven = ($null -ne $Groups)
+    $outboundGiven = ($null -ne $Outbound -and @($Outbound | Where-Object { $_ }).Count -gt 0)
+    if ($Provider -or $EligibilityLine -or $groupsGiven) {
+        $rows = New-Object System.Text.StringBuilder
+        if ($Provider -and $Provider.Specialty) {
+            [void]$rows.Append('<tr><th>Specialty</th><td>' + (_h ([string]$Provider.Specialty)) + '</td></tr>')
+        }
+        if ($EligibilityLine) {
+            [void]$rows.Append('<tr><th>Medicare ordering &amp; referring</th><td>' + (_h $EligibilityLine) + '</td></tr>')
+        }
+        if ($groupsGiven -and @($Groups | Where-Object { $_ }).Count) {
+            $gtxt = (@($Groups | Where-Object { $_ } | ForEach-Object { "$($_.GroupName) [$($_.State), roster $($_.RosterSize)]" }) -join '; ')
+            [void]$rows.Append('<tr><th>Practice group(s)</th><td>' + (_h $gtxt) + '</td></tr>')
+        } elseif ($groupsGiven) {
+            [void]$rows.Append('<tr><th>Practice group(s)</th><td>None on record &mdash; solo, or not reassigning to a group.</td></tr>')
+        }
+        $profileHtml = ('<div class="card"><h2>Provider profile</h2><table class="proftbl">' + $rows.ToString() + '</table></div>')
+    }
+    $outHtml = ''
+    if ($outboundGiven) {
+        $oTop = @($Outbound | Where-Object { $_ } | Sort-Object SharedPatients -Descending | Select-Object -First 15)
+        $oIsHop = [bool]($oTop[0].PSObject.Properties['AvgDayWait'])
+        $oRows = (@($oTop) | ForEach-Object {
+            $lastCell = if ($oIsHop) { '{0:N1}' -f [double]$_.AvgDayWait } else { '{0:N0}' -f [int]$_.SameDay }
+            '<tr><td>' + (_h ([string]$_.Name)) + '</td><td>' + (_h ([string]$_.Specialty)) + '</td><td>' + $_.NPI +
+            '</td><td class="num">' + ('{0:N0}' -f [int]$_.SharedPatients) + '</td><td class="num">' + $lastCell + '</td></tr>'
+        }) -join "`n"
+        $oTotal = 0; foreach ($o in @($Outbound | Where-Object { $_ })) { $oTotal += [int]$o.SharedPatients }
+        $outHtml = @"
+<div class="card"><h2>Where patients go next &mdash; outbound destinations</h2>
+<table>
+  <tr><th>Destination</th><th>Specialty</th><th>NPI</th><th class="num">Patients</th><th class="num">$(if ($oIsHop) { 'Avg day wait' } else { 'Same day' })</th></tr>
+  $oRows
+</table>
+<p class="note">$('{0:N0}' -f @($Outbound | Where-Object { $_ }).Count) destination(s), $('{0:N0}' -f $oTotal) patients shared onward in $($a.Year) &mdash; the physicians, imaging centers, and facilities that own the post-therapy hand-offs. Top 15 shown; the direction is claims sequence, so co-occurring care appears alongside true referrals.</p>
+</div>
+"@
+    }
+
     $trendHtml = ''
     if ($tr -and @($tr.Years).Count -ge 2) {
         $ty = @($tr.Years)
@@ -4334,6 +4383,9 @@ __RM_LEAFLET_JS__
   tr.you td { background:#e4eef6; font-weight:600; }
   .youtag { background:var(--accent); color:#fff; font-size:9.5px; font-weight:700;
             padding:1px 6px; border-radius:99px; vertical-align:1px; letter-spacing:.5px; }
+  .proftbl th { text-align:left; white-space:nowrap; width:220px; color:#4A5560;
+                font-size:12px; vertical-align:top; padding:7px 12px; }
+  .proftbl td { font-size:12.5px; padding:7px 12px; }
   .chain { color:#b26a00; font-weight:700; cursor:help; }
   .barmuted { fill:#9db4c6; }
   #rm-map { height:52vh; min-height:380px; }
@@ -4379,6 +4431,7 @@ Inbound Medicare shared-patient volume, $($a.Year).</p>
   <div class="stat$(if ($hasVolume -and $a.HHI -ge 2500) { ' warn' })"><b>$(if ($hasVolume) { '{0:N0}' -f $a.HHI } else { '&mdash;' })</b><span>Concentration (HHI)</span></div>
 $(if ($comp -and $comp.Rank) { '  <div class="stat"><b>#' + $comp.Rank + ' of ' + ('{0:N0}' -f $comp.ProviderCount) + '</b><span>Rank within ' + $comp.RadiusMiles + ' mi</span></div>' })
 </div>
+$profileHtml
 <div class="card"><h2>Key findings</h2><div class="body"><ul class="findings">
 $findingsHtml
 </ul></div></div>
@@ -4407,6 +4460,7 @@ source, specialty, distance and referral-lag breakdowns are omitted rather than 
 <p class="empty">The competitive landscape below is still measured and useful: it shows which providers in the same area <i>do</i> carry measured volume.</p>
 </div></div>
 "@ })
+$outHtml
 $trendHtml
 $compHtml
 $(if ($hasVolume) { @"

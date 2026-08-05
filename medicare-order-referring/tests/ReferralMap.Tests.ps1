@@ -1903,6 +1903,39 @@ Describe 'Source analysis report' {
         $html | Should -Not -BeLike '*<script src*'
     }
 
+    It 'renders the one-stop sections only when their data is provided' {
+        $sa = Get-RmSourceAnalysis -Npi 9000000001 -SkipCompetitors
+        $outFile = Join-Path $script:WorkDir 'onestop.html'
+        $prov = [pscustomobject]@{ Name = 'TEST REHAB CLINIC LLC'; Specialty = 'Physical Therapy Clinic'; City = 'TESTVILLE'; State = 'MO' }
+        $grp = @([pscustomobject]@{ GroupName = 'TEST GROUP LLC'; State = 'MO'; RosterSize = 12 })
+        $outb = @(
+            [pscustomobject]@{ NPI = '7000000001'; Name = 'ORTHO ONE'; Specialty = 'Orthopedic Surgery'; SharedPatients = 40; AvgDayWait = 12.5 }
+            [pscustomobject]@{ NPI = '7000000002'; Name = 'IMAGING TWO'; Specialty = 'Radiology'; SharedPatients = 15; AvgDayWait = 3.0 }
+        )
+        Export-RmSourceReportHtml -Analysis $sa -Path $outFile -Provider $prov `
+            -EligibilityLine 'ELIGIBLE to order & refer - PartB=Y' -Groups $grp -Outbound $outb | Out-Null
+        $html = Get-Content $outFile -Raw
+        $html | Should -BeLike '*Provider profile*'
+        $html | Should -BeLike '*ELIGIBLE to order &amp; refer*'
+        $html | Should -BeLike '*TEST GROUP LLC*roster 12*'
+        $html | Should -BeLike '*Where patients go next*'
+        $html | Should -BeLike '*ORTHO ONE*'
+        # outbound sorted by volume: ORTHO ONE (40) before IMAGING TWO (15)
+        $html.IndexOf('ORTHO ONE') | Should -BeLessThan $html.IndexOf('IMAGING TWO')
+
+        # an EMPTY groups array is a checked-and-none answer, not silence
+        $out2 = Join-Path $script:WorkDir 'onestop2.html'
+        Export-RmSourceReportHtml -Analysis $sa -Path $out2 -Provider $prov -Groups @() | Out-Null
+        (Get-Content $out2 -Raw) | Should -BeLike '*None on record*'
+
+        # and with NO extras the report must not grow the sections at all
+        $out3 = Join-Path $script:WorkDir 'onestop3.html'
+        Export-RmSourceReportHtml -Analysis $sa -Path $out3 | Out-Null
+        $plain = Get-Content $out3 -Raw
+        $plain | Should -Not -BeLike '*Provider profile*'
+        $plain | Should -Not -BeLike '*Where patients go next*'
+    }
+
     It 'reports an honest empty analysis for an NPI with no inbound pairs' {
         $sa = Get-RmSourceAnalysis -Npi 8000000002 -CentroidPath $script:SaCsv
         $sa.TotalPatients | Should -Be 0

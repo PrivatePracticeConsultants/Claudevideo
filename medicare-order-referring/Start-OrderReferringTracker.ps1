@@ -504,6 +504,8 @@ $xaml = @'
             <Button x:Name="LkAnalysisButton" Content="Source analysis..." Padding="10,5" Margin="10,0,0,0"
                     ToolTip="A client-ready deep dive on this NPI's referral sources: concentration metrics (HHI, top-5 dependence), specialty mix, distance profile, referral-lag profile on CareSet data, charts, and auto-written findings."/>
             <Button x:Name="LkSaveReportButton" Content="Save report (HTML)..." Padding="10,4" Margin="8,0,0,0" IsEnabled="False"/>
+            <Button x:Name="LkFullReportButton" Content="Full report (one-stop)..." Padding="10,5" Margin="10,0,0,0" FontWeight="SemiBold"
+                    ToolTip="Everything in ONE document: the complete source analysis with metrics and charts, the embedded referral heat map with market-capture layers, year-over-year trendlines across every imported CareSet year, outbound destinations, Medicare eligibility, practice-group memberships, competitive landscape, findings, and methodology. Pick where to save first; the big scans then run and the report opens when done."/>
             <CheckBox x:Name="LkTrendCheck" Content="Include year-over-year" VerticalAlignment="Center" Margin="12,0,0,0"
                       ToolTip="Also measure performance across EVERY imported CareSet year: volume and source count per year, source retention (kept / new / lost), and the biggest gains and declines. Adds a full scan per year, so it takes several minutes longer."/>
           </WrapPanel>
@@ -630,7 +632,7 @@ foreach ($name in @(
     'ChNameBox', 'ChStateBox', 'ChZipBox', 'ChNpiButton', 'ChAddrButton', 'ChExportButton',
     'ChLabel', 'ChGrid', 'ChSummary',
     'LkNpiBox', 'LkRunButton', 'LkTrendButton', 'LkExportTrendButton',
-    'LkGeoButton', 'LkSaveMapButton', 'LkAnalysisButton', 'LkSaveReportButton', 'LkTrendCheck', 'LkDetail',
+    'LkGeoButton', 'LkSaveMapButton', 'LkAnalysisButton', 'LkSaveReportButton', 'LkFullReportButton', 'LkTrendCheck', 'LkDetail',
     'LkInboundLabel', 'LkExportInboundButton',
     'LkInboundGrid', 'LkOutboundLabel', 'LkExportOutboundButton', 'LkOutboundGrid',
     'RmExportMixButton',
@@ -746,7 +748,7 @@ function Set-Busy([bool]$On, [string]$Message, [string]$Title) {
                      $ui.BmSearchButton,
                      $ui.PgRunButton, $ui.PgDownloadButton, $ui.PgFootprintButton,
                      $ui.ChNpiButton, $ui.ChAddrButton, $ui.ChSetupButton, $ui.ChNppesButton,
-                     $ui.LkRunButton, $ui.LkTrendButton, $ui.LkGeoButton, $ui.LkAnalysisButton, $ui.WlCheckButton)) {
+                     $ui.LkRunButton, $ui.LkTrendButton, $ui.LkGeoButton, $ui.LkAnalysisButton, $ui.LkFullReportButton, $ui.WlCheckButton)) {
         $b.IsEnabled = -not $On
     }
     $window.Cursor = if ($On) { [System.Windows.Input.Cursors]::Wait } else { $null }
@@ -792,6 +794,7 @@ $script:BusyTitles = @{
     'lk-trend'     = 'Measuring referrals year over year...'
     'lk-geo'       = 'Building the referral heat map...'
     'lk-analysis'  = 'Analyzing referral sources...'
+    'lk-full'      = 'Building the full provider report...'
     'wl-check'     = 'Checking your watchlist...'
 }
 function Get-BusyTitle([string]$Kind) {
@@ -2462,6 +2465,101 @@ $ui.LkAnalysisButton.Add_Click({
             param($message)
             Show-ErrorBox "Source analysis failed: $message"
         }
+})
+
+# ---- The one-stop report: every dataset, one document ---------------------
+$ui.LkFullReportButton.Add_Click({
+    if ($script:Busy) { return }
+    $npis = @([regex]::Matches($ui.LkNpiBox.Text, '\d{10}') | ForEach-Object { $_.Value } | Select-Object -Unique)
+    if ($npis.Count -eq 0) {
+        Show-ErrorBox ('Enter a full 10-digit NPI first. Tip: paste SEVERAL NPIs (separated by spaces ' +
+            'or commas) to build one combined report for an org NPI plus its therapist NPIs.')
+        return
+    }
+    if (-not (Get-RmStatus).DatasetReady) {
+        Show-ErrorBox ("No referral dataset is available yet - on the Referral map tab, click " +
+            "'Download CMS dataset' (free 2015 data) or 'Import CareSet file' first.")
+        return
+    }
+    # Destination first: nobody wants a save dialog ambushing them after a
+    # 10-minute scan.
+    $dialog = New-Object Microsoft.Win32.SaveFileDialog
+    $dialog.Filter = 'Provider report (*.html)|*.html'
+    $dialog.FileName = "provider-report-$($npis[0]).html"
+    if (-not $dialog.ShowDialog($window)) { return }
+    $outPath = $dialog.FileName
+
+    # Trend is automatic in the one-stop report whenever 2+ CareSet years
+    # exist - that is what one-stop means. It costs a full scan per year.
+    $hopYears = @(Get-RmAvailableDatasets | Where-Object { $_.Source -eq 'hop-teaming' })
+    $withTrend = ($hopYears.Count -ge 2)
+    # Eligibility from the in-memory snapshot (same as Look up provider).
+    $eligLine = 'Order & Referring eligibility: (data not loaded - use the Search tab''s "Check for updates" first.)'
+    if ($script:Data) {
+        $chk = @($npis[0] | Test-OrfNpi -Data $script:Data)[0]
+        if ($chk.Status -like 'ELIGIBLE*') {
+            $eligLine = "ELIGIBLE to order & refer - PartB=$($chk.PartB) DME=$($chk.DME) HHA=$($chk.HHA) PMD=$($chk.PMD) Hospice=$($chk.Hospice)"
+        } elseif ($chk.Status -eq 'NOT ON LIST') {
+            $eligLine = 'NOT on the current Medicare order-&-referring eligibility list.'
+        } else {
+            $eligLine = "Eligibility check: $($chk.Status)"
+        }
+    }
+    $who = $npis[0] + $(if ($npis.Count -gt 1) { " (+$($npis.Count - 1) more, combined)" } else { '' })
+    $trendBit = if ($withTrend) { " Year-over-year runs across all $($hopYears.Count) imported years - several minutes per year." } else { '' }
+    Invoke-Async -Kind 'lk-full' -Params @{
+            RmModulePath = $script:RmModulePath; PgModulePath = $script:PgModulePath
+            Npi = $npis; WithTrend = $withTrend; HasPg = (Get-PgStatus).DatasetReady
+        } `
+        -BusyMessage ("Building the one-stop report for $who - full source analysis, heat map, competitive sweep, outbound scan$(if ($withTrend) { ', trendlines' }).$trendBit Lookups are cached, so re-runs are much faster.") `
+        -WorkerScript 'param($RmModulePath, $PgModulePath, $Npi, $WithTrend, $HasPg)
+            Import-Module $RmModulePath
+            $sa = Get-RmSourceAnalysis -Npi $Npi
+            if ($WithTrend) { $sa = Add-RmSourceTrend -Analysis $sa }
+            $act = Get-RmProviderReferralActivity -Npi $Npi[0]
+            $detail = (Get-RmProviderDetail -Npi @($Npi[0]))[$Npi[0]]
+            $groups = $null
+            if ($HasPg) { Import-Module $PgModulePath; $groups = @(Get-PgMembershipForNpi -Npi $Npi[0]) }
+            [pscustomobject]@{ Analysis = $sa; Outbound = @($act.Outbound); Detail = $detail; Groups = $groups }' `
+        -OnDone {
+            param($result)
+            $r = $result[0]
+            $script:LkAnalysis = $r.Analysis   # the plain save button stays usable
+            try {
+                $renderArgs = @{
+                    Analysis = $r.Analysis; Path = $outPath
+                    Provider = $r.Detail; EligibilityLine = $eligLine
+                    Outbound = @($r.Outbound)
+                }
+                if ($null -ne $r.Groups) { $renderArgs['Groups'] = @($r.Groups) }
+                $rep = Export-RmSourceReportHtml @renderArgs
+                # CSV sidecars: the full source table, outbound, and trend.
+                $csvPath = [System.IO.Path]::ChangeExtension($outPath, '.sources.csv')
+                @($r.Analysis.Sources) |
+                    Export-RmResult -Path $csvPath -Notes @($r.Analysis.Notes) `
+                        -Description "Full ranked referral-source table for NPI $($r.Analysis.Npi) ($script:RmDataLabel)" | Out-Null
+                if (@($r.Outbound).Count) {
+                    @($r.Outbound) |
+                        Export-RmResult -Path ([System.IO.Path]::ChangeExtension($outPath, '.outbound.csv')) `
+                            -Notes @($r.Analysis.Notes) `
+                            -Description "Outbound destinations for NPI $($r.Analysis.Npi) ($script:RmDataLabel)" | Out-Null
+                }
+                if ($r.Analysis.PSObject.Properties['Trend'] -and $r.Analysis.Trend) {
+                    @($r.Analysis.Trend.Years) |
+                        Export-RmResult -Path ([System.IO.Path]::ChangeExtension($outPath, '.by-year.csv')) `
+                            -Notes @($r.Analysis.Trend.Notes) `
+                            -Description "Year-over-year referral performance for NPI $($r.Analysis.Npi)" | Out-Null
+                }
+                $ui.LkSaveReportButton.IsEnabled = $true
+                Set-Status "One-stop report saved: $($rep.Path) (+ CSV sidecars with methodology)."
+                if (Confirm-Box "Report saved.`n`nOpen it in your browser now? (The map background needs an internet connection; everything else is self-contained.)") {
+                    try { Start-Process $rep.Path } catch { Show-ErrorBox "Could not open the browser: $($_.Exception.Message)" }
+                }
+            } catch {
+                Show-ErrorBox "The analysis finished but writing the report failed: $($_.Exception.Message)"
+            }
+        } `
+        -OnFail { param($message) Show-ErrorBox "Full report failed: $message" }
 })
 
 $ui.LkSaveReportButton.Add_Click({
