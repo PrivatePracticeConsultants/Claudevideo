@@ -248,6 +248,37 @@ extra volume not counted here (benchmark it on the Practice benchmark tab),
 and "missed" can also mean the relationship exists but fell under the
 11-patient privacy floor.
 
+### The asterisk: spotting chains anywhere in the app
+
+A `Chain` column now appears beside the provider tables. An **asterisk (\*)**
+means that organization's *name* is registered by **more than three
+organization NPIs** in the national registry — the signature of a company
+that opens one NPI per clinic. The row you are looking at is one slice of it,
+so the company's real local presence is bigger than the number shows.
+
+It is deliberately hard to trip: on the full registry, 91.8% of outpatient
+PT/OT/speech organizations hold exactly one org NPI and can never be flagged,
+and the rule selects just 1.79% of names. Verified live: Ivy Rehab Network
+(15 org NPIs across 14 cities) and ATI Holdings (90 across 56) are flagged; a
+single-location practice with one NPI is not.
+
+Two honest limits:
+
+- The flag counts a **name**. A *generic* name shared by unrelated
+  organizations trips it too — `MEMORIAL HOSPITAL` shows 151 org NPIs in 45
+  cities because many separate hospitals use that name, not because they are
+  one company. For a distinctive brand it means a chain; for a generic name,
+  check before concluding.
+- Some groups do the opposite and give **every clinic its own legal name**, so
+  no two names match and the flag stays blank. Advanced Training and Rehab in
+  St Louis enrolls ATR JUSTIN LLC, ATR RYAN LLC, ATR-JEFF LLC, ATR HAND
+  THERAPY LLC and more — eight separate names, so eight modest rows instead of
+  one large one. For that pattern the app adds a **"possible same company"**
+  note listing organizations in your results that share a distinctive leading
+  word, so you can spot the cluster and combine them yourself. It is a prompt
+  to look, never a conclusion: nothing is merged and no volume is added up for
+  you.
+
 ### Tab 7 — Multi-site chains
 *"Ivy Rehab has a clinic in my ZIP. How many referrals go to THAT clinic?"*
 
@@ -278,8 +309,13 @@ by 300 Princeton Hightstown Rd in East Windsor NJ at 39,929 patients from
 
 Read the columns like this:
 
-- `SharedPatients` / `ReferralSources` — that location's measured referral
-  volume and how many distinct providers fed it.
+- `SharedPatients` / `ExclusivePatients` — the site's **range**. A therapist
+  who covers two clinics is credited to both, because the data cannot say
+  which visit happened where; `SharedPatients` includes them (the ceiling) and
+  `ExclusivePatients` counts only therapists who work at that one site (the
+  floor). Where the two are equal, the site is measured cleanly. Ivy Rehab's
+  top site reads 39,929 either way; its Hackensack site reads 8,631–15,969.
+- `ReferralSources` — how many distinct providers fed that location.
 - `Clinicians` vs `CliniciansWithVolume` — how much of the site's roster is
   actually visible in the data. 31 of 38 means seven therapists bill through
   the group or fell under the 11-patient privacy floor.
@@ -301,11 +337,14 @@ Three honest caveats, all repeated in the export sidecar:
 3. Care Compare reflects **today's** rosters while the referral data is
    historical, so a therapist who has since moved is credited to the address
    they are listed at now.
-4. You get the locations enrolled under a name matching what you typed. Chains
-   also register clinics under regional legal names (`ATI Physical Therapy of
-   Carolina, LLC`), so if a site you expect is missing, search a shorter
-   fragment. A live run on `ATI PHYSICAL THERAPY` returned 20 addresses — the
-   ones enrolled under exactly that name, not the brand's whole footprint.
+4. You get the locations enrolled under a name matching what you typed, and
+   **brands are usually enrolled under a different legal name**. ATI Physical
+   Therapy's clinics are registered as `ATI HOLDINGS, LLC`: searching the brand
+   found 20 addresses, searching the real name found **213 addresses, 185 with
+   measured volume, 222,421 patients**. So the app now suggests the
+   alternatives for you — the result names related organizations it found in
+   Care Compare ("Did you mean ATI HOLDINGS, LLC (137 locations)?"), both when
+   a search finds nothing and alongside a successful one.
 
 **Export…** saves whichever view is on screen with its methodology file.
 

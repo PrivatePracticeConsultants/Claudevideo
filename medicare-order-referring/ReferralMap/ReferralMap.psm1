@@ -416,6 +416,90 @@ public static class RmEngine
         }
         return hits;
     }
+
+    // Organization-name key. MUST stay byte-identical to Get-RmOrgNameKey in
+    // the module - a regression test asserts the two agree, because a drift
+    // would silently flag the wrong companies.
+    static readonly HashSet<string> NoiseWords = new HashSet<string>(new string[] {
+        "LLC","INC","PC","PA","PLLC","LLP","LP","CORP","CORPORATION","COMPANY","CO","THE","OF","AND"
+    });
+    public static string OrgNameKey(string name)
+    {
+        if (name == null) return "";
+        StringBuilder cleaned = new StringBuilder(name.Length);
+        foreach (char ch in name.ToUpperInvariant())
+        {
+            if ((ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9')) cleaned.Append(ch);
+            else cleaned.Append(' ');
+        }
+        StringBuilder outp = new StringBuilder(name.Length);
+        foreach (string w in cleaned.ToString().Split(' '))
+        {
+            if (w.Length == 0 || NoiseWords.Contains(w)) continue;
+            if (outp.Length > 0) outp.Append(' ');
+            outp.Append(w);
+        }
+        return outp.ToString();
+    }
+
+    // One pass over the NPPES index -> "nameKey|orgNpiCount|cityCount" for
+    // every ORGANIZATION name. In PowerShell this loop cost 541 seconds on
+    // the real 687 MB index, which is not something a user can wait through
+    // inside a ZIP search; here it is seconds.
+    public static long BuildChainIndex(string indexPath, string dest)
+    {
+        Dictionary<string, int> counts = new Dictionary<string, int>(1 << 20);
+        Dictionary<string, HashSet<string>> cities = new Dictionary<string, HashSet<string>>(1 << 20);
+        using (StreamReader r = new StreamReader(indexPath, Encoding.UTF8, false, 1 << 20))
+        {
+            string line;
+            while ((line = r.ReadLine()) != null)
+            {
+                string[] f = line.Split('|');
+                if (f.Length < 10 || f[1] != "2" || f[2].Length == 0) continue;
+                string k = OrgNameKey(f[2]);
+                if (k.Length == 0) continue;
+                int c;
+                if (counts.TryGetValue(k, out c)) counts[k] = c + 1;
+                else { counts[k] = 1; cities[k] = new HashSet<string>(); }
+                cities[k].Add(f[5] + "|" + f[6]);
+            }
+        }
+        long rows = 0;
+        using (StreamWriter w = new StreamWriter(dest, false, new UTF8Encoding(false), 1 << 20))
+        {
+            foreach (KeyValuePair<string, int> kv in counts)
+            {
+                w.Write(kv.Key); w.Write('|'); w.Write(kv.Value);
+                w.Write('|'); w.Write(cities[kv.Key].Count); w.Write('\n');
+                rows++;
+            }
+        }
+        return rows;
+    }
+
+    // Loads that file into a dictionary in one go. Doing it line-by-line in
+    // PowerShell over 1.35 million names is itself slow enough to notice.
+    public static Dictionary<string, int[]> LoadChainIndex(string path)
+    {
+        Dictionary<string, int[]> d = new Dictionary<string, int[]>(1 << 21);
+        using (StreamReader r = new StreamReader(path, Encoding.UTF8, false, 1 << 20))
+        {
+            string line;
+            while ((line = r.ReadLine()) != null)
+            {
+                int p1 = line.LastIndexOf('|');
+                if (p1 <= 0) continue;
+                int p0 = line.LastIndexOf('|', p1 - 1);
+                if (p0 <= 0) continue;
+                int npis, cty;
+                if (!int.TryParse(line.Substring(p0 + 1, p1 - p0 - 1), out npis)) continue;
+                if (!int.TryParse(line.Substring(p1 + 1), out cty)) continue;
+                d[line.Substring(0, p0)] = new int[] { npis, cty };
+            }
+        }
+        return d;
+    }
 }
 '@
 }
@@ -1499,6 +1583,9 @@ function Get-RmReferralMap {
         $row['MultiSiteNPI'] = if ($secLoc -gt 0) { 'Yes (registry)' }
                                elseif ($srcN -ge $script:RmSingleSiteSourceCeiling) { 'Likely (scale)' }
                                else { '' }
+        # Chain marker. Only organizations can carry it - an individual
+        # therapist's name is not a company name.
+        $row['Chain'] = if ($_.Type -eq 'Organization') { Get-RmChainMark $_.Name } else { '' }
         if (-not $isHop) { $row['SameDay'] = if ($agg) { $agg.SameDay } else { 0 } }
         $row['ExistedInDataYear'] = $existed
         [pscustomobject]$row
@@ -1538,9 +1625,31 @@ function Get-RmReferralMap {
             'Shared-patient data carries no service address, so per-location volume cannot be derived from it.')
     }
 
+    $chained = @($clinicRows | Where-Object { $_.Chain })
+    # Same-company clusters hiding behind per-clinic legal names.
+    $sibs = @(Get-RmNameSiblingGroups -Rows $clinicRows)
+    $sibNote = $null
+    if ($sibs.Count) {
+        $top = @($sibs | Select-Object -First 3 | ForEach-Object {
+            "'$($_.LeadWord)' - $($_.Organizations) organizations, $('{0:N0}' -f $_.CombinedPatients) patients between them ($(@($_.Names | Select-Object -First 4) -join ', ')$(if (@($_.Names).Count -gt 4) { ', ...' }))"
+        })
+        $sibNote = ("POSSIBLE SAME COMPANY: some groups register EVERY clinic under its own legal name, so one practice " +
+            "appears as several modest rows instead of one large one. Organizations here sharing a leading name word: " +
+            ($top -join '; ') + $(if ($sibs.Count -gt 3) { "; and $($sibs.Count - 3) more" }) + '. ' +
+            "Real case: Advanced Training and Rehab in St Louis enrolls ATR JUSTIN LLC, ATR RYAN LLC, ATR JEFF LLC and more. " +
+            "This is a prompt to check, NOT a finding - nothing has been combined, and unrelated practices can share a word. " +
+            "To combine them deliberately, paste their NPIs together into Source analysis, or use the Multi-site chains tab.")
+    }
     $notes = @(Get-RmMethodologyNotes -Info $info -OrganizationsOnly:$OrganizationsOnly) + @(
+        $(if ($sibNote) { $sibNote })
         $(if ($coverageNote) { $coverageNote })
         $(if ($multiNote) { $multiNote })
+        $(if ($chained.Count) {
+            (Get-RmChainNote) + " Flagged here: $($chained.Count) of $($clinicRows.Count) providers - " +
+            (@($chained | Sort-Object SharedPatients -Descending | Select-Object -First 3 | ForEach-Object {
+                $d = Get-RmChainDetail $_.Name; "$($_.Name) ($($d.Npis) org NPIs in $($d.Cities) cities)" }) -join '; ') +
+            $(if ($chained.Count -gt 3) { ', ...' }) + '.'
+        })
         $(if ($radiusZips) { "RADIUS SEARCH: providers were swept from the $($radiusZips.Count) ZIP code(s) whose US-Census area centroid lies within $RadiusMiles straight-line miles of ZIP $Zip's centroid. DistanceMiles is centroid-to-centroid, not driving distance; PO-box-only ZIPs (absent from the Census table) are not swept." })
         $(if ($notYetEnumerated -gt 0) { '{0} of {1} providers found in this ZIP were issued their NPI after the {2} file''s service window ended, so they cannot appear in it (ExistedInDataYear = No).' -f $notYetEnumerated, $clinicRows.Count, $info.Year })
         $(if ($enrichNote) { $enrichNote })
@@ -1552,6 +1661,8 @@ function Get-RmReferralMap {
         Sources = $sources
         ProvidersWithVolume = $withVol
         CoverageNote = $coverageNote      # $null unless volume is thin
+        ChainClinics = $chained.Count
+        SiblingGroups = $sibs             # possible one-company-many-names clusters
         Notes   = @($notes)
     }
 }
@@ -2220,6 +2331,9 @@ function Get-RmPracticeBenchmark {
             Zip = $zip5
             ReferralSources = $own.Count; SharedPatients = $ownVol
         }
+        # Keep the shape identical to the swept rows so the ranking table has
+        # no ragged column.
+        $row['Chain'] = if ($isOrg) { Get-RmChainMark $pracName } else { '' }
         if (-not $isHop) { $row['SameDay'] = 0 }
         $row['ExistedInDataYear'] = ''
         $clinics = @($clinics) + @([pscustomobject]$row)
@@ -2852,6 +2966,9 @@ function Get-RmSourceAnalysis {
                     ReferralSources = $rp.ReferralSources
                     SharedPatients = $rp.SharedPatients
                     SharePct = if ($regionTotal -gt 0) { [math]::Round(100.0 * $rp.SharedPatients / $regionTotal, 1) } else { 0 }
+                    # A competitor that is really one clinic of a chain is a
+                    # different threat from an independent of the same size.
+                    Chain = if ($rp.Type -eq 'Organization') { Get-RmChainMark $rp.Name } else { '' }
                 })
             }
             # The practice's own row is ALWAYS shown, appended after the top
@@ -2872,6 +2989,7 @@ function Get-RmSourceAnalysis {
                 Peers               = $peersOut
                 Competitors         = @($outRows.ToArray() | Where-Object { -not $_.You } | Select-Object -First 5)
                 SecondaryOnlyExcluded = $secondaryOnly
+                ChainCount          = @($outRows.ToArray() | Where-Object { $_.Chain }).Count
             }
 
             # ---- Market-capture map layer -------------------------------
@@ -3612,7 +3730,10 @@ function Export-RmSourceReportHtml {
             '<td class="num">{5}</td><td class="num">{6}</td><td class="num">{7}</td><td class="num">{8}%</td></tr>'
         $cpRows = (@($cpShown) | ForEach-Object {
             $tag = if ($_.You) { ' class="you"' } else { '' }
-            $nmCell = (_h ([string]$_.Name)) + $(if ($_.You) { ' <span class="youtag">YOU</span>' } else { '' })
+            # A chain competitor gets the asterisk right on its name: the row
+            # is ONE of its clinics, so the company is bigger than it looks.
+            $chainMark = if ($_.PSObject.Properties['Chain'] -and $_.Chain) { ' <span class="chain" title="One clinic of a multi-site company">*</span>' } else { '' }
+            $nmCell = (_h ([string]$_.Name)) + $chainMark + $(if ($_.You) { ' <span class="youtag">YOU</span>' } else { '' })
             $miles = if ($_.DistanceMiles -is [double]) { '{0:N1}' -f $_.DistanceMiles } else { '' }
             $cpRowFmt -f $tag, $_.Rank, $nmCell,
                 (_h ([string]$_.Type)),
@@ -3623,7 +3744,9 @@ function Export-RmSourceReportHtml {
         $cpNote = ("$('{0:N0}' -f $comp.ProviderCount) outpatient rehab provider$(if ($comp.ProviderCount -ne 1) { 's' }) " +
             "$(if ($comp.ProviderCount -eq 1) { 'is' } else { 'are' }) listed within $($comp.RadiusMiles) miles; " +
             "$('{0:N0}' -f $comp.ProvidersWithVolume) $(if ($comp.ProvidersWithVolume -eq 1) { 'has' } else { 'have' }) measured referral volume in $($a.Year).") +
-            $(if ($cpHidden -gt 0) { " The other $('{0:N0}' -f $cpHidden) $(if ($cpHidden -eq 1) { 'is' } else { 'are' }) not shown here — every pair they had (if any) fell under the 11-patient privacy floor." })
+            $(if ($cpHidden -gt 0) { " The other $('{0:N0}' -f $cpHidden) $(if ($cpHidden -eq 1) { 'is' } else { 'are' }) not shown here — every pair they had (if any) fell under the 11-patient privacy floor." }) +
+            $(if ($comp.PSObject.Properties['ChainCount'] -and $comp.ChainCount -gt 0) {
+                " An asterisk (*) marks a competitor that is one clinic of a MULTI-SITE COMPANY — its organization name is registered by more than $($script:RmChainNpiThreshold) organization NPIs, so the row is a slice of a larger operator, not an independent practice. $($comp.ChainCount) of the ranked providers carry it." })
         $compHtml = @"
 <div class="card"><h2>Competitive landscape &mdash; inbound referral volume within $($comp.RadiusMiles) miles</h2>
 <div class="body">$cpSvg</div>
@@ -4150,6 +4273,7 @@ __RM_LEAFLET_JS__
   tr.you td { background:#e4eef6; font-weight:600; }
   .youtag { background:var(--accent); color:#fff; font-size:9.5px; font-weight:700;
             padding:1px 6px; border-radius:99px; vertical-align:1px; letter-spacing:.5px; }
+  .chain { color:#b26a00; font-weight:700; cursor:help; }
   .barmuted { fill:#9db4c6; }
   #rm-map { height:52vh; min-height:380px; }
   .offline { padding:9px 14px; background:#fff6da; color:#6b5619; font-size:12.5px;
@@ -4413,6 +4537,7 @@ function Get-RmServiceProfile {
 
 function Get-RmNppesIndexPath { Join-Path $script:RmConfig.DataDir 'nppes-index.psv' }
 function Get-RmNppesLocIndexPath { Join-Path $script:RmConfig.DataDir 'nppes-locations.psv' }
+function Get-RmChainIndexPath { Join-Path $script:RmConfig.DataDir 'chain-index.psv' }
 
 # A single outpatient therapy SITE rarely exceeds a few hundred distinct
 # referring providers - a large, busy one-location practice measured 379.
@@ -4420,6 +4545,156 @@ function Get-RmNppesLocIndexPath { Join-Path $script:RmConfig.DataDir 'nppes-loc
 # must not be read as one address's business. Verified case: IvyRehab's
 # Hoboken-registered NPI carries 194,516 patients from 4,204 sources.
 $script:RmSingleSiteSourceCeiling = 750
+
+# A national chain registers the SAME legal name over and over - one
+# organization NPI per clinic. Counting those NPIs is therefore a direct
+# read on "is this a chain?". Calibrated on the real NPPES bulk file over
+# organizations carrying an in-scope PT/OT/speech taxonomy (78,783 names):
+# 91.8% hold exactly ONE org NPI and can never be flagged, 6.4% hold 2-3,
+# and >3 selects just 1.79% of names - 642 of them spanning two or more
+# states. Verified: Ivy Rehab Network Inc 8 NPIs / 7 cities, Ivy Rehab SE
+# PT LLC 14 / 9, ATI Holdings LLC 67 / 46, Athletico Ltd 423 / 308.
+$script:RmChainNpiThreshold = 3
+$script:RmChainIdx = $null
+
+# nameKey -> @{ Npis; Cities }, built once from the local NPPES bulk index.
+# Absent index = no flag anywhere (never a guess).
+function Get-RmChainIndex {
+    if ($null -ne $script:RmChainIdx) { return $script:RmChainIdx }
+    $t = $null
+    $p = Get-RmNppesIndexPath
+    if (Test-Path -LiteralPath $p) {
+        $cp = Get-RmChainIndexPath
+        # Rebuild whenever the derived file is missing or older than the
+        # index it comes from, so a fresh NPPES import can never be read
+        # through last month's chain table.
+        $stale = -not (Test-Path -LiteralPath $cp)
+        if (-not $stale) {
+            $stale = (Get-Item -LiteralPath $cp).LastWriteTimeUtc -lt (Get-Item -LiteralPath $p).LastWriteTimeUtc
+        }
+        if ($stale) {
+            Write-Verbose 'Building the chain table from the NPPES index (one time)...'
+            $tmp = "$cp.tmp"
+            [void][RmEngine]::BuildChainIndex($p, $tmp)
+            Move-Item -LiteralPath $tmp -Destination $cp -Force
+        }
+        $t = [RmEngine]::LoadChainIndex($cp)
+    }
+    if ($null -eq $t) { $t = New-Object 'System.Collections.Generic.Dictionary[string,int[]]' }
+    $script:RmChainIdx = $t
+    $t
+}
+
+# '*' when this organization name is registered by more than
+# $script:RmChainNpiThreshold organization NPIs; '' otherwise (and '' when
+# the local index is missing, or the row is an individual therapist).
+function Get-RmChainMark([string]$Name) {
+    if (-not $Name) { return '' }
+    $idx = Get-RmChainIndex
+    if (-not $idx.Count) { return '' }
+    $k = Get-RmOrgNameKey $Name
+    if (-not $k -or -not $idx.ContainsKey($k)) { return '' }
+    if ($idx[$k][0] -gt $script:RmChainNpiThreshold) { '*' } else { '' }
+}
+
+function Get-RmChainDetail([string]$Name) {
+    $idx = Get-RmChainIndex
+    $k = Get-RmOrgNameKey $Name
+    if (-not $idx.Count -or -not $k -or -not $idx.ContainsKey($k)) {
+        return [pscustomobject]@{ Npis = 0; Cities = 0; IsChain = $false }
+    }
+    $e = $idx[$k]
+    [pscustomobject]@{
+        Npis = $e[0]; Cities = $e[1]
+        IsChain = ($e[0] -gt $script:RmChainNpiThreshold)
+    }
+}
+
+# Some groups give every clinic its OWN legal name, so counting identical
+# names cannot see them. Real case: Advanced Training and Rehab in St Louis
+# enrolls ATR JUSTIN LLC, ATR RYAN LLC, ATR JEFF LLC, ATR CHRIS LLC, ATR
+# MORGAN LLC, ATR JOHN LLC, ATR-TC LLC, ATR HAND THERAPY LLC - eight
+# separate names, so eight modest rows instead of one large one, and the
+# practice looks far smaller than it is.
+#
+# Within ONE result set, organizations sharing a distinctive LEADING WORD
+# are therefore surfaced as a possible single company. This is a prompt to
+# look, never an assertion: nothing is merged and no volume is combined.
+$script:RmSiblingMinGroup = 3
+# Words that lead the names of unrelated practices everywhere, so a shared
+# one means nothing. Drawn from a live 63101 + 30mi sweep, where grouping on
+# them produced junk clusters ('PHYSICAL' pulled 10 unrelated practices
+# together) while the real clusters - ATR, EMPOWERME, FOX, LEGACY - all lead
+# with a distinctive word.
+$script:RmGenericLeadWords = @{}
+foreach ($w in @(
+    'PHYSICAL', 'THERAPY', 'THERAPIES', 'REHAB', 'REHABILITATION', 'SPORTS', 'SPORT',
+    'MEDICAL', 'MEDICINE', 'HEALTH', 'HEALTHCARE', 'CLINIC', 'CENTER', 'CENTRE', 'CENTERS',
+    'ORTHOPEDIC', 'ORTHOPAEDIC', 'OCCUPATIONAL', 'SPEECH', 'HAND', 'SPINE', 'PEDIATRIC',
+    'PEDIATRICS', 'WELLNESS', 'FAMILY', 'COMMUNITY', 'REGIONAL', 'MEMORIAL', 'UNIVERSITY',
+    'HOSPITAL', 'ASSOCIATES', 'PARTNERS', 'GROUP', 'SERVICES', 'SOLUTIONS', 'CARE',
+    'NORTH', 'SOUTH', 'EAST', 'WEST', 'CENTRAL', 'GREATER', 'VALLEY', 'LAKE', 'RIVER', 'PARK',
+    'ADVANCED', 'PREMIER', 'PROFESSIONAL', 'PROGRESSIVE', 'COMPLETE', 'TOTAL', 'INTEGRATED',
+    'INNOVATIVE', 'QUALITY', 'PRECISION', 'DYNAMIC', 'ACTIVE', 'OPTIMAL', 'SUPERIOR',
+    'AMERICAN', 'NATIONAL', 'UNITED', 'FIRST', 'NEW', 'ALL', 'PRO', 'BACK', 'BODY', 'MOTION',
+    'PERFORMANCE', 'RECOVERY', 'RESTORE', 'RENEW', 'BALANCE', 'STRENGTH',
+    'PAIN', 'INJURY', 'MOBILITY', 'MOVEMENT', 'FUNCTION', 'FUNCTIONAL', 'KIDS', 'CHILDRENS',
+    'SENIOR', 'HOME', 'MOBILE', 'SPORTSMED', 'PHYSIO', 'PHYSIOTHERAPY',
+    # A state name leads unrelated practices in that state; too weak to group on.
+    'ALABAMA', 'ALASKA', 'ARIZONA', 'ARKANSAS', 'CALIFORNIA', 'COLORADO', 'CONNECTICUT',
+    'DELAWARE', 'FLORIDA', 'GEORGIA', 'HAWAII', 'IDAHO', 'ILLINOIS', 'INDIANA', 'IOWA',
+    'KANSAS', 'KENTUCKY', 'LOUISIANA', 'MAINE', 'MARYLAND', 'MASSACHUSETTS', 'MICHIGAN',
+    'MINNESOTA', 'MISSISSIPPI', 'MISSOURI', 'MONTANA', 'NEBRASKA', 'NEVADA', 'HAMPSHIRE',
+    'JERSEY', 'MEXICO', 'YORK', 'CAROLINA', 'DAKOTA', 'OHIO', 'OKLAHOMA', 'OREGON',
+    'PENNSYLVANIA', 'RHODE', 'TENNESSEE', 'TEXAS', 'UTAH', 'VERMONT', 'VIRGINIA',
+    'WASHINGTON', 'WISCONSIN', 'WYOMING')) { $script:RmGenericLeadWords[$w] = $true }
+
+function Get-RmNameSiblingGroups {
+    param([object[]]$Rows, [string]$NameProperty = 'Name', [string]$TypeProperty = 'Type')
+    $byLead = @{}
+    foreach ($r in @($Rows)) {
+        if ($TypeProperty -and $r.PSObject.Properties[$TypeProperty] -and $r.$TypeProperty -ne 'Organization') { continue }
+        $nm = [string]$r.$NameProperty
+        $k = Get-RmOrgNameKey $nm
+        if (-not $k) { continue }
+        $lead = @($k -split ' ')[0]
+        # Two characters matches far too much; a purely numeric lead is
+        # noise; an industry-generic lead groups strangers.
+        if ($lead.Length -lt 3 -or $lead -match '^\d+$') { continue }
+        if ($script:RmGenericLeadWords.ContainsKey($lead)) { continue }
+        if (-not $byLead.ContainsKey($lead)) { $byLead[$lead] = New-Object System.Collections.Generic.List[object] }
+        $byLead[$lead].Add($r)
+    }
+    $out = foreach ($kv in $byLead.GetEnumerator()) {
+        # Distinct NAMES, not rows: one company holding two NPIs under the
+        # same name is already covered by the Chain flag.
+        $names = @($kv.Value | ForEach-Object { Get-RmOrgNameKey ([string]$_.$NameProperty) } | Select-Object -Unique)
+        if ($names.Count -lt $script:RmSiblingMinGroup) { continue }
+        $vol = 0
+        foreach ($r in $kv.Value) { if ($r.PSObject.Properties['SharedPatients']) { $vol += [int]$r.SharedPatients } }
+        [pscustomobject]@{
+            LeadWord = $kv.Key
+            Organizations = $names.Count
+            CombinedPatients = $vol
+            Names = @($kv.Value | ForEach-Object { [string]$_.$NameProperty } | Select-Object -Unique | Sort-Object)
+        }
+    }
+    @($out | Sort-Object CombinedPatients -Descending)
+}
+
+# The legend that must travel with any table carrying a Chain column.
+function Get-RmChainNote {
+    ("CHAIN FLAG (*): an asterisk in the Chain column means this organization NAME is registered by more than " +
+     "$($script:RmChainNpiThreshold) organization NPIs in NPPES - the signature of a multi-site company (one org NPI per clinic), " +
+     "not an independent practice. Its measured volume is that ONE NPI's, so it is a slice of the company, and the company's " +
+     "local footprint is larger than the row suggests. Break it apart on the Multi-site chains tab. Calibrated on the full " +
+     "NPPES file: 91.8% of outpatient PT/OT/speech organizations hold exactly one org NPI and are never flagged; the flag " +
+     "selects 1.79% of names. A blank flag means 'not flagged', which needs the local NPPES index to be meaningful. " +
+     "ONE LIMIT: the flag counts a NAME, so a GENERIC name shared by unrelated organizations also carries it - " +
+     "'MEMORIAL HOSPITAL' shows 151 org NPIs across 45 cities because many separate hospitals use that name, not because " +
+     "they are one company. Read the flag as 'this exact name is registered many times', which for a distinctive brand " +
+     "means a chain and for a generic name means check before concluding.")
+}
 
 $script:RmLocCounts = $null
 function Get-RmSecondaryLocationCount([string]$Npi) {
@@ -4516,6 +4791,19 @@ function Import-RmNppesBulk {
             $rows = [RmEngine]::BuildRosterIndex($src, $tmpOut, $cols)
         }
         Move-Item -LiteralPath $tmpOut -Destination (Get-RmNppesIndexPath) -Force
+        # The chain table is DERIVED from this index, so a rebuild must drop
+        # it or the next flag would come from the previous file. Build it now
+        # (~25s on the real file) rather than making the user wait inside
+        # their first ZIP search; a failure here must not fail the import,
+        # since Get-RmChainIndex rebuilds on demand anyway.
+        $script:RmChainIdx = $null
+        try {
+            $ctmp = (Get-RmChainIndexPath) + '.tmp'
+            [void][RmEngine]::BuildChainIndex((Get-RmNppesIndexPath), $ctmp)
+            Move-Item -LiteralPath $ctmp -Destination (Get-RmChainIndexPath) -Force
+        } catch {
+            Write-Warning "Chain table not pre-built ($($_.Exception.Message)); it will be built on first use."
+        }
         # Secondary practice locations (pl_pfile) -> NPI|count. Sparse in
         # practice (many chains register none), so it CONFIRMS multi-site
         # but its absence proves nothing.
@@ -4795,6 +5083,7 @@ function Get-RmProviderFamily {
             MultiSiteNPI = $(if ($sec -gt 0) { 'Yes (registry)' }
                              elseif ($srcN -ge $script:RmSingleSiteSourceCeiling) { 'Likely (scale)' }
                              else { '' })
+            Chain = Get-RmChainMark $m.Name
             FamilyKey = $m.FamilyKey
         }
     }
@@ -4819,7 +5108,8 @@ function Get-RmProviderFamily {
         "MultiSiteNPI = 'Yes (registry)' when NPPES lists extra practice locations for that NPI; 'Likely (scale)' when it draws $($script:RmSingleSiteSourceCeiling)+ distinct referring providers, which no single outpatient site plausibly does (a large one-location practice measured 379)."
         'Chains also enumerate REGIONAL entities under slightly different names (e.g. "<Brand> New Hampshire, LLC"); those appear as separate rows here when the name still matches, and under their own FamilyKey.'
         'A blank volume means that NPI has no measured pair in this data year - commonly a location that bills through a sibling NPI, or one whose pairs all fell under the 11-patient floor.'
-    )
+        $(if (@($rows | Where-Object { $_.Chain }).Count) { Get-RmChainNote })
+    ) | Where-Object { $_ }
     [pscustomobject]@{
         Search = $Name
         Year = $info.Year
@@ -4827,12 +5117,60 @@ function Get-RmProviderFamily {
         Npis = @($rows).Count
         NpisWithVolume = $withVol
         MultiSiteNpis = $multi
+        ChainNpis = @($rows | Where-Object { $_.Chain }).Count
         TotalPatients = $totVol
         TotalSourceLinks = $totSrc
         Rows = @($rows)
         ByState = @($byState)
         Notes = @($notes)
     }
+}
+
+function Get-RmRelatedOrgNames {
+    <#
+    .SYNOPSIS
+      Other Care Compare facility names that plausibly belong to the same
+      company as $Name, ranked by how many street addresses they hold.
+    .NOTES
+      Brands rarely enrol under the brand: ATI Physical Therapy's clinics are
+      registered as 'ATI HOLDINGS, LLC' (137 addresses) plus state entities,
+      so a search for 'ATI PHYSICAL THERAPY' finds only a 20-site joint
+      venture. Matching on the LEADING WORD of the search recovers those.
+      Suggestions only - nothing is merged automatically, because two
+      companies can share a first word.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidateLength(3, 100)][string]$Name,
+        [int]$Top = 5
+    )
+    $idx = Get-RmDacIndexPath
+    if (-not (Test-Path -LiteralPath $idx)) { return @() }
+    $needle = Get-RmOrgNameKey $Name
+    # The leading word, which is where a brand lives ('ATI PHYSICAL THERAPY'
+    # -> 'ATI'). Under 3 characters it matches half the file, so we stop.
+    $lead = Get-RmOrgNameKey (@($Name -split '\s+' | Where-Object { $_ })[0])
+    if (-not $lead -or $lead.Length -lt 3) { return @() }
+
+    $addrs = @{}; $display = @{}
+    foreach ($line in [System.IO.File]::ReadLines($idx)) {
+        $f = $line.Split('|')
+        if ($f.Count -lt 10 -or -not $f[2]) { continue }
+        $k = Get-RmOrgNameKey $f[2]
+        # startswith, NOT contains: 'ATI' is a substring of REHABILITATION.
+        if (-not $k.StartsWith($lead)) { continue }
+        if ($needle -and $k -like "*$needle*") { continue }   # already found
+        if (-not $addrs.ContainsKey($k)) {
+            $addrs[$k] = New-Object 'System.Collections.Generic.HashSet[string]'
+            $display[$k] = $f[2]
+        }
+        $z5 = if ($f[9].Length -ge 5) { $f[9].Substring(0, 5) } else { $f[9] }
+        [void]$addrs[$k].Add("$($f[8])|$z5")
+    }
+    $out = foreach ($k in $addrs.Keys) {
+        [pscustomobject]@{ Name = $display[$k]; Addresses = $addrs[$k].Count }
+    }
+    @($out | Sort-Object Addresses -Descending | Select-Object -First $Top)
 }
 
 function Get-RmLocationReferrals {
@@ -4889,7 +5227,15 @@ function Get-RmLocationReferrals {
         if (-not $npiAddrs.ContainsKey($f[0])) { $npiAddrs[$f[0]] = (New-Object 'System.Collections.Generic.HashSet[string]') }
         [void]$npiAddrs[$f[0]].Add($key)
     }
-    if (-not $byAddr.Count) { throw "No Care Compare practice addresses match '$Name'$(if ($State) { " in $State" })$(if ($Zip) { " in $Zip" })." }
+    if (-not $byAddr.Count) {
+        # Don't just say "nothing found" - a brand is usually enrolled under
+        # a different legal name, so offer the candidates.
+        $sugg = @(Get-RmRelatedOrgNames -Name $Name)
+        $hint = if ($sugg.Count) {
+            " Did you mean: " + (@($sugg | ForEach-Object { "$($_.Name) ($($_.Addresses) locations)" }) -join '; ') + "?"
+        } else { ' Try a shorter fragment of the name.' }
+        throw ("No Care Compare practice addresses match '$Name'$(if ($State) { " in $State" })$(if ($Zip) { " in $Zip" })." + $hint)
+    }
 
     $set = New-Object 'System.Collections.Generic.HashSet[string]'
     foreach ($k in $npiAddrs.Keys) { [void]$set.Add($k) }
@@ -4909,12 +5255,17 @@ function Get-RmLocationReferrals {
             if ($v) { $tv += $v.Benes; $ts += $v.Sources; $withV++ }
             if ($npiAddrs[$n].Count -gt 1) { $shared++; if ($v) { $sharedVol += $v.Benes } }
         }
+        # Lower bound: only the clinicians who work HERE AND NOWHERE ELSE.
+        # SharedPatients is the upper bound (every shared clinician counted
+        # in full). The site's true number lies between the two.
+        $exclusive = $tv - $sharedVol
         [pscustomobject]@{
             Address = $b.Address; City = $b.City; State = $b.State; Zip = $b.Zip
             Facility = $b.Facility
             Clinicians = $b.Npis.Count
             CliniciansWithVolume = $withV
-            SharedPatients = $tv
+            SharedPatients = $tv              # upper bound
+            ExclusivePatients = $exclusive    # lower bound: this site's own clinicians
             ReferralSources = $ts
             CliniciansAtOtherSites = $shared
             SharedSitePatients = $sharedVol   # of this row, also counted elsewhere
@@ -4945,6 +5296,9 @@ function Get-RmLocationReferrals {
         $orgVol = [int]$fam.TotalPatients; $orgNpis = [int]$fam.Npis
     } catch { }
 
+    $related = @()
+    try { $related = @(Get-RmRelatedOrgNames -Name $Name) } catch { }
+
     $notes = @(Get-RmMethodologyNotes -Info $info) + @(
         ''
         "ADDRESS-LEVEL METHOD: Care Compare lists which clinicians practice at each street address of '$Name'. Those clinicians bill under their OWN NPIs, so their measured referral volume on $($info.Label) can be summed per address. This is the only way to get per-location figures - an organization NPI carries no service address."
@@ -4952,7 +5306,13 @@ function Get-RmLocationReferrals {
         $(if ($double -gt 0) { "DOUBLE COUNTING: some clinicians are listed at more than one address, and the data cannot say which visit happened where, so their volume is credited to EACH of their sites. The address rows therefore sum to $('{0:N0}' -f $rowTotal) while the clinicians behind them hold $('{0:N0}' -f $totVol) - $('{0:N0}' -f $double) patients of overlap. AttributedPatients is the de-duplicated figure; per row, SharedSitePatients shows how much of that site's number is also counted elsewhere." })
         'A clinician with no measured volume either bills through the group NPI or had every pair fall under the 11-patient floor; CliniciansWithVolume shows how many of a site''s roster are actually visible.'
         'Care Compare reflects TODAY''s rosters while the referral data is historical - a clinician who moved is credited to the address they are listed at now.'
-        "NAME MATCH: addresses are found by matching '$Name' against Care Compare's facility name. Chains often enroll clinics under REGIONAL legal names ('<Brand> of Carolina, LLC'), and those sites will be missing unless you search the name they enrolled under - so treat $($byAddr.Count) as the locations matching this search, not necessarily every clinic the brand operates. Searching a shorter fragment widens the net."
+        "NAME MATCH: addresses are found by matching '$Name' against Care Compare's facility name. Chains often enroll clinics under a DIFFERENT legal name than the brand - ATI Physical Therapy's clinics are registered as 'ATI HOLDINGS, LLC' - so treat $($byAddr.Count) as the locations matching this search, not necessarily every clinic the brand operates."
+        $(if ($related.Count) {
+            "RELATED NAMES also in Care Compare, which may be the same company (search them separately to see): " +
+            (@($related | ForEach-Object { "$($_.Name) - $($_.Addresses) locations" }) -join '; ') +
+            '. These are suggestions from a shared leading word, not a proven link; nothing was merged into the figures above.'
+        })
+        'RANGE PER SITE: SharedPatients credits a multi-site clinician in full to every site they are listed at, so it is the UPPER bound for a location. ExclusivePatients counts only clinicians who work at that one site, so it is the LOWER bound. A site whose two figures are close is measured cleanly; a wide gap means its number leans on shared staff.'
     ) | Where-Object { $_ }
 
     [pscustomobject]@{
@@ -4966,6 +5326,8 @@ function Get-RmLocationReferrals {
         AddressRowTotal = $rowTotal       # what the rows below add up to
         DoubleCountedPatients = $double   # the gap between the two
         OrgNpiPatients = $orgVol
+        Chain = Get-RmChainMark $Name
+        RelatedNames = @($related)
         Rows = @($rows)
         Notes = @($notes)
     }
@@ -5071,7 +5433,8 @@ Export-ModuleMember -Function @(
     'Get-RmSourceTrend', 'Add-RmSourceTrend',
     'Get-RmCountyMarket', 'Get-RmServiceProfile',
     'Import-RmNppesBulk', 'Import-RmCareCompare', 'Get-RmAffiliatedNpi',
-    'Get-RmProviderFamily', 'Get-RmLocationReferrals',
+    'Get-RmProviderFamily', 'Get-RmLocationReferrals', 'Get-RmRelatedOrgNames',
+    'Get-RmChainMark', 'Get-RmChainDetail', 'Get-RmNameSiblingGroups',
     'Import-RmEnrollment', 'Save-RmLocalResources',
     'Export-RmResult', 'Clear-RmStaleTemp'
 )

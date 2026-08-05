@@ -1204,6 +1204,193 @@ Describe 'Organization breakdown (chain volume by NPI and address)' {
     }
 }
 
+Describe 'Chain flag (an asterisk on multi-site companies)' {
+    BeforeAll {
+        # BIGCHAIN registers the SAME legal name five times - one org NPI per
+        # clinic, which is exactly how Ivy Rehab and ATI appear in the real
+        # file. SOLO holds one NPI and must never be flagged.
+        $script:ChainFlagCsv = Join-Path $script:WorkDir 'npi-chainflag.csv'
+        $lines = @($script:NppesHdr)
+        foreach ($i in 1..5) {
+            $lines += ('"820000000{0}","2","BIGCHAIN THERAPY LLC","","","CITY{0}","MO","99999{0}234","261QP2000X","01/01/2010",' -f $i) + (',' * 14) + '"Y"'
+        }
+        $lines += '"8300000001","2","SOLO PT OF TESTVILLE LLC","","","TESTVILLE","MO","999991234","261QP2000X","01/01/2010",' + (',' * 14) + '"Y"'
+        foreach ($i in 1..3) {
+            $lines += ('"840000000{0}","2","TRIPLE PT LLC","","","CITY{0}","MO","99999{0}234","261QP2000X","01/01/2010",' -f $i) + (',' * 14) + '"Y"'
+        }
+        Set-Content -Path $script:ChainFlagCsv -Encoding utf8 -Value $lines
+        Import-RmNppesBulk -Path $script:ChainFlagCsv | Out-Null
+    }
+    AfterAll { Import-RmNppesBulk -Path $script:NppesCsv | Out-Null }
+
+    It 'flags a name registered by more than three organization NPIs' {
+        InModuleScope ReferralMap {
+            (Get-RmChainMark 'BIGCHAIN THERAPY LLC') | Should -Be '*'
+            (Get-RmChainMark 'BigChain Therapy, LLC') | Should -Be '*'   # suffix noise
+            $d = Get-RmChainDetail 'BIGCHAIN THERAPY LLC'
+            $d.Npis | Should -Be 5
+            $d.Cities | Should -Be 5
+            $d.IsChain | Should -BeTrue
+        }
+    }
+
+    It 'never flags an independent practice, nor one sitting on the threshold' {
+        InModuleScope ReferralMap {
+            (Get-RmChainMark 'SOLO PT OF TESTVILLE LLC') | Should -Be ''
+            # exactly 3 NPIs is NOT more than 3 - the boundary must not slip
+            (Get-RmChainDetail 'TRIPLE PT LLC').Npis | Should -Be 3
+            (Get-RmChainMark 'TRIPLE PT LLC') | Should -Be ''
+            (Get-RmChainMark 'NAME THAT DOES NOT EXIST AT ALL') | Should -Be ''
+            (Get-RmChainMark '') | Should -Be ''
+        }
+    }
+
+    It 'stays silent rather than guessing when no local index is available' {
+        $bare = Join-Path $script:WorkDir 'no-index-store'
+        New-Item -ItemType Directory -Path $bare -Force | Out-Null
+        $saved = (Get-RmConfig).DataDir
+        try {
+            Set-RmConfig -DataDir $bare
+            InModuleScope ReferralMap {
+                $script:RmChainIdx = $null
+                (Get-RmChainMark 'BIGCHAIN THERAPY LLC') | Should -Be ''
+                (Get-RmChainDetail 'BIGCHAIN THERAPY LLC').IsChain | Should -BeFalse
+            }
+        } finally {
+            Set-RmConfig -DataDir $saved
+            InModuleScope ReferralMap { $script:RmChainIdx = $null }
+        }
+    }
+
+    It 'the C# name key never drifts from the PowerShell one' {
+        # The chain table is built in C# for speed; the family search uses
+        # the PowerShell key. If the two normalisations disagree, the flag
+        # attaches to the wrong companies and nothing else would notice.
+        InModuleScope ReferralMap {
+            $probes = @(
+                'IVYREHAB NETWORK, INC.', 'IvyRehab Network Inc', 'ATI HOLDINGS, LLC',
+                'Select Physical Therapy Holdings, Inc.', 'THE REHAB CO OF AND OF', '1',
+                'A  B   C', '  PADDED PT LLC  ', 'ACME-PT/OT & SLP, P.C.', 'CO', 'LLC INC PA',
+                'Ünïcode Ptë Ltd', '123 THERAPY 456', 'x')
+            foreach ($n in $probes) {
+                [RmEngine]::OrgNameKey($n) | Should -Be (Get-RmOrgNameKey $n) -Because "key for '$n' must match"
+            }
+        }
+    }
+
+    It 'rebuilds the chain table when the NPPES index is newer' {
+        InModuleScope ReferralMap {
+            $cp = Get-RmChainIndexPath
+            Get-RmChainIndex | Out-Null
+            Test-Path -LiteralPath $cp | Should -BeTrue
+            # Poison the derived file and age it: a stale table must not win.
+            Set-Content -LiteralPath $cp -Value 'BIGCHAIN THERAPY|99|99' -Encoding ascii
+            (Get-Item -LiteralPath $cp).LastWriteTimeUtc = (Get-Item -LiteralPath (Get-RmNppesIndexPath)).LastWriteTimeUtc.AddMinutes(-5)
+            $script:RmChainIdx = $null
+            (Get-RmChainDetail 'BIGCHAIN THERAPY LLC').Npis | Should -Be 5   # rebuilt, not 99
+        }
+    }
+
+    It 'rebuilding the index drops the cached chain table' {
+        # A stale table would flag from the PREVIOUS file - silently wrong.
+        InModuleScope ReferralMap {
+            Get-RmChainIndex | Out-Null
+            $script:RmChainIdx | Should -Not -BeNullOrEmpty
+        }
+        Import-RmNppesBulk -Path $script:ChainFlagCsv | Out-Null
+        InModuleScope ReferralMap { $script:RmChainIdx | Should -BeNullOrEmpty }
+    }
+
+    It 'marks the chain in the referral map and explains the asterisk' {
+        # All five BIGCHAIN clinics sit in ZIP 99999, so the map must show
+        # five asterisks - and the independent beside them must show none.
+        $map = Get-RmReferralMap -Zip 99999 -SkipEnrichment
+        @($map.Clinics)[0].PSObject.Properties['Chain'] | Should -Not -BeNullOrEmpty
+        $flagged = @($map.Clinics | Where-Object { $_.Chain })
+        $flagged.Count | Should -Be 5
+        foreach ($f in $flagged) { $f.Chain | Should -Be '*'; $f.Name | Should -BeLike 'BIGCHAIN*' }
+        @($map.Clinics | Where-Object { $_.Name -eq 'SOLO PT OF TESTVILLE LLC' })[0].Chain | Should -Be ''
+        $n = @($map.Notes) -join ' '
+        $n | Should -BeLike '*CHAIN FLAG*'
+        $n | Should -BeLike '*BIGCHAIN THERAPY LLC (5 org NPIs in 5 cities)*'
+        InModuleScope ReferralMap {
+            (Get-RmChainNote) | Should -BeLike '*asterisk*'
+            (Get-RmChainNote) | Should -BeLike '*Multi-site chains tab*'
+        }
+    }
+
+    It 'spots a practice hiding behind one legal name per clinic' {
+        # The ATR case: Advanced Training and Rehab in St Louis enrolls ATR
+        # JUSTIN LLC, ATR RYAN LLC, ATR JEFF LLC and more. Every name is
+        # unique, so counting identical names sees nothing and the practice
+        # shows up as several small rows instead of one large one.
+        InModuleScope ReferralMap {
+            $rows = @(
+                [pscustomobject]@{ Name = 'ATR JUSTIN LLC'; Type = 'Organization'; SharedPatients = 916 }
+                [pscustomobject]@{ Name = 'ATR RYAN LLC'; Type = 'Organization'; SharedPatients = 1704 }
+                [pscustomobject]@{ Name = 'ATR-JEFF LLC'; Type = 'Organization'; SharedPatients = 1183 }
+                [pscustomobject]@{ Name = 'ATR HAND THERAPY LLC'; Type = 'Organization'; SharedPatients = 2336 }
+                [pscustomobject]@{ Name = 'UNRELATED PT LLC'; Type = 'Organization'; SharedPatients = 500 }
+                [pscustomobject]@{ Name = 'ATRIA SOMETHING'; Type = 'Individual'; SharedPatients = 900 }
+            )
+            $g = @(Get-RmNameSiblingGroups -Rows $rows)
+            $g.Count | Should -Be 1
+            $g[0].LeadWord | Should -Be 'ATR'
+            $g[0].Organizations | Should -Be 4
+            $g[0].CombinedPatients | Should -Be 6139     # 916+1704+1183+2336
+            # individuals are people, not companies, and must stay out
+            @($g[0].Names) | Should -Not -Contain 'ATRIA SOMETHING'
+        }
+    }
+
+    It 'stays quiet on short, numeric, or too-small name groups' {
+        InModuleScope ReferralMap {
+            # a two-letter lead matches far too much to mean anything
+            $short = @(1..5 | ForEach-Object {
+                [pscustomobject]@{ Name = "PT CLINIC $_ LLC"; Type = 'Organization'; SharedPatients = 10 } })
+            @(Get-RmNameSiblingGroups -Rows $short).Count | Should -Be 0
+            # a purely numeric lead is address noise, not a brand
+            $nums = @(1..5 | ForEach-Object {
+                [pscustomobject]@{ Name = "123 THERAPY $_ LLC"; Type = 'Organization'; SharedPatients = 10 } })
+            @(Get-RmNameSiblingGroups -Rows $nums).Count | Should -Be 0
+            # two siblings is below the reporting bar
+            $pair = @(
+                [pscustomobject]@{ Name = 'ZEBRA ALPHA LLC'; Type = 'Organization'; SharedPatients = 10 }
+                [pscustomobject]@{ Name = 'ZEBRA BETA LLC'; Type = 'Organization'; SharedPatients = 10 })
+            @(Get-RmNameSiblingGroups -Rows $pair).Count | Should -Be 0
+            # the SAME name repeated is the Chain flag's job, not this one
+            $same = @(1..4 | ForEach-Object {
+                [pscustomobject]@{ Name = 'ZEBRA THERAPY LLC'; Type = 'Organization'; SharedPatients = 10 } })
+            @(Get-RmNameSiblingGroups -Rows $same).Count | Should -Be 0
+            # an industry-generic lead groups strangers, not a company: a
+            # live 63101 sweep clustered 10 unrelated practices on 'PHYSICAL'
+            foreach ($w in 'PHYSICAL', 'SPORTS', 'WEST', 'REHAB', 'ADVANCED', 'PREMIER',
+                            'PAIN', 'MISSOURI', 'TEXAS', 'UNIVERSITY', 'MEMORIAL') {
+                $generic = @(1..5 | ForEach-Object {
+                    [pscustomobject]@{ Name = "$w SOMETHING$_ LLC"; Type = 'Organization'; SharedPatients = 10 } })
+                @(Get-RmNameSiblingGroups -Rows $generic).Count | Should -Be 0 -Because "'$w' leads unrelated practices everywhere"
+            }
+        }
+    }
+
+    It 'calls the cluster a prompt to check, never a finding' {
+        InModuleScope ReferralMap {
+            $rows = @(1..4 | ForEach-Object {
+                [pscustomobject]@{ Name = "ZEBRACO SITE$_ LLC"; Type = 'Organization'; SharedPatients = 100 } })
+            $g = @(Get-RmNameSiblingGroups -Rows $rows)
+            $g.Count | Should -Be 1
+            $g[0].Organizations | Should -Be 4
+        }
+    }
+
+    It 'never flags an individual therapist, whose name is not a company' {
+        $map = Get-RmReferralMap -Zip 99999 -SkipEnrichment
+        foreach ($c in @($map.Clinics | Where-Object { $_.Type -ne 'Organization' })) {
+            $c.Chain | Should -Be ''
+        }
+    }
+}
+
 Describe 'Address-level referrals (the multi-site workaround)' {
     BeforeAll {
         # Care Compare shape: two addresses for one chain, plus a clinician
@@ -1270,6 +1457,73 @@ Describe 'Address-level referrals (the multi-site workaround)' {
             # Chains enroll clinics under regional legal names, so a name
             # search finds SOME of the brand's sites, not provably all.
             (@($r.Notes) -join ' ') | Should -BeLike '*NAME MATCH*'
+        } finally { Set-RmActiveDataset -Source cms-pspp -Year 2015 | Out-Null }
+    }
+
+    It 'gives each site a range: exclusive clinicians as the floor' {
+        Set-RmActiveDataset -Source hop-teaming -Year 2022 | Out-Null
+        try {
+            $r = Get-RmLocationReferrals -Name 'CHAINREHAB'
+            $main = @($r.Rows | Where-Object Address -eq '100 MAIN ST')[0]
+            # 111 total, of which PAT's 12 also count at 200 OAK AVE
+            $main.SharedPatients | Should -Be 111       # upper bound
+            $main.ExclusivePatients | Should -Be 99     # lower bound
+            foreach ($row in @($r.Rows)) {
+                [int]$row.ExclusivePatients | Should -BeLessOrEqual ([int]$row.SharedPatients)
+                ([int]$row.ExclusivePatients + [int]$row.SharedSitePatients) | Should -Be ([int]$row.SharedPatients)
+            }
+            (@($r.Notes) -join ' ') | Should -BeLike '*UPPER bound*'
+            (@($r.Notes) -join ' ') | Should -BeLike '*LOWER bound*'
+        } finally { Set-RmActiveDataset -Source cms-pspp -Year 2015 | Out-Null }
+    }
+
+    It 'suggests the legal name a brand actually enrolled under' {
+        # The real failure: ATI Physical Therapy's clinics are registered as
+        # 'ATI HOLDINGS, LLC', so searching the brand finds almost nothing.
+        $dac = Join-Path $script:WorkDir 'DAC_brand.csv'
+        Set-Content -Path $dac -Encoding ascii -Value @(
+            'NPI,Ind_PAC_ID,Provider Last Name,Provider First Name,pri_spec,Facility Name,org_pac_id,City/Town,State,adr_ln_1,ZIP Code'
+            '9100000001,1,A,A,PHYSICAL THERAPY,BRANDCO HOLDINGS LLC,7001,TESTVILLE,MO,1 A ST,99999'
+            '9100000002,2,B,B,PHYSICAL THERAPY,BRANDCO HOLDINGS LLC,7001,TESTVILLE,MO,2 B ST,99999'
+            '9100000003,3,C,C,PHYSICAL THERAPY,BRANDCO HOLDINGS OF OHIO LLC,7002,TESTVILLE,MO,3 C ST,99999'
+            '9100000004,4,D,D,PHYSICAL THERAPY,BRANDCO PHYSICAL THERAPY LLC,7003,TESTVILLE,MO,4 D ST,99999'
+            '9100000005,5,E,E,PHYSICAL THERAPY,REHABILITATION PARTNERS LLC,7004,TESTVILLE,MO,5 E ST,99999'
+        )
+        Import-RmCareCompare -Path $dac | Out-Null
+        try {
+            $sugg = @(Get-RmRelatedOrgNames -Name 'BRANDCO PHYSICAL THERAPY')
+            @($sugg | ForEach-Object Name) | Should -Contain 'BRANDCO HOLDINGS LLC'
+            @($sugg | ForEach-Object Name) | Should -Contain 'BRANDCO HOLDINGS OF OHIO LLC'
+            # its OWN name is already matched, so it is not suggested back
+            @($sugg | ForEach-Object Name) | Should -Not -Contain 'BRANDCO PHYSICAL THERAPY LLC'
+            # ranked by footprint: the two-address entity leads
+            $sugg[0].Name | Should -Be 'BRANDCO HOLDINGS LLC'
+            $sugg[0].Addresses | Should -Be 2
+            # 'BRANDCO' is not a substring of REHABILITATION, but a naive
+            # contains-match on a short fragment would drag it in.
+            @($sugg | ForEach-Object Name) | Should -Not -Contain 'REHABILITATION PARTNERS LLC'
+        } finally { Import-RmCareCompare -Path $script:AddrDac | Out-Null }
+    }
+
+    It 'names the alternatives instead of just saying nothing was found' {
+        $dac = Join-Path $script:WorkDir 'DAC_brand2.csv'
+        Set-Content -Path $dac -Encoding ascii -Value @(
+            'NPI,Ind_PAC_ID,Provider Last Name,Provider First Name,pri_spec,Facility Name,org_pac_id,City/Town,State,adr_ln_1,ZIP Code'
+            '9200000001,1,A,A,PHYSICAL THERAPY,ZEBRACO HOLDINGS LLC,8001,TESTVILLE,MO,1 A ST,99999'
+        )
+        Import-RmCareCompare -Path $dac | Out-Null
+        try {
+            { Get-RmLocationReferrals -Name 'ZEBRACO PHYSICAL THERAPY' } |
+                Should -Throw '*Did you mean*ZEBRACO HOLDINGS LLC*'
+        } finally { Import-RmCareCompare -Path $script:AddrDac | Out-Null }
+    }
+
+    It 'carries the related-name suggestions on a successful result too' {
+        Set-RmActiveDataset -Source hop-teaming -Year 2022 | Out-Null
+        try {
+            $r = Get-RmLocationReferrals -Name 'CHAINREHAB'
+            $r.PSObject.Properties['RelatedNames'] | Should -Not -BeNullOrEmpty
+            (@($r.Notes) -join ' ') | Should -BeLike '*ATI HOLDINGS*'
         } finally { Set-RmActiveDataset -Source cms-pspp -Year 2015 | Out-Null }
     }
 

@@ -1059,7 +1059,7 @@ $ui.ExportChangesButton.Add_Click({
 # ---------------------------------------------------------------------------
 
 $script:RmClinicCols = @('NPI', 'Name', 'Type', 'Taxonomy', 'City', 'State', 'Zip',
-                         'ReferralSources', 'SharedPatients', 'SameDay', 'MultiSiteNPI', 'ExistedInDataYear')
+                         'ReferralSources', 'SharedPatients', 'SameDay', 'Chain', 'MultiSiteNPI', 'ExistedInDataYear')
 $script:RmSourceCols = @('SourceNPI', 'SourceName', 'SourceSpecialty', 'SourceCity', 'SourceState',
                          'ClinicNPI', 'ClinicName', 'SharedPatients', 'SharedEvents', 'SameDay')
 
@@ -1294,6 +1294,13 @@ $ui.RmRunButton.Add_Click({
                 $(if ($map.PSObject.Properties['CoverageNote'] -and $map.CoverageNote) { " " + $map.CoverageNote } else { '' }) +
                 $(if (@($clinics | Where-Object { $_.PSObject.Properties['MultiSiteNPI'] -and $_.MultiSiteNPI }).Count) {
                     " NOTE: $(@($clinics | Where-Object { $_.PSObject.Properties['MultiSiteNPI'] -and $_.MultiSiteNPI }).Count) provider(s) bill under a MULTI-SITE NPI - their volume covers every location that NPI serves, not just this address (see the MultiSiteNPI column)." } else { '' }) +
+                $(if (@($clinics | Where-Object { $_.PSObject.Properties['Chain'] -and $_.Chain }).Count) {
+                    " CHAIN (*): $(@($clinics | Where-Object { $_.PSObject.Properties['Chain'] -and $_.Chain }).Count) of these are one clinic of a multi-site company (their organization name holds 4+ org NPIs) - break them apart on the Multi-site chains tab." } else { '' }) +
+                $(if ($map.PSObject.Properties['SiblingGroups'] -and @($map.SiblingGroups).Count) {
+                    $sg = @($map.SiblingGroups)[0]
+                    " POSSIBLE SAME COMPANY: $($sg.Organizations) organizations here share the name word '$($sg.LeadWord)' " +
+                    "($('{0:N0}' -f $sg.CombinedPatients) patients between them) - a practice that gives each clinic its own LLC shows up as several small rows. " +
+                    "Check the exported methodology for the full list." } else { '' }) +
                 " Reminder: $year vintage — market structure, not current volumes; pairs under 11 patients are excluded per CMS privacy policy. Tip: a prefix like 630* widens the area.")
             Set-Status "Referral map for $($map.Zip) complete."
         } `
@@ -2099,7 +2106,7 @@ $ui.ChNpiButton.Add_Click({
             $script:ChResult = $f; $script:ChKind = 'npi'
             $ui.ChGrid.ItemsSource = (ConvertTo-DataTable -Rows @($f.Rows) -Columns @(
                 'NPI', 'Name', 'City', 'State', 'Zip', 'SharedPatients', 'ReferralSources',
-                'PracticeSites', 'MultiSiteNPI')).DefaultView
+                'PracticeSites', 'Chain', 'MultiSiteNPI')).DefaultView
             $ui.ChLabel.Text = ("BY NPI - '$($f.Search)' in $($f.Label): $('{0:N0}' -f $f.Npis) organization NPI(s), " +
                 "$($f.NpisWithVolume) with measured volume, $('{0:N0}' -f $f.TotalPatients) patients in total.")
             $top = @($f.ByState | Select-Object -First 4 | ForEach-Object { "$($_.State) $($_.PctOfFamily)%" }) -join ', '
@@ -2132,7 +2139,8 @@ $ui.ChAddrButton.Add_Click({
             $script:ChResult = $r; $script:ChKind = 'addr'
             $ui.ChGrid.ItemsSource = (ConvertTo-DataTable -Rows @($r.Rows) -Columns @(
                 'Address', 'City', 'State', 'Zip', 'SharedPatients', 'ReferralSources',
-                'Clinicians', 'CliniciansWithVolume', 'CliniciansAtOtherSites', 'SharedSitePatients')).DefaultView
+                'ExclusivePatients', 'Clinicians', 'CliniciansWithVolume',
+                'CliniciansAtOtherSites', 'SharedSitePatients')).DefaultView
             $ui.ChLabel.Text = ("BY ADDRESS - '$($r.Search)' in $($r.Label): $('{0:N0}' -f $r.Addresses) location(s), " +
                 "$('{0:N0}' -f $r.AddressesWithVolume) with measured volume, " +
                 "$('{0:N0}' -f $r.AttributedPatients) patients attributed across $('{0:N0}' -f $r.Clinicians) clinicians.")
@@ -2140,11 +2148,17 @@ $ui.ChAddrButton.Add_Click({
                 (" The rows below add up to $('{0:N0}' -f $r.AddressRowTotal) because clinicians listed at MORE THAN ONE address are " +
                  "credited to each of their sites; the $('{0:N0}' -f $r.DoubleCountedPatients)-patient gap is that overlap (see CliniciansAtOtherSites / SharedSitePatients).")
             } else { '' }
+            # A brand is usually enrolled under a different legal name, so
+            # name the candidates rather than leaving a partial answer.
+            $relBit = if (@($r.RelatedNames).Count) {
+                " Related names in Care Compare that may be the same company - search them separately: " +
+                (@($r.RelatedNames | ForEach-Object { "$($_.Name) ($($_.Addresses) locations)" }) -join '; ') + "."
+            } else { ' Chains also register clinics under other legal names, so try a shorter fragment if a site you expect is missing.' }
             $ui.ChSummary.Text = ("This counts care billed under INDIVIDUAL clinician NPIs. A further " +
                 "$('{0:N0}' -f $r.OrgNpiPatients) patients are billed under the organization's own NPI(s), which carry no " +
                 "service address and are NOT spread across the sites - treat the two as separate views." + $overlapBit +
-                " These are the locations enrolled under a name matching your search: chains also register clinics under regional " +
-                "legal names, so try a shorter fragment if a site you expect is missing. Export for the full table with methodology.")
+                " These are the locations enrolled under a name matching your search." + $relBit +
+                " Export for the full table with methodology.")
             $ui.ChExportButton.IsEnabled = $true
             Set-Status "Per-location breakdown ready - $('{0:N0}' -f $r.AttributedPatients) patients across $($r.AddressesWithVolume) location(s)."
         } `
