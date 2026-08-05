@@ -964,6 +964,15 @@ function Test-NpiChecksum([string]$Npi) {
     try { [OrfEngine]::IsValidNpi($Npi) } catch { $true }   # helper failure never blocks
 }
 
+function Test-RmDatasetReadyUi {
+    # One shared gate for every button that needs the shared-patient file on
+    # disk; says where to get it and returns $false so the caller can bail.
+    if ((Get-RmStatus).DatasetReady) { return $true }
+    Show-ErrorBox ("No referral dataset is available yet - on the Referral map tab, click " +
+        "'Download CMS dataset' (free 2015 data) or 'Import CareSet file' first.")
+    $false
+}
+
 function Get-CappedNote([int]$Total) {
     if ($Total -gt $script:MaxGridRows) {
         " Showing first $('{0:N0}' -f $script:MaxGridRows) of $('{0:N0}' -f $Total) rows — exports include all rows."
@@ -1583,7 +1592,6 @@ $ui.RmExportMixButton.Add_Click({
 # Practice benchmark tab
 # ---------------------------------------------------------------------------
 
-$script:BmSearchRows = @()
 $script:BmResult = $null
 
 # The benchmark button needs BOTH a target (grid selection or a pasted NPI)
@@ -1616,7 +1624,6 @@ $ui.BmSearchButton.Add_Click({
         -OnDone {
             param($result)
             $rows = @($result | Where-Object { $null -ne $_ })
-            $script:BmSearchRows = $rows
             $ui.BmSearchGrid.ItemsSource = (ConvertTo-DataTable -Rows $rows `
                 -Columns @('NPI','Name','Type','Specialty','City','State','Zip')).DefaultView
             $ui.BmSummary.Text = if ($rows.Count -eq 0) {
@@ -1641,11 +1648,7 @@ $ui.BmRunButton.Add_Click({
            else { $null }
     if (-not $npi) { Show-ErrorBox 'Select a practice from the search results first (or paste its 10-digit NPI).'; return }
     if (-not (Test-NpiChecksum $npi)) { Show-ErrorBox 'That NPI fails its check digit — one digit is mistyped. Double-check the number and try again.'; return }
-    if (-not (Get-RmStatus).DatasetReady) {
-        Show-ErrorBox ("No referral dataset is available yet - on the Referral map tab, click " +
-            "'Download CMS dataset' (free 2015 data) or 'Import CareSet file' first.")
-        return
-    }
+    if (-not (Test-RmDatasetReadyUi)) { return }
     $ui.BmRunButton.IsEnabled = $false
     Invoke-Async -Kind 'bm-run' -Params @{
             RmModulePath = $script:RmModulePath; Npi = $npi
@@ -2227,11 +2230,7 @@ $ui.LkGeoButton.Add_Click({
     $npi = $ui.LkNpiBox.Text.Trim()
     if ($npi -notmatch '^\d{10}$') { Show-ErrorBox 'Enter a full 10-digit NPI first.'; return }
     if (-not (Test-NpiChecksum $npi)) { Show-ErrorBox 'That NPI fails its check digit — one digit is mistyped. Double-check the number and try again.'; return }
-    if (-not (Get-RmStatus).DatasetReady) {
-        Show-ErrorBox ("No referral dataset is available yet - on the Referral map tab, click " +
-            "'Download CMS dataset' (free 2015 data) or 'Import CareSet file' first.")
-        return
-    }
+    if (-not (Test-RmDatasetReadyUi)) { return }
     $ui.LkSaveMapButton.IsEnabled = $false
     $ui.LkExportTrendButton.IsEnabled = $false
     $ui.LkSaveReportButton.IsEnabled = $false
@@ -2314,12 +2313,11 @@ function Update-ChDataStatus {
         }
         # If the registry zip is already sitting on this computer (a drive
         # root, Downloads), say so - the user should never have to browse
-        # for a file the app can see.
-        $script:ChFoundNppes = $null
+        # for a file the app can see. (The import button re-runs the finder
+        # itself, so nothing is stored here.)
         if (-not $d.Nppes.Present) {
             $found = Find-RmNppesDisseminationFile
             if ($found) {
-                $script:ChFoundNppes = $found
                 $ui.ChDataStatus.Text += (" Found $(Split-Path -Leaf $found.Path) ($($found.SizeMB) MB, $($found.Label)) on your computer" +
                     " - click 'Import NPPES bulk zip' and it will be offered automatically.")
             }
@@ -2404,11 +2402,7 @@ function Get-ChSearchArgs {
         Show-ErrorBox 'Enter at least 3 letters of the organization name, e.g. IVYREHAB.'
         return $null
     }
-    if (-not (Get-RmStatus).DatasetReady) {
-        Show-ErrorBox ("No referral dataset is available yet - on the Referral map tab, click " +
-            "'Download CMS dataset' (free 2015 data) or 'Import CareSet file' first.")
-        return $null
-    }
+    if (-not (Test-RmDatasetReadyUi)) { return $null }
     $a = @{ Name = $name }
     $st = $ui.ChStateBox.Text.Trim()
     if ($st) {
@@ -2525,11 +2519,7 @@ $ui.LkAnalysisButton.Add_Click({
         Show-ErrorBox ("These NPI(s) fail their check digit (one digit is mistyped): " + ($badNpis -join ', ') + '. Fix them and try again.')
         return
     }
-    if (-not (Get-RmStatus).DatasetReady) {
-        Show-ErrorBox ("No referral dataset is available yet - on the Referral map tab, click " +
-            "'Download CMS dataset' (free 2015 data) or 'Import CareSet file' first.")
-        return
-    }
+    if (-not (Test-RmDatasetReadyUi)) { return }
     $ui.LkSaveReportButton.IsEnabled = $false
     $ui.LkSaveMapButton.IsEnabled = $false
     $ui.LkExportTrendButton.IsEnabled = $false
@@ -2600,11 +2590,7 @@ $ui.LkFullReportButton.Add_Click({
         Show-ErrorBox ("These NPI(s) fail their check digit (one digit is mistyped): " + ($badNpis -join ', ') + '. Fix them and try again.')
         return
     }
-    if (-not (Get-RmStatus).DatasetReady) {
-        Show-ErrorBox ("No referral dataset is available yet - on the Referral map tab, click " +
-            "'Download CMS dataset' (free 2015 data) or 'Import CareSet file' first.")
-        return
-    }
+    if (-not (Test-RmDatasetReadyUi)) { return }
     # Destination first: nobody wants a save dialog ambushing them after a
     # 10-minute scan.
     $dialog = New-Object Microsoft.Win32.SaveFileDialog

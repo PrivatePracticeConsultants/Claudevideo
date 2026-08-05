@@ -5015,6 +5015,27 @@ function Invoke-RmCmsApi([string]$DatasetId, [string]$Query) {
     throw "The CMS open-data API (data.cms.gov) could not be reached after $($delays.Count) attempts. Details: $lastMsg"
 }
 
+# Small keyed JSON caches (county market, billed-services profiles): one
+# reader and one atomic writer instead of a copy in each consumer. Purely
+# cosmetic caches - unreadable or unwritable files degrade to a re-fetch.
+function Read-RmJsonCache([string]$Path) {
+    $cache = @{}
+    if (Test-Path -LiteralPath $Path) {
+        try { $j = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
+              foreach ($p in $j.PSObject.Properties) { $cache[$p.Name] = $p.Value } } catch {}
+    }
+    $cache
+}
+
+function Write-RmJsonCache([string]$Path, [hashtable]$Cache) {
+    try {
+        New-Item -ItemType Directory -Path $script:RmConfig.DataDir -Force | Out-Null
+        $ctmp = $Path + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
+        $Cache | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $ctmp -Encoding UTF8
+        Move-Item -LiteralPath $ctmp -Destination $Path -Force
+    } catch {}
+}
+
 function Get-RmCountyMarket {
     <#
     .SYNOPSIS
@@ -5030,11 +5051,7 @@ function Get-RmCountyMarket {
     $fips = Get-RmZctaCountyFips $Zip $CrosswalkPath
     if (-not $fips) { return $null }
     $cachePath = Join-Path $script:RmConfig.DataDir 'market-cache.json'
-    $cache = @{}
-    if (Test-Path -LiteralPath $cachePath) {
-        try { $j = Get-Content -LiteralPath $cachePath -Raw -Encoding UTF8 | ConvertFrom-Json
-              foreach ($p in $j.PSObject.Properties) { $cache[$p.Name] = $p.Value } } catch {}
-    }
+    $cache = Read-RmJsonCache $cachePath
     if ($cache.ContainsKey($fips)) { return $cache[$fips] }
     # Local enrollment index first (works with no internet); the API is the
     # fallback when the user has not imported the file.
@@ -5077,12 +5094,7 @@ function Get-RmCountyMarket {
         FfsByYear = [pscustomobject]$fy
     }
     $cache[$fips] = $m
-    try {
-        New-Item -ItemType Directory -Path $script:RmConfig.DataDir -Force | Out-Null
-        $ctmp = $cachePath + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
-        $cache | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $ctmp -Encoding UTF8
-        Move-Item -LiteralPath $ctmp -Destination $cachePath -Force
-    } catch {}
+    Write-RmJsonCache $cachePath $cache
     $m
 }
 
@@ -5098,11 +5110,7 @@ function Get-RmServiceProfile {
     [CmdletBinding()]
     param([Parameter(Mandatory)][ValidateCount(1, 60)][ValidatePattern('^\d{10}$')][string[]]$Npi)
     $cachePath = Join-Path $script:RmConfig.DataDir 'services-cache.json'
-    $cache = @{}
-    if (Test-Path -LiteralPath $cachePath) {
-        try { $j = Get-Content -LiteralPath $cachePath -Raw -Encoding UTF8 | ConvertFrom-Json
-              foreach ($p in $j.PSObject.Properties) { $cache[$p.Name] = $p.Value } } catch {}
-    }
+    $cache = Read-RmJsonCache $cachePath
     $dirty = $false
     $out = @{}
     foreach ($n in @($Npi | Sort-Object -Unique)) {
@@ -5126,14 +5134,7 @@ function Get-RmServiceProfile {
         }
         $cache[$n] = $p; $out[$n] = $p; $dirty = $true
     }
-    if ($dirty) {
-        try {
-            New-Item -ItemType Directory -Path $script:RmConfig.DataDir -Force | Out-Null
-            $ctmp = $cachePath + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
-        $cache | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $ctmp -Encoding UTF8
-        Move-Item -LiteralPath $ctmp -Destination $cachePath -Force
-        } catch {}
-    }
+    if ($dirty) { Write-RmJsonCache $cachePath $cache }
     $out
 }
 
