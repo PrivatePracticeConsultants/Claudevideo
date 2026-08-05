@@ -4568,7 +4568,8 @@ function Import-RmCareCompare {
     param([Parameter(Mandatory)][string]$Path)
     Initialize-RmDataDir | Out-Null
     $cols = @('NPI', 'org_pac_id', 'Facility Name', 'pri_spec',
-        'Provider Last Name', 'Provider First Name', 'City/Town', 'State')
+        'Provider Last Name', 'Provider First Name', 'City/Town', 'State',
+        'adr_ln_1', 'ZIP Code')   # appended: existing field indexes stay valid
     $tmpOut = (Get-RmDacIndexPath) + '.tmp'
     $rows = [RmEngine]::BuildRosterIndex($Path, $tmpOut, $cols)
     Move-Item -LiteralPath $tmpOut -Destination (Get-RmDacIndexPath) -Force
@@ -4737,8 +4738,7 @@ function Get-RmProviderFamily {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][ValidateLength(3, 100)][string]$Name,
-        [ValidatePattern('^[A-Za-z]{2}$')][string]$State,
-        [switch]$SkipEnrichment
+        [ValidatePattern('^[A-Za-z]{2}$')][string]$State
     )
     $info = Get-RmDatasetInfo
     if (-not $info.Ready) {
@@ -4831,6 +4831,134 @@ function Get-RmProviderFamily {
         TotalSourceLinks = $totSrc
         Rows = @($rows)
         ByState = @($byState)
+        Notes = @($notes)
+    }
+}
+
+function Get-RmLocationReferrals {
+    <#
+    .SYNOPSIS
+      ADDRESS-level referral volume for a multi-location organization.
+      Care Compare publishes which clinicians practice at each street
+      address; those clinicians have their OWN NPIs, and the shared-patient
+      file carries volume against them. Summing per address therefore
+      yields per-location figures that an organization NPI cannot give.
+    .NOTES
+      Covers the share of care billed under INDIVIDUAL clinician NPIs.
+      Volume billed under the organization's own NPI has no service address
+      and stays unattributable - it is reported separately, never spread
+      across sites. A clinician listed at several addresses is counted at
+      each (the data cannot say which visit happened where); those rows are
+      flagged and the affected volume is quantified.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidateLength(3, 100)][string]$Name,
+        [ValidatePattern('^[A-Za-z]{2}$')][string]$State,
+        [ValidatePattern('^\d{5}$')][string]$Zip
+    )
+    $info = Get-RmDatasetInfo
+    if (-not $info.Ready) {
+        throw "No shared-patient dataset is available yet (Referral map tab: download the CMS dataset or import a CareSet file)."
+    }
+    $idx = Get-RmDacIndexPath
+    if (-not (Test-Path -LiteralPath $idx)) {
+        throw ("Address-level figures need the Care Compare clinician file. Download the National Downloadable File " +
+               "from https://data.cms.gov/provider-data/dataset/mj5m-pzi6 and run Import-RmCareCompare -Path <csv>.")
+    }
+    $needle = Get-RmOrgNameKey $Name
+    if (-not $needle) { throw "Enter part of an organization name (letters or numbers)." }
+
+    $byAddr = @{}; $npiAddrs = @{}
+    foreach ($line in [System.IO.File]::ReadLines($idx)) {
+        $f = $line.Split('|')
+        if ($f.Count -lt 10) { continue }
+        if ((Get-RmOrgNameKey $f[2]) -notlike "*$needle*") { continue }
+        if ($State -and $f[7] -ne $State.ToUpperInvariant()) { continue }
+        $z5 = if ($f[9].Length -ge 5) { $f[9].Substring(0, 5) } else { $f[9] }
+        if ($Zip -and $z5 -ne $Zip) { continue }
+        $key = "$($f[8])|$($f[6])|$($f[7])|$z5"
+        if (-not $byAddr.ContainsKey($key)) {
+            $byAddr[$key] = [pscustomobject]@{
+                Address = $f[8]; City = $f[6]; State = $f[7]; Zip = $z5
+                Facility = $f[2]
+                Npis = (New-Object 'System.Collections.Generic.HashSet[string]')
+            }
+        }
+        [void]$byAddr[$key].Npis.Add($f[0])
+        if (-not $npiAddrs.ContainsKey($f[0])) { $npiAddrs[$f[0]] = (New-Object 'System.Collections.Generic.HashSet[string]') }
+        [void]$npiAddrs[$f[0]].Add($key)
+    }
+    if (-not $byAddr.Count) { throw "No Care Compare practice addresses match '$Name'$(if ($State) { " in $State" })$(if ($Zip) { " in $Zip" })." }
+
+    $set = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($k in $npiAddrs.Keys) { [void]$set.Add($k) }
+    Write-Verbose "Scanning $($info.Label) for $($set.Count) clinician NPI(s) across $($byAddr.Count) address(es)..."
+    $vol = @{}
+    foreach ($e in @([RmEngine]::ScanInbound($info.Path, $set, $info.Format))) {
+        if (-not $vol.ContainsKey($e.TargetNpi)) { $vol[$e.TargetNpi] = [pscustomobject]@{ Benes = 0; Sources = 0 } }
+        $vol[$e.TargetNpi].Benes += $e.BeneCount
+        $vol[$e.TargetNpi].Sources += 1
+    }
+
+    $rows = foreach ($kv in $byAddr.GetEnumerator()) {
+        $b = $kv.Value
+        $tv = 0; $ts = 0; $withV = 0; $shared = 0; $sharedVol = 0
+        foreach ($n in $b.Npis) {
+            $v = if ($vol.ContainsKey($n)) { $vol[$n] } else { $null }
+            if ($v) { $tv += $v.Benes; $ts += $v.Sources; $withV++ }
+            if ($npiAddrs[$n].Count -gt 1) { $shared++; if ($v) { $sharedVol += $v.Benes } }
+        }
+        [pscustomobject]@{
+            Address = $b.Address; City = $b.City; State = $b.State; Zip = $b.Zip
+            Facility = $b.Facility
+            Clinicians = $b.Npis.Count
+            CliniciansWithVolume = $withV
+            SharedPatients = $tv
+            ReferralSources = $ts
+            CliniciansAtOtherSites = $shared
+            OverlapPatients = $sharedVol      # counted at another address too
+        }
+    }
+    $rows = @($rows | Sort-Object -Property @{Expression = 'SharedPatients'; Descending = $true},
+                                            @{Expression = 'Address'; Descending = $false})
+    $totVol = 0; $addrWithVol = 0; $overlap = 0
+    foreach ($r in $rows) {
+        $totVol += [int]$r.SharedPatients
+        if ([int]$r.SharedPatients -gt 0) { $addrWithVol++ }
+        $overlap += [int]$r.OverlapPatients
+    }
+    # The organization's OWN NPI volume, reported separately - it has no
+    # service address and must never be spread across the sites.
+    $orgVol = 0; $orgNpis = 0
+    # -State:'' would trip the pattern validator, so bind it only when set.
+    $famArgs = @{ Name = $Name }
+    if ($State) { $famArgs['State'] = $State }
+    try {
+        $fam = Get-RmProviderFamily @famArgs
+        $orgVol = [int]$fam.TotalPatients; $orgNpis = [int]$fam.Npis
+    } catch { }
+
+    $notes = @(Get-RmMethodologyNotes -Info $info) + @(
+        ''
+        "ADDRESS-LEVEL METHOD: Care Compare lists which clinicians practice at each street address of '$Name'. Those clinicians bill under their OWN NPIs, so their measured referral volume on $($info.Label) can be summed per address. This is the only way to get per-location figures - an organization NPI carries no service address."
+        "COVERAGE: this counts care billed under INDIVIDUAL clinician NPIs. Volume billed under the organization's own NPI(s) ($('{0:N0}' -f $orgVol) patients across $orgNpis NPI(s) here) has no address and is NOT distributed across sites - treat the two as separate views of the same organization."
+        $(if ($overlap -gt 0) { "OVERLAP: some clinicians are listed at more than one address, so their volume is counted at each ($('{0:N0}' -f $overlap) patients affected, see CliniciansAtOtherSites/OverlapPatients). The data cannot say which visit happened at which site, so the figure is not split." })
+        'A clinician with no measured volume either bills through the group NPI or had every pair fall under the 11-patient floor; CliniciansWithVolume shows how many of a site''s roster are actually visible.'
+        'Care Compare reflects TODAY''s rosters while the referral data is historical - a clinician who moved is credited to the address they are listed at now.'
+    ) | Where-Object { $_ }
+
+    [pscustomobject]@{
+        Search = $Name
+        Year = $info.Year
+        Label = $info.Label
+        Addresses = @($rows).Count
+        AddressesWithVolume = $addrWithVol
+        Clinicians = $set.Count
+        AttributedPatients = $totVol
+        OrgNpiPatients = $orgVol
+        OverlapPatients = $overlap
+        Rows = @($rows)
         Notes = @($notes)
     }
 }
@@ -4935,7 +5063,7 @@ Export-ModuleMember -Function @(
     'Get-RmSourceTrend', 'Add-RmSourceTrend',
     'Get-RmCountyMarket', 'Get-RmServiceProfile',
     'Import-RmNppesBulk', 'Import-RmCareCompare', 'Get-RmAffiliatedNpi',
-    'Get-RmProviderFamily',
+    'Get-RmProviderFamily', 'Get-RmLocationReferrals',
     'Import-RmEnrollment', 'Save-RmLocalResources',
     'Export-RmResult', 'Clear-RmStaleTemp'
 )

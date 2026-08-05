@@ -900,12 +900,12 @@ Describe 'Local rosters (NPPES bulk index + Care Compare groups)' {
         )
         $script:DacCsv = Join-Path $script:WorkDir 'DAC_fixture.csv'
         Set-Content -Path $script:DacCsv -Encoding ascii -Value @(
-            'NPI,Ind_PAC_ID,Provider Last Name,Provider First Name,pri_spec,Facility Name,org_pac_id,City/Town,State'
-            '7700000002,1111,BULKPT,BOB,PHYSICAL THERAPY,BULK REHAB PARTNERS,5555,ROLLA,MO'
-            '7700000003,2222,SECOND,SUE,OCCUPATIONAL THERAPY,BULK REHAB PARTNERS,5555,ROLLA,MO'
-            '7700000004,3333,THIRD,TOM,SPEECH LANGUAGE PATHOLOGIST,BULK REHAB PARTNERS,5555,ROLLA,MO'
-            '7700000005,4444,DOCTOR,DAN,INTERNAL MEDICINE,BULK REHAB PARTNERS,5555,ROLLA,MO'
-            '7700000006,5551,OTHER,OLA,PHYSICAL THERAPY,ELSEWHERE PT,7777,SALEM,MO'
+            'NPI,Ind_PAC_ID,Provider Last Name,Provider First Name,pri_spec,Facility Name,org_pac_id,City/Town,State,adr_ln_1,ZIP Code'
+            '7700000002,1111,BULKPT,BOB,PHYSICAL THERAPY,BULK REHAB PARTNERS,5555,ROLLA,MO,1 TEST ST,65401'
+            '7700000003,2222,SECOND,SUE,OCCUPATIONAL THERAPY,BULK REHAB PARTNERS,5555,ROLLA,MO,1 TEST ST,65401'
+            '7700000004,3333,THIRD,TOM,SPEECH LANGUAGE PATHOLOGIST,BULK REHAB PARTNERS,5555,ROLLA,MO,1 TEST ST,65401'
+            '7700000005,4444,DOCTOR,DAN,INTERNAL MEDICINE,BULK REHAB PARTNERS,5555,ROLLA,MO,1 TEST ST,65401'
+            '7700000006,5551,OTHER,OLA,PHYSICAL THERAPY,ELSEWHERE PT,7777,SALEM,MO,1 TEST ST,65401'
         )
     }
 
@@ -1101,9 +1101,9 @@ Describe 'Local rosters (NPPES bulk index + Care Compare groups)' {
         $sa = Get-RmSourceAnalysis -Npi 9000000001 -SkipCompetitors -CentroidPath $script:SaCsv
         (@($sa.Notes) -join ' ') | Should -Not -BeLike '*AFFILIATED CLINICIANS*'
         Set-Content -Path $script:DacCsv -Encoding ascii -Value @(
-            'NPI,Ind_PAC_ID,Provider Last Name,Provider First Name,pri_spec,Facility Name,org_pac_id,City/Town,State'
-            '9000000001,1111,CLINIC,TEST,PHYSICAL THERAPY,TEST REHAB,5555,TESTVILLE,MO'
-            '9000000002,2222,THERAPIST,PAT,PHYSICAL THERAPY,TEST REHAB,5555,TESTVILLE,MO'
+            'NPI,Ind_PAC_ID,Provider Last Name,Provider First Name,pri_spec,Facility Name,org_pac_id,City/Town,State,adr_ln_1,ZIP Code'
+            '9000000001,1111,CLINIC,TEST,PHYSICAL THERAPY,TEST REHAB,5555,TESTVILLE,MO,1 TEST ST,65401'
+            '9000000002,2222,THERAPIST,PAT,PHYSICAL THERAPY,TEST REHAB,5555,TESTVILLE,MO,1 TEST ST,65401'
         )
         Import-RmCareCompare -Path $script:DacCsv | Out-Null
         $sa2 = Get-RmSourceAnalysis -Npi 9000000001 -SkipCompetitors -CentroidPath $script:SaCsv
@@ -1201,6 +1201,76 @@ Describe 'Organization breakdown (chain volume by NPI and address)' {
     It 'filters by state and rejects a nonsense search' {
         (Get-RmProviderFamily -Name 'CHAINREHAB' -State NH).Npis | Should -Be 1
         { Get-RmProviderFamily -Name 'ZZZNOSUCHCHAIN' } | Should -Throw '*No organization NPIs match*'
+    }
+}
+
+Describe 'Address-level referrals (the multi-site workaround)' {
+    BeforeAll {
+        # Care Compare shape: two addresses for one chain, plus a clinician
+        # listed at BOTH (the overlap case), matching the real data where
+        # ~5% of clinicians appear at more than one site.
+        $script:AddrDac = Join-Path $script:WorkDir 'DAC_addr.csv'
+        Set-Content -Path $script:AddrDac -Encoding ascii -Value @(
+            'NPI,Ind_PAC_ID,Provider Last Name,Provider First Name,pri_spec,Facility Name,org_pac_id,City/Town,State,adr_ln_1,ZIP Code'
+            '8000000001,1,DOCTOR,DAVID,PHYSICAL THERAPY,CHAINREHAB NETWORK,5555,TESTVILLE,MO,100 MAIN ST,99999'
+            '9000000002,2,THERAPIST,PAT,PHYSICAL THERAPY,CHAINREHAB NETWORK,5555,TESTVILLE,MO,100 MAIN ST,99999'
+            '9000000005,3,GRAD,NEW,PHYSICAL THERAPY,CHAINREHAB NETWORK,5555,TESTVILLE,MO,200 OAK AVE,99999'
+            '9000000002,2,THERAPIST,PAT,PHYSICAL THERAPY,CHAINREHAB NETWORK,5555,TESTVILLE,MO,200 OAK AVE,99999'
+        )
+        Import-RmCareCompare -Path $script:AddrDac | Out-Null
+    }
+
+    It 'sums each street address from its own clinicians NPIs' {
+        Set-RmActiveDataset -Source hop-teaming -Year 2022 | Out-Null
+        try {
+            $r = Get-RmLocationReferrals -Name 'CHAINREHAB'
+            $r.Addresses | Should -Be 2
+            $main = @($r.Rows | Where-Object Address -eq '100 MAIN ST')[0]
+            $main.Clinicians | Should -Be 2                 # DAVID + PAT
+            # PAT (9000000002) receives 12 and DAVID (8000000001) receives 99
+            # in the hop fixture -> 111 for this address, both visible.
+            $main.SharedPatients | Should -Be 111
+            $main.CliniciansWithVolume | Should -Be 2
+            $oak = @($r.Rows | Where-Object Address -eq '200 OAK AVE')[0]
+            $oak.Clinicians | Should -Be 2
+            $r.AddressesWithVolume | Should -BeGreaterThan 0
+        } finally { Set-RmActiveDataset -Source cms-pspp -Year 2015 | Out-Null }
+    }
+
+    It 'flags a clinician listed at two sites and quantifies the overlap' {
+        Set-RmActiveDataset -Source hop-teaming -Year 2022 | Out-Null
+        try {
+            $r = Get-RmLocationReferrals -Name 'CHAINREHAB'
+            foreach ($row in @($r.Rows)) {
+                $row.CliniciansAtOtherSites | Should -Be 1   # PAT is at both
+            }
+            $r.OverlapPatients | Should -Be 24               # PAT's 12 counted twice
+            (@($r.Notes) -join ' ') | Should -BeLike '*OVERLAP*'
+            (@($r.Notes) -join ' ') | Should -BeLike '*not split*'
+        } finally { Set-RmActiveDataset -Source cms-pspp -Year 2015 | Out-Null }
+    }
+
+    It 'keeps org-NPI volume separate instead of spreading it across sites' {
+        Set-RmActiveDataset -Source hop-teaming -Year 2022 | Out-Null
+        try {
+            $r = Get-RmLocationReferrals -Name 'CHAINREHAB'
+            $sumRows = 0; foreach ($row in @($r.Rows)) { $sumRows += [int]$row.SharedPatients }
+            $r.AttributedPatients | Should -Be $sumRows
+            (@($r.Notes) -join ' ') | Should -BeLike '*no address and is NOT distributed*'
+            (@($r.Notes) -join ' ') | Should -BeLike '*ADDRESS-LEVEL METHOD*'
+        } finally { Set-RmActiveDataset -Source cms-pspp -Year 2015 | Out-Null }
+    }
+
+    It 'refuses clearly when the Care Compare file was never imported' {
+        $bare = Join-Path $script:WorkDir 'no-dac-store'
+        New-Item -ItemType Directory -Path $bare -Force | Out-Null
+        Copy-Item (Join-Path $env:RM_DATA_DIR 'hop_teaming_2022.csv') $bare -ErrorAction SilentlyContinue
+        Copy-Item (Join-Path $env:RM_DATA_DIR 'dataset-meta.json') $bare -ErrorAction SilentlyContinue
+        $saved = (Get-RmConfig).DataDir
+        try {
+            Set-RmConfig -DataDir $bare
+            { Get-RmLocationReferrals -Name 'CHAINREHAB' } | Should -Throw '*Import-RmCareCompare*'
+        } finally { Set-RmConfig -DataDir $saved }
     }
 }
 
