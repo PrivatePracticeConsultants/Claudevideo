@@ -421,7 +421,8 @@ public static class RmEngine
     // the module - a regression test asserts the two agree, because a drift
     // would silently flag the wrong companies.
     static readonly HashSet<string> NoiseWords = new HashSet<string>(new string[] {
-        "LLC","INC","PC","PA","PLLC","LLP","LP","CORP","CORPORATION","COMPANY","CO","THE","OF","AND"
+        "LLC","INC","INCORPORATED","PC","PA","PLLC","LLP","LLLP","LP","LTD","LIMITED",
+        "PLC","SC","PSC","APC","CORP","CORPORATION","COMPANY","CO","PARTNERSHIP","THE","OF","AND"
     });
     public static string OrgNameKey(string name)
     {
@@ -432,8 +433,27 @@ public static class RmEngine
             if ((ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9')) cleaned.Append(ch);
             else cleaned.Append(' ');
         }
+        string[] raw = cleaned.ToString().Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+        // "P.C." tokenizes to "P" "C"; glue runs of single letters back into
+        // one word so the punctuated form matches the plain one.
+        List<string> merged = new List<string>(raw.Length);
+        for (int i = 0; i < raw.Length; )
+        {
+            if (raw[i].Length == 1 && raw[i][0] >= 'A' && raw[i][0] <= 'Z'
+                && i + 1 < raw.Length && raw[i + 1].Length == 1
+                && raw[i + 1][0] >= 'A' && raw[i + 1][0] <= 'Z')
+            {
+                StringBuilder run = new StringBuilder();
+                while (i < raw.Length && raw[i].Length == 1 && raw[i][0] >= 'A' && raw[i][0] <= 'Z')
+                {
+                    run.Append(raw[i]); i++;
+                }
+                merged.Add(run.ToString());
+            }
+            else { merged.Add(raw[i]); i++; }
+        }
         StringBuilder outp = new StringBuilder(name.Length);
-        foreach (string w in cleaned.ToString().Split(' '))
+        foreach (string w in merged)
         {
             if (w.Length == 0 || NoiseWords.Contains(w)) continue;
             if (outp.Length > 0) outp.Append(' ');
@@ -441,6 +461,11 @@ public static class RmEngine
         }
         return outp.ToString();
     }
+
+    // Stamped into the derived chain file. Bump it whenever OrgNameKey
+    // changes, so a table built under the old rules is discarded instead of
+    // being read with keys that no longer match.
+    public const string ChainIndexVersion = "#RMCHAIN|2";
 
     // One pass over the NPPES index -> "nameKey|orgNpiCount|cityCount" for
     // every ORGANIZATION name. In PowerShell this loop cost 541 seconds on
@@ -468,6 +493,7 @@ public static class RmEngine
         long rows = 0;
         using (StreamWriter w = new StreamWriter(dest, false, new UTF8Encoding(false), 1 << 20))
         {
+            w.Write(ChainIndexVersion); w.Write('\n');
             foreach (KeyValuePair<string, int> kv in counts)
             {
                 w.Write(kv.Key); w.Write('|'); w.Write(kv.Value);
@@ -488,6 +514,7 @@ public static class RmEngine
             string line;
             while ((line = r.ReadLine()) != null)
             {
+                if (line.Length > 0 && line[0] == '#') continue;   // version stamp
                 int p1 = line.LastIndexOf('|');
                 if (p1 <= 0) continue;
                 int p0 = line.LastIndexOf('|', p1 - 1);
@@ -4572,6 +4599,13 @@ function Get-RmChainIndex {
         if (-not $stale) {
             $stale = (Get-Item -LiteralPath $cp).LastWriteTimeUtc -lt (Get-Item -LiteralPath $p).LastWriteTimeUtc
         }
+        if (-not $stale) {
+            # A table built under older name-normalisation rules holds keys
+            # that no longer match; the stamp catches that, timestamps cannot.
+            $first = ''
+            try { foreach ($ln in [System.IO.File]::ReadLines($cp)) { $first = $ln; break } } catch { }
+            $stale = ($first -ne [RmEngine]::ChainIndexVersion)
+        }
         if ($stale) {
             Write-Verbose 'Building the chain table from the NPPES index (one time)...'
             $tmp = "$cp.tmp"
@@ -4639,6 +4673,8 @@ foreach ($w in @(
     'AMERICAN', 'NATIONAL', 'UNITED', 'FIRST', 'NEW', 'ALL', 'PRO', 'BACK', 'BODY', 'MOTION',
     'PERFORMANCE', 'RECOVERY', 'RESTORE', 'RENEW', 'BALANCE', 'STRENGTH',
     'PAIN', 'INJURY', 'MOBILITY', 'MOVEMENT', 'FUNCTION', 'FUNCTIONAL', 'KIDS', 'CHILDRENS',
+    'COMPREHENSIVE', 'ASSOCIATED', 'GENERAL', 'MIDWEST', 'METRO', 'METROPOLITAN', 'SUBURBAN',
+    'COMMUNITY', 'UNIVERSAL', 'ALLIED', 'APEX', 'SUMMIT', 'PINNACLE',
     'SENIOR', 'HOME', 'MOBILE', 'SPORTSMED', 'PHYSIO', 'PHYSIOTHERAPY',
     # A state name leads unrelated practices in that state; too weak to group on.
     'ALABAMA', 'ALASKA', 'ARIZONA', 'ARKANSAS', 'CALIFORNIA', 'COLORADO', 'CONNECTICUT',
@@ -5001,12 +5037,26 @@ function Save-RmLocalResources {
     [pscustomobject]@{ Destination = $dest; Manifest = $manifestPath; Files = @($results.ToArray()) }
 }
 
+# Corporate-form words that carry no identity. Measured over the 1,949,379
+# organization names in the real NPPES file, where the most common final
+# words are LLC 28.7%, INC 20.8%, PLLC 6.0%, PC 4.7%, PA 2.5%, LTD 0.7%.
+$script:RmOrgNoiseWords = 'LLC|INC|INCORPORATED|PC|PA|PLLC|LLP|LLLP|LP|LTD|LIMITED|PLC|SC|PSC|APC|CORP|CORPORATION|COMPANY|CO|PARTNERSHIP|THE|OF|AND'
+
 function Get-RmOrgNameKey([string]$Name) {
     # Collapses the corporate-suffix noise that makes one chain look like
     # many companies: "IVYREHAB NETWORK, INC." / "INC." / "INC" -> one key.
     $n = $Name.ToUpperInvariant()
     $n = [regex]::Replace($n, '[^A-Z0-9 ]', ' ')
-    $n = [regex]::Replace($n, '\b(LLC|INC|PC|PA|PLLC|LLP|LP|CORP|CORPORATION|COMPANY|CO|THE|OF|AND)\b', ' ')
+    # Collapse runs of spaces FIRST: the single-letter merge below matches on
+    # one space, and the C# twin splits on whitespace regardless of width, so
+    # "A  B" would key differently in each. (The drift test caught exactly
+    # this.)
+    $n = [regex]::Replace($n, '\s+', ' ').Trim()
+    # Punctuated forms tokenize apart: "P.C." becomes "P C", so 52,156 real
+    # names end in a bare "C" and 20,777 in "A" and would never match their
+    # unpunctuated twins. Glue runs of single letters back together.
+    $n = [regex]::Replace($n, '\b[A-Z](?: [A-Z]\b)+', { $args[0].Value -replace ' ', '' })
+    $n = [regex]::Replace($n, "\b($script:RmOrgNoiseWords)\b", ' ')
     [regex]::Replace($n, '\s+', ' ').Trim()
 }
 

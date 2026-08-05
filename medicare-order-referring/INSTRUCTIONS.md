@@ -262,6 +262,12 @@ and the rule selects just 1.79% of names. Verified live: Ivy Rehab Network
 (15 org NPIs across 14 cities) and ATI Holdings (90 across 56) are flagged; a
 single-location practice with one NPI is not.
 
+Verified on the biggest chain in the data: **Athletico** holds **426
+organization NPIs across 310 cities**, and a single Oak Brook NPI carries
+**732,228 patients from 17,568 distinct referring providers** — 46x what any
+one clinic plausibly draws. That one addressless NPI is 90.6% of the chain's
+measured volume, which is exactly why the by-address view exists.
+
 Two honest limits:
 
 - The flag counts a **name**. A *generic* name shared by unrelated

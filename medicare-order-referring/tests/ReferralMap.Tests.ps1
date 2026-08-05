@@ -1271,10 +1271,47 @@ Describe 'Chain flag (an asterisk on multi-site companies)' {
                 'IVYREHAB NETWORK, INC.', 'IvyRehab Network Inc', 'ATI HOLDINGS, LLC',
                 'Select Physical Therapy Holdings, Inc.', 'THE REHAB CO OF AND OF', '1',
                 'A  B   C', '  PADDED PT LLC  ', 'ACME-PT/OT & SLP, P.C.', 'CO', 'LLC INC PA',
-                'Ünïcode Ptë Ltd', '123 THERAPY 456', 'x')
+                'Ünïcode Ptë Ltd', '123 THERAPY 456', 'x',
+                # punctuated corporate forms must land on the same key as
+                # their plain twins - 52,156 real names end in a bare "C"
+                'SMITH THERAPY P.C.', 'SMITH THERAPY PC', 'JONES REHAB P.A.', 'JONES REHAB PA',
+                'ACME L.L.C.', 'ACME LLC', 'ACME P.L.L.C.', 'BRAND S.C.',
+                'ATHLETICO LTD', 'ATHLETICO, LTD.', 'ATHLETICO INC',
+                'SELECT PT OF ST LOUIS LIMITED PARTNERSHIP', 'VITAMIN C CLINIC', 'J & J THERAPY')
             foreach ($n in $probes) {
                 [RmEngine]::OrgNameKey($n) | Should -Be (Get-RmOrgNameKey $n) -Because "key for '$n' must match"
             }
+        }
+    }
+
+    It 'treats corporate form as noise so one company keeps one key' {
+        InModuleScope ReferralMap {
+            # the real gap this closed: ATHLETICO trades as 'ATHLETICO LTD'
+            (Get-RmOrgNameKey 'ATHLETICO LTD') | Should -Be 'ATHLETICO'
+            (Get-RmOrgNameKey 'ATHLETICO, LTD.') | Should -Be 'ATHLETICO'
+            (Get-RmOrgNameKey 'ATHLETICO INC') | Should -Be 'ATHLETICO'
+            # punctuated professional-corporation forms
+            (Get-RmOrgNameKey 'SMITH THERAPY P.C.') | Should -Be (Get-RmOrgNameKey 'SMITH THERAPY PC')
+            (Get-RmOrgNameKey 'JONES REHAB P.A.') | Should -Be (Get-RmOrgNameKey 'JONES REHAB PA')
+            (Get-RmOrgNameKey 'ACME L.L.C.') | Should -Be (Get-RmOrgNameKey 'ACME LLC')
+            (Get-RmOrgNameKey 'ACME P.L.L.C.') | Should -Be 'ACME'
+            # a lone letter that is part of the NAME must survive
+            (Get-RmOrgNameKey 'VITAMIN C CLINIC') | Should -Be 'VITAMIN C CLINIC'
+        }
+    }
+
+    It 'discards a chain table built under older naming rules' {
+        InModuleScope ReferralMap {
+            $cp = Get-RmChainIndexPath
+            Get-RmChainIndex | Out-Null
+            # stamped, and the stamp is the first line
+            $first = ''
+            foreach ($ln in [System.IO.File]::ReadLines($cp)) { $first = $ln; break }
+            $first | Should -Be ([RmEngine]::ChainIndexVersion)
+            # an old-version file must be rebuilt even though it is NEWER
+            Set-Content -LiteralPath $cp -Value @('#RMCHAIN|1', 'BIGCHAIN THERAPY|99|99') -Encoding ascii
+            $script:RmChainIdx = $null
+            (Get-RmChainDetail 'BIGCHAIN THERAPY LLC').Npis | Should -Be 5
         }
     }
 
