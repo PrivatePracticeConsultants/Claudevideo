@@ -1015,7 +1015,7 @@ $ui.ExportChangesButton.Add_Click({
 # ---------------------------------------------------------------------------
 
 $script:RmClinicCols = @('NPI', 'Name', 'Type', 'Taxonomy', 'City', 'State', 'Zip',
-                         'ReferralSources', 'SharedPatients', 'SameDay', 'ExistedInDataYear')
+                         'ReferralSources', 'SharedPatients', 'SameDay', 'MultiSiteNPI', 'ExistedInDataYear')
 $script:RmSourceCols = @('SourceNPI', 'SourceName', 'SourceSpecialty', 'SourceCity', 'SourceState',
                          'ClinicNPI', 'ClinicName', 'SharedPatients', 'SharedEvents', 'SameDay')
 
@@ -1248,6 +1248,8 @@ $ui.RmRunButton.Add_Click({
                 "($('{0:N0}' -f $sources.Count) source relationships)." +
                 $(if ($tooNew -gt 0) { " $tooNew did not have an NPI yet in $year (their zeros mean 'did not exist', not 'no referrals')." } else { '' }) +
                 $(if ($map.PSObject.Properties['CoverageNote'] -and $map.CoverageNote) { " " + $map.CoverageNote } else { '' }) +
+                $(if (@($clinics | Where-Object { $_.PSObject.Properties['MultiSiteNPI'] -and $_.MultiSiteNPI }).Count) {
+                    " NOTE: $(@($clinics | Where-Object { $_.PSObject.Properties['MultiSiteNPI'] -and $_.MultiSiteNPI }).Count) provider(s) bill under a MULTI-SITE NPI - their volume covers every location that NPI serves, not just this address (see the MultiSiteNPI column)." } else { '' }) +
                 " Reminder: $year vintage — market structure, not current volumes; pairs under 11 patients are excluded per CMS privacy policy. Tip: a prefix like 630* widens the area.")
             Set-Status "Referral map for $($map.Zip) complete."
         } `

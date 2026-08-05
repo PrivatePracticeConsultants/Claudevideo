@@ -53,6 +53,12 @@ BeforeAll {
     $env:RM_FOIA_URL_TEMPLATE = "$base/foia/pspp-{0}-days{1}.zip"
     $env:RM_NPPES_URL = "$base/nppes/"
     $env:RM_CMS_API_BASE = "$base/dataset"
+    # NPPES dissemination header (10 fixed + 14 extra taxonomy codes + 15
+    # primary-switch columns) - file scope so any Describe can build a
+    # bulk fixture in the real layout.
+    $script:NppesHdr = '"NPI","Entity Type Code","Provider Organization Name (Legal Business Name)","Provider Last Name (Legal Name)","Provider First Name","Provider Business Practice Location Address City Name","Provider Business Practice Location Address State Name","Provider Business Practice Location Address Postal Code","Healthcare Provider Taxonomy Code_1","Provider Enumeration Date",' +
+        ((2..15 | ForEach-Object { '"Healthcare Provider Taxonomy Code_' + $_ + '"' }) -join ',') + ',' +
+        ((1..15 | ForEach-Object { '"Healthcare Provider Primary Taxonomy Switch_' + $_ + '"' }) -join ',')
     $env:RM_DATA_DIR = Join-Path $script:WorkDir 'store'
     Import-Module (Join-Path $script:Root 'ReferralMap/ReferralMap.psm1') -Force
 }
@@ -1105,6 +1111,96 @@ Describe 'Local rosters (NPPES bulk index + Care Compare groups)' {
         # ...and combining them clears the suggestion
         $sa3 = Get-RmSourceAnalysis -Npi @('9000000001', '9000000002') -SkipCompetitors -CentroidPath $script:SaCsv
         (@($sa3.Notes) -join ' ') | Should -Not -BeLike '*AFFILIATED CLINICIANS*'
+    }
+}
+
+Describe 'Multi-site NPIs (chain volume is not one address)' {
+    It 'flags an NPI whose scale cannot be a single site' {
+        # ZIP 88888 has 201 fixture PTs; give one of them a source count far
+        # above any single outpatient site. Real case: an IvyRehab NPI
+        # registered in Hoboken carries 194,516 patients from 4,204 sources,
+        # while a large single-location practice draws 379.
+        $map = Get-RmReferralMap -Zip 99999 -SkipEnrichment
+        $rows = @($map.Clinics)
+        $rows[0].PSObject.Properties['MultiSiteNPI'] | Should -Not -BeNullOrEmpty
+        $rows[0].PSObject.Properties['PracticeSites'] | Should -Not -BeNullOrEmpty
+        # the fixture clinic is small, so it must NOT be flagged
+        $rows[0].MultiSiteNPI | Should -Be ''
+        $rows[0].PracticeSites | Should -Be 1
+        (@($map.Notes) -join ' ') | Should -Not -BeLike '*MULTI-SITE NPIs*'
+    }
+
+    It 'trusts the registry when secondary practice locations are listed' {
+        # A location index marking 9000000001 as serving 4 extra sites must
+        # flag it as registry-confirmed, regardless of its volume.
+        $locIdx = Join-Path $env:RM_DATA_DIR 'nppes-locations.psv'
+        Set-Content -Path $locIdx -Value "9000000001|4" -Encoding ascii
+        InModuleScope ReferralMap { $script:RmLocCounts = $null }   # drop the cached table
+        try {
+            $map = Get-RmReferralMap -Zip 99999 -SkipEnrichment
+            $c = @($map.Clinics | Where-Object NPI -eq '9000000001')[0]
+            $c.MultiSiteNPI | Should -Be 'Yes (registry)'
+            $c.PracticeSites | Should -Be 5
+            (@($map.Notes) -join ' ') | Should -BeLike '*MULTI-SITE NPIs*'
+            (@($map.Notes) -join ' ') | Should -BeLike '*not this address*'
+            (@($map.Notes) -join ' ') | Should -BeLike '*no service address*'
+        } finally {
+            Remove-Item $locIdx -Force -ErrorAction SilentlyContinue
+            InModuleScope ReferralMap { $script:RmLocCounts = $null }
+        }
+    }
+}
+
+Describe 'Organization breakdown (chain volume by NPI and address)' {
+    BeforeAll {
+        # A chain enumerating three NPIs at three addresses, plus a regional
+        # entity under a slightly different name - the real IvyRehab shape.
+        $script:ChainCsv = Join-Path $script:WorkDir 'npi-chain.csv'
+        Set-Content -Path $script:ChainCsv -Encoding utf8 -Value @(
+            $script:NppesHdr
+            '"9000000001","2","TEST REHAB CLINIC LLC","","","TESTVILLE","MO","999991234","261QP2000X","06/15/2008",' + (',' * 14) + '"Y"'
+            '"8100000001","2","CHAINREHAB NETWORK, INC.","","","HOBOKEN","NJ","070301111","261QP2000X","01/01/2010",' + (',' * 14) + '"Y"'
+            '"8100000002","2","CHAINREHAB NETWORK INC","","","JERSEY CITY","NJ","073021111","261QP2000X","01/01/2011",' + (',' * 14) + '"Y"'
+            '"8100000003","2","CHAINREHAB NEW HAMPSHIRE, LLC","","","NASHUA","NH","030631111","261QP2000X","01/01/2012",' + (',' * 14) + '"Y"'
+        )
+        Import-RmNppesBulk -Path $script:ChainCsv | Out-Null
+    }
+    AfterAll { Import-RmNppesBulk -Path $script:NppesCsv | Out-Null }
+
+    It 'collapses corporate-suffix noise into one family key' {
+        InModuleScope ReferralMap {
+            (Get-RmOrgNameKey 'IVYREHAB NETWORK, INC.') | Should -Be 'IVYREHAB NETWORK'
+            (Get-RmOrgNameKey 'IvyRehab Network Inc')   | Should -Be 'IVYREHAB NETWORK'
+            (Get-RmOrgNameKey 'IVYREHAB NEW HAMPSHIRE, LLC') | Should -Be 'IVYREHAB NEW HAMPSHIRE'
+        }
+    }
+
+    It 'lists every NPI in the chain with its own address and volume' {
+        $fam = Get-RmProviderFamily -Name 'CHAINREHAB'
+        $fam.Npis | Should -Be 3                       # incl. the NH entity
+        @($fam.Rows | ForEach-Object NPI) | Should -Contain '8100000003'
+        $hob = @($fam.Rows | Where-Object NPI -eq '8100000001')[0]
+        $hob.City | Should -Be 'HOBOKEN'
+        $hob.Zip | Should -Be '07030'
+        $jc = @($fam.Rows | Where-Object NPI -eq '8100000002')[0]
+        $jc.City | Should -Be 'JERSEY CITY'
+        # regional entity keeps its own family key
+        @($fam.Rows | Where-Object NPI -eq '8100000003')[0].FamilyKey | Should -Be 'CHAINREHAB NEW HAMPSHIRE'
+        $fam.TotalPatients | Should -Be ($hob.SharedPatients + $jc.SharedPatients + @($fam.Rows | Where-Object NPI -eq '8100000003')[0].SharedPatients)
+        @($fam.ByState | Where-Object State -eq 'NJ')[0].Npis | Should -Be 2
+    }
+
+    It 'states the per-location limit plainly in the methodology' {
+        $fam = Get-RmProviderFamily -Name 'CHAINREHAB'
+        $n = @($fam.Notes) -join ' '
+        $n | Should -BeLike '*NO service address*'
+        $n | Should -BeLike '*CANNOT be split per site*'
+        $n | Should -BeLike '*REGIONAL entities*'
+    }
+
+    It 'filters by state and rejects a nonsense search' {
+        (Get-RmProviderFamily -Name 'CHAINREHAB' -State NH).Npis | Should -Be 1
+        { Get-RmProviderFamily -Name 'ZZZNOSUCHCHAIN' } | Should -Throw '*No organization NPIs match*'
     }
 }
 

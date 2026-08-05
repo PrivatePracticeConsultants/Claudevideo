@@ -1490,6 +1490,15 @@ function Get-RmReferralMap {
         }
         $row['ReferralSources'] = if ($agg) { $agg.Sources } else { 0 }
         $row['SharedPatients']  = if ($agg) { $agg.Benes } else { 0 }
+        # Is this NPI one site, or a billing NPI covering many? Registered
+        # secondary locations prove multi-site; scale infers it when the
+        # registry is silent (chains often register none).
+        $secLoc = Get-RmSecondaryLocationCount $_.NPI
+        $srcN = if ($agg) { $agg.Sources } else { 0 }
+        $row['PracticeSites'] = if ($secLoc -gt 0) { $secLoc + 1 } else { 1 }
+        $row['MultiSiteNPI'] = if ($secLoc -gt 0) { 'Yes (registry)' }
+                               elseif ($srcN -ge $script:RmSingleSiteSourceCeiling) { 'Likely (scale)' }
+                               else { '' }
         if (-not $isHop) { $row['SameDay'] = if ($agg) { $agg.SameDay } else { 0 } }
         $row['ExistedInDataYear'] = $existed
         [pscustomobject]$row
@@ -1516,8 +1525,22 @@ function Get-RmReferralMap {
             " Try a radius search to see the wider market."
     }
 
+    $multiSite = @($clinicRows | Where-Object { $_.MultiSiteNPI })
+    $multiNote = $null
+    if ($multiSite.Count) {
+        $top3 = @($multiSite | Sort-Object SharedPatients -Descending | Select-Object -First 3 |
+            ForEach-Object { "$($_.Name) ($('{0:N0}' -f $_.SharedPatients) patients from $('{0:N0}' -f $_.ReferralSources) sources)" })
+        $multiNote = ("MULTI-SITE NPIs: $($multiSite.Count) provider(s) here bill under an NPI that covers MORE THAN ONE location, " +
+            "so their volume is the whole footprint of that NPI, not this address: $($top3 -join '; ')" +
+            $(if ($multiSite.Count -gt 3) { ', ...' }) + '. ' +
+            "The MultiSiteNPI column says 'Yes (registry)' when NPPES lists extra practice locations, or 'Likely (scale)' when the NPI draws " +
+            "$($script:RmSingleSiteSourceCeiling)+ distinct referring providers - far more than one outpatient site plausibly has. " +
+            'Shared-patient data carries no service address, so per-location volume cannot be derived from it.')
+    }
+
     $notes = @(Get-RmMethodologyNotes -Info $info -OrganizationsOnly:$OrganizationsOnly) + @(
         $(if ($coverageNote) { $coverageNote })
+        $(if ($multiNote) { $multiNote })
         $(if ($radiusZips) { "RADIUS SEARCH: providers were swept from the $($radiusZips.Count) ZIP code(s) whose US-Census area centroid lies within $RadiusMiles straight-line miles of ZIP $Zip's centroid. DistanceMiles is centroid-to-centroid, not driving distance; PO-box-only ZIPs (absent from the Census table) are not swept." })
         $(if ($notYetEnumerated -gt 0) { '{0} of {1} providers found in this ZIP were issued their NPI after the {2} file''s service window ended, so they cannot appear in it (ExistedInDataYear = No).' -f $notYetEnumerated, $clinicRows.Count, $info.Year })
         $(if ($enrichNote) { $enrichNote })
@@ -4389,6 +4412,30 @@ function Get-RmServiceProfile {
 # ---------------------------------------------------------------------------
 
 function Get-RmNppesIndexPath { Join-Path $script:RmConfig.DataDir 'nppes-index.psv' }
+function Get-RmNppesLocIndexPath { Join-Path $script:RmConfig.DataDir 'nppes-locations.psv' }
+
+# A single outpatient therapy SITE rarely exceeds a few hundred distinct
+# referring providers - a large, busy one-location practice measured 379.
+# An NPI far above that is a billing NPI covering many sites, so its volume
+# must not be read as one address's business. Verified case: IvyRehab's
+# Hoboken-registered NPI carries 194,516 patients from 4,204 sources.
+$script:RmSingleSiteSourceCeiling = 750
+
+$script:RmLocCounts = $null
+function Get-RmSecondaryLocationCount([string]$Npi) {
+    if ($null -eq $script:RmLocCounts) {
+        $t = @{}
+        $p = Get-RmNppesLocIndexPath
+        if (Test-Path -LiteralPath $p) {
+            foreach ($line in [System.IO.File]::ReadLines($p)) {
+                $i = $line.IndexOf('|')
+                if ($i -gt 0) { $t[$line.Substring(0, $i)] = [int]$line.Substring($i + 1) }
+            }
+        }
+        $script:RmLocCounts = $t
+    }
+    if ($script:RmLocCounts.ContainsKey($Npi)) { $script:RmLocCounts[$Npi] } else { 0 }
+}
 
 function Get-RmIndexPrimaryCode([string[]]$f) {
     # Index layout: code_1 at 8, codes 2-15 at 10..23, Switch_1..15 at 24..38.
@@ -4469,7 +4516,41 @@ function Import-RmNppesBulk {
             $rows = [RmEngine]::BuildRosterIndex($src, $tmpOut, $cols)
         }
         Move-Item -LiteralPath $tmpOut -Destination (Get-RmNppesIndexPath) -Force
-        [pscustomobject]@{ Rows = $rows; Path = Get-RmNppesIndexPath
+        # Secondary practice locations (pl_pfile) -> NPI|count. Sparse in
+        # practice (many chains register none), so it CONFIRMS multi-site
+        # but its absence proves nothing.
+        $locRows = 0
+        try {
+            if ([System.IO.Path]::GetExtension($Path).ToLowerInvariant() -eq '.zip') {
+                $zip2 = [System.IO.Compression.ZipFile]::OpenRead($Path)
+                try {
+                    $ple = @($zip2.Entries | Where-Object { $_.Name -match '^pl_pfile_[\d-]+\.csv$' } |
+                        Sort-Object Length -Descending)
+                    if ($ple.Count) {
+                        $st2 = $ple[0].Open()
+                        try {
+                            $locTmp = (Get-RmNppesLocIndexPath) + '.raw'
+                            [void][RmEngine]::BuildRosterIndexFromStream($st2, $locTmp,
+                                @('NPI', 'Provider Secondary Practice Location Address - Postal Code'))
+                            $counts = @{}
+                            foreach ($ln in [System.IO.File]::ReadLines($locTmp)) {
+                                $i = $ln.IndexOf('|')
+                                if ($i -gt 0) {
+                                    $k = $ln.Substring(0, $i)
+                                    if ($counts.ContainsKey($k)) { $counts[$k]++ } else { $counts[$k] = 1 }
+                                }
+                            }
+                            $sw2 = New-Object System.IO.StreamWriter((Get-RmNppesLocIndexPath) + '.tmp', $false, (New-Object System.Text.UTF8Encoding($false)))
+                            try { foreach ($kv in $counts.GetEnumerator()) { $sw2.WriteLine($kv.Key + '|' + $kv.Value); $locRows++ } }
+                            finally { $sw2.Dispose() }
+                            Move-Item -LiteralPath ((Get-RmNppesLocIndexPath) + '.tmp') -Destination (Get-RmNppesLocIndexPath) -Force
+                            Remove-Item -LiteralPath $locTmp -Force -ErrorAction SilentlyContinue
+                        } finally { $st2.Dispose() }
+                    }
+                } finally { $zip2.Dispose() }
+            }
+        } catch { Write-Warning "Secondary practice locations could not be indexed (multi-site detection falls back to scale): $($_.Exception.Message)" }
+        [pscustomobject]@{ Rows = $rows; SecondaryLocationRows = $locRows; Path = Get-RmNppesIndexPath
             Message = "NPPES bulk index built: $('{0:N0}' -f $rows) providers. Lookups now run locally (the live registry stays as fallback)." }
     } finally {
         if ($tmpExtract -and (Test-Path -LiteralPath $tmpExtract)) { Remove-Item -LiteralPath $tmpExtract -Force }
@@ -4631,6 +4712,129 @@ function Save-RmLocalResources {
     [pscustomobject]@{ Destination = $dest; Manifest = $manifestPath; Files = @($results.ToArray()) }
 }
 
+function Get-RmOrgNameKey([string]$Name) {
+    # Collapses the corporate-suffix noise that makes one chain look like
+    # many companies: "IVYREHAB NETWORK, INC." / "INC." / "INC" -> one key.
+    $n = $Name.ToUpperInvariant()
+    $n = [regex]::Replace($n, '[^A-Z0-9 ]', ' ')
+    $n = [regex]::Replace($n, '\b(LLC|INC|PC|PA|PLLC|LLP|LP|CORP|CORPORATION|COMPANY|CO|THE|OF|AND)\b', ' ')
+    [regex]::Replace($n, '\s+', ' ').Trim()
+}
+
+function Get-RmProviderFamily {
+    <#
+    .SYNOPSIS
+      Breaks a multi-location provider organization down by NPI: every NPI
+      whose name matches, its REGISTERED address, its measured referral
+      volume and distinct source count, and whether that NPI covers more
+      than one site. Rolls the whole family up so chain totals are visible.
+    .NOTES
+      HARD LIMIT: shared-patient data records NPI pairs and carries NO
+      service address, so where one NPI bills for several clinics its
+      volume CANNOT be split per location. What is reliable is per-NPI
+      volume and the address that NPI is registered at.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidateLength(3, 100)][string]$Name,
+        [ValidatePattern('^[A-Za-z]{2}$')][string]$State,
+        [switch]$SkipEnrichment
+    )
+    $info = Get-RmDatasetInfo
+    if (-not $info.Ready) {
+        throw "No shared-patient dataset is available yet (Referral map tab: download the CMS dataset or import a CareSet file)."
+    }
+    $needle = Get-RmOrgNameKey $Name
+    if (-not $needle) { throw "Enter part of an organization name (letters or numbers)." }
+
+    $members = @{}
+    $idx = Get-RmNppesIndexPath
+    if (Test-Path -LiteralPath $idx) {
+        foreach ($line in [System.IO.File]::ReadLines($idx)) {
+            $f = $line.Split('|')
+            if ($f.Count -lt 10 -or $f[1] -ne '2' -or -not $f[2]) { continue }
+            $key = Get-RmOrgNameKey $f[2]
+            if ($key -notlike "*$needle*") { continue }
+            if ($State -and $f[6] -ne $State.ToUpperInvariant()) { continue }
+            $members[$f[0]] = [pscustomobject]@{
+                NPI = $f[0]; Name = $f[2]; FamilyKey = $key
+                City = $f[5]; State = $f[6]
+                Zip = $(if ($f[7].Length -ge 5) { $f[7].Substring(0, 5) } else { $f[7] })
+            }
+        }
+    } else {
+        foreach ($r in @(Find-RmPractice -Name $Name -State:$State | Where-Object { $_.Type -eq 'Organization' })) {
+            $members[$r.NPI] = [pscustomobject]@{
+                NPI = $r.NPI; Name = $r.Name; FamilyKey = Get-RmOrgNameKey $r.Name
+                City = $r.City; State = $r.State; Zip = $r.Zip
+            }
+        }
+    }
+    if (-not $members.Count) { throw "No organization NPIs match '$Name'$(if ($State) { " in $State" })." }
+
+    $set = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($k in $members.Keys) { [void]$set.Add($k) }
+    Write-Verbose "Scanning $($info.Label) for $($set.Count) NPI(s) in this organization..."
+    $agg = @{}
+    foreach ($e in @([RmEngine]::ScanInbound($info.Path, $set, $info.Format))) {
+        if (-not $agg.ContainsKey($e.TargetNpi)) { $agg[$e.TargetNpi] = [pscustomobject]@{ Benes = 0; Sources = 0 } }
+        $agg[$e.TargetNpi].Benes += $e.BeneCount
+        $agg[$e.TargetNpi].Sources += 1
+    }
+
+    $rows = foreach ($m in $members.Values) {
+        $a = if ($agg.ContainsKey($m.NPI)) { $agg[$m.NPI] } else { $null }
+        $sec = Get-RmSecondaryLocationCount $m.NPI
+        $srcN = if ($a) { $a.Sources } else { 0 }
+        [pscustomobject]@{
+            NPI = $m.NPI; Name = $m.Name
+            City = $m.City; State = $m.State; Zip = $m.Zip
+            ReferralSources = $srcN
+            SharedPatients = $(if ($a) { $a.Benes } else { 0 })
+            PracticeSites = $(if ($sec -gt 0) { $sec + 1 } else { 1 })
+            MultiSiteNPI = $(if ($sec -gt 0) { 'Yes (registry)' }
+                             elseif ($srcN -ge $script:RmSingleSiteSourceCeiling) { 'Likely (scale)' }
+                             else { '' })
+            FamilyKey = $m.FamilyKey
+        }
+    }
+    $rows = @($rows | Sort-Object -Property @{Expression = 'SharedPatients'; Descending = $true},
+                                            @{Expression = 'NPI'; Descending = $false})
+    $totVol = 0; $totSrc = 0; $withVol = 0; $multi = 0
+    foreach ($r in $rows) {
+        $totVol += [int]$r.SharedPatients; $totSrc += [int]$r.ReferralSources
+        if ([int]$r.SharedPatients -gt 0) { $withVol++ }
+        if ($r.MultiSiteNPI) { $multi++ }
+    }
+    $byState = @($rows | Group-Object State | ForEach-Object {
+        $v = 0; foreach ($x in $_.Group) { $v += [int]$x.SharedPatients }
+        [pscustomobject]@{ State = $_.Name; Npis = $_.Count; SharedPatients = $v
+            PctOfFamily = if ($totVol -gt 0) { [math]::Round(100.0 * $v / $totVol, 1) } else { 0 } }
+    } | Sort-Object SharedPatients -Descending)
+
+    $notes = @(Get-RmMethodologyNotes -Info $info) + @(
+        ''
+        "ORGANIZATION BREAKDOWN: every NPPES ORGANIZATION NPI whose name matches '$Name'$(if ($State) { " in $State" }), with its registered practice address and its own measured referral volume on $($info.Label)."
+        'PER-LOCATION LIMIT: the shared-patient file records NPI-to-NPI pairs and carries NO service address. Where one NPI bills for several clinics, its volume covers ALL of them and CANNOT be split per site. Rows flagged in MultiSiteNPI are exactly those cases.'
+        "MultiSiteNPI = 'Yes (registry)' when NPPES lists extra practice locations for that NPI; 'Likely (scale)' when it draws $($script:RmSingleSiteSourceCeiling)+ distinct referring providers, which no single outpatient site plausibly does (a large one-location practice measured 379)."
+        'Chains also enumerate REGIONAL entities under slightly different names (e.g. "<Brand> New Hampshire, LLC"); those appear as separate rows here when the name still matches, and under their own FamilyKey.'
+        'A blank volume means that NPI has no measured pair in this data year - commonly a location that bills through a sibling NPI, or one whose pairs all fell under the 11-patient floor.'
+    )
+    [pscustomobject]@{
+        Search = $Name
+        Year = $info.Year
+        Label = $info.Label
+        Npis = @($rows).Count
+        NpisWithVolume = $withVol
+        MultiSiteNpis = $multi
+        TotalPatients = $totVol
+        TotalSourceLinks = $totSrc
+        Rows = @($rows)
+        ByState = @($byState)
+        Notes = @($notes)
+    }
+}
+
 function Get-RmSourceSpecialtyMix {
     <#
     .SYNOPSIS
@@ -4731,6 +4935,7 @@ Export-ModuleMember -Function @(
     'Get-RmSourceTrend', 'Add-RmSourceTrend',
     'Get-RmCountyMarket', 'Get-RmServiceProfile',
     'Import-RmNppesBulk', 'Import-RmCareCompare', 'Get-RmAffiliatedNpi',
+    'Get-RmProviderFamily',
     'Import-RmEnrollment', 'Save-RmLocalResources',
     'Export-RmResult', 'Clear-RmStaleTemp'
 )
