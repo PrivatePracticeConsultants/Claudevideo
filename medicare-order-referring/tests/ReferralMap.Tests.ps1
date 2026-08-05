@@ -2216,6 +2216,27 @@ Describe 'Source analysis report' {
         }
     }
 
+    It 'explains distant dots as centralized services, not distant referrers' {
+        # A real user asked why a Carmichael CA practice showed circles in
+        # Berkeley, Cleveland and New York. The pairs are real; the dot sits
+        # at the source's REGISTERED address, which for a reference lab or a
+        # teleradiology read is a corporate office.
+        $far = Join-Path $script:WorkDir 'geo-far-centroids.csv'
+        Set-Content -Path $far -Encoding ascii -Value @(
+            'zip,lat,lon'
+            '99999,38.6,-121.3'      # the practice
+            '99998,38.65,-121.35'    # ~4 mi: a local orthopedist
+            '88801,34.2,-118.6'      # ~350 mi: a reference lab
+        )
+        $sa = Get-RmSourceAnalysis -Npi 9000000001 -SkipCompetitors -CentroidPath $far
+        $sa.PSObject.Properties['DistantNote'] | Should -Not -BeNullOrEmpty
+        if ($sa.DistantNote) {
+            $sa.DistantNote | Should -BeLike '*DISTANT DOTS*'
+            $sa.DistantNote | Should -BeLike '*REGISTERED*'
+            $sa.DistantNote | Should -BeLike '*co-occurring care*'
+        }
+    }
+
     It 'rolls sources up by ZIP for the embedded heat map (no extra scan)' {
         $sa = Get-RmSourceAnalysis -Npi 9000000001 -SkipCompetitors -CentroidPath $script:SaCsv
         $geo = @($sa.Geo)

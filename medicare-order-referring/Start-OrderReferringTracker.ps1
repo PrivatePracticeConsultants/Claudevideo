@@ -2499,6 +2499,9 @@ $ui.LkAnalysisButton.Add_Click({
                 "top-5 dependence $($sa.Top5Pct)%, concentration $($sa.Concentration) (HHI $('{0:N0}' -f $sa.HHI))." +
                 $rankBit + $trendBit2 + " Top 25 sources shown:")
             $ui.LkSaveReportButton.IsEnabled = $true
+            if ($sa.PSObject.Properties['DistantNote'] -and $sa.DistantNote) {
+                $ui.LkInboundLabel.Text += ' ' + $sa.DistantNote
+            }
             Set-Status "Source analysis ready - click 'Save report (HTML)...' for the full report with charts."
         } `
         -OnFail {

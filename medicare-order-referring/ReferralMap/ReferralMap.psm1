@@ -3093,6 +3093,52 @@ function Get-RmSourceAnalysis {
     } | Sort-Object -Property @{Expression = 'SharedPatients'; Descending = $true},
                               @{Expression = 'Zip'; Descending = $false})
 
+    # DISTANT SOURCES. A real user asked why a Carmichael CA practice showed
+    # circles in Berkeley, Cleveland and New York. The pairs are real, but
+    # the DOT IS PLOTTED AT THE SOURCE'S REGISTERED ADDRESS, and centralized
+    # services register centrally: on that practice, 88.4% of mapped volume
+    # sat within 40 miles and 78% of the remainder was reference labs
+    # (Quest Nichols Institute, LabCorp, Cleveland HeartLab, Exact
+    # Sciences), teleradiology reads and a pharmacy chain's corporate NPI.
+    # Those are co-occurring care, not distant referrers - so the map says
+    # so instead of leaving the reader to guess.
+    $remoteSpecialties = @('LABORATOR', 'PATHOLOG', 'RADIOLOG', 'PHARMAC', 'DURABLE MEDICAL',
+                           'PROSTHETIC', 'ORTHOTIC', 'SUPPLIER', 'AMBULANCE', 'TELEHEALTH')
+    $farCut = 40.0
+    $farVol = 0; $farRemote = 0; $farZips = 0
+    $farBySpec = @{}
+    foreach ($gr in $geoRows) {
+        if ($gr.DistanceMiles -isnot [double] -or $gr.DistanceMiles -le $farCut) { continue }
+        $farZips++; $farVol += [int]$gr.SharedPatients
+    }
+    foreach ($e in $edges) {
+        $d = $detail[$e.SourceNpi]
+        if (-not $d) { continue }
+        $z = [string]$d.Zip
+        if ($z.Length -lt 5 -or -not $centroids.ContainsKey($z) -or -not $pracLoc) { continue }
+        $dist = Get-RmMilesBetween $pracLoc[0] $pracLoc[1] $centroids[$z][0] $centroids[$z][1]
+        if ($dist -le $farCut) { continue }
+        $spec = ([string]$d.Specialty).ToUpperInvariant()
+        $isRemote = $false
+        foreach ($rs in $remoteSpecialties) { if ($spec.Contains($rs)) { $isRemote = $true; break } }
+        if ($isRemote) { $farRemote += $e.BeneCount }
+        $key = if ($d.Specialty) { [string]$d.Specialty } else { '(specialty not looked up)' }
+        if (-not $farBySpec.ContainsKey($key)) { $farBySpec[$key] = 0 }
+        $farBySpec[$key] += $e.BeneCount
+    }
+    $distantNote = $null
+    if ($farVol -gt 0 -and $total -gt 0) {
+        $topFar = @($farBySpec.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 3 |
+            ForEach-Object { "$($_.Key) ($('{0:N0}' -f $_.Value))" })
+        $distantNote = ("DISTANT DOTS: $('{0:N0}' -f $farVol) patients ($([math]::Round(100.0 * $farVol / $total, 1))% of measured volume) " +
+            "come from sources registered more than $([int]$farCut) miles away, across $farZips ZIP area(s)" +
+            $(if ($farRemote -gt 0) { ", and $([math]::Round(100.0 * $farRemote / $farVol))% of that is centralized services" }) + ". " +
+            "A source is plotted at the address its NPI is REGISTERED at, which for a reference lab, a teleradiology read, " +
+            "a pharmacy chain or a DME supplier is a corporate office far from where the patient was actually seen - the " +
+            "specimen was drawn locally and processed elsewhere. Biggest distant contributors: " + ($topFar -join '; ') + ". " +
+            "Read these as co-occurring care, not as an out-of-area referral base; the local cluster is the outreach map.")
+    }
+
     # Concentration metrics. HHI on shares (0-10,000): sum of squared
     # percentage shares — the antitrust-style concentration index.
     $hhi = 0.0
@@ -3414,6 +3460,7 @@ function Get-RmSourceAnalysis {
         Geo          = @($geoRows)          # per-ZIP roll-up for the heat map
         GeoMarket    = @($geoMarket)        # per-ZIP area volume + capture rate
         GeoUnmappedPatients = $geoUnmapped  # volume with no locatable source ZIP
+        DistantNote  = $distantNote         # $null when nothing is far away
         Market       = $market              # county Medicare market (CMS enrollment); $null offline
         ServiceProfile = $svcProfile        # real billed therapy claims (CMS P&S); $null offline
         Outbound     = @($outboundRows)   # free: the same pass carried both directions
@@ -4317,7 +4364,8 @@ $lossRows
             }) -join "`n"
             $zipNote = "Top $([math]::Min(15, $geo.Count)) of $('{0:N0}' -f $geo.Count) source ZIP areas; " +
                 "$('{0:N0}' -f $geoMapped) of $('{0:N0}' -f $a.TotalPatients) patients mappable" +
-                $(if ($geoUn -gt 0) { " ($('{0:N0}' -f $geoUn) from sources without a locatable ZIP)" }) + '.'
+                $(if ($geoUn -gt 0) { " ($('{0:N0}' -f $geoUn) from sources without a locatable ZIP)" }) + '.' +
+                $(if ($a.PSObject.Properties['DistantNote'] -and $a.DistantNote) { ' ' + $a.DistantNote })
             $capNoteHtml = if (@($mkt).Count) {
                 'AREA / CAPTURE columns: total therapy volume that ZIP sends to ANY comparable provider within the radius, and this practice''s share of it. A big ZIP with a low capture rate is an outreach target.'
             } else {
