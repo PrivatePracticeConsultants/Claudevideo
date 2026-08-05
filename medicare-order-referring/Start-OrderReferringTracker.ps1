@@ -423,6 +423,47 @@ $xaml = @'
         </Grid>
       </TabItem>
 
+      <!-- ============ Multi-site chains tab ============ -->
+      <TabItem Header="Multi-site chains">
+        <Grid Margin="10">
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+          </Grid.RowDefinitions>
+          <TextBlock Grid.Row="0" TextWrapping="Wrap" Foreground="#4A5560" Margin="0,0,0,8"
+              Text="Break a chain (Ivy Rehab, ATI, Select, Athletico...) down into its parts. BY NPI lists every organization NPI trading under that name with its registered address and measured volume. BY ADDRESS goes further: it uses the Care Compare roster to find the clinicians at each street address and sums THEIR referral volume, which is the only way to get per-location figures - an organization NPI carries no service address."/>
+          <WrapPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,6">
+            <TextBlock Text="Organization name:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+            <TextBox x:Name="ChNameBox" Width="220" Height="28" VerticalContentAlignment="Center"
+                     ToolTip="Part of the chain's name, e.g. IVYREHAB or ATI PHYSICAL THERAPY"/>
+            <TextBlock Text="State:" VerticalAlignment="Center" Margin="10,0,4,0"/>
+            <TextBox x:Name="ChStateBox" Width="46" Height="28" VerticalContentAlignment="Center" MaxLength="2"
+                     CharacterCasing="Upper" ToolTip="Optional 2-letter state to narrow to one region"/>
+            <TextBlock Text="ZIP:" VerticalAlignment="Center" Margin="10,0,4,0"/>
+            <TextBox x:Name="ChZipBox" Width="70" Height="28" VerticalContentAlignment="Center" MaxLength="5"
+                     ToolTip="Optional 5-digit ZIP - by address only, to isolate one location"/>
+            <Button x:Name="ChNpiButton" Content="Break down by NPI" Padding="12,5" Margin="14,0,0,0"
+                    ToolTip="Every organization NPI under this name: registered address, measured referral volume, and whether that NPI covers several sites."/>
+            <Button x:Name="ChAddrButton" Content="Break down by ADDRESS" Padding="12,5" Margin="8,0,0,0"
+                    ToolTip="Per-location referral volume, built from the individual clinicians Care Compare lists at each street address. Needs the Care Compare file (Practice groups tab: Download CMS dataset)."/>
+            <Button x:Name="ChExportButton" Content="Export..." Padding="10,4" Margin="10,0,0,0" IsEnabled="False"/>
+          </WrapPanel>
+          <TextBlock Grid.Row="2" x:Name="ChLabel" FontWeight="SemiBold" Foreground="#1F3B57" Margin="0,2,0,4"
+                     TextWrapping="Wrap" Text="Enter a chain name and pick a breakdown."/>
+          <DataGrid Grid.Row="3" x:Name="ChGrid" IsReadOnly="True" AutoGenerateColumns="True"
+                    CanUserAddRows="False" GridLinesVisibility="Horizontal"
+                    HeadersVisibility="Column" EnableRowVirtualization="True"/>
+          <Border Grid.Row="4" Background="White" BorderBrush="#D5DBE1" BorderThickness="1"
+                  CornerRadius="4" Padding="9,7" Margin="0,8,0,0">
+            <TextBlock x:Name="ChSummary" Foreground="#26333E" TextWrapping="Wrap"
+              Text="Needs a referral dataset (Referral map tab). The by-address breakdown also needs the Care Compare clinician file from the Practice groups tab."/>
+          </Border>
+        </Grid>
+      </TabItem>
+
       <!-- ============ Provider 360 lookup tab ============ -->
       <TabItem Header="Provider lookup">
         <Grid Margin="10">
@@ -544,6 +585,8 @@ foreach ($name in @(
     'PgZipBox', 'PgRunButton', 'PgDownloadButton', 'PgDataStatus', 'PgGroupGrid',
     'PgRosterLabel', 'PgFootprintButton', 'PgViewCombo', 'PgTrendButton', 'PgExportGroupsButton', 'PgExportRosterButton',
     'PgRosterGrid', 'PgSummary',
+    'ChNameBox', 'ChStateBox', 'ChZipBox', 'ChNpiButton', 'ChAddrButton', 'ChExportButton',
+    'ChLabel', 'ChGrid', 'ChSummary',
     'LkNpiBox', 'LkRunButton', 'LkTrendButton', 'LkExportTrendButton',
     'LkGeoButton', 'LkSaveMapButton', 'LkAnalysisButton', 'LkSaveReportButton', 'LkTrendCheck', 'LkDetail',
     'LkInboundLabel', 'LkExportInboundButton',
@@ -620,6 +663,7 @@ function Set-Busy([bool]$On, [string]$Message) {
                      $ui.RmRunButton, $ui.RmDownloadButton, $ui.RmImportButton, $ui.RmDatasetCombo, $ui.RmRadiusCombo,
                      $ui.BmSearchButton,
                      $ui.PgRunButton, $ui.PgDownloadButton, $ui.PgFootprintButton,
+                     $ui.ChNpiButton, $ui.ChAddrButton,
                      $ui.LkRunButton, $ui.LkTrendButton, $ui.LkGeoButton, $ui.LkAnalysisButton, $ui.WlCheckButton)) {
         $b.IsEnabled = -not $On
     }
@@ -2008,6 +2052,115 @@ $ui.LkSaveMapButton.Add_Click({
         }
     } catch {
         Show-ErrorBox "Saving the map failed: $($_.Exception.Message)"
+    }
+})
+
+# ---------------------------------------------------------------------------
+# Multi-site chains: an organization NPI carries no service address, so a
+# chain's volume cannot be split by NPI alone. Two complementary views —
+# BY NPI (what each legal entity draws) and BY ADDRESS (what each clinic
+# draws, reconstructed from the clinicians Care Compare lists there).
+# ---------------------------------------------------------------------------
+$script:ChResult = $null
+$script:ChKind = ''
+
+function Get-ChSearchArgs {
+    $name = $ui.ChNameBox.Text.Trim()
+    if ($name.Length -lt 3) {
+        Show-ErrorBox 'Enter at least 3 letters of the organization name, e.g. IVYREHAB.'
+        return $null
+    }
+    if (-not (Get-RmStatus).DatasetReady) {
+        Show-ErrorBox ("No referral dataset is available yet - on the Referral map tab, click " +
+            "'Download CMS dataset' (free 2015 data) or 'Import CareSet file' first.")
+        return $null
+    }
+    $a = @{ Name = $name }
+    $st = $ui.ChStateBox.Text.Trim()
+    if ($st) {
+        if ($st -notmatch '^[A-Za-z]{2}$') { Show-ErrorBox 'State must be two letters, e.g. NJ. Leave it blank for nationwide.'; return $null }
+        $a['State'] = $st.ToUpperInvariant()
+    }
+    $a
+}
+
+$ui.ChNpiButton.Add_Click({
+    if ($script:Busy) { return }
+    $a = Get-ChSearchArgs
+    if (-not $a) { return }
+    $ui.ChExportButton.IsEnabled = $false
+    Invoke-Async -Kind 'ch-npi' -Params @{ RmModulePath = $script:RmModulePath; SearchArgs = $a } `
+        -BusyMessage ("Finding every NPI trading as '$($a.Name)' and measuring each one's referral volume - " +
+            "one pass over $script:RmRowsLabel pairs, usually a few minutes.") `
+        -WorkerScript 'param($RmModulePath, $SearchArgs) Import-Module $RmModulePath; Get-RmProviderFamily @SearchArgs' `
+        -OnDone {
+            param($result)
+            $f = $result[0]
+            $script:ChResult = $f; $script:ChKind = 'npi'
+            $ui.ChGrid.ItemsSource = (ConvertTo-DataTable -Rows @($f.Rows) -Columns @(
+                'NPI', 'Name', 'City', 'State', 'Zip', 'SharedPatients', 'ReferralSources',
+                'PracticeSites', 'MultiSiteNPI')).DefaultView
+            $ui.ChLabel.Text = ("BY NPI - '$($f.Search)' in $($f.Label): $('{0:N0}' -f $f.Npis) organization NPI(s), " +
+                "$($f.NpisWithVolume) with measured volume, $('{0:N0}' -f $f.TotalPatients) patients in total.")
+            $top = @($f.ByState | Select-Object -First 4 | ForEach-Object { "$($_.State) $($_.PctOfFamily)%" }) -join ', '
+            $ui.ChSummary.Text = ("Volume by state: $top. " +
+                "$($f.MultiSiteNpis) NPI(s) are flagged MULTI-SITE - their volume covers every clinic that NPI bills for and " +
+                "CANNOT be split per location from this data. Use 'Break down by ADDRESS' for per-clinic figures.")
+            $ui.ChExportButton.IsEnabled = $true
+            Set-Status "Chain breakdown by NPI ready - $('{0:N0}' -f $f.TotalPatients) patients across $($f.Npis) NPI(s)."
+        } `
+        -OnFail { param($message) Show-ErrorBox "Chain breakdown failed: $message" }
+})
+
+$ui.ChAddrButton.Add_Click({
+    if ($script:Busy) { return }
+    $a = Get-ChSearchArgs
+    if (-not $a) { return }
+    $zip = $ui.ChZipBox.Text.Trim()
+    if ($zip) {
+        if ($zip -notmatch '^\d{5}$') { Show-ErrorBox 'ZIP must be 5 digits. Leave it blank for every location.'; return }
+        $a['Zip'] = $zip
+    }
+    $ui.ChExportButton.IsEnabled = $false
+    Invoke-Async -Kind 'ch-addr' -Params @{ RmModulePath = $script:RmModulePath; SearchArgs = $a } `
+        -BusyMessage ("Building per-location referral figures for '$($a.Name)' from the Care Compare roster - " +
+            "one pass over $script:RmRowsLabel pairs, usually a few minutes.") `
+        -WorkerScript 'param($RmModulePath, $SearchArgs) Import-Module $RmModulePath; Get-RmLocationReferrals @SearchArgs' `
+        -OnDone {
+            param($result)
+            $r = $result[0]
+            $script:ChResult = $r; $script:ChKind = 'addr'
+            $ui.ChGrid.ItemsSource = (ConvertTo-DataTable -Rows @($r.Rows) -Columns @(
+                'Address', 'City', 'State', 'Zip', 'SharedPatients', 'ReferralSources',
+                'Clinicians', 'CliniciansWithVolume', 'CliniciansAtOtherSites', 'SharedSitePatients')).DefaultView
+            $ui.ChLabel.Text = ("BY ADDRESS - '$($r.Search)' in $($r.Label): $('{0:N0}' -f $r.Addresses) location(s), " +
+                "$('{0:N0}' -f $r.AddressesWithVolume) with measured volume, " +
+                "$('{0:N0}' -f $r.AttributedPatients) patients attributed across $('{0:N0}' -f $r.Clinicians) clinicians.")
+            $overlapBit = if ($r.DoubleCountedPatients -gt 0) {
+                (" The rows below add up to $('{0:N0}' -f $r.AddressRowTotal) because clinicians listed at MORE THAN ONE address are " +
+                 "credited to each of their sites; the $('{0:N0}' -f $r.DoubleCountedPatients)-patient gap is that overlap (see CliniciansAtOtherSites / SharedSitePatients).")
+            } else { '' }
+            $ui.ChSummary.Text = ("This counts care billed under INDIVIDUAL clinician NPIs. A further " +
+                "$('{0:N0}' -f $r.OrgNpiPatients) patients are billed under the organization's own NPI(s), which carry no " +
+                "service address and are NOT spread across the sites - treat the two as separate views." + $overlapBit +
+                " Export for the full table with methodology.")
+            $ui.ChExportButton.IsEnabled = $true
+            Set-Status "Per-location breakdown ready - $('{0:N0}' -f $r.AttributedPatients) patients across $($r.AddressesWithVolume) location(s)."
+        } `
+        -OnFail { param($message) Show-ErrorBox "Per-location breakdown failed: $message" }
+})
+
+$ui.ChExportButton.Add_Click({
+    if (-not $script:ChResult) { return }
+    $slug = ($script:ChResult.Search -replace '[^A-Za-z0-9]', '').ToLowerInvariant()
+    if ($script:ChKind -eq 'addr') {
+        Export-RmWithDialog -Rows @($script:ChResult.Rows) -Notes @($script:ChResult.Notes) `
+            -SuggestedName "chain-by-address-$slug.csv" `
+            -Description "Per-location referral volume for '$($script:ChResult.Search)' ($($script:ChResult.Label)), built from Care Compare practice addresses"
+    } else {
+        Export-RmWithDialog -Rows @($script:ChResult.Rows) -Notes @($script:ChResult.Notes) `
+            -SuggestedName "chain-by-npi-$slug.csv" `
+            -Description "Referral volume by organization NPI for '$($script:ChResult.Search)' ($($script:ChResult.Label))"
     }
 })
 

@@ -4917,17 +4917,23 @@ function Get-RmLocationReferrals {
             SharedPatients = $tv
             ReferralSources = $ts
             CliniciansAtOtherSites = $shared
-            OverlapPatients = $sharedVol      # counted at another address too
+            SharedSitePatients = $sharedVol   # of this row, also counted elsewhere
         }
     }
     $rows = @($rows | Sort-Object -Property @{Expression = 'SharedPatients'; Descending = $true},
                                             @{Expression = 'Address'; Descending = $false})
-    $totVol = 0; $addrWithVol = 0; $overlap = 0
+    $rowTotal = 0; $addrWithVol = 0
     foreach ($r in $rows) {
-        $totVol += [int]$r.SharedPatients
+        $rowTotal += [int]$r.SharedPatients
         if ([int]$r.SharedPatients -gt 0) { $addrWithVol++ }
-        $overlap += [int]$r.OverlapPatients
     }
+    # The headline total must count each CLINICIAN once. Summing the address
+    # rows would double-count anyone listed at several sites (measured: 350
+    # IvyRehab addresses sum to 581,483, but the 1,668 clinicians behind them
+    # hold 521,938 - an 11% overstatement if the row sum were the headline).
+    $totVol = 0
+    foreach ($n in $set) { if ($vol.ContainsKey($n)) { $totVol += [int]$vol[$n].Benes } }
+    $double = $rowTotal - $totVol
     # The organization's OWN NPI volume, reported separately - it has no
     # service address and must never be spread across the sites.
     $orgVol = 0; $orgNpis = 0
@@ -4943,7 +4949,7 @@ function Get-RmLocationReferrals {
         ''
         "ADDRESS-LEVEL METHOD: Care Compare lists which clinicians practice at each street address of '$Name'. Those clinicians bill under their OWN NPIs, so their measured referral volume on $($info.Label) can be summed per address. This is the only way to get per-location figures - an organization NPI carries no service address."
         "COVERAGE: this counts care billed under INDIVIDUAL clinician NPIs. Volume billed under the organization's own NPI(s) ($('{0:N0}' -f $orgVol) patients across $orgNpis NPI(s) here) has no address and is NOT distributed across sites - treat the two as separate views of the same organization."
-        $(if ($overlap -gt 0) { "OVERLAP: some clinicians are listed at more than one address, so their volume is counted at each ($('{0:N0}' -f $overlap) patients affected, see CliniciansAtOtherSites/OverlapPatients). The data cannot say which visit happened at which site, so the figure is not split." })
+        $(if ($double -gt 0) { "DOUBLE COUNTING: some clinicians are listed at more than one address, and the data cannot say which visit happened where, so their volume is credited to EACH of their sites. The address rows therefore sum to $('{0:N0}' -f $rowTotal) while the clinicians behind them hold $('{0:N0}' -f $totVol) - $('{0:N0}' -f $double) patients of overlap. AttributedPatients is the de-duplicated figure; per row, SharedSitePatients shows how much of that site's number is also counted elsewhere." })
         'A clinician with no measured volume either bills through the group NPI or had every pair fall under the 11-patient floor; CliniciansWithVolume shows how many of a site''s roster are actually visible.'
         'Care Compare reflects TODAY''s rosters while the referral data is historical - a clinician who moved is credited to the address they are listed at now.'
     ) | Where-Object { $_ }
@@ -4955,9 +4961,10 @@ function Get-RmLocationReferrals {
         Addresses = @($rows).Count
         AddressesWithVolume = $addrWithVol
         Clinicians = $set.Count
-        AttributedPatients = $totVol
+        AttributedPatients = $totVol      # each clinician counted once
+        AddressRowTotal = $rowTotal       # what the rows below add up to
+        DoubleCountedPatients = $double   # the gap between the two
         OrgNpiPatients = $orgVol
-        OverlapPatients = $overlap
         Rows = @($rows)
         Notes = @($notes)
     }

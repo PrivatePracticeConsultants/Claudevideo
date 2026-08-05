@@ -248,7 +248,63 @@ extra volume not counted here (benchmark it on the Practice benchmark tab),
 and "missed" can also mean the relationship exists but fell under the
 11-patient privacy floor.
 
-### Tab 7 — Provider lookup
+### Tab 7 — Multi-site chains
+*"Ivy Rehab has a clinic in my ZIP. How many referrals go to THAT clinic?"*
+
+Big chains break every simple count. Ivy Rehab trades under 60 different
+organization NPIs, and the biggest of them draws 4,204 distinct referring
+providers — no single clinic does that, so that number is really dozens of
+clinics added together. This tab pulls a chain apart two ways.
+
+Type part of the chain's name (`IVYREHAB`, `ATI PHYSICAL THERAPY`, `SELECT
+PHYSICAL THERAPY`…), optionally a state, then pick a breakdown.
+
+**Break down by NPI** lists every organization NPI trading under that name:
+its registered city/ZIP, the patients and distinct referral sources measured
+against it, how many practice sites the registry lists for it, and a
+`MultiSiteNPI` flag. The summary line gives you the chain's split by state.
+Rows flagged `Yes (registry)` or `Likely (scale)` are the ones whose volume
+covers several clinics at once and **cannot** be split any further from the
+referral data — that is a hard limit of the data, not of the app.
+
+**Break down by ADDRESS** is the way around that limit. The Care Compare file
+(the same download the Practice groups tab uses) lists which *clinicians*
+practice at each street address. Those clinicians bill under their own NPIs,
+and the referral data does carry volume against them — so summing per address
+gives you a real per-clinic number. For Ivy Rehab that means **350 street
+addresses, 1,668 clinicians, and 270 locations with measured volume**, topped
+by 300 Princeton Hightstown Rd in East Windsor NJ at 39,929 patients from
+1,449 distinct sources. Fill in the **ZIP** box to isolate one location.
+
+Read the columns like this:
+
+- `SharedPatients` / `ReferralSources` — that location's measured referral
+  volume and how many distinct providers fed it.
+- `Clinicians` vs `CliniciansWithVolume` — how much of the site's roster is
+  actually visible in the data. 31 of 38 means seven therapists bill through
+  the group or fell under the 11-patient privacy floor.
+- `CliniciansAtOtherSites` / `SharedSitePatients` — therapists who cover more
+  than one location. Their volume is credited to *each* of their sites,
+  because the data cannot say which visit happened where. About 5% of Ivy
+  Rehab's clinicians are in this position.
+
+Three honest caveats, all repeated in the export sidecar:
+
+1. This counts care billed under **individual clinician** NPIs. Whatever the
+   chain bills under its **organization** NPIs (534,286 patients for Ivy Rehab)
+   has no service address attached and is reported separately — never spread
+   across the sites. The two are different views of the same company, not
+   numbers to add together.
+2. The headline `AttributedPatients` counts each clinician once. The address
+   rows sum to a bigger number (`AddressRowTotal`) precisely because of the
+   multi-site therapists above; the gap is shown as `DoubleCountedPatients`.
+3. Care Compare reflects **today's** rosters while the referral data is
+   historical, so a therapist who has since moved is credited to the address
+   they are listed at now.
+
+**Export…** saves whichever view is on screen with its methodology file.
+
+### Tab 8 — Provider lookup
 *"Tell me everything about this one provider."*
 
 Type any 10-digit NPI and click **Look up provider**. The app pulls together
@@ -405,7 +461,7 @@ zero may just mean the pair fell under the 11-patient privacy floor, and
 Medicare Advantage growth pulls patients out of this data over time, which can
 look like decline.
 
-### Tab 8 — Watchlist
+### Tab 9 — Watchlist
 *"Did any of MY referrers change in the latest update?"*
 
 Paste your referring providers' NPIs into the box and click **Save watchlist**

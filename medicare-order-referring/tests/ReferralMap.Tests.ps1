@@ -1244,9 +1244,14 @@ Describe 'Address-level referrals (the multi-site workaround)' {
             foreach ($row in @($r.Rows)) {
                 $row.CliniciansAtOtherSites | Should -Be 1   # PAT is at both
             }
-            $r.OverlapPatients | Should -Be 24               # PAT's 12 counted twice
-            (@($r.Notes) -join ' ') | Should -BeLike '*OVERLAP*'
-            (@($r.Notes) -join ' ') | Should -BeLike '*not split*'
+            # PAT's 12 patients are credited to BOTH sites, so the rows sum
+            # to 12 more than the clinicians behind them actually hold.
+            foreach ($row in @($r.Rows)) { $row.SharedSitePatients | Should -Be 12 }
+            $r.AddressRowTotal | Should -Be 123              # 111 + 12
+            $r.AttributedPatients | Should -Be 111           # PAT counted once
+            $r.DoubleCountedPatients | Should -Be 12
+            (@($r.Notes) -join ' ') | Should -BeLike '*DOUBLE COUNTING*'
+            (@($r.Notes) -join ' ') | Should -BeLike '*de-duplicated*'
         } finally { Set-RmActiveDataset -Source cms-pspp -Year 2015 | Out-Null }
     }
 
@@ -1255,7 +1260,11 @@ Describe 'Address-level referrals (the multi-site workaround)' {
         try {
             $r = Get-RmLocationReferrals -Name 'CHAINREHAB'
             $sumRows = 0; foreach ($row in @($r.Rows)) { $sumRows += [int]$row.SharedPatients }
-            $r.AttributedPatients | Should -Be $sumRows
+            $r.AddressRowTotal | Should -Be $sumRows
+            # The headline is the de-duplicated clinician figure, never the
+            # row sum and never quietly merged with the org NPI's volume.
+            $r.AttributedPatients | Should -Be 111
+            $r.PSObject.Properties['OrgNpiPatients'] | Should -Not -BeNullOrEmpty
             (@($r.Notes) -join ' ') | Should -BeLike '*no address and is NOT distributed*'
             (@($r.Notes) -join ' ') | Should -BeLike '*ADDRESS-LEVEL METHOD*'
         } finally { Set-RmActiveDataset -Source cms-pspp -Year 2015 | Out-Null }
