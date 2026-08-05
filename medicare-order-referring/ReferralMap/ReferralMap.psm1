@@ -1607,7 +1607,7 @@ function Get-RmReferralMap {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][ValidatePattern('^\d{3,5}\*?$')][string]$Zip,
-        [ValidateRange(0, 50)][double]$RadiusMiles = 0,
+        [ValidateRange(0, 100)][double]$RadiusMiles = 0,
         [switch]$OrganizationsOnly,
         [switch]$SkipEnrichment,   # NPI-only output when offline
         [string]$CentroidPath      # test override for the radius table
@@ -2653,7 +2653,7 @@ function Get-RmZipsInRadius {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][ValidatePattern('^\d{5}$')][string]$Zip,
-        [Parameter(Mandatory)][ValidateRange(0, 50)][double]$RadiusMiles,
+        [Parameter(Mandatory)][ValidateRange(0, 100)][double]$RadiusMiles,
         [string]$CentroidPath
     )
     $centroids = Get-RmCentroids $CentroidPath
@@ -2828,7 +2828,7 @@ function Get-RmSourceAnalysis {
         # which hits small practices hardest. The FIRST NPI is the primary:
         # it names the practice and centers the geography.
         [Parameter(Mandatory)][ValidateCount(1, 50)][ValidatePattern('^\d{10}$')][string[]]$Npi,
-        [ValidateRange(1, 50)][double]$CompetitorRadiusMiles = 10,
+        [ValidateRange(1, 100)][double]$CompetitorRadiusMiles = 10,
         [switch]$SkipCompetitors,
         [string]$CentroidPath,
         [string]$CrosswalkPath     # test override for the ZIP->county table

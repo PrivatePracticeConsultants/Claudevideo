@@ -266,7 +266,7 @@ $xaml = @'
                      MaxLength="6" ToolTip="5-digit ZIP, or a prefix like 630* for a wider area"/>
             <TextBlock Text="Radius:" VerticalAlignment="Center" Margin="10,0,4,0"/>
             <ComboBox x:Name="RmRadiusCombo" MinWidth="110" Height="28" SelectedIndex="0"
-                      ToolTip="Sweep every ZIP whose center lies within this many straight-line miles of the ZIP you typed. Wide radii in metro areas sweep many ZIPs and take longer.">
+                      ToolTip="Sweep every ZIP whose center lies within this many straight-line miles of the ZIP you typed, from 5 up to 100 in 5-mile steps. Area grows with the SQUARE of the radius, so a wide radius in a metro area sweeps thousands of ZIPs and takes considerably longer - the app warns before running the biggest ones.">
               <ComboBoxItem Content="Exact ZIP"/>
               <ComboBoxItem Content="5 miles"/>
               <ComboBoxItem Content="10 miles"/>
@@ -274,8 +274,20 @@ $xaml = @'
               <ComboBoxItem Content="20 miles"/>
               <ComboBoxItem Content="25 miles"/>
               <ComboBoxItem Content="30 miles"/>
+              <ComboBoxItem Content="35 miles"/>
               <ComboBoxItem Content="40 miles"/>
+              <ComboBoxItem Content="45 miles"/>
               <ComboBoxItem Content="50 miles"/>
+              <ComboBoxItem Content="55 miles"/>
+              <ComboBoxItem Content="60 miles"/>
+              <ComboBoxItem Content="65 miles"/>
+              <ComboBoxItem Content="70 miles"/>
+              <ComboBoxItem Content="75 miles"/>
+              <ComboBoxItem Content="80 miles"/>
+              <ComboBoxItem Content="85 miles"/>
+              <ComboBoxItem Content="90 miles"/>
+              <ComboBoxItem Content="95 miles"/>
+              <ComboBoxItem Content="100 miles"/>
             </ComboBox>
             <CheckBox x:Name="RmOrgOnly" Content="Clinics (organizations) only" VerticalAlignment="Center"
                       Margin="14,0,0,0" ToolTip="Unchecked: also includes individual PT/OT/SLP providers (solo practices bill under individual NPIs)"/>
@@ -1354,7 +1366,7 @@ $ui.RmDatasetCombo.Add_SelectionChanged({
     }
 })
 
-$script:RmRadiusValues = @(0, 5, 10, 15, 20, 25, 30, 40, 50)
+$script:RmRadiusValues = @(0) + @(1..20 | ForEach-Object { $_ * 5 })   # 0, then 5..100 by 5
 
 $ui.RmRunButton.Add_Click({
     if ($script:Busy) { return }
@@ -1368,6 +1380,18 @@ $ui.RmRunButton.Add_Click({
     if ($radius -gt 0 -and $zip -notmatch '^\d{5}$') {
         Show-ErrorBox 'A radius search needs a full 5-digit center ZIP. Prefixes like 630* only work with "Exact ZIP".'
         return
+    }
+    # Area grows with the square of the radius, so the widest sweeps are a
+    # different order of work. Measured on the real data: 100 miles around
+    # 10001 sweeps 1,806 ZIPs and ~99,600 providers, versus 140 ZIPs and
+    # 7,265 at 30 miles around 63101. Set the expectation before the wait,
+    # not after it.
+    if ($radius -ge 60) {
+        if (-not (Confirm-Box ("A $([int]$radius)-mile radius is a very wide sweep.`n`n" +
+            "In a dense metro this reaches roughly 1,000-1,800 ZIP codes and tens of thousands of " +
+            "providers, so the search takes noticeably longer and the table shows the first " +
+            "$('{0:N0}' -f $script:MaxGridRows) rows (exports still include every row).`n`n" +
+            "Run it anyway?"))) { return }
     }
     if (-not (Get-RmStatus).DatasetReady) {
         Show-ErrorBox ("No referral dataset is available yet - click 'Download CMS dataset' " +

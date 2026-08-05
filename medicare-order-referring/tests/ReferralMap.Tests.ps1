@@ -2356,6 +2356,22 @@ Describe 'Source analysis report' {
         } finally { Set-RmConfig -DataDir $saved }
     }
 
+    It 'accepts a radius all the way to 100 miles, and rejects beyond it' {
+        # the widened ceiling must hold on BOTH radius parameters. (PowerShell's
+        # ValidateRange compares a double against int bounds by coercion, so
+        # 100.5 is accepted as 100 - harmless, and unreachable from the combo,
+        # which only offers multiples of 5.)
+        { Get-RmZipsInRadius -Zip 99999 -RadiusMiles 100 -CentroidPath $script:RadCsv } | Should -Not -Throw
+        { Get-RmZipsInRadius -Zip 99999 -RadiusMiles 101 -CentroidPath $script:RadCsv } | Should -Throw
+        { Get-RmZipsInRadius -Zip 99999 -RadiusMiles -1 -CentroidPath $script:RadCsv } | Should -Throw
+        { Get-RmReferralMap -Zip 99999 -RadiusMiles 100 -SkipEnrichment -CentroidPath $script:RadCsv } | Should -Not -Throw
+        { Get-RmReferralMap -Zip 99999 -RadiusMiles 101 -SkipEnrichment -CentroidPath $script:RadCsv } | Should -Throw
+        # and every value the dropdown can produce must bind
+        foreach ($r in 5, 25, 50, 65, 80, 95, 100) {
+            { Get-RmZipsInRadius -Zip 99999 -RadiusMiles $r -CentroidPath $script:RadCsv } | Should -Not -Throw
+        }
+    }
+
     It 'puts a source at exactly 5.0 miles into the 5-10 band (edges are half-open)' {
         # 0.0724 deg of latitude ≈ 5.0 miles: the rounded distance lands
         # exactly on the band edge, and the contract is [min, max).

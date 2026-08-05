@@ -123,13 +123,20 @@ results on screen are cleared so numbers from different years can't get mixed
 up.
 
 Then:
-1. Type a ZIP code and pick a **Radius** (up to 50 miles) — every ZIP whose
+1. Type a ZIP code and pick a **Radius** — **5 to 100 miles in 5-mile steps** — every ZIP whose
    center falls inside the circle gets swept, and the results gain a
    **DistanceMiles** column so you can see how far each provider sits from
    your center ZIP. "Exact ZIP" searches just the one ZIP, and a prefix like
    `630*` still works for whole-prefix areas. Wide radii in metro areas sweep
    dozens of ZIPs, so give those a few extra minutes. Click **Map referral
    sources**.
+   A wider radius costs more than it looks: area grows with the *square*
+   of the radius. Measured on real data — 30 miles around St Louis sweeps
+   140 ZIPs and 7,265 providers, while 100 miles around Manhattan sweeps
+   1,806 ZIPs and 99,640. The app asks for confirmation at 60 miles and
+   above, the table shows the first 5,000 rows, and exports always
+   contain every row.
+
 2. **Top table:** every outpatient rehab provider in that area, ranked by
    referral *volume* (the SharedPatients number adds up each source's patients,
    so treat it as a ranking score, not a count of distinct people).
