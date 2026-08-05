@@ -5146,8 +5146,10 @@ function Get-RmProviderFamily {
             $key = Get-RmOrgNameKey $f[2]
             if (-not $m0.Regex.IsMatch($key)) {
                 # spacing-only near miss (e.g. VIRTUA-IVY REHAB when the
-                # needle is IVYREHAB): report it, never absorb it.
-                if (($key -replace ' ', '').Contains($m0.Compact)) { [void]$nearMiss.Add($f[2]) }
+                # needle is IVYREHAB): report it, never absorb it. String
+                # .Replace, not -replace: this line runs 9.6M times and the
+                # regex form is measurably slower at that scale.
+                if ($key.Replace(' ', '').Contains($m0.Compact)) { [void]$nearMiss.Add($f[2]) }
                 continue
             }
             if ($State -and $f[6] -ne $State.ToUpperInvariant()) { continue }
@@ -5328,7 +5330,7 @@ function Get-RmLocationReferrals {
         if ($f.Count -lt 10) { continue }
         $k0 = Get-RmOrgNameKey $f[2]
         if (-not $m1.Regex.IsMatch($k0)) {
-            if ($k0 -and ($k0 -replace ' ', '').Contains($m1.Compact)) { [void]$addrNearMiss.Add($f[2]) }
+            if ($k0 -and $k0.Replace(' ', '').Contains($m1.Compact)) { [void]$addrNearMiss.Add($f[2]) }
             continue
         }
         if ($State -and $f[7] -ne $State.ToUpperInvariant()) { continue }
