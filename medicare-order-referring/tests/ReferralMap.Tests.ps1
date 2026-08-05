@@ -1690,6 +1690,42 @@ Describe 'Address-level referrals (the multi-site workaround)' {
     }
 }
 
+Describe 'NPPES zip auto-discovery (never make the user browse for it)' {
+    BeforeAll {
+        $script:FindDirA = Join-Path $script:WorkDir 'find-driveE'
+        $script:FindDirB = Join-Path $script:WorkDir 'find-downloads'
+        New-Item -ItemType Directory -Path $script:FindDirA, $script:FindDirB -Force | Out-Null
+    }
+
+    It 'finds the exact real-world filename and prefers the newest by name' {
+        # the file the user actually has, on a drive root
+        Set-Content -Path (Join-Path $script:FindDirA 'NPPES_Data_Dissemination_July_2026_V2.zip') -Value 'x'
+        # older candidates elsewhere - V2 of the same month must win, and
+        # July must beat June regardless of which folder they sit in
+        Set-Content -Path (Join-Path $script:FindDirB 'NPPES_Data_Dissemination_July_2026.zip') -Value 'x'
+        Set-Content -Path (Join-Path $script:FindDirB 'NPPES_Data_Dissemination_June_2026.zip') -Value 'x'
+        $f = Find-RmNppesDisseminationFile -SearchPath @($script:FindDirB, $script:FindDirA)
+        $f | Should -Not -BeNullOrEmpty
+        Split-Path -Leaf $f.Path | Should -Be 'NPPES_Data_Dissemination_July_2026_V2.zip'
+        $f.Label | Should -Be 'July 2026 V2'
+    }
+
+    It 'a parseable name beats an unparseable one even when the latter is newer' {
+        $odd = Join-Path $script:FindDirB 'NPPES_Data_Dissemination_weekly_update.zip'
+        Set-Content -Path $odd -Value 'x'
+        (Get-Item $odd).LastWriteTimeUtc = [DateTime]::UtcNow   # newest file on disk
+        $f = Find-RmNppesDisseminationFile -SearchPath @($script:FindDirB, $script:FindDirA)
+        Split-Path -Leaf $f.Path | Should -Be 'NPPES_Data_Dissemination_July_2026_V2.zip'
+    }
+
+    It 'returns nothing quietly when no candidate exists, even for a bad path' {
+        $empty = Join-Path $script:WorkDir 'find-empty'
+        New-Item -ItemType Directory -Path $empty -Force | Out-Null
+        Find-RmNppesDisseminationFile -SearchPath @($empty, (Join-Path $script:WorkDir 'no-such-dir')) |
+            Should -BeNullOrEmpty
+    }
+}
+
 Describe 'Local data status (the GUI setup line)' {
     It 'reports presence, size, and date for every supporting index' {
         $d = Get-RmLocalDataStatus

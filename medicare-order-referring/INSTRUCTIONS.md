@@ -321,7 +321,10 @@ Care Compare clinician file (~800 MB) and the Medicare enrollment file
 (~60 MB) — that enables the by-address breakdown and offline county-market
 data. The NPPES registry file (~1.1 GB) has no stable download link, so grab
 it yourself from `download.cms.gov/nppes` (the monthly "NPPES Data
-Dissemination" zip) and click **Import NPPES bulk zip** — that one powers the
+Dissemination" zip). **If the zip is already anywhere obvious on your
+computer — a drive root like `E:\`, your Downloads folder — the app finds it
+by itself**: the status bar names it, and clicking **Import NPPES bulk zip**
+offers it directly so you just confirm instead of browsing. That file powers the
 chain asterisks, multi-site detection, offline provider discovery, and the
 market-capture map layer, across every tab. Without it those features stay
 quietly off; the status bar says so rather than letting you wonder.

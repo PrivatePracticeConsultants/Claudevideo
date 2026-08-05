@@ -2198,6 +2198,18 @@ function Update-ChDataStatus {
         if (-not $d.Nppes.Present -or -not $d.CareCompare.Present) {
             $ui.ChDataStatus.Text += ' Missing pieces disable chain flags (*) or the by-address breakdown.'
         }
+        # If the registry zip is already sitting on this computer (a drive
+        # root, Downloads), say so - the user should never have to browse
+        # for a file the app can see.
+        $script:ChFoundNppes = $null
+        if (-not $d.Nppes.Present) {
+            $found = Find-RmNppesDisseminationFile
+            if ($found) {
+                $script:ChFoundNppes = $found
+                $ui.ChDataStatus.Text += (" Found $(Split-Path -Leaf $found.Path) ($($found.SizeMB) MB, $($found.Label)) on your computer" +
+                    " - click 'Import NPPES bulk zip' and it will be offered automatically.")
+            }
+        }
     } catch { $ui.ChDataStatus.Text = 'Local data status unavailable.' }
 }
 Update-ChDataStatus
@@ -2241,11 +2253,24 @@ $ui.ChSetupButton.Add_Click({
 
 $ui.ChNppesButton.Add_Click({
     if ($script:Busy) { return }
-    $dialog = New-Object Microsoft.Win32.OpenFileDialog
-    $dialog.Filter = 'NPPES Data Dissemination (*.zip)|*.zip|NPPES csv (*.csv)|*.csv'
-    $dialog.Title = 'Pick the NPPES Data Dissemination file (download.cms.gov/nppes)'
-    if (-not $dialog.ShowDialog($window)) { return }
-    Invoke-Async -Kind 'ch-nppes' -Params @{ RmModulePath = $script:RmModulePath; File = $dialog.FileName } `
+    # Auto-offer a zip the app already found on this computer; the picker
+    # is the fallback, not the first stop.
+    $pick = $null
+    $found = $null
+    try { $found = Find-RmNppesDisseminationFile } catch { $found = $null }
+    if ($found -and (Confirm-Box ("Found the NPPES registry file on your computer:`n`n" +
+            "$($found.Path)`n($($found.SizeMB) MB, $($found.Label))`n`n" +
+            "Import this file? Choose No to pick a different one."))) {
+        $pick = $found.Path
+    }
+    if (-not $pick) {
+        $dialog = New-Object Microsoft.Win32.OpenFileDialog
+        $dialog.Filter = 'NPPES Data Dissemination (*.zip)|*.zip|NPPES csv (*.csv)|*.csv'
+        $dialog.Title = 'Pick the NPPES Data Dissemination file (download.cms.gov/nppes)'
+        if (-not $dialog.ShowDialog($window)) { return }
+        $pick = $dialog.FileName
+    }
+    Invoke-Async -Kind 'ch-nppes' -Params @{ RmModulePath = $script:RmModulePath; File = $pick } `
         -BusyMessage 'Indexing the NPPES registry (streams the 11 GB file straight out of the zip) and building the chain table. Typically 10-20 minutes; one-time per monthly file.' `
         -WorkerScript 'param($RmModulePath, $File) Import-Module $RmModulePath; Import-RmNppesBulk -Path $File' `
         -OnDone {

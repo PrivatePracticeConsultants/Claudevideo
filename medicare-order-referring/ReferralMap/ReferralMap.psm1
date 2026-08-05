@@ -5028,6 +5028,71 @@ function Get-RmLocalDataStatus {
     }
 }
 
+# The NPPES Data Dissemination zip cannot be auto-downloaded (no stable
+# URL), but it CAN be auto-found once the user has it: the monthly file
+# lands in predictable places with a predictable name. Scans drive roots
+# (fixed and removable - users park 1.1 GB files on E:\), Downloads, and
+# the app's data folder; never recursive, so it is instant. Newest wins,
+# judged by the month/year/version IN THE NAME (July_2026_V2 beats
+# July_2026 beats June_2026); an unparseable name falls back to its file
+# date and never outranks a parseable one.
+function Find-RmNppesDisseminationFile {
+    [CmdletBinding()]
+    param([string[]]$SearchPath)
+    $dirs = New-Object System.Collections.Generic.List[string]
+    if ($SearchPath) {
+        foreach ($p in $SearchPath) { $dirs.Add($p) }
+    } else {
+        try {
+            foreach ($dr in [System.IO.DriveInfo]::GetDrives()) {
+                try {
+                    if ($dr.IsReady -and ($dr.DriveType -eq 'Fixed' -or $dr.DriveType -eq 'Removable')) {
+                        $dirs.Add($dr.RootDirectory.FullName)
+                    }
+                } catch { }
+            }
+        } catch { }
+        foreach ($p in @((Join-Path $HOME 'Downloads'),
+                         $script:RmConfig.DataDir,
+                         (Join-Path $script:RmConfig.DataDir 'resources'))) { $dirs.Add($p) }
+    }
+    $months = @{ JANUARY = 1; FEBRUARY = 2; MARCH = 3; APRIL = 4; MAY = 5; JUNE = 6
+                 JULY = 7; AUGUST = 8; SEPTEMBER = 9; OCTOBER = 10; NOVEMBER = 11; DECEMBER = 12 }
+    $best = $null; $bestTier = -1; $bestKey = [long]-1
+    foreach ($dir in $dirs) {
+        if (-not $dir) { continue }
+        $files = @()
+        try {
+            if (Test-Path -LiteralPath $dir) {
+                $files = @(Get-ChildItem -LiteralPath $dir -Filter 'NPPES_Data_Dissemination*.zip' -File -ErrorAction SilentlyContinue)
+            }
+        } catch { continue }
+        foreach ($f in $files) {
+            $tier = 0; $key = [long]$f.LastWriteTimeUtc.Ticks; $label = ''
+            if ($f.Name -match '(?i)NPPES_Data_Dissemination_([A-Za-z]+)_(\d{4})(?:_V(\d+))?') {
+                $mn = $Matches[1].ToUpperInvariant()
+                if ($months.ContainsKey($mn)) {
+                    $tier = 1
+                    $v = if ($Matches[3]) { [int]$Matches[3] } else { 1 }
+                    $key = [long]([int]$Matches[2] * 10000 + $months[$mn] * 100 + $v)
+                    $label = ('{0} {1}{2}' -f ($Matches[1].Substring(0,1).ToUpperInvariant() + $Matches[1].Substring(1).ToLowerInvariant()),
+                              $Matches[2], $(if ($v -gt 1) { " V$v" } else { '' }))
+                }
+            }
+            if ($tier -gt $bestTier -or ($tier -eq $bestTier -and $key -gt $bestKey)) {
+                $bestTier = $tier; $bestKey = $key
+                $best = [pscustomobject]@{
+                    Path = $f.FullName
+                    SizeMB = [math]::Round($f.Length / 1MB, 1)
+                    Label = if ($label) { $label } else { $f.LastWriteTime.ToString('yyyy-MM-dd') }
+                    LastWrite = $f.LastWriteTimeUtc
+                }
+            }
+        }
+    }
+    $best
+}
+
 function Save-RmLocalResources {
     <#
     .SYNOPSIS
@@ -5585,5 +5650,6 @@ Export-ModuleMember -Function @(
     'Get-RmProviderFamily', 'Get-RmLocationReferrals', 'Get-RmRelatedOrgNames',
     'Get-RmChainMark', 'Get-RmChainDetail', 'Get-RmNameSiblingGroups',
     'Import-RmEnrollment', 'Save-RmLocalResources', 'Get-RmLocalDataStatus',
+    'Find-RmNppesDisseminationFile',
     'Export-RmResult', 'Clear-RmStaleTemp'
 )
