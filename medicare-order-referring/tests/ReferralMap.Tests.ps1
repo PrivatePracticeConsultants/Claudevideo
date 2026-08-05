@@ -2073,6 +2073,24 @@ Describe 'Source analysis report' {
         $html | Should -BeLike '*privacy floor*'
     }
 
+    It 'trend riding on an analysis reuses the scanned year identically' {
+        # Add-RmSourceTrend hands the analysis's per-source totals to the
+        # trend so the active year is not re-scanned. The reused year MUST
+        # be numerically identical to a from-scratch trend - if the two
+        # construction paths ever diverge, this catches it.
+        $sa = Get-RmSourceAnalysis -Npi 8000000001 -SkipCompetitors
+        $sa = Add-RmSourceTrend -Analysis $sa -SkipEnrichment
+        $direct = Get-RmSourceTrend -Npi 8000000001 -SkipEnrichment
+        $a = @($sa.Trend.Years) | Sort-Object Year
+        $b = @($direct.Years) | Sort-Object Year
+        $a.Count | Should -Be $b.Count
+        for ($i = 0; $i -lt $a.Count; $i++) {
+            $a[$i].Year | Should -Be $b[$i].Year
+            $a[$i].SharedPatients | Should -Be $b[$i].SharedPatients
+            $a[$i].Sources | Should -Be $b[$i].Sources
+        }
+    }
+
     It 'measures year-over-year performance across every imported year' {
         # Fixture store holds hop 2021 and 2022 with identical rows, so the
         # per-year numbers must match and retention must be a clean 100%.

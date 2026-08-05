@@ -162,6 +162,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
+using System.Text.RegularExpressions;
 
 public class RmEdge
 {
@@ -224,11 +225,45 @@ public static class RmEngine
     // column. matchColumn 1 = the SECOND provider in the pair (inbound: the
     // recipient); 0 = the FIRST (outbound: the initiator). Throws with a
     // plain message on a malformed file rather than returning wrong numbers.
+    // Counts commas without allocating - the whole-file malformed check
+    // must survive the fast path below.
+    private static int CommaCount(string line)
+    {
+        int c = 0;
+        for (int i = 0; i < line.Length; i++) if (line[i] == ',') c++;
+        return c;
+    }
+
+    // Extracts one comma-separated field as a trimmed string, allocating
+    // only that field. Returns null when the field does not exist.
+    private static string FieldAt(string line, int index)
+    {
+        int start = 0;
+        for (int k = 0; k < index; k++)
+        {
+            start = line.IndexOf(',', start);
+            if (start < 0) return null;
+            start++;
+        }
+        int end = line.IndexOf(',', start);
+        if (end < 0) end = line.Length;
+        string v = line.Substring(start, end - start);
+        return (v.Length > 0 && (v[0] == ' ' || v[v.Length - 1] == ' ')) ? v.Trim() : v;
+    }
+
     private static List<RmEdge> Scan(string path, HashSet<string> match, int matchColumn, int format)
     {
+        // MATCH FIRST, PARSE ON HIT. The old path Split() every one of the
+        // ~210M rows into 6 strings before the match check discarded
+        // 99.99% of them - measured at 188s per 8 GB pass. Here only the
+        // key field is materialized per row; the full parse (and its
+        // strict validation) runs on matches and on the first 5 lines, and
+        // a no-allocation comma count keeps the whole-file malformed
+        // guard exact.
         List<RmEdge> edges = new List<RmEdge>();
         long lineNo = 0;
         long badLines = 0;
+        int wantCommas = ((format == FormatHopTeaming) ? 6 : 5) - 1;
         using (StreamReader reader = new StreamReader(path, Encoding.ASCII, false, 1 << 20))
         {
             string line;
@@ -236,18 +271,23 @@ public static class RmEngine
             {
                 lineNo++;
                 if (line.Length == 0) continue;
-                RmEdge e;
-                try { e = ParseLine(line, format, path, lineNo); }
-                catch (InvalidDataException)
+                if (lineNo <= 5)
                 {
-                    badLines++;
-                    if (lineNo <= 5) throw;
+                    RmEdge e0;
+                    try { e0 = ParseLine(line, format, path, lineNo); }
+                    catch (InvalidDataException) { throw; }
+                    if (e0 == null) continue;   // header row
+                    string k0 = (matchColumn == 1) ? e0.TargetNpi : e0.SourceNpi;
+                    if (match.Contains(k0)) edges.Add(e0);
                     continue;
                 }
-                if (e == null) continue;   // header row
-                string key = (matchColumn == 1) ? e.TargetNpi : e.SourceNpi;
-                if (!match.Contains(key)) continue;
-                edges.Add(e);
+                if (CommaCount(line) != wantCommas) { badLines++; continue; }
+                string key = FieldAt(line, matchColumn);
+                if (key == null || !match.Contains(key)) continue;
+                RmEdge e;
+                try { e = ParseLine(line, format, path, lineNo); }
+                catch (InvalidDataException) { badLines++; continue; }
+                if (e != null) edges.Add(e);
             }
         }
         if (lineNo == 0)
@@ -285,6 +325,7 @@ public static class RmEngine
     {
         List<RmEdge> edges = new List<RmEdge>();
         long lineNo = 0, badLines = 0;
+        int wantCommas = ((format == FormatHopTeaming) ? 6 : 5) - 1;
         using (StreamReader reader = new StreamReader(path, Encoding.ASCII, false, 1 << 20))
         {
             string line;
@@ -292,17 +333,23 @@ public static class RmEngine
             {
                 lineNo++;
                 if (line.Length == 0) continue;
-                RmEdge e;
-                try { e = ParseLine(line, format, path, lineNo); }
-                catch (InvalidDataException)
+                if (lineNo <= 5)
                 {
-                    badLines++;
-                    if (lineNo <= 5) throw;
+                    RmEdge e0;
+                    try { e0 = ParseLine(line, format, path, lineNo); }
+                    catch (InvalidDataException) { throw; }
+                    if (e0 == null) continue;
+                    if (set.Contains(e0.SourceNpi) || set.Contains(e0.TargetNpi)) edges.Add(e0);
                     continue;
                 }
-                if (e == null) continue;
-                if (!set.Contains(e.SourceNpi) && !set.Contains(e.TargetNpi)) continue;
-                edges.Add(e);
+                if (CommaCount(line) != wantCommas) { badLines++; continue; }
+                string src = FieldAt(line, 0);
+                string tgt = FieldAt(line, 1);
+                if ((src == null || !set.Contains(src)) && (tgt == null || !set.Contains(tgt))) continue;
+                RmEdge e;
+                try { e = ParseLine(line, format, path, lineNo); }
+                catch (InvalidDataException) { badLines++; continue; }
+                if (e != null) edges.Add(e);
             }
         }
         if (lineNo == 0) throw new InvalidDataException("The file '" + path + "' is empty.");
@@ -435,6 +482,77 @@ public static class RmEngine
                     start = p + 1; fi++;
                 }
                 if (val != null && wanted.Contains(val)) hits.Add(line);
+            }
+        }
+        return hits;
+    }
+
+    // Pipe-field extractor for the PSV indexes (no quoting in those files).
+    private static string PipeFieldAt(string line, int index)
+    {
+        int start = 0;
+        for (int k = 0; k < index; k++)
+        {
+            start = line.IndexOf('|', start);
+            if (start < 0) return null;
+            start++;
+        }
+        int end = line.IndexOf('|', start);
+        if (end < 0) end = line.Length;
+        return line.Substring(start, end - start);
+    }
+
+    // ZIP-sweep over an index: returns the full lines whose postal field
+    // starts in the wanted set (or matches a prefix). The PowerShell loop
+    // this replaces Split() all 9.7M rows per map search.
+    public static List<string> ScanIndexByZip(string path, int zipField, HashSet<string> zips, List<string> prefixes)
+    {
+        List<string> hits = new List<string>();
+        using (StreamReader r = new StreamReader(path, Encoding.UTF8, false, 1 << 20))
+        {
+            string line;
+            while ((line = r.ReadLine()) != null)
+            {
+                string postal = PipeFieldAt(line, zipField);
+                if (postal == null || postal.Length < 5) continue;
+                string z5 = postal.Substring(0, 5);
+                bool hit = zips.Contains(z5);
+                if (!hit && prefixes != null)
+                {
+                    for (int i = 0; i < prefixes.Count; i++)
+                        if (z5.StartsWith(prefixes[i], StringComparison.Ordinal)) { hit = true; break; }
+                }
+                if (hit) hits.Add(line);
+            }
+        }
+        return hits;
+    }
+
+    // Organization-name search over an index: needlePattern is the caller's
+    // space-optional regex over the normalized key; compactNeedle catches
+    // the spacing near-misses. entityField -1 = no entity filter (DAC).
+    // Returns matching lines; near-miss NAMES accumulate into nearMiss.
+    public static List<string> FindByOrgName(string path, int entityField, int nameField,
+        string needlePattern, string compactNeedle, HashSet<string> nearMiss)
+    {
+        Regex rx = new Regex(needlePattern, RegexOptions.Compiled);
+        List<string> hits = new List<string>();
+        using (StreamReader r = new StreamReader(path, Encoding.UTF8, false, 1 << 20))
+        {
+            string line;
+            while ((line = r.ReadLine()) != null)
+            {
+                if (entityField >= 0)
+                {
+                    string ent = PipeFieldAt(line, entityField);
+                    if (ent != "2") continue;
+                }
+                string name = PipeFieldAt(line, nameField);
+                if (string.IsNullOrEmpty(name)) continue;
+                string key = OrgNameKey(name);
+                if (key.Length == 0) continue;
+                if (rx.IsMatch(key)) { hits.Add(line); continue; }
+                if (nearMiss != null && key.Replace(" ", "").Contains(compactNeedle)) nearMiss.Add(name);
             }
         }
         return hits;
@@ -1173,15 +1291,15 @@ function Find-RmClinic {
         }
         Write-Verbose "NPPES bulk index: sweeping $($zipWanted.Count) ZIP(s)$(if ($prefixes.Count) { " + $($prefixes.Count) prefix(es)" })..."
         $found2 = @{}
-        foreach ($line in [System.IO.File]::ReadLines($bulkIdx)) {
+        # The ZIP filter runs in C# (the PowerShell per-line loop over 9.7M
+        # rows was the tab's dominant cost); only the few thousand matched
+        # lines are parsed here.
+        $pfxList = New-Object 'System.Collections.Generic.List[string]'
+        foreach ($p in $prefixes) { $pfxList.Add([string]$p) }
+        foreach ($line in @([RmEngine]::ScanIndexByZip($bulkIdx, 7, $zipWanted, $pfxList))) {
             $f = $line.Split('|')
             if ($f.Count -lt 10) { continue }
-            $postal = $f[7]
-            if ($postal.Length -lt 5) { continue }
-            $z5 = $postal.Substring(0, 5)
-            $hit = $zipWanted.Contains($z5)
-            if (-not $hit) { foreach ($p in $prefixes) { if ($z5.StartsWith($p)) { $hit = $true; break } } }
-            if (-not $hit) { continue }
+            $z5 = $f[7].Substring(0, 5)
             # ANY taxonomy slot may carry the in-scope code (primary at 8,
             # secondaries from 10 on) — matching only the primary silently
             # dropped real therapy providers.
@@ -3215,7 +3333,13 @@ function Get-RmSourceTrend {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][ValidateCount(1, 50)][ValidatePattern('^\d{10}$')][string[]]$Npi,
-        [switch]$SkipEnrichment
+        [switch]$SkipEnrichment,
+        # A caller that already holds one year's per-source totals (the
+        # analysis that just scanned it) passes them here to skip that
+        # year's full 8 GB pass. Totals MUST be built the same way this
+        # function builds them: internal flows excluded, summed per source.
+        [int]$ReuseYear,
+        [hashtable]$ReuseBySrc
     )
     $years = @(Get-RmAvailableDatasets | Where-Object { $_.Source -eq 'hop-teaming' } | Sort-Object Year)
     if ($years.Count -lt 2) {
@@ -3227,8 +3351,15 @@ function Get-RmSourceTrend {
 
     # Per-year: merge across member NPIs exactly like the single-year
     # analysis (internal handoffs out, one row per external source).
+    # A caller that already scanned one year (Add-RmSourceTrend riding on a
+    # fresh analysis) hands that year's totals in, saving a full 8 GB pass.
     $perYear = @{}
     foreach ($y in $years) {
+        if ($ReuseBySrc -and $y.Year -eq $ReuseYear) {
+            Write-Verbose "Reusing the already-scanned $($y.Label) totals..."
+            $perYear[$y.Year] = $ReuseBySrc
+            continue
+        }
         Write-Verbose "Scanning $($y.Label) for $($npiList.Count) NPI(s)..."
         $bySrc = @{}
         foreach ($e in @([RmEngine]::ScanInbound($y.Path, $memberSet, [RmEngine]::FormatHopTeaming))) {
@@ -3384,7 +3515,18 @@ function Add-RmSourceTrend {
         [switch]$SkipEnrichment
     )
     $npis = if ($Analysis.PSObject.Properties['NpiList']) { @($Analysis.NpiList) } else { @($Analysis.Npi) }
-    $Analysis.Trend = Get-RmSourceTrend -Npi $npis -SkipEnrichment:$SkipEnrichment
+    # The analysis just scanned the active year and its Sources table holds
+    # exactly what the trend recomputes for that year (per-source totals,
+    # internal flows already excluded) - hand it over instead of paying for
+    # the same 8 GB pass twice. Only valid for a CareSet-year analysis.
+    $trendArgs = @{ Npi = $npis; SkipEnrichment = $SkipEnrichment }
+    if ($Analysis.PSObject.Properties['IsHop'] -and $Analysis.IsHop -and @($Analysis.Sources).Count) {
+        $bySrc = @{}
+        foreach ($srow in @($Analysis.Sources)) { $bySrc[[string]$srow.SourceNPI] = [int]$srow.SharedPatients }
+        $trendArgs['ReuseYear'] = [int]$Analysis.Year
+        $trendArgs['ReuseBySrc'] = $bySrc
+    }
+    $Analysis.Trend = Get-RmSourceTrend @trendArgs
     $Analysis
 }
 
@@ -5283,21 +5425,15 @@ function Get-RmProviderFamily {
     $nearMiss = New-Object 'System.Collections.Generic.HashSet[string]'
     $idx = Get-RmNppesIndexPath
     if (Test-Path -LiteralPath $idx) {
-        foreach ($line in [System.IO.File]::ReadLines($idx)) {
+        # Name matching runs in C# (key normalisation + the space-optional
+        # regex per 9.7M rows was this search's dominant cost); spacing
+        # near-misses accumulate into $nearMiss on the way through.
+        foreach ($line in @([RmEngine]::FindByOrgName($idx, 1, 2, $m0.Regex.ToString(), $m0.Compact, $nearMiss))) {
             $f = $line.Split('|')
-            if ($f.Count -lt 10 -or $f[1] -ne '2' -or -not $f[2]) { continue }
-            $key = Get-RmOrgNameKey $f[2]
-            if (-not $m0.Regex.IsMatch($key)) {
-                # spacing-only near miss (e.g. VIRTUA-IVY REHAB when the
-                # needle is IVYREHAB): report it, never absorb it. String
-                # .Replace, not -replace: this line runs 9.6M times and the
-                # regex form is measurably slower at that scale.
-                if ($key.Replace(' ', '').Contains($m0.Compact)) { [void]$nearMiss.Add($f[2]) }
-                continue
-            }
+            if ($f.Count -lt 10) { continue }
             if ($State -and $f[6] -ne $State.ToUpperInvariant()) { continue }
             $members[$f[0]] = [pscustomobject]@{
-                NPI = $f[0]; Name = $f[2]; FamilyKey = $key
+                NPI = $f[0]; Name = $f[2]; FamilyKey = (Get-RmOrgNameKey $f[2])
                 City = $f[5]; State = $f[6]
                 Zip = $(if ($f[7].Length -ge 5) { $f[7].Substring(0, 5) } else { $f[7] })
             }
@@ -5469,14 +5605,9 @@ function Get-RmLocationReferrals {
     $byAddr = @{}; $npiAddrs = @{}
     $m1 = Get-RmNameMatcher $needle
     $addrNearMiss = New-Object 'System.Collections.Generic.HashSet[string]'
-    foreach ($line in [System.IO.File]::ReadLines($idx)) {
+    foreach ($line in @([RmEngine]::FindByOrgName($idx, -1, 2, $m1.Regex.ToString(), $m1.Compact, $addrNearMiss))) {
         $f = $line.Split('|')
         if ($f.Count -lt 10) { continue }
-        $k0 = Get-RmOrgNameKey $f[2]
-        if (-not $m1.Regex.IsMatch($k0)) {
-            if ($k0 -and $k0.Replace(' ', '').Contains($m1.Compact)) { [void]$addrNearMiss.Add($f[2]) }
-            continue
-        }
         if ($State -and $f[7] -ne $State.ToUpperInvariant()) { continue }
         $z5 = if ($f[9].Length -ge 5) { $f[9].Substring(0, 5) } else { $f[9] }
         if ($Zip -and $z5 -ne $Zip) { continue }
