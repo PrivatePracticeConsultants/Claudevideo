@@ -607,6 +607,49 @@ public static class RmEngine
         return hits;
     }
 
+    // Related-name grouping for a brand's lead word: distinct addresses per
+    // normalized name whose key STARTS WITH the lead (not contains - 'ATI'
+    // is a substring of REHABILITATION), excluding keys the main search
+    // already matched. This was the last PowerShell loop over a
+    // million-row index: measured live it crawled the 3.4M-row Care
+    // Compare file at ~135 KB/s (about 40 minutes) because the name key
+    // costs four regex operations per row in script; here it is seconds.
+    // Returns "displayName\u0001addressCount" rows; the tiny result is
+    // sorted by the caller.
+    public static List<string> RelatedOrgAddressCounts(string path, int nameField, int addrField,
+        int zipField, string leadWord, string excludeNeedle)
+    {
+        Dictionary<string, HashSet<string>> addrs = new Dictionary<string, HashSet<string>>();
+        Dictionary<string, string> display = new Dictionary<string, string>();
+        using (StreamReader r = new StreamReader(path, Encoding.UTF8, false, 1 << 20))
+        {
+            string line;
+            while ((line = r.ReadLine()) != null)
+            {
+                string name = PipeFieldAt(line, nameField);
+                if (string.IsNullOrEmpty(name)) continue;
+                string key = OrgNameKey(name);
+                if (key.Length == 0 || !key.StartsWith(leadWord, StringComparison.Ordinal)) continue;
+                if (excludeNeedle.Length > 0 && key.Contains(excludeNeedle)) continue;
+                string addr = PipeFieldAt(line, addrField);
+                string zip = PipeFieldAt(line, zipField);
+                if (zip != null && zip.Length > 5) zip = zip.Substring(0, 5);
+                HashSet<string> set;
+                if (!addrs.TryGetValue(key, out set))
+                {
+                    set = new HashSet<string>();
+                    addrs[key] = set;
+                    display[key] = name;
+                }
+                set.Add(addr + "|" + zip);
+            }
+        }
+        List<string> outRows = new List<string>();
+        foreach (KeyValuePair<string, HashSet<string>> kv in addrs)
+            outRows.Add(display[kv.Key] + "\u0001" + kv.Value.Count);
+        return outRows;
+    }
+
     // Organization-name key. MUST stay byte-identical to Get-RmOrgNameKey in
     // the module - a regression test asserts the two agree, because a drift
     // would silently flag the wrong companies.
@@ -5701,25 +5744,16 @@ function Get-RmRelatedOrgNames {
     $lead = Get-RmOrgNameKey (@($Name -split '\s+' | Where-Object { $_ })[0])
     if (-not $lead -or $lead.Length -lt 3) { return @() }
 
-    $addrs = @{}; $display = @{}
-    foreach ($line in [System.IO.File]::ReadLines($idx)) {
-        $f = $line.Split('|')
-        if ($f.Count -lt 10 -or -not $f[2]) { continue }
-        $k = Get-RmOrgNameKey $f[2]
-        # startswith, NOT contains: 'ATI' is a substring of REHABILITATION.
-        if (-not $k.StartsWith($lead)) { continue }
-        if ($needle -and $k -like "*$needle*") { continue }   # already found
-        if (-not $addrs.ContainsKey($k)) {
-            $addrs[$k] = New-Object 'System.Collections.Generic.HashSet[string]'
-            $display[$k] = $f[2]
-        }
-        $z5 = if ($f[9].Length -ge 5) { $f[9].Substring(0, 5) } else { $f[9] }
-        [void]$addrs[$k].Add("$($f[8])|$z5")
+    # The grouping runs in C# - this was the last script loop over a
+    # million-row index, and it crawled (measured ~40 min on the real DAC
+    # file); the engine does it in seconds with identical semantics.
+    $out = foreach ($row in @([RmEngine]::RelatedOrgAddressCounts($idx, 2, 8, 9, $lead, [string]$needle))) {
+        $i = $row.LastIndexOf([char]1)
+        if ($i -lt 1) { continue }
+        [pscustomobject]@{ Name = $row.Substring(0, $i); Addresses = [int]$row.Substring($i + 1) }
     }
-    $out = foreach ($k in $addrs.Keys) {
-        [pscustomobject]@{ Name = $display[$k]; Addresses = $addrs[$k].Count }
-    }
-    @($out | Sort-Object Addresses -Descending | Select-Object -First $Top)
+    @($out | Sort-Object -Property @{Expression = 'Addresses'; Descending = $true},
+                                   @{Expression = 'Name'; Descending = $false} | Select-Object -First $Top)
 }
 
 function Get-RmLocationReferrals {
