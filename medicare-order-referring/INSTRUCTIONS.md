@@ -559,6 +559,19 @@ Import-Module .\OrderReferring; Uninstall-OrfUpdateTask
 
 ## 7. If something goes wrong
 
+**"It looks frozen."** It almost certainly isn't. Whenever a long job runs,
+the app dims and shows a **working panel** naming the step ("Analyzing
+referral sources…"), a moving progress bar, and a **ticking elapsed clock**.
+If the clock is counting, the work is running. Jobs that read the whole
+shared-patient file — the referral map, source analysis, per-location
+breakdowns, any year-over-year run — take **minutes**, and a multi-year trend
+re-reads the file once per year. The panel disappears by itself when the work
+finishes or fails; the buttons come back at the same moment.
+
+Quick jobs never flash the panel: it waits about half a second before
+appearing, so a fast search just completes.
+
+
 - Every error appears in plain English in a pop-up; your existing data is
   never damaged by a failed download — the app only swaps in a new file
   after it has fully arrived and passed validation.

@@ -562,6 +562,34 @@ $xaml = @'
       <TextBlock TextWrapping="Wrap" FontSize="12" Foreground="#5A4A00"
           Text="About this data: the CMS Order &amp; Referring file is an eligibility roster — every provider currently allowed to order/refer for Medicare Part B, DME, Home Health, PMD, and Hospice. It contains no claims and no referral relationships, so it cannot show who referred patients to whom. Use the Batch NPI check with the referral list from your own EMR/billing system to verify and monitor YOUR referring providers."/>
     </Border>
+
+    <!-- ===== Working overlay =====
+         Long jobs (an 8 GB file scan, a multi-year trend) run for minutes in
+         a background runspace. Without this the window just sits there and
+         reads as frozen, so cover the whole app with an unmistakable working
+         state: a live progress bar, what is running, and a ticking clock.
+         RowSpan covers every row; it is the LAST child so it paints on top. -->
+    <Border x:Name="BusyOverlay" Grid.Row="0" Grid.RowSpan="3" Visibility="Collapsed"
+            Background="#C81F2733" Panel.ZIndex="100">
+      <Border Background="White" CornerRadius="10" BorderBrush="#C6D0DA" BorderThickness="1"
+              Padding="26,22" MaxWidth="620" VerticalAlignment="Center" HorizontalAlignment="Center">
+        <Border.Effect>
+          <DropShadowEffect BlurRadius="26" ShadowDepth="3" Opacity="0.32" Color="#000000"/>
+        </Border.Effect>
+        <StackPanel>
+          <TextBlock x:Name="BusyTitle" Text="Working..." FontSize="17" FontWeight="Bold"
+                     Foreground="#1F3B57" Margin="0,0,0,10"/>
+          <ProgressBar x:Name="BusyBar" IsIndeterminate="True" Height="8" Margin="0,0,0,14"
+                       Foreground="#1F6FB2" Background="#E4EAF0" BorderThickness="0"/>
+          <TextBlock x:Name="BusyMessage" TextWrapping="Wrap" FontSize="13" Foreground="#26333E"
+                     Text="Starting..." Margin="0,0,0,12"/>
+          <TextBlock x:Name="BusyElapsed" FontSize="12.5" FontWeight="SemiBold" Foreground="#4A5560"
+                     Text="Elapsed 0:00"/>
+          <TextBlock TextWrapping="Wrap" FontSize="11.5" Foreground="#6B7681" Margin="0,10,0,0"
+              Text="The app is NOT frozen. Big jobs read the whole shared-patient file, which is several gigabytes, so minutes are normal - the bar above keeps moving while it works. The window stays put until it finishes."/>
+        </StackPanel>
+      </Border>
+    </Border>
   </Grid>
 </Window>
 '@
@@ -570,6 +598,7 @@ $window = [System.Windows.Markup.XamlReader]::Parse($xaml)
 $ui = @{}
 foreach ($name in @(
     'StatusText', 'UpdateButton', 'UpdateHint', 'Tabs',
+    'BusyOverlay', 'BusyTitle', 'BusyBar', 'BusyMessage', 'BusyElapsed',
     'NameBox', 'NpiBox', 'SearchButton', 'ExportSearchButton',
     'FlagPartB', 'FlagDme', 'FlagHha', 'FlagPmd', 'FlagHospice', 'SearchGrid', 'SearchSummary',
     'NpiListBox', 'LoadNpiFileButton', 'BatchCheckButton', 'ExportBatchButton', 'BatchGrid', 'BatchSummary',
@@ -656,8 +685,48 @@ $script:MaxGridRows = 5000
 
 function Set-Status([string]$Text) { $ui.StatusText.Text = $Text }
 
-function Set-Busy([bool]$On, [string]$Message) {
+# ---- Working overlay -------------------------------------------------------
+# Purely cosmetic, so every path is wrapped: a formatting slip in the
+# progress display must never take down the work it is describing.
+$script:BusyStart = $null
+# A quick job that finishes in a fraction of a second should not make the
+# screen flash - reveal only once the work has clearly outlasted a click.
+$script:BusyRevealAfterMs = 600
+$script:BusyTimer = New-Object System.Windows.Threading.DispatcherTimer
+$script:BusyTimer.Interval = [TimeSpan]::FromMilliseconds(250)
+$script:BusyTimer.Add_Tick({
+    try {
+        if ($null -eq $script:BusyStart) { return }
+        $e = [DateTime]::UtcNow - $script:BusyStart
+        if ($e.TotalMilliseconds -lt $script:BusyRevealAfterMs) { return }
+        if ($ui.BusyOverlay.Visibility -ne [System.Windows.Visibility]::Visible) {
+            $ui.BusyOverlay.Visibility = [System.Windows.Visibility]::Visible
+        }
+        $ui.BusyElapsed.Text = 'Elapsed {0}:{1:00}' -f [int]$e.TotalMinutes, $e.Seconds
+    } catch { }
+})
+
+function Show-BusyOverlay([string]$Message, [string]$Title) {
+    try {
+        $ui.BusyTitle.Text = if ($Title) { $Title } else { 'Working...' }
+        $ui.BusyMessage.Text = if ($Message) { $Message } else { 'Working...' }
+        $ui.BusyElapsed.Text = 'Elapsed 0:00'
+        $script:BusyStart = [DateTime]::UtcNow
+        $script:BusyTimer.Start()
+    } catch { }
+}
+
+function Hide-BusyOverlay {
+    try {
+        $script:BusyTimer.Stop()
+        $script:BusyStart = $null
+        $ui.BusyOverlay.Visibility = [System.Windows.Visibility]::Collapsed
+    } catch { }
+}
+
+function Set-Busy([bool]$On, [string]$Message, [string]$Title) {
     $script:Busy = $On
+    if ($On) { Show-BusyOverlay $Message $Title } else { Hide-BusyOverlay }
     foreach ($b in @($ui.UpdateButton, $ui.SearchButton, $ui.BatchCheckButton,
                      $ui.CompareButton, $ui.LoadNpiFileButton,
                      $ui.RmRunButton, $ui.RmDownloadButton, $ui.RmImportButton, $ui.RmDatasetCombo, $ui.RmRadiusCombo,
@@ -687,6 +756,33 @@ function Confirm-Box([string]$Message) {
 # never freezes; OnDone/OnFail run back on the UI thread via the poll timer.
 # Owns the busy choreography: sets busy here, and the timer ALWAYS clears busy
 # before dispatching, so no handler can leave the window stuck disabled.
+# A plain-English name for the running step, shown on the overlay so the
+# user can tell WHICH long job they are waiting on.
+$script:BusyTitles = @{
+    'load'         = 'Loading the provider snapshot...'
+    'update'       = 'Downloading the CMS provider file...'
+    'compare'      = 'Comparing snapshots...'
+    'rm-run'       = 'Mapping referral sources...'
+    'rm-download'  = 'Downloading the referral dataset...'
+    'rm-import'    = 'Importing the CareSet file...'
+    'bm-search'    = 'Searching NPPES for the practice...'
+    'bm-run'       = 'Benchmarking this practice...'
+    'pg-run'       = 'Finding practice groups...'
+    'pg-download'  = 'Downloading the practice-group dataset...'
+    'pg-benchmark' = 'Building the group referral benchmark...'
+    'pg-trend'     = 'Measuring this group year over year...'
+    'ch-npi'       = 'Breaking the chain down by NPI...'
+    'ch-addr'      = 'Building per-location referral figures...'
+    'lk-run'       = 'Looking up this provider...'
+    'lk-trend'     = 'Measuring referrals year over year...'
+    'lk-geo'       = 'Building the referral heat map...'
+    'lk-analysis'  = 'Analyzing referral sources...'
+    'wl-check'     = 'Checking your watchlist...'
+}
+function Get-BusyTitle([string]$Kind) {
+    if ($Kind -and $script:BusyTitles.ContainsKey($Kind)) { $script:BusyTitles[$Kind] } else { 'Working...' }
+}
+
 function Invoke-Async {
     param(
         [Parameter(Mandatory)][string]$Kind,
@@ -696,7 +792,7 @@ function Invoke-Async {
         [Parameter(Mandatory)][scriptblock]$OnFail,
         [string]$BusyMessage
     )
-    Set-Busy $true $BusyMessage
+    Set-Busy $true $BusyMessage (Get-BusyTitle $Kind)
     $rs = [runspacefactory]::CreateRunspace()
     $rs.Open()
     $ps = [powershell]::Create()

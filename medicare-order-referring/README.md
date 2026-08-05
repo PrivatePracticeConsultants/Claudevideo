@@ -256,6 +256,16 @@ interrupted download can never corrupt the data you already have — the new
 file is fully downloaded and structurally validated before it replaces
 anything, and a validation failure keeps your existing snapshot untouched.
 
+## Long jobs show their work
+
+Scanning a multi-gigabyte shared-patient file takes minutes, and a window that
+sits still for minutes reads as crashed. Every background job therefore dims
+the app behind a working panel that names the running step, animates a
+progress bar, and counts elapsed time, so "still working" is never confused
+with "hung". It waits ~600 ms before appearing, so quick actions don't flash
+it, and it is torn down unconditionally when a job ends — a job that fails
+can never strand the app behind it.
+
 ## Accuracy guarantees
 
 - The file is discovered live from the official CMS catalog
