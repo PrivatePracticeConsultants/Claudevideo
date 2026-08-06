@@ -630,11 +630,16 @@ Describe 'Referral geography and heat map' {
         $g = Get-RmReferralGeography -Npi 9000000001 -CentroidPath $script:CentroidCsv
         $out = Join-Path $script:WorkDir 'heatmap.html'
         $r = Export-RmReferralMapHtml -Geography $g -Path $out
-        $r.Points | Should -Be 2
+        # This fixture's ZIPs are ~1,400 miles apart, so the far one is
+        # correctly NOT drawn under the 250-mile map cap - it stays in the
+        # table and the totals, and the notes say why.
+        $r.Points | Should -Be 1
         $html = Get-Content $out -Raw
         $html | Should -BeLike '*circleMarker*'
         $html | Should -BeLike '*"z":"99999"*'
-        $html | Should -BeLike '*"z":"86442"*'
+        $html | Should -Not -BeLike '*"z":"86442"*'
+        $html | Should -BeLike '*MAP RADIUS:*'
+        $html | Should -BeLike '*<td class="mono">86442</td>*'
         $html | Should -BeLike '*TEST REHAB CLINIC LLC*'
         $html | Should -BeLike '*GEOGRAPHY METHOD*'
         $html | Should -BeLike '*openstreetmap*'
@@ -2753,6 +2758,136 @@ Describe 'Practice-therapist reclassification' {
         # therapist volume or it would dip below its neighbours by exactly 80.
         $y30.SharedPatients | Should -Be 155
         $y30.SourceCount | Should -Be 3
+    }
+}
+
+Describe 'Outbound own-clinician fold + practice roster' {
+    # A real report showed the practice's own PTs among the OUTBOUND
+    # destinations (0-day waits - the co-billing pattern in reverse), and
+    # the user asked for the org's roster on the report. One transient hop
+    # year: inbound doctor + own PT, outbound to the SAME own PT and to an
+    # external orthopedist. The DAC fixture puts the PT on the practice's
+    # roster, plus one clinician under a VARIANT facility name sharing the
+    # same org_pac_id (the pac-expansion case) and one roster-only OT.
+    BeforeAll {
+        $src31 = Join-Path $script:WorkDir 'DocGraph_Hop_Teaming_2031.csv'
+        Set-Content -Path $src31 -Encoding ascii -NoNewline -Value (@(
+            'from_npi,to_npi,patient_count,transaction_count,average_day_wait,std_day_wait'
+            '8000000001,9000000001,45,50,12.5,10.0'    # external doctor: inbound
+            '8000000011,9000000001,80,90,3.0,1.0'      # own PT: inbound (practice therapist)
+            '9000000001,8000000011,60,70,0.5,1.0'      # own PT: OUTBOUND (continued care)
+            '9000000001,8000000002,25,30,14.0,2.0'     # external orthopedist: outbound
+        ) -join "`n")
+        $dacR = Join-Path $script:WorkDir 'DAC_roster.csv'
+        Set-Content -Path $dacR -Encoding ascii -Value @(
+            'NPI,Ind_PAC_ID,Provider Last Name,Provider First Name,pri_spec,Facility Name,org_pac_id,City/Town,State,adr_ln_1,ZIP Code'
+            '8000000011,10,PHYSIO,PIPER,PHYSICAL THERAPY,TEST REHAB CLINIC LLC,9901,TESTVILLE,MO,1 A ST,99999'
+            '8000000031,11,NEWHIRE,NORA,PHYSICAL THERAPY,TRC HOLDINGS LLC,9901,TESTVILLE,MO,1 A ST,99999'
+            '8000000032,12,OTHER,OWEN,OCCUPATIONAL THERAPY,TEST REHAB CLINIC LLC,9901,TESTVILLE,MO,1 A ST,99999'
+        )
+        Import-RmCareCompare -Path $dacR | Out-Null
+        Import-RmDataset -Path $src31 | Out-Null
+        $script:Sa31 = Get-RmSourceAnalysis -Npi 9000000001 -SkipCompetitors -CentroidPath $script:SaCsv
+    }
+    AfterAll {
+        Remove-Item (Join-Path $env:RM_DATA_DIR 'hop_teaming_2031.csv') -Force -ErrorAction SilentlyContinue
+        Remove-Item (Join-Path $env:RM_DATA_DIR 'hop_teaming_2031.csv.rows') -Force -ErrorAction SilentlyContinue
+        Import-RmCareCompare -Path $script:AddrDac | Out-Null
+        Set-RmActiveDataset -Source cms-pspp -Year 2015 | Out-Null
+    }
+
+    It 'folds the practice''s own PT out of the outbound destinations' {
+        $sa = $script:Sa31
+        @($sa.Outbound).Count | Should -Be 1
+        @($sa.Outbound)[0].NPI | Should -Be '8000000002'    # the real hand-off stays
+        @($sa.Outbound)[0].SharedPatients | Should -Be 25
+        $t = @($sa.OutboundTherapistRows)
+        $t.Count | Should -Be 1
+        $t[0].NPI | Should -Be '8000000011'
+        $t[0].SharedPatients | Should -Be 60
+        $t[0].Staff | Should -Be 'VERIFIED (Care Compare)'
+        $sa.OutboundTherapistPatients | Should -Be 60
+        (@($sa.Notes) -join ' ') | Should -BeLike '*OUTBOUND OWN-CLINICIANS*'
+    }
+
+    It 'verifies the inbound therapist against the roster (not just same-discipline)' {
+        $t = @($script:Sa31.TherapistRows)
+        $t.Count | Should -Be 1
+        $t[0].Staff | Should -Be 'VERIFIED (Care Compare)'
+        $script:Sa31.TherapistStaffVerified | Should -Be 1
+    }
+
+    It 'returns today''s roster, expanded across variant facility names via the group id' {
+        $r = @($script:Sa31.PracticeRoster)
+        $r.Count | Should -Be 3
+        @($r | ForEach-Object NPI) | Should -Contain '8000000011'   # name-matched
+        @($r | ForEach-Object NPI) | Should -Contain '8000000032'   # name-matched OT
+        @($r | ForEach-Object NPI) | Should -Contain '8000000031'   # ONLY reachable via org_pac_id
+        @($r | Where-Object NPI -eq '8000000031')[0].Clinician | Should -Be 'NORA NEWHIRE'
+        (@($script:Sa31.Notes) -join ' ') | Should -BeLike '*PRACTICE ROSTER*'
+    }
+
+    It 'renders the roster card and the outbound fold note in the report' {
+        $out = Join-Path $script:WorkDir 'roster-report.html'
+        Export-RmSourceReportHtml -Analysis $script:Sa31 -Path $out -Outbound @($script:Sa31.Outbound) | Out-Null
+        $html = Get-Content $out -Raw
+        $html | Should -BeLike '*Care Compare roster*'
+        $html | Should -BeLike '*NORA NEWHIRE*'                     # roster-only clinician is shown
+        $html | Should -BeLike '*folded out of this list*'         # outbound card discloses the fold
+        $html | Should -BeLike '*80 in + 60 out*'                  # the PT''s volume, both directions
+        $html | Should -BeLike '*OLIVIA ORTHO*'                    # the external hand-off stays listed
+    }
+}
+
+Describe 'Heat-map radius cap (250 miles)' {
+    # The user asked that dots beyond 250 miles not be drawn: at that
+    # distance a dot is a corporate/HQ registration, not a referral area.
+    # The rows must STAY in the tables and totals - only the drawing stops.
+    BeforeAll {
+        Set-RmActiveDataset -Source hop-teaming -Year 2022 | Out-Null
+        $script:CapCsv = Join-Path $script:WorkDir 'cap-centroids.csv'
+        Set-Content -Path $script:CapCsv -Encoding ascii -Value @(
+            'zip,lat,lon'
+            '99999,38.6,-121.3'      # the practice + the local doctor
+            '86442,34.2,-110.0'      # the second source, ~700 straight-line miles out
+        )
+    }
+    AfterAll { Set-RmActiveDataset -Source cms-pspp -Year 2015 | Out-Null }
+
+    It 'keeps far ZIPs in the data but not on the embedded report map' {
+        $sa = Get-RmSourceAnalysis -Npi 9000000001 -SkipCompetitors -CentroidPath $script:CapCsv
+        # the analysis data is COMPLETE - both ZIPs, every patient accounted
+        @($sa.Geo | ForEach-Object Zip) | Should -Contain '86442'
+        $out = Join-Path $script:WorkDir 'cap-report.html'
+        Export-RmSourceReportHtml -Analysis $sa -Path $out | Out-Null
+        $html = Get-Content $out -Raw
+        $html | Should -BeLike '*"z":"99999"*'          # local circle drawn
+        $html | Should -Not -BeLike '*"z":"86442"*'     # far circle NOT drawn
+        $html | Should -BeLike '*MAP RADIUS:*'          # and the map says so
+        $html | Should -BeLike '*<td class="mono">86442</td>*'   # still in the ZIP table
+    }
+
+    It 'applies the same cap to the standalone heat-map export' {
+        $mkRow = {
+            param($zip, $lat, $lon, $pat, $dist)
+            [pscustomobject]@{ Zip = $zip; City = 'X'; State = 'MO'; Sources = 1
+                SharedPatients = $pat; PctOfVolume = 50.0; DistanceMiles = $dist
+                Lat = $lat; Lon = $lon; TopSource = 'SOMEONE' }
+        }
+        $g = [pscustomobject]@{
+            Npi = '9000000001'; Label = 'Test 2022'; Year = 2022; TotalPatients = 65; MappedPatients = 65
+            Practice = [pscustomobject]@{ Name = 'TEST REHAB CLINIC LLC'; Zip = '99999'
+                City = 'TESTVILLE'; State = 'MO'; Lat = 38.6; Lon = -121.3 }
+            Rows = @((& $mkRow '99999' 38.6 -121.3 45 ([double]0)), (& $mkRow '11111' 34.2 -110.0 20 ([double]700)))
+            Notes = @('base note')
+        }
+        $out = Join-Path $script:WorkDir 'cap-map.html'
+        Export-RmReferralMapHtml -Geography $g -Path $out | Out-Null
+        $html = Get-Content $out -Raw
+        $html | Should -BeLike '*"z":"99999"*'
+        $html | Should -Not -BeLike '*"z":"11111"*'
+        $html | Should -BeLike '*MAP RADIUS:*'
+        $html | Should -BeLike '*<td class="mono">11111</td>*'   # table keeps the far row
     }
 }
 

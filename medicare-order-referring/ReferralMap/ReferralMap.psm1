@@ -3298,20 +3298,48 @@ function Get-RmSourceAnalysis {
             $keepEdges.Add($e)
         }
     }
+    # The practice's Care Compare roster, fetched whenever the local DAC
+    # index exists (not only when inbound therapist rows need labels): it
+    # (a) marks which therapist "sources" are VERIFIED current staff,
+    # (b) folds own-clinician rows out of the OUTBOUND destinations below,
+    # and (c) is returned as PracticeRoster so the report can display who
+    # bills under this practice today. Name-matched rows seed the practice's
+    # group-enrollment id(s) (org_pac_id); a second pass pulls every
+    # clinician sharing those ids, so staff enrolled under a variant
+    # facility-name spelling still count.
     $staffSet = New-Object 'System.Collections.Generic.HashSet[string]'
-    if ($therEdges.Count -gt 0) {
-        try {
-            $dacIdx = Get-RmDacIndexPath
-            $rosterNeedle = Get-RmOrgNameKey $pracName
-            if ($rosterNeedle -and (Test-Path -LiteralPath $dacIdx)) {
-                $m0 = Get-RmNameMatcher $rosterNeedle
-                foreach ($line in @([RmEngine]::FindByOrgName($dacIdx, -1, 2, $m0.Regex.ToString(), $m0.Compact, $null))) {
-                    $i0 = $line.IndexOf('|')
-                    if ($i0 -gt 0) { [void]$staffSet.Add($line.Substring(0, $i0)) }
+    $rosterRows = New-Object System.Collections.Generic.List[object]
+    try {
+        $dacIdx = Get-RmDacIndexPath
+        $rosterNeedle = Get-RmOrgNameKey $pracName
+        if ($rosterNeedle -and (Test-Path -LiteralPath $dacIdx)) {
+            $m0 = Get-RmNameMatcher $rosterNeedle
+            $rosterPacs = New-Object 'System.Collections.Generic.HashSet[string]'
+            foreach ($line in @([RmEngine]::FindByOrgName($dacIdx, -1, 2, $m0.Regex.ToString(), $m0.Compact, $null))) {
+                $f = $line.Split('|')
+                if ($f.Count -ge 8 -and $f[0]) {
+                    if ($f[1]) { [void]$rosterPacs.Add($f[1]) }
+                    if ($staffSet.Add($f[0])) {
+                        $rosterRows.Add([pscustomobject]@{
+                            NPI = $f[0]; Clinician = ("$($f[5]) $($f[4])").Trim()
+                            Specialty = $f[3]; City = $f[6]; State = $f[7]
+                        })
+                    }
                 }
             }
-        } catch { }   # the roster only labels rows; never sink the analysis
-    }
+            if ($rosterPacs.Count -gt 0) {
+                foreach ($line in @([RmEngine]::ScanRosterIndex($dacIdx, $rosterPacs, 1))) {
+                    $f = $line.Split('|')
+                    if ($f.Count -ge 8 -and $f[0] -and $staffSet.Add($f[0])) {
+                        $rosterRows.Add([pscustomobject]@{
+                            NPI = $f[0]; Clinician = ("$($f[5]) $($f[4])").Trim()
+                            Specialty = $f[3]; City = $f[6]; State = $f[7]
+                        })
+                    }
+                }
+            }
+        }
+    } catch { }   # the roster only labels rows; never sink the analysis
     $grandTotal = $total
     # .ToArray(), not @($list) — the @() binder can throw a spurious
     # 'Argument types do not match' on a generic List here (see the trend).
@@ -3333,24 +3361,47 @@ function Get-RmSourceAnalysis {
     }
 
     # Outbound rows, named from the top destinations only (the same cached
-    # lookup the sources use, so a handful of extra NPIs at most).
+    # lookup the sources use, so a handful of extra NPIs at most). The
+    # practice's own PT/OT/SLPs appear on THIS side too — the co-billing
+    # pattern in reverse (org visit first, therapist billed later) — so the
+    # same fold applies: an individual-therapist destination moves to a
+    # separate own-clinician list instead of masquerading as a hand-off.
+    # A roster-NPI match catches every CURRENT staff member at any volume;
+    # the specialty test catches departed staff among the top destinations.
+    $outboundTherRows = @()
     if ($outBySrc.Count -gt 0) {
-        $topOut = @($outBySrc.GetEnumerator() | Sort-Object { $_.Value.N } -Descending | Select-Object -First 25)
+        # Classify a deeper window than the 25 shown, so folding staff out
+        # never leaves the external list short.
+        $topOut = @($outBySrc.GetEnumerator() | Sort-Object { $_.Value.N } -Descending | Select-Object -First 60)
         $outNpis = @($topOut | ForEach-Object { $_.Key } | Where-Object { -not $detail.ContainsKey($_) })
         $outDetail = if ($outNpis.Count -gt 0) { Get-RmProviderDetail -Npi $outNpis } else { @{} }
-        $outboundRows = @($topOut | ForEach-Object {
-            $d = if ($detail.ContainsKey($_.Key)) { $detail[$_.Key] }
-                 elseif ($outDetail.ContainsKey($_.Key)) { $outDetail[$_.Key] } else { $null }
+        $outExt = New-Object System.Collections.Generic.List[object]
+        $outTher = New-Object System.Collections.Generic.List[object]
+        foreach ($t in $topOut) {
+            $d = if ($detail.ContainsKey($t.Key)) { $detail[$t.Key] }
+                 elseif ($outDetail.ContainsKey($t.Key)) { $outDetail[$t.Key] } else { $null }
+            $spec0 = if ($d) { ([string]$d.Specialty).ToUpperInvariant() } else { '' }
+            $isOwn = $staffSet.Contains($t.Key) -or
+                     ($spec0 -and $spec0 -notmatch 'CLINIC|CENTER' -and $spec0 -match $therapistRe)
             $row = [ordered]@{
-                NPI = $_.Key
+                NPI = $t.Key
                 Name = if ($d) { [string]$d.Name } else { '' }
                 Specialty = if ($d) { [string]$d.Specialty } else { '' }
-                SharedPatients = $_.Value.N
+                SharedPatients = $t.Value.N
             }
-            if ($isHop -and $_.Value.T -gt 0) { $row['AvgDayWait'] = [math]::Round($_.Value.W / $_.Value.T, 1) }
-            [pscustomobject]$row
-        })
+            if ($isHop -and $t.Value.T -gt 0) { $row['AvgDayWait'] = [math]::Round($t.Value.W / $t.Value.T, 1) }
+            if ($isOwn) {
+                $row['Staff'] = if ($staffSet.Contains($t.Key)) { 'VERIFIED (Care Compare)' } else { 'same discipline' }
+                $outTher.Add([pscustomobject]$row)
+            } else {
+                $outExt.Add([pscustomobject]$row)
+            }
+        }
+        $outboundRows = @($outExt.ToArray() | Select-Object -First 25)
+        $outboundTherRows = $outTher.ToArray()
     }
+    $outTherPatients = 0
+    foreach ($o in $outboundTherRows) { $outTherPatients += [int]$o.SharedPatients }
 
     # Per-source ranked rows with share, cumulative share, and distance —
     # and, in the same pass, the per-ZIP geography roll-up the report's
@@ -3775,6 +3826,11 @@ function Get-RmSourceAnalysis {
             $vst = @($therRows | Where-Object { $_.Staff -like 'VERIFIED*' }).Count
             "PRACTICE THERAPISTS: $($therRows.Count) individual PT/OT/SLP NPI(s) appear in the raw file as 'sources' of this practice, carrying $('{0:N0}' -f $therTotal) shared patients. That is the practice's own patient base arriving through its clinicians (PT->org co-billing), NOT external referrals, so it is summed into TotalPatients and kept out of the source ranking. $vst of $($therRows.Count) are on this practice's own Care Compare roster (VERIFIED staff); the rest are same-discipline clinicians - most commonly staff who left or are not yet on today's roster. An external therapist who truly refers here would also land in this bucket: check the roster labels before writing anyone off."
         })
+        $(if (@($outboundTherRows).Count) {
+            $ovst = @($outboundTherRows | Where-Object { $_.Staff -like 'VERIFIED*' }).Count
+            "OUTBOUND OWN-CLINICIANS: $(@($outboundTherRows).Count) individual PT/OT/SLP NPI(s) also appear on the OUTBOUND side, carrying $('{0:N0}' -f $outTherPatients) patients - the same co-billing pattern in the other direction (continued care under the practice's own therapists), NOT a post-therapy hand-off, so they are folded out of the outbound destination list. $ovst of $(@($outboundTherRows).Count) are VERIFIED on this practice's Care Compare roster today."
+        })
+        $(if ($rosterRows.Count) { "PRACTICE ROSTER (Care Compare): $($rosterRows.Count) clinician(s) are listed under this practice in Medicare Care Compare today - matched by practice name, then expanded to everyone sharing the same group-enrollment id (org_pac_id). This is TODAY's roster: staff who left are absent even though their historical volume appears above, and cash-pay or non-Medicare clinicians never appear. If the location column shows an unexpected city, a same-named practice elsewhere matched too - read those rows with care." })
         $(if ($npiList.Count -gt 1) { "COMBINED ANALYSIS: inbound volume is merged across $($npiList.Count) NPIs ($($npiList -join ', ')). A source feeding several of them counts ONCE with summed volume; patient flows BETWEEN these NPIs are excluded as internal handoffs. Geography and the competitive radius are centered on the primary NPI ($primary)." })
         $(if ($grandTotal -gt 0 -and $grandTotal -lt 1000) { 'SMALL-PRACTICE NOTE: pairs under 11 distinct patients are excluded at the source, so a modest measured total usually UNDERSTATES the real referral base. Volume may also sit under the therapists'' individual NPIs — run a combined analysis (paste the org NPI plus the therapist NPIs together) for the full picture.' })
         'CONCENTRATION: HHI = sum of squared percentage shares (0-10,000); above ~2,500 is highly concentrated — losing one relationship materially moves the total. Top-1/5/10 dependence reads the same risk directly. Both are computed on MEASURED (11+ patient) pairs only: sub-floor referrers are invisible, which inflates the measured shares, so true concentration is LOWER whenever many small sources exist — treat a high reading on a short source list with caution.'
@@ -3815,6 +3871,9 @@ function Get-RmSourceAnalysis {
         TherapistPatients = $therTotal       # billed by the practice's own PT/OT/SLP NPIs
         TherapistRows = @($therRows.ToArray())
         TherapistStaffVerified = @($therRows | Where-Object { $_.Staff -like 'VERIFIED*' }).Count
+        PracticeRoster = @($rosterRows.ToArray())   # today's Care Compare roster (name + group-id matched)
+        OutboundTherapistRows = @($outboundTherRows)  # own clinicians folded OUT of Outbound
+        OutboundTherapistPatients = $outTherPatients
         SourceCount  = $sources.Count
         Top1Pct      = [double]$top1
         Top5Pct      = [math]::Round($top5, 1)
@@ -4086,7 +4145,14 @@ function Export-RmReferralMapHtml {
         [Parameter(Mandatory)][string]$Path
     )
     $g = $Geography
-    $points = @($g.Rows | Where-Object { $null -ne $_.Lat } | ForEach-Object {
+    # MAP RADIUS CAP (same rule as the report's embedded map): a dot more
+    # than 250 straight-line miles out is the registered corporate/HQ
+    # address of a centralized service, not a place patients travel from.
+    # It stays in the table and the totals; it is just not drawn.
+    $mapFarCut = 250.0
+    $mapFarRows = @($g.Rows | Where-Object { $null -ne $_.Lat -and $_.DistanceMiles -is [double] -and $_.DistanceMiles -gt $mapFarCut })
+    $points = @($g.Rows | Where-Object { $null -ne $_.Lat } |
+        Where-Object { -not ($_.DistanceMiles -is [double] -and $_.DistanceMiles -gt $mapFarCut) } | ForEach-Object {
         [ordered]@{
             z = $_.Zip; lat = [double]$_.Lat; lon = [double]$_.Lon
             p = [int]$_.SharedPatients; s = [int]$_.Sources
@@ -4111,7 +4177,11 @@ function Export-RmReferralMapHtml {
         elseif ($t.City) { "$($t.Zip) ($($t.City))" } else { $t.Zip }
     } else { '—' }
     $generated = (Get-Date).ToString('MMMM d, yyyy')
-    $notesHtml = (@($g.Notes) | Where-Object { $_ } | ForEach-Object {
+    $mapCapNote = if (@($mapFarRows).Count) {
+        $mapFarPat = 0; foreach ($fr in $mapFarRows) { $mapFarPat += [int]$fr.SharedPatients }
+        "MAP RADIUS: $(@($mapFarRows).Count) ZIP area(s) carrying $('{0:N0}' -f $mapFarPat) patients sit more than $([int]$mapFarCut) miles from the practice and are NOT drawn on the map - at that distance a dot is the source's registered corporate/HQ address (reference labs, chains, telehealth), not a place patients travel from. Those rows stay in the table below and in every total."
+    } else { $null }
+    $notesHtml = (@(@($g.Notes) + @($mapCapNote)) | Where-Object { $_ } | ForEach-Object {
         '<li>' + ([System.Net.WebUtility]::HtmlEncode([string]$_)) + '</li>' }) -join "`n"
     $tableRows = (@($g.Rows) | Select-Object -First 30 | ForEach-Object {
         '<tr><td class="mono">{0}</td><td>{1}</td><td>{2}</td><td class="num">{3}</td><td class="num">{4}</td><td class="num">{5}%</td><td class="num">{6}</td><td>{7}</td></tr>' -f
@@ -4426,6 +4496,17 @@ function Export-RmSourceReportHtml {
     $refPat = if ($a.PSObject.Properties['ReferralPatients']) { [int]$a.ReferralPatients } else { [int]$a.TotalPatients }
     $therPat = if ($a.PSObject.Properties['TherapistPatients']) { [int]$a.TherapistPatients } else { 0 }
     $therList = if ($a.PSObject.Properties['TherapistRows']) { @($a.TherapistRows) } else { @() }
+    $rosterList = if ($a.PSObject.Properties['PracticeRoster']) { @($a.PracticeRoster) } else { @() }
+    $outTherList = if ($a.PSObject.Properties['OutboundTherapistRows']) { @($a.OutboundTherapistRows) } else { @() }
+    # Roster rows cross-referenced with measured volume: inbound patients
+    # from the practice-therapist fold, outbound from the own-clinician fold.
+    $rosterVol = @{}
+    foreach ($t in $therList) { $rosterVol[[string]$t.SourceNPI] = @{ In = [int]$t.SharedPatients; Out = 0 } }
+    foreach ($t in $outTherList) {
+        $k = [string]$t.NPI
+        if (-not $rosterVol.ContainsKey($k)) { $rosterVol[$k] = @{ In = 0; Out = 0 } }
+        $rosterVol[$k].Out += [int]$t.SharedPatients
+    }
 
     # ---- Chart 1: top-15 sources horizontal bars -------------------------
     $top = @($a.Sources | Select-Object -First 15)
@@ -4625,7 +4706,7 @@ function Export-RmSourceReportHtml {
   <tr><th>Destination</th><th>Specialty</th><th>NPI</th><th class="num">Patients</th><th class="num">$(if ($oIsHop) { 'Avg day wait' } else { 'Same day' })</th></tr>
   $oRows
 </table>
-<p class="note">$('{0:N0}' -f @($Outbound | Where-Object { $_ }).Count) destination(s), $('{0:N0}' -f $oTotal) patients shared onward in $($a.Year) &mdash; the physicians, imaging centers, and facilities that own the post-therapy hand-offs. Top 15 shown; the direction is claims sequence, so co-occurring care appears alongside true referrals.</p>
+<p class="note">$('{0:N0}' -f @($Outbound | Where-Object { $_ }).Count) destination(s), $('{0:N0}' -f $oTotal) patients shared onward in $($a.Year) &mdash; the physicians, imaging centers, and facilities that own the post-therapy hand-offs. Top 15 shown; the direction is claims sequence, so co-occurring care appears alongside true referrals.$(if (@($outTherList).Count) { $foldPat = 0; foreach ($ot in $outTherList) { $foldPat += [int]$ot.SharedPatients }; " <b>$(@($outTherList).Count) of the practice's own PT/OT/SLP clinicians ($('{0:N0}' -f $foldPat) patients) were folded out of this list</b> &mdash; continued care under the practice's own therapists, not an outbound hand-off. They are listed in the roster section below." })</p>
 </div>
 "@
     }
@@ -4777,7 +4858,17 @@ $lossRows
         if ((Test-Path -LiteralPath $lfJsPath) -and (Test-Path -LiteralPath $lfCssPath)) {
             $lfCss = '<style>' + [System.IO.File]::ReadAllText($lfCssPath) + '</style>'
             $lfJs = '<script>' + [System.IO.File]::ReadAllText($lfJsPath) + '</script>'
-            $geoPts = @($geo | ForEach-Object {
+            # MAP RADIUS CAP: a dot more than 250 straight-line miles out is
+            # almost never a place patients travel from - it is the REGISTERED
+            # corporate/HQ address of a centralized service (reference labs,
+            # chains, telehealth). Those rows keep their place in every table
+            # and total; they are just not DRAWN, so one New York dot cannot
+            # zoom a Colorado map out to the whole country.
+            $geoFarCut = 250.0
+            $geoFarRows = @($geo | Where-Object { $_.DistanceMiles -is [double] -and $_.DistanceMiles -gt $geoFarCut })
+            $geoDrawn = @($geo | Where-Object { -not ($_.DistanceMiles -is [double] -and $_.DistanceMiles -gt $geoFarCut) })
+            $geoFarPat = 0; foreach ($gr in $geoFarRows) { $geoFarPat += [int]$gr.SharedPatients }
+            $geoPts = @($geoDrawn | ForEach-Object {
                 $prov = @($_.TopProviders | ForEach-Object {
                     [ordered]@{ n = [string]$_.Name; s = [string]$_.Specialty; p = [int]$_.Patients } })
                 [ordered]@{
@@ -4827,6 +4918,7 @@ $lossRows
             $zipNote = "Top $([math]::Min(15, $geo.Count)) of $('{0:N0}' -f $geo.Count) source ZIP areas; " +
                 "$('{0:N0}' -f $geoMapped) of $('{0:N0}' -f $refPat) external-source patients mappable" +
                 $(if ($geoUn -gt 0) { " ($('{0:N0}' -f $geoUn) from sources without a locatable ZIP)" }) + '.' +
+                $(if (@($geoFarRows).Count) { " MAP RADIUS: $(@($geoFarRows).Count) ZIP area(s) carrying $('{0:N0}' -f $geoFarPat) patients sit more than $([int]$geoFarCut) miles away and are NOT drawn - at that distance a dot is the source's registered corporate/HQ address (reference labs, chains, telehealth), not a place patients travel from. Those rows stay in this table and in every total." }) +
                 $(if ($a.PSObject.Properties['DistantNote'] -and $a.DistantNote) { ' ' + $a.DistantNote })
             $capNoteHtml = if (@($mkt).Count) {
                 'AREA / CAPTURE columns: total therapy volume that ZIP sends to ANY comparable provider within the radius, and this practice''s share of it. A big ZIP with a low capture rate is an outreach target.'
@@ -5297,6 +5389,31 @@ $(if (@($therList).Count) { @"
             ('{0:N0}' -f [int]$_.SharedPatients), (_h ([string]$_.Staff))
     }) -join "`n")
   </table>
+</div>
+"@ })
+$(if (@($rosterList).Count) {
+    $rSortProps = @(
+        @{Expression = { if ($rosterVol.ContainsKey([string]$_.NPI)) { -($rosterVol[[string]$_.NPI].In + $rosterVol[[string]$_.NPI].Out) } else { 0 } }}
+        @{Expression = 'Clinician'})
+    $rShown = @($rosterList | Sort-Object -Property $rSortProps | Select-Object -First 60)
+    $rRows = (@($rShown) | ForEach-Object {
+        $v = if ($rosterVol.ContainsKey([string]$_.NPI)) { $rosterVol[[string]$_.NPI] } else { $null }
+        $volCell = if ($v) {
+            (@($(if ($v.In) { "$('{0:N0}' -f $v.In) in" }), $(if ($v.Out) { "$('{0:N0}' -f $v.Out) out" })) | Where-Object { $_ }) -join ' + '
+        } else { '&mdash;' }
+        '<tr><td class="mono">{0}</td><td>{1}</td><td>{2}</td><td>{3}</td><td class="num">{4}</td></tr>' -f
+            $_.NPI, (_h ([string]$_.Clinician)), (_h ([string]$_.Specialty)),
+            (_h (("$($_.City), $($_.State)").Trim(', ').Trim())), $volCell
+    }) -join "`n"
+    @"
+<div class="card">
+  <h2>Care Compare roster &mdash; clinicians billing under this practice today</h2>
+  <div class="body"><p>Medicare Care Compare lists $('{0:N0}' -f @($rosterList).Count) clinician$(if (@($rosterList).Count -ne 1) { 's' }) under this practice today (matched by practice name, then expanded to everyone sharing the same group-enrollment id). The last column shows each clinician's measured volume in this year's shared-patient file &mdash; "in" is caseload arriving through that clinician, "out" is continued care under them after an organization visit; a dash means every pair fell under the 11-patient privacy floor or the clinician bills only through the group NPI.</p></div>
+  <table>
+    <tr><th>NPI</th><th>Clinician</th><th>Specialty</th><th>Location</th><th class="num">In this year's data</th></tr>
+    $rRows
+  </table>
+  <div class="tablenote">$(if (@($rosterList).Count -gt 60) { "Showing 60 of $('{0:N0}' -f @($rosterList).Count) roster clinicians (highest measured volume first). " })This is TODAY's roster: clinicians who left the practice are absent even when their historical volume appears above, and cash-pay or non-Medicare clinicians never appear here.</div>
 </div>
 "@ })
 <div class="card">

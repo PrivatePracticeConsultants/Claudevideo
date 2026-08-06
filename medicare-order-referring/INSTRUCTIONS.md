@@ -488,7 +488,18 @@ PT/OT/SLP source into the practice's own patient base automatically — they
 appear in their own labeled section (with a Care Compare roster check marking
 verified staff), never in the referral ranking, so the source list shows only
 the physicians, hospitals, and other true referrers you could actually win or
-lose. a
+lose. The same fold applies to the **outbound** side of the one-stop report:
+an individual PT/OT/SLP among the "destinations" (recognizable by a ~0-day
+wait) is the practice's own clinician continuing care, not a post-therapy
+hand-off, so those rows are folded out of the destination list and disclosed.
+The report also shows the practice's **Care Compare roster** — every clinician
+billing under the practice today (matched by practice name, then expanded
+through the shared group-enrollment id), cross-referenced with each
+clinician's measured inbound/outbound volume. And the heat maps draw nothing
+beyond **250 straight-line miles** of the practice: a dot at that distance is
+a corporate/HQ registration (reference labs, chains, telehealth), not a
+referral area — capped rows stay in every table and total, and the map note
+lists what was left undrawn. a
 top-sources chart, the specialty mix of the referral base, a concentration
 curve, volume by distance from the practice, an embedded **referral-geography
 heat map** (one circle per source ZIP, sized and colored by volume, your
