@@ -171,6 +171,17 @@ care…"). Select a clinic first to profile just that clinic, or leave it
 unselected for the whole ZIP — handy for seeing where a practice's funnel comes
 from.
 
+**Underserved areas (expansion screen):** with a ZIP and a radius picked, the
+**Underserved areas** button ranks every county the circle touches by
+**registered PT/OT/SLP clinicians per 10,000 Original-Medicare
+beneficiaries** — lower means more Medicare demand per clinician, i.e. a more
+open market. It needs the local NPPES index (one click on the Multi-site
+chains tab). Only compare counties with a high **CoveragePct**: a county only
+partly inside your circle counts part of its clinicians against all of its
+beneficiaries, which understates supply. Medicare Advantage members are not
+in the denominator, and cash-pay demand is invisible — treat it as a
+screening ranking for where to look next, not a market study.
+
 ### Tab 5 — Practice benchmark
 *"How does this clinic stack up against everyone else around it?"*
 
@@ -431,6 +442,12 @@ Three honest caveats, all repeated in the export sidecar:
 
 **Export…** saves whichever view is on screen with its methodology file.
 
+**Analyze family as one practice…** (after a by-NPI breakdown) carries every
+family NPI straight into the Provider lookup tab — one more click on **Source
+analysis** or **Full report (one-stop)** analyzes the whole family as a single
+combined practice. For families over 50 NPIs, the 50 with the most measured
+volume are carried (the combined engine's cap) and the status bar says so.
+
 ### Tab 8 — Provider lookup
 *"Tell me everything about this one provider."*
 
@@ -499,7 +516,20 @@ clinician's measured inbound/outbound volume. And the heat maps draw nothing
 beyond **250 straight-line miles** of the practice: a dot at that distance is
 a corporate/HQ registration (reference labs, chains, telehealth), not a
 referral area — capped rows stay in every table and total, and the map note
-lists what was left undrawn. a
+lists what was left undrawn. Four more things the report reads for you:
+a **Back** column on every source (how many patients went the OTHER way —
+in≈back with a long lag is co-occurring care like labs and hospitals;
+in≫back with a short lag is referral flow you could win or lose); an
+**at-risk flag** (⚠) on any physician/NP/PA-type source who is missing from
+the current Order & Referring roster — they retired, deactivated, or left
+Medicare, so their future referrals would deny (therapists and organizations
+are never on that roster, so they are never flagged); departed staff in the
+practice-therapists section are labeled with the practice they bill under
+**today** (an ex-employee at a rival is a competitor, not history); and an
+**Outreach targets** card — the biggest referrers feeding your competitors
+with no measured flow into this practice (their own clinicians excluded),
+saved as an `.outreach.csv` call sheet beside the report. The year-over-year
+table also carries **outbound** volume per year. a
 top-sources chart, the specialty mix of the referral base, a concentration
 curve, volume by distance from the practice, an embedded **referral-geography
 heat map** (one circle per source ZIP, sized and colored by volume, your

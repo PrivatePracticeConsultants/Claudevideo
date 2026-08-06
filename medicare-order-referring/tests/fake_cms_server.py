@@ -132,6 +132,16 @@ SOURCES = {
     # patient base instead of ranking her as a referrer.
     '8000000011': provider('8000000011', 'NPI-1', ('PIPER', 'PHYSIO'), ['225100000X'],
                            '999990000', primary_desc='Physical Therapist'),
+    # A DEPARTED staff PT: folded like the others, but the DAC fixture lists
+    # him under a different practice today ("now at ..." labeling).
+    '8000000033': provider('8000000033', 'NPI-1', ('PETER', 'PASTSTAFF'), ['225100000X'],
+                           '999990000', primary_desc='Physical Therapist'),
+    # A doctor who feeds only the COMPETITOR clinic: the outreach-target list
+    # must surface him; the competitor's own PT below must be excluded.
+    '8000000034': provider('8000000034', 'NPI-1', ('DANA', 'DOCTORTWO'), ['207Q00000X'],
+                           '999990000', primary_desc='Family Medicine'),
+    '8000000035': provider('8000000035', 'NPI-1', ('PAULA', 'PEERSTAFF'), ['225100000X'],
+                           '999990000', primary_desc='Physical Therapist'),
 }
 
 # ZIP 77777: individual therapists for the PracticeGroups tests. Two belong to a

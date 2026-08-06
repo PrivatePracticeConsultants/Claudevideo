@@ -3069,8 +3069,12 @@ function Get-RmUnderservedAreas {
     foreach ($line in @([RmEngine]::ScanIndexByZip($idx, 7, $zipSet, $emptyPrefixes))) {
         $f = $line.Split('|')
         if ($f.Count -lt 9 -or $f[1] -ne '1') { continue }
+        # NOT @(10..$max): when a short row makes $max < 10, PowerShell's
+        # range operator counts DOWN and indexes past the array.
         $isTher = $false
-        foreach ($slot in (@(8) + @(10..([math]::Min(23, $f.Count - 1))))) {
+        $slotMax = [math]::Min(23, $f.Count - 1)
+        for ($slot = 8; $slot -le $slotMax; $slot++) {
+            if ($slot -eq 9) { continue }   # field 9 is the enumeration date
             $code = $f[$slot]
             if ($code -and ($code.StartsWith('2251') -or $code.StartsWith('225X') -or $code.StartsWith('235Z'))) { $isTher = $true; break }
         }
@@ -3665,7 +3669,16 @@ function Get-RmSourceAnalysis {
     $atRisk = @()
     if ($EligibilityIndexPath -and (Test-Path -LiteralPath $EligibilityIndexPath)) {
         try {
-            $refTypeRe = 'PHYSICIAN|NURSE PRACTITIONER|PHYSICIAN ASSISTANT|PODIATR|OPTOMETR|DENTIST|CHIROPRACT|CLINICAL NURSE SPECIALIST|CERTIFIED REGISTERED NURSE ANESTHETIST|CERTIFIED NURSE MIDWIFE'
+            # Local-index enrichment labels physicians '... Physician' (NUCC
+            # display names); the NPPES API returns the bare taxonomy desc
+            # ('Family Medicine'). Cover both so the check does not silently
+            # skip API-enriched sources.
+            $refTypeRe = ('PHYSICIAN|NURSE PRACTITIONER|PHYSICIAN ASSISTANT|PODIATR|OPTOMETR|DENTIST|CHIROPRACT|' +
+                'CLINICAL NURSE SPECIALIST|CERTIFIED REGISTERED NURSE ANESTHETIST|CERTIFIED NURSE MIDWIFE|' +
+                'FAMILY MEDICINE|INTERNAL MEDICINE|GENERAL PRACTICE|ORTHOPAEDIC|NEUROLOG|CARDIOVASCULAR|SPORTS MEDICINE|' +
+                'PHYSICAL MEDICINE|OSTEOPATH|SURGERY|PSYCHIATR|RHEUMATOLOG|PAIN MEDICINE|GERIATRIC|PULMONARY|ENDOCRIN|' +
+                'GASTROENTER|OTOLARYNG|UROLOG|ONCOLOG|RADIOLOG|ANESTHESIOLOG|DERMATOLOG|EMERGENCY MEDICINE|OBSTETRIC|' +
+                'GYNECOLOG|OPHTHALMOLOG|NEPHROLOG|HEMATOLOG|INFECTIOUS|ALLERGY')
             $checkSet = New-Object 'System.Collections.Generic.HashSet[string]'
             foreach ($srow in $sources) {
                 $sp = ([string]$srow.SourceSpecialty).ToUpperInvariant()

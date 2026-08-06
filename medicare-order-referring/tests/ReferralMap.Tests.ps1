@@ -2774,9 +2774,14 @@ Describe 'Outbound own-clinician fold + practice roster' {
         Set-Content -Path $src31 -Encoding ascii -NoNewline -Value (@(
             'from_npi,to_npi,patient_count,transaction_count,average_day_wait,std_day_wait'
             '8000000001,9000000001,45,50,12.5,10.0'    # external doctor: inbound
+            '8000000002,9000000001,20,25,9.0,2.0'      # external orthopedist: inbound
             '8000000011,9000000001,80,90,3.0,1.0'      # own PT: inbound (practice therapist)
+            '8000000033,9000000001,30,40,2.0,1.0'      # DEPARTED PT: inbound (billing at RIVAL today)
             '9000000001,8000000011,60,70,0.5,1.0'      # own PT: OUTBOUND (continued care)
             '9000000001,8000000002,25,30,14.0,2.0'     # external orthopedist: outbound
+            '9000000001,8000000001,15,20,10.0,2.0'     # back to the doctor: the SharedBack case
+            '8000000034,9000000002,50,60,11.0,3.0'     # doctor feeding ONLY the competitor: outreach target
+            '8000000035,9000000002,40,50,1.0,1.0'      # the competitor''s own PT: NOT an outreach target
         ) -join "`n")
         $dacR = Join-Path $script:WorkDir 'DAC_roster.csv'
         Set-Content -Path $dacR -Encoding ascii -Value @(
@@ -2784,10 +2789,21 @@ Describe 'Outbound own-clinician fold + practice roster' {
             '8000000011,10,PHYSIO,PIPER,PHYSICAL THERAPY,TEST REHAB CLINIC LLC,9901,TESTVILLE,MO,1 A ST,99999'
             '8000000031,11,NEWHIRE,NORA,PHYSICAL THERAPY,TRC HOLDINGS LLC,9901,TESTVILLE,MO,1 A ST,99999'
             '8000000032,12,OTHER,OWEN,OCCUPATIONAL THERAPY,TEST REHAB CLINIC LLC,9901,TESTVILLE,MO,1 A ST,99999'
+            '8000000033,13,PASTSTAFF,PETER,PHYSICAL THERAPY,RIVAL REHAB LLC,9902,TESTVILLE,MO,9 R ST,99999'
         )
         Import-RmCareCompare -Path $dacR | Out-Null
+        # O&R roster fixture: the family doctor is ABSENT (at risk); the
+        # orthopedist is on the list but with Part B = N (also at risk).
+        $script:EligCsv = Join-Path $script:WorkDir 'orf-elig.csv'
+        Set-Content -Path $script:EligCsv -Encoding ascii -Value @(
+            'NPI,LAST_NAME,FIRST_NAME,PARTB,DME,HHA,PMD,HOSPICE'
+            '8000000002,ORTHO,OLIVIA,N,Y,N,N,N'
+            '1234567893,SOMEONE,ELSE,Y,Y,Y,Y,Y'
+        )
         Import-RmDataset -Path $src31 | Out-Null
-        $script:Sa31 = Get-RmSourceAnalysis -Npi 9000000001 -SkipCompetitors -CentroidPath $script:SaCsv
+        # Competitors ON: the outreach-target list rides the competitive sweep.
+        $script:Sa31 = Get-RmSourceAnalysis -Npi 9000000001 -CentroidPath $script:SaCsv `
+            -EligibilityIndexPath $script:EligCsv
     }
     AfterAll {
         Remove-Item (Join-Path $env:RM_DATA_DIR 'hop_teaming_2031.csv') -Force -ErrorAction SilentlyContinue
@@ -2798,8 +2814,8 @@ Describe 'Outbound own-clinician fold + practice roster' {
 
     It 'folds the practice''s own PT out of the outbound destinations' {
         $sa = $script:Sa31
-        @($sa.Outbound).Count | Should -Be 1
-        @($sa.Outbound)[0].NPI | Should -Be '8000000002'    # the real hand-off stays
+        @($sa.Outbound).Count | Should -Be 2
+        @($sa.Outbound)[0].NPI | Should -Be '8000000002'    # the real hand-offs stay
         @($sa.Outbound)[0].SharedPatients | Should -Be 25
         $t = @($sa.OutboundTherapistRows)
         $t.Count | Should -Be 1
@@ -2807,14 +2823,52 @@ Describe 'Outbound own-clinician fold + practice roster' {
         $t[0].SharedPatients | Should -Be 60
         $t[0].Staff | Should -Be 'VERIFIED (Care Compare)'
         $sa.OutboundTherapistPatients | Should -Be 60
+        $sa.OutboundRawPatients | Should -Be 100            # 60 + 25 + 15, raw both kinds
+        $sa.OutboundRawDestinations | Should -Be 3
         (@($sa.Notes) -join ' ') | Should -BeLike '*OUTBOUND OWN-CLINICIANS*'
     }
 
-    It 'verifies the inbound therapist against the roster (not just same-discipline)' {
+    It 'verifies staff against the roster and labels departed staff with where they bill TODAY' {
         $t = @($script:Sa31.TherapistRows)
-        $t.Count | Should -Be 1
-        $t[0].Staff | Should -Be 'VERIFIED (Care Compare)'
+        $t.Count | Should -Be 2
+        @($t | Where-Object SourceNPI -eq '8000000011')[0].Staff | Should -Be 'VERIFIED (Care Compare)'
+        @($t | Where-Object SourceNPI -eq '8000000033')[0].Staff | Should -BeLike 'same discipline - now at RIVAL REHAB LLC*'
         $script:Sa31.TherapistStaffVerified | Should -Be 1
+    }
+
+    It 'adds net-flow (SharedBack) to each source from the same pass' {
+        $s = @($script:Sa31.Sources)
+        @($s | Where-Object SourceNPI -eq '8000000001')[0].SharedBack | Should -Be 15
+        @($s | Where-Object SourceNPI -eq '8000000002')[0].SharedBack | Should -Be 25
+        (@($script:Sa31.Notes) -join ' ') | Should -BeLike '*NET FLOW*'
+    }
+
+    It 'flags referrer-type sources missing from the O&R roster (and Part B = N)' {
+        $s = @($script:Sa31.Sources)
+        @($s | Where-Object SourceNPI -eq '8000000001')[0].Eligibility | Should -Be 'NOT on the current Order & Referring list'
+        @($s | Where-Object SourceNPI -eq '8000000002')[0].Eligibility | Should -Be 'on the list, but NOT Part B eligible'
+        @($script:Sa31.AtRiskSources).Count | Should -Be 2
+        (@($script:Sa31.Notes) -join ' ') | Should -BeLike '*AT-RISK REFERRERS*'
+    }
+
+    It 'lists outreach targets from the sweep, excluding the competitor''s own clinicians' {
+        $m = @($script:Sa31.MissedSources)
+        $m.Count | Should -Be 1
+        $m[0].SourceNPI | Should -Be '8000000034'           # the doctor feeding only the rival
+        $m[0].PatientsToCompetitors | Should -Be 50
+        @($m | Where-Object SourceNPI -eq '8000000035').Count | Should -Be 0   # rival's own PT excluded
+        (@($script:Sa31.Notes) -join ' ') | Should -BeLike '*OUTREACH TARGETS*'
+    }
+
+    It 'carries outbound totals in the trend: reused year from the analysis, other years scanned' {
+        $sa = Add-RmSourceTrend -Analysis $script:Sa31 -SkipEnrichment
+        $y31 = @($sa.Trend.Years | Where-Object Year -eq 2031)[0]
+        $y31.OutboundPatients | Should -Be 100              # reused from the analysis (raw)
+        $y31.OutboundDestinations | Should -Be 3
+        $y22 = @($sa.Trend.Years | Where-Object Year -eq 2022)[0]
+        $y22.OutboundPatients | Should -Be 99               # scanned fresh via ScanEither
+        $y22.OutboundDestinations | Should -Be 1
+        (@($sa.Trend.Notes) -join ' ') | Should -BeLike '*OUTBOUND COLUMNS*'
     }
 
     It 'returns today''s roster, expanded across variant facility names via the group id' {
@@ -2836,6 +2890,17 @@ Describe 'Outbound own-clinician fold + practice roster' {
         $html | Should -BeLike '*folded out of this list*'         # outbound card discloses the fold
         $html | Should -BeLike '*80 in + 60 out*'                  # the PT''s volume, both directions
         $html | Should -BeLike '*OLIVIA ORTHO*'                    # the external hand-off stays listed
+        $html | Should -BeLike '*must not be added together*'      # in/out overlap disclosure
+    }
+
+    It 'renders the Back column, the at-risk flags, and the outreach card in the report' {
+        $html = Get-Content (Join-Path $script:WorkDir 'roster-report.html') -Raw
+        $html | Should -BeLike '*<th class="num">Back</th>*'       # net-flow column
+        $html | Should -BeLike '*&#9888;*'                         # at-risk marker on flagged rows
+        $html | Should -BeLike '*AT RISK: 2 referral source*'      # auto-written finding
+        $html | Should -BeLike '*Outreach targets*'                # the missed-sources card
+        $html | Should -BeLike '*DANA DOCTORTWO*'                  # the target is named
+        $html | Should -Not -BeLike '*PAULA PEERSTAFF*'            # rival staff never appears as a target
     }
 }
 
@@ -2888,6 +2953,86 @@ Describe 'Heat-map radius cap (250 miles)' {
         $html | Should -Not -BeLike '*"z":"11111"*'
         $html | Should -BeLike '*MAP RADIUS:*'
         $html | Should -BeLike '*<td class="mono">11111</td>*'   # table keeps the far row
+    }
+}
+
+Describe 'Underserved-area screen' {
+    # County FFS beneficiaries (local enrollment index) vs the PT/OT/SLP
+    # clinician headcount registered in the swept ZIPs (local NPPES index).
+    # Two counties: ALPHA is only half-swept (coverage must say so), GAMMA
+    # is fully inside the circle and has more beneficiaries per clinician.
+    BeforeAll {
+        $script:UsIdx = Join-Path $env:RM_DATA_DIR 'nppes-index.psv'
+        $script:UsIdxSaved = if (Test-Path $script:UsIdx) { Get-Content $script:UsIdx -Raw } else { $null }
+        Set-Content -Path $script:UsIdx -Encoding ascii -Value @(
+            '1111111101|1||ONE|PT|TESTVILLE|MO|999990000|225100000X|01/01/2005'
+            '1111111102|1||TWO|PT|TESTVILLE|MO|999990000|2251H1200X|01/01/2005'
+            # therapy code only in a SECONDARY slot - must still count
+            '1111111103|1||THREE|MIXED|TESTVILLE|MO|999970000|207Q00000X|01/01/2005|225X00000X'
+            # an ORGANIZATION with a therapy code - headcount is individuals only
+            '1111111104|2|SOME CLINIC LLC|||TESTVILLE|MO|999990000|225100000X|01/01/2005'
+            # an individual with no therapy code anywhere
+            '1111111105|1||FOUR|DOC|TESTVILLE|MO|999990000|207Q00000X|01/01/2005'
+        )
+        $script:UsEnroll = Join-Path $env:RM_DATA_DIR 'enrollment-index.psv'
+        $script:UsEnrollSaved = if (Test-Path $script:UsEnroll) { Get-Content $script:UsEnroll -Raw } else { $null }
+        Set-Content -Path $script:UsEnroll -Encoding ascii -Value @(
+            '17001|2023|Year|ALPHA COUNTY|MO|1000|800|200'
+            '17003|2023|Year|GAMMA COUNTY|MO|2500|2000|500'
+        )
+        $script:UsCache = Join-Path $env:RM_DATA_DIR 'market-cache.json'
+        $script:UsCacheSaved = if (Test-Path $script:UsCache) { Get-Content $script:UsCache -Raw } else { $null }
+        Remove-Item $script:UsCache -Force -ErrorAction SilentlyContinue
+        $script:UsCent = Join-Path $script:WorkDir 'us-centroids.csv'
+        Set-Content -Path $script:UsCent -Encoding ascii -Value @(
+            'zip,lat,lon'
+            '99999,40.0000,-90.0000'
+            '99997,40.0500,-90.0000'    # ~3.5 miles: inside a 5-mile sweep
+            '86442,35.1000,-114.6000'   # far outside
+        )
+        $script:UsXw = Join-Path $script:WorkDir 'us-county.csv'
+        Set-Content -Path $script:UsXw -Encoding ascii -Value @(
+            'zip,fips'
+            '99999,17001'
+            '99998,17001'               # ALPHA's second ZIP, NOT swept -> 50% coverage
+            '99997,17003'
+        )
+    }
+    AfterAll {
+        if ($null -ne $script:UsIdxSaved) { Set-Content -Path $script:UsIdx -Value $script:UsIdxSaved -NoNewline -Encoding utf8 }
+        else { Remove-Item $script:UsIdx -Force -ErrorAction SilentlyContinue }
+        if ($null -ne $script:UsEnrollSaved) { Set-Content -Path $script:UsEnroll -Value $script:UsEnrollSaved -NoNewline -Encoding utf8 }
+        else { Remove-Item $script:UsEnroll -Force -ErrorAction SilentlyContinue }
+        if ($null -ne $script:UsCacheSaved) { Set-Content -Path $script:UsCache -Value $script:UsCacheSaved -NoNewline -Encoding utf8 }
+        else { Remove-Item $script:UsCache -Force -ErrorAction SilentlyContinue }
+    }
+
+    It 'ranks counties by clinician supply per 10k FFS beneficiaries, disclosing partial coverage' {
+        $r = Get-RmUnderservedAreas -Zip 99999 -RadiusMiles 5 -CentroidPath $script:UsCent -CrosswalkPath $script:UsXw
+        $r.ZipCount | Should -Be 2
+        $r.TherapistTotal | Should -Be 3                    # org + non-therapist excluded, any-slot counted
+        $rows = @($r.Rows)
+        $rows.Count | Should -Be 2
+        $rows[0].County | Should -Be 'GAMMA COUNTY'         # 5.0/10k ranks as MORE underserved than 25.0
+        $rows[0].TherapistsPer10kFfs | Should -Be 5.0
+        $rows[0].CoveragePct | Should -Be 100
+        $alpha = @($rows | Where-Object County -eq 'ALPHA COUNTY')[0]
+        $alpha.TherapistsInSweep | Should -Be 2
+        $alpha.FfsBeneficiaries | Should -Be 800
+        $alpha.TherapistsPer10kFfs | Should -Be 25.0
+        $alpha.CoveragePct | Should -Be 50                  # one of its two ZIPs swept
+        (@($r.Notes) -join ' ') | Should -BeLike '*UNDERSERVED-AREA SCREEN*'
+    }
+
+    It 'refuses honestly when the NPPES index is missing' {
+        $tmpDir = Join-Path $script:WorkDir 'us-bare'
+        New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+        $savedIdx = Get-Content $script:UsIdx -Raw
+        Remove-Item $script:UsIdx -Force
+        try {
+            { Get-RmUnderservedAreas -Zip 99999 -RadiusMiles 5 -CentroidPath $script:UsCent -CrosswalkPath $script:UsXw } |
+                Should -Throw '*NPPES index*'
+        } finally { Set-Content -Path $script:UsIdx -Value $savedIdx -NoNewline -Encoding utf8 }
     }
 }
 
