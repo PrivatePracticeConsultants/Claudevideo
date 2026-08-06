@@ -1819,7 +1819,7 @@ $ui.PgRunButton.Add_Click({
                 $zl = @(Get-RmZipsInRadius -Zip $Zip -RadiusMiles $Radius)
                 $idx = Get-RmNppesIndexPath
                 $pgArgs = @{ ZipList = $zl; AreaLabel = "$Zip+${Radius}mi" }
-                if (Test-Path -LiteralPath $idx) { $pgArgs['NppesIndexPath'] = $idx }
+                if (Test-Path -LiteralPath $idx) { $pgArgs[''NppesIndexPath''] = $idx }
                 Get-PgGroupsInZip @pgArgs
             } else {
                 Get-PgGroupsInZip -Zip $Zip

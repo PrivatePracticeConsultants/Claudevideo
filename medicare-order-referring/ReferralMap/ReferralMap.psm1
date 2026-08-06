@@ -6709,6 +6709,7 @@ Export-ModuleMember -Function @(
     'Get-RmSourceTrend', 'Add-RmSourceTrend',
     'Get-RmCountyMarket', 'Get-RmServiceProfile',
     'Import-RmNppesBulk', 'Import-RmCareCompare', 'Get-RmAffiliatedNpi',
+    'Get-RmNppesIndexPath',
     'Get-RmProviderFamily', 'Get-RmLocationReferrals', 'Get-RmRelatedOrgNames',
     'Get-RmChainMark', 'Get-RmChainDetail', 'Get-RmNameSiblingGroups',
     'Import-RmEnrollment', 'Save-RmLocalResources', 'Get-RmLocalDataStatus',

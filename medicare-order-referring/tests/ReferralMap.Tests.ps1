@@ -2891,3 +2891,118 @@ Describe 'Secondary practice locations widen area searches' {
     }
 }
 
+Describe 'GUI worker-script integrity (static)' {
+    # A single quote inside a single-quoted -WorkerScript string terminates
+    # it early; the file still PARSES, but the handler then feeds the tail of
+    # the worker to Invoke-Async as a positional argument and every click on
+    # that button dies at runtime ("A positional parameter cannot be found").
+    # A user hit exactly that. This gate makes the whole class impossible:
+    # every Invoke-Async call must use named parameters ONLY, and every
+    # -WorkerScript value must be one string that compiles on its own.
+    BeforeAll {
+        $gui = Join-Path (Split-Path -Parent $PSScriptRoot) 'Start-OrderReferringTracker.ps1'
+        $tokens = $null; $errors = $null
+        $script:GuiAst = [System.Management.Automation.Language.Parser]::ParseFile($gui, [ref]$tokens, [ref]$errors)
+        $errors | Should -BeNullOrEmpty
+        $script:AsyncCalls = @($script:GuiAst.FindAll({ param($n)
+            $n -is [System.Management.Automation.Language.CommandAst] -and
+            $n.GetCommandName() -eq 'Invoke-Async' }, $true))
+    }
+
+    It 'finds the Invoke-Async call sites' {
+        $script:AsyncCalls.Count | Should -BeGreaterThan 15
+    }
+
+    It 'passes every Invoke-Async argument by NAME (a positional one means a broken worker string)' {
+        foreach ($call in $script:AsyncCalls) {
+            $elems = @($call.CommandElements)
+            $i = 1
+            while ($i -lt $elems.Count) {
+                $e = $elems[$i]
+                if ($e -is [System.Management.Automation.Language.CommandParameterAst]) {
+                    # a parameter; unless the argument is attached (-Foo:Bar),
+                    # the next element is its value
+                    if ($null -eq $e.Argument -and ($i + 1) -lt $elems.Count -and
+                        -not ($elems[$i + 1] -is [System.Management.Automation.Language.CommandParameterAst])) { $i += 2 }
+                    else { $i += 1 }
+                } else {
+                    throw ("Invoke-Async at line $($call.Extent.StartLineNumber) has a POSITIONAL argument starting with: " +
+                        $e.Extent.Text.Substring(0, [math]::Min(80, $e.Extent.Text.Length)) +
+                        ' - almost always an un-doubled quote inside a single-quoted -WorkerScript string.')
+                }
+            }
+        }
+    }
+
+    It 'compiles every -WorkerScript string as a standalone scriptblock' {
+        $checked = 0
+        foreach ($call in $script:AsyncCalls) {
+            $elems = @($call.CommandElements)
+            for ($i = 1; $i -lt $elems.Count; $i++) {
+                $e = $elems[$i]
+                if ($e -is [System.Management.Automation.Language.CommandParameterAst] -and
+                    $e.ParameterName -eq 'WorkerScript' -and ($i + 1) -lt $elems.Count) {
+                    $v = $elems[$i + 1]
+                    $v | Should -BeOfType [System.Management.Automation.Language.StringConstantExpressionAst]
+                    { [scriptblock]::Create($v.Value) } | Should -Not -Throw
+                    # the worker must declare params - a truncated string
+                    # would usually lose them
+                    $v.Value | Should -BeLike 'param(*'
+                    $checked++
+                }
+            }
+        }
+        $checked | Should -BeGreaterThan 15
+    }
+
+    It 'only calls module commands the modules actually EXPORT from worker scripts' {
+        # Workers run in a fresh runspace that Import-Modules the .psm1 files,
+        # so a worker calling an un-exported helper dies at runtime with
+        # "term is not recognized" even though everything parses. (The
+        # practice-groups radius worker hit exactly this with
+        # Get-RmNppesIndexPath.) Statically: every Verb-Rm*/Pg*/Orf* command
+        # named inside a -WorkerScript string must be in the export list.
+        $appDir = Split-Path -Parent $PSScriptRoot
+        $exported = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($m in @('ReferralMap\ReferralMap.psm1', 'PracticeGroups\PracticeGroups.psm1', 'OrderReferring\OrderReferring.psm1')) {
+            $p = Join-Path $appDir $m
+            $mtok = $null; $merr = $null
+            $mast = [System.Management.Automation.Language.Parser]::ParseFile($p, [ref]$mtok, [ref]$merr)
+            $exports = $mast.FindAll({ param($n)
+                $n -is [System.Management.Automation.Language.CommandAst] -and
+                $n.GetCommandName() -eq 'Export-ModuleMember' }, $true)
+            foreach ($ex in $exports) {
+                foreach ($s in $ex.FindAll({ param($n)
+                    $n -is [System.Management.Automation.Language.StringConstantExpressionAst] }, $true)) {
+                    [void]$exported.Add($s.Value)
+                }
+            }
+        }
+        $exported.Count | Should -BeGreaterThan 30
+        $checked = 0
+        foreach ($call in $script:AsyncCalls) {
+            $elems = @($call.CommandElements)
+            for ($i = 1; $i -lt $elems.Count; $i++) {
+                $e = $elems[$i]
+                if ($e -is [System.Management.Automation.Language.CommandParameterAst] -and
+                    $e.ParameterName -eq 'WorkerScript' -and ($i + 1) -lt $elems.Count) {
+                    $sb = [scriptblock]::Create($elems[$i + 1].Value)
+                    $cmds = $sb.Ast.FindAll({ param($n)
+                        $n -is [System.Management.Automation.Language.CommandAst] }, $true)
+                    foreach ($c in $cmds) {
+                        $name = $c.GetCommandName()
+                        if ($name -and $name -match '^[A-Za-z]+-(Rm|Pg|Orf)[A-Za-z]') {
+                            if (-not $exported.Contains($name)) {
+                                throw ("Worker at GUI line $($call.Extent.StartLineNumber) calls '$name', " +
+                                    'which is NOT exported by any module - it will die at runtime in the worker runspace.')
+                            }
+                            $checked++
+                        }
+                    }
+                }
+            }
+        }
+        $checked | Should -BeGreaterThan 30
+    }
+}
+
