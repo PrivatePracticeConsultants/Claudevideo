@@ -2782,6 +2782,7 @@ Describe 'Outbound own-clinician fold + practice roster' {
             '9000000001,8000000001,15,20,10.0,2.0'     # back to the doctor: the SharedBack case
             '8000000034,9000000002,50,60,11.0,3.0'     # doctor feeding ONLY the competitor: outreach target
             '8000000035,9000000002,40,50,1.0,1.0'      # the competitor''s own PT: NOT an outreach target
+            '8000000009,9000000002,35,40,20.0,5.0'     # a rehab ORG feeding the competitor: a rival, not a target
         ) -join "`n")
         $dacR = Join-Path $script:WorkDir 'DAC_roster.csv'
         Set-Content -Path $dacR -Encoding ascii -Value @(
@@ -2857,6 +2858,7 @@ Describe 'Outbound own-clinician fold + practice roster' {
         $m[0].SourceNPI | Should -Be '8000000034'           # the doctor feeding only the rival
         $m[0].PatientsToCompetitors | Should -Be 50
         @($m | Where-Object SourceNPI -eq '8000000035').Count | Should -Be 0   # rival's own PT excluded
+        @($m | Where-Object SourceNPI -eq '8000000009').Count | Should -Be 0   # rival rehab ORG excluded
         (@($script:Sa31.Notes) -join ' ') | Should -BeLike '*OUTREACH TARGETS*'
     }
 

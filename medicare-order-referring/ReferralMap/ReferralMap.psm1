@@ -4089,6 +4089,12 @@ function Get-RmSourceAnalysis {
                          elseif ($missDetail.ContainsKey($mc.Key)) { $missDetail[$mc.Key] } else { $null }
                     $sp = if ($d) { ([string]$d.Specialty).ToUpperInvariant() } else { '' }
                     if ($sp -and $sp -notmatch 'CLINIC|CENTER' -and $sp -match $therapistRe) { continue }
+                    # A therapy ORGANIZATION feeding the competitors is a rival
+                    # (often a chain's own org NPI co-billing with its clinics
+                    # - live sampling put 'Athletico Ltd, 164 miles away' at
+                    # the top of a prospect list), not winnable referral flow.
+                    # Rival relationships belong in the landscape card.
+                    if ($sp -match 'CLINIC|CENTER' -and $sp -match 'PHYSICAL THERAP|OCCUPATIONAL THERAP|SPEECH|REHABILITATION') { continue }
                     $mz = if ($d -and $null -ne $d.PSObject.Properties['Zip'] -and ([string]$d.Zip) -match '^\d{5}$') { [string]$d.Zip } else { '' }
                     $missKeep.Add([pscustomobject]@{
                         SourceNPI = $mc.Key
@@ -4157,7 +4163,7 @@ function Get-RmSourceAnalysis {
         })
         $(if (@($missedRows).Count) {
             $msPat = 0; foreach ($ms in $missedRows) { $msPat += [int]$ms.PatientsToCompetitors }
-            "OUTREACH TARGETS: the $(@($missedRows).Count) biggest referrers feeding comparable providers within $CompetitorRadiusMiles miles with NO measured flow into this practice carry $('{0:N0}' -f $msPat) patients to competitors in $($info.Year). Individual PT/OT/SLP 'sources' of a competitor are its own clinicians and are excluded. Pairs under 11 patients are invisible, so 'no measured flow' can also mean 'fewer than 11 patients came here' - treat the list as prospecting priorities, not proof of zero relationship."
+            "OUTREACH TARGETS: the $(@($missedRows).Count) biggest referrers feeding comparable providers within $CompetitorRadiusMiles miles with NO measured flow into this practice carry $('{0:N0}' -f $msPat) patients to competitors in $($info.Year). Individual PT/OT/SLP 'sources' of a competitor are its own clinicians, and therapy ORGANIZATIONS are rivals (often a chain's org NPI co-billing with its clinics) - both are excluded; rival relationships appear in the competitive landscape instead. Pairs under 11 patients are invisible, so 'no measured flow' can also mean 'fewer than 11 patients came here' - treat the list as prospecting priorities, not proof of zero relationship."
         })
         $(if ($rosterRows.Count) { "PRACTICE ROSTER (Care Compare): $($rosterRows.Count) clinician(s) are listed under this practice in Medicare Care Compare today - matched by practice name, then expanded to everyone sharing the same group-enrollment id (org_pac_id). This is TODAY's roster: staff who left are absent even though their historical volume appears above, and cash-pay or non-Medicare clinicians never appear. If the location column shows an unexpected city, a same-named practice elsewhere matched too - read those rows with care." })
         $(if ($npiList.Count -gt 1) { "COMBINED ANALYSIS: inbound volume is merged across $($npiList.Count) NPIs ($($npiList -join ', ')). A source feeding several of them counts ONCE with summed volume; patient flows BETWEEN these NPIs are excluded as internal handoffs. Geography and the competitive radius are centered on the primary NPI ($primary)." })
