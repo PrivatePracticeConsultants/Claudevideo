@@ -1738,9 +1738,14 @@ function Get-RmProviderDetail {
       Treat cached entries that predate the Zip field as misses so they are
       re-fetched with their practice ZIP (the geography map needs it). Old
       caches upgrade in place; nothing is thrown away.
+    .PARAMETER RequireEntity
+      Same upgrade pattern for the Entity field ('1' individual / '2'
+      organization) - the O&R at-risk check must never flag an organization,
+      so it needs the entity type, not just the specialty label (orgs carry
+      physician-style labels like 'Diagnostic Radiology Physician').
     #>
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string[]]$Npi, [switch]$RequireZip)
+    param([Parameter(Mandatory)][string[]]$Npi, [switch]$RequireZip, [switch]$RequireEntity)
 
     $cache = Read-RmNppesCache
     $result = @{}
@@ -1749,7 +1754,8 @@ function Get-RmProviderDetail {
     $missing = @($Npi | Sort-Object -Unique |
         Where-Object { (Test-RmNpiShape $_) -and (
             -not $cache.ContainsKey($_) -or
-            ($RequireZip -and $null -eq $cache[$_].PSObject.Properties['Zip'])) })
+            ($RequireZip -and $null -eq $cache[$_].PSObject.Properties['Zip']) -or
+            ($RequireEntity -and $null -eq $cache[$_].PSObject.Properties['Entity'])) })
 
     # Local NPPES bulk index first (one streaming scan answers every miss at
     # once, offline); anything it cannot answer falls through to the live
@@ -1770,13 +1776,15 @@ function Get-RmProviderDetail {
                 Specialty = Get-RmTaxonomyName (Get-RmIndexPrimaryCode $f)
                 City      = $f[5]; State = $f[6]
                 Zip       = if ($postal.Length -ge 5) { $postal.Substring(0, 5) } else { $postal }
+                Entity    = $f[1]
                 FetchedAt = [DateTime]::UtcNow.ToString('o')
             }
             $dirtyBulk = $true
         }
         if ($dirtyBulk) { Write-RmNppesCache $cache }
         $missing = @($missing | Where-Object { -not $cache.ContainsKey($_) -or
-            ($RequireZip -and $null -eq $cache[$_].PSObject.Properties['Zip']) })
+            ($RequireZip -and $null -eq $cache[$_].PSObject.Properties['Zip']) -or
+            ($RequireEntity -and $null -eq $cache[$_].PSObject.Properties['Entity']) })
     }
     $n = 0
     $consecutiveFailures = 0
@@ -1797,6 +1805,7 @@ function Get-RmProviderDetail {
             if ($results.Count -eq 0) {
                 $cache[$id] = [pscustomobject]@{
                     Name = '(NPI deactivated or not found)'; Specialty = ''; City = ''; State = ''; Zip = ''
+                    Entity = ''   # unknown: the at-risk check must NOT flag it
                     FetchedAt = [DateTime]::UtcNow.ToString('o') }
             } else {
                 $r = $results[0]
@@ -1813,6 +1822,7 @@ function Get-RmProviderDetail {
                     City      = if ($loc.Count) { [string](Get-RmProp $loc[0] 'city') } else { '' }
                     State     = if ($loc.Count) { [string](Get-RmProp $loc[0] 'state') } else { '' }
                     Zip       = if ($postal.Length -ge 5) { $postal.Substring(0, 5) } else { $postal }
+                    Entity    = if ($isOrg) { '2' } else { '1' }
                     FetchedAt = [DateTime]::UtcNow.ToString('o')
                 }
             }
@@ -3684,6 +3694,20 @@ function Get-RmSourceAnalysis {
                 $sp = ([string]$srow.SourceSpecialty).ToUpperInvariant()
                 if ($sp -and $sp -match $refTypeRe -and $sp -notmatch 'CLINIC|CENTER|HOSPITAL') {
                     [void]$checkSet.Add([string]$srow.SourceNPI)
+                }
+            }
+            # INDIVIDUALS only: an organization NPI carries physician-style
+            # labels ('Diagnostic Radiology Physician') but is never on the
+            # O&R roster - flagging one is a false alarm (the live Boulder
+            # run surfaced 72 of them before this filter). RequireEntity
+            # upgrades old cache entries in place; unknown entity = never
+            # flagged.
+            if ($checkSet.Count -gt 0) {
+                $entDetail = Get-RmProviderDetail -Npi @($checkSet) -RequireEntity
+                foreach ($ck in @($checkSet)) {
+                    $ed = if ($entDetail.ContainsKey($ck)) { $entDetail[$ck] } else { $null }
+                    $ent = if ($ed -and $null -ne $ed.PSObject.Properties['Entity']) { [string]$ed.Entity } else { '' }
+                    if ($ent -ne '1') { [void]$checkSet.Remove($ck) }
                 }
             }
             if ($checkSet.Count -gt 0) {
