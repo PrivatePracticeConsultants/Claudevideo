@@ -292,6 +292,8 @@ $xaml = @'
             <CheckBox x:Name="RmOrgOnly" Content="Clinics (organizations) only" VerticalAlignment="Center"
                       Margin="14,0,0,0" ToolTip="Unchecked: also includes individual PT/OT/SLP providers (solo practices bill under individual NPIs)"/>
             <Button x:Name="RmRunButton" Content="Map referral sources" Padding="14,5" Margin="14,0,0,0"/>
+            <Button x:Name="RmUnderservedButton" Content="Underserved areas" Padding="10,5" Margin="8,0,0,0"
+                    ToolTip="Expansion screen: for every county the ZIP+radius circle touches, the registered PT/OT/SLP clinician headcount against the county's Original-Medicare beneficiaries. Needs a radius and the local NPPES index (Multi-site chains tab). Lower clinicians-per-10k = more Medicare demand per clinician."/>
             <Button x:Name="RmDownloadButton" Content="Download CMS dataset" Padding="10,5" Margin="10,0,0,0"/>
             <Button x:Name="RmImportButton" Content="Import CareSet file..." Padding="10,5" Margin="8,0,0,0"
                     ToolTip="Import a DocGraph Hop Teaming dataset (.zip or .csv) obtained from CareSet Systems — years newer than the free 2015 CMS data."/>
@@ -498,6 +500,8 @@ $xaml = @'
             <Button x:Name="ChAddrButton" Content="Break down by ADDRESS" Padding="12,5" Margin="8,0,0,0"
                     ToolTip="Per-location referral volume, built from the individual clinicians Care Compare lists at each street address. Needs the Care Compare file - one click on 'Download supporting data' above."/>
             <Button x:Name="ChExportButton" Content="Export..." Padding="10,4" Margin="10,0,0,0" IsEnabled="False"/>
+            <Button x:Name="ChToLookupButton" Content="Analyze family as one practice..." Padding="10,4" Margin="8,0,0,0" IsEnabled="False"
+                    ToolTip="Copies every NPI from the by-NPI family breakdown into the Provider lookup tab, ready for a combined Source analysis or one-stop report on the whole family."/>
           </WrapPanel>
           <TextBlock Grid.Row="3" x:Name="ChLabel" FontWeight="SemiBold" Foreground="#1F3B57" Margin="0,2,0,4"
                      TextWrapping="Wrap" Text="Enter a chain name and pick a breakdown."/>
@@ -528,8 +532,8 @@ $xaml = @'
               Text="Enter any NPI for a single-provider profile that pulls together every dataset in this app: current eligibility and specialty, practice-group memberships, and their historical referral activity (who sent them patients, and who they sent onward). Optional data is shown when downloaded on the other tabs."/>
           <WrapPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,6">
             <TextBlock Text="NPI:" VerticalAlignment="Center" Margin="0,0,6,0"/>
-            <TextBox x:Name="LkNpiBox" Width="140" Height="28" VerticalContentAlignment="Center"
-                     MaxLength="10" ToolTip="A full 10-digit NPI"/>
+            <TextBox x:Name="LkNpiBox" Width="220" Height="28" VerticalContentAlignment="Center"
+                     ToolTip="A full 10-digit NPI - or paste SEVERAL (spaces/commas, any format) to run the Source analysis and one-stop report on them as ONE combined practice. The lookup and heat-map buttons use the first NPI."/>
             <Button x:Name="LkRunButton" Content="Look up provider" Padding="14,5" Margin="14,0,0,0"/>
             <Button x:Name="LkTrendButton" Content="Referral trend (multi-year)..." Padding="10,5" Margin="10,0,0,0"
                     ToolTip="Year-over-year referral totals for this NPI across every imported CareSet Hop Teaming year. Each year is a full file scan, so this takes minutes per year."/>
@@ -656,7 +660,7 @@ foreach ($name in @(
     'NpiListBox', 'LoadNpiFileButton', 'BatchCheckButton', 'ExportBatchButton', 'BatchGrid', 'BatchSummary',
     'OldSnapCombo', 'NewSnapCombo', 'ChangeTypeCombo', 'CompareButton', 'ExportChangesButton',
     'ChangesGrid', 'ChangesSummary',
-    'RmTab', 'RmIntroText', 'RmZipBox', 'RmRadiusCombo', 'RmOrgOnly', 'RmRunButton', 'RmDownloadButton',
+    'RmTab', 'RmIntroText', 'RmZipBox', 'RmRadiusCombo', 'RmOrgOnly', 'RmRunButton', 'RmUnderservedButton', 'RmDownloadButton',
     'RmImportButton', 'RmDatasetCombo', 'RmDataStatus',
     'RmClinicGrid', 'RmSourceLabel', 'RmExportClinicsButton', 'RmExportSourcesButton',
     'RmSourceGrid', 'RmSummary',
@@ -667,7 +671,7 @@ foreach ($name in @(
     'PgRosterLabel', 'PgFootprintButton', 'PgViewCombo', 'PgTrendButton', 'PgExportGroupsButton', 'PgExportRosterButton',
     'PgRosterGrid', 'PgSummary',
     'ChDataStatus', 'ChSetupButton', 'ChNppesButton',
-    'ChNameBox', 'ChStateBox', 'ChZipBox', 'ChNpiButton', 'ChAddrButton', 'ChExportButton',
+    'ChNameBox', 'ChStateBox', 'ChZipBox', 'ChNpiButton', 'ChAddrButton', 'ChExportButton', 'ChToLookupButton',
     'ChLabel', 'ChGrid', 'ChSummary',
     'LkNpiBox', 'LkRunButton', 'LkTrendButton', 'LkExportTrendButton',
     'LkGeoButton', 'LkSaveMapButton', 'LkAnalysisButton', 'LkSaveReportButton', 'LkFullReportButton', 'LkTrendCheck', 'LkDetail',
@@ -723,6 +727,7 @@ $script:LastChangeResultsAll = @() # unfiltered compare result (ChangeTypeCombo 
 $script:LastChangeResults = @()    # currently-shown (filtered) compare result
 $script:LastChangeDesc = ''
 $script:RmResult = $null          # last referral-map result object
+$script:RmUnderserved = $null     # last underserved-area screen (map tab)
 $script:PgResult = $null          # last practice-group result object
 $script:LkInbound = @()           # last provider-lookup inbound / outbound rows
 $script:LkOutbound = @()
@@ -791,7 +796,7 @@ function Set-Busy([bool]$On, [string]$Message, [string]$Title) {
     if ($On) { Show-BusyOverlay $Message $Title } else { Hide-BusyOverlay }
     foreach ($b in @($ui.UpdateButton, $ui.SearchButton, $ui.BatchCheckButton,
                      $ui.CompareButton, $ui.LoadNpiFileButton,
-                     $ui.RmRunButton, $ui.RmDownloadButton, $ui.RmImportButton, $ui.RmDatasetCombo, $ui.RmRadiusCombo,
+                     $ui.RmRunButton, $ui.RmUnderservedButton, $ui.RmDownloadButton, $ui.RmImportButton, $ui.RmDatasetCombo, $ui.RmRadiusCombo,
                      $ui.BmSearchButton,
                      $ui.PgRunButton, $ui.PgRadiusCombo, $ui.PgDownloadButton, $ui.PgFootprintButton,
                      $ui.ChNpiButton, $ui.ChAddrButton, $ui.ChSetupButton, $ui.ChNppesButton,
@@ -826,6 +831,7 @@ $script:BusyTitles = @{
     'compare'      = 'Comparing snapshots...'
     'export'       = 'Writing the export file...'
     'rm-run'       = 'Mapping referral sources...'
+    'rm-underserved' = 'Screening counties for unmet therapy demand...'
     'rm-download'  = 'Downloading the referral dataset...'
     'rm-import'    = 'Importing the CareSet file...'
     'bm-search'    = 'Searching NPPES for the practice...'
@@ -1525,6 +1531,7 @@ $ui.RmRunButton.Add_Click({
             param($result)
             $map = $result[0]
             $script:RmResult = $map
+            $script:RmUnderserved = $null   # the export button follows whichever ran last
             $clinics = @($map.Clinics)
             $sources = @($map.Sources)
             $ui.RmClinicGrid.ItemsSource = (ConvertTo-DataTable -Rows $clinics `
@@ -1580,6 +1587,13 @@ $ui.RmClinicGrid.Add_SelectionChanged({
 })
 
 $ui.RmExportClinicsButton.Add_Click({
+    if ($script:RmUnderserved) {
+        Export-RmWithDialog -Rows @($script:RmUnderserved.Rows) `
+            -SuggestedName "underserved-areas-$($script:RmUnderserved.CenterZip)-$([int]$script:RmUnderserved.RadiusMiles)mi.csv" `
+            -Description "Underserved-area screen around ZIP $($script:RmUnderserved.CenterZip) ($([int]$script:RmUnderserved.RadiusMiles) mi): county FFS beneficiaries vs registered PT/OT/SLP clinicians" `
+            -Notes @($script:RmUnderserved.Notes)
+        return
+    }
     if (-not $script:RmResult) { return }
     Export-RmWithDialog -Rows @($script:RmResult.Clinics) `
         -SuggestedName "rehab-clinics-$($script:RmResult.Zip.TrimEnd('*')).csv" `
@@ -1610,6 +1624,45 @@ $ui.RmExportMixButton.Add_Click({
         'Specialty mix: referral sources grouped by NPPES primary specialty. PctOfVolume is each specialty''s share of total shared-patient volume. Read with the usual caveat — labs/imaging/hospitals appear as "sources" from co-occurring care.')
     Export-RmWithDialog -Rows $mix -SuggestedName "specialty-mix-$($script:RmResult.Zip.TrimEnd('*')).csv" `
         -Description "Referral-source specialty mix for $scope ($script:RmDataLabel)" -Notes $notes
+})
+
+$ui.RmUnderservedButton.Add_Click({
+    if ($script:Busy) { return }
+    $zip = $ui.RmZipBox.Text.Trim()
+    if ($zip -notmatch '^\d{5}$') {
+        Show-ErrorBox 'Enter a full 5-digit ZIP for the underserved-area screen (prefix searches do not apply here).'
+        return
+    }
+    $idx = [Math]::Max(0, $ui.RmRadiusCombo.SelectedIndex)
+    $radius = if ($idx -lt $script:RmRadiusValues.Count) { $script:RmRadiusValues[$idx] } else { 0 }
+    if ($radius -le 0) {
+        Show-ErrorBox 'Pick a radius (5-100 miles) first - the screen compares every county the circle touches.'
+        return
+    }
+    Invoke-Async -Kind 'rm-underserved' -Params @{ RmModulePath = $script:RmModulePath; Zip = $zip; Radius = $radius } `
+        -BusyMessage ("Screening counties within $radius miles of $zip - one pass over the local NPPES index for the PT/OT/SLP headcount, plus a county enrollment lookup each (cached).") `
+        -WorkerScript 'param($RmModulePath, $Zip, $Radius) Import-Module $RmModulePath; Get-RmUnderservedAreas -Zip $Zip -RadiusMiles $Radius' `
+        -OnDone {
+            param($result)
+            $r = $result[0]
+            $script:RmUnderserved = $r
+            $script:RmResult = $null   # the clinic grid now shows counties, not providers
+            $ui.RmSourceGrid.ItemsSource = $null
+            $ui.RmExportSourcesButton.IsEnabled = $false
+            $ui.RmExportMixButton.IsEnabled = $false
+            $rows = @($r.Rows)
+            $ui.RmClinicGrid.ItemsSource = (ConvertTo-DataTable -Rows $rows `
+                -Columns @('County', 'State', 'FfsBeneficiaries', 'TherapistsInSweep', 'TherapistsPer10kFfs', 'ZipsSwept', 'ZipsInCounty', 'CoveragePct')).DefaultView
+            $ui.RmExportClinicsButton.IsEnabled = ($rows.Count -gt 0)
+            $ranked = @($rows | Where-Object { $_.CoveragePct -ge 80 -and $_.TherapistsPer10kFfs -is [double] })
+            $hint = if (@($ranked).Count) {
+                'Lowest supply among well-covered counties: ' +
+                ((@($ranked | Select-Object -First 3 | ForEach-Object { "$($_.County), $($_.State) ($($_.TherapistsPer10kFfs)/10k)" })) -join '; ') + '.'
+            } else { 'No county is covered well enough to rank fairly - widen the radius so whole counties fall inside.' }
+            $ui.RmSummary.Text = ("Underserved-area screen: $($r.ZipCount) ZIPs swept, $('{0:N0}' -f $r.TherapistTotal) registered PT/OT/SLP clinician(s) across $(@($rows).Count) county(ies). $hint " +
+                'LOWER TherapistsPer10kFfs = more Medicare demand per clinician. Only compare counties with a high CoveragePct - a partly-swept county counts part of its clinicians against ALL of its beneficiaries. Export saves the table with full methodology.')
+            $ui.RmSourceLabel.Text = 'County screen shown above - run "Map referral sources" to restore the provider view.'
+        }
 })
 
 # ---------------------------------------------------------------------------
@@ -2482,9 +2535,30 @@ $ui.ChNpiButton.Add_Click({
                 "$($f.MultiSiteNpis) NPI(s) are flagged MULTI-SITE - their volume covers every clinic that NPI bills for and " +
                 "CANNOT be split per location from this data. Use 'Break down by ADDRESS' for per-clinic figures.")
             $ui.ChExportButton.IsEnabled = $true
+            $ui.ChToLookupButton.IsEnabled = (@($f.Rows).Count -gt 0)
             Set-Status "Chain breakdown by NPI ready - $('{0:N0}' -f $f.TotalPatients) patients across $($f.Npis) NPI(s)."
         } `
         -OnFail { param($message) Show-ErrorBox "Chain breakdown failed: $message" }
+})
+
+$ui.ChToLookupButton.Add_Click({
+    if ($script:Busy) { return }
+    if (-not $script:ChResult -or $script:ChKind -ne 'npi') {
+        Show-ErrorBox 'Run "Break down by NPI" first - this button carries that family list over.'
+        return
+    }
+    # The analysis engine caps a combined run at 50 NPIs; for a bigger
+    # family carry the 50 highest-volume members and say so.
+    $famRows = @($script:ChResult.Rows | Where-Object { ([string]$_.NPI) -match '^\d{10}$' } |
+        Sort-Object -Property @{Expression = { [int]$_.SharedPatients }; Descending = $true})
+    $famAll = @($famRows | ForEach-Object { [string]$_.NPI } | Select-Object -Unique)
+    if (-not $famAll.Count) { Show-ErrorBox 'The family list is empty - nothing to carry over.'; return }
+    $fam = @($famAll | Select-Object -First 50)
+    $ui.LkNpiBox.Text = ($fam -join ' ')
+    $ui.Tabs.SelectedIndex = 7
+    Set-Status ("$($fam.Count) family NPI(s) loaded into Provider lookup - click 'Source analysis' or 'Full report (one-stop)' to analyze them as ONE combined practice." +
+        $(if ($famAll.Count -gt 50) { " The family has $($famAll.Count) NPIs; the 50 with the most measured volume were carried (the combined engine caps at 50)." }
+          elseif ($fam.Count -gt 25) { ' Large family: the combined scan and enrichment will take longer than a single NPI.' }))
 })
 
 $ui.ChAddrButton.Add_Click({
@@ -2528,6 +2602,7 @@ $ui.ChAddrButton.Add_Click({
                 " These are the locations enrolled under a name matching your search." + $relBit +
                 " Export for the full table with methodology.")
             $ui.ChExportButton.IsEnabled = $true
+            $ui.ChToLookupButton.IsEnabled = $false   # address rows carry no NPI list
             Set-Status "Per-location breakdown ready - $('{0:N0}' -f $r.AttributedPatients) patients across $($r.AddressesWithVolume) location(s)."
         } `
         -OnFail { param($message) Show-ErrorBox "Per-location breakdown failed: $message" }
@@ -2580,9 +2655,19 @@ $ui.LkAnalysisButton.Add_Click({
     }
     $who = $npis[0] + $(if ($npis.Count -gt 1) { " (+$($npis.Count - 1) more, combined)" } else { '' })
     $trendBit = if ($wantTrend) { " Then repeating the scan across all $($hopYears.Count) imported years for the year-over-year section — several minutes per year." } else { '' }
-    Invoke-Async -Kind 'lk-analysis' -Params @{ RmModulePath = $script:RmModulePath; Npi = $npis; WithTrend = $wantTrend } `
+    # The O&R snapshot powers the at-risk referrer cross-check; resolved
+    # here (the worker runspace has no loaded data), blank = check skipped.
+    $eligPath = ''
+    try { $snapF = Get-OrfLatestSnapshot; if ($snapF) { $eligPath = [string]$snapF.FullName } } catch { }
+    Invoke-Async -Kind 'lk-analysis' -Params @{ RmModulePath = $script:RmModulePath; Npi = $npis; WithTrend = $wantTrend; EligPath = $eligPath } `
         -BusyMessage ("Analyzing $who's referral sources — scanning $script:RmRowsLabel pairs, naming and locating each source, then sweeping competitors within 10 miles (first run on a big practice can take several minutes; lookups are cached).$trendBit") `
-        -WorkerScript 'param($RmModulePath, $Npi, $WithTrend) Import-Module $RmModulePath; $sa = Get-RmSourceAnalysis -Npi $Npi; if ($WithTrend) { $sa = Add-RmSourceTrend -Analysis $sa }; $sa' `
+        -WorkerScript 'param($RmModulePath, $Npi, $WithTrend, $EligPath)
+            Import-Module $RmModulePath
+            $saArgs = @{ Npi = $Npi }
+            if ($EligPath) { $saArgs[''EligibilityIndexPath''] = $EligPath }
+            $sa = Get-RmSourceAnalysis @saArgs
+            if ($WithTrend) { $sa = Add-RmSourceTrend -Analysis $sa }
+            $sa' `
         -OnDone {
             param($result)
             $sa = $result[0]
@@ -2677,17 +2762,22 @@ $ui.LkFullReportButton.Add_Click({
     }
     $who = $npis[0] + $(if ($npis.Count -gt 1) { " (+$($npis.Count - 1) more, combined)" } else { '' })
     $trendBit = if ($withTrend) { " Year-over-year runs across all $($hopYears.Count) imported years - several minutes per year." } else { '' }
+    $eligPath = ''
+    try { $snapF = Get-OrfLatestSnapshot; if ($snapF) { $eligPath = [string]$snapF.FullName } } catch { }
     Invoke-Async -Kind 'lk-full' -Params @{
             RmModulePath = $script:RmModulePath; PgModulePath = $script:PgModulePath
             Npi = $npis; WithTrend = $withTrend; HasPg = (Get-PgStatus).DatasetReady
+            EligPath = $eligPath
         } `
         -BusyMessage ("Building the one-stop report for $who - full source analysis, heat map, competitive sweep, outbound scan$(if ($withTrend) { ', trendlines' }).$trendBit Lookups are cached, so re-runs are much faster.") `
         -WithProgress `
-        -WorkerScript 'param($RmModulePath, $PgModulePath, $Npi, $WithTrend, $HasPg, $Progress)
+        -WorkerScript 'param($RmModulePath, $PgModulePath, $Npi, $WithTrend, $HasPg, $EligPath, $Progress)
             Import-Module $RmModulePath
             $total = if ($WithTrend) { 4 } else { 3 }
             $Progress[''Step''] = "Step 1 of $total - scanning referral sources and competitors..."
-            $sa = Get-RmSourceAnalysis -Npi $Npi
+            $saArgs = @{ Npi = $Npi }
+            if ($EligPath) { $saArgs[''EligibilityIndexPath''] = $EligPath }
+            $sa = Get-RmSourceAnalysis @saArgs
             # Outbound now rides along in the analysis pass; no extra scan.
             $outbound = @($sa.Outbound)
             $step = 2
@@ -2724,6 +2814,12 @@ $ui.LkFullReportButton.Add_Click({
                         Export-RmResult -Path ([System.IO.Path]::ChangeExtension($script:LkFullPath, '.outbound.csv')) `
                             -Notes @($r.Analysis.Notes) `
                             -Description "Outbound destinations for NPI $($r.Analysis.Npi) ($script:RmDataLabel)" | Out-Null
+                }
+                if ($r.Analysis.PSObject.Properties['MissedSources'] -and @($r.Analysis.MissedSources).Count) {
+                    @($r.Analysis.MissedSources) |
+                        Export-RmResult -Path ([System.IO.Path]::ChangeExtension($script:LkFullPath, '.outreach.csv')) `
+                            -Notes @($r.Analysis.Notes) `
+                            -Description "Outreach targets - area referrers with no measured flow into NPI $($r.Analysis.Npi) ($script:RmDataLabel)" | Out-Null
                 }
                 if ($r.Analysis.PSObject.Properties['Trend'] -and $r.Analysis.Trend) {
                     @($r.Analysis.Trend.Years) |
