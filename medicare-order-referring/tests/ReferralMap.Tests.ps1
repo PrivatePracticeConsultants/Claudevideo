@@ -2756,3 +2756,87 @@ Describe 'Practice-therapist reclassification' {
     }
 }
 
+Describe 'Secondary practice locations widen area searches' {
+    # A provider REGISTERED in Rolla (65401) whose secondary practice
+    # location sits in ZIP 99999: a 99999 sweep must list it, marked, with
+    # the site ZIP - not silently miss it like Google-vs-map users noticed.
+    BeforeAll {
+        $script:SecZip = Join-Path $script:WorkDir 'NPPES_sec_fixture.zip'
+        Remove-Item $script:SecZip -ErrorAction SilentlyContinue
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $z = [System.IO.Compression.ZipFile]::Open($script:SecZip, 'Create')
+        try {
+            $npidata = @(
+                ('"NPI","Entity Type Code","Provider Organization Name (Legal Business Name)","Provider Last Name (Legal Name)","Provider First Name","Provider Business Practice Location Address City Name","Provider Business Practice Location Address State Name","Provider Business Practice Location Address Postal Code","Healthcare Provider Taxonomy Code_1","Provider Enumeration Date",' + ((2..15 | ForEach-Object { '"Healthcare Provider Taxonomy Code_' + $_ + '"' }) -join ',') + ',' + ((1..15 | ForEach-Object { '"Healthcare Provider Primary Taxonomy Switch_' + $_ + '"' }) -join ','))
+                '"7700000001","2","BULK REHAB PARTNERS, LLC","","","ROLLA","MO","654010000","261QP2000X","06/15/2008","",""'
+                '"7700000008","2","FARAWAY REGISTERED PT, LLC","","","ROLLA","MO","654010000","261QP2000X","04/01/2012","",""'
+                '"7700000009","2","FARAWAY DERMATOLOGY, LLC","","","ROLLA","MO","654010000","207N00000X","04/01/2012","",""'
+            ) -join "`n"
+            $pl = @(
+                '"NPI","Provider Secondary Practice Location Address- Address Line 1","Provider Secondary Practice Location Address-  Address Line 2","Provider Secondary Practice Location Address - City Name","Provider Secondary Practice Location Address - State Name","Provider Secondary Practice Location Address - Postal Code"'
+                '"7700000008","1 SITE ST","","TESTVILLE","MO","999991234"'
+                '"7700000009","2 SITE ST","","TESTVILLE","MO","999991234"'
+            ) -join "`n"
+            foreach ($pair in @(
+                @('npidata_pfile_20050523-20990101.csv', $npidata),
+                @('pl_pfile_20050523-20990101.csv', $pl)
+            )) {
+                $entry = $z.CreateEntry($pair[0])
+                $w = New-Object System.IO.StreamWriter($entry.Open())
+                $w.Write($pair[1]); $w.Dispose()
+            }
+        } finally { $z.Dispose() }
+        Import-RmNppesBulk -Path $script:SecZip | Out-Null
+        InModuleScope ReferralMap { $script:RmLocCounts = $null }   # drop cached tables
+    }
+    AfterAll {
+        # restore the shared 3-row bulk fixture for any later Describes
+        Import-RmNppesBulk -Path $script:NppesCsv | Out-Null
+        InModuleScope ReferralMap { $script:RmLocCounts = $null }
+    }
+
+    It 'stores the secondary-location ZIPs in the locations index' {
+        $locIdx = Join-Path $env:RM_DATA_DIR 'nppes-locations.psv'
+        Test-Path $locIdx | Should -BeTrue
+        (Get-Content $locIdx) -join ' ' | Should -BeLike '*7700000008|1|99999*'
+    }
+
+    It 'lists a therapy practice registered elsewhere that treats in the searched ZIP' {
+        $rows = @(Find-RmClinic -ZipList @('99999'))
+        $hit = @($rows | Where-Object NPI -eq '7700000008')
+        $hit.Count | Should -Be 1
+        $hit[0].Zip | Should -Be '99999'                  # the SITE zip, not 65401
+        $hit[0].Presence | Should -BeLike 'secondary site*ROLLA*'
+        $hit[0].PrimaryInScope | Should -BeTrue
+        # ...but scope still applies: the dermatology org with a site here
+        # is NOT a therapy provider and must stay out.
+        @($rows | Where-Object NPI -eq '7700000009').Count | Should -Be 0
+        # and the registered-here provider is unaffected
+        @($rows | Where-Object { $_.NPI -eq '7700000008' -and $_.Presence -eq '' }).Count | Should -Be 0
+    }
+
+    It 'carries the marker and a plain-language note into the referral map' {
+        $map = Get-RmReferralMap -Zip 99999 -SkipEnrichment
+        $c = @($map.Clinics | Where-Object NPI -eq '7700000008')
+        $c.Count | Should -Be 1
+        $c[0].Presence | Should -BeLike 'secondary site*'
+        (@($map.Notes) -join ' ') | Should -BeLike '*SECONDARY SITES*'
+        (@($map.Notes) -join ' ') | Should -BeLike '*REGISTERED outside the searched area*'
+        (@($map.Notes) -join ' ') | Should -BeLike '*covers ALL of that provider''s locations*'
+    }
+
+    It 'keeps old-format count-only location indexes working (feature just stays off)' {
+        $locIdx = Join-Path $env:RM_DATA_DIR 'nppes-locations.psv'
+        Set-Content -Path $locIdx -Value "7700000008|3" -Encoding ascii
+        InModuleScope ReferralMap { $script:RmLocCounts = $null }
+        try {
+            & (Get-Module ReferralMap) { Get-RmSecondaryLocationCount '7700000008' } | Should -Be 3
+            (& (Get-Module ReferralMap) { Get-RmSecondaryLocationZipTable }).Count | Should -Be 0
+            @(Find-RmClinic -ZipList @('99999') -ErrorAction SilentlyContinue |
+                Where-Object NPI -eq '7700000008').Count | Should -Be 0
+        } finally {
+            InModuleScope ReferralMap { $script:RmLocCounts = $null }
+        }
+    }
+}
+

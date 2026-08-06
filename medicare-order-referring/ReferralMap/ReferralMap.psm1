@@ -1493,6 +1493,65 @@ function Find-RmClinic {
                 # slot is a real provider but NOT a comparable therapy
                 # practice — its inbound volume spans every service line.
                 PrimaryInScope = $primaryInScope
+                Presence = ''
+            }
+        }
+        # ---- Secondary practice locations --------------------------------
+        # A practice can TREAT in this area while its Medicare enrollment is
+        # registered outside it - NPPES's secondary-location file is where
+        # those clinics live (measured in St Louis 63101+30mi: 169 therapy
+        # NPIs incl. AXES Physical Therapy with five in-ring clinics and
+        # 19,287 patients, registered one town past the radius). Sweep it so
+        # those practices appear instead of silently missing from the map.
+        # Needs a locations index built by a current NPPES import; older
+        # indexes carry no ZIPs and the sweep quietly contributes nothing.
+        $locZipTbl = Get-RmSecondaryLocationZipTable
+        if ($locZipTbl.Count -gt 0) {
+            $secWant = New-Object 'System.Collections.Generic.HashSet[string]'
+            $secZip = @{}
+            foreach ($kv in $locZipTbl.GetEnumerator()) {
+                if ($found2.ContainsKey($kv.Key)) { continue }
+                foreach ($sz in ([string]$kv.Value).Split(';')) {
+                    $hit = $zipWanted.Contains($sz)
+                    if (-not $hit) {
+                        foreach ($pf in $pfxList) { if ($sz.StartsWith($pf)) { $hit = $true; break } }
+                    }
+                    if ($hit) { [void]$secWant.Add($kv.Key); $secZip[$kv.Key] = $sz; break }
+                }
+            }
+            if ($secWant.Count -gt 0) {
+                foreach ($line in @([RmEngine]::ScanRosterIndex($bulkIdx, $secWant, 0))) {
+                    $f = $line.Split('|')
+                    if ($f.Count -lt 10) { continue }
+                    $label = $null; $matchedCode = ''
+                    $taxEnd = [math]::Min($f.Count - 1, 23)
+                    foreach ($ti in @(8) + @(10..$taxEnd)) {
+                        if ($ti -ge $f.Count) { break }
+                        $code = $f[$ti]
+                        if (-not $code) { continue }
+                        $label = & $resolveTax $code ''
+                        if ($label) { $matchedCode = $code; break }
+                    }
+                    if (-not $label) { continue }   # same therapy scope as the primary sweep
+                    $primaryCode = Get-RmIndexPrimaryCode $f
+                    $primaryInScope = [bool](& $resolveTax $primaryCode '')
+                    if (-not $primaryInScope -and $script:RmGenericPrimaryTaxonomies.ContainsKey($primaryCode)) { $primaryInScope = $true }
+                    $isOrg = $f[1] -eq '2'
+                    $found2[$f[0]] = [pscustomobject]@{
+                        NPI = $f[0]
+                        Name = if ($isOrg) { $f[2] } else { ("$($f[4]) $($f[3])").Trim() }
+                        Type = if ($isOrg) { 'Organization' } else { 'Individual' }
+                        Taxonomy = Get-RmTaxonomyName $matchedCode
+                        # The in-area SITE ZIP, not the registered one; city/
+                        # state stay blank rather than showing the registered
+                        # town next to a local ZIP.
+                        City = ''; State = ''; Zip = $secZip[$f[0]]
+                        Enumerated = if ($f[9] -match '^(\d{2})/(\d{2})/(\d{4})$') { "$($Matches[3])-$($Matches[1])-$($Matches[2])" } else { $f[9] }
+                        PrimaryInScope = $primaryInScope
+                        Presence = "secondary site (registered in $($f[5]), $($f[6]))"
+                    }
+                }
+                Write-Verbose "Secondary-location sweep added providers (total now $($found2.Count))."
             }
         }
         Write-Verbose "Bulk sweep found $($found2.Count) provider(s)."
@@ -1570,6 +1629,7 @@ function Find-RmClinic {
                 # abort the whole query.
                 $postal = [string](Get-RmProp $loc[0] 'postal_code')
                 $found[$npi] = [pscustomobject]@{
+                Presence = ''
                     NPI        = $npi
                     Name       = $name
                     Type       = if ($isOrg) { 'Organization' } else { 'Individual' }
@@ -1710,7 +1770,7 @@ function Get-RmProviderDetail {
 function Get-RmMethodologyNotes {
     param([Parameter(Mandatory)]$Info, [switch]$OrganizationsOnly)
     $y = $Info.Year
-    $clinicTaxNote = 'Clinic list = NPPES providers with a practice location in the requested ZIP holding taxonomies: ' +
+    $clinicTaxNote = 'Clinic list = NPPES providers with a REGISTERED practice location in the requested ZIP - plus, when the local NPPES index carries them, providers whose SECONDARY practice location is there (see the Presence column) - holding taxonomies: ' +
         (@($script:RmClinicTaxonomies.Values) +
          $(if (-not $OrganizationsOnly) {
              @($script:RmIndividualTaxonomyPrefixes.Values | ForEach-Object { "$_ (incl. subspecialties)" })
@@ -1903,6 +1963,7 @@ function Get-RmReferralMap {
             City            = $_.City
             State           = $_.State
             Zip             = $_.Zip
+            Presence        = if ($null -ne $_.PSObject.Properties['Presence']) { [string]$_.Presence } else { '' }
         }
         if ($null -ne $centerLoc) {
             $cz = [string]$_.Zip
@@ -1931,6 +1992,10 @@ function Get-RmReferralMap {
     } | Sort-Object -Property @{Expression = 'SharedPatients'; Descending = $true},
                               @{Expression = 'Name'; Descending = $false})
     $notYetEnumerated = @($clinicRows | Where-Object { $_.ExistedInDataYear -like 'No*' }).Count
+    $secondaryRows = @($clinicRows | Where-Object { $_.Presence }).Count
+    $secondaryNote = if ($secondaryRows -gt 0) {
+        "SECONDARY SITES: $secondaryRows provider(s) in this list are REGISTERED outside the searched area but operate a practice location inside it (from NPPES's secondary-practice-location file; marked in the Presence column with their registered city). Their referral volume is measured on the NPI, so it covers ALL of that provider's locations, not just the local one - use the Multi-site chains tab for per-location figures."
+    } else { $null }
 
     # A ZIP full of therapists but almost no measured volume looks exactly
     # like a broken search. Explain it instead: state the coverage plainly
@@ -1980,6 +2045,7 @@ function Get-RmReferralMap {
             "To combine them deliberately, paste their NPIs together into Source analysis, or use the Multi-site chains tab.")
     }
     $notes = @(Get-RmMethodologyNotes -Info $info -OrganizationsOnly:$OrganizationsOnly) + @(
+        $(if ($secondaryNote) { $secondaryNote })
         $(if ($sibNote) { $sibNote })
         $(if ($coverageNote) { $coverageNote })
         $(if ($multiNote) { $multiNote })
@@ -3645,7 +3711,7 @@ function Get-RmSourceAnalysis {
         'CONCENTRATION: HHI = sum of squared percentage shares (0-10,000); above ~2,500 is highly concentrated — losing one relationship materially moves the total. Top-1/5/10 dependence reads the same risk directly. Both are computed on MEASURED (11+ patient) pairs only: sub-floor referrers are invisible, which inflates the measured shares, so true concentration is LOWER whenever many small sources exist — treat a high reading on a short source list with caution.'
         'Distances are straight-line miles between ZIP-area centroids (US Census) using TODAY''s NPPES practice addresses — a source that moved is measured where it is now.'
         $(if ($isHop) { 'REFERRAL-LAG PROFILE: average days from source visit to this practice''s visit, volume-weighted, over EXTERNAL referral sources only. Short lags look like referrals; 90+ days usually means co-occurring care (labs, hospitals), not referral flow.' })
-        $(if ($landscape) { "COMPETITIVE LANDSCAPE: peers are the NPPES-listed outpatient rehab providers (the same PT/OT/SLP taxonomy sweep the Referral map uses) whose practice location falls in the $($landscape.ZipCount) ZIP(s) within $($landscape.RadiusMiles) straight-line miles of ZIP $pracZip, ranked by inbound shared-patient volume on $($info.Label). Share of area volume = a provider's inbound volume over the SUM across all listed providers — share of measured referral VOLUME, not of patients." })
+        $(if ($landscape) { "COMPETITIVE LANDSCAPE: peers are the NPPES-listed outpatient rehab providers (the same PT/OT/SLP taxonomy sweep the Referral map uses) whose registered - or, with the local NPPES index, secondary - practice location falls in the $($landscape.ZipCount) ZIP(s) within $($landscape.RadiusMiles) straight-line miles of ZIP $pracZip, ranked by inbound shared-patient volume on $($info.Label). Share of area volume = a provider's inbound volume over the SUM across all listed providers — share of measured referral VOLUME, not of patients." })
         $(if ($landscape) { 'A practice''s volume is often SPLIT between its organization NPI and its therapists'' individual NPIs, so a group can rank below its true combined volume. Benchmark the org NPI and its key therapists separately for the full picture.' })
         $(if ($landscape -and $landscape.SecondaryOnlyExcluded -gt 0) { "COMPARABILITY: $($landscape.SecondaryOnlyExcluded) provider(s) in the radius list a therapy taxonomy only in a SECONDARY slot — typically hospitals and multi-specialty organizations. They are excluded from the ranking because their inbound volume spans every service line, not therapy, and including them would overstate the market and understate this practice's share. A provider whose primary is a NON-SPECIFIC code - generic 'Clinic/Center', 'Multi-Specialty Clinic', or the legacy 'Specialist' - but which also carries a real therapy taxonomy is NOT excluded: those registrations are how chains and therapy companies fill in forms (277 of Athletico's 426 clinics, Apex Physical Therapy, EmpowerMe), and dropping them hid top-5 competitors in some markets." })
         $(if ($landscapeNote) { $landscapeNote })
@@ -5420,19 +5486,36 @@ function Get-RmChainNote {
 }
 
 $script:RmLocCounts = $null
-function Get-RmSecondaryLocationCount([string]$Npi) {
-    if ($null -eq $script:RmLocCounts) {
-        $t = @{}
-        $p = Get-RmNppesLocIndexPath
-        if (Test-Path -LiteralPath $p) {
-            foreach ($line in [System.IO.File]::ReadLines($p)) {
-                $i = $line.IndexOf('|')
-                if ($i -gt 0) { $t[$line.Substring(0, $i)] = [int]$line.Substring($i + 1) }
-            }
+$script:RmLocZips = $null
+function Initialize-RmLocTables {
+    # One pass loads both views of nppes-locations.psv: NPI -> site count
+    # (multi-site flags) and NPI -> 'zip1;zip2' (secondary-site sweeps).
+    # Old-format files (NPI|count, no third field) still feed the counts;
+    # the ZIP table just stays empty, which switches the sweep feature off.
+    if ($null -ne $script:RmLocCounts) { return }
+    $t = @{}; $z = @{}
+    $p = Get-RmNppesLocIndexPath
+    if (Test-Path -LiteralPath $p) {
+        foreach ($line in [System.IO.File]::ReadLines($p)) {
+            $f = $line.Split('|')
+            if ($f.Count -lt 2 -or -not $f[0]) { continue }
+            $n = 0
+            if ([int]::TryParse($f[1], [ref]$n)) { $t[$f[0]] = $n }
+            if ($f.Count -ge 3 -and $f[2]) { $z[$f[0]] = $f[2] }
         }
-        $script:RmLocCounts = $t
     }
+    $script:RmLocCounts = $t
+    $script:RmLocZips = $z
+}
+
+function Get-RmSecondaryLocationCount([string]$Npi) {
+    Initialize-RmLocTables
     if ($script:RmLocCounts.ContainsKey($Npi)) { $script:RmLocCounts[$Npi] } else { 0 }
+}
+
+function Get-RmSecondaryLocationZipTable {
+    Initialize-RmLocTables
+    $script:RmLocZips
 }
 
 function Get-RmIndexPrimaryCode([string[]]$f) {
@@ -5527,9 +5610,13 @@ function Import-RmNppesBulk {
         } catch {
             Write-Warning "Chain table not pre-built ($($_.Exception.Message)); it will be built on first use."
         }
-        # Secondary practice locations (pl_pfile) -> NPI|count. Sparse in
-        # practice (many chains register none), so it CONFIRMS multi-site
-        # but its absence proves nothing.
+        # Secondary practice locations (pl_pfile) -> NPI|count|zip1;zip2;...
+        # The counts confirm multi-site NPIs; the ZIPs let area sweeps list a
+        # practice that TREATS in the searched area but is REGISTERED outside
+        # it (measured in St Louis: AXES Physical Therapy, 19,287 patients
+        # and five in-ring clinics, registered one town past the radius).
+        # Sparse in practice (many chains register none), so it CONFIRMS
+        # multi-site but its absence proves nothing.
         $locRows = 0
         try {
             if ([System.IO.Path]::GetExtension($Path).ToLowerInvariant() -eq '.zip') {
@@ -5544,16 +5631,30 @@ function Import-RmNppesBulk {
                             [void][RmEngine]::BuildRosterIndexFromStream($st2, $locTmp,
                                 @('NPI', 'Provider Secondary Practice Location Address - Postal Code'))
                             $counts = @{}
+                            $locZips = @{}
                             foreach ($ln in [System.IO.File]::ReadLines($locTmp)) {
                                 $i = $ln.IndexOf('|')
                                 if ($i -gt 0) {
                                     $k = $ln.Substring(0, $i)
                                     if ($counts.ContainsKey($k)) { $counts[$k]++ } else { $counts[$k] = 1 }
+                                    $pz = $ln.Substring($i + 1)
+                                    if ($pz.Length -ge 5) {
+                                        $z5 = $pz.Substring(0, 5)
+                                        if ($z5 -match '^\d{5}$') {
+                                            if (-not $locZips.ContainsKey($k)) { $locZips[$k] = New-Object 'System.Collections.Generic.HashSet[string]' }
+                                            [void]$locZips[$k].Add($z5)
+                                        }
+                                    }
                                 }
                             }
                             $locOutTmp = (Get-RmNppesLocIndexPath) + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
                             $sw2 = New-Object System.IO.StreamWriter($locOutTmp, $false, (New-Object System.Text.UTF8Encoding($false)))
-                            try { foreach ($kv in $counts.GetEnumerator()) { $sw2.WriteLine($kv.Key + '|' + $kv.Value); $locRows++ } }
+                            try {
+                                foreach ($kv in $counts.GetEnumerator()) {
+                                    $zl = if ($locZips.ContainsKey($kv.Key)) { @($locZips[$kv.Key]) -join ';' } else { '' }
+                                    $sw2.WriteLine($kv.Key + '|' + $kv.Value + '|' + $zl); $locRows++
+                                }
+                            }
                             finally { $sw2.Dispose() }
                             Move-Item -LiteralPath $locOutTmp -Destination (Get-RmNppesLocIndexPath) -Force
                             Remove-Item -LiteralPath $locTmp -Force -ErrorAction SilentlyContinue
@@ -5563,7 +5664,7 @@ function Import-RmNppesBulk {
             }
         } catch { Write-Warning "Secondary practice locations could not be indexed (multi-site detection falls back to scale): $($_.Exception.Message)" }
         [pscustomobject]@{ Rows = $rows; SecondaryLocationRows = $locRows; Path = Get-RmNppesIndexPath
-            Message = "NPPES bulk index built: $('{0:N0}' -f $rows) providers. Lookups now run locally (the live registry stays as fallback)." }
+            Message = "NPPES bulk index built: $('{0:N0}' -f $rows) providers$(if ($locRows -gt 0) { "; $('{0:N0}' -f $locRows) secondary-location records (area searches now also find practices registered elsewhere that treat locally)" }). Lookups now run locally (the live registry stays as fallback)." }
     } finally {
         if ($tmpExtract -and (Test-Path -LiteralPath $tmpExtract)) { Remove-Item -LiteralPath $tmpExtract -Force }
     }

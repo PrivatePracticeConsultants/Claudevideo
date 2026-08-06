@@ -217,6 +217,18 @@ only one or two local therapists is a multi-site chain, not a big local clinic â
 rank by `TherapistsInZip` for local size. And this is *who practices together*,
 not *who refers to whom*.
 
+**Practices registered outside the area but treating in it:** a clinic can be
+enrolled with Medicare at one address (often the owner's office or an HQ one
+town over) while its actual clinics sit elsewhere. With the NPPES bulk zip
+imported, area searches also check every provider's **secondary practice
+locations**, so those practices appear in the map and competitive rankings
+with a `Presence` note naming where they are registered. Their referral volume
+is measured on the NPI, so it covers all of that provider's locations - the
+Multi-site chains tab breaks it down per address. (Measured in St Louis: this
+recovers 169 therapy providers a 30-mile search used to miss, including a
+five-clinic private practice with 19,287 patients registered just past the
+radius.)
+
 **The group leaderboard â€” "Add referral benchmark":** if you have a dataset on
 the Referral map tab, this button rolls every group's *local* therapists'
 referral volume up to the group and turns the top table into a **leaderboard**:

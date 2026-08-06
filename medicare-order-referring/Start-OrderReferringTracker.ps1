@@ -1273,7 +1273,7 @@ $ui.ExportChangesButton.Add_Click({
 # Referral map tab
 # ---------------------------------------------------------------------------
 
-$script:RmClinicCols = @('NPI', 'Name', 'Type', 'Taxonomy', 'City', 'State', 'Zip',
+$script:RmClinicCols = @('NPI', 'Name', 'Type', 'Taxonomy', 'City', 'State', 'Zip', 'Presence',
                          'ReferralSources', 'SharedPatients', 'SameDay', 'Chain', 'MultiSiteNPI', 'ExistedInDataYear')
 $script:RmSourceCols = @('SourceNPI', 'SourceName', 'SourceSpecialty', 'SourceCity', 'SourceState',
                          'ClinicNPI', 'ClinicName', 'SharedPatients', 'SharedEvents', 'SameDay')
