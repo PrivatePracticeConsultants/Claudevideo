@@ -2771,15 +2771,25 @@ Describe 'Secondary practice locations widen area searches' {
                 '"7700000001","2","BULK REHAB PARTNERS, LLC","","","ROLLA","MO","654010000","261QP2000X","06/15/2008","",""'
                 '"7700000008","2","FARAWAY REGISTERED PT, LLC","","","ROLLA","MO","654010000","261QP2000X","04/01/2012","",""'
                 '"7700000009","2","FARAWAY DERMATOLOGY, LLC","","","ROLLA","MO","654010000","207N00000X","04/01/2012","",""'
+                '"7700000011","2","TESTVILLE PHYSICAL THERAPY, INC","","","TESTVILLE","MO","999990000","174400000X","05/05/2010","",""'
+                '"7700000012","2","TESTVILLE PHYSICAL THERAPY NURSING HOME","","","TESTVILLE","MO","999990000","174400000X","05/05/2010","",""'
+                '"7700000013","2","TESTVILLE WELLNESS HOLDINGS LLC","","","TESTVILLE","MO","999990000","174400000X","05/05/2010","",""'
+                '"7700000014","2","QUIET HOLDINGS OF MISSOURI LLC","","","ROLLA","MO","654010000","261QP2000X","05/05/2010","",""'
             ) -join "`n"
             $pl = @(
                 '"NPI","Provider Secondary Practice Location Address- Address Line 1","Provider Secondary Practice Location Address-  Address Line 2","Provider Secondary Practice Location Address - City Name","Provider Secondary Practice Location Address - State Name","Provider Secondary Practice Location Address - Postal Code"'
                 '"7700000008","1 SITE ST","","TESTVILLE","MO","999991234"'
                 '"7700000009","2 SITE ST","","TESTVILLE","MO","999991234"'
             ) -join "`n"
+            $othernames = @(
+                '"NPI","Provider Other Organization Name","Provider Other Organization Name Type Code","Created Date"'
+                '"7700000013","Testville Physical Therapy & Balance","3","01/01/2020"'
+                '"7700000014","BRANDX PHYSICAL THERAPY","3","01/01/2020"'
+            ) -join "`n"
             foreach ($pair in @(
                 @('npidata_pfile_20050523-20990101.csv', $npidata),
-                @('pl_pfile_20050523-20990101.csv', $pl)
+                @('pl_pfile_20050523-20990101.csv', $pl),
+                @('othername_pfile_20050523-20990101.csv', $othernames)
             )) {
                 $entry = $z.CreateEntry($pair[0])
                 $w = New-Object System.IO.StreamWriter($entry.Open())
@@ -2787,12 +2797,13 @@ Describe 'Secondary practice locations widen area searches' {
             }
         } finally { $z.Dispose() }
         Import-RmNppesBulk -Path $script:SecZip | Out-Null
-        InModuleScope ReferralMap { $script:RmLocCounts = $null }   # drop cached tables
+        InModuleScope ReferralMap { $script:RmLocCounts = $null; $script:RmOtherNames = $null }   # drop cached tables
     }
     AfterAll {
         # restore the shared 3-row bulk fixture for any later Describes
         Import-RmNppesBulk -Path $script:NppesCsv | Out-Null
-        InModuleScope ReferralMap { $script:RmLocCounts = $null }
+        InModuleScope ReferralMap { $script:RmLocCounts = $null; $script:RmOtherNames = $null }
+        Remove-Item (Join-Path $env:RM_DATA_DIR 'nppes-othernames.psv') -Force -ErrorAction SilentlyContinue
     }
 
     It 'stores the secondary-location ZIPs in the locations index' {
@@ -2823,6 +2834,46 @@ Describe 'Secondary practice locations widen area searches' {
         (@($map.Notes) -join ' ') | Should -BeLike '*SECONDARY SITES*'
         (@($map.Notes) -join ' ') | Should -BeLike '*REGISTERED outside the searched area*'
         (@($map.Notes) -join ' ') | Should -BeLike '*covers ALL of that provider''s locations*'
+    }
+
+    It 'rescues an org that registered NO therapy taxonomy but is NAMED a therapy practice' {
+        $rows = @(Find-RmClinic -ZipList @('99999'))
+        $hit = @($rows | Where-Object NPI -eq '7700000011')
+        $hit.Count | Should -Be 1
+        $hit[0].Presence | Should -BeLike 'therapy-named practice*'
+        $hit[0].PrimaryInScope | Should -BeTrue        # its name IS the evidence; it must rank
+        # refused facility type stays out despite the therapy words
+        @($rows | Where-Object NPI -eq '7700000012').Count | Should -Be 0
+        $map = Get-RmReferralMap -Zip 99999 -SkipEnrichment
+        (@($map.Notes) -join ' ') | Should -BeLike '*NAME-MATCHED PRACTICES*'
+    }
+
+    It 'rescues an org whose DBA (not legal name) says it is a therapy practice' {
+        $rows = @(Find-RmClinic -ZipList @('99999'))
+        $hit = @($rows | Where-Object NPI -eq '7700000013')
+        $hit.Count | Should -Be 1
+        $hit[0].Presence | Should -BeLike "therapy-named practice (DBA 'Testville Physical Therapy & Balance'*"
+    }
+
+    It 'finds a family member enrolled under a holding name via its DBA' {
+        Set-RmActiveDataset -Source hop-teaming -Year 2022 | Out-Null
+        try {
+            $f = Get-RmProviderFamily -Name 'BRANDX PHYSICAL THERAPY'
+            $hit = @($f.Rows | Where-Object NPI -eq '7700000014')
+            $hit.Count | Should -Be 1
+            $hit[0].Name | Should -Be 'QUIET HOLDINGS OF MISSOURI LLC'   # legal name shown
+            $hit[0].MatchedVia | Should -BeLike 'DBA: BRANDX*'
+        } finally { Set-RmActiveDataset -Source cms-pspp -Year 2015 | Out-Null }
+    }
+
+    It 'measures distance to the CLOSEST location for a multi-site provider' {
+        # 7700000008 is registered in Rolla (65401) with a secondary site in
+        # 99999; a radius map centered on 99999 must measure ~0 miles, not
+        # the Rolla distance.
+        $map = Get-RmReferralMap -Zip 99999 -RadiusMiles 5 -SkipEnrichment -CentroidPath $script:CentroidCsv
+        $c = @($map.Clinics | Where-Object NPI -eq '7700000008')
+        $c.Count | Should -Be 1
+        [double]$c[0].DistanceMiles | Should -BeLessThan 1.0
     }
 
     It 'keeps old-format count-only location indexes working (feature just stays off)' {

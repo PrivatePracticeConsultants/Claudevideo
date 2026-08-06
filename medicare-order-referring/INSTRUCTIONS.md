@@ -217,6 +217,15 @@ only one or two local therapists is a multi-site chain, not a big local clinic â
 rank by `TherapistsInZip` for local size. And this is *who practices together*,
 not *who refers to whom*.
 
+**Brand names vs legal names (DBA):** a third of therapy organizations enroll
+with Medicare under a legal name that differs from the brand on the door -
+'ADVANCED PHYSICAL THERAPY, LLC' is an ATI Physical Therapy clinic. With the
+NPPES bulk zip imported, name searches (Multi-site chains tab) also match
+these **doing-business-as** names, and matched rows say which DBA matched in a
+`MatchedVia` column. Area searches likewise include practices whose name (legal
+or DBA) literally says physical/occupational/speech therapy even when they
+registered no therapy taxonomy code at all - marked in the `Presence` column.
+
 **Practices registered outside the area but treating in it:** a clinic can be
 enrolled with Medicare at one address (often the owner's office or an HQ one
 town over) while its actual clinics sit elsewhere. With the NPPES bulk zip

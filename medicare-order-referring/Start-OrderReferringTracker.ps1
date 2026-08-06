@@ -394,6 +394,30 @@ $xaml = @'
             <TextBlock Text="ZIP:" VerticalAlignment="Center" Margin="0,0,6,0"/>
             <TextBox x:Name="PgZipBox" Width="100" Height="28" VerticalContentAlignment="Center"
                      MaxLength="6" ToolTip="5-digit ZIP, or a prefix like 630* for a wider area"/>
+            <ComboBox x:Name="PgRadiusCombo" MinWidth="110" Height="28" SelectedIndex="0" Margin="8,0,0,0"
+                      ToolTip="Sweep every ZIP whose center lies within this many straight-line miles of the ZIP you typed, from 5 up to 100 in 5-mile steps. Wide sweeps need the NPPES bulk index from the Multi-site chains tab (one-time import); with it, any radius runs in seconds.">
+              <ComboBoxItem Content="Exact ZIP"/>
+              <ComboBoxItem Content="5 miles"/>
+              <ComboBoxItem Content="10 miles"/>
+              <ComboBoxItem Content="15 miles"/>
+              <ComboBoxItem Content="20 miles"/>
+              <ComboBoxItem Content="25 miles"/>
+              <ComboBoxItem Content="30 miles"/>
+              <ComboBoxItem Content="35 miles"/>
+              <ComboBoxItem Content="40 miles"/>
+              <ComboBoxItem Content="45 miles"/>
+              <ComboBoxItem Content="50 miles"/>
+              <ComboBoxItem Content="55 miles"/>
+              <ComboBoxItem Content="60 miles"/>
+              <ComboBoxItem Content="65 miles"/>
+              <ComboBoxItem Content="70 miles"/>
+              <ComboBoxItem Content="75 miles"/>
+              <ComboBoxItem Content="80 miles"/>
+              <ComboBoxItem Content="85 miles"/>
+              <ComboBoxItem Content="90 miles"/>
+              <ComboBoxItem Content="95 miles"/>
+              <ComboBoxItem Content="100 miles"/>
+            </ComboBox>
             <Button x:Name="PgRunButton" Content="Find practice groups" Padding="14,5" Margin="14,0,0,0"/>
             <Button x:Name="PgDownloadButton" Content="Download CMS dataset" Padding="10,5" Margin="10,0,0,0"/>
             <TextBlock x:Name="PgDataStatus" VerticalAlignment="Center" Margin="12,0,0,0" Foreground="#666"/>
@@ -639,7 +663,7 @@ foreach ($name in @(
     'BmNameBox', 'BmStateBox', 'BmSearchButton', 'BmRunButton', 'BmWiderArea',
     'BmSearchGrid', 'BmRegionLabel', 'BmExportRegionButton', 'BmRegionGrid',
     'BmMissedLabel', 'BmExportMissedButton', 'BmMissedGrid', 'BmSummary',
-    'PgZipBox', 'PgRunButton', 'PgDownloadButton', 'PgDataStatus', 'PgGroupGrid',
+    'PgZipBox', 'PgRadiusCombo', 'PgRunButton', 'PgDownloadButton', 'PgDataStatus', 'PgGroupGrid',
     'PgRosterLabel', 'PgFootprintButton', 'PgViewCombo', 'PgTrendButton', 'PgExportGroupsButton', 'PgExportRosterButton',
     'PgRosterGrid', 'PgSummary',
     'ChDataStatus', 'ChSetupButton', 'ChNppesButton',
@@ -769,7 +793,7 @@ function Set-Busy([bool]$On, [string]$Message, [string]$Title) {
                      $ui.CompareButton, $ui.LoadNpiFileButton,
                      $ui.RmRunButton, $ui.RmDownloadButton, $ui.RmImportButton, $ui.RmDatasetCombo, $ui.RmRadiusCombo,
                      $ui.BmSearchButton,
-                     $ui.PgRunButton, $ui.PgDownloadButton, $ui.PgFootprintButton,
+                     $ui.PgRunButton, $ui.PgRadiusCombo, $ui.PgDownloadButton, $ui.PgFootprintButton,
                      $ui.ChNpiButton, $ui.ChAddrButton, $ui.ChSetupButton, $ui.ChNppesButton,
                      $ui.LkRunButton, $ui.LkTrendButton, $ui.LkGeoButton, $ui.LkAnalysisButton, $ui.LkFullReportButton, $ui.WlCheckButton)) {
         $b.IsEnabled = -not $On
@@ -1274,7 +1298,7 @@ $ui.ExportChangesButton.Add_Click({
 # ---------------------------------------------------------------------------
 
 $script:RmClinicCols = @('NPI', 'Name', 'Type', 'Taxonomy', 'City', 'State', 'Zip', 'Presence',
-                         'ReferralSources', 'SharedPatients', 'SameDay', 'Chain', 'MultiSiteNPI', 'ExistedInDataYear')
+                         'ReferralSources', 'SharedPatients', 'RosterSize', 'SameDay', 'Chain', 'MultiSiteNPI', 'ExistedInDataYear')
 $script:RmSourceCols = @('SourceNPI', 'SourceName', 'SourceSpecialty', 'SourceCity', 'SourceState',
                          'ClinicNPI', 'ClinicName', 'SharedPatients', 'SharedEvents', 'SameDay')
 
@@ -1709,7 +1733,7 @@ $ui.BmExportMissedButton.Add_Click({
 
 # The footprint column is named for the ACTIVE referral dataset's year
 # (LocalReferrals2015, LocalReferrals2022, ...) so exports stay self-describing.
-function Get-PgGroupCols { @('Rank', 'GroupName', 'State', 'TherapistsInZip', 'RosterSize', "LocalReferrals$($script:RmYear)", 'SharePct', 'GroupPacId') }
+function Get-PgGroupCols { @('Rank', 'GroupName', 'State', 'TherapistsInZip', 'RosterSize', "LocalReferrals$($script:RmYear)", 'SharePct', 'GroupPacId', 'TherapistNpisInZip') }
 $script:PgRosterCols = @('GroupName', 'GroupPacId', 'NPI', 'FirstName', 'LastName', 'Specialty', 'InThisZip')
 $script:PgFootprintSources = @{}   # group PAC ID -> top-sources array (after footprint run)
 $script:PgFootprintYear = $null    # data year the footprint was computed from
@@ -1774,9 +1798,32 @@ $ui.PgRunButton.Add_Click({
         Show-ErrorBox "The dataset isn't downloaded yet — click 'Download CMS dataset' first (one-time, ~510 MB)."
         return
     }
-    Invoke-Async -Kind 'pg-run' -Params @{ PgModulePath = $script:PgModulePath; Zip = $zip } `
-        -BusyMessage "Finding practice groups for $zip — NPPES lookup, then matching against the reassignment roster (loading the ~510 MB roster is most of the wait)..." `
-        -WorkerScript 'param($PgModulePath, $Zip) Import-Module $PgModulePath; Get-PgGroupsInZip -Zip $Zip' `
+    $pgIdx = [Math]::Max(0, $ui.PgRadiusCombo.SelectedIndex)
+    $pgRadius = if ($pgIdx -lt $script:RmRadiusValues.Count) { $script:RmRadiusValues[$pgIdx] } else { 0 }
+    if ($pgRadius -gt 0 -and $zip -notmatch '^\d{5}$') {
+        Show-ErrorBox 'A radius search needs a full 5-digit center ZIP (prefixes like 630* work with Exact ZIP only).'
+        return
+    }
+    $areaText = if ($pgRadius -gt 0) { "$zip+${pgRadius}mi" } else { $zip }
+    Invoke-Async -Kind 'pg-run' -Params @{
+            PgModulePath = $script:PgModulePath; RmModulePath = $script:RmModulePath
+            Zip = $zip; Radius = $pgRadius
+        } `
+        -BusyMessage "Finding practice groups for $areaText — NPPES lookup, then matching against the reassignment roster (loading the ~510 MB roster is most of the wait)..." `
+        -WorkerScript 'param($PgModulePath, $RmModulePath, $Zip, $Radius)
+            Import-Module $PgModulePath
+            if ($Radius -gt 0) {
+                # The RM module supplies the Census ZIP ring and (when built)
+                # the local NPPES index that makes a wide sweep affordable.
+                Import-Module $RmModulePath
+                $zl = @(Get-RmZipsInRadius -Zip $Zip -RadiusMiles $Radius)
+                $idx = Get-RmNppesIndexPath
+                $pgArgs = @{ ZipList = $zl; AreaLabel = "$Zip+${Radius}mi" }
+                if (Test-Path -LiteralPath $idx) { $pgArgs['NppesIndexPath'] = $idx }
+                Get-PgGroupsInZip @pgArgs
+            } else {
+                Get-PgGroupsInZip -Zip $Zip
+            }' `
         -OnDone {
             param($result)
             $pg = $result[0]
@@ -1793,7 +1840,7 @@ $ui.PgRunButton.Add_Click({
             $ui.PgExportGroupsButton.IsEnabled = ($groups.Count -gt 0)
             # The footprint bridge needs the Referral map (shared-patient) dataset.
             $ui.PgFootprintButton.IsEnabled = ($groups.Count -gt 0 -and (Get-RmStatus).DatasetReady)
-            $ui.PgSummary.Text = ("ZIP $($pg.Zip): $($pg.TherapistCount) individual therapists found; " +
+            $ui.PgSummary.Text = ("$($pg.Zip): $($pg.TherapistCount) individual therapists found; " +
                 "$($groups.Count) multi-provider practice group(s) operate here; " +
                 "$($pg.SoloCount) therapists are solo or not in a named group. " +
                 'RosterSize is nationwide — a big roster with few in-ZIP members is a multi-site organization.')
@@ -2427,7 +2474,7 @@ $ui.ChNpiButton.Add_Click({
             $script:ChResult = $f; $script:ChKind = 'npi'
             $ui.ChGrid.ItemsSource = (ConvertTo-DataTable -Rows @($f.Rows) -Columns @(
                 'NPI', 'Name', 'City', 'State', 'Zip', 'SharedPatients', 'ReferralSources',
-                'PracticeSites', 'Chain', 'MultiSiteNPI')).DefaultView
+                'PracticeSites', 'Chain', 'MultiSiteNPI', 'MatchedVia')).DefaultView
             $ui.ChLabel.Text = ("BY NPI - '$($f.Search)' in $($f.Label): $('{0:N0}' -f $f.Npis) organization NPI(s), " +
                 "$($f.NpisWithVolume) with measured volume, $('{0:N0}' -f $f.TotalPatients) patients in total.")
             $top = @($f.ByState | Select-Object -First 4 | ForEach-Object { "$($_.State) $($_.PctOfFamily)%" }) -join ', '

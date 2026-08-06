@@ -448,6 +448,45 @@ function Get-PgTherapistNpiInZip {
     $found
 }
 
+function Get-PgTherapistNpiInZipList {
+    <# .SYNOPSIS Individual PT/OT/SLP NPIs across MANY ZIPs (radius sweeps).
+       One streaming pass over the local NPPES index when available (built on
+       the Multi-site chains tab); falls back to the live registry per ZIP,
+       which is only practical for small sweeps. #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidateCount(1, 2000)][string[]]$ZipList,
+        [string]$NppesIndexPath
+    )
+    $found = @{}
+    if ($NppesIndexPath -and (Test-Path -LiteralPath $NppesIndexPath) -and ('RmEngine' -as [type])) {
+        $want = New-Object 'System.Collections.Generic.HashSet[string]'
+        foreach ($z in $ZipList) { if ($z -match '^\d{5}$') { [void]$want.Add($z) } }
+        $pfx = New-Object 'System.Collections.Generic.List[string]'
+        foreach ($line in @([RmEngine]::ScanIndexByZip($NppesIndexPath, 7, $want, $pfx))) {
+            $f = $line.Split('|')
+            if ($f.Count -lt 10 -or $f[1] -ne '1') { continue }
+            $isTher = $false
+            $taxEnd = [math]::Min($f.Count - 1, 23)
+            foreach ($ti in @(8) + @(10..$taxEnd)) {
+                if ($ti -ge $f.Count) { break }
+                $c4 = if ($f[$ti].Length -ge 4) { $f[$ti].Substring(0, 4) } else { '' }
+                if ($c4 -in '2251', '225X', '235Z') { $isTher = $true; break }
+            }
+            if ($isTher) { $found[$f[0]] = ("$($f[4]) $($f[3])").Trim() }
+        }
+        return $found
+    }
+    if ($ZipList.Count -gt 30) {
+        throw ("A radius this wide covers $($ZipList.Count) ZIP codes - too many to sweep through the live registry. " +
+               "Import the NPPES bulk zip on the Multi-site chains tab first (one time); radius searches then run locally in seconds.")
+    }
+    foreach ($z in $ZipList) {
+        foreach ($kv in (Get-PgTherapistNpiInZip -Zip $z).GetEnumerator()) { $found[$kv.Key] = $kv.Value }
+    }
+    $found
+}
+
 # ---------------------------------------------------------------------------
 # The main query
 # ---------------------------------------------------------------------------
@@ -465,18 +504,32 @@ function Get-PgGroupsInZip {
     #>
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)][ValidatePattern('^\d{3,5}\*?$')][string]$Zip
+        [ValidatePattern('^\d{3,5}\*?$')][string]$Zip,
+        # Radius searches: the exact 5-digit ZIPs to sweep (the GUI computes
+        # them from the Census centroid table) + the local NPPES index that
+        # makes a wide sweep affordable.
+        [ValidateCount(1, 2000)][string[]]$ZipList,
+        [string]$NppesIndexPath,
+        [string]$AreaLabel
     )
+    if (-not $Zip -and -not $ZipList) { throw 'Provide -Zip or -ZipList.' }
     Import-PgDataset | Out-Null
 
-    Write-Verbose "Finding therapists in ZIP $Zip via NPPES..."
-    $inZip = Get-PgTherapistNpiInZip -Zip $Zip
+    $areaText = if ($AreaLabel) { $AreaLabel } elseif ($ZipList) { "$(@($ZipList).Count) ZIP codes" } else { "ZIP $Zip" }
+    Write-Verbose "Finding therapists in $areaText via NPPES..."
+    $inZip = if ($ZipList) {
+        Get-PgTherapistNpiInZipList -ZipList $ZipList -NppesIndexPath:$NppesIndexPath
+    } else {
+        Get-PgTherapistNpiInZip -Zip $Zip
+    }
     if ($inZip.Count -eq 0) {
-        throw "NPPES lists no individual PT/OT/SLP providers with a practice location in ZIP '$Zip'. Try a broader prefix like '$($Zip.Substring(0,3))*'."
+        throw $(if ($ZipList) { "NPPES lists no individual PT/OT/SLP providers with a practice location in $areaText. Try a larger radius." }
+                else { "NPPES lists no individual PT/OT/SLP providers with a practice location in ZIP '$Zip'. Try a broader prefix like '$($Zip.Substring(0,3))*'." })
     }
 
     # Which groups do the in-ZIP therapists belong to?
     $groupHits = @{}   # groupPac -> count of in-zip therapists
+    $groupNpis = @{}   # groupPac -> the in-area members' NPIs (for exports / combined analyses)
     $soloOrUnlisted = 0
     foreach ($npi in $inZip.Keys) {
         if (-not $script:PgNpiIndex.ContainsKey($npi)) { $soloOrUnlisted++; continue }
@@ -488,8 +541,12 @@ function Get-PgGroupsInZip {
         }
         if ($named.Count -eq 0) { $soloOrUnlisted++; continue }
         foreach ($g in $named) {
-            if (-not $groupHits.ContainsKey($g)) { $groupHits[$g] = 0 }
+            if (-not $groupHits.ContainsKey($g)) {
+                $groupHits[$g] = 0
+                $groupNpis[$g] = New-Object System.Collections.Generic.List[string]
+            }
             $groupHits[$g]++
+            $groupNpis[$g].Add($npi)
         }
     }
 
@@ -501,6 +558,9 @@ function Get-PgGroupsInZip {
             TherapistsInZip  = $groupHits[$gpac]
             RosterSize       = $g.Members.Count
             GroupPacId       = $gpac
+            # Space-separated so the whole cell pastes straight into the
+            # Provider lookup for a combined group analysis.
+            TherapistNpisInZip = (@($groupNpis[$gpac] | Sort-Object) -join ' ')
         }
     }
     $rows = @($rows | Sort-Object -Property @{Expression = 'TherapistsInZip'; Descending = $true},
@@ -529,11 +589,13 @@ function Get-PgGroupsInZip {
         "A 'group' here is a practice with a legal business name and 2+ therapist members. Solo/private-practice therapists (who reassign to themselves) are counted separately, not shown as groups."
         "TherapistsInZip = roster members with an NPPES practice location in the requested ZIP. RosterSize = the group's total PT/OT/SLP members nationwide (a group may span many locations, so a large roster with few in-ZIP members is a multi-site organization)."
         "Every listed therapist is Medicare-enrolled and reassigning benefits to the group (that is what this file records), so no separate eligibility check is needed. The Order & Referring roster is not used here — it covers ordering/referring, which therapists generally do not do."
-        "$($inZip.Count) individual therapists found in ZIP $Zip; $soloOrUnlisted of them are solo or not in a named multi-member group."
+        "$($inZip.Count) individual therapists found in $areaText; $soloOrUnlisted of them are solo or not in a named multi-member group."
+        $(if ($ZipList) { "RADIUS SEARCH: therapists were swept from $(@($ZipList).Count) ZIP code(s)$(if ($NppesIndexPath -and (Test-Path -LiteralPath $NppesIndexPath)) { ' using the local NPPES index' } else { ' via the live NPPES registry' }). TherapistsInZip counts members anywhere in that area." })
+        'TherapistNpisInZip lists the in-area members'' NPIs - paste a group''s cell into the Provider lookup tab for a combined referral analysis of that group.' 
     ) | Where-Object { $_ }
 
     [pscustomobject]@{
-        Zip            = $Zip
+        Zip            = $(if ($AreaLabel) { $AreaLabel } elseif ($Zip) { $Zip } else { $areaText })
         TherapistCount = $inZip.Count
         SoloCount      = $soloOrUnlisted
         Groups         = $rows

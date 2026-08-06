@@ -632,6 +632,31 @@ public static class RmEngine
     // costs four regex operations per row in script; here it is seconds.
     // Returns "displayName\u0001addressCount" rows; the tiny result is
     // sorted by the caller.
+    // Facility-name key -> distinct clinician count over the whole Care
+    // Compare index. Powers the map's RosterSize column: how many clinicians
+    // practice under that organization name (all its locations combined).
+    public static Dictionary<string, int> ScanDacRosterCounts(string path, int npiField, int nameField)
+    {
+        HashSet<string> seen = new HashSet<string>(StringComparer.Ordinal);
+        Dictionary<string, int> counts = new Dictionary<string, int>(StringComparer.Ordinal);
+        using (StreamReader r = new StreamReader(path, Encoding.UTF8, false, 1 << 20))
+        {
+            string line;
+            while ((line = r.ReadLine()) != null)
+            {
+                string npi = PipeFieldAt(line, npiField);
+                string name = PipeFieldAt(line, nameField);
+                if (string.IsNullOrEmpty(npi) || string.IsNullOrEmpty(name)) continue;
+                string key = OrgNameKey(name);
+                if (key.Length == 0) continue;
+                if (!seen.Add(key + "\u0001" + npi)) continue;
+                int c;
+                counts[key] = counts.TryGetValue(key, out c) ? c + 1 : 1;
+            }
+        }
+        return counts;
+    }
+
     public static List<string> RelatedOrgAddressCounts(string path, int nameField, int addrField,
         int zipField, string leadWord, string excludeNeedle)
     {
@@ -1469,7 +1494,32 @@ function Find-RmClinic {
                 $label = & $resolveTax $code ''
                 if ($label) { $matchedCode = $code; break }
             }
-            if (-not $label) { continue }
+            $nameRescue = ''
+            if (-not $label) {
+                # NAME RESCUE: an organization that registered NO therapy
+                # taxonomy anywhere, but whose legal or DBA name literally
+                # says it is a PT/OT/SLP practice. Measured nationwide: 469
+                # such orgs carried 785,074 patients in 2022 (Reddy Care
+                # Physical Therapy alone 89,005) - most hold the legacy
+                # 'Specialist' code 174400000X, so the taxonomy sweep can
+                # never see them. Facility names (hospital, nursing, home
+                # health...) are refused by the strict name test.
+                if ($f[1] -ne '2') { continue }
+                if (Test-RmTherapyPracticeName $f[2]) {
+                    $nameRescue = 'therapy-named practice (no therapy taxonomy registered)'
+                } else {
+                    $ont = Get-RmOtherNameTable
+                    if ($ont.ContainsKey($f[0])) {
+                        foreach ($dn in $ont[$f[0]]) {
+                            if (Test-RmTherapyPracticeName $dn) {
+                                $nameRescue = "therapy-named practice (DBA '$dn'; no therapy taxonomy registered)"
+                                break
+                            }
+                        }
+                    }
+                }
+                if (-not $nameRescue) { continue }
+            }
             # PRIMARY = the slot whose Switch_N is 'Y' (slot ORDER is not
             # primacy - see the importer note). Older indexes without switch
             # fields fall back to slot 1.
@@ -1480,12 +1530,13 @@ function Find-RmClinic {
                 # another slot ($label proved one is present) = comparable.
                 $primaryInScope = $true
             }
+            if ($nameRescue) { $primaryInScope = $true }   # its name IS the evidence
             $isOrg = $f[1] -eq '2'
             $found2[$f[0]] = [pscustomobject]@{
                 NPI = $f[0]
                 Name = if ($isOrg) { $f[2] } else { ("$($f[4]) $($f[3])").Trim() }
                 Type = if ($isOrg) { 'Organization' } else { 'Individual' }
-                Taxonomy = Get-RmTaxonomyName $matchedCode
+                Taxonomy = if ($nameRescue) { Get-RmTaxonomyName (Get-RmIndexPrimaryCode $f) } else { Get-RmTaxonomyName $matchedCode }
                 City = $f[5]; State = $f[6]; Zip = $z5
                 Enumerated = if ($f[9] -match '^(\d{2})/(\d{2})/(\d{4})$') { "$($Matches[3])-$($Matches[1])-$($Matches[2])" } else { $f[9] }
                 # TRUE when therapy is the provider's PRIMARY taxonomy. A
@@ -1493,7 +1544,7 @@ function Find-RmClinic {
                 # slot is a real provider but NOT a comparable therapy
                 # practice — its inbound volume spans every service line.
                 PrimaryInScope = $primaryInScope
-                Presence = ''
+                Presence = $nameRescue
             }
         }
         # ---- Secondary practice locations --------------------------------
@@ -1966,11 +2017,12 @@ function Get-RmReferralMap {
             Presence        = if ($null -ne $_.PSObject.Properties['Presence']) { [string]$_.Presence } else { '' }
         }
         if ($null -ne $centerLoc) {
-            $cz = [string]$_.Zip
             $cents2 = Get-RmCentroids $CentroidPath
-            $row['DistanceMiles'] = if ($cz -match '^\d{5}$' -and $cents2.ContainsKey($cz)) {
-                Get-RmMilesBetween $centerLoc[0] $centerLoc[1] $cents2[$cz][0] $cents2[$cz][1]
-            } else { '' }
+            # Closest KNOWN location (row ZIP + registered secondary sites),
+            # so a multi-site provider's distance is to its nearest clinic,
+            # not to wherever it happens to be enrolled.
+            $dmin = Get-RmClosestSiteDistance -Npi $_.NPI -RowZip ([string]$_.Zip) -RefLoc $centerLoc -Cents $cents2
+            $row['DistanceMiles'] = if ($null -ne $dmin) { $dmin } else { '' }
         }
         $row['ReferralSources'] = if ($agg) { $agg.Sources } else { 0 }
         $row['SharedPatients']  = if ($agg) { $agg.Benes } else { 0 }
@@ -1980,6 +2032,13 @@ function Get-RmReferralMap {
         $secLoc = Get-RmSecondaryLocationCount $_.NPI
         $srcN = if ($agg) { $agg.Sources } else { 0 }
         $row['PracticeSites'] = if ($secLoc -gt 0) { $secLoc + 1 } else { 1 }
+        # Clinicians on the org's Care Compare roster under this NAME (all
+        # its locations combined); blank for individuals and for orgs the
+        # roster does not list.
+        $row['RosterSize'] = $(if ($_.Type -eq 'Organization') {
+            $rs = Get-RmCareCompareRosterSize $_.Name
+            if ($rs -gt 0) { $rs } else { '' }
+        } else { '' })
         $row['MultiSiteNPI'] = if ($secLoc -gt 0) { 'Yes (registry)' }
                                elseif ($srcN -ge $script:RmSingleSiteSourceCeiling) { 'Likely (scale)' }
                                else { '' }
@@ -1992,7 +2051,15 @@ function Get-RmReferralMap {
     } | Sort-Object -Property @{Expression = 'SharedPatients'; Descending = $true},
                               @{Expression = 'Name'; Descending = $false})
     $notYetEnumerated = @($clinicRows | Where-Object { $_.ExistedInDataYear -like 'No*' }).Count
-    $secondaryRows = @($clinicRows | Where-Object { $_.Presence }).Count
+    $rosterSized = @($clinicRows | Where-Object { $_.RosterSize -ne '' }).Count
+    $rosterNote = if ($rosterSized -gt 0) {
+        'ROSTER SIZE: distinct clinicians listed on Medicare Care Compare under that organization NAME - all of its locations combined, so a chain shows its national roster. Blank = an individual provider, or an organization Care Compare does not list (cash-pay and recently enrolled clinics are missing there).'
+    } else { $null }
+    $nameRescueRows = @($clinicRows | Where-Object { $_.Presence -like 'therapy-named*' }).Count
+    $nameRescueNote = if ($nameRescueRows -gt 0) {
+        "NAME-MATCHED PRACTICES: $nameRescueRows organization(s) in this list registered NO therapy taxonomy at all, but their legal or doing-business-as name says they are a PT/OT/SLP practice (most hold the legacy 'Specialist' code or a generic clinic code - measured nationwide, 469 such practices carried 785,074 patients in 2022). They are included and ranked, marked in the Presence column; facility types that merely mention therapy (hospitals, nursing, home health) are refused."
+    } else { $null }
+    $secondaryRows = @($clinicRows | Where-Object { $_.Presence -like 'secondary site*' }).Count
     $secondaryNote = if ($secondaryRows -gt 0) {
         "SECONDARY SITES: $secondaryRows provider(s) in this list are REGISTERED outside the searched area but operate a practice location inside it (from NPPES's secondary-practice-location file; marked in the Presence column with their registered city). Their referral volume is measured on the NPI, so it covers ALL of that provider's locations, not just the local one - use the Multi-site chains tab for per-location figures."
     } else { $null }
@@ -2046,6 +2113,8 @@ function Get-RmReferralMap {
     }
     $notes = @(Get-RmMethodologyNotes -Info $info -OrganizationsOnly:$OrganizationsOnly) + @(
         $(if ($secondaryNote) { $secondaryNote })
+        $(if ($nameRescueNote) { $nameRescueNote })
+        $(if ($rosterNote) { $rosterNote })
         $(if ($sibNote) { $sibNote })
         $(if ($coverageNote) { $coverageNote })
         $(if ($multiNote) { $multiNote })
@@ -2055,7 +2124,7 @@ function Get-RmReferralMap {
                 $d = Get-RmChainDetail $_.Name; "$($_.Name) ($($d.Npis) org NPIs in $($d.Cities) cities)" }) -join '; ') +
             $(if ($chained.Count -gt 3) { ', ...' }) + '.'
         })
-        $(if ($radiusZips) { "RADIUS SEARCH: providers were swept from the $($radiusZips.Count) ZIP code(s) whose US-Census area centroid lies within $RadiusMiles straight-line miles of ZIP $Zip's centroid. DistanceMiles is centroid-to-centroid, not driving distance; PO-box-only ZIPs (absent from the Census table) are not swept." })
+        $(if ($radiusZips) { "RADIUS SEARCH: providers were swept from the $($radiusZips.Count) ZIP code(s) whose US-Census area centroid lies within $RadiusMiles straight-line miles of ZIP $Zip's centroid. DistanceMiles is centroid-to-centroid, not driving distance, and for a multi-site provider it is measured to its CLOSEST known location (registered address or any secondary practice location); PO-box-only ZIPs (absent from the Census table) are not swept - measured nationwide that hides 0.5% of therapy NPIs from radius sweeps (an exact-ZIP or prefix search still finds them)." })
         $(if ($notYetEnumerated -gt 0) { '{0} of {1} providers found in this ZIP were issued their NPI after the {2} file''s service window ended, so they cannot appear in it (ExistedInDataYear = No).' -f $notYetEnumerated, $clinicRows.Count, $info.Year })
         $(if ($enrichNote) { $enrichNote })
     ) | Where-Object { $_ }
@@ -3532,9 +3601,9 @@ function Get-RmSourceAnalysis {
                 $rows.Add([pscustomobject]@{
                     NPI = $p.NPI; Name = $p.Name; Type = $p.Type
                     City = $p.City; State = $p.State; Zip = $pz
-                    DistanceMiles = if ($pz -match '^\d{5}$' -and $pracLoc -and $centroids.ContainsKey($pz)) {
-                        Get-RmMilesBetween $pracLoc[0] $pracLoc[1] $centroids[$pz][0] $centroids[$pz][1]
-                    } else { '' }
+                    DistanceMiles = $(
+                        $dmin = Get-RmClosestSiteDistance -Npi $p.NPI -RowZip $pz -RefLoc $pracLoc -Cents $centroids
+                        if ($null -ne $dmin) { $dmin } else { '' })
                     ReferralSources = $(if ($agg) { $agg.Sources } else { 0 })
                     SharedPatients  = $(if ($agg) { $agg.Benes } else { 0 })
                 })
@@ -3711,7 +3780,7 @@ function Get-RmSourceAnalysis {
         'CONCENTRATION: HHI = sum of squared percentage shares (0-10,000); above ~2,500 is highly concentrated — losing one relationship materially moves the total. Top-1/5/10 dependence reads the same risk directly. Both are computed on MEASURED (11+ patient) pairs only: sub-floor referrers are invisible, which inflates the measured shares, so true concentration is LOWER whenever many small sources exist — treat a high reading on a short source list with caution.'
         'Distances are straight-line miles between ZIP-area centroids (US Census) using TODAY''s NPPES practice addresses — a source that moved is measured where it is now.'
         $(if ($isHop) { 'REFERRAL-LAG PROFILE: average days from source visit to this practice''s visit, volume-weighted, over EXTERNAL referral sources only. Short lags look like referrals; 90+ days usually means co-occurring care (labs, hospitals), not referral flow.' })
-        $(if ($landscape) { "COMPETITIVE LANDSCAPE: peers are the NPPES-listed outpatient rehab providers (the same PT/OT/SLP taxonomy sweep the Referral map uses) whose registered - or, with the local NPPES index, secondary - practice location falls in the $($landscape.ZipCount) ZIP(s) within $($landscape.RadiusMiles) straight-line miles of ZIP $pracZip, ranked by inbound shared-patient volume on $($info.Label). Share of area volume = a provider's inbound volume over the SUM across all listed providers — share of measured referral VOLUME, not of patients." })
+        $(if ($landscape) { "COMPETITIVE LANDSCAPE: peers are the NPPES-listed outpatient rehab providers (the same PT/OT/SLP taxonomy sweep the Referral map uses) whose registered - or, with the local NPPES index, secondary - practice location falls in the $($landscape.ZipCount) ZIP(s) within $($landscape.RadiusMiles) straight-line miles of ZIP $pracZip, ranked by inbound shared-patient volume on $($info.Label). DistanceMiles is to each provider's CLOSEST known location (registered or secondary site). Share of area volume = a provider's inbound volume over the SUM across all listed providers — share of measured referral VOLUME, not of patients." })
         $(if ($landscape) { 'A practice''s volume is often SPLIT between its organization NPI and its therapists'' individual NPIs, so a group can rank below its true combined volume. Benchmark the org NPI and its key therapists separately for the full picture.' })
         $(if ($landscape -and $landscape.SecondaryOnlyExcluded -gt 0) { "COMPARABILITY: $($landscape.SecondaryOnlyExcluded) provider(s) in the radius list a therapy taxonomy only in a SECONDARY slot — typically hospitals and multi-specialty organizations. They are excluded from the ranking because their inbound volume spans every service line, not therapy, and including them would overstate the market and understate this practice's share. A provider whose primary is a NON-SPECIFIC code - generic 'Clinic/Center', 'Multi-Specialty Clinic', or the legacy 'Specialist' - but which also carries a real therapy taxonomy is NOT excluded: those registrations are how chains and therapy companies fill in forms (277 of Athletico's 426 clinics, Apex Physical Therapy, EmpowerMe), and dropping them hid top-5 competitors in some markets." })
         $(if ($landscapeNote) { $landscapeNote })
@@ -4081,55 +4150,125 @@ function Export-RmReferralMapHtml {
 __LEAFLET_CSS_BLOCK__
 __LEAFLET_JS_BLOCK__
 <style>
-  :root { --ink:#1c2b3a; --sub:#5b6b7a; --line:#dde3e9; --accent:#2c5f8a; }
+  /* Corporate palette: deep navy ink, bold cobalt accent, amber highlight.
+     Sharp edges (2px radii), strong contrast, responsive from phone to
+     desktop - wide tables scroll inside their card instead of breaking
+     the page. */
+  :root { --ink:#0f1f33; --sub:#4e5d6e; --line:#c9d3de; --accent:#0f5cad;
+          --accent-dark:#0a3f78; --amber:#b45309; --bg:#e9edf2; }
   * { box-sizing:border-box; }
-  body { margin:0; background:#eef1f4; color:var(--ink);
+  html { -webkit-text-size-adjust:100%; }
+  body { margin:0; background:var(--bg); color:var(--ink);
          font-family:"Segoe UI", -apple-system, "Helvetica Neue", Arial, sans-serif; }
-  .wrap { max-width:1180px; margin:0 auto; padding:18px 20px 30px; }
-  header { display:flex; flex-wrap:wrap; align-items:baseline; gap:8px 14px; margin-bottom:4px; }
-  header h1 { margin:0; font-size:21px; font-weight:600; letter-spacing:-.2px; }
-  .badge { background:var(--accent); color:#fff; font-size:11.5px; font-weight:600;
-           padding:3px 9px; border-radius:99px; white-space:nowrap; }
-  .sub { color:var(--sub); font-size:13px; margin:2px 0 14px; }
-  .stats { display:flex; flex-wrap:wrap; gap:12px; margin:0 0 14px; }
-  .stat { background:#fff; border:1px solid var(--line); border-radius:8px;
-          padding:10px 16px; min-width:150px; box-shadow:0 1px 2px rgba(16,32,48,.05); }
-  .stat b { display:block; font-size:20px; font-weight:650; letter-spacing:-.3px; }
-  .stat span { font-size:11.5px; color:var(--sub); text-transform:uppercase; letter-spacing:.4px; }
-  .card { background:#fff; border:1px solid var(--line); border-radius:8px;
-          box-shadow:0 1px 2px rgba(16,32,48,.05); overflow:hidden; margin-bottom:16px; }
-  #map { height:60vh; min-height:420px; }
-  .offline { padding:9px 14px; background:#fff6da; color:#6b5619; font-size:12.5px;
-             border-bottom:1px solid #eadfb6; display:none; }
-  .card h2 { margin:0; padding:12px 16px 10px; font-size:14.5px; font-weight:600; }
-  table { border-collapse:collapse; width:100%; font-size:12.8px; }
-  th, td { border-top:1px solid var(--line); padding:6px 14px; text-align:left; }
-  th { background:#f2f5f8; color:#33475c; font-weight:600; font-size:11.5px;
-       text-transform:uppercase; letter-spacing:.4px; border-top:none; }
-  tr:nth-child(even) td { background:#f8fafc; }
-  td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
-  td.mono { font-variant-numeric:tabular-nums; }
-  .tablenote { padding:8px 16px 12px; color:var(--sub); font-size:12px; }
-  details { margin:2px 0 0; }
-  summary { cursor:pointer; padding:12px 16px; font-size:14.5px; font-weight:600; }
-  .notes { font-size:12px; color:#4a5a68; line-height:1.55; margin:0; padding:0 20px 14px 34px; }
-  .notes li { margin-bottom:5px; }
-  footer { color:var(--sub); font-size:11.5px; margin-top:6px; }
-  .legend { background:#fff; padding:9px 12px; border-radius:6px;
+  .wrap { max-width:1120px; margin:0 auto; padding:0 22px 36px; }
+  header { display:flex; flex-wrap:wrap; align-items:center; gap:10px 16px;
+           background:linear-gradient(135deg, var(--accent-dark), var(--accent));
+           margin:0 -22px 14px; padding:20px 26px 18px;
+           border-bottom:4px solid var(--amber); }
+  header h1 { margin:0; color:#fff; font-size:23px; font-weight:700; letter-spacing:-.2px; }
+  .badge { background:#fff; color:var(--accent-dark); font-size:11.5px; font-weight:700;
+           padding:4px 12px; border-radius:2px; white-space:nowrap; letter-spacing:.4px; }
+  .sub { color:var(--sub); font-size:13.5px; margin:2px 0 16px; }
+  .stats { display:flex; flex-wrap:wrap; gap:12px; margin:0 0 18px; }
+  .stat { background:#fff; border:1px solid var(--line); border-top:3px solid var(--accent);
+          border-radius:2px; padding:12px 18px; min-width:150px; flex:1 1 150px;
+          box-shadow:0 1px 3px rgba(10,30,55,.10); }
+  .stat b { display:block; font-size:23px; font-weight:700; letter-spacing:-.4px; color:var(--accent-dark);
+            font-variant-numeric:tabular-nums; }
+  .stat span { font-size:10.5px; color:var(--sub); text-transform:uppercase; letter-spacing:.7px; font-weight:600; }
+  .stat.warn { border-top-color:#c0390f; }
+  .stat.warn b { color:#c0390f; }
+  .card { background:#fff; border:1px solid var(--line); border-radius:2px;
+          box-shadow:0 1px 3px rgba(10,30,55,.10); margin-bottom:18px; padding:0 0 8px;
+          overflow-x:auto; }
+  .card h2 { margin:0; padding:14px 18px 10px; font-size:13.5px; font-weight:700;
+             text-transform:uppercase; letter-spacing:.8px; color:var(--accent-dark);
+             border-bottom:2px solid var(--accent); }
+  .card .body { padding:10px 18px 8px; }
+  .duo { display:flex; flex-wrap:wrap; gap:18px; }
+  .duo > div { flex:1 1 460px; min-width:0; }
+  /* Chart SVGs only — scoped to .body so Leaflet's attribute-sized overlay
+     pane is untouched (a global svg rule collapsed it to 0x0 and made every
+     map circle invisible; found by probing the rendered geometry). */
+  .body svg { width:100%; height:auto; display:block; max-width:100%; }
+  .bar { fill:var(--accent); }
+  .blbl { font-size:12.5px; fill:#22364d; font-weight:600; }
+  .bval { font-size:11.5px; fill:#44566b; }
+  .dbig { font-size:26px; font-weight:700; fill:#0f1f33; }
+  .dsm { font-size:11px; fill:#44566b; }
+  .grid { stroke:#dfe6ed; stroke-width:1; }
+  .axlbl { font-size:10.5px; fill:#5f7186; }
+  .curve { fill:none; stroke:var(--accent); stroke-width:3; }
+  .curve2 { fill:none; stroke:var(--amber); stroke-width:2.5; }
+  .dot2 { fill:var(--amber); }
+  .lbl2 { font-size:10.5px; fill:#8a5410; font-weight:600; }
+  .bin { font-size:11.5px; fill:#ffffff; font-weight:700; }
+  .segKept { fill:#0f5cad; } .segNew { fill:#5a92c9; } .segLost { fill:#c3cdd8; }
+  .sub2 { margin:2px 0 0; padding:8px 18px 0; font-size:12.5px; font-weight:700; color:#22364d; }
+  td.up { color:#116b3f; font-weight:700; }
+  td.down { color:#c0390f; font-weight:700; }
+  .findings { font-size:13.5px; line-height:1.7; margin:2px 0 6px; padding-left:22px; }
+  .findings li { margin-bottom:6px; }
+  .findings li::marker { color:var(--accent); font-weight:700; }
+  .empty { font-size:13.5px; line-height:1.6; margin:2px 0 10px; color:#22364d; }
+  table { border-collapse:collapse; width:100%; font-size:12.6px; }
+  th, td { border-top:1px solid var(--line); padding:7px 12px; text-align:left; }
+  th { background:var(--accent-dark); color:#fff; font-weight:700; font-size:10.5px;
+       text-transform:uppercase; letter-spacing:.6px; border-top:none; white-space:nowrap; }
+  tr:nth-child(even) td { background:#f2f6fa; }
+  tr.you td { background:#dcebf8; font-weight:700; border-top:2px solid var(--accent); border-bottom:2px solid var(--accent); }
+  .youtag { background:var(--amber); color:#fff; font-size:9.5px; font-weight:700;
+            padding:2px 7px; border-radius:2px; vertical-align:1px; letter-spacing:.6px; }
+  .proftbl th { text-align:left; white-space:nowrap; width:220px; background:#f2f6fa; color:#22364d;
+                font-size:11px; vertical-align:top; padding:8px 12px; }
+  .proftbl td { font-size:12.5px; padding:8px 12px; }
+  .chain { color:var(--amber); font-weight:700; cursor:help; }
+  .barmuted { fill:#96abc0; }
+  #rm-map { height:52vh; min-height:380px; }
+  .offline { padding:9px 14px; background:#fff3cd; color:#6b4e0e; font-size:12.5px;
+             border-bottom:1px solid #e7d59a; display:none; }
+  .prac-pin { width:22px; height:22px; border-radius:50%; background:#c62828;
+              border:3px solid #fff; box-shadow:0 1px 6px rgba(0,0,0,.45); }
+  .legend { background:#fff; padding:9px 12px; border-radius:2px;
             box-shadow:0 1px 5px rgba(0,0,0,.25); font-size:12px; line-height:19px; }
   .legend i { width:12px; height:12px; display:inline-block; border-radius:50%;
               margin-right:6px; vertical-align:-2px; }
   .maptools { display:flex; flex-wrap:wrap; align-items:center; gap:8px;
-              padding:9px 16px; border-bottom:1px solid var(--line); background:#f7f9fb; }
-  .mtlabel { font-size:12px; color:var(--sub); text-transform:uppercase; letter-spacing:.4px; }
-  .mtbtn { font:inherit; font-size:12.5px; padding:4px 11px; border-radius:99px; cursor:pointer;
-           border:1px solid var(--line); background:#fff; color:#33475c; }
-  .mtbtn.active { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600; }
-  .mtchk { font-size:12.5px; color:#33475c; display:inline-flex; align-items:center; gap:5px; }
-  @media print { .maptools { display:none; } }
-  .prac-pin { width:22px; height:22px; border-radius:50%; background:#c62828;
-              border:3px solid #fff; box-shadow:0 1px 6px rgba(0,0,0,.45); }
-  @media print { #map { height:480px; } .badge { border:1px solid var(--accent); } }
+              padding:9px 16px; border-bottom:1px solid var(--line); background:#f2f6fa; }
+  .mtlabel { font-size:11px; color:var(--sub); text-transform:uppercase; letter-spacing:.6px; font-weight:700; }
+  .mtbtn { font:inherit; font-size:12.5px; padding:5px 12px; border-radius:2px; cursor:pointer;
+           border:1px solid var(--line); background:#fff; color:#22364d; font-weight:600; }
+  td.mono { font-variant-numeric:tabular-nums; }
+  td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
+  .mtbtn.active { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:700; }
+  .mtchk { font-size:12.5px; color:#22364d; display:inline-flex; align-items:center; gap:5px; }
+  .note { color:var(--sub); font-size:12px; }
+  .tablenote { padding:8px 18px 10px; color:var(--sub); font-size:12px; }
+  details { margin:0; } summary { cursor:pointer; padding:14px 18px; font-size:13.5px; font-weight:700;
+            text-transform:uppercase; letter-spacing:.8px; color:var(--accent-dark); }
+  .notes { font-size:12px; color:#435364; line-height:1.6; margin:0; padding:0 22px 14px 36px; }
+  .notes li { margin-bottom:5px; }
+  footer { color:var(--sub); font-size:11.5px; margin-top:6px; }
+  /* Tablet */
+  @media (max-width: 900px) {
+    .wrap { padding:0 14px 28px; }
+    header { margin:0 -14px 12px; padding:16px 18px 14px; }
+    .duo > div { flex:1 1 100%; }
+    .proftbl th { width:150px; white-space:normal; }
+  }
+  /* Phone */
+  @media (max-width: 620px) {
+    header h1 { font-size:19px; }
+    .stats { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+    .stat { min-width:0; padding:10px 12px; }
+    .stat b { font-size:19px; }
+    table { font-size:11.8px; }
+    th, td { padding:6px 8px; }
+    #rm-map { height:60vh; min-height:300px; }
+    .card h2 { font-size:12.5px; }
+  }
+  @media print { body { background:#fff; } .card { box-shadow:none; overflow:visible; }
+                 header { background:var(--accent-dark) !important; -webkit-print-color-adjust:exact; } }
 </style>
 </head>
 <body>
@@ -4964,89 +5103,125 @@ $lossRows
 __RM_LEAFLET_CSS__
 __RM_LEAFLET_JS__
 <style>
-  :root { --ink:#1c2b3a; --sub:#5b6b7a; --line:#dde3e9; --accent:#2c5f8a; }
+  /* Corporate palette: deep navy ink, bold cobalt accent, amber highlight.
+     Sharp edges (2px radii), strong contrast, responsive from phone to
+     desktop - wide tables scroll inside their card instead of breaking
+     the page. */
+  :root { --ink:#0f1f33; --sub:#4e5d6e; --line:#c9d3de; --accent:#0f5cad;
+          --accent-dark:#0a3f78; --amber:#b45309; --bg:#e9edf2; }
   * { box-sizing:border-box; }
-  body { margin:0; background:#eef1f4; color:var(--ink);
+  html { -webkit-text-size-adjust:100%; }
+  body { margin:0; background:var(--bg); color:var(--ink);
          font-family:"Segoe UI", -apple-system, "Helvetica Neue", Arial, sans-serif; }
-  .wrap { max-width:1080px; margin:0 auto; padding:20px 22px 34px; }
-  header { display:flex; flex-wrap:wrap; align-items:baseline; gap:8px 14px; }
-  header h1 { margin:0; font-size:22px; font-weight:650; letter-spacing:-.2px; }
-  .badge { background:var(--accent); color:#fff; font-size:11.5px; font-weight:600;
-           padding:3px 10px; border-radius:99px; white-space:nowrap; }
-  .sub { color:var(--sub); font-size:13px; margin:4px 0 16px; }
-  .stats { display:flex; flex-wrap:wrap; gap:12px; margin:0 0 16px; }
-  .stat { background:#fff; border:1px solid var(--line); border-radius:8px;
-          padding:11px 16px; min-width:148px; box-shadow:0 1px 2px rgba(16,32,48,.05); }
-  .stat b { display:block; font-size:20px; font-weight:650; letter-spacing:-.3px; }
-  .stat span { font-size:11px; color:var(--sub); text-transform:uppercase; letter-spacing:.4px; }
-  .stat.warn b { color:#a94420; }
-  .card { background:#fff; border:1px solid var(--line); border-radius:8px;
-          box-shadow:0 1px 2px rgba(16,32,48,.05); margin-bottom:16px; padding:0 0 8px; }
-  .card h2 { margin:0; padding:13px 18px 8px; font-size:14.5px; font-weight:600; }
-  .card .body { padding:4px 18px 8px; }
-  .duo { display:flex; flex-wrap:wrap; gap:16px; }
-  .duo > div { flex:1 1 460px; }
+  .wrap { max-width:1120px; margin:0 auto; padding:0 22px 36px; }
+  header { display:flex; flex-wrap:wrap; align-items:center; gap:10px 16px;
+           background:linear-gradient(135deg, var(--accent-dark), var(--accent));
+           margin:0 -22px 14px; padding:20px 26px 18px;
+           border-bottom:4px solid var(--amber); }
+  header h1 { margin:0; color:#fff; font-size:23px; font-weight:700; letter-spacing:-.2px; }
+  .badge { background:#fff; color:var(--accent-dark); font-size:11.5px; font-weight:700;
+           padding:4px 12px; border-radius:2px; white-space:nowrap; letter-spacing:.4px; }
+  .sub { color:var(--sub); font-size:13.5px; margin:2px 0 16px; }
+  .stats { display:flex; flex-wrap:wrap; gap:12px; margin:0 0 18px; }
+  .stat { background:#fff; border:1px solid var(--line); border-top:3px solid var(--accent);
+          border-radius:2px; padding:12px 18px; min-width:150px; flex:1 1 150px;
+          box-shadow:0 1px 3px rgba(10,30,55,.10); }
+  .stat b { display:block; font-size:23px; font-weight:700; letter-spacing:-.4px; color:var(--accent-dark);
+            font-variant-numeric:tabular-nums; }
+  .stat span { font-size:10.5px; color:var(--sub); text-transform:uppercase; letter-spacing:.7px; font-weight:600; }
+  .stat.warn { border-top-color:#c0390f; }
+  .stat.warn b { color:#c0390f; }
+  .card { background:#fff; border:1px solid var(--line); border-radius:2px;
+          box-shadow:0 1px 3px rgba(10,30,55,.10); margin-bottom:18px; padding:0 0 8px;
+          overflow-x:auto; }
+  .card h2 { margin:0; padding:14px 18px 10px; font-size:13.5px; font-weight:700;
+             text-transform:uppercase; letter-spacing:.8px; color:var(--accent-dark);
+             border-bottom:2px solid var(--accent); }
+  .card .body { padding:10px 18px 8px; }
+  .duo { display:flex; flex-wrap:wrap; gap:18px; }
+  .duo > div { flex:1 1 460px; min-width:0; }
   /* Chart SVGs only — scoped to .body so Leaflet's attribute-sized overlay
      pane is untouched (a global svg rule collapsed it to 0x0 and made every
      map circle invisible; found by probing the rendered geometry). */
-  .body svg { width:100%; height:auto; display:block; }
+  .body svg { width:100%; height:auto; display:block; max-width:100%; }
   .bar { fill:var(--accent); }
-  .blbl { font-size:12.5px; fill:#33475c; }
-  .bval { font-size:11.5px; fill:#5b6b7a; }
-  .dbig { font-size:26px; font-weight:650; fill:#1c2b3a; }
-  .dsm { font-size:11px; fill:#5b6b7a; }
-  .grid { stroke:#e3e9ee; stroke-width:1; }
-  .axlbl { font-size:10.5px; fill:#7b8794; }
-  .curve { fill:none; stroke:var(--accent); stroke-width:2.5; }
-  .curve2 { fill:none; stroke:#c98f3d; stroke-width:2; }
-  .dot2 { fill:#c98f3d; }
-  .lbl2 { font-size:10.5px; fill:#9a6d2c; }
-  .bin { font-size:11.5px; fill:#ffffff; font-weight:600; }
-  .segKept { fill:#2c5f8a; } .segNew { fill:#6f9bbd; } .segLost { fill:#c2ccd4; }
-  .sub2 { margin:2px 0 0; padding:6px 18px 0; font-size:12.5px; font-weight:600; color:#33475c; }
-  td.up { color:#1d6b45; font-weight:600; }
-  td.down { color:#a94420; font-weight:600; }
-  .findings { font-size:13.5px; line-height:1.65; margin:2px 0 6px; padding-left:22px; }
-  .findings li { margin-bottom:4px; }
-  .empty { font-size:13.5px; line-height:1.6; margin:2px 0 10px; color:#33475c; }
+  .blbl { font-size:12.5px; fill:#22364d; font-weight:600; }
+  .bval { font-size:11.5px; fill:#44566b; }
+  .dbig { font-size:26px; font-weight:700; fill:#0f1f33; }
+  .dsm { font-size:11px; fill:#44566b; }
+  .grid { stroke:#dfe6ed; stroke-width:1; }
+  .axlbl { font-size:10.5px; fill:#5f7186; }
+  .curve { fill:none; stroke:var(--accent); stroke-width:3; }
+  .curve2 { fill:none; stroke:var(--amber); stroke-width:2.5; }
+  .dot2 { fill:var(--amber); }
+  .lbl2 { font-size:10.5px; fill:#8a5410; font-weight:600; }
+  .bin { font-size:11.5px; fill:#ffffff; font-weight:700; }
+  .segKept { fill:#0f5cad; } .segNew { fill:#5a92c9; } .segLost { fill:#c3cdd8; }
+  .sub2 { margin:2px 0 0; padding:8px 18px 0; font-size:12.5px; font-weight:700; color:#22364d; }
+  td.up { color:#116b3f; font-weight:700; }
+  td.down { color:#c0390f; font-weight:700; }
+  .findings { font-size:13.5px; line-height:1.7; margin:2px 0 6px; padding-left:22px; }
+  .findings li { margin-bottom:6px; }
+  .findings li::marker { color:var(--accent); font-weight:700; }
+  .empty { font-size:13.5px; line-height:1.6; margin:2px 0 10px; color:#22364d; }
   table { border-collapse:collapse; width:100%; font-size:12.6px; }
-  th, td { border-top:1px solid var(--line); padding:6px 12px; text-align:left; }
-  th { background:#f2f5f8; color:#33475c; font-weight:600; font-size:11px;
-       text-transform:uppercase; letter-spacing:.4px; border-top:none; }
-  tr:nth-child(even) td { background:#f8fafc; }
-  tr.you td { background:#e4eef6; font-weight:600; }
-  .youtag { background:var(--accent); color:#fff; font-size:9.5px; font-weight:700;
-            padding:1px 6px; border-radius:99px; vertical-align:1px; letter-spacing:.5px; }
-  .proftbl th { text-align:left; white-space:nowrap; width:220px; color:#4A5560;
-                font-size:12px; vertical-align:top; padding:7px 12px; }
-  .proftbl td { font-size:12.5px; padding:7px 12px; }
-  .chain { color:#b26a00; font-weight:700; cursor:help; }
-  .barmuted { fill:#9db4c6; }
+  th, td { border-top:1px solid var(--line); padding:7px 12px; text-align:left; }
+  th { background:var(--accent-dark); color:#fff; font-weight:700; font-size:10.5px;
+       text-transform:uppercase; letter-spacing:.6px; border-top:none; white-space:nowrap; }
+  tr:nth-child(even) td { background:#f2f6fa; }
+  tr.you td { background:#dcebf8; font-weight:700; border-top:2px solid var(--accent); border-bottom:2px solid var(--accent); }
+  .youtag { background:var(--amber); color:#fff; font-size:9.5px; font-weight:700;
+            padding:2px 7px; border-radius:2px; vertical-align:1px; letter-spacing:.6px; }
+  .proftbl th { text-align:left; white-space:nowrap; width:220px; background:#f2f6fa; color:#22364d;
+                font-size:11px; vertical-align:top; padding:8px 12px; }
+  .proftbl td { font-size:12.5px; padding:8px 12px; }
+  .chain { color:var(--amber); font-weight:700; cursor:help; }
+  .barmuted { fill:#96abc0; }
   #rm-map { height:52vh; min-height:380px; }
-  .offline { padding:9px 14px; background:#fff6da; color:#6b5619; font-size:12.5px;
-             border-bottom:1px solid #eadfb6; display:none; }
+  .offline { padding:9px 14px; background:#fff3cd; color:#6b4e0e; font-size:12.5px;
+             border-bottom:1px solid #e7d59a; display:none; }
   .prac-pin { width:22px; height:22px; border-radius:50%; background:#c62828;
               border:3px solid #fff; box-shadow:0 1px 6px rgba(0,0,0,.45); }
-  .legend { background:#fff; padding:9px 12px; border-radius:6px;
+  .legend { background:#fff; padding:9px 12px; border-radius:2px;
             box-shadow:0 1px 5px rgba(0,0,0,.25); font-size:12px; line-height:19px; }
   .legend i { width:12px; height:12px; display:inline-block; border-radius:50%;
               margin-right:6px; vertical-align:-2px; }
   .maptools { display:flex; flex-wrap:wrap; align-items:center; gap:8px;
-              padding:9px 16px; border-bottom:1px solid var(--line); background:#f7f9fb; }
-  .mtlabel { font-size:12px; color:var(--sub); text-transform:uppercase; letter-spacing:.4px; }
-  .mtbtn { font:inherit; font-size:12.5px; padding:4px 11px; border-radius:99px; cursor:pointer;
-           border:1px solid var(--line); background:#fff; color:#33475c; }
-  .mtbtn.active { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600; }
-  .mtchk { font-size:12.5px; color:#33475c; display:inline-flex; align-items:center; gap:5px; }
-  @media print { .maptools { display:none; } }
-  td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
+              padding:9px 16px; border-bottom:1px solid var(--line); background:#f2f6fa; }
+  .mtlabel { font-size:11px; color:var(--sub); text-transform:uppercase; letter-spacing:.6px; font-weight:700; }
+  .mtbtn { font:inherit; font-size:12.5px; padding:5px 12px; border-radius:2px; cursor:pointer;
+           border:1px solid var(--line); background:#fff; color:#22364d; font-weight:600; }
   td.mono { font-variant-numeric:tabular-nums; }
+  td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
+  .mtbtn.active { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:700; }
+  .mtchk { font-size:12.5px; color:#22364d; display:inline-flex; align-items:center; gap:5px; }
+  .note { color:var(--sub); font-size:12px; }
   .tablenote { padding:8px 18px 10px; color:var(--sub); font-size:12px; }
-  details { margin:0; } summary { cursor:pointer; padding:13px 18px; font-size:14.5px; font-weight:600; }
-  .notes { font-size:12px; color:#4a5a68; line-height:1.55; margin:0; padding:0 22px 14px 36px; }
+  details { margin:0; } summary { cursor:pointer; padding:14px 18px; font-size:13.5px; font-weight:700;
+            text-transform:uppercase; letter-spacing:.8px; color:var(--accent-dark); }
+  .notes { font-size:12px; color:#435364; line-height:1.6; margin:0; padding:0 22px 14px 36px; }
   .notes li { margin-bottom:5px; }
-  footer { color:var(--sub); font-size:11.5px; margin-top:4px; }
-  @media print { body { background:#fff; } .card { box-shadow:none; } }
+  footer { color:var(--sub); font-size:11.5px; margin-top:6px; }
+  /* Tablet */
+  @media (max-width: 900px) {
+    .wrap { padding:0 14px 28px; }
+    header { margin:0 -14px 12px; padding:16px 18px 14px; }
+    .duo > div { flex:1 1 100%; }
+    .proftbl th { width:150px; white-space:normal; }
+  }
+  /* Phone */
+  @media (max-width: 620px) {
+    header h1 { font-size:19px; }
+    .stats { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+    .stat { min-width:0; padding:10px 12px; }
+    .stat b { font-size:19px; }
+    table { font-size:11.8px; }
+    th, td { padding:6px 8px; }
+    #rm-map { height:60vh; min-height:300px; }
+    .card h2 { font-size:12.5px; }
+  }
+  @media print { body { background:#fff; } .card { box-shadow:none; overflow:visible; }
+                 header { background:var(--accent-dark) !important; -webkit-print-color-adjust:exact; } }
 </style>
 </head>
 <body>
@@ -5317,6 +5492,7 @@ function Get-RmServiceProfile {
 
 function Get-RmNppesIndexPath { Join-Path $script:RmConfig.DataDir 'nppes-index.psv' }
 function Get-RmNppesLocIndexPath { Join-Path $script:RmConfig.DataDir 'nppes-locations.psv' }
+function Get-RmNppesOtherNamePath { Join-Path $script:RmConfig.DataDir 'nppes-othernames.psv' }
 function Get-RmChainIndexPath { Join-Path $script:RmConfig.DataDir 'chain-index.psv' }
 
 # A single outpatient therapy SITE rarely exceeds a few hundred distinct
@@ -5518,6 +5694,80 @@ function Get-RmSecondaryLocationZipTable {
     $script:RmLocZips
 }
 
+$script:RmOtherNames = $null
+function Get-RmOtherNameTable {
+    # NPI -> List of "doing business as" names (NPPES other-name file).
+    # 31.8% of therapy organizations trade under a DBA whose normalized form
+    # differs from the legal name (measured) - 'ADVANCED PHYSICAL THERAPY,
+    # LLC' IS an 'ATI Physical Therapy' clinic. Loaded once per process;
+    # absent file = empty table and every consumer degrades to legal names.
+    if ($null -ne $script:RmOtherNames) { return $script:RmOtherNames }
+    $t = @{}
+    $p = Get-RmNppesOtherNamePath
+    if (Test-Path -LiteralPath $p) {
+        foreach ($line in [System.IO.File]::ReadLines($p)) {
+            $i = $line.IndexOf('|')
+            if ($i -lt 1) { continue }
+            $n = $line.Substring(0, $i)
+            if (-not $t.ContainsKey($n)) { $t[$n] = New-Object System.Collections.Generic.List[string] }
+            $t[$n].Add($line.Substring($i + 1))
+        }
+    }
+    $script:RmOtherNames = $t
+    $t
+}
+
+$script:RmDacRoster = $null
+function Get-RmCareCompareRosterSize([string]$OrgName) {
+    # Distinct clinicians on Care Compare practicing under this organization
+    # NAME (all locations combined - same name-key the by-address view uses).
+    # 0 means "not listed on Care Compare", not "no staff": cash-pay and
+    # recently-enrolled clinics sit outside that roster.
+    if (-not $OrgName) { return 0 }
+    if ($null -eq $script:RmDacRoster) {
+        $p = Get-RmDacIndexPath
+        $script:RmDacRoster = if (Test-Path -LiteralPath $p) {
+            [RmEngine]::ScanDacRosterCounts($p, 0, 2)
+        } else { New-Object 'System.Collections.Generic.Dictionary[string,int]' }
+    }
+    $k = Get-RmOrgNameKey $OrgName
+    if ($k -and $script:RmDacRoster.ContainsKey($k)) { $script:RmDacRoster[$k] } else { 0 }
+}
+
+function Get-RmClosestSiteDistance {
+    # Distance from a reference point to a provider's CLOSEST known location:
+    # the row's own ZIP plus every registered secondary-location ZIP. Without
+    # this, a chain registered 20 miles out whose clinic sits 2 miles away
+    # reads as "20 miles" in competitor tables. Returns $null when nothing
+    # is locatable.
+    param([string]$Npi, [string]$RowZip, $RefLoc, $Cents)
+    if ($null -eq $RefLoc) { return $null }
+    $zips = New-Object System.Collections.Generic.List[string]
+    if ($RowZip) { $zips.Add($RowZip) }
+    $tbl = Get-RmSecondaryLocationZipTable
+    if ($tbl.ContainsKey($Npi)) { foreach ($z in ([string]$tbl[$Npi]).Split(';')) { $zips.Add($z) } }
+    $best = $null
+    foreach ($z in $zips) {
+        if (-not $z -or $z -notmatch '^\d{5}$' -or -not $Cents.ContainsKey($z)) { continue }
+        $d = Get-RmMilesBetween $RefLoc[0] $RefLoc[1] $Cents[$z][0] $Cents[$z][1]
+        if ($null -eq $best -or $d -lt $best) { $best = $d }
+    }
+    $best
+}
+
+function Test-RmTherapyPracticeName([string]$Name) {
+    # STRICT: the name must literally say it is a PT/OT/SLP practice, and
+    # must not be a facility type that merely mentions therapy. Used to
+    # rescue orgs that registered NO therapy taxonomy (measured: 469 such
+    # orgs carried 785,074 patients in 2022; most hold the legacy
+    # 'Specialist' code 174400000X).
+    if (-not $Name) { return $false }
+    $u = $Name.ToUpperInvariant()
+    if ($u -notmatch 'PHYSICAL THERAP|OCCUPATIONAL THERAP|SPEECH THERAP|SPEECH.LANGUAGE PATHOLOG') { return $false }
+    if ($u -match 'HOSPITAL|MEDICAL CENTER|HEALTH SYSTEM|NURSING|HOME HEALTH|HOME CARE|HOSPICE|SCHOOL|UNIVERSITY|COLLEGE|STAFFING|REGISTRY|INSURANCE|EQUIPMENT|SUPPLY|ACADEM') { return $false }
+    $true
+}
+
 function Get-RmIndexPrimaryCode([string[]]$f) {
     # Index layout: code_1 at 8, codes 2-15 at 10..23, Switch_1..15 at 24..38.
     # Returns the code whose switch is 'Y'; falls back to slot 1 when the
@@ -5663,8 +5913,30 @@ function Import-RmNppesBulk {
                 } finally { $zip2.Dispose() }
             }
         } catch { Write-Warning "Secondary practice locations could not be indexed (multi-site detection falls back to scale): $($_.Exception.Message)" }
+        # "Doing business as" names (othername_pfile) -> NPI|OtherName rows.
+        # A third of therapy orgs trade under a DBA that differs from the
+        # legal name; name searches match BOTH once this index exists.
+        $dbaRows = 0
+        try {
+            if ([System.IO.Path]::GetExtension($Path).ToLowerInvariant() -eq '.zip') {
+                $zip3 = [System.IO.Compression.ZipFile]::OpenRead($Path)
+                try {
+                    $one = @($zip3.Entries | Where-Object { $_.Name -match '^othername_pfile_[\d-]+\.csv$' } |
+                        Sort-Object Length -Descending)
+                    if ($one.Count) {
+                        $st3 = $one[0].Open()
+                        try {
+                            $onTmp = (Get-RmNppesOtherNamePath) + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
+                            $dbaRows = [RmEngine]::BuildRosterIndexFromStream($st3, $onTmp,
+                                @('NPI', 'Provider Other Organization Name'))
+                            Move-Item -LiteralPath $onTmp -Destination (Get-RmNppesOtherNamePath) -Force
+                        } finally { $st3.Dispose() }
+                    }
+                } finally { $zip3.Dispose() }
+            }
+        } catch { Write-Warning "Other-name (DBA) file could not be indexed (name searches match legal names only): $($_.Exception.Message)" }
         [pscustomobject]@{ Rows = $rows; SecondaryLocationRows = $locRows; Path = Get-RmNppesIndexPath
-            Message = "NPPES bulk index built: $('{0:N0}' -f $rows) providers$(if ($locRows -gt 0) { "; $('{0:N0}' -f $locRows) secondary-location records (area searches now also find practices registered elsewhere that treat locally)" }). Lookups now run locally (the live registry stays as fallback)." }
+            Message = "NPPES bulk index built: $('{0:N0}' -f $rows) providers$(if ($locRows -gt 0) { "; $('{0:N0}' -f $locRows) secondary-location records (area searches now also find practices registered elsewhere that treat locally)" })$(if ($dbaRows -gt 0) { "; $('{0:N0}' -f $dbaRows) doing-business-as names (name searches match brands AND legal names)" }). Lookups now run locally (the live registry stays as fallback)." }
     } finally {
         if ($tmpExtract -and (Test-Path -LiteralPath $tmpExtract)) { Remove-Item -LiteralPath $tmpExtract -Force }
     }
@@ -6007,6 +6279,39 @@ function Get-RmProviderFamily {
                 NPI = $f[0]; Name = $f[2]; FamilyKey = (Get-RmOrgNameKey $f[2])
                 City = $f[5]; State = $f[6]
                 Zip = $(if ($f[7].Length -ge 5) { $f[7].Substring(0, 5) } else { $f[7] })
+                MatchedVia = ''
+            }
+        }
+        # DBA pass: clinics often enroll under a holding/legal name while
+        # trading as the brand everyone searches for - 'ADVANCED PHYSICAL
+        # THERAPY, LLC' IS an ATI clinic, and a legal-name search misses it.
+        # The other-name index maps brand -> NPI; matched members join the
+        # family flagged with the DBA that matched, so nothing is silent.
+        $onPath = Get-RmNppesOtherNamePath
+        if (Test-Path -LiteralPath $onPath) {
+            $dbaHits = @{}
+            foreach ($line in @([RmEngine]::FindByOrgName($onPath, -1, 1, $m0.Regex.ToString(), $m0.Compact, $nearMiss))) {
+                $i = $line.IndexOf('|')
+                if ($i -lt 1) { continue }
+                $n0 = $line.Substring(0, $i)
+                if (-not $members.ContainsKey($n0) -and -not $dbaHits.ContainsKey($n0)) {
+                    $dbaHits[$n0] = $line.Substring($i + 1)
+                }
+            }
+            if ($dbaHits.Count -gt 0) {
+                $dbaWant = New-Object 'System.Collections.Generic.HashSet[string]'
+                foreach ($k in $dbaHits.Keys) { [void]$dbaWant.Add($k) }
+                foreach ($line in @([RmEngine]::ScanRosterIndex($idx, $dbaWant, 0))) {
+                    $f = $line.Split('|')
+                    if ($f.Count -lt 10 -or $f[1] -ne '2') { continue }
+                    if ($State -and $f[6] -ne $State.ToUpperInvariant()) { continue }
+                    $members[$f[0]] = [pscustomobject]@{
+                        NPI = $f[0]; Name = $f[2]; FamilyKey = (Get-RmOrgNameKey $f[2])
+                        City = $f[5]; State = $f[6]
+                        Zip = $(if ($f[7].Length -ge 5) { $f[7].Substring(0, 5) } else { $f[7] })
+                        MatchedVia = "DBA: $($dbaHits[$f[0]])"
+                    }
+                }
             }
         }
     } else {
@@ -6014,6 +6319,7 @@ function Get-RmProviderFamily {
             $members[$r.NPI] = [pscustomobject]@{
                 NPI = $r.NPI; Name = $r.Name; FamilyKey = Get-RmOrgNameKey $r.Name
                 City = $r.City; State = $r.State; Zip = $r.Zip
+                MatchedVia = ''
             }
         }
     }
@@ -6043,6 +6349,7 @@ function Get-RmProviderFamily {
                              elseif ($srcN -ge $script:RmSingleSiteSourceCeiling) { 'Likely (scale)' }
                              else { '' })
             Chain = Get-RmChainMark $m.Name
+            MatchedVia = $(if ($null -ne $m.PSObject.Properties['MatchedVia']) { [string]$m.MatchedVia } else { '' })
             FamilyKey = $m.FamilyKey
         }
     }

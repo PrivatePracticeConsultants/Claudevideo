@@ -175,3 +175,44 @@ Describe 'Malformed-file refusal' {
     }
 }
 
+Describe 'Radius (ZipList) searches' {
+    It 'sweeps several ZIPs through the live registry when the list is small' {
+        $pg = Get-PgGroupsInZip -ZipList @('77777', '10101') -AreaLabel '77777+5mi'
+        $pg.Zip | Should -Be '77777+5mi'
+        $pg.TherapistCount | Should -Be 3               # all fixture therapists sit in 77777
+        @($pg.Groups).Count | Should -Be 1
+        (@($pg.Notes) -join ' ') | Should -BeLike '*RADIUS SEARCH*live NPPES registry*'
+    }
+
+    It 'lists the in-area member NPIs on each group row (paste-ready)' {
+        $pg = Get-PgGroupsInZip -Zip 77777
+        $g = @($pg.Groups)[0]
+        $g.PSObject.Properties['TherapistNpisInZip'] | Should -Not -BeNullOrEmpty
+        $g.TherapistNpisInZip | Should -BeLike '*7011111111*'
+        $g.TherapistNpisInZip | Should -BeLike '*7022222222*'
+    }
+
+    It 'refuses a wide sweep without the local NPPES index, with plain guidance' {
+        $wide = @(1..31 | ForEach-Object { '{0:D5}' -f $_ })
+        { Get-PgGroupsInZip -ZipList $wide } | Should -Throw '*Import the NPPES bulk zip*'
+    }
+
+    It 'uses the local NPPES index for wide sweeps when available' {
+        Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'ReferralMap/ReferralMap.psm1') -Force
+        $idx = Join-Path $script:WorkDir 'mini-nppes-index.psv'
+        # index layout: npi|entity|org|last|first|city|state|zip|tax1|enum|tax2..tax15|switch1..15
+        $pad = ('|' * 14) + ('|' * 15)
+        Set-Content -Path $idx -Encoding ascii -Value @(
+            ('7011111111|1||MEMBERONE|JOSE|TESTVILLE|MO|777770000|225100000X|01/01/2010' + $pad)
+            ('7099999999|1||OUTSIDER|OTTO|ELSEWHERE|MO|111110000|225100000X|01/01/2010' + $pad)
+            ('7088888888|2|SOME ORG LLC|||TESTVILLE|MO|777770000|261QP2000X|01/01/2010' + $pad)
+        )
+        $wide = @('77777') + @(1..35 | ForEach-Object { '{0:D5}' -f $_ })
+        $pg = Get-PgGroupsInZip -ZipList $wide -NppesIndexPath $idx -AreaLabel '77777+100mi'
+        # only the in-area INDIVIDUAL therapist counts; the org and the
+        # out-of-area therapist do not
+        $pg.TherapistCount | Should -Be 1
+        (@($pg.Notes) -join ' ') | Should -BeLike '*RADIUS SEARCH*local NPPES index*'
+    }
+}
+
