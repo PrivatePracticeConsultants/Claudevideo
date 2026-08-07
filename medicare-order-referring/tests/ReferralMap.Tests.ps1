@@ -2158,12 +2158,22 @@ Describe 'Source analysis report' {
             $byNpi['8000000002'].Status | Should -Be 'Lost'
             $byNpi['8000000002'].Change | Should -Be -20
             $byNpi['8000000009'].Status | Should -Be 'New'
+            # Unenriched: no specialty is known, so nothing can be judged a
+            # therapy provider and every mover stays in the ranking.
             @($t.Gained)[0].SourceNPI | Should -Be '8000000009'   # +30 tops +15
             @($t.Lost)[0].SourceNPI | Should -Be '8000000002'
             # movers must be NAMED even when they sit outside a year's top 25
             $named = Get-RmSourceTrend -Npi 9000000001
-            @(@($named.Gained) | Where-Object SourceNPI -eq '8000000009')[0].SourceName |
+            @(@($named.Movers) | Where-Object SourceNPI -eq '8000000009')[0].SourceName |
                 Should -Be 'NEWCOMER IMAGING LLC'
+            # ...but gains/declines are REFERRAL relationships only: once the
+            # specialty is known, this rehab clinic (a competitor, not a
+            # referrer anyone wins) drops out of those two tables while
+            # staying in Movers and in every total.
+            @(@($named.Gained) | Where-Object SourceNPI -eq '8000000009').Count | Should -Be 0
+            @($named.Gained)[0].SourceNPI | Should -Be '8000000001'   # the family doctor leads instead
+            $named.MoversTherapyExcluded | Should -BeGreaterThan 0
+            (@($named.Notes) -join ' ') | Should -BeLike '*BIGGEST GAINS/DECLINES*'
         } finally {
             Remove-Item $y23, "$y23.rows" -Force -ErrorAction SilentlyContinue
             Set-RmActiveDataset -Source cms-pspp -Year 2015 | Out-Null   # restore state for later tests
@@ -2903,6 +2913,68 @@ Describe 'Outbound own-clinician fold + practice roster' {
         $html | Should -BeLike '*Outreach targets*'                # the missed-sources card
         $html | Should -BeLike '*DANA DOCTORTWO*'                  # the target is named
         $html | Should -Not -BeLike '*PAULA PEERSTAFF*'            # rival staff never appears as a target
+    }
+}
+
+Describe 'Client-deliverable report' {
+    # The report is handed to the practice owner, so it must (a) carry a
+    # cover masthead with the practice as the title and an optional
+    # prepared-by line, (b) turn the findings into owner-facing actions,
+    # (c) never name the commercial data licensor, and (d) stay fully
+    # self-contained.
+    BeforeAll {
+        $script:DelivSa = Get-RmSourceAnalysis -Npi 9000000001 -SkipCompetitors -CentroidPath $script:SaCsv
+        $script:DelivOut = Join-Path $script:WorkDir 'deliverable.html'
+        Export-RmSourceReportHtml -Analysis $script:DelivSa -Path $script:DelivOut `
+            -PreparedBy 'Mihama Advisors' | Out-Null
+        $script:DelivHtml = Get-Content $script:DelivOut -Raw
+    }
+
+    It 'leads with the practice name and the prepared-by line' {
+        $script:DelivHtml | Should -BeLike '*<h1>TEST REHAB CLINIC LLC</h1>*'
+        $script:DelivHtml | Should -BeLike '*Prepared for practice leadership*'
+        $script:DelivHtml | Should -BeLike '*Mihama Advisors*'
+        $script:DelivHtml | Should -BeLike '*Calendar 2015*'      # plain year, not a product name
+        $script:DelivHtml | Should -BeLike '*Confidential*'
+    }
+
+    It 'names the DATA but never the commercial licensor' {
+        foreach ($banned in 'CareSet', 'DocGraph', 'Hop Teaming') {
+            $script:DelivHtml | Should -Not -BeLike "*$banned*"
+        }
+        # ...while the underlying analysis keeps full provenance for the
+        # consultant's own records.
+        (@($script:DelivSa.Notes) -join ' ') | Should -BeLike '*CMS*'
+    }
+
+    It 'writes a Where-to-focus action list driven by the practice''s own numbers' {
+        $html2 = Get-Content (Join-Path $script:WorkDir 'ther-report.html') -Raw -ErrorAction SilentlyContinue
+        # the fixture practice is single-source enough to trigger the
+        # concentration action
+        $script:DelivHtml | Should -BeLike '*Where to focus*'
+        $script:DelivHtml | Should -BeLike '*class="focus"*'
+    }
+
+    It 'applies the Mihama palette and keeps the file self-contained' {
+        $script:DelivHtml | Should -BeLike '*#030b18*'      # navy
+        $script:DelivHtml | Should -BeLike '*#C8A96E*'      # gold
+        $script:DelivHtml | Should -BeLike '*#00C8E0*'      # cyan rule
+        $script:DelivHtml | Should -BeLike '*Cormorant Garamond*'
+        # No external LOADS. (A bare 'http://' would false-positive on the
+        # SVG namespace URI inside the inlined Leaflet bundle, which is an
+        # XML identifier, not a fetch - assert on the loading attributes.)
+        $script:DelivHtml | Should -Not -BeLike '*<script src*'
+        $script:DelivHtml | Should -Not -BeLike '*fonts.googleapis*'
+        $script:DelivHtml | Should -Not -BeLike '*<link *href="http*'
+        $script:DelivHtml | Should -Not -BeLike '*@import*'
+    }
+
+    It 'still renders without a prepared-by line' {
+        $out2 = Join-Path $script:WorkDir 'deliverable-nobrand.html'
+        Export-RmSourceReportHtml -Analysis $script:DelivSa -Path $out2 | Out-Null
+        $h = Get-Content $out2 -Raw
+        $h | Should -BeLike '*<h1>TEST REHAB CLINIC LLC</h1>*'
+        $h | Should -Not -BeLike '*Prepared by*'
     }
 }
 

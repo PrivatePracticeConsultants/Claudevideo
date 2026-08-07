@@ -3302,6 +3302,10 @@ function Get-RmSourceAnalysis {
         [switch]$SkipCompetitors,
         [string]$CentroidPath,
         [string]$CrosswalkPath,    # test override for the ZIP->county table
+        # Outreach targets must be close enough to actually visit: a
+        # prospect registered hundreds of miles away is a corporate NPI,
+        # not a call-sheet entry.
+        [ValidateRange(5, 250)][double]$OutreachRadiusMiles = 50,
         # Path to a current Order & Referring snapshot CSV. When given,
         # referrer-type sources (MD/DO, NP, PA, ...) are cross-checked
         # against it and vanished referrers are flagged as at-risk.
@@ -4073,16 +4077,23 @@ function Get-RmSourceAnalysis {
             # Individual PT/OT/SLP "sources" of a competitor are that
             # competitor's own clinicians (the same co-billing pattern this
             # analysis folds out of its own numbers), so they are dropped:
-            # nobody wins a referral from a rival's staff.
+            # nobody wins a referral from a rival's staff. A target must
+            # also be LOCAL: this is a call sheet, and live sampling turned
+            # up prospects registered 452 and 1,700 miles away (corporate
+            # NPIs whose clinicians treat locally). Candidates are taken
+            # deep enough that the distance filter cannot starve the list.
             if ($areaBySource.Count -gt 0) {
                 $missCand = @($areaBySource.GetEnumerator() |
                     Where-Object { -not $mergedBySrc.ContainsKey($_.Key) } |
                     Sort-Object -Property @{Expression = { $_.Value }; Descending = $true},
                                           @{Expression = { $_.Key }; Descending = $false} |
-                    Select-Object -First 40)
+                    Select-Object -First 150)
                 $missNpis = @($missCand | ForEach-Object { $_.Key } | Where-Object { -not $detail.ContainsKey($_) })
-                $missDetail = if ($missNpis.Count -gt 0) { Get-RmProviderDetail -Npi $missNpis } else { @{} }
+                # -RequireZip: a cached entry with no ZIP cannot be placed on
+                # the map, and an unplaceable prospect would be dropped below.
+                $missDetail = if ($missNpis.Count -gt 0) { Get-RmProviderDetail -Npi $missNpis -RequireZip } else { @{} }
                 $missKeep = New-Object System.Collections.Generic.List[object]
+                $missFar = 0; $missNoLoc = 0
                 foreach ($mc in $missCand) {
                     if ($missKeep.Count -ge 20) { break }
                     $d = if ($detail.ContainsKey($mc.Key)) { $detail[$mc.Key] }
@@ -4105,6 +4116,14 @@ function Get-RmSourceAnalysis {
                     # the data year - a retired practice, not a target).
                     if (-not $mName -or $mName -like '(NPI deactivated*' -or $mName -like '(lookup failed*') { continue }
                     $mz = if ($d -and $null -ne $d.PSObject.Properties['Zip'] -and ([string]$d.Zip) -match '^\d{5}$') { [string]$d.Zip } else { '' }
+                    $mDist = if ($mz -and $pracLoc -and $centroids.ContainsKey($mz)) {
+                        Get-RmMilesBetween $pracLoc[0] $pracLoc[1] $centroids[$mz][0] $centroids[$mz][1]
+                    } else { $null }
+                    # LOCAL ONLY. An unplaceable prospect is dropped too: a
+                    # call sheet the user cannot act on is worse than a
+                    # shorter one, and both drops are disclosed in the notes.
+                    if ($null -eq $mDist) { $missNoLoc++; continue }
+                    if ($mDist -gt $OutreachRadiusMiles) { $missFar++; continue }
                     $missKeep.Add([pscustomobject]@{
                         SourceNPI = $mc.Key
                         SourceName = if ($d) { [string]$d.Name } else { '' }
@@ -4112,9 +4131,7 @@ function Get-RmSourceAnalysis {
                         City = if ($d) { [string]$d.City } else { '' }
                         State = if ($d) { [string]$d.State } else { '' }
                         PatientsToCompetitors = [int]$mc.Value
-                        DistanceMiles = if ($mz -and $pracLoc -and $centroids.ContainsKey($mz)) {
-                            Get-RmMilesBetween $pracLoc[0] $pracLoc[1] $centroids[$mz][0] $centroids[$mz][1]
-                        } else { '' }
+                        DistanceMiles = $mDist
                     })
                 }
                 $missedRows = $missKeep.ToArray()
@@ -4172,7 +4189,10 @@ function Get-RmSourceAnalysis {
         })
         $(if (@($missedRows).Count) {
             $msPat = 0; foreach ($ms in $missedRows) { $msPat += [int]$ms.PatientsToCompetitors }
-            "OUTREACH TARGETS: the $(@($missedRows).Count) biggest referrers feeding comparable providers within $CompetitorRadiusMiles miles with NO measured flow into this practice carry $('{0:N0}' -f $msPat) patients to competitors in $($info.Year). Individual PT/OT/SLP 'sources' of a competitor are its own clinicians, and therapy ORGANIZATIONS are rivals (often a chain's org NPI co-billing with its clinics) - both are excluded; rival relationships appear in the competitive landscape instead. Pairs under 11 patients are invisible, so 'no measured flow' can also mean 'fewer than 11 patients came here' - treat the list as prospecting priorities, not proof of zero relationship."
+            "OUTREACH TARGETS: the $(@($missedRows).Count) biggest referrers feeding comparable providers within $CompetitorRadiusMiles miles with NO measured flow into this practice carry $('{0:N0}' -f $msPat) patients to competitors in $($info.Year). Only prospects whose registered practice address is within $([int]$OutreachRadiusMiles) miles of this practice are listed - a referrer registered further away is a corporate/HQ address, not somewhere to visit" +
+            $(if ($missFar -gt 0 -or $missNoLoc -gt 0) {
+                " ($missFar candidate(s) were dropped as too far$(if ($missNoLoc -gt 0) { ", $missNoLoc more had no locatable practice ZIP" }))" }) + ". " +
+            "Individual PT/OT/SLP 'sources' of a competitor are its own clinicians, and therapy ORGANIZATIONS are rivals (often a chain's org NPI co-billing with its clinics) - both are excluded; rival relationships appear in the competitive landscape instead. Pairs under 11 patients are invisible, so 'no measured flow' can also mean 'fewer than 11 patients came here' - treat the list as prospecting priorities, not proof of zero relationship."
         })
         $(if ($rosterRows.Count) { "PRACTICE ROSTER (Care Compare): $($rosterRows.Count) clinician(s) are listed under this practice in Medicare Care Compare today - matched by practice name, then expanded to everyone sharing the same group-enrollment id (org_pac_id). This is TODAY's roster: staff who left are absent even though their historical volume appears above, and cash-pay or non-Medicare clinicians never appear. If the location column shows an unexpected city, a same-named practice elsewhere matched too - read those rows with care." })
         $(if ($npiList.Count -gt 1) { "COMBINED ANALYSIS: inbound volume is merged across $($npiList.Count) NPIs ($($npiList -join ', ')). A source feeding several of them counts ONCE with summed volume; patient flows BETWEEN these NPIs are excluded as internal handoffs. Geography and the competitive radius are centered on the primary NPI ($primary)." })
@@ -4239,6 +4259,7 @@ function Get-RmSourceAnalysis {
         OutboundRawPatients = $(  $orp = 0; foreach ($ov in $outBySrc.Values) { $orp += [int]$ov.N }; $orp )
         OutboundRawDestinations = $outBySrc.Count
         MissedSources = @($missedRows)    # area referrers with no flow into this practice
+        OutreachRadiusMiles = $OutreachRadiusMiles   # how far a prospect may sit and still be listed
         AtRiskSources = @($atRisk)        # referrer-type sources gone from the O&R roster
         Competitive  = $landscape     # $null when skipped or the sweep failed
         Trend        = $null          # filled by Add-RmSourceTrend
@@ -4424,6 +4445,18 @@ function Get-RmSourceTrend {
     }
     $movers = @($movers | Sort-Object -Property @{Expression = 'Change'; Descending = $true},
                                                 @{Expression = 'SourceNPI'; Descending = $false})
+    # Biggest gains/declines are a REFERRAL-RELATIONSHIP story, so therapy
+    # itself is filtered out of them: an individual PT/OT/SLP is the
+    # practice's own (or a rival's) clinician co-billing, and a therapy
+    # clinic is a competitor - neither is a referral you win or lose by
+    # working the relationship. Rows with no specialty on hand (an
+    # unenriched run) are kept rather than guessed at.
+    $moverDrop = 'PHYSICAL THERAP|OCCUPATIONAL THERAP|SPEECH.LANGUAGE PATHOLOG|SPEECH THERAP|REHABILITATION'
+    $moversRel = @($movers | Where-Object {
+        $sp = ([string]$_.SourceSpecialty).ToUpperInvariant()
+        -not ($sp -and $sp -match $moverDrop)
+    })
+    $moversDropped = @($movers).Count - @($moversRel).Count
 
     $firstRow = $rows[0]; $lastRow = $rows[$rows.Count - 1]
     $volChangePct = if ($firstRow.SharedPatients -gt 0) {
@@ -4447,6 +4480,7 @@ function Get-RmSourceTrend {
         $(if ($gapPairs.Count) { "IMPORT GAP: the imported years are not consecutive ($($gapPairs -join ', ')). Retention/New/Lost are blank after a gap - churn measured across several years is not comparable to annual churn. Import the in-between years to fill them in." })
         'A source "lost" may simply have fallen under the 11-patient privacy floor rather than stopped referring — treat small movements as noise and read the direction of the whole base.'
         'Medicare FFS only: Medicare Advantage enrollment grew over these years, moving patients OUT of this data. A gentle decline can reflect that shift rather than lost referrals; compare against the area trend before concluding.'
+        $(if ($moversDropped -gt 0) { "BIGGEST GAINS/DECLINES cover REFERRAL relationships only: $moversDropped therapy provider(s) that moved between $firstY and $lastY are excluded from those two tables - an individual PT/OT/SLP is a clinician co-billing (the practice's own or a rival's) and a therapy clinic is a competitor, so neither is a referral won or lost by working the relationship. They remain in the full Movers list and in every total." })
         'OUTBOUND COLUMNS: OutboundPatients/OutboundDestinations are the RAW onward flow (everyone this practice shared patients to, including its own therapists) measured in the same pass. A blank means that year''s scan was reused from an older analysis that did not carry outbound totals - re-run to fill it.'
         'The CMS 2015 FOIA file is intentionally excluded: a different (~8-month) window and methodology, not on the same scale.'
         $(if ($leadingZero.Count) { "NO MEASURED VOLUME IN $($leadingZero -join ', '): the practice may not have been enumerated or billing Medicare yet in those years, or every pair it had fell under the 11-patient floor. Growth is therefore also reported from $activeFrom, the first year with measured volume." })
@@ -4461,10 +4495,12 @@ function Get-RmSourceTrend {
         VolumeChangePct = $volChangePct
         ActiveFromYear  = $activeFrom          # first year with measured volume
         ActiveChangePct = $activeChangePct     # growth measured from that year
-        Movers       = $movers
-        Gained       = @($movers | Where-Object { $_.Change -gt 0 } | Select-Object -First 10)
-        Lost         = @($movers | Where-Object { $_.Change -lt 0 } |
+        Movers       = $movers            # every source, therapy included
+        # Gained/Lost are the RELATIONSHIP movers: therapy providers excluded.
+        Gained       = @($moversRel | Where-Object { $_.Change -gt 0 } | Select-Object -First 10)
+        Lost         = @($moversRel | Where-Object { $_.Change -lt 0 } |
                             Sort-Object Change | Select-Object -First 10)
+        MoversTherapyExcluded = $moversDropped
         Notes        = @($notes)
     }
 }
@@ -4861,10 +4897,31 @@ function Export-RmSourceReportHtml {
         [object]$Provider,          # identity: Name/Specialty/City/State
         [string]$EligibilityLine,   # the Order & Referring status sentence
         [object[]]$Groups,          # practice-group memberships
-        [object[]]$Outbound         # onward destinations (who they send to)
+        [object[]]$Outbound,        # onward destinations (who they send to)
+        # Consulting firm / author shown on the masthead and footer of this
+        # client-facing deliverable. Blank leaves the branding off.
+        [string]$PreparedBy
     )
     $a = $Analysis
     function _h([string]$t) { [System.Net.WebUtility]::HtmlEncode($t) }
+    # CLIENT DELIVERABLE: this document is handed to the practice owner, so
+    # it names the DATA (Medicare shared-patient claims, and the year) but
+    # not the commercial licensor the consultant buys it from. Nothing is
+    # fabricated - the vintage, the methodology and every limitation stay
+    # exactly as measured. The CSV sidecars and the app's own notes keep
+    # the full provenance for the consultant's records.
+    function _client([string]$t) {
+        if (-not $t) { return $t }
+        $o = $t -replace '(?i)\bDocGraph\s+Hop\s+Teaming\b', 'Medicare shared-patient data'
+        $o = $o -replace '(?i)\bHop\s+Teaming\b', 'Medicare shared-patient data'
+        $o = $o -replace '(?i)\bCareSet\s+Systems\b', 'the licensed data provider'
+        $o = $o -replace '(?i)\bCareSet''s\b', "the data provider's"
+        $o = $o -replace '(?i)\bCareSet\b', 'the licensed data provider'
+        $o = $o -replace '(?i)\bDocGraph\b', 'the licensed data provider'
+        $o -replace '\s{2,}', ' '
+    }
+    # The masthead badge: the plain calendar year, never the product name.
+    $yearBadge = if ($a.PSObject.Properties['Year'] -and $a.Year) { "Calendar $($a.Year)" } else { _client ([string]$a.Label) }
     # With no measured inbound volume every source-side chart would be an
     # empty box and every derived metric meaningless; the report explains the
     # situation instead of rendering blanks that look broken.
@@ -5055,9 +5112,10 @@ function Export-RmSourceReportHtml {
         }) -join "`n"
         $mTot = 0; foreach ($ms in $missList) { $mTot += [int]$ms.PatientsToCompetitors }
         $mRad = if ($comp) { $comp.RadiusMiles } else { 10 }
+        $mOutRad = if ($a.PSObject.Properties['OutreachRadiusMiles']) { [int]$a.OutreachRadiusMiles } else { 50 }
         $outreachHtml = @"
-<div class="card"><h2>Outreach targets &mdash; area referrers not feeding this practice</h2>
-<div class="body"><p>The $(@($missList).Count) biggest referrers sending patients to comparable providers within $mRad miles with <b>no measured flow into this practice</b>: $('{0:N0}' -f $mTot) patients went from them to competitors in $($a.Year). Competitors' own PT/OT/SLP clinicians are excluded &mdash; nobody wins a referral from a rival's staff. Pairs under 11 patients are invisible, so "no measured flow" can also mean "fewer than 11 came here": treat this as a prospecting priority list, not proof of zero relationship.</p></div>
+<div class="card"><h2>Outreach targets &mdash; local referrers not sending you patients</h2>
+<div class="body"><p>These $(@($missList).Count) practices sent <b>$('{0:N0}' -f $mTot) patients to other therapy providers</b> near you in $($a.Year), and none measurably to you. Every one sits within <b>$mOutRad miles</b> of your practice, so each is somewhere you could realistically visit &mdash; this is a call list, ranked by the size of the opportunity. Rival therapy practices and their own clinicians are left out, because nobody wins a referral from a competitor's staff. One caveat: referral pairs under 11 patients are hidden by Medicare privacy rules, so "none measurably to you" can also mean "fewer than 11 came your way."</p></div>
 <table>
   <tr><th>NPI</th><th>Referrer</th><th>Specialty</th><th>Location</th><th class="num">Miles</th><th class="num">Patients to competitors</th></tr>
   $mRows
@@ -5582,7 +5640,53 @@ $lossRows
                 'No other provider in the area shows measured inbound volume (pairs under 11 patients are excluded from the data).'
             } })
     ) | Where-Object { $_ }
-    $findingsHtml = (@($findings) | ForEach-Object { '<li>' + (_h ([string]$_)) + '</li>' }) -join "`n"
+    $findingsHtml = (@($findings) | ForEach-Object { '<li>' + (_h (_client ([string]$_))) + '</li>' }) -join "`n"
+
+    # ---- Where to focus: the findings turned into owner-facing actions ----
+    # Every item is driven by this practice's own measured numbers; an item
+    # that does not apply simply is not written (no filler advice).
+    $missListF = if ($a.PSObject.Properties['MissedSources']) { @($a.MissedSources) } else { @() }
+    $riskListF = if ($a.PSObject.Properties['AtRiskSources']) { @($a.AtRiskSources) } else { @() }
+    # Precomputed: an `if` expression cannot be passed straight in as a
+    # function ARGUMENT (PowerShell parses the `if` as a command name).
+    $s1Name = if ($s1) { if ($s1.SourceName) { _h ([string]$s1.SourceName) } else { "NPI $($s1.SourceNPI)" } } else { '' }
+    $actions = @(
+        $(if (@($riskListF).Count) {
+            $arp = 0; foreach ($ar in $riskListF) { $arp += [int]$ar.SharedPatients }
+            $n1 = @($riskListF | Sort-Object SharedPatients -Descending | Select-Object -First 1)[0]
+            "<b>Confirm $(@($riskListF).Count) referring provider$(if (@($riskListF).Count -ne 1) { 's are' } else { ' is' }) still able to refer.</b> They accounted for $('{0:N0}' -f $arp) of your measured patients in $($a.Year), and none appears on Medicare's current order-and-referring list &mdash; starting with $(_h ([string]$n1.SourceName)). Retirement or a lapsed enrollment is the usual reason. Medicare claims for therapy they refer today would be denied, so verify before the next episode is billed."
+        })
+        $(if (@($missListF).Count) {
+            $mp = 0; foreach ($ms in $missListF) { $mp += [int]$ms.PatientsToCompetitors }
+            $m1 = @($missListF)[0]
+            $mr = if ($a.PSObject.Properties['OutreachRadiusMiles']) { [int]$a.OutreachRadiusMiles } else { 50 }
+            "<b>Work the outreach list &mdash; $('{0:N0}' -f $mp) patients are going elsewhere.</b> $(@($missListF).Count) practices within $mr miles sent that volume to other therapy providers in $($a.Year) and nothing measurable to you. The largest, $(_h ([string]$m1.SourceName)) ($(_h ([string]$m1.SourceSpecialty))), is $($m1.DistanceMiles) miles away and sent $('{0:N0}' -f [int]$m1.PatientsToCompetitors). Start there."
+        })
+        $(if ($hasVolume -and $a.HHI -ge 2500 -and $s1) {
+            "<b>Reduce dependence on your largest referrer.</b> $s1Name alone accounts for $($s1.PctOfVolume)% of your referral volume and your top five for $($a.Top5Pct)%. At this concentration (HHI $('{0:N0}' -f $a.HHI)), losing one relationship materially moves the practice. Protect it, and add depth from the outreach list."
+        } elseif ($hasVolume -and $a.Top5Pct -ge 60 -and $s1) {
+            "<b>Watch your top-five concentration.</b> Five referrers account for $($a.Top5Pct)% of measured volume, led by $s1Name at $($s1.PctOfVolume)%. That is a manageable but real dependence: keep those relationships warm and broaden the base."
+        })
+        $(if (@($therList).Count -and $therPat -gt 0) {
+            $vst = @($therList | Where-Object { $_.Staff -like 'VERIFIED*' }).Count
+            $gone = @($therList | Where-Object { $_.Staff -like '*now at*' })
+            "<b>$('{0:N0}' -f $therPat) patients came through your own clinicians, not outside referrals.</b> That volume is your existing caseload billed under $(@($therList).Count) individual therapist NPI$(if (@($therList).Count -ne 1) { 's' }) ($vst confirmed on your current Medicare roster), so it is counted in your patient base and kept out of the referral ranking." +
+            $(if (@($gone).Count) { " $(@($gone).Count) of those clinician$(if (@($gone).Count -ne 1) { 's' }) now bill$(if (@($gone).Count -eq 1) { 's' }) under another practice &mdash; worth knowing where that volume went." })
+        })
+        $(if ($tr -and @($tr.Years).Count -ge 2 -and $tr.VolumeChangePct -ne '' -and [double]$tr.VolumeChangePct -lt -5) {
+            "<b>Measured referral volume is down $([math]::Abs($tr.VolumeChangePct))% since $($tr.FirstYear).</b> Read it alongside the retention columns: a decline driven by lost referrers is an outreach problem, while one spread evenly across kept relationships usually reflects Medicare Advantage growth pulling patients out of this data entirely."
+        } elseif ($tr -and @($tr.Years).Count -ge 2 -and $tr.VolumeChangePct -ne '' -and [double]$tr.VolumeChangePct -gt 5) {
+            "<b>Measured referral volume is up $($tr.VolumeChangePct)% since $($tr.FirstYear).</b> The year-over-year table shows whether that came from new referrers or deeper volume from existing ones &mdash; protect whichever is carrying the growth."
+        })
+        $(if ($comp -and $comp.Rank -and $a.TotalPatients -gt 0) {
+            "<b>You rank #$($comp.Rank) of $('{0:N0}' -f $comp.ProviderCount) therapy providers within $($comp.RadiusMiles) miles</b>, holding $($comp.SharePct)% of the area's measured referral volume. The competitive table shows who sits above you and where their volume comes from."
+        })
+    ) | Where-Object { $_ }
+    $actionsHtml = if (@($actions).Count) {
+        '<div class="card"><h2>Where to focus</h2><div class="body"><ol class="focus">' +
+        ((@($actions) | ForEach-Object { '<li>' + $_ + '</li>' }) -join "`n") +
+        '</ol></div></div>'
+    } else { '' }
 
     # ---- Tables ----------------------------------------------------------
     # Older analysis objects predate the SharedBack / Eligibility columns.
@@ -5609,7 +5713,7 @@ $lossRows
     ) | Where-Object { $_ }) -join ' '
     $waitTh = if ($a.IsHop) { '<th class="num">Avg lag (days)</th>' } else { '' }
     $allNotes = @($a.Notes) + $(if ($tr) { @('') + @($tr.Notes) } else { @() })
-    $notesHtml = (@($allNotes) | Where-Object { $_ } | ForEach-Object { '<li>' + (_h ([string]$_)) + '</li>' }) -join "`n"
+    $notesHtml = (@($allNotes) | Where-Object { $_ } | ForEach-Object { '<li>' + (_h (_client ([string]$_))) + '</li>' }) -join "`n"
     $generated = (Get-Date).ToString('MMMM d, yyyy')
 
     $html = @"
@@ -5622,135 +5726,182 @@ $lossRows
 __RM_LEAFLET_CSS__
 __RM_LEAFLET_JS__
 <style>
-  /* Corporate palette: deep navy ink, bold cobalt accent, amber highlight.
-     Sharp edges (2px radii), strong contrast, responsive from phone to
-     desktop - wide tables scroll inside their card instead of breaking
-     the page. */
-  :root { --ink:#0f1f33; --sub:#4e5d6e; --line:#c9d3de; --accent:#0f5cad;
-          --accent-dark:#0a3f78; --amber:#b45309; --bg:#e9edf2; }
+  /* Deliverable design system - client-facing.
+     Palette: Mihama navy #030b18 / mid-navy #071528, gold #C8A96E,
+     cyan #00C8E0, page white #F8F9FC. Serif display (Cormorant Garamond
+     with a Georgia fallback - no webfonts, the file must stay
+     self-contained), condensed letter-spaced sans for eyebrows and table
+     heads. Hairline rules, generous whitespace, sharp corners. Wide
+     tables scroll inside their own card and never break the page. */
+  :root { --navy:#030b18; --navy-mid:#071528; --gold:#C8A96E; --gold-dk:#8a6f3c;
+          --cyan:#00C8E0; --teal-dk:#0b7c8c; --white:#F8F9FC;
+          --ink:#0b1727; --body-c:#33404f; --sub:#65727f; --line:#e2e6ec; --hair:#eef1f5;
+          --warn:#9c3b34; --tint:#f3f5f8;
+          --serif:"Cormorant Garamond", Georgia, "Times New Roman", serif;
+          --cond:"Barlow Condensed", "Segoe UI Semibold", "Segoe UI", Arial, sans-serif;
+          --sans:"Segoe UI", -apple-system, "Helvetica Neue", Arial, sans-serif; }
   * { box-sizing:border-box; }
   html { -webkit-text-size-adjust:100%; }
-  body { margin:0; background:var(--bg); color:var(--ink);
-         font-family:"Segoe UI", -apple-system, "Helvetica Neue", Arial, sans-serif; }
-  .wrap { max-width:1120px; margin:0 auto; padding:0 22px 36px; }
-  header { display:flex; flex-wrap:wrap; align-items:center; gap:10px 16px;
-           background:linear-gradient(135deg, var(--accent-dark), var(--accent));
-           margin:0 -22px 14px; padding:20px 26px 18px;
-           border-bottom:4px solid var(--amber); }
-  header h1 { margin:0; color:#fff; font-size:23px; font-weight:700; letter-spacing:-.2px; }
-  .badge { background:#fff; color:var(--accent-dark); font-size:11.5px; font-weight:700;
-           padding:4px 12px; border-radius:2px; white-space:nowrap; letter-spacing:.4px; }
-  .sub { color:var(--sub); font-size:13.5px; margin:2px 0 16px; }
-  .stats { display:flex; flex-wrap:wrap; gap:12px; margin:0 0 18px; }
-  .stat { background:#fff; border:1px solid var(--line); border-top:3px solid var(--accent);
-          border-radius:2px; padding:12px 18px; min-width:150px; flex:1 1 150px;
-          box-shadow:0 1px 3px rgba(10,30,55,.10); }
-  .stat b { display:block; font-size:23px; font-weight:700; letter-spacing:-.4px; color:var(--accent-dark);
-            font-variant-numeric:tabular-nums; }
-  .stat span { font-size:10.5px; color:var(--sub); text-transform:uppercase; letter-spacing:.7px; font-weight:600; }
-  .stat.warn { border-top-color:#c0390f; }
-  .stat.warn b { color:#c0390f; }
-  .card { background:#fff; border:1px solid var(--line); border-radius:2px;
-          box-shadow:0 1px 3px rgba(10,30,55,.10); margin-bottom:18px; padding:0 0 8px;
+  body { margin:0; background:var(--white); color:var(--body-c); hyphens:none;
+         font-family:var(--sans); font-kerning:normal; text-rendering:optimizeLegibility; }
+  /* Wrapping discipline: prose balances and never splits a word mid-line;
+     long names/URLs in cells wrap instead of stretching the table. */
+  p, li { text-wrap:pretty; overflow-wrap:break-word; }
+  h1, h2, h3, .stat span, .kicker { text-wrap:balance; }
+  td { overflow-wrap:anywhere; }
+  .wrap { max-width:1120px; margin:0 auto; padding:0 26px 46px; }
+  header { display:block; background:var(--navy); color:#fff;
+           margin:0 -26px 0; padding:38px 34px 30px; }
+  .mast-top { display:flex; flex-wrap:wrap; align-items:baseline; justify-content:space-between;
+              gap:8px 18px; margin-bottom:18px; }
+  .kicker { font-family:var(--cond); color:var(--gold); font-size:12.5px; font-weight:600;
+            letter-spacing:.42em; text-transform:uppercase; }
+  header h1 { margin:0 0 10px; color:#fff; font-family:var(--serif); font-size:38px;
+              line-height:1.14; font-weight:500; letter-spacing:.02em; }
+  .badge { font-family:var(--cond); border:1px solid rgba(200,169,110,.55); color:var(--gold);
+           font-size:11px; font-weight:400; padding:4px 13px; white-space:nowrap;
+           letter-spacing:.22em; text-transform:uppercase; }
+  .rule { height:2px; background:linear-gradient(90deg, var(--cyan), var(--gold)); margin:0 -34px 18px; }
+  .prep { color:rgba(248,249,252,.62); font-size:12.5px; letter-spacing:.06em; font-family:var(--cond);
+          text-transform:uppercase; }
+  .prep b { color:var(--white); font-weight:600; }
+  .sub { color:var(--sub); font-size:13px; margin:0 -26px 24px; padding:13px 34px;
+         background:#fff; border-bottom:1px solid var(--line); letter-spacing:.02em; }
+  .stats { display:flex; flex-wrap:wrap; margin:0 0 24px; background:#fff;
+           border:1px solid var(--line); border-top:2px solid var(--navy); }
+  .stat { padding:19px 22px 16px; min-width:150px; flex:1 1 150px; border-left:1px solid var(--hair); }
+  .stat:first-child { border-left:none; }
+  .stat b { display:block; font-family:var(--serif); font-size:33px; font-weight:500;
+            letter-spacing:-.01em; color:var(--navy); font-variant-numeric:tabular-nums;
+            line-height:1.06; margin-bottom:7px; }
+  .stat span { font-family:var(--cond); font-size:11px; color:var(--sub); text-transform:uppercase;
+               letter-spacing:.16em; font-weight:600; }
+  .stat.warn b { color:var(--warn); }
+  .stat.warn span { color:var(--warn); }
+  .card { background:#fff; border:1px solid var(--line); margin-bottom:24px; padding:0 0 12px;
           overflow-x:auto; }
-  .card h2 { margin:0; padding:14px 18px 10px; font-size:13.5px; font-weight:700;
-             text-transform:uppercase; letter-spacing:.8px; color:var(--accent-dark);
-             border-bottom:2px solid var(--accent); }
-  .card .body { padding:10px 18px 8px; }
-  .duo { display:flex; flex-wrap:wrap; gap:18px; }
+  .card h2 { margin:0 0 4px; padding:20px 24px 0; font-family:var(--cond); font-size:13px;
+             font-weight:600; text-transform:uppercase; letter-spacing:.24em; color:var(--navy); }
+  .card h2::after { content:""; display:block; width:38px; height:2px; background:var(--gold);
+                    margin:10px 0 0; }
+  .card .body { padding:14px 24px 8px; }
+  .duo { display:flex; flex-wrap:wrap; gap:24px; }
   .duo > div { flex:1 1 460px; min-width:0; }
-  /* Chart SVGs only — scoped to .body so Leaflet's attribute-sized overlay
+  /* Chart SVGs only - scoped to .body so Leaflet's attribute-sized overlay
      pane is untouched (a global svg rule collapsed it to 0x0 and made every
      map circle invisible; found by probing the rendered geometry). */
   .body svg { width:100%; height:auto; display:block; max-width:100%; }
-  .bar { fill:var(--accent); }
-  .blbl { font-size:12.5px; fill:#22364d; font-weight:600; }
-  .bval { font-size:11.5px; fill:#44566b; }
-  .dbig { font-size:26px; font-weight:700; fill:#0f1f33; }
-  .dsm { font-size:11px; fill:#44566b; }
-  .grid { stroke:#dfe6ed; stroke-width:1; }
-  .axlbl { font-size:10.5px; fill:#5f7186; }
-  .curve { fill:none; stroke:var(--accent); stroke-width:3; }
-  .curve2 { fill:none; stroke:var(--amber); stroke-width:2.5; }
-  .dot2 { fill:var(--amber); }
-  .lbl2 { font-size:10.5px; fill:#8a5410; font-weight:600; }
-  .bin { font-size:11.5px; fill:#ffffff; font-weight:700; }
-  .segKept { fill:#0f5cad; } .segNew { fill:#5a92c9; } .segLost { fill:#c3cdd8; }
-  .sub2 { margin:2px 0 0; padding:8px 18px 0; font-size:12.5px; font-weight:700; color:#22364d; }
-  td.up { color:#116b3f; font-weight:700; }
-  td.down { color:#c0390f; font-weight:700; }
-  .findings { font-size:13.5px; line-height:1.7; margin:2px 0 6px; padding-left:22px; }
-  .findings li { margin-bottom:6px; }
-  .findings li::marker { color:var(--accent); font-weight:700; }
-  .empty { font-size:13.5px; line-height:1.6; margin:2px 0 10px; color:#22364d; }
+  .bar { fill:var(--navy-mid); }
+  .blbl { font-size:12.5px; fill:#2b3948; font-weight:600; }
+  .bval { font-size:11.5px; fill:#4f5e6f; }
+  .dbig { font-size:27px; font-weight:500; fill:#030b18; font-family:Georgia, serif; }
+  .dsm { font-size:11px; fill:#4f5e6f; }
+  .grid { stroke:#e7ebf0; stroke-width:1; }
+  .axlbl { font-size:10.5px; fill:#65727f; letter-spacing:.06em; }
+  .curve { fill:none; stroke:var(--teal-dk); stroke-width:2.5; }
+  .curve2 { fill:none; stroke:var(--gold-dk); stroke-width:2; }
+  .dot2 { fill:var(--gold-dk); }
+  .lbl2 { font-size:10.5px; fill:var(--gold-dk); font-weight:600; }
+  .bin { font-size:11.5px; fill:#ffffff; font-weight:600; }
+  .segKept { fill:var(--navy-mid); } .segNew { fill:#6f8ba6; } .segLost { fill:#d8dee6; }
+  .sub2 { margin:2px 0 0; padding:12px 24px 0; font-family:var(--cond); font-size:12.5px;
+          font-weight:600; color:#2b3948; text-transform:uppercase; letter-spacing:.18em; }
+  td.up { color:#126b52; font-weight:700; }
+  td.down { color:var(--warn); font-weight:700; }
+  .findings { font-size:13.5px; line-height:1.75; margin:4px 0 8px; padding-left:20px; }
+  .findings li { margin-bottom:9px; padding-left:5px; }
+  .findings li::marker { content:"\25A0\00a0\00a0"; color:var(--gold); font-size:8.5px; }
+  .focus { counter-reset:fi; list-style:none; font-size:13.5px; line-height:1.7; margin:8px 0 8px; padding:0; }
+  .focus li { counter-increment:fi; position:relative; padding:0 0 15px 48px; margin:0; }
+  .focus li::before { content:counter(fi, decimal-leading-zero); position:absolute; left:0; top:-1px;
+                      font-family:var(--serif); font-size:20px; font-weight:500; color:var(--gold-dk);
+                      font-variant-numeric:tabular-nums; }
+  .focus li + li { border-top:1px solid var(--hair); padding-top:14px; }
+  .focus b { color:var(--ink); }
+  .empty { font-size:13.5px; line-height:1.65; margin:2px 0 10px; color:#2b3948; }
   table { border-collapse:collapse; width:100%; font-size:12.6px; }
-  th, td { border-top:1px solid var(--line); padding:7px 12px; text-align:left; }
-  th { background:var(--accent-dark); color:#fff; font-weight:700; font-size:10.5px;
-       text-transform:uppercase; letter-spacing:.6px; border-top:none; white-space:nowrap; }
-  tr:nth-child(even) td { background:#f2f6fa; }
-  tr.you td { background:#dcebf8; font-weight:700; border-top:2px solid var(--accent); border-bottom:2px solid var(--accent); }
-  .youtag { background:var(--amber); color:#fff; font-size:9.5px; font-weight:700;
-            padding:2px 7px; border-radius:2px; vertical-align:1px; letter-spacing:.6px; }
-  .proftbl th { text-align:left; white-space:nowrap; width:220px; background:#f2f6fa; color:#22364d;
-                font-size:11px; vertical-align:top; padding:8px 12px; }
-  .proftbl td { font-size:12.5px; padding:8px 12px; }
-  .chain { color:var(--amber); font-weight:700; cursor:help; }
-  .barmuted { fill:#96abc0; }
+  th, td { border-top:1px solid var(--hair); padding:8px 12px; text-align:left; vertical-align:top; }
+  th { background:#fff; color:var(--navy); font-family:var(--cond); font-weight:600; font-size:11px;
+       text-transform:uppercase; letter-spacing:.16em; border-top:none;
+       border-bottom:2px solid var(--navy); white-space:nowrap; }
+  tr:nth-child(even) td { background:#fafbfd; }
+  tr.you td { background:#f6f1e6; font-weight:700; border-top:2px solid var(--gold);
+              border-bottom:2px solid var(--gold); }
+  .youtag { background:var(--gold-dk); color:#fff; font-family:var(--cond); font-size:10px;
+            font-weight:600; padding:2px 8px; vertical-align:1px; letter-spacing:.14em; }
+  .proftbl th { text-align:left; white-space:nowrap; width:220px; background:var(--tint); color:#2b3948;
+                font-size:11px; vertical-align:top; padding:9px 12px; border-bottom:1px solid var(--hair); }
+  .proftbl td { font-size:12.5px; padding:9px 12px; }
+  .chain { color:var(--gold-dk); font-weight:700; cursor:help; }
+  .barmuted { fill:#adbccb; }
   #rm-map { height:52vh; min-height:380px; }
-  .offline { padding:9px 14px; background:#fff3cd; color:#6b4e0e; font-size:12.5px;
-             border-bottom:1px solid #e7d59a; display:none; }
-  .prac-pin { width:22px; height:22px; border-radius:50%; background:#c62828;
+  .offline { padding:9px 14px; background:#fbf4e4; color:#6b4e0e; font-size:12.5px;
+             border-bottom:1px solid #e8d9b4; display:none; }
+  .prac-pin { width:22px; height:22px; border-radius:50%; background:#9c3b34;
               border:3px solid #fff; box-shadow:0 1px 6px rgba(0,0,0,.45); }
-  .legend { background:#fff; padding:9px 12px; border-radius:2px;
-            box-shadow:0 1px 5px rgba(0,0,0,.25); font-size:12px; line-height:19px; }
+  .legend { background:#fff; padding:9px 12px; box-shadow:0 1px 5px rgba(0,0,0,.25);
+            font-size:12px; line-height:19px; }
   .legend i { width:12px; height:12px; display:inline-block; border-radius:50%;
               margin-right:6px; vertical-align:-2px; }
   .maptools { display:flex; flex-wrap:wrap; align-items:center; gap:8px;
-              padding:9px 16px; border-bottom:1px solid var(--line); background:#f2f6fa; }
-  .mtlabel { font-size:11px; color:var(--sub); text-transform:uppercase; letter-spacing:.6px; font-weight:700; }
-  .mtbtn { font:inherit; font-size:12.5px; padding:5px 12px; border-radius:2px; cursor:pointer;
-           border:1px solid var(--line); background:#fff; color:#22364d; font-weight:600; }
+              padding:11px 22px; border-bottom:1px solid var(--line); background:var(--tint); }
+  .mtlabel { font-family:var(--cond); font-size:11px; color:var(--sub); text-transform:uppercase;
+             letter-spacing:.16em; font-weight:600; }
+  .mtbtn { font:inherit; font-size:12.5px; padding:5px 14px; cursor:pointer;
+           border:1px solid var(--line); background:#fff; color:#2b3948; font-weight:600; }
   td.mono { font-variant-numeric:tabular-nums; }
   td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
-  .mtbtn.active { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:700; }
-  .mtchk { font-size:12.5px; color:#22364d; display:inline-flex; align-items:center; gap:5px; }
-  .note { color:var(--sub); font-size:12px; }
-  .tablenote { padding:8px 18px 10px; color:var(--sub); font-size:12px; }
-  details { margin:0; } summary { cursor:pointer; padding:14px 18px; font-size:13.5px; font-weight:700;
-            text-transform:uppercase; letter-spacing:.8px; color:var(--accent-dark); }
-  .notes { font-size:12px; color:#435364; line-height:1.6; margin:0; padding:0 22px 14px 36px; }
-  .notes li { margin-bottom:5px; }
-  footer { color:var(--sub); font-size:11.5px; margin-top:6px; }
+  .mtbtn.active { background:var(--navy); border-color:var(--navy); color:#fff; font-weight:600; }
+  .mtchk { font-size:12.5px; color:#2b3948; display:inline-flex; align-items:center; gap:5px; }
+  .note { color:var(--sub); font-size:12px; line-height:1.65; }
+  .tablenote { padding:11px 24px 12px; color:var(--sub); font-size:11.5px; line-height:1.65; }
+  details { margin:0; } summary { cursor:pointer; padding:17px 24px; font-family:var(--cond);
+            font-size:13px; font-weight:600; text-transform:uppercase; letter-spacing:.24em; color:var(--navy); }
+  .notes { font-size:11.5px; color:#4f5e6f; line-height:1.7; margin:0; padding:0 26px 16px 42px; }
+  .notes li { margin-bottom:7px; }
+  footer { color:var(--sub); font-size:11px; margin-top:12px; letter-spacing:.04em;
+           border-top:1px solid var(--line); padding-top:14px; line-height:1.7; }
   /* Tablet */
   @media (max-width: 900px) {
-    .wrap { padding:0 14px 28px; }
-    header { margin:0 -14px 12px; padding:16px 18px 14px; }
+    .wrap { padding:0 16px 34px; }
+    header { margin:0 -16px 0; padding:28px 22px 22px; }
+    .rule { margin:0 -22px 16px; }
+    .sub { margin:0 -16px 20px; padding:12px 22px; }
+    header h1 { font-size:29px; }
     .duo > div { flex:1 1 100%; }
     .proftbl th { width:150px; white-space:normal; }
   }
   /* Phone */
   @media (max-width: 620px) {
-    header h1 { font-size:19px; }
-    .stats { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
-    .stat { min-width:0; padding:10px 12px; }
-    .stat b { font-size:19px; }
+    header h1 { font-size:24px; }
+    .kicker { letter-spacing:.28em; font-size:11px; }
+    .stats { display:grid; grid-template-columns:1fr 1fr; }
+    .stat { min-width:0; padding:14px 14px 12px; border-left:none; border-top:1px solid var(--hair); }
+    .stat b { font-size:25px; }
     table { font-size:11.8px; }
-    th, td { padding:6px 8px; }
+    th, td { padding:7px 8px; }
     #rm-map { height:60vh; min-height:300px; }
-    .card h2 { font-size:12.5px; }
+    .card h2 { font-size:11.5px; letter-spacing:.18em; }
+    .focus li { padding-left:38px; }
   }
-  @media print { body { background:#fff; } .card { box-shadow:none; overflow:visible; }
-                 header { background:var(--accent-dark) !important; -webkit-print-color-adjust:exact; } }
+  @media print { body { background:#fff; } .card { box-shadow:none; overflow:visible; border-color:#ccd3db; }
+                 header { background:var(--navy) !important; -webkit-print-color-adjust:exact;
+                          print-color-adjust:exact; }
+                 .rule, .stats, .card, .focus li { break-inside:avoid; } }
 </style>
 </head>
 <body>
 <div class="wrap">
 <header>
-  <h1>Referral Source Analysis</h1>
-  <span class="badge">$(_h $a.Label)</span>
+  <div class="mast-top">
+    <span class="kicker">Referral Source Analysis</span>
+    <span class="badge">$(_h $yearBadge)</span>
+  </div>
+  <h1>$(_h $a.Practice.Name)</h1>
+  <div class="prep">Prepared for practice leadership &middot; $generated$(if ($PreparedBy) { ' &middot; Prepared by <b>' + (_h $PreparedBy) + '</b>' })</div>
 </header>
-<p class="sub"><b>$(_h $a.Practice.Name)</b> &mdash; NPI $($a.Npi)$(if ($a.PSObject.Properties['NpiCount'] -and $a.NpiCount -gt 1) { " (+$($a.NpiCount - 1) affiliated NPI$(if ($a.NpiCount -gt 2) { 's' }) combined)" }), $(_h ("$($a.Practice.City), $($a.Practice.State) $($a.Practice.Zip)")).
-Inbound Medicare shared-patient volume, $($a.Year).</p>
+<div class="rule"></div>
+<p class="sub">NPI $($a.Npi)$(if ($a.PSObject.Properties['NpiCount'] -and $a.NpiCount -gt 1) { " (+$($a.NpiCount - 1) affiliated NPI$(if ($a.NpiCount -gt 2) { 's' }) combined)" }) &middot; $(_h ("$($a.Practice.City), $($a.Practice.State) $($a.Practice.Zip)")) &middot; Inbound Medicare shared-patient volume, $($a.Year).</p>
 <div class="stats">
   <div class="stat"><b>$('{0:N0}' -f $a.TotalPatients)</b><span>Measured patient base</span></div>
 $(if ($therPat -gt 0) { '  <div class="stat"><b>' + ('{0:N0}' -f $refPat) + '</b><span>From external referrers</span></div>' })
@@ -5765,6 +5916,7 @@ $profileHtml
 <div class="card"><h2>Key findings</h2><div class="body"><ul class="findings">
 $findingsHtml
 </ul></div></div>
+$actionsHtml
 $(if ($hasVolume) { @"
 <div class="card"><h2>Top referral sources</h2><div class="body">$barSvg</div></div>
 <div class="duo">
@@ -5852,7 +6004,8 @@ $(if (@($rosterList).Count) {
     </ul>
   </details>
 </div>
-<footer>Generated $generated by the Medicare Order &amp; Referring Tracker &middot; ZIP centroids: US Census 2023 ZCTA gazetteer &middot; Provider identities: NPPES registry</footer>
+<footer>$(if ($PreparedBy) { 'Prepared by <b>' + (_h $PreparedBy) + '</b> &middot; ' })Confidential &mdash; prepared for $(_h $a.Practice.Name). Contains no patient-identifiable information.<br/>
+Sources: Medicare shared-patient claims data (calendar $($a.Year)) &middot; Medicare Order &amp; Referring enrollment file &middot; Medicare Care Compare clinician file &middot; NPPES provider registry &middot; US Census 2023 ZCTA gazetteer. Generated $generated.</footer>
 </div>
 </body>
 </html>
