@@ -142,6 +142,13 @@ SOURCES = {
                            '999990000', primary_desc='Family Medicine'),
     '8000000035': provider('8000000035', 'NPI-1', ('PAULA', 'PEERSTAFF'), ['225100000X'],
                            '999990000', primary_desc='Physical Therapist'),
+    # A sibling ORGANIZATION of the analyzed practice itself: same company
+    # name, punctuated differently, its own NPI (the NPI-per-clinic pattern).
+    # Flow to/from it is the company's internal patient movement - the
+    # sibling fold must keep it out of the referral ranking and the
+    # outbound destination list.
+    '8000000036': provider('8000000036', 'NPI-2', 'TEST REHAB CLINIC, L.L.C.', ['261QP2000X'],
+                           '999980000', primary_desc='Physical Therapy Clinic/Center'),
 }
 
 # ZIP 77777: individual therapists for the PracticeGroups tests. Two belong to a

@@ -2916,6 +2916,121 @@ Describe 'Outbound own-clinician fold + practice roster' {
     }
 }
 
+Describe 'Competitive landscape: one company, one row' {
+    # A multi-site operator registers an NPI per clinic, so the raw peer list
+    # repeats the same company at different addresses, and a practice's OWN
+    # other locations show up against it. Both were live findings. The peers
+    # come from a fixture NPPES bulk index (the exact path the live sweep
+    # takes): 9000000001 is the analyzed practice (TEST REHAB CLINIC LLC);
+    # 9000000010/11 are two clinics of one competitor company (spelled the
+    # way registries actually differ); 9000000012 trades under the analyzed
+    # practice's OWN name from a second address.
+    BeforeAll {
+        Set-RmActiveDataset -Source hop-teaming -Year 2022 | Out-Null
+        $script:LsIdx = Join-Path $env:RM_DATA_DIR 'nppes-index.psv'
+        $script:LsSaved = if (Test-Path $script:LsIdx) { Get-Content $script:LsIdx -Raw } else { $null }
+        Set-Content -Path $script:LsIdx -Encoding ascii -Value @(
+            '9000000010|2|RIVAL REHAB OF TESTVILLE, LLC|||TESTVILLE|MO|999990000|261QP2000X|01/01/2005'
+            '9000000011|2|Rival Rehab of Testville LLC|||NEXTTOWN|MO|999980000|261QP2000X|01/01/2005'
+            '9000000012|2|TEST REHAB CLINIC LLC|||NEXTTOWN|MO|999980000|261QP2000X|01/01/2005'
+            '9000000013|2|SOLO PT LLC|||TESTVILLE|MO|999990000|261QP2000X|01/01/2005'
+            # one operator, two registrations: spelled-out state vs postal code
+            # (live: 'INDEPENDENT PHYSICAL THERAPY OF GEORGIA' + '... OF GA')
+            '9000000014|2|COASTAL REHAB OF MISSOURI, LLC|||TESTVILLE|MO|999990000|261QP2000X|01/01/2005'
+            '9000000015|2|COASTAL REHAB OF MO LLC|||NEXTTOWN|MO|999980000|261QP2000X|01/01/2005'
+        )
+        # Both fixture ZIPs sit inside the 10-mile sweep circle.
+        $script:LsCent = Join-Path $script:WorkDir 'ls-centroids.csv'
+        Set-Content -Path $script:LsCent -Encoding ascii -Value @(
+            'zip,lat,lon'
+            '99999,40.0000,-90.0000'
+            '99998,40.0500,-90.0000'    # ~3.5 miles away
+            '86442,35.1000,-114.6000'
+        )
+    }
+    AfterAll {
+        if ($null -ne $script:LsSaved) { Set-Content -Path $script:LsIdx -Value $script:LsSaved -NoNewline -Encoding utf8 }
+        else { Remove-Item $script:LsIdx -Force -ErrorAction SilentlyContinue }
+        Set-RmActiveDataset -Source cms-pspp -Year 2015 | Out-Null
+    }
+
+    It 'merges a company''s clinics into one row and drops the practice''s own sites' {
+        $sa = Get-RmSourceAnalysis -Npi 9000000001 -CentroidPath $script:LsCent
+        $c = $sa.Competitive
+        $c | Should -Not -BeNullOrEmpty
+        $names = @($c.Peers | ForEach-Object { [string]$_.Name })
+        # the two-clinic company appears exactly once...
+        @($names | Where-Object { $_ -match '(?i)rival rehab' }).Count | Should -Be 1
+        $rival = @($c.Peers | Where-Object { $_.Name -match '(?i)rival rehab' })[0]
+        $rival.Sites | Should -Be 2
+        $rival.City | Should -Be 'TESTVILLE'                # shown at its closest site
+        # 'OF MISSOURI' and 'OF MO' are one company registered two ways
+        @($names | Where-Object { $_ -match '(?i)coastal rehab' }).Count | Should -Be 1
+        @($c.Peers | Where-Object { $_.Name -match '(?i)coastal rehab' })[0].Sites | Should -Be 2
+        $c.MergedCompanies | Should -Be 2
+        # ...and the practice's own second location is not ranked against it
+        @($c.Peers | Where-Object { $_.NPI -eq '9000000012' }).Count | Should -Be 0
+        $c.OwnOtherSites | Should -Be 1
+        # the analyzed practice still has exactly one row, its own
+        @($c.Peers | Where-Object { $_.You }).Count | Should -Be 1
+        # the ranking counts COMPANIES: you + merged rival + coastal + solo
+        $c.ProviderCount | Should -Be 4
+        # ...and the method note discloses the merge and the own-site drop
+        (@($sa.Notes) -join ' ') | Should -BeLike '*appears ONCE*'
+        (@($sa.Notes) -join ' ') | Should -BeLike "*own name is NOT ranked*"   # exactly one own site here
+    }
+}
+
+Describe 'Same-company org fold (inbound + outbound)' {
+    # A multi-site company's OTHER org NPIs appear in the raw file as
+    # "sources" and "destinations" of the analyzed NPI - internal patient
+    # movement between its own clinics, not referrals (live: EMORY PHYSICAL
+    # THERAPY, LLC ranked as the #6 "referral source" of EMORY PHYSICAL
+    # THERAPY, LLC at a 0.0-day lag). Both directions fold into disclosed
+    # buckets, matched by the landscape's organization-name key.
+    It 'folds the company''s other locations out of both directions, disclosed' {
+        $sibDir = Join-Path $script:WorkDir 'sibling-fold'
+        New-Item -ItemType Directory -Path $sibDir -Force | Out-Null
+        Set-Content -Path (Join-Path $sibDir 'hop_teaming_2022.csv') -Encoding ascii -NoNewline -Value (@(
+            'from_npi,to_npi,patient_count,transaction_count,average_day_wait,std_day_wait'
+            '8000000001,9000000001,45,50,12.5,10.0'    # real external referrer
+            '8000000036,9000000001,30,30,0.4,1.0'      # the company's own other location
+            '9000000001,8000000036,25,25,0.5,1.0'      # outbound to that same location
+            '9000000001,8000000002,10,10,40.0,5.0'     # real outbound destination
+        ) -join "`n")
+        $saved = (Get-RmConfig).DataDir
+        try {
+            Set-RmConfig -DataDir $sibDir
+            Set-RmActiveDataset -Source hop-teaming -Year 2022 | Out-Null
+            $sa = Get-RmSourceAnalysis -Npi 9000000001 -SkipCompetitors
+            $sa.TotalPatients | Should -Be 75          # 45 external + 30 internal, all counted
+            $sa.ReferralPatients | Should -Be 45       # the ranking covers external volume only
+            $sa.SiblingPatients | Should -Be 30
+            @($sa.SiblingRows).Count | Should -Be 1
+            @($sa.SiblingRows)[0].SourceNPI | Should -Be '8000000036'
+            @($sa.Sources | Where-Object SourceNPI -eq '8000000036').Count | Should -Be 0
+            # shares are computed on EXTERNAL volume: the one real source is 100%
+            $sa.Top1Pct | Should -Be 100
+            # outbound: the sibling location folds out, the real destination stays
+            @($sa.Outbound | Where-Object NPI -eq '8000000036').Count | Should -Be 0
+            @($sa.Outbound | Where-Object NPI -eq '8000000002').Count | Should -Be 1
+            $sa.OutboundSiblingPatients | Should -Be 25
+            (@($sa.Notes) -join ' ') | Should -BeLike "*COMPANY'S OTHER LOCATIONS*"
+
+            # and the deliverable shows the internal flow as its own card
+            $out = Join-Path $script:WorkDir 'sibling-report.html'
+            Export-RmSourceReportHtml -Analysis $sa -Path $out | Out-Null
+            $html = Get-Content $out -Raw
+            $html | Should -BeLike '*Your other locations*'
+            $html | Should -BeLike '*TEST REHAB CLINIC, L.L.C.*'
+            $html | Should -BeLike '*From own locations*'      # the stat band tile
+        } finally {
+            Set-RmConfig -DataDir $saved
+            Set-RmActiveDataset -Source cms-pspp -Year 2015 | Out-Null
+        }
+    }
+}
+
 Describe 'Client-deliverable report' {
     # The report is handed to the practice owner, so it must (a) carry a
     # cover masthead with the practice as the title and an optional
@@ -2947,12 +3062,9 @@ Describe 'Client-deliverable report' {
         (@($script:DelivSa.Notes) -join ' ') | Should -BeLike '*CMS*'
     }
 
-    It 'writes a Where-to-focus action list driven by the practice''s own numbers' {
-        $html2 = Get-Content (Join-Path $script:WorkDir 'ther-report.html') -Raw -ErrorAction SilentlyContinue
-        # the fixture practice is single-source enough to trigger the
-        # concentration action
-        $script:DelivHtml | Should -BeLike '*Where to focus*'
-        $script:DelivHtml | Should -BeLike '*class="focus"*'
+    It 'carries no Where-to-focus section (the findings card stands alone)' {
+        $script:DelivHtml | Should -Not -BeLike '*Where to focus*'
+        $script:DelivHtml | Should -BeLike '*Key findings*'
     }
 
     It 'applies the Mihama palette and keeps the file self-contained' {

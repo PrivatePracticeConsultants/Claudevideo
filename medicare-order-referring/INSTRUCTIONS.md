@@ -509,6 +509,13 @@ lose. The same fold applies to the **outbound** side of the one-stop report:
 an individual PT/OT/SLP among the "destinations" (recognizable by a ~0-day
 wait) is the practice's own clinician continuing care, not a post-therapy
 hand-off, so those rows are folded out of the destination list and disclosed.
+**The company's own other locations fold the same way:** a multi-clinic
+company registers an NPI per location, and patients moving between its own
+clinics make one location look like a top "referral source" (or destination)
+of another. Organization NPIs sharing the practice's company name are moved
+into their own **"Your other locations"** card — internal patient flow,
+counted in the patient base but never ranked as a referrer — and the note
+tells you to paste those NPIs together for the company-wide analysis.
 The report also shows the practice's **Care Compare roster** — every clinician
 billing under the practice today (matched by practice name, then expanded
 through the shared group-enrollment id), cross-referenced with each
@@ -538,9 +545,8 @@ year-over-year table also carries **outbound** volume per year, and its
 **The report is a client deliverable.** It is written to be handed to the
 practice owner: an editorial cover with the practice name as the title, your
 firm on the *Prepared by* line (type it once in the **Prepared by** box on
-this tab &mdash; it is remembered), a numbered **Where to focus** section that
-turns the findings into specific next steps using that practice's own
-numbers, and a confidentiality line plus a plain list of data sources in the
+this tab &mdash; it is remembered), a **Key findings** card in plain
+language, and a confidentiality line plus a plain list of data sources in the
 footer. It names the data and its calendar year but not the commercial
 company the data is licensed from. Everything is self-contained in the one
 HTML file, prints cleanly, and reads correctly on a phone or iPad. a
@@ -567,8 +573,14 @@ provider within 10 miles of the practice, ranked by inbound Medicare referral
 volume, with the analyzed practice's rank and share of area volume, its top
 competitors, and a top-15 table (the practice's own row highlighted — and
 always shown, even when it ranks below the top 15; equal volumes share a
-rank). A full ranked source spreadsheet and methodology file are saved next
-to it.
+rank). **Each company appears once**: an operator running several clinics in
+the radius is combined into a single row — volume summed, feeding practices
+counted once, shown at its closest location, with a **Sites** column giving
+the number of clinics combined. Locations trading under the analyzed
+practice's **own name** are never ranked against it — they are its own
+clinics, and the note tells you to analyze those NPIs together for the
+company-wide picture. A full ranked source spreadsheet and methodology file
+are saved next to it.
 
 **Getting all your years in:** the year-over-year section compares whatever
 CareSet years are in your data folder, so import each year once (Referral map

@@ -3449,12 +3449,32 @@ function Get-RmSourceAnalysis {
     # discloses that). Clinic/Center taxonomies never match: a therapy ORG
     # appearing as a source is a competitor relationship, still listed.
     $therapistRe = '(PHYSICAL|OCCUPATIONAL) THERAPIST|SPEECH.LANGUAGE PATHOLOGIST'
+    # The company's OTHER org NPIs appear as "sources" too: a multi-site
+    # operator registers an NPI per clinic, and patients moving between its
+    # own locations co-bill across those NPIs (live: EMORY PHYSICAL
+    # THERAPY, LLC ranked as the #6 referral source of EMORY PHYSICAL
+    # THERAPY, LLC, 0.0-day lag). Same-company organizations are folded
+    # into their own disclosed bucket - internal flow, not referrals -
+    # exactly as the landscape refuses to rank them as competitors.
+    $ownOrgKey = if ($isOrg) { Get-RmLandscapeNameKey $pracName } else { '' }
+    $siblingEdges = New-Object System.Collections.Generic.List[object]
     $therEdges = New-Object System.Collections.Generic.List[object]
     $keepEdges = New-Object System.Collections.Generic.List[object]
     foreach ($e in $edges) {
         $d0 = if ($detail.ContainsKey($e.SourceNpi)) { $detail[$e.SourceNpi] } else { $null }
         $spec0 = if ($d0) { ([string]$d0.Specialty).ToUpperInvariant() } else { '' }
-        if ($spec0 -and $spec0 -notmatch 'CLINIC|CENTER' -and $spec0 -match $therapistRe) {
+        $isSib = $false
+        if ($ownOrgKey -and $d0) {
+            # Organization check: the cached Entity field when present, else
+            # the Clinic/Center specialty label (older cache entries).
+            $ent0 = if ($null -ne $d0.PSObject.Properties['Entity']) { [string]$d0.Entity } else { '' }
+            if ($ent0 -eq '2' -or $spec0 -match 'CLINIC|CENTER') {
+                $isSib = ((Get-RmLandscapeNameKey ([string]$d0.Name)) -eq $ownOrgKey)
+            }
+        }
+        if ($isSib) {
+            $siblingEdges.Add($e)
+        } elseif ($spec0 -and $spec0 -notmatch 'CLINIC|CENTER' -and $spec0 -match $therapistRe) {
             $therEdges.Add($e)
         } else {
             $keepEdges.Add($e)
@@ -3507,7 +3527,8 @@ function Get-RmSourceAnalysis {
     # 'Argument types do not match' on a generic List here (see the trend).
     $edges = $keepEdges.ToArray()
     $total = 0; foreach ($e in $edges) { $total += $e.BeneCount }
-    $therTotal = $grandTotal - $total
+    $sibTotal = 0; foreach ($e in $siblingEdges) { $sibTotal += $e.BeneCount }
+    $therTotal = $grandTotal - $total - $sibTotal
     $therRows = New-Object System.Collections.Generic.List[object]
     foreach ($e in $therEdges) {
         $d0 = if ($detail.ContainsKey($e.SourceNpi)) { $detail[$e.SourceNpi] } else { $null }
@@ -3521,6 +3542,18 @@ function Get-RmSourceAnalysis {
         if ($isHop) { $trow['AvgDayWait'] = $e.AvgDayWait }
         $therRows.Add([pscustomobject]$trow)
     }
+    $siblingRows = New-Object System.Collections.Generic.List[object]
+    foreach ($e in $siblingEdges) {
+        $d0 = if ($detail.ContainsKey($e.SourceNpi)) { $detail[$e.SourceNpi] } else { $null }
+        $srow = [ordered]@{
+            SourceNPI       = $e.SourceNpi
+            SourceName      = if ($d0) { [string]$d0.Name } else { '' }
+            SourceSpecialty = if ($d0) { [string]$d0.Specialty } else { '' }
+            SharedPatients  = $e.BeneCount
+        }
+        if ($isHop) { $srow['AvgDayWait'] = $e.AvgDayWait }
+        $siblingRows.Add([pscustomobject]$srow)
+    }
 
     # Outbound rows, named from the top destinations only (the same cached
     # lookup the sources use, so a handful of extra NPIs at most). The
@@ -3531,6 +3564,7 @@ function Get-RmSourceAnalysis {
     # A roster-NPI match catches every CURRENT staff member at any volume;
     # the specialty test catches departed staff among the top destinations.
     $outboundTherRows = @()
+    $outboundSibRows = @()
     if ($outBySrc.Count -gt 0) {
         # Classify a deeper window than the 25 shown, so folding staff out
         # never leaves the external list short.
@@ -3539,10 +3573,21 @@ function Get-RmSourceAnalysis {
         $outDetail = if ($outNpis.Count -gt 0) { Get-RmProviderDetail -Npi $outNpis } else { @{} }
         $outExt = New-Object System.Collections.Generic.List[object]
         $outTher = New-Object System.Collections.Generic.List[object]
+        $outSib = New-Object System.Collections.Generic.List[object]
         foreach ($t in $topOut) {
             $d = if ($detail.ContainsKey($t.Key)) { $detail[$t.Key] }
                  elseif ($outDetail.ContainsKey($t.Key)) { $outDetail[$t.Key] } else { $null }
             $spec0 = if ($d) { ([string]$d.Specialty).ToUpperInvariant() } else { '' }
+            # A same-company org NPI on the outbound side is the mirror of
+            # the inbound sibling fold: patients continuing at another of
+            # the company's own locations, not a hand-off anyone chose.
+            $isSibOut = $false
+            if ($ownOrgKey -and $d) {
+                $entO = if ($null -ne $d.PSObject.Properties['Entity']) { [string]$d.Entity } else { '' }
+                if ($entO -eq '2' -or $spec0 -match 'CLINIC|CENTER') {
+                    $isSibOut = ((Get-RmLandscapeNameKey ([string]$d.Name)) -eq $ownOrgKey)
+                }
+            }
             $isOwn = $staffSet.Contains($t.Key) -or
                      ($spec0 -and $spec0 -notmatch 'CLINIC|CENTER' -and $spec0 -match $therapistRe)
             $row = [ordered]@{
@@ -3552,7 +3597,9 @@ function Get-RmSourceAnalysis {
                 SharedPatients = $t.Value.N
             }
             if ($isHop -and $t.Value.T -gt 0) { $row['AvgDayWait'] = [math]::Round($t.Value.W / $t.Value.T, 1) }
-            if ($isOwn) {
+            if ($isSibOut) {
+                $outSib.Add([pscustomobject]$row)
+            } elseif ($isOwn) {
                 $row['Staff'] = if ($staffSet.Contains($t.Key)) { 'VERIFIED (Care Compare)' } else { 'same discipline' }
                 $outTher.Add([pscustomobject]$row)
             } else {
@@ -3561,9 +3608,12 @@ function Get-RmSourceAnalysis {
         }
         $outboundRows = @($outExt.ToArray() | Select-Object -First 25)
         $outboundTherRows = $outTher.ToArray()
+        $outboundSibRows = $outSib.ToArray()
     }
     $outTherPatients = 0
     foreach ($o in $outboundTherRows) { $outTherPatients += [int]$o.SharedPatients }
+    $outSibPatients = 0
+    foreach ($o in $outboundSibRows) { $outSibPatients += [int]$o.SharedPatients }
 
     # Departed-staff context: a "same discipline" clinician is usually an
     # ex-employee, and where they bill TODAY changes what the row means -
@@ -3797,7 +3847,7 @@ function Get-RmSourceAnalysis {
         $topFar = @($farBySpec.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 3 |
             ForEach-Object { "$($_.Key) ($('{0:N0}' -f $_.Value))" })
         $distantNote = ("DISTANT DOTS: $('{0:N0}' -f $farVol) patients ($([math]::Round(100.0 * $farVol / $total, 1))% of measured volume) " +
-            "come from sources registered more than $([int]$farCut) miles away, across $farZips ZIP area(s)" +
+            "come from sources registered more than $([int]$farCut) miles away, across $farZips ZIP area$(if ($farZips -ne 1) { 's' })" +
             $(if ($farRemote -gt 0) { ", and $([math]::Round(100.0 * $farRemote / $farVol))% of that is centralized services" }) + ". " +
             "A source is plotted at the address its NPI is REGISTERED at, which for a reference lab, a teleradiology read, " +
             "a pharmacy chain or a DME supplier is a corporate office far from where the patient was actually seen - the " +
@@ -3877,7 +3927,7 @@ function Get-RmSourceAnalysis {
         }
     }
 
-    $mix = if ($sources.Count) { @(Get-RmSourceSpecialtyMix -Rows $sources) } else { @() }
+    $mix = @(if ($sources.Count) { Get-RmSourceSpecialtyMix -Rows $sources })
 
     # Competitive landscape: the same NPPES outpatient-rehab taxonomy sweep
     # the Referral map uses, over every ZIP whose centroid falls within the
@@ -3929,11 +3979,26 @@ function Get-RmSourceAnalysis {
                 Zip = $pracZip; DistanceMiles = [double]0
                 ReferralSources = ($edges.Count + $therEdges.Count); SharedPatients = $grandTotal
             })
+            # The practice's OWN other locations are not competitors. A
+            # multi-site practice registers an NPI per clinic, so its sibling
+            # sites otherwise appear in its own competitive table (live:
+            # 'Emory Physical Therapy, LLC' listed against itself). They are
+            # dropped from the ranking and disclosed, with a pointer to the
+            # combined analysis that measures the company as one.
+            $myNameKey = Get-RmLandscapeNameKey $pracName
+            $ownSites = 0; $ownSitePatients = 0
+            $peerRows = New-Object System.Collections.Generic.List[object]
             foreach ($p in $peers) {
                 if ($memberSet.Contains($p.NPI)) { continue }
+                if ($myNameKey -and $p.Type -eq 'Organization' -and
+                    (Get-RmLandscapeNameKey ([string]$p.Name)) -eq $myNameKey) {
+                    $ownSites++
+                    if ($peerAgg.ContainsKey($p.NPI)) { $ownSitePatients += [int]$peerAgg[$p.NPI].Benes }
+                    continue
+                }
                 $agg = if ($peerAgg.ContainsKey($p.NPI)) { $peerAgg[$p.NPI] } else { $null }
                 $pz = [string]$p.Zip
-                $rows.Add([pscustomobject]@{
+                $peerRows.Add([pscustomobject]@{
                     NPI = $p.NPI; Name = $p.Name; Type = $p.Type
                     City = $p.City; State = $p.State; Zip = $pz
                     DistanceMiles = $(
@@ -3941,8 +4006,70 @@ function Get-RmSourceAnalysis {
                         if ($null -ne $dmin) { $dmin } else { '' })
                     ReferralSources = $(if ($agg) { $agg.Sources } else { 0 })
                     SharedPatients  = $(if ($agg) { $agg.Benes } else { 0 })
+                    Sites = 1
                 })
             }
+
+            # ---- One company, one row -----------------------------------
+            # A multi-site operator registers a separate organization NPI per
+            # clinic, so the raw list repeats the same company at different
+            # addresses (live: 'Independent Physical Therapy of Georgia'
+            # twice, Dunwoody and Atlanta). As a COMPETITIVE ranking that is
+            # wrong twice over - it understates the operator's real presence
+            # and pushes genuine rivals off the table. Organizations sharing
+            # an organization-name key are merged into one row: volume summed,
+            # sources counted DISTINCT (a source feeding two of its sites is
+            # one relationship, not two), shown at its closest site with a
+            # Sites count. Individuals are never merged - two clinicians can
+            # share a name and still be different people.
+            $grpOf = @{}
+            foreach ($pr in $peerRows) {
+                $k = if ($pr.Type -eq 'Organization') { Get-RmLandscapeNameKey ([string]$pr.Name) } else { '' }
+                $grpOf[[string]$pr.NPI] = if ($k) { 'N:' + $k } else { 'I:' + $pr.NPI }
+            }
+            $grpMembers = @{}
+            foreach ($pr in $peerRows) {
+                $k = $grpOf[[string]$pr.NPI]
+                if (-not $grpMembers.ContainsKey($k)) { $grpMembers[$k] = New-Object System.Collections.Generic.List[object] }
+                $grpMembers[$k].Add($pr)
+            }
+            # Distinct feeding sources, but only for the companies that
+            # actually span several NPIs - everywhere else the per-NPI count
+            # already is the distinct count.
+            $multiKeys = New-Object 'System.Collections.Generic.HashSet[string]'
+            foreach ($kv in $grpMembers.GetEnumerator()) { if ($kv.Value.Count -gt 1) { [void]$multiKeys.Add($kv.Key) } }
+            $grpSrc = @{}
+            if ($multiKeys.Count -gt 0) {
+                foreach ($e in $peerEdges) {
+                    $k = if ($grpOf.ContainsKey($e.TargetNpi)) { $grpOf[$e.TargetNpi] } else { $null }
+                    if (-not $k -or -not $multiKeys.Contains($k)) { continue }
+                    if (-not $grpSrc.ContainsKey($k)) { $grpSrc[$k] = New-Object 'System.Collections.Generic.HashSet[string]' }
+                    [void]$grpSrc[$k].Add($e.SourceNpi)
+                }
+            }
+            foreach ($kv in $grpMembers.GetEnumerator()) {
+                $mem = @($kv.Value.ToArray())
+                if ($mem.Count -eq 1) { $rows.Add($mem[0]); continue }
+                # Represent the company at its CLOSEST site (that is the one
+                # a patient would actually choose between), and let the
+                # biggest-volume NPI stand as the row's identifier.
+                $withDist = @($mem | Where-Object { $_.DistanceMiles -is [double] })
+                $near = if ($withDist.Count) { @($withDist | Sort-Object DistanceMiles)[0] } else { $mem[0] }
+                $lead = @($mem | Sort-Object -Property @{Expression = { [int]$_.SharedPatients }; Descending = $true},
+                                                       @{Expression = 'NPI'})[0]
+                $sumB = 0; foreach ($m in $mem) { $sumB += [int]$m.SharedPatients }
+                $srcN = if ($grpSrc.ContainsKey($kv.Key)) { $grpSrc[$kv.Key].Count }
+                        else { $s0 = 0; foreach ($m in $mem) { $s0 += [int]$m.ReferralSources }; $s0 }
+                $rows.Add([pscustomobject]@{
+                    NPI = $lead.NPI; Name = $lead.Name; Type = 'Organization'
+                    City = $near.City; State = $near.State; Zip = $near.Zip
+                    DistanceMiles = $near.DistanceMiles
+                    ReferralSources = $srcN
+                    SharedPatients = $sumB
+                    Sites = $mem.Count
+                })
+            }
+            $mergedCompanies = @($grpMembers.Values | Where-Object { $_.Count -gt 1 }).Count
             $regionTotal = 0; foreach ($rw in $rows) { $regionTotal += [int]$rw.SharedPatients }
             $rankedPeers = @($rows.ToArray() |
                 Sort-Object -Property @{Expression = 'SharedPatients'; Descending = $true},
@@ -3966,6 +4093,9 @@ function Get-RmSourceAnalysis {
                     DistanceMiles = $rp.DistanceMiles
                     ReferralSources = $rp.ReferralSources
                     SharedPatients = $rp.SharedPatients
+                    # The practice's own row is built before the merge and has
+                    # no Sites; every merged/peer row carries one.
+                    Sites = if ($null -ne $rp.PSObject.Properties['Sites']) { [int]$rp.Sites } else { 1 }
                     SharePct = if ($regionTotal -gt 0) { [math]::Round(100.0 * $rp.SharedPatients / $regionTotal, 1) } else { 0 }
                     # A competitor that is really one clinic of a chain is a
                     # different threat from an independent of the same size.
@@ -3982,7 +4112,10 @@ function Get-RmSourceAnalysis {
             $landscape = [pscustomobject]@{
                 RadiusMiles         = $CompetitorRadiusMiles
                 ZipCount            = $rzips.Count
-                ProviderCount       = $rankedPeers.Count
+                ProviderCount       = $rankedPeers.Count   # ranked ROWS = companies
+                MergedCompanies     = $mergedCompanies      # companies whose sites were combined
+                OwnOtherSites       = $ownSites             # this practice's own locations, not ranked
+                OwnOtherSitePatients = $ownSitePatients
                 ProvidersWithVolume = $withVol
                 RegionPatients      = $regionTotal
                 Rank                = $myRank
@@ -4175,15 +4308,18 @@ function Get-RmSourceAnalysis {
         "SOURCE ANALYSIS METHOD: every inbound pair of NPI $primary ($pracName) in $($info.Label). Individual PT/OT/SLP 'sources' are the practice's own clinicians billing under personal NPIs, so they are folded into the PRACTICE THERAPISTS figure below - the referral ranking, shares, concentration, geography and lag profile cover EXTERNAL sources only. PctOfVolume/CumulativePct are shares of the external referral volume."
         $(if ($therRows.Count) {
             $vst = @($therRows | Where-Object { $_.Staff -like 'VERIFIED*' }).Count
-            "PRACTICE THERAPISTS: $($therRows.Count) individual PT/OT/SLP NPI(s) appear in the raw file as 'sources' of this practice, carrying $('{0:N0}' -f $therTotal) shared patients. That is the practice's own patient base arriving through its clinicians (PT->org co-billing), NOT external referrals, so it is summed into TotalPatients and kept out of the source ranking. $vst of $($therRows.Count) are on this practice's own Care Compare roster (VERIFIED staff); the rest are same-discipline clinicians - most commonly staff who left or are not yet on today's roster. An external therapist who truly refers here would also land in this bucket: check the roster labels before writing anyone off."
+            "PRACTICE THERAPISTS: $($therRows.Count) individual PT/OT/SLP NPI$(if ($therRows.Count -ne 1) { 's' }) appear$(if ($therRows.Count -eq 1) { 's' }) in the raw file as 'sources' of this practice, carrying $('{0:N0}' -f $therTotal) shared patients. That is the practice's own patient base arriving through its clinicians (PT->org co-billing), NOT external referrals, so it is summed into TotalPatients and kept out of the source ranking. $vst of $($therRows.Count) are on this practice's own Care Compare roster (VERIFIED staff); the rest are same-discipline clinicians - most commonly staff who left or are not yet on today's roster. An external therapist who truly refers here would also land in this bucket: check the roster labels before writing anyone off."
         })
         $(if (@($outboundTherRows).Count) {
             $ovst = @($outboundTherRows | Where-Object { $_.Staff -like 'VERIFIED*' }).Count
-            "OUTBOUND OWN-CLINICIANS: $(@($outboundTherRows).Count) individual PT/OT/SLP NPI(s) also appear on the OUTBOUND side, carrying $('{0:N0}' -f $outTherPatients) patients - the same co-billing pattern in the other direction (continued care under the practice's own therapists), NOT a post-therapy hand-off, so they are folded out of the outbound destination list. $ovst of $(@($outboundTherRows).Count) are VERIFIED on this practice's Care Compare roster today."
+            "OUTBOUND OWN-CLINICIANS: $(@($outboundTherRows).Count) individual PT/OT/SLP NPI$(if (@($outboundTherRows).Count -ne 1) { 's' }) also appear$(if (@($outboundTherRows).Count -eq 1) { 's' }) on the OUTBOUND side, carrying $('{0:N0}' -f $outTherPatients) patients - the same co-billing pattern in the other direction (continued care under the practice's own therapists), NOT a post-therapy hand-off, so they are folded out of the outbound destination list. $ovst of $(@($outboundTherRows).Count) are VERIFIED on this practice's Care Compare roster today."
+        })
+        $(if ($siblingRows.Count -or @($outboundSibRows).Count) {
+            "COMPANY'S OTHER LOCATIONS: $($siblingRows.Count) organization NPI$(if ($siblingRows.Count -ne 1) { 's' }) sharing this practice's company name appear$(if ($siblingRows.Count -eq 1) { 's' }) in the raw file as 'sources' of it, carrying $('{0:N0}' -f $sibTotal) shared patients - that is patient flow between the company's own locations (each clinic bills under its own NPI), NOT external referrals, so it is counted in TotalPatients and kept out of the referral ranking$(if (@($outboundSibRows).Count) { "; on the outbound side, $('{0:N0}' -f $outSibPatients) patients continuing at $(@($outboundSibRows).Count) of its own location$(if (@($outboundSibRows).Count -ne 1) { 's' }) are folded out of the destination list the same way" }). Same-company matching is by organization-name key, the rule the competitive landscape uses. Paste those NPIs together with this one for the company-wide analysis."
         })
         $(if (@($atRisk).Count) {
             $arPat = 0; foreach ($ar in $atRisk) { $arPat += [int]$ar.SharedPatients }
-            "AT-RISK REFERRERS: $(@($atRisk).Count) referrer-type source(s) carrying $('{0:N0}' -f $arPat) patients in $($info.Year) are flagged against TODAY's Medicare Order & Referring roster: " +
+            "AT-RISK REFERRERS: $(@($atRisk).Count) referrer-type source$(if (@($atRisk).Count -ne 1) { 's' }) carrying $('{0:N0}' -f $arPat) patients in $($info.Year) are flagged against TODAY's Medicare Order & Referring roster: " +
             ((@($atRisk | Sort-Object SharedPatients -Descending | Select-Object -First 8 | ForEach-Object { "$($_.SourceName) ($($_.SourceNPI); $($_.Status))" })) -join '; ') +
             "$(if (@($atRisk).Count -gt 8) { '; ...' }). A referrer who left the roster has retired, deactivated, or dis-enrolled - Medicare claims for their future referrals would deny. The check covers only provider types the roster lists (physicians, NPs, PAs, podiatry, optometry, dental, chiropractic, nurse specialists); organizations and therapists are never on it and are not checked."
         })
@@ -4191,19 +4327,21 @@ function Get-RmSourceAnalysis {
             $msPat = 0; foreach ($ms in $missedRows) { $msPat += [int]$ms.PatientsToCompetitors }
             "OUTREACH TARGETS: the $(@($missedRows).Count) biggest referrers feeding comparable providers within $CompetitorRadiusMiles miles with NO measured flow into this practice carry $('{0:N0}' -f $msPat) patients to competitors in $($info.Year). Only prospects whose registered practice address is within $([int]$OutreachRadiusMiles) miles of this practice are listed - a referrer registered further away is a corporate/HQ address, not somewhere to visit" +
             $(if ($missFar -gt 0 -or $missNoLoc -gt 0) {
-                " ($missFar candidate(s) were dropped as too far$(if ($missNoLoc -gt 0) { ", $missNoLoc more had no locatable practice ZIP" }))" }) + ". " +
+                " ($missFar candidate$(if ($missFar -eq 1) { ' was' } else { 's were' }) dropped as too far$(if ($missNoLoc -gt 0) { ", $missNoLoc more had no locatable practice ZIP" }))" }) + ". " +
             "Individual PT/OT/SLP 'sources' of a competitor are its own clinicians, and therapy ORGANIZATIONS are rivals (often a chain's org NPI co-billing with its clinics) - both are excluded; rival relationships appear in the competitive landscape instead. Pairs under 11 patients are invisible, so 'no measured flow' can also mean 'fewer than 11 patients came here' - treat the list as prospecting priorities, not proof of zero relationship."
         })
-        $(if ($rosterRows.Count) { "PRACTICE ROSTER (Care Compare): $($rosterRows.Count) clinician(s) are listed under this practice in Medicare Care Compare today - matched by practice name, then expanded to everyone sharing the same group-enrollment id (org_pac_id). This is TODAY's roster: staff who left are absent even though their historical volume appears above, and cash-pay or non-Medicare clinicians never appear. If the location column shows an unexpected city, a same-named practice elsewhere matched too - read those rows with care." })
+        $(if ($rosterRows.Count) { "PRACTICE ROSTER (Care Compare): $($rosterRows.Count) clinician$(if ($rosterRows.Count -eq 1) { ' is' } else { 's are' }) listed under this practice in Medicare Care Compare today - matched by practice name, then expanded to everyone sharing the same group-enrollment id (org_pac_id). This is TODAY's roster: staff who left are absent even though their historical volume appears above, and cash-pay or non-Medicare clinicians never appear. If the location column shows an unexpected city, a same-named practice elsewhere matched too - read those rows with care." })
         $(if ($npiList.Count -gt 1) { "COMBINED ANALYSIS: inbound volume is merged across $($npiList.Count) NPIs ($($npiList -join ', ')). A source feeding several of them counts ONCE with summed volume; patient flows BETWEEN these NPIs are excluded as internal handoffs. Geography and the competitive radius are centered on the primary NPI ($primary)." })
         $(if ($grandTotal -gt 0 -and $grandTotal -lt 1000) { 'SMALL-PRACTICE NOTE: pairs under 11 distinct patients are excluded at the source, so a modest measured total usually UNDERSTATES the real referral base. Volume may also sit under the therapists'' individual NPIs — run a combined analysis (paste the org NPI plus the therapist NPIs together) for the full picture.' })
         'NET FLOW: SharedBack is the patients this practice shared ONWARD to that same source in the same year (claims sequence, both directions from one pass). A source with SharedPatients roughly equal to SharedBack and a long lag is co-occurring care (labs, pharmacies, hospitals); inbound far above SharedBack with a short lag is referral flow someone could win or lose.'
         'CONCENTRATION: HHI = sum of squared percentage shares (0-10,000); above ~2,500 is highly concentrated — losing one relationship materially moves the total. Top-1/5/10 dependence reads the same risk directly. Both are computed on MEASURED (11+ patient) pairs only: sub-floor referrers are invisible, which inflates the measured shares, so true concentration is LOWER whenever many small sources exist — treat a high reading on a short source list with caution.'
         'Distances are straight-line miles between ZIP-area centroids (US Census) using TODAY''s NPPES practice addresses — a source that moved is measured where it is now.'
         $(if ($isHop) { 'REFERRAL-LAG PROFILE: average days from source visit to this practice''s visit, volume-weighted, over EXTERNAL referral sources only. Short lags look like referrals; 90+ days usually means co-occurring care (labs, hospitals), not referral flow.' })
-        $(if ($landscape) { "COMPETITIVE LANDSCAPE: peers are the NPPES-listed outpatient rehab providers (the same PT/OT/SLP taxonomy sweep the Referral map uses) whose registered - or, with the local NPPES index, secondary - practice location falls in the $($landscape.ZipCount) ZIP(s) within $($landscape.RadiusMiles) straight-line miles of ZIP $pracZip, ranked by inbound shared-patient volume on $($info.Label). DistanceMiles is to each provider's CLOSEST known location (registered or secondary site). Share of area volume = a provider's inbound volume over the SUM across all listed providers — share of measured referral VOLUME, not of patients." })
+        $(if ($landscape) { "COMPETITIVE LANDSCAPE: peers are the NPPES-listed outpatient rehab providers (the same PT/OT/SLP taxonomy sweep the Referral map uses) whose registered - or, with the local NPPES index, secondary - practice location falls in the $($landscape.ZipCount) ZIP$(if ($landscape.ZipCount -ne 1) { 's' }) within $($landscape.RadiusMiles) straight-line miles of ZIP $pracZip, ranked by inbound shared-patient volume on $($info.Label). DistanceMiles is to each provider's CLOSEST known location (registered or secondary site). Share of area volume = a provider's inbound volume over the SUM across all listed providers — share of measured referral VOLUME, not of patients." +
+            $(if ($landscape.MergedCompanies -gt 0) { " Each company appears ONCE: $($landscape.MergedCompanies) operator$(if ($landscape.MergedCompanies -eq 1) { ' runs' } else { 's run' }) several clinics in the radius, so their locations are combined into a single row (volume summed, feeding practices counted once, shown at the closest site; the Sites column gives the count)." }) +
+            $(if ($landscape.OwnOtherSites -gt 0) { " $($landscape.OwnOtherSites) location$(if ($landscape.OwnOtherSites -eq 1) { ' trading under this practice''s own name is NOT ranked - it is one of its own clinics, not a competitor' } else { 's trading under this practice''s own name are NOT ranked - they are its own clinics, not competitors' })$(if ($landscape.OwnOtherSitePatients -gt 0) { " (a further $('{0:N0}' -f $landscape.OwnOtherSitePatients) measured patients)" }); analyze those NPIs together with this one for a company-wide picture." }) })
         $(if ($landscape) { 'A practice''s volume is often SPLIT between its organization NPI and its therapists'' individual NPIs, so a group can rank below its true combined volume. Benchmark the org NPI and its key therapists separately for the full picture.' })
-        $(if ($landscape -and $landscape.SecondaryOnlyExcluded -gt 0) { "COMPARABILITY: $($landscape.SecondaryOnlyExcluded) provider(s) in the radius list a therapy taxonomy only in a SECONDARY slot — typically hospitals and multi-specialty organizations. They are excluded from the ranking because their inbound volume spans every service line, not therapy, and including them would overstate the market and understate this practice's share. A provider whose primary is a NON-SPECIFIC code - generic 'Clinic/Center', 'Multi-Specialty Clinic', or the legacy 'Specialist' - but which also carries a real therapy taxonomy is NOT excluded: those registrations are how chains and therapy companies fill in forms (277 of Athletico's 426 clinics, Apex Physical Therapy, EmpowerMe), and dropping them hid top-5 competitors in some markets." })
+        $(if ($landscape -and $landscape.SecondaryOnlyExcluded -gt 0) { "COMPARABILITY: $($landscape.SecondaryOnlyExcluded) provider$(if ($landscape.SecondaryOnlyExcluded -eq 1) { ' in the radius lists' } else { 's in the radius list' }) a therapy taxonomy only in a SECONDARY slot — typically hospitals and multi-specialty organizations. They are excluded from the ranking because their inbound volume spans every service line, not therapy, and including them would overstate the market and understate this practice's share. A provider whose primary is a NON-SPECIFIC code - generic 'Clinic/Center', 'Multi-Specialty Clinic', or the legacy 'Specialist' - but which also carries a real therapy taxonomy is NOT excluded: those registrations are how chains and therapy companies fill in forms (277 of Athletico's 426 clinics, Apex Physical Therapy, EmpowerMe), and dropping them hid top-5 competitors in some markets." })
         $(if ($landscapeNote) { $landscapeNote })
         $(if ($market) { "MARKET CONTEXT: county Medicare enrollment from CMS's Medicare Monthly Enrollment dataset (calendar $($market.Year), latest full year). Original Medicare (FFS) beneficiaries are the population this file can see; Medicare Advantage members ($($market.MaPct)% of $($market.County)) are invisible to it." })
         $(if ($svcProfile) { 'BILLED-SERVICES PROFILE: actual Medicare Part B claims from CMS''s Physician & Other Practitioners dataset (latest annual release; therapy = HCPCS 97xxx/92xxx). CAUTION: this dataset suppresses provider-procedure lines under 11 beneficiaries, so small caseloads are invisible here too, and services bill under the RENDERING NPI — organizations that bill through their therapists'' individual NPIs legitimately show no claims here. Distinct-patient counts are a FLOOR (patients overlap across procedure codes).' })
@@ -4211,7 +4349,7 @@ function Get-RmSourceAnalysis {
             $aff = @(Get-RmAffiliatedNpi -Npi $primary | Where-Object { $npiList -notcontains $_.NPI })
             if ($aff.Count) {
                 $names = @($aff | Select-Object -First 12 | ForEach-Object { "$($_.Name) ($($_.NPI))" }) -join ', '
-                "AFFILIATED CLINICIANS (Care Compare): $($aff.Count) other therapy clinician(s) share this practice's group and are NOT in this analysis: $names$(if ($aff.Count -gt 12) { ', ...' }). Care they co-billed with this practice is already counted under PRACTICE THERAPISTS, but referrals sent DIRECTLY to their personal NPIs are not - paste their NPIs together with this one for the combined picture."
+                "AFFILIATED CLINICIANS (Care Compare): $($aff.Count) other therapy clinician$(if ($aff.Count -eq 1) { ' shares' } else { 's share' }) this practice's group and $(if ($aff.Count -eq 1) { 'is' } else { 'are' }) NOT in this analysis: $names$(if ($aff.Count -gt 12) { ', ...' }). Care they co-billed with this practice is already counted under PRACTICE THERAPISTS, but referrals sent DIRECTLY to their personal NPIs are not - paste their NPIs together with this one for the combined picture."
             } } catch { $null })
         $(if ($suppNote) { $suppNote })
         $(if ($capNote) { $capNote })
@@ -4236,6 +4374,10 @@ function Get-RmSourceAnalysis {
         TherapistPatients = $therTotal       # billed by the practice's own PT/OT/SLP NPIs
         TherapistRows = @($therRows.ToArray())
         TherapistStaffVerified = @($therRows | Where-Object { $_.Staff -like 'VERIFIED*' }).Count
+        SiblingRows = @($siblingRows.ToArray())   # same-company org NPIs folded out of the ranking
+        SiblingPatients = $sibTotal
+        OutboundSiblingRows = @($outboundSibRows)
+        OutboundSiblingPatients = $outSibPatients
         PracticeRoster = @($rosterRows.ToArray())   # today's Care Compare roster (name + group-id matched)
         OutboundTherapistRows = @($outboundTherRows)  # own clinicians folded OUT of Outbound
         OutboundTherapistPatients = $outTherPatients
@@ -4480,7 +4622,7 @@ function Get-RmSourceTrend {
         $(if ($gapPairs.Count) { "IMPORT GAP: the imported years are not consecutive ($($gapPairs -join ', ')). Retention/New/Lost are blank after a gap - churn measured across several years is not comparable to annual churn. Import the in-between years to fill them in." })
         'A source "lost" may simply have fallen under the 11-patient privacy floor rather than stopped referring — treat small movements as noise and read the direction of the whole base.'
         'Medicare FFS only: Medicare Advantage enrollment grew over these years, moving patients OUT of this data. A gentle decline can reflect that shift rather than lost referrals; compare against the area trend before concluding.'
-        $(if ($moversDropped -gt 0) { "BIGGEST GAINS/DECLINES cover REFERRAL relationships only: $moversDropped therapy provider(s) that moved between $firstY and $lastY are excluded from those two tables - an individual PT/OT/SLP is a clinician co-billing (the practice's own or a rival's) and a therapy clinic is a competitor, so neither is a referral won or lost by working the relationship. They remain in the full Movers list and in every total." })
+        $(if ($moversDropped -gt 0) { "BIGGEST GAINS/DECLINES cover REFERRAL relationships only: $moversDropped therapy provider$(if ($moversDropped -ne 1) { 's' }) that moved between $firstY and $lastY $(if ($moversDropped -eq 1) { 'is' } else { 'are' }) excluded from those two tables - an individual PT/OT/SLP is a clinician co-billing (the practice's own or a rival's) and a therapy clinic is a competitor, so neither is a referral won or lost by working the relationship. They remain in the full Movers list and in every total." })
         'OUTBOUND COLUMNS: OutboundPatients/OutboundDestinations are the RAW onward flow (everyone this practice shared patients to, including its own therapists) measured in the same pass. A blank means that year''s scan was reused from an older analysis that did not carry outbound totals - re-run to fill it.'
         'The CMS 2015 FOIA file is intentionally excluded: a different (~8-month) window and methodology, not on the same scale.'
         $(if ($leadingZero.Count) { "NO MEASURED VOLUME IN $($leadingZero -join ', '): the practice may not have been enumerated or billing Medicare yet in those years, or every pair it had fell under the 11-patient floor. Growth is therefore also reported from $activeFrom, the first year with measured volume." })
@@ -4592,7 +4734,7 @@ function Export-RmReferralMapHtml {
     $generated = (Get-Date).ToString('MMMM d, yyyy')
     $mapCapNote = if (@($mapFarRows).Count) {
         $mapFarPat = 0; foreach ($fr in $mapFarRows) { $mapFarPat += [int]$fr.SharedPatients }
-        "MAP RADIUS: $(@($mapFarRows).Count) ZIP area(s) carrying $('{0:N0}' -f $mapFarPat) patients sit more than $([int]$mapFarCut) miles from the practice and are NOT drawn on the map - at that distance a dot is the source's registered corporate/HQ address (reference labs, chains, telehealth), not a place patients travel from. Those rows stay in the table below and in every total."
+        "MAP RADIUS: $(@($mapFarRows).Count) ZIP area$(if (@($mapFarRows).Count -ne 1) { 's' }) carrying $('{0:N0}' -f $mapFarPat) patients sit$(if (@($mapFarRows).Count -eq 1) { 's' }) more than $([int]$mapFarCut) miles from the practice and $(if (@($mapFarRows).Count -eq 1) { 'is' } else { 'are' }) NOT drawn on the map - at that distance a dot is the source's registered corporate/HQ address (reference labs, chains, telehealth), not a place patients travel from. Those rows stay in the table below and in every total."
     } else { $null }
     $notesHtml = (@(@($g.Notes) + @($mapCapNote)) | Where-Object { $_ } | ForEach-Object {
         '<li>' + ([System.Net.WebUtility]::HtmlEncode([string]$_)) + '</li>' }) -join "`n"
@@ -4826,7 +4968,7 @@ pts.forEach(function(p) {
     fillColor: color(p.p), fillOpacity: 0.72
   }).addTo(map);
   c.bindPopup('<b>ZIP ' + p.z + '</b> &mdash; ' + p.city + ', ' + p.st +
-    '<br/>' + p.p.toLocaleString() + ' patients (' + p.pct + '% of volume) from ' + p.s + ' source(s)' +
+    '<br/>' + p.p.toLocaleString() + ' patients (' + p.pct + '% of volume) from ' + p.s + (p.s === 1 ? ' source' : ' sources') +
     (p.d ? '<br/>' + p.d + ' miles from the practice' : '') +
     (p.top ? '<br/>Top source: ' + p.top : ''));
   group.push(c);
@@ -4929,9 +5071,17 @@ function Export-RmSourceReportHtml {
     # Old analysis objects (pre practice-therapist split) lack these fields.
     $refPat = if ($a.PSObject.Properties['ReferralPatients']) { [int]$a.ReferralPatients } else { [int]$a.TotalPatients }
     $therPat = if ($a.PSObject.Properties['TherapistPatients']) { [int]$a.TherapistPatients } else { 0 }
-    $therList = if ($a.PSObject.Properties['TherapistRows']) { @($a.TherapistRows) } else { @() }
-    $rosterList = if ($a.PSObject.Properties['PracticeRoster']) { @($a.PracticeRoster) } else { @() }
-    $outTherList = if ($a.PSObject.Properties['OutboundTherapistRows']) { @($a.OutboundTherapistRows) } else { @() }
+    $sibPat = if ($a.PSObject.Properties['SiblingPatients']) { [int]$a.SiblingPatients } else { 0 }
+    $sibList = @(if ($a.PSObject.Properties['SiblingRows']) { $a.SiblingRows })
+    # The stat band shows "inside the company" as ONE tile (own clinicians +
+    # own locations); the cards below give the split. Keeps the tile count
+    # stable and the band's arithmetic adding up to the patient base.
+    $insidePat = $therPat + $sibPat
+    $insideLabel = if ($therPat -gt 0 -and $sibPat -gt 0) { 'From inside the company' }
+                   elseif ($sibPat -gt 0) { 'From own locations' } else { 'From own clinicians' }
+    $therList = @(if ($a.PSObject.Properties['TherapistRows']) { $a.TherapistRows })
+    $rosterList = @(if ($a.PSObject.Properties['PracticeRoster']) { $a.PracticeRoster })
+    $outTherList = @(if ($a.PSObject.Properties['OutboundTherapistRows']) { $a.OutboundTherapistRows })
     # Roster rows cross-referenced with measured volume: inbound patients
     # from the practice-therapist fold, outbound from the own-clinician fold.
     $rosterVol = @{}
@@ -5070,7 +5220,8 @@ function Export-RmSourceReportHtml {
         }
         $cpSvg = ('<svg viewBox="0 0 {0} {1}" role="img" aria-label="Competitive landscape">{2}</svg>' -f $w, ($cpTop.Count * ($barH + $gap) + 10), $cpBars.ToString())
         $cpRowFmt = '<tr{0}><td class="num">{1}</td><td>{2}</td><td>{3}</td><td>{4}</td>' +
-            '<td class="num">{5}</td><td class="num">{6}</td><td class="num">{7}</td><td class="num">{8}%</td></tr>'
+            '<td class="num">{5}</td><td class="num">{6}</td><td class="num">{7}</td>' +
+            '<td class="num">{8}</td><td class="num">{9}%</td></tr>'
         $cpRows = (@($cpShown) | ForEach-Object {
             $tag = if ($_.You) { ' class="you"' } else { '' }
             # A chain competitor gets the asterisk right on its name: the row
@@ -5078,16 +5229,23 @@ function Export-RmSourceReportHtml {
             $chainMark = if ($_.PSObject.Properties['Chain'] -and $_.Chain) { ' <span class="chain" title="One clinic of a multi-site company">*</span>' } else { '' }
             $nmCell = (_h ([string]$_.Name)) + $chainMark + $(if ($_.You) { ' <span class="youtag">YOU</span>' } else { '' })
             $miles = if ($_.DistanceMiles -is [double]) { '{0:N1}' -f $_.DistanceMiles } else { '' }
+            $sitesCell = if ($_.PSObject.Properties['Sites'] -and [int]$_.Sites -gt 1) { '{0:N0}' -f [int]$_.Sites } else { '&mdash;' }
             $cpRowFmt -f $tag, $_.Rank, $nmCell,
                 (_h ([string]$_.Type)),
                 (_h (("{0}, {1} {2}" -f $_.City, $_.State, $_.Zip).Trim(', ').Trim())),
-                $miles, ('{0:N0}' -f $_.ReferralSources), ('{0:N0}' -f $_.SharedPatients), $_.SharePct
+                $miles, $sitesCell, ('{0:N0}' -f $_.ReferralSources), ('{0:N0}' -f $_.SharedPatients), $_.SharePct
         }) -join "`n"
         $cpHidden = [math]::Max(0, $comp.ProviderCount - @($cpShown).Count)
         $cpNote = ("$('{0:N0}' -f $comp.ProviderCount) outpatient rehab provider$(if ($comp.ProviderCount -ne 1) { 's' }) " +
             "$(if ($comp.ProviderCount -eq 1) { 'is' } else { 'are' }) listed within $($comp.RadiusMiles) miles; " +
             "$('{0:N0}' -f $comp.ProvidersWithVolume) $(if ($comp.ProvidersWithVolume -eq 1) { 'has' } else { 'have' }) measured referral volume in $($a.Year).") +
             $(if ($cpHidden -gt 0) { " The other $('{0:N0}' -f $cpHidden) $(if ($cpHidden -eq 1) { 'is' } else { 'are' }) not shown here — every pair they had (if any) fell under the 11-patient privacy floor." }) +
+            $(if ($comp.PSObject.Properties['MergedCompanies'] -and $comp.MergedCompanies -gt 0) {
+                " Each company appears ONCE: $($comp.MergedCompanies) operator$(if ($comp.MergedCompanies -eq 1) { ' here runs' } else { 's here run' }) several clinics in this area, so their locations are combined into a single row — volume summed, feeding practices counted once even when they feed two of its sites, and shown at the location closest to you. The Sites column gives the number of locations combined." }) +
+            $(if ($comp.PSObject.Properties['OwnOtherSites'] -and $comp.OwnOtherSites -gt 0) {
+                " $($comp.OwnOtherSites) location$(if ($comp.OwnOtherSites -eq 1) { ' trading under this practice''s own name is NOT ranked here — it is one of its own clinics, not a competitor' } else { 's trading under this practice''s own name are NOT ranked here — they are its own clinics, not competitors' })" +
+                $(if ($comp.OwnOtherSitePatients -gt 0) { " (a further $('{0:N0}' -f $comp.OwnOtherSitePatients) measured patients)" }) +
+                ". Analyze those NPIs together with this one for a company-wide picture." }) +
             $(if ($comp.PSObject.Properties['ChainCount'] -and $comp.ChainCount -gt 0) {
                 " An asterisk (*) marks a competitor that is one clinic of a MULTI-SITE COMPANY — its organization name is registered by more than $($script:RmChainNpiThreshold) organization NPIs, so the row is a slice of a larger operator, not an independent practice. $($comp.ChainCount) of the ranked providers carry it." })
         $compHtml = @"
@@ -5095,7 +5253,7 @@ function Export-RmSourceReportHtml {
 <div class="body">$cpSvg</div>
 <table>
   <tr><th class="num">#</th><th>Practice</th><th>Type</th><th>Location</th>
-      <th class="num">Miles</th><th class="num">Sources</th><th class="num">Patients</th><th class="num">Area share</th></tr>
+      <th class="num">Miles</th><th class="num">Sites</th><th class="num">Sources</th><th class="num">Patients</th><th class="num">Area share</th></tr>
   $cpRows
 </table>
 <div class="tablenote">$cpNote The analyzed practice's own row is always shown, even when it ranks below the top 15. Equal volumes share a rank. A practice's volume can be split across its organization and individual therapist NPIs.</div>
@@ -5104,7 +5262,7 @@ function Export-RmSourceReportHtml {
     }
 
     # ---- Outreach targets (missed sources) -------------------------------
-    $missList = if ($a.PSObject.Properties['MissedSources']) { @($a.MissedSources) } else { @() }
+    $missList = @(if ($a.PSObject.Properties['MissedSources']) { $a.MissedSources })
     $outreachHtml = ''
     if (@($missList).Count) {
         $mRows = (@($missList) | ForEach-Object {
@@ -5321,7 +5479,7 @@ $lossRows
     # explains an offline background instead of showing a broken white box.
     # Unlike the standalone map there is NO CDN fallback — this report's
     # contract is fully-self-contained, so a missing bundle skips the map.
-    $geo = if ($a.PSObject.Properties['Geo']) { @($a.Geo) } else { @() }
+    $geo = @(if ($a.PSObject.Properties['Geo']) { $a.Geo })
     $geoCardHtml = ''
     $lfCss = ''; $lfJs = ''
     if ($hasVolume -and $geo.Count -gt 0) {
@@ -5361,7 +5519,7 @@ $lossRows
             }) -Compress
             # Market-capture layer + competitor pins (present only when the
             # local NPPES index made them computable).
-            $mkt = if ($a.PSObject.Properties['GeoMarket']) { @($a.GeoMarket) } else { @() }
+            $mkt = @(if ($a.PSObject.Properties['GeoMarket']) { $a.GeoMarket })
             $mktJson = ConvertTo-Json -Compress -Depth 4 -InputObject @(@($mkt) | ForEach-Object {
                 [ordered]@{ z = $_.Zip; lat = [double]$_.Lat; lon = [double]$_.Lon
                             mine = [int]$_.MyPatients; area = [int]$_.AreaPatients
@@ -5391,7 +5549,7 @@ $lossRows
             $zipNote = "Top $([math]::Min(15, $geo.Count)) of $('{0:N0}' -f $geo.Count) source ZIP areas; " +
                 "$('{0:N0}' -f $geoMapped) of $('{0:N0}' -f $refPat) external-source patients mappable" +
                 $(if ($geoUn -gt 0) { " ($('{0:N0}' -f $geoUn) from sources without a locatable ZIP)" }) + '.' +
-                $(if (@($geoFarRows).Count) { " MAP RADIUS: $(@($geoFarRows).Count) ZIP area(s) carrying $('{0:N0}' -f $geoFarPat) patients sit more than $([int]$geoFarCut) miles away and are NOT drawn - at that distance a dot is the source's registered corporate/HQ address (reference labs, chains, telehealth), not a place patients travel from. Those rows stay in this table and in every total." }) +
+                $(if (@($geoFarRows).Count) { " MAP RADIUS: $(@($geoFarRows).Count) ZIP area$(if (@($geoFarRows).Count -ne 1) { 's' }) carrying $('{0:N0}' -f $geoFarPat) patients sit$(if (@($geoFarRows).Count -eq 1) { 's' }) more than $([int]$geoFarCut) miles away and $(if (@($geoFarRows).Count -eq 1) { 'is' } else { 'are' }) NOT drawn - at that distance a dot is the source's registered corporate/HQ address (reference labs, chains, telehealth), not a place patients travel from. Those rows stay in this table and in every total." }) +
                 $(if ($a.PSObject.Properties['DistantNote'] -and $a.DistantNote) { ' ' + $a.DistantNote })
             $capNoteHtml = if (@($mkt).Count) {
                 'AREA / CAPTURE columns: total therapy volume that ZIP sends to ANY comparable provider within the radius, and this practice''s share of it. A big ZIP with a low capture rate is an outreach target.'
@@ -5463,7 +5621,7 @@ $lossRows
       radius: 6 + 30 * Math.sqrt(p.p / maxP), color: '#26333e', weight: 1,
       fillColor: volColor(p.p), fillOpacity: 0.72
     }).addTo(mineLayer).bindPopup('<b>ZIP ' + p.z + '</b> &mdash; ' + esc(p.city) + ', ' + esc(p.st) +
-      '<br/>' + p.p.toLocaleString() + ' patients (' + p.pct + '% of your volume) from ' + p.s + ' source(s)' +
+      '<br/>' + p.p.toLocaleString() + ' patients (' + p.pct + '% of your volume) from ' + p.s + (p.s === 1 ? ' source' : ' sources') +
       (p.d ? '<br/>' + p.d + ' miles from the practice' : '') +
       (lines.length ? '<br/><br/><b>Top sources here:</b><br/>' + lines.join('<br/>') : ''));
   });
@@ -5574,8 +5732,10 @@ $lossRows
     $nearVol = 0; foreach ($b in @($a.DistanceBands)) { if ($b.Band -in '0-5 mi', '5-10 mi') { $nearVol += [int]$b.SharedPatients } }
     $near = if ($refPat -gt 0) { [math]::Round(100.0 * $nearVol / $refPat, 1) } else { 0 }
     $findings = @(
-        $(if ($therPat -gt 0) {
-            "The practice's measured Medicare patient base was $('{0:N0}' -f $a.TotalPatients) shared patients in $($a.Year): $('{0:N0}' -f $refPat) from $('{0:N0}' -f $a.SourceCount) external referral source(s), plus $('{0:N0}' -f $therPat) billed by its own $(@($therList).Count) PT/OT/SLP clinician(s) (their volume is the practice's own caseload, not referrals)."
+        $(if ($insidePat -gt 0) {
+            "The practice's measured Medicare patient base was $('{0:N0}' -f $a.TotalPatients) shared patients in $($a.Year): $('{0:N0}' -f $refPat) from $('{0:N0}' -f $a.SourceCount) external referral source$(if ($a.SourceCount -ne 1) { 's' })" +
+            $(if ($therPat -gt 0) { ", plus $('{0:N0}' -f $therPat) billed by its own $(@($therList).Count) PT/OT/SLP clinician$(if (@($therList).Count -ne 1) { 's' }) (their volume is the practice's own caseload, not referrals)" }) +
+            $(if ($sibPat -gt 0) { ", plus $('{0:N0}' -f $sibPat) moving between the company's own location$(if (@($sibList).Count -ne 1) { 's' }) (internal flow, not referrals)" }) + "."
         } else {
             "The practice drew $('{0:N0}' -f $a.TotalPatients) shared Medicare patients from $('{0:N0}' -f $a.SourceCount) distinct sources in $($a.Year)."
         })
@@ -5583,7 +5743,7 @@ $lossRows
         $(if ($a.PSObject.Properties['AtRiskSources'] -and @($a.AtRiskSources).Count) {
             $arp = 0; foreach ($ar in @($a.AtRiskSources)) { $arp += [int]$ar.SharedPatients }
             $arTop = @($a.AtRiskSources | Sort-Object SharedPatients -Descending | Select-Object -First 3 | ForEach-Object { "$($_.SourceName)" })
-            "AT RISK: $(@($a.AtRiskSources).Count) referral source(s) carrying $('{0:N0}' -f $arp) patients in $($a.Year) are no longer Medicare order-&-refer eligible today (retired, deactivated, or dis-enrolled) - starting with $($arTop -join ', '). Their future Medicare referrals would deny; the source table flags each one."
+            "AT RISK: $(@($a.AtRiskSources).Count) referral source$(if (@($a.AtRiskSources).Count -ne 1) { 's' }) carrying $('{0:N0}' -f $arp) patients in $($a.Year) are no longer Medicare order-&-refer eligible today (retired, deactivated, or dis-enrolled) - starting with $($arTop -join ', '). Their future Medicare referrals would deny; the source table flags each one."
         })
         $(if ($hasVolume) { "Source concentration is $($a.Concentration) (HHI $('{0:N0}' -f $a.HHI) on a 0-10,000 scale)." })
         $(if ($hasVolume) {
@@ -5645,51 +5805,6 @@ $lossRows
     ) | Where-Object { $_ }
     $findingsHtml = (@($findings) | ForEach-Object { '<li>' + (_h (_client ([string]$_))) + '</li>' }) -join "`n"
 
-    # ---- Where to focus: the findings turned into owner-facing actions ----
-    # Every item is driven by this practice's own measured numbers; an item
-    # that does not apply simply is not written (no filler advice).
-    $missListF = if ($a.PSObject.Properties['MissedSources']) { @($a.MissedSources) } else { @() }
-    $riskListF = if ($a.PSObject.Properties['AtRiskSources']) { @($a.AtRiskSources) } else { @() }
-    # Precomputed: an `if` expression cannot be passed straight in as a
-    # function ARGUMENT (PowerShell parses the `if` as a command name).
-    $s1Name = if ($s1) { if ($s1.SourceName) { _h ([string]$s1.SourceName) } else { "NPI $($s1.SourceNPI)" } } else { '' }
-    $actions = @(
-        $(if (@($riskListF).Count) {
-            $arp = 0; foreach ($ar in $riskListF) { $arp += [int]$ar.SharedPatients }
-            $n1 = @($riskListF | Sort-Object SharedPatients -Descending | Select-Object -First 1)[0]
-            "<b>Confirm $(@($riskListF).Count) referring provider$(if (@($riskListF).Count -ne 1) { 's are' } else { ' is' }) still able to refer.</b> They accounted for $('{0:N0}' -f $arp) of your measured patients in $($a.Year), and none appears on Medicare's current order-and-referring list &mdash; starting with $(_h ([string]$n1.SourceName)). Retirement or a lapsed enrollment is the usual reason. Medicare claims for therapy they refer today would be denied, so verify before the next episode is billed."
-        })
-        $(if (@($missListF).Count) {
-            $mp = 0; foreach ($ms in $missListF) { $mp += [int]$ms.PatientsToCompetitors }
-            $m1 = @($missListF)[0]
-            $mr = if ($a.PSObject.Properties['OutreachRadiusMiles']) { [int]$a.OutreachRadiusMiles } else { 50 }
-            "<b>Work the outreach list &mdash; $('{0:N0}' -f $mp) patients are going elsewhere.</b> $(@($missListF).Count) practices within $mr miles sent that volume to other therapy providers in $($a.Year) and nothing measurable to you. The largest, $(_h ([string]$m1.SourceName)) ($(_h ([string]$m1.SourceSpecialty))), is $($m1.DistanceMiles) miles away and sent $('{0:N0}' -f [int]$m1.PatientsToCompetitors). Start there."
-        })
-        $(if ($hasVolume -and $a.HHI -ge 2500 -and $s1) {
-            "<b>Reduce dependence on your largest referrer.</b> $s1Name alone accounts for $($s1.PctOfVolume)% of your referral volume and your top five for $($a.Top5Pct)%. At this concentration (HHI $('{0:N0}' -f $a.HHI)), losing one relationship materially moves the practice. Protect it, and add depth from the outreach list."
-        } elseif ($hasVolume -and $a.Top5Pct -ge 60 -and $s1) {
-            "<b>Watch your top-five concentration.</b> Five referrers account for $($a.Top5Pct)% of measured volume, led by $s1Name at $($s1.PctOfVolume)%. That is a manageable but real dependence: keep those relationships warm and broaden the base."
-        })
-        $(if (@($therList).Count -and $therPat -gt 0) {
-            $vst = @($therList | Where-Object { $_.Staff -like 'VERIFIED*' }).Count
-            $gone = @($therList | Where-Object { $_.Staff -like '*now at*' })
-            "<b>$('{0:N0}' -f $therPat) patients came through your own clinicians, not outside referrals.</b> That volume is your existing caseload billed under $(@($therList).Count) individual therapist NPI$(if (@($therList).Count -ne 1) { 's' }) ($vst confirmed on your current Medicare roster), so it is counted in your patient base and kept out of the referral ranking." +
-            $(if (@($gone).Count) { " $(@($gone).Count) of those clinician$(if (@($gone).Count -ne 1) { 's' }) now bill$(if (@($gone).Count -eq 1) { 's' }) under another practice &mdash; worth knowing where that volume went." })
-        })
-        $(if ($tr -and @($tr.Years).Count -ge 2 -and $tr.VolumeChangePct -ne '' -and [double]$tr.VolumeChangePct -lt -5) {
-            "<b>Measured referral volume is down $([math]::Abs($tr.VolumeChangePct))% since $($tr.FirstYear).</b> Read it alongside the retention columns: a decline driven by lost referrers is an outreach problem, while one spread evenly across kept relationships usually reflects Medicare Advantage growth pulling patients out of this data entirely."
-        } elseif ($tr -and @($tr.Years).Count -ge 2 -and $tr.VolumeChangePct -ne '' -and [double]$tr.VolumeChangePct -gt 5) {
-            "<b>Measured referral volume is up $($tr.VolumeChangePct)% since $($tr.FirstYear).</b> The year-over-year table shows whether that came from new referrers or deeper volume from existing ones &mdash; protect whichever is carrying the growth."
-        })
-        $(if ($comp -and $comp.Rank -and $a.TotalPatients -gt 0) {
-            "<b>You rank #$($comp.Rank) of $('{0:N0}' -f $comp.ProviderCount) therapy providers within $($comp.RadiusMiles) miles</b>, holding $($comp.SharePct)% of the area's measured referral volume. The competitive table shows who sits above you and where their volume comes from."
-        })
-    ) | Where-Object { $_ }
-    $actionsHtml = if (@($actions).Count) {
-        '<div class="card"><h2>Where to focus</h2><div class="body"><ol class="focus">' +
-        ((@($actions) | ForEach-Object { '<li>' + $_ + '</li>' }) -join "`n") +
-        '</ol></div></div>'
-    } else { '' }
 
     # ---- Tables ----------------------------------------------------------
     # Older analysis objects predate the SharedBack / Eligibility columns.
@@ -5926,8 +6041,8 @@ __RM_LEAFLET_JS__
 <p class="sub">NPI $($a.Npi)$(if ($a.PSObject.Properties['NpiCount'] -and $a.NpiCount -gt 1) { " (+$($a.NpiCount - 1) affiliated NPI$(if ($a.NpiCount -gt 2) { 's' }) combined)" }) &middot; $(_h ("$($a.Practice.City), $($a.Practice.State) $($a.Practice.Zip)")) &middot; Inbound Medicare shared-patient volume, $($a.Year).</p>
 <div class="stats">
   <div class="stat"><b>$('{0:N0}' -f $a.TotalPatients)</b><span>Measured patient base</span></div>
-$(if ($therPat -gt 0) { '  <div class="stat"><b>' + ('{0:N0}' -f $refPat) + '</b><span>From outside referrers</span></div>' })
-$(if ($therPat -gt 0) { '  <div class="stat"><b>' + ('{0:N0}' -f $therPat) + '</b><span>From own clinicians</span></div>' })
+$(if ($insidePat -gt 0) { '  <div class="stat"><b>' + ('{0:N0}' -f $refPat) + '</b><span>From outside referrers</span></div>' })
+$(if ($insidePat -gt 0) { '  <div class="stat"><b>' + ('{0:N0}' -f $insidePat) + '</b><span>' + $insideLabel + '</span></div>' })
   <div class="stat"><b>$('{0:N0}' -f $a.SourceCount)</b><span>Referral sources</span></div>
   <div class="stat"><b>$(if ($hasVolume) { "$($a.Top1Pct)%" } else { '&mdash;' })</b><span>From top source</span></div>
   <div class="stat"><b>$(if ($hasVolume) { "$($a.Top5Pct)%" } else { '&mdash;' })</b><span>Top-5 dependence</span></div>
@@ -5938,7 +6053,6 @@ $profileHtml
 <div class="card"><h2>Key findings</h2><div class="body"><ul class="findings">
 $findingsHtml
 </ul></div></div>
-$actionsHtml
 $(if ($hasVolume) { @"
 <div class="card"><h2>Top referral sources</h2><div class="body">$barSvg</div></div>
 <div class="duo">
@@ -5989,6 +6103,20 @@ $(if (@($therList).Count) { @"
         '<tr><td class="mono">{0}</td><td>{1}</td><td>{2}</td><td class="num">{3}</td><td>{4}</td></tr>' -f
             $_.SourceNPI, (_h ([string]$_.SourceName)), (_h ([string]$_.SourceSpecialty)),
             ('{0:N0}' -f [int]$_.SharedPatients), (_h ([string]$_.Staff))
+    }) -join "`n")
+  </table>
+</div>
+"@ })
+$(if (@($sibList).Count) { @"
+<div class="card">
+  <h2>Your other locations &mdash; internal patient flow</h2>
+  <div class="body"><p>These organization NPIs share the practice's company name &mdash; a company that runs several clinics registers an NPI per location, and patients moving between its own locations are recorded against those NPIs. That is <b>internal patient flow, not external referrals</b>, so their $('{0:N0}' -f $sibPat) patients are counted in the measured patient base above and kept out of the referral ranking &mdash; exactly as the competitive landscape declines to rank these locations as competitors. For one company-wide view, run the analysis with these NPIs pasted alongside the primary NPI.</p></div>
+  <table>
+    <tr><th>NPI</th><th>Location</th><th>Specialty</th><th class="num">Patients</th></tr>
+    $(@($sibList | ForEach-Object {
+        '<tr><td class="mono">{0}</td><td>{1}</td><td>{2}</td><td class="num">{3}</td></tr>' -f
+            $_.SourceNPI, (_h ([string]$_.SourceName)), (_h ([string]$_.SourceSpecialty)),
+            ('{0:N0}' -f [int]$_.SharedPatients)
     }) -join "`n")
   </table>
 </div>
@@ -6969,6 +7097,42 @@ function Get-RmOrgNameKey([string]$Name) {
     $n = [regex]::Replace($n, '\b[A-Z](?: [A-Z]\b)+', { $args[0].Value -replace ' ', '' })
     $n = [regex]::Replace($n, "\b($script:RmOrgNoiseWords)\b", ' ')
     [regex]::Replace($n, '\s+', ' ').Trim()
+}
+
+# State names spelled out vs postal codes: '... OF GEORGIA, LLC' and
+# '... OF GA, LLC' are one operator registered two ways (live finding in
+# the Atlanta landscape). Longest names FIRST so 'WEST VIRGINIA' never
+# half-matches as 'WEST ' + VA. Used ONLY for landscape row grouping -
+# the chain index keeps the plain org-name key (its C# twin is pinned by
+# the drift test and rebuilding every user's index is not worth it).
+$script:RmStateAbbrevMap = @{
+    'ALABAMA'='AL'; 'ALASKA'='AK'; 'ARIZONA'='AZ'; 'ARKANSAS'='AR'; 'CALIFORNIA'='CA'
+    'COLORADO'='CO'; 'CONNECTICUT'='CT'; 'DELAWARE'='DE'; 'FLORIDA'='FL'; 'GEORGIA'='GA'
+    'HAWAII'='HI'; 'IDAHO'='ID'; 'ILLINOIS'='IL'; 'INDIANA'='IN'; 'IOWA'='IA'
+    'KANSAS'='KS'; 'KENTUCKY'='KY'; 'LOUISIANA'='LA'; 'MAINE'='ME'; 'MARYLAND'='MD'
+    'MASSACHUSETTS'='MA'; 'MICHIGAN'='MI'; 'MINNESOTA'='MN'; 'MISSISSIPPI'='MS'; 'MISSOURI'='MO'
+    'MONTANA'='MT'; 'NEBRASKA'='NE'; 'NEVADA'='NV'; 'NEW HAMPSHIRE'='NH'; 'NEW JERSEY'='NJ'
+    'NEW MEXICO'='NM'; 'NEW YORK'='NY'; 'NORTH CAROLINA'='NC'; 'NORTH DAKOTA'='ND'; 'OHIO'='OH'
+    'OKLAHOMA'='OK'; 'OREGON'='OR'; 'PENNSYLVANIA'='PA'; 'RHODE ISLAND'='RI'; 'SOUTH CAROLINA'='SC'
+    'SOUTH DAKOTA'='SD'; 'TENNESSEE'='TN'; 'TEXAS'='TX'; 'UTAH'='UT'; 'VERMONT'='VT'
+    'VIRGINIA'='VA'; 'WASHINGTON'='WA'; 'WEST VIRGINIA'='WV'; 'WISCONSIN'='WI'; 'WYOMING'='WY'
+    'DISTRICT OF COLUMBIA'='DC'
+}
+$script:RmStateNameRegex = $null
+
+function Get-RmLandscapeNameKey([string]$Name) {
+    # Grouping key for competitive-landscape rows: the org-name key with
+    # whole-word state NAMES collapsed to postal codes. NOTE: 'PA'/'SC'
+    # etc. as corporate suffixes are already stripped by the noise-word
+    # pass inside Get-RmOrgNameKey before this substitution runs.
+    $k = Get-RmOrgNameKey $Name
+    if (-not $k) { return $k }
+    if ($null -eq $script:RmStateNameRegex) {
+        $alts = @($script:RmStateAbbrevMap.Keys | Sort-Object { -$_.Length } | ForEach-Object { [regex]::Escape($_) })
+        $script:RmStateNameRegex = New-Object regex ('\b(' + ($alts -join '|') + ')\b')
+    }
+    $k = $script:RmStateNameRegex.Replace($k, { param($m) $script:RmStateAbbrevMap[$m.Groups[1].Value] })
+    [regex]::Replace($k, '\s+', ' ').Trim()
 }
 
 # Matching a user-typed organization name against stored name keys.
