@@ -4095,6 +4095,15 @@ function Get-RmSourceAnalysis {
                     # the top of a prospect list), not winnable referral flow.
                     # Rival relationships belong in the landscape card.
                     if ($sp -match 'CLINIC|CENTER' -and $sp -match 'PHYSICAL THERAP|OCCUPATIONAL THERAP|SPEECH|REHABILITATION') { continue }
+                    # ...and the NAME test catches rivals hiding behind the
+                    # legacy generic 'Specialist' taxonomy (live sampling:
+                    # 'Base Physical Therapy LLC' with label 'Specialist').
+                    $mName = if ($d) { [string]$d.Name } else { '' }
+                    if (Test-RmTherapyPracticeName $mName) { continue }
+                    # A source whose NPPES record cannot be resolved to a name
+                    # is not a callable prospect (usually deactivated since
+                    # the data year - a retired practice, not a target).
+                    if (-not $mName -or $mName -like '(NPI deactivated*' -or $mName -like '(lookup failed*') { continue }
                     $mz = if ($d -and $null -ne $d.PSObject.Properties['Zip'] -and ([string]$d.Zip) -match '^\d{5}$') { [string]$d.Zip } else { '' }
                     $missKeep.Add([pscustomobject]@{
                         SourceNPI = $mc.Key
