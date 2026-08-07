@@ -546,6 +546,9 @@ $xaml = @'
             <Button x:Name="LkSaveReportButton" Content="Save report (HTML)..." Padding="10,4" Margin="8,0,0,0" IsEnabled="False"/>
             <Button x:Name="LkFullReportButton" Content="Full report (one-stop)..." Padding="10,5" Margin="10,0,0,0" FontWeight="SemiBold"
                     ToolTip="Everything in ONE document: the complete source analysis with metrics and charts, the embedded referral heat map with market-capture layers, year-over-year trendlines across every imported CareSet year, outbound destinations, Medicare eligibility, practice-group memberships, competitive landscape, findings, and methodology. Pick where to save first; the big scans then run and the report opens when done."/>
+            <TextBlock Text="Prepared by:" VerticalAlignment="Center" Margin="14,0,5,0"/>
+            <TextBox x:Name="LkPreparedByBox" Width="180" Height="26" VerticalContentAlignment="Center"
+                     ToolTip="Your firm or your name. It is stamped on the report masthead and footer of the client deliverable, and remembered for next time. Leave blank to omit the branding."/>
             <CheckBox x:Name="LkTrendCheck" Content="Include year-over-year" VerticalAlignment="Center" Margin="12,0,0,0"
                       ToolTip="Also measure performance across EVERY imported CareSet year: volume and source count per year, source retention (kept / new / lost), and the biggest gains and declines. Adds a full scan per year, so it takes several minutes longer."/>
           </WrapPanel>
@@ -673,7 +676,7 @@ foreach ($name in @(
     'ChDataStatus', 'ChSetupButton', 'ChNppesButton',
     'ChNameBox', 'ChStateBox', 'ChZipBox', 'ChNpiButton', 'ChAddrButton', 'ChExportButton', 'ChToLookupButton',
     'ChLabel', 'ChGrid', 'ChSummary',
-    'LkNpiBox', 'LkRunButton', 'LkTrendButton', 'LkExportTrendButton',
+    'LkNpiBox', 'LkRunButton', 'LkTrendButton', 'LkExportTrendButton', 'LkPreparedByBox',
     'LkGeoButton', 'LkSaveMapButton', 'LkAnalysisButton', 'LkSaveReportButton', 'LkFullReportButton', 'LkTrendCheck', 'LkDetail',
     'LkInboundLabel', 'LkExportInboundButton',
     'LkInboundGrid', 'LkOutboundLabel', 'LkExportOutboundButton', 'LkOutboundGrid',
@@ -2743,6 +2746,8 @@ $ui.LkFullReportButton.Add_Click({
     # threw away the whole scan. Every other handler here uses $script: for
     # exactly this reason.
     $script:LkFullPath = $dialog.FileName
+    # Read the UI field here, on the UI thread: OnDone runs later.
+    $script:LkFullPreparedBy = ([string]$ui.LkPreparedByBox.Text).Trim()
 
     # Trend is automatic in the one-stop report whenever 2+ CareSet years
     # exist - that is what one-stop means. It costs a full scan per year.
@@ -2801,6 +2806,7 @@ $ui.LkFullReportButton.Add_Click({
                     Analysis = $r.Analysis; Path = $script:LkFullPath
                     Provider = $r.Detail; EligibilityLine = $script:LkFullElig
                     Outbound = @($r.Outbound)
+                    PreparedBy = $script:LkFullPreparedBy
                 }
                 if ($null -ne $r.Groups) { $renderArgs['Groups'] = @($r.Groups) }
                 $rep = Export-RmSourceReportHtml @renderArgs
@@ -2858,7 +2864,8 @@ $ui.LkSaveReportButton.Add_Click({
     $dialog.FileName = "source-analysis-$($script:LkAnalysis.Npi).html"
     if (-not $dialog.ShowDialog($window)) { return }
     try {
-        $r = Export-RmSourceReportHtml -Analysis $script:LkAnalysis -Path $dialog.FileName
+        $r = Export-RmSourceReportHtml -Analysis $script:LkAnalysis -Path $dialog.FileName `
+            -PreparedBy ([string]$ui.LkPreparedByBox.Text).Trim()
         $csvPath = [System.IO.Path]::ChangeExtension($dialog.FileName, '.csv')
         @($script:LkAnalysis.Sources) |
             Export-RmResult -Path $csvPath -Notes @($script:LkAnalysis.Notes) `
@@ -2959,6 +2966,13 @@ try { Clear-PgStaleTemp -OlderThanMinutes 2 } catch { }
 Update-StatusFromDisk
 Update-RmStatus
 Update-PgStatus
+# Remember the consultant's firm name across sessions; it brands the
+# client deliverable's masthead and footer.
+try { $ui.LkPreparedByBox.Text = Get-RmPreparedBy } catch { }
+$ui.LkPreparedByBox.Add_LostFocus({
+    try { Set-RmPreparedBy -Name $ui.LkPreparedByBox.Text | Out-Null } catch { }
+})
+
 if (Get-OrfLatestSnapshot) { Start-DataLoad }
 
 # Safety net: any unhandled exception in a click/UI handler is shown in a

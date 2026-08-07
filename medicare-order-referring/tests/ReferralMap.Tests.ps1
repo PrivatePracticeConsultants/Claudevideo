@@ -2969,6 +2969,19 @@ Describe 'Client-deliverable report' {
         $script:DelivHtml | Should -Not -BeLike '*@import*'
     }
 
+    It 'remembers the prepared-by name across sessions' {
+        try {
+            Set-RmPreparedBy -Name '  Mihama Acquisitions  ' | Out-Null
+            Get-RmPreparedBy | Should -Be 'Mihama Acquisitions'      # trimmed
+            # a stray newline pasted from a signature block must not break
+            # the single-line masthead
+            Set-RmPreparedBy -Name "Two`r`nLines" | Out-Null
+            Get-RmPreparedBy | Should -Be 'Two Lines'
+            Set-RmPreparedBy -Name '' | Out-Null
+            Get-RmPreparedBy | Should -Be ''
+        } finally { Set-RmPreparedBy -Name '' | Out-Null }
+    }
+
     It 'still renders without a prepared-by line' {
         $out2 = Join-Path $script:WorkDir 'deliverable-nobrand.html'
         Export-RmSourceReportHtml -Analysis $script:DelivSa -Path $out2 | Out-Null

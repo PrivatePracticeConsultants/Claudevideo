@@ -528,8 +528,22 @@ practice-therapists section are labeled with the practice they bill under
 **today** (an ex-employee at a rival is a competitor, not history); and an
 **Outreach targets** card — the biggest referrers feeding your competitors
 with no measured flow into this practice (their own clinicians excluded),
-saved as an `.outreach.csv` call sheet beside the report. The year-over-year
-table also carries **outbound** volume per year. a
+saved as an `.outreach.csv` call sheet beside the report &mdash; and only
+prospects **within 50 miles** are listed, because a referrer registered
+hundreds of miles away is a corporate address, not somewhere to visit. The
+year-over-year table also carries **outbound** volume per year, and its
+**biggest gains / declines** tables now cover non-therapy specialties only
+(another therapy practice is a competitor, not a referral you win or lose).
+
+**The report is a client deliverable.** It is written to be handed to the
+practice owner: an editorial cover with the practice name as the title, your
+firm on the *Prepared by* line (type it once in the **Prepared by** box on
+this tab &mdash; it is remembered), a numbered **Where to focus** section that
+turns the findings into specific next steps using that practice's own
+numbers, and a confidentiality line plus a plain list of data sources in the
+footer. It names the data and its calendar year but not the commercial
+company the data is licensed from. Everything is self-contained in the one
+HTML file, prints cleanly, and reads correctly on a phone or iPad. a
 top-sources chart, the specialty mix of the referral base, a concentration
 curve, volume by distance from the practice, an embedded **referral-geography
 heat map** (one circle per source ZIP, sized and colored by volume, your

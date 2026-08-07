@@ -6502,6 +6502,37 @@ function Get-RmIndexPrimaryCode([string[]]$f) {
     }
     if ($f.Count -gt 8) { $f[8] } else { '' }
 }
+function Get-RmPreparedByPath { Join-Path $script:RmConfig.DataDir 'prepared-by.txt' }
+
+function Get-RmPreparedBy {
+    <#
+    .SYNOPSIS
+      The consulting firm / author name stamped on client deliverables.
+      Empty string when never set - the report then omits the branding.
+    #>
+    $p = Get-RmPreparedByPath
+    if (-not (Test-Path -LiteralPath $p)) { return '' }
+    try { ([string](Get-Content -LiteralPath $p -Raw -ErrorAction Stop)).Trim() } catch { '' }
+}
+
+function Set-RmPreparedBy {
+    <#
+    .SYNOPSIS
+      Stores the firm name used on client deliverables. Passing an empty
+      string clears it. Kept in a plain text file beside the data so it
+      survives restarts without a settings system.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Name)
+    Initialize-RmDataDir | Out-Null
+    $clean = ($Name -replace '[\r\n]+', ' ').Trim()
+    if ($clean.Length -gt 120) { $clean = $clean.Substring(0, 120).Trim() }
+    $p = Get-RmPreparedByPath
+    if (-not $clean) { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue; return '' }
+    [System.IO.File]::WriteAllText($p, $clean, (New-Object System.Text.UTF8Encoding($false)))
+    $clean
+}
+
 function Get-RmDacIndexPath { Join-Path $script:RmConfig.DataDir 'care-compare-index.psv' }
 
 $script:RmNuccNames = $null
@@ -7420,6 +7451,7 @@ Export-ModuleMember -Function @(
     'Save-RmDataset', 'Import-RmDataset',
     'Find-RmClinic', 'Find-RmPractice', 'Get-RmProviderDetail',
     'Get-RmZipsInRadius', 'Get-RmUnderservedAreas',
+    'Get-RmPreparedBy', 'Set-RmPreparedBy',
     'Get-RmReferralMap', 'Get-RmInboundByBucket', 'Get-RmGroupBenchmark', 'Get-RmGroupMissedSources',
     'Get-RmGroupTrend',
     'Get-RmProviderReferralActivity',
