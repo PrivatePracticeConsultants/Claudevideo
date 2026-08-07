@@ -4963,7 +4963,10 @@ function Export-RmSourceReportHtml {
     $barSvg = ('<svg viewBox="0 0 {0} {1}" role="img" aria-label="Top referral sources">{2}</svg>' -f $w, $h, $bars.ToString())
 
     # ---- Chart 2: specialty donut (top 6 + other) ------------------------
-    $palette = @('#2c5f8a', '#4f7ca6', '#7fa3c2', '#aec6da', '#c98f3d', '#7d8a96', '#c4cdd5')
+    # Deliverable palette: navy stepping down to steel, with the gold
+    # accent reserved for one slice so the ring reads as a hierarchy
+    # rather than a rainbow.
+    $palette = @('#0c2340', '#16385f', '#3c5a7d', '#6f8ba6', '#C8A96E', '#9fb2c4', '#d3dbe3')
     $mixTop = @($a.SpecialtyMix | Select-Object -First 6)
     # "Other" from raw VOLUMES, rounded once (100 minus a sum of rounded
     # slice percentages drifts; the audit flagged the pattern).
@@ -5748,7 +5751,13 @@ __RM_LEAFLET_JS__
      long names/URLs in cells wrap instead of stretching the table. */
   p, li { text-wrap:pretty; overflow-wrap:break-word; }
   h1, h2, h3, .stat span, .kicker { text-wrap:balance; }
-  td { overflow-wrap:anywhere; }
+  td { overflow-wrap:break-word; }
+  /* Identifiers and figures are atomic - never hyphenate an NPI or
+     split a rank across lines. Dense tables get a floor width and the
+     card scrolls (its overflow-x) instead of crushing words. */
+  td.mono, td.num, th.num { white-space:nowrap; }
+  .card > table { min-width:660px; }
+  .card > table.proftbl { min-width:0; }
   .wrap { max-width:1120px; margin:0 auto; padding:0 26px 46px; }
   header { display:block; background:var(--navy); color:#fff;
            margin:0 -26px 0; padding:38px 34px 30px; }
@@ -5761,21 +5770,26 @@ __RM_LEAFLET_JS__
   .badge { font-family:var(--cond); border:1px solid rgba(200,169,110,.55); color:var(--gold);
            font-size:11px; font-weight:400; padding:4px 13px; white-space:nowrap;
            letter-spacing:.22em; text-transform:uppercase; }
-  .rule { height:2px; background:linear-gradient(90deg, var(--cyan), var(--gold)); margin:0 -34px 18px; }
+  .rule { height:2px; background:linear-gradient(90deg, var(--cyan), var(--gold)); margin:0 -26px 18px; }
   .prep { color:rgba(248,249,252,.62); font-size:12.5px; letter-spacing:.06em; font-family:var(--cond);
           text-transform:uppercase; }
   .prep b { color:var(--white); font-weight:600; }
   .sub { color:var(--sub); font-size:13px; margin:0 -26px 24px; padding:13px 34px;
          background:#fff; border-bottom:1px solid var(--line); letter-spacing:.02em; }
-  .stats { display:flex; flex-wrap:wrap; margin:0 0 24px; background:#fff;
+  /* Fixed grid, not flex: with 5-8 tiles a flex row orphans the last
+     one across the full width. Four across always reads as a band. */
+  .stats { display:grid; grid-template-columns:repeat(4, 1fr); margin:0 0 24px; background:#fff;
            border:1px solid var(--line); border-top:2px solid var(--navy); }
-  .stat { padding:19px 22px 16px; min-width:150px; flex:1 1 150px; border-left:1px solid var(--hair); }
-  .stat:first-child { border-left:none; }
+  .stat { padding:19px 22px 16px; min-width:0; border-left:1px solid var(--hair);
+          border-top:1px solid var(--hair); }
+  .stat:nth-child(4n+1) { border-left:none; }
+  .stat:nth-child(-n+4) { border-top:none; }
   .stat b { display:block; font-family:var(--serif); font-size:33px; font-weight:500;
             letter-spacing:-.01em; color:var(--navy); font-variant-numeric:tabular-nums;
             line-height:1.06; margin-bottom:7px; }
   .stat span { font-family:var(--cond); font-size:11px; color:var(--sub); text-transform:uppercase;
-               letter-spacing:.16em; font-weight:600; }
+               letter-spacing:.16em; font-weight:600; display:block; line-height:1.4;
+               overflow-wrap:normal; hyphens:none; }
   .stat.warn b { color:var(--warn); }
   .stat.warn span { color:var(--warn); }
   .card { background:#fff; border:1px solid var(--line); margin-bottom:24px; padding:0 0 12px;
@@ -5865,18 +5879,26 @@ __RM_LEAFLET_JS__
   @media (max-width: 900px) {
     .wrap { padding:0 16px 34px; }
     header { margin:0 -16px 0; padding:28px 22px 22px; }
-    .rule { margin:0 -22px 16px; }
+    .rule { margin:0 -16px 16px; }
     .sub { margin:0 -16px 20px; padding:12px 22px; }
     header h1 { font-size:29px; }
     .duo > div { flex:1 1 100%; }
+    .stats { grid-template-columns:repeat(3, 1fr); }
+    .stat:nth-child(4n+1) { border-left:1px solid var(--hair); }
+    .stat:nth-child(3n+1) { border-left:none; }
+    .stat:nth-child(-n+3) { border-top:none; }
+    .stat:nth-child(4) { border-top:1px solid var(--hair); }
     .proftbl th { width:150px; white-space:normal; }
   }
   /* Phone */
   @media (max-width: 620px) {
     header h1 { font-size:24px; }
     .kicker { letter-spacing:.28em; font-size:11px; }
-    .stats { display:grid; grid-template-columns:1fr 1fr; }
-    .stat { min-width:0; padding:14px 14px 12px; border-left:none; border-top:1px solid var(--hair); }
+    .stats { grid-template-columns:repeat(2, 1fr); }
+    .stat { padding:14px 14px 12px; }
+    .stat:nth-child(n) { border-left:1px solid var(--hair); border-top:1px solid var(--hair); }
+    .stat:nth-child(odd) { border-left:none; }
+    .stat:nth-child(-n+2) { border-top:none; }
     .stat b { font-size:25px; }
     table { font-size:11.8px; }
     th, td { padding:7px 8px; }
@@ -5904,9 +5926,9 @@ __RM_LEAFLET_JS__
 <p class="sub">NPI $($a.Npi)$(if ($a.PSObject.Properties['NpiCount'] -and $a.NpiCount -gt 1) { " (+$($a.NpiCount - 1) affiliated NPI$(if ($a.NpiCount -gt 2) { 's' }) combined)" }) &middot; $(_h ("$($a.Practice.City), $($a.Practice.State) $($a.Practice.Zip)")) &middot; Inbound Medicare shared-patient volume, $($a.Year).</p>
 <div class="stats">
   <div class="stat"><b>$('{0:N0}' -f $a.TotalPatients)</b><span>Measured patient base</span></div>
-$(if ($therPat -gt 0) { '  <div class="stat"><b>' + ('{0:N0}' -f $refPat) + '</b><span>From external referrers</span></div>' })
-$(if ($therPat -gt 0) { '  <div class="stat"><b>' + ('{0:N0}' -f $therPat) + '</b><span>Own-therapist volume</span></div>' })
-  <div class="stat"><b>$('{0:N0}' -f $a.SourceCount)</b><span>External referral sources</span></div>
+$(if ($therPat -gt 0) { '  <div class="stat"><b>' + ('{0:N0}' -f $refPat) + '</b><span>From outside referrers</span></div>' })
+$(if ($therPat -gt 0) { '  <div class="stat"><b>' + ('{0:N0}' -f $therPat) + '</b><span>From own clinicians</span></div>' })
+  <div class="stat"><b>$('{0:N0}' -f $a.SourceCount)</b><span>Referral sources</span></div>
   <div class="stat"><b>$(if ($hasVolume) { "$($a.Top1Pct)%" } else { '&mdash;' })</b><span>From top source</span></div>
   <div class="stat"><b>$(if ($hasVolume) { "$($a.Top5Pct)%" } else { '&mdash;' })</b><span>Top-5 dependence</span></div>
   <div class="stat$(if ($hasVolume -and $a.HHI -ge 2500) { ' warn' })"><b>$(if ($hasVolume) { '{0:N0}' -f $a.HHI } else { '&mdash;' })</b><span>Concentration (HHI)</span></div>
