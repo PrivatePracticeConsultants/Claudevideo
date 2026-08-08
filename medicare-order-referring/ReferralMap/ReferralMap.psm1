@@ -4635,7 +4635,14 @@ function Get-RmSourceTrend {
         # Raw outbound totals for the reused year (the analysis carries
         # them); -1 = unknown, that year's outbound columns stay blank.
         [int]$ReuseOutboundPatients = -1,
-        [int]$ReuseOutboundDestinations = -1
+        [int]$ReuseOutboundDestinations = -1,
+        # Biggest gains/declines are a CALL LIST, so they follow the same
+        # ranking radius as the analysis. Distances need the practice's own
+        # ZIP; without it (a standalone trend run) no distance filter is
+        # applied and the note says so.
+        [string]$PracticeZip,
+        [string]$CentroidPath,
+        [ValidateRange(10, 3000)][double]$RankingRadiusMiles = 75
     )
     $years = @(Get-RmAvailableDatasets | Where-Object { $_.Source -eq 'hop-teaming' } | Sort-Object Year)
     if ($years.Count -lt 2) {
@@ -4797,7 +4804,58 @@ function Get-RmSourceTrend {
         $sp = ([string]$_.SourceSpecialty).ToUpperInvariant()
         -not ($sp -and $sp -match $moverDrop)
     })
+    # Locate every source once: the mover distance filter and the
+    # neighborhood trend below both need it, and it is one index pass.
+    $srcZipAll = @{}; $srcCityAll = @{}
+    try {
+        $allSrcZ = New-Object 'System.Collections.Generic.HashSet[string]'
+        foreach ($y in $years) { foreach ($k in $perYear[$y.Year].Keys) { [void]$allSrcZ.Add($k) } }
+        $zipCache = Read-RmNppesCache
+        foreach ($k in $allSrcZ) {
+            if ($zipCache.ContainsKey($k)) {
+                $cz = [string](Get-RmProp $zipCache[$k] 'Zip')
+                if ($cz -match '^\d{5}$') {
+                    $srcZipAll[$k] = $cz
+                    $cc = [string](Get-RmProp $zipCache[$k] 'City')
+                    if ($cc) { $srcCityAll[$k] = ("{0}, {1}" -f $cc, [string](Get-RmProp $zipCache[$k] 'State')) }
+                }
+            }
+        }
+        if (Test-Path -LiteralPath (Get-RmNppesIndexPath)) {
+            foreach ($line in @([RmEngine]::ScanRosterIndex((Get-RmNppesIndexPath), $allSrcZ, 0))) {
+                $ff = $line.Split('|')
+                if ($ff.Count -lt 10) { continue }
+                if ($srcZipAll.ContainsKey($ff[0])) { continue }
+                $pz = $ff[7]
+                if ($pz.Length -ge 5) {
+                    $srcZipAll[$ff[0]] = $pz.Substring(0, 5)
+                    if ($ff[5]) { $srcCityAll[$ff[0]] = ("{0}, {1}" -f $ff[5], $ff[6]) }
+                }
+            }
+        }
+    } catch { Write-Verbose "Source ZIP resolution skipped: $($_.Exception.Message)" }
+
     $moversDropped = @($movers).Count - @($moversRel).Count
+    # ...and out-of-area movers leave those two tables for the same reason
+    # they leave the analysis ranking: a lab 300 miles away that swung by
+    # 200 patients is not a relationship anyone won or lost.
+    $moversFar = 0
+    if ($PracticeZip -match '^\d{5}$') {
+        $cents = Get-RmCentroids $CentroidPath
+        if ($cents.ContainsKey($PracticeZip)) {
+            $pl = $cents[$PracticeZip]
+            $keepRel = New-Object System.Collections.Generic.List[object]
+            foreach ($m in $moversRel) {
+                $mz = if ($srcZipAll.ContainsKey([string]$m.SourceNPI)) { $srcZipAll[[string]$m.SourceNPI] } else { '' }
+                if ($mz -and $cents.ContainsKey($mz)) {
+                    $md = Get-RmMilesBetween $pl[0] $pl[1] $cents[$mz][0] $cents[$mz][1]
+                    if ($md -gt $RankingRadiusMiles) { $moversFar++; continue }
+                }
+                $keepRel.Add($m)   # unlocatable stays: unknown is not far
+            }
+            $moversRel = @($keepRel.ToArray())
+        }
+    }
 
     # ---- Neighborhood (ZIP) trend ------------------------------------
     # Which neighborhoods the volume comes from, per year. Sources are
@@ -4808,32 +4866,7 @@ function Get-RmSourceTrend {
     $zipTrendRows = @()
     $zipTrendMappedPct = $null
     try {
-        $allSrcZ = New-Object 'System.Collections.Generic.HashSet[string]'
-        foreach ($y in $years) { foreach ($k in $perYear[$y.Year].Keys) { [void]$allSrcZ.Add($k) } }
-        $srcZip = @{}; $srcCity = @{}
-        $zipCache = Read-RmNppesCache
-        foreach ($k in $allSrcZ) {
-            if ($zipCache.ContainsKey($k)) {
-                $cz = [string](Get-RmProp $zipCache[$k] 'Zip')
-                if ($cz -match '^\d{5}$') {
-                    $srcZip[$k] = $cz
-                    $cc = [string](Get-RmProp $zipCache[$k] 'City')
-                    if ($cc) { $srcCity[$k] = ("{0}, {1}" -f $cc, [string](Get-RmProp $zipCache[$k] 'State')) }
-                }
-            }
-        }
-        if (Test-Path -LiteralPath (Get-RmNppesIndexPath)) {
-            foreach ($line in @([RmEngine]::ScanRosterIndex((Get-RmNppesIndexPath), $allSrcZ, 0))) {
-                $ff = $line.Split('|')
-                if ($ff.Count -lt 10) { continue }
-                if ($srcZip.ContainsKey($ff[0])) { continue }
-                $pz = $ff[7]
-                if ($pz.Length -ge 5) {
-                    $srcZip[$ff[0]] = $pz.Substring(0, 5)
-                    if ($ff[5]) { $srcCity[$ff[0]] = ("{0}, {1}" -f $ff[5], $ff[6]) }
-                }
-            }
-        }
+        $srcZip = $srcZipAll; $srcCity = $srcCityAll
         if ($srcZip.Count -gt 0) {
             $zipYear = @{}   # zip -> (year -> volume)
             $zipArea = @{}
@@ -4893,6 +4926,7 @@ function Get-RmSourceTrend {
         'Medicare FFS only: Medicare Advantage enrollment grew over these years, moving patients OUT of this data. A gentle decline can reflect that shift rather than lost referrals; compare against the area trend before concluding.'
         $(if ($moversDropped -gt 0) { "BIGGEST GAINS/DECLINES cover REFERRAL relationships only: $moversDropped therapy provider$(if ($moversDropped -ne 1) { 's' }) that moved between $firstY and $lastY $(if ($moversDropped -eq 1) { 'is' } else { 'are' }) excluded from those two tables - an individual PT/OT/SLP is a clinician co-billing (the practice's own or a rival's) and a therapy clinic is a competitor, so neither is a referral won or lost by working the relationship. They remain in the full Movers list and in every total." })
         'OUTBOUND COLUMNS: OutboundPatients/OutboundDestinations are the RAW onward flow (everyone this practice shared patients to, including its own therapists) measured in the same pass. A blank means that year''s scan was reused from an older analysis that did not carry outbound totals - re-run to fill it.'
+        $(if ($moversFar -gt 0) { "BIGGEST GAINS/DECLINES also stop at $([int]$RankingRadiusMiles) miles: $moversFar mover$(if ($moversFar -ne 1) { 's' }) registered further away $(if ($moversFar -eq 1) { 'is' } else { 'are' }) excluded from those two tables - at that distance a swing belongs to a reference lab, a corporate address or a telehealth group, not to a referral relationship anyone worked. They remain in the full Movers list and in every total; a mover whose ZIP could not be located stays in the tables." })
         $(if (@($zipTrendRows).Count) { "NEIGHBORHOOD TREND: inbound volume grouped by each source's practice ZIP; $zipTrendMappedPct% of all-year volume was locatable. Every year is mapped with the source's registered NPPES address as of TODAY, so the table reads as referrer relationships by place - an office that moved since a data year carries its history to its current ZIP. Sources with no locatable ZIP are excluded from this table only, never from the totals." })
         'The CMS 2015 FOIA file is intentionally excluded: a different (~8-month) window and methodology, not on the same scale.'
         $(if ($leadingZero.Count) { "NO MEASURED VOLUME IN $($leadingZero -join ', '): the practice may not have been enumerated or billing Medicare yet in those years, or every pair it had fell under the 11-patient floor. Growth is therefore also reported from $activeFrom, the first year with measured volume." })
@@ -4913,6 +4947,7 @@ function Get-RmSourceTrend {
         Lost         = @($moversRel | Where-Object { $_.Change -lt 0 } |
                             Sort-Object Change | Select-Object -First 10)
         MoversTherapyExcluded = $moversDropped
+        MoversOutOfAreaExcluded = $moversFar
         ZipTrend     = @($zipTrendRows)        # per-neighborhood volume by year
         ZipTrendMappedPct = $zipTrendMappedPct # share of all-year volume locatable
         Notes        = @($notes)
@@ -4937,6 +4972,14 @@ function Add-RmSourceTrend {
     # internal flows already excluded) - hand it over instead of paying for
     # the same 8 GB pass twice. Only valid for a CareSet-year analysis.
     $trendArgs = @{ Npi = $npis; SkipEnrichment = $SkipEnrichment }
+    # The gains/declines tables follow the analysis's ranking radius, which
+    # needs the practice's own ZIP to measure distance from.
+    if ($Analysis.PSObject.Properties['Practice'] -and $Analysis.Practice.Zip) {
+        $trendArgs['PracticeZip'] = [string]$Analysis.Practice.Zip
+    }
+    if ($Analysis.PSObject.Properties['RankingRadiusMiles'] -and $Analysis.RankingRadiusMiles) {
+        $trendArgs['RankingRadiusMiles'] = [double]$Analysis.RankingRadiusMiles
+    }
     if ($Analysis.PSObject.Properties['IsHop'] -and $Analysis.IsHop -and @($Analysis.Sources).Count) {
         $bySrc = @{}
         foreach ($srow in @($Analysis.Sources)) { $bySrc[[string]$srow.SourceNPI] = [int]$srow.SharedPatients }

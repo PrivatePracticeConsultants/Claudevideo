@@ -1852,10 +1852,16 @@ Describe 'Taxonomy scope (outpatient PT/OT/speech only)' {
 Describe 'Source analysis report' {
     BeforeAll {
         $script:SaCsv = Join-Path $script:WorkDir 'sa-centroids.csv'
+        # Two distinct source ZIPs, which is what these tests need. 86442
+        # sits ~60 miles out: far enough for the '50+ mi' distance band,
+        # near enough to stay inside the 75-mile RANKING radius, so these
+        # tests keep measuring shares and merging rather than the cap.
+        # The cap itself is pinned by 'Ranking radius', which brings its own
+        # geography.
         Set-Content -Path $script:SaCsv -Encoding ascii -Value @(
             'zip,lat,lon'
             '99999,40.0000,-90.0000'
-            '86442,35.1000,-114.6000'
+            '86442,40.8700,-90.0000'
         )
     }
 
@@ -1970,13 +1976,19 @@ Describe 'Source analysis report' {
 
     It 'ranks the practice against every rehab provider within the radius' {
         # 99998 is ~6.9 mi from 99999, so the default 10-mile sweep must pull
-        # in the neighbor; 86442 stays ~1,400 mi away.
+        # in the neighbor; 86442 stays ~60 mi out, well outside it.
         $script:CompCsv = Join-Path $script:WorkDir 'comp-centroids.csv'
+        # 86442 sits ~60 miles out: outside the 10-mile competitive sweep,
+        # inside the 75-mile ranking radius, so these merging and
+        # internal-flow tests keep their source ranked (the cap has its own
+        # Describe). It is placed SOUTH of the practice on purpose - due
+        # north would land within 10 miles of 88888 and sweep that ZIP's 201
+        # paging fixtures into a landscape meant to be empty.
         Set-Content -Path $script:CompCsv -Encoding ascii -Value @(
             'zip,lat,lon'
             '99999,40.0000,-90.0000'
             '99998,40.1000,-90.0000'
-            '86442,35.1000,-114.6000'
+            '86442,39.1300,-90.0000'
             '88888,41.0000,-90.0000'
         )
         $sa = Get-RmSourceAnalysis -Npi 9000000001 -CentroidPath $script:CompCsv
@@ -3157,6 +3169,87 @@ Describe 'Owner features: wallet share, area lag, ZIP call sheet, headroom, ZIP 
     }
 }
 
+Describe 'Ranking radius: out-of-area sources are counted, never ranked' {
+    # A source hundreds of miles out is a reference lab, a corporate/HQ
+    # registration or a telehealth group - measured volume, but not a
+    # relationship an owner can work. It leaves the RANKING and stays in the
+    # patient base, so shares are shares of the ranked base and the two
+    # still add up to the measured total.
+    It 'ranks only local sources, keeps distant volume in the base, and reconciles' {
+        $rrDir = Join-Path $script:WorkDir 'ranking-radius'
+        New-Item -ItemType Directory -Path $rrDir -Force | Out-Null
+        # this Describe brings its OWN geography: 86442 ~1,300 miles out
+        $rrCent = Join-Path $rrDir 'rr-centroids.csv'
+        Set-Content -Path $rrCent -Encoding ascii -Value @(
+            'zip,lat,lon'
+            '99999,40.0000,-90.0000'
+            '86442,35.1000,-114.6000'
+        )
+        # 8000000001 is local (ZIP 99999, 0 mi); 8000000002 sits in 86442,
+        # ~1,300 miles away - beyond any sane ranking radius.
+        Set-Content -Path (Join-Path $rrDir 'hop_teaming_2022.csv') -Encoding ascii -NoNewline -Value (@(
+            'from_npi,to_npi,patient_count,transaction_count,average_day_wait,std_day_wait'
+            '8000000001,9000000001,60,60,10.0,5.0'
+            '8000000002,9000000001,40,40,20.0,5.0'
+        ) -join "`n")
+        $saved = (Get-RmConfig).DataDir
+        try {
+            Set-RmConfig -DataDir $rrDir
+            Set-RmActiveDataset -Source hop-teaming -Year 2022 | Out-Null
+            $sa = Get-RmSourceAnalysis -Npi 9000000001 -CentroidPath $rrCent -SkipCompetitors
+
+            # the distant source is OUT of the ranking...
+            @($sa.Sources).Count | Should -Be 1
+            @($sa.Sources)[0].SourceNPI | Should -Be '8000000001'
+            @($sa.Sources | Where-Object SourceNPI -eq '8000000002').Count | Should -Be 0
+            # ...and shares are shares of the RANKED base, not of everything
+            @($sa.Sources)[0].PctOfVolume | Should -Be 100
+            @($sa.Sources)[0].CumulativePct | Should -Be 100
+            $sa.Top1Pct | Should -Be 100
+
+            # ...but its volume is still counted and disclosed
+            @($sa.DistantRows).Count | Should -Be 1
+            @($sa.DistantRows)[0].SourceNPI | Should -Be '8000000002'
+            $sa.DistantPatients | Should -Be 40
+            $sa.ReferralPatients | Should -Be 60          # ranked base
+            $sa.ExternalPatients | Should -Be 100         # ranked + out-of-area
+            $sa.TotalPatients | Should -Be 100            # patient base unchanged
+            ([int]$sa.ReferralPatients + [int]$sa.DistantPatients) | Should -Be ([int]$sa.ExternalPatients)
+            $sa.RankingRadiusMiles | Should -Be 75
+            (@($sa.Notes) -join ' ') | Should -BeLike '*OUT-OF-AREA SOURCES*'
+
+            # the report shows the out-of-area section and the tile
+            $out = Join-Path $script:WorkDir 'ranking-radius.html'
+            Export-RmSourceReportHtml -Analysis $sa -Path $out | Out-Null
+            $html = Get-Content $out -Raw
+            $html | Should -BeLike '*Out-of-area sources*'
+            $html | Should -BeLike '*Out of area (75+ mi)*'
+            $html | Should -BeLike '*OLIVIA ORTHO*'       # named in that section
+
+            # a wider radius puts it back in the ranking - the cap is a knob,
+            # not a hard-coded rule
+            $wide = Get-RmSourceAnalysis -Npi 9000000001 -CentroidPath $rrCent `
+                -SkipCompetitors -RankingRadiusMiles 2000
+            @($wide.Sources).Count | Should -Be 2
+            $wide.DistantPatients | Should -Be 0
+            $wide.ReferralPatients | Should -Be 100
+        } finally {
+            Set-RmConfig -DataDir $saved
+            Set-RmActiveDataset -Source cms-pspp -Year 2015 | Out-Null
+        }
+    }
+
+    It 'keeps a source it could not place: unknown is not the same as far' {
+        # 8000000003 is absent from the registry, so it has no locatable ZIP.
+        # It must stay in the ranking rather than be ruled out on a guess.
+        $sa = Get-RmSourceAnalysis -Npi 9000000001 -CentroidPath $script:SaCsv -SkipCompetitors
+        $unplaced = @($sa.Sources | Where-Object { $_.DistanceMiles -isnot [double] })
+        foreach ($u in $unplaced) {
+            @($sa.DistantRows | Where-Object SourceNPI -eq $u.SourceNPI).Count | Should -Be 0
+        }
+    }
+}
+
 Describe 'Owner features degrade honestly when their inputs are absent' {
     # Every new layer rides on the competitive sweep or a local index. When
     # those are missing the report must simply omit the card - never render
@@ -3207,6 +3300,12 @@ Describe 'Owner features degrade honestly when their inputs are absent' {
         # methodology at the back.
         $mmDir = Join-Path $script:WorkDir 'area-mismatch'
         New-Item -ItemType Directory -Path $mmDir -Force | Out-Null
+        $mmCent = Join-Path $mmDir 'mm-centroids.csv'
+        Set-Content -Path $mmCent -Encoding ascii -Value @(
+            'zip,lat,lon'
+            '99999,40.0000,-90.0000'
+            '86442,35.1000,-114.6000'
+        )
         # 8000000002 is registered in ZIP 86442, ~1,300 miles from the
         # practice's ZIP 99999: a referral base entirely somewhere else.
         Set-Content -Path (Join-Path $mmDir 'hop_teaming_2022.csv') -Encoding ascii -NoNewline -Value (@(
@@ -3219,7 +3318,7 @@ Describe 'Owner features degrade honestly when their inputs are absent' {
             Set-RmActiveDataset -Source hop-teaming -Year 2022 | Out-Null
             # the sweep must RUN here: the caution belongs on the area cards,
             # and with no area cards there is nothing to caution about.
-            $sa = Get-RmSourceAnalysis -Npi 9000000001 -CentroidPath $script:SaCsv
+            $sa = Get-RmSourceAnalysis -Npi 9000000001 -CentroidPath $mmCent
             $sa.TotalPatients | Should -Be 40
             $sa.LocalVolumePct | Should -Be 0
             $sa.AreaMismatch | Should -BeTrue
