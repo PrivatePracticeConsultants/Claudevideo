@@ -3316,6 +3316,10 @@ function Get-RmSourceAnalysis {
         # is one cached CMS API call, so this is the knob between depth and
         # runtime; 0 skips the benchmark entirely.
         [ValidateRange(0, 200)][int]$ServiceMixPeerSample = 40,
+        # Largest group the colleague list is meaningful for. Above this a
+        # 'group' is a health system, where sharing an enrollment id says
+        # nothing about who knows whom.
+        [ValidateRange(2, 5000)][int]$GroupPenetrationMaxSize = 60,
         # Radius for the market-headroom (underserved counties) card.
         [ValidateRange(5, 100)][double]$HeadroomRadiusMiles = 25,
         # Path to a current Order & Referring snapshot CSV. When given,
@@ -3849,6 +3853,8 @@ function Get-RmSourceAnalysis {
     # Two local index passes: referrer NPIs -> their group ids -> everyone
     # sharing those ids.
     $groupPen = @()
+    $groupPenLargeGroups = 0
+    $gpTherapyDropped = 0
     try {
         $dacIdx3 = Get-RmDacIndexPath
         $refNpis = New-Object 'System.Collections.Generic.HashSet[string]'
@@ -3885,6 +3891,7 @@ function Get-RmSourceAnalysis {
                     $members[$f[1]].Add([pscustomobject]@{
                         NPI = $f[0]; Clinician = ("$($f[5]) $($f[4])").Trim()
                         Specialty = $f[3]; City = $f[6]; State = $f[7]
+                        Zip = $(if ($f.Count -ge 10 -and ([string]$f[9]).Length -ge 5) { ([string]$f[9]).Substring(0, 5) } else { '' })
                     })
                 }
                 $gp = New-Object System.Collections.Generic.List[object]
@@ -3895,10 +3902,22 @@ function Get-RmSourceAnalysis {
                     if ($all.Count -eq 0) { continue }
                     # colleagues who could refer but never have. A therapist
                     # inside a physician group is not a referral prospect.
+                    # LOCAL colleagues only. A group id is national: an
+                    # Atlanta practice was offered 49 'untapped colleagues'
+                    # at the Regents of the University of California. Same
+                    # rule as the outreach call sheet - close enough to
+                    # visit. A colleague with no locatable ZIP is kept:
+                    # unknown is not far.
                     $untapped = @($all | Where-Object {
                         $sp2 = ([string]$_.Specialty).ToUpperInvariant()
-                        (-not $mine.Contains([string]$_.NPI)) -and $sp2 -and
-                        $sp2 -match $script:RmReferrerTypeRegex -and $sp2 -notmatch $therapistRe
+                        if ($mine.Contains([string]$_.NPI)) { return $false }
+                        if (-not $sp2 -or $sp2 -notmatch $script:RmReferrerTypeRegex -or $sp2 -match $therapistRe) { return $false }
+                        $z9 = [string]$_.Zip
+                        if ($z9 -and $pracLoc -and $centroids.ContainsKey($z9)) {
+                            $d9b = Get-RmMilesBetween $pracLoc[0] $pracLoc[1] $centroids[$z9][0] $centroids[$z9][1]
+                            return ($d9b -le $OutreachRadiusMiles)
+                        }
+                        $true
                     })
                     $pat = 0; foreach ($n in $mine) { if ($volByNpi.ContainsKey($n)) { $pat += [int]$volByNpi[$n] } }
                     $gp.Add([pscustomobject]@{
@@ -3912,8 +3931,24 @@ function Get-RmSourceAnalysis {
                         UntappedClinicians = @($untapped | Sort-Object Clinician)
                     })
                 }
-                $groupPen = @($gp.ToArray() |
-                    Where-Object { $_.Untapped -gt 0 } |
+                # A CALL LIST, not a census. Two exclusions keep it honest:
+                #  - health systems. 'Colleague who already trusts you' is a
+                #    real lever in a 12-physician practice and meaningless in
+                #    a 4,105-clinician academic system (live: The Emory
+                #    Clinic offered 3,479 'untapped colleagues'). Groups
+                #    above the size cap are counted and disclosed, not shown.
+                #  - therapy groups. A rehab company's clinicians are
+                #    competitors or co-billing staff, not referral prospects
+                #    (live: ESOP Rehabilitation and Physiotherapy Associates
+                #    both surfaced, and both are ranked competitors).
+                $gpAll = @($gp.ToArray() | Where-Object { $_.Untapped -gt 0 })
+                $gpTherapyDropped = 0
+                $gpNoTherapy = @($gpAll | Where-Object {
+                    if (Test-RmTherapyPracticeName ([string]$_.GroupName)) { $gpTherapyDropped++; $false } else { $true }
+                })
+                $groupPenLargeGroups = @($gpNoTherapy | Where-Object { $_.Clinicians -gt $GroupPenetrationMaxSize }).Count
+                $groupPen = @($gpNoTherapy |
+                    Where-Object { $_.Clinicians -le $GroupPenetrationMaxSize } |
                     Sort-Object -Property @{Expression = 'SharedPatients'; Descending = $true},
                                           @{Expression = 'GroupName'; Descending = $false})
             }
@@ -3921,6 +3956,15 @@ function Get-RmSourceAnalysis {
     } catch { Write-Verbose "Group penetration skipped: $($_.Exception.Message)" }
 
     # ---- Therapy leakage (outbound) --------------------------------------
+    # The company's own locations never count as leakage, so resolve them
+    # here from the same name key the landscape uses (that set is built
+    # later, inside the competitive block).
+    $ownSiteNpisAll = New-Object 'System.Collections.Generic.HashSet[string]'
+    if ($ownOrgKey) {
+        foreach ($sib in $siblingRows) { [void]$ownSiteNpisAll.Add([string]$sib.SourceNPI) }
+        foreach ($osb in @($outboundSibRows)) { [void]$ownSiteNpisAll.Add([string]$osb.NPI) }
+    }
+
     # Patients who went on to ANOTHER therapy provider. The own-clinician and
     # own-location folds already removed the practice's own staff and sites,
     # so what remains with a therapy label is care that left the building.
@@ -3928,7 +3972,29 @@ function Get-RmSourceAnalysis {
     # the rivals actually taking continuing care.
     $leakRows = @()
     $leakTotal = 0
+    # Exact pass first: ANY outbound edge whose destination is a swept
+    # therapy provider is leakage, however small. The enriched top-25 window
+    # alone missed this entirely on a large practice (live: 0 rows) because
+    # its biggest destinations are physicians and hospitals.
+    $leakSeen = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($e in $outEdges) {
+        if (-not $others.Contains($e.TargetNpi)) { continue }
+        if ($ownSiteNpisAll.Contains($e.TargetNpi)) { continue }
+        $d9 = if ($detail.ContainsKey($e.TargetNpi)) { $detail[$e.TargetNpi] } else { $null }
+        [void]$leakSeen.Add([string]$e.TargetNpi)
+        $leakTotal += $e.BeneCount
+        $row9 = [ordered]@{
+            NPI = $e.TargetNpi
+            Name = if ($d9) { [string]$d9.Name } else { '' }
+            Specialty = if ($d9) { [string]$d9.Specialty } else { '' }
+            SharedPatients = $e.BeneCount
+            InCompetitiveRadius = $true
+        }
+        if ($isHop -and $e.PairCount -gt 0) { $row9['AvgDayWait'] = [math]::Round([double]$e.AvgDayWait, 1) }
+        $leakRows += [pscustomobject]$row9
+    }
     foreach ($o in @($outboundRows)) {
+        if ($leakSeen.Contains([string]$o.NPI)) { continue }
         $osp = ([string]$o.Specialty).ToUpperInvariant()
         $isTher = ($osp -and ($osp -match $therapistRe -or
                    ($osp -match 'CLINIC|CENTER' -and $osp -match 'PHYSICAL THERAP|OCCUPATIONAL THERAP|SPEECH|REHABILITATION'))) -or
@@ -4297,15 +4363,35 @@ function Get-RmSourceAnalysis {
             try {
                 $dacIdx4 = Get-RmDacIndexPath
                 if (Test-Path -LiteralPath $dacIdx4) {
-                    # ONE pass returns every facility-name key's distinct
-                    # clinician count (the same helper the map's RosterSize
-                    # column uses); the ranked names are looked up in it.
-                    $capBySite = [RmEngine]::ScanDacRosterCounts($dacIdx4, 0, 2)
+                    # Count clinicians IN THE SWEPT ZIPS only. A whole-index
+                    # count is what a multi-site company employs nationally -
+                    # dividing this area's volume by that is meaningless
+                    # (live: Independent PT of Georgia came back with 527
+                    # clinicians and "22 patients each"). One ZIP-filtered
+                    # pass, grouped by organization-name key.
+                    $zipWant4 = New-Object 'System.Collections.Generic.HashSet[string]'
+                    foreach ($z in $rzips) { [void]$zipWant4.Add([string]$z) }
+                    $noPfx = New-Object 'System.Collections.Generic.List[string]'
+                    $seenCl = @{}
+                    foreach ($line in @([RmEngine]::ScanIndexByZip($dacIdx4, 9, $zipWant4, $noPfx))) {
+                        $f = $line.Split('|')
+                        if ($f.Count -lt 10 -or -not $f[0] -or -not $f[2]) { continue }
+                        $nk2 = Get-RmOrgNameKey ([string]$f[2])
+                        if (-not $nk2) { continue }
+                        if (-not $seenCl.ContainsKey($nk2)) { $seenCl[$nk2] = New-Object 'System.Collections.Generic.HashSet[string]' }
+                        [void]$seenCl[$nk2].Add($f[0])
+                    }
+                    foreach ($kv in $seenCl.GetEnumerator()) { $capBySite[$kv.Key] = $kv.Value.Count }
                 }
             } catch { Write-Verbose "Competitor capacity skipped: $($_.Exception.Message)" }
             # Attach headcount + productivity to every ranked row. The
             # analyzed practice uses its OWN roster, already fetched.
-            $myClin = $rosterRows.Count   # NOT @(list).Count: the binder throws on a generic List
+            # ...including the analyzed practice: comparing its national
+            # roster against competitors' local headcounts would flatter or
+            # punish it arbitrarily.
+            $myKeyCap = Get-RmOrgNameKey $pracName
+            $myClin = if ($myKeyCap -and $capBySite.ContainsKey($myKeyCap)) { [int]$capBySite[$myKeyCap] }
+                      else { $rosterRows.Count }   # NOT @(list).Count: the binder throws on a generic List
             foreach ($pw in @($peersOut)) {
                 $cl = if ($pw.You) { $myClin }
                       elseif ($pw.Type -eq 'Organization') {
@@ -4323,9 +4409,14 @@ function Get-RmSourceAnalysis {
             $newEntrants = @()
             try {
                 $dy = [int]$info.Year
+                # ORGANIZATIONS only. Individual NPIs issued since the data
+                # year are overwhelmingly new graduates joining existing
+                # practices - 541 of them around one Atlanta practice - and
+                # listing them as "new providers in your area" is noise. A
+                # new ORG NPI is a practice that opened.
                 $newEntrants = @($peers | Where-Object {
-                    $en = [string]$_.Enumerated
-                    $en -match '^(\d{4})' -and [int]$Matches[1] -gt $dy
+                    $_.Type -eq 'Organization' -and
+                    ([string]$_.Enumerated) -match '^(\d{4})' -and [int]$Matches[1] -gt $dy
                 } | ForEach-Object {
                     [pscustomobject]@{
                         NPI = $_.NPI; Name = $_.Name; Type = $_.Type
@@ -4700,7 +4791,7 @@ function Get-RmSourceAnalysis {
         $(if ($svcMixNote) { "BILLING MIX: $svcMixNote" })
         $(if (@($groupPen).Count) {
             $gpU = 0; foreach ($g in $groupPen) { $gpU += [int]$g.Untapped }
-            "GROUP PENETRATION: for every individual referrer-type source, Medicare Care Compare's group-enrollment id (org_pac_id) identifies the practice group they bill under, and every other clinician sharing that id. $(@($groupPen).Count) group$(if (@($groupPen).Count -ne 1) { 's' }) that already refer here contain $gpU referrer-type clinician$(if ($gpU -ne 1) { 's' }) with NO measured referral to this practice. Care Compare is TODAY's roster while the volume is from $($info.Year), so a colleague who joined since will read as untapped when they are simply new - check the join before assuming a cold relationship. Therapists inside a group are excluded (a PT colleague is not a referral source), and pairs under 11 patients are invisible, so 'never referred' can also mean 'fewer than 11'."
+            "GROUP PENETRATION: for every individual referrer-type source, Medicare Care Compare's group-enrollment id (org_pac_id) identifies the practice group they bill under, and every other clinician sharing that id. $(@($groupPen).Count) group$(if (@($groupPen).Count -ne 1) { 's' }) that already refer here contain $gpU referrer-type clinician$(if ($gpU -ne 1) { 's' }) with NO measured referral to this practice. Care Compare is TODAY's roster while the volume is from $($info.Year), so a colleague who joined since will read as untapped when they are simply new - check the join before assuming a cold relationship. Only colleagues registered within $([int]$OutreachRadiusMiles) miles are listed - a group enrollment id is national, and a colleague in another state is not a call. Therapists inside a group are excluded (a PT colleague is not a referral source), and pairs under 11 patients are invisible, so 'never referred' can also mean 'fewer than 11'. Two whole-group exclusions keep this a call list rather than a census: groups larger than $GroupPenetrationMaxSize clinicians are health systems where a shared enrollment id says nothing about who knows whom$(if ($groupPenLargeGroups -gt 0) { " ($groupPenLargeGroups excluded here)" }), and therapy groups are competitors or co-billing staff, not prospects$(if ($gpTherapyDropped -gt 0) { " ($gpTherapyDropped excluded)" })."
         })
         $(if (@($leakRows).Count) {
             $lkIn = @($leakRows | Where-Object { $_.InCompetitiveRadius }).Count
@@ -4817,6 +4908,8 @@ function Get-RmSourceAnalysis {
         OutreachRadiusMiles = $OutreachRadiusMiles   # how far a prospect may sit and still be listed
         AtRiskSources = @($atRisk)        # referrer-type sources gone from the O&R roster
         GroupPenetration = @($groupPen)   # referring groups + colleagues who never referred
+        GroupPenetrationLargeGroups = $groupPenLargeGroups   # health systems, too big to call a colleague list
+        GroupPenetrationMaxSize = $GroupPenetrationMaxSize
         TherapyLeakage = @($leakRows)     # outbound volume to OTHER therapy providers
         TherapyLeakagePatients = $leakTotal
         Competitive  = $landscape     # $null when skipped or the sweep failed
@@ -5940,7 +6033,7 @@ $areaCaution
   <tr><th>Group</th><th class="num">Patients to you</th><th class="num">Referring</th><th class="num">Penetration</th><th>Colleagues who have not referred</th></tr>
   $gpRows
 </table>
-<div class="tablenote">$(if (@($gpList).Count -gt 8) { "Showing the 8 groups sending you the most patients, of $(@($gpList).Count). " })Group membership is Medicare Care Compare as it stands TODAY, while the volume is from $($a.Year) &mdash; a clinician who joined the group since then will appear here as untapped when they are simply new. Therapists inside a group are left out (a PT colleague is not a referral source), and referral pairs under 11 patients are invisible, so "has not referred" can also mean "fewer than 11 patients".</div>
+<div class="tablenote">$(if (@($gpList).Count -gt 8) { "Showing the 8 groups sending you the most patients, of $(@($gpList).Count). " })$(if ($a.PSObject.Properties['GroupPenetrationLargeGroups'] -and [int]$a.GroupPenetrationLargeGroups -gt 0) { "$([int]$a.GroupPenetrationLargeGroups) larger organisation$(if ([int]$a.GroupPenetrationLargeGroups -ne 1) { 's are' } else { ' is' }) left out: above about $([int]$a.GroupPenetrationMaxSize) clinicians a &quot;group&quot; is a health system, where sharing an enrollment id tells you nothing about who knows whom. " })Group membership is Medicare Care Compare as it stands TODAY, while the volume is from $($a.Year) &mdash; a clinician who joined the group since then will appear here as untapped when they are simply new. Therapists inside a group are left out (a PT colleague is not a referral source), and referral pairs under 11 patients are invisible, so "has not referred" can also mean "fewer than 11 patients".</div>
 </div>
 "@
     }

@@ -555,6 +555,49 @@ days they take to reach the competitors that referrer also feeds — slower
 than the area on a big source is a scheduling/intake warning worth checking
 before assuming preference.
 
+**Inside the groups that already refer to you.** Every referring physician
+bills under a practice group, and Medicare publishes who else is in it. This
+card lists the groups already sending you patients, how many of their
+clinicians refer, and — by name — the colleagues who never have. It is the
+warmest list in the report: same group, same building, a colleague who
+already trusts you. Two cautions the card states plainly: group membership
+is *today's* Care Compare roster while the volume is from the data year, so
+a recent joiner reads as untapped when they are simply new; and pairs under
+11 patients are invisible, so "has not referred" can also mean "fewer than
+11".
+
+**Where your patients continued care elsewhere.** Outbound volume that went
+on to *another* therapy provider, with your own clinicians and your own
+other locations already excluded, and a flag for the ones inside your
+competitive radius. It is not proof of a lost patient — someone may have
+moved, been discharged, or been sent on for a different problem — but a
+familiar name high on that list is worth a conversation about discharge and
+follow-up.
+
+**Clinicians and per-clinician volume in the ranking.** The competitive
+table now shows how many clinicians Medicare lists under each practice today
+and its volume divided by that headcount. Volume alone flatters a big
+roster: a rival with twice the staff and the same volume is not
+outperforming you, and being #4 overall can mean leading your market per
+clinician. A dash means Care Compare lists nobody under that name.
+
+**New therapy providers since the data year.** A therapy NPI issued *after*
+the data year is a practice that opened since — invisible in every volume
+figure by construction, which is exactly why it gets named. These are the
+practices competing for your referrers now.
+
+**How you bill, against your competitors' clinicians.** The one section not
+about referrals: real Medicare Part B lines billed by the clinicians on your
+roster, compared with a sample of clinicians working at the practices ranked
+above you — evaluation complexity (97161/62/63), treatment units per
+evaluation, and the allowed amount per service. A practice billing nearly
+every evaluation as low complexity is either treating unusually simple cases
+or under-documenting them. Medicare suppresses any provider-and-procedure
+line under 11 patients, so the figures are floors, the peer side is a sample
+rather than the whole market, and its release year may differ from the
+shared-patient year — read it as an order of magnitude worth investigating,
+not a scorecard.
+
 **Ranked lists stop at 75 miles.** A "source" registered hundreds of miles
 away is a reference laboratory, a corporate or head-office address, or a
 telehealth group &mdash; real shared care, but not a referral relationship
