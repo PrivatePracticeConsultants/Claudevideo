@@ -538,9 +538,34 @@ with no measured flow into this practice (their own clinicians excluded),
 saved as an `.outreach.csv` call sheet beside the report &mdash; and only
 prospects **within 50 miles** are listed, because a referrer registered
 hundreds of miles away is a corporate address, not somewhere to visit. The
+same prospects are then regrouped **by neighborhood** — one row per ZIP
+with your capture rate there and the prospect names — a printed route plan
+for a morning of visits. The
 year-over-year table also carries **outbound** volume per year, and its
 **biggest gains / declines** tables now cover non-therapy specialties only
 (another therapy practice is a competitor, not a referral you win or lose).
+
+**Your share of each referrer** card — the growth list most owners act on
+first: referrers you *already have* who also send patients to other therapy
+providers in the radius, ranked by how much walks past you. It shows what
+each sends you, what they send everyone else (your own other locations
+excluded), and your share of the relationship; on CareSet years two lag
+columns compare the average days patients take to reach *you* against the
+days they take to reach the competitors that referrer also feeds — slower
+than the area on a big source is a scheduling/intake warning worth checking
+before assuming preference.
+
+**Market headroom** card — nearby counties ranked by registered PT/OT/SLP
+clinicians per 10,000 Original-Medicare patients (needs the local NPPES
+index; county enrollment comes from CMS). Fewer clinicians per 10,000 means
+more Medicare demand per practice — where marketing spend or a future
+location faces the least competition. Partially swept counties are flagged.
+
+**Neighborhood trend** card — with two or more CareSet years imported, the
+year-over-year section also tracks each source ZIP's volume per year, so
+you can see which neighborhoods are growing and which are fading (every
+year is mapped with the source's registered address as of today, and the
+note says so).
 
 **The report is a client deliverable.** It is written to be handed to the
 practice owner: an editorial cover with the practice name as the title, your

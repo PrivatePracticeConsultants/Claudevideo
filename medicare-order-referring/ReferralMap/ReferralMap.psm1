@@ -3306,6 +3306,8 @@ function Get-RmSourceAnalysis {
         # prospect registered hundreds of miles away is a corporate NPI,
         # not a call-sheet entry.
         [ValidateRange(5, 250)][double]$OutreachRadiusMiles = 50,
+        # Radius for the market-headroom (underserved counties) card.
+        [ValidateRange(5, 100)][double]$HeadroomRadiusMiles = 25,
         # Path to a current Order & Referring snapshot CSV. When given,
         # referrer-type sources (MD/DO, NP, PA, ...) are cross-checked
         # against it and vanished referrers are flagged as at-risk.
@@ -3939,6 +3941,8 @@ function Get-RmSourceAnalysis {
     $landscapeNote = $null
     $geoMarket = @()
     $missedRows = @()
+    $walletRows = @()
+    $underserved = $null
     if (-not $SkipCompetitors) {
         try {
             if ($sweepError) { throw $sweepError }
@@ -3987,12 +3991,14 @@ function Get-RmSourceAnalysis {
             # combined analysis that measures the company as one.
             $myNameKey = Get-RmLandscapeNameKey $pracName
             $ownSites = 0; $ownSitePatients = 0
+            $ownSiteNpis = New-Object 'System.Collections.Generic.HashSet[string]'
             $peerRows = New-Object System.Collections.Generic.List[object]
             foreach ($p in $peers) {
                 if ($memberSet.Contains($p.NPI)) { continue }
                 if ($myNameKey -and $p.Type -eq 'Organization' -and
                     (Get-RmLandscapeNameKey ([string]$p.Name)) -eq $myNameKey) {
                     $ownSites++
+                    [void]$ownSiteNpis.Add([string]$p.NPI)
                     if ($peerAgg.ContainsKey($p.NPI)) { $ownSitePatients += [int]$peerAgg[$p.NPI].Benes }
                     continue
                 }
@@ -4125,6 +4131,101 @@ function Get-RmSourceAnalysis {
                 SecondaryOnlyExcluded = $secondaryOnly
                 ChainCount          = @($outRows.ToArray() | Where-Object { $_.Chain }).Count
             }
+
+            # ---- Share of each referrer (wallet share) ------------------
+            # The sweep already carries every edge from this practice's
+            # sources into its competitors, so for each EXISTING referrer we
+            # know what they send to the rest of the area's therapy market.
+            # An owner's cheapest growth is usually a referrer who likes
+            # them but splits volume. Flow into the practice's OWN other
+            # locations is internal, not competitor volume, and is removed
+            # from the comparison. On hop data the same edges also give the
+            # area-average referral lag per source (transaction-weighted) -
+            # slower-than-area on a big source is an operational warning.
+            $srcToOwn = @{}
+            $srcAreaLag = @{}
+            foreach ($e in $peerEdges) {
+                if ($memberSet.Contains($e.SourceNpi)) { continue }
+                if ($ownSiteNpis.Contains($e.TargetNpi)) {
+                    if ($srcToOwn.ContainsKey($e.SourceNpi)) { $srcToOwn[$e.SourceNpi] += $e.BeneCount }
+                    else { $srcToOwn[$e.SourceNpi] = $e.BeneCount }
+                    continue
+                }
+                if ($isHop -and $e.PairCount -gt 0) {
+                    if (-not $srcAreaLag.ContainsKey($e.SourceNpi)) {
+                        $srcAreaLag[$e.SourceNpi] = [pscustomobject]@{ W = [double]0; T = [long]0 }
+                    }
+                    $srcAreaLag[$e.SourceNpi].W += [double]$e.AvgDayWait * $e.PairCount
+                    $srcAreaLag[$e.SourceNpi].T += $e.PairCount
+                }
+            }
+            foreach ($srcRow in $sources) {
+                $sn = [string]$srcRow.SourceNPI
+                $toComp = if ($areaBySource.ContainsKey($sn)) { [int]$areaBySource[$sn] } else { 0 }
+                if ($srcToOwn.ContainsKey($sn)) { $toComp -= [int]$srcToOwn[$sn]; if ($toComp -lt 0) { $toComp = 0 } }
+                $shareOf = if (([int]$srcRow.SharedPatients + $toComp) -gt 0) {
+                    [math]::Round(100.0 * [int]$srcRow.SharedPatients / ([int]$srcRow.SharedPatients + $toComp), 1)
+                } else { $null }
+                $srcRow | Add-Member -NotePropertyName PatientsToCompetitors -NotePropertyValue $toComp
+                $srcRow | Add-Member -NotePropertyName ShareOfReferrer -NotePropertyValue $shareOf
+                if ($isHop) {
+                    $al = if ($srcAreaLag.ContainsKey($sn) -and $srcAreaLag[$sn].T -gt 0) {
+                        [math]::Round($srcAreaLag[$sn].W / $srcAreaLag[$sn].T, 1)
+                    } else { $null }
+                    $srcRow | Add-Member -NotePropertyName AreaAvgDayWait -NotePropertyValue $al
+                }
+            }
+            # One RELATIONSHIP, one row: a referrer billing under several org
+            # NPIs (live: Resurgens twice) is one relationship in the
+            # owner's mind, so organization sources sharing a landscape name
+            # key are combined - volumes summed, lags transaction-weighted
+            # from the per-NPI accumulators. Individuals never merge.
+            $wCand = @($sources | Where-Object { [int]$_.PatientsToCompetitors -gt 0 })
+            $wByKey = [ordered]@{}
+            foreach ($w in $wCand) {
+                $sn = [string]$w.SourceNPI
+                $d0w = if ($detail.ContainsKey($sn)) { $detail[$sn] } else { $null }
+                $entW = if ($d0w -and $null -ne $d0w.PSObject.Properties['Entity']) { [string]$d0w.Entity } else { '' }
+                $wk = if ($entW -eq '2' -and $w.SourceName) { 'N:' + (Get-RmLandscapeNameKey ([string]$w.SourceName)) } else { 'I:' + $sn }
+                if (-not $wByKey.Contains($wk)) { $wByKey[$wk] = New-Object System.Collections.Generic.List[object] }
+                $wByKey[$wk].Add($w)
+            }
+            $walletAll = New-Object System.Collections.Generic.List[object]
+            foreach ($wk in @($wByKey.Keys)) {
+                $mem = $wByKey[$wk]
+                if ($mem.Count -eq 1) { $walletAll.Add($mem[0]); continue }
+                $lead = $mem[0]   # $sources is volume-sorted, so first = biggest to-you
+                $sumYou = 0; $sumOth = 0
+                $mW = [double]0; $mT = [long]0; $aW = [double]0; $aT = [long]0
+                foreach ($m in $mem) {
+                    $mn = [string]$m.SourceNPI
+                    $sumYou += [int]$m.SharedPatients
+                    $sumOth += [int]$m.PatientsToCompetitors
+                    if ($isHop -and $mergedBySrc.ContainsKey($mn)) {
+                        $ms = $mergedBySrc[$mn]
+                        $mW += [double]$ms.AvgDayWait * $ms.PairCount; $mT += $ms.PairCount
+                    }
+                    if ($isHop -and $srcAreaLag.ContainsKey($mn) -and $srcAreaLag[$mn].T -gt 0) {
+                        $aW += $srcAreaLag[$mn].W; $aT += $srcAreaLag[$mn].T
+                    }
+                }
+                $wrow = [ordered]@{
+                    SourceNPI = $lead.SourceNPI; SourceName = $lead.SourceName
+                    SourceSpecialty = $lead.SourceSpecialty
+                    SharedPatients = $sumYou; PatientsToCompetitors = $sumOth
+                    ShareOfReferrer = if (($sumYou + $sumOth) -gt 0) { [math]::Round(100.0 * $sumYou / ($sumYou + $sumOth), 1) } else { $null }
+                    MergedNpis = $mem.Count
+                }
+                if ($isHop) {
+                    $wrow['AvgDayWait'] = if ($mT -gt 0) { [math]::Round($mW / $mT, 1) } else { $null }
+                    $wrow['AreaAvgDayWait'] = if ($aT -gt 0) { [math]::Round($aW / $aT, 1) } else { $null }
+                }
+                $walletAll.Add([pscustomobject]$wrow)
+            }
+            $walletRows = @($walletAll.ToArray() |
+                Sort-Object -Property @{Expression = { [int]$_.PatientsToCompetitors }; Descending = $true},
+                                      @{Expression = 'SourceNPI'} |
+                Select-Object -First 15)
 
             # ---- Market-capture map layer -------------------------------
             # For every source ZIP: total therapy volume it sends into the
@@ -4263,6 +4364,7 @@ function Get-RmSourceAnalysis {
                         SourceSpecialty = if ($d) { [string]$d.Specialty } else { '' }
                         City = if ($d) { [string]$d.City } else { '' }
                         State = if ($d) { [string]$d.State } else { '' }
+                        Zip = $mz   # groups the printed call sheet by neighborhood
                         PatientsToCompetitors = [int]$mc.Value
                         DistanceMiles = $mDist
                     })
@@ -4272,6 +4374,20 @@ function Get-RmSourceAnalysis {
         } catch {
             $landscapeNote = "COMPETITIVE LANDSCAPE unavailable for this run: $($_.Exception.Message)"
             Write-Warning $landscapeNote
+        }
+
+        # ---- Market headroom (thin-supply counties nearby) --------------
+        # The underserved screen the GUI already offers, run around the
+        # practice so the deliverable can show expansion room. Needs the
+        # local NPPES index and the county enrollment index; without them
+        # it is skipped silently - enrichment, never a blocker.
+        try {
+            if ($pracZip -match '^\d{5}$') {
+                $underserved = Get-RmUnderservedAreas -Zip $pracZip -RadiusMiles $HeadroomRadiusMiles `
+                    -CentroidPath $CentroidPath -CrosswalkPath $CrosswalkPath
+            }
+        } catch {
+            Write-Verbose "Market headroom skipped: $($_.Exception.Message)"
         }
     }
 
@@ -4329,6 +4445,12 @@ function Get-RmSourceAnalysis {
             $(if ($missFar -gt 0 -or $missNoLoc -gt 0) {
                 " ($missFar candidate$(if ($missFar -eq 1) { ' was' } else { 's were' }) dropped as too far$(if ($missNoLoc -gt 0) { ", $missNoLoc more had no locatable practice ZIP" }))" }) + ". " +
             "Individual PT/OT/SLP 'sources' of a competitor are its own clinicians, and therapy ORGANIZATIONS are rivals (often a chain's org NPI co-billing with its clinics) - both are excluded; rival relationships appear in the competitive landscape instead. Pairs under 11 patients are invisible, so 'no measured flow' can also mean 'fewer than 11 patients came here' - treat the list as prospecting priorities, not proof of zero relationship."
+        })
+        $(if (@($walletRows).Count) {
+            "SHARE OF REFERRER: for each existing source, PatientsToCompetitors is what that referrer sent to the OTHER comparable therapy providers in the $CompetitorRadiusMiles-mile radius in $($info.Year) (flow into this practice's own other locations excluded), and ShareOfReferrer is this practice's share of that referrer's measured therapy volume in the radius. A large referrer with a low share is the cheapest growth - the relationship already exists. AreaAvgDayWait (CareSet years) is the transaction-weighted average lag from that source into COMPETING practices; notably slower into this practice than into the area on a big source is an operational warning (scheduling, intake). All figures cover measured (11+ patient) pairs only."
+        })
+        $(if ($underserved) {
+            "MARKET HEADROOM: counties touched by a $([int]$HeadroomRadiusMiles)-mile sweep around ZIP $pracZip, ranked by registered PT/OT/SLP clinicians per 10,000 Original-Medicare (FFS) beneficiaries - a LOW figure means more Medicare demand per registered clinician (thin supply). The clinician count covers only the swept ZIPs while the beneficiary count covers the whole county, so read partially-covered counties (CoveragePct under 100) with care; supply is registered location, not necessarily where care is delivered."
         })
         $(if ($rosterRows.Count) { "PRACTICE ROSTER (Care Compare): $($rosterRows.Count) clinician$(if ($rosterRows.Count -eq 1) { ' is' } else { 's are' }) listed under this practice in Medicare Care Compare today - matched by practice name, then expanded to everyone sharing the same group-enrollment id (org_pac_id). This is TODAY's roster: staff who left are absent even though their historical volume appears above, and cash-pay or non-Medicare clinicians never appear. If the location column shows an unexpected city, a same-named practice elsewhere matched too - read those rows with care." })
         $(if ($npiList.Count -gt 1) { "COMBINED ANALYSIS: inbound volume is merged across $($npiList.Count) NPIs ($($npiList -join ', ')). A source feeding several of them counts ONCE with summed volume; patient flows BETWEEN these NPIs are excluded as internal handoffs. Geography and the competitive radius are centered on the primary NPI ($primary)." })
@@ -4401,6 +4523,8 @@ function Get-RmSourceAnalysis {
         OutboundRawPatients = $(  $orp = 0; foreach ($ov in $outBySrc.Values) { $orp += [int]$ov.N }; $orp )
         OutboundRawDestinations = $outBySrc.Count
         MissedSources = @($missedRows)    # area referrers with no flow into this practice
+        WalletShare  = @($walletRows)     # existing referrers who also feed competitors
+        Underserved  = $underserved       # market-headroom screen ($null when indexes absent)
         OutreachRadiusMiles = $OutreachRadiusMiles   # how far a prospect may sit and still be listed
         AtRiskSources = @($atRisk)        # referrer-type sources gone from the O&R roster
         Competitive  = $landscape     # $null when skipped or the sweep failed
@@ -4600,6 +4724,76 @@ function Get-RmSourceTrend {
     })
     $moversDropped = @($movers).Count - @($moversRel).Count
 
+    # ---- Neighborhood (ZIP) trend ------------------------------------
+    # Which neighborhoods the volume comes from, per year. Sources are
+    # placed at TODAY's registered NPPES address (disk cache first, then
+    # one pass over the local bulk index), so the trend reads as referrer
+    # relationships by place - an office that moved since the data year
+    # carries its history to its current ZIP, and the note says so.
+    $zipTrendRows = @()
+    $zipTrendMappedPct = $null
+    try {
+        $allSrcZ = New-Object 'System.Collections.Generic.HashSet[string]'
+        foreach ($y in $years) { foreach ($k in $perYear[$y.Year].Keys) { [void]$allSrcZ.Add($k) } }
+        $srcZip = @{}; $srcCity = @{}
+        $zipCache = Read-RmNppesCache
+        foreach ($k in $allSrcZ) {
+            if ($zipCache.ContainsKey($k)) {
+                $cz = [string](Get-RmProp $zipCache[$k] 'Zip')
+                if ($cz -match '^\d{5}$') {
+                    $srcZip[$k] = $cz
+                    $cc = [string](Get-RmProp $zipCache[$k] 'City')
+                    if ($cc) { $srcCity[$k] = ("{0}, {1}" -f $cc, [string](Get-RmProp $zipCache[$k] 'State')) }
+                }
+            }
+        }
+        if (Test-Path -LiteralPath (Get-RmNppesIndexPath)) {
+            foreach ($line in @([RmEngine]::ScanRosterIndex((Get-RmNppesIndexPath), $allSrcZ, 0))) {
+                $ff = $line.Split('|')
+                if ($ff.Count -lt 10) { continue }
+                if ($srcZip.ContainsKey($ff[0])) { continue }
+                $pz = $ff[7]
+                if ($pz.Length -ge 5) {
+                    $srcZip[$ff[0]] = $pz.Substring(0, 5)
+                    if ($ff[5]) { $srcCity[$ff[0]] = ("{0}, {1}" -f $ff[5], $ff[6]) }
+                }
+            }
+        }
+        if ($srcZip.Count -gt 0) {
+            $zipYear = @{}   # zip -> (year -> volume)
+            $zipArea = @{}
+            $mappedVol = [long]0; $grandVol = [long]0
+            foreach ($y in $years) {
+                foreach ($kv in $perYear[$y.Year].GetEnumerator()) {
+                    $grandVol += $kv.Value
+                    if (-not $srcZip.ContainsKey($kv.Key)) { continue }
+                    $mappedVol += $kv.Value
+                    $z = $srcZip[$kv.Key]
+                    if (-not $zipYear.ContainsKey($z)) { $zipYear[$z] = @{} }
+                    if ($zipYear[$z].ContainsKey($y.Year)) { $zipYear[$z][$y.Year] += $kv.Value }
+                    else { $zipYear[$z][$y.Year] = $kv.Value }
+                    if (-not $zipArea.ContainsKey($z) -and $srcCity.ContainsKey($kv.Key)) { $zipArea[$z] = $srcCity[$kv.Key] }
+                }
+            }
+            $zipTrendMappedPct = if ($grandVol -gt 0) { [math]::Round(100.0 * $mappedVol / $grandVol, 1) } else { 0 }
+            $ztAll = foreach ($zkv in $zipYear.GetEnumerator()) {
+                $v0 = if ($zkv.Value.ContainsKey($firstY)) { [int]$zkv.Value[$firstY] } else { 0 }
+                $v1 = if ($zkv.Value.ContainsKey($lastY)) { [int]$zkv.Value[$lastY] } else { 0 }
+                [pscustomobject]@{
+                    Zip = $zkv.Key
+                    Area = if ($zipArea.ContainsKey($zkv.Key)) { [string]$zipArea[$zkv.Key] } else { '' }
+                    YearVolumes = $zkv.Value          # every imported year -> volume
+                    FirstYearVolume = $v0
+                    LastYearVolume  = $v1
+                    Change = $v1 - $v0
+                    ChangePct = if ($v0 -gt 0) { [math]::Round(100.0 * ($v1 - $v0) / $v0, 1) } else { '' }
+                }
+            }
+            $zipTrendRows = @($ztAll | Sort-Object -Property @{Expression = 'LastYearVolume'; Descending = $true},
+                                                             @{Expression = 'Zip'; Descending = $false})
+        }
+    } catch { Write-Verbose "ZIP trend skipped: $($_.Exception.Message)" }
+
     $firstRow = $rows[0]; $lastRow = $rows[$rows.Count - 1]
     $volChangePct = if ($firstRow.SharedPatients -gt 0) {
         [math]::Round(100.0 * ($lastRow.SharedPatients - $firstRow.SharedPatients) / $firstRow.SharedPatients, 1)
@@ -4624,6 +4818,7 @@ function Get-RmSourceTrend {
         'Medicare FFS only: Medicare Advantage enrollment grew over these years, moving patients OUT of this data. A gentle decline can reflect that shift rather than lost referrals; compare against the area trend before concluding.'
         $(if ($moversDropped -gt 0) { "BIGGEST GAINS/DECLINES cover REFERRAL relationships only: $moversDropped therapy provider$(if ($moversDropped -ne 1) { 's' }) that moved between $firstY and $lastY $(if ($moversDropped -eq 1) { 'is' } else { 'are' }) excluded from those two tables - an individual PT/OT/SLP is a clinician co-billing (the practice's own or a rival's) and a therapy clinic is a competitor, so neither is a referral won or lost by working the relationship. They remain in the full Movers list and in every total." })
         'OUTBOUND COLUMNS: OutboundPatients/OutboundDestinations are the RAW onward flow (everyone this practice shared patients to, including its own therapists) measured in the same pass. A blank means that year''s scan was reused from an older analysis that did not carry outbound totals - re-run to fill it.'
+        $(if (@($zipTrendRows).Count) { "NEIGHBORHOOD TREND: inbound volume grouped by each source's practice ZIP; $zipTrendMappedPct% of all-year volume was locatable. Every year is mapped with the source's registered NPPES address as of TODAY, so the table reads as referrer relationships by place - an office that moved since a data year carries its history to its current ZIP. Sources with no locatable ZIP are excluded from this table only, never from the totals." })
         'The CMS 2015 FOIA file is intentionally excluded: a different (~8-month) window and methodology, not on the same scale.'
         $(if ($leadingZero.Count) { "NO MEASURED VOLUME IN $($leadingZero -join ', '): the practice may not have been enumerated or billing Medicare yet in those years, or every pair it had fell under the 11-patient floor. Growth is therefore also reported from $activeFrom, the first year with measured volume." })
     ) | Where-Object { $_ }
@@ -4643,6 +4838,8 @@ function Get-RmSourceTrend {
         Lost         = @($moversRel | Where-Object { $_.Change -lt 0 } |
                             Sort-Object Change | Select-Object -First 10)
         MoversTherapyExcluded = $moversDropped
+        ZipTrend     = @($zipTrendRows)        # per-neighborhood volume by year
+        ZipTrendMappedPct = $zipTrendMappedPct # share of all-year volume locatable
         Notes        = @($notes)
     }
 }
@@ -5274,6 +5471,39 @@ function Export-RmSourceReportHtml {
         $mTot = 0; foreach ($ms in $missList) { $mTot += [int]$ms.PatientsToCompetitors }
         $mRad = if ($comp) { $comp.RadiusMiles } else { 10 }
         $mOutRad = if ($a.PSObject.Properties['OutreachRadiusMiles']) { [int]$a.OutreachRadiusMiles } else { 50 }
+        # By-neighborhood grouping: the same prospects arranged as a route
+        # plan - one row per ZIP, with the practice's capture rate there so
+        # a rep can see WHY that neighborhood is worth a morning.
+        $mZipSheet = ''
+        $mZipRows2 = @($missList | Where-Object { $null -ne $_.PSObject.Properties['Zip'] -and ([string]$_.Zip) -match '^\d{5}$' })
+        if (@($mZipRows2).Count -ge 2) {
+            $capByZip = @{}
+            foreach ($gm in @(if ($a.PSObject.Properties['GeoMarket']) { $a.GeoMarket })) { $capByZip[[string]$gm.Zip] = $gm.CapturePct }
+            $mGroups = @($mZipRows2 | Group-Object Zip |
+                Sort-Object -Property @{Expression = { -(($_.Group | Measure-Object PatientsToCompetitors -Sum).Sum) }},
+                                      @{Expression = 'Name'})
+            if (@($mGroups).Count -gt 1) {
+                $mgRows = (@($mGroups) | ForEach-Object {
+                    $g0 = @($_.Group)
+                    $gSum = 0; foreach ($gp in $g0) { $gSum += [int]$gp.PatientsToCompetitors }
+                    $gCity = ([string]$g0[0].City).Trim()
+                    $gCap = if ($capByZip.ContainsKey([string]$_.Name)) { "$($capByZip[[string]$_.Name])%" } else { '&mdash;' }
+                    $gNames = (@($g0 | Select-Object -First 4 | ForEach-Object {
+                        (_h ([string]$_.SourceName)) + ' (' + ('{0:N0}' -f [int]$_.PatientsToCompetitors) + ')'
+                    }) -join '; ') + $(if ($g0.Count -gt 4) { "; +$($g0.Count - 4) more" })
+                    '<tr><td class="mono">' + $_.Name + '</td><td>' + (_h $gCity) + '</td><td class="num">' + $gCap +
+                    '</td><td class="num">' + ('{0:N0}' -f $gSum) + '</td><td>' + $gNames + '</td></tr>'
+                }) -join "`n"
+                $mZipSheet = @"
+<h3>The same list as a route plan &mdash; by neighborhood</h3>
+<table>
+  <tr><th>ZIP</th><th>Area</th><th class="num">Your capture</th><th class="num">Patients to competitors</th><th>Prospects (patients to competitors)</th></tr>
+  $mgRows
+</table>
+<div class="tablenote">Your capture = the share of that ZIP's total measured therapy volume that already comes to you (from the market-capture layer; a dash means the ZIP sends you volume but is outside the competitive radius, or the local NPPES index was not imported). A high-volume ZIP with a low capture rate is a neighborhood worth a morning of visits.</div>
+"@
+            }
+        }
         $outreachHtml = @"
 <div class="card"><h2>Outreach targets &mdash; local referrers not sending you patients</h2>
 <div class="body"><p>These $(@($missList).Count) practices sent <b>$('{0:N0}' -f $mTot) patients to other therapy providers</b> near you in $($a.Year), and none measurably to you. Every one sits within <b>$mOutRad miles</b> of your practice, so each is somewhere you could realistically visit &mdash; this is a call list, ranked by the size of the opportunity. Rival therapy practices and their own clinicians are left out, because nobody wins a referral from a competitor's staff. One caveat: referral pairs under 11 patients are hidden by Medicare privacy rules, so "none measurably to you" can also mean "fewer than 11 came your way."</p></div>
@@ -5281,6 +5511,63 @@ function Export-RmSourceReportHtml {
   <tr><th>NPI</th><th>Referrer</th><th>Specialty</th><th>Location</th><th class="num">Miles</th><th class="num">Patients to competitors</th></tr>
   $mRows
 </table>
+$mZipSheet
+</div>
+"@
+    }
+
+    # ---- Share of each referrer (wallet share) ---------------------------
+    $walletList = @(if ($a.PSObject.Properties['WalletShare']) { $a.WalletShare })
+    $walletHtml = ''
+    if (@($walletList).Count) {
+        $wRad = if ($comp) { $comp.RadiusMiles } else { 10 }
+        $wIsHop = [bool]($walletList[0].PSObject.Properties['AreaAvgDayWait'])
+        $wLagTh = if ($wIsHop) { '<th class="num">Days to you</th><th class="num">Days to others</th>' } else { '' }
+        $wRows = (@($walletList) | ForEach-Object {
+            $wName = if ($_.SourceName) { [string]$_.SourceName } else { "NPI $($_.SourceNPI)" }
+            $lagCells = ''
+            if ($wIsHop) {
+                $mineL = if ($null -ne $_.PSObject.Properties['AvgDayWait'] -and '' -ne [string]$_.AvgDayWait) { '{0:N1}' -f [double]$_.AvgDayWait } else { '&mdash;' }
+                $areaL = if ($null -ne $_.AreaAvgDayWait) { '{0:N1}' -f [double]$_.AreaAvgDayWait } else { '&mdash;' }
+                $lagCells = '<td class="num">' + $mineL + '</td><td class="num">' + $areaL + '</td>'
+            }
+            '<tr><td>' + (_h $wName) + '</td><td>' + (_h ([string]$_.SourceSpecialty)) + '</td>' +
+            '<td class="num">' + ('{0:N0}' -f [int]$_.SharedPatients) + '</td>' +
+            '<td class="num">' + ('{0:N0}' -f [int]$_.PatientsToCompetitors) + '</td>' +
+            '<td class="num">' + $_.ShareOfReferrer + '%</td>' + $lagCells + '</tr>'
+        }) -join "`n"
+        $walletHtml = @"
+<div class="card"><h2>Your share of each referrer &mdash; where they send everyone else</h2>
+<div class="body"><p>These are referrers you <b>already have</b> who also send patients to other therapy providers within $wRad miles &mdash; ranked by how much walks past you. Growing your share of a current referrer is usually cheaper than winning a stranger: the relationship, the phone number, and the trust already exist.$(if ($wIsHop) { ' The two lag columns show the average days from the referrer''s visit to the first therapy visit &mdash; with you, and with the competing practices they also feed. If patients reach competitors materially faster, look at scheduling and intake before assuming preference.' })</p></div>
+<table>
+  <tr><th>Referrer</th><th>Specialty</th><th class="num">To you</th><th class="num">To others</th><th class="num">Your share</th>$wLagTh</tr>
+  $wRows
+</table>
+<div class="tablenote">"To others" counts patients this referrer shared with the other comparable therapy providers in the radius (your own other locations excluded). Your share = to-you over (to-you + to-others). A referrer billing under several organization NPIs is combined into one row. Measured (11+ patient) pairs only, so small flows are invisible on both sides.</div>
+</div>
+"@
+    }
+
+    # ---- Market headroom (thin-supply counties nearby) -------------------
+    $us = if ($a.PSObject.Properties['Underserved']) { $a.Underserved } else { $null }
+    $headroomHtml = ''
+    if ($us -and @($us.Rows).Count) {
+        $usShown = @($us.Rows | Select-Object -First 8)
+        $usRows = (@($usShown) | ForEach-Object {
+            $ffsC = if ('' -ne [string]$_.FfsBeneficiaries) { '{0:N0}' -f [int]$_.FfsBeneficiaries } else { '&mdash;' }
+            $perC = if ('' -ne [string]$_.TherapistsPer10kFfs) { [string]$_.TherapistsPer10kFfs } else { '&mdash;' }
+            '<tr><td>' + (_h ([string]$_.County)) + '</td><td>' + (_h ([string]$_.State)) + '</td>' +
+            '<td class="num">' + $ffsC + '</td><td class="num">' + ('{0:N0}' -f [int]$_.TherapistsInSweep) + '</td>' +
+            '<td class="num">' + $perC + '</td><td class="num">' + $_.CoveragePct + '%</td></tr>'
+        }) -join "`n"
+        $headroomHtml = @"
+<div class="card"><h2>Market headroom &mdash; Medicare demand per clinician nearby</h2>
+<div class="body"><p>Counties around the practice, ranked by how thin the therapy supply is: registered PT/OT/SLP clinicians per 10,000 Original-Medicare patients &mdash; <b>fewer clinicians per 10,000 means more demand for each practice there</b>. This is where marketing dollars or a future location face the least competition for the same patients.</p></div>
+<table>
+  <tr><th>County</th><th>State</th><th class="num">Medicare (FFS) patients</th><th class="num">Therapy clinicians</th><th class="num">Clinicians per 10k</th><th class="num">Coverage</th></tr>
+  $usRows
+</table>
+<div class="tablenote">Clinician counts cover the ZIPs swept by the radius; patient counts cover the whole county &mdash; so the rate is only firm where Coverage is near 100%. Supply is where clinicians are registered, not always where they see patients. Sources: NPPES registry (today) and the latest CMS county enrollment file.</div>
 </div>
 "@
     }
@@ -5448,6 +5735,39 @@ function Export-RmSourceReportHtml {
         $movHead = '<tr><th>Source</th><th>Specialty</th><th class="num">' + $tr.FirstYear +
             '</th><th class="num">' + $tr.LastYear + '</th><th class="num">Change</th></tr>'
 
+        # Neighborhood trend: the same per-year volumes grouped by each
+        # source's practice ZIP - which neighborhoods are growing or fading.
+        $ztList = @(if ($tr.PSObject.Properties['ZipTrend']) { $tr.ZipTrend })
+        $ztHtml = ''
+        if (@($ztList).Count) {
+            $ztShown = @($ztList | Select-Object -First 12)
+            $ztYrTh = (@($ty) | ForEach-Object { '<th class="num">' + $_.Year + '</th>' }) -join ''
+            $ztRows = (@($ztShown) | ForEach-Object {
+                $cells = ''
+                foreach ($yy in @($ty)) {
+                    $vRaw = $_.YearVolumes[[int]$yy.Year]
+                    $cells += '<td class="num">' + $(if ($null -ne $vRaw) { '{0:N0}' -f [int]$vRaw } else { '0' }) + '</td>'
+                }
+                $chg = if ('' -ne [string]$_.ChangePct) {
+                    $sgn = if ([double]$_.ChangePct -gt 0) { '+' } else { '' }
+                    "$sgn$($_.ChangePct)%"
+                } elseif ([int]$_.LastYearVolume -gt 0) { 'new' } else { '' }
+                '<tr><td class="mono">' + $_.Zip + '</td><td>' + (_h ([string]$_.Area)) + '</td>' + $cells +
+                '<td class="num">' + $chg + '</td></tr>'
+            }) -join "`n"
+            $ztMapped = if ($null -ne $tr.PSObject.Properties['ZipTrendMappedPct'] -and $null -ne $tr.ZipTrendMappedPct) { "$($tr.ZipTrendMappedPct)%" } else { '' }
+            $ztHtml = @"
+<div class="card"><h2>Neighborhood trend &mdash; where the volume comes from, by year</h2>
+<div class="body"><p>Your referral volume grouped by each source's practice ZIP, for every imported year &mdash; the neighborhoods that are growing are where your name is spreading, and a fading ZIP is worth a visit before the habit hardens.</p></div>
+<table>
+  <tr><th>ZIP</th><th>Area</th>$ztYrTh<th class="num">Change</th></tr>
+  $ztRows
+</table>
+<div class="tablenote">Top $(@($ztShown).Count) of $(@($ztList).Count) neighborhoods by latest-year volume$(if ($ztMapped) { "; $ztMapped of all-year volume was locatable" }). Every year is mapped with the source's registered address as of TODAY, so an office that moved carries its history to its current ZIP &mdash; read this as referrer relationships by place, not a map of past addresses. "new" = no measured volume in $($tr.FirstYear).</div>
+</div>
+"@
+        }
+
         $trendHtml = @"
 <div class="card"><h2>Year-over-year performance &mdash; $($tr.FirstYear) to $($tr.LastYear)</h2>
 <div class="body">$trVolSvg</div>
@@ -5459,6 +5779,7 @@ $(if ($trRetSvg) { '<h3 class="sub2">Referral-source retention (vs the prior yea
 </table>
 <div class="tablenote">Kept = share of the previous year's sources still present. Sources under 11 shared patients are excluded every year, so a source can appear or vanish by crossing that floor rather than by winning or losing the relationship.$(if ($hasTrOut) { ' Outbound/Destinations = RAW onward flow (including the practice''s own therapists), measured in the same pass; a dash is a year whose scan predates these columns.' })</div>
 </div>
+$ztHtml
 <div class="duo">
   <div class="card"><h2>Biggest gains, $($tr.FirstYear) &rarr; $($tr.LastYear)</h2>
     <table>$movHead
@@ -5802,6 +6123,14 @@ $lossRows
             } else {
                 'No other provider in the area shows measured inbound volume (pairs under 11 patients are excluded from the data).'
             } })
+        $(if (@($walletList).Count) {
+            $w0 = @($walletList)[0]
+            $w0Name = if ($w0.SourceName) { [string]$w0.SourceName } else { "NPI $($w0.SourceNPI)" }
+            "GROWTH INSIDE EXISTING RELATIONSHIPS: $(@($walletList).Count) of the practice's referrers also send patients to competitors. The largest, $w0Name, sends the practice $('{0:N0}' -f [int]$w0.SharedPatients) patients but $('{0:N0}' -f [int]$w0.PatientsToCompetitors) to others — the practice holds $($w0.ShareOfReferrer)% of that relationship. Growing share with a current referrer is usually cheaper than winning a new one." })
+        $(if ($us -and @($us.Rows).Count) {
+            $u0 = @($us.Rows)[0]
+            if ('' -ne [string]$u0.TherapistsPer10kFfs -and [int]$u0.CoveragePct -ge 80) {
+                "MARKET HEADROOM: $($u0.County), $($u0.State) has the thinnest therapy supply nearby — $($u0.TherapistsPer10kFfs) registered PT/OT/SLP clinicians per 10,000 Original-Medicare patients. Thin supply means marketing or a future location competes with fewer practices for the same patients." } })
     ) | Where-Object { $_ }
     $findingsHtml = (@($findings) | ForEach-Object { '<li>' + (_h (_client ([string]$_))) + '</li>' }) -join "`n"
 
@@ -6081,7 +6410,9 @@ source, specialty, distance and referral-lag breakdowns are omitted rather than 
 $outHtml
 $trendHtml
 $compHtml
+$walletHtml
 $outreachHtml
+$headroomHtml
 $(if ($hasVolume) { @"
 <div class="card">
   <h2>Source detail</h2>

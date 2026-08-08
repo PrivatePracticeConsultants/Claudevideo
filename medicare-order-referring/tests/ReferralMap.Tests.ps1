@@ -3031,6 +3031,115 @@ Describe 'Same-company org fold (inbound + outbound)' {
     }
 }
 
+Describe 'Owner features: wallet share, area lag, ZIP call sheet, headroom, ZIP trend' {
+    # Five owner-facing layers computed from data the sweep already carries:
+    # (1) share-of-referrer - what each EXISTING source sends to competitors
+    #     (flow into the practice's own-name sites excluded),
+    # (2) area-average referral lag per source vs the lag into this practice,
+    # (3) the outreach call sheet grouped by prospect ZIP,
+    # (4) the market-headroom (underserved counties) card, and
+    # (5) the per-neighborhood year-over-year trend.
+    It 'computes all five layers from an isolated store and renders them' {
+        $ofDir = Join-Path $script:WorkDir 'owner-feats'
+        New-Item -ItemType Directory -Path $ofDir -Force | Out-Null
+        Set-Content -Path (Join-Path $ofDir 'hop_teaming_2022.csv') -Encoding ascii -NoNewline -Value (@(
+            'from_npi,to_npi,patient_count,transaction_count,average_day_wait,std_day_wait'
+            '8000000001,9000000001,45,50,10.0,5.0'    # DAVID -> me (10-day lag)
+            '8000000001,9000000010,90,90,4.0,2.0'     # DAVID -> rival (4-day lag): wallet share
+            '8000000001,9000000012,10,10,3.0,1.0'     # DAVID -> my own-name site: NOT competitor volume
+            '8000000034,9000000010,60,60,5.0,2.0'     # DANA -> rival only: outreach prospect, ZIP 99999
+            '8000000037,9000000010,40,40,6.0,2.0'     # NED  -> rival only: outreach prospect, ZIP 99998
+            # one medical group, two org NPIs, two spellings: ONE wallet row
+            '8000000039,9000000001,20,20,8.0,2.0'
+            '8000000039,9000000010,30,30,5.0,2.0'
+            '8000000040,9000000001,10,10,12.0,2.0'
+            '8000000040,9000000010,40,40,7.0,2.0'
+        ) -join "`n")
+        Set-Content -Path (Join-Path $ofDir 'hop_teaming_2021.csv') -Encoding ascii -NoNewline -Value (@(
+            'from_npi,to_npi,patient_count,transaction_count,average_day_wait,std_day_wait'
+            '8000000001,9000000001,30,30,10.0,5.0'
+        ) -join "`n")
+        Set-Content -Path (Join-Path $ofDir 'nppes-index.psv') -Encoding ascii -Value @(
+            '9000000010|2|RIVAL REHAB OF TESTVILLE, LLC|||NEXTTOWN|MO|999980000|261QP2000X|01/01/2005'
+            '9000000012|2|TEST REHAB CLINIC LLC|||NEXTTOWN|MO|999980000|261QP2000X|01/01/2005'
+            '8000000001|1||DOCTOR|DAVID|TESTVILLE|MO|999990000|207Q00000X|01/01/2005'
+            '8000000038|1||PT|PIPER|TESTVILLE|MO|999990000|225100000X|01/01/2005'
+            '8000000039|2|MEDICAL GROUP OF MISSOURI, INC|||TESTVILLE|MO|999990000|207Q00000X|01/01/2005'
+            '8000000040|2|MEDICAL GROUP OF MO INC|||TESTVILLE|MO|999990000|207Q00000X|01/01/2005'
+        )
+        Set-Content -Path (Join-Path $ofDir 'enrollment-index.psv') -Encoding ascii -Value @(
+            '17001|2023|Year|ALPHA COUNTY|MO|1000|800|200'
+        )
+        $ofCent = Join-Path $ofDir 'of-centroids.csv'
+        Set-Content -Path $ofCent -Encoding ascii -Value @(
+            'zip,lat,lon'
+            '99999,40.0000,-90.0000'
+            '99998,40.0500,-90.0000'    # ~3.5 miles
+            '86442,35.1000,-114.6000'
+        )
+        $ofXw = Join-Path $ofDir 'of-county.csv'
+        Set-Content -Path $ofXw -Encoding ascii -Value @('zip,fips', '99999,17001', '99998,17001')
+        $saved = (Get-RmConfig).DataDir
+        try {
+            Set-RmConfig -DataDir $ofDir
+            Set-RmActiveDataset -Source hop-teaming -Year 2022 | Out-Null
+            $sa = Get-RmSourceAnalysis -Npi 9000000001 -CentroidPath $ofCent -CrosswalkPath $ofXw
+
+            # (1) wallet share on the existing source, own-site flow excluded
+            $david = @($sa.Sources | Where-Object SourceNPI -eq '8000000001')[0]
+            $david.PatientsToCompetitors | Should -Be 90      # 100 raw minus 10 to my own site
+            $david.ShareOfReferrer | Should -Be 33.3          # 45 / (45 + 90)
+            # (2) area lag: 4.0 days into the rival vs 10.0 into me
+            $david.AreaAvgDayWait | Should -Be 4.0
+            $david.AvgDayWait | Should -Be 10.0
+            # one company billing under two org NPIs = ONE wallet relationship
+            @($sa.WalletShare).Count | Should -Be 2
+            $mg = @($sa.WalletShare | Where-Object { $_.SourceName -match '(?i)medical group' })
+            @($mg).Count | Should -Be 1
+            $mg[0].SharedPatients | Should -Be 30            # 20 + 10 to me
+            $mg[0].PatientsToCompetitors | Should -Be 70     # 30 + 40 to the rival
+            $mg[0].ShareOfReferrer | Should -Be 30           # 30 / 100
+            $mg[0].MergedNpis | Should -Be 2
+            (@($sa.Notes) -join ' ') | Should -BeLike '*SHARE OF REFERRER*'
+
+            # (3) outreach prospects carry their ZIP for the call sheet
+            $miss = @($sa.MissedSources)
+            @($miss | Where-Object SourceNPI -eq '8000000034')[0].Zip | Should -Be '99999'
+            @($miss | Where-Object SourceNPI -eq '8000000037')[0].Zip | Should -Be '99998'
+
+            # (4) market headroom from the county enrollment + NPPES indexes
+            $sa.Underserved | Should -Not -BeNullOrEmpty
+            @($sa.Underserved.Rows)[0].County | Should -Be 'ALPHA COUNTY'
+            @($sa.Underserved.Rows)[0].FfsBeneficiaries | Should -Be 800
+            (@($sa.Notes) -join ' ') | Should -BeLike '*MARKET HEADROOM*'
+
+            # (5) neighborhood trend across the two imported years
+            $sa2 = Add-RmSourceTrend -Analysis $sa -SkipEnrichment
+            $zt = @($sa2.Trend.ZipTrend)
+            $zt.Count | Should -Be 1
+            $zt[0].Zip | Should -Be '99999'
+            $zt[0].FirstYearVolume | Should -Be 30
+            $zt[0].LastYearVolume | Should -Be 75            # 45 + 20 + 10
+            $zt[0].ChangePct | Should -Be 150
+            $sa2.Trend.ZipTrendMappedPct | Should -Be 100
+            (@($sa2.Trend.Notes) -join ' ') | Should -BeLike '*NEIGHBORHOOD TREND*'
+
+            # ...and every layer renders in the deliverable
+            $out = Join-Path $script:WorkDir 'owner-feats.html'
+            Export-RmSourceReportHtml -Analysis $sa2 -Path $out | Out-Null
+            $html = Get-Content $out -Raw
+            $html | Should -BeLike '*Your share of each referrer*'
+            $html | Should -BeLike '*Days to you*'
+            $html | Should -BeLike '*route plan*'
+            $html | Should -BeLike '*Market headroom*'
+            $html | Should -BeLike '*Neighborhood trend*'
+        } finally {
+            Set-RmConfig -DataDir $saved
+            Set-RmActiveDataset -Source cms-pspp -Year 2015 | Out-Null
+        }
+    }
+}
+
 Describe 'Client-deliverable report' {
     # The report is handed to the practice owner, so it must (a) carry a
     # cover masthead with the practice as the title and an optional

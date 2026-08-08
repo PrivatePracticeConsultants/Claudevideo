@@ -142,6 +142,16 @@ SOURCES = {
                            '999990000', primary_desc='Family Medicine'),
     '8000000035': provider('8000000035', 'NPI-1', ('PAULA', 'PEERSTAFF'), ['225100000X'],
                            '999990000', primary_desc='Physical Therapist'),
+    # A second doctor feeding only the competitor, registered in the NEXT
+    # town over: the outreach call sheet must group prospects by ZIP.
+    '8000000037': provider('8000000037', 'NPI-1', ('NED', 'NEXTDOC'), ['207Q00000X'],
+                           '999980000', primary_desc='Family Medicine'),
+    # One medical group, two org NPIs, two spellings: the wallet-share card
+    # must combine them into a single relationship row.
+    '8000000039': provider('8000000039', 'NPI-2', 'MEDICAL GROUP OF MISSOURI, INC', ['207Q00000X'],
+                           '999990000', primary_desc='Family Medicine'),
+    '8000000040': provider('8000000040', 'NPI-2', 'MEDICAL GROUP OF MO INC', ['207Q00000X'],
+                           '999990000', primary_desc='Family Medicine'),
     # A sibling ORGANIZATION of the analyzed practice itself: same company
     # name, punctuated differently, its own NPI (the NPI-per-clinic pattern).
     # Flow to/from it is the company's internal patient movement - the
