@@ -3965,6 +3965,39 @@ Describe 'Secondary practice locations widen area searches' {
     }
 }
 
+Describe 'StrictMode trap-class scan (static)' {
+    # $x = if (c) { @($y) } else { @() } looks safe and is not: an
+    # if-EXPRESSION flattens an empty inner array to $null, so the else
+    # branch (and an empty then-branch) hands back $null instead of @(),
+    # and the next $x.Count throws PropertyNotFoundException under the
+    # StrictMode the modules run in. Eight live sites were fixed this way
+    # once already; this gate keeps the class extinct in module code.
+    # The safe spelling is $x = @(if (c) { $y }).
+    It 'modules contain no assignment of a bare if-expression whose else is @()' {
+        $moduleFiles = @(
+            Join-Path (Split-Path -Parent $PSScriptRoot) 'ReferralMap/ReferralMap.psm1'
+            Join-Path (Split-Path -Parent $PSScriptRoot) 'OrderReferring/OrderReferring.psm1'
+            Join-Path (Split-Path -Parent $PSScriptRoot) 'PracticeGroups/PracticeGroups.psm1'
+        )
+        $bad = New-Object System.Collections.Generic.List[string]
+        foreach ($mf in $moduleFiles) {
+            $lines = Get-Content -LiteralPath $mf
+            for ($ln = 0; $ln -lt $lines.Count; $ln++) {
+                # the dangerous shape ENDS the statement with else { @() };
+                # an else block feeding -join/+/[0] does not flatten into a
+                # bare variable and is left alone.
+                if ($lines[$ln] -notmatch 'else\s*\{\s*@\(\)\s*\}\s*$') { continue }
+                $from = [math]::Max(0, $ln - 2)
+                $stmt = ($lines[$from..$ln] -join ' ')
+                if ($stmt -match '\$\w+\s*=\s*if\s*\(') {
+                    $bad.Add("$(Split-Path -Leaf $mf):$($ln + 1): $($lines[$ln].Trim())")
+                }
+            }
+        }
+        ($bad -join "`n") | Should -BeNullOrEmpty
+    }
+}
+
 Describe 'GUI worker-script integrity (static)' {
     # A single quote inside a single-quoted -WorkerScript string terminates
     # it early; the file still PARSES, but the handler then feeds the tail of

@@ -282,7 +282,7 @@ can never strand the app behind it.
 
 ## Tests
 
-The test suite (281 tests across three modules: download/update/validation/
+The test suite (285 tests across three modules: download/update/validation/
 idempotency, crash-recovery state repair, older-release and retention safety,
 schema-drift tolerance, CSV formula-injection neutralization, download-URL and
 zip-slip rejection, search, batch check, snapshot diff/rename detection,

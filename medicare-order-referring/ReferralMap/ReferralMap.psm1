@@ -112,7 +112,7 @@ $script:RmIndividualTaxonomyPrefixes = @{
 # nationally, this readmits 910 providers of the 27,742 holding this primary,
 # only 2.5% of them hospital-named - it does not reopen the door to hospitals,
 # which is what ranking-on-primary exists to prevent.
-# A Fable-pass volume audit found the same pattern behind two more codes:
+# A follow-up volume audit found the same pattern behind two more codes:
 # in St Louis, Apex Physical Therapy (16,872 patients, would rank #3) sat
 # on 174400000X "Specialist" - a legacy code NUCC itself calls non-specific
 # - and EmpowerMe Rehabilitation Missouri (15,605, would rank #4) on
@@ -3915,7 +3915,10 @@ function Get-RmSourceAnalysis {
                 foreach ($kv in $pacOf.GetEnumerator()) {
                     $pid = $kv.Key
                     $mine = $kv.Value
-                    $all = if ($members.ContainsKey($pid)) { @($members[$pid].ToArray()) } else { @() }
+                    # @(if ...) not "= if ... else { @() }": an if-EXPRESSION
+                    # flattens an empty inner array to $null, and $null.Count
+                    # throws under StrictMode. See the tests' trap-class scan.
+                    $all = @(if ($members.ContainsKey($pid)) { $members[$pid].ToArray() })
                     if ($all.Count -eq 0) { continue }
                     # colleagues who could refer but never have. A therapist
                     # inside a physician group is not a referral prospect.
