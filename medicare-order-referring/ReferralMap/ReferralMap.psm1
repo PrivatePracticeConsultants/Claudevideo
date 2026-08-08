@@ -4739,6 +4739,11 @@ function Get-RmSourceAnalysis {
     # sides use ROSTERS (Care Compare), never the organization NPI. Peers
     # are sampled, not exhaustive: each clinician is one cached API call.
     $svcMix = $null; $svcMixPeer = $null; $svcMixNote = $null
+    if (-not $SkipCompetitors -and $ServiceMixPeerSample -gt 0 -and $rosterRows.Count -eq 0) {
+        # Every other skipped layer explains itself; this one went silent,
+        # leaving a consultant to wonder why the billing section vanished.
+        $svcMixNote = 'Billing mix not computed: Medicare Care Compare lists no clinicians under this practice, and Part B services bill under the RENDERING clinician''s NPI, so there is no roster to total. A practice whose Care Compare facility name differs from its NPPES name looks the same way.'
+    }
     if (-not $SkipCompetitors -and $ServiceMixPeerSample -gt 0 -and $rosterRows.Count -gt 0) {
         try {
             $myNpis = @($rosterRows | ForEach-Object { [string]$_.NPI } | Select-Object -First 60)
@@ -5929,7 +5934,7 @@ function Export-RmSourceReportHtml {
                 $(if ($comp.OwnOtherSitePatients -gt 0) { " (a further $('{0:N0}' -f $comp.OwnOtherSitePatients) measured patients)" }) +
                 ". Analyze those NPIs together with this one for a company-wide picture." }) +
             $(if (@($comp.Peers | Where-Object { $_.PSObject.Properties['Clinicians'] -and [int]$_.Clinicians -gt 0 }).Count -gt 1) {
-                " CLINICIANS / PER CLINICIAN: how many clinicians Medicare Care Compare lists under each practice TODAY, and its measured volume divided by that headcount - volume alone flatters a big roster, and a rival with twice the staff and the same volume is not outperforming you. A dash means Care Compare lists nobody under that name (solo practices billing only through an individual NPI, or a name spelled differently there); individuals count as one clinician. Headcount is today's, the volume is $($a.Year)." }) +
+                " CLINICIANS / PER CLINICIAN: how many clinicians Medicare Care Compare lists under each practice TODAY, and its measured volume divided by that headcount - volume alone flatters a big roster, and a rival with twice the staff and the same volume is not outperforming you. A dash means Care Compare lists nobody under that name (solo practices billing only through an individual NPI, or a name spelled differently there); individuals count as one clinician. The same mismatch can also match only PART of a practice, which understates its headcount and therefore overstates its volume per clinician - a figure far above its neighbours usually means the roster is incomplete, not that the practice is extraordinary. Headcount is today's, the volume is $($a.Year), and volume is the sum over sources (a patient with three referrers counts three times), so read this as referral volume per clinician rather than a caseload." }) +
             $(if ($comp.PSObject.Properties['ChainCount'] -and $comp.ChainCount -gt 0) {
                 " An asterisk (*) marks a competitor that is one clinic of a MULTI-SITE COMPANY — its organization name is registered by more than $($script:RmChainNpiThreshold) organization NPIs, so the row is a slice of a larger operator, not an independent practice. $($comp.ChainCount) of the ranked providers carry it." })
         $compHtml = @"
