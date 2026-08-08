@@ -3374,6 +3374,46 @@ Describe 'Competitor capacity, productivity and new entrants' {
             Set-RmActiveDataset -Source cms-pspp -Year 2015 | Out-Null
         }
     }
+    It 'counts the practice''s own clinicians by the SAME local rule as rivals' {
+        # PracticeRoster is name-matched nationally and then expanded through
+        # shared group-enrollment ids, so using it as the practice's headcount
+        # put a national figure in the same column as rivals' local ones and
+        # invented a per-clinician rate (live: a Longmont practice with NO
+        # local Care Compare rows reported 54 clinicians). With no local rows
+        # the practice must get the same dash a competitor would.
+        $ncDir = Join-Path $script:WorkDir 'no-local-roster'
+        New-Item -ItemType Directory -Path $ncDir -Force | Out-Null
+        Set-Content -Path (Join-Path $ncDir 'hop_teaming_2022.csv') -Encoding ascii -NoNewline -Value (@(
+            'from_npi,to_npi,patient_count,transaction_count,average_day_wait,std_day_wait'
+            '8000000001,9000000001,60,60,10.0,5.0'
+        ) -join "`n")
+        # Care Compare knows this practice's clinicians, but ALL of them sit
+        # in a far-away ZIP - so there is no LOCAL headcount to report.
+        Set-Content -Path (Join-Path $ncDir 'care-compare-index.psv') -Encoding ascii -Value @(
+            '7000000201|66009|TEST REHAB CLINIC|Physical Therapy|FAR|FIONA|BULLHEAD CITY|AZ|9 ST|86442'
+            '7000000202|66009|TEST REHAB CLINIC|Physical Therapy|FAR|FRANK|BULLHEAD CITY|AZ|9 ST|86442'
+        )
+        $ncCent = Join-Path $ncDir 'nc-centroids.csv'
+        Set-Content -Path $ncCent -Encoding ascii -Value @(
+            'zip,lat,lon', '99999,40.0000,-90.0000', '86442,35.1000,-114.6000')
+        $saved = (Get-RmConfig).DataDir
+        try {
+            Set-RmConfig -DataDir $ncDir
+            Set-RmActiveDataset -Source hop-teaming -Year 2022 | Out-Null
+            $sa = Get-RmSourceAnalysis -Npi 9000000001 -CentroidPath $ncCent
+            @($sa.PracticeRoster).Count | Should -BeGreaterThan 0   # the roster card still works
+            $sa.Competitive.MyClinicians | Should -Be 0             # ...but the RANKING says nothing
+            $me = @($sa.Competitive.Peers | Where-Object { $_.You })[0]
+            $me.Clinicians | Should -Be 0
+            $out = Join-Path $script:WorkDir 'no-local-roster.html'
+            Export-RmSourceReportHtml -Analysis $sa -Path $out | Out-Null
+            # a dash, never a fabricated rate
+            (Get-Content $out -Raw) | Should -Not -BeLike '*<td class="num">60</td><td class="num">60</td>*'
+        } finally {
+            Set-RmConfig -DataDir $saved
+            Set-RmActiveDataset -Source cms-pspp -Year 2015 | Out-Null
+        }
+    }
 }
 
 Describe 'Ranking radius: out-of-area sources are counted, never ranked' {

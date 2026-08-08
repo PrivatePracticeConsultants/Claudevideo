@@ -4409,8 +4409,15 @@ function Get-RmSourceAnalysis {
             # roster against competitors' local headcounts would flatter or
             # punish it arbitrarily.
             $myKeyCap = Get-RmOrgNameKey $pracName
-            $myClin = if ($myKeyCap -and $capBySite.ContainsKey($myKeyCap)) { [int]$capBySite[$myKeyCap] }
-                      else { $rosterRows.Count }   # NOT @(list).Count: the binder throws on a generic List
+            # LOCAL headcount, exactly as every competitor is counted. The
+            # practice's own PracticeRoster is name-matched nationally and
+            # then expanded through shared group-enrollment ids, so falling
+            # back to it put a national (sometimes parent-company) figure in
+            # the same column as rivals' local ones: live, a Longmont
+            # practice with no local Care Compare rows at all showed 54
+            # clinicians and an invented per-clinician rate. No local rows
+            # means a dash here, the same answer a competitor would get.
+            $myClin = if ($myKeyCap -and $capBySite.ContainsKey($myKeyCap)) { [int]$capBySite[$myKeyCap] } else { 0 }
             foreach ($pw in @($peersOut)) {
                 $cl = if ($pw.You) { $myClin }
                       elseif ($pw.Type -eq 'Organization') {
