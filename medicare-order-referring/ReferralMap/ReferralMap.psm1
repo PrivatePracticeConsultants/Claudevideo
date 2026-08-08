@@ -4281,6 +4281,57 @@ function Get-RmSourceAnalysis {
             if (-not @($peersOut | Where-Object { $_.You }).Count) {
                 $peersOut = @($peersOut) + @($outRows.ToArray() | Where-Object { $_.You } | Select-Object -First 1)
             }
+            # ---- Competitor capacity + new entrants ---------------------
+            # Volume alone flatters a big roster. Care Compare knows how many
+            # clinicians bill under each practice today, so the ranking can
+            # say whether a rival is genuinely outperforming or simply
+            # bigger - and patients per clinician is the number an owner can
+            # actually compare themselves against. ONE index pass covers
+            # every ranked competitor: their name keys go into a single
+            # alternation and the matches are grouped locally.
+            $capBySite = @{}
+            try {
+                $dacIdx4 = Get-RmDacIndexPath
+                if (Test-Path -LiteralPath $dacIdx4) {
+                    # ONE pass returns every facility-name key's distinct
+                    # clinician count (the same helper the map's RosterSize
+                    # column uses); the ranked names are looked up in it.
+                    $capBySite = [RmEngine]::ScanDacRosterCounts($dacIdx4, 0, 2)
+                }
+            } catch { Write-Verbose "Competitor capacity skipped: $($_.Exception.Message)" }
+            # Attach headcount + productivity to every ranked row. The
+            # analyzed practice uses its OWN roster, already fetched.
+            $myClin = $rosterRows.Count   # NOT @(list).Count: the binder throws on a generic List
+            foreach ($pw in @($peersOut)) {
+                $cl = if ($pw.You) { $myClin }
+                      elseif ($pw.Type -eq 'Organization') {
+                          $k3 = Get-RmOrgNameKey ([string]$pw.Name)
+                          if ($k3 -and $capBySite.ContainsKey($k3)) { [int]$capBySite[$k3] } else { 0 }
+                      } else { 1 }   # an individual is one clinician
+                $pw | Add-Member -NotePropertyName Clinicians -NotePropertyValue $cl -Force
+                $pw | Add-Member -NotePropertyName PatientsPerClinician -NotePropertyValue $(
+                    if ($cl -gt 0) { [math]::Round([double]$pw.SharedPatients / $cl, 0) } else { $null }) -Force
+            }
+            # NEW ENTRANTS: the sweep already carried each provider's NPPES
+            # enumeration date, so a therapy NPI issued after the data year
+            # is a practice that opened since - free, and the clearest
+            # early warning a local market gives.
+            $newEntrants = @()
+            try {
+                $dy = [int]$info.Year
+                $newEntrants = @($peers | Where-Object {
+                    $en = [string]$_.Enumerated
+                    $en -match '^(\d{4})' -and [int]$Matches[1] -gt $dy
+                } | ForEach-Object {
+                    [pscustomobject]@{
+                        NPI = $_.NPI; Name = $_.Name; Type = $_.Type
+                        City = $_.City; State = $_.State; Zip = $_.Zip
+                        Enumerated = [string]$_.Enumerated
+                    }
+                } | Sort-Object -Property @{Expression = 'Enumerated'; Descending = $true},
+                                          @{Expression = 'Name'; Descending = $false})
+            } catch { }
+
             $landscape = [pscustomobject]@{
                 RadiusMiles         = $CompetitorRadiusMiles
                 ZipCount            = $rzips.Count
@@ -4296,6 +4347,8 @@ function Get-RmSourceAnalysis {
                 Competitors         = @($outRows.ToArray() | Where-Object { -not $_.You } | Select-Object -First 5)
                 SecondaryOnlyExcluded = $secondaryOnly
                 ChainCount          = @($outRows.ToArray() | Where-Object { $_.Chain }).Count
+                NewEntrants         = @($newEntrants)     # therapy NPIs issued AFTER the data year
+                MyClinicians        = $myClin
             }
 
             # ---- Share of each referrer (wallet share) ------------------
@@ -5675,7 +5728,8 @@ function Export-RmSourceReportHtml {
         }
         $cpSvg = ('<svg viewBox="0 0 {0} {1}" role="img" aria-label="Competitive landscape">{2}</svg>' -f $w, ($cpTop.Count * ($barH + $gap) + 10), $cpBars.ToString())
         $cpRowFmt = '<tr{0}><td class="num">{1}</td><td>{2}</td><td>{3}</td><td>{4}</td>' +
-            '<td class="num">{5}</td><td class="num">{6}</td><td class="num">{7}</td>' +
+            '<td class="num">{5}</td><td class="num">{6}</td><td class="num">{10}</td><td class="num">{11}</td>' +
+            '<td class="num">{7}</td>' +
             '<td class="num">{8}</td><td class="num">{9}%</td></tr>'
         $cpRows = (@($cpShown) | ForEach-Object {
             $tag = if ($_.You) { ' class="you"' } else { '' }
@@ -5688,7 +5742,9 @@ function Export-RmSourceReportHtml {
             $cpRowFmt -f $tag, $_.Rank, $nmCell,
                 (_h ([string]$_.Type)),
                 (_h (("{0}, {1} {2}" -f $_.City, $_.State, $_.Zip).Trim(', ').Trim())),
-                $miles, $sitesCell, ('{0:N0}' -f $_.ReferralSources), ('{0:N0}' -f $_.SharedPatients), $_.SharePct
+                $miles, $sitesCell, ('{0:N0}' -f $_.ReferralSources), ('{0:N0}' -f $_.SharedPatients), $_.SharePct,
+                $(if ($_.PSObject.Properties['Clinicians'] -and [int]$_.Clinicians -gt 0) { '{0:N0}' -f [int]$_.Clinicians } else { '&mdash;' }),
+                $(if ($null -ne $_.PSObject.Properties['PatientsPerClinician'] -and $null -ne $_.PatientsPerClinician -and [int]$_.Clinicians -gt 0) { '{0:N0}' -f [int]$_.PatientsPerClinician } else { '&mdash;' })
         }) -join "`n"
         $cpHidden = [math]::Max(0, $comp.ProviderCount - @($cpShown).Count)
         $cpNote = ("$('{0:N0}' -f $comp.ProviderCount) outpatient rehab provider$(if ($comp.ProviderCount -ne 1) { 's' }) " +
@@ -5701,6 +5757,8 @@ function Export-RmSourceReportHtml {
                 " $($comp.OwnOtherSites) location$(if ($comp.OwnOtherSites -eq 1) { ' trading under this practice''s own name is NOT ranked here — it is one of its own clinics, not a competitor' } else { 's trading under this practice''s own name are NOT ranked here — they are its own clinics, not competitors' })" +
                 $(if ($comp.OwnOtherSitePatients -gt 0) { " (a further $('{0:N0}' -f $comp.OwnOtherSitePatients) measured patients)" }) +
                 ". Analyze those NPIs together with this one for a company-wide picture." }) +
+            $(if (@($comp.Peers | Where-Object { $_.PSObject.Properties['Clinicians'] -and [int]$_.Clinicians -gt 0 }).Count -gt 1) {
+                " CLINICIANS / PER CLINICIAN: how many clinicians Medicare Care Compare lists under each practice TODAY, and its measured volume divided by that headcount - volume alone flatters a big roster, and a rival with twice the staff and the same volume is not outperforming you. A dash means Care Compare lists nobody under that name (solo practices billing only through an individual NPI, or a name spelled differently there); individuals count as one clinician. Headcount is today's, the volume is $($a.Year)." }) +
             $(if ($comp.PSObject.Properties['ChainCount'] -and $comp.ChainCount -gt 0) {
                 " An asterisk (*) marks a competitor that is one clinic of a MULTI-SITE COMPANY — its organization name is registered by more than $($script:RmChainNpiThreshold) organization NPIs, so the row is a slice of a larger operator, not an independent practice. $($comp.ChainCount) of the ranked providers carry it." })
         $compHtml = @"
@@ -5709,7 +5767,7 @@ $areaCaution
 <div class="body">$cpSvg</div>
 <table>
   <tr><th class="num">#</th><th>Practice</th><th>Type</th><th>Location</th>
-      <th class="num">Miles</th><th class="num">Sites</th><th class="num">Sources</th><th class="num">Patients</th><th class="num">Area share</th></tr>
+      <th class="num">Miles</th><th class="num">Sites</th><th class="num">Clinicians</th><th class="num">Per clinician</th><th class="num">Sources</th><th class="num">Patients</th><th class="num">Area share</th></tr>
   $cpRows
 </table>
 <div class="tablenote">$cpNote The analyzed practice's own row is always shown, even when it ranks below the top 15. Equal volumes share a rank. A practice's volume can be split across its organization and individual therapist NPIs.</div>
@@ -5853,6 +5911,28 @@ $areaCaution
   $leakRowsHtml
 </table>
 <div class="tablenote">$(if (@($leakList).Count -gt 12) { "Showing the 12 largest of $(@($leakList).Count). " })Direction is claims sequence, not a documented transfer. "Avg days after" is the average gap from the visit here to the visit there &mdash; a few days reads like a hand-off, many months like unrelated later care.</div>
+</div>
+"@
+    }
+
+    # ---- New entrants -----------------------------------------------------
+    $newEntHtml = ''
+    $newEnts = @(if ($comp -and $comp.PSObject.Properties['NewEntrants']) { $comp.NewEntrants })
+    if (@($newEnts).Count) {
+        $neRows = (@($newEnts | Select-Object -First 12) | ForEach-Object {
+            '<tr><td class="mono">' + $_.NPI + '</td><td>' + (_h ([string]$_.Name)) + '</td><td>' + (_h ([string]$_.Type)) +
+            '</td><td>' + (_h (("{0}, {1}" -f $_.City, $_.State).Trim(', ').Trim())) + '</td><td class="num">' +
+            (_h ([string]$_.Enumerated)) + '</td></tr>'
+        }) -join "`n"
+        $newEntHtml = @"
+<div class="card"><h2>New therapy providers in your area since $($a.Year)</h2>
+$areaCaution
+<div class="body"><p>$(@($newEnts).Count) therapy provider$(if (@($newEnts).Count -ne 1) { 's' }) within $(if ($comp) { $comp.RadiusMiles } else { 10 }) miles registered $(if (@($newEnts).Count -eq 1) { 'its' } else { 'their' }) Medicare NPI <b>after</b> $($a.Year), so $(if (@($newEnts).Count -eq 1) { 'it does' } else { 'they do' }) not appear anywhere in the volume figures above &mdash; the data simply predates $(if (@($newEnts).Count -eq 1) { 'it' } else { 'them' }). These are the practices competing for your referrers now.</p></div>
+<table>
+  <tr><th>NPI</th><th>Provider</th><th>Type</th><th>Location</th><th class="num">NPI issued</th></tr>
+  $neRows
+</table>
+<div class="tablenote">$(if (@($newEnts).Count -gt 12) { "Showing the 12 newest of $(@($newEnts).Count). " })An NPI issue date is when the provider enrolled with Medicare, which is close to but not the same as when the doors opened; a practice that re-enumerated after a change of ownership also appears here.</div>
 </div>
 "@
     }
@@ -6736,6 +6816,7 @@ $trendHtml
 $compHtml
 $walletHtml
 $gpHtml
+$newEntHtml
 $outreachHtml
 $leakHtml
 $headroomHtml

@@ -3246,6 +3246,57 @@ Describe 'Group penetration and therapy leakage' {
     }
 }
 
+Describe 'Competitor capacity, productivity and new entrants' {
+    # Volume alone flatters a big roster, so the ranking carries headcount
+    # and patients-per-clinician; and a therapy NPI issued AFTER the data
+    # year is a practice that opened since - invisible in the volume figures
+    # by construction, which is exactly why it needs naming.
+    It 'adds headcount and per-clinician volume, and names providers that opened later' {
+        $capDir = Join-Path $script:WorkDir 'capacity'
+        New-Item -ItemType Directory -Path $capDir -Force | Out-Null
+        Set-Content -Path (Join-Path $capDir 'hop_teaming_2022.csv') -Encoding ascii -NoNewline -Value (@(
+            'from_npi,to_npi,patient_count,transaction_count,average_day_wait,std_day_wait'
+            '8000000001,9000000001,60,60,10.0,5.0'
+        ) -join "`n")
+        # Care Compare: the analyzed practice fields 2 clinicians.
+        Set-Content -Path (Join-Path $capDir 'care-compare-index.psv') -Encoding ascii -Value @(
+            '7000000101|66001|TEST REHAB CLINIC|Physical Therapy|ONE|ALICE|TESTVILLE|MO|1 ST|99999'
+            '7000000102|66001|TEST REHAB CLINIC|Physical Therapy|TWO|BOB|TESTVILLE|MO|1 ST|99999'
+        )
+        $capCent = Join-Path $capDir 'cap-centroids.csv'
+        Set-Content -Path $capCent -Encoding ascii -Value @(
+            'zip,lat,lon', '99999,40.0000,-90.0000', '86442,40.0500,-90.0000')
+        $saved = (Get-RmConfig).DataDir
+        try {
+            Set-RmConfig -DataDir $capDir
+            Set-RmActiveDataset -Source hop-teaming -Year 2022 | Out-Null
+            $sa = Get-RmSourceAnalysis -Npi 9000000001 -CentroidPath $capCent
+            $c = $sa.Competitive
+            $c | Should -Not -BeNullOrEmpty
+            $me = @($c.Peers | Where-Object { $_.You })[0]
+            $me.Clinicians | Should -Be 2                  # from the practice's own roster
+            $me.PatientsPerClinician | Should -Be 30       # 60 / 2
+            $c.MyClinicians | Should -Be 2
+
+            # 9000000005 enumerated 2015-11-10, i.e. BEFORE 2022: not new.
+            @($c.NewEntrants | Where-Object NPI -eq '9000000005').Count | Should -Be 0
+            # every listed entrant really is post-data-year
+            foreach ($n in @($c.NewEntrants)) {
+                ([int]([string]$n.Enumerated).Substring(0, 4)) | Should -BeGreaterThan 2022
+            }
+
+            $out = Join-Path $script:WorkDir 'capacity.html'
+            Export-RmSourceReportHtml -Analysis $sa -Path $out | Out-Null
+            $html = Get-Content $out -Raw
+            $html | Should -BeLike '*<th class="num">Clinicians</th>*'
+            $html | Should -BeLike '*<th class="num">Per clinician</th>*'
+        } finally {
+            Set-RmConfig -DataDir $saved
+            Set-RmActiveDataset -Source cms-pspp -Year 2015 | Out-Null
+        }
+    }
+}
+
 Describe 'Ranking radius: out-of-area sources are counted, never ranked' {
     # A source hundreds of miles out is a reference lab, a corporate/HQ
     # registration or a telehealth group - measured volume, but not a
