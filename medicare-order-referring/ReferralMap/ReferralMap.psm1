@@ -3782,12 +3782,7 @@ function Get-RmSourceAnalysis {
             # display names); the NPPES API returns the bare taxonomy desc
             # ('Family Medicine'). Cover both so the check does not silently
             # skip API-enriched sources.
-            $refTypeRe = ('PHYSICIAN|NURSE PRACTITIONER|PHYSICIAN ASSISTANT|PODIATR|OPTOMETR|DENTIST|CHIROPRACT|' +
-                'CLINICAL NURSE SPECIALIST|CERTIFIED REGISTERED NURSE ANESTHETIST|CERTIFIED NURSE MIDWIFE|' +
-                'FAMILY MEDICINE|INTERNAL MEDICINE|GENERAL PRACTICE|ORTHOPAEDIC|NEUROLOG|CARDIOVASCULAR|SPORTS MEDICINE|' +
-                'PHYSICAL MEDICINE|OSTEOPATH|SURGERY|PSYCHIATR|RHEUMATOLOG|PAIN MEDICINE|GERIATRIC|PULMONARY|ENDOCRIN|' +
-                'GASTROENTER|OTOLARYNG|UROLOG|ONCOLOG|RADIOLOG|ANESTHESIOLOG|DERMATOLOG|EMERGENCY MEDICINE|OBSTETRIC|' +
-                'GYNECOLOG|OPHTHALMOLOG|NEPHROLOG|HEMATOLOG|INFECTIOUS|ALLERGY')
+            $refTypeRe = $script:RmReferrerTypeRegex
             $checkSet = New-Object 'System.Collections.Generic.HashSet[string]'
             foreach ($srow in $sources) {
                 $sp = ([string]$srow.SourceSpecialty).ToUpperInvariant()
@@ -3840,6 +3835,112 @@ function Get-RmSourceAnalysis {
             }
         } catch { }   # a cross-check label; never sink the analysis
     }
+
+    # ---- Group penetration ----------------------------------------------
+    # A physician who refers here almost never practises alone. Care Compare
+    # publishes each clinician's group-enrollment id, so the colleagues of an
+    # existing referrer can be listed exactly - and the ones who have never
+    # sent a patient are the warmest call list a practice will ever get: the
+    # relationship, the building and the referral pathway already exist.
+    # Two local index passes: referrer NPIs -> their group ids -> everyone
+    # sharing those ids.
+    $groupPen = @()
+    try {
+        $dacIdx3 = Get-RmDacIndexPath
+        $refNpis = New-Object 'System.Collections.Generic.HashSet[string]'
+        $volByNpi = @{}
+        foreach ($srow in $sources) {
+            $sp = ([string]$srow.SourceSpecialty).ToUpperInvariant()
+            # individual referrer-types only: an ORGANIZATION has no
+            # colleagues in the Care Compare sense, and a therapist is not a
+            # referral source (that is the practice-therapist fold).
+            if (-not $sp -or $sp -match 'CLINIC|CENTER|HOSPITAL' -or $sp -notmatch $script:RmReferrerTypeRegex) { continue }
+            if ($sp -match $therapistRe) { continue }
+            [void]$refNpis.Add([string]$srow.SourceNPI)
+            $volByNpi[[string]$srow.SourceNPI] = [int]$srow.SharedPatients
+        }
+        if ($refNpis.Count -gt 0 -and (Test-Path -LiteralPath $dacIdx3)) {
+            # pass 1: the groups those referrers belong to
+            $pacOf = @{}; $pacName = @{}
+            foreach ($line in @([RmEngine]::ScanRosterIndex($dacIdx3, $refNpis, 0))) {
+                $f = $line.Split('|')
+                if ($f.Count -lt 8 -or -not $f[1]) { continue }
+                if (-not $pacOf.ContainsKey($f[1])) { $pacOf[$f[1]] = New-Object 'System.Collections.Generic.HashSet[string]' }
+                [void]$pacOf[$f[1]].Add($f[0])
+                if (-not $pacName.ContainsKey($f[1]) -and $f[2]) { $pacName[$f[1]] = $f[2] }
+            }
+            if ($pacOf.Count -gt 0) {
+                # pass 2: every clinician in those groups
+                $pacSet = New-Object 'System.Collections.Generic.HashSet[string]'
+                foreach ($k in $pacOf.Keys) { [void]$pacSet.Add($k) }
+                $members = @{}
+                foreach ($line in @([RmEngine]::ScanRosterIndex($dacIdx3, $pacSet, 1))) {
+                    $f = $line.Split('|')
+                    if ($f.Count -lt 8 -or -not $f[0]) { continue }
+                    if (-not $members.ContainsKey($f[1])) { $members[$f[1]] = New-Object System.Collections.Generic.List[object] }
+                    $members[$f[1]].Add([pscustomobject]@{
+                        NPI = $f[0]; Clinician = ("$($f[5]) $($f[4])").Trim()
+                        Specialty = $f[3]; City = $f[6]; State = $f[7]
+                    })
+                }
+                $gp = New-Object System.Collections.Generic.List[object]
+                foreach ($kv in $pacOf.GetEnumerator()) {
+                    $pid = $kv.Key
+                    $mine = $kv.Value
+                    $all = if ($members.ContainsKey($pid)) { @($members[$pid].ToArray()) } else { @() }
+                    if ($all.Count -eq 0) { continue }
+                    # colleagues who could refer but never have. A therapist
+                    # inside a physician group is not a referral prospect.
+                    $untapped = @($all | Where-Object {
+                        $sp2 = ([string]$_.Specialty).ToUpperInvariant()
+                        (-not $mine.Contains([string]$_.NPI)) -and $sp2 -and
+                        $sp2 -match $script:RmReferrerTypeRegex -and $sp2 -notmatch $therapistRe
+                    })
+                    $pat = 0; foreach ($n in $mine) { if ($volByNpi.ContainsKey($n)) { $pat += [int]$volByNpi[$n] } }
+                    $gp.Add([pscustomobject]@{
+                        GroupId = $pid
+                        GroupName = if ($pacName.ContainsKey($pid)) { [string]$pacName[$pid] } else { "Group $pid" }
+                        Clinicians = $all.Count
+                        Referring = $mine.Count
+                        Untapped = $untapped.Count
+                        SharedPatients = $pat
+                        PenetrationPct = if ($all.Count -gt 0) { [math]::Round(100.0 * $mine.Count / $all.Count, 1) } else { 0 }
+                        UntappedClinicians = @($untapped | Sort-Object Clinician)
+                    })
+                }
+                $groupPen = @($gp.ToArray() |
+                    Where-Object { $_.Untapped -gt 0 } |
+                    Sort-Object -Property @{Expression = 'SharedPatients'; Descending = $true},
+                                          @{Expression = 'GroupName'; Descending = $false})
+            }
+        }
+    } catch { Write-Verbose "Group penetration skipped: $($_.Exception.Message)" }
+
+    # ---- Therapy leakage (outbound) --------------------------------------
+    # Patients who went on to ANOTHER therapy provider. The own-clinician and
+    # own-location folds already removed the practice's own staff and sites,
+    # so what remains with a therapy label is care that left the building.
+    # Destinations inside the competitive radius are named as such: those are
+    # the rivals actually taking continuing care.
+    $leakRows = @()
+    $leakTotal = 0
+    foreach ($o in @($outboundRows)) {
+        $osp = ([string]$o.Specialty).ToUpperInvariant()
+        $isTher = ($osp -and ($osp -match $therapistRe -or
+                   ($osp -match 'CLINIC|CENTER' -and $osp -match 'PHYSICAL THERAP|OCCUPATIONAL THERAP|SPEECH|REHABILITATION'))) -or
+                  (Test-RmTherapyPracticeName ([string]$o.Name))
+        if (-not $isTher) { continue }
+        $leakTotal += [int]$o.SharedPatients
+        $row = [ordered]@{
+            NPI = $o.NPI; Name = $o.Name; Specialty = $o.Specialty
+            SharedPatients = $o.SharedPatients
+            InCompetitiveRadius = $others.Contains([string]$o.NPI)
+        }
+        if ($null -ne $o.PSObject.Properties['AvgDayWait']) { $row['AvgDayWait'] = $o.AvgDayWait }
+        $leakRows += [pscustomobject]$row
+    }
+    $leakRows = @($leakRows | Sort-Object -Property @{Expression = { [int]$_.SharedPatients }; Descending = $true})
+
     $geoRows = @($byZip.GetEnumerator() | ForEach-Object {
         $z = $_.Key; $b = $_.Value
         [pscustomobject]@{
@@ -4495,6 +4596,14 @@ function Get-RmSourceAnalysis {
             $ovst = @($outboundTherRows | Where-Object { $_.Staff -like 'VERIFIED*' }).Count
             "OUTBOUND OWN-CLINICIANS: $(@($outboundTherRows).Count) individual PT/OT/SLP NPI$(if (@($outboundTherRows).Count -ne 1) { 's' }) also appear$(if (@($outboundTherRows).Count -eq 1) { 's' }) on the OUTBOUND side, carrying $('{0:N0}' -f $outTherPatients) patients - the same co-billing pattern in the other direction (continued care under the practice's own therapists), NOT a post-therapy hand-off, so they are folded out of the outbound destination list. $ovst of $(@($outboundTherRows).Count) are VERIFIED on this practice's Care Compare roster today."
         })
+        $(if (@($groupPen).Count) {
+            $gpU = 0; foreach ($g in $groupPen) { $gpU += [int]$g.Untapped }
+            "GROUP PENETRATION: for every individual referrer-type source, Medicare Care Compare's group-enrollment id (org_pac_id) identifies the practice group they bill under, and every other clinician sharing that id. $(@($groupPen).Count) group$(if (@($groupPen).Count -ne 1) { 's' }) that already refer here contain $gpU referrer-type clinician$(if ($gpU -ne 1) { 's' }) with NO measured referral to this practice. Care Compare is TODAY's roster while the volume is from $($info.Year), so a colleague who joined since will read as untapped when they are simply new - check the join before assuming a cold relationship. Therapists inside a group are excluded (a PT colleague is not a referral source), and pairs under 11 patients are invisible, so 'never referred' can also mean 'fewer than 11'."
+        })
+        $(if (@($leakRows).Count) {
+            $lkIn = @($leakRows | Where-Object { $_.InCompetitiveRadius }).Count
+            "THERAPY LEAKAGE: $('{0:N0}' -f $leakTotal) patients shared onward to $(@($leakRows).Count) OTHER therapy provider$(if (@($leakRows).Count -ne 1) { 's' }) in $($info.Year)$(if ($lkIn -gt 0) { ", $lkIn of them inside the $CompetitorRadiusMiles-mile competitive radius" }). The practice's own clinicians and its own other locations are already folded out, so this is care that left the practice. Direction is claims sequence, not a documented transfer: a patient may have been discharged, moved, or been referred on for a different problem. Read it as a retention question to ask, not a proven loss."
+        })
         $(if (@($distantRows).Count) {
             "OUT-OF-AREA SOURCES: $(@($distantRows).Count) source$(if (@($distantRows).Count -ne 1) { 's' }) carrying $('{0:N0}' -f $distantTotal) shared patients sit more than $([int]$RankingRadiusMiles) straight-line miles from this practice, so they are counted in the measured patient base but kept OUT of the referral ranking: at that distance a source is a reference lab, a corporate/HQ registration or a telehealth group rather than a referral relationship anyone can work, and leaving them in pushed real local referrers down the table. PctOfVolume, CumulativePct, concentration and the distance profile are shares of the RANKED base ($('{0:N0}' -f $total) patients); ranked + out-of-area = $('{0:N0}' -f $externalAll) external patients. A source whose practice ZIP could not be located stays in the ranking - unknown is not the same as far."
         })
@@ -4602,6 +4711,9 @@ function Get-RmSourceAnalysis {
         Underserved  = $underserved       # market-headroom screen ($null when indexes absent)
         OutreachRadiusMiles = $OutreachRadiusMiles   # how far a prospect may sit and still be listed
         AtRiskSources = @($atRisk)        # referrer-type sources gone from the O&R roster
+        GroupPenetration = @($groupPen)   # referring groups + colleagues who never referred
+        TherapyLeakage = @($leakRows)     # outbound volume to OTHER therapy providers
+        TherapyLeakagePatients = $leakTotal
         Competitive  = $landscape     # $null when skipped or the sweep failed
         Trend        = $null          # filled by Add-RmSourceTrend
         Notes        = @($notes)
@@ -5394,6 +5506,9 @@ function Export-RmSourceReportHtml {
     $sibPat = if ($a.PSObject.Properties['SiblingPatients']) { [int]$a.SiblingPatients } else { 0 }
     $sibList = @(if ($a.PSObject.Properties['SiblingRows']) { $a.SiblingRows })
     $farList2 = @(if ($a.PSObject.Properties['DistantRows']) { $a.DistantRows })
+    $gpList = @(if ($a.PSObject.Properties['GroupPenetration']) { $a.GroupPenetration })
+    $leakList = @(if ($a.PSObject.Properties['TherapyLeakage']) { $a.TherapyLeakage })
+    $leakPat = if ($a.PSObject.Properties['TherapyLeakagePatients']) { [int]$a.TherapyLeakagePatients } else { 0 }
     $farPat = if ($a.PSObject.Properties['DistantPatients']) { [int]$a.DistantPatients } else { 0 }
     $rankRad = if ($a.PSObject.Properties['RankingRadiusMiles']) { [int]$a.RankingRadiusMiles } else { 0 }
     # The heat map still draws EVERY external source (its own 250-mile cap
@@ -5690,6 +5805,54 @@ $areaCaution
   $wRows
 </table>
 <div class="tablenote">"To others" counts patients this referrer shared with the other comparable therapy providers in the radius (your own other locations excluded). Your share = to-you over (to-you + to-others). A referrer billing under several organization NPIs is combined into one row. Measured (11+ patient) pairs only, so small flows are invisible on both sides.</div>
+</div>
+"@
+    }
+
+    # ---- Group penetration ----------------------------------------------
+    $gpHtml = ''
+    if (@($gpList).Count) {
+        $gpShown = @($gpList | Select-Object -First 8)
+        $gpTotalU = 0; foreach ($g in $gpList) { $gpTotalU += [int]$g.Untapped }
+        $gpRows = (@($gpShown) | ForEach-Object {
+            $names = (@($_.UntappedClinicians | Select-Object -First 6 | ForEach-Object {
+                (_h ([string]$_.Clinician)) + ' <span class="mut">' + (_h ([string]$_.Specialty)) + '</span>'
+            }) -join '; ') + $(if (@($_.UntappedClinicians).Count -gt 6) { '; +' + (@($_.UntappedClinicians).Count - 6) + ' more' })
+            '<tr><td>' + (_h ([string]$_.GroupName)) + '</td><td class="num">' + ('{0:N0}' -f [int]$_.SharedPatients) +
+            '</td><td class="num">' + $_.Referring + ' of ' + $_.Clinicians + '</td><td class="num">' + $_.PenetrationPct +
+            '%</td><td>' + $names + '</td></tr>'
+        }) -join "`n"
+        $gpHtml = @"
+<div class="card"><h2>Inside the groups that already refer to you</h2>
+$areaCaution
+<div class="body"><p>Every referring physician bills under a practice group, and Medicare publishes who else is in it. These groups already send you patients &mdash; and they contain <b>$gpTotalU clinicians who have never sent you one</b>. That is the warmest list in this report: same building, same group, a colleague who already trusts you, and a name you can use when you call.</p></div>
+<table>
+  <tr><th>Group</th><th class="num">Patients to you</th><th class="num">Referring</th><th class="num">Penetration</th><th>Colleagues who have not referred</th></tr>
+  $gpRows
+</table>
+<div class="tablenote">$(if (@($gpList).Count -gt 8) { "Showing the 8 groups sending you the most patients, of $(@($gpList).Count). " })Group membership is Medicare Care Compare as it stands TODAY, while the volume is from $($a.Year) &mdash; a clinician who joined the group since then will appear here as untapped when they are simply new. Therapists inside a group are left out (a PT colleague is not a referral source), and referral pairs under 11 patients are invisible, so "has not referred" can also mean "fewer than 11 patients".</div>
+</div>
+"@
+    }
+
+    # ---- Therapy leakage --------------------------------------------------
+    $leakHtml = ''
+    if (@($leakList).Count) {
+        $leakIn = @($leakList | Where-Object { $_.InCompetitiveRadius }).Count
+        $leakRowsHtml = (@($leakList | Select-Object -First 12) | ForEach-Object {
+            $near = if ($_.InCompetitiveRadius) { 'In your area' } else { 'Outside your area' }
+            $lag = if ($null -ne $_.PSObject.Properties['AvgDayWait']) { '{0:N1}' -f [double]$_.AvgDayWait } else { '&mdash;' }
+            '<tr><td class="mono">' + $_.NPI + '</td><td>' + (_h ([string]$_.Name)) + '</td><td>' + (_h ([string]$_.Specialty)) +
+            '</td><td>' + $near + '</td><td class="num">' + $lag + '</td><td class="num">' + ('{0:N0}' -f [int]$_.SharedPatients) + '</td></tr>'
+        }) -join "`n"
+        $leakHtml = @"
+<div class="card"><h2>Where your patients continued care elsewhere</h2>
+<div class="body"><p>$('{0:N0}' -f $leakPat) patients went on to <b>another therapy provider</b> in $($a.Year)$(if ($leakIn -gt 0) { ", and $leakIn of those practices sit inside your $(if ($comp) { $comp.RadiusMiles } else { 10 })-mile market" }). Your own clinicians and your own other locations are already excluded, so this is care that left the practice. It is not proof of a lost patient &mdash; someone may have moved, been discharged, or been sent on for a different problem &mdash; but a familiar name high on this list is worth a conversation about discharge and follow-up.</p></div>
+<table>
+  <tr><th>NPI</th><th>Provider</th><th>Specialty</th><th>Location</th><th class="num">Avg days after</th><th class="num">Patients</th></tr>
+  $leakRowsHtml
+</table>
+<div class="tablenote">$(if (@($leakList).Count -gt 12) { "Showing the 12 largest of $(@($leakList).Count). " })Direction is claims sequence, not a documented transfer. "Avg days after" is the average gap from the visit here to the visit there &mdash; a few days reads like a hand-off, many months like unrelated later care.</div>
 </div>
 "@
     }
@@ -6468,6 +6631,9 @@ __RM_LEAFLET_JS__
              font-size:13.5px; line-height:1.55; text-wrap:pretty; }
   .caution b { letter-spacing:.04em; text-transform:uppercase; font-size:12px; }
 
+  /* Inline muted qualifier - a specialty beside a clinician name. */
+  .mut { color:var(--sub); font-size:.92em; }
+
   .tablenote { padding:11px 24px 12px; color:var(--sub); font-size:11.5px; line-height:1.65; }
   details { margin:0; } summary { cursor:pointer; padding:17px 24px; font-family:var(--cond);
             font-size:13px; font-weight:600; text-transform:uppercase; letter-spacing:.24em; color:var(--navy); }
@@ -6569,7 +6735,9 @@ $outHtml
 $trendHtml
 $compHtml
 $walletHtml
+$gpHtml
 $outreachHtml
+$leakHtml
 $headroomHtml
 $(if ($hasVolume) { @"
 <div class="card">
@@ -7584,6 +7752,17 @@ function Save-RmLocalResources {
 # Corporate-form words that carry no identity. Measured over the 1,949,379
 # organization names in the real NPPES file, where the most common final
 # words are LLC 28.7%, INC 20.8%, PLLC 6.0%, PC 4.7%, PA 2.5%, LTD 0.7%.
+# Provider types that can actually REFER (the ones the Order & Referring
+# roster covers). Local-index enrichment labels physicians '... Physician'
+# (NUCC display names) while the NPPES API returns the bare taxonomy desc
+# ('Family Medicine'), so both spellings are covered.
+$script:RmReferrerTypeRegex = ('PHYSICIAN|NURSE PRACTITIONER|PHYSICIAN ASSISTANT|PODIATR|OPTOMETR|DENTIST|CHIROPRACT|' +
+    'CLINICAL NURSE SPECIALIST|CERTIFIED REGISTERED NURSE ANESTHETIST|CERTIFIED NURSE MIDWIFE|' +
+    'FAMILY MEDICINE|INTERNAL MEDICINE|GENERAL PRACTICE|ORTHOPAEDIC|NEUROLOG|CARDIOVASCULAR|SPORTS MEDICINE|' +
+    'PHYSICAL MEDICINE|OSTEOPATH|SURGERY|PSYCHIATR|RHEUMATOLOG|PAIN MEDICINE|GERIATRIC|PULMONARY|ENDOCRIN|' +
+    'GASTROENTER|OTOLARYNG|UROLOG|ONCOLOG|RADIOLOG|ANESTHESIOLOG|DERMATOLOG|EMERGENCY MEDICINE|OBSTETRIC|' +
+    'GYNECOLOG|OPHTHALMOLOG|NEPHROLOG|HEMATOLOG|INFECTIOUS|ALLERGY')
+
 $script:RmOrgNoiseWords = 'LLC|INC|INCORPORATED|PC|PA|PLLC|LLP|LLLP|LP|LTD|LIMITED|PLC|SC|PSC|APC|CORP|CORPORATION|COMPANY|CO|PARTNERSHIP|THE|OF|AND'
 
 function Get-RmOrgNameKey([string]$Name) {

@@ -3169,6 +3169,83 @@ Describe 'Owner features: wallet share, area lag, ZIP call sheet, headroom, ZIP 
     }
 }
 
+Describe 'Group penetration and therapy leakage' {
+    # Two owner-facing layers built from data already in hand: the colleagues
+    # of an existing referrer who have never referred (Care Compare group
+    # membership), and outbound volume that went to ANOTHER therapy provider.
+    BeforeAll {
+        Set-RmActiveDataset -Source hop-teaming -Year 2022 | Out-Null
+        $script:GpDir = Join-Path $script:WorkDir 'group-pen'
+        New-Item -ItemType Directory -Path $script:GpDir -Force | Out-Null
+        Set-Content -Path (Join-Path $script:GpDir 'hop_teaming_2022.csv') -Encoding ascii -NoNewline -Value (@(
+            'from_npi,to_npi,patient_count,transaction_count,average_day_wait,std_day_wait'
+            '8000000001,9000000001,45,45,10.0,5.0'    # DAVID DOCTOR refers in
+            '9000000001,8000000009,25,25,20.0,5.0'    # onward to a REHAB CLINIC = leakage
+            '9000000001,8000000002,15,15,30.0,5.0'    # onward to an ortho = not leakage
+        ) -join "`n")
+        # Care Compare: DAVID DOCTOR's group has two colleagues who have never
+        # referred (one of them a PT, who must NOT be counted as a prospect).
+        $script:GpDac = Join-Path $script:GpDir 'care-compare-index.psv'
+        Set-Content -Path $script:GpDac -Encoding ascii -Value @(
+            '8000000001|77001|BIG MEDICAL GROUP|Family Practice|DOCTOR|DAVID|TESTVILLE|MO|1 TEST ST|99999'
+            '8000000050|77001|BIG MEDICAL GROUP|Orthopedic Surgery|NEVER|NELLIE|TESTVILLE|MO|1 TEST ST|99999'
+            '8000000051|77001|BIG MEDICAL GROUP|Internal Medicine|QUIET|QUENTIN|TESTVILLE|MO|1 TEST ST|99999'
+            '8000000052|77001|BIG MEDICAL GROUP|Physical Therapy|STAFF|SALLY|TESTVILLE|MO|1 TEST ST|99999'
+        )
+        $script:GpCent = Join-Path $script:GpDir 'gp-centroids.csv'
+        Set-Content -Path $script:GpCent -Encoding ascii -Value @(
+            'zip,lat,lon', '99999,40.0000,-90.0000', '86442,40.0500,-90.0000')
+    }
+    AfterAll { Set-RmActiveDataset -Source cms-pspp -Year 2015 | Out-Null }
+
+    It 'lists the colleagues of a referring group who have never referred' {
+        $saved = (Get-RmConfig).DataDir
+        try {
+            Set-RmConfig -DataDir $script:GpDir
+            $sa = Get-RmSourceAnalysis -Npi 9000000001 -CentroidPath $script:GpCent -SkipCompetitors
+            $g = @($sa.GroupPenetration)
+            $g.Count | Should -Be 1
+            $g[0].GroupName | Should -Be 'BIG MEDICAL GROUP'
+            $g[0].Clinicians | Should -Be 4
+            $g[0].Referring | Should -Be 1
+            $g[0].SharedPatients | Should -Be 45
+            $g[0].PenetrationPct | Should -Be 25
+            # the PT colleague is NOT a referral prospect; the two physicians are
+            $g[0].Untapped | Should -Be 2
+            $names = @($g[0].UntappedClinicians | ForEach-Object { [string]$_.Clinician })
+            $names | Should -Contain 'NELLIE NEVER'
+            $names | Should -Contain 'QUENTIN QUIET'
+            $names | Should -Not -Contain 'SALLY STAFF'
+            (@($sa.Notes) -join ' ') | Should -BeLike '*GROUP PENETRATION*'
+
+            $out = Join-Path $script:WorkDir 'group-pen.html'
+            Export-RmSourceReportHtml -Analysis $sa -Path $out | Out-Null
+            $html = Get-Content $out -Raw
+            $html | Should -BeLike '*Inside the groups that already refer to you*'
+            $html | Should -BeLike '*NELLIE NEVER*'
+        } finally { Set-RmConfig -DataDir $saved }
+    }
+
+    It 'counts onward volume to other therapy providers as leakage' {
+        $saved = (Get-RmConfig).DataDir
+        try {
+            Set-RmConfig -DataDir $script:GpDir
+            $sa = Get-RmSourceAnalysis -Npi 9000000001 -CentroidPath $script:GpCent -SkipCompetitors
+            $lk = @($sa.TherapyLeakage)
+            $lk.Count | Should -Be 1                       # the rehab clinic only
+            $lk[0].NPI | Should -Be '8000000009'
+            $sa.TherapyLeakagePatients | Should -Be 25
+            # the orthopaedic destination is a hand-off, not leakage
+            @($lk | Where-Object NPI -eq '8000000002').Count | Should -Be 0
+            (@($sa.Notes) -join ' ') | Should -BeLike '*THERAPY LEAKAGE*'
+
+            $out = Join-Path $script:WorkDir 'leakage.html'
+            Export-RmSourceReportHtml -Analysis $sa -Path $out | Out-Null
+            (Get-Content $out -Raw) | Should -BeLike '*continued care elsewhere*'
+        } finally { Set-RmConfig -DataDir $saved }
+    }
+}
+
 Describe 'Ranking radius: out-of-area sources are counted, never ranked' {
     # A source hundreds of miles out is a reference lab, a corporate/HQ
     # registration or a telehealth group - measured volume, but not a
