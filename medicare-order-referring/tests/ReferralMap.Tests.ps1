@@ -3054,6 +3054,9 @@ Describe 'Owner features: wallet share, area lag, ZIP call sheet, headroom, ZIP 
             '8000000039,9000000010,30,30,5.0,2.0'
             '8000000040,9000000001,10,10,12.0,2.0'
             '8000000040,9000000010,40,40,7.0,2.0'
+            # the company's OWN other location: folded out of the referral
+            # ranking, but it must still ride along into the reused trend year
+            '8000000036,9000000001,12,12,0.5,1.0'
         ) -join "`n")
         Set-Content -Path (Join-Path $ofDir 'hop_teaming_2021.csv') -Encoding ascii -NoNewline -Value (@(
             'from_npi,to_npi,patient_count,transaction_count,average_day_wait,std_day_wait'
@@ -3066,6 +3069,7 @@ Describe 'Owner features: wallet share, area lag, ZIP call sheet, headroom, ZIP 
             '8000000038|1||PT|PIPER|TESTVILLE|MO|999990000|225100000X|01/01/2005'
             '8000000039|2|MEDICAL GROUP OF MISSOURI, INC|||TESTVILLE|MO|999990000|207Q00000X|01/01/2005'
             '8000000040|2|MEDICAL GROUP OF MO INC|||TESTVILLE|MO|999990000|207Q00000X|01/01/2005'
+            '8000000036|2|TEST REHAB CLINIC, L.L.C.|||TESTVILLE|MO|999990000|261QP2000X|01/01/2005'
         )
         Set-Content -Path (Join-Path $ofDir 'enrollment-index.psv') -Encoding ascii -Value @(
             '17001|2023|Year|ALPHA COUNTY|MO|1000|800|200'
@@ -3113,14 +3117,27 @@ Describe 'Owner features: wallet share, area lag, ZIP call sheet, headroom, ZIP 
             @($sa.Underserved.Rows)[0].FfsBeneficiaries | Should -Be 800
             (@($sa.Notes) -join ' ') | Should -BeLike '*MARKET HEADROOM*'
 
-            # (5) neighborhood trend across the two imported years
+            # (5a) THE REUSED YEAR MUST EQUAL A FULL SCAN. Add-RmSourceTrend
+            # skips re-scanning the active year by handing the analysis's own
+            # per-source totals to the trend - so every bucket the analysis
+            # folded OUT of its source ranking (practice therapists, the
+            # company's own other locations) has to ride along. Missing one
+            # silently shrinks that single year and can invert the
+            # year-over-year direction; live, Emory's 2022 came back 1,622
+            # patients light and a 4.8% gain read as a 0.9% decline.
+            $sa.SiblingPatients | Should -Be 12          # folded out of the ranking...
+            $sa.TotalPatients | Should -Be 87            # ...but still in the patient base
             $sa2 = Add-RmSourceTrend -Analysis $sa -SkipEnrichment
+            $reused = @($sa2.Trend.Years | Where-Object Year -eq $sa.Year)[0]
+            $reused.SharedPatients | Should -Be $sa.TotalPatients
+
+            # (5) neighborhood trend across the two imported years
             $zt = @($sa2.Trend.ZipTrend)
             $zt.Count | Should -Be 1
             $zt[0].Zip | Should -Be '99999'
             $zt[0].FirstYearVolume | Should -Be 30
-            $zt[0].LastYearVolume | Should -Be 75            # 45 + 20 + 10
-            $zt[0].ChangePct | Should -Be 150
+            $zt[0].LastYearVolume | Should -Be 87            # 45 + 20 + 10 + 12 (own site)
+            $zt[0].ChangePct | Should -Be 190
             $sa2.Trend.ZipTrendMappedPct | Should -Be 100
             (@($sa2.Trend.Notes) -join ' ') | Should -BeLike '*NEIGHBORHOOD TREND*'
 
@@ -3137,6 +3154,97 @@ Describe 'Owner features: wallet share, area lag, ZIP call sheet, headroom, ZIP 
             Set-RmConfig -DataDir $saved
             Set-RmActiveDataset -Source cms-pspp -Year 2015 | Out-Null
         }
+    }
+}
+
+Describe 'Owner features degrade honestly when their inputs are absent' {
+    # Every new layer rides on the competitive sweep or a local index. When
+    # those are missing the report must simply omit the card - never render
+    # an empty table, a zero that reads as measured, or throw.
+    It 'omits wallet share and market headroom when the sweep is skipped' {
+        $sa = Get-RmSourceAnalysis -Npi 9000000001 -SkipCompetitors
+        @($sa.WalletShare).Count | Should -Be 0
+        $sa.Underserved | Should -BeNullOrEmpty
+        # ...and no source row claims a competitor figure it never measured
+        foreach ($s in @($sa.Sources)) {
+            $s.PSObject.Properties['PatientsToCompetitors'] | Should -BeNullOrEmpty
+        }
+        $out = Join-Path $script:WorkDir 'no-sweep.html'
+        Export-RmSourceReportHtml -Analysis $sa -Path $out | Out-Null
+        $html = Get-Content $out -Raw
+        # assert on the CARD HEADINGS: the methodology notes legitimately
+        # mention these layers by name even when no card is rendered.
+        $html | Should -Not -BeLike '*<h2>Your share of each referrer*'
+        $html | Should -Not -BeLike '*<h2>Market headroom*'
+        $html | Should -BeLike '*Key findings*'          # the report itself still stands
+    }
+
+    It 'renders an analysis object saved before the owner features existed' {
+        # A result object from an older build carries none of the new
+        # properties. Every guard is a PSObject.Properties test, so the
+        # report must still render - the cards simply do not appear.
+        $sa = Get-RmSourceAnalysis -Npi 9000000001 -SkipCompetitors
+        foreach ($p in 'WalletShare', 'Underserved', 'SiblingRows', 'SiblingPatients',
+                       'OutboundSiblingRows', 'OutboundSiblingPatients') {
+            $sa.PSObject.Properties.Remove($p)
+        }
+        $out = Join-Path $script:WorkDir 'legacy-analysis.html'
+        { Export-RmSourceReportHtml -Analysis $sa -Path $out } | Should -Not -Throw
+        $html = Get-Content $out -Raw
+        $html | Should -BeLike '*Key findings*'
+        $html | Should -Not -BeLike '*Your other locations*'
+        $html | Should -Not -BeLike '*Your share of each referrer*'
+    }
+
+    It 'flags an analysis whose volume comes from nowhere near the practice' {
+        # Every area card is centered on the address NPPES holds TODAY. A
+        # provider who moved after the data year gets a correct ranking of
+        # the WRONG town (live: a clinician registered in Rolla MO whose
+        # entire referral base was 500 miles away in Ardmore OK, reported as
+        # "#1 of 45 providers within 10 miles"). 8000000002 sits in ZIP
+        # 86442, ~1,300 miles from the practice, so 9000000002's whole base
+        # is remote and the guard must fire - on the cards, not just in the
+        # methodology at the back.
+        $mmDir = Join-Path $script:WorkDir 'area-mismatch'
+        New-Item -ItemType Directory -Path $mmDir -Force | Out-Null
+        # 8000000002 is registered in ZIP 86442, ~1,300 miles from the
+        # practice's ZIP 99999: a referral base entirely somewhere else.
+        Set-Content -Path (Join-Path $mmDir 'hop_teaming_2022.csv') -Encoding ascii -NoNewline -Value (@(
+            'from_npi,to_npi,patient_count,transaction_count,average_day_wait,std_day_wait'
+            '8000000002,9000000001,40,40,20.0,5.0'
+        ) -join "`n")
+        $saved = (Get-RmConfig).DataDir
+        try {
+            Set-RmConfig -DataDir $mmDir
+            Set-RmActiveDataset -Source hop-teaming -Year 2022 | Out-Null
+            # the sweep must RUN here: the caution belongs on the area cards,
+            # and with no area cards there is nothing to caution about.
+            $sa = Get-RmSourceAnalysis -Npi 9000000001 -CentroidPath $script:SaCsv
+            $sa.TotalPatients | Should -Be 40
+            $sa.LocalVolumePct | Should -Be 0
+            $sa.AreaMismatch | Should -BeTrue
+            (@($sa.Notes) -join ' ') | Should -BeLike '*AREA MISMATCH*'
+            # the caution has to reach the CARD, not just the methodology
+            $mmOut = Join-Path $script:WorkDir 'area-mismatch.html'
+            Export-RmSourceReportHtml -Analysis $sa -Path $mmOut | Out-Null
+            (Get-Content $mmOut -Raw) | Should -BeLike '*Read this section as context*'
+        } finally {
+            Set-RmConfig -DataDir $saved
+            Set-RmActiveDataset -Source cms-pspp -Year 2015 | Out-Null
+        }
+
+        # ...and a practice whose base IS local must NOT be flagged
+        $ok = Get-RmSourceAnalysis -Npi 9000000001 -CentroidPath $script:SaCsv -SkipCompetitors
+        $ok.AreaMismatch | Should -BeFalse
+        (@($ok.Notes) -join ' ') | Should -Not -BeLike '*AREA MISMATCH*'
+        $out = Join-Path $script:WorkDir 'area-ok.html'
+        Export-RmSourceReportHtml -Analysis $ok -Path $out | Out-Null
+        (Get-Content $out -Raw) | Should -Not -BeLike '*Read this section as context*'
+    }
+
+    It 'refuses an out-of-range headroom radius instead of guessing' {
+        { Get-RmSourceAnalysis -Npi 9000000001 -SkipCompetitors -HeadroomRadiusMiles 500 } |
+            Should -Throw '*HeadroomRadiusMiles*'
     }
 }
 

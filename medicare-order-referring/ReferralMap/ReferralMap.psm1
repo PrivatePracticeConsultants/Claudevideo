@@ -3910,6 +3910,24 @@ function Get-RmSourceAnalysis {
     $distBands = @($distBands) + @([pscustomobject]@{ Band = 'Not locatable'; SharedPatients = $unknownDist
         Pct = if ($total -gt 0) { [math]::Round(100.0 * $unknownDist / $total, 1) } else { 0 } })
 
+    # AREA MISMATCH: every area-based layer - the competitive ranking, market
+    # capture, outreach targets, share-of-referrer and market headroom - is
+    # centered on the NPPES address the practice carries TODAY, while the
+    # volume is from the data year. When a provider has moved since, those
+    # cards measure a market its patients never touched: live sampling found
+    # a clinician registered in Rolla, MO whose entire 2022 referral base was
+    # in Ardmore, OK, 500 miles away - and the report still called her "#1 of
+    # 45 providers within 10 miles". The numbers are all correct; what they
+    # describe is the wrong town. Measured, disclosed, never silently shown.
+    $localVol = 0
+    foreach ($srcRow in $sources) {
+        if ($srcRow.DistanceMiles -is [double] -and [double]$srcRow.DistanceMiles -lt 25.0) {
+            $localVol += $srcRow.SharedPatients
+        }
+    }
+    $localPct = if ($total -gt 0) { [math]::Round(100.0 * $localVol / $total, 1) } else { $null }
+    $areaMismatch = ($total -gt 0 -and $null -ne $localPct -and $localPct -lt 10.0)
+
     # Referral-lag profile (hop only, volume-weighted by patient count).
     $waitBands = @()
     if ($isHop) {
@@ -4455,6 +4473,7 @@ function Get-RmSourceAnalysis {
         $(if ($rosterRows.Count) { "PRACTICE ROSTER (Care Compare): $($rosterRows.Count) clinician$(if ($rosterRows.Count -eq 1) { ' is' } else { 's are' }) listed under this practice in Medicare Care Compare today - matched by practice name, then expanded to everyone sharing the same group-enrollment id (org_pac_id). This is TODAY's roster: staff who left are absent even though their historical volume appears above, and cash-pay or non-Medicare clinicians never appear. If the location column shows an unexpected city, a same-named practice elsewhere matched too - read those rows with care." })
         $(if ($npiList.Count -gt 1) { "COMBINED ANALYSIS: inbound volume is merged across $($npiList.Count) NPIs ($($npiList -join ', ')). A source feeding several of them counts ONCE with summed volume; patient flows BETWEEN these NPIs are excluded as internal handoffs. Geography and the competitive radius are centered on the primary NPI ($primary)." })
         $(if ($grandTotal -gt 0 -and $grandTotal -lt 1000) { 'SMALL-PRACTICE NOTE: pairs under 11 distinct patients are excluded at the source, so a modest measured total usually UNDERSTATES the real referral base. Volume may also sit under the therapists'' individual NPIs — run a combined analysis (paste the org NPI plus the therapist NPIs together) for the full picture.' })
+        $(if ($areaMismatch) { "AREA MISMATCH - READ THE AREA SECTIONS WITH CARE: only $localPct% of measured referral volume comes from within 25 miles of this practice's CURRENT registered address ($pracZip). Everything measured by area - the competitive ranking, share of area volume, market capture, outreach targets, share-of-referrer and market headroom - is centered on that address, so it describes a market this practice's $($info.Year) patients did not come from. The usual cause is a provider who MOVED after the data year (NPPES holds today's address); a corporate/billing address, or a practice serving a distant catchment, does the same. The source table, totals, concentration and lag profile are unaffected. Re-run against the NPI's address in the data year, or read the area cards as context only." })
         'NET FLOW: SharedBack is the patients this practice shared ONWARD to that same source in the same year (claims sequence, both directions from one pass). A source with SharedPatients roughly equal to SharedBack and a long lag is co-occurring care (labs, pharmacies, hospitals); inbound far above SharedBack with a short lag is referral flow someone could win or lose.'
         'CONCENTRATION: HHI = sum of squared percentage shares (0-10,000); above ~2,500 is highly concentrated — losing one relationship materially moves the total. Top-1/5/10 dependence reads the same risk directly. Both are computed on MEASURED (11+ patient) pairs only: sub-floor referrers are invisible, which inflates the measured shares, so true concentration is LOWER whenever many small sources exist — treat a high reading on a short source list with caution.'
         'Distances are straight-line miles between ZIP-area centroids (US Census) using TODAY''s NPPES practice addresses — a source that moved is measured where it is now.'
@@ -4512,6 +4531,8 @@ function Get-RmSourceAnalysis {
         Sources      = $sources
         SpecialtyMix = @($mix)
         DistanceBands = @($distBands)
+        LocalVolumePct = $localPct      # share of external volume from within 25 mi
+        AreaMismatch  = $areaMismatch   # TRUE when the area cards describe the wrong market
         WaitBands    = @($waitBands)
         Geo          = @($geoRows)          # per-ZIP roll-up for the heat map
         GeoMarket    = @($geoMarket)        # per-ZIP area volume + capture rate
@@ -4866,11 +4887,16 @@ function Add-RmSourceTrend {
         $bySrc = @{}
         foreach ($srow in @($Analysis.Sources)) { $bySrc[[string]$srow.SourceNPI] = [int]$srow.SharedPatients }
         # The trend measures RAW per-year totals (it has no specialty data
-        # for past years), so the practice-therapist rows the analysis split
-        # out must ride along or the reused year would dip below its
-        # neighbours by exactly the staff volume.
-        if ($Analysis.PSObject.Properties['TherapistRows']) {
-            foreach ($srow in @($Analysis.TherapistRows)) { $bySrc[[string]$srow.SourceNPI] = [int]$srow.SharedPatients }
+        # for past years), so EVERY bucket the analysis split out of its
+        # source ranking must ride along - practice therapists AND the
+        # company's own other locations - or the reused year dips below its
+        # neighbours by exactly the folded volume and the year-over-year
+        # direction can invert. (Caught live: Emory 2022 came back 28,022
+        # against a raw 29,644, reporting a 4.8% GAIN as a 0.9% decline.)
+        foreach ($bucket in 'TherapistRows', 'SiblingRows') {
+            if ($Analysis.PSObject.Properties[$bucket]) {
+                foreach ($srow in @($Analysis.$bucket)) { $bySrc[[string]$srow.SourceNPI] = [int]$srow.SharedPatients }
+            }
         }
         $trendArgs['ReuseYear'] = [int]$Analysis.Year
         $trendArgs['ReuseBySrc'] = $bySrc
@@ -5390,6 +5416,19 @@ function Export-RmSourceReportHtml {
 
     # ---- Chart 6 + table: competitive landscape (when the sweep ran) -----
     $comp = if ($a.PSObject.Properties['Competitive']) { $a.Competitive } else { $null }
+    # Every area-based card is centered on the practice's CURRENT registered
+    # address. When almost none of the measured volume comes from near it,
+    # those cards describe a market this practice's patients did not come
+    # from - most often a provider who moved after the data year. Say so on
+    # the cards themselves, not only in the methodology at the back.
+    $areaCaution = ''
+    if ($a.PSObject.Properties['AreaMismatch'] -and $a.AreaMismatch) {
+        $areaCaution = '<div class="caution"><b>Read this section as context, not as your market.</b><br/>' +
+            'Only ' + $a.LocalVolumePct + '% of your measured referral volume came from within 25 miles of the address on file for this NPI (' +
+            (_h ([string]$a.Practice.Zip)) + '), so the comparison below is drawn around a location your ' + $a.Year +
+            ' patients did not come from &mdash; usually because the practice moved after that year, or bills from a corporate address. ' +
+            'Your own volume, sources, concentration and timing figures are unaffected.</div>'
+    }
     $compHtml = ''
     if ($comp -and @($comp.Peers).Count) {
         # Chart and table only providers with measured volume (plus this
@@ -5447,6 +5486,7 @@ function Export-RmSourceReportHtml {
                 " An asterisk (*) marks a competitor that is one clinic of a MULTI-SITE COMPANY — its organization name is registered by more than $($script:RmChainNpiThreshold) organization NPIs, so the row is a slice of a larger operator, not an independent practice. $($comp.ChainCount) of the ranked providers carry it." })
         $compHtml = @"
 <div class="card"><h2>Competitive landscape &mdash; inbound referral volume within $($comp.RadiusMiles) miles</h2>
+$areaCaution
 <div class="body">$cpSvg</div>
 <table>
   <tr><th class="num">#</th><th>Practice</th><th>Type</th><th>Location</th>
@@ -5506,6 +5546,7 @@ function Export-RmSourceReportHtml {
         }
         $outreachHtml = @"
 <div class="card"><h2>Outreach targets &mdash; local referrers not sending you patients</h2>
+$areaCaution
 <div class="body"><p>These $(@($missList).Count) practices sent <b>$('{0:N0}' -f $mTot) patients to other therapy providers</b> near you in $($a.Year), and none measurably to you. Every one sits within <b>$mOutRad miles</b> of your practice, so each is somewhere you could realistically visit &mdash; this is a call list, ranked by the size of the opportunity. Rival therapy practices and their own clinicians are left out, because nobody wins a referral from a competitor's staff. One caveat: referral pairs under 11 patients are hidden by Medicare privacy rules, so "none measurably to you" can also mean "fewer than 11 came your way."</p></div>
 <table>
   <tr><th>NPI</th><th>Referrer</th><th>Specialty</th><th>Location</th><th class="num">Miles</th><th class="num">Patients to competitors</th></tr>
@@ -5538,6 +5579,7 @@ $mZipSheet
         }) -join "`n"
         $walletHtml = @"
 <div class="card"><h2>Your share of each referrer &mdash; where they send everyone else</h2>
+$areaCaution
 <div class="body"><p>These are referrers you <b>already have</b> who also send patients to other therapy providers within $wRad miles &mdash; ranked by how much walks past you. Growing your share of a current referrer is usually cheaper than winning a stranger: the relationship, the phone number, and the trust already exist.$(if ($wIsHop) { ' The two lag columns show the average days from the referrer''s visit to the first therapy visit &mdash; with you, and with the competing practices they also feed. If patients reach competitors materially faster, look at scheduling and intake before assuming preference.' })</p></div>
 <table>
   <tr><th>Referrer</th><th>Specialty</th><th class="num">To you</th><th class="num">To others</th><th class="num">Your share</th>$wLagTh</tr>
@@ -5562,6 +5604,7 @@ $mZipSheet
         }) -join "`n"
         $headroomHtml = @"
 <div class="card"><h2>Market headroom &mdash; Medicare demand per clinician nearby</h2>
+$areaCaution
 <div class="body"><p>Counties around the practice, ranked by how thin the therapy supply is: registered PT/OT/SLP clinicians per 10,000 Original-Medicare patients &mdash; <b>fewer clinicians per 10,000 means more demand for each practice there</b>. This is where marketing dollars or a future location face the least competition for the same patients.</p></div>
 <table>
   <tr><th>County</th><th>State</th><th class="num">Medicare (FFS) patients</th><th class="num">Therapy clinicians</th><th class="num">Clinicians per 10k</th><th class="num">Coverage</th></tr>
@@ -6312,6 +6355,12 @@ __RM_LEAFLET_JS__
   .mtbtn.active { background:var(--navy); border-color:var(--navy); color:#fff; font-weight:600; }
   .mtchk { font-size:12.5px; color:#2b3948; display:inline-flex; align-items:center; gap:5px; }
   .note { color:var(--sub); font-size:12px; line-height:1.65; }
+  /* Area-mismatch caution: the area cards describe the wrong town. */
+  .caution { border:1px solid var(--gold); border-left:4px solid var(--gold);
+             background:rgba(200,169,110,.08); padding:12px 14px; margin:0 0 16px;
+             font-size:13.5px; line-height:1.55; text-wrap:pretty; }
+  .caution b { letter-spacing:.04em; text-transform:uppercase; font-size:12px; }
+
   .tablenote { padding:11px 24px 12px; color:var(--sub); font-size:11.5px; line-height:1.65; }
   details { margin:0; } summary { cursor:pointer; padding:17px 24px; font-family:var(--cond);
             font-size:13px; font-weight:600; text-transform:uppercase; letter-spacing:.24em; color:var(--navy); }

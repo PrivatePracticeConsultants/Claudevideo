@@ -555,6 +555,17 @@ days they take to reach the competitors that referrer also feeds — slower
 than the area on a big source is a scheduling/intake warning worth checking
 before assuming preference.
 
+**If the practice moved, the report says so.** Everything measured *by
+area* &mdash; the competitive ranking, market capture, outreach targets, share
+of each referrer, market headroom &mdash; is drawn around the address NPPES
+holds for that NPI **today**, while the volume comes from the data year. When
+almost none of the measured volume comes from near that address (under 10%
+within 25 miles), the report prints a caution at the top of each of those
+sections and in the methodology: the numbers are right, but they describe a
+market those patients did not come from. The usual cause is a provider who
+moved after the data year. Volume, sources, concentration and timing are
+unaffected.
+
 **Market headroom** card — nearby counties ranked by registered PT/OT/SLP
 clinicians per 10,000 Original-Medicare patients (needs the local NPPES
 index; county enrollment comes from CMS). Fewer clinicians per 10,000 means
