@@ -3306,6 +3306,12 @@ function Get-RmSourceAnalysis {
         # prospect registered hundreds of miles away is a corporate NPI,
         # not a call-sheet entry.
         [ValidateRange(5, 250)][double]$OutreachRadiusMiles = 50,
+        # Ranked lists stop here. A source hundreds of miles away is a
+        # reference lab, a corporate/HQ registration or a telehealth group -
+        # real measured volume, but not a referral relationship anyone can
+        # work - so it is counted in the patient base and shown in its own
+        # out-of-area section instead of occupying the referral ranking.
+        [ValidateRange(10, 3000)][double]$RankingRadiusMiles = 75,
         # Radius for the market-headroom (underserved counties) card.
         [ValidateRange(5, 100)][double]$HeadroomRadiusMiles = 25,
         # Path to a current Order & Referring snapshot CSV. When given,
@@ -3724,6 +3730,43 @@ function Get-RmSourceAnalysis {
     }
     $sources = $srcRows.ToArray()
 
+    # ---- Ranking radius: out-of-area sources leave the RANKING -----------
+    # Measured, kept in the patient base, never ranked. A source 144 miles
+    # away (live: a national lab's Birmingham address against an Atlanta
+    # practice) is real shared-patient volume but not a relationship an
+    # owner can work; leaving it in the ranking pushed genuine local
+    # referrers down the table and diluted every share. Shares, cumulative
+    # share, concentration and the distance profile are therefore computed
+    # on the RANKED base, and the out-of-area volume is disclosed on its own
+    # line so the two still add up to the measured total.
+    # A source whose practice ZIP cannot be located STAYS in the ranking:
+    # unknown is not the same as far, and the app never rules against a
+    # provider it could not place.
+    $externalAll = $total          # external volume BEFORE the ranking cap
+    $distantRows = @()
+    $distantTotal = 0
+    $farList = New-Object System.Collections.Generic.List[object]
+    $nearList = New-Object System.Collections.Generic.List[object]
+    foreach ($r in $sources) {
+        if ($r.DistanceMiles -is [double] -and [double]$r.DistanceMiles -gt $RankingRadiusMiles) { $farList.Add($r) }
+        else { $nearList.Add($r) }
+    }
+    if ($farList.Count -gt 0) {
+        foreach ($r in $farList) { $distantTotal += [int]$r.SharedPatients }
+        $distantRows = @($farList.ToArray())
+        $sources = $nearList.ToArray()
+        $total = $externalAll - $distantTotal
+        # Re-rank the ranked base: Rank, PctOfVolume and CumulativePct are
+        # all shares OF THAT BASE, so they are rebuilt, not patched.
+        $rk = 0; $cm = 0
+        foreach ($r in $sources) {
+            $rk++; $cm += [int]$r.SharedPatients
+            $r.Rank = $rk
+            $r.PctOfVolume = if ($total -gt 0) { [math]::Round(100.0 * [int]$r.SharedPatients / $total, 1) } else { 0 }
+            $r.CumulativePct = if ($total -gt 0) { [math]::Round(100.0 * $cm / $total, 1) } else { 0 }
+        }
+    }
+
     # Eligibility cross-check (optional): the Order & Referring roster is the
     # app's ORIGINAL dataset, and a referrer who vanished from it has
     # retired, deactivated, or left Medicare - future Medicare referrals
@@ -3925,8 +3968,12 @@ function Get-RmSourceAnalysis {
             $localVol += $srcRow.SharedPatients
         }
     }
-    $localPct = if ($total -gt 0) { [math]::Round(100.0 * $localVol / $total, 1) } else { $null }
-    $areaMismatch = ($total -gt 0 -and $null -ne $localPct -and $localPct -lt 10.0)
+    # Measured against ALL external volume, not the post-cap ranked base:
+    # when a practice has moved, the ranking cap lifts its whole referral
+    # base out of the ranking, and dividing by the (now tiny) ranked base
+    # would hide the very mismatch this guard exists to report.
+    $localPct = if ($externalAll -gt 0) { [math]::Round(100.0 * $localVol / $externalAll, 1) } else { $null }
+    $areaMismatch = ($externalAll -gt 0 -and $null -ne $localPct -and $localPct -lt 10.0)
 
     # Referral-lag profile (hop only, volume-weighted by patient count).
     $waitBands = @()
@@ -4448,6 +4495,9 @@ function Get-RmSourceAnalysis {
             $ovst = @($outboundTherRows | Where-Object { $_.Staff -like 'VERIFIED*' }).Count
             "OUTBOUND OWN-CLINICIANS: $(@($outboundTherRows).Count) individual PT/OT/SLP NPI$(if (@($outboundTherRows).Count -ne 1) { 's' }) also appear$(if (@($outboundTherRows).Count -eq 1) { 's' }) on the OUTBOUND side, carrying $('{0:N0}' -f $outTherPatients) patients - the same co-billing pattern in the other direction (continued care under the practice's own therapists), NOT a post-therapy hand-off, so they are folded out of the outbound destination list. $ovst of $(@($outboundTherRows).Count) are VERIFIED on this practice's Care Compare roster today."
         })
+        $(if (@($distantRows).Count) {
+            "OUT-OF-AREA SOURCES: $(@($distantRows).Count) source$(if (@($distantRows).Count -ne 1) { 's' }) carrying $('{0:N0}' -f $distantTotal) shared patients sit more than $([int]$RankingRadiusMiles) straight-line miles from this practice, so they are counted in the measured patient base but kept OUT of the referral ranking: at that distance a source is a reference lab, a corporate/HQ registration or a telehealth group rather than a referral relationship anyone can work, and leaving them in pushed real local referrers down the table. PctOfVolume, CumulativePct, concentration and the distance profile are shares of the RANKED base ($('{0:N0}' -f $total) patients); ranked + out-of-area = $('{0:N0}' -f $externalAll) external patients. A source whose practice ZIP could not be located stays in the ranking - unknown is not the same as far."
+        })
         $(if ($siblingRows.Count -or @($outboundSibRows).Count) {
             "COMPANY'S OTHER LOCATIONS: $($siblingRows.Count) organization NPI$(if ($siblingRows.Count -ne 1) { 's' }) sharing this practice's company name appear$(if ($siblingRows.Count -eq 1) { 's' }) in the raw file as 'sources' of it, carrying $('{0:N0}' -f $sibTotal) shared patients - that is patient flow between the company's own locations (each clinic bills under its own NPI), NOT external referrals, so it is counted in TotalPatients and kept out of the referral ranking$(if (@($outboundSibRows).Count) { "; on the outbound side, $('{0:N0}' -f $outSibPatients) patients continuing at $(@($outboundSibRows).Count) of its own location$(if (@($outboundSibRows).Count -ne 1) { 's' }) are folded out of the destination list the same way" }). Same-company matching is by organization-name key, the rule the competitive landscape uses. Paste those NPIs together with this one for the company-wide analysis."
         })
@@ -4531,6 +4581,10 @@ function Get-RmSourceAnalysis {
         Sources      = $sources
         SpecialtyMix = @($mix)
         DistanceBands = @($distBands)
+        DistantRows  = @($distantRows)  # measured, counted, out of the ranking
+        DistantPatients = $distantTotal
+        ExternalPatients = $externalAll # ranked + out-of-area external volume
+        RankingRadiusMiles = $RankingRadiusMiles
         LocalVolumePct = $localPct      # share of external volume from within 25 mi
         AreaMismatch  = $areaMismatch   # TRUE when the area cards describe the wrong market
         WaitBands    = @($waitBands)
@@ -5296,6 +5350,13 @@ function Export-RmSourceReportHtml {
     $therPat = if ($a.PSObject.Properties['TherapistPatients']) { [int]$a.TherapistPatients } else { 0 }
     $sibPat = if ($a.PSObject.Properties['SiblingPatients']) { [int]$a.SiblingPatients } else { 0 }
     $sibList = @(if ($a.PSObject.Properties['SiblingRows']) { $a.SiblingRows })
+    $farList2 = @(if ($a.PSObject.Properties['DistantRows']) { $a.DistantRows })
+    $farPat = if ($a.PSObject.Properties['DistantPatients']) { [int]$a.DistantPatients } else { 0 }
+    $rankRad = if ($a.PSObject.Properties['RankingRadiusMiles']) { [int]$a.RankingRadiusMiles } else { 0 }
+    # The heat map still draws EVERY external source (its own 250-mile cap
+    # governs there), so its mappable note counts against the full external
+    # base, not the ranked one.
+    $extAllRep = if ($a.PSObject.Properties['ExternalPatients']) { [int]$a.ExternalPatients } else { $refPat }
     # The stat band shows "inside the company" as ONE tile (own clinicians +
     # own locations); the cards below give the split. Keeps the tile count
     # stable and the band's arithmetic adding up to the patient base.
@@ -5911,7 +5972,7 @@ $lossRows
                     $areaCell, $capCell, (_h ([string]$_.TopSource))
             }) -join "`n"
             $zipNote = "Top $([math]::Min(15, $geo.Count)) of $('{0:N0}' -f $geo.Count) source ZIP areas; " +
-                "$('{0:N0}' -f $geoMapped) of $('{0:N0}' -f $refPat) external-source patients mappable" +
+                "$('{0:N0}' -f $geoMapped) of $('{0:N0}' -f $extAllRep) external-source patients mappable" +
                 $(if ($geoUn -gt 0) { " ($('{0:N0}' -f $geoUn) from sources without a locatable ZIP)" }) + '.' +
                 $(if (@($geoFarRows).Count) { " MAP RADIUS: $(@($geoFarRows).Count) ZIP area$(if (@($geoFarRows).Count -ne 1) { 's' }) carrying $('{0:N0}' -f $geoFarPat) patients sit$(if (@($geoFarRows).Count -eq 1) { 's' }) more than $([int]$geoFarCut) miles away and $(if (@($geoFarRows).Count -eq 1) { 'is' } else { 'are' }) NOT drawn - at that distance a dot is the source's registered corporate/HQ address (reference labs, chains, telehealth), not a place patients travel from. Those rows stay in this table and in every total." }) +
                 $(if ($a.PSObject.Properties['DistantNote'] -and $a.DistantNote) { ' ' + $a.DistantNote })
@@ -6104,6 +6165,9 @@ $lossRows
             "The practice drew $('{0:N0}' -f $a.TotalPatients) shared Medicare patients from $('{0:N0}' -f $a.SourceCount) distinct sources in $($a.Year)."
         })
         $(if ($s1) { "The single largest source, $(if ($s1.SourceName) { $s1.SourceName } else { "NPI $($s1.SourceNPI)" }), accounts for $($s1.PctOfVolume)% of inbound volume; the top five account for $($a.Top5Pct)% and the top ten for $($a.Top10Pct)%." })
+        $(if ($farPat -gt 0) {
+            "$('{0:N0}' -f $farPat) patients came from $(@($farList2).Count) source$(if (@($farList2).Count -ne 1) { 's' }) registered more than $rankRad miles away - reference labs, corporate addresses and telehealth groups rather than referral relationships. They are counted in the patient base but kept out of the ranking, so the shares below describe the $('{0:N0}' -f $refPat) patients from referrers you can actually work."
+        })
         $(if ($a.PSObject.Properties['AtRiskSources'] -and @($a.AtRiskSources).Count) {
             $arp = 0; foreach ($ar in @($a.AtRiskSources)) { $arp += [int]$ar.SharedPatients }
             $arTop = @($a.AtRiskSources | Sort-Object SharedPatients -Descending | Select-Object -First 3 | ForEach-Object { "$($_.SourceName)" })
@@ -6421,6 +6485,7 @@ __RM_LEAFLET_JS__
   <div class="stat"><b>$('{0:N0}' -f $a.TotalPatients)</b><span>Measured patient base</span></div>
 $(if ($insidePat -gt 0) { '  <div class="stat"><b>' + ('{0:N0}' -f $refPat) + '</b><span>From outside referrers</span></div>' })
 $(if ($insidePat -gt 0) { '  <div class="stat"><b>' + ('{0:N0}' -f $insidePat) + '</b><span>' + $insideLabel + '</span></div>' })
+$(if ($farPat -gt 0) { '  <div class="stat"><b>' + ('{0:N0}' -f $farPat) + '</b><span>Out of area (' + $rankRad + '+ mi)</span></div>' })
   <div class="stat"><b>$('{0:N0}' -f $a.SourceCount)</b><span>Referral sources</span></div>
   <div class="stat"><b>$(if ($hasVolume) { "$($a.Top1Pct)%" } else { '&mdash;' })</b><span>From top source</span></div>
   <div class="stat"><b>$(if ($hasVolume) { "$($a.Top5Pct)%" } else { '&mdash;' })</b><span>Top-5 dependence</span></div>
@@ -6446,6 +6511,7 @@ $geoCardHtml
 <div class="card"><h2>No measured referral volume for this practice</h2><div class="body">
 <p class="empty">The $($a.Year) file records <b>no inbound shared-patient pairs</b> for this NPI, so there is nothing to chart:
 source, specialty, distance and referral-lag breakdowns are omitted rather than drawn empty.</p>
+$(if ($farPat -gt 0) { '<p class="empty"><b>All of this practice&rsquo;s measured volume (' + ('{0:N0}' -f $farPat) + ' patients) came from sources more than ' + $rankRad + ' miles away</b>, so nothing remains to rank locally. That is the pattern of a practice that has moved since the data year, or one whose NPI is registered at an address far from where it treats &mdash; see the out-of-area section below for the sources themselves.</p>' })
 <p class="empty">This does <b>not</b> mean the practice received no referrals. The common explanations are:</p>
 <ul class="findings">
   <li><b>The 11-patient privacy floor.</b> Any source that shared fewer than 11 distinct Medicare patients with this practice during the year is removed from the data at the source. A smaller practice can have its entire referral base fall below that line.</li>
@@ -6485,6 +6551,22 @@ $(if (@($therList).Count) { @"
             ('{0:N0}' -f [int]$_.SharedPatients), (_h ([string]$_.Staff))
     }) -join "`n")
   </table>
+</div>
+"@ })
+$(if (@($farList2).Count) { @"
+<div class="card">
+  <h2>Out-of-area sources &mdash; counted, not ranked</h2>
+  <div class="body"><p>These $(@($farList2).Count) source$(if (@($farList2).Count -ne 1) { 's' }) shared $('{0:N0}' -f $farPat) patients with the practice but are registered more than <b>$rankRad miles</b> away. At that distance a &quot;source&quot; is almost always a reference laboratory, a corporate or head-office registration, or a telehealth group &mdash; real shared care, but not a referral relationship anyone can go and win. They are counted in the measured patient base above and left out of the referral ranking, so the ranked table stays a list of practices you could actually visit.</p></div>
+  <table>
+    <tr><th>NPI</th><th>Source</th><th>Specialty</th><th>Location</th><th class="num">Miles</th><th class="num">Patients</th></tr>
+    $(@($farList2 | Sort-Object -Property @{Expression = { [int]$_.SharedPatients }; Descending = $true} | Select-Object -First 25 | ForEach-Object {
+        '<tr><td class="mono">{0}</td><td>{1}</td><td>{2}</td><td>{3}</td><td class="num">{4}</td><td class="num">{5}</td></tr>' -f
+            $_.SourceNPI, (_h ([string]$_.SourceName)), (_h ([string]$_.SourceSpecialty)),
+            (_h (("{0}, {1}" -f $_.City, $_.State).Trim(', ').Trim())),
+            ('{0:N0}' -f [double]$_.DistanceMiles), ('{0:N0}' -f [int]$_.SharedPatients)
+    }) -join "`n")
+  </table>
+  <div class="tablenote">$(if (@($farList2).Count -gt 25) { "Showing the 25 largest of $('{0:N0}' -f @($farList2).Count). " })Shares, concentration and the distance profile above are computed on the ranked base; these patients are in the measured total but not in those percentages.</div>
 </div>
 "@ })
 $(if (@($sibList).Count) { @"
