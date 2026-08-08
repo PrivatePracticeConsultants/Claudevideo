@@ -866,8 +866,8 @@ Describe 'Supplemental market and billed-services data (CMS open data)' {
 
     It 'service profile counts ONLY therapy codes and floors distinct patients' {
         $p = (Get-RmServiceProfile -Npi 9000000001)['9000000001']
-        $p.TherapyServices | Should -Be 500            # 350 + 150; the 99213 E/M row is excluded
-        $p.TherapyCodes | Should -Be 2
+        $p.TherapyServices | Should -Be 570            # 350+150+40+8+2+20; the 99213 E/M row is excluded
+        $p.TherapyCodes | Should -Be 6            # 97110/97140/97161/97162/97163/97530
         $p.MinDistinctPatients | Should -Be 60         # max single-code benes = a floor, never a sum
         $p.HasAnyClaims | Should -BeTrue
         $none = (Get-RmServiceProfile -Npi 9000000002)['9000000002']
@@ -878,7 +878,7 @@ Describe 'Supplemental market and billed-services data (CMS open data)' {
     It 'analysis carries both blocks and the report writes the findings' {
         $sa = Get-RmSourceAnalysis -Npi 9000000001 -CentroidPath $script:MkSaCsv -CrosswalkPath $script:XwCsv
         $sa.Market.MaPct | Should -Be 41.7
-        $sa.ServiceProfile.TherapyServices | Should -Be 500
+        $sa.ServiceProfile.TherapyServices | Should -Be 570
         (@($sa.Notes) -join ' ') | Should -BeLike '*MARKET CONTEXT*'
         (@($sa.Notes) -join ' ') | Should -BeLike '*BILLED-SERVICES PROFILE*'
         $out = Join-Path $script:WorkDir 'market-report.html'
@@ -3243,6 +3243,41 @@ Describe 'Group penetration and therapy leakage' {
             Export-RmSourceReportHtml -Analysis $sa -Path $out | Out-Null
             (Get-Content $out -Raw) | Should -BeLike '*continued care elsewhere*'
         } finally { Set-RmConfig -DataDir $saved }
+    }
+}
+
+Describe 'Billing mix from real Part B claims' {
+    # The one layer that is not about referrals: what the practice's
+    # clinicians actually billed. Evaluation-complexity split and units per
+    # evaluation come straight from the CMS Physician & Other Practitioners
+    # rows the fake server serves for 9000000001.
+    It 'rolls up per-HCPCS billing and the evaluation-complexity split' {
+        $mx = Get-RmServiceMix -Npi 9000000001
+        $mx.NpiCount | Should -Be 1
+        $mx.NpisWithClaims | Should -Be 1
+        # 350 + 150 + 40 + 8 + 2 + 20 therapy services; 99213 is NOT therapy
+        $mx.TotalServices | Should -Be 570
+        @($mx.Codes | Where-Object Code -eq '99213').Count | Should -Be 0
+        @($mx.Codes)[0].Code | Should -Be '97110'
+        @($mx.Codes)[0].Services | Should -Be 350
+        # the evaluation split: 40 low / 8 moderate / 2 high of 50
+        $mx.EvalServices | Should -Be 50
+        $mx.EvalLowPct | Should -Be 80
+        $mx.EvalModeratePct | Should -Be 16
+        $mx.EvalHighPct | Should -Be 4
+        # treatment units per evaluation = (570 - 50) / 50
+        $mx.ServicesPerEval | Should -Be 10.4
+        # a row with no allowed-amount column must not sink the roll-up
+        @($mx.Codes | Where-Object Code -eq '97530')[0].AvgAllowed | Should -Be 0
+    }
+
+    It 'skips the benchmark cleanly when no peer sample is wanted' {
+        $sa = Get-RmSourceAnalysis -Npi 9000000001 -CentroidPath $script:SaCsv `
+            -SkipCompetitors -ServiceMixPeerSample 0
+        $sa.ServiceMix | Should -BeNullOrEmpty
+        $out = Join-Path $script:WorkDir 'no-mix.html'
+        Export-RmSourceReportHtml -Analysis $sa -Path $out | Out-Null
+        (Get-Content $out -Raw) | Should -Not -BeLike '*How you bill*'
     }
 }
 

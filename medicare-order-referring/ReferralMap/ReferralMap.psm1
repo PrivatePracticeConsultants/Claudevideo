@@ -3312,6 +3312,10 @@ function Get-RmSourceAnalysis {
         # work - so it is counted in the patient base and shown in its own
         # out-of-area section instead of occupying the referral ranking.
         [ValidateRange(10, 3000)][double]$RankingRadiusMiles = 75,
+        # How many PEER clinicians to sample for the billing benchmark. Each
+        # is one cached CMS API call, so this is the knob between depth and
+        # runtime; 0 skips the benchmark entirely.
+        [ValidateRange(0, 200)][int]$ServiceMixPeerSample = 40,
         # Radius for the market-headroom (underserved counties) card.
         [ValidateRange(5, 100)][double]$HeadroomRadiusMiles = 25,
         # Path to a current Order & Referring snapshot CSV. When given,
@@ -4610,6 +4614,47 @@ function Get-RmSourceAnalysis {
         }
     }
 
+    # ---- Billing mix vs local peers --------------------------------------
+    # How the practice BILLS, not who refers to it: evaluation-complexity
+    # split, treatment units per evaluation, and Medicare's allowed amount
+    # per service - against the same figures for the clinicians working at
+    # ranked competitors. Services bill under the RENDERING NPI, so both
+    # sides use ROSTERS (Care Compare), never the organization NPI. Peers
+    # are sampled, not exhaustive: each clinician is one cached API call.
+    $svcMix = $null; $svcMixPeer = $null; $svcMixNote = $null
+    if (-not $SkipCompetitors -and $ServiceMixPeerSample -gt 0 -and $rosterRows.Count -gt 0) {
+        try {
+            $myNpis = @($rosterRows | ForEach-Object { [string]$_.NPI } | Select-Object -First 60)
+            $svcMix = Get-RmServiceMix -Npi $myNpis
+            # Peer clinicians: the Care Compare rosters of the ranked
+            # competitors, taken in ranking order until the sample fills.
+            $peerNpis = New-Object System.Collections.Generic.List[string]
+            $dacIdx5 = Get-RmDacIndexPath
+            if ($landscape -and (Test-Path -LiteralPath $dacIdx5)) {
+                $mineSet = New-Object 'System.Collections.Generic.HashSet[string]'
+                foreach ($n in $myNpis) { [void]$mineSet.Add($n) }
+                foreach ($pw in @($landscape.Peers | Where-Object { -not $_.You -and $_.Type -eq 'Organization' })) {
+                    if ($peerNpis.Count -ge $ServiceMixPeerSample) { break }
+                    $nk4 = Get-RmOrgNameKey ([string]$pw.Name)
+                    if (-not $nk4) { continue }
+                    $mm = Get-RmNameMatcher $nk4
+                    foreach ($line in @([RmEngine]::FindByOrgName($dacIdx5, -1, 2, $mm.Regex.ToString(), $mm.Compact, $null))) {
+                        if ($peerNpis.Count -ge $ServiceMixPeerSample) { break }
+                        $f = $line.Split('|')
+                        if ($f.Count -lt 8 -or -not $f[0]) { continue }
+                        if ($mineSet.Contains($f[0])) { continue }
+                        if (-not $peerNpis.Contains($f[0])) { $peerNpis.Add($f[0]) }
+                    }
+                }
+            }
+            if ($peerNpis.Count -gt 0) { $svcMixPeer = Get-RmServiceMix -Npi @($peerNpis.ToArray()) }
+            else { $svcMixNote = 'No peer clinicians could be sampled (Care Compare lists none under the ranked competitors'' names), so the billing figures stand alone.' }
+        } catch {
+            $svcMixNote = "Billing benchmark unavailable for this run: $($_.Exception.Message)"
+            Write-Verbose $svcMixNote
+        }
+    }
+
     # Supplemental market context + real billed-services profile (both
     # keyless CMS open-data APIs, cached). Enrichment only: any failure
     # degrades to a note and never blocks the analysis.
@@ -4649,6 +4694,10 @@ function Get-RmSourceAnalysis {
             $ovst = @($outboundTherRows | Where-Object { $_.Staff -like 'VERIFIED*' }).Count
             "OUTBOUND OWN-CLINICIANS: $(@($outboundTherRows).Count) individual PT/OT/SLP NPI$(if (@($outboundTherRows).Count -ne 1) { 's' }) also appear$(if (@($outboundTherRows).Count -eq 1) { 's' }) on the OUTBOUND side, carrying $('{0:N0}' -f $outTherPatients) patients - the same co-billing pattern in the other direction (continued care under the practice's own therapists), NOT a post-therapy hand-off, so they are folded out of the outbound destination list. $ovst of $(@($outboundTherRows).Count) are VERIFIED on this practice's Care Compare roster today."
         })
+        $(if ($svcMix -and $svcMix.TotalServices -gt 0) {
+            "BILLING MIX: actual Medicare Part B therapy lines (HCPCS 97xxx/92xxx) billed by the $($svcMix.NpisWithClaims) of $($svcMix.NpiCount) clinicians on this practice's Care Compare roster who have any, from CMS's Physician & Other Practitioners release$(if ($svcMixPeer -and $svcMixPeer.TotalServices -gt 0) { ", against $($svcMixPeer.NpisWithClaims) of $($svcMixPeer.NpiCount) sampled clinicians working at ranked competitors" }). Services bill under the RENDERING NPI, so both sides use rosters, never the organization NPI. CMS suppresses any provider-procedure line under 11 beneficiaries, so every figure here is a FLOOR and small caseloads are invisible. The peer side is a SAMPLE taken in ranking order, not the whole market, and the release year may differ from the shared-patient year - read the comparison as an order of magnitude, not a scorecard."
+        })
+        $(if ($svcMixNote) { "BILLING MIX: $svcMixNote" })
         $(if (@($groupPen).Count) {
             $gpU = 0; foreach ($g in $groupPen) { $gpU += [int]$g.Untapped }
             "GROUP PENETRATION: for every individual referrer-type source, Medicare Care Compare's group-enrollment id (org_pac_id) identifies the practice group they bill under, and every other clinician sharing that id. $(@($groupPen).Count) group$(if (@($groupPen).Count -ne 1) { 's' }) that already refer here contain $gpU referrer-type clinician$(if ($gpU -ne 1) { 's' }) with NO measured referral to this practice. Care Compare is TODAY's roster while the volume is from $($info.Year), so a colleague who joined since will read as untapped when they are simply new - check the join before assuming a cold relationship. Therapists inside a group are excluded (a PT colleague is not a referral source), and pairs under 11 patients are invisible, so 'never referred' can also mean 'fewer than 11'."
@@ -4756,6 +4805,9 @@ function Get-RmSourceAnalysis {
         DistantNote  = $distantNote         # $null when nothing is far away
         Market       = $market              # county Medicare market (CMS enrollment); $null offline
         ServiceProfile = $svcProfile        # real billed therapy claims (CMS P&S); $null offline
+        ServiceMix   = $svcMix              # this practice's roster, per-HCPCS
+        ServiceMixPeers = $svcMixPeer       # sampled competitor clinicians
+        ServiceMixNote = $svcMixNote
         Outbound     = @($outboundRows)   # free: the same pass carried both directions
         OutboundRawPatients = $(  $orp = 0; foreach ($ov in $outBySrc.Values) { $orp += [int]$ov.N }; $orp )
         OutboundRawDestinations = $outBySrc.Count
@@ -5937,6 +5989,52 @@ $areaCaution
 "@
     }
 
+    # ---- Billing mix vs peers ---------------------------------------------
+    $mixHtml = ''
+    $mx = if ($a.PSObject.Properties['ServiceMix']) { $a.ServiceMix } else { $null }
+    $mxP = if ($a.PSObject.Properties['ServiceMixPeers']) { $a.ServiceMixPeers } else { $null }
+    if ($mx -and $mx.TotalServices -gt 0) {
+        $cmpCell = {
+            param($mine, $theirs, $suffix)
+            $l = if ($null -ne $mine) { ('{0:N1}' -f [double]$mine) + $suffix } else { '&mdash;' }
+            $r = if ($null -ne $theirs) { ('{0:N1}' -f [double]$theirs) + $suffix } else { '&mdash;' }
+            '<td class="num">' + $l + '</td><td class="num">' + $r + '</td>'
+        }
+        $pLow = if ($mxP) { $mxP.EvalLowPct } else { $null }
+        $pMod = if ($mxP) { $mxP.EvalModeratePct } else { $null }
+        $pHigh = if ($mxP) { $mxP.EvalHighPct } else { $null }
+        $pPer = if ($mxP) { $mxP.ServicesPerEval } else { $null }
+        $rowsMix = New-Object System.Collections.Generic.List[string]
+        $rowsMix.Add('<tr><td>Evaluations billed as LOW complexity (97161)</td>' + (& $cmpCell $mx.EvalLowPct $pLow '%') + '</tr>')
+        $rowsMix.Add('<tr><td>Evaluations billed as MODERATE (97162)</td>' + (& $cmpCell $mx.EvalModeratePct $pMod '%') + '</tr>')
+        $rowsMix.Add('<tr><td>Evaluations billed as HIGH (97163)</td>' + (& $cmpCell $mx.EvalHighPct $pHigh '%') + '</tr>')
+        $rowsMix.Add('<tr><td>Treatment units per evaluation</td>' + (& $cmpCell $mx.ServicesPerEval $pPer '') + '</tr>')
+        $peerAllowed = if ($mxP -and $mxP.TotalServices -gt 0) { '$' + ('{0:N2}' -f [double]$mxP.AvgAllowedPerService) } else { '&mdash;' }
+        $rowsMix.Add('<tr><td>Medicare allowed per service</td><td class="num">$' +
+            ('{0:N2}' -f [double]$mx.AvgAllowedPerService) + '</td><td class="num">' + $peerAllowed + '</td></tr>')
+        $topCodes = (@($mx.Codes | Select-Object -First 8) | ForEach-Object {
+            '<tr><td class="mono">' + (_h ([string]$_.Code)) + '</td><td class="num">' + ('{0:N0}' -f [int]$_.Services) +
+            '</td><td class="num">' + ('{0:N0}' -f [int]$_.Benes) + '</td><td class="num">$' + ('{0:N2}' -f [double]$_.AvgAllowed) + '</td></tr>'
+        }) -join "`n"
+        $mixRowsHtml = ($rowsMix.ToArray() -join "`n")
+        $peerCover = if ($mxP -and $mxP.TotalServices -gt 0) { "; the comparison covers $($mxP.NpisWithClaims) of $($mxP.NpiCount) clinicians sampled from the practices ranked above" } else { '' }
+        $mixHtml = @"
+<div class="card"><h2>How you bill &mdash; against the clinicians working at your competitors</h2>
+<div class="body"><p>This is the one section that is not about referrals: it is what your clinicians actually billed Medicare. Evaluation complexity and units per evaluation are the two levers most often left on the table &mdash; a practice billing nearly every evaluation as low complexity is either treating unusually simple cases or under-documenting the ones it has.</p></div>
+<table>
+  <tr><th>Measure</th><th class="num">Your practice</th><th class="num">Competitor clinicians</th></tr>
+  $mixRowsHtml
+</table>
+<h3 class="sub2">Your most-billed therapy codes</h3>
+<table>
+  <tr><th>HCPCS</th><th class="num">Services</th><th class="num">Patients (line sum)</th><th class="num">Allowed each</th></tr>
+  $topCodes
+</table>
+<div class="tablenote">Your side covers the $($mx.NpisWithClaims) of $($mx.NpiCount) clinicians on your Care Compare roster with billing on file$peerCover. Medicare suppresses any provider-and-procedure line under 11 patients, so these are FLOORS and a small caseload can be invisible entirely; "Patients (line sum)" adds each code's patient count, so someone treated under three codes counts three times. The comparison is a sample and its release year may differ from $($a.Year) &mdash; read it as an order of magnitude worth investigating, not a scorecard.</div>
+</div>
+"@
+    }
+
     # ---- Market headroom (thin-supply counties nearby) -------------------
     $us = if ($a.PSObject.Properties['Underserved']) { $a.Underserved } else { $null }
     $headroomHtml = ''
@@ -6819,6 +6917,7 @@ $gpHtml
 $newEntHtml
 $outreachHtml
 $leakHtml
+$mixHtml
 $headroomHtml
 $(if ($hasVolume) { @"
 <div class="card">
@@ -7044,6 +7143,96 @@ function Get-RmCountyMarket {
     $cache[$fips] = $m
     Write-RmJsonCache $cachePath $cache
     $m
+}
+
+function Get-RmServiceMix {
+    <#
+    .SYNOPSIS
+      Per-HCPCS therapy billing for a set of NPIs, from CMS's Physician &
+      Other Practitioners (by Provider and Service) dataset: services,
+      distinct beneficiaries and the Medicare allowed amount per service.
+      Returns a roll-up with the evaluation-complexity split and units per
+      patient - the numbers that say how a practice BILLS, not who refers to
+      it.
+    .NOTES
+      Rows under 11 beneficiaries are suppressed at source, so a small
+      caseload is invisible here and every figure is a floor. Services bill
+      under the RENDERING NPI, so an organization that bills through its
+      therapists shows nothing under its own NPI - pass the roster.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][ValidateCount(1, 200)][ValidatePattern('^\d{10}$')][string[]]$Npi)
+    $cachePath = Join-Path $script:RmConfig.DataDir 'servicemix-cache.json'
+    $cache = Read-RmJsonCache $cachePath
+    $dirty = $false
+    $byCode = @{}
+    $withClaims = 0
+    foreach ($n in @($Npi | Sort-Object -Unique)) {
+        $rows = $null
+        if ($cache.ContainsKey($n)) {
+            $rows = @(Get-RmProp $cache[$n] 'Codes')
+        } else {
+            $api = @(Invoke-RmCmsApi '92396110-2aed-4d63-a6a2-5d6207d46a29' `
+                ('filter[Rndrng_NPI]={0}&size=500' -f $n))
+            $keep = New-Object System.Collections.Generic.List[object]
+            foreach ($r in $api) {
+                # Get-RmProp, not direct access: a CMS row can omit a column
+                # entirely and StrictMode turns that into a terminating error.
+                $code = [string](Get-RmProp $r 'HCPCS_Cd')
+                if ($code -notmatch '^(97|92)') { continue }
+                $al = [string](Get-RmProp $r 'Avg_Mdcr_Alowd_Amt')
+                $keep.Add([pscustomobject]@{
+                    Code = $code
+                    Services = [int][double](Get-RmProp $r 'Tot_Srvcs')
+                    Benes = [int][double](Get-RmProp $r 'Tot_Benes')
+                    Allowed = $(if ($al -match '^\s*-?\d+(\.\d+)?\s*$') { [double]$al } else { [double]0 })
+                })
+            }
+            $rows = @($keep.ToArray())
+            $cache[$n] = [pscustomobject]@{ Codes = $rows }
+            $dirty = $true
+        }
+        if (@($rows).Count -gt 0) { $withClaims++ }
+        foreach ($r in @($rows)) {
+            $c = [string](Get-RmProp $r 'Code')
+            if (-not $c) { continue }
+            if (-not $byCode.ContainsKey($c)) {
+                $byCode[$c] = [pscustomobject]@{ Code = $c; Services = 0; Benes = 0; AllowedWeighted = [double]0 }
+            }
+            $sv = [int](Get-RmProp $r 'Services')
+            $byCode[$c].Services += $sv
+            $byCode[$c].Benes += [int](Get-RmProp $r 'Benes')
+            $byCode[$c].AllowedWeighted += [double](Get-RmProp $r 'Allowed') * $sv
+        }
+    }
+    if ($dirty) { Write-RmJsonCache $cachePath $cache }
+    $codes = @($byCode.Values | ForEach-Object {
+        [pscustomobject]@{
+            Code = $_.Code; Services = $_.Services; Benes = $_.Benes
+            AvgAllowed = if ($_.Services -gt 0) { [math]::Round($_.AllowedWeighted / $_.Services, 2) } else { 0 }
+        }
+    } | Sort-Object -Property @{Expression = 'Services'; Descending = $true})
+    $totSvc = 0; $totBene = 0; $totAllowed = [double]0
+    foreach ($c in $codes) { $totSvc += $c.Services; $totBene += $c.Benes; $totAllowed += [double]$c.AvgAllowed * $c.Services }
+    # PT evaluation complexity: 97161 low, 97162 moderate, 97163 high.
+    # A practice billing almost only 97161 is either treating unusually
+    # simple cases or under-documenting - the question is worth asking.
+    $ev = @{ '97161' = 0; '97162' = 0; '97163' = 0 }
+    foreach ($c in $codes) { if ($ev.ContainsKey($c.Code)) { $ev[$c.Code] = $c.Services } }
+    $evTot = $ev['97161'] + $ev['97162'] + $ev['97163']
+    [pscustomobject]@{
+        NpiCount = @($Npi | Sort-Object -Unique).Count
+        NpisWithClaims = $withClaims
+        Codes = $codes
+        TotalServices = $totSvc
+        BeneLineSum = $totBene          # sum of per-code bene counts, NOT distinct patients
+        AvgAllowedPerService = if ($totSvc -gt 0) { [math]::Round($totAllowed / $totSvc, 2) } else { 0 }
+        ServicesPerEval = if ($evTot -gt 0) { [math]::Round(($totSvc - $evTot) / $evTot, 1) } else { $null }
+        EvalLowPct = if ($evTot -gt 0) { [math]::Round(100.0 * $ev['97161'] / $evTot, 1) } else { $null }
+        EvalModeratePct = if ($evTot -gt 0) { [math]::Round(100.0 * $ev['97162'] / $evTot, 1) } else { $null }
+        EvalHighPct = if ($evTot -gt 0) { [math]::Round(100.0 * $ev['97163'] / $evTot, 1) } else { $null }
+        EvalServices = $evTot
+    }
 }
 
 function Get-RmServiceProfile {
@@ -8388,7 +8577,7 @@ Export-ModuleMember -Function @(
     'Get-RmReferralGeography', 'Export-RmReferralMapHtml',
     'Get-RmSourceAnalysis', 'Export-RmSourceReportHtml',
     'Get-RmSourceTrend', 'Add-RmSourceTrend',
-    'Get-RmCountyMarket', 'Get-RmServiceProfile',
+    'Get-RmCountyMarket', 'Get-RmServiceProfile', 'Get-RmServiceMix',
     'Import-RmNppesBulk', 'Import-RmCareCompare', 'Get-RmAffiliatedNpi',
     'Get-RmNppesIndexPath',
     'Get-RmProviderFamily', 'Get-RmLocationReferrals', 'Get-RmRelatedOrgNames',

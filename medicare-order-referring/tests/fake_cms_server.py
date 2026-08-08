@@ -183,12 +183,24 @@ ENROLLMENT = {
 SERVICES = {
     '9000000001': [
         {'Rndrng_NPI': '9000000001', 'HCPCS_Cd': '97110', 'Tot_Srvcs': '350', 'Tot_Benes': '60',
-         'Rndrng_Prvdr_Type': 'Physical Therapist'},
+         'Avg_Mdcr_Alowd_Amt': '30.00', 'Rndrng_Prvdr_Type': 'Physical Therapist'},
         {'Rndrng_NPI': '9000000001', 'HCPCS_Cd': '97140', 'Tot_Srvcs': '150', 'Tot_Benes': '40',
+         'Avg_Mdcr_Alowd_Amt': '26.00', 'Rndrng_Prvdr_Type': 'Physical Therapist'},
+        # evaluation codes: the complexity split is the point of the card.
+        # 40 low + 8 moderate + 2 high = 50 evaluations.
+        {'Rndrng_NPI': '9000000001', 'HCPCS_Cd': '97161', 'Tot_Srvcs': '40', 'Tot_Benes': '38',
+         'Avg_Mdcr_Alowd_Amt': '95.00', 'Rndrng_Prvdr_Type': 'Physical Therapist'},
+        {'Rndrng_NPI': '9000000001', 'HCPCS_Cd': '97162', 'Tot_Srvcs': '8', 'Tot_Benes': '8',
+         'Avg_Mdcr_Alowd_Amt': '95.00', 'Rndrng_Prvdr_Type': 'Physical Therapist'},
+        {'Rndrng_NPI': '9000000001', 'HCPCS_Cd': '97163', 'Tot_Srvcs': '2', 'Tot_Benes': '2',
+         'Avg_Mdcr_Alowd_Amt': '95.00', 'Rndrng_Prvdr_Type': 'Physical Therapist'},
+        # a row with NO allowed-amount column at all: CMS omits fields, and
+        # StrictMode turns a direct property read into a terminating error.
+        {'Rndrng_NPI': '9000000001', 'HCPCS_Cd': '97530', 'Tot_Srvcs': '20', 'Tot_Benes': '15',
          'Rndrng_Prvdr_Type': 'Physical Therapist'},
         # an E/M code that must NOT count as therapy
         {'Rndrng_NPI': '9000000001', 'HCPCS_Cd': '99213', 'Tot_Srvcs': '25', 'Tot_Benes': '20',
-         'Rndrng_Prvdr_Type': 'Physical Therapist'},
+         'Avg_Mdcr_Alowd_Amt': '90.00', 'Rndrng_Prvdr_Type': 'Physical Therapist'},
     ],
     # 9000000002 deliberately absent -> org-bills-under-individuals case
 }
