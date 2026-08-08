@@ -555,6 +555,21 @@ days they take to reach the competitors that referrer also feeds — slower
 than the area on a big source is a scheduling/intake warning worth checking
 before assuming preference.
 
+**Ranked lists stop at 75 miles.** A "source" registered hundreds of miles
+away is a reference laboratory, a corporate or head-office address, or a
+telehealth group &mdash; real shared care, but not a referral relationship
+anyone can go and win, and leaving those rows in pushed genuine local
+referrers down the table. Sources beyond 75 miles are **counted in the
+measured patient base** and listed in their own **Out-of-area sources**
+section, but they are kept out of the referral ranking, out of the
+share-of-referrer table and out of the biggest gains/declines. Percentages,
+top-5 dependence and the concentration score describe the ranked base, and
+the report states both figures so they still add up. A source whose practice
+ZIP can't be located stays in the ranking &mdash; unknown is not the same as
+far. The heat map still draws everything (its own 250-mile rule applies
+there), the outreach call sheet still uses 50 miles, and the competitive
+landscape still uses its 10-mile sweep.
+
 **If the practice moved, the report says so.** Everything measured *by
 area* &mdash; the competitive ranking, market capture, outreach targets, share
 of each referrer, market headroom &mdash; is drawn around the address NPPES
