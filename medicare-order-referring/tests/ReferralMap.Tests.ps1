@@ -3226,6 +3226,50 @@ Describe 'Group penetration and therapy leakage' {
         } finally { Set-RmConfig -DataDir $saved }
     }
 
+    It 'never counts the practice''s OWN other locations as leakage' {
+        # The swept peer set contains the practice's own-name sites (they are
+        # only dropped later, when the landscape is ranked). Leakage reads
+        # every outbound edge into that set, so without an authoritative
+        # own-site exclusion a company's own clinic is reported as patients
+        # LEAVING - the same class of error as ranking a practice against
+        # itself. 8000000036 trades under the analyzed practice's name.
+        $lkDir = Join-Path $script:WorkDir 'leak-ownsite'
+        New-Item -ItemType Directory -Path $lkDir -Force | Out-Null
+        # The own site must sit OUTSIDE the enriched outbound window, which
+        # is where the old guard came from: 60 louder destinations push it
+        # out, and only an authoritative own-site set can still exclude it.
+        $lkLines = New-Object System.Collections.Generic.List[string]
+        $lkLines.Add('from_npi,to_npi,patient_count,transaction_count,average_day_wait,std_day_wait')
+        $lkLines.Add('8000000001,9000000001,50,50,10.0,5.0')
+        for ($i = 1; $i -le 60; $i++) {
+            $lkLines.Add(('9000000001,86{0:D8},40,40,15.0,5.0' -f $i))
+        }
+        $lkLines.Add('9000000001,8000000036,12,12,0.5,1.0')   # our OWN other clinic, quietest
+        $lkLines.Add('9000000001,9000000010,20,20,25.0,5.0')  # a genuine rival
+        Set-Content -Path (Join-Path $lkDir 'hop_teaming_2022.csv') -Encoding ascii -NoNewline `
+            -Value ($lkLines.ToArray() -join "`n")
+        # both the own site and the rival are swept therapy providers
+        Set-Content -Path (Join-Path $lkDir 'nppes-index.psv') -Encoding ascii -Value @(
+            '8000000036|2|TEST REHAB CLINIC, L.L.C.|||TESTVILLE|MO|999990000|261QP2000X|01/01/2005'
+            '9000000010|2|RIVAL REHAB OF TESTVILLE, LLC|||TESTVILLE|MO|999990000|261QP2000X|01/01/2005'
+        )
+        $lkCent = Join-Path $lkDir 'lk-centroids.csv'
+        Set-Content -Path $lkCent -Encoding ascii -Value @('zip,lat,lon', '99999,40.0000,-90.0000')
+        $saved = (Get-RmConfig).DataDir
+        try {
+            Set-RmConfig -DataDir $lkDir
+            Set-RmActiveDataset -Source hop-teaming -Year 2022 | Out-Null
+            $sa = Get-RmSourceAnalysis -Npi 9000000001 -CentroidPath $lkCent
+            $lk = @($sa.TherapyLeakage)
+            @($lk | Where-Object NPI -eq '8000000036').Count | Should -Be 0   # our own clinic
+            @($lk | Where-Object NPI -eq '9000000010').Count | Should -Be 1   # a real rival
+            $sa.TherapyLeakagePatients | Should -Be 20                        # NOT 32
+        } finally {
+            Set-RmConfig -DataDir $saved
+            Set-RmActiveDataset -Source cms-pspp -Year 2015 | Out-Null
+        }
+    }
+
     It 'counts onward volume to other therapy providers as leakage' {
         $saved = (Get-RmConfig).DataDir
         try {
@@ -3502,6 +3546,38 @@ Describe 'Owner features degrade honestly when their inputs are absent' {
         $out = Join-Path $script:WorkDir 'area-ok.html'
         Export-RmSourceReportHtml -Analysis $ok -Path $out | Out-Null
         (Get-Content $out -Raw) | Should -Not -BeLike '*Read this section as context*'
+    }
+
+    It 'omits group penetration, capacity and billing when their indexes are absent' {
+        # None of the new layers may crash, fabricate, or leave a half-built
+        # card when Care Compare has not been imported: the analysis simply
+        # does not carry them.
+        $bareDir = Join-Path $script:WorkDir 'bare-indexes'
+        New-Item -ItemType Directory -Path $bareDir -Force | Out-Null
+        Set-Content -Path (Join-Path $bareDir 'hop_teaming_2022.csv') -Encoding ascii -NoNewline -Value (@(
+            'from_npi,to_npi,patient_count,transaction_count,average_day_wait,std_day_wait'
+            '8000000001,9000000001,45,45,10.0,5.0'
+        ) -join "`n")
+        $bareCent = Join-Path $bareDir 'bare-centroids.csv'
+        Set-Content -Path $bareCent -Encoding ascii -Value @('zip,lat,lon', '99999,40.0000,-90.0000')
+        $saved = (Get-RmConfig).DataDir
+        try {
+            Set-RmConfig -DataDir $bareDir      # no care-compare-index.psv at all
+            Set-RmActiveDataset -Source hop-teaming -Year 2022 | Out-Null
+            $sa = Get-RmSourceAnalysis -Npi 9000000001 -CentroidPath $bareCent
+            @($sa.GroupPenetration).Count | Should -Be 0
+            $sa.ServiceMix | Should -BeNullOrEmpty          # no roster to bill under
+            $sa.TotalPatients | Should -Be 45               # the analysis itself is unharmed
+            $out = Join-Path $script:WorkDir 'bare-indexes.html'
+            { Export-RmSourceReportHtml -Analysis $sa -Path $out } | Should -Not -Throw
+            $html = Get-Content $out -Raw
+            $html | Should -Not -BeLike '*Inside the groups that already refer*'
+            $html | Should -Not -BeLike '*How you bill*'
+            $html | Should -BeLike '*Key findings*'
+        } finally {
+            Set-RmConfig -DataDir $saved
+            Set-RmActiveDataset -Source cms-pspp -Year 2015 | Out-Null
+        }
     }
 
     It 'refuses an out-of-range headroom radius instead of guessing' {

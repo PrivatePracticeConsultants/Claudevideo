@@ -3358,6 +3358,9 @@ function Get-RmSourceAnalysis {
     # analysis, the outbound view and the competitive layer. A failure here
     # must not sink the analysis, exactly as when the sweep ran later.
     $peersAll = @(); $peers = @(); $secondaryOnly = 0
+    $ownOrgKey = ''
+    $ownSiteNpisRadius = New-Object 'System.Collections.Generic.HashSet[string]'
+    $capNpisByKey = @{}   # org-name key -> clinician NPIs in the swept ZIPs
     $others = New-Object 'System.Collections.Generic.HashSet[string]'
     $rzips = @(); $sweepError = $null
     $outboundRows = @()   # NOT $outRows: that name is the competitive peer list below
@@ -3380,6 +3383,20 @@ function Get-RmSourceAnalysis {
                 $null -eq $_.PSObject.Properties['PrimaryInScope'] -or $_.PrimaryInScope })
             $secondaryOnly = @($peersAll).Count - @($peers).Count
             foreach ($p in $peers) { if (-not $memberSet.Contains($p.NPI)) { [void]$others.Add($p.NPI) } }
+            # The practice's OWN other locations inside the radius, resolved
+            # here from the swept peer list - complete, and shared by every
+            # consumer. Deriving them later from whichever sibling rows
+            # happened to fall inside an enrichment window let an own clinic
+            # outside that window be reported as patients LEAVING.
+            if (-not $ownOrgKey) { $ownOrgKey = if ($isOrg) { Get-RmLandscapeNameKey $pracName } else { '' } }
+            if ($ownOrgKey) {
+                foreach ($p in $peers) {
+                    if ($memberSet.Contains($p.NPI)) { continue }
+                    if ($p.Type -eq 'Organization' -and (Get-RmLandscapeNameKey ([string]$p.Name)) -eq $ownOrgKey) {
+                        [void]$ownSiteNpisRadius.Add([string]$p.NPI)
+                    }
+                }
+            }
         } catch {
             $sweepError = $_.Exception.Message
             Write-Warning "COMPETITIVE LANDSCAPE unavailable: $sweepError"
@@ -3472,7 +3489,7 @@ function Get-RmSourceAnalysis {
     # THERAPY, LLC, 0.0-day lag). Same-company organizations are folded
     # into their own disclosed bucket - internal flow, not referrals -
     # exactly as the landscape refuses to rank them as competitors.
-    $ownOrgKey = if ($isOrg) { Get-RmLandscapeNameKey $pracName } else { '' }
+    if (-not $ownOrgKey) { $ownOrgKey = if ($isOrg) { Get-RmLandscapeNameKey $pracName } else { '' } }
     $siblingEdges = New-Object System.Collections.Generic.List[object]
     $therEdges = New-Object System.Collections.Generic.List[object]
     $keepEdges = New-Object System.Collections.Generic.List[object]
@@ -3960,6 +3977,7 @@ function Get-RmSourceAnalysis {
     # here from the same name key the landscape uses (that set is built
     # later, inside the competitive block).
     $ownSiteNpisAll = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($n in $ownSiteNpisRadius) { [void]$ownSiteNpisAll.Add([string]$n) }
     if ($ownOrgKey) {
         foreach ($sib in $siblingRows) { [void]$ownSiteNpisAll.Add([string]$sib.SourceNPI) }
         foreach ($osb in @($outboundSibRows)) { [void]$ownSiteNpisAll.Add([string]$osb.NPI) }
@@ -4225,14 +4243,12 @@ function Get-RmSourceAnalysis {
             # 'Emory Physical Therapy, LLC' listed against itself). They are
             # dropped from the ranking and disclosed, with a pointer to the
             # combined analysis that measures the company as one.
-            $myNameKey = Get-RmLandscapeNameKey $pracName
             $ownSites = 0; $ownSitePatients = 0
             $ownSiteNpis = New-Object 'System.Collections.Generic.HashSet[string]'
             $peerRows = New-Object System.Collections.Generic.List[object]
             foreach ($p in $peers) {
                 if ($memberSet.Contains($p.NPI)) { continue }
-                if ($myNameKey -and $p.Type -eq 'Organization' -and
-                    (Get-RmLandscapeNameKey ([string]$p.Name)) -eq $myNameKey) {
+                if ($ownSiteNpisRadius.Contains([string]$p.NPI)) {
                     $ownSites++
                     [void]$ownSiteNpis.Add([string]$p.NPI)
                     if ($peerAgg.ContainsKey($p.NPI)) { $ownSitePatients += [int]$peerAgg[$p.NPI].Benes }
@@ -4382,6 +4398,9 @@ function Get-RmSourceAnalysis {
                         [void]$seenCl[$nk2].Add($f[0])
                     }
                     foreach ($kv in $seenCl.GetEnumerator()) { $capBySite[$kv.Key] = $kv.Value.Count }
+                    # the same pass supplies the billing benchmark's peer
+                    # clinicians, so it never re-reads the index per rival
+                    $capNpisByKey = $seenCl
                 }
             } catch { Write-Verbose "Competitor capacity skipped: $($_.Exception.Message)" }
             # Attach headcount + productivity to every ranked row. The
@@ -4720,21 +4739,21 @@ function Get-RmSourceAnalysis {
             # Peer clinicians: the Care Compare rosters of the ranked
             # competitors, taken in ranking order until the sample fills.
             $peerNpis = New-Object System.Collections.Generic.List[string]
-            $dacIdx5 = Get-RmDacIndexPath
-            if ($landscape -and (Test-Path -LiteralPath $dacIdx5)) {
+            if ($landscape -and $capNpisByKey.Count -gt 0) {
                 $mineSet = New-Object 'System.Collections.Generic.HashSet[string]'
                 foreach ($n in $myNpis) { [void]$mineSet.Add($n) }
+                # Taken in RANKING order from the map the capacity scan
+                # already built (clinicians in the swept ZIPs, keyed by
+                # organization name). Scanning the 407 MB index once per
+                # ranked rival instead cost a full pass each.
                 foreach ($pw in @($landscape.Peers | Where-Object { -not $_.You -and $_.Type -eq 'Organization' })) {
                     if ($peerNpis.Count -ge $ServiceMixPeerSample) { break }
                     $nk4 = Get-RmOrgNameKey ([string]$pw.Name)
-                    if (-not $nk4) { continue }
-                    $mm = Get-RmNameMatcher $nk4
-                    foreach ($line in @([RmEngine]::FindByOrgName($dacIdx5, -1, 2, $mm.Regex.ToString(), $mm.Compact, $null))) {
+                    if (-not $nk4 -or -not $capNpisByKey.ContainsKey($nk4)) { continue }
+                    foreach ($cn in $capNpisByKey[$nk4]) {
                         if ($peerNpis.Count -ge $ServiceMixPeerSample) { break }
-                        $f = $line.Split('|')
-                        if ($f.Count -lt 8 -or -not $f[0]) { continue }
-                        if ($mineSet.Contains($f[0])) { continue }
-                        if (-not $peerNpis.Contains($f[0])) { $peerNpis.Add($f[0]) }
+                        if ($mineSet.Contains($cn)) { continue }
+                        if (-not $peerNpis.Contains($cn)) { $peerNpis.Add([string]$cn) }
                     }
                 }
             }
