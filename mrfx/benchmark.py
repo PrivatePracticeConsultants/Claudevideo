@@ -74,7 +74,7 @@ def normalize_market(market: dict | None) -> dict:
     return m
 
 
-def _rates_relation(market: dict) -> str:
+def _rates_relation(market: dict, prefilter: str = "") -> str:
     """The FROM-relation for market queries, aliased `t` by the caller.
     Pinned month → plain `rates_by_tin` (the file_month = ? clause in
     _market_where selects that snapshot). "Latest" → a subquery that keeps, per
@@ -87,12 +87,27 @@ def _rates_relation(market: dict) -> str:
     the median (measured: June GP 34.50 pooling with July 37.95 → 36.22).
     Coarser (per payer) would drop whole regions when a payer's shard files
     update on different cadences. Known limit: a code line absent from ALL of a
-    payer's newer files lingers at its last-seen vintage."""
+    payer's newer files lingers at its last-seen vintage.
+
+    `prefilter` is SQL applied INSIDE the "latest" subquery, before the window.
+    Only ever pass predicates on the PARTITION KEY columns (payer, tin_value,
+    tin_is_really_npi, billing_code): those select whole partitions, so the
+    max(file_month) each surviving row sees is identical to the unfiltered
+    result. Filtering on anything else (a rate bound, a modifier, a month)
+    would remove rows from WITHIN a partition and could promote a stale
+    vintage to "latest" — silently wrong numbers.
+
+    This matters because a window function cannot use the caller's WHERE: the
+    unfiltered form sorts the ENTIRE spine on every call, so its cost grows
+    with total store size even when the question is about one practice
+    (measured: 0.64s -> 1.96s as the spine went 800k -> 3.2M rows, while the
+    same query against a pinned month stayed flat at ~0.4s)."""
     if is_latest(market):
         # tin_is_really_npi is part of the identity: an EIN row and a same-
         # digit-string npi-typed row are different providers — one must never
         # supersede the other
-        return ("(SELECT * FROM rates_by_tin QUALIFY file_month = max(file_month) "
+        where = f" WHERE {prefilter}" if prefilter else ""
+        return (f"(SELECT * FROM rates_by_tin{where} QUALIFY file_month = max(file_month) "
                 "OVER (PARTITION BY payer, tin_value, tin_is_really_npi, billing_code))")
     return "rates_by_tin"
 

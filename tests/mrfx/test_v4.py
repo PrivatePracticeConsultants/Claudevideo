@@ -2169,3 +2169,52 @@ def test_subject_accepts_an_npi_not_just_a_name_or_tin(cfg, store):
     # a 10-digit id that IS a known TIN keeps resolving to itself (payers that
     # publish NPIs in the TIN slot must not be re-routed out from under us)
     assert resolve_subject_tins(store, "9999999999") == ["9999999999"]
+
+
+def test_latest_window_is_narrowed_without_changing_which_vintage_wins(cfg, store):
+    """month='latest' resolves supersession with a window function, which cannot
+    use the caller's WHERE — so it sorted the ENTIRE spine to answer a question
+    about one practice, and its cost grew with total store size (measured
+    0.64s -> 1.96s as the spine went 800k -> 3.2M rows). It is now pre-filtered
+    on PARTITION-KEY columns only (tin_value for the subject, payer+code for the
+    peers), which selects whole partitions and so cannot change the winner.
+
+    This pins the property that makes that safe: per-CONTRACT latest. Alpha
+    prices in May and June (June wins); Beta prices ONLY in May (it must
+    survive, not be dropped for being older than Alpha's June)."""
+    from mrfx.schedule import compute_fee_schedule
+
+    def row(month, payer, tin, code, rate):
+        return dict(payer=payer, tin_value=tin, tin_type="ein", npi="1000000001",
+                    source_file=f"{payer}_{month}.json", billing_code=code,
+                    billing_code_type="CPT", discipline="PT", is_timed=True,
+                    billing_class="professional", negotiated_rate=float(rate),
+                    negotiated_type="negotiated", is_dollar_rate=True,
+                    billing_code_modifier=[], service_code=["11"], file_month=month,
+                    last_updated_on=f"{month}-01", expiration_date=None,
+                    schema_version="2.0.0", tin_is_really_npi=False, state=None)
+
+    subject = "430000000"
+    peers = ["43%07d" % (i + 1) for i in range(6)]
+    rows = []
+    for tin in [subject] + peers:
+        for code in ("97110", "97140"):
+            rows.extend([row("2026-05", "Alpha", tin, code, 50),
+                         row("2026-06", "Alpha", tin, code, 60),
+                         row("2026-05", "Beta", tin, code, 40)])
+    with store.rates_part_writer("v.json") as w:
+        w.write_batch(rows)
+    store.rebuild_rollups()
+
+    fs = compute_fee_schedule(store, subject, {"month": "latest"})
+    rates = {(c["billing_code"], p): v for c in fs["codes"] for p, v in c["rates"].items()}
+    assert rates, "subject must have rates"
+    for (code, payer), v in rates.items():
+        if payer == "Alpha":
+            assert v["rate"] == 60.0, f"{code}: June must supersede May"
+        else:
+            assert v["rate"] == 40.0, f"{code}: Beta's only vintage must survive"
+        # the peer side uses a DIFFERENT narrowed relation (payer+code, not
+        # tin) — reusing the subject's would have returned zero peers
+        assert v["n_peers"] == len(peers), (code, payer, v["n_peers"])
+        assert v["market_median"] is not None

@@ -73,7 +73,12 @@ def compute_fee_schedule(store: Store, subject: str, market: dict) -> dict:
     subject_where, subject_params = _market_where(
         {k: v for k, v in market.items() if k not in ("therapy_only", "state", "city")},
         include_assistant, include_non_dollar)
-    rel = _rates_relation(market)
+    # Narrow the "latest" supersession window to THIS SUBJECT before it runs.
+    # tin_value is part of the window's partition key, so selecting whole
+    # partitions cannot change which vintage wins — but it stops the window
+    # sorting the entire store to answer a question about one practice.
+    # (subject_tins is a CTE in the query below; a FROM-subquery can see it.)
+    rel = _rates_relation(market, "tin_value IN (SELECT tin FROM subject_tins)")
 
     sql = f"""
     WITH subject_tins AS (SELECT unnest(?::VARCHAR[]) AS tin),
@@ -112,12 +117,22 @@ def compute_fee_schedule(store: Store, subject: str, market: dict) -> dict:
         subj_codes = sorted({r["billing_code"] for r in raw})
         market_by: dict[tuple, dict] = {}
         if subj_payers and subj_codes:
+            # The peer side must NOT reuse `rel` — that one is narrowed to the
+            # subject's TINs and would return zero peers. Narrow this one by
+            # payer + billing_code instead: both are partition-key columns, so
+            # the surviving vintages are unchanged, and the window no longer
+            # sorts the whole store to compare a handful of codes.
+            peer_rel = _rates_relation(market, (
+                f"payer IN ({', '.join('?' for _ in subj_payers)}) "
+                f"AND billing_code IN ({', '.join('?' for _ in subj_codes)})"))
+            peer_rel_params = ([*subj_payers, *subj_codes]
+                               if peer_rel != "rates_by_tin" else [])
             msql = f"""
             WITH subject_tins AS (SELECT unnest(?::VARCHAR[]) AS tin),
             per_tin AS (
                 SELECT t.payer, t.billing_code, t.tin_value,
                        median(t.negotiated_rate) AS rate
-                FROM {rel} t LEFT JOIN tin_directory td USING (tin_value)
+                FROM {peer_rel} t LEFT JOIN tin_directory td USING (tin_value)
                 WHERE {where} AND t.is_dollar_rate
                   AND t.payer IN ({', '.join('?' for _ in subj_payers)})
                   AND t.billing_code IN ({', '.join('?' for _ in subj_codes)})
@@ -129,7 +144,11 @@ def compute_fee_schedule(store: Store, subject: str, market: dict) -> dict:
                    count(DISTINCT tin_value)  AS n_peers
             FROM per_tin GROUP BY payer, billing_code
             """
-            mcur = con.execute(msql, [subject_tins, *params, *subj_payers, *subj_codes])
+            # bind order follows the SQL TEXT: the subject_tins CTE, then the
+            # relation's own filter inside FROM, then the shared WHERE, then the
+            # explicit payer/code lists
+            mcur = con.execute(msql, [subject_tins, *peer_rel_params, *params,
+                                      *subj_payers, *subj_codes])
             for row in mcur.fetchall():
                 d = dict(zip([c[0] for c in mcur.description], row))
                 market_by[(d["payer"], d["billing_code"])] = d
