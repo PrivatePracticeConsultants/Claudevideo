@@ -172,19 +172,42 @@ def _market_where(market: dict, include_assistant: bool, include_non_dollar: boo
 
 def resolve_subject_tins(store: Store, subject: str) -> list[str]:
     """Subject may be a manually-mapped entity name, an AUTO-grouped org name
-    (every TIN whose NPPES organization name is `subject`), or a raw TIN."""
+    (every TIN whose NPPES organization name is `subject`), an NPI, or a raw TIN.
+
+    NPIs are accepted because the app SHOWS them everywhere — the NPI grain, the
+    entity detail panel, the exports — so pasting one into a subject box is the
+    natural thing to do. Without this it fell through to the raw-TIN branch,
+    matched nothing (rates are keyed by TIN, and the market basis further
+    excludes NPI-in-the-TIN-slot rows), and every report came back "no published
+    rates for this practice" for a provider that plainly has them.
+    """
     emap = store.entity_map()
     tins = [t for t, name in emap.items() if name == subject]
     if tins:
         return tins
-    # auto-grouped org: the same NPPES display_name the entity grain groups on
+    ident = subject.replace("-", "").strip()
     with store.connect() as con:
+        # auto-grouped org: the same NPPES display_name the entity grain groups on
         named = [r[0] for r in con.execute(
             "SELECT tin_value FROM tin_directory WHERE display_name = ?", [subject],
         ).fetchall()]
-    if named:
-        return named
-    return [subject.replace("-", "").strip()]
+        if named:
+            return named
+        # A 10-digit all-digit id is an NPI (TINs/EINs are 9). Only treat it as
+        # one when it isn't already a known TIN, so a payer that publishes NPIs
+        # in the TIN slot still resolves to itself.
+        if len(ident) == 10 and ident.isdigit():
+            known_tin = con.execute(
+                "SELECT 1 FROM tin_directory WHERE tin_value = ? LIMIT 1", [ident],
+            ).fetchone()
+            if not known_tin:
+                by_npi = [r[0] for r in con.execute(
+                    "SELECT DISTINCT tin_value FROM rates_dedup "
+                    "WHERE npi = ? AND tin_value IS NOT NULL", [ident],
+                ).fetchall()]
+                if by_npi:
+                    return by_npi
+    return [ident]
 
 
 def resolve_peer_set(store: Store, market: dict) -> tuple[str, dict]:
@@ -933,7 +956,7 @@ def require_subject_content(store: Store, benchmark: dict, kind: str) -> None:
     raise BenchmarkError(
             f"{kind}: no published rates for this practice under the current "
             "filters — there is nothing to compare against the market. Check "
-            "the practice name/tax ID, and widen the as-of month, state or "
+            "the practice name, tax ID or NPI, and widen the as-of month, state or "
             "discipline filters.")
 
 

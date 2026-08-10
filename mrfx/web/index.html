@@ -291,8 +291,8 @@
     <div class="bench-grid">
       <div class="bench-form">
         <h2>Market benchmark</h2>
-        <div class="field"><label>Subject entity / TIN</label>
-          <input type="text" id="b-subject" list="b-subjects" placeholder="entity name or TIN…">
+        <div class="field"><label>Subject entity / TIN / NPI</label>
+          <input type="text" id="b-subject" list="b-subjects" placeholder="entity name, TIN, or NPI…">
           <datalist id="b-subjects"></datalist>
         </div>
         <div class="field"><label>As-of month</label><select id="b-month"></select></div>
@@ -356,7 +356,7 @@
       <div class="bench-form">
         <h2>Payer negotiation</h2>
         <div class="field"><label>Your practice (subject)</label>
-          <input type="text" id="ng-subject" list="ng-subjects" placeholder="entity name or TIN…">
+          <input type="text" id="ng-subject" list="ng-subjects" placeholder="entity name, TIN, or NPI…">
           <datalist id="ng-subjects"></datalist>
         </div>
         <div class="field"><label>Payer you're negotiating with (required)</label>
@@ -374,7 +374,7 @@
         </label>
         <div class="field"><label>Comparable entities <span class="muted" style="text-transform:none">(each adds a column)</span></label>
           <div style="display:flex;gap:6px">
-            <input type="text" id="ng-comp" list="ng-comps" placeholder="entity name or TIN…" style="flex:1">
+            <input type="text" id="ng-comp" list="ng-comps" placeholder="entity name, TIN, or NPI…" style="flex:1">
             <button class="btn" id="ng-add">Add</button>
           </div>
           <datalist id="ng-comps"></datalist>
@@ -402,8 +402,8 @@
         <p class="muted" style="text-transform:none;margin:-4px 0 10px">
           A practice's own negotiated rates, laid out by payer, with its payers ranked by who pays best.
           No volumes or assumptions — just what the payers published.</p>
-        <div class="field"><label>Subject entity / TIN</label>
-          <input type="text" id="rc-subject" list="rc-subjects" placeholder="entity name or TIN…">
+        <div class="field"><label>Subject entity / TIN / NPI</label>
+          <input type="text" id="rc-subject" list="rc-subjects" placeholder="entity name, TIN, or NPI…">
           <datalist id="rc-subjects"></datalist>
         </div>
         <div class="field"><label>As-of month</label><select id="rc-month"></select></div>

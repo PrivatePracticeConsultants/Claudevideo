@@ -325,7 +325,7 @@ def require_rate_card_content(fee_schedule: dict) -> None:
     if not fee_schedule.get("codes"):
         raise BenchmarkError(
             "no published rates for this practice under the current filters "
-            "— nothing to put on a rate card. Check the practice name/tax ID, "
+            "— nothing to put on a rate card. Check the practice name, tax ID or NPI, "
             "and widen the as-of month, state or discipline filters.")
 
 

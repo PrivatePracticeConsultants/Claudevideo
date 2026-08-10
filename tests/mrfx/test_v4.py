@@ -2130,3 +2130,42 @@ def test_status_states_which_codes_are_collected_and_flags_a_dropped_discipline(
 
     out = cov(all_codes=True)
     assert "EVERY billing code" in out
+
+
+def test_subject_accepts_an_npi_not_just_a_name_or_tin(cfg, store):
+    """The app SHOWS NPIs everywhere — the NPI grain, entity detail, exports —
+    so pasting one into a subject box is the natural thing to do. It used to
+    fall through to the raw-TIN branch, match nothing (rates are keyed by TIN,
+    and the market basis further excludes NPI-in-the-TIN-slot rows) and report
+    "no published rates for this practice" for a provider that plainly has
+    them. Reported live against NPI 1417594896."""
+    from mrfx.benchmark import resolve_subject_tins
+
+    npi, tin = "1417594896", "431234567"
+    rows = [dict(
+        payer=p, tin_value=tin, tin_type="ein", npi=npi, source_file="s.json",
+        billing_code=c, billing_code_type="CPT", discipline="PT", is_timed=True,
+        billing_class="professional", negotiated_rate=55.0, negotiated_type="negotiated",
+        is_dollar_rate=True, billing_code_modifier=[], service_code=["11"],
+        file_month="2026-06", last_updated_on="2026-06-01", expiration_date=None,
+        schema_version="2.0.0", tin_is_really_npi=False, state=None)
+        for p in ("Aetna", "BCBS") for c in ("97110", "97140", "97530")]
+    with store.rates_part_writer("s.json") as w:
+        w.write_batch(rows)
+    store.rebuild_rollups()
+
+    assert resolve_subject_tins(store, npi) == [tin]          # NPI -> its TIN
+    assert resolve_subject_tins(store, tin) == [tin]          # TIN still itself
+    # both routes must produce the SAME card, not merely a non-error
+    client = TestClient(create_app(cfg, store))
+    by_npi = client.post("/api/schedule/fee", json={
+        "subject": npi, "market": {"month": "2026-06"}}).json()["fee_schedule"]
+    by_tin = client.post("/api/schedule/fee", json={
+        "subject": tin, "market": {"month": "2026-06"}}).json()["fee_schedule"]
+    assert by_npi["codes"] and by_npi["codes"] == by_tin["codes"]
+    assert client.post("/api/report/ratecard", json={
+        "subject": npi, "market": {"month": "2026-06"}}).status_code == 200
+
+    # a 10-digit id that IS a known TIN keeps resolving to itself (payers that
+    # publish NPIs in the TIN slot must not be re-routed out from under us)
+    assert resolve_subject_tins(store, "9999999999") == ["9999999999"]
