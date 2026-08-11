@@ -37,7 +37,10 @@ Other commands: `mrfx add <url>… [--file links.txt] [--known] [--retry-failed]
 `mrfx export out.csv [--cpt … --payer … --grain tin]`, `mrfx outreach`,
 `mrfx forget <filename>`, `mrfx speedtest <url>`,
 `mrfx orgreport <subject>` (one-practice bundle for the Medicare Order &
-Referring Tracker), `mrfx reset --confirm`.
+Referring Tracker), `mrfx medicare --eligibility/--referrals <path>` (import the
+CMS Order & Referring roster and shared-patient pair data the Tracker
+downloaded — the eligibility and referral halves MRFs cannot supply),
+`mrfx reset --confirm`.
 Config: `config/mrfx.yaml`.
 
 Playwright/Chromium for JS portals is optional and auto-downloaded on first use

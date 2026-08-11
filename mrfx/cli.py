@@ -533,8 +533,32 @@ def _print_code_coverage(cfg: MrfxConfig) -> None:
           "to pick the new codes up in files you already have.")
 
 
+def _print_medicare_status(cfg: MrfxConfig) -> None:
+    """One line for the Medicare layers, so it's obvious whether the referral
+    and eligibility halves are actually loaded."""
+    try:
+        from .medicare import medicare_status
+        st = medicare_status(Store(cfg.store_dir, cfg.duckdb_memory_gb,
+                                   temp_dir=cfg.duckdb_temp_dir))
+    except Exception:  # noqa: BLE001 — a status line must never block the command
+        return
+    e = st.get("eligibility")
+    refs = st.get("referrals") or []
+    if not e and not refs:
+        print("medicare:   no eligibility or referral data imported "
+              "(`mrfx medicare --help`)")
+        return
+    bits = []
+    if e:
+        bits.append(f"eligibility {e['providers']:,} providers (release {e['release']})")
+    for d in refs:
+        bits.append(f"{d['label']} {d['year']} {d['pairs']:,} pairs")
+    print("medicare:   " + " · ".join(bits))
+
+
 def cmd_status(cfg: MrfxConfig, args) -> int:
     _print_code_coverage(cfg)
+    _print_medicare_status(cfg)
     if _something_owns_the_port(cfg, "reading the store locally"):
         print("(the dashboard's Files tab shows the same information live)")
         return 1
@@ -719,6 +743,54 @@ def cmd_enrich(cfg: MrfxConfig, args) -> int:
               "--bulk <file.zip> (or set enrichment.bulk_csv_path).")
     n = run_enrichment(cfg, store)
     print(f"identified {n:,} name(s).")
+    return 0
+
+
+def cmd_medicare(cfg: MrfxConfig, args) -> int:
+    """Import the CMS Medicare layers the rate data cannot supply: order/refer
+    eligibility, and shared-patient (referral-structure) pairs.
+
+    Deliberately IMPORT-only. The Order & Referring Tracker already downloads
+    and validates these; re-fetching 70 MB — or 7-11 GB for a Hop Teaming year
+    — would waste the bandwidth and fork the provenance."""
+    from .medicare import (import_orf_roster, import_shared_patients,
+                           medicare_status)
+
+    store = Store(cfg.store_dir, cfg.duckdb_memory_gb, temp_dir=cfg.duckdb_temp_dir)
+    did = False
+    if args.eligibility:
+        try:
+            r = import_orf_roster(store, args.eligibility)
+            print(f"eligibility: {r['providers']:,} providers (release {r['release']})")
+            did = True
+        except Exception as e:  # noqa: BLE001 — a bad file is a message, not a trace
+            print(f"could not import the eligibility roster: {e}")
+            return 1
+    if args.referrals:
+        try:
+            r = import_shared_patients(store, args.referrals, year=args.year)
+            print(f"referrals:   {r['pairs']:,} pairs touching your providers "
+                  f"({r['label']} {r['year']})")
+            did = True
+        except Exception as e:  # noqa: BLE001
+            print(f"could not import the referral data: {e}")
+            return 1
+    st = medicare_status(store)
+    if not did:
+        print("Nothing imported. Point this at files the Order & Referring Tracker "
+              "already downloaded:\n"
+              "  mrfx medicare --eligibility \"%LOCALAPPDATA%\\OrderReferringTracker\\"
+              "snapshots\\OrderReferring_<date>.csv\"\n"
+              "  mrfx medicare --referrals <shared-patient or Hop Teaming .csv>\n")
+    print("\ncurrently loaded:")
+    e = st["eligibility"]
+    print(f"  eligibility : {e['providers']:,} providers (release {e['release']})"
+          if e else "  eligibility : (none)")
+    if st["referrals"]:
+        for d in st["referrals"]:
+            print(f"  referrals   : {d['label']} {d['year']} — {d['pairs']:,} pairs")
+    else:
+        print("  referrals   : (none)")
     return 0
 
 
@@ -993,6 +1065,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--bulk", dest="bulk_file", metavar="PATH",
                    help="NPPES full-file .zip (or unzipped .csv) — resolves all names in one local pass")
     p = sub.add_parser(
+        "medicare",
+        help="import CMS eligibility / referral data the Order & Referring Tracker downloaded")
+    p.add_argument("--eligibility", default=None,
+                   help="path to an OrderReferring_<date>.csv snapshot")
+    p.add_argument("--referrals", default=None,
+                   help="path to a CMS shared-patient or DocGraph Hop Teaming CSV")
+    p.add_argument("--year", default=None, help="label the referral data's year")
+
+    p = sub.add_parser(
         "orgreport",
         help="bundle ONE practice (NPI list + rates) to pair with the Order & Referring Tracker")
     p.add_argument("subject", help="practice name, tax ID, or NPI")
@@ -1058,6 +1139,7 @@ def main(argv: list[str] | None = None) -> int:
         "outreach": cmd_outreach,
         "forget": cmd_forget,
         "enrich": cmd_enrich,
+        "medicare": cmd_medicare,
         "orgreport": cmd_orgreport,
         "speedtest": cmd_speedtest,
         "reset": cmd_reset,

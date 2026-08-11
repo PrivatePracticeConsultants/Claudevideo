@@ -106,40 +106,6 @@ def org_bundle_files(store: Store, profile: dict) -> dict[str, str]:
     #    line would be scanned for 10-digit numbers like any other text.
     files["npis.txt"] = "\n".join(profile["npis"]) + ("\n" if profile["npis"] else "")
 
-    # 2. Identity, so the bundle is self-describing away from the app
-    files["profile.txt"] = "\n".join([
-        f"Organization:   {name}",
-        f"Subject as entered: {profile['subject']}",
-        f"Tax IDs:        {', '.join(profile['tins']) or '(none)'}",
-        f"NPIs:           {len(profile['npis'])}",
-        f"Location:       {', '.join(x for x in (profile.get('city'), profile.get('state')) if x) or '(not resolved)'}",
-        f"Address:        {profile.get('address') or '(not resolved)'}",
-        f"Phone:          {profile.get('phone') or '(not resolved)'}",
-        f"States seen:    {', '.join(profile['states']) or '(none)'}",
-        f"Payers:         {len(fs['payers'])}",
-        f"Codes priced:   {len(fs['codes'])}",
-        f"Months present: {', '.join(profile['months_present']) or '(none)'}",
-        f"As-of month:    {fs.get('month')}",
-        "",
-        "HOW TO USE THIS WITH THE ORDER & REFERRING TRACKER",
-        "  1. Open npis.txt and copy the NPIs.",
-        "  2. Tracker -> Provider lookup -> paste them -> Full report (one-stop)",
-        "     for this practice's referral base, eligibility and competitors.",
-        "     (Several NPIs pasted together are analyzed as one practice, which",
-        "     is the right move here: a practice's volume is usually split",
-        "     across its organization NPI and its therapists'.)",
-        "  3. Tracker -> Batch NPI check on the same list confirms which of",
-        "     these NPIs are currently eligible to order/refer for Medicare.",
-        "  4. Read that alongside rates.csv and payers.csv here: the tracker",
-        "     tells you where this practice's patients come from, this bundle",
-        "     tells you what its commercial contracts pay.",
-        "",
-        "WHAT THIS BUNDLE DOES NOT CONTAIN",
-        "  Referral, claims, volume or Medicare-eligibility data. Machine-",
-        "  readable files publish negotiated RATES only. Anything about who",
-        "  refers to this practice comes from the tracker, not from here.",
-    ]) + "\n"
-
     # 3. The rate profile — one row per payer x code, the app's house basis
     rows = [["payer", "scorecard_rank", "billing_code", "description", "discipline",
              "rate", "pct_of_medicare", "payer_peer_median", "peer_practices",
@@ -177,6 +143,91 @@ def org_bundle_files(store: Store, profile: dict) -> dict[str, str]:
         ])
     files["payers.csv"] = _w(prows)
 
+    # 5. Medicare layers, when they've been imported. These are the halves the
+    #    rate data cannot supply: who may order/refer, and who feeds the
+    #    practice patients. Absent unless the user has imported them.
+    from .medicare import (REFERRAL_CAVEAT, npi_eligibility, org_referrals)
+
+    elig = npi_eligibility(store, profile["npis"])
+    if elig:
+        erows = [["npi", "on_order_referring_list", "name",
+                  "partb", "dme", "hha", "pmd", "hospice", "release"]]
+        for e in elig:
+            erows.append([e["npi"], "Y" if e["on_list"] else "N", defuse_csv(e["name"]),
+                          *["" if e[f] is None else ("Y" if e[f] else "N")
+                            for f in ("partb", "dme", "hha", "pmd", "hospice")],
+                          e["release"] or ""])
+        erows.append([])
+        erows.append(["NOTE: therapists and organizations are NOT on the Order & "
+                      "Referring roster at all, so 'N' for this practice's own NPIs "
+                      "is expected and is not a finding. The roster matters for the "
+                      "REFERRING physicians in referral_sources.csv."])
+        files["eligibility.csv"] = _w(erows)
+
+    for direction, fname in (("in", "referral_sources.csv"),
+                             ("out", "referral_destinations.csv")):
+        ref = org_referrals(store, profile["npis"], direction, limit=250)
+        if not ref["rows"]:
+            continue
+        by_npi = {e["npi"]: e for e in npi_eligibility(
+            store, [r["npi"] for r in ref["rows"]])}
+        rrows = [["npi", "name", "taxonomy", "shared_patients", "transactions",
+                  "avg_day_wait", "still_eligible_partb", "dataset", "data_year"]]
+        for r in ref["rows"]:
+            e = by_npi.get(r["npi"]) or {}
+            rrows.append([
+                r["npi"], defuse_csv(r["name"]), r["taxonomy"], r["patients"],
+                r["transactions"], r["avg_day_wait"] if r["avg_day_wait"] else "",
+                "" if not e.get("on_list") else ("Y" if e.get("partb") else "N"),
+                ref["dataset"], ref["data_year"]])
+        rrows.append([])
+        rrows.append([f"NOTE: {REFERRAL_CAVEAT}"])
+        files[fname] = _w(rrows)
+
+    # 2. Identity, so the bundle is self-describing away from the app
+    files["profile.txt"] = "\n".join([
+        f"Organization:   {name}",
+        f"Subject as entered: {profile['subject']}",
+        f"Tax IDs:        {', '.join(profile['tins']) or '(none)'}",
+        f"NPIs:           {len(profile['npis'])}",
+        f"Location:       {', '.join(x for x in (profile.get('city'), profile.get('state')) if x) or '(not resolved)'}",
+        f"Address:        {profile.get('address') or '(not resolved)'}",
+        f"Phone:          {profile.get('phone') or '(not resolved)'}",
+        f"States seen:    {', '.join(profile['states']) or '(none)'}",
+        f"Payers:         {len(fs['payers'])}",
+        f"Codes priced:   {len(fs['codes'])}",
+        f"Months present: {', '.join(profile['months_present']) or '(none)'}",
+        f"As-of month:    {fs.get('month')}",
+        "",
+        "HOW TO USE THIS WITH THE ORDER & REFERRING TRACKER",
+        "  1. Open npis.txt and copy the NPIs.",
+        "  2. Tracker -> Provider lookup -> paste them -> Full report (one-stop)",
+        "     for this practice's referral base, eligibility and competitors.",
+        "     (Several NPIs pasted together are analyzed as one practice, which",
+        "     is the right move here: a practice's volume is usually split",
+        "     across its organization NPI and its therapists'.)",
+        "  3. Tracker -> Batch NPI check on the same list confirms which of",
+        "     these NPIs are currently eligible to order/refer for Medicare.",
+        "  4. Read that alongside rates.csv and payers.csv here: the tracker",
+        "     tells you where this practice's patients come from, this bundle",
+        "     tells you what its commercial contracts pay.",
+        "",
+        "WHAT IS IN THIS BUNDLE",
+    ] + [f"  {n}" for n in sorted(files)] + [
+        "",
+    ] + ([
+        "The Medicare layers above were imported into this app, so this bundle",
+        "already carries eligibility and referral structure. The tracker remains",
+        "the richer view of both (competitors, groups, trends, maps).",
+    ] if any(k in files for k in ("eligibility.csv", "referral_sources.csv",
+                                  "referral_destinations.csv")) else [
+        "WHAT THIS BUNDLE DOES NOT CONTAIN",
+        "  Referral, claims, volume or Medicare-eligibility data — none has been",
+        "  imported here. Machine-readable files publish negotiated RATES only.",
+        "  Run `mrfx medicare` to add those layers, or get them from the tracker.",
+    ])) + "\n"
+
+
     files["methodology.txt"] = "\n".join([
         f"Generated:      {dt.datetime.now(dt.timezone.utc):%Y-%m-%d %H:%M} UTC "
         f"by MRF Explorer v{__version__}",
@@ -190,7 +241,19 @@ def org_bundle_files(store: Store, profile: dict) -> dict[str, str]:
         "Source: payers' Transparency-in-Coverage machine-readable files, as",
         "ingested by this app. These are PUBLISHED NEGOTIATED RATES — not paid",
         "amounts, not volumes, and not evidence that any service was rendered.",
-        "This bundle contains no Medicare referral, claims or eligibility data;",
-        "pair it with the Order & Referring Tracker for that side.",
-    ]) + "\n"
+    ] + ([
+        "",
+        "eligibility.csv: CMS Order & Referring roster, as imported into this",
+        "app (`mrfx medicare`). Current enrollment eligibility only.",
+    ] if "eligibility.csv" in files else []) + ([
+        "",
+        "referral_sources.csv / referral_destinations.csv: CMS or CareSet",
+        "shared-patient pair data, as imported into this app. " + REFERRAL_CAVEAT,
+    ] if "referral_sources.csv" in files or "referral_destinations.csv" in files
+        else [
+        "",
+        "This bundle contains no Medicare referral or eligibility data — none",
+        "has been imported. Run `mrfx medicare` to add it, or use the Order &",
+        "Referring Tracker for that side.",
+    ])) + "\n"
     return files
