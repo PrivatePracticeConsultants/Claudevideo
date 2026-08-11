@@ -1354,6 +1354,90 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return FileResponse(out, filename=f"mrfx_org_{safe or 'practice'}_{stamp}.zip",
                             media_type="application/zip")
 
+    # -- Medicare layers (eligibility + referral structure) ----------------------------
+
+    @app.get("/api/medicare/status")
+    def api_medicare_status():
+        """What Medicare data has been imported (`mrfx medicare`) — the
+        dashboard's Medicare tab decides between data and instructions on this."""
+        from .medicare import medicare_status
+        return medicare_status(store)
+
+    @app.post("/api/medicare/eligibility")
+    def api_medicare_eligibility(body: dict = Body(...)):
+        """Batch Order & Referring check: any pasted text in, one row per
+        10-digit number found. Absence from the roster is a real answer, not an
+        error — expected for therapists/orgs, a denial risk for referrers."""
+        from .medicare import npi_eligibility
+        npis = list(dict.fromkeys(re.findall(r"\b\d{10}\b", str(body.get("text", "")))))
+        if not npis:
+            raise HTTPException(422, "no 10-digit NPIs found in the pasted text")
+        if len(npis) > 2000:
+            raise HTTPException(422, f"{len(npis):,} NPIs is too many for one "
+                                "check — paste up to 2,000 at a time")
+        rows = npi_eligibility(store, npis)
+        if not rows:
+            raise HTTPException(422, "no Order & Referring roster is loaded — "
+                                "import one first (mrfx medicare --eligibility …)")
+        return {"rows": rows, "checked": len(npis),
+                "on_list": sum(1 for r in rows if r["on_list"])}
+
+    @app.post("/api/medicare/org")
+    def api_medicare_org(body: dict = Body(...)):
+        """One practice's Medicare view: its NPIs' eligibility, plus who shares
+        patients into it and where it shares onward — each referral row carrying
+        whether that provider is still Part B order/refer-eligible."""
+        from .medicare import (MedicareImportError, medicare_status,
+                               npi_eligibility, org_referrals, taxonomy_label)
+        from .benchmark import resolve_subject_tins
+        subject = str(body.get("subject", "")).strip()
+        if not subject:
+            raise HTTPException(422, "pick a subject practice first")
+        year = str(body.get("year") or "").strip() or None
+        limit = min(max(int(body.get("limit") or 100), 1), 500)
+        # resolve_subject_tins never returns empty (a raw id falls through as
+        # itself), so "did we match a practice" is decided by whether any rate
+        # rows carry NPIs for it — the NPI is the join this whole tab runs on.
+        tins = resolve_subject_tins(store, subject)
+        with store.connect() as con:
+            npis = [r[0] for r in con.execute(
+                "SELECT DISTINCT npi FROM rates WHERE tin_value IN "
+                "(SELECT unnest(?::VARCHAR[])) AND npi IS NOT NULL ORDER BY npi",
+                [tins]).fetchall()]
+            name = (con.execute(
+                "SELECT any_value(display_name) FROM tin_directory WHERE tin_value "
+                "IN (SELECT unnest(?::VARCHAR[]))", [tins]).fetchone() or [None])[0]
+        if not npis:
+            raise HTTPException(
+                422, f"no practice with NPIs matched '{subject}'. The Medicare "
+                "layers join on NPI, and no rate rows carry NPIs for that "
+                "subject — check the spelling, or pick it from the suggestions.")
+
+        def with_eligibility(ref):
+            by = {e["npi"]: e for e in npi_eligibility(
+                store, [r["npi"] for r in ref["rows"]])}
+            for r in ref["rows"]:
+                e = by.get(r["npi"]) or {}
+                r["on_orf"] = bool(e.get("on_list"))
+                r["partb"] = e.get("partb")
+                r["specialty"] = taxonomy_label(r.get("taxonomy"))
+            return ref
+
+        try:
+            refs_in = with_eligibility(org_referrals(store, npis, "in", limit, year))
+            refs_out = with_eligibility(org_referrals(store, npis, "out", limit, year))
+        except MedicareImportError as e:
+            raise HTTPException(422, str(e))
+        return {
+            "display_name": name or subject,
+            "tins": [mask_tin(t) for t in tins],
+            "npis": npis,
+            "eligibility": npi_eligibility(store, npis),
+            "referrals_in": refs_in,
+            "referrals_out": refs_out,
+            "status": medicare_status(store),
+        }
+
     def _outreach_parts(request: Request):
         from .outreach import build_outreach_rows, outreach_csv
 

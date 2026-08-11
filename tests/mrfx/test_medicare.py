@@ -125,6 +125,66 @@ def test_vintages_are_never_blended(store, tmp_path):
     assert {d["year"] for d in st["referrals"]} == {"2015", "2022"}
 
 
+def test_medicare_api_and_dashboard_tab(cfg, store, tmp_path):
+    """The dashboard tab's three endpoints: status, one-practice lookup (with
+    eligibility joined onto every referral row), and the batch NPI check."""
+    from fastapi.testclient import TestClient
+    from mrfx.api import create_app
+
+    _seed_rates(store)
+    client = TestClient(create_app(cfg, store))
+
+    # Nothing imported: status says so, the practice lookup still answers with
+    # its NPIs (the UI shows import instructions), and the batch check is a
+    # clear refusal rather than an empty table.
+    assert client.get("/api/medicare/status").json() == {
+        "eligibility": None, "referrals": []}
+    d = client.post("/api/medicare/org", json={"subject": "431234567"}).json()
+    assert set(d["npis"]) == set(MINE)
+    assert d["eligibility"] == [] and d["referrals_in"]["rows"] == []
+    r = client.post("/api/medicare/eligibility", json={"text": MINE[0]})
+    assert r.status_code == 422 and "no Order & Referring roster" in r.json()["detail"]
+
+    import_orf_roster(store, _orf(tmp_path))
+    hop = tmp_path / "docgraph_2022.csv"
+    hop.write_text("from_npi,to_npi,patient_count,transaction_count,"
+                   "average_day_wait,std_day_wait\n"
+                   + "".join(f"{d},{MINE[0]},{70 + i},{500 + i},12.5,3.1\n"
+                             for i, d in enumerate(DOCS)))
+    import_shared_patients(store, hop)
+
+    st = client.get("/api/medicare/status").json()
+    assert st["eligibility"]["providers"] == len(DOCS)
+    assert st["referrals"] == [
+        {"label": "DocGraph Hop Teaming", "year": "2022", "pairs": len(DOCS)}]
+
+    d = client.post("/api/medicare/org", json={"subject": "431234567"}).json()
+    rows = d["referrals_in"]["rows"]
+    assert [x["npi"] for x in rows] == [DOCS[2], DOCS[1], DOCS[0]]  # by patients desc
+    # the payoff on one row: volume + current Part B eligibility + a readable specialty
+    assert all(x["on_orf"] and x["partb"] for x in rows)
+    assert rows[0]["specialty"] == "Orthopedic surgery"           # 207X00000X
+    assert d["referrals_in"]["data_year"] == "2022"
+    # the practice's own NPIs read as not-on-list (expected for therapists/orgs)
+    assert all(e["on_list"] is False for e in d["eligibility"])
+
+    # an unloaded year and an unknown practice are refusals, not empty screens
+    r = client.post("/api/medicare/org", json={"subject": "431234567", "year": "1999"})
+    assert r.status_code == 422 and "no referral data loaded for 1999" in r.json()["detail"]
+    r = client.post("/api/medicare/org", json={"subject": "No Such Clinic LLC"})
+    assert r.status_code == 422 and "no practice with NPIs" in r.json()["detail"]
+
+    # batch check: NPIs are pulled out of any pasted text, deduplicated
+    r = client.post("/api/medicare/eligibility",
+                    json={"text": f"call {DOCS[0]} and {MINE[0]}; also {DOCS[0]} again"})
+    d = r.json()
+    assert d["checked"] == 2 and d["on_list"] == 1
+    by = {x["npi"]: x for x in d["rows"]}
+    assert by[DOCS[0]]["on_list"] is True and by[MINE[0]]["on_list"] is False
+    r = client.post("/api/medicare/eligibility", json={"text": "no npis here"})
+    assert r.status_code == 422
+
+
 def test_bundle_gains_the_medicare_layers_and_says_so(cfg, store, tmp_path):
     """With the layers imported the bundle must carry them AND stop claiming it
     contains no eligibility/referral data — that disclaimer is true only while

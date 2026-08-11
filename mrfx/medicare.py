@@ -316,6 +316,42 @@ def org_referrals(store: Store, npis: list[str], direction: str = "in",
             "caveat": REFERRAL_CAVEAT}
 
 
+# Compact NUCC prefix -> readable family, for the dashboard's referral tables.
+# Deliberately coarse: the point is "orthopedic surgeon vs lab vs hospital",
+# which is what the shared-patient caveat says to interpret by. Unknown codes
+# fall back to the raw code — never a guess.
+_TAXONOMY_FAMILIES = [
+    ("2251", "Physical therapist"), ("2252", "PT assistant"),
+    ("225X", "Occupational therapist"), ("224Z", "OT assistant"),
+    ("235Z", "Speech-language pathologist"), ("231H", "Audiologist"),
+    ("261QP2000", "PT clinic"), ("261QR04", "Rehab clinic"),
+    ("261QR08", "Radiology center"), ("261QU", "Urgent care"),
+    ("261QM13", "Multi-specialty clinic"), ("261Q", "Clinic/center"),
+    ("207X", "Orthopedic surgery"), ("2081", "Physiatry (PM&R)"),
+    ("207Q", "Family medicine"), ("207R", "Internal medicine"),
+    ("207T", "Neurosurgery"), ("2084", "Neurology/psychiatry"),
+    ("207ZP", "Pathology"), ("2085", "Radiology"), ("2086", "Surgery"),
+    ("207", "Physician"), ("208", "Physician"),
+    ("363L", "Nurse practitioner"), ("363A", "Physician assistant"),
+    ("111N", "Chiropractor"), ("213E", "Podiatrist"),
+    ("291U", "Clinical laboratory"), ("29", "Laboratory"),
+    ("282N", "General acute hospital"), ("28", "Hospital"),
+    ("314000", "Skilled nursing facility"), ("31", "Nursing/custodial facility"),
+    ("251E", "Home health agency"), ("25", "Agency"),
+    ("332B", "DME supplier"), ("33", "Supplier"),
+]
+
+
+def taxonomy_label(code: str | None) -> str:
+    """Readable family for an NPPES taxonomy code; the raw code if unknown."""
+    if not code:
+        return ""
+    for prefix, label in _TAXONOMY_FAMILIES:
+        if code.startswith(prefix):
+            return label
+    return code
+
+
 REFERRAL_CAVEAT = (
     "Shared-patient data is NOT a referral record. A pair means two providers "
     "saw the same Medicare patient in sequence — labs, imaging and hospitals "

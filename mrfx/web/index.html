@@ -20,6 +20,7 @@
     <button data-view="benchmark">Benchmark</button>
     <button data-view="negotiate">Negotiate</button>
     <button data-view="ratecard">Rate card</button>
+    <button data-view="medicare">Medicare</button>
     <button data-view="leads">Leads</button>
     <button data-view="roster">Payer roster</button>
     <button data-view="changes">Changes</button>
@@ -436,6 +437,46 @@
         <div id="rc-out" class="empty"><h3>Pick a practice</h3>
           See every code it has a negotiated rate for, by payer, and which payers pay best.</div>
       </div>
+    </div>
+  </section>
+
+  <!-- ======================= MEDICARE (eligibility + referral structure) ======================= -->
+  <section id="view-medicare" class="view">
+    <div class="view-head">
+      <h2>Medicare: referrals &amp; eligibility</h2>
+      <span class="spacer"></span>
+      <span id="md-status" class="muted">checking what's loaded…</span>
+    </div>
+    <div id="md-nodata" class="note-banner" style="display:none"></div>
+    <div class="filters" style="align-items:flex-end">
+      <div class="field grow" style="max-width:420px">
+        <label>Practice (entity / TIN / NPI)</label>
+        <input type="text" id="md-subject" list="md-subjects" placeholder="entity name, TIN, or NPI…">
+        <datalist id="md-subjects"></datalist>
+      </div>
+      <div class="field">
+        <label>Referral dataset <span class="muted" style="text-transform:none" title="One dataset at a time — releases cover different periods with different methods, so they are never blended.">(never blended)</span></label>
+        <select id="md-year"><option value="">newest loaded</option></select>
+      </div>
+      <button class="btn primary" id="md-run">Look up</button>
+      <span class="muted" style="max-width:520px">Who shares Medicare patients with this practice — with each provider's
+        current Part&nbsp;B order/refer eligibility on the same row. The full package for one practice
+        (rates + these layers) is the Rate-card tab's <b>Tracker bundle</b>.</span>
+    </div>
+    <div id="md-out" class="empty"><h3>Pick a practice</h3>
+      Its providers' Order &amp; Referring status, who shares patients into it, and where its
+      patients go next — from the CMS datasets imported with <code class="inline">mrfx medicare</code>.</div>
+
+    <div class="validate-card">
+      <h3>Batch NPI eligibility check</h3>
+      <p class="muted">Paste anything containing NPIs — a referral list, a roster export, an email —
+        and every 10-digit number in it is checked against the loaded Order &amp; Referring snapshot.</p>
+      <textarea id="md-npis" rows="3" placeholder="1234567893, 1417594896 …" style="width:100%;box-sizing:border-box"></textarea>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:8px">
+        <button class="btn" id="md-check">Check eligibility</button>
+        <span id="md-check-msg" class="muted"></span>
+      </div>
+      <div id="md-check-out" style="margin-top:10px"></div>
     </div>
   </section>
 

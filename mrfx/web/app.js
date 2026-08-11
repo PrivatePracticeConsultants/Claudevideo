@@ -128,6 +128,7 @@ function switchView(view) {
   if (view === "benchmark") initBenchmark();
   if (view === "negotiate") initNegotiate();
   if (view === "ratecard") initRatecard();
+  if (view === "medicare") initMedicare();
   if (view === "leads") initLeads();
   if (view === "changes") initChanges();
   // re-entry: keep whatever state was picked (else the cards blank out while the
@@ -1746,6 +1747,150 @@ async function downloadRatecardCsv() {
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 60000);
   } catch (e) { alert("CSV export failed: " + e.message); }
+}
+
+/* =======================================================================
+   MEDICARE — the two layers MRFs cannot supply (imported via `mrfx medicare`):
+   Order & Referring eligibility, and shared-patient referral structure.
+   ======================================================================= */
+
+let medicareInit = false;
+async function initMedicare() {
+  refreshMedicareStatus();
+  if (medicareInit) { refreshSubjectPickers("#md-subjects", []); return; }
+  medicareInit = true;
+  const subjects = await api("/api/benchmark/subjects").catch(() => null);
+  if (subjects) $("#md-subjects").innerHTML = subjectOptionsHtml(subjects);
+  wireSubjectSearch("#md-subject", "#md-subjects");
+  $("#md-run").addEventListener("click", runMedicareOrg);
+  $("#md-subject").addEventListener("keydown", (e) => { if (e.key === "Enter") runMedicareOrg(); });
+  $("#md-check").addEventListener("click", runMedicareBatchCheck);
+}
+
+async function refreshMedicareStatus() {
+  let st;
+  try { st = await api("/api/medicare/status"); }
+  catch { $("#md-status").textContent = "status unavailable"; return; }
+  const parts = [];
+  if (st.eligibility) parts.push(`Order &amp; Referring: <b>${fmtInt(st.eligibility.providers)}</b> providers (release ${esc(st.eligibility.release || "?")})`);
+  (st.referrals || []).forEach((r) => parts.push(`${esc(r.label)} ${esc(r.year)}: <b>${fmtInt(r.pairs)}</b> pairs`));
+  $("#md-status").innerHTML = parts.join(" · ") || "nothing imported yet";
+  // dataset picker: one option per loaded referral release, keep the pick across refreshes
+  const yearSel = $("#md-year");
+  const keep = yearSel.value;
+  yearSel.innerHTML = `<option value="">newest loaded</option>` +
+    (st.referrals || []).map((r) => `<option value="${esc(r.year)}">${esc(r.label)} ${esc(r.year)}</option>`).join("");
+  if ([...yearSel.options].some((o) => o.value === keep)) yearSel.value = keep;
+  const nod = $("#md-nodata");
+  if (!st.eligibility && !(st.referrals || []).length) {
+    nod.style.display = "";
+    nod.innerHTML = `<b>Nothing imported yet.</b> This tab reads two public CMS datasets that
+      machine-readable files cannot supply. Import the copies the Order &amp; Referring Tracker
+      already downloaded — nothing is re-downloaded:<br>
+      · Eligibility (who may order/refer for Medicare):
+      <code class="inline">mrfx medicare --eligibility "%LOCALAPPDATA%\\OrderReferringTracker\\snapshots\\OrderReferring_&lt;date&gt;.csv"</code><br>
+      · Referral structure (who shares patients with whom):
+      <code class="inline">mrfx medicare --referrals &lt;shared-patient or Hop Teaming .csv&gt;</code><br>
+      Run these in the same window you run <code class="inline">mrfx serve</code> from, then refresh this tab.`;
+  } else nod.style.display = "none";
+}
+
+async function runMedicareOrg() {
+  const out = $("#md-out");
+  const subject = $("#md-subject").value.trim();
+  if (!subject) { out.innerHTML = `<div class="empty"><h3>Pick a practice</h3>Type an entity name, TIN, or NPI above.</div>`; return; }
+  out.classList.remove("empty");
+  out.innerHTML = `<div class="loading">Looking up Medicare layers</div>`;
+  let d;
+  try { d = await postJson("/api/medicare/org", { subject, year: $("#md-year").value || null }); }
+  catch (e) { out.innerHTML = `<div class="empty"><h3>Could not look up</h3>${esc(e.message)}</div>`; return; }
+  renderMedicareOrg(out, d);
+}
+
+// Y/N/– cell for an eligibility flag: null = the NPI isn't on the roster at all
+const flagCell = (v) => v == null ? `<td class="num">–</td>`
+  : v ? `<td class="num"><span class="ok-tag">Y</span></td>`
+      : `<td class="num"><span class="warn-text">N</span></td>`;
+
+function medicareEligTable(rows) {
+  const body = rows.map((e) => `<tr>
+      <td>${esc(e.npi)}<div class="sub">${esc(e.name || "")}</div></td>
+      <td>${e.on_list ? '<span class="ok-tag">on list</span>' : '<span class="muted">not on list</span>'}</td>
+      ${flagCell(e.partb)}${flagCell(e.dme)}${flagCell(e.hha)}${flagCell(e.pmd)}${flagCell(e.hospice)}
+    </tr>`).join("");
+  return `<div class="tablewrap"><table><thead><tr>
+      <th>NPI</th><th>Order &amp; Referring</th><th class="num">Part B</th>
+      <th class="num">DME</th><th class="num">HHA</th><th class="num">PMD</th><th class="num">Hospice</th>
+    </tr></thead><tbody>${body}</tbody></table></div>`;
+}
+
+function medicareRefTable(ref, heading, emptyMsg) {
+  const h = `<h3 style="margin-top:18px">${heading}${ref.dataset
+    ? ` <span class="muted" style="font-weight:400">— ${esc(ref.dataset)} ${esc(ref.data_year)}</span>` : ""}</h3>`;
+  if (!ref.rows.length) return `${h}<div class="muted">${emptyMsg}</div>`;
+  const body = ref.rows.map((r, i) => `<tr>
+      <td class="num">${i + 1}</td>
+      <td>${esc(r.name || "(name not identified)")}<div class="sub">${esc(r.npi)}</div></td>
+      <td>${esc(r.specialty || "")}</td>
+      <td class="num">${fmtInt(r.patients)}</td>
+      <td class="num">${fmtInt(r.transactions)}</td>
+      <td class="num">${r.avg_day_wait == null ? "–" : r.avg_day_wait}</td>
+      <td>${r.on_orf ? (r.partb ? '<span class="ok-tag">eligible</span>'
+                                : '<span class="warn-text" title="on the roster but Part B says N — claims ordered/referred by this provider are at denial risk">NOT eligible</span>')
+                     : '<span class="muted" title="not on the Order & Referring roster — normal for facilities, labs and organizations; a denial risk only for a physician who refers">not on list</span>'}</td>
+    </tr>`).join("");
+  return `${h}<div class="tablewrap"><table><thead><tr>
+      <th>#</th><th>Provider</th><th>Specialty</th><th class="num">Shared patients</th>
+      <th class="num">Transactions</th><th class="num" title="average days between their visit and this practice's — Hop Teaming only">Avg wait (d)</th>
+      <th>Part B order/refer</th>
+    </tr></thead><tbody>${body}</tbody></table></div>`;
+}
+
+function renderMedicareOrg(out, d) {
+  const st = d.status || {};
+  const hasElig = !!st.eligibility;
+  const hasRefs = (st.referrals || []).length > 0;
+  const caveat = (d.referrals_in && d.referrals_in.caveat) || "";
+  const parts = [`<div class="rc-summary"><b>${esc(d.display_name)}</b> —
+      ${d.npis.length} NPI${d.npis.length === 1 ? "" : "s"} billing under ${d.tins.length}
+      tax ID${d.tins.length === 1 ? "" : "s"} in this store.</div>`];
+
+  parts.push(`<h3>This practice's providers — Order &amp; Referring status</h3>`);
+  if (!hasElig) {
+    parts.push(`<div class="muted">No Order &amp; Referring roster imported
+      (<code class="inline">mrfx medicare --eligibility …</code>).</div>`);
+  } else {
+    parts.push(medicareEligTable(d.eligibility));
+    parts.push(`<div class="muted" style="font-size:12px;margin-top:4px">Therapists and organizations
+      are <b>not on this roster by design</b> — "not on list" here is expected, not a finding.
+      The roster matters for the REFERRING physicians below.</div>`);
+  }
+
+  if (!hasRefs) {
+    parts.push(`<h3 style="margin-top:18px">Referral structure</h3>
+      <div class="muted">No shared-patient data imported
+      (<code class="inline">mrfx medicare --referrals …</code>).</div>`);
+  } else {
+    parts.push(medicareRefTable(d.referrals_in, "Who shares patients INTO this practice",
+      "No pairs found for this practice's NPIs in the selected dataset. CMS suppresses pairs under 11 patients, so a practice with a small Medicare book can legitimately show nothing."));
+    parts.push(medicareRefTable(d.referrals_out, "Where its patients go next",
+      "No outbound pairs found in the selected dataset."));
+    parts.push(`<div class="disclaimer" style="margin-top:14px">${esc(caveat)}</div>`);
+  }
+  out.innerHTML = parts.join("");
+}
+
+async function runMedicareBatchCheck() {
+  const outEl = $("#md-check-out");
+  const msg = $("#md-check-msg");
+  msg.textContent = "checking…";
+  let d;
+  try { d = await postJson("/api/medicare/eligibility", { text: $("#md-npis").value }); }
+  catch (e) { msg.textContent = ""; outEl.innerHTML = `<div class="muted">${esc(e.message)}</div>`; return; }
+  msg.textContent = "";
+  outEl.innerHTML = `<div class="muted" style="margin-bottom:6px"><b>${fmtInt(d.on_list)}</b> of
+    <b>${fmtInt(d.checked)}</b> NPIs are on the Order &amp; Referring list.</div>` +
+    medicareEligTable(d.rows);
 }
 
 /* =======================================================================
