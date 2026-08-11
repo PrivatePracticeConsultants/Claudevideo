@@ -2218,3 +2218,87 @@ def test_latest_window_is_narrowed_without_changing_which_vintage_wins(cfg, stor
         # tin) — reusing the subject's would have returned zero peers
         assert v["n_peers"] == len(peers), (code, payer, v["n_peers"])
         assert v["market_median"] is not None
+
+
+def _seed_org(store, tin, npis, payers=("Aetna", "BCBS"), codes=("97110", "92507")):
+    rows = []
+    for k, npi in enumerate(npis):
+        for p in payers:
+            for c in codes:
+                rows.append(dict(
+                    payer=p, tin_value=tin, tin_type="ein", npi=npi, source_file="o.json",
+                    billing_code=c, billing_code_type="CPT", discipline="PT", is_timed=True,
+                    billing_class="professional", negotiated_rate=50.0 + k,
+                    negotiated_type="negotiated", is_dollar_rate=True,
+                    billing_code_modifier=[], service_code=["11"], file_month="2026-06",
+                    last_updated_on="2026-06-01", expiration_date=None,
+                    schema_version="2.0.0", tin_is_really_npi=False, state=None))
+    for t in range(6):                      # peers, so peer stats are non-thin
+        for p in payers:
+            for c in codes:
+                rows.append(dict(
+                    payer=p, tin_value="44%07d" % t, tin_type="ein", npi="2%09d" % t,
+                    source_file="o.json", billing_code=c, billing_code_type="CPT",
+                    discipline="PT", is_timed=True, billing_class="professional",
+                    negotiated_rate=60.0 + t, negotiated_type="negotiated",
+                    is_dollar_rate=True, billing_code_modifier=[], service_code=["11"],
+                    file_month="2026-06", last_updated_on="2026-06-01",
+                    expiration_date=None, schema_version="2.0.0",
+                    tin_is_really_npi=False, state=None))
+    with store.rates_part_writer("o.json") as w:
+        w.write_batch(rows)
+    store.save_npis_bulk([dict(npi=n, org_name="Gateway Therapy", entity_type="NPI-2",
+                               taxonomy_code="261QP2000X", city="St. Louis", state="MO",
+                               address="1 Main St", zip="63101", phone="3145550142")
+                          for n in npis])
+    store.rebuild_rollups()
+
+
+def test_org_bundle_bridges_to_the_order_and_referring_tracker(cfg, store):
+    """The tracker knows the referral/eligibility side and is NPI-native; this
+    app knows the contract side and is TIN-grained. The bundle has to carry the
+    join (a paste-ready NPI list) plus the rates the tracker cannot know."""
+    import io
+    import zipfile
+
+    tin, npis = "431234567", ["1417594896", "1234567893", "1093817465"]
+    _seed_org(store, tin, npis)
+    client = TestClient(create_app(cfg, store))
+    r = client.post("/api/report/org-bundle.zip",
+                    json={"subject": tin, "market": {"month": "2026-06"}})
+    assert r.status_code == 200
+    assert "Gateway_Therapy" in r.headers["content-disposition"]
+    z = zipfile.ZipFile(io.BytesIO(r.content))
+    assert set(z.namelist()) == {"npis.txt", "profile.txt", "rates.csv",
+                                 "payers.csv", "methodology.txt"}
+
+    # THE BRIDGE: bare NPIs, one per line, no header. The tracker's Batch NPI
+    # check scans any text for 10-digit numbers, so a header would be picked up
+    # as data — this file must contain nothing but the NPIs.
+    lines = [x for x in z.read("npis.txt").decode().splitlines() if x.strip()]
+    assert sorted(lines) == sorted(npis)
+    assert all(len(x) == 10 and x.isdigit() for x in lines)
+
+    rates = z.read("rates.csv").decode()
+    assert "pct_of_medicare" in rates and "payer_peer_median" in rates
+    assert "92507" in rates                      # SLP code carried through
+    payers = z.read("payers.csv").decode()
+    assert "median_pct_of_best" in payers and "ranked_on" in payers
+
+    # honesty: the bundle must say what it is NOT, since it will sit next to
+    # referral data and the two are easy to conflate
+    prof, meth = z.read("profile.txt").decode(), z.read("methodology.txt").decode()
+    assert "Provider lookup" in prof and "Batch NPI check" in prof
+    assert "does not contain" in prof.lower()
+    assert "NEGOTIATED RATES" in meth and "no Medicare referral" in meth
+
+
+def test_org_bundle_refuses_a_practice_with_no_rates(cfg, store):
+    """Same rule as the rate card: never emit an official-looking, empty
+    deliverable for a practice that has nothing published."""
+    _seed_org(store, "431234567", ["1417594896"])
+    client = TestClient(create_app(cfg, store))
+    r = client.post("/api/report/org-bundle.zip",
+                    json={"subject": "NO_SUCH_PRACTICE", "market": {"month": "2026-06"}})
+    assert r.status_code == 422
+    assert "no published rates for this practice" in r.json()["detail"]

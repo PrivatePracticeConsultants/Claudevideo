@@ -1204,6 +1204,7 @@ def test_enrichment_loop_treats_memory_contention_as_a_pause_not_a_crash(
     situation."""
     import logging
     import threading
+    import time
 
     import duckdb
 
@@ -1225,7 +1226,12 @@ def test_enrichment_loop_treats_memory_contention_as_a_pause_not_a_crash(
         with caplog.at_level(logging.INFO):
             caplog.clear()
             E.start_persistent_enrichment(cfg, store, stop)
-            stop.wait(3.0)
+            # POLL for the log line instead of sleeping a fixed interval: this
+            # runs a real background thread, and a fixed wait loses the race
+            # under full-suite load (seen once in CI, passing in isolation).
+            deadline = time.monotonic() + 15.0
+            while time.monotonic() < deadline and "paused" not in caplog.text:
+                time.sleep(0.05)
         text = caplog.text
         assert "paused" in text, text                 # calm, explanatory
         assert "Traceback" not in text, text          # not dressed up as a crash

@@ -35,7 +35,9 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt && .venv/bin/
 Other commands: `mrfx add <url>… [--file links.txt] [--known] [--retry-failed]`,
 `mrfx preflight <path>`, `mrfx ingest [path] [--force]`, `mrfx status`,
 `mrfx export out.csv [--cpt … --payer … --grain tin]`, `mrfx outreach`,
-`mrfx forget <filename>`, `mrfx speedtest <url>`, `mrfx reset --confirm`.
+`mrfx forget <filename>`, `mrfx speedtest <url>`,
+`mrfx orgreport <subject>` (one-practice bundle for the Medicare Order &
+Referring Tracker), `mrfx reset --confirm`.
 Config: `config/mrfx.yaml`.
 
 Playwright/Chromium for JS portals is optional and auto-downloaded on first use

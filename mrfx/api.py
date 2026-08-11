@@ -13,6 +13,7 @@ import io
 import json
 import logging
 import os
+import re
 import tempfile
 import threading
 import time
@@ -1329,6 +1330,29 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         csv_path.unlink(missing_ok=True)
         background.add_task(out.unlink, missing_ok=True)
         return FileResponse(out, filename=f"mrfx_{view}_{stamp}.zip", media_type="application/zip")
+
+    @app.post("/api/report/org-bundle.zip")
+    def org_bundle(background: BackgroundTasks, body: dict = Body(...)):
+        """One organization, packaged to be combined with the Medicare Order &
+        Referring Tracker: a paste-ready NPI list (the tracker is NPI-native,
+        this app is TIN-grained — the NPI is the join) plus the rate profile
+        the tracker has no way to know."""
+        from .orgprofile import compute_org_profile, org_bundle_files
+        try:
+            profile = compute_org_profile(
+                store, str(body.get("subject", "")), body.get("market") or {})
+            files = org_bundle_files(store, profile)
+        except (BenchmarkError, ValueError, TypeError) as e:
+            raise HTTPException(422, str(e))
+        safe = re.sub(r"[^A-Za-z0-9]+", "_", profile["display_name"]).strip("_")[:48]
+        stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d")
+        out = _mktemp(".zip")
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+            for fname, text in files.items():
+                z.writestr(fname, text)
+        background.add_task(out.unlink, missing_ok=True)
+        return FileResponse(out, filename=f"mrfx_org_{safe or 'practice'}_{stamp}.zip",
+                            media_type="application/zip")
 
     def _outreach_parts(request: Request):
         from .outreach import build_outreach_rows, outreach_csv

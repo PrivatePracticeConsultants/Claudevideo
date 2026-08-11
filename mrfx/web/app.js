@@ -1588,6 +1588,7 @@ async function initRatecard() {
   $("#rc-report").addEventListener("click", () =>
     openReportWith("/api/report/ratecard", state.lastRatecardPayload));
   $("#rc-csv").addEventListener("click", downloadRatecardCsv);
+  $("#rc-bundle").addEventListener("click", downloadTrackerBundle);
 }
 
 async function refreshRcMpfs() {
@@ -1621,6 +1622,7 @@ async function buildRatecard() {
   state.lastRatecardPayload = null;
   $("#rc-report").disabled = true;
   $("#rc-csv").disabled = true;
+  $("#rc-bundle").disabled = true;
   let payload;
   try { payload = ratecardPayload(); }
   catch (e) { out.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
@@ -1636,6 +1638,7 @@ async function buildRatecard() {
   const hasCard = ((data.fee_schedule || {}).codes || []).length > 0;
   $("#rc-report").disabled = !hasCard;
   $("#rc-csv").disabled = !hasCard;
+  $("#rc-bundle").disabled = !hasCard;
   renderRatecard(out, data.fee_schedule, data.scorecard);
 }
 
@@ -1693,6 +1696,40 @@ function renderRatecard(out, fs, sc) {
     <div class="tablewrap"><table class="rc-table"><thead><tr>${scHead}</tr></thead><tbody>${scRows}</tbody></table></div>
     <h3 style="margin-top:18px">Fee schedule</h3>
     <div class="tablewrap"><table class="rc-table"><thead><tr>${feeHead}</tr></thead><tbody>${feeRows}</tbody></table></div>`;
+}
+
+// The Order & Referring Tracker is NPI-native and knows the referral side;
+// this app is TIN-grained and knows the contract side. The bundle leads with a
+// paste-ready NPI list so the two can be joined on one practice.
+async function downloadTrackerBundle() {
+  if (!state.lastRatecardPayload) return;
+  const btn = $("#rc-bundle");
+  const label = btn.textContent;
+  btn.disabled = true; btn.textContent = "Building…";
+  try {
+    const r = await fetch("/api/report/org-bundle.zip", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(state.lastRatecardPayload),
+    });
+    if (!r.ok) {
+      const raw = await r.text();
+      let msg = raw;
+      try { msg = JSON.parse(raw).detail || raw; } catch (_) { /* not JSON */ }
+      alert("Couldn't build the bundle.\n\n" + msg);
+      return;
+    }
+    const cd = r.headers.get("Content-Disposition") || "";
+    const m = cd.match(/filename="?([^";]+)"?/);
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(await r.blob());
+    a.download = m ? m[1] : "mrfx_org_bundle.zip";
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+  } catch (e) {
+    alert("Couldn't build the bundle: " + e.message);
+  } finally {
+    btn.disabled = false; btn.textContent = label;
+  }
 }
 
 async function downloadRatecardCsv() {

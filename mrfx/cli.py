@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import logging
 import os
 import sys
@@ -721,6 +722,40 @@ def cmd_enrich(cfg: MrfxConfig, args) -> int:
     return 0
 
 
+def cmd_orgreport(cfg: MrfxConfig, args) -> int:
+    """Bundle ONE organization for use alongside the Medicare Order & Referring
+    Tracker. The tracker knows the referral/eligibility side and is NPI-native;
+    this app knows the contract side and is TIN-grained. The bundle leads with a
+    paste-ready NPI list so the two can be joined."""
+    import zipfile
+
+    from .orgprofile import compute_org_profile, org_bundle_files
+
+    store = Store(cfg.store_dir, cfg.duckdb_memory_gb, temp_dir=cfg.duckdb_temp_dir)
+    market: dict = {"month": args.month}
+    if args.state:
+        market["state"] = args.state
+    try:
+        profile = compute_org_profile(store, args.subject, market)
+        files = org_bundle_files(store, profile)
+    except Exception as e:  # noqa: BLE001 — a lookup miss is a message, not a trace
+        print(f"could not build the bundle: {e}")
+        return 1
+    out = Path(args.out) if args.out else Path(
+        "mrfx_org_%s.zip" % re.sub(r"[^A-Za-z0-9]+", "_",
+                                   profile["display_name"]).strip("_")[:48])
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+        for fname, text in files.items():
+            z.writestr(fname, text)
+    print(f"wrote {out}")
+    print(f"  organization : {profile['display_name']}")
+    print(f"  NPIs         : {len(profile['npis'])}  (npis.txt — paste into the "
+          "tracker's Provider lookup)")
+    print(f"  payers       : {len(profile['fee_schedule']['payers'])}")
+    print(f"  codes priced : {len(profile['fee_schedule']['codes'])}")
+    return 0
+
+
 def cmd_speedtest(cfg: MrfxConfig, args) -> int:
     """Measure a real MRF link on THIS machine: one connection vs several byte
     ranges, over an equal-sized but DIFFERENT slice each time, then recommend a
@@ -958,6 +993,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--bulk", dest="bulk_file", metavar="PATH",
                    help="NPPES full-file .zip (or unzipped .csv) — resolves all names in one local pass")
     p = sub.add_parser(
+        "orgreport",
+        help="bundle ONE practice (NPI list + rates) to pair with the Order & Referring Tracker")
+    p.add_argument("subject", help="practice name, tax ID, or NPI")
+    p.add_argument("--month", default="latest", help="as-of month (default: latest)")
+    p.add_argument("--state", default=None, help="scope the PEER comparison to one state")
+    p.add_argument("--out", default=None, help="output .zip path")
+
+    p = sub.add_parser(
         "speedtest",
         help="measure one MRF link: is it the payer's server throttling, or your connection?")
     p.add_argument("url", help="a direct MRF file URL (not an index/TOC page)")
@@ -1015,6 +1058,7 @@ def main(argv: list[str] | None = None) -> int:
         "outreach": cmd_outreach,
         "forget": cmd_forget,
         "enrich": cmd_enrich,
+        "orgreport": cmd_orgreport,
         "speedtest": cmd_speedtest,
         "reset": cmd_reset,
     }[args.cmd]
