@@ -64,6 +64,39 @@ class MedicareImportError(Exception):
     """A file that isn't what it claims to be — refuse it, don't guess."""
 
 
+def _replace_with_retry(src: Path, dst: Path, attempts: int = 5) -> None:
+    """os.replace, but tolerant of Windows file locking: a dashboard poll can
+    have the destination parquet open for a query at the exact moment the
+    import promotes its replacement, and Windows refuses to replace an open
+    file (POSIX doesn't care). The reader closes within milliseconds — retry
+    briefly instead of failing a multi-minute import at its very last step."""
+    import time as _time
+
+    for i in range(attempts):
+        try:
+            src.replace(dst)
+            return
+        except PermissionError:
+            if i == attempts - 1:
+                raise
+            _time.sleep(0.2 * (i + 1))
+
+
+def _unlink_with_retry(p: Path, attempts: int = 5) -> bool:
+    """unlink with the same Windows-lock tolerance; returns False if the file
+    stayed locked (callers treat that as cosmetic — a leftover file, not a
+    wrong answer)."""
+    import time as _time
+
+    for i in range(attempts):
+        try:
+            p.unlink(missing_ok=True)
+            return True
+        except PermissionError:
+            _time.sleep(0.2 * (i + 1))
+    return False
+
+
 def is_valid_npi(s: str) -> bool:
     """True when `s` is a structurally valid NPI: 10 digits, leading 1 or 2
     (the only prefixes NPPES issues), and a correct ISO-7812 Luhn check digit
@@ -293,6 +326,12 @@ def import_shared_patients(store: Store, path: str | Path,
     tmp = out.with_suffix(out.suffix + ".tmp")
     src, dst = ("column0", "column1") if fmt == FMT_CMS else ("from_npi", "to_npi")
     with store.write_lock, store.connect() as con:
+        # sweep stale *.tmp partials from imports killed mid-COPY — they never
+        # reach the view (the glob wants *.parquet) but they hold real disk
+        # (a Hop year's partial can be GBs) with nothing to ever reclaim them
+        for stale in out_dir.glob("*.parquet.tmp"):
+            if stale != tmp and _unlink_with_retry(stale):
+                log.info("referrals: removed stale partial %s", stale.name)
         # existence probe, not a count: a full DISTINCT over the rates view
         # exists only to answer "is there at least one NPI", and on a 300M-row
         # store that is many seconds of scan for a boolean
@@ -326,7 +365,7 @@ def import_shared_patients(store: Store, path: str | Path,
                 f"through ({e}). Previously imported referral data is untouched.") from e
         finally:
             con.execute("DROP TABLE IF EXISTS _store_npis")
-        tmp.replace(out)
+        _replace_with_retry(tmp, out)
         # Supersede the pre-interval file for this same format+year, if one is
         # left from an older build. Under that build every window of a year
         # collided into ONE window-less parquet — so that file IS a prior
@@ -334,9 +373,13 @@ def import_shared_patients(store: Store, path: str | Path,
         # data as two "vintages" in every picker.
         legacy = out_dir / f"{fmt}_{year}.parquet"
         if interval and legacy.exists():
-            legacy.unlink()
-            log.info("referrals: removed the legacy window-less %s "
-                     "(superseded by %s)", legacy.name, out.name)
+            if _unlink_with_retry(legacy):
+                log.info("referrals: removed the legacy window-less %s "
+                         "(superseded by %s)", legacy.name, out.name)
+            else:
+                log.warning("referrals: could not remove legacy %s (in use) — "
+                            "it will list alongside %s until the next import",
+                            legacy.name, out.name)
         _register_referral_view(con, store)
         n = con.execute("SELECT count(*) FROM referral_pairs WHERE dataset_id = ?",
                         [dataset_id]).fetchone()[0]

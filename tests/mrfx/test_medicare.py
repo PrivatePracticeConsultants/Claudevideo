@@ -482,6 +482,132 @@ def test_bundle_says_when_a_referral_list_is_truncated(cfg, store, tmp_path):
     assert "NOT a referral record" in src           # the caveat still travels
 
 
+def test_real_world_file_encodings_import_cleanly(store, tmp_path):
+    """Files that came through Windows: UTF-8 BOM, CRLF line endings, quoted
+    fields. All three at once must import with nothing dropped — these are
+    cosmetic encodings, not different data."""
+    _seed_rates(store)
+
+    orf = tmp_path / "OrderReferring_2026-08-01.csv"
+    body = ("NPI,LAST_NAME,FIRST_NAME,PARTB,DME,HHA,PMD,HOSPICE\r\n"
+            + "".join(f'"{d}","DOC{i}","ANNA","Y","N","N","N","N"\r\n'
+                      for i, d in enumerate(DOCS)))
+    orf.write_bytes(b"\xef\xbb\xbf" + body.encode())          # BOM + CRLF + quotes
+    r = import_orf_roster(store, orf)
+    assert r["providers"] == len(DOCS)
+    flags = {e["npi"]: e for e in npi_eligibility(store, DOCS)}
+    assert all(flags[d]["on_list"] and flags[d]["partb"] for d in DOCS)
+
+    hop = tmp_path / "hop_teaming_2022.csv"
+    hop_body = ("from_npi,to_npi,patient_count,transaction_count,"
+                "average_day_wait,std_day_wait\r\n"
+                + "".join(f'"{d}","{MINE[0]}",{70 + i},{500 + i},12.5,3.1\r\n'
+                          for i, d in enumerate(DOCS)))
+    hop.write_bytes(b"\xef\xbb\xbf" + hop_body.encode())
+    r2 = import_shared_patients(store, hop)
+    assert r2["pairs"] == len(DOCS), "BOM/CRLF/quoted pairs must all be kept"
+    assert {x["npi"] for x in org_referrals(store, MINE, "in")["rows"]} == set(DOCS)
+
+
+def test_garbage_files_are_refused_never_crash_never_import(store, tmp_path):
+    """Fuzz the two importers with byte garbage: every case must raise the
+    plain-language MedicareImportError — never a traceback class, never a
+    partial import."""
+    _seed_rates(store)
+    cases = [
+        b"",                                          # empty
+        b"\x00\x01\x02\xff" * 300,                    # binary junk
+        b"\xef\xbb\xbf\r\n\r\n",                      # BOM + blank lines only
+        "col_a,col_b\n1,2\n".encode(),                # wrong shape
+        ("NPI,LAST_NAME\n123,x\n").encode(),          # truncated header
+        b"PK\x03\x04not-actually-a-zip",              # zip magic, not a csv
+    ]
+    for i, blob in enumerate(cases):
+        f = tmp_path / f"garbage_{i}.csv"
+        f.write_bytes(blob)
+        with pytest.raises(MedicareImportError):
+            import_orf_roster(store, f)
+        with pytest.raises(MedicareImportError):
+            import_shared_patients(store, f)
+    st = medicare_status(store)
+    assert st["eligibility"] is None and st["referrals"] == [], \
+        "no garbage case may leave anything imported"
+
+
+def test_concurrent_requests_do_not_500(cfg, store, tmp_path):
+    """Actually run the mixed read/write load the dashboard produces — status
+    polls, org lookups, drawer glances, an import — from parallel threads.
+    This is the empirical check for the catalog write-write conflict class:
+    code reading says the read paths no longer write, so prove it."""
+    import threading
+
+    from fastapi.testclient import TestClient
+    from mrfx.api import create_app
+
+    _seed_rates(store)
+    import_orf_roster(store, _orf(tmp_path))
+    hop = tmp_path / "docgraph_2022.csv"
+    hop.write_text("from_npi,to_npi,patient_count,transaction_count,"
+                   "average_day_wait,std_day_wait\n"
+                   + "".join(f"{d},{MINE[0]},{70 + i},{500 + i},12.5,3.1\n"
+                             for i, d in enumerate(DOCS)))
+    import_shared_patients(store, hop)
+    client = TestClient(create_app(cfg, store), raise_server_exceptions=False)
+
+    failures: list[str] = []
+    barrier = threading.Barrier(8)
+
+    def worker(kind: str) -> None:
+        barrier.wait()   # maximal overlap
+        for _ in range(15):
+            if kind == "status":
+                r = client.get("/api/medicare/status")
+            elif kind == "org":
+                r = client.post("/api/medicare/org", json={"subject": "431234567"})
+            elif kind == "glance":
+                r = client.get("/api/entity/tin/431234567")
+            else:
+                r = client.post("/api/medicare/eligibility",
+                                json={"text": " ".join(DOCS)})
+            if r.status_code >= 500:
+                failures.append(f"{kind}: {r.status_code} {r.text[:120]}")
+
+    threads = [threading.Thread(target=worker, args=(k,))
+               for k in ("status", "org", "glance", "batch") * 2]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=120)
+    assert not failures, failures[:5]
+
+
+def test_kill_between_promote_and_register_is_recovered(store, tmp_path):
+    """Crash-resume (invariant 6) for the referral import: the parquet was
+    promoted but the process died before anything else. The view's glob is
+    evaluated per query, so the data must simply appear; and a stale .tmp
+    from a kill mid-COPY must be swept by the next import, not accrete."""
+    _seed_rates(store)
+    hop = tmp_path / "docgraph_2022.csv"
+    hop.write_text("from_npi,to_npi,patient_count,transaction_count,"
+                   "average_day_wait,std_day_wait\n"
+                   f"{DOCS[0]},{MINE[0]},70,500,12.5,3.1\n")
+    import_shared_patients(store, hop)
+
+    # simulate the kill artifacts: a promoted parquet appears via the glob
+    # (already covered by the import above) and a dead partial sits beside it
+    stale = store.dir / "referrals" / "hop-teaming_2019.parquet.tmp"
+    stale.write_bytes(b"partial garbage from a killed COPY")
+    assert org_referrals(store, MINE, "in")["rows"], "data must stay queryable"
+
+    cms = tmp_path / "pspp_2015_days180.txt"
+    cms.write_text(f"{DOCS[0]},{MINE[0]},300,40,3\n")
+    import_shared_patients(store, cms)
+    assert not stale.exists(), "the next import must sweep dead partials"
+    # and the garbage tmp never leaked into the view
+    assert {d["dataset_id"] for d in medicare_status(store)["referrals"]} == {
+        "hop-teaming_2022", "cms-shared-patient_2015_180d"}
+
+
 def test_import_inputs_are_validated_not_trusted(store, tmp_path):
     """`year` and `label` are embedded in a COPY statement (DuckDB cannot
     parameterize it) and `year` also names the output parquet — so a hostile
