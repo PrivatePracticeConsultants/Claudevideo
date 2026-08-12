@@ -125,6 +125,53 @@ def test_vintages_are_never_blended(store, tmp_path):
     assert {d["year"] for d in st["referrals"]} == {"2015", "2022"}
 
 
+def test_failed_imports_leave_previous_data_untouched(store, tmp_path):
+    """The tracker's contract, kept here: a validation failure keeps your
+    existing snapshot untouched. Two ways an import can die AFTER passing the
+    up-front checks — and neither may destroy what was already loaded:
+
+    - roster: header OK but the body is unreadable. Connections are autocommit,
+      so an unwrapped DELETE + INSERT committed the DELETE alone — the bad file
+      WIPED the roster it was meant to replace.
+    - referrals: COPY dies partway. Written straight to the *.parquet the view
+      globs, the corrupt file blinded the WHOLE referral_pairs view, prior
+      good datasets included."""
+    _seed_rates(store)
+    import_orf_roster(store, _orf(tmp_path))
+    good_hop = tmp_path / "docgraph_2022.csv"
+    good_hop.write_text("from_npi,to_npi,patient_count,transaction_count,"
+                        "average_day_wait,std_day_wait\n"
+                        f"{DOCS[0]},{MINE[0]},70,500,12.5,3.1\n")
+    import_shared_patients(store, good_hop)
+
+    # roster: right header, ragged body (e.g. a truncated re-download)
+    bad = tmp_path / "OrderReferring_2026-08-01.csv"
+    bad.write_text("NPI,LAST_NAME,FIRST_NAME,PARTB,DME,HHA,PMD,HOSPICE\n"
+                   "1901234567,DOC,ANNA,Y,N,N,N,N,EXTRA,COLUMNS,HERE\n")
+    with pytest.raises(MedicareImportError, match="untouched"):
+        import_orf_roster(store, bad)
+    st = medicare_status(store)
+    assert st["eligibility"]["providers"] == len(DOCS), \
+        "failed roster load must not wipe the loaded snapshot"
+    assert st["eligibility"]["release"] == "2026-07-17"      # still the OLD release
+
+    # referrals: header says Hop, body goes ragged mid-file
+    bad_hop = tmp_path / "hop_2023.csv"
+    bad_hop.write_text("from_npi,to_npi,patient_count,transaction_count,"
+                       "average_day_wait,std_day_wait\n"
+                       f"{DOCS[0]},{MINE[0]},70,500,12.5,3.1\n"
+                       "9999999999,8888888888,1,2\n")       # 4 fields — corrupt
+    with pytest.raises(MedicareImportError, match="untouched"):
+        import_shared_patients(store, bad_hop)
+    st = medicare_status(store)
+    assert [d["year"] for d in st["referrals"]] == ["2022"], \
+        "failed referral import must not blind the prior datasets"
+    assert org_referrals(store, MINE, "in")["rows"], "2022 pairs still answer"
+    ref_dir = store.dir / "referrals"
+    assert not list(ref_dir.glob("*.tmp")) and not list(ref_dir.glob("*2023*")), \
+        "no partial/corrupt parquet may be left behind"
+
+
 def test_medicare_api_and_dashboard_tab(cfg, store, tmp_path):
     """The dashboard tab's three endpoints: status, one-practice lookup (with
     eligibility joined onto every referral row), and the batch NPI check."""

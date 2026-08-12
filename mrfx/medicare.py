@@ -105,16 +105,30 @@ def import_orf_roster(store: Store, path: str | Path) -> dict:
                 partb BOOLEAN, dme BOOLEAN, hha BOOLEAN, pmd BOOLEAN,
                 hospice BOOLEAN, release VARCHAR, loaded_at TIMESTAMP)
         """)
-        con.execute("DELETE FROM medicare_orf")   # a snapshot REPLACES, never merges
-        con.execute(f"""
-            INSERT INTO medicare_orf
-            SELECT trim(NPI), trim(LAST_NAME), trim(FIRST_NAME),
-                   upper(trim(PARTB))   = 'Y', upper(trim(DME))  = 'Y',
-                   upper(trim(HHA))     = 'Y', upper(trim(PMD))  = 'Y',
-                   upper(trim(HOSPICE)) = 'Y', ?, now()
-            FROM read_csv('{p}', header = true, all_varchar = true)
-            WHERE NPI IS NOT NULL AND trim(NPI) <> ''
-        """, [release])
+        # One transaction for replace-with-snapshot. Connections are autocommit,
+        # so an unwrapped DELETE + INSERT would commit the DELETE alone — and a
+        # file that passes the header check but dies mid-body (truncated
+        # download, ragged row) would WIPE the roster it was meant to replace.
+        # The tracker's contract, kept here: a failed load leaves the previous
+        # snapshot untouched.
+        con.execute("BEGIN")
+        try:
+            con.execute("DELETE FROM medicare_orf")   # a snapshot REPLACES, never merges
+            con.execute(f"""
+                INSERT INTO medicare_orf
+                SELECT trim(NPI), trim(LAST_NAME), trim(FIRST_NAME),
+                       upper(trim(PARTB))   = 'Y', upper(trim(DME))  = 'Y',
+                       upper(trim(HHA))     = 'Y', upper(trim(PMD))  = 'Y',
+                       upper(trim(HOSPICE)) = 'Y', ?, now()
+                FROM read_csv('{p}', header = true, all_varchar = true)
+                WHERE NPI IS NOT NULL AND trim(NPI) <> ''
+            """, [release])
+            con.execute("COMMIT")
+        except Exception as e:
+            con.execute("ROLLBACK")
+            raise MedicareImportError(
+                f"{path.name} has the right header but could not be read past "
+                f"it ({e}). The previously loaded roster is untouched.") from e
         n = con.execute("SELECT count(*) FROM medicare_orf").fetchone()[0]
     log.info("Medicare Order & Referring: loaded %s providers (release %s)",
              f"{n:,}", release)
@@ -158,20 +172,34 @@ def import_shared_patients(store: Store, path: str | Path,
                   "TRY_CAST(average_day_wait AS DOUBLE) AS avg_day_wait")
         reader = f"read_csv('{p}', header = true, all_varchar = true)"
 
+    # Write to a .tmp beside the target and rename only on success — the
+    # registered view globs *.parquet, so a COPY that dies partway (bad row
+    # deep in a 7 GB file, disk full) must never leave a corrupt file where
+    # the glob will read it: one bad import would blind the WHOLE
+    # referral_pairs view, prior good datasets included. Same convention as
+    # the parser workers' *.parquet.tmp handoff.
+    tmp = out.with_suffix(out.suffix + ".tmp")
     with store.write_lock, store.connect() as con:
         known = con.execute("SELECT count(*) FROM (SELECT DISTINCT npi FROM rates)").fetchone()[0]
         if not known:
             raise MedicareImportError(
                 "this store has no NPIs yet — ingest some rate files first, or "
                 "the referral import would have nothing to attach to.")
-        con.execute(f"""
-            COPY (
-                SELECT {select}, '{label}' AS source_label, '{year}' AS data_year
-                FROM {reader} e
-                WHERE EXISTS (SELECT 1 FROM rates r WHERE r.npi = e.{'column0' if fmt == FMT_CMS else 'from_npi'})
-                   OR EXISTS (SELECT 1 FROM rates r WHERE r.npi = e.{'column1' if fmt == FMT_CMS else 'to_npi'})
-            ) TO '{sql_path(out)}' (FORMAT PARQUET, COMPRESSION ZSTD)
-        """)
+        try:
+            con.execute(f"""
+                COPY (
+                    SELECT {select}, '{label}' AS source_label, '{year}' AS data_year
+                    FROM {reader} e
+                    WHERE EXISTS (SELECT 1 FROM rates r WHERE r.npi = e.{'column0' if fmt == FMT_CMS else 'from_npi'})
+                       OR EXISTS (SELECT 1 FROM rates r WHERE r.npi = e.{'column1' if fmt == FMT_CMS else 'to_npi'})
+                ) TO '{sql_path(tmp)}' (FORMAT PARQUET, COMPRESSION ZSTD)
+            """)
+        except Exception as e:
+            tmp.unlink(missing_ok=True)
+            raise MedicareImportError(
+                f"{path.name} looked like a {label} file but could not be read "
+                f"through ({e}). Previously imported referral data is untouched.") from e
+        tmp.replace(out)
         _register_referral_view(con, store)
         n = con.execute("SELECT count(*) FROM referral_pairs WHERE data_year = ?",
                         [year]).fetchone()[0]
