@@ -1409,9 +1409,10 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 try:
                     if item.get("kind") == "eligibility":
                         r = import_orf_roster(store, item["path"])
+                        # the label already names the release — repeating it
+                        # here rendered "release X — N providers (release X)"
                         done.append({"label": label, "ok": True,
-                                     "detail": f"{r['providers']:,} providers "
-                                               f"(release {r['release']})",
+                                     "detail": f"{r['providers']:,} providers",
                                      "diff": r.get("diff")})
                     else:
                         r = import_shared_patients(
