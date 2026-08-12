@@ -2010,6 +2010,11 @@ async function runReferralLeaders() {
   // practices could not be placed on the map at all
   const notes = [`${esc(d.dataset)} ${esc(d.data_year)} · ${scope} · showing ${d.rows.length} of ${fmtInt(d.total)} practices`];
   if (d.unplaced) notes.push(`<span class="warn-text">${fmtInt(d.unplaced)} practice${d.unplaced === 1 ? "" : "s"} have no mappable ZIP and are not in radius results</span>`);
+  // the coverage boundary rides VISIBLY with the ranking (a tooltip would not
+  // survive a screenshot): absence here can mean "not connected to your
+  // store", never only "no referrals"
+  const coverage = d.coverage_note
+    ? `<div class="muted" style="font-size:11.5px;margin:4px 0 6px">${esc(d.coverage_note)}</div>` : "";
   const body = d.rows.map((r, i) => {
     const name = r.in_store && r.tin
       ? `<a href="#" data-rl-tin="${esc(r.tin)}" title="open every payer rate the MRF files price this practice at">${esc(r.practice)}</a>`
@@ -2025,7 +2030,8 @@ async function runReferralLeaders() {
       <td class="num">${fmtInt(r.npis)}</td>
     </tr>`;
   }).join("");
-  out.innerHTML = `<div class="muted" style="margin-bottom:6px">${notes.join(" · ")}</div>
+  out.innerHTML = `<div class="muted" style="margin-bottom:2px">${notes.join(" · ")}</div>
+    ${coverage}
     <div class="tablewrap" style="max-height:44vh"><table><thead><tr>
       <th>#</th><th>Practice</th><th>City</th><th>ZIP</th><th class="num">Miles</th>
       <th class="num" title="shared Medicare patients received — see the caveat above; not a referral count">Patients in</th>

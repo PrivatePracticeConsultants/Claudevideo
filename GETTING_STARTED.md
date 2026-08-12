@@ -294,7 +294,10 @@ Once a file is `done`:
 - **Medicare** tab also ranks **referral leaders** — practices by shared
   Medicare patients received, searchable around a ZIP with a radius filter.
   Clicking a practice that has rates in your store opens every payer rate the
-  MRF files price it at.
+  MRF files price it at. **Coverage note:** the ranking sees only practices
+  connected to your store (the referral import keeps pairs that touch your
+  providers), so it grows with every payer you ingest — it is your market's
+  referral view, not a census.
 - **Medicare** tab (optional): who shares Medicare patients with a practice and
   whether each of those providers may still order/refer for Medicare — plus a
   batch NPI checker. If you use the **Medicare Order & Referring Tracker**,

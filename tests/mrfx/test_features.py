@@ -186,6 +186,40 @@ def test_watchlist_digest_composes_the_tabs(cfg, store, tmp_path):
 
 # ---------------------------------------------------------------- leaders --
 
+def test_leaders_coverage_boundary_is_stated(store, tmp_path):
+    """A practice whose referral relationships never touch the store's
+    providers is INVISIBLE in the ranking (its pairs were dropped at import to
+    keep a 210M-pair year from dwarfing the rate data). That is a coverage
+    boundary, not a low rank — so it must be impossible to read the ranking
+    without seeing it stated. (Raised by the user: 'only 4 practices within
+    25 miles?' — the honest answer names what the ranking can and can't see.)"""
+    from mrfx.medicare import import_shared_patients, referral_leaders
+
+    _seed(store)
+    orphan, doc2 = "1555666770", "1743210989"
+    store.save_npis_bulk([
+        dict(npi=orphan, org_name="Orphan PT", entity_type="NPI-2",
+             taxonomy_code="261QP2000X", city="StL", state="MO", address="9",
+             zip="63103", phone=None),
+        dict(npi=doc2, org_name="Dr Elsewhere", entity_type="NPI-1",
+             taxonomy_code="207X00000X", city="StL", state="MO", address="9",
+             zip="63103", phone=None)])
+    hop = tmp_path / "hop_2022.csv"
+    hop.write_text("from_npi,to_npi,patient_count,transaction_count,"
+                   "average_day_wait,std_day_wait\n"
+                   f"{DOCS[0]},{GW_N[0]},100,400,12,3\n"   # into a store practice
+                   f"{doc2},{orphan},999,4000,12,3\n")     # unknown -> unknown
+    r = import_shared_patients(store, hop)
+    assert r["pairs"] == 1, "the orphan pair is dropped at import by design"
+
+    d = referral_leaders(store, therapy_only=True)
+    names = [x["practice"] for x in d["rows"]]
+    assert "Gateway Therapy" in names
+    assert "Orphan PT" not in names, "999 shared patients, but disconnected"
+    # the boundary is STATED on the result every renderer shows
+    assert "keeps only pairs" in d["coverage_note"]
+    assert "does not appear at all" in d["coverage_note"]
+
 def test_referral_leaders_zip_radius_and_honesty(cfg, store, tmp_path):
     from mrfx.medicare import (MedicareImportError, import_shared_patients,
                                referral_leaders)

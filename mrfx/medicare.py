@@ -795,7 +795,22 @@ def referral_leaders(store: Store, zip_code: str | None = None,
     return {"rows": rows, "dataset": label, "data_year": yr, "dataset_id": ds_id,
             "zip": zip_code, "radius_miles": radius_miles if use_radius else None,
             "total": total, "unplaced": unplaced if use_radius else 0,
-            "caveat": REFERRAL_CAVEAT}
+            "coverage_note": LEADERS_COVERAGE_NOTE, "caveat": REFERRAL_CAVEAT}
+
+
+# The ranking's coverage boundary, stated wherever the ranking is shown. The
+# import keeps only pairs touching this store's providers (a Hop Teaming year
+# is 140-210M pairs; unfiltered it would dwarf the rate data), so a practice
+# whose referral relationships never touch the store is INVISIBLE here — not
+# ranked low, absent. The wider the rate store, the closer this is to the
+# whole market; it must never be read as a census of one.
+LEADERS_COVERAGE_NOTE = (
+    "This ranking covers practices connected to YOUR store: the referral "
+    "import keeps only pairs that touch a provider with rates here, so a "
+    "practice whose shared-patient relationships never touch your store's "
+    "providers does not appear at all. The more payers you ingest, the "
+    "closer this gets to the whole market."
+)
 
 
 REFERRAL_CAVEAT = (
