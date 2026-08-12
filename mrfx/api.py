@@ -1450,24 +1450,36 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         to refuse while `mrfx serve` holds the database; the server importing
         its own store is the one process allowed to, so the user never has to
         stop anything."""
+        # Reserve the job slot ATOMICALLY with the busy-check: discovery below
+        # takes real time (it stats files and queries the store), and checking
+        # in one lock acquisition then setting "running" in another would let
+        # two concurrent clicks both pass the check and spawn two import
+        # threads. Anything that fails between reserve and thread-start must
+        # release the slot, or the button would be stuck "running" forever.
         with tracker_job_lock:
             if tracker_job["state"] == "running":
                 raise HTTPException(409, "an import is already running — "
                                     f"{tracker_job['message']}")
-        found = {p["path"]: p for p in _tracker_discover()["pending"]}
-        want = body.get("paths")
-        # Import only what discovery just offered: the request names files by
-        # path, and echoing an arbitrary path back into a reader would let the
-        # dashboard read anywhere on disk.
-        items = ([found[p] for p in want if p in found] if want
-                 else list(found.values()))
-        if not items:
-            raise HTTPException(422, "nothing to import — either the tracker has "
-                                "nothing new, or those files are no longer there. "
-                                "Refresh and try again.")
+            tracker_job.update({"state": "running", "done": [], "items": [],
+                                "message": "finding the tracker's files…"})
+        try:
+            found = {p["path"]: p for p in _tracker_discover()["pending"]}
+            want = body.get("paths")
+            # Import only what discovery just offered: the request names files
+            # by path, and echoing an arbitrary path back into a reader would
+            # let the dashboard read anywhere on disk.
+            items = ([found[p] for p in want if p in found] if want
+                     else list(found.values()))
+            if not items:
+                raise HTTPException(422, "nothing to import — either the tracker "
+                                    "has nothing new, or those files are no longer "
+                                    "there. Refresh and try again.")
+        except BaseException:
+            with tracker_job_lock:
+                tracker_job.update({"state": "idle", "message": ""})
+            raise
         with tracker_job_lock:
-            tracker_job.update({"state": "running", "done": [],
-                                "items": [i["label"] for i in items],
+            tracker_job.update({"items": [i["label"] for i in items],
                                 "message": f"starting {len(items)} import(s)…"})
         threading.Thread(target=_bg_safe, args=(_run_tracker_import, items),
                          name="mrfx-tracker-import", daemon=True).start()

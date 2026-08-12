@@ -173,7 +173,11 @@ def list_referral_datasets(data_dir: Path) -> list[dict]:
                 record(mp, fmt, yr, iv if fmt == FMT_CMS else None,
                        int(rows) if isinstance(rows, (int, float)) else None, active=True)
 
-    for p in sorted(rm.iterdir() if rm.is_dir() else []):
+    try:
+        entries = sorted(rm.iterdir())
+    except OSError:   # the folder vanished mid-scan (drive unplugged, cleanup)
+        entries = []  # — what the meta already recorded still stands
+    for p in entries:
         if not p.is_file():
             continue
         m = PSPP_RE.match(p.name)
@@ -214,20 +218,19 @@ def discover(store, configured: str | Path | None = None) -> dict:
     snaps = list_snapshots(data_dir)
     for s in snaps:
         s["imported"] = s["release"] == loaded_release
-    # Only the NEWEST roster is offered: this table is a snapshot of who may
-    # order/refer TODAY, and importing an older one would move eligibility
-    # backwards. Older files stay listed (the tracker keeps 8) but are not
-    # pending work.
+    # Only a NEWER roster is ever offered: this table is a snapshot of who may
+    # order/refer TODAY, so importing an equal one is a no-op and importing an
+    # OLDER one (the loaded roster came from a fresher download than the
+    # tracker's newest) would move eligibility BACKWARDS. Older files stay
+    # listed (the tracker keeps 8) but are never pending work.
     out["snapshots"] = snaps
-    if snaps and not snaps[0]["imported"]:
-        newer = loaded_release is None or snaps[0]["release"] > loaded_release
+    if snaps and (loaded_release is None or snaps[0]["release"] > loaded_release):
         out["pending"].append({
             "kind": "eligibility", "path": snaps[0]["path"],
             "label": f"Order & Referring roster, release {snaps[0]['release']}",
             "size_mb": snaps[0]["size_mb"],
             "why": ("not imported yet" if loaded_release is None else
-                    f"newer than the loaded {loaded_release}" if newer else
-                    f"differs from the loaded {loaded_release}"),
+                    f"newer than the loaded {loaded_release}"),
         })
 
     datasets = list_referral_datasets(data_dir)

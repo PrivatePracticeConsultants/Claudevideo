@@ -285,6 +285,140 @@ def test_dashboard_imports_from_the_tracker_without_stopping_the_server(
     assert r.status_code == 422
 
 
+def test_upgrade_from_pre_dataset_id_store_self_heals(store, tmp_path):
+    """Views persist in DuckDB's catalog: a store that imported referral data
+    under the pre-dataset_id build still carries the OLD view definition after
+    upgrading. That view answers a bare probe happily while every real query
+    dies on the missing column — and the not-loaded catches would read that as
+    'no referral data', silently hiding data the user already imported."""
+    from mrfx.store import sql_path
+
+    _seed_rates(store)
+    hop = tmp_path / "docgraph_2022.csv"
+    hop.write_text("from_npi,to_npi,patient_count,transaction_count,"
+                   "average_day_wait,std_day_wait\n"
+                   f"{DOCS[0]},{MINE[0]},70,500,12.5,3.1\n")
+    import_shared_patients(store, hop)
+
+    # regress the catalog to the OLD view definition (no dataset_id column),
+    # exactly what an upgraded store wakes up with
+    glob = sql_path(store.dir / "referrals" / "*.parquet")
+    with store.write_lock, store.connect() as con:
+        con.execute("CREATE OR REPLACE VIEW referral_pairs AS "
+                    "SELECT source_npi, target_npi, patients, transactions, "
+                    f"same_day, avg_day_wait, source_label, data_year "
+                    f"FROM read_parquet('{glob}', union_by_name = true)")
+
+    st = medicare_status(store)
+    assert st["referrals"] and st["referrals"][0]["dataset_id"] == "hop-teaming_2022", \
+        "an upgraded store must heal its stale view, not report no data"
+    res = org_referrals(store, MINE, "in")
+    assert [r["patients"] for r in res["rows"]] == [70]
+
+
+def test_legacy_windowless_parquet_reads_and_is_superseded(store, tmp_path):
+    """A parquet written by the pre-interval build has no dataset_id column
+    and no window in its name. It must (a) still read, with a synthesized
+    vintage id, and (b) be REPLACED when the same format+year is re-imported
+    with a window — under the old build every window collided into that one
+    file, so it IS a prior import of the same delivery, and keeping both
+    would list the same data as two vintages."""
+    from mrfx.store import sql_path
+
+    _seed_rates(store)
+    legacy = store.dir / "referrals" / "cms-shared-patient_2015.parquet"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    with store.write_lock, store.connect() as con:
+        con.execute(f"""
+            COPY (SELECT '{DOCS[0]}' AS source_npi, '{MINE[0]}' AS target_npi,
+                         40::BIGINT AS patients, 300::BIGINT AS transactions,
+                         3::BIGINT AS same_day, CAST(NULL AS DOUBLE) AS avg_day_wait,
+                         'CMS shared-patient' AS source_label, '2015' AS data_year)
+            TO '{sql_path(legacy)}' (FORMAT PARQUET)
+        """)
+        from mrfx.medicare import _register_referral_view
+        _register_referral_view(con, store)
+
+    st = medicare_status(store)
+    assert st["referrals"][0]["dataset_id"] == "CMS shared-patient_2015"  # synthesized
+    assert org_referrals(store, MINE, "in")["rows"][0]["patients"] == 40
+
+    # re-import the same year WITH its window: the legacy file is superseded
+    d180 = tmp_path / "pspp_2015_days180.txt"
+    d180.write_text(f"{DOCS[0]},{MINE[0]},900,99,3\n")
+    import_shared_patients(store, d180)
+    assert not legacy.exists(), "the window-less duplicate must be removed"
+    st = medicare_status(store)
+    assert [d["dataset_id"] for d in st["referrals"]] == ["cms-shared-patient_2015_180d"]
+    assert org_referrals(store, MINE, "in")["rows"][0]["patients"] == 99
+
+
+def test_discovery_never_offers_an_older_roster(store, tmp_path):
+    """The roster is 'who may order/refer TODAY'. If the loaded snapshot is
+    newer than the tracker's newest (imported by hand from a fresher
+    download), offering the tracker's would move eligibility BACKWARDS."""
+    from mrfx.tracker import discover
+
+    _seed_rates(store)
+    root = _fake_tracker(tmp_path / "OrderReferringTracker",
+                         releases=("2026-08-01",), datasets=())
+    import_orf_roster(store, _orf(tmp_path, "OrderReferring_2026-08-10.csv"))
+
+    d = discover(store, root)
+    assert [p for p in d["pending"] if p["kind"] == "eligibility"] == [], \
+        "an older roster than the loaded one must never be offered"
+    # and the older snapshot is honestly listed as not-imported, just not work
+    assert d["snapshots"][0]["imported"] is False
+
+
+def test_failed_import_start_releases_the_job_slot(cfg, store, tmp_path, monkeypatch):
+    """The busy-check and the 'running' reservation are one atomic step, so a
+    request that then fails (nothing to import) must RELEASE the slot — else
+    the button is stuck 'running' forever with no import alive."""
+    from fastapi.testclient import TestClient
+    from mrfx.api import create_app
+
+    _seed_rates(store)
+    root = _fake_tracker(tmp_path / "OrderReferringTracker")
+    monkeypatch.setattr(cfg, "tracker_dir", root, raising=False)
+    client = TestClient(create_app(cfg, store))
+
+    r = client.post("/api/medicare/tracker/import", json={"paths": ["/no/such"]})
+    assert r.status_code == 422
+    assert client.get("/api/medicare/tracker").json()["job"]["state"] == "idle", \
+        "a refused start must not leave the job stuck 'running'"
+    # and a real start still works right after
+    assert client.post("/api/medicare/tracker/import", json={}).status_code == 200
+
+
+def test_startup_autoimport_takes_the_roster_and_only_the_roster(
+        cfg, store, tmp_path, monkeypatch):
+    """tracker_auto_import: ON, a newer roster is picked up at startup with no
+    click — but referral datasets are NEVER auto-imported (GB-sized,
+    licence-encumbered): they stay a deliberate act."""
+    from fastapi.testclient import TestClient
+    from mrfx.api import create_app
+
+    _seed_rates(store)
+    root = _fake_tracker(tmp_path / "OrderReferringTracker")   # roster + hop file
+    monkeypatch.setattr(cfg, "tracker_dir", root, raising=False)
+    monkeypatch.setattr(cfg, "tracker_auto_import", True, raising=False)
+
+    # the context manager runs the startup hooks — that IS the code path
+    with TestClient(create_app(cfg, store)) as client:
+        for _ in range(200):
+            st = client.get("/api/medicare/status").json()
+            if st["eligibility"]:
+                break
+            time.sleep(0.05)
+        assert st["eligibility"] and st["eligibility"]["providers"] == len(DOCS), \
+            "auto-import must load the newer roster at startup"
+        assert st["referrals"] == [], "referral data must NEVER auto-import"
+        d = client.get("/api/medicare/tracker").json()
+        assert [p["kind"] for p in d["pending"]] == ["referrals"], \
+            "the referral file stays offered as a deliberate click"
+
+
 def test_import_inputs_are_validated_not_trusted(store, tmp_path):
     """`year` and `label` are embedded in a COPY statement (DuckDB cannot
     parameterize it) and `year` also names the output parquet — so a hostile

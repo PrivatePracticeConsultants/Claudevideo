@@ -801,6 +801,7 @@ def cmd_medicare(cfg: MrfxConfig, args) -> int:
         print(f"tracker data: {d['data_dir']}")
         if not d["pending"]:
             print("everything the tracker has is already imported.")
+        failed = 0
         for item in d["pending"]:
             print(f"\nimporting {item['label']} ({item['size_mb']:,.1f} MB) — {item['why']}")
             # Fault isolation: one unreadable file must not abort the rest.
@@ -817,7 +818,13 @@ def cmd_medicare(cfg: MrfxConfig, args) -> int:
                           f"({r['label']} {r['year']})")
                 did = True
             except Exception as e:  # noqa: BLE001 — a bad file is a message
+                failed += 1
                 print(f"  skipped: {e}")
+        if failed and not did:
+            # there WAS work and none of it succeeded — that is a failure,
+            # and exit 0 would tell a script (or the user) everything is fine
+            print(f"\nnone of the {failed} pending file(s) could be imported.")
+            return 1
     if args.eligibility:
         try:
             r = import_orf_roster(store, args.eligibility)
@@ -838,9 +845,14 @@ def cmd_medicare(cfg: MrfxConfig, args) -> int:
             print(f"could not import the referral data: {e}")
             return 1
     st = medicare_status(store)
-    if not did:
-        print("Nothing imported. Point this at files the Order & Referring Tracker "
-              "already downloaded:\n"
+    # Usage help only when the user gave NO instruction at all. A
+    # --from-tracker run that found nothing new already said so — following
+    # that with "Nothing imported. Point this at files…" reads as
+    # contradicting it.
+    if not did and not (getattr(args, "from_tracker", False)
+                        or args.eligibility or args.referrals):
+        print("Nothing imported. Easiest: mrfx medicare --from-tracker "
+              "(finds the tracker's downloads by itself), or point at files:\n"
               "  mrfx medicare --eligibility \"%LOCALAPPDATA%\\OrderReferringTracker\\"
               "snapshots\\OrderReferring_<date>.csv\"\n"
               "  mrfx medicare --referrals <shared-patient or Hop Teaming .csv>\n")

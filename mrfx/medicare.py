@@ -304,6 +304,16 @@ def import_shared_patients(store: Store, path: str | Path,
                 f"{path.name} looked like a {label} file but could not be read "
                 f"through ({e}). Previously imported referral data is untouched.") from e
         tmp.replace(out)
+        # Supersede the pre-interval file for this same format+year, if one is
+        # left from an older build. Under that build every window of a year
+        # collided into ONE window-less parquet — so that file IS a prior
+        # import of this same delivery, and leaving it would list the same
+        # data as two "vintages" in every picker.
+        legacy = out_dir / f"{fmt}_{year}.parquet"
+        if interval and legacy.exists():
+            legacy.unlink()
+            log.info("referrals: removed the legacy window-less %s "
+                     "(superseded by %s)", legacy.name, out.name)
         _register_referral_view(con, store)
         n = con.execute("SELECT count(*) FROM referral_pairs WHERE dataset_id = ?",
                         [dataset_id]).fetchone()[0]
@@ -342,10 +352,18 @@ def _ensure_referral_view(con, store: Store) -> None:
     every read is a catalog write — two concurrent dashboard requests doing it
     can collide in DuckDB's catalog (write-write conflict) and 500 for no
     reason. The empty-view fallback only upgrades to real data on the import
-    path, which re-registers under the write lock."""
+    path, which re-registers under the write lock.
+
+    The probe selects dataset_id BY NAME, not `SELECT 1`: views persist in the
+    DuckDB catalog, so a store upgraded from before the dataset_id column
+    still carries the OLD view definition. That view answers a bare probe
+    happily while every real query dies on the missing column — and the broad
+    not-loaded catches upstream would read that as "no referral data",
+    silently hiding data the user already imported."""
     try:
-        con.execute("SELECT 1 FROM referral_pairs LIMIT 0")
-    except Exception:  # noqa: BLE001 — missing view / vanished parquet
+        con.execute("SELECT dataset_id FROM referral_pairs LIMIT 0")
+    except Exception:  # noqa: BLE001 — missing view, vanished parquet, or a
+        # pre-upgrade view definition: all healed by re-registering
         _register_referral_view(con, store)
 
 
