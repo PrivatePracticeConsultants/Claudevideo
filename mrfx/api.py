@@ -1366,12 +1366,19 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     @app.post("/api/medicare/eligibility")
     def api_medicare_eligibility(body: dict = Body(...)):
         """Batch Order & Referring check: any pasted text in, one row per
-        10-digit number found. Absence from the roster is a real answer, not an
-        error — expected for therapists/orgs, a denial risk for referrers."""
-        from .medicare import npi_eligibility
-        npis = list(dict.fromkeys(re.findall(r"\b\d{10}\b", str(body.get("text", "")))))
+        VALID NPI found (10 digits + NPPES prefix + Luhn check digit — pasted
+        emails and referral lists are full of phone numbers, and reporting a
+        phone number as 'not on the list' would be a false alarm). Absence
+        from the roster is a real answer, not an error — expected for
+        therapists/orgs, a denial risk for referrers."""
+        from .medicare import is_valid_npi, npi_eligibility
+        found = list(dict.fromkeys(re.findall(r"\b\d{10}\b", str(body.get("text", "")))))
+        npis = [n for n in found if is_valid_npi(n)]
         if not npis:
-            raise HTTPException(422, "no 10-digit NPIs found in the pasted text")
+            raise HTTPException(422, "no valid NPIs found in the pasted text"
+                                + (f" ({len(found)} ten-digit numbers were "
+                                   "skipped — they fail the NPI check digit, "
+                                   "e.g. phone numbers)" if found else ""))
         if len(npis) > 2000:
             raise HTTPException(422, f"{len(npis):,} NPIs is too many for one "
                                 "check — paste up to 2,000 at a time")
@@ -1380,6 +1387,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, "no Order & Referring roster is loaded — "
                                 "import one first (mrfx medicare --eligibility …)")
         return {"rows": rows, "checked": len(npis),
+                "ignored_non_npi": len(found) - len(npis),
                 "on_list": sum(1 for r in rows if r["on_list"])}
 
     @app.post("/api/medicare/org")
@@ -1395,7 +1403,10 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         if not subject:
             raise HTTPException(422, "pick a subject practice first")
         year = str(body.get("year") or "").strip() or None
-        limit = min(max(int(body.get("limit") or 100), 1), 500)
+        try:
+            limit = min(max(int(body.get("limit") or 100), 1), 500)
+        except (TypeError, ValueError):
+            raise HTTPException(422, "limit must be a number")
         # resolve_subject_tins never returns empty (a raw id falls through as
         # itself), so "did we match a practice" is decided by whether any rate
         # rows carry NPIs for it — the NPI is the join this whole tab runs on.

@@ -146,7 +146,8 @@ def org_bundle_files(store: Store, profile: dict) -> dict[str, str]:
     # 5. Medicare layers, when they've been imported. These are the halves the
     #    rate data cannot supply: who may order/refer, and who feeds the
     #    practice patients. Absent unless the user has imported them.
-    from .medicare import (REFERRAL_CAVEAT, npi_eligibility, org_referrals)
+    from .medicare import (REFERRAL_CAVEAT, npi_eligibility, org_referrals,
+                           recent_losses)
 
     elig = npi_eligibility(store, profile["npis"])
     if elig:
@@ -169,16 +170,19 @@ def org_bundle_files(store: Store, profile: dict) -> dict[str, str]:
         ref = org_referrals(store, profile["npis"], direction, limit=250)
         if not ref["rows"]:
             continue
-        by_npi = {e["npi"]: e for e in npi_eligibility(
-            store, [r["npi"] for r in ref["rows"]])}
+        row_npis = [r["npi"] for r in ref["rows"]]
+        by_npi = {e["npi"]: e for e in npi_eligibility(store, row_npis)}
+        losses = recent_losses(store, row_npis)   # same flag the dashboard shows
         rrows = [["npi", "name", "taxonomy", "shared_patients", "transactions",
-                  "avg_day_wait", "still_eligible_partb", "dataset", "data_year"]]
+                  "avg_day_wait", "still_eligible_partb", "recent_change",
+                  "dataset", "data_year"]]
         for r in ref["rows"]:
             e = by_npi.get(r["npi"]) or {}
             rrows.append([
                 r["npi"], defuse_csv(r["name"]), r["taxonomy"], r["patients"],
                 r["transactions"], r["avg_day_wait"] if r["avg_day_wait"] else "",
                 "" if not e.get("on_list") else ("Y" if e.get("partb") else "N"),
+                losses.get(r["npi"], ""),
                 ref["dataset"], ref["data_year"]])
         rrows.append([])
         rrows.append([f"NOTE: {REFERRAL_CAVEAT}"])

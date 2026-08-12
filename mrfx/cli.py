@@ -761,6 +761,16 @@ def cmd_medicare(cfg: MrfxConfig, args) -> int:
     from .medicare import (import_orf_roster, import_shared_patients,
                            medicare_status)
 
+    # This command opens the store (the imports WRITE it), and a running
+    # `mrfx serve` owns the database file — proceeding under it would fail on
+    # the file lock at best. Same guard the other store-owning commands use.
+    if _something_owns_the_port(cfg, "touching the Medicare data"):
+        if args.eligibility or args.referrals:
+            print("Stop the server (Ctrl+C in its window), run this import, "
+                  "then start `mrfx serve` again.")
+        else:
+            print("(the dashboard's Medicare tab shows what's loaded, live)")
+        return 1
     store = Store(cfg.store_dir, cfg.duckdb_memory_gb, temp_dir=cfg.duckdb_temp_dir)
     did = False
     if args.eligibility:
@@ -818,6 +828,9 @@ def cmd_orgreport(cfg: MrfxConfig, args) -> int:
 
     from .orgprofile import compute_org_profile, org_bundle_files
 
+    if _something_owns_the_port(cfg, "building the bundle locally"):
+        print("(the Rate card tab's 'Tracker bundle' button builds the same zip)")
+        return 1
     store = Store(cfg.store_dir, cfg.duckdb_memory_gb, temp_dir=cfg.duckdb_temp_dir)
     market: dict = {"month": args.month}
     if args.state:

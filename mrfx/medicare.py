@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import re
 from pathlib import Path
 
 from .store import Store, sql_path
@@ -61,6 +62,23 @@ STALE_ROSTER_DAYS = 45
 
 class MedicareImportError(Exception):
     """A file that isn't what it claims to be — refuse it, don't guess."""
+
+
+def is_valid_npi(s: str) -> bool:
+    """True when `s` is a structurally valid NPI: 10 digits, leading 1 or 2
+    (the only prefixes NPPES issues), and a correct ISO-7812 Luhn check digit
+    computed over the '80840' health-industry prefix. This is how a 10-digit
+    phone number in pasted text is told apart from a provider id — a random
+    10-digit number passes by chance only ~5% of the time."""
+    if len(s) != 10 or not s.isdigit() or s[0] not in "12":
+        return False
+    total = 0
+    for i, ch in enumerate(reversed("80840" + s)):
+        d = int(ch)
+        if i % 2 == 1:
+            d = d * 2 - 9 if d > 4 else d * 2
+        total += d
+    return total % 10 == 0
 
 
 def _peek_format(path: Path) -> str:
@@ -207,8 +225,16 @@ def import_shared_patients(store: Store, path: str | Path,
     if not path.exists():
         raise MedicareImportError(f"no such file: {path}")
     fmt = _peek_format(path)
+    # Both values are embedded in a COPY statement (which DuckDB cannot
+    # parameterize) and `year` also names the output file — so they are
+    # validated/sanitized, never trusted. A year of "2022'; DROP…" or "../x"
+    # must die here, not in the SQL or the filesystem.
     year = year or "".join(c for c in path.stem if c.isdigit())[:4] or "unknown"
+    if not (year == "unknown" or re.fullmatch(r"\d{4}", year)):
+        raise MedicareImportError(
+            f"'{year}' is not a data year — pass a 4-digit year (e.g. --year 2022).")
     label = label or ("CMS shared-patient" if fmt == FMT_CMS else "DocGraph Hop Teaming")
+    label = re.sub(r"[^A-Za-z0-9 ._-]", "", label)[:40] or "shared-patient"
 
     out_dir = Path(store.dir) / "referrals"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -268,6 +294,8 @@ def import_shared_patients(store: Store, path: str | Path,
 
 
 def _register_referral_view(con, store: Store) -> None:
+    """(Re)write the referral_pairs view — a CATALOG WRITE, so this belongs on
+    the import path (under store.write_lock). Read paths use _ensure below."""
     glob = sql_path(Path(store.dir) / "referrals" / "*.parquet")
     try:
         con.execute(f"CREATE OR REPLACE VIEW referral_pairs AS SELECT * FROM read_parquet('{glob}')")
@@ -277,6 +305,19 @@ def _register_referral_view(con, store: Store) -> None:
                     "NULL::BIGINT AS patients, NULL::BIGINT AS transactions, "
                     "NULL::BIGINT AS same_day, NULL::DOUBLE AS avg_day_wait, "
                     "NULL::VARCHAR AS source_label, NULL::VARCHAR AS data_year WHERE FALSE")
+
+
+def _ensure_referral_view(con, store: Store) -> None:
+    """Read-path variant: probe first, register only when the view is missing
+    or its parquet went away. Unconditionally running CREATE OR REPLACE on
+    every read is a catalog write — two concurrent dashboard requests doing it
+    can collide in DuckDB's catalog (write-write conflict) and 500 for no
+    reason. The empty-view fallback only upgrades to real data on the import
+    path, which re-registers under the write lock."""
+    try:
+        con.execute("SELECT 1 FROM referral_pairs LIMIT 0")
+    except Exception:  # noqa: BLE001 — missing view / vanished parquet
+        _register_referral_view(con, store)
 
 
 def medicare_status(store: Store) -> dict:
@@ -310,7 +351,7 @@ def medicare_status(store: Store) -> dict:
         except Exception:  # noqa: BLE001 — no change recorded yet
             pass
         try:
-            _register_referral_view(con, store)
+            _ensure_referral_view(con, store)
             out["referrals"] = [
                 {"label": a, "year": b, "pairs": c}
                 for a, b, c in con.execute(
@@ -372,7 +413,7 @@ def active_dataset(store: Store, year: str | None = None) -> tuple[str, str] | N
     pinned. ONE dataset at a time, never a blend: see org_referrals."""
     with store.connect() as con:
         try:
-            _register_referral_view(con, store)
+            _ensure_referral_view(con, store)
             rows = con.execute(
                 "SELECT any_value(source_label), data_year FROM referral_pairs "
                 "GROUP BY data_year ORDER BY data_year DESC").fetchall()
@@ -415,7 +456,7 @@ def org_referrals(store: Store, npis: list[str], direction: str = "in",
     mine, theirs = (("target_npi", "source_npi") if direction == "in"
                     else ("source_npi", "target_npi"))
     with store.connect() as con:
-        _register_referral_view(con, store)
+        _ensure_referral_view(con, store)
         cur = con.execute(f"""
             SELECT p.{theirs}                             AS npi,
                    coalesce(n.org_name, '')               AS name,

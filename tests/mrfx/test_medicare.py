@@ -8,7 +8,7 @@ from mrfx.medicare import (MedicareImportError, import_orf_roster,
                            npi_eligibility, org_referrals)
 
 MINE = ["1417594896", "1234567893"]
-DOCS = ["1901234567", "1811223344", "1722334455"]
+DOCS = ["1901234561", "1811223340", "1722334459"]
 
 
 def _seed_rates(store):
@@ -125,6 +125,38 @@ def test_vintages_are_never_blended(store, tmp_path):
     assert {d["year"] for d in st["referrals"]} == {"2015", "2022"}
 
 
+def test_import_inputs_are_validated_not_trusted(store, tmp_path):
+    """`year` and `label` are embedded in a COPY statement (DuckDB cannot
+    parameterize it) and `year` also names the output parquet — so a hostile
+    or fat-fingered value must be refused/sanitized, never interpolated."""
+    _seed_rates(store)
+    hop = tmp_path / "hop.csv"
+    hop.write_text("from_npi,to_npi,patient_count,transaction_count,"
+                   "average_day_wait,std_day_wait\n"
+                   f"{DOCS[0]},{MINE[0]},70,500,12.5,3.1\n")
+    for bad_year in ("2022'; DROP TABLE rates; --", "../../evil", "20222", "abc"):
+        with pytest.raises(MedicareImportError, match="4-digit year"):
+            import_shared_patients(store, hop, year=bad_year)
+    # label: quotes and path characters are stripped, import still works
+    r = import_shared_patients(store, hop, year="2022",
+                               label="Evil' ); DROP--/../lbl")
+    assert "'" not in r["label"] and "/" not in r["label"]
+    assert org_referrals(store, MINE, "in", year="2022")["rows"]
+
+
+def test_npi_check_digit():
+    """NPIs carry an ISO-7812 Luhn check digit over the 80840 prefix; the
+    batch check uses it to keep phone numbers out of the results."""
+    from mrfx.medicare import is_valid_npi
+
+    assert is_valid_npi("1234567893")            # CMS's canonical example
+    assert all(is_valid_npi(n) for n in MINE + DOCS)
+    assert not is_valid_npi("1234567890")        # wrong check digit
+    assert not is_valid_npi("3145551008")        # Luhn-valid but no 1/2 prefix
+    assert not is_valid_npi("141759489")         # 9 digits
+    assert not is_valid_npi("14175948960")       # 11 digits
+
+
 def test_roster_change_tracking_and_staleness(cfg, store, tmp_path):
     """Between two snapshots the actionable movement is who LOST order/refer
     standing — those NPIs must be flagged by name on referral rows. And a
@@ -150,7 +182,7 @@ def test_roster_change_tracking_and_staleness(cfg, store, tmp_path):
     v2.write_text("NPI,LAST_NAME,FIRST_NAME,PARTB,DME,HHA,PMD,HOSPICE\n"
                   f"{DOCS[0]},DOC0,ANNA,Y,Y,N,N,N\n"
                   f"{DOCS[1]},DOC1,ANNA,N,N,N,N,N\n"
-                  "1590000009,NEWDOC,SAM,Y,N,N,N,N\n")
+                  "1590000000,NEWDOC,SAM,Y,N,N,N,N\n")
     r2 = import_orf_roster(store, v2)
     assert r2["diff"] == {"prev_release": "2026-07-17", "added": 1, "removed": 1,
                           "partb_lost": 1, "partb_gained": 0}
@@ -203,7 +235,7 @@ def test_failed_imports_leave_previous_data_untouched(store, tmp_path):
     # roster: right header, ragged body (e.g. a truncated re-download)
     bad = tmp_path / "OrderReferring_2026-08-01.csv"
     bad.write_text("NPI,LAST_NAME,FIRST_NAME,PARTB,DME,HHA,PMD,HOSPICE\n"
-                   "1901234567,DOC,ANNA,Y,N,N,N,N,EXTRA,COLUMNS,HERE\n")
+                   "1901234561,DOC,ANNA,Y,N,N,N,N,EXTRA,COLUMNS,HERE\n")
     with pytest.raises(MedicareImportError, match="untouched"):
         import_orf_roster(store, bad)
     st = medicare_status(store)
@@ -277,15 +309,20 @@ def test_medicare_api_and_dashboard_tab(cfg, store, tmp_path):
     r = client.post("/api/medicare/org", json={"subject": "No Such Clinic LLC"})
     assert r.status_code == 422 and "no practice with NPIs" in r.json()["detail"]
 
-    # batch check: NPIs are pulled out of any pasted text, deduplicated
+    # batch check: NPIs are pulled out of any pasted text, deduplicated, and
+    # 10-digit numbers that fail the NPI check digit (phone numbers) are
+    # skipped and counted rather than reported as "not on the list"
     r = client.post("/api/medicare/eligibility",
-                    json={"text": f"call {DOCS[0]} and {MINE[0]}; also {DOCS[0]} again"})
+                    json={"text": f"call {DOCS[0]} at 3145551000 and {MINE[0]};"
+                                  f" also {DOCS[0]} again"})
     d = r.json()
-    assert d["checked"] == 2 and d["on_list"] == 1
+    assert d["checked"] == 2 and d["on_list"] == 1 and d["ignored_non_npi"] == 1
     by = {x["npi"]: x for x in d["rows"]}
     assert by[DOCS[0]]["on_list"] is True and by[MINE[0]]["on_list"] is False
     r = client.post("/api/medicare/eligibility", json={"text": "no npis here"})
     assert r.status_code == 422
+    r = client.post("/api/medicare/eligibility", json={"text": "3145551000"})
+    assert r.status_code == 422 and "phone numbers" in r.json()["detail"]
 
 
 def test_bundle_gains_the_medicare_layers_and_says_so(cfg, store, tmp_path):

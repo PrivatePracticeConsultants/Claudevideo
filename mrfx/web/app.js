@@ -1817,7 +1817,8 @@ async function refreshMedicareStatus() {
       <code class="inline">mrfx medicare --eligibility "%LOCALAPPDATA%\\OrderReferringTracker\\snapshots\\OrderReferring_&lt;date&gt;.csv"</code><br>
       · Referral structure (who shares patients with whom):
       <code class="inline">mrfx medicare --referrals &lt;shared-patient or Hop Teaming .csv&gt;</code><br>
-      Run these in the same window you run <code class="inline">mrfx serve</code> from, then refresh this tab.`;
+      <b>Stop the server first</b> (Ctrl+C in its window — imports need the database),
+      run the import(s), start <code class="inline">mrfx serve</code> again, then refresh this tab.`;
   } else nod.style.display = "none";
 }
 
@@ -1924,8 +1925,11 @@ async function runMedicareBatchCheck() {
   msg.textContent = "";
   state.lastMedicareCheck = d;
   $("#md-check-csv").disabled = false;
+  const skipped = d.ignored_non_npi
+    ? ` <span title="10-digit numbers that fail the NPI check digit — usually phone numbers">(${fmtInt(d.ignored_non_npi)} other 10-digit number${d.ignored_non_npi === 1 ? "" : "s"} skipped — not valid NPIs)</span>`
+    : "";
   outEl.innerHTML = `<div class="muted" style="margin-bottom:6px"><b>${fmtInt(d.on_list)}</b> of
-    <b>${fmtInt(d.checked)}</b> NPIs are on the Order &amp; Referring list.</div>` +
+    <b>${fmtInt(d.checked)}</b> NPIs are on the Order &amp; Referring list.${skipped}</div>` +
     medicareEligTable(d.rows);
 }
 

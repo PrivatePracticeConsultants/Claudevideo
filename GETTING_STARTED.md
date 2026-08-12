@@ -282,6 +282,21 @@ Once a file is `done`:
   current filtered view. The **Outreach CSV** button gives one row per practice
   with name + address + phone + per-code rate/percentile columns — ready to
   cross-reference your contact list and mail-merge (e.g. in Brevo).
+- **Medicare** tab (optional): who shares Medicare patients with a practice and
+  whether each of those providers may still order/refer for Medicare — plus a
+  batch NPI checker. It needs two public CMS files imported first; the tab
+  shows the exact commands when nothing is loaded. **Stop the server before
+  importing** (the import needs the database), then:
+
+  ```powershell
+  mrfx medicare --eligibility "$env:LOCALAPPDATA\OrderReferringTracker\snapshots\OrderReferring_<date>.csv"
+  mrfx medicare --referrals "C:\path\to\shared-patient-or-hop-teaming.csv"
+  ```
+
+  Both files are ones the **Medicare Order & Referring Tracker** already
+  downloads — point at its copies, nothing is re-fetched. Each time you import
+  a fresh eligibility snapshot, the app reports who joined, dropped off, or
+  lost Part B since the previous one, and flags affected referral sources.
 
 ---
 
@@ -527,6 +542,9 @@ prompt). They're an alternative to the dashboard buttons.
 | `mrfx export out.csv --cpt 97110 --payer "Aetna"` | Export a filtered CSV + methodology sidecar (state filtering lives in the dashboard and `mrfx outreach`) |
 | `mrfx outreach contacts.csv --state MO --cpt 97110,97140` | Contact/mail-merge CSV |
 | `mrfx enrich --bulk "E:\NPPES…zip"` | Fill in provider names/geography now, in one fast local pass from the NPPES bulk file (see "Make provider names fill in fast" above) |
+| `mrfx medicare --eligibility <csv>` | Import the CMS Order & Referring roster the tracker downloaded (stop the server first) |
+| `mrfx medicare --referrals <csv>` | Import CMS shared-patient / Hop Teaming pair data (stop the server first) |
+| `mrfx orgreport <practice>` | One-practice bundle (NPIs + rates + Medicare layers) to pair with the tracker |
 | `mrfx forget <filename> [more…]` | Erase chosen files' rates + raw copies (names from `mrfx status`) |
 | `mrfx reset --confirm` | Clear the analyzed data (keeps your downloaded files) |
 
