@@ -213,7 +213,8 @@ def import_orf_roster(store: Store, path: str | Path) -> dict:
 
 
 def import_shared_patients(store: Store, path: str | Path,
-                           label: str | None = None, year: str | None = None) -> dict:
+                           label: str | None = None, year: str | None = None,
+                           interval: str | int | None = None) -> dict:
     """Load a shared-patient pair file into the store as Parquet.
 
     Streamed and converted by DuckDB itself — a 210M-row Hop Teaming year is
@@ -233,12 +234,29 @@ def import_shared_patients(store: Store, path: str | Path,
     if not (year == "unknown" or re.fullmatch(r"\d{4}", year)):
         raise MedicareImportError(
             f"'{year}' is not a data year — pass a 4-digit year (e.g. --year 2022).")
+    # CMS publishes the SAME year at several windows (pspp_2015_days30 …
+    # days365): different files, different pair counts, the same year. Without
+    # the interval in the identity the second import would overwrite the first
+    # under one name, and the tab would call whichever landed last "2015".
+    if interval is None:
+        m = re.search(r"days(\d{1,3})\b", path.stem, re.IGNORECASE)
+        interval = m.group(1) if m else None
+    if interval is not None:
+        interval = str(interval).strip()
+        if not re.fullmatch(r"\d{1,3}", interval):
+            raise MedicareImportError(
+                f"'{interval}' is not a day interval — pass a number (e.g. 180).")
     label = label or ("CMS shared-patient" if fmt == FMT_CMS else "DocGraph Hop Teaming")
     label = re.sub(r"[^A-Za-z0-9 ._-]", "", label)[:40] or "shared-patient"
+    if interval and "day" not in label.lower():
+        label = f"{label} {interval}-day"
+    # The vintage identity everything groups by. Two datasets are the same
+    # vintage only if format, year AND window match.
+    dataset_id = f"{fmt}_{year}" + (f"_{interval}d" if interval else "")
 
     out_dir = Path(store.dir) / "referrals"
     out_dir.mkdir(parents=True, exist_ok=True)
-    out = out_dir / f"{fmt}_{year}.parquet"
+    out = out_dir / f"{dataset_id}.parquet"
     p = sql_path(path)
 
     # Column order differs by format — map explicitly, never positionally.
@@ -273,7 +291,8 @@ def import_shared_patients(store: Store, path: str | Path,
         try:
             con.execute(f"""
                 COPY (
-                    SELECT {select}, '{label}' AS source_label, '{year}' AS data_year
+                    SELECT {select}, '{label}' AS source_label, '{year}' AS data_year,
+                           '{dataset_id}' AS dataset_id
                     FROM {reader} e
                     WHERE EXISTS (SELECT 1 FROM rates r WHERE r.npi = e.{'column0' if fmt == FMT_CMS else 'from_npi'})
                        OR EXISTS (SELECT 1 FROM rates r WHERE r.npi = e.{'column1' if fmt == FMT_CMS else 'to_npi'})
@@ -286,25 +305,35 @@ def import_shared_patients(store: Store, path: str | Path,
                 f"through ({e}). Previously imported referral data is untouched.") from e
         tmp.replace(out)
         _register_referral_view(con, store)
-        n = con.execute("SELECT count(*) FROM referral_pairs WHERE data_year = ?",
-                        [year]).fetchone()[0]
+        n = con.execute("SELECT count(*) FROM referral_pairs WHERE dataset_id = ?",
+                        [dataset_id]).fetchone()[0]
     log.info("referrals: kept %s pairs touching this store's providers (%s %s)",
              f"{n:,}", label, year)
-    return {"pairs": n, "format": fmt, "year": year, "label": label, "path": str(out)}
+    return {"pairs": n, "format": fmt, "year": year, "label": label,
+            "interval": interval, "dataset_id": dataset_id, "path": str(out)}
 
 
 def _register_referral_view(con, store: Store) -> None:
     """(Re)write the referral_pairs view — a CATALOG WRITE, so this belongs on
     the import path (under store.write_lock). Read paths use _ensure below."""
     glob = sql_path(Path(store.dir) / "referrals" / "*.parquet")
+    # union_by_name so a store holding BOTH pre-dataset_id parquet and new ones
+    # still reads; the missing column is then synthesized below, so every row
+    # has a vintage identity whether or not its file was written with one.
+    reader = f"read_parquet('{glob}', union_by_name = true)"
     try:
-        con.execute(f"CREATE OR REPLACE VIEW referral_pairs AS SELECT * FROM read_parquet('{glob}')")
+        cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {reader}").fetchall()}
+        sel = ("* REPLACE (coalesce(dataset_id, source_label || '_' || data_year) "
+               "AS dataset_id)" if "dataset_id" in cols
+               else "*, source_label || '_' || data_year AS dataset_id")
+        con.execute(f"CREATE OR REPLACE VIEW referral_pairs AS SELECT {sel} FROM {reader}")
     except Exception:  # noqa: BLE001 — no files yet: an empty view beats a hard error
         con.execute("CREATE OR REPLACE VIEW referral_pairs AS "
                     "SELECT NULL::VARCHAR AS source_npi, NULL::VARCHAR AS target_npi, "
                     "NULL::BIGINT AS patients, NULL::BIGINT AS transactions, "
                     "NULL::BIGINT AS same_day, NULL::DOUBLE AS avg_day_wait, "
-                    "NULL::VARCHAR AS source_label, NULL::VARCHAR AS data_year WHERE FALSE")
+                    "NULL::VARCHAR AS source_label, NULL::VARCHAR AS data_year, "
+                    "NULL::VARCHAR AS dataset_id WHERE FALSE")
 
 
 def _ensure_referral_view(con, store: Store) -> None:
@@ -353,10 +382,11 @@ def medicare_status(store: Store) -> dict:
         try:
             _ensure_referral_view(con, store)
             out["referrals"] = [
-                {"label": a, "year": b, "pairs": c}
-                for a, b, c in con.execute(
-                    "SELECT source_label, data_year, count(*) FROM referral_pairs "
-                    "GROUP BY 1, 2 ORDER BY 2").fetchall()]
+                {"label": a, "year": b, "pairs": c, "dataset_id": d}
+                for a, b, c, d in con.execute(
+                    "SELECT any_value(source_label), any_value(data_year), count(*), "
+                    "dataset_id FROM referral_pairs GROUP BY dataset_id "
+                    "ORDER BY any_value(data_year), dataset_id").fetchall()]
         except Exception:  # noqa: BLE001
             pass
     return out
@@ -408,31 +438,48 @@ def recent_losses(store: Store, npis: list[str]) -> dict[str, str]:
             return {}
 
 
-def active_dataset(store: Store, year: str | None = None) -> tuple[str, str] | None:
-    """(label, year) of the dataset to answer with — the newest loaded unless
-    pinned. ONE dataset at a time, never a blend: see org_referrals."""
+def active_dataset(store: Store, year: str | None = None,
+                   dataset_id: str | None = None) -> tuple[str, str, str] | None:
+    """(label, year, dataset_id) of the dataset to answer with — the newest
+    loaded unless pinned. ONE dataset at a time, never a blend: see
+    org_referrals. Pin by `dataset_id` (exact) or `year` (rejected when the
+    year is ambiguous — e.g. CMS 2015 loaded at both 30- and 180-day windows,
+    which are different measurements of the same year)."""
     with store.connect() as con:
         try:
             _ensure_referral_view(con, store)
             rows = con.execute(
-                "SELECT any_value(source_label), data_year FROM referral_pairs "
-                "GROUP BY data_year ORDER BY data_year DESC").fetchall()
+                "SELECT any_value(source_label), any_value(data_year), dataset_id "
+                "FROM referral_pairs GROUP BY dataset_id "
+                "ORDER BY any_value(data_year) DESC, dataset_id").fetchall()
         except Exception:  # noqa: BLE001
             return None
     if not rows:
         return None
-    if year:
-        for label, y in rows:
-            if y == year:
-                return (label, y)
+    have = ", ".join(f"{lbl} {y} [{ds}]" for lbl, y, ds in rows)
+    if dataset_id:
+        for r in rows:
+            if r[2] == dataset_id:
+                return tuple(r)
         raise MedicareImportError(
-            f"no referral data loaded for {year}; have: "
-            + ", ".join(f"{lbl} {y}" for lbl, y in rows))
-    return (rows[0][0], rows[0][1])
+            f"no referral dataset '{dataset_id}' is loaded; have: {have}")
+    if year:
+        hits = [r for r in rows if r[1] == year]
+        if not hits:
+            raise MedicareImportError(
+                f"no referral data loaded for {year}; have: {have}")
+        if len(hits) > 1:
+            raise MedicareImportError(
+                f"{year} is loaded as more than one dataset — they measure "
+                f"different windows and must not be mixed. Pick one: "
+                + ", ".join(f"{lbl} [{ds}]" for lbl, _y, ds in hits))
+        return tuple(hits[0])
+    return tuple(rows[0])
 
 
 def org_referrals(store: Store, npis: list[str], direction: str = "in",
-                  limit: int = 100, year: str | None = None) -> dict:
+                  limit: int = 100, year: str | None = None,
+                  dataset_id: str | None = None) -> dict:
     """Who shares patients INTO this practice (direction='in'), or where it
     shares them onward ('out'), aggregated over the practice's NPIs.
 
@@ -448,11 +495,11 @@ def org_referrals(store: Store, npis: list[str], direction: str = "in",
     source is identifiable without any extra dataset."""
     if direction not in ("in", "out"):
         raise ValueError("direction must be 'in' or 'out'")
-    active = active_dataset(store, year) if npis else None
+    active = active_dataset(store, year, dataset_id) if npis else None
     if not npis or active is None:
         return {"direction": direction, "rows": [], "dataset": None, "data_year": None,
-                "caveat": REFERRAL_CAVEAT}
-    label, yr = active
+                "dataset_id": None, "caveat": REFERRAL_CAVEAT}
+    label, yr, ds_id = active
     mine, theirs = (("target_npi", "source_npi") if direction == "in"
                     else ("source_npi", "target_npi"))
     with store.connect() as con:
@@ -466,16 +513,16 @@ def org_referrals(store: Store, npis: list[str], direction: str = "in",
                    round(avg(p.avg_day_wait), 1)          AS avg_day_wait
             FROM referral_pairs p
             LEFT JOIN npi_directory n ON n.npi = p.{theirs}
-            WHERE p.data_year = ?
+            WHERE p.dataset_id = ?
               AND p.{mine} IN (SELECT unnest(?::VARCHAR[]))
               AND p.{theirs} NOT IN (SELECT unnest(?::VARCHAR[]))
             GROUP BY 1, 2, 3
             ORDER BY patients DESC NULLS LAST
             LIMIT {int(limit)}
-        """, [yr, npis, npis])
+        """, [ds_id, npis, npis])
         rows = [dict(zip([d[0] for d in cur.description], r)) for r in cur.fetchall()]
     return {"direction": direction, "rows": rows, "dataset": label, "data_year": yr,
-            "caveat": REFERRAL_CAVEAT}
+            "dataset_id": ds_id, "caveat": REFERRAL_CAVEAT}
 
 
 # Compact NUCC prefix -> readable family, for the dashboard's referral tables.

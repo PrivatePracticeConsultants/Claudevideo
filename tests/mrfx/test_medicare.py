@@ -1,6 +1,8 @@
 """The two CMS layers MRFs cannot supply: order/refer eligibility, and
 shared-patient (referral-structure) pairs."""
 
+import time
+
 import pytest
 
 from mrfx.medicare import (MedicareImportError, import_orf_roster,
@@ -123,6 +125,164 @@ def test_vintages_are_never_blended(store, tmp_path):
 
     st = medicare_status(store)
     assert {d["year"] for d in st["referrals"]} == {"2015", "2022"}
+
+
+def _fake_tracker(root, releases=("2026-08-01",), datasets=("hop_teaming_2022.csv",),
+                  meta=None):
+    """A stand-in for the tracker's data folder, laid out exactly as its source
+    does: snapshots/, referral-map/, dataset-meta.json, state.json."""
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "state.json").write_text('{"ReleaseDate": "%s"}' % (releases[0] if releases else ""))
+    snaps = root / "snapshots"
+    snaps.mkdir(exist_ok=True)
+    for rel in releases:
+        (snaps / f"OrderReferring_{rel}.csv").write_text(
+            "NPI,LAST_NAME,FIRST_NAME,PARTB,DME,HHA,PMD,HOSPICE\n"
+            + "".join(f"{d},DOC{i},ANNA,Y,N,N,N,N\n" for i, d in enumerate(DOCS)))
+    rm = root / "referral-map"
+    rm.mkdir(exist_ok=True)
+    for name in datasets:
+        if name.startswith("hop_"):
+            (rm / name).write_text(
+                "from_npi,to_npi,patient_count,transaction_count,"
+                "average_day_wait,std_day_wait\n"
+                + "".join(f"{d},{MINE[0]},{70 + i},{500 + i},12.5,3.1\n"
+                          for i, d in enumerate(DOCS)))
+        else:                                    # pspp_<year>_days<n>.txt
+            (rm / name).write_text("".join(f"{d},{MINE[0]},{300 + i},{40 + i},3\n"
+                                           for i, d in enumerate(DOCS)))
+    if meta:
+        (rm / "dataset-meta.json").write_text(meta)
+    return root
+
+
+def test_tracker_discovery_finds_what_is_on_disk(store, tmp_path, monkeypatch):
+    """The merge's premise: the files that join the two tools are already on
+    the user's disk, so the app must find them without being told."""
+    from mrfx.tracker import discover, find_data_dir
+
+    _seed_rates(store)
+    root = _fake_tracker(tmp_path / "OrderReferringTracker",
+                         releases=("2026-08-01", "2026-07-17"),
+                         datasets=("hop_teaming_2022.csv", "pspp_2015_days180.txt"))
+
+    # found via the tracker's own environment variable, with no config at all
+    monkeypatch.setenv("ORF_DATA_DIR", str(root))
+    assert find_data_dir() == root
+    monkeypatch.delenv("ORF_DATA_DIR")
+    # and via LOCALAPPDATA, the normal Windows install
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    assert find_data_dir() == root
+    monkeypatch.delenv("LOCALAPPDATA")
+
+    d = discover(store, root)
+    assert d["found"] and d["data_dir"] == str(root)
+    # newest roster first; both listed, neither imported yet
+    assert [s["release"] for s in d["snapshots"]] == ["2026-08-01", "2026-07-17"]
+    assert not any(s["imported"] for s in d["snapshots"])
+    assert {x["dataset_id"] for x in d["datasets"]} == {
+        "hop-teaming_2022", "cms-shared-patient_2015_180d"}
+    # ONLY the newest roster is offered — importing an older snapshot would
+    # move "who may order/refer today" backwards
+    elig = [p for p in d["pending"] if p["kind"] == "eligibility"]
+    assert len(elig) == 1 and "2026-08-01" in elig[0]["label"]
+    # the licensed dataset is flagged so the UI can carry the licence warning
+    hop = [p for p in d["pending"] if p.get("dataset_id") == "hop-teaming_2022"][0]
+    assert hop["non_commercial"] is True
+
+    # after importing, those items stop being pending — the card goes quiet
+    import_orf_roster(store, elig[0]["path"])
+    import_shared_patients(store, hop["path"], year="2022")
+    d2 = discover(store, root)
+    assert d2["snapshots"][0]["imported"] is True
+    assert not [p for p in d2["pending"] if p["kind"] == "eligibility"]
+    assert [p["dataset_id"] for p in d2["pending"]] == ["cms-shared-patient_2015_180d"]
+
+    # a folder that is not the tracker's is not "connected"
+    assert find_data_dir(tmp_path / "nope") is None
+    assert discover(store, tmp_path / "nope")["found"] is False
+
+
+def test_missing_tracker_is_a_clear_answer_not_a_crash(store, tmp_path, monkeypatch):
+    from mrfx.tracker import discover
+
+    monkeypatch.delenv("ORF_DATA_DIR", raising=False)
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    d = discover(store, None)
+    assert d["found"] is False and d["data_dir"] is None
+    assert d["searched"], "must say where it looked, so the user can fix it"
+    assert d["pending"] == [] and d["snapshots"] == [] and d["datasets"] == []
+
+
+def test_same_year_at_two_windows_is_two_datasets(store, tmp_path):
+    """CMS publishes one year at several windows (pspp_2015_days30 …
+    days180): different files, different counts, the SAME year. Keyed by year
+    alone the second import would overwrite the first and the app would call
+    whatever landed last '2015'."""
+    _seed_rates(store)
+    d30 = tmp_path / "pspp_2015_days30.txt"
+    d30.write_text(f"{DOCS[0]},{MINE[0]},100,11,3\n")
+    d180 = tmp_path / "pspp_2015_days180.txt"
+    d180.write_text(f"{DOCS[0]},{MINE[0]},900,99,3\n")
+    r30 = import_shared_patients(store, d30)
+    r180 = import_shared_patients(store, d180)
+    assert r30["interval"] == "30" and r180["interval"] == "180"
+    assert r30["dataset_id"] != r180["dataset_id"]
+
+    st = medicare_status(store)
+    assert len(st["referrals"]) == 2, "two windows must not collapse into one"
+    assert {d["dataset_id"] for d in st["referrals"]} == {
+        "cms-shared-patient_2015_30d", "cms-shared-patient_2015_180d"}
+
+    # pinning by year alone is now ambiguous, and saying so beats picking one
+    with pytest.raises(MedicareImportError, match="more than one dataset"):
+        org_referrals(store, MINE, "in", year="2015")
+    got = org_referrals(store, MINE, "in", dataset_id="cms-shared-patient_2015_30d")
+    assert [r["patients"] for r in got["rows"]] == [11]
+    assert "30-day" in got["dataset"]
+    got180 = org_referrals(store, MINE, "in", dataset_id="cms-shared-patient_2015_180d")
+    assert [r["patients"] for r in got180["rows"]] == [99]
+
+
+def test_dashboard_imports_from_the_tracker_without_stopping_the_server(
+        cfg, store, tmp_path, monkeypatch):
+    """The friction the merge removes. The CLI must refuse while the server
+    owns the database; the SERVER importing its own store is the one process
+    that may — so the user never stops anything."""
+    from fastapi.testclient import TestClient
+    from mrfx.api import create_app
+
+    _seed_rates(store)
+    root = _fake_tracker(tmp_path / "OrderReferringTracker")
+    monkeypatch.setattr(cfg, "tracker_dir", root, raising=False)
+    client = TestClient(create_app(cfg, store))
+
+    d = client.get("/api/medicare/tracker").json()
+    assert d["found"] and len(d["pending"]) == 2 and d["job"]["state"] == "idle"
+
+    r = client.post("/api/medicare/tracker/import", json={})
+    assert r.status_code == 200 and len(r.json()["started"]) == 2
+    for _ in range(200):                       # the import runs on a thread
+        job = client.get("/api/medicare/tracker").json()["job"]
+        if job["state"] == "done":
+            break
+        time.sleep(0.05)
+    assert job["state"] == "done", job
+    assert all(x["ok"] for x in job["done"]), job["done"]
+
+    st = client.get("/api/medicare/status").json()
+    assert st["eligibility"]["providers"] == len(DOCS)
+    assert [x["dataset_id"] for x in st["referrals"]] == ["hop-teaming_2022"]
+    # and the tab now has nothing left to offer
+    assert client.get("/api/medicare/tracker").json()["pending"] == []
+
+    # a path the discovery did not just offer is refused — the request must not
+    # be able to point the reader at an arbitrary file
+    secret = tmp_path / "secret.csv"
+    secret.write_text("NPI,LAST_NAME,FIRST_NAME,PARTB,DME,HHA,PMD,HOSPICE\n")
+    r = client.post("/api/medicare/tracker/import", json={"paths": [str(secret)]})
+    assert r.status_code == 422
 
 
 def test_import_inputs_are_validated_not_trusted(store, tmp_path):
@@ -290,8 +450,8 @@ def test_medicare_api_and_dashboard_tab(cfg, store, tmp_path):
 
     st = client.get("/api/medicare/status").json()
     assert st["eligibility"]["providers"] == len(DOCS)
-    assert st["referrals"] == [
-        {"label": "DocGraph Hop Teaming", "year": "2022", "pairs": len(DOCS)}]
+    assert st["referrals"] == [{"label": "DocGraph Hop Teaming", "year": "2022",
+                                "pairs": len(DOCS), "dataset_id": "hop-teaming_2022"}]
 
     d = client.post("/api/medicare/org", json={"subject": "431234567"}).json()
     rows = d["referrals_in"]["rows"]

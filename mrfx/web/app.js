@@ -115,6 +115,10 @@ function switchView(view) {
   $$("nav button").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
   $$(".view").forEach((v) => v.classList.toggle("active", v.id === `view-${view}`));
   clearInterval(state.filesTimer);
+  // the tracker-import poll belongs to the Medicare tab; leaving it stops it
+  if (view !== "medicare" && state.trackerPoll) {
+    clearInterval(state.trackerPoll); state.trackerPoll = null;
+  }
   if (view === "files") {
     loadFiles(); loadUrlQueue();
     state.filesTimer = setInterval(() => { loadFiles(); loadUrlQueue(); }, 4000);
@@ -852,6 +856,7 @@ async function openEntity(grain, unitId) {
     <div class="meta">${grain.toUpperCase()} · ${esc(maskTin(unitId))}${payers.length ? " · " + payers.map(esc).join(" / ") : ""}</div>
     ${siteHtml}
     ${varianceNote}
+    ${medicareGlanceHtml(d.medicare)}
     <h3>Median dollar rate by code${payers.length > 1 ? " and payer" : ""}</h3>
     ${payers.length > 1 ? `<div class="legend">${payers.slice(0, 2).map((p, i) =>
       `<span><span class="sw" style="background:var(--accent${i ? "-2" : ""})"></span>${esc(p)}</span>`).join("")}</div>` : ""}
@@ -891,6 +896,22 @@ async function openEntity(grain, unitId) {
   };
   renderBarChart($("#entity-chart"), d.chart, payers.slice(0, 2));
 }
+// The Medicare layers travel WITH the practice: whoever opens one anywhere in
+// the app sees its referral base without changing tabs. Absent (null) unless
+// those layers were imported — an empty box would read as "no referrals".
+function medicareGlanceHtml(m) {
+  if (!m) return "";
+  const warn = m.lost_standing
+    ? ` · <span class="warn-text">${fmtInt(m.lost_standing)} lost order/refer standing in the latest roster</span>`
+    : "";
+  return `<div class="rc-summary" style="margin:10px 0">
+    <b>Medicare referral base:</b> ${fmtInt(m.sources)} source${m.sources === 1 ? "" : "s"} ·
+    ${fmtInt(m.patients)} shared patients${warn}
+    <div class="muted" style="font-size:11.5px;margin-top:2px">${esc(m.dataset || "")}
+      ${esc(m.data_year || "")} — shared-patient data is not a referral record; full detail and
+      caveats on the Medicare tab.</div></div>`;
+}
+
 function closeDrawer() {
   $("#drawer").classList.remove("open");
   $("#overlay").classList.remove("open");
@@ -1756,6 +1777,9 @@ async function downloadRatecardCsv() {
 
 let medicareInit = false;
 async function initMedicare() {
+  // tracker card FIRST: it decides whether the "nothing imported yet" banner
+  // would be repeating a button the user can already see
+  await refreshTrackerCard();
   refreshMedicareStatus();
   if (medicareInit) { refreshSubjectPickers("#md-subjects", []); return; }
   medicareInit = true;
@@ -1772,6 +1796,88 @@ async function initMedicare() {
 // the roster is refreshed by CMS ~twice a week; past this age the tab calls
 // the loaded snapshot stale (mirror of medicare.STALE_ROSTER_DAYS)
 const STALE_ROSTER_DAYS = 45;
+
+/* ---- the merge: the tracker's downloads, imported in place ----------------
+   The two tools own disjoint halves of the same practice, and the files that
+   join them are already on this machine. So the app finds them and imports
+   them itself — the server owns the database, so nothing has to be stopped. */
+async function refreshTrackerCard() {
+  const el = $("#md-tracker");
+  let d;
+  try { d = await api("/api/medicare/tracker"); }
+  catch { el.style.display = "none"; state.trackerOffering = false; return; }
+  state.trackerJob = d.job;
+  // whether THIS card is already showing a one-click import, so the
+  // "nothing imported yet" banner can stay quiet instead of repeating it
+  state.trackerOffering = !!(d.found && (d.pending || []).length)
+    || (d.job && d.job.state === "running");
+
+  if (d.job && d.job.state === "running") {
+    el.style.display = "";
+    el.innerHTML = `<b>Importing from the Order &amp; Referring Tracker…</b>
+      <div class="loading" style="margin-top:6px">${esc(d.job.message || "working")}</div>
+      <div class="muted" style="margin-top:4px">A referral year is several GB — this can take
+      a few minutes. You can keep using the rest of the app; this card updates itself.</div>`;
+    if (!state.trackerPoll) state.trackerPoll = setInterval(refreshTrackerCard, 2000);
+    return;
+  }
+  if (state.trackerPoll) { clearInterval(state.trackerPoll); state.trackerPoll = null; }
+
+  // just-finished report, shown once
+  let finished = "";
+  if (d.job && d.job.state === "done" && (d.job.done || []).length && !state.trackerReported) {
+    state.trackerReported = true;
+    finished = `<div style="margin-bottom:8px">${d.job.done.map((x) =>
+      `<div>${x.ok ? "<b>Imported</b>" : '<span class="warn-text">Could not import</span>'}
+        ${esc(x.label)} — ${esc(x.detail)}</div>`).join("")}</div>`;
+    refreshMedicareStatus();
+  }
+
+  if (!d.found) {
+    // Only worth saying when there is nothing loaded at all; a user who has
+    // imported already does not need to be told where the tracker isn't.
+    if (d.status && !d.status.eligibility && !(d.status.referrals || []).length) {
+      el.style.display = "";
+      el.innerHTML = `${finished}<b>Order &amp; Referring Tracker not found.</b>
+        If it is installed somewhere unusual, set <code class="inline">tracker_dir</code>
+        in <code class="inline">config/mrfx.yaml</code> to its data folder and restart.
+        Looked in:<div class="muted" style="margin-top:4px">${
+          d.searched.map((s) => `<div><code class="inline">${esc(s)}</code></div>`).join("")}</div>`;
+    } else el.style.display = "none";
+    return;
+  }
+  if (!d.pending.length) {
+    el.style.display = finished ? "" : "none";
+    if (finished) el.innerHTML = finished +
+      `<span class="muted">Everything the tracker has downloaded is imported.</span>`;
+    return;
+  }
+  const licence = d.pending.some((p) => p.non_commercial)
+    ? `<div class="muted" style="margin-top:6px"><b>Licence note:</b> DocGraph Hop Teaming is
+       CareSet's research release under CC BY-NC-SA 4.0 — <b>non-commercial</b>. If you use it
+       in paid consulting work, confirm your terms with CareSet. The CMS shared-patient file
+       carries no such restriction.</div>` : "";
+  el.style.display = "";
+  // break-anywhere: a data folder path has no spaces and is long enough to
+  // push the whole page into a horizontal scroll if it is allowed to run on
+  el.innerHTML = `${finished}<b>Found the Order &amp; Referring Tracker.</b>
+    <span class="muted" style="overflow-wrap:anywhere">${esc(d.data_dir)}</span>
+    <div style="margin:8px 0">It has ${d.pending.length} file${d.pending.length === 1 ? "" : "s"}
+      this app hasn't imported yet:</div>
+    <ul style="margin:0 0 8px 18px">${d.pending.map((p) =>
+      `<li>${esc(p.label)} <span class="muted">— ${esc(p.why)}, ${fmtInt(Math.round(p.size_mb))} MB</span></li>`).join("")}</ul>
+    <button class="btn primary" id="md-tracker-import">Import ${d.pending.length === 1 ? "it" : "them"} now</button>
+    <span class="muted" style="margin-left:8px">Nothing is re-downloaded, and you don't have to stop the app.</span>
+    ${licence}`;
+  $("#md-tracker-import").addEventListener("click", async (ev) => {
+    ev.target.disabled = true;
+    ev.target.textContent = "Starting…";
+    state.trackerReported = false;
+    try { await postJson("/api/medicare/tracker/import", {}); }
+    catch (e) { alert("Could not start the import.\n\n" + e.message); }
+    refreshTrackerCard();
+  });
+}
 
 async function refreshMedicareStatus() {
   let st;
@@ -1802,23 +1908,31 @@ async function refreshMedicareStatus() {
       (lost ? ` — affected referral sources are flagged in the tables below.` : ``);
   } else chg.style.display = "none";
   // dataset picker: one option per loaded referral release, keep the pick across refreshes
+  // Keyed by dataset_id, not year: CMS publishes one year at several windows
+  // (30/60/90/180/365-day), which are different measurements and must stay
+  // separately selectable.
   const yearSel = $("#md-year");
   const keep = yearSel.value;
   yearSel.innerHTML = `<option value="">newest loaded</option>` +
-    (st.referrals || []).map((r) => `<option value="${esc(r.year)}">${esc(r.label)} ${esc(r.year)}</option>`).join("");
+    (st.referrals || []).map((r) =>
+      `<option value="${esc(r.dataset_id)}">${esc(r.label)} ${esc(r.year)}</option>`).join("");
   if ([...yearSel.options].some((o) => o.value === keep)) yearSel.value = keep;
   const nod = $("#md-nodata");
   if (!st.eligibility && !(st.referrals || []).length) {
     nod.style.display = "";
+    // When the tracker card is already offering a one-click import, this
+    // banner would repeat it and bury the button in prose. Say it once.
+    if (state.trackerOffering) { nod.style.display = "none"; return; }
     nod.innerHTML = `<b>Nothing imported yet.</b> This tab reads two public CMS datasets that
-      machine-readable files cannot supply. Import the copies the Order &amp; Referring Tracker
-      already downloaded — nothing is re-downloaded:<br>
-      · Eligibility (who may order/refer for Medicare):
-      <code class="inline">mrfx medicare --eligibility "%LOCALAPPDATA%\\OrderReferringTracker\\snapshots\\OrderReferring_&lt;date&gt;.csv"</code><br>
-      · Referral structure (who shares patients with whom):
-      <code class="inline">mrfx medicare --referrals &lt;shared-patient or Hop Teaming .csv&gt;</code><br>
-      <b>Stop the server first</b> (Ctrl+C in its window — imports need the database),
-      run the import(s), start <code class="inline">mrfx serve</code> again, then refresh this tab.`;
+      machine-readable files cannot supply: who may order/refer for Medicare, and who shares
+      patients with whom. <b>If you have the Order &amp; Referring Tracker, use the Import
+      button above</b> — the app finds its downloads and loads them in place, with nothing
+      re-downloaded and nothing to stop.
+      <div class="muted" style="margin-top:6px">Prefer the terminal, or the files live elsewhere?
+      Stop the server first (imports need the database), then run
+      <code class="inline">mrfx medicare --from-tracker</code>, or point at files by hand with
+      <code class="inline">mrfx medicare --eligibility &lt;OrderReferring_&lt;date&gt;.csv&gt;</code> /
+      <code class="inline">--referrals &lt;shared-patient or Hop Teaming .csv&gt;</code>.</div>`;
   } else nod.style.display = "none";
 }
 
@@ -1831,7 +1945,7 @@ async function runMedicareOrg() {
   out.classList.remove("empty");
   out.innerHTML = `<div class="loading">Looking up Medicare layers</div>`;
   let d;
-  try { d = await postJson("/api/medicare/org", { subject, year: $("#md-year").value || null }); }
+  try { d = await postJson("/api/medicare/org", { subject, dataset_id: $("#md-year").value || null }); }
   catch (e) { out.innerHTML = `<div class="empty"><h3>Could not look up</h3>${esc(e.message)}</div>`; return; }
   state.lastMedicareOrg = d;
   $("#md-csv").disabled = !(d.referrals_in.rows.length || d.referrals_out.rows.length);

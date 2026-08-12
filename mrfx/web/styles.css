@@ -50,17 +50,23 @@ header {
   border-bottom: 1px solid var(--border);
   padding: 0 24px;
   display: flex; align-items: center; gap: 28px;
-  height: 56px;
+  /* min-height, not height: the nav wraps to a second line on a narrow window
+     (or once enough tabs exist), and a fixed height would clip the wrapped row */
+  min-height: 56px;
 }
 header h1 { font-size: 16px; font-weight: 650; margin: 0; letter-spacing: -0.01em; }
 header h1 span { color: var(--accent); }
 #dataset-stats { color: var(--muted); font-size: 12.5px; white-space: nowrap; }
 #dataset-stats b { color: var(--ink-2); font-weight: 600; font-variant-numeric: tabular-nums; }
-nav { display: flex; gap: 4px; margin-left: auto; }
+/* wrap rather than push the page sideways: the tab row grows over time (the
+   Medicare tab was the one that first overflowed a 1500px window), and a
+   horizontally-scrolling body makes every view feel broken */
+nav { display: flex; flex-wrap: wrap; gap: 4px; margin-left: auto; justify-content: flex-end; }
 nav button {
   background: none; border: none; cursor: pointer;
   padding: 8px 14px; border-radius: var(--radius);
   color: var(--ink-2); font-weight: 500;
+  white-space: nowrap;
 }
 nav button:hover { background: var(--grid); }
 nav button.active { color: var(--accent); font-weight: 650; background: color-mix(in srgb, var(--accent) 10%, transparent); }

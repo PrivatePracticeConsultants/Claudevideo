@@ -906,7 +906,37 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             "chart": chart, "variants": len(variance),
             "website": website, "website_lookup": website_lookup,
             "website_tins": tin_list if grain != "npi" else [],
+            # The Medicare layers travel WITH the practice rather than living
+            # only on their own tab: whoever opens a practice anywhere in the
+            # app sees at a glance that it has referral data and whether any
+            # of its referrers just lost standing. Absent (None) unless the
+            # layers have been imported — never an empty box implying "none".
+            "medicare": _medicare_glance(
+                [r["npi"] for r in member_npis] if member_npis
+                else ([unit_id] if grain == "npi" else [])),
         }
+
+    def _medicare_glance(npis: list[str]) -> dict | None:
+        """Two numbers and a warning for the entity drawer. Best-effort and
+        never fatal: a drawer must still open when the Medicare layers are
+        absent, half-imported, or mid-import."""
+        if not npis:
+            return None
+        try:
+            from .medicare import org_referrals, recent_losses
+            ref = org_referrals(store, npis, "in", limit=500)
+            if not ref["rows"]:
+                return None
+            lost = recent_losses(store, [r["npi"] for r in ref["rows"]])
+            return {
+                "sources": len(ref["rows"]),
+                "patients": sum(r["patients"] or 0 for r in ref["rows"]),
+                "lost_standing": len(lost),
+                "dataset": ref["dataset"], "data_year": ref["data_year"],
+            }
+        except Exception:  # noqa: BLE001 — a cosmetic panel never breaks a drawer
+            log.debug("medicare glance unavailable", exc_info=True)
+            return None
 
     @app.get("/api/code/{code}")
     def code_detail(code: str, request: Request):
@@ -1356,6 +1386,93 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
 
     # -- Medicare layers (eligibility + referral structure) ----------------------------
 
+    # State of the most recent tracker import, polled by the dashboard. The
+    # import runs on a daemon thread — a Hop Teaming year is 7-11 GB and takes
+    # minutes, which must not hold a request open or block the event loop.
+    # ONE at a time: the store has a single writer, and two concurrent imports
+    # would queue on the write lock anyway with no way to report which is which.
+    tracker_job: dict = {"state": "idle", "message": "", "items": [], "done": []}
+    tracker_job_lock = threading.Lock()
+
+    def _run_tracker_import(items: list[dict]) -> None:
+        from .medicare import import_orf_roster, import_shared_patients
+
+        done: list[dict] = []
+        try:
+            for i, item in enumerate(items, 1):
+                label = item.get("label") or item.get("path")
+                with tracker_job_lock:
+                    tracker_job["message"] = f"importing {label} ({i} of {len(items)})…"
+                try:
+                    if item.get("kind") == "eligibility":
+                        r = import_orf_roster(store, item["path"])
+                        done.append({"label": label, "ok": True,
+                                     "detail": f"{r['providers']:,} providers "
+                                               f"(release {r['release']})",
+                                     "diff": r.get("diff")})
+                    else:
+                        r = import_shared_patients(
+                            store, item["path"], year=item.get("year") or None,
+                            interval=item.get("interval") or None)
+                        done.append({"label": label, "ok": True,
+                                     "detail": f"{r['pairs']:,} pairs touching your providers"})
+                except Exception as e:  # noqa: BLE001 — one bad file must not
+                    # abort the others; fault isolation, same as the ingest path
+                    log.warning("tracker import failed for %s: %s", label, e)
+                    done.append({"label": label, "ok": False, "detail": str(e)})
+                with tracker_job_lock:
+                    tracker_job["done"] = list(done)
+        finally:
+            with tracker_job_lock:
+                tracker_job["state"] = "done"
+                tracker_job["done"] = list(done)
+                ok = sum(1 for d in done if d["ok"])
+                tracker_job["message"] = (
+                    f"imported {ok} of {len(items)}" if done else "nothing to import")
+
+    def _tracker_discover() -> dict:
+        from .tracker import discover
+        return discover(store, getattr(cfg, "tracker_dir", None))
+
+    @app.get("/api/medicare/tracker")
+    def api_tracker():
+        """Where the Order & Referring Tracker is, what it has downloaded, and
+        what of that is not yet imported here. Read-only: the tracker's files
+        belong to the tracker, which has its own retention rules."""
+        d = _tracker_discover()
+        with tracker_job_lock:
+            d["job"] = dict(tracker_job)
+        return d
+
+    @app.post("/api/medicare/tracker/import")
+    def api_tracker_import(body: dict = Body(...)):
+        """Import selected tracker files INTO THIS RUNNING SERVER. The CLI has
+        to refuse while `mrfx serve` holds the database; the server importing
+        its own store is the one process allowed to, so the user never has to
+        stop anything."""
+        with tracker_job_lock:
+            if tracker_job["state"] == "running":
+                raise HTTPException(409, "an import is already running — "
+                                    f"{tracker_job['message']}")
+        found = {p["path"]: p for p in _tracker_discover()["pending"]}
+        want = body.get("paths")
+        # Import only what discovery just offered: the request names files by
+        # path, and echoing an arbitrary path back into a reader would let the
+        # dashboard read anywhere on disk.
+        items = ([found[p] for p in want if p in found] if want
+                 else list(found.values()))
+        if not items:
+            raise HTTPException(422, "nothing to import — either the tracker has "
+                                "nothing new, or those files are no longer there. "
+                                "Refresh and try again.")
+        with tracker_job_lock:
+            tracker_job.update({"state": "running", "done": [],
+                                "items": [i["label"] for i in items],
+                                "message": f"starting {len(items)} import(s)…"})
+        threading.Thread(target=_bg_safe, args=(_run_tracker_import, items),
+                         name="mrfx-tracker-import", daemon=True).start()
+        return {"started": [i["label"] for i in items]}
+
     @app.get("/api/medicare/status")
     def api_medicare_status():
         """What Medicare data has been imported (`mrfx medicare`) — the
@@ -1403,6 +1520,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         if not subject:
             raise HTTPException(422, "pick a subject practice first")
         year = str(body.get("year") or "").strip() or None
+        ds_id = str(body.get("dataset_id") or "").strip() or None
         try:
             limit = min(max(int(body.get("limit") or 100), 1), 500)
         except (TypeError, ValueError):
@@ -1441,8 +1559,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             return ref
 
         try:
-            refs_in = with_eligibility(org_referrals(store, npis, "in", limit, year))
-            refs_out = with_eligibility(org_referrals(store, npis, "out", limit, year))
+            refs_in = with_eligibility(org_referrals(store, npis, "in", limit, year, ds_id))
+            refs_out = with_eligibility(org_referrals(store, npis, "out", limit, year, ds_id))
         except MedicareImportError as e:
             raise HTTPException(422, str(e))
         return {
@@ -1981,6 +2099,35 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             anyio.to_thread.current_default_thread_limiter().total_tokens = 100
         except Exception:  # noqa: BLE001 — tuning must never block startup
             log.exception("could not widen the request threadpool; keeping default")
+
+    @app.on_event("startup")
+    async def _tracker_autoimport():
+        """OPT-IN (tracker_auto_import). The tracker refreshes the eligibility
+        roster ~twice a week; with this on, a newer snapshot is picked up at
+        startup so 'is this referrer still eligible' is never answered from a
+        stale roster. Eligibility only — referral datasets are 7-11 GB and
+        licence-encumbered, so they always stay a deliberate click."""
+        if not getattr(cfg, "tracker_auto_import", False):
+            return
+
+        def _go():
+            try:
+                pend = [p for p in _tracker_discover()["pending"]
+                        if p["kind"] == "eligibility"]
+            except Exception:  # noqa: BLE001 — discovery must never block boot
+                log.exception("tracker auto-import: discovery failed")
+                return
+            if not pend:
+                return
+            log.info("tracker auto-import: %s", pend[0]["label"])
+            with tracker_job_lock:
+                tracker_job.update({"state": "running", "done": [],
+                                    "items": [pend[0]["label"]],
+                                    "message": "auto-importing the newest roster…"})
+            _run_tracker_import(pend[:1])
+
+        threading.Thread(target=_bg_safe, args=(_go,),
+                         name="mrfx-tracker-autoimport", daemon=True).start()
 
     app.mount("/", NoCacheStaticFiles(directory=WEB_DIR, html=True), name="web")
     return app

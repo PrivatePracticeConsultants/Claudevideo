@@ -751,6 +751,21 @@ def cmd_enrich(cfg: MrfxConfig, args) -> int:
     return 0
 
 
+def _print_roster_diff(d: dict | None) -> None:
+    """What moved between the snapshot just replaced and this one. Losses are
+    the actionable half — a referrer who lost Part B means future denials."""
+    if not d:
+        return
+    print(f"  since release {d['prev_release']}: "
+          f"+{d['added']:,} joined the roster, "
+          f"{d['removed']:,} dropped off, "
+          f"{d['partb_lost']:,} lost Part B, "
+          f"{d['partb_gained']:,} regained it")
+    if d["removed"] or d["partb_lost"]:
+        print("  (referral sources affected by a loss are flagged "
+              "on the dashboard's Medicare tab)")
+
+
 def cmd_medicare(cfg: MrfxConfig, args) -> int:
     """Import the CMS Medicare layers the rate data cannot supply: order/refer
     eligibility, and shared-patient (referral-structure) pairs.
@@ -773,27 +788,49 @@ def cmd_medicare(cfg: MrfxConfig, args) -> int:
         return 1
     store = Store(cfg.store_dir, cfg.duckdb_memory_gb, temp_dir=cfg.duckdb_temp_dir)
     did = False
+    if getattr(args, "from_tracker", False):
+        from .tracker import discover
+
+        d = discover(store, cfg.tracker_dir)
+        if not d["found"]:
+            print("Could not find the Order & Referring Tracker's data. Looked in:")
+            for s in d["searched"]:
+                print(f"  {s}")
+            print("\nIf it lives somewhere else, set tracker_dir in config/mrfx.yaml.")
+            return 1
+        print(f"tracker data: {d['data_dir']}")
+        if not d["pending"]:
+            print("everything the tracker has is already imported.")
+        for item in d["pending"]:
+            print(f"\nimporting {item['label']} ({item['size_mb']:,.1f} MB) — {item['why']}")
+            # Fault isolation: one unreadable file must not abort the rest.
+            try:
+                if item["kind"] == "eligibility":
+                    r = import_orf_roster(store, item["path"])
+                    print(f"  {r['providers']:,} providers (release {r['release']})")
+                    _print_roster_diff(r.get("diff"))
+                else:
+                    r = import_shared_patients(
+                        store, item["path"], year=item.get("year") or None,
+                        interval=item.get("interval") or None)
+                    print(f"  {r['pairs']:,} pairs touching your providers "
+                          f"({r['label']} {r['year']})")
+                did = True
+            except Exception as e:  # noqa: BLE001 — a bad file is a message
+                print(f"  skipped: {e}")
     if args.eligibility:
         try:
             r = import_orf_roster(store, args.eligibility)
             print(f"eligibility: {r['providers']:,} providers (release {r['release']})")
-            d = r.get("diff")
-            if d:
-                print(f"  since release {d['prev_release']}: "
-                      f"+{d['added']:,} joined the roster, "
-                      f"{d['removed']:,} dropped off, "
-                      f"{d['partb_lost']:,} lost Part B, "
-                      f"{d['partb_gained']:,} regained it")
-                if d["removed"] or d["partb_lost"]:
-                    print("  (referral sources affected by a loss are flagged "
-                          "on the dashboard's Medicare tab)")
+            _print_roster_diff(r.get("diff"))
             did = True
         except Exception as e:  # noqa: BLE001 — a bad file is a message, not a trace
             print(f"could not import the eligibility roster: {e}")
             return 1
     if args.referrals:
         try:
-            r = import_shared_patients(store, args.referrals, year=args.year)
+            r = import_shared_patients(store, args.referrals, year=args.year,
+                                       interval=getattr(args, "interval", None))
             print(f"referrals:   {r['pairs']:,} pairs touching your providers "
                   f"({r['label']} {r['year']})")
             did = True
@@ -1095,11 +1132,17 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser(
         "medicare",
         help="import CMS eligibility / referral data the Order & Referring Tracker downloaded")
+    p.add_argument("--from-tracker", dest="from_tracker", action="store_true",
+                   help="find the tracker's data folder and import everything "
+                        "new from it (no paths to type)")
     p.add_argument("--eligibility", default=None,
                    help="path to an OrderReferring_<date>.csv snapshot")
     p.add_argument("--referrals", default=None,
                    help="path to a CMS shared-patient or DocGraph Hop Teaming CSV")
     p.add_argument("--year", default=None, help="label the referral data's year")
+    p.add_argument("--interval", default=None,
+                   help="CMS shared-patient day window (30/60/90/180/365) — "
+                        "read from the filename when omitted")
 
     p = sub.add_parser(
         "orgreport",

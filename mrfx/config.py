@@ -90,6 +90,25 @@ class MrfxConfig(BaseModel):
         if isinstance(v, str) and not v.strip():
             return None
         return v
+    # Where the Medicare Order & Referring Tracker keeps ITS data, if it isn't
+    # in the usual place. Leave unset: the app looks in the tracker's own
+    # default locations (ORF_DATA_DIR, %LOCALAPPDATA%\OrderReferringTracker,
+    # ~/.order-referring-tracker) and finds a normal install by itself. Set it
+    # only for a portable/relocated copy, e.g. tracker_dir: "E:\\OrfTracker".
+    tracker_dir: Path | None = None
+    # OPT-IN: when the tracker has downloaded a NEWER eligibility roster than
+    # the one loaded here, import it automatically at startup instead of just
+    # offering the button. Off by default — a data change the user did not ask
+    # for should be their click, not a surprise. Referral datasets are never
+    # auto-imported: they are 7-11 GB and licence-encumbered.
+    tracker_auto_import: bool = False
+
+    @field_validator("tracker_dir", mode="before")
+    @classmethod
+    def _empty_tracker_dir_is_none(cls, v):
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
     # OPT-IN: at extraction, keep only rows whose NPI is a PT/OT/SLP or therapy
     # clinic (by NPPES taxonomy), dropping the MDs/DOs/NPs who merely bill a
     # 97xxx code. Shrinks the store (often several-fold) and speeds every rebuild
@@ -214,7 +233,7 @@ class MrfxConfig(BaseModel):
 # empty after an update" — the real store was intact, just not looked at).
 _ANCHORED_FIELDS = ("inbox_dir", "processed_dir", "failed_dir", "store_dir",
                     "downloads_dir", "entity_map_path", "mpfs_path",
-                    "duckdb_temp_dir", "registry_path",
+                    "duckdb_temp_dir", "tracker_dir", "registry_path",
                     "registry_overrides_path", "known_sources_path")
 
 

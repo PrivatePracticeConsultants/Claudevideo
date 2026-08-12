@@ -284,19 +284,45 @@ Once a file is `done`:
   cross-reference your contact list and mail-merge (e.g. in Brevo).
 - **Medicare** tab (optional): who shares Medicare patients with a practice and
   whether each of those providers may still order/refer for Medicare — plus a
-  batch NPI checker. It needs two public CMS files imported first; the tab
-  shows the exact commands when nothing is loaded. **Stop the server before
-  importing** (the import needs the database), then:
+  batch NPI checker. If you use the **Medicare Order & Referring Tracker**,
+  open this tab and it finds the tracker's downloads by itself: click
+  **Import them now** and it loads them in place. Nothing is re-downloaded,
+  and you don't have to stop the app. Each time a fresh eligibility snapshot
+  is imported, the app reports who joined, dropped off, or lost Part B since
+  the previous one, and flags any affected referral source.
 
-  ```powershell
-  mrfx medicare --eligibility "$env:LOCALAPPDATA\OrderReferringTracker\snapshots\OrderReferring_<date>.csv"
-  mrfx medicare --referrals "C:\path\to\shared-patient-or-hop-teaming.csv"
-  ```
+  Once those layers are loaded, every practice you open anywhere in the app
+  (click a row on Explorer, Leads, Payer roster…) shows its referral base and
+  any recent loss of order/refer standing.
 
-  Both files are ones the **Medicare Order & Referring Tracker** already
-  downloads — point at its copies, nothing is re-fetched. Each time you import
-  a fresh eligibility snapshot, the app reports who joined, dropped off, or
-  lost Part B since the previous one, and flags affected referral sources.
+---
+
+## Using it with the Medicare Order & Referring Tracker
+
+The two tools know opposite halves of the same practice. The tracker knows
+**who sends it patients** and **who may order/refer**; MRF Explorer knows
+**what each commercial payer pays it**. They join on NPI, and the app does the
+joining for you:
+
+1. **Import.** Medicare tab → **Import them now**. The app looks in the
+   tracker's own data folder (`%LOCALAPPDATA%\OrderReferringTracker` and the
+   other places it uses) and imports whatever it has that you don't. If your
+   tracker lives somewhere unusual, set `tracker_dir` in `config/mrfx.yaml`.
+2. **Keep it current.** CMS refreshes the eligibility roster about twice a
+   week. Whenever the tracker downloads a newer one, the tab offers it again —
+   or set `tracker_auto_import: true` in `config/mrfx.yaml` to have the app
+   pick up a newer roster at startup on its own. (Referral files are never
+   auto-imported: they're several GB and may be licence-restricted.)
+3. **Go the other way.** Rate card tab → **Tracker bundle (.zip)** packages one
+   practice's NPIs and rates for pasting into the tracker's Provider lookup.
+
+From the terminal instead: stop the server, then `mrfx medicare --from-tracker`
+imports everything new in one go.
+
+> **Licence.** DocGraph Hop Teaming years come from CareSet under CC BY-NC-SA
+> 4.0 — **non-commercial**. If you use that data in paid consulting work,
+> confirm your terms with CareSet. The CMS shared-patient file carries no such
+> restriction.
 
 ---
 
@@ -542,6 +568,7 @@ prompt). They're an alternative to the dashboard buttons.
 | `mrfx export out.csv --cpt 97110 --payer "Aetna"` | Export a filtered CSV + methodology sidecar (state filtering lives in the dashboard and `mrfx outreach`) |
 | `mrfx outreach contacts.csv --state MO --cpt 97110,97140` | Contact/mail-merge CSV |
 | `mrfx enrich --bulk "E:\NPPES…zip"` | Fill in provider names/geography now, in one fast local pass from the NPPES bulk file (see "Make provider names fill in fast" above) |
+| `mrfx medicare --from-tracker` | Find the Order & Referring Tracker's folder and import everything new from it (stop the server first; the dashboard's Import button needs no stopping) |
 | `mrfx medicare --eligibility <csv>` | Import the CMS Order & Referring roster the tracker downloaded (stop the server first) |
 | `mrfx medicare --referrals <csv>` | Import CMS shared-patient / Hop Teaming pair data (stop the server first) |
 | `mrfx orgreport <practice>` | One-practice bundle (NPIs + rates + Medicare layers) to pair with the tracker |

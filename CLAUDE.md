@@ -37,9 +37,11 @@ Other commands: `mrfx add <url>… [--file links.txt] [--known] [--retry-failed]
 `mrfx export out.csv [--cpt … --payer … --grain tin]`, `mrfx outreach`,
 `mrfx forget <filename>`, `mrfx speedtest <url>`,
 `mrfx orgreport <subject>` (one-practice bundle for the Medicare Order &
-Referring Tracker), `mrfx medicare --eligibility/--referrals <path>` (import the
-CMS Order & Referring roster and shared-patient pair data the Tracker
-downloaded — the eligibility and referral halves MRFs cannot supply),
+Referring Tracker), `mrfx medicare --from-tracker` (find the Tracker's data
+folder and import everything new; `--eligibility/--referrals <path>` point at
+files by hand) — the eligibility and referral halves MRFs cannot supply. The
+dashboard's Medicare tab does the same import in-process, so the user never
+stops the server; see `mrfx/tracker.py` for the discovery contract.
 `mrfx reset --confirm`.
 Config: `config/mrfx.yaml`.
 
