@@ -282,6 +282,19 @@ Once a file is `done`:
   current filtered view. The **Outreach CSV** button gives one row per practice
   with name + address + phone + per-code rate/percentile columns — ready to
   cross-reference your contact list and mail-merge (e.g. in Brevo).
+- **Clients** tab — your book in one screen. Save each client practice once;
+  every refresh answers: whose rates moved this month (and the biggest move),
+  who has contract gaps worth chasing, and which of their referral sources
+  lost Medicare order/refer standing. Click any cell to land on the matching
+  tab with that client already loaded and running.
+- **Negotiate** tab now also builds the **rate proposal** — pick a basis
+  (payer's median or p75, best comparable rate, or % of Medicare), paste
+  annual volumes, and print the proposal grid the payer receives. Proposed
+  rates never fall below current, and every number's basis is stated.
+- **Medicare** tab also ranks **referral leaders** — practices by shared
+  Medicare patients received, searchable around a ZIP with a radius filter.
+  Clicking a practice that has rates in your store opens every payer rate the
+  MRF files price it at.
 - **Medicare** tab (optional): who shares Medicare patients with a practice and
   whether each of those providers may still order/refer for Medicare — plus a
   batch NPI checker. If you use the **Medicare Order & Referring Tracker**,
@@ -568,6 +581,8 @@ prompt). They're an alternative to the dashboard buttons.
 | `mrfx export out.csv --cpt 97110 --payer "Aetna"` | Export a filtered CSV + methodology sidecar (state filtering lives in the dashboard and `mrfx outreach`) |
 | `mrfx outreach contacts.csv --state MO --cpt 97110,97140` | Contact/mail-merge CSV |
 | `mrfx enrich --bulk "E:\NPPES…zip"` | Fill in provider names/geography now, in one fast local pass from the NPPES bulk file (see "Make provider names fill in fast" above) |
+| `mrfx backup E:\backups\mrfx.zip` | Copy the whole store into one zip with a checksum manifest (stop the server first) |
+| `mrfx verify [backup.zip]` | Check a backup against its manifest, or (no argument) the live store's integrity |
 | `mrfx medicare --from-tracker` | Find the Order & Referring Tracker's folder and import everything new from it (stop the server first; the dashboard's Import button needs no stopping) |
 | `mrfx medicare --eligibility <csv>` | Import the CMS Order & Referring roster the tracker downloaded (stop the server first) |
 | `mrfx medicare --referrals <csv>` | Import CMS shared-patient / Hop Teaming pair data (stop the server first) |

@@ -42,6 +42,7 @@ folder and import everything new; `--eligibility/--referrals <path>` point at
 files by hand) — the eligibility and referral halves MRFs cannot supply. The
 dashboard's Medicare tab does the same import in-process, so the user never
 stops the server; see `mrfx/tracker.py` for the discovery contract.
+`mrfx backup <zip>` / `mrfx verify [zip]` (checksummed store backup + integrity check),
 `mrfx reset --confirm`.
 Config: `config/mrfx.yaml`.
 

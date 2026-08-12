@@ -1490,6 +1490,53 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                          name="mrfx-tracker-import", daemon=True).start()
         return {"started": [i["label"] for i in items]}
 
+    # -- client watchlist ("my book") ---------------------------------------------------
+
+    @app.get("/api/clients")
+    def clients_list():
+        from .clients import watchlist
+        return {"clients": watchlist(store)}
+
+    @app.post("/api/clients")
+    def clients_add(body: dict = Body(...)):
+        from .clients import add_client
+        try:
+            return {"clients": add_client(store, str(body.get("subject", "")))}
+        except BenchmarkError as e:
+            raise HTTPException(422, str(e))
+
+    @app.post("/api/clients/remove")
+    def clients_remove(body: dict = Body(...)):
+        from .clients import remove_client
+        return {"clients": remove_client(store, str(body.get("subject", "")))}
+
+    @app.get("/api/clients/digest")
+    def clients_digest():
+        """The Monday review: per saved client, what moved. Composes the same
+        functions the Changes/Benchmark/Medicare tabs run, so a digest cell can
+        never disagree with its drill-down."""
+        from .clients import client_digest
+        return client_digest(store)
+
+    @app.post("/api/medicare/leaders")
+    def api_medicare_leaders(body: dict = Body(...)):
+        """Practices ranked by shared Medicare patients received, optionally
+        ZIP+radius clipped. in_store rows click through to the entity drawer
+        — every payer rate the MRF files priced them at."""
+        from .medicare import MedicareImportError, referral_leaders
+        try:
+            return referral_leaders(
+                store,
+                zip_code=str(body.get("zip") or "").strip() or None,
+                radius_miles=float(body["radius_miles"]) if body.get("radius_miles") else None,
+                limit=int(body.get("limit") or 50),
+                dataset_id=str(body.get("dataset_id") or "").strip() or None,
+                therapy_only=bool(body.get("therapy_only", True)))
+        except MedicareImportError as e:
+            raise HTTPException(422, str(e))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(422, f"bad input: {e}")
+
     @app.get("/api/medicare/status")
     def api_medicare_status():
         """What Medicare data has been imported (`mrfx medicare`) — the
@@ -1758,6 +1805,31 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, str(e))
 
     # fee schedule / payer scorecard (§7C)
+    @app.post("/api/negotiate/proposal")
+    def negotiate_proposal(body: dict = Body(...)):
+        from .benchmark import compute_rate_proposal
+        try:
+            return compute_rate_proposal(
+                store, str(body.get("subject", "")), str(body.get("payer", "")),
+                body.get("market") or {}, body.get("target") or {},
+                volumes=body.get("volumes") or None,
+                comparables=body.get("comparables") or None)
+        except BenchmarkError as e:
+            raise HTTPException(422, str(e))
+
+    @app.post("/api/report/proposal", response_class=HTMLResponse)
+    def report_proposal(body: dict = Body(...)):
+        from .benchmark import compute_rate_proposal, render_proposal_report
+        try:
+            prop = compute_rate_proposal(
+                store, str(body.get("subject", "")), str(body.get("payer", "")),
+                body.get("market") or {}, body.get("target") or {},
+                volumes=body.get("volumes") or None,
+                comparables=body.get("comparables") or None)
+            return render_proposal_report(cfg, store, prop)
+        except BenchmarkError as e:
+            raise HTTPException(422, str(e))
+
     @app.post("/api/schedule/fee")
     def schedule_fee(body: dict = Body(...)):
         try:
@@ -1988,10 +2060,35 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return {"loaded": store.mpfs_loaded()}
 
     @app.post("/api/mpfs/upload")
-    def mpfs_upload(file: UploadFile):
+    def mpfs_upload(file: UploadFile, cf: str = "", state: str = "",
+                    locality: str = ""):
+        """Two inputs accepted: the official CMS RVU bundle (PPRRVU+GPCI zip,
+        needs the published conversion factor + a state to pick the GPCI
+        locality) or the simple code,non_facility_rate CSV, unchanged."""
+        from .mpfs import MpfsImportError, import_official, looks_official
         data = file.file.read()
+        fname = file.filename or "upload.csv"
+        if looks_official(data, fname):
+            if not cf.strip():
+                raise HTTPException(422, "official CMS RVU files need the "
+                                    "published conversion factor — enter it in "
+                                    "the CF box (e.g. 32.35) and reload.")
+            if not state.strip():
+                raise HTTPException(422, "official CMS RVU files need a state "
+                                    "to pick the GPCI locality — enter it in "
+                                    "the State box (e.g. MO) and reload.")
+            try:
+                r = import_official(store, data, fname,
+                                    conversion_factor=float(cf),
+                                    state=state, locality_name=locality.strip() or None)
+            except MpfsImportError as e:
+                raise HTTPException(422, str(e))
+            except ValueError:
+                raise HTTPException(422, f"CF must be a number, got {cf!r}")
+            return {"loaded": store.mpfs_loaded(), "rows": r["rows"],
+                    "locality": r["locality"]}
         try:
-            n = _load_mpfs_csv(store, data, file.filename or "upload.csv")
+            n = _load_mpfs_csv(store, data, fname)
         except (ValueError, KeyError) as e:
             raise HTTPException(422, f"MPFS CSV must have code,locality,non_facility_rate columns: {e}")
         return {"loaded": store.mpfs_loaded(), "rows": n}

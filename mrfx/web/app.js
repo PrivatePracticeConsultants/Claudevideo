@@ -133,6 +133,7 @@ function switchView(view) {
   if (view === "negotiate") initNegotiate();
   if (view === "ratecard") initRatecard();
   if (view === "medicare") initMedicare();
+  if (view === "clients") initClients();
   if (view === "leads") initLeads();
   if (view === "changes") initChanges();
   // re-entry: keep whatever state was picked (else the cards blank out while the
@@ -1212,10 +1213,19 @@ async function initBenchmark() {
     if (!f) return;
     const fd = new FormData();
     fd.append("file", f);
+    // CF + state ride as query params: required for the official CMS RVU
+    // files (locality-adjusted), ignored for the simple code,rate CSV
+    const q = new URLSearchParams({
+      cf: $("#mpfs-cf").value.trim(),
+      state: $("#mpfs-state").value.trim(),
+      locality: $("#mpfs-locality").value.trim(),
+    });
     try {
-      await api("/api/mpfs/upload", { method: "POST", body: fd });
+      await api(`/api/mpfs/upload?${q}`, { method: "POST", body: fd });
       refreshMpfsStatus();
+      refreshRcMpfs();
     } catch (err) { alert(err.message); }
+    e.target.value = "";   // allow re-selecting the same file after a fix
   });
   $("#b-run").addEventListener("click", runBenchmark);
   $("#b-report").addEventListener("click", async () => {
@@ -1507,6 +1517,21 @@ async function initNegotiate() {
     if (state.lastNegotiatePayload) runNegotiate();
   });
   $("#ng-run").addEventListener("click", runNegotiate);
+  $("#ng-target").addEventListener("change", () => {
+    $("#ng-target-pct").style.display =
+      $("#ng-target").value === "pct_medicare" ? "" : "none";
+  });
+  $("#ng-proposal-run").addEventListener("click", runProposal);
+  $("#ng-proposal-report").addEventListener("click", () => {
+    let p;
+    try { p = proposalPayload(); }
+    catch (e) { alert(e.message); return; }
+    if (!p.market.state) {   // same national-scope confirm as the other reports
+      if (!confirm("No state set — the proposal will pool every loaded state into one national comparison. Continue?")) return;
+      p.market.allow_national = true;
+    }
+    openReportWith("/api/report/proposal", p);
+  });
   $("#ng-report").addEventListener("click", () => {
     if (!state.lastNegotiatePayload) return;
     const p = { ...state.lastNegotiatePayload,
@@ -1522,6 +1547,51 @@ async function initNegotiate() {
 function renderCompChips() {
   $("#ng-comp-chips").innerHTML = state.ngComps.map((c) =>
     `<button class="chip on" data-comp="${esc(c)}" title="remove">${esc(c)} ✕</button>`).join("");
+}
+
+function proposalPayload() {
+  const p = negotiatePayload();
+  p.target = { kind: $("#ng-target").value };
+  if (p.target.kind === "pct_medicare") p.target.value = Number($("#ng-target-pct").value);
+  // "97110, 4200" per line — same format as the Benchmark tab's volumes box
+  const vols = {};
+  $("#ng-volumes").value.split("\n").forEach((line) => {
+    const m = line.match(/^\s*([A-Za-z0-9]+)\s*[,;\t ]\s*([\d,.]+)\s*$/);
+    if (m) vols[m[1].toUpperCase()] = Number(m[2].replace(/,/g, ""));
+  });
+  if (Object.keys(vols).length) p.volumes = vols;
+  return p;
+}
+
+async function runProposal() {
+  const out = $("#ng-out");
+  let payload;
+  try { payload = proposalPayload(); }
+  catch (e) { out.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  out.classList.remove("empty");
+  out.innerHTML = `<div class="loading">Building the proposal</div>`;
+  let d;
+  try { d = await postJson("/api/negotiate/proposal", payload); }
+  catch (e) { out.innerHTML = `<div class="empty"><h3>Could not build</h3>${esc(e.message)}</div>`; return; }
+  const s = d.summary;
+  const rows = d.rows.map((r) => `<tr>
+    <td>${esc(r.billing_code)}<div class="sub">${esc(r.description || "")}</div></td>
+    <td class="num">${money(r.current)}</td>
+    <td class="num"><b>${r.no_reference ? "—" : money(r.proposed)}</b></td>
+    <td class="num">${r.delta == null ? "" : r.kept ? '<span class="muted">keep</span>'
+      : `<span class="peer-up">+${fmtMoney(r.delta)} (${r.delta_pct > 0 ? "+" : ""}${r.delta_pct}%)</span>`}</td>
+    <td class="num">${r.units == null ? "" : fmtInt(r.units)}</td>
+    <td class="num">${r.annual_value == null ? "" : money(r.annual_value)}</td>
+  </tr>`).join("");
+  out.innerHTML = `
+    <div class="rc-summary">Proposal basis: <b>${esc(d.target.label)}</b> — ${s.n_raised} of ${s.n_codes}
+      codes raised, ${s.n_kept} kept${s.n_no_reference ? `, ${s.n_no_reference} with no reference rate` : ""}.
+      ${s.total_annual_value != null ? `At your volumes this ask is worth <b>${money(s.total_annual_value)}</b>/yr.` : ""}
+      Proposed rates never fall below current.</div>
+    <div class="tablewrap"><table class="rc-table"><thead><tr>
+      <th>Code</th><th class="num">Current</th><th class="num">Proposed</th>
+      <th class="num">Change</th><th class="num">Units/yr</th><th class="num">Value/yr</th>
+    </tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
 function negotiatePayload() {
@@ -1771,6 +1841,127 @@ async function downloadRatecardCsv() {
 }
 
 /* =======================================================================
+   CLIENTS — the consultant's book: per saved client, what changed.
+   Every cell reuses its own tab's function server-side, so a digest number
+   can never disagree with the drill-down the click lands on.
+   ======================================================================= */
+
+let clientsInit = false;
+async function initClients() {
+  if (clientsInit) { refreshSubjectPickers("#cl-subjects", []); loadClientDigest(); return; }
+  clientsInit = true;
+  const subjects = await api("/api/benchmark/subjects").catch(() => null);
+  if (subjects) $("#cl-subjects").innerHTML = subjectOptionsHtml(subjects);
+  wireSubjectSearch("#cl-subject", "#cl-subjects");
+  $("#cl-add").addEventListener("click", addClient);
+  $("#cl-subject").addEventListener("keydown", (e) => { if (e.key === "Enter") addClient(); });
+  $("#cl-refresh").addEventListener("click", loadClientDigest);
+  loadClientDigest();
+}
+
+async function addClient() {
+  const s = $("#cl-subject").value.trim();
+  if (!s) return;
+  try { await postJson("/api/clients", { subject: s }); }
+  catch (e) { alert("Couldn't add: " + e.message); return; }
+  $("#cl-subject").value = "";
+  loadClientDigest();
+}
+
+// jump-throughs: land on the tab with the client prefilled AND already running.
+// Tab init is async (month/payer pickers load on first visit), so wait for the
+// tab's required select to be populated before firing — otherwise a first-ever
+// jump to Changes would run with no month and bounce off the 422.
+async function clientJump(view, inputSel, runFn, subject, readySel) {
+  switchView(view);
+  for (let i = 0; i < 30; i++) {
+    const ready = !readySel || ($(readySel) && $(readySel).options.length > 0);
+    if (ready) break;
+    await new Promise((r) => setTimeout(r, 150));
+  }
+  const input = $(inputSel);
+  if (input) { input.value = subject; runFn(); }
+}
+
+async function loadClientDigest() {
+  const out = $("#cl-out");
+  const have = await api("/api/clients").catch(() => null);
+  if (!have || !have.clients.length) {
+    out.classList.add("empty");
+    out.innerHTML = `<h3>No clients saved yet</h3>Add the practices you work for. Each refresh
+      answers: whose rates moved, who has contract gaps, and which of their referral sources
+      lost Medicare standing.`;
+    return;
+  }
+  out.classList.remove("empty");
+  out.innerHTML = `<div class="loading">Building the digest for ${have.clients.length} client${have.clients.length === 1 ? "" : "s"}</div>`;
+  let d;
+  try { d = await api("/api/clients/digest"); }
+  catch (e) { out.innerHTML = `<div class="empty"><h3>Digest failed</h3>${esc(e.message)}</div>`; return; }
+  const rows = d.clients.map((c) => {
+    const name = `<b>${esc(c.display_name || c.subject)}</b>${
+      c.display_name && c.display_name !== c.subject ? `<div class="sub">${esc(c.subject)}</div>` : ""}`;
+    if (c.error) {
+      return `<tr><td>${name}</td><td colspan="3"><span class="warn-text">${esc(c.error)}</span></td>
+        <td><button class="btn" data-cl-remove="${esc(c.subject)}">remove</button></td></tr>`;
+    }
+    let chg;
+    if (!d.can_diff) chg = `<span class="muted" title="rate changes need two loaded months of the same payer">needs 2 months</span>`;
+    else if (!c.changes) chg = `<span class="muted">–</span>`;
+    else if (c.changes.error) chg = `<span class="muted">${esc(c.changes.error)}</span>`;
+    else if (!c.changes.n) chg = `<span class="muted">no moves in ${esc(c.changes.month)}</span>`;
+    else {
+      const b = c.changes.biggest_pct;
+      chg = `<a href="#" data-cl-changes="${esc(c.subject)}"><b>${fmtInt(c.changes.n)}</b> line${c.changes.n === 1 ? "" : "s"} moved</a>
+        <div class="sub">biggest: <span class="${b > 0 ? "peer-up" : "peer-down"}">${b > 0 ? "+" : ""}${b}%</span>
+        on ${esc(c.changes.biggest_code || "")} (${esc(c.changes.biggest_payer || "")})</div>`;
+    }
+    let gaps;
+    if (!c.gaps) gaps = `<span class="muted">–</span>`;
+    else if (c.gaps.error) gaps = `<span class="muted">${esc(c.gaps.error)}</span>`;
+    else if (!c.gaps.n) gaps = `<span class="muted">none</span>`;
+    else gaps = `<a href="#" data-cl-gaps="${esc(c.subject)}"><b>${fmtInt(c.gaps.n)}</b> code${c.gaps.n === 1 ? "" : "s"}</a>
+      <div class="sub">${c.gaps.top.map(esc).join(", ")}${c.gaps.n > 3 ? "…" : ""}</div>`;
+    let med;
+    if (!d.have_medicare) med = `<span class="muted" title="import the Medicare layers on the Medicare tab to light this up">no referral data</span>`;
+    else if (!c.lost_referrers) med = `<span class="muted">–</span>`;
+    else if (!c.lost_referrers.length) med = `<span class="ok-tag">all sources in good standing</span>`;
+    else med = `<a href="#" data-cl-med="${esc(c.subject)}"><span class="warn-text"><b>${c.lost_referrers.length}</b> source${c.lost_referrers.length === 1 ? "" : "s"} lost standing</span></a>
+      <div class="sub">${c.lost_referrers.slice(0, 3).map((l) =>
+        `${esc(l.name || l.npi)} (${l.kind === "removed" ? "off roster" : "lost Part B"}, ${fmtInt(l.patients)} pts)`).join("; ")}</div>`;
+    return `<tr><td>${name}</td><td>${chg}</td><td>${gaps}</td><td>${med}</td>
+      <td style="white-space:nowrap">
+        <button class="btn" data-cl-rc="${esc(c.subject)}" title="rate card">Rates</button>
+        <button class="btn" data-cl-remove="${esc(c.subject)}">remove</button>
+      </td></tr>`;
+  }).join("");
+  out.innerHTML = `
+    <div class="muted" style="margin-bottom:8px">Newest month in the store: <b>${esc(d.month || "–")}</b>.
+      Rate moves compare it to the month before it, per payer contract line.</div>
+    <div class="tablewrap"><table><thead><tr>
+      <th>Client</th><th>Rate moves</th><th>Contract gaps</th><th>Referral alerts</th><th></th>
+    </tr></thead><tbody>${rows}</tbody></table></div>`;
+  $$("[data-cl-remove]", out).forEach((b) => b.addEventListener("click", async () => {
+    await postJson("/api/clients/remove", { subject: b.dataset.clRemove }).catch(() => null);
+    loadClientDigest();
+  }));
+  $$("[data-cl-rc]", out).forEach((b) => b.addEventListener("click", () =>
+    clientJump("ratecard", "#rc-subject", buildRatecard, b.dataset.clRc)));
+  $$("a[data-cl-changes]", out).forEach((a) => a.addEventListener("click", (ev) => {
+    ev.preventDefault();
+    clientJump("changes", "#ch-subject", runChanges, a.dataset.clChanges, "#ch-month");
+  }));
+  $$("a[data-cl-gaps]", out).forEach((a) => a.addEventListener("click", (ev) => {
+    ev.preventDefault();
+    clientJump("benchmark", "#b-subject", runContractGaps, a.dataset.clGaps);
+  }));
+  $$("a[data-cl-med]", out).forEach((a) => a.addEventListener("click", (ev) => {
+    ev.preventDefault();
+    clientJump("medicare", "#md-subject", runMedicareOrg, a.dataset.clMed);
+  }));
+}
+
+/* =======================================================================
    MEDICARE — the two layers MRFs cannot supply (imported via `mrfx medicare`):
    Order & Referring eligibility, and shared-patient referral structure.
    ======================================================================= */
@@ -1791,6 +1982,61 @@ async function initMedicare() {
   $("#md-check").addEventListener("click", runMedicareBatchCheck);
   $("#md-csv").addEventListener("click", downloadMedicareCsv);
   $("#md-check-csv").addEventListener("click", downloadMedicareCheckCsv);
+  $("#rl-run").addEventListener("click", runReferralLeaders);
+  $("#rl-zip").addEventListener("keydown", (e) => { if (e.key === "Enter") runReferralLeaders(); });
+}
+
+async function runReferralLeaders() {
+  const out = $("#rl-out");
+  const msg = $("#rl-msg");
+  msg.textContent = "ranking…";
+  let d;
+  try {
+    d = await postJson("/api/medicare/leaders", {
+      zip: $("#rl-zip").value.trim() || null,
+      radius_miles: $("#rl-zip").value.trim() ? Number($("#rl-radius").value) : null,
+      therapy_only: $("#rl-therapy").checked,
+      limit: 100,
+      dataset_id: $("#md-year").value || null,
+    });
+  } catch (e) { msg.textContent = ""; out.innerHTML = `<div class="muted">${esc(e.message)}</div>`; return; }
+  msg.textContent = "";
+  if (!d.rows.length) {
+    out.innerHTML = `<div class="muted">No practices found${d.zip ? ` within ${d.radius_miles} miles of ${esc(d.zip)}` : ""} in ${esc(d.dataset || "the referral data")} — try a wider radius, or untick "therapy practices only".</div>`;
+    return;
+  }
+  const scope = d.zip ? `within ${d.radius_miles} miles of ${esc(d.zip)}` : "everywhere in the data";
+  // honesty notes: how much of the market the list covers, and how many
+  // practices could not be placed on the map at all
+  const notes = [`${esc(d.dataset)} ${esc(d.data_year)} · ${scope} · showing ${d.rows.length} of ${fmtInt(d.total)} practices`];
+  if (d.unplaced) notes.push(`<span class="warn-text">${fmtInt(d.unplaced)} practice${d.unplaced === 1 ? "" : "s"} have no mappable ZIP and are not in radius results</span>`);
+  const body = d.rows.map((r, i) => {
+    const name = r.in_store && r.tin
+      ? `<a href="#" data-rl-tin="${esc(r.tin)}" title="open every payer rate the MRF files price this practice at">${esc(r.practice)}</a>`
+      : `${esc(r.practice)} <span class="muted" title="no ingested payer file prices this practice — it may still have contracts; your store just hasn't seen them">no MRF rates in store</span>`;
+    return `<tr>
+      <td class="num">${i + 1}</td>
+      <td>${name}</td>
+      <td>${esc([r.city, r.state].filter(Boolean).join(", "))}</td>
+      <td>${esc(r.zip || "")}</td>
+      <td class="num">${r.miles == null ? "–" : r.miles}</td>
+      <td class="num">${fmtInt(r.patients)}</td>
+      <td class="num">${fmtInt(r.sources)}</td>
+      <td class="num">${fmtInt(r.npis)}</td>
+    </tr>`;
+  }).join("");
+  out.innerHTML = `<div class="muted" style="margin-bottom:6px">${notes.join(" · ")}</div>
+    <div class="tablewrap" style="max-height:44vh"><table><thead><tr>
+      <th>#</th><th>Practice</th><th>City</th><th>ZIP</th><th class="num">Miles</th>
+      <th class="num" title="shared Medicare patients received — see the caveat above; not a referral count">Patients in</th>
+      <th class="num">Sources</th><th class="num">NPIs</th>
+    </tr></thead><tbody>${body}</tbody></table></div>`;
+  $$("a[data-rl-tin]", out).forEach((a) => a.addEventListener("click", (ev) => {
+    ev.preventDefault();
+    // TIN grain, not entity: an individual therapist's NPPES name is not an
+    // entity key, but the TIN their rates bill under always resolves
+    openEntity("tin", a.dataset.rlTin);   // the drawer: every payer rate
+  }));
 }
 
 // the roster is refreshed by CMS ~twice a week; past this age the tab calls

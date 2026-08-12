@@ -36,6 +36,7 @@ import logging
 import re
 from pathlib import Path
 
+from .catalog import therapy_taxonomy_sql
 from .store import Store, sql_path
 
 log = logging.getLogger(__name__)
@@ -671,6 +672,115 @@ def taxonomy_label(code: str | None) -> str:
         if code.startswith(prefix):
             return label
     return code
+
+
+def referral_leaders(store: Store, zip_code: str | None = None,
+                     radius_miles: float | None = None, limit: int = 50,
+                     dataset_id: str | None = None, year: str | None = None,
+                     therapy_only: bool = True,
+                     centroids_path: str | Path | None = None) -> dict:
+    """Practices ranked by shared Medicare patients RECEIVED — who wins the
+    referral market — optionally centered on a ZIP and clipped to a radius.
+
+    Practices group by NPPES organization name (the entity grain's own rule),
+    so a clinic's org NPI and its therapists count once. Distance is
+    ZCTA-centroid haversine — good to a mile or two, honest for a radius
+    filter, not for door-to-door directions. Practices whose ZIP has no
+    centroid are EXCLUDED from a radius search and REPORTED in `unplaced`,
+    never silently dropped. in_store says whether the practice has MRF rates
+    in this store (the click-through target); its absence means only that no
+    ingested payer file priced them, not that they don't exist."""
+    active = active_dataset(store, year, dataset_id)
+    if active is None:
+        return {"rows": [], "dataset": None, "data_year": None, "dataset_id": None,
+                "unplaced": 0, "total": 0, "caveat": REFERRAL_CAVEAT}
+    label, yr, ds_id = active
+    limit = min(max(int(limit), 1), 200)
+
+    zip_code = (zip_code or "").strip()[:5] or None
+    if zip_code and not re.fullmatch(r"\d{5}", zip_code):
+        raise MedicareImportError(f"'{zip_code}' is not a 5-digit ZIP code.")
+    cpath = Path(centroids_path) if centroids_path else (
+        Path(__file__).resolve().parent.parent / "config" / "zcta-centroids.csv")
+    use_radius = bool(zip_code and radius_miles)
+
+    therapy = therapy_taxonomy_sql("n.taxonomy_code") if therapy_only else "TRUE"
+    with store.connect() as con:
+        _ensure_referral_view(con, store)
+        if use_radius:
+            if not cpath.exists():
+                raise MedicareImportError(
+                    "the ZIP centroid file (config/zcta-centroids.csv) is "
+                    "missing — reinstall it to use the radius search.")
+            # zip is TYPED, not inferred: a centroid file whose sampled rows
+            # happen to lack leading zeros would infer BIGINT and every join
+            # against the (VARCHAR) practice zips would bind-error; lpad
+            # restores zeros a spreadsheet round-trip may have eaten
+            con.execute(
+                f"CREATE OR REPLACE TEMP TABLE _zcta AS "
+                f"SELECT lpad(zip, 5, '0') AS zip, lat, lon "
+                f"FROM read_csv('{sql_path(cpath)}', header = true, "
+                f"types = {{'zip': 'VARCHAR', 'lat': 'DOUBLE', 'lon': 'DOUBLE'}})")
+            origin = con.execute("SELECT lat, lon FROM _zcta WHERE zip = ?",
+                                 [zip_code]).fetchone()
+            if origin is None:
+                raise MedicareImportError(
+                    f"ZIP {zip_code} is not in the Census ZCTA centroid list — "
+                    "check the ZIP, or use a neighboring one.")
+        # one practice = one NPPES org name; keep the practice's modal 5-digit
+        # ZIP for placement and count every member NPI once
+        base = f"""
+            WITH agg AS (
+                SELECT coalesce(nullif(trim(n.org_name), ''), p.target_npi) AS practice,
+                       mode(n.city)                          AS city,
+                       mode(n.state)                         AS state,
+                       mode(substr(trim(n.zip), 1, 5))       AS zip,
+                       sum(p.patients)                       AS patients,
+                       count(DISTINCT p.source_npi)          AS sources,
+                       count(DISTINCT p.target_npi)          AS npis,
+                       max(CASE WHEN r.npi IS NOT NULL THEN 1 ELSE 0 END) = 1 AS in_store,
+                       mode(r.tin)                           AS tin
+                FROM referral_pairs p
+                JOIN npi_directory n ON n.npi = p.target_npi
+                -- tin rides along so a click opens the RIGHT drawer: an
+                -- individual therapist's NPPES name is not an entity key, but
+                -- the TIN their rates bill under always resolves
+                LEFT JOIN (SELECT npi, mode(tin_value) AS tin FROM rates
+                           GROUP BY npi) r ON r.npi = p.target_npi
+                WHERE p.dataset_id = ? AND {therapy}
+                GROUP BY 1
+            )
+        """
+        if use_radius:
+            cur = con.execute(base + """
+                SELECT a.*, round(2 * 3958.8 * asin(sqrt(
+                           pow(sin(radians((z.lat - ?) / 2)), 2)
+                           + cos(radians(?)) * cos(radians(z.lat))
+                           * pow(sin(radians((z.lon - ?) / 2)), 2))), 1) AS miles
+                FROM agg a JOIN _zcta z ON z.zip = a.zip
+                WHERE 2 * 3958.8 * asin(sqrt(
+                          pow(sin(radians((z.lat - ?) / 2)), 2)
+                          + cos(radians(?)) * cos(radians(z.lat))
+                          * pow(sin(radians((z.lon - ?) / 2)), 2))) <= ?
+                ORDER BY a.patients DESC NULLS LAST LIMIT ?
+            """, [ds_id, origin[0], origin[0], origin[1],
+                  origin[0], origin[0], origin[1], float(radius_miles), limit])
+        else:
+            cur = con.execute(base + """
+                SELECT a.*, CAST(NULL AS DOUBLE) AS miles FROM agg a
+                ORDER BY a.patients DESC NULLS LAST LIMIT ?
+            """, [ds_id, limit])
+        rows = [dict(zip([d[0] for d in cur.description], r)) for r in cur.fetchall()]
+        total, unplaced = con.execute(base + f"""
+            SELECT count(*),
+                   count(*) FILTER (zip IS NULL{
+                       " OR zip NOT IN (SELECT zip FROM _zcta)" if use_radius else ""})
+            FROM agg
+        """, [ds_id]).fetchone()
+    return {"rows": rows, "dataset": label, "data_year": yr, "dataset_id": ds_id,
+            "zip": zip_code, "radius_miles": radius_miles if use_radius else None,
+            "total": total, "unplaced": unplaced if use_radius else 0,
+            "caveat": REFERRAL_CAVEAT}
 
 
 REFERRAL_CAVEAT = (

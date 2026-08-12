@@ -870,6 +870,146 @@ def cmd_medicare(cfg: MrfxConfig, args) -> int:
     return 0
 
 
+def cmd_backup(cfg: MrfxConfig, args) -> int:
+    """Copy the whole analytical store into one zip with a manifest, so the
+    business asset on this one machine survives it. Parquet is already
+    ZSTD-compressed, so the zip STORES rather than re-deflating — a 300M-row
+    backup is disk-speed, not CPU-speed."""
+    import datetime as dt
+    import hashlib
+    import json as _json
+    import zipfile
+
+    if _something_owns_the_port(cfg, "backing up the store"):
+        print("Stop the server first — a backup taken while the database is "
+              "being written could capture a torn state.")
+        return 1
+    dest = Path(args.dest)
+    if dest.exists():
+        print(f"{dest} already exists — pick a new filename (backups are "
+              "never overwritten).")
+        return 1
+    root = cfg.store_dir
+    if not root.is_dir():
+        print(f"no store at {root}")
+        return 1
+    files = sorted(p for p in root.rglob("*")
+                   if p.is_file() and not p.name.endswith((".tmp", ".part"))
+                   and "duckdb_tmp" not in p.parts and "diagnostics" not in p.parts)
+    manifest: dict = {"created": dt.datetime.now(dt.timezone.utc).isoformat(),
+                      "store_dir": str(root), "files": {}}
+    total = 0
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(dest, "w", zipfile.ZIP_STORED, allowZip64=True) as z:
+        for p in files:
+            rel = p.relative_to(root).as_posix()
+            h = hashlib.sha256()
+            with open(p, "rb") as fh:
+                for chunk in iter(lambda: fh.read(1 << 20), b""):
+                    h.update(chunk)
+            z.write(p, f"store/{rel}")
+            manifest["files"][rel] = {"sha256": h.hexdigest(),
+                                      "bytes": p.stat().st_size}
+            total += p.stat().st_size
+            print(f"  {rel} ({p.stat().st_size / 1e6:,.1f} MB)")
+        # row counts so verify can prove the DATA, not just the bytes
+        try:
+            store = Store(cfg.store_dir, cfg.duckdb_memory_gb,
+                          temp_dir=cfg.duckdb_temp_dir)
+            with store.connect() as con:
+                manifest["counts"] = {
+                    "rates": con.execute("SELECT count(*) FROM rates").fetchone()[0],
+                    "files_done": con.execute(
+                        "SELECT count(*) FROM files WHERE status = 'done'").fetchone()[0],
+                }
+            store.close()
+        except Exception as e:  # noqa: BLE001 — counts are extra evidence, not a gate
+            print(f"  (row counts unavailable: {e})")
+        z.writestr("manifest.json", _json.dumps(manifest, indent=1))
+    print(f"\nbackup written: {dest} ({total / 1e9:,.2f} GB, "
+          f"{len(manifest['files'])} files + manifest)")
+    print("verify it any time with: mrfx verify " + str(dest))
+    return 0
+
+
+def cmd_verify(cfg: MrfxConfig, args) -> int:
+    """Prove a backup (or the live store) is intact. A backup zip is checked
+    byte-for-byte against its own manifest; the live store is checked by
+    binding every view and reading every parquet footer — the failures that
+    otherwise surface only when a report needs the data."""
+    import hashlib
+    import json as _json
+    import zipfile
+
+    from .store import sql_path
+
+    target = Path(args.target) if args.target else None
+    if target and target.suffix.lower() == ".zip":
+        if not target.is_file():
+            print(f"no such backup file: {target}")
+            return 1
+        bad = 0
+        try:
+            with zipfile.ZipFile(target) as z:
+                manifest = _json.loads(z.read("manifest.json"))
+                for rel, meta in manifest["files"].items():
+                    h = hashlib.sha256()
+                    try:
+                        with z.open(f"store/{rel}") as fh:
+                            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                                h.update(chunk)
+                        ok = h.hexdigest() == meta["sha256"]
+                    except (zipfile.BadZipFile, KeyError, OSError) as e:
+                        ok = False
+                        print(f"  ({rel}: {e})")
+                    if not ok:
+                        bad += 1
+                        print(f"CORRUPT: {rel}")
+        except (zipfile.BadZipFile, KeyError, ValueError, OSError) as e:
+            # a torn central directory / missing manifest is corruption too —
+            # report it as the verdict, never a traceback
+            print(f"this backup is not readable ({e}) — it is damaged; "
+                  "take a fresh one.")
+            return 1
+        n = len(manifest["files"])
+        if bad:
+            print(f"\n{bad} of {n} files FAILED the checksum — this backup is "
+                  "damaged; take a fresh one.")
+            return 1
+        print(f"backup OK: {n} files match their checksums"
+              + (f"; recorded {manifest.get('counts', {}).get('rates', '?'):,} "
+                 "rate rows" if manifest.get("counts") else ""))
+        return 0
+
+    # live store: structural integrity, not checksums (it changes by design)
+    if _something_owns_the_port(cfg, "verifying the store locally"):
+        return 1
+    store = Store(cfg.store_dir, cfg.duckdb_memory_gb, temp_dir=cfg.duckdb_temp_dir)
+    problems = 0
+    with store.connect() as con:
+        n = con.execute("SELECT count(*) FROM rates").fetchone()[0]
+        print(f"rates view binds: {n:,} rows")
+        for p in sorted(store.rates_dir.glob("*.parquet")) + sorted(
+                (Path(store.dir) / "referrals").glob("*.parquet")):
+            try:
+                con.execute(f"SELECT count(*) FROM read_parquet('{sql_path(p)}')").fetchone()
+            except Exception as e:  # noqa: BLE001 — this is the report
+                problems += 1
+                print(f"UNREADABLE parquet: {p.name} ({e})")
+        for tbl in ("files", "npi_directory", "tin_directory", "mpfs"):
+            try:
+                con.execute(f"SELECT count(*) FROM {tbl}").fetchone()
+            except Exception as e:  # noqa: BLE001
+                problems += 1
+                print(f"UNREADABLE table/view: {tbl} ({e})")
+    if problems:
+        print(f"\n{problems} problem(s) found — restore the affected files "
+              "from a backup (mrfx verify <backup.zip> first).")
+        return 1
+    print("store OK: every parquet readable, every table binds")
+    return 0
+
+
 def cmd_orgreport(cfg: MrfxConfig, args) -> int:
     """Bundle ONE organization for use alongside the Medicare Order & Referring
     Tracker. The tracker knows the referral/eligibility side and is NPI-native;
@@ -1158,6 +1298,12 @@ def main(argv: list[str] | None = None) -> int:
                    help="CMS shared-patient day window (30/60/90/180/365) — "
                         "read from the filename when omitted")
 
+    p = sub.add_parser("backup", help="copy the whole store into one zip with a checksum manifest")
+    p.add_argument("dest", help="backup filename, e.g. E:\\backups\\mrfx_2026-08-12.zip")
+    p = sub.add_parser("verify", help="check a backup zip against its manifest, or the live store's integrity")
+    p.add_argument("target", nargs="?", default=None,
+                   help="backup .zip to verify; omit to verify the live store")
+
     p = sub.add_parser(
         "orgreport",
         help="bundle ONE practice (NPI list + rates) to pair with the Order & Referring Tracker")
@@ -1227,6 +1373,8 @@ def main(argv: list[str] | None = None) -> int:
         "medicare": cmd_medicare,
         "orgreport": cmd_orgreport,
         "speedtest": cmd_speedtest,
+        "backup": cmd_backup,
+        "verify": cmd_verify,
         "reset": cmd_reset,
     }[args.cmd]
     try:

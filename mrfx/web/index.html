@@ -13,6 +13,7 @@
   <h1>MRF <span>Explorer</span></h1>
   <div id="dataset-stats">loading…</div>
   <nav>
+    <button data-view="clients">Clients</button>
     <button data-view="overview">Overview</button>
     <button data-view="explorer" class="active">Explorer</button>
     <button data-view="cpt">Code comparison</button>
@@ -30,6 +31,30 @@
 </header>
 
 <main>
+
+  <!-- ======================= CLIENTS (my book) ======================= -->
+  <section id="view-clients" class="view">
+    <div class="view-head">
+      <h2>Your clients — what changed</h2>
+      <span class="spacer"></span>
+      <button class="btn primary" id="cl-refresh">Refresh digest</button>
+    </div>
+    <div class="filters" style="align-items:flex-end">
+      <div class="field grow" style="max-width:420px">
+        <label>Add a client (entity / TIN / NPI)</label>
+        <input type="text" id="cl-subject" list="cl-subjects" placeholder="entity name, TIN, or NPI…">
+        <datalist id="cl-subjects"></datalist>
+      </div>
+      <button class="btn" id="cl-add">Add</button>
+      <span class="muted" style="max-width:560px">Every cell reuses the same math as its own tab —
+        rate moves from <b>Changes</b> (newest month vs the one before), gaps from
+        <b>Benchmark</b>, and referral alerts from <b>Medicare</b> — so the digest can never
+        disagree with a drill-down. Click through to investigate.</span>
+    </div>
+    <div id="cl-out" class="empty"><h3>No clients saved yet</h3>
+      Add the practices you work for. Each refresh answers: whose rates moved, who has
+      contract gaps, and which of their referral sources lost Medicare standing.</div>
+  </section>
 
   <!-- ======================= OVERVIEW ======================= -->
   <section id="view-overview" class="view">
@@ -332,7 +357,10 @@
         </div>
         <div class="mpfs-row">
           <span id="mpfs-status" class="muted">MPFS: not loaded</span>
-          <label class="btn" style="cursor:pointer">Load MPFS CSV<input type="file" id="mpfs-file" accept=".csv" style="display:none"></label>
+          <label class="btn" style="cursor:pointer" title="Best input: the official CMS RVU bundle zip (PPRRVU + GPCI) from cms.gov — locality-adjusted % of Medicare everywhere. A simple code,non_facility_rate CSV also works.">Load MPFS (CMS zip or CSV)<input type="file" id="mpfs-file" accept=".csv,.zip,.txt" style="display:none"></label>
+          <input type="text" id="mpfs-cf" placeholder="CF $" style="width:64px" title="the CMS-published conversion factor for the file's year (e.g. 32.35) — required for the official RVU files, printed in every methodology">
+          <input type="text" id="mpfs-state" placeholder="MO" style="width:44px" title="state whose GPCI locality prices the % of Medicare (its 'rest of state' locality unless you type a locality name below)">
+          <input type="text" id="mpfs-locality" placeholder="locality (opt.)" style="width:96px" title="optional locality name, e.g. 'ST. LOUIS' — otherwise the state's REST OF locality is used and disclosed">
         </div>
         <div style="display:flex;gap:8px;margin-top:12px">
           <button class="btn primary" id="b-run">Run benchmark</button>
@@ -385,6 +413,25 @@
           <button class="btn primary" id="ng-run">Compare</button>
           <button class="btn" id="ng-report" disabled title="Print-ready document for the payer request">Printable report</button>
         </div>
+        <details style="margin-top:14px" id="ng-proposal-box">
+          <summary style="cursor:pointer;font-weight:600">Build a rate proposal</summary>
+          <div class="field" style="margin-top:8px"><label>Propose at</label>
+            <select id="ng-target">
+              <option value="p50">this payer's median</option>
+              <option value="p75">this payer's p75</option>
+              <option value="best_comparable">best comparable rate this payer pays</option>
+              <option value="pct_medicare">% of Medicare (MPFS must be loaded)</option>
+            </select>
+            <input type="number" id="ng-target-pct" value="110" min="50" max="400" style="width:64px;display:none;margin-top:4px" title="e.g. 110 = 110% of the loaded Medicare fee schedule">
+          </div>
+          <div class="field"><label>Annual units per code <span class="muted" style="text-transform:none">(optional — prices the ask)</span></label>
+            <textarea id="ng-volumes" rows="3" placeholder="97110, 4200&#10;97140, 1800"></textarea>
+          </div>
+          <div style="display:flex;gap:8px">
+            <button class="btn" id="ng-proposal-run" title="Proposed rate per code at the chosen basis — never below current">Preview proposal</button>
+            <button class="btn" id="ng-proposal-report" title="Print-ready proposal document (needs the state field above)">Printable proposal</button>
+          </div>
+        </details>
       </div>
       <div class="bench-results">
         <div id="ng-out" class="empty"><h3>Pick your practice and the payer</h3>
@@ -469,6 +516,28 @@
     <div id="md-out" class="empty"><h3>Pick a practice</h3>
       Its providers' Order &amp; Referring status, who shares patients into it, and where its
       patients go next — from the CMS datasets imported with <code class="inline">mrfx medicare</code>.</div>
+
+    <div class="validate-card" style="margin-bottom:14px">
+      <h3>Referral leaders — who wins the Medicare referral market</h3>
+      <p class="muted">Practices ranked by shared Medicare patients received. Search around a ZIP,
+        set a radius, and click any practice that has rates in your store to see every payer rate
+        the MRF files price them at.</p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <input type="text" id="rl-zip" placeholder="ZIP (optional)" style="width:110px">
+        <select id="rl-radius">
+          <option value="10">10 miles</option>
+          <option value="25" selected>25 miles</option>
+          <option value="50">50 miles</option>
+          <option value="100">100 miles</option>
+        </select>
+        <label class="toggle" title="keep only PT/OT/SLP providers and therapy clinics (by NPPES taxonomy) — hides the hospitals and labs that 'receive' patients from co-occurring care">
+          <input type="checkbox" id="rl-therapy" checked> therapy practices only
+        </label>
+        <button class="btn primary" id="rl-run">Rank</button>
+        <span id="rl-msg" class="muted"></span>
+      </div>
+      <div id="rl-out" style="margin-top:10px"></div>
+    </div>
 
     <div class="validate-card">
       <h3>Batch NPI eligibility check</h3>

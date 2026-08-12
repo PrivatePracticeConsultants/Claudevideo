@@ -899,6 +899,171 @@ and P75, and the best rate this payer already pays one of your named comparables
 </body></html>"""
 
 
+PROPOSAL_TARGETS = ("p50", "p75", "best_comparable", "pct_medicare")
+
+
+def compute_rate_proposal(store: Store, subject: str, payer: str, market: dict,
+                          target: dict, volumes: dict[str, float] | None = None,
+                          comparables: list[str] | None = None) -> dict:
+    """The proposal grid the payer actually receives: per code, current rate ->
+    proposed rate at a stated, checkable basis.
+
+    Targets are REAL reference points only — this payer's median or p75 among
+    its other providers, the best rate it already pays a named comparable, or
+    a % of the loaded Medicare fee schedule. No interpolated percentiles: a
+    number in a payer-facing document must be reproducible from stated inputs.
+    A proposed rate is never below the current one (those rows read 'keep');
+    annual value uses owner-supplied volumes and only volumes — codes without
+    a volume still get a proposed rate, with the value column honest-blank."""
+    kind = str(target.get("kind") or "").strip()
+    if kind not in PROPOSAL_TARGETS:
+        raise BenchmarkError(f"target must be one of {', '.join(PROPOSAL_TARGETS)}")
+    pct = None
+    if kind == "pct_medicare":
+        try:
+            pct = float(target.get("value"))
+        except (TypeError, ValueError):
+            raise BenchmarkError("a % of Medicare target needs a number, e.g. 110")
+        if not (50 <= pct <= 400):
+            raise BenchmarkError(f"{pct}% of Medicare is outside a plausible "
+                                 "proposal range (50-400%)")
+    comp = compute_payer_comparison(store, subject, payer, market,
+                                    comparables=comparables)
+    mpfs: dict[str, float] = {}
+    if kind == "pct_medicare":
+        if not comp.get("mpfs_loaded"):
+            raise BenchmarkError("a % of Medicare target needs the MPFS loaded "
+                                 "(Benchmark tab -> Load MPFS)")
+        with store.connect() as con:
+            mpfs = dict(con.execute(
+                "SELECT code, median(non_facility_rate) FROM mpfs GROUP BY code"
+            ).fetchall())
+
+    volumes = {str(k).strip(): float(v) for k, v in (volumes or {}).items()}
+    basis_label = {"p50": f"{payer}'s median", "p75": f"{payer}'s p75",
+                   "best_comparable": "best comparable rate this payer pays",
+                   "pct_medicare": f"{pct:g}% of Medicare" if pct else ""}[kind]
+    rows, total_value, priced_value_units = [], 0.0, 0
+    for r in comp["rows"]:
+        cur = r["subject_rate"]
+        if kind == "p50":
+            tgt = r.get("p50")
+        elif kind == "p75":
+            tgt = r.get("p75")
+        elif kind == "best_comparable":
+            tgt = r.get("best_comparable")
+        else:
+            m = mpfs.get(r["billing_code"])
+            tgt = round(m * pct / 100.0, 2) if m is not None else None
+        proposed = None if tgt is None else max(round(float(tgt), 2), cur)
+        units = volumes.get(r["billing_code"])
+        delta = None if proposed is None else round(proposed - cur, 2)
+        value = (round(delta * units, 2)
+                 if delta is not None and units is not None else None)
+        if value is not None:
+            total_value += value
+            priced_value_units += 1
+        rows.append({
+            "billing_code": r["billing_code"], "description": r.get("description"),
+            "is_timed": r.get("is_timed"), "current": cur, "proposed": proposed,
+            "delta": delta,
+            "delta_pct": (round(100 * delta / cur, 1)
+                          if delta is not None and cur else None),
+            "kept": proposed is not None and proposed == cur,
+            "no_reference": proposed is None,
+            "units": units, "annual_value": value,
+            "n_peers": r.get("n_peers"),
+        })
+    return {
+        "subject": comp["subject"], "payer": payer, "market": comp["market"],
+        "target": {"kind": kind, "value": pct, "label": basis_label},
+        "rows": rows,
+        "basis_note": comp["basis_note"], "peer_set": comp["peer_set"],
+        "mpfs_loaded": comp["mpfs_loaded"], "mpfs_source": comp.get("mpfs_source"),
+        "summary": {
+            "n_codes": len(rows),
+            "n_raised": sum(1 for r in rows if r["delta"] and r["delta"] > 0),
+            "n_kept": sum(1 for r in rows if r["kept"]),
+            "n_no_reference": sum(1 for r in rows if r["no_reference"]),
+            "has_volumes": bool(volumes),
+            "n_valued": priced_value_units,
+            "total_annual_value": round(total_value, 2) if volumes else None,
+        },
+    }
+
+
+def render_proposal_report(cfg: MrfxConfig, store: Store, prop: dict) -> str:
+    """Print-ready rate proposal — the one-pager handed to the payer. Same
+    honesty rails as every report: pinned month, geographic-scope banner,
+    stated basis per number, full methodology footer."""
+    if not prop.get("market", {}).get("month"):
+        raise BenchmarkError("a proposal document requires a pinned as-of month")
+    geo_banner = _geo_banner_html(
+        require_geographic_scope(prop["market"], "rate proposal"))
+    e = html.escape
+    s = prop["summary"]
+    month = prop["market"].get("month")
+    rows_html = "".join(
+        f"""<tr><td>{e(r['billing_code'])}{' <span class="sub">15-min</span>' if r.get('is_timed') else ''}
+        <div class="sub">{e(r.get('description') or '')}</div></td>
+        <td class="num">{_m(r['current'])}</td>
+        <td class="num gap">{'—' if r['no_reference'] else _m(r['proposed'])}</td>
+        <td class="num">{'' if r['delta'] is None else ('keep' if r['kept'] else f"+{_m(r['delta'])} ({r['delta_pct']:+.1f}%)")}</td>
+        <td class="num">{'' if r['units'] is None else f"{r['units']:,.0f}"}</td>
+        <td class="num">{'' if r['annual_value'] is None else _m(r['annual_value'])}</td>
+        <td class="num sub">{r.get('n_peers') if r.get('n_peers') is not None else ''}</td></tr>"""
+        for r in prop["rows"])
+    value_band = ""
+    if s["has_volumes"] and s["total_annual_value"] is not None:
+        value_band = (f'<p class="band">At the practice\'s stated annual volumes, this '
+                      f'proposal is worth <b>{_m(s["total_annual_value"])}</b> per year '
+                      f'({s["n_valued"]} of {s["n_codes"]} codes carry volumes; '
+                      f'codes without a stated volume are excluded from the total).</p>')
+    nr = (f' {s["n_no_reference"]} code(s) show no proposal — the reference '
+          f'basis has no rate to point to there.' if s["n_no_reference"] else "")
+    footer = methodology_footer(store, {
+        "market": {**prop["market"], "payers": [prop["payer"]]},
+        "peer_set": prop["peer_set"], "basis_note": prop["basis_note"],
+        "mpfs_loaded": prop["mpfs_loaded"], "mpfs_source": prop.get("mpfs_source"),
+    })
+    return f"""<!DOCTYPE html><html><head><meta charset="utf-8">
+<title>Rate proposal — {e(prop['subject'])} to {e(prop['payer'])}</title>
+<style>
+ body {{ font: 13px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; color: #0b0b0b;
+        max-width: 940px; margin: 32px auto; padding: 0 24px; }}
+ h1 {{ font-size: 20px; margin-bottom: 2px; }} h2 {{ font-size: 15px; margin-top: 28px; }}
+ .brand {{ color: #52514e; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }}
+ .brandbar {{ display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }}
+ .brandbar .brand {{ margin: 0; }} .logo {{ max-height: 40px; max-width: 200px; }}
+ .meta {{ color: #52514e; margin-bottom: 10px; }}
+ table {{ border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }}
+ th, td {{ text-align: left; padding: 6px 8px; border-bottom: 1px solid #e1e0d9; vertical-align: middle; }}
+ th {{ font-size: 11px; color: #898781; text-transform: uppercase; letter-spacing: .04em; }}
+ .num {{ text-align: right; }} .sub {{ color: #898781; font-size: 11.5px; }}
+ .gap {{ font-weight: 650; }}
+ .band {{ font-size: 13.5px; background: #f4f3ee; padding: 10px 14px; border-radius: 6px; }}
+ .geo-warn {{ background: #fbe9d0; border: 1px solid #d99a3a; color: #7a4a00;
+          padding: 10px 14px; border-radius: 6px; font-size: 12.5px; margin: 12px 0; }}
+ footer {{ margin-top: 36px; border-top: 1px solid #c3c2b7; padding-top: 12px;
+          color: #52514e; font-size: 11px; white-space: pre-wrap; }}
+ @media print {{ body {{ margin: 0; }} h2 {{ break-after: avoid; }} }}
+</style></head><body>
+{_brand_header(cfg)}
+<h1>Rate proposal — {e(prop['subject'])} to {e(prop['payer'])}</h1>
+<div class="meta">Proposed rate basis: <b>{e(prop['target']['label'])}</b>, from published
+ machine-readable rates as of {e(month_label(month))}. Proposed rates never fall below the
+ current contract; rows at market read "keep".{e(nr)}</div>
+{geo_banner}
+{value_band}
+<h2>Proposed fee schedule</h2>
+<table><thead><tr><th>Code</th><th class="num">Current</th><th class="num">Proposed</th>
+<th class="num">Change</th><th class="num">Annual units</th><th class="num">Annual value</th>
+<th class="num">Peers</th></tr></thead>
+<tbody>{rows_html}</tbody></table>
+<footer>METHODOLOGY\n{e(footer)}</footer>
+</body></html>"""
+
+
 def require_geographic_scope(market: dict, kind: str) -> str:
     """Client-facing reports must not silently pool multiple states — negotiated
     reimbursement varies by geography, so a national comparison has to be an
