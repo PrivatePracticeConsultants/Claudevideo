@@ -1945,7 +1945,9 @@ async function runMedicareOrg() {
   out.classList.remove("empty");
   out.innerHTML = `<div class="loading">Looking up Medicare layers</div>`;
   let d;
-  try { d = await postJson("/api/medicare/org", { subject, dataset_id: $("#md-year").value || null }); }
+  // limit 500 (the API max) so the table and its CSV carry everything up to
+  // the cap — and total_partners says when even that truncates
+  try { d = await postJson("/api/medicare/org", { subject, dataset_id: $("#md-year").value || null, limit: 500 }); }
   catch (e) { out.innerHTML = `<div class="empty"><h3>Could not look up</h3>${esc(e.message)}</div>`; return; }
   state.lastMedicareOrg = d;
   $("#md-csv").disabled = !(d.referrals_in.rows.length || d.referrals_out.rows.length);
@@ -1970,8 +1972,14 @@ function medicareEligTable(rows) {
 }
 
 function medicareRefTable(ref, heading, emptyMsg) {
+  // no silent caps: when the row limit truncates, the heading says "top N of
+  // M" — otherwise a 500-row table reads as the whole referral base
+  const total = ref.total_partners ?? ref.rows.length;
+  const countNote = ref.rows.length < total
+    ? ` · <span class="warn-text">top ${fmtInt(ref.rows.length)} of ${fmtInt(total)} — the CSV carries the same ${fmtInt(ref.rows.length)}</span>`
+    : ` · ${fmtInt(total)} partner${total === 1 ? "" : "s"}`;
   const h = `<h3 style="margin-top:18px">${heading}${ref.dataset
-    ? ` <span class="muted" style="font-weight:400">— ${esc(ref.dataset)} ${esc(ref.data_year)}</span>` : ""}</h3>`;
+    ? ` <span class="muted" style="font-weight:400">— ${esc(ref.dataset)} ${esc(ref.data_year)}${countNote}</span>` : ""}</h3>`;
   if (!ref.rows.length) return `${h}<div class="muted">${emptyMsg}</div>`;
   const body = ref.rows.map((r, i) => `<tr>
       <td class="num">${i + 1}</td>
@@ -2080,6 +2088,12 @@ function downloadMedicareCsv() {
       ref.dataset || "", ref.data_year || ""]));
   }
   rows.push([]);
+  for (const [dir, ref] of [["sources", d.referrals_in], ["destinations", d.referrals_out]]) {
+    if ((ref.rows || []).length < (ref.total_partners ?? 0)) {
+      rows.push([`NOTE: ${dir} truncated — this file carries the top ${ref.rows.length} ` +
+                 `of ${ref.total_partners} partners by shared patients.`]);
+    }
+  }
   rows.push([`NOTE: ${d.referrals_in.caveat || ""}`]);
   const safe = (d.display_name || "practice").replace(/[^A-Za-z0-9]+/g, "_").slice(0, 48);
   csvDownload(`medicare_referrals_${safe}.csv`, rows);

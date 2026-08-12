@@ -814,7 +814,8 @@ def cmd_medicare(cfg: MrfxConfig, args) -> int:
                     r = import_shared_patients(
                         store, item["path"], year=item.get("year") or None,
                         interval=item.get("interval") or None)
-                    print(f"  {r['pairs']:,} pairs touching your providers "
+                    print(f"  WARNING: {r['warning']}" if r["warning"] else
+                          f"  {r['pairs']:,} pairs touching your providers "
                           f"({r['label']} {r['year']})")
                 did = True
             except Exception as e:  # noqa: BLE001 — a bad file is a message
@@ -838,7 +839,8 @@ def cmd_medicare(cfg: MrfxConfig, args) -> int:
         try:
             r = import_shared_patients(store, args.referrals, year=args.year,
                                        interval=getattr(args, "interval", None))
-            print(f"referrals:   {r['pairs']:,} pairs touching your providers "
+            print(f"referrals:   WARNING: {r['warning']}" if r["warning"] else
+                  f"referrals:   {r['pairs']:,} pairs touching your providers "
                   f"({r['label']} {r['year']})")
             did = True
         except Exception as e:  # noqa: BLE001

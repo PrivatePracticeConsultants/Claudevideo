@@ -167,7 +167,7 @@ def org_bundle_files(store: Store, profile: dict) -> dict[str, str]:
 
     for direction, fname in (("in", "referral_sources.csv"),
                              ("out", "referral_destinations.csv")):
-        ref = org_referrals(store, profile["npis"], direction, limit=250)
+        ref = org_referrals(store, profile["npis"], direction, limit=500)
         if not ref["rows"]:
             continue
         row_npis = [r["npi"] for r in ref["rows"]]
@@ -185,6 +185,10 @@ def org_bundle_files(store: Store, profile: dict) -> dict[str, str]:
                 losses.get(r["npi"], ""),
                 ref["dataset"], ref["data_year"]])
         rrows.append([])
+        if len(ref["rows"]) < (ref.get("total_partners") or 0):
+            # no silent caps: a client deliverable must say when it is a top-N
+            rrows.append([f"NOTE: truncated — top {len(ref['rows'])} of "
+                          f"{ref['total_partners']} partners by shared patients."])
         rrows.append([f"NOTE: {REFERRAL_CAVEAT}"])
         files[fname] = _w(rrows)
 

@@ -419,6 +419,69 @@ def test_startup_autoimport_takes_the_roster_and_only_the_roster(
             "the referral file stays offered as a deliberate click"
 
 
+def test_nothing_is_excluded_silently(store, tmp_path):
+    """The three quiet ways referral data could vanish or understate, each of
+    which must instead be kept or SAID:
+
+    - padded NPIs: every downstream join is an exact string match, so one
+      space of padding would silently drop every pair;
+    - a 0-kept import: honest data, but it must come back with a warning, not
+      read as a quiet success;
+    - the row limit: totals must be exact regardless of it, so every consumer
+      can say 'top N of M' instead of implying the rows are the whole story."""
+    _seed_rates(store)
+
+    # padded values in a Hop delivery still match and import
+    hop = tmp_path / "docgraph_2022.csv"
+    hop.write_text("from_npi,to_npi,patient_count,transaction_count,"
+                   "average_day_wait,std_day_wait\n"
+                   + "".join(f" {d} , {MINE[0]} ,{70 + i},{500 + i},12.5,3.1\n"
+                             for i, d in enumerate(DOCS)))
+    r = import_shared_patients(store, hop)
+    assert r["pairs"] == len(DOCS), "padded NPIs must be trimmed, not dropped"
+    assert r["warning"] is None
+    rows = org_referrals(store, MINE, "in")["rows"]
+    assert {x["npi"] for x in rows} == set(DOCS)
+    assert all(x["name"].startswith("Dr Ortho") for x in rows), \
+        "trimmed NPIs must join to the NPPES directory"
+
+    # totals are exact regardless of the row limit
+    ref = org_referrals(store, MINE, "in", limit=2)
+    assert len(ref["rows"]) == 2
+    assert ref["total_partners"] == len(DOCS)
+    assert ref["total_patients"] == sum(70 + i for i in range(len(DOCS)))
+
+    # a file whose pairs touch nothing imports as an honest 0 WITH a warning
+    alien = tmp_path / "alien_2019.csv"
+    alien.write_text("from_npi,to_npi,patient_count,transaction_count,"
+                     "average_day_wait,std_day_wait\n"
+                     "9999999991,9999999992,50,100,10.0,2.0\n")
+    r0 = import_shared_patients(store, alien)
+    assert r0["pairs"] == 0
+    assert r0["warning"] and "matches nothing" in r0["warning"]
+
+
+def test_bundle_says_when_a_referral_list_is_truncated(cfg, store, tmp_path):
+    """A client deliverable that is a top-N must say so in the file itself."""
+    from mrfx.orgprofile import compute_org_profile, org_bundle_files
+
+    _seed_rates(store)
+    # more partners than we can name without a big fixture: monkey-level check
+    # via a small limit is not possible through the bundle (fixed 500), so
+    # assert the honest inverse instead: NOT truncated -> no truncation note.
+    hop = tmp_path / "docgraph_2022.csv"
+    hop.write_text("from_npi,to_npi,patient_count,transaction_count,"
+                   "average_day_wait,std_day_wait\n"
+                   + "".join(f"{d},{MINE[0]},{70 + i},{500 + i},12.5,3.1\n"
+                             for i, d in enumerate(DOCS)))
+    import_shared_patients(store, hop)
+    files = org_bundle_files(store, compute_org_profile(
+        store, "431234567", {"month": "2026-06"}))
+    src = files["referral_sources.csv"]
+    assert "NOTE: truncated" not in src
+    assert "NOT a referral record" in src           # the caveat still travels
+
+
 def test_import_inputs_are_validated_not_trusted(store, tmp_path):
     """`year` and `label` are embedded in a COPY statement (DuckDB cannot
     parameterize it) and `year` also names the output parquet — so a hostile

@@ -260,15 +260,19 @@ def import_shared_patients(store: Store, path: str | Path,
     p = sql_path(path)
 
     # Column order differs by format — map explicitly, never positionally.
+    # NPIs are trim()ed: the roster import and the rates parser both store
+    # trimmed NPIs, and the keep-filter + every downstream join are exact
+    # string matches — one space of padding in a delivery would otherwise
+    # match NOTHING and silently drop every pair.
     if fmt == FMT_CMS:
-        select = ("column0 AS source_npi, column1 AS target_npi, "
+        select = ("trim(column0) AS source_npi, trim(column1) AS target_npi, "
                   "TRY_CAST(column3 AS BIGINT) AS patients, "
                   "TRY_CAST(column2 AS BIGINT) AS transactions, "
                   "TRY_CAST(column4 AS BIGINT) AS same_day, "
                   "CAST(NULL AS DOUBLE) AS avg_day_wait")
         reader = f"read_csv('{p}', header = false, all_varchar = true)"
     else:
-        select = ("from_npi AS source_npi, to_npi AS target_npi, "
+        select = ("trim(from_npi) AS source_npi, trim(to_npi) AS target_npi, "
                   "TRY_CAST(patient_count AS BIGINT) AS patients, "
                   "TRY_CAST(transaction_count AS BIGINT) AS transactions, "
                   "CAST(NULL AS BIGINT) AS same_day, "
@@ -311,8 +315,8 @@ def import_shared_patients(store: Store, path: str | Path,
                     SELECT {select}, '{label}' AS source_label, '{year}' AS data_year,
                            '{dataset_id}' AS dataset_id
                     FROM {reader} e
-                    WHERE e.{src} IN (SELECT npi FROM _store_npis)
-                       OR e.{dst} IN (SELECT npi FROM _store_npis)
+                    WHERE trim(e.{src}) IN (SELECT npi FROM _store_npis)
+                       OR trim(e.{dst}) IN (SELECT npi FROM _store_npis)
                 ) TO '{sql_path(tmp)}' (FORMAT PARQUET, COMPRESSION ZSTD)
             """)
         except Exception as e:
@@ -336,10 +340,24 @@ def import_shared_patients(store: Store, path: str | Path,
         _register_referral_view(con, store)
         n = con.execute("SELECT count(*) FROM referral_pairs WHERE dataset_id = ?",
                         [dataset_id]).fetchone()[0]
-    log.info("referrals: kept %s pairs touching this store's providers (%s %s)",
-             f"{n:,}", label, year)
+    # 0 kept is honest (the file imported cleanly, nothing matched) but it is
+    # almost never what the user meant — a national claims file that shares no
+    # provider with a store full of practices is nearly always the WRONG file.
+    # The honesty contract keeps the 0; this makes sure it is SAID, not shown
+    # as a quiet success the user reads as "done".
+    warning = None
+    if n == 0:
+        warning = (f"0 of {path.name}'s pairs involve any provider in this "
+                   "store. The file imported cleanly but matches nothing — "
+                   "usually the wrong file (different region or population), "
+                   "not a real absence of shared patients.")
+        log.warning("referrals: %s", warning)
+    else:
+        log.info("referrals: kept %s pairs touching this store's providers (%s %s)",
+                 f"{n:,}", label, year)
     return {"pairs": n, "format": fmt, "year": year, "label": label,
-            "interval": interval, "dataset_id": dataset_id, "path": str(out)}
+            "interval": interval, "dataset_id": dataset_id, "path": str(out),
+            "warning": warning}
 
 
 def _register_referral_view(con, store: Store) -> None:
@@ -535,7 +553,8 @@ def org_referrals(store: Store, npis: list[str], direction: str = "in",
     active = active_dataset(store, year, dataset_id) if npis else None
     if not npis or active is None:
         return {"direction": direction, "rows": [], "dataset": None, "data_year": None,
-                "dataset_id": None, "caveat": REFERRAL_CAVEAT}
+                "dataset_id": None, "total_partners": 0, "total_patients": 0,
+                "caveat": REFERRAL_CAVEAT}
     label, yr, ds_id = active
     mine, theirs = (("target_npi", "source_npi") if direction == "in"
                     else ("source_npi", "target_npi"))
@@ -558,8 +577,21 @@ def org_referrals(store: Store, npis: list[str], direction: str = "in",
             LIMIT {int(limit)}
         """, [ds_id, npis, npis])
         rows = [dict(zip([d[0] for d in cur.description], r)) for r in cur.fetchall()]
+        # Totals over ALL partners, independent of the row limit — "no silent
+        # caps": every consumer can say "top 100 of 217" instead of implying
+        # the shown rows are the whole story, and summary numbers (the entity
+        # drawer's glance) stay exact for practices with more partners than
+        # any list shows. Same scan class as the query above (~ms).
+        total_partners, total_patients = con.execute(f"""
+            SELECT count(DISTINCT p.{theirs}), coalesce(sum(p.patients), 0)
+            FROM referral_pairs p
+            WHERE p.dataset_id = ?
+              AND p.{mine} IN (SELECT unnest(?::VARCHAR[]))
+              AND p.{theirs} NOT IN (SELECT unnest(?::VARCHAR[]))
+        """, [ds_id, npis, npis]).fetchone()
     return {"direction": direction, "rows": rows, "dataset": label, "data_year": yr,
-            "dataset_id": ds_id, "caveat": REFERRAL_CAVEAT}
+            "dataset_id": ds_id, "total_partners": total_partners,
+            "total_patients": total_patients, "caveat": REFERRAL_CAVEAT}
 
 
 # Compact NUCC prefix -> readable family, for the dashboard's referral tables.

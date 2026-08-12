@@ -929,8 +929,11 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 return None
             lost = recent_losses(store, [r["npi"] for r in ref["rows"]])
             return {
-                "sources": len(ref["rows"]),
-                "patients": sum(r["patients"] or 0 for r in ref["rows"]),
+                # exact totals from the aggregate, NOT sums over the fetched
+                # rows — a practice with more partners than the row limit
+                # would otherwise be silently understated on every drawer
+                "sources": ref["total_partners"],
+                "patients": ref["total_patients"],
                 "lost_standing": len(lost),
                 "dataset": ref["dataset"], "data_year": ref["data_year"],
             }
@@ -1415,7 +1418,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                             store, item["path"], year=item.get("year") or None,
                             interval=item.get("interval") or None)
                         done.append({"label": label, "ok": True,
-                                     "detail": f"{r['pairs']:,} pairs touching your providers"})
+                                     "detail": (r["warning"] or
+                                                f"{r['pairs']:,} pairs touching your providers")})
                 except Exception as e:  # noqa: BLE001 — one bad file must not
                     # abort the others; fault isolation, same as the ingest path
                     log.warning("tracker import failed for %s: %s", label, e)
