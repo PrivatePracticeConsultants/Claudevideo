@@ -537,7 +537,7 @@ def _print_medicare_status(cfg: MrfxConfig) -> None:
     """One line for the Medicare layers, so it's obvious whether the referral
     and eligibility halves are actually loaded."""
     try:
-        from .medicare import medicare_status
+        from .medicare import STALE_ROSTER_DAYS, medicare_status
         st = medicare_status(Store(cfg.store_dir, cfg.duckdb_memory_gb,
                                    temp_dir=cfg.duckdb_temp_dir))
     except Exception:  # noqa: BLE001 — a status line must never block the command
@@ -550,7 +550,12 @@ def _print_medicare_status(cfg: MrfxConfig) -> None:
         return
     bits = []
     if e:
-        bits.append(f"eligibility {e['providers']:,} providers (release {e['release']})")
+        line = f"eligibility {e['providers']:,} providers (release {e['release']}"
+        age = e.get("age_days")
+        if age is not None and age > STALE_ROSTER_DAYS:
+            line += (f" — {age} days old; CMS refreshes ~twice a week, "
+                     "re-import a fresh snapshot")
+        bits.append(line + ")")
     for d in refs:
         bits.append(f"{d['label']} {d['year']} {d['pairs']:,} pairs")
     print("medicare:   " + " · ".join(bits))
@@ -762,6 +767,16 @@ def cmd_medicare(cfg: MrfxConfig, args) -> int:
         try:
             r = import_orf_roster(store, args.eligibility)
             print(f"eligibility: {r['providers']:,} providers (release {r['release']})")
+            d = r.get("diff")
+            if d:
+                print(f"  since release {d['prev_release']}: "
+                      f"+{d['added']:,} joined the roster, "
+                      f"{d['removed']:,} dropped off, "
+                      f"{d['partb_lost']:,} lost Part B, "
+                      f"{d['partb_gained']:,} regained it")
+                if d["removed"] or d["partb_lost"]:
+                    print("  (referral sources affected by a loss are flagged "
+                          "on the dashboard's Medicare tab)")
             did = True
         except Exception as e:  # noqa: BLE001 — a bad file is a message, not a trace
             print(f"could not import the eligibility roster: {e}")

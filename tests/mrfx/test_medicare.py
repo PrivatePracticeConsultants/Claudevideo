@@ -125,6 +125,62 @@ def test_vintages_are_never_blended(store, tmp_path):
     assert {d["year"] for d in st["referrals"]} == {"2015", "2022"}
 
 
+def test_roster_change_tracking_and_staleness(cfg, store, tmp_path):
+    """Between two snapshots the actionable movement is who LOST order/refer
+    standing — those NPIs must be flagged by name on referral rows. And a
+    months-old roster must call itself stale rather than quietly answering
+    eligibility from the past."""
+    import datetime as dt
+
+    from fastapi.testclient import TestClient
+    from mrfx.api import create_app
+    from mrfx.medicare import recent_losses
+
+    _seed_rates(store)
+    r1 = import_orf_roster(store, _orf(tmp_path))
+    assert r1["diff"] is None                      # first import: nothing to diff
+    st = medicare_status(store)
+    assert "last_change" not in st["eligibility"]
+    # age computed from the release date in the tracker's filename
+    assert st["eligibility"]["age_days"] == (
+        dt.date.today() - dt.date(2026, 7, 17)).days
+
+    # v2: DOCS[0] unchanged, DOCS[1] loses Part B, DOCS[2] drops off, one new
+    v2 = tmp_path / "OrderReferring_2026-08-10.csv"
+    v2.write_text("NPI,LAST_NAME,FIRST_NAME,PARTB,DME,HHA,PMD,HOSPICE\n"
+                  f"{DOCS[0]},DOC0,ANNA,Y,Y,N,N,N\n"
+                  f"{DOCS[1]},DOC1,ANNA,N,N,N,N,N\n"
+                  "1590000009,NEWDOC,SAM,Y,N,N,N,N\n")
+    r2 = import_orf_roster(store, v2)
+    assert r2["diff"] == {"prev_release": "2026-07-17", "added": 1, "removed": 1,
+                          "partb_lost": 1, "partb_gained": 0}
+    lc = medicare_status(store)["eligibility"]["last_change"]
+    assert lc["partb_lost"] == 1 and lc["prev_release"] == "2026-07-17"
+    assert recent_losses(store, DOCS) == {DOCS[1]: "lost_partb",
+                                          DOCS[2]: "removed"}
+
+    # re-importing the SAME release must not erase the recorded change with
+    # an all-zero diff
+    r3 = import_orf_roster(store, v2)
+    assert r3["diff"] is None
+    assert medicare_status(store)["eligibility"]["last_change"]["partb_lost"] == 1
+
+    # the flag lands on the dashboard's referral rows
+    hop = tmp_path / "docgraph_2022.csv"
+    hop.write_text("from_npi,to_npi,patient_count,transaction_count,"
+                   "average_day_wait,std_day_wait\n"
+                   + "".join(f"{d},{MINE[0]},{70 + i},{500 + i},12.5,3.1\n"
+                             for i, d in enumerate(DOCS)))
+    import_shared_patients(store, hop)
+    client = TestClient(create_app(cfg, store))
+    rows = {r["npi"]: r for r in client.post(
+        "/api/medicare/org",
+        json={"subject": "431234567"}).json()["referrals_in"]["rows"]}
+    assert rows[DOCS[1]]["recent_change"] == "lost_partb"
+    assert rows[DOCS[2]]["recent_change"] == "removed"
+    assert rows[DOCS[0]]["recent_change"] is None
+
+
 def test_failed_imports_leave_previous_data_untouched(store, tmp_path):
     """The tracker's contract, kept here: a validation failure keeps your
     existing snapshot untouched. Two ways an import can die AFTER passing the

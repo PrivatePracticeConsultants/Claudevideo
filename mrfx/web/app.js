@@ -1765,16 +1765,42 @@ async function initMedicare() {
   $("#md-run").addEventListener("click", runMedicareOrg);
   $("#md-subject").addEventListener("keydown", (e) => { if (e.key === "Enter") runMedicareOrg(); });
   $("#md-check").addEventListener("click", runMedicareBatchCheck);
+  $("#md-csv").addEventListener("click", downloadMedicareCsv);
+  $("#md-check-csv").addEventListener("click", downloadMedicareCheckCsv);
 }
+
+// the roster is refreshed by CMS ~twice a week; past this age the tab calls
+// the loaded snapshot stale (mirror of medicare.STALE_ROSTER_DAYS)
+const STALE_ROSTER_DAYS = 45;
 
 async function refreshMedicareStatus() {
   let st;
   try { st = await api("/api/medicare/status"); }
   catch { $("#md-status").textContent = "status unavailable"; return; }
   const parts = [];
-  if (st.eligibility) parts.push(`Order &amp; Referring: <b>${fmtInt(st.eligibility.providers)}</b> providers (release ${esc(st.eligibility.release || "?")})`);
+  const el = st.eligibility;
+  if (el) {
+    let line = `Order &amp; Referring: <b>${fmtInt(el.providers)}</b> providers (release ${esc(el.release || "?")})`;
+    if (el.age_days != null && el.age_days > STALE_ROSTER_DAYS) {
+      line += ` <span class="warn-text">— ${el.age_days} days old (stale). CMS refreshes ~twice a week; re-download in the tracker and re-import.</span>`;
+    }
+    parts.push(line);
+  }
   (st.referrals || []).forEach((r) => parts.push(`${esc(r.label)} ${esc(r.year)}: <b>${fmtInt(r.pairs)}</b> pairs`));
   $("#md-status").innerHTML = parts.join(" · ") || "nothing imported yet";
+  // movement between the two most recent roster snapshots — losses are the
+  // part a consultant acts on, so they get the warning color
+  const chg = $("#md-changes");
+  const lc = el && el.last_change;
+  if (lc) {
+    const lost = (lc.removed || 0) + (lc.partb_lost || 0);
+    chg.style.display = "";
+    chg.innerHTML = `Since release ${esc(lc.prev_release)}: +${fmtInt(lc.added)} joined the roster · ` +
+      `${fmtInt(lc.removed)} dropped off · ` +
+      `<span class="${lc.partb_lost ? "warn-text" : ""}">${fmtInt(lc.partb_lost)} lost Part B</span> · ` +
+      `${fmtInt(lc.partb_gained)} regained it` +
+      (lost ? ` — affected referral sources are flagged in the tables below.` : ``);
+  } else chg.style.display = "none";
   // dataset picker: one option per loaded referral release, keep the pick across refreshes
   const yearSel = $("#md-year");
   const keep = yearSel.value;
@@ -1797,6 +1823,8 @@ async function refreshMedicareStatus() {
 
 async function runMedicareOrg() {
   const out = $("#md-out");
+  state.lastMedicareOrg = null;
+  $("#md-csv").disabled = true;
   const subject = $("#md-subject").value.trim();
   if (!subject) { out.innerHTML = `<div class="empty"><h3>Pick a practice</h3>Type an entity name, TIN, or NPI above.</div>`; return; }
   out.classList.remove("empty");
@@ -1804,6 +1832,8 @@ async function runMedicareOrg() {
   let d;
   try { d = await postJson("/api/medicare/org", { subject, year: $("#md-year").value || null }); }
   catch (e) { out.innerHTML = `<div class="empty"><h3>Could not look up</h3>${esc(e.message)}</div>`; return; }
+  state.lastMedicareOrg = d;
+  $("#md-csv").disabled = !(d.referrals_in.rows.length || d.referrals_out.rows.length);
   renderMedicareOrg(out, d);
 }
 
@@ -1837,7 +1867,9 @@ function medicareRefTable(ref, heading, emptyMsg) {
       <td class="num">${r.avg_day_wait == null ? "–" : r.avg_day_wait}</td>
       <td>${r.on_orf ? (r.partb ? '<span class="ok-tag">eligible</span>'
                                 : '<span class="warn-text" title="on the roster but Part B says N — claims ordered/referred by this provider are at denial risk">NOT eligible</span>')
-                     : '<span class="muted" title="not on the Order & Referring roster — normal for facilities, labs and organizations; a denial risk only for a physician who refers">not on list</span>'}</td>
+                     : '<span class="muted" title="not on the Order & Referring roster — normal for facilities, labs and organizations; a denial risk only for a physician who refers">not on list</span>'}${
+        r.recent_change ? `<div class="sub warn-text" title="changed between the two most recent roster snapshots you imported — the freshest possible warning this data can give">${
+          r.recent_change === "removed" ? "dropped off the roster in the latest snapshot" : "lost Part B in the latest snapshot"}</div>` : ""}</td>
     </tr>`).join("");
   return `${h}<div class="tablewrap"><table><thead><tr>
       <th>#</th><th>Provider</th><th>Specialty</th><th class="num">Shared patients</th>
@@ -1883,14 +1915,72 @@ function renderMedicareOrg(out, d) {
 async function runMedicareBatchCheck() {
   const outEl = $("#md-check-out");
   const msg = $("#md-check-msg");
+  state.lastMedicareCheck = null;
+  $("#md-check-csv").disabled = true;
   msg.textContent = "checking…";
   let d;
   try { d = await postJson("/api/medicare/eligibility", { text: $("#md-npis").value }); }
   catch (e) { msg.textContent = ""; outEl.innerHTML = `<div class="muted">${esc(e.message)}</div>`; return; }
   msg.textContent = "";
+  state.lastMedicareCheck = d;
+  $("#md-check-csv").disabled = false;
   outEl.innerHTML = `<div class="muted" style="margin-bottom:6px"><b>${fmtInt(d.on_list)}</b> of
     <b>${fmtInt(d.checked)}</b> NPIs are on the Order &amp; Referring list.</div>` +
     medicareEligTable(d.rows);
+}
+
+/* client-side CSV for the Medicare tables. Mirrors the server exports' two
+   safety habits: spreadsheet-formula defusing (a value starting with = + @
+   would execute in Excel) and the caveat traveling WITH the data as NOTE
+   rows, exactly like the bundle's referral CSVs. */
+function csvCell(v) {
+  let s = String(v ?? "");
+  if (/^[=+@]/.test(s) || (s.startsWith("-") && isNaN(Number(s)))) s = "'" + s;
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+function csvDownload(filename, rows) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob(
+    [rows.map((r) => r.map(csvCell).join(",")).join("\r\n") + "\r\n"],
+    { type: "text/csv" }));
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+}
+
+function downloadMedicareCsv() {
+  const d = state.lastMedicareOrg;
+  if (!d) return;
+  const rows = [["direction", "rank", "npi", "name", "specialty", "taxonomy",
+                 "shared_patients", "transactions", "avg_day_wait",
+                 "still_eligible_partb", "recent_change", "dataset", "data_year"]];
+  for (const [dir, ref] of [["source", d.referrals_in], ["destination", d.referrals_out]]) {
+    (ref.rows || []).forEach((r, i) => rows.push([
+      dir, i + 1, r.npi, r.name, r.specialty || "", r.taxonomy || "",
+      r.patients, r.transactions, r.avg_day_wait ?? "",
+      r.on_orf ? (r.partb ? "Y" : "N") : "", r.recent_change || "",
+      ref.dataset || "", ref.data_year || ""]));
+  }
+  rows.push([]);
+  rows.push([`NOTE: ${d.referrals_in.caveat || ""}`]);
+  const safe = (d.display_name || "practice").replace(/[^A-Za-z0-9]+/g, "_").slice(0, 48);
+  csvDownload(`medicare_referrals_${safe}.csv`, rows);
+}
+
+function downloadMedicareCheckCsv() {
+  const d = state.lastMedicareCheck;
+  if (!d) return;
+  const rows = [["npi", "on_order_referring_list", "name",
+                 "partb", "dme", "hha", "pmd", "hospice", "release"]];
+  const yn = (v) => (v == null ? "" : v ? "Y" : "N");
+  d.rows.forEach((e) => rows.push([
+    e.npi, e.on_list ? "Y" : "N", e.name || "",
+    yn(e.partb), yn(e.dme), yn(e.hha), yn(e.pmd), yn(e.hospice), e.release || ""]));
+  rows.push([]);
+  rows.push(["NOTE: therapists and organizations are not on the Order & Referring "
+    + "roster at all, so N is expected for them and is not a finding. Absence "
+    + "matters for physicians who order or refer."]);
+  csvDownload("medicare_npi_check.csv", rows);
 }
 
 /* =======================================================================

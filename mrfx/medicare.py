@@ -53,6 +53,11 @@ ORF_FLAGS = ("partb", "dme", "hha", "pmd", "hospice")
 # would silently report transaction counts as patients.
 FMT_CMS, FMT_HOP = "cms-shared-patient", "hop-teaming"
 
+# CMS refreshes the Order & Referring roster about twice a week; past this age
+# a loaded snapshot is called STALE by the CLI and dashboard, because "is this
+# referrer still eligible" answered from an old roster is quietly wrong.
+STALE_ROSTER_DAYS = 45
+
 
 class MedicareImportError(Exception):
     """A file that isn't what it claims to be — refuse it, don't guess."""
@@ -111,8 +116,23 @@ def import_orf_roster(store: Store, path: str | Path) -> dict:
         # download, ragged row) would WIPE the roster it was meant to replace.
         # The tracker's contract, kept here: a failed load leaves the previous
         # snapshot untouched.
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS medicare_orf_changes (
+                prev_release VARCHAR, release VARCHAR, loaded_at TIMESTAMP,
+                added BIGINT, removed BIGINT, partb_lost BIGINT, partb_gained BIGINT)
+        """)
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS medicare_orf_lost (
+                npi VARCHAR, last_name VARCHAR, first_name VARCHAR,
+                kind VARCHAR, prev_release VARCHAR, release VARCHAR)
+        """)
+        diff = None
         con.execute("BEGIN")
         try:
+            prev_release = con.execute(
+                "SELECT any_value(release) FROM medicare_orf").fetchone()[0]
+            con.execute("CREATE OR REPLACE TEMP TABLE _orf_prev AS "
+                        "SELECT npi, last_name, first_name, partb FROM medicare_orf")
             con.execute("DELETE FROM medicare_orf")   # a snapshot REPLACES, never merges
             con.execute(f"""
                 INSERT INTO medicare_orf
@@ -123,6 +143,45 @@ def import_orf_roster(store: Store, path: str | Path) -> dict:
                 FROM read_csv('{p}', header = true, all_varchar = true)
                 WHERE NPI IS NOT NULL AND trim(NPI) <> ''
             """, [release])
+            # Change tracking vs the snapshot just replaced — the actionable
+            # movement is "who LOST order/refer standing", so those NPIs are
+            # kept by name (medicare_orf_lost) for the referral tables to flag.
+            # Only the latest real change is kept: re-importing the SAME
+            # release must not overwrite it with an all-zero diff, and a first
+            # import has nothing to diff against.
+            if prev_release is None:
+                con.execute("DELETE FROM medicare_orf_changes")
+                con.execute("DELETE FROM medicare_orf_lost")
+            elif prev_release != release:
+                con.execute("DELETE FROM medicare_orf_changes")
+                con.execute("DELETE FROM medicare_orf_lost")
+                added, removed, lost, gained = con.execute("""
+                    SELECT
+                      (SELECT count(*) FROM medicare_orf n
+                       WHERE NOT EXISTS (SELECT 1 FROM _orf_prev p WHERE p.npi = n.npi)),
+                      (SELECT count(*) FROM _orf_prev p
+                       WHERE NOT EXISTS (SELECT 1 FROM medicare_orf n WHERE n.npi = p.npi)),
+                      (SELECT count(*) FROM _orf_prev p JOIN medicare_orf n USING (npi)
+                       WHERE p.partb AND NOT n.partb),
+                      (SELECT count(*) FROM _orf_prev p JOIN medicare_orf n USING (npi)
+                       WHERE NOT p.partb AND n.partb)
+                """).fetchone()
+                con.execute(
+                    "INSERT INTO medicare_orf_changes VALUES (?, ?, now(), ?, ?, ?, ?)",
+                    [prev_release, release, added, removed, lost, gained])
+                con.execute("""
+                    INSERT INTO medicare_orf_lost
+                    SELECT p.npi, p.last_name, p.first_name, 'removed', ?, ?
+                    FROM _orf_prev p
+                    WHERE NOT EXISTS (SELECT 1 FROM medicare_orf n WHERE n.npi = p.npi)
+                    UNION ALL
+                    SELECT p.npi, p.last_name, p.first_name, 'lost_partb', ?, ?
+                    FROM _orf_prev p JOIN medicare_orf n USING (npi)
+                    WHERE p.partb AND NOT n.partb
+                """, [prev_release, release, prev_release, release])
+                diff = {"prev_release": prev_release, "added": added,
+                        "removed": removed, "partb_lost": lost,
+                        "partb_gained": gained}
             con.execute("COMMIT")
         except Exception as e:
             con.execute("ROLLBACK")
@@ -132,7 +191,7 @@ def import_orf_roster(store: Store, path: str | Path) -> dict:
         n = con.execute("SELECT count(*) FROM medicare_orf").fetchone()[0]
     log.info("Medicare Order & Referring: loaded %s providers (release %s)",
              f"{n:,}", release)
-    return {"providers": n, "release": release, "path": str(path)}
+    return {"providers": n, "release": release, "path": str(path), "diff": diff}
 
 
 def import_shared_patients(store: Store, path: str | Path,
@@ -230,7 +289,25 @@ def medicare_status(store: Store) -> dict:
             if r and r[0]:
                 out["eligibility"] = {"providers": r[0], "release": r[1],
                                       "loaded_at": str(r[2])[:19]}
+                # CMS refreshes this roster ~twice a week; a months-old
+                # snapshot quietly answers eligibility wrong. Age is surfaced
+                # so the UI/CLI can say "stale" instead of implying current.
+                try:
+                    out["eligibility"]["age_days"] = (
+                        dt.date.today() - dt.date.fromisoformat(r[1])).days
+                except (ValueError, TypeError):
+                    out["eligibility"]["age_days"] = None
         except Exception:  # noqa: BLE001 — table absent = simply not loaded
+            pass
+        try:
+            c = con.execute(
+                "SELECT prev_release, release, added, removed, partb_lost, "
+                "partb_gained FROM medicare_orf_changes LIMIT 1").fetchone()
+            if c and out["eligibility"]:
+                out["eligibility"]["last_change"] = {
+                    "prev_release": c[0], "release": c[1], "added": c[2],
+                    "removed": c[3], "partb_lost": c[4], "partb_gained": c[5]}
+        except Exception:  # noqa: BLE001 — no change recorded yet
             pass
         try:
             _register_referral_view(con, store)
@@ -272,6 +349,22 @@ def npi_eligibility(store: Store, npis: list[str]) -> list[dict]:
             "release": r[8] if r else None,
         })
     return out
+
+
+def recent_losses(store: Store, npis: list[str]) -> dict[str, str]:
+    """npi -> 'removed' | 'lost_partb' for NPIs that lost order/refer standing
+    between the two most recent roster imports. The single most actionable
+    Medicare fact for a practice: a referrer who just lost Part B standing
+    means future claims ordered by them will deny."""
+    if not npis:
+        return {}
+    with store.connect() as con:
+        try:
+            return {r[0]: r[1] for r in con.execute(
+                "SELECT npi, kind FROM medicare_orf_lost "
+                "WHERE npi IN (SELECT unnest(?::VARCHAR[]))", [npis]).fetchall()}
+        except Exception:  # noqa: BLE001 — no change history yet
+            return {}
 
 
 def active_dataset(store: Store, year: str | None = None) -> tuple[str, str] | None:

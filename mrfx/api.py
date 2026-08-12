@@ -1388,7 +1388,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         patients into it and where it shares onward — each referral row carrying
         whether that provider is still Part B order/refer-eligible."""
         from .medicare import (MedicareImportError, medicare_status,
-                               npi_eligibility, org_referrals, taxonomy_label)
+                               npi_eligibility, org_referrals, recent_losses,
+                               taxonomy_label)
         from .benchmark import resolve_subject_tins
         subject = str(body.get("subject", "")).strip()
         if not subject:
@@ -1414,13 +1415,18 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 "subject — check the spelling, or pick it from the suggestions.")
 
         def with_eligibility(ref):
-            by = {e["npi"]: e for e in npi_eligibility(
-                store, [r["npi"] for r in ref["rows"]])}
+            row_npis = [r["npi"] for r in ref["rows"]]
+            by = {e["npi"]: e for e in npi_eligibility(store, row_npis)}
+            losses = recent_losses(store, row_npis)
             for r in ref["rows"]:
                 e = by.get(r["npi"]) or {}
                 r["on_orf"] = bool(e.get("on_list"))
                 r["partb"] = e.get("partb")
                 r["specialty"] = taxonomy_label(r.get("taxonomy"))
+                # 'removed' | 'lost_partb' when this provider lost order/refer
+                # standing between the two most recent roster snapshots — the
+                # alert a consultant acts on the day they see it
+                r["recent_change"] = losses.get(r["npi"])
             return ref
 
         try:
