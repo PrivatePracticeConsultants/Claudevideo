@@ -727,8 +727,13 @@ def referral_leaders(store: Store, zip_code: str | None = None,
                 raise MedicareImportError(
                     f"ZIP {zip_code} is not in the Census ZCTA centroid list — "
                     "check the ZIP, or use a neighboring one.")
-        # one practice = one NPPES org name; keep the practice's modal 5-digit
-        # ZIP for placement and count every member NPI once
+        # One practice = one NPPES org name; keep the practice's modal 5-digit
+        # ZIP for placement and count every member NPI once. The rates join is
+        # DISTINCT-npi ONLY (a two-column dedup scan); resolving each row's
+        # drawer TIN happens AFTER the top-N cut, over just those practices'
+        # member NPIs — a mode(tin) GROUP BY npi over the whole rates relation
+        # here measured 4.8x slower (7.3s -> 1.5s at 20M rows) and its
+        # per-group counters scale with the store.
         base = f"""
             WITH agg AS (
                 SELECT coalesce(nullif(trim(n.org_name), ''), p.target_npi) AS practice,
@@ -738,39 +743,49 @@ def referral_leaders(store: Store, zip_code: str | None = None,
                        sum(p.patients)                       AS patients,
                        count(DISTINCT p.source_npi)          AS sources,
                        count(DISTINCT p.target_npi)          AS npis,
-                       max(CASE WHEN r.npi IS NOT NULL THEN 1 ELSE 0 END) = 1 AS in_store,
-                       mode(r.tin)                           AS tin
+                       list(DISTINCT p.target_npi)           AS member_npis,
+                       max(CASE WHEN r.npi IS NOT NULL THEN 1 ELSE 0 END) = 1 AS in_store
                 FROM referral_pairs p
                 JOIN npi_directory n ON n.npi = p.target_npi
-                -- tin rides along so a click opens the RIGHT drawer: an
-                -- individual therapist's NPPES name is not an entity key, but
-                -- the TIN their rates bill under always resolves
-                LEFT JOIN (SELECT npi, mode(tin_value) AS tin FROM rates
-                           GROUP BY npi) r ON r.npi = p.target_npi
+                LEFT JOIN (SELECT DISTINCT npi FROM rates) r ON r.npi = p.target_npi
                 WHERE p.dataset_id = ? AND {therapy}
                 GROUP BY 1
             )
         """
         if use_radius:
+            # haversine computed ONCE in the subselect, filtered outside
             cur = con.execute(base + """
-                SELECT a.*, round(2 * 3958.8 * asin(sqrt(
-                           pow(sin(radians((z.lat - ?) / 2)), 2)
-                           + cos(radians(?)) * cos(radians(z.lat))
-                           * pow(sin(radians((z.lon - ?) / 2)), 2))), 1) AS miles
-                FROM agg a JOIN _zcta z ON z.zip = a.zip
-                WHERE 2 * 3958.8 * asin(sqrt(
-                          pow(sin(radians((z.lat - ?) / 2)), 2)
-                          + cos(radians(?)) * cos(radians(z.lat))
-                          * pow(sin(radians((z.lon - ?) / 2)), 2))) <= ?
-                ORDER BY a.patients DESC NULLS LAST LIMIT ?
+                SELECT * FROM (
+                    SELECT a.*, round(2 * 3958.8 * asin(sqrt(
+                               pow(sin(radians((z.lat - ?) / 2)), 2)
+                               + cos(radians(?)) * cos(radians(z.lat))
+                               * pow(sin(radians((z.lon - ?) / 2)), 2))), 1) AS miles
+                    FROM agg a JOIN _zcta z ON z.zip = a.zip
+                ) WHERE miles <= ?
+                ORDER BY patients DESC NULLS LAST LIMIT ?
             """, [ds_id, origin[0], origin[0], origin[1],
-                  origin[0], origin[0], origin[1], float(radius_miles), limit])
+                  float(radius_miles), limit])
         else:
             cur = con.execute(base + """
                 SELECT a.*, CAST(NULL AS DOUBLE) AS miles FROM agg a
                 ORDER BY a.patients DESC NULLS LAST LIMIT ?
             """, [ds_id, limit])
         rows = [dict(zip([d[0] for d in cur.description], r)) for r in cur.fetchall()]
+        # drawer TIN for the returned rows only — an individual therapist's
+        # NPPES name is not an entity key, but the TIN their rates bill under
+        # always resolves in the drawer
+        members: dict[str, list[str]] = {r["practice"]: r.pop("member_npis") or []
+                                         for r in rows}
+        wanted = sorted({n for r in rows if r["in_store"]
+                         for n in members[r["practice"]]})
+        tin_of = dict(con.execute(
+            "SELECT npi, mode(tin_value) FROM rates WHERE npi IN "
+            "(SELECT unnest(?::VARCHAR[])) GROUP BY npi",
+            [wanted]).fetchall()) if wanted else {}
+        for r in rows:
+            tins = [tin_of[n] for n in members[r["practice"]] if n in tin_of]
+            # the practice's modal TIN — the drawer that shows most of its book
+            r["tin"] = max(set(tins), key=tins.count) if tins else None
         total, unplaced = con.execute(base + f"""
             SELECT count(*),
                    count(*) FILTER (zip IS NULL{
