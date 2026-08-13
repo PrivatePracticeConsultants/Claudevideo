@@ -1546,6 +1546,93 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         except (TypeError, ValueError) as e:
             raise HTTPException(422, f"bad input: {e}")
 
+    # -- reference datasets: utilization, demographics, new clinics --------------------
+
+    @app.get("/api/utilization/status")
+    def api_utilization_status():
+        from .utilization import utilization_status
+        return utilization_status(store)
+
+    @app.post("/api/utilization/volumes")
+    def api_utilization_volumes(body: dict = Body(...)):
+        """Annual units per code for a practice, from Medicare claims — what
+        pre-fills a volumes box. Medicare-only, so it is labeled a floor."""
+        from .utilization import suggested_volumes
+        try:
+            return suggested_volumes(store, str(body.get("subject", "")),
+                                     body.get("year") or None,
+                                     multiplier=body.get("multiplier") or 1.0)
+        except BenchmarkError as e:
+            raise HTTPException(422, str(e))
+
+    @app.post("/api/utilization/import")
+    def api_utilization_import(body: dict = Body(...)):
+        """Import by PATH, not upload: the national PUF is a multi-gigabyte CSV
+        and pushing it through the browser would be slower and far more
+        fragile than DuckDB streaming it off disk (same reason the Medicare
+        tab imports the tracker's files by path)."""
+        from .utilization import UtilizationImportError, import_utilization
+        path = str(body.get("path") or "").strip()
+        if not path:
+            raise HTTPException(422, "give the path to the CSV you downloaded")
+        try:
+            return import_utilization(store, path, str(body.get("year") or "") or None)
+        except UtilizationImportError as e:
+            raise HTTPException(422, str(e))
+
+    @app.get("/api/demographics/status")
+    def api_demographics_status():
+        from .demographics import demographics_status
+        return demographics_status(store)
+
+    @app.post("/api/demographics/import")
+    def api_demographics_import(body: dict = Body(...)):
+        from .demographics import DemographicsImportError, import_demographics
+        path = str(body.get("path") or "").strip()
+        if not path:
+            raise HTTPException(422, "give the path to the ACS CSV you downloaded")
+        try:
+            return import_demographics(store, path,
+                                       str(body.get("vintage") or "") or None)
+        except DemographicsImportError as e:
+            raise HTTPException(422, str(e))
+
+    @app.post("/api/market/sizing")
+    def api_market_sizing(body: dict = Body(...)):
+        """Population, seniors and therapy practices inside a radius — is this
+        market underserved or saturated?"""
+        from .demographics import DemographicsImportError, market_sizing
+        try:
+            return market_sizing(store, str(body.get("zip") or ""),
+                                 float(body.get("radius_miles") or 25),
+                                 therapy_only=bool(body.get("therapy_only", True)))
+        except DemographicsImportError as e:
+            raise HTTPException(422, str(e))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(422, f"bad input: {e}")
+
+    @app.get("/api/newclinics/status")
+    def api_newclinics_status():
+        from .nppes import feed_status
+        return feed_status(store)
+
+    @app.post("/api/newclinics")
+    def api_newclinics(body: dict = Body(...)):
+        """Therapy NPIs issued recently — practices that have no payer contract
+        yet, which is the earliest a consultant can reach them."""
+        from .nppes import NppesFeedError, new_enumerations
+        try:
+            return new_enumerations(
+                store, zip_code=str(body.get("zip") or "").strip() or None,
+                radius_miles=float(body["radius_miles"]) if body.get("radius_miles") else None,
+                days=int(body.get("days") or 180),
+                therapy_only=bool(body.get("therapy_only", True)),
+                state=str(body.get("state") or "").strip() or None)
+        except NppesFeedError as e:
+            raise HTTPException(422, str(e))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(422, f"bad input: {e}")
+
     # -- underpayment check ------------------------------------------------------------
 
     @app.post("/api/remits/check")

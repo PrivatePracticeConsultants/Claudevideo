@@ -421,6 +421,59 @@ later — is identified in seconds, with no internet lookups.
 > them, and leaves the banner honestly above zero until you swap in the full
 > file.
 
+**Bonus once this is set up: the brand-new-clinic feed.** The same file carries
+the date each NPI was *issued*. Leads tab → **Brand-new clinics** lists therapy
+NPIs enumerated in the last few months near a ZIP — practices that have no payer
+contracts yet, which is the earliest anyone can reach them. Nothing extra to
+download; it reads the cache the step above already built. (If you set this up
+before this version, the cache rebuilds itself once on the next enrichment pass
+to add the date column.)
+
+---
+
+## Two more free files worth grabbing (optional, high value)
+
+Both are public-domain US government downloads. Neither is required; each makes
+a specific part of the app sharper. Load them on the **Files tab → Reference
+data** by pasting the *path* you saved them to (they're large — the app reads
+them off your disk rather than uploading through the browser).
+
+### 1. Medicare volumes — fills in "annual units" for you
+
+Every dollar figure the app produces (opportunity, proposal value, the win
+report) needs annual units per code. Today you type those in — impossible for a
+practice that isn't your client yet.
+
+- **What to get:** *Medicare Physician & Other Practitioners — by Provider and
+  Service*, one year, from <https://data.cms.gov/provider-summary-by-type-of-service>.
+  Download the CSV (roughly 2 GB; keep it on a drive with room).
+- **What you get:** a **Fill from Medicare** button next to every units box
+  (Benchmark, Negotiate, Clients → results), and prospect sizing — you can see
+  roughly how much therapy a practice bills before you ever call them.
+- **The honest limit, stated on every result:** these are Medicare
+  fee-for-service claims only — no commercial, Medicare Advantage, Medicaid or
+  cash — and CMS hides any code with fewer than 11 patients. So the number is a
+  **floor**, not the practice's book. There's a multiplier box if you know
+  Medicare is (say) a third of a client's visits; whatever you scale by is
+  printed as an assumption, never as data. The file also lags about two years.
+
+### 2. Census ZIP demographics — tells you if a market is worth working
+
+- **What to get:** an **ACS 5-year table by ZCTA** from
+  <https://data.census.gov> — table **B01001** (sex by age, which carries the
+  65+ buckets) and/or **B19013** (median household income). Choose geography
+  "ZIP Code Tabulation Areas", then Download CSV. The app reads both the
+  variable-id form (`B01001_020E`) and the human-labeled export, and sums the
+  65+ buckets for you.
+- **What you get:** Leads tab → **Market sizing**: population, seniors and
+  median income inside a radius, against the therapy practices this store knows
+  — i.e. *seniors per practice*. High means room for a new client or a rate
+  increase; low means saturated.
+- **The honest limits:** ACS figures are 5-year *estimates*, and ZCTAs aren't
+  quite ZIP codes (PO-box ZIPs have none — those are reported as unmatched, never
+  as zero people). Practice counts only include practices some ingested payer
+  file priced, so "seniors per practice" is an upper bound.
+
 ---
 
 ## Making a big queue finish faster
@@ -605,6 +658,9 @@ prompt). They're an alternative to the dashboard buttons.
 | `mrfx medicare --from-tracker` | Find the Order & Referring Tracker's folder and import everything new from it (stop the server first; the dashboard's Import button needs no stopping) |
 | `mrfx medicare --eligibility <csv>` | Import the CMS Order & Referring roster the tracker downloaded (stop the server first) |
 | `mrfx medicare --referrals <csv>` | Import CMS shared-patient / Hop Teaming pair data (stop the server first) |
+| `mrfx utilization <csv> [--year 2023]` | Import a CMS Physician & Other Practitioners file — gives every practice its Medicare units per code (stop the server first) |
+| `mrfx demographics <csv>` | Import a Census ACS ZCTA table — population, seniors and income for market sizing (stop the server first) |
+| `mrfx newclinics --zip 63103 --radius 25` | Therapy NPIs issued recently near a ZIP — practices with no contracts yet |
 | `mrfx orgreport <practice>` | One-practice bundle (NPIs + rates + Medicare layers) to pair with the tracker |
 | `mrfx forget <filename> [more…]` | Erase chosen files' rates + raw copies (names from `mrfx status`) |
 | `mrfx reset --confirm` | Clear the analyzed data (keeps your downloaded files) |

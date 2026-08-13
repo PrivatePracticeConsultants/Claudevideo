@@ -82,6 +82,10 @@
       <div class="field" style="margin-top:6px;max-width:420px">
         <label>Annual units per code <span class="muted" style="text-transform:none">(optional — values the win)</span></label>
         <textarea id="en-volumes" rows="2" placeholder="97110, 4200&#10;97140, 1800"></textarea>
+        <div style="display:flex;gap:6px;align-items:center;margin-top:4px">
+          <button class="btn" id="en-vol-medicare" title="Fill from this practice's Medicare claims — a FLOOR, since Medicare is only part of the book">Fill from Medicare</button>
+          <span id="en-vol-msg" class="muted"></span>
+        </div>
       </div>
       <div id="en-out" style="margin-top:8px"></div>
     </div>
@@ -407,6 +411,11 @@
         </details>
         <div class="field"><label>Annual units per code <span class="muted" style="text-transform:none">(owner-supplied — required for the opportunity model)</span></label>
           <textarea id="b-volumes" rows="4" placeholder="97110, 4200&#10;97140, 1800"></textarea>
+          <div style="display:flex;gap:6px;align-items:center;margin-top:4px;flex-wrap:wrap">
+            <button class="btn" id="b-vol-medicare" title="Fill these from the practice's Medicare claims (CMS utilization file). Medicare-only, so it is a FLOOR — edit before quoting.">Fill from Medicare</button>
+            <input type="text" id="b-vol-mult" value="1" style="width:52px" title="Scale the Medicare units to your whole book if you know the share (Medicare is a third of visits -> 3). 1 = Medicare only. Any scaling is an assumption and is printed as one.">
+            <span id="b-vol-msg" class="muted"></span>
+          </div>
         </div>
         <div class="mpfs-row">
           <span id="mpfs-status" class="muted">MPFS: not loaded</span>
@@ -479,6 +488,10 @@
           </div>
           <div class="field"><label>Annual units per code <span class="muted" style="text-transform:none">(optional — prices the ask)</span></label>
             <textarea id="ng-volumes" rows="3" placeholder="97110, 4200&#10;97140, 1800"></textarea>
+            <div style="display:flex;gap:6px;align-items:center;margin-top:4px">
+              <button class="btn" id="ng-vol-medicare" title="Fill from this practice's Medicare claims — a FLOOR, since Medicare is only part of the book">Fill from Medicare</button>
+              <span id="ng-vol-msg" class="muted"></span>
+            </div>
           </div>
           <div style="display:flex;gap:8px">
             <button class="btn" id="ng-proposal-run" title="Proposed rate per code at the chosen basis — never below current">Preview proposal</button>
@@ -672,6 +685,48 @@
           </div>
           <div id="nn-out" style="margin-top:8px"></div>
         </div>
+
+        <div class="validate-card" style="margin-top:14px">
+          <h3>Brand-new clinics — before they sign anything</h3>
+          <p class="muted">Therapy NPIs the NPPES file says were ISSUED recently. A clinic
+            enumerated last month has no payer contracts yet — the earliest a rate consultant
+            can reach it. Needs the NPPES monthly file loaded once (Files tab → bulk enrichment).</p>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <input type="text" id="nc-zip" placeholder="ZIP (optional)" style="width:110px">
+            <select id="nc-radius">
+              <option value="25">25 miles</option>
+              <option value="50" selected>50 miles</option>
+              <option value="100">100 miles</option>
+            </select>
+            <input type="text" id="nc-state" placeholder="ST" style="width:44px" title="two-letter state filter (optional)">
+            <select id="nc-days" title="how far back to look">
+              <option value="90">last 90 days</option>
+              <option value="180" selected>last 6 months</option>
+              <option value="365">last year</option>
+            </select>
+            <button class="btn primary" id="nc-run">Find new clinics</button>
+            <span id="nc-msg" class="muted"></span>
+          </div>
+          <div id="nc-out" style="margin-top:8px"></div>
+        </div>
+
+        <div class="validate-card" style="margin-top:14px">
+          <h3>Market sizing — is this area underserved?</h3>
+          <p class="muted">Census population and seniors inside a radius, against the therapy
+            practices this store knows. High seniors-per-practice means room; low means saturated.
+            Needs an ACS ZCTA table loaded (Files tab → reference data).</p>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <input type="text" id="ms-zip" placeholder="ZIP" style="width:110px">
+            <select id="ms-radius">
+              <option value="10">10 miles</option>
+              <option value="25" selected>25 miles</option>
+              <option value="50">50 miles</option>
+            </select>
+            <button class="btn primary" id="ms-run">Size this market</button>
+            <span id="ms-msg" class="muted"></span>
+          </div>
+          <div id="ms-out" style="margin-top:8px"></div>
+        </div>
       </div>
     </div>
   </section>
@@ -785,6 +840,28 @@
         <tbody id="files-body"></tbody>
       </table>
       <div id="files-state"></div>
+    </div>
+
+    <div class="validate-card">
+      <h3>Reference data — Medicare volumes &amp; Census demographics</h3>
+      <p class="muted">Two free public files that make the rest of the app sharper. Both are
+        big, so give the app the PATH you saved them to rather than uploading through the
+        browser. Each import replaces the previous one of its kind.</p>
+      <div class="mpfs-row" style="flex-wrap:wrap">
+        <span id="util-status" class="muted">Medicare utilization: not loaded</span>
+        <input type="text" id="util-path" placeholder="path to the CMS Physician &amp; Other Practitioners CSV" style="flex:1;min-width:260px"
+          title="CMS 'Medicare Physician & Other Practitioners — by Provider and Service' for one year. Free at data.cms.gov. Gives every practice's Medicare units per code, which pre-fills the volumes boxes and sizes prospects.">
+        <input type="text" id="util-year" placeholder="year" style="width:64px" title="read from the filename when left blank">
+        <button class="btn" id="util-import">Import utilization</button>
+      </div>
+      <div class="mpfs-row" style="flex-wrap:wrap;margin-top:6px">
+        <span id="demo-status" class="muted">ZIP demographics: not loaded</span>
+        <input type="text" id="demo-path" placeholder="path to an ACS 5-year ZCTA table CSV" style="flex:1;min-width:260px"
+          title="US Census ACS 5-year table by ZCTA (B01001 sex-by-age and/or B19013 median income) from data.census.gov. Adds population, seniors and income to ZIP searches and market sizing.">
+        <input type="text" id="demo-vintage" placeholder="vintage" style="width:72px" title="read from the filename when left blank">
+        <button class="btn" id="demo-import">Import demographics</button>
+      </div>
+      <div id="refdata-msg" class="muted" style="margin-top:6px"></div>
     </div>
 
     <div class="validate-card">

@@ -1231,6 +1231,8 @@ async function initBenchmark() {
     e.target.value = "";   // allow re-selecting the same file after a fix
   });
   $("#b-run").addEventListener("click", runBenchmark);
+  $("#b-vol-medicare").addEventListener("click", () =>
+    fillVolumesFromMedicare("#b-subject", "#b-volumes", "#b-vol-msg", "#b-vol-mult"));
   $("#b-report").addEventListener("click", async () => {
     try { await openPitchReport(); }
     catch (e) { alert(`could not build the report: ${e.message}`); }
@@ -1520,6 +1522,8 @@ async function initNegotiate() {
     if (state.lastNegotiatePayload) runNegotiate();
   });
   $("#ng-run").addEventListener("click", runNegotiate);
+  $("#ng-vol-medicare").addEventListener("click", () =>
+    fillVolumesFromMedicare("#ng-subject", "#ng-volumes", "#ng-vol-msg"));
   $("#ng-target").addEventListener("change", () => {
     $("#ng-target-pct").style.display =
       $("#ng-target").value === "pct_medicare" ? "" : "none";
@@ -2017,6 +2021,8 @@ function parseVolumes(sel) {
 }
 
 function initEngagements() {
+  $("#en-vol-medicare").addEventListener("click", () =>
+    fillVolumesFromMedicare("#en-subject", "#en-volumes", "#en-vol-msg"));
   $("#en-save").addEventListener("click", async () => {
     const subject = $("#en-subject").value.trim();
     if (!subject) { $("#en-msg").textContent = "pick a practice first"; return; }
@@ -2139,6 +2145,143 @@ function initNewToNetwork() {
         <th>Payer</th><th>Prev. month</th><th class="num">Codes</th><th class="num">Median</th>
       </tr></thead><tbody>${rows}</tbody></table></div>
       <div class="muted" style="font-size:11.5px;margin-top:6px">${esc(d.note || "")}</div>`;
+  });
+}
+
+/* ---- reference datasets: Medicare volumes, ZIP demographics ------------- */
+async function refreshRefData() {
+  const u = await api("/api/utilization/status").catch(() => null);
+  if (u) {
+    $("#util-status").textContent = u.loaded
+      ? `Medicare utilization: ${u.years.map((y) => y.year).join(", ")}`
+      : "Medicare utilization: not loaded";
+  }
+  const d = await api("/api/demographics/status").catch(() => null);
+  if (d) {
+    $("#demo-status").textContent = d.loaded
+      ? `ZIP demographics: ${fmtInt(d.zctas)} ZCTAs`
+      : "ZIP demographics: not loaded";
+  }
+}
+
+function initRefData() {
+  refreshRefData();
+  const msg = () => $("#refdata-msg");
+  $("#util-import").addEventListener("click", async () => {
+    const path = $("#util-path").value.trim();
+    if (!path) { msg().textContent = "paste the path to the CSV you downloaded"; return; }
+    msg().textContent = "importing — a national file takes a minute…";
+    try {
+      const r = await postJson("/api/utilization/import", { path, year: $("#util-year").value.trim() });
+      msg().innerHTML = `${esc(String(r.year))}: <b>${fmtInt(r.rows)}</b> therapy rows over
+        ${fmtInt(r.providers)} providers. ${r.warning ? `<b>${esc(r.warning)}</b> ` : ""}
+        <span class="muted">${esc(r.note)}</span>`;
+    } catch (e) { msg().textContent = e.message; }
+    refreshRefData();
+  });
+  $("#demo-import").addEventListener("click", async () => {
+    const path = $("#demo-path").value.trim();
+    if (!path) { msg().textContent = "paste the path to the ACS CSV you downloaded"; return; }
+    msg().textContent = "importing…";
+    try {
+      const r = await postJson("/api/demographics/import", { path, vintage: $("#demo-vintage").value.trim() });
+      msg().innerHTML = `<b>${fmtInt(r.zctas)}</b> ZCTAs from ${esc(r.source)}.
+        ${r.problems && r.problems.length ? `${r.problems.length} line(s) skipped. ` : ""}
+        <span class="muted">${esc(r.note)}</span>`;
+    } catch (e) { msg().textContent = e.message; }
+    refreshRefData();
+  });
+}
+
+/* Fill a volumes box from the practice's Medicare claims. The units are a
+   FLOOR (Medicare only), so the message says so every time — a pre-filled box
+   the user forgets came from Medicare is how a wrong dollar figure ships. */
+async function fillVolumesFromMedicare(subjectSel, boxSel, msgSel, multSel) {
+  const subject = $(subjectSel).value.trim();
+  const out = $(msgSel);
+  if (!subject) { out.textContent = "pick a practice first"; return; }
+  out.textContent = "reading Medicare claims…";
+  let d;
+  try {
+    d = await postJson("/api/utilization/volumes", {
+      subject, multiplier: multSel ? Number($(multSel).value || 1) : 1 });
+  } catch (e) { out.textContent = e.message; return; }
+  const lines = Object.entries(d.volumes).map(([c, u]) => `${c}, ${u}`);
+  $(boxSel).value = lines.join("\n");
+  out.innerHTML = `${lines.length} code(s) from Medicare ${esc(String(d.year))}
+    ${d.multiplier !== 1 ? `×${d.multiplier}` : ""} — a <b>floor</b>, edit before quoting.`;
+  out.title = d.note;
+}
+
+/* ---- brand-new clinics (NPPES enumeration dates) ------------------------ */
+function initNewClinics() {
+  $("#nc-run").addEventListener("click", async () => {
+    const out = $("#nc-out");
+    $("#nc-msg").textContent = "looking…";
+    let d;
+    try {
+      d = await postJson("/api/newclinics", {
+        zip: $("#nc-zip").value.trim() || null,
+        radius_miles: $("#nc-zip").value.trim() ? Number($("#nc-radius").value) : null,
+        state: $("#nc-state").value.trim() || null,
+        days: Number($("#nc-days").value),
+      });
+    } catch (e) { $("#nc-msg").textContent = ""; out.innerHTML = `<div class="muted">${esc(e.message)}</div>`; return; }
+    $("#nc-msg").textContent = "";
+    if (d.reason) { out.innerHTML = `<div class="muted">${esc(d.reason)}</div>`; return; }
+    if (!d.rows.length) {
+      out.innerHTML = `<div class="muted">No therapy NPI was issued in the last ${d.days} days
+        ${d.zip ? `within ${d.radius_miles} miles of ${esc(d.zip)}` : ""}.</div>`;
+      return;
+    }
+    const rows = d.rows.map((r, i) => `<tr>
+      <td class="num muted">${i + 1}</td>
+      <td>${esc(r.org_name || r.npi)}<div class="sub">${esc(r.taxonomy || "")}</div></td>
+      <td>${esc(r.enumerated)}</td>
+      <td class="sub">${esc([r.city, r.state].filter(Boolean).join(", "))} ${esc(r.zip || "")}</td>
+      <td class="num">${r.miles == null ? "–" : r.miles}</td>
+      <td class="sub">${esc(r.phone || "")}</td>
+      <td>${r.in_store ? '<span class="muted">has published rates</span>' : "<b>no contracts seen</b>"}</td>
+    </tr>`).join("");
+    out.innerHTML = `<div class="muted" style="margin-bottom:6px">${fmtInt(d.total)} therapy NPI(s)
+      issued since ${esc(d.since)}${d.unplaced ? ` · ${d.unplaced} skipped (ZIP has no Census centroid)` : ""}.</div>
+      <div class="tablewrap" style="max-height:40vh"><table><thead><tr>
+        <th>#</th><th>Practice</th><th>Enumerated</th><th>Location</th><th class="num">Miles</th>
+        <th>Phone</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table></div>
+      <div class="muted" style="font-size:11.5px;margin-top:6px">${esc(d.note)}</div>`;
+  });
+}
+
+/* ---- market sizing (Census ACS) ---------------------------------------- */
+function initMarketSizing() {
+  $("#ms-run").addEventListener("click", async () => {
+    const out = $("#ms-out");
+    if (!$("#ms-zip").value.trim()) { $("#ms-msg").textContent = "enter a ZIP"; return; }
+    $("#ms-msg").textContent = "sizing…";
+    let d;
+    try {
+      d = await postJson("/api/market/sizing", {
+        zip: $("#ms-zip").value.trim(), radius_miles: Number($("#ms-radius").value) });
+    } catch (e) { $("#ms-msg").textContent = ""; out.innerHTML = `<div class="muted">${esc(e.message)}</div>`; return; }
+    $("#ms-msg").textContent = "";
+    if (!d.loaded) { out.innerHTML = `<div class="muted">${esc(d.reason)}</div>`; return; }
+    const zips = d.top_zips.map((z) => `<tr><td>${esc(z.zip)}</td>
+      <td class="num">${fmtInt(z.population)}</td><td class="num">${fmtInt(z.pop_65_plus)}</td>
+      <td class="num">${z.pct_65_plus == null ? "–" : z.pct_65_plus + "%"}</td>
+      <td class="num">${z.median_income == null ? "–" : money(z.median_income)}</td>
+      <td class="num">${z.miles}</td></tr>`).join("");
+    out.innerHTML = `<div class="rc-summary">Within ${d.radius_miles} miles of ${esc(d.zip)}:
+      <b>${fmtInt(d.population)}</b> people, <b>${fmtInt(d.pop_65_plus)}</b> aged 65+
+      (${d.pct_65_plus == null ? "–" : d.pct_65_plus + "%"}), median household income
+      ${d.median_income == null ? "–" : money(d.median_income)}. This store knows
+      <b>${fmtInt(d.practices)}</b> therapy practice(s) there${d.seniors_per_practice
+        ? ` — <b>${fmtInt(d.seniors_per_practice)}</b> seniors per practice` : ""}.
+      ${d.zctas_unmatched ? `<span class="muted">${d.zctas_unmatched} ZIP(s) in radius have no Census row.</span>` : ""}</div>
+      <div class="tablewrap" style="max-height:32vh"><table><thead><tr>
+        <th>ZIP</th><th class="num">Population</th><th class="num">65+</th><th class="num">% 65+</th>
+        <th class="num">Median income</th><th class="num">Miles</th>
+      </tr></thead><tbody>${zips}</tbody></table></div>
+      <div class="muted" style="font-size:11.5px;margin-top:6px">${esc(d.note)}</div>`;
   });
 }
 
@@ -2656,6 +2799,8 @@ async function initLeads() {
   wireSubjectSearch("#ld-exclude", "#ld-subjects");
   $("#ld-run").addEventListener("click", runLeads);
   initNewToNetwork();
+  initNewClinics();
+  initMarketSizing();
   $("#ld-csv").addEventListener("click", () => { if (state.lastLeadsPayload) postDownload("/api/leads.csv", state.lastLeadsPayload, "leads.csv"); });
   $("#ld-board-run").addEventListener("click", runLeaderboard);
 }
@@ -3180,6 +3325,7 @@ function initFilesView() {
   dz.addEventListener("drop", (e) => uploadFiles([...e.dataTransfer.files]));
 
   initRemits();
+  initRefData();
   $("#v-run").addEventListener("click", async () => {
     const id = $("#v-id").value.trim(), code = $("#v-code").value.trim();
     const expected = $("#v-expected").value.trim();

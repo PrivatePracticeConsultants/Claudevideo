@@ -604,9 +604,32 @@ def _print_medicare_status(cfg: MrfxConfig) -> None:
     print("medicare:   " + " · ".join(bits))
 
 
+def _print_reference_status(cfg: MrfxConfig) -> None:
+    """One line for the optional reference datasets — the dollar math and the
+    market sizing are only as good as whether these are actually loaded."""
+    try:
+        from .demographics import demographics_status
+        from .nppes import feed_status
+        from .utilization import utilization_status
+        store = Store(cfg.store_dir, cfg.duckdb_memory_gb,
+                      temp_dir=cfg.duckdb_temp_dir)
+        u, d, n = (utilization_status(store), demographics_status(store),
+                   feed_status(store))
+    except Exception:  # noqa: BLE001 — a status line must never block `status`
+        return
+    bits = []
+    bits.append("medicare volumes " + (", ".join(y["year"] for y in u["years"])
+                                       if u["loaded"] else "none"))
+    bits.append(f"zip demographics {d['zctas']:,} ZCTAs" if d["loaded"]
+                else "zip demographics none")
+    bits.append("new-clinic feed ready" if n["ready"] else "new-clinic feed off")
+    print("reference:  " + " · ".join(bits))
+
+
 def cmd_status(cfg: MrfxConfig, args) -> int:
     _print_code_coverage(cfg)
     _print_medicare_status(cfg)
+    _print_reference_status(cfg)
     if _something_owns_the_port(cfg, "reading the store locally"):
         print("(the dashboard's Files tab shows the same information live)")
         return 1
@@ -967,6 +990,85 @@ def cmd_renewals(cfg: MrfxConfig, args) -> int:
         print(f"{r['expires']:<12} {r['days']:>5}  {str(r['practice'])[:34]:<34} "
               f"{str(r['payer'])[:24]:<24} {r['codes']}")
     print(f"\n{cov['note']}")
+    return 0
+
+
+def cmd_utilization(cfg: MrfxConfig, args) -> int:
+    """Import one year of the CMS Physician & Other Practitioners PUF."""
+    from .utilization import import_utilization
+
+    if _something_owns_the_port(cfg, "importing utilization data locally"):
+        print("(the dashboard's Data tab imports it without stopping the server)")
+        return 1
+    store = Store(cfg.store_dir, cfg.duckdb_memory_gb, temp_dir=cfg.duckdb_temp_dir)
+    try:
+        res = import_utilization(store, args.path, args.year)
+    except Exception as e:  # noqa: BLE001 — a refusal is a message, not a trace
+        print(f"could not import that file: {e}", file=sys.stderr)
+        return 1
+    print(f"utilization {res['year']}: {res['rows']:,} therapy rows over "
+          f"{res['providers']:,} providers")
+    if res["warning"]:
+        print(f"\n{res['warning']}")
+    print(f"\n{res['note']}")
+    return 0
+
+
+def cmd_demographics(cfg: MrfxConfig, args) -> int:
+    """Import Census ACS ZCTA demographics for market sizing."""
+    from .demographics import import_demographics
+
+    if _something_owns_the_port(cfg, "importing demographics locally"):
+        print("(the dashboard's Data tab imports it without stopping the server)")
+        return 1
+    store = Store(cfg.store_dir, cfg.duckdb_memory_gb, temp_dir=cfg.duckdb_temp_dir)
+    try:
+        res = import_demographics(store, args.path, args.vintage)
+    except Exception as e:  # noqa: BLE001
+        print(f"could not import that file: {e}", file=sys.stderr)
+        return 1
+    print(f"{res['zctas']:,} ZCTAs loaded from {res['source']}")
+    for p in res["problems"]:
+        print(f"  skipped — {p}")
+    print(f"\n{res['note']}")
+    return 0
+
+
+def cmd_newclinics(cfg: MrfxConfig, args) -> int:
+    """Therapy NPIs enumerated recently, newest first."""
+    from .nppes import new_enumerations
+
+    if _something_owns_the_port(cfg, "reading the store locally"):
+        return 1
+    store = Store(cfg.store_dir, cfg.duckdb_memory_gb, temp_dir=cfg.duckdb_temp_dir)
+    try:
+        res = new_enumerations(store, args.zip_code, args.radius, days=args.days,
+                               state=args.state)
+    except Exception as e:  # noqa: BLE001
+        print(f"could not build the new-clinic feed: {e}", file=sys.stderr)
+        return 1
+    if res["reason"]:
+        print(res["reason"])
+        return 0
+    if not res["rows"]:
+        print(f"no therapy NPIs enumerated in the last {res['days']} days"
+              + (f" within {res['radius_miles']:g} miles of {res['zip']}"
+                 if res["zip"] else ""))
+        print(f"\n{res['note']}")
+        return 0
+    print(f"{res['total']:,} therapy NPI(s) enumerated since {res['since']}"
+          + (f" within {res['radius_miles']:g} miles of {res['zip']}"
+             if res.get("radius_miles") else "")
+          + (f" ({res['unplaced']} skipped: ZIP has no Census centroid)"
+             if res["unplaced"] else ""))
+    print(f"\n{'enumerated':<12} {'miles':>6}  {'name':<38} {'city':<18} status")
+    for r in res["rows"]:
+        miles = "" if r.get("miles") is None else f"{r['miles']:.1f}"
+        print(f"{r['enumerated']:<12} {miles:>6}  "
+              f"{str(r.get('org_name') or '')[:38]:<38} "
+              f"{str(r.get('city') or '')[:18]:<18} "
+              f"{'has published rates' if r.get('in_store') else 'no contracts seen'}")
+    print(f"\n{res['note']}")
     return 0
 
 
@@ -1405,6 +1507,28 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--clients", action="store_true", help="only your watchlist clients")
     p.add_argument("--within-days", dest="within_days", type=int, default=365)
 
+    p = sub.add_parser(
+        "utilization",
+        help="import a CMS Medicare Physician & Other Practitioners file (annual volumes)")
+    p.add_argument("path", help="the PUF CSV for one year")
+    p.add_argument("--year", default=None,
+                   help="data year (read from the filename when omitted)")
+
+    p = sub.add_parser(
+        "demographics",
+        help="import Census ACS ZCTA population/income (market sizing)")
+    p.add_argument("path", help="an ACS 5-year ZCTA table CSV")
+    p.add_argument("--vintage", default=None,
+                   help="ACS vintage label (read from the filename when omitted)")
+
+    p = sub.add_parser(
+        "newclinics",
+        help="therapy NPIs enumerated recently — the earliest lead there is")
+    p.add_argument("--zip", dest="zip_code", default=None, help="center ZIP")
+    p.add_argument("--radius", type=float, default=25.0, help="miles (with --zip)")
+    p.add_argument("--days", type=int, default=180, help="look-back window")
+    p.add_argument("--state", default=None, help="two-letter state filter")
+
     p = sub.add_parser("backup", help="copy the whole store into one zip with a checksum manifest")
     p.add_argument("dest", help="backup filename, e.g. E:\\backups\\mrfx_2026-08-12.zip")
     p = sub.add_parser("verify", help="check a backup zip against its manifest, or the live store's integrity")
@@ -1482,6 +1606,9 @@ def main(argv: list[str] | None = None) -> int:
         "speedtest": cmd_speedtest,
         "packets": cmd_packets,
         "renewals": cmd_renewals,
+        "utilization": cmd_utilization,
+        "demographics": cmd_demographics,
+        "newclinics": cmd_newclinics,
         "backup": cmd_backup,
         "verify": cmd_verify,
         "reset": cmd_reset,

@@ -42,6 +42,10 @@ folder and import everything new; `--eligibility/--referrals <path>` point at
 files by hand) — the eligibility and referral halves MRFs cannot supply. The
 dashboard's Medicare tab does the same import in-process, so the user never
 stops the server; see `mrfx/tracker.py` for the discovery contract.
+`mrfx utilization <puf.csv>` (CMS Medicare volumes → the "Fill from Medicare"
+buttons + prospect sizing), `mrfx demographics <acs.csv>` (Census ZCTA
+population/income → market sizing), `mrfx newclinics --zip … --radius …`
+(therapy NPIs issued recently, from the NPPES bulk cache),
 `mrfx packets` (monthly client packets), `mrfx renewals [--clients]`,
 `mrfx backup <zip>` / `mrfx verify [zip]` (checksummed store backup + integrity check),
 `mrfx reset --confirm`.

@@ -335,6 +335,10 @@ _BULK_COLS = {
     "address": "Provider First Line Business Practice Location Address",
     "zip": "Provider Business Practice Location Address Postal Code",
     "phone": "Provider Business Practice Location Address Telephone Number",
+    # the date the NPI was issued — a therapy clinic enumerated last month is a
+    # practice that has no payer contracts yet, which is the earliest possible
+    # consulting lead (mrfx/nppes.py builds that feed from this column)
+    "enumerated": "Provider Enumeration Date",
 }
 
 
@@ -394,7 +398,13 @@ _BULK_STREAM_MAX_WANTED = 2_000_000
 # subsequent lookup into a sub-second indexed join (measured 0.02s vs a fresh
 # multi-GB scan). The parquet holds only the ~9 columns we keep.
 _NPPES_CACHE_COLS = ("npi", "org_name", "entity_type", "taxonomy_code",
-                     "city", "state", "address", "zip", "phone")
+                     "city", "state", "address", "zip", "phone",
+                     "enumeration_date")
+# Bumped whenever _NPPES_CACHE_COLS changes: the signature is otherwise just
+# the source file's (path, mtime, size), so an UNCHANGED NPPES download would
+# keep serving a cache built under the old column set and the new column would
+# silently never appear.
+_NPPES_CACHE_SCHEMA = 2
 
 
 def _nppes_cache_path(store: Store) -> Path:
@@ -412,8 +422,9 @@ def _ensure_nppes_cache(cfg: MrfxConfig, store: Store, sig: tuple,
     behaviour is never worse than before. The build is a single pass over the
     file (same cost as one scan); every enrichment after it is an instant join."""
     pqp, sigp = _nppes_cache_path(store), _nppes_sig_path(store)
+    stamp = f"{sig!r}|schema{_NPPES_CACHE_SCHEMA}"
     try:
-        if pqp.exists() and sigp.exists() and sigp.read_text(encoding="utf-8") == repr(sig):
+        if pqp.exists() and sigp.exists() and sigp.read_text(encoding="utf-8") == stamp:
             return pqp
     except OSError:
         pass
@@ -422,7 +433,7 @@ def _ensure_nppes_cache(cfg: MrfxConfig, store: Store, sig: tuple,
         if stop is not None and stop.is_set():
             pqp.unlink(missing_ok=True)   # interrupted mid-build: incomplete
             return None
-        sigp.write_text(repr(sig), encoding="utf-8")
+        sigp.write_text(stamp, encoding="utf-8")
         log.info("built NPPES fast-lookup cache: %d rows -> %s", n, pqp.name)
         return pqp
     except Exception as e:  # noqa: BLE001 — any failure just falls back to streaming
@@ -458,6 +469,7 @@ def _write_nppes_parquet(cfg: MrfxConfig, store: Store, pqp: Path,
             i_ent, i_tax = col.get("entity"), col.get("tax1")
             i_city, i_state = col.get("city"), col.get("state")
             i_addr, i_zip, i_phone = col.get("address"), col.get("zip"), col.get("phone")
+            i_enum = col.get("enumerated")
 
             def at(row, ix):
                 return (row[ix] if ix is not None and ix < len(row) else None) or None
@@ -475,7 +487,8 @@ def _write_nppes_parquet(cfg: MrfxConfig, store: Store, pqp: Path,
                 for c, v in (("npi", npi), ("org_name", name), ("entity_type", entity),
                              ("taxonomy_code", at(row, i_tax)), ("city", at(row, i_city)),
                              ("state", at(row, i_state)), ("address", at(row, i_addr)),
-                             ("zip", at(row, i_zip)), ("phone", at(row, i_phone))):
+                             ("zip", at(row, i_zip)), ("phone", at(row, i_phone)),
+                             ("enumeration_date", at(row, i_enum))):
                     batch[c].append(v)
                 if len(batch["npi"]) >= 100000:
                     writer.write_table(pa.table(batch, schema=schema))
