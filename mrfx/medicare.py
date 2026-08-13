@@ -734,6 +734,15 @@ def referral_leaders(store: Store, zip_code: str | None = None,
         # member NPIs — a mode(tin) GROUP BY npi over the whole rates relation
         # here measured 4.8x slower (7.3s -> 1.5s at 20M rows) and its
         # per-group counters scale with the store.
+        # LEFT JOIN, never INNER: an NPI the background NPPES identification
+        # has not reached yet must stay IN the ranking (as its bare NPI,
+        # flagged 'unidentified'), not vanish. Excluding-unknown was the exact
+        # false-negative the user feared — a true clinic silently missing.
+        # Under therapy_only, unknown-taxonomy practices are likewise KEPT and
+        # flagged: unknown means unidentified, not non-therapy; once
+        # enrichment classifies them they either name themselves or drop out
+        # honestly on the next run.
+        keep = f"({therapy} OR n.npi IS NULL)" if therapy_only else "TRUE"
         base = f"""
             WITH agg AS (
                 SELECT coalesce(nullif(trim(n.org_name), ''), p.target_npi) AS practice,
@@ -744,11 +753,12 @@ def referral_leaders(store: Store, zip_code: str | None = None,
                        count(DISTINCT p.source_npi)          AS sources,
                        count(DISTINCT p.target_npi)          AS npis,
                        list(DISTINCT p.target_npi)           AS member_npis,
+                       bool_and(n.npi IS NULL)               AS unidentified,
                        max(CASE WHEN r.npi IS NOT NULL THEN 1 ELSE 0 END) = 1 AS in_store
                 FROM referral_pairs p
-                JOIN npi_directory n ON n.npi = p.target_npi
+                LEFT JOIN npi_directory n ON n.npi = p.target_npi
                 LEFT JOIN (SELECT DISTINCT npi FROM rates) r ON r.npi = p.target_npi
-                WHERE p.dataset_id = ? AND {therapy}
+                WHERE p.dataset_id = ? AND {keep}
                 GROUP BY 1
             )
         """
@@ -786,15 +796,17 @@ def referral_leaders(store: Store, zip_code: str | None = None,
             tins = [tin_of[n] for n in members[r["practice"]] if n in tin_of]
             # the practice's modal TIN — the drawer that shows most of its book
             r["tin"] = max(set(tins), key=tins.count) if tins else None
-        total, unplaced = con.execute(base + f"""
+        total, unplaced, unidentified = con.execute(base + f"""
             SELECT count(*),
                    count(*) FILTER (zip IS NULL{
-                       " OR zip NOT IN (SELECT zip FROM _zcta)" if use_radius else ""})
+                       " OR zip NOT IN (SELECT zip FROM _zcta)" if use_radius else ""}),
+                   count(*) FILTER (unidentified)
             FROM agg
         """, [ds_id]).fetchone()
     return {"rows": rows, "dataset": label, "data_year": yr, "dataset_id": ds_id,
             "zip": zip_code, "radius_miles": radius_miles if use_radius else None,
             "total": total, "unplaced": unplaced if use_radius else 0,
+            "unidentified": unidentified,
             "coverage_note": LEADERS_COVERAGE_NOTE, "caveat": REFERRAL_CAVEAT}
 
 

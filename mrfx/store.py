@@ -2841,26 +2841,39 @@ class Store:
         deterministic, so callers that page through the full population
         without saving rows in between MUST advance the cursor or every
         page is identical."""
+        # Referral-pair NPIs (sources AND targets) are enrichment citizens too:
+        # they are the practices the Medicare tab names and the referral
+        # leaderboard ranks, and without enrichment a competitor clinic that
+        # is in the referral data but not the rate store stayed unidentified
+        # forever — blank name, unknown taxonomy, invisible to the therapy
+        # filter. The view is optional (no referral data imported yet), so the
+        # wide query falls back to the rates-only one.
+        base = """
+            SELECT DISTINCT npi FROM (
+                SELECT npi FROM rates
+                UNION
+                -- tin.type='npi' rows put an NPI in the TIN slot; it names
+                -- the entity, so it needs enrichment too
+                SELECT tin_value AS npi FROM rates
+                WHERE tin_is_really_npi AND tin_value IS NOT NULL
+                {referrals}
+            )
+            WHERE npi > ? AND npi NOT IN (SELECT npi FROM npi_directory)
+              -- only well-formed 10-digit NPIs: junk ids from messy files
+              -- always fail at NPPES, sort to the FRONT of every batch,
+              -- and can wedge enrichment permanently at the same spot
+              AND regexp_full_match(npi, '[0-9]{{10}}')
+            ORDER BY npi LIMIT ?
+        """
         with self.connect() as con:
-            rows = con.execute(
-                """
-                SELECT DISTINCT npi FROM (
-                    SELECT npi FROM rates
-                    UNION
-                    -- tin.type='npi' rows put an NPI in the TIN slot; it names
-                    -- the entity, so it needs enrichment too
-                    SELECT tin_value AS npi FROM rates
-                    WHERE tin_is_really_npi AND tin_value IS NOT NULL
-                )
-                WHERE npi > ? AND npi NOT IN (SELECT npi FROM npi_directory)
-                  -- only well-formed 10-digit NPIs: junk ids from messy files
-                  -- always fail at NPPES, sort to the FRONT of every batch,
-                  -- and can wedge enrichment permanently at the same spot
-                  AND regexp_full_match(npi, '[0-9]{10}')
-                ORDER BY npi LIMIT ?
-                """,
-                [after, limit],
-            ).fetchall()
+            try:
+                rows = con.execute(base.format(referrals=(
+                    "UNION SELECT source_npi AS npi FROM referral_pairs "
+                    "UNION SELECT target_npi AS npi FROM referral_pairs")),
+                    [after, limit]).fetchall()
+            except duckdb.Error:   # no referral view in this store
+                rows = con.execute(base.format(referrals=""),
+                                   [after, limit]).fetchall()
         return [r[0] for r in rows]
 
     def store_stats(self, max_age_seconds: float = 60.0) -> dict:

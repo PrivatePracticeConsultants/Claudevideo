@@ -2010,15 +2010,18 @@ async function runReferralLeaders() {
   // practices could not be placed on the map at all
   const notes = [`${esc(d.dataset)} ${esc(d.data_year)} · ${scope} · showing ${d.rows.length} of ${fmtInt(d.total)} practices`];
   if (d.unplaced) notes.push(`<span class="warn-text">${fmtInt(d.unplaced)} practice${d.unplaced === 1 ? "" : "s"} have no mappable ZIP and are not in radius results</span>`);
+  if (d.unidentified) notes.push(`${fmtInt(d.unidentified)} not yet identified (NPPES lookup still filling in — they stay listed rather than being dropped)`);
   // the coverage boundary rides VISIBLY with the ranking (a tooltip would not
   // survive a screenshot): absence here can mean "not connected to your
   // store", never only "no referrals"
   const coverage = d.coverage_note
     ? `<div class="muted" style="font-size:11.5px;margin:4px 0 6px">${esc(d.coverage_note)}</div>` : "";
   const body = d.rows.map((r, i) => {
+    const ident = r.unidentified
+      ? ` <span class="muted" title="this NPI has not been identified by the background NPPES lookup yet — it stays listed (unknown is not non-therapy) and will name itself once identification reaches it">not yet identified</span>` : "";
     const name = r.in_store && r.tin
-      ? `<a href="#" data-rl-tin="${esc(r.tin)}" title="open every payer rate the MRF files price this practice at">${esc(r.practice)}</a>`
-      : `${esc(r.practice)} <span class="muted" title="no ingested payer file prices this practice — it may still have contracts; your store just hasn't seen them">no MRF rates in store</span>`;
+      ? `<a href="#" data-rl-tin="${esc(r.tin)}" title="open every payer rate the MRF files price this practice at">${esc(r.practice)}</a>${ident}`
+      : `${esc(r.practice)}${ident} <span class="muted" title="no ingested payer file prices this practice — it may still have contracts; your store just hasn't seen them">no MRF rates in store</span>`;
     return `<tr>
       <td class="num">${i + 1}</td>
       <td>${name}</td>

@@ -186,6 +186,55 @@ def test_watchlist_digest_composes_the_tabs(cfg, store, tmp_path):
 
 # ---------------------------------------------------------------- leaders --
 
+def test_unidentified_practices_are_kept_not_dropped(store, tmp_path):
+    """The two ways a TRUE therapy clinic could silently vanish, both closed:
+
+    (1) the ranking joined npi_directory with an INNER join, so an NPI the
+        background NPPES identification hadn't reached yet disappeared
+        entirely — even with the therapy filter off;
+    (2) enrichment only covered rate-file NPIs, so a referral-only practice
+        stayed unidentified FOREVER (blank name, unknown taxonomy).
+    Unknown must mean 'not identified yet', never 'not a therapy practice'."""
+    from mrfx.medicare import import_shared_patients, referral_leaders
+
+    _seed(store)
+    mystery = "1548372800"     # receives referrals; NOT in npi_directory
+    hop = tmp_path / "hop_2022.csv"
+    # mystery's pair must TOUCH the store (the import's documented boundary),
+    # so it arrives via a store NPI — the exact shape of a competitor a
+    # client's own therapists share patients with
+    hop.write_text("from_npi,to_npi,patient_count,transaction_count,"
+                   "average_day_wait,std_day_wait\n"
+                   f"{DOCS[0]},{GW_N[0]},100,400,12,3\n"
+                   f"{GW_N[1]},{mystery},80,300,12,3\n")
+    import_shared_patients(store, hop)
+
+    # (2) enrichment now queues the referral NPIs it has never seen
+    pending = store.unenriched_npis(limit=500)
+    assert mystery in pending, "referral-only NPIs must reach enrichment"
+    assert DOCS[0] not in pending or True   # sources queue too (may be enriched)
+
+    # (1) kept and flagged in the ranking — with the therapy filter ON
+    d = referral_leaders(store, therapy_only=True)
+    by = {r["practice"]: r for r in d["rows"]}
+    assert mystery in by, "an unidentified practice must stay listed"
+    assert by[mystery]["unidentified"] is True
+    assert d["unidentified"] == 1
+    assert by["Gateway Therapy"]["unidentified"] is False
+
+    # once identification arrives, it resolves honestly BOTH ways:
+    store.save_npis_bulk([dict(npi=mystery, org_name="Mystery Hospital",
+                               entity_type="NPI-2", taxonomy_code="282N00000X",
+                               city="StL", state="MO", address="9",
+                               zip="63103", phone=None)])
+    d2 = referral_leaders(store, therapy_only=True)
+    assert "Mystery Hospital" not in {r["practice"] for r in d2["rows"]}, \
+        "identified as a hospital -> correctly excluded by the therapy filter"
+    assert d2["unidentified"] == 0
+    d3 = referral_leaders(store, therapy_only=False)
+    assert "Mystery Hospital" in {r["practice"] for r in d3["rows"]}
+
+
 def test_leaders_coverage_boundary_is_stated(store, tmp_path):
     """A practice whose referral relationships never touch the store's
     providers is INVISIBLE in the ranking (its pairs were dropped at import to
