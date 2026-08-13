@@ -129,6 +129,27 @@ def test_utilization_refuses_a_file_that_is_not_the_puf(store, tmp_path):
     noyear.write_text(PUF_MODERN)
     with pytest.raises(UtilizationImportError, match="which year"):
         import_utilization(store, noyear)
+    # binary garbage refuses in plain language, never a raw DuckDB traceback
+    binary = tmp_path / "puf_2023.zip"
+    binary.write_bytes(b"PK\x03\x04" + bytes(range(256)) * 40)
+    with pytest.raises(UtilizationImportError, match="could not be read"):
+        import_utilization(store, binary)
+
+
+def test_utilization_reads_the_real_cms_filename_year(store, tmp_path):
+    """The actual download is named MUP_PHY_R24_P05_V10_D23_Prov_Svc.csv —
+    no 4-digit year anywhere; D23 IS the data year. Refusing THE file the CMS
+    page hands out would be pointless friction."""
+    from mrfx.utilization import import_utilization
+
+    _seed(store)
+    f = tmp_path / "MUP_PHY_R24_P05_V10_D23_Prov_Svc.csv"
+    f.write_text(PUF_MODERN)
+    assert import_utilization(store, f)["year"] == "2023"
+    # but an explicit year still wins over the filename
+    f2 = tmp_path / "MUP_PHY_R24_P05_V10_D23_Prov_Svc_copy.csv"
+    f2.write_text(PUF_MODERN)
+    assert import_utilization(store, f2, year="2022")["year"] == "2022"
 
 
 def test_utilization_quotes_hostile_column_names(store, tmp_path):

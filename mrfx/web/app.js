@@ -2200,11 +2200,18 @@ async function fillVolumesFromMedicare(subjectSel, boxSel, msgSel, multSel) {
   const subject = $(subjectSel).value.trim();
   const out = $(msgSel);
   if (!subject) { out.textContent = "pick a practice first"; return; }
+  // validate here: NaN survives Number() but JSON.stringify turns it into
+  // null, which the server would silently read as "no multiplier" (=1) —
+  // the user typed SOMETHING and must be told it didn't take
+  const mult = multSel ? Number($(multSel).value || 1) : 1;
+  if (!isFinite(mult) || mult <= 0) {
+    out.textContent = "the multiplier must be a positive number (1 = Medicare only)";
+    return;
+  }
   out.textContent = "reading Medicare claims…";
   let d;
   try {
-    d = await postJson("/api/utilization/volumes", {
-      subject, multiplier: multSel ? Number($(multSel).value || 1) : 1 });
+    d = await postJson("/api/utilization/volumes", { subject, multiplier: mult });
   } catch (e) { out.textContent = e.message; return; }
   const lines = Object.entries(d.volumes).map(([c, u]) => `${c}, ${u}`);
   $(boxSel).value = lines.join("\n");

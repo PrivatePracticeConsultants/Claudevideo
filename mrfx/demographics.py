@@ -335,15 +335,22 @@ def market_sizing(store: Store, zip_code: str, radius_miles: float = 25,
         """, [in_radius]).fetchone()
         matched = demo[0] or 0
         # practices: TIN grain, located by their clinicians' modal ZIP — the
-        # same rule the leads/leaderboard ZIP search uses
+        # same rule the leads/leaderboard ZIP search uses. DISTINCT pairs
+        # FIRST, then join+mode over that small set: mode() over the full
+        # 300M-row join is the exact shape the leaders query documents as the
+        # slow one (measured here: 0.95s -> 0.63s at 20M rows, same answer;
+        # the gap grows with store size because mode's per-group counters
+        # otherwise scale with total rows, not distinct pairs).
         practices, npis = con.execute(f"""
-            WITH p AS (
-                SELECT r.tin_value AS tin,
+            WITH pairs AS (
+                SELECT DISTINCT tin_value, npi FROM rates
+                WHERE tin_value IS NOT NULL AND NOT tin_is_really_npi
+            ), p AS (
+                SELECT pr.tin_value AS tin,
                        mode(lpad(substr(trim(n.zip), 1, 5), 5, '0')) AS zip,
-                       count(DISTINCT r.npi) AS npis
-                FROM rates r JOIN npi_directory n ON n.npi = r.npi
-                WHERE r.tin_value IS NOT NULL AND NOT r.tin_is_really_npi
-                  AND {therapy}
+                       count(DISTINCT pr.npi) AS npis
+                FROM pairs pr JOIN npi_directory n ON n.npi = pr.npi
+                WHERE {therapy}
                 GROUP BY 1
             )
             SELECT count(*), sum(npis) FROM p

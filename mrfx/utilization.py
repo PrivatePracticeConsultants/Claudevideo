@@ -81,7 +81,13 @@ def _ident(name: str) -> str:
 
 def _columns(con, reader: str) -> dict[str, str]:
     """Map our field names onto this file's actual headers, or refuse."""
-    cols = [r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {reader}").fetchall()]
+    try:
+        cols = [r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {reader}").fetchall()]
+    except Exception as e:  # noqa: BLE001 — a binary/garbled file must refuse
+        # in plain language, not surface a raw DuckDB traceback as a 500
+        raise UtilizationImportError(
+            f"that file could not be read as a CSV ({e}). Point at the "
+            "unzipped Physician & Other Practitioners CSV itself.") from e
     got = {
         "npi": _find(cols, "npi", exclude=("hcpcs", "entity")),
         "code": (_find(cols, "hcpcs", "cd", exclude=("desc",))
@@ -107,8 +113,20 @@ def _year_from(path: Path, year: str | None) -> str:
     """The data year: explicit, else the first 4-digit run in the filename.
     Embedded in a COPY statement and used as a FILENAME, so it is validated
     here rather than trusted."""
-    m = re.search(r"(19|20)\d{2}", path.stem)
-    y = str(year or "").strip() or (m.group(0) if m else "")
+    y = str(year or "").strip()
+    if not y:
+        m = re.search(r"(19|20)\d{2}", path.stem)
+        if m:
+            y = m.group(0)
+        else:
+            # the CURRENT CMS delivery has no 4-digit year in its name —
+            # MUP_PHY_R24_P05_V10_D23_Prov_Svc.csv encodes the data year as
+            # "DYY". Refusing THE file the download page hands out would be
+            # pointless friction, and the pattern is specific enough not to
+            # misfire (underscore-delimited D + exactly two digits).
+            m = re.search(r"(?:^|_)D(\d{2})(?:_|$)", path.stem, re.IGNORECASE)
+            if m:
+                y = f"20{m.group(1)}"
     if not y:
         raise UtilizationImportError(
             "could not tell which year this file covers — pass --year 2023.")
