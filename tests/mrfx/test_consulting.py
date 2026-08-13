@@ -199,6 +199,62 @@ def test_new_to_network_finds_only_genuinely_new_practices(store):
     assert single["rows"] == [] and single["reason"]
 
 
+def test_new_to_network_keeps_unidentified_practices(store):
+    """A newly signed practice whose clinicians are not yet in the NPI
+    directory must be KEPT and flagged, never silently dropped by the
+    therapy filter — same rule as the Medicare leaderboard."""
+    from mrfx.contracts import new_to_network
+
+    _seed(store, months=("2026-05", "2026-06"), newbie_month="2026-06")
+    with store.write_lock, store.connect() as con:
+        con.execute("DELETE FROM npi_directory WHERE npi = ?", [NEWBIE[1]])
+    d = new_to_network(store, {"month": "2026-06"}, therapy_only=True)
+    assert len(d["rows"]) >= 1, "unenriched newbie must not vanish"
+    row = d["rows"][0]
+    assert row["unidentified"] is True
+    assert "kept and flagged" in d["note"]
+
+    # a prev_month no payer published in must not report the whole book as new
+    empty = new_to_network(store, {"month": "2026-06"}, prev_month="2020-01")
+    assert empty["rows"] == [] and "2020-01" in (empty["reason"] or "")
+
+
+def test_remit_parser_survives_hostile_headers(store):
+    """Real remit exports carry paid_date, denial_reason_code, unit_price…
+    columns. Substring-matching those as the amount/code/units column would
+    silently score garbage (a date '2026-01-05' reads as $2026)."""
+    from mrfx.remits import parse_remit
+
+    text = ("claim_id,paid_date,denial_reason_code,cpt,unit_price,units,paid_amount\n"
+            "C1,2026-01-05,CO45,97110,15.00,2,57.00\n"
+            "C2,2026-01-06,,97140,28.00,1,28.00\n")
+    rows, problems = parse_remit(text)
+    assert not problems
+    assert [r["billing_code"] for r in rows] == ["97110", "97140"]
+    assert [r["amount"] for r in rows] == [57.0, 28.0], \
+        "amount must come from paid_amount, never paid_date"
+    assert [r["units"] for r in rows] == [2.0, 1.0], \
+        "units must come from the units column, never unit_price"
+
+
+def test_baseline_labels_carry_a_concrete_month(store):
+    """A baseline saved on the default 'latest' basis must label itself with
+    the store's real newest month — 'as of latest' is meaningless the day
+    after it is written."""
+    from mrfx.engagements import compare_to_baseline, save_baseline
+
+    _seed(store, months=("2026-05", "2026-06"))
+    saved = save_baseline(store, GW, {"month": "latest"}, label="ui default")
+    assert saved["month"] == "2026-06", saved
+    cmp = compare_to_baseline(store, GW, label="ui default")
+    assert cmp["baseline_month"] == "2026-06"
+    assert cmp["current_month"] == "2026-06", "never the literal 'latest'"
+
+    with pytest.raises(BenchmarkError, match="volumes"):
+        compare_to_baseline(store, GW, label="ui default",
+                            volumes={"97110": "lots"})
+
+
 # ----------------------------------------------------------- packets --
 
 def test_packets_are_written_per_client_and_omissions_explained(cfg, store, tmp_path):

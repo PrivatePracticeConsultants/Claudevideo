@@ -1640,8 +1640,16 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 raise HTTPException(409, "a packet build is already running")
             packet_job.update({"state": "running", "result": None,
                                "message": "starting…"})
-        threading.Thread(target=_bg_safe, args=(_run_packets,),
-                         name="mrfx-packets", daemon=True).start()
+        try:
+            threading.Thread(target=_bg_safe, args=(_run_packets,),
+                             name="mrfx-packets", daemon=True).start()
+        except Exception:
+            # release the slot — a failed thread start must not wedge the
+            # button as "already running" until the server restarts
+            with packet_lock:
+                packet_job.update({"state": "idle",
+                                   "message": "could not start the build"})
+            raise
         return {"started": True}
 
     @app.get("/api/clients/digest")

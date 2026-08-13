@@ -2125,7 +2125,8 @@ function initNewToNetwork() {
       return;
     }
     const rows = d.rows.map((r, i) => `<tr>
-      <td class="num">${i + 1}</td><td>${esc(r.practice)}</td>
+      <td class="num">${i + 1}</td><td>${esc(r.practice)}${r.unidentified
+        ? ' <span class="muted" title="clinicians not yet in the NPI directory">(not yet identified)</span>' : ""}</td>
       <td>${esc([...(r.cities || []), ...(r.states || [])].join(", "))}</td>
       <td>${esc(r.zip || "")}</td>
       <td class="num">${r.miles == null ? "–" : r.miles}</td>

@@ -43,6 +43,20 @@ def _ensure_table(con) -> None:
     """)
 
 
+def _concrete_month(store: Store, month) -> str | None:
+    """'latest' resolved to the store's newest file month, for LABELS only.
+    A baseline row or a wins report that says 'as of latest' is meaningless
+    the day after it is written — the vintage-honesty rule everywhere else
+    (packets pin max(file_month)) applies here too. The computation itself
+    still runs on the 'latest' basis (newest file per contract)."""
+    if month and str(month).strip().lower() != "latest":
+        return month
+    with store.connect() as con:
+        m = (con.execute(
+            "SELECT max(file_month) FROM rates_by_tin").fetchone() or [None])[0]
+    return m or month
+
+
 def _snapshot(store: Store, subject: str, market: dict) -> dict:
     """The measurement both ends of the comparison use — one function, so a
     baseline and a 'now' can never be computed differently."""
@@ -74,6 +88,7 @@ def save_baseline(store: Store, subject: str, market: dict | None = None,
     label = (str(label or "").strip() or "engagement start")[:60]
     market = normalize_market(market or {"month": "latest"})
     snap = _snapshot(store, subject, market)
+    snap["month"] = _concrete_month(store, snap["month"])
     if not snap["codes"]:
         raise BenchmarkError(
             f"no published rates for '{subject}' under the current basis — "
@@ -152,8 +167,14 @@ def compare_to_baseline(store: Store, subject: str, label: str = "engagement sta
     cmp_market.update(market or {})
     cmp_market.setdefault("month", "latest")
     now = _snapshot(store, subject, normalize_market(cmp_market))
+    now["month"] = _concrete_month(store, now["month"])
 
-    volumes = {str(k).strip().upper(): float(v) for k, v in (volumes or {}).items()}
+    try:
+        volumes = {str(k).strip().upper(): float(v)
+                   for k, v in (volumes or {}).items()}
+    except (TypeError, ValueError, AttributeError):
+        raise BenchmarkError(
+            "volumes must map a billing code to annual units, e.g. 97110: 1200")
     both, gained, lost = [], [], []
     total_value = 0.0
     for code, b in sorted(base["codes"].items()):

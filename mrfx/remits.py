@@ -92,16 +92,24 @@ def parse_remit(text: str) -> tuple[list[dict], list[str]]:
                 return i
         return None
 
-    i_code = find("code", "cpt", "hcpcs", exclude=("modifier", "zip"))
+    # exclusions matter more than matches here: real remit exports carry
+    # denial_reason_code, adjustment_group_code, paid_date, unit_price —
+    # substring-matching those as the code/amount/units column would silently
+    # score garbage (a paid_date "2026-01-05" reads as $2026.00)
+    i_code = find("code", "cpt", "hcpcs",
+                  exclude=("modifier", "zip", "denial", "reason", "remark",
+                           "adjust", "group"))
     # ALLOWED wins over PAID when a remit export carries both — it is the
     # column comparable to a published rate. `is not None`, never `or`: the
     # column is often at index 0, and 0 is falsy.
-    i_allowed = find("allowed")
-    i_amt = i_allowed if i_allowed is not None else find("paid", "payment", "amount")
+    i_allowed = find("allowed", exclude=("date",))
+    i_amt = i_allowed if i_allowed is not None else find(
+        "paid", "payment", "amount", exclude=("date",))
     has_header = i_code is not None and i_amt is not None
     if has_header:
         i_payer = find("payer", "carrier", "insurer", "plan")
-        i_units = find("unit", "qty", "quantity")
+        i_units = find("unit", "qty", "quantity",
+                       exclude=("price", "amount", "charge", "rate"))
         i_mods = find("modifier", "mod")
         i_date = find("date", "dos", "service")
         body = records[1:]

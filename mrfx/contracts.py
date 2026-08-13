@@ -58,15 +58,17 @@ def expiration_coverage(store: Store, market: dict | None = None) -> dict:
     rel = _rates_relation(market)
     usable = _usable_expiry_sql()
     with store.connect() as con:
-        total, ok = con.execute(
-            f"SELECT count(*), count(*) FILTER ({usable}) FROM {rel} t WHERE {where}",
-            params).fetchone()
+        # one scan: the overall figures are the sum of the per-payer ones, and
+        # for month="latest" each scan re-sorts the whole spine — no reason to
+        # pay that twice
         per_payer = [
             {"payer": p, "rows": n, "with_expiry": k,
              "pct": round(100.0 * k / n, 1) if n else 0.0}
             for p, n, k in con.execute(
                 f"SELECT t.payer, count(*), count(*) FILTER ({usable}) FROM {rel} t "
                 f"WHERE {where} GROUP BY t.payer ORDER BY 2 DESC", params).fetchall()]
+    total = sum(r["rows"] for r in per_payer)
+    ok = sum(r["with_expiry"] for r in per_payer)
     return {
         "rows": total, "with_expiry": ok,
         "pct": round(100.0 * ok / total, 1) if total else 0.0,
@@ -178,11 +180,20 @@ def new_to_network(store: Store, market: dict | None = None,
             WHERE file_month < ? GROUP BY payer
         """, [month]).fetchall()
         if prev_month:
-            pairs = [(p, prev_month) for p, _ in pairs]
+            # a payer that did not publish in the requested prev_month has an
+            # EMPTY "before" set — its whole book would read as newly signed.
+            # Compare only payers that actually published then.
+            published = {p for (p,) in con.execute(
+                "SELECT DISTINCT payer FROM rates_by_tin WHERE file_month = ?",
+                [prev_month]).fetchall()}
+            pairs = [(p, prev_month) for p, _ in pairs if p in published]
         if not pairs:
             return {"rows": [], "month": month, "compared": [],
-                    "reason": ("only one month of data is loaded — new-to-network "
-                               "needs two vintages of the same payer to compare"),
+                    "reason": ((f"no payer published in {prev_month}, so there is "
+                                "no honest earlier book to compare against")
+                               if prev_month else
+                               ("only one month of data is loaded — new-to-network "
+                                "needs two vintages of the same payer to compare")),
                     "zip": zip_code, "radius_miles": None, "total": 0}
         origin = None
         if use_radius:
@@ -218,35 +229,47 @@ def new_to_network(store: Store, market: dict | None = None,
             for r in cur.fetchall():
                 rows.append({"payer": payer, "prev_month": pm,
                              **dict(zip([c[0] for c in cur.description], r))})
-        # therapy + geography filters need the member NPIs' directory rows
+        # therapy + geography filters need the member NPIs' directory rows.
+        # LEFT JOIN, one scan: a practice whose clinicians are not yet in the
+        # NPI directory must be KEPT and flagged "unidentified", never silently
+        # dropped — under therapy_only only a practice whose identified
+        # clinicians are all NON-therapy is excluded (same rule as the
+        # Medicare leaderboard).
         if rows:
             tins = [r["tin_value"] for r in rows]
-            keep = {t for (t,) in con.execute(f"""
-                SELECT DISTINCT r.tin_value
-                FROM rates r JOIN npi_directory n ON n.npi = r.npi
-                WHERE r.tin_value IN (SELECT unnest(?::VARCHAR[])) AND {therapy}
-            """, [tins]).fetchall()} if therapy_only else set(tins)
-            zips = dict(con.execute("""
-                SELECT r.tin_value, mode(substr(trim(n.zip), 1, 5))
-                FROM rates r JOIN npi_directory n ON n.npi = r.npi
+            info = {t: (bool(ident), bool(ther), z) for t, ident, ther, z in
+                    con.execute(f"""
+                SELECT r.tin_value,
+                       bool_or(n.npi IS NOT NULL),
+                       coalesce(bool_or({therapy}), FALSE),
+                       mode(substr(trim(n.zip), 1, 5))
+                FROM rates r LEFT JOIN npi_directory n ON n.npi = r.npi
                 WHERE r.tin_value IN (SELECT unnest(?::VARCHAR[]))
                 GROUP BY 1
-            """, [tins]).fetchall())
+            """, [tins]).fetchall()}
             out = []
             for r in rows:
-                if therapy_only and r["tin_value"] not in keep:
+                ident, ther, z = info.get(r["tin_value"], (False, False, None))
+                if therapy_only and ident and not ther:
                     continue
-                r["zip"] = zips.get(r["tin_value"])
-                if use_radius:
-                    if not r["zip"]:
-                        continue
-                    d = con.execute(
-                        f"SELECT {haversine_miles_sql('z.lat', 'z.lon', origin[0], origin[1])} "
-                        "FROM _zcta z WHERE z.zip = ?", [r["zip"]]).fetchone()
-                    if d is None or d[0] > float(radius_miles):
-                        continue
-                    r["miles"] = round(d[0], 1)
+                r["unidentified"] = not ident
+                r["zip"] = z
                 out.append(r)
+            if use_radius:
+                dist = dict(con.execute(f"""
+                    SELECT z.zip, {haversine_miles_sql('z.lat', 'z.lon',
+                                                       origin[0], origin[1])}
+                    FROM _zcta z
+                    WHERE z.zip IN (SELECT unnest(?::VARCHAR[]))
+                """, [sorted({r["zip"] for r in out if r["zip"]})]).fetchall())
+                kept = []
+                for r in out:
+                    d = dist.get(r["zip"]) if r["zip"] else None
+                    if d is None or d > float(radius_miles):
+                        continue
+                    r["miles"] = round(d, 1)
+                    kept.append(r)
+                out = kept
             rows = out
     for r in rows:
         r["cities"] = list(r.get("cities") or [])
@@ -262,5 +285,7 @@ def new_to_network(store: Store, market: dict | None = None,
                      "payer's published book this month and was absent from the "
                      "same payer's previous published month. Payers are compared "
                      "only across months they actually published, so a month you "
-                     "did not ingest cannot fake a wave of new contracts."),
+                     "did not ingest cannot fake a wave of new contracts. "
+                     "Practices whose clinicians are not yet identified in the "
+                     "NPI directory are kept and flagged, never dropped."),
             }
