@@ -999,6 +999,16 @@ class Store:
         except duckdb.Error:
             return None
 
+    def meta_get(self, key: str) -> str | None:
+        """Small durable key/value for scheduling state (e.g. the last month
+        the auto-refresh ran) — survives restarts, unlike anything in memory."""
+        with self.connect() as con:
+            return self._meta_get(con, key)
+
+    def meta_set(self, key: str, value: str) -> None:
+        with self.write_lock, self.connect() as con:
+            con.execute("INSERT OR REPLACE INTO meta VALUES (?, ?)", [key, str(value)])
+
     def directory_ready(self) -> bool:
         """True when a materialized tin_directory table exists — the boot-time
         forced name refresh has nothing to add unless new names arrived."""

@@ -287,6 +287,20 @@ Once a file is `done`:
   who has contract gaps worth chasing, and which of their referral sources
   lost Medicare order/refer standing. Click any cell to land on the matching
   tab with that client already loaded and running.
+- **Clients** tab also carries the consulting workflow: **monthly packets**
+  (one click writes a branded folder per client — rate card, market position,
+  what moved, gaps, Medicare alerts, and results-since-baseline), **engagement
+  baselines** (snapshot a client at the start, then show before/after proof of
+  what your work moved), and the **renewal radar** (contracts whose published
+  end date is coming up — with the coverage figure shown first, because payers
+  publish that field inconsistently).
+- **Leads** tab adds **new to network** — practices that appear in a payer's
+  book this month and were absent last month. A practice that just signed its
+  first commercial contract is the strongest lead in this data.
+- **Files** tab adds the **underpayment check** — paste remit lines and see
+  every one paid below what that payer published for the practice, with the
+  shortfall and a CSV. Read the caveats: MPPR, assistant modifiers and patient
+  cost-share all legitimately sit between a published rate and a payment.
 - **Negotiate** tab now also builds the **rate proposal** — pick a basis
   (payer's median or p75, best comparable rate, or % of Medicare), paste
   annual volumes, and print the proposal grid the payer receives. Proposed
@@ -584,6 +598,8 @@ prompt). They're an alternative to the dashboard buttons.
 | `mrfx export out.csv --cpt 97110 --payer "Aetna"` | Export a filtered CSV + methodology sidecar (state filtering lives in the dashboard and `mrfx outreach`) |
 | `mrfx outreach contacts.csv --state MO --cpt 97110,97140` | Contact/mail-merge CSV |
 | `mrfx enrich --bulk "E:\NPPES…zip"` | Fill in provider names/geography now, in one fast local pass from the NPPES bulk file (see "Make provider names fill in fast" above) |
+| `mrfx packets` | Write this month's packet for every watchlist client |
+| `mrfx renewals --clients` | Contracts with a real published end date, soonest first |
 | `mrfx backup E:\backups\mrfx.zip` | Copy the whole store into one zip with a checksum manifest (stop the server first) |
 | `mrfx verify [backup.zip]` | Check a backup against its manifest, or (no argument) the live store's integrity |
 | `mrfx medicare --from-tracker` | Find the Order & Referring Tracker's folder and import everything new from it (stop the server first; the dashboard's Import button needs no stopping) |

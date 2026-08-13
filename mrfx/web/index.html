@@ -54,6 +54,59 @@
     <div id="cl-out" class="empty"><h3>No clients saved yet</h3>
       Add the practices you work for. Each refresh answers: whose rates moved, who has
       contract gaps, and which of their referral sources lost Medicare standing.</div>
+
+    <div class="validate-card" style="margin-top:14px">
+      <h3>Monthly packets — the documents you send</h3>
+      <p class="muted">One click writes a branded folder per client for the current month:
+        rate card, market position, what moved, contract gaps, Medicare alerts, and the
+        before/after report when a baseline exists. Sections with nothing to say are
+        omitted and listed as omitted — never an empty branded page.</p>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <button class="btn primary" id="pk-build">Build monthly packets</button>
+        <span id="pk-msg" class="muted"></span>
+      </div>
+      <div id="pk-out" style="margin-top:8px"></div>
+    </div>
+
+    <div class="validate-card" style="margin-top:14px">
+      <h3>Engagement results — prove the fee</h3>
+      <p class="muted">Baseline a client at the start of an engagement, then compare later:
+        rates and market position before vs after, valued at their volumes. The baseline is a
+        stored snapshot, never recomputed, so history can't be rewritten by a later ingest.</p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <input type="text" id="en-subject" list="cl-subjects" placeholder="practice…" style="width:220px">
+        <button class="btn" id="en-save">Baseline this client</button>
+        <button class="btn" id="en-compare">Show results since baseline</button>
+        <span id="en-msg" class="muted"></span>
+      </div>
+      <div class="field" style="margin-top:6px;max-width:420px">
+        <label>Annual units per code <span class="muted" style="text-transform:none">(optional — values the win)</span></label>
+        <textarea id="en-volumes" rows="2" placeholder="97110, 4200&#10;97140, 1800"></textarea>
+      </div>
+      <div id="en-out" style="margin-top:8px"></div>
+    </div>
+
+    <div class="validate-card" style="margin-top:14px">
+      <h3>Contract renewals</h3>
+      <p class="muted">Contracts whose published end date is coming up — so you start the
+        renegotiation on your timeline. Payers publish this field inconsistently, so the
+        coverage figure is shown first and contracts without a usable published date are
+        absent, not "no renewal".</p>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <label class="toggle" style="text-transform:none">Within
+          <select id="rn-within" style="margin-left:4px">
+            <option value="90">90 days</option>
+            <option value="180">180 days</option>
+            <option value="365" selected>1 year</option>
+            <option value="730">2 years</option>
+          </select>
+        </label>
+        <label class="toggle"><input type="checkbox" id="rn-clients" checked> my clients only</label>
+        <button class="btn primary" id="rn-run">Show renewals</button>
+        <span id="rn-msg" class="muted"></span>
+      </div>
+      <div id="rn-out" style="margin-top:8px"></div>
+    </div>
   </section>
 
   <!-- ======================= OVERVIEW ======================= -->
@@ -599,6 +652,26 @@
         <div id="ld-out" class="empty"><h3>Pick a market</h3>
           Find practices being underpaid relative to their local market, with contact info.</div>
         <div id="ld-board"></div>
+        <div class="validate-card" style="margin-top:14px">
+          <h3>New to network — just-signed practices</h3>
+          <p class="muted">Practices in a payer's published book this month that were absent
+            from that payer's previous published month. A practice that just signed its first
+            commercial contract is the strongest lead in this data: new to negotiating, and
+            probably took the opening offer.</p>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <input type="text" id="nn-zip" placeholder="ZIP (optional)" style="width:110px">
+            <select id="nn-radius">
+              <option value="25">25 miles</option>
+              <option value="50" selected>50 miles</option>
+              <option value="100">100 miles</option>
+              <option value="200">200 miles</option>
+            </select>
+            <label class="toggle"><input type="checkbox" id="nn-therapy" checked> therapy practices only</label>
+            <button class="btn primary" id="nn-run">Find new contracts</button>
+            <span id="nn-msg" class="muted"></span>
+          </div>
+          <div id="nn-out" style="margin-top:8px"></div>
+        </div>
       </div>
     </div>
   </section>
@@ -712,6 +785,30 @@
         <tbody id="files-body"></tbody>
       </table>
       <div id="files-state"></div>
+    </div>
+
+    <div class="validate-card">
+      <h3>Underpayment check — remit vs published contract</h3>
+      <p class="muted">Paste remit lines and see every one paid below what that payer
+        published for this practice. Expected columns: <code class="inline">code, payer,
+        allowed_amount</code> (units, modifiers and date optional) — a header row is read
+        if present.</p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:6px">
+        <input type="text" id="rm-subject" list="rm-subjects" placeholder="the practice…" style="width:240px">
+        <datalist id="rm-subjects"></datalist>
+        <label class="toggle" style="text-transform:none">These amounts are
+          <select id="rm-basis" style="margin-left:4px" title="ALLOWED is the amount comparable to a published rate. PAYER-PAID excludes patient deductible/copay, so nearly every line would look short.">
+            <option value="allowed">allowed amounts</option>
+            <option value="paid">payer-paid amounts</option>
+          </select>
+        </label>
+        <button class="btn primary" id="rm-run">Check</button>
+        <button class="btn" id="rm-csv" disabled>Download CSV</button>
+        <span id="rm-msg" class="muted"></span>
+      </div>
+      <textarea id="rm-text" rows="4" style="width:100%;box-sizing:border-box"
+        placeholder="code,payer,allowed_amount,units&#10;97110,Anthem BCBS MO,28.50,1&#10;97140,Anthem BCBS MO,26.00,1"></textarea>
+      <div id="rm-out" style="margin-top:10px"></div>
     </div>
 
     <div class="validate-card">

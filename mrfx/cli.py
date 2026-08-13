@@ -123,6 +123,46 @@ def _url_worker_loop(cfg: MrfxConfig, store: Store, stop: threading.Event) -> No
             stop.wait(30)
 
 
+def _monthly_refresh_loop(cfg: MrfxConfig, store: Store, stop: threading.Event) -> None:
+    """OPT-IN (monthly_refresh). Re-queue the tested payer indexes once per
+    calendar month so vintages stay current without the user remembering to
+    re-paste links — everything downstream (rate changes, the Clients digest,
+    month="latest") is only as fresh as the last ingest.
+
+    ONCE PER MONTH, durably: the last month it ran is written to the store's
+    meta table, so a restart (or five restarts) in the same month re-queues
+    nothing. Content-hash dedup means a payer that republished nothing costs
+    one download per file and no re-ingest, but re-queueing on every boot
+    would still thrash the queue and the disk.
+    """
+    import datetime as _dt
+
+    from .fetch import add_urls
+    from .known_sources import load_known_sources
+
+    KEY = "monthly_refresh_last"
+    while not stop.is_set():
+        try:
+            month = _dt.date.today().strftime("%Y-%m")
+            if store.meta_get(KEY) != month:
+                sources = load_known_sources(cfg.known_sources_path)
+                urls = [s["url"] for s in sources if s.get("queueable")]
+                if urls:
+                    counts = add_urls(store, urls)
+                    log.info("monthly refresh %s: queued %s new link(s), "
+                             "%s already known", month, counts["added"],
+                             counts["skipped"])
+                # mark AFTER a successful pass — a crash mid-queue retries
+                # next tick rather than skipping the month entirely
+                store.meta_set(KEY, month)
+        except Exception:  # noqa: BLE001 — a refresh must never kill the server
+            log.exception("monthly refresh failed; will retry")
+        # hourly tick: cheap, and it catches the month rollover on a machine
+        # that stays up for weeks
+        if stop.wait(3600):
+            return
+
+
 def cmd_serve(cfg: MrfxConfig, args) -> int:
     import faulthandler
     import socket
@@ -218,6 +258,9 @@ def cmd_serve(cfg: MrfxConfig, args) -> int:
     # the inbox watcher AND the URL worker), refreshing the directory
     # progressively rather than only when everything finishes.
     start_persistent_enrichment(cfg, store, stop)
+    if getattr(cfg, "monthly_refresh", False):
+        threading.Thread(target=_monthly_refresh_loop, args=(cfg, store, stop),
+                         name="mrfx-monthly-refresh", daemon=True).start()
     app = create_app(cfg, store)
     spill_line = ""
     if store.spill_is_relocated:
@@ -870,6 +913,63 @@ def cmd_medicare(cfg: MrfxConfig, args) -> int:
     return 0
 
 
+def cmd_packets(cfg: MrfxConfig, args) -> int:
+    """Write a monthly packet for every watchlist client."""
+    from .packets import build_all_packets
+
+    if _something_owns_the_port(cfg, "building packets locally"):
+        print("(the Clients tab's 'Build monthly packets' button does the same "
+              "thing without stopping the server)")
+        return 1
+    store = Store(cfg.store_dir, cfg.duckdb_memory_gb, temp_dir=cfg.duckdb_temp_dir)
+    try:
+        res = build_all_packets(cfg, store, args.out or getattr(cfg, "packets_dir", None),
+                                progress=lambda m: print(f"  {m}"))
+    except Exception as e:  # noqa: BLE001 — a refusal is a message, not a trace
+        print(f"could not build packets: {e}")
+        return 1
+    print(f"\n{res['clients']} client packet(s), {res['documents']} document(s)")
+    print(f"written to: {res['dir']}")
+    for p in res["packets"]:
+        line = f"  {p['display_name']}: {len(p['written'])} doc(s)"
+        if p["skipped"]:
+            line += f" — omitted: {'; '.join(x.split(':')[0] for x in p['skipped'])}"
+        print(line)
+    return 0
+
+
+def cmd_renewals(cfg: MrfxConfig, args) -> int:
+    """Contracts with a real published end date, soonest first."""
+    from .contracts import renewal_radar
+
+    if _something_owns_the_port(cfg, "reading the store locally"):
+        return 1
+    store = Store(cfg.store_dir, cfg.duckdb_memory_gb, temp_dir=cfg.duckdb_temp_dir)
+    try:
+        from .clients import watchlist
+        subjects = ([args.subject] if args.subject
+                    else (watchlist(store) if args.clients else None))
+        res = renewal_radar(store, subjects, {"month": "latest"},
+                            within_days=args.within_days)
+    except Exception as e:  # noqa: BLE001
+        print(f"could not build the renewal radar: {e}")
+        return 1
+    cov = res["coverage"]
+    print(f"expiration dates published on {cov['with_expiry']:,} of "
+          f"{cov['rows']:,} contract lines ({cov['pct']}%)")
+    if not res["rows"]:
+        print(f"\nno contracts with a usable published end date in the next "
+              f"{res['within_days']} days.")
+        print(f"\n{cov['note']}")
+        return 0
+    print(f"\n{'expires':<12} {'days':>5}  {'practice':<34} {'payer':<24} codes")
+    for r in res["rows"]:
+        print(f"{r['expires']:<12} {r['days']:>5}  {str(r['practice'])[:34]:<34} "
+              f"{str(r['payer'])[:24]:<24} {r['codes']}")
+    print(f"\n{cov['note']}")
+    return 0
+
+
 def cmd_backup(cfg: MrfxConfig, args) -> int:
     """Copy the whole analytical store into one zip with a manifest, so the
     business asset on this one machine survives it. Parquet is already
@@ -1298,6 +1398,13 @@ def main(argv: list[str] | None = None) -> int:
                    help="CMS shared-patient day window (30/60/90/180/365) — "
                         "read from the filename when omitted")
 
+    p = sub.add_parser("packets", help="write a monthly packet for every watchlist client")
+    p.add_argument("--out", default=None, help="output folder (default: packets_dir, else <store>/../packets)")
+    p = sub.add_parser("renewals", help="contracts with a real published end date, soonest first")
+    p.add_argument("--subject", default=None, help="one practice (entity/TIN/NPI)")
+    p.add_argument("--clients", action="store_true", help="only your watchlist clients")
+    p.add_argument("--within-days", dest="within_days", type=int, default=365)
+
     p = sub.add_parser("backup", help="copy the whole store into one zip with a checksum manifest")
     p.add_argument("dest", help="backup filename, e.g. E:\\backups\\mrfx_2026-08-12.zip")
     p = sub.add_parser("verify", help="check a backup zip against its manifest, or the live store's integrity")
@@ -1373,6 +1480,8 @@ def main(argv: list[str] | None = None) -> int:
         "medicare": cmd_medicare,
         "orgreport": cmd_orgreport,
         "speedtest": cmd_speedtest,
+        "packets": cmd_packets,
+        "renewals": cmd_renewals,
         "backup": cmd_backup,
         "verify": cmd_verify,
         "reset": cmd_reset,

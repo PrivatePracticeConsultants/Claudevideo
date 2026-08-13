@@ -119,6 +119,9 @@ function switchView(view) {
   if (view !== "medicare" && state.trackerPoll) {
     clearInterval(state.trackerPoll); state.trackerPoll = null;
   }
+  if (view !== "clients" && state.packetPoll) {
+    clearInterval(state.packetPoll); state.packetPoll = null;
+  }
   if (view === "files") {
     loadFiles(); loadUrlQueue();
     state.filesTimer = setInterval(() => { loadFiles(); loadUrlQueue(); }, 4000);
@@ -1856,6 +1859,9 @@ async function initClients() {
   $("#cl-add").addEventListener("click", addClient);
   $("#cl-subject").addEventListener("keydown", (e) => { if (e.key === "Enter") addClient(); });
   $("#cl-refresh").addEventListener("click", loadClientDigest);
+  initPackets();
+  initEngagements();
+  initRenewals();
   loadClientDigest();
 }
 
@@ -1959,6 +1965,245 @@ async function loadClientDigest() {
     ev.preventDefault();
     clientJump("medicare", "#md-subject", runMedicareOrg, a.dataset.clMed);
   }));
+}
+
+/* ---- monthly packets: the documents you send ---------------------------- */
+async function initPackets() {
+  $("#pk-build").addEventListener("click", async () => {
+    $("#pk-msg").textContent = "starting…";
+    try { await postJson("/api/packets/build", {}); }
+    catch (e) { $("#pk-msg").textContent = ""; alert("Couldn't start: " + e.message); return; }
+    pollPackets();
+  });
+  pollPackets(true);
+}
+
+async function pollPackets(quiet = false) {
+  let d;
+  try { d = await api("/api/packets"); } catch { return; }
+  const msg = $("#pk-msg"), out = $("#pk-out");
+  if (d.state === "running") {
+    msg.textContent = "";
+    out.innerHTML = `<div class="loading">${esc(d.message || "building")}</div>`;
+    if (!state.packetPoll) state.packetPoll = setInterval(() => pollPackets(true), 1500);
+    return;
+  }
+  if (state.packetPoll) { clearInterval(state.packetPoll); state.packetPoll = null; }
+  msg.textContent = "";
+  if (d.state === "done" && d.result) {
+    const r = d.result;
+    out.innerHTML = `<div class="rc-summary"><b>${fmtInt(r.clients)}</b> client packet(s),
+      <b>${fmtInt(r.documents)}</b> document(s) for <b>${esc(r.month)}</b> →
+      <code class="inline" style="overflow-wrap:anywhere">${esc(r.dir)}</code></div>
+      <div class="tablewrap"><table><thead><tr><th>Client</th><th class="num">Documents</th>
+      <th>Omitted (and why)</th></tr></thead><tbody>${r.packets.map((p) => `<tr>
+        <td>${esc(p.display_name)}</td><td class="num">${p.written.length}</td>
+        <td class="sub">${esc((p.skipped || []).join("; "))}</td></tr>`).join("")}</tbody></table></div>
+      <div class="muted" style="margin-top:6px">Open the folder above and attach the files, or
+      open each client's <code class="inline">index.html</code> to review.</div>`;
+  } else if (d.state === "done" && d.message && !quiet) {
+    out.innerHTML = `<div class="muted">${esc(d.message)}</div>`;
+  }
+}
+
+/* ---- engagement baselines: before/after proof --------------------------- */
+function parseVolumes(sel) {
+  const vols = {};
+  ($(sel).value || "").split("\n").forEach((line) => {
+    const m = line.match(/^\s*([A-Za-z0-9]+)\s*[,;\t ]\s*([\d,.]+)\s*$/);
+    if (m) vols[m[1].toUpperCase()] = Number(m[2].replace(/,/g, ""));
+  });
+  return Object.keys(vols).length ? vols : null;
+}
+
+function initEngagements() {
+  $("#en-save").addEventListener("click", async () => {
+    const subject = $("#en-subject").value.trim();
+    if (!subject) { $("#en-msg").textContent = "pick a practice first"; return; }
+    $("#en-msg").textContent = "saving…";
+    try {
+      const r = await postJson("/api/engagements/baseline", { subject });
+      $("#en-msg").textContent = `${r.replaced ? "replaced" : "saved"} — ${r.codes} codes as of ${r.month}`;
+    } catch (e) { $("#en-msg").textContent = ""; alert(e.message); }
+  });
+  $("#en-compare").addEventListener("click", runEngagementCompare);
+}
+
+async function runEngagementCompare() {
+  const out = $("#en-out");
+  const subject = $("#en-subject").value.trim();
+  if (!subject) { $("#en-msg").textContent = "pick a practice first"; return; }
+  $("#en-msg").textContent = "comparing…";
+  let d;
+  try {
+    d = await postJson("/api/engagements/compare",
+                       { subject, volumes: parseVolumes("#en-volumes") });
+  } catch (e) { $("#en-msg").textContent = ""; out.innerHTML = `<div class="muted">${esc(e.message)}</div>`; return; }
+  $("#en-msg").textContent = "";
+  const s = d.summary;
+  const rows = d.rows.map((r) => `<tr>
+    <td>${esc(r.billing_code)}<div class="sub">${esc(r.description || "")}</div></td>
+    <td class="num">${money(r.before)}</td><td class="num">${money(r.after)}</td>
+    <td class="num ${r.delta > 0 ? "peer-up" : r.delta < 0 ? "peer-down" : ""}">${
+      r.delta > 0 ? "+" : ""}${fmtMoney(r.delta)}${r.delta_pct == null ? "" : ` (${r.delta_pct > 0 ? "+" : ""}${r.delta_pct}%)`}</td>
+    <td class="num">${r.pctile_before == null ? "–" : "p" + Math.round(r.pctile_before)} →
+      ${r.pctile_after == null ? "–" : "p" + Math.round(r.pctile_after)}</td>
+    <td class="num">${r.annual_value == null ? "" : money(r.annual_value)}</td></tr>`).join("");
+  out.innerHTML = `<div class="rc-summary"><b>${s.n_improved}</b> of ${s.n_codes} code(s)
+    improved since ${esc(String(d.baseline_month))}${
+      s.median_pctile_before != null && s.median_pctile_after != null
+        ? `; median position p${s.median_pctile_before} → <b>p${s.median_pctile_after}</b>` : ""}${
+      s.total_annual_value != null ? `. Worth <b>${money(s.total_annual_value)}</b>/yr at your volumes` : ""}.</div>
+    <div class="tablewrap" style="max-height:40vh"><table class="rc-table"><thead><tr>
+      <th>Code</th><th class="num">Before</th><th class="num">After</th><th class="num">Change</th>
+      <th class="num">Percentile</th><th class="num">Value/yr</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="muted" style="font-size:11.5px;margin-top:6px">${esc(d.note)}</div>`;
+}
+
+/* ---- contract renewals -------------------------------------------------- */
+function initRenewals() {
+  $("#rn-run").addEventListener("click", async () => {
+    const out = $("#rn-out");
+    $("#rn-msg").textContent = "checking…";
+    let subjects = null;
+    if ($("#rn-clients").checked) {
+      const c = await api("/api/clients").catch(() => null);
+      subjects = (c && c.clients.length) ? c.clients : null;
+      if (!subjects) {
+        $("#rn-msg").textContent = "";
+        out.innerHTML = `<div class="muted">No clients saved yet — add some above, or untick "my clients only".</div>`;
+        return;
+      }
+    }
+    let d;
+    try {
+      d = await postJson("/api/contracts/renewals",
+        { subjects, within_days: Number($("#rn-within").value), market: { month: "latest" } });
+    } catch (e) { $("#rn-msg").textContent = ""; out.innerHTML = `<div class="muted">${esc(e.message)}</div>`; return; }
+    $("#rn-msg").textContent = "";
+    const cov = d.coverage;
+    const head = `<div class="muted" style="margin-bottom:6px">Expiration dates published on
+      <b>${fmtInt(cov.with_expiry)}</b> of ${fmtInt(cov.rows)} contract lines
+      (<b>${cov.pct}%</b>).</div>`;
+    if (!d.rows.length) {
+      out.innerHTML = head + `<div class="muted">No contracts with a usable published end date
+        in the next ${d.within_days} days.</div>
+        <div class="muted" style="font-size:11.5px;margin-top:6px">${esc(cov.note)}</div>`;
+      return;
+    }
+    const rows = d.rows.map((r) => `<tr>
+      <td>${esc(r.expires)}</td>
+      <td class="num ${r.expired ? "warn-text" : r.days < 90 ? "peer-down" : ""}">${r.expired ? "expired" : fmtInt(r.days)}</td>
+      <td>${esc(r.practice)}</td><td>${esc(r.payer)}</td>
+      <td class="num">${fmtInt(r.codes)}</td><td class="num">${money(r.median_rate)}</td></tr>`).join("");
+    out.innerHTML = head + `<div class="tablewrap" style="max-height:40vh"><table><thead><tr>
+      <th>Expires</th><th class="num">Days</th><th>Practice</th><th>Payer</th>
+      <th class="num">Codes</th><th class="num">Median rate</th></tr></thead><tbody>${rows}</tbody></table></div>
+      <div class="muted" style="font-size:11.5px;margin-top:6px">${esc(cov.note)}</div>`;
+  });
+}
+
+/* ---- new to network ----------------------------------------------------- */
+function initNewToNetwork() {
+  $("#nn-run").addEventListener("click", async () => {
+    const out = $("#nn-out");
+    $("#nn-msg").textContent = "looking…";
+    let d;
+    try {
+      d = await postJson("/api/contracts/new-to-network", {
+        market: { month: "latest" },
+        zip: $("#nn-zip").value.trim() || null,
+        radius_miles: $("#nn-zip").value.trim() ? Number($("#nn-radius").value) : null,
+        therapy_only: $("#nn-therapy").checked,
+      });
+    } catch (e) { $("#nn-msg").textContent = ""; out.innerHTML = `<div class="muted">${esc(e.message)}</div>`; return; }
+    $("#nn-msg").textContent = "";
+    if (d.reason) { out.innerHTML = `<div class="muted">${esc(d.reason)}</div>`; return; }
+    if (!d.rows.length) {
+      out.innerHTML = `<div class="muted">No practice newly appeared in a payer's book for
+        ${esc(String(d.month))}${d.zip ? ` within ${d.radius_miles} miles of ${esc(d.zip)}` : ""}.</div>`;
+      return;
+    }
+    const rows = d.rows.map((r, i) => `<tr>
+      <td class="num">${i + 1}</td><td>${esc(r.practice)}</td>
+      <td>${esc([...(r.cities || []), ...(r.states || [])].join(", "))}</td>
+      <td>${esc(r.zip || "")}</td>
+      <td class="num">${r.miles == null ? "–" : r.miles}</td>
+      <td>${esc(r.payer)}</td><td class="sub">${esc(r.prev_month)}</td>
+      <td class="num">${fmtInt(r.codes)}</td><td class="num">${money(r.median_rate)}</td></tr>`).join("");
+    out.innerHTML = `<div class="muted" style="margin-bottom:6px">${fmtInt(d.total)} newly
+      contracted practice(s) in <b>${esc(String(d.month))}</b>.</div>
+      <div class="tablewrap" style="max-height:40vh"><table><thead><tr>
+        <th>#</th><th>Practice</th><th>Location</th><th>ZIP</th><th class="num">Miles</th>
+        <th>Payer</th><th>Prev. month</th><th class="num">Codes</th><th class="num">Median</th>
+      </tr></thead><tbody>${rows}</tbody></table></div>
+      <div class="muted" style="font-size:11.5px;margin-top:6px">${esc(d.note || "")}</div>`;
+  });
+}
+
+/* ---- underpayment check ------------------------------------------------- */
+function initRemits() {
+  api("/api/benchmark/subjects").then((s) => {
+    if (s) $("#rm-subjects").innerHTML = subjectOptionsHtml(s);
+  }).catch(() => null);
+  wireSubjectSearch("#rm-subject", "#rm-subjects");
+  $("#rm-run").addEventListener("click", runRemitCheck);
+  $("#rm-csv").addEventListener("click", async () => {
+    if (!state.lastRemitPayload) return;
+    const r = await fetch("/api/remits/check.csv", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(state.lastRemitPayload),
+    });
+    if (!r.ok) { alert((await r.json().catch(() => ({}))).detail || "export failed"); return; }
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([await r.text()], { type: "text/csv" }));
+    a.download = "underpayment_check.csv";
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+  });
+}
+
+async function runRemitCheck() {
+  const out = $("#rm-out");
+  const payload = {
+    subject: $("#rm-subject").value.trim(),
+    text: $("#rm-text").value,
+    basis: $("#rm-basis").value,
+    market: { month: "latest" },
+  };
+  state.lastRemitPayload = null;
+  $("#rm-csv").disabled = true;
+  $("#rm-msg").textContent = "checking…";
+  let d;
+  try { d = await postJson("/api/remits/check", payload); }
+  catch (e) { $("#rm-msg").textContent = ""; out.innerHTML = `<div class="muted">${esc(e.message)}</div>`; return; }
+  $("#rm-msg").textContent = "";
+  state.lastRemitPayload = payload;
+  $("#rm-csv").disabled = false;
+  const s = d.summary;
+  const flagged = d.flagged.map((r) => `<tr>
+    <td class="num">${r.line}</td><td>${esc(r.billing_code)}</td>
+    <td>${esc(r.matched_payer || "")}</td><td class="num">${fmtInt(r.units)}</td>
+    <td class="num">${money(r.amount)}</td><td class="num">${money(r.expected)}</td>
+    <td class="num peer-down">${money(r.shortfall)}${r.pct_short == null ? "" : ` (${r.pct_short}%)`}</td></tr>`).join("");
+  const unmatched = d.unmatched.length ? `<h3 style="margin-top:14px">Could not price (${d.unmatched.length})</h3>
+    <div class="tablewrap" style="max-height:22vh"><table><thead><tr><th class="num">Line</th>
+    <th>Code</th><th>Payer on remit</th><th>Why</th></tr></thead><tbody>${
+      d.unmatched.map((r) => `<tr><td class="num">${r.line}</td><td>${esc(r.billing_code)}</td>
+      <td>${esc(r.payer || "")}</td><td class="sub">${esc(r.reason)}</td></tr>`).join("")}</tbody></table></div>` : "";
+  const problems = d.problems.length ? `<div class="muted" style="margin-top:6px">
+    ${d.problems.length} line(s) could not be read: ${esc(d.problems.slice(0, 3).join("; "))}</div>` : "";
+  out.innerHTML = `
+    <div class="rc-summary">${s.flagged ? `<b>${fmtInt(s.flagged)}</b> of ${fmtInt(s.lines_read)} line(s)
+      paid below the published contract rate — <b>${money(s.total_shortfall)}</b> total shortfall on this batch.`
+      : `No line was paid below the published contract rate (${fmtInt(s.ok)} checked).`}
+      ${s.unmatched ? ` ${fmtInt(s.unmatched)} line(s) could not be priced.` : ""}</div>
+    <div class="disclaimer">${esc(s.basis_note)} ${esc(d.caveat)}</div>
+    ${s.flagged ? `<div class="tablewrap" style="max-height:34vh"><table class="rc-table"><thead><tr>
+      <th class="num">Line</th><th>Code</th><th>Payer</th><th class="num">Units</th>
+      <th class="num">Paid</th><th class="num">Published</th><th class="num">Short by</th>
+    </tr></thead><tbody>${flagged}</tbody></table></div>` : ""}
+    ${unmatched}${problems}`;
 }
 
 /* =======================================================================
@@ -2409,6 +2654,7 @@ async function initLeads() {
   if (subjects) $("#ld-subjects").innerHTML = subjectOptionsHtml(subjects);
   wireSubjectSearch("#ld-exclude", "#ld-subjects");
   $("#ld-run").addEventListener("click", runLeads);
+  initNewToNetwork();
   $("#ld-csv").addEventListener("click", () => { if (state.lastLeadsPayload) postDownload("/api/leads.csv", state.lastLeadsPayload, "leads.csv"); });
   $("#ld-board-run").addEventListener("click", runLeaderboard);
 }
@@ -2932,6 +3178,7 @@ function initFilesView() {
     dz.addEventListener(t, (e) => { e.preventDefault(); dz.classList.remove("drag"); }));
   dz.addEventListener("drop", (e) => uploadFiles([...e.dataTransfer.files]));
 
+  initRemits();
   $("#v-run").addEventListener("click", async () => {
     const id = $("#v-id").value.trim(), code = $("#v-code").value.trim();
     const expected = $("#v-expected").value.trim();

@@ -1510,6 +1510,140 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         from .clients import remove_client
         return {"clients": remove_client(store, str(body.get("subject", "")))}
 
+    @app.post("/api/contracts/renewals")
+    def api_renewals(body: dict = Body(...)):
+        """Contracts with a REAL published end date, soonest first — with the
+        coverage figure attached, because payers publish this field
+        inconsistently and a sparse radar must never read as a schedule."""
+        from .contracts import renewal_radar
+        try:
+            return renewal_radar(store, body.get("subjects") or None,
+                                 body.get("market") or {},
+                                 within_days=int(body.get("within_days") or 365))
+        except BenchmarkError as e:
+            raise HTTPException(422, str(e))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(422, f"bad input: {e}")
+
+    @app.get("/api/contracts/expiry-coverage")
+    def api_expiry_coverage():
+        from .contracts import expiration_coverage
+        return expiration_coverage(store, {})
+
+    @app.post("/api/contracts/new-to-network")
+    def api_new_to_network(body: dict = Body(...)):
+        """Practices that appear in a payer's book this month and were absent
+        from the same payer's previous published month."""
+        from .contracts import new_to_network
+        try:
+            return new_to_network(
+                store, body.get("market") or {},
+                zip_code=str(body.get("zip") or "").strip() or None,
+                radius_miles=float(body["radius_miles"]) if body.get("radius_miles") else None,
+                therapy_only=bool(body.get("therapy_only", True)))
+        except BenchmarkError as e:
+            raise HTTPException(422, str(e))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(422, f"bad input: {e}")
+
+    # -- underpayment check ------------------------------------------------------------
+
+    @app.post("/api/remits/check")
+    def api_remit_check(body: dict = Body(...)):
+        from .remits import check_underpayments
+        try:
+            return check_underpayments(
+                store, str(body.get("subject", "")), str(body.get("text", "")),
+                body.get("market") or {"month": "latest"},
+                basis=str(body.get("basis") or "allowed"))
+        except BenchmarkError as e:
+            raise HTTPException(422, str(e))
+
+    @app.post("/api/remits/check.csv", response_class=PlainTextResponse)
+    def api_remit_check_csv(body: dict = Body(...)):
+        from .remits import check_underpayments, underpayment_csv
+        try:
+            return underpayment_csv(check_underpayments(
+                store, str(body.get("subject", "")), str(body.get("text", "")),
+                body.get("market") or {"month": "latest"},
+                basis=str(body.get("basis") or "allowed")))
+        except BenchmarkError as e:
+            raise HTTPException(422, str(e))
+
+    # -- engagement baselines / win tracking -------------------------------------------
+
+    @app.get("/api/engagements")
+    def api_engagements(subject: str = ""):
+        from .engagements import list_baselines
+        return {"baselines": list_baselines(store, subject or None)}
+
+    @app.post("/api/engagements/baseline")
+    def api_save_baseline(body: dict = Body(...)):
+        from .engagements import save_baseline
+        try:
+            return save_baseline(store, str(body.get("subject", "")),
+                                 body.get("market") or {"month": "latest"},
+                                 label=str(body.get("label") or "engagement start"))
+        except BenchmarkError as e:
+            raise HTTPException(422, str(e))
+
+    @app.post("/api/engagements/delete")
+    def api_delete_baseline(body: dict = Body(...)):
+        from .engagements import delete_baseline, list_baselines
+        delete_baseline(store, str(body.get("subject", "")),
+                        str(body.get("label") or "engagement start"))
+        return {"baselines": list_baselines(store)}
+
+    @app.post("/api/engagements/compare")
+    def api_compare_baseline(body: dict = Body(...)):
+        from .engagements import compare_to_baseline
+        try:
+            return compare_to_baseline(
+                store, str(body.get("subject", "")),
+                str(body.get("label") or "engagement start"),
+                body.get("market") or None, body.get("volumes") or None)
+        except BenchmarkError as e:
+            raise HTTPException(422, str(e))
+
+    # -- monthly client packets --------------------------------------------------------
+
+    packet_job: dict = {"state": "idle", "message": "", "result": None}
+    packet_lock = threading.Lock()
+
+    def _run_packets() -> None:
+        from .packets import build_all_packets
+        try:
+            def progress(msg):
+                with packet_lock:
+                    packet_job["message"] = msg
+            res = build_all_packets(cfg, store, getattr(cfg, "packets_dir", None),
+                                    progress=progress)
+            with packet_lock:
+                packet_job.update({"state": "done", "result": res,
+                                   "message": f"{res['clients']} client packet(s) "
+                                              f"written to {res['dir']}"})
+        except Exception as e:  # noqa: BLE001 — report, never die silently
+            log.warning("packet build failed: %s", e)
+            with packet_lock:
+                packet_job.update({"state": "done", "result": None,
+                                   "message": f"could not build packets: {e}"})
+
+    @app.get("/api/packets")
+    def api_packets_status():
+        with packet_lock:
+            return dict(packet_job)
+
+    @app.post("/api/packets/build")
+    def api_packets_build():
+        with packet_lock:
+            if packet_job["state"] == "running":
+                raise HTTPException(409, "a packet build is already running")
+            packet_job.update({"state": "running", "result": None,
+                               "message": "starting…"})
+        threading.Thread(target=_bg_safe, args=(_run_packets,),
+                         name="mrfx-packets", daemon=True).start()
+        return {"started": True}
+
     @app.get("/api/clients/digest")
     def clients_digest():
         """The Monday review: per saved client, what moved. Composes the same

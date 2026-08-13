@@ -102,6 +102,24 @@ class MrfxConfig(BaseModel):
     # for should be their click, not a surprise. Referral datasets are never
     # auto-imported: they are 7-11 GB and licence-encumbered.
     tracker_auto_import: bool = False
+    # OPT-IN: while `mrfx serve` runs, re-queue the tested payer indexes once
+    # per calendar month so vintages stay current without you remembering to
+    # re-paste links. Everything downstream (rate changes, the Clients digest,
+    # month="latest") is only as fresh as the last ingest. Off by default: it
+    # spends bandwidth and disk on your machine, so it should be your choice.
+    # Content-hash dedup means a payer that republished nothing costs one HEAD
+    # per file, not a re-ingest.
+    monthly_refresh: bool = False
+    # Where `mrfx packets` writes client packets. Relative paths anchor to the
+    # project folder; unset means <store_dir>/../packets.
+    packets_dir: Path | None = None
+
+    @field_validator("packets_dir", mode="before")
+    @classmethod
+    def _empty_packets_dir_is_none(cls, v):
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
 
     @field_validator("tracker_dir", mode="before")
     @classmethod
@@ -233,7 +251,7 @@ class MrfxConfig(BaseModel):
 # empty after an update" — the real store was intact, just not looked at).
 _ANCHORED_FIELDS = ("inbox_dir", "processed_dir", "failed_dir", "store_dir",
                     "downloads_dir", "entity_map_path", "mpfs_path",
-                    "duckdb_temp_dir", "tracker_dir", "registry_path",
+                    "duckdb_temp_dir", "tracker_dir", "packets_dir", "registry_path",
                     "registry_overrides_path", "known_sources_path")
 
 

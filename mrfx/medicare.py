@@ -674,6 +674,36 @@ def taxonomy_label(code: str | None) -> str:
     return code
 
 
+def load_centroids(con, centroids_path=None) -> None:
+    """Bind the bundled Census ZCTA centroids as a temp table `_zcta`.
+
+    `zip` is TYPED, not inferred: a centroid file whose sampled rows happen to
+    lack leading zeros would infer BIGINT and every join against the (VARCHAR)
+    practice zips would bind-error; lpad restores zeros a spreadsheet
+    round-trip may have eaten."""
+    cpath = Path(centroids_path) if centroids_path else (
+        Path(__file__).resolve().parent.parent / "config" / "zcta-centroids.csv")
+    if not cpath.exists():
+        raise MedicareImportError(
+            "the ZIP centroid file (config/zcta-centroids.csv) is missing — "
+            "reinstall it to use the radius search.")
+    con.execute(
+        f"CREATE OR REPLACE TEMP TABLE _zcta AS "
+        f"SELECT lpad(zip, 5, '0') AS zip, lat, lon "
+        f"FROM read_csv('{sql_path(cpath)}', header = true, "
+        f"types = {{'zip': 'VARCHAR', 'lat': 'DOUBLE', 'lon': 'DOUBLE'}})")
+
+
+def haversine_miles_sql(lat_col: str, lon_col: str, lat0: float, lon0: float) -> str:
+    """Great-circle miles from a fixed origin to (lat_col, lon_col). Verified
+    against an independent implementation to 0 ULPs and against published
+    city-to-city distances; keep ONE copy so every radius search agrees."""
+    return (f"2 * 3958.8 * asin(sqrt("
+            f"pow(sin(radians(({lat_col} - {lat0}) / 2)), 2)"
+            f" + cos(radians({lat0})) * cos(radians({lat_col}))"
+            f" * pow(sin(radians(({lon_col} - {lon0}) / 2)), 2)))")
+
+
 def referral_leaders(store: Store, zip_code: str | None = None,
                      radius_miles: float | None = None, limit: int = 50,
                      dataset_id: str | None = None, year: str | None = None,
@@ -700,27 +730,13 @@ def referral_leaders(store: Store, zip_code: str | None = None,
     zip_code = (zip_code or "").strip()[:5] or None
     if zip_code and not re.fullmatch(r"\d{5}", zip_code):
         raise MedicareImportError(f"'{zip_code}' is not a 5-digit ZIP code.")
-    cpath = Path(centroids_path) if centroids_path else (
-        Path(__file__).resolve().parent.parent / "config" / "zcta-centroids.csv")
     use_radius = bool(zip_code and radius_miles)
 
     therapy = therapy_taxonomy_sql("n.taxonomy_code") if therapy_only else "TRUE"
     with store.connect() as con:
         _ensure_referral_view(con, store)
         if use_radius:
-            if not cpath.exists():
-                raise MedicareImportError(
-                    "the ZIP centroid file (config/zcta-centroids.csv) is "
-                    "missing — reinstall it to use the radius search.")
-            # zip is TYPED, not inferred: a centroid file whose sampled rows
-            # happen to lack leading zeros would infer BIGINT and every join
-            # against the (VARCHAR) practice zips would bind-error; lpad
-            # restores zeros a spreadsheet round-trip may have eaten
-            con.execute(
-                f"CREATE OR REPLACE TEMP TABLE _zcta AS "
-                f"SELECT lpad(zip, 5, '0') AS zip, lat, lon "
-                f"FROM read_csv('{sql_path(cpath)}', header = true, "
-                f"types = {{'zip': 'VARCHAR', 'lat': 'DOUBLE', 'lon': 'DOUBLE'}})")
+            load_centroids(con, centroids_path)
             origin = con.execute("SELECT lat, lon FROM _zcta WHERE zip = ?",
                                  [zip_code]).fetchone()
             if origin is None:
@@ -764,17 +780,14 @@ def referral_leaders(store: Store, zip_code: str | None = None,
         """
         if use_radius:
             # haversine computed ONCE in the subselect, filtered outside
-            cur = con.execute(base + """
+            cur = con.execute(base + f"""
                 SELECT * FROM (
-                    SELECT a.*, round(2 * 3958.8 * asin(sqrt(
-                               pow(sin(radians((z.lat - ?) / 2)), 2)
-                               + cos(radians(?)) * cos(radians(z.lat))
-                               * pow(sin(radians((z.lon - ?) / 2)), 2))), 1) AS miles
+                    SELECT a.*, round({haversine_miles_sql('z.lat', 'z.lon',
+                                                           origin[0], origin[1])}, 1) AS miles
                     FROM agg a JOIN _zcta z ON z.zip = a.zip
                 ) WHERE miles <= ?
                 ORDER BY patients DESC NULLS LAST LIMIT ?
-            """, [ds_id, origin[0], origin[0], origin[1],
-                  float(radius_miles), limit])
+            """, [ds_id, float(radius_miles), limit])
         else:
             cur = con.execute(base + """
                 SELECT a.*, CAST(NULL AS DOUBLE) AS miles FROM agg a
