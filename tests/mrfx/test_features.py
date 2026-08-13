@@ -338,3 +338,105 @@ def test_referral_leaders_zip_radius_and_honesty(cfg, store, tmp_path):
     assert got["rows"][0]["practice"] == "Gateway Therapy"
     assert client.post("/api/medicare/leaders",
                        json={"zip": "abcde", "radius_miles": 25}).status_code == 422
+
+
+# ------------------------------------------------- discipline coverage --
+
+# Every NUCC taxonomy a PT, OT or speech-therapy provider/clinic enumerates
+# under. If someone narrows the classifier, this list says out loud which real
+# clinics would start disappearing.
+PT_TAXONOMIES = ("225100000X", "2251X0800X", "2251P0200X", "2251N0400X",
+                 "2251S0007X", "2251H1200X", "2251G0304X", "2251C2600X",
+                 "225200000X", "261QP2000X")
+OT_TAXONOMIES = ("225X00000X", "225XH1200X", "225XP0200X", "225XR0403X",
+                 "225XE0001X", "225XF0002X", "225XM0800X", "225XN1300X",
+                 "225XL0004X", "224Z00000X", "224ZR0403X", "224ZL0004X")
+SLP_TAXONOMIES = ("235Z00000X", "2355S0801X", "261QH0700X")
+SHARED_CLINIC_TAXONOMIES = ("261QR0401X", "261QD1600X", "261QR0400X")
+NOT_THERAPY = ("207X00000X", "2081P0301X", "111N00000X", "282N00000X",
+               "231H00000X", "2355A2700X", "261QR0404X", "314000000X")
+
+
+def test_every_pt_ot_slp_taxonomy_is_included(store):
+    """PT, OT and SPEECH are all first-class — no discipline is narrower than
+    another. The near-misses matter: 2355A2700X (audiology assistant) must NOT
+    ride in on the SLP-assistant prefix, and cardiac rehab must not ride in on
+    the rehab-clinic code."""
+    from mrfx.catalog import therapy_taxonomy_sql
+
+    expr = therapy_taxonomy_sql("t")
+    with store.connect() as con:
+        def included(code):
+            return bool(con.execute(f"SELECT {expr} FROM (SELECT ? AS t)",
+                                    [code]).fetchone()[0])
+        for group in (PT_TAXONOMIES, OT_TAXONOMIES, SLP_TAXONOMIES,
+                      SHARED_CLINIC_TAXONOMIES):
+            for code in group:
+                assert included(code), f"{code} must count as therapy"
+        for code in NOT_THERAPY:
+            assert not included(code), f"{code} must NOT count as therapy"
+
+
+def test_pt_ot_and_speech_clinics_all_survive_the_practice_filter(store, tmp_path):
+    """Whole-practice classification for each discipline. The OT case is the
+    one that can silently break: NUCC has NO 'Clinic/Center - Occupational
+    Therapy' code, so an OT-only practice can only qualify through its
+    CLINICIANS — if the rule ever leaned on org codes alone, every OT clinic
+    in the country would vanish from the filtered views."""
+    from mrfx.medicare import import_shared_patients, referral_leaders
+
+    practices = [
+        ("PT clinic", "431000001", "261QP2000X", ["225100000X", "225200000X"]),
+        ("OT clinic", "431000002", None, ["225X00000X", "224Z00000X"]),
+        ("Speech clinic", "431000003", "261QH0700X", ["235Z00000X", "2355S0801X"]),
+        ("Peds multidisciplinary", "431000004", "261QD1600X",
+         ["225XP0200X", "235Z00000X", "2251P0200X"]),
+        ("Mixed no org code", "431000005", None,
+         ["225100000X", "225X00000X", "235Z00000X"]),
+        ("Ortho MD group", "431000006", None, ["207X00000X", "207X00000X"]),
+    ]
+    rows, directory, seq = [], [], 1000000000
+    for name, tin, orgtax, clinicians in practices:
+        members = []
+        for tax, kind in ([(orgtax, "NPI-2")] if orgtax else []) + \
+                         [(t, "NPI-1") for t in clinicians]:
+            seq += 7
+            npi = f"1{seq}"[:10]
+            directory.append(dict(npi=npi, org_name=name, entity_type=kind,
+                                  taxonomy_code=tax, city="StL", state="MO",
+                                  address="1 Main", zip="63103", phone=None))
+            members.append(npi)
+        for npi in members:
+            rows.append(dict(
+                payer="Aetna", tin_value=tin, tin_type="ein", npi=npi,
+                source_file="d.json", billing_code="97110", billing_code_type="CPT",
+                discipline="PT", is_timed=True, billing_class="professional",
+                negotiated_rate=50.0, negotiated_type="negotiated",
+                is_dollar_rate=True, billing_code_modifier=[], service_code=["11"],
+                file_month="2026-06", last_updated_on="2026-06-01",
+                expiration_date=None, schema_version="2.0.0",
+                tin_is_really_npi=False, state=None))
+    with store.rates_part_writer("d.json") as w:
+        w.write_batch(rows)
+    store.save_npis_bulk(directory)
+    store.rebuild_rollups()
+
+    with store.connect() as con:
+        flags = dict(con.execute(
+            "SELECT tin_value, is_therapy FROM tin_directory").fetchall())
+    for name, tin, _o, _c in practices:
+        want = name != "Ortho MD group"
+        assert bool(flags.get(tin)) is want, f"{name}: is_therapy should be {want}"
+
+    # and the same answer on the referral leaderboard's therapy filter
+    src = directory[0]["npi"]
+    hop = tmp_path / "hop_2022.csv"
+    hop.write_text("from_npi,to_npi,patient_count,transaction_count,"
+                   "average_day_wait,std_day_wait\n"
+                   + "".join(f"{src},{d['npi']},{50 + i},200,12,3\n"
+                             for i, d in enumerate(directory) if d["npi"] != src))
+    import_shared_patients(store, hop)
+    ranked = {r["practice"] for r in referral_leaders(store, therapy_only=True)["rows"]}
+    for name, *_ in practices:
+        assert (name in ranked) is (name != "Ortho MD group"), \
+            f"{name} on the leaderboard should be {name != 'Ortho MD group'}"
