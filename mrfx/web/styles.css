@@ -159,9 +159,12 @@ main { width: 100%; max-width: 1440px; margin: 0 auto; padding: 22px 28px 90px; 
 }
 .filters .field { display: flex; flex-direction: column; gap: 4px; }
 .filters label { font-size: 11px; color: var(--muted); font-weight: 650; text-transform: uppercase; letter-spacing: 0.05em; }
+/* 8px side padding, not 10: many inputs carry small fixed inline widths
+   (state "MO" at 52px, code "97110" at 92px) and box-sizing is border-box —
+   two extra padding pixels per side were enough to clip their content */
 input[type="text"], input[type="number"], select, textarea {
   background: var(--surface-1); border: 1px solid var(--baseline); border-radius: var(--radius-sm);
-  padding: 7px 10px; min-width: 0;
+  padding: 6px 8px; min-width: 0;
   transition: border-color 0.1s, box-shadow 0.1s;
 }
 .filters input[type="text"], .filters input[type="number"], .filters select { min-width: 110px; }
