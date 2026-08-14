@@ -200,11 +200,27 @@ def resolve_subject_tins(store: Store, subject: str) -> list[str]:
     tins = [t for t, name in emap.items() if name == subject]
     if tins:
         return tins
+    # case-insensitive twin of the exact map match: a user who types their own
+    # client's name in lower case must not fall through to the raw-TIN branch
+    folded = subject.strip().casefold()
+    tins = [t for t, name in emap.items() if str(name).strip().casefold() == folded]
+    if tins:
+        return tins
     ident = subject.replace("-", "").strip()
     with store.connect() as con:
         # auto-grouped org: the same NPPES display_name the entity grain groups on
         named = [r[0] for r in con.execute(
             "SELECT tin_value FROM tin_directory WHERE display_name = ?", [subject],
+        ).fetchall()]
+        if named:
+            return named
+        # Same name, different case ("gateway physical therapy"). Payers publish
+        # names in wildly inconsistent case, so an exact-case-only match made a
+        # hand-typed name silently return NOTHING — which reads as "this
+        # practice has no rates" rather than "that isn't how it's spelled here".
+        named = [r[0] for r in con.execute(
+            "SELECT tin_value FROM tin_directory WHERE lower(display_name) = lower(?)",
+            [subject],
         ).fetchall()]
         if named:
             return named
@@ -222,6 +238,25 @@ def resolve_subject_tins(store: Store, subject: str) -> list[str]:
                 ).fetchall()]
                 if by_npi:
                     return by_npi
+        # A partial name ("Gateway" for "Gateway Physical Therapy"). Only when
+        # it identifies exactly ONE practice: several matches is ambiguous, and
+        # silently picking one would put another practice's rates under your
+        # client's name. Digits are excluded — a partial TIN/NPI is a typo, not
+        # a name, and must keep falling through to the raw-id branch below.
+        if len(subject.strip()) >= 4 and not ident.isdigit():
+            like = [(r[0], r[1]) for r in con.execute(
+                "SELECT tin_value, display_name FROM tin_directory "
+                "WHERE display_name ILIKE '%' || ? || '%'", [subject.strip()],
+            ).fetchall()]
+            names = {n for _t, n in like}
+            if len(names) == 1:
+                return [t for t, _n in like]
+            if len(names) > 1:
+                shown = ", ".join(sorted(names)[:6])
+                raise BenchmarkError(
+                    f"'{subject}' matches {len(names)} practices ({shown}"
+                    f"{'…' if len(names) > 6 else ''}) — type more of the name, "
+                    "or pick one from the suggestions.")
     return [ident]
 
 

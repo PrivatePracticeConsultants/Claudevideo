@@ -102,6 +102,31 @@ def test_utilization_import_and_volume_prefill(store, tmp_path):
     assert st["years"][0]["providers"] == 3
 
 
+def test_volume_multiplier_zero_is_refused_not_silently_one(cfg, store, tmp_path):
+    """`body.get("multiplier") or 1.0` treated a typed 0 as absent — 0 is
+    falsy — so the user got unscaled Medicare units with no hint their input
+    was discarded. A typed value must never quietly not take."""
+    from fastapi.testclient import TestClient
+
+    from mrfx.api import create_app
+    from mrfx.utilization import import_utilization
+
+    _seed(store)
+    f = tmp_path / "puf_2023.csv"
+    f.write_text(PUF_MODERN)
+    import_utilization(store, f)
+    client = TestClient(create_app(cfg, store))
+
+    r = client.post("/api/utilization/volumes", json={"subject": GW, "multiplier": 0})
+    assert r.status_code == 422 and "multiplier" in r.json()["detail"]
+    # omitted entirely is still the honest default of 1 (Medicare as-is)
+    r = client.post("/api/utilization/volumes", json={"subject": GW})
+    assert r.status_code == 200 and r.json()["multiplier"] == 1.0
+    # and a real scale still works
+    r = client.post("/api/utilization/volumes", json={"subject": GW, "multiplier": 2})
+    assert r.status_code == 200 and r.json()["volumes"]["97110"] == 12000
+
+
 def test_utilization_reads_the_old_column_layout(store, tmp_path):
     """CMS renamed every column between the 2013 and 2020 layouts; matching
     tokens (not positions) is what keeps an older download working."""

@@ -1519,7 +1519,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         try:
             return renewal_radar(store, body.get("subjects") or None,
                                  body.get("market") or {},
-                                 within_days=int(body.get("within_days") or 365))
+                                 within_days=_as_int(body.get("within_days"), 365))
         except BenchmarkError as e:
             raise HTTPException(422, str(e))
         except (TypeError, ValueError) as e:
@@ -1561,7 +1561,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         try:
             return suggested_volumes(store, str(body.get("subject", "")),
                                      body.get("year") or None,
-                                     multiplier=body.get("multiplier") or 1.0)
+                                     multiplier=_as_float(body.get("multiplier"), 1.0))
         except BenchmarkError as e:
             raise HTTPException(422, str(e))
 
@@ -1604,7 +1604,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         from .demographics import DemographicsImportError, market_sizing
         try:
             return market_sizing(store, str(body.get("zip") or ""),
-                                 float(body.get("radius_miles") or 25),
+                                 _as_float(body.get("radius_miles"), 25),
                                  therapy_only=bool(body.get("therapy_only", True)))
         except DemographicsImportError as e:
             raise HTTPException(422, str(e))
@@ -1625,7 +1625,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             return new_enumerations(
                 store, zip_code=str(body.get("zip") or "").strip() or None,
                 radius_miles=float(body["radius_miles"]) if body.get("radius_miles") else None,
-                days=int(body.get("days") or 180),
+                days=_as_int(body.get("days"), 180),
                 therapy_only=bool(body.get("therapy_only", True)),
                 state=str(body.get("state") or "").strip() or None)
         except NppesFeedError as e:
@@ -1758,7 +1758,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 store,
                 zip_code=str(body.get("zip") or "").strip() or None,
                 radius_miles=float(body["radius_miles"]) if body.get("radius_miles") else None,
-                limit=int(body.get("limit") or 50),
+                limit=_as_int(body.get("limit"), 50),
                 dataset_id=str(body.get("dataset_id") or "").strip() or None,
                 therapy_only=bool(body.get("therapy_only", True)))
         except MedicareImportError as e:
@@ -1815,7 +1815,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         year = str(body.get("year") or "").strip() or None
         ds_id = str(body.get("dataset_id") or "").strip() or None
         try:
-            limit = min(max(int(body.get("limit") or 100), 1), 500)
+            limit = min(max(_as_int(body.get("limit"), 100), 1), 500)
         except (TypeError, ValueError):
             raise HTTPException(422, "limit must be a number")
         # resolve_subject_tins never returns empty (a raw id falls through as

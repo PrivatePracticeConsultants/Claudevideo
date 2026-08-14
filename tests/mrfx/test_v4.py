@@ -2171,6 +2171,48 @@ def test_subject_accepts_an_npi_not_just_a_name_or_tin(cfg, store):
     assert resolve_subject_tins(store, "9999999999") == ["9999999999"]
 
 
+def test_subject_name_matching_is_forgiving_but_never_guesses(cfg, store):
+    """A hand-typed practice name must not silently return NOTHING because of
+    case — that reads as 'this practice has no rates' rather than 'that isn't
+    how it's spelled here'. A partial name resolves only when it identifies ONE
+    practice; several matches must REFUSE with the candidates, because silently
+    picking one would put another practice's rates under your client's name."""
+    from mrfx.benchmark import BenchmarkError, resolve_subject_tins
+
+    rows = []
+    for tin, npi in (("431234567", "1417594896"), ("437654321", "1999999992")):
+        for p in ("Aetna", "BCBS"):
+            for c in ("97110", "97140"):
+                rows.append(dict(
+                    payer=p, tin_value=tin, tin_type="ein", npi=npi,
+                    source_file="s.json", billing_code=c, billing_code_type="CPT",
+                    discipline="PT", is_timed=True, billing_class="professional",
+                    negotiated_rate=55.0, negotiated_type="negotiated",
+                    is_dollar_rate=True, billing_code_modifier=[], service_code=["11"],
+                    file_month="2026-06", last_updated_on="2026-06-01",
+                    expiration_date=None, schema_version="2.0.0",
+                    tin_is_really_npi=False, state=None))
+    with store.rates_part_writer("s.json") as w:
+        w.write_batch(rows)
+    store.save_npis_bulk([
+        dict(npi="1417594896", org_name="Gateway Physical Therapy", entity_type="NPI-2",
+             taxonomy_code="261QP2000X", city="StL", state="MO", address="1 Main",
+             zip="63103", phone=None),
+        dict(npi="1999999992", org_name="Ozark Therapy Group", entity_type="NPI-2",
+             taxonomy_code="261QP2000X", city="Springfield", state="MO",
+             address="2 Oak", zip="65807", phone=None)])
+    store.rebuild_rollups()
+
+    assert resolve_subject_tins(store, "Gateway Physical Therapy") == ["431234567"]
+    assert resolve_subject_tins(store, "gateway physical therapy") == ["431234567"]
+    assert resolve_subject_tins(store, "GATEWAY PHYSICAL THERAPY") == ["431234567"]
+    assert resolve_subject_tins(store, "Gateway") == ["431234567"], "unique partial"
+    with pytest.raises(BenchmarkError, match="matches 2 practices"):
+        resolve_subject_tins(store, "Therapy")          # ambiguous -> refuse
+    # a digit string is an id, never a name: it must still fall through
+    assert resolve_subject_tins(store, "4312") == ["4312"]
+
+
 def test_latest_window_is_narrowed_without_changing_which_vintage_wins(cfg, store):
     """month='latest' resolves supersession with a window function, which cannot
     use the caller's WHERE — so it sorted the ENTIRE spine to answer a question
