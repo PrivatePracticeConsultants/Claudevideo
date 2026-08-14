@@ -115,7 +115,17 @@ def new_enumerations(store: Store, zip_code: str | None = None,
     since = (dt.date.today() - dt.timedelta(days=days)).isoformat()
 
     reader = f"read_parquet('{sql_path(p)}')"
-    therapy = therapy_taxonomy_sql("n.taxonomy_code") if therapy_only else "TRUE"
+    # A cache written before the all-taxonomies column existed has only the
+    # primary; classify on whatever it actually carries rather than binder-
+    # erroring (it rebuilds itself on the next enrichment pass, because the
+    # cache schema stamp changed).
+    therapy = "TRUE"
+    if therapy_only:
+        with store.connect() as _c:
+            has_all = "taxonomy_codes" in {
+                r[0] for r in _c.execute(f"DESCRIBE SELECT * FROM {reader}").fetchall()}
+        therapy = therapy_taxonomy_sql(
+            "n.taxonomy_code", all_col="n.taxonomy_codes" if has_all else None)
     # NPPES writes MM/DD/YYYY; a trimmed export may already be ISO. Try both and
     # keep whichever parses — a date we cannot read must exclude the row from a
     # *recency* filter rather than silently pass it as "new".

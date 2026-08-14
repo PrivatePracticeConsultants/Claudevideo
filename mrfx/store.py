@@ -444,7 +444,12 @@ ROLLUP_SCHEMA_VERSION = 2
 # counting as a therapy practice); the real PT code 261QP2000X replaces it, and
 # Hearing-and-Speech / Developmental-Disabilities / CORF clinics were added so
 # speech and pediatric therapy clinics stop being excluded.
-DIRECTORY_SCHEMA_VERSION = 4
+# v5: a therapy taxonomy in ANY of NPPES's 15 slots now counts, not just the
+# primary/slot-1 one. is_therapy is MATERIALIZED, so without this bump an
+# existing store would keep serving the old primary-only verdicts (measured on
+# the live registry: 9% of real therapy providers misclassified) until some
+# unrelated ingest happened to rebuild the directory.
+DIRECTORY_SCHEMA_VERSION = 5
 
 # Sentinel for upsert_file(finished_at=...): "stamp the completion time INSIDE
 # the write lock". Callers must never pre-compute a done-timestamp in Python —
