@@ -436,25 +436,25 @@ def render_rate_card(cfg: MrfxConfig, store: Store, fee_schedule: dict,
     return f"""<!DOCTYPE html><html><head><meta charset="utf-8">
 <title>Rate card — {e(fee_schedule['subject'])}</title>
 <style>
- body {{ font: 13px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; color: #0b0b0b;
+ body {{ font: 13px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; color: #101828;
         max-width: 1100px; margin: 32px auto; padding: 0 24px; }}
  h1 {{ font-size: 20px; margin-bottom: 2px; }} h2 {{ font-size: 15px; margin-top: 28px; }}
- .brand {{ color: #52514e; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }}
+ .brand {{ color: #475467; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }}
  .brandbar {{ display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }}
  .brandbar .brand {{ margin: 0; }} .logo {{ max-height: 40px; max-width: 200px; }}
- .meta {{ color: #52514e; margin-bottom: 12px; }}
+ .meta {{ color: #475467; margin-bottom: 12px; }}
  .wrap {{ overflow-x: auto; }}
  table {{ border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }}
- th, td {{ text-align: left; padding: 5px 8px; border-bottom: 1px solid #e1e0d9; vertical-align: top; white-space: nowrap; }}
- th {{ font-size: 11px; color: #898781; text-transform: uppercase; letter-spacing: .04em; }}
- .num {{ text-align: right; }} .sub {{ color: #898781; font-size: 11px; font-weight: 400; }}
+ th, td {{ text-align: left; padding: 5px 8px; border-bottom: 1px solid #eaecf0; vertical-align: top; white-space: nowrap; }}
+ th {{ font-size: 11px; color: #667085; text-transform: uppercase; letter-spacing: .04em; }}
+ .num {{ text-align: right; }} .sub {{ color: #667085; font-size: 11px; font-weight: 400; }}
  tr.best {{ background: #eef6ee; }} td.top {{ font-weight: 700; color: #1c6b3a; }}
  .sub .up {{ color: #1c6b3a; font-weight: 600; }} .sub .down {{ color: #b3261e; font-weight: 600; }}
  .sub .thin {{ color: #9a6b00; font-weight: 600; }}
  .geo-warn {{ background: #fbe9d0; border: 1px solid #d99a3a; color: #7a4a00;
              padding: 8px 12px; margin: 10px 0 14px; font-size: 12px; }}
- footer {{ margin-top: 32px; border-top: 1px solid #c3c2b7; padding-top: 12px;
-          color: #52514e; font-size: 11px; white-space: pre-wrap; }}
+ footer {{ margin-top: 32px; border-top: 1px solid #d0d5dd; padding-top: 12px;
+          color: #475467; font-size: 11px; white-space: pre-wrap; }}
  @media print {{ body {{ margin: 0; }} }}
 </style></head><body>
 {_brand_header(cfg)}

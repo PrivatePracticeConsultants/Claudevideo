@@ -9,25 +9,49 @@
 </head>
 <body>
 
-<header>
-  <h1>MRF <span>Explorer</span></h1>
-  <div id="dataset-stats">loading…</div>
+<aside id="side">
+  <div class="brand">
+    <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1" y="8" width="3" height="7" rx="1"/><rect x="6" y="4" width="3" height="11" rx="1"/><rect x="11" y="1" width="3" height="14" rx="1"/></svg>
+    MRF <span>Explorer</span>
+  </div>
   <nav>
-    <button data-view="clients">Clients</button>
-    <button data-view="overview">Overview</button>
-    <button data-view="explorer" class="active">Explorer</button>
-    <button data-view="cpt">Code comparison</button>
-    <button data-view="markets">Markets</button>
-    <button data-view="benchmark">Benchmark</button>
-    <button data-view="negotiate">Negotiate</button>
-    <button data-view="ratecard">Rate card</button>
-    <button data-view="medicare">Medicare</button>
-    <button data-view="leads">Leads</button>
-    <button data-view="roster">Payer roster</button>
-    <button data-view="changes">Changes</button>
-    <button data-view="files">Files</button>
-    <button data-view="sources">Sources</button>
+    <div class="navgroup">
+      <span class="navlabel">Practice</span>
+      <button data-view="overview">Overview</button>
+      <button data-view="clients">Clients</button>
+    </div>
+    <div class="navgroup">
+      <span class="navlabel">Rates</span>
+      <button data-view="explorer" class="active">Explorer</button>
+      <button data-view="cpt">Code comparison</button>
+      <button data-view="markets">Markets</button>
+      <button data-view="changes">Rate changes</button>
+    </div>
+    <div class="navgroup">
+      <span class="navlabel">Consulting</span>
+      <button data-view="benchmark">Benchmark</button>
+      <button data-view="negotiate">Negotiate</button>
+      <button data-view="ratecard">Rate card</button>
+    </div>
+    <div class="navgroup">
+      <span class="navlabel">Growth</span>
+      <button data-view="leads">Leads</button>
+      <button data-view="medicare">Medicare</button>
+      <button data-view="roster">Payer roster</button>
+    </div>
+    <div class="navgroup">
+      <span class="navlabel">Data</span>
+      <button data-view="files">Files &amp; imports</button>
+      <button data-view="sources">Sources</button>
+    </div>
   </nav>
+</aside>
+
+<div id="shell">
+<header>
+  <div id="topbar-title">Explorer</div>
+  <span class="topbar-spacer"></span>
+  <div id="dataset-stats">loading…</div>
 </header>
 
 <main>
@@ -118,7 +142,7 @@
     <div class="filters" style="align-items:flex-end">
       <div class="field">
         <label for="ov-state">State (optional)</label>
-        <input id="ov-state" list="ov-state-list" placeholder="all states" style="width:120px">
+        <input type="text" id="ov-state" list="ov-state-list" placeholder="all states" style="width:120px">
         <datalist id="ov-state-list"></datalist>
       </div>
       <button class="btn" id="ov-refresh">Refresh</button>
@@ -925,6 +949,7 @@
   </section>
 
 </main>
+</div><!-- /shell -->
 
 <!-- entity detail slide-over -->
 <div id="overlay"></div>

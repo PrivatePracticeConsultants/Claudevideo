@@ -202,24 +202,24 @@ def build_all_packets(cfg: MrfxConfig, store: Store, out_root: Path | str | None
 # ---------------------------------------------------------------- rendering --
 
 _CSS = """
- body { font: 13px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; color: #0b0b0b;
+ body { font: 13px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; color: #101828;
         max-width: 940px; margin: 32px auto; padding: 0 24px; }
  h1 { font-size: 20px; margin-bottom: 2px; } h2 { font-size: 15px; margin-top: 26px; }
- .brand { color: #52514e; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
+ .brand { color: #475467; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
  .brandbar { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
  .brandbar .brand { margin: 0; } .logo { max-height: 40px; max-width: 200px; }
- .meta { color: #52514e; margin-bottom: 10px; }
+ .meta { color: #475467; margin-bottom: 10px; }
  table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
- th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #e1e0d9; }
- th { font-size: 11px; color: #898781; text-transform: uppercase; letter-spacing: .04em; }
- .num { text-align: right; } .sub { color: #898781; font-size: 11.5px; }
- .band { font-size: 13.5px; background: #f4f3ee; padding: 10px 14px; border-radius: 6px; }
+ th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #eaecf0; }
+ th { font-size: 11px; color: #667085; text-transform: uppercase; letter-spacing: .04em; }
+ .num { text-align: right; } .sub { color: #667085; font-size: 11.5px; }
+ .band { font-size: 13.5px; background: #f2f4f7; padding: 10px 14px; border-radius: 6px; }
  .up { color: #1b7f4b; font-weight: 650; } .down { color: #b4321f; font-weight: 650; }
  .warn { background: #fbe9d0; border: 1px solid #d99a3a; color: #7a4a00;
          padding: 10px 14px; border-radius: 6px; font-size: 12.5px; margin: 12px 0; }
  ul { margin: 6px 0 6px 18px; } a { color: #2a78d6; }
- footer { margin-top: 34px; border-top: 1px solid #c3c2b7; padding-top: 12px;
-          color: #52514e; font-size: 11px; }
+ footer { margin-top: 34px; border-top: 1px solid #d0d5dd; padding-top: 12px;
+          color: #475467; font-size: 11px; }
  @media print { body { margin: 0; } h2 { break-after: avoid; } }
 """
 

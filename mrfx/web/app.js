@@ -114,6 +114,9 @@ function switchView(view) {
   state.view = view;
   $$("nav button").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
   $$(".view").forEach((v) => v.classList.toggle("active", v.id === `view-${view}`));
+  const active = $$("nav button").find((b) => b.dataset.view === view);
+  const tt = $("#topbar-title");
+  if (active && tt) tt.textContent = active.textContent;
   clearInterval(state.filesTimer);
   // the tracker-import poll belongs to the Medicare tab; leaving it stops it
   if (view !== "medicare" && state.trackerPoll) {

@@ -857,24 +857,24 @@ def render_payer_compare_report(cfg: MrfxConfig, store: Store, comp: dict) -> st
     return f"""<!DOCTYPE html><html><head><meta charset="utf-8">
 <title>Payer negotiation — {e(comp['subject'])} vs {e(comp['payer'])}</title>
 <style>
- body {{ font: 13px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; color: #0b0b0b;
+ body {{ font: 13px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; color: #101828;
         max-width: 980px; margin: 32px auto; padding: 0 24px; }}
  h1 {{ font-size: 20px; margin-bottom: 2px; }} h2 {{ font-size: 15px; margin-top: 28px; }}
- .brand {{ color: #52514e; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }}
+ .brand {{ color: #475467; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }}
  .brandbar {{ display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }}
  .brandbar .brand {{ margin: 0; }} .logo {{ max-height: 40px; max-width: 200px; }}
- .meta {{ color: #52514e; margin-bottom: 10px; }}
+ .meta {{ color: #475467; margin-bottom: 10px; }}
  table {{ border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }}
- th, td {{ text-align: left; padding: 6px 8px; border-bottom: 1px solid #e1e0d9; vertical-align: middle; }}
- th {{ font-size: 11px; color: #898781; text-transform: uppercase; letter-spacing: .04em; }}
- .num {{ text-align: right; }} .sub {{ color: #898781; font-size: 11.5px; }}
+ th, td {{ text-align: left; padding: 6px 8px; border-bottom: 1px solid #eaecf0; vertical-align: middle; }}
+ th {{ font-size: 11px; color: #667085; text-transform: uppercase; letter-spacing: .04em; }}
+ .num {{ text-align: right; }} .sub {{ color: #667085; font-size: 11.5px; }}
  .gap {{ font-weight: 650; }}
- .band {{ font-size: 13.5px; background: #f4f3ee; padding: 10px 14px; border-radius: 6px; }}
+ .band {{ font-size: 13.5px; background: #f2f4f7; padding: 10px 14px; border-radius: 6px; }}
  .band li {{ margin: 4px 0 4px 16px; }}
  .geo-warn {{ background: #fbe9d0; border: 1px solid #d99a3a; color: #7a4a00;
           padding: 10px 14px; border-radius: 6px; font-size: 12.5px; margin: 12px 0; }}
- footer {{ margin-top: 36px; border-top: 1px solid #c3c2b7; padding-top: 12px;
-          color: #52514e; font-size: 11px; white-space: pre-wrap; }}
+ footer {{ margin-top: 36px; border-top: 1px solid #d0d5dd; padding-top: 12px;
+          color: #475467; font-size: 11px; white-space: pre-wrap; }}
  @media print {{ body {{ margin: 0; }} h2 {{ break-after: avoid; }} }}
 </style></head><body>
 {_brand_header(cfg)}
@@ -1029,23 +1029,23 @@ def render_proposal_report(cfg: MrfxConfig, store: Store, prop: dict) -> str:
     return f"""<!DOCTYPE html><html><head><meta charset="utf-8">
 <title>Rate proposal — {e(prop['subject'])} to {e(prop['payer'])}</title>
 <style>
- body {{ font: 13px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; color: #0b0b0b;
+ body {{ font: 13px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; color: #101828;
         max-width: 940px; margin: 32px auto; padding: 0 24px; }}
  h1 {{ font-size: 20px; margin-bottom: 2px; }} h2 {{ font-size: 15px; margin-top: 28px; }}
- .brand {{ color: #52514e; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }}
+ .brand {{ color: #475467; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }}
  .brandbar {{ display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }}
  .brandbar .brand {{ margin: 0; }} .logo {{ max-height: 40px; max-width: 200px; }}
- .meta {{ color: #52514e; margin-bottom: 10px; }}
+ .meta {{ color: #475467; margin-bottom: 10px; }}
  table {{ border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }}
- th, td {{ text-align: left; padding: 6px 8px; border-bottom: 1px solid #e1e0d9; vertical-align: middle; }}
- th {{ font-size: 11px; color: #898781; text-transform: uppercase; letter-spacing: .04em; }}
- .num {{ text-align: right; }} .sub {{ color: #898781; font-size: 11.5px; }}
+ th, td {{ text-align: left; padding: 6px 8px; border-bottom: 1px solid #eaecf0; vertical-align: middle; }}
+ th {{ font-size: 11px; color: #667085; text-transform: uppercase; letter-spacing: .04em; }}
+ .num {{ text-align: right; }} .sub {{ color: #667085; font-size: 11.5px; }}
  .gap {{ font-weight: 650; }}
- .band {{ font-size: 13.5px; background: #f4f3ee; padding: 10px 14px; border-radius: 6px; }}
+ .band {{ font-size: 13.5px; background: #f2f4f7; padding: 10px 14px; border-radius: 6px; }}
  .geo-warn {{ background: #fbe9d0; border: 1px solid #d99a3a; color: #7a4a00;
           padding: 10px 14px; border-radius: 6px; font-size: 12.5px; margin: 12px 0; }}
- footer {{ margin-top: 36px; border-top: 1px solid #c3c2b7; padding-top: 12px;
-          color: #52514e; font-size: 11px; white-space: pre-wrap; }}
+ footer {{ margin-top: 36px; border-top: 1px solid #d0d5dd; padding-top: 12px;
+          color: #475467; font-size: 11px; white-space: pre-wrap; }}
  @media print {{ body {{ margin: 0; }} h2 {{ break-after: avoid; }} }}
 </style></head><body>
 {_brand_header(cfg)}
@@ -1210,25 +1210,25 @@ def render_negotiation_report(cfg: MrfxConfig, store: Store, neg: dict) -> str:
     return f"""<!DOCTYPE html><html><head><meta charset="utf-8">
 <title>Payer negotiation one-pager — {e(subject)}</title>
 <style>
- body {{ font: 13px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; color: #0b0b0b;
+ body {{ font: 13px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; color: #101828;
         max-width: 900px; margin: 32px auto; padding: 0 24px; }}
  h1 {{ font-size: 20px; margin-bottom: 2px; }} h2 {{ font-size: 15px; margin-top: 30px;
-        border-bottom: 2px solid #0b0b0b; padding-bottom: 3px; }}
- .brand {{ color: #52514e; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }}
+        border-bottom: 2px solid #101828; padding-bottom: 3px; }}
+ .brand {{ color: #475467; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }}
  .brandbar {{ display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }}
  .brandbar .brand {{ margin: 0; }} .logo {{ max-height: 40px; max-width: 200px; }}
- .meta {{ color: #52514e; margin-bottom: 10px; }}
+ .meta {{ color: #475467; margin-bottom: 10px; }}
  table {{ border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }}
- th, td {{ text-align: left; padding: 6px 8px; border-bottom: 1px solid #e1e0d9; vertical-align: middle; }}
- th {{ font-size: 11px; color: #898781; text-transform: uppercase; letter-spacing: .04em; }}
- .num {{ text-align: right; }} .sub {{ color: #898781; font-size: 11.5px; }}
+ th, td {{ text-align: left; padding: 6px 8px; border-bottom: 1px solid #eaecf0; vertical-align: middle; }}
+ th {{ font-size: 11px; color: #667085; text-transform: uppercase; letter-spacing: .04em; }}
+ .num {{ text-align: right; }} .sub {{ color: #667085; font-size: 11.5px; }}
  .gap {{ font-weight: 650; }}
- .band {{ font-size: 14px; background: #f4f3ee; padding: 10px 14px; border-radius: 6px; }}
- .note {{ color: #52514e; font-size: 12px; }}
+ .band {{ font-size: 14px; background: #f2f4f7; padding: 10px 14px; border-radius: 6px; }}
+ .note {{ color: #475467; font-size: 12px; }}
  .geo-warn {{ background: #fbe9d0; border: 1px solid #d99a3a; color: #7a4a00;
           padding: 10px 14px; border-radius: 6px; font-size: 12.5px; margin: 12px 0; }}
- footer {{ margin-top: 36px; border-top: 1px solid #c3c2b7; padding-top: 12px;
-          color: #52514e; font-size: 11px; white-space: pre-wrap; }}
+ footer {{ margin-top: 36px; border-top: 1px solid #d0d5dd; padding-top: 12px;
+          color: #475467; font-size: 11px; white-space: pre-wrap; }}
  @media print {{ body {{ margin: 0; }} h2 {{ break-after: avoid; }} }}
 </style></head><body>
 {_brand_header(cfg)}
@@ -1343,28 +1343,28 @@ def render_pitch_report(cfg: MrfxConfig, store: Store, benchmark: dict,
     return f"""<!DOCTYPE html><html><head><meta charset="utf-8">
 <title>Rate benchmark — {e(benchmark['subject'])}</title>
 <style>
- body {{ font: 13px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; color: #0b0b0b;
+ body {{ font: 13px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; color: #101828;
         max-width: 900px; margin: 32px auto; padding: 0 24px; }}
  h1 {{ font-size: 20px; margin-bottom: 2px; }} h2 {{ font-size: 15px; margin-top: 28px; }}
- .brand {{ color: #52514e; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }}
+ .brand {{ color: #475467; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }}
  .brandbar {{ display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }}
  .brandbar .brand {{ margin: 0; }} .logo {{ max-height: 40px; max-width: 200px; }}
- .meta {{ color: #52514e; margin-bottom: 18px; }}
+ .meta {{ color: #475467; margin-bottom: 18px; }}
  table {{ border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }}
- th, td {{ text-align: left; padding: 6px 8px; border-bottom: 1px solid #e1e0d9; vertical-align: middle; }}
- th {{ font-size: 11px; color: #898781; text-transform: uppercase; letter-spacing: .04em; }}
- .num {{ text-align: right; }} .sub {{ color: #898781; font-size: 11.5px; }}
+ th, td {{ text-align: left; padding: 6px 8px; border-bottom: 1px solid #eaecf0; vertical-align: middle; }}
+ th {{ font-size: 11px; color: #667085; text-transform: uppercase; letter-spacing: .04em; }}
+ .num {{ text-align: right; }} .sub {{ color: #667085; font-size: 11.5px; }}
  .gap {{ font-weight: 650; }}
  .strip {{ position: relative; width: 120px; height: 8px; background: #eee;
           border-radius: 4px; display: inline-block; vertical-align: middle; }}
  .you {{ position: absolute; top: -3px; width: 3px; height: 14px; background: #2a78d6; border-radius: 2px; }}
- .pctlbl {{ font-size: 11px; color: #52514e; margin-left: 6px; }}
+ .pctlbl {{ font-size: 11px; color: #475467; margin-left: 6px; }}
  .band {{ font-size: 14px; }}
- .note {{ color: #52514e; font-size: 12px; }}
+ .note {{ color: #475467; font-size: 12px; }}
  .geo-warn {{ background: #fbe9d0; border: 1px solid #d99a3a; color: #7a4a00;
           padding: 10px 14px; border-radius: 6px; font-size: 12.5px; margin: 12px 0; }}
- footer {{ margin-top: 36px; border-top: 1px solid #c3c2b7; padding-top: 12px;
-          color: #52514e; font-size: 11px; white-space: pre-wrap; }}
+ footer {{ margin-top: 36px; border-top: 1px solid #d0d5dd; padding-top: 12px;
+          color: #475467; font-size: 11px; white-space: pre-wrap; }}
  @media print {{ body {{ margin: 0; }} }}
 </style></head><body>
 {_brand_header(cfg)}
