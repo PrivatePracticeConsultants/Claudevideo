@@ -377,6 +377,66 @@ def test_every_pt_ot_slp_taxonomy_is_included(store):
             assert not included(code), f"{code} must NOT count as therapy"
 
 
+def test_zip_distances_match_published_straight_line_miles(store):
+    """The radius search is only as good as the distance. These pairs are
+    cross-checked against published straight-line (great-circle) distances:
+    St. Louis->Kirksville 167 mi, St. Louis->Springfield MO 195 mi,
+    NYC->Beverly Hills 2451 mi. The app measures ZCTA CENTROID to centroid, so
+    it lands ~1-2% off a city-center figure — that tolerance is the claim, and
+    a regression that breaks the math breaks it by far more than 4%."""
+    from mrfx.medicare import haversine_miles_sql, load_centroids
+
+    published = [("63103", "63501", 167.0), ("63103", "65807", 195.0),
+                 ("10001", "90210", 2451.0)]
+    with store.connect() as con:
+        load_centroids(con, None)
+        for a, b, expect in published:
+            origin = con.execute("SELECT lat, lon FROM _zcta WHERE zip = ?",
+                                 [a]).fetchone()
+            assert origin, f"{a} must have a Census centroid"
+            got = con.execute(
+                f"SELECT {haversine_miles_sql('z.lat', 'z.lon', origin[0], origin[1])} "
+                "FROM _zcta z WHERE z.zip = ?", [b]).fetchone()[0]
+            off = abs(got - expect) / expect
+            assert off < 0.04, f"{a}->{b}: {got:.1f} mi vs published {expect} ({off:.1%})"
+
+
+def test_therapy_taxonomy_in_a_secondary_slot_still_counts(store):
+    """NPPES allows 15 taxonomies and flags only ONE primary, so a real therapy
+    clinic can hold its therapy code in a secondary slot. Measured against the
+    live registry across five Missouri ZIPs: 10 of 109 providers carrying a
+    therapy taxonomy (9%) did not carry it as primary — including a clinic
+    literally named APEX PHYSICAL THERAPY, LLC whose primary is the generic
+    174400000X 'Specialist'. Keying on the primary alone excluded all of them.
+    """
+    from mrfx.catalog import therapy_taxonomy_sql
+
+    expr = therapy_taxonomy_sql("n.taxonomy_code")
+    with store.connect() as con:
+        def included(primary, all_codes):
+            return bool(con.execute(
+                f"SELECT {expr} FROM (SELECT ? AS taxonomy_code, "
+                f"? AS taxonomy_codes) n", [primary, all_codes]).fetchone()[0])
+
+        # the real-world rows this was found on
+        assert included("174400000X", "174400000X|261QP2000X"), "APEX PT"
+        assert included("103K00000X", "103K00000X|235Z00000X|225X00000X")
+        assert included("207Q00000X", "207Q00000X|235Z00000X"), "hospital w/ SLP"
+        assert included("261QU0200X", "261QU0200X|261QP2000X"), "urgent care w/ PT"
+        # primary alone still works when there is no secondary list at all
+        # (a store enriched before the column existed: NULL -> primary only)
+        assert included("261QP2000X", None)
+        assert not included("207X00000X", None)
+        # and a non-therapy provider with only non-therapy secondaries stays out
+        assert not included("207X00000X", "207X00000X|208100000X|111N00000X")
+        # the near-miss guards must survive the list form too: an audiology
+        # ASSISTANT in a secondary slot must not ride in on the SLP prefix
+        assert not included("231H00000X", "231H00000X|2355A2700X")
+        # a code that merely CONTAINS a therapy code as a substring must not
+        # match — the delimiters are what make the list test exact
+        assert not included("999999999X", "999999999X|X261QP2000XY")
+
+
 def test_pt_ot_and_speech_clinics_all_survive_the_practice_filter(store, tmp_path):
     """Whole-practice classification for each discipline. The OT case is the
     one that can silently break: NUCC has NO 'Clinic/Center - Occupational

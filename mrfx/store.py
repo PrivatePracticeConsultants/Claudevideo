@@ -532,7 +532,7 @@ TIN_DIRECTORY_QUERY = """
     ),
     joined AS (
         SELECT t.tin_value, t.npi, d.entity_type, d.org_name, d.state, d.city,
-               d.taxonomy_code
+               d.taxonomy_code, d.taxonomy_codes
         FROM tin_npis t LEFT JOIN npi_directory d USING (npi)
     ),
     names AS (
@@ -1234,6 +1234,12 @@ class Store:
                 org_name VARCHAR,
                 taxonomy_code VARCHAR,
                 taxonomy_desc VARCHAR,
+                -- every taxonomy the provider carries, pipe-joined. NPPES
+                -- allows 15 and flags only one primary, so a real therapy
+                -- clinic can hold its therapy code in a secondary slot
+                -- (measured: 9% of therapy providers) — the therapy filter
+                -- tests this column as well as the primary.
+                taxonomy_codes VARCHAR,
                 city VARCHAR,
                 state VARCHAR,
                 address VARCHAR,
@@ -1297,7 +1303,7 @@ class Store:
             """
         )
         # migrate pre-existing stores created before the outreach columns
-        for col in ("address", "zip", "phone"):
+        for col in ("address", "zip", "phone", "taxonomy_codes"):
             con.execute(f"ALTER TABLE npi_directory ADD COLUMN IF NOT EXISTS {col} VARCHAR")
         # migrate stores created before the chunked-progress columns
         for col, typ in (("progress", "DOUBLE"), ("chunks_done", "BIGINT"), ("chunks_total", "BIGINT")):
@@ -3026,13 +3032,16 @@ class Store:
     def save_npi(self, npi: str, org_name: str | None, taxonomy_code: str | None,
                  taxonomy_desc: str | None, city: str | None, state: str | None,
                  entity_type: str | None = None, address: str | None = None,
-                 zip_code: str | None = None, phone: str | None = None) -> None:
+                 zip_code: str | None = None, phone: str | None = None,
+                 taxonomy_codes: str | None = None) -> None:
         with self.write_lock, self.connect() as con:
             con.execute(
                 "INSERT OR REPLACE INTO npi_directory "
-                "(npi, entity_type, org_name, taxonomy_code, taxonomy_desc, city, state, "
-                " address, zip, phone, enriched_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                [npi, entity_type, org_name, taxonomy_code, taxonomy_desc, city, state,
+                "(npi, entity_type, org_name, taxonomy_code, taxonomy_desc, "
+                " taxonomy_codes, city, state, address, zip, phone, enriched_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [npi, entity_type, org_name, taxonomy_code, taxonomy_desc,
+                 taxonomy_codes, city, state,
                  address, (zip_code or "")[:5] or None, phone,
                  dt.datetime.now(dt.timezone.utc)],
             )
@@ -3062,6 +3071,7 @@ class Store:
             "org_name": sarr("org_name"),
             "taxonomy_code": sarr("taxonomy_code"),
             "taxonomy_desc": pa.array([None] * len(rows), type=pa.string()),
+            "taxonomy_codes": sarr("taxonomy_codes"),
             "city": sarr("city"),
             "state": sarr("state"),
             "address": sarr("address"),
@@ -3069,7 +3079,7 @@ class Store:
             "phone": sarr("phone"),
         })
         batch_cols = ("npi, entity_type, org_name, taxonomy_code, taxonomy_desc, "
-                      "city, state, address, zip, phone")
+                      "taxonomy_codes, city, state, address, zip, phone")
         cols = batch_cols + ", enriched_at"
         with self.write_lock, self.connect() as con:
             # enriched_at is stamped INSIDE the lock so it reflects COMMIT

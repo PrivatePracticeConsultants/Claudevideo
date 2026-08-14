@@ -53,6 +53,11 @@ def _apply_nppes_result(store: Store, npi: str, data: dict) -> None:
     ) or None
     taxonomies = r.get("taxonomies") or []
     tax = next((t for t in taxonomies if t.get("primary")), None) or (taxonomies or [{}])[0]
+    # EVERY taxonomy, not just the primary: NPPES flags one primary out of up
+    # to 15, and a real therapy clinic often carries its therapy code in a
+    # secondary slot (measured 9% of therapy providers), which primary-only
+    # classification silently excluded.
+    all_codes = "|".join(str(t.get("code")) for t in taxonomies if t.get("code")) or None
     addresses = r.get("addresses") or []
     addr = next(
         (a for a in addresses if a.get("address_purpose") == "LOCATION"),
@@ -65,6 +70,7 @@ def _apply_nppes_result(store: Store, npi: str, data: dict) -> None:
         address=addr.get("address_1"),
         zip_code=addr.get("postal_code"),
         phone=addr.get("telephone_number"),
+        taxonomy_codes=all_codes,
     )
 
 
@@ -331,6 +337,7 @@ _BULK_COLS = {
     "city": "Provider Business Practice Location Address City Name",
     "state": "Provider Business Practice Location Address State Name",
     "tax1": "Healthcare Provider Taxonomy Code_1",
+    # slots 2..15 are read too (see _BULK_TAX_SLOTS) — see catalog for why
     "entity": "Entity Type Code",
     "address": "Provider First Line Business Practice Location Address",
     "zip": "Provider Business Practice Location Address Postal Code",
@@ -398,13 +405,15 @@ _BULK_STREAM_MAX_WANTED = 2_000_000
 # subsequent lookup into a sub-second indexed join (measured 0.02s vs a fresh
 # multi-GB scan). The parquet holds only the ~9 columns we keep.
 _NPPES_CACHE_COLS = ("npi", "org_name", "entity_type", "taxonomy_code",
-                     "city", "state", "address", "zip", "phone",
-                     "enumeration_date")
+                     "taxonomy_codes", "city", "state", "address", "zip",
+                     "phone", "enumeration_date")
+# every taxonomy column the bulk file can carry (NPPES allows 15)
+_BULK_TAX_SLOTS = [f"Healthcare Provider Taxonomy Code_{i}" for i in range(1, 16)]
 # Bumped whenever _NPPES_CACHE_COLS changes: the signature is otherwise just
 # the source file's (path, mtime, size), so an UNCHANGED NPPES download would
 # keep serving a cache built under the old column set and the new column would
 # silently never appear.
-_NPPES_CACHE_SCHEMA = 2
+_NPPES_CACHE_SCHEMA = 3
 
 
 def _nppes_cache_path(store: Store) -> Path:
@@ -462,6 +471,7 @@ def _write_nppes_parquet(cfg: MrfxConfig, store: Store, pqp: Path,
             reader = csv.reader(f)
             header = next(reader, [])
             col = {k: header.index(v) for k, v in _BULK_COLS.items() if v in header}
+            tax_ix = [header.index(c) for c in _BULK_TAX_SLOTS if c in header]
             i_npi = col.get("npi")
             if i_npi is None:
                 raise ValueError("NPPES file has no 'NPI' column — wrong file inside the zip?")
@@ -474,6 +484,14 @@ def _write_nppes_parquet(cfg: MrfxConfig, store: Store, pqp: Path,
             def at(row, ix):
                 return (row[ix] if ix is not None and ix < len(row) else None) or None
 
+            def all_tax(row):
+                """Every populated taxonomy slot, pipe-joined. Slot 1 is NOT
+                necessarily the primary and a therapy clinic often carries its
+                therapy code further down the list — reading slot 1 alone
+                silently excluded 9% of real therapy providers."""
+                vals = [at(row, ix) for ix in tax_ix]
+                return "|".join(v.strip() for v in vals if v and v.strip()) or None
+
             batch: dict[str, list] = {c: [] for c in _NPPES_CACHE_COLS}
             for i, row in enumerate(reader):
                 if stop is not None and (i & 0x3FFF) == 0 and stop.is_set():
@@ -485,7 +503,8 @@ def _write_nppes_parquet(cfg: MrfxConfig, store: Store, pqp: Path,
                     p for p in (at(row, i_first), at(row, i_last)) if p) or None
                 entity = {"1": "NPI-1", "2": "NPI-2"}.get(str(at(row, i_ent) or "").strip())
                 for c, v in (("npi", npi), ("org_name", name), ("entity_type", entity),
-                             ("taxonomy_code", at(row, i_tax)), ("city", at(row, i_city)),
+                             ("taxonomy_code", at(row, i_tax)),
+                             ("taxonomy_codes", all_tax(row)), ("city", at(row, i_city)),
                              ("state", at(row, i_state)), ("address", at(row, i_addr)),
                              ("zip", at(row, i_zip)), ("phone", at(row, i_phone)),
                              ("enumeration_date", at(row, i_enum))):
@@ -523,7 +542,7 @@ def _enrich_from_parquet(store: Store, pqp: Path, wanted: set[str]) -> int:
         try:
             matched = con.execute(
                 f"SELECT c.npi, c.org_name, c.entity_type, c.taxonomy_code, c.city, "
-                f"c.state, c.address, c.zip, c.phone "
+                f"c.state, c.address, c.zip, c.phone, c.taxonomy_codes "
                 f"FROM read_parquet('{pth}') c JOIN _want w ON w.npi = c.npi"
             ).fetchall()
         finally:
@@ -533,6 +552,7 @@ def _enrich_from_parquet(store: Store, pqp: Path, wanted: set[str]) -> int:
         store.save_npis_bulk([{
             "npi": r[0], "org_name": r[1], "entity_type": r[2], "taxonomy_code": r[3],
             "city": r[4], "state": r[5], "address": r[6], "zip": r[7], "phone": r[8],
+            "taxonomy_codes": r[9],
         } for r in matched[j:j + 5000]])
         found.update(r[0] for r in matched[j:j + 5000])
     if matched:
@@ -651,6 +671,7 @@ def enrich_via_bulk(cfg: MrfxConfig, store: Store,
             reader = csv.reader(f)
             header = next(reader, [])
             col = {k: header.index(v) for k, v in _BULK_COLS.items() if v in header}
+            tax_ix = [header.index(c) for c in _BULK_TAX_SLOTS if c in header]
             i_npi = col.get("npi")
             if i_npi is None:  # not the npidata pfile / unexpected layout
                 raise ValueError("NPPES file has no 'NPI' column — wrong file inside the zip?")
@@ -661,6 +682,12 @@ def enrich_via_bulk(cfg: MrfxConfig, store: Store,
 
             def at(row, ix):  # tolerate short/ragged rows; only called on matches
                 return (row[ix] if ix is not None and ix < len(row) else None) or None
+
+            def all_tax(row):
+                """Every populated taxonomy slot, pipe-joined (see the cache
+                writer: slot 1 is not necessarily the primary)."""
+                vals = [at(row, ix) for ix in tax_ix]
+                return "|".join(v.strip() for v in vals if v and v.strip()) or None
 
             i = -1
             for i, row in enumerate(reader):
@@ -676,6 +703,7 @@ def enrich_via_bulk(cfg: MrfxConfig, store: Store,
                 pending.append({
                     "npi": npi, "org_name": name, "entity_type": entity,
                     "taxonomy_code": at(row, i_tax),
+                    "taxonomy_codes": all_tax(row),
                     "city": at(row, i_city), "state": at(row, i_state),
                     "address": at(row, i_addr), "zip": at(row, i_zip),
                     "phone": at(row, i_phone),

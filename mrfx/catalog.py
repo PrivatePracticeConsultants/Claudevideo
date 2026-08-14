@@ -285,13 +285,41 @@ def excluded_facility_taxonomy_sql(col: str) -> str:
 
 
 def therapy_taxonomy_sql(col: str, prefixes=THERAPY_TAXONOMY_PREFIXES,
-                         codes=THERAPY_TAXONOMY_CODES) -> str:
-    """A SQL boolean expression: TRUE when `col` (an NPPES taxonomy_code) is a
-    PT/OT/SLP or outpatient-therapy-clinic taxonomy. Values are hard-coded
-    identifiers (letters+digits), never user input, so inlining is safe."""
+                         codes=THERAPY_TAXONOMY_CODES,
+                         all_col: str | None = "auto") -> str:
+    """A SQL boolean expression: TRUE when the provider is a PT/OT/SLP or
+    outpatient-therapy-clinic taxonomy. Values are hard-coded identifiers
+    (letters+digits), never user input, so inlining is safe.
+
+    Tests the primary taxonomy AND the full list. NPPES lets a provider carry
+    up to 15 taxonomies and only ONE is flagged primary — so a real therapy
+    clinic can have its therapy code in a secondary slot. Measured against the
+    live registry across five Missouri ZIPs: 10 of 109 providers carrying a
+    therapy taxonomy (9%) do NOT carry it as primary, including a clinic named
+    "APEX PHYSICAL THERAPY, LLC" whose primary is the generic 174400000X
+    'Specialist'. Keying on the primary alone silently excluded all of them.
+
+    `all_col` names the pipe-joined column: "auto" derives it from `col`
+    (n.taxonomy_code -> n.taxonomy_codes), and None tests the primary alone —
+    for a relation that genuinely has no such column (an NPPES cache written
+    before it existed), where the rule must degrade to the OLD behaviour rather
+    than binder-error. A store whose column exists but is NULL falls back to
+    primary-only per row, which is likewise never worse than before."""
     likes = " OR ".join(f"{col} LIKE '{p}%'" for p in prefixes) or "FALSE"
     code_list = ", ".join(f"'{c}'" for c in codes) or "''"
-    return f"({col} IS NOT NULL AND (({likes}) OR {col} IN ({code_list})))"
+    primary = f"({col} IS NOT NULL AND (({likes}) OR {col} IN ({code_list})))"
+    if all_col == "auto":
+        all_col = col + "s" if col.endswith("taxonomy_code") else None
+    if not all_col:
+        return primary
+    # pipe-joined list, wrapped in delimiters here so a prefix match cannot
+    # straddle two codes and an exact match cannot hit a longer code that
+    # merely contains it
+    allc = all_col
+    padded = f"('|' || {allc} || '|')"
+    any_prefix = " OR ".join(f"{padded} LIKE '%|{p}%'" for p in prefixes) or "FALSE"
+    any_code = " OR ".join(f"{padded} LIKE '%|{c}|%'" for c in codes) or "FALSE"
+    return f"({primary} OR ({allc} IS NOT NULL AND (({any_prefix}) OR ({any_code}))))"
 
 
 # parser worker cache: {(path, mtime, size): frozenset[npi]} so the (nationally
@@ -330,9 +358,19 @@ def therapy_npi_set(cache_parquet) -> frozenset[str] | None:
             total = con.execute(f"SELECT count(*) FROM read_parquet('{pth}')").fetchone()[0]
             if total < _THERAPY_CACHE_MIN_ROWS:
                 return None  # partial/weekly file — don't trust it to classify therapists
+            # A cache written before the all-taxonomies column existed has only
+            # `taxonomy_code`. Match on whatever it actually carries rather than
+            # binder-erroring into "keep everything": the multi-slot rule is an
+            # improvement, and its absence must degrade to the OLD behaviour,
+            # never to none at all. (The cache rebuilds itself on the next
+            # enrichment pass because the schema stamp changed.)
+            cols = {r[0] for r in con.execute(
+                f"DESCRIBE SELECT * FROM read_parquet('{pth}')").fetchall()}
+            expr = therapy_taxonomy_sql(
+                "taxonomy_code",
+                all_col="taxonomy_codes" if "taxonomy_codes" in cols else None)
             rows = con.execute(
-                f"SELECT npi FROM read_parquet('{pth}') "
-                f"WHERE {therapy_taxonomy_sql('taxonomy_code')}").fetchall()
+                f"SELECT npi FROM read_parquet('{pth}') WHERE {expr}").fetchall()
         finally:
             con.close()  # don't leak a connection per file on the long grind
         result = frozenset(r[0] for r in rows if r[0])
