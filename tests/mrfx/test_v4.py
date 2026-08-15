@@ -613,7 +613,12 @@ def test_payer_negotiation_report_orders_weakest_payer_first(cfg, two_payer_stor
     assert alpha["payer"] == "Alpha Health Plan"
     assert alpha["headline_percentile"] == 0.0   # $30 below every Alpha peer
     beta = neg["sections"][1]
-    assert beta["headline_percentile"] == 89.0   # $38 above 8 of 9 Beta peers
+    # Beta peers are 31..39, so the $38 subject is strictly above SEVEN and
+    # TIED with the eighth. Mid-rank scores that (7 + 0.5)/9 = 83, not the 89
+    # the old at-or-below rule gave — that rule credited the subject for
+    # beating a peer it merely matched, which is the overstatement the
+    # percentile fix removes (see test_adversarial.py).
+    assert beta["headline_percentile"] == 83.0
     # each section benchmarks the subject only against THAT payer's peers
     assert alpha["benchmark"]["market"]["payers"] == ["Alpha Health Plan"]
     assert alpha["benchmark"]["rows"][0]["n_peers"] == 9

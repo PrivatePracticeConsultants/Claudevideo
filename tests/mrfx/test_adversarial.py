@@ -93,6 +93,61 @@ def test_changes_hostile_market_never_500(client):
         assert r.status_code < 500, r.text[:200]
 
 
+# ---- numeric accuracy: the percentile a client is SOLD on ----------------
+
+def test_subject_percentile_is_mid_rank_and_agrees_with_p50(cfg, store):
+    """A practice whose rate equals the peer median must report p50.
+
+    The position used to be at-or-below ('<='), which counted the subject's own
+    ties in full: a practice sitting exactly at the market median was reported
+    at p60 of 5 peers, and the SAME row displayed 'subject 34.00 · p50 34.00'
+    — self-contradictory. Ties are the norm (payers publish identical fee
+    schedules to many practices), and the bias always ran upward, making
+    clients look better paid than they are and shrinking the negotiating gap.
+    Mid-rank (strictly below + half the ties) is the standard definition and
+    the only one consistent with the quantile_cont columns beside it."""
+    subj_tin, subj_npi = "431234567", "1417594896"
+    peers = [("437654321", "1999999992", 30.0), ("434440001", "1876543219", 32.0),
+             ("434440002", "1765432196", 34.0), ("434440003", "1654321987", 36.0),
+             ("434440004", "1543219876", 38.0)]
+    rows = [_row(tin_value=subj_tin, npi=subj_npi, negotiated_rate=34.0)]
+    rows += [_row(tin_value=t, npi=n, negotiated_rate=r) for t, n, r in peers]
+    with store.rates_part_writer("s.json") as w:
+        w.write_batch(rows)
+    store.save_npis_bulk(
+        [dict(npi=n, org_name=f"P{i}", entity_type="NPI-2",
+              taxonomy_code="261QP2000X", taxonomy_codes="261QP2000X",
+              city="StL", state="MO", address="x", zip="63103", phone=None)
+         for i, n in enumerate([subj_npi] + [p[1] for p in peers])])
+    store.rebuild_rollups()
+
+    client = TestClient(create_app(cfg, store))
+    r = client.post("/api/benchmark/market", json={
+        "subject": subj_tin,
+        "market": {"month": "2026-06", "therapy_only": False}}).json()
+    row = next(x for x in r["rows"] if x["billing_code"] == "97110")
+    assert row["subject_rate"] == 34.0
+    assert row["p50"] == 34.0
+    assert row["subject_percentile"] == 50, (
+        "a subject AT the peer median must be p50, not p60 — the row would "
+        "otherwise contradict its own p50 column")
+
+    # and a subject BELOW everything is still near the bottom, ABOVE is near
+    # the top: the fix must not flatten the scale
+    for rate, lo, hi in ((20.0, 0, 10), (99.0, 90, 100)):
+        store.forget_file("s.json")
+        rows2 = [_row(tin_value=subj_tin, npi=subj_npi, negotiated_rate=rate)]
+        rows2 += [_row(tin_value=t, npi=n, negotiated_rate=x) for t, n, x in peers]
+        with store.rates_part_writer("s.json") as w:
+            w.write_batch(rows2)
+        store.rebuild_rollups()
+        got = next(x for x in client.post("/api/benchmark/market", json={
+            "subject": subj_tin,
+            "market": {"month": "2026-06", "therapy_only": False}}).json()["rows"]
+            if x["billing_code"] == "97110")["subject_percentile"]
+        assert lo <= got <= hi, f"rate {rate} -> p{got}, expected p{lo}-p{hi}"
+
+
 # ---- corrupt-part quarantine: one bad file must not blind the store -------
 
 def test_corrupt_parquet_is_quarantined_not_fatal(cfg, store, tmp_path):

@@ -359,9 +359,29 @@ def compute_benchmark(store: Store, subject: str, market: dict) -> dict:
         FROM peers GROUP BY billing_code
     ),
     position AS (
+        -- MID-RANK percentile: everything strictly below, plus HALF of the
+        -- ties. This is the standard percentile-rank definition and the only
+        -- one mutually consistent with the quantile_cont columns shown beside
+        -- it — a subject whose rate equals the peer median scores exactly 50.
+        --
+        -- It used to be at-or-below ('<='), which counted the subject's own
+        -- ties in full and so OVERSTATED the position: a practice sitting
+        -- exactly at the market median was reported at p60 of 5 peers, and
+        -- p75 when it tied with two of four. The same row then read
+        -- "subject 34.00 · p50 34.00 · you are at p60", which is
+        -- self-contradictory. Ties are not an edge case here — payers publish
+        -- identical fee schedules to many practices, so they are the norm —
+        -- and the bias ran the dangerous way: it made clients look BETTER
+        -- paid than they are, understating the negotiating opportunity.
+        --
+        -- Both comparisons round the peer rate to 2dp first: subject_rate is
+        -- already rounded, peers.rate is not, and an exact '=' between them
+        -- misses real ties (median 33.325 vs a displayed 33.33).
         SELECT p.billing_code,
-               round(100.0 * avg(CASE WHEN p.rate <= s.subject_rate THEN 1 ELSE 0 END), 0)
-                   AS subject_percentile
+               round(100.0 * (
+                   sum(CASE WHEN round(p.rate, 2) < s.subject_rate THEN 1 ELSE 0 END)
+                   + 0.5 * sum(CASE WHEN round(p.rate, 2) = s.subject_rate THEN 1 ELSE 0 END)
+               ) / count(*), 0) AS subject_percentile
         FROM peers p JOIN subject s USING (billing_code)
         GROUP BY p.billing_code
     )
