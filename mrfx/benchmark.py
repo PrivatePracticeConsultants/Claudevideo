@@ -68,10 +68,48 @@ def normalize_market(market: dict | None) -> dict:
     methodology footers still carry an explicit vintage label (honesty rails
     downstream keep asserting month is set). Rate CHANGES are the exception:
     they compare two real months and keep their own strict validation."""
+    # Defensive at the boundary, because every compute entry point runs this
+    # first and its output goes straight into SQL parameters. Fuzzing found
+    # three 500 classes that all land here: a non-dict market ('.get' on a
+    # string), a NUMERIC month (DuckDB then tries to cast the whole VARCHAR
+    # file_month column to INT32), and non-string payers (VARCHAR vs
+    # INTEGER/STRUCT binder errors). Bad shape is a 422-able refusal; bad
+    # VALUES are coerced to strings, which simply match nothing — honest.
+    if market is not None and not isinstance(market, dict):
+        raise BenchmarkError("market must be an object of filters, "
+                             "e.g. {\"month\": \"latest\"}")
     m = dict(market or {})
     if not str(m.get("month") or "").strip():
         m["month"] = LATEST_MONTH
+    else:
+        m["month"] = str(m["month"]).strip()
+    if "prev_month" in m and m.get("prev_month") is not None:
+        m["prev_month"] = str(m["prev_month"]).strip()
+    payers = m.get("payers")
+    if payers is not None:
+        if isinstance(payers, str):          # a single payer is natural input
+            payers = [payers]
+        elif not isinstance(payers, (list, tuple)):
+            raise BenchmarkError("payers must be a list of payer names")
+        m["payers"] = [str(p).strip() for p in payers
+                       if p is not None and str(p).strip()]
     return m
+
+
+def clean_volumes(volumes) -> dict[str, float]:
+    """{billing code -> annual units} off the wire. A non-dict (fuzzing sent
+    a bare string, whose .items() 500'd) or a non-numeric unit is a refusal,
+    never an unhandled exception. Codes are upcased to match the store's."""
+    if volumes in (None, "", {}, []):
+        return {}
+    if not isinstance(volumes, dict):
+        raise BenchmarkError(
+            'volumes must map a billing code to annual units, e.g. {"97110": 4200}')
+    try:
+        return {str(k).strip().upper(): float(v) for k, v in volumes.items()}
+    except (TypeError, ValueError):
+        raise BenchmarkError(
+            "volumes must map a billing code to annual units (numbers)")
 
 
 def _rates_relation(market: dict, prefilter: str = "") -> str:
@@ -504,7 +542,7 @@ def compute_payer_negotiation(store: Store, subject: str, market: dict,
         raise BenchmarkError(
             "subject has no rates for the given as-of month and market scope "
             "— nothing to build a per-payer negotiation view from")
-    volumes = {str(k): float(v) for k, v in (volumes or {}).items()} or None
+    volumes = clean_volumes(volumes) or None
     sections, total_target, total_conservative = [], 0.0, 0.0
     covered_payers = 0
     for payer in payers:
@@ -974,7 +1012,7 @@ def compute_rate_proposal(store: Store, subject: str, payer: str, market: dict,
                 "SELECT code, median(non_facility_rate) FROM mpfs GROUP BY code"
             ).fetchall())
 
-    volumes = {str(k).strip(): float(v) for k, v in (volumes or {}).items()}
+    volumes = clean_volumes(volumes)
     basis_label = {"p50": f"{payer}'s median", "p75": f"{payer}'s p75",
                    "best_comparable": "best comparable rate this payer pays",
                    "pct_medicare": f"{pct:g}% of Medicare" if pct else ""}[kind]

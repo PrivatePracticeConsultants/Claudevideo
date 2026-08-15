@@ -910,9 +910,64 @@ class Store:
             # auto-spill SSD that's the user's system drive filling up with no
             # visible cause. Sweep BEFORE _init_tables (nothing has spilled yet).
             self._sweep_stale_spill()
+            self._quarantine_corrupt_parts()
             self._init_tables(con)
             self._register_views(con)
         self._migrate_stale_rollups()
+
+    def _quarantine_corrupt_parts(self) -> None:
+        """Move any UNREADABLE .parquet part out of the rates glob before the
+        views bind to it.
+
+        The store's own writes are atomic (write .tmp, then rename), so a
+        kill mid-write leaves a .parquet.tmp — never a corrupt .parquet — and
+        those are swept elsewhere. But corruption from OUTSIDE the app is real:
+        disk bit-rot, a half-copied backup restore, an antivirus quarantine
+        that truncates a file, a rename target lost to a full disk on a
+        filesystem without atomic rename. read_parquet() over the glob fails
+        ENTIRELY on one bad file, so a single damaged part would blind the
+        whole dashboard with a cryptic "No magic bytes" error — the opposite
+        of the fault-isolation the rest of the pipeline guarantees.
+
+        A valid parquet begins and ends with the 4-byte magic 'PAR1'. Checking
+        those 8 bytes is O(1) per file and catches truncation and header
+        damage; anything failing it is moved to rates/corrupt/ (kept, never
+        deleted — the raw MRF may be gone) with a plain-language warning, so
+        the rest of the store still serves. Best-effort: a file we cannot even
+        stat/move is skipped, never fatal."""
+        try:
+            parts = list(self.rates_dir.glob("*.parquet"))
+        except OSError:
+            return
+        bad = []
+        for p in parts:
+            try:
+                size = p.stat().st_size
+                if size < 8:
+                    bad.append(p)
+                    continue
+                with open(p, "rb") as fh:
+                    head = fh.read(4)
+                    fh.seek(-4, 2)
+                    tail = fh.read(4)
+                if head != b"PAR1" or tail != b"PAR1":
+                    bad.append(p)
+            except OSError:
+                continue  # can't read it now (locked/vanishing) — leave it
+        if not bad:
+            return
+        quar = self.rates_dir / "corrupt"
+        for p in bad:
+            try:
+                quar.mkdir(exist_ok=True)
+                replace_with_retry(p, quar / p.name)
+            except OSError:
+                continue
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "quarantined %d unreadable rate part(s) to %s so the rest of the "
+            "store still loads — re-ingest the source file(s) to restore them: %s",
+            len(bad), quar, ", ".join(p.name for p in bad))
 
     def _sweep_stale_spill(self) -> None:
         """Best-effort removal of dead DuckDB spill files in our spill dir.

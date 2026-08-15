@@ -27,6 +27,7 @@ from fastapi.staticfiles import StaticFiles
 from . import __version__
 from .benchmark import (
     BenchmarkError,
+    clean_volumes,
     compute_benchmark,
     compute_opportunity,
     compute_payer_comparison,
@@ -1968,7 +1969,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     def benchmark_opportunity(body: dict = Body(...)):
         try:
             bench = compute_benchmark(store, str(body.get("subject", "")), body.get("market") or {})
-            volumes = {str(k): float(v) for k, v in (body.get("volumes") or {}).items()}
+            volumes = clean_volumes(body.get("volumes"))
             opp = compute_opportunity(bench, volumes,
                                       int(body.get("conservative_percentile", 40)))
             return {"benchmark": bench, "opportunity": opp}
@@ -1982,7 +1983,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         try:
             bench = compute_benchmark(store, str(body.get("subject", "")), body.get("market") or {})
             opp = None
-            volumes = {str(k): float(v) for k, v in (body.get("volumes") or {}).items()}
+            volumes = clean_volumes(body.get("volumes"))
             if volumes:
                 opp = compute_opportunity(bench, volumes,
                                           int(body.get("conservative_percentile", 40)))
@@ -1995,7 +1996,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     @app.post("/api/report/negotiation", response_class=HTMLResponse)
     def negotiation_report(body: dict = Body(...)):
         try:
-            volumes = {str(k): float(v) for k, v in (body.get("volumes") or {}).items()}
+            volumes = clean_volumes(body.get("volumes"))
             neg = compute_payer_negotiation(
                 store, str(body.get("subject", "")), body.get("market") or {},
                 volumes=volumes or None,

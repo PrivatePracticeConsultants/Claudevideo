@@ -42,6 +42,16 @@ def compute_rate_changes(store: Store, market: dict, *, subject: str | None = No
     baseline; if absent, the most recent month strictly before the new one that
     exists in the store is used. Optionally scope to a subject practice.
     """
+    # rate changes keep their own strict two-month validation instead of
+    # normalize_market, so they need the same boundary guards it grew: a
+    # non-dict market and a numeric month both came straight off the wire
+    # in fuzzing and 500'd here
+    if market is not None and not isinstance(market, dict):
+        raise BenchmarkError("market must be an object of filters")
+    market = {**(market or {})}
+    for k in ("month", "prev_month"):
+        if market.get(k) is not None:
+            market[k] = str(market[k]).strip()
     new_month = market.get("month")
     if not new_month:
         raise BenchmarkError("an as-of month is required (7A.5) — pass market.month")
