@@ -1663,6 +1663,66 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         except (TypeError, ValueError) as e:
             raise HTTPException(422, f"bad input: {e}")
 
+    # -- Medicaid / workers-comp floor schedules ---------------------------------------
+
+    @app.get("/api/floors/status")
+    def api_floors_status():
+        from .floors import floor_status
+        return floor_status(store)
+
+    @app.post("/api/floors/import")
+    def api_floors_import(file: UploadFile, kind: str = "medicaid", state: str = "",
+                          label: str = "", year: str = "",
+                          code_col: str = "", rate_col: str = ""):
+        """Load one state Medicaid / workers'-comp schedule (a code,rate CSV)."""
+        import uuid as _uuid
+
+        from .floors import FloorImportError, floor_status, import_fee_schedule
+        dest = (Path(cfg.store_dir) / "uploads" /
+                f"{os.getpid()}-{_uuid.uuid4().hex[:8]}")
+        dest.mkdir(parents=True, exist_ok=True)
+        p = dest / (Path(file.filename or "schedule.csv").name or "schedule.csv")
+        try:
+            with open(p, "wb") as out:
+                while chunk := file.file.read(1 << 20):
+                    out.write(chunk)
+            res = import_fee_schedule(
+                store, p, kind=kind, state=state,
+                label=label.strip() or None, year=year.strip() or None,
+                code_col=code_col.strip() or None, rate_col=rate_col.strip() or None)
+        except FloorImportError as e:
+            raise HTTPException(422, str(e))
+        except (OSError, ValueError) as e:
+            raise HTTPException(422, f"could not read that file: {e}")
+        finally:
+            p.unlink(missing_ok=True)
+            try:
+                dest.rmdir()
+            except OSError:
+                pass
+        return {**res, "status": floor_status(store)}
+
+    @app.post("/api/floors/compare")
+    def api_floors_compare(body: dict = Body(...)):
+        """Commercial rates against the loaded Medicaid / WC schedules."""
+        from .floors import floor_comparison
+        try:
+            return floor_comparison(
+                store, body.get("market") or {},
+                subject=str(body.get("subject") or "").strip() or None,
+                state=str(body.get("state") or "").strip() or None,
+                payer=str(body.get("payer") or "").strip() or None)
+        except BenchmarkError as e:
+            raise HTTPException(422, str(e))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(422, f"bad input: {e}")
+
+    @app.delete("/api/floors/{kind}/{state}")
+    def api_floors_forget(kind: str, state: str, year: str = ""):
+        from .floors import floor_status, forget_schedule
+        return {**forget_schedule(store, kind, state, year.strip() or None),
+                "status": floor_status(store)}
+
     # -- territory: sub-state geography, payer concentration, steal-share --------------
 
     @app.post("/api/territory/local")

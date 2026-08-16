@@ -1376,6 +1376,18 @@ class Store:
                 source VARCHAR,
                 added_at TIMESTAMP
             );
+            -- State Medicaid / workers'-comp fee schedules the USER loaded.
+            -- Never fetched or generated: each state publishes its own document
+            -- on its own cadence, and the label the user gives a schedule IS
+            -- its provenance.
+            CREATE TABLE IF NOT EXISTS floor_schedules (
+                kind VARCHAR,          -- medicaid | workers_comp | other
+                state VARCHAR,
+                year VARCHAR,
+                label VARCHAR,
+                code VARCHAR,
+                rate DOUBLE
+            );
             CREATE TABLE IF NOT EXISTS mpfs (
                 code VARCHAR,
                 locality VARCHAR,

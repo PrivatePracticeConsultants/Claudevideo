@@ -787,6 +787,20 @@ def cmd_enrich(cfg: MrfxConfig, args) -> int:
         return 1
     store = Store(cfg.store_dir, cfg.duckdb_memory_gb, temp_dir=cfg.duckdb_temp_dir,
                   auto_spill=True)  # drains/rebuilds rollups — rollup-heavy
+    if getattr(args, "weekly_file", None):
+        # a weekly is a MERGE into the existing cache, not an enrichment pass
+        from .enrich import WeeklyUpdateError, apply_weekly_update
+        try:
+            res = apply_weekly_update(cfg, store, args.weekly_file)
+        except WeeklyUpdateError as e:
+            print(str(e), file=sys.stderr)
+            return 1
+        print(f"{res['file']}: {res['rows_in_weekly']:,} row(s) applied "
+              f"({res['new_npis']:,} new NPIs, {res['updated_npis']:,} updated, "
+              f"{res['deactivations_in_file']:,} carrying a deactivation date); "
+              f"cache {res['cache_rows_before']:,} -> {res['cache_rows_after']:,}")
+        print(f"\n{res['note']}")
+        return 0
     if getattr(args, "bulk_file", None):
         cfg.enrichment.mode = "bulk"
         cfg.enrichment.bulk_csv_path = Path(args.bulk_file)
@@ -1107,6 +1121,56 @@ def cmd_closures(cfg: MrfxConfig, args) -> int:
               f"{str(r.get('city') or '')[:18]:<18} "
               f"{'had published rates' if r.get('in_store') else 'no rates in store'}")
     print(f"\n{res['note']}")
+    return 0
+
+
+def cmd_floors(cfg: MrfxConfig, args) -> int:
+    """Load a state Medicaid / workers'-comp schedule, or compare against them."""
+    from .floors import (FloorImportError, floor_comparison, floor_status,
+                         import_fee_schedule)
+
+    if _something_owns_the_port(cfg, "writing to the store locally"):
+        return 1
+    store = Store(cfg.store_dir, cfg.duckdb_memory_gb, temp_dir=cfg.duckdb_temp_dir)
+    if args.path:
+        try:
+            res = import_fee_schedule(
+                store, args.path, kind=args.kind, state=args.state,
+                label=args.label, year=args.year,
+                code_col=args.code_col, rate_col=args.rate_col)
+        except FloorImportError as e:
+            print(f"could not load that schedule: {e}", file=sys.stderr)
+            return 1
+        print(f"{res['label']}: {res['codes']} therapy code(s) loaded"
+              + (f" ({res['skipped_no_rate']} row(s) had no usable rate)"
+                 if res["skipped_no_rate"] else ""))
+    st = floor_status(store)
+    if not st["loaded"]:
+        print(st["reason"])
+        return 0
+    print(f"\nloaded schedules:")
+    for sc in st["schedules"]:
+        print(f"  {str(sc['label'])[:44]:<44} {sc['codes']:>4} codes  "
+              f"${sc['min_rate']:.2f}–${sc['max_rate']:.2f}")
+    if args.compare:
+        cmp = floor_comparison(store, {"month": args.month},
+                               subject=args.compare if args.compare != "market" else None,
+                               state=args.state, payer=args.payer)
+        if not cmp["loaded"] or not cmp["rows"]:
+            print(f"\n{cmp['reason']}")
+            return 0
+        print(f"\n{cmp['headline']}\n")
+        print(f"{'code':<8} {'commercial':>11} {'medicaid':>10} {'% of':>7} "
+              f"{'workcomp':>10} {'% of':>7}")
+        for r in cmp["rows"]:
+            def f(v, money=True):
+                return ("$%.2f" % v) if (v is not None and money) else \
+                       (("%.0f%%" % v) if v is not None else "–")
+            print(f"{r['billing_code']:<8} {f(r['commercial_median']):>11} "
+                  f"{f(r['medicaid']):>10} {f(r['pct_of_medicaid'], False):>7} "
+                  f"{f(r['workers_comp']):>10} "
+                  f"{f(r['pct_of_workers_comp'], False):>7}")
+    print(f"\n{st['note']}")
     return 0
 
 
@@ -1599,6 +1663,9 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("enrich", help="resolve NPI names/geography now (NPPES bulk file or API)")
     p.add_argument("--bulk", dest="bulk_file", metavar="PATH",
                    help="NPPES full-file .zip (or unzipped .csv) — resolves all names in one local pass")
+    p.add_argument("--weekly", dest="weekly_file", metavar="PATH",
+                   help="NPPES WEEKLY incremental .zip/.csv — folds that week's "
+                        "changes into the existing cache (needs the monthly loaded first)")
     p = sub.add_parser(
         "medicare",
         help="import CMS eligibility / referral data the Order & Referring Tracker downloaded")
@@ -1650,6 +1717,23 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--radius", type=float, default=25.0, help="miles (with --zip)")
     p.add_argument("--days", type=int, default=365, help="look-back window")
     p.add_argument("--state", default=None, help="two-letter state filter")
+
+    p = sub.add_parser(
+        "floors",
+        help="load a state Medicaid / workers'-comp schedule and compare rates to it")
+    p.add_argument("path", nargs="?", default=None,
+                   help="a CSV with a code column and a rate column (omit to just list)")
+    p.add_argument("--kind", default="medicaid",
+                   choices=("medicaid", "workers_comp", "other"))
+    p.add_argument("--state", default=None, help="two-letter state (required to load)")
+    p.add_argument("--year", default=None, help="schedule year, e.g. 2026")
+    p.add_argument("--label", default=None, help="how this schedule should be named in reports")
+    p.add_argument("--code-col", dest="code_col", default=None, help="name of the code column")
+    p.add_argument("--rate-col", dest="rate_col", default=None, help="name of the rate column")
+    p.add_argument("--compare", default=None, metavar="SUBJECT",
+                   help="compare rates against the loaded schedules ('market' for no subject)")
+    p.add_argument("--payer", default=None, help="scope the comparison to one payer")
+    p.add_argument("--month", default="latest", help="as-of month for the comparison")
 
     p = sub.add_parser(
         "hospital",
@@ -1757,6 +1841,7 @@ def main(argv: list[str] | None = None) -> int:
         "closures": cmd_closures,
         "inflation": cmd_inflation,
         "hospital": cmd_hospital,
+        "floors": cmd_floors,
         "backup": cmd_backup,
         "verify": cmd_verify,
         "reset": cmd_reset,

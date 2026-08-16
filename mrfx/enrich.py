@@ -19,7 +19,7 @@ import duckdb
 import httpx
 
 from .config import MrfxConfig
-from .store import Store, replace_with_retry
+from .store import Store, replace_with_retry, sql_path
 
 log = logging.getLogger(__name__)
 
@@ -380,6 +380,106 @@ def _open_bulk_text(path: Path):
             yield f
 
 
+class WeeklyUpdateError(Exception):
+    """A weekly incremental we cannot apply — say why, never half-apply it."""
+
+
+def apply_weekly_update(cfg: MrfxConfig, store: Store, path) -> dict:
+    """Fold an NPPES WEEKLY incremental into the local bulk cache.
+
+    NPPES publishes a full file monthly and small incrementals weekly. Without
+    this, a store's names, taxonomies, enumeration dates and deactivations are
+    up to a month stale — which matters most for exactly the two feeds built on
+    those columns (brand-new clinics, closures), where a month of lag is most
+    of the signal.
+
+    Merge semantics: a weekly row REPLACES the cached row for that NPI, and
+    every other cached row is kept. The weekly is authoritative for what it
+    contains and says nothing about what it omits — so an NPI absent from the
+    weekly must never be dropped.
+
+    Refuses rather than half-applying: with no cache built there is nothing to
+    merge into (a weekly is not a directory), and a file that yields no usable
+    rows is a wrong-file mistake, not an empty update.
+    """
+    src = Path(path)
+    if not src.exists():
+        raise WeeklyUpdateError(f"no such file: {src}")
+    cache = _nppes_cache_path(store)
+    if not cache.exists():
+        raise WeeklyUpdateError(
+            "there is no local NPPES cache to update — load the full monthly "
+            "file once first (enrichment.mode: bulk, or `mrfx enrich --bulk "
+            "<NPPES monthly zip>`), then apply weeklies on top of it")
+
+    tmp_week = cache.with_name("nppes_weekly.parquet.tmp")
+    try:
+        n_week = _write_nppes_parquet(cfg, store, tmp_week, None, src=src)
+    except Exception as e:  # noqa: BLE001
+        tmp_week.unlink(missing_ok=True)
+        raise WeeklyUpdateError(f"could not read that weekly file: {e}")
+    if not n_week:
+        tmp_week.unlink(missing_ok=True)
+        raise WeeklyUpdateError(
+            "that file contained no NPI rows — check it is an NPPES weekly "
+            "incremental (npidata_pfile_…_Weekly.zip), not a header or a "
+            "different export")
+
+    import duckdb
+    merged = cache.with_name("nppes_cache.merged.parquet.tmp")
+    cols = ", ".join(_NPPES_CACHE_COLS)
+    try:
+        con = duckdb.connect()
+        try:
+            before = con.execute(
+                f"SELECT count(*) FROM read_parquet('{sql_path(cache)}')").fetchone()[0]
+            fresh = con.execute(
+                f"SELECT count(*) FROM read_parquet('{sql_path(tmp_week)}') w "
+                f"WHERE w.npi NOT IN (SELECT npi FROM read_parquet('{sql_path(cache)}'))"
+            ).fetchone()[0]
+            deact = con.execute(
+                f"SELECT count(*) FROM read_parquet('{sql_path(tmp_week)}') "
+                "WHERE deactivation_date IS NOT NULL").fetchone()[0]
+            con.execute(f"""
+                COPY (
+                    SELECT {cols} FROM read_parquet('{sql_path(tmp_week)}')
+                    UNION ALL
+                    SELECT {cols} FROM read_parquet('{sql_path(cache)}') c
+                    WHERE c.npi NOT IN (
+                        SELECT npi FROM read_parquet('{sql_path(tmp_week)}'))
+                ) TO '{sql_path(merged)}' (FORMAT PARQUET, COMPRESSION zstd)
+            """)
+            after = con.execute(
+                f"SELECT count(*) FROM read_parquet('{sql_path(merged)}')").fetchone()[0]
+        finally:
+            con.close()
+        # only swap once the merged file is complete: a crash mid-merge must
+        # leave the previous cache intact, not a truncated one. replace_with_retry
+        # because on Windows any open handle on the cache (a dashboard query
+        # mid-scan) makes a bare replace raise.
+        replace_with_retry(merged, cache)
+    except Exception as e:  # noqa: BLE001
+        merged.unlink(missing_ok=True)
+        raise WeeklyUpdateError(f"could not merge the weekly update: {e}")
+    finally:
+        tmp_week.unlink(missing_ok=True)
+
+    log.info("NPPES weekly: %s rows applied (%s new NPIs); cache %s -> %s",
+             f"{n_week:,}", f"{fresh:,}", f"{before:,}", f"{after:,}")
+    return {
+        "file": src.name, "rows_in_weekly": n_week,
+        "new_npis": fresh, "updated_npis": n_week - fresh,
+        "deactivations_in_file": deact,
+        "cache_rows_before": before, "cache_rows_after": after,
+        "note": (
+            "A weekly incremental is authoritative only for the NPIs it "
+            "contains: those rows replaced their cached versions and every "
+            "other row was kept untouched. Downloading a newer MONTHLY file "
+            "rebuilds the cache from scratch and supersedes weeklies applied "
+            "on top of the older one."),
+    }
+
+
 # change-awareness for the persistent serve loop: after a full scan we remember
 # the file's signature and the NPIs it does NOT contain (deactivated/new/junk
 # ids that would otherwise force a fresh multi-GB scan on every poll forever).
@@ -464,9 +564,14 @@ def _ensure_nppes_cache(cfg: MrfxConfig, store: Store, sig: tuple,
 
 
 def _write_nppes_parquet(cfg: MrfxConfig, store: Store, pqp: Path,
-                         stop: threading.Event | None) -> int:
-    """One streaming pass over the NPPES file -> compact parquet (the ~9 kept
-    columns). Positional reader, batched writes; interruptible via `stop`."""
+                         stop: threading.Event | None,
+                         src: Path | None = None) -> int:
+    """One streaming pass over an NPPES file -> compact parquet (the ~9 kept
+    columns). Positional reader, batched writes; interruptible via `stop`.
+
+    `src` overrides the configured bulk file — the weekly incremental path
+    reuses this exact projection so a weekly row and a monthly row can never be
+    parsed by two slightly different readers."""
     import pyarrow as pa
     import pyarrow.parquet as pq
 
@@ -475,7 +580,7 @@ def _write_nppes_parquet(cfg: MrfxConfig, store: Store, pqp: Path,
     total = 0
     writer = pq.ParquetWriter(str(tmp), schema, compression="zstd")
     try:
-        with _open_bulk_text(cfg.enrichment.bulk_csv_path) as f:
+        with _open_bulk_text(src or cfg.enrichment.bulk_csv_path) as f:
             reader = csv.reader(f)
             header = next(reader, [])
             col = {k: header.index(v) for k, v in _BULK_COLS.items() if v in header}

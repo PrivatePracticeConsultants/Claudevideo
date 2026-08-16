@@ -1677,6 +1677,7 @@ async function initNegotiate() {
   state.ngInited = true;
   state.ngComps = [];
   initHospital();      // the hospital comparison card lives on this tab
+  initFloors();
   const [subjects, months, payers] = await Promise.all([
     api("/api/benchmark/subjects").catch(() => null),
     api("/api/months").catch(() => null),
@@ -2444,6 +2445,72 @@ function initNewClinics() {
         <th>Phone</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table></div>
       <div class="muted" style="font-size:11.5px;margin-top:6px">${esc(d.note)}</div>`;
   });
+}
+
+/* ---- Medicaid / workers-comp floors ------------------------------------- */
+function initFloors() {
+  const msg = (t) => { $("#fl-msg").textContent = t; };
+  $("#fl-file").addEventListener("change", async (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    if (!$("#fl-state").value.trim()) { msg("enter the state first — a fee schedule is a state document"); e.target.value = ""; return; }
+    msg("loading…");
+    const fd = new FormData();
+    fd.append("file", f);
+    const q = new URLSearchParams({
+      kind: $("#fl-kind").value, state: $("#fl-state").value.trim(),
+      year: $("#fl-year").value.trim(),
+    });
+    try {
+      const r = await api(`/api/floors/import?${q}`, { method: "POST", body: fd });
+      msg(`${esc(r.label)}: ${r.codes} code(s) loaded.`);
+      await runFloorCompare();
+    } catch (err) { msg(`couldn't load: ${err.message}`); }
+    e.target.value = "";
+  });
+  $("#fl-run").addEventListener("click", runFloorCompare);
+  api("/api/floors/status").then((st) => {
+    if (st && st.loaded) msg(st.schedules.map((s) => s.label).join(" · "));
+  }).catch(() => {});
+}
+
+async function runFloorCompare() {
+  const out = $("#fl-out");
+  out.innerHTML = `<div class="loading">Comparing</div>`;
+  let d;
+  try {
+    d = await postJson("/api/floors/compare", {
+      subject: $("#ng-subject").value.trim() || null,
+      payer: $("#ng-payer").value || null,
+      state: $("#fl-state").value.trim() || $("#ng-state").value.trim() || null,
+      market: { month: $("#ng-month").value || "latest",
+                therapy_only: $("#ng-therapy").checked },
+    });
+  } catch (e) { out.innerHTML = `<div class="muted">${esc(e.message)}</div>`; return; }
+  if (!d.loaded || !d.rows.length) {
+    out.innerHTML = `<div class="muted">${esc(d.reason || "nothing to compare yet")}</div>`;
+    return;
+  }
+  const pct = (v) => (v == null ? "–" : v + "%");
+  const rows = d.rows.map((r) => `<tr>
+    <td>${esc(r.billing_code)}<div class="sub">${esc(r.description || "")}</div></td>
+    <td class="num">${r.subject_rate == null ? "–" : money(r.subject_rate)}</td>
+    <td class="num">${money(r.commercial_median)}</td>
+    <td class="num">${money(r.medicaid)}</td>
+    <td class="num"><b>${pct(r.subject_pct_of_medicaid ?? r.pct_of_medicaid)}</b></td>
+    <td class="num">${money(r.workers_comp)}</td>
+    <td class="num">${pct(r.subject_pct_of_workers_comp ?? r.pct_of_workers_comp)}</td>
+  </tr>`).join("");
+  out.innerHTML = `<div class="muted" style="margin-bottom:6px">${esc(d.headline)}</div>
+    <div class="tablewrap" style="max-height:40vh"><table><thead><tr>
+      <th>Code</th><th class="num">Your rate</th><th class="num">Commercial median</th>
+      <th class="num">Medicaid</th><th class="num">% of Medicaid</th>
+      <th class="num">Work comp</th><th class="num">% of WC</th>
+    </tr></thead><tbody>${rows}</tbody></table></div>
+    ${d.codes_not_in_schedule.length ? `<div class="muted" style="margin-top:6px">
+      Not in the schedule (left out, not counted as zero):
+      ${esc(d.codes_not_in_schedule.join(", "))}</div>` : ""}
+    <div class="muted" style="font-size:11.5px;margin-top:6px">${esc(d.note)}</div>`;
 }
 
 /* ---- steal-share: referrals going to a competitor ----------------------- */

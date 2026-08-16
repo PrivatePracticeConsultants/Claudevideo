@@ -554,6 +554,30 @@
           </div>
           <div id="hp-out" style="margin-top:8px"></div>
         </div>
+
+        <div class="validate-card" style="margin-top:14px">
+          <h3>Against Medicaid and workers' comp</h3>
+          <p class="muted">Load your state's Medicaid and workers'-comp schedules (any CSV with a
+            code column and a rate column) to show what sits under and over a commercial rate.
+            "Your commercial rate is 4% above Medicaid" ends an argument faster than a percentile
+            does. These are <b>your</b> uploaded numbers — the app never fetches or invents a
+            Medicaid rate, and a code a schedule omits is left out, never treated as zero.</p>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <select id="fl-kind">
+              <option value="medicaid">Medicaid</option>
+              <option value="workers_comp">Workers' comp</option>
+              <option value="other">Other schedule</option>
+            </select>
+            <input type="text" id="fl-state" placeholder="ST" style="width:44px">
+            <input type="text" id="fl-year" placeholder="year" style="width:64px">
+            <label class="btn" style="cursor:pointer">Load a schedule
+              <input type="file" id="fl-file" accept=".csv,.txt,.gz,.zip" style="display:none">
+            </label>
+            <button class="btn primary" id="fl-run">Compare</button>
+            <span id="fl-msg" class="muted"></span>
+          </div>
+          <div id="fl-out" style="margin-top:8px"></div>
+        </div>
       </div>
     </div>
   </section>

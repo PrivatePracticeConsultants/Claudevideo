@@ -1529,6 +1529,21 @@ def render_pitch_report(cfg: MrfxConfig, store: Store, benchmark: dict,
         )
 
     mp = benchmark.get("mpfs_loaded")
+    # A printed report states one number per code as of one month; the client's
+    # real question is which way it is moving. Cosmetic tier — series_by_code
+    # returns {} rather than raising, so a trend column can never cost a
+    # deliverable (invariant 3).
+    from .spark import SPARK_CSS, SPARK_NOTE, series_by_code, sparkline
+    series = series_by_code(
+        store, resolve_subject_tins(store, benchmark["subject"]),
+        benchmark.get("market") or {},
+        codes=[r["billing_code"] for r in benchmark["rows"]])
+    has_trend = any(len(v) >= 2 for v in series.values())
+
+    def trend(r) -> str:
+        return (f"<td class='num'>{sparkline(series.get(r['billing_code']), label=r['billing_code'])}</td>"
+                if has_trend else "")
+
     rows_html = "".join(
         f"<tr><td>{e(r['billing_code'])}<div class='sub'>{e(r['description'] or '')}"
         f"{' · timed 15-min' if r['is_timed'] else ''}</div></td>"
@@ -1539,6 +1554,7 @@ def render_pitch_report(cfg: MrfxConfig, store: Store, benchmark: dict,
         f"<td class='num gap'>{_m(r['gap_to_target'])}</td>"
         + (f"<td class='num'>{_pctnum(r.get('subject_pct_medicare'))}</td>"
            f"<td class='num'>{_pctnum(r.get('median_pct_medicare'))}</td>" if mp else "")
+        + trend(r)
         + f"<td class='pos'>{strip(r)}</td></tr>"
         for r in benchmark["rows"]
     )
@@ -1565,6 +1581,8 @@ def render_pitch_report(cfg: MrfxConfig, store: Store, benchmark: dict,
         """
 
     mp_heads = "<th class='num'>% Medicare (you)</th><th class='num'>% Medicare (median)</th>" if mp else ""
+    trend_head = "<th class='num'>Your trend</th>" if has_trend else ""
+    trend_note = (f'<p class="note">{e(SPARK_NOTE)}</p>' if has_trend else "")
     return f"""<!DOCTYPE html><html><head><meta charset="utf-8">
 <title>Rate benchmark — {e(benchmark['subject'])}</title>
 <style>
@@ -1588,6 +1606,7 @@ def render_pitch_report(cfg: MrfxConfig, store: Store, benchmark: dict,
  .note {{ color: #475467; font-size: 12px; }}
  .geo-warn {{ background: #fbe9d0; border: 1px solid #d99a3a; color: #7a4a00;
           padding: 10px 14px; border-radius: 6px; font-size: 12.5px; margin: 12px 0; }}
+{SPARK_CSS}
  footer {{ margin-top: 36px; border-top: 1px solid #d0d5dd; padding-top: 12px;
           color: #475467; font-size: 11px; white-space: pre-wrap; }}
  @media print {{ body {{ margin: 0; }} }}
@@ -1599,8 +1618,9 @@ def render_pitch_report(cfg: MrfxConfig, store: Store, benchmark: dict,
 {geo_banner}
 <table><thead><tr><th>Code</th><th class="num">Your rate</th><th class="num">P25</th>
 <th class="num">Median</th><th class="num">P75</th><th class="num">Target (p{target})</th>
-<th class="num">Gap</th>{mp_heads}<th>Your position</th></tr></thead>
+<th class="num">Gap</th>{mp_heads}{trend_head}<th>Your position</th></tr></thead>
 <tbody>{rows_html}</tbody></table>
+{trend_note}
 {opp_html}
 <footer>METHODOLOGY\n{e(footer)}</footer>
 </body></html>"""
