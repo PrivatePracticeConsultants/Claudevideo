@@ -1335,6 +1335,21 @@ class Store:
                 key VARCHAR PRIMARY KEY,
                 value VARCHAR
             );
+            -- Which health PLANS a rate file serves, harvested from the payer's
+            -- table-of-contents (the rate file itself never names a plan).
+            -- Keyed by the URL's dedup_key so it joins to url_queue, which
+            -- carries the local filename that rates rows are stamped with —
+            -- no column on the 300M-row spine and no re-ingest.
+            -- Many-to-many on purpose: payers publish ONE file shared by many
+            -- plans, so a rate legitimately belongs to all of them.
+            CREATE TABLE IF NOT EXISTS plan_index (
+                dedup_key VARCHAR,
+                plan_name VARCHAR,
+                plan_id VARCHAR,
+                plan_id_type VARCHAR,
+                market_type VARCHAR,
+                PRIMARY KEY (dedup_key, plan_name, plan_id)
+            );
             CREATE TABLE IF NOT EXISTS mpfs (
                 code VARCHAR,
                 locality VARCHAR,
@@ -1492,6 +1507,77 @@ class Store:
                 if self._enqueue_one(con, url, dk, parent_id) is not None:
                     added += 1
         return added
+
+    def save_plan_index(self, rows: list[dict]) -> int:
+        """Record which plans each rate-file URL serves (from a payer's TOC).
+
+        Keyed on dedup_key so it survives signed-URL churn and joins to
+        url_queue. INSERT OR REPLACE: re-expanding a TOC refreshes the plan
+        list rather than duplicating it."""
+        if not rows:
+            return 0
+        # callers pass dedup_key (fetch.py owns that function; the store must
+        # not depend on the fetch layer)
+        payload = []
+        for r in rows:
+            dk = r.get("dedup_key")
+            if not dk or not r.get("plan_name"):
+                continue
+            payload.append([dk, r.get("plan_name"), r.get("plan_id") or "",
+                            r.get("plan_id_type"), r.get("market_type")])
+        if not payload:
+            return 0
+        with self.write_lock, self.connect() as con:
+            con.executemany(
+                "INSERT OR REPLACE INTO plan_index "
+                "(dedup_key, plan_name, plan_id, plan_id_type, market_type) "
+                "VALUES (?, ?, ?, ?, ?)", payload)
+        return len(payload)
+
+    def plans_for_payer(self, payer: str | None = None) -> list[dict]:
+        """Plans that resolve to INGESTED files, with how many files each
+        covers. Only meaningful once a TOC has been expanded — a store built
+        from directly-pasted rate links has no plan metadata to show, which
+        the caller reports as 'not published' rather than 'no plans'."""
+        # plan_index is keyed by URL; url_queue turns that into the local
+        # filename; `files` is the only place the payer name lives per file.
+        q = """
+            SELECT f.payer, p.plan_name, any_value(p.market_type) AS market_type,
+                   count(DISTINCT f.filename) AS files
+            FROM plan_index p
+            JOIN url_queue q ON q.dedup_key = p.dedup_key
+            JOIN files f ON f.filename = q.filename AND f.status = 'done'
+        """
+        args: list = []
+        if payer:
+            q += " WHERE f.payer = ?"
+            args.append(payer)
+        q += " GROUP BY 1, 2 ORDER BY 4 DESC, 2"
+        with self.connect() as con:
+            try:
+                rows = con.execute(q, args).fetchall()
+            except duckdb.Error as e:
+                # An empty list reads to the caller as "this payer publishes no
+                # plan metadata". Never let a query fault masquerade as that.
+                logging.getLogger(__name__).warning("plans_for_payer failed: %s", e)
+                return []
+        return [{"payer": p, "plan_name": n, "market_type": m, "files": f}
+                for p, n, m, f in rows]
+
+    def files_for_plan(self, plan_name: str) -> list[str]:
+        """The ingested source_file names a plan's rates live in — the join a
+        plan-scoped market filter uses."""
+        with self.connect() as con:
+            try:
+                return [r[0] for r in con.execute(
+                    "SELECT DISTINCT f.filename FROM plan_index p "
+                    "JOIN url_queue q ON q.dedup_key = p.dedup_key "
+                    "JOIN files f ON f.filename = q.filename AND f.status = 'done' "
+                    "WHERE p.plan_name = ?",
+                    [plan_name]).fetchall() if r[0]]
+            except duckdb.Error as e:
+                logging.getLogger(__name__).warning("files_for_plan failed: %s", e)
+                return []
 
     def _enqueue_one(self, con: duckdb.DuckDBPyConnection, url: str, dedup_key: str,
                      parent_id: int | None) -> int | None:

@@ -37,6 +37,7 @@ from .benchmark import (
     _rates_relation,
     normalize_market,
     month_label,
+    public_market,
     resolve_subject_tins,
 )
 from .catalog import code_info
@@ -57,7 +58,8 @@ def compute_fee_schedule(store: Store, subject: str, market: dict) -> dict:
     Rate for a (payer, code) = median across the subject's TINs of each TIN's
     median published rate — the same entity-grain rule the rest of the app uses.
     """
-    market = normalize_market(market)
+    from .benchmark import resolve_plan_scope
+    market = resolve_plan_scope(store, normalize_market(market))
     subject_tins = resolve_subject_tins(store, subject)
     include_assistant = bool(market.get("include_assistant", False))
     include_non_dollar = bool(market.get("include_non_dollar", False))
@@ -125,8 +127,9 @@ def compute_fee_schedule(store: Store, subject: str, market: dict) -> dict:
             peer_rel = _rates_relation(market, (
                 f"payer IN ({', '.join('?' for _ in subj_payers)}) "
                 f"AND billing_code IN ({', '.join('?' for _ in subj_codes)})"))
-            peer_rel_params = ([*subj_payers, *subj_codes]
-                               if peer_rel != "rates_by_tin" else [])
+            # _rates_relation always consumes a non-empty prefilter, so its
+            # placeholders always need binding
+            peer_rel_params = [*subj_payers, *subj_codes]
             msql = f"""
             WITH subject_tins AS (SELECT unnest(?::VARCHAR[]) AS tin),
             per_tin AS (
@@ -191,7 +194,7 @@ def compute_fee_schedule(store: Store, subject: str, market: dict) -> dict:
     return {
         "subject": subject,
         "subject_tins": [mask_tin(t) for t in subject_tins],
-        "market": {k: v for k, v in market.items() if v not in (None, [], "")},
+        "market": {k: v for k, v in public_market(market).items() if v not in (None, [], "")},
         "month": market.get("month"),
         "payers": payers,
         "codes": codes,
@@ -299,7 +302,7 @@ def _methodology(store: Store, fee_schedule: dict) -> str:
     lines = [
         f"Generated {dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} by MRF Explorer v{__version__}.",
         f"As-of month: {month_label(market.get('month'))}. Subject tax IDs: {', '.join(fee_schedule['subject_tins']) or 'n/a'}.",
-        f"Market definition: {json.dumps({k: v for k, v in market.items()})}.",
+        f"Market definition: {json.dumps(public_market(market))}.",
         fee_schedule["basis_note"],
         "Rate for a (payer, code) is the median across the subject's tax IDs of "
         "each tax ID's median published value (variants collapse per the app's "

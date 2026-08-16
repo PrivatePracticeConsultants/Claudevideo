@@ -1188,21 +1188,25 @@ async function initBenchmark() {
   benchmarkInit = true;
   // Independent loads: a single failing/slow call must not blank the required
   // As-of month (or the whole tab).
-  const [subjects, months, payers, peersets] = await Promise.all([
+  const [subjects, months, payers, peersets, plans] = await Promise.all([
     api("/api/benchmark/subjects").catch(() => null),
     api("/api/months").catch(() => null),
     api("/api/payers").catch(() => null),
     api("/api/peersets").catch(() => null),
+    api("/api/plans").catch(() => null),
   ]);
   if (subjects) $("#b-subjects").innerHTML = subjectOptionsHtml(subjects);
   wireSubjectSearch("#b-subject", "#b-subjects");
   fillMonthSelect("#b-month", months, LATEST_MONTH_OPT);
   if (payers) $("#b-payer-chips").innerHTML = payers.payers.map((p) =>
     `<button class="chip" data-payer="${esc(p)}">${esc(p)}</button>`).join("");
+  state.plans = plans;
+  renderPlanField();
   $("#b-payer-chips").addEventListener("click", (ev) => {
     const b = ev.target.closest(".chip");
-    if (b) b.classList.toggle("on");
+    if (b) { b.classList.toggle("on"); renderPlanField(); }
   });
+  $("#b-plan").addEventListener("change", renderPlanField);
   refreshPeersets((peersets || {}).peer_sets);
   $("#ps-save").addEventListener("click", async () => {
     const name = $("#ps-name").value.trim();
@@ -1287,6 +1291,41 @@ async function refreshMpfsStatus() {
   } catch { /* ignore */ }
 }
 
+// The plan picker exists ONLY when the store has plan tags. A payer that
+// publishes several plans is one whose pooled median blends networks that may
+// price very differently, so say so where the user is about to quote a number.
+function renderPlanField() {
+  const field = $("#b-plan-field");
+  const sel = $("#b-plan");
+  if (!field || !sel) return;
+  const cov = state.plans;
+  if (!cov || !cov.loaded) { field.hidden = true; return; }
+  field.hidden = false;
+  const chosen = $$("#b-payer-chips .chip.on").map((c) => c.dataset.payer);
+  // with payers selected, offer only THEIR plans; with none, offer all
+  const shown = cov.plans.filter((p) => !chosen.length || chosen.includes(p.payer));
+  const keep = sel.value;
+  sel.innerHTML = `<option value="">all plans (pooled)</option>` +
+    shown.map((p) => `<option value="${esc(p.plan_name)}">${esc(p.plan_name)}` +
+      `${chosen.length === 1 ? "" : ` — ${esc(p.payer || "unknown payer")}`}</option>`).join("");
+  // a plan that is no longer offered must not stay silently selected
+  sel.value = shown.some((p) => p.plan_name === keep) ? keep : "";
+  const blended = (cov.by_payer || []).filter(
+    (p) => p.blended && (!chosen.length || chosen.includes(p.payer)));
+  const note = $("#b-plan-note");
+  if (sel.value) {
+    note.textContent = `Scoped to ${sel.value} — only the files that plan is ` +
+      `listed on. Rates a file shares with other plans are included, because ` +
+      `the payer publishes one file for all of them.`;
+  } else if (blended.length) {
+    note.textContent = `${blended.map((p) => `${p.payer} (${p.n_plans} plans)`).join(", ")}` +
+      ` publish more than one plan, so the pooled median blends networks that ` +
+      `may price differently. Pick a plan to see one network on its own.`;
+  } else {
+    note.textContent = "";
+  }
+}
+
 function benchmarkPayload() {
   const subject = $("#b-subject").value.trim();
   const month = $("#b-month").value || "latest"; // empty = newest rate per contract
@@ -1303,6 +1342,7 @@ function benchmarkPayload() {
   if ($("#b-city").value.trim()) market.city = $("#b-city").value.trim();
   if ($("#b-pos").value) market.pos = $("#b-pos").value;
   if ($("#b-peerset").value) market.peer_set = $("#b-peerset").value;
+  if ($("#b-plan") && $("#b-plan").value) market.plan = $("#b-plan").value;
   const volumes = {};
   for (const line of $("#b-volumes").value.split(/\n+/)) {
     const m = line.split(/[,\t]/).map((s) => s.trim());

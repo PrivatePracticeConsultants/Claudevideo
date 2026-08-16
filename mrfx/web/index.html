@@ -404,6 +404,12 @@
         </div>
         <div class="field"><label>As-of month</label><select id="b-month"></select></div>
         <div class="field"><label>Payer(s)</label><div class="chips" id="b-payer-chips"></div></div>
+        <!-- shown only when a store carries plan tags (they come from a payer's
+             table-of-contents, so directly-pasted rate links have none) -->
+        <div class="field" id="b-plan-field" hidden><label>Plan / network</label>
+          <select id="b-plan"><option value="">all plans (pooled)</option></select>
+          <div id="b-plan-note" class="muted" style="text-transform:none;margin-top:4px"></div>
+        </div>
         <div class="field"><label>Discipline</label>
           <select id="b-disc"><option value="">any</option><option>PT</option><option>OT</option><option>SLP</option></select>
         </div>

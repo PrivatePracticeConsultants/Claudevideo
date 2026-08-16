@@ -982,6 +982,102 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
 # ---------------------------------------------------------------------------
 
 
+# A TOC's reporting_structure item pairs `reporting_plans` with the
+# `in_network_files` those plans use. Payers publish ONE rate file shared by
+# many plans, so the association is many-to-many and lives only in the index —
+# the rate file itself never names a plan. Capturing it is what lets the app
+# stop blending a payer's narrow-network and broad-PPO books into one median.
+#
+# Caps keep the streaming invariant honest: a structure item can list tens of
+# thousands of plans, and a national TOC tens of thousands of files.
+_MAX_PLANS_PER_FILE = 25
+_MAX_PLAN_ROWS = 200_000
+# Locations retained per structure item purely to attribute plans to them.
+# Unique URLs are already bounded by max_files, but a TOC that re-lists the
+# SAME location thousands of times is not, and this list is per-item state.
+_MAX_LOCS_PER_ITEM = 20_000
+
+
+def expand_toc_with_plans(path: Path, max_files: int, base_url: str = "",
+                          ) -> tuple[list[str], bool, list[dict]]:
+    """expand_toc, plus the plan rows each file belongs to.
+
+    Event-based rather than `ijson.items(...item)`: materializing a whole
+    reporting_structure item would defeat streaming on a payer that lists
+    60k plans in one structure. We track only the CURRENT item's plans (capped)
+    and flush them against that item's file locations.
+    """
+    seen: set[str] = set()
+    urls: list[str] = []
+    plan_rows: list[dict] = []
+    truncated = False
+    stop = False
+
+    cur_plans: list[dict] = []      # plans of the structure item being read
+    cur_locs: list[str] = []        # its file locations
+    plan: dict = {}
+
+    def norm(loc):
+        if not loc or not isinstance(loc, str):
+            return None
+        loc = loc.strip()
+        if base_url and not loc.lower().startswith(("http://", "https://")):
+            loc = urljoin(base_url, loc)
+        return loc if loc.lower().startswith(("http://", "https://")) else None
+
+    def flush_item():
+        """Attach the item's plans to its files, then reset for the next one."""
+        nonlocal cur_plans, cur_locs
+        if cur_plans and cur_locs and len(plan_rows) < _MAX_PLAN_ROWS:
+            for loc in cur_locs:
+                for p in cur_plans[:_MAX_PLANS_PER_FILE]:
+                    plan_rows.append({"url": loc, **p})
+                    if len(plan_rows) >= _MAX_PLAN_ROWS:
+                        break
+                if len(plan_rows) >= _MAX_PLAN_ROWS:
+                    break
+        cur_plans, cur_locs = [], []
+
+    with open_stream(path) as stream:
+        for prefix, event, value in ijson.parse(stream):
+            if prefix == "reporting_structure.item" and event == "start_map":
+                flush_item()          # previous item ended
+            elif prefix.endswith("reporting_plans.item") and event == "start_map":
+                plan = {}
+            elif prefix.endswith("reporting_plans.item") and event == "end_map":
+                if plan.get("plan_name") and len(cur_plans) < _MAX_PLANS_PER_FILE:
+                    cur_plans.append(plan)
+                plan = {}
+            elif prefix.endswith("reporting_plans.item.plan_name"):
+                plan["plan_name"] = str(value)[:160] if value else None
+            elif prefix.endswith("reporting_plans.item.plan_id"):
+                plan["plan_id"] = str(value)[:40] if value else None
+            elif prefix.endswith("reporting_plans.item.plan_id_type"):
+                plan["plan_id_type"] = str(value)[:20] if value else None
+            elif prefix.endswith("reporting_plans.item.plan_market_type"):
+                plan["market_type"] = str(value)[:20] if value else None
+            elif prefix.endswith("in_network_files.item.location") and event == "string":
+                loc = norm(value)
+                if not loc:
+                    continue
+                if len(cur_locs) < _MAX_LOCS_PER_ITEM:
+                    cur_locs.append(loc)
+                k = dedup_key(loc)
+                if k not in seen:
+                    seen.add(k)
+                    urls.append(loc)
+                    if len(urls) >= max_files:
+                        truncated = True
+                        stop = True
+            if stop:
+                break
+    flush_item()
+    # keep only plans for files we actually queued
+    keep = {dedup_key(u) for u in urls}
+    plan_rows = [p for p in plan_rows if dedup_key(p["url"]) in keep]
+    return urls, truncated, plan_rows
+
+
 def expand_toc(path: Path, max_files: int, base_url: str = "") -> tuple[list[str], bool]:
     """Stream-parse a table-of-contents file and return the in-network file
     URLs it lists (deduped, order-preserved). Returns (urls, truncated) where
@@ -1606,16 +1702,31 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
 
     if pf.file_type in ("toc", "blob_listing"):
         store.update_url(url_id, status="expanding", kind="toc")
-        expander = expand_toc if pf.file_type == "toc" else expand_blobs_listing
+        plan_rows: list[dict] = []
         try:
             # relative locations resolve against where the index actually came
             # from (post-redirect), not the possibly-redirected pasted URL
-            child_urls, truncated = expander(dest, cfg.max_toc_files, base_url=final_url)
+            if pf.file_type == "toc":
+                child_urls, truncated, plan_rows = expand_toc_with_plans(
+                    dest, cfg.max_toc_files, base_url=final_url)
+            else:
+                child_urls, truncated = expand_blobs_listing(
+                    dest, cfg.max_toc_files, base_url=final_url)
         except Exception as e:  # noqa: BLE001
             store.update_url(url_id, status="failed", kind="toc", error=f"index parse failed: {e}")
             dest.unlink(missing_ok=True)
             return False
         added = _enqueue_children(store, child_urls, url_id)
+        # which PLANS each queued file serves — the dimension that stops a
+        # payer's narrow-network and broad-PPO books blending into one median.
+        # Cosmetic-tier: a failure here must never cost the expansion.
+        if plan_rows:
+            try:
+                n = store.save_plan_index(
+                    [{**p, "dedup_key": dedup_key(p["url"])} for p in plan_rows])
+                log.info("index: recorded %s plan/file link(s)", f"{n:,}")
+            except Exception:  # noqa: BLE001
+                log.debug("plan index not recorded", exc_info=True)
         msg = f"index expanded: {len(child_urls)} files listed, {added} newly queued"
         if truncated:
             msg += f" (capped at max_toc_files={cfg.max_toc_files})"

@@ -17,7 +17,7 @@ import statistics
 from . import __version__
 from .catalog import code_info
 from .config import MrfxConfig
-from .store import Store, mask_tin
+from .store import BY_TIN_QUERY, Store, mask_tin
 
 log = logging.getLogger(__name__)
 
@@ -112,6 +112,52 @@ def clean_volumes(volumes) -> dict[str, float]:
             "volumes must map a billing code to annual units (numbers)")
 
 
+def public_market(market: dict, drop: tuple = ()) -> dict:
+    """The market as the USER stated it, for display, reports and provenance.
+
+    Keys starting with '_' are resolved implementation detail (a plan name
+    becomes a file list; that list can be hundreds of names). They must never
+    reach the market-definition line of a methodology footer, which is meant to
+    be a human-readable restatement of what was asked for."""
+    return {k: v for k, v in market.items()
+            if not k.startswith("_") and k not in drop}
+
+
+def _sql_str_list(values) -> str:
+    """Inline a list of strings as SQL literals. Used only for the FROM-clause
+    relation, which is composed before the WHERE parameters and so cannot carry
+    placeholders of its own without corrupting their order."""
+    return ", ".join("'" + str(v).replace("'", "''") + "'" for v in values)
+
+
+def spine_relation(market: dict) -> str:
+    """The TIN-grain spine a market reads, aliased `t` by the caller.
+
+    Normally the prebuilt `rates_by_tin`. Under a PLAN scope it is rebuilt on
+    the fly from the raw rates of that plan's files, because the prebuilt spine
+    has already aggregated ACROSS files: a TIN priced 28 in the narrow book and
+    40 in the broad one is stored as a single row at their median (34) with
+    only a representative source_file. There is no WHERE clause over that spine
+    that recovers 28 — the blend happened before the filter could see it. Since
+    this reuses store.BY_TIN_QUERY verbatim, only its input changes, so a
+    plan-scoped number is computed exactly like the pooled one.
+
+    Cost is a filtered scan of the plan's files rather than a lookup on the
+    prebuilt spine; source_file is constant within each parquet part, so DuckDB
+    prunes the rest of the store by row-group zonemap."""
+    files = market.get("_plan_files")
+    if files is None:
+        return "rates_by_tin"
+    if not files:                      # a plan with no ingested file: empty, never "everything"
+        return f"({BY_TIN_QUERY.format(part='FALSE')})"
+    scoped = BY_TIN_QUERY.format(part=f"source_file IN ({_sql_str_list(files)})")
+    # the spine's trailing ORDER BY exists to cluster the MATERIALIZED table;
+    # inside a subquery it is a pure cost, and every reader re-aggregates.
+    # The newline before ')' is load-bearing: the query's last line is a SQL
+    # comment, which would otherwise swallow the closing paren.
+    return f"({scoped.rsplit('ORDER BY billing_code, tin_value', 1)[0]}\n)"
+
+
 def _rates_relation(market: dict, prefilter: str = "") -> str:
     """The FROM-relation for market queries, aliased `t` by the caller.
     Pinned month → plain `rates_by_tin` (the file_month = ? clause in
@@ -140,14 +186,20 @@ def _rates_relation(market: dict, prefilter: str = "") -> str:
     with total store size even when the question is about one practice
     (measured: 0.64s -> 1.96s as the spine went 800k -> 3.2M rows, while the
     same query against a pinned month stayed flat at ~0.4s)."""
+    base = spine_relation(market)
+    where = f" WHERE {prefilter}" if prefilter else ""
     if is_latest(market):
         # tin_is_really_npi is part of the identity: an EIN row and a same-
         # digit-string npi-typed row are different providers — one must never
         # supersede the other
-        where = f" WHERE {prefilter}" if prefilter else ""
-        return (f"(SELECT * FROM rates_by_tin{where} QUALIFY file_month = max(file_month) "
+        return (f"(SELECT * FROM {base} t0{where} QUALIFY file_month = max(file_month) "
                 "OVER (PARTITION BY payer, tin_value, tin_is_really_npi, billing_code))")
-    return "rates_by_tin"
+    # A prefilter is ALWAYS consumed, pinned month included — it is a plain
+    # pushed-down filter there (no window to perturb), and a caller that binds
+    # its placeholders must not have to guess whether the relation took them.
+    # Guessing by string ("is the relation still literally rates_by_tin?") broke
+    # the moment a plan scope made the pinned-month relation a subquery too.
+    return f"(SELECT * FROM {base} t0{where})" if prefilter else base
 
 
 def month_label(month) -> str:
@@ -161,6 +213,15 @@ def _market_where(market: dict, include_assistant: bool, include_non_dollar: boo
     Pair with _rates_relation(market) as the FROM-relation — for "latest" the
     relation already reduces to one row per contract, so no file_month filter."""
     clauses, params = ["t.tin_value IS NOT NULL", "NOT t.tin_is_really_npi"], []
+    # A plan scope is applied by spine_relation, not here. If a market names a
+    # plan that no entry point resolved, the query would run POOLED and the
+    # answer would be labelled with the plan's name — a fabricated provenance.
+    # Refuse instead: a view that wants plan scoping calls resolve_plan_scope.
+    if market.get("plan") and "_plan_files" not in market:
+        raise BenchmarkError(
+            f"this view can't be scoped to a plan yet (asked for "
+            f"{str(market['plan'])[:80]!r}) — remove the plan filter, or use the "
+            "Benchmark, Negotiate or Rate-card views, which support it")
     month = market.get("month")
     if not month:
         raise BenchmarkError("an as-of month is required (7A.5) — pass market.month (or 'latest')")
@@ -197,6 +258,17 @@ def _market_where(market: dict, include_assistant: bool, include_non_dollar: boo
     if market.get("billing_class", "professional"):
         clauses.append("t.billing_class = ?")
         params.append(market.get("billing_class", "professional"))
+    # PLAN scope. A payer publishes one rate file shared by many plans, so the
+    # plan lives on the FILE (from the TOC), not the rate row. The spine keeps
+    # one filename per (payer, TIN, code) group plus a source_count, so this is
+    # EXACT for single-file groups and would be a guess for multi-file ones —
+    # those are excluded rather than half-counted, and the caller discloses how
+    # many. Without this a payer's narrow-network and broad-PPO books blend
+    # into one median that matches neither.
+    # NOTE: a plan scope is NOT a clause here. It restricts the spine's INPUT
+    # (see spine_relation) because the prebuilt spine has already blended the
+    # files a plan scope wants to separate. Pair this WHERE with a relation
+    # from spine_relation/_rates_relation or the scope is silently ignored.
     if market.get("discipline"):
         clauses.append("(t.discipline = ? OR t.discipline = 'unspecified')")
         params.append(market["discipline"])
@@ -298,6 +370,52 @@ def resolve_subject_tins(store: Store, subject: str) -> list[str]:
     return [ident]
 
 
+def resolve_plan_scope(store: Store, market: dict) -> dict:
+    """Turn `market["plan"]` into the concrete file list `_market_where` uses.
+
+    Call this once per entry point, right after normalize_market: the plan
+    name is user-facing, the file list is the implementation, and resolving it
+    in one place keeps every tab's plan scoping identical."""
+    name = str(market.get("plan") or "").strip()
+    if not name:
+        return market
+    files = store.files_for_plan(name)
+    if not files:
+        raise BenchmarkError(
+            f"no ingested files are tagged with the plan {name!r} — plan tags "
+            "come from a payer's table-of-contents, so files added by pasting "
+            "a direct rate link have none")
+    return {**market, "_plan_files": files}
+
+
+def plan_coverage(store: Store, payer: str | None = None) -> dict:
+    """What plan information exists, stated honestly.
+
+    `blended` is the finding that matters: a payer whose ingested files serve
+    MORE THAN ONE plan is one whose pooled median mixes networks that may
+    price very differently."""
+    plans = store.plans_for_payer(payer)
+    by_payer: dict[str, list] = {}
+    for p in plans:
+        by_payer.setdefault(p["payer"] or "(unknown payer)", []).append(p)
+    return {
+        "plans": plans,
+        "by_payer": [{"payer": k, "n_plans": len(v),
+                      "market_types": sorted({x["market_type"] for x in v if x["market_type"]}),
+                      "blended": len(v) > 1,
+                      "plans": v[:25]}
+                     for k, v in sorted(by_payer.items())],
+        "loaded": bool(plans),
+        "note": ("Plan names come from a payer's table-of-contents, which maps "
+                 "each rate file to the plans it serves. One file commonly "
+                 "serves many plans, so a rate can belong to all of them. "
+                 "Files added by pasting a direct rate link carry no plan tag, "
+                 "and a payer shown with several plans is one whose pooled "
+                 "median blends networks that may price differently — scope to "
+                 "a plan to see that payer's book on its own."),
+    }
+
+
 def resolve_peer_set(store: Store, market: dict) -> tuple[str, dict]:
     """Returns (description, market-with-curated-tins) for provenance."""
     name = market.get("peer_set")
@@ -314,7 +432,7 @@ def resolve_peer_set(store: Store, market: dict) -> tuple[str, dict]:
 
 def compute_benchmark(store: Store, subject: str, market: dict) -> dict:
     """Per-code subject vs market percentiles (§7B.1)."""
-    market = normalize_market(market)
+    market = resolve_plan_scope(store, normalize_market(market))
     subject_tins = resolve_subject_tins(store, subject)
     peer_desc, market = resolve_peer_set(store, market)
     include_assistant = bool(market.get("include_assistant", False))
@@ -428,7 +546,7 @@ def compute_benchmark(store: Store, subject: str, market: dict) -> dict:
     return {
         "subject": subject,
         "subject_tins": [mask_tin(t) for t in subject_tins],
-        "market": {k: v for k, v in market.items() if k != "curated_tins"},
+        "market": public_market(market, drop=("curated_tins",)),
         "peer_set": peer_desc,
         "target_percentile": target,
         "rows": rows,
@@ -522,7 +640,7 @@ def subject_payers(store: Store, subject: str, market: dict) -> list[str]:
     build — computed from the subject's own rows, not from every payer in the
     store (a payer the subject doesn't contract with has nothing to negotiate).
     """
-    market = normalize_market(market)
+    market = resolve_plan_scope(store, normalize_market(market))
     subject_tins = resolve_subject_tins(store, subject)
     if not subject_tins:
         return []
@@ -538,8 +656,8 @@ def subject_payers(store: Store, subject: str, market: dict) -> list[str]:
         params += scope
     with store.connect() as con:
         rows = con.execute(
-            f"SELECT DISTINCT payer FROM rates_by_tin WHERE {' AND '.join(clauses)} "
-            "ORDER BY payer",
+            f"SELECT DISTINCT payer FROM {spine_relation(market)} t "
+            f"WHERE {' AND '.join(clauses)} ORDER BY payer",
             params,
         ).fetchall()
     return [r[0] for r in rows if r[0]]
@@ -556,7 +674,7 @@ def compute_payer_negotiation(store: Store, subject: str, market: dict,
     peers", not a blended cross-payer market). Optionally attach the annual
     opportunity per payer when the caller supplies volumes.
     """
-    market = normalize_market(market)
+    market = resolve_plan_scope(store, normalize_market(market))
     payers = subject_payers(store, subject, market)
     if not payers:
         raise BenchmarkError(
@@ -608,7 +726,7 @@ def compute_payer_negotiation(store: Store, subject: str, market: dict,
     return {
         "subject": subject,
         "subject_tins": sections[0]["benchmark"]["subject_tins"],
-        "market": {k: v for k, v in market.items() if k != "payers"},
+        "market": public_market(market, drop=("payers",)),
         "payers": [s["payer"] for s in sections],
         "sections": sections,
         "has_volumes": bool(volumes),
@@ -653,7 +771,7 @@ def compute_payer_comparison(store: Store, subject: str, payer: str, market: dic
     excluded, percentiles over this payer's OTHER providers."""
     if not payer:
         raise BenchmarkError("pick the payer you are negotiating with")
-    market = normalize_market(market)
+    market = resolve_plan_scope(store, normalize_market(market))
     pmarket = {**market, "payers": [payer]}
     bench = compute_benchmark(store, subject, pmarket)
 
@@ -675,7 +793,7 @@ def compute_payer_comparison(store: Store, subject: str, payer: str, market: dic
     # cross-payer leverage: the subject's own rates for the same codes with
     # every OTHER payer (same month/basis) — "you pay me less than my other
     # contracts do" is often the strongest single line in the room
-    other_market = {k: v for k, v in market.items() if k != "payers"}
+    other_market = public_market(market, drop=("payers",))
     o_where, o_params = _market_where(other_market, bool(market.get("include_assistant")),
                                       bool(market.get("include_non_dollar")))
     orel = _rates_relation(other_market)
@@ -759,7 +877,7 @@ def compute_payer_comparison(store: Store, subject: str, payer: str, market: dic
         "subject": subject,
         "subject_tins": bench["subject_tins"],
         "payer": payer,
-        "market": {k: v for k, v in market.items() if k != "payers"},
+        "market": public_market(market, drop=("payers",)),
         "rows": rows,
         "comparables": comp_summaries,
         "mpfs_loaded": bench["mpfs_loaded"],
@@ -804,7 +922,7 @@ def contract_gaps(store: Store, subject: str, market: dict, *,
     subject = str(subject or "").strip()
     if not subject:
         raise BenchmarkError("pick a subject practice")
-    market = normalize_market(market)
+    market = resolve_plan_scope(store, normalize_market(market))
     subject_tins = resolve_subject_tins(store, subject)
     # a blank/unknown subject resolves to [""], which matches no rows — the subj
     # CTE would then exclude nothing and EVERY peer-priced code would read as a
@@ -862,7 +980,7 @@ def contract_gaps(store: Store, subject: str, market: dict, *,
     return {
         "subject": subject,
         "subject_tins": [mask_tin(t) for t in subject_tins],
-        "market": {k: v for k, v in market.items() if k != "curated_tins"},
+        "market": public_market(market, drop=("curated_tins",)),
         "peer_set": peer_desc,
         "min_peers": min_peers,
         "count": len(rows),
@@ -1188,7 +1306,7 @@ def _subject_has_scoped_rates(store: Store, subject: str, market: dict) -> bool:
     subject_tins = resolve_subject_tins(store, subject)
     if not subject_tins:
         return False
-    market = normalize_market(market)
+    market = resolve_plan_scope(store, normalize_market(market))
     where, params = _market_where(market,
                                   bool(market.get("include_assistant", False)),
                                   bool(market.get("include_non_dollar", False)))
@@ -1352,10 +1470,24 @@ def methodology_footer(store: Store, benchmark: dict) -> str:
         if payers:
             q += f"AND payer IN ({', '.join('?' for _ in payers)}) "
         files = con.execute(q + "ORDER BY filename", payers).fetchall()
+    # a plan-scoped number was computed from that plan's files ALONE — listing
+    # the payer's whole catalogue underneath it would be a false provenance
+    # claim, the one thing the footer exists to prevent
+    plan = str(market.get("plan") or "").strip()
+    plan_line = ""
+    if plan:
+        keep = set(store.files_for_plan(plan))
+        files = [f for f in files if f[0] in keep]
+        plan_line = (
+            f"Plan scope: {plan}. Only the files that plan is listed on in its "
+            "payer's table-of-contents are included. A payer commonly publishes "
+            "ONE file for several plans, so rates shared with those plans are "
+            "part of this scope.")
     lines = [
         f"Generated {dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} by MRF Explorer v{__version__}.",
         f"As-of month: {month_label(market.get('month'))}. Peer basis: {benchmark['peer_set']}.",
-        f"Market definition: {json.dumps({k: v for k, v in market.items() if v not in (None, [], '')})}.",
+        f"Market definition: {json.dumps({k: v for k, v in public_market(market).items() if v not in (None, [], '')})}.",
+        *([plan_line] if plan_line else []),
         benchmark["basis_note"],
         "Dedup rule: one row per (payer, TIN, code, modifier-set, billing class, "
         "place-of-service set, month); a TIN's rate is the median of its distinct "

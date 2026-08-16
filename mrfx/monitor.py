@@ -17,7 +17,8 @@ import json
 
 from . import __version__
 from .benchmark import (BenchmarkError, _market_where, normalize_market,
-                        resolve_subject_tins)
+                        public_market, resolve_plan_scope, resolve_subject_tins,
+                        spine_relation)
 from .catalog import code_info
 from .store import Store, defuse_csv, mask_tin
 
@@ -83,6 +84,8 @@ def compute_rate_changes(store: Store, market: dict, *, subject: str | None = No
     if old_month >= new_month:
         raise BenchmarkError("prev_month must be earlier than month")
 
+    market = resolve_plan_scope(store, market)
+    rel = spine_relation(market)
     include_assistant = bool(market.get("include_assistant", False))
     include_non_dollar = bool(market.get("include_non_dollar", False))
     where_cur, p_cur = _market_where({**market, "month": new_month},
@@ -103,7 +106,7 @@ def compute_rate_changes(store: Store, market: dict, *, subject: str | None = No
             SELECT t.payer, t.tin_value, t.billing_code, t.modifier_set,
                    t.billing_class, t.service_code_set,
                    median(t.negotiated_rate) AS rate
-            FROM rates_by_tin t LEFT JOIN tin_directory td USING (tin_value)
+            FROM {rel} t LEFT JOIN tin_directory td USING (tin_value)
             WHERE {where} {subj_clause}
             GROUP BY t.payer, t.tin_value, t.billing_code, t.modifier_set,
                      t.billing_class, t.service_code_set
@@ -187,7 +190,7 @@ def compute_rate_changes(store: Store, market: dict, *, subject: str | None = No
         } for payer, rs in by_payer_map.items()),
         key=lambda d: d["median_pct_change"])
     return {
-        "market": {k: v for k, v in market.items() if v not in (None, [], "")},
+        "market": {k: v for k, v in public_market(market).items() if v not in (None, [], "")},
         "new_month": new_month,
         "prev_month": old_month,
         "subject": subject,
@@ -221,14 +224,14 @@ def compute_payer_trajectory(store: Store, market: dict, *, min_months: int = 2)
     # _market_where skip the file_month clause; we then read rates_by_tin
     # directly (NOT the 'latest' supersession relation, which would collapse
     # history to one row per contract).
-    m = normalize_market({**(market or {}), "month": "latest"})
+    m = resolve_plan_scope(store, normalize_market({**(market or {}), "month": "latest"}))
     include_assistant = bool(m.get("include_assistant", False))
     include_non_dollar = bool(m.get("include_non_dollar", False))
     where, params = _market_where(m, include_assistant, include_non_dollar)
     sql = f"""
     WITH base AS (
         SELECT t.payer, t.file_month, t.tin_value, median(t.negotiated_rate) AS rate
-        FROM rates_by_tin t LEFT JOIN tin_directory td USING (tin_value)
+        FROM {spine_relation(m)} t LEFT JOIN tin_directory td USING (tin_value)
         WHERE {where}
         GROUP BY t.payer, t.file_month, t.tin_value
     )
@@ -279,7 +282,7 @@ def compute_payer_trajectory(store: Store, market: dict, *, min_months: int = 2)
     payers.sort(key=lambda d: (d["cumulative_pct"] is None,
                                d["cumulative_pct"] if d["cumulative_pct"] is not None else 0))
     return {
-        "market": {k: v for k, v in market.items() if v not in (None, [], "")},
+        "market": {k: v for k, v in public_market(market).items() if v not in (None, [], "")},
         "months": months,
         "count": len(payers),
         "payers": payers,

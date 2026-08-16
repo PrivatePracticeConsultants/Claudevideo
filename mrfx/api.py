@@ -1547,6 +1547,13 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         except (TypeError, ValueError) as e:
             raise HTTPException(422, f"bad input: {e}")
 
+    @app.get("/api/plans")
+    def api_plans(payer: str = ""):
+        """Which plans each payer's ingested files serve — and which payers are
+        therefore BLENDING several networks into one median."""
+        from .benchmark import plan_coverage
+        return plan_coverage(store, payer or None)
+
     # -- reference datasets: utilization, demographics, new clinics --------------------
 
     @app.get("/api/utilization/status")
