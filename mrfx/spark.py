@@ -22,6 +22,7 @@ HONESTY:
 from __future__ import annotations
 
 import html
+import math
 
 
 def _fmt(v) -> str:
@@ -35,14 +36,23 @@ def sparkline(points, *, width: int = 84, height: int = 22,
     Returns a plain dash for fewer than two usable points: a single dot styled
     like a trend is a claim the data does not support.
     """
+    # Only FINITE numbers may reach the path: a NaN or inf coordinate writes
+    # literal "nan" into the SVG `d` attribute — a visibly broken picture in a
+    # client-facing report (found by the adversarial harness). The store never
+    # produces such rates on purpose, but a parquet DOUBLE can carry them.
     pts = [(str(m), float(v)) for m, v in (points or [])
-           if v is not None and isinstance(v, (int, float))]
+           if v is not None and isinstance(v, (int, float))
+           and math.isfinite(float(v))]
     if len(pts) < 2:
         return '<span class="spark-none" title="one month only — no trend to draw">–</span>'
 
     vals = [v for _m, v in pts]
     lo, hi = min(vals), max(vals)
     span = hi - lo
+    if not math.isfinite(span):
+        # two finite extremes whose DIFFERENCE overflows (±1e308). Not a rate
+        # that can exist; a line drawn from it would be a lie either way.
+        return '<span class="spark-none" title="values out of drawable range">–</span>' 
     n = len(pts)
     pad = 2.0
     w, h = float(width), float(height)

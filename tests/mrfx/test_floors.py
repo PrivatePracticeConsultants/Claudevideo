@@ -326,3 +326,21 @@ def test_a_wrong_file_as_a_weekly_is_refused(cfg, store, tmp_path):
         f"SELECT count(*) FROM read_parquet('{_nppes_cache_path(store)}')"
     ).fetchone()[0] == 1
     con.close()
+
+
+def test_a_non_finite_value_never_reaches_the_svg_path():
+    """Found by the adversarial harness: NaN/inf rates wrote literal 'nan' into
+    the SVG `d` attribute — a visibly broken picture inside a client report.
+    Non-finite points are dropped; a span that overflows draws nothing."""
+    nan, inf = float("nan"), float("inf")
+    for pts in ([("2026-01", 40.0), ("2026-02", nan)],
+                [("2026-01", nan), ("2026-02", nan)],
+                [("2026-01", 40.0), ("2026-02", inf)],
+                [("2026-01", -inf), ("2026-02", 40.0)],
+                [("2026-01", -1e308), ("2026-02", 1e308)]):
+        out = sparkline(pts)
+        assert "nan" not in out.lower() or "<svg" not in out, out
+        assert "inf" not in out.split("aria-label")[0].lower() or "<svg" not in out
+    # three points, one poisoned: the two good ones still draw
+    out = sparkline([("2026-01", 40.0), ("2026-02", nan), ("2026-03", 44.0)])
+    assert "<svg" in out and "nan" not in out.lower()
