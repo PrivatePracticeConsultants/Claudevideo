@@ -151,6 +151,73 @@ The **Benchmark** tab answers "where does this practice sit vs its market":
   external fetch when a client opens them offline). A missing logo silently
   falls back to the text brand; it never blocks a report.
 
+## Reference points beyond the MRFs
+
+A commercial rate means more with something to measure it against. Four
+comparisons, each from a source the app does not invent and each carrying the
+limit that makes it honest:
+
+- **Plan / network scoping.** A payer publishes one rate FILE shared by many
+  plans, and the plan name lives only in its table-of-contents — so a payer's
+  narrow-network and broad-PPO books blend into one median that matches neither.
+  Expanding a TOC now captures which plans each file serves, and the Benchmark
+  tab's plan picker (shown only when a store carries plan tags) scopes every
+  number to one network. An unknown plan refuses rather than quietly handing
+  back the pooled market, and a plan-scoped report cites only that plan's files.
+- **Medicaid (the floor) and workers' comp (usually the ceiling).** Load your
+  state's schedules as a `code,rate` CSV. "Your commercial rate is 4% above
+  Medicaid" ends an argument faster than a percentile does. A state is required
+  — a fee schedule is a state document — and a code the schedule omits is left
+  out, never counted as $0.
+- **The hospital across town.** CMS requires every hospital to publish its
+  negotiated rates; the outpatient department bills the same 97xxx codes to the
+  same payer, usually at a multiple. Both CMS file shapes (tall CSV and JSON)
+  import. Hospital rates live in their own store and **never** enter the
+  practice rate spine — a facility payment is a different product, and mixing
+  one in would move every practice median in the app. Matched on payer name and
+  code only, reported as a ratio, never as an amount owed.
+- **Inflation.** Every other number here is nominal dollars, so a payer holding
+  a rate flat since 2022 read as "flat" when it is a 6.7% pay cut. The payer
+  trajectory now restates each payer's change in constant dollars. A year the
+  price index does not cover is a refusal naming the missing year, never an
+  extrapolation; an explicit percent-per-year assumption is allowed and is
+  labelled an assumption everywhere it appears.
+
+## How solid is the data behind a number
+
+Three properties of a rate that the rate itself doesn't state, surfaced where
+they matter:
+
+- **Contracted vs derived.** `negotiated_type` separates a real contracted
+  amount from one the payer constructed where it has no contracted figure. The
+  composition is reported for a market and for a client's own rates — reported,
+  not filtered, because excluding derived rates by default would silently move
+  numbers already quoted.
+- **Freshness.** Payers are compared on the `last_updated_on` they published,
+  with three states rather than two: fresh, stale, and unreadable-or-unstated (a
+  date we cannot parse must not pass as fresh, and must not be called stale).
+- **Does size explain the gap?** "The practices above me are bigger" is the
+  commonest objection to a benchmark, and it is testable: practices are ranked
+  within (payer, code), then compared across provider-count bands. A band with
+  too few practices is marked thin rather than reported.
+
+## Territory and growth
+
+- **Inside one state, by city** — state medians hide the metro/small-town split
+  that decides where a client competes. Thin cities are suppressed *and counted*,
+  so a suppressed city never reads as "nothing there".
+- **Payer concentration (HHI)** — who holds the contracts here, with the DOJ
+  bands. Under five payers it refuses to assign a band at all: with three payers
+  the index calls every market concentrated by construction.
+- **Referrals going to someone else** — physicians who send therapy patients to
+  other practices in a client's own city and little or nothing to the client,
+  ranked by the gap. Every other lead surface finds practices; this one finds
+  the relationship to go and win.
+- **Openings and closures** — therapy NPIs newly issued (a practice with no
+  contracts yet, the earliest possible lead) and newly deactivated and not since
+  reactivated (a closed referral source is a hole in a client's volume; a closed
+  competitor is room).
+
 ## Rate card & payer scorecard (§7C)
 
 The **Rate card** tab reconstructs a single practice's own negotiated schedule

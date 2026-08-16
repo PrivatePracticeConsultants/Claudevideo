@@ -431,7 +431,7 @@ to add the date column.)
 
 ---
 
-## Two more free files worth grabbing (optional, high value)
+## More free files worth grabbing (optional, high value)
 
 Both are public-domain US government downloads. Neither is required; each makes
 a specific part of the app sharper. Load them on the **Files tab → Reference
@@ -473,6 +473,52 @@ practice that isn't your client yet.
   quite ZIP codes (PO-box ZIPs have none — those are reported as unmatched, never
   as zero people). Practice counts only include practices some ingested payer
   file priced, so "seniors per practice" is an upper bound.
+
+### 3. Your state's Medicaid and workers'-comp fee schedules
+
+The single fastest way to end an argument about whether a rate is defensible:
+*"your commercial rate is 4% above Missouri Medicaid."* Workers' comp usually
+runs the other way — above commercial — which turns "we can't pay more" into
+"you already pay more, under a different schedule."
+
+- **What to get:** your state Medicaid agency's therapy fee schedule and your
+  state's workers'-comp medical fee schedule. Every state posts its own, in its
+  own format. You need **any CSV with a code column and a rate column** — if
+  yours arrives as a PDF or a spreadsheet, export the two columns you need.
+- **Where it goes:** Negotiate tab → **Against Medicaid and workers' comp**.
+  Pick the kind and the state, load the file, press Compare. (Or
+  `mrfx floors mo_medicaid.csv --kind medicaid --state MO --year 2026`.)
+- **The honest limits:** these are *your* uploaded numbers and the app never
+  fetches or invents them — the label you give a schedule is what gets printed
+  in reports. A Medicaid schedule is the fee-for-service maximum allowable, and
+  managed-Medicaid plans commonly pay a percentage of it, so a practice's real
+  floor can be lower. A code your schedule doesn't list is left out of the
+  comparison entirely, never treated as $0.
+
+### 4. The local hospital's price-transparency file
+
+CMS requires every hospital to publish its negotiated rates. The hospital
+outpatient department bills the same 97xxx codes to the same payers — usually
+at a multiple of what a private practice gets.
+
+- **What to get:** search the hospital's name plus "price transparency" — the
+  file is on the hospital's own website, as CSV or JSON. Both work.
+- **Where it goes:** Negotiate tab → **Hospital comparison**. (Or
+  `mrfx hospital stmarys_standardcharges.csv --state MO`.)
+- **The honest limit, printed on every result:** a hospital rate is a
+  **facility** rate — it pays for the department, its space and its overhead,
+  and the hospital often bills a separate professional line on top. Same CPT
+  code, different economics. Use it as evidence of what a payer already pays in
+  your market, never as an amount your client is owed.
+
+### 5. NPPES weekly updates (if you already load the monthly file)
+
+If you use the NPPES monthly file for provider names, the weekly incrementals
+keep it current between monthly downloads — which matters most for the two
+feeds built on those columns: brand-new clinics and closures, where a month of
+lag is most of the signal. Download the weekly zip from the same NPPES page and
+run `mrfx enrich --weekly npidata_pfile_...Weekly.zip`. It updates only the
+NPIs that changed that week and leaves everything else alone.
 
 ---
 
