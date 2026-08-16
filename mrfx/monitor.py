@@ -20,6 +20,8 @@ from .benchmark import (BenchmarkError, _market_where, normalize_market,
                         public_market, resolve_plan_scope, resolve_subject_tins,
                         spine_relation)
 from .catalog import code_info
+from .inflation import (BASIS_CAVEAT, deflator, erosion_line, load_index,
+                        real_change_pct)
 from .store import Store, defuse_csv, mask_tin
 
 # a rate-change list beyond this is unusable in a browser and a memory risk to
@@ -206,7 +208,8 @@ def compute_rate_changes(store: Store, market: dict, *, subject: str | None = No
     }
 
 
-def compute_payer_trajectory(store: Store, market: dict, *, min_months: int = 2) -> dict:
+def compute_payer_trajectory(store: Store, market: dict, *, min_months: int = 2,
+                             assume_inflation_pct: float | None = None) -> dict:
     """Each payer's median therapy-rate trajectory across ALL loaded months —
     the strategic read a two-month diff can't give: is a payer eroding rates
     over time (sign a multi-year deal against), and how long is the cut streak?
@@ -246,6 +249,7 @@ def compute_payer_trajectory(store: Store, market: dict, *, min_months: int = 2)
         cols = [d[0] for d in cur.description]
         raw = [dict(zip(cols, r)) for r in cur.fetchall()]
 
+    index = load_index(store)
     series: dict[str, list] = {}
     for r in raw:
         series.setdefault(r["payer"], []).append(r)
@@ -265,6 +269,9 @@ def compute_payer_trajectory(store: Store, market: dict, *, min_months: int = 2)
                 streak += 1
             else:
                 break
+        defl = deflator(index, first["file_month"], last["file_month"],
+                        assume_pct_per_year=assume_inflation_pct)
+        real = real_change_pct(cumulative, defl)
         payers.append({
             "payer": payer,
             "n_months": len(pts),
@@ -277,15 +284,40 @@ def compute_payer_trajectory(store: Store, market: dict, *, min_months: int = 2)
                           else "flat"),
             "series": [{"month": p["file_month"], "median_rate": p["median_rate"],
                         "n_practices": p["n_practices"]} for p in pts],
+            # A flat nominal rate is a pay CUT once costs rise; this is the
+            # only place in the app that says so. None (with a reason) when no
+            # index year covers the span — never an extrapolation.
+            "real_cumulative_pct": real,
+            "real_basis": defl.get("basis"),
+            "real_reason": defl.get("reason"),
+            "erosion_line": erosion_line(payer, cumulative, real,
+                                         first["file_month"], last["file_month"], defl),
         })
     # most-eroding first (most negative cumulative change); flats/ups after
     payers.sort(key=lambda d: (d["cumulative_pct"] is None,
                                d["cumulative_pct"] if d["cumulative_pct"] is not None else 0))
+    # what the whole panel says in real terms, stated once
+    real_ok = [p for p in payers if p["real_cumulative_pct"] is not None]
+    eroding = [p for p in real_ok if p["real_cumulative_pct"] < 0]
+    assumption = next((p for p in payers if p.get("real_basis") == "assumption"), None)
     return {
         "market": {k: v for k, v in public_market(market).items() if v not in (None, [], "")},
         "months": months,
         "count": len(payers),
         "payers": payers,
+        "inflation": {
+            "index_name": index["index_name"],
+            "source": index["source"],
+            "last_year": index["last_year"],
+            "basis": ("assumption" if assumption else "index" if real_ok else None),
+            "assumed_pct_per_year": assume_inflation_pct,
+            "n_with_real_terms": len(real_ok),
+            "n_eroding_in_real_terms": len(eroding),
+            "caveat": BASIS_CAVEAT,
+            # one reason, not one per payer: they all fail for the same year
+            "reason": next((p["real_reason"] for p in payers
+                            if p["real_cumulative_pct"] is None and p["real_reason"]), None),
+        },
         "note": ("Median rate is over the practices priced EACH month; the panel "
                  "can shift between months, so a trajectory is directional market "
                  "movement, not a matched-contract diff (use the change monitor "

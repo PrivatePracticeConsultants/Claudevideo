@@ -162,6 +162,62 @@ def build_client_packet(cfg: MrfxConfig, store: Store, subject: str,
         written.append("5_results_since_baseline.html")
     attempt("Results since baseline", _wins)
 
+    # 6. referral sources that closed — the client should hear this from their
+    #    consultant, not from a quiet month. Cross-references the practice's own
+    #    inbound referral partners against NPPES deactivations.
+    def _closed_sources():
+        from .benchmark import resolve_subject_tins
+        from .medicare import org_referrals, taxonomy_label
+        from .nppes import closure_status, closures
+
+        st = closure_status(store)
+        if not st["ready"]:
+            raise BenchmarkError(st["reason"])
+        # same TIN -> NPI resolution the Clients digest uses, so the packet and
+        # the screen name the same practice
+        tins = resolve_subject_tins(store, subject)
+        with store.connect() as con:
+            npis = [r[0] for r in con.execute(
+                "SELECT DISTINCT npi FROM rates WHERE tin_value IN "
+                "(SELECT unnest(?::VARCHAR[])) AND npi IS NOT NULL",
+                [tins]).fetchall()]
+        if not npis:
+            raise BenchmarkError("no NPIs resolved for this practice")
+        refs = org_referrals(store, npis, direction="in", limit=500)
+        if not refs["rows"]:
+            raise BenchmarkError(
+                "no referral data loaded for this practice (Medicare tab)")
+        partners = {str(r.get("npi")): r for r in refs["rows"] if r.get("npi")}
+        # a wide closure window, then intersect: the feed is the authority on
+        # what closed, the referral list on who matters to THIS client
+        gone = [r for r in closures(store, days=730, therapy_only=False,
+                                    limit=1000)["rows"]
+                if r["npi"] in partners]
+        if not gone:
+            raise BenchmarkError("no referral source of this practice has closed")
+        rows = "".join(
+            f"<tr><td>{html.escape(str(x.get('org_name') or partners[x['npi']].get('name') or x['npi']))}</td>"
+            f"<td>{html.escape(x['deactivated'])}</td>"
+            f"<td class='num'>{partners[x['npi']].get('patients') or ''}</td>"
+            f"<td>{html.escape(taxonomy_label(partners[x['npi']].get('taxonomy')))}</td>"
+            f"<td>{html.escape(str(x.get('phone') or ''))}</td></tr>"
+            for x in sorted(gone, key=lambda r: r["deactivated"], reverse=True))
+        (pdir / "6_closed_referral_sources.html").write_text(_doc(
+            cfg, f"Referral sources that closed — {display}",
+            "<p class='meta'>Practices that referred patients to this one whose NPI "
+            "has since been DEACTIVATED in NPPES and not reactivated. A deactivated "
+            "NPI is not proof a practice closed — NPPES deactivates for paperwork "
+            "lapses, mergers and retirements too, and it records the date the "
+            "registry was updated, not the date the doors shut. Each row is a call "
+            "to make about replacing that volume, never a fact to act on blind. "
+            "Shared-patient counts come from the referral release named in the "
+            "Medicare tab and describe that period only.</p>"
+            "<table><thead><tr><th>Referral source</th><th>Deactivated</th>"
+            "<th class='num'>Shared patients</th><th>Specialty</th><th>Phone</th>"
+            "</tr></thead><tbody>" + rows + "</tbody></table>"), encoding="utf-8")
+        written.append("6_closed_referral_sources.html")
+    attempt("Closed referral sources", _closed_sources)
+
     index = _index_html(cfg, display, subject, written, skipped, market,
                         market["month"])
     (pdir / "index.html").write_text(index, encoding="utf-8")

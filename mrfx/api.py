@@ -1641,6 +1641,28 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         except (TypeError, ValueError) as e:
             raise HTTPException(422, f"bad input: {e}")
 
+    @app.get("/api/closures/status")
+    def api_closures_status():
+        from .nppes import closure_status
+        return closure_status(store)
+
+    @app.post("/api/closures")
+    def api_closures(body: dict = Body(...)):
+        """Therapy NPIs deactivated recently — a closed referral source is a
+        hole in a client's inbound volume; a closed competitor is room."""
+        from .nppes import NppesFeedError, closures
+        try:
+            return closures(
+                store, zip_code=str(body.get("zip") or "").strip() or None,
+                radius_miles=float(body["radius_miles"]) if body.get("radius_miles") else None,
+                days=_as_int(body.get("days"), 365),
+                therapy_only=bool(body.get("therapy_only", True)),
+                state=str(body.get("state") or "").strip() or None)
+        except NppesFeedError as e:
+            raise HTTPException(422, str(e))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(422, f"bad input: {e}")
+
     # -- underpayment check ------------------------------------------------------------
 
     @app.post("/api/remits/check")
@@ -2215,10 +2237,42 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
 
     @app.post("/api/trajectory")
     def trajectory_ep(body: dict = Body(...)):
+        from .inflation import InflationError
         try:
-            return compute_payer_trajectory(store, body.get("market") or {})
-        except (BenchmarkError, ValueError, TypeError) as e:
+            return compute_payer_trajectory(
+                store, body.get("market") or {},
+                # an inflation ASSUMPTION is opt-in and echoed back as one;
+                # 0 is a meaningful value, so don't treat it as absent
+                assume_inflation_pct=_as_float(body.get("assume_inflation_pct"), None))
+        except (BenchmarkError, InflationError, ValueError, TypeError) as e:
             raise HTTPException(422, str(e))
+
+    @app.get("/api/inflation/status")
+    def api_inflation_status():
+        """Which years the real-terms basis covers, and how to extend it."""
+        from .inflation import index_status
+        return index_status(store)
+
+    @app.post("/api/inflation")
+    def api_inflation_save(body: dict = Body(...)):
+        """Record published index values (year, value). Never computed here —
+        the user reads them off the BLS release."""
+        from .inflation import InflationError, index_status, save_index_values
+        rows = body.get("values")
+        if isinstance(rows, dict):
+            rows = list(rows.items())
+        if not isinstance(rows, list) or not rows:
+            raise HTTPException(422, 'send {"values": [[2025, 322.1], ...]}')
+        try:
+            n = save_index_values(
+                store, [tuple(r) if isinstance(r, (list, tuple)) else (r,) for r in rows],
+                index_name=str(body.get("index_name") or "").strip() or None,
+                source=str(body.get("source") or "").strip() or None)
+        except InflationError as e:
+            raise HTTPException(422, str(e))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(422, f"bad input: {e}")
+        return {"saved": n, **index_status(store)}
 
     @app.post("/api/roster")
     def roster_ep(body: dict = Body(...)):

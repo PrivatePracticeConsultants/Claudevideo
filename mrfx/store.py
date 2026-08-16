@@ -1350,6 +1350,18 @@ class Store:
                 market_type VARCHAR,
                 PRIMARY KEY (dedup_key, plan_name, plan_id)
             );
+            -- Annual price-index values used to restate rates in constant
+            -- dollars. The shipped CPI-U table lives in inflation.py; this
+            -- holds what the USER added (newer years, or a different basket),
+            -- which wins for the same year. Never auto-populated: an index
+            -- value this app did not read somewhere must not exist.
+            CREATE TABLE IF NOT EXISTS inflation_index (
+                year INTEGER PRIMARY KEY,
+                value DOUBLE,
+                index_name VARCHAR,
+                source VARCHAR,
+                added_at TIMESTAMP
+            );
             CREATE TABLE IF NOT EXISTS mpfs (
                 code VARCHAR,
                 locality VARCHAR,

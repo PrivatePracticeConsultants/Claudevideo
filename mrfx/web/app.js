@@ -2302,6 +2302,45 @@ function initNewClinics() {
   });
 }
 
+/* ---- closures (NPPES deactivation dates) -------------------------------- */
+function initClosures() {
+  $("#cl-run").addEventListener("click", async () => {
+    const out = $("#cl-out");
+    $("#cl-msg").textContent = "looking…";
+    let d;
+    try {
+      d = await postJson("/api/closures", {
+        zip: $("#cl-zip").value.trim() || null,
+        radius_miles: $("#cl-zip").value.trim() ? Number($("#cl-radius").value) : null,
+        state: $("#cl-state").value.trim() || null,
+        days: Number($("#cl-days").value),
+      });
+    } catch (e) { $("#cl-msg").textContent = ""; out.innerHTML = `<div class="muted">${esc(e.message)}</div>`; return; }
+    $("#cl-msg").textContent = "";
+    if (d.reason) { out.innerHTML = `<div class="muted">${esc(d.reason)}</div>`; return; }
+    if (!d.rows.length) {
+      out.innerHTML = `<div class="muted">No therapy NPI was deactivated in the last ${d.days} days
+        ${d.zip ? `within ${d.radius_miles} miles of ${esc(d.zip)}` : ""}.</div>`;
+      return;
+    }
+    const rows = d.rows.map((r, i) => `<tr>
+      <td class="num muted">${i + 1}</td>
+      <td>${esc(r.org_name || r.npi)}<div class="sub">${esc(r.taxonomy || "")}</div></td>
+      <td>${esc(r.deactivated)}</td>
+      <td class="sub">${esc([r.city, r.state].filter(Boolean).join(", "))} ${esc(r.zip || "")}</td>
+      <td class="num">${r.miles == null ? "–" : r.miles}</td>
+      <td class="sub">${esc(r.phone || "")}</td>
+      <td>${r.in_store ? "<b>had published rates</b>" : '<span class="muted">no rates in store</span>'}</td>
+    </tr>`).join("");
+    out.innerHTML = `<div class="muted" style="margin-bottom:6px">${fmtInt(d.total)} therapy NPI(s)
+      deactivated since ${esc(d.since)}${d.unplaced ? ` · ${d.unplaced} skipped (ZIP has no Census centroid)` : ""}.</div>
+      <div class="tablewrap" style="max-height:40vh"><table><thead><tr>
+        <th>#</th><th>Practice</th><th>Deactivated</th><th>Location</th><th class="num">Miles</th>
+        <th>Phone</th><th>Was it in your data?</th></tr></thead><tbody>${rows}</tbody></table></div>
+      <div class="muted" style="font-size:11.5px;margin-top:6px">${esc(d.note)}</div>`;
+  });
+}
+
 /* ---- market sizing (Census ACS) ---------------------------------------- */
 function initMarketSizing() {
   $("#ms-run").addEventListener("click", async () => {
@@ -2850,6 +2889,7 @@ async function initLeads() {
   $("#ld-run").addEventListener("click", runLeads);
   initNewToNetwork();
   initNewClinics();
+  initClosures();
   initMarketSizing();
   $("#ld-csv").addEventListener("click", () => { if (state.lastLeadsPayload) postDownload("/api/leads.csv", state.lastLeadsPayload, "leads.csv"); });
   $("#ld-board-run").addEventListener("click", runLeaderboard);
@@ -2998,21 +3038,40 @@ async function runTrajectory() {
     return;
   }
   const arrow = { down: "▼", up: "▲", flat: "▬" };
+  const pctTxt = (v) => (v == null ? "–" : (v > 0 ? "+" : "") + v + "%");
   const rows = d.payers.map((p) => {
     const cls = p.direction === "down" ? "chg-cut" : p.direction === "up" ? "chg-up" : "";
-    const pct = p.cumulative_pct == null ? "–" : (p.cumulative_pct > 0 ? "+" : "") + p.cumulative_pct + "%";
+    // real terms is the point of this table: a payer flat in dollars is still
+    // cutting pay, so colour it by the REAL sign, not the nominal one
+    const realCls = p.real_cumulative_pct == null ? ""
+      : p.real_cumulative_pct < 0 ? "chg-cut" : "chg-up";
     return `<tr>
       <td>${esc(p.payer)}</td>
       <td class="num muted">${esc(p.first_month)}→${esc(p.last_month)} (${p.n_months})</td>
       <td class="num">${money(p.first_rate)} → <b>${money(p.last_rate)}</b></td>
-      <td class="num ${cls}">${arrow[p.direction] || ""} ${pct}</td>
+      <td class="num ${cls}">${arrow[p.direction] || ""} ${pctTxt(p.cumulative_pct)}</td>
+      <td class="num ${realCls}" title="${esc(p.erosion_line || p.real_reason || "")}">${pctTxt(p.real_cumulative_pct)}</td>
       <td class="num muted">${p.cut_streak || 0}</td></tr>`;
   }).join("");
+  const inf = d.inflation || {};
+  const eroding = d.payers.filter((p) => p.erosion_line &&
+    p.real_cumulative_pct != null && p.real_cumulative_pct < 0);
+  // the sentence a consultant reads aloud in a renewal meeting
+  const lines = eroding.length
+    ? `<ul class="plain">${eroding.slice(0, 6).map((p) => `<li>${esc(p.erosion_line)}</li>`).join("")}</ul>`
+    : "";
+  const basis = inf.basis === "index"
+    ? `Real terms use ${esc(inf.index_name || "an index")} (${esc(inf.source || "")}).`
+    : inf.basis === "assumption"
+      ? `Real terms use YOUR assumption of ${inf.assumed_pct_per_year}%/yr — an assumption, not a measurement.`
+      : `<b>No real-terms figures:</b> ${esc(inf.reason || "no index year covers this span.")}`;
   el.innerHTML = `<div class="ov-block"><h3>Payer rate trajectory — all ${d.months.length} loaded months</h3>
     <div class="muted" style="margin-bottom:6px">${esc(d.note)} Most-eroding first.</div>
+    ${lines}
     <div class="tablewrap"><table>
-      <thead><tr><th>Payer</th><th class="num">Span</th><th class="num">First → last median</th><th class="num">Cumulative</th><th class="num">Cut streak</th></tr></thead>
-      <tbody>${rows}</tbody></table></div></div>`;
+      <thead><tr><th>Payer</th><th class="num">Span</th><th class="num">First → last median</th><th class="num">Cumulative</th><th class="num" title="the same change restated in constant dollars — a flat rate is a real cut">Real terms</th><th class="num">Cut streak</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>
+    <div class="muted" style="margin-top:6px">${basis} ${esc(inf.caveat || "")}</div></div>`;
 }
 
 function changesPayload() {

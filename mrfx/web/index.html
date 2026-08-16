@@ -741,6 +741,32 @@
         </div>
 
         <div class="validate-card" style="margin-top:14px">
+          <h3>Closures nearby — a referral source gone, or a competitor gone</h3>
+          <p class="muted">Therapy NPIs the NPPES file says were DEACTIVATED recently and not
+            since reactivated. A closed referral source is a hole in a client's inbound volume
+            they should hear about from you first; a closed competitor is room in the market.
+            NPPES deactivates for paperwork lapses and mergers too, so treat every row as a
+            call to make, not a fact to print. Needs the NPPES monthly file loaded once.</p>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <input type="text" id="cl-zip" placeholder="ZIP (optional)" style="width:122px">
+            <select id="cl-radius">
+              <option value="25">25 miles</option>
+              <option value="50" selected>50 miles</option>
+              <option value="100">100 miles</option>
+            </select>
+            <input type="text" id="cl-state" placeholder="ST" style="width:44px" title="two-letter state filter (optional)">
+            <select id="cl-days" title="how far back to look">
+              <option value="180">last 6 months</option>
+              <option value="365" selected>last year</option>
+              <option value="730">last 2 years</option>
+            </select>
+            <button class="btn primary" id="cl-run">Find closures</button>
+            <span id="cl-msg" class="muted"></span>
+          </div>
+          <div id="cl-out" style="margin-top:8px"></div>
+        </div>
+
+        <div class="validate-card" style="margin-top:14px">
           <h3>Market sizing — is this area underserved?</h3>
           <p class="muted">Census population and seniors inside a radius, against the therapy
             practices this store knows. High seniors-per-practice means room; low means saturated.

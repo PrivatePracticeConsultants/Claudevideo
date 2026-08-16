@@ -1072,6 +1072,71 @@ def cmd_newclinics(cfg: MrfxConfig, args) -> int:
     return 0
 
 
+def cmd_closures(cfg: MrfxConfig, args) -> int:
+    """Therapy NPIs deactivated recently, newest first."""
+    from .nppes import closures
+
+    if _something_owns_the_port(cfg, "reading the store locally"):
+        return 1
+    store = Store(cfg.store_dir, cfg.duckdb_memory_gb, temp_dir=cfg.duckdb_temp_dir)
+    try:
+        res = closures(store, args.zip_code, args.radius, days=args.days,
+                       state=args.state)
+    except Exception as e:  # noqa: BLE001
+        print(f"could not build the closure feed: {e}", file=sys.stderr)
+        return 1
+    if res["reason"]:
+        print(res["reason"])
+        return 0
+    if not res["rows"]:
+        print(f"no therapy NPIs deactivated in the last {res['days']} days"
+              + (f" within {res['radius_miles']:g} miles of {res['zip']}"
+                 if res["zip"] else ""))
+        print(f"\n{res['note']}")
+        return 0
+    print(f"{res['total']:,} therapy NPI(s) deactivated since {res['since']}"
+          + (f" within {res['radius_miles']:g} miles of {res['zip']}"
+             if res.get("radius_miles") else "")
+          + (f" ({res['unplaced']} skipped: ZIP has no Census centroid)"
+             if res["unplaced"] else ""))
+    print(f"\n{'deactivated':<12} {'miles':>6}  {'name':<38} {'city':<18} status")
+    for r in res["rows"]:
+        miles = "" if r.get("miles") is None else f"{r['miles']:.1f}"
+        print(f"{r['deactivated']:<12} {miles:>6}  "
+              f"{str(r.get('org_name') or '')[:38]:<38} "
+              f"{str(r.get('city') or '')[:18]:<18} "
+              f"{'had published rates' if r.get('in_store') else 'no rates in store'}")
+    print(f"\n{res['note']}")
+    return 0
+
+
+def cmd_inflation(cfg: MrfxConfig, args) -> int:
+    """Show or extend the price index that real-terms figures use."""
+    from .inflation import InflationError, index_status, save_index_values
+
+    if _something_owns_the_port(cfg, "writing to the store locally"):
+        return 1
+    store = Store(cfg.store_dir, cfg.duckdb_memory_gb, temp_dir=cfg.duckdb_temp_dir)
+    if args.year is not None or args.value is not None:
+        if args.year is None or args.value is None:
+            print("--year and --value go together", file=sys.stderr)
+            return 1
+        try:
+            save_index_values(store, [(args.year, args.value)],
+                              index_name=args.index_name, source=args.source)
+        except InflationError as e:
+            print(str(e), file=sys.stderr)
+            return 1
+        print(f"recorded {args.index_name or 'CPI-U'} {args.year} = {args.value:g}")
+    st = index_status(store)
+    print(f"\nbasis: {st['index_name']} — {st['source']}")
+    print(f"years: {st['first_year']}-{st['last_year']} ({st['n_years']} values"
+          + (f", {len(st['user_years'])} entered locally)" if st["user_years"] else ")"))
+    print(f"\n{st['note']}")
+    print(f"\n{st['caveat']}")
+    return 0
+
+
 def cmd_backup(cfg: MrfxConfig, args) -> int:
     """Copy the whole analytical store into one zip with a manifest, so the
     business asset on this one machine survives it. Parquet is already
@@ -1529,6 +1594,24 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--days", type=int, default=180, help="look-back window")
     p.add_argument("--state", default=None, help="two-letter state filter")
 
+    p = sub.add_parser(
+        "closures",
+        help="therapy NPIs deactivated recently — closed referral sources and competitors")
+    p.add_argument("--zip", dest="zip_code", default=None, help="center ZIP")
+    p.add_argument("--radius", type=float, default=25.0, help="miles (with --zip)")
+    p.add_argument("--days", type=int, default=365, help="look-back window")
+    p.add_argument("--state", default=None, help="two-letter state filter")
+
+    p = sub.add_parser(
+        "inflation",
+        help="show or extend the price index behind real-terms (constant-dollar) figures")
+    p.add_argument("--year", type=int, default=None, help="calendar year, e.g. 2025")
+    p.add_argument("--value", type=float, default=None,
+                   help="that year's ANNUAL AVERAGE index value, as published")
+    p.add_argument("--index-name", dest="index_name", default=None,
+                   help="index label (default CPI-U)")
+    p.add_argument("--source", default=None, help="where you read the value")
+
     p = sub.add_parser("backup", help="copy the whole store into one zip with a checksum manifest")
     p.add_argument("dest", help="backup filename, e.g. E:\\backups\\mrfx_2026-08-12.zip")
     p = sub.add_parser("verify", help="check a backup zip against its manifest, or the live store's integrity")
@@ -1609,6 +1692,8 @@ def main(argv: list[str] | None = None) -> int:
         "utilization": cmd_utilization,
         "demographics": cmd_demographics,
         "newclinics": cmd_newclinics,
+        "closures": cmd_closures,
+        "inflation": cmd_inflation,
         "backup": cmd_backup,
         "verify": cmd_verify,
         "reset": cmd_reset,

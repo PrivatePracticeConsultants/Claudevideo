@@ -346,6 +346,13 @@ _BULK_COLS = {
     # practice that has no payer contracts yet, which is the earliest possible
     # consulting lead (mrfx/nppes.py builds that feed from this column)
     "enumerated": "Provider Enumeration Date",
+    # An NPI that was DEACTIVATED is a practice that stopped billing — a
+    # referral source that closed (a loss the client should hear from their
+    # consultant first) or a competitor that closed (a market that just got
+    # less crowded). Reactivation matters too: NPPES deactivates for paperwork
+    # lapses as often as for closures, and a reactivated NPI never closed.
+    "deactivated": "NPI Deactivation Date",
+    "reactivated": "NPI Reactivation Date",
 }
 
 
@@ -406,14 +413,15 @@ _BULK_STREAM_MAX_WANTED = 2_000_000
 # multi-GB scan). The parquet holds only the ~9 columns we keep.
 _NPPES_CACHE_COLS = ("npi", "org_name", "entity_type", "taxonomy_code",
                      "taxonomy_codes", "city", "state", "address", "zip",
-                     "phone", "enumeration_date")
+                     "phone", "enumeration_date", "deactivation_date",
+                     "reactivation_date")
 # every taxonomy column the bulk file can carry (NPPES allows 15)
 _BULK_TAX_SLOTS = [f"Healthcare Provider Taxonomy Code_{i}" for i in range(1, 16)]
 # Bumped whenever _NPPES_CACHE_COLS changes: the signature is otherwise just
 # the source file's (path, mtime, size), so an UNCHANGED NPPES download would
 # keep serving a cache built under the old column set and the new column would
 # silently never appear.
-_NPPES_CACHE_SCHEMA = 3
+_NPPES_CACHE_SCHEMA = 4
 
 
 def _nppes_cache_path(store: Store) -> Path:
@@ -480,6 +488,7 @@ def _write_nppes_parquet(cfg: MrfxConfig, store: Store, pqp: Path,
             i_city, i_state = col.get("city"), col.get("state")
             i_addr, i_zip, i_phone = col.get("address"), col.get("zip"), col.get("phone")
             i_enum = col.get("enumerated")
+            i_deact, i_react = col.get("deactivated"), col.get("reactivated")
 
             def at(row, ix):
                 return (row[ix] if ix is not None and ix < len(row) else None) or None
@@ -507,7 +516,9 @@ def _write_nppes_parquet(cfg: MrfxConfig, store: Store, pqp: Path,
                              ("taxonomy_codes", all_tax(row)), ("city", at(row, i_city)),
                              ("state", at(row, i_state)), ("address", at(row, i_addr)),
                              ("zip", at(row, i_zip)), ("phone", at(row, i_phone)),
-                             ("enumeration_date", at(row, i_enum))):
+                             ("enumeration_date", at(row, i_enum)),
+                             ("deactivation_date", at(row, i_deact)),
+                             ("reactivation_date", at(row, i_react))):
                     batch[c].append(v)
                 if len(batch["npi"]) >= 100000:
                     writer.write_table(pa.table(batch, schema=schema))
