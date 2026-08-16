@@ -1663,6 +1663,48 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         except (TypeError, ValueError) as e:
             raise HTTPException(422, f"bad input: {e}")
 
+    # -- data quality: what kind of rate, how old, does size explain it ----------------
+
+    @app.post("/api/quality/types")
+    def api_quality_types(body: dict = Body(...)):
+        """Contracted vs payer-derived composition of the scoped market."""
+        from .quality import rate_type_mix
+        try:
+            return rate_type_mix(store, body.get("market") or {})
+        except BenchmarkError as e:
+            raise HTTPException(422, str(e))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(422, f"bad input: {e}")
+
+    @app.get("/api/quality/freshness")
+    def api_quality_freshness(stale_days: int = 270):
+        from .quality import payer_freshness
+        return payer_freshness(store, stale_days=max(1, min(int(stale_days), 3650)))
+
+    @app.post("/api/quality/size")
+    def api_quality_size(body: dict = Body(...)):
+        """Whether bigger practices are paid better in this market."""
+        from .quality import size_premium
+        try:
+            return size_premium(store, body.get("market") or {},
+                                subject=str(body.get("subject") or "").strip() or None,
+                                min_practices=_as_int(body.get("min_practices"), 5))
+        except BenchmarkError as e:
+            raise HTTPException(422, str(e))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(422, f"bad input: {e}")
+
+    @app.post("/api/quality/subject-types")
+    def api_quality_subject_types(body: dict = Body(...)):
+        from .quality import code_type_flag
+        try:
+            return code_type_flag(store, body.get("market") or {},
+                                  str(body.get("subject") or "").strip())
+        except BenchmarkError as e:
+            raise HTTPException(422, str(e))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(422, f"bad input: {e}")
+
     # -- hospital price transparency ---------------------------------------------------
 
     @app.get("/api/hospital/status")

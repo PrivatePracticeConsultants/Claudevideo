@@ -275,7 +275,49 @@ async function loadOverview(stateCode = "") {
 
   out.innerHTML = `<div class="rc-summary">Market snapshot — <b>${scope}</b>. ${payerBlock ? "The payer index below is the fastest read on where the reimbursement leverage is." : ""}</div>
     <div class="stats-row">${cards}</div>${payerBlock}${disc}${topCodes}
+    <div id="ov-quality"></div>
     <div class="bench-note">All figures use published dollar negotiated rates (base modifier, professional class). A published rate is directional market positioning, not proof a provider collects it.</div>`;
+  renderDataQuality(stateCode);
+}
+
+// How solid is the data behind every number above: which payers re-published
+// recently, and how much of the market is contracted vs payer-derived. Loaded
+// after the snapshot so a slow/failed call never blanks it.
+async function renderDataQuality(stateCode) {
+  const el = $("#ov-quality");
+  if (!el) return;
+  const market = { month: "latest" };
+  if (stateCode) market.state = stateCode;
+  const [fresh, types] = await Promise.all([
+    api("/api/quality/freshness").catch(() => null),
+    postJson("/api/quality/types", { market }).catch(() => null),
+  ]);
+  if (!fresh && !types) return;
+  const rows = (fresh?.payers || []).map((p) => `<tr>
+      <td>${esc(p.payer)}</td>
+      <td class="num">${esc(p.published || "–")}</td>
+      <td class="num ${p.stale ? "chg-cut" : ""}">${
+        p.age_days == null ? (p.date_unreadable ? "unreadable" : "not stated")
+                           : p.age_days + " days"}</td>
+      <td class="num muted">${esc(p.newest_file_month || "–")}</td>
+      <td class="num muted">${fmtInt(p.rows)}</td></tr>`).join("");
+  const mixRows = (types?.rows || []).map((r) => `<tr>
+      <td>${esc(r.rate_type)}${r.contracted ? "" : ' <span class="muted">(not a contract)</span>'}</td>
+      <td class="num">${r.pct}%</td>
+      <td class="num muted">${fmtInt(r.n_practices)}</td>
+      <td class="num">${money(r.median_rate)}</td></tr>`).join("");
+  el.innerHTML = `<div class="ov-block"><h3>How solid is this data?</h3>
+    ${types ? `<div class="muted" style="margin-bottom:6px">${esc(types.headline)}</div>` : ""}
+    ${mixRows ? `<div class="tablewrap"><table>
+      <thead><tr><th>Rate type</th><th class="num">Share</th><th class="num">Practices</th><th class="num">Median</th></tr></thead>
+      <tbody>${mixRows}</tbody></table></div>` : ""}
+    ${fresh ? `<div class="muted" style="margin:8px 0 6px">${esc(fresh.headline)}</div>` : ""}
+    ${rows ? `<div class="tablewrap" style="max-height:32vh"><table>
+      <thead><tr><th>Payer</th><th class="num">Published</th><th class="num">Age</th>
+      <th class="num">Newest month</th><th class="num">Rows</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>` : ""}
+    <div class="muted" style="font-size:11.5px;margin-top:6px">
+      ${esc(types?.note || "")} ${esc(fresh?.note || "")}</div></div>`;
 }
 
 /* =======================================================================
@@ -1446,10 +1488,50 @@ function renderBenchmark(out, bench, opp) {
       <th class="num">Peers</th><th>Position</th></tr></thead>
       <tbody>${rows}</tbody></table></div>
     ${oppHtml}
+    <div id="b-quality"></div>
     <div class="bench-note">${esc(bench.basis_note)}${spreadNote} Ghost rates: a published rate does not mean a
     peer bills that code — scoping the market to a discipline or code list mitigates this
     (the market definition above shows which filters were actually applied). A published rate
     is not proof a peer collects it — this is directional market positioning.</div>`;
+  // use the market the SERVER echoed back, not the form: it is the scope the
+  // numbers above were actually computed under
+  renderBenchmarkQuality({ market: bench.market, subject: bench.subject });
+}
+
+// Two questions a client asks the moment they see a benchmark: "are the
+// practices above me just bigger?" and "is this even a real contracted rate?"
+// Both are answerable from the same data, so answer them here rather than
+// leaving the consultant to field them unarmed.
+async function renderBenchmarkQuality(payload) {
+  const el = $("#b-quality");
+  if (!el || !payload) return;
+  const [size, types] = await Promise.all([
+    postJson("/api/quality/size", { market: payload.market, subject: payload.subject })
+      .catch(() => null),
+    postJson("/api/quality/subject-types",
+             { market: payload.market, subject: payload.subject }).catch(() => null),
+  ]);
+  if (!size && !types) return;
+  const bands = (size?.bands || []).filter((b) => !b.thin);
+  const bandRows = bands.map((b) => `<tr>
+      <td>${esc(b.band)}</td>
+      <td class="num">p${b.avg_percentile}</td>
+      <td class="num">${money(b.median_rate)}</td>
+      <td class="num muted">${fmtInt(b.n_practices)}</td></tr>`).join("");
+  const typeWarn = types?.flag
+    ? `<div class="warn-text" style="margin-top:8px">${esc(types.headline)}</div>`
+    : types && types.derived_pct != null
+      ? `<div class="muted" style="margin-top:8px">${esc(types.headline)}</div>` : "";
+  el.innerHTML = `<div class="ov-block" style="margin-top:12px">
+    <h3>"Aren't the practices above us just bigger?"</h3>
+    <div class="muted" style="margin-bottom:6px">${esc(size?.headline || "")}</div>
+    ${bandRows ? `<div class="tablewrap"><table>
+      <thead><tr><th>Practice size</th><th class="num">Typical position</th>
+      <th class="num">Median rate</th><th class="num">Practices</th></tr></thead>
+      <tbody>${bandRows}</tbody></table></div>` : ""}
+    ${typeWarn}
+    <div class="muted" style="font-size:11.5px;margin-top:6px">
+      ${esc(size?.note || "")}</div></div>`;
 }
 
 // Client reports must be scoped to one state (reimbursement varies by state).
