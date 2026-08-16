@@ -381,7 +381,68 @@ async function loadMarkets() {
     `<div class="rc-summary">Market intelligence — <b>${esc(code)}</b>${desc ? " · " + esc(desc) : ""}. ` +
     `Latest rate per contract; thin cells (&lt;5 practices) suppressed.</div>` +
     renderMkMedicare(mcr) + renderMkNegotiability(neg) +
-    renderMkGeography(geo) + renderMkDifferential(diff);
+    renderMkGeography(geo) + `<div id="mk-local"></div><div id="mk-hhi"></div>` +
+    renderMkDifferential(diff);
+  renderMkLocal(code, market);
+  renderMkConcentration(market);
+}
+
+// Inside ONE state, cities differ enough to matter to a client choosing where
+// to open or arguing their location. Only runs when a state is set — pooling
+// cities across states would bury the far larger state effect.
+async function renderMkLocal(code, market) {
+  const el = $("#mk-local");
+  if (!el) return;
+  if (!market.state) {
+    el.innerHTML = mkEmpty("Inside one state (by city)",
+      "Set a state above to break this code down by city.");
+    return;
+  }
+  const d = await postJson("/api/territory/local",
+                           { code, market, state: market.state }).catch((e) => ({ _err: e.message }));
+  if (d._err) { el.innerHTML = mkErr(d, "Inside one state (by city)"); return; }
+  if (!d.cities.length) {
+    el.innerHTML = mkEmpty("Inside one state (by city)", esc(d.headline));
+    return;
+  }
+  const rows = d.cities.map((c) => `<tr>
+    <td>${esc(c.city.replace(/\b\w/g, (m) => m.toUpperCase()))}</td>
+    <td class="num">${money(c.median_rate)}</td>
+    <td class="num ${c.vs_state_pct > 0 ? "" : "warn-text"}">${
+      c.vs_state_pct == null ? "–" : (c.vs_state_pct > 0 ? "+" : "") + c.vs_state_pct + "%"}</td>
+    <td class="num muted">${money(c.p25)} – ${money(c.p75)}</td>
+    <td class="num muted">${fmtInt(c.n_practices)}</td></tr>`).join("");
+  el.innerHTML = `<div class="ov-block"><h3>Inside ${esc(d.state)} (by city)</h3>
+    <div class="muted" style="margin-bottom:6px">${esc(d.headline)}
+      State median ${money(d.state_median)}.${
+        d.suppressed_cities ? ` ${d.suppressed_cities} city/cities suppressed (under ${d.min_practices} practices).` : ""}</div>
+    <div class="tablewrap"><table><thead><tr><th>City</th><th class="num">Median</th>
+      <th class="num">vs state</th><th class="num">P25–P75</th><th class="num">Practices</th>
+      </tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="muted" style="font-size:11.5px;margin-top:6px">${esc(d.note)}</div></div>`;
+}
+
+// Who holds the contracts here. The caveat is louder than the number: this is
+// the store's own payer coverage, not market share of covered lives.
+async function renderMkConcentration(market) {
+  const el = $("#mk-hhi");
+  if (!el) return;
+  const d = await postJson("/api/territory/concentration", { market })
+    .catch((e) => ({ _err: e.message }));
+  if (d._err) { el.innerHTML = mkErr(d, "Payer concentration"); return; }
+  if (!d.payers.length) { el.innerHTML = ""; return; }
+  const rows = d.payers.map((p) => `<tr>
+    <td>${esc(p.payer)}</td>
+    <td class="num">${p.share_pct}%</td>
+    <td class="num muted">${fmtInt(p.n_practices)}</td>
+    <td class="num">${money(p.median_rate)}</td></tr>`).join("");
+  el.innerHTML = `<div class="ov-block"><h3>Payer concentration${
+      d.band ? ` — ${esc(d.band)}` : ""}</h3>
+    <div class="muted" style="margin-bottom:6px">${esc(d.headline)}</div>
+    <div class="tablewrap"><table><thead><tr><th>Payer</th>
+      <th class="num">Share of contracted practices</th><th class="num">Practices</th>
+      <th class="num">Median rate</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="muted" style="font-size:11.5px;margin-top:6px">${esc(d.note)}</div></div>`;
 }
 
 function mkErr(d, title) {
@@ -2385,6 +2446,38 @@ function initNewClinics() {
   });
 }
 
+/* ---- steal-share: referrals going to a competitor ----------------------- */
+function initStealShare() {
+  $("#ss-run").addEventListener("click", async () => {
+    const out = $("#ss-out");
+    const subject = $("#ss-subject").value.trim();
+    if (!subject) { $("#ss-msg").textContent = "pick a client first"; return; }
+    $("#ss-msg").textContent = "looking…";
+    let d;
+    try { d = await postJson("/api/territory/steal-share", { subject }); }
+    catch (e) { $("#ss-msg").textContent = ""; out.innerHTML = `<div class="muted">${esc(e.message)}</div>`; return; }
+    $("#ss-msg").textContent = "";
+    if (!d.rows.length) { out.innerHTML = `<div class="muted">${esc(d.reason || "nothing to target")}</div>`; return; }
+    const rows = d.rows.map((r, i) => `<tr>
+      <td class="num muted">${i + 1}</td>
+      <td>${esc(r.name || r.npi)}<div class="sub">${esc(r.specialty || "")}</div></td>
+      <td class="num"><b>${fmtInt(r.patients_elsewhere)}</b></td>
+      <td class="num">${fmtInt(r.patients_to_me)}</td>
+      <td class="num">${r.share_missed_pct == null ? "–" : r.share_missed_pct + "%"}</td>
+      <td class="sub">${esc([r.city, r.state].filter(Boolean).join(", "))}</td>
+      <td class="sub">${esc(r.phone || "")}</td>
+      <td>${r.already_a_partner ? '<span class="muted">sends you some</span>' : "<b>sends you none</b>"}</td>
+    </tr>`).join("");
+    out.innerHTML = `<div class="muted" style="margin-bottom:6px">${esc(d.headline)}
+      Release: ${esc(d.dataset || "")}.</div>
+      <div class="tablewrap" style="max-height:40vh"><table><thead><tr>
+        <th>#</th><th>Referral source</th><th class="num">To others</th>
+        <th class="num">To your client</th><th class="num">Share missed</th>
+        <th>Location</th><th>Phone</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table></div>
+      <div class="muted" style="font-size:11.5px;margin-top:6px">${esc(d.note)}</div>`;
+  });
+}
+
 /* ---- hospital price transparency (parity vs practice rates) ------------- */
 function initHospital() {
   const msg = (t) => { $("#hp-msg").textContent = t; };
@@ -3046,6 +3139,7 @@ async function initLeads() {
   initNewToNetwork();
   initNewClinics();
   initClosures();
+  initStealShare();
   initMarketSizing();
   $("#ld-csv").addEventListener("click", () => { if (state.lastLeadsPayload) postDownload("/api/leads.csv", state.lastLeadsPayload, "leads.csv"); });
   $("#ld-board-run").addEventListener("click", runLeaderboard);

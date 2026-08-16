@@ -1663,6 +1663,51 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         except (TypeError, ValueError) as e:
             raise HTTPException(422, f"bad input: {e}")
 
+    # -- territory: sub-state geography, payer concentration, steal-share --------------
+
+    @app.post("/api/territory/local")
+    def api_territory_local(body: dict = Body(...)):
+        """Median rate by CITY inside one state, for one code."""
+        from .territory import local_rate_map
+        try:
+            return local_rate_map(store, str(body.get("code") or ""),
+                                  body.get("market") or {},
+                                  state=str(body.get("state") or "").strip() or None,
+                                  limit=_as_int(body.get("limit"), 60))
+        except BenchmarkError as e:
+            raise HTTPException(422, str(e))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(422, f"bad input: {e}")
+
+    @app.post("/api/territory/concentration")
+    def api_territory_concentration(body: dict = Body(...)):
+        """How contracted relationships divide across payers (HHI)."""
+        from .territory import payer_concentration
+        try:
+            return payer_concentration(store, body.get("market") or {})
+        except BenchmarkError as e:
+            raise HTTPException(422, str(e))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(422, f"bad input: {e}")
+
+    @app.post("/api/territory/steal-share")
+    def api_territory_steal(body: dict = Body(...)):
+        """Referral sources feeding a client's competitors, not the client."""
+        from .medicare import MedicareImportError
+        from .territory import steal_share
+        try:
+            return steal_share(
+                store, str(body.get("subject") or "").strip(),
+                limit=_as_int(body.get("limit"), 50),
+                min_patients=_as_int(body.get("min_patients"), 11),
+                dataset_id=str(body.get("dataset_id") or "").strip() or None)
+        except BenchmarkError as e:
+            raise HTTPException(422, str(e))
+        except MedicareImportError as e:
+            raise HTTPException(422, str(e))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(422, f"bad input: {e}")
+
     # -- data quality: what kind of rate, how old, does size explain it ----------------
 
     @app.post("/api/quality/types")

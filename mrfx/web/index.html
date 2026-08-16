@@ -787,6 +787,22 @@
         </div>
 
         <div class="validate-card" style="margin-top:14px">
+          <h3>Referrals going to someone else</h3>
+          <p class="muted">Physicians who send therapy patients to other practices in your
+            client's own city — and little or nothing to your client. Every other list here finds
+            practices; this one finds the specific relationship to go and win. Needs a CMS
+            referral release imported on the Medicare tab. Shared-patient counts are a proxy for
+            referral, not a record of one, so these are the calls worth making first — not proof
+            a relationship is winnable.</p>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <input type="text" id="ss-subject" list="ld-subjects" placeholder="your client…" style="width:230px">
+            <button class="btn primary" id="ss-run">Find them</button>
+            <span id="ss-msg" class="muted"></span>
+          </div>
+          <div id="ss-out" style="margin-top:8px"></div>
+        </div>
+
+        <div class="validate-card" style="margin-top:14px">
           <h3>Market sizing — is this area underserved?</h3>
           <p class="muted">Census population and seniors inside a radius, against the therapy
             practices this store knows. High seniors-per-practice means room; low means saturated.
