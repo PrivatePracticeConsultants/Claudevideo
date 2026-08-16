@@ -288,11 +288,12 @@ async function renderDataQuality(stateCode) {
   if (!el) return;
   const market = { month: "latest" };
   if (stateCode) market.state = stateCode;
-  const [fresh, types] = await Promise.all([
+  const [fresh, types, posture] = await Promise.all([
     api("/api/quality/freshness").catch(() => null),
     postJson("/api/quality/types", { market }).catch(() => null),
+    postJson("/api/quality/posture", { market }).catch(() => null),
   ]);
-  if (!fresh && !types) return;
+  if (!fresh && !types && !posture) return;
   const rows = (fresh?.payers || []).map((p) => `<tr>
       <td>${esc(p.payer)}</td>
       <td class="num">${esc(p.published || "–")}</td>
@@ -306,7 +307,25 @@ async function renderDataQuality(stateCode) {
       <td class="num">${r.pct}%</td>
       <td class="num muted">${fmtInt(r.n_practices)}</td>
       <td class="num">${money(r.median_rate)}</td></tr>`).join("");
-  el.innerHTML = `<div class="ov-block"><h3>How solid is this data?</h3>
+  // Which payers actually do deals. The label is the payer's claim; the
+  // spread is the evidence — both shown, because they can disagree.
+  const postRows = (posture?.payers || []).map((p) => `<tr>
+      <td>${esc(p.payer)}</td>
+      <td>${p.winnable === true ? "<b>negotiates</b>"
+            : p.winnable === false ? '<span class="muted">one schedule</span>'
+            : '<span class="muted">too little data</span>'}</td>
+      <td class="sub">${esc(p.claimed || "unstated")}</td>
+      <td class="num muted">${p.pct_codes_varying == null ? "–" : p.pct_codes_varying + "%"}</td>
+      <td class="sub">${p.conflict ? "<b>claim and behaviour disagree</b>" : ""}</td>
+    </tr>`).join("");
+  const postureBlock = postRows ? `<div class="ov-block"><h3>Which payers actually negotiate</h3>
+    <div class="muted" style="margin-bottom:6px">${esc(posture.headline)}</div>
+    <div class="tablewrap"><table><thead><tr><th>Payer</th><th>Read</th>
+      <th>Says</th><th class="num">Codes priced differently</th><th></th></tr></thead>
+      <tbody>${postRows}</tbody></table></div>
+    <div class="muted" style="font-size:11.5px;margin-top:6px">${esc(posture.note)}</div></div>` : "";
+
+  el.innerHTML = postureBlock + `<div class="ov-block"><h3>How solid is this data?</h3>
     ${types ? `<div class="muted" style="margin-bottom:6px">${esc(types.headline)}</div>` : ""}
     ${mixRows ? `<div class="tablewrap"><table>
       <thead><tr><th>Rate type</th><th class="num">Share</th><th class="num">Practices</th><th class="num">Median</th></tr></thead>
@@ -381,9 +400,11 @@ async function loadMarkets() {
     `<div class="rc-summary">Market intelligence — <b>${esc(code)}</b>${desc ? " · " + esc(desc) : ""}. ` +
     `Latest rate per contract; thin cells (&lt;5 practices) suppressed.</div>` +
     renderMkMedicare(mcr) + renderMkNegotiability(neg) +
-    renderMkGeography(geo) + `<div id="mk-local"></div><div id="mk-hhi"></div>` +
+    renderMkGeography(geo) +
+    `<div id="mk-local"></div><div id="mk-radius"></div><div id="mk-hhi"></div>` +
     renderMkDifferential(diff);
   renderMkLocal(code, market);
+  renderMkRadius(code, market);
   renderMkConcentration(market);
 }
 
@@ -419,6 +440,38 @@ async function renderMkLocal(code, market) {
     <div class="tablewrap"><table><thead><tr><th>City</th><th class="num">Median</th>
       <th class="num">vs state</th><th class="num">P25–P75</th><th class="num">Practices</th>
       </tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="muted" style="font-size:11.5px;margin-top:6px">${esc(d.note)}</div></div>`;
+}
+
+// The sharpest form of the sub-state question: same payer, same code, a short
+// drive apart. City names cannot show it — a metro's edge is 40 miles from its
+// centre — so this places every practice by its own ZIP's centroid.
+async function renderMkRadius(code, market) {
+  const el = $("#mk-radius");
+  if (!el) return;
+  const zip = ($("#mk-zip") && $("#mk-zip").value.trim()) || "";
+  if (!/^\d{5}$/.test(zip)) {
+    el.innerHTML = mkEmpty("By distance from a ZIP",
+      "Enter a 5-digit ZIP above to see whether this code pays differently a short drive away.");
+    return;
+  }
+  const d = await postJson("/api/territory/radius",
+                           { code, market, zip, max_miles: 100 })
+    .catch((e) => ({ _err: e.message }));
+  if (d._err) { el.innerHTML = mkErr(d, "By distance from a ZIP"); return; }
+  const rows = d.bands.map((b) => `<tr>
+    <td>${esc(b.band)}</td>
+    <td class="num">${b.thin ? "–" : money(b.median_rate)}</td>
+    <td class="num ${b.vs_nearest_pct < 0 ? "warn-text" : ""}">${
+      b.vs_nearest_pct == null ? "–" : (b.vs_nearest_pct > 0 ? "+" : "") + b.vs_nearest_pct + "%"}</td>
+    <td class="num muted">${fmtInt(b.n_practices)}${b.thin && b.n_practices ? " (thin)" : ""}</td>
+  </tr>`).join("");
+  el.innerHTML = `<div class="ov-block"><h3>By distance from ${esc(d.zip)}</h3>
+    <div class="muted" style="margin-bottom:6px">${esc(d.headline)}${
+      d.unplaced ? ` ${d.unplaced} practice(s) had no ZIP centroid and are not placed.` : ""}</div>
+    <div class="tablewrap"><table><thead><tr><th>Distance</th>
+      <th class="num">Median</th><th class="num">vs nearest band</th>
+      <th class="num">Practices</th></tr></thead><tbody>${rows}</tbody></table></div>
     <div class="muted" style="font-size:11.5px;margin-top:6px">${esc(d.note)}</div></div>`;
 }
 
@@ -604,7 +657,18 @@ function renderRoster(out, d) {
     <td class="num">${money(o.median_rate)}</td>
     <td class="sub">${esc(o.tin_value)}</td></tr>`).join("");
   const cap = d.truncated ? ` <span class="warn-text">Showing the first ${fmtInt(d.limit)} — narrow by state/discipline to see the rest.</span>` : "";
-  out.innerHTML = `<div class="rc-summary"><b>${fmtInt(d.count)}${d.truncated ? "+" : ""}</b> organization${d.count === 1 ? "" : "s"} contracted with <b>${esc(d.payer)}</b>${d.market.state ? " in " + esc(d.market.state) : ""}${d.market.discipline ? " · " + esc(d.market.discipline) : ""}.${cap}</div>
+  // How old the book being described actually is. A roster of a payer that
+  // last re-published 14 months ago is a roster of what WAS true.
+  const f = d.freshness;
+  const fresh = !f ? ""
+    : f.published == null
+      ? ` <span class="muted">This payer's files state no publication date.</span>`
+      : f.stale
+        ? ` <span class="warn-text">Last published ${esc(f.published)}${
+            f.age_days != null ? ` — ${fmtInt(f.age_days)} days ago` : ""}; these rates have not been refreshed recently.</span>`
+        : ` <span class="muted">Last published ${esc(f.published)}${
+            f.age_days != null ? ` (${fmtInt(f.age_days)} days ago)` : ""}.</span>`;
+  out.innerHTML = `<div class="rc-summary"><b>${fmtInt(d.count)}${d.truncated ? "+" : ""}</b> organization${d.count === 1 ? "" : "s"} contracted with <b>${esc(d.payer)}</b>${d.market.state ? " in " + esc(d.market.state) : ""}${d.market.discipline ? " · " + esc(d.market.discipline) : ""}.${cap}${fresh}</div>
     <div class="muted" style="font-size:11.5px;margin:-6px 0 10px">${esc(d.note)}</div>
     <div class="tablewrap" style="max-height:calc(100vh - 220px)"><table>
       <thead><tr><th>#</th><th>Organization</th><th>Location</th><th class="num">Providers</th><th class="num">Codes</th><th class="num" title="position among this payer's other practices">Position</th><th class="num" title="median across whichever codes that practice prices with this payer — not comparable row-to-row unless the practices price the same codes">Median rate*</th><th>TIN</th></tr></thead>
@@ -2531,6 +2595,7 @@ function initStealShare() {
       <td class="num"><b>${fmtInt(r.patients_elsewhere)}</b></td>
       <td class="num">${fmtInt(r.patients_to_me)}</td>
       <td class="num">${r.share_missed_pct == null ? "–" : r.share_missed_pct + "%"}</td>
+      <td class="num">${r.miles == null ? "–" : r.miles}</td>
       <td class="sub">${esc([r.city, r.state].filter(Boolean).join(", "))}</td>
       <td class="sub">${esc(r.phone || "")}</td>
       <td>${r.already_a_partner ? '<span class="muted">sends you some</span>' : "<b>sends you none</b>"}</td>
@@ -2540,7 +2605,8 @@ function initStealShare() {
       <div class="tablewrap" style="max-height:40vh"><table><thead><tr>
         <th>#</th><th>Referral source</th><th class="num">To others</th>
         <th class="num">To your client</th><th class="num">Share missed</th>
-        <th>Location</th><th>Phone</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table></div>
+        <th class="num">Miles</th><th>Location</th><th>Phone</th><th>Status</th>
+        </tr></thead><tbody>${rows}</tbody></table></div>
       <div class="muted" style="font-size:11.5px;margin-top:6px">${esc(d.note)}</div>`;
   });
 }

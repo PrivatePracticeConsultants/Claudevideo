@@ -248,3 +248,97 @@ def test_a_thin_subject_is_a_cant_say_not_a_bad_name(cfg, store):
 
     with pytest.raises(BenchmarkError, match="check the practice name"):
         size_premium(store, MARKET, subject="Not A Real Practice")
+
+
+def test_negotiated_and_fee_schedule_are_never_collapsed(cfg, store):
+    """'negotiated' and 'fee schedule' are both contracted amounts, but they say
+    OPPOSITE things about whether a negotiation is worth opening. Treating them
+    as one value — which the first cut of this module did — throws away the most
+    actionable fact in the column."""
+    from mrfx.quality import payer_posture
+
+    rows, npis = [], []
+    npi = 1417594896
+    # Dealmaker: negotiated_type='negotiated' AND actually pays differently
+    for i in range(6):
+        rows.append(_row(f"43100000{i}", str(npi + i), 40.0 + i, payer="Dealmaker"))
+        npis.append(str(npi + i))
+    for i in range(6):
+        rows.append(_row(f"43100000{i}", str(npi + i), 50.0 + i,
+                         payer="Dealmaker", code="97140"))
+    for i in range(6):
+        rows.append(_row(f"43100000{i}", str(npi + i), 30.0 + i,
+                         payer="Dealmaker", code="97112"))
+    # Takeitorleaveit: negotiated_type='fee schedule' AND one rate for everyone
+    for i in range(6):
+        rows.append(_row(f"43200000{i}", str(npi + 100 + i), 44.0,
+                         payer="Takeitorleaveit", ntype="fee schedule"))
+        npis.append(str(npi + 100 + i))
+    for i in range(6):
+        rows.append(_row(f"43200000{i}", str(npi + 100 + i), 39.0,
+                         payer="Takeitorleaveit", ntype="fee schedule", code="97140"))
+    for i in range(6):
+        rows.append(_row(f"43200000{i}", str(npi + 100 + i), 33.0,
+                         payer="Takeitorleaveit", ntype="fee schedule", code="97112"))
+    with store.rates_part_writer("a.json") as w:
+        w.write_batch(rows)
+    _npis(store, [(n, f"C{n[-3:]}") for n in npis])
+    store.rebuild_rollups()
+
+    p = {x["payer"]: x for x in payer_posture(store, MARKET)["payers"]}
+    d, t = p["Dealmaker"], p["Takeitorleaveit"]
+
+    assert d["claimed"] == "negotiates" and d["pct_negotiated"] == 100.0
+    assert t["claimed"] == "standard fee schedule" and t["pct_fee_schedule"] == 100.0
+    assert d["observed"] == "prices practices differently"
+    assert t["observed"] == "one rate for everyone"
+    assert d["winnable"] is True, "a negotiation worth opening"
+    assert t["winnable"] is False, "expect little movement"
+    assert "expect little movement" in t["verdict"]
+
+    res = payer_posture(store, MARKET)
+    assert res["n_winnable"] == 1 and "Dealmaker" in res["headline"]
+
+
+def test_a_payers_claim_and_its_behaviour_can_disagree(cfg, store):
+    """A payer calling every rate a 'fee schedule' while paying practices
+    differently IS making exceptions. Reporting only the label would hide that,
+    and reporting only the spread would ignore what the payer said."""
+    from mrfx.quality import payer_posture
+
+    rows, npis = [], []
+    npi = 1417594896
+    for i in range(6):
+        rows.append(_row(f"43100000{i}", str(npi + i), 40.0 + i * 3,
+                         payer="SaysFixed", ntype="fee schedule"))
+        rows.append(_row(f"43100000{i}", str(npi + i), 30.0 + i * 2,
+                         payer="SaysFixed", ntype="fee schedule", code="97140"))
+        rows.append(_row(f"43100000{i}", str(npi + i), 20.0 + i,
+                         payer="SaysFixed", ntype="fee schedule", code="97112"))
+        npis.append(str(npi + i))
+    with store.rates_part_writer("a.json") as w:
+        w.write_batch(rows)
+    _npis(store, [(n, f"C{n[-3:]}") for n in npis])
+    store.rebuild_rollups()
+
+    p = payer_posture(store, MARKET)["payers"][0]
+    assert p["claimed"] == "standard fee schedule"
+    assert p["observed"] == "prices practices differently"
+    assert p["conflict"] is True
+    assert "it does make exceptions" in p["verdict"]
+    assert "CLAIM" in payer_posture(store, MARKET)["note"], (
+        "the note has to say the label is a claim and the spread is evidence")
+
+
+def test_a_payer_with_too_little_shared_data_is_not_judged(cfg, store):
+    """One practice per code cannot show dispersion either way. Calling that
+    'one rate for everyone' would invent the finding."""
+    from mrfx.quality import payer_posture
+
+    with store.rates_part_writer("a.json") as w:
+        w.write_batch([_row("431234567", "1417594896", 40.0, payer="Tiny")])
+    _npis(store, [("1417594896", "A")])
+    store.rebuild_rollups()
+    p = payer_posture(store, MARKET)["payers"][0]
+    assert p["thin"] is True and p["observed"] is None and p["winnable"] is None
+    assert "too few shared codes to check" in p["verdict"]

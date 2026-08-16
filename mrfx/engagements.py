@@ -217,10 +217,38 @@ def compare_to_baseline(store: Store, subject: str, label: str = "engagement sta
         n = len(xs)
         return round((xs[n // 2] if n % 2 else (xs[n // 2 - 1] + xs[n // 2]) / 2), 1)
 
+    # A win measured in nominal dollars overstates itself: prices rose between
+    # the baseline and now, so part of any gain is inflation, not negotiation.
+    # Cosmetic tier — no index year covering the span means NO real-terms
+    # figure, never an estimate, and never a failed comparison.
+    real = None
+    try:
+        from .inflation import BASIS_CAVEAT, deflator, load_index, real_change_pct
+        d = deflator(load_index(store), row[1], now["month"])
+        before, after = med(pb), med(pa)
+        gain_pct = None
+        if volumes and total_value:
+            gain_pct = None       # a dollar total has no percentage to deflate
+        real = {
+            "basis": d.get("basis"), "reason": d.get("reason"),
+            "factor": round(d["factor"], 4) if d.get("factor") else None,
+            "caveat": BASIS_CAVEAT,
+            "value_in_baseline_dollars": (
+                round(total_value / d["factor"], 2)
+                if volumes and total_value and d.get("factor") else None),
+            "note": (
+                "Prices rose between the baseline and now, so a gain measured in "
+                "today's dollars is worth less than the same figure at the "
+                "baseline. Where an index covers the span, the win is also shown "
+                "in baseline dollars."),
+        }
+    except Exception:  # noqa: BLE001
+        real = None
     return {
         "subject": subject, "label": label,
         "baseline_month": row[1], "baseline_saved": str(row[2])[:19],
         "current_month": now["month"],
+        "real_terms": real,
         "rows": both, "gained_codes": gained, "lost_codes": lost,
         "basis_note": now.get("basis_note"), "peer_set": now.get("peer_set"),
         "market": cmp_market,

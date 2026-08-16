@@ -1739,6 +1739,20 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         except (TypeError, ValueError) as e:
             raise HTTPException(422, f"bad input: {e}")
 
+    @app.post("/api/territory/radius")
+    def api_territory_radius(body: dict = Body(...)):
+        """One code's median rate by DISTANCE BAND from a ZIP."""
+        from .territory import radius_rate_map
+        try:
+            return radius_rate_map(
+                store, str(body.get("code") or ""), body.get("market") or {},
+                zip_code=str(body.get("zip") or "").strip(),
+                max_miles=_as_float(body.get("max_miles"), 100.0))
+        except BenchmarkError as e:
+            raise HTTPException(422, str(e))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(422, f"bad input: {e}")
+
     @app.post("/api/territory/concentration")
     def api_territory_concentration(body: dict = Body(...)):
         """How contracted relationships divide across payers (HHI)."""
@@ -1776,6 +1790,18 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         from .quality import rate_type_mix
         try:
             return rate_type_mix(store, body.get("market") or {})
+        except BenchmarkError as e:
+            raise HTTPException(422, str(e))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(422, f"bad input: {e}")
+
+    @app.post("/api/quality/posture")
+    def api_quality_posture(body: dict = Body(...)):
+        """Per payer: does it negotiate, or run one schedule for everyone?"""
+        from .quality import payer_posture
+        try:
+            return payer_posture(store, body.get("market") or {},
+                                 min_codes=_as_int(body.get("min_codes"), 3))
         except BenchmarkError as e:
             raise HTTPException(422, str(e))
         except (TypeError, ValueError) as e:

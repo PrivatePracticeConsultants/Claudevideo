@@ -430,8 +430,28 @@ def render_rate_card(cfg: MrfxConfig, store: Store, fee_schedule: dict,
                 f"<div class='sub'>{e(entry['description'] or '')}"
                 f"{' · timed 15-min' if entry['is_timed'] else ''}</div></td>{cells}</tr>")
 
-    fee_head = "<th>Code</th>" + "".join(f"<th class='num'>{e(p)}</th>" for p in payers)
-    fee_html = "".join(fee_row(entry) for entry in fee_schedule["codes"])
+    # A rate card is a single-month snapshot; the client's next question is
+    # which way each line is moving. Cosmetic tier: no history (or any error)
+    # means no column at all, never a failed card.
+    from .spark import SPARK_CSS, SPARK_NOTE, series_by_code, sparkline
+    series = series_by_code(
+        store, resolve_subject_tins(store, fee_schedule["subject"]),
+        fee_schedule.get("market") or {},
+        codes=[c["billing_code"] for c in fee_schedule["codes"]])
+    has_trend = any(len(v) >= 2 for v in series.values())
+
+    fee_head = ("<th>Code</th>"
+                + ("<th class='num'>Trend</th>" if has_trend else "")
+                + "".join(f"<th class='num'>{e(p)}</th>" for p in payers))
+    fee_html = "".join(
+        fee_row(entry).replace(
+            "</div></td>",
+            "</div></td><td class='num'>"
+            + sparkline(series.get(entry["billing_code"]),
+                        label=entry["billing_code"]) + "</td>", 1)
+        if has_trend else fee_row(entry)
+        for entry in fee_schedule["codes"])
+    trend_note = (f"<p class='sub'>{e(SPARK_NOTE)}</p>" if has_trend else "")
     footer = _methodology(store, fee_schedule)
     best_line = (f"Best-paying payer: <b>{e(scorecard['best_payer'])}</b>."
                  if scorecard.get("best_payer") else "")
@@ -456,6 +476,7 @@ def render_rate_card(cfg: MrfxConfig, store: Store, fee_schedule: dict,
  .sub .thin {{ color: #9a6b00; font-weight: 600; }}
  .geo-warn {{ background: #fbe9d0; border: 1px solid #d99a3a; color: #7a4a00;
              padding: 8px 12px; margin: 10px 0 14px; font-size: 12px; }}
+{SPARK_CSS}
  footer {{ margin-top: 32px; border-top: 1px solid #d0d5dd; padding-top: 12px;
           color: #475467; font-size: 11px; white-space: pre-wrap; }}
  @media print {{ body {{ margin: 0; }} }}
@@ -468,6 +489,7 @@ def render_rate_card(cfg: MrfxConfig, store: Store, fee_schedule: dict,
 <div class="wrap"><table><thead><tr>{sc_head}</tr></thead><tbody>{sc_html}</tbody></table></div>
 <h2>Fee schedule</h2>
 <div class="wrap"><table><thead><tr>{fee_head}</tr></thead><tbody>{fee_html}</tbody></table></div>
+{trend_note}
 <footer>METHODOLOGY\n{e(footer)}</footer>
 </body></html>"""
 

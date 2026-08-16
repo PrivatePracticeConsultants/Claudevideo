@@ -219,3 +219,83 @@ def test_the_territory_endpoints_answer_and_refuse(cfg, store, tmp_path):
                   json={"subject": "nobody"}).status_code == 422
     assert c.post("/api/territory/concentration",
                   json={"market": "everything"}).status_code == 422
+
+
+def _radius_world(store):
+    """Two clusters of practices at different ZIPs: one in St Louis (63103),
+    one about 90 miles away in Columbia (65201), paid differently."""
+    rows, npis = [], []
+    tin, npi = 431000000, 1417594896
+    for zipc, rate, n in (("63103", 60.0, 6), ("65201", 44.0, 6)):
+        for i in range(n):
+            rows.append(_row(str(tin), str(npi), rate + i))
+            npis.append((str(npi), zipc))
+            tin += 1
+            npi += 1
+    with store.rates_part_writer("a.json") as w:
+        w.write_batch(rows)
+    store.save_npis_bulk([
+        dict(npi=n, org_name=f"C{n[-3:]}", entity_type="NPI-2",
+             taxonomy_code="261QP2000X", taxonomy_codes="261QP2000X",
+             city="X", state="MO", address="x", zip=z, phone=None)
+        for n, z in npis])
+    store.rebuild_rollups()
+
+
+def test_the_same_code_can_pay_differently_a_short_drive_away(cfg, store):
+    """City names cannot show this — two adjacent suburbs are different cities
+    and a metro's edge is 40 miles from its centre."""
+    from mrfx.territory import radius_rate_map
+
+    _radius_world(store)
+    m = radius_rate_map(store, "97110", MARKET, zip_code="63103", max_miles=200)
+    usable = [b for b in m["bands"] if not b["thin"]]
+    assert len(usable) >= 2, f"expected two populated bands, got {m['bands']}"
+    assert usable[0]["median_rate"] > usable[-1]["median_rate"]
+    assert usable[0]["vs_nearest_pct"] == 0.0, "the nearest band is the baseline"
+    assert usable[-1]["vs_nearest_pct"] < 0
+    assert m["spread_pct"] and m["spread_pct"] > 1
+    assert "a short drive apart" in m["headline"]
+    assert "not a driving distance" in m["note"]
+
+
+def test_a_thin_distance_band_is_suppressed_and_a_bad_zip_refuses(cfg, store):
+    from mrfx.territory import radius_rate_map
+
+    _radius_world(store)
+    m = radius_rate_map(store, "97110", MARKET, zip_code="63103", max_miles=100)
+    assert any(b["thin"] and b["median_rate"] is None for b in m["bands"]), (
+        "an empty band is listed as thin with no number, never invented")
+    for bad in ("", "abcde", "6310", "00000"):
+        with pytest.raises(BenchmarkError):
+            radius_rate_map(store, "97110", MARKET, zip_code=bad)
+    with pytest.raises(BenchmarkError, match="billing code"):
+        radius_rate_map(store, "", MARKET, zip_code="63103")
+
+
+def test_steal_share_orders_a_call_list_by_distance_too(cfg, store, tmp_path):
+    """"Name, volume, distance" — without distance a client drives 90 miles
+    past the referrer down the road."""
+    _referral_world(store, tmp_path)
+    r = steal_share(store, "431234567")
+    assert r["n_with_distance"] >= 1, "distances were attached"
+    for row in r["rows"]:
+        assert "miles" in row
+        if row["miles"] is not None:
+            assert row["miles"] >= 0 and row.get("from_zip")
+
+
+def test_no_practice_inside_the_radius_falls_outside_every_band(cfg, store):
+    """Found by the previous test: with a radius wider than the last fixed band
+    edge, practices past that edge were counted as inside but appeared in no
+    band — vanishing from the table meant to show them."""
+    from mrfx.territory import radius_rate_map
+
+    _radius_world(store)
+    for radius in (30, 100, 200, 500):
+        m = radius_rate_map(store, "97110", MARKET, zip_code="63103",
+                            max_miles=radius)
+        assert m["unbanded"] == 0, (
+            f"at {radius} miles, {m['unbanded']} placed practice(s) fell "
+            f"outside every band: {m['bands']}")
+        assert m["n_banded"] == m["n_placed"]

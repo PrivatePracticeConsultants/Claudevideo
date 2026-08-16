@@ -402,3 +402,140 @@ def code_type_flag(store: Store, market: dict | None, subject: str) -> dict:
             if pct and pct >= 10.0 else
             "This practice's published rates are contracted amounts."),
     }
+
+
+# The two contracted types are NOT interchangeable, and collapsing them loses
+# the most actionable fact in the column. A payer publishing 'fee schedule' for
+# every provider is running one book take-it-or-leave-it; a payer publishing
+# 'negotiated' is doing deals, provider by provider. That is the difference
+# between a negotiation worth opening and one that will go nowhere.
+NEGOTIATED_TYPES = ("negotiated",)
+FEE_SCHEDULE_TYPES = ("fee schedule", "fee_schedule")
+
+POSTURE_NOTE = (
+    "Posture reads the payer's own negotiated_type field, then checks it "
+    "against the evidence: whether that payer actually pays different "
+    "practices different amounts for the same code. The field is the payer's "
+    "CLAIM and the dispersion is the OBSERVATION, so when they disagree the "
+    "answer says so rather than picking one. A payer with a single published "
+    "rate per code is running one schedule for everyone — which does not prove "
+    "it will refuse to negotiate, only that it has not published evidence of "
+    "doing so."
+)
+
+
+def payer_posture(store: Store, market: dict | None = None,
+                  *, min_codes: int = 3) -> dict:
+    """Per payer: does it negotiate, or publish one schedule for everyone?
+
+    Two independent signals, reported side by side:
+      - the payer's own `negotiated_type` mix ('negotiated' vs 'fee schedule')
+      - the OBSERVED dispersion: the share of that payer's codes on which
+        different practices are paid different amounts
+    """
+    from .benchmark import (_market_where, _rates_relation, normalize_market,
+                            resolve_plan_scope)
+
+    m = resolve_plan_scope(store, normalize_market(market or {}))
+    where, params = _market_where(m, bool(m.get("include_assistant")),
+                                  bool(m.get("include_non_dollar")))
+    rel = _rates_relation(m)
+    neg = ", ".join("'" + t + "'" for t in NEGOTIATED_TYPES)
+    fee = ", ".join("'" + t + "'" for t in FEE_SCHEDULE_TYPES)
+    sql = f"""
+        WITH rows AS (
+            SELECT t.payer, t.billing_code, t.tin_value,
+                   lower(trim(coalesce(t.negotiated_type, ''))) AS ntype,
+                   median(t.negotiated_rate) AS rate
+            FROM {rel} t LEFT JOIN tin_directory td USING (tin_value)
+            WHERE {where}
+            GROUP BY t.payer, t.billing_code, t.tin_value, 4
+        ),
+        -- dispersion is measured per (payer, code) across PRACTICES: a code
+        -- priced by one practice cannot show dispersion either way, so it is
+        -- excluded rather than counted as "no spread"
+        percode AS (
+            SELECT payer, billing_code,
+                   count(DISTINCT tin_value)        AS n_practices,
+                   count(DISTINCT round(rate, 2))   AS n_distinct_rates
+            FROM rows GROUP BY payer, billing_code
+        )
+        SELECT r.payer,
+               count(*)                                                  AS n_rows,
+               sum(CASE WHEN r.ntype IN ({neg}) THEN 1 ELSE 0 END)       AS n_negotiated,
+               sum(CASE WHEN r.ntype IN ({fee}) THEN 1 ELSE 0 END)       AS n_fee_schedule,
+               count(DISTINCT r.billing_code)                            AS n_codes,
+               (SELECT count(*) FROM percode p
+                 WHERE p.payer = r.payer AND p.n_practices >= 2)         AS n_codes_rankable,
+               (SELECT count(*) FROM percode p
+                 WHERE p.payer = r.payer AND p.n_practices >= 2
+                   AND p.n_distinct_rates > 1)                           AS n_codes_varying
+        FROM rows r
+        GROUP BY r.payer
+        ORDER BY n_rows DESC
+    """
+    with store.connect() as con:
+        cur = con.execute(sql, params)
+        raw = [dict(zip([d[0] for d in cur.description], r)) for r in cur.fetchall()]
+
+    out = []
+    for r in raw:
+        n = r["n_rows"] or 0
+        pct_neg = round(100.0 * r["n_negotiated"] / n, 1) if n else None
+        pct_fee = round(100.0 * r["n_fee_schedule"] / n, 1) if n else None
+        rankable = r["n_codes_rankable"] or 0
+        pct_var = (round(100.0 * r["n_codes_varying"] / rankable, 1)
+                   if rankable else None)
+        # the payer's CLAIM
+        claim = ("negotiates" if (pct_neg or 0) >= 60
+                 else "standard fee schedule" if (pct_fee or 0) >= 60
+                 else "mixed" if n else None)
+        # the OBSERVATION, only when there is enough to observe
+        thin = rankable < min_codes
+        observed = (None if thin else
+                    "prices practices differently" if (pct_var or 0) >= 25
+                    else "one rate for everyone")
+        # do they agree? disagreement is a finding, not a thing to resolve
+        conflict = bool(
+            observed and claim and (
+                (claim == "standard fee schedule" and observed == "prices practices differently")
+                or (claim == "negotiates" and observed == "one rate for everyone")))
+        if thin:
+            verdict = f"{claim or 'unstated'} (claimed; too few shared codes to check)"
+        elif conflict and claim == "standard fee schedule":
+            verdict = ("calls it a fee schedule, but pays practices differently "
+                       "— it does make exceptions")
+        elif conflict:
+            verdict = ("calls it negotiated, but publishes one rate for everyone "
+                       "— no evidence of deals here")
+        elif observed == "prices practices differently":
+            verdict = "negotiates — practices are priced differently"
+        elif observed == "one rate for everyone":
+            verdict = "one schedule for everyone — expect little movement"
+        else:
+            verdict = claim or "unstated"
+        out.append({
+            "payer": r["payer"], "n_rows": n, "n_codes": r["n_codes"],
+            "pct_negotiated": pct_neg, "pct_fee_schedule": pct_fee,
+            "claimed": claim,
+            "codes_rankable": rankable, "codes_varying": r["n_codes_varying"],
+            "pct_codes_varying": pct_var,
+            "observed": observed, "thin": thin, "conflict": conflict,
+            "verdict": verdict,
+            # the practical read: is a negotiation here worth opening?
+            "winnable": (None if thin or not observed
+                         else observed == "prices practices differently"),
+        })
+
+    winnable = [p for p in out if p["winnable"]]
+    return {
+        "payers": out, "count": len(out), "min_codes": min_codes,
+        "n_winnable": len(winnable),
+        "headline": (
+            f"{len(winnable)} of {len(out)} payer(s) demonstrably price "
+            "practices differently — those are the negotiations with room. "
+            + (f"{', '.join(p['payer'] for p in winnable[:4])}."
+               if winnable else "")
+            if out else "No rates match this market."),
+        "note": POSTURE_NOTE,
+    }

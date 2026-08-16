@@ -565,7 +565,28 @@ def compute_benchmark(store: Store, subject: str, market: dict) -> dict:
             " [all billing classes included: market.billing_class='']"
             if not market.get("billing_class", "professional") else ""
         ),
+        # Which payers behind THIS benchmark have not re-published recently. A
+        # stale file does not mean a stale contract, but a client is about to
+        # quote these numbers, so the age belongs beside them rather than on
+        # another tab. Cosmetic tier: never let it cost the benchmark.
+        "stale_payers": _stale_payers_for(store, market),
     }
+
+
+def _stale_payers_for(store: Store, market: dict) -> list[dict]:
+    """Payers in this market whose own last_updated_on is old. Returns [] on
+    any failure — a freshness caveat must never break a benchmark."""
+    try:
+        from .quality import payer_freshness
+        scope = set(market.get("payers") or [])
+        return [
+            {"payer": f["payer"], "published": f["published"],
+             "age_days": f["age_days"]}
+            for f in payer_freshness(store)["payers"]
+            if f["stale"] and (not scope or f["payer"] in scope)
+        ][:10]
+    except Exception:  # noqa: BLE001
+        return []
 
 
 def compute_opportunity(benchmark: dict, volumes: dict[str, float],
@@ -1506,6 +1527,68 @@ def methodology_footer(store: Store, benchmark: dict) -> str:
     return "\n".join(lines)
 
 
+def _erosion_block(store: Store, benchmark: dict, e) -> str:
+    """The real-terms sentence, for a printed deliverable.
+
+    Cosmetic tier in the strict sense: a market with one month, or a year the
+    price index does not cover, produces NOTHING here — never an estimate, and
+    never a failed report.
+    """
+    try:
+        from .monitor import compute_payer_trajectory
+        market = dict(benchmark.get("market") or {})
+        payers = market.get("payers") or []
+        traj = compute_payer_trajectory(
+            store, {k: v for k, v in market.items() if k != "month"})
+    except Exception:  # noqa: BLE001 — one month in the store is the usual case
+        return ""
+    rows = [p for p in traj.get("payers", [])
+            if p.get("real_cumulative_pct") is not None
+            and (not payers or p["payer"] in payers)]
+    if not rows:
+        return ""
+    inf = traj.get("inflation") or {}
+    lines = "".join(
+        f"<tr><td>{e(p['payer'])}</td>"
+        f"<td class='num muted'>{e(p['first_month'])}→{e(p['last_month'])}</td>"
+        f"<td class='num'>{p['cumulative_pct']:+.1f}%</td>"
+        f"<td class='num gap'>{p['real_cumulative_pct']:+.1f}%</td></tr>"
+        for p in rows)
+    worst = min(rows, key=lambda p: p["real_cumulative_pct"])
+    return (
+        "<h2>In real terms</h2>"
+        f"<p>{e(worst['erosion_line'])}</p>"
+        "<table><thead><tr><th>Payer</th><th class='num'>Span</th>"
+        "<th class='num'>Change in dollars</th>"
+        "<th class='num'>Change in real terms</th></tr></thead>"
+        f"<tbody>{lines}</tbody></table>"
+        f"<p class='note'>{e(inf.get('caveat') or '')}"
+        + (f" Basis: an assumed {inf.get('assumed_pct_per_year')}%/yr, "
+           "supplied by the analyst — not measured."
+           if inf.get("basis") == "assumption" else
+           f" Basis: {e(str(inf.get('index_name') or ''))} "
+           f"({e(str(inf.get('source') or ''))}).")
+        + "</p>")
+
+
+def _stale_block(benchmark: dict, e) -> str:
+    """Name any payer behind this report that has not re-published recently.
+    A reader is about to quote these numbers to that payer."""
+    stale = benchmark.get("stale_payers") or []
+    if not stale:
+        return ""
+    names = "; ".join(
+        f"{p['payer']} (last published {p['published']}"
+        + (f", {p['age_days']} days ago)" if p.get("age_days") is not None else ")")
+        for p in stale)
+    return (
+        "<p class='geo-warn'><b>Publication age:</b> "
+        f"{e(names)}. An old file does not mean an old contract — payers "
+        "refresh on their own cadences — but these rates have not been "
+        "re-published recently, which is worth saying before acting on them."
+        "</p>")
+
+
 def render_pitch_report(cfg: MrfxConfig, store: Store, benchmark: dict,
                         opportunity: dict | None = None) -> str:
     """Print-ready standalone HTML. Refuses to render without an as-of month
@@ -1583,6 +1666,11 @@ def render_pitch_report(cfg: MrfxConfig, store: Store, benchmark: dict,
     mp_heads = "<th class='num'>% Medicare (you)</th><th class='num'>% Medicare (median)</th>" if mp else ""
     trend_head = "<th class='num'>Your trend</th>" if has_trend else ""
     trend_note = (f'<p class="note">{e(SPARK_NOTE)}</p>' if has_trend else "")
+    # The strongest sentence in a renegotiation letter: a rate held flat is a
+    # pay cut once costs rise. Cosmetic tier — a missing index year yields
+    # nothing here rather than an estimate, and never blocks the report.
+    erosion_html = _erosion_block(store, benchmark, e)
+    stale_html = _stale_block(benchmark, e)
     return f"""<!DOCTYPE html><html><head><meta charset="utf-8">
 <title>Rate benchmark — {e(benchmark['subject'])}</title>
 <style>
@@ -1621,7 +1709,9 @@ def render_pitch_report(cfg: MrfxConfig, store: Store, benchmark: dict,
 <th class="num">Gap</th>{mp_heads}{trend_head}<th>Your position</th></tr></thead>
 <tbody>{rows_html}</tbody></table>
 {trend_note}
+{erosion_html}
 {opp_html}
+{stale_html}
 <footer>METHODOLOGY\n{e(footer)}</footer>
 </body></html>"""
 

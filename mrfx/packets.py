@@ -28,6 +28,7 @@ import re
 from pathlib import Path
 
 from .benchmark import (BenchmarkError, compute_benchmark, contract_gaps,
+                        resolve_subject_tins,
                         render_pitch_report)
 from .config import MrfxConfig
 from .schedule import (compute_fee_schedule, payer_scorecard,
@@ -121,7 +122,8 @@ def build_client_packet(cfg: MrfxConfig, store: Store, subject: str,
         if row.get("error"):
             raise BenchmarkError(row["error"])
         (pdir / "3_this_month.html").write_text(
-            _month_summary_html(cfg, display, row, dig), encoding="utf-8")
+            _month_summary_html(cfg, display, row, dig, store, subject, market),
+            encoding="utf-8")
         written.append("3_this_month.html")
     attempt("What changed this month", _changes)
 
@@ -289,7 +291,9 @@ def _doc(cfg: MrfxConfig, title: str, body: str, footer: str = "") -> str:
             f"<footer>{e(footer) if footer else ''}</footer></body></html>")
 
 
-def _month_summary_html(cfg: MrfxConfig, display: str, row: dict, dig: dict) -> str:
+def _month_summary_html(cfg: MrfxConfig, display: str, row: dict, dig: dict,
+                        store: Store | None = None, subject: str | None = None,
+                        market: dict | None = None) -> str:
     e = html.escape
     parts = []
     ch = row.get("changes")
@@ -316,6 +320,29 @@ def _month_summary_html(cfg: MrfxConfig, display: str, row: dict, dig: dict) -> 
                      f"this practice does not: {e(', '.join(g.get('top') or []))}"
                      f"{'…' if g['n'] > len(g.get('top') or []) else ''}. "
                      "The full list is in <i>4_contract_gaps.html</i>.</p>")
+    # The shape behind the numbers above: one line per code, oldest to newest.
+    # Cosmetic tier — no history, or any error, means no section at all.
+    if store is not None and subject:
+        try:
+            from .spark import SPARK_NOTE, series_by_code, sparkline
+            series = series_by_code(store, resolve_subject_tins(store, subject),
+                                    market or {})
+            drawable = {c: pts for c, pts in series.items() if len(pts) >= 2}
+            if drawable:
+                rows_html = "".join(
+                    f"<tr><td>{e(c)}</td>"
+                    f"<td>{sparkline(pts, label=c)}</td>"
+                    f"<td class='num'>${pts[0][1]:,.2f} → ${pts[-1][1]:,.2f}</td>"
+                    f"<td class='sub'>{e(pts[0][0])} → {e(pts[-1][0])}</td></tr>"
+                    for c, pts in sorted(drawable.items()))
+                parts.append(
+                    "<h2>Where each rate has been going</h2>"
+                    "<table><thead><tr><th>Code</th><th>Trend</th>"
+                    "<th class='num'>First → latest</th><th>Span</th></tr>"
+                    f"</thead><tbody>{rows_html}</tbody></table>"
+                    f"<p class='sub'>{e(SPARK_NOTE)}</p>")
+        except Exception:  # noqa: BLE001
+            pass
     lost = row.get("lost_referrers")
     if lost:
         rows = "".join(

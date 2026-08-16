@@ -351,6 +351,18 @@ def compute_payer_roster(store: Store, payer: str, market: dict, *,
             "median_rate": r["median_rate"],
             "website": sites.get(r["tin_value"]),
         })
+    # How fresh is the book being described. A roster of a payer that last
+    # re-published 14 months ago is a roster of what WAS true, and the reader
+    # is about to act on it — so the age travels with the list, not on some
+    # other tab (cosmetic tier: never let it cost the roster).
+    freshness = None
+    try:
+        from .quality import payer_freshness
+        freshness = next(
+            (f for f in payer_freshness(store)["payers"] if f["payer"] == payer),
+            None)
+    except Exception:  # noqa: BLE001
+        freshness = None
     return {
         "payer": payer,
         "market": {k: v for k, v in market.items()
@@ -358,6 +370,7 @@ def compute_payer_roster(store: Store, payer: str, market: dict, *,
         "sort": sort, "min_codes": min_codes,
         "count": len(out), "truncated": truncated, "limit": limit,
         "organizations": out,
+        "freshness": freshness,
         "note": ("'Contracted' = the payer published negotiated rates for the "
                  "practice; a published rate is not proof of an active or billed "
                  "contract. Percentile is the practice's position among THIS "

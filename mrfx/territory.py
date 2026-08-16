@@ -25,6 +25,7 @@ payer actually has, and which referral relationship to go after next:
 from __future__ import annotations
 
 import logging
+import re
 
 from .catalog import code_info
 from .store import Store, mask_tin
@@ -223,9 +224,53 @@ def payer_concentration(store: Store, market: dict | None = None,
     }
 
 
+def _add_miles(store: Store, rows: list[dict], subject_tins: list[str],
+               centroids_path=None) -> None:
+    """Attach `miles` from the subject's own location to each referrer.
+
+    Mutates `rows` in place and swallows every failure: a distance column is
+    an ordering aid, and a missing centroid file must never cost a consultant
+    the call list itself.
+    """
+    if not rows:
+        return
+    try:
+        from .medicare import haversine_miles_sql, load_centroids
+        with store.connect() as con:
+            load_centroids(con, centroids_path)
+            origin = con.execute("""
+                SELECT mode(lpad(substr(trim(n.zip), 1, 5), 5, '0'))
+                FROM rates r JOIN npi_directory n ON n.npi = r.npi
+                WHERE r.tin_value IN (SELECT unnest(?::VARCHAR[]))
+                  AND n.zip IS NOT NULL AND trim(n.zip) <> ''
+            """, [subject_tins]).fetchone()
+            home = origin[0] if origin else None
+            if not home:
+                return
+            pt = con.execute("SELECT lat, lon FROM _zcta WHERE zip = ?",
+                             [home]).fetchone()
+            if pt is None:
+                return
+            npis = [r["npi"] for r in rows if r.get("npi")]
+            dist = dict(con.execute(f"""
+                SELECT n.npi,
+                       {haversine_miles_sql('c.lat', 'c.lon', pt[0], pt[1])} AS miles
+                FROM npi_directory n
+                JOIN _zcta c ON c.zip = lpad(substr(trim(n.zip), 1, 5), 5, '0')
+                WHERE n.npi IN (SELECT unnest(?::VARCHAR[]))
+            """, [npis]).fetchall())
+        for r in rows:
+            d = dist.get(r.get("npi"))
+            r["miles"] = round(d, 1) if d is not None else None
+            r["from_zip"] = home
+    except Exception:  # noqa: BLE001 — ordering aid only
+        log.debug("steal-share distances unavailable", exc_info=True)
+
+
 def steal_share(store: Store, subject: str, *, radius_miles: float | None = None,
                 zip_code: str | None = None, limit: int = 50,
-                dataset_id: str | None = None, min_patients: int = 11) -> dict:
+                dataset_id: str | None = None, min_patients: int = 11,
+                centroids_path=None) -> dict:
     """Referral sources sending patients to a client's COMPETITORS, not to them.
 
     The client's own inbound partners are subtracted, so what remains is the
@@ -321,6 +366,12 @@ def steal_share(store: Store, subject: str, *, radius_miles: float | None = None
                                 int(min_patients), int(limit)])
         rows = [dict(zip([d[0] for d in cur.description], r)) for r in cur.fetchall()]
 
+    # How far away each referrer actually is. A call list ordered only by volume
+    # sends a client to a physician 90 miles away before the one down the road;
+    # distance is what makes it a route. Cosmetic tier — no centroid means the
+    # row keeps its place with miles=None, never dropped.
+    _add_miles(store, rows, tins, centroids_path)
+
     for r in rows:
         r["specialty"] = taxonomy_label(r.get("taxonomy"))
         r["gap"] = int(r["patients_elsewhere"]) - int(r["patients_to_me"])
@@ -331,10 +382,13 @@ def steal_share(store: Store, subject: str, *, radius_miles: float | None = None
         r["already_a_partner"] = int(r["patients_to_me"]) > 0
 
     cold = [r for r in rows if not r["already_a_partner"]]
+    placed = [r for r in rows if r.get("miles") is not None]
     return {
         "rows": rows, "count": len(rows), "n_cold": len(cold),
         "subject": subject, "subject_tins": [mask_tin(t) for t in tins],
         "cities": cities, "dataset": label, "data_year": year,
+        "n_with_distance": len(placed),
+        "n_unplaced": len(rows) - len(placed),
         "dataset_id": ds_id, "min_patients": min_patients,
         "reason": None if rows else (
             "no local physician sends therapy patients to another practice in "
@@ -348,4 +402,162 @@ def steal_share(store: Store, subject: str, *, radius_miles: float | None = None
             f"{len(rows)} referral source(s) send more elsewhere than here."
             if rows else "Nothing to target in this release."),
         "note": STEAL_NOTE,
+    }
+
+
+RADIUS_NOTE = (
+    "Distance is from the centre of the ZIP you named to the centre of each "
+    "practice's own ZIP (Census ZCTA centroids), so it is a ZIP-to-ZIP "
+    "approximation, not a driving distance. A practice's ZIP is the NPPES "
+    "practice location of its NPIs; a multi-site group is placed at the ZIP "
+    "most of its NPIs share, and practices whose ZIP has no centroid are "
+    "reported as unplaced rather than dropped. Bands with fewer than "
+    f"{MIN_CELL} practices are suppressed rather than shown as a market."
+)
+
+# Distance bands. The question this answers is "does the same payer pay
+# differently 30 miles away", so the bands are coarse enough to hold real
+# practice counts and fine enough that the near band is genuinely local.
+RADIUS_BANDS = ((0, 10, "0-10 miles"), (10, 25, "10-25 miles"),
+                (25, 50, "25-50 miles"), (50, 100, "50-100 miles"))
+
+
+def radius_rate_map(store: Store, code: str, market: dict, *,
+                    zip_code: str, max_miles: float = 100.0,
+                    centroids_path=None) -> dict:
+    """One code's median rate by DISTANCE BAND from a ZIP.
+
+    The sharpest form of the sub-state question: same payer, same code, 30
+    miles apart, different rate. City names cannot show that — two adjacent
+    suburbs are different cities and a metro's edge is 40 miles from its
+    centre — so this places every practice by its own ZIP's centroid.
+    """
+    from .benchmark import (BenchmarkError, _market_where, _rates_relation,
+                            month_label, normalize_market, resolve_plan_scope)
+    from .medicare import haversine_miles_sql, load_centroids
+
+    code = str(code or "").strip().upper()
+    if not code:
+        raise BenchmarkError("pick a billing code")
+    zip_code = str(zip_code or "").strip()[:5]
+    if not re.fullmatch(r"\d{5}", zip_code):
+        raise BenchmarkError(f"{zip_code!r} is not a 5-digit ZIP code")
+    try:
+        max_miles = max(1.0, min(float(max_miles), 500.0))
+    except (TypeError, ValueError):
+        raise BenchmarkError("radius must be a number of miles")
+
+    m = resolve_plan_scope(store, normalize_market({**(market or {}), "codes": [code]}))
+    where, params = _market_where(m, bool(m.get("include_assistant")),
+                                  bool(m.get("include_non_dollar")))
+    rel = _rates_relation(m)
+
+    with store.connect() as con:
+        load_centroids(con, centroids_path)
+        origin = con.execute("SELECT lat, lon FROM _zcta WHERE zip = ?",
+                             [zip_code]).fetchone()
+        if origin is None:
+            raise BenchmarkError(
+                f"ZIP {zip_code} is not in the Census ZCTA centroid list")
+        # A practice sits at the ZIP most of its NPIs share — mode, not an
+        # arbitrary pick, so a multi-site group lands where its bulk is.
+        sql = f"""
+        WITH per_tin AS (
+            SELECT t.tin_value, median(t.negotiated_rate) AS rate
+            FROM {rel} t LEFT JOIN tin_directory td USING (tin_value)
+            WHERE {where}
+            GROUP BY t.tin_value
+        ),
+        tin_zip AS (
+            SELECT r.tin_value,
+                   mode(lpad(substr(trim(n.zip), 1, 5), 5, '0')) AS zip
+            FROM rates r JOIN npi_directory n ON n.npi = r.npi
+            WHERE r.tin_value IN (SELECT tin_value FROM per_tin)
+              AND n.zip IS NOT NULL AND trim(n.zip) <> ''
+            GROUP BY r.tin_value
+        ),
+        placed AS (
+            SELECT p.tin_value, p.rate, z.zip,
+                   {haversine_miles_sql('c.lat', 'c.lon', origin[0], origin[1])} AS miles
+            FROM per_tin p
+            LEFT JOIN tin_zip z USING (tin_value)
+            LEFT JOIN _zcta c ON c.zip = z.zip
+        )
+        SELECT tin_value, rate, zip, miles FROM placed
+        """
+        cur = con.execute(sql, params)
+        rows = [dict(zip(["tin_value", "rate", "zip", "miles"], r))
+                for r in cur.fetchall()]
+
+    unplaced = sum(1 for r in rows if r["miles"] is None)
+    inside = [r for r in rows if r["miles"] is not None and r["miles"] <= max_miles]
+
+    # Band edges must COVER the whole radius: a practice inside max_miles that
+    # falls past the last fixed edge would otherwise be counted in `inside` and
+    # appear in no band — silently vanishing from the very table that is meant
+    # to show it. Clip the fixed bands to the radius and extend the last one.
+    edges = [(lo, hi, label) for lo, hi, label in RADIUS_BANDS if lo < max_miles]
+    if not edges:
+        edges = [(0.0, max_miles, f"0-{max_miles:g} miles")]
+    else:
+        lo, hi, label = edges[-1]
+        if max_miles > hi:
+            edges.append((hi, max_miles, f"{hi:g}-{max_miles:g} miles"))
+        elif max_miles < hi:
+            edges[-1] = (lo, max_miles, f"{lo:g}-{max_miles:g} miles")
+
+    bands = []
+    for lo, hi, label in edges:
+        grp = [r for r in inside if lo <= r["miles"] < hi
+               or (hi >= max_miles and r["miles"] == hi)]
+        if len(grp) < MIN_CELL:
+            bands.append({"band": label, "min_miles": lo, "max_miles": hi,
+                          "n_practices": len(grp), "median_rate": None,
+                          "thin": True})
+            continue
+        vals = sorted(r["rate"] for r in grp)
+        mid = len(vals) // 2
+        bands.append({
+            "band": label, "min_miles": lo, "max_miles": hi,
+            "n_practices": len(grp),
+            "median_rate": round(vals[mid] if len(vals) % 2
+                                 else (vals[mid - 1] + vals[mid]) / 2, 2),
+            "thin": False,
+        })
+
+    usable = [b for b in bands if not b["thin"]]
+    near = usable[0] if usable else None
+    for b in usable:
+        b["vs_nearest_pct"] = (
+            round(100.0 * (b["median_rate"] - near["median_rate"])
+                  / near["median_rate"], 1)
+            if near and near["median_rate"] else None)
+    spread = None
+    if len(usable) >= 2:
+        rates = [b["median_rate"] for b in usable]
+        lo_r, hi_r = min(rates), max(rates)
+        spread = round(100.0 * (hi_r - lo_r) / lo_r, 1) if lo_r else None
+
+    # invariant: every placed practice inside the radius lands in exactly one
+    # band. If that ever stops holding, say so rather than quietly under-reporting.
+    banded = sum(b["n_practices"] for b in bands)
+    return {
+        "code": code, "description": code_info(code)[0],
+        "zip": zip_code, "max_miles": max_miles,
+        "n_banded": banded,
+        "unbanded": len(inside) - banded,
+        "as_of": month_label(m["month"]),
+        "bands": bands, "n_placed": len(inside), "unplaced": unplaced,
+        "min_practices": MIN_CELL, "spread_pct": spread,
+        "headline": (
+            f"Within {max_miles:g} miles of {zip_code}, {code} pays {spread:g}% "
+            "more in one distance band than another — the same payers, a short "
+            "drive apart."
+            if spread and spread >= 1 else
+            f"No meaningful distance effect for {code} within {max_miles:g} "
+            f"miles of {zip_code}."
+            if len(usable) >= 2 else
+            f"Only {len(usable)} distance band around {zip_code} has "
+            f"{MIN_CELL}+ practices — too thin to compare."),
+        "note": RADIUS_NOTE,
     }
