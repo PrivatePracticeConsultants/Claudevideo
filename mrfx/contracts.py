@@ -129,7 +129,7 @@ def renewal_radar(store: Store, subjects: list[str] | None = None,
               AND t.expiration_date <= ?{tin_filter}
             GROUP BY 1, 2, 3, 4
             ORDER BY t.expiration_date, practice, t.payer
-            LIMIT {limit}
+            LIMIT {max(1, min(int(limit), 5000))}
         """, [today, *params, horizon, *tin_params])
         rows = [dict(zip([c[0] for c in cur.description], r)) for r in cur.fetchall()]
     for r in rows:

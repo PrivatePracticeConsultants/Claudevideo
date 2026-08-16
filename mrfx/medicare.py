@@ -594,6 +594,7 @@ def org_referrals(store: Store, npis: list[str], direction: str = "in",
     source is identifiable without any extra dataset."""
     if direction not in ("in", "out"):
         raise ValueError("direction must be 'in' or 'out'")
+    limit = max(1, min(int(limit), 5000))
     active = active_dataset(store, year, dataset_id) if npis else None
     if not npis or active is None:
         return {"direction": direction, "rows": [], "dataset": None, "data_year": None,

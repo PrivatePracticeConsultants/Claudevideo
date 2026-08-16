@@ -85,6 +85,7 @@ def local_rate_map(store: Store, code: str, market: dict, *,
     code = str(code or "").strip().upper()
     if not code:
         raise BenchmarkError("pick a billing code")
+    limit = max(1, min(int(limit), 500))   # a negative LIMIT is a DuckDB binder 500
     m = resolve_plan_scope(store, normalize_market({**(market or {}), "codes": [code]}))
     st = (state or m.get("state") or "").strip().upper()[:2]
     if not st:
@@ -167,6 +168,7 @@ def local_rate_map(store: Store, code: str, market: dict, *,
 def payer_concentration(store: Store, market: dict | None = None,
                         *, limit: int = 25) -> dict:
     """How the contracted relationships in a market divide across payers."""
+    limit = max(1, min(int(limit), 500))
     from .benchmark import (_market_where, _rates_relation, month_label,
                             normalize_market, resolve_plan_scope)
 
@@ -281,6 +283,8 @@ def steal_share(store: Store, subject: str, *, radius_miles: float | None = None
     from .benchmark import BenchmarkError, resolve_subject_tins
     from .medicare import active_dataset, _ensure_referral_view, taxonomy_label
 
+    limit = max(1, min(int(limit), 500))
+    min_patients = max(0, int(min_patients))
     tins = resolve_subject_tins(store, subject)
     if not tins:
         raise BenchmarkError(f"no practice matches {subject!r}")

@@ -220,6 +220,9 @@ def size_premium(store: Store, market: dict | None = None, *,
                             normalize_market, resolve_plan_scope,
                             resolve_subject_tins)
 
+    # a band below ONE practice cannot exist; a hostile 0/negative walked
+    # straight into indexing an empty percentile list (found by audit)
+    min_practices = max(1, int(min_practices))
     m = resolve_plan_scope(store, normalize_market(market or {}))
     where, params = _market_where(m, bool(m.get("include_assistant")),
                                   bool(m.get("include_non_dollar")))
@@ -436,6 +439,9 @@ def payer_posture(store: Store, market: dict | None = None,
     from .benchmark import (_market_where, _rates_relation, normalize_market,
                             resolve_plan_scope)
 
+    # below 1, a payer with ZERO rankable codes would be judged "one rate
+    # for everyone" — a fabricated verdict about evidence that does not exist
+    min_codes = max(1, int(min_codes))
     m = resolve_plan_scope(store, normalize_market(market or {}))
     where, params = _market_where(m, bool(m.get("include_assistant")),
                                   bool(m.get("include_non_dollar")))

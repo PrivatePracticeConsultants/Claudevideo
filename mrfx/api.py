@@ -489,6 +489,14 @@ def _as_int(v, default: int) -> int:
         raise BenchmarkError(f"expected a whole number, got {v!r}")
 
 
+def _bounded_int(v, default, lo, hi):
+    """Wire-boundary int with hard bounds. Negative LIMITs reach DuckDB as a
+    binder error (a 500), and a negative min_practices walked size_premium
+    into indexing an empty list — found by the parameter-abuse audit. Every
+    count-like wire param comes through here so the class cannot recur."""
+    return max(lo, min(_as_int(v, default), hi))
+
+
 def _as_float(v, default):
     if v is None or v == "":
         return default
@@ -1733,7 +1741,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             return local_rate_map(store, str(body.get("code") or ""),
                                   body.get("market") or {},
                                   state=str(body.get("state") or "").strip() or None,
-                                  limit=_as_int(body.get("limit"), 60))
+                                  limit=_bounded_int(body.get("limit"), 60, 1, 5000))
         except BenchmarkError as e:
             raise HTTPException(422, str(e))
         except (TypeError, ValueError) as e:
@@ -1772,8 +1780,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         try:
             return steal_share(
                 store, str(body.get("subject") or "").strip(),
-                limit=_as_int(body.get("limit"), 50),
-                min_patients=_as_int(body.get("min_patients"), 11),
+                limit=_bounded_int(body.get("limit"), 50, 1, 5000),
+                min_patients=_bounded_int(body.get("min_patients"), 11, 0, 10**9),
                 dataset_id=str(body.get("dataset_id") or "").strip() or None)
         except BenchmarkError as e:
             raise HTTPException(422, str(e))
@@ -1801,7 +1809,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         from .quality import payer_posture
         try:
             return payer_posture(store, body.get("market") or {},
-                                 min_codes=_as_int(body.get("min_codes"), 3))
+                                 min_codes=_bounded_int(body.get("min_codes"), 3, 1, 1000))
         except BenchmarkError as e:
             raise HTTPException(422, str(e))
         except (TypeError, ValueError) as e:
@@ -1819,7 +1827,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         try:
             return size_premium(store, body.get("market") or {},
                                 subject=str(body.get("subject") or "").strip() or None,
-                                min_practices=_as_int(body.get("min_practices"), 5))
+                                min_practices=_bounded_int(body.get("min_practices"), 5, 1, 1000))
         except BenchmarkError as e:
             raise HTTPException(422, str(e))
         except (TypeError, ValueError) as e:
@@ -1887,7 +1895,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 payer=str(body.get("payer") or "").strip() or None,
                 state=str(body.get("state") or "").strip() or None,
                 subject=str(body.get("subject") or "").strip() or None,
-                limit=_as_int(body.get("limit"), 200))
+                limit=_bounded_int(body.get("limit"), 200, 1, 5000))
         except BenchmarkError as e:
             raise HTTPException(422, str(e))
         except (TypeError, ValueError) as e:
@@ -2023,7 +2031,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 store,
                 zip_code=str(body.get("zip") or "").strip() or None,
                 radius_miles=float(body["radius_miles"]) if body.get("radius_miles") else None,
-                limit=_as_int(body.get("limit"), 50),
+                limit=_bounded_int(body.get("limit"), 50, 1, 5000),
                 dataset_id=str(body.get("dataset_id") or "").strip() or None,
                 therapy_only=bool(body.get("therapy_only", True)))
         except MedicareImportError as e:
@@ -2080,7 +2088,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         year = str(body.get("year") or "").strip() or None
         ds_id = str(body.get("dataset_id") or "").strip() or None
         try:
-            limit = min(max(_as_int(body.get("limit"), 100), 1), 500)
+            limit = min(max(_bounded_int(body.get("limit"), 100, 1, 5000), 1), 500)
         except (TypeError, ValueError):
             raise HTTPException(422, "limit must be a number")
         # resolve_subject_tins never returns empty (a raw id falls through as
@@ -2363,8 +2371,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             return compute_leads(
                 store, body.get("market") or {},
                 threshold_percentile=_as_int(body.get("threshold_percentile"), 25),
-                min_codes=_as_int(body.get("min_codes"), 3),
-                limit=_as_int(body.get("limit"), 100),
+                min_codes=_bounded_int(body.get("min_codes"), 3, 1, 1000),
+                limit=_bounded_int(body.get("limit"), 100, 1, 5000),
                 exclude_subject=(str(body["exclude_subject"]) if body.get("exclude_subject") else None),
             )
         except (BenchmarkError, ValueError, TypeError) as e:
@@ -2378,8 +2386,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             result = compute_leads(
                 store, body.get("market") or {},
                 threshold_percentile=_as_int(body.get("threshold_percentile"), 25),
-                min_codes=_as_int(body.get("min_codes"), 3),
-                limit=_as_int(body.get("limit"), 1000),
+                min_codes=_bounded_int(body.get("min_codes"), 3, 1, 1000),
+                limit=_bounded_int(body.get("limit"), 1000, 1, 5000),
                 exclude_subject=(str(body["exclude_subject"]) if body.get("exclude_subject") else None),
             )
             return PlainTextResponse("﻿" + leads_csv(store, result), headers={
@@ -2424,7 +2432,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     def market_geography(body: dict = Body(...)):
         try:
             return geographic_rates(store, body.get("code"), body.get("market") or {},
-                                    limit=_as_int(body.get("limit"), 60))
+                                    limit=_bounded_int(body.get("limit"), 60, 1, 5000))
         except (BenchmarkError, ValueError, TypeError) as e:
             raise HTTPException(422, str(e))
 
@@ -2455,7 +2463,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             return contract_gaps(
                 store, str(body.get("subject") or ""), body.get("market") or {},
                 min_peers=_as_int(body.get("min_peers"), 5),
-                limit=_as_int(body.get("limit"), 100))
+                limit=_bounded_int(body.get("limit"), 100, 1, 5000))
         except (BenchmarkError, ValueError, TypeError) as e:
             raise HTTPException(422, str(e))
 
@@ -2464,8 +2472,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         try:
             return compute_leaderboard(
                 store, body.get("market") or {},
-                min_codes=_as_int(body.get("min_codes"), 3),
-                limit=_as_int(body.get("limit"), 50),
+                min_codes=_bounded_int(body.get("min_codes"), 3, 1, 1000),
+                limit=_bounded_int(body.get("limit"), 50, 1, 5000),
                 sort=str(body.get("sort") or "size"))
         except (BenchmarkError, ValueError, TypeError) as e:
             raise HTTPException(422, str(e))
@@ -2514,8 +2522,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         try:
             return compute_payer_roster(
                 store, str(body.get("payer") or ""), body.get("market") or {},
-                min_codes=_as_int(body.get("min_codes"), 1),
-                limit=_as_int(body.get("limit"), 500),
+                min_codes=_bounded_int(body.get("min_codes"), 1, 1, 1000),
+                limit=_bounded_int(body.get("limit"), 500, 1, 5000),
                 sort=str(body.get("sort") or "name"))
         except (BenchmarkError, ValueError, TypeError) as e:
             raise HTTPException(422, str(e))
@@ -2525,8 +2533,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         try:
             result = compute_payer_roster(
                 store, str(body.get("payer") or ""), body.get("market") or {},
-                min_codes=_as_int(body.get("min_codes"), 1),
-                limit=_as_int(body.get("limit"), 2000),
+                min_codes=_bounded_int(body.get("min_codes"), 1, 1, 1000),
+                limit=_bounded_int(body.get("limit"), 2000, 1, 5000),
                 sort=str(body.get("sort") or "name"))
             return PlainTextResponse("﻿" + payer_roster_csv(result), headers={
                 "Content-Disposition": 'attachment; filename="payer_roster.csv"'})

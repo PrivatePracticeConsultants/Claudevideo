@@ -344,3 +344,40 @@ def test_a_non_finite_value_never_reaches_the_svg_path():
     # three points, one poisoned: the two good ones still draw
     out = sparkline([("2026-01", 40.0), ("2026-02", nan), ("2026-03", 44.0)])
     assert "<svg" in out and "nan" not in out.lower()
+
+
+def test_a_weekly_listing_the_same_npi_twice_leaves_one_row(cfg, store, tmp_path):
+    """Found by audit: the merge trusted the weekly to be internally unique,
+    so a duplicated NPI left TWO rows in the cache and every downstream join
+    double-counted that provider. The file's later occurrence wins."""
+    from mrfx.enrich import (_nppes_cache_path, _write_nppes_parquet,
+                             apply_weekly_update)
+
+    monthly = _nppes_csv(tmp_path, [_nppes_row("1417594896", "Original")],
+                         name="npidata_pfile_m.csv")
+    cfg.enrichment.bulk_csv_path = monthly
+    _write_nppes_parquet(cfg, store, _nppes_cache_path(store), None)
+
+    weekly = _nppes_csv(tmp_path, [
+        _nppes_row("1417594896", "Renamed v1"),
+        _nppes_row("1417594896", "Renamed v2"),      # same NPI again
+        _nppes_row("1215555554", "New Clinic"),
+    ])
+    res = apply_weekly_update(cfg, store, weekly)
+    assert res["rows_in_weekly"] == 3 and res["n_npis_in_weekly"] == 2
+    assert res["new_npis"] == 1 and res["updated_npis"] == 1
+    assert res["cache_rows_after"] == 2
+
+    import duckdb
+    con = duckdb.connect()
+    try:
+        dupes = con.execute(
+            f"SELECT npi FROM read_parquet('{_nppes_cache_path(store)}') "
+            "GROUP BY npi HAVING count(*) > 1").fetchall()
+        winner = con.execute(
+            f"SELECT org_name FROM read_parquet('{_nppes_cache_path(store)}') "
+            "WHERE npi = '1417594896'").fetchone()[0]
+    finally:
+        con.close()
+    assert dupes == [], "one row per NPI is the invariant every join assumes"
+    assert winner == "Renamed v2", "the file's LATER occurrence is the later update"

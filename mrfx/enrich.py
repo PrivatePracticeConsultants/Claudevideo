@@ -433,20 +433,36 @@ def apply_weekly_update(cfg: MrfxConfig, store: Store, path) -> dict:
         try:
             before = con.execute(
                 f"SELECT count(*) FROM read_parquet('{sql_path(cache)}')").fetchone()[0]
-            fresh = con.execute(
-                f"SELECT count(*) FROM read_parquet('{sql_path(tmp_week)}') w "
-                f"WHERE w.npi NOT IN (SELECT npi FROM read_parquet('{sql_path(cache)}'))"
-            ).fetchone()[0]
+            wk_npis, fresh = con.execute(
+                f"SELECT count(DISTINCT w.npi), "
+                f"count(DISTINCT w.npi) FILTER (w.npi NOT IN "
+                f"(SELECT npi FROM read_parquet('{sql_path(cache)}'))) "
+                f"FROM read_parquet('{sql_path(tmp_week)}') w").fetchone()
             deact = con.execute(
-                f"SELECT count(*) FROM read_parquet('{sql_path(tmp_week)}') "
+                f"SELECT count(DISTINCT npi) FROM read_parquet('{sql_path(tmp_week)}') "
                 "WHERE deactivation_date IS NOT NULL").fetchone()[0]
+            # The cache invariant every join assumes is ONE ROW PER NPI. A
+            # weekly that lists the same NPI twice (corrupt or concatenated
+            # files happen) must not break it — keep the file's LATER
+            # occurrence, since in an NPPES export the later row is the later
+            # update. Found by the duplicate-NPI audit: the plain UNION ALL
+            # kept both and the merged cache double-counted that provider.
             con.execute(f"""
                 COPY (
-                    SELECT {cols} FROM read_parquet('{sql_path(tmp_week)}')
+                    WITH week AS (
+                        SELECT {cols}, file_row_number AS _rn
+                        FROM read_parquet('{sql_path(tmp_week)}',
+                                          file_row_number = true)
+                    ),
+                    week_dedup AS (
+                        SELECT {cols} FROM week
+                        QUALIFY row_number() OVER (PARTITION BY npi
+                                                   ORDER BY _rn DESC) = 1
+                    )
+                    SELECT {cols} FROM week_dedup
                     UNION ALL
                     SELECT {cols} FROM read_parquet('{sql_path(cache)}') c
-                    WHERE c.npi NOT IN (
-                        SELECT npi FROM read_parquet('{sql_path(tmp_week)}'))
+                    WHERE c.npi NOT IN (SELECT npi FROM week_dedup)
                 ) TO '{sql_path(merged)}' (FORMAT PARQUET, COMPRESSION zstd)
             """)
             after = con.execute(
@@ -468,7 +484,8 @@ def apply_weekly_update(cfg: MrfxConfig, store: Store, path) -> dict:
              f"{n_week:,}", f"{fresh:,}", f"{before:,}", f"{after:,}")
     return {
         "file": src.name, "rows_in_weekly": n_week,
-        "new_npis": fresh, "updated_npis": n_week - fresh,
+        "n_npis_in_weekly": wk_npis,
+        "new_npis": fresh, "updated_npis": wk_npis - fresh,
         "deactivations_in_file": deact,
         "cache_rows_before": before, "cache_rows_after": after,
         "note": (

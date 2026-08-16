@@ -477,6 +477,7 @@ def hospital_parity(store: Store, market: dict | None = None, *,
                             normalize_market, resolve_plan_scope,
                             resolve_subject_tins)
 
+    limit = max(1, min(int(limit), 2000))
     ensure_view(store)
     st = hospital_status(store)
     if not st["loaded"]:

@@ -182,3 +182,74 @@ def test_corrupt_parquet_is_quarantined_not_fatal(cfg, store, tmp_path):
     assert (rates_dir / "corrupt" / "headerless.parquet").exists()
     # a real part is untouched
     assert list(rates_dir.glob("*.parquet")), "the good part stays in the glob"
+
+
+def test_count_like_parameters_survive_hostile_values(cfg, store):
+    """Found by the parameter-abuse audit: a negative LIMIT reaches DuckDB as
+    a binder error (500), and min_practices<=0 walked size_premium into
+    indexing an empty list. Every count-like wire param is now bounded at the
+    boundary AND clamped in the compute layer."""
+    from fastapi.testclient import TestClient
+
+    from mrfx.api import create_app
+
+    def row(tin, npi, rate, code="97110"):
+        return dict(payer="Aetna", tin_value=tin, tin_type="ein", npi=npi,
+                    source_file="a.json", billing_code=code, billing_code_type="CPT",
+                    discipline="PT", is_timed=True, billing_class="professional",
+                    negotiated_rate=rate, negotiated_type="negotiated",
+                    is_dollar_rate=True, billing_code_modifier=[], service_code=["11"],
+                    file_month="2026-06", last_updated_on="2026-06-01",
+                    expiration_date=None, schema_version="2.0.0",
+                    tin_is_really_npi=False, state="MO")
+    with store.rates_part_writer("a.json") as w:
+        w.write_batch([row(str(431000000 + i), str(1417594896 + i), 40.0 + i)
+                       for i in range(6)])
+    store.save_npis_bulk([
+        dict(npi=str(1417594896 + i), org_name=f"C{i}", entity_type="NPI-2",
+             taxonomy_code="261QP2000X", taxonomy_codes="261QP2000X", city="StL",
+             state="MO", address="x", zip="63103", phone=None) for i in range(6)])
+    store.rebuild_rollups()
+    c = TestClient(create_app(cfg, store), raise_server_exceptions=False)
+    M = {"month": "2026-06", "therapy_only": False}
+    for route, body in (
+        ("/api/quality/size", {"market": M, "min_practices": 0}),
+        ("/api/quality/size", {"market": M, "min_practices": -5}),
+        ("/api/quality/posture", {"market": M, "min_codes": -5}),
+        ("/api/territory/local", {"code": "97110", "market": M, "state": "MO", "limit": -1}),
+        ("/api/territory/concentration", {"market": M, "limit": -7}),
+        ("/api/hospital/parity", {"market": M, "limit": -1}),
+        ("/api/leads", {"market": M, "limit": -9}),
+        ("/api/roster", {"payer": "Aetna", "market": M, "limit": -2}),
+    ):
+        r = c.post(route, json=body)
+        assert r.status_code < 500, f"{route} {body}: {r.status_code} {r.text[:120]}"
+
+
+def test_a_payer_with_no_rankable_code_is_never_judged_even_at_hostile_min_codes(cfg, store):
+    """min_codes<=0 used to let a payer with ZERO rankable codes be verdicted
+    'one rate for everyone' — a finding fabricated from no evidence."""
+    from mrfx.quality import payer_posture
+
+    def row(code):
+        return dict(payer="Loner", tin_value="431234567", tin_type="ein",
+                    npi="1417594896", source_file="a.json", billing_code=code,
+                    billing_code_type="CPT", discipline="PT", is_timed=True,
+                    billing_class="professional", negotiated_rate=44.0,
+                    negotiated_type="fee schedule", is_dollar_rate=True,
+                    billing_code_modifier=[], service_code=["11"],
+                    file_month="2026-06", last_updated_on="2026-06-01",
+                    expiration_date=None, schema_version="2.0.0",
+                    tin_is_really_npi=False, state="MO")
+    with store.rates_part_writer("a.json") as w:
+        w.write_batch([row("97110"), row("97140"), row("97112")])
+    store.save_npis_bulk([dict(npi="1417594896", org_name="Solo", entity_type="NPI-2",
+        taxonomy_code="261QP2000X", taxonomy_codes="261QP2000X", city="StL",
+        state="MO", address="x", zip="63103", phone=None)])
+    store.rebuild_rollups()
+    for mc in (3, 1, 0, -5):
+        p = payer_posture(store, {"month": "2026-06", "therapy_only": False},
+                          min_codes=mc)["payers"][0]
+        assert p["codes_rankable"] == 0
+        assert p["thin"] is True and p["observed"] is None and p["winnable"] is None, \
+            f"min_codes={mc} judged a payer with zero rankable codes: {p['verdict']}"
