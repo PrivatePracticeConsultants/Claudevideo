@@ -1110,6 +1110,55 @@ def cmd_closures(cfg: MrfxConfig, args) -> int:
     return 0
 
 
+def cmd_hospital(cfg: MrfxConfig, args) -> int:
+    """Import one hospital's CMS standard-charges file, or list what's loaded."""
+    from .hospital import (HospitalImportError, hospital_parity,
+                           hospital_status, import_hospital_file)
+
+    if _something_owns_the_port(cfg, "writing to the store locally"):
+        return 1
+    store = Store(cfg.store_dir, cfg.duckdb_memory_gb, temp_dir=cfg.duckdb_temp_dir)
+    if args.path:
+        try:
+            res = import_hospital_file(store, args.path, hospital_name=args.name,
+                                       state=args.state, city=args.city, cfg=cfg)
+        except HospitalImportError as e:
+            print(f"could not import that file: {e}", file=sys.stderr)
+            return 1
+        if not res["rows"]:
+            print(f"{res['hospital']}: {res['note']}")
+        else:
+            print(f"{res['hospital']}: {res['rows']:,} therapy rate(s), "
+                  f"{res['codes']} code(s), {res['payers']} payer(s)"
+                  + (f", published {res['last_updated_on']}"
+                     if res["last_updated_on"] else ""))
+    st = hospital_status(store)
+    if not st["loaded"]:
+        print(st["reason"])
+        return 0
+    print(f"\n{st['n_hospitals']} hospital(s), {st['rows']:,} therapy rate(s), "
+          f"{st['n_payers']} payer(s), {st['n_codes']} code(s)")
+    for h in st["hospitals"]:
+        print(f"  {str(h['hospital_name'])[:44]:<44} {str(h['state'] or ''):<3} "
+              f"{h['rows']:>6,} rows  {h['last_updated_on'] or ''}")
+    if args.parity:
+        par = hospital_parity(store, {"month": args.month}, payer=args.payer,
+                              state=args.state, subject=args.parity)
+        if not par["loaded"] or not par["rows"]:
+            print(f"\n{par['reason']}")
+            return 0
+        print(f"\n{'code':<8} {'your rate':>10} {'practice med':>13} "
+              f"{'hospital med':>13} {'multiple':>9}")
+        for r in par["rows"]:
+            sr = r.get("subject_rate")
+            print(f"{r['billing_code']:<8} {('$%.2f' % sr) if sr else '–':>10} "
+                  f"{'$%.2f' % r['practice_median']:>13} "
+                  f"{'$%.2f' % r['hospital_median']:>13} "
+                  f"{('%.2fx' % r['hospital_multiple']) if r['hospital_multiple'] else '–':>9}")
+    print(f"\n{st['caveat']}")
+    return 0
+
+
 def cmd_inflation(cfg: MrfxConfig, args) -> int:
     """Show or extend the price index that real-terms figures use."""
     from .inflation import InflationError, index_status, save_index_values
@@ -1603,6 +1652,19 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--state", default=None, help="two-letter state filter")
 
     p = sub.add_parser(
+        "hospital",
+        help="import a hospital's CMS standard-charges file; compare it to practice rates")
+    p.add_argument("path", nargs="?", default=None,
+                   help="the hospital's standard-charges CSV or JSON (omit to just list)")
+    p.add_argument("--name", default=None, help="hospital name (read from the file when omitted)")
+    p.add_argument("--state", default=None, help="two-letter state")
+    p.add_argument("--city", default=None, help="city")
+    p.add_argument("--parity", default=None, metavar="SUBJECT",
+                   help="also show a practice's rates against the hospitals loaded")
+    p.add_argument("--payer", default=None, help="scope the parity table to one payer")
+    p.add_argument("--month", default="latest", help="as-of month for the parity table")
+
+    p = sub.add_parser(
         "inflation",
         help="show or extend the price index behind real-terms (constant-dollar) figures")
     p.add_argument("--year", type=int, default=None, help="calendar year, e.g. 2025")
@@ -1694,6 +1756,7 @@ def main(argv: list[str] | None = None) -> int:
         "newclinics": cmd_newclinics,
         "closures": cmd_closures,
         "inflation": cmd_inflation,
+        "hospital": cmd_hospital,
         "backup": cmd_backup,
         "verify": cmd_verify,
         "reset": cmd_reset,

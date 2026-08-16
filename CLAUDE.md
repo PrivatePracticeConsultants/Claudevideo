@@ -48,6 +48,8 @@ population/income → market sizing), `mrfx newclinics --zip … --radius …`
 (therapy NPIs issued recently, from the NPPES bulk cache),
 `mrfx closures --zip … --radius …` (therapy NPIs DEACTIVATED recently and not
 reactivated — a closed referral source or a closed competitor),
+`mrfx hospital <file> [--state … --parity <practice>]` (a hospital's CMS
+standard-charges file + what the same payer pays the hospital vs the practice),
 `mrfx inflation [--year YYYY --value N]` (the price index behind real-terms
 erosion; a year with no value is refused, never estimated),
 `mrfx packets` (monthly client packets), `mrfx renewals [--clients]`,

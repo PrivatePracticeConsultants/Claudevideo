@@ -534,6 +534,26 @@
           Compares every CPT code you're priced on against this payer's market
           (median/percentiles), your named comparables, and what your other
           payers pay you — the working numbers for a rate request.</div>
+
+        <div class="validate-card" style="margin-top:14px">
+          <h3>Hospital comparison — what this payer pays the hospital</h3>
+          <p class="muted">CMS makes every hospital publish its negotiated rates. Loading the
+            local hospital's file shows what the SAME payer pays the outpatient department for
+            the SAME codes. A hospital rate is a <b>facility</b> rate — it pays for the
+            department, not a private practice's professional fee — so it is evidence of what
+            this payer already pays in this market, never an amount you are owed.</p>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <label class="btn" style="cursor:pointer">Load a hospital file
+              <input type="file" id="hp-file" accept=".csv,.json,.gz,.zip" style="display:none">
+            </label>
+            <input type="text" id="hp-name" placeholder="hospital name (optional)" style="width:190px">
+            <input type="text" id="hp-state" placeholder="ST" style="width:44px">
+            <input type="text" id="hp-city" placeholder="city (optional)" style="width:130px">
+            <button class="btn primary" id="hp-run">Compare</button>
+            <span id="hp-msg" class="muted"></span>
+          </div>
+          <div id="hp-out" style="margin-top:8px"></div>
+        </div>
       </div>
     </div>
   </section>

@@ -1533,6 +1533,7 @@ async function initNegotiate() {
   }
   state.ngInited = true;
   state.ngComps = [];
+  initHospital();      // the hospital comparison card lives on this tab
   const [subjects, months, payers] = await Promise.all([
     api("/api/benchmark/subjects").catch(() => null),
     api("/api/months").catch(() => null),
@@ -2300,6 +2301,79 @@ function initNewClinics() {
         <th>Phone</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table></div>
       <div class="muted" style="font-size:11.5px;margin-top:6px">${esc(d.note)}</div>`;
   });
+}
+
+/* ---- hospital price transparency (parity vs practice rates) ------------- */
+function initHospital() {
+  const msg = (t) => { $("#hp-msg").textContent = t; };
+  $("#hp-file").addEventListener("change", async (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    msg("importing… (a large hospital file can take a minute)");
+    const fd = new FormData();
+    fd.append("file", f);
+    const q = new URLSearchParams({
+      state: $("#hp-state").value.trim(),
+      city: $("#hp-city").value.trim(),
+      hospital_name: $("#hp-name").value.trim(),
+    });
+    try {
+      const r = await api(`/api/hospital/import?${q}`, { method: "POST", body: fd });
+      msg(r.rows
+        ? `${esc(r.hospital)}: ${fmtInt(r.rows)} therapy rate(s) across ${r.codes} code(s).`
+        : `${esc(r.hospital)}: ${esc(r.note || "no therapy rates found")}`);
+      await runHospitalParity();
+    } catch (err) { msg(`couldn't import: ${err.message}`); }
+    e.target.value = "";
+  });
+  $("#hp-run").addEventListener("click", runHospitalParity);
+  refreshHospitalStatus();
+}
+
+async function refreshHospitalStatus() {
+  const st = await api("/api/hospital/status").catch(() => null);
+  if (st && st.loaded) {
+    $("#hp-msg").textContent =
+      `${st.n_hospitals} hospital(s) loaded · ${fmtInt(st.rows)} therapy rate(s)`;
+  }
+}
+
+async function runHospitalParity() {
+  const out = $("#hp-out");
+  out.innerHTML = `<div class="loading">Comparing</div>`;
+  let d;
+  try {
+    d = await postJson("/api/hospital/parity", {
+      subject: $("#ng-subject").value.trim() || null,
+      payer: $("#ng-payer").value || null,
+      state: $("#hp-state").value.trim() || $("#ng-state").value.trim() || null,
+      market: { month: $("#ng-month").value || "latest",
+                therapy_only: $("#ng-therapy").checked },
+    });
+  } catch (e) { out.innerHTML = `<div class="muted">${esc(e.message)}</div>`; return; }
+  if (!d.loaded || !d.rows.length) {
+    out.innerHTML = `<div class="muted">${esc(d.reason || "nothing to compare yet")}</div>`;
+    return;
+  }
+  const rows = d.rows.map((r) => `<tr>
+    <td>${esc(r.billing_code)}<div class="sub">${esc(r.description || "")}</div></td>
+    <td>${esc(r.payer)}</td>
+    <td class="num">${r.subject_rate == null ? "–" : money(r.subject_rate)}</td>
+    <td class="num">${money(r.practice_median)}<div class="sub">${r.n_practices} practices</div></td>
+    <td class="num">${money(r.hospital_median)}<div class="sub">${r.n_hospitals} hospital(s)</div></td>
+    <td class="num"><b>${r.subject_multiple ?? r.hospital_multiple ?? "–"}${
+      (r.subject_multiple ?? r.hospital_multiple) == null ? "" : "×"}</b></td>
+  </tr>`).join("");
+  out.innerHTML = `<div class="muted" style="margin-bottom:6px">
+      ${d.median_hospital_multiple
+        ? `Across ${d.count} code(s), this payer pays the hospital outpatient department a
+           median of <b>${d.median_hospital_multiple}×</b> the private-practice median.`
+        : `${d.count} code(s) matched.`}</div>
+    <div class="tablewrap" style="max-height:40vh"><table><thead><tr>
+      <th>Code</th><th>Payer</th><th class="num">Your rate</th>
+      <th class="num">Practice median</th><th class="num">Hospital median</th>
+      <th class="num">Multiple</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="muted" style="font-size:11.5px;margin-top:6px">${esc(d.caveat)} ${esc(d.note)}</div>`;
 }
 
 /* ---- closures (NPPES deactivation dates) -------------------------------- */

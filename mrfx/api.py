@@ -1663,6 +1663,68 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         except (TypeError, ValueError) as e:
             raise HTTPException(422, f"bad input: {e}")
 
+    # -- hospital price transparency ---------------------------------------------------
+
+    @app.get("/api/hospital/status")
+    def api_hospital_status():
+        from .hospital import hospital_status
+        return hospital_status(store)
+
+    @app.post("/api/hospital/import")
+    def api_hospital_import(file: UploadFile, state: str = "", city: str = "",
+                            hospital_name: str = ""):
+        """Load one hospital's CMS standard-charges file (CSV or JSON)."""
+        import uuid as _uuid
+
+        from .hospital import HospitalImportError, hospital_status, import_hospital_file
+        # A per-upload DIRECTORY, not a suffixed filename: two uploads of the
+        # same name must not truncate each other (audit F7), and the importer
+        # records the file's own name as provenance, so it has to survive.
+        dest = (Path(cfg.store_dir) / "uploads" /
+                f"{os.getpid()}-{_uuid.uuid4().hex[:8]}")
+        dest.mkdir(parents=True, exist_ok=True)
+        safe = Path(file.filename or "hospital.csv").name or "hospital.csv"
+        p = dest / safe
+        try:
+            with open(p, "wb") as out:
+                while chunk := file.file.read(1 << 20):
+                    out.write(chunk)
+            res = import_hospital_file(
+                store, p, hospital_name=hospital_name.strip() or None,
+                state=state.strip() or None, city=city.strip() or None, cfg=cfg)
+        except HospitalImportError as e:
+            raise HTTPException(422, str(e))
+        except (OSError, ValueError) as e:
+            raise HTTPException(422, f"could not read that file: {e}")
+        finally:
+            p.unlink(missing_ok=True)
+            try:
+                dest.rmdir()
+            except OSError:
+                pass
+        return {**res, "status": hospital_status(store)}
+
+    @app.post("/api/hospital/parity")
+    def api_hospital_parity(body: dict = Body(...)):
+        """Practice rates vs hospital outpatient rates for the same payer+code."""
+        from .hospital import hospital_parity
+        try:
+            return hospital_parity(
+                store, body.get("market") or {},
+                payer=str(body.get("payer") or "").strip() or None,
+                state=str(body.get("state") or "").strip() or None,
+                subject=str(body.get("subject") or "").strip() or None,
+                limit=_as_int(body.get("limit"), 200))
+        except BenchmarkError as e:
+            raise HTTPException(422, str(e))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(422, f"bad input: {e}")
+
+    @app.delete("/api/hospital/{name}")
+    def api_hospital_forget(name: str):
+        from .hospital import forget_hospital, hospital_status
+        return {**forget_hospital(store, name), "status": hospital_status(store)}
+
     # -- underpayment check ------------------------------------------------------------
 
     @app.post("/api/remits/check")

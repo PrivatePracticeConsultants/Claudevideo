@@ -1355,6 +1355,20 @@ class Store:
             -- holds what the USER added (newer years, or a different basket),
             -- which wins for the same year. Never auto-populated: an index
             -- value this app did not read somewhere must not exist.
+            -- One row per imported hospital price-transparency file. The rates
+            -- themselves live in hospital/*.parquet behind the hospital_rates
+            -- view — deliberately NOT in `rates`: a hospital outpatient rate is
+            -- a facility payment under a different mandate, and mixing it into
+            -- the spine would corrupt every practice median in the app.
+            CREATE TABLE IF NOT EXISTS hospital_files (
+                hospital_name VARCHAR PRIMARY KEY,
+                state VARCHAR,
+                city VARCHAR,
+                source_file VARCHAR,
+                rows BIGINT,
+                last_updated_on VARCHAR,
+                imported_at TIMESTAMP
+            );
             CREATE TABLE IF NOT EXISTS inflation_index (
                 year INTEGER PRIMARY KEY,
                 value DOUBLE,
