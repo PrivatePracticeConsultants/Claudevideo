@@ -84,7 +84,12 @@ def compute_rate_changes(store: Store, market: dict, *, subject: str | None = No
             "rate-change monitoring needs two months — only one is in the store. "
             "Re-ingest the payer's newer MRF (a later file_month) and try again.")
     if old_month >= new_month:
-        raise BenchmarkError("prev_month must be earlier than month")
+        # plain language: "prev_month" and "month" are this function's parameter
+        # names, not words the person reading the Changes tab chose
+        raise BenchmarkError(
+            f"the month to compare against ({old_month}) has to be EARLIER than "
+            f"the month being examined ({new_month}) — a rate move only has a "
+            f"direction when the two months are in order")
 
     market = resolve_plan_scope(store, market)
     rel = spine_relation(market)

@@ -808,11 +808,24 @@ async function loadSummary() {
     // aggregates hitting the memory cap on a big unfiltered view. Say so and
     // what to do — the same guidance loadRates gives — instead of a mystery
     // empty strip.
-    const msg = /memory/i.test(e.message || "")
-      ? "Stats need more memory than the current limit — add a filter (payer, code, or state), or raise duckdb_memory_gb in config and restart."
-      : "Stats are busy — they'll appear on the next refresh.";
+    const busy = !/memory/i.test(e.message || "");
+    const msg = busy
+      ? "Stats are busy — retrying…"
+      : "Stats need more memory than the current limit — add a filter (payer, code, or state), or raise duckdb_memory_gb in config and restart.";
     el.innerHTML = `<div class="stat" style="flex:1"><div class="k">Summary</div><div class="v" style="font-size:0.8rem;font-weight:normal">${esc(msg)}</div></div>`;
     const bc = $("#summary-bycode"); if (bc) bc.innerHTML = "";
+    // "busy" means another scan holds the single-flight lock, so the answer is
+    // seconds away. Keep the promise instead of leaving a dead strip the user
+    // has to poke a filter to clear — but only once, and only if the filter
+    // hasn't moved on since (a later refresh supersedes this retry).
+    if (busy && !loadSummary._retrying) {
+      const q = filterQuery();
+      loadSummary._retrying = true;
+      setTimeout(() => {
+        loadSummary._retrying = false;
+        if (filterQuery() === q) loadSummary();
+      }, 1400);
+    }
   }
 }
 
@@ -835,7 +848,13 @@ function renderByCode(el, rows, mpfs) {
 }
 
 const refresh = () => { loadRates(); loadSummary(); };
-const refreshFromFirstPage = () => { state.page = 1; refresh(); };
+// Ticking three payer chips in a row used to fire three full scans. On a big
+// store each one is heavy enough that the later ones hit the summary's
+// single-flight lock and land on "Stats are busy" — for a filter the user is
+// still in the middle of choosing. Coalesce a burst into the one query they
+// actually meant. (Entry and init still refresh immediately, below.)
+const refreshSoon = debounce(refresh, 280);
+const refreshFromFirstPage = () => { state.page = 1; refreshSoon(); };
 // Sorting and page-size changes re-order/re-window the SAME filtered set, so
 // the summary stats (medians, counts, benchmarks) are unchanged — reload only
 // the table, skipping a heavy summary recompute that dominates on a big store.
@@ -3674,6 +3693,17 @@ async function runChanges() {
   $("#ch-csv").disabled = true;
   let payload;
   try { payload = changesPayload(); } catch (e) { out.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  // both dropdowns offer every loaded month, so the pair can be chosen out of
+  // order. Say which way round it goes here rather than spending a round trip
+  // to be told — the server still validates.
+  const mNew = $("#ch-month").value, mPrev = $("#ch-prev").value;
+  if (mPrev && mNew && mPrev >= mNew) {
+    out.innerHTML = `<div class="empty"><h3>Pick the earlier month to compare against</h3>
+      ${esc(mPrev === mNew
+        ? `Both boxes are set to ${mNew}. Choose an earlier month in "compare to".`
+        : `${mPrev} is not earlier than ${mNew} — a rate move only has a direction when the two months are in order.`)}</div>`;
+    return;
+  }
   out.innerHTML = `<div class="loading">Comparing months</div>`;
   let data;
   try { data = await postJson("/api/changes", payload); } catch (e) { out.innerHTML = `<div class="empty"><h3>Could not compare</h3>${esc(e.message)}</div>`; return; }

@@ -119,3 +119,21 @@ def test_expiration_coverage_accepts_a_state(tied_store):
     # and the state actually filters rather than being ignored
     none_there = expiration_coverage(store, {"month": "2026-06", "state": "MI"})
     assert none_there["rows"] == 0
+
+
+def test_out_of_order_months_are_refused_in_the_readers_words(tied_store):
+    """The Changes tab offers every loaded month in BOTH dropdowns, so the pair
+    can be picked out of order. The refusal used to read "prev_month must be
+    earlier than month" — the function's parameter names, not words the person
+    reading the tab chose."""
+    import pytest as _pytest
+
+    from mrfx.benchmark import BenchmarkError
+    from mrfx.monitor import compute_rate_changes
+    _cfg, store = tied_store
+    with _pytest.raises(BenchmarkError) as e:
+        compute_rate_changes(store, {"month": "2026-06", "prev_month": "2026-06"})
+    msg = str(e.value)
+    assert "prev_month" not in msg and "month being examined" in msg
+    # both months are named, so the reader can see which way round it goes
+    assert msg.count("2026-06") >= 2
