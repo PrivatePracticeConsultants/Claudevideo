@@ -124,8 +124,12 @@ def import_fee_schedule(store: Store, path: str | Path, *, kind: str,
     if kind not in KINDS:
         raise FloorImportError(
             f"kind must be one of {', '.join(KINDS)} — got {kind!r}")
-    st = str(state or "").strip().upper()[:2]
-    if len(st) != 2:
+    from .states import state_code
+    try:
+        st = state_code(state)
+    except ValueError as exc:
+        raise FloorImportError(str(exc)) from exc
+    if not st:
         raise FloorImportError("a two-letter state is required — a fee schedule "
                                "is a state document and means nothing without it")
     path = Path(path)
@@ -223,7 +227,11 @@ def floor_comparison(store: Store, market: dict | None = None, *,
                 "note": FLOOR_NOTE}
 
     m = resolve_plan_scope(store, normalize_market(market or {}))
-    scope_state = (state or m.get("state") or "").strip().upper()[:2]
+    from .states import state_code
+    try:
+        scope_state = state_code(state or m.get("state"))
+    except ValueError as exc:
+        raise BenchmarkError(str(exc)) from exc
     if not scope_state:
         # a fee schedule is a STATE document; comparing a national commercial
         # median to one state's Medicaid would be an accidental apples-oranges
@@ -348,14 +356,22 @@ def floor_comparison(store: Store, market: dict | None = None, *,
 
 def forget_schedule(store: Store, kind: str, state: str,
                     year: str | None = None) -> dict:
+    from .states import state_code
+    try:
+        st = state_code(state)
+    except ValueError as exc:
+        raise FloorImportError(str(exc)) from exc
+    if not st:
+        raise FloorImportError("a two-letter state is required to forget a "
+                               "schedule — schedules are stored per state")
     with store.write_lock, store.connect() as con:
         n = con.execute(
             "SELECT count(*) FROM floor_schedules WHERE kind = ? AND state = ? "
             "AND coalesce(year, '') = coalesce(?, '')",
-            [kind, str(state).upper()[:2], year]).fetchone()[0]
+            [kind, st, year]).fetchone()[0]
         con.execute(
             "DELETE FROM floor_schedules WHERE kind = ? AND state = ? "
             "AND coalesce(year, '') = coalesce(?, '')",
-            [kind, str(state).upper()[:2], year])
-    return {"removed": n, "kind": kind, "state": str(state).upper()[:2],
+            [kind, st, year])
+    return {"removed": n, "kind": kind, "state": st,
             "year": year}

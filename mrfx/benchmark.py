@@ -93,6 +93,15 @@ def normalize_market(market: dict | None) -> dict:
             raise BenchmarkError("payers must be a list of payer names")
         m["payers"] = [str(p).strip() for p in payers
                        if p is not None and str(p).strip()]
+    # A state has to be a state. This used to be truncated to two characters
+    # wherever it was consumed, so "Missouri" quietly became "MI" — Michigan's
+    # peers, schedules and hospitals under a Missouri heading.
+    if m.get("state") is not None:
+        from .states import state_code
+        try:
+            m["state"] = state_code(m["state"])
+        except ValueError as exc:
+            raise BenchmarkError(str(exc)) from exc
     return m
 
 

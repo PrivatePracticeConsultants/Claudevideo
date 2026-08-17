@@ -1727,9 +1727,14 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
 
     @app.delete("/api/floors/{kind}/{state}")
     def api_floors_forget(kind: str, state: str, year: str = ""):
-        from .floors import floor_status, forget_schedule
-        return {**forget_schedule(store, kind, state, year.strip() or None),
-                "status": floor_status(store)}
+        from .floors import FloorImportError, floor_status, forget_schedule
+        try:
+            removed = forget_schedule(store, kind, state, year.strip() or None)
+        except FloorImportError as e:      # an unreadable state is a refusal
+            raise HTTPException(422, str(e))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(422, f"bad input: {e}")
+        return {**removed, "status": floor_status(store)}
 
     # -- prospect dossier + market report -------------------------------------------------
 

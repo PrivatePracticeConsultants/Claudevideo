@@ -42,6 +42,7 @@ from pathlib import Path
 
 from .catalog import CODE_CATALOG, code_info, resolve_discipline
 from .sniff import open_stream
+from .states import state_code_or_none
 from .store import Store, sql_path
 
 log = logging.getLogger(__name__)
@@ -334,7 +335,7 @@ def import_hospital_file(store: Store, path: str | Path, *,
         (r["hospital_name"] for r in rows if r.get("hospital_name")), None)
     if not name:
         name = path.stem
-    st = (state or "").strip().upper()[:2] or None
+    st = state_code_or_none(state)
     ct = (city or "").strip() or None
     last_updated = next((r["last_updated_on"] for r in rows if r.get("last_updated_on")), None)
 
@@ -506,7 +507,7 @@ def hospital_parity(store: Store, market: dict | None = None, *,
         hosp_params.append(payer)
     if state or m.get("state"):
         hosp_where.append("h.state = ?")
-        hosp_params.append(str(state or m["state"]).upper()[:2])
+        hosp_params.append(state_code_or_none(state or m["state"]))
 
     sql = f"""
     WITH practice AS (
@@ -623,7 +624,7 @@ def cash_anchors(store: Store, *, state: str | None = None,
     where, params = ["h.cash_price IS NOT NULL"], []
     if state:
         where.append("h.state = ?")
-        params.append(str(state).upper()[:2])
+        params.append(state_code_or_none(state))
     if codes:
         want = [str(c).upper() for c in codes]
         where.append(f"h.billing_code IN ({', '.join('?' for _ in want)})")
@@ -654,7 +655,7 @@ def cash_anchors(store: Store, *, state: str | None = None,
             if r["cash_median"] and r["negotiated_median"] else None)
     return {
         "loaded": bool(rows), "rows": rows, "count": len(rows),
-        "state": str(state).upper()[:2] if state else None,
+        "state": state_code_or_none(state),
         "n_hospitals": st["n_hospitals"],
         "reason": None if rows else (
             "the loaded hospital file(s) publish no discounted-cash price for "

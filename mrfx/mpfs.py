@@ -127,13 +127,17 @@ def parse_gpci(text: str, state: str, locality_name: str | None = None) -> dict:
         raise MpfsImportError(
             "this does not look like a CMS GPCI file — could not find "
             f"column(s) {', '.join(missing)} in header: {fields[:10]}")
-    state = (state or "").strip().upper()
+    from .states import state_code
+    try:
+        state = state_code(state)
+    except ValueError as exc:
+        raise MpfsImportError(str(exc)) from exc
     if not state:
         raise MpfsImportError("a state is required to pick the GPCI locality "
                               "(e.g. --state MO)")
     rows = []
     for row in r:
-        if (row.get(col_state) or "").strip().upper()[:2] != state[:2]:
+        if (row.get(col_state) or "").strip().upper()[:2] != state:
             continue
         try:
             rows.append({

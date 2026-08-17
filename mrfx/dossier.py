@@ -300,8 +300,12 @@ def build_market_report(cfg: MrfxConfig, store: Store, *, state: str,
     """The metro-level story, as one branded document."""
     from .benchmark import BenchmarkError
     e = html.escape
-    st = str(state or "").strip().upper()[:2]
-    if len(st) != 2:
+    from .states import state_code
+    try:
+        st = state_code(state)
+    except ValueError as exc:
+        raise BenchmarkError(str(exc)) from exc
+    if not st:
         raise BenchmarkError(
             "a market report needs a two-letter state — reimbursement varies "
             "far more between states than within them")

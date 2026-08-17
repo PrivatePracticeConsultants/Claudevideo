@@ -42,6 +42,19 @@ def _safe(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9]+", "_", name).strip("_")[:60] or "practice"
 
 
+def _reason(exc: Exception) -> str:
+    """A refusal message as a clause, not a sentence.
+
+    Skipped sections are joined with "; " on the Clients tab and in the packet
+    index, so a message that already ends in a full stop renders as ".;". Drop
+    one trailing period (never an ellipsis, which is meaningful).
+    """
+    text = " ".join(str(exc).split())
+    if text.endswith(".") and not text.endswith(".."):
+        text = text[:-1]
+    return text or "no reason given"
+
+
 def _month_dir(root: Path, month: str) -> Path:
     d = Path(root) / month
     d.mkdir(parents=True, exist_ok=True)
@@ -81,10 +94,10 @@ def build_client_packet(cfg: MrfxConfig, store: Store, subject: str,
         try:
             fn()
         except BenchmarkError as e:      # a real, expected refusal
-            skipped.append(f"{section}: {e}")
+            skipped.append(f"{section}: {_reason(e)}")
         except Exception as e:           # noqa: BLE001 — never lose the packet
             log.warning("packet %s / %s failed: %s", subject, section, e)
-            skipped.append(f"{section}: could not be built ({e})")
+            skipped.append(f"{section}: could not be built ({_reason(e)})")
 
     pdir = Path(out_dir) / _safe(subject)
     pdir.mkdir(parents=True, exist_ok=True)

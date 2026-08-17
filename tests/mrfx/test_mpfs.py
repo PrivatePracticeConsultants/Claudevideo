@@ -47,8 +47,14 @@ def test_gpci_locality_selection_and_disclosure():
     assert parse_gpci(GPCI, "IA")["name"] == "IOWA"
     with pytest.raises(MpfsImportError, match="available"):
         parse_gpci(GPCI, "MO", "narnia")
+    # a real state simply absent from this file
     with pytest.raises(MpfsImportError, match="no GPCI rows"):
+        parse_gpci(GPCI, "CA")
+    # not a state at all — refused by name, before we go looking for rows
+    with pytest.raises(MpfsImportError, match="not a US state code"):
         parse_gpci(GPCI, "ZZ")
+    # and the state NAME resolves to its own code, not its first two letters
+    assert parse_gpci(GPCI, "Missouri")["name"] == "REST OF MISSOURI"
 
 
 def test_rates_match_the_published_formula():

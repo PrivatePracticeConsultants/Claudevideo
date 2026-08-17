@@ -32,6 +32,7 @@ from pathlib import Path
 
 from .catalog import therapy_taxonomy_sql
 from .medicare import haversine_miles_sql, load_centroids
+from .states import state_code_or_none
 from .store import Store, sql_path
 
 log = logging.getLogger(__name__)
@@ -170,7 +171,7 @@ def closures(store: Store, zip_code: str | None = None,
     zip_code = (zip_code or "").strip()[:5] or None
     if zip_code and not re.fullmatch(r"\d{5}", zip_code):
         raise NppesFeedError(f"'{zip_code}' is not a 5-digit ZIP code")
-    state = (state or "").strip().upper()[:2] or None
+    state = state_code_or_none(state)
     use_radius = bool(zip_code and radius_miles)
     since = (dt.date.today() - dt.timedelta(days=days)).isoformat()
 
@@ -279,7 +280,7 @@ def new_enumerations(store: Store, zip_code: str | None = None,
     zip_code = (zip_code or "").strip()[:5] or None
     if zip_code and not re.fullmatch(r"\d{5}", zip_code):
         raise NppesFeedError(f"'{zip_code}' is not a 5-digit ZIP code")
-    state = (state or "").strip().upper()[:2] or None
+    state = state_code_or_none(state)
     use_radius = bool(zip_code and radius_miles)
     since = (dt.date.today() - dt.timedelta(days=days)).isoformat()
 

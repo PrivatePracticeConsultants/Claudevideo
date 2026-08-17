@@ -28,6 +28,7 @@ import logging
 import re
 
 from .catalog import code_info
+from .states import state_code_or_none
 from .store import Store, mask_tin
 
 log = logging.getLogger(__name__)
@@ -87,7 +88,7 @@ def local_rate_map(store: Store, code: str, market: dict, *,
         raise BenchmarkError("pick a billing code")
     limit = max(1, min(int(limit), 500))   # a negative LIMIT is a DuckDB binder 500
     m = resolve_plan_scope(store, normalize_market({**(market or {}), "codes": [code]}))
-    st = (state or m.get("state") or "").strip().upper()[:2]
+    st = state_code_or_none(state or m.get("state")) or ""
     if not st:
         raise BenchmarkError(
             "a sub-state map needs a state — rates vary far more between states "
