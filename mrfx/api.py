@@ -8,6 +8,7 @@ ships with a methodology sidecar (§7A.6). The default analytical grain is
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import io
 import json
@@ -629,7 +630,22 @@ def _fs(qp: dict) -> FilterSet:
 
 
 def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
-    app = FastAPI(title="MRF Explorer", docs_url="/api/docs")
+    # Startup work is collected here and run by the lifespan handler below.
+    # `@app.on_event("startup")` is deprecated and slated for removal, but the
+    # handlers are defined far below (they close over locals built on the way
+    # down), so they register into this list instead of decorating.
+    startup_tasks: list = []
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        for task in startup_tasks:
+            try:
+                await task()
+            except Exception:  # noqa: BLE001 — boot tuning must never block serve
+                log.exception("startup task %s failed", getattr(task, "__name__", task))
+        yield
+
+    app = FastAPI(title="MRF Explorer", docs_url="/api/docs", lifespan=lifespan)
     registry = Registry(cfg)
     sync_entity_map(cfg, store)
     if cfg.mpfs_path and Path(cfg.mpfs_path).exists():
@@ -2922,7 +2938,6 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             return JSONResponse(status_code=422, content={"error": str(exc)})
         return JSONResponse(status_code=500, content={"error": f"{type(exc).__name__}: {exc}"})
 
-    @app.on_event("startup")
     async def _widen_threadpool():
         # sync endpoints + their lock-waits share anyio's default 40-token
         # threadpool; during a minutes-long rollup a busy dashboard can park
@@ -2935,7 +2950,6 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         except Exception:  # noqa: BLE001 — tuning must never block startup
             log.exception("could not widen the request threadpool; keeping default")
 
-    @app.on_event("startup")
     async def _tracker_autoimport():
         """OPT-IN (tracker_auto_import). The tracker refreshes the eligibility
         roster ~twice a week; with this on, a newer snapshot is picked up at
@@ -2963,6 +2977,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
 
         threading.Thread(target=_bg_safe, args=(_go,),
                          name="mrfx-tracker-autoimport", daemon=True).start()
+
+    startup_tasks.extend([_widen_threadpool, _tracker_autoimport])
 
     app.mount("/", NoCacheStaticFiles(directory=WEB_DIR, html=True), name="web")
     return app

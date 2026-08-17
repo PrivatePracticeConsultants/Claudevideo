@@ -29,7 +29,6 @@ import io
 from . import __version__
 from .benchmark import BenchmarkError, normalize_market, resolve_subject_tins
 from .catalog import code_info
-from .config import MrfxConfig
 from .schedule import (_methodology, compute_fee_schedule,
                        payer_scorecard, require_rate_card_content)
 from .store import Store, defuse_csv, mask_tin

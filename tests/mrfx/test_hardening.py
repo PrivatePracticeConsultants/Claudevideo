@@ -1147,7 +1147,7 @@ def test_store_stats_and_states_cached_single_flight(cfg, store):
     assert a["rates"] == 1 and a["payers"] == 1
     # second call within TTL returns the SAME cached dict object
     assert store.store_stats() is store._store_stats_cache[1]
-    st = store.available_states()
+    store.available_states()          # populates the cache
     assert store.available_states() is store._states_cache[1]
 
 

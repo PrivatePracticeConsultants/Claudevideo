@@ -26,10 +26,11 @@ for correctness of the numbers.
 
 ## Build / run / test
 
-```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt && .venv/bin/pip install -e .
 .venv/bin/mrfx serve                       # dashboard http://localhost:8377 + inbox watcher + URL worker
 .venv/bin/python -m pytest tests/ -q       # the suite: real end-to-end drains against local HTTP servers
+.venv/bin/ruff check mrfx/ tests/          # lint gate: narrow by design (see pyproject), stays at ZERO
+.venv/bin/pip-audit -r requirements.txt    # dependency CVEs: was 25 across 5 packages, now clean
 ```
 
 Other commands: `mrfx add <url>… [--file links.txt] [--known] [--retry-failed]`,

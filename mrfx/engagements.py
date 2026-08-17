@@ -223,12 +223,12 @@ def compare_to_baseline(store: Store, subject: str, label: str = "engagement sta
     # figure, never an estimate, and never a failed comparison.
     real = None
     try:
-        from .inflation import BASIS_CAVEAT, deflator, load_index, real_change_pct
+        from .inflation import BASIS_CAVEAT, deflator, load_index
         d = deflator(load_index(store), row[1], now["month"])
-        before, after = med(pb), med(pa)
-        gain_pct = None
-        if volumes and total_value:
-            gain_pct = None       # a dollar total has no percentage to deflate
+        # (there is deliberately no real-terms PERCENTAGE here: the gain this
+        # block deflates is a dollar total, and a percentile move has no
+        # dollar value to restate. The before/after medians the caller wants
+        # are computed once, in `summary` below.)
         real = {
             "basis": d.get("basis"), "reason": d.get("reason"),
             "factor": round(d["factor"], 4) if d.get("factor") else None,

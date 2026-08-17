@@ -109,3 +109,40 @@ def test_a_huge_pasted_value_does_not_become_a_huge_error_message():
         state_code("Z" * 1000)
     assert len(str(e.value)) < 160
     assert "…" in str(e.value)
+
+
+def test_open_stream_does_not_leak_the_handle_when_it_refuses(tmp_path, monkeypatch):
+    """open_stream hands the caller a stream to close, but if it raises AFTER
+    opening the file (a zip with no .json member) the handle used to leak — and
+    on Windows a leaked handle blocks deleting the raw file after ingest.
+
+    Asserted on the handle itself: a ResourceWarning is raised during GC in an
+    unraisable context, so it never reaches the test body and cannot be used.
+    """
+    import builtins
+    import zipfile
+
+    from mrfx import sniff
+
+    p = tmp_path / "empty.zip"
+    with zipfile.ZipFile(p, "w") as z:
+        z.writestr("readme.txt", "no json here")
+
+    opened = []
+    real_open = builtins.open
+
+    def spy(*a, **k):
+        fh = real_open(*a, **k)
+        opened.append(fh)
+        return fh
+
+    monkeypatch.setattr(builtins, "open", spy)
+    with pytest.raises(ValueError, match="no .json member"):
+        sniff.open_stream(p)
+    monkeypatch.undo()
+
+    assert opened, "open_stream did not open the file at all — test is not exercising it"
+    leaked = [fh for fh in opened if not fh.closed]
+    for fh in leaked:                     # never leave the suite holding handles
+        fh.close()
+    assert not leaked, f"{len(leaked)} file handle(s) leaked when open_stream refused"

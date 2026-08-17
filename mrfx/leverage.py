@@ -34,7 +34,6 @@ HONESTY — the rails that keep this from overclaiming:
 from __future__ import annotations
 
 import logging
-import re
 
 from .store import Store, mask_tin
 

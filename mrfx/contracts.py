@@ -208,7 +208,7 @@ def new_to_network(store: Store, market: dict | None = None,
                     f"ZIP {zip_code} is not in the Census ZCTA centroid list")
         rows: list[dict] = []
         for payer, pm in pairs:
-            cur = con.execute(f"""
+            cur = con.execute("""
                 WITH now AS (
                     SELECT DISTINCT tin_value FROM rates_by_tin
                     WHERE payer = ? AND file_month = ?

@@ -418,10 +418,10 @@ def _wins_html(cfg: MrfxConfig, display: str, cmp: dict) -> str:
                 "<th class='num'>After</th><th class='num'>Change</th>"
                 "<th class='num'>Percentile</th><th class='num'>Annual value</th>"
                 "</tr></thead><tbody>" + rows + "</tbody></table>"
-                + (f"<h2>Codes added since baseline</h2><p>"
+                + ("<h2>Codes added since baseline</h2><p>"
                    + e(", ".join(x["billing_code"] for x in cmp["gained_codes"]))
                    + "</p>" if cmp["gained_codes"] else "")
-                + (f"<h2>Codes no longer published</h2><p>"
+                + ("<h2>Codes no longer published</h2><p>"
                    + e(", ".join(x["billing_code"] for x in cmp["lost_codes"]))
                    + "</p>" if cmp["lost_codes"] else ""),
                 cmp["note"])

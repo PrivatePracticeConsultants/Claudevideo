@@ -199,7 +199,7 @@ def weighted_position(store: Store, subject: str, market: dict | None = None, *,
     makes the number represent its dollars — but only when the volumes cover
     enough of the priced codes to mean anything.
     """
-    from .benchmark import BenchmarkError, clean_volumes, compute_benchmark
+    from .benchmark import clean_volumes, compute_benchmark
     from .utilization import practice_utilization
 
     b = benchmark or compute_benchmark(store, subject, market or {})

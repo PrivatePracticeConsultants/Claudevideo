@@ -191,7 +191,7 @@ def test_a_payer_is_never_made_to_look_cheap_by_a_code_it_doesnt_publish(cfg, st
     _world(store)
     _puf(store, tmp_path, "2023")
     # BCBS drops 97112 entirely
-    with store.connect() as con, store.write_lock:
+    with store.connect(), store.write_lock:
         pass
     rows = [_row("431000000", "1417594896", 40.0, code="97110", payer="Thin"),
             _row("431000000", "1417594896", 36.0, code="97140", payer="Thin")]

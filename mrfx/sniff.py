@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import gzip
 import io
-import json
 import logging
 import zipfile
 from dataclasses import dataclass, field
@@ -141,34 +140,42 @@ def open_stream(path: Path, progress_cb=None) -> io.BufferedIOBase:
 
     progress_cb(compressed_bytes_read) is called as the underlying compressed
     bytes are consumed, so callers can render a progress bar."""
-    raw: io.BufferedIOBase = open(path, "rb")
-    head = raw.peek(4)[:4] if hasattr(raw, "peek") else raw.read(4)
-    if progress_cb is not None:
-        raw = io.BufferedReader(_CountingRaw(raw, progress_cb), buffer_size=1 << 20)
-    if head[:2] == b"\x1f\x8b":
-        return _debom(gzip.GzipFile(fileobj=raw))
-    if head[:4] == b"PK\x03\x04":
-        zf = zipfile.ZipFile(raw)
-        members = [m for m in zf.infolist()
-                   if m.filename.lower().endswith((".json", ".json.gz"))]
-        if not members:
-            raw.close()
-            raise ValueError("zip archive contains no .json member")
-        # the LARGEST member is the rate file; picking namelist()[0] silently
-        # ingested a small manifest JSON and dropped the real data
-        pick = max(members, key=lambda m: m.file_size)
-        if len(members) > 1:
-            import logging as _logging
+    raw: io.BufferedIOBase = open(path, "rb")  # noqa: SIM115 — see below
+    # The handle is owned by the CALLER (`with open_stream(p) as s:` closes the
+    # whole chain), so it cannot be a `with` here. But anything that raises
+    # between the open and the return would leak it — and on Windows a leaked
+    # handle also blocks deleting the raw file after ingest
+    # (delete_raw_after_ingest), so the leak turns into a disk-space problem.
+    try:
+        head = raw.peek(4)[:4] if hasattr(raw, "peek") else raw.read(4)
+        if progress_cb is not None:
+            raw = io.BufferedReader(_CountingRaw(raw, progress_cb), buffer_size=1 << 20)
+        if head[:2] == b"\x1f\x8b":
+            return _debom(gzip.GzipFile(fileobj=raw))
+        if head[:4] == b"PK\x03\x04":
+            zf = zipfile.ZipFile(raw)
+            members = [m for m in zf.infolist()
+                       if m.filename.lower().endswith((".json", ".json.gz"))]
+            if not members:
+                raise ValueError("zip archive contains no .json member")
+            # the LARGEST member is the rate file; picking namelist()[0] silently
+            # ingested a small manifest JSON and dropped the real data
+            pick = max(members, key=lambda m: m.file_size)
+            if len(members) > 1:
+                import logging as _logging
 
-            _logging.getLogger(__name__).info(
-                "%s: zip has %d .json members — reading the largest (%s); "
-                "the others are ignored", getattr(path, "name", path),
-                len(members), pick.filename)
-        inner = zf.open(pick)
-        if pick.filename.lower().endswith(".gz"):
-            return _debom(gzip.GzipFile(fileobj=inner))
-        return _debom(inner)
-    return _debom(raw)
+                _logging.getLogger(__name__).info(
+                    "%s: zip has %d .json members — reading the largest (%s); "
+                    "the others are ignored", getattr(path, "name", path),
+                    len(members), pick.filename)
+            inner = zf.open(pick)
+            if pick.filename.lower().endswith(".gz"):
+                return _debom(gzip.GzipFile(fileobj=inner))
+            return _debom(inner)
+        return _debom(raw)
+    except BaseException:
+        raw.close()
+        raise
 
 
 def _estimate_uncompressed(path: Path, compressed: int) -> int | None:

@@ -18,7 +18,6 @@ from pathlib import Path
 from .config import MrfxConfig
 from .parser import (
     InNetworkParser,
-    ParseResult,
     parse_provider_reference_file,
     skim_needed_ref_ids,
 )
@@ -235,7 +234,6 @@ class ParsePoolManager:
 
     def heal(self) -> None:
         """Replace a broken executor (no-op if another thread already did)."""
-        import concurrent.futures
 
         with self._lock:
             broken = getattr(self._pool, "_broken", False)

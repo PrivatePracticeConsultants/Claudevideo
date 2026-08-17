@@ -268,7 +268,7 @@ def test_file_month_memo_invalidates_on_header_change():
     from mrfx.parser import ParseResult
     r = ParseResult(source_file="rates.json")
     r.last_updated_on = None
-    first = r.file_month  # falls back (no date in name/header)
+    assert r.file_month  # the READ caches; the next assert proves it recomputes
     r.last_updated_on = "2025-03-01"
     assert r.file_month == "2025-03"  # recomputed, not the stale cached value
     r.last_updated_on = "2025-08-15"

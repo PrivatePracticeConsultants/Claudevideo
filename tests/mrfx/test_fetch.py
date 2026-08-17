@@ -1504,7 +1504,6 @@ def test_download_aborts_mid_stream_on_cancel(cfg):
         url = f"http://127.0.0.1:{httpd.server_address[1]}/f.json.gz"
         dest = cfg.downloads_dir / filename_for(url)
         part = dest.with_suffix(dest.suffix + ".part")
-        state = {"cancel": False}
         # cancel after a couple of chunks land
         def check():
             return payload_sent["n"] >= 2

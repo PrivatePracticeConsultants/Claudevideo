@@ -1148,7 +1148,7 @@ def cmd_floors(cfg: MrfxConfig, args) -> int:
     if not st["loaded"]:
         print(st["reason"])
         return 0
-    print(f"\nloaded schedules:")
+    print("\nloaded schedules:")
     for sc in st["schedules"]:
         print(f"  {str(sc['label'])[:44]:<44} {sc['codes']:>4} codes  "
               f"${sc['min_rate']:.2f}–${sc['max_rate']:.2f}")

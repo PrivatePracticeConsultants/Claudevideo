@@ -16,3 +16,42 @@ packages = ["mrfx", "src"]
 
 [tool.setuptools.package-data]
 mrfx = ["web/*"]
+
+# ---------------------------------------------------------------------------
+# Lint. Selected for RULES THAT CATCH BUGS, not house style: this codebase's
+# correctness is defended by a large end-to-end suite and the audit harnesses,
+# and a 278-finding style sweep would bury the few findings that matter. When
+# ruff was first run it surfaced exactly one real defect (dead assignments in
+# engagements.py) out of 278 — so the selection below is deliberately narrow
+# and expected to stay at zero.
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+extend-exclude = ["src", ".venv", "data"]
+
+[tool.ruff.lint]
+select = [
+  "E9",     # syntax / IO errors — never acceptable
+  "F",      # pyflakes: undefined names, unused imports, dead assignments
+  "PLE",    # pylint errors (real mistakes, not opinions)
+  "B006",   # a mutable default argument, shared across every call
+  "B012",   # break/return inside finally silently discards the exception
+  "SIM115", # a file opened without a context manager leaks the handle
+]
+# Deliberately NOT selected, with reasons — so the next person knows these were
+# considered rather than forgotten:
+#   T20    the CLI is a print-based UI; 197 of its prints ARE the interface.
+#   B008   FastAPI's whole idiom is `body: dict = Body(...)` in a default.
+#   B904   the refusals are written FOR the reader; chaining a Python cause
+#          onto "pick a practice and a payer" helps nobody.
+#   B905   `dict(zip(cols, row))` over a DuckDB cursor cannot mismatch.
+#   B023   flagged 5 closures; all 5 are called inside their own iteration and
+#          never escape it (checked one by one).
+#   S110   try/except/pass around COSMETIC work is invariant 3 by design: a
+#          progress bar or QA counter must never cost a real result.
+#   PLR0124 `v != v` is the NaN check in clean_volumes, not a typo.
+#   DTZ/UP/I001/ISC  style only; a 278-finding sweep would bury real findings.
+
+[tool.ruff.lint.per-file-ignores]
+# Tests re-import inside test bodies on purpose (locality of the thing tested).
+"tests/**" = ["F401"]

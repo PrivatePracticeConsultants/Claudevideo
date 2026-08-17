@@ -306,7 +306,7 @@ def test_forget_file_erases_data_and_frees_disk(cfg, store):
 
     p1 = drop(cfg, "innetwork_mixed.json", gz=True)
     scan_inbox(cfg, store)
-    keep = make_fixture(cfg.inbox_dir, "keep.json",
+    make_fixture(cfg.inbox_dir, "keep.json",
                         json.loads((FIXTURES / "innetwork_mixed.json").read_text()))
     scan_inbox(cfg, store)
     total = len(rates(store))
