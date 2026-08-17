@@ -201,6 +201,42 @@ they matter:
   within (payer, code), then compared across provider-count bands. A band with
   too few practices is marked thin rather than reported.
 
+## Leverage, per-visit value, and documents that sell
+
+- **Walk-away leverage.** The question that actually decides a negotiation
+  isn't what you're paid — it's what happens to the payer if you leave. This
+  counts the payer's OTHER contracted therapy practices near a client, and the
+  seniors those alternatives would have to absorb. A published rate is a
+  contract, not proof a practice is open or taking patients, so the count is an
+  upper bound on the payer's real fallback — meaning the client's leverage is
+  larger than shown, not smaller. It is a negotiating observation, never a
+  network-adequacy finding.
+- **What a visit is worth.** Owners don't think in "$44 for 97110"; they think
+  in visits. Pricing a practice's own Medicare code mix against each payer turns
+  every rate into the unit their P&L speaks — *"an Aetna visit pays you $115.54;
+  BCBS $133.54."* A payer that simply doesn't publish a code is never made to
+  look cheap by pricing it at zero: the mix is re-normalized over what each
+  payer actually prices, and the coverage is shown. Medicare counts units, not
+  visits, so the units-per-visit divisor is your assumption and is printed as
+  one.
+- **Position weighted by what you actually bill.** The headline percentile used
+  to treat a code billed eleven times a year like one billed four thousand
+  times. Weighted, it represents dollars — and it refuses when volumes cover
+  too little of the book to mean anything.
+- **The prospect dossier.** One branded page about a practice you've never
+  spoken to: what they bill, where their rates sit, which payer is weakest for
+  them, their leverage, who refers to them, and whether their market is growing.
+  All public data. Sections that can't be built are listed as omitted, and a
+  practice that isn't in the store is refused rather than rendered empty.
+- **The market report.** The same one level up: a metro's rate map, payer
+  concentration, who negotiates, who opened and closed, and how much demand
+  there is — sellable before you have a client there.
+- **Growth, service lines and cash anchors.** Medicare volume across two PUF
+  years (codes present in both only — CMS suppression can create or destroy a
+  line on its own); therapy codes nearby practices bill that a client doesn't;
+  and what local hospitals charge self-pay patients, from files already
+  imported.
+
 ## Territory and growth
 
 - **Inside one state, by city** — state medians hide the metro/small-town split

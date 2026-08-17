@@ -1731,6 +1731,155 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return {**forget_schedule(store, kind, state, year.strip() or None),
                 "status": floor_status(store)}
 
+    # -- prospect dossier + market report -------------------------------------------------
+
+    @app.post("/api/report/dossier")
+    def api_dossier(body: dict = Body(...)):
+        """One branded page about a practice you have never spoken to."""
+        from .dossier import build_prospect_dossier
+        try:
+            res = build_prospect_dossier(
+                cfg, store, str(body.get("subject") or "").strip(),
+                body.get("market") or {},
+                radius_miles=_as_float(body.get("radius_miles"), 25.0))
+        except BenchmarkError as e:
+            raise HTTPException(422, str(e))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(422, f"bad input: {e}")
+        return HTMLResponse(res["html"])
+
+    @app.post("/api/report/dossier.json")
+    def api_dossier_json(body: dict = Body(...)):
+        """The dossier's facts and omissions, without the rendered page."""
+        from .dossier import build_prospect_dossier
+        try:
+            res = build_prospect_dossier(
+                cfg, store, str(body.get("subject") or "").strip(),
+                body.get("market") or {},
+                radius_miles=_as_float(body.get("radius_miles"), 25.0))
+        except BenchmarkError as e:
+            raise HTTPException(422, str(e))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(422, f"bad input: {e}")
+        return {k: v for k, v in res.items() if k != "html"}
+
+    @app.post("/api/report/market")
+    def api_market_report(body: dict = Body(...)):
+        """The metro-level story as one sellable branded document."""
+        from .dossier import build_market_report
+        try:
+            res = build_market_report(
+                cfg, store, state=str(body.get("state") or "").strip(),
+                code=str(body.get("code") or "97110").strip(),
+                zip_code=str(body.get("zip") or "").strip() or None,
+                radius_miles=_as_float(body.get("radius_miles"), 25.0),
+                market=body.get("market") or {})
+        except BenchmarkError as e:
+            raise HTTPException(422, str(e))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(422, f"bad input: {e}")
+        return HTMLResponse(res["html"])
+
+    # -- practice growth + service-line gaps ----------------------------------------------
+
+    @app.get("/api/utilization/years")
+    def api_utilization_years():
+        from .utilization import available_years
+        return {"years": available_years(store)}
+
+    @app.post("/api/utilization/growth")
+    def api_practice_growth(body: dict = Body(...)):
+        """A practice's Medicare volume between two PUF years."""
+        from .utilization import practice_growth
+        try:
+            return practice_growth(
+                store, str(body.get("subject") or "").strip(),
+                from_year=str(body.get("from_year") or "").strip() or None,
+                to_year=str(body.get("to_year") or "").strip() or None)
+        except BenchmarkError as e:
+            raise HTTPException(422, str(e))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(422, f"bad input: {e}")
+
+    @app.post("/api/utilization/service-lines")
+    def api_service_lines(body: dict = Body(...)):
+        """Codes nearby practices bill Medicare that this one does not."""
+        from .utilization import service_line_gaps
+        try:
+            return service_line_gaps(
+                store, str(body.get("subject") or "").strip(),
+                zip_code=str(body.get("zip") or "").strip() or None,
+                radius_miles=_as_float(body.get("radius_miles"), 25.0),
+                year=str(body.get("year") or "").strip() or None,
+                min_peers=_bounded_int(body.get("min_peers"), 3, 1, 1000))
+        except BenchmarkError as e:
+            raise HTTPException(422, str(e))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(422, f"bad input: {e}")
+
+    # -- per-visit economics + volume-weighted position -----------------------------------
+
+    @app.post("/api/economics/visit")
+    def api_visit_economics(body: dict = Body(...)):
+        """What one payer's visit is worth on this practice's own code mix."""
+        from .economics import visit_economics
+        try:
+            return visit_economics(
+                store, str(body.get("subject") or "").strip(),
+                body.get("market") or {},
+                units_per_visit=_as_float(body.get("units_per_visit"), None),
+                year=str(body.get("year") or "").strip() or None)
+        except BenchmarkError as e:
+            raise HTTPException(422, str(e))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(422, f"bad input: {e}")
+
+    @app.post("/api/economics/weighted-position")
+    def api_weighted_position(body: dict = Body(...)):
+        """Market position weighted by what the practice actually bills."""
+        from .economics import weighted_position
+        try:
+            return weighted_position(
+                store, str(body.get("subject") or "").strip(),
+                body.get("market") or {},
+                volumes=body.get("volumes"),
+                year=str(body.get("year") or "").strip() or None)
+        except BenchmarkError as e:
+            raise HTTPException(422, str(e))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(422, f"bad input: {e}")
+
+    # -- walk-away leverage --------------------------------------------------------------
+
+    @app.post("/api/leverage")
+    def api_leverage(body: dict = Body(...)):
+        """How many other local practices this payer publishes rates for."""
+        from .leverage import network_leverage
+        try:
+            return network_leverage(
+                store, str(body.get("subject") or "").strip(),
+                str(body.get("payer") or "").strip(),
+                body.get("market") or {},
+                radius_miles=_as_float(body.get("radius_miles"), 15.0))
+        except BenchmarkError as e:
+            raise HTTPException(422, str(e))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(422, f"bad input: {e}")
+
+    @app.post("/api/leverage/summary")
+    def api_leverage_summary(body: dict = Body(...)):
+        """Every payer this practice contracts with, thinnest network first."""
+        from .leverage import leverage_summary
+        try:
+            return leverage_summary(
+                store, str(body.get("subject") or "").strip(),
+                body.get("market") or {},
+                radius_miles=_as_float(body.get("radius_miles"), 15.0))
+        except BenchmarkError as e:
+            raise HTTPException(422, str(e))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(422, f"bad input: {e}")
+
     # -- territory: sub-state geography, payer concentration, steal-share --------------
 
     @app.post("/api/territory/local")
@@ -1898,6 +2047,18 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 limit=_bounded_int(body.get("limit"), 200, 1, 5000))
         except BenchmarkError as e:
             raise HTTPException(422, str(e))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(422, f"bad input: {e}")
+
+    @app.post("/api/hospital/cash")
+    def api_hospital_cash(body: dict = Body(...)):
+        """What local hospitals charge self-pay patients for the same codes."""
+        from .hospital import cash_anchors
+        try:
+            return cash_anchors(
+                store, state=str(body.get("state") or "").strip() or None,
+                codes=body.get("codes") or None,
+                limit=_bounded_int(body.get("limit"), 200, 1, 2000))
         except (TypeError, ValueError) as e:
             raise HTTPException(422, f"bad input: {e}")
 

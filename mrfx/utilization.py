@@ -35,7 +35,7 @@ import logging
 import re
 from pathlib import Path
 
-from .catalog import CODE_CATALOG
+from .catalog import CODE_CATALOG, code_info
 from .store import Store, sql_path
 
 log = logging.getLogger(__name__)
@@ -375,3 +375,233 @@ def suggested_volumes(store: Store, subject: str, year: str | None = None,
                 f" These were scaled by {mult:g}x from the Medicare units at "
                 "your instruction; the scaling is an assumption, not data."
                 if mult != 1.0 else "")}
+
+
+GROWTH_NOTE = (
+    "Growth compares this practice's Medicare service counts between two PUF "
+    "years. Medicare fee-for-service only, so a practice growing its commercial "
+    "or cash book while its Medicare panel ages out can read flat or down here. "
+    "CMS suppresses codes under 11 beneficiaries, so a code can APPEAR or "
+    "VANISH between years purely by crossing that threshold — the comparison "
+    "therefore reports codes present in BOTH years separately from those in "
+    "only one, and never counts a suppression as a real change."
+)
+
+SERVICE_LINE_NOTE = (
+    "Service-line gaps compare what this practice bills Medicare against what "
+    "nearby therapy practices bill Medicare — a BILLING-BEHAVIOUR comparison, "
+    "not a contract one (for codes peers have published rates on that this "
+    "practice has not, see contract gaps). A code the practice does not bill "
+    "may be a genuine service it could add, a service it chooses not to offer, "
+    "or one it bills too rarely for CMS to publish. Every row is a question to "
+    "ask the owner, never a diagnosis."
+)
+
+
+def available_years(store: Store) -> list[str]:
+    """PUF years present, newest first."""
+    with store.connect() as con:
+        _ensure_view(con, store)
+        try:
+            return [r[0] for r in con.execute(
+                "SELECT DISTINCT data_year FROM utilization "
+                "WHERE data_year IS NOT NULL ORDER BY data_year DESC").fetchall()]
+        except Exception:  # noqa: BLE001
+            return []
+
+
+def practice_growth(store: Store, subject: str, *, from_year: str | None = None,
+                    to_year: str | None = None) -> dict:
+    """A practice's Medicare volume between two PUF years.
+
+    A growing practice is a better prospect; a shrinking referral source is a
+    call worth making. Codes present in only ONE year are reported separately,
+    because CMS suppression can create or destroy a code line without anything
+    changing in the practice.
+    """
+    from .benchmark import BenchmarkError, resolve_subject_tins
+
+    years = available_years(store)
+    if len(years) < 2:
+        return {"loaded": False, "subject": subject, "rows": [],
+                "years_available": years,
+                "reason": ("growth needs two Medicare utilization years in the "
+                           "store — import a second CMS Physician & Other "
+                           "Practitioners file (a different year)"),
+                "note": GROWTH_NOTE}
+    newer = str(to_year or years[0])
+    older = str(from_year or years[1])
+    if newer == older:
+        raise BenchmarkError("pick two different years to compare")
+    if older > newer:
+        older, newer = newer, older
+    for y in (older, newer):
+        if y not in years:
+            raise BenchmarkError(
+                f"no Medicare utilization loaded for {y} — years present: "
+                f"{', '.join(years)}")
+
+    tins = resolve_subject_tins(store, subject)
+    if not tins:
+        raise BenchmarkError(f"no practice matches {subject!r}")
+    old_u = practice_utilization(store, tins, older)
+    new_u = practice_utilization(store, tins, newer)
+    old_by = {c["billing_code"]: float(c["units"] or 0) for c in old_u["codes"]}
+    new_by = {c["billing_code"]: float(c["units"] or 0) for c in new_u["codes"]}
+    if not old_by and not new_by:
+        return {"loaded": False, "subject": subject, "rows": [],
+                "from_year": older, "to_year": newer, "years_available": years,
+                "reason": ("this practice has no Medicare utilization in either "
+                           "year — the PUF may not cover its NPIs"),
+                "note": GROWTH_NOTE}
+
+    both = sorted(set(old_by) & set(new_by))
+    rows = []
+    for code in both:
+        o, n = old_by[code], new_by[code]
+        rows.append({
+            "billing_code": code, "description": code_info(code)[0],
+            "units_from": int(o), "units_to": int(n),
+            "delta": int(n - o),
+            "pct_change": round(100.0 * (n - o) / o, 1) if o else None,
+        })
+    rows.sort(key=lambda r: r["delta"])
+
+    # totals over the MATCHED codes only: adding a code that merely crossed the
+    # suppression threshold would book a fake gain
+    tot_old = sum(old_by[c] for c in both)
+    tot_new = sum(new_by[c] for c in both)
+    pct = round(100.0 * (tot_new - tot_old) / tot_old, 1) if tot_old else None
+    direction = ("grew" if pct and pct > 0 else "shrank" if pct and pct < 0
+                 else "held flat")
+    only_new = sorted(set(new_by) - set(old_by))
+    only_old = sorted(set(old_by) - set(new_by))
+    return {
+        "loaded": True, "subject": subject,
+        "from_year": older, "to_year": newer, "years_available": years,
+        "rows": rows, "count": len(rows),
+        "total_units_from": int(tot_old), "total_units_to": int(tot_new),
+        "pct_change": pct, "direction": direction,
+        "codes_only_in_newer": [
+            {"billing_code": c, "description": code_info(c)[0],
+             "units": int(new_by[c])} for c in only_new][:50],
+        "codes_only_in_older": [
+            {"billing_code": c, "description": code_info(c)[0],
+             "units": int(old_by[c])} for c in only_old][:50],
+        "headline": (
+            f"On codes billed in both years, this practice's Medicare volume "
+            f"{direction}"
+            + (f" {abs(pct):g}%" if pct else "")
+            + f" from {older} to {newer} ({int(tot_old):,} to {int(tot_new):,} "
+              "services)."
+            + (f" {len(only_new)} code(s) appear only in {newer} and "
+               f"{len(only_old)} only in {older} — CMS suppression can do that "
+               "on its own, so they are listed apart."
+               if (only_new or only_old) else "")),
+        "note": GROWTH_NOTE,
+    }
+
+
+def service_line_gaps(store: Store, subject: str, *, zip_code: str | None = None,
+                      radius_miles: float = 25.0, year: str | None = None,
+                      min_peers: int = 3, centroids_path=None) -> dict:
+    """Codes nearby therapy practices bill Medicare that this one does not.
+
+    Distinct from contract gaps: that asks "what do peers have RATES for?",
+    this asks "what do peers actually DO?" A code the practice never bills may
+    be a service line worth adding — or one it deliberately doesn't offer, so
+    every row is a question for the owner.
+    """
+    from .benchmark import BenchmarkError, resolve_subject_tins
+    from .catalog import therapy_taxonomy_sql
+    from .medicare import haversine_miles_sql, load_centroids
+
+    tins = resolve_subject_tins(store, subject)
+    if not tins:
+        raise BenchmarkError(f"no practice matches {subject!r}")
+    try:
+        radius = max(1.0, min(float(radius_miles), 250.0))
+    except (TypeError, ValueError):
+        raise BenchmarkError("radius must be a number of miles")
+    min_peers = max(1, int(min_peers))
+
+    with store.connect() as con:
+        _ensure_view(con, store)
+        yr = _latest_year(con, year)
+        if not yr:
+            return {"loaded": False, "subject": subject, "rows": [],
+                    "reason": ("no Medicare utilization is loaded — import a CMS "
+                               "Physician & Other Practitioners file first"),
+                    "note": SERVICE_LINE_NOTE}
+        load_centroids(con, centroids_path)
+        home = zip_code and str(zip_code).strip()[:5]
+        if not home:
+            r = con.execute("""
+                SELECT mode(lpad(substr(trim(n.zip), 1, 5), 5, '0'))
+                FROM rates r JOIN npi_directory n ON n.npi = r.npi
+                WHERE r.tin_value IN (SELECT unnest(?::VARCHAR[]))
+                  AND n.zip IS NOT NULL AND trim(n.zip) <> ''
+            """, [tins]).fetchone()
+            home = r[0] if r else None
+        if not home:
+            raise BenchmarkError(
+                "this practice has no NPPES location on file, so its local "
+                "peers cannot be found — run NPI enrichment or pass a ZIP")
+        origin = con.execute("SELECT lat, lon FROM _zcta WHERE zip = ?",
+                             [home]).fetchone()
+        if origin is None:
+            raise BenchmarkError(
+                f"ZIP {home} is not in the Census ZCTA centroid list")
+        miles = haversine_miles_sql("z.lat", "z.lon", origin[0], origin[1])
+        in_radius = [r[0] for r in con.execute(
+            f"SELECT z.zip FROM _zcta z WHERE {miles} <= ?", [radius]).fetchall()]
+
+        mine = [n for (n,) in con.execute(
+            "SELECT DISTINCT npi FROM rates WHERE tin_value IN "
+            "(SELECT unnest(?::VARCHAR[])) AND npi IS NOT NULL", [tins]).fetchall()]
+        therapy = therapy_taxonomy_sql("n.taxonomy_code", all_col="n.taxonomy_codes")
+        cur = con.execute(f"""
+            WITH peers AS (
+                SELECT DISTINCT n.npi
+                FROM npi_directory n
+                WHERE lpad(substr(trim(n.zip), 1, 5), 5, '0')
+                      IN (SELECT unnest(?::VARCHAR[]))
+                  AND {therapy}
+                  AND n.npi NOT IN (SELECT unnest(?::VARCHAR[]))
+            )
+            SELECT u.billing_code,
+                   count(DISTINCT u.npi)  AS n_peers,
+                   sum(u.services)        AS peer_units,
+                   round(median(u.services), 0) AS median_units_each
+            FROM utilization u JOIN peers p ON p.npi = u.npi
+            WHERE u.data_year = ?
+            GROUP BY u.billing_code
+            HAVING count(DISTINCT u.npi) >= ?
+            ORDER BY n_peers DESC, peer_units DESC
+        """, [in_radius, mine, yr, min_peers])
+        peer_codes = [dict(zip(["billing_code", "n_peers", "peer_units",
+                                "median_units_each"], r)) for r in cur.fetchall()]
+
+    my_codes = {c["billing_code"] for c in
+                practice_utilization(store, tins, yr)["codes"]}
+    gaps = [c for c in peer_codes if c["billing_code"] not in my_codes]
+    for g in gaps:
+        g["description"] = code_info(g["billing_code"])[0]
+        g["peer_units"] = int(g["peer_units"] or 0)
+        g["median_units_each"] = int(g["median_units_each"] or 0)
+    return {
+        "loaded": True, "subject": subject, "zip": home,
+        "radius_miles": radius, "year": yr, "min_peers": min_peers,
+        "rows": gaps[:100], "count": len(gaps),
+        "n_peer_codes": len(peer_codes), "n_my_codes": len(my_codes),
+        "reason": None if gaps else (
+            "this practice already bills every therapy code its local peers "
+            "bill in this release — no service-line gap to discuss"),
+        "headline": (
+            f"{len(gaps)} therapy code(s) that {min_peers}+ nearby practices "
+            f"bill Medicare and this one does not"
+            + (f", led by {gaps[0]['billing_code']} "
+               f"({gaps[0]['description']}) at {gaps[0]['n_peers']} practices."
+               if gaps else ".")),
+        "note": SERVICE_LINE_NOTE,
+    }

@@ -581,6 +581,42 @@
           </div>
           <div id="fl-out" style="margin-top:8px"></div>
         </div>
+
+        <div class="validate-card" style="margin-top:14px">
+          <h3>Walk-away leverage — how badly does this payer need them?</h3>
+          <p class="muted">How many OTHER therapy practices this payer publishes rates for near
+            your client, and how many seniors those alternatives would have to absorb. A thin
+            local network is the strongest argument in the room. Published rates mean a
+            contract, not that a practice is open or taking patients — so the real number of
+            usable alternatives is smaller, which makes the leverage bigger, not smaller.</p>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <select id="lv-radius">
+              <option value="10">10 miles</option>
+              <option value="15" selected>15 miles</option>
+              <option value="25">25 miles</option>
+              <option value="50">50 miles</option>
+            </select>
+            <button class="btn primary" id="lv-run">This payer</button>
+            <button class="btn" id="lv-all">Rank every payer</button>
+            <span id="lv-msg" class="muted"></span>
+          </div>
+          <div id="lv-out" style="margin-top:8px"></div>
+        </div>
+
+        <div class="validate-card" style="margin-top:14px">
+          <h3>What a visit is worth</h3>
+          <p class="muted">Owners don't think in "$44 for 97110" — they think in what a visit
+            pays. This prices the practice's own Medicare code mix against each payer. The mix
+            is Medicare fee-for-service only, and Medicare counts units rather than visits, so
+            the units-per-visit divisor is your assumption and is printed as one.</p>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <input type="text" id="ec-upv" placeholder="units/visit" style="width:96px"
+                   title="Typical billed units per visit — YOUR assumption. Leave blank to see per-unit figures instead.">
+            <button class="btn primary" id="ec-run">Value a visit</button>
+            <span id="ec-msg" class="muted"></span>
+          </div>
+          <div id="ec-out" style="margin-top:8px"></div>
+        </div>
       </div>
     </div>
   </section>
@@ -827,6 +863,55 @@
             <span id="ss-msg" class="muted"></span>
           </div>
           <div id="ss-out" style="margin-top:8px"></div>
+        </div>
+
+        <div class="validate-card" style="margin-top:14px">
+          <h3>Prospect dossier — one page before the call</h3>
+          <p class="muted">Everything this store knows about a practice you have never spoken
+            to: what they bill, where their rates sit, which payer is weakest for them, how
+            much leverage they have, who refers to them, and whether their market is growing.
+            All public data — nothing from the practice. Sections that can't be built are
+            listed as omitted rather than dropped.</p>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <input type="text" id="ds-subject" list="ld-subjects" placeholder="practice…" style="width:230px">
+            <select id="ds-radius">
+              <option value="15">15 miles</option>
+              <option value="25" selected>25 miles</option>
+              <option value="50">50 miles</option>
+            </select>
+            <button class="btn primary" id="ds-run">Open dossier</button>
+            <span id="ds-msg" class="muted"></span>
+          </div>
+          <div id="ds-out" style="margin-top:8px"></div>
+        </div>
+
+        <div class="validate-card" style="margin-top:14px">
+          <h3>Market report — sellable before you have a client there</h3>
+          <p class="muted">The metro-level story as one branded document: what a code pays by
+            city, who holds the contracts, which payers actually negotiate, who opened and
+            closed, and how much demand there is.</p>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <input type="text" id="mr-state" placeholder="ST" style="width:48px">
+            <input type="text" id="mr-code" placeholder="97110" style="width:80px">
+            <input type="text" id="mr-zip" placeholder="ZIP (for demand)" style="width:140px">
+            <button class="btn primary" id="mr-run">Open market report</button>
+            <span id="mr-msg" class="muted"></span>
+          </div>
+        </div>
+
+        <div class="validate-card" style="margin-top:14px">
+          <h3>Growth &amp; service lines</h3>
+          <p class="muted">Is this practice's Medicare volume growing or shrinking between the
+            PUF years you've loaded — and which therapy codes do nearby practices bill that it
+            doesn't? The second is a billing-behaviour comparison, not a contract one: every
+            row is a question for the owner.</p>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <input type="text" id="gr-subject" list="ld-subjects" placeholder="practice…" style="width:230px">
+            <button class="btn primary" id="gr-run">Growth</button>
+            <button class="btn" id="gr-lines">Service lines</button>
+            <span id="gr-msg" class="muted"></span>
+          </div>
+          <div id="gr-out" style="margin-top:8px"></div>
         </div>
 
         <div class="validate-card" style="margin-top:14px">

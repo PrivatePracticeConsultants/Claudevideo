@@ -596,6 +596,79 @@ def hospital_parity(store: Store, market: dict | None = None, *,
     }
 
 
+CASH_NOTE = (
+    "Cash and gross figures come from the same hospital file as the negotiated "
+    "rates. A hospital's DISCOUNTED CASH price is what it charges a self-pay "
+    "patient — a real, published, local anchor for a practice setting its own "
+    "cash rate. Its GROSS CHARGE is a list price almost nobody pays and is "
+    "shown only for context. Both are FACILITY prices covering a hospital's "
+    "overhead, so a private practice's cash rate should sit below them; they "
+    "bound the conversation rather than answer it."
+)
+
+
+def cash_anchors(store: Store, *, state: str | None = None,
+                 codes=None, limit: int = 200) -> dict:
+    """What local hospitals charge SELF-PAY patients for the same codes.
+
+    A therapy practice setting a cash rate usually has no local reference at
+    all. The hospital price-transparency files already imported carry one, and
+    nothing surfaced it until now.
+    """
+    ensure_view(store)
+    st = hospital_status(store)
+    if not st["loaded"]:
+        return {"loaded": False, "rows": [], "reason": st["reason"],
+                "note": CASH_NOTE}
+    where, params = ["h.cash_price IS NOT NULL"], []
+    if state:
+        where.append("h.state = ?")
+        params.append(str(state).upper()[:2])
+    if codes:
+        want = [str(c).upper() for c in codes]
+        where.append(f"h.billing_code IN ({', '.join('?' for _ in want)})")
+        params += want
+    with store.connect() as con:
+        cur = con.execute(f"""
+            SELECT h.billing_code,
+                   count(DISTINCT h.hospital_name)   AS n_hospitals,
+                   round(median(h.cash_price), 2)    AS cash_median,
+                   round(min(h.cash_price), 2)       AS cash_min,
+                   round(max(h.cash_price), 2)       AS cash_max,
+                   round(median(h.gross_charge), 2)  AS gross_median,
+                   round(median(h.rate), 2)          AS negotiated_median
+            FROM hospital_rates h
+            WHERE {' AND '.join(where)}
+            GROUP BY h.billing_code
+            ORDER BY h.billing_code
+            LIMIT {max(1, min(int(limit), 2000))}
+        """, params)
+        rows = [dict(zip([d[0] for d in cur.description], r)) for r in cur.fetchall()]
+    for r in rows:
+        r["description"] = code_info(r["billing_code"])[0]
+        # what the hospital's own insured rate is as a share of its cash price:
+        # the discount a payer negotiated off self-pay, which is the shape of
+        # the conversation a practice is having with itself about cash pricing
+        r["negotiated_pct_of_cash"] = (
+            round(100.0 * r["negotiated_median"] / r["cash_median"], 1)
+            if r["cash_median"] and r["negotiated_median"] else None)
+    return {
+        "loaded": bool(rows), "rows": rows, "count": len(rows),
+        "state": str(state).upper()[:2] if state else None,
+        "n_hospitals": st["n_hospitals"],
+        "reason": None if rows else (
+            "the loaded hospital file(s) publish no discounted-cash price for "
+            "therapy codes — many publish negotiated rates only"),
+        "headline": (
+            f"Local hospitals charge self-pay patients a median of "
+            f"${rows[0]['cash_median']:,.2f} for {rows[0]['billing_code']}"
+            + (f", and their insured rate is {rows[0]['negotiated_pct_of_cash']:g}% "
+               "of that." if rows[0].get("negotiated_pct_of_cash") else ".")
+            if rows else "No cash prices in the loaded hospital files."),
+        "note": CASH_NOTE,
+    }
+
+
 def forget_hospital(store: Store, hospital_name: str) -> dict:
     """Remove one hospital's data — the same erase-cleanly rule as `mrfx
     forget` for rate files."""

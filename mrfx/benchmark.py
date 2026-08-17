@@ -106,10 +106,23 @@ def clean_volumes(volumes) -> dict[str, float]:
         raise BenchmarkError(
             'volumes must map a billing code to annual units, e.g. {"97110": 4200}')
     try:
-        return {str(k).strip().upper(): float(v) for k, v in volumes.items()}
+        out = {str(k).strip().upper(): float(v) for k, v in volumes.items()}
     except (TypeError, ValueError):
         raise BenchmarkError(
             "volumes must map a billing code to annual units (numbers)")
+    # A negative unit count is not a quantity. Left unchecked it produced a
+    # NEGATIVE opportunity figure (-$12,000 on a -4,000-unit input) that flowed
+    # into the pitch report, the proposal and the win report, and it weighted a
+    # position calculation backwards. Found by the growth-feature audit.
+    bad = sorted(k for k, v in out.items() if v < 0)
+    if bad:
+        raise BenchmarkError(
+            "annual units cannot be negative — check "
+            + ", ".join(bad[:5])
+            + (" and others" if len(bad) > 5 else ""))
+    if any(v != v or v in (float("inf"), float("-inf")) for v in out.values()):
+        raise BenchmarkError("annual units must be real numbers")
+    return out
 
 
 def public_market(market: dict, drop: tuple = ()) -> dict:
@@ -597,6 +610,11 @@ def compute_opportunity(benchmark: dict, volumes: dict[str, float],
     """
     if not volumes:
         raise BenchmarkError("opportunity model requires user-supplied annual units per code")
+    # Re-validate here, not only at the API boundary: this is the function that
+    # turns units into DOLLARS, and a direct caller (CLI, packet, report,
+    # another module) must not be able to reach it with a negative or
+    # non-finite unit count. clean_volumes is idempotent on good input.
+    volumes = clean_volumes(volumes)
     if conservative_percentile not in PERCENTILES:
         raise BenchmarkError(
             f"conservative_percentile must be one of {PERCENTILES} — an unknown "

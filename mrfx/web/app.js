@@ -1742,6 +1742,8 @@ async function initNegotiate() {
   state.ngComps = [];
   initHospital();      // the hospital comparison card lives on this tab
   initFloors();
+  initLeverage();
+  initVisitEconomics();
   const [subjects, months, payers] = await Promise.all([
     api("/api/benchmark/subjects").catch(() => null),
     api("/api/months").catch(() => null),
@@ -2577,6 +2579,179 @@ async function runFloorCompare() {
     <div class="muted" style="font-size:11.5px;margin-top:6px">${esc(d.note)}</div>`;
 }
 
+/* ---- walk-away leverage + per-visit economics (Negotiate tab) ----------- */
+function initLeverage() {
+  const show = (html) => { $("#lv-out").innerHTML = html; };
+  const params = () => ({
+    subject: $("#ng-subject").value.trim(),
+    payer: $("#ng-payer").value,
+    radius_miles: Number($("#lv-radius").value),
+    market: { month: $("#ng-month").value || "latest",
+              therapy_only: $("#ng-therapy").checked },
+  });
+  $("#lv-run").addEventListener("click", async () => {
+    const p = params();
+    if (!p.subject || !p.payer) { $("#lv-msg").textContent = "pick a practice and a payer"; return; }
+    $("#lv-msg").textContent = "measuring…";
+    let d;
+    try { d = await postJson("/api/leverage", p); }
+    catch (e) { $("#lv-msg").textContent = ""; show(`<div class="muted">${esc(e.message)}</div>`); return; }
+    $("#lv-msg").textContent = "";
+    const rows = d.alternatives.map((a, i) => `<tr>
+      <td class="num muted">${i + 1}</td>
+      <td>${esc(a.display_name)}</td>
+      <td class="num">${a.miles == null ? "–" : a.miles}</td>
+      <td class="sub">${esc(a.zip || "")}</td>
+      <td class="num muted">${fmtInt(a.npi_count)}</td></tr>`).join("");
+    const cls = d.band === "thin" ? "chg-up" : d.band === "crowded" ? "chg-cut" : "";
+    show(`<div class="rc-summary ${cls}">${esc(d.headline)}</div>
+      ${rows ? `<div class="tablewrap" style="max-height:34vh"><table><thead><tr>
+        <th>#</th><th>Their other contracted practices</th><th class="num">Miles</th>
+        <th>ZIP</th><th class="num">Providers</th></tr></thead>
+        <tbody>${rows}</tbody></table></div>` : ""}
+      <div class="muted" style="font-size:11.5px;margin-top:6px">${esc(d.note)}</div>`);
+  });
+  $("#lv-all").addEventListener("click", async () => {
+    const p = params();
+    if (!p.subject) { $("#lv-msg").textContent = "pick a practice"; return; }
+    $("#lv-msg").textContent = "ranking payers…";
+    let d;
+    try { d = await postJson("/api/leverage/summary", p); }
+    catch (e) { $("#lv-msg").textContent = ""; show(`<div class="muted">${esc(e.message)}</div>`); return; }
+    $("#lv-msg").textContent = "";
+    const rows = d.payers.map((x) => `<tr>
+      <td>${esc(x.payer)}</td>
+      <td class="num">${fmtInt(x.n_alternatives)}</td>
+      <td>${x.band === "thin" ? "<b>thin — open here</b>" : esc(x.band)}</td>
+      <td class="num muted">${x.seniors_per_alternative == null ? "–" : fmtInt(x.seniors_per_alternative)}</td>
+      </tr>`).join("");
+    show(`<div class="rc-summary">${esc(d.headline)}</div>
+      <div class="tablewrap"><table><thead><tr><th>Payer</th>
+        <th class="num">Local alternatives</th><th>Network</th>
+        <th class="num">Seniors each</th></tr></thead><tbody>${rows}</tbody></table></div>
+      ${(d.skipped || []).length ? `<div class="muted" style="margin-top:6px">
+        Not ranked: ${esc(d.skipped.map((s) => s.payer).join(", "))}.</div>` : ""}
+      <div class="muted" style="font-size:11.5px;margin-top:6px">${esc(d.note)}</div>`);
+  });
+}
+
+function initVisitEconomics() {
+  $("#ec-run").addEventListener("click", async () => {
+    const out = $("#ec-out");
+    const subject = $("#ng-subject").value.trim();
+    if (!subject) { $("#ec-msg").textContent = "pick a practice"; return; }
+    $("#ec-msg").textContent = "pricing…";
+    const upv = $("#ec-upv").value.trim();
+    let d;
+    try {
+      d = await postJson("/api/economics/visit", {
+        subject, units_per_visit: upv ? Number(upv) : null,
+        market: { month: $("#ng-month").value || "latest",
+                  therapy_only: $("#ng-therapy").checked },
+      });
+    } catch (e) { $("#ec-msg").textContent = ""; out.innerHTML = `<div class="muted">${esc(e.message)}</div>`; return; }
+    $("#ec-msg").textContent = "";
+    if (!d.loaded) { out.innerHTML = `<div class="muted">${esc(d.reason)}</div>`; return; }
+    const rows = d.rows.map((r) => `<tr>
+      <td>${esc(r.payer)}</td>
+      <td class="num"><b>${r.value_per_visit == null ? money(r.value_per_billed_unit) : money(r.value_per_visit)}</b></td>
+      <td class="num">${money(r.value_per_billed_unit)}</td>
+      <td class="num muted">${r.mix_coverage_pct}%</td>
+      <td class="num muted">${money(r.annual_value_at_this_rate)}</td></tr>`).join("");
+    const mix = d.mix.map((m) => `${esc(m.billing_code)} ${m.share_pct}%`).join(" · ");
+    out.innerHTML = `<div class="rc-summary">${esc(d.headline)}</div>
+      <div class="tablewrap"><table><thead><tr><th>Payer</th>
+        <th class="num">Per ${d.units_per_visit ? "visit" : "unit"}</th>
+        <th class="num">Per billed unit</th><th class="num">Mix covered</th>
+        <th class="num">Annual at this rate</th></tr></thead>
+        <tbody>${rows}</tbody></table></div>
+      <div class="muted" style="margin-top:6px">Their mix (${esc(String(d.mix_year || ""))}): ${mix}</div>
+      ${d.assumption_note ? `<div class="warn-text" style="margin-top:6px">${esc(d.assumption_note)}</div>` : ""}
+      <div class="muted" style="font-size:11.5px;margin-top:6px">${esc(d.note)}</div>`;
+  });
+}
+
+/* ---- dossier, market report, growth & service lines (Leads tab) --------- */
+function initDossier() {
+  $("#ds-run").addEventListener("click", async () => {
+    const subject = $("#ds-subject").value.trim();
+    if (!subject) { $("#ds-msg").textContent = "pick a practice"; return; }
+    $("#ds-msg").textContent = "assembling…";
+    const body = { subject, radius_miles: Number($("#ds-radius").value),
+                   market: { month: "latest", therapy_only: false } };
+    try {
+      const meta = await postJson("/api/report/dossier.json", body);
+      $("#ds-msg").textContent = "";
+      $("#ds-out").innerHTML = (meta.skipped || []).length
+        ? `<div class="muted">Built with ${meta.skipped.length} section(s) omitted: ${
+            esc(meta.skipped.join("; "))}</div>` : "";
+      postDownloadHtml("/api/report/dossier", body);
+    } catch (e) { $("#ds-msg").textContent = ""; $("#ds-out").innerHTML = `<div class="muted">${esc(e.message)}</div>`; }
+  });
+  $("#mr-run").addEventListener("click", () => {
+    const st = $("#mr-state").value.trim();
+    if (!st) { $("#mr-msg").textContent = "enter a state"; return; }
+    $("#mr-msg").textContent = "";
+    postDownloadHtml("/api/report/market", {
+      state: st, code: $("#mr-code").value.trim() || "97110",
+      zip: $("#mr-zip").value.trim() || null,
+      market: { month: "latest", therapy_only: false } });
+  });
+}
+
+// open a POSTed HTML report in a new tab (same trick the other reports use)
+async function postDownloadHtml(url, body) {
+  const r = await fetch(url, { method: "POST",
+    headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (!r.ok) {
+    let msg = `HTTP ${r.status}`;
+    try { msg = (await r.json()).detail || msg; } catch { /* not json */ }
+    throw new Error(msg);
+  }
+  const html = await r.text();
+  const w = window.open("", "_blank");
+  if (w) { w.document.write(html); w.document.close(); }
+}
+
+function initGrowth() {
+  const run = async (route, render) => {
+    const subject = $("#gr-subject").value.trim();
+    if (!subject) { $("#gr-msg").textContent = "pick a practice"; return; }
+    $("#gr-msg").textContent = "looking…";
+    let d;
+    try { d = await postJson(route, { subject }); }
+    catch (e) { $("#gr-msg").textContent = ""; $("#gr-out").innerHTML = `<div class="muted">${esc(e.message)}</div>`; return; }
+    $("#gr-msg").textContent = "";
+    $("#gr-out").innerHTML = d.loaded === false
+      ? `<div class="muted">${esc(d.reason)}</div>` : render(d);
+  };
+  $("#gr-run").addEventListener("click", () => run("/api/utilization/growth", (d) => {
+    const rows = d.rows.map((r) => `<tr><td>${esc(r.billing_code)}
+      <div class="sub">${esc(r.description || "")}</div></td>
+      <td class="num">${fmtInt(r.units_from)}</td><td class="num">${fmtInt(r.units_to)}</td>
+      <td class="num ${r.delta < 0 ? "chg-cut" : "chg-up"}">${r.delta > 0 ? "+" : ""}${fmtInt(r.delta)}</td>
+      <td class="num">${r.pct_change == null ? "–" : (r.pct_change > 0 ? "+" : "") + r.pct_change + "%"}</td></tr>`).join("");
+    return `<div class="rc-summary">${esc(d.headline)}</div>
+      <div class="tablewrap"><table><thead><tr><th>Code</th>
+        <th class="num">${esc(d.from_year)}</th><th class="num">${esc(d.to_year)}</th>
+        <th class="num">Change</th><th class="num">%</th></tr></thead>
+        <tbody>${rows}</tbody></table></div>
+      <div class="muted" style="font-size:11.5px;margin-top:6px">${esc(d.note)}</div>`;
+  }));
+  $("#gr-lines").addEventListener("click", () => run("/api/utilization/service-lines", (d) => {
+    if (!d.rows.length) return `<div class="muted">${esc(d.reason)}</div>`;
+    const rows = d.rows.map((r) => `<tr><td>${esc(r.billing_code)}
+      <div class="sub">${esc(r.description || "")}</div></td>
+      <td class="num">${fmtInt(r.n_peers)}</td>
+      <td class="num muted">${fmtInt(r.median_units_each)}</td></tr>`).join("");
+    return `<div class="rc-summary">${esc(d.headline)}</div>
+      <div class="tablewrap"><table><thead><tr><th>Code they don't bill</th>
+        <th class="num">Nearby practices billing it</th>
+        <th class="num">Median units each</th></tr></thead><tbody>${rows}</tbody></table></div>
+      <div class="muted" style="font-size:11.5px;margin-top:6px">${esc(d.note)}</div>`;
+  }));
+}
+
 /* ---- steal-share: referrals going to a competitor ----------------------- */
 function initStealShare() {
   $("#ss-run").addEventListener("click", async () => {
@@ -3273,6 +3448,8 @@ async function initLeads() {
   initNewClinics();
   initClosures();
   initStealShare();
+  initDossier();
+  initGrowth();
   initMarketSizing();
   $("#ld-csv").addEventListener("click", () => { if (state.lastLeadsPayload) postDownload("/api/leads.csv", state.lastLeadsPayload, "leads.csv"); });
   $("#ld-board-run").addEventListener("click", runLeaderboard);
