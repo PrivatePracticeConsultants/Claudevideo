@@ -364,7 +364,7 @@ def market_sizing(store: Store, zip_code: str, radius_miles: float = 25,
                    d.median_income, {miles} AS miles
             FROM zip_demographics d JOIN _zcta z ON z.zip = d.zip
             WHERE {miles} <= ? AND d.pop_65_plus IS NOT NULL
-            ORDER BY d.pop_65_plus DESC LIMIT 15
+            ORDER BY d.pop_65_plus DESC, d.zip LIMIT 15
         """, [radius]).fetchall()]
 
     pop, seniors = demo[1], demo[2]

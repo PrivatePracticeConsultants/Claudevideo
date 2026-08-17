@@ -2542,13 +2542,23 @@ function initFloors() {
 
 async function runFloorCompare() {
   const out = $("#fl-out");
+  // ask for the state before spending a round trip on a request that cannot
+  // succeed: a fee schedule is a state document, so there is nothing to compare
+  const st = $("#fl-state").value.trim() || $("#ng-state").value.trim();
+  if (!st) {
+    $("#fl-msg").textContent =
+      "enter the state first — Medicaid and workers'-comp schedules are state documents";
+    out.innerHTML = "";
+    return;
+  }
+  $("#fl-msg").textContent = "";
   out.innerHTML = `<div class="loading">Comparing</div>`;
   let d;
   try {
     d = await postJson("/api/floors/compare", {
       subject: $("#ng-subject").value.trim() || null,
       payer: $("#ng-payer").value || null,
-      state: $("#fl-state").value.trim() || $("#ng-state").value.trim() || null,
+      state: st,
       market: { month: $("#ng-month").value || "latest",
                 therapy_only: $("#ng-therapy").checked },
     });
@@ -2963,6 +2973,13 @@ async function runRemitCheck() {
   };
   state.lastRemitPayload = null;
   $("#rm-csv").disabled = true;
+  if (!payload.subject || !payload.text.trim()) {
+    $("#rm-msg").textContent = payload.subject
+      ? "paste the remit lines first"
+      : "pick a practice, then paste the remit lines";
+    out.innerHTML = "";
+    return;
+  }
   $("#rm-msg").textContent = "checking…";
   let d;
   try { d = await postJson("/api/remits/check", payload); }
@@ -3330,6 +3347,11 @@ async function runMedicareBatchCheck() {
   const msg = $("#md-check-msg");
   state.lastMedicareCheck = null;
   $("#md-check-csv").disabled = true;
+  if (!$("#md-npis").value.trim()) {   // nothing pasted — ask, don't round-trip
+    msg.textContent = "paste some NPIs first (one per line, or comma-separated)";
+    outEl.innerHTML = "";
+    return;
+  }
   msg.textContent = "checking…";
   let d;
   try { d = await postJson("/api/medicare/eligibility", { text: $("#md-npis").value }); }

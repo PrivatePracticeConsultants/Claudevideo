@@ -83,6 +83,13 @@ NOT run `playwright install` here.
    replaces a file's part (never duplicates rows); content-sha dedup skips
    byte-identical twins; one atomic content-claim means exactly one twin ingests.
 
+7. **Reproducible deliverables** — the same question asked twice returns the same
+   answer. DuckDB scans in parallel, so any `ORDER BY` whose key can tie hands
+   the tied rows back in whichever thread finished first: every ranked list needs
+   a UNIQUE tiebreaker (`… DESC, payer`, `… DESC, city`, `… DESC, practice`).
+   A rate card or market report the user SELLS must not reorder between two
+   generations off an unchanged store. Pinned by `tests/mrfx/test_determinism.py`.
+
 ## Ground rules
 
 Commit messages: what + why + verified-with-numbers. Big claims require a live

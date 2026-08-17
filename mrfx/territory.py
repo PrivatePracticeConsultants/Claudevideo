@@ -117,7 +117,10 @@ def local_rate_map(store: Store, code: str, market: dict, *,
     WHERE city <> ''
     GROUP BY city
     HAVING count(DISTINCT tin_value) >= ?
-    ORDER BY median_rate DESC
+    -- city breaks the tie: two cities on the same median must not swap places
+    -- between refreshes (DuckDB scans in parallel, so a tied ORDER BY is
+    -- returned in whichever order finished first)
+    ORDER BY median_rate DESC, city
     LIMIT ?
     """
     with store.connect() as con:
@@ -184,7 +187,7 @@ def payer_concentration(store: Store, market: dict | None = None,
                round(median(t.negotiated_rate), 2) AS median_rate
         FROM {rel} t LEFT JOIN tin_directory td USING (tin_value)
         WHERE {where}
-        GROUP BY t.payer ORDER BY n_practices DESC
+        GROUP BY t.payer ORDER BY n_practices DESC, t.payer
     """
     with store.connect() as con:
         cur = con.execute(sql, params)
@@ -364,7 +367,8 @@ def steal_share(store: Store, subject: str, *, radius_miles: float | None = None
         LEFT JOIN npi_directory n ON n.npi = r.source_npi
         WHERE r.source_npi NOT IN (SELECT npi FROM mine)
           AND r.patients_elsewhere >= ?
-        ORDER BY (r.patients_elsewhere - coalesce(m.patients_to_me, 0)) DESC
+        ORDER BY (r.patients_elsewhere - coalesce(m.patients_to_me, 0)) DESC,
+                 r.source_npi
         LIMIT ?
         """
         cur = con.execute(sql, [mine, cities, ds_id, ds_id,

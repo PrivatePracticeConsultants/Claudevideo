@@ -66,7 +66,10 @@ def expiration_coverage(store: Store, market: dict | None = None) -> dict:
              "pct": round(100.0 * k / n, 1) if n else 0.0}
             for p, n, k in con.execute(
                 f"SELECT t.payer, count(*), count(*) FILTER ({usable}) FROM {rel} t "
-                f"WHERE {where} GROUP BY t.payer ORDER BY 2 DESC", params).fetchall()]
+                # _market_where emits td.-qualified state predicates, so the
+                # directory must be joined under exactly that alias
+                f"LEFT JOIN tin_directory td ON td.tin_value = t.tin_value "
+                f"WHERE {where} GROUP BY t.payer ORDER BY 2 DESC, t.payer", params).fetchall()]
     total = sum(r["rows"] for r in per_payer)
     ok = sum(r["with_expiry"] for r in per_payer)
     return {
@@ -118,13 +121,13 @@ def renewal_radar(store: Store, subjects: list[str] | None = None,
     today = dt.date.today().isoformat()
     with store.connect() as con:
         cur = con.execute(f"""
-            SELECT t.tin_value, coalesce(d.display_name, t.tin_value) AS practice,
+            SELECT t.tin_value, coalesce(td.display_name, t.tin_value) AS practice,
                    t.payer, t.expiration_date AS expires,
                    count(DISTINCT t.billing_code) AS codes,
                    round(median(t.negotiated_rate), 2) AS median_rate,
                    date_diff('day', CAST(? AS DATE), CAST(t.expiration_date AS DATE)) AS days
             FROM {rel} t
-            LEFT JOIN tin_directory d ON d.tin_value = t.tin_value
+            LEFT JOIN tin_directory td ON td.tin_value = t.tin_value
             WHERE {where} AND {usable.replace('expiration_date', 't.expiration_date')}
               AND t.expiration_date <= ?{tin_filter}
             GROUP BY 1, 2, 3, 4

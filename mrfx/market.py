@@ -84,7 +84,7 @@ def geographic_rates(store: Store, code: str, market: dict, limit: int = 60) -> 
     FROM exploded
     GROUP BY state
     HAVING count(DISTINCT tin_value) >= ?
-    ORDER BY median_rate DESC
+    ORDER BY median_rate DESC, state
     LIMIT ?
     """
     with store.connect() as con:
@@ -170,7 +170,7 @@ def medicare_index(store: Store, code: str, market: dict) -> dict:
            round(median(rate), 2) AS median_rate
     FROM base GROUP BY payer
     HAVING count(DISTINCT tin_value) >= ?
-    ORDER BY median_rate DESC
+    ORDER BY median_rate DESC, payer
     """
     market_sql = f"""
     WITH base AS (SELECT t.tin_value, median(t.negotiated_rate) AS rate

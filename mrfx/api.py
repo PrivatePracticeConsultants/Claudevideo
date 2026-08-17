@@ -506,6 +506,21 @@ def _as_float(v, default):
         raise BenchmarkError(f"expected a number, got {v!r}")
 
 
+def _state_arg(v):
+    """A state off the wire, handed to the compute layer unmangled.
+
+    Routes used to do `str(v).strip()`, which turns a JSON object into a Python
+    repr — and `mrfx.states` then quoted that repr back at the reader
+    ("could not read \"{'a': 1}\" as a state"). A container is named by its type
+    instead; a string is passed through for `state_code` to accept or refuse."""
+    if v is None:
+        return None
+    if isinstance(v, (dict, list, tuple, set, bool)):
+        raise BenchmarkError("state must be a two-letter state code or a state "
+                             "name, e.g. MO or Missouri")
+    return str(v).strip() or None
+
+
 def export_select(grain: str, fs: FilterSet, sort: str, direction: str) -> tuple[str, list]:
     """The one export query (provenance columns per §7A.6). Every text column
     that can carry third-party strings is formula-defused; TIN columns are
@@ -972,7 +987,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                        sum(npi_count) AS npi_count, count(*) AS n
                 FROM ({rel_sql(grain, fs)})
                 GROUP BY unit_id, payer, modifier_set, billing_class, is_dollar_rate
-                ORDER BY median_rate DESC LIMIT 500
+                ORDER BY median_rate DESC, unit_id, payer, modifier_set LIMIT 500
                 """,
                 fs.params,
             ))
@@ -1009,7 +1024,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                        max(rate)                  AS max_rate,
                        count(DISTINCT unit_id)    AS n_entities
                 FROM per_unit
-                GROUP BY payer ORDER BY median_rate DESC
+                GROUP BY payer ORDER BY median_rate DESC, payer
                 """,
                 fs.params,
             ))
@@ -1643,7 +1658,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 radius_miles=float(body["radius_miles"]) if body.get("radius_miles") else None,
                 days=_as_int(body.get("days"), 180),
                 therapy_only=bool(body.get("therapy_only", True)),
-                state=str(body.get("state") or "").strip() or None)
+                state=_state_arg(body.get("state")))
         except NppesFeedError as e:
             raise HTTPException(422, str(e))
         except (TypeError, ValueError) as e:
@@ -1665,7 +1680,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 radius_miles=float(body["radius_miles"]) if body.get("radius_miles") else None,
                 days=_as_int(body.get("days"), 365),
                 therapy_only=bool(body.get("therapy_only", True)),
-                state=str(body.get("state") or "").strip() or None)
+                state=_state_arg(body.get("state")))
         except NppesFeedError as e:
             raise HTTPException(422, str(e))
         except (TypeError, ValueError) as e:
@@ -1718,7 +1733,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             return floor_comparison(
                 store, body.get("market") or {},
                 subject=str(body.get("subject") or "").strip() or None,
-                state=str(body.get("state") or "").strip() or None,
+                state=_state_arg(body.get("state")),
                 payer=str(body.get("payer") or "").strip() or None)
         except BenchmarkError as e:
             raise HTTPException(422, str(e))
@@ -1774,7 +1789,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         from .dossier import build_market_report
         try:
             res = build_market_report(
-                cfg, store, state=str(body.get("state") or "").strip(),
+                cfg, store, state=_state_arg(body.get("state")),
                 code=str(body.get("code") or "97110").strip(),
                 zip_code=str(body.get("zip") or "").strip() or None,
                 radius_miles=_as_float(body.get("radius_miles"), 25.0),
@@ -1894,7 +1909,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         try:
             return local_rate_map(store, str(body.get("code") or ""),
                                   body.get("market") or {},
-                                  state=str(body.get("state") or "").strip() or None,
+                                  state=_state_arg(body.get("state")),
                                   limit=_bounded_int(body.get("limit"), 60, 1, 5000))
         except BenchmarkError as e:
             raise HTTPException(422, str(e))
@@ -2047,7 +2062,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             return hospital_parity(
                 store, body.get("market") or {},
                 payer=str(body.get("payer") or "").strip() or None,
-                state=str(body.get("state") or "").strip() or None,
+                state=_state_arg(body.get("state")),
                 subject=str(body.get("subject") or "").strip() or None,
                 limit=_bounded_int(body.get("limit"), 200, 1, 5000))
         except BenchmarkError as e:
@@ -2061,7 +2076,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         from .hospital import cash_anchors
         try:
             return cash_anchors(
-                store, state=str(body.get("state") or "").strip() or None,
+                store, state=_state_arg(body.get("state")),
                 codes=body.get("codes") or None,
                 limit=_bounded_int(body.get("limit"), 200, 1, 2000))
         except (TypeError, ValueError) as e:
@@ -2732,7 +2747,13 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     @app.get("/api/overview")
     def overview(request: Request):
         from .overview import market_overview
-        state = (_qp(request).get("state") or "").strip().upper() or None
+        from .states import state_code
+        # canonicalise BEFORE the cache key, so "MO", "mo" and "Missouri" share
+        # one entry instead of computing the same whole-spine scan three times
+        try:
+            state = state_code((_qp(request).get("state") or "").strip() or None)
+        except ValueError as e:      # refuse next to the input, like every other route
+            raise HTTPException(422, str(e))
         key = (state, store.data_generation)
         hit = _overview_cache.get(key)
         if hit is not None:

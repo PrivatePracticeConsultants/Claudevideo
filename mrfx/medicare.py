@@ -618,7 +618,7 @@ def org_referrals(store: Store, npis: list[str], direction: str = "in",
               AND p.{mine} IN (SELECT unnest(?::VARCHAR[]))
               AND p.{theirs} NOT IN (SELECT unnest(?::VARCHAR[]))
             GROUP BY 1, 2, 3
-            ORDER BY patients DESC NULLS LAST
+            ORDER BY patients DESC NULLS LAST, 1, 2, 3
             LIMIT {int(limit)}
         """, [ds_id, npis, npis])
         rows = [dict(zip([d[0] for d in cur.description], r)) for r in cur.fetchall()]
@@ -787,12 +787,12 @@ def referral_leaders(store: Store, zip_code: str | None = None,
                                                            origin[0], origin[1])}, 1) AS miles
                     FROM agg a JOIN _zcta z ON z.zip = a.zip
                 ) WHERE miles <= ?
-                ORDER BY patients DESC NULLS LAST LIMIT ?
+                ORDER BY patients DESC NULLS LAST, practice LIMIT ?
             """, [ds_id, float(radius_miles), limit])
         else:
             cur = con.execute(base + """
                 SELECT a.*, CAST(NULL AS DOUBLE) AS miles FROM agg a
-                ORDER BY a.patients DESC NULLS LAST LIMIT ?
+                ORDER BY a.patients DESC NULLS LAST, a.practice LIMIT ?
             """, [ds_id, limit])
         rows = [dict(zip([d[0] for d in cur.description], r)) for r in cur.fetchall()]
         # drawer TIN for the returned rows only — an individual therapist's

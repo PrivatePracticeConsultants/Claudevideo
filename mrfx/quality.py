@@ -104,7 +104,7 @@ def rate_type_mix(store: Store, market: dict | None = None) -> dict:
                round(median(t.negotiated_rate), 2) AS median_rate
         FROM {rel} t LEFT JOIN tin_directory td USING (tin_value)
         WHERE {where}
-        GROUP BY 1 ORDER BY n_rows DESC
+        GROUP BY 1 ORDER BY n_rows DESC, rate_type
     """
     with store.connect() as con:
         rows = [dict(zip([d[0] for d in cur.description], r))
@@ -125,7 +125,7 @@ def rate_type_mix(store: Store, market: dict | None = None) -> dict:
                    THEN 1 ELSE 0 END) AS n_contracted
         FROM {rel} t LEFT JOIN tin_directory td USING (tin_value)
         WHERE {where}
-        GROUP BY 1 ORDER BY 2 DESC
+        GROUP BY 1 ORDER BY 2 DESC, t.payer
     """
     with store.connect() as con:
         payers = [{"payer": p, "n_rows": n,
@@ -478,7 +478,7 @@ def payer_posture(store: Store, market: dict | None = None,
                    AND p.n_distinct_rates > 1)                           AS n_codes_varying
         FROM rows r
         GROUP BY r.payer
-        ORDER BY n_rows DESC
+        ORDER BY n_rows DESC, r.payer
     """
     with store.connect() as con:
         cur = con.execute(sql, params)

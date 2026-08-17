@@ -111,7 +111,7 @@ def build_outreach_rows(store: Store, rel_sql: str, params: list,
                    string_agg(DISTINCT file_month, '; ' ORDER BY file_month) AS months
             FROM ({rel_sql}) WHERE is_dollar_rate AND negotiated_rate > 0.01
             GROUP BY unit_id
-            ORDER BY display_name
+            ORDER BY display_name, unit_id
             """,
             params,
         ).fetchall()

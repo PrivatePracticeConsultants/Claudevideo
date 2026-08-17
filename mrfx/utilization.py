@@ -317,7 +317,7 @@ def practice_utilization(store: Store, tins: list[str], year: str | None = None,
                    count(DISTINCT npi) AS npis
             FROM utilization
             WHERE data_year = ? AND npi IN (SELECT unnest(?::VARCHAR[])){pos}
-            GROUP BY 1 ORDER BY 2 DESC
+            GROUP BY 1 ORDER BY 2 DESC, 1
         """, [yr, npis]).fetchall()
         matched = con.execute(
             f"SELECT count(DISTINCT npi) FROM utilization WHERE data_year = ? "

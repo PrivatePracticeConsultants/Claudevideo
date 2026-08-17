@@ -210,7 +210,7 @@ def closures(store: Store, zip_code: str | None = None,
                    CAST({deact} AS DATE) AS deactivated
             FROM {reader} n
             WHERE {' AND '.join(where)}
-            ORDER BY deactivated DESC
+            ORDER BY deactivated DESC, n.npi
             LIMIT {window}
         """, params).fetchall()
         capped = len(rows) >= window
@@ -328,7 +328,7 @@ def new_enumerations(store: Store, zip_code: str | None = None,
                    CAST({parsed} AS DATE) AS enumerated
             FROM {reader} n
             WHERE {' AND '.join(where)}
-            ORDER BY enumerated DESC
+            ORDER BY enumerated DESC, n.npi
             LIMIT {window}
         """, params).fetchall()
         capped = len(rows) >= window

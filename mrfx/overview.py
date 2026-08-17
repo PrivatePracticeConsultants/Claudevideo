@@ -96,7 +96,7 @@ def market_overview(store: Store, state: str | None = None) -> dict:
                 WHERE m.mkt_med > 0
                 GROUP BY b.payer
                 HAVING count(DISTINCT b.billing_code) >= {_MIN_INDEX_CODES}
-                ORDER BY idx DESC""", params).fetchall()
+                ORDER BY idx DESC, b.payer""", params).fetchall()
 
     disc_label = {"pt": "Physical therapy", "ot": "Occupational therapy",
                   "slp": "Speech-language pathology"}
