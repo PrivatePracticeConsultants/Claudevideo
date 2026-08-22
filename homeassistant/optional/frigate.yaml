@@ -89,6 +89,9 @@ automation:
           actions:
             - action: URI
               title: View clip
-              # Uses the external URL from secrets, so this link works from
-              # outside the house too.
-              uri: "{{ states('sensor.frigate_base_url') }}/api/events/{{ event_id }}/clip.mp4"
+              # external_url comes from secrets.yaml (already documented in
+              # secrets.yaml.example), so this link works from outside the house.
+              # Deliberately NOT a sensor: there is no such entity, and inventing
+              # one would render `unknown` into the URL and silently produce a
+              # dead link on every notification.
+              uri: !secret external_url

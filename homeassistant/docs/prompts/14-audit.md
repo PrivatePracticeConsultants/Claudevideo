@@ -17,19 +17,32 @@
 Run these first; they need no token:
 
 ```bash
-./scripts/validate.sh                  # secrets scan + placeholder scan + schema
-
-# automations that hardcode entity_ids instead of labels/areas
-grep -rnE 'entity_id: (light|switch|binary_sensor|sensor|lock|fan|climate)\.' packages/ \
-  | grep -v '{{' | grep -v '#'
+./scripts/validate.sh    # yamllint + secrets + placeholders + schema
+./scripts/audit.py       # the structural half of this prompt
 
 # devices whose firmware has not been checked in six months
 grep -rn 'firmware_checked' devices/
 ```
 
-The first grep is the tech-debt check the pack asks for. It should return
-**nothing** from `packages/` — every concrete `entity_id:` there is either a
-helper this repo declares or a template. Anything else that appears is drift.
+`scripts/audit.py` answers the offline part of this prompt mechanically and
+exits non-zero on any finding. It checks:
+
+- **Dangling references** — a helper, script, or alarm panel referenced but
+  declared nowhere. This is the failure `check_config` cannot see, because it
+  never consults a registry.
+- **Hardcoded entity targets** in `packages/` — the tech-debt check the pack
+  asks for. Should always be zero; anything appearing is drift away from
+  label targeting.
+- **Duplicate automation ids and unique_ids** — HA silently keeps one.
+- **Helper name collisions between packages** — packages merge, so two files
+  declaring the same helper means one silently loses.
+- **Kill-switch coverage** — any automation acting on the house without
+  checking `automations_paused`, unless it carries a written
+  `DELIBERATELY EXEMPT` rationale (the alarm response and the tablet
+  battery interlock do).
+- **Undocumented `!secret` keys.**
+
+CI runs it on every push, so these stay at zero rather than accumulating.
 
 ## What needs the live instance
 

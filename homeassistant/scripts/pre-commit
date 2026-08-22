@@ -23,7 +23,7 @@ for f in $STAGED; do
     *.example|docs/*|scripts/pre-commit|scripts/validate.sh) continue ;;
   esac
   [ -f "$REPO_ROOT/$f" ] || continue
-  if grep -HnEi "$PATTERN" "$REPO_ROOT/$f"; then
+  if grep -HnEi "$PATTERN" "$REPO_ROOT/$f" | grep -v '!secret'; then
     echo "pre-commit: possible credential above. Use !secret."
     FAILED=1
   fi

@@ -58,6 +58,11 @@ jobs:
           HA_PYTHON: python
         run: ./scripts/validate.sh
 
+      # Catches what check_config cannot: dangling helper references, duplicate
+      # ids, cross-package collisions, missing kill switches, hardcoded targets.
+      - name: Structural audit
+        run: ./scripts/audit.py
+
       # Belt and braces: validate.sh scans tracked files, this scans the diff
       # including anything the scan pattern might not cover.
       - name: Confirm secrets.yaml is not tracked

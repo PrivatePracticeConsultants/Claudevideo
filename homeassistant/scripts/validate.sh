@@ -28,12 +28,16 @@ fi
 step "secrets scan"
 # Anything that looks like a credential in a tracked file. secrets.yaml is
 # gitignored and deliberately excluded from this scan.
-PATTERN='(eyJ[A-Za-z0-9_-]{20,}|[a-f0-9]{64}|api[_-]?key["'"'"' :=]+[A-Za-z0-9]{16,}|token["'"'"' :=]+[A-Za-z0-9]{20,}|password["'"'"' :=]+[^!\s].{6,})'
+# NOTE: inside a POSIX bracket expression, [^!\s] means "not !, \, or s" -- it
+# does NOT mean non-whitespace. Use [:space:] explicitly. Getting this wrong made
+# every `password: !secret ...` line look like a hardcoded credential.
+PATTERN='(eyJ[A-Za-z0-9_-]{20,}|[a-f0-9]{64}|api[_-]?key["'"'"' :=]+[A-Za-z0-9]{16,}|token["'"'"' :=]+[A-Za-z0-9]{20,}|password["'"'"' :=]+[^![:space:]][^[:space:]]{5,})'
 HITS=$(cd "$CONFIG_DIR" && git ls-files -z 2>/dev/null \
        | tr '\0' '\n' \
        | grep -vE '^(secrets\.yaml|.*\.example|docs/|scripts/validate\.sh)' \
        | while read -r f; do
-           [ -f "$f" ] && grep -HnEi "$PATTERN" "$f" 2>/dev/null
+           # A line referencing !secret is correct by construction.
+           [ -f "$f" ] && grep -HnEi "$PATTERN" "$f" 2>/dev/null | grep -v '!secret'
          done)
 if [ -n "$HITS" ]; then fail "possible secret in a tracked file:"; echo "$HITS"; else ok "no secrets in tracked files"; fi
 

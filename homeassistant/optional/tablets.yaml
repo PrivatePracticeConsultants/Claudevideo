@@ -30,6 +30,12 @@ input_number:
     unit_of_measurement: "%"
     mode: slider
 
+# The two charge automations below are DELIBERATELY EXEMPT from
+# input_boolean.automations_paused. Every other automation checks that kill
+# switch. These do not, because they are the battery-safety interlock: pausing
+# automations for an unrelated reason must never leave a lithium cell pinned at
+# 100% in a wall mount indefinitely. The drain alert is a notification, so it is
+# exempt for the ordinary reason.
 automation:
   - id: tablet_charge_ceiling
     alias: "[tablet] Stop charging at the ceiling"

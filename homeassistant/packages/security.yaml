@@ -297,6 +297,11 @@ automation:
       Critical priority by definition — this is the one notification that must
       bypass do-not-disturb. Turns on every exterior light: it helps cameras and
       it is the single most effective deterrent available.
+
+      DELIBERATELY EXEMPT from input_boolean.automations_paused. Every other
+      automation in this system checks that kill switch; this one must not. A
+      flag someone flipped last week to stop the lights flickering must not be
+      able to silence an intrusion alarm. If you want the alarm off, disarm it.
     mode: single
     triggers:
       - trigger: state
@@ -390,6 +395,9 @@ automation:
         event: start
     conditions:
       - condition: state
+        entity_id: input_boolean.automations_paused
+        state: "off"
+      - condition: state
         entity_id: input_select.house_mode
         state: vacation
       - condition: state
@@ -399,6 +407,9 @@ automation:
       - repeat:
           # Runs until the mode changes; the while-condition re-checks each pass.
           while:
+            - condition: state
+              entity_id: input_boolean.automations_paused
+              state: "off"
             - condition: state
               entity_id: input_select.house_mode
               state: vacation
