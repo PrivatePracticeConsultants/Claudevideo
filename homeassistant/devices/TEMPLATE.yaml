@@ -1,0 +1,55 @@
+# devices/<slug>.yaml — one file per physical device. A REGISTER, not loaded
+# config (see the note at the bottom).
+#
+# Copy this for each new device. What matters here is not the config (most
+# devices need none) but the FAILURE MODE: what breaks when this dies, and what
+# the human does instead. That is the physical-first rule made concrete, and it
+# is the section that gets read during an outage.
+
+device:
+  slug: template-device
+  model: ""                      # exact model, not the marketing name
+  manufacturer: ""
+  protocol: ""                   # zigbee | zwave | matter | thread | wifi | esphome | ir | cloud
+  integration: ""                # zha | zwave_js | esphome | matter | ...
+  firmware: ""
+  firmware_checked: ""           # YYYY-MM-DD — the audit flags this at 6 months
+
+  location:
+    area: ""                     # must match the HA area slug
+    physical: ""                 # "above the back door, facing the driveway"
+
+  power:
+    source: ""                   # mains | battery | poe | usb
+    battery_type: ""             # CR2032 | AA | 18650 | n/a
+    survives_outage: false       # does it keep working when the power goes?
+
+  labels: []                     # from the canonical set in CLAUDE.md
+
+  # ---- the part that matters ----
+  depends_on: []                 # what this device needs to function (hub, wifi, cloud)
+  depended_on_by: []             # which automations break without it
+
+  failure_mode: |
+    What stops working when this dies:
+
+    What the human does instead, with no phone and no HA:
+
+  quirks: |
+    Pairing gotchas, required firmware order, ZHA quirk file, Z2M external
+    converter, exclusion-before-inclusion, binding that must be done manually.
+    Write this down at pairing time — it is completely forgotten within a month
+    and needed again the day the device is replaced.
+
+# NOTE: files in devices/ are a REGISTER, not loaded configuration.
+# configuration.yaml does not include this directory, and deliberately so —
+# `packages:` can only take one !include_dir_named, and packages/ owns it.
+#
+# So device-specific HA config (a wall remote's event entity wired to an
+# automation, a lock's code-slot event entity) goes in the package that owns
+# the concern — packages/lighting.yaml, packages/security.yaml — with a comment
+# pointing back at this file. Record HERE that it exists and where it lives:
+#
+#   wired_automations:
+#     - id: lighting_kitchen_remote
+#       lives_in: packages/lighting.yaml

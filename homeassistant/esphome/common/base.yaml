@@ -1,0 +1,109 @@
+# esphome/common/base.yaml — everything every node gets.
+#
+# Included as a package by each node file, so a new node is a dozen lines plus
+# its actual sensors. Change something here and it propagates to every node on
+# the next flash.
+#
+# Consumed substitutions (each node must define these):
+#   node_name          e.g. garage-sensor
+#   node_friendly      e.g. Garage Sensor
+# Optional, with defaults below:
+#   status_led_pin     omit if the board has no usable LED
+
+esphome:
+  name: ${node_name}
+  friendly_name: ${node_friendly}
+  # Report the build time so `sensor.<node>_build` answers "did my flash
+  # actually land?" without guessing from behaviour.
+  project:
+    name: "house.${node_name}"
+    version: "1.0.0"
+
+logger:
+  level: INFO
+  # Serial logging costs RAM and, on some boards, stability. UART logging off;
+  # logs still reach HA and the ESPHome dashboard over the network.
+  baud_rate: 0
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+  # If HA goes away for 15 minutes, reboot rather than sit there deaf. A node
+  # that has lost the API and does not reboot is the single most common ESPHome
+  # failure, and it looks exactly like dead hardware.
+  reboot_timeout: 15min
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  # PHYSICAL-FIRST RULE (CLAUDE.md): the hotspot exists so a node whose Wi-Fi
+  # credentials no longer work can still be reached and reflashed without
+  # unmounting it from a ceiling.
+  ap:
+    ssid: "${node_name} fallback"
+    password: !secret fallback_password
+  # Reboot if Wi-Fi cannot be reached at all for 15 minutes.
+  reboot_timeout: 15min
+  # Do not roam aggressively; a node flapping between APs drops the API session.
+  fast_connect: false
+
+captive_portal:
+
+# Lets the node be found on the network by name when DHCP moves it.
+mdns:
+  disabled: false
+
+# ---------------------------------------------------------------------------
+# Diagnostics every node reports. All marked as diagnostic so they land in the
+# device page rather than cluttering dashboards, and all excluded from the
+# recorder in packages/_global.yaml so they do not bloat the database.
+# ---------------------------------------------------------------------------
+sensor:
+  - platform: uptime
+    name: Uptime
+    id: node_uptime
+    update_interval: 60s
+    entity_category: diagnostic
+
+  - platform: wifi_signal
+    name: WiFi signal
+    update_interval: 60s
+    entity_category: diagnostic
+
+text_sensor:
+  - platform: version
+    name: ESPHome version
+    entity_category: diagnostic
+
+  - platform: wifi_info
+    ip_address:
+      name: IP address
+      entity_category: diagnostic
+    ssid:
+      name: Connected SSID
+      entity_category: diagnostic
+
+binary_sensor:
+  - platform: status
+    name: Status
+    entity_category: diagnostic
+
+button:
+  - platform: restart
+    name: Restart
+    entity_category: config
+
+  - platform: safe_mode
+    name: Restart into safe mode
+    entity_category: config
+    # Safe mode boots with sensors disabled so a node stuck in a crash loop can
+    # still accept an OTA. This button is the difference between an OTA fix and
+    # a ladder.
+
+time:
+  - platform: homeassistant
+    id: homeassistant_time

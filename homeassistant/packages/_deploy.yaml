@@ -1,0 +1,48 @@
+# _deploy.yaml — what commit is actually running.
+#
+# "Last known good" is only unambiguous if the house can tell you what it is
+# running right now. scripts/deploy.sh tags every successful deploy; this
+# sensor reads the tag back out of the working tree.
+
+command_line:
+  - sensor:
+      name: Deployed commit
+      unique_id: deploy_current_commit
+      # Runs in the config directory, which IS the git working tree.
+      # `|| echo` so a config dir that is not a git checkout reports plainly
+      # rather than leaving the sensor unavailable and the admin view blank.
+      command: >-
+        git -C /config log -1 --pretty=format:'{"commit":"%h","subject":"%s","when":"%cI"}'
+        2>/dev/null || echo '{"commit":"unknown","subject":"config dir is not a git checkout","when":""}'
+      value_template: "{{ value_json.commit }}"
+      json_attributes:
+        - commit
+        - subject
+        - when
+      scan_interval: 300
+
+automation:
+  - id: deploy_commit_changed
+    alias: "[deploy] Deployed commit changed"
+    description: >-
+      Announces every deploy, including ones nobody meant to do. A house that
+      silently changes behaviour is the hardest kind to debug.
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: sensor.deployed_commit
+    conditions:
+      - condition: template
+        value_template: >-
+          {{ trigger.from_state is not none
+             and trigger.to_state is not none
+             and trigger.from_state.state not in ['unknown', 'unavailable']
+             and trigger.to_state.state not in ['unknown', 'unavailable']
+             and trigger.from_state.state != trigger.to_state.state }}
+    actions:
+      - action: script.notify_person
+        data:
+          target: all
+          priority: info
+          title: "Deployed {{ states('sensor.deployed_commit') }}"
+          message: "{{ state_attr('sensor.deployed_commit', 'subject') }}"

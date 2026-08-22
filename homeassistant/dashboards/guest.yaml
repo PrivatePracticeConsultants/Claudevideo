@@ -1,0 +1,35 @@
+# guest.yaml — for someone who does not know or care how any of this works.
+# Big targets, nothing that can break anything, no diagnostics.
+title: Guest
+views:
+  - title: Home
+    path: home
+    icon: mdi:home-heart
+    type: sections
+    max_columns: 1
+    sections:
+      - type: grid
+        cards:
+          - type: markdown
+            content: >-
+              {% if states('sensor.house_status_summary') == 'All clear' %}
+              ## Everything's fine
+              {% else %}
+              ## Someone should look at this
+              {{ states('sensor.house_status_summary') }}
+              {% endif %}
+
+          - type: entities
+            title: Comfort
+            entities:
+              - entity: sensor.house_average_temperature
+                name: Temperature
+              - entity: input_number.comfort_target
+                name: Set temperature to
+
+  # Rooms and their lights, generated from the registry.
+  - title: Rooms
+    path: rooms
+    icon: mdi:lightbulb-group
+    strategy:
+      type: areas

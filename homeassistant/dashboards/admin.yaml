@@ -1,0 +1,91 @@
+# admin.yaml — system health. Admin-only (require_admin is set in
+# configuration.yaml). This is the view consulted when something is wrong.
+title: Admin
+views:
+  - title: System
+    path: system
+    icon: mdi:heart-pulse
+    type: sections
+    sections:
+      - type: grid
+        cards:
+          - type: entities
+            title: Home Assistant
+            entities:
+              - entity: sensor.ha_uptime
+                name: Uptime
+              - entity: input_datetime.ha_last_start
+                name: Last start
+              - entity: sensor.database_size
+                name: Database
+              - entity: sensor.unavailable_entities
+                name: Unavailable entities
+
+          - type: entities
+            title: Network
+            entities:
+              - entity: binary_sensor.internet_up
+                name: Internet
+              - entity: sensor.internet_latency
+                name: Latency
+              - entity: sensor.dns_resolution
+                name: DNS
+              - entity: binary_sensor.critical_devices_online
+                name: Critical devices
+
+      - type: grid
+        cards:
+          - type: markdown
+            title: Unavailable
+            content: >-
+              {% set e = state_attr('sensor.unavailable_entities', 'entities') or [] %}
+              {% if e | count == 0 %}Nothing unavailable.
+              {% else %}{% for x in e %}- `{{ x }}`
+              {% endfor %}{% endif %}
+
+          - type: markdown
+            title: Low batteries
+            content: >-
+              {% set d = state_attr('sensor.low_battery_devices', 'devices') or [] %}
+              {% if d | count == 0 %}All batteries above
+              {{ states('input_number.low_battery_threshold') }}%.
+              {% else %}{% for x in d %}- {{ state_attr(x, 'friendly_name') or x }}
+              — {{ states(x) }}%
+              {% endfor %}{% endif %}
+
+      - type: grid
+        cards:
+          - type: entities
+            title: HVAC protection
+            entities:
+              - entity: binary_sensor.hvac_may_start
+                name: May start now
+              - entity: timer.hvac_compressor_lockout
+                name: Compressor lockout
+              - entity: timer.hvac_min_runtime_hold
+                name: Minimum runtime hold
+              - entity: timer.climate_manual_override
+                name: Manual override
+
+          - type: entities
+            title: Energy
+            entities:
+              - entity: sensor.current_energy_rate
+                name: Rate now
+              - entity: sensor.house_power_draw
+                name: Draw
+              - entity: sensor.house_power_baseline
+                name: Baseline for this hour
+              - entity: sensor.vampire_load_report
+                name: Standby load
+
+      - type: grid
+        cards:
+          - type: markdown
+            title: Deployed commit
+            # Populated by scripts/deploy.sh via the command_line sensor in
+            # packages/_deploy.yaml. "Unknown" means deploy.sh has never run.
+            content: >-
+              **{{ states('sensor.deployed_commit') }}**
+
+              {{ state_attr('sensor.deployed_commit', 'subject') or '' }}

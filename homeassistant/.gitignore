@@ -16,3 +16,4 @@ custom_components/
 image/
 .venv/
 __pycache__/
+esphome/secrets.yaml

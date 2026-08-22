@@ -1,0 +1,17 @@
+# Shared theme. Used by the dashboards above and by both wall tablets
+# (prompt 21) so a design change propagates to every screen at once.
+house_dark:
+  # High contrast on purpose: a wall tablet is read from two feet away, often
+  # at an angle, often in a dim room.
+  primary-color: "#4a9eff"
+  accent-color: "#ff9800"
+  primary-background-color: "#111418"
+  secondary-background-color: "#1b1f26"
+  card-background-color: "#1b1f26"
+  primary-text-color: "#f2f4f7"
+  secondary-text-color: "#a8b0bd"
+  divider-color: "#2c323c"
+  state-icon-active-color: "#ffc65c"
+  paper-item-icon-color: "#a8b0bd"
+  ha-card-border-radius: "12px"
+  ha-card-box-shadow: "none"

@@ -1,0 +1,94 @@
+# frigate.yaml — camera notifications. REQUIRES the Frigate HACS integration.
+# See optional/README.md before moving this into packages/.
+#
+# Frigate does object detection outside HA and fires an MQTT event per detection.
+# What matters here is the rate limiting: one delivery driver walking up a path
+# generates a detection every few hundred milliseconds, and without a cooldown
+# that is fifteen push notifications for one visit. People mute the channel after
+# the second such incident, and then the camera notifications are worthless.
+
+input_number:
+  camera_notify_cooldown:
+    name: Camera notification cooldown
+    icon: mdi:camera-timer
+    min: 1
+    max: 30
+    step: 1
+    initial: 5
+    unit_of_measurement: min
+    mode: slider
+
+input_boolean:
+  camera_notifications:
+    name: Camera notifications
+    icon: mdi:cctv
+
+# One timer per camera, named timer.<camera_slug>_notify_cooldown.
+# Per-camera rather than global: a person at the front door should not suppress
+# the back door for five minutes.
+timer:
+  frontdoor_notify_cooldown:
+    name: Front door notify cooldown
+    duration: "00:05:00"
+    restore: true
+
+automation:
+  - id: frigate_person_detected
+    alias: "[frigate] Person detected"
+    description: >-
+      Notifies on a NEW person detection, with a snapshot and a link to the clip.
+      Rate-limited per camera by a timer, and restricted to zones so the
+      pavement outside does not trigger anything.
+
+      Priority scales with house mode: a person at the door while everyone is
+      away is a different event from one while people are home.
+    mode: queued
+    max: 10
+    triggers:
+      - trigger: mqtt
+        topic: frigate/events
+        value_template: "{{ value_json['type'] }}"
+        payload: "new"
+    conditions:
+      - condition: state
+        entity_id: input_boolean.camera_notifications
+        state: "on"
+      - condition: state
+        entity_id: input_boolean.automations_paused
+        state: "off"
+      - condition: template
+        value_template: "{{ trigger.payload_json['after']['label'] == 'person' }}"
+      # Only detections that entered a defined zone. Without this, every car on
+      # the street is a notification.
+      - condition: template
+        value_template: "{{ trigger.payload_json['after']['entered_zones'] | count > 0 }}"
+      # The per-camera cooldown.
+      - condition: template
+        value_template: >-
+          {% set cam = trigger.payload_json['after']['camera'] %}
+          {{ not is_state('timer.' ~ cam ~ '_notify_cooldown', 'active') }}
+    actions:
+      - variables:
+          cam: "{{ trigger.payload_json['after']['camera'] }}"
+          event_id: "{{ trigger.payload_json['after']['id'] }}"
+          zones: "{{ trigger.payload_json['after']['entered_zones'] | join(', ') }}"
+      - action: timer.start
+        continue_on_error: true
+        target:
+          entity_id: "timer.{{ cam }}_notify_cooldown"
+        data:
+          duration: "{{ (states('input_number.camera_notify_cooldown') | int(5)) * 60 }}"
+      - action: script.notify_person
+        data:
+          target: all
+          priority: >-
+            {{ 'warning' if states('input_select.house_mode') in ['away', 'vacation', 'night']
+               else 'info' }}
+          title: "Person at {{ cam | replace('_', ' ') | title }}"
+          message: "In {{ zones }} at {{ now().strftime('%H:%M') }}"
+          actions:
+            - action: URI
+              title: View clip
+              # Uses the external URL from secrets, so this link works from
+              # outside the house too.
+              uri: "{{ states('sensor.frigate_base_url') }}/api/events/{{ event_id }}/clip.mp4"

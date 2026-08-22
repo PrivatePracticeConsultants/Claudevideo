@@ -40,10 +40,13 @@ if [ -n "$HITS" ]; then fail "possible secret in a tracked file:"; echo "$HITS";
 # ---------------------------------------------------------------------------
 step "placeholder scan"
 # Commented-out placeholders are documentation (a worked example the user
-# uncomments). Only flag a placeholder that is live config.
+# uncomments). optional/ is not-yet-live config by definition. Only flag a
+# placeholder that is LIVE config -- which is exactly what makes moving a file
+# from optional/ into packages/ with placeholders still in it fail this gate.
 PH=$(cd "$CONFIG_DIR" && grep -rniE 'REPLACE_ME|TODO_ENTITY|CHANGEME|<your' \
       --include='*.yaml' --exclude='*.example' . 2>/dev/null \
       | grep -vE '^\./docs/' \
+      | grep -vE '^\./optional/' \
       | grep -vE '^[^:]+:[0-9]+: *#' || true)
 if [ -n "$PH" ]; then fail "unfilled placeholders remain:"; echo "$PH"; else ok "no unfilled placeholders"; fi
 

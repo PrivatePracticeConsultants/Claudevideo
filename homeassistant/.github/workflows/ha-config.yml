@@ -1,0 +1,69 @@
+---
+# Pre-merge gate. A bad commit must not be able to reach the house.
+#
+# NOTE ON LOCATION: GitHub only runs workflows from `.github/workflows` at the
+# ROOT of a repository. This file is correct as-is when the Home Assistant
+# config directory is its own repo, which is how the prompt pack intends it
+# (`git init` the config directory). If this config lives in a subdirectory of a
+# larger repo, move this file to the repo root and set `working-directory`
+# below to the config subdirectory.
+
+name: Home Assistant config
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The version is pinned in .ha-version and read here, so CI and
+      # scripts/validate.sh cannot drift apart. Validating against a version
+      # other than production's is worse than not validating: it accepts syntax
+      # production has already removed.
+      - name: Read pinned HA version
+        id: ha
+        run: echo "version=$(cat .ha-version)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@v5
+        with:
+          # Track the Python that HA itself ships on. Home Assistant drops old
+          # Python versions quickly, and a mismatch here silently caps which HA
+          # version pip will even resolve.
+          python-version: "3.13"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install yamllint "homeassistant==${{ steps.ha.outputs.version }}"
+
+      # check_config needs a secrets.yaml. Building it from the committed
+      # example has a useful side effect: if someone adds a !secret reference
+      # without documenting the key in the example, CI fails here. The example
+      # is therefore guaranteed complete.
+      - name: Materialise secrets from the example
+        run: cp secrets.yaml.example secrets.yaml
+
+      - name: Validate
+        env:
+          HA_PYTHON: python
+        run: ./scripts/validate.sh
+
+      # Belt and braces: validate.sh scans tracked files, this scans the diff
+      # including anything the scan pattern might not cover.
+      - name: Confirm secrets.yaml is not tracked
+        run: |
+          if git ls-files --error-unmatch secrets.yaml 2>/dev/null; then
+            echo "::error::secrets.yaml is tracked by git. It must be gitignored."
+            exit 1
+          fi
+          echo "secrets.yaml is correctly untracked"

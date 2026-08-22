@@ -1,0 +1,49 @@
+# TEMPLATE-node.yaml — copy this to esphome/<node-name>.yaml for a new node.
+#
+# Everything shared lives in common/base.yaml. What follows is the whole of
+# what a new node needs: its identity, its board, and its actual sensors.
+#
+# Flash process is in docs/runbook.md, "flashing an ESPHome node".
+
+substitutions:
+  node_name: template-node
+  node_friendly: Template Node
+
+packages:
+  base: !include common/base.yaml
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+# --- this node's actual reason for existing -------------------------------
+# Delete the example below and put the real sensors here.
+#
+# sensor:
+#   - platform: dht
+#     pin: GPIO4
+#     model: DHT22
+#     temperature:
+#       name: Temperature
+#       filters:
+#         # Averaging across 6 samples: raw DHT readings jitter by ~0.5C and
+#         # would otherwise write a database row every 15 seconds forever.
+#         - sliding_window_moving_average:
+#             window_size: 6
+#             send_every: 6
+#     humidity:
+#       name: Humidity
+#     update_interval: 15s
+#
+# binary_sensor:
+#   - platform: gpio
+#     pin:
+#       number: GPIO5
+#       mode: INPUT_PULLUP
+#       inverted: true
+#     name: Contact
+#     device_class: door
+#     filters:
+#       # Debounce: a reed switch chatters on the way to closed.
+#       - delayed_on_off: 50ms

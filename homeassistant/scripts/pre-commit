@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# pre-commit — YAML lint and secrets scan on staged files only.
+#
+# Deliberately does NOT run check_config: that takes ~30 seconds and would make
+# people commit with --no-verify, at which point the hook catches nothing. Fast
+# checks here, the slow one in CI and in deploy.sh.
+set -uo pipefail
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+STAGED=$(git diff --cached --name-only --diff-filter=ACM)
+[ -z "$STAGED" ] && exit 0
+FAILED=0
+
+# --- secrets.yaml must never be staged ---
+if echo "$STAGED" | grep -qE '(^|/)secrets\.yaml$'; then
+  echo "pre-commit: secrets.yaml is staged. It must never be committed."
+  FAILED=1
+fi
+
+# --- credential-shaped strings ---
+PATTERN='(eyJ[A-Za-z0-9_-]{20,}|[a-f0-9]{64}|api[_-]?key["'"'"' :=]+[A-Za-z0-9]{16,}|token["'"'"' :=]+[A-Za-z0-9]{20,})'
+for f in $STAGED; do
+  case "$f" in
+    *.example|docs/*|scripts/pre-commit|scripts/validate.sh) continue ;;
+  esac
+  [ -f "$REPO_ROOT/$f" ] || continue
+  if grep -HnEi "$PATTERN" "$REPO_ROOT/$f"; then
+    echo "pre-commit: possible credential above. Use !secret."
+    FAILED=1
+  fi
+done
+
+# --- yaml lint on staged yaml ---
+if command -v yamllint >/dev/null 2>&1; then
+  YAML=$(echo "$STAGED" | grep -E '\.ya?ml$' || true)
+  if [ -n "$YAML" ]; then
+    # shellcheck disable=SC2086
+    (cd "$REPO_ROOT" && yamllint -c .yamllint $YAML) || FAILED=1
+  fi
+fi
+
+[ $FAILED -ne 0 ] && echo "pre-commit: FAILED. Fix, or bypass deliberately with --no-verify."
+exit $FAILED

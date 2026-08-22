@@ -1,0 +1,89 @@
+# tablets.yaml — wall tablet as a managed device. REQUIRES the Fully Kiosk
+# integration. See optional/README.md before moving this into packages/.
+#
+# BATTERY MANAGEMENT IS THE SAFETY-CRITICAL PART.
+# A lithium cell held at 100% state-of-charge at room temperature degrades and
+# eventually swells. A tablet permanently docked at 100% for a year is a
+# genuine fire risk in a wall mount, not a battery-life inconvenience. Holding
+# it between 20% and 80% removes essentially all of that risk.
+#
+# Replace both REPLACE_ME entity_ids with the real ones from the live registry
+# before moving this file. validate.sh enforces that outside optional/.
+
+input_number:
+  tablet_charge_floor:
+    name: Tablet charge floor
+    icon: mdi:battery-20
+    min: 15
+    max: 40
+    step: 5
+    initial: 20
+    unit_of_measurement: "%"
+    mode: slider
+  tablet_charge_ceiling:
+    name: Tablet charge ceiling
+    icon: mdi:battery-80
+    min: 60
+    max: 90
+    step: 5
+    initial: 80
+    unit_of_measurement: "%"
+    mode: slider
+
+automation:
+  - id: tablet_charge_ceiling
+    alias: "[tablet] Stop charging at the ceiling"
+    description: >-
+      Cuts the smart plug once the tablet reaches the ceiling. This is the half
+      that matters for cell longevity and for not putting a swollen battery in
+      a wall.
+    mode: single
+    triggers:
+      - trigger: numeric_state
+        entity_id: sensor.REPLACE_ME_tablet_battery
+        above: input_number.tablet_charge_ceiling
+    actions:
+      - action: switch.turn_off
+        target:
+          entity_id: switch.REPLACE_ME_tablet_plug
+
+  - id: tablet_charge_floor
+    alias: "[tablet] Resume charging at the floor"
+    description: Restores power before the tablet dies and the wall panel goes dark.
+    mode: single
+    triggers:
+      - trigger: numeric_state
+        entity_id: sensor.REPLACE_ME_tablet_battery
+        below: input_number.tablet_charge_floor
+    actions:
+      - action: switch.turn_on
+        target:
+          entity_id: switch.REPLACE_ME_tablet_plug
+
+  - id: tablet_unexpected_drain
+    alias: "[tablet] Draining while plugged in"
+    description: >-
+      The failure this catches: the plug is on, but the tablet is still losing
+      charge — a failed charger, a bad cable, or a screen pinned at full
+      brightness drawing more than the supply provides. Left alone it ends with
+      a dead panel and, occasionally, a hot cable.
+    mode: single
+    triggers:
+      - trigger: numeric_state
+        entity_id: sensor.REPLACE_ME_tablet_battery
+        below: 15
+        for:
+          minutes: 30
+    conditions:
+      - condition: state
+        entity_id: switch.REPLACE_ME_tablet_plug
+        state: "on"
+    actions:
+      - action: script.notify_person
+        data:
+          target: all
+          priority: warning
+          title: Tablet is draining while plugged in
+          message: >-
+            Battery {{ states('sensor.REPLACE_ME_tablet_battery') }}% and falling
+            with the charger on. Check the cable and the supply.
