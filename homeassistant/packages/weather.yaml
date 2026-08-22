@@ -1,0 +1,216 @@
+# weather.yaml — outdoor conditions for the control panel.
+#
+# THE INTEGRATION ITSELF MUST BE ADDED IN THE UI. Verified against 2026.2.3:
+# of the 28 shipped weather integrations, `template` is the ONLY one with a
+# YAML platform schema — met.no, Open-Meteo, AccuWeather and the rest are all
+# config-flow. So this file cannot install weather; it can only consume it.
+#
+#   Settings -> Devices & Services -> Add Integration -> "Met.no"
+#   (free, no API key, uses the lat/long already in secrets.yaml)
+#
+# Everything below then binds itself automatically. Nothing here names a
+# weather entity, because this repo has never seen your instance and the
+# entity_id depends on which provider you pick. It resolves the first
+# `weather.*` entity in the registry at runtime — so it is correct whichever
+# one you choose, and it degrades to "unknown" (not an error) before you
+# choose any.
+
+template:
+  # -------------------------------------------------------------------------
+  # Current conditions. Plain template sensors: they re-evaluate whenever the
+  # underlying weather entity updates.
+  # -------------------------------------------------------------------------
+  - sensor:
+      - name: Outdoor temperature
+        unique_id: weather_outdoor_temperature
+        unit_of_measurement: "°F"
+        device_class: temperature
+        state_class: measurement
+        state: >-
+          {% set wx = states.weather | map(attribute='entity_id') | list %}
+          {{ state_attr(wx[0], 'temperature') if wx | count > 0 else none }}
+        availability: "{{ states.weather | list | count > 0 }}"
+
+      - name: Outdoor humidity
+        unique_id: weather_outdoor_humidity
+        unit_of_measurement: "%"
+        device_class: humidity
+        state_class: measurement
+        state: >-
+          {% set wx = states.weather | map(attribute='entity_id') | list %}
+          {{ state_attr(wx[0], 'humidity') if wx | count > 0 else none }}
+        availability: "{{ states.weather | list | count > 0 }}"
+
+      - name: Wind speed
+        unique_id: weather_wind_speed
+        unit_of_measurement: "mph"
+        device_class: wind_speed
+        state_class: measurement
+        state: >-
+          {% set wx = states.weather | map(attribute='entity_id') | list %}
+          {{ state_attr(wx[0], 'wind_speed') if wx | count > 0 else none }}
+        availability: "{{ states.weather | list | count > 0 }}"
+
+      - name: Weather condition
+        unique_id: weather_condition
+        icon: >-
+          {% set c = states(states.weather | map(attribute='entity_id') | list | first
+                            if states.weather | list | count > 0 else '') %}
+          {% set icons = {
+            'clear-night': 'mdi:weather-night', 'cloudy': 'mdi:weather-cloudy',
+            'fog': 'mdi:weather-fog', 'hail': 'mdi:weather-hail',
+            'lightning': 'mdi:weather-lightning',
+            'lightning-rainy': 'mdi:weather-lightning-rainy',
+            'partlycloudy': 'mdi:weather-partly-cloudy',
+            'pouring': 'mdi:weather-pouring', 'rainy': 'mdi:weather-rainy',
+            'snowy': 'mdi:weather-snowy', 'snowy-rainy': 'mdi:weather-snowy-rainy',
+            'sunny': 'mdi:weather-sunny', 'windy': 'mdi:weather-windy',
+            'windy-variant': 'mdi:weather-windy-variant',
+            'exceptional': 'mdi:alert-circle-outline' } %}
+          {{ icons.get(c, 'mdi:weather-cloudy-clock') }}
+        # HA condition states are single tokens like `partlycloudy`, so
+        # replace('-',' ')|title renders "Partlycloudy". Map them to real labels.
+        state: >-
+          {% set labels = {
+            'clear-night': 'Clear', 'cloudy': 'Cloudy', 'exceptional': 'Severe',
+            'fog': 'Fog', 'hail': 'Hail', 'lightning': 'Thunderstorms',
+            'lightning-rainy': 'Thunderstorms', 'partlycloudy': 'Partly Cloudy',
+            'pouring': 'Heavy Rain', 'rainy': 'Rain', 'snowy': 'Snow',
+            'snowy-rainy': 'Sleet', 'sunny': 'Sunny', 'windy': 'Windy',
+            'windy-variant': 'Windy' } %}
+          {% set wx = states.weather | map(attribute='entity_id') | list %}
+          {{ labels.get(states(wx[0]), states(wx[0]) | replace('-', ' ') | title)
+             if wx | count > 0 else 'unknown' }}
+        availability: "{{ states.weather | list | count > 0 }}"
+
+      # A single human line for the hero card and for voice.
+      - name: Weather summary
+        unique_id: weather_summary
+        icon: mdi:weather-partly-cloudy
+        # Built as one string rather than across template lines: a folded block
+        # keeps the newline between the two substitutions, and the state rendered
+        # as "Partlycloudy,\n73°" on a live instance.
+        state: >-
+          {% if states.weather | list | count == 0 %}No weather integration yet
+          {% else %}{{ states('sensor.weather_condition') ~ ', '
+             ~ (states('sensor.outdoor_temperature') | float(0) | round(0) | int) ~ '°' }}
+          {% endif %}
+
+  # -------------------------------------------------------------------------
+  # Daily forecast. A forecast is NOT an attribute any more — it is behind the
+  # weather.get_forecasts service, so it needs a trigger-based template entity
+  # that calls the service and stores the response. This is the documented
+  # pattern since forecast attributes were removed in 2024.4.
+  # -------------------------------------------------------------------------
+  - triggers:
+      - trigger: time_pattern
+        minutes: "/30"
+      - trigger: homeassistant
+        event: start
+    actions:
+      - variables:
+          wx: >-
+            {% set w = states.weather | map(attribute='entity_id') | list %}
+            {{ w[0] if w | count > 0 else '' }}
+      # Nothing to ask before an integration exists; exit quietly rather than
+      # erroring every 30 minutes in the log.
+      - condition: template
+        value_template: "{{ wx != '' }}"
+      - action: weather.get_forecasts
+        target:
+          entity_id: "{{ wx }}"
+        data:
+          type: daily
+        response_variable: forecast_response
+      - variables:
+          # response is keyed by entity_id
+          today: >-
+            {{ (forecast_response[wx].forecast | default([]))[0] | default({}) }}
+    sensor:
+      - name: Forecast high today
+        unique_id: weather_forecast_high_today
+        unit_of_measurement: "°F"
+        device_class: temperature
+        # `today` is undefined until the action sequence has run at least once,
+        # and the sequence exits early when no weather integration exists yet.
+        # availability (not a string state) is what makes that safe: this sensor
+        # has a unit and a device_class, so HA REQUIRES a numeric state and
+        # rendering the literal 'unknown' into it raises ValueError — observed
+        # live on a fresh instance.
+        state: "{{ today.get('temperature', none) if today is defined else none }}"
+        availability: "{{ today is defined and today | count > 0 }}"
+
+      - name: Forecast low today
+        unique_id: weather_forecast_low_today
+        unit_of_measurement: "°F"
+        device_class: temperature
+        # `today` is undefined until the action sequence has run at least once,
+        # and the sequence exits early when no weather integration exists yet.
+        # availability (not a string state) is what makes that safe: this sensor
+        # has a unit and a device_class, so HA REQUIRES a numeric state and
+        # rendering the literal 'unknown' into it raises ValueError — observed
+        # live on a fresh instance.
+        state: "{{ today.get('templow', none) if today is defined else none }}"
+        availability: "{{ today is defined and today | count > 0 }}"
+
+      - name: Forecast precipitation chance
+        unique_id: weather_forecast_precip_today
+        unit_of_measurement: "%"
+        # `today` is undefined until the action sequence has run at least once,
+        # and the sequence exits early when no weather integration exists yet.
+        # availability (not a string state) is what makes that safe: this sensor
+        # has a unit and a device_class, so HA REQUIRES a numeric state and
+        # rendering the literal 'unknown' into it raises ValueError — observed
+        # live on a fresh instance.
+        state: "{{ today.get('precipitation_probability', 0) if today is defined else 0 }}"
+        availability: "{{ today is defined and today | count > 0 }}"
+        icon: mdi:weather-rainy
+
+automation:
+  # -------------------------------------------------------------------------
+  # The one weather automation worth having: it saves money and it is the
+  # thing a thermostat alone can never notice.
+  # -------------------------------------------------------------------------
+  - id: weather_open_windows_suggestion
+    alias: "[weather] It is nicer outside than in"
+    description: >-
+      Suggests opening up when outdoor air would do the cooling the compressor
+      is currently doing. Requires a real margin (3°F) so it does not fire on
+      sensor noise, and only when someone is home to act on it.
+
+      Deliberately a suggestion, not an action — the house cannot open a window,
+      and an automation that silently stops cooling would just be confusing.
+    mode: single
+    triggers:
+      - trigger: template
+        value_template: >-
+          {% set out = states('sensor.outdoor_temperature') | float(999) %}
+          {% set inside = states('sensor.house_average_temperature') | float(0) %}
+          {% set target = states('input_number.comfort_target') | float(72) %}
+          {{ inside > target and out < (inside - 3) and out > 55 }}
+        for:
+          minutes: 20
+    conditions:
+      - condition: state
+        entity_id: input_boolean.automations_paused
+        state: "off"
+      - condition: state
+        entity_id: binary_sensor.anyone_home
+        state: "on"
+      # Pointless if they are already open.
+      - condition: state
+        entity_id: binary_sensor.any_window_open
+        state: "off"
+      - condition: state
+        entity_id: input_select.house_mode
+        state: home
+    actions:
+      - action: script.notify_person
+        data:
+          target: all
+          priority: info
+          title: Open the windows?
+          message: >-
+            {{ states('sensor.outdoor_temperature') | round(0) }}° outside versus
+            {{ states('sensor.house_average_temperature') | round(0) }}° inside.
+            Free cooling for the next few hours.

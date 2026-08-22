@@ -243,10 +243,12 @@ command_line:
   - sensor:
       name: Database size
       unique_id: sys_database_size
-      # `|| echo 0` so a moved/missing DB reports zero instead of making the
-      # sensor unavailable and firing a spurious "something is broken" alert.
+      # Capture then default. `du ... | cut -f1 || echo 0` does NOT work: the
+      # `||` binds to `cut`, which exits 0 with empty output when du fails, so
+      # the fallback never fires and the sensor dies on ValueError (observed on
+      # a live instance). ${s:-0} is the guard that actually holds.
       command: >-
-        du -m /config/home-assistant_v2.db 2>/dev/null | cut -f1 || echo 0
+        s=$(du -m /config/home-assistant_v2.db 2>/dev/null | cut -f1); echo "${s:-0}"
       unit_of_measurement: "MB"
       scan_interval: 3600
       state_class: measurement

@@ -71,6 +71,10 @@ template:
         # "away" locks someone out and disarms nothing.
         delay_off:
           minutes: 5
+        # Without this the badge reads "Unknown" on a fresh instance, and for
+        # five minutes after every restart, because delay_off applies to the
+        # unknown -> off transition as well. Refuse to have an opinion instead.
+        availability: "{{ states.person | list | count > 0 }}"
         attributes:
           home_now: >-
             {{ states.person | selectattr('state', 'eq', 'home')

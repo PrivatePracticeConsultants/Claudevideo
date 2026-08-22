@@ -12,12 +12,16 @@ command_line:
       unique_id: net_internet_latency
       # 1.1.1.1 rather than a hostname: this must keep working when DNS is the
       # thing that has broken, which is most of the time.
+      # Same capture-then-default guard as sensor.database_size: a `||` after a
+      # pipeline binds to the LAST command, not the pipeline, so a failed ping
+      # would still yield empty output and a ValueError.
       command: >-
-        ping -c 3 -W 2 1.1.1.1 2>/dev/null | tail -1 | awk -F'/' '{print $5}' || echo ""
+        s=$(ping -c 3 -W 2 1.1.1.1 2>/dev/null | tail -1 | awk -F'/' '{print $5}');
+        echo "${s:-unknown}"
       unit_of_measurement: ms
       scan_interval: 120
       state_class: measurement
-      availability: "{{ value is defined and value not in ['', 'unknown'] }}"
+      availability: "{{ value not in ['', 'unknown', 'unavailable'] }}"
 
   - sensor:
       name: DNS resolution

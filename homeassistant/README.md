@@ -33,7 +33,8 @@ for everything else, and only one of its three legs could be satisfied here:
 | 07 presence | ✓ built | `packages/presence.yaml` |
 | 08 security | ✓ built (cameras → `optional/`) | `packages/security.yaml` |
 | 09 energy | ✓ built (dashboard itself is UI-only) | `packages/energy.yaml` |
-| 10 dashboards | ✓ built | `dashboards/` |
+| — weather | ✓ built, self-binding (add the integration in the UI) | `packages/weather.yaml` |
+| 10 dashboards | ✓ built — control panel, rooms, devices, admin, guest | `dashboards/` |
 | 11 voice | ○ needs hardware | `docs/prompts/11-voice.md` |
 | 12 ESPHome | ✓ built | `esphome/common/base.yaml` |
 | 13 backups + runbook | ✓ built | `scripts/backup-verify.sh`, `docs/runbook.md` |
@@ -80,10 +81,17 @@ Then, in order: `docs/prompts/18-radio.md` (**before pairing anything**),
 
 ## Validation
 
-`scripts/validate.sh` runs four checks — yamllint, a secrets scan, a
-placeholder scan, and `check_config` against the version pinned in
-`.ha-version`. CI runs the same script, building `secrets.yaml` from the
-committed example (which proves the example stays complete).
+`scripts/validate.sh` runs six checks — yamllint, a secrets scan, a placeholder
+scan, `check_config` against the version pinned in `.ha-version`, a **template
+compile + dispatch check** (HA's real Jinja environment), and a **dashboard
+check** (every card, badge, tile feature, view and strategy name verified
+against the shipped frontend bundle). `scripts/audit.py` adds the structural
+cross-references. CI runs all of it, building `secrets.yaml` from the committed
+example (which proves the example stays complete).
+
+Beyond that, a real instance has been booted, onboarded and screenshotted: HA
+2026.2.3 reaches **zero configuration errors and zero template loops**, and all
+four dashboards render with **no browser console errors**.
 
 **What that does not prove**, spelled out in `docs/decisions.md`: `check_config`
 validates schema, not logic, and it does **not** verify that any entity_id

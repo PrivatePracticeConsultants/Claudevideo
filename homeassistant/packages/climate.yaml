@@ -142,21 +142,32 @@ template:
       # House-wide aggregates. Registry-driven: every sensor carrying the
       # right device_class is included, so a new room sensor needs no edit.
       # -----------------------------------------------------------------
+      # NB: renders `none`, never the string 'unknown'. A sensor carrying a
+      # unit_of_measurement must render a number or none — HA coerces the state
+      # and the literal 'unknown' raises ValueError at startup (observed live).
       - name: House max humidity
         unique_id: climate_house_max_humidity
         unit_of_measurement: "%"
         device_class: humidity
         state_class: measurement
+        # SELF-REFERENCE GUARD: this sensor has device_class humidity, so an
+        # unfiltered scan includes its own output and HA refuses to render
+        # ("Template loop detected"). sensor.outdoor_* is excluded too --
+        # outdoor humidity is not a room. Prefers explicitly labelled indoor
+        # sensors when they exist, and falls back to the filtered scan so it
+        # still works before anything is labelled.
         state: >-
           {% set hs = states.sensor
+             | rejectattr('entity_id', 'match', 'sensor\.(house_|outdoor_|forecast_|weather_)')
              | selectattr('attributes.device_class', 'defined')
              | selectattr('attributes.device_class', 'eq', 'humidity')
              | selectattr('state', 'is_number') | map(attribute='state')
              | map('float') | list %}
-          {{ hs | max | round(1) if hs | count > 0 else 'unknown' }}
+          {{ hs | max | round(1) if hs | count > 0 else none }}
         attributes:
           wettest_zone: >-
             {% set hs = states.sensor
+               | rejectattr('entity_id', 'match', 'sensor\.(house_|outdoor_|forecast_|weather_)')
                | selectattr('attributes.device_class', 'defined')
                | selectattr('attributes.device_class', 'eq', 'humidity')
                | selectattr('state', 'is_number') | list %}
@@ -173,13 +184,17 @@ template:
         unit_of_measurement: "°F"
         device_class: temperature
         state_class: measurement
+        # Same self-reference guard as above, and the same reason to exclude
+        # outdoor: averaging the weather into "house average temperature" makes
+        # the comfort index track the sky instead of the rooms.
         state: >-
           {% set ts = states.sensor
+             | rejectattr('entity_id', 'match', 'sensor\.(house_|outdoor_|forecast_|weather_)')
              | selectattr('attributes.device_class', 'defined')
              | selectattr('attributes.device_class', 'eq', 'temperature')
              | selectattr('state', 'is_number') | map(attribute='state')
              | map('float') | list %}
-          {{ (ts | sum / ts | count) | round(1) if ts | count > 0 else 'unknown' }}
+          {{ (ts | sum / ts | count) | round(1) if ts | count > 0 else none }}
 
       # -----------------------------------------------------------------
       # Comfort index: apparent temperature, not dry-bulb. 78F at 70% RH is

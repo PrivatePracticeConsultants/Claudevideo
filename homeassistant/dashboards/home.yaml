@@ -1,36 +1,85 @@
-# home.yaml — mobile-first. What is wrong, what is on, what needs attention.
+# home.yaml — the control panel.
 #
-# Every entity referenced here is one this repo itself declares, so this
-# dashboard is correct on a fresh instance. The per-area view is generated from
-# the area registry by the built-in `areas` strategy, so a new device appears
-# without anyone editing this file.
+# Sections layout with heading cards, tile cards carrying real controls, and
+# badges for at-a-glance state. Core cards only: no HACS, nothing to install,
+# nothing that breaks on the next HA update. Every card type, tile feature and
+# badge here is verified against the shipped frontend by
+# scripts/check-dashboards.py.
+#
+# Every entity referenced is one this repo declares, so this renders correctly
+# on a fresh instance before a single device is paired.
 title: Home
 views:
   # =========================================================================
-  - title: Status
-    path: status
+  # THE CONTROL PANEL
+  # =========================================================================
+  - title: Home
+    path: home
     icon: mdi:home
     type: sections
-    max_columns: 2
+    max_columns: 3
+    dense_section_placement: true
+
+    # At-a-glance state, always visible above the fold.
+    badges:
+      - type: entity
+        entity: input_select.house_mode
+        name: Mode
+        color: blue
+      - type: entity
+        entity: alarm_control_panel.house
+        name: Alarm
+        color: red
+        state_content: state
+      - type: entity
+        entity: binary_sensor.anyone_home
+        name: Home
+        color: green
+      - type: entity
+        entity: sensor.outdoor_temperature
+        name: Outside
+        color: cyan
+      - type: entity
+        entity: sensor.house_secure_summary
+        name: Security
+        color: amber
+
     sections:
+      # ---------------------------------------------------------------
+      # 1. STATUS — the one-line answer. If all is well this is the only
+      #    thing worth reading, which is the entire point of the view.
+      # ---------------------------------------------------------------
       - type: grid
+        column_span: 3
         cards:
-          # The one-line answer. If everything is fine, this is all there is
-          # to read — that is the whole design goal of this view.
           - type: markdown
+            text_only: true
             content: >-
               {% set s = states('sensor.house_status_summary') %}
               {% if s == 'All clear' %}
-              # ✅ All clear
+
+              ## ✅ All clear
+
+              {{ states('sensor.house_secure_summary') }} ·
+              {{ states('input_select.house_mode') | title }} mode ·
+              {{ states('sensor.weather_summary') }}
+
+              {% else %}
+
+              ## ⚠️ {{ s }}
+
               {{ states('sensor.house_secure_summary') }} ·
               {{ states('input_select.house_mode') | title }} mode
-              {% else %}
-              # ⚠️ {{ s }}
-              {{ states('sensor.house_secure_summary') }}
+
               {% endif %}
 
-      # ---- problems, each shown only when it IS a problem ----
+      # ---------------------------------------------------------------
+      # 2. NEEDS ATTENTION — every card here is conditional, so this whole
+      #    section disappears when nothing is wrong. Nothing shouts for
+      #    attention that does not deserve it.
+      # ---------------------------------------------------------------
       - type: grid
+        column_span: 3
         cards:
           - type: conditional
             conditions:
@@ -40,8 +89,10 @@ views:
             card:
               type: markdown
               content: >-
-                **Open:** {{ state_attr('sensor.perimeter_open_count', 'open_names')
-                | join(', ') }}
+                ### 🚪 Open
+
+                {{ state_attr('sensor.perimeter_open_count', 'open_names')
+                   | join(', ') }}
 
           - type: conditional
             conditions:
@@ -50,9 +101,11 @@ views:
                 state: "off"
             card:
               type: markdown
-              content: |
-                **Internet is down.** DNS: {{ states('sensor.dns_resolution') }}.
-                See the runbook, "internet down".
+              content: >-
+                ### 🌐 Internet is down
+
+                DNS reports `{{ states('sensor.dns_resolution') }}`.
+                Runbook → "internet down".
 
           - type: conditional
             conditions:
@@ -62,19 +115,10 @@ views:
             card:
               type: markdown
               content: >-
-                **Humidity high** in {{ state_attr('binary_sensor.mold_risk', 'zone') }}
-                — {{ states('sensor.house_max_humidity') }}%
+                ### 💧 Humidity high
 
-          - type: conditional
-            conditions:
-              - condition: numeric_state
-                entity: sensor.unavailable_entities
-                above: 0
-            card:
-              type: markdown
-              content: >-
-                **{{ states('sensor.unavailable_entities') }} entities unavailable.**
-                {{ state_attr('sensor.unavailable_entities', 'entities')[:5] | join(', ') }}
+                {{ state_attr('binary_sensor.mold_risk', 'zone') }} at
+                {{ states('sensor.house_max_humidity') }}% RH.
 
           - type: conditional
             conditions:
@@ -83,37 +127,241 @@ views:
                 state: "on"
             card:
               type: markdown
-              content: |
-                **Automations are PAUSED.** Nothing is running automatically.
+              content: >-
+                ### ⏸ Automations are paused
 
-      # ---- controls ----
+                Nothing is running automatically.
+
+          - type: conditional
+            conditions:
+              - condition: numeric_state
+                entity: sensor.low_battery_devices
+                above: 0
+            card:
+              type: markdown
+              content: >-
+                ### 🔋 {{ states('sensor.low_battery_devices') }} low batteries
+
+                {{ (state_attr('sensor.low_battery_devices', 'devices') or [])
+                   | map('replace', 'sensor.', '') | join(', ') }}
+
+      # ---------------------------------------------------------------
+      # 3. HOUSE — the controls used daily, each operable in one tap.
+      # ---------------------------------------------------------------
       - type: grid
         cards:
-          - type: entities
-            title: House
-            state_color: true
-            entities:
-              - entity: input_select.house_mode
-                name: Mode
-              - entity: alarm_control_panel.house
-                name: Alarm
-              - entity: input_boolean.guest_mode
-                name: Guests
-              - entity: input_boolean.pet_at_home
-                name: Dog is home
-              - entity: input_boolean.automations_paused
-                name: Pause automations
+          - type: heading
+            heading: House
+            heading_style: title
+            icon: mdi:home-heart
 
-          - type: entities
-            title: Now
-            entities:
-              - entity: sensor.house_comfort_index
-                name: Feels like
-              - entity: sensor.house_average_temperature
-                name: Temperature
-              - entity: sensor.house_max_humidity
-                name: Humidity (worst room)
-              - entity: sensor.house_power_draw
-                name: Power
-              - entity: sensor.current_energy_cost_rate
-                name: Costing now
+          - type: tile
+            entity: input_select.house_mode
+            name: Mode
+            icon: mdi:home-heart
+            color: blue
+            features:
+              - type: select-options
+
+          - type: tile
+            entity: alarm_control_panel.house
+            name: Alarm
+            color: red
+            features:
+              - type: alarm-modes
+                modes:
+                  - armed_home
+                  - armed_away
+                  - armed_night
+                  - disarmed
+
+          - type: tile
+            entity: input_boolean.guest_mode
+            name: Guests
+            icon: mdi:account-supervisor
+            color: purple
+            features:
+              - type: toggle
+
+          - type: tile
+            entity: input_boolean.pet_at_home
+            name: Dog is home
+            icon: mdi:dog
+            color: brown
+            features:
+              - type: toggle
+
+      # ---------------------------------------------------------------
+      # 4. OUTSIDE
+      # ---------------------------------------------------------------
+      - type: grid
+        cards:
+          - type: heading
+            heading: Outside
+            heading_style: title
+            icon: mdi:weather-partly-cloudy
+
+          - type: conditional
+            conditions:
+              - condition: state
+                entity: sensor.weather_condition
+                state_not: unavailable
+            card:
+              type: tile
+              entity: sensor.weather_condition
+              name: Conditions
+              color: cyan
+
+          - type: tile
+            entity: sensor.outdoor_temperature
+            name: Temperature
+            icon: mdi:thermometer
+            color: cyan
+
+          - type: tile
+            entity: sensor.forecast_high_today
+            name: High
+            icon: mdi:thermometer-chevron-up
+            color: orange
+
+          - type: tile
+            entity: sensor.forecast_low_today
+            name: Low
+            icon: mdi:thermometer-chevron-down
+            color: blue
+
+          - type: tile
+            entity: sensor.forecast_precipitation_chance
+            name: Rain
+            icon: mdi:weather-rainy
+            color: light-blue
+
+          # A real forecast card needs the concrete weather entity_id, which
+          # depends on which provider you added and which this repo has never
+          # seen. Uncomment and set it after adding the integration:
+          #   - type: weather-forecast
+          #     entity: weather.YOUR_ENTITY_HERE
+          #     forecast_type: daily
+          #     show_current: true
+
+      # ---------------------------------------------------------------
+      # 5. COMFORT
+      # ---------------------------------------------------------------
+      - type: grid
+        cards:
+          - type: heading
+            heading: Comfort
+            heading_style: title
+            icon: mdi:thermostat
+
+          - type: tile
+            entity: sensor.house_comfort_index
+            name: Feels like
+            icon: mdi:home-thermometer
+            color: orange
+
+          - type: tile
+            entity: sensor.house_average_temperature
+            name: Inside
+            icon: mdi:thermometer
+            color: orange
+
+          - type: tile
+            entity: sensor.house_max_humidity
+            name: Humidity
+            icon: mdi:water-percent
+            color: teal
+
+          - type: tile
+            entity: input_number.comfort_target
+            name: Target
+            icon: mdi:target
+            color: green
+            features:
+              - type: numeric-input
+                style: buttons
+
+      # ---------------------------------------------------------------
+      # 6. ENERGY
+      # ---------------------------------------------------------------
+      - type: grid
+        cards:
+          - type: heading
+            heading: Energy
+            heading_style: title
+            icon: mdi:lightning-bolt
+
+          - type: tile
+            entity: sensor.house_power_draw
+            name: Drawing now
+            icon: mdi:flash
+            color: yellow
+
+          - type: tile
+            entity: sensor.current_energy_cost_rate
+            name: Costing
+            icon: mdi:cash-clock
+            color: green
+
+          - type: tile
+            entity: sensor.current_energy_rate
+            name: Rate
+            icon: mdi:cash-multiple
+            color: grey
+
+          - type: tile
+            entity: sensor.vampire_load_report
+            name: Standby
+            icon: mdi:sleep
+            color: purple
+
+      # ---------------------------------------------------------------
+      # 7. SHORTCUTS
+      # ---------------------------------------------------------------
+      - type: grid
+        column_span: 3
+        cards:
+          - type: heading
+            heading: Go to
+            heading_style: subtitle
+            icon: mdi:arrow-right-circle
+
+          - type: button
+            name: Rooms
+            icon: mdi:floor-plan
+            show_state: false
+            tap_action:
+              action: navigate
+              navigation_path: /dash-rooms/home
+
+          - type: button
+            name: Devices
+            icon: mdi:devices
+            show_state: false
+            tap_action:
+              action: navigate
+              navigation_path: /dash-devices/devices
+
+          - type: button
+            name: System
+            icon: mdi:heart-pulse
+            show_state: false
+            tap_action:
+              action: navigate
+              navigation_path: /dash-admin/system
+
+          - type: button
+            name: History
+            icon: mdi:chart-line
+            show_state: false
+            tap_action:
+              action: navigate
+              navigation_path: /history
+
+          - type: button
+            name: Pause all
+            icon: mdi:pause-octagon
+            show_state: false
+            tap_action:
+              action: toggle
+            entity: input_boolean.automations_paused

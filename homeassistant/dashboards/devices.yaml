@@ -1,0 +1,192 @@
+# devices.yaml — adding and managing hardware.
+#
+# Pairing a radio device is inherently a UI flow: config entries live in
+# .storage and there is no YAML path for them. So this dashboard does not try
+# to replace that — it puts every one of those flows one tap away, in the order
+# you actually need them, and it surfaces the step people forget.
+#
+# THE STEP PEOPLE FORGET: assign a LABEL. Every automation in this repo targets
+# labels, not entity_ids, so an unlabelled device is invisible to the whole
+# system. The label reference is right here rather than buried in the docs.
+title: Devices
+views:
+  - title: Devices
+    path: devices
+    icon: mdi:devices
+    type: sections
+    max_columns: 3
+
+    badges:
+      - type: entity
+        entity: sensor.unavailable_entities
+        name: Unavailable
+        color: red
+      - type: entity
+        entity: sensor.low_battery_devices
+        name: Low battery
+        color: orange
+      - type: entity
+        entity: binary_sensor.critical_devices_online
+        name: Critical devices
+        color: green
+
+    sections:
+      # ---------------------------------------------------------------
+      - type: grid
+        column_span: 3
+        cards:
+          - type: heading
+            heading: Add a device
+            heading_style: title
+            icon: mdi:plus-circle
+
+          # Core card: shows anything HA has auto-discovered on the network
+          # and not yet configured. Usually the fastest path in.
+          - type: discovered-devices
+
+          - type: markdown
+            content: |
+              Anything Home Assistant has auto-discovered on the network but not yet set up appears above. If it is empty, nothing new was found — use the pairing buttons below.
+
+      - type: grid
+        cards:
+          - type: heading
+            heading: Pairing
+            heading_style: subtitle
+            icon: mdi:access-point
+
+          - type: button
+            name: Add integration
+            icon: mdi:puzzle-plus
+            show_state: false
+            tap_action:
+              action: navigate
+              navigation_path: /config/integrations/dashboard
+
+          - type: button
+            name: Zigbee (ZHA)
+            icon: mdi:zigbee
+            show_state: false
+            tap_action:
+              action: navigate
+              navigation_path: /config/zha/dashboard
+
+          - type: button
+            name: Z-Wave
+            icon: mdi:z-wave
+            show_state: false
+            tap_action:
+              action: navigate
+              navigation_path: /config/zwave_js/dashboard
+
+          - type: button
+            name: Matter
+            icon: mdi:matter
+            show_state: false
+            tap_action:
+              action: navigate
+              navigation_path: /config/matter
+
+      - type: grid
+        cards:
+          - type: heading
+            heading: Organise
+            heading_style: subtitle
+            icon: mdi:tag-multiple
+
+          # Labels first: this is the one that makes automations work.
+          - type: button
+            name: Labels
+            icon: mdi:label-multiple
+            show_state: false
+            tap_action:
+              action: navigate
+              navigation_path: /config/labels/dashboard
+
+          - type: button
+            name: Areas
+            icon: mdi:floor-plan
+            show_state: false
+            tap_action:
+              action: navigate
+              navigation_path: /config/areas/dashboard
+
+          - type: button
+            name: All devices
+            icon: mdi:devices
+            show_state: false
+            tap_action:
+              action: navigate
+              navigation_path: /config/devices/dashboard
+
+          - type: button
+            name: All entities
+            icon: mdi:format-list-bulleted
+            show_state: false
+            tap_action:
+              action: navigate
+              navigation_path: /config/entities
+
+      # ---------------------------------------------------------------
+      - type: grid
+        column_span: 3
+        cards:
+          - type: heading
+            heading: After pairing — do these three things
+            heading_style: title
+            icon: mdi:clipboard-check
+
+          - type: markdown
+            content: |
+              **1 · Rename the entities.** `<domain>.<area>_<device>_<function>` — e.g. `light.kitchen_ceiling_main`. The friendly name never repeats the area; Home Assistant prepends it.
+
+              **2 · Assign the area, then the labels.** This is the step that matters. Nothing in this system targets an entity by name — every automation queries labels and areas — so **an unlabelled device is invisible**, and no automation will pick it up.
+
+              | Label | What starts working |
+              |---|---|
+              | `security_perimeter` | Alarm, perimeter count, HVAC window-pause |
+              | `exterior_light` | Alarm turns these on |
+              | `entry_light` | Lit on arrival after dark |
+              | `adaptive` | Colour/brightness follow the sun |
+              | `comfort_fan` | Fan runs before the compressor |
+              | `dehumidifier` | Humidity band control |
+              | `monitored_circuit` | Power, cost, anomaly, standby figures |
+              | `battery_powered` | Daily low-battery digest |
+              | `critical_uptime` | Offline alert |
+              | `pet_exposed` | **Every pet-immunity rule** — set this on any sensor the dog can reach |
+              | `auto_lock` | Auto-locks (never while the door is open) |
+              | `announce` | Speaks critical alerts aloud |
+
+              **3 · Write it down.** Copy `devices/TEMPLATE.yaml` to `devices/<slug>.yaml` and record the firmware, what powers it, and — the part that matters at 2am — **what breaks if it dies and what you do by hand instead**. Then append it to `docs/inventory.md`.
+
+              Full checklist: `docs/prompts/04-add-device.md`.
+
+      # ---------------------------------------------------------------
+      - type: grid
+        column_span: 3
+        cards:
+          - type: heading
+            heading: Health
+            heading_style: title
+            icon: mdi:stethoscope
+
+          - type: markdown
+            title: Unavailable right now
+            content: >-
+              {% set e = state_attr('sensor.unavailable_entities', 'entities') or [] %}
+              {% set ns = namespace(l=[]) %}
+              {% for x in e[:20] %}{% set ns.l = ns.l + ['- `' ~ x ~ '`'] %}{% endfor %}
+              {% if e | count == 0 %}Nothing unavailable.
+              {% else %}{{ ns.l | join('\n') }}{% if e | count > 20 %}
+              {{ '\n_…and ' ~ (e | count - 20) ~ ' more._' }}{% endif %}{% endif %}
+
+          - type: markdown
+            title: Batteries below threshold
+            content: >-
+              {% set d = state_attr('sensor.low_battery_devices', 'devices') or [] %}
+              {% set ns = namespace(l=[]) %}
+              {% for x in d %}{% set ns.l = ns.l + ['- ' ~ (state_attr(x, 'friendly_name') or x)
+                 ~ ' — **' ~ states(x) ~ '%**'] %}{% endfor %}
+              {% if d | count == 0 %}All batteries above
+              {{ states('input_number.low_battery_threshold') | int }}%.
+              {% else %}{{ ns.l | join('\n') }}{% endif %}

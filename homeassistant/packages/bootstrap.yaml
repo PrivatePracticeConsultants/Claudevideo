@@ -1,0 +1,90 @@
+# bootstrap.yaml — sane values on a brand-new instance, once and only once.
+#
+# WHY THIS EXISTS, because it looks redundant and is not:
+#
+# `initial:` on an input_number/input_select seems like the obvious way to set a
+# default. It is a trap. HA's own async_added_to_hass returns EARLY when a
+# seeded value exists, which means `initial:` DEFEATS STATE RESTORE on every
+# single restart: house_mode snaps back to `home` while the household is away,
+# and every slider the user tuned reverts after an HA update.
+#
+# But with no `initial:`, a first boot leaves every input_number sitting at its
+# `min` — verified on a live instance: comfort_target 60°F, every tariff rate
+# $0.000, low_battery_threshold 5%. Everything downstream is then confidently
+# wrong rather than obviously broken, which is worse.
+#
+# So: no `initial:` anywhere, and this runs exactly once on a fresh instance,
+# guarded by a boolean that itself restores. First boot gets real defaults;
+# every later restart restores whatever the user actually set.
+#
+# Changing a value here does NOT change a running system — it has already
+# bootstrapped. Change it in the UI, or turn helpers_initialised off and restart.
+
+input_boolean:
+  helpers_initialised:
+    name: Helpers initialised
+    icon: mdi:check-decagram
+
+script:
+  apply_default_settings:
+    alias: Apply default settings
+    icon: mdi:cog-refresh
+    description: >-
+      Write the documented defaults into every tunable helper. Safe to run by
+      hand at any time to reset the system to its shipped configuration.
+    mode: single
+    sequence:
+      - repeat:
+          for_each: >-
+            {{ {"low_battery_threshold": "20", "adaptive_min_kelvin": "2200", "adaptive_max_kelvin": "5000", "adaptive_min_brightness": "25", "adaptive_max_brightness": "100", "night_mode_brightness": "5", "manual_override_minutes": "60", "comfort_target": "72", "comfort_deadband": "2", "hvac_min_runtime": "10", "hvac_min_offtime": "5", "window_open_grace": "5", "rh_target_low": "40", "rh_target_high": "55", "mold_risk_rh": "60", "fan_first_delta": "2", "presence_away_delay": "5", "occupancy_clear_fast": "3", "occupancy_clear_slow": "20", "auto_lock_delay": "10", "rate_flat": "0.150", "rate_tier1": "0.120", "rate_tier2": "0.220", "tier1_limit_kwh": "500", "rate_peak": "0.320", "rate_offpeak": "0.110", "peak_start_hour": "16", "peak_end_hour": "21", "daily_supply_charge": "0.35", "anomaly_multiplier": "2.0", "anomaly_floor_watts": "300"} | dictsort }}
+          sequence:
+            - action: input_number.set_value
+              continue_on_error: true
+              target:
+                entity_id: "input_number.{{ repeat.item[0] }}"
+              data:
+                value: "{{ repeat.item[1] }}"
+      - repeat:
+          for_each: >-
+            {{ {"house_mode": "home", "hvac_system_type": "ductless_minisplit", "tariff_type": "flat"} | dictsort }}
+          sequence:
+            - action: input_select.select_option
+              continue_on_error: true
+              target:
+                entity_id: "input_select.{{ repeat.item[0] }}"
+              data:
+                option: "{{ repeat.item[1] }}"
+
+automation:
+  - id: bootstrap_first_run
+    alias: "[bootstrap] Apply defaults on a fresh instance"
+    description: >-
+      Runs once, on the first start where helpers_initialised is off. The flag
+      restores across restarts, so this never fires again and never overwrites a
+      value the user has changed.
+    mode: single
+    triggers:
+      - trigger: homeassistant
+        event: start
+    conditions:
+      - condition: state
+        entity_id: input_boolean.helpers_initialised
+        state: "off"
+    actions:
+      # Helpers restore asynchronously; give them a moment to settle so this
+      # does not race the restore and get overwritten by it.
+      - delay:
+          seconds: 15
+      - action: script.apply_default_settings
+      - action: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.helpers_initialised
+      - action: persistent_notification.create
+        data:
+          title: Default settings applied
+          notification_id: bootstrap_first_run
+          message: >-
+            This looked like a fresh instance, so the documented defaults were
+            written to every tunable helper (comfort target, tariff rates,
+            thresholds). Adjust them in the UI — they will persist from now on.
+            See packages/bootstrap.yaml.

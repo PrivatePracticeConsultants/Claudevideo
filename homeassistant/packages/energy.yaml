@@ -193,7 +193,7 @@ template:
              | select('match', 'sensor\.') | list %}
           {% set vals = circuits | select('has_value')
              | map('states') | select('is_number') | map('float') | list %}
-          {{ vals | sum | round(0) if vals | count > 0 else 'unknown' }}
+          {{ vals | sum | round(0) if vals | count > 0 else none }}
         availability: >-
           {{ label_entities('monitored_circuit') | select('match', 'sensor\.')
              | list | count > 0 }}

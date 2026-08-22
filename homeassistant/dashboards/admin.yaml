@@ -1,91 +1,219 @@
-# admin.yaml — system health. Admin-only (require_admin is set in
-# configuration.yaml). This is the view consulted when something is wrong.
+# admin.yaml — system health. Admin-only (require_admin in configuration.yaml).
+# This is the view you open when something is wrong and you need to know what.
 title: Admin
 views:
   - title: System
     path: system
     icon: mdi:heart-pulse
     type: sections
+    max_columns: 3
+
+    badges:
+      - type: entity
+        entity: sensor.ha_uptime
+        name: Uptime
+        color: green
+      - type: entity
+        entity: sensor.database_size
+        name: Database
+        color: blue
+      - type: entity
+        entity: sensor.unavailable_entities
+        name: Unavailable
+        color: red
+      - type: entity
+        entity: binary_sensor.internet_up
+        name: Internet
+        color: cyan
+      - type: entity
+        entity: sensor.deployed_commit
+        name: Deployed
+        color: purple
+
     sections:
       - type: grid
         cards:
-          - type: entities
-            title: Home Assistant
-            entities:
-              - entity: sensor.ha_uptime
-                name: Uptime
-              - entity: input_datetime.ha_last_start
-                name: Last start
-              - entity: sensor.database_size
-                name: Database
-              - entity: sensor.unavailable_entities
-                name: Unavailable entities
-
-          - type: entities
-            title: Network
-            entities:
-              - entity: binary_sensor.internet_up
-                name: Internet
-              - entity: sensor.internet_latency
-                name: Latency
-              - entity: sensor.dns_resolution
-                name: DNS
-              - entity: binary_sensor.critical_devices_online
-                name: Critical devices
+          - type: heading
+            heading: Home Assistant
+            heading_style: title
+            icon: mdi:home-assistant
+          - type: tile
+            entity: sensor.ha_uptime
+            name: Uptime
+            color: green
+          - type: tile
+            entity: sensor.database_size
+            name: Database
+            icon: mdi:database
+            color: blue
+          - type: tile
+            entity: input_datetime.ha_last_start
+            name: Last start
+            icon: mdi:restart
+          - type: tile
+            entity: sensor.unavailable_entities
+            name: Unavailable
+            icon: mdi:help-network-outline
+            color: red
 
       - type: grid
         cards:
+          - type: heading
+            heading: Network
+            heading_style: title
+            icon: mdi:lan
+          - type: tile
+            entity: binary_sensor.internet_up
+            name: Internet
+            color: cyan
+          - type: tile
+            entity: sensor.internet_latency
+            name: Latency
+            icon: mdi:speedometer
+          - type: tile
+            entity: sensor.dns_resolution
+            name: DNS
+            icon: mdi:dns
+          - type: tile
+            entity: binary_sensor.critical_devices_online
+            name: Critical
+            icon: mdi:server-network
+            color: green
+
+      - type: grid
+        cards:
+          - type: heading
+            heading: HVAC protection
+            heading_style: title
+            icon: mdi:air-conditioner
+          - type: tile
+            entity: binary_sensor.hvac_may_start
+            name: May start now
+            color: green
+          - type: tile
+            entity: timer.hvac_compressor_lockout
+            name: Lockout
+            icon: mdi:timer-pause
+            color: red
+          - type: tile
+            entity: timer.hvac_min_runtime_hold
+            name: Runtime hold
+            icon: mdi:timer-play
+          - type: tile
+            entity: timer.climate_manual_override
+            name: Manual override
+            icon: mdi:hand-back-right
+
+      - type: grid
+        column_span: 3
+        cards:
+          - type: heading
+            heading: Diagnostics
+            heading_style: title
+            icon: mdi:clipboard-pulse
           - type: markdown
-            title: Unavailable
+            title: Unavailable entities
             content: >-
               {% set e = state_attr('sensor.unavailable_entities', 'entities') or [] %}
+              {% set ns = namespace(l=[]) %}
+              {% for x in e[:20] %}{% set ns.l = ns.l + ['- `' ~ x ~ '`'] %}{% endfor %}
               {% if e | count == 0 %}Nothing unavailable.
-              {% else %}{% for x in e %}- `{{ x }}`
-              {% endfor %}{% endif %}
-
+              {% else %}{{ ns.l | join('\n') }}{% if e | count > 20 %}
+              {{ '\n_…and ' ~ (e | count - 20) ~ ' more._' }}{% endif %}{% endif %}
           - type: markdown
             title: Low batteries
             content: >-
               {% set d = state_attr('sensor.low_battery_devices', 'devices') or [] %}
+              {% set ns = namespace(l=[]) %}
+              {% for x in d %}{% set ns.l = ns.l + ['- ' ~ (state_attr(x, 'friendly_name') or x)
+                 ~ ' — **' ~ states(x) ~ '%**'] %}{% endfor %}
               {% if d | count == 0 %}All batteries above
-              {{ states('input_number.low_battery_threshold') }}%.
-              {% else %}{% for x in d %}- {{ state_attr(x, 'friendly_name') or x }}
-              — {{ states(x) }}%
-              {% endfor %}{% endif %}
-
-      - type: grid
-        cards:
-          - type: entities
-            title: HVAC protection
-            entities:
-              - entity: binary_sensor.hvac_may_start
-                name: May start now
-              - entity: timer.hvac_compressor_lockout
-                name: Compressor lockout
-              - entity: timer.hvac_min_runtime_hold
-                name: Minimum runtime hold
-              - entity: timer.climate_manual_override
-                name: Manual override
-
-          - type: entities
-            title: Energy
-            entities:
-              - entity: sensor.current_energy_rate
-                name: Rate now
-              - entity: sensor.house_power_draw
-                name: Draw
-              - entity: sensor.house_power_baseline
-                name: Baseline for this hour
-              - entity: sensor.vampire_load_report
-                name: Standby load
-
-      - type: grid
-        cards:
+              {{ states('input_number.low_battery_threshold') | int }}%.
+              {% else %}{{ ns.l | join('\n') }}{% endif %}
           - type: markdown
             title: Deployed commit
-            # Populated by scripts/deploy.sh via the command_line sensor in
-            # packages/deploy.yaml. "Unknown" means deploy.sh has never run.
             content: >-
-              **{{ states('sensor.deployed_commit') }}**
+              **`{{ states('sensor.deployed_commit') }}`**
 
               {{ state_attr('sensor.deployed_commit', 'subject') or '' }}
+
+              {% if state_attr('sensor.deployed_commit', 'when') %}
+              _{{ state_attr('sensor.deployed_commit', 'when') }}_
+              {% endif %}
+
+      - type: grid
+        column_span: 3
+        cards:
+          - type: heading
+            heading: Energy detail
+            heading_style: title
+            icon: mdi:transmission-tower
+          - type: tile
+            entity: sensor.house_power_draw
+            name: Draw
+            icon: mdi:flash
+            color: yellow
+            features:
+              - type: trend-graph
+          - type: tile
+            entity: sensor.house_power_baseline
+            name: Baseline
+            icon: mdi:chart-bell-curve
+          - type: tile
+            entity: sensor.vampire_load_report
+            name: Standby load
+            icon: mdi:sleep
+            color: purple
+          - type: markdown
+            title: Standby by circuit
+            content: >-
+              {% set r = state_attr('sensor.vampire_load_report', 'ranked') or [] %}
+              {% set ns = namespace(l=[]) %}
+              {% for e, w in r %}{% set ns.l = ns.l + ['- ' ~ (state_attr(e, 'friendly_name') or e)
+                 ~ ' — **' ~ w ~ 'W**'] %}{% endfor %}
+              {% if r | count == 0 %}No monitored circuits labelled yet.
+              {% else %}{{ ns.l | join('\n') }}{% endif %}
+
+      - type: grid
+        column_span: 3
+        cards:
+          - type: heading
+            heading: Controls
+            heading_style: subtitle
+            icon: mdi:tune
+          - type: tile
+            entity: input_boolean.automations_paused
+            name: Pause all
+            icon: mdi:pause-octagon
+            color: red
+            features:
+              - type: toggle
+          - type: tile
+            entity: input_boolean.adaptive_lighting_enabled
+            name: Adaptive lighting
+            features:
+              - type: toggle
+          - type: tile
+            entity: input_boolean.climate_automation_enabled
+            name: Climate auto
+            features:
+              - type: toggle
+          - type: tile
+            entity: input_boolean.energy_anomaly_alerts
+            name: Energy alerts
+            features:
+              - type: toggle
+          - type: button
+            name: Server controls
+            icon: mdi:server
+            show_state: false
+            tap_action:
+              action: navigate
+              navigation_path: /developer-tools/yaml
+          - type: button
+            name: Logs
+            icon: mdi:text-box-search
+            show_state: false
+            tap_action:
+              action: navigate
+              navigation_path: /config/logs

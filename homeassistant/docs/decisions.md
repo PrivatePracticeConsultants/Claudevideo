@@ -176,6 +176,56 @@ Two adjacent rules found the hard way, both now enforced by tooling:
 
 ---
 
+## The UI is core cards only, on purpose
+
+No HACS. No mushroom-cards, no button-card, no card-mod, no auto-entities. The
+showcase dashboards people post use those, and they do look better than stock.
+
+The trade is upgrade risk against polish. A frontend card is a Lovelace
+*resource*, not an integration, so it never fails `check_config` — it fails
+silently in the browser after an HA update, usually as a blank card, and
+`docs/prompts/16-upgrade.md` exists precisely because that keeps happening. The
+non-technical single user this is built for cannot debug a blank dashboard.
+
+Home Assistant's own cards closed most of that gap: `sections` view layout,
+`heading` cards, and `tile` cards with real inline features (alarm mode buttons,
+select dropdowns, ± setpoints, toggles, trend graphs) are all core now. That is
+what `dashboards/` uses, verified card-by-card against the shipped frontend by
+`scripts/check-dashboards.py`.
+
+If you want the extra polish later, add the HACS cards to `optional/` first and
+accept that each one is a thing to re-check on every upgrade.
+
+## Weather binds itself; the integration is added in the UI
+
+Of the 28 weather integrations shipping in 2026.2.3, `template` is the ONLY one
+with a YAML platform schema — every other one is config-flow. So the repo cannot
+install weather. Add **Met.no** in the UI (free, no API key, uses the lat/long
+already in `secrets.yaml`).
+
+`packages/weather.yaml` then binds itself: it resolves the first `weather.*`
+entity in the registry at runtime rather than naming one, so it is correct
+whichever provider you pick and inert (not broken) before you pick any. Forecast
+figures come from the `weather.get_forecasts` **service** via a trigger-based
+template entity — forecast attributes were removed in 2024.4 and there is no
+longer any way to read them declaratively.
+
+## First-boot defaults: why `initial:` is banned and bootstrap.yaml exists
+
+See `packages/bootstrap.yaml` for the full reasoning. Short version, both halves
+verified on a live instance:
+
+- `initial:` **defeats state restore on every restart** — HA returns early from
+  `async_added_to_hass` when a value is already seeded. `house_mode` would snap
+  back to `home` mid-vacation and every tuned slider would revert after an
+  update.
+- With no `initial:`, a fresh instance leaves every `input_number` at its `min`
+  — observed: `comfort_target` 60°F, every tariff rate $0.000,
+  `low_battery_threshold` 5%. Silently, confidently wrong.
+
+So: no `initial:` anywhere, and a one-shot bootstrap automation guarded by a
+boolean that itself restores.
+
 ## What has NOT been verified
 
 Honesty about the limits of the validation, because "it validates" is easy to
@@ -186,8 +236,11 @@ committed secrets. It does **not** prove:
 
 - **That any entity_id exists.** `check_config` does not consult a registry.
   This is precisely why targeting is label-driven.
-- **That any automation does the right thing.** No instance has run any of this.
-  Config check catches syntax, not logic. (What IS now verified beyond schema:
+- **That any automation does the right thing** on real hardware. A live instance
+  HAS now been booted (HA 2026.2.3, onboarded, dashboards rendered and
+  screenshotted) and reaches **zero configuration errors and zero template
+  loops** — but with no paired devices, so no automation has ever fired against
+  a real sensor. (What IS now verified beyond schema:
   all 231 templates compile in HA 2026.2.3's real Jinja environment with every
   dynamically-dispatched filter/test name checked against its registries; the
   blueprint instantiates cleanly through check_config; the ESPHome template

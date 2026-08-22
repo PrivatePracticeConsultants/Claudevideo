@@ -6,26 +6,103 @@ views:
     path: home
     icon: mdi:home-heart
     type: sections
-    max_columns: 1
+    max_columns: 2
+
+    badges:
+      - type: entity
+        entity: sensor.outdoor_temperature
+        name: Outside
+        color: cyan
+      - type: entity
+        entity: sensor.house_average_temperature
+        name: Inside
+        color: orange
+
     sections:
       - type: grid
+        column_span: 2
         cards:
+          # Deliberately NOT sensor.house_status_summary: that counts unavailable
+          # entities and low batteries, which a guest can neither interpret nor
+          # act on — it rendered "Someone should look at this / 18 unavailable"
+          # on a fresh instance, which is alarming and useless to them. A guest
+          # only needs to know about things happening in the house.
           - type: markdown
+            text_only: true
             content: >-
-              {% if states('sensor.house_status_summary') == 'All clear' %}
-              ## Everything's fine
+              {% set alarm = states('alarm_control_panel.house') %}
+              {% set open = states('sensor.perimeter_open_count') | int(0) %}
+              {% if alarm == 'triggered' %}
+
+              ## The alarm is going off
+
+              Find someone who lives here.
+
+              {% elif open > 0 %}
+
+              ## {{ open }} {{ 'door or window is' if open == 1 else 'doors and windows are' }} open
+
+              {{ state_attr('sensor.perimeter_open_count', 'open_names') | join(', ') }}
+
               {% else %}
-              ## Someone should look at this
-              {{ states('sensor.house_status_summary') }}
+
+              ## Everything's fine
+
+              {{ states('sensor.weather_summary') }}
+
               {% endif %}
 
-          - type: entities
-            title: Comfort
-            entities:
-              - entity: sensor.house_average_temperature
-                name: Temperature
-              - entity: input_number.comfort_target
-                name: Set temperature to
+      - type: grid
+        cards:
+          - type: heading
+            heading: Comfort
+            heading_style: title
+            icon: mdi:thermostat
+          - type: tile
+            entity: sensor.house_average_temperature
+            name: Temperature
+            icon: mdi:thermometer
+            color: orange
+          - type: tile
+            entity: input_number.comfort_target
+            name: Set it to
+            icon: mdi:target
+            color: green
+            features:
+              - type: numeric-input
+                style: buttons
 
-  # Rooms live in their own dashboard (dash-rooms): `areas` is only a
-  # dashboard-level strategy, so it cannot be a view here.
+      - type: grid
+        cards:
+          - type: heading
+            heading: Outside
+            heading_style: title
+            icon: mdi:weather-partly-cloudy
+          - type: tile
+            entity: sensor.outdoor_temperature
+            name: Now
+            icon: mdi:thermometer
+            color: cyan
+          - type: tile
+            entity: sensor.forecast_high_today
+            name: High
+            icon: mdi:thermometer-chevron-up
+            color: orange
+          - type: tile
+            entity: sensor.forecast_low_today
+            name: Low
+            icon: mdi:thermometer-chevron-down
+            color: blue
+
+      # Rooms live in their own dashboard (dash-rooms): `areas` is only a
+      # dashboard-level strategy, so it cannot be a view here.
+      - type: grid
+        column_span: 2
+        cards:
+          - type: button
+            name: Rooms and lights
+            icon: mdi:lightbulb-group
+            show_state: false
+            tap_action:
+              action: navigate
+              navigation_path: /dash-rooms/home

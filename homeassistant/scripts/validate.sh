@@ -79,6 +79,15 @@ if [ -n "$HA_PYTHON" ] && [ -x "$HA_PYTHON" ]; then
   # Compile every template with HA's real Jinja env, and verify that
   # dynamically-dispatched filter/test names (map('x'), select('x')) exist —
   # those resolve at runtime, so check_config and compile both miss them.
+  # check_config does not look at Lovelace YAML at all, so card/badge/feature/
+  # view/strategy names are verified against the shipped frontend instead.
+  step "dashboard card + strategy check"
+  if "$HA_PYTHON" "$CONFIG_DIR/scripts/check-dashboards.py"; then
+    ok "dashboards verified against the shipped frontend"
+  else
+    fail "dashboard check found problems"
+  fi
+
   step "template compile + dispatch check"
   if "$HA_PYTHON" "$CONFIG_DIR/scripts/check-templates.py"; then
     ok "templates verified against the running HA version"
