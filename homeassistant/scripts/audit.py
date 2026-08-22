@@ -171,6 +171,15 @@ def main() -> int:
                 hard.append(f"{p.name}:{i} targets {m.group(1)} directly — use a label or area")
     report("hardcoded entity targets", hard, "none — everything targets labels or areas")
 
+    # --- package filenames must be valid slugs ---
+    # HA validates package keys with cv.slug: slugify(name) must equal name.
+    # A leading underscore fails that, and the package is SILENTLY skipped —
+    # found the hard way when _global.yaml never loaded.
+    bad_slugs = [f"packages/{p.name}: '{p.stem}' is not a valid package slug "
+                 f"(try '{re.sub(r'^_+', '', p.stem)}')"
+                 for p in pkg if not re.fullmatch(r'[a-z0-9]+(?:_[a-z0-9]+)*', p.stem)]
+    report("package filename slugs", bad_slugs, "all valid HA slugs")
+
     # --- secrets documented ---
     used = set()
     for p in ROOT.rglob('*.yaml'):

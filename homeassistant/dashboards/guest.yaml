@@ -27,9 +27,5 @@ views:
               - entity: input_number.comfort_target
                 name: Set temperature to
 
-  # Rooms and their lights, generated from the registry.
-  - title: Rooms
-    path: rooms
-    icon: mdi:lightbulb-group
-    strategy:
-      type: areas
+  # Rooms live in their own dashboard (dash-rooms): `areas` is only a
+  # dashboard-level strategy, so it cannot be a view here.

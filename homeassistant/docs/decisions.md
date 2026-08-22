@@ -149,6 +149,33 @@ instead, which resolves **2026.2.3**.
 
 ---
 
+## Helpers: no `initial:` — restore must win
+
+No `input_number`/`input_select` here sets `initial:`. HA's own source returns
+early from restore when a seeded value exists, so `initial:` resets the helper
+on EVERY restart: `house_mode` would snap back to `home` while the household is
+away, and every slider tuned in the UI would silently revert to defaults after
+an update. First boot still defaults sanely (`input_select` falls back to its
+first option; templates carry `| int(...)` / `| float(...)` fallbacks).
+`scripts/audit.py` does not police this — the rule lives here and in review.
+
+Two adjacent rules found the hard way, both now enforced by tooling:
+
+- **Package filenames must be valid HA slugs.** `_global.yaml` fails
+  `cv.slug` (leading underscore) and the package is *silently skipped* — the
+  whole foundation never loaded, and check_config reports it only under the
+  `Incorrect config` banner, which the old gate did not grep for. Both fixed;
+  `scripts/audit.py` now checks slugs and `scripts/validate.sh` greps both
+  banners.
+- **A dynamically-dispatched filter name — `map('x')`, `select('x')` — is not
+  checked at compile time.** `map('extract')` (an Ansible filter that does not
+  exist in Jinja or HA) compiled cleanly and would have crashed the
+  notification router on its first real push. `scripts/check-templates.py`
+  compiles all templates with HA's real environment AND verifies every
+  dispatched name against its filter/test registries.
+
+---
+
 ## What has NOT been verified
 
 Honesty about the limits of the validation, because "it validates" is easy to
@@ -160,7 +187,13 @@ committed secrets. It does **not** prove:
 - **That any entity_id exists.** `check_config` does not consult a registry.
   This is precisely why targeting is label-driven.
 - **That any automation does the right thing.** No instance has run any of this.
-  Config check catches syntax, not logic.
+  Config check catches syntax, not logic. (What IS now verified beyond schema:
+  all 231 templates compile in HA 2026.2.3's real Jinja environment with every
+  dynamically-dispatched filter/test name checked against its registries; the
+  blueprint instantiates cleanly through check_config; the ESPHome template
+  node validates end-to-end with esphome 2026.8.0; the notification-route,
+  battery-threshold and wettest-zone templates render correctly on test data;
+  the five shell scripts are shellcheck-clean.)
 - **`sensor.house_power_baseline`.** The hour-of-week EWMA needs roughly a week
   of real data before its output means anything, and its alerts should not be
   trusted or acted on until then. The mechanism (trigger-based template entity

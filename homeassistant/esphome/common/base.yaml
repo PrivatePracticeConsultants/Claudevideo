@@ -60,7 +60,7 @@ mdns:
 # ---------------------------------------------------------------------------
 # Diagnostics every node reports. All marked as diagnostic so they land in the
 # device page rather than cluttering dashboards, and all excluded from the
-# recorder in packages/_global.yaml so they do not bloat the database.
+# recorder in packages/global.yaml so they do not bloat the database.
 # ---------------------------------------------------------------------------
 sensor:
   - platform: uptime

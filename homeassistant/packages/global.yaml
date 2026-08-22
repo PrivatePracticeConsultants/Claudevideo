@@ -1,4 +1,4 @@
-# _global.yaml — shared infrastructure every other package depends on.
+# global.yaml — shared infrastructure every other package depends on.
 #
 # Contents:
 #   1. script.notify_person   the ONLY way anything in this system notifies
@@ -79,9 +79,16 @@ script:
       selected: >-
         {% if target == 'all' %}{{ routes.keys() | list }}
         {% else %}{{ [target] }}{% endif %}
+      # NOTE: no map('extract') here — 'extract' is an Ansible filter, not a
+      # Jinja/HA one. It compiles (dynamic dispatch) and then throws
+      # "No filter named 'extract'" on the first real notification.
       push_services: >-
-        {{ selected | map('extract', routes, {}) | map(attribute='push', default='')
-           | reject('eq', '') | list }}
+        {% set ns = namespace(svcs=[]) %}
+        {% for t in selected %}
+          {% set svc = (routes.get(t) or {}).get('push', '') %}
+          {% if svc %}{% set ns.svcs = ns.svcs + [svc] %}{% endif %}
+        {% endfor %}
+        {{ ns.svcs }}
       in_quiet_hours: >-
         {% set r = routes.get(target, {}) %}
         {% set qs = r.get('quiet_start') %}
@@ -104,7 +111,7 @@ script:
                 No push route is configured for target "{{ target }}", so this
                 {{ priority }} alert could not reach a phone. Original message:
                 {{ message }}. Fix by adding an entry to the `routes` table in
-                packages/_global.yaml.
+                packages/global.yaml.
               notification_id: "notify_route_missing_{{ target }}"
 
       - choose:
@@ -203,7 +210,6 @@ input_select:
       - guest
       - night
       - vacation
-    initial: home
 
 input_boolean:
   automations_paused:
@@ -220,7 +226,6 @@ input_number:
     min: 5
     max: 50
     step: 5
-    initial: 20
     unit_of_measurement: "%"
     mode: slider
 
@@ -265,21 +270,27 @@ template:
         state_class: measurement
         # Registry-driven: label a device `battery_powered` and it appears here.
         # No entity_id is hardcoded, so this is correct on a house it has never seen.
+        # States are STRINGS: 'lt' on them is lexicographic ('9' > '20'), so the
+        # comparison must go through float. A 9% battery missed by a string
+        # compare is precisely the battery that dies unnoticed.
         state: >-
+          {% set thr = states('input_number.low_battery_threshold') | float(20) %}
           {{ states.sensor
              | selectattr('attributes.device_class', 'defined')
              | selectattr('attributes.device_class', 'eq', 'battery')
              | selectattr('state', 'is_number')
-             | selectattr('state', 'lt', states('input_number.low_battery_threshold'))
-             | list | count }}
+             | map(attribute='state') | map('float')
+             | select('lt', thr) | list | count }}
         attributes:
           devices: >-
-            {{ states.sensor
-               | selectattr('attributes.device_class', 'defined')
-               | selectattr('attributes.device_class', 'eq', 'battery')
-               | selectattr('state', 'is_number')
-               | selectattr('state', 'lt', states('input_number.low_battery_threshold'))
-               | map(attribute='entity_id') | list }}
+            {% set thr = states('input_number.low_battery_threshold') | float(20) %}
+            {% set ns = namespace(ids=[]) %}
+            {% for s in states.sensor
+               if s.attributes.get('device_class') == 'battery'
+               and s.state is is_number and s.state | float < thr %}
+              {% set ns.ids = ns.ids + [s.entity_id] %}
+            {% endfor %}
+            {{ ns.ids }}
 
       - name: Unavailable entities
         unique_id: sys_unavailable_entities

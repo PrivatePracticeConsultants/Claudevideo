@@ -84,7 +84,7 @@ views:
           - type: markdown
             title: Deployed commit
             # Populated by scripts/deploy.sh via the command_line sensor in
-            # packages/_deploy.yaml. "Unknown" means deploy.sh has never run.
+            # packages/deploy.yaml. "Unknown" means deploy.sh has never run.
             content: >-
               **{{ states('sensor.deployed_commit') }}**
 

@@ -1,4 +1,4 @@
-# _deploy.yaml — what commit is actually running.
+# deploy.yaml — what commit is actually running.
 #
 # "Last known good" is only unambiguous if the house can tell you what it is
 # running right now. scripts/deploy.sh tags every successful deploy; this

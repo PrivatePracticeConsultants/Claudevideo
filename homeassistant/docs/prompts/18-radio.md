@@ -40,7 +40,7 @@ devices dropping months later with no configuration change to blame.
 
 ## When you do run the mesh report
 
-Re-enable the link-quality sensors first — `packages/_global.yaml` excludes
+Re-enable the link-quality sensors first — `packages/global.yaml` excludes
 `*_linkquality` and `*_rssi` from the recorder, so there is no history to
 analyse until you do. Exclude them again afterwards; see `docs/decisions.md`.
 

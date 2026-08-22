@@ -33,6 +33,12 @@ lovelace:
       icon: mdi:home
       show_in_sidebar: true
       filename: dashboards/home.yaml
+    dash-rooms:
+      mode: yaml
+      title: Rooms
+      icon: mdi:floor-plan
+      show_in_sidebar: true
+      filename: dashboards/rooms.yaml
     dash-admin:
       mode: yaml
       title: Admin

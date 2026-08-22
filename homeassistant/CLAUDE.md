@@ -63,7 +63,7 @@ This is the hard rule and the most common way an AI breaks this repo.
 Every `input_boolean`, `input_number`, `timer`, etc. is declared **in YAML, in
 the package that uses it**. A helper created in the UI is invisible to this repo
 and will be silently destroyed by a restore. If a helper is used by two
-packages, it belongs in `_global.yaml`.
+packages, it belongs in `global.yaml`.
 
 ## Physical-first rule
 

@@ -48,7 +48,7 @@ step "placeholder scan"
 # placeholder that is LIVE config -- which is exactly what makes moving a file
 # from optional/ into packages/ with placeholders still in it fail this gate.
 PH=$(cd "$CONFIG_DIR" && grep -rniE 'REPLACE_ME|TODO_ENTITY|CHANGEME|<your' \
-      --include='*.yaml' --exclude='*.example' . 2>/dev/null \
+      --include='*.yaml' --exclude='*.example' --exclude='secrets.yaml' . 2>/dev/null \
       | grep -vE '^\./docs/' \
       | grep -vE '^\./optional/' \
       | grep -vE '^[^:]+:[0-9]+: *#' || true)
@@ -66,12 +66,24 @@ if [ -n "$HA_PYTHON" ] && [ -x "$HA_PYTHON" ]; then
   printf 'validating against Home Assistant %s\n' "$VER"
   OUT=$("$HA_PYTHON" -m homeassistant --script check_config -c "$CONFIG_DIR" 2>&1)
   RC=$?
-  # check_config exits 0 even on some failures; the banner is authoritative.
-  if [ $RC -ne 0 ] || echo "$OUT" | grep -q 'Failed config'; then
+  # check_config exits 0 even on some failures; the banners are authoritative.
+  # There are TWO: 'Failed config' (general errors) and 'Incorrect config'
+  # (per-package/per-domain errors, e.g. an invalid package slug). Grepping only
+  # the first let a config through in which whole packages silently did not load.
+  if [ $RC -ne 0 ] || echo "$OUT" | grep -qE 'Failed config|Incorrect config'; then
     fail "check_config rejected the configuration"
     echo "$OUT" | grep -vE 'Attempting install|util\.package' | tail -60
   else
     ok "check_config accepted the configuration (HA $VER)"
+  fi
+  # Compile every template with HA's real Jinja env, and verify that
+  # dynamically-dispatched filter/test names (map('x'), select('x')) exist —
+  # those resolve at runtime, so check_config and compile both miss them.
+  step "template compile + dispatch check"
+  if "$HA_PYTHON" "$CONFIG_DIR/scripts/check-templates.py"; then
+    ok "templates verified against the running HA version"
+  else
+    fail "template check found problems"
   fi
 else
   fail "no HA python found — set HA_PYTHON. Validation is NOT complete without this."

@@ -1,0 +1,9 @@
+# rooms.yaml — the whole dashboard is generated from the area registry.
+#
+# `areas` exists ONLY as a dashboard-level strategy (verified against the
+# shipped 2026.2.3 frontend: view-level strategies are energy, energy-overview,
+# original-states, water — nothing else). A `strategy: type: areas` inside a
+# view of another dashboard renders "Unknown strategy", which is why Rooms is
+# its own dashboard rather than a view of Home.
+strategy:
+  type: areas

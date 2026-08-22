@@ -16,7 +16,7 @@
 
 ## The exact edit
 
-`script.notify_person` in `packages/_global.yaml` has a `routes:` table that
+`script.notify_person` in `packages/global.yaml` has a `routes:` table that
 **ships empty on purpose** — a guessed notify service silently swallows every
 alert given to it. One entry per person:
 

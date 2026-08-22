@@ -15,7 +15,6 @@ input_number:
     min: 1800
     max: 3000
     step: 100
-    initial: 2200
     unit_of_measurement: K
     mode: slider
   adaptive_max_kelvin:
@@ -24,7 +23,6 @@ input_number:
     min: 3500
     max: 6500
     step: 100
-    initial: 5000
     unit_of_measurement: K
     mode: slider
   adaptive_min_brightness:
@@ -33,7 +31,6 @@ input_number:
     min: 1
     max: 60
     step: 1
-    initial: 25
     unit_of_measurement: "%"
     mode: slider
   adaptive_max_brightness:
@@ -42,7 +39,6 @@ input_number:
     min: 40
     max: 100
     step: 1
-    initial: 100
     unit_of_measurement: "%"
     mode: slider
   night_mode_brightness:
@@ -51,17 +47,16 @@ input_number:
     min: 1
     max: 30
     step: 1
-    initial: 5
     unit_of_measurement: "%"
     mode: slider
   manual_override_minutes:
+    # How long automation backs off after a human touches a light.
+    # (input_number has no description: field — that is a comment's job.)
     name: Manual override window
     icon: mdi:hand-back-right
-    description: How long automation backs off after a human touches a light.
     min: 5
     max: 240
     step: 5
-    initial: 60
     unit_of_measurement: min
     mode: slider
 

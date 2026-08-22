@@ -36,7 +36,7 @@ survived — `check_config` does not run automations. The staging instance from
 
 Things most likely to be hit by a breaking change, worth grepping first:
 
-- `command_line` sensors (`_global.yaml`, `network.yaml`, `_deploy.yaml`) —
+- `command_line` sensors (`global.yaml`, `network.yaml`, `deploy.yaml`) —
   this platform has been reworked once already.
 - The `manual` alarm panel (`security.yaml`) — a YAML platform in a
   config-flow-first world.

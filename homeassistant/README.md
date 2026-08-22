@@ -26,7 +26,7 @@ for everything else, and only one of its three legs could be satisfied here:
 | 00 connect | ◐ validation leg only | `scripts/validate.sh`, `docs/prompts/00-connect.md` |
 | 01 bootstrap + CLAUDE.md | ✓ built | `CLAUDE.md`, `configuration.yaml` |
 | 02 taxonomy | ◐ tooling built, plan needs the registry | `scripts/apply-taxonomy.py` |
-| 03 global scaffolding | ✓ built | `packages/_global.yaml` |
+| 03 global scaffolding | ✓ built | `packages/global.yaml` |
 | 04 add a device | ○ reusable prompt | `docs/prompts/04-add-device.md` |
 | 05 lighting | ✓ built | `packages/lighting.yaml` + blueprint |
 | 06 climate | ✓ built | `packages/climate.yaml` |

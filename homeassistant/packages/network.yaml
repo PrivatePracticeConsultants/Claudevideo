@@ -25,8 +25,11 @@ command_line:
       # Separated from the latency check on purpose: "internet is down" and
       # "DNS is down" produce identical symptoms for a user and need completely
       # different fixes. The runbook branches on exactly this distinction.
+      # python3 rather than getent: the HA container is Alpine-based and getent
+      # is not guaranteed present; python3 is what HA itself runs on.
       command: >-
-        getent hosts github.com >/dev/null 2>&1 && echo ok || echo failed
+        python3 -c "import socket; socket.getaddrinfo('github.com', 443)"
+        >/dev/null 2>&1 && echo ok || echo failed
       scan_interval: 300
 
 template:

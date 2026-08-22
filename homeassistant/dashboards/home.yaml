@@ -117,12 +117,3 @@ views:
                 name: Power
               - entity: sensor.current_energy_cost_rate
                 name: Costing now
-
-  # =========================================================================
-  # Generated from the area registry. Nothing to maintain by hand: a device
-  # assigned to an area shows up here on its own.
-  - title: Rooms
-    path: rooms
-    icon: mdi:floor-plan
-    strategy:
-      type: areas

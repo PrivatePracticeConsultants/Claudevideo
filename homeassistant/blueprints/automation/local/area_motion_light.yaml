@@ -8,7 +8,6 @@ blueprint:
     One instantiation per area. Adding a bulb to the area requires no edit here:
     the light target is the area itself, optionally narrowed by a label.
   domain: automation
-  source_url: local/area_motion_light.yaml
   input:
     area_settings:
       name: Area

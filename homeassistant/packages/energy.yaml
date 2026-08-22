@@ -21,7 +21,6 @@ input_select:
       - flat
       - tiered
       - time_of_use
-    initial: flat
 
 input_number:
   rate_flat:
@@ -30,7 +29,6 @@ input_number:
     min: 0
     max: 2
     step: 0.001
-    initial: 0.150
     unit_of_measurement: "$/kWh"
     mode: box
   rate_tier1:
@@ -39,7 +37,6 @@ input_number:
     min: 0
     max: 2
     step: 0.001
-    initial: 0.120
     unit_of_measurement: "$/kWh"
     mode: box
   rate_tier2:
@@ -48,7 +45,6 @@ input_number:
     min: 0
     max: 2
     step: 0.001
-    initial: 0.220
     unit_of_measurement: "$/kWh"
     mode: box
   tier1_limit_kwh:
@@ -57,7 +53,6 @@ input_number:
     min: 0
     max: 3000
     step: 10
-    initial: 500
     unit_of_measurement: kWh
     mode: box
   rate_peak:
@@ -66,7 +61,6 @@ input_number:
     min: 0
     max: 2
     step: 0.001
-    initial: 0.320
     unit_of_measurement: "$/kWh"
     mode: box
   rate_offpeak:
@@ -75,7 +69,6 @@ input_number:
     min: 0
     max: 2
     step: 0.001
-    initial: 0.110
     unit_of_measurement: "$/kWh"
     mode: box
   peak_start_hour:
@@ -84,7 +77,6 @@ input_number:
     min: 0
     max: 23
     step: 1
-    initial: 16
     mode: box
   peak_end_hour:
     name: Peak period end hour
@@ -92,7 +84,6 @@ input_number:
     min: 0
     max: 23
     step: 1
-    initial: 21
     mode: box
   daily_supply_charge:
     name: Daily supply charge
@@ -100,7 +91,6 @@ input_number:
     min: 0
     max: 10
     step: 0.01
-    initial: 0.35
     unit_of_measurement: "$/day"
     mode: box
   anomaly_multiplier:
@@ -111,7 +101,6 @@ input_number:
     min: 1.2
     max: 5
     step: 0.1
-    initial: 2.0
     mode: slider
   anomaly_floor_watts:
     name: Anomaly minimum wattage
@@ -121,7 +110,6 @@ input_number:
     min: 50
     max: 2000
     step: 50
-    initial: 300
     unit_of_measurement: W
     mode: box
 
