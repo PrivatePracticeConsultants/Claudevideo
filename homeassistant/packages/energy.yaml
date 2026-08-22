@@ -1,0 +1,407 @@
+# energy.yaml — tariff, cost, anomaly detection, vampire loads.
+#
+# WHAT THIS FILE CANNOT DO, stated up front:
+# The HA **Energy dashboard** itself is configured in .storage through the UI
+# (Settings -> Dashboards -> Energy) and has no YAML schema. It cannot be
+# versioned here. What IS versioned here is everything it consumes: the tariff
+# maths, the cost sensors, and the utility meters. Record the dashboard's
+# circuit-to-device-class mapping in docs/decisions.md so it can be rebuilt.
+#
+# TARIFF: the rate structure below ships as neutral placeholders because
+# guessing someone's tariff produces confidently wrong money. Fill the helpers
+# from an actual bill, then verify sensor.current_energy_rate against that bill
+# before trusting any cost figure. The maths is deliberately isolated in that
+# one sensor so it can be checked in one place.
+
+input_select:
+  tariff_type:
+    name: Tariff type
+    icon: mdi:cash-multiple
+    options:
+      - flat
+      - tiered
+      - time_of_use
+    initial: flat
+
+input_number:
+  rate_flat:
+    name: Flat rate
+    icon: mdi:currency-usd
+    min: 0
+    max: 2
+    step: 0.001
+    initial: 0.150
+    unit_of_measurement: "$/kWh"
+    mode: box
+  rate_tier1:
+    name: Tier 1 rate
+    icon: mdi:numeric-1-box
+    min: 0
+    max: 2
+    step: 0.001
+    initial: 0.120
+    unit_of_measurement: "$/kWh"
+    mode: box
+  rate_tier2:
+    name: Tier 2 rate
+    icon: mdi:numeric-2-box
+    min: 0
+    max: 2
+    step: 0.001
+    initial: 0.220
+    unit_of_measurement: "$/kWh"
+    mode: box
+  tier1_limit_kwh:
+    name: Tier 1 monthly allowance
+    icon: mdi:gauge
+    min: 0
+    max: 3000
+    step: 10
+    initial: 500
+    unit_of_measurement: kWh
+    mode: box
+  rate_peak:
+    name: Time-of-use peak rate
+    icon: mdi:transmission-tower
+    min: 0
+    max: 2
+    step: 0.001
+    initial: 0.320
+    unit_of_measurement: "$/kWh"
+    mode: box
+  rate_offpeak:
+    name: Time-of-use off-peak rate
+    icon: mdi:transmission-tower-off
+    min: 0
+    max: 2
+    step: 0.001
+    initial: 0.110
+    unit_of_measurement: "$/kWh"
+    mode: box
+  peak_start_hour:
+    name: Peak period start hour
+    icon: mdi:clock-start
+    min: 0
+    max: 23
+    step: 1
+    initial: 16
+    mode: box
+  peak_end_hour:
+    name: Peak period end hour
+    icon: mdi:clock-end
+    min: 0
+    max: 23
+    step: 1
+    initial: 21
+    mode: box
+  daily_supply_charge:
+    name: Daily supply charge
+    icon: mdi:receipt
+    min: 0
+    max: 10
+    step: 0.01
+    initial: 0.35
+    unit_of_measurement: "$/day"
+    mode: box
+  anomaly_multiplier:
+    name: Anomaly threshold multiplier
+    icon: mdi:alert-decagram
+    # Alert when draw exceeds baseline * this. 2.0 catches a stuck heating
+    # element or a failing compressor without firing every time the kettle runs.
+    min: 1.2
+    max: 5
+    step: 0.1
+    initial: 2.0
+    mode: slider
+  anomaly_floor_watts:
+    name: Anomaly minimum wattage
+    icon: mdi:flash-alert
+    # Below this, ignore ratios entirely. 5W vs a 2W baseline is a 2.5x
+    # "anomaly" that means nothing.
+    min: 50
+    max: 2000
+    step: 50
+    initial: 300
+    unit_of_measurement: W
+    mode: box
+
+input_boolean:
+  energy_anomaly_alerts:
+    name: Energy anomaly alerts
+    icon: mdi:chart-bell-curve
+
+template:
+  # =========================================================================
+  # THE TARIFF CALCULATION — isolated on purpose.
+  #
+  # Verify this one sensor against a real bill. Everything downstream
+  # multiplies by it, so if this is right the rest is right, and if this is
+  # wrong every cost figure in the system is wrong in the same direction.
+  #
+  #   flat        -> rate_flat
+  #   tiered      -> tier1 until the monthly allowance is used, then tier2
+  #   time_of_use -> peak rate between peak_start_hour and peak_end_hour
+  #
+  # Tiered mode needs a monthly consumption figure. Point it at the
+  # utility_meter defined at the bottom of this file once a source exists;
+  # until then it reports tier 1, and says so in the `basis` attribute.
+  # =========================================================================
+  - sensor:
+      - name: Current energy rate
+        unique_id: energy_current_rate
+        icon: mdi:cash-clock
+        unit_of_measurement: "$/kWh"
+        state_class: measurement
+        state: >-
+          {% set mode = states('input_select.tariff_type') %}
+          {% if mode == 'flat' %}
+            {{ states('input_number.rate_flat') | float(0) | round(4) }}
+          {% elif mode == 'time_of_use' %}
+            {% set h = now().hour %}
+            {% set s = states('input_number.peak_start_hour') | int(16) %}
+            {% set e = states('input_number.peak_end_hour') | int(21) %}
+            {% set in_peak = (s <= h < e) if s < e else (h >= s or h < e) %}
+            {{ (states('input_number.rate_peak') if in_peak
+                else states('input_number.rate_offpeak')) | float(0) | round(4) }}
+          {% elif mode == 'tiered' %}
+            {% set used = states('sensor.monthly_energy') | float(-1) %}
+            {% set limit = states('input_number.tier1_limit_kwh') | float(500) %}
+            {% if used < 0 or used < limit %}
+              {{ states('input_number.rate_tier1') | float(0) | round(4) }}
+            {% else %}
+              {{ states('input_number.rate_tier2') | float(0) | round(4) }}
+            {% endif %}
+          {% else %}
+            {{ states('input_number.rate_flat') | float(0) | round(4) }}
+          {% endif %}
+        attributes:
+          basis: >-
+            {% set mode = states('input_select.tariff_type') %}
+            {% if mode == 'time_of_use' %}
+              {% set h = now().hour %}
+              {% set s = states('input_number.peak_start_hour') | int(16) %}
+              {% set e = states('input_number.peak_end_hour') | int(21) %}
+              {{ 'peak' if ((s <= h < e) if s < e else (h >= s or h < e)) else 'off-peak' }}
+            {% elif mode == 'tiered' %}
+              {% set used = states('sensor.monthly_energy') | float(-1) %}
+              {% if used < 0 %}tier 1 (no monthly meter configured yet)
+              {% else %}
+                {{ 'tier 1' if used < states('input_number.tier1_limit_kwh') | float(500)
+                   else 'tier 2' }} ({{ used | round(1) }} kWh used)
+              {% endif %}
+            {% else %}flat{% endif %}
+
+      # =====================================================================
+      # WHOLE-HOUSE DRAW, from circuits labelled `monitored_circuit`.
+      # Registry-driven: labelling a new circuit adds it to every figure below.
+      # =====================================================================
+      - name: House power draw
+        unique_id: energy_house_power
+        unit_of_measurement: W
+        device_class: power
+        state_class: measurement
+        state: >-
+          {% set circuits = label_entities('monitored_circuit')
+             | select('match', 'sensor\.') | list %}
+          {% set vals = circuits | select('has_value')
+             | map('states') | select('is_number') | map('float') | list %}
+          {{ vals | sum | round(0) if vals | count > 0 else 'unknown' }}
+        availability: >-
+          {{ label_entities('monitored_circuit') | select('match', 'sensor\.')
+             | list | count > 0 }}
+
+      - name: Current energy cost rate
+        unique_id: energy_current_cost_rate
+        unit_of_measurement: "$/h"
+        state_class: measurement
+        icon: mdi:cash-fast
+        # What the house is costing right now, per hour. The single most
+        # legible energy number there is — far more actionable than kWh.
+        state: >-
+          {{ ((states('sensor.house_power_draw') | float(0) / 1000)
+              * states('sensor.current_energy_rate') | float(0)) | round(3) }}
+        availability: "{{ states('sensor.house_power_draw') | is_number }}"
+
+  # =========================================================================
+  # ANOMALY BASELINE.
+  #
+  # Trigger-based template sensor holding an exponentially-weighted moving
+  # average per (weekday-or-weekend, hour) bucket — 48 buckets. That shape
+  # matters: a house at 7pm Tuesday looks nothing like 7pm Sunday, and a flat
+  # 24-hour baseline would flag every weekend as anomalous.
+  #
+  # EWMA with alpha 0.1 means roughly a three-week memory, so a genuinely new
+  # normal (a new freezer) is absorbed, while a fault that appears today stands
+  # out against the weeks before it.
+  #
+  # Trigger-based template entities restore their state and attributes across a
+  # restart, so the learned baseline is not lost on every HA update.
+  #
+  # NOT YET VERIFIED ON A LIVE INSTANCE — see docs/decisions.md. It needs about
+  # a week of real data before its alerts should be trusted or acted on.
+  # =========================================================================
+  - trigger:
+      - trigger: time_pattern
+        minutes: "/10"
+    sensor:
+      - name: House power baseline
+        unique_id: energy_house_power_baseline
+        unit_of_measurement: W
+        device_class: power
+        state_class: measurement
+        state: >-
+          {% set bucket = ('we' if now().weekday() >= 5 else 'wd') ~ now().hour %}
+          {% set hist = this.attributes.get('buckets', {}) %}
+          {{ hist.get(bucket, states('sensor.house_power_draw') | float(0)) | round(0) }}
+        attributes:
+          buckets: >-
+            {% set bucket = ('we' if now().weekday() >= 5 else 'wd') ~ now().hour %}
+            {% set hist = this.attributes.get('buckets', {}) %}
+            {% set current = states('sensor.house_power_draw') | float(-1) %}
+            {% if current < 0 %}
+              {{ hist }}
+            {% else %}
+              {% set prior = hist.get(bucket, current) %}
+              {% set updated = (0.1 * current) + (0.9 * prior) %}
+              {{ dict(hist, **{bucket: updated | round(1)}) }}
+            {% endif %}
+          bucket_now: "{{ ('weekend ' if now().weekday() >= 5 else 'weekday ') ~ now().hour ~ ':00' }}"
+          samples: "{{ this.attributes.get('buckets', {}) | count }}"
+
+  # =========================================================================
+  # VAMPIRE LOAD — the floor each circuit never drops below.
+  # Reset weekly by automation; a week is long enough to include one full
+  # cycle of everything intermittent.
+  # =========================================================================
+  - trigger:
+      - trigger: time_pattern
+        minutes: "/5"
+      - trigger: event
+        event_type: vampire_load_reset
+    sensor:
+      - name: Vampire load report
+        unique_id: energy_vampire_load
+        unit_of_measurement: W
+        state_class: measurement
+        icon: mdi:sleep
+        state: >-
+          {% if trigger.platform == 'event' %}0
+          {% else %}
+            {% set mins = this.attributes.get('minimums', {}) %}
+            {{ mins.values() | map('float') | sum | round(1) if mins | count > 0 else 0 }}
+          {% endif %}
+        attributes:
+          minimums: >-
+            {% if trigger.platform == 'event' %}
+              {{ {} }}
+            {% else %}
+              {% set mins = this.attributes.get('minimums', {}) %}
+              {% set ns = namespace(out=mins) %}
+              {% for e in label_entities('monitored_circuit') | select('match', 'sensor\.') %}
+                {% set v = states(e) %}
+                {% if v | is_number %}
+                  {% set prior = mins.get(e, 999999) | float(999999) %}
+                  {% if v | float < prior %}
+                    {% set ns.out = dict(ns.out, **{e: v | float | round(1)}) %}
+                  {% endif %}
+                {% endif %}
+              {% endfor %}
+              {{ ns.out }}
+            {% endif %}
+          ranked: >-
+            {% set mins = this.attributes.get('minimums', {}) %}
+            {{ mins | dictsort(by='value', reverse=true) | list }}
+
+# ===========================================================================
+# UTILITY METERS
+#
+# utility_meter needs a concrete source entity_id, which this repo has not
+# seen. Uncomment and point `source:` at the real whole-house energy sensor.
+# sensor.monthly_energy is what the tiered tariff above reads.
+# ===========================================================================
+# utility_meter:
+#   daily_energy:
+#     source: sensor.REPLACE_ME_energy_source
+#     name: Daily energy
+#     cycle: daily
+#   monthly_energy:
+#     source: sensor.REPLACE_ME_energy_source
+#     name: Monthly energy
+#     cycle: monthly
+#     tariffs:
+#       - tier1
+#       - tier2
+
+automation:
+  - id: energy_anomaly_detect
+    alias: "[energy] Draw well above its own baseline"
+    description: >-
+      Compares present draw to the learned baseline for this hour-of-week.
+      Guarded by an absolute wattage floor so small ratios on small loads do not
+      generate noise, and requires 15 minutes of sustained excess so a kettle or
+      a microwave does not page anyone.
+
+      This is how a failing appliance or a stuck heating element gets caught —
+      it is a slow, permanent step change, not a spike.
+    mode: single
+    triggers:
+      - trigger: template
+        value_template: >-
+          {% set now_w = states('sensor.house_power_draw') | float(0) %}
+          {% set base = states('sensor.house_power_baseline') | float(0) %}
+          {% set mult = states('input_number.anomaly_multiplier') | float(2) %}
+          {% set floor = states('input_number.anomaly_floor_watts') | float(300) %}
+          {{ base > 0 and now_w > floor and now_w > (base * mult) }}
+        for:
+          minutes: 15
+    conditions:
+      - condition: state
+        entity_id: input_boolean.energy_anomaly_alerts
+        state: "on"
+      - condition: state
+        entity_id: input_boolean.automations_paused
+        state: "off"
+    actions:
+      - action: script.notify_person
+        data:
+          target: all
+          priority: warning
+          title: Unusual power draw
+          message: >-
+            {{ states('sensor.house_power_draw') }}W now, against a typical
+            {{ states('sensor.house_power_baseline') }}W for
+            {{ state_attr('sensor.house_power_baseline', 'bucket_now') }}.
+            Costing about ${{ states('sensor.current_energy_cost_rate') }}/hour.
+
+  - id: energy_vampire_weekly_report
+    alias: "[energy] Weekly vampire load report"
+    description: >-
+      Reports each circuit's weekly floor — the draw it never drops below,
+      which is what standby actually costs — then resets the window.
+    mode: single
+    triggers:
+      - trigger: time
+        at: "10:00:00"
+    conditions:
+      - condition: time
+        weekday:
+          - sun
+      - condition: state
+        entity_id: input_boolean.automations_paused
+        state: "off"
+    actions:
+      - action: script.notify_person
+        data:
+          target: all
+          priority: info
+          title: "Standby load: {{ states('sensor.vampire_load_report') }}W"
+          message: >-
+            Always-on draw by circuit this week:
+            {% for e, w in (state_attr('sensor.vampire_load_report', 'ranked') or []) %}
+            {{ state_attr(e, 'friendly_name') or e }}: {{ w }}W;
+            {% endfor %}
+            At {{ states('sensor.current_energy_rate') }}/kWh that is about
+            ${{ ((states('sensor.vampire_load_report') | float(0) / 1000)
+                 * states('sensor.current_energy_rate') | float(0) * 24 * 365)
+                | round(2) }}/year.
+      - event: vampire_load_reset

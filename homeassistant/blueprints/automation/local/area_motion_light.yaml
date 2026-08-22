@@ -1,0 +1,209 @@
+blueprint:
+  name: Area occupancy lighting (with manual override)
+  description: >-
+    Per-area lighting driven by occupancy, with motion only ever *extending*
+    occupancy rather than determining it, and a manual-override window so the
+    automation stops fighting a human who just touched a switch.
+
+    One instantiation per area. Adding a bulb to the area requires no edit here:
+    the light target is the area itself, optionally narrowed by a label.
+  domain: automation
+  source_url: local/area_motion_light.yaml
+  input:
+    area_settings:
+      name: Area
+      icon: mdi:floor-plan
+      collapsed: false
+      input:
+        target_area:
+          name: Area to light
+          description: Lights in this area are controlled. New bulbs are picked up automatically.
+          selector:
+            area:
+        required_label:
+          name: Label filter (optional)
+          description: >-
+            If set, only lights in the area carrying this label are touched.
+            Use to exclude, say, a display cabinet from motion control.
+            Leave blank to control every light in the area.
+          default: ""
+          selector:
+            text:
+
+    sensors:
+      name: Sensors
+      icon: mdi:motion-sensor
+      collapsed: false
+      input:
+        occupancy_sensors:
+          name: Occupancy sensors (optional but preferred)
+          description: >-
+            mmWave or a fused template occupancy sensor from packages/presence.yaml.
+            When present, THIS decides whether the room is occupied. Motion only
+            extends it. Leave empty for motion-only rooms such as a hallway.
+          default: []
+          selector:
+            entity:
+              multiple: false
+              filter:
+                - domain: binary_sensor
+        motion_sensors:
+          name: Motion sensors
+          description: Motion/PIR sensors in this area. Any one triggering extends occupancy.
+          default: []
+          selector:
+            entity:
+              multiple: true
+              filter:
+                - domain: binary_sensor
+
+    behaviour:
+      name: Behaviour
+      icon: mdi:tune
+      collapsed: false
+      input:
+        override_timer:
+          name: Manual override timer
+          description: >-
+            The per-area timer helper that suppresses this automation after a
+            human intervenes. Declared in packages/lighting.yaml. Per-area
+            rather than a global flag so overriding the kitchen does not
+            disable the hallway.
+          selector:
+            entity:
+              filter:
+                - domain: timer
+        linger_minutes:
+          name: Linger after last motion
+          description: How long to keep lights on after occupancy clears.
+          default: 5
+          selector:
+            number:
+              min: 1
+              max: 60
+              unit_of_measurement: min
+        only_when_dark:
+          name: Only when dark
+          description: >-
+            Require the sun to be below the horizon (or illuminance low) before
+            turning on. Off means the lights come on regardless of daylight.
+          default: true
+          selector:
+            boolean:
+        apply_adaptive:
+          name: Apply adaptive colour/brightness
+          description: >-
+            Call script.apply_adaptive_lighting on turn-on so the light matches
+            the time of day rather than snapping to whatever it was last set to.
+          default: true
+          selector:
+            boolean:
+
+variables:
+  target_area: !input target_area
+  required_label: !input required_label
+  occupancy_sensors: !input occupancy_sensors
+  motion_sensors: !input motion_sensors
+  override_timer: !input override_timer
+  linger_minutes: !input linger_minutes
+  only_when_dark: !input only_when_dark
+  apply_adaptive: !input apply_adaptive
+  # Resolved from the registry every run: area membership and labels are read
+  # live, so a bulb added this morning is included this evening with no edit.
+  controlled_lights: >-
+    {% set in_area = area_entities(target_area)
+       | select('match', 'light\.') | list %}
+    {% if required_label | length > 0 %}
+      {{ in_area | select('in', label_entities(required_label)) | list }}
+    {% else %}
+      {{ in_area }}
+    {% endif %}
+  # Occupancy is authoritative when a sensor exists; motion only extends it.
+  occupancy_known: "{{ occupancy_sensors | count > 0 }}"
+
+mode: restart
+max_exceeded: silent
+
+triggers:
+  - trigger: state
+    entity_id: !input motion_sensors
+    to: "on"
+    id: activity
+  - trigger: state
+    entity_id: !input occupancy_sensors
+    to: "on"
+    id: activity
+  - trigger: state
+    entity_id: !input motion_sensors
+    to: "off"
+    id: quiet
+  - trigger: state
+    entity_id: !input occupancy_sensors
+    to: "off"
+    id: quiet
+
+conditions:
+  # The global kill switch, per CLAUDE.md. Every automation checks it.
+  - condition: state
+    entity_id: input_boolean.automations_paused
+    state: "off"
+  # A human has touched a switch in this area recently — back off entirely.
+  - condition: not
+    conditions:
+      - condition: state
+        entity_id: !input override_timer
+        state: active
+  - condition: template
+    value_template: "{{ controlled_lights | count > 0 }}"
+
+actions:
+  - choose:
+      # ---------------- someone is here ----------------
+      - conditions:
+          - condition: trigger
+            id: activity
+          - or:
+              - condition: template
+                value_template: "{{ not only_when_dark }}"
+              - condition: sun
+                after: sunset
+                before: sunrise
+        sequence:
+          - action: light.turn_on
+            target:
+              entity_id: "{{ controlled_lights }}"
+          - if:
+              - condition: template
+                value_template: "{{ apply_adaptive }}"
+            then:
+              - action: script.apply_adaptive_lighting
+                continue_on_error: true
+                data:
+                  lights: "{{ controlled_lights }}"
+
+      # ---------------- room went quiet ----------------
+      - conditions:
+          - condition: trigger
+            id: quiet
+        sequence:
+          # mode:restart means a new motion event cancels this wait, which is
+          # exactly the behaviour wanted: the countdown restarts, it does not stack.
+          - delay:
+              minutes: "{{ linger_minutes }}"
+          # Re-check occupancy at the end of the delay. Without this, a mmWave
+          # sensor that re-detected during the wait would still be switched off.
+          - condition: template
+            value_template: >-
+              {% if occupancy_known %}
+                {{ occupancy_sensors | select('is_state', 'on') | list | count == 0 }}
+              {% else %}
+                {{ motion_sensors | select('is_state', 'on') | list | count == 0 }}
+              {% endif %}
+          - condition: not
+            conditions:
+              - condition: state
+                entity_id: !input override_timer
+                state: active
+          - action: light.turn_off
+            target:
+              entity_id: "{{ controlled_lights }}"

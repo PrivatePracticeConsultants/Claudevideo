@@ -1,0 +1,440 @@
+# security.yaml — perimeter, alarm panel, locks, vacation simulation.
+#
+# Cameras (Frigate) are NOT here: Frigate is a custom component and would make
+# check_config fail on a machine that does not have it installed. See
+# optional/frigate.yaml, which is moved into packages/ once HACS has it.
+#
+# Manual disarm and manual unlock, for when HA is down, are in docs/runbook.md.
+# That section is not optional reading — an alarm you cannot silence without a
+# working dashboard is a liability.
+
+input_number:
+  auto_lock_delay:
+    name: Auto-lock delay
+    icon: mdi:lock-clock
+    min: 1
+    max: 60
+    step: 1
+    initial: 10
+    unit_of_measurement: min
+    mode: slider
+
+input_boolean:
+  vacation_simulation:
+    name: Vacation presence simulation
+    icon: mdi:home-clock
+
+input_datetime:
+  security_check_time:
+    name: Daily security check time
+    icon: mdi:shield-check
+    has_date: false
+    has_time: true
+
+# ---------------------------------------------------------------------------
+# ALARM PANEL — the built-in `manual` platform.
+#
+# Alarmo (HACS) has a nicer UI and per-sensor bypass. This uses `manual`
+# because it is built in, has no upgrade risk, and survives a HACS outage.
+# Swapping to Alarmo later means changing the entity_id in this file only —
+# every automation below targets alarm_control_panel.house.
+# ---------------------------------------------------------------------------
+alarm_control_panel:
+  - platform: manual
+    name: House
+    unique_id: security_house_alarm
+    code: !secret alarm_code
+    code_arm_required: false      # arming should be frictionless; disarming should not
+    arming_time: 60               # exit delay: time to get out of the door
+    delay_time: 30                # entry delay: time to disarm on the way in
+    trigger_time: 300             # how long the siren runs before auto-reset
+    disarmed:
+      trigger_time: 0
+    armed_home:
+      arming_time: 0              # already inside; no exit delay needed
+      delay_time: 30
+    armed_night:
+      arming_time: 0
+      delay_time: 30
+    armed_away:
+      arming_time: 60
+      delay_time: 30
+
+template:
+  - sensor:
+      - name: Perimeter open count
+        unique_id: security_perimeter_open_count
+        icon: mdi:door-open
+        state_class: measurement
+        # Registry-driven from the `security_perimeter` label. Labelling a new
+        # door sensor is the entire integration step.
+        state: >-
+          {{ label_entities('security_perimeter')
+             | select('match', 'binary_sensor\.')
+             | select('is_state', 'on') | list | count }}
+        attributes:
+          open_names: >-
+            {% set open = label_entities('security_perimeter')
+               | select('match', 'binary_sensor\.')
+               | select('is_state', 'on') | list %}
+            {{ open | map('state_attr', 'friendly_name') | reject('none') | list }}
+          open_entities: >-
+            {{ label_entities('security_perimeter')
+               | select('match', 'binary_sensor\.')
+               | select('is_state', 'on') | list }}
+
+      - name: House secure summary
+        unique_id: security_house_secure_summary
+        icon: mdi:shield-home
+        state: >-
+          {% set open = states('sensor.perimeter_open_count') | int(0) %}
+          {% set unlocked = states.lock | selectattr('state', 'eq', 'unlocked')
+             | list | count %}
+          {% if open == 0 and unlocked == 0 %}Secure
+          {% else %}
+            {{ [open ~ ' open' if open else '', unlocked ~ ' unlocked' if unlocked else '']
+               | reject('eq', '') | join(', ') }}
+          {% endif %}
+        attributes:
+          unlocked_locks: >-
+            {{ states.lock | selectattr('state', 'eq', 'unlocked')
+               | map(attribute='entity_id') | list }}
+
+  - binary_sensor:
+      - name: Perimeter secure
+        unique_id: security_perimeter_secure
+        device_class: safety
+        state: "{{ states('sensor.perimeter_open_count') | int(0) == 0 }}"
+
+script:
+  # -------------------------------------------------------------------------
+  # Arming with bypass. A sensor already open at arm time must not instantly
+  # trip the alarm — but it must also not be silently ignored, which is how
+  # people arm an alarm with the patio door wide open and never find out.
+  # -------------------------------------------------------------------------
+  arm_house:
+    alias: Arm house
+    icon: mdi:shield-lock
+    description: Arm the alarm, reporting anything currently open rather than silently bypassing it.
+    mode: single
+    fields:
+      mode:
+        description: away | home | night
+        required: true
+        default: away
+        selector:
+          select:
+            options: [away, home, night]
+    variables:
+      open_now: "{{ state_attr('sensor.perimeter_open_count', 'open_names') or [] }}"
+    sequence:
+      - if:
+          - condition: template
+            value_template: "{{ open_now | count > 0 }}"
+        then:
+          - action: script.notify_person
+            data:
+              target: all
+              priority: warning
+              title: "Arming with {{ open_now | count }} opening(s) bypassed"
+              message: >-
+                Arming {{ mode }} anyway, but these are open and will NOT be
+                monitored until they close: {{ open_now | join(', ') }}.
+      - choose:
+          - conditions: "{{ mode == 'away' }}"
+            sequence:
+              - action: alarm_control_panel.alarm_arm_away
+                target:
+                  entity_id: alarm_control_panel.house
+          - conditions: "{{ mode == 'home' }}"
+            sequence:
+              - action: alarm_control_panel.alarm_arm_home
+                target:
+                  entity_id: alarm_control_panel.house
+          - conditions: "{{ mode == 'night' }}"
+            sequence:
+              - action: alarm_control_panel.alarm_arm_night
+                target:
+                  entity_id: alarm_control_panel.house
+
+automation:
+  # -------------------------------------------------------------------------
+  # LOCKS
+  # -------------------------------------------------------------------------
+  - id: security_auto_lock
+    alias: "[security] Auto-lock after delay"
+    description: >-
+      Locks anything labelled `auto_lock` after the configured idle period.
+      NEVER locks a door whose contact sensor says it is physically open —
+      driving a deadbolt into a strike plate that is not there breaks the bolt,
+      and a door that reports locked while standing open is worse than one that
+      reports unlocked.
+    mode: queued
+    max: 10
+    triggers:
+      - trigger: event
+        event_type: state_changed
+    conditions:
+      - condition: template
+        value_template: "{{ trigger.event.data.entity_id.startswith('lock.') }}"
+      - condition: template
+        value_template: >-
+          {{ trigger.event.data.new_state is not none
+             and trigger.event.data.new_state.state == 'unlocked'
+             and trigger.event.data.entity_id in label_entities('auto_lock') }}
+      - condition: state
+        entity_id: input_boolean.automations_paused
+        state: "off"
+    actions:
+      - variables:
+          lock_entity: "{{ trigger.event.data.entity_id }}"
+          lock_area: "{{ area_id(trigger.event.data.entity_id) }}"
+      - delay:
+          minutes: "{{ states('input_number.auto_lock_delay') | int(10) }}"
+      # Still unlocked after the delay? (If someone re-locked it manually,
+      # this exits quietly.)
+      - condition: template
+        value_template: "{{ is_state(lock_entity, 'unlocked') }}"
+      # The physical-open guard.
+      - condition: template
+        value_template: >-
+          {% set door_contacts = area_entities(lock_area)
+             | select('match', 'binary_sensor\.')
+             | select('in', label_entities('security_perimeter')) | list %}
+          {{ door_contacts | select('is_state', 'on') | list | count == 0 }}
+      - action: lock.lock
+        continue_on_error: true
+        target:
+          entity_id: "{{ lock_entity }}"
+
+  - id: security_lock_opened_while_open
+    alias: "[security] Refused to auto-lock — door is open"
+    description: >-
+      The visible half of the guard above. Silently declining to lock is how a
+      house ends up unlocked overnight with everyone believing it is secure.
+    mode: queued
+    max: 5
+    triggers:
+      - trigger: state
+        entity_id: sensor.perimeter_open_count
+    conditions:
+      - condition: state
+        entity_id: input_boolean.automations_paused
+        state: "off"
+      - condition: numeric_state
+        entity_id: sensor.perimeter_open_count
+        above: 0
+      - condition: state
+        entity_id: binary_sensor.everyone_away
+        state: "on"
+    actions:
+      - action: script.notify_person
+        data:
+          target: all
+          priority: warning
+          title: Open while nobody is home
+          message: >-
+            {{ state_attr('sensor.perimeter_open_count', 'open_names') | join(', ') }}
+            {{ 'is' if states('sensor.perimeter_open_count') | int == 1 else 'are' }}
+            open and the house is empty.
+
+  - id: security_unlock_notify
+    alias: "[security] Lock was unlocked"
+    description: >-
+      Notifies on every unlock while away or at night.
+
+      NOTE: reporting WHICH code was used requires the lock to expose an event
+      entity with the slot name — that is Z-Wave/Zigbee and model specific, so
+      it is wired per lock in devices/<slug>.yaml rather than guessed here.
+      Until that is wired, this reports the lock and the time only.
+    mode: queued
+    max: 10
+    triggers:
+      - trigger: event
+        event_type: state_changed
+    conditions:
+      - condition: template
+        value_template: "{{ trigger.event.data.entity_id.startswith('lock.') }}"
+      - condition: template
+        value_template: >-
+          {{ trigger.event.data.old_state is not none
+             and trigger.event.data.new_state is not none
+             and trigger.event.data.old_state.state == 'locked'
+             and trigger.event.data.new_state.state == 'unlocked' }}
+      - condition: state
+        entity_id: input_boolean.automations_paused
+        state: "off"
+      - condition: or
+        conditions:
+          - condition: state
+            entity_id: input_select.house_mode
+            state: away
+          - condition: state
+            entity_id: input_select.house_mode
+            state: night
+          - condition: state
+            entity_id: input_select.house_mode
+            state: vacation
+    actions:
+      - action: script.notify_person
+        data:
+          target: all
+          priority: >-
+            {{ 'critical' if is_state('input_select.house_mode', 'vacation') else 'warning' }}
+          title: Door unlocked
+          message: >-
+            {{ state_attr(trigger.event.data.entity_id, 'friendly_name')
+               or trigger.event.data.entity_id }}
+            was unlocked at {{ now().strftime('%H:%M') }} while the house is
+            {{ states('input_select.house_mode') }}.
+
+  # -------------------------------------------------------------------------
+  # ALARM
+  # -------------------------------------------------------------------------
+  - id: security_alarm_triggered
+    alias: "[security] Alarm triggered"
+    description: >-
+      Critical priority by definition — this is the one notification that must
+      bypass do-not-disturb. Turns on every exterior light: it helps cameras and
+      it is the single most effective deterrent available.
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: alarm_control_panel.house
+        to: triggered
+    actions:
+      - action: script.notify_person
+        data:
+          target: all
+          priority: critical
+          title: ALARM TRIGGERED
+          message: >-
+            {{ state_attr('binary_sensor.trustworthy_intrusion_signal', 'reason') }}
+      - if:
+          - condition: template
+            value_template: "{{ label_entities('exterior_light') | count > 0 }}"
+        then:
+          - action: light.turn_on
+            continue_on_error: true
+            target:
+              label_id: exterior_light
+            data:
+              brightness_pct: 100
+
+  - id: security_arm_on_away
+    alias: "[security] Arm away when the house empties"
+    description: >-
+      Guest mode deliberately suppresses this: a guest who does not know the
+      code should not be able to trip the alarm by walking to the kitchen.
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: input_select.house_mode
+        to: away
+    conditions:
+      - condition: state
+        entity_id: input_boolean.automations_paused
+        state: "off"
+      - condition: state
+        entity_id: input_boolean.guest_mode
+        state: "off"
+    actions:
+      - action: script.arm_house
+        data:
+          mode: away
+
+  - id: security_daily_check
+    alias: "[security] Daily house-secure check"
+    description: >-
+      One scheduled sweep reporting anything open or unlocked. Reports "secure"
+      too — a check that only speaks up on failure is indistinguishable from a
+      check that has silently stopped running.
+    mode: single
+    triggers:
+      - trigger: time
+        at: input_datetime.security_check_time
+    actions:
+      - action: script.notify_person
+        data:
+          target: all
+          priority: >-
+            {{ 'info' if states('sensor.house_secure_summary') == 'Secure' else 'warning' }}
+          title: "House check: {{ states('sensor.house_secure_summary') }}"
+          message: >-
+            {% if states('sensor.house_secure_summary') == 'Secure' %}
+              Everything closed and locked.
+            {% else %}
+              Open: {{ state_attr('sensor.perimeter_open_count', 'open_names') | join(', ') or 'none' }}.
+              Unlocked: {{ state_attr('sensor.house_secure_summary', 'unlocked_locks') | join(', ') or 'none' }}.
+            {% endif %}
+
+  # -------------------------------------------------------------------------
+  # VACATION PRESENCE SIMULATION
+  # -------------------------------------------------------------------------
+  - id: security_vacation_simulation
+    alias: "[security] Vacation presence simulation"
+    description: >-
+      Replays plausible occupancy while away. Deliberately NOT a fixed schedule:
+      a burglar watching for two evenings can clock lights that switch at
+      exactly 19:00 every night. Randomised interval, randomised duration, and
+      rooms chosen to suit the hour — kitchen in the evening, bedroom late, not
+      the living room at 3am.
+
+      mode: restart so a mode change cancels a pending cycle immediately.
+    mode: restart
+    triggers:
+      - trigger: state
+        entity_id: input_select.house_mode
+        to: vacation
+      - trigger: homeassistant
+        event: start
+    conditions:
+      - condition: state
+        entity_id: input_select.house_mode
+        state: vacation
+      - condition: state
+        entity_id: input_boolean.vacation_simulation
+        state: "on"
+    actions:
+      - repeat:
+          # Runs until the mode changes; the while-condition re-checks each pass.
+          while:
+            - condition: state
+              entity_id: input_select.house_mode
+              state: vacation
+            - condition: state
+              entity_id: input_boolean.vacation_simulation
+              state: "on"
+          sequence:
+            - variables:
+                hour: "{{ now().hour }}"
+                # Which label is plausible for this hour.
+                pool: >-
+                  {% if hour >= 6 and hour < 9 %}sim_morning
+                  {% elif hour >= 17 and hour < 21 %}sim_evening
+                  {% elif hour >= 21 or hour < 1 %}sim_night
+                  {% else %}none{% endif %}
+                candidates: >-
+                  {{ label_entities(pool) | select('match', 'light\.') | list
+                     if pool != 'none' else [] }}
+            - if:
+                - condition: template
+                  value_template: "{{ candidates | count > 0 }}"
+              then:
+                - variables:
+                    chosen: "{{ candidates | random }}"
+                    on_minutes: "{{ range(18, 75) | random }}"
+                - action: light.turn_on
+                  continue_on_error: true
+                  target:
+                    entity_id: "{{ chosen }}"
+                - delay:
+                    minutes: "{{ on_minutes }}"
+                - action: light.turn_off
+                  continue_on_error: true
+                  target:
+                    entity_id: "{{ chosen }}"
+            # Randomised gap before the next room, including through the dead
+            # hours when the correct behaviour is simply darkness.
+            - delay:
+                minutes: "{{ range(12, 55) | random }}"

@@ -1,0 +1,137 @@
+# network.yaml — internet reachability, and whether the things that must never
+# be offline are online.
+#
+# Deliberately uses command_line ping rather than the `ping` integration: that
+# one is config-flow only, so it would live in .storage and be invisible to this
+# repo. See CLAUDE.md, "no orphan helpers" — the same reasoning applies to
+# integrations whose config cannot be committed.
+
+command_line:
+  - sensor:
+      name: Internet latency
+      unique_id: net_internet_latency
+      # 1.1.1.1 rather than a hostname: this must keep working when DNS is the
+      # thing that has broken, which is most of the time.
+      command: >-
+        ping -c 3 -W 2 1.1.1.1 2>/dev/null | tail -1 | awk -F'/' '{print $5}' || echo ""
+      unit_of_measurement: ms
+      scan_interval: 120
+      state_class: measurement
+      availability: "{{ value is defined and value not in ['', 'unknown'] }}"
+
+  - sensor:
+      name: DNS resolution
+      unique_id: net_dns_resolution
+      # Separated from the latency check on purpose: "internet is down" and
+      # "DNS is down" produce identical symptoms for a user and need completely
+      # different fixes. The runbook branches on exactly this distinction.
+      command: >-
+        getent hosts github.com >/dev/null 2>&1 && echo ok || echo failed
+      scan_interval: 300
+
+template:
+  - binary_sensor:
+      - name: Internet up
+        unique_id: net_internet_up
+        device_class: connectivity
+        state: "{{ states('sensor.internet_latency') | is_number }}"
+        # Two failed polls before declaring an outage — a single dropped ping is
+        # normal and alerting on it trains everyone to ignore the alert.
+        delay_off:
+          minutes: 5
+
+      - name: Critical devices online
+        unique_id: net_critical_devices_online
+        device_class: connectivity
+        # Registry-driven from the `critical_uptime` label: the coordinator, the
+        # NAS, the router, whatever must not quietly die.
+        state: >-
+          {{ label_entities('critical_uptime')
+             | select('is_state', 'unavailable') | list | count == 0 }}
+        attributes:
+          offline: >-
+            {{ label_entities('critical_uptime')
+               | select('is_state', 'unavailable') | list }}
+        availability: "{{ label_entities('critical_uptime') | count > 0 }}"
+
+automation:
+  - id: network_internet_down
+    alias: "[network] Internet down"
+    description: >-
+      Notifies locally when the internet drops. Priority info rather than
+      warning because a push notification cannot leave the house during an
+      internet outage — this lands as a persistent notification on the local
+      dashboard, which is the only channel that actually works right now.
+      That is the point: the router says nothing, the house does.
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: binary_sensor.internet_up
+        to: "off"
+        for:
+          minutes: 5
+    conditions:
+      - condition: state
+        entity_id: input_boolean.automations_paused
+        state: "off"
+    actions:
+      - action: persistent_notification.create
+        data:
+          title: Internet down
+          notification_id: net_internet_down
+          message: >-
+            No route to 1.1.1.1 since {{ now().strftime('%H:%M') }}.
+            DNS check last reported: {{ states('sensor.dns_resolution') }}.
+            See docs/runbook.md, "internet down".
+
+  - id: network_internet_restored
+    alias: "[network] Internet restored"
+    description: Clears the outage notification and reports how long it lasted.
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: binary_sensor.internet_up
+        to: "on"
+    conditions:
+      - condition: template
+        value_template: "{{ trigger.from_state is not none and trigger.from_state.state == 'off' }}"
+    actions:
+      - action: persistent_notification.dismiss
+        data:
+          notification_id: net_internet_down
+      - action: script.notify_person
+        data:
+          target: all
+          priority: info
+          title: Internet restored
+          message: >-
+            Back up after
+            {{ ((as_timestamp(now()) - as_timestamp(trigger.from_state.last_changed))
+                / 60) | round(0) }} minutes.
+
+  - id: network_critical_device_offline
+    alias: "[network] Critical device offline"
+    description: >-
+      Anything labelled `critical_uptime` going unavailable for 15 minutes.
+      Fifteen rather than five because a Zigbee coordinator restart and a HA
+      update both blip these, and paging on every restart is how alerts get muted.
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: binary_sensor.critical_devices_online
+        to: "off"
+        for:
+          minutes: 15
+    conditions:
+      - condition: state
+        entity_id: input_boolean.automations_paused
+        state: "off"
+    actions:
+      - action: script.notify_person
+        data:
+          target: all
+          priority: warning
+          title: Critical device offline
+          message: >-
+            Offline for 15+ minutes:
+            {{ state_attr('binary_sensor.critical_devices_online', 'offline') | join(', ') }}

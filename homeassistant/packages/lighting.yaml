@@ -1,0 +1,355 @@
+# lighting.yaml — adaptive colour/brightness, occupancy lighting, manual override.
+#
+# The per-area motion logic lives in blueprints/automation/local/area_motion_light.yaml
+# so each area is a short instantiation rather than a copy-pasted automation.
+#
+# ADDING AN AREA is two things:
+#   1. a timer helper below, named timer.<area_slug>_light_override
+#   2. a blueprint instantiation at the bottom of this file
+# ADDING A BULB to an existing area is nothing at all — targeting is by area.
+
+input_number:
+  adaptive_min_kelvin:
+    name: Adaptive minimum colour temperature
+    icon: mdi:weather-night
+    min: 1800
+    max: 3000
+    step: 100
+    initial: 2200
+    unit_of_measurement: K
+    mode: slider
+  adaptive_max_kelvin:
+    name: Adaptive maximum colour temperature
+    icon: mdi:white-balance-sunny
+    min: 3500
+    max: 6500
+    step: 100
+    initial: 5000
+    unit_of_measurement: K
+    mode: slider
+  adaptive_min_brightness:
+    name: Adaptive minimum brightness
+    icon: mdi:brightness-2
+    min: 1
+    max: 60
+    step: 1
+    initial: 25
+    unit_of_measurement: "%"
+    mode: slider
+  adaptive_max_brightness:
+    name: Adaptive maximum brightness
+    icon: mdi:brightness-7
+    min: 40
+    max: 100
+    step: 1
+    initial: 100
+    unit_of_measurement: "%"
+    mode: slider
+  night_mode_brightness:
+    name: Night mode brightness
+    icon: mdi:sleep
+    min: 1
+    max: 30
+    step: 1
+    initial: 5
+    unit_of_measurement: "%"
+    mode: slider
+  manual_override_minutes:
+    name: Manual override window
+    icon: mdi:hand-back-right
+    description: How long automation backs off after a human touches a light.
+    min: 5
+    max: 240
+    step: 5
+    initial: 60
+    unit_of_measurement: min
+    mode: slider
+
+input_boolean:
+  adaptive_lighting_enabled:
+    name: Adaptive lighting enabled
+    icon: mdi:theme-light-dark
+
+# ---------------------------------------------------------------------------
+# Per-area override timers.
+# One per area, named by convention: timer.<area_slug>_light_override.
+# The manual-override automation below resolves the name from the area of the
+# light that changed, so it needs no edit when an area is added.
+# ---------------------------------------------------------------------------
+timer:
+  # Uncomment / add one block per real area. Slug must match the HA area slug.
+  #
+  # kitchen_light_override:
+  #   name: Kitchen light override
+  #   duration: "01:00:00"
+  #   restore: true
+  #
+  # living_room_light_override:
+  #   name: Living room light override
+  #   duration: "01:00:00"
+  #   restore: true
+  #
+  # Placeholder so the `timer:` key is valid YAML with nothing configured yet.
+  # Delete this once a real area timer exists.
+  example_area_light_override:
+    name: Example area light override
+    duration: "01:00:00"
+    restore: true
+
+script:
+  # -------------------------------------------------------------------------
+  # The adaptive curve. Called by the blueprint on turn-on and by a periodic
+  # automation so lights already on drift with the day.
+  # -------------------------------------------------------------------------
+  apply_adaptive_lighting:
+    alias: Apply adaptive lighting
+    icon: mdi:theme-light-dark
+    description: >-
+      Set colour temperature and brightness on the given lights according to sun
+      elevation and house mode. Cool and bright at midday, warm and dim after
+      sunset, minimal and deeply red-shifted in night mode.
+    mode: parallel
+    max: 25
+    fields:
+      lights:
+        description: List of light entity_ids to adjust.
+        required: true
+        selector:
+          object:
+    variables:
+      # Sun elevation drives the curve. 0 = horizon, ~50 = high noon.
+      # Normalised 0..1 across the -6 (civil twilight) to +30 degree band, so the
+      # transition happens around sunset rather than all at once at midnight.
+      elevation: "{{ state_attr('sun.sun', 'elevation') | float(0) }}"
+      daylight_factor: >-
+        {{ [[(elevation + 6) / 36, 0] | max, 1] | min }}
+      is_night_mode: "{{ is_state('input_select.house_mode', 'night') }}"
+      kelvin: >-
+        {% set lo = states('input_number.adaptive_min_kelvin') | int(2200) %}
+        {% set hi = states('input_number.adaptive_max_kelvin') | int(5000) %}
+        {% if is_night_mode %}{{ lo }}
+        {% else %}{{ (lo + (hi - lo) * daylight_factor) | round(0) | int }}{% endif %}
+      brightness_pct: >-
+        {% set lo = states('input_number.adaptive_min_brightness') | int(25) %}
+        {% set hi = states('input_number.adaptive_max_brightness') | int(100) %}
+        {% if is_night_mode %}
+          {{ states('input_number.night_mode_brightness') | int(5) }}
+        {% else %}{{ (lo + (hi - lo) * daylight_factor) | round(0) | int }}{% endif %}
+    sequence:
+      - condition: state
+        entity_id: input_boolean.adaptive_lighting_enabled
+        state: "on"
+      - repeat:
+          for_each: "{{ lights }}"
+          sequence:
+            - variables:
+                modes: "{{ state_attr(repeat.item, 'supported_color_modes') or [] }}"
+                supports_ct: "{{ 'color_temp' in modes }}"
+                supports_dim: >-
+                  {{ modes | reject('in', ['onoff']) | list | count > 0 }}
+            - choose:
+                - conditions:
+                    - condition: template
+                      value_template: "{{ supports_ct }}"
+                  sequence:
+                    - action: light.turn_on
+                      continue_on_error: true
+                      target:
+                        entity_id: "{{ repeat.item }}"
+                      data:
+                        color_temp_kelvin: "{{ kelvin }}"
+                        brightness_pct: "{{ brightness_pct }}"
+                        transition: 2
+                - conditions:
+                    - condition: template
+                      value_template: "{{ supports_dim }}"
+                  sequence:
+                    - action: light.turn_on
+                      continue_on_error: true
+                      target:
+                        entity_id: "{{ repeat.item }}"
+                      data:
+                        brightness_pct: "{{ brightness_pct }}"
+                        transition: 2
+              # on/off-only bulbs: nothing to adapt, leave them alone.
+
+  # -------------------------------------------------------------------------
+  # Mood presets, callable by voice and from a dashboard, for ANY area.
+  # Registry-driven, so this works in a room built next year.
+  # -------------------------------------------------------------------------
+  set_area_mood:
+    alias: Set area mood
+    icon: mdi:palette
+    description: Apply a lighting mood to every light in an area.
+    mode: parallel
+    max: 10
+    fields:
+      area:
+        description: Area id (slug).
+        required: true
+        selector:
+          area:
+      mood:
+        description: bright | relax | movie | off
+        required: true
+        default: relax
+        selector:
+          select:
+            options: [bright, relax, movie, "off"]
+    variables:
+      lights: "{{ area_entities(area) | select('match', 'light\\.') | list }}"
+    sequence:
+      - choose:
+          - conditions: "{{ mood == 'off' }}"
+            sequence:
+              - action: light.turn_off
+                target:
+                  entity_id: "{{ lights }}"
+                data:
+                  transition: 2
+          - conditions: "{{ mood == 'bright' }}"
+            sequence:
+              - action: light.turn_on
+                continue_on_error: true
+                target:
+                  entity_id: "{{ lights }}"
+                data:
+                  brightness_pct: 100
+                  transition: 1
+          - conditions: "{{ mood == 'relax' }}"
+            sequence:
+              - action: light.turn_on
+                continue_on_error: true
+                target:
+                  entity_id: "{{ lights }}"
+                data:
+                  brightness_pct: 40
+                  transition: 3
+          - conditions: "{{ mood == 'movie' }}"
+            sequence:
+              - action: light.turn_on
+                continue_on_error: true
+                target:
+                  entity_id: "{{ lights }}"
+                data:
+                  brightness_pct: 10
+                  transition: 3
+
+automation:
+  # -------------------------------------------------------------------------
+  # Manual override detection.
+  #
+  # One automation covers every area: it reads the area of whichever light
+  # changed and starts that area's timer. No edit needed when an area is added.
+  #
+  # LIMITATION, stated plainly: this reliably catches changes made from the HA
+  # UI, the companion app, and voice, because those carry a user_id in the
+  # context. A dumb wall switch that cuts power is invisible to HA by
+  # definition. A *smart* switch or a Zigbee wall remote is caught only if it
+  # exposes an event entity or device trigger — wire those per-device in
+  # devices/<slug>.yaml. See docs/decisions.md.
+  # -------------------------------------------------------------------------
+  - id: lighting_manual_override_detect
+    alias: "[lighting] Detect manual light change and back off"
+    description: >-
+      When a human changes a light themselves, start that area's override timer
+      so occupancy automation stops fighting them for the configured window.
+      Per-area rather than one global flag, so overriding the kitchen leaves the
+      hallway automated.
+    mode: queued
+    max: 30
+    triggers:
+      - trigger: event
+        event_type: state_changed
+    conditions:
+      - condition: template
+        value_template: "{{ trigger.event.data.entity_id.startswith('light.') }}"
+      # A real on/off change, not an attribute-only update (brightness ticking
+      # during a transition fires state_changed dozens of times).
+      - condition: template
+        value_template: >-
+          {{ trigger.event.data.new_state is not none
+             and trigger.event.data.old_state is not none
+             and trigger.event.data.new_state.state != trigger.event.data.old_state.state }}
+      # user_id present == a human did this. Our own scripts run without one.
+      - condition: template
+        value_template: "{{ trigger.event.data.new_state.context.user_id is not none }}"
+      - condition: template
+        value_template: "{{ area_id(trigger.event.data.entity_id) is not none }}"
+    actions:
+      - variables:
+          area_slug: "{{ area_id(trigger.event.data.entity_id) }}"
+          timer_entity: "timer.{{ area_slug }}_light_override"
+      # Only if that area actually declared a timer — otherwise this is a no-op
+      # rather than an error in the log every time a light is touched.
+      - condition: template
+        value_template: "{{ states(timer_entity) not in ['unknown', 'unavailable'] }}"
+      - action: timer.start
+        target:
+          entity_id: "{{ timer_entity }}"
+        data:
+          duration: >-
+            {{ (states('input_number.manual_override_minutes') | int(60) * 60) }}
+
+  # -------------------------------------------------------------------------
+  # Keep already-on lights drifting with the day.
+  # -------------------------------------------------------------------------
+  - id: lighting_adaptive_refresh
+    alias: "[lighting] Refresh adaptive lighting"
+    description: >-
+      Re-applies the adaptive curve every 15 minutes to lights that are already
+      on and labelled `adaptive`, so a lamp switched on at 3pm warms up by 8pm
+      instead of staying at noon colour all evening. Areas under manual override
+      are skipped.
+    mode: single
+    triggers:
+      - trigger: time_pattern
+        minutes: "/15"
+      - trigger: state
+        entity_id: input_select.house_mode
+    conditions:
+      - condition: state
+        entity_id: input_boolean.automations_paused
+        state: "off"
+      - condition: state
+        entity_id: input_boolean.adaptive_lighting_enabled
+        state: "on"
+    actions:
+      - variables:
+          eligible: >-
+            {% set ns = namespace(keep=[]) %}
+            {% for e in label_entities('adaptive') if e.startswith('light.') and is_state(e, 'on') %}
+              {% set a = area_id(e) %}
+              {% set t = 'timer.' ~ a ~ '_light_override' if a else '' %}
+              {% if t == '' or not is_state(t, 'active') %}
+                {% set ns.keep = ns.keep + [e] %}
+              {% endif %}
+            {% endfor %}
+            {{ ns.keep }}
+      - condition: template
+        value_template: "{{ eligible | count > 0 }}"
+      - action: script.apply_adaptive_lighting
+        data:
+          lights: "{{ eligible }}"
+
+  # -------------------------------------------------------------------------
+  # PER-AREA INSTANTIATIONS
+  #
+  # Add one block per area. This is the "few lines" the blueprint buys you.
+  # Commented out because this repo has not seen your areas and CLAUDE.md
+  # forbids inventing entity_ids or area slugs.
+  #
+  # - id: lighting_kitchen_occupancy
+  #   alias: "[lighting] Kitchen occupancy"
+  #   use_blueprint:
+  #     path: local/area_motion_light.yaml
+  #     input:
+  #       target_area: kitchen
+  #       occupancy_sensors:
+  #         - binary_sensor.kitchen_occupancy
+  #       motion_sensors:
+  #         - binary_sensor.kitchen_motion
+  #       override_timer: timer.kitchen_light_override
+  #       linger_minutes: 5
+  #       only_when_dark: true
+  # -------------------------------------------------------------------------

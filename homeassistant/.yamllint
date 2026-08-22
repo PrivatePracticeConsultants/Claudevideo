@@ -1,0 +1,31 @@
+---
+# Deliberately narrow: this lints for things that actually break Home Assistant
+# or reviews, not for cosmetic preferences. A lint gate that cries wolf gets
+# disabled, and then it catches nothing.
+extends: default
+
+ignore: |
+  .venv/
+  deps/
+  www/community/
+  custom_components/
+  secrets.yaml
+
+rules:
+  line-length:
+    max: 120
+    level: warning
+  comments:
+    min-spaces-from-content: 1
+  comments-indentation: disable
+  # HA uses `on:` as a state value constantly; the norway/bool ambiguity check
+  # is more noise than signal here as long as values stay quoted.
+  truthy:
+    allowed-values: ["true", "false", "on", "off"]
+    check-keys: false
+  indentation:
+    spaces: 2
+    indent-sequences: consistent
+  document-start: disable
+  empty-lines:
+    max: 2

@@ -1,0 +1,340 @@
+# presence.yaml — person fusion, room occupancy, arrival/departure, guest mode.
+#
+# THE DOG. A dog sets off PIR and mmWave sensors exactly like a person does.
+# Three defences, applied throughout this package:
+#   1. Label every sensor the dog can physically reach `pet_exposed`.
+#   2. A `pet_exposed` sensor alone never establishes occupancy — it needs a
+#      corroborating signal (a second sensor, a door, or device activity).
+#   3. Away-mode intrusion logic ignores pet_exposed-only motion entirely.
+# Placement and tuning guidance is in docs/decisions.md under "pet immunity".
+
+input_number:
+  presence_away_delay:
+    name: Away-mode confirmation delay
+    icon: mdi:timer-sand
+    # Hysteresis. A phone that drops Wi-Fi in a dead spot, or hands off between
+    # APs, looks exactly like leaving for about 90 seconds. Anything under ~3
+    # minutes here produces phantom away-mode and a house that turns itself off
+    # while someone is in the shower.
+    min: 2
+    max: 30
+    step: 1
+    initial: 5
+    unit_of_measurement: min
+    mode: slider
+  occupancy_clear_fast:
+    name: Occupancy clear-out — transit rooms
+    icon: mdi:walk
+    # Halls, entryways, bathrooms: people pass through, so clear quickly.
+    min: 1
+    max: 15
+    step: 1
+    initial: 3
+    unit_of_measurement: min
+    mode: slider
+  occupancy_clear_slow:
+    name: Occupancy clear-out — sitting rooms
+    icon: mdi:sofa
+    # Living rooms, offices, bedrooms: people sit still and stop triggering PIR.
+    # Too short here is the classic "lights turn off while I'm reading" failure.
+    min: 5
+    max: 60
+    step: 5
+    initial: 20
+    unit_of_measurement: min
+    mode: slider
+
+input_boolean:
+  guest_mode:
+    name: Guest mode
+    icon: mdi:account-supervisor
+    # Relaxes away-mode automations without disabling anything, so nothing has
+    # to be remembered and re-enabled after the guest leaves.
+  pet_at_home:
+    name: Pet at home
+    icon: mdi:dog
+    # Set false when the dog is boarded/travelling — corroboration requirements
+    # relax and motion becomes trustworthy again.
+
+template:
+  - binary_sensor:
+      # -----------------------------------------------------------------
+      # PERSON FUSION
+      # Registry-driven across every person entity, so onboarding a person
+      # (prompt 19) needs no edit here.
+      # -----------------------------------------------------------------
+      - name: Anyone home
+        unique_id: presence_anyone_home
+        device_class: presence
+        icon: mdi:home-account
+        state: >-
+          {{ states.person | selectattr('state', 'eq', 'home') | list | count > 0 }}
+        # delay_off is the hysteresis: going home is instant, going away must
+        # persist. Asymmetric on purpose — a false "home" is harmless, a false
+        # "away" locks someone out and disarms nothing.
+        delay_off:
+          minutes: 5
+        attributes:
+          home_now: >-
+            {{ states.person | selectattr('state', 'eq', 'home')
+               | map(attribute='name') | list }}
+          away_now: >-
+            {{ states.person | rejectattr('state', 'eq', 'home')
+               | map(attribute='name') | list }}
+
+      - name: Everyone away
+        unique_id: presence_everyone_away
+        device_class: presence
+        icon: mdi:home-export-outline
+        state: >-
+          {{ states.person | list | count > 0
+             and states.person | selectattr('state', 'eq', 'home') | list | count == 0 }}
+        delay_on:
+          minutes: 5
+        # availability: with no person entities configured this sensor would
+        # read "everyone away" on an empty house registry and arm the alarm on
+        # a fresh install. Refuse to have an opinion instead.
+        availability: "{{ states.person | list | count > 0 }}"
+
+      # -----------------------------------------------------------------
+      # HOUSE-WIDE MOTION, split by whether the dog could be the cause.
+      # -----------------------------------------------------------------
+      - name: Human motion detected
+        unique_id: presence_human_motion
+        device_class: motion
+        icon: mdi:account-alert
+        # Motion from sensors the dog CANNOT reach. This is the signal that is
+        # safe to treat as a person — used by the alarm, not by the lights.
+        state: >-
+          {% set pet = label_entities('pet_exposed') %}
+          {% set motion = states.binary_sensor
+             | selectattr('attributes.device_class', 'defined')
+             | selectattr('attributes.device_class', 'in', ['motion', 'occupancy', 'presence'])
+             | selectattr('state', 'eq', 'on')
+             | map(attribute='entity_id') | list %}
+          {{ motion | reject('in', pet) | list | count > 0 }}
+        attributes:
+          triggered_by: >-
+            {% set pet = label_entities('pet_exposed') %}
+            {{ states.binary_sensor
+               | selectattr('attributes.device_class', 'defined')
+               | selectattr('attributes.device_class', 'in', ['motion', 'occupancy', 'presence'])
+               | selectattr('state', 'eq', 'on')
+               | map(attribute='entity_id') | reject('in', pet) | list }}
+
+      - name: Corroborated motion
+        unique_id: presence_corroborated_motion
+        device_class: motion
+        icon: mdi:account-check
+        # Two or more independent sensors active at once. A dog triggers one
+        # sensor as it moves; two simultaneous hits in different areas is a
+        # person, or two dogs, and the second case is rarer than a false alarm.
+        state: >-
+          {% set active = states.binary_sensor
+             | selectattr('attributes.device_class', 'defined')
+             | selectattr('attributes.device_class', 'in', ['motion', 'occupancy', 'presence'])
+             | selectattr('state', 'eq', 'on')
+             | map(attribute='entity_id') | list %}
+          {% set areas = active | map('area_id') | reject('none') | unique | list %}
+          {{ active | count >= 2 or areas | count >= 2 }}
+
+      - name: Trustworthy intrusion signal
+        unique_id: presence_intrusion_signal
+        device_class: safety
+        icon: mdi:shield-alert
+        # THE sensor the alarm uses while away. Deliberately conservative:
+        # a perimeter opening is always trusted (a dog does not open a door);
+        # interior motion is trusted only if it is NOT pet-exposed, or if the
+        # dog is known to be away.
+        state: >-
+          {% set perimeter_open = label_entities('security_perimeter')
+             | select('match', 'binary_sensor\.')
+             | select('is_state', 'on') | list | count > 0 %}
+          {% set pet_home = is_state('input_boolean.pet_at_home', 'on') %}
+          {% set human = is_state('binary_sensor.human_motion_detected', 'on') %}
+          {% set any_motion = is_state('binary_sensor.corroborated_motion', 'on') %}
+          {{ perimeter_open or human or (any_motion and not pet_home) }}
+        attributes:
+          reason: >-
+            {% set perimeter = label_entities('security_perimeter')
+               | select('match', 'binary_sensor\.')
+               | select('is_state', 'on') | list %}
+            {% if perimeter | count > 0 %}perimeter: {{ perimeter | join(', ') }}
+            {% elif is_state('binary_sensor.human_motion_detected', 'on') %}
+              pet-immune motion: {{ state_attr('binary_sensor.human_motion_detected', 'triggered_by') | join(', ') }}
+            {% elif is_state('binary_sensor.corroborated_motion', 'on')
+                    and is_state('input_boolean.pet_at_home', 'off') %}
+              corroborated motion, pet is away
+            {% else %}none{% endif %}
+
+      # -----------------------------------------------------------------
+      # PER-ROOM OCCUPANCY — copy this block per room.
+      #
+      # The ONLY per-room values are: name, the area slug, the clear-out
+      # helper, and whether the room needs pet corroboration. Everything else
+      # is registry-driven — adding a sensor to the room means assigning it to
+      # the area in HA, which is zero edits to this file.
+      #
+      # Commented out because this repo has not seen your areas, and CLAUDE.md
+      # forbids inventing area slugs.
+      #
+      # - name: Living room occupancy
+      #   unique_id: presence_occupancy_living_room
+      #   device_class: occupancy
+      #   delay_off:
+      #     minutes: 20            # occupancy_clear_slow: a sitting room
+      #   state: >-
+      #     {% set area = 'living_room' %}
+      #     {% set pet = label_entities('pet_exposed') %}
+      #     {% set sensors = area_entities(area)
+      #        | select('match', 'binary_sensor\.') | list %}
+      #     {% set active = sensors | select('is_state', 'on') | list %}
+      #     {% set human_active = active | reject('in', pet) | list %}
+      #     {% if human_active | count > 0 %}true
+      #     {% elif is_state('input_boolean.pet_at_home', 'off') %}
+      #       {{ active | count > 0 }}
+      #     {% else %}
+      #       {{ active | count >= 2 }}
+      #     {% endif %}
+      # -----------------------------------------------------------------
+
+automation:
+  # -------------------------------------------------------------------------
+  # HOUSE MODE transitions
+  # -------------------------------------------------------------------------
+  - id: presence_set_away
+    alias: "[presence] Everyone left — go to away"
+    description: >-
+      Driven by binary_sensor.everyone_away, which already carries the 5-minute
+      hysteresis, so this does not need its own `for:`. Never overrides vacation
+      mode — that is set deliberately and a day trip should not clear it.
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: binary_sensor.everyone_away
+        to: "on"
+    conditions:
+      - condition: state
+        entity_id: input_boolean.automations_paused
+        state: "off"
+      - condition: not
+        conditions:
+          - condition: state
+            entity_id: input_select.house_mode
+            state: vacation
+    actions:
+      - action: input_select.select_option
+        target:
+          entity_id: input_select.house_mode
+        data:
+          option: away
+      - action: script.notify_person
+        data:
+          target: all
+          priority: info
+          title: House set to away
+          message: Everyone has left. Away-mode automations are active.
+
+  - id: presence_arrival
+    alias: "[presence] Someone arrived"
+    description: >-
+      Arrival sequence. Guest mode is preserved rather than overwritten, so a
+      guest arriving home does not silently re-arm away-mode behaviour.
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: binary_sensor.anyone_home
+        to: "on"
+    conditions:
+      - condition: state
+        entity_id: input_boolean.automations_paused
+        state: "off"
+    actions:
+      - action: input_select.select_option
+        target:
+          entity_id: input_select.house_mode
+        data:
+          option: >-
+            {{ 'guest' if is_state('input_boolean.guest_mode', 'on') else 'home' }}
+      # Entry lighting only if it is actually dark — arriving at noon does not
+      # need the hall lit.
+      - if:
+          - condition: sun
+            after: sunset
+            before: sunrise
+          - condition: template
+            value_template: "{{ label_entities('entry_light') | count > 0 }}"
+        then:
+          - action: light.turn_on
+            continue_on_error: true
+            target:
+              label_id: entry_light
+
+  - id: presence_night_mode
+    alias: "[presence] Enter night mode"
+    description: >-
+      Time-based rather than "last person stopped moving", because mmWave in a
+      bedroom sees a sleeping person and would never trigger. Skipped entirely
+      when nobody is home so an empty house does not shuffle modes overnight.
+    mode: single
+    triggers:
+      - trigger: time
+        at: "23:00:00"
+    conditions:
+      - condition: state
+        entity_id: input_boolean.automations_paused
+        state: "off"
+      - condition: state
+        entity_id: binary_sensor.anyone_home
+        state: "on"
+      - condition: not
+        conditions:
+          - condition: state
+            entity_id: input_select.house_mode
+            state: vacation
+    actions:
+      - action: input_select.select_option
+        target:
+          entity_id: input_select.house_mode
+        data:
+          option: night
+
+  - id: presence_morning_mode
+    alias: "[presence] Leave night mode"
+    description: Return to home/guest at sunrise, so adaptive lighting stops red-shifting.
+    mode: single
+    triggers:
+      - trigger: sun
+        event: sunrise
+        offset: "-00:30:00"
+    conditions:
+      - condition: state
+        entity_id: input_select.house_mode
+        state: night
+    actions:
+      - action: input_select.select_option
+        target:
+          entity_id: input_select.house_mode
+        data:
+          option: >-
+            {{ 'guest' if is_state('input_boolean.guest_mode', 'on') else 'home' }}
+
+  - id: presence_guest_mode_sync
+    alias: "[presence] Guest mode toggled"
+    description: >-
+      Keeps house_mode consistent when guest mode is switched, so the two cannot
+      disagree and leave away-automations half-applied with a guest in the house.
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: input_boolean.guest_mode
+    conditions:
+      - condition: state
+        entity_id: binary_sensor.anyone_home
+        state: "on"
+    actions:
+      - action: input_select.select_option
+        target:
+          entity_id: input_select.house_mode
+        data:
+          option: "{{ 'guest' if trigger.to_state.state == 'on' else 'home' }}"

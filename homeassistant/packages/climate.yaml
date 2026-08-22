@@ -1,0 +1,542 @@
+# climate.yaml — comfort, short-cycle protection, dehumidification, fan-first.
+#
+# SYSTEM TYPE: set input_select.hvac_system_type to match your hardware. The
+# short-cycle protection constants below are defaulted for a compressor-based
+# system (mini-split or central AC). A ducted system with a variable-speed
+# air handler can safely use shorter lockouts; resistive heat needs none.
+#
+# SENSORS THIS PACKAGE NEEDS AND WHY — see docs/decisions.md "climate gaps".
+# Without them, the listed feature degrades rather than breaks:
+#   * per-zone humidity      -> comfort index falls back to dry-bulb only
+#   * window/door contacts   -> open-window pause cannot work at all
+#   * ceiling fan as a fan.* -> fan-first coordination is skipped
+#   * outdoor temperature    -> no economiser logic, no "open a window instead"
+#   * per-zone occupancy     -> falls back to house_mode only
+
+input_select:
+  hvac_system_type:
+    name: HVAC system type
+    icon: mdi:hvac
+    options:
+      - ducted_central
+      - ductless_minisplit
+      - window_units
+    initial: ductless_minisplit
+
+input_number:
+  comfort_target:
+    name: Comfort target temperature
+    icon: mdi:thermometer
+    min: 60
+    max: 82
+    step: 1
+    initial: 72
+    unit_of_measurement: "°F"
+    mode: slider
+  comfort_deadband:
+    name: Comfort deadband
+    icon: mdi:arrow-expand-vertical
+    # The half-width of the dead zone. With target 72 and deadband 2, cooling
+    # starts at 74 and stops at 72. Narrower than ~1.5F and a compressor system
+    # will hunt no matter how good the lockout is.
+    min: 1
+    max: 5
+    step: 0.5
+    initial: 2
+    unit_of_measurement: "°F"
+    mode: slider
+  hvac_min_runtime:
+    name: HVAC minimum runtime
+    icon: mdi:timer-play
+    # Once running, run at least this long. Compressor oil return and latent
+    # (moisture) removal both need sustained runtime; 3-minute cycles dehumidify
+    # nothing and shorten the compressor's life.
+    min: 3
+    max: 30
+    step: 1
+    initial: 10
+    unit_of_measurement: min
+    mode: slider
+  hvac_min_offtime:
+    name: HVAC minimum off time
+    icon: mdi:timer-pause
+    # Compressors must equalise head pressure before restarting. Restarting a
+    # scroll compressor against high head pressure is how they die. 5 minutes
+    # is the industry floor; this is a HARD requirement, not a preference.
+    min: 3
+    max: 20
+    step: 1
+    initial: 5
+    unit_of_measurement: min
+    mode: slider
+  window_open_grace:
+    name: Window-open grace period
+    icon: mdi:window-open
+    # Delay before pausing, so airing a room for 30 seconds does not cycle HVAC.
+    min: 1
+    max: 30
+    step: 1
+    initial: 5
+    unit_of_measurement: min
+    mode: slider
+  rh_target_low:
+    name: Humidity target low
+    icon: mdi:water-percent
+    min: 30
+    max: 50
+    step: 1
+    initial: 40
+    unit_of_measurement: "%"
+    mode: slider
+  rh_target_high:
+    name: Humidity target high
+    icon: mdi:water-percent
+    min: 45
+    max: 65
+    step: 1
+    initial: 55
+    unit_of_measurement: "%"
+    mode: slider
+  mold_risk_rh:
+    name: Mold risk RH threshold
+    icon: mdi:mushroom-outline
+    # Sustained RH above ~60% supports mold growth on most surfaces. This is a
+    # building-health threshold, not a comfort one.
+    min: 55
+    max: 75
+    step: 1
+    initial: 60
+    unit_of_measurement: "%"
+    mode: slider
+  fan_first_delta:
+    name: Fan-first temperature delta
+    icon: mdi:fan
+    # If we are within this many degrees of target, move air instead of running
+    # the compressor. A ceiling fan is ~50W against ~1500W for a compressor, and
+    # air movement is worth roughly 4F of perceived temperature.
+    min: 0.5
+    max: 5
+    step: 0.5
+    initial: 2
+    unit_of_measurement: "°F"
+    mode: slider
+
+input_boolean:
+  climate_automation_enabled:
+    name: Climate automation enabled
+    icon: mdi:thermostat-auto
+  dehumidify_enabled:
+    name: Dehumidification enabled
+    icon: mdi:air-humidifier
+
+timer:
+  # Global compressor lockout. For a multi-zone system, duplicate per outdoor
+  # unit and adjust the automations to match; a single lockout is correct for
+  # one condenser, and conservative (but safe) for several.
+  hvac_compressor_lockout:
+    name: HVAC compressor lockout
+    duration: "00:05:00"
+    restore: true
+  hvac_min_runtime_hold:
+    name: HVAC minimum runtime hold
+    duration: "00:10:00"
+    restore: true
+  climate_manual_override:
+    name: Climate manual override
+    duration: "02:00:00"
+    restore: true
+
+template:
+  - sensor:
+      # -----------------------------------------------------------------
+      # House-wide aggregates. Registry-driven: every sensor carrying the
+      # right device_class is included, so a new room sensor needs no edit.
+      # -----------------------------------------------------------------
+      - name: House max humidity
+        unique_id: climate_house_max_humidity
+        unit_of_measurement: "%"
+        device_class: humidity
+        state_class: measurement
+        state: >-
+          {% set hs = states.sensor
+             | selectattr('attributes.device_class', 'defined')
+             | selectattr('attributes.device_class', 'eq', 'humidity')
+             | selectattr('state', 'is_number') | map(attribute='state')
+             | map('float') | list %}
+          {{ hs | max | round(1) if hs | count > 0 else 'unknown' }}
+        attributes:
+          wettest_zone: >-
+            {% set hs = states.sensor
+               | selectattr('attributes.device_class', 'defined')
+               | selectattr('attributes.device_class', 'eq', 'humidity')
+               | selectattr('state', 'is_number') | list %}
+            {% if hs | count > 0 %}
+              {% set worst = hs | sort(attribute='state', reverse=true) | first %}
+              {{ area_name(worst.entity_id) or worst.name }}
+            {% else %}unknown{% endif %}
+
+      - name: House average temperature
+        unique_id: climate_house_avg_temperature
+        unit_of_measurement: "°F"
+        device_class: temperature
+        state_class: measurement
+        state: >-
+          {% set ts = states.sensor
+             | selectattr('attributes.device_class', 'defined')
+             | selectattr('attributes.device_class', 'eq', 'temperature')
+             | selectattr('state', 'is_number') | map(attribute='state')
+             | map('float') | list %}
+          {{ (ts | sum / ts | count) | round(1) if ts | count > 0 else 'unknown' }}
+
+      # -----------------------------------------------------------------
+      # Comfort index: apparent temperature, not dry-bulb. 78F at 70% RH is
+      # meaningfully less comfortable than 78F at 40%, and a thermostat that
+      # only reads dry-bulb cannot tell the difference.
+      #
+      # Rothfusz heat-index regression, valid roughly above 80F; below that the
+      # simple average with dry-bulb that NWS uses is applied instead.
+      # -----------------------------------------------------------------
+      - name: House comfort index
+        unique_id: climate_house_comfort_index
+        unit_of_measurement: "°F"
+        device_class: temperature
+        state_class: measurement
+        state: >-
+          {% set t = states('sensor.house_average_temperature') | float(-999) %}
+          {% set r = states('sensor.house_max_humidity') | float(-1) %}
+          {% if t == -999 or r < 0 %}unknown
+          {% else %}
+            {% set simple = 0.5 * (t + 61.0 + ((t - 68.0) * 1.2) + (r * 0.094)) %}
+            {% if (simple + t) / 2 < 80 %}
+              {{ simple | round(1) }}
+            {% else %}
+              {% set hi = -42.379 + 2.04901523*t + 10.14333127*r
+                          - 0.22475541*t*r - 0.00683783*t*t
+                          - 0.05481717*r*r + 0.00122874*t*t*r
+                          + 0.00085282*t*r*r - 0.00000199*t*t*r*r %}
+              {{ hi | round(1) }}
+            {% endif %}
+          {% endif %}
+        availability: >-
+          {{ states('sensor.house_average_temperature') | is_number
+             and states('sensor.house_max_humidity') | is_number }}
+
+  - binary_sensor:
+      - name: Mold risk
+        unique_id: climate_mold_risk
+        device_class: problem
+        icon: mdi:mushroom-outline
+        state: >-
+          {{ states('sensor.house_max_humidity') | float(0)
+             > states('input_number.mold_risk_rh') | float(60) }}
+        attributes:
+          zone: "{{ state_attr('sensor.house_max_humidity', 'wettest_zone') }}"
+
+      - name: Any window open
+        unique_id: climate_any_window_open
+        device_class: opening
+        # Registry-driven from the security_perimeter label, so the same label
+        # serves both the alarm and the "stop cooling the street" logic.
+        state: >-
+          {{ label_entities('security_perimeter')
+             | select('match', 'binary_sensor\.')
+             | select('is_state', 'on') | list | count > 0 }}
+        attributes:
+          open_now: >-
+            {{ label_entities('security_perimeter')
+               | select('match', 'binary_sensor\.')
+               | select('is_state', 'on') | list }}
+
+      - name: HVAC may start
+        unique_id: climate_hvac_may_start
+        icon: mdi:air-conditioner
+        # The single gate every start decision consults. Short-cycle protection
+        # is expressed once, here, rather than repeated in each automation where
+        # it could be forgotten.
+        state: >-
+          {{ is_state('timer.hvac_compressor_lockout', 'idle')
+             and is_state('input_boolean.climate_automation_enabled', 'on')
+             and is_state('input_boolean.automations_paused', 'off')
+             and not is_state('timer.climate_manual_override', 'active') }}
+
+script:
+  climate_boost:
+    alias: Climate boost
+    icon: mdi:fan-plus
+    description: >-
+      Temporarily drive a zone hard, then hand control back to automation.
+      Starts the manual-override timer so scheduled logic does not immediately
+      undo it.
+    mode: restart
+    fields:
+      area:
+        description: Area to boost.
+        required: true
+        selector:
+          area:
+      minutes:
+        description: How long to boost.
+        required: false
+        default: 30
+        selector:
+          number:
+            min: 5
+            max: 180
+            unit_of_measurement: min
+      direction:
+        description: cool | heat
+        required: false
+        default: cool
+        selector:
+          select:
+            options: [cool, heat]
+    variables:
+      zone_climate: "{{ area_entities(area) | select('match', 'climate\\.') | list }}"
+      offset: "{{ 4 if direction == 'cool' else -4 }}"
+    sequence:
+      - condition: template
+        value_template: "{{ zone_climate | count > 0 }}"
+      - action: timer.start
+        target:
+          entity_id: timer.climate_manual_override
+        data:
+          duration: "{{ (minutes | int(30)) * 60 }}"
+      - action: climate.set_temperature
+        continue_on_error: true
+        target:
+          entity_id: "{{ zone_climate }}"
+        data:
+          temperature: >-
+            {{ states('input_number.comfort_target') | float(72) - offset | float }}
+
+automation:
+  # -------------------------------------------------------------------------
+  # SHORT-CYCLE PROTECTION. Hard requirement.
+  # -------------------------------------------------------------------------
+  - id: climate_start_lockout_on_stop
+    alias: "[climate] Start compressor lockout when HVAC stops"
+    description: >-
+      Whenever any climate entity leaves an active state, begin the minimum
+      off-time lockout. binary_sensor.hvac_may_start reads this timer, so every
+      start path is protected without each one re-implementing the check.
+    mode: single
+    triggers:
+      - trigger: event
+        event_type: state_changed
+    conditions:
+      - condition: template
+        value_template: "{{ trigger.event.data.entity_id.startswith('climate.') }}"
+      - condition: template
+        value_template: >-
+          {{ trigger.event.data.old_state is not none
+             and trigger.event.data.new_state is not none
+             and trigger.event.data.old_state.attributes.get('hvac_action')
+                 in ['cooling', 'heating']
+             and trigger.event.data.new_state.attributes.get('hvac_action')
+                 not in ['cooling', 'heating'] }}
+    actions:
+      - action: timer.start
+        target:
+          entity_id: timer.hvac_compressor_lockout
+        data:
+          duration: "{{ (states('input_number.hvac_min_offtime') | int(5)) * 60 }}"
+
+  - id: climate_start_runtime_hold_on_start
+    alias: "[climate] Hold minimum runtime when HVAC starts"
+    description: >-
+      Mirror of the lockout: once running, stay running long enough to actually
+      remove latent heat. Stop decisions check this timer.
+    mode: single
+    triggers:
+      - trigger: event
+        event_type: state_changed
+    conditions:
+      - condition: template
+        value_template: "{{ trigger.event.data.entity_id.startswith('climate.') }}"
+      - condition: template
+        value_template: >-
+          {{ trigger.event.data.old_state is not none
+             and trigger.event.data.new_state is not none
+             and trigger.event.data.old_state.attributes.get('hvac_action')
+                 not in ['cooling', 'heating']
+             and trigger.event.data.new_state.attributes.get('hvac_action')
+                 in ['cooling', 'heating'] }}
+    actions:
+      - action: timer.start
+        target:
+          entity_id: timer.hvac_min_runtime_hold
+        data:
+          duration: "{{ (states('input_number.hvac_min_runtime') | int(10)) * 60 }}"
+
+  # -------------------------------------------------------------------------
+  # WINDOW OPEN -> pause cooling in that zone after a grace period.
+  # -------------------------------------------------------------------------
+  - id: climate_pause_on_window_open
+    alias: "[climate] Pause HVAC while a window is open"
+    description: >-
+      After the grace period, turn off climate entities in areas that have an
+      open perimeter opening. Grace exists so airing a room briefly does not
+      cycle the compressor — which the lockout would then punish for 5 minutes.
+    mode: restart
+    triggers:
+      - trigger: state
+        entity_id: binary_sensor.any_window_open
+        to: "on"
+        for:
+          minutes: 5
+    conditions:
+      - condition: state
+        entity_id: input_boolean.automations_paused
+        state: "off"
+      - condition: state
+        entity_id: input_boolean.climate_automation_enabled
+        state: "on"
+    actions:
+      - variables:
+          affected_areas: >-
+            {{ state_attr('binary_sensor.any_window_open', 'open_now')
+               | map('area_id') | reject('none') | unique | list }}
+          zone_climate: >-
+            {% set ns = namespace(e=[]) %}
+            {% for a in affected_areas %}
+              {% set ns.e = ns.e + (area_entities(a) | select('match', 'climate\.') | list) %}
+            {% endfor %}
+            {{ ns.e | unique | list }}
+      - condition: template
+        value_template: "{{ zone_climate | count > 0 }}"
+      - action: climate.set_hvac_mode
+        continue_on_error: true
+        target:
+          entity_id: "{{ zone_climate }}"
+        data:
+          hvac_mode: "off"
+      - action: script.notify_person
+        data:
+          target: all
+          priority: info
+          title: HVAC paused — window open
+          message: >-
+            Paused in {{ affected_areas | join(', ') }} because
+            {{ state_attr('binary_sensor.any_window_open', 'open_now') | join(', ') }}
+            has been open for {{ states('input_number.window_open_grace') }} minutes.
+
+  # -------------------------------------------------------------------------
+  # FAN FIRST. Move air before running a compressor.
+  # -------------------------------------------------------------------------
+  - id: climate_fan_before_compressor
+    alias: "[climate] Prefer fans when the delta is small"
+    description: >-
+      When the house is only slightly warm, run ceiling fans labelled
+      `comfort_fan` instead of cooling. ~50W vs ~1500W, and air movement is
+      worth roughly 4F of perceived temperature. Only while someone is home —
+      a fan cools people, not rooms.
+    mode: single
+    triggers:
+      - trigger: numeric_state
+        entity_id: sensor.house_comfort_index
+        above: input_number.comfort_target
+        for:
+          minutes: 5
+    conditions:
+      - condition: state
+        entity_id: input_boolean.automations_paused
+        state: "off"
+      - condition: state
+        entity_id: input_boolean.climate_automation_enabled
+        state: "on"
+      - condition: not
+        conditions:
+          - condition: state
+            entity_id: input_select.house_mode
+            state: away
+      - condition: template
+        value_template: >-
+          {% set over = states('sensor.house_comfort_index') | float(0)
+                        - states('input_number.comfort_target') | float(72) %}
+          {{ over <= states('input_number.fan_first_delta') | float(2) }}
+      - condition: template
+        value_template: "{{ label_entities('comfort_fan') | count > 0 }}"
+    actions:
+      - action: fan.turn_on
+        continue_on_error: true
+        target:
+          label_id: comfort_fan
+
+  # -------------------------------------------------------------------------
+  # DEHUMIDIFICATION, separate from cooling.
+  # -------------------------------------------------------------------------
+  - id: climate_dehumidify
+    alias: "[climate] Dehumidify to target band"
+    description: >-
+      Runs dehumidifiers labelled `dehumidifier` on the RH band, independently
+      of temperature. Deliberately separate from cooling: a cool damp house is
+      the case a temperature-only thermostat handles worst.
+    mode: single
+    triggers:
+      - trigger: numeric_state
+        entity_id: sensor.house_max_humidity
+        above: input_number.rh_target_high
+        for:
+          minutes: 10
+        id: too_wet
+      - trigger: numeric_state
+        entity_id: sensor.house_max_humidity
+        below: input_number.rh_target_low
+        for:
+          minutes: 10
+        id: dry_enough
+    conditions:
+      - condition: state
+        entity_id: input_boolean.dehumidify_enabled
+        state: "on"
+      - condition: state
+        entity_id: input_boolean.automations_paused
+        state: "off"
+      - condition: template
+        value_template: "{{ label_entities('dehumidifier') | count > 0 }}"
+    actions:
+      - choose:
+          - conditions:
+              - condition: trigger
+                id: too_wet
+            sequence:
+              - action: homeassistant.turn_on
+                continue_on_error: true
+                target:
+                  label_id: dehumidifier
+          - conditions:
+              - condition: trigger
+                id: dry_enough
+            sequence:
+              - action: homeassistant.turn_off
+                continue_on_error: true
+                target:
+                  label_id: dehumidifier
+
+  - id: climate_mold_risk_alert
+    alias: "[climate] Sustained mold-risk humidity"
+    description: >-
+      Building-health alert, not a comfort one. Two hours above the threshold
+      means condensation risk on cold surfaces, so this warrants a real push
+      rather than a dashboard badge nobody looks at.
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: binary_sensor.mold_risk
+        to: "on"
+        for:
+          hours: 2
+    conditions:
+      - condition: state
+        entity_id: input_boolean.automations_paused
+        state: "off"
+    actions:
+      - action: script.notify_person
+        data:
+          target: all
+          priority: warning
+          title: Mold-risk humidity
+          message: >-
+            {{ state_attr('binary_sensor.mold_risk', 'zone') }} has been above
+            {{ states('input_number.mold_risk_rh') }}% RH for two hours
+            (currently {{ states('sensor.house_max_humidity') }}%).

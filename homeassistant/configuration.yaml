@@ -1,0 +1,51 @@
+# Includes only. No logic lives in this file — see CLAUDE.md.
+# Everything functional is a package under packages/, auto-included by name.
+
+homeassistant:
+  name: !secret home_name
+  latitude: !secret home_latitude
+  longitude: !secret home_longitude
+  elevation: !secret home_elevation
+  unit_system: us_customary
+  time_zone: !secret home_time_zone
+  currency: USD
+  country: US
+  # One file per functional domain. The filename is the package name.
+  packages: !include_dir_named packages
+
+# The standard bundle: frontend, history, logbook, mobile_app, energy, ssdp,
+# zeroconf, bluetooth, and friends. Keep it — dropping it to speed up
+# check_config diverges this repo from production, which is worse than slow.
+default_config:
+
+automation: !include_dir_merge_list automations/
+script: !include_dir_merge_named scripts_yaml/
+scene: !include_dir_merge_list scenes/
+
+# Dashboards in YAML mode so they are versioned and reviewable in a diff.
+lovelace:
+  mode: yaml
+  resources: []
+  dashboards:
+    dash-home:
+      mode: yaml
+      title: Home
+      icon: mdi:home
+      show_in_sidebar: true
+      filename: dashboards/home.yaml
+    dash-admin:
+      mode: yaml
+      title: Admin
+      icon: mdi:cog
+      show_in_sidebar: true
+      require_admin: true
+      filename: dashboards/admin.yaml
+    dash-guest:
+      mode: yaml
+      title: Guest
+      icon: mdi:account-group
+      show_in_sidebar: true
+      filename: dashboards/guest.yaml
+
+frontend:
+  themes: !include_dir_merge_named themes/
