@@ -44,7 +44,8 @@ template:
       - name: Wind speed
         unique_id: weather_wind_speed
         unit_of_measurement: "mph"
-        device_class: wind_speed
+        # no device_class: wind_speed forces two-decimal display ("6.00 mph")
+        # everywhere the state is printed; a wall panel wants "6 mph"
         state_class: measurement
         state: >-
           {% set wx = states.weather | map(attribute='entity_id') | list %}
@@ -149,8 +150,22 @@ template:
         response_variable: forecast_response
       - variables:
           # response is keyed by entity_id
-          today: >-
-            {{ (forecast_response[wx].forecast | default([]))[0] | default({}) }}
+          fc: "{{ forecast_response[wx].forecast | default([]) }}"
+          today: "{{ fc[0] | default({}) }}"
+          day1: "{{ fc[1] | default({}) }}"
+          day2: "{{ fc[2] | default({}) }}"
+          day3: "{{ fc[3] | default({}) }}"
+          icon_map: >-
+            {{ {'clear-night': 'mdi:weather-night', 'cloudy': 'mdi:weather-cloudy',
+                'fog': 'mdi:weather-fog', 'hail': 'mdi:weather-hail',
+                'lightning': 'mdi:weather-lightning',
+                'lightning-rainy': 'mdi:weather-lightning-rainy',
+                'partlycloudy': 'mdi:weather-partly-cloudy',
+                'pouring': 'mdi:weather-pouring', 'rainy': 'mdi:weather-rainy',
+                'snowy': 'mdi:weather-snowy', 'snowy-rainy': 'mdi:weather-snowy-rainy',
+                'sunny': 'mdi:weather-sunny', 'windy': 'mdi:weather-windy',
+                'windy-variant': 'mdi:weather-windy-variant',
+                'exceptional': 'mdi:alert-circle-outline'} }}
     sensor:
       - name: Forecast high today
         unique_id: weather_forecast_high_today
@@ -177,6 +192,48 @@ template:
         # live on a fresh instance.
         state: "{{ today.get('templow', none) if today is defined else none }}"
         availability: "{{ today is defined and today | count > 0 }}"
+
+      # ---- the next three days, for the weather card's forecast rows ----
+      # Plain string states ("79° / 61°") so no unit coercion applies; the day
+      # name and condition ride as attributes; the icon tracks the condition.
+      - name: Forecast day 1
+        unique_id: weather_forecast_day1
+        icon: "{{ icon_map.get(day1.get('condition'), 'mdi:weather-partly-cloudy') }}"
+        state: >-
+          {% if day1 is defined and day1.get('temperature') is not none %}
+            {{ day1.get('temperature') | round(0) | int }}° / {{ day1.get('templow', 0) | round(0) | int }}°
+          {% else %}—{% endif %}
+        attributes:
+          day: >-
+            {{ as_timestamp(day1.get('datetime')) | timestamp_custom('%A')
+               if day1 is defined and day1.get('datetime') else '' }}
+        availability: "{{ day1 is defined and day1 | count > 0 }}"
+
+      - name: Forecast day 2
+        unique_id: weather_forecast_day2
+        icon: "{{ icon_map.get(day2.get('condition'), 'mdi:weather-partly-cloudy') }}"
+        state: >-
+          {% if day2 is defined and day2.get('temperature') is not none %}
+            {{ day2.get('temperature') | round(0) | int }}° / {{ day2.get('templow', 0) | round(0) | int }}°
+          {% else %}—{% endif %}
+        attributes:
+          day: >-
+            {{ as_timestamp(day2.get('datetime')) | timestamp_custom('%A')
+               if day2 is defined and day2.get('datetime') else '' }}
+        availability: "{{ day2 is defined and day2 | count > 0 }}"
+
+      - name: Forecast day 3
+        unique_id: weather_forecast_day3
+        icon: "{{ icon_map.get(day3.get('condition'), 'mdi:weather-partly-cloudy') }}"
+        state: >-
+          {% if day3 is defined and day3.get('temperature') is not none %}
+            {{ day3.get('temperature') | round(0) | int }}° / {{ day3.get('templow', 0) | round(0) | int }}°
+          {% else %}—{% endif %}
+        attributes:
+          day: >-
+            {{ as_timestamp(day3.get('datetime')) | timestamp_custom('%A')
+               if day3 is defined and day3.get('datetime') else '' }}
+        availability: "{{ day3 is defined and day3 | count > 0 }}"
 
       - name: Forecast precipitation chance
         unique_id: weather_forecast_precip_today

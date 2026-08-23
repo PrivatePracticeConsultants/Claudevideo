@@ -1,13 +1,11 @@
-# home.yaml — the control panel.
+# home.yaml — the wall-panel control screen.
 #
-# Sections layout, core cards only, every type verified against the shipped
-# frontend by scripts/check-dashboards.py. Every entity referenced is one this
-# repo declares, so this renders correctly on a fresh instance.
-#
-# The hero's background artwork CHANGES WITH THE WEATHER: an image element
-# keyed on sensor.weather_condition_raw maps every HA condition token to one of
-# eight generated variants (scripts/generate-hero-art.py -> www/hero/). The
-# card's base image is the fallback for unknown/unavailable.
+# Composed to match the reference design: a room scene on the left, a tall
+# weather card with real forecast rows in the middle, a gradient thermostat
+# dial with chunky toggles on the right. Everything is core cards — the "designed"
+# chrome is generated SVG art (scripts/generate-hero-art.py) with every number
+# overlaid live by picture-elements, so nothing here is a mock-up: it is the
+# running house, drawn well.
 title: Home
 views:
   - title: Home
@@ -31,6 +29,10 @@ views:
         entity: binary_sensor.anyone_home
         name: Home
         color: green
+        visibility:
+          - condition: state
+            entity: binary_sensor.anyone_home
+            state_not: unavailable
       - type: entity
         entity: sensor.outdoor_temperature
         name: Outside
@@ -42,34 +44,7 @@ views:
 
     sections:
       # ---------------------------------------------------------------
-      # STATUS — one line. If all is well this is all there is to read.
-      # ---------------------------------------------------------------
-      - type: grid
-        column_span: 3
-        cards:
-          - type: markdown
-            text_only: true
-            content: >-
-              {% set s = states('sensor.house_status_summary') %}
-              {% if s == 'All clear' %}
-
-              ## ✅ All clear
-
-              {{ states('sensor.house_secure_summary') }} ·
-              {{ states('input_select.house_mode') | title }} mode ·
-              {{ states('sensor.weather_summary') }}
-
-              {% else %}
-
-              ## ⚠️ {{ s }}
-
-              {{ states('sensor.house_secure_summary') }} ·
-              {{ states('input_select.house_mode') | title }} mode
-
-              {% endif %}
-
-      # ---------------------------------------------------------------
-      # NEEDS ATTENTION — every card conditional; invisible when fine.
+      # NEEDS ATTENTION — conditional; the row is invisible when all is well.
       # ---------------------------------------------------------------
       - type: grid
         column_span: 3
@@ -138,11 +113,60 @@ views:
                 {{ (state_attr('sensor.low_battery_devices', 'devices') or [])
                    | map('replace', 'sensor.', '') | join(', ') }}
 
-      # ---------------------------------------------------------------
-      # HOUSE — daily controls, one tap each.
-      # ---------------------------------------------------------------
+      # ===============================================================
+      # LEFT — the room scene, then the house controls.
+      # ===============================================================
       - type: grid
         cards:
+          - type: picture-elements
+            image: /local/hero/room.svg
+            elements:
+              - type: icon
+                icon: mdi:home-heart
+                style:
+                  top: 14%
+                  left: 6%
+                  transform: none
+                  color: "#ffb357"
+                  "--mdc-icon-size": 26px
+              - type: state-label
+                entity: input_select.house_mode
+                prefix: "House · "
+                style:
+                  top: 13.5%
+                  left: 13%
+                  transform: none
+                  font-size: 22px
+                  font-weight: "600"
+                  color: "#f2f5ff"
+                  text-transform: capitalize
+              # the reference's orange action button → straight to Rooms
+              - type: icon
+                icon: mdi:arrow-right
+                tap_action:
+                  action: navigate
+                  navigation_path: /dash-rooms/home
+                style:
+                  top: 86%
+                  left: 90%
+                  color: "#0b0e16"
+                  background: "#ff9f43"
+                  border-radius: 50%
+                  padding: 10px
+                  "--mdc-icon-size": 24px
+              - type: state-label
+                entity: sensor.house_secure_summary
+                prefix: "Control every room · "
+                tap_action:
+                  action: navigate
+                  navigation_path: /dash-rooms/home
+                style:
+                  top: 87%
+                  left: 6%
+                  transform: none
+                  font-size: 14px
+                  color: "#c9d2e8"
+
           - type: heading
             heading: House
             heading_style: title
@@ -168,12 +192,16 @@ views:
                   - armed_night
                   - disarmed
 
+          # chunky square toggles, reference-style
           - type: tile
             entity: input_boolean.guest_mode
             name: Guests
             icon: mdi:account-supervisor
             color: purple
             vertical: true
+            grid_options:
+              columns: 6
+              rows: 2
             features:
               - type: toggle
 
@@ -183,6 +211,9 @@ views:
             icon: mdi:dog
             color: amber
             vertical: true
+            grid_options:
+              columns: 6
+              rows: 2
             features:
               - type: toggle
 
@@ -194,9 +225,9 @@ views:
             features:
               - type: toggle
 
-      # ---------------------------------------------------------------
-      # OUTSIDE — the reactive hero.
-      # ---------------------------------------------------------------
+      # ===============================================================
+      # MIDDLE — the weather column: reactive hero + forecast panel.
+      # ===============================================================
       - type: grid
         cards:
           - type: heading
@@ -205,11 +236,8 @@ views:
             icon: mdi:weather-partly-cloudy
 
           - type: picture-elements
-            # Fallback art for unknown/unavailable condition.
             image: /local/hero/partly.svg
             elements:
-              # Full-bleed background that tracks the CURRENT weather. Listed
-              # first so every label below renders above it.
               - type: image
                 entity: sensor.weather_condition_raw
                 image: /local/hero/partly.svg
@@ -303,24 +331,122 @@ views:
                   transform: none
                   font-size: 13px
                   color: "#c9d2e8"
-              - type: state-label
-                entity: sensor.forecast_precipitation_chance
-                prefix: "Rain "
+
+          # the forecast panel: three REAL days from weather.get_forecasts,
+          # plus the 2x2 live stat grid, all overlaid on glossy panel art
+          - type: picture-elements
+            image: /local/hero/panel.svg
+            elements:
+              # ---- row: tomorrow ----
+              - type: state-icon
+                entity: sensor.forecast_day_1
                 style:
-                  top: 84%
-                  left: 57%
+                  top: 10.5%
+                  left: 6%
                   transform: none
-                  font-size: 13px
+                  "--mdc-icon-size": 26px
                   color: "#7cb5f5"
               - type: state-label
-                entity: sensor.wind_speed
-                prefix: "Wind "
+                entity: sensor.forecast_day_1
+                attribute: day
                 style:
-                  top: 84%
-                  left: 73%
+                  top: 11%
+                  left: 15%
                   transform: none
-                  font-size: 13px
+                  font-size: 15px
+                  font-weight: "500"
+                  color: "#e9edf5"
+              - type: state-label
+                entity: sensor.forecast_day_1
+                style:
+                  top: 12.5%
+                  left: 70%
+                  transform: none
+                  font-size: 15px
                   color: "#c9d2e8"
+              # ---- row: day 2 ----
+              - type: state-icon
+                entity: sensor.forecast_day_2
+                style:
+                  top: 24.5%
+                  left: 6%
+                  transform: none
+                  "--mdc-icon-size": 26px
+                  color: "#7cb5f5"
+              - type: state-label
+                entity: sensor.forecast_day_2
+                attribute: day
+                style:
+                  top: 25%
+                  left: 15%
+                  transform: none
+                  font-size: 15px
+                  font-weight: "500"
+                  color: "#e9edf5"
+              - type: state-label
+                entity: sensor.forecast_day_2
+                style:
+                  top: 30.5%
+                  left: 70%
+                  transform: none
+                  font-size: 15px
+                  color: "#c9d2e8"
+              # ---- row: day 3 ----
+              - type: state-icon
+                entity: sensor.forecast_day_3
+                style:
+                  top: 38.5%
+                  left: 6%
+                  transform: none
+                  "--mdc-icon-size": 26px
+                  color: "#7cb5f5"
+              - type: state-label
+                entity: sensor.forecast_day_3
+                attribute: day
+                style:
+                  top: 39%
+                  left: 15%
+                  transform: none
+                  font-size: 15px
+                  font-weight: "500"
+                  color: "#e9edf5"
+              - type: state-label
+                entity: sensor.forecast_day_3
+                style:
+                  top: 48.5%
+                  left: 70%
+                  transform: none
+                  font-size: 15px
+                  color: "#c9d2e8"
+              # ---- 2x2 live stats under the divider ----
+              - type: icon
+                icon: mdi:thermometer
+                style: {top: 57%, left: 6%, transform: none, color: "#ff9f43", "--mdc-icon-size": 18px}
+              - type: state-label
+                entity: sensor.outdoor_temperature
+                prefix: "Outdoor  "
+                style: {top: 57%, left: 12%, transform: none, font-size: 14px, color: "#c9d2e8"}
+              - type: icon
+                icon: mdi:water-percent
+                style: {top: 57%, left: 53%, transform: none, color: "#40beaf", "--mdc-icon-size": 18px}
+              - type: state-label
+                entity: sensor.outdoor_humidity
+                prefix: "Humidity  "
+                style: {top: 57%, left: 59%, transform: none, font-size: 14px, color: "#c9d2e8"}
+              - type: icon
+                icon: mdi:weather-windy
+                style: {top: 73%, left: 6%, transform: none, color: "#7cb5f5", "--mdc-icon-size": 18px}
+              - type: state-label
+                entity: sensor.wind_speed
+                prefix: "Wind  "
+                style: {top: 73%, left: 12%, transform: none, font-size: 14px, color: "#c9d2e8"}
+              - type: icon
+                icon: mdi:weather-rainy
+                style: {top: 73%, left: 53%, transform: none, color: "#8d96f2", "--mdc-icon-size": 18px}
+              - type: state-label
+                entity: sensor.forecast_precipitation_chance
+                prefix: "Rain  "
+                style: {top: 73%, left: 59%, transform: none, font-size: 14px, color: "#c9d2e8"}
 
           - type: history-graph
             entities:
@@ -328,19 +454,48 @@ views:
                 name: Outside
             hours_to_show: 12
 
-      # ---------------------------------------------------------------
-      # COMFORT + ENERGY share the third column so no column runs short.
-      # ---------------------------------------------------------------
+      # ===============================================================
+      # RIGHT — the dial, comfort, energy.
+      # ===============================================================
       - type: grid
         cards:
           - type: heading
-            heading: Comfort
+            heading: Temperature
             heading_style: title
             icon: mdi:thermostat
 
-          # Needle gauge over colour segments spanning the target slider's
-          # real 60-82 range. Conditional: with no indoor sensors yet the raw
-          # gauge renders an "unavailable" warning box — hide it instead.
+          # The gradient dial. The ring is chrome; the number is live and taps
+          # through to the slider. The +/- feature below actually changes it.
+          - type: picture-elements
+            image: /local/hero/dial.svg
+            elements:
+              - type: state-label
+                entity: input_number.comfort_target
+                style:
+                  top: 44%
+                  left: 50%
+                  font-size: 58px
+                  font-weight: "300"
+                  color: "#f2f5ff"
+              - type: state-label
+                entity: input_select.house_mode
+                prefix: "Target · "
+                style:
+                  top: 62%
+                  left: 50%
+                  font-size: 14px
+                  color: "#8f9ab5"
+                  text-transform: capitalize
+
+          - type: tile
+            entity: input_number.comfort_target
+            name: Adjust
+            icon: mdi:target
+            color: amber
+            features:
+              - type: numeric-input
+                style: buttons
+
           - type: conditional
             conditions:
               - condition: state
@@ -366,15 +521,6 @@ views:
                   color: "#ffa94d"
                 - from: 80
                   color: "#ff6b6b"
-
-          - type: tile
-            entity: input_number.comfort_target
-            name: Target
-            icon: mdi:target
-            color: amber
-            features:
-              - type: numeric-input
-                style: buttons
 
           - type: tile
             entity: sensor.house_average_temperature
@@ -417,8 +563,6 @@ views:
             icon: mdi:sleep
             color: purple
 
-          # Hourly bars; fills in as statistics accrue. Conditional: until a
-          # circuit is labelled it renders "No statistics found" — hide it.
           - type: conditional
             conditions:
               - condition: state
@@ -439,8 +583,6 @@ views:
                 - mean
               days_to_show: 1
 
-      # ---------------------------------------------------------------
-      # SHORTCUTS
       # ---------------------------------------------------------------
       - type: grid
         column_span: 3
