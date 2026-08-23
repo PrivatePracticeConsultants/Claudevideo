@@ -246,7 +246,20 @@ committed secrets. It does **not** prove:
 - ~~That apply-taxonomy.py's websocket half works~~ **Now executed**: `dump`
   ran against the live registry — auth, all three registry queries, ~200
   entities and the instance's areas in the emitted plan.
-- **That any automation does the right thing** on real hardware. A live instance
+- ~~That the automations do the right thing~~ **Now proven against a virtual
+  house** (optional/testlab.yaml: template lights, door/motion sensors and
+  power circuits wired through the REAL registry with real labels and areas).
+  Scenarios executed and passing: motion → light on; linger → off; the kill
+  switch blocks; a human turn-on arms the override timer and the automation
+  stops fighting them; and the full break-in — armed_home, door opens,
+  intrusion signal, panel `pending`, 30 s entry delay, `TRIGGERED`, exterior
+  light response, critical alert routed (surfaced as Undeliverable, correctly,
+  with no phones), disarm by code, signal clears with no latch. The label-
+  driven sensors track live: perimeter count 0→1→0 with the door, power sum
+  exact, the 9% battery caught by the digest.
+- **That any automation does the right thing** on real *hardware* — radios,
+  real lag, real firmware quirks. The virtual house exercises the logic, not
+  the physics. A live instance
   HAS now been booted (HA 2026.2.3, onboarded, dashboards rendered and
   screenshotted) and reaches **zero configuration errors and zero template
   loops** — but with no paired devices, so no automation has ever fired against

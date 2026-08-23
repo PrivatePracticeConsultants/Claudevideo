@@ -1,0 +1,141 @@
+# testlab.yaml — a VIRTUAL TEST HOUSE.
+#
+# Template devices backed by helpers, so every automation in this repo can be
+# exercised end-to-end before a single real device is paired: flip
+# input_boolean.sim_front_door and a real binary_sensor with device_class door
+# changes, the perimeter count moves, the alarm logic runs.
+#
+# Lives in optional/ because it is not part of the real house. To use it:
+# move into packages/, restart, then assign areas and labels (the register is
+# what the automations query — scripts/apply-taxonomy.py does it in bulk).
+# Delete or move back out before pairing real hardware, and `mrfx forget`-style
+# leftovers are avoided by removing its helpers with it.
+
+input_boolean:
+  sim_front_door:
+    name: "[sim] Front door open"
+    icon: mdi:door
+  sim_kitchen_motion:
+    name: "[sim] Kitchen motion"
+    icon: mdi:motion-sensor
+  sim_livingroom_motion:
+    name: "[sim] Living room motion"
+    icon: mdi:motion-sensor
+  sim_kitchen_light_state:
+    name: "[sim] Kitchen light backer"
+  sim_porch_light_state:
+    name: "[sim] Porch light backer"
+
+input_number:
+  sim_fridge_watts:
+    name: "[sim] Fridge circuit draw"
+    min: 0
+    max: 3000
+    step: 10
+    unit_of_measurement: W
+    mode: box
+  sim_hvac_watts:
+    name: "[sim] HVAC circuit draw"
+    min: 0
+    max: 5000
+    step: 10
+    unit_of_measurement: W
+    mode: box
+  sim_sensor_battery:
+    name: "[sim] Door sensor battery"
+    min: 0
+    max: 100
+    step: 1
+    unit_of_measurement: "%"
+    mode: box
+
+template:
+  - binary_sensor:
+      - name: Front door contact
+        unique_id: testlab_front_door_contact
+        device_class: door
+        state: "{{ is_state('input_boolean.sim_front_door', 'on') }}"
+
+      - name: Kitchen motion
+        unique_id: testlab_kitchen_motion
+        device_class: motion
+        state: "{{ is_state('input_boolean.sim_kitchen_motion', 'on') }}"
+
+      - name: Living room motion
+        unique_id: testlab_livingroom_motion
+        device_class: motion
+        state: "{{ is_state('input_boolean.sim_livingroom_motion', 'on') }}"
+
+  - sensor:
+      - name: Fridge circuit power
+        unique_id: testlab_fridge_power
+        unit_of_measurement: W
+        device_class: power
+        state_class: measurement
+        state: "{{ states('input_number.sim_fridge_watts') | float(0) }}"
+
+      - name: HVAC circuit power
+        unique_id: testlab_hvac_power
+        unit_of_measurement: W
+        device_class: power
+        state_class: measurement
+        state: "{{ states('input_number.sim_hvac_watts') | float(0) }}"
+
+      - name: Front door sensor battery
+        unique_id: testlab_door_battery
+        unit_of_measurement: "%"
+        device_class: battery
+        state_class: measurement
+        state: "{{ states('input_number.sim_sensor_battery') | float(100) }}"
+
+light:
+  - platform: template
+    lights:
+      kitchen_ceiling:
+        friendly_name: Kitchen ceiling
+        unique_id: testlab_kitchen_ceiling
+        value_template: "{{ is_state('input_boolean.sim_kitchen_light_state', 'on') }}"
+        turn_on:
+          - action: input_boolean.turn_on
+            target:
+              entity_id: input_boolean.sim_kitchen_light_state
+        turn_off:
+          - action: input_boolean.turn_off
+            target:
+              entity_id: input_boolean.sim_kitchen_light_state
+      porch_light:
+        friendly_name: Porch light
+        unique_id: testlab_porch_light
+        value_template: "{{ is_state('input_boolean.sim_porch_light_state', 'on') }}"
+        turn_on:
+          - action: input_boolean.turn_on
+            target:
+              entity_id: input_boolean.sim_porch_light_state
+        turn_off:
+          - action: input_boolean.turn_off
+            target:
+              entity_id: input_boolean.sim_porch_light_state
+
+timer:
+  kitchen_light_override:
+    name: Kitchen light override
+    duration: "01:00:00"
+    restore: true
+
+automation:
+  - id: testlab_kitchen_motion_lighting
+    alias: "[testlab] Kitchen occupancy lighting"
+    description: >-
+      Blueprint instantiation for the virtual kitchen — the first time the
+      motion-lighting blueprint is exercised anywhere. One-minute linger so the
+      off-path is testable in a scenario run.
+    use_blueprint:
+      path: local/area_motion_light.yaml
+      input:
+        target_area: kitchen
+        motion_sensors:
+          - binary_sensor.kitchen_motion
+        override_timer: timer.kitchen_light_override
+        linger_minutes: 1
+        only_when_dark: true
+        apply_adaptive: false

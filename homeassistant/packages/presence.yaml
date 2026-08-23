@@ -115,9 +115,15 @@ template:
         icon: mdi:account-alert
         # Motion from sensors the dog CANNOT reach. This is the signal that is
         # safe to treat as a person — used by the alarm, not by the lights.
+        # SELF-REFERENCE GUARD: this sensor and its siblings carry motion-family
+        # device_classes themselves, so an unguarded scan includes its own
+        # output — one motion event then latches it on FOREVER (observed live:
+        # `reason` cited the fusion sensors as their own evidence, and the
+        # armed house saw a permanent intrusion signal).
         state: >-
           {% set pet = label_entities('pet_exposed') %}
           {% set motion = states.binary_sensor
+             | rejectattr('entity_id', 'match', 'binary_sensor\.(human_motion|corroborated_)')
              | selectattr('attributes.device_class', 'defined')
              | selectattr('attributes.device_class', 'in', ['motion', 'occupancy', 'presence'])
              | selectattr('state', 'eq', 'on')
@@ -127,6 +133,7 @@ template:
           triggered_by: >-
             {% set pet = label_entities('pet_exposed') %}
             {{ states.binary_sensor
+               | rejectattr('entity_id', 'match', 'binary_sensor\.(human_motion|corroborated_)')
                | selectattr('attributes.device_class', 'defined')
                | selectattr('attributes.device_class', 'in', ['motion', 'occupancy', 'presence'])
                | selectattr('state', 'eq', 'on')
@@ -139,8 +146,10 @@ template:
         # Two or more independent sensors active at once. A dog triggers one
         # sensor as it moves; two simultaneous hits in different areas is a
         # person, or two dogs, and the second case is rarer than a false alarm.
+        # Same self-reference guard as human_motion_detected above.
         state: >-
           {% set active = states.binary_sensor
+             | rejectattr('entity_id', 'match', 'binary_sensor\.(human_motion|corroborated_)')
              | selectattr('attributes.device_class', 'defined')
              | selectattr('attributes.device_class', 'in', ['motion', 'occupancy', 'presence'])
              | selectattr('state', 'eq', 'on')

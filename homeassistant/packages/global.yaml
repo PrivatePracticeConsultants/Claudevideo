@@ -371,6 +371,32 @@ automation:
           name: house
           mode: light
 
+  - id: global_reload_templates_on_registry_change
+    alias: "[global] Re-render templates when labels or areas change"
+    description: >-
+      Template sensors register their entity listeners at RENDER time, so a
+      registry-driven sensor that rendered while a label was empty never
+      re-renders when newly-labelled devices change — proven on a live
+      instance: with security_perimeter freshly applied, the door opened and
+      perimeter_open_count stayed 0 until a template reload, after which it
+      tracked perfectly. Since this whole system targets labels, a label or
+      area change must trigger a re-render or "label it and it works" is a lie.
+      Debounced by mode:single + a settle delay; harmless when nothing changed.
+    mode: single
+    max_exceeded: silent
+    triggers:
+      - trigger: event
+        event_type: label_registry_updated
+      - trigger: event
+        event_type: area_registry_updated
+      - trigger: event
+        event_type: entity_registry_updated
+    actions:
+      # let a burst of registry edits (bulk labelling) settle into ONE reload
+      - delay:
+          seconds: 5
+      - action: template.reload
+
   - id: global_low_battery_alert
     alias: "[global] Low battery alert"
     description: >-

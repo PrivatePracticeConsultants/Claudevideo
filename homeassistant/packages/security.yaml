@@ -290,6 +290,51 @@ automation:
   # -------------------------------------------------------------------------
   # ALARM
   # -------------------------------------------------------------------------
+  - id: security_intrusion_trips_alarm
+    alias: "[security] Intrusion while armed trips the alarm"
+    description: >-
+      THE automation that makes the alarm real: while the panel is armed, a
+      trustworthy intrusion signal calls alarm_trigger, which runs the panel's
+      entry delay and then fires it. Without this the panel was decorative --
+      nothing anywhere called the panel's alarm_trigger service, so an armed
+      house did nothing on a break-in. Found while designing the reality test,
+      before a single scenario ran.
+
+      binary_sensor.trustworthy_intrusion_signal already encodes the pet rules:
+      a perimeter opening always counts; interior motion only if pet-immune or
+      the dog is away. armed_home additionally requires a perimeter opening --
+      people are home and moving, so interior motion alone must not fire it.
+
+      DELIBERATELY EXEMPT from input_boolean.automations_paused, same reasoning
+      as the response automation below: a convenience kill switch must never be
+      able to disarm the intrusion path. If you want the alarm off, disarm it.
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: binary_sensor.trustworthy_intrusion_signal
+        to: "on"
+    conditions:
+      - condition: state
+        entity_id: alarm_control_panel.house
+        state:
+          - armed_away
+          - armed_home
+          - armed_night
+      - condition: or
+        conditions:
+          - condition: state
+            entity_id: alarm_control_panel.house
+            state: armed_away
+          - condition: template
+            value_template: >-
+              {{ label_entities('security_perimeter')
+                 | select('match', 'binary_sensor\.')
+                 | select('is_state', 'on') | list | count > 0 }}
+    actions:
+      - action: alarm_control_panel.alarm_trigger
+        target:
+          entity_id: alarm_control_panel.house
+
   - id: security_alarm_triggered
     alias: "[security] Alarm triggered"
     description: >-

@@ -163,8 +163,8 @@ def load_plan(path: Path) -> list[dict]:
     return data["entities"]
 
 
-def compute_changes(rows: list[dict]) -> tuple[list[dict], list[dict]]:
-    renames, labellings = [], []
+def compute_changes(rows: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
+    renames, labellings, area_moves = [], [], []
     seen_targets: dict[str, str] = {}
     for row in rows:
         old, new = row.get("entity_id"), row.get("new_entity_id")
@@ -186,16 +186,22 @@ def compute_changes(rows: list[dict]) -> tuple[list[dict], list[dict]]:
                 "current": row.get("current_labels") or [],
                 "add": add,
             })
-    return renames, labellings
+        # `set_area` moves the entity to the named area (created if missing).
+        if row.get("set_area"):
+            area_moves.append({"entity_id": new or old, "area": row["set_area"]})
+    return renames, labellings, area_moves
 
 
 async def do_apply(args) -> int:
     rows = load_plan(Path(args.plan))
-    renames, labellings = compute_changes(rows)
+    renames, labellings, area_moves = compute_changes(rows)
 
     referenced = [r for r in rows if r.get("repo_references") and r.get("new_entity_id") != r.get("entity_id")]
 
-    print(f"{len(renames)} rename(s), {len(labellings)} label change(s)")
+    print(f"{len(renames)} rename(s), {len(labellings)} label change(s), "
+          f"{len(area_moves)} area move(s)")
+    for a in area_moves:
+        print(f"  area    {a['entity_id']}  -> {a['area']}")
     for r in renames:
         print(f"  rename  {r['from']}  ->  {r['to']}")
     for l in labellings:
@@ -217,13 +223,32 @@ async def do_apply(args) -> int:
         print("\nDRY RUN - nothing was changed.")
         return 0
 
-    if not renames and not labellings:
+    if not renames and not labellings and not area_moves:
         print("nothing to do")
         return 0
 
     rollback = {"_generated": datetime.now(timezone.utc).isoformat(), "entities": []}
     applied = 0
     async with HA(args.url, args.token) as ha:
+        # Labels must exist in the label registry before entities carry them.
+        if labellings:
+            existing = {l["label_id"] for l in await ha.cmd(type="config/label_registry/list")}
+            wanted = {lb for l in labellings for lb in l["add"]}
+            for lb in sorted(wanted - existing):
+                await ha.cmd(type="config/label_registry/create", name=lb)
+                print(f"created label '{lb}'")
+        # Areas referenced by set_area resolve by name, created if absent.
+        area_ids: dict[str, str] = {}
+        if area_moves:
+            reg = await ha.cmd(type="config/area_registry/list")
+            by_name = {a["name"].lower(): a["area_id"] for a in reg}
+            for mv in area_moves:
+                key = mv["area"].lower()
+                if key not in by_name:
+                    made = await ha.cmd(type="config/area_registry/create", name=mv["area"])
+                    by_name[key] = made["area_id"]
+                    print(f"created area '{mv['area']}'")
+                area_ids[mv["entity_id"]] = by_name[key]
         for r in renames:
             await ha.cmd(type="config/entity_registry/update",
                          entity_id=r["from"], new_entity_id=r["to"])
@@ -243,6 +268,14 @@ async def do_apply(args) -> int:
             })
             applied += 1
             print(f"labelled {l['entity_id']}: {merged}")
+        for mv in area_moves:
+            await ha.cmd(type="config/entity_registry/update",
+                         entity_id=mv["entity_id"], area_id=area_ids[mv["entity_id"]])
+            rollback["entities"].append({"entity_id": mv["entity_id"],
+                                         "new_entity_id": mv["entity_id"],
+                                         "set_area_id": None})
+            applied += 1
+            print(f"moved {mv['entity_id']} -> area '{mv['area']}'")
 
     out = Path(args.rollback_file or f"rollback-{datetime.now().strftime('%Y%m%d-%H%M%S')}.yaml")
     out.write_text(yaml.safe_dump(rollback, sort_keys=False, allow_unicode=True))
@@ -258,6 +291,10 @@ async def do_rollback(args) -> int:
     async with HA(args.url, args.token) as ha:
         for row in rows:
             eid, new = row["entity_id"], row.get("new_entity_id")
+            if "set_area_id" in row:
+                await ha.cmd(type="config/entity_registry/update",
+                             entity_id=eid, area_id=row["set_area_id"])
+                print(f"area cleared on {eid}")
             if "set_labels" in row:
                 await ha.cmd(type="config/entity_registry/update",
                              entity_id=eid, labels=row["set_labels"])

@@ -136,10 +136,13 @@ def main() -> int:
            f"{sum(uids.values())} unique_ids, all distinct")
 
     # --- required fields ---
+    # use_blueprint automations inherit mode: from the blueprint's own
+    # declaration, so requiring it on the instantiation is a false positive.
     report("automations missing required fields",
            [f"{f}: {a.get('id', '?')} missing {m}" for f, a in autos
-            if (m := [x for x in ('id', 'alias', 'description', 'mode') if not a.get(x)])],
-           "all have id, alias, description and mode")
+            if (m := [x for x in ('id', 'alias', 'description', 'mode')
+                      if not a.get(x) and not (x == 'mode' and 'use_blueprint' in a)])],
+           "all have id, alias, description and mode (or inherit mode from a blueprint)")
 
     # --- kill switch ---
     # An automation may be exempt from the kill switch (an alarm response, a
