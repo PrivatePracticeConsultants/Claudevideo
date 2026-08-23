@@ -81,26 +81,55 @@ def walk_cards(node, path, out):
             walk_cards(v, f"{path}[{i}]", out)
 
 
+# Palette names the frontend composes DYNAMICALLY as var(--${color}-color)
+# (tile/badge `color:` values), so static extraction cannot see them even
+# though they are real. This is a closed list, NOT a suffix wildcard: a
+# blanket endswith("-color") exemption would leave three quarters of a
+# typical theme unvalidated and wave through `succes-color`.
+DYNAMIC_PALETTE = {
+    f"{c}-color" for c in (
+        "red", "pink", "purple", "deep-purple", "indigo", "blue", "light-blue",
+        "cyan", "teal", "green", "light-green", "lime", "yellow", "amber",
+        "orange", "deep-orange", "brown", "grey", "blue-grey", "black", "white",
+    )
+}
+
+
 def check_themes(reg_vars: set[str], problems: list[str]) -> int:
     """Theme keys become CSS custom properties (--<key>). A typo'd key does
     nothing, silently — so validate every key against the variables the shipped
-    frontend actually consumes. Tile palette names (`<color>-color`) are
-    composed dynamically as var(--${color}-color), invisible to static
-    extraction, so that suffix is allowed as a family."""
+    frontend consumes, plus the closed dynamic palette list above."""
     n = 0
     for f in sorted(ROOT.glob("themes/*.yaml")):
-        doc = yaml.safe_load(f.read_text()) or {}
+        try:
+            doc = yaml.safe_load(f.read_text()) or {}
+        except yaml.YAMLError as e:
+            problems.append(f"{f.name}: unparseable: {e}")
+            continue
+        if not isinstance(doc, dict):
+            problems.append(f"{f.name}: top level is not a mapping of themes")
+            continue
         for theme_name, theme in doc.items():
+            if not isinstance(theme, dict):
+                problems.append(f"{f.name} [{theme_name}]: theme is not a mapping")
+                continue
             flat: dict[str, str] = {}
-            for k, v in (theme or {}).items():
+            for k, v in theme.items():
                 if k == "modes":
-                    for mode in (v or {}).values():
-                        flat.update(mode or {})
+                    if not isinstance(v, dict):
+                        problems.append(f"{f.name} [{theme_name}]: modes is not a mapping")
+                        continue
+                    for mode_name, mode in v.items():
+                        if not isinstance(mode, dict):
+                            problems.append(f"{f.name} [{theme_name}]: mode "
+                                            f"'{mode_name}' is not a mapping")
+                            continue
+                        flat.update(mode)
                 else:
                     flat[k] = v
             for key in flat:
                 n += 1
-                if key not in reg_vars and not key.endswith("-color"):
+                if key not in reg_vars and key not in DYNAMIC_PALETTE:
                     problems.append(f"{f.name} [{theme_name}]: '{key}' is not a "
                                     f"CSS variable the shipped frontend consumes")
     return n
