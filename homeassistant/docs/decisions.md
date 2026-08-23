@@ -236,6 +236,16 @@ committed secrets. It does **not** prove:
 
 - **That any entity_id exists.** `check_config` does not consult a registry.
   This is precisely why targeting is label-driven.
+- ~~That the notification router works~~ **Now executed, not just validated**:
+  `script.notify_person` has been invoked live at every priority — info creates
+  a persistent notification, an unrouted warning/critical surfaces an
+  Undeliverable notice, a bad priority is flagged — and the daily security
+  check ran the full automation → router → notification chain ("House check:
+  Secure"). This execution round found and fixed two script-variable landmines
+  (see CLAUDE.md, "Script variables") that every static check had passed.
+- ~~That apply-taxonomy.py's websocket half works~~ **Now executed**: `dump`
+  ran against the live registry — auth, all three registry queries, ~200
+  entities and the instance's areas in the emitted plan.
 - **That any automation does the right thing** on real hardware. A live instance
   HAS now been booted (HA 2026.2.3, onboarded, dashboards rendered and
   screenshotted) and reaches **zero configuration errors and zero template

@@ -142,26 +142,37 @@ template:
       # erroring every 30 minutes in the log.
       - condition: template
         value_template: "{{ wx != '' }}"
+      # continue_on_error on BOTH calls: a provider that supports only one
+      # forecast type must not abort the sequence and take down the sensors fed
+      # by the other type (found in review — the hourly call, added later,
+      # would have broken every daily sensor on a daily-only provider).
       - action: weather.get_forecasts
+        continue_on_error: true
         target:
           entity_id: "{{ wx }}"
         data:
           type: daily
         response_variable: forecast_response
       - action: weather.get_forecasts
+        continue_on_error: true
         target:
           entity_id: "{{ wx }}"
         data:
           type: hourly
         response_variable: hourly_response
       - variables:
-          # response is keyed by entity_id
-          fc: "{{ forecast_response[wx].forecast | default([]) }}"
+          # responses are keyed by entity_id; each may be missing entirely if
+          # its call failed, so every access tolerates absence
+          fc: >-
+            {{ ((forecast_response | default({}))[wx] | default({})).forecast
+               | default([]) }}
           today: "{{ fc[0] | default({}) }}"
           day1: "{{ fc[1] | default({}) }}"
           day2: "{{ fc[2] | default({}) }}"
           day3: "{{ fc[3] | default({}) }}"
-          hourly: "{{ hourly_response[wx].forecast | default([]) }}"
+          hourly: >-
+            {{ ((hourly_response | default({}))[wx] | default({})).forecast
+               | default([]) }}
           icon_map: >-
             {{ {'clear-night': 'mdi:weather-night', 'cloudy': 'mdi:weather-cloudy',
                 'fog': 'mdi:weather-fog', 'hail': 'mdi:weather-hail',
@@ -173,22 +184,24 @@ template:
                 'sunny': 'mdi:weather-sunny', 'windy': 'mdi:weather-windy',
                 'windy-variant': 'mdi:weather-windy-variant',
                 'exceptional': 'mdi:alert-circle-outline'} }}
-      - variables:
-          # today's hours, 5am-10pm local. Depends on icon_map, so it lives in
-          # a second variables step. Hours already past are absent from the
-          # provider forecast, so the strip shrinks through the day.
+          # today's hours, 5am-10pm local, in the SAME block: variables render
+          # sequentially, so this can read icon_map above. Rows with a null
+          # temperature or missing datetime are skipped rather than allowed to
+          # raise — .get() only defaults when the KEY is absent, and a present
+          # null would abort the whole sequence and every sensor in it.
           hours_out: >-
             {% set ns = namespace(out=[]) %}
             {% set today = now().strftime('%Y-%m-%d') %}
-            {% for h in hourly | default([]) %}
+            {% for h in hourly | default([])
+               if h.get('datetime') and h.get('temperature') is not none %}
               {% set ts = as_timestamp(h.datetime) %}
               {% set hr = ts | timestamp_custom('%H') | int %}
               {% if ts | timestamp_custom('%Y-%m-%d') == today and 5 <= hr <= 22 %}
                 {% set ns.out = ns.out + [{
                      't': ts | timestamp_custom('%-I%p') | lower,
-                     'temp': h.get('temperature', 0) | round(0) | int,
+                     'temp': h.get('temperature') | round(0) | int,
                      'icon': icon_map.get(h.get('condition'), 'mdi:weather-partly-cloudy'),
-                     'precip': h.get('precipitation_probability', 0) | int}] %}
+                     'precip': (h.get('precipitation_probability') or 0) | int}] %}
               {% endif %}
             {% endfor %}
             {{ ns.out }}

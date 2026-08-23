@@ -55,50 +55,56 @@ script:
         required: false
         selector:
           object:
-    variables:
-      # ---------------------------------------------------------------
-      # THE ONE PLACE A PERSON IS ADDED. Prompt 19 appends here.
-      # Ships empty on purpose: this repo has never seen your phones, and
-      # a guessed notify service silently swallows every alert it is given.
-      # Add an entry once the companion app is paired and you have read the
-      # real service name out of Developer Tools -> Actions.
-      #
-      #   alex:
-      #     push: notify.mobile_app_alex_pixel
-      #     quiet_start: "22:00"
-      #     quiet_end: "07:00"
-      #     critical_bypasses_dnd: true
-      # ---------------------------------------------------------------
-      routes: {}
-      # Speakers that may be spoken through. Resolved from the registry at
-      # runtime, so labelling a new speaker `announce` is all it takes.
-      announce_targets: "{{ label_entities('announce') }}"
-      # Fill once a TTS engine exists (prompt 11). Empty = TTS silently skipped.
-      tts_service: ""
-      # ---- resolution ----
-      selected: >-
-        {% if target == 'all' %}{{ routes.keys() | list }}
-        {% else %}{{ [target] }}{% endif %}
-      # NOTE: no map('extract') here — 'extract' is an Ansible filter, not a
-      # Jinja/HA one. It compiles (dynamic dispatch) and then throws
-      # "No filter named 'extract'" on the first real notification.
-      push_services: >-
-        {% set ns = namespace(svcs=[]) %}
-        {% for t in selected %}
-          {% set svc = (routes.get(t) or {}).get('push', '') %}
-          {% if svc %}{% set ns.svcs = ns.svcs + [svc] %}{% endif %}
-        {% endfor %}
-        {{ ns.svcs }}
-      in_quiet_hours: >-
-        {% set r = routes.get(target, {}) %}
-        {% set qs = r.get('quiet_start') %}
-        {% set qe = r.get('quiet_end') %}
-        {% if qs and qe %}
-          {% set now_hm = now().strftime('%H:%M') %}
-          {% if qs < qe %}{{ qs <= now_hm < qe }}
-          {% else %}{{ now_hm >= qs or now_hm < qe }}{% endif %}
-        {% else %}false{% endif %}
     sequence:
+      # EVERYTHING lives in this action-level variables step, config included.
+      # Found by executing the script and bisecting the failure on a live
+      # instance: a script-level variable whose value is an EMPTY mapping is
+      # silently dropped when the script declares `fields:` — routes: {} at
+      # script level vanished while its sibling string survived, and every
+      # notification in the house died with "UndefinedError: 'routes'".
+      # Action-level variables render sequentially and are immune.
+      - variables:
+          # ---------------------------------------------------------------
+          # THE ONE PLACE A PERSON IS ADDED. Prompt 19 appends here.
+          # Ships empty on purpose: this repo has never seen your phones, and
+          # a guessed notify service silently swallows every alert it is
+          # given. Add an entry once the companion app is paired and you have
+          # read the real service name out of Developer Tools -> Actions.
+          #
+          #   alex:
+          #     push: notify.mobile_app_alex_pixel
+          #     quiet_start: "22:00"
+          #     quiet_end: "07:00"
+          #     critical_bypasses_dnd: true
+          # ---------------------------------------------------------------
+          routes: {}
+          # Fill once a TTS engine exists (prompt 11). Empty = TTS skipped.
+          tts_service: ""
+          # Speakers that may be spoken through. Resolved from the registry at
+          # runtime, so labelling a new speaker `announce` is all it takes.
+          announce_targets: "{{ label_entities('announce') }}"
+          selected: >-
+            {% if target == 'all' %}{{ routes.keys() | list }}
+            {% else %}{{ [target] }}{% endif %}
+          # NOTE: no map('extract') here — 'extract' is an Ansible filter, not
+          # a Jinja/HA one. It compiles (dynamic dispatch) and then throws at
+          # runtime.
+          push_services: >-
+            {% set ns = namespace(svcs=[]) %}
+            {% for t in selected %}
+              {% set svc = (routes.get(t) or {}).get('push', '') %}
+              {% if svc %}{% set ns.svcs = ns.svcs + [svc] %}{% endif %}
+            {% endfor %}
+            {{ ns.svcs }}
+          in_quiet_hours: >-
+            {% set r = routes.get(target, {}) %}
+            {% set qs = r.get('quiet_start') %}
+            {% set qe = r.get('quiet_end') %}
+            {% if qs and qe %}
+              {% set now_hm = now().strftime('%H:%M') %}
+              {% if qs < qe %}{{ qs <= now_hm < qe }}
+              {% else %}{{ now_hm >= qs or now_hm < qe }}{% endif %}
+            {% else %}false{% endif %}
       # A notification nobody can receive is a bug, not a no-op. Surface it.
       - if:
           - condition: template

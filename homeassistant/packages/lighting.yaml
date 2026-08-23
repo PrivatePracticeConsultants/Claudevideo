@@ -111,29 +111,33 @@ script:
         required: true
         selector:
           object:
-    variables:
-      # Sun elevation drives the curve. 0 = horizon, ~50 = high noon.
-      # Normalised 0..1 across the -6 (civil twilight) to +30 degree band, so the
-      # transition happens around sunset rather than all at once at midnight.
-      elevation: "{{ state_attr('sun.sun', 'elevation') | float(0) }}"
-      daylight_factor: >-
-        {{ [[(elevation + 6) / 36, 0] | max, 1] | min }}
-      is_night_mode: "{{ is_state('input_select.house_mode', 'night') }}"
-      kelvin: >-
-        {% set lo = states('input_number.adaptive_min_kelvin') | int(2200) %}
-        {% set hi = states('input_number.adaptive_max_kelvin') | int(5000) %}
-        {% if is_night_mode %}{{ lo }}
-        {% else %}{{ (lo + (hi - lo) * daylight_factor) | round(0) | int }}{% endif %}
-      brightness_pct: >-
-        {% set lo = states('input_number.adaptive_min_brightness') | int(25) %}
-        {% set hi = states('input_number.adaptive_max_brightness') | int(100) %}
-        {% if is_night_mode %}
-          {{ states('input_number.night_mode_brightness') | int(5) }}
-        {% else %}{{ (lo + (hi - lo) * daylight_factor) | round(0) | int }}{% endif %}
     sequence:
       - condition: state
         entity_id: input_boolean.adaptive_lighting_enabled
         state: "on"
+      # Computed in an ACTION step, not script-level variables: script-level
+      # variables render as defaults and cannot see sibling keys, so
+      # daylight_factor referencing elevation raised UndefinedError on every
+      # run — the same scoping bug that silenced the notification router.
+      - variables:
+          # Sun elevation drives the curve. 0 = horizon, ~50 = high noon.
+          # Normalised 0..1 across the -6 (civil twilight) to +30 degree band,
+          # so the transition happens around sunset rather than at midnight.
+          elevation: "{{ state_attr('sun.sun', 'elevation') | float(0) }}"
+          daylight_factor: >-
+            {{ [[(elevation + 6) / 36, 0] | max, 1] | min }}
+          is_night_mode: "{{ is_state('input_select.house_mode', 'night') }}"
+          kelvin: >-
+            {% set lo = states('input_number.adaptive_min_kelvin') | int(2200) %}
+            {% set hi = states('input_number.adaptive_max_kelvin') | int(5000) %}
+            {% if is_night_mode %}{{ lo }}
+            {% else %}{{ (lo + (hi - lo) * daylight_factor) | round(0) | int }}{% endif %}
+          brightness_pct: >-
+            {% set lo = states('input_number.adaptive_min_brightness') | int(25) %}
+            {% set hi = states('input_number.adaptive_max_brightness') | int(100) %}
+            {% if is_night_mode %}
+              {{ states('input_number.night_mode_brightness') | int(5) }}
+            {% else %}{{ (lo + (hi - lo) * daylight_factor) | round(0) | int }}{% endif %}
       - repeat:
           for_each: "{{ lights }}"
           sequence:

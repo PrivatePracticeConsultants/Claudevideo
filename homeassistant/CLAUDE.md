@@ -58,6 +58,21 @@ This is the hard rule and the most common way an AI breaks this repo.
 - The global kill switch in its conditions (see below).
 - A comment on any non-obvious logic explaining what a trace would show.
 
+## Script variables: compute in an action step, never at script level
+
+Two Home Assistant behaviors, both found by executing scripts on a live
+instance after every static check had passed:
+
+- Script-level `variables:` render as *defaults* whose templates **cannot see
+  sibling keys** — a computed variable referencing another dies with
+  `UndefinedError` on every run.
+- A script-level variable holding an **empty mapping is silently dropped when
+  the script declares `fields:`** (`routes: {}` vanished while its sibling
+  string survived, killing every notification in the house).
+
+So: static AND computed variables both live in a `- variables:` action step at
+the top of `sequence:`, which renders sequentially and has neither problem.
+
 ## No orphan helpers
 
 Every `input_boolean`, `input_number`, `timer`, etc. is declared **in YAML, in
