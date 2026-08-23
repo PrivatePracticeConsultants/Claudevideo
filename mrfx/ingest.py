@@ -275,8 +275,23 @@ class ParsePoolManager:
         running futures — a SIGTERM'd server would block for the rest of a
         multi-hour parse before exiting."""
         with self._lock:
-            self._pool.shutdown(wait=False, cancel_futures=True)
-            for proc in list(getattr(self._pool, "_processes", {}).values()):
+            pool = self._pool
+            if pool is None:
+                return
+            # Grab the worker handles BEFORE shutdown(). Two bugs lived here:
+            # ProcessPoolExecutor sets _processes to None as it tears down, and
+            # `getattr(pool, "_processes", {})` returns that None (the attribute
+            # EXISTS, so the {} default never applies) — `.values()` then raised
+            # AttributeError and printed a traceback over the user's Ctrl-C. And
+            # reading it after shutdown() meant the list was usually already
+            # empty, so the terminate loop — the whole point of a hard stop —
+            # silently did nothing.
+            procs = list((getattr(pool, "_processes", None) or {}).values())
+            try:
+                pool.shutdown(wait=False, cancel_futures=True)
+            except Exception:  # noqa: BLE001 — exiting must not need a clean stop
+                pass
+            for proc in procs:
                 try:
                     proc.terminate()
                 except Exception:  # noqa: BLE001 — already gone

@@ -137,3 +137,43 @@ def test_out_of_order_months_are_refused_in_the_readers_words(tied_store):
     assert "prev_month" not in msg and "month being examined" in msg
     # both months are named, so the reader can see which way round it goes
     assert msg.count("2026-06") >= 2
+
+
+def test_shutting_the_parser_pool_down_never_raises_over_the_users_ctrl_c():
+    """Ctrl-C printed a traceback instead of exiting cleanly.
+
+    `shutdown_now` read `getattr(pool, "_processes", {})` AFTER calling
+    shutdown(). ProcessPoolExecutor sets `_processes` to None while tearing
+    down, and the {} default does not apply to an attribute that EXISTS and is
+    None — so `.values()` raised AttributeError straight over the user's
+    Ctrl-C. Reading it after shutdown() also meant the terminate loop, the
+    entire point of a hard stop, usually had nothing left to terminate.
+    """
+    from mrfx.ingest import ParsePoolManager
+
+    mgr = ParsePoolManager(max_workers=1)
+
+    # the exact teardown state that used to crash
+    mgr._pool._processes = None
+    mgr.shutdown_now()          # must not raise
+
+    # and it stays safe when called again on an already-dead pool
+    mgr.shutdown_now()
+    mgr._pool = None
+    mgr.shutdown_now()
+
+
+def test_the_hard_stop_actually_terminates_the_workers():
+    """The handles must be captured BEFORE shutdown(), or there is nothing left
+    to terminate and a multi-hour parse would keep the process alive."""
+    from mrfx.ingest import ParsePoolManager
+
+    mgr = ParsePoolManager(max_workers=2)
+    mgr.submit(len, "warm the pool up").result(timeout=120)
+    procs = list(mgr._pool._processes.values())
+    assert procs, "pool did not start any workers — test proves nothing"
+
+    mgr.shutdown_now()
+    for p in procs:
+        p.join(timeout=30)
+    assert all(not p.is_alive() for p in procs), "workers survived the hard stop"

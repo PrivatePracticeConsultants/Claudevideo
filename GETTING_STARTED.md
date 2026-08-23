@@ -12,27 +12,26 @@ typed into a **terminal**:
 
 ---
 
-## Step 1 — Install Python 3.12 (one time)
+## Step 1 — Install Python (one time)
 
-**Use Python 3.12** — not the newest release. The packages this app needs
-(duckdb, pyarrow, and friends) ship ready-made installers for 3.11/3.12 but
-often lag on brand-new Python versions, and without a ready-made installer the
-setup tries to *compile* them and fails. 3.12 is the sweet spot: fully
-supported everywhere, nothing to compile.
+**Any Python from 3.11 to 3.14 works.** Every package this app pins ships a
+ready-made Windows/macOS installer for all of those, so nothing has to be
+compiled. Check what you already have:
 
-- **Windows**: install from
-  <https://www.python.org/downloads/release/python-3120/> — scroll to
-  "Files" and get **Windows installer (64-bit)**. **On the first installer
-  screen, tick "Add python.exe to PATH"** before clicking Install. You can
-  have 3.12 installed alongside a newer Python; Step 3 picks 3.12 explicitly
-  with `py -3.12`.
-- **macOS**: install 3.12 from <https://www.python.org/downloads/> — or, with
-  Homebrew, `brew install python@3.12`.
-- **Linux (Debian/Ubuntu)**: `sudo apt install python3.12 python3.12-venv python3-pip`
-  (or your distro's 3.12 package).
+```
+python --version
+```
 
-Already have 3.11 or 3.12? You're set — skip to Step 2. (Check with
-`python --version`, or on Windows `py -0p` to list every version installed.)
+(On Windows, `py -0p` lists every version installed.) If it prints 3.11, 3.12,
+3.13 or 3.14 you are done — skip to Step 2. Otherwise install the current
+release from <https://www.python.org/downloads/>; on Windows tick
+**"Add python.exe to PATH"** on the first installer screen.
+
+> **Historical note.** Older copies of this guide insisted on Python 3.12,
+> because `duckdb` 1.3.2 shipped no build for anything newer and pip fell back
+> to compiling it from source — the "Failed to build installable wheels" error.
+> duckdb 1.5.5 covers 3.14, so that requirement is gone. If you still hit that
+> error, you are on an old `requirements.txt`: update it and retry.
 
 ---
 
@@ -72,11 +71,9 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
-**Windows (PowerShell):** — build the environment with **Python 3.12
-specifically** (see the note below on why):
+**Windows (PowerShell):**
 ```
-py -0p
-py -3.12 -m venv .venv
+py -3 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python --version
 python -m pip install -r requirements.txt
