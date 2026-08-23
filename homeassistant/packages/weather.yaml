@@ -98,6 +98,16 @@ template:
           {% set t = state_attr('sun.sun', 'next_setting') %}
           {{ as_timestamp(t) | timestamp_custom('%-I:%M %p') if t else 'unknown' }}
 
+      # Raw HA condition token (sunny, rainy, clear-night, ...) — the display
+      # sensor above maps to human labels, but the dashboard's state_image
+      # needs the raw vocabulary to key artwork on.
+      - name: Weather condition raw
+        unique_id: weather_condition_raw
+        icon: mdi:weather-cloudy-clock
+        state: >-
+          {% set wx = states.weather | map(attribute='entity_id') | list %}
+          {{ states(wx[0]) if wx | count > 0 else 'unknown' }}
+
       # A single human line for the hero card and for voice.
       - name: Weather summary
         unique_id: weather_summary

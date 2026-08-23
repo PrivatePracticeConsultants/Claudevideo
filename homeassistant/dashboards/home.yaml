@@ -1,18 +1,15 @@
 # home.yaml — the control panel.
 #
-# Sections layout with heading cards, tile cards carrying real controls, and
-# badges for at-a-glance state. Core cards only: no HACS, nothing to install,
-# nothing that breaks on the next HA update. Every card type, tile feature and
-# badge here is verified against the shipped frontend by
-# scripts/check-dashboards.py.
+# Sections layout, core cards only, every type verified against the shipped
+# frontend by scripts/check-dashboards.py. Every entity referenced is one this
+# repo declares, so this renders correctly on a fresh instance.
 #
-# Every entity referenced is one this repo declares, so this renders correctly
-# on a fresh instance before a single device is paired.
+# The hero's background artwork CHANGES WITH THE WEATHER: an image element
+# keyed on sensor.weather_condition_raw maps every HA condition token to one of
+# eight generated variants (scripts/generate-hero-art.py -> www/hero/). The
+# card's base image is the fallback for unknown/unavailable.
 title: Home
 views:
-  # =========================================================================
-  # THE CONTROL PANEL
-  # =========================================================================
   - title: Home
     path: home
     icon: mdi:home
@@ -20,7 +17,6 @@ views:
     max_columns: 3
     dense_section_placement: true
 
-    # At-a-glance state, always visible above the fold.
     badges:
       - type: entity
         entity: input_select.house_mode
@@ -46,8 +42,7 @@ views:
 
     sections:
       # ---------------------------------------------------------------
-      # 1. STATUS — the one-line answer. If all is well this is the only
-      #    thing worth reading, which is the entire point of the view.
+      # STATUS — one line. If all is well this is all there is to read.
       # ---------------------------------------------------------------
       - type: grid
         column_span: 3
@@ -74,9 +69,7 @@ views:
               {% endif %}
 
       # ---------------------------------------------------------------
-      # 2. NEEDS ATTENTION — every card here is conditional, so this whole
-      #    section disappears when nothing is wrong. Nothing shouts for
-      #    attention that does not deserve it.
+      # NEEDS ATTENTION — every card conditional; invisible when fine.
       # ---------------------------------------------------------------
       - type: grid
         column_span: 3
@@ -146,7 +139,7 @@ views:
                    | map('replace', 'sensor.', '') | join(', ') }}
 
       # ---------------------------------------------------------------
-      # 3. HOUSE — the controls used daily, each operable in one tap.
+      # HOUSE — daily controls, one tap each.
       # ---------------------------------------------------------------
       - type: grid
         cards:
@@ -193,10 +186,16 @@ views:
             features:
               - type: toggle
 
+          - type: tile
+            entity: input_boolean.automations_paused
+            name: Pause all
+            icon: mdi:pause-octagon
+            color: red
+            features:
+              - type: toggle
+
       # ---------------------------------------------------------------
-      # 4. OUTSIDE — hero card. Generated artwork (www/hero-weather.svg) with
-      # every number overlaid live by picture-elements, so the art never goes
-      # stale. All core; positioning styles are inline CSS, no card-mod.
+      # OUTSIDE — the reactive hero.
       # ---------------------------------------------------------------
       - type: grid
         cards:
@@ -206,8 +205,35 @@ views:
             icon: mdi:weather-partly-cloudy
 
           - type: picture-elements
-            image: /local/hero-weather.svg
+            # Fallback art for unknown/unavailable condition.
+            image: /local/hero/partly.svg
             elements:
+              # Full-bleed background that tracks the CURRENT weather. Listed
+              # first so every label below renders above it.
+              - type: image
+                entity: sensor.weather_condition_raw
+                image: /local/hero/partly.svg
+                state_image:
+                  sunny: /local/hero/sunny.svg
+                  clear-night: /local/hero/clear-night.svg
+                  partlycloudy: /local/hero/partly.svg
+                  windy: /local/hero/partly.svg
+                  windy-variant: /local/hero/partly.svg
+                  cloudy: /local/hero/cloudy.svg
+                  fog: /local/hero/fog.svg
+                  rainy: /local/hero/rain.svg
+                  pouring: /local/hero/rain.svg
+                  lightning: /local/hero/storm.svg
+                  lightning-rainy: /local/hero/storm.svg
+                  exceptional: /local/hero/storm.svg
+                  snowy: /local/hero/snow.svg
+                  snowy-rainy: /local/hero/snow.svg
+                  hail: /local/hero/snow.svg
+                style:
+                  top: 50%
+                  left: 50%
+                  width: 100%
+                  transform: translate(-50%, -50%)
               - type: state-label
                 entity: sensor.outdoor_temperature
                 style:
@@ -296,23 +322,14 @@ views:
                   font-size: 13px
                   color: "#c9d2e8"
 
-          # 12h temperature trace under the hero — real recorded data.
           - type: history-graph
             entities:
               - entity: sensor.outdoor_temperature
                 name: Outside
             hours_to_show: 12
 
-          # A real forecast card needs the concrete weather entity_id, which
-          # depends on which provider you added and which this repo has never
-          # seen. Uncomment and set it after adding the integration:
-          #   - type: weather-forecast
-          #     entity: weather.YOUR_ENTITY_HERE
-          #     forecast_type: daily
-          #     show_current: true
-
       # ---------------------------------------------------------------
-      # 5. COMFORT
+      # COMFORT + ENERGY share the third column so no column runs short.
       # ---------------------------------------------------------------
       - type: grid
         cards:
@@ -321,10 +338,9 @@ views:
             heading_style: title
             icon: mdi:thermostat
 
-          # The dial: needle gauge over colour segments, spanning the
-          # input_number's 60-82 range so the needle position is truthful.
-          # Conditional: with no indoor sensors yet, the raw gauge renders an
-          # "Entity is currently unavailable" warning box — hide it instead.
+          # Needle gauge over colour segments spanning the target slider's
+          # real 60-82 range. Conditional: with no indoor sensors yet the raw
+          # gauge renders an "unavailable" warning box — hide it instead.
           - type: conditional
             conditions:
               - condition: state
@@ -372,11 +388,6 @@ views:
             icon: mdi:water-percent
             color: teal
 
-      # ---------------------------------------------------------------
-      # 6. ENERGY
-      # ---------------------------------------------------------------
-      - type: grid
-        cards:
           - type: heading
             heading: Energy
             heading_style: title
@@ -406,10 +417,8 @@ views:
             icon: mdi:sleep
             color: purple
 
-          # Hourly bars, like the concept's chart. Draws from long-term
-          # statistics, so it fills in as the instance accrues history.
-          # Conditional: until a circuit is labelled, the card renders an empty
-          # "No statistics found" box — hide it instead.
+          # Hourly bars; fills in as statistics accrue. Conditional: until a
+          # circuit is labelled it renders "No statistics found" — hide it.
           - type: conditional
             conditions:
               - condition: state
@@ -431,7 +440,7 @@ views:
               days_to_show: 1
 
       # ---------------------------------------------------------------
-      # 7. SHORTCUTS
+      # SHORTCUTS
       # ---------------------------------------------------------------
       - type: grid
         column_span: 3
@@ -472,11 +481,3 @@ views:
             tap_action:
               action: navigate
               navigation_path: /history
-
-          - type: button
-            name: Pause all
-            icon: mdi:pause-octagon
-            show_state: false
-            tap_action:
-              action: toggle
-            entity: input_boolean.automations_paused
