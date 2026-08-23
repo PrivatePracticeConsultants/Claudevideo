@@ -44,8 +44,9 @@ not a nicety.
 
 ## Already in place
 
-- **Shared theme**: `themes/house.yaml` (`house_dark`) — high contrast, chosen
-  for reading at two feet. Both tablets use it, so a change propagates to both.
+- **Shared theme**: `themes/house.yaml` (`house`, with dark and light modes) —
+  the whole design system, validated variable-by-variable against the shipped
+  frontend. Both tablets use it, so a change propagates to both.
 - **The 20–80% charge automation is written**: `optional/tablets.yaml`. It is in
   `optional/` because the Fully Kiosk integration and its entities do not exist
   on this instance yet. Move it to `packages/` once they do, and replace the

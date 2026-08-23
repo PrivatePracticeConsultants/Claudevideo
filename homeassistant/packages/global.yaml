@@ -341,6 +341,30 @@ automation:
         data:
           datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
 
+  - id: global_apply_theme
+    alias: "[global] Apply the house theme"
+    description: >-
+      Sets the designed theme (themes/house.yaml) as the backend default for
+      both light and dark slots on every start, so every user on
+      "Backend-selected" — including wall tablets — gets it without touching
+      their profile. Idempotent; cosmetic; no kill-switch needed because it
+      does not act on the house.
+    mode: single
+    triggers:
+      - trigger: homeassistant
+        event: start
+    actions:
+      - action: frontend.set_theme
+        continue_on_error: true
+        data:
+          name: house
+          mode: dark
+      - action: frontend.set_theme
+        continue_on_error: true
+        data:
+          name: house
+          mode: light
+
   - id: global_low_battery_alert
     alias: "[global] Low battery alert"
     description: >-

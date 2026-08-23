@@ -32,8 +32,10 @@ def frontend_registry() -> dict[str, set[str]]:
     features: set[str] = set()
     views: set[str] = set()
     strategies: dict[str, set[str]] = {"dashboard": set(), "view": set()}
+    css_vars: set[str] = set()
     for f in js:
         s = pathlib.Path(f).read_text(encoding="utf-8", errors="replace")
+        css_vars |= set(re.findall(r"var\(--([a-z0-9-]+)", s))
         cards |= set(re.findall(r'"hui-([a-z0-9-]+)-card"', s))
         badges |= set(re.findall(r'"hui-([a-z0-9-]+)-badge"', s))
         features |= set(re.findall(r'"hui-([a-z0-9-]+)-card-feature"', s))
@@ -51,7 +53,8 @@ def frontend_registry() -> dict[str, set[str]]:
     noise = {"dialog-create", "dialog-delete", "dialog-edit", "dialog-suggest",
              "dialog-select", "error", "empty-state", "starting", "recovery-mode",
              "error-heading", "button-heading", "entity-heading"}
-    return {"card": cards - noise, "badge": badges - noise,
+    return {"css_vars": css_vars,
+            "card": cards - noise, "badge": badges - noise,
             "feature": features, "view": views - noise,
             "strategy_dashboard": strategies["dashboard"],
             "strategy_view": strategies["view"]}
@@ -76,6 +79,31 @@ def walk_cards(node, path, out):
     elif isinstance(node, list):
         for i, v in enumerate(node):
             walk_cards(v, f"{path}[{i}]", out)
+
+
+def check_themes(reg_vars: set[str], problems: list[str]) -> int:
+    """Theme keys become CSS custom properties (--<key>). A typo'd key does
+    nothing, silently — so validate every key against the variables the shipped
+    frontend actually consumes. Tile palette names (`<color>-color`) are
+    composed dynamically as var(--${color}-color), invisible to static
+    extraction, so that suffix is allowed as a family."""
+    n = 0
+    for f in sorted(ROOT.glob("themes/*.yaml")):
+        doc = yaml.safe_load(f.read_text()) or {}
+        for theme_name, theme in doc.items():
+            flat: dict[str, str] = {}
+            for k, v in (theme or {}).items():
+                if k == "modes":
+                    for mode in (v or {}).values():
+                        flat.update(mode or {})
+                else:
+                    flat[k] = v
+            for key in flat:
+                n += 1
+                if key not in reg_vars and not key.endswith("-color"):
+                    problems.append(f"{f.name} [{theme_name}]: '{key}' is not a "
+                                    f"CSS variable the shipped frontend consumes")
+    return n
 
 
 def main() -> int:
@@ -140,7 +168,10 @@ def main() -> int:
                         problems.append(f"{path}.features[{fi}]: tile feature "
                                         f"'{ft}' does not exist")
 
+    n_theme = check_themes(reg["css_vars"], problems)
+
     print(f"dashboard check: {len(files)} dashboards, {n_cards} cards, "
+          f"{n_theme} theme vars, "
           f"against the shipped frontend "
           f"({len(reg['card'])} card types, {len(reg['feature'])} tile features)")
     if problems:
@@ -148,7 +179,7 @@ def main() -> int:
         for p in problems:
             print(f"  {p}")
         return 1
-    print("all card, badge, feature, view and strategy types exist")
+    print("all card, badge, feature, view, strategy and theme-variable names exist")
     return 0
 
 

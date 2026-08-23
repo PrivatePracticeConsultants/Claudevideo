@@ -1,17 +1,132 @@
-# Shared theme. Used by the dashboards above and by both wall tablets
-# (prompt 21) so a design change propagates to every screen at once.
-house_dark:
-  # High contrast on purpose: a wall tablet is read from two feet away, often
-  # at an angle, often in a dim room.
-  primary-color: "#4a9eff"
-  accent-color: "#ff9800"
-  primary-background-color: "#111418"
-  secondary-background-color: "#1b1f26"
-  card-background-color: "#1b1f26"
-  primary-text-color: "#f2f4f7"
-  secondary-text-color: "#a8b0bd"
-  divider-color: "#2c323c"
-  state-icon-active-color: "#ffc65c"
-  paper-item-icon-color: "#a8b0bd"
-  ha-card-border-radius: "12px"
-  ha-card-box-shadow: "none"
+# House theme — the design system for every screen, wall tablets included.
+#
+# Every variable name here is verified against the CSS custom properties the
+# shipped frontend actually consumes (scripts/check-dashboards.py extracts the
+# registry from the bundle and validates this file). No card-mod, no HACS: this
+# is pure theme YAML, so it cannot break a dashboard — the worst an unknown
+# variable could do is nothing, and the gate rejects unknown variables anyway.
+#
+# Design intent, so future edits keep the language coherent:
+#   - One hue family per meaning: blue = control, amber = attention/active,
+#     green = healthy, red = security, cyan = weather, purple = energy detail.
+#   - Cards sit on a hairline border, not a drop shadow — crisper on dark, and
+#     shadows on dark themes read as smudges.
+#   - Large radii (20px cards, 16px tile icons) and a faint two-tone glow in
+#     the page background are what make it read as "designed" rather than
+#     stock; everything else is restraint.
+house:
+  # ---- shape ----------------------------------------------------------
+  ha-card-border-radius: "20px"
+  ha-card-border-width: "1px"
+  ha-badge-border-radius: "10px"
+  ha-tile-icon-border-radius: "16px"
+  ha-dialog-border-radius: "24px"
+  ha-heading-card-title-font-size: "17px"
+  ha-heading-card-title-font-weight: "600"
+  ha-view-sections-column-gap: "20px"
+  ha-view-sections-row-gap: "20px"
+
+  modes:
+    # ================================================================= DARK
+    dark:
+      # ---- ground ----
+      primary-background-color: "#0c0e13"
+      secondary-background-color: "#12151c"
+      lovelace-background: >-
+        radial-gradient(ellipse 90% 60% at 12% -8%, rgba(111, 155, 255, 0.09), transparent 55%),
+        radial-gradient(ellipse 70% 55% at 95% 105%, rgba(64, 190, 175, 0.07), transparent 55%),
+        #0c0e13
+      # ---- surfaces ----
+      card-background-color: "#161a22"
+      ha-card-background: "#161a22"
+      ha-card-border-color: "rgba(255, 255, 255, 0.07)"
+      ha-card-box-shadow: "none"
+      input-fill-color: "#1d222c"
+      # ---- chrome ----
+      app-header-background-color: "rgba(12, 14, 19, 0.92)"
+      app-header-text-color: "#e9edf5"
+      app-header-border-bottom: "1px solid rgba(255, 255, 255, 0.06)"
+      sidebar-background-color: "#0a0c10"
+      sidebar-text-color: "#9aa3b5"
+      sidebar-icon-color: "#7c8598"
+      sidebar-selected-icon-color: "#8fb1ff"
+      divider-color: "rgba(255, 255, 255, 0.07)"
+      # ---- text ----
+      primary-text-color: "#e9edf5"
+      secondary-text-color: "#9aa3b5"
+      # ---- brand ----
+      primary-color: "#6f9bff"
+      rgb-primary-color: "111, 155, 255"
+      accent-color: "#ffb357"
+      rgb-accent-color: "255, 179, 87"
+      state-icon-color: "#8b94a7"
+      state-active-color: "#ffb357"
+      # ---- semantics ----
+      error-color: "#ff6b6b"
+      warning-color: "#ffb357"
+      success-color: "#4fd1a5"
+      info-color: "#6f9bff"
+      # ---- controls ----
+      switch-checked-track-color: "rgba(111, 155, 255, 0.5)"
+      switch-checked-button-color: "#6f9bff"
+      # ---- tile / badge palette, tuned to sit together on the dark ground ----
+      red-color: "#ff6b6b"
+      orange-color: "#ff9c5c"
+      amber-color: "#ffb357"
+      yellow-color: "#f4cf5e"
+      green-color: "#4fd1a5"
+      teal-color: "#40beaf"
+      cyan-color: "#5cc4e8"
+      light-blue-color: "#7cb5f5"
+      blue-color: "#6f9bff"
+      indigo-color: "#8d96f2"
+      purple-color: "#b18ef2"
+      grey-color: "#8b94a7"
+
+    # ================================================================ LIGHT
+    light:
+      primary-background-color: "#f3f5f9"
+      secondary-background-color: "#e9edf4"
+      lovelace-background: >-
+        radial-gradient(ellipse 90% 60% at 12% -8%, rgba(63, 108, 215, 0.07), transparent 55%),
+        radial-gradient(ellipse 70% 55% at 95% 105%, rgba(23, 141, 128, 0.06), transparent 55%),
+        #f3f5f9
+      card-background-color: "#ffffff"
+      ha-card-background: "#ffffff"
+      ha-card-border-color: "rgba(18, 26, 43, 0.09)"
+      ha-card-box-shadow: "0 1px 2px rgba(18, 26, 43, 0.04)"
+      input-fill-color: "#eef1f6"
+      app-header-background-color: "rgba(243, 245, 249, 0.92)"
+      app-header-text-color: "#171d2b"
+      app-header-border-bottom: "1px solid rgba(18, 26, 43, 0.08)"
+      sidebar-background-color: "#eceff5"
+      sidebar-text-color: "#525b6e"
+      sidebar-icon-color: "#6a7386"
+      sidebar-selected-icon-color: "#2f5fd7"
+      divider-color: "rgba(18, 26, 43, 0.09)"
+      primary-text-color: "#171d2b"
+      secondary-text-color: "#525b6e"
+      primary-color: "#2f5fd7"
+      rgb-primary-color: "47, 95, 215"
+      accent-color: "#d97a1f"
+      rgb-accent-color: "217, 122, 31"
+      state-icon-color: "#6a7386"
+      state-active-color: "#d97a1f"
+      error-color: "#d64545"
+      warning-color: "#d97a1f"
+      success-color: "#178d70"
+      info-color: "#2f5fd7"
+      switch-checked-track-color: "rgba(47, 95, 215, 0.4)"
+      switch-checked-button-color: "#2f5fd7"
+      red-color: "#d64545"
+      orange-color: "#e07b39"
+      amber-color: "#d97a1f"
+      yellow-color: "#b8952a"
+      green-color: "#178d70"
+      teal-color: "#12857b"
+      cyan-color: "#1583ab"
+      light-blue-color: "#3b78d8"
+      blue-color: "#2f5fd7"
+      indigo-color: "#5560d4"
+      purple-color: "#7d55d4"
+      grey-color: "#6a7386"
