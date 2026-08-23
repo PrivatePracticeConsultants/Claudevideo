@@ -332,6 +332,29 @@ views:
                   font-size: 13px
                   color: "#c9d2e8"
 
+          # today by hour, 5am-10pm — real hourly forecast, shrinking through
+          # the day as hours pass; hides itself when today is spent
+          - type: conditional
+            conditions:
+              - condition: numeric_state
+                entity: sensor.forecast_hourly_today
+                above: 0
+            card:
+              type: markdown
+              # literal block, one source line per table row: a markdown table
+              # needs its rows on CONSECUTIVE lines, and a folded scalar (>-)
+              # can only separate lines with blank lines, which broke the
+              # header/separator pairing on every batch after the first.
+              content: |-
+                {%- set hs = state_attr('sensor.forecast_hourly_today', 'hours') or [] -%}
+                {%- for chunk in hs | batch(6) %}
+                |{% for h in chunk %} {{ h.t }} |{% endfor %}
+                |{% for h in chunk %}:---:|{% endfor %}
+                |{% for h in chunk %} <ha-icon icon="{{ h.icon }}"></ha-icon> |{% endfor %}
+                |{% for h in chunk %} **{{ h.temp }}°** |{% endfor %}
+                |{% for h in chunk %} {{ '💧' ~ h.precip ~ '%' if h.precip > 0 else '—' }} |{% endfor %}
+                {% endfor %}
+
           # the forecast panel: three REAL days from weather.get_forecasts,
           # plus the 2x2 live stat grid, all overlaid on glossy panel art
           - type: picture-elements
@@ -359,7 +382,7 @@ views:
               - type: state-label
                 entity: sensor.forecast_day_1
                 style:
-                  top: 12.5%
+                  top: 11%
                   left: 70%
                   transform: none
                   font-size: 15px
@@ -386,7 +409,7 @@ views:
               - type: state-label
                 entity: sensor.forecast_day_2
                 style:
-                  top: 30.5%
+                  top: 25%
                   left: 70%
                   transform: none
                   font-size: 15px
@@ -413,7 +436,7 @@ views:
               - type: state-label
                 entity: sensor.forecast_day_3
                 style:
-                  top: 48.5%
+                  top: 39%
                   left: 70%
                   transform: none
                   font-size: 15px

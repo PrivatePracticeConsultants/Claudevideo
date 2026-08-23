@@ -148,6 +148,12 @@ template:
         data:
           type: daily
         response_variable: forecast_response
+      - action: weather.get_forecasts
+        target:
+          entity_id: "{{ wx }}"
+        data:
+          type: hourly
+        response_variable: hourly_response
       - variables:
           # response is keyed by entity_id
           fc: "{{ forecast_response[wx].forecast | default([]) }}"
@@ -155,6 +161,7 @@ template:
           day1: "{{ fc[1] | default({}) }}"
           day2: "{{ fc[2] | default({}) }}"
           day3: "{{ fc[3] | default({}) }}"
+          hourly: "{{ hourly_response[wx].forecast | default([]) }}"
           icon_map: >-
             {{ {'clear-night': 'mdi:weather-night', 'cloudy': 'mdi:weather-cloudy',
                 'fog': 'mdi:weather-fog', 'hail': 'mdi:weather-hail',
@@ -166,6 +173,25 @@ template:
                 'sunny': 'mdi:weather-sunny', 'windy': 'mdi:weather-windy',
                 'windy-variant': 'mdi:weather-windy-variant',
                 'exceptional': 'mdi:alert-circle-outline'} }}
+      - variables:
+          # today's hours, 5am-10pm local. Depends on icon_map, so it lives in
+          # a second variables step. Hours already past are absent from the
+          # provider forecast, so the strip shrinks through the day.
+          hours_out: >-
+            {% set ns = namespace(out=[]) %}
+            {% set today = now().strftime('%Y-%m-%d') %}
+            {% for h in hourly | default([]) %}
+              {% set ts = as_timestamp(h.datetime) %}
+              {% set hr = ts | timestamp_custom('%H') | int %}
+              {% if ts | timestamp_custom('%Y-%m-%d') == today and 5 <= hr <= 22 %}
+                {% set ns.out = ns.out + [{
+                     't': ts | timestamp_custom('%-I%p') | lower,
+                     'temp': h.get('temperature', 0) | round(0) | int,
+                     'icon': icon_map.get(h.get('condition'), 'mdi:weather-partly-cloudy'),
+                     'precip': h.get('precipitation_probability', 0) | int}] %}
+              {% endif %}
+            {% endfor %}
+            {{ ns.out }}
     sensor:
       - name: Forecast high today
         unique_id: weather_forecast_high_today
@@ -192,6 +218,18 @@ template:
         # live on a fresh instance.
         state: "{{ today.get('templow', none) if today is defined else none }}"
         availability: "{{ today is defined and today | count > 0 }}"
+
+      # ---- today by hour, 5am-10pm, for the hour strip ----
+      # Hours already past are simply absent from the provider's forecast, so
+      # late in the day the strip naturally shrinks to what remains; the card
+      # hides itself when nothing is left. State is the row count.
+      - name: Forecast hourly today
+        unique_id: weather_forecast_hourly_today
+        icon: mdi:clock-time-five-outline
+        state: "{{ hours_out | count }}"
+        attributes:
+          hours: "{{ hours_out }}"
+        availability: "{{ hours_out is defined }}"
 
       # ---- the next three days, for the weather card's forecast rows ----
       # Plain string states ("79° / 61°") so no unit coercion applies; the day
