@@ -30,23 +30,25 @@ house:
     # ================================================================= DARK
     dark:
       # ---- ground ----
-      primary-background-color: "#0c0e13"
-      secondary-background-color: "#12151c"
+      primary-background-color: "#090b10"
+      secondary-background-color: "#10131b"
       lovelace-background: >-
-        radial-gradient(ellipse 90% 60% at 12% -8%, rgba(111, 155, 255, 0.09), transparent 55%),
-        radial-gradient(ellipse 70% 55% at 95% 105%, rgba(64, 190, 175, 0.07), transparent 55%),
-        #0c0e13
+        radial-gradient(ellipse 80% 55% at 85% -10%, rgba(255, 159, 67, 0.10), transparent 55%),
+        radial-gradient(ellipse 90% 60% at 8% 110%, rgba(75, 99, 216, 0.12), transparent 55%),
+        #090b10
       # ---- surfaces ----
-      card-background-color: "#161a22"
-      ha-card-background: "#161a22"
-      ha-card-border-color: "rgba(255, 255, 255, 0.07)"
+      card-background-color: "#141822"
+      ha-card-background: >-
+        linear-gradient(165deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0) 42%),
+        #141822
+      ha-card-border-color: "rgba(255, 255, 255, 0.08)"
       ha-card-box-shadow: "none"
       input-fill-color: "#1d222c"
       # ---- chrome ----
-      app-header-background-color: "rgba(12, 14, 19, 0.92)"
+      app-header-background-color: "rgba(9, 11, 16, 0.9)"
       app-header-text-color: "#e9edf5"
       app-header-border-bottom: "1px solid rgba(255, 255, 255, 0.06)"
-      sidebar-background-color: "#0a0c10"
+      sidebar-background-color: "#07090d"
       sidebar-text-color: "#9aa3b5"
       sidebar-icon-color: "#7c8598"
       sidebar-selected-icon-color: "#8fb1ff"
@@ -57,10 +59,10 @@ house:
       # ---- brand ----
       primary-color: "#6f9bff"
       rgb-primary-color: "111, 155, 255"
-      accent-color: "#ffb357"
-      rgb-accent-color: "255, 179, 87"
+      accent-color: "#ff9f43"
+      rgb-accent-color: "255, 159, 67"
       state-icon-color: "#8b94a7"
-      state-active-color: "#ffb357"
+      state-active-color: "#ff9f43"
       # ---- semantics ----
       error-color: "#ff6b6b"
       warning-color: "#ffb357"
@@ -71,8 +73,8 @@ house:
       switch-checked-button-color: "#6f9bff"
       # ---- tile / badge palette, tuned to sit together on the dark ground ----
       red-color: "#ff6b6b"
-      orange-color: "#ff9c5c"
-      amber-color: "#ffb357"
+      orange-color: "#ff9f43"
+      amber-color: "#ffa94d"
       yellow-color: "#f4cf5e"
       green-color: "#4fd1a5"
       teal-color: "#40beaf"

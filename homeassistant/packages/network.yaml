@@ -41,7 +41,13 @@ template:
       - name: Internet up
         unique_id: net_internet_up
         device_class: connectivity
-        state: "{{ states('sensor.internet_latency') | is_number }}"
+        # Either probe suffices: a successful DNS resolution proves
+        # connectivity even where ICMP is blocked (some containers, some
+        # firewalls). Requiring ping alone produced "Internet is down /
+        # DNS reports ok" on a live instance — a false alarm by definition.
+        state: >-
+          {{ states('sensor.internet_latency') | is_number
+             or states('sensor.dns_resolution') == 'ok' }}
         # Two failed polls before declaring an outage — a single dropped ping is
         # normal and alerting on it trains everyone to ignore the alert.
         delay_off:

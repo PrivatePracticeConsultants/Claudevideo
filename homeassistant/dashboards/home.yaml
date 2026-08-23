@@ -180,19 +180,23 @@ views:
             name: Guests
             icon: mdi:account-supervisor
             color: purple
+            vertical: true
             features:
               - type: toggle
 
           - type: tile
             entity: input_boolean.pet_at_home
-            name: Dog is home
+            name: Dog home
             icon: mdi:dog
-            color: brown
+            color: amber
+            vertical: true
             features:
               - type: toggle
 
       # ---------------------------------------------------------------
-      # 4. OUTSIDE
+      # 4. OUTSIDE — hero card. Generated artwork (www/hero-weather.svg) with
+      # every number overlaid live by picture-elements, so the art never goes
+      # stale. All core; positioning styles are inline CSS, no card-mod.
       # ---------------------------------------------------------------
       - type: grid
         cards:
@@ -201,40 +205,103 @@ views:
             heading_style: title
             icon: mdi:weather-partly-cloudy
 
-          - type: conditional
-            conditions:
-              - condition: state
+          - type: picture-elements
+            image: /local/hero-weather.svg
+            elements:
+              - type: state-label
+                entity: sensor.outdoor_temperature
+                style:
+                  top: 24%
+                  left: 6%
+                  transform: none
+                  font-size: 56px
+                  font-weight: "300"
+                  line-height: "1"
+                  color: "#f2f5ff"
+              - type: state-label
                 entity: sensor.weather_condition
-                state_not: unavailable
-            card:
-              type: tile
-              entity: sensor.weather_condition
-              name: Conditions
-              color: cyan
+                style:
+                  top: 52%
+                  left: 6.5%
+                  transform: none
+                  font-size: 16px
+                  font-weight: "500"
+                  color: "#ffb357"
+              - type: state-label
+                entity: sensor.forecast_high_today
+                prefix: "H "
+                style:
+                  top: 66%
+                  left: 6.5%
+                  transform: none
+                  font-size: 14px
+                  color: "#c9d2e8"
+              - type: state-label
+                entity: sensor.forecast_low_today
+                prefix: "L "
+                style:
+                  top: 66%
+                  left: 24%
+                  transform: none
+                  font-size: 14px
+                  color: "#8f9ab5"
+              - type: icon
+                icon: mdi:weather-sunset-up
+                style:
+                  top: 84%
+                  left: 6.5%
+                  transform: none
+                  color: "#ffb357"
+                  "--mdc-icon-size": 17px
+              - type: state-label
+                entity: sensor.next_sunrise
+                style:
+                  top: 84%
+                  left: 12%
+                  transform: none
+                  font-size: 13px
+                  color: "#c9d2e8"
+              - type: icon
+                icon: mdi:weather-sunset-down
+                style:
+                  top: 84%
+                  left: 32%
+                  transform: none
+                  color: "#8d96f2"
+                  "--mdc-icon-size": 17px
+              - type: state-label
+                entity: sensor.next_sunset
+                style:
+                  top: 84%
+                  left: 37.5%
+                  transform: none
+                  font-size: 13px
+                  color: "#c9d2e8"
+              - type: state-label
+                entity: sensor.forecast_precipitation_chance
+                prefix: "Rain "
+                style:
+                  top: 84%
+                  left: 57%
+                  transform: none
+                  font-size: 13px
+                  color: "#7cb5f5"
+              - type: state-label
+                entity: sensor.wind_speed
+                prefix: "Wind "
+                style:
+                  top: 84%
+                  left: 73%
+                  transform: none
+                  font-size: 13px
+                  color: "#c9d2e8"
 
-          - type: tile
-            entity: sensor.outdoor_temperature
-            name: Temperature
-            icon: mdi:thermometer
-            color: cyan
-
-          - type: tile
-            entity: sensor.forecast_high_today
-            name: High
-            icon: mdi:thermometer-chevron-up
-            color: orange
-
-          - type: tile
-            entity: sensor.forecast_low_today
-            name: Low
-            icon: mdi:thermometer-chevron-down
-            color: blue
-
-          - type: tile
-            entity: sensor.forecast_precipitation_chance
-            name: Rain
-            icon: mdi:weather-rainy
-            color: light-blue
+          # 12h temperature trace under the hero — real recorded data.
+          - type: history-graph
+            entities:
+              - entity: sensor.outdoor_temperature
+                name: Outside
+            hours_to_show: 12
 
           # A real forecast card needs the concrete weather entity_id, which
           # depends on which provider you added and which this repo has never
@@ -254,11 +321,44 @@ views:
             heading_style: title
             icon: mdi:thermostat
 
+          # The dial: needle gauge over colour segments, spanning the
+          # input_number's 60-82 range so the needle position is truthful.
+          # Conditional: with no indoor sensors yet, the raw gauge renders an
+          # "Entity is currently unavailable" warning box — hide it instead.
+          - type: conditional
+            conditions:
+              - condition: state
+                entity: sensor.house_comfort_index
+                state_not: unavailable
+              - condition: state
+                entity: sensor.house_comfort_index
+                state_not: unknown
+            card:
+              type: gauge
+              entity: sensor.house_comfort_index
+              name: Feels like
+              unit: "°F"
+              min: 60
+              max: 82
+              needle: true
+              segments:
+                - from: 60
+                  color: "#6f9bff"
+                - from: 67
+                  color: "#4fd1a5"
+                - from: 76
+                  color: "#ffa94d"
+                - from: 80
+                  color: "#ff6b6b"
+
           - type: tile
-            entity: sensor.house_comfort_index
-            name: Feels like
-            icon: mdi:home-thermometer
-            color: orange
+            entity: input_number.comfort_target
+            name: Target
+            icon: mdi:target
+            color: amber
+            features:
+              - type: numeric-input
+                style: buttons
 
           - type: tile
             entity: sensor.house_average_temperature
@@ -271,15 +371,6 @@ views:
             name: Humidity
             icon: mdi:water-percent
             color: teal
-
-          - type: tile
-            entity: input_number.comfort_target
-            name: Target
-            icon: mdi:target
-            color: green
-            features:
-              - type: numeric-input
-                style: buttons
 
       # ---------------------------------------------------------------
       # 6. ENERGY
@@ -314,6 +405,30 @@ views:
             name: Standby
             icon: mdi:sleep
             color: purple
+
+          # Hourly bars, like the concept's chart. Draws from long-term
+          # statistics, so it fills in as the instance accrues history.
+          # Conditional: until a circuit is labelled, the card renders an empty
+          # "No statistics found" box — hide it instead.
+          - type: conditional
+            conditions:
+              - condition: state
+                entity: sensor.house_power_draw
+                state_not: unavailable
+              - condition: state
+                entity: sensor.house_power_draw
+                state_not: unknown
+            card:
+              type: statistics-graph
+              title: Draw by hour
+              entities:
+                - entity: sensor.house_power_draw
+                  name: Power
+              chart_type: bar
+              period: hour
+              stat_types:
+                - mean
+              days_to_show: 1
 
       # ---------------------------------------------------------------
       # 7. SHORTCUTS

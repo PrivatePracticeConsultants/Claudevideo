@@ -48,7 +48,8 @@ template:
         state_class: measurement
         state: >-
           {% set wx = states.weather | map(attribute='entity_id') | list %}
-          {{ state_attr(wx[0], 'wind_speed') if wx | count > 0 else none }}
+          {% set w = state_attr(wx[0], 'wind_speed') if wx | count > 0 else none %}
+          {{ w | round(0) | int if w is not none else none }}
         availability: "{{ states.weather | list | count > 0 }}"
 
       - name: Weather condition
@@ -82,6 +83,20 @@ template:
           {{ labels.get(states(wx[0]), states(wx[0]) | replace('-', ' ') | title)
              if wx | count > 0 else 'unknown' }}
         availability: "{{ states.weather | list | count > 0 }}"
+
+      - name: Next sunrise
+        unique_id: weather_next_sunrise
+        icon: mdi:weather-sunset-up
+        state: >-
+          {% set t = state_attr('sun.sun', 'next_rising') %}
+          {{ as_timestamp(t) | timestamp_custom('%-I:%M %p') if t else 'unknown' }}
+
+      - name: Next sunset
+        unique_id: weather_next_sunset
+        icon: mdi:weather-sunset-down
+        state: >-
+          {% set t = state_attr('sun.sun', 'next_setting') %}
+          {{ as_timestamp(t) | timestamp_custom('%-I:%M %p') if t else 'unknown' }}
 
       # A single human line for the hero card and for voice.
       - name: Weather summary

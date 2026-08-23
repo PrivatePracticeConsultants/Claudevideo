@@ -64,7 +64,10 @@ def frontend_registry() -> dict[str, set[str]]:
 # them reports a tile feature as a bogus card.
 NON_CARD_KEYS = {"features", "badges", "strategy", "footer", "header",
                  "tap_action", "hold_action", "double_tap_action",
-                 "state_content", "conditions"}
+                 "state_content", "conditions",
+                 # picture-elements entries carry type: state-label / state-icon /
+                 # service-button — element types, not card types
+                 "elements"}
 
 
 def walk_cards(node, path, out):
