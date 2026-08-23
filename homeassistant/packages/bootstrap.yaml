@@ -76,6 +76,21 @@ automation:
       - delay:
           seconds: 15
       - action: script.apply_default_settings
+      # The daily security check triggers at input_datetime.security_check_time
+      # — an input_datetime with no value is `unknown` and a time trigger on it
+      # NEVER fires, so on a fresh install the check silently did not exist.
+      - action: input_datetime.set_datetime
+        continue_on_error: true
+        target:
+          entity_id: input_datetime.security_check_time
+        data:
+          time: "21:30:00"
+      # Presence simulation ships ON: picking vacation mode should visibly do
+      # what the feature promises, not depend on a switch surfaced nowhere.
+      - action: input_boolean.turn_on
+        continue_on_error: true
+        target:
+          entity_id: input_boolean.vacation_simulation
       - action: input_boolean.turn_on
         target:
           entity_id: input_boolean.helpers_initialised

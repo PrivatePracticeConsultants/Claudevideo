@@ -257,9 +257,29 @@ committed secrets. It does **not** prove:
   with no phones), disarm by code, signal clears with no latch. The label-
   driven sensors track live: perimeter count 0→1→0 with the door, power sum
   exact, the 9% battery caught by the digest.
+- ~~That every feature is reachable~~ **Decorative-feature sweep executed**: a
+  reachability pass over all 36 automations plus live firing of every path
+  that had never run. It found and fixed three features that could never work:
+  the daily security check triggered on an input_datetime that was `unknown`
+  forever (bootstrap now seeds 21:30); the automation-error alert listened for
+  `system_log_event`, which core never emits without `fire_event: true` (now
+  set, and proven end-to-end with an induced error); and vacation presence
+  simulation was gated on a switch that defaulted off and was surfaced nowhere
+  (bootstrap turns it on — and the simulation was fired live: porch lit within
+  seconds of entering vacation mode at night). Also executed: every dashboard
+  navigation target resolves; set_area_mood and climate_boost run (boost exits
+  cleanly with no climate hardware); the power baseline and vampire-floor
+  sensors are genuinely accumulating; and scripts/deploy.sh completed its full
+  lifecycle on a real git origin — a broken commit was pulled, failed the
+  on-box gates, rolled back automatically to the known-good commit and raised
+  a critical alert; a diverged history was refused loudly; a good commit
+  deployed, chose reload over restart correctly, and pushed its
+  `deployed-*` tag.
 - **That any automation does the right thing** on real *hardware* — radios,
   real lag, real firmware quirks. The virtual house exercises the logic, not
-  the physics. A live instance
+  the physics. (The adaptive-lighting colour-temperature branch is also
+  hardware-gated: the test light is on/off-only, so the CT/dim branches are
+  render-verified but not device-verified.) A live instance
   HAS now been booted (HA 2026.2.3, onboarded, dashboards rendered and
   screenshotted) and reaches **zero configuration errors and zero template
   loops** — but with no paired devices, so no automation has ever fired against

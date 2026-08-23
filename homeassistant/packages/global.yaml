@@ -245,6 +245,13 @@ input_datetime:
 # ---------------------------------------------------------------------------
 # 3. HEALTH PACKAGE
 # ---------------------------------------------------------------------------
+# Without fire_event, system_log NEVER emits system_log_event
+# (DEFAULT_FIRE_EVENT = False in core) — the error-alert automation below
+# listened for an event that could not occur. Found in the decorative-feature
+# sweep, same class as the alarm that nothing could trigger.
+system_log:
+  fire_event: true
+
 command_line:
   - sensor:
       name: Database size
