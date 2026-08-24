@@ -529,15 +529,28 @@ recorder:
       - sensor.date_*
       - sensor.time_*
       # ---- Ring / MQTT diagnostics (docs/decisions.md: recorder exclusions) ----
-      # Ring publishes battery, RSSI and link-quality on every heartbeat, and a
-      # motion/ding burst can be dozens of rows per event. The ALARM STATE and
-      # the contact sensors are deliberately NOT excluded — those are the
-      # history you would want after an incident.
-      - sensor.ring_*_battery
-      - sensor.ring_*_rssi
-      - sensor.ring_*_link_quality
-      - sensor.ring_*_wireless_signal
-      - event.ring_*_ding
-      - event.ring_*_motion
+      # NO `ring_` PREFIX. ring-mqtt names entities after the Ring device and
+      # location, not after the integration: the front-door contact arrives as
+      # something like `binary_sensor.front_door`, so `sensor.ring_*` would be a
+      # glob that matches nothing and silently excludes nothing.
+      #
+      # These are therefore written unprefixed, which is safe here because the
+      # suffixes are diagnostic ones this house has no other source for, and
+      # because `event` is a domain nothing but the bridge populates. The
+      # generic `sensor.*_rssi` / `sensor.*_linkquality` rules above already do
+      # part of this job.
+      #
+      # NOT excluded, deliberately: the alarm state and the contact sensors —
+      # those are exactly the history you would want after an incident.
+      #
+      # REVISIT IN PHASE 1. Once the real entity table exists
+      # (docs/prompts/22-ring.md, step 11), check these against actual entity
+      # IDs. Until then treat them as best-effort, not as verified: an
+      # exclusion that matches nothing fails silently and looks identical to
+      # one that works.
+      - sensor.*_link_quality
+      - sensor.*_wireless_signal
+      - event.*_ding
+      - event.*_motion
     event_types:
       - call_service    # the single largest table in most HA databases

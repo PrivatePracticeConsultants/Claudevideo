@@ -91,6 +91,27 @@ automation:
         continue_on_error: true
         target:
           entity_id: input_boolean.vacation_simulation
+      # Ring helpers. continue_on_error because optional/ring.yaml is not
+      # promoted on every install; these are no-ops until it is.
+      # Without the first, the nightly arm time is `unknown` -> midnight.
+      # Without the second, EVERY alarm health notification is gated off and
+      # the health sensor becomes decorative.
+      - action: input_datetime.set_datetime
+        continue_on_error: true
+        target:
+          entity_id: input_datetime.ring_nightly_arm_time
+        data:
+          time: "22:30:00"
+      - action: input_boolean.turn_on
+        continue_on_error: true
+        target:
+          entity_id: input_boolean.ring_health_alerts
+      - action: input_number.set_value
+        continue_on_error: true
+        target:
+          entity_id: input_number.ring_battery_threshold
+        data:
+          value: 20
       - action: input_boolean.turn_on
         target:
           entity_id: input_boolean.helpers_initialised

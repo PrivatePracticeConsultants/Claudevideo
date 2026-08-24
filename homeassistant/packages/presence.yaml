@@ -237,15 +237,25 @@ template:
   - triggers:
       - trigger: event
         event_type: state_changed
+      # The window must AGE OUT on its own. Pruning only when a new transition
+      # arrives means a phone that flapped and then went quiet keeps reporting
+      # those flaps forever — and both the weekly soak report and the auto-arm
+      # gate read that stale number.
+      - trigger: time_pattern
+        minutes: "/1"
     actions:
       # Only real device_tracker transitions; attribute-only updates (battery,
       # GPS accuracy) fire state_changed constantly and are not movements.
+      # Pass through for the time_pattern tick (prune-only), and for genuine
+      # tracker transitions. Everything else aborts.
       - condition: template
         value_template: >-
-          {{ trigger.event.data.entity_id.startswith('device_tracker.')
-             and trigger.event.data.old_state is not none
-             and trigger.event.data.new_state is not none
-             and trigger.event.data.old_state.state != trigger.event.data.new_state.state }}
+          {{ trigger.platform == 'time_pattern'
+             or (trigger.event.data.entity_id.startswith('device_tracker.')
+                 and trigger.event.data.old_state is not none
+                 and trigger.event.data.new_state is not none
+                 and trigger.event.data.old_state.state
+                     != trigger.event.data.new_state.state) }}
       - variables:
           # Keep a rolling window of recent transitions in the attribute. Same
           # accumulate-in-attributes pattern as the energy baseline, and it
@@ -260,12 +270,16 @@ template:
                or [] %}
             {% set cutoff = as_timestamp(now()) - 900 %}
             {% set kept = prior | selectattr('t', 'gt', cutoff) | list %}
-            {{ kept + [{
-                 't': as_timestamp(now()),
-                 'entity': trigger.event.data.entity_id,
-                 'from': trigger.event.data.old_state.state,
-                 'to': trigger.event.data.new_state.state,
-                 'at': now().strftime('%Y-%m-%d %H:%M:%S')}] }}
+            {% if trigger.platform == 'time_pattern' %}
+              {{ kept }}
+            {% else %}
+              {{ kept + [{
+                   't': as_timestamp(now()),
+                   'entity': trigger.event.data.entity_id,
+                   'from': trigger.event.data.old_state.state,
+                   'to': trigger.event.data.new_state.state,
+                   'at': now().strftime('%Y-%m-%d %H:%M:%S')}] }}
+            {% endif %}
     sensor:
       - name: Tracker flaps 15m
         unique_id: presence_tracker_flaps_15m
@@ -369,64 +383,10 @@ automation:
             Review the logbook for the week's transitions before deciding on
             auto-arm. Four clean weeks required.
 
-  # =====================================================================
-  # AUTO-ARM-AWAY — WRITTEN, DELIBERATELY DISABLED.
-  #
-  # DO NOT ENABLE THIS WITHOUT AN EXPLICIT DECISION AFTER THE SOAK.
-  #
-  # Under alarm topology (a), Ring's panel is the real, monitored panel. That
-  # changes what a mistake costs. Before, arming wrongly meant a wrong state in
-  # a logbook. Now it means a siren, a call from a monitoring dispatcher, a
-  # possible police dispatch, and a City & County of Honolulu false-alarm fee.
-  #
-  # This repo has already made exactly this mistake once: an earlier version
-  # treated a person whose state was `unknown` as "away" and armed the house
-  # with nobody having left. The fusion sensors now refuse to have an opinion
-  # unless at least one person's state is actually KNOWN — that guard stays
-  # exactly as it is, and is NOT to be weakened now that a tracker exists.
-  #
-  # To enable, after four clean soak weeks: remove the `false` condition below,
-  # and only then.
-  # =====================================================================
-  - id: presence_auto_arm_away_DISABLED
-    alias: "[presence] Auto-arm away (DISABLED pending soak)"
-    description: >-
-      Arms the Ring panel Away when everyone leaves. DISABLED: the first
-      condition is a hard `false`, so this can never run. It exists in this
-      form so the logic is reviewed, versioned and ready — not so it can fire.
-      Enabling is a deliberate act after four clean tracker-soak weeks.
-    mode: single
-    triggers:
-      - trigger: state
-        entity_id: binary_sensor.everyone_away
-        to: "on"
-        for:
-          minutes: 10
-    conditions:
-      # THE DISABLE. Remove this line only after the soak, deliberately.
-      - condition: template
-        value_template: "{{ false }}"
-      - condition: state
-        entity_id: input_boolean.automations_paused
-        state: "off"
-      - condition: state
-        entity_id: input_boolean.guest_mode
-        state: "off"
-      # Never arm off a guess: the fusion sensor must be genuinely available,
-      # not merely not-home.
-      - condition: template
-        value_template: "{{ states('binary_sensor.everyone_away') == 'on' }}"
-      - condition: numeric_state
-        entity_id: sensor.tracker_flaps_15m
-        below: 1
-    actions:
-      - action: script.notify_person
-        data:
-          target: all
-          priority: warning
-          title: Auto-arm away
-          message: >-
-            Everyone has been away for 10 minutes; arming the alarm Away.
+  # AUTO-ARM-AWAY lives in optional/ring.yaml, not here: it must actually
+  # call arm_away on the Ring panel, and that entity id is a placeholder until
+  # the bridge is installed. An automation that announces "arming" without
+  # arming is worse than none.
 
   - id: presence_set_away
     alias: "[presence] Everyone left — go to away"

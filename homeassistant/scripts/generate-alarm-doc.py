@@ -15,13 +15,17 @@ Never emits an address, a keypad code, or the monitoring passcode. It records
 that those exist and where they are set — never their values.
 """
 from __future__ import annotations
-import json, os, pathlib, sys, urllib.request, urllib.error
+import json, os, pathlib, re, sys, urllib.request, urllib.error
 from datetime import datetime, timezone
 
 import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 OUT = ROOT / "docs" / "alarm-system.md"
+# Hand-maintained, NEVER written by this script. The insurer's document needs a
+# live-test date, but it is regenerated on every run — so the date is typed
+# there and reprinted here, rather than hand-edited into generated output.
+TEST_LOG = ROOT / "docs" / "alarm-test-log.md"
 
 # Sensor device_classes that count as a protected opening or space.
 PROTECTIVE = {"door": "Entry point", "window": "Window", "opening": "Opening",
@@ -32,42 +36,116 @@ LIFE_SAFETY = {"smoke", "gas", "carbon_monoxide", "heat"}
 
 
 def from_live() -> list[dict] | None:
+    """Protected points from the live registry — REAL Ring devices only.
+
+    Scoped to entities carrying the `ring` label. Without that scope this
+    listed Home Assistant's own fusion/aggregate template sensors
+    (human_motion_detected, corroborated_motion, any_window_open) and the
+    testlab simulations as protected points — which is exactly what it did on
+    its first run, reporting "6 protected points" for a house with no alarm
+    hardware at all. On an insurer's document that is not a cosmetic bug.
+    """
     url, token = os.environ.get("HA_URL"), os.environ.get("HA_TOKEN")
     if not (url and token):
         return None
-    req = urllib.request.Request(url.rstrip("/") + "/api/states")
-    req.add_header("Authorization", f"Bearer {token}")
-    try:
+    def _get(path):
+        req = urllib.request.Request(url.rstrip("/") + path)
+        req.add_header("Authorization", f"Bearer {token}")
         with urllib.request.urlopen(req, timeout=30) as r:
-            states = json.loads(r.read())
-    except (urllib.error.URLError, OSError) as e:
+            return json.loads(r.read())
+    try:
+        states = _get("/api/states")
+        # `ring`-labelled entities, resolved through the template API so the
+        # scope is the registry's, not a name-guess.
+        req = urllib.request.Request(url.rstrip("/") + "/api/template",
+                                     data=json.dumps(
+                                         {"template": "{{ label_entities('ring') | list }}"}
+                                     ).encode(), method="POST")
+        req.add_header("Authorization", f"Bearer {token}")
+        req.add_header("Content-Type", "application/json")
+        with urllib.request.urlopen(req, timeout=30) as r:
+            labelled = set(eval(r.read().decode(), {"__builtins__": {}}, {}))
+    except (urllib.error.URLError, OSError, SyntaxError, ValueError) as e:
         print(f"  live registry unreachable ({e}); falling back to the register",
               file=sys.stderr)
         return None
+
+    if not labelled:
+        print("  live registry reachable but NO entities carry the `ring` "
+              "label — falling back to the committed register", file=sys.stderr)
+        return None
+
     rows = []
     for s in states:
         a = s.get("attributes", {})
         dc = a.get("device_class")
-        if s["entity_id"].startswith("binary_sensor.") and dc in PROTECTIVE:
+        if (s["entity_id"] in labelled
+                and s["entity_id"].startswith("binary_sensor.")
+                and dc in PROTECTIVE):
             rows.append({"entity_id": s["entity_id"],
                          "name": a.get("friendly_name", s["entity_id"]),
                          "kind": PROTECTIVE[dc], "device_class": dc,
-                         "location": "", "source": "live registry"})
-    return rows
+                         "location": a.get("ha_area", ""), "source": "live registry"})
+    # #14: an empty result must NOT masquerade as an authoritative answer.
+    return rows or None
 
 
 def from_register() -> list[dict]:
+    """Protected points from devices/ring-*.yaml.
+
+    Reads the schema devices/TEMPLATE.yaml actually defines. The first version
+    invented `entity_id`/`kind`/`device_class` keys the template does not have,
+    so a fully-registered contact sensor still produced "0 protected openings"
+    — and a registered smoke listener would still have printed "do not claim
+    fire monitoring". Silent under-reporting on an insurance document.
+    """
     rows = []
     for f in sorted((ROOT / "devices").glob("ring-*.yaml")):
         d = yaml.safe_load(f.read_text()) or {}
-        dev = d.get("device", {})
-        rows.append({"entity_id": dev.get("entity_id", "—"),
+        dev = d.get("device", {}) or {}
+        # device_class is what classifies a point; accept it at the top level or
+        # infer from the documented `protects` field.
+        dc = (dev.get("device_class") or dev.get("protects") or "").strip()
+        entity = dev.get("entity_id") or dev.get("primary_entity") or "—"
+        rows.append({"entity_id": entity,
                      "name": dev.get("slug", f.stem),
-                     "kind": dev.get("kind", "—"),
-                     "device_class": dev.get("device_class", ""),
+                     "kind": PROTECTIVE.get(dc, dc or "—"),
+                     "device_class": dc,
                      "location": (dev.get("location") or {}).get("physical", ""),
                      "source": f.name})
     return rows
+
+
+def last_live_test() -> str | None:
+    """Most recent dated row of docs/alarm-test-log.md, or None.
+
+    Deliberately forgiving: this is a human-typed table, and a malformed row
+    must degrade to "no test recorded" rather than break the insurer document.
+    """
+    if not TEST_LOG.exists():
+        return None
+    # Strip HTML comments FIRST. A commented-out example row is still a line
+    # beginning with "|", and letting one through would print an invented test
+    # date into a document that goes to an insurer. Caught in review; do not
+    # simplify this back to a per-line startswith("<!--") check.
+    text = re.sub(r"<!--.*?-->", "", TEST_LOG.read_text(), flags=re.DOTALL)
+    rows = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("|"):
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        if len(cells) < 3:
+            continue
+        try:
+            datetime.strptime(cells[0], "%Y-%m-%d")
+        except ValueError:
+            continue          # header, separator, or the "_none yet_" placeholder
+        rows.append(cells)
+    if not rows:
+        return None
+    d = sorted(rows, key=lambda c: c[0])[-1]
+    return f"| {d[0]} | {d[1]} | {d[2]} |"
 
 
 def main() -> int:
@@ -141,6 +219,8 @@ def main() -> int:
         w("_None recorded yet — no Ring contact sensors have been paired._")
     w("")
 
+    other = [r for r in rows if r not in life and r not in perimeter and r not in interior]
+
     w(f"## Interior — {len(interior)} motion detector(s)\n")
     if interior:
         w("| Entity | Type | Location | Pet-exposed |")
@@ -150,6 +230,14 @@ def main() -> int:
     else:
         w("_None recorded yet._")
     w("")
+
+    if other:
+        w(f"## Other monitored points — {len(other)}\n")
+        w("| Entity | Type | Location |")
+        w("|---|---|---|")
+        for r in sorted(other, key=lambda x: x["entity_id"]):
+            w(f"| `{r['entity_id']}` | {r['kind']} | {r['location'] or '—'} |")
+        w("")
 
     w("## Arming logic\n")
     w("| Mode | Coverage | Set by |")
@@ -176,6 +264,24 @@ def main() -> int:
     w("**It reports Home Assistant's visibility, not the alarm's protection.** "
       "Ring arms, sirens and dispatches without the bridge; a degraded reading "
       "means HA has gone blind, not that the house is unprotected.\n")
+
+    w("## Last live test\n")
+    tested = last_live_test()
+    if tested:
+        w("| Date | Test | Result |")
+        w("|---|---|---|")
+        w(tested)
+        w("")
+        w("Full history: `docs/alarm-test-log.md`. Procedure: "
+          "`docs/alarm-testing.md`.")
+    else:
+        w("> **No live end-to-end test has been recorded.** Arming, siren and "
+          "the dispatch call have not been demonstrated together. Run "
+          "`docs/alarm-testing.md` section E — with Ring monitoring in **test "
+          "mode** — and log the date in `docs/alarm-test-log.md`.\n>\n"
+          "> Do not present this document to an insurer as evidence of a "
+          "tested system until that row exists.")
+    w("")
 
     w("## Not recorded here, by policy\n")
     w("The property address, the keypad codes, and the monitoring verbal "

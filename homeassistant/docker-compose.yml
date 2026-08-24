@@ -88,3 +88,11 @@ volumes:
   mosquitto_data:
   mosquitto_log:
   ring_mqtt_data:
+    # PINNED NAME, deliberately. Compose prefixes volume names with the project
+    # (this directory), so the default would be `homeassistant_ring_mqtt_data`
+    # — while the one-off 2FA bootstrap and the re-auth procedure both run
+    # `docker run -v ring_mqtt_data:/data`, outside any project. Without this
+    # `name:` those are two different volumes: the token gets written to one
+    # and the bridge starts from the other, empty, and simply never logs in.
+    # See docs/prompts/22-ring.md step 2 and docs/runbook.md §14.
+    name: ring_mqtt_data

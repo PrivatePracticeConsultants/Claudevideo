@@ -1,6 +1,6 @@
 # Alarm system — protected points
 
-> **Generated** 2026-08-24 16:47 UTC from devices/ring-*.yaml (offline register) by `scripts/generate-alarm-doc.py`.
+> **Generated** 2026-08-24 17:07 UTC from devices/ring-*.yaml (offline register) by `scripts/generate-alarm-doc.py`.
 >
 > Regenerate after any change to the alarm hardware. Do not hand-edit:
 > edits are lost on the next run, and a drifted document is worse than
@@ -65,6 +65,12 @@ _None recorded yet._
 `binary_sensor.alarm_system_degraded` turns on when the bridge, broker, base station, any sensor (>1h), any battery (<20%), any tamper flag, or the notification path is degraded. Immediate alert on transition, daily digest while it persists, and `sensor.alarm_system_healthy_7d` reports 7-day healthy uptime.
 
 **It reports Home Assistant's visibility, not the alarm's protection.** Ring arms, sirens and dispatches without the bridge; a degraded reading means HA has gone blind, not that the house is unprotected.
+
+## Last live test
+
+> **No live end-to-end test has been recorded.** Arming, siren and the dispatch call have not been demonstrated together. Run `docs/alarm-testing.md` section E — with Ring monitoring in **test mode** — and log the date in `docs/alarm-test-log.md`.
+>
+> Do not present this document to an insurer as evidence of a tested system until that row exists.
 
 ## Not recorded here, by policy
 

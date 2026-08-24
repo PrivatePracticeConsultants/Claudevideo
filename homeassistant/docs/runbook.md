@@ -221,6 +221,20 @@ You have a dead machine and a backup.
 
 ---
 
+## 11. Who to call / where things are
+
+> Fill this in. It is the part of the runbook that cannot be written in
+> advance, and the part most likely to be needed by someone who is not you.
+
+- Electrician:
+- HVAC:
+- ISP + account number:
+- Alarm monitoring (if any):
+- Breaker panel location:
+- Water shutoff:
+- Coordinator stick model + spare:
+- Password manager (where the secrets live):
+
 ## 12. The critical notification path (iOS) — verify this, don't assume it
 
 **This is the single point of failure for every alert in the house**, including
@@ -382,19 +396,12 @@ docker compose start ring-mqtt
 Requires the Ring account password and the 2FA device. The new token is written
 into the state volume; **nothing is committed to this repo, ever.**
 
+The bare `ring_mqtt_data` above is correct because `docker-compose.yml` pins
+that volume with an explicit `name:`. `docker run` is not a Compose project and
+would otherwise miss the project-prefixed volume, writing the new token
+somewhere the bridge never reads. Check with
+`docker run --rm -v ring_mqtt_data:/data alpine ls -l /data/ring-state.json`
+before restarting the bridge.
+
 Verify afterwards: Ring entities repopulate and
 `binary_sensor.alarm_system_degraded` returns to **off**.
-
-## 11. Who to call / where things are
-
-> Fill this in. It is the part of the runbook that cannot be written in
-> advance, and the part most likely to be needed by someone who is not you.
-
-- Electrician:
-- HVAC:
-- ISP + account number:
-- Alarm monitoring (if any):
-- Breaker panel location:
-- Water shutoff:
-- Coordinator stick model + spare:
-- Password manager (where the secrets live):

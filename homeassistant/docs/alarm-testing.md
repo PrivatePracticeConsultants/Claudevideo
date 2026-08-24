@@ -47,7 +47,7 @@ Close it; expect both to clear.
 | Already armed | Repeat while already Armed Away | **No change** — never downgrades Away to Home | ☐ |
 | Kill switch | `input_boolean.automations_paused` on, wait for the arm time | Nothing happens | ☐ |
 | **No auto-disarm exists** | `grep -rn "alarm_disarm" packages/ optional/` | **Zero results.** If this ever returns a hit, stop and remove it. | ☐ |
-| Auto-arm-away stays disabled | Trigger `automation.presence_auto_arm_away_disabled_pending_soak` manually | Panel does **not** arm (hard-`false` condition) | ☐ |
+| Auto-arm-away stays disabled | `automation.trigger` on `automation.ring_auto_arm_away_disabled_pending_soak` **with `skip_condition: false`** | Panel does **not** arm. Without that flag `automation.trigger` SKIPS conditions and the test proves nothing. | ☐ |
 
 ## C. The health sensor — simulate the failures
 
@@ -114,7 +114,11 @@ Do this once at install, then annually. Two people, ~30 minutes.
 **After:**
 - ☐ Ring monitoring **test mode OFF** — confirmed
 - ☐ Panel armed or disarmed deliberately, as intended
-- ☐ Record the date in `docs/alarm-system.md`
+- ☐ Add a dated row to `docs/alarm-test-log.md` (hand-maintained), then
+  run `python3 scripts/generate-alarm-doc.py` — it reprints the newest
+  row into `docs/alarm-system.md`. Do **not** type the date into
+  `alarm-system.md` itself: that file is generated and the edit is lost
+  on the next run.
 
 ## F. The verbal passcode — rehearse it
 

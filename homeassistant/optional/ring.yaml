@@ -47,6 +47,10 @@ input_datetime:
     icon: mdi:shield-moon
     has_date: false
     has_time: true
+    # NOTE: an input_datetime with no value falls back to 00:00:00, which on a
+    # MONITORED panel means silently auto-arming Home every midnight. The
+    # nightly-arm automation therefore refuses to run until bootstrap has
+    # seeded a real time (packages/bootstrap.yaml) — see its condition.
 
 template:
   # =====================================================================
@@ -116,13 +120,18 @@ template:
                STRINGS, so a lexicographic '9' > '20' would hide the flattest
                battery in the house — the same bug already fixed in the global
                low-battery digest. #}
-            {# Scoped by INTEGRATION, not by a hand-applied label. Gating a
-               health check on a label means that forgetting the label makes
-               the check silently pass forever — proven in testing, where a 9%
-               battery went unflagged because nothing carried the label. The
-               integration membership cannot be forgotten. #}
+            {# Scoped to the `ring` label, WITH a missing-label check below.
+               Two failure modes had to be closed at once: gating on a label
+               means forgetting it silently checks nothing (a 9% battery went
+               unflagged in testing), while scoping to integration_entities
+               ('mqtt') sweeps in every unrelated MQTT device so a Zigbee
+               doorbell's flat cell would raise an ALARM-system warning. The
+               label is correct scoping; the guard makes forgetting it loud. #}
             {% set thr = states('input_number.ring_battery_threshold') | float(20) %}
-            {% set ring_ents = integration_entities('mqtt') %}
+            {% set ring_ents = label_entities('ring') %}
+            {% if ring_ents | count == 0 %}
+              {% set ns.r = ns.r + ['battery monitoring INACTIVE: no entities carry the `ring` label'] %}
+            {% endif %}
             {% set ns2 = namespace(n=[]) %}
             {% for s in states.sensor
                | selectattr('attributes.device_class', 'defined')
@@ -325,6 +334,12 @@ automation:
       - condition: state
         entity_id: input_boolean.automations_paused
         state: "off"
+      # Refuse to act on an unseeded helper: `unknown` renders as midnight and
+      # would arm a monitored panel at 00:00 with nobody having chosen that.
+      - condition: template
+        value_template: >-
+          {{ states('input_datetime.ring_nightly_arm_time')
+             not in ['unknown', 'unavailable', ''] }}
       - condition: state
         entity_id: REPLACE_ME_ring_panel
         state: disarmed
@@ -383,3 +398,60 @@ automation:
           label_id: interior_light
         data:
           brightness_pct: 100
+
+  # =====================================================================
+  # AUTO-ARM-AWAY — WRITTEN, DELIBERATELY DISABLED.
+  #
+  # DO NOT ENABLE WITHOUT AN EXPLICIT DECISION AFTER THE SOAK.
+  #
+  # Under topology (a) Ring's panel is the real, monitored panel, which changes
+  # what a mistake costs: a bad arm is a siren, a call from a dispatcher, a
+  # possible police response and a City & County of Honolulu false-alarm fee —
+  # not a logbook entry. This repo has already armed the house once off an
+  # `unknown` person state; the fusion-sensor guard that fixed that stays
+  # exactly as it is and is NOT to be weakened now that a tracker exists.
+  #
+  # TO ENABLE, after four clean soak weeks: delete the `false` condition. The
+  # arm action below is real, so enabling it genuinely arms — verify in
+  # testlab first.
+  # =====================================================================
+  - id: ring_auto_arm_away_DISABLED
+    alias: "[ring] Auto-arm away (DISABLED pending soak)"
+    description: >-
+      Arms the Ring panel Away when everyone has been gone 10 minutes.
+      DISABLED by a hard `false` condition. NOTE: `automation.trigger` skips
+      conditions unless you pass `skip_condition: false` — testing this guard
+      requires that flag, or the test proves nothing.
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: binary_sensor.everyone_away
+        to: "on"
+        for:
+          minutes: 10
+    conditions:
+      # THE DISABLE. Remove this line only after the soak, deliberately.
+      - condition: template
+        value_template: "{{ false }}"
+      - condition: state
+        entity_id: input_boolean.automations_paused
+        state: "off"
+      - condition: state
+        entity_id: input_boolean.guest_mode
+        state: "off"
+      # Never arm off a guess: the fusion sensor must be genuinely available.
+      - condition: template
+        value_template: "{{ states('binary_sensor.everyone_away') == 'on' }}"
+      - condition: numeric_state
+        entity_id: sensor.tracker_flaps_15m
+        below: 1
+    actions:
+      - action: alarm_control_panel.alarm_arm_away
+        target:
+          entity_id: REPLACE_ME_ring_panel
+      - action: script.notify_person
+        data:
+          target: all
+          priority: warning
+          title: Auto-armed away
+          message: Everyone has been away 10 minutes; the alarm is now Armed Away.

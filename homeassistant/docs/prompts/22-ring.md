@@ -57,6 +57,16 @@ Prompts for account, password and 2FA code, then saves `ring-state.json` to
 `/data`. Rotation and expiry behaviour: `docs/decisions.md`, credential
 register.
 
+`ring_mqtt_data` is the same volume the bridge mounts: `docker-compose.yml`
+pins it with an explicit `name:` so Compose does **not** prefix it with the
+project directory. Confirm before moving on — if this shows nothing, the
+bootstrap wrote to a volume the bridge will never read:
+
+```bash
+docker volume inspect ring_mqtt_data --format '{{.Mountpoint}}'
+docker run --rm -v ring_mqtt_data:/data alpine ls -l /data/ring-state.json
+```
+
 ### 3. Start the substrate
 
 ```bash
