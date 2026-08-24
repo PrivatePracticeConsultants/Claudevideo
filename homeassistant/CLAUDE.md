@@ -73,6 +73,22 @@ instance after every static check had passed:
 So: static AND computed variables both live in a `- variables:` action step at
 the top of `sequence:`, which renders sequentially and has neither problem.
 
+## Trigger-based template entities: two runtime rules
+
+Both learned by watching entities fail on a live instance, both invisible to
+every static check:
+
+- **`this` is undefined inside the `actions:` block.** It is available in the
+  `state:` and attribute templates, but a variables step that reads
+  `this.attributes` raises `UndefinedError` on every event. Read the entity's
+  own prior value with `state_attr('sensor.x', 'attr')` instead.
+- **A condition that aborts the action sequence still renders the entity.**
+  The variables the actions would have set are then *undefined*, so any
+  accumulator that writes them straight into an attribute silently WIPES
+  itself — once per event, which on a `state_changed` trigger is hundreds of
+  times a minute. Every state/attribute template must fall back:
+  `{{ x if x is defined else (this.attributes.get('x') or default) }}`.
+
 ## No orphan helpers
 
 Every `input_boolean`, `input_number`, `timer`, etc. is declared **in YAML, in
