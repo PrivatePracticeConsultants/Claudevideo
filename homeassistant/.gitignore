@@ -17,3 +17,10 @@ image/
 .venv/
 __pycache__/
 esphome/secrets.yaml
+
+# Ring/MQTT substrate — credentials and bridge state never enter the repo
+.env
+mosquitto/config/passwd
+mosquitto/data/
+mosquitto/log/
+ring-state.json

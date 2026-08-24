@@ -305,6 +305,86 @@ After **any iOS major update, phone replacement, or Companion reinstall**:
 If the phone is replaced, the `notify.mobile_app_*` service name changes —
 update `routes:` in `packages/global.yaml` or every alert silently stops.
 
+## 13. Operating the Ring bridge (Mosquitto + ring-mqtt)
+
+**First, the thing to stay calm about:** these containers are not the alarm.
+Ring's base station arms, sirens and dispatches on its own path. If both
+containers are dead, the house is **still armed and still monitored** — Home
+Assistant just cannot see it, and cannot arm/disarm from a dashboard. The
+keypad and the Ring app work regardless.
+
+### Daily operation
+
+```bash
+cd <repo>/homeassistant
+docker compose ps                  # both should be healthy
+docker compose logs -f ring-mqtt   # what the bridge is doing
+docker compose restart ring-mqtt   # safe; re-reads its state volume
+```
+
+Health is measured in Home Assistant, not by `docker ps`:
+`binary_sensor.alarm_system_degraded` reads the bridge's MQTT availability
+topic. **A container can be "up" while the bridge is useless** — that is
+exactly the case the sensor exists to catch.
+
+### Upgrading (deliberate, never automatic)
+
+Tags are pinned on purpose. To upgrade:
+
+1. Read the upstream release notes for every version between current and target.
+2. Note the current tag — that is your rollback target.
+3. Bump the tag in `docker-compose.yml`, commit it (the upgrade is reviewable
+   in git).
+4. ```bash
+   docker compose pull ring-mqtt
+   docker compose up -d ring-mqtt
+   docker compose logs -f ring-mqtt
+   ```
+5. Verify: entities present, `alarm_system_degraded` off, arm/disarm from HA
+   still works.
+
+### Rolling back
+
+```bash
+git revert <the tag bump>     # or edit the tag back
+docker compose up -d ring-mqtt
+```
+
+The state volume is untouched by an image change, so a rollback does **not**
+require redoing the Ring 2FA flow.
+
+### When the bridge is broken
+
+1. `docker compose ps` — is the container even running?
+2. `docker compose logs --tail 100 ring-mqtt`.
+3. **Auth failures / all Ring entities unavailable** → the refresh token is
+   invalid. Re-run the 2FA flow (§14).
+4. **Connection refused to the broker** → check Mosquitto is healthy and that
+   the password matches in all three places (`.env`, `mosquitto/config/passwd`,
+   `secrets.yaml`).
+5. **Bridge up, but HA sees nothing** → check the MQTT integration is connected
+   in HA, and that the discovery prefix is `homeassistant`.
+
+## 14. Re-authenticating Ring (refresh token)
+
+Needed when the token is invalidated: a Ring password change, revoking the
+session in the Ring app, or losing the `ring_mqtt_data` volume.
+
+```bash
+cd <repo>/homeassistant
+docker compose stop ring-mqtt
+docker run -it --rm -v ring_mqtt_data:/data \
+  --entrypoint /app/ring-mqtt/init-ring-mqtt.js \
+  tsightler/ring-mqtt:5.9.3
+docker compose start ring-mqtt
+```
+
+Requires the Ring account password and the 2FA device. The new token is written
+into the state volume; **nothing is committed to this repo, ever.**
+
+Verify afterwards: Ring entities repopulate and
+`binary_sensor.alarm_system_degraded` returns to **off**.
+
 ## 11. Who to call / where things are
 
 > Fill this in. It is the part of the runbook that cannot be written in

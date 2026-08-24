@@ -1,0 +1,90 @@
+# docker-compose.yml — the Ring Alarm bridge substrate.
+#
+# Two containers: an authenticated MQTT broker, and ring-mqtt which logs into
+# Ring's cloud and republishes the alarm onto that broker with Home Assistant
+# MQTT discovery.
+#
+# WHAT THIS IS NOT: this is not the alarm. Per docs/decisions.md (topology (a)),
+# Ring's base station arms, sirens and dispatches on its own path. If every
+# container here is stopped, the house is still armed and still monitored —
+# Home Assistant simply goes blind. Nothing in this file is in the dispatch
+# chain.
+#
+# Tags are PINNED deliberately. An unattended `latest` pull on a security
+# bridge is an unreviewed change to a security system; upgrades are a decision,
+# not a side effect. Upgrade/rollback procedure: docs/runbook.md §13.
+#
+# Operate:  docker compose up -d
+# Logs:     docker compose logs -f ring-mqtt
+# Upgrade:  see runbook §13 (bump the tag, pull, recreate, verify, or roll back)
+
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2.0.22
+    container_name: mosquitto
+    restart: unless-stopped
+    ports:
+      # Bound to the Docker host only. The broker carries alarm state; it has
+      # no business being reachable from the wider network.
+      - "127.0.0.1:1883:1883"
+    volumes:
+      # Committed config — the broker's security posture is reviewable in git.
+      - ./mosquitto/config/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      # Password file is generated on the host and NEVER committed (gitignored).
+      - ./mosquitto/config/passwd:/mosquitto/config/passwd:ro
+      - mosquitto_data:/mosquitto/data
+      - mosquitto_log:/mosquitto/log
+    healthcheck:
+      # Publishing to the broker proves it is actually accepting authenticated
+      # connections, not merely that the process is alive.
+      test:
+        - CMD-SHELL
+        - >-
+          mosquitto_pub -h 127.0.0.1 -p 1883
+          -u "$$MOSQUITTO_HEALTH_USER" -P "$$MOSQUITTO_HEALTH_PASS"
+          -t healthcheck/mosquitto -m ok -q 0 || exit 1
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    environment:
+      # Read from a .env file beside this compose file (gitignored, see
+      # .env.example). Same credentials HA uses; see runbook §13.
+      MOSQUITTO_HEALTH_USER: ${MQTT_USERNAME:?set MQTT_USERNAME in .env}
+      MOSQUITTO_HEALTH_PASS: ${MQTT_PASSWORD:?set MQTT_PASSWORD in .env}
+
+  ring-mqtt:
+    image: tsightler/ring-mqtt:5.9.3
+    container_name: ring-mqtt
+    restart: unless-stopped
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+    volumes:
+      # THE STATE VOLUME. ring-state.json lives here and holds the Ring refresh
+      # token — which is why the token is NOT in secrets.yaml and never enters
+      # this repo. Losing this volume means redoing the 2FA flow (runbook §14).
+      - ring_mqtt_data:/data
+    # ring-mqtt's own MQTT connection settings are written into /data on first
+    # run. The exact environment-variable names for supplying them
+    # non-interactively are NOT documented on the pages consulted while writing
+    # this file, so they are deliberately NOT guessed here — a wrong variable
+    # name is accepted silently and the bridge simply never connects.
+    # Configure MQTT on first run per docs/prompts/22-ring.md step 3, and if you
+    # confirm the variable names against the upstream wiki, add them here and
+    # delete this comment.
+    healthcheck:
+      # Node process liveness only. Bridge HEALTH (is it actually talking to
+      # Ring and to the broker?) is measured in Home Assistant by
+      # binary_sensor.alarm_system_degraded, which reads the MQTT availability
+      # topic — a container can be "up" while the bridge is useless.
+      test: ["CMD-SHELL", "pgrep -f ring-mqtt > /dev/null || exit 1"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  mosquitto_data:
+  mosquitto_log:
+  ring_mqtt_data:

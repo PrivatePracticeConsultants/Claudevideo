@@ -528,5 +528,16 @@ recorder:
       - sensor.clock_*
       - sensor.date_*
       - sensor.time_*
+      # ---- Ring / MQTT diagnostics (docs/decisions.md: recorder exclusions) ----
+      # Ring publishes battery, RSSI and link-quality on every heartbeat, and a
+      # motion/ding burst can be dozens of rows per event. The ALARM STATE and
+      # the contact sensors are deliberately NOT excluded — those are the
+      # history you would want after an incident.
+      - sensor.ring_*_battery
+      - sensor.ring_*_rssi
+      - sensor.ring_*_link_quality
+      - sensor.ring_*_wireless_signal
+      - event.ring_*_ding
+      - event.ring_*_motion
     event_types:
       - call_service    # the single largest table in most HA databases

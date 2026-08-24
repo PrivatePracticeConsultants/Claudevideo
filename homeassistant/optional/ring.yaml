@@ -1,0 +1,385 @@
+# ring.yaml — Ring Alarm integration.
+#
+# IN optional/ ON PURPOSE: mqtt and the Ring entities do not exist on the
+# target box yet, and check_config fails on an unknown integration. Promote to
+# packages/ (filename `ring.yaml` — already a valid HA slug) once the substrate
+# from docs/prompts/22-ring.md is running. The placeholder scan is exempt in
+# optional/ and enforced in packages/, so promotion CANNOT succeed until every
+# REPLACE_ME below is filled with a real entity id.
+#
+# ============================ ARCHITECTURE ============================
+# Per docs/decisions.md, topology (a): Ring's panel is the real panel.
+# Home Assistant is NEVER in the dispatch chain. Ring's base station sirens and
+# dispatches on its own path; everything here is observability, convenience,
+# and LOCAL response. Nothing in this file may call emergency services or
+# stand in for Ring's monitoring, and nothing may assume protection has failed
+# just because the bridge has.
+# ======================================================================
+#
+# ---- FILL THESE IN ON PROMOTION -------------------------------------------
+# Read the real ids from Developer Tools -> States after MQTT discovery runs;
+# ring-mqtt names entities after your Ring location, which this repo cannot
+# know. Do not guess them.
+#
+#   REPLACE_ME_ring_panel        e.g. alarm_control_panel.<location>_alarm
+#   REPLACE_ME_ring_bridge       the ring-mqtt bridge connectivity entity
+#   REPLACE_ME_base_station      the base station's own status entity
+# ---------------------------------------------------------------------------
+
+input_boolean:
+  ring_health_alerts:
+    name: Ring health alerts
+    icon: mdi:shield-alert-outline
+
+input_number:
+  ring_battery_threshold:
+    name: Ring sensor battery threshold
+    icon: mdi:battery-alert
+    min: 5
+    max: 50
+    step: 5
+    unit_of_measurement: "%"
+    mode: slider
+
+input_datetime:
+  ring_nightly_arm_time:
+    name: Ring nightly auto-arm time
+    icon: mdi:shield-moon
+    has_date: false
+    has_time: true
+
+template:
+  # =====================================================================
+  # THE HEALTH SENSOR. The most important thing in this file.
+  #
+  # A monitored alarm that has quietly stopped reporting is worse than no
+  # alarm, because it is trusted. On whenever ANY part of the observability
+  # chain is degraded, and deliberately noisy: a false "degraded" costs a
+  # glance, a missed one costs the thing the alarm is for.
+  #
+  # WHAT `on` DOES NOT MEAN: it does not mean the house is unprotected. Ring
+  # keeps arming, sirening and dispatching without the bridge. It means HOME
+  # ASSISTANT HAS GONE BLIND.
+  #
+  # TRIGGER-BASED on purpose. Every check is computed ONCE into `reasons`,
+  # which both the state and the attributes then read. A plain template sensor
+  # would have to either duplicate all seven checks (drift) or read its own
+  # attribute back (self-reference — the exact class of bug that produced
+  # "Template loop detected" twice already in this repo). The cost is up to
+  # 60s of detection latency on a health signal, which is the right trade;
+  # the two dwell-based checks below are separate automations anyway.
+  # =====================================================================
+  - triggers:
+      - trigger: time_pattern
+        minutes: "/1"
+      - trigger: homeassistant
+        event: start
+    actions:
+      - variables:
+          reasons: >-
+            {% set ns = namespace(r=[]) %}
+
+            {# 1. the bridge itself — read from ring-mqtt's own MQTT
+               availability topic via its connectivity entity, NOT inferred
+               from whether some Ring entity looks stale. Entity-state guessing
+               cannot tell "bridge down" from "sensor genuinely quiet". #}
+            {% set bridge = 'REPLACE_ME_ring_bridge' %}
+            {% if states(bridge) in ['unavailable', 'unknown', 'off'] %}
+              {% set ns.r = ns.r + ['ring-mqtt bridge is ' ~ states(bridge)] %}
+            {% endif %}
+
+            {# 2. broker connection — if HA's MQTT link drops, every mqtt
+               entity goes unavailable at once. #}
+            {% set mqtt_ents = integration_entities('mqtt') %}
+            {% if mqtt_ents | count > 0
+                  and mqtt_ents | select('is_state', 'unavailable') | list | count
+                      == mqtt_ents | count %}
+              {% set ns.r = ns.r + ['MQTT broker connection lost (all '
+                 ~ mqtt_ents | count ~ ' mqtt entities unavailable)'] %}
+            {% endif %}
+
+            {# 3. base station reachability #}
+            {% set base = 'REPLACE_ME_base_station' %}
+            {% if states(base) in ['unavailable', 'unknown', 'off'] %}
+              {% set ns.r = ns.r + ['base station unreachable'] %}
+            {% endif %}
+
+            {# 4. any alarm sensor unavailable. The >1h dwell is enforced by a
+               separate automation, so this stays a pure function of now. #}
+            {% set dead = label_entities('security_perimeter')
+               | select('is_state', 'unavailable') | list %}
+            {% if dead | count > 0 %}
+              {% set ns.r = ns.r + [dead | count ~ ' alarm sensor(s) unavailable'] %}
+            {% endif %}
+
+            {# 5. battery below threshold. Compared through float: states are
+               STRINGS, so a lexicographic '9' > '20' would hide the flattest
+               battery in the house — the same bug already fixed in the global
+               low-battery digest. #}
+            {# Scoped by INTEGRATION, not by a hand-applied label. Gating a
+               health check on a label means that forgetting the label makes
+               the check silently pass forever — proven in testing, where a 9%
+               battery went unflagged because nothing carried the label. The
+               integration membership cannot be forgotten. #}
+            {% set thr = states('input_number.ring_battery_threshold') | float(20) %}
+            {% set ring_ents = integration_entities('mqtt') %}
+            {% set ns2 = namespace(n=[]) %}
+            {% for s in states.sensor
+               | selectattr('attributes.device_class', 'defined')
+               | selectattr('attributes.device_class', 'eq', 'battery')
+               | selectattr('entity_id', 'in', ring_ents)
+               | selectattr('state', 'is_number')
+               if s.state | float(100) < thr %}
+              {% set ns2.n = ns2.n + [s.name] %}
+            {% endfor %}
+            {% if ns2.n | count > 0 %}
+              {% set ns.r = ns.r + ['low battery: ' ~ ns2.n | join(', ')] %}
+            {% endif %}
+
+            {# 6. tamper on any Ring device #}
+            {% set tamper = states.binary_sensor
+               | selectattr('attributes.device_class', 'defined')
+               | selectattr('attributes.device_class', 'eq', 'tamper')
+               | selectattr('state', 'eq', 'on')
+               | map(attribute='name') | list %}
+            {% if tamper | count > 0 %}
+              {% set ns.r = ns.r + ['TAMPER: ' ~ tamper | join(', ')] %}
+            {% endif %}
+
+            {# 7. the notification path — a degraded alarm nobody can be told
+               about is the worst case in this file. The >6h dwell is on the
+               automation below. #}
+            {% set phone = 'REPLACE_ME_phone_tracker' %}
+            {% if states(phone) == 'unavailable' %}
+              {% set ns.r = ns.r + ['mobile notify target unreachable'] %}
+            {% endif %}
+
+            {{ ns.r }}
+    binary_sensor:
+      - name: Alarm system degraded
+        unique_id: ring_alarm_system_degraded
+        device_class: problem
+        icon: mdi:shield-off-outline
+        state: "{{ reasons | count > 0 }}"
+        attributes:
+          reasons: "{{ reasons }}"
+          summary: >-
+            {{ reasons | join('; ') if reasons | count > 0
+               else 'All alarm-system health checks passing' }}
+
+  # -----------------------------------------------------------------------
+  # 7-day healthy uptime. recorder keeps 14 days, so a 7-day window is inside
+  # what the database can actually answer — asking for 30 would silently
+  # report against truncated history.
+  # -----------------------------------------------------------------------
+  - sensor:
+      - name: Alarm system healthy 7d
+        unique_id: ring_alarm_healthy_7d
+        unit_of_measurement: "%"
+        state_class: measurement
+        icon: mdi:shield-check
+        state: >-
+          {% set h = states('sensor.alarm_degraded_hours_7d') | float(-1) %}
+          {{ ((1 - (h / 168)) * 100) | round(1) if h >= 0 else none }}
+        availability: "{{ states('sensor.alarm_degraded_hours_7d') | is_number }}"
+
+sensor:
+  - platform: history_stats
+    name: Alarm degraded hours 7d
+    entity_id: binary_sensor.alarm_system_degraded
+    state: "on"
+    type: time
+    start: "{{ now() - timedelta(days=7) }}"
+    end: "{{ now() }}"
+
+automation:
+  - id: ring_health_degraded_transition
+    alias: "[ring] Alarm system became degraded"
+    description: >-
+      Immediate notification the moment the health sensor trips. Warning, not
+      critical: the house is still armed and still monitored by Ring — this
+      says Home Assistant has gone blind, which is urgent but is not an
+      intrusion.
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: binary_sensor.alarm_system_degraded
+        to: "on"
+    conditions:
+      - condition: state
+        entity_id: input_boolean.ring_health_alerts
+        state: "on"
+    actions:
+      - action: script.notify_person
+        data:
+          target: all
+          priority: warning
+          title: Alarm system degraded
+          message: >-
+            {{ state_attr('binary_sensor.alarm_system_degraded', 'summary') }}.
+            The Ring panel is still armed and monitored — Home Assistant has
+            lost visibility. Runbook section 13.
+
+  - id: ring_health_recovered
+    alias: "[ring] Alarm system health recovered"
+    description: Closes the loop so a resolved problem is not left looking open.
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: binary_sensor.alarm_system_degraded
+        to: "off"
+        for:
+          minutes: 2
+    conditions:
+      - condition: state
+        entity_id: input_boolean.ring_health_alerts
+        state: "on"
+    actions:
+      - action: script.notify_person
+        data:
+          target: all
+          priority: info
+          title: Alarm system health recovered
+          message: All alarm-system health checks are passing again.
+
+  - id: ring_health_daily_digest
+    alias: "[ring] Daily digest while degraded"
+    description: >-
+      A persistent degradation must not fade into the background after its one
+      transition notification. Repeats daily for as long as it lasts.
+    mode: single
+    triggers:
+      - trigger: time
+        at: "09:15:00"
+    conditions:
+      - condition: state
+        entity_id: binary_sensor.alarm_system_degraded
+        state: "on"
+      - condition: state
+        entity_id: input_boolean.ring_health_alerts
+        state: "on"
+    actions:
+      - action: script.notify_person
+        data:
+          target: all
+          priority: warning
+          title: Alarm system still degraded
+          message: >-
+            {{ state_attr('binary_sensor.alarm_system_degraded', 'summary') }}.
+            Healthy uptime over 7 days:
+            {{ states('sensor.alarm_system_healthy_7d') }}%.
+
+  # -----------------------------------------------------------------------
+  # DWELL-BASED CHECKS. The spec requires "unavailable >1h" and "notify target
+  # unreachable >6h"; those live on triggers because a template attribute
+  # cannot express duration.
+  # -----------------------------------------------------------------------
+  - id: ring_sensor_unavailable_1h
+    alias: "[ring] Alarm sensor unavailable over an hour"
+    description: >-
+      A perimeter sensor offline for an hour is a hole in the perimeter that
+      Ring may still believe is covered. Separate from the health sensor's
+      instantaneous view so a brief radio blip does not page anyone.
+    mode: single
+    triggers:
+      - trigger: template
+        value_template: >-
+          {{ label_entities('security_perimeter')
+             | select('is_state', 'unavailable') | list | count > 0 }}
+        for:
+          hours: 1
+    conditions:
+      - condition: state
+        entity_id: input_boolean.ring_health_alerts
+        state: "on"
+    actions:
+      - action: script.notify_person
+        data:
+          target: all
+          priority: warning
+          title: Alarm sensor offline over an hour
+          message: >-
+            {{ label_entities('security_perimeter')
+               | select('is_state', 'unavailable') | list | join(', ') }}
+            has been unavailable for more than an hour.
+
+  # -----------------------------------------------------------------------
+  # ARMING
+  # -----------------------------------------------------------------------
+  - id: ring_nightly_arm_home
+    alias: "[ring] Nightly auto-arm Home"
+    description: >-
+      Arms Home at the configured time if not already armed. Never escalates an
+      existing armed state (arming Home over Away would REDUCE coverage), and
+      never disarms.
+
+      NOTE ON WHO DISARMED: Ring keypad codes are not exposed over the bridge,
+      so Home Assistant cannot identify which household member disarmed, or
+      whether a code or the app was used. Attribution lives in the Ring app's
+      event history only — do not build anything here that assumes HA knows.
+    mode: single
+    triggers:
+      - trigger: time
+        at: input_datetime.ring_nightly_arm_time
+    conditions:
+      - condition: state
+        entity_id: input_boolean.automations_paused
+        state: "off"
+      - condition: state
+        entity_id: REPLACE_ME_ring_panel
+        state: disarmed
+    actions:
+      - action: alarm_control_panel.alarm_arm_home
+        target:
+          entity_id: REPLACE_ME_ring_panel
+      - action: script.notify_person
+        data:
+          target: all
+          priority: info
+          title: Armed for the night
+          message: Nightly auto-arm set the alarm to Home.
+
+  # THERE IS DELIBERATELY NO AUTO-DISARM AUTOMATION IN THIS FILE.
+  # Disarming is a human act, performed at the keypad or in the Ring app.
+  # No trigger — arrival, presence, time, geofence — may disarm a monitored
+  # alarm: every one of them is a chain that can be spoofed or can misfire,
+  # and the failure mode is an unmonitored house that looks armed.
+
+  - id: ring_alarm_local_response
+    alias: "[ring] Local response to a triggered alarm"
+    description: >-
+      LOCAL response only: lights up the house and pushes a critical alert.
+      Ring's base station has already dispatched over its own path — this adds
+      nothing to that and must never try to. No camera snapshots (no Ring
+      cameras in scope).
+
+      DELIBERATELY EXEMPT from input_boolean.automations_paused, matching the
+      existing alarm-response rule: a convenience kill switch must never
+      suppress the response to a live intrusion.
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: REPLACE_ME_ring_panel
+        to: triggered
+    actions:
+      - action: script.notify_person
+        data:
+          target: all
+          priority: critical
+          title: ALARM TRIGGERED
+          message: >-
+            The Ring alarm is sounding. Ring is dispatching. If this is a false
+            alarm, cancel it with the verbal passcode when the monitoring
+            centre calls.
+      - action: light.turn_on
+        continue_on_error: true
+        target:
+          label_id: exterior_light
+        data:
+          brightness_pct: 100
+      - action: light.turn_on
+        continue_on_error: true
+        target:
+          label_id: interior_light
+        data:
+          brightness_pct: 100

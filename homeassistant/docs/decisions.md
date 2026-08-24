@@ -104,6 +104,41 @@ Assistant simply cannot see. That is an acceptable failure mode; the reverse —
 HA thinking it is in control while dispatch is dead — is what topology (a)
 exists to prevent.
 
+## Ring substrate: broker, discovery prefix, and the credential register
+
+### MQTT broker
+
+| Setting | Value |
+|---|---|
+| Broker host | the Docker host running `docker-compose.yml` |
+| Port | `1883`, published on `127.0.0.1` only |
+| Auth | required; `allow_anonymous false`, password file |
+| Username / password | `mqtt_username` / `mqtt_password` in `secrets.yaml` |
+| Discovery prefix | `homeassistant` (HA default — deliberately unchanged) |
+
+The broker is bound to localhost because it carries alarm state: anything that
+can reach port 1883 can publish a forged disarm onto the discovery topics.
+
+**HA's MQTT integration is a config flow and lives in `.storage`** — it is
+therefore *invisible to this repo* and is **not** restored by pulling this git
+history. It is a manual step in the bare-metal rebuild path
+(`docs/runbook.md` §9) and in `docs/prompts/22-ring.md` step 4.
+
+### Credential register (prompt 17 rotation plan)
+
+| Credential | Where it lives | Expiry / rotation | Regenerate |
+|---|---|---|---|
+| **Ring refresh token** | `ring-state.json` inside the `ring_mqtt_data` Docker volume — **never in this repo, never in `secrets.yaml`** | Rotates silently in normal use; invalidated by a Ring password change, by revoking the session in the Ring app, or by a long bridge outage. Symptom is the bridge logging auth failures and every Ring entity going unavailable — which `binary_sensor.alarm_system_degraded` catches. | Re-run the interactive 2FA flow: `docs/prompts/22-ring.md` step 2. Requires the 2FA device. |
+| **MQTT broker password** | `secrets.yaml`, `.env`, and Mosquitto's `passwd` — three places that must match | No expiry; rotate if the host is compromised or someone leaves the household | Rotate all three together, then restart both containers and reload HA's MQTT integration |
+| **HA long-lived token** (for `deploy.sh` / `backup-verify.sh`) | operator environment | Per prompt 17 | HA profile → Security |
+
+### Why the Ring token is not in `secrets.yaml`
+
+It is not a static secret. ring-mqtt refreshes it during normal operation and
+writes the new value back to its state volume — a copy pinned in `secrets.yaml`
+would go stale and then fail authentication. The state volume is the single
+source of truth, which is also why losing that volume means redoing 2FA.
+
 ## Recorder exclusions — the history being given up
 
 Each of these is a deliberate trade. Reverse any of them if you need it.
@@ -117,6 +152,13 @@ Each of these is a deliberate trade. Reverse any of them if you need it.
 | `*_uptime`, `*_last_seen` | Per-device uptime history | Changes every single poll by definition |
 | `sensor.time_*`, `sensor.date_*` | Nothing | These change by design every minute |
 | `call_service` events | Which service calls were made | Usually the single largest table in an HA database. Traces cover the automation-triggered ones, which are the ones anyone ever wants |
+
+**Ring additions** (same reasoning, one line each): `ring_*_battery`,
+`ring_*_rssi`, `ring_*_link_quality` and `ring_*_wireless_signal` are published
+on every heartbeat and are diagnostics, not history; `event.ring_*_ding` and
+`event.ring_*_motion` arrive in bursts. **Alarm state and contact sensors are
+deliberately kept** — that is precisely the history worth having after an
+incident, and `sensor.alarm_degraded_hours_7d` reads back over it.
 
 `purge_keep_days: 14` with long-term statistics left on: numeric sensors with a
 `state_class` keep hourly min/mean/max **forever** regardless of this setting.
