@@ -187,3 +187,107 @@ configuration in this repo, and every one of them is load-bearing.
 - [ ] `./scripts/validate.sh` and `./scripts/audit.py` pass.
 - [ ] `optional/ring.yaml` promoted to `packages/` and all placeholders filled
       (the placeholder scan enforces this on promotion).
+
+---
+
+# Phase 2 — migrating to Ring's panel
+
+## The inventory (step 14) — 11 sites in 3 files
+
+| File | Line | What it does | Migration |
+|---|---|---|---|
+| `packages/security.yaml` | 41 | `alarm_control_panel:` — the `manual` platform definition | **DELETE** (step 17) |
+| `packages/security.yaml` | 147 | `script.arm_house` → `alarm_arm_away` | retarget |
+| `packages/security.yaml` | 152 | `script.arm_house` → `alarm_arm_home` | retarget |
+| `packages/security.yaml` | 157 | `script.arm_house` → `alarm_arm_night` | **remap → `alarm_arm_home`** (see below) |
+| `packages/security.yaml` | 318 | intrusion automation: armed-state condition | **RETIRE the automation** |
+| `packages/security.yaml` | 326 | intrusion automation: armed_away branch | **RETIRE** |
+| `packages/security.yaml` | 336 | intrusion automation: `alarm_trigger` call | **RETIRE — must not exist under (a)** |
+| `packages/security.yaml` | 352 | response automation: `to: triggered` | superseded by `ring_alarm_local_response` |
+| `dashboards/home.yaml` | 24 | alarm badge | retarget |
+| `dashboards/home.yaml` | 184 | alarm tile, `alarm-modes` feature | retarget + drop `armed_night` |
+| `dashboards/guest.yaml` | 33 | guest status template | retarget |
+
+## State and semantics mapping (step 15)
+
+Home Assistant's canonical states (read from core, not assumed):
+`disarmed, armed_home, armed_away, armed_night, armed_vacation,
+armed_custom_bypass, pending, arming, disarming, triggered`.
+
+| Concept | `manual` panel (today) | Ring Alarm | Lossy? |
+|---|---|---|---|
+| Disarmed | `disarmed` | `disarmed` | no |
+| Stay/Home | `armed_home` | `armed_home` | no |
+| Away | `armed_away` | `armed_away` | no |
+| **Night** | `armed_night` — configured here | **Ring has no Night mode.** Ring Alarm is Disarmed / Home / Away. | **YES — see below** |
+| Exit delay | `arming_time:` in YAML | set **in the Ring app**, not here | **YES** — no longer version-controlled |
+| Entry delay | `delay_time:` in YAML | set **in the Ring app** | **YES** |
+| Siren duration | `trigger_time:` in YAML | set in the Ring app | **YES** |
+| Trigger from HA | `alarm_trigger` worked | **Do not use** — see below | intentional |
+| Who disarmed | n/a | keypad codes not exposed over the bridge | **YES** — HA can never attribute a disarm |
+| Bypass at arm | `script.arm_house` reports openings from the `security_perimeter` label | Ring computes its own bypass from its own sensors | **YES** — the two views can disagree |
+
+### The Night-mode loss
+
+`armed_night` has three consumers today: `script.arm_house` (mode `night`), the
+dashboard tile's `alarm-modes` feature, and `presence_night_mode`. Ring offers
+no equivalent.
+
+**Decision: map Night → `armed_home`.** Ring's Home mode already arms the
+perimeter and bypasses interior motion, which is what Night was for here. Keep
+the `night` option in `input_select.house_mode` — it still drives lighting and
+climate — but it now arms the panel *Home*.
+
+Do **not** synthesise a fake Night by arming Away and bypassing sensors: that
+changes what the monitoring centre is told about the house.
+
+### Retiring the intrusion automation — the important one
+
+`security_intrusion_trips_alarm` exists because the `manual` panel is inert: it
+does not watch sensors, so something had to call `alarm_trigger`. **Ring's base
+station watches its own sensors and triggers itself.**
+
+Under topology (a) that automation must be **deleted, not migrated**:
+
+1. It is redundant — Ring has already tripped by the time HA sees anything.
+2. It is slower — HA's path is sensor → bridge → MQTT → HA → back through the
+   bridge, versus the base station's local decision.
+3. It puts Home Assistant **inside the dispatch chain**, which the architecture
+   constraints forbid outright. A bridge glitch must never be able to summon a
+   patrol car.
+
+`binary_sensor.trustworthy_intrusion_signal` **stays** — it is still the right
+signal for HA-side awareness and for the pet-immunity logic. It simply no
+longer arms or triggers anything.
+
+Likewise `security_alarm_triggered` is superseded by
+`ring_alarm_local_response` in `optional/ring.yaml`, which does the same local
+job (lights + critical notification) against the Ring panel.
+
+### Confirm on the real panel before migrating
+
+Ring's exact entity id and supported modes are not knowable from here. On the
+live instance, before touching anything:
+
+```
+Developer Tools → Template:
+  {{ states.alarm_control_panel | map(attribute='entity_id') | list }}
+  {{ state_attr('<the ring panel>', 'supported_features') }}
+```
+
+`supported_features` is a bit field: `ARM_HOME=1, ARM_AWAY=2, ARM_NIGHT=4,
+TRIGGER=8, ARM_CUSTOM_BYPASS=16, ARM_VACATION=32`. A value of `3` means Home +
+Away only and confirms the Night mapping above. **If bit 4 is set, Ring does
+expose Night and the remap is unnecessary** — verify rather than assume.
+
+## Order of work (step 16 → 17)
+
+1. Bind `REPLACE_ME_ring_panel` in `optional/ring.yaml` to the real entity.
+2. Scenario-test in `testlab.yaml` against the Ring panel: arm Home, arm Away,
+   disarm, and the local response on `triggered`.
+3. Retarget the 11 sites above; delete the `manual` platform block and the
+   intrusion automation.
+4. Promote `optional/ring.yaml` → `packages/ring.yaml` (the placeholder scan
+   blocks this until every `REPLACE_ME` is gone).
+5. `./scripts/validate.sh && ./scripts/audit.py`, then deploy via `deploy.sh`.
+6. Record the retirement in `docs/decisions.md`.
