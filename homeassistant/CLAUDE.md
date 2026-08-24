@@ -163,3 +163,33 @@ into `packages/` by the user once the component is actually installed.
   trace.
 - **Write the runbook as you go.** A system that cannot be handed to someone
   else during an emergency is a liability, not an amenity.
+
+## Runtime facts that only execution revealed
+
+Each of these cost a real bug. They are not inferable from the schema, and
+`check_config` accepts every one of the broken versions.
+
+- **An unset `input_datetime` renders `00:00:00`, not `unknown`.** So a guard
+  written as `states(...) not in ['unknown','unavailable','']` passes on a
+  helper nobody has ever set. This armed a monitored alarm panel in testing.
+  Anything gating on "has the user configured this?" must treat `00:00:00` as
+  unset, and accept that exactly-midnight becomes unexpressible.
+- **A one-shot bootstrap can only ever seed a fresh install.** Defaults appended
+  to a first-run block never reach an instance that already ran it — which is
+  every instance being upgraded. Use the migration ladder in
+  `packages/bootstrap.yaml`: add a new versioned step, never edit an old one.
+- **`history_stats` does not count time it has no records for.** Hours when HA
+  was stopped are not "not degraded", they are unmeasured — so dividing by a
+  fixed window turns downtime into apparent health. Divide by a measured
+  coverage sensor and go unavailable when coverage is thin.
+- **A `rejectattr` self-exclusion stops the value oscillating, not the log
+  line.** A template iterating all states still subscribes to itself, so HA may
+  still log "Template loop detected ... skipping template render". The
+  exclusion is still required; just do not read its absence as proof of a loop,
+  or its presence as proof of none.
+- **A registry label can be non-empty and still resolve to nothing.** Orphaned
+  entries keep a label alive after the entity is gone. Guard on "how many
+  entities can this actually read", not on `label_entities(x) | count > 0`.
+- **`automation.trigger` skips conditions** unless you pass
+  `skip_condition: false`. A test without it proves the actions run, not that
+  the guards hold.

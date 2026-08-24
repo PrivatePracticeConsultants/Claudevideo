@@ -336,14 +336,28 @@ template:
         unique_id: sys_unavailable_entities
         icon: mdi:help-network-outline
         state_class: measurement
+        # Excludes ITSELF. This sensor iterates every state in the machine,
+        # which includes its own, so its own render re-triggered its own
+        # listener: HA logged "Template loop detected ... skipping template
+        # render" and dropped the update. Seen four times across live boots.
+        #
+        # Note what the exclusion does and does not buy, because the comment
+        # this pattern carries elsewhere in the repo overstates it: rejecting
+        # self keeps the VALUE from oscillating, but the template still
+        # subscribes to every entity including itself, so HA can still log the
+        # skip. sensor.house_average_temperature already had this guard and
+        # still logged one. The skip is HA doing the right thing; the guard
+        # stops it from mattering.
         state: >-
           {{ states | selectattr('state', 'in', ['unavailable', 'unknown'])
              | rejectattr('domain', 'in', ['button', 'scene', 'input_button'])
+             | rejectattr('entity_id', 'eq', 'sensor.unavailable_entities')
              | list | count }}
         attributes:
           entities: >-
             {{ states | selectattr('state', 'in', ['unavailable', 'unknown'])
                | rejectattr('domain', 'in', ['button', 'scene', 'input_button'])
+               | rejectattr('entity_id', 'eq', 'sensor.unavailable_entities')
                | map(attribute='entity_id') | list }}
 
       - name: House status summary

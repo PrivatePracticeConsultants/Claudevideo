@@ -377,7 +377,9 @@ committed secrets. It does **not** prove:
   driven sensors track live: perimeter count 0→1→0 with the door, power sum
   exact, the 9% battery caught by the digest.
 - ~~That every feature is reachable~~ **Decorative-feature sweep executed**: a
-  reachability pass over all 36 automations plus live firing of every path
+  reachability pass over all 36 automations THEN PRESENT (49 now — the 13 Ring
+  automations were added afterwards and are covered by the Ring execution pass
+  below, not by this one) plus live firing of every path
   that had never run. It found and fixed three features that could never work:
   the daily security check triggered on an input_datetime that was `unknown`
   forever (bootstrap now seeds 21:30); the automation-error alert listened for
@@ -400,10 +402,16 @@ committed secrets. It does **not** prove:
   hardware-gated: the test light is on/off-only, so the CT/dim branches are
   render-verified but not device-verified.) A live instance
   HAS now been booted (HA 2026.2.3, onboarded, dashboards rendered and
-  screenshotted) and reaches **zero configuration errors and zero template
-  loops** — but with no paired devices, so no automation has ever fired against
+  screenshotted) and reaches **zero configuration errors**. NOT zero template
+  loops — that earlier claim was wrong. Five "Template loop detected ...
+  skipping template render" warnings appear across the live boot logs, from
+  `sensor.unavailable_entities` (which iterated its own state; now excludes
+  itself) and `sensor.house_average_temperature` (which already had the
+  exclusion — proving the exclusion stops the value oscillating but does not
+  stop HA logging the skip) — but with no paired devices, so no automation has ever fired against
   a real sensor. (What IS now verified beyond schema:
-  all 231 templates compile in HA 2026.2.3's real Jinja environment with every
+  all templates compile in HA 2026.2.3's real Jinja environment — 231 at the
+  time of that pass, 323 now — with every
   dynamically-dispatched filter/test name checked against its registries; the
   blueprint instantiates cleanly through check_config; the ESPHome template
   node validates end-to-end with esphome 2026.8.0; the notification-route,

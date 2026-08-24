@@ -129,8 +129,21 @@ template:
                label is correct scoping; the guard makes forgetting it loud. #}
             {% set thr = states('input_number.ring_battery_threshold') | float(20) %}
             {% set ring_ents = label_entities('ring') %}
-            {% if ring_ents | count == 0 %}
-              {% set ns.r = ns.r + ['battery monitoring INACTIVE: no entities carry the `ring` label'] %}
+            {# The guard has to be "is anything actually being READ", not "does
+               the label exist". Observed live: the `ring` label survived on one
+               orphaned registry entry whose entity was gone, so the label was
+               non-empty, this check passed, and the battery scan below silently
+               examined nothing while the system reported healthy — precisely
+               the state the guard was written to make impossible. Count the
+               entities the scan can actually use. #}
+            {% set readable = states.sensor
+               | selectattr('entity_id', 'in', ring_ents)
+               | selectattr('attributes.device_class', 'defined')
+               | selectattr('attributes.device_class', 'eq', 'battery')
+               | selectattr('state', 'is_number') | list | count %}
+            {% if readable == 0 %}
+              {% set ns.r = ns.r + ['battery monitoring INACTIVE: no `ring`-labelled battery sensor is reporting a number ('
+                 ~ ring_ents | count ~ ' entities carry the label)'] %}
             {% endif %}
             {% set ns2 = namespace(n=[]) %}
             {% for s in states.sensor
@@ -177,9 +190,25 @@ template:
                else 'All alarm-system health checks passing' }}
 
   # -----------------------------------------------------------------------
-  # 7-day healthy uptime. recorder keeps 14 days, so a 7-day window is inside
-  # what the database can actually answer — asking for 30 would silently
+  # 7-day healthy percentage. recorder keeps 14 days, so a 7-day window is
+  # inside what the database can actually answer — asking for 30 would silently
   # report against truncated history.
+  #
+  # DIVIDED BY MEASURED COVERAGE, NOT BY 168. This is the whole point, and the
+  # earlier version got it wrong in the most flattering possible direction.
+  #
+  # history_stats only counts time it has records for. Hours when Home
+  # Assistant was NOT RUNNING are therefore not counted as degraded — so
+  # dividing by a flat 168 made downtime read as health. Measured on a live
+  # instance with 42h of history, most of it with HA stopped: it reported
+  # **99.8% healthy**. An alarm-health number that peaks when the monitoring
+  # software is switched off is worse than no number, and this one is quoted
+  # to an insurer in docs/alarm-system.md.
+  #
+  # `sensor.alarm_data_coverage_7d` measures how much of the window we
+  # genuinely observed. The percentage is of THAT, and the sensor goes
+  # unavailable below half a window rather than publishing a confident figure
+  # off three hours of data.
   # -----------------------------------------------------------------------
   - sensor:
       - name: Alarm system healthy 7d
@@ -189,14 +218,37 @@ template:
         icon: mdi:shield-check
         state: >-
           {% set h = states('sensor.alarm_degraded_hours_7d') | float(-1) %}
-          {{ ((1 - (h / 168)) * 100) | round(1) if h >= 0 else none }}
-        availability: "{{ states('sensor.alarm_degraded_hours_7d') | is_number }}"
+          {% set c = states('sensor.alarm_data_coverage_7d') | float(-1) %}
+          {{ ((1 - (h / c)) * 100) | round(1) if h >= 0 and c >= 84 else none }}
+        availability: >-
+          {{ states('sensor.alarm_degraded_hours_7d') | is_number
+             and states('sensor.alarm_data_coverage_7d') | float(0) >= 84 }}
+        attributes:
+          coverage_hours: "{{ states('sensor.alarm_data_coverage_7d') }}"
+          basis: >-
+            {% set c = states('sensor.alarm_data_coverage_7d') | float(0) %}
+            {{ 'of ' ~ c | round(1) ~ 'h observed out of 168h. Hours when Home
+               Assistant was not running are excluded, not counted as healthy.' }}
 
 sensor:
   - platform: history_stats
     name: Alarm degraded hours 7d
     entity_id: binary_sensor.alarm_system_degraded
     state: "on"
+    type: time
+    start: "{{ now() - timedelta(days=7) }}"
+    end: "{{ now() }}"
+
+  # How much of the window we actually have records for. `on` OR `off` is
+  # observed time; anything else (unavailable, unknown, or no row at all
+  # because HA was stopped) is not. Without this the healthy percentage above
+  # divides by a window it never measured.
+  - platform: history_stats
+    name: Alarm data coverage 7d
+    entity_id: binary_sensor.alarm_system_degraded
+    state:
+      - "on"
+      - "off"
     type: time
     start: "{{ now() - timedelta(days=7) }}"
     end: "{{ now() }}"
@@ -334,12 +386,25 @@ automation:
       - condition: state
         entity_id: input_boolean.automations_paused
         state: "off"
-      # Refuse to act on an unseeded helper: `unknown` renders as midnight and
-      # would arm a monitored panel at 00:00 with nobody having chosen that.
+      # Refuse to act on an unseeded helper.
+      #
+      # VERIFIED ON A LIVE INSTANCE, and it is not what you would expect: an
+      # input_datetime that has never been set does NOT render as `unknown`.
+      # It renders as `00:00:00`. An earlier version of this guard tested only
+      # for unknown/unavailable/'' — it rendered True and the panel ARMED. The
+      # test is in the transcript: `alarm_control_panel` went disarmed ->
+      # armed_home off a helper nobody had ever touched.
+      #
+      # So `00:00:00` has to be treated as "never configured". That does mean a
+      # household genuinely wanting a midnight arm cannot have exactly 00:00 —
+      # set 00:01. That is the right trade: HA gives us no way to tell the two
+      # apart, and the failure directions are not symmetric. Refusing costs one
+      # unarmed night and a notification; arming costs a siren, a call from the
+      # monitoring centre, and possibly a false-alarm fee.
       - condition: template
         value_template: >-
           {{ states('input_datetime.ring_nightly_arm_time')
-             not in ['unknown', 'unavailable', ''] }}
+             not in ['unknown', 'unavailable', '', '00:00:00'] }}
       - condition: state
         entity_id: REPLACE_ME_ring_panel
         state: disarmed

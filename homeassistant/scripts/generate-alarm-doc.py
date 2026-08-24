@@ -258,9 +258,15 @@ def main() -> int:
     w("## Health monitoring\n")
     w("`binary_sensor.alarm_system_degraded` turns on when the bridge, broker, "
       "base station, any sensor (>1h), any battery (<20%), any tamper flag, or "
-      "the notification path is degraded. Immediate alert on transition, daily "
-      "digest while it persists, and `sensor.alarm_system_healthy_7d` reports "
-      "7-day healthy uptime.\n")
+      "the notification path is degraded. Immediate alert on transition, and a "
+      "daily digest while it persists.\n")
+    w("`sensor.alarm_system_healthy_7d` reports the degraded-free percentage "
+      "**of observed time**, not of the calendar week. Hours when Home "
+      "Assistant was not running are excluded rather than counted as healthy, "
+      "and the sensor reports nothing at all below half a window of coverage. "
+      "A figure here is therefore a measurement; a blank is an honest absence "
+      "of one. Neither is a statement about whether the house was armed — Ring "
+      "monitors independently of all of this.\n")
     w("**It reports Home Assistant's visibility, not the alarm's protection.** "
       "Ring arms, sirens and dispatches without the bridge; a degraded reading "
       "means HA has gone blind, not that the house is unprotected.\n")

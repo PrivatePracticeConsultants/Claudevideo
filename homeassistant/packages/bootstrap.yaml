@@ -25,6 +25,30 @@ input_boolean:
     name: Helpers initialised
     icon: mdi:check-decagram
 
+input_number:
+  # MIGRATION LADDER. A single "have we bootstrapped?" boolean is a one-way
+  # door: it is set on first boot, and every helper added to this file
+  # AFTERWARDS is then never seeded on any instance that already ran — which
+  # is every existing install, i.e. exactly the ones being upgraded.
+  #
+  # Found the hard way: the Ring helpers were appended to the first-run block
+  # and, on an instance bootstrapped in an earlier session, silently never ran.
+  # ring_nightly_arm_time stayed at 00:00 and ring_health_alerts stayed off,
+  # so every alarm health notification was gated off on precisely the installs
+  # that had been running longest.
+  #
+  # So: a version number, and one block per step. Each block runs if the stored
+  # version is below it, then the version is written. ADDING NEW DEFAULTS MEANS
+  # ADDING A NEW BLOCK AND BUMPING BOOTSTRAP_TARGET — never editing an existing
+  # block, which has already run everywhere.
+  bootstrap_version:
+    name: Bootstrap version
+    icon: mdi:database-arrow-up
+    min: 0
+    max: 999
+    step: 1
+    mode: box
+
 script:
   apply_default_settings:
     alias: Apply default settings
@@ -91,27 +115,6 @@ automation:
         continue_on_error: true
         target:
           entity_id: input_boolean.vacation_simulation
-      # Ring helpers. continue_on_error because optional/ring.yaml is not
-      # promoted on every install; these are no-ops until it is.
-      # Without the first, the nightly arm time is `unknown` -> midnight.
-      # Without the second, EVERY alarm health notification is gated off and
-      # the health sensor becomes decorative.
-      - action: input_datetime.set_datetime
-        continue_on_error: true
-        target:
-          entity_id: input_datetime.ring_nightly_arm_time
-        data:
-          time: "22:30:00"
-      - action: input_boolean.turn_on
-        continue_on_error: true
-        target:
-          entity_id: input_boolean.ring_health_alerts
-      - action: input_number.set_value
-        continue_on_error: true
-        target:
-          entity_id: input_number.ring_battery_threshold
-        data:
-          value: 20
       - action: input_boolean.turn_on
         target:
           entity_id: input_boolean.helpers_initialised
@@ -124,3 +127,77 @@ automation:
             written to every tunable helper (comfort target, tariff rates,
             thresholds). Adjust them in the UI — they will persist from now on.
             See packages/bootstrap.yaml.
+
+  # -----------------------------------------------------------------------
+  # THE MIGRATION LADDER. Runs on every start, applies only the steps this
+  # instance has not seen, and is idempotent.
+  #
+  # This is what makes a default added today reach an instance that first
+  # booted months ago. The first-run automation above still handles a genuinely
+  # fresh install; this handles everybody else, and the two are safe to both
+  # fire because every step here only writes values the step below has not
+  # already recorded.
+  # -----------------------------------------------------------------------
+  - id: bootstrap_migrations
+    alias: "[bootstrap] Apply pending default migrations"
+    description: >-
+      Seeds defaults added to this file AFTER an instance was first
+      bootstrapped. Keyed on input_number.bootstrap_version, which restores
+      across restarts. Step 1 is the original first-run set; step 2 is the Ring
+      helpers. To add defaults: append a new step block, do not edit an old one.
+    mode: single
+    triggers:
+      - trigger: homeassistant
+        event: start
+    actions:
+      # Helpers restore asynchronously; do not race the restore.
+      - delay:
+          seconds: 20
+      # An instance that ran the old boolean-guarded bootstrap is at step 1
+      # already, even though it has never seen this version number.
+      - if:
+          - condition: state
+            entity_id: input_boolean.helpers_initialised
+            state: "on"
+          - condition: numeric_state
+            entity_id: input_number.bootstrap_version
+            below: 1
+        then:
+          - action: input_number.set_value
+            target:
+              entity_id: input_number.bootstrap_version
+            data:
+              value: 1
+
+      # ---- step 2: Ring helpers ----
+      # continue_on_error because optional/ring.yaml is not promoted on every
+      # install; these are no-ops until it is. Without the arm time, the
+      # nightly arm sits at 00:00:00, which the arming automation now REFUSES
+      # to act on. Without ring_health_alerts, every alarm health notification
+      # is gated off and the health sensor is decorative.
+      - if:
+          - condition: numeric_state
+            entity_id: input_number.bootstrap_version
+            below: 2
+        then:
+          - action: input_datetime.set_datetime
+            continue_on_error: true
+            target:
+              entity_id: input_datetime.ring_nightly_arm_time
+            data:
+              time: "22:30:00"
+          - action: input_boolean.turn_on
+            continue_on_error: true
+            target:
+              entity_id: input_boolean.ring_health_alerts
+          - action: input_number.set_value
+            continue_on_error: true
+            target:
+              entity_id: input_number.ring_battery_threshold
+            data:
+              value: 20
+          - action: input_number.set_value
+            target:
+              entity_id: input_number.bootstrap_version
+            data:
+              value: 2

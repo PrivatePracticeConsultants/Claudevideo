@@ -1,6 +1,6 @@
 # Alarm system — protected points
 
-> **Generated** 2026-08-24 17:07 UTC from devices/ring-*.yaml (offline register) by `scripts/generate-alarm-doc.py`.
+> **Generated** 2026-08-24 18:20 UTC from devices/ring-*.yaml (offline register) by `scripts/generate-alarm-doc.py`.
 >
 > Regenerate after any change to the alarm hardware. Do not hand-edit:
 > edits are lost on the next run, and a drifted document is worse than
@@ -62,7 +62,9 @@ _None recorded yet._
 
 ## Health monitoring
 
-`binary_sensor.alarm_system_degraded` turns on when the bridge, broker, base station, any sensor (>1h), any battery (<20%), any tamper flag, or the notification path is degraded. Immediate alert on transition, daily digest while it persists, and `sensor.alarm_system_healthy_7d` reports 7-day healthy uptime.
+`binary_sensor.alarm_system_degraded` turns on when the bridge, broker, base station, any sensor (>1h), any battery (<20%), any tamper flag, or the notification path is degraded. Immediate alert on transition, and a daily digest while it persists.
+
+`sensor.alarm_system_healthy_7d` reports the degraded-free percentage **of observed time**, not of the calendar week. Hours when Home Assistant was not running are excluded rather than counted as healthy, and the sensor reports nothing at all below half a window of coverage. A figure here is therefore a measurement; a blank is an honest absence of one. Neither is a statement about whether the house was armed — Ring monitors independently of all of this.
 
 **It reports Home Assistant's visibility, not the alarm's protection.** Ring arms, sirens and dispatches without the bridge; a degraded reading means HA has gone blind, not that the house is unprotected.
 
