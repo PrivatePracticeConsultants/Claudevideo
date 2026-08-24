@@ -27,6 +27,83 @@ labelled. The canonical label list is in `CLAUDE.md`; applying them is
 
 ---
 
+## Ring Alarm — the decisions
+
+Decided by the owner and recorded before any code was written. **These are
+settled; do not re-litigate them.** Everything in `optional/ring.yaml`,
+`docker-compose.yml` and `docs/prompts/22-ring.md` follows from here.
+
+### Mobile platform: **iOS**
+
+Fixes the critical-notification payload to `interruption-level: critical` plus
+the `sound.critical` form, and makes Critical Alerts an OS permission that must
+be granted on the device — the payload alone is inert without it. See
+`docs/runbook.md` §12.
+
+### Install method: **containers, pinned**
+
+Mosquitto and ring-mqtt run as Docker containers from a `docker-compose.yml`
+committed to this repo. **Not add-ons** — the reference environment is HA Core
+in a venv with no Supervisor, so no add-on store exists. Image tags are pinned,
+never floating: an unattended `latest` pull on a security bridge is an
+unreviewed change to a security system.
+
+### Panel topology: **(a) — Ring's panel becomes the real panel**
+
+`alarm_control_panel.house` (the built-in `manual` panel) retires.
+
+**Why (a):** the monitored panel must be the armed panel. Ring's base station
+is what dispatches to the central station; if the household arms a *different*
+panel, an intrusion produces a local reaction and **no dispatch** — the
+monitoring subscription is paid for and silent.
+
+Rejected alternatives, recorded so the reasoning survives:
+
+- **(b) `.house` stays master, mirror state to Ring.** Rejected: two sources of
+  truth for arm state, a mirroring loop to design around, and — decisively — a
+  window in which HA believes the house is armed while Ring is not. That
+  failure is invisible until the night it matters.
+- **(c) Ring sensors feed `.house`, Ring's own alarm unused.** Rejected: pays
+  for monitoring that can never fire. Strictly worse than (a) at the same cost.
+
+### Accepted tradeoff (stated plainly, eyes open)
+
+**HA-initiated arming depends on the bridge.** If Mosquitto or ring-mqtt is
+down, Home Assistant cannot arm or disarm, and the dashboards go blind.
+
+**Protection does not.** The Ring panel stays armed and monitored regardless:
+the keypad, the Ring app, the siren and the cellular dispatch path all work
+with Home Assistant switched off entirely. This is the whole reason (a) is
+safe to accept — the bridge is a convenience layer over an independently
+functioning alarm, not a dependency of it.
+
+### Home Assistant is NOT in the dispatch chain — ever
+
+Ring's base station talks to the central station over its own path. **No
+automation in this repo may call emergency services, contact a monitoring
+provider, or substitute for Ring's monitoring**, and nothing may be built that
+assumes protection fails when the bridge fails. `ring-mqtt` is observability
+and convenience: it reports what the alarm is doing and lets HA arm it as a
+nicety. If a future change starts to look like it is becoming part of the
+dispatch chain, stop and ask the owner.
+
+### Cloud dependency — for the monthly audit
+
+`docs/prompts/14-audit.md` asks what breaks when a cloud service goes away.
+Ring Alarm is exactly such a dependency, so the answer is recorded here rather
+than rediscovered each month:
+
+| Ring cloud unreachable | Still works |
+|---|---|
+| HA visibility of sensors and arm state | Local siren |
+| HA-initiated arm/disarm | Keypad arm/disarm |
+| ring-mqtt bridge (it is a cloud client) | Cellular dispatch to the central station |
+
+The alarm degrades to a normally-functioning monitored alarm that Home
+Assistant simply cannot see. That is an acceptable failure mode; the reverse —
+HA thinking it is in control while dispatch is dead — is what topology (a)
+exists to prevent.
+
 ## Recorder exclusions — the history being given up
 
 Each of these is a deliberate trade. Reverse any of them if you need it.

@@ -221,6 +221,90 @@ You have a dead machine and a backup.
 
 ---
 
+## 12. The critical notification path (iOS) — verify this, don't assume it
+
+**This is the single point of failure for every alert in the house**, including
+the alarm. If it is broken, everything downstream is silent and you will not
+find out until the night it matters. Verify it on setup, and re-verify it after
+every iOS major update and every Companion-app reinstall.
+
+### 12.1 One-time setup
+
+1. Install **Home Assistant** (Companion) from the App Store on the phone.
+2. Open it, sign in to your instance, and **accept the notification permission
+   prompt**. If you decline it here, nothing below will work.
+3. Confirm the device registered: in Home Assistant, **Developer Tools →
+   Actions**, search `notify.` — your phone appears as
+   `notify.mobile_app_<device_name>`. **Copy that exact name.**
+4. Put it in the `routes:` table in `packages/global.yaml` (there is a
+   commented block ready for it). Do not guess the name — read it from the list.
+5. Reload scripts (or deploy normally). No restart needed.
+
+### 12.2 Grant Critical Alerts — the step everyone misses
+
+The critical payload this repo sends (`interruption-level: critical` plus
+`push.sound.critical`) **does nothing on its own**. Critical Alerts is a
+separate iOS entitlement the user must grant.
+
+**The authoritative check** — this is what actually decides whether an alarm
+wakes you:
+
+> **iOS Settings → Notifications → Home Assistant → Critical Alerts must be ON.**
+
+If that toggle is **not present**, the app has never requested the entitlement:
+open the Companion app, go to its notification settings and re-run notification
+setup, then re-check. Grant the prompt when iOS shows it.
+
+> The exact in-app menu path varies by Companion version and could not be
+> verified from the official docs at the time of writing — the iOS Settings
+> path above is authoritative regardless of app version, so check there.
+
+### 12.3 The test that counts
+
+A delivery is **not** a pass. A persistent notification appearing in HA is
+**not** a pass. The only pass is: **the phone made noise while in Do Not
+Disturb.**
+
+1. Put the phone in **Do Not Disturb / a Focus mode**. Leave the ringer switch
+   silenced too — critical alerts are supposed to beat both.
+2. Lock the phone and set it down.
+3. From **Developer Tools → Actions**, run:
+
+   ```yaml
+   action: script.notify_person
+   data:
+     target: owner
+     priority: critical
+     title: Critical path test
+     message: If this made noise, the alert path works.
+   ```
+
+4. **Confirm all three:** it appeared on the lock screen, it played a sound,
+   and it did so with DND active.
+
+**If it was silent:** the entitlement is off (§12.2), or the route in
+`routes:` names a service that does not exist — a wrong service name is
+accepted by HA and discarded silently. Check Developer Tools → Actions again.
+
+**If nothing arrived at all:** check `script.notify_person` in the logbook. If
+it raised an *Undeliverable* persistent notification, the `routes:` table has
+no push entry for that target — that notice exists precisely so this failure is
+visible rather than silent.
+
+### 12.4 Re-verify after an OS update
+
+iOS major updates can reset notification entitlements, and restoring a phone
+from backup does not always carry Critical Alerts across.
+
+After **any iOS major update, phone replacement, or Companion reinstall**:
+
+1. Re-check the toggle in §12.2.
+2. Re-run the DND test in §12.3. It takes ninety seconds.
+3. Note the date in `docs/decisions.md` under the token/credential register.
+
+If the phone is replaced, the `notify.mobile_app_*` service name changes —
+update `routes:` in `packages/global.yaml` or every alert silently stops.
+
 ## 11. Who to call / where things are
 
 > Fill this in. It is the part of the runbook that cannot be written in

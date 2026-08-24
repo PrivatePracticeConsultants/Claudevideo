@@ -77,6 +77,22 @@ script:
           #     quiet_end: "07:00"
           #     critical_bypasses_dnd: true
           # ---------------------------------------------------------------
+          #
+          # PHASE 0 (Ring): the owner's iPhone goes here. Uncomment and replace
+          # BOTH the key and the push service with the real values:
+          #
+          #   owner:
+          #     push: notify.mobile_app_<device_name_from_companion_app>
+          #     quiet_start: "22:00"
+          #     quiet_end: "07:00"
+          #     critical_bypasses_dnd: true
+          #
+          # Read the real service name from Developer Tools -> Actions after
+          # registering the phone; do NOT guess it. A guessed notify service
+          # accepts every call and silently discards it, which is exactly the
+          # failure this empty table exists to prevent. `warning` and
+          # `critical` both route through the `push:` entry above;
+          # quiet_start/quiet_end suppress WARNING only — critical always goes.
           routes: {}
           # Fill once a TTS engine exists (prompt 11). Empty = TTS skipped.
           tts_service: ""
@@ -172,14 +188,23 @@ script:
                       data:
                         title: "{{ title }}"
                         message: "{{ message }}"
+                        # iOS critical payload (platform decided in
+                        # docs/decisions.md — this household is iOS).
+                        #
+                        # BOTH forms are sent deliberately:
+                        #   interruption-level: critical  — iOS 15+ semantics
+                        #   push.sound.critical: 1        — the entitlement-backed
+                        #                                   form that forces audio
+                        # Verified against companion.home-assistant.io; note the
+                        # key is `interruption-level` with a HYPHEN.
+                        #
+                        # NONE OF THIS WORKS without the Critical Alerts
+                        # permission granted on the device. The payload is inert
+                        # on its own — see docs/runbook.md §12, which is the
+                        # verification procedure, not optional reading.
                         data:
-                          # Android
-                          channel: critical
-                          importance: high
-                          ttl: 0
-                          priority: high
-                          # iOS
                           push:
+                            interruption-level: critical
                             sound:
                               name: default
                               critical: 1
