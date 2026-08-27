@@ -1184,12 +1184,26 @@ class Store:
         # a millisecond-held external lock lands exactly between our
         # short-lived connections sometimes. Retry briefly instead of letting
         # one unlucky race kill an hours-long ingest run.
+        # duckdb 1.5.x added a second transient: "Unique file handle conflict"
+        # (a BinderException), raised when connect() races another in-process
+        # connection that is closing the same file — the instance cache is
+        # mid-teardown for a few ms and refuses the attach. 1.3.x tolerated
+        # this; under 1.5.5 a loaded machine hits it and, unretried, the queue
+        # marked a FILE as failed over a wobble that clears in milliseconds
+        # (caught by the audit's concurrent-suite run, in three fetch tests).
+        # A real binder error (bad SQL, missing table) still raises at once.
+        def _transient(e: Exception) -> bool:
+            msg = str(e).lower()
+            if isinstance(e, duckdb.IOException):
+                return "lock" in msg
+            return "unique file handle conflict" in msg
+
         last_exc: Exception | None = None
         for attempt in range(6):
             try:
                 return duckdb.connect(str(self.db_path))
-            except duckdb.IOException as e:
-                if "lock" not in str(e).lower():
+            except (duckdb.IOException, duckdb.BinderException) as e:
+                if not _transient(e):
                     raise
                 last_exc = e
                 if attempt < 5:  # no pointless sleep after the final attempt

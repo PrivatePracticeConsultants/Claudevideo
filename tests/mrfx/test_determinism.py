@@ -174,6 +174,57 @@ def test_the_hard_stop_actually_terminates_the_workers():
     assert procs, "pool did not start any workers — test proves nothing"
 
     mgr.shutdown_now()
-    for p in procs:
-        p.join(timeout=30)
+    # Poll rather than join-once-and-assert: the executor's own management
+    # thread is reaping these same children, and two threads waitpid()ing one
+    # pid race — the loser sees "already reaped" and is_alive() reports True
+    # for a few microseconds after the winner's join. Under machine load that
+    # window got this test failing while the workers were in fact dead
+    # (exitcode -15). A 30s deadline still catches the real bug, where the
+    # workers survive indefinitely.
+    import time as _time
+    deadline = _time.monotonic() + 30
+    while _time.monotonic() < deadline and any(p.is_alive() for p in procs):
+        _time.sleep(0.05)
     assert all(not p.is_alive() for p in procs), "workers survived the hard stop"
+
+
+def test_the_new_duckdb_handle_conflict_is_retried_not_fatal(store, monkeypatch):
+    """duckdb 1.5.x raises BinderException("Unique file handle conflict") when
+    connect() races another in-process connection closing the same file. It
+    clears in milliseconds, but unretried it marked a FILE as failed — found
+    when two full suites ran concurrently and three fetch tests failed on it.
+    """
+    import duckdb as _duckdb
+
+    calls = {"n": 0}
+    real_connect = _duckdb.connect
+
+    def flaky(path, *a, **k):
+        calls["n"] += 1
+        if calls["n"] <= 2:      # first two attempts hit the racing window
+            raise _duckdb.BinderException(
+                'Binder Error: Unique file handle conflict: Cannot attach '
+                '"mrfx" - the database file is already attached by database "mrfx"')
+        return real_connect(path, *a, **k)
+
+    monkeypatch.setattr(_duckdb, "connect", flaky)
+    with store.connect() as con:            # must survive the two wobbles
+        assert con.execute("SELECT 1").fetchone()[0] == 1
+    assert calls["n"] == 3
+
+
+def test_a_real_binder_error_still_raises_immediately(store, monkeypatch):
+    """The retry must not swallow genuine binder errors — only the transient
+    handle-conflict message is retryable."""
+    import duckdb as _duckdb
+
+    calls = {"n": 0}
+
+    def broken(path, *a, **k):
+        calls["n"] += 1
+        raise _duckdb.BinderException("Binder Error: Referenced table nope not found")
+
+    monkeypatch.setattr(_duckdb, "connect", broken)
+    with pytest.raises(_duckdb.BinderException, match="nope"):
+        store.connect()
+    assert calls["n"] == 1                   # no retries for a real error
