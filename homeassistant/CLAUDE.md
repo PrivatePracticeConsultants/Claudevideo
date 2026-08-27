@@ -176,8 +176,20 @@ Each of these cost a real bug. They are not inferable from the schema, and
   unset, and accept that exactly-midnight becomes unexpressible.
 - **A one-shot bootstrap can only ever seed a fresh install.** Defaults appended
   to a first-run block never reach an instance that already ran it — which is
-  every instance being upgraded. Use the migration ladder in
-  `packages/bootstrap.yaml`: add a new versioned step, never edit an old one.
+  every instance being upgraded.
+- **And a linear migration version is the wrong fix for that.** Version ladders
+  assume every step is applicable when reached. Seeding for an `optional/`
+  package is not: on a normal install the package is unpromoted, the step runs
+  against entities that do not exist, `continue_on_error` swallows it, the
+  version is stamped anyway, and the package is never seeded when it IS
+  promoted later. Written, tested, and caught doing exactly that. Use one
+  automation and one flag PER FEATURE, gated on the entities actually existing
+  (`states(x) in ['on','off']` — a missing entity reads `unknown`, a removed
+  one `unavailable`), and set the flag only after the work succeeded.
+- **A dict `.get(key, default)` does not defend against a null value.** The
+  default fires only when the key is ABSENT. Forecast payloads routinely carry
+  `templow: null`, and `None | round(0)` raises — killing the sensor. Use
+  `(x.get(key) or default)`.
 - **`history_stats` does not count time it has no records for.** Hours when HA
   was stopped are not "not degraded", they are unmeasured — so dividing by a
   fixed window turns downtime into apparent health. Divide by a measured

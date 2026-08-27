@@ -247,12 +247,16 @@ template:
       # ---- the next three days, for the weather card's forecast rows ----
       # Plain string states ("79° / 61°") so no unit coercion applies; the day
       # name and condition ride as attributes; the icon tracks the condition.
+      # `(x or 0)`, not `.get('templow', 0)`: the dict default only fires when
+      # the key is ABSENT, and forecast payloads routinely carry `templow` with
+      # a null value — `None | round(0)` then raises and the row goes
+      # unavailable. Verified against the live template engine.
       - name: Forecast day 1
         unique_id: weather_forecast_day1
         icon: "{{ icon_map.get(day1.get('condition'), 'mdi:weather-partly-cloudy') }}"
         state: >-
           {% if day1 is defined and day1.get('temperature') is not none %}
-            {{ day1.get('temperature') | round(0) | int }}° / {{ day1.get('templow', 0) | round(0) | int }}°
+            {{ day1.get('temperature') | round(0) | int }}° / {{ (day1.get('templow') or 0) | round(0) | int }}°
           {% else %}—{% endif %}
         attributes:
           day: >-
@@ -265,7 +269,7 @@ template:
         icon: "{{ icon_map.get(day2.get('condition'), 'mdi:weather-partly-cloudy') }}"
         state: >-
           {% if day2 is defined and day2.get('temperature') is not none %}
-            {{ day2.get('temperature') | round(0) | int }}° / {{ day2.get('templow', 0) | round(0) | int }}°
+            {{ day2.get('temperature') | round(0) | int }}° / {{ (day2.get('templow') or 0) | round(0) | int }}°
           {% else %}—{% endif %}
         attributes:
           day: >-
@@ -278,7 +282,7 @@ template:
         icon: "{{ icon_map.get(day3.get('condition'), 'mdi:weather-partly-cloudy') }}"
         state: >-
           {% if day3 is defined and day3.get('temperature') is not none %}
-            {{ day3.get('temperature') | round(0) | int }}° / {{ day3.get('templow', 0) | round(0) | int }}°
+            {{ day3.get('temperature') | round(0) | int }}° / {{ (day3.get('templow') or 0) | round(0) | int }}°
           {% else %}—{% endif %}
         attributes:
           day: >-
@@ -295,7 +299,11 @@ template:
         # has a unit and a device_class, so HA REQUIRES a numeric state and
         # rendering the literal 'unknown' into it raises ValueError — observed
         # live on a fresh instance.
-        state: "{{ today.get('precipitation_probability', 0) if today is defined else 0 }}"
+        # `or 0`, not `.get(k, 0)`: a dict default only fires when the key is
+        # ABSENT, and forecast payloads routinely carry the key with a null
+        # value. This sensor has a unit and a device_class, so a None state
+        # raises ValueError and the sensor dies rather than reading 0.
+        state: "{{ (today.get('precipitation_probability') or 0) if today is defined else 0 }}"
         availability: "{{ today is defined and today | count > 0 }}"
         icon: mdi:weather-rainy
 

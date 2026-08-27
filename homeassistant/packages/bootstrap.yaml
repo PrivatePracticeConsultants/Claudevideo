@@ -24,30 +24,10 @@ input_boolean:
   helpers_initialised:
     name: Helpers initialised
     icon: mdi:check-decagram
-
-input_number:
-  # MIGRATION LADDER. A single "have we bootstrapped?" boolean is a one-way
-  # door: it is set on first boot, and every helper added to this file
-  # AFTERWARDS is then never seeded on any instance that already ran — which
-  # is every existing install, i.e. exactly the ones being upgraded.
-  #
-  # Found the hard way: the Ring helpers were appended to the first-run block
-  # and, on an instance bootstrapped in an earlier session, silently never ran.
-  # ring_nightly_arm_time stayed at 00:00 and ring_health_alerts stayed off,
-  # so every alarm health notification was gated off on precisely the installs
-  # that had been running longest.
-  #
-  # So: a version number, and one block per step. Each block runs if the stored
-  # version is below it, then the version is written. ADDING NEW DEFAULTS MEANS
-  # ADDING A NEW BLOCK AND BUMPING BOOTSTRAP_TARGET — never editing an existing
-  # block, which has already run everywhere.
-  bootstrap_version:
-    name: Bootstrap version
-    icon: mdi:database-arrow-up
-    min: 0
-    max: 999
-    step: 1
-    mode: box
+  # ONE FLAG PER SEEDABLE FEATURE. See the note above bootstrap_seed_ring.
+  ring_defaults_seeded:
+    name: Ring defaults seeded
+    icon: mdi:database-check
 
 script:
   apply_default_settings:
@@ -138,66 +118,84 @@ automation:
   # fire because every step here only writes values the step below has not
   # already recorded.
   # -----------------------------------------------------------------------
-  - id: bootstrap_migrations
-    alias: "[bootstrap] Apply pending default migrations"
+  # =======================================================================
+  # SEEDING DEFAULTS FOR A FEATURE ADDED AFTER FIRST BOOT
+  #
+  # `bootstrap_first_run` above only ever fires on a genuinely fresh instance,
+  # so anything appended to it later never reaches an install that already ran
+  # — which is every install being upgraded. That was a real bug: the Ring
+  # helpers were appended there and, on an already-bootstrapped instance,
+  # silently never ran.
+  #
+  # The obvious fix — a linear `bootstrap_version` with one step per batch — is
+  # WRONG HERE, and was written and then removed after being caught in testing.
+  # Linear versioning assumes every migration is applicable the moment it is
+  # reached. These are not: `optional/ring.yaml` is unpromoted on a normal
+  # install, so a version-2 step would run against entities that do not exist,
+  # have its failures swallowed by continue_on_error, stamp the version 2
+  # anyway, and then never run again — leaving the helpers unseeded on exactly
+  # the installs that promote Ring later, which is the documented path. Verified
+  # live before it was replaced.
+  #
+  # So: ONE AUTOMATION AND ONE FLAG PER FEATURE, each gated on the feature's
+  # entities ACTUALLY EXISTING, and each setting its flag only after the seed
+  # has really happened. Adding defaults for a new optional package means
+  # copying this block, not extending a counter.
+  # =======================================================================
+  - id: bootstrap_seed_ring
+    alias: "[bootstrap] Seed Ring defaults once the package is promoted"
     description: >-
-      Seeds defaults added to this file AFTER an instance was first
-      bootstrapped. Keyed on input_number.bootstrap_version, which restores
-      across restarts. Step 1 is the original first-run set; step 2 is the Ring
-      helpers. To add defaults: append a new step block, do not edit an old one.
+      Writes the Ring helper defaults the first time optional/ring.yaml is
+      actually loaded, whether that is on a fresh install or months later.
+      Idempotent: guarded by input_boolean.ring_defaults_seeded, which restores,
+      so a value the user changes afterwards is never overwritten.
     mode: single
     triggers:
       - trigger: homeassistant
         event: start
+      # Safety net: promoting a package normally means a restart, but YAML can
+      # also be reloaded in place, and then `homeassistant start` never fires.
+      - trigger: time_pattern
+        hours: "/1"
+    conditions:
+      - condition: state
+        entity_id: input_boolean.ring_defaults_seeded
+        state: "off"
+      # EXISTENCE TEST, not a value test. states() of an entity that does not
+      # exist returns `unknown`; a real input_boolean is only ever on or off.
+      # This is what stops the seed being marked done against a package that
+      # was never loaded.
+      - condition: template
+        value_template: >-
+          {{ states('input_boolean.ring_health_alerts') in ['on', 'off']
+             and states('input_datetime.ring_nightly_arm_time')
+                 not in ['unknown', 'unavailable'] }}
     actions:
-      # Helpers restore asynchronously; do not race the restore.
+      # Helpers restore asynchronously; do not race the restore and overwrite
+      # a value this instance already had.
       - delay:
           seconds: 20
-      # An instance that ran the old boolean-guarded bootstrap is at step 1
-      # already, even though it has never seen this version number.
-      - if:
-          - condition: state
-            entity_id: input_boolean.helpers_initialised
-            state: "on"
-          - condition: numeric_state
-            entity_id: input_number.bootstrap_version
-            below: 1
-        then:
-          - action: input_number.set_value
-            target:
-              entity_id: input_number.bootstrap_version
-            data:
-              value: 1
-
-      # ---- step 2: Ring helpers ----
-      # continue_on_error because optional/ring.yaml is not promoted on every
-      # install; these are no-ops until it is. Without the arm time, the
-      # nightly arm sits at 00:00:00, which the arming automation now REFUSES
-      # to act on. Without ring_health_alerts, every alarm health notification
-      # is gated off and the health sensor is decorative.
-      - if:
-          - condition: numeric_state
-            entity_id: input_number.bootstrap_version
-            below: 2
-        then:
-          - action: input_datetime.set_datetime
-            continue_on_error: true
-            target:
-              entity_id: input_datetime.ring_nightly_arm_time
-            data:
-              time: "22:30:00"
-          - action: input_boolean.turn_on
-            continue_on_error: true
-            target:
-              entity_id: input_boolean.ring_health_alerts
-          - action: input_number.set_value
-            continue_on_error: true
-            target:
-              entity_id: input_number.ring_battery_threshold
-            data:
-              value: 20
-          - action: input_number.set_value
-            target:
-              entity_id: input_number.bootstrap_version
-            data:
-              value: 2
+      # Re-check after the delay: the restore may have completed in between,
+      # and on a reload trigger the entities may have gone away again.
+      - condition: state
+        entity_id: input_boolean.ring_defaults_seeded
+        state: "off"
+      - action: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.ring_nightly_arm_time
+        data:
+          time: "22:30:00"
+      - action: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.ring_health_alerts
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.ring_battery_threshold
+        data:
+          value: 20
+      # Set LAST, and with no continue_on_error anywhere above it: if a seed
+      # fails, the flag stays off and the next start tries again. A flag set
+      # before the work is a flag that lies.
+      - action: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.ring_defaults_seeded

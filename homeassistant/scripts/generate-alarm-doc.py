@@ -34,6 +34,11 @@ PROTECTIVE = {"door": "Entry point", "window": "Window", "opening": "Opening",
               "moisture": "Water leak", "heat": "Heat"}
 LIFE_SAFETY = {"smoke", "gas", "carbon_monoxide", "heat"}
 
+# Device files that could not be parsed. Collected rather than raised so one
+# typo cannot destroy the document, and printed into the document itself so
+# an incomplete count is never read as a complete one.
+UNREADABLE: list[tuple[str, str]] = []
+
 
 def from_live() -> list[dict] | None:
     """Protected points from the live registry — REAL Ring devices only.
@@ -101,8 +106,26 @@ def from_register() -> list[dict]:
     """
     rows = []
     for f in sorted((ROOT / "devices").glob("ring-*.yaml")):
-        d = yaml.safe_load(f.read_text()) or {}
+        # PER-FILE isolation. devices/*.yaml is hand-maintained, so a typo in
+        # one file must not take out the document — the repo's fault-isolation
+        # rule. But a SILENT skip is worse than a crash here: this document
+        # states how many points an alarm protects, and quietly dropping a
+        # registered sensor under-reports coverage to an insurer. So: skip the
+        # file, keep going, and record it loudly enough that the number cannot
+        # be mistaken for complete (see UNREADABLE, printed into the doc).
+        try:
+            d = yaml.safe_load(f.read_text()) or {}
+        except (yaml.YAMLError, OSError) as e:
+            first = str(e).strip().splitlines()[0]
+            UNREADABLE.append((f.name, first))
+            continue
+        if not isinstance(d, dict):
+            UNREADABLE.append((f.name, "file does not contain a YAML mapping"))
+            continue
         dev = d.get("device", {}) or {}
+        if not isinstance(dev, dict):
+            UNREADABLE.append((f.name, "`device:` is not a mapping"))
+            continue
         # device_class is what classifies a point; accept it at the top level or
         # infer from the documented `protects` field.
         dc = (dev.get("device_class") or dev.get("protects") or "").strip()
@@ -166,6 +189,13 @@ def main() -> int:
       "> Regenerate after any change to the alarm hardware. Do not hand-edit:\n"
       "> edits are lost on the next run, and a drifted document is worse than\n"
       "> none because it is believed.\n")
+
+    if UNREADABLE:
+        w("> ## ⚠️ THIS DOCUMENT IS INCOMPLETE\n>\n"
+          "> " + str(len(UNREADABLE)) + " device file(s) in `devices/` could not be read, so any\n"
+          "> device they describe is MISSING from the counts below. Fix the file\n"
+          "> and regenerate before sending this to anyone.\n>\n"
+          + "\n".join(f"> - `{n}` — {e}" for n, e in UNREADABLE) + "\n")
 
     w("## System\n")
     w("| Field | Value |")
@@ -301,6 +331,12 @@ def main() -> int:
     if not life:
         print("  ⚠️  NO life-safety device found — the doc carries the "
               "fire-coverage warning prominently.")
+    if UNREADABLE:
+        for n, e in UNREADABLE:
+            print(f"  ⚠️  UNREADABLE {n}: {e}")
+        print("  The document was still written, and says on its face that it "
+              "is incomplete. Exit code 1 so this is not missed in a script.")
+        return 1
     return 0
 
 

@@ -1,6 +1,6 @@
 # Alarm system — protected points
 
-> **Generated** 2026-08-24 18:20 UTC from devices/ring-*.yaml (offline register) by `scripts/generate-alarm-doc.py`.
+> **Generated** 2026-08-27 13:16 UTC from devices/ring-*.yaml (offline register) by `scripts/generate-alarm-doc.py`.
 >
 > Regenerate after any change to the alarm hardware. Do not hand-edit:
 > edits are lost on the next run, and a drifted document is worse than
