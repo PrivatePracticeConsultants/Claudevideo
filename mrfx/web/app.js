@@ -1257,7 +1257,8 @@ async function selectCpt(code) {
   $("#view-cpt h2").textContent =
     `Which entities get paid most for ${code}${info.description ? " — " + info.description : ""}` +
     (cptState ? ` · ${cptState}` : "") +
-    (info.timed ? " (timed 15-min units)" : "");
+    (info.timed ? " (timed 15-min units)" : "") +
+    (d.as_of === "latest" ? " · newest file per contract" : (d.as_of ? ` · ${d.as_of}` : ""));
   renderPayerRank($("#cpt-payer-rank"), d.payer_rank, d.mpfs_rate);
   renderHistogram($("#cpt-hist"), d.histogram, code);
   renderTrend($("#cpt-trend"), trend.rows);

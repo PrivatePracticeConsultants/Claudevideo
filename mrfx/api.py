@@ -145,9 +145,9 @@ _TIN_JOINS = """
 _TIN_REL = f"SELECT {_TIN_PROJECTION} FROM rates_by_tin t {_TIN_JOINS}"
 
 _ENTITY_REL = f"""
-    SELECT any_value(display_name) AS display_name,
+    SELECT min(display_name) AS display_name,
            entity_key AS unit_id,
-           string_agg(DISTINCT tin_value, '; ') AS tin_value,
+           string_agg(DISTINCT tin_value, '; ' ORDER BY tin_value) AS tin_value,
            bool_or(is_mapped_entity) AS is_mapped_entity,
            bool_or(tin_is_really_npi) AS tin_is_really_npi,
            count(DISTINCT tin_value) AS tin_count,
@@ -155,8 +155,8 @@ _ENTITY_REL = f"""
            CASE WHEN count(DISTINCT negotiated_rate) > 1 THEN count(DISTINCT negotiated_rate)
                 ELSE max(rate_variants) END AS rate_variants,
            min(rate_min) AS rate_min, max(rate_max) AS rate_max,
-           payer, billing_code, any_value(billing_code_type) AS billing_code_type,
-           discipline, any_value(is_timed) AS is_timed,
+           payer, billing_code, min(billing_code_type) AS billing_code_type,
+           discipline, min(is_timed) AS is_timed,
            modifier_set, billing_class, service_code_set, file_month,
            -- Re-median across the entity's member TINs — but a placeholder-ONLY
            -- TIN carries its 0.01 as its per-TIN "median" (store.BY_TIN_QUERY's
@@ -171,10 +171,10 @@ _ENTITY_REL = f"""
                median(negotiated_rate) FILTER (NOT is_dollar_rate OR negotiated_rate > 0.01),
                median(negotiated_rate)
            ), 4) AS negotiated_rate,
-           any_value(negotiated_type) AS negotiated_type, is_dollar_rate,
+           min(negotiated_type) AS negotiated_type, is_dollar_rate,
            sum(source_count) AS source_count,
-           string_agg(DISTINCT source_files, ';') AS source_files,
-           any_value(schema_version) AS schema_version,
+           string_agg(DISTINCT source_files, ';' ORDER BY source_files) AS source_files,
+           min(schema_version) AS schema_version,
            max(last_updated_on) AS last_updated_on,
            list_sort(list_distinct(flatten(list(states)))) AS states,
            list_sort(list_distinct(flatten(list(cities)))) AS cities,
@@ -987,12 +987,27 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         qp["code"] = code
         grain = grain_of(qp, cfg, store)
         fs = _fs(qp)
+        # Payers republish every month, so with no month pinned the relation
+        # holds one row per contract PER INGESTED MONTH. Pooling them blended
+        # May's $40 and June's $42 into a "$41" median nobody published, and
+        # summed the same NPIs once per month (2 NPIs shown as 3). Collapse to
+        # each contract's NEWEST month first — the report tabs' "latest"
+        # supersession (benchmark.LATEST_MONTH) — unless a month is pinned.
+        rel = rel_sql(grain, fs)
+        as_of = qp.get("month") or "latest"
+        if not qp.get("month"):
+            # an NPI billing under two TINs holds two contracts — one must
+            # not supersede the other (benchmark._rates_relation's rule)
+            part = "payer, unit_id, tin_value, billing_code" if grain == "npi" \
+                else "payer, unit_id, billing_code"
+            rel = (f"SELECT * FROM ({rel}) QUALIFY file_month = max(file_month) "
+                   f"OVER (PARTITION BY {part})")
         with store.connect() as con:
             ranked = _dicts(con.execute(
                 f"""
-                SELECT unit_id, any_value(display_name) AS display_name,
+                SELECT unit_id, min(display_name) AS display_name,
                        payer, modifier_set, billing_class,
-                       any_value(discipline) AS discipline,
+                       min(discipline) AS discipline,
                        -- is_dollar_rate in the GROUP BY: under dollar_only=0 a
                        -- unit holding $85 AND a 150% percentage row must not
                        -- blend them into one median that matches no published
@@ -1000,8 +1015,11 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                        is_dollar_rate,
                        median(negotiated_rate) AS median_rate,
                        min(negotiated_rate) AS min_rate, max(negotiated_rate) AS max_rate,
-                       sum(npi_count) AS npi_count, count(*) AS n
-                FROM ({rel_sql(grain, fs)})
+                       -- MAX, not SUM: the grouped rows are the same
+                       -- practice's place-of-service variants, which share
+                       -- one roster — summing counted each NPI per variant
+                       max(npi_count) AS npi_count, count(*) AS n
+                FROM ({rel})
                 GROUP BY unit_id, payer, modifier_set, billing_class, is_dollar_rate
                 ORDER BY median_rate DESC, unit_id, payer, modifier_set LIMIT 500
                 """,
@@ -1009,7 +1027,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             ))
             hist = _dicts(con.execute(
                 f"""
-                WITH r AS (SELECT negotiated_rate FROM ({rel_sql(grain, fs)}) WHERE is_dollar_rate AND negotiated_rate > 0.01)
+                WITH r AS (SELECT negotiated_rate FROM ({rel}) WHERE is_dollar_rate AND negotiated_rate > 0.01)
                 SELECT floor(negotiated_rate / g.w) * g.w AS bucket, count(*) AS n
                 FROM r, (SELECT greatest((max(negotiated_rate) - min(negotiated_rate)) / 20, 0.01) AS w FROM r) g
                 GROUP BY 1 ORDER BY 1
@@ -1028,7 +1046,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 f"""
                 WITH per_unit AS (
                     SELECT payer, unit_id, median(negotiated_rate) AS rate
-                    FROM ({rel_sql(grain, fs)})
+                    FROM ({rel})
                     WHERE is_dollar_rate AND negotiated_rate > 0.01
                     GROUP BY payer, unit_id
                 )
@@ -1054,7 +1072,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             p["pct_medicare"] = (round(100 * p["median_rate"] / base)
                                  if base and p.get("median_rate") else None)
         info = catalog_json().get(code, {})
-        return {"billing_code": code, "grain": grain, **info, "ranked": ranked,
+        return {"billing_code": code, "grain": grain, "as_of": as_of, **info, "ranked": ranked,
                 "histogram": hist, "payer_rank": payer_rank,
                 "mpfs_rate": round(base, 2) if base else None}
 

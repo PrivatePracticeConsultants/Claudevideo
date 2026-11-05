@@ -242,7 +242,8 @@ def _maybe_refresh_directory(store: Store, force: bool = False) -> bool:
         return False
 
 
-def enrich_via_api(cfg: MrfxConfig, store: Store, stop: threading.Event | None = None) -> int:
+def enrich_via_api(cfg: MrfxConfig, store: Store, stop: threading.Event | None = None,
+                   on_progress=None) -> int:
     """Polite CONCURRENT NPPES lookups for every un-enriched NPI in the store,
     so names/states fill in quickly on a large book instead of one-every-0.15s.
     Poisoning guards are preserved: a transient/error response leaves the NPI
@@ -304,6 +305,8 @@ def enrich_via_api(cfg: MrfxConfig, store: Store, stop: threading.Event | None =
                         with lock:
                             recent_failures = 0
                             done += 1
+                        if on_progress is not None:
+                            on_progress(done)   # cosmetic: never fails real work
                     if aborted or (stop is not None and stop.is_set()):
                         # don't grind through the rest of a 200-NPI batch of
                         # 30s timeouts against a dead NPPES (or a stop request)
@@ -915,7 +918,9 @@ def use_bulk_enrichment(cfg: MrfxConfig) -> bool:
 
 
 def run_enrichment(cfg: MrfxConfig, store: Store, stop: threading.Event | None = None,
-                   final_refresh: bool = True) -> int:
+                   final_refresh: bool = True, on_progress=None) -> int:
+    """`on_progress(n_done)` is called after each NPPES API lookup (the CLI's
+    progress line); the bulk path is one local pass and does not report."""
     global _WARNED_BULK_PATH_MISSING
     mode = cfg.enrichment.mode
     if mode == "off":
@@ -932,7 +937,8 @@ def run_enrichment(cfg: MrfxConfig, store: Store, stop: threading.Event | None =
                     "found — falling back to the slow NPPES API. Fix the path to "
                     "identify the whole book in one local pass.",
                     cfg.enrichment.bulk_csv_path)
-    done = enrich_via_bulk(cfg, store, stop) if use_bulk else enrich_via_api(cfg, store, stop)
+    done = (enrich_via_bulk(cfg, store, stop) if use_bulk
+            else enrich_via_api(cfg, store, stop, on_progress))
     # AUTO-PROMOTED bulk (mode is api; we chose bulk only because a file is
     # present): if that bulk pass couldn't finish the book — a corrupt/truncated
     # file whose read-failure circuit breaker tripped, or a partial/weekly file
@@ -948,7 +954,7 @@ def run_enrichment(cfg: MrfxConfig, store: Store, stop: threading.Event | None =
             and store.unenriched_npis(limit=1)):
         log.info("bulk enrichment left NPIs unresolved (missing/partial NPPES "
                  "file) — finishing the rest via the NPPES API")
-        done += enrich_via_api(cfg, store, stop)
+        done += enrich_via_api(cfg, store, stop, on_progress)
     # tin_directory materializes NPPES names/states/cities — without a rebuild,
     # geographic benchmarks (state/city joins) silently run against NULLs. The
     # dirty flag (set by the save paths) means this rebuilds iff there are names

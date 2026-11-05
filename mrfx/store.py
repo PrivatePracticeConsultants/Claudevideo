@@ -385,9 +385,9 @@ ROLLUP_MAX_THREADS = 4
 
 DEDUP_QUERY = """
     SELECT payer, npi, billing_code,
-           any_value(billing_code_type)                              AS billing_code_type,
-           any_value(discipline)                                     AS discipline,
-           any_value(is_timed)                                       AS is_timed,
+           min(billing_code_type)                                    AS billing_code_type,
+           min(discipline)                                           AS discipline,
+           min(is_timed)                                             AS is_timed,
            coalesce(array_to_string(billing_code_modifier, '|'), '') AS modifier_set,
            negotiated_rate, billing_class,
            coalesce(array_to_string(service_code, '|'), '')          AS service_code_set,
@@ -399,16 +399,19 @@ DEDUP_QUERY = """
            -- drill-down and TIN search), and a dollar row must never merge
            -- with a same-numeric percentage row and swallow it
            tin_value, tin_is_really_npi, is_dollar_rate,
-           any_value(negotiated_type)                                AS negotiated_type,
-           any_value(schema_version)                                 AS schema_version,
+           min(negotiated_type)                                      AS negotiated_type,
+           min(schema_version)                                       AS schema_version,
            max(last_updated_on)                                      AS last_updated_on,
-           any_value(expiration_date)                                AS expiration_date,
+           min(expiration_date)                                      AS expiration_date,
            count(DISTINCT source_file)                               AS source_count,
+           -- min(), not any_value(), for every representative pick here: a
+           -- re-dropped twin made any_value flip the shown file between two
+           -- runs, so the CSV differed from the screen (invariant 7)
            -- representative file, not the full list: string_agg(DISTINCT)
            -- over tens of millions of near-unique groups cannot spill and
            -- explodes memory/temp disk; source_count carries the cardinality
            -- and the raw rates table has the complete list on demand
-           any_value(source_file)                                    AS source_files,
+           min(source_file)                                          AS source_files,
            1                                                         AS rate_variants,
            1                                                         AS npi_count
     FROM rates
@@ -474,11 +477,11 @@ ROLLUP_SKIPPED = -1.0
 
 BY_TIN_QUERY = """
     SELECT payer, tin_value, billing_code,
-           any_value(tin_type)                                       AS tin_type,
+           min(tin_type)                                             AS tin_type,
            tin_is_really_npi,
-           any_value(billing_code_type)                              AS billing_code_type,
-           any_value(discipline)                                     AS discipline,
-           any_value(is_timed)                                       AS is_timed,
+           min(billing_code_type)                                    AS billing_code_type,
+           min(discipline)                                           AS discipline,
+           min(is_timed)                                             AS is_timed,
            coalesce(array_to_string(billing_code_modifier, '|'), '') AS modifier_set,
            billing_class,
            coalesce(array_to_string(service_code, '|'), '')          AS service_code_set,
@@ -501,11 +504,11 @@ BY_TIN_QUERY = """
            count(DISTINCT negotiated_rate)                           AS rate_variants,
            count(DISTINCT npi)                                       AS npi_count,
            count(DISTINCT source_file)                               AS source_count,
-           any_value(source_file)                                    AS source_files,
-           any_value(negotiated_type)                                AS negotiated_type,
-           any_value(schema_version)                                 AS schema_version,
+           min(source_file)                                          AS source_files,
+           min(negotiated_type)                                      AS negotiated_type,
+           min(schema_version)                                       AS schema_version,
            max(last_updated_on)                                      AS last_updated_on,
-           any_value(expiration_date)                                AS expiration_date
+           min(expiration_date)                                      AS expiration_date
     FROM rates
     WHERE {part}
     GROUP BY payer, tin_value, billing_code,

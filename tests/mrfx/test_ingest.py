@@ -343,3 +343,38 @@ def test_reset_clears_url_queue(cfg, store):
         assert con.execute("SELECT count(*) FROM url_queue").fetchone()[0] == 0
     # and the same URL re-queues cleanly after the wipe
     assert store.enqueue_url("https://x.example/rates.json.gz", "https://x.example/rates.json.gz") is not None
+
+
+def test_locked_temp_file_cannot_fail_a_finished_parse(cfg, store, monkeypatch):
+    """Windows: an antivirus/indexer briefly holding the worker's progress file
+    made the parent's cleanup unlink raise from a `finally`, replacing the
+    successful parse with a PermissionError (file marked failed). Cleanup must
+    retry and then give up quietly — the leftover is swept at next start."""
+    import pathlib
+
+    import mrfx.store as store_mod
+
+    real_unlink = pathlib.Path.unlink
+    held = []
+
+    def unlink(self, missing_ok=False):
+        if self.name.endswith(".progress") or self.name.endswith(".progress.tmp"):
+            held.append(self.name)
+            raise PermissionError(32, "being used by another process", str(self))
+        return real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(pathlib.Path, "unlink", unlink)
+    monkeypatch.setattr(store_mod.time, "sleep", lambda s: None)   # skip retry backoff
+    from mrfx.ingest import ParsePoolManager, set_parse_pool
+
+    p = drop(cfg, "innetwork_mixed.json", gz=True)
+    pool = ParsePoolManager(max_workers=1)   # the worker path owns the progress file
+    set_parse_pool(pool)
+    try:
+        res = ingest_file(cfg, store, p)
+    finally:
+        set_parse_pool(None)
+        pool.shutdown_now()
+    assert res["status"] == "done", res
+    assert held   # the lock really was hit
+    assert any(r["npi"] == "2222222222" for r in rates(store))

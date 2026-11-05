@@ -25,7 +25,7 @@ from .parser import (
     run_skim,
 )
 from .sniff import Preflight, open_stream, preflight
-from .store import FINISHED_NOW, Store, file_key, sql_path
+from .store import FINISHED_NOW, Store, file_key, sql_path, unlink_with_retry
 
 log = logging.getLogger(__name__)
 
@@ -390,6 +390,15 @@ def get_parse_pool():
     return _PARSE_POOL
 
 
+def _cleanup_unlink(p) -> None:
+    """Best-effort temp-file delete for cleanup paths: retries a transient
+    Windows lock, and never raises (a leftover is swept at the next start)."""
+    try:
+        unlink_with_retry(Path(p))
+    except OSError:
+        pass
+
+
 def spool_path_for(part_tmp) -> Path:
     """The big-file spool sits next to its part's .parquet.tmp with the SAME
     key and pid, so the store's orphan sweep removes it after a crash."""
@@ -678,19 +687,22 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
                 "parse was cancelled by a worker-pool restart — press retry "
                 "on this file; other files resume automatically") from e
     except Exception:
-        tmp_out.unlink(missing_ok=True)
+        _cleanup_unlink(tmp_out)
         raise
     finally:
-        Path(progress_path).unlink(missing_ok=True)
-        Path(progress_path + ".tmp").unlink(missing_ok=True)
+        # Every delete here is retry-tolerant and never raises: on Windows an
+        # antivirus/indexer briefly holding one of these files open made the
+        # unlink raise FROM THIS finally, replacing a successful parse's
+        # result (or the real error) with a PermissionError — a finished file
+        # marked failed over a temp file. A file still held is swept at the
+        # next start.
+        _cleanup_unlink(progress_path)
+        _cleanup_unlink(progress_path + ".tmp")
         # the worker deletes its own spool, but a worker that DIES (OOM kill,
         # crash, force_heal) can't — and the spool carries THIS (live)
         # process's pid, so the orphan sweep would keep it until restart.
         # It can be GBs; the parent always removes it.
-        try:
-            spool_path_for(tmp_out).unlink(missing_ok=True)
-        except OSError:
-            pass  # held open by AV/indexer — swept at next start
+        _cleanup_unlink(spool_path_for(tmp_out))
 
     store.update_progress(name, 100.0, chunks_done=payload["chunks_total"],
                           chunks_total=payload["chunks_total"])

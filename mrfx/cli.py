@@ -8,6 +8,7 @@ import logging
 import os
 import sys
 import threading
+import time
 from pathlib import Path
 
 import duckdb
@@ -415,19 +416,86 @@ def cmd_add(cfg: MrfxConfig, args) -> int:
             print(f"  TOO BIG {rec['url'][:90]}\n          → over confirm_over_gb; raise it in "
                   "config/mrfx.yaml (or use the dashboard's \"download anyway\") and re-run")
     if cfg.enrichment.mode != "off" and processed:
-        print("looking up practice names (NPPES)...")
-        _run_enrichment_best_effort(cfg, store)
+        _run_enrichment_best_effort(cfg, store, interactive=True)
     return 0
 
 
-def _run_enrichment_best_effort(cfg: MrfxConfig, store: Store) -> None:
+# seconds between "names: N of M" lines during a CLI NPPES pass
+ENRICH_TICK_S = 15.0
+
+
+def _run_enrichment_best_effort(cfg: MrfxConfig, store: Store, interactive: bool = False) -> None:
     """Name lookups are a bonus pass AFTER the ingest already succeeded — a
-    bad bulk CSV or NPPES hiccup must not end the command with a traceback."""
+    bad bulk CSV or NPPES hiccup must not end the command with a traceback.
+
+    interactive (the `mrfx add` tail): one NPPES API request per new NPI is
+    >15 min on a few million rows, which used to print one line and go quiet.
+    Now it says how many remain, prints progress, and Ctrl-C skips the rest
+    cleanly (names fill in on the next run, or from the dashboard)."""
+    from .enrich import use_bulk_enrichment
+
+    if not interactive:
+        try:
+            run_enrichment(cfg, store)
+        except Exception as e:  # noqa: BLE001
+            print(f"name enrichment hit a problem ({e}) — your rates are saved; "
+                  "names fill in on the next run")
+        return
+    bulk = use_bulk_enrichment(cfg)
     try:
-        run_enrichment(cfg, store)
-    except Exception as e:  # noqa: BLE001
-        print(f"name enrichment hit a problem ({e}) — your rates are saved; "
+        left = store.enrichment_progress(max_age_seconds=0).get("remaining", 0)
+    except Exception:  # noqa: BLE001 — a count is cosmetic
+        left = 0
+    if bulk:
+        print("looking up practice names from the local NPPES file...")
+    else:
+        print(f"looking up practice names for {left:,} NPI(s) via the NPPES website "
+              "(one request each). Press Ctrl-C to skip — your rates are saved and "
+              "names fill in on the next run.")
+        if left > 20_000:
+            print("  tip: for a book this size, download the NPPES file once and point "
+                  "enrichment.bulk_csv_path at it (GETTING_STARTED.md, 'The fast way') — "
+                  "one local pass instead of hours of lookups")
+    stop = threading.Event()
+    state = {"done": 0, "err": None}
+
+    def work():
+        try:
+            run_enrichment(cfg, store, stop=stop,
+                           on_progress=lambda n: state.__setitem__("done", n))
+        except Exception as e:  # noqa: BLE001
+            state["err"] = e
+
+    th = threading.Thread(target=work, name="mrfx-cli-enrich", daemon=True)
+    th.start()
+    t0 = last = time.monotonic()
+    try:
+        while th.is_alive():
+            th.join(0.5)
+            now = time.monotonic()
+            if not bulk and now - last >= ENRICH_TICK_S:
+                last = now
+                n = state["done"]
+                rate = n / max(now - t0, 1e-9)
+                eta = (f", about {((left - n) / rate) / 60:.0f} min left"
+                       if rate > 0 and left > n else "")
+                print(f"  names: {n:,} of {left:,} looked up{eta}", flush=True)
+    except KeyboardInterrupt:
+        stop.set()
+        print("\nskipping the rest of the name lookups (Ctrl-C) — finishing the "
+              "requests already in flight...", flush=True)
+        try:
+            th.join(60)
+        except KeyboardInterrupt:
+            pass
+        print(f"skipped: {state['done']:,} names looked up; the rest fill in on the next "
+              "run or while the dashboard is open")
+        return
+    if state["err"] is not None:
+        print(f"name enrichment hit a problem ({state['err']}) — your rates are saved; "
               "names fill in on the next run")
+    elif not bulk:
+        print(f"names: {state['done']:,} looked up")
 
 
 def cmd_preflight(cfg: MrfxConfig, args) -> int:

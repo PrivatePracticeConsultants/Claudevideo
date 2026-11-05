@@ -44,7 +44,7 @@ home folder or Desktop.
 **Option B — download with git** (if you use GitHub):
 
 ```
-git clone --branch claude/bcbs-mo-mrf-pipeline-o0qwq4 <your-repo-url>
+git clone --branch claude/gracious-mccarthy-ao7vmo <your-repo-url>
 ```
 
 Either way, `cd` into the folder in your terminal:
@@ -79,21 +79,16 @@ python --version
 python -m pip install -r requirements.txt
 python -m pip install -e .
 ```
-The first line (`py -0p`) lists the Python versions installed on your machine
-and their paths — you should see a `3.12` entry. If you don't, install Python
-3.12 from <https://www.python.org/downloads/release/python-3120/> (tick "Add
-python.exe to PATH"), then re-run the lines above. `python --version` should
-print `Python 3.12.x` once the environment is active.
+`python --version` should print 3.11, 3.12, 3.13 or 3.14 once the environment
+is active. (`py -0p` lists every Python installed; if you have several, pick
+one with e.g. `py -3.13 -m venv .venv`.)
 
-> **Why 3.12 and not the newest Python?** This is the single most common
-> install snag. If you see **`Failed to build installable wheels for some
-> pyproject.toml based projects` (duckdb, pyarrow, watchfiles, pydantic-core)**,
-> it means your Python is *newer* than those packages ship ready-made
-> installers for, so pip tried to *compile* them from source — which needs a
-> C/Rust build toolchain you don't have. The fix is not to install a compiler;
-> it's to use Python **3.12**, which has ready-made installers for everything
-> here. Delete the half-made `.venv` folder if one was created, then run the
-> `py -3.12 -m venv .venv` sequence above.
+> **If you see `Failed to build installable wheels` (duckdb, pyarrow,
+> watchfiles, pydantic-core):** pip found no ready-made installer for your
+> Python and tried to compile one. That means either a Python NEWER than 3.14,
+> or an old copy of `requirements.txt`. Don't install a compiler: delete the
+> half-made `.venv` folder, use Python 3.11–3.14 (`py -3.13 -m venv .venv`),
+> and re-run the lines above.
 
 > If Windows blocks the activate script with a security error, run this once,
 > then retry the activate line:
@@ -841,13 +836,12 @@ them in one place, grouped by where you'll hit them.
 
 - **`Failed to build installable wheels for some pyproject.toml based
   projects` (duckdb, pyarrow, watchfiles, pydantic-core)** — your Python is
-  newer than these packages ship ready-made installers for, so pip tried to
-  compile them from source and failed. **Don't install a compiler — use Python
-  3.12.** On Windows: `py -0p` to confirm 3.12 is installed (if not, get it
-  from <https://www.python.org/downloads/release/python-3120/>), delete the
-  half-made `.venv` folder, then run the Step-3 sequence starting with
-  `py -3.12 -m venv .venv`. `python --version` inside the active environment
-  must read `3.12.x` before you install.
+  newer than these packages ship ready-made installers for (anything past
+  3.14), or `requirements.txt` is an old copy, so pip tried to compile them
+  from source and failed. **Don't install a compiler — use Python 3.11–3.14.**
+  On Windows: `py -0p` lists what's installed; delete the half-made `.venv`
+  folder, then run the Step-3 sequence starting with e.g.
+  `py -3.13 -m venv .venv`.
 - **`mrfx: command not found`** — the virtual environment isn't active. Re-run
   the `activate` line from Step 3 (you'll see `(.venv)` in the prompt).
 - **`python3: command not found` on Windows** — use `python` instead.
