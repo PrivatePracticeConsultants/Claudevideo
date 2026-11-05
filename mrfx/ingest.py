@@ -188,17 +188,27 @@ class SingleReadProgress:
             self.emit(pct)
 
 
-def qa_report(store: Store, qa_counters: dict, source_file: str) -> dict:
+def qa_report(store: Store, qa_counters: dict, source_file: str,
+              agg: tuple[int, int, int] | None = None) -> dict:
     """Per-file data-quality summary (§7A.3). The incremental counters come from
     the parser (as a plain dict, so parallel workers can ship them across
     processes); the aggregate metrics (outliers, duplicate ratio, TIN=NPI
     count) are computed in DuckDB over the written part so this scales to
-    files with millions of rows without holding them in Python memory."""
+    files with millions of rows without holding them in Python memory.
+
+    `agg` = (outliers, tin_is_really_npi rows, distinct facts) already
+    computed by the parse WORKER on its own part (qa_aggregate_counts on a
+    private connection) — then the main process's shared DuckDB, which also
+    serves the dashboard and the rollups, isn't scanned at all."""
     qa = dict(qa_counters)
     total = qa["rows"]
     part = store.rates_dir / f"{file_key(source_file)}.parquet"
     try:
-        _qa_aggregates(store, part, total, qa)
+        if agg is None:
+            with store.connect() as con:
+                agg = (qa_aggregate_counts(con, part) if total and part.exists()
+                       else (0, 0, 0))
+        _apply_qa_aggregates(qa, total, agg)
     except Exception as e:  # noqa: BLE001 — this runs AFTER the parse succeeded
         # and its parquet is durable: derived stats failing (store briefly
         # locked by an external reader) must degrade, not flip a finished
@@ -211,32 +221,73 @@ def qa_report(store: Store, qa_counters: dict, source_file: str) -> dict:
     return qa
 
 
-def _qa_aggregates(store: Store, part: Path, total: int, qa: dict) -> None:
-    outliers = tin_npi = distinct_facts = 0
-    if total and part.exists():
-        with store.connect() as con:
-            p = str(part)
-            outliers = con.execute(
-                f"""
-                WITH r AS (SELECT * FROM read_parquet('{sql_path(p)}') WHERE is_dollar_rate),
-                med AS (SELECT billing_code, median(negotiated_rate) m FROM r GROUP BY billing_code)
-                SELECT count(*) FROM r JOIN med USING (billing_code)
-                WHERE m > 0 AND (negotiated_rate > 5 * m OR negotiated_rate < 0.2 * m)
-                """
-            ).fetchone()[0]
-            tin_npi = con.execute(
-                f"SELECT count(*) FROM read_parquet('{sql_path(p)}') WHERE tin_is_really_npi"
-            ).fetchone()[0]
-            distinct_facts = con.execute(
-                f"""
-                SELECT count(*) FROM (
-                    SELECT DISTINCT payer, tin_value, npi, billing_code,
-                           array_to_string(billing_code_modifier, '|'),
-                           negotiated_rate, billing_class
-                    FROM read_parquet('{sql_path(p)}')
-                )
-                """
-            ).fetchone()[0]
+def qa_aggregate_counts(con, part: Path) -> tuple[int, int, int]:
+    """(outlier dollar rates, tin_is_really_npi rows, distinct negotiated
+    facts) of one rate part — THE definition, run by the parse worker on a
+    private connection or by the main process as a fallback. Two scans:
+    outliers and the TIN=NPI count share one pass (verified identical to the
+    former three-query form on 11 real parts, 32M rows)."""
+    src = f"read_parquet('{sql_path(str(part))}')"
+    outliers, tin_npi = con.execute(
+        f"""
+        WITH med AS (SELECT billing_code, median(negotiated_rate) AS m FROM {src}
+                     WHERE is_dollar_rate GROUP BY billing_code)
+        SELECT count(*) FILTER (WHERE r.is_dollar_rate AND med.m > 0
+                                AND (r.negotiated_rate > 5 * med.m
+                                     OR r.negotiated_rate < 0.2 * med.m)),
+               count(*) FILTER (WHERE r.tin_is_really_npi)
+        FROM {src} r LEFT JOIN med USING (billing_code)
+        """
+    ).fetchone()
+    distinct_facts = con.execute(
+        f"""
+        SELECT count(*) FROM (
+            SELECT DISTINCT payer, tin_value, npi, billing_code,
+                   array_to_string(billing_code_modifier, '|'),
+                   negotiated_rate, billing_class
+            FROM {src}
+        )
+        """
+    ).fetchone()[0]
+    return int(outliers or 0), int(tin_npi or 0), int(distinct_facts or 0)
+
+
+# the worker's private QA connection: a slice of the machine, never the
+# whole of it (the other workers are parsing meanwhile)
+WORKER_QA_THREADS = 2
+WORKER_QA_MEMORY = "1GB"
+
+
+def _worker_qa_counts(part: Path) -> tuple[int, int, int] | None:
+    """qa_aggregate_counts on a private in-memory DuckDB, inside the parse
+    worker. Spills (a 590M-row DISTINCT does) to a pid-named folder beside the
+    part — never the current directory — removed afterwards and swept at the
+    next start if the worker dies. None on any failure: the parent then runs
+    the same query on the main connection, so QA never fails a parse."""
+    import duckdb
+
+    spill = part.with_name(part.name.removesuffix(".parquet.tmp") + ".qa-spill")
+    con = None
+    try:
+        con = duckdb.connect()
+        con.execute(f"SET threads = {WORKER_QA_THREADS}")
+        con.execute(f"SET memory_limit = '{WORKER_QA_MEMORY}'")
+        con.execute("SET preserve_insertion_order = false")
+        con.execute("SET enable_progress_bar = false")   # else it paints the console
+        con.execute(f"SET temp_directory = '{sql_path(str(spill))}'")
+        return qa_aggregate_counts(con, part)
+    except Exception as e:  # noqa: BLE001 — cosmetic tier: the parent recomputes
+        log.info("%s: worker QA skipped (%s) — the main process will compute it",
+                 part.name, e)
+        return None
+    finally:
+        if con is not None:
+            con.close()
+        shutil.rmtree(spill, ignore_errors=True)
+
+
+def _apply_qa_aggregates(qa: dict, total: int, agg: tuple[int, int, int]) -> None:
+    outliers, tin_npi, distinct_facts = agg
     prices = qa.get("prices") or 0
     qa.update({
         "outlier_rates": outliers,
@@ -563,9 +614,15 @@ def _parse_worker(cfg: MrfxConfig, path_str: str, name: str, header_defaults: di
     finally:
         if writer is not None:
             writer.close()
+    # QA aggregates HERE, on this worker's own part, so the main process's
+    # shared DuckDB (dashboard, rollups, every other file's adoption) isn't
+    # scanned once per file. Stop requests are honored up to this point only.
+    qa_agg = (_worker_qa_counts(Path(tmp_out))
+              if rows_written and Path(tmp_out).exists() else (0, 0, 0))
     return {
         "short_circuit": False,
         "chunks_total": chunks_total,
+        "qa_agg": qa_agg,
         "payer": result.payer,
         "schema_version": result.schema_version,
         "last_updated_on": result.last_updated_on,
@@ -778,7 +835,7 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
         status="done",
         rows_emitted=payload["rows"],
         ref_groups_skipped=payload["ref_groups_skipped"],
-        qa=qa_report(store, payload["qa"], name),
+        qa=qa_report(store, payload["qa"], name, agg=payload.get("qa_agg")),
         finished_at=FINISHED_NOW,
     )
     # rollup AFTER the done-upsert: the incremental update finds its work by

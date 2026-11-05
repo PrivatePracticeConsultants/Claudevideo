@@ -1158,16 +1158,22 @@ class Store:
         for p in [*self.rates_dir.glob(".*.parquet.tmp"),
                   *self.rates_dir.glob(".*.spool.tmp"),
                   *self.rates_dir.glob(".*.progress"),
-                  *self.rates_dir.glob(".*.progress.tmp")]:
+                  *self.rates_dir.glob(".*.progress.tmp"),
+                  *self.rates_dir.glob(".*.progress.stop"),
+                  *self.rates_dir.glob(".*.qa-spill")]:
             # every name shape carries the pid right after the file key:
             # .{key}.{pid}.parquet.tmp / .spool.tmp (big-file target-item
             # spool, can be large) / .progress[.tmp]
-            m = re.match(r"^\.(.+)\.(\d+)\.(parquet\.tmp|spool\.tmp|progress(\.tmp)?)$", p.name)
+            m = re.match(r"^\.(.+)\.(\d+)\.(parquet\.tmp|spool\.tmp|qa-spill"
+                         r"|progress(\.tmp|\.stop)?)$", p.name)
             pid = m.group(2) if m else None
             if pid is not None and _pid_alive(int(pid)):
                 continue  # owner is alive — in-progress write, keep it
             try:
-                p.unlink(missing_ok=True)
+                if p.is_dir():   # a dead worker's QA spill folder
+                    shutil.rmtree(p, ignore_errors=True)
+                else:
+                    p.unlink(missing_ok=True)
             except OSError:
                 pass  # locked by AV/indexer — a leftover tmp is cosmetic, not fatal
 

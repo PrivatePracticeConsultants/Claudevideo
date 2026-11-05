@@ -324,8 +324,12 @@ def test_cosmetic_failures_never_fail_real_work(cfg, store, monkeypatch):
     monkeypatch.undo()
 
     # 2. QA aggregates degrade instead of failing the finished file
-    monkeypatch.setattr(ing, "_qa_aggregates", boom)
+    monkeypatch.setattr(ing, "qa_aggregate_counts", boom)
+    from mrfx.store import file_key
+    fake_part = store.rates_dir / f"{file_key('x.json')}.parquet"
+    fake_part.write_bytes(b"")   # a part for the (failing) QA scan to target
     qa = qa_report(store, {"rows": 5, "non_dollar_rows": 0}, "x.json")
+    fake_part.unlink()
     assert qa["rows"] == 5 and any("unaffected" in m for m in qa["messages"])
     p = drop(cfg, "innetwork_mixed.json", gz=True)
     res = ingest_file(cfg, store, p)

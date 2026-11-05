@@ -378,3 +378,58 @@ def test_locked_temp_file_cannot_fail_a_finished_parse(cfg, store, monkeypatch):
     assert res["status"] == "done", res
     assert held   # the lock really was hit
     assert any(r["npi"] == "2222222222" for r in rates(store))
+
+
+def test_worker_computes_qa_and_matches_the_main_process(cfg, store, monkeypatch):
+    """The parse worker computes the QA aggregates on its own part (private
+    DuckDB), so the main process's shared connection isn't scanned. Its
+    numbers must equal the main-process computation exactly, and a failure
+    there must fall back to the main process, never fail the file."""
+    import mrfx.ingest as ing
+    from mrfx.ingest import ParsePoolManager, qa_report, set_parse_pool
+
+    calls = []
+    real = ing.qa_aggregate_counts
+    monkeypatch.setattr(ing, "qa_aggregate_counts",
+                        lambda con, part: calls.append(part) or real(con, part))
+    p = drop(cfg, "innetwork_mixed.json", gz=True)
+    pool = ParsePoolManager(max_workers=1)
+    set_parse_pool(pool)
+    try:
+        assert ingest_file(cfg, store, p)["status"] == "done"
+    finally:
+        set_parse_pool(None)
+        pool.shutdown_now()
+    assert calls == []          # main process never scanned the part
+    st = store.file_status(p.name)
+    import json as _json
+    worker_qa = _json.loads(st["qa"]) if isinstance(st["qa"], str) else st["qa"]
+    main_qa = qa_report(store, {k: worker_qa[k] for k in ("rows", "non_dollar_rows", "prices")
+                                if k in worker_qa}, p.name)
+    for k in ("outlier_rates", "duplicate_explosion_ratio", "tin_is_really_npi_rows"):
+        assert worker_qa[k] == main_qa[k], k
+    assert len(calls) == 1      # (that comparison ran it once in the main process)
+    assert [f for f in store.rates_dir.iterdir() if f.name.endswith(".qa-spill")] == []
+
+
+def test_worker_qa_failure_falls_back_to_the_main_process(cfg, store, monkeypatch, tmp_path):
+    import mrfx.ingest as ing
+
+    bad = tmp_path / ".k.1.parquet.tmp"
+    bad.write_bytes(b"not parquet")
+    assert ing._worker_qa_counts(bad) is None          # never raises
+    assert not (tmp_path / ".k.1.qa-spill").exists()   # spill folder removed
+    qa = ing.qa_report(store, {"rows": 0, "non_dollar_rows": 0}, "nothing.json", agg=None)
+    assert qa["duplicate_explosion_ratio"] == 1.0
+
+
+def test_orphan_sweep_removes_a_dead_workers_qa_spill(cfg, store):
+    from mrfx.store import Store
+
+    dead = store.rates_dir / ".abc.999999.qa-spill"
+    dead.mkdir()
+    (dead / "duckdb_temp_block-1.block").write_bytes(b"x" * 10)
+    live = store.rates_dir / f".abc.{__import__('os').getpid()}.qa-spill"
+    live.mkdir()
+    Store(cfg.store_dir)._sweep_orphan_tmps()
+    assert not dead.exists() and live.exists()
