@@ -433,6 +433,7 @@ def _run_enrichment_best_effort(cfg: MrfxConfig, store: Store, interactive: bool
     Now it says how many remain, prints progress, and Ctrl-C skips the rest
     cleanly (names fill in on the next run, or from the dashboard)."""
     from .enrich import use_bulk_enrichment
+    from .nppes_auto import bulk_source, ensure_current
 
     if not interactive:
         try:
@@ -441,21 +442,28 @@ def _run_enrichment_best_effort(cfg: MrfxConfig, store: Store, interactive: bool
             print(f"name enrichment hit a problem ({e}) — your rates are saved; "
                   "names fill in on the next run")
         return
+    # this month's NPPES file first (auto_download; skips when already current)
+    # so a fresh install resolves names locally instead of crawling the API
+    try:
+        ensure_current(cfg)
+    except Exception:  # noqa: BLE001 — never fail the command over names
+        pass
     bulk = use_bulk_enrichment(cfg)
     try:
         left = store.enrichment_progress(max_age_seconds=0).get("remaining", 0)
     except Exception:  # noqa: BLE001 — a count is cosmetic
         left = 0
     if bulk:
-        print("looking up practice names from the local NPPES file...")
+        print(f"looking up practice names from the local NPPES file "
+              f"({Path(bulk_source(cfg)).name})...")
     else:
         print(f"looking up practice names for {left:,} NPI(s) via the NPPES website "
               "(one request each). Press Ctrl-C to skip — your rates are saved and "
               "names fill in on the next run.")
         if left > 20_000:
-            print("  tip: for a book this size, download the NPPES file once and point "
-                  "enrichment.bulk_csv_path at it (GETTING_STARTED.md, 'The fast way') — "
-                  "one local pass instead of hours of lookups")
+            print("  tip: the app normally downloads CMS's NPPES file by itself and names "
+                  "everyone in one local pass — it couldn't this time (see the NPPES: "
+                  "line above). GETTING_STARTED.md, 'Provider names fill in automatically'.")
     stop = threading.Event()
     state = {"done": 0, "err": None}
 
@@ -883,15 +891,18 @@ def cmd_enrich(cfg: MrfxConfig, args) -> int:
               "or pass --bulk <NPPES zip/csv>.", file=sys.stderr)
         return 1
     from .enrich import use_bulk_enrichment
+    from .nppes_auto import bulk_source, ensure_current
+    if not getattr(args, "bulk_file", None):
+        ensure_current(cfg)   # fetch this month's NPPES file if auto_download is on
     if cfg.enrichment.mode == "bulk":
-        src = cfg.enrichment.bulk_csv_path
+        src = bulk_source(cfg)
         if not src or not Path(src).exists():
             print(f"bulk file not found: {src}\nDownload the NPPES full monthly file from "
                   "https://download.cms.gov/nppes/NPI_Files.html and point --bulk (or "
                   "enrichment.bulk_csv_path) at the .zip.", file=sys.stderr)
             return 1
     if use_bulk_enrichment(cfg):
-        print(f"resolving names from {cfg.enrichment.bulk_csv_path} in one local "
+        print(f"resolving names from {bulk_source(cfg)} in one local "
               "pass — this reads the file once…")
     else:
         print("resolving names via the NPPES API (can take a while for a large "

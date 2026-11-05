@@ -230,27 +230,26 @@ a client). The export contains exactly the rows the screen shows.
 Social-Security-number-looking tax IDs (sole practitioners who use their SSN)
 are always shown as **MASKED-SSN**, on screen and in every export.
 
-### Step 11 (recommended). Make practice names fill in fast
+### Step 11. Practice names fill in by themselves
 
-Rates arrive with only ID numbers; names come from the federal NPI registry
-(NPPES). By default the program looks them up one by one over the internet,
-which is slow for big loads. The fast way is a one-time download:
+Rates arrive with only ID numbers; names, specialties and addresses come from
+the federal provider registry (NPPES). **You don't need to do anything:** the
+program downloads CMS's monthly provider file (about 1.1 GB) on its own the
+first time it runs, in the background, and then names every provider from it
+in one fast pass. Measured on a database of 32 million rates: all 93,479
+providers named in about 3½ minutes, download included.
 
-1. Download the "NPPES Data Dissemination" file (full monthly, ~1 GB zip) from
-   <https://download.cms.gov/nppes/NPI_Files.html>.
-2. Open `config/mrfx.yaml` (in the project's `config` folder) with Notepad.
-   Find the line near the `enrichment:` section that reads
-   `# bulk_csv_path: 'E:\NPPES_Data_Dissemination_July_2026_V2.zip'`.
-   Delete the `#` and the space after it (the line must start with two
-   spaces, lined up with `mode: api` above it), and replace the path with
-   where you saved the zip, keeping the single quotes, e.g.
-   `  bulk_csv_path: 'C:\Users\you\Downloads\NPPES_Data_Dissemination_November_2026.zip'`
-   (Keep it zipped — don't unzip it.)
-3. Save, then stop and restart the program (Step 6).
+After that it checks once a day for a newer month. When CMS publishes one
+(early each month), it downloads it, uses it, and updates any provider whose
+name, specialty or address changed. The file is kept in `data\nppes` (the last
+two months; older ones are deleted for you).
 
-(If you load files from the command line with `mrfx add`, it now tells you how
-many names are left to look up, and **Ctrl-C** skips that step safely — your
-rates are already saved.)
+- The first time, the banner at the top of the dashboard shows names starting
+  to fill in after a few minutes.
+- No internet, or CMS is down? It quietly tries again in an hour and uses what
+  it already has meanwhile.
+- If you'd rather manage the file yourself, see the `enrichment:` section in
+  `config\mrfx.yaml`.
 
 ---
 

@@ -1,6 +1,11 @@
+import os
 from pathlib import Path
 
 import pytest
+
+# the app downloads CMS's ~1.1 GB NPPES file by itself (enrichment.auto_download);
+# the suite must never do that — tests that exercise it clear this variable
+os.environ.setdefault("MRFX_NO_AUTO_DOWNLOAD", "1")
 
 from src.config import Config
 from src.npi_resolver import TargetProvider, TargetSet

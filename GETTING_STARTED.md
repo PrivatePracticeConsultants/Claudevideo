@@ -349,64 +349,45 @@ imports everything new in one go.
 
 ---
 
-## Make provider names fill in fast (recommended)
+## Provider names fill in automatically
 
 The rates load with raw NPI numbers first, then the app fills in each
 provider's **name, city/state, and taxonomy** in the background. You'll see a
 banner like *"5,192 / 854,692 names (identifying 849,492 more…)"* while it
 works.
 
-Out of the box that runs in **`api` mode** — it looks each NPI up one at a
-time over the internet against the public NPPES service, which is heavily
-rate-limited. For a big book (hundreds of thousands of providers) that can
-take **days**. If your banner is climbing only a few thousand per day, this is
-why.
+**This is automatic.** The app keeps CMS's **NPPES full monthly file** (a
+~1.1 GB `.zip`) in `data/nppes` by itself: it checks
+<https://download.cms.gov/nppes/NPI_Files.html> at most once a day, downloads a
+new month in the background, builds a small local lookup cache
+(`nppes_cache.parquet` in your store folder) in one pass, and then identifies
+every provider — the whole backlog at once, and anything new you ingest later —
+in seconds, with no per-provider internet lookups. Measured on a 32-million-rate
+store: a fresh install named all 93,479 providers in ~3½ minutes including the
+download. When a new month arrives it also **refreshes providers whose name,
+specialty or address changed**. The newest two monthly files are kept; older
+ones are deleted.
 
-**The fast way — point it at the NPPES bulk file (one local pass, minutes):**
+If CMS can't be reached, it retries within the hour and meanwhile uses the file
+it already has — or, on a brand-new install, looks names up one by one over the
+internet (the slow way: rate-limited, can take days for a big book).
 
-1. Download the **NPPES full monthly file** (a ~1 GB `.zip`) from
-   <https://download.cms.gov/nppes/NPI_Files.html>. Keep it as the `.zip` — you
-   do **not** need to unzip it.
-2. In `config/mrfx.yaml`, set `bulk_csv_path` under the `enrichment:` block:
+**Managing the file yourself instead** (optional): set `auto_download: false`
+under `enrichment:` in `config/mrfx.yaml` and point `bulk_csv_path` at a full
+monthly `.zip` you downloaded (keep it zipped; a **folder** also works — its
+newest NPPES zip is used). On Windows keep the path in single quotes:
 
-   ```yaml
-   enrichment:
-     mode: bulk
-     bulk_csv_path: 'E:\NPPES_Data_Dissemination_July_2026_V2.zip'
-   ```
+```yaml
+enrichment:
+  auto_download: false
+  bulk_csv_path: 'E:\NPPES\'
+```
 
-   Use the real path to *your* download. On Windows, **keep the single quotes**
-   around the path (or write it with forward slashes,
-   `E:/NPPES_Data_Dissemination_July_2026_V2.zip`) so the backslashes are read
-   correctly.
+You can also run it as a one-off command (stop the dashboard first):
 
-   > **You only really need the `bulk_csv_path` line.** Whenever that file is
-   > present the app uses it automatically — even if `mode` is left at the
-   > default `api`. Setting `mode: bulk` is just the explicit form. (So if names
-   > were "stuck", the usual cause is a `bulk_csv_path` that's misspelled or
-   > points at a file that isn't there — the app can't use a file it can't find,
-   > and falls back to the slow API. Double-check the path.)
-3. Restart `mrfx serve`.
-
-The first time it runs, it reads the file **once** (a few minutes) and builds a
-small local lookup cache (`nppes_cache.parquet` in your store folder). After
-that, every provider — the whole backlog at once, and anything new you ingest
-later — is identified in seconds, with no internet lookups.
-
-**Already have a backlog?** You have two options:
-
-- **Easiest:** just set `bulk_csv_path` (step 2 above) and restart `mrfx serve`
-  — the running app picks the file up on its own and clears the backlog in one
-  pass. Nothing else to run.
-- **Or run it as a one-off command** — stop the dashboard first (Ctrl-C in its
-  window; while it runs it keeps the database open, so this command will
-  politely refuse), then:
-
-  ```
-  mrfx enrich --bulk "E:\NPPES_Data_Dissemination_July_2026_V2.zip"
-  ```
-
-  It prints `identified N name(s)` when done; start the dashboard again after.
+```
+mrfx enrich --bulk "E:\NPPES_Data_Dissemination_November_2026_V2.zip"
+```
 
 > The app only trusts the **full monthly** file for this (it's ~8–9 million
 > providers). If you accidentally point it at a small *weekly* update, it
@@ -726,7 +707,7 @@ prompt). They're an alternative to the dashboard buttons.
 | `mrfx status` | List ingested files and totals |
 | `mrfx export out.csv --cpt 97110 --payer "Aetna"` | Export a filtered CSV + methodology sidecar (state filtering lives in the dashboard and `mrfx outreach`) |
 | `mrfx outreach contacts.csv --state MO --cpt 97110,97140` | Contact/mail-merge CSV |
-| `mrfx enrich --bulk "E:\NPPES…zip"` | Fill in provider names/geography now, in one fast local pass from the NPPES bulk file (see "Make provider names fill in fast" above) |
+| `mrfx enrich` | Fill in provider names/geography now (downloads this month's NPPES file first if needed — see "Provider names fill in automatically" above); `--bulk <zip>` uses a file you choose |
 | `mrfx packets` | Write this month's packet for every watchlist client |
 | `mrfx renewals --clients` | Contracts with a real published end date, soonest first |
 | `mrfx backup E:\backups\mrfx.zip` | Copy the whole store into one zip with a checksum manifest (stop the server first) |
@@ -1040,20 +1021,16 @@ them in one place, grouped by where you'll hit them.
 ### Provider names / identification
 
 - **Names are identifying very slowly — the banner crawls up a few thousand a
-  day, or is stuck at a few thousand.** You're being served by the slow `api`
-  path, looking each provider up one at a time over the internet (rate-limited,
-  so a big book takes days and can appear stuck once NPPES throttles you). Point
-  the app at the local NPPES bulk file — see **"Make provider names fill in fast
-  (recommended)"** above. One local pass identifies the whole backlog in
-  minutes. Quick version: set `bulk_csv_path` in `config/mrfx.yaml` and restart
-  (that alone switches to the fast local path — `mode` can stay `api`; the
-  one-off `mrfx enrich --bulk` command does the same but needs the dashboard
-  stopped first). **If you
-  already set `bulk_csv_path` and it's still slow, the path is almost certainly
-  wrong** — a misspelled path or one pointing at a file that isn't there is
-  silently un-usable, so the app falls back to the API. Check the `mrfx serve`
-  window: it now logs a warning naming the missing file. Fix the path (mind the
-  Windows quotes/slashes) and restart.
+  day, or is stuck at a few thousand.** That means the app is looking providers
+  up one at a time over the internet instead of using the local NPPES file it
+  normally downloads by itself (see **"Provider names fill in automatically"**
+  above). Check the `mrfx serve` window for a line starting `NPPES:` — it says
+  why: no internet / CMS unreachable (it retries within the hour), a download
+  that stopped (it resumes), or `auto_download: false` in `config/mrfx.yaml`
+  (then point `bulk_csv_path` at a file you downloaded). If you set
+  `bulk_csv_path` yourself and it's still slow, the path is almost certainly
+  wrong — the window logs a warning naming the missing file. Fix the path (mind
+  the Windows quotes/slashes) and restart.
 - **The banner never reaches zero.** A handful of NPIs in payer files are
   deactivated or malformed and simply aren't in NPPES — those are marked
   "identified" (no name found) so the count settles just short of 100% instead

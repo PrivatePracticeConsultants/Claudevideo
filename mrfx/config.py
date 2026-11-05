@@ -33,6 +33,15 @@ class EnrichmentConfig(BaseModel):
     # .csv. One local pass resolves the whole book in minutes. Get it from
     # https://download.cms.gov/nppes/NPI_Files.html
     bulk_csv_path: Path | None = None
+    # Keep a current NPPES monthly file on hand AUTOMATICALLY: at most once a
+    # day the app checks https://download.cms.gov/nppes/NPI_Files.html and,
+    # when a newer month is out, downloads the full file (~1.1 GB) into
+    # nppes_dir in the background and uses it — names then fill in from one
+    # fast local pass, no API crawl and no config edits each month. Ignored
+    # when bulk_csv_path names a specific FILE (you manage it); a FOLDER there
+    # is used instead of nppes_dir. Set false to manage the file yourself.
+    auto_download: bool = True
+    nppes_dir: Path = Path("data/nppes")
     # NPPES API lookups run concurrently so names/states fill in quickly on a
     # large book instead of one-every-0.15s. Kept modest to stay polite; dial
     # down to 1 for strictly sequential, or up if NPPES tolerates it.
@@ -278,6 +287,9 @@ def _anchor_paths(cfg: MrfxConfig, root: Path) -> MrfxConfig:
     b = getattr(cfg.enrichment, "bulk_csv_path", None)
     if b is not None and not Path(b).is_absolute():
         cfg.enrichment.bulk_csv_path = root / b
+    nd = getattr(cfg.enrichment, "nppes_dir", None)
+    if nd is not None and not Path(nd).is_absolute():
+        cfg.enrichment.nppes_dir = root / nd
     lp = getattr(cfg.report_branding, "logo_path", None)
     if lp is not None and not Path(lp).is_absolute():
         cfg.report_branding.logo_path = root / lp

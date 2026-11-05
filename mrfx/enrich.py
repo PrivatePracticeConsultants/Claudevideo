@@ -30,6 +30,9 @@ class _EnrichFailure(Exception):
     """A transient NPPES failure for one NPI — leave it un-enriched to retry."""
 
 
+from .nppes_auto import bulk_source, ensure_current  # noqa: E402
+
+
 def _apply_nppes_result(store: Store, npi: str, data: dict) -> None:
     """Persist one NPPES response. Raises _EnrichFailure for a transient/error
     body so the NPI is left un-enriched (never poisoned as permanently dead)."""
@@ -600,7 +603,7 @@ def _write_nppes_parquet(cfg: MrfxConfig, store: Store, pqp: Path,
     total = 0
     writer = pq.ParquetWriter(str(tmp), schema, compression="zstd")
     try:
-        with _open_bulk_text(src or cfg.enrichment.bulk_csv_path) as f:
+        with _open_bulk_text(src or bulk_source(cfg)) as f:
             reader = csv.reader(f)
             header = next(reader, [])
             col = {k: header.index(v) for k, v in _BULK_COLS.items() if v in header}
@@ -708,6 +711,55 @@ def _enrich_from_parquet(store: Store, pqp: Path, wanted: set[str]) -> int:
     return len(matched)
 
 
+def _read_cache_stamp(store) -> str | None:
+    """Which NPPES file the lookup cache was built from (None if unknown) —
+    cosmetic: any problem reading it just means "no refresh this time"."""
+    try:
+        return _nppes_sig_path(store).read_text(encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _refresh_changed_from_parquet(store: Store, pqp: Path) -> int:
+    """After a NEW monthly NPPES file: re-save every already-identified NPI
+    whose details differ in the new file (name, entity type, taxonomies, city,
+    state, address, ZIP, phone) — one set-based join, not a re-lookup of the
+    whole book. Rows recorded as absent from the old file (no name) that the
+    new file now has are picked up the same way."""
+    pth = str(pqp).replace("'", "''")
+    changed = 0
+    with store.connect() as con:
+        cur = con.execute(
+            f"""
+            SELECT c.npi, c.org_name, c.entity_type, c.taxonomy_code, c.city, c.state,
+                   c.address, c.zip, c.phone, c.taxonomy_codes
+            FROM read_parquet('{pth}') c JOIN npi_directory d ON d.npi = c.npi
+            WHERE d.org_name IS DISTINCT FROM c.org_name
+               OR d.entity_type IS DISTINCT FROM c.entity_type
+               OR d.taxonomy_code IS DISTINCT FROM c.taxonomy_code
+               OR d.taxonomy_codes IS DISTINCT FROM c.taxonomy_codes
+               OR d.city IS DISTINCT FROM c.city
+               OR d.state IS DISTINCT FROM c.state
+               OR d.address IS DISTINCT FROM c.address
+               OR d.zip IS DISTINCT FROM nullif(left(coalesce(c.zip, ''), 5), '')
+               OR d.phone IS DISTINCT FROM c.phone
+            """)
+        while True:
+            rows = cur.fetchmany(5000)
+            if not rows:
+                break
+            store.save_npis_bulk([{
+                "npi": r[0], "org_name": r[1], "entity_type": r[2], "taxonomy_code": r[3],
+                "city": r[4], "state": r[5], "address": r[6], "zip": r[7], "phone": r[8],
+                "taxonomy_codes": r[9]} for r in rows])
+            changed += len(rows)
+    if changed:
+        _mark_dirty()
+        log.info("NPPES: new monthly file — refreshed %d already-identified providers "
+                 "whose name, specialty or address changed", changed)
+    return changed
+
+
 def enrich_via_bulk(cfg: MrfxConfig, store: Store,
                     stop: threading.Event | None = None) -> int:
     """Fill every un-enriched NPI the NPPES bulk file covers. On first use it
@@ -719,7 +771,7 @@ def enrich_via_bulk(cfg: MrfxConfig, store: Store,
     entirely when the only remaining un-enriched NPIs are ones already proven
     absent from this (unchanged) file."""
     global _bulk_sig, _bulk_read_failures
-    path = cfg.enrichment.bulk_csv_path
+    path = bulk_source(cfg)
     if not path or not Path(path).exists():
         # don't claim mode=bulk — this also runs for an auto-promoted api-mode
         # config whose file vanished between the presence check and here (TOCTOU)
@@ -739,7 +791,18 @@ def enrich_via_bulk(cfg: MrfxConfig, store: Store,
 
     # FAST PATH: resolve against a one-time compact parquet of the whole file.
     # Built on the first call (one pass), then every lookup is sub-second.
+    prev_stamp = _read_cache_stamp(store)
     cache = _ensure_nppes_cache(cfg, store, sig, stop)
+    if cache is not None and prev_stamp is not None:
+        now_stamp = _read_cache_stamp(store) or prev_stamp
+        if now_stamp != prev_stamp and (stop is None or not stop.is_set()):
+            # a NEW NPPES file (next month): providers already identified may
+            # have changed name, specialty or address — refresh those too
+            try:
+                _refresh_changed_from_parquet(store, cache)
+            except Exception as e:  # noqa: BLE001 — cosmetic tier
+                log.warning("NPPES: refreshing changed provider details failed (%s) — "
+                            "new providers still resolve normally", e)
 
     def _paged(cursor: str):
         """Yield keyset-paged batches of un-enriched NPIs, yielding to any
@@ -891,7 +954,7 @@ _WARNED_BULK_PATH_MISSING = False
 
 def _bulk_file_ready(cfg: MrfxConfig) -> bool:
     """True when a usable local NPPES bulk file is configured and on disk."""
-    p = cfg.enrichment.bulk_csv_path
+    p = bulk_source(cfg)
     try:
         return bool(p) and Path(p).exists()
     except OSError:
@@ -925,11 +988,15 @@ def run_enrichment(cfg: MrfxConfig, store: Store, stop: threading.Event | None =
     mode = cfg.enrichment.mode
     if mode == "off":
         return 0
+    # keep this month's NPPES file on hand (auto_download; at most one check a
+    # day, a download only when CMS has published a newer month). Never raises.
+    ensure_current(cfg, stop)
     use_bulk = use_bulk_enrichment(cfg)
     if mode == "api" and use_bulk:
         log.info("enrichment: a local NPPES bulk file is configured — using it "
                  "(one fast local pass) instead of the rate-limited API")
-    elif mode == "api" and cfg.enrichment.bulk_csv_path and not _WARNED_BULK_PATH_MISSING:
+    elif mode == "api" and cfg.enrichment.bulk_csv_path and not _WARNED_BULK_PATH_MISSING \
+            and not Path(cfg.enrichment.bulk_csv_path).is_dir():
         # they configured a bulk file but it isn't on disk — they meant to use
         # it; the API path (slow, rate-limited) is running only as a fallback.
         _WARNED_BULK_PATH_MISSING = True
