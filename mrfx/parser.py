@@ -140,11 +140,24 @@ def clean_rate(v) -> float | None:
         return None
 
 
+_NON_DIGIT_RE = re.compile(r"\D")
+
+
 def clean_digits(v) -> str:
-    """Identifier (NPI / EIN) as int, float, or dirty string -> digits only."""
+    """Identifier (NPI / EIN) as int, float, or dirty string -> digits only.
+
+    Called for every NPI and TIN of every emitted provider group (~1.8M
+    times for a 13M-row file), so the already-clean shapes skip the regex:
+    a non-negative int's str() IS its digits, and an ASCII-digit string is
+    returned as is. (isascii() matters: str.isdigit() also accepts e.g.
+    superscript digits, which the \\D regex would strip.)"""
+    if type(v) is int and v >= 0:
+        return str(v)
+    if type(v) is str and v.isascii() and v.isdigit():
+        return v
     if isinstance(v, float) and v.is_integer():
         v = int(v)
-    return re.sub(r"\D", "", str(v))
+    return _NON_DIGIT_RE.sub("", str(v))
 
 
 def clean_ref_id(v) -> int | None:
