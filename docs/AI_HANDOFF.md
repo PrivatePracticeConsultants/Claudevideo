@@ -434,6 +434,14 @@ retry button reachable.
   a row-dense file's time). What remains per chunk is numpy over every
   byte — ~9-10 s/GB on string-dense files; the next step change would need
   a compiled kernel (e.g. an optional numba scanner), not more numpy.
+- ROW VOLUME, not bytes, bounds some payers. A real Aetna-generated file
+  (1.54 GB gz / 20.4 GB JSON) yields 590,311,124 PT/OT/SLP rows across
+  1.92M distinct NPIs — every specialty that bills a 97xxx code, fanned out
+  over provider groups. The scan finished in minutes; the remaining ~25 min
+  was producing/writing rows (~360k rows/s; peak RSS 2.18 GB = that file's
+  kept reference table + write buffers). For such books `therapy_only_ingest`
+  (needs the NPPES cache) is the lever: it drops non-therapist NPIs at parse
+  time, before the row is ever built.
 - Downloads: the content hash carries across reconnects (it used to re-read
   the whole .part on every resume); gzip-encoded bodies are stored as sent
   (decoding them corrupted Range resumes). Companion reference files and
