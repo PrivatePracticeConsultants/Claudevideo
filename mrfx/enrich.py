@@ -937,8 +937,11 @@ def run_enrichment(cfg: MrfxConfig, store: Store, stop: threading.Event | None =
                     "found — falling back to the slow NPPES API. Fix the path to "
                     "identify the whole book in one local pass.",
                     cfg.enrichment.bulk_csv_path)
+    # on_progress only when asked for: keeps the plain 3-argument call shape
+    # (serve's loop, and anything substituting enrich_via_api) unchanged
+    api_kw = {"on_progress": on_progress} if on_progress is not None else {}
     done = (enrich_via_bulk(cfg, store, stop) if use_bulk
-            else enrich_via_api(cfg, store, stop, on_progress))
+            else enrich_via_api(cfg, store, stop, **api_kw))
     # AUTO-PROMOTED bulk (mode is api; we chose bulk only because a file is
     # present): if that bulk pass couldn't finish the book — a corrupt/truncated
     # file whose read-failure circuit breaker tripped, or a partial/weekly file
@@ -954,7 +957,7 @@ def run_enrichment(cfg: MrfxConfig, store: Store, stop: threading.Event | None =
             and store.unenriched_npis(limit=1)):
         log.info("bulk enrichment left NPIs unresolved (missing/partial NPPES "
                  "file) — finishing the rest via the NPPES API")
-        done += enrich_via_api(cfg, store, stop, on_progress)
+        done += enrich_via_api(cfg, store, stop, **api_kw)
     # tin_directory materializes NPPES names/states/cities — without a rebuild,
     # geographic benchmarks (state/city joins) silently run against NULLs. The
     # dirty flag (set by the save paths) means this rebuilds iff there are names

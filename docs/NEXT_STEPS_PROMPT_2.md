@@ -4,6 +4,32 @@
 round 1 closed. This is the round-2 plan. Copy everything below the line into
 a fresh session on this repo.
 
+> **STATUS (round 2 executed, Nov 2026).** What it closed, with numbers —
+> details in the commits and AI_HANDOFF Step 8:
+> - P0.1 `tests/mrfx/test_known_answer.py`: hand-computed files through ingest
+>   -> rollups -> API -> CSV/ZIP. Found + fixed: the Code comparison page pooled
+>   months ($40 May + $42 June shown as "$41", NPIs counted per month) — now
+>   newest file per contract, and its export matches; exports were not
+>   reproducible (any_value source file) — min() everywhere.
+> - P0.2 independent Arrow+Python recount of 12 real files / 32M rows:
+>   1,411,001 TIN groups, 0 differences; NPI rows 23.4M == 23.4M.
+> - P0.3 month contract written down and pinned (explorer = all months with a
+>   Month column; code view/reports = newest per contract).
+> - P0.4/P0.5 export == screen at all grains; SSN-pattern TINs masked in every
+>   displayed field and exported file (`unit_id`/`website_tins` stay raw as
+>   machine keys, by design).
+> - P1 on a synthetic 306M-row store: NPI search went from out-of-memory to
+>   0.6-1.2 s; removals 1,441 s -> 165 s (scoped directory); summary 11.2 ->
+>   5.2 GB; big-store guard for NPI/entity views; RAM-aware auto workers. Full
+>   rebuild still 65 min (C1, design in Step 8). P1.5 QA fold: not done.
+> - P2 Windows: NOT RUN — no Windows machine. Code review only (cleanup in a
+>   `finally` could raise on an AV lock — fixed + test). HOW_TO_RUN.md Part 4 is
+>   the user's first-run checklist.
+> - P3: CLI NPPES progress + Ctrl-C (done), fair retry scheduling (done),
+>   expired-link message names its index (done), cancel in-flight parse (open).
+> - P4: AI_HANDOFF Step 8 reconciled; `pytest -m quick` exists; fastscan/parser
+>   simplification NOT attempted (would need before/after fastcheck runs).
+
 ---
 
 You are picking up MRF Explorer (`mrfx/`). Read `CLAUDE.md`, then

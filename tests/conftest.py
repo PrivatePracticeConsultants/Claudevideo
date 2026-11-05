@@ -30,3 +30,19 @@ def cfg(tmp_path) -> Config:
             "paths": {"raw_dir": str(tmp_path / "raw"), "out_dir": str(tmp_path / "out")},
         }
     )
+
+
+# `pytest -m quick`: everything except the tests listed in slow_tests.txt
+# (measured >= 0.8 s each). The default `pytest tests/` still runs them all.
+_SLOW = {line.strip() for line in (Path(__file__).parent / "slow_tests.txt").read_text().splitlines()
+         if line.strip() and not line.startswith("#")}
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "quick: fast inner-loop subset (see tests/slow_tests.txt)")
+
+
+def pytest_collection_modifyitems(config, items):
+    for item in items:
+        if item.nodeid not in _SLOW:
+            item.add_marker(pytest.mark.quick)

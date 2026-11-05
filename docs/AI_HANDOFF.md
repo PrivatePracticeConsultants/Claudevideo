@@ -532,7 +532,14 @@ retry button reachable.
 
 ## Step 7 — Test and verify like the history did
 
-- `.venv/bin/python -m pytest tests/ -q` — the suite (167+ tests) runs real
+- `.venv/bin/python -m pytest tests/ -q -m quick` — the ~3-min inner loop
+  (503 of 670 tests; the >= 0.8 s ones are listed in `tests/slow_tests.txt`).
+  Run the full suite before every commit that touches numbers.
+- `tests/mrfx/test_known_answer.py` — the hand-computed end-to-end answer
+  check (ingest -> rollups -> API -> CSV/ZIP, masking, month rules). If a
+  change moves one of its numbers, the change is wrong or the rule changed —
+  say which in the commit.
+- `.venv/bin/python -m pytest tests/ -q` — the suite (670 tests) runs real
   end-to-end drains against local HTTP servers, including parallel mode,
   kill-recovery semantics (crash-flip of stuck files/urls is tested
   directly), the forget HTTP flow, dedup, guards, and messy-file parser cases
@@ -597,10 +604,14 @@ not yet built — pick these up before adding features):
   fresh link resumes it, but there is no auto-re-expand of the parent TOC on a
   child 403, no re-expand action on a 'done' TOC row, and revive-on-re-add
   does not update a child row's stored URL. A wall of 403s after a multi-hour
-  pause on mrf.bcbs.com/Anthem still requires re-pasting links.
-- No cancel for in-flight downloads/parses (only queued/failed/oversize rows
-  have actions); a wrong 22 GB paste must run its course or the server be
-  restarted.
+  pause on mrf.bcbs.com/Anthem still requires re-pasting links — since round 2
+  each such row's error names the exact index URL to paste again.
+- No cancel for an in-flight PARSE ("Stop downloads" covers downloads); a
+  wrong 22 GB paste must finish parsing or the server be restarted. Round 2
+  looked at it: the pooled path could use the worker's progress callback (a
+  sentinel file it already polls near), but with ONE worker (the default on
+  8 GB machines since the RAM-aware auto count) the parse runs in-process,
+  which needs its own hook plus a Files-tab button — left for a focused change.
 - Download slot starvation is bounded by a STALL DEADLINE, not just retries.
   `download_retries` resets on ANY byte progress, so a flaky CDN that
   dribbles/truncates bytes could once hold one of the few (2-4) downloader slots
@@ -628,11 +639,10 @@ not yet built — pick these up before adding features):
   refusal of a range-ignored 200 is BOUNDED (`_KEEP_200_MAX_REFUSALS`): a server
   that NEVER supports Range only ever sends 200, so after a few refusals we
   accept it and restart from 0 — otherwise such a file could never complete
-  (`test_no_range_server_completes_after_bounded_200_refusals`). Still open: no
-  fair scheduling —
-  `_claim_next` is plain `ORDER BY id`, so a cluster of flaky low-id rows is
-  re-tried before fresh files; deprioritizing rows that have already burned
-  connections would let good files jump the queue.
+  (`test_no_range_server_completes_after_bounded_200_refusals`). Fair
+  scheduling FIXED in round 2: `url_queue.retries` counts bulk "retry failed"
+  rounds and `_claim_next` orders by (retries, id), so re-queued dead/flaky
+  links wait behind fresh files (`test_bulk_retried_rows_wait_behind_fresh_files`).
 - Orphaned .part files: skipping a row whose download had started leaves its
   .part in data/downloads forever (no sweep ties .parts to skipped rows).
 - The Files tab's actionable child window is the newest 500 rows; oversize
@@ -657,31 +667,46 @@ not yet built — pick these up before adding features):
 - Auto-spill relocates rollup scratch off an HDD only on Windows WITH a roomy
   SSD (PowerShell Get-PhysicalDisk probe). On an all-HDD box the rollup and the
   parser reads contend on one spindle — SLOW during a rebuild, not a stall.
-- Full-store scale (300M+ rate rows) — TIME, not correctness or memory. Two
-  paths are O(partitions × total_rows) because the hash-partition predicate is
-  not pushed into the scan, so every slice re-reads the whole table:
-  - **C1 — a FULL rollup rebuild** (`rebuild_rollups()` / `rollup_needs_full`
-    drift / a schema migration) re-aggregates all rows per partition. At ~300M
-    rows this is hours, not minutes. It is NOT hit on the normal grind: new
-    files take the payer-scoped incremental path (`update_rollups_incremental`),
-    whose per-slice memory and time are bounded by the SLICE, invariant to total
-    store size. C1 only fires on an explicit rebuild, a >25%-of-TINs drift, or a
-    version bump — all rare and all logged. Memory stays capped the whole time
-    (the OOM ladder subdivides 1→64); it is slow, never a crash. (The clustering
-    ORDER BY adds a bounded, spillable sort per slice — modest extra wall-clock
-    on this already-slow path, and it makes every subsequent dashboard query
-    prune, so it pays for itself many times over.)
-  - **C2 — `forget` / a removal** keeps the rate spine payer-scoped and fast but
-    rebuilds the tin_directory in FULL, because a removed file can change which
-    practices are shared across the survivors (a directory row is correct only
-    against the whole surviving store). At 300M rows that directory rebuild is a
-    long operation (tens of minutes to hours), logged honestly at start
-    ("refreshing the full name directory"). Removals are rare by design. The
-    scoped-forget fix (recompute only the directory rows for TINs the removed
-    file actually touched, then re-check just those for lost sharing) is designed
-    but unbuilt — build it if removals become routine at book scale.
-  Both are graceful (bounded memory, honest logs, correct results); the cost is
-  wall-clock on operations that don't happen during a normal ingest grind.
+- Full-store scale — MEASURED in round 2 on a synthetic 306M-row store built
+  through the real part-adoption API (15 payers x 3 months, 4 cores, 6 GB
+  DuckDB budget, 15 GB RAM box; scratchpad `scale/` scripts). The synthetic
+  data is PESSIMISTIC for rollups: ~1 raw row per TIN group (real files
+  collapse ~23:1), so rates_by_tin is nearly as big as raw.
+
+  | operation | wall-clock | peak RSS |
+  |---|---|---|
+  | full `rebuild_rollups()` (C1) | 65 min | 6.6 GB |
+  | incremental after a new 5M-row file | 168 s | 6.4 GB |
+  | re-ingest of a done file, OLD code (full directory) | 1,441 s | — |
+  | same re-ingest, round-2 scoped directory | 165 s | 6.4 GB |
+  | `forget` + its incremental | 3.5 s + 124 s | 6.5 GB |
+  | NPI search `/api/rates?grain=npi&q=<NPI>` OLD | OOM (temp disk) at 30 s | — |
+  | same, round 2 (single-column pushdown) | 1.2 s cold / 0.6 s warm | 0.8 GB |
+  | `/api/summary` OLD / round 2 | 38 s, 11.2 GB / 21 s, 5.2 GB | |
+  | `/api/stats` cold (cached 60 s after) | 35-42 s | 4.7 GB |
+  | `/api/entity/npi/<x>` | 4.0 s cold / 1.3 s warm | |
+  | `/api/code/97110` (TIN grain) | 5.9 s | |
+  | TIN view, payer+code filter | 0.26 s | |
+
+  - **C1 — a FULL rollup rebuild** is still O(slices x total rows): ~103
+    hash slices, each re-reading the whole store (the hash predicate can't
+    prune parquet). 65 min at 306M rows on 4 cores. Only fires on an explicit
+    rebuild, a schema-version bump, or `rollup_needs_full` — round 2 did NOT
+    bump ROLLUP_SCHEMA_VERSION. Fix design if it matters: one pass that
+    writes the rows hash-partitioned to temp parquet (COPY … PARTITION_BY),
+    then aggregate each partition file — O(2 x rows) instead of O(slices x rows).
+  - **C2 — removal** is FIXED in round 2: the removed part's TINs are recorded
+    (`rollup_pending_tins`) and only those directory rows recompute (each
+    directory row depends only on its own TIN's rows). An incremental slice
+    still scans the whole store once per directory slice for `tin_value IN
+    delta`, because parts aren't sorted by TIN (~8 s/slice at 306M); sorting
+    parts by (payer, tin_value) at write time would let stats prune it.
+  - NPI and entity views are live aggregations: on stores over
+    `api.NARROW_REQUIRED_ROWS` (40M) they need a full NPI/TIN search (NPI view)
+    or payer AND code (both), else a 422 says what to type. Measured: payer-
+    only/code-only NPI view 30-51 s; name search in the NPI view, entity
+    code-only and entity TIN search ran out of temp disk. The TIN view (the
+    default) and the NPI profile page are unaffected.
 
 
 - Renderer click-through handles single-click gates ("View Plan List");
