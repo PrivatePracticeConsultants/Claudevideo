@@ -31,19 +31,29 @@ Everything stays on your computer. Nothing is uploaded anywhere.
 2. Right-click it → **Extract All…** → **Extract**.
 3. Move the folder it makes somewhere easy to find, for example your
    **Documents** folder. Don't rename anything inside it.
+4. **Important:** inside that folder is ONE more folder called
+   **`Claudevideo`**. That inner `Claudevideo` folder is the program — it
+   holds `requirements.txt`, `HOW_TO_RUN.md` and the
+   `Start MRF Explorer (auto-restart).bat` file. Every step below happens
+   **inside `Claudevideo`** (for example `E:\mrfx_project\Claudevideo`).
 
 > Pick a drive with plenty of free space. The downloads are big (a single
 > insurer file can be several gigabytes) even though the finished database is
 > small. 100 GB free is comfortable.
 
-### Step 3. Open a command window in that folder
+### Step 3. Open a command window in the `Claudevideo` folder
 
-- **Windows 11:** open the project folder, right-click an empty spot inside
-  it → **Open in Terminal**.
-- **Windows 10:** open the project folder, hold **Shift** and right-click an
-  empty spot → **Open PowerShell window here**.
+- **Windows 11:** open the **`Claudevideo`** folder (the inner one from
+  Step 2), right-click an empty spot inside it → **Open in Terminal**.
+- **Windows 10:** open the **`Claudevideo`** folder, hold **Shift** and
+  right-click an empty spot → **Open PowerShell window here**.
 - **Mac:** open the **Terminal** app, type `cd ` (with a space after it), drag
-  the project folder onto the Terminal window, and press **Enter**.
+  the **`Claudevideo`** folder onto the Terminal window, and press **Enter**.
+
+Check you're in the right place by pasting `dir requirements.txt` (Mac:
+`ls requirements.txt`) and pressing Enter: it must list the file. If it says
+"cannot find" / "No such file", you're one folder too high — type
+`cd Claudevideo`, press Enter, and check again.
 
 A window with a blinking cursor opens. You'll paste commands into it.
 (To paste: right-click in the window on Windows, or Cmd-V on a Mac. Press
@@ -90,6 +100,13 @@ normal. It's done when the blinking cursor comes back.
   ```
   Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
   ```
+- If you see **"Could not open requirements file … No such file or
+  directory"**, the window is in the outer folder, not `Claudevideo` — type
+  `cd Claudevideo`, press Enter, and start Step 4 again from the first line.
+  (The ".venv" folder the first try made in the outer folder is harmless;
+  delete it whenever you like.)
+- A yellow **"A new release of pip is available"** line is just a notice,
+  not an error — ignore it.
 - If you see **"Failed to build installable wheels"**, your Python is too new
   or too old. Install 3.13 from python.org, delete the `.venv` folder inside
   the project, and start Step 4 again.
