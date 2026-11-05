@@ -898,6 +898,114 @@ def run_in_network_parse(cfg: MrfxConfig, make_parser, open_fn) -> tuple["InNetw
         return parser, parser.parse(stream)
 
 
+def _cited_ref_ids(item: dict) -> set[int]:
+    out: set[int] = set()
+    for grp in as_list(item.get("negotiated_rates")):
+        if not isinstance(grp, dict):
+            continue
+        for x in as_list(grp.get("provider_references")):
+            if isinstance(x, (dict, list)):
+                continue
+            rid = clean_ref_id(x)
+            if rid is not None:
+                out.add(rid)
+    return out
+
+
+def _is_target_item(item: dict, code_set) -> bool:
+    """skim_needed_ref_ids' notion of a target item (string/number code)."""
+    code = item.get("billing_code")
+    if not isinstance(code, (str, int, float)) or isinstance(code, bool):
+        return False
+    return code_set is None or clean_code(code) in code_set
+
+
+def run_big_file_fast(cfg: MrfxConfig, parser: "InNetworkParser", open_fn, spool_path,
+                      on_pass=None) -> tuple[ParseResult, int]:
+    """Big-file ingest in ONE full read (plus, if needed, a short read of the
+    reference table), replacing skim-then-extract's two full reads.
+
+    Pass 1 streams the whole file once: non-target members are skipped as raw
+    bytes, the QA side effects of skipping are counted into `parser`, the
+    TARGET in_network members are appended verbatim to an on-disk spool (they
+    are the only bytes needed again), and the reference ids they cite are
+    collected. References that come AFTER in_network are kept right there
+    (the cited set is complete by then). References that came BEFORE it were
+    skipped, so pass 2 re-reads the file only until provider_references
+    closes and stops — it never re-scans in_network. Finally the spooled
+    items are replayed through the normal _handle_item with every reference
+    resolved. Memory: the kept references + one item at a time; the spool
+    is on disk (`spool_path`, deleted here, swept as an orphan if killed).
+
+    Returns (result, target_items). target_items == 0 means the file holds
+    none of the target codes. Raises FastScanUnsupported before doing any
+    work if the file's shape can't be vouched for (caller falls back)."""
+    import struct
+
+    from .fastscan import RefPolicy, decode_member, iter_members
+
+    cited: set[int] = set()
+    parser._keep_ref_ids = cited          # _add_ref filters to the cited set
+    policy = RefPolicy(active=False, ids=cited)
+    refs_before = False
+    target_items = 0
+    counts: dict = {}
+    spool_path = Path(spool_path)
+    try:
+        with open(spool_path, "wb") as spool:
+            with open_fn() as stream:
+                for array, data in iter_members(
+                        stream, parser._want_item, None, on_header=parser._set_header,
+                        counts=counts, target_codes=parser.code_set, ref_policy=policy,
+                        on_type_other=parser._count_type_other):
+                    if data is None:
+                        if array == "provider_references" and not policy.active:
+                            refs_before = True
+                        elif array == "in_network":
+                            policy.active = True  # later references: keep cited
+                        continue
+                    if array == "in_network":
+                        item = decode_member(data)
+                        if _is_target_item(item, parser.code_set):
+                            target_items += 1
+                        cited |= _cited_ref_ids(item)
+                        spool.write(struct.pack("<Q", len(data)))
+                        spool.write(data)
+                    else:
+                        parser._add_ref(decode_member(data))
+        if refs_before and cited:
+            if on_pass is not None:
+                on_pass(1)
+            with open_fn() as stream:
+                for array, data in iter_members(
+                        stream, lambda events, final: False, None,
+                        target_codes=parser.code_set,
+                        ref_policy=RefPolicy(active=True, ids=cited)):
+                    if array == "provider_references":
+                        if data is None:
+                            break         # the reference table is done: stop reading
+                        parser._add_ref(decode_member(data))
+        parser._refs_complete = True
+        with open(spool_path, "rb") as spool:
+            while True:
+                head = spool.read(8)
+                if not head:
+                    break
+                (n,) = struct.unpack("<Q", head)
+                parser._handle_item(decode_member(spool.read(n)))
+        parser.result.items_seen = counts.get("in_network", 0)
+        return parser._finish(), target_items
+    finally:
+        try:
+            spool_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def fast_big_file_available(cfg: MrfxConfig) -> bool:
+    return _fast_scan_unsupported(cfg) is not None
+
+
 def run_skim(cfg: MrfxConfig, open_fn) -> tuple[set[int], int]:
     """Pass 1 of a big file (see skim_needed_ref_ids), fast path first."""
     FastScanUnsupported = _fast_scan_unsupported(cfg)

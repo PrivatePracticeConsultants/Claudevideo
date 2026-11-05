@@ -682,3 +682,182 @@ def test_real_vendor_shapes_match_classic_and_golden(cfg, monkeypatch, name):
     assert n_f == n_c == matched and ids_f <= ids_c
     got = InNetworkParser(cfg, f"{name}.json", keep_ref_ids=ids_f).parse_fast(io.BytesIO(data))
     assert _row_digest(got.rows) == want_digest
+
+
+# ---------------------------------------------------------------------------
+# big files: ONE full read + a short read of the reference table
+# ---------------------------------------------------------------------------
+
+class _Rows(list):
+    """A sink that keeps rows as dicts (production sinks see the same
+    batches; sink mode is where the late-header restamp happens)."""
+
+    def __call__(self, batch):
+        self.extend(batch)
+
+
+def _classic_two_pass(cfg, data, refs=None):
+    keep, n = skim_needed_ref_ids(cfg, io.BytesIO(data))
+    rows = _Rows()
+    p = InNetworkParser(cfg, "big_2026-05.json", external_refs=refs, keep_ref_ids=keep, sink=rows)
+    r = p.parse(io.BytesIO(data))
+    r.rows = rows
+    return r, n
+
+
+class _CountingOpen:
+    """open_fn for run_big_file_fast that records bytes read per open."""
+
+    def __init__(self, data: bytes):
+        self.data = data
+        self.reads: list[int] = []
+
+    def __call__(self):
+        import contextlib
+
+        outer = self
+        outer.reads.append(0)
+
+        class S(io.BytesIO):
+            def read(self, n=-1):
+                b = super().read(n)
+                outer.reads[-1] += len(b)
+                return b
+        return contextlib.nullcontext(S(outer.data))
+
+
+def _big_fast(cfg, data, tmp_path, refs=None):
+    from mrfx.parser import run_big_file_fast
+
+    rows = _Rows()
+    p = InNetworkParser(cfg, "big_2026-05.json", external_refs=refs, sink=rows)
+    opener = _CountingOpen(data)
+    spool = tmp_path / ".k.1.spool.tmp"
+    r, n = run_big_file_fast(cfg, p, opener, spool)
+    assert not spool.exists(), "spool must be deleted"
+    r.rows = rows
+    return r, n, opener.reads
+
+
+def _layouts():
+    refs = [{"provider_group_id": i, "provider_groups": [
+        {"npi": [1500000000 + i, 1600000000 + i], "tin": {"type": "ein", "value": f"8{i:08d}"}}]}
+        for i in range(40)]
+    items = [_item("97110", refs=[1, 2, 39]), _item("99213", refs=list(range(30))),
+             _item("97140", groups=G), _item("97112", refs=[5, 77]),
+             {"billing_code_type": "MS-DRG", "billing_code": "470", "negotiated_rates": []},
+             _item("97530", refs=7)]
+    hdr = {"reporting_entity_name": "Big Co", "version": "1.0", "last_updated_on": "2026-05-01"}
+    return {
+        "refs_first": {**hdr, "provider_references": refs, "in_network": items},
+        "refs_after": {**hdr, "in_network": items, "provider_references": refs},
+        "header_last": {"provider_references": refs, "in_network": items, **hdr},
+        "no_refs": {**hdr, "in_network": [_item("97110", groups=G), _item("99213", groups=G)]},
+        "no_targets": {**hdr, "provider_references": refs, "in_network": [_item("99213", refs=[1])]},
+    }
+
+
+@pytest.mark.parametrize("layout", sorted(_layouts()))
+def test_big_file_single_read_matches_classic_two_pass(cfg, tmp_path, monkeypatch, layout):
+    data = json.dumps(_layouts()[layout]).encode()
+    want, want_n = _classic_two_pass(cfg, data)
+    for chunk in (7, 4096, 1 << 20):
+        monkeypatch.setattr(fastscan, "CHUNK", chunk)
+        got, n, reads = _big_fast(cfg, data, tmp_path)
+        assert n == want_n
+        assert sorted(map(_key, got.rows)) == sorted(map(_key, want.rows)), (layout, chunk)
+        assert got.qa.to_dict() == want.qa.to_dict(), (layout, chunk)
+        assert (got.items_seen, got.items_matched, got.ref_groups_skipped) == (
+            want.items_seen, want.items_matched, want.ref_groups_skipped)
+        assert (got.payer, got.schema_version, got.last_updated_on) == (
+            want.payer, want.schema_version, want.last_updated_on)
+        # ONE full read; a second, SHORT read only when references came first
+        assert reads[0] == len(data)
+        needs_refs = layout in ("refs_first", "header_last")
+        assert len(reads) == (2 if needs_refs else 1), reads
+        if needs_refs and chunk * 4 < len(data):
+            # pass 2 stopped once the reference table closed — it never
+            # re-read in_network (at most one chunk past where it starts)
+            assert reads[1] <= data.index(b'"in_network"') + chunk, reads
+
+
+def test_big_file_single_read_on_real_vendor_shapes(cfg, tmp_path, monkeypatch):
+    import gzip
+
+    for name in sorted(REAL):
+        data = gzip.decompress((FIXTURES / "real" / f"{name}.json.gz").read_bytes())
+        want, want_n = _classic_two_pass(cfg, data)
+        monkeypatch.setattr(fastscan, "CHUNK", 1 << 16)
+        got, n, reads = _big_fast(cfg, data, tmp_path)
+        assert n == want_n
+        assert got.qa.to_dict() == want.qa.to_dict(), name
+        assert _row_digest(got.rows) == _row_digest(want.rows), name
+        assert got.items_seen == want.items_seen and got.payer == want.payer
+
+
+def test_big_file_uses_companion_references(cfg, tmp_path):
+    """References from a standalone companion file (external_refs) resolve
+    the same way on the single-read path."""
+    ext = {9: [("123456789", "ein", ("1234567890",))]}
+    data = json.dumps({"in_network": [_item("97110", refs=[9]), _item("97140", refs=[10])]}).encode()
+    want, _ = _classic_two_pass(cfg, data, refs=ext)
+    got, _, _ = _big_fast(cfg, data, tmp_path, refs=ext)
+    assert sorted(map(_key, got.rows)) == sorted(map(_key, want.rows)) and got.qa.rows == 1
+    assert got.ref_groups_skipped == want.ref_groups_skipped == 1
+
+
+def test_big_file_spool_is_removed_on_failure(cfg, tmp_path):
+    from mrfx.parser import run_big_file_fast
+
+    data = json.dumps({"in_network": [_item("97110", groups=G)] * 3}).encode()[:-20]
+    spool = tmp_path / ".k.1.spool.tmp"
+    with pytest.raises(ValueError):
+        run_big_file_fast(cfg, InNetworkParser(cfg, "t.json"), _CountingOpen(data), spool)
+    assert not spool.exists()
+
+
+def test_orphaned_spool_from_a_dead_process_is_swept(cfg):
+    from mrfx.store import Store
+
+    st = Store(cfg.store_dir)
+    dead = st.rates_dir / ".somefile.999999.spool.tmp"   # pid 999999: not alive
+    dead.write_bytes(b"x" * 100)
+    live = st.rates_dir / f".other.{__import__('os').getpid()}.spool.tmp"
+    live.write_bytes(b"y")
+    st._sweep_orphan_tmps()
+    assert not dead.exists() and live.exists()
+
+
+def test_prefetch_reader_errors_and_early_close():
+    """The background reader: an exception in read() (e.g. the orphaned-worker
+    SystemExit from the progress callback) surfaces in the consumer; closing
+    the generator early stops the thread."""
+    import threading
+
+    from mrfx.fastscan import _prefetch
+
+    class Boom(io.BytesIO):
+        def __init__(self):
+            super().__init__(b"x" * 10_000)
+            self.n = 0
+
+        def read(self, n=-1):
+            self.n += 1
+            if self.n == 3:
+                raise SystemExit("parent process died")
+            return super().read(n)
+
+    g = _prefetch(Boom(), 100)
+    with pytest.raises(SystemExit):
+        for _ in g:
+            pass
+    before = threading.active_count()
+    g2 = _prefetch(io.BytesIO(b"y" * 10_000_000), 1000)
+    next(g2)
+    g2.close()
+    import time
+    deadline = time.monotonic() + 5
+    while threading.active_count() > before and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert threading.active_count() <= before
+    assert b"".join(_prefetch(io.BytesIO(b"abc" * 1000), 7)) == b"abc" * 1000

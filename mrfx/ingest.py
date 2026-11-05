@@ -18,7 +18,9 @@ from pathlib import Path
 from .config import MrfxConfig
 from .parser import (
     InNetworkParser,
+    fast_big_file_available,
     parse_provider_reference_file,
+    run_big_file_fast,
     run_in_network_parse,
     run_skim,
 )
@@ -309,15 +311,21 @@ def get_parse_pool():
     return _PARSE_POOL
 
 
+def spool_path_for(part_tmp) -> Path:
+    """The big-file spool sits next to its part's .parquet.tmp with the SAME
+    key and pid, so the store's orphan sweep removes it after a crash."""
+    p = Path(part_tmp)
+    return p.with_name(p.name.removesuffix(".parquet.tmp") + ".spool.tmp")
+
+
 def _parse_worker(cfg: MrfxConfig, path_str: str, name: str, header_defaults: dict,
                   external_refs: dict, est: int, compressed_bytes: int,
                   tmp_out: str, progress_path: str) -> dict:
     """Runs in a child process. Returns a picklable summary; raises on failure
     (the parent marks the file failed)."""
-    import pyarrow.parquet as pq
 
     from .parser import batch_to_table
-    from .store import PARQUET_COMPRESSION, RATES_SCHEMA
+    from .store import PARQUET_COMPRESSION, RATES_SCHEMA, BackgroundParquetWriter
 
     path = Path(path_str)
     file_chunks = max(1, -(-max(compressed_bytes, 1) // CHUNK_COMPRESSED_BYTES))
@@ -354,14 +362,6 @@ def _parse_worker(cfg: MrfxConfig, path_str: str, name: str, header_defaults: di
         except OSError:
             pass  # progress is cosmetic
 
-    keep_ref_ids = None
-    if big:
-        keep_ref_ids, target_items = run_skim(
-            cfg, lambda: open_stream(path, progress_cb=report))
-        if target_items == 0:
-            return {"short_circuit": True, "chunks_total": chunks_total}
-        state["pass"] = 1
-
     rows_written = 0
     writer = None
 
@@ -371,19 +371,45 @@ def _parse_worker(cfg: MrfxConfig, path_str: str, name: str, header_defaults: di
             return
         table = batch_to_table(rows, RATES_SCHEMA)
         if writer is None:
-            writer = pq.ParquetWriter(tmp_out, RATES_SCHEMA, compression=PARQUET_COMPRESSION)
+            writer = BackgroundParquetWriter(tmp_out, RATES_SCHEMA, PARQUET_COMPRESSION)
         writer.write_table(table)
         rows_written += len(rows)
 
-    def make_parser() -> InNetworkParser:
+    def make_parser(keep_ref_ids=None) -> InNetworkParser:
         return InNetworkParser(
             cfg, source_file=name, external_refs=external_refs,
             sink=sink, header_defaults=header_defaults, keep_ref_ids=keep_ref_ids,
         )
 
+    def set_pass(i: int) -> None:
+        state["pass"] = i
+
     try:
-        _, result = run_in_network_parse(
-            cfg, make_parser, lambda: open_stream(path, progress_cb=report))
+        result = None
+        if big and fast_big_file_available(cfg):
+            # ONE full read + a short read of the reference table (see
+            # run_big_file_fast) instead of skim + extract's two full reads
+            from .fastscan import FastScanUnsupported
+            try:
+                result, target_items = run_big_file_fast(
+                    cfg, make_parser(), lambda: open_stream(path, progress_cb=report),
+                    spool_path_for(tmp_out), on_pass=set_pass)
+            except FastScanUnsupported as e:
+                log.info("%s: fast scan declined (%s) — classic two-pass", name, e)
+                state["pass"] = 0
+            else:
+                if target_items == 0:
+                    return {"short_circuit": True, "chunks_total": chunks_total}
+        if result is None:
+            keep_ref_ids = None
+            if big:
+                keep_ref_ids, target_items = run_skim(
+                    cfg, lambda: open_stream(path, progress_cb=report))
+                if target_items == 0:
+                    return {"short_circuit": True, "chunks_total": chunks_total}
+                state["pass"] = 1
+            _, result = run_in_network_parse(
+                cfg, lambda: make_parser(keep_ref_ids), lambda: open_stream(path, progress_cb=report))
     finally:
         if writer is not None:
             writer.close()
@@ -814,6 +840,7 @@ def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight
         est = pf.est_uncompressed_bytes or 0
         big = est >= LARGE_FILE_UNCOMPRESSED_BYTES
         keep_ref_ids = None
+        result = None
         if big:
             # progress spans two passes: pass 1 fills 0-50%, pass 2 fills 50-100%
             progress = _ProgressTracker(store, name, pf.compressed_bytes,
@@ -822,10 +849,27 @@ def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight
                      name, est / 1e9, progress.chunks_total)
             store.upsert_file(name, chunks_total=progress.chunks_total, progress=0.0)
             progress.set_pass(0)
-            keep_ref_ids, target_items = run_skim(
-                cfg, lambda: open_stream(path, progress_cb=progress.update))
-            log.info("%s: pass 1 done — %d target-code items, %d target-cited references",
-                     name, target_items, len(keep_ref_ids))
+            if fast_big_file_available(cfg):
+                # ONE full read + a short read of the reference table
+                # (run_big_file_fast) instead of skim + extract's two full reads
+                from .fastscan import FastScanUnsupported
+                try:
+                    with store.rates_part_writer(name) as writer:
+                        result, target_items = run_big_file_fast(
+                            cfg,
+                            InNetworkParser(cfg, source_file=name, external_refs=external_refs,
+                                            sink=writer.write_batch, header_defaults=header_defaults),
+                            lambda: open_stream(path, progress_cb=progress.update),
+                            spool_path_for(writer.tmp), on_pass=progress.set_pass)
+                except FastScanUnsupported as e:
+                    log.info("%s: fast scan declined (%s) — classic two-pass", name, e)
+                    result = None
+                    progress.set_pass(0)
+            if result is None:
+                keep_ref_ids, target_items = run_skim(
+                    cfg, lambda: open_stream(path, progress_cb=progress.update))
+                log.info("%s: pass 1 done — %d target-code items, %d target-cited references",
+                         name, target_items, len(keep_ref_ids))
             if target_items == 0:
                 # the scan IS the answer: none of the user's billing codes
                 # appear anywhere in this file, so the extraction pass would
@@ -843,20 +887,22 @@ def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight
                 _finish_file(cfg, path, ok=True)
                 log.info("%s: %s", name, msg)
                 return {"status": "done", "rows": 0, "payer": pf.payer, "note": msg}
-            progress.set_pass(1)
+            if result is None:
+                progress.set_pass(1)
         else:
             progress = None
 
-        with store.rates_part_writer(name) as writer:
-            _, result = run_in_network_parse(
-                cfg,
-                lambda: InNetworkParser(
-                    cfg, source_file=name, external_refs=external_refs,
-                    sink=writer.write_batch, header_defaults=header_defaults,
-                    keep_ref_ids=keep_ref_ids,
-                ),
-                lambda: open_stream(path, progress_cb=progress.update if progress else None),
-            )
+        if result is None:
+            with store.rates_part_writer(name) as writer:
+                _, result = run_in_network_parse(
+                    cfg,
+                    lambda: InNetworkParser(
+                        cfg, source_file=name, external_refs=external_refs,
+                        sink=writer.write_batch, header_defaults=header_defaults,
+                        keep_ref_ids=keep_ref_ids,
+                    ),
+                    lambda: open_stream(path, progress_cb=progress.update if progress else None),
+                )
         if progress is not None:
             progress.finish()
         store.upsert_file(

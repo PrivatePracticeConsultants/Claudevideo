@@ -254,3 +254,47 @@ def test_size_estimate_never_under_reads_a_high_ratio_file(tmp_path):
     bad = tmp_path / "bad.json.gz"
     bad.write_bytes(b"\x1f\x8b")
     assert _estimate_uncompressed(bad, 2) == 36
+
+
+def test_background_parquet_writer_writes_in_order_and_surfaces_errors(tmp_path):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from mrfx.store import BackgroundParquetWriter
+
+    schema = pa.schema([pa.field("x", pa.int64())])
+    w = BackgroundParquetWriter(tmp_path / "a.parquet", schema, "zstd")
+    for i in range(50):
+        w.write_table(pa.table({"x": list(range(i * 10, i * 10 + 10))}, schema=schema))
+    w.close()
+    w.close()  # idempotent
+    assert pq.read_table(tmp_path / "a.parquet").column("x").to_pylist() == list(range(500))
+
+    bad = BackgroundParquetWriter(tmp_path / "b.parquet", schema, "zstd")
+    bad.write_table(pa.table({"y": ["wrong schema"]}))   # fails inside the thread
+    with pytest.raises(Exception):
+        for _ in range(10):
+            bad.write_table(pa.table({"x": [1]}, schema=schema))
+        bad.close()
+
+
+def test_a_failed_write_fails_the_part_and_leaves_nothing_behind(cfg, store, monkeypatch):
+    """A disk-full style error raised by the writer thread must fail the
+    file exactly like a parse error: no part, no temp, files row failed."""
+    import mrfx.store as store_mod
+
+    real = store_mod.BackgroundParquetWriter.write_table
+    calls = {"n": 0}
+
+    def boom(self, table):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            self._err = OSError(28, "No space left on device")
+        return real(self, table)
+    monkeypatch.setattr(store_mod.BackgroundParquetWriter, "write_table", boom)
+    monkeypatch.setattr("mrfx.parser.InNetworkParser.BATCH_ROWS", 1)
+    p = cfg.inbox_dir / "big_2026-01.json"
+    p.write_text(json.dumps({"in_network": [_item("97110", groups=G)] * 20}))
+    res = ingest_file(cfg, store, p)
+    assert res["status"] == "failed" and "No space left" in res.get("error", "")
+    assert not list(store.rates_dir.glob("*.parquet")) and not list(store.rates_dir.glob(".*.tmp"))

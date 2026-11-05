@@ -45,9 +45,7 @@ _HEADER_RE = re.compile(rb'"(reporting_entity_name|version|last_updated_on)"\s*:
 _KEY_BEFORE_RE = re.compile(rb'"((?:[^"\\]|\\.)*)"\s*:\s*$')
 
 
-_STRUCT_LUT = np.zeros(256, dtype=np.int8)
-_STRUCT_LUT[[_LBRACE, _LBRACK]] = 1
-_STRUCT_LUT[[_RBRACE, _RBRACK]] = -1
+_EVENT_TBL = bytes(1 if c in (0x22, 0x7B, 0x7D, 0x5B, 0x5D) else 0 for c in range(256))
 
 
 def _has_backslash(buf: bytes) -> bool:
@@ -177,6 +175,91 @@ class _Member:
         self.peek = b""             # bytes seen so far while undecided
 
 
+def _ref_int(v):
+    """clean_ref_id (parser.py) — integral values only; kept here to avoid
+    an import cycle. Must stay identical."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return int(f) if f.is_integer() else None
+
+
+class RefPolicy:
+    """Which provider_references members to collect, as a mutable object so a
+    caller can switch collection ON mid-stream (references that come AFTER
+    in_network, once the cited ids are known). `fn`, when given, is the exact
+    per-member predicate; otherwise membership in `ids` (None = all)."""
+
+    def __init__(self, active: bool = True, ids: set | None = None, fn=None):
+        self.active = active
+        self.ids = ids
+        self.fn = fn
+
+    def __call__(self, raw) -> bool:
+        if self.fn is not None:
+            return bool(self.fn(raw))
+        if self.ids is None:
+            return True
+        rid = _ref_int(raw)
+        return rid is not None and rid in self.ids
+
+
+_PREFETCH_DEPTH = 2
+_LIT_RE: dict = {}
+_PREFETCH_MIN = 64 * 1024
+
+
+def _prefetch(stream, chunk_size: int):
+    """Chunks of `stream`, read by a background thread so decompression
+    (zlib releases the GIL) overlaps the numpy scan of the previous chunk.
+    At most _PREFETCH_DEPTH chunks wait in memory. Exceptions raised by the
+    reader (including the progress callback's SystemExit for an orphaned
+    worker) are re-raised in the consumer; closing the generator early (a
+    caller that stops reading) stops the thread."""
+    import queue
+    import threading
+
+    q: queue.Queue = queue.Queue(maxsize=_PREFETCH_DEPTH)
+    stop = threading.Event()
+    _END = object()
+
+    def reader():
+        try:
+            while not stop.is_set():
+                b = stream.read(chunk_size)
+                item = b if b else _END
+                while not stop.is_set():
+                    try:
+                        q.put(item, timeout=0.1)
+                        break
+                    except queue.Full:
+                        continue
+                if not b:
+                    return
+        except BaseException as e:  # noqa: BLE001 — handed to the consumer
+            while not stop.is_set():
+                try:
+                    q.put(("__error__", e), timeout=0.1)
+                    return
+                except queue.Full:
+                    continue
+
+    t = threading.Thread(target=reader, name="mrfx-prefetch", daemon=True)
+    t.start()
+    try:
+        while True:
+            item = q.get()
+            if item is _END:
+                return
+            if isinstance(item, tuple):
+                raise item[1]
+            yield item
+    finally:
+        stop.set()
+        t.join(timeout=30)
+
+
 def iter_members(
     stream,
     want_item: Callable[[list, bool], bool | None],
@@ -187,6 +270,7 @@ def iter_members(
     target_codes: set | None = None,
     ref_keep: set | None = None,
     on_type_other: Callable[[int], None] | None = None,
+    ref_policy: "RefPolicy | None" = None,
 ) -> Iterator[tuple[str, bytes | None]]:
     """Yield ('in_network' | 'provider_references', member_bytes) for every
     top-level member the predicates keep, and (array_name, None) when a
@@ -206,6 +290,27 @@ def iter_members(
     QA side effect bulk skips can have (billing_type_other) is reported via
     on_type_other(n). Everything else still goes through the predicates.
     """
+    if counts is None:
+        counts = {}
+    if chunk_size is None:
+        chunk_size = CHUNK  # read at call time so tests can shrink it
+    if ref_policy is None:
+        ref_policy = RefPolicy(active=want_ref is not None, ids=ref_keep, fn=want_ref)
+    policy = ref_policy
+    bulk = _Bulk(target_codes, policy)
+
+    # tiny chunks (tests) aren't worth a thread hand-off per chunk
+    chunks = (_prefetch(stream, chunk_size) if chunk_size >= _PREFETCH_MIN
+              else iter(lambda: stream.read(chunk_size), b""))
+    try:
+        yield from _scan(chunks, want_item, policy, on_header, counts, bulk, on_type_other)
+    finally:
+        close = getattr(chunks, "close", None)
+        if close is not None:
+            close()
+
+
+def _scan(chunks, want_item, policy, on_header, counts, bulk, on_type_other):
     depth = 0           # structural depth BEFORE the next byte
     in_str = False      # inside a string BEFORE the next byte
     esc_carry = 0       # trailing backslash run length from the previous chunk
@@ -216,14 +321,8 @@ def iter_members(
     seen_top = False
     doc_closed = False
     trailing_garbage = False
-    if counts is None:
-        counts = {}
-    if chunk_size is None:
-        chunk_size = CHUNK  # read at call time so tests can shrink it
-    bulk = _Bulk(target_codes, ref_keep)
-
     while True:
-        buf = stream.read(chunk_size)
+        buf = next(chunks, b"")
         if not buf:
             break
         if not seen_top:
@@ -234,17 +333,29 @@ def iter_members(
                 raise FastScanUnsupported("top level is not a JSON object")
             seen_top = True
         a = np.frombuffer(buf, dtype=np.uint8)
-        q_idx = np.flatnonzero(a == _QUOTE)
+        # every quote / brace / bracket in one C-speed translate + ONE nonzero
+        # over a bool view (2x the old compare+gather+searchsorted pipeline,
+        # measured on a string-dense UHC chunk: 32 ms vs 68 ms per 8 MB)
+        ev = np.flatnonzero(np.frombuffer(buf.translate(_EVENT_TBL), dtype=np.bool_))
+        cls = a[ev]
+        isq = cls == _QUOTE
         if esc_carry or _has_backslash(buf):
-            q_idx, esc_carry = _drop_escaped(a, q_idx, esc_carry)
-        # structural bytes via one table lookup, then string-awareness by
-        # counting quotes before each one (sparse: no per-byte cumsum)
-        v = _STRUCT_LUT[a]
-        s_idx = np.flatnonzero(v)
+            q_all = ev[isq]
+            q_idx, esc_carry = _drop_escaped(a, q_all, esc_carry)
+            if len(q_idx) != len(q_all):
+                # an escaped quote is just a character inside a string
+                isq = isq & np.isin(ev, q_idx, assume_unique=True)
+                keep_ev = isq | (cls != _QUOTE)
+                ev, cls, isq = ev[keep_ev], cls[keep_ev], isq[keep_ev]
+        else:
+            q_idx = ev[isq]
+        # inside-string parity at each event = quotes strictly before it
         start_parity = 1 if in_str else 0
-        outside = ((np.searchsorted(q_idx, s_idx) + start_parity) & 1) == 0
-        struct_idx = s_idx[outside]
-        delta = v[struct_idx].astype(np.int64)
+        qcount = np.cumsum(isq, dtype=np.int32)
+        outside = (((qcount - isq + start_parity) & 1) == 0) & ~isq
+        struct_idx = ev[outside]
+        sc = cls[outside]
+        delta = np.where((sc == _LBRACE) | (sc == _LBRACK), 1, -1).astype(np.int64)
         depth_after = depth + np.cumsum(delta)
         depth_before = depth_after - delta
         n_quotes = len(q_idx)
@@ -258,7 +369,7 @@ def iter_members(
         t_pos = struct_idx[top].tolist()
         t_db = depth_before[top].tolist()
         t_da = depth_after[top].tolist()
-        ck = _ChunkKeys(bulk, a, q_idx, start_parity, struct_idx, depth_after, depth)
+        ck = _ChunkKeys(bulk, a, q_idx, start_parity, struct_idx, depth_after, depth, buf)
         ck.on_type_other = on_type_other
 
         cursor = 0   # where the open (partial) member's unread bytes start
@@ -273,7 +384,7 @@ def iter_members(
                 # the member left open by an earlier chunk closes here
                 end = int(c[0])
                 counts[member.array] = counts.get(member.array, 0) + 1
-                done = _feed(member, buf[cursor:end + 1], want_item, want_ref, final=True)
+                done = _feed(member, buf[cursor:end + 1], want_item, policy, final=True)
                 if done is not None:
                     yield member.array, done
                 member = None
@@ -282,10 +393,10 @@ def iter_members(
                 n_whole = len(c)
                 if n_whole:
                     yield from _whole_members(cur_array, o[:n_whole], c, a, buf, ck,
-                                              want_item, want_ref, counts)
+                                              want_item, policy, counts)
                 if len(o) > n_whole:  # one member opens and runs past the chunk
                     st = int(o[n_whole])
-                    member = _new_member(cur_array, buf[st], want_ref)
+                    member = _new_member(cur_array, buf[st], policy)
                     cursor = st
             if db is None:
                 break
@@ -314,7 +425,7 @@ def iter_members(
                 zone = pos + 1
             seg_lo = pos + 1
         if member is not None:
-            _feed(member, buf[cursor:], want_item, want_ref, final=False)
+            _feed(member, buf[cursor:], want_item, policy, final=False)
             cursor = 0
         if zone is not None and on_header is not None:
             # carry the open header zone; scanned once when it closes. Real
@@ -337,7 +448,7 @@ def iter_members(
             depth = int(depth_after[-1])
         in_str = bool((n_quotes + start_parity) & 1)
         tail = (tail + buf[-512:])[-512:]
-        del a, q_idx, v, s_idx, outside, ck
+        del a, q_idx, ev, cls, isq, outside, ck
     if not seen_top:
         raise FastScanUnsupported("empty file")
     if trailing_garbage:
@@ -349,7 +460,7 @@ def iter_members(
         raise ValueError("file ended mid-structure — truncated download or not valid JSON")
 
 
-def _new_member(cur_array: str, first_byte: int, want_ref) -> _Member:
+def _new_member(cur_array: str, first_byte: int, policy) -> _Member:
     if first_byte != _LBRACE:
         # a non-object member (an array in in_network[]): the ijson path never
         # sees an `.item` map here and ignores it — and doesn't count it
@@ -358,12 +469,12 @@ def _new_member(cur_array: str, first_byte: int, want_ref) -> _Member:
         return m
     m = _Member(cur_array)
     if cur_array not in ("in_network", "provider_references") or (
-            cur_array == "provider_references" and want_ref is None):
+            cur_array == "provider_references" and not policy.active):
         m.decided, m.keep = True, False
     return m
 
 
-def _whole_members(cur_array, o, c, a, buf, ck, want_item, want_ref, counts):
+def _whole_members(cur_array, o, c, a, buf, ck, want_item, policy, counts):
     """Members opening at o[i] and closing at c[i], all inside this chunk."""
     is_obj = a[o] == _LBRACE
     n_obj = int(is_obj.sum())
@@ -374,7 +485,7 @@ def _whole_members(cur_array, o, c, a, buf, ck, want_item, want_ref, counts):
         check &= is_obj
         if n_type_other and ck.on_type_other is not None:
             ck.on_type_other(n_type_other)
-    elif cur_array == "provider_references" and want_ref is not None:
+    elif cur_array == "provider_references" and policy.active:
         check = ck.refs_needing_a_look(o, c) & is_obj
     else:
         return
@@ -383,7 +494,7 @@ def _whole_members(cur_array, o, c, a, buf, ck, want_item, want_ref, counts):
         if cur_array == "in_network":
             keep = _decide_item(data, want_item, final=True)
         else:
-            keep = _decide_ref(data, want_ref, final=True)
+            keep = _decide_ref(data, policy, final=True)
         if keep:
             yield cur_array, data
 
@@ -406,17 +517,30 @@ _NUM_END_LUT[np.frombuffer(b",}] \t\r\n", np.uint8)] = True
 class _Bulk:
     """Per-file constants for the bulk skip decisions."""
 
-    def __init__(self, target_codes, ref_keep):
+    def __init__(self, target_codes, policy: "RefPolicy"):
         self.codes = None
         self.width = 8
         if target_codes is not None:
             codes = [str(x).upper().encode() for x in target_codes]
             self.width = max([8] + [len(x) for x in codes])
             self.codes = np.array(codes, dtype=f"S{self.width}")
-        self.refs = None
-        if ref_keep is not None:
-            self.refs = np.array(sorted(r for r in ref_keep if _INT64_MIN <= r <= _INT64_MAX),
-                                 dtype=np.int64)
+        self.policy = policy
+        self._refs_key = None
+        self._refs = None
+
+    @property
+    def refs(self):
+        """The kept reference ids as a sorted int64 array (None = keep all),
+        rebuilt only when the policy's id set changes (it can grow while a
+        file streams: references that come AFTER in_network)."""
+        ids = self.policy.ids
+        key = (id(ids), len(ids)) if ids is not None else None
+        if key != self._refs_key:
+            self._refs_key = key
+            self._refs = None if ids is None else np.array(
+                sorted(r for r in ids if isinstance(r, int) and _INT64_MIN <= r <= _INT64_MAX),
+                dtype=np.int64)
+        return self._refs
 
 
 class _ChunkKeys:
@@ -424,37 +548,43 @@ class _ChunkKeys:
     found with numpy at the chunk's quote positions (no Python per key).
     Computed lazily, once per chunk."""
 
-    def __init__(self, bulk: _Bulk, a, q_idx, start_parity, struct_idx, depth_after, depth0):
-        self.bulk, self.a, self.n = bulk, a, len(a)
+    def __init__(self, bulk: _Bulk, a, q_idx, start_parity, struct_idx, depth_after, depth0, buf=b""):
+        self.bulk, self.a, self.n, self.buf = bulk, a, len(a), buf
         self.q_idx = q_idx
         self.struct_idx, self.depth_after, self.depth0 = struct_idx, depth_after, depth0
         self.start_parity = start_parity
-        self._open_q = None
         self._code = self._type = self._ref = None
         self._bs = None
 
-    @property
-    def open_q(self):
-        # opening quotes only (an even number of real quotes before them)
-        if self._open_q is None:
-            par = (np.arange(len(self.q_idx)) + self.start_parity) & 1
-            self._open_q = self.q_idx[par == 0]
-        return self._open_q
+    def _keys_many(self, *lits: bytes) -> dict:
+        """_keys for several literals in ONE regex pass over the chunk."""
+        rx = _LIT_RE.get(lits)
+        if rx is None:
+            rx = _LIT_RE[lits] = re.compile(b"|".join(re.escape(x) for x in
+                                                     sorted(lits, key=len, reverse=True)))
+        by_len: dict[int, list[int]] = {len(x): [] for x in lits}
+        for m in rx.finditer(self.buf):
+            by_len[m.end() - m.start()].append(m.start())
+        return {x: self._keys(x, by_len[len(x)]) for x in lits}
 
-    def _keys(self, lit: bytes):
+    def _keys(self, lit: bytes, hits=None):
         """Opening-quote positions of the key `lit` (e.g. b'"billing_code"')
         at a member's own level (document depth 3), and where each value
-        starts (-1 if the key/colon layout isn't a simple one)."""
+        starts (-1 if the key/colon layout isn't a simple one). The literal
+        is found at C speed; each hit must be a REAL opening quote (in
+        q_idx, with an even number of real quotes before it)."""
         a, n = self.a, self.n
-        cand = self.open_q
-        cand = cand[cand + len(lit) + 1 < n]
-        # cheap pre-filter on two distinctive bytes, then the full literal
-        ok = (a[cand + 1] == lit[1]) & (a[cand + len(lit) - 1] == _QUOTE)
-        cand = cand[ok]
-        ok = np.ones(len(cand), dtype=bool)
-        for j, ch in enumerate(lit):
-            ok &= a[cand + j] == ch
-        p = cand[ok]
+        if hits is None:
+            rx = _LIT_RE.get(lit)
+            if rx is None:
+                rx = _LIT_RE[lit] = re.compile(re.escape(lit))
+            hits = [m.start() for m in rx.finditer(self.buf)]
+        p = np.array(hits, dtype=np.int64)
+        if len(p):
+            qi = np.searchsorted(self.q_idx, p)
+            real = (qi < len(self.q_idx)) & (self.q_idx[np.minimum(qi, len(self.q_idx) - 1)] == p)
+            opening = ((qi + self.start_parity) & 1) == 0
+            p = p[real & opening & (p + len(lit) + 1 < n)]
         if len(p):
             k = np.searchsorted(self.struct_idx, p)
             d = np.where(k > 0, self.depth_after[np.maximum(k - 1, 0)], self.depth0)
@@ -522,10 +652,11 @@ class _ChunkKeys:
         if b.codes is None or not m:
             return np.ones(m, dtype=bool), 0
         if self._code is None:
-            p, vs = self._keys(b'"billing_code"')
+            found = self._keys_many(b'"billing_code"', b'"billing_code_type"')
+            p, vs = found[b'"billing_code"']
             plain, up = self._string_values(vs, b.width)
             target = plain & np.isin(up, b.codes)
-            tp, tvs = self._keys(b'"billing_code_type"')
+            tp, tvs = found[b'"billing_code_type"']
             tplain, tup = self._string_values(tvs, 16, _TYPE_LUT)
             fam_ok = ((tup == b"") | np.char.startswith(tup, b"CPT")
                       | np.char.startswith(tup, b"HCPCS"))
@@ -563,7 +694,8 @@ class _ChunkKeys:
         """Bool per reference member: True unless exactly one own-level
         provider_group_id whose plain integer value is NOT kept."""
         b = self.bulk
-        if b.refs is None or not len(o):
+        refs = b.refs
+        if refs is None or not len(o):
             return np.ones(len(o), dtype=bool)
         if self._ref is None:
             a, n = self.a, self.n
@@ -582,7 +714,7 @@ class _ChunkKeys:
             digits = np.where(np.arange(width)[None, :] < ln[:, None],
                               mat[:, :width].astype(np.int64) - 48, 0)
             val = (digits * pw[None, :]).sum(axis=1) // (10 ** (width - ln.astype(np.int64)))
-            self._ref = (p, plain & ~np.isin(val, b.refs))
+            self._ref = (p, plain & ~np.isin(val, refs))
         p, skip = self._ref
         m = len(o)
         mi = self._per_member(p, o, c)
@@ -639,8 +771,35 @@ def _own_keys(regex, data: bytes, final: bool):
 
 
 # a KEY spelled with a \\u escape ("billing\\u005fcode" IS billing_code to a
-# JSON parser) — the literal-key regexes can't see it
-_ESCAPED_KEY_RE = re.compile(rb'"(?:[^"\\]|\\[^u])*\\u(?:[^"\\]|\\.)*"\s*:')
+# JSON parser) can't be seen by the literal-key regexes: _has_escaped_key
+
+
+def _has_escaped_key(data: bytes) -> bool:
+    """Does some KEY in `data` contain a \\u escape? Cheap path first: no
+    '\\u' at all (the norm) costs one find. Otherwise each occurrence's
+    string end is located and checked for a following ':'. A false positive
+    (e.g. an escaped backslash before a 'u') only routes the member to the
+    exact ijson replay, so erring that way is safe."""
+    i = data.find(b"\\u")
+    n = len(data)
+    while i != -1:
+        j = i
+        while True:                       # the string's closing quote
+            j = data.find(b'"', j + 1)
+            if j == -1:
+                return False              # string not finished in this peek
+            k = j - 1
+            while data[k] == _BSLASH:
+                k -= 1
+            if (j - 1 - k) % 2 == 0:
+                break                     # an unescaped quote
+        k = j + 1
+        while k < n and data[k] in b" \t\r\n":
+            k += 1
+        if k < n and data[k] == 0x3A:     # ':' -> that string was a key
+            return True
+        i = data.find(b"\\u", j + 1)
+    return False
 
 
 def _replay_with_ijson(data: bytes) -> list:
@@ -659,7 +818,7 @@ def _decide_item(data: bytes, want_item, final: bool):
     """Replay the member's own billing_code / billing_code_type keys in
     stream order — every one of them, as the classic event loop sees them
     (duplicate keys included) — and ask want_item for a verdict."""
-    if _ESCAPED_KEY_RE.search(data):
+    if _has_escaped_key(data):
         # rare: let the classic tokenizer itself read the keys. A partial
         # peek waits for the member's end — an escaped key BEFORE whichever
         # key would decide is always complete in the peek, so it is seen here

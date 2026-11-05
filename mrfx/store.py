@@ -1141,11 +1141,13 @@ class Store:
         (crash/kill mid-ingest). Temps owned by a LIVE process are left
         alone — that's the whole point of the pid in the name."""
         for p in [*self.rates_dir.glob(".*.parquet.tmp"),
+                  *self.rates_dir.glob(".*.spool.tmp"),
                   *self.rates_dir.glob(".*.progress"),
                   *self.rates_dir.glob(".*.progress.tmp")]:
-            # both name shapes carry the pid right after the file key:
-            # .{key}.{pid}.parquet.tmp / .{key}.{pid}.progress[.tmp]
-            m = re.match(r"^\.(.+)\.(\d+)\.(parquet\.tmp|progress(\.tmp)?)$", p.name)
+            # every name shape carries the pid right after the file key:
+            # .{key}.{pid}.parquet.tmp / .spool.tmp (big-file target-item
+            # spool, can be large) / .progress[.tmp]
+            m = re.match(r"^\.(.+)\.(\d+)\.(parquet\.tmp|spool\.tmp|progress(\.tmp)?)$", p.name)
             pid = m.group(2) if m else None
             if pid is not None and _pid_alive(int(pid)):
                 continue  # owner is alive — in-progress write, keep it
@@ -3440,6 +3442,65 @@ class Store:
         self._invalidate_scan_caches()
 
 
+class BackgroundParquetWriter:
+    """A ParquetWriter fed through a small queue and drained by a thread.
+
+    Encoding + zstd compression of a batch is real work (measured: 48% of a
+    row-dense file's ingest — 12.7 s of 26.5 s for 13.5M rows) and pyarrow
+    releases the GIL while it does it, so handing batches to a thread lets the
+    parser keep scanning instead of waiting. At most `depth` tables are in
+    flight (bounded memory). A write error surfaces on the next write() or
+    on close(), which always joins the thread and closes the file."""
+
+    def __init__(self, path, schema, compression, depth: int = 2):
+        import queue
+        import threading
+
+        self.path, self.schema, self.compression = path, schema, compression
+        self._q: "queue.Queue" = queue.Queue(maxsize=depth)
+        self._err: BaseException | None = None
+        self._t = threading.Thread(target=self._run, name="mrfx-parquet-writer", daemon=True)
+        self._t.start()
+        self._closed = False
+
+    def _run(self) -> None:
+        writer = None
+        try:
+            while True:
+                table = self._q.get()
+                if table is None:
+                    break
+                if self._err is not None:
+                    continue              # keep draining so producers never block
+                try:
+                    if writer is None:
+                        writer = pq.ParquetWriter(self.path, self.schema, compression=self.compression)
+                    writer.write_table(table)
+                except BaseException as e:  # noqa: BLE001 — re-raised in the producer
+                    self._err = e
+        finally:
+            if writer is not None:
+                try:
+                    writer.close()
+                except BaseException as e:  # noqa: BLE001
+                    if self._err is None:
+                        self._err = e
+
+    def write_table(self, table) -> None:
+        if self._err is not None:
+            raise self._err
+        self._q.put(table)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._q.put(None)
+        self._t.join()
+        if self._err is not None:
+            raise self._err
+
+
 class RatesPartWriter:
     """Incremental parquet writer for one source file's rows. Use as a context
     manager; call write_batch(rows) any number of times. Rows are appended to a
@@ -3457,7 +3518,7 @@ class RatesPartWriter:
         # orphans left by dead processes).
         self.tmp = store.rates_dir / f".{file_key(source_file)}.{os.getpid()}.parquet.tmp"
         self.source_file = source_file
-        self._writer: pq.ParquetWriter | None = None
+        self._writer: BackgroundParquetWriter | None = None
         self.rows_written = 0
 
     def __enter__(self) -> "RatesPartWriter":
@@ -3471,13 +3532,19 @@ class RatesPartWriter:
         from .parser import batch_to_table
         table = batch_to_table(rows, RATES_SCHEMA)
         if self._writer is None:
-            self._writer = pq.ParquetWriter(self.tmp, RATES_SCHEMA, compression=PARQUET_COMPRESSION)
+            self._writer = BackgroundParquetWriter(self.tmp, RATES_SCHEMA, PARQUET_COMPRESSION)
         self._writer.write_table(table)
         self.rows_written += len(rows)
 
     def __exit__(self, exc_type, exc, tb):
         if self._writer is not None:
-            self._writer.close()
+            try:
+                self._writer.close()
+            except BaseException:
+                if exc_type is None:
+                    # a failed WRITE fails the file exactly like a failed parse
+                    self.tmp.unlink(missing_ok=True)
+                    raise
         if exc_type is not None:
             self.tmp.unlink(missing_ok=True)
             return False
