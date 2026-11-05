@@ -489,8 +489,9 @@ list. MRF Explorer does not fetch those: rate groups that depend on them are
 skipped and counted, and the Files tab and `mrfx ingest` say "their provider
 lists are remote links MRF Explorer doesn't download" — distinct from the
 missing-companion case, because dropping those linked files in cannot help
-(they carry no `provider_group_id` to match on). None of the real payer
-files checked in Nov 2026 (BCBS, UHC, Moda, Tufts; 10 scanned in full) used
+(they carry no `provider_group_id` to match on). None of the 22 real payer
+files scanned in full in Nov 2026 (BCBS WY/MS/ND, Florida Blue, UHC, Moda,
+Aetna, Tufts, Security Health, Highmark; up to 42 GB uncompressed) used
 remote references.
 
 ## Volume expectations

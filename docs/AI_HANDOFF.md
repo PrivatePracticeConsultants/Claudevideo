@@ -467,11 +467,13 @@ retry button reachable.
 - ROW VOLUME, not bytes, bounds some payers. A real Aetna-generated file
   (1.54 GB gz / 20.4 GB JSON) yields 590,311,124 PT/OT/SLP rows across
   1.92M distinct NPIs — every specialty that bills a 97xxx code, fanned out
-  over provider groups. The scan finished in minutes; the remaining ~25 min
-  was producing/writing rows (~360k rows/s; peak RSS 2.18 GB = that file's
-  kept reference table + write buffers). For such books `therapy_only_ingest`
-  (needs the NPPES cache) is the lever: it drops non-therapist NPIs at parse
-  time, before the row is ever built.
+  over provider groups. Full-file comparison with the ORIGINAL code (Nov
+  2026): IDENTICAL rows (digest, both directions), QA counters, item counts
+  and header; 4,071 s -> 1,082 s (3.8x); peak RSS 3.19 GB -> 1.92 GB. The
+  scan is minutes; the rest is producing/writing rows. For such books
+  `therapy_only_ingest` (needs the NPPES cache) is the lever: it drops
+  non-therapist NPIs at parse time, before the row is ever built (slice:
+  60M -> 6.3M rows, 87 -> 48 s, 2.0 -> 0.9 GB).
 - Downloads: the content hash carries across reconnects (it used to re-read
   the whole .part on every resume); gzip-encoded bodies are stored as sent
   (decoding them corrupted Range resumes). Companion reference files and
@@ -557,8 +559,9 @@ Open after the Nov 2026 performance/correctness pass (docs/NEXT_STEPS_PROMPT.md
 lists the full audit plan; these are what it left open):
 - Remote `location` provider references are NOT downloaded. The groups that
   depend on them are skipped, counted (`qa.remote_ref_groups`) and named as
-  such in the Files tab / `mrfx ingest`. None of the real files scanned in
-  full (10 so far) used them; build a fetcher only when a target payer does.
+  such in the Files tab / `mrfx ingest`. None of the 22 real files scanned
+  in full (8 payers/generators, up to 42 GB) used them; build a fetcher only
+  when a target payer does.
 - `mrfx add` (CLI, no dashboard running) looks up practice names through the
   live NPPES API after the queue drains — one request per new NPI. On a few
   million rows that ran >15 min after "finished:" in a trial (it prints
