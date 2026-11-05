@@ -912,15 +912,20 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             with store.connect() as con:
                 row = con.execute(
                     f"""
+                    -- ONE list-form quantile, not median + two quantile_cont:
+                    -- each exact quantile aggregate holds its own copy of every
+                    -- value in memory (not spillable). At 306M rows the three
+                    -- copies peaked the server at 11.2 GB RSS; one state gives
+                    -- the identical exact values (median == quantile_cont .5).
+                    SELECT n, entities, codes, mn, q[1], q[2], q[3], mx FROM (
                     SELECT count(*) AS n,
                            count(DISTINCT unit_id) AS entities,
                            count(DISTINCT billing_code) AS codes,
-                           min(negotiated_rate) FILTER (is_dollar_rate AND negotiated_rate > 0.01) AS min,
-                           quantile_cont(negotiated_rate, .25) FILTER (is_dollar_rate AND negotiated_rate > 0.01) AS p25,
-                           median(negotiated_rate) FILTER (is_dollar_rate AND negotiated_rate > 0.01) AS median,
-                           quantile_cont(negotiated_rate, .75) FILTER (is_dollar_rate AND negotiated_rate > 0.01) AS p75,
-                           max(negotiated_rate) FILTER (is_dollar_rate AND negotiated_rate > 0.01) AS max
-                    FROM ({rel_sql(grain, fs)})
+                           min(negotiated_rate) FILTER (is_dollar_rate AND negotiated_rate > 0.01) AS mn,
+                           quantile_cont(negotiated_rate, [0.25, 0.5, 0.75])
+                               FILTER (is_dollar_rate AND negotiated_rate > 0.01) AS q,
+                           max(negotiated_rate) FILTER (is_dollar_rate AND negotiated_rate > 0.01) AS mx
+                    FROM ({rel_sql(grain, fs)}))
                     """,
                     fs.params,
                 ).fetchone()
@@ -933,16 +938,16 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                     WITH r AS (SELECT billing_code, negotiated_rate, unit_id
                                FROM ({rel_sql(grain, fs)})
                                WHERE is_dollar_rate AND negotiated_rate > 0.01)
+                    SELECT billing_code, q[2] AS median, q[1] AS p25, q[3] AS p75,
+                           entities, mpfs_rate FROM (
                     SELECT r.billing_code,
-                           median(r.negotiated_rate)             AS median,
-                           quantile_cont(r.negotiated_rate, .25) AS p25,
-                           quantile_cont(r.negotiated_rate, .75) AS p75,
+                           quantile_cont(r.negotiated_rate, [0.25, 0.5, 0.75]) AS q,
                            count(DISTINCT r.unit_id)             AS entities,
                            m.mc                                  AS mpfs_rate
                     FROM r LEFT JOIN (SELECT code, median(non_facility_rate) AS mc
                                       FROM mpfs GROUP BY code) m ON m.code = r.billing_code
-                    GROUP BY r.billing_code, m.mc
-                    ORDER BY r.billing_code
+                    GROUP BY r.billing_code, m.mc)
+                    ORDER BY billing_code
                     """,
                     fs.params,
                 ))
