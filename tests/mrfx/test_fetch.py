@@ -965,6 +965,21 @@ def test_retry_failed_is_bulk_and_unbounded(cfg, store, server):
     assert store.url_queue_counts().get("queued") == 4
 
 
+def test_bulk_retried_rows_wait_behind_fresh_files(cfg, store, server):
+    """Fair scheduling: after "retry failed", the dead/flaky low-id links must
+    not claim the download slots ahead of files pasted since — measured as 3
+    dead links + fresh ones: the fresh ones are claimed first."""
+    add_urls(store, [f"{server}/dead_{i}.json.gz" for i in range(3)])
+    drain(cfg, store)
+    assert store.requeue_failed() == 3
+    add_urls(store, [f"{server}/fresh_{i}.json.gz" for i in range(2)])
+    order = []
+    while (rec := store.next_queued_url()) is not None:
+        order.append(rec["url"].rsplit("/", 1)[1])
+    assert order == ["fresh_0.json.gz", "fresh_1.json.gz",
+                     "dead_0.json.gz", "dead_1.json.gz", "dead_2.json.gz"]
+
+
 def test_user_transition_guards(cfg, store, server):
     add_urls(store, [f"{server}/rates.json.gz"])
     drain(cfg, store)
@@ -2282,3 +2297,28 @@ def test_segments_fall_back_when_the_server_compresses_each_range(cfg, monkeypat
         assert dest.read_bytes() == payload and sha == hashlib.sha256(payload).hexdigest()
     finally:
         httpd.shutdown()
+
+
+def test_expired_signed_child_names_the_index_to_repaste(cfg, store, monkeypatch):
+    """A 403 on a child of a long-ago-expanded index: the row must say WHICH
+    index to paste again (one of thousands of rows otherwise just said 're-add
+    the TOC it came from')."""
+    import mrfx.fetch as fetch
+
+    toc = "https://idx.example/Table_of_Contents.json"
+    parent = store.enqueue_url(toc, toc)
+    store.update_url(parent, status="done", kind="toc")
+    store.enqueue_urls([("https://cdn.example/f.json.gz?sig=old", "https://cdn.example/f.json.gz")],
+                       parent_id=parent)
+
+    def expired(*a, **k):
+        raise fetch.DownloadError("HTTP 403 — access refused.", 403, retryable=False)
+
+    monkeypatch.setattr(fetch, "download", expired)
+    for run in (fetch.process_url_record, fetch.fetch_url_record):
+        rec = store.next_queued_url()
+        run(cfg, store, rec)
+        (row,) = [r for r in store.list_urls() if r["id"] == rec["id"]]
+        assert row["status"] == "failed"
+        assert f"came from the index {toc}" in row["error"], row["error"]
+        store.update_url(rec["id"], status="queued")   # second path, same row

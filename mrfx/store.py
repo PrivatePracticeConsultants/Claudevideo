@@ -1451,6 +1451,9 @@ class Store:
         con.execute("ALTER TABLE url_queue ADD COLUMN IF NOT EXISTS content_sha VARCHAR")
         # migrate stores created before the "download anyway" size override
         con.execute("ALTER TABLE url_queue ADD COLUMN IF NOT EXISTS force_size BOOLEAN DEFAULT false")
+        # bulk "retry failed" rounds a row has been through: _claim_next serves
+        # never-retried rows first (fair scheduling)
+        con.execute("ALTER TABLE url_queue ADD COLUMN IF NOT EXISTS retries INTEGER DEFAULT 0")
 
     def _register_views(self, con: duckdb.DuckDBPyConnection) -> None:
         """(Re)point the derived views. Callers must hold write_lock."""
@@ -1715,7 +1718,11 @@ class Store:
     def _claim_next(self, from_status: str, to_status: str) -> dict | None:
         with self.write_lock, self.connect() as con:
             row = con.execute(
-                f"SELECT * FROM url_queue WHERE status = '{from_status}' ORDER BY id LIMIT 1"
+                # FAIR order: rows a bulk "retry failed" sent back (flaky or
+                # dead links, usually low ids) go after fresh files instead of
+                # re-burning the download slots first; id within each tier
+                f"SELECT * FROM url_queue WHERE status = '{from_status}' "
+                "ORDER BY coalesce(retries, 0), id LIMIT 1"
             ).fetchall()
             if not row:
                 return None
@@ -1723,6 +1730,14 @@ class Store:
             rec = dict(zip(cols, row[0]))
             con.execute("UPDATE url_queue SET status = ? WHERE id = ?", [to_status, rec["id"]])
             return rec
+
+    def url_of(self, url_id: int | None) -> str | None:
+        """The stored URL of one queue row (None if absent)."""
+        if url_id is None:
+            return None
+        with self.connect() as con:
+            row = con.execute("SELECT url FROM url_queue WHERE id = ?", [url_id]).fetchone()
+        return row[0] if row else None
 
     def update_url(self, url_id: int, **fields) -> None:
         allowed = {"kind", "status", "filename", "bytes_total", "bytes_done",
@@ -2048,6 +2063,7 @@ class Store:
             if n:
                 con.execute(
                     "UPDATE url_queue SET status = 'queued', error = NULL, "
+                    "retries = coalesce(retries, 0) + 1, "
                     # bulk retry never inherits a one-shot "download anyway"
                     "progress = 0, bytes_done = 0, force_size = false WHERE status = 'failed'"
                 )

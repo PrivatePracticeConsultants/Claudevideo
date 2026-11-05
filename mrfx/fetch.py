@@ -1478,6 +1478,24 @@ def _ram_worker_cap(cfg: MrfxConfig) -> int | None:
     return max(1, int((total_gb - pool_gb - OS_RESERVE_GB) // WORKER_RAM_GB))
 
 
+def _failure_message(store: Store, rec: dict, e: "DownloadError") -> str:
+    """The row's error text. A 403 on a file that came from an index is almost
+    always an expired signed link (captured when the index was expanded, dead
+    after a long pause) — name the exact index to re-paste, instead of a
+    generic "re-add the TOC it came from" on one of thousands of rows."""
+    msg = str(e)
+    if e.status == 403 and rec.get("parent_id") is not None:
+        try:
+            parent = store.url_of(rec["parent_id"])
+        except Exception:  # noqa: BLE001 — a hint must never fail the row update
+            parent = None
+        if parent:
+            msg += (f" This link came from the index {parent} — if that was added "
+                    "a while ago its signed links have likely expired: paste that "
+                    "index again to get fresh ones.")
+    return msg
+
+
 def resolve_worker_count(cfg: MrfxConfig) -> int:
     """Effective parser-process count. 0 (or unset) = auto: (CPU cores - 1)
     capped at 8 AND at what fits in RAM (_ram_worker_cap); a positive value is
@@ -1610,7 +1628,8 @@ def fetch_url_record(cfg: MrfxConfig, store: Store, rec: dict) -> bool:
             store.update_url(url_id, status="queued", error=str(e))
             log.info("url %s: %s", url, e)
             return False
-        store.update_url(url_id, status="oversize" if e.oversize else "failed", error=str(e))
+        store.update_url(url_id, status="oversize" if e.oversize else "failed",
+                         error=_failure_message(store, rec, e))
         # duplicates may have deferred to this row in an earlier life (it
         # ingested once, failed, was retried, and now its signed URL is dead):
         # they hold the kept bytes and must get their promised auto-retry
@@ -1707,7 +1726,7 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
                 return False
             log.warning("url %s download stopped: %s", url, e)
             store.update_url(url_id, status="oversize" if e.oversize else "failed",
-                             error=str(e))
+                             error=_failure_message(store, rec, e))
             _maybe_queue_prev_month(store, rec, str(e))
             # a failed re-download may strand twins that deferred to this row
             # on a PREVIOUS attempt (its sha is still on the record)
