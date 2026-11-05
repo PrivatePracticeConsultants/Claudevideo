@@ -165,8 +165,9 @@ with a row count; index links show `expanding` while their file lists unpack;
 a file bigger than the safety limit shows `too big` — see the disk section
 below).
 Files process **a few at a time in the background** — by default as many as
-your computer has processor cores minus one (the `parallel_ingests:` knob in
-`config/mrfx.yaml`, `0` = automatic), and **several files download at once**
+your computer has processor cores minus one, or fewer if your RAM can't hold
+that many (about 2 GB each: 3 on a 16 GB machine, 7 on 32 GB; the
+`parallel_ingests:` knob in `config/mrfx.yaml`, `0` = automatic), and **several files download at once**
 to keep those workers fed (`parallel_downloads:`, `0` = automatic, capped at
 6 — the same per-host limit a web browser uses; simultaneous downloads
 coordinate so they can never fill your disk together) — you can paste a whole
@@ -984,7 +985,7 @@ them in one place, grouped by where you'll hit them.
   15+ minutes.
 - **The queue is huge and slow** — expected for whole-payer grinds (UHC and
   Anthem queue thousands of files; parsing runs ~30s per uncompressed GB).
-  The app already uses (your cores − 1) parsers automatically
+  The app already uses (your cores − 1) parsers automatically (fewer if RAM is tight)
   (`parallel_ingests: 0`); on a big multi-core machine that's the fastest
   safe setting, so just leave it running overnight and skip rows you don't
   need. (If the startup log warns that ijson is running its "pure-Python

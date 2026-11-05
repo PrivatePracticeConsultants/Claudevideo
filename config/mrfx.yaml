@@ -107,9 +107,11 @@ payer_name_map:
 
 # Files parsed at the same time when grinding pasted links (each is its own
 # CPU process; the database stays single-writer, and a died worker restarts
-# automatically). 0 = auto: uses (your CPU cores - 1), capped at 8 — the
-# fastest safe setting on any machine. Set a specific number to pin it (still
-# capped at cores-1), or 1 to process strictly one file at a time.
+# automatically). 0 = auto: (your CPU cores - 1), capped at 8 AND at what
+# fits in RAM (~2 GB per worker after the database's share and ~3 GB for
+# Windows: 16 GB -> 3, 32 GB -> 7) — the fastest safe setting on any machine.
+# Set a specific number to pin it (still capped at cores-1; RAM is then your
+# call), or 1 to process strictly one file at a time.
 parallel_ingests: 0
 
 # Files DOWNLOADED at the same time to feed the parsers above. 0 = auto: 6,

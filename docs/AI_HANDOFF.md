@@ -565,19 +565,30 @@ lists the full audit plan; these are what it left open):
   such in the Files tab / `mrfx ingest`. None of the 22 real files scanned
   in full (8 payers/generators, up to 42 GB) used them; build a fetcher only
   when a target payer does.
-- `mrfx add` (CLI, no dashboard running) looks up practice names through the
-  live NPPES API after the queue drains — one request per new NPI. On a few
-  million rows that ran >15 min after "finished:" in a trial (it prints
-  "looking up practice names (NPPES)..."). The bulk NPPES file
-  (`enrichment.mode: bulk`) avoids it; consider making the CLI say how many
-  lookups remain, or skip them for huge drains.
+- `mrfx add` (CLI) name lookups after the drain: FIXED in round 2 — it now
+  prints how many NPIs remain, a progress line every 15 s with an ETA, points
+  at the bulk NPPES file for big books, and Ctrl-C skips the rest cleanly
+  (`tests/mrfx/test_cli_enrich.py`).
+- Month semantics (round 2, pinned by `tests/mrfx/test_known_answer.py`):
+  the Explorer shows EVERY ingested month (each row carries its Month; the
+  sidecar says "ALL months pooled"); Code comparison and its export use each
+  contract's NEWEST month (`FilterSet.latest_only`, `latest=1`), as do the
+  report tabs. A payer republishing a byte-identical file under a new name is
+  skipped by the URL queue's content-sha dedup, so that payer's "latest" stays
+  the OLD month label — honest, because the file's own header date is
+  unchanged; when the month came from the FILENAME (no header date) the label
+  lags the republication. Inbox drops have no content dedup: a twin IS
+  ingested and merges in dedup (source_count rises, numbers unchanged).
 - A worker notices its parent died only at its next progress report; one
   that dies in a small file's last seconds may finish and leave its temps for
   the next start's sweep (swept then; big files report through replay).
 - Not measured here (Linux, 4 cores): the parallel_ingests throughput curve
-  on an 8-core box, and anything Windows-specific (file locking on .spool.tmp
-  under AV scanners, console encoding) — see NEXT_STEPS_PROMPT P2.3 / P3.
-
+  on an 8-core box, and ANYTHING on Windows — no agent has run this repo on
+  Windows. Reviewed by reading only: `_pid_alive` uses OpenProcess there
+  (the /proc zombie check is POSIX-only; unsure -> "alive" = keep the file);
+  the parent's temp/spool/progress cleanup is retry-tolerant and can no longer
+  raise out of a `finally` (round 2 fix + test). HOW_TO_RUN.md Part 4 is the
+  user's first-Windows-run checklist.
 
 Deferred from the July 2026 comprehensive audit (real findings, consciously
 not yet built — pick these up before adding features):

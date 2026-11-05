@@ -1456,16 +1456,41 @@ def _meta_path(dest: Path) -> Path:
     return Path(str(dest) + _META_SUFFIX)
 
 
+# RAM budget for the AUTO worker count. A parser worker peaks ~1-2 GB on a
+# reference-heavy payer (measured: 1.92 GB on the full 20 GB Aetna file), the
+# main process holds DuckDB's analytics pool, and Windows + a browser need the
+# rest. Cores alone put 7 workers on a 16 GB 8-core laptop: 7 x 2 GB + a 6 GB
+# pool > 16 GB — swap or a native OOM death mid-grind. Throughput plateaus at
+# ~cores/1.4 workers anyway (measured), so the RAM cap costs little.
+WORKER_RAM_GB = 2.0
+OS_RESERVE_GB = 3.0
+
+
+def _ram_worker_cap(cfg: MrfxConfig) -> int | None:
+    """How many parser workers fit in RAM next to the analytics pool, or None
+    when the machine's RAM can't be read (then cores decide, as before)."""
+    from .store import _total_ram_bytes
+
+    total_gb = _total_ram_bytes() / 1e9
+    if total_gb <= 0:
+        return None
+    pool_gb = getattr(cfg, "duckdb_memory_gb", None) or max(2, min(12, int(total_gb * 0.4)))
+    return max(1, int((total_gb - pool_gb - OS_RESERVE_GB) // WORKER_RAM_GB))
+
+
 def resolve_worker_count(cfg: MrfxConfig) -> int:
     """Effective parser-process count. 0 (or unset) = auto: (CPU cores - 1)
-    capped at 8; a positive value is honored but still clamped to cores-1
-    (extra processes past the core count only add contention). Never less
+    capped at 8 AND at what fits in RAM (_ram_worker_cap); a positive value is
+    honored but still clamped to cores-1 (extra processes past the core count
+    only add contention — RAM is the user's call once they set it). Never less
     than 1. Central so run_queue, the prefetch sizing, and the CLI banner
     all agree."""
     cores_cap = max(1, (os.cpu_count() or 2) - 1)
     configured = int(getattr(cfg, "parallel_ingests", 0) or 0)
     if configured <= 0:
-        return min(cores_cap, 8)
+        n = min(cores_cap, 8)
+        ram_cap = _ram_worker_cap(cfg)
+        return n if ram_cap is None else max(1, min(n, ram_cap))
     return max(1, min(configured, cores_cap))
 
 

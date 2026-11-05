@@ -775,6 +775,7 @@ function rateRow(r) {
     <td>${esc(r.billing_class || "—")}</td>
     <td class="sub">${esc((r.service_code_set || "").replaceAll("|", ", ") || "—")}</td>
     <td class="num"><span class="rate">${money(r.negotiated_rate)}</span></td>
+    <td class="sub">${esc(r.file_month || "—")}</td>
     <td class="num">${variants}</td>
     <td>${esc(r.negotiated_type)}${r.is_dollar_rate ? "" : ` <span class="warn-text">(non-dollar)</span>`}</td>
     <td class="num">${fmtInt(r.source_count)}</td>
