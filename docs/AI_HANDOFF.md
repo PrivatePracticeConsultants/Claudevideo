@@ -414,9 +414,31 @@ retry button reachable.
     have absolute golden expectations too. This caught a pre-existing bug:
     header-at-EOF rows could flush with the seed payer during deferred-ref
     emission (now restamped first).
-- Two-pass for ≥1.5 GB uncompressed; pass 1 skims target-cited refs (80k ids
-  on an 8 GB Anthem shard vs 4.2M total); short-circuits pass 2 if zero
-  target codes.
+- Big files (≥1.5 GB uncompressed, estimate = max(18x compressed, the size
+  the gzip trailer / zip directory records)) — fast path: `run_big_file_fast`
+  reads the file ONCE: non-target members skipped in bulk, TARGET in_network
+  members spooled verbatim to `.{key}.{pid}.spool.tmp` (deleted after; swept
+  as an orphan if killed), cited ref ids collected, references that come
+  AFTER in_network kept in the same read. References that came BEFORE it
+  need a second read that STOPS when provider_references closes (never
+  re-scans in_network). Then the spool is replayed through `_handle_item`.
+  Memory = kept refs + one item. Measured: 42.4 GB real BCBS file 3,676 s
+  (original code) -> 434 s, peak RSS 0.32 GB; 5.5 GB UHC 423 s -> 48 s.
+  Classic path (fast_scan off / declined): pass 1 skims target-cited refs
+  (80k ids on an 8 GB Anthem shard vs 4.2M total), pass 2 extracts.
+- Inside one read: decompression runs in a prefetch thread (zlib releases
+  the GIL); the scan core is one `bytes.translate` + one `nonzero` on a
+  bool view + a parity cumsum (2x the compare/gather/searchsorted version
+  on string-dense UHC data); keys are found with one C regex pass per chunk;
+  Parquet encoding + zstd runs in `BackgroundParquetWriter` (it was 48% of
+  a row-dense file's time). What remains per chunk is numpy over every
+  byte — ~9-10 s/GB on string-dense files; the next step change would need
+  a compiled kernel (e.g. an optional numba scanner), not more numpy.
+- Downloads: the content hash carries across reconnects (it used to re-read
+  the whole .part on every resume); gzip-encoded bodies are stored as sent
+  (decoding them corrupted Range resumes). Companion reference files and
+  TOC plan indexes insert via one Arrow table (was ~420 rows/s under the
+  write lock).
 - Parallel: N worker processes (`parallel_ingests`), N downloader threads
   (`parallel_downloads`, 0 = auto = 6) prefetching
   into the `fetched` state so the network overlaps parsing and many-small-
