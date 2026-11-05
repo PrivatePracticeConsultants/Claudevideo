@@ -365,6 +365,22 @@ retry button reachable.
   (64 KB default wins). The remaining honest lever is process count
   (`parallel_ingests`), documented for the user in GETTING_STARTED
   "Making a big queue finish faster".
+- **Fast path (Nov 2026, `mrfx/fastscan.py`, `fast_scan: true` default)** —
+  the new data that re-opened the "dead ends" above: the ijson floor is the
+  per-TOKEN yield (~25 s/GB measured with an empty loop body), so the fix is
+  to not tokenize non-target bytes at all. A numpy splitter finds top-level
+  `in_network[]`/`provider_references[]` member boundaries (string- and
+  escape-aware), regex-peeks each member's OWN billing_code/type/ref-id, and
+  `json.loads` only target members into the SAME `_handle_item`/`_add_ref`.
+  Memory envelope unchanged (target items were already built whole). Second
+  fix: rows go to the sink as a columnar `RowBatch` (one dict per PRICE, not
+  per row) — `from_pylist` over 20-key row dicts was ~52 s/GB on its own at
+  ~12M rows/GB. Synthetic 0.63 GB row-dense file, two-pass total:
+  165.5 → 44.0 s/GB (3.8x); output Parquet identical to the pre-change code
+  (7,530,087 rows). Escape-heavy variant: 77.7 s/GB, also identical. Pinned by
+  `tests/mrfx/test_fastscan.py` (hostile shapes at 1-byte..4 KB chunks + seeded
+  fuzz). Declines (non-object top level / empty) fall back to ijson up front;
+  a missing numpy degrades to ijson with one warning.
 - Two-pass for ≥1.5 GB uncompressed; pass 1 skims target-cited refs (80k ids
   on an 8 GB Anthem shard vs 4.2M total); short-circuits pass 2 if zero
   target codes.

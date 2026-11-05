@@ -137,6 +137,12 @@ class MrfxConfig(BaseModel):
     # rates (no NPI) are always kept. Leave off to keep the full store and use
     # the dashboard's "therapy providers only" toggle for therapist-only views.
     therapy_only_ingest: bool = False
+    # Byte-level fast path for in-network files (mrfx/fastscan.py): skips the
+    # non-target billing codes and unused provider references as raw bytes
+    # instead of tokenizing them. Same rows, same QA counters (pinned by
+    # tests/mrfx/test_fastscan.py); a file whose shape it can't vouch for falls
+    # back to the classic parser automatically. false = always the classic path.
+    fast_scan: bool = True
     confirm_over_gb: float = Field(default=5.0, gt=0)
     # URL-drop ingestion: staging for downloads, and knobs for aggregating many
     # files without filling the disk.

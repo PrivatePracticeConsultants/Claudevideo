@@ -286,6 +286,79 @@ class _DeferredGroup:
     prices: list[dict]
 
 
+_ROW_COLS = ("tin_value", "tin_type", "tin_is_really_npi", "npi")
+
+
+class RowBatch:
+    """A batch of emitted rate rows held COLUMN-wise.
+
+    Every row of one negotiated price shares all 16 price-level fields and
+    differs only in (tin_value, tin_type, tin_is_really_npi, npi). Building a
+    20-key dict per row and handing the list to `pa.Table.from_pylist` cost
+    more than parsing itself on row-dense files (measured ~52 s per
+    uncompressed GB at ~12M rows/GB). Here each price is one `bases` dict and a
+    row is four list entries; `to_table` expands the bases with a C-level
+    `take`. Iterating yields the same row dicts as before, so any sink that
+    wants dicts still works.
+    """
+
+    __slots__ = ("bases", "base_idx", "tin_value", "tin_type", "tin_is_really_npi", "npi")
+
+    def __init__(self):
+        self.bases: list[dict] = []
+        self.base_idx: list[int] = []
+        self.tin_value: list = []
+        self.tin_type: list = []
+        self.tin_is_really_npi: list = []
+        self.npi: list = []
+
+    def __len__(self) -> int:
+        return len(self.npi)
+
+    def __bool__(self) -> bool:
+        return bool(self.npi)
+
+    def add_base(self, base: dict) -> int:
+        self.bases.append(base)
+        return len(self.bases) - 1
+
+    def add(self, base_i: int, tin_value, tin_type, really: bool, npis) -> None:
+        n = len(npis)
+        self.base_idx.extend([base_i] * n)
+        self.tin_value.extend([tin_value] * n)
+        self.tin_type.extend([tin_type] * n)
+        self.tin_is_really_npi.extend([really] * n)
+        self.npi.extend(npis)
+
+    def __iter__(self):
+        for i, b in enumerate(self.base_idx):
+            yield {**self.bases[b], "tin_value": self.tin_value[i],
+                   "tin_type": self.tin_type[i],
+                   "tin_is_really_npi": self.tin_is_really_npi[i], "npi": self.npi[i]}
+
+    def to_table(self, schema):
+        import pyarrow as pa
+
+        base_schema = pa.schema([f for f in schema if f.name not in _ROW_COLS])
+        bt = pa.Table.from_pylist(self.bases, schema=base_schema).take(
+            pa.array(self.base_idx, type=pa.int64()))
+        cols = []
+        for f in schema:
+            if f.name in _ROW_COLS:
+                cols.append(pa.array(getattr(self, f.name), type=f.type))
+            else:
+                cols.append(bt.column(f.name))
+        return pa.Table.from_arrays(cols, schema=schema)
+
+
+def batch_to_table(rows, schema):
+    """A sink's batch (RowBatch or a plain list of row dicts) as an Arrow table."""
+    if isinstance(rows, RowBatch):
+        return rows.to_table(schema)
+    import pyarrow as pa
+    return pa.Table.from_pylist(rows, schema=schema)
+
+
 class InNetworkParser:
     """One streaming pass over an in-network file."""
 
@@ -322,7 +395,7 @@ class InNetworkParser:
             self.result.schema_version = header_defaults.get("schema_version")
             self.result.last_updated_on = header_defaults.get("last_updated_on")
         self._sink = sink
-        self._buffer: list[dict] = []
+        self._buffer = RowBatch()
         self._flushed = False
         self._refs_complete = False
         self._deferred: list[_DeferredGroup] = []
@@ -344,7 +417,7 @@ class InNetworkParser:
         if self._buffer:
             self._sink(self._buffer)
             self._flushed = True
-            self._buffer = []
+            self._buffer = RowBatch()
 
     def parse(self, stream) -> ParseResult:
         r = self.result
@@ -399,20 +472,12 @@ class InNetworkParser:
             elif event == "end_array" and prefix == "provider_references":
                 self._refs_complete = True
             elif event == "string" and prefix in ("reporting_entity_name", "version", "last_updated_on"):
-                if prefix == "reporting_entity_name":
-                    new_payer = self.cfg.normalize_payer(value)
-                    if self._flushed and new_payer != r.payer:
-                        log.warning(
-                            "%s: reporting_entity_name appeared after %d rows were already "
-                            "written; those rows keep the preflight-seeded payer %r",
-                            self.source_file, r.qa.rows, r.payer,
-                        )
-                    r.payer = new_payer
-                elif prefix == "version":
-                    r.schema_version = value
-                else:
-                    r.last_updated_on = value
+                self._set_header(prefix, value)
 
+        return self._finish()
+
+    def _finish(self) -> ParseResult:
+        r = self.result
         self._refs_complete = True
         for dg in self._deferred:
             self._emit_group(dg.billing_code, dg.billing_code_type, dg.groups, dg.ref_ids, dg.prices)
@@ -421,13 +486,87 @@ class InNetworkParser:
         # rows relied on the preflight seed (correct for every real file, whose
         # header is at the top). The tiny header-at-EOF hostile case fits in one
         # batch and is fully corrected here.
-        for row in self._buffer:
+        for row in self._buffer.bases:
             row["payer"] = r.payer
             row["schema_version"] = r.schema_version
             row["last_updated_on"] = r.last_updated_on
             row["file_month"] = r.file_month
         self._flush(final=True)
         return r
+
+    def _set_header(self, key: str, value: str) -> None:
+        r = self.result
+        if key == "reporting_entity_name":
+            new_payer = self.cfg.normalize_payer(value)
+            if self._flushed and new_payer != r.payer:
+                log.warning(
+                    "%s: reporting_entity_name appeared after %d rows were already "
+                    "written; those rows keep the preflight-seeded payer %r",
+                    self.source_file, r.qa.rows, r.payer,
+                )
+            r.payer = new_payer
+        elif key == "version":
+            r.schema_version = value
+        else:
+            r.last_updated_on = value
+
+    def _want_item(self, code, ctype, order: str, final: bool):
+        """Fast-path keep/skip verdict for one in_network member, mirroring
+        the ijson loop above EXACTLY — including which QA counter fires,
+        which depends on whether billing_code or billing_code_type streams
+        first (the event loop stops checking once it decides to skip)."""
+        qa = self.result.qa
+        checks = ("type", "code") if order == "type_first" else ("code", "type")
+        for what in checks:
+            if what == "type":
+                if ctype is None:
+                    if not final:
+                        return None  # type may still stream after the code
+                    continue
+                if code_type_family(ctype) == "__other__":
+                    qa.billing_type_other += 1
+                    return False
+            else:
+                if code is None:
+                    if not final:
+                        return None
+                    continue
+                if self.code_set is not None and clean_code(code) not in self.code_set:
+                    if isinstance(code, str) and MULTI_CODE_RE.search(code.strip()):
+                        qa.multi_code_fields += 1
+                    return False
+        return True
+
+    def parse_fast(self, stream) -> ParseResult:
+        """Same output as parse(), via the byte-level splitter: non-target
+        in_network members (and non-kept references) are never tokenized in
+        Python. Raises fastscan.FastScanUnsupported — before emitting any row —
+        when it can't vouch for the file's shape; the caller then uses parse().
+        """
+        import json
+
+        from .fastscan import iter_members
+
+        keep = self._keep_ref_ids
+
+        def want_ref(raw) -> bool:
+            rid = clean_ref_id(raw)
+            return rid is not None and (keep is None or rid in keep)
+
+        counts: dict = {}
+        for array, data in iter_members(stream, self._want_item, want_ref,
+                                        on_header=self._set_header, counts=counts):
+            if data is None:
+                if array == "provider_references":
+                    self._refs_complete = True
+                continue
+            obj = json.loads(data)
+            if array == "provider_references":
+                self._add_ref(obj)
+            else:
+                self._handle_item(obj)
+        self.result.items_seen = counts.get("in_network", 0)
+        return self._finish()
 
     # -- refs -----------------------------------------------------------------
 
@@ -575,12 +714,10 @@ class InNetworkParser:
                 "ingested_at": self._ingested_at,
             }
             # rows are emitted per provider GROUP so the NPI↔TIN pairing holds
+            base_i = None if self._sink is None else self._buffer.add_base(row_base)
+            therapy = self._therapy_npis
             for tin_value, tin_type, npis in all_groups:
-                tin_flags = {
-                    "tin_value": tin_value,
-                    "tin_type": tin_type,
-                    "tin_is_really_npi": tin_type == "npi",
-                }
+                really = tin_type == "npi"
                 if not npis:
                     # A group with a TIN but no NPIs is a TIN-only rate — the
                     # whole product is TIN-grain, so dropping it lost that
@@ -595,29 +732,28 @@ class InNetworkParser:
                     # classifiable — drop it if that NPI isn't a therapist. A
                     # genuine EIN TIN-only rate has no NPI to judge, so it is
                     # always kept (the honest TIN-grain rate).
-                    if (self._therapy_npis is not None
-                            and tin_flags["tin_is_really_npi"]
-                            and tin_value not in self._therapy_npis):
+                    if therapy is not None and really and tin_value not in therapy:
                         r.qa.non_therapy_dropped += 1
                         continue
-                    row = {**row_base, **tin_flags, "npi": None}
-                    (r.rows if self._sink is None else self._buffer).append(row)
-                    r.qa.rows += 1
+                    keep = (None,)
                     r.qa.tin_only_rows += 1
-                    continue
-                for npi in npis:
+                elif therapy is not None:
                     # therapy_only_ingest: drop rows for NPIs that aren't a
-                    # PT/OT/SLP or therapy clinic (per NPPES). TIN-only rows above
-                    # are always kept (no NPI to classify).
-                    if self._therapy_npis is not None and npi not in self._therapy_npis:
-                        r.qa.non_therapy_dropped += 1
+                    # PT/OT/SLP or therapy clinic (per NPPES). TIN-only rows
+                    # above are always kept (no NPI to classify).
+                    keep = tuple(n for n in npis if n in therapy)
+                    r.qa.non_therapy_dropped += len(npis) - len(keep)
+                    if not keep:
                         continue
-                    row = {**row_base, **tin_flags, "npi": npi}
-                    if self._sink is None:
-                        r.rows.append(row)
-                    else:
-                        self._buffer.append(row)
-                    r.qa.rows += 1
+                else:
+                    keep = npis
+                r.qa.rows += len(keep)
+                if self._sink is None:
+                    tin_flags = {"tin_value": tin_value, "tin_type": tin_type,
+                                 "tin_is_really_npi": really}
+                    r.rows.extend({**row_base, **tin_flags, "npi": n} for n in keep)
+                else:
+                    self._buffer.add(base_i, tin_value, tin_type, really, keep)
         self._flush()
 
 
@@ -684,6 +820,98 @@ def skim_needed_ref_ids(cfg: MrfxConfig, stream, progress_marker=None) -> tuple[
             builder = object()  # sentinel: "inside an item"
             skipping = False
     return needed, target_items
+
+
+def skim_needed_ref_ids_fast(cfg: MrfxConfig, stream) -> tuple[set[int], int]:
+    """skim_needed_ref_ids via the byte-level splitter (same contract and
+    result): only target-code members are decoded; the reference table and
+    non-target members are skipped as raw bytes."""
+    import json
+
+    from .fastscan import iter_members
+
+    probe = InNetworkParser.__new__(InNetworkParser)  # predicate only
+    probe.code_set = cfg.code_set
+    probe.result = ParseResult()
+    needed: set[int] = set()
+    target_items = 0
+    for array, data in iter_members(stream, probe._want_item, None):
+        if data is None or array != "in_network":
+            continue
+        item = json.loads(data)
+        # the ijson skim counts an item only once a string/number billing_code
+        # in the target set has streamed — a code-less member is not a target
+        code = item.get("billing_code")
+        if not isinstance(code, (str, int, float)) or isinstance(code, bool) or (
+                cfg.code_set is not None and clean_code(code) not in cfg.code_set):
+            continue
+        target_items += 1
+        for grp in as_list(item.get("negotiated_rates")):
+            if not isinstance(grp, dict):
+                continue
+            for x in as_list(grp.get("provider_references")):
+                if isinstance(x, (dict, list)):
+                    continue
+                rid = clean_ref_id(x)
+                if rid is not None:
+                    needed.add(rid)
+    return needed, target_items
+
+
+_WARNED_NO_NUMPY = False
+
+
+def _fast_scan_unsupported(cfg: MrfxConfig):
+    """The fast path's decline exception if the fast path is enabled AND
+    importable, else None (classic parser). An install that predates the
+    numpy requirement must keep ingesting — slower, with one warning — never
+    fail every file on an ImportError."""
+    global _WARNED_NO_NUMPY
+    if not getattr(cfg, "fast_scan", True):
+        return None
+    try:
+        from .fastscan import FastScanUnsupported
+    except ImportError as e:
+        if not _WARNED_NO_NUMPY:
+            _WARNED_NO_NUMPY = True
+            log.warning("fast scan unavailable (%s) — using the classic parser, which "
+                        "is several times slower. Re-run: pip install -r requirements.txt", e)
+        return None
+    return FastScanUnsupported
+
+
+def run_in_network_parse(cfg: MrfxConfig, make_parser, open_fn) -> tuple["InNetworkParser", ParseResult]:
+    """Parse one in-network file: the byte-level fast path when enabled,
+    else (or when it declines the file up front) the classic ijson path.
+    `make_parser()` builds a fresh InNetworkParser; `open_fn()` opens a fresh
+    stream context. Returns (parser, result)."""
+    parser = make_parser()
+    FastScanUnsupported = _fast_scan_unsupported(cfg)
+    if FastScanUnsupported is not None:
+        try:
+            with open_fn() as stream:
+                return parser, parser.parse_fast(stream)
+        except FastScanUnsupported as e:
+            if parser._flushed or parser.result.qa.rows:
+                raise  # never happens (declines are up front) — never double-write
+            log.info("%s: fast scan declined (%s) — using the classic parser",
+                     parser.source_file, e)
+            parser = make_parser()
+    with open_fn() as stream:
+        return parser, parser.parse(stream)
+
+
+def run_skim(cfg: MrfxConfig, open_fn) -> tuple[set[int], int]:
+    """Pass 1 of a big file (see skim_needed_ref_ids), fast path first."""
+    FastScanUnsupported = _fast_scan_unsupported(cfg)
+    if FastScanUnsupported is not None:
+        try:
+            with open_fn() as stream:
+                return skim_needed_ref_ids_fast(cfg, stream)
+        except FastScanUnsupported as e:
+            log.info("fast skim declined (%s) — using the classic skim", e)
+    with open_fn() as stream:
+        return skim_needed_ref_ids(cfg, stream)
 
 
 def parse_provider_reference_file(cfg: MrfxConfig, stream) -> tuple[str, str | None, dict[int, list[PGroup]]]:

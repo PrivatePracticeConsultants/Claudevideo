@@ -19,7 +19,8 @@ from .config import MrfxConfig
 from .parser import (
     InNetworkParser,
     parse_provider_reference_file,
-    skim_needed_ref_ids,
+    run_in_network_parse,
+    run_skim,
 )
 from .sniff import Preflight, open_stream, preflight
 from .store import FINISHED_NOW, Store, file_key, sql_path
@@ -313,9 +314,9 @@ def _parse_worker(cfg: MrfxConfig, path_str: str, name: str, header_defaults: di
                   tmp_out: str, progress_path: str) -> dict:
     """Runs in a child process. Returns a picklable summary; raises on failure
     (the parent marks the file failed)."""
-    import pyarrow as pa
     import pyarrow.parquet as pq
 
+    from .parser import batch_to_table
     from .store import PARQUET_COMPRESSION, RATES_SCHEMA
 
     path = Path(path_str)
@@ -355,8 +356,8 @@ def _parse_worker(cfg: MrfxConfig, path_str: str, name: str, header_defaults: di
 
     keep_ref_ids = None
     if big:
-        with open_stream(path, progress_cb=report) as stream:
-            keep_ref_ids, target_items = skim_needed_ref_ids(cfg, stream)
+        keep_ref_ids, target_items = run_skim(
+            cfg, lambda: open_stream(path, progress_cb=report))
         if target_items == 0:
             return {"short_circuit": True, "chunks_total": chunks_total}
         state["pass"] = 1
@@ -368,19 +369,21 @@ def _parse_worker(cfg: MrfxConfig, path_str: str, name: str, header_defaults: di
         nonlocal rows_written, writer
         if not rows:
             return
-        table = pa.Table.from_pylist(rows, schema=RATES_SCHEMA)
+        table = batch_to_table(rows, RATES_SCHEMA)
         if writer is None:
             writer = pq.ParquetWriter(tmp_out, RATES_SCHEMA, compression=PARQUET_COMPRESSION)
         writer.write_table(table)
         rows_written += len(rows)
 
-    parser = InNetworkParser(
-        cfg, source_file=name, external_refs=external_refs,
-        sink=sink, header_defaults=header_defaults, keep_ref_ids=keep_ref_ids,
-    )
+    def make_parser() -> InNetworkParser:
+        return InNetworkParser(
+            cfg, source_file=name, external_refs=external_refs,
+            sink=sink, header_defaults=header_defaults, keep_ref_ids=keep_ref_ids,
+        )
+
     try:
-        with open_stream(path, progress_cb=report) as stream:
-            result = parser.parse(stream)
+        _, result = run_in_network_parse(
+            cfg, make_parser, lambda: open_stream(path, progress_cb=report))
     finally:
         if writer is not None:
             writer.close()
@@ -819,8 +822,8 @@ def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight
                      name, est / 1e9, progress.chunks_total)
             store.upsert_file(name, chunks_total=progress.chunks_total, progress=0.0)
             progress.set_pass(0)
-            with open_stream(path, progress_cb=progress.update) as stream:
-                keep_ref_ids, target_items = skim_needed_ref_ids(cfg, stream)
+            keep_ref_ids, target_items = run_skim(
+                cfg, lambda: open_stream(path, progress_cb=progress.update))
             log.info("%s: pass 1 done — %d target-code items, %d target-cited references",
                      name, target_items, len(keep_ref_ids))
             if target_items == 0:
@@ -845,13 +848,15 @@ def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight
             progress = None
 
         with store.rates_part_writer(name) as writer:
-            parser = InNetworkParser(
-                cfg, source_file=name, external_refs=external_refs,
-                sink=writer.write_batch, header_defaults=header_defaults,
-                keep_ref_ids=keep_ref_ids,
+            _, result = run_in_network_parse(
+                cfg,
+                lambda: InNetworkParser(
+                    cfg, source_file=name, external_refs=external_refs,
+                    sink=writer.write_batch, header_defaults=header_defaults,
+                    keep_ref_ids=keep_ref_ids,
+                ),
+                lambda: open_stream(path, progress_cb=progress.update if progress else None),
             )
-            with open_stream(path, progress_cb=progress.update if progress else None) as stream:
-                result = parser.parse(stream)
         if progress is not None:
             progress.finish()
         store.upsert_file(

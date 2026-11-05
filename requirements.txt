@@ -5,6 +5,9 @@ httpx==0.28.1
 ijson==3.5.1
 duckdb==1.5.5
 pyarrow==25.0.1
+# the fast in-network splitter (mrfx/fastscan.py); 2.3.x is the last line
+# with Windows wheels for every CPython 3.11-3.14 (2.5 dropped 3.11)
+numpy==2.3.5
 pydantic==2.13.4
 PyYAML==6.0.3
 rich==14.0.0

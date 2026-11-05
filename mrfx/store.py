@@ -3464,10 +3464,12 @@ class RatesPartWriter:
         self.tmp.unlink(missing_ok=True)
         return self
 
-    def write_batch(self, rows: list[dict]) -> None:
+    def write_batch(self, rows) -> None:
+        """rows: a parser RowBatch (columnar, fast) or a list of row dicts."""
         if not rows:
             return
-        table = pa.Table.from_pylist(rows, schema=RATES_SCHEMA)
+        from .parser import batch_to_table
+        table = batch_to_table(rows, RATES_SCHEMA)
         if self._writer is None:
             self._writer = pq.ParquetWriter(self.tmp, RATES_SCHEMA, compression=PARQUET_COMPRESSION)
         self._writer.write_table(table)
