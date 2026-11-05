@@ -1105,3 +1105,26 @@ def test_row_batch_without_numpy_builds_the_same_table(cfg, monkeypatch):
     for a, b, batch in zip(with_np, without, batches):
         assert a.equals(b)
         assert a.equals(pa.Table.from_pylist(list(batch), schema=RATES_SCHEMA))
+
+
+def test_extreme_whitespace_and_nested_bundle_references(cfg, tmp_path, monkeypatch):
+    """More whitespace around ':' than the bulk path's simple layout (<=2
+    before, <=4 after) must fall through to the exact path, not be skipped
+    or misread; and provider_references nested inside a bundle are NOT the
+    item's references on either path (only negotiated_rates' count)."""
+    txt = json.dumps({"provider_references": [{"provider_group_id": 9, "provider_groups": G}],
+                      "in_network": [_item("97110", refs=[9],
+                                           bundled_codes=[{"billing_code": "97140", "provider_references": [9]}]),
+                                     _item("99213", groups=G), _item("97140", groups=G)]})
+    for variant in (txt,
+                    txt.replace('"billing_code": ', '"billing_code"' + " " * 10 + ":" + "\n" * 10),
+                    txt.replace('"billing_code_type": ', '"billing_code_type"\r\n\t :\r\n\t\t\t\t\t'),
+                    txt.replace(", ", ",\r\n").replace(": ", " :\r\n\t")):
+        data = variant.encode()
+        rows = _assert_same(cfg, data, monkeypatch)
+        assert len(rows) == 4
+        keep, n = skim_needed_ref_ids(cfg, io.BytesIO(data))
+        assert keep == skim_needed_ref_ids_fast(cfg, io.BytesIO(data))[0] == {9} and n == 2
+        want, _ = _classic_two_pass(cfg, data)
+        got, _, _ = _big_fast(cfg, data, tmp_path)
+        assert sorted(map(_key, got.rows)) == sorted(map(_key, want.rows))

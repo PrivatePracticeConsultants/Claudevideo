@@ -483,6 +483,16 @@ dropping the companion in later re-ingests the affected files automatically.
 estimate and the companion verdict (`READY` / `NEEDS COMPANION` /
 `NOT A RATE FILE` / `UNREADABLE`) from the header alone.
 
+**Remote references are not downloaded.** The schema also lets a reference
+entry carry only a `location` URL whose file holds that one entry's provider
+list. MRF Explorer does not fetch those: rate groups that depend on them are
+skipped and counted, and the Files tab and `mrfx ingest` say "their provider
+lists are remote links MRF Explorer doesn't download" — distinct from the
+missing-companion case, because dropping those linked files in cannot help
+(they carry no `provider_group_id` to match on). None of the real payer
+files checked in Nov 2026 (BCBS, UHC, Moda, Tufts; 10 scanned in full) used
+remote references.
+
 ## Volume expectations
 
 In-network files run 1–100+ GB uncompressed (some ~1 TB), and one licensee's
@@ -522,6 +532,13 @@ the progress bar advancing to 100%.
 ---
 
 # bcbs-mo-mrf — BCBS Missouri PT/Rehab negotiated-rate extraction
+
+> **Legacy tool (`src/` + `run.py`), kept for reference only.** Everything
+> from here down describes that earlier extractor, NOT MRF Explorer. Where they
+> differ, MRF Explorer's behavior is documented above — notably: MRF Explorer
+> does **not** download `location`-style remote provider-reference files (this
+> legacy tool does); it skips the rate groups that cite them and counts them
+> so the Files tab can say so (see "Companion provider-reference files").
 
 Extracts commercial negotiated reimbursement rates for targeted physical-therapy /
 rehab provider groups in Missouri from Blue Cross Blue Shield

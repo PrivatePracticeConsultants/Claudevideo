@@ -358,9 +358,10 @@ retry button reachable.
 
 ## Step 5 — Performance envelope (measured)
 
-- Parse ≈ 30–35 s per uncompressed GB per pass (ijson C backend; this IS the
-  bottleneck — 95% of processing; isal/gzip and buffer tuning were measured
-  and rejected as noise).
+- CLASSIC path (ijson; `fast_scan: false` or a declined file): parse ≈ 30–35
+  s per uncompressed GB per pass. The ijson floor is the per-token yield
+  (~25 s/GB with an empty loop body). The bullets below about dead ends
+  apply to THIS path; the fast path (further down) is what normally runs.
 - Faster-parse dead ends, measured (don't re-litigate without new data): the
   Python event loop is ~55% of parse; a tight drain-loop for skipped items
   gains ~0% (the C generator's yield is the cost, not the loop body);
@@ -438,9 +439,31 @@ retry button reachable.
   bool view + a parity cumsum (2x the compare/gather/searchsorted version
   on string-dense UHC data); keys are found with one C regex pass per chunk;
   Parquet encoding + zstd runs in `BackgroundParquetWriter` (it was 48% of
-  a row-dense file's time). What remains per chunk is numpy over every
-  byte — ~9-10 s/GB on string-dense files; the next step change would need
-  a compiled kernel (e.g. an optional numba scanner), not more numpy.
+  a row-dense file's time). What remains per chunk is numpy over every byte.
+  Measured (5.5 GB UHC, quiet 4-core box): decompression alone 1.4 s/GB;
+  decompression + full byte scan with nothing kept 6.9 s/GB; full single read
+  with rows 34.6–48 s total. A compiled (numba) scanner was EVALUATED, not
+  built: numba has Windows wheels for cp311–cp314, but removing most of the
+  30 s scan projects to ~1.9x on scan-bound files and ~1.05x on row-bound
+  ones (Aetna) — under the ">=2x on real files" bar. Revisit only with a
+  measured prototype.
+- Per worker: 1.2–1.5 cores busy (scanner + decompression thread + Parquet
+  writer thread): UHC 1.22, row-dense WY 1.53, Aetna slice 1.38. The auto
+  `parallel_ingests` (cores-1, cap 8) therefore slightly oversubscribes; NOT
+  changed without a throughput curve measured on an 8-core box (P2.3 in
+  docs/NEXT_STEPS_PROMPT.md).
+- Row production (RowBatch) is factored by provider group: one entry per
+  distinct group + one (price, group) pair per fan-out, expanded with numpy +
+  Arrow take; each group (therapy filter, TIN-only) is decided once per item,
+  not per price. Real files: therapy-only Aetna slice 56.5 -> 48.3 s;
+  default mode ~4%. Kept reference tables share one string object per
+  distinct NPI/TIN: Aetna's 7.4M NPI slots / 2.3M distinct, 606 -> 408 MB.
+- Big-file single read DECLINES (before any row; falls back to the no-spool
+  two-pass) in all-codes mode — the spool would be the whole in_network
+  section — and whenever free disk is under 2 GB (checked up front and every
+  64 MB of spool). Its progress bar has three phases (scan 0-80%, reference
+  re-read 80-85%, replay 85-99%), since a row-heavy file spends most of its
+  time replaying.
 - ROW VOLUME, not bytes, bounds some payers. A real Aetna-generated file
   (1.54 GB gz / 20.4 GB JSON) yields 590,311,124 PT/OT/SLP rows across
   1.92M distinct NPIs — every specialty that bills a 97xxx code, fanned out
@@ -529,6 +552,26 @@ Guards verified live: 35.2 GB refused by confirm_over_gb, 25.1 GB by the
 disk-space guard, both with actionable messages.
 
 ## Step 8 — Known limitations / next frontiers
+
+Open after the Nov 2026 performance/correctness pass (docs/NEXT_STEPS_PROMPT.md
+lists the full audit plan; these are what it left open):
+- Remote `location` provider references are NOT downloaded. The groups that
+  depend on them are skipped, counted (`qa.remote_ref_groups`) and named as
+  such in the Files tab / `mrfx ingest`. None of the real files scanned in
+  full (10 so far) used them; build a fetcher only when a target payer does.
+- `mrfx add` (CLI, no dashboard running) looks up practice names through the
+  live NPPES API after the queue drains — one request per new NPI. On a few
+  million rows that ran >15 min after "finished:" in a trial (it prints
+  "looking up practice names (NPPES)..."). The bulk NPPES file
+  (`enrichment.mode: bulk`) avoids it; consider making the CLI say how many
+  lookups remain, or skip them for huge drains.
+- A worker notices its parent died only at its next progress report; one
+  that dies in a small file's last seconds may finish and leave its temps for
+  the next start's sweep (swept then; big files report through replay).
+- Not measured here (Linux, 4 cores): the parallel_ingests throughput curve
+  on an 8-core box, and anything Windows-specific (file locking on .spool.tmp
+  under AV scanners, console encoding) — see NEXT_STEPS_PROMPT P2.3 / P3.
+
 
 Deferred from the July 2026 comprehensive audit (real findings, consciously
 not yet built — pick these up before adding features):

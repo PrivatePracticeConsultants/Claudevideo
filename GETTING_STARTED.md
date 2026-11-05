@@ -532,10 +532,25 @@ them):
 14:05:01 INFO    mrfx.fetch: parallel ingest: 3 parser worker process(es)
 ```
 
-Parsing is the slow part (roughly 30 seconds per uncompressed GB *per worker*,
-and big payer files are 10–200 GB uncompressed), so the wall-clock for a long
-queue is basically `total uncompressed GB ÷ workers`. Here's what actually
-moves that number, in order of impact:
+Parsing is the slow part, and how slow depends on the kind of file. What to
+expect per worker (measured on real payer files on a 4-core test machine in
+Nov 2026 — your PC will differ, but the shape holds):
+
+| Kind of file | Real example | Time per worker |
+|---|---|---|
+| Big file, few of your codes in it | UHC, 5.5 GB uncompressed | 35–50 s (6–9 s per uncompressed GB) |
+| Very big file | BCBS Wyoming, 42 GB uncompressed | about 7½ minutes |
+| None of your codes in it | BCBS North Dakota, 3 GB | about 1 minute (skipped quickly) |
+| Huge number of providers per rate | Aetna, 20 GB → 590 million rows | 25–30 minutes — limited by the rows it writes, not the file size |
+
+So a file that sits at the same percentage for a minute is normal; one that
+shows **no movement for an hour** is not (the app flags that on its own). For
+the many-rows kind, `therapy_only_ingest: true` in `config/mrfx.yaml` is the
+big lever: on that Aetna data it cut the rows ~10× and the time roughly in
+half. Read its comment in that file first — it **permanently** leaves out the
+non-therapist providers (MDs, NPs…) who also bill these codes, and it needs
+the NPPES provider data loaded before it can tell therapists apart.
+Here's what moves the queue's total time, in order of impact:
 
 1. **Use more of your CPU (if you have it).** Auto mode uses your core count
    minus one, but stops at **8** workers to stay safe on RAM. If Task Manager →
@@ -550,7 +565,10 @@ moves that number, in order of impact:
    database and Windows itself. On a 16 GB machine, don't go past 5–6; on
    32 GB, 10–12 is fine. (If you've ever seen an out-of-memory error on this
    machine, stay at the auto setting.) Values above your core count are
-   clamped — extra processes past the cores only fight each other.
+   clamped — extra processes past the cores only fight each other. Each
+   worker keeps a bit more than one core busy (about 1.2–1.5: its file
+   reading and database writing run alongside the parsing), so you don't
+   gain anything by going past your core count.
 
 2. **More simultaneous downloads if the parsers are starving.** On the Files
    tab, if parsers sit idle while links crawl (common with Blue-plan CDNs that
