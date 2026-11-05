@@ -69,6 +69,37 @@ def _parse_one(cfg: MrfxConfig, path: Path, fast: bool, two_pass: bool, out: Pat
     return info
 
 
+def _compare_row_sets(duckdb, tmp: str, a: str, b: str) -> tuple[int, int]:
+    """(rows only in a, rows only in b) as MULTISETS. First a streaming
+    digest — row count plus two independent sums of per-row hashes, one scan
+    each, no spill — which settles the common IDENTICAL case on any file
+    size. Only when the digests differ does it run the exact EXCEPT ALL to
+    count the differing rows; its spill stays inside this check's own temp
+    folder (never the current directory)."""
+    con = duckdb.connect()
+    try:
+        spill = Path(tmp) / "spill"
+        spill.mkdir(exist_ok=True)
+        con.execute(f"SET temp_directory = '{str(spill).replace(chr(39), chr(39) * 2)}'")
+        cols = [r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet('{a}')").fetchall()
+                if r[0] != "ingested_at"]
+        tup = ", ".join(f'"{c}"' for c in cols)
+        digest = ("SELECT count(*), sum(hash({t})::HUGEINT), "
+                  "sum(hash('salt', {t})::HUGEINT) FROM read_parquet('{x}')")
+        if (con.execute(digest.format(t=tup, x=a)).fetchone()
+                == con.execute(digest.format(t=tup, x=b)).fetchone()):
+            return 0, 0
+        q = ("SELECT count(*) FROM (SELECT {c} FROM read_parquet('{x}') "
+             "EXCEPT ALL SELECT {c} FROM read_parquet('{y}'))")
+        only_a = con.execute(q.format(c=_COLS_EXCEPT_INGESTED, x=a, y=b)).fetchone()[0]
+        only_b = con.execute(q.format(c=_COLS_EXCEPT_INGESTED, x=b, y=a)).fetchone()[0]
+        # a digest mismatch with no row difference cannot happen for equal
+        # multisets; report it rather than claim IDENTICAL
+        return (only_a, only_b) if (only_a or only_b) else (-1, -1)
+    finally:
+        con.close()
+
+
 def compare_parsers(cfg: MrfxConfig, path: Path, two_pass: bool | None = None) -> dict:
     """Both parsers on one file -> a report dict; report['identical'] is the
     verdict. Errors from either side are captured, not raised: a file both
@@ -112,13 +143,13 @@ def compare_parsers(cfg: MrfxConfig, path: Path, two_pass: bool | None = None) -
                 rep["differences"].append("fast skim kept reference ids the classic skim did not")
             for side in (c, f):
                 side["skim_ref_ids"] = len(side.pop("skim_ref_ids"))
-        con = duckdb.connect()
         a, b = (str(outs[m]).replace("'", "''") for m in ("classic", "fast"))
-        q = ("SELECT count(*) FROM (SELECT {cols} FROM read_parquet('{x}') "
-             "EXCEPT ALL SELECT {cols} FROM read_parquet('{y}'))")
-        only_c = con.execute(q.format(cols=_COLS_EXCEPT_INGESTED, x=a, y=b)).fetchone()[0]
-        only_f = con.execute(q.format(cols=_COLS_EXCEPT_INGESTED, x=b, y=a)).fetchone()[0]
-        con.close()
+        try:
+            only_c, only_f = _compare_row_sets(duckdb, tmp, a, b)
+        except duckdb.Error as e:
+            rep["differences"].append(f"could not compare the row sets: {e}")
+            rep["identical"] = False
+            return rep
         rep["rows_only_in_classic"], rep["rows_only_in_fast"] = only_c, only_f
         if only_c or only_f:
             rep["differences"].append(
