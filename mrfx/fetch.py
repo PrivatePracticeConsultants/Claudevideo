@@ -445,7 +445,7 @@ def _segmented_download(cfg: MrfxConfig, url: str, dest: Path, part: Path, val_p
                                             retryable=resp.status_code in RETRYABLE_STATUS)
                     with open(part, "r+b") as f:
                         f.seek(start + got)
-                        for chunk in resp.iter_bytes(chunk_size=1 << 20):
+                        for chunk in _body_chunks(resp):
                             if state["err"] or state["canceled"]:
                                 return
                             h = _halt()
@@ -538,6 +538,21 @@ def _reserve_disk_or_raise(my_key: int, parent: Path, total: int, resume_from: i
                 retryable=False,
             )
         _disk_reservations[my_key] = max(0, total - resume_from)
+
+
+def _body_chunks(resp, size: int = 1 << 20):
+    """The response body as SENT. We ask for `Accept-Encoding: identity`, but
+    some origins (S3 objects stored with Content-Encoding: gzip metadata) gzip
+    anyway; iter_bytes() would silently decode that — writing ~20x the bytes
+    (a 20 GB file landing as 200 GB), giving the file a different content
+    hash than other copies, and, worst, making a Range resume (whose offsets
+    count ENCODED bytes) splice decoded and encoded data into a corrupt file.
+    gzip-encoded bodies are kept raw (open_stream reads gzip by its magic
+    bytes, whatever the name); other encodings are still decoded."""
+    enc = (resp.headers.get("Content-Encoding") or "").strip().lower()
+    if enc in ("", "identity", "gzip", "x-gzip"):
+        return resp.iter_raw(chunk_size=size)
+    return resp.iter_bytes(chunk_size=size)
 
 
 def download(cfg: MrfxConfig, url: str, dest: Path, progress_cb=None,
@@ -637,6 +652,12 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                     except _SegmentationFailed as e:
                         log.info("%s: %s — falling back to a single connection", url, e)
 
+    # the running hash of the .part's bytes, carried across reconnects so a
+    # resume does NOT re-read everything downloaded so far (that re-hash grew
+    # with the square of the number of resumes — ~3 s per GB each time, and
+    # the connection sat idle meanwhile, inviting the next reset). Re-hashed
+    # from disk only when the .part isn't exactly what we hashed.
+    sha_carry: tuple | None = None   # (hasher, bytes hashed)
     while attempt <= cfg.download_retries and connections < _MAX_DOWNLOAD_CONNECTIONS:
         if _canceled():
             raise DownloadError("download canceled", retryable=False, canceled=True)
@@ -772,11 +793,16 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                     # up-front guard instead of overcommitting the disk.
                     _set_reservation(my_key, _UNKNOWN_LEN_RESERVATION)
 
-                sha = hashlib.sha256()
-                if resuming:
-                    with open(part, "rb") as f:  # hash what we already have
+                if resuming and sha_carry is not None and sha_carry[1] == resume_from:
+                    sha = sha_carry[0]               # continue the running hash
+                else:
+                    sha = hashlib.sha256()
+                    sha_carry = None
+                if resuming and sha_carry is None:
+                    with open(part, "rb") as f:  # cold resume: hash what we already have
                         for blk in iter(lambda: f.read(1 << 20), b""):
                             sha.update(blk)
+                if resuming:
                     log.info("resuming download at %.1f GB / %s", resume_from / 1e9,
                              f"{total / 1e9:.1f} GB" if total else "?")
                 else:
@@ -802,10 +828,11 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                 last_report_t = 0.0
                 last_free_check = done  # for the unknown-length mid-stream guard
                 with open(part, "ab" if resuming else "wb") as f:
-                    for chunk in resp.iter_bytes(chunk_size=1 << 20):
+                    for chunk in _body_chunks(resp):
                         f.write(chunk)
                         sha.update(chunk)
                         done += len(chunk)
+                        sha_carry = (sha, done)
                         if total:
                             # written bytes now show in disk_usage; shrink the
                             # reservation so they're never counted twice

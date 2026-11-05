@@ -2134,3 +2134,98 @@ def test_slow_big_file_requeues_itself_instead_of_waiting_for_a_human(cfg, store
     # than starting over (that is what makes repeated passes converge)
     parts = list(cfg.downloads_dir.glob("*.part"))
     assert parts and parts[0].stat().st_size > 0, "partial bytes must survive"
+
+
+def test_resume_continues_the_running_hash_instead_of_rereading(cfg, monkeypatch):
+    """Each reconnect used to re-read and re-hash EVERYTHING downloaded so far
+    (cost grows with the square of the number of resumes, and the connection
+    idled meanwhile). Within one download the hash now carries over; the
+    final hash must still be the hash of the exact bytes."""
+    import builtins
+    import hashlib
+    import http.server as hs
+    import os as _os
+
+    payload = _os.urandom(6 << 20)
+    calls = []
+
+    class Drops(hs.BaseHTTPRequestHandler):
+        def do_GET(self):
+            rng = self.headers.get("Range")
+            start = int(rng.split("=")[1].rstrip("-")) if rng else 0
+            calls.append(start)
+            body = payload[start:]
+            self.send_response(206 if rng else 200)
+            if rng:
+                self.send_header("Content-Range", f"bytes {start}-{len(payload)-1}/{len(payload)}")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            # every response drops after ~1.5 MB until the last stretch
+            self.wfile.write(body if len(body) <= (2 << 20) else body[: (3 << 20) // 2])
+            self.wfile.flush()
+            self.connection.close()
+
+        def log_message(self, *a):
+            pass
+
+    rereads = []
+    real_open = builtins.open
+
+    def spy_open(file, mode="r", *a, **k):
+        if str(file).endswith(".part") and mode == "rb":
+            rereads.append(str(file))
+        return real_open(file, mode, *a, **k)
+    monkeypatch.setattr(builtins, "open", spy_open)
+
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Drops)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        from mrfx.fetch import download, filename_for
+
+        url = f"http://127.0.0.1:{httpd.server_address[1]}/r.json.gz"
+        dest = cfg.downloads_dir / filename_for(url)
+        sha, _ = download(cfg, url, dest)
+        assert sha == hashlib.sha256(payload).hexdigest()
+        assert len(calls) >= 3, calls                 # really resumed several times
+        assert rereads == [], rereads                 # never re-read the .part to hash it
+    finally:
+        httpd.shutdown()
+
+
+def test_a_gzip_encoded_body_is_saved_as_sent_not_decoded(cfg):
+    """Some origins gzip a body we asked for as identity (S3 objects stored
+    with Content-Encoding: gzip). Decoding it wrote ~20x the bytes and made
+    Range resumes (encoded offsets) splice decoded+encoded data. The bytes
+    on disk must be exactly what was sent — and still ingestible."""
+    import gzip as _gz
+    import hashlib
+    import http.server as hs
+
+    doc = json.dumps({"reporting_entity_name": "Enc", "in_network": []}).encode() * 1
+    sent = _gz.compress(doc)
+
+    class Enc(hs.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Content-Length", str(len(sent)))
+            self.end_headers()
+            self.wfile.write(sent)
+
+        def log_message(self, *a):
+            pass
+
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Enc)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        from mrfx.fetch import download, filename_for
+        from mrfx.sniff import open_stream
+
+        url = f"http://127.0.0.1:{httpd.server_address[1]}/plain.json"
+        dest = cfg.downloads_dir / filename_for(url)
+        sha, _ = download(cfg, url, dest)
+        assert dest.read_bytes() == sent and sha == hashlib.sha256(sent).hexdigest()
+        with open_stream(dest) as s:          # read as gzip by its magic bytes
+            assert s.read() == doc
+    finally:
+        httpd.shutdown()

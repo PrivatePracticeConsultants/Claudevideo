@@ -1581,11 +1581,30 @@ class Store:
                             r.get("plan_id_type"), r.get("market_type")])
         if not payload:
             return 0
+        # one bulk INSERT OR REPLACE instead of executemany (row-at-a-time,
+        # ~420 rows/s, minutes under the write lock for a 200k-plan TOC). A
+        # bulk upsert refuses two rows with the same key, which executemany
+        # resolved as "last one wins" — so dedupe the same way first.
+        last: dict = {}
+        for row in payload:
+            last[(row[0], row[1], row[2])] = row
+        rows_out = list(last.values())
+        tbl = pa.table({  # noqa: F841 — scanned by name below
+            "dedup_key": pa.array([r[0] for r in rows_out], pa.string()),
+            "plan_name": pa.array([r[1] for r in rows_out], pa.string()),
+            "plan_id": pa.array([r[2] for r in rows_out], pa.string()),
+            "plan_id_type": pa.array([r[3] for r in rows_out], pa.string()),
+            "market_type": pa.array([r[4] for r in rows_out], pa.string()),
+        })
         with self.write_lock, self.connect() as con:
-            con.executemany(
-                "INSERT OR REPLACE INTO plan_index "
-                "(dedup_key, plan_name, plan_id, plan_id_type, market_type) "
-                "VALUES (?, ?, ?, ?, ?)", payload)
+            con.register("__plans_in", tbl)
+            try:
+                con.execute(
+                    "INSERT OR REPLACE INTO plan_index "
+                    "(dedup_key, plan_name, plan_id, plan_id_type, market_type) "
+                    "SELECT dedup_key, plan_name, plan_id, plan_id_type, market_type FROM __plans_in")
+            finally:
+                con.unregister("__plans_in")
         return len(payload)
 
     def plans_for_payer(self, payer: str | None = None) -> list[dict]:
@@ -3002,14 +3021,32 @@ class Store:
             )
             if not refs:
                 return
-            con.executemany(
-                "INSERT INTO provider_refs VALUES (?, ?, ?, ?, ?, ?, ?)",
-                [
-                    [payer, source_file, last_updated_on, rid, tin_value, tin_type, list(npis)]
-                    for rid, groups in refs.items()
-                    for tin_value, tin_type, npis in (groups or [(None, None, ())])
-                ],
-            )
+            # one Arrow table, one INSERT: executemany ran ~420 rows/s
+            # (measured) — hours for a 4M-group reference file, all of it
+            # under the store write lock that every other worker waits on
+            rids, tins, types, npi_lists = [], [], [], []
+            for rid, groups in refs.items():
+                for tin_value, tin_type, npis in (groups or [(None, None, ())]):
+                    rids.append(rid)
+                    tins.append(tin_value)
+                    types.append(tin_type)
+                    npi_lists.append(list(npis))
+            n = len(rids)
+            refs_tbl = pa.table({  # noqa: F841 — scanned by name below
+                "payer": pa.array([payer] * n, pa.string()),
+                "source_file": pa.array([source_file] * n, pa.string()),
+                "last_updated_on": pa.array([last_updated_on] * n, pa.string()),
+                "ref_id": pa.array(rids, pa.int64()),
+                "tin_value": pa.array(tins, pa.string()),
+                "tin_type": pa.array(types, pa.string()),
+                "npis": pa.array(npi_lists, pa.list_(pa.string())),
+            })
+            con.register("__refs_in", refs_tbl)
+            try:
+                con.execute("INSERT INTO provider_refs SELECT payer, source_file, last_updated_on, "
+                            "ref_id, tin_value, tin_type, npis FROM __refs_in")
+            finally:
+                con.unregister("__refs_in")
 
     def load_provider_refs(self, payer: str) -> dict[int, list[tuple[str | None, str | None, tuple[str, ...]]]]:
         """Per ref_id, only the NEWEST vintage's groups are served: two
