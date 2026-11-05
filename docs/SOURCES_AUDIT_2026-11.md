@@ -36,3 +36,55 @@ Security Health, Horizon, Idaho, Priority, UPMC, Sentara, SummaCare: 2026-11.
 Mississippi, Centene, SelectHealth: 2026-10. CareFirst: mostly 2026-09.
 First Health: 2026-06 (stale). UnitedHealthcare: 76,234 files listed for
 2026-11 (7,476 in-network).
+
+## Additions, same day (2026-11-05, second pass)
+
+Five research passes (Northeast, Southeast, Midwest, South-central & West,
+national TPAs / networks / hosting vendors) proposed ~110 candidates. Each
+was run through the same live check (`verify_candidates.py`) and a second
+check that the app can READ what the source lists (`ext_check.py`: file types
+of the lifted links, and for a `.zip` its member names read with HTTP range
+requests). Only sources that passed both went in as auto-queueable.
+
+**Result: 145 entries — 104 auto-queueable (was 37), 41 open-in-browser.**
+
+- **New auto-queueable (58):** Healthfirst, Fallon, NHPRI, Mass General
+  Brigham HP, CDPHP, Geisinger, AmeriHealth NJ ×2 / PA, Independent Health,
+  MVP; AvMed, Health First, Alliant, AmeriHealth Caritas Next, First Choice
+  Next, The Health Plan, MedCost, Health Advantage ×3; HealthPartners, Medical
+  Mutual of Ohio, Paramount, Quartz, Aspirus, McLaren ×2, Sanford, Avera,
+  AultCare, Ohio Health Choice, PHP of N. Indiana, GHC-SCW, WPS; PacificSource,
+  Mountain Health CO-OP, UHA, Sutter, U of Utah, Hometown Health, CHPW, Sharp,
+  Baylor Scott & White, HMAA, Presbyterian; Meritain, Allied Benefit Systems,
+  HealthComp/Personify, ACS, Zenith American, QuikTrip, Healthcare Highways,
+  Luminare (Valenz), MultiPlan/PHCS (SISCO mirror), Curative, Gravie,
+  Preferred Health Professionals.
+- **Existing portals made auto-queueable (9):** BCBS Arizona, Excellus,
+  BCBS Nebraska, Health New England, Capital Blue Cross, Wellmark, Univera,
+  Blue Shield of CA, Premera — via HealthSparq's undated
+  `mrf.healthsparq.com/<tenant>-egress.nophi.kyruushsq.com/prd/mrf/<INSURER_I>/<BRAND>/latest_metadata.json`,
+  which lists current files directly (no browser needed).
+- **New open-in-browser (18), each with the reason:** CareSource (ZIPs nested
+  in ZIPs), MercyCare (.zst), UCare and 1199SEIU (invalid index JSON), Johns
+  Hopkins EHP (month folders), GlobalHealth (403 to automated downloads),
+  Community Health Options, Collective Health, L.A. Care, WebTPA, Imagine360,
+  Providence, Sendero, Community Health Choice (links not liftable), Medica
+  (feed stale since 2026-03), and UNVERIFIED from the test network: Jefferson
+  (502), WellSense (port 8443), Midlands Choice (incomplete TLS chain).
+- **Rejected:** MetroPlus (newest files 2024-02), Prominence (2026-04),
+  Denver Health (stale since 2024), Healthgram regional networks (2026-02),
+  Group Health Cooperative of Eau Claire (2024-06), Valenz/HealthSmart (2022)
+  and HPI (dead links), MagnaCare (dead links), Sidecar (allowed amounts only),
+  QualChoice / Fidelis / Health Net (already inside the Centene source).
+
+**Full re-audit of all 145 entries after the additions:** 100 of 104
+auto-queueable resolve to live, readable files; the other 4 behave exactly as
+their notes say (Anthem asks before its 11.5 GB index; BCBS SC refuses this
+test machine; Moda's own dead files; Avera's file host fails this tester's
+quick HEAD but the app's downloader fetched its file). 37 of 41 portals load;
+the other 4 are the ones marked UNVERIFIED / bot-walled.
+
+App limits found along the way (not fixed here): no `.7z` or `.zst`
+decompression, no ZIP-inside-ZIP, strict JSON for indexes, and a 2,000-file
+cap per index (`max_toc_files`) that hides most of the big TPA hubs unless
+raised.

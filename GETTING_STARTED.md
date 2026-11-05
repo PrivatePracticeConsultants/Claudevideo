@@ -195,25 +195,24 @@ aren't part of that comparison.)
   mrfx add --file config/starter_links.txt
   ```
 
-  That queues 38 sources (Highmark's 15 hosted Blue plans, BCBS Mississippi,
-  BCBS Tennessee, Cigna, BCBS South and North Carolina, CareFirst, Molina,
-  Kaiser, Aetna, Harvard Pilgrim, Regence, Oscar, the 14-state Anthem
-  master index,
-  Centene/Ambetter's all-states page, the Blue KC / BCBS Michigan /
-  BCBS Louisiana hubs, UnitedHealthcare's national portal, SelectHealth
-  (Utah/Idaho/Nevada), Moda Health (Oregon/Alaska/Texas), the First
-  Health PPO rental network, Tufts Health Public Plans (Massachusetts),
-  and Security Health Plan (Wisconsin) —
-  Molina/Kaiser/Aetna/Harvard Pilgrim/Regence/Oscar need the headless
-  browser, which the app now downloads for itself on first use (the
-  starter-links FILE swaps Oscar
-  for a browser-free monthly index), and Anthem needs confirm_over_gb: 12).
-  Each one
-  expands on its own — expect thousands of files to queue and let it run.
-  The same file lists the remaining browser-only portals (Humana, HCSC, Premera…)
+  That queues about 100 automatic sources (audited live 2026-11-05 — see
+  docs/SOURCES_AUDIT_2026-11.md): the Highmark-hosted Blue plans, about 20
+  more Blue plans (Michigan, Kansas City, Louisiana, Idaho, Arizona,
+  Nebraska, Vermont, Excellus, Premera, Wellmark, Blue Shield of CA…),
+  Anthem's 14-state master index, UnitedHealthcare, Aetna, Cigna, Kaiser,
+  Centene/Ambetter, regional plans across the country, and national
+  administrators and networks (Meritain, Allied Benefit Systems, HealthComp,
+  MedCost, MultiPlan/PHCS…). That is hundreds of thousands of files and many
+  terabytes, a grind of weeks, so most people paste only the sources for
+  their own states from **Show tested sources** instead. Some sources use the
+  headless browser, which the app downloads for itself on first use. Anthem's
+  index is 11.5 GB and asks for "download anyway" unless confirm_over_gb is
+  15 or more. Each big index is capped at 2,000 files unless you raise
+  max_toc_files.
+  The same file lists the remaining browser-only portals (Humana, HCSC, HAP…)
   with instructions in the comments. Click **"Show tested
 sources"** on the Files tab to browse it, or **"Queue tested payer indexes"**
-to load them all — monthly-dated links are refreshed to the current month
+to load all the automatic ones — monthly-dated links are refreshed to the current month
 automatically. The catalog lives in `config/known_sources.yaml` with each
 source's verification date and test results.
 

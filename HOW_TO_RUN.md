@@ -156,8 +156,16 @@ exactly where it stopped, including half-finished downloads.
    the "machine-readable file" links insurers publish — a "table of contents"
    link that lists many files is fine; the program expands it.
 3. Click **Add links**.
-   - Not sure where to start? Click **Queue tested payer indexes** — it queues
-     insurer links this program has already been tested against.
+   - Not sure where to start? Click **Show tested sources**: it lists about
+     145 insurer and administrator links this program has been tested against
+     (each with the date it was checked and what to expect). **Copy the ones
+     for the states and insurers you care about** into the box above and click
+     **Add links**.
+   - **Queue tested payer indexes** queues ALL of the roughly 100 automatic
+     ones at once. That is hundreds of thousands of files and many terabytes,
+     a grind of weeks, so only use it if you really want everything. (Each big
+     index is capped at 2,000 files unless you raise `max_toc_files` in
+     `config/mrfx.yaml`.)
 4. Watch the list below: each file goes *queued → downloading → ingesting →
    done*. The bar shows progress. Large files take a while (see the table in
    `GETTING_STARTED.md` under "what to expect"); you can keep using the

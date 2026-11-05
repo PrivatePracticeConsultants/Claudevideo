@@ -119,26 +119,28 @@ sources:
       book.)
 
   - name: BCBS Nebraska (own book)
-    url: https://www.nebraskablue.com/MRFs
-    kind: portal
-    queueable: false
+    url: https://mrf.healthsparq.com/bcbsne-egress.nophi.kyruushsq.com/prd/mrf/BCBSNE_I/BCBSNE/latest_metadata.json
+    kind: listing
+    queueable: true
     verified: "2026-11-05"
     notes: >-
-      Checked 2026-11-05: nebraskablue.com/MRFs redirects to BCBSNE's
-      HealthSparq portal (JavaScript; open in a browser). The old
-      Highmark-hosted "Nebraska" index was a copy of Highmark PA's index, not
-      BCBSNE's book.
+      HealthSparq's undated latest_metadata.json for this brand — it lists the
+      current files directly, so no browser is needed (the human portal is
+      https://www.nebraskablue.com/MRFs). Verified 2026-11-05: 38 file links,
+      newest dated 2026-11; sampled files answer HTTP 200. Previously a
+      browser-only portal entry.
 
   - name: BCBS Arizona (own book)
-    url: https://bcbsaz.healthsparq.com/healthsparq/public/#/one/insurerCode=BCBSAZ_I&brandCode=BCBSAZ/machine-readable-transparency-in-coverage
-    kind: portal
-    queueable: false
+    url: https://mrf.healthsparq.com/bcbsaz-egress.nophi.kyruushsq.com/prd/mrf/BCBSAZ_I/BCBSAZ/latest_metadata.json
+    kind: listing
+    queueable: true
     verified: "2026-11-05"
     notes: >-
-      UNCONFIRMED 2026-11-05: BCBSAZ's HealthSparq portal address, from BCBSAZ's
-      own 2022 announcement; azblue.com no longer links a transparency page.
-      Open in a browser and check it is current. The old Highmark-hosted
-      "Arizona" index was a copy of Highmark PA's index, not BCBSAZ's book.
+      HealthSparq's undated latest_metadata.json for this brand — it lists the
+      current files directly, so no browser is needed (the human portal is
+      https://bcbsaz.healthsparq.com/healthsparq/public/#/one/insurerCode=BCBSAZ_I&brandCode=BCBSAZ/machine-readable-transparency-in-coverage).
+      Verified 2026-11-05: 511 file links, newest dated 2026-11; sampled files
+      answer HTTP 200. Previously a browser-only portal entry.
 
   - name: Highmark Blue Shield of Pennsylvania
     url: https://mrfdata.hmhs.com/files/378/pa/inbound/local/{FIRST_OF_MONTH}_Highmark_Blue_Shield_of_Pennsylvania_index.json
@@ -240,7 +242,10 @@ sources:
       answer HTTP 200. Earlier: Static page; the app lifts 12 index files off it
       automatically (Ambetter, Fidelis, QualChoice, ...). Verified cascade:
       Ambetter index expanded to 28 files; two ingested as "Centene Management
-      Company LLC" (Ambetter OK + IN), 2,561,540 rows total.
+      Company LLC" (Ambetter OK + IN), 2,561,540 rows total. Checked 2026-11-05:
+      the page's 11 indexes cover Ambetter, Fidelis Care, Health Net and
+      QualChoice (Arkansas — its main index plus 7 employer indexes), so those
+      need no separate entries.
 
   - name: UnitedHealthcare (national)
     url: https://transparency-in-coverage.uhc.com/
@@ -460,15 +465,16 @@ sources:
       browser; if files download there, drop them into data/inbox/.
 
   - name: Wellmark BCBS (Iowa / South Dakota)
-    url: https://www.wellmark.com/charges-and-costs
-    kind: portal
-    queueable: false
+    url: https://mrf.healthsparq.com/wmrk-egress.nophi.kyruushsq.com/prd/mrf/WMRK_I/WELLMARK/latest_metadata.json
+    kind: listing
+    queueable: true
     verified: "2026-11-05"
     notes: >-
-      Re-verified 2026-11-05 (page loads, HTTP 200 unless noted): Wellmark's
-      "Charges and costs" page — its machine-readable files sit in a HealthSparq
-      portal (JavaScript; open in a browser). The old
-      wellmark.com/transparency-in-coverage page now returns 404.
+      HealthSparq's undated latest_metadata.json for this brand — it lists the
+      current files directly, so no browser is needed (the human portal is
+      https://www.wellmark.com/charges-and-costs). Verified 2026-11-05: 26 file
+      links, newest dated 2026-11; sampled files answer HTTP 200. Previously a
+      browser-only portal entry.
 
   - name: Horizon BCBS New Jersey
     url: https://horizonblue.sapphiremrfhub.com/
@@ -483,13 +489,16 @@ sources:
       returns 404.
 
   - name: Premera Blue Cross (Washington / Alaska)
-    url: https://www.premera.com/visitor/transparency-in-coverage
-    kind: portal
-    queueable: false
+    url: https://mrf.healthsparq.com/premera-egress.nophi.kyruushsq.com/prd/mrf/PREMERA_I/PREMERA/latest_metadata.json
+    kind: listing
+    queueable: true
     verified: "2026-11-05"
     notes: >-
-      Re-checked 2026-11-05: page loads (HTTP 200). JavaScript page (probed — no
-      static links); paste file links from a browser.
+      HealthSparq's undated latest_metadata.json for this brand — it lists the
+      current files directly, so no browser is needed (the human portal is
+      https://www.premera.com/visitor/transparency-in-coverage). Verified
+      2026-11-05: 599 file links, newest dated 2026-11; sampled files answer
+      HTTP 200. Previously a browser-only portal entry.
 
   - name: Regence (Cambia — OR / WA / UT / ID)
     url: https://www.regence.com/transparency-in-coverage/
@@ -689,41 +698,40 @@ sources:
       browser.
 
   - name: Blue Shield of California
-    url: https://www.blueshieldca.com/en/home/help-and-resources/machine-readable-files
-    kind: portal
-    queueable: false
+    url: https://mrf.healthsparq.com/bsca-egress.nophi.kyruushsq.com/prd/mrf/BSCA_I/BSCA/latest_metadata.json
+    kind: listing
+    queueable: true
     verified: "2026-11-05"
     notes: >-
-      Re-verified 2026-11-05 (page loads, HTTP 200 unless noted): Blue Shield of
-      CA's machine-readable-files page; the files are in a HealthSparq portal
-      (JavaScript; open in a browser). The old
-      /get-to-know-blue-shield/machine-readable-files page now returns 404.
+      HealthSparq's undated latest_metadata.json for this brand — it lists the
+      current files directly, so no browser is needed (the human portal is
+      https://www.blueshieldca.com/en/home/help-and-resources/machine-readable-files).
+      Verified 2026-11-05: 996 file links, newest dated 2026-11; sampled files
+      answer HTTP 200. Previously a browser-only portal entry.
 
   - name: Excellus BCBS (upstate New York)
-    url: https://excellusbcbs.healthsparq.com/healthsparq/public/#/one/insurerCode=EXC_I&brandCode=EXC&productCode=MRF/machine-readable-transparency-in-coverage
-    kind: portal
-    queueable: false
+    url: https://mrf.healthsparq.com/exc-egress.nophi.kyruushsq.com/prd/mrf/EXC_I/EXC/latest_metadata.json
+    kind: listing
+    queueable: true
     verified: "2026-11-05"
     notes: >-
-      Re-checked 2026-11-05: page loads (HTTP 200). HealthSparq SPA — with
-      Playwright the app renders it and follows its latest_metadata.json to 117
-      employer-group TOCs automatically, BUT every one lists only out-of-network
-      allowed-amounts files (Excellus publishes no negotiated-rate files at this
-      endpoint), so there is nothing to ingest. TOCs are marked skipped with
-      that explanation. The healthsparq render flow itself works and should
-      generalize to other HealthSparq-hosted Blues whose books do carry
-      in-network files.
+      HealthSparq's undated latest_metadata.json for this brand — it lists the
+      current files directly, so no browser is needed (the human portal is
+      https://excellusbcbs.healthsparq.com/healthsparq/public/#/one/insurerCode=EXC_I&brandCode=EXC&productCode=MRF/machine-readable-transparency-in-coverage).
+      Verified 2026-11-05: 119 file links, newest dated 2026-11; sampled files
+      answer HTTP 200. Previously a browser-only portal entry.
 
   - name: Capital Blue Cross (central Pennsylvania)
-    url: https://www.capbluecross.com/wps/portal/cap/about/machine-readable-file-transparency-in-coverage
-    kind: portal
-    queueable: false
+    url: https://mrf.healthsparq.com/capbc-egress.nophi.kyruushsq.com/prd/mrf/CAPBC_I/CAPBC/latest_metadata.json
+    kind: listing
+    queueable: true
     verified: "2026-11-05"
     notes: >-
-      Re-verified 2026-11-05 (page loads, HTTP 200 unless noted): Capital Blue
-      Cross moved the page from /company/legal/ to /about/; files are in a
-      HealthSparq portal (JavaScript; open in a browser). The old address shows
-      a 404 page.
+      HealthSparq's undated latest_metadata.json for this brand — it lists the
+      current files directly, so no browser is needed (the human portal is
+      https://www.capbluecross.com/wps/portal/cap/about/machine-readable-file-transparency-in-coverage).
+      Verified 2026-11-05: 7 file links, newest dated 2026-11; sampled files
+      answer HTTP 200. Previously a browser-only portal entry.
 
   - name: Independence Blue Cross (Philadelphia)
     url: https://www.ibx.com/resources/for-members/transparency-in-coverage
@@ -778,15 +786,16 @@ sources:
       hap.org/transparency page now returns 404.
 
   - name: Health New England (Massachusetts)
-    url: https://healthnewengland.healthsparq.com/healthsparq/public/#/one/city=&state=&postalCode=&country=&insurerCode=HNE_I&brandCode=HNE/machine-readable-transparency-in-coverage
-    kind: portal
-    queueable: false
+    url: https://mrf.healthsparq.com/hne-egress.nophi.kyruushsq.com/prd/mrf/HNE_I/HNE/latest_metadata.json
+    kind: listing
+    queueable: true
     verified: "2026-11-05"
     notes: >-
-      Re-verified 2026-11-05 (page loads, HTTP 200 unless noted): HNE's "Machine
-      Readable Data" link (from healthnewengland.org/forms, Employers section) —
-      a HealthSparq portal (JavaScript; open in a browser). The old
-      healthnewengland.org/transparency-coverage page now returns 404.
+      HealthSparq's undated latest_metadata.json for this brand — it lists the
+      current files directly, so no browser is needed (the human portal is
+      https://healthnewengland.healthsparq.com/healthsparq/public/#/one/city=&state=&postalCode=&country=&insurerCode=HNE_I&brandCode=HNE/machine-readable-transparency-in-coverage).
+      Verified 2026-11-05: 12 file links, newest dated 2026-11; sampled files
+      answer HTTP 200. Previously a browser-only portal entry.
 
   - name: SummaCare (Ohio)
     url: https://files.myplancentral.com/TIC/TOC/
@@ -801,15 +810,16 @@ sources:
       summacare.com homepage.
 
   - name: Univera Healthcare (western New York)
-    url: https://news.univerahealthcare.com/developer-info/transparency-coverage-mrf
-    kind: portal
-    queueable: false
+    url: https://mrf.healthsparq.com/unvra-egress.nophi.kyruushsq.com/prd/mrf/UNVRA_I/UNVRA/latest_metadata.json
+    kind: listing
+    queueable: true
     verified: "2026-11-05"
     notes: >-
-      Re-verified 2026-11-05 (page loads, HTTP 200 unless noted): Univera's
-      Transparency in Coverage MRF page; the files are in a HealthSparq portal
-      (JavaScript; open in a browser). The old univerahealthcare.com/about/...
-      page now returns 404.
+      HealthSparq's undated latest_metadata.json for this brand — it lists the
+      current files directly, so no browser is needed (the human portal is
+      https://news.univerahealthcare.com/developer-info/transparency-coverage-mrf).
+      Verified 2026-11-05: 1,862 file links, newest dated 2026-11; sampled files
+      answer HTTP 200. Previously a browser-only portal entry.
 
   - name: ConnectiCare (Connecticut)
     url: https://transparency.connecticare.com/
@@ -919,3 +929,783 @@ sources:
       portal (file rows load by AJAX — no inline static links on probe). Open in
       a browser, let the table load, and copy the file links from it into the
       paste box here.
+
+  # ---- Added 2026-11-05 — Northeast (live-verified) ----
+
+  - name: Healthfirst (New York)
+    url: https://healthfirst.org/health-data
+    kind: page
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 6 file links; sampled files answer HTTP 200. The page
+      links Healthfirst's indexes: HIX professional (2,084 files) and
+      institutional (5,240), plus vision/dental/chiropractic vendor files the
+      code filter ignores.
+
+  - name: Fallon Health (Massachusetts)
+    url: https://fallon.sapphiremrfhub.com/
+    kind: page
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 1 file link, newest dated 2026-11; sampled files
+      answer HTTP 200. Fallon's Sapphire MRF hub (linked from fallonhealth.org);
+      its one index lists 5 rate files.
+
+  - name: Neighborhood Health Plan of Rhode Island
+    url: https://files.nhpri.org/mrf/nhp/TOC/
+    kind: page
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 2 file links, newest dated 2026-10; sampled files
+      answer HTTP 200. Open folder of NHPRI's monthly indexes (linked from
+      nhpri.org) — currently the 2026-09-22 and 2026-10-22 sets, so both months
+      queue.
+
+  - name: Mass General Brigham Health Plan (formerly AllWays)
+    url: https://massgeneralbrighamhealthplan.org/pricetransparency/MRF/Base
+    kind: toc
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 14 file links, newest dated 2026-10; sampled files
+      answer HTTP 200. A fixed link that redirects to the newest index
+      (2026-10-01_AHP_index.json, updated 2026-09-27). Also cross-lists UMR and
+      MultiPlan/PHCS files.
+
+  - name: CDPHP (New York)
+    url: https://www.cdphp.com/interoperability/machine-readable-pricing-data-files
+    kind: page
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 6 file links, newest dated 2026-11; sampled files
+      answer HTTP 200. 3 in-network ZIPs (CDPHP, CDPHN, CDPHP-UBI) each holding
+      one rate file — the CDPHP one is 1.5 GB zipped / 17.3 GB JSON, over the
+      default confirm_over_gb, so it asks first — plus allowed-amounts files the
+      app skips.
+
+  - name: Geisinger Health Plan (Pennsylvania)
+    url: https://mrf.thehealthplan.com/content/MRF/toc.zip
+    kind: toc
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 1,195 file links; sampled files answer HTTP 200.
+      Geisinger's zipped table of contents (stable name; linked from
+      geisinger.org/health-plan/no-surprises-act).
+
+  - name: AmeriHealth New Jersey (PPO)
+    url: https://www.amerihealthnj.com/cmstic/?brand=ahnj
+    kind: page
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 1 file link, newest dated 2026-10; sampled files
+      answer HTTP 200. JavaScript page — the app's headless browser lifts the
+      brand's monthly index.
+
+  - name: AmeriHealth New Jersey (HMO)
+    url: https://www.amerihealthnj.com/cmstic/?brand=ahnjhmo
+    kind: page
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 1 file link, newest dated 2026-10; sampled files
+      answer HTTP 200. JavaScript page — the app's headless browser lifts the
+      brand's monthly index.
+
+  - name: AmeriHealth Pennsylvania
+    url: https://www.amerihealth.com/cmstic/?brand=ahpa
+    kind: page
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 1 file link, newest dated 2026-10; sampled files
+      answer HTTP 200. JavaScript page — the headless browser lifts
+      2026-10-01_ahpa_index.json.
+
+  - name: Independent Health (western New York)
+    url: https://mrf.healthsparq.com/ihny-egress.nophi.kyruushsq.com/prd/mrf/IHNY_I/IHNY/latest_metadata.json
+    kind: listing
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      HealthSparq's undated latest_metadata.json for this brand — it lists the
+      current files directly, so no browser is needed (the human portal is
+      web.healthsparq.com (insurerCode=IHNY_I)). Verified 2026-11-05: 9 file
+      links, newest dated 2026-10; sampled files answer HTTP 200.
+
+  - name: MVP Health Care (New York / Vermont)
+    url: https://mrf.healthsparq.com/mvp-egress.nophi.kyruushsq.com/prd/mrf/MVP_I/MVP/latest_metadata.json
+    kind: listing
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      HealthSparq's undated latest_metadata.json for this brand — it lists the
+      current files directly, so no browser is needed (the human portal is
+      mvp.healthsparq.com, linked from
+      mvphealthcare.com/developers/machine-readable-files). Verified 2026-11-05:
+      759 file links, newest dated 2026-12; sampled files answer HTTP 200.
+
+  # ---- Added 2026-11-05 — Southeast (live-verified) ----
+
+  - name: AvMed (Florida)
+    url: https://mrfproddestinationdata.blob.core.windows.net/avmed-mrf-output/AvMed-Health-Plans_INN_index.html
+    kind: page
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 1 file link, newest dated 2026-11; sampled files
+      answer HTTP 200. Stable wrapper link (from avmed.org/for-developers) to
+      the current monthly index; 10 in-network ZIPs, each holding one JSON.
+
+  - name: Health First Health Plans (Florida)
+    url: https://apps.hf.org/applications/dn/cms_json/files/tic/index.json
+    kind: toc
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 1 file link, newest dated 2026-09; sampled files
+      answer HTTP 200. Fixed index URL; individual-market plans. Runs about two
+      months behind.
+
+  - name: Alliant Health Plans (Georgia / Tennessee)
+    url: https://alliantplans.com/json/pt/latestpt_nlc.html
+    kind: page
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 1 file link, newest dated 2026-10; sampled files
+      answer HTTP 200. Stable link that redirects to the latest dated index
+      (from alliantplans.com/machine-readable-data).
+
+  - name: AmeriHealth Caritas Next (FL / NC / LA / DE marketplace)
+    url: https://www.amerihealthcaritasnext.com/json
+    kind: page
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 69 file links, newest dated 2026-10; sampled files
+      answer HTTP 200. Plain page of dated state indexes.
+
+  - name: First Choice Next (South Carolina marketplace)
+    url: https://www.firstchoicenext.com/json
+    kind: page
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 20 file links, newest dated 2026-10; sampled files
+      answer HTTP 200. Plain page of dated indexes (AmeriHealth Caritas family).
+
+  - name: The Health Plan (West Virginia / eastern Ohio)
+    url: https://www.healthplan.org/thp_mrfs
+    kind: page
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 3 file links, newest dated 2026-10; sampled files
+      answer HTTP 200. Plain page: the monthly index plus Commercial ASO and
+      PEIA in-network ZIPs.
+
+  - name: MedCost (rental network — NC / SC / VA)
+    url: https://mrf.mmsanalytics.com/medcost/
+    kind: page
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 4,594 file links, newest dated 2026-10; sampled files
+      answer HTTP 200. Open folder (linked from medcost.com) of 4,594 files
+      across employer groups. More than max_toc_files (default 2,000) is capped
+      — raise it for full reach.
+
+  - name: Health Advantage HMO (Arkansas Blue Cross family — individual)
+    url: https://mrf.arkansasbluecross.com/mrf/hmo_ha_hii_arkbluecross_index
+    kind: toc
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 521 file links, newest dated 2026-11; sampled files
+      answer HTTP 200. Fixed link that redirects to the current month's index.
+
+  - name: Health Advantage Octave (Arkansas Blue Cross family — individual)
+    url: https://mrf.arkansasbluecross.com/mrf/hmo_octave_hii_arkbluecross_index
+    kind: toc
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 284 file links, newest dated 2026-11; sampled files
+      answer HTTP 200. Fixed link that redirects to the current month's index.
+
+  - name: Health Advantage HMO (Arkansas Blue Cross family — TPA)
+    url: https://mrf.arkansasbluecross.com/mrf/hmo_ha_tpa_arkbluecross_index
+    kind: toc
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 519 file links, newest dated 2026-11; sampled files
+      answer HTTP 200. Fixed link that redirects to the current month's index.
+
+  # ---- Added 2026-11-05 — Midwest (live-verified) ----
+
+  - name: HealthPartners (MN / WI / IA / ND / SD)
+    url: https://mrfproddestinationdata.blob.core.windows.net/mrf-output/HealthPartners_In-Network_MRF_Index.html
+    kind: page
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 1 file link, newest dated 2026-11; sampled files
+      answer HTTP 200. Stable wrapper (linked from healthpartners.com) to the
+      current index; 6 network ZIPs, each one JSON.
+
+  - name: Medical Mutual of Ohio
+    url: https://mrf.healthsparq.com/mmo-egress.nophi.kyruushsq.com/prd/mrf/MMO_I/MMO/latest_metadata.json
+    kind: listing
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      HealthSparq's undated latest_metadata.json for this brand — it lists the
+      current files directly, so no browser is needed (the human portal is
+      medmutual.com/mrf). Verified 2026-11-05: 48 file links, newest dated
+      2026-11; sampled files answer HTTP 200.
+
+  - name: Paramount Health Care (Ohio / Michigan)
+    url: https://mrf.healthsparq.com/paramount-egress.nophi.kyruushsq.com/prd/mrf/PARAMOUNT_I/PARAMOUNT/latest_metadata.json
+    kind: listing
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      HealthSparq's undated latest_metadata.json for this brand — it lists the
+      current files directly, so no browser is needed (the human portal is
+      linked from paramounthealthcare.com/Legal). Verified 2026-11-05: 5 file
+      links, newest dated 2026-11; sampled files answer HTTP 200.
+
+  - name: Quartz Health Solutions (WI / IL / MN)
+    url: https://mrf.healthsparq.com/quartz-egress.nophi.kyruushsq.com/prd/mrf/QUARTZ_I/QUARTZ/latest_metadata.json
+    kind: listing
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      HealthSparq's undated latest_metadata.json for this brand — it lists the
+      current files directly, so no browser is needed (the human portal is
+      linked from quartzbenefits.com). Verified 2026-11-05: 1,330 file links,
+      newest dated 2026-11; sampled files answer HTTP 200. 1,311 are ZIPs
+      holding one JSON each.
+
+  - name: Aspirus Health Plan (Wisconsin / Michigan)
+    url: https://mrf.healthsparq.com/preferredone-egress.nophi.kyruushsq.com/prd/mrf/ASPIRUS_I/ASPIRUS/latest_metadata.json
+    kind: listing
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      HealthSparq's undated latest_metadata.json for this brand — it lists the
+      current files directly, so no browser is needed (the human portal is
+      aspirus.healthsparq.com, linked from aspirushealthplan.com). Verified
+      2026-11-05: 24 file links, newest dated 2026-11; sampled files answer HTTP
+      200.
+
+  - name: McLaren Health Plan — HealthAdvantage (Michigan)
+    url: https://www.mclarenhealthplan.org/Uploads/Public/Documents/HealthPlan/documents/no-surprise-bill-mhp-mrf/McLarenHealthPlan_HealthAdvantage_in-network-rates_table_of_content.json
+    kind: toc
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 1 file link; sampled files answer HTTP 200. Fixed
+      index URL (index dated 2026-10-05).
+
+  - name: McLaren Health Plan — Community Individual (Michigan)
+    url: https://www.mclarenhealthplan.org/Uploads/Public/Documents/HealthPlan/documents/no-surprise-bill-mhp-mrf/McLarenHealthPlan_Community_Individual_in-network-rates_table_of_content.json
+    kind: toc
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 1 file link; sampled files answer HTTP 200. Fixed
+      index URL.
+
+  - name: Sanford Health Plan (ND / SD / MN / IA)
+    url: https://www.sanfordhealthplan.com/transparency-in-coverage-rule
+    kind: page
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 14 file links, newest dated 2026-10; sampled files
+      answer HTTP 200. Static page; the index and in-network files are zipped
+      JSON.
+
+  - name: Avera Health Plans (SD / IA / NE / MN)
+    url: https://portaldocs.avera.org/machinereadablefiles
+    kind: page
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 18 file links, newest dated 2026-11; sampled files
+      answer HTTP 200. Static page with in-network, out-of-area and FirstChoice
+      of the Midwest files (the app's downloader fetches them; files are ~0.3
+      GB).
+
+  - name: AultCare (Ohio)
+    url: https://www.aultcare.com/notices/pricetransparency/aultcare-mrf-2
+    kind: page
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 5 file links, newest dated 2026-11; sampled files
+      answer HTTP 200. Plain page: index plus HMO, PPO and AEN files.
+
+  - name: Ohio Health Choice / Ohio PPO Connect (AultCare network)
+    url: https://www.aultcare.com/notices/pricetransparency/ohio-ppo-connect-ohc
+    kind: page
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 4 file links; sampled files answer HTTP 200. Plain
+      page of 4 network rate files (dated Oct 16, 2026).
+
+  - name: Physicians Health Plan of Northern Indiana
+    url: https://services.phpni.com/machine-readable-files/files/phpni/phpni
+    kind: page
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 5 file links, newest dated 2026-10; sampled files
+      answer HTTP 200. Links redirect to short-lived signed downloads (they
+      answered).
+
+  - name: Group Health Cooperative of South Central Wisconsin
+    url: https://ghcmrf.azureedge.net/public?restype=container&comp=list
+    kind: page
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 579 file links, newest dated 2026-10; sampled files
+      answer HTTP 200. The open file listing behind GHC-SCW's MRF app (only the
+      current set is kept).
+
+  - name: WPS Health Insurance (Wisconsin)
+    url: https://transparency.healthcare/wps/mrf/table-of-contents/
+    kind: page
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 1 file link, newest dated 2026-10; sampled files
+      answer HTTP 200. Turquoise-hosted page (linked from wpshealth.com); its
+      zipped index lists 55 files.
+
+  # ---- Added 2026-11-05 — South-central & West (live-verified) ----
+
+  - name: PacificSource (ID / MT / OR / WA)
+    url: https://w2bipdmrfsa.blob.core.windows.net/$web?restype=container&comp=list&prefix=20
+    kind: page
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 1 file link, newest dated 2026-11; sampled files
+      answer HTTP 200. The open listing of PacificSource's storage (only the
+      current month's index is kept); that index lists 10,427 part files —
+      capped by max_toc_files unless raised.
+
+  - name: Mountain Health CO-OP (MT / ID / WY)
+    url: https://mrf.mmsanalytics.com/talon-mrf-generation/tocs/spyglass/mountain-health-co-op/toclist.json
+    kind: page
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 1 file link, newest dated 2026-11; sampled files
+      answer HTTP 200. Fixed list (from mountainhealth.coop) pointing at the
+      current master index (440 files).
+
+  - name: UHA Health Insurance (Hawaii)
+    url: https://app.uhahealth.com/mrf
+    kind: toc
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 46 file links, newest dated 2026-11; sampled files
+      answer HTTP 200. Fixed link that redirects to the current month's index;
+      ZIPs each hold one JSON.
+
+  - name: Sutter Health Plan (California)
+    url: https://xmc-sutterhealt962c-sutterhealt8fce-production57cc.sitecorecloud.io/-/media/Project/SutterHealth/SutterHealthPlan/PDF/{FIRST_OF_MONTH}_sutter-health-plus_index
+    kind: toc
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 3 file links, newest dated 2026-11; sampled files
+      answer HTTP 200. Monthly-dated index (date filled in when queued; linked
+      from sutterhealthplan.org/technical-information).
+
+  - name: University of Utah Health Plans
+    url: https://doc.uhealthplan.utah.edu/machine-readable-data/TIC_MRF/u-of-u-health-plans_index.json
+    kind: toc
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 9 file links, newest dated 2026-11; sampled files
+      answer HTTP 200. Fixed index URL (updated 2026-11-02); zipped JSON rate
+      files.
+
+  - name: Hometown Health (Nevada)
+    url: https://www.hometownhealth.com/about-us/transparency-in-coverage/
+    kind: page
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 50 file links, newest dated 2026-10; sampled files
+      answer HTTP 200. Page with the main index and per-employer indexes.
+
+  - name: Community Health Plan of Washington (Cascade Select)
+    url: https://api-mkt.chpw.org/blob
+    kind: page
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 2 file links, newest dated 2026-11; sampled files
+      answer HTTP 200. JSON list of rate files whose download links expire after
+      ~24 h — the app fetches the list fresh each time it is queued.
+
+  - name: Sharp Health Plan (California)
+    url: https://www.sharphealthplan.com/api-access-for-developers
+    kind: page
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 4 file links, newest dated 2026-10; sampled files
+      answer HTTP 200. Page with the monthly zipped index (770 files) and
+      in-network ZIPs; November not yet posted.
+
+  - name: Baylor Scott & White Health Plan (Texas)
+    url: https://www.bswhealthplan.com/transparency
+    kind: page
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 19 file links, newest dated 2026-11; sampled files
+      answer HTTP 200. Page of JSON and ZIP files. Some in-network files are .7z
+      archives, which the app can't open — those rows will fail; the rest
+      ingest.
+
+  - name: HMAA (Hawaii)
+    url: https://hmaa.com/NSA/MRF
+    kind: file
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: a fixed link to one in-network ZIP (134 MB; modified
+      2026-11-02 despite the 2022 folder name).
+
+  - name: Presbyterian Health Plan (New Mexico)
+    url: https://onbaseext.phs.org/PEL/DisplayDocument?ContentID=OB_000000007649
+    kind: file
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: one 174 MB in-network JSON ("Presbyterian Network,
+      Inc"), linked from phs.org/tools-resources/member/applicable-rates. Its
+      last_updated_on is 2026-07-17 — about four months old.
+
+  # ---- Added 2026-11-05 — National TPAs, rental networks and hubs (live-verified) ----
+
+  - name: Meritain Health (Aetna's TPA)
+    url: https://mrf.healthsparq.com/aetnacvs-egress.nophi.kyruushsq.com/prd/mrf/MERITAIN_I/MERITAINOVER/latest_metadata.json
+    kind: listing
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      HealthSparq's undated latest_metadata.json for this brand — it lists the
+      current files directly, so no browser is needed (the human portal is
+      reached from meritain.com). Verified 2026-11-05: 4,173 file links, newest
+      dated 2026-11; sampled files answer HTTP 200. More than max_toc_files
+      (default 2,000) is capped alphabetically — raise it for full reach.
+
+  - name: Allied Benefit Systems (TPA)
+    url: https://alliedbenefit.sapphiremrfhub.com/
+    kind: page
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 32,397 file links, newest dated 2026-11; sampled
+      files answer HTTP 200. Sapphire hub (linked from alliedbenefit.com) with
+      ~32,000 employer-group indexes — queueing caps at max_toc_files (default
+      2,000); raise it for deeper reach.
+
+  - name: HealthComp / Personify Health (TPA)
+    url: https://healthcomp.sapphiremrfhub.com/
+    kind: page
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 763 file links, newest dated 2026-11; sampled files
+      answer HTTP 200. Sapphire hub (linked from personifyhealth.com); some
+      older group links are stale.
+
+  - name: ACS Benefit Services (TPA)
+    url: https://acsbenefitservices.sapphiremrfhub.com/
+    kind: page
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 225 file links, newest dated 2026-11; sampled files
+      answer HTTP 200. Sapphire hub.
+
+  - name: Zenith American Solutions (TPA)
+    url: https://zenith-american.sapphiremrfhub.com/
+    kind: page
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 42 file links, newest dated 2026-11; sampled files
+      answer HTTP 200. Sapphire hub; a few group entries are missing files.
+
+  - name: QuikTrip employee plan
+    url: https://quiktrip.sapphiremrfhub.com/
+    kind: page
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 1 file link, newest dated 2026-11; sampled files
+      answer HTTP 200. Single-employer Sapphire hub (4 rate files).
+
+  - name: Healthcare Highways (network)
+    url: https://hchmrfblob.blob.core.windows.net/clearcost?restype=container&comp=list
+    kind: page
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 82 file links; sampled files answer HTTP 200. Open
+      file listing; ZIPs hold JSON / JSON.GZ files (modified Oct–Nov 2026).
+
+  - name: Luminare Health (formerly Trustmark) — via Valenz Bluebook
+    url: https://mrf.healthcarebluebook.com/luminarehealth
+    kind: page
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 32 file links, newest dated 2026-11; sampled files
+      answer HTTP 200. Server-rendered Valenz hub page.
+
+  - name: MultiPlan / PHCS network (via SISCO's mirror)
+    url: https://sisconosurprise.com/ppo/phcs/index.html
+    kind: page
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 1 file link, newest dated 2026-09; sampled files
+      answer HTTP 200. SISCO's page links the Claritev/MultiPlan PHCS table of
+      contents (one month behind); MultiPlan publishes no public page of its own
+      that we could reach.
+
+  - name: Curative
+    url: https://static.curative.com/transparency_in_coverage/table-of-contents.json
+    kind: toc
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 6 file links, newest dated 2026-11; sampled files
+      answer HTTP 200. Fixed index URL (linked from curative.com).
+
+  - name: Gravie
+    url: https://www.gravie.com/compliance/transparency-in-coverage/
+    kind: page
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 3 file links; sampled files answer HTTP 200. Page of
+      Gravie's files (mostly Cigna network plus an HPS/Paymedix ZIP).
+
+  - name: Preferred Health Professionals (network — KC region)
+    url: https://phpmrffiles.phpkc.com/
+    kind: page
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: 4 file links, newest dated 2026-11; sampled files
+      answer HTTP 200. JavaScript page — the app's headless browser lifts the
+      files (linked from phpkc.com).
+
+  # ---- Added 2026-11-05 — open in a browser (found, but not readable automatically) ----
+
+  - name: CareSource (marketplace — OH / IN / MI / WI / GA / KY / WV / NC)
+    url: https://www.caresource.com/vendor/tic/tic-data-index.json
+    kind: portal
+    queueable: false
+    verified: "2026-11-05"
+    notes: >-
+      Checked 2026-11-05: The index loads (18 state ZIPs), but each ZIP holds
+      more ZIPs inside — the app opens a ZIP of .json files, not ZIPs inside a
+      ZIP. Download a state ZIP, unzip it twice, and drop the .json files into
+      data/inbox. Some states are stale (KY Jan 2026, NC Dec 2025).
+
+  - name: MercyCare Health Plans (Wisconsin / Illinois)
+    url: https://stmercycaremrf.z14.web.core.windows.net/in_network.html
+    kind: portal
+    queueable: false
+    verified: "2026-11-05"
+    notes: >-
+      Checked 2026-11-05: Files are Zstandard-compressed (.json.zst), which the
+      app can't decompress yet. Download, decompress with a zstd tool, and drop
+      the .json files into data/inbox.
+
+  - name: UCare (Minnesota individual plans)
+    url: https://ucm-p-001.sitecorecontenthub.cloud/api/public/content/ucare_toc.json?download=true
+    kind: portal
+    queueable: false
+    verified: "2026-11-05"
+    notes: >-
+      Checked 2026-11-05: UCare's index is NOT valid JSON (a missing comma
+      between entries), so the app can't expand it. The rate files it names were
+      updated Oct 30, 2026 — open the index in a browser and paste the file
+      links.
+
+  - name: 1199SEIU Benefit Funds (NY / NJ / MA / MD / DC)
+    url: https://www.1199seiubenefits.org/price-transparency
+    kind: portal
+    queueable: false
+    verified: "2026-11-05"
+    notes: >-
+      Checked 2026-11-05: The monthly index
+      (data.1199funds.net/MRF/TOC/<YYYY-MM-01>_1199SEIU_index.json) is NOT valid
+      JSON, so the app can't expand it — paste its file links by hand.
+
+  - name: Johns Hopkins Employer Health Programs (MD / DC)
+    url: https://ehptransparency.org/
+    kind: portal
+    queueable: false
+    verified: "2026-11-05"
+    notes: >-
+      Checked 2026-11-05: Open folder organised by month (e.g.
+      September_2026/2026-09-01_jhhc_ehp_table-of-contents.json) — open the
+      newest folder and paste its table-of-contents link. Runs about two months
+      behind.
+
+  - name: Jefferson Health Plans (PA / NJ)
+    url: https://jhp.blob.core.windows.net/jhp/mrf/Jefferson-Health-Plans_index.json
+    kind: portal
+    queueable: false
+    verified: "2026-11-05"
+    notes: >-
+      Checked 2026-11-05: UNVERIFIED: the index link (from Jefferson's
+      transparency page) returned 502 through the test machine's network. Paste
+      it into the queue from your own computer.
+
+  - name: WellSense Health Plan (Massachusetts)
+    url: https://www.wellsense.org/about-us/interoperability
+    kind: portal
+    queueable: false
+    verified: "2026-11-05"
+    notes: >-
+      Checked 2026-11-05: UNVERIFIED: the page's "Download TOC Index File" link
+      uses port 8443, which the test machine's network refused. Try it from your
+      own computer.
+
+  - name: Midlands Choice (rental network — NE / IA / SD / KS)
+    url: https://api.midlandschoice.com/mrf
+    kind: portal
+    queueable: false
+    verified: "2026-11-05"
+    notes: >-
+      Checked 2026-11-05: UNVERIFIED: the server's certificate chain is
+      incomplete, so it did not validate here (the app never skips certificate
+      checks). Monthly network files
+      2026-11-01_midlands-choice_<net>_in-network-rates.json.gz.
+
+  - name: GlobalHealth (Oklahoma)
+    url: https://www.globalhealth.com/oklahoma/providers/forms-and-resources/
+    kind: portal
+    queueable: false
+    verified: "2026-11-05"
+    notes: >-
+      Checked 2026-11-05: The page lists monthly ZIPs, but
+      files.globalhealth.com refuses automated downloads (HTTP 403). Download in
+      a browser and drop them into data/inbox.
+
+  - name: Community Health Options (Maine)
+    url: https://index.opynhealth.com/Community-Health-Options/Community-Health-Options
+    kind: portal
+    queueable: false
+    verified: "2026-11-05"
+    notes: >-
+      Checked 2026-11-05: Opyn-hosted JavaScript page (linked from
+      healthoptions.org) — the file list didn't render for automated access;
+      open in a browser.
+
+  - name: Collective Health
+    url: https://mrfhost.serifhealth.com/?list-type=2&prefix=current/&delimiter=/
+    kind: portal
+    queueable: false
+    verified: "2026-11-05"
+    notes: >-
+      Checked 2026-11-05: Serif-hosted storage listing of Collective Health's
+      own-network files (~3.2 GB each). The listing gives file names, not links
+      — prefix each with https://mrfhost.serifhealth.com/ and paste.
+
+  - name: L.A. Care Covered California
+    url: https://transparency.lacare.org/
+    kind: portal
+    queueable: false
+    verified: "2026-11-05"
+    notes: >-
+      Checked 2026-11-05: JavaScript site over an open storage bucket; the
+      latest index is
+      transparency.lacare.org/download/<YYYY-MM-DD>_LA_Care_index.json (several
+      per month) — paste the newest.
+
+  - name: WebTPA (TPA)
+    url: https://price-transparency.webtpa.com/machinereadablefile/plans
+    kind: portal
+    queueable: false
+    verified: "2026-11-05"
+    notes: >-
+      Checked 2026-11-05: Open JSON API of 67 plans; each plan's in-network
+      links sit two API calls deeper. Mostly Aetna ASA, Healthcare Highways and
+      Florida Blue networks already covered elsewhere.
+
+  - name: Imagine360 (TPA — employer groups)
+    url: https://caa.imagine360.com/
+    kind: portal
+    queueable: false
+    verified: "2026-11-05"
+    notes: >-
+      Checked 2026-11-05: Hub of ~715 employer-group indexes (linked from
+      imagine360.com); its links aren't in a form the app lifts automatically —
+      open in a browser and paste a group's index link.
+
+  - name: Providence Health Plan (Oregon / Washington)
+    url: https://mrfhub.providencehealthplan.com/
+    kind: portal
+    queueable: false
+    verified: "2026-11-05"
+    notes: >-
+      Checked 2026-11-05: Search portal backed by a keyed API — no static file
+      list; open in a browser.
+
+  - name: Sendero Health Plans — IdealCare (Texas)
+    url: https://www.mymedicalshopper.com/mrf/idealcare-by-sendero-sendero-health-plans-inc-idealcare
+    kind: portal
+    queueable: false
+    verified: "2026-11-05"
+    notes: >-
+      Checked 2026-11-05: JavaScript app (linked from senderohealth.com) — open
+      in a browser.
+
+  - name: Community Health Choice (Texas marketplace)
+    url: https://www.communityhealthchoice.org/health-insurance-marketplace/transparency-in-coverage-2026/
+    kind: portal
+    queueable: false
+    verified: "2026-11-05"
+    notes: >-
+      Checked 2026-11-05: Page lists 9 in-network endpoints (network × metal
+      level) whose links aren't in a form the app lifts; last_updated
+      2026-08-13. The page name changes each plan year.
+
+  - name: Medica (incl. Dean / WellFirst — MN / WI / IA / NE / KS / MO / ND / SD / OK)
+    url: https://www.medica.com/price-transparency
+    kind: portal
+    queueable: false
+    verified: "2026-11-05"
+    notes: >-
+      Checked 2026-11-05: STALE feed: Medica's HealthSparq listing
+      (medica-egress … MEDICA_I/MEDICA/latest_metadata.json) still only has
+      2026-03 files, and medica.com refuses automated requests, so a newer
+      location couldn't be checked.
