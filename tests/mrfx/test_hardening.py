@@ -1136,6 +1136,72 @@ def test_forget_recomputes_shared_tin_directory_flags(cfg, store):
     assert inc == full
 
 
+def test_removal_refreshes_only_the_removed_tins_directory_rows(cfg, store, monkeypatch):
+    """A forget/replace used to rebuild the WHOLE name directory (measured 30+
+    min at 300M rows) because the directory has no payer column. Each
+    directory row depends only on its own TIN's rows, so the removed part's
+    TINs are recorded and only those rows are recomputed — and the result
+    must equal a full rebuild bit for bit (gone TIN pruned, shared TIN
+    recomputed, untouched TINs unchanged)."""
+    _payer_part(store, "r1.json", "Rho", [
+        ("460000001", "1460000001", "97110", "2026-06", 50.0),   # only in r1 -> must vanish
+        ("460000002", "1460000002", "97110", "2026-06", 52.0),   # shared with r2
+    ])
+    store.upsert_file("r1.json", finished_at="2026-07-01 10:00:00")
+    _payer_part(store, "r2.json", "Sigma", [
+        ("460000002", "1460000003", "97112", "2026-06", 54.0),
+        ("460000003", "1460000004", "97110", "2026-06", 56.0),   # untouched
+    ])
+    store.upsert_file("r2.json", finished_at="2026-07-01 10:00:01")
+    store.rebuild_rollups()
+
+    full_dir_builds = []
+    real_build = store._build_rollup_tables
+
+    def spy(con, *a, **k):
+        full_dir_builds.append(k.get("tables"))
+        return real_build(con, *a, **k)
+
+    monkeypatch.setattr(store, "_build_rollup_tables", spy)
+    from mrfx.ingest import forget_file
+    forget_file(cfg, store, "r1.json")
+    assert not store.rollups_stale()
+    assert full_dir_builds == []            # no whole-directory refresh
+    inc = _rollup_snapshot(store)
+    with store.connect() as con:
+        assert con.execute("SELECT count(*) FROM rollup_pending_tins").fetchone()[0] == 0
+        tins = [r[0] for r in con.execute(
+            "SELECT tin_value FROM tin_directory_tbl ORDER BY tin_value").fetchall()]
+    assert tins == ["460000002", "460000003"]
+    monkeypatch.undo()
+    store.rebuild_rollups()
+    assert inc == _rollup_snapshot(store)
+
+
+def test_removal_queued_by_an_older_version_still_refreshes_whole_directory(cfg, store):
+    """A pending note written before TINs were recorded has no tins_tracked
+    flag: the consumer must fall back to the full directory refresh."""
+    import json as _json
+
+    _payer_part(store, "o1.json", "Tau", [("470000001", "1470000001", "97110", "2026-06", 40.0)])
+    store.upsert_file("o1.json", finished_at="2026-07-01 10:00:00")
+    _payer_part(store, "o2.json", "Tau", [("470000002", "1470000002", "97110", "2026-06", 41.0)])
+    store.upsert_file("o2.json", finished_at="2026-07-01 10:00:01")
+    store.rebuild_rollups()
+    store.rates_dir.joinpath(  # remove o1's part behind the store's back, like an old version did
+        __import__("mrfx.store", fromlist=["file_key"]).file_key("o1.json") + ".parquet").unlink()
+    with store.connect() as con:
+        con.execute("INSERT OR REPLACE INTO meta VALUES ('rollup_pending_payers', ?)",
+                    [_json.dumps({"gen": 1, "payers": ["Tau"]})])
+        con.execute("DELETE FROM files WHERE filename = 'o1.json'")
+        store._register_views(con)
+    store.update_rollups_incremental()
+    with store.connect() as con:
+        tins = [r[0] for r in con.execute(
+            "SELECT tin_value FROM tin_directory_tbl ORDER BY tin_value").fetchall()]
+    assert tins == ["470000002"]           # full refresh dropped the vanished TIN
+
+
 def test_store_stats_and_states_cached_single_flight(cfg, store):
     # The stall fix: store_stats and available_states must serve from cache
     # within the TTL (no repeat whole-store scan on the 15s dashboard poll).

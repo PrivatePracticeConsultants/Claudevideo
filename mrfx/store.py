@@ -1361,6 +1361,11 @@ class Store:
                 key VARCHAR PRIMARY KEY,
                 value VARCHAR
             );
+            -- TINs of removed/replaced rate parts, queued (with the payers in
+            -- meta 'rollup_pending_payers') for the next incremental rollup:
+            -- a directory row depends only on its own TIN's rows, so these are
+            -- the ONLY directory rows a removal can change
+            CREATE TABLE IF NOT EXISTS rollup_pending_tins (tin_value VARCHAR);
             -- Which health PLANS a rate file serves, harvested from the payer's
             -- table-of-contents (the rate file itself never names a plan).
             -- Keyed by the URL's dedup_key so it joins to url_queue, which
@@ -2132,13 +2137,15 @@ class Store:
                     "AND bytes_total <= ?", [limit_bytes])
         return n
 
-    def _part_payers_for_removal(self, path: Path) -> list[str] | None:
-        """Distinct payers of a live part that is about to be removed or
-        replaced. Deliberately LOCK-FREE — a multi-GB part scan under
-        write_lock would stall every claim/progress/upsert for seconds; the
-        per-filename ingest claim already serializes writers of one part.
-        Returns [] when no part exists; None when the part is unreadable
-        (caller must then force the full-rebuild flag).
+    def _part_payers_for_removal(self, path: Path) -> tuple[list[str], list[str]] | None:
+        """(distinct payers, distinct TINs) of a live part that is about to be
+        removed or replaced — the rollup slices the removal can change: the
+        rate spine by payer (a grain key), the directory by TIN (each row is
+        computed from its own TIN's rows only). Deliberately LOCK-FREE — a
+        multi-GB part scan under write_lock would stall every claim/progress/
+        upsert for seconds; the per-filename ingest claim already serializes
+        writers of one part. Returns ([], []) when no part exists; None when
+        the part is unreadable (caller must then force the full-rebuild flag).
 
         RETRIES a transient read failure before giving up: returning None latches
         `rollup_needs_full`, which forces the hours-long whole-store rebuild — and
@@ -2147,14 +2154,18 @@ class Store:
         full-rebuild demand from a 200ms lock is exactly the "why is it doing a
         full rebuild again" trap, so read up to 3 times with short backoffs."""
         if not path.exists():
-            return []
+            return [], []
         last: Exception | None = None
         for i in range(3):
             try:
                 with self.connect() as con:
-                    return [r[0] for r in con.execute(
-                        f"SELECT DISTINCT payer FROM read_parquet('{sql_path(path)}') "
-                        "WHERE payer IS NOT NULL").fetchall()]
+                    src = f"read_parquet('{sql_path(path)}')"
+                    payers = [r[0] for r in con.execute(
+                        f"SELECT DISTINCT payer FROM {src} WHERE payer IS NOT NULL").fetchall()]
+                    tins = [r[0] for r in con.execute(
+                        f"SELECT DISTINCT tin_value FROM {src} "
+                        "WHERE tin_value IS NOT NULL").fetchall()]
+                    return payers, tins
             except Exception as e:  # noqa: BLE001
                 last = e
                 if i < 2:
@@ -2180,6 +2191,18 @@ class Store:
         return int(obj.get("gen", 0)), [p for p in obj.get("payers", [])
                                         if isinstance(p, str)]
 
+    def _pending_tins_tracked(self, con: duckdb.DuckDBPyConnection) -> bool:
+        """True when every queued removal also recorded its TINs (so the
+        directory can be refreshed for just those). A note written by an older
+        version, or by any removal whose TINs weren't captured, says False —
+        and the consumer then refreshes the whole directory, as it always did."""
+        raw = self._meta_get(con, "rollup_pending_payers")
+        try:
+            obj = json.loads(raw) if raw else {}
+        except ValueError:
+            return False
+        return isinstance(obj, dict) and obj.get("tins_tracked") is True
+
     def _consume_pending_payers(self, con: duckdb.DuckDBPyConnection,
                                 gen0: int, consumed: list[str]) -> None:
         """Under write_lock: drop the consumed payers from the pending note —
@@ -2193,31 +2216,43 @@ class Store:
                 return
             remain = sorted(set(cur) - set(consumed))
             if remain:
+                # (unreachable while gen is unchanged — kept conservative: the
+                # TIN list stays, and tins_tracked is dropped so the next
+                # consumer refreshes the whole directory)
                 con.execute(
                     "INSERT OR REPLACE INTO meta VALUES ('rollup_pending_payers', ?)",
                     [json.dumps({"gen": gen, "payers": remain})])
             else:
                 con.execute("DELETE FROM meta WHERE key = 'rollup_pending_payers'")
+                con.execute("DELETE FROM rollup_pending_tins")
 
     def _queue_removed_payers(self, con: duckdb.DuckDBPyConnection,
-                              payers: list[str] | None) -> None:
-        """Under write_lock: queue removed/replaced payer slices for the next
-        incremental rollup. A removed part's rows vanish from the raw store,
-        but its files row leaves the rows_emitted>0 delta — without this
-        note the orphaned rollup slice would keep serving the removed rows
-        with rollups_stale() False. payers=None (unreadable part) forces the
-        full-rebuild flag instead."""
+                              scope: tuple[list[str], list[str]] | None) -> None:
+        """Under write_lock: queue removed/replaced slices for the next
+        incremental rollup — the part's payers (rate spine) and TINs (name
+        directory), as returned by _part_payers_for_removal. A removed part's
+        rows vanish from the raw store, but its files row leaves the
+        rows_emitted>0 delta — without this note the orphaned rollup slice
+        would keep serving the removed rows with rollups_stale() False.
+        scope=None (unreadable part) forces the full-rebuild flag instead."""
         try:
-            if payers == []:
+            if scope is not None and not scope[0] and not scope[1]:
                 return
-            if payers is None:
+            if scope is None:
                 con.execute(
                     "INSERT OR REPLACE INTO meta VALUES ('rollup_needs_full', '1')")
                 return
+            payers, tins = scope
             gen, cur = self._read_pending_payers(con)
+            # TINs are tracked only if EVERY queued removal recorded them: an
+            # existing note without the flag (older version) stays untracked
+            tracked = (not cur) or self._pending_tins_tracked(con)
+            if tins:
+                con.execute("INSERT INTO rollup_pending_tins "
+                            "SELECT unnest(?::VARCHAR[])", [list(tins)])
             con.execute(
                 "INSERT OR REPLACE INTO meta VALUES ('rollup_pending_payers', ?)",
-                [json.dumps({"gen": gen + 1,
+                [json.dumps({"gen": gen + 1, "tins_tracked": tracked,
                              "payers": sorted(set(cur) | set(payers))})])
         except Exception:  # noqa: BLE001 — never block the removal itself
             try:
@@ -2504,19 +2539,25 @@ class Store:
                 # full — correct, and rare (removals don't happen in a normal
                 # first-time grind).
                 removal = bool(pending)
+                # a removal whose TINs were all recorded refreshes ONLY those
+                # directory rows (each row depends on its own TIN's rows alone):
+                # measured 30+ min -> the slice at 300M rows. An untracked note
+                # (older version) keeps the old full-directory refresh.
+                dir_scoped = (not removal) or self._pending_tins_tracked(con)
                 if payers:
                     payer_pred = "payer IN (" + ", ".join(q(p) for p in payers) + ")"
                     log.info("analytics update: %d new file(s), %d queued slice(s) — "
                              "recomputing %d payer slice(s) instead of the whole store",
                              len(delta), len(pending), len(payers))
                     self._apply_rollup_delta(con, payer_pred, files_pred, log,
-                                             directory_scoped=not removal)
+                                             directory_scoped=dir_scoped,
+                                             with_pending_tins=removal)
                 else:
                     log.info("analytics update: %d new reference file(s) — "
                              "no rate slices to recompute", len(delta))
-                if removal:
-                    log.info("analytics update: a removal changed shared "
-                             "practices — refreshing the full name directory "
+                if removal and not dir_scoped:
+                    log.info("analytics update: a removal queued by an older "
+                             "version — refreshing the full name directory "
                              "(rate slices stayed scoped and fast)")
                     # size slices for the ACTUAL thread count and give this
                     # build the same OOM ladder as every other — the default
@@ -2667,15 +2708,17 @@ class Store:
         return self._rollup_active
 
     def _apply_rollup_delta(self, con: duckdb.DuckDBPyConnection, payer_pred: str,
-                            files_pred: str, log, directory_scoped: bool = True) -> None:
+                            files_pred: str, log, directory_scoped: bool = True,
+                            with_pending_tins: bool = False) -> None:
         """Delete-and-recompute the affected rollup slices. Same OOM ladder as
         the full build (thread cap first, then finer hash partitions); same
         one-transaction-per-table + CHECKPOINT discipline (a mid-slice failure
         rolls back to that table's previous complete version).
 
         directory_scoped=False rebuilds ONLY the rate spine here and leaves the
-        directory to the caller (a removal needs the FULL directory — see
-        update_rollups_incremental)."""
+        directory to the caller (an untracked removal needs the FULL directory —
+        see update_rollups_incremental). with_pending_tins adds the TINs that
+        queued removals recorded (rollup_pending_tins) to the directory slice."""
         # READ the current thread count for partition sizing — NEVER `SET
         # threads`. SET threads reconfigures the shared instance's GLOBAL task
         # scheduler; on a live store with other connections mid-query (the
@@ -2694,9 +2737,11 @@ class Store:
         # affected TINs: computed ONCE from the delta files' parts (per-file
         # parquet stats prune every other file's part from this scan)
         con.execute("DROP TABLE IF EXISTS __delta_tins")
+        pending_tins = ("UNION SELECT tin_value FROM rollup_pending_tins "
+                        "WHERE tin_value IS NOT NULL") if with_pending_tins else ""
         con.execute("CREATE TEMP TABLE __delta_tins AS "
                     f"SELECT DISTINCT tin_value FROM rates WHERE {files_pred} "
-                    "AND tin_value IS NOT NULL")
+                    f"AND tin_value IS NOT NULL {pending_tins}")
         tin_pred = "tin_value IN (SELECT tin_value FROM __delta_tins)"
         n_rows = con.execute(
             f"SELECT count(*) FROM rates WHERE {payer_pred}").fetchone()[0] or 0
@@ -2738,13 +2783,11 @@ class Store:
                     if parts > 1:
                         log.info("analytics update %s: partition %d/%d", tbl, i + 1, parts)
                     con.execute(f"INSERT INTO {tbl} {query.format(part=part)}")
-                if tbl == "tin_directory_tbl":
-                    # prune ghosts: a re-ingest that shrank/emptied a part can
-                    # leave directory rows for TINs with no rates anywhere —
-                    # invisible to the spine but not to directory-driven views
-                    con.execute(
-                        "DELETE FROM tin_directory_tbl WHERE NOT EXISTS ("
-                        "SELECT 1 FROM rates r WHERE r.tin_value = tin_directory_tbl.tin_value)")
+                # (no whole-store ghost prune here: every TIN whose rows could
+                # have vanished — a removed or shrunk part's — is in tin_pred
+                # via rollup_pending_tins, so the DELETE above drops its row
+                # and the INSERT re-creates it only if rates remain. The old
+                # anti-join scanned all of `rates` on every update.)
                 con.execute("COMMIT")
             except Exception:
                 try:
@@ -3493,7 +3536,7 @@ class Store:
                     # hashes) would refuse to re-queue / dedup-away the very
                     # URLs the user re-pastes to rebuild the store they just
                     # wiped. entity_map and org_websites stay — user config.
-                    "DELETE FROM url_queue;"
+                    "DELETE FROM url_queue; DELETE FROM rollup_pending_tins;"
                 )
                 for tbl in ("rates_dedup_tbl", "rates_by_tin_tbl", "tin_directory_tbl"):
                     con.execute(f"DROP TABLE IF EXISTS {tbl}")

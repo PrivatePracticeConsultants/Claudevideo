@@ -216,6 +216,25 @@ _NPI_REL = f"""
 GRAIN_REL = {"tin": _TIN_REL, "entity": _ENTITY_REL, "npi": _NPI_REL}
 
 
+# Store size (done in-network rates) above which the NPI / entity views need a
+# narrowing filter — see create_app's _require_narrowing for the measurements.
+NARROW_REQUIRED_ROWS = 40_000_000
+
+# Placeholder for an exact NPI/TIN search clause; rel_sql substitutes the
+# grain's single-column predicate (see FilterSet's q handling).
+_IDENT_TOKEN = "(__IDENT_MATCH__)"
+
+
+def _ident_clause(grain: str, kind: str) -> str:
+    """One-parameter exact match for an NPI (kind 'npi') or TIN ('tin')."""
+    if grain == "npi":
+        return "unit_id = ?" if kind == "npi" else "tin_value = ?"
+    if grain == "tin":
+        return "tin_value = ?"          # a 10-digit value = an NPI in the TIN slot
+    # entity grain: tin_value is the '; '-joined list of member TINs
+    return "list_contains(string_split(tin_value, '; '), ?)"
+
+
 class FilterSet:
     """Query params -> parameterized WHERE over the uniform grain relation.
     Shared by table, summary, and CSV export so the numbers always agree."""
@@ -245,6 +264,7 @@ class FilterSet:
 
         clauses, params = [], []
         self.described: dict = {}
+        self.ident_kind: str | None = None   # set by an exact NPI/TIN search
         # True once a filter references a column that only exists AFTER the
         # name/geo joins (states, cities, display_name). The table endpoint can
         # take its fast late-join path only when this stays False.
@@ -317,7 +337,33 @@ class FilterSet:
             params.append(qp["month"])
             add("as_of_month", qp["month"])
         q = qp.get("q")
-        if q:
+        ident = re.sub(r"[\s-]", "", q) if q else ""
+        if q and ident.isdigit():
+            # An NPI / TIN search (the product's core lookup) matches the ID
+            # columns ONLY. Both are grouping keys of every grain relation, so
+            # DuckDB applies the filter to the raw rows BEFORE the NPI dedup
+            # aggregation. ORing in display_name (a joined column) blocked that
+            # pushdown: at 306M rows the NPI search aggregated the whole store
+            # first and died out of temp disk after 30 s. Digits never occur in
+            # a real name; a nameless TIN's label "TIN 123…" is its tin_value.
+            if len(ident) in (9, 10):
+                # a complete TIN (9) / NPI (10): an exact match on ONE column,
+                # which DuckDB pushes into the parquet scan itself (measured at
+                # 306M rows: 0.5 s, vs 9.8 s for `npi = ? OR tin_value = ?` —
+                # an OR across columns is evaluated only after reading every
+                # row). Which column depends on the grain, so rel_sql swaps
+                # this token for the grain's clause (exactly one parameter).
+                clauses.append(_IDENT_TOKEN)
+                params.append(ident)
+                self.ident_kind = "npi" if len(ident) == 10 else "tin"
+            else:   # a partial number while typing
+                clauses.append("(unit_id LIKE ? OR tin_value LIKE ?)")
+                params += [f"%{ident}%", f"%{ident}%"]
+            add("search", q)
+            # unit_id is a projected name (tin_value / npi / entity), not a
+            # base-table column: keep the TIN grain off the late-join path
+            self.uses_dim_cols = True
+        elif q:
             clauses.append(
                 "(unit_id LIKE ? OR upper(display_name) LIKE upper(?) OR tin_value LIKE ?)"
             )
@@ -423,7 +469,10 @@ def grain_of(qp: dict, cfg: MrfxConfig, store: Store) -> str:
 
 
 def rel_sql(grain: str, fs: FilterSet) -> str:
-    base = f"WITH base AS ({GRAIN_REL[grain]}) SELECT * FROM base WHERE {fs.where}"
+    where = fs.where
+    if fs.ident_kind:
+        where = where.replace(_IDENT_TOKEN, f"({_ident_clause(grain, fs.ident_kind)})")
+    base = f"WITH base AS ({GRAIN_REL[grain]}) SELECT * FROM base WHERE {where}"
     if fs.latest_only:
         # each contract's NEWEST month among the filtered rows. An NPI billing
         # under two TINs holds two contracts — one must not supersede the
@@ -748,6 +797,43 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         finally:
             _count_lock.release()
 
+    # NPI and entity grains are LIVE aggregations over the whole store (the NPI
+    # dedup, the entity rollup): ORDER BY … LIMIT 100 still aggregates every
+    # row a filter can't remove first. Measured on a 306M-row store:
+    #   NPI view    exact NPI/TIN search 0.6-1.2 s · payer+code 2-3 s ·
+    #               code only 30-41 s · payer only 51 s · name search / no
+    #               filter: out of temp disk after ~30 s
+    #   Entity view payer+code 3.5 s · code only / TIN search / no filter:
+    #               out of temp disk (membership resolves after aggregation)
+    # On a big store, ask for a filter that keeps it fast instead of a long
+    # hang that ends in a 500. Small stores are unaffected (NARROW_REQUIRED_ROWS).
+    def _require_narrowing(grain: str, fs: FilterSet) -> None:
+        if grain not in ("npi", "entity"):
+            return
+        d = fs.described
+        payer_and_code = bool(d.get("payers")) and bool(d.get("codes"))
+        if payer_and_code or (grain == "npi" and fs.ident_kind):
+            return
+        try:
+            with store.connect() as con:
+                n = con.execute("SELECT coalesce(sum(rows_emitted), 0) FROM files "
+                                "WHERE status = 'done' AND file_type = 'in_network'"
+                                ).fetchone()[0]
+        except Exception:  # noqa: BLE001 — the guard is advisory
+            return
+        if n < NARROW_REQUIRED_ROWS:
+            return
+        if grain == "npi":
+            msg = (f"Your store is large ({n:,} rates), so the NPI view needs a "
+                   "narrower question: type a full 10-digit NPI (or 9-digit TIN) "
+                   "in the search box, or pick BOTH a payer and a code. To find a "
+                   "practice by NAME, use the TIN view's search, then click it.")
+        else:
+            msg = (f"Your store is large ({n:,} rates), so the Entity view needs "
+                   "BOTH a payer and a code picked. To look up one practice, use "
+                   "the TIN view's search (name or TIN), then click it.")
+        raise HTTPException(422, msg)
+
     @app.get("/api/rates")
     def rates(
         request: Request,
@@ -759,6 +845,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         qp = _qp(request)
         grain = grain_of(qp, cfg, store)
         fs = _fs(qp)
+        _require_narrowing(grain, fs)
         order = order_sql(sort, dir)
         limit_params = [*fs.params, page_size, (page - 1) * page_size]
         if _tin_late_join_ok(grain, fs, sort):
@@ -798,6 +885,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         qp = _qp(request)
         grain = grain_of(qp, cfg, store)
         fs = _fs(qp)
+        _require_narrowing(grain, fs)
         # hide_outliers is applied inside rel_sql but is NOT part of fs.where/
         # params — omitting it from the key served the unfiltered stats to the
         # outlier-hidden view (and vice versa) for a TTL: the strip disagreed
@@ -1389,6 +1477,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         qp = {} if full else _qp(request)
         grain = grain_of(qp, cfg, store)
         fs = _fs(qp if not full else {"dollar_only": "0"})
+        if not full:
+            _require_narrowing(grain, fs)
         select, params = export_select(grain, fs, sort, dir)
         stamp = dt.datetime.now().strftime("%Y-%m-%d_%H%M")
         tmp = _mktemp(".csv")

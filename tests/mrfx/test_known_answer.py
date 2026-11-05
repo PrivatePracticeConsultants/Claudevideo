@@ -312,3 +312,39 @@ def test_code_comparison_export_matches_its_screen(ka):
     assert "As-of month: latest" in method
     # the explorer (no latest flag) still shows every month, as labelled
     assert len(c.get("/api/rates?grain=tin&cpt=97110&limit=100").json()["rows"]) > len(rows)
+
+
+def test_big_store_npi_and_entity_views_need_a_narrowing_filter(ka, monkeypatch):
+    """At 306M rows the unfiltered NPI/entity views (and an NPI-view name
+    search) ran out of temp disk after ~30 s; an exact NPI search or payer+code
+    took 0.6-3 s. On a big store the API asks for the fast filter instead."""
+    import mrfx.api as api_mod
+
+    _, c = ka
+    monkeypatch.setattr(api_mod, "NARROW_REQUIRED_ROWS", 1)   # this tiny store counts as "big"
+    for u in ["/api/rates?grain=npi", "/api/rates?grain=npi&q=Alpha",
+              "/api/rates?grain=npi&cpt=97110", "/api/rates?grain=entity&q=210000001",
+              "/api/summary?grain=npi", "/api/export.csv?grain=entity"]:
+        r = c.get(u)
+        assert r.status_code == 422, u
+        assert "narrower" in r.json()["detail"] or "BOTH a payer and a code" in r.json()["detail"]
+    for u in [f"/api/rates?grain=npi&q={X}", f"/api/rates?grain=npi&q={T1}",
+              "/api/rates?grain=npi&payer=Alpha%20Health&cpt=97110",
+              "/api/rates?grain=entity&payer=Alpha%20Health&cpt=97110",
+              "/api/rates?grain=tin", "/api/rates?grain=tin&q=Alpha"]:
+        assert c.get(u).status_code == 200, u
+    # the NPI search answers exactly as before (the guard and the exact-match
+    # rewrite change speed, not results)
+    rows = c.get(f"/api/rates?grain=npi&q={X}&limit=100").json()["rows"]
+    assert len(rows) == 7 and all(r["unit_id"] == X for r in rows)
+    by_tin = c.get(f"/api/rates?grain=npi&q={T1}&limit=100").json()["rows"]
+    assert {r["unit_id"] for r in by_tin} == {X, Y} and all(r["tin_value"] == T1 for r in by_tin)
+
+
+def test_tin_search_works_at_every_grain(ka):
+    _, c = ka
+    for grain in ("npi", "tin", "entity"):
+        rows = c.get(f"/api/rates?grain={grain}&q={T2}&limit=100").json()["rows"]
+        assert rows and all(T2 in r["tin_value"] for r in rows), grain
+    # a partial number still substring-matches while typing
+    assert c.get("/api/rates?grain=tin&q=22000&limit=100").json()["rows"]
