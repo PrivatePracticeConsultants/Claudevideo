@@ -258,9 +258,8 @@ two months; older ones are deleted for you).
 - **Back up your database** now and then: in a command window with the
   environment on (Step 6, items 1–2), run `mrfx backup my_backup.zip`. Check a
   backup with `mrfx verify my_backup.zip`.
-- **Updating to a new version:** keep your old project folder's `data` folder
-  and `config/mrfx.yaml`. Unzip the new version, copy those two into it, and
-  redo Step 4 (it's quick the second time).
+- **Updating to a new version:** see Part 5 — drag the new zip onto
+  `Update MRF Explorer.bat`; your data and settings are kept.
 - **Does a number look wrong?** Note the insurer, NPI/TIN, code and month,
   then run `mrfx fastcheck "path\to\that_file.json.gz"` on the insurer file.
   It processes the file two independent ways and tells you if they disagree.
@@ -290,3 +289,66 @@ first run, please watch for these and note anything odd:
 
 If something fails, the black program window shows a plain-language message;
 copy it (and the file name) and send it along.
+
+---
+
+## Part 5 — Updating to a new version (your data is kept)
+
+Everything the program has found — the rates, provider names, the link queue,
+your saved backups — lives in the **`data`** folder. Your settings live in
+**`config\mrfx.yaml`**. An update replaces the *program*, never those.
+
+### From now on: drag and drop (about a minute)
+
+1. **Close MRF Explorer** — close its black window (or click in it and press
+   **Ctrl-C**). The update refuses to run while the program is open.
+2. **Download the new `mrfx_project.zip`.** Leave it zipped.
+3. Open your program folder (`…\Claudevideo`) and **drag the zip file onto
+   `Update MRF Explorer.bat`**. A black window opens, shows what it updated,
+   and ends with **"Done."** Press any key to close it.
+4. **Start MRF Explorer** as usual (Step 6), and in the browser press
+   **Ctrl-Shift-R** once on the dashboard so it loads the new screens.
+
+What the updater does for you: it keeps the `data` folder, the `.venv`
+folder and your `config\mrfx.yaml` exactly as they are; replaces the program,
+the tested-payer list and the guides; saves the old program files in
+`data\update_backups\` (so nothing is ever lost); and re-installs any new
+components. If the new version comes with a changed settings file, yours is
+kept and the new one is saved next to it as `config\mrfx.yaml.new` — you only
+need it if you want to look at new options.
+
+On the first start after an update, the program may spend a few minutes
+"rebuilding analytics" (shown in the window). That's normal and happens once;
+nothing is re-downloaded.
+
+### The very first time (your current copy has no updater yet)
+
+Do this once; after it, use the drag-and-drop steps above.
+
+1. **Close MRF Explorer.**
+2. **Save your settings:** in `…\Claudevideo\config`, copy `mrfx.yaml` to your
+   Desktop. (If you never edited it, you can skip this and step 5.)
+3. Right-click the new `mrfx_project.zip` → **Extract All…** → in the
+   "destination" box choose **the same folder you extracted to last time**
+   (the one that *contains* `Claudevideo` — e.g. `E:\mrfx_project`) →
+   **Extract**.
+4. Windows asks about files that already exist → choose **"Replace the files
+   in the destination"**. (Your `data` folder isn't in the zip, so it can't be
+   replaced.)
+5. Copy the `mrfx.yaml` from your Desktop back into `…\Claudevideo\config`
+   and choose **Replace**.
+6. Open a command window in `…\Claudevideo` (Step 3) and paste, one at a time:
+   ```
+   .\.venv\Scripts\Activate.ps1
+   ```
+   ```
+   python -m pip install -r requirements.txt
+   ```
+   ```
+   python -m pip install -e .
+   ```
+7. **Start MRF Explorer** (Step 6) and press **Ctrl-Shift-R** in the browser.
+
+**Want an extra safety net first?** Before any update you can copy the whole
+`data` folder somewhere else (it may be large), or run `mrfx backup
+E:\mrfx_backup.zip` with the program closed.

@@ -61,6 +61,8 @@ standard-charges file + what the same payer pays the hospital vs the practice),
 erosion; a year with no value is refused, never estimated),
 `mrfx packets` (monthly client packets), `mrfx renewals [--clients]`,
 `mrfx backup <zip>` / `mrfx verify [zip]` (checksummed store backup + integrity check),
+`mrfx update <new build zip>` (install a newer build; never writes data/, .venv/ or the user's
+config/mrfx.yaml — see mrfx/updater.py; `Update MRF Explorer.bat` is the drag-and-drop form),
 `mrfx reset --confirm`.
 Config: `config/mrfx.yaml`.
 

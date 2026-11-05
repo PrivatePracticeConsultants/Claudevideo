@@ -764,48 +764,42 @@ terabytes). Three ways to control it:
 
 ## Updating to a new version without losing your data
 
-Your **data and the program are separate folders**, so you can drop in a newer
-build and keep everything you've already ingested — rates, identified provider
-names, the link queue, entity groupings, peer sets. All of that lives in the
-`data/` folder, which is **never** part of a code download, so a code update
-cannot touch it. The one file a new build *does* replace is your
-`config/mrfx.yaml` (your settings), so protect that.
+Your **data and the program are separate**: everything you've ingested —
+rates, identified provider names, the link queue, entity groupings, peer sets,
+backups — lives in `data/`, which is **never** part of a code download. Your
+settings live in `config/mrfx.yaml`.
 
-Steps (a few minutes, no re-ingesting):
+**The easy way (this version and later): `Update MRF Explorer.bat`.**
+Close the app, then drag the new build's `.zip` onto `Update MRF Explorer.bat`
+in the project folder (or run `mrfx update path\to\mrfx_project.zip`). It:
 
-1. **Stop the app** — press Ctrl-C in the `mrfx serve` window. While it runs it
-   keeps the database open, so don't update code mid-run.
-2. **Save your settings** — copy `config/mrfx.yaml` somewhere safe (or just note
-   your `bulk_csv_path` line and any other edits).
-3. **(Recommended) back up your store** — copy the whole `data/` folder
-   somewhere first. It may be several GB, but it's your entire book of work, and
-   then even a mistake is fully recoverable.
-4. **Put the new code in.** The simplest safe way: open the new build's `.zip`,
-   and copy its **`mrfx` folder** over your existing `mrfx` folder (choose
-   replace/overwrite). That single folder *is* the whole program — this updates
-   everything while leaving `data/`, `config/`, and `.venv/` untouched, so
-   there's nothing to restore. (If you'd rather unzip the whole thing over the
-   folder, that works too — just put your saved `config/mrfx.yaml` back after.)
-5. **Restart `mrfx serve`.** You do **not** need to reinstall anything — your
-   virtual environment already has what it needs.
-6. **Hard-refresh the dashboard in your browser** — press **Ctrl-Shift-R** (or
-   Ctrl-F5) once on the dashboard tab. Browsers cache the dashboard's code, and
-   after a build swap they can keep running the *old* page against the new app —
-   the tell-tale sign is a control that suddenly shows **blank** (e.g. the
-   "As-of month" dropdown). A hard-refresh loads the new page. (New builds also
-   ask the browser not to cache the dashboard, so this gets less necessary over
-   time, but it's the instant fix if anything looks off right after updating.)
+- refuses while the app is running (the database must be closed);
+- checks the zip is a complete MRF Explorer build;
+- saves the program files it will replace to `data/update_backups/`;
+- writes only the files that changed — **never** `data/`, `.venv/`, or your
+  `config/mrfx.yaml` / `entity_map.yaml` / `registry_overrides.yaml` (if the new
+  build ships a different `mrfx.yaml`, it's saved beside yours as
+  `mrfx.yaml.new` so you can see new options);
+- re-installs components (`pip install -r requirements.txt` and `-e .`).
 
-On that first restart the app notices its summary tables are from the older
-version and **rebuilds them once** — a one-time wait proportional to your store
-size. This only recomputes the compact analytics from your existing rates; it
-does **not** re-download, re-parse, or re-identify anything. After it finishes,
-the new features are live and every number is preserved.
+Then start the app and press **Ctrl-Shift-R** once in the dashboard tab
+(browsers cache the dashboard's code; a hard-refresh loads the new page).
 
-**Adding new payer files** then works exactly as always — drop them in the inbox
-or paste links; they ingest alongside what's already there. Re-adding a file you
-already have is automatically **skipped, not duplicated**, so your numbers can't
-get double-counted.
+**Updating a copy that predates the updater (one time):** close the app, copy
+`config/mrfx.yaml` somewhere safe, extract the new zip over the old folder
+(Windows: Extract All to the folder that *contains* the project folder →
+"Replace the files in the destination"), put your `mrfx.yaml` back, then run
+`python -m pip install -r requirements.txt` and `python -m pip install -e .`
+with the environment active. HOW_TO_RUN.md Part 5 has it click by click.
+
+On the first restart after an update the app may notice its summary tables
+are from an older version and **rebuild them once** — a one-time wait
+proportional to your store size. It only recomputes the compact analytics from
+your existing rates; it does **not** re-download, re-parse, or re-identify
+anything.
+
+**Adding new payer files** then works exactly as always — re-adding a file you
+already have is automatically **skipped, not duplicated**.
 
 ---
 
