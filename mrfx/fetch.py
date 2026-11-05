@@ -443,6 +443,14 @@ def _segmented_download(cfg: MrfxConfig, url: str, dest: Path, part: Path, val_p
                     if resp.status_code != 206:
                         raise DownloadError(f"segment HTTP {resp.status_code}",
                                             retryable=resp.status_code in RETRYABLE_STATUS)
+                    enc = (resp.headers.get("Content-Encoding") or "").strip().lower()
+                    if enc not in ("", "identity"):
+                        # a server that compresses each byte RANGE can't be
+                        # stitched (raw: several gzip streams; decoded:
+                        # offsets no longer line up) — give up on segments;
+                        # the single-connection path handles encoded bodies
+                        state["err"] = f"server compresses byte ranges ({enc})"
+                        return
                     with open(part, "r+b") as f:
                         f.seek(start + got)
                         for chunk in _body_chunks(resp):

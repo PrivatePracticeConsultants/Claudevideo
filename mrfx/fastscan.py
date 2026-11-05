@@ -42,7 +42,6 @@ _CODE_RE = re.compile(rb'"billing_code"\s*:\s*(?:"((?:[^"\\]|\\.)*)"|(-?[0-9][0-
 _TYPE_RE = re.compile(rb'"billing_code_type"\s*:\s*(?:"((?:[^"\\]|\\.)*)"|(-?[0-9][0-9.eE+-]*))')
 _REFID_RE = re.compile(rb'"provider_group_id"\s*:\s*(?:"((?:[^"\\]|\\.)*)"|(-?[0-9][0-9.eE+-]*))')
 _HEADER_RE = re.compile(rb'"(reporting_entity_name|version|last_updated_on)"\s*:\s*"((?:[^"\\]|\\.)*)"')
-_KEY_BEFORE_RE = re.compile(rb'"((?:[^"\\]|\\.)*)"\s*:\s*$')
 
 
 _EVENT_TBL = bytes(1 if c in (0x22, 0x7B, 0x7D, 0x5B, 0x5D) else 0 for c in range(256))
@@ -414,10 +413,7 @@ def _scan(chunks, want_item, policy, on_header, counts, bulk, on_type_other):
                 if buf[pos] != _LBRACK:
                     cur_array = None   # a top-level OBJECT value: no members
                 else:
-                    # the key may straddle any number of chunks: `tail` rolls
-                    look = (tail + buf[max(0, pos - 512):pos])[-512:]
-                    m = _KEY_BEFORE_RE.search(look)
-                    cur_array = _unescape(m.group(1)) if m else None
+                    cur_array = _key_before(tail, buf[:pos])
             elif db == 2 and da == 1:
                 if cur_array is not None:
                     yield cur_array, None   # array-closed marker
@@ -447,7 +443,11 @@ def _scan(chunks, want_item, policy, on_header, counts, bulk, on_type_other):
         if len(struct_idx):
             depth = int(depth_after[-1])
         in_str = bool((n_quotes + start_parity) & 1)
-        tail = (tail + buf[-512:])[-512:]
+        # the last non-whitespace bytes seen (a key may be followed by any
+        # amount of whitespace, across any number of chunks, before its '[')
+        t = buf.rstrip(_WS_BYTES)
+        if t:
+            tail = (tail + t[-4096:])[-4096:]
         del a, q_idx, ev, cls, isq, outside, ck
     if not seen_top:
         raise FastScanUnsupported("empty file")
@@ -709,7 +709,11 @@ class _ChunkKeys:
             rows = np.arange(len(vs))
             term = mat[rows, ln] if len(vs) else np.zeros(0, np.uint8)
             term_ok = _NUM_END_LUT[term] & (cols[rows, ln] < n) if len(vs) else np.zeros(0, bool)
-            plain = (vs >= 0) & (ln >= 1) & term_ok & ~((ln > 1) & (mat[:, 0] == ord("0")))
+            # <= 15 digits: exact in a float. clean_ref_id goes through
+            # float(), so a longer id is ROUNDED on the classic path (and in
+            # the cited set) — those take the exact per-member path instead
+            plain = ((vs >= 0) & (ln >= 1) & (ln <= 15) & term_ok
+                     & ~((ln > 1) & (mat[:, 0] == ord("0"))))
             pw = 10 ** np.arange(width - 1, -1, -1, dtype=np.int64)
             digits = np.where(np.arange(width)[None, :] < ln[:, None],
                               mat[:, :width].astype(np.int64) - 48, 0)
@@ -724,9 +728,42 @@ class _ChunkKeys:
         return ~((n_id == 1) & (n_skip == 1) & ~self._has_backslash(o, c))
 
 
+_WS_BYTES = b" \t\r\n"
+_KEY_AT_END_RE = re.compile(rb'"((?:[^"\\]|\\.)*)"$')
+
+
+def _key_before(tail: bytes, pre: bytes):
+    """The top-level key whose value starts right after `pre` (the bytes
+    before a '['), or None. Whitespace between key, ':' and '[' may be any
+    length; `tail` holds the last non-whitespace bytes of earlier chunks."""
+    s = pre.rstrip(_WS_BYTES)
+    if not s:
+        s = tail
+    elif len(s) < 4096:
+        s = tail + s
+    if not s.endswith(b":"):
+        return None
+    s = s[:-1].rstrip(_WS_BYTES)
+    if not s:
+        s = tail
+    m = _KEY_AT_END_RE.search(s[-4096:])
+    return _unescape(m.group(1)) if m else None
+
+
+_PAIR_RE = re.compile(rb'"((?:[^"\\]|\\.)*)"\s*:\s*"((?:[^"\\]|\\.)*)"')
+_HEADER_KEYS = ("reporting_entity_name", "version", "last_updated_on")
+
+
 def _headers(chunk: bytes, on_header) -> None:
-    for m in _HEADER_RE.finditer(chunk):
-        on_header(m.group(1).decode(), _unescape(m.group(2)))
+    if b"\\" not in chunk:
+        for m in _HEADER_RE.finditer(chunk):
+            on_header(m.group(1).decode(), _unescape(m.group(2)))
+        return
+    # escapes present: a header KEY may itself be escaped — unescape keys
+    for m in _PAIR_RE.finditer(chunk):
+        key = _unescape(m.group(1))
+        if key in _HEADER_KEYS:
+            on_header(key, _unescape(m.group(2)))
 
 
 def _depth_before(data: bytes) -> np.ndarray:
@@ -833,10 +870,22 @@ def _decide_item(data: bytes, want_item, final: bool):
 
 
 def _decide_ref(data: bytes, want_ref, final: bool):
+    """Keep this reference member? Decided at its END: with duplicate
+    provider_group_id keys the classic parser (a dict) keeps the LAST one,
+    and a key spelled with a \\u escape is read by ijson itself."""
+    if not final:
+        return None
+    if _has_escaped_key(data):
+        import ijson
+
+        ids = [v for prefix, event, v in ijson.parse(io.BytesIO(data), use_float=True)
+               if prefix == "provider_group_id" and event not in ("start_map", "start_array",
+                                                                  "end_map", "end_array", "map_key")]
+        return bool(ids) and bool(want_ref(ids[-1]))
     refs, _ = _own_keys(_REFID_RE, data, final)
     if not refs:
-        return False if final else None
-    return bool(want_ref(_value(refs[0])))
+        return False
+    return bool(want_ref(_value(refs[-1])))
 
 
 # an undecided member's peek buffer is re-searched on every chunk; cap how

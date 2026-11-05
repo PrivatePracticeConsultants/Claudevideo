@@ -180,7 +180,9 @@ def open_stream(path: Path, progress_cb=None) -> io.BufferedIOBase:
 
 def _estimate_uncompressed(path: Path, compressed: int) -> int | None:
     suffix = path.name.lower()
-    if suffix.endswith(".gz") or suffix.endswith(".zip"):
+    # by NAME or by MAGIC BYTES: a body an origin gzipped anyway is stored as
+    # sent (fetch._body_chunks), so a ".json" name can hold gzip bytes
+    if suffix.endswith(".gz") or suffix.endswith(".zip") or _compressed_magic(path):
         # MRF JSON is extremely repetitive and commonly gzips 12-20x (sometimes
         # more). A too-low multiplier is dangerous: it can route a genuinely
         # huge, ref-heavy file to the single-pass IN-MEMORY path, which then
@@ -201,10 +203,21 @@ def _estimate_uncompressed(path: Path, compressed: int) -> int | None:
     return compressed
 
 
+def _compressed_magic(path: Path) -> bool:
+    try:
+        with open(path, "rb") as f:
+            head = f.read(4)
+    except OSError:
+        return False
+    return head[:2] == b"\x1f\x8b" or head[:4] == b"PK\x03\x04"
+
+
 def _recorded_uncompressed(path: Path) -> int | None:
     """Uncompressed size as the archive records it; None if unreadable."""
     try:
-        if path.name.lower().endswith(".zip"):
+        with open(path, "rb") as f:
+            is_zip = f.read(4) == b"PK\x03\x04"
+        if is_zip:
             with zipfile.ZipFile(path) as zf:
                 sizes = [i.file_size for i in zf.infolist()
                          if i.filename.lower().endswith((".json", ".json.gz"))]

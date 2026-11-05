@@ -35,6 +35,9 @@ def _parse_one(cfg: MrfxConfig, path: Path, fast: bool, two_pass: bool, out: Pat
 
     info: dict = {"skim_s": 0.0}
     keep = None
+    if two_pass and fast:
+        # exactly what ingest runs for a big file on the fast path
+        return _big_fast_one(cfg, path, out, info)
     if two_pass:
         t = time.perf_counter()
         with open_stream(path) as s:
@@ -100,6 +103,46 @@ def _compare_row_sets(duckdb, tmp: str, a: str, b: str) -> tuple[int, int]:
         con.close()
 
 
+def _big_fast_one(cfg: MrfxConfig, path: Path, out: Path, info: dict) -> dict:
+    import pyarrow.parquet as pq
+
+    from .fastscan import FastScanUnsupported
+    from .parser import InNetworkParser, batch_to_table, run_big_file_fast
+    from .sniff import open_stream
+    from .store import PARQUET_COMPRESSION, RATES_SCHEMA
+
+    writer = None
+
+    def sink(batch) -> None:
+        nonlocal writer
+        if writer is None:
+            writer = pq.ParquetWriter(out, RATES_SCHEMA, compression=PARQUET_COMPRESSION)
+        writer.write_table(batch_to_table(batch, RATES_SCHEMA))
+
+    t = time.perf_counter()
+    try:
+        r, target_items = run_big_file_fast(
+            cfg, InNetworkParser(cfg, source_file=path.name, sink=sink),
+            lambda: open_stream(path), Path(str(out) + ".spool.tmp"))
+    except FastScanUnsupported as e:
+        raise RuntimeError(f"fast path declined this file ({e}); ingest would use the "
+                           "classic parser for it") from e
+    finally:
+        if writer is not None:
+            writer.close()
+    if writer is None:
+        pq.write_table(RATES_SCHEMA.empty_table(), out)
+    info["extract_s"] = time.perf_counter() - t
+    info["skim_target_items"] = target_items
+    info["skim_ref_ids"] = None    # single read: no separate kept-id set
+    info.update(
+        rows=r.qa.rows, qa=r.qa.to_dict(), items_seen=r.items_seen,
+        items_matched=r.items_matched, ref_groups_skipped=r.ref_groups_skipped,
+        header=(r.payer, r.schema_version, r.last_updated_on),
+    )
+    return info
+
+
 def compare_parsers(cfg: MrfxConfig, path: Path, two_pass: bool | None = None) -> dict:
     """Both parsers on one file -> a report dict; report['identical'] is the
     verdict. Errors from either side are captured, not raised: a file both
@@ -139,10 +182,9 @@ def compare_parsers(cfg: MrfxConfig, path: Path, two_pass: bool | None = None) -
                     f"skim target items: classic={c['skim_target_items']} fast={f['skim_target_items']}")
             # the fast skim may keep FEWER ids (classic over-collects ids cited
             # before a non-target code streams); it must never need MORE
-            if not f["skim_ref_ids"] <= c["skim_ref_ids"]:
-                rep["differences"].append("fast skim kept reference ids the classic skim did not")
             for side in (c, f):
-                side["skim_ref_ids"] = len(side.pop("skim_ref_ids"))
+                ids = side.pop("skim_ref_ids")
+                side["skim_ref_ids"] = len(ids) if ids is not None else None
         a, b = (str(outs[m]).replace("'", "''") for m in ("classic", "fast"))
         try:
             only_c, only_f = _compare_row_sets(duckdb, tmp, a, b)

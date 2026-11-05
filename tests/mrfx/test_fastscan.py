@@ -861,3 +861,138 @@ def test_prefetch_reader_errors_and_early_close():
         time.sleep(0.01)
     assert threading.active_count() <= before
     assert b"".join(_prefetch(io.BytesIO(b"abc" * 1000), 7)) == b"abc" * 1000
+
+
+# ---------------------------------------------------------------------------
+# found by an independent review of the fast path (each reproduced first)
+# ---------------------------------------------------------------------------
+
+def test_duplicate_top_level_arrays_make_the_single_read_decline(cfg, tmp_path):
+    """Duplicate keys ({"in_network":[..],"provider_references":[..],
+    "in_network":[..]}) are valid JSON; the classic parser's order-dependent
+    reference resolution can't be replayed from a spool, so the single read
+    DECLINES (before any row) and ingest falls back."""
+    from mrfx.fastscan import FastScanUnsupported
+    from mrfx.parser import run_big_file_fast
+
+    ref = lambda i: '{"provider_group_id": %d, "provider_groups": [{"npi": ["%d"], "tin": {"type": "ein", "value": "11111111%d"}}]}' % (i, 1200000000 + i, i)  # noqa: E731
+    for raw in (
+        '{"in_network": [%s], "provider_references": [%s, %s], "in_network": [%s]}'
+        % (json.dumps(_item("97110", refs=[1])), ref(1), ref(2), json.dumps(_item("97140", refs=[2]))),
+        '{"provider_references": [%s], "provider_references": [%s], "in_network": [%s]}'
+        % (ref(1), ref(2), json.dumps(_item("97110", refs=[1, 2]))),
+    ):
+        rows = _Rows()
+        p = InNetworkParser(cfg, "dup.json", sink=rows)
+        with pytest.raises(FastScanUnsupported):
+            run_big_file_fast(cfg, p, _CountingOpen(raw.encode()), tmp_path / ".d.1.spool.tmp")
+        assert rows == [] and not (tmp_path / ".d.1.spool.tmp").exists()
+
+
+def test_duplicate_arrays_ingest_like_classic_through_the_fallback(tmp_path, monkeypatch):
+    import mrfx.ingest as ingest_mod
+    from mrfx.config import MrfxConfig
+    from mrfx.ingest import ingest_file
+    from mrfx.store import Store
+
+    monkeypatch.setattr(ingest_mod, "LARGE_FILE_UNCOMPRESSED_BYTES", 1)
+    ref = lambda i: '{"provider_group_id": %d, "provider_groups": [{"npi": ["%d"], "tin": {"type": "ein", "value": "11111111%d"}}]}' % (i, 1200000000 + i, i)  # noqa: E731
+    raw = ('{"in_network": [%s], "provider_references": [%s, %s], "in_network": [%s]}'
+           % (json.dumps(_item("97110", refs=[1])), ref(1), ref(2), json.dumps(_item("97140", refs=[2]))))
+    out = {}
+    for fast in (False, True):
+        root = tmp_path / str(fast)
+        c = MrfxConfig(inbox_dir=root / "i", processed_dir=root / "p", failed_dir=root / "f",
+                       store_dir=root / "s", downloads_dir=root / "d",
+                       entity_map_path=root / "e.yaml", fast_scan=fast)
+        c.ensure_dirs()
+        st = Store(c.store_dir)
+        f = c.inbox_dir / "dup_2026-01.json"
+        f.write_text(raw)
+        assert ingest_file(c, st, f)["status"] == "done"
+        with st.connect() as con:
+            out[fast] = sorted(con.execute("SELECT billing_code, npi FROM rates").fetchall())
+    assert out[True] == out[False] and len(out[True]) == 2
+
+
+@pytest.mark.parametrize("rid", [9007199254740993, 12345678901234567, 123456789012345678])
+def test_reference_ids_beyond_float_precision_match_classic(cfg, tmp_path, monkeypatch, rid):
+    """clean_ref_id goes through float(): ids past 2**53 are ROUNDED on the
+    classic path (and in the cited set). The bulk skip compared the exact
+    integer and dropped the reference — chunk-size dependent."""
+    for refs_first in (True, False):
+        refs = [{"provider_group_id": rid, "provider_groups": G}]
+        items = [_item("97110", refs=[rid])]
+        doc = {"provider_references": refs, "in_network": items} if refs_first else {
+            "in_network": items, "provider_references": refs}
+        data = json.dumps(doc).encode()
+        keep, _ = skim_needed_ref_ids(cfg, io.BytesIO(data))
+        _assert_same(cfg, data, monkeypatch, keep=keep)
+        want, _ = _classic_two_pass(cfg, data)
+        for chunk in (7, 1 << 20):
+            monkeypatch.setattr(fastscan, "CHUNK", chunk)
+            got, _, _ = _big_fast(cfg, data, tmp_path)
+            assert sorted(map(_key, got.rows)) == sorted(map(_key, want.rows)) and len(want.rows) == 2
+
+
+@pytest.mark.parametrize("ids", [('"abc"', "1"), ("1", "5"), ("5", "1"), ("1", '"x"')])
+def test_duplicate_provider_group_id_last_one_wins_like_classic(cfg, tmp_path, monkeypatch, ids):
+    raw = ('{"provider_references": [{"provider_group_id": %s, "provider_group_id": %s, '
+           '"provider_groups": [{"npi": ["1234567890"], "tin": {"type": "ein", "value": "111111111"}}]}], '
+           '"in_network": [%s, %s]}') % (ids[0], ids[1], json.dumps(_item("97110", refs=[1])),
+                                         json.dumps(_item("97140", refs=[5])))
+    data = raw.encode()
+    keep, _ = skim_needed_ref_ids(cfg, io.BytesIO(data))
+    _assert_same(cfg, data, monkeypatch)
+    _assert_same(cfg, data, monkeypatch, keep=keep)
+    want, _ = _classic_two_pass(cfg, data)
+    got, _, _ = _big_fast(cfg, data, tmp_path)
+    assert sorted(map(_key, got.rows)) == sorted(map(_key, want.rows))
+
+
+def test_escaped_reference_key_and_escaped_header_key(cfg, tmp_path, monkeypatch):
+    B = "\\"
+    raw = ('{"reporting' + B + 'u005fentity_name": "Real Payer", "provider_references": '
+           '[{"provider' + B + 'u005fgroup_id": 1, "provider_groups": [{"npi": ["1234567890"], '
+           '"tin": {"type": "ein", "value": "111111111"}}]}], "in_network": [%s]}'
+           ) % json.dumps(_item("97110", refs=[1]))
+    data = raw.encode()
+    rows = _assert_same(cfg, data, monkeypatch)
+    assert len(rows) == 1
+    assert InNetworkParser(cfg, "t.json").parse_fast(io.BytesIO(data)).payer == "Real Payer"
+    keep, _ = skim_needed_ref_ids(cfg, io.BytesIO(data))
+    _assert_same(cfg, data, monkeypatch, keep=keep)
+
+
+@pytest.mark.parametrize("gap", [600, 5000, 3 << 20])
+def test_any_amount_of_whitespace_between_key_and_array(cfg, monkeypatch, gap):
+    """The array's key was found in a fixed 512-byte lookback: 600 spaces
+    before '[' dropped the whole in_network array (file still 'done')."""
+    item = json.dumps(_item("97110", groups=G))
+    for raw in ('{"in_network"' + " " * gap + ":[" + item + "]}",
+                '{"in_network":' + "\n" * gap + "[" + item + "]}",
+                '{"in_network"' + " " * gap + ":" + "\t" * gap + "[" + item + "]}"):
+        rows = _assert_same(cfg, raw.encode(), monkeypatch) if gap < (1 << 20) else None
+        if rows is not None:
+            assert len(rows) == 2
+        for chunk in (4096, 1 << 20):
+            monkeypatch.setattr(fastscan, "CHUNK", chunk)
+            got = InNetworkParser(cfg, "t.json").parse_fast(io.BytesIO(raw.encode()))
+            assert got.qa.rows == 2 and got.items_seen == 1
+
+
+def test_gzip_bytes_under_a_json_name_are_sized_from_the_trailer(tmp_path):
+    """A gzip-encoded download is stored as sent, so a '.json' name can hold
+    gzip bytes; the estimate must still see the real size (big-file routing
+    keeps the reference table out of memory)."""
+    import gzip
+
+    from mrfx.sniff import _estimate_uncompressed
+
+    body = b'{"in_network": [' + b",".join([b'{"billing_code": "99213"}'] * 100_000) + b"]}"
+    f = tmp_path / "x_rates.json"
+    f.write_bytes(gzip.compress(body))
+    assert _estimate_uncompressed(f, f.stat().st_size) == len(body)
+    plain = tmp_path / "y.json"
+    plain.write_bytes(body)
+    assert _estimate_uncompressed(plain, len(body)) == len(body)

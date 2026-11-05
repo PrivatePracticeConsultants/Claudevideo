@@ -2229,3 +2229,56 @@ def test_a_gzip_encoded_body_is_saved_as_sent_not_decoded(cfg):
             assert s.read() == doc
     finally:
         httpd.shutdown()
+
+
+def test_segments_fall_back_when_the_server_compresses_each_range(cfg, monkeypatch):
+    """Stitching raw byte ranges is only valid if each 206 body IS those
+    bytes. An origin that gzips every range response would assemble a corrupt
+    file; segmentation must give up and the single connection finish it."""
+    import gzip as _gz
+    import hashlib
+    import http.server as hs
+    import os as _os
+
+    import mrfx.fetch as F
+
+    # COMPRESSIBLE like a real MRF: each gzipped range is SMALLER than the
+    # range, so naive stitching quietly fills the file with wrong bytes
+    payload = (b'{"billing_code": "97110", "negotiated_rate": 41.5}, ' * 6000)[:300_000]
+    assert len(payload) == 300_000 and _os
+
+    class CompressesRanges(hs.BaseHTTPRequestHandler):
+        def do_GET(self):
+            rng = self.headers.get("Range", "")
+            if rng.startswith("bytes="):
+                a, b = rng[6:].split("-")
+                start = int(a)
+                end = min(int(b) if b else len(payload) - 1, len(payload) - 1)
+                body = _gz.compress(payload[start:end + 1])
+                self.send_response(206)
+                self.send_header("Content-Range", f"bytes {start}-{end}/{len(payload)}")
+                self.send_header("Content-Encoding", "gzip")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            else:
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+        def log_message(self, *a):
+            pass
+
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), CompressesRanges)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        monkeypatch.setattr(F, "_SEGMENT_MIN_BYTES", 1000)
+        monkeypatch.setattr(F, "_SEGMENT_MIN_PIECE", 50_000)
+        cfg.download_segments = 4
+        url = f"http://127.0.0.1:{httpd.server_address[1]}/f.json.gz"
+        dest = cfg.downloads_dir / F.filename_for(url)
+        sha, _ = F.download(cfg, url, dest)
+        assert dest.read_bytes() == payload and sha == hashlib.sha256(payload).hexdigest()
+    finally:
+        httpd.shutdown()

@@ -938,13 +938,15 @@ def run_big_file_fast(cfg: MrfxConfig, parser: "InNetworkParser", open_fn, spool
     is on disk (`spool_path`, deleted here, swept as an orphan if killed).
 
     Returns (result, target_items). target_items == 0 means the file holds
-    none of the target codes. Raises FastScanUnsupported before doing any
-    work if the file's shape can't be vouched for (caller falls back)."""
+    none of the target codes. Raises FastScanUnsupported — always before any
+    row reaches the sink — if the file's shape can't be vouched for (the
+    caller falls back to the classic two-pass with a FRESH parser)."""
     import struct
 
-    from .fastscan import RefPolicy, decode_member, iter_members
+    from .fastscan import FastScanUnsupported, RefPolicy, decode_member, iter_members
 
     cited: set[int] = set()
+    arrays: dict = {}
     parser._keep_ref_ids = cited          # _add_ref filters to the cited set
     policy = RefPolicy(active=False, ids=cited)
     refs_before = False
@@ -959,6 +961,13 @@ def run_big_file_fast(cfg: MrfxConfig, parser: "InNetworkParser", open_fn, spool
                         counts=counts, target_codes=parser.code_set, ref_policy=policy,
                         on_type_other=parser._count_type_other):
                     if data is None:
+                        arrays[array] = arrays.get(array, 0) + 1
+                        if arrays[array] > 1 and array in ("in_network", "provider_references"):
+                            # duplicate top-level keys (valid JSON, never seen
+                            # in a real MRF): the classic parser's order-
+                            # dependent reference resolution can't be replayed
+                            # from a spool — decline; no row was emitted yet
+                            raise FastScanUnsupported(f"more than one top-level {array} array")
                         if array == "provider_references" and not policy.active:
                             refs_before = True
                         elif array == "in_network":
