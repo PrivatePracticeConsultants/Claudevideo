@@ -166,7 +166,8 @@ a file bigger than the safety limit shows `too big` — see the disk section
 below).
 Files process **a few at a time in the background** — by default as many as
 your computer has processor cores minus one, or fewer if your RAM can't hold
-that many (about 2 GB each: 3 on a 16 GB machine, 7 on 32 GB; the
+that many (about 2 GB each after the database's 8 GB: 2 on a 16 GB machine,
+up to 7 on 32 GB; the
 `parallel_ingests:` knob in `config/mrfx.yaml`, `0` = automatic), and **several files download at once**
 to keep those workers fed (`parallel_downloads:`, `0` = automatic, capped at
 6 — the same per-host limit a web browser uses; simultaneous downloads
