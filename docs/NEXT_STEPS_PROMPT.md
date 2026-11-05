@@ -2,6 +2,34 @@
 
 Copy everything below the line into a fresh session on this repo.
 
+## Status after the Nov 5, 2026 session (read before re-running the prompt)
+
+Done, with tests and real-file verification (see `git log` for numbers):
+- P0.1 all-codes / low-disk single read declines to the no-spool two-pass.
+- P0.2 three-phase honest progress bar (in-process and worker pool).
+- P0.3 README legacy banner; remote `location` refs counted + explained
+  (`qa.remote_ref_groups`); all 22 real files scanned: none use them.
+- P0.4 full 20.4 GB Aetna file: IDENTICAL to the original code (590,311,124
+  rows), 4,071 s -> 1,082 s, 3.19 -> 1.92 GB.
+- P1: UTF-16/32 fail fast; whitespace extremes, nested bundle refs and the
+  late-header contract pinned; therapy_only_ingest verified on real files
+  with a real-schema cache; parent removes orphaned spools; orphaned workers
+  delete their own temps; zombies count as dead in the sweep; two SIGKILL
+  trials (mid-spool, mid-write) recover exactly; fastcheck catches replay bugs.
+- P2: RowBatch factored by provider group (therapy-only -15%), shared
+  NPI/TIN strings (-33% reference-table memory), numba evaluated and NOT
+  built (projected <2x), cores/worker and a 1-4 worker curve measured.
+- P3/P4: pip-audit clean; numpy wheels confirmed win_amd64 cp311-cp314;
+  GETTING_STARTED what-to-expect table; AI_HANDOFF Step 5 / Step 8 updated.
+
+Still open: P2.3 on an 8-core box (default unchanged), P2.5 QA fold (~5 s
+per 13.5M rows, left), P2.6 rollup refresh at 300M-row scale, P2.7
+segmented re-hash (opt-in feature, ~1 min per 20 GB, left), P2.8 remote-ref
+fetching (no payer seen using them), and ALL of P3 on Windows — nothing in
+this repo has been run on Windows by an agent yet. An Aetna fixture was not
+added: its smallest PT items cite 6,220 references each (19 MB slice).
+
+
 ---
 
 You are picking up MRF Explorer (`mrfx/`). Read `CLAUDE.md`, then

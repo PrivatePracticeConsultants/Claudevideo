@@ -568,7 +568,11 @@ Here's what moves the queue's total time, in order of impact:
    clamped — extra processes past the cores only fight each other. Each
    worker keeps a bit more than one core busy (about 1.2–1.5: its file
    reading and database writing run alongside the parsing), so you don't
-   gain anything by going past your core count.
+   gain anything by going past your core count. Measured on a 4-core test
+   machine: 1 worker 154 s for a test queue, 2 workers 87 s, 3 workers
+   87 s — speed stops improving at about **your cores ÷ 1.4** workers
+   (around 5 on an 8-core PC). If memory is tight, that number is a good
+   place to stop; going higher only costs RAM.
 
 2. **More simultaneous downloads if the parsers are starving.** On the Files
    tab, if parsers sit idle while links crawl (common with Blue-plan CDNs that

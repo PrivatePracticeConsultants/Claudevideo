@@ -449,9 +449,12 @@ retry button reachable.
   measured prototype.
 - Per worker: 1.2–1.5 cores busy (scanner + decompression thread + Parquet
   writer thread): UHC 1.22, row-dense WY 1.53, Aetna slice 1.38. The auto
-  `parallel_ingests` (cores-1, cap 8) therefore slightly oversubscribes; NOT
-  changed without a throughput curve measured on an 8-core box (P2.3 in
-  docs/NEXT_STEPS_PROMPT.md).
+  `parallel_ingests` (cores-1, cap 8) therefore slightly oversubscribes.
+  Measured curve, 8 real files over local HTTP on a 4-core box (enrichment
+  off): 1 worker 153.5 s, 2 -> 87.0 s, 3 -> 87.2 s, 4 (clamped to 3) ->
+  87.9 s. Plateau at ~cores/1.4; extra workers cost memory, not speed. The
+  default was NOT changed — it loses nothing measurable, and an 8-core curve
+  (expected plateau ~5) is still unmeasured (NEXT_STEPS_PROMPT P2.3).
 - Row production (RowBatch) is factored by provider group: one entry per
   distinct group + one (price, group) pair per fan-out, expanded with numpy +
   Arrow take; each group (therapy filter, TIN-only) is decided once per item,
