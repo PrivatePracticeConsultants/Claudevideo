@@ -229,3 +229,28 @@ def test_companion_reference_file_is_untouched_by_fast_scan(tmp_path):
         with store.connect() as con:
             skipped = con.execute("SELECT sum(ref_groups_skipped) FROM files").fetchone()[0]
         assert not skipped  # every cited reference resolved through the companion
+
+
+def test_size_estimate_never_under_reads_a_high_ratio_file(tmp_path):
+    """Real MRFs compress 3x-60x. A fixed 18x guess under-estimated a
+    high-ratio file, which can route a genuinely big file to the single-pass
+    path (whole reference table in RAM). The recorded size raises it."""
+    from mrfx.sniff import _estimate_uncompressed
+
+    body = b'{"in_network": [' + b",".join([b'{"billing_code": "99213"}'] * 200_000) + b"]}"
+    gz = tmp_path / "x.json.gz"
+    gz.write_bytes(gzip.compress(body))
+    ratio = len(body) / gz.stat().st_size
+    assert ratio > 18                      # the case the old guess got wrong
+    assert _estimate_uncompressed(gz, gz.stat().st_size) == len(body)
+    zp = tmp_path / "x.zip"
+    with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("x.json", body)
+    assert _estimate_uncompressed(zp, zp.stat().st_size) >= len(body)
+    # never LOWER than the old guess (low-ratio / >4 GiB wrap stays safe)
+    low = tmp_path / "low.json.gz"
+    low.write_bytes(gzip.compress(bytes(range(256)) * 10_000, compresslevel=1))
+    assert _estimate_uncompressed(low, low.stat().st_size) >= 18 * low.stat().st_size
+    bad = tmp_path / "bad.json.gz"
+    bad.write_bytes(b"\x1f\x8b")
+    assert _estimate_uncompressed(bad, 2) == 36

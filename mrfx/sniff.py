@@ -188,8 +188,32 @@ def _estimate_uncompressed(path: Path, compressed: int) -> int | None:
         # constant-memory invariant. Over-estimating is safe — it only routes a
         # file to the two-pass streaming path, which is always correct. So bias
         # high: 18x.
-        return compressed * 18
+        #
+        # But real MRFs compress anywhere from ~3x to 60x (measured Nov 2026:
+        # a BCBS file 38x, a 0.7 GB download that is 42 GB of JSON). So also
+        # read the size the archive RECORDS — the gzip trailer (exact below
+        # 4 GiB, modulo 4 GiB above it) or the zip directory (exact) — and
+        # take the LARGER. That can only raise an estimate, which only ever
+        # routes a file to the always-correct two-pass path; it closes the
+        # dangerous case of a 40-80 MB download that is really 1.5-3 GB being
+        # parsed single-pass with its whole reference table in memory.
+        return max(compressed * 18, _recorded_uncompressed(path) or 0)
     return compressed
+
+
+def _recorded_uncompressed(path: Path) -> int | None:
+    """Uncompressed size as the archive records it; None if unreadable."""
+    try:
+        if path.name.lower().endswith(".zip"):
+            with zipfile.ZipFile(path) as zf:
+                sizes = [i.file_size for i in zf.infolist()
+                         if i.filename.lower().endswith((".json", ".json.gz"))]
+            return max(sizes) if sizes else None
+        with open(path, "rb") as f:
+            f.seek(-4, 2)
+            return int.from_bytes(f.read(4), "little")
+    except (OSError, ValueError, zipfile.BadZipFile):
+        return None
 
 
 def _scan_header(stream: io.BufferedIOBase, pf: Preflight) -> None:
