@@ -632,6 +632,21 @@ moves that number, in order of impact:
    in files you already have, re-add those links (the app re-downloads and
    re-extracts them).
 
+   **Want proof the fast reader gives the same numbers?** The app reads big
+   files with a fast scanner that skips every code you didn't ask for without
+   parsing it. It was checked against the original reader on real payer files
+   (identical rates), but you can check it on YOUR files any time — it touches
+   nothing in your data:
+
+   ```
+   mrfx fastcheck "C:\path\to\some-payer-file.json.gz"
+   ```
+
+   It reads the file both ways and prints `IDENTICAL` (plus how much faster the
+   fast way was) or `DIFFERENT` with what differed. If you ever see
+   `DIFFERENT`, set `fast_scan: false` in `config/mrfx.yaml` to go back to the
+   original reader, and send that file's name along with the report.
+
 4. **Keep the machine awake.** Windows sleep pauses everything mid-queue. For
    an overnight grind: plug in, Settings → System → Power → set "Put my device
    to sleep" to **Never** (screen off is fine).

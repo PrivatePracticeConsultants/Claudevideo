@@ -23,7 +23,7 @@ from mrfx.store import RATES_SCHEMA
 from tests.mrfx.conftest import FIXTURES
 from tests.mrfx.test_messy_files import HOSTILE
 
-CHUNKS = [1, 2, 3, 7, 64, 4096]
+CHUNKS = [1, 2, 3, 7, 64, 4096, 1 << 20]
 
 
 def _key(row):
@@ -254,3 +254,431 @@ def test_missing_numpy_degrades_to_classic_parser(cfg, monkeypatch):
     _, r = run_in_network_parse(cfg, lambda: InNetworkParser(cfg, "t.json"),
                                 lambda: contextlib.nullcontext(io.BytesIO(data)))
     assert r.qa.rows == 2
+
+
+# ---------------------------------------------------------------------------
+# strictness parity: whatever the classic parser REJECTS inside a member we
+# actually decode must fail the file on the fast path too — never become a row
+# ---------------------------------------------------------------------------
+
+_BAD_NUMBERS = ["NaN", "Infinity", "-Infinity", "1e400", "-1e999",
+                "123456789012345678901234567890"]
+
+
+@pytest.mark.parametrize("bad", _BAD_NUMBERS)
+def test_invalid_numbers_in_a_target_item_fail_the_file_like_classic(cfg, bad):
+    """A NaN/inf rate is not JSON; the classic parser fails the file. The
+    fast path's json.loads would ACCEPT it and emit a NaN rate into a median
+    — the one outcome that is never acceptable."""
+    doc = json.dumps({"in_network": [_item("97110", groups=G)]}).replace('"negotiated_rate": 50.0', f'"negotiated_rate": {bad}')
+    assert bad in doc
+    with pytest.raises(Exception):
+        InNetworkParser(cfg, "t.json").parse(io.BytesIO(doc.encode()))
+    with pytest.raises(ValueError):
+        InNetworkParser(cfg, "t.json").parse_fast(io.BytesIO(doc.encode()))
+
+
+@pytest.mark.parametrize("bad", _BAD_NUMBERS)
+def test_invalid_numbers_in_a_kept_reference_fail_the_file(cfg, bad):
+    doc = json.dumps({
+        "provider_references": [{"provider_group_id": 1, "provider_groups": [
+            {"npi": ["1234567890"], "tin": {"type": "ein", "value": "111111111"}, "x": "PLACEHOLDER"}]}],
+        "in_network": [_item("97110", refs=[1])]}).replace('"PLACEHOLDER"', bad)
+    with pytest.raises(ValueError):
+        InNetworkParser(cfg, "t.json").parse_fast(io.BytesIO(doc.encode()))
+
+
+def test_big_numbers_that_are_valid_still_parse(cfg, monkeypatch):
+    """The strict decoder only engages on a suspicious pattern — and must not
+    reject the valid numbers that trip it (19-digit strings, 1e100)."""
+    doc = {"in_network": [_item("97110", rate=1e100, groups=[
+        {"npi": ["1234567890123456789", 1234567890], "tin": {"type": "ein", "value": "1234567890123456789"}}])]}
+    _assert_same(cfg, json.dumps(doc).encode(), monkeypatch)
+
+
+@pytest.mark.parametrize("tail", [b" xyz", b'{"in_network": []}', b"]", b"}", b"\x00"])
+def test_bytes_after_the_document_fail_the_file(cfg, tail):
+    """Trailing bytes after the closing brace mean a doubled/corrupt download
+    (e.g. a resume that appended the file again). Classic fails it; so must
+    the fast path, rather than quietly ingesting half a story."""
+    data = json.dumps({"in_network": [_item("97110", groups=G)]}).encode() + tail
+    with pytest.raises(Exception):
+        InNetworkParser(cfg, "t.json").parse(io.BytesIO(data))
+    for chunk in CHUNKS:
+        import mrfx.fastscan as fs
+        old = fs.CHUNK
+        fs.CHUNK = chunk
+        try:
+            with pytest.raises(ValueError):
+                InNetworkParser(cfg, "t.json").parse_fast(io.BytesIO(data))
+        finally:
+            fs.CHUNK = old
+
+
+def test_trailing_whitespace_is_fine(cfg, monkeypatch):
+    _assert_same(cfg, json.dumps({"in_network": [_item("97110", groups=G)]}).encode() + b" \r\n\t\n", monkeypatch)
+
+
+def test_lone_surrogates_never_reach_a_row(cfg):
+    """A bad \\uD800 escape decodes to a lone surrogate, which can't be stored
+    as UTF-8 — the Parquet write would crash and fail the file. The classic
+    parser turns it into '?'; so does the fast path, everywhere a string can
+    reach a row (header, modifiers, billing class, codes)."""
+    raw = ('{"reporting_entity_name": "Pay\\ud800er", "in_network": [{"billing_code": "97110", '
+           '"billing_code_type": "CPT", "negotiated_rates": [{"provider_groups": '
+           '[{"npi": ["1234567890"], "tin": {"type": "ein", "value": "111111111"}}], '
+           '"negotiated_prices": [{"negotiated_type": "negotiated", "negotiated_rate": 5, '
+           '"billing_class": "prof\\udc00", "billing_code_modifier": ["G\\ud83dP"], '
+           '"service_code": ["1\\udfff1"]}]}]}]}').encode()
+    batches = []
+    p = InNetworkParser(cfg, "t.json", sink=batches.append)
+    r = p.parse_fast(io.BytesIO(raw))
+    assert r.payer == "Pay?er"
+    t = batch_to_table(batches[0], RATES_SCHEMA)          # must not raise
+    row = t.to_pylist()[0]
+    assert row["billing_class"] == "prof?" and row["billing_code_modifier"] == ["G?P"]
+    assert row["service_code"] == ["1?1"]
+
+
+def test_valid_surrogate_pairs_are_kept(cfg, monkeypatch):
+    raw = '{"reporting_entity_name": "A\\ud83d\\ude00", "in_network": []}'.encode()
+    _assert_same(cfg, raw, monkeypatch)
+    p = InNetworkParser(cfg, "t.json")
+    assert p.parse_fast(io.BytesIO(raw)).payer.endswith("\U0001F600")
+
+
+# ---------------------------------------------------------------------------
+# the one DELIBERATE difference: corrupt bytes inside an item we never decode
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("corrupt", [
+    b'"name": "\xff\xfe bad utf-8",',                 # invalid UTF-8
+    b'"name": "raw\nnewline",',                        # unescaped control char
+    b'"name": "x", "extra": [1, 2, ],',               # trailing comma
+    b'"rate": NaN,',                                    # NaN in a non-target item
+])
+def test_corruption_inside_a_non_target_item_keeps_the_target_rows(cfg, corrupt):
+    """The classic parser tokenizes every byte, so ONE malformed character in
+    an unrelated billing code fails the whole file and loses every PT rate in
+    it. The fast path never reads non-target bytes, so it keeps the valid PT
+    rows — identical to the same file with the corrupt item removed. This
+    pins that behavior so it can't change silently in either direction."""
+    target = json.dumps(_item("97110", groups=G)).encode()
+    bad = b'{"billing_code": "99213", "billing_code_type": "CPT", ' + corrupt + b' "negotiated_rates": []}'
+    corrupt_doc = b'{"in_network": [' + bad + b", " + target + b"]}"
+    clean_doc = b'{"in_network": [' + target + b"]}"
+    with pytest.raises(Exception):
+        InNetworkParser(cfg, "t.json").parse(io.BytesIO(corrupt_doc))
+    got = InNetworkParser(cfg, "t.json").parse_fast(io.BytesIO(corrupt_doc))
+    want = InNetworkParser(cfg, "t.json").parse(io.BytesIO(clean_doc))
+    assert sorted(map(_key, got.rows)) == sorted(map(_key, want.rows)) and got.qa.rows == 2
+    assert got.items_seen == 2  # the corrupt item is still counted as seen
+
+
+# ---------------------------------------------------------------------------
+# the production sink: batching, header-at-EOF restamp, deferred references
+# ---------------------------------------------------------------------------
+
+def _sink_rows(cfg, data, fast, keep=None):
+    batches = []
+    p = InNetworkParser(cfg, "plan_2026-05.json", sink=batches.append, keep_ref_ids=keep,
+                        header_defaults={"payer": "Seeded", "schema_version": None, "last_updated_on": None})
+    r = (p.parse_fast if fast else p.parse)(io.BytesIO(data))
+    tables = [batch_to_table(b, RATES_SCHEMA) for b in batches]
+    rows = [{k: v for k, v in row.items() if k != "ingested_at"} for t in tables for row in t.to_pylist()]
+    return rows, r, len(batches)
+
+
+@pytest.mark.parametrize("batch_rows", [1, 2, 7, 50_000])
+def test_sink_mode_matches_including_batching_and_late_header(cfg, monkeypatch, batch_rows):
+    """The real ingest path: rows leave in batches, and a header that arrives
+    AFTER in_network re-stamps only the still-buffered rows. Both parsers must
+    flush at the same points and stamp the same rows — compared row-by-row IN
+    ORDER, not just as sets."""
+    monkeypatch.setattr(InNetworkParser, "BATCH_ROWS", batch_rows)
+    refs = [{"provider_group_id": i, "provider_groups": [
+        {"npi": [1000000000 + i, 1100000000 + i], "tin": {"type": "ein", "value": f"{i:09d}"}}]}
+        for i in range(6)]
+    doc = {"in_network": [_item("97110", refs=[0, 1]), _item("97140", groups=G),
+                          _item("99213", refs=[2]), _item("97112", refs=[3, 4, 5])],
+           "provider_references": refs,           # AFTER in_network: deferred
+           "reporting_entity_name": "Late Co", "last_updated_on": "2026-03-01"}
+    data = json.dumps(doc).encode()
+    want_rows, want, want_n = _sink_rows(cfg, data, fast=False)
+    assert want_rows
+    # ABSOLUTE expectation, not just "both agree": rows still buffered when
+    # the late header arrives carry it; rows already flushed keep the seed
+    # (a bug in the shared restamp would break both parsers identically)
+    # - reference-citing items (97110/97112) DEFER until the refs table at
+    #   EOF, so they are emitted after the header arrived: always "Late Co"
+    # - the inline-group item (97140, 2 rows) is emitted mid-stream: it keeps
+    #   the seed if a flush happened before EOF (batch <= 2), else the EOF
+    #   restamp fixes it to "Late Co"
+    for r in want_rows:
+        late = r["billing_code"] != "97140" or batch_rows > 2
+        assert r["payer"] == ("Late Co" if late else "Seeded"), (batch_rows, r["billing_code"])
+        assert r["file_month"] == ("2026-03" if late else "2026-05")
+    for chunk in CHUNKS:
+        monkeypatch.setattr(fastscan, "CHUNK", chunk)
+        got_rows, got, got_n = _sink_rows(cfg, data, fast=True)
+        assert got_rows == want_rows, f"chunk={chunk}"
+        assert got_n == want_n and got.qa.to_dict() == want.qa.to_dict()
+
+
+def test_therapy_only_filter_counts_match(cfg, monkeypatch):
+    """therapy_only_ingest drops non-therapist NPIs inside the emit loop that
+    the RowBatch rewrite touched — rows AND non_therapy_dropped must match."""
+    import mrfx.catalog as catalog
+
+    therapists = {"1234567890", "2222222222"}
+    monkeypatch.setattr(catalog, "therapy_npi_set", lambda _p: therapists)
+    cfg.therapy_only_ingest = True
+    groups = [
+        {"npi": ["1234567890", "1234567891", "2222222222"], "tin": {"type": "ein", "value": "111111111"}},
+        {"npi": ["9999999999"], "tin": {"type": "ein", "value": "222222222"}},     # all dropped
+        {"npi": [], "tin": {"type": "ein", "value": "333333333"}},                 # EIN TIN-only: kept
+        {"npi": [], "tin": {"type": "npi", "value": "2222222222"}},                # NPI-as-TIN therapist: kept
+        {"npi": [], "tin": {"type": "npi", "value": "8888888888"}},                # NPI-as-TIN other: dropped
+    ]
+    data = json.dumps({"in_network": [_item("97110", groups=groups), _item("97140", groups=groups)]}).encode()
+    want_rows, want, _ = _sink_rows(cfg, data, fast=False)
+    got_rows, got, _ = _sink_rows(cfg, data, fast=True)
+    assert got_rows == want_rows
+    assert got.qa.to_dict() == want.qa.to_dict()
+    # per item: 2 therapists + EIN TIN-only + therapist NPI-as-TIN = 4 rows;
+    # dropped: 1234567891, 9999999999, 8888888888 = 3
+    assert want.qa.rows == 8 and want.qa.non_therapy_dropped == 6 and want.qa.tin_only_rows == 4
+
+
+# ---------------------------------------------------------------------------
+# streams, big items, memory
+# ---------------------------------------------------------------------------
+
+class _ShortReads(io.RawIOBase):
+    """Returns a random 1..n bytes per read() — like gzip/zip/network
+    streams do — regardless of how much was asked for."""
+
+    def __init__(self, data: bytes, seed: int, n: int):
+        self._b = io.BytesIO(data)
+        self._rng = random.Random(seed)
+        self._n = n
+
+    def readable(self):
+        return True
+
+    def read(self, size=-1):
+        k = self._rng.randint(1, self._n)
+        return self._b.read(k if size is None or size < 0 else min(size, k))
+
+
+@pytest.mark.parametrize("n", [1, 5, 300])
+def test_short_reads_do_not_change_anything(cfg, n):
+    data = json.dumps({"provider_references": [{"provider_group_id": 1, "provider_groups": G}],
+                       "in_network": [_item("97110", refs=[1], name='a "q" {b} \\'),
+                                      _item("99213", groups=G), _item("97140", groups=G)],
+                       "version": "1"}).encode()
+    want = sorted(map(_key, InNetworkParser(cfg, "t.json").parse(io.BytesIO(data)).rows))
+    for seed in range(5):
+        got = InNetworkParser(cfg, "t.json").parse_fast(_ShortReads(data, seed, n))
+        assert sorted(map(_key, got.rows)) == want
+
+
+@pytest.mark.parametrize("code_pos", ["first", "last"])
+@pytest.mark.parametrize("code", ["97110", "99213"])
+def test_items_bigger_than_the_peek_limit(cfg, monkeypatch, code_pos, code):
+    """An item whose own billing_code hasn't appeared within _PEEK_LIMIT bytes
+    is buffered whole and decided at its end (the code-LAST layout)."""
+    monkeypatch.setattr(fastscan, "_PEEK_LIMIT", 64)
+    big = {"negotiated_rates": [{"provider_groups": G, "negotiated_prices": [
+        {"negotiated_type": "negotiated", "negotiated_rate": float(i), "billing_class": "professional"}]}
+        for i in range(40)]}
+    item = ({"billing_code": code, "billing_code_type": "CPT", **big} if code_pos == "first"
+            else {"billing_code_type": "CPT", **big, "billing_code": code})
+    _assert_same(cfg, json.dumps({"in_network": [item, _item("97140", groups=G)]}).encode(), monkeypatch)
+
+
+def test_a_huge_non_target_item_is_never_held_in_memory(cfg, monkeypatch):
+    """The point of skipping: a non-target item tens of MB long (UHC ships
+    single items that size) must cost a chunk of memory, not its own size."""
+    import tracemalloc
+
+    monkeypatch.setattr(fastscan, "CHUNK", 1 << 20)
+    filler = json.dumps({"provider_groups": G, "negotiated_prices": [
+        {"negotiated_type": "negotiated", "negotiated_rate": 1.0}]})
+    n = (40 << 20) // len(filler)
+    huge = ('{"billing_code": "99213", "billing_code_type": "CPT", "negotiated_rates": ['
+            + ",".join([filler] * n) + "]}")
+    data = ('{"in_network": [' + huge + ", " + json.dumps(_item("97110", groups=G)) + "]}").encode()
+    assert len(data) > 40 << 20
+    stream = io.BytesIO(data)
+    tracemalloc.start()
+    try:
+        r = InNetworkParser(cfg, "t.json").parse_fast(stream)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert r.qa.rows == 2 and r.items_seen == 2
+    assert peak < 16 << 20, f"peak {peak / 1e6:.0f} MB for a 40 MB non-target item"
+
+
+def test_same_input_same_output_order(cfg):
+    data = (FIXTURES / "innetwork_mixed.json").read_bytes()
+    a = [_key(r) for r in InNetworkParser(cfg, "t.json").parse_fast(io.BytesIO(data)).rows]
+    b = [_key(r) for r in InNetworkParser(cfg, "t.json").parse_fast(io.BytesIO(data)).rows]
+    c = [_key(r) for r in InNetworkParser(cfg, "t.json").parse(io.BytesIO(data)).rows]
+    assert a == b == c  # same ORDER too, not only the same set
+
+
+def test_fast_scan_off_never_touches_the_fast_path(cfg, monkeypatch):
+    import contextlib
+
+    def boom(*a, **k):
+        raise AssertionError("fast path used with fast_scan: false")
+
+    monkeypatch.setattr(InNetworkParser, "parse_fast", boom)
+    monkeypatch.setattr("mrfx.parser.skim_needed_ref_ids_fast", boom)
+    cfg.fast_scan = False
+    data = json.dumps({"in_network": [_item("97110", groups=G)]}).encode()
+    _, r = run_in_network_parse(cfg, lambda: InNetworkParser(cfg, "t.json"),
+                                lambda: contextlib.nullcontext(io.BytesIO(data)))
+    assert r.qa.rows == 2
+    from mrfx.parser import run_skim
+    ids, n = run_skim(cfg, lambda: contextlib.nullcontext(io.BytesIO(data)))
+    assert n == 1
+
+
+# ---------------------------------------------------------------------------
+# the numpy BULK skip (non-target members dropped without Python per member):
+# every input whose verdict depends on cleaning, casing or key multiplicity
+# must fall through to the exact per-member decision
+# ---------------------------------------------------------------------------
+
+def test_bulk_skip_never_drops_codes_that_clean_into_targets(cfg, monkeypatch):
+    """clean_code strips, upper-cases and drops '.0': ' 97110 ', 'g0283',
+    '97110.0' and 97110 (a number) are all TARGETS. A bulk check that only
+    compares raw bytes would drop them as non-target."""
+    assert "G0283" in cfg.code_set
+    items = [_item(c, groups=G) for c in (" 97110 ", "97110 ", "g0283", "97110.0", 97110, "97140\t")]
+    items += [_item("97112", ctype=t, groups=G) for t in ("cpt", "hcpcs", "Cpt4", " CPT", "HCPCS Level II")]
+    items += [_item("99213", ctype=t, groups=G) for t in ("rc", "cdt", "ms-drg", "  ")]
+    for indent in (None, 1):
+        rows = _assert_same(cfg, json.dumps({"in_network": items}, indent=indent).encode(), monkeypatch)
+        assert len(rows) == 2 * (6 + 5)
+
+
+def test_bulk_skip_respects_duplicate_keys_and_their_qa_counts(cfg, monkeypatch):
+    """Two own-level billing_code keys: the classic parser judges the FIRST to
+    stream (and counts a multi-code field there). The bulk path must not
+    decide on 'one of them is a plain non-target'."""
+    raw = ('{"in_network": ['
+           '{"billing_code": "97110, 97112", "billing_code": "99213", "negotiated_rates": []},'
+           '{"billing_code": "99213", "billing_code": "97110", "billing_code_type": "CPT", "negotiated_rates": []},'
+           '{"billing_code_type": "RC", "billing_code": "99213", "billing_code_type": "CPT", "negotiated_rates": []},'
+           '{"billing_code": "97110", "billing_code_type": "CPT", "billing_code_type": "ICD", "negotiated_rates": []}'
+           ']}').encode()
+    _assert_same(cfg, raw, monkeypatch)
+    r = InNetworkParser(cfg, "t.json").parse(io.BytesIO(raw))
+    assert r.qa.multi_code_fields == 1 and r.qa.billing_type_other == 2
+
+
+def test_bulk_reference_skip_reads_ids_like_the_classic_parser(cfg, monkeypatch):
+    """provider_group_id 1e3 / 1000.0 / 1.0e3 / "1000" all mean 1000; 12.5 is
+    not an id. A digits-only bulk reader would see '1' / '12' and skip a KEPT
+    reference. One definition per document so nothing masks another."""
+    for lit, means in (("1e3", 1000), ("1000.0", 1000), ("1.0e3", 1000), ('"1000"', 1000),
+                       ("1E+3", 1000), ("12.5", None), ("7", 7), ('"007"', 7), ("0", 0)):
+        raw = ('{"provider_references": [{"provider_group_id": %s, "provider_groups": '
+               '[{"npi": ["1400000000"], "tin": {"type": "ein", "value": "700000000"}}]}], '
+               '"in_network": [%s]}') % (lit, json.dumps(_item("97110", refs=[1000, 7, 0, 1, 12])))
+        for keep in (None, {1000}, {7}, {0}, {1}, {12}):
+            rows = _assert_same(cfg, raw.encode(), monkeypatch, keep=keep)
+            kept = means is not None and (keep is None or means in keep)
+            assert bool(rows) == kept, (lit, keep)
+
+
+def test_bulk_other_code_systems_count_exactly_like_classic(cfg, monkeypatch):
+    """Hospital-heavy files are mostly MS-DRG / HIPPS / RC items. They are
+    skipped in bulk, but billing_type_other must still count exactly what the
+    classic parser counts: type first -> counted; code first non-target ->
+    not counted; code first TARGET -> counted; code absent -> counted."""
+    def it(*pairs):
+        return "{" + ", ".join(f'"{k}": {json.dumps(v)}' for k, v in pairs) + ', "negotiated_rates": []}'
+    members = []
+    for t in ("MS-DRG", "HIPPS", "RC", "ms-drg", "APR-DRG", "ICD-10", "CSTM-ALL", "CDT"):
+        members += [
+            it(("billing_code_type", t), ("billing_code", "470")),      # type first: counted
+            it(("billing_code", "470"), ("billing_code_type", t)),      # non-target first: not
+            it(("billing_code", "97110"), ("billing_code_type", t)),    # target first: counted
+            it(("billing_code_type", t)),                               # no code: counted
+            it(("billing_code", 470), ("billing_code_type", t)),        # numeric code: exact path
+            it(("billing_code_type", t), ("billing_code", 97110)),
+            it(("billing_code", 97110), ("billing_code_type", t)),      # numeric TARGET first: counted
+            it(("billing\\u005fcode", "470"), ("billing_code_type", t)),  # escaped key, non-target: not
+            it(("billing\\u005fcode", "97110"), ("billing_code_type", t)),  # escaped key, target: counted
+        ]
+    for prefix in ("CPT", "HCPCS"):
+        members.append(it(("billing_code_type", prefix + "-X"), ("billing_code", "470")))
+    raw = ('{"in_network": [' + ", ".join(members) + "]}").encode()
+    _assert_same(cfg, raw, monkeypatch)
+    r = InNetworkParser(cfg, "t.json").parse(io.BytesIO(raw))
+    # per system: counted = type-first(1) + target-first(1) + no-code(1)
+    # + type-first numeric (1) + numeric target first (1) + escaped target (1)
+    assert r.qa.billing_type_other == 8 * 6
+    pretty = json.dumps(json.loads(raw), indent=2).encode()
+    _assert_same(cfg, pretty, monkeypatch)
+
+
+# ---------------------------------------------------------------------------
+# real-shape fixtures: slices cut from real payer files (Nov 2026), member
+# bytes VERBATIM so each generator's whitespace, key order, quoting and id
+# styles are exercised; identifiers anonymized (same-length look-alike digits,
+# placeholder business names). Golden counts are the classic parser's output.
+# ---------------------------------------------------------------------------
+
+REAL = {
+    # name: (rows, items_seen, items_matched, ref_groups_skipped, billing_type_other, payer)
+    "real_bcbs_wy_compact": (327984, 12, 4, 0, 2, "Blue Cross Blue Shield of Wyoming"),
+    "real_floridablue_npi_tins": (4, 12, 4, 0, 2, "Florida Blue"),
+    "real_moda_compact": (11306, 10, 4, 1, 0, "Moda"),
+    "real_tufts_pretty_jackson": (42063, 10, 4, 0, 0, "Tufts Health Public Plans, Inc."),
+    "real_uhc_strings_refid_last": (12, 12, 4, 0, 2, "HEALTHSCOPE BENEFITS"),
+}
+
+
+def _row_digest(rows) -> tuple[int, int]:
+    """Order-independent digest of a row multiset (cheap for 300k rows)."""
+    import hashlib
+
+    acc = 0
+    for r in rows:
+        h = hashlib.blake2b(_key(r).encode(), digest_size=8).digest()
+        acc = (acc + int.from_bytes(h, "little")) % (1 << 64)
+    return len(rows), acc
+
+
+@pytest.mark.parametrize("name", sorted(REAL))
+def test_real_vendor_shapes_match_classic_and_golden(cfg, monkeypatch, name):
+    import gzip
+
+    data = gzip.decompress((FIXTURES / "real" / f"{name}.json.gz").read_bytes())
+    rows, items, matched, skipped, type_other, payer = REAL[name]
+    want = InNetworkParser(cfg, f"{name}.json").parse(io.BytesIO(data))
+    # absolute anchors: a regression in code BOTH paths share shows up here
+    assert (want.qa.rows, want.items_seen, want.items_matched, want.ref_groups_skipped,
+            want.qa.billing_type_other, want.payer) == (rows, items, matched, skipped, type_other, payer)
+    want_digest = _row_digest(want.rows)
+    small = len(data) < 100_000
+    for chunk in ([7, 64, 4096, 1 << 20] if small else [4093, 1 << 16, 1 << 20]):
+        monkeypatch.setattr(fastscan, "CHUNK", chunk)
+        got = InNetworkParser(cfg, f"{name}.json").parse_fast(io.BytesIO(data))
+        assert got.qa.to_dict() == want.qa.to_dict(), chunk
+        assert (got.items_seen, got.items_matched, got.ref_groups_skipped, got.payer) == (
+            want.items_seen, want.items_matched, want.ref_groups_skipped, want.payer)
+        assert _row_digest(got.rows) == want_digest, chunk
+    # the two-pass path: fast skim's kept set, then extraction
+    monkeypatch.setattr(fastscan, "CHUNK", 1 << 16)
+    ids_c, n_c = skim_needed_ref_ids(cfg, io.BytesIO(data))
+    ids_f, n_f = skim_needed_ref_ids_fast(cfg, io.BytesIO(data))
+    assert n_f == n_c == matched and ids_f <= ids_c
+    got = InNetworkParser(cfg, f"{name}.json", keep_ref_ids=ids_f).parse_fast(io.BytesIO(data))
+    assert _row_digest(got.rows) == want_digest

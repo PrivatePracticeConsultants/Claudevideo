@@ -1559,6 +1559,28 @@ def cmd_speedtest(cfg: MrfxConfig, args) -> int:
     return 0
 
 
+def cmd_fastcheck(cfg: MrfxConfig, args) -> int:
+    """Run real files through BOTH parsers and confirm identical results."""
+    from .fastcheck import compare_parsers, format_report
+    from .sniff import preflight
+
+    two_pass = {"auto": None, "yes": True, "no": False}[args.two_pass]
+    bad = 0
+    for raw in args.paths:
+        path = Path(raw)
+        if not path.is_file():
+            print(f"{raw}: not a file")
+            bad += 1
+            continue
+        est = preflight(path, cfg).est_uncompressed_bytes
+        rep = compare_parsers(cfg, path, two_pass=two_pass)
+        print(format_report(rep, (est / 1e9) if est else None))
+        bad += not rep["identical"]
+    if len(args.paths) > 1:
+        print(f"\n{len(args.paths) - bad} of {len(args.paths)} files identical")
+    return 1 if bad else 0
+
+
 def cmd_reset(cfg: MrfxConfig, args) -> int:
     if not args.confirm:
         print("refusing: pass --confirm to clear the store (processed files are kept)")
@@ -1779,6 +1801,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--mb", type=int, default=40,
                    help="MB to pull per attempt (default 40; downloads it 4x, once per setting)")
 
+    p = sub.add_parser(
+        "fastcheck",
+        help="run files through the fast AND classic parsers; confirm identical rates")
+    p.add_argument("paths", nargs="+", help="in-network files (.json / .json.gz / .zip)")
+    p.add_argument("--two-pass", choices=["auto", "yes", "no"], default="auto",
+                   help="force the big-file two-pass mode on/off (default: as ingest would)")
+
     p = sub.add_parser("reset", help="clear the store (keeps processed files)")
     p.add_argument("--confirm", action="store_true")
 
@@ -1833,6 +1862,7 @@ def main(argv: list[str] | None = None) -> int:
         "medicare": cmd_medicare,
         "orgreport": cmd_orgreport,
         "speedtest": cmd_speedtest,
+        "fastcheck": cmd_fastcheck,
         "packets": cmd_packets,
         "renewals": cmd_renewals,
         "utilization": cmd_utilization,

@@ -381,6 +381,39 @@ retry button reachable.
   `tests/mrfx/test_fastscan.py` (hostile shapes at 1-byte..4 KB chunks + seeded
   fuzz). Declines (non-object top level / empty) fall back to ijson up front;
   a missing numpy degrades to ijson with one warning.
+  - **Bulk skip** (`_ChunkKeys`): per 8 MB chunk, own-level `billing_code` /
+    `billing_code_type` / `provider_group_id` keys are located with numpy at
+    the quote positions, values read straight from the byte array, targets
+    tested with `np.isin`. Members that are provably "skip, no side effect"
+    never reach Python: a plain non-target code (+ plain CPT/HCPCS type or
+    none), a plain other-system type (MS-DRG/HIPPS/RC — its exact
+    `billing_type_other` count is computed in bulk), a plain ref id outside
+    the kept set. ANYTHING else (target, numeric/escaped/padded code, dupe
+    keys, backslashes, members straddling a chunk edge) takes the exact
+    per-member path, which replays every own-level key in stream order like
+    the ijson loop (and hands \u-escaped KEYS to ijson itself). Real Florida
+    Blue file (2M tiny items, 1.6 GB): 1.0x -> 1.9x after this.
+  - **Strictness parity**: anything the classic parser REJECTS inside a member
+    we decode fails the file on the fast path too — NaN/Infinity/overflowing
+    numbers (never a NaN rate in a median), bytes after the document end
+    (doubled download), bad UTF-8 in a decoded member. Lone \uD800 escapes
+    become '?' like classic. ONE DELIBERATE difference: corrupt bytes inside a
+    NON-target item (never decoded) no longer fail the whole file — the valid
+    PT rows are kept (pinned by test_corruption_inside_a_non_target_item...).
+  - **Verified on real files (Nov 2026)**: 15 files from BCBS WY/MS, Florida
+    Blue, UHC, Moda and Tufts (.json.gz and .zip, 0.01–10 GB uncompressed,
+    up to 13.5M rows) produce row sets IDENTICAL to the pre-change code
+    (DuckDB EXCEPT ALL both ways) with identical QA counters; 1.2x–4.6x
+    faster end to end. `mrfx fastcheck <files>` repeats that check on the
+    user's own files. Five anonymized real-shape slices live in
+    `tests/mrfx/fixtures/real/` with golden counts.
+  - **Testing discipline that found real bugs**: the suite was mutation-
+    tested (each safeguard deliberately broken; every mutation must fail a
+    test). Several tests only compare fast vs classic — a bug in code they
+    SHARE (RowBatch, the EOF restamp) breaks both identically, so those
+    have absolute golden expectations too. This caught a pre-existing bug:
+    header-at-EOF rows could flush with the seed payer during deferred-ref
+    emission (now restamped first).
 - Two-pass for ≥1.5 GB uncompressed; pass 1 skims target-cited refs (80k ids
   on an 8 GB Anthem shard vs 4.2M total); short-circuits pass 2 if zero
   target codes.

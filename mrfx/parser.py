@@ -479,18 +479,21 @@ class InNetworkParser:
     def _finish(self) -> ParseResult:
         r = self.result
         self._refs_complete = True
-        for dg in self._deferred:
-            self._emit_group(dg.billing_code, dg.billing_code_type, dg.groups, dg.ref_ids, dg.prices)
         # Header fields may appear AFTER in_network. Rows still in the buffer
         # (not yet flushed) get the final header stamped now; already-flushed
         # rows relied on the preflight seed (correct for every real file, whose
-        # header is at the top). The tiny header-at-EOF hostile case fits in one
-        # batch and is fully corrected here.
+        # header is at the top). Stamp BEFORE emitting the deferred groups:
+        # emitting them can trigger a flush, which used to ship still-buffered
+        # mid-stream rows with the seed even though the real header was known
+        # (deferred rows themselves are built after the header, so they're
+        # already right).
         for row in self._buffer.bases:
             row["payer"] = r.payer
             row["schema_version"] = r.schema_version
             row["last_updated_on"] = r.last_updated_on
             row["file_month"] = r.file_month
+        for dg in self._deferred:
+            self._emit_group(dg.billing_code, dg.billing_code_type, dg.groups, dg.ref_ids, dg.prices)
         self._flush(final=True)
         return r
 
@@ -510,32 +513,25 @@ class InNetworkParser:
         else:
             r.last_updated_on = value
 
-    def _want_item(self, code, ctype, order: str, final: bool):
+    def _count_type_other(self, n: int) -> None:
+        self.result.qa.billing_type_other += n
+
+    def _want_item(self, events: list, final: bool):
         """Fast-path keep/skip verdict for one in_network member, mirroring
-        the ijson loop above EXACTLY — including which QA counter fires,
-        which depends on whether billing_code or billing_code_type streams
-        first (the event loop stops checking once it decides to skip)."""
+        the ijson loop above EXACTLY: it checks each billing_code /
+        billing_code_type event as it streams (duplicates included) and stops
+        at the first that says skip — which is also which QA counter fires."""
         qa = self.result.qa
-        checks = ("type", "code") if order == "type_first" else ("code", "type")
-        for what in checks:
-            if what == "type":
-                if ctype is None:
-                    if not final:
-                        return None  # type may still stream after the code
-                    continue
-                if code_type_family(ctype) == "__other__":
+        for kind, value in events:
+            if kind == "type":
+                if code_type_family(value) == "__other__":
                     qa.billing_type_other += 1
                     return False
-            else:
-                if code is None:
-                    if not final:
-                        return None
-                    continue
-                if self.code_set is not None and clean_code(code) not in self.code_set:
-                    if isinstance(code, str) and MULTI_CODE_RE.search(code.strip()):
-                        qa.multi_code_fields += 1
-                    return False
-        return True
+            elif self.code_set is not None and clean_code(value) not in self.code_set:
+                if isinstance(value, str) and MULTI_CODE_RE.search(value.strip()):
+                    qa.multi_code_fields += 1
+                return False
+        return True if final else None
 
     def parse_fast(self, stream) -> ParseResult:
         """Same output as parse(), via the byte-level splitter: non-target
@@ -543,9 +539,8 @@ class InNetworkParser:
         Python. Raises fastscan.FastScanUnsupported — before emitting any row —
         when it can't vouch for the file's shape; the caller then uses parse().
         """
-        import json
 
-        from .fastscan import iter_members
+        from .fastscan import decode_member, iter_members
 
         keep = self._keep_ref_ids
 
@@ -555,12 +550,14 @@ class InNetworkParser:
 
         counts: dict = {}
         for array, data in iter_members(stream, self._want_item, want_ref,
-                                        on_header=self._set_header, counts=counts):
+                                        on_header=self._set_header, counts=counts,
+                                        target_codes=self.code_set, ref_keep=keep,
+                                        on_type_other=self._count_type_other):
             if data is None:
                 if array == "provider_references":
                     self._refs_complete = True
                 continue
-            obj = json.loads(data)
+            obj = decode_member(data)
             if array == "provider_references":
                 self._add_ref(obj)
             else:
@@ -826,24 +823,24 @@ def skim_needed_ref_ids_fast(cfg: MrfxConfig, stream) -> tuple[set[int], int]:
     """skim_needed_ref_ids via the byte-level splitter (same contract and
     result): only target-code members are decoded; the reference table and
     non-target members are skipped as raw bytes."""
-    import json
 
-    from .fastscan import iter_members
+    from .fastscan import decode_member, iter_members
 
+    code_set = cfg.code_set  # a property that rebuilds the set: read once
     probe = InNetworkParser.__new__(InNetworkParser)  # predicate only
-    probe.code_set = cfg.code_set
+    probe.code_set = code_set
     probe.result = ParseResult()
     needed: set[int] = set()
     target_items = 0
-    for array, data in iter_members(stream, probe._want_item, None):
+    for array, data in iter_members(stream, probe._want_item, None, target_codes=code_set):
         if data is None or array != "in_network":
             continue
-        item = json.loads(data)
+        item = decode_member(data)
         # the ijson skim counts an item only once a string/number billing_code
         # in the target set has streamed — a code-less member is not a target
         code = item.get("billing_code")
         if not isinstance(code, (str, int, float)) or isinstance(code, bool) or (
-                cfg.code_set is not None and clean_code(code) not in cfg.code_set):
+                code_set is not None and clean_code(code) not in code_set):
             continue
         target_items += 1
         for grp in as_list(item.get("negotiated_rates")):

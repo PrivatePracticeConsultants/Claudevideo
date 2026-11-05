@@ -37,6 +37,8 @@ Other commands: `mrfx add <url>… [--file links.txt] [--known] [--retry-failed]
 `mrfx preflight <path>`, `mrfx ingest [path] [--force]`, `mrfx status`,
 `mrfx export out.csv [--cpt … --payer … --grain tin]`, `mrfx outreach`,
 `mrfx forget <filename>`, `mrfx speedtest <url>`,
+`mrfx fastcheck <file>…` (run real files through the fast AND classic parsers;
+confirms identical rows/QA and reports both timings),
 `mrfx orgreport <subject>` (one-practice bundle for the Medicare Order &
 Referring Tracker), `mrfx medicare --from-tracker` (find the Tracker's data
 folder and import everything new; `--eligibility/--referrals <path>` point at
