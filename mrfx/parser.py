@@ -317,62 +317,121 @@ _ROW_COLS = ("tin_value", "tin_type", "tin_is_really_npi", "npi")
 
 
 class RowBatch:
-    """A batch of emitted rate rows held COLUMN-wise.
+    """A batch of emitted rate rows held COLUMN-wise, factored twice.
 
-    Every row of one negotiated price shares all 16 price-level fields and
-    differs only in (tin_value, tin_type, tin_is_really_npi, npi). Building a
-    20-key dict per row and handing the list to `pa.Table.from_pylist` cost
-    more than parsing itself on row-dense files (measured ~52 s per
-    uncompressed GB at ~12M rows/GB). Here each price is one `bases` dict and a
-    row is four list entries; `to_table` expands the bases with a C-level
-    `take`. Iterating yields the same row dicts as before, so any sink that
-    wants dicts still works.
+    Every row of one negotiated price shares all 16 price-level fields, and
+    every price of one item fans out over the SAME provider groups. So a batch
+    stores: `bases` (one dict per price), `groups` (one entry per distinct
+    provider group: tin_value, tin_type, tin_is_really_npi, kept NPIs), and
+    one (price, group) PAIR per fan-out — never a per-row Python object.
+    `to_table` expands pairs into rows with numpy indexing and Arrow `take`,
+    converting each NPI string once per batch instead of once per row.
+
+    Measured on a byte-exact 2.7 GB slice of a real Aetna file (60M rows): the
+    per-(price, group) list building was 37 s and the per-row string
+    conversion most of `to_table`'s 27 s, of a 133 s run. Iterating still
+    yields the same row dicts, in the same order, for sinks that want dicts.
     """
 
-    __slots__ = ("bases", "base_idx", "tin_value", "tin_type", "tin_is_really_npi", "npi")
+    __slots__ = ("bases", "pair_base", "pair_group", "groups", "_gid", "_keys", "_n")
 
     def __init__(self):
         self.bases: list[dict] = []
-        self.base_idx: list[int] = []
-        self.tin_value: list = []
-        self.tin_type: list = []
-        self.tin_is_really_npi: list = []
-        self.npi: list = []
+        self.pair_base: list[int] = []
+        self.pair_group: list[int] = []
+        self.groups: list[tuple] = []     # (tin_value, tin_type, really, npis)
+        self._gid: dict[int, int] = {}    # id(group key) -> index in groups
+        self._keys: list = []             # keeps keys alive so ids stay unique
+        self._n = 0
 
     def __len__(self) -> int:
-        return len(self.npi)
+        return self._n
 
     def __bool__(self) -> bool:
-        return bool(self.npi)
+        return self._n > 0
 
     def add_base(self, base: dict) -> int:
         self.bases.append(base)
         return len(self.bases) - 1
 
+    def group(self, key, tin_value, tin_type, really: bool, npis: tuple) -> int:
+        """Index of a provider group in this batch. `key` is the group's
+        source object; the same key always yields the same (tin, npis), so
+        it is registered once however many prices fan out over it."""
+        i = self._gid.get(id(key))
+        if i is None:
+            i = len(self.groups)
+            self.groups.append((tin_value, tin_type, really, npis))
+            self._gid[id(key)] = i
+            self._keys.append(key)
+        return i
+
+    def add_pairs(self, base_i: int, group_idx: list[int], nrows: int) -> None:
+        """One price fanned out over `group_idx` (in emission order)."""
+        self.pair_base.extend([base_i] * len(group_idx))
+        self.pair_group.extend(group_idx)
+        self._n += nrows
+
     def add(self, base_i: int, tin_value, tin_type, really: bool, npis) -> None:
-        n = len(npis)
-        self.base_idx.extend([base_i] * n)
-        self.tin_value.extend([tin_value] * n)
-        self.tin_type.extend([tin_type] * n)
-        self.tin_is_really_npi.extend([really] * n)
-        self.npi.extend(npis)
+        """Single-group form (kept for callers outside the parser)."""
+        key = (tin_value, tin_type, really, tuple(npis))
+        self.add_pairs(base_i, [self.group(key, tin_value, tin_type, really, key[3])], len(npis))
 
     def __iter__(self):
-        for i, b in enumerate(self.base_idx):
-            yield {**self.bases[b], "tin_value": self.tin_value[i],
-                   "tin_type": self.tin_type[i],
-                   "tin_is_really_npi": self.tin_is_really_npi[i], "npi": self.npi[i]}
+        for b, g in zip(self.pair_base, self.pair_group):
+            tin_value, tin_type, really, npis = self.groups[g]
+            base = self.bases[b]
+            for n in npis:
+                yield {**base, "tin_value": tin_value, "tin_type": tin_type,
+                       "tin_is_really_npi": really, "npi": n}
+
+    def _row_indices(self):
+        """(row -> base index, row -> group index, row -> flat NPI index)."""
+        glen = [len(g[3]) for g in self.groups]
+        try:
+            import numpy as np
+        except ImportError:   # an install predating the numpy pin: plain Python
+            starts, acc = [], 0
+            for n in glen:
+                starts.append(acc)
+                acc += n
+            rb, rg, ri = [], [], []
+            for b, g in zip(self.pair_base, self.pair_group):
+                n = glen[g]
+                rb.extend([b] * n)
+                rg.extend([g] * n)
+                ri.extend(range(starts[g], starts[g] + n))
+            return rb, rg, ri
+        pb = np.asarray(self.pair_base, dtype=np.int64)
+        pg = np.asarray(self.pair_group, dtype=np.int64)
+        gl = np.asarray(glen, dtype=np.int64)
+        gstart = np.cumsum(gl) - gl
+        lens = gl[pg]
+        first = np.cumsum(lens) - lens
+        within = np.arange(int(lens.sum()), dtype=np.int64) - np.repeat(first, lens)
+        return (np.repeat(pb, lens), np.repeat(pg, lens),
+                np.repeat(gstart[pg], lens) + within)
 
     def to_table(self, schema):
         import pyarrow as pa
 
+        row_base, row_group, row_npi = self._row_indices()
         base_schema = pa.schema([f for f in schema if f.name not in _ROW_COLS])
         bt = pa.Table.from_pylist(self.bases, schema=base_schema).take(
-            pa.array(self.base_idx, type=pa.int64()))
+            pa.array(row_base, type=pa.int64()))
+        rg = pa.array(row_group, type=pa.int64())
+        per_group = {
+            "tin_value": [g[0] for g in self.groups],
+            "tin_type": [g[1] for g in self.groups],
+            "tin_is_really_npi": [g[2] for g in self.groups],
+        }
         cols = []
         for f in schema:
-            if f.name in _ROW_COLS:
-                cols.append(pa.array(getattr(self, f.name), type=f.type))
+            if f.name == "npi":
+                flat = pa.array([n for g in self.groups for n in g[3]], type=f.type)
+                cols.append(flat.take(pa.array(row_npi, type=pa.int64())))
+            elif f.name in per_group:
+                cols.append(pa.array(per_group[f.name], type=f.type).take(rg))
             else:
                 cols.append(bt.column(f.name))
         return pa.Table.from_arrays(cols, schema=schema)
@@ -710,6 +769,47 @@ class InNetworkParser:
             return
 
         r = self.result
+        # Decide each provider group ONCE (not once per price — every price of
+        # an item fans out over the same groups): TIN-only handling, the
+        # therapy filter, and the per-price QA tallies.
+        therapy = self._therapy_npis
+        prepared = []          # (key, tin_value, tin_type, really, kept npis)
+        per_price_rows = per_price_tin_only = per_price_dropped = 0
+        for g in all_groups:
+            tin_value, tin_type, npis = g
+            really = tin_type == "npi"
+            if not npis:
+                # A group with a TIN but no NPIs is a TIN-only rate — the
+                # whole product is TIN-grain, so dropping it lost that
+                # payer's rate for the TIN. Emit one row at npi=NULL so the
+                # rate reaches the TIN/entity grains; it is filtered out of
+                # the NPI grain (DEDUP_QUERY). A group with neither TIN nor
+                # NPI carries nothing and is still skipped.
+                if not tin_value:
+                    continue
+                # therapy_only_ingest: when the "TIN" is really an NPI in the
+                # tin slot (tin.type=="npi", empty npi array), it IS
+                # classifiable — drop it if that NPI isn't a therapist. A
+                # genuine EIN TIN-only rate has no NPI to judge, so it is
+                # always kept (the honest TIN-grain rate).
+                if therapy is not None and really and tin_value not in therapy:
+                    per_price_dropped += 1
+                    continue
+                keep = (None,)
+                per_price_tin_only += 1
+            elif therapy is not None:
+                # therapy_only_ingest: drop rows for NPIs that aren't a
+                # PT/OT/SLP or therapy clinic (per NPPES). TIN-only rows
+                # above are always kept (no NPI to classify).
+                keep = tuple(n for n in npis if n in therapy)
+                per_price_dropped += len(npis) - len(keep)
+                if not keep:
+                    continue
+            else:
+                keep = npis
+            per_price_rows += len(keep)
+            prepared.append((g, tin_value, tin_type, really, keep))
+        gidx = None
         for price in prices:
             # sorted+deduped: [GP,59] and [59,GP] are the SAME modifier set —
             # publication order must not split the dedup grain into two medians
@@ -746,47 +846,20 @@ class InNetworkParser:
                 "expiration_date": str(price.get("expiration_date", "") or ""),
                 "ingested_at": self._ingested_at,
             }
+            r.qa.non_therapy_dropped += per_price_dropped
+            r.qa.tin_only_rows += per_price_tin_only
+            r.qa.rows += per_price_rows
             # rows are emitted per provider GROUP so the NPI↔TIN pairing holds
-            base_i = None if self._sink is None else self._buffer.add_base(row_base)
-            therapy = self._therapy_npis
-            for tin_value, tin_type, npis in all_groups:
-                really = tin_type == "npi"
-                if not npis:
-                    # A group with a TIN but no NPIs is a TIN-only rate — the
-                    # whole product is TIN-grain, so dropping it lost that
-                    # payer's rate for the TIN. Emit one row at npi=NULL so the
-                    # rate reaches the TIN/entity grains; it is filtered out of
-                    # the NPI grain (DEDUP_QUERY). A group with neither TIN nor
-                    # NPI carries nothing and is still skipped.
-                    if not tin_value:
-                        continue
-                    # therapy_only_ingest: when the "TIN" is really an NPI in the
-                    # tin slot (tin.type=="npi", empty npi array), it IS
-                    # classifiable — drop it if that NPI isn't a therapist. A
-                    # genuine EIN TIN-only rate has no NPI to judge, so it is
-                    # always kept (the honest TIN-grain rate).
-                    if therapy is not None and really and tin_value not in therapy:
-                        r.qa.non_therapy_dropped += 1
-                        continue
-                    keep = (None,)
-                    r.qa.tin_only_rows += 1
-                elif therapy is not None:
-                    # therapy_only_ingest: drop rows for NPIs that aren't a
-                    # PT/OT/SLP or therapy clinic (per NPPES). TIN-only rows
-                    # above are always kept (no NPI to classify).
-                    keep = tuple(n for n in npis if n in therapy)
-                    r.qa.non_therapy_dropped += len(npis) - len(keep)
-                    if not keep:
-                        continue
-                else:
-                    keep = npis
-                r.qa.rows += len(keep)
-                if self._sink is None:
+            if self._sink is None:
+                for _key, tin_value, tin_type, really, keep in prepared:
                     tin_flags = {"tin_value": tin_value, "tin_type": tin_type,
                                  "tin_is_really_npi": really}
                     r.rows.extend({**row_base, **tin_flags, "npi": n} for n in keep)
-                else:
-                    self._buffer.add(base_i, tin_value, tin_type, really, keep)
+                continue
+            buf = self._buffer
+            if gidx is None:   # the buffer only swaps in _flush, after this loop
+                gidx = [buf.group(key, tv, tt, re_, keep) for key, tv, tt, re_, keep in prepared]
+            buf.add_pairs(buf.add_base(row_base), gidx, per_price_rows)
         self._flush()
 
 

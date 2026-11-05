@@ -1074,3 +1074,34 @@ def test_late_header_contract(cfg, tmp_path, monkeypatch):
     run_big_file_fast(cfg, p, _CountingOpen(data), tmp_path / ".x.1.spool.tmp")
     assert {r["payer"] for r in rows} == {"Late Payer"}
     assert {r["file_month"] for r in rows} == {"2026-03"}
+
+
+def test_row_batch_without_numpy_builds_the_same_table(cfg, monkeypatch):
+    """RowBatch serves the CLASSIC path too, so an install predating the
+    numpy pin must still write rates: the pure-Python index expansion has to
+    build the identical table."""
+    import builtins
+
+    import pyarrow as pa
+
+    monkeypatch.setattr(InNetworkParser, "BATCH_ROWS", 7)
+    batches = []
+    InNetworkParser(cfg, "x.json", sink=batches.append).parse(io.BytesIO(json.dumps(HOSTILE).encode()))
+    data = json.dumps({"provider_references": [{"provider_group_id": i, "provider_groups": [
+        {"npi": [1800000000 + i, 1900000000 + i], "tin": {"type": "ein", "value": f"5{i:08d}"}},
+        {"npi": [], "tin": {"type": "ein", "value": f"6{i:08d}"}}]} for i in range(5)],
+        "in_network": [_item("97110", refs=[0, 1, 2]), _item("97140", refs=[3, 4], groups=G)]}).encode()
+    InNetworkParser(cfg, "y.json", sink=batches.append).parse(io.BytesIO(data))
+    with_np = [batch_to_table(b, RATES_SCHEMA) for b in batches]
+    real_import = builtins.__import__
+
+    def no_numpy(name, *a, **k):
+        if name == "numpy" or name.startswith("numpy."):
+            raise ImportError("No module named 'numpy'")
+        return real_import(name, *a, **k)
+    monkeypatch.setattr(builtins, "__import__", no_numpy)
+    without = [batch_to_table(b, RATES_SCHEMA) for b in batches]
+    assert len(with_np) > 2
+    for a, b, batch in zip(with_np, without, batches):
+        assert a.equals(b)
+        assert a.equals(pa.Table.from_pylist(list(batch), schema=RATES_SCHEMA))
