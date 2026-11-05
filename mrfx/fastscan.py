@@ -37,11 +37,24 @@ CHUNK = 8 * 1024 * 1024  # numpy temporaries are ~10x this; 8 MB keeps them smal
 _QUOTE, _BSLASH = 0x22, 0x5C
 _LBRACE, _RBRACE, _LBRACK, _RBRACK = 0x7B, 0x7D, 0x5B, 0x5D
 
+# A JSON string literal (group = its raw, still-escaped content) and a JSON
+# number — the two value shapes every key regex below matches.
+_JSTR = rb'"((?:[^"\\]|\\.)*)"'
+_JNUM = rb'(-?[0-9][0-9.eE+-]*)'
+
+
+def _key_value_re(key: bytes) -> "re.Pattern[bytes]":
+    """`"key": <string or number>` — group 1 a string's content, group 2 a
+    number's text."""
+    return re.compile(rb'"' + key + rb'"\s*:\s*(?:' + _JSTR + rb'|' + _JNUM + rb')')
+
+
 # a member's OWN keys sit at depth 3 (doc { =1, array [ =2, member { =3)
-_CODE_RE = re.compile(rb'"billing_code"\s*:\s*(?:"((?:[^"\\]|\\.)*)"|(-?[0-9][0-9.eE+-]*))')
-_TYPE_RE = re.compile(rb'"billing_code_type"\s*:\s*(?:"((?:[^"\\]|\\.)*)"|(-?[0-9][0-9.eE+-]*))')
-_REFID_RE = re.compile(rb'"provider_group_id"\s*:\s*(?:"((?:[^"\\]|\\.)*)"|(-?[0-9][0-9.eE+-]*))')
-_HEADER_RE = re.compile(rb'"(reporting_entity_name|version|last_updated_on)"\s*:\s*"((?:[^"\\]|\\.)*)"')
+_CODE_RE = _key_value_re(b"billing_code")
+_TYPE_RE = _key_value_re(b"billing_code_type")
+_REFID_RE = _key_value_re(b"provider_group_id")
+_HEADER_KEYS = ("reporting_entity_name", "version", "last_updated_on")
+_HEADER_RE = re.compile(rb'"(' + "|".join(_HEADER_KEYS).encode() + rb')"\s*:\s*' + _JSTR)
 
 
 _EVENT_TBL = bytes(1 if c in (0x22, 0x7B, 0x7D, 0x5B, 0x5D) else 0 for c in range(256))
@@ -517,8 +530,9 @@ def _whole_members(cur_array, o, c, a, buf, ck, want_item, policy, counts):
             yield cur_array, data
 
 
+_WS_BYTES = b" \t\r\n"          # JSON's four whitespace bytes
 _WS_LUT = np.zeros(256, dtype=bool)
-_WS_LUT[[0x20, 0x09, 0x0A, 0x0D]] = True
+_WS_LUT[np.frombuffer(_WS_BYTES, np.uint8)] = True
 _ALNUM_LUT = np.zeros(256, dtype=bool)
 _ALNUM_LUT[np.frombuffer(b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz", np.uint8)] = True
 _TYPE_LUT = _ALNUM_LUT.copy()
@@ -746,8 +760,7 @@ class _ChunkKeys:
         return ~((n_id == 1) & (n_skip == 1) & ~self._has_backslash(o, c))
 
 
-_WS_BYTES = b" \t\r\n"
-_KEY_AT_END_RE = re.compile(rb'"((?:[^"\\]|\\.)*)"$')
+_KEY_AT_END_RE = re.compile(_JSTR + rb'$')
 
 
 def _key_before(tail: bytes, pre: bytes):
@@ -768,8 +781,7 @@ def _key_before(tail: bytes, pre: bytes):
     return _unescape(m.group(1)) if m else None
 
 
-_PAIR_RE = re.compile(rb'"((?:[^"\\]|\\.)*)"\s*:\s*"((?:[^"\\]|\\.)*)"')
-_HEADER_KEYS = ("reporting_entity_name", "version", "last_updated_on")
+_PAIR_RE = re.compile(_JSTR + rb'\s*:\s*' + _JSTR)
 
 
 def _headers(chunk: bytes, on_header) -> None:
@@ -808,21 +820,21 @@ def _depth_before(data: bytes) -> np.ndarray:
     return after - d
 
 
-def _own_keys(regex, data: bytes, final: bool):
-    """All own-level matches of `regex` in member bytes, in order, and
-    whether the scan is complete (a non-final peek stops at a match that
-    touches the end — its value may be cut)."""
+def _own_keys(regex, data: bytes, final: bool) -> list:
+    """All own-level matches of `regex` in member bytes, in order. A
+    non-final peek stops at a match that touches the end (its value may be
+    cut); the caller's verdict function treats a non-final list as partial."""
     out = []
     for m in regex.finditer(data):
         if not final and m.end() >= len(data):
-            return out, False
+            return out
         st = m.start()
         if (data.find(b"{", 1, st) == -1 and data.find(b"[", 0, st) == -1
                 and data.find(b"}", 0, st) == -1 and data.find(b"]", 0, st) == -1):
             out.append(m)        # nothing structural before it: own level
         elif _depth_before(data[:st + 1])[-1] == 1:
             out.append(m)
-    return out, True
+    return out
 
 
 # a KEY spelled with a \\u escape ("billing\\u005fcode" IS billing_code to a
@@ -878,8 +890,8 @@ def _decide_item(data: bytes, want_item, final: bool):
         # peek waits for the member's end — an escaped key BEFORE whichever
         # key would decide is always complete in the peek, so it is seen here
         return want_item(_replay_with_ijson(data), True) if final else None
-    codes, ok1 = _own_keys(_CODE_RE, data, final)
-    types, ok2 = _own_keys(_TYPE_RE, data, final)
+    codes = _own_keys(_CODE_RE, data, final)
+    types = _own_keys(_TYPE_RE, data, final)
     events = sorted([(m.start(), "code", m) for m in codes] + [(m.start(), "type", m) for m in types],
                     key=lambda e: e[0])
     if not final and not events:
@@ -900,7 +912,7 @@ def _decide_ref(data: bytes, want_ref, final: bool):
                if prefix == "provider_group_id" and event not in ("start_map", "start_array",
                                                                   "end_map", "end_array", "map_key")]
         return bool(ids) and bool(want_ref(ids[-1]))
-    refs, _ = _own_keys(_REFID_RE, data, final)
+    refs = _own_keys(_REFID_RE, data, final)
     if not refs:
         return False
     return bool(want_ref(_value(refs[-1])))

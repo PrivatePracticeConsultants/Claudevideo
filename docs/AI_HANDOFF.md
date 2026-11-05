@@ -606,6 +606,13 @@ not yet built — pick these up before adding features):
   does not update a child row's stored URL. A wall of 403s after a multi-hour
   pause on mrf.bcbs.com/Anthem still requires re-pasting links — since round 2
   each such row's error names the exact index URL to paste again.
+- Per-file QA aggregates (outliers, duplicate ratio, TIN=NPI rows): computed
+  by the parse WORKER on its own part (`ingest.qa_aggregate_counts`, the one
+  definition; private in-memory DuckDB, 2 threads / 1 GB, spill in a
+  pid-named `.qa-spill` folder swept at start). Main-process fallback on any
+  worker failure; in-process parses compute it in the main process. Measured
+  on 12 real files / 32M rows, 3 workers: main-process peak RSS 2.88 ->
+  1.35 GB, wall clock unchanged within noise, QA output identical.
 - Cancel an in-flight PARSE: DONE (round 2 follow-up). Files-tab "stop" on a
   processing file / an ingesting link -> `Store.request_parse_stop(filename)`
   (in-memory flag). In-process parses check it on every ~1 MB read

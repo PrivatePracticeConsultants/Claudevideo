@@ -71,7 +71,6 @@ def warn_if_slow_json_backend() -> bool:
         name or "python")
     return False
 
-ACCEPTED_CODE_TYPES = {"CPT", "HCPCS"}
 
 
 def code_type_family(raw) -> str | None:
@@ -863,7 +862,7 @@ class InNetworkParser:
         self._flush()
 
 
-def skim_needed_ref_ids(cfg: MrfxConfig, stream, progress_marker=None) -> tuple[set[int], int]:
+def skim_needed_ref_ids(cfg: MrfxConfig, stream) -> tuple[set[int], int]:
     """Fast first pass over a huge in-network file: find the provider_reference
     ids that the TARGET billing codes actually cite. The (millions-strong)
     provider_references table and every non-target in_network item are skipped

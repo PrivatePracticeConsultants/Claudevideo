@@ -21,14 +21,22 @@ a fresh session on this repo.
 > - P1 on a synthetic 306M-row store: NPI search went from out-of-memory to
 >   0.6-1.2 s; removals 1,441 s -> 165 s (scoped directory); summary 11.2 ->
 >   5.2 GB; big-store guard for NPI/entity views; RAM-aware auto workers. Full
->   rebuild still 65 min (C1, design in Step 8). P1.5 QA fold: not done.
+>   rebuild still 65 min (C1, design in Step 8). P1.5 (follow-up): QA runs in
+>   the parse worker — main-process peak RSS 2.88 -> 1.35 GB, throughput
+>   unchanged, QA output identical on 12 real files.
 > - P2 Windows: NOT RUN — no Windows machine. Code review only (cleanup in a
 >   `finally` could raise on an AV lock — fixed + test). HOW_TO_RUN.md Part 4 is
 >   the user's first-run checklist.
 > - P3: CLI NPPES progress + Ctrl-C (done), fair retry scheduling (done),
 >   expired-link message names its index (done), cancel in-flight parse (done in a follow-up).
-> - P4: AI_HANDOFF Step 8 reconciled; `pytest -m quick` exists; fastscan/parser
->   simplification NOT attempted (would need before/after fastcheck runs).
+> - P4: AI_HANDOFF Step 8 reconciled; `pytest -m quick` exists. Follow-up
+>   clean-up guided by full-suite coverage (fastscan 98%, parser 96%) + vulture:
+>   only provably-unused code removed and the 6x-pasted JSON-string regex
+>   factored (compiled patterns asserted byte-identical); parser output
+>   fingerprints identical on 3 real files x both paths; fastcheck IDENTICAL.
+>   The remaining uncovered lines are defensive branches — kept. The two
+>   progress mechanisms (chunk tracker vs single-read percent) both serve
+>   live paths with different UI semantics — kept.
 
 ---
 

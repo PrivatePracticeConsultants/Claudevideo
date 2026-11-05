@@ -604,12 +604,9 @@ def _parse_worker(cfg: MrfxConfig, path_str: str, name: str, header_defaults: di
             except BaseException:  # noqa: BLE001 — leaving anyway
                 pass
             writer = None
-        for leftover in (Path(tmp_out), spool_path_for(tmp_out), Path(progress_path),
-                         Path(progress_path + ".tmp")):
-            try:
-                leftover.unlink(missing_ok=True)
-            except OSError:
-                pass  # held open (AV/indexer) — the next start's sweep gets it
+        for leftover in (tmp_out, spool_path_for(tmp_out), progress_path,
+                         progress_path + ".tmp", stop_sentinel_for(progress_path)):
+            _cleanup_unlink(leftover)   # held open (AV/indexer) -> next start's sweep
         raise
     finally:
         if writer is not None:
