@@ -933,8 +933,23 @@ def _is_target_item(item: dict, code_set) -> bool:
     return code_set is None or clean_code(code) in code_set
 
 
+# the downloader's floor (fetch.py): never let scratch run the drive below it
+SPOOL_FREE_FLOOR = 2 << 30
+SPOOL_DISK_CHECK_BYTES = 64 << 20
+REPLAY_TICK_BYTES = 1 << 20   # progress report cadence while replaying the spool
+
+
+def _free_disk(path: Path) -> int:
+    import shutil
+
+    try:
+        return shutil.disk_usage(path).free
+    except OSError:
+        return 1 << 62   # can't tell: don't block on a cosmetic probe
+
+
 def run_big_file_fast(cfg: MrfxConfig, parser: "InNetworkParser", open_fn, spool_path,
-                      on_pass=None) -> tuple[ParseResult, int]:
+                      progress=None) -> tuple[ParseResult, int]:
     """Big-file ingest in ONE full read (plus, if needed, a short read of the
     reference table), replacing skim-then-extract's two full reads.
 
@@ -949,6 +964,8 @@ def run_big_file_fast(cfg: MrfxConfig, parser: "InNetworkParser", open_fn, spool
     items are replayed through the normal _handle_item with every reference
     resolved. Memory: the kept references + one item at a time; the spool
     is on disk (`spool_path`, deleted here, swept as an orphan if killed).
+    `progress` (optional) gets refs_closed() / second_pass() / replay(done,
+    total) so a bar can follow the three phases (see SingleReadProgress).
 
     Returns (result, target_items). target_items == 0 means the file holds
     none of the target codes. Raises FastScanUnsupported — always before any
@@ -958,6 +975,17 @@ def run_big_file_fast(cfg: MrfxConfig, parser: "InNetworkParser", open_fn, spool
 
     from .fastscan import FastScanUnsupported, RefPolicy, decode_member, iter_members
 
+    spool_path = Path(spool_path)
+    if parser.code_set is None:
+        # all-codes mode: EVERY item is a target, so the spool would be the
+        # entire in_network section (~the uncompressed file) written as
+        # scratch next to the store. The two-pass path needs no scratch disk
+        # (and in all-codes mode its kept-reference set is the whole table
+        # either way) — decline before creating anything
+        raise FastScanUnsupported("all-codes mode — two-pass instead of a full-file spool")
+    if _free_disk(spool_path.parent) < SPOOL_FREE_FLOOR:
+        raise FastScanUnsupported("too little free disk for the single-read working copy")
+
     cited: set[int] = set()
     arrays: dict = {}
     parser._keep_ref_ids = cited          # _add_ref filters to the cited set
@@ -965,7 +993,7 @@ def run_big_file_fast(cfg: MrfxConfig, parser: "InNetworkParser", open_fn, spool
     refs_before = False
     target_items = 0
     counts: dict = {}
-    spool_path = Path(spool_path)
+    spooled = next_disk_check = 0
     try:
         with open(spool_path, "wb") as spool:
             with open_fn() as stream:
@@ -983,6 +1011,8 @@ def run_big_file_fast(cfg: MrfxConfig, parser: "InNetworkParser", open_fn, spool
                             raise FastScanUnsupported(f"more than one top-level {array} array")
                         if array == "provider_references" and not policy.active:
                             refs_before = True
+                            if progress is not None:
+                                progress.refs_closed()
                         elif array == "in_network":
                             policy.active = True  # later references: keep cited
                         continue
@@ -993,11 +1023,20 @@ def run_big_file_fast(cfg: MrfxConfig, parser: "InNetworkParser", open_fn, spool
                         cited |= _cited_ref_ids(item)
                         spool.write(struct.pack("<Q", len(data)))
                         spool.write(data)
+                        spooled += len(data) + 8
+                        if spooled >= next_disk_check:
+                            next_disk_check = spooled + SPOOL_DISK_CHECK_BYTES
+                            if _free_disk(spool_path.parent) < SPOOL_FREE_FLOOR:
+                                # no row has reached the sink yet: decline, and the
+                                # caller's two-pass (no scratch disk) finishes it
+                                raise FastScanUnsupported(
+                                    "free disk fell under 2 GB while spooling — "
+                                    "two-pass instead")
                     else:
                         parser._add_ref(decode_member(data))
         if refs_before and cited:
-            if on_pass is not None:
-                on_pass(1)
+            if progress is not None:
+                progress.second_pass()
             with open_fn() as stream:
                 for array, data in iter_members(
                         stream, lambda events, final: False, None,
@@ -1008,6 +1047,8 @@ def run_big_file_fast(cfg: MrfxConfig, parser: "InNetworkParser", open_fn, spool
                             break         # the reference table is done: stop reading
                         parser._add_ref(decode_member(data))
         parser._refs_complete = True
+        replayed = 0
+        next_tick = 0
         with open(spool_path, "rb") as spool:
             while True:
                 head = spool.read(8)
@@ -1015,6 +1056,10 @@ def run_big_file_fast(cfg: MrfxConfig, parser: "InNetworkParser", open_fn, spool
                     break
                 (n,) = struct.unpack("<Q", head)
                 parser._handle_item(decode_member(spool.read(n)))
+                replayed += n + 8
+                if progress is not None and replayed >= next_tick:
+                    next_tick = replayed + REPLAY_TICK_BYTES
+                    progress.replay(replayed, spooled)
         parser.result.items_seen = counts.get("in_network", 0)
         return parser._finish(), target_items
     finally:

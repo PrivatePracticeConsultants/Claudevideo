@@ -298,3 +298,167 @@ def test_a_failed_write_fails_the_part_and_leaves_nothing_behind(cfg, store, mon
     res = ingest_file(cfg, store, p)
     assert res["status"] == "failed" and "No space left" in res.get("error", "")
     assert not list(store.rates_dir.glob("*.parquet")) and not list(store.rates_dir.glob(".*.tmp"))
+
+
+def _spool_spy(monkeypatch):
+    """Record every .spool.tmp the code opens for writing."""
+    import builtins
+
+    opened = []
+    real_open = builtins.open
+
+    def spy(file, mode="r", *a, **k):
+        if str(file).endswith(".spool.tmp") and "w" in mode:
+            opened.append(str(file))
+        return real_open(file, mode, *a, **k)
+    monkeypatch.setattr(builtins, "open", spy)
+    return opened
+
+
+def _ingest_corpus_with(tmp_path, fast: bool, **cfg_kw) -> dict:
+    cfg = _make_cfg(tmp_path / ("fast" if fast else "classic"), fast)
+    for k, v in cfg_kw.items():
+        if k == "all_codes":
+            cfg.codes.all_codes = v
+        else:
+            setattr(cfg, k, v)
+    store = Store(cfg.store_dir)
+    for name, data in _corpus():
+        p = cfg.inbox_dir / name
+        p.write_bytes(data)
+        res = ingest_file(cfg, store, p)
+        assert res["status"] == "done", res
+    return _snapshot(store)
+
+
+def test_all_codes_big_files_never_spool_and_ingest_identically(tmp_path, monkeypatch):
+    """All-codes mode makes EVERY item a target: the single-read spool would
+    be the whole in_network section written as scratch (~200 GB for a 200 GB
+    file). It must decline up front and run the two-pass path instead."""
+    monkeypatch.setattr(ingest_mod, "LARGE_FILE_UNCOMPRESSED_BYTES", 1)
+    opened = _spool_spy(monkeypatch)
+    want = _ingest_corpus_with(tmp_path, False, all_codes=True)
+    got = _ingest_corpus_with(tmp_path, True, all_codes=True)
+    assert opened == [], opened
+    assert len(want["rates"]) > len(_ingest_corpus_with(tmp_path / "pt", False)["rates"])  # all-codes keeps more
+    for k in want:
+        assert got[k] == want[k], k
+
+
+@pytest.mark.parametrize("when", ["up_front", "mid_spool"])
+def test_low_disk_while_spooling_falls_back_and_still_finishes(tmp_path, monkeypatch, when):
+    """Disk running low must not fail the file or fill the drive: the single
+    read declines (no row was emitted yet) and the two-pass path, which needs
+    no scratch, finishes it with identical results."""
+    import mrfx.parser as parser_mod
+
+    monkeypatch.setattr(ingest_mod, "LARGE_FILE_UNCOMPRESSED_BYTES", 1)
+    calls = {"n": 0}
+
+    def fake_free(path):
+        calls["n"] += 1
+        if when == "up_front" or calls["n"] > 1:
+            return 1 << 20            # 1 MB free
+        return 1 << 40
+    monkeypatch.setattr(parser_mod, "_free_disk", fake_free)
+    monkeypatch.setattr(parser_mod, "SPOOL_DISK_CHECK_BYTES", 1)
+    want = _ingest_corpus_with(tmp_path, False)
+    skims = []
+    real_skim = ingest_mod.run_skim
+    monkeypatch.setattr(ingest_mod, "run_skim", lambda *a, **k: skims.append(1) or real_skim(*a, **k))
+    got = _ingest_corpus_with(tmp_path, True)
+    assert calls["n"] >= 1
+    assert len(skims) == 4, skims     # every in-network file fell back to two-pass
+    for k in want:
+        assert got[k] == want[k], k
+    leftovers = list((tmp_path / "fast" / "store").rglob("*.spool.tmp"))
+    assert leftovers == []
+
+
+def test_single_read_progress_phases_are_monotonic_and_move_through_replay():
+    from mrfx.ingest import SingleReadProgress
+
+    seen = []
+    sp = SingleReadProgress(1000, seen.append)
+    for pos in range(0, 1001, 50):
+        sp.feed(pos)
+        if pos == 300:
+            sp.refs_closed()             # the reference table ended 30% in
+    assert 79.0 <= seen[-1] <= 80.0
+    sp.second_pass()
+    for pos in range(0, 301, 30):        # re-read stops at the table's end
+        sp.feed(pos)
+    assert 84.0 <= seen[-1] <= 85.0
+    for done in range(0, 101, 10):
+        sp.replay(done, 100)
+    assert seen[-1] == 99.0
+    assert seen == sorted(seen) and len(set(seen)) == len(seen)
+    sp.feed(0)                           # a late callback can't move it backwards
+    assert sp.pct == 99.0
+
+
+def _unthrottled(fn):
+    """set_percent without its half-percent throttle (a test file is tiny)."""
+    def wrapper(self, pct):
+        self._last_pct = -1.0
+        self._last_chunk = -2
+        return fn(self, pct)
+    return wrapper
+
+
+@pytest.mark.parametrize("pooled", [False, True])
+def test_big_file_progress_is_honest_end_to_end(tmp_path, monkeypatch, pooled):
+    """The single read was tracked as two equal passes: the bar sat at ~50%
+    for the whole run, then jumped to 100%. Now it moves through scan ->
+    reference re-read -> replay, never backwards, and ends at 100."""
+    monkeypatch.setattr(ingest_mod, "LARGE_FILE_UNCOMPRESSED_BYTES", 1)
+    import mrfx.ingest as im
+
+    import mrfx.parser as parser_mod
+
+    monkeypatch.setattr(im.SingleReadProgress, "STEP", 0.0)
+    monkeypatch.setattr(parser_mod, "REPLAY_TICK_BYTES", 1)
+    monkeypatch.setattr(im._ProgressTracker, "set_percent", _unthrottled(im._ProgressTracker.set_percent))
+    cfg = _make_cfg(tmp_path, True)
+    store = Store(cfg.store_dir)
+    refs = [{"provider_group_id": i, "provider_groups": [
+        {"npi": [1700000000 + i], "tin": {"type": "ein", "value": f"6{i:08d}"}}]} for i in range(3000)]
+    items = [_item("97110", refs=[i, i + 1]) for i in range(0, 600, 3)]
+    items += [_item("99213", refs=[5]) for _ in range(3000)]
+    p = cfg.inbox_dir / "big_2026-01.json.gz"
+    p.write_bytes(gzip.compress(json.dumps({"provider_references": refs, "in_network": items}).encode(),
+                                compresslevel=1))
+    seen = []
+    real_update = store.update_progress
+
+    def spy(name, pct, *a, **k):
+        seen.append(pct)
+        return real_update(name, pct, *a, **k)
+    monkeypatch.setattr(store, "update_progress", spy)
+    if pooled:
+        pool = ParsePoolManager(max_workers=1)
+        set_parse_pool(pool)
+    try:
+        res = ingest_file(cfg, store, p)
+    finally:
+        if pooled:
+            set_parse_pool(None)
+            pool.shutdown_now()
+    assert res["status"] == "done" and res["rows"] > 0
+    assert seen and seen[-1] == 100.0
+    before_finish = seen[:-1]
+    assert before_finish == sorted(before_finish), before_finish
+    if not pooled:   # the pooled parent only samples the worker every 2 s
+        assert any(85.0 < x < 100.0 for x in before_finish), before_finish   # replay phase seen
+        assert max(before_finish) > 80.0
+
+
+def test_stall_log_label_handles_every_progress_shape():
+    """The parent's 15-minute stall warning formats the last progress it saw;
+    that value became a (chunks, pct) tuple and once compared a tuple to 0."""
+    from mrfx.ingest import _chunk_label
+
+    assert _chunk_label(-1) == "0"
+    assert _chunk_label((-1, None)) == "0"
+    assert _chunk_label((7, 42.5)) == "7"
+    assert _chunk_label((0, 0.0)) == "0"

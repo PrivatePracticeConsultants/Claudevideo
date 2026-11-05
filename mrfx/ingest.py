@@ -97,6 +97,25 @@ class _ProgressTracker:
             except Exception:  # noqa: BLE001 — a display bar is cosmetic; drop it
                 self.on_bar = None
 
+    def set_percent(self, pct: float) -> None:
+        """Drive the bar by percent (the single-read path's phases). Chunks
+        are 64 MB compressed — too coarse to show a long replay moving — so
+        a half-percent of movement updates the bar too."""
+        chunk = int(self.chunks_total * min(100.0, pct) / 100.0)
+        if chunk == self._last_chunk and pct - getattr(self, "_last_pct", -1.0) < 0.5:
+            return
+        self._last_chunk = chunk
+        self._last_pct = pct
+        try:
+            self.store.update_progress(self.filename, pct, chunks_done=chunk, chunks_total=self.chunks_total)
+        except Exception:  # noqa: BLE001 — progress writes must never break ingest
+            pass
+        if self.on_bar:
+            try:
+                self.on_bar(chunk, self.chunks_total, pct)
+            except Exception:  # noqa: BLE001 — a display bar is cosmetic; drop it
+                self.on_bar = None
+
     def finish(self) -> None:
         try:
             self.store.update_progress(self.filename, 100.0, self.chunks_total, self.chunks_total)
@@ -107,6 +126,66 @@ class _ProgressTracker:
                 self.on_bar(self.chunks_total, self.chunks_total, 100.0)
             except Exception:  # noqa: BLE001
                 self.on_bar = None
+
+
+def _chunk_label(last) -> str:
+    """The last chunk count the parent saw from a worker, for log lines.
+    `last` is -1 before any report, else (chunks_done, pct)."""
+    if isinstance(last, tuple) and isinstance(last[0], int) and last[0] >= 0:
+        return str(last[0])
+    return "0"
+
+
+class SingleReadProgress:
+    """Progress for run_big_file_fast, whose work is NOT two equal passes:
+    a full scan, an optional SHORT re-read of the reference table, then a
+    replay of the spooled target items (on a row-dense file — 590M rows from
+    one Aetna file — the replay is most of the time). A two-pass bar sat at
+    ~50% for the whole single read and jumped to 100% at the end.
+
+    Shares: scan 0-80% (compressed bytes read), reference re-read 80-85%
+    (scaled by where the reference table ended, learned during the scan),
+    replay 85-99% (spool bytes replayed), 100% at finish. Monotonic, and it
+    keeps moving during the replay — the parent's frozen-worker watchdog
+    reads a moving chunk count as "alive"."""
+
+    SCAN_END, REFS_END, REPLAY_END = 80.0, 85.0, 99.0
+    STEP = 0.25   # emit at most every quarter percent
+
+    def __init__(self, compressed_total: int, emit):
+        self.total = max(int(compressed_total or 0), 1)
+        self.emit = emit
+        self.phase = "scan"
+        self.pos = 0
+        self.refs_end: int | None = None
+        self.pct = 0.0
+        self._last = -1.0
+
+    def feed(self, compressed_read: int) -> None:      # open_stream progress_cb
+        self.pos = compressed_read
+        if self.phase == "scan":
+            self._set(self.SCAN_END * min(1.0, compressed_read / self.total))
+        elif self.phase == "refs":
+            span = self.refs_end or self.total
+            self._set(self.SCAN_END + (self.REFS_END - self.SCAN_END) * min(1.0, compressed_read / span))
+
+    def refs_closed(self) -> None:
+        if self.phase == "scan" and self.refs_end is None:
+            self.refs_end = max(self.pos, 1)
+
+    def second_pass(self) -> None:
+        self.phase = "refs"
+
+    def replay(self, done: int, total: int) -> None:
+        self.phase = "replay"
+        self._set(self.REFS_END + (self.REPLAY_END - self.REFS_END) * min(1.0, done / max(total, 1)))
+
+    def _set(self, pct: float) -> None:
+        pct = max(pct, self.pct)
+        self.pct = pct
+        if pct - self._last >= self.STEP:
+            self._last = pct
+            self.emit(pct)
 
 
 def qa_report(store: Store, qa_counters: dict, source_file: str) -> dict:
@@ -338,10 +417,20 @@ def _parse_worker(cfg: MrfxConfig, path_str: str, name: str, header_defaults: di
 
     def report(compressed_read: int) -> None:
         in_pass = min(file_chunks, compressed_read // CHUNK_COMPRESSED_BYTES)
-        chunk = state["pass"] * file_chunks + in_pass
-        if chunk == state["last"]:
+        report_chunk(state["pass"] * file_chunks + in_pass)
+
+    def report_percent(pct: float) -> None:
+        report_chunk(int(chunks_total * min(100.0, pct) / 100.0), pct)
+
+    def report_chunk(chunk: int, pct: float | None = None) -> None:
+        if pct is None:
+            pct = min(100.0, 100.0 * chunk / chunks_total)
+        # a chunk is 64 MB compressed — a 700 MB file has ~22 of them, so a
+        # long replay phase would show no movement; percent moves count too
+        if chunk == state["last"] and pct - state.get("last_pct", -1.0) < 0.5:
             return
         state["last"] = chunk
+        state["last_pct"] = pct
         # the server that dispatched this parse is GONE (killed without pool
         # shutdown). Nobody will collect the result — seen live as orphans
         # burning 85% CPU on 12 GB files. Stop within one chunk; the
@@ -357,7 +446,7 @@ def _parse_worker(cfg: MrfxConfig, path_str: str, name: str, header_defaults: di
             tmp = progress_path + ".tmp"
             with open(tmp, "w") as f:
                 json.dump({"chunks_done": chunk, "chunks_total": chunks_total,
-                           "pct": min(100.0, 100.0 * chunk / chunks_total)}, f)
+                           "pct": round(min(100.0, pct), 2)}, f)
             os.replace(tmp, progress_path)
         except OSError:
             pass  # progress is cosmetic
@@ -381,21 +470,19 @@ def _parse_worker(cfg: MrfxConfig, path_str: str, name: str, header_defaults: di
             sink=sink, header_defaults=header_defaults, keep_ref_ids=keep_ref_ids,
         )
 
-    def set_pass(i: int) -> None:
-        state["pass"] = i
-
     try:
         result = None
         if big and fast_big_file_available(cfg):
             # ONE full read + a short read of the reference table (see
             # run_big_file_fast) instead of skim + extract's two full reads
             from .fastscan import FastScanUnsupported
+            srp = SingleReadProgress(compressed_bytes, report_percent)
             try:
                 result, target_items = run_big_file_fast(
-                    cfg, make_parser(), lambda: open_stream(path, progress_cb=report),
-                    spool_path_for(tmp_out), on_pass=set_pass)
+                    cfg, make_parser(), lambda: open_stream(path, progress_cb=srp.feed),
+                    spool_path_for(tmp_out), progress=srp)
             except FastScanUnsupported as e:
-                log.info("%s: fast scan declined (%s) — classic two-pass", name, e)
+                log.info("%s: single read declined (%s) — two-pass", name, e)
                 state["pass"] = 0
             else:
                 if target_items == 0:
@@ -483,8 +570,8 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
                 except (OSError, ValueError):
                     prog = None
                 now = time.monotonic()
-                if prog and prog.get("chunks_done", -1) != last:
-                    last = prog["chunks_done"]
+                if prog and (prog.get("chunks_done", -1), prog.get("pct")) != last:
+                    last = (prog.get("chunks_done", -1), prog.get("pct"))
                     last_advance = now
                     last_out_mb = -1.0
                     kill_ref_mb = -1.0  # progress resets the hard-kill clock
@@ -516,7 +603,7 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
                         "If it stays frozen too for hours, Ctrl-C and restart "
                         "— the file re-queues and everything else resumes.",
                         name, (now - last_advance) / 60,
-                        last if last >= 0 else "0", out_mb)
+                        _chunk_label(last), out_mb)
                     # counter AND output both frozen across two consecutive
                     # complaints = a real stall. Put the diagnosis in the
                     # console right here — when a stall wedges the whole
@@ -854,15 +941,16 @@ def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight
                 # (run_big_file_fast) instead of skim + extract's two full reads
                 from .fastscan import FastScanUnsupported
                 try:
+                    srp = SingleReadProgress(pf.compressed_bytes, progress.set_percent)
                     with store.rates_part_writer(name) as writer:
                         result, target_items = run_big_file_fast(
                             cfg,
                             InNetworkParser(cfg, source_file=name, external_refs=external_refs,
                                             sink=writer.write_batch, header_defaults=header_defaults),
-                            lambda: open_stream(path, progress_cb=progress.update),
-                            spool_path_for(writer.tmp), on_pass=progress.set_pass)
+                            lambda: open_stream(path, progress_cb=srp.feed),
+                            spool_path_for(writer.tmp), progress=srp)
                 except FastScanUnsupported as e:
-                    log.info("%s: fast scan declined (%s) — classic two-pass", name, e)
+                    log.info("%s: single read declined (%s) — two-pass", name, e)
                     result = None
                     progress.set_pass(0)
             if result is None:
