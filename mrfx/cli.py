@@ -1335,6 +1335,29 @@ def cmd_inflation(cfg: MrfxConfig, args) -> int:
     return 0
 
 
+def cmd_update(cfg: MrfxConfig, args) -> int:
+    """Install a newer build from its zip, keeping data/ and the user's settings."""
+    from .updater import UpdateError, apply_update
+
+    if _something_owns_the_port(cfg, "updating the program"):
+        print("Close the MRF Explorer window (the one running the dashboard) first, "
+              "then run the update again.")
+        return 1
+    root = Path(__file__).resolve().parent.parent
+    print(f"updating MRF Explorer in {root}\n  from {args.zip}")
+    try:
+        res = apply_update(Path(args.zip), root, run_pip=not args.no_pip)
+    except UpdateError as e:
+        print(f"update NOT applied — nothing was changed: {e}", file=sys.stderr)
+        return 1
+    print("\nDone. Start MRF Explorer again as usual, then press Ctrl+Shift+R once in "
+          "the dashboard tab so your browser loads the new screens.")
+    if res["backup"]:
+        print(f"(If anything looks wrong, the previous program files are saved in "
+              f"{res['backup']}.)")
+    return 0 if res["pip_ok"] else 2
+
+
 def cmd_backup(cfg: MrfxConfig, args) -> int:
     """Copy the whole analytical store into one zip with a manifest, so the
     business asset on this one machine survives it. Parquet is already
@@ -1865,6 +1888,9 @@ def main(argv: list[str] | None = None) -> int:
                    help="index label (default CPI-U)")
     p.add_argument("--source", default=None, help="where you read the value")
 
+    p = sub.add_parser("update", help="install a newer version from its .zip — keeps your data and settings")
+    p.add_argument("zip", help="the new mrfx_project.zip you downloaded")
+    p.add_argument("--no-pip", action="store_true", help="skip re-syncing the Python packages")
     p = sub.add_parser("backup", help="copy the whole store into one zip with a checksum manifest")
     p.add_argument("dest", help="backup filename, e.g. E:\\backups\\mrfx_2026-08-12.zip")
     p = sub.add_parser("verify", help="check a backup zip against its manifest, or the live store's integrity")
@@ -1958,6 +1984,7 @@ def main(argv: list[str] | None = None) -> int:
         "hospital": cmd_hospital,
         "floors": cmd_floors,
         "backup": cmd_backup,
+        "update": cmd_update,
         "verify": cmd_verify,
         "reset": cmd_reset,
     }[args.cmd]
