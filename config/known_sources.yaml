@@ -3,7 +3,7 @@
 # Every entry below was tested live against the real payer infrastructure
 # (dates and results in `verified` / `notes`). Entries with `queueable: true`
 # are safe to hand straight to the URL queue: `mrfx add --known` or the
-# "Queue verified sources" button on the Files tab. `queueable: false` entries
+# "Queue tested payer indexes" button on the Files tab. `queueable: false` entries
 # are portals that need a human click (JavaScript file lists, signed links) —
 # open them in a browser and paste the actual file links.
 #
@@ -18,146 +18,176 @@ sources:
     url: https://mrfdata.hmhs.com/files/443/wv/inbound/local/{FIRST_OF_MONTH}_Highmark_Blue_Cross_Blue_Shield_of_West_Virginia_index.json
     kind: toc
     queueable: true
-    verified: "2026-07-08"
+    verified: "2026-11-05"
     notes: >-
-      Index expanded to 482 files. Ingested a 10.8 GB (uncompressed) national
-      shard: 5,509,481 rows (file reports "Blue Cross and Blue Shield of
-      Illinois" — Blues cross-host national files) and a 6.5 MB shard:
+      Re-verified 2026-11-05: the 2026-11-01 index is live (reporting entity
+      "Highmark Blue Cross Blue Shield West Virginia"), lists 538 in-network
+      files, almost all dated 2026-11; sampled files answer HTTP 200. Earlier
+      (2026-07): Index expanded to 482 files. Ingested a 10.8 GB (uncompressed)
+      national shard: 5,509,481 rows (file reports "Blue Cross and Blue Shield
+      of Illinois" — Blues cross-host national files) and a 6.5 MB shard:
       2,993,969 rows.
 
   - name: Blue Cross Blue Shield of Wyoming
     url: https://mrfdata.hmhs.com/files/460/wy/inbound/local/{FIRST_OF_MONTH}_Blue_Cross_Blue_Shield_of_Wyoming_index.json
     kind: toc
     queueable: true
-    verified: "2026-07-08"
-    notes: Index expanded to 559 files; two shards ingested, 606,227 rows.
-
-  - name: Blue Cross and Blue Shield of Nebraska
-    url: https://mrfdata.hmhs.com/files/363/pa/inbound/local/{FIRST_OF_MONTH}_Blue_Cross_and_Blue_Shield_of_Nebraska_index.json
-    kind: toc
-    queueable: true
-    verified: "2026-07-08"
+    verified: "2026-11-05"
     notes: >-
-      Index expanded to 764 files. Its copies of national files were detected
-      byte-identical to ones already ingested and skipped as duplicates.
+      Re-verified 2026-11-05: the 2026-11-01 index is live (reporting entity
+      "Blue Cross Blue Shield of Wyoming"), lists 587 in-network files, almost
+      all dated 2026-11; sampled files answer HTTP 200. Earlier (2026-07): Index
+      expanded to 559 files; two shards ingested, 606,227 rows.
 
   - name: Highmark Blue Shield of Western New York
     url: https://mrfdata.hmhs.com/files/301/wny/inbound/local/{FIRST_OF_MONTH}_Highmark_Blue_Shield_of_Western_New_York_index.json
     kind: toc
     queueable: true
-    verified: "2026-07-08"
-    notes: Index expanded to 546 files; two shards ingested, 606,183 rows.
-
-  - name: Blue Cross and Blue Shield of Florida (Florida Blue)
-    url: https://mrfdata.hmhs.com/files/363/pa/inbound/local/{FIRST_OF_MONTH}_Blue_Cross_and_Blue_Shield_of_Florida_index.json
-    kind: toc
-    queueable: true
-    verified: "2026-07-08"
+    verified: "2026-11-05"
     notes: >-
-      Index expanded to 764 files. Ingested a 14.2 GB (uncompressed) shard,
-      1,294,212 rows, 44/44 chunks at 1.3 GB peak memory. An 11.6 GB
-      (compressed) shard correctly triggered the confirm_over_gb safety guard.
+      Re-verified 2026-11-05: the 2026-11-01 index is live (reporting entity
+      "Highmark Blue Cross Blue Shield of Western New York"), lists 603
+      in-network files, almost all dated 2026-11; sampled files answer HTTP 200.
+      Earlier (2026-07): Index expanded to 546 files; two shards ingested,
+      606,183 rows.
 
   - name: Highmark BCBS Delaware
     url: https://mrfdata.hmhs.com/files/070/del/inbound/local/{FIRST_OF_MONTH}_Highmark_Blue_Cross_Blue_Shield_of_Delaware_index.json
     kind: toc
     queueable: true
-    verified: "2026-07-08"
+    verified: "2026-11-05"
     notes: >-
-      Delaware verified end-to-end earlier via its file-listing page (cascade
-      to 8,283 queued files; 4 ingested as payer "Highmark DE."); the monthly
-      index URL is the cleaner entry point.
+      Re-verified 2026-11-05: the 2026-11-01 index is live (reporting entity
+      "Highmark Blue Cross Blue Shield Delaware"), lists 615 in-network files,
+      almost all dated 2026-11; sampled files answer HTTP 200. Earlier
+      (2026-07): Delaware verified end-to-end earlier via its file-listing page
+      (cascade to 8,283 queued files; 4 ingested as payer "Highmark DE."); the
+      monthly index URL is the cleaner entry point.
 
   - name: Blue Cross Blue Shield of North Dakota
     url: https://mrfdata.hmhs.com/files/320/nd/inbound/local/{FIRST_OF_MONTH}_BlueCrossBlueShieldND_index.json
     kind: toc
     queueable: true
-    verified: "2026-07-08"
+    verified: "2026-11-05"
     notes: >-
-      Index URL live-verified. A BCBSND in-network shard (275 MB compressed)
-      was previously ingested end-to-end: 2.1M rows at ~130 MB parser memory.
+      Re-verified 2026-11-05: the 2026-11-01 index is live (reporting entity
+      "Blue Cross Blue Shield of North Dakota"), lists 622 in-network files,
+      almost all dated 2026-11; sampled files answer HTTP 200. Earlier
+      (2026-07): Index URL live-verified. A BCBSND in-network shard (275 MB
+      compressed) was previously ingested end-to-end: 2.1M rows at ~130 MB
+      parser memory.
 
   - name: Highmark BCBS Pennsylvania
     url: https://mrfdata.hmhs.com/files/363/pa/inbound/local/{FIRST_OF_MONTH}_Highmark_Blue_Cross_Blue_Shield_of_Pennsylvania_index.json
     kind: toc
     queueable: true
-    verified: "2026-07-08"
-    notes: Index URL live-verified (HTTP); not yet expanded in testing.
+    verified: "2026-11-05"
+    notes: >-
+      Re-verified 2026-11-05: 843 in-network files (815 dated 2026-11), 184
+      plans, all "Highmark, Inc." — Highmark's own book plus the national
+      BlueCard files it hosts. NOTE: Highmark also publishes this exact index
+      (byte-identical, same SHA-256) under seven other plans' names — Florida,
+      Nebraska, Arizona, Idaho, Minnesota, Louisiana and Independence National
+      Alliance. Those copies are NOT those plans' own books, so they were
+      removed from this list; each plan's own source is listed separately where
+      one is known.
+
+  - name: Blue Cross of Idaho
+    url: https://bci.sapphiremrfhub.com/
+    kind: page
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Verified 2026-11-05: Blue Cross of Idaho's own Sapphire MRF hub
+      (Sapphire/Zelis under BCI's name) — 420 file links, all dated 2026-11;
+      sampled files answer HTTP 200. Replaces the old Highmark-hosted "Blue
+      Cross of Idaho" index, which was a copy of Highmark PA's index.
+
+  - name: Florida Blue (Blue Cross and Blue Shield of Florida)
+    url: https://www.floridablue.com/members/tools-resources/transparency/machine-readable-files
+    kind: portal
+    queueable: false
+    verified: "2026-11-05"
+    notes: >-
+      Checked 2026-11-05: Florida Blue's own page links two undated indexes
+      (d1hgtx7rrdl2cn.cloudfront.net/mrf/toc/FloridaBlue_Health-Insurance-Issuer_index.json
+      — 491 files — and ..._Third-Party-Administrator_index.json — 485 files).
+      Both indexes load, but they still list files dated 2026-09, and every
+      sampled file link was refused (HTTP 403) from this test machine — so not
+      auto-queued. Open the page in a browser. (The old Highmark-hosted
+      "Florida" index was a copy of Highmark PA's index, not Florida Blue's
+      book.)
+
+  - name: BCBS Nebraska (own book)
+    url: https://www.nebraskablue.com/MRFs
+    kind: portal
+    queueable: false
+    verified: "2026-11-05"
+    notes: >-
+      Checked 2026-11-05: nebraskablue.com/MRFs redirects to BCBSNE's
+      HealthSparq portal (JavaScript; open in a browser). The old
+      Highmark-hosted "Nebraska" index was a copy of Highmark PA's index, not
+      BCBSNE's book.
+
+  - name: BCBS Arizona (own book)
+    url: https://bcbsaz.healthsparq.com/healthsparq/public/#/one/insurerCode=BCBSAZ_I&brandCode=BCBSAZ/machine-readable-transparency-in-coverage
+    kind: portal
+    queueable: false
+    verified: "2026-11-05"
+    notes: >-
+      UNCONFIRMED 2026-11-05: BCBSAZ's HealthSparq portal address, from BCBSAZ's
+      own 2022 announcement; azblue.com no longer links a transparency page.
+      Open in a browser and check it is current. The old Highmark-hosted
+      "Arizona" index was a copy of Highmark PA's index, not BCBSAZ's book.
 
   - name: Highmark Blue Shield of Pennsylvania
     url: https://mrfdata.hmhs.com/files/378/pa/inbound/local/{FIRST_OF_MONTH}_Highmark_Blue_Shield_of_Pennsylvania_index.json
     kind: toc
     queueable: true
-    verified: "2026-07-08"
-    notes: Index URL live-verified (HTTP); not yet expanded in testing.
+    verified: "2026-11-05"
+    notes: >-
+      Re-verified 2026-11-05: the 2026-11-01 index is live (reporting entity
+      "Highmark Blue Shield Pennsylvania"), lists 835 in-network files, almost
+      all dated 2026-11; sampled files answer HTTP 200. Earlier (2026-07): Index
+      URL live-verified (HTTP); not yet expanded in testing.
 
   - name: Highmark Blue Shield of Northeastern New York
     url: https://mrfdata.hmhs.com/files/800/nny/inbound/local/{FIRST_OF_MONTH}_Highmark_Blue_Shield_of_Northeastern_New_York_index.json
     kind: toc
     queueable: true
-    verified: "2026-07-08"
-    notes: Index URL live-verified (HTTP); not yet expanded in testing.
-
-  - name: Blue Cross and Blue Shield of Arizona
-    url: https://mrfdata.hmhs.com/files/363/pa/inbound/local/{FIRST_OF_MONTH}_Blue_Cross_and_Blue_Shield_of_Arizona_index.json
-    kind: toc
-    queueable: true
-    verified: "2026-07-08"
-    notes: Index URL live-verified (HTTP); not yet expanded in testing.
-
-  - name: Blue Cross of Idaho
-    url: https://mrfdata.hmhs.com/files/363/pa/inbound/local/{FIRST_OF_MONTH}_Blue_Cross_of_Idaho_index.json
-    kind: toc
-    queueable: true
-    verified: "2026-07-08"
-    notes: Index URL live-verified (HTTP); not yet expanded in testing.
-
-  - name: Blue Cross and Blue Shield of Minnesota (partnership book)
-    url: https://mrfdata.hmhs.com/files/363/pa/inbound/local/{FIRST_OF_MONTH}_Blue_Cross_and_Blue_Shield_of_Minnesota_index.json
-    kind: toc
-    queueable: true
-    verified: "2026-07-08"
-    notes: Index URL live-verified (HTTP); not yet expanded in testing.
-
-  - name: Blue Cross and Blue Shield of Louisiana
-    url: https://mrfdata.hmhs.com/files/363/pa/inbound/local/{FIRST_OF_MONTH}_Blue_Cross_Blue_Shield_Louisana_index.json
-    kind: toc
-    queueable: true
-    verified: "2026-07-08"
+    verified: "2026-11-05"
     notes: >-
-      Index URL live-verified (HTTP); not yet expanded in testing. ("Louisana"
-      spelling is the payer's own.)
-
-  - name: Independence National Alliance (powered by Highmark)
-    url: https://mrfdata.hmhs.com/files/363/pa/inbound/local/{FIRST_OF_MONTH}_Independence_National_Alliance_index.json
-    kind: toc
-    queueable: true
-    verified: "2026-07-08"
-    notes: Index URL live-verified (HTTP); not yet expanded in testing.
+      Re-verified 2026-11-05: the 2026-11-01 index is live (reporting entity
+      "Highmark Blue Shield of Northeastern New York"), lists 588 in-network
+      files, almost all dated 2026-11; sampled files answer HTTP 200. Earlier
+      (2026-07): Index URL live-verified (HTTP); not yet expanded in testing.
 
   # ---- Other Blues ----
   - name: Blue Cross & Blue Shield of Mississippi
     url: https://tcr.bcbsms.com/Table_of_Contents/Local_TOC.json
     kind: toc
     queueable: true
-    verified: "2026-07-08"
+    verified: "2026-11-05"
     notes: >-
-      Stable (undated) TOC URL. Expanded to 466 files; first shard ingested
-      204,896 rows (file reports "Blue Cross and Blue Shield of Alabama" —
-      per-file attribution is correct, Blues cross-host).
+      Re-verified 2026-11-05: index lists 507 files, all dated 2026-10; sampled
+      files answer HTTP 200. Earlier: Stable (undated) TOC URL. Expanded to 466
+      files; first shard ingested 204,896 rows (file reports "Blue Cross and
+      Blue Shield of Alabama" — per-file attribution is correct, Blues
+      cross-host).
 
   - name: Anthem / Elevance national master index (14 states)
     url: https://antm-pt-prod-dataz-nogbd-nophi-us-east1.s3.amazonaws.com/anthem/{FIRST_OF_MONTH}_anthem_index.json.gz
     kind: toc
     queueable: true
-    verified: "2026-07-10"
+    verified: "2026-11-05"
     notes: >-
-      The index alone is 10.5 GB compressed — requires confirm_over_gb >= 12
-      in config/mrfx.yaml (the guard message says exactly that if you
-      forget). Verified end-to-end: 10.5 GB index downloaded in ~5 min,
-      stream-expanded to the max_toc_files cap (2,000 queued of many more —
-      raise the cap for deeper reach). Covers all Anthem states
-      (CA/CO/CT/GA/IN/KY/ME/MO/NV/NH/NY/OH/VA/WI). First ingests: Anthem
+      Re-verified 2026-11-05: the 2026-11-01 index is live and is now 11.5 GB
+      compressed (was 10.5 GB in July) — set confirm_over_gb to at least 15 in
+      config/mrfx.yaml to leave headroom as it grows (the guard message names
+      the exact size if you forget). Verified end-to-end: 10.5 GB index
+      downloaded in ~5 min, stream-expanded to the max_toc_files cap (2,000
+      queued of many more — raise the cap for deeper reach). Covers all Anthem
+      states (CA/CO/CT/GA/IN/KY/ME/MO/NV/NH/NY/OH/VA/WI). First ingests: Anthem
       BCBS Nevada (cross-hosted on the CT domain) 609,819 rows; an Anthem CO
       shard (8 GB uncompressed) previously ingested 1,057,258 rows.
 
@@ -165,187 +195,206 @@ sources:
     url: https://bcbskc.sapphiremrfhub.com
     kind: page
     queueable: true
-    verified: "2026-07-08"
+    verified: "2026-11-05"
     notes: >-
-      Sapphire/Gatsby hub — the app crawls its static data automatically:
-      found 2 TOC indexes; the main index expanded to 674 files; two rate
-      files ingested 2,573,672 rows (files report the payer as "BKC").
-      Other payers on *.sapphiremrfhub.com hubs work the same way.
+      Re-verified 2026-11-05: 65 file links, all dated 2026-11; sampled links
+      answer HTTP 200. Earlier: Sapphire/Gatsby hub — the app crawls its static
+      data automatically: found 2 TOC indexes; the main index expanded to 674
+      files; two rate files ingested 2,573,672 rows (files report the payer as
+      "BKC"). Other payers on *.sapphiremrfhub.com hubs work the same way.
 
   - name: Blue Cross Blue Shield of Michigan
     url: https://bcbsm.sapphiremrfhub.com
     kind: page
     queueable: true
-    verified: "2026-07-08"
+    verified: "2026-11-05"
     notes: >-
-      Sapphire hub, crawled automatically: index expanded to 264 files.
-      Metro-Detroit HMO shard ingested 8,418 therapy rows (payer "BCBSMI").
-      Specialty network files with no therapy codes (e.g. home infusion)
-      ingest honestly as 0 rows; a 5.9 GB shard trips the size guard until
-      confirm_over_gb is raised.
+      Re-verified 2026-11-05: 842 file links, all dated 2026-11; sampled links
+      answer HTTP 200. Earlier: Sapphire hub, crawled automatically: index
+      expanded to 264 files. Metro-Detroit HMO shard ingested 8,418 therapy rows
+      (payer "BCBSMI"). Specialty network files with no therapy codes (e.g. home
+      infusion) ingest honestly as 0 rows; a 5.9 GB shard trips the size guard
+      until confirm_over_gb is raised.
 
   - name: Blue Cross Blue Shield of Louisiana
     url: https://bcbsla.sapphiremrfhub.com
     kind: page
     queueable: true
-    verified: "2026-07-08"
+    verified: "2026-11-05"
     notes: >-
-      Sapphire hub, crawled automatically: 2 TOCs (HMO Louisiana 275 files +
-      LAHSIC 263 files). The bcbsla P001 fee-schedule file (2.8 GB
-      uncompressed) ingested 14,607,476 rows — the largest single-file yield
-      tested (payer "bcbsla"). Also cross-lists other Blues' national files,
-      attributed per-file.
+      Re-verified 2026-11-05: 263 file links, all dated 2026-11; sampled links
+      answer HTTP 200. Earlier: Sapphire hub, crawled automatically: 2 TOCs (HMO
+      Louisiana 275 files + LAHSIC 263 files). The bcbsla P001 fee-schedule file
+      (2.8 GB uncompressed) ingested 14,607,476 rows — the largest single-file
+      yield tested (payer "bcbsla"). Also cross-lists other Blues' national
+      files, attributed per-file.
 
   # ---- National non-Blues ----
   - name: Centene / Ambetter (all states, one page)
     url: https://www.centene.com/price-transparency-files.html
     kind: page
     queueable: true
-    verified: "2026-07-08"
+    verified: "2026-11-05"
     notes: >-
-      Static page; the app lifts 12 index files off it automatically
-      (Ambetter, Fidelis, QualChoice, ...). Verified cascade: Ambetter index
-      expanded to 28 files; two ingested as "Centene Management Company LLC"
-      (Ambetter OK + IN), 2,561,540 rows total.
+      Re-verified 2026-11-05: 11 index links, dated 2026-10; sampled links
+      answer HTTP 200. Earlier: Static page; the app lifts 12 index files off it
+      automatically (Ambetter, Fidelis, QualChoice, ...). Verified cascade:
+      Ambetter index expanded to 28 files; two ingested as "Centene Management
+      Company LLC" (Ambetter OK + IN), 2,561,540 rows total.
 
   - name: UnitedHealthcare (national)
     url: https://transparency-in-coverage.uhc.com/
     kind: page
     queueable: true
-    verified: "2026-07-09"
+    verified: "2026-11-05"
     notes: >-
-      React portal — the app finds its file-listing API automatically and
-      expands it like an index. Verified live: 86,722 files listed (7,133
-      in-network rate files totaling ~89 TB compressed); rate files queue
-      first, allowed-amounts entries are excluded, and queueing caps at
-      max_toc_files (default 2000, alphabetical) — raise it in
-      config/mrfx.yaml or paste specific file links for deeper reach. The
-      Missouri Provider Network file ingested 88,649 therapy rows as
-      "UnitedHealthcare Insurance Company". Large-file stress tests
-      (2026-07-09): Oxford Liberty Network (0.58 GB compressed) 5,590,693
+      Re-verified 2026-11-05: the file-listing API answers: 76,234 files (7,476
+      in-network) for 2026-11; sampled links answer HTTP 200. Earlier: React
+      portal — the app finds its file-listing API automatically and expands it
+      like an index. Verified live: 86,722 files listed (7,133 in-network rate
+      files totaling ~89 TB compressed); rate files queue first, allowed-amounts
+      entries are excluded, and queueing caps at max_toc_files (default 2000,
+      alphabetical) — raise it in config/mrfx.yaml or paste specific file links
+      for deeper reach. The Missouri Provider Network file ingested 88,649
+      therapy rows as "UnitedHealthcare Insurance Company". Large-file stress
+      tests (2026-07-09): Oxford Liberty Network (0.58 GB compressed) 5,590,693
       rows; River Valley Heritage (1.70 GB / ~17 GB uncompressed) 9,832,954
-      rows; River Valley PS1-77_EL (3.39 GB / ~34 GB uncompressed, 102
-      chunks) 29,688,251 rows; Charter 617 (8.85 GB / ~88 GB uncompressed,
-      264 chunks, above the default confirm_over_gb=5 guard — raised to 12
-      for the test) 63,987,440 rows in 3.8 h, surviving a kill/resume and a
-      disk-full episode mid-run — the largest single file tested. Parses at
-      <1 GB memory. Files named "...NDC..." are drug
-      pricing and are skipped at queue time. Employer plans under an opt-out
-      book live at private-transparency-in-coverage.uhc.com.
+      rows; River Valley PS1-77_EL (3.39 GB / ~34 GB uncompressed, 102 chunks)
+      29,688,251 rows; Charter 617 (8.85 GB / ~88 GB uncompressed, 264 chunks,
+      above the default confirm_over_gb=5 guard — raised to 12 for the test)
+      63,987,440 rows in 3.8 h, surviving a kill/resume and a disk-full episode
+      mid-run — the largest single file tested. Parses at <1 GB memory. Files
+      named "...NDC..." are drug pricing and are skipped at queue time. Employer
+      plans under an opt-out book live at
+      private-transparency-in-coverage.uhc.com.
 
   # ---- Regional non-Blues & rental networks ----
   - name: SelectHealth (Intermountain — Utah / Idaho / Nevada)
     url: https://ebu.intermountainhealthcare.org/selecthealth/transparencyincoverage/
     kind: page
     queueable: true
-    verified: "2026-07-11"
+    verified: "2026-11-05"
     notes: >-
-      Plain directory listing of ~125 per-plan CMS TOC index files (v2.0).
-      Dates are MID-month and irregular (e.g. 2026-06-11), so this listing
-      page is the stable entry — the app lifts the current index links off it
-      automatically (verified: 40 TOC children queued at the default cap;
-      raise max_toc_files for the full book). Each TOC's in_network files are
-      .json.gz on the same host.
+      Re-verified 2026-11-05: 124 file links, dated 2026-10; sampled links
+      answer HTTP 200. Earlier: Plain directory listing of ~125 per-plan CMS TOC
+      index files (v2.0). Dates are MID-month and irregular (e.g. 2026-06-11),
+      so this listing page is the stable entry — the app lifts the current index
+      links off it automatically (verified: 40 TOC children queued at the
+      default cap; raise max_toc_files for the full book). Each TOC's in_network
+      files are .json.gz on the same host.
 
   - name: Moda Health (Oregon / Alaska / Texas)
     url: https://mrf.modahealth.com/mrf/Moda/{FIRST_OF_MONTH}_moda_ModaSelect_index.json
     kind: toc
     queueable: true
-    verified: "2026-07-11"
+    verified: "2026-11-05"
     notes: >-
-      CMS TOC v2.0.0, clean first-of-month dated path (2026-07-01 live).
-      Verified expansion: 13 in-network file children queued. Sibling books
-      swap the plan segment: _moda_Connexus_index.json and
-      _moda_Affinity_index.json at the same path; the full per-employer list
-      is on https://www.modahealth.com/privacy-center/machine-readable-files.shtml
+      Re-verified 2026-11-05: the 2026-11-01 index is live and lists 13 files,
+      but 5 of them (moda_0166, 0243, 0244, 0280, 0281) return HTTP 404 — Moda's
+      index points at files it has not posted. Those rows will fail with "file
+      not found"; retry them later in the month. Earlier: CMS TOC v2.0.0, clean
+      first-of-month dated path (2026-07-01 live). Verified expansion: 13
+      in-network file children queued. Sibling books swap the plan segment:
+      _moda_Connexus_index.json and _moda_Affinity_index.json at the same path;
+      the full per-employer list is on
+      https://www.modahealth.com/privacy-center/machine-readable-files.shtml
       (static page — also pasteable directly).
 
   - name: First Health PPO via Healthgram (national rental network)
     url: https://mrf.healthgram.com/mrfiles/FRST/FirstHealth_index.json
     kind: toc
     queueable: true
-    verified: "2026-07-11"
+    verified: "2026-11-05"
     notes: >-
-      Stable UNdated path. CMS TOC v1.6.1 that cascades: it lists a nested
-      dated TOC which lists 20 in-network rate files (hosted on
-      mrf.healthsparq.com). Verified: nested TOC child queued and its 20
-      rate-file locations confirmed live. First Health is Aetna's rental
-      PPO network — this is a direct plain-JSON route to it that needs no
-      browser (unlike health1.firsthealth.com, which is a JS portal).
+      Re-verified 2026-11-05: still live, but STALE on the payer's side — the
+      index still points at a 2026-06-05 file set (20 files, all answering HTTP
+      200), so these are June rates. Earlier: Stable UNdated path. CMS TOC
+      v1.6.1 that cascades: it lists a nested dated TOC which lists 20
+      in-network rate files (hosted on mrf.healthsparq.com). Verified: nested
+      TOC child queued and its 20 rate-file locations confirmed live. First
+      Health is Aetna's rental PPO network — this is a direct plain-JSON route
+      to it that needs no browser (unlike health1.firsthealth.com, which is a JS
+      portal).
 
   - name: Tufts Health Public Plans (Point32Health — Massachusetts)
     url: https://eusprdtransparencymrfp32.blob.core.windows.net/thp/{FIRST_OF_MONTH}_TuftsHealthPublicPlansInc_index.json
     kind: toc
     queueable: true
-    verified: "2026-07-11"
+    verified: "2026-11-05"
     notes: >-
-      CMS TOC v2.0.0, first-of-month dated path on Point32Health's Azure
-      tenant. Verified expansion: 3 in-network file children queued. This is
-      the Tufts Public Plans (Medicaid/ConnectorCare) book — a distinct book
-      from Harvard Pilgrim (same parent, Point32Health, already cataloged via
-      harvardpilgrim.org). Found via the mrfdatasolutions.com payer directory.
+      Re-verified 2026-11-05: the 2026-11-01 index lists 3 files, dated 2026-11;
+      sampled links answer HTTP 200. Earlier: CMS TOC v2.0.0, first-of-month
+      dated path on Point32Health's Azure tenant. Verified expansion: 3
+      in-network file children queued. This is the Tufts Public Plans
+      (Medicaid/ConnectorCare) book — a distinct book from Harvard Pilgrim (same
+      parent, Point32Health, already cataloged via harvardpilgrim.org). Found
+      via the mrfdatasolutions.com payer directory.
 
   - name: Security Health Plan (Wisconsin)
     url: https://www.securityhealth.org/insurance-resources/json
     kind: page
     queueable: true
-    verified: "2026-07-11"
+    verified: "2026-11-05"
     notes: >-
-      Static page listing ~33 per-employer TOC files on
-      shp-web-public.s3.amazonaws.com (dated the 2nd of the month, so the
+      Re-verified 2026-11-05: 38 file links, 32 dated 2026-11; sampled links
+      answer HTTP 200. Earlier: Static page listing ~33 per-employer TOC files
+      on shp-web-public.s3.amazonaws.com (dated the 2nd of the month, so the
       listing page is the stable entry — the app lifts the current links off
       it). Each per-employer index is a ZIP-WRAPPED CMS TOC v2.0.0; all
       employers share the same 3 in-network files. Verified: 24 employer
-      children queued, one zip-TOC expanded to its 3 in-network children.
-      NOTE: the sibling PRD/exchange/cms-data-index.json is the
-      interoperability index (providers/plans/drugs), NOT the price MRF.
-      Found via the mrfdatasolutions.com payer directory.
+      children queued, one zip-TOC expanded to its 3 in-network children. NOTE:
+      the sibling PRD/exchange/cms-data-index.json is the interoperability index
+      (providers/plans/drugs), NOT the price MRF. Found via the
+      mrfdatasolutions.com payer directory.
 
   - name: Optum Health (transparency portal)
     url: https://transparency-in-coverage.optum.com/
     kind: portal
     queueable: false
-    verified: "2026-07-09"
+    verified: "2026-11-05"
     notes: >-
-      Same portal platform as UHC and auto-crawlable the same way, but its
-      listing carries prescription-drug files (no PT/OT/SLP rates) — not
-      queued by default to avoid pointless downloads.
+      Re-checked 2026-11-05: page loads (HTTP 200). Same portal platform as UHC
+      and auto-crawlable the same way, but its listing carries prescription-drug
+      files (no PT/OT/SLP rates) — not queued by default to avoid pointless
+      downloads.
 
   - name: Cigna
     url: https://www.cigna.com/legal/compliance/machine-readable-files
     kind: page
     queueable: true
-    verified: "2026-07-09"
+    verified: "2026-11-05"
     notes: >-
-      The page embeds /static/mrf/latest.json (+ /static/mrf/co/latest.json)
-      manifests whose {"mrfs": [...]} entries carry freshly-signed CloudFront
-      TOC URLs — the app lifts the manifest paths off the page and follows
-      them, so the signatures are always fresh (no browser needed). Verified
-      cascade: page -> 2 manifests -> main TOC (134 files) + CO TOC (9) ->
-      signed rate files. Verified ingests: Sagamore Health Network 747,340
-      rows; Upper Midwest Affiliation Partner / HealthPartners (532 MB zip,
-      ~5.2 GB uncompressed) 19,792,712 rows; Cigna Health & Life Pathwell
-      OAP (1.6 GB / ~15.7 GB uncompressed) 243,358,952 rows — the largest
-      single file ingested so far; its 264M-row store rebuilt analytics
-      rollups in 44 min via 18 hash partitions.
+      Re-verified 2026-11-05: the page still carries its 2 signed manifests;
+      sampled links answer HTTP 200. Earlier: The page embeds
+      /static/mrf/latest.json (+ /static/mrf/co/latest.json) manifests whose
+      {"mrfs": [...]} entries carry freshly-signed CloudFront TOC URLs — the app
+      lifts the manifest paths off the page and follows them, so the signatures
+      are always fresh (no browser needed). Verified cascade: page -> 2
+      manifests -> main TOC (134 files) + CO TOC (9) -> signed rate files.
+      Verified ingests: Sagamore Health Network 747,340 rows; Upper Midwest
+      Affiliation Partner / HealthPartners (532 MB zip, ~5.2 GB uncompressed)
+      19,792,712 rows; Cigna Health & Life Pathwell OAP (1.6 GB / ~15.7 GB
+      uncompressed) 243,358,952 rows — the largest single file ingested so far;
+      its 264M-row store rebuilt analytics rollups in 44 min via 18 hash
+      partitions.
 
   - name: Aetna / CVS Health
     url: https://health1.aetna.com/app/public/#/one/insurerCode=AETNACVS_I&brandCode=ALICFI/machine-readable-transparency-in-coverage
     kind: page
     queueable: true
-    verified: "2026-07-10"
+    verified: "2026-11-05"
     notes: >-
-      health1 SPA — with Playwright the app renders it and captures the
-      HealthSparq metadata API, which lists real in-network rate files
-      (unlike Excellus's allowed-amounts-only book). Aetna's server also
-      sends an incomplete TLS chain; the app repairs it automatically
-      (fetches + verifies the missing DigiCert intermediates). Verified
-      cascade: page -> 330 files queued (per-plan inNetworkRates on
-      mrf.healthsparq.com). First ingests: Aetna Health of California
-      (~6.2 GB uncompressed, two-pass chunked) 83,737,061 rows — the
-      second-largest single file tested; Aetna Health Inc. Maine
-      1,527,562 rows.
-      FirstHealth (Aetna's rental PPO network) lives on the same platform:
+      Re-verified 2026-11-05: the headless browser lifted 1,984 file links;
+      sampled links answer HTTP 200. Earlier: health1 SPA — with Playwright the
+      app renders it and captures the HealthSparq metadata API, which lists real
+      in-network rate files (unlike Excellus's allowed-amounts-only book).
+      Aetna's server also sends an incomplete TLS chain; the app repairs it
+      automatically (fetches + verifies the missing DigiCert intermediates).
+      Verified cascade: page -> 330 files queued (per-plan inNetworkRates on
+      mrf.healthsparq.com). First ingests: Aetna Health of California (~6.2 GB
+      uncompressed, two-pass chunked) 83,737,061 rows — the second-largest
+      single file tested; Aetna Health Inc. Maine 1,527,562 rows. FirstHealth
+      (Aetna's rental PPO network) lives on the same platform:
       https://www.health1.firsthealth.com/app/public/#/one/insurerCode=FIRSTHEALTH_I&brandCode=FIRSTH/machine-readable-transparency-in-coverage
       — link harvest verified the same way.
 
@@ -353,118 +402,136 @@ sources:
     url: https://developers.humana.com/cost-transparency
     kind: portal
     queueable: false
-    verified: "2026-07-09"
+    verified: "2026-11-05"
     notes: >-
-      Developer portal (old /patient-cost-transparency URL now 404s; the
-      /cost-transparency page was returning 502 when re-tested). Open in a
-      browser and paste the file links.
+      Re-checked 2026-11-05: page loads (HTTP 200). Developer portal (old
+      /patient-cost-transparency URL now 404s; the /cost-transparency page was
+      returning 502 when re-tested). Open in a browser and paste the file links.
 
   - name: HCSC (BCBS Illinois / Texas / New Mexico / Oklahoma / Montana)
     url: https://www.bcbsil.com/provider/standards/standard-requirements/caa/caa-tic
     kind: portal
     queueable: false
-    verified: "2026-07-08"
+    verified: "2026-11-05"
     notes: >-
-      JavaScript pages on each state site (bcbsil/bcbstx/bcbsnm/bcbsok/
-      bcbsmt.com) — open in a browser and paste the index links.
+      Re-checked 2026-11-05: page loads (HTTP 200). JavaScript pages on each
+      state site (bcbsil/bcbstx/bcbsnm/bcbsok/ bcbsmt.com) — open in a browser
+      and paste the index links.
 
   - name: CareFirst (Maryland / DC / N. Virginia)
     url: https://individual.carefirst.com/individuals-families/mandates-policies/machine-readable-file.page
     kind: page
     queueable: true
-    verified: "2026-07-09"
+    verified: "2026-11-05"
     notes: >-
-      The download buttons hide the real Azure blob URLs in data-key
+      Re-verified 2026-11-05: 7 index links, 6 dated 2026-09 and 1 2026-10
+      (CareFirst runs about a month behind); sampled links answer HTTP 200.
+      Earlier: The download buttons hide the real Azure blob URLs in data-key
       attributes (with spaces in the filenames) — the app lifts and encodes
       them. Verified cascade: page -> 7 indexes (ppo/hmo/par/cfa/ncas/
-      netlease/FEHBP) -> 435 files. CareFirst slices its book by
-      billing-code range, so many small files legitimately ingest 0 rows;
-      the therapy codes landed in FEHBP hmo16 (2,727,332 rows) and 08C0
-      parts 28/33 (10,222 + 1,925 rows). Schema is v1.2.0 — ingested
-      best-effort, rates verified present.
+      netlease/FEHBP) -> 435 files. CareFirst slices its book by billing-code
+      range, so many small files legitimately ingest 0 rows; the therapy codes
+      landed in FEHBP hmo16 (2,727,332 rows) and 08C0 parts 28/33 (10,222 +
+      1,925 rows). Schema is v1.2.0 — ingested best-effort, rates verified
+      present.
 
   - name: BCBS Tennessee
     url: https://www.bcbst.com/tcr
     kind: page
     queueable: true
-    verified: "2026-07-09"
+    verified: "2026-11-05"
     notes: >-
-      Static page linking two directory JSONs (custom {"TOC_Files": [...]}
-      wrappers — the app lifts links out of unknown JSON containers).
-      Verified cascade: page -> 2 directories -> 593 employer/main TOCs ->
-      rate files on the signed bcbstn CDN. First two files ingested 2,591,391
-      rows (BCBS Hawaii) and 1,125,723 rows (Wellmark South Dakota) — more
-      cross-hosted national files, attributed per-file as always.
+      Re-verified 2026-11-05: the page still links its 2 directory files;
+      sampled links answer HTTP 200. Earlier: Static page linking two directory
+      JSONs (custom {"TOC_Files": [...]} wrappers — the app lifts links out of
+      unknown JSON containers). Verified cascade: page -> 2 directories -> 593
+      employer/main TOCs -> rate files on the signed bcbstn CDN. First two files
+      ingested 2,591,391 rows (BCBS Hawaii) and 1,125,723 rows (Wellmark South
+      Dakota) — more cross-hosted national files, attributed per-file as always.
 
   - name: Universal Health Services (UHS — hospital system employer plan)
     url: https://uhs.com/transparency-in-coverage-machine-readable-files/
     kind: portal
     queueable: false
-    verified: "2026-07-09"
+    verified: "2026-11-05"
     notes: >-
-      The site's firewall blocks automated downloads (HTTP 403 even with
-      browser headers). Open it in your browser; if files download there,
-      drop them into data/inbox/.
+      Re-checked 2026-11-05: page loads (HTTP 200). The site's firewall blocks
+      automated downloads (HTTP 403 even with browser headers). Open it in your
+      browser; if files download there, drop them into data/inbox/.
 
   - name: Wellmark BCBS (Iowa / South Dakota)
-    url: https://www.wellmark.com/transparency-in-coverage
+    url: https://www.wellmark.com/charges-and-costs
     kind: portal
     queueable: false
-    verified: "2026-07-08"
-    notes: JavaScript page (probed — no static links); paste file links from a browser.
+    verified: "2026-11-05"
+    notes: >-
+      Re-verified 2026-11-05 (page loads, HTTP 200 unless noted): Wellmark's
+      "Charges and costs" page — its machine-readable files sit in a HealthSparq
+      portal (JavaScript; open in a browser). The old
+      wellmark.com/transparency-in-coverage page now returns 404.
 
   - name: Horizon BCBS New Jersey
-    url: https://www.horizonblue.com/transparency-in-coverage
-    kind: portal
-    queueable: false
-    verified: "2026-07-08"
-    notes: JavaScript page (probed — no static links); paste file links from a browser.
+    url: https://horizonblue.sapphiremrfhub.com/
+    kind: page
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Re-verified 2026-11-05: Horizon's Sapphire MRF hub (run by Sapphire on
+      behalf of Horizon; linked from nj.gov) — the app crawls it like the other
+      Sapphire hubs: 1,726 file links, all dated 2026-11; sampled files answer
+      HTTP 200. The old horizonblue.com/transparency-in-coverage page now
+      returns 404.
 
   - name: Premera Blue Cross (Washington / Alaska)
     url: https://www.premera.com/visitor/transparency-in-coverage
     kind: portal
     queueable: false
-    verified: "2026-07-08"
-    notes: JavaScript page (probed — no static links); paste file links from a browser.
+    verified: "2026-11-05"
+    notes: >-
+      Re-checked 2026-11-05: page loads (HTTP 200). JavaScript page (probed — no
+      static links); paste file links from a browser.
 
   - name: Regence (Cambia — OR / WA / UT / ID)
     url: https://www.regence.com/transparency-in-coverage/
     kind: page
     queueable: true
-    verified: "2026-07-10"
+    verified: "2026-11-05"
     notes: >-
-      With Playwright the app renders the page and lifts 8 monthly
-      per-licensee indexes (tic-mrf.regence.com/mrf/current/ — ASO and
-      non-ASO for OR/WA/UT/ID). Verified cascade: page -> 8 indexes ->
-      signed rate files on the bcbs.com CDN. First ingests (a 2-part file
-      hosted on the Idaho CDN that reports as Arkansas BCBS — more Blues
-      cross-hosting, attributed per-file as always): 366,680 + 239,547
-      rows.
+      Re-verified 2026-11-05: the headless browser lifted 8 links; sampled links
+      answer HTTP 200. Earlier: With Playwright the app renders the page and
+      lifts 8 monthly per-licensee indexes (tic-mrf.regence.com/mrf/current/ —
+      ASO and non-ASO for OR/WA/UT/ID). Verified cascade: page -> 8 indexes ->
+      signed rate files on the bcbs.com CDN. First ingests (a 2-part file hosted
+      on the Idaho CDN that reports as Arkansas BCBS — more Blues cross-hosting,
+      attributed per-file as always): 366,680 + 239,547 rows.
 
   - name: Kaiser Permanente (all regions)
     url: https://healthy.kaiserpermanente.org/southern-california/front-door/machine-readable
     kind: page
     queueable: true
-    verified: "2026-07-10"
+    verified: "2026-11-05"
     notes: >-
-      JavaScript page — with Playwright the app renders it and lifts the
-      regional index links (KPIC/KFHP/Self-Funded per state: CA/CO/GA/HI/
-      MD/NC/OR/SC/VA/WA…). Verified cascade: page -> indexes -> rate files.
-      First ingests are American Specialty Health books (ASH administers
-      Kaiser's PT/OT/chiro network — exactly the therapy rates): KFHP-HI
-      22,292 rows; KFHP-NC 267,104 rows. Allowed-amounts entries skipped.
+      Re-verified 2026-11-05: the headless browser lifted 1,238 file links;
+      sampled links answer HTTP 200. Earlier: JavaScript page — with Playwright
+      the app renders it and lifts the regional index links
+      (KPIC/KFHP/Self-Funded per state: CA/CO/GA/HI/ MD/NC/OR/SC/VA/WA…).
+      Verified cascade: page -> indexes -> rate files. First ingests are
+      American Specialty Health books (ASH administers Kaiser's PT/OT/chiro
+      network — exactly the therapy rates): KFHP-HI 22,292 rows; KFHP-NC 267,104
+      rows. Allowed-amounts entries skipped.
 
   - name: Oscar Health
     url: https://www.hioscar.com/transparency-in-coverage-files/oscar
     kind: page
     queueable: true
-    verified: "2026-07-10"
+    verified: "2026-11-05"
     notes: >-
-      With Playwright the app renders the page and lifts ~25 monthly S3
-      index links — Oscar keeps YEARS of history online, so expect the
-      queue to swell (5,603 files from one paste in testing; every row
-      carries its file_month, so history is safe but noisy). To bound it,
-      paste just the newest index:
+      Re-verified 2026-11-05: the headless browser lifted 53 file links; sampled
+      links answer HTTP 200. Earlier: With Playwright the app renders the page
+      and lifts ~25 monthly S3 index links — Oscar keeps YEARS of history
+      online, so expect the queue to swell (5,603 files from one paste in
+      testing; every row carries its file_month, so history is safe but noisy).
+      To bound it, paste just the newest index:
       https://hioscar-cms-tic-us-east-1.s3.amazonaws.com/oscar/{FIRST_OF_MONTH}_oscar_index.json
       Verified ingests: Davis Vision 0 rows (vision — correct skip-level),
       Optum/UBH behavioral book 460 therapy rows.
@@ -473,41 +540,43 @@ sources:
     url: https://www.harvardpilgrim.org/public/machine-readable-files
     kind: page
     queueable: true
-    verified: "2026-07-10"
+    verified: "2026-11-05"
     notes: >-
-      The plan list hides behind a "View Plan List" button — with Playwright
-      the app renders the page, clicks it, and lifts 128 employer-group
-      index links (Azure blob). Verified cascade: page -> click -> 128
-      indexes -> shared network files (deduped across employers). First
-      ingests: two Harvard Pilgrim network zips, 10,138,585 and 10,138,511
-      rows. Files are only published for the current month — re-queue
-      monthly.
+      Re-verified 2026-11-05: the headless browser lifted 124 file links;
+      sampled links answer HTTP 200. Earlier: The plan list hides behind a "View
+      Plan List" button — with Playwright the app renders the page, clicks it,
+      and lifts 128 employer-group index links (Azure blob). Verified cascade:
+      page -> click -> 128 indexes -> shared network files (deduped across
+      employers). First ingests: two Harvard Pilgrim network zips, 10,138,585
+      and 10,138,511 rows. Files are only published for the current month —
+      re-queue monthly.
 
   - name: Molina Healthcare (all states)
-    url: https://www.molinahealthcare.com/marketplace/wa/en-us/About/compinfo/PricingTransparency
-    kind: page
-    queueable: true
-    verified: "2026-07-10"
+    url: https://www.molinahealthcare.com/
+    kind: portal
+    queueable: false
+    verified: "2026-11-05"
     notes: >-
-      JavaScript page — with Playwright installed the app renders it
-      headlessly and lifts 19 state index links (CA/CT/FL/…/TX/WA — the
-      whole national footprint is on every state's page). Verified cascade:
-      page -> 19 indexes -> 3,431 files queued; first two California
-      in-network files ingested 404 rows each (small per-plan files).
-      Without Playwright the page reports "no links" with install
-      instructions.
+      NOT FOUND 2026-11-05: the page this entry used
+      (marketplace/wa/.../PricingTransparency, which lifted 19 state indexes in
+      July) now returns 404, and so does the same path for other states.
+      Molina's site refuses some automated requests, so its new location could
+      not be confirmed. On molinahealthcare.com, look for "Pricing Transparency"
+      under your state's Marketplace pages, then paste the index links it lists.
 
   - name: BCBS North Carolina
     url: https://www.bluecrossnc.com/policies-best-practices/machine-readable-files
     kind: page
     queueable: true
-    verified: "2026-07-10"
+    verified: "2026-11-05"
     notes: >-
-      The page embeds a signed non-ASO TOC link (mrfmftprod.bcbsnc.com) the
-      app lifts directly. Verified cascade: page -> TOC -> 10 in-network
-      files. Ingested: Preferred Provider Network (11.45 GB gz) 23,712,556
-      rows; BlueHPN-Atrium (~29.9 GB uncompressed) 4,669,816 rows. NC also
-      cross-hosts on other Blues' indexes (the SC index carries its book).
+      Re-verified 2026-11-05: the page still carries its signed index link;
+      sampled links answer HTTP 200. Earlier: The page embeds a signed non-ASO
+      TOC link (mrfmftprod.bcbsnc.com) the app lifts directly. Verified cascade:
+      page -> TOC -> 10 in-network files. Ingested: Preferred Provider Network
+      (11.45 GB gz) 23,712,556 rows; BlueHPN-Atrium (~29.9 GB uncompressed)
+      4,669,816 rows. NC also cross-hosts on other Blues' indexes (the SC index
+      carries its book).
 
   - name: BCBS South Carolina
     url: https://www.southcarolinablues.com/web/public/brands/universal/transparency-in-coverage/?branding=sc
@@ -515,131 +584,168 @@ sources:
     queueable: true
     verified: "2026-07-09"
     notes: >-
-      The universal-brand page embeds two CloudFront indexes
-      (bcbssc_index.json — 702 files, and instil_index.json). The CDN 403s
-      non-browser user agents; the app retries with a browser UA
-      automatically. Verified cascade: page -> 2 indexes -> rate files
-      (incl. signed bcbssc.mrf.bcbs.com links). First ingests: BCBSSC main
-      book 423,333 rows; INSTIL HEALTH 714,798; BCBS Puerto Rico
-      (cross-hosted) 97,011; BCBSSC AI-CB 833; BCBS North Carolina
-      (cross-hosted 310_32Q0, 11.45 GB gz / ~40 GB uncompressed, 46-min
-      two-pass ingest) 23,717,082. The index also carries 19-35 GB
-      compressed monsters (254_39x0 series) — the size and disk-space
-      guards refuse them gracefully until confirm_over_gb/disk allow.
+      Checked 2026-11-05: from this test machine the page refused automated
+      access (HTTP 403 even after the app's normal retry), so it could not be
+      re-verified — it worked in July. If the row fails for you, open the page
+      in a browser and paste its index links. Earlier: The universal-brand page
+      embeds two CloudFront indexes (bcbssc_index.json — 702 files, and
+      instil_index.json). The CDN 403s non-browser user agents; the app retries
+      with a browser UA automatically. Verified cascade: page -> 2 indexes ->
+      rate files (incl. signed bcbssc.mrf.bcbs.com links). First ingests: BCBSSC
+      main book 423,333 rows; INSTIL HEALTH 714,798; BCBS Puerto Rico
+      (cross-hosted) 97,011; BCBSSC AI-CB 833; BCBS North Carolina (cross-hosted
+      310_32Q0, 11.45 GB gz / ~40 GB uncompressed, 46-min two-pass ingest)
+      23,717,082. The index also carries 19-35 GB compressed monsters (254_39x0
+      series) — the size and disk-space guards refuse them gracefully until
+      confirm_over_gb/disk allow.
 
   - name: Priority Health (Michigan)
-    url: https://www.priorityhealth.com/machine-readable-files
-    kind: portal
-    queueable: false
-    verified: "2026-07-08"
-    notes: JavaScript page (probed — no static links); paste file links from a browser.
+    url: https://priorityhealthtransparencymrfs.s3.us-east-1.amazonaws.com/CompleteList.html
+    kind: page
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Re-verified 2026-11-05: Priority Health's complete file list (linked from
+      priorityhealth.com/landing/transparency) — 18 file links, dated 2026-11,
+      sampled files answer HTTP 200. The old
+      priorityhealth.com/machine-readable-files page now returns 404.
 
   - name: BCBS Alabama
     url: https://www.bcbsal.org/web/transparency-in-coverage
     kind: portal
     queueable: false
-    verified: "2026-07-08"
+    verified: "2026-11-05"
     notes: >-
-      JavaScript page (probed — no static links); paste file links from a
-      browser. Alabama's national files also appear inside other Blues'
-      indexes (the BCBS-MS TOC ingested one).
+      Re-checked 2026-11-05: page loads (HTTP 200). JavaScript page (probed — no
+      static links); paste file links from a browser. Alabama's national files
+      also appear inside other Blues' indexes (the BCBS-MS TOC ingested one).
 
   - name: BCBS Massachusetts
-    url: https://www.bluecrossma.org/about-us/transparency-coverage
+    url: https://transparency-in-coverage.bluecrossma.com/
     kind: portal
     queueable: false
-    verified: "2026-07-08"
-    notes: JavaScript page (probed — no static links); paste file links from a browser.
+    verified: "2026-11-05"
+    notes: >-
+      Re-verified 2026-11-05 (page loads, HTTP 200 unless noted): BCBS
+      Massachusetts' transparency site (files by EIN / HIOS id). UNVERIFIED:
+      from this test machine the site's security certificate did not validate,
+      so it was not opened (the app never skips certificate checks). Try it in
+      your browser. The old bluecrossma.org/about-us/transparency-coverage page
+      now returns 404.
 
   - name: BCBS Rhode Island
-    url: https://www.bcbsri.com/transparency-in-coverage
+    url: https://www.bcbsri.com/developers
     kind: portal
     queueable: false
-    verified: "2026-07-08"
-    notes: JavaScript page (probed — no static links); paste file links from a browser.
+    verified: "2026-11-05"
+    notes: >-
+      Re-verified 2026-11-05 (page loads, HTTP 200 unless noted): BCBSRI's
+      Developers page, section "Transparency in Coverage: Machine Readable
+      Files" (refreshed monthly); the file links load by script — open in a
+      browser. The old bcbsri.com/transparency-in-coverage page now returns 404.
 
   - name: BCBS Vermont
-    url: https://www.bluecrossvt.org/transparency-in-coverage
-    kind: portal
-    queueable: false
-    verified: "2026-07-08"
-    notes: JavaScript page (probed — no static links); paste file links from a browser.
+    url: https://www.bluecrossvt.org/documents/toc-json
+    kind: toc
+    queueable: true
+    verified: "2026-11-05"
+    notes: >-
+      Re-verified 2026-11-05: BCBSVT's own table of contents (stable, undated
+      address; linked from
+      bluecrossvt.org/our-plans/employers-and-groups/machine-readable-files):
+      reporting entity "BCBSVT", last updated 2026-10-01, 529 files (newest
+      dated 2026-11); 30 of 30 sampled files answer HTTP 200. The old
+      bluecrossvt.org/transparency-in-coverage page now returns 404.
 
   - name: BCBS Kansas
     url: https://www.bcbsks.com/transparency-in-coverage
     kind: portal
     queueable: false
-    verified: "2026-07-08"
-    notes: JavaScript page (probed — no static links); paste file links from a browser.
+    verified: "2026-11-05"
+    notes: >-
+      Re-checked 2026-11-05: page loads (HTTP 200). JavaScript page (probed — no
+      static links); paste file links from a browser.
 
   - name: Arkansas BCBS
-    url: https://www.arkansasbluecross.com/transparency-in-coverage
+    url: https://www.arkansasbluecross.com/members/tools-resources/rights/transparency-in-coverage
     kind: portal
     queueable: false
-    verified: "2026-07-08"
+    verified: "2026-11-05"
     notes: >-
-      JavaScript page (probed — no static links). Arkansas's national files
-      are widely cross-hosted by other Blues' indexes and were ingested via
-      the Wyoming/Nebraska/Western-NY trials.
+      Re-checked 2026-11-05: page loads at its new address (HTTP 200).
+      JavaScript page (probed — no static links). Arkansas's national files are
+      widely cross-hosted by other Blues' indexes and were ingested via the
+      Wyoming/Nebraska/Western-NY trials.
 
   - name: HMSA (BCBS Hawaii)
     url: https://hmsa.com/help-center/transparency-in-coverage-machine-readable-files/
     kind: portal
     queueable: false
-    verified: "2026-07-09"
+    verified: "2026-11-05"
     notes: >-
-      Old URL 404s; the help-center page links a private S3 bucket
-      (hmsa-cost-transparency-west2 — listing denied) with no static file
-      links. Paste file links from a browser.
+      Re-checked 2026-11-05: page loads (HTTP 200). Old URL 404s; the
+      help-center page links a private S3 bucket (hmsa-cost-transparency-west2 —
+      listing denied) with no static file links. Paste file links from a
+      browser.
 
   - name: Blue Shield of California
-    url: https://www.blueshieldca.com/en/home/get-to-know-blue-shield/machine-readable-files
+    url: https://www.blueshieldca.com/en/home/help-and-resources/machine-readable-files
     kind: portal
     queueable: false
-    verified: "2026-07-08"
+    verified: "2026-11-05"
     notes: >-
-      JavaScript page (probed — no static links). Note CA has TWO Blues:
-      Anthem Blue Cross CA is covered by the Anthem/Elevance national index.
+      Re-verified 2026-11-05 (page loads, HTTP 200 unless noted): Blue Shield of
+      CA's machine-readable-files page; the files are in a HealthSparq portal
+      (JavaScript; open in a browser). The old
+      /get-to-know-blue-shield/machine-readable-files page now returns 404.
 
   - name: Excellus BCBS (upstate New York)
     url: https://excellusbcbs.healthsparq.com/healthsparq/public/#/one/insurerCode=EXC_I&brandCode=EXC&productCode=MRF/machine-readable-transparency-in-coverage
     kind: portal
     queueable: false
-    verified: "2026-07-10"
+    verified: "2026-11-05"
     notes: >-
-      HealthSparq SPA — with Playwright the app renders it and follows its
-      latest_metadata.json to 117 employer-group TOCs automatically, BUT
-      every one lists only out-of-network allowed-amounts files (Excellus
-      publishes no negotiated-rate files at this endpoint), so there is
-      nothing to ingest. TOCs are marked skipped with that explanation.
-      The healthsparq render flow itself works and should generalize to
-      other HealthSparq-hosted Blues whose books do carry in-network files.
+      Re-checked 2026-11-05: page loads (HTTP 200). HealthSparq SPA — with
+      Playwright the app renders it and follows its latest_metadata.json to 117
+      employer-group TOCs automatically, BUT every one lists only out-of-network
+      allowed-amounts files (Excellus publishes no negotiated-rate files at this
+      endpoint), so there is nothing to ingest. TOCs are marked skipped with
+      that explanation. The healthsparq render flow itself works and should
+      generalize to other HealthSparq-hosted Blues whose books do carry
+      in-network files.
 
   - name: Capital Blue Cross (central Pennsylvania)
-    url: https://www.capbluecross.com/wps/portal/cap/company/legal/machine-readable-files
+    url: https://www.capbluecross.com/wps/portal/cap/about/machine-readable-file-transparency-in-coverage
     kind: portal
     queueable: false
-    verified: "2026-07-08"
-    notes: JavaScript page (probed — no static links); paste file links from a browser.
+    verified: "2026-11-05"
+    notes: >-
+      Re-verified 2026-11-05 (page loads, HTTP 200 unless noted): Capital Blue
+      Cross moved the page from /company/legal/ to /about/; files are in a
+      HealthSparq portal (JavaScript; open in a browser). The old address shows
+      a 404 page.
 
   - name: Independence Blue Cross (Philadelphia)
     url: https://www.ibx.com/resources/for-members/transparency-in-coverage
     kind: portal
     queueable: false
-    verified: "2026-07-08"
+    verified: "2026-11-05"
     notes: >-
-      JavaScript page (probed — no static links). IBX's national-alliance
-      book is queueable via the "Independence National Alliance" Highmark
-      index above.
+      JavaScript page (probed — no static links); open in a browser. Re-checked
+      2026-11-05: page loads. (An earlier note pointed at a Highmark-hosted
+      "Independence National Alliance" index — that turned out to be a copy of
+      Highmark PA's own index, not IBX's book, and was removed.)
 
   - name: BCBS Minnesota (own book)
     url: https://www.bluecrossmn.com/about-us/transparency-coverage-regulations
     kind: portal
     queueable: false
-    verified: "2026-07-08"
+    verified: "2026-11-05"
     notes: >-
-      JavaScript page (probed — no static links). The Minnesota partnership
-      book is queueable via the Highmark-hosted index above.
+      JavaScript page (probed — no static links); open in a browser. Re-checked
+      2026-11-05: page loads. (An earlier note pointed at a Highmark-hosted
+      "Minnesota" index — that turned out to be a copy of Highmark PA's own
+      index, not BCBS Minnesota's book, and was removed.)
 
   # ---- Browser-only portals from the mrfdatasolutions.com directory ----
   # Probed 2026-07-11: these build their file list with JavaScript behind a
@@ -652,113 +758,143 @@ sources:
     url: https://christushealthplan.healthsparq.com/healthsparq/public/#/one/insurerCode=CHRISTUS_I&brandCode=CHRISTUS/machine-readable-transparency-in-coverage
     kind: portal
     queueable: false
-    verified: "2026-07-11"
+    verified: "2026-11-05"
     notes: >-
-      HealthSparq portal (reCAPTCHA + plan-search gated — the headless renderer
-      loads it but the file list is behind the search/bot-check). To load: open
-      the link, accept the terms, use the machine-readable-files search, then
-      copy the Table-of-Contents / in-network file links and paste them here.
+      Re-checked 2026-11-05: page loads (HTTP 200). HealthSparq portal
+      (reCAPTCHA + plan-search gated — the headless renderer loads it but the
+      file list is behind the search/bot-check). To load: open the link, accept
+      the terms, use the machine-readable-files search, then copy the
+      Table-of-Contents / in-network file links and paste them here.
 
   - name: HAP — Health Alliance Plan (Michigan)
-    url: https://www.hap.org/transparency
+    url: https://www.hap.org/readable
     kind: portal
     queueable: false
-    verified: "2026-07-11"
+    verified: "2026-11-05"
     notes: >-
-      HealthSparq portal (hap.healthsparq.com — search/bot-check gated). Open
-      the page, go to the machine-readable-files list, and paste the file/TOC
-      links here.
+      Re-verified 2026-11-05 (page loads, HTTP 200 unless noted): HAP's MRF
+      page; files are in per-product HealthSparq portal searches (OPEN, GNYC,
+      HCPN, HPOS, AHLD, PIVO — JavaScript; open in a browser). The old
+      hap.org/transparency page now returns 404.
 
   - name: Health New England (Massachusetts)
-    url: https://healthnewengland.org/transparency-coverage
+    url: https://healthnewengland.healthsparq.com/healthsparq/public/#/one/city=&state=&postalCode=&country=&insurerCode=HNE_I&brandCode=HNE/machine-readable-transparency-in-coverage
     kind: portal
     queueable: false
-    verified: "2026-07-11"
+    verified: "2026-11-05"
     notes: >-
-      HealthSparq portal (healthnewengland.healthsparq.com). Open, reach the
-      machine-readable file list, copy the .json/.json.gz links, paste here.
+      Re-verified 2026-11-05 (page loads, HTTP 200 unless noted): HNE's "Machine
+      Readable Data" link (from healthnewengland.org/forms, Employers section) —
+      a HealthSparq portal (JavaScript; open in a browser). The old
+      healthnewengland.org/transparency-coverage page now returns 404.
 
   - name: SummaCare (Ohio)
-    url: https://www.summacare.com/
-    kind: portal
-    queueable: false
-    verified: "2026-07-11"
+    url: https://files.myplancentral.com/TIC/TOC/
+    kind: page
+    queueable: true
+    verified: "2026-11-05"
     notes: >-
-      HealthSparq portal (summacareweb.healthsparq.com). Navigate to the
-      machine-readable-files page and paste its file/TOC links here.
+      Re-verified 2026-11-05: the open folder of SummaCare's per-employer
+      indexes (linked as "View Machine-Readable Files" from
+      summacare.com/pricing-transparency): 11 index links, dated 2026-11,
+      sampled ones answer HTTP 200. Previously this entry pointed only at the
+      summacare.com homepage.
 
   - name: Univera Healthcare (western New York)
-    url: https://www.univerahealthcare.com/about/developer-information/transparency-coverage-mrf
+    url: https://news.univerahealthcare.com/developer-info/transparency-coverage-mrf
     kind: portal
     queueable: false
-    verified: "2026-07-11"
+    verified: "2026-11-05"
     notes: >-
-      HealthSparq portal (Excellus family). NOTE the related Excellus book is
-      allowed-amounts-only (no negotiated rates); check Univera's list has
-      in-network-rates files before pasting. Open, reach the list, paste links.
+      Re-verified 2026-11-05 (page loads, HTTP 200 unless noted): Univera's
+      Transparency in Coverage MRF page; the files are in a HealthSparq portal
+      (JavaScript; open in a browser). The old univerahealthcare.com/about/...
+      page now returns 404.
 
   - name: ConnectiCare (Connecticut)
-    url: https://www.connecticare.com/about-us/transparency-coverage-compliance
+    url: https://transparency.connecticare.com/
     kind: portal
     queueable: false
-    verified: "2026-07-11"
+    verified: "2026-11-05"
     notes: >-
-      Sapphire365 JS portal (transparency.connecticare.com — no reachable
-      static index on probe). Open in a browser, reach the machine-readable
-      file list, and paste the .json/TOC links here.
+      Re-verified 2026-11-05 (page loads, HTTP 200 unless noted): ConnectiCare's
+      transparency site (page loads; its file list is built by script — open in
+      a browser). connecticare.com refuses automated requests, so the file list
+      itself could not be checked from here. The old
+      connecticare.com/about-us/... page now returns 404.
 
   - name: CommunityCare (Oklahoma)
-    url: https://www.ccok.com/transparency-coverage-information
+    url: https://www.ccok.com/Price-Transparency/Machine-Readable/
     kind: portal
     queueable: false
-    verified: "2026-07-11"
+    verified: "2026-11-05"
     notes: >-
-      JavaScript portal (no static links on probe). Open the page, reach the
-      machine-readable file list, copy the file links and paste them here.
+      Re-verified 2026-11-05 (page loads, HTTP 200 unless noted):
+      CommunityCare's machine-readable-files page; every file download sits
+      behind a reCAPTCHA, so it can only be done by hand in a browser. The old
+      ccok.com/transparency-coverage-information page shows a 404 page.
 
   - name: Network Health (Wisconsin)
-    url: https://networkhealth.com/price-transparency
+    url: https://networkhealth.com/employer/transparency
     kind: portal
     queueable: false
-    verified: "2026-07-11"
+    verified: "2026-11-05"
     notes: >-
-      JavaScript portal (no static links on probe). Open, reach the file list,
-      paste the .json/.json.gz/TOC links here.
+      Checked 2026-11-05: the page (title "Employer Plan Transparency Policy")
+      links Network Health's files, but neither can be used automatically yet:
+      the table-of-contents file (nhpricetransparency_table_of_contents.json) is
+      NOT valid JSON (several top-level objects glued together), and the
+      in-network download (nhpricetransparency_in_network.zip, 88 MB) is a ZIP
+      of 350 smaller ZIPs, one per contract — the app opens a ZIP that holds
+      .json files, not ZIPs inside a ZIP. To use it: download that ZIP, unzip
+      it, then unzip the inner files and drop the .json files into data/inbox.
+      The old networkhealth.com/price-transparency page shows a 404 page.
 
   - name: Optima Health / Sentara (Virginia)
-    url: https://www.optimahealth.com/
-    kind: portal
-    queueable: false
-    verified: "2026-07-11"
+    url: https://mrfproddestinationdata.blob.core.windows.net/sentara-mrf-output/Sentara-Health-Plans-INN_index.html
+    kind: page
+    queueable: true
+    verified: "2026-11-05"
     notes: >-
-      JavaScript portal. Find the transparency-in-coverage / machine-readable
-      files page, then paste its file links here.
+      Re-verified 2026-11-05: Sentara Health Plans' stable in-network wrapper
+      link (from sentara.com/health-plans/vendor/machine-readable-data;
+      "Merative on behalf of Sentara") — it points at the current month's index
+      (2026-11-01_Sentara-INN_index.json, answering HTTP 200). Optima Health is
+      now Sentara Health Plans; the old optimahealth.com address only reached
+      the Sentara homepage.
 
   - name: UPMC Health Plan (Pennsylvania)
-    url: https://www.upmchealthplan.com/
-    kind: portal
-    queueable: false
-    verified: "2026-07-11"
+    url: https://content.upmchp.com/publicweb/table-of-contents/{FIRST_OF_MONTH}_UPMC-Health-Plan_index.json
+    kind: toc
+    queueable: true
+    verified: "2026-11-05"
     notes: >-
-      JavaScript (.aspx) portal — the /mrf page returns an empty shell on
-      probe. Open in a browser, reach the machine-readable file list, and paste
-      the file/TOC links here.
+      Re-verified 2026-11-05: UPMC's monthly-dated index (the date is filled in
+      when queued; the page upmchealthplan.com/transparency-in-coverage/mrf
+      builds the same name): reporting entity "UPMC Health Plan", updated
+      2026-10-22, 8 files dated 2026-11, sampled files answer HTTP 200.
+      Previously this entry pointed only at the homepage.
 
   - name: Viva Health (Alabama)
-    url: https://www.vivahealth.com/
+    url: https://www.vivahealth.com/mrf
     kind: portal
     queueable: false
-    verified: "2026-07-11"
+    verified: "2026-11-05"
     notes: >-
-      JavaScript portal. Locate the transparency / machine-readable-files page
-      and paste its file links here.
+      Re-verified 2026-11-05 (page loads, HTTP 200 unless noted): Viva Health's
+      MRF page. Its commercial in-network rates are ONE ZIP with no index
+      (https://www.vivahealth.com/files/mrf/viva-health-commercial-in-network-rates,
+      answering HTTP 200; the server does not say how big it is and the page
+      warns files can be "up to 1 terabyte") — paste that link only if you have
+      the disk space. Previously this entry pointed only at the homepage.
 
   - name: Capital Health Plan (Florida)
-    url: https://capitalhealth.com/transparency-in-coverage
+    url: https://capitalhealth.com/legal/transparency-in-coverage/
     kind: portal
     queueable: false
-    verified: "2026-07-11"
+    verified: "2026-11-05"
     notes: >-
+      Re-checked 2026-11-05: page loads at its new address (HTTP 200).
       JavaScript portal (no static MRF links on probe). Open, reach the file
       list, paste the .json/TOC links here.
 
@@ -768,15 +904,18 @@ sources:
     queueable: false
     verified: "2026-07-11"
     notes: >-
-      JavaScript portal (rate-limited on probe). Open in a browser, reach the
-      machine-readable file list, and paste its links here.
+      Checked 2026-11-05: the site answered with a bot-check (HTTP 429), so it
+      could not be re-verified. JavaScript portal (rate-limited on probe). Open
+      in a browser, reach the machine-readable file list, and paste its links
+      here.
 
   - name: EmblemHealth (New York)
     url: https://transparency.emblemhealth.com/
     kind: portal
     queueable: false
-    verified: "2026-07-11"
+    verified: "2026-11-05"
     notes: >-
-      Server-rendered DataTables portal (file rows load by AJAX — no inline
-      static links on probe). Open in a browser, let the table load, and copy
-      the file links from it into the paste box here.
+      Re-checked 2026-11-05: page loads (HTTP 200). Server-rendered DataTables
+      portal (file rows load by AJAX — no inline static links on probe). Open in
+      a browser, let the table load, and copy the file links from it into the
+      paste box here.
