@@ -185,6 +185,7 @@ class QaCounters:
     non_therapy_dropped: int = 0      # rows skipped at ingest (therapy_only_ingest)
     bad_ref_ids: int = 0              # provider_reference ids that are not numeric
     bundled_items: int = 0            # bundle/capitation items excluded (not per-code rates)
+    remote_ref_groups: int = 0        # skipped rate groups whose references are remote `location` links
     prices: int = 0                   # readable prices seen (denominator for price-level shares)
     rows: int = 0
 
@@ -275,6 +276,19 @@ def parse_provider_group(pg: dict, qa: QaCounters | None = None) -> PGroup:
 
 def parse_groups(provider_groups, qa: QaCounters | None = None) -> list[PGroup]:
     return [parse_provider_group(pg, qa) for pg in as_list(provider_groups) if isinstance(pg, dict)]
+
+
+def share_strings(groups: list[PGroup], pool: dict) -> list[PGroup]:
+    """The same groups with every TIN/NPI string replaced by ONE shared
+    object per distinct value (`pool` maps value -> canonical object).
+
+    A kept reference table repeats NPIs heavily — a real Aetna file: 7.4M
+    NPI slots, 2.3M distinct — and each repeat was its own ~59-byte string.
+    Sharing cut that table 606 MB -> 408 MB (measured), per worker process.
+    Values are unchanged; only identity is shared."""
+    get = pool.setdefault
+    return [(get(t, t) if t is not None else None, ty, tuple(get(n, n) for n in ns))
+            for t, ty, ns in groups]
 
 
 MULTI_CODE_RE = re.compile(r"[,\s;/]")
@@ -413,6 +427,8 @@ class InNetworkParser:
         self._refs_complete = False
         self._deferred: list[_DeferredGroup] = []
         self._ingested_at = dt.datetime.now(dt.timezone.utc).isoformat()
+        self._remote_rids: set[int] = set()
+        self._strings: dict = {}   # shared NPI/TIN strings for kept references
         # therapy_only_ingest: keep only PT/OT/SLP-provider rows. The set of
         # therapy NPIs comes from the NPPES fast-lookup cache; if it isn't built
         # yet, `_therapy_npis` is None and we keep everything (a logged warning),
@@ -592,11 +608,15 @@ class InNetworkParser:
             return
         groups = entry.get("provider_groups")
         if groups is None and entry.get("location"):
-            # file-driven app: remote reference locations are not fetched; the
-            # user must drop the companion file in.
+            # a reference whose provider list lives at a remote URL. MRF
+            # Explorer does NOT download these (and a dropped-in copy can't
+            # help: that file has no provider_group_id to match on). Groups
+            # citing it are skipped and counted as remote_ref_groups, so the
+            # Files tab can say WHY instead of "missing companion file".
             self.result.embedded_refs.setdefault(rid, [])
+            self._remote_rids.add(rid)
             return
-        self.result.embedded_refs[rid] = parse_groups(groups or [])
+        self.result.embedded_refs[rid] = share_strings(parse_groups(groups or []), self._strings)
 
     def _resolve_refs(self, ref_ids: list[int]) -> dict[int, list[PGroup] | None]:
         """Resolve a rate group's cited ref ids from the in-memory table
@@ -667,7 +687,7 @@ class InNetworkParser:
         prices: list[dict],
     ) -> None:
         all_groups = list(groups)
-        missing_ref = False
+        missing_ref = remote_ref = False
         if ref_ids:
             resolved = self._resolve_refs(ref_ids)
             # dict.fromkeys: some payers list the same reference id twice in
@@ -678,10 +698,13 @@ class InNetworkParser:
                 got = resolved.get(rid)
                 if not got:
                     missing_ref = True
+                    remote_ref = remote_ref or rid in self._remote_rids
                     continue
                 all_groups.extend(got)
         if missing_ref and not all_groups:
             self.result.ref_groups_skipped += 1
+            if remote_ref:
+                self.result.qa.remote_ref_groups += 1
             return
         if not all_groups:
             return
@@ -1091,6 +1114,7 @@ def parse_provider_reference_file(cfg: MrfxConfig, stream) -> tuple[str, str | N
     payer = "Unknown payer"
     last_updated = None
     refs: dict[int, list[PGroup]] = {}
+    strings: dict = {}
     builder = None
     for prefix, event, value in ijson.parse(stream, use_float=True):
         if builder is not None:
@@ -1099,7 +1123,7 @@ def parse_provider_reference_file(cfg: MrfxConfig, stream) -> tuple[str, str | N
                 entry = builder.value
                 rid = clean_ref_id(entry.get("provider_group_id"))
                 if rid is not None:
-                    refs[rid] = parse_groups(entry.get("provider_groups") or [])
+                    refs[rid] = share_strings(parse_groups(entry.get("provider_groups") or []), strings)
                 builder = None
             continue
         if event == "start_map" and prefix == "provider_references.item":

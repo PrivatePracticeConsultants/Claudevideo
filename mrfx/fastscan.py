@@ -259,6 +259,20 @@ def _prefetch(stream, chunk_size: int):
         t.join(timeout=30)
 
 
+_NOT_UTF8 = ("this file is not UTF-8 text (it looks UTF-16 or UTF-32 encoded); "
+             "machine-readable files must be UTF-8 — ask the payer for a UTF-8 copy")
+
+
+def _looks_utf16_or_32(head: bytes) -> bool:
+    """A UTF-16/32 byte-order mark, or NUL-dense text: ASCII-range JSON in
+    UTF-16 is ~50% NUL bytes, in UTF-32 ~75%. (A single stray NUL in a UTF-8
+    file is just invalid JSON — left to the normal error.)"""
+    if head[:2] in (b"\xff\xfe", b"\xfe\xff") or head[:4] == b"\x00\x00\xfe\xff":
+        return True
+    h = head[:4096]
+    return len(h) >= 2 and h.count(b"\x00") * 4 >= len(h)
+
+
 def iter_members(
     stream,
     want_item: Callable[[list, bool], bool | None],
@@ -325,6 +339,10 @@ def _scan(chunks, want_item, policy, on_header, counts, bulk, on_type_other):
         if not buf:
             break
         if not seen_top:
+            if _looks_utf16_or_32(buf):
+                # both parsers reject non-UTF-8 JSON; say so plainly up front
+                # instead of scanning gigabytes and calling it a corrupt download
+                raise ValueError(_NOT_UTF8)
             stripped = buf.lstrip(b"\xef\xbb\xbf \t\r\n")
             if not stripped:
                 continue

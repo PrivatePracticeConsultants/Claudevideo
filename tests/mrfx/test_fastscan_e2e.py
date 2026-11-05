@@ -9,6 +9,7 @@ import gzip
 import json
 import shutil
 import zipfile
+from pathlib import Path
 
 import pytest
 
@@ -462,3 +463,186 @@ def test_stall_log_label_handles_every_progress_shape():
     assert _chunk_label((-1, None)) == "0"
     assert _chunk_label((7, 42.5)) == "7"
     assert _chunk_label((0, 0.0)) == "0"
+
+
+@pytest.mark.parametrize("pooled", [False, True])
+def test_ingest_reports_remote_reference_skips(tmp_path, pooled):
+    refs = [{"provider_group_id": 1, "location": "https://payer.example/refs/1.json"},
+            {"provider_group_id": 2, "provider_groups": G}]
+    doc = {"provider_references": refs,
+           "in_network": [_item("97110", refs=[1]), _item("97140", refs=[2])]}
+    cfg = _make_cfg(tmp_path, True)
+    store = Store(cfg.store_dir)
+    p = cfg.inbox_dir / "remote_2026-01.json"
+    p.write_text(json.dumps(doc))
+    if pooled:
+        pool = ParsePoolManager(max_workers=1)
+        set_parse_pool(pool)
+    try:
+        res = ingest_file(cfg, store, p)
+    finally:
+        if pooled:
+            set_parse_pool(None)
+            pool.shutdown_now()
+    assert res["status"] == "done" and res["ref_groups_skipped"] == 1
+    assert res["remote_ref_groups"] == 1
+    with store.connect() as con:
+        qa = json.loads(con.execute("SELECT qa FROM files WHERE filename = ?", [p.name]).fetchone()[0])
+    assert qa["remote_ref_groups"] == 1
+
+
+def test_parent_removes_a_spool_its_worker_left_behind(tmp_path):
+    """A worker killed mid-spool (OOM, crash) can't delete its spool, and the
+    spool is named with the PARENT's live pid so the orphan sweep keeps it.
+    The parent must remove it whatever happened in the worker."""
+    import os
+
+    from mrfx.ingest import spool_path_for
+    from mrfx.store import file_key
+
+    cfg = _make_cfg(tmp_path, True)
+    store = Store(cfg.store_dir)
+    p = cfg.inbox_dir / "x_2026-01.json"
+    p.write_text(json.dumps({"in_network": [_item("97110", groups=G)]}))
+    tmp_out = store.rates_dir / f".{file_key(p.name)}.{os.getpid()}.parquet.tmp"
+    left = spool_path_for(tmp_out)
+    left.write_bytes(b"x" * 1000)           # what a killed worker leaves
+    pool = ParsePoolManager(max_workers=1)
+    set_parse_pool(pool)
+    try:
+        assert ingest_file(cfg, store, p)["status"] == "done"
+    finally:
+        set_parse_pool(None)
+        pool.shutdown_now()
+    assert not left.exists()
+
+
+def test_fastcheck_catches_a_bug_in_the_spool_replay(tmp_path, monkeypatch):
+    """fastcheck runs the production single-read path for big files; a bug
+    that loses an item between spool and replay must show as DIFFERENT."""
+    import mrfx.parser as parser_mod
+    from mrfx.fastcheck import compare_parsers
+
+    cfg = _make_cfg(tmp_path, True)
+    p = tmp_path / "big.json.gz"
+    p.write_bytes(gzip.compress(json.dumps(HOSTILE).encode()))
+    assert compare_parsers(cfg, p, two_pass=True)["identical"]
+
+    real = parser_mod.InNetworkParser._handle_item
+    seen = {"n": 0}
+
+    def drop_second(self, item):
+        if getattr(self, "_refs_complete", False):       # only during replay
+            seen["n"] += 1
+            if seen["n"] == 2:
+                return None
+        return real(self, item)
+    monkeypatch.setattr(parser_mod.InNetworkParser, "_handle_item", drop_second)
+    real_big = parser_mod.run_big_file_fast
+
+    def big_then_count(*a, **k):
+        seen["n"] = 0
+        return real_big(*a, **k)
+    monkeypatch.setattr(parser_mod, "run_big_file_fast", big_then_count)
+    rep = compare_parsers(cfg, p, two_pass=True)
+    assert not rep["identical"] and rep["rows_only_in_classic"] > 0, rep
+
+
+def test_kept_reference_strings_are_shared_not_copied(tmp_path):
+    """A kept reference table repeats each NPI across many groups (Aetna:
+    7.4M slots, 2.3M distinct). One object per distinct value cut it 33%;
+    values must be unchanged, and the store loader must share too (its dict
+    is pickled to every worker, and pickle preserves the sharing)."""
+    import pickle
+
+    from mrfx.parser import InNetworkParser, share_strings
+
+    raw = [("111111111", "ein", ("1234567890", "1234567891")),
+           ("111111111", "ein", ("1234567890",))]
+    copies = [(str(int(t)), ty, tuple(str(int(n)) for n in ns)) for t, ty, ns in raw]
+    assert copies[0][2][0] is not copies[1][2][0]
+    shared = share_strings(copies, {})
+    assert shared == raw
+    assert shared[0][2][0] is shared[1][2][0] and shared[0][0] is shared[1][0]
+
+    cfg = _make_cfg(tmp_path, True)
+    p = InNetworkParser(cfg, "x.json")
+    p._add_ref({"provider_group_id": 1, "provider_groups": [{"npi": [1234567890], "tin": {"type": "ein", "value": "111111111"}}]})
+    p._add_ref({"provider_group_id": 2, "provider_groups": [{"npi": [1234567890], "tin": {"type": "ein", "value": "111111111"}}]})
+    a, b = p.result.embedded_refs[1][0], p.result.embedded_refs[2][0]
+    assert a == b and a[2][0] is b[2][0] and a[0] is b[0]
+
+    store = Store(cfg.store_dir)
+    store.save_provider_refs("P", "refs.json", "2026-01-01",
+                             {i: [("111111111", "ein", ("1234567890", f"12345678{i:02d}"))] for i in range(50)})
+    loaded = store.load_provider_refs("P")
+    firsts = [g[0][2][0] for g in loaded.values()]
+    assert all(x is firsts[0] for x in firsts)
+    unshared = {k: [(str(int(t)), ty, tuple(str(int(n)) for n in ns)) for t, ty, ns in v] for k, v in loaded.items()}
+    assert unshared == loaded and len(pickle.dumps(loaded)) < len(pickle.dumps(unshared))
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="needs /proc (Linux)")
+def test_a_zombie_process_counts_as_dead_for_the_orphan_sweep():
+    """signal 0 succeeds on a zombie (exited, not reaped). Seen in a kill
+    trial: a killed app's temp files survived a restart because its pid was
+    a zombie. A zombie writes nothing — its temps are safe to sweep."""
+    import os
+    import subprocess
+    import time
+
+    from mrfx.store import _pid_alive
+
+    assert _pid_alive(os.getpid())
+    child = subprocess.Popen(["true"])
+    deadline = time.monotonic() + 10
+    state = b""
+    while time.monotonic() < deadline:
+        state = Path(f"/proc/{child.pid}/stat").read_bytes().rsplit(b")", 1)[1].split()[0]
+        if state == b"Z":
+            break
+        time.sleep(0.01)
+    assert state == b"Z"
+    try:
+        assert not _pid_alive(child.pid)
+    finally:
+        child.wait()
+    assert not _pid_alive(child.pid)
+
+
+def test_a_worker_whose_parent_died_removes_its_own_temp_files(tmp_path, monkeypatch):
+    """An orphaned worker exits (SystemExit from its liveness check); it used
+    to leave its .parquet.tmp / spool / progress files — named with the DEAD
+    parent's pid — for the next start's sweep. It now removes them on the way
+    out. Deterministic: the exit fires once rows AND a progress file exist
+    (the real check runs on the read-ahead thread, so its timing can't be
+    pinned in a test)."""
+    import time
+
+    import mrfx.parser as parser_mod
+    import mrfx.store as store_mod
+    from mrfx.ingest import _parse_worker, spool_path_for
+
+    monkeypatch.setattr(ingest_mod, "CHUNK_COMPRESSED_BYTES", 4096)
+    monkeypatch.setattr(parser_mod.InNetworkParser, "BATCH_ROWS", 5)
+    cfg = _make_cfg(tmp_path, True)
+    p = tmp_path / "f_2026-01.json.gz"
+    p.write_bytes(gzip.compress(json.dumps({"in_network": [_item("97110", groups=G)] * 400}).encode()))
+    tmp_out = tmp_path / ".k.4242.parquet.tmp"
+    progress = str(tmp_path / ".k.4242.progress")
+    real = store_mod.BackgroundParquetWriter.write_table
+    seen = {}
+
+    def write_then_parent_dies(self, table):
+        real(self, table)
+        deadline = time.monotonic() + 5
+        while not tmp_out.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        seen["tmp"], seen["progress"] = tmp_out.exists(), Path(progress).exists()
+        raise SystemExit("parent process died — abandoning orphaned parse")
+    monkeypatch.setattr(store_mod.BackgroundParquetWriter, "write_table", write_then_parent_dies)
+    with pytest.raises(SystemExit):
+        _parse_worker(cfg, str(p), p.name, {}, {}, 0, p.stat().st_size, str(tmp_out), progress)
+    assert seen == {"tmp": True, "progress": True}, seen          # not vacuous
+    leftovers = [x for x in (tmp_out, spool_path_for(tmp_out), Path(progress), Path(progress + ".tmp")) if x.exists()]
+    assert leftovers == []

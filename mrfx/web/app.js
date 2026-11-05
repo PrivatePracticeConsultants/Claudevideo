@@ -3779,8 +3779,14 @@ async function loadFiles() {
   stateEl.innerHTML = "";
   body.innerHTML = d.files.map((f) => {
     let warn = "";
-    if (f.ref_groups_skipped > 0)
-      warn = `<span class="warn-text">⚠ ${fmtInt(f.ref_groups_skipped)} rate groups skipped — missing provider reference file</span>`;
+    if (f.ref_groups_skipped > 0) {
+      const remote = (f.qa && f.qa.remote_ref_groups) || 0;
+      warn = remote >= f.ref_groups_skipped
+        ? `<span class="warn-text" title="The payer published these provider lists as separate web links (location URLs). MRF Explorer does not download those, and dropping the linked files in will not fill them.">⚠ ${fmtInt(f.ref_groups_skipped)} rate groups skipped — their provider lists are remote links MRF Explorer doesn't download</span>`
+        : remote > 0
+          ? `<span class="warn-text">⚠ ${fmtInt(f.ref_groups_skipped)} rate groups skipped — ${fmtInt(remote)} point at remote provider lists MRF Explorer doesn't download; the rest need the payer's provider reference file</span>`
+          : `<span class="warn-text">⚠ ${fmtInt(f.ref_groups_skipped)} rate groups skipped — missing provider reference file</span>`;
+    }
     let statusExtra = "";
     if (f.status === "pending_confirmation")
       statusExtra = ` <button class="btn" style="padding:2px 8px;font-size:12px" data-confirm="${esc(f.filename)}">ingest anyway</button>`;

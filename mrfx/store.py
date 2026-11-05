@@ -303,13 +303,20 @@ def _pid_alive(pid: int) -> bool:
             return True
     try:
         os.kill(pid, 0)
-        return True
     except ProcessLookupError:
         return False
     except PermissionError:
         return True  # alive, owned by another user
     except OSError:
         return True  # can't tell: keep the file
+    # signal 0 succeeds on a ZOMBIE (exited, not yet reaped by its parent) —
+    # it can't be writing anything, so its temp files are fair to sweep
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as f:
+            state = f.read().rsplit(b")", 1)[1].split()[0]
+        return state not in (b"Z", b"X")
+    except (OSError, IndexError):
+        return True
 
 
 # --- SSN masking (§7A.7b) ----------------------------------------------------
@@ -3070,12 +3077,16 @@ class Store:
             ).fetchall()
         out: dict[int, list] = {}
         seen: set = set()
+        pool: dict = {}   # one object per distinct NPI/TIN (see parser.share_strings);
+        get = pool.setdefault   # also shrinks the pickle shipped to each worker
         for rid, tin_value, tin_type, npis in rows:
             key = (rid, tin_value, tin_type, tuple(npis or ()))
             if key in seen:
                 continue
             seen.add(key)
-            out.setdefault(rid, []).append((tin_value, tin_type, tuple(npis or ())))
+            out.setdefault(rid, []).append(
+                (get(tin_value, tin_value) if tin_value is not None else None, tin_type,
+                 tuple(get(n, n) for n in (npis or ()))))
         return out
 
     def has_provider_refs(self, payer: str, last_updated_on: str | None = None) -> bool:

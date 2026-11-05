@@ -129,6 +129,13 @@ Two codebases live in this repo:
    Modifier and service-code arrays are sorted+deduped at parse time so
    publication order can never split the dedup grain. file_month = validated
    header month, else the filename's stamped date, else ingestion month.
+   LATE-HEADER CONTRACT (header keys AFTER in_network; real files put them
+   first): streaming paths (classic parse / parse_fast) stamp rows already
+   flushed before the header arrived with the PREFLIGHT seed (preflight reads
+   the first 1 MB) and later rows with the real header; the big-file single
+   read (run_big_file_fast) emits every row after the full read, so EVERY row
+   carries the real header. Identical whenever all rows fit one batch.
+   Pinned by test_fastscan.py::test_late_header_contract.
    An untyped 10-digit tin.value is an NPI-in-the-TIN-slot (flagged), not an
    EIN. A provider group with a TIN but NO NPIs (a TIN-only rate) emits one
    row at `npi = NULL` (QA-counted as tin_only_rows) so the rate reaches the

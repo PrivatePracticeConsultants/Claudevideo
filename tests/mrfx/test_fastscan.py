@@ -996,3 +996,81 @@ def test_gzip_bytes_under_a_json_name_are_sized_from_the_trailer(tmp_path):
     plain = tmp_path / "y.json"
     plain.write_bytes(body)
     assert _estimate_uncompressed(plain, len(body)) == len(body)
+
+
+def test_remote_location_references_are_counted_identically(cfg, tmp_path, monkeypatch):
+    """A reference entry carrying only a `location` URL is not downloaded.
+    The groups that depend on it are skipped AND counted as remote, the same
+    on every path, so the Files tab can say why (not "missing companion")."""
+    refs = [{"provider_group_id": 1, "location": "https://payer.example/refs/1.json"},
+            {"provider_group_id": 2, "provider_groups": G},
+            {"provider_group_id": 3, "location": "https://payer.example/refs/3.json"}]
+    items = [_item("97110", refs=[1]),          # remote only        -> skipped, remote
+             _item("97140", refs=[1, 2]),       # remote + resolvable -> emitted
+             _item("97112", refs=[3, 99]),      # remote + missing   -> skipped, remote
+             _item("97530", refs=[99])]         # missing only       -> skipped, not remote
+    for doc in ({"provider_references": refs, "in_network": items},
+                {"in_network": items, "provider_references": refs}):
+        data = json.dumps(doc).encode()
+        _assert_same(cfg, data, monkeypatch)
+        keep, _ = skim_needed_ref_ids(cfg, io.BytesIO(data))
+        _assert_same(cfg, data, monkeypatch, keep=keep)
+        want, _ = _classic_two_pass(cfg, data)
+        got, _, _ = _big_fast(cfg, data, tmp_path)
+        assert got.qa.to_dict() == want.qa.to_dict()
+        assert want.ref_groups_skipped == 3 and want.qa.remote_ref_groups == 2
+        assert got.ref_groups_skipped == 3 and got.qa.remote_ref_groups == 2
+
+
+@pytest.mark.parametrize("enc", ["utf-16-le", "utf-16-be", "utf-32-le", "utf-32-be", "utf-16", "utf-32"])
+def test_utf16_and_utf32_files_fail_fast_with_a_plain_message(cfg, enc):
+    """Both parsers reject non-UTF-8 JSON. The fast path used to scan the
+    WHOLE file and then blame a "corrupted or doubled download" (no BOM), or
+    decline so the classic parser re-read it (BOM). Fail at once, plainly."""
+    data = json.dumps({"in_network": [_item("97110", groups=G)]}).encode(enc)
+    with pytest.raises(Exception):
+        InNetworkParser(cfg, "t.json").parse(io.BytesIO(data))
+
+    class Counting(io.BytesIO):
+        n = 0
+
+        def read(self, k=-1):
+            b = super().read(k)
+            Counting.n += len(b)
+            return b
+    with pytest.raises(ValueError, match="not UTF-8"):
+        InNetworkParser(cfg, "t.json").parse_fast(Counting(data))
+
+
+def test_a_stray_nul_is_not_blamed_on_utf16(cfg):
+    raw = json.dumps({"in_network": [_item("97110", groups=G, name="a\u0000b")]}).encode()
+    raw = raw.replace(b"\\u0000", b"\x00")
+    with pytest.raises(Exception) as e:
+        InNetworkParser(cfg, "t.json").parse_fast(io.BytesIO(raw))
+    assert "UTF-8" not in str(e.value)
+
+
+def test_late_header_contract(cfg, tmp_path, monkeypatch):
+    """CONTRACT (AI_HANDOFF Step 3): when the header comes AFTER in_network,
+    - streaming paths (classic parse, parse_fast) stamp rows already FLUSHED
+      before the header arrived with the preflight seed, and later rows with
+      the real header (there is no going back to rewrite a flushed batch);
+    - the big-file single read emits every row after the full read, so EVERY
+      row carries the real header.
+    Both stamp the real header on every row whenever all rows fit one batch."""
+    monkeypatch.setattr(InNetworkParser, "BATCH_ROWS", 1)
+    doc = {"in_network": [_item("97110", groups=G), _item("97140", groups=G)],
+           "reporting_entity_name": "Late Payer", "last_updated_on": "2026-03-01"}
+    data = json.dumps(doc).encode()
+    seed = {"payer": "Seeded", "schema_version": None, "last_updated_on": None}
+    for streaming in ("parse", "parse_fast"):
+        rows = _Rows()
+        p = InNetworkParser(cfg, "x.json", sink=rows, header_defaults=seed)
+        getattr(p, streaming)(io.BytesIO(data))
+        assert {r["payer"] for r in rows} == {"Seeded"}, streaming   # all flushed early
+    from mrfx.parser import run_big_file_fast
+    rows = _Rows()
+    p = InNetworkParser(cfg, "x.json", sink=rows, header_defaults=seed)
+    run_big_file_fast(cfg, p, _CountingOpen(data), tmp_path / ".x.1.spool.tmp")
+    assert {r["payer"] for r in rows} == {"Late Payer"}
+    assert {r["file_month"] for r in rows} == {"2026-03"}

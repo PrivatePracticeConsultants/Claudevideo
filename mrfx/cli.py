@@ -530,7 +530,13 @@ def cmd_ingest(cfg: MrfxConfig, args) -> int:
         if r.get("rows") is not None:
             line += f" ({r['rows']} rows"
             if r.get("ref_groups_skipped"):
-                line += f", {r['ref_groups_skipped']} rate groups skipped — missing provider reference file"
+                remote = r.get("remote_ref_groups") or 0
+                why = ("their provider lists are remote links MRF Explorer doesn't download"
+                       if remote >= r["ref_groups_skipped"] else
+                       f"{remote} point at remote provider lists MRF Explorer doesn't download; "
+                       "the rest need the payer's provider reference file"
+                       if remote else "missing provider reference file")
+                line += f", {r['ref_groups_skipped']} rate groups skipped — {why}"
             line += ")"
         if r.get("error"):
             line += f" — {r['error']}"

@@ -497,6 +497,23 @@ def _parse_worker(cfg: MrfxConfig, path_str: str, name: str, header_defaults: di
                 state["pass"] = 1
             _, result = run_in_network_parse(
                 cfg, lambda: make_parser(keep_ref_ids), lambda: open_stream(path, progress_cb=report))
+    except SystemExit:
+        # the parent is gone (report_chunk noticed): nobody will adopt these
+        # files, and they carry the dead parent's pid — they'd sit (possibly
+        # GBs) until the next start's sweep. Remove our own temps now.
+        if writer is not None:
+            try:
+                writer.close()
+            except BaseException:  # noqa: BLE001 — leaving anyway
+                pass
+            writer = None
+        for leftover in (Path(tmp_out), spool_path_for(tmp_out), Path(progress_path),
+                         Path(progress_path + ".tmp")):
+            try:
+                leftover.unlink(missing_ok=True)
+            except OSError:
+                pass  # held open (AV/indexer) — the next start's sweep gets it
+        raise
     finally:
         if writer is not None:
             writer.close()
@@ -666,6 +683,14 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
     finally:
         Path(progress_path).unlink(missing_ok=True)
         Path(progress_path + ".tmp").unlink(missing_ok=True)
+        # the worker deletes its own spool, but a worker that DIES (OOM kill,
+        # crash, force_heal) can't — and the spool carries THIS (live)
+        # process's pid, so the orphan sweep would keep it until restart.
+        # It can be GBs; the parent always removes it.
+        try:
+            spool_path_for(tmp_out).unlink(missing_ok=True)
+        except OSError:
+            pass  # held open by AV/indexer — swept at next start
 
     store.update_progress(name, 100.0, chunks_done=payload["chunks_total"],
                           chunks_total=payload["chunks_total"])
@@ -705,7 +730,8 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
         log.warning("%s: %d rate groups skipped — missing provider reference file",
                     name, payload["ref_groups_skipped"])
     return {"status": "done", "rows": payload["rows"],
-            "ref_groups_skipped": payload["ref_groups_skipped"]}
+            "ref_groups_skipped": payload["ref_groups_skipped"],
+            "remote_ref_groups": (payload.get("qa") or {}).get("remote_ref_groups", 0)}
 
 
 # One ingest per filename at a time, process-wide. Guards the shared
@@ -1017,6 +1043,7 @@ def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight
             "status": "done",
             "rows": result.qa.rows,
             "ref_groups_skipped": result.ref_groups_skipped,
+            "remote_ref_groups": result.qa.remote_ref_groups,
         }
 
     except Exception as e:  # noqa: BLE001 — fault isolation is the contract here
