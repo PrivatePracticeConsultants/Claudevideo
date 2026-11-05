@@ -390,6 +390,37 @@ def get_parse_pool():
     return _PARSE_POOL
 
 
+class ParseStopped(Exception):
+    """The user pressed "stop" on a file mid-parse. Not a failure: the row
+    says so in plain words and the download is kept for a retry."""
+
+    def __init__(self, msg: str = "stopped by you"):
+        super().__init__(msg)
+
+
+# files-table / url-queue wording for a stopped parse
+STOPPED_MSG = ("stopped by you before it finished — nothing from this run was "
+               "saved (an earlier version of the file, if any, is unchanged)")
+
+
+def stop_sentinel_for(progress_path: str) -> Path:
+    """The file the parent creates to tell a parse WORKER to stop (workers
+    have no access to the store's in-memory flags)."""
+    return Path(progress_path + ".stop")
+
+
+def _stop_aware(store: Store, name: str, inner=None):
+    """A read-progress callback that also honors a stop request for `name`
+    (in-process parse): open_stream calls it on every ~1 MB read, so a stop
+    lands within one read wherever the parse is."""
+    def cb(n):
+        if store.is_parse_stopped(name):
+            raise ParseStopped()
+        if inner is not None:
+            inner(n)
+    return cb
+
+
 def _cleanup_unlink(p) -> None:
     """Best-effort temp-file delete for cleanup paths: retries a transient
     Windows lock, and never raises (a leftover is swept at the next start)."""
@@ -431,7 +462,13 @@ def _parse_worker(cfg: MrfxConfig, path_str: str, name: str, header_defaults: di
     def report_percent(pct: float) -> None:
         report_chunk(int(chunks_total * min(100.0, pct) / 100.0), pct)
 
+    stop_flag = stop_sentinel_for(progress_path)
+
     def report_chunk(chunk: int, pct: float | None = None) -> None:
+        # the user pressed "stop" (the parent created the sentinel): checked
+        # on EVERY report, ahead of the throttle — one stat per ~1 MB read
+        if stop_flag.exists():
+            raise ParseStopped()
         if pct is None:
             pct = min(100.0, 100.0 * chunk / chunks_total)
         # a chunk is 64 MB compressed — a 700 MB file has ~22 of them, so a
@@ -587,10 +624,22 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
         kill_ref_mb = -1.0   # output size when the freeze began (for the kill test)
         kill_ref_at = time.monotonic()
         stacks_dumped = False  # one auto-dump per stall episode, not per warn
+
+        def _relay_stop() -> None:
+            # the worker can't see the store's flags: hand a "stop" over as a
+            # sentinel file it checks on its next read
+            if store.is_parse_stopped(name):
+                try:
+                    stop_sentinel_for(progress_path).touch()
+                except OSError:
+                    pass
+
+        _relay_stop()   # a stop pressed before dispatch reaches the first read
         while True:
             try:
                 return fut.result(timeout=2.0)
             except concurrent.futures.TimeoutError:
+                _relay_stop()
                 try:
                     prog = json.loads(Path(progress_path).read_text())
                 except (OSError, ValueError):
@@ -698,6 +747,7 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
         # next start.
         _cleanup_unlink(progress_path)
         _cleanup_unlink(progress_path + ".tmp")
+        _cleanup_unlink(stop_sentinel_for(progress_path))
         # the worker deletes its own spool, but a worker that DIES (OOM kill,
         # crash, force_heal) can't — and the spool carries THIS (live)
         # process's pid, so the orphan sweep would keep it until restart.
@@ -985,7 +1035,7 @@ def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight
                             cfg,
                             InNetworkParser(cfg, source_file=name, external_refs=external_refs,
                                             sink=writer.write_batch, header_defaults=header_defaults),
-                            lambda: open_stream(path, progress_cb=srp.feed),
+                            lambda: open_stream(path, progress_cb=_stop_aware(store, name, srp.feed)),
                             spool_path_for(writer.tmp), progress=srp)
                 except FastScanUnsupported as e:
                     log.info("%s: single read declined (%s) — two-pass", name, e)
@@ -993,7 +1043,8 @@ def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight
                     progress.set_pass(0)
             if result is None:
                 keep_ref_ids, target_items = run_skim(
-                    cfg, lambda: open_stream(path, progress_cb=progress.update))
+                    cfg, lambda: open_stream(
+                        path, progress_cb=_stop_aware(store, name, progress.update)))
                 log.info("%s: pass 1 done — %d target-code items, %d target-cited references",
                          name, target_items, len(keep_ref_ids))
             if target_items == 0:
@@ -1027,7 +1078,8 @@ def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight
                         sink=writer.write_batch, header_defaults=header_defaults,
                         keep_ref_ids=keep_ref_ids,
                     ),
-                    lambda: open_stream(path, progress_cb=progress.update if progress else None),
+                    lambda: open_stream(path, progress_cb=_stop_aware(
+                        store, name, progress.update if progress else None)),
                 )
         if progress is not None:
             progress.finish()
@@ -1058,6 +1110,18 @@ def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight
             "remote_ref_groups": result.qa.remote_ref_groups,
         }
 
+    except ParseStopped:
+        store.clear_parse_stop(name)
+        in_inbox = cfg.inbox_dir in path.parents
+        msg = STOPPED_MSG + (" — the file was moved to data/failed; drop it into the "
+                             "inbox again to process it" if in_inbox else
+                             " — the download is kept; press retry to process it")
+        log.info("%s: %s", name, msg)
+        store.upsert_file(name, status="stopped", error=msg, finished_at=_now())
+        if in_inbox:
+            # left in the inbox, the watcher would simply start it again
+            _finish_file(cfg, path, ok=False)
+        return {"status": "stopped", "error": msg}
     except Exception as e:  # noqa: BLE001 — fault isolation is the contract here
         log.exception("ingest failed for %s", name)
         store.upsert_file(name, status="failed", error=f"{type(e).__name__}: {e}", finished_at=_now())

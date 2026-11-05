@@ -26,7 +26,7 @@ a fresh session on this repo.
 >   `finally` could raise on an AV lock — fixed + test). HOW_TO_RUN.md Part 4 is
 >   the user's first-run checklist.
 > - P3: CLI NPPES progress + Ctrl-C (done), fair retry scheduling (done),
->   expired-link message names its index (done), cancel in-flight parse (open).
+>   expired-link message names its index (done), cancel in-flight parse (done in a follow-up).
 > - P4: AI_HANDOFF Step 8 reconciled; `pytest -m quick` exists; fastscan/parser
 >   simplification NOT attempted (would need before/after fastcheck runs).
 

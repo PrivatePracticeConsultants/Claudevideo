@@ -789,6 +789,11 @@ class Store:
         # sees it and stops.
         self._canceled_downloads: set[int] = set()
         self._cancel_lock = threading.Lock()
+        # filenames the user asked to STOP mid-parse (the Files tab's "stop"):
+        # the in-process parse checks it on every read; for a worker process
+        # the parent's wait loop turns it into a sentinel file the worker
+        # polls. Cleared once the parse has stopped.
+        self._stopped_parses: set[str] = set()
         # Rollup rebuilds serialize against EACH OTHER here — NOT against the
         # write_lock. Holding write_lock for a rebuild froze the whole
         # pipeline: claiming a queue row (downloaders AND parsers) needs
@@ -2117,6 +2122,28 @@ class Store:
         retry of the SAME row isn't instantly canceled again."""
         with self._cancel_lock:
             self._canceled_downloads.discard(url_id)
+
+    def request_parse_stop(self, filename: str) -> bool:
+        """Ask the in-flight parse of `filename` to stop. False when the file
+        isn't being processed right now (nothing to stop)."""
+        with self.connect() as con:
+            row = con.execute("SELECT status FROM files WHERE filename = ?",
+                              [filename]).fetchone()
+        if not row or row[0] != "processing":
+            return False
+        with self._cancel_lock:
+            self._stopped_parses.add(filename)
+        return True
+
+    def is_parse_stopped(self, filename: str) -> bool:
+        with self._cancel_lock:
+            return filename in self._stopped_parses
+
+    def clear_parse_stop(self, filename: str) -> None:
+        """Called once the stop has been honored, so a retry of the same file
+        isn't stopped again at its first read."""
+        with self._cancel_lock:
+            self._stopped_parses.discard(filename)
 
     def requeue_oversize_within(self, limit_bytes: int) -> int:
         """Re-queue 'oversize' rows whose known size fits the CURRENT

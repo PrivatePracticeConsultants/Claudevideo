@@ -2322,3 +2322,40 @@ def test_expired_signed_child_names_the_index_to_repaste(cfg, store, monkeypatch
         assert row["status"] == "failed"
         assert f"came from the index {toc}" in row["error"], row["error"]
         store.update_url(rec["id"], status="queued")   # second path, same row
+
+
+def test_stopped_link_keeps_its_download_and_retry_reuses_it(cfg, store, server, monkeypatch):
+    """Stop on a link mid-processing: the row is 'skipped' (not failed) with a
+    plain message, the downloaded bytes stay, and retry finishes it WITHOUT
+    downloading again (the signed link may have expired by then)."""
+    import mrfx.fetch as fetch
+
+    downloads = []
+    real_download = fetch.download
+    monkeypatch.setattr(fetch, "download",
+                        lambda *a, **k: downloads.append(1) or real_download(*a, **k))
+    real_upsert = store.upsert_file
+    pressed = []
+
+    def upsert(name, **fields):
+        real_upsert(name, **fields)
+        if fields.get("status") == "processing" and not pressed:
+            pressed.append(store.request_parse_stop(name))
+
+    monkeypatch.setattr(store, "upsert_file", upsert)
+    add_urls(store, [f"{server}/rates.json.gz"])
+    drain(cfg, store)
+    (rec,) = store.list_urls()
+    assert pressed == [True]
+    assert rec["status"] == "skipped" and "stopped by you" in rec["error"]
+    assert "download is kept" in rec["error"]
+    kept = cfg.downloads_dir / fetch.filename_for(rec["url"])
+    assert kept.exists()
+    with store.connect() as con:
+        assert con.execute("SELECT count(*) FROM rates").fetchone()[0] == 0
+
+    assert store.set_url_status_by_id(rec["id"], "queued")      # the retry button
+    drain(cfg, store)
+    (rec,) = store.list_urls()
+    assert rec["status"] == "done" and rec["rows_emitted"] > 0
+    assert len(downloads) == 1                                  # never re-downloaded

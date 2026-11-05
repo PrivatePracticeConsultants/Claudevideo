@@ -146,6 +146,11 @@ exactly where it stopped, including half-finished downloads.
    `GETTING_STARTED.md` under "what to expect"); you can keep using the
    dashboard while they run.
 
+**Pasted the wrong link?** While a file is being processed its row has a
+**stop** button. Nothing from the stopped run is saved. A file from a link
+keeps its download, so **retry** later processes it without downloading
+again; a file you dropped in the inbox is moved to `data/failed`.
+
 **Leave the program running** while a long list works through. It's fine to
 leave it overnight.
 

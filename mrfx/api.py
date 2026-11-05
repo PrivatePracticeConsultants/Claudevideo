@@ -1414,6 +1414,22 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                                      "(this row may have just started or already finished)")
         return {"status": "skipped"}
 
+    @app.post("/api/urls/{url_id}/stop")
+    def urls_stop(url_id: int):
+        """Stop a link whose file is being PROCESSED (the download is kept;
+        retry re-processes it without downloading again)."""
+        from .fetch import filename_for
+        url = store.url_of(url_id)
+        if not url or not store.request_parse_stop(filename_for(url)):
+            raise HTTPException(409, "this link's file isn't being processed right now")
+        return {"status": "stopping"}
+
+    @app.post("/api/files/{filename}/stop")
+    def files_stop(filename: str):
+        if not store.request_parse_stop(filename):
+            raise HTTPException(409, "this file isn't being processed right now")
+        return {"status": "stopping"}
+
     @app.post("/api/urls/{url_id}/force-size")
     def urls_force_size(url_id: int):
         # "download anyway" past confirm_over_gb, for THIS file only. The

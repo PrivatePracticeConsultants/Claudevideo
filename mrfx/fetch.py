@@ -1945,6 +1945,12 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
                 dup.unlink(missing_ok=True)
                 _meta_path(dup).unlink(missing_ok=True)
         return True
+    elif status == "stopped":
+        # the user pressed "stop": not a failure. The download (and its
+        # sidecar) stay in place, so retry re-parses it without downloading
+        # again; twins that deferred to this row keep waiting on it.
+        store.update_url(url_id, status="skipped", kind=pf.file_type,
+                         error=result.get("error") or "stopped by you")
     elif status == "pending_confirmation":
         store.update_url(url_id, status="oversize", kind=pf.file_type,
                          error="file exceeds the confirm_over_gb safety limit — press "

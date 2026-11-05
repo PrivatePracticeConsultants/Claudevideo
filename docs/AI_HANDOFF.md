@@ -606,12 +606,19 @@ not yet built — pick these up before adding features):
   does not update a child row's stored URL. A wall of 403s after a multi-hour
   pause on mrf.bcbs.com/Anthem still requires re-pasting links — since round 2
   each such row's error names the exact index URL to paste again.
-- No cancel for an in-flight PARSE ("Stop downloads" covers downloads); a
-  wrong 22 GB paste must finish parsing or the server be restarted. Round 2
-  looked at it: the pooled path could use the worker's progress callback (a
-  sentinel file it already polls near), but with ONE worker (the default on
-  8 GB machines since the RAM-aware auto count) the parse runs in-process,
-  which needs its own hook plus a Files-tab button — left for a focused change.
+- Cancel an in-flight PARSE: DONE (round 2 follow-up). Files-tab "stop" on a
+  processing file / an ingesting link -> `Store.request_parse_stop(filename)`
+  (in-memory flag). In-process parses check it on every ~1 MB read
+  (`ingest._stop_aware` wraps open_stream's progress callback); a worker
+  process can't see the flag, so the parent's wait loop relays it as a
+  `<progress>.stop` sentinel the worker checks in `report_chunk` ahead of the
+  throttle. `ParseStopped` -> files row `stopped` (plain message; an inbox file
+  moves to data/failed so the watcher doesn't restart it), url row `skipped`
+  with the download + sidecar KEPT so retry re-parses without re-downloading.
+  An earlier version of a re-ingested file is untouched. Live trial, real
+  277 MB file: in-process stop 2.7 s, worker stop 0.4 s, retry finished
+  5,352,298 rows in 17 s with no new download. Tests: tests/mrfx/test_stop_parse.py
+  (+ the link flow in test_fetch.py), all three hooks mutation-checked.
 - Download slot starvation is bounded by a STALL DEADLINE, not just retries.
   `download_retries` resets on ANY byte progress, so a flaky CDN that
   dribbles/truncates bytes could once hold one of the few (2-4) downloader slots

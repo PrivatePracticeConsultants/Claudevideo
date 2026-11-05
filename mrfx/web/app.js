@@ -3792,6 +3792,8 @@ async function loadFiles() {
     let statusExtra = "";
     if (f.status === "pending_confirmation")
       statusExtra = ` <button class="btn" style="padding:2px 8px;font-size:12px" data-confirm="${esc(f.filename)}">ingest anyway</button>`;
+    if (f.status === "processing")
+      statusExtra = ` <button class="btn" style="padding:2px 8px;font-size:12px" title="stop processing this file now — nothing from this run is saved; a downloaded link can be retried without downloading again" data-stop-file="${esc(f.filename)}">stop</button>`;
     const inflight = (f.status === "processing" || f.status === "queued") && f.chunks_total > 0;
     const progressBar = inflight
       ? `<div class="progress" title="working through the file in chunks">
@@ -3818,6 +3820,17 @@ async function loadFiles() {
         const r = await fetch(`/api/files/${encodeURIComponent(b.dataset.confirm)}/confirm`, { method: "POST" });
         if (!r.ok) alert((await r.json().catch(() => ({}))).detail || `confirm failed (HTTP ${r.status})`);
       } catch (e) { alert("confirm failed: " + e.message); b.disabled = false; return; }
+      loadFiles();
+    }));
+  $$("[data-stop-file]", body).forEach((b) =>
+    b.addEventListener("click", async () => {
+      if (!confirm(`Stop processing ${b.dataset.stopFile}?\n\nNothing from this run is saved. If it came from a link, its download is kept and "retry" processes it again without re-downloading.`)) return;
+      b.disabled = true;
+      b.textContent = "stopping…";
+      try {
+        const r = await fetch(`/api/files/${encodeURIComponent(b.dataset.stopFile)}/stop`, { method: "POST" });
+        if (!r.ok) alert((await r.json().catch(() => ({}))).detail || `stop failed (HTTP ${r.status})`);
+      } catch (e) { alert("stop failed: " + e.message); }
       loadFiles();
     }));
   $$("[data-forget]", body).forEach((b) =>
@@ -3906,7 +3919,8 @@ async function loadUrlQueue() {
           + ` waiting on the payer's server, will reconnect and resume</div>`;
       }
     } else if (u.status === "ingesting") {
-      statusCell += ` <span class="muted">(see file row below for chunk progress)</span>`;
+      statusCell += ` <span class="muted">(see file row below for chunk progress)</span>`
+        + ` <button class="btn" style="padding:1px 8px;font-size:11.5px" title="stop processing this file — the download is kept; retry processes it again without re-downloading" data-url-stop="${u.id}">stop</button>`;
     }
     if (u.status === "failed" || u.status === "skipped" || u.status === "oversize") {
       statusCell += ` <button class="btn" style="padding:1px 8px;font-size:11.5px" data-url-retry="${u.id}">retry</button>`;
@@ -3951,6 +3965,8 @@ async function loadUrlQueue() {
   };
   $$("[data-url-retry]", body).forEach((b) =>
     b.addEventListener("click", urlAction(b, `/api/urls/${b.dataset.urlRetry}/retry`, "retry")));
+  $$("[data-url-stop]", body).forEach((b) =>
+    b.addEventListener("click", urlAction(b, `/api/urls/${b.dataset.urlStop}/stop`, "stop")));
   $$("[data-url-cancel]", body).forEach((b) =>
     b.addEventListener("click", urlAction(b, `/api/urls/${b.dataset.urlCancel}/cancel`, "skip")));
   $$("[data-url-force]", body).forEach((b) =>
