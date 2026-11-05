@@ -292,3 +292,23 @@ def test_python_and_sql_masking_agree_on_real_ssn_shapes():
                                  [s]).fetchone()[0] != s
         if looks_like_ssn(s):
             assert sql_masked, s
+
+
+def test_code_comparison_export_matches_its_screen(ka):
+    """The Code comparison page ranks each contract's NEWEST month; its
+    'Export + methodology' button (latest=1) must export those same rows —
+    not every month's — and say so in the sidecar."""
+    _, c = ka
+    screen = c.get("/api/code/97110?grain=tin").json()["ranked"]
+    z = zipfile.ZipFile(io.BytesIO(c.get(
+        "/api/export.zip?cpt=97110&grain=tin&view=code_97110&latest=1").content))
+    names = z.namelist()
+    rows = _csv_rows(z.read([n for n in names if n.endswith(".csv")][0]))
+    assert sorted((r["payer"], r["modifiers"], float(r["negotiated_rate"]), r["file_month"]) for r in rows) == \
+        sorted([("Alpha Health", "GP", 50.0, "2026-05"), ("Alpha Health", "GP", 45.0, "2026-05"),
+                ("Alpha Health", "GP", 44.0, "2026-05"), ("Alpha Health", "GP", 42.0, "2026-06")])
+    assert sum(r["n"] for r in screen) == len(rows)
+    method = z.read([n for n in names if n.endswith("_methodology.txt")][0]).decode()
+    assert "As-of month: latest" in method
+    # the explorer (no latest flag) still shows every month, as labelled
+    assert len(c.get("/api/rates?grain=tin&cpt=97110&limit=100").json()["rows"]) > len(rows)

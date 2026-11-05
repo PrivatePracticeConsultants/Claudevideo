@@ -369,6 +369,14 @@ class FilterSet:
             clauses.append(f"negotiated_rate {op} ?")
             params.append(val)
             add(bound, val)
+        # "newest file per contract" — the report tabs' LATEST rule, for the
+        # explorer-shaped views: payers republish monthly, so with no month
+        # pinned every contract appears once per ingested month. A pinned
+        # month wins (it is already single-vintage).
+        self.latest_only = (not qp.get("month")
+                            and str(qp.get("latest", "0")).lower() in ("1", "true"))
+        if self.latest_only:
+            add("as_of_month", "latest")
         self.hide_outliers = qp.get("hide_outliers", "0") in ("1", "true")
         add("hide_outliers", f"ON — {OUTLIER_RULE}" if self.hide_outliers else "off")
         self.where = " AND ".join(clauses) if clauses else "1=1"
@@ -416,6 +424,14 @@ def grain_of(qp: dict, cfg: MrfxConfig, store: Store) -> str:
 
 def rel_sql(grain: str, fs: FilterSet) -> str:
     base = f"WITH base AS ({GRAIN_REL[grain]}) SELECT * FROM base WHERE {fs.where}"
+    if fs.latest_only:
+        # each contract's NEWEST month among the filtered rows. An NPI billing
+        # under two TINs holds two contracts — one must not supersede the
+        # other (benchmark._rates_relation's rule), so NPI grain keys by TIN too
+        part = ("payer, unit_id, tin_value, billing_code" if grain == "npi"
+                else "payer, unit_id, billing_code")
+        base = (f"SELECT * FROM ({base}) QUALIFY file_month = max(file_month) "
+                f"OVER (PARTITION BY {part})")
     if fs.hide_outliers:
         # The reference median must exclude $0/$0.01 placeholders: with
         # "dollar rates only" OFF, fs.where no longer strips them, and a
@@ -577,7 +593,10 @@ def methodology_text(cfg: MrfxConfig, store: Store, grain: str, fs: FilterSet,
         # own row, so a rate republished monthly appears once per month and the
         # medians/counts pool every vintage. Say so, or an exported median reads
         # as one number when it blends several months.
-        ("As-of month: " + str(fs.described["as_of_month"]) + " (only this month's rates)."
+        ("As-of month: latest — each contract's NEWEST ingested month only "
+         "(an older month's rate a payer has since republished is superseded)."
+         if fs.described.get("as_of_month") == "latest" else
+         "As-of month: " + str(fs.described["as_of_month"]) + " (only this month's rates)."
          if "as_of_month" in fs.described else
          "As-of month: ALL months pooled (no month filter was set) — a rate "
          "republished across months is counted once per month, so these "
@@ -681,11 +700,12 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         500). Every other ORDER BY tiebreaker is a base rates_by_tin column, so
         the page — and its order — is byte-identical to the full-join query,
         just far cheaper."""
-        return (grain == "tin" and not fs.hide_outliers
+        return (grain == "tin" and not fs.hide_outliers and not fs.latest_only
                 and not fs.uses_dim_cols and sort not in ("display_name", "tin_count"))
 
     def _filtered_count(con, grain: str, fs: FilterSet) -> int:
-        key = (grain, fs.where, tuple(fs.params), fs.hide_outliers, store.data_generation)
+        key = (grain, fs.where, tuple(fs.params), fs.hide_outliers, fs.latest_only,
+               store.data_generation)
         hit = _count_cache.get(key)
         now = time.monotonic()
         if hit is not None and now - hit[0] < _COUNT_TTL:
@@ -783,7 +803,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         # outlier-hidden view (and vice versa) for a TTL: the strip disagreed
         # with the table it sits above (caught by the verification audit,
         # reproduced live: max=$9000 shown with the outlier "hidden")
-        key = (grain, fs.where, tuple(fs.params), fs.hide_outliers,
+        key = (grain, fs.where, tuple(fs.params), fs.hide_outliers, fs.latest_only,
                store.data_generation)
         hit = _summary_cache.get(key)
         now = time.monotonic()
@@ -985,23 +1005,17 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     def code_detail(code: str, request: Request):
         qp = _qp(request)
         qp["code"] = code
-        grain = grain_of(qp, cfg, store)
-        fs = _fs(qp)
         # Payers republish every month, so with no month pinned the relation
         # holds one row per contract PER INGESTED MONTH. Pooling them blended
         # May's $40 and June's $42 into a "$41" median nobody published, and
-        # summed the same NPIs once per month (2 NPIs shown as 3). Collapse to
-        # each contract's NEWEST month first — the report tabs' "latest"
-        # supersession (benchmark.LATEST_MONTH) — unless a month is pinned.
+        # counted the same NPIs once per month. Default to each contract's
+        # NEWEST month (FilterSet.latest_only) unless a month is pinned; the
+        # page's export button sends the same latest=1, so export == screen.
+        qp.setdefault("latest", "1")
+        grain = grain_of(qp, cfg, store)
+        fs = _fs(qp)
         rel = rel_sql(grain, fs)
-        as_of = qp.get("month") or "latest"
-        if not qp.get("month"):
-            # an NPI billing under two TINs holds two contracts — one must
-            # not supersede the other (benchmark._rates_relation's rule)
-            part = "payer, unit_id, tin_value, billing_code" if grain == "npi" \
-                else "payer, unit_id, billing_code"
-            rel = (f"SELECT * FROM ({rel}) QUALIFY file_month = max(file_month) "
-                   f"OVER (PARTITION BY {part})")
+        as_of = qp.get("month") or ("latest" if fs.latest_only else "all")
         with store.connect() as con:
             ranked = _dicts(con.execute(
                 f"""

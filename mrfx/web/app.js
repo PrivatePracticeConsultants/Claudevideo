@@ -1226,7 +1226,7 @@ function initCptView() {
     // export must be too — inheriting the Explorer tab's grain toggle emitted
     // NPI-grain rows that didn't match the table the user was looking at.
     const p = new URLSearchParams({ cpt: state.cptSelected, view: `code_${state.cptSelected}`,
-      grain: "tin", sort: "negotiated_rate", dir: "desc" });
+      grain: "tin", sort: "negotiated_rate", dir: "desc", latest: "1" });
     if ($("#cpt-base-only").checked) p.set("modifier", "base");
     if (cptState.value.trim()) p.set("state", cptState.value.trim().toUpperCase());
     location.href = `/api/export.zip?${p}`;
