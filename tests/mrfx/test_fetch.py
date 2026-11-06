@@ -2556,3 +2556,143 @@ def test_healthsparq_latest_metadata_shape(cfg, store, tmp_path):
     row = store.list_urls()[0]
     assert row["status"] == "failed" and "HealthSparq file list" in row["error"]
     shutil.rmtree(root, ignore_errors=True)
+
+
+def _stalling_server():
+    """A server that sends a few KB of a 4 MB file and hangs up, every time
+    (the 'payer's server stopped sending data' case), plus a good file."""
+    import http.server as hs
+    import os as _os
+    payload = _os.urandom(4 << 20)
+    good = gzip.compress(json.dumps({"reporting_entity_name": "Pauseco", "last_updated_on": "2026-05-01",
+                                     "version": "2.0.0", "in_network": []}).encode())
+
+    class H(hs.BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path.endswith("good.json.gz"):
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(good)))
+                self.end_headers()
+                self.wfile.write(good)
+                return
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload[:4096])
+            self.wfile.flush()
+            self.connection.close()
+
+        def log_message(self, *a):
+            pass
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return httpd, f"http://127.0.0.1:{httpd.server_address[1]}"
+
+
+def test_a_stalled_download_is_paused_not_failed_and_the_queue_moves_on(cfg, store):
+    """A payer server that stops feeding a download used to hold a slot until
+    the stall deadline, then leave a 'failed' row for a human to retry. Now
+    it is PAUSED: the slot goes to the next file, the bytes are kept, and it
+    resumes by itself after download_pause_hours."""
+    import datetime as dt
+
+    from mrfx.fetch import filename_for
+    cfg.download_stall_seconds = 1.0
+    cfg.download_retries = 6
+    cfg.download_pause_hours = 24.0
+    httpd, base = _stalling_server()
+    try:
+        add_urls(store, [f"{base}/stalls.json.gz", f"{base}/good.json.gz"])
+        assert _drain_with_deadline(cfg, store, 120), "queue did not finish — a paused row counted as in flight"
+    finally:
+        httpd.shutdown()
+    rows = {u["url"].rsplit("/", 1)[-1]: u for u in store.list_urls()}
+    assert rows["good.json.gz"]["status"] == "done"
+    p = rows["stalls.json.gz"]
+    assert p["status"] == "paused" and p["auto_resumes"] == 1
+    assert "stopped sending data" in p["error"] and "24 hours" in p["error"]
+    wake = dt.datetime.fromisoformat(p["retry_after"])
+    now = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+    assert dt.timedelta(hours=23) < wake - now < dt.timedelta(hours=25)
+    part = (cfg.downloads_dir / filename_for(p["url"]))
+    assert part.with_suffix(part.suffix + ".part").exists()        # bytes kept for the resume
+
+
+def test_a_paused_download_wakes_when_its_time_comes_then_fails_after_the_last_pause(cfg, store):
+    cfg.download_stall_seconds = 1.0
+    cfg.download_retries = 6
+    cfg.download_pause_hours = 24.0
+    cfg.download_auto_resumes = 2
+    httpd, base = _stalling_server()
+    try:
+        add_urls(store, [f"{base}/stalls.json.gz"])
+        assert _drain_with_deadline(cfg, store, 120)
+        row = store.list_urls()[0]
+        assert row["status"] == "paused"
+        assert store.wake_paused_urls() == 0                        # not yet
+        with store.connect() as con:
+            con.execute("UPDATE url_queue SET retry_after = retry_after - INTERVAL 25 HOUR")
+        assert store.wake_paused_urls() == 1
+        assert store.list_urls()[0]["status"] == "queued"
+        assert _drain_with_deadline(cfg, store, 120)                 # pause 2 of 2
+        row = store.list_urls()[0]
+        assert row["status"] == "paused" and row["auto_resumes"] == 2
+        with store.connect() as con:
+            con.execute("UPDATE url_queue SET retry_after = retry_after - INTERVAL 25 HOUR")
+        store.wake_paused_urls()
+        assert _drain_with_deadline(cfg, store, 120)                 # out of pauses -> failed
+        assert store.list_urls()[0]["status"] == "failed"
+    finally:
+        httpd.shutdown()
+
+
+def test_retry_now_and_retry_all_wake_a_paused_download(store):
+    from mrfx.fetch import dedup_key
+    a = store.enqueue_url("https://x/a.json.gz", dedup_key("https://x/a.json.gz"))
+    b = store.enqueue_url("https://x/b.json.gz", dedup_key("https://x/b.json.gz"))
+    store.pause_url(a, 24, "paused: test")
+    store.pause_url(b, 24, "paused: test")
+    assert store.set_url_status_by_id(a, "queued")                  # the row's "try now" button
+    assert store.requeue_failed() == 1                               # "retry all failed" takes paused too
+    st = {u["id"]: (u["status"], u["retry_after"]) for u in store.list_urls()}
+    assert st == {a: ("queued", None), b: ("queued", None)}
+
+
+def test_a_server_that_dribbles_on_one_connection_trips_the_stall_deadline(cfg):
+    """A server that keeps the connection open and sends a trickle never hits
+    the read timeout, so the stall deadline (checked between connections)
+    never ran and the download held its slot until the 3-hour cap. The
+    deadline is now checked mid-stream."""
+    import http.server as hs
+    import time as _time
+    cfg.download_stall_seconds = 2.0
+    cfg.download_max_seconds = 999
+    cfg.download_retries = 0
+
+    class Dribble(hs.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", str(50 << 20))
+            self.end_headers()
+            try:
+                while True:
+                    self.wfile.write(b"x" * 1024)
+                    self.wfile.flush()
+                    _time.sleep(0.2)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+        def log_message(self, *a):
+            pass
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Dribble)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        from mrfx.fetch import DownloadError, download, filename_for
+        url = f"http://127.0.0.1:{httpd.server_address[1]}/slow.json.gz"
+        t0 = _time.monotonic()
+        with pytest.raises(DownloadError) as ei:
+            download(cfg, url, cfg.downloads_dir / filename_for(url))
+        assert _time.monotonic() - t0 < 30, "mid-stream stall check did not fire"
+        assert "no download progress" in str(ei.value) and ei.value.retryable
+    finally:
+        httpd.shutdown()

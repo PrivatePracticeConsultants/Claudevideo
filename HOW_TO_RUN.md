@@ -173,6 +173,12 @@ exactly where it stopped, including half-finished downloads.
    `GETTING_STARTED.md` under "what to expect"); you can keep using the
    dashboard while they run.
 
+**A file says "paused"?** Its insurer's server stopped sending data part-way
+(the bar sat still for 10 minutes). The program set it aside so the other
+files keep going, kept what it had, and will try again by itself in 24 hours
+— up to 5 times, then it's marked failed. **Try now** retries it immediately;
+**skip** forgets it.
+
 **Too much at once?** **Clear queue** sets aside everything still waiting and
 **Stop downloads** pauses the ones downloading; **Resume stopped** puts all of
 them back in one click (partial downloads continue where they stopped).

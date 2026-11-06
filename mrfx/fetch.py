@@ -548,7 +548,15 @@ def _reserve_disk_or_raise(my_key: int, parent: Path, total: int, resume_from: i
         _disk_reservations[my_key] = max(0, total - resume_from)
 
 
-def _body_chunks(resp, size: int = 1 << 20):
+# 64 KB, not 1 MB: httpx yields a chunk only once `size` bytes have ARRIVED,
+# so with a payer server trickling 5 KB/s the loop body (stall check, cancel
+# check, progress) did not run for 200 s per chunk — a dribbling download held
+# its slot until the 3-hour cap. Per-chunk bookkeeping at 64 KB is still cheap
+# (a lock acquire and a hash update; ~1,600/s on a 100 MB/s link).
+BODY_CHUNK_BYTES = 64 << 10
+
+
+def _body_chunks(resp, size: int = BODY_CHUNK_BYTES):
     """The response body as SENT. We ask for `Accept-Encoding: identity`, but
     some origins (S3 objects stored with Content-Encoding: gzip metadata) gzip
     anyway; iter_bytes() would silently decode that — writing ~20x the bytes
@@ -832,6 +840,7 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                     else:
                         val_p.unlink(missing_ok=True)
                 done = resume_from
+                stream_anchor = done   # mid-stream stall clock (see the chunk loop)
                 last_report = done
                 last_report_t = 0.0
                 last_free_check = done  # for the unknown-length mid-stream guard
@@ -870,6 +879,20 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                             raise DownloadError(
                                 "exceeded the download time cap mid-stream",
                                 retryable=True)
+                        # the STALL deadline mid-stream too: a server that keeps
+                        # the connection alive but dribbles a few KB never hits
+                        # the read timeout, so the loop-top check never ran and
+                        # it held the slot until the 3-hour cap
+                        # (measured on THIS connection's own bytes: a server
+                        # that made us restart from byte 0 is re-downloading
+                        # for real, not stalled)
+                        now = time.monotonic()
+                        if done - stream_anchor >= _STALL_MIN_PROGRESS_BYTES:
+                            stream_anchor = done
+                            last_progress_t = now
+                        elif stall_budget and now - last_progress_t > stall_budget:
+                            raise DownloadError(
+                                "no meaningful progress mid-stream", retryable=True)
                         # user pressed "stop downloads" — abort NOW to free the
                         # slot (checked per streamed chunk, throttled by the 1 MB
                         # chunk size so it's cheap)
@@ -879,8 +902,11 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                         # dashboard polls every ~4s; don't hammer the store
                         # with a write-locked UPDATE for every 8 MB of a fast
                         # link — report on bytes AND wall-clock
-                        now = time.monotonic()
-                        if progress_cb and done - last_report >= 8 << 20 and now - last_report_t >= 1.5:
+                        # ...and at least every 10 s when ANY bytes arrived,
+                        # so a slow file never reads "no data" on the dashboard
+                        if progress_cb and done > last_report and (
+                                (done - last_report >= 8 << 20 and now - last_report_t >= 1.5)
+                                or now - last_report_t >= 10):
                             progress_cb(done, total)
                             last_report = done
                             last_report_t = now
@@ -1726,6 +1752,27 @@ def fetch_url_record(cfg: MrfxConfig, store: Store, rec: dict) -> bool:
             store.update_url(url_id, status="queued", error=str(e))
             log.info("url %s: %s", url, e)
             return False
+        if (e.retryable and not e.oversize and cfg.download_pause_hours > 0
+                and int(rec.get("auto_resumes") or 0) < cfg.download_auto_resumes):
+            # A STALLED or flaky server: free the slot for the next file now
+            # and come back to this one by itself later — the bytes so far are
+            # kept, so it resumes where it stopped. Failing it instead needed
+            # a human to notice and press retry.
+            part = dest.with_suffix(dest.suffix + ".part")
+            got = part.stat().st_size if part.exists() else 0
+            n = int(rec.get("auto_resumes") or 0) + 1
+            why = ("the payer's server stopped sending data"
+                   if "no download progress" in str(e) else
+                   f"the download kept failing ({str(e)[:120]})")
+            hours = cfg.download_pause_hours
+            when = f"{hours:g} hour{'s' if hours != 1 else ''}"
+            store.pause_url(url_id, hours, (
+                f"paused: {why}. "
+                + (f"The {got / 1e6:.0f} MB downloaded so far are kept. " if got else "")
+                + f"It tries again by itself in {when} (pause {n} of "
+                f"{cfg.download_auto_resumes}); other files keep downloading meanwhile."))
+            log.info("url %s: paused for %s — %s", url, when, why)
+            return False
         store.update_url(url_id, status="oversize" if e.oversize else "failed",
                          error=_failure_message(store, rec, e))
         # duplicates may have deferred to this row in an earlier life (it
@@ -2184,6 +2231,10 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
     recovered = store.recover_stuck_urls()
     if recovered:
         log.info("resumed %d URL(s) left mid-flight by a previous run", recovered)
+    woke = store.wake_paused_urls()
+    if woke:
+        log.info("resumed %d paused download(s) whose wait is over", woke)
+    last_wake_check = time.monotonic()
     refit = store.requeue_oversize_within(int(cfg.confirm_over_gb * 1e9))
     if refit:
         log.info("re-queued %d file(s) previously over the size limit — they "
@@ -2459,6 +2510,14 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
                          + counts.get("fetched", 0) + counts.get("expanding", 0)
                          + counts.get("ingesting", 0) + busy)
             respawn_dead_threads()
+            if time.monotonic() - last_wake_check >= 60:
+                last_wake_check = time.monotonic()
+                try:
+                    woke = store.wake_paused_urls()
+                    if woke:
+                        log.info("resumed %d paused download(s) whose wait is over", woke)
+                except Exception:  # noqa: BLE001 — a wake check must never stop the queue
+                    log.exception("could not check paused downloads; will retry")
             if _rollup_due(pend, in_flight, time.monotonic() - last_rebuild_at,
                            rollup_min_interval):
                 if rebuild_now():

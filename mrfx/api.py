@@ -144,8 +144,16 @@ _TIN_JOINS = """
     LEFT JOIN tin_directory td USING (tin_value)
     LEFT JOIN entity_map em USING (tin_value)
     -- payers that set tin.type='npi' publish an NPI in the TIN slot: name and
-    -- locate those rows from the NPI directory instead of leaving raw numbers
-    LEFT JOIN npi_directory nn ON t.tin_is_really_npi AND nn.npi = t.tin_value
+    -- locate those rows from the NPI directory instead of leaving raw numbers.
+    -- The key is an EXPRESSION equality on purpose: written as
+    -- `ON t.tin_is_really_npi AND nn.npi = t.tin_value`, the one-sided
+    -- predicate made DuckDB fall back to a nested-loop join (BLOCKWISE_NL_JOIN:
+    -- every spine row against every named provider — 1.41M x 93k on the real
+    -- store, 529 thread-seconds; the Explorer's table took 158 s and the Code
+    -- page 10 s once practice names were loaded, 0.9 s / 0.1 s before). The
+    -- CASE yields NULL for an EIN row, which matches nothing — the same rows,
+    -- hash-joined.
+    LEFT JOIN npi_directory nn ON nn.npi = CASE WHEN t.tin_is_really_npi THEN t.tin_value END
 """
 _TIN_REL = f"SELECT {_TIN_PROJECTION} FROM rates_by_tin t {_TIN_JOINS}"
 

@@ -231,6 +231,15 @@ class MrfxConfig(BaseModel):
     # raise it if you routinely pull tens-of-GB files over a slow link, or set 0
     # to disable the cap.
     download_max_seconds: float = Field(default=10800.0, ge=0)
+    # A download the payer's server stops feeding (past download_stall_seconds)
+    # or that keeps failing on network errors is PAUSED, not failed: its slot
+    # goes to the next file at once, the bytes so far are kept, and it resumes
+    # by itself this many hours later — a struggling server usually recovers
+    # within a day, and a monthly file arriving a day late costs nothing.
+    # After download_auto_resumes pauses it is marked failed (a link that is
+    # really dead must not cycle forever). 0 hours = the old behavior (failed).
+    download_pause_hours: float = Field(default=24.0, ge=0)
+    download_auto_resumes: int = Field(default=5, ge=0)
     registry_path: Path = Path("config/payer_registry.yaml")
     registry_overrides_path: Path = Path("config/registry_overrides.yaml")
     known_sources_path: Path = Path("config/known_sources.yaml")

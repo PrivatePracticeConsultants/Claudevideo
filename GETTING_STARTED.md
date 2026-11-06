@@ -824,9 +824,14 @@ already have is automatically **skipped, not duplicated**.
 - **Sources**: every tested source lists its states; "Queue these states"
   queues just yours. `mrfx sources --check` re-checks the whole list live
   (read-only) — run it monthly.
-- **Long runs**: Resume stopped; the monthly refresh (if on) retries a
-  not-yet-posted monthly file daily until the 10th; NPPES name file built in
-  about a minute.
+- **Speed with names loaded**: once practice names arrive, the Explorer
+  table took 158 s and the Code page 10 s on a 32M-rate store (a join DuckDB
+  could only run as a nested loop); fixed — 1.2 s and 0.17 s on the same store.
+- **Long runs**: a download whose server stalls is **paused** (slot freed,
+  bytes kept, automatic retry in 24 h, up to 5 times — `download_pause_hours`
+  / `download_auto_resumes`); Resume stopped; the monthly refresh (if on)
+  retries a not-yet-posted monthly file daily until the 10th; NPPES name file
+  built in about a minute.
 
 ## Debug FAQ — what it says, what it means, what to do
 

@@ -155,3 +155,18 @@ def test_a_bare_name_link_resolves_only_when_unambiguous(ke):
     assert "ACME THERAPY · KS" in ke.get("/api/entity/entity/ACME THERAPY").json()["detail"]
     r = ke.get("/api/entity/entity/ACME THERAPY · KS")
     assert r.status_code == 200 and [t["tin_value"] for t in r.json()["tins"]] == [F]
+
+
+def test_no_grain_relation_plans_a_nested_loop_join(ke, store):
+    """Once practice names exist, a join written with a one-sided predicate in
+    its ON clause (`ON t.tin_is_really_npi AND nn.npi = t.tin_value`) made
+    DuckDB nested-loop every spine row against every named provider: the
+    Explorer table took 158 s on the real 32M-row store (0.9 s unnamed), the
+    Code page 10 s. The plan of every grain relation must hash-join."""
+    from mrfx.api import FilterSet, rel_sql
+    for grain, qp in (("tin", {"latest": "1"}), ("tin", {"cpt": "97110"}),
+                      ("entity", {"latest": "1"}), ("npi", {"cpt": "97110"})):
+        fs = FilterSet(qp)
+        with store.connect() as con:
+            plan = con.execute("EXPLAIN " + rel_sql(grain, fs), fs.params).fetchall()[0][1]
+        assert "BLOCKWISE_NL_JOIN" not in plan and "CROSS_PRODUCT" not in plan, (grain, qp)

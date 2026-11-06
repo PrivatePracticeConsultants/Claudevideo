@@ -1787,6 +1787,10 @@ class Store:
         # bulk "retry failed" rounds a row has been through: _claim_next serves
         # never-retried rows first (fair scheduling)
         con.execute("ALTER TABLE url_queue ADD COLUMN IF NOT EXISTS retries INTEGER DEFAULT 0")
+        # a PAUSED download (its payer's server stalled): when it wakes, and
+        # how many times it has already been paused (fetch.download_pause_hours)
+        con.execute("ALTER TABLE url_queue ADD COLUMN IF NOT EXISTS retry_after TIMESTAMP")
+        con.execute("ALTER TABLE url_queue ADD COLUMN IF NOT EXISTS auto_resumes INTEGER DEFAULT 0")
 
     def _register_views(self, con: duckdb.DuckDBPyConnection) -> None:
         """(Re)point the derived views. Callers must hold write_lock."""
@@ -2142,12 +2146,12 @@ class Store:
             ).fetchall()
             rows += con.execute(
                 "SELECT * FROM url_queue WHERE parent_id IS NOT NULL "
-                "AND status IN ('failed', 'skipped', 'oversize') ORDER BY id DESC LIMIT ?",
+                "AND status IN ('failed', 'skipped', 'oversize', 'paused') ORDER BY id DESC LIMIT ?",
                 [limit],
             ).fetchall()
             rows += con.execute(
                 "SELECT * FROM url_queue WHERE parent_id IS NOT NULL "
-                "AND status NOT IN ('failed', 'skipped', 'oversize') ORDER BY id DESC LIMIT ?",
+                "AND status NOT IN ('failed', 'skipped', 'oversize', 'paused') ORDER BY id DESC LIMIT ?",
                 [limit],
             ).fetchall()
             cols = [d[0] for d in con.description]
@@ -2158,7 +2162,7 @@ class Store:
                 continue  # slices run as separate queries; a row changing
                 # status between them must not render twice in one poll
             seen.add(d["id"])
-            for k in ("added_at", "finished_at"):
+            for k in ("added_at", "finished_at", "retry_after"):
                 if d.get(k) is not None:
                     d[k] = str(d[k])
             out.append(d)
@@ -2369,8 +2373,9 @@ class Store:
     _USER_TRANSITIONS = {
         # 'oversize' is a too-big-needs-OK terminal state: retry (→queued)
         # works once the user has raised confirm_over_gb, and skip dismisses it
-        "queued": ("failed", "skipped", "oversize"),
-        "skipped": ("queued", "failed", "oversize"),
+        # 'paused' -> queued is "try now"; -> skipped is "forget it"
+        "queued": ("failed", "skipped", "oversize", "paused"),
+        "skipped": ("queued", "failed", "oversize", "paused"),
     }
 
     def set_url_status_by_id(self, url_id: int, status: str) -> bool:
@@ -2385,7 +2390,7 @@ class Store:
                 "UPDATE url_queue SET status = ?, error = NULL, progress = 0, bytes_done = 0, "
                 # plain retry must NOT inherit a prior "download anyway" — that
                 # override is one-shot; only force_size_requeue re-sets it
-                "force_size = false WHERE id = ?", [status, url_id])
+                "force_size = false, retry_after = NULL WHERE id = ?", [status, url_id])
             return True
 
     def force_size_requeue(self, url_id: int) -> bool:
@@ -2421,18 +2426,45 @@ class Store:
                     "AND status IN ('done', 'failed', 'skipped')", [list(urls)])
         return n
 
+    def pause_url(self, url_id: int, hours: float, error: str) -> None:
+        """Set a stalled download aside for `hours`: it holds no slot, isn't
+        counted as in flight (a CLI drain finishes), keeps its partial bytes,
+        and wake_paused_urls() puts it back in the queue when the time comes."""
+        with self.write_lock, self.connect() as con:
+            con.execute(
+                "UPDATE url_queue SET status = 'paused', error = ?, "
+                "retry_after = ? + to_seconds(CAST(? AS DOUBLE)), "
+                "auto_resumes = coalesce(auto_resumes, 0) + 1 WHERE id = ?",
+                [error, _utcnow(), float(hours) * 3600.0, url_id])
+
+    def wake_paused_urls(self) -> int:
+        """Paused downloads whose time has come go back in the queue (they
+        resume from their kept bytes). Returns how many woke."""
+        with self.write_lock, self.connect() as con:
+            now = _utcnow()
+            n = con.execute("SELECT count(*) FROM url_queue WHERE status = 'paused' "
+                            "AND (retry_after IS NULL OR retry_after <= ?)", [now]).fetchone()[0]
+            if n:
+                con.execute("UPDATE url_queue SET status = 'queued', error = NULL, "
+                            "retry_after = NULL WHERE status = 'paused' "
+                            "AND (retry_after IS NULL OR retry_after <= ?)", [now])
+        return n
+
     def requeue_failed(self) -> int:
         """Bulk retry: every failed row back to queued in ONE statement — the
         per-row path capped at list_urls' window silently stranded failures
         beyond the newest 500. Returns rows re-queued."""
         with self.write_lock, self.connect() as con:
-            n = con.execute("SELECT count(*) FROM url_queue WHERE status = 'failed'").fetchone()[0]
+            n = con.execute("SELECT count(*) FROM url_queue WHERE status IN "
+                            "('failed', 'paused')").fetchone()[0]
             if n:
+                # paused rows too: pressing retry means "now", not tomorrow
                 con.execute(
-                    "UPDATE url_queue SET status = 'queued', error = NULL, "
+                    "UPDATE url_queue SET status = 'queued', error = NULL, retry_after = NULL, "
                     "retries = coalesce(retries, 0) + 1, "
                     # bulk retry never inherits a one-shot "download anyway"
-                    "progress = 0, bytes_done = 0, force_size = false WHERE status = 'failed'"
+                    "progress = 0, bytes_done = 0, force_size = false "
+                    "WHERE status IN ('failed', 'paused')"
                 )
         return n
 
@@ -2445,12 +2477,12 @@ class Store:
         with self.write_lock, self.connect() as con:
             n = con.execute(
                 "SELECT count(*) FROM url_queue WHERE status IN "
-                "('queued', 'fetched', 'expanding')").fetchone()[0]
+                "('queued', 'fetched', 'expanding', 'paused')").fetchone()[0]
             if n:
                 con.execute(
                     "UPDATE url_queue SET status = 'skipped', kind = 'canceled', "
-                    "error = 'cleared from the queue' WHERE status IN "
-                    "('queued', 'fetched', 'expanding')")
+                    "error = 'cleared from the queue', retry_after = NULL WHERE status IN "
+                    "('queued', 'fetched', 'expanding', 'paused')")
         return n
 
     def cancel_all_downloading(self) -> int:

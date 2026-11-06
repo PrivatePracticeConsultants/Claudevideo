@@ -165,6 +165,13 @@ download_stall_seconds: 600
 # Its partial bytes are kept — press retry to resume. Default 3 hours; raise it
 # if you routinely pull very large files over a slow link, or set 0 to disable.
 download_max_seconds: 10800
+# A download whose server stops sending data (or keeps failing) is PAUSED, not
+# failed: its slot goes to the next file at once, the bytes so far are kept, and
+# it tries again by itself this many hours later ("paused" in the Files tab,
+# with a "try now" button). After download_auto_resumes pauses it is marked
+# failed. 0 hours = the old behavior (failed right away, retry by hand).
+download_pause_hours: 24
+download_auto_resumes: 5
 
 inbox_dir: data/inbox
 processed_dir: data/processed

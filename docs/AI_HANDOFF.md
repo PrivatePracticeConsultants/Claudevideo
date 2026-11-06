@@ -566,6 +566,20 @@ disk-space guard, both with actionable messages.
 
 ## Step 8 — Known limitations / next frontiers
 
+**Measure on a NAMED store, and read the plan.** The round-3 close-out found
+that `api._TIN_JOINS` joined `npi_directory` with a one-sided predicate in its
+ON clause (`ON t.tin_is_really_npi AND nn.npi = t.tin_value`); DuckDB can only
+run that as a BLOCKWISE_NL_JOIN, so once practice names were loaded the
+Explorer table took 158 s and the Code page 10.9 s on the 32M-row store (0.9 s /
+0.13 s unnamed — every earlier timing had been taken before names existed).
+Rewritten as `nn.npi = CASE WHEN t.tin_is_really_npi THEN t.tin_value END`
+(same rows, hash join): 1.2 s / 0.17 s. Rules: time endpoints on
+`scratchpad/perf/named` (or any store with `npi_directory` populated), keep
+`EXPLAIN ANALYZE` output for every relation you change, and never write a join
+condition that isn't an equality between the two sides
+(`test_no_grain_relation_plans_a_nested_loop_join` pins the grain relations).
+`docs/NEXT_STEPS_PROMPT_4.md` is the follow-on plan for output speed.
+
 Round 3 (docs/NEXT_STEPS_PROMPT_3.md, status block) — still open after it:
 - Windows has STILL never been run by an agent (P1.5). The round-3 Windows
   fixes (`_nt_alive_without_handle`, parked part swaps, UTC timestamps under a
