@@ -3761,6 +3761,8 @@ function qaLine(qa) {
   if (qa.billing_type_other) bits.push(`${fmtInt(qa.billing_type_other)} non-CPT/HCPCS`);
   if (qa.multi_code_fields) bits.push(`<span class="bad">${fmtInt(qa.multi_code_fields)} multi-code fields</span>`);
   if (qa.tin_is_really_npi_rows) bits.push(`${fmtInt(qa.tin_is_really_npi_rows)} TIN=NPI`);
+  if (qa.pos_in_modifier_rows) bits.push(`<span title="This payer put place-of-service codes (11 office, 22 outpatient hospital, ...) in the modifier field. MRF Explorer moved them to place of service, so these rates count as base (no modifier).">${fmtInt(qa.pos_in_modifier_rows)} POS codes moved out of modifiers</span>`);
+  if (qa.modifier_split_rows) bits.push(`<span title="This payer wrote two modifiers as one (e.g. &quot;52,53&quot;). MRF Explorer split them.">${fmtInt(qa.modifier_split_rows)} combined modifiers split</span>`);
   if (qa.duplicate_explosion_ratio > 1.5) bits.push(`<span class="warn">${qa.duplicate_explosion_ratio}x dup</span>`);
   return bits.length
     ? `<span class="qa-line" title="${esc(qa.outlier_rule || "")}">${bits.join(" · ")}</span>`

@@ -25,6 +25,7 @@ from pathlib import Path
 import ijson
 
 from .catalog import is_timed, resolve_discipline
+from .modifiers import normalize as normalize_modifiers
 from .config import DOLLAR_TYPES, MrfxConfig
 from .sniff import open_stream  # noqa: F401  (re-exported for ingest)
 
@@ -186,6 +187,8 @@ class QaCounters:
     bundled_items: int = 0            # bundle/capitation items excluded (not per-code rates)
     remote_ref_groups: int = 0        # skipped rate groups whose references are remote `location` links
     prices: int = 0                   # readable prices seen (denominator for price-level shares)
+    modifier_split_rows: int = 0      # rows whose modifier element held several ("52,53" -> 52|53)
+    pos_in_modifier_rows: int = 0     # rows whose "modifiers" were place-of-service codes (moved)
     rows: int = 0
 
     def to_dict(self) -> dict:
@@ -810,9 +813,13 @@ class InNetworkParser:
             prepared.append((g, tin_value, tin_type, really, keep))
         gidx = None
         for price in prices:
-            # sorted+deduped: [GP,59] and [59,GP] are the SAME modifier set —
-            # publication order must not split the dedup grain into two medians
-            modifiers = sorted({str(m).strip().upper() for m in as_list(price.get("billing_code_modifier")) if str(m).strip()})
+            # modifiers.normalize: sorted+deduped ([GP,59] == [59,GP]), "52,53"
+            # split into two, and a payer's place-of-service list published in
+            # the modifier field moved to service_code — see mrfx/modifiers.py
+            modifiers, service_codes, mod_split, pos_moved = normalize_modifiers(
+                as_list(price.get("billing_code_modifier")),
+                # sorted+deduped for the same grain reason as modifiers
+                sorted({clean_code(s) for s in as_list(price.get("service_code")) if str(s).strip()}))
             ntype = str(price.get("negotiated_type", "") or "").strip().lower()
             rate = clean_rate(price.get("negotiated_rate"))
             if rate is None:
@@ -840,11 +847,14 @@ class InNetworkParser:
                 "negotiated_type": ntype,
                 "is_dollar_rate": is_dollar,
                 "billing_class": str(price.get("billing_class", "") or "").strip().lower(),
-                # sorted+deduped for the same grain reason as modifiers
-                "service_code": sorted({clean_code(s) for s in as_list(price.get("service_code")) if str(s).strip()}),
+                "service_code": service_codes,
                 "expiration_date": str(price.get("expiration_date", "") or ""),
                 "ingested_at": self._ingested_at,
             }
+            if mod_split:
+                r.qa.modifier_split_rows += per_price_rows
+            if pos_moved:
+                r.qa.pos_in_modifier_rows += per_price_rows
             r.qa.non_therapy_dropped += per_price_dropped
             r.qa.tin_only_rows += per_price_tin_only
             r.qa.rows += per_price_rows

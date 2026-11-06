@@ -83,7 +83,8 @@ NOT run `playwright install` here.
    drug/allowed-amounts files with the reason; 0-row files stay 0; SSN-pattern
    TINs are masked everywhere; exports carry a methodology sidecar (ZIP/CLI).
 5. **Numbers correctness IS the product** — bundle/capitation excluded; modifiers
-   sorted+deduped; `file_month` = header→filename→ingest; untyped 10-digit TIN is
+   sorted+deduped+split, POS codes published as modifiers moved to POS, ONE
+   "base" rule (all in `mrfx/modifiers.py`); `file_month` = header→filename→ingest; untyped 10-digit TIN is
    an NPI-in-the-slot; entity rate = median of member-TIN rates.
 6. **Idempotency / crash-resume** — kill at any instant; re-ingest atomically
    replaces a file's part (never duplicates rows); content-sha dedup skips

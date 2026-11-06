@@ -50,6 +50,7 @@ from .market import (
     medicare_index,
     negotiability,
 )
+from .modifiers import BASE_RULE_TEXT, MODIFIER_INGEST_NOTE, base_sql
 from .monitor import compute_payer_trajectory, compute_rate_changes, rate_changes_csv
 from .schedule import (
     compute_fee_schedule,
@@ -290,8 +291,8 @@ class FilterSet:
             add("disciplines", disciplines)
         modifier = qp.get("modifier")
         if modifier == "base":
-            clauses.append("(modifier_set = '' OR modifier_set IN ('GP','GO','GN'))")
-            add("modifier", "base only (no modifiers, or discipline GP/GO/GN only)")
+            clauses.append(base_sql("modifier_set"))
+            add("modifier", BASE_RULE_TEXT)
         elif modifier == "assistant":
             clauses.append("(modifier_set LIKE '%CQ%' OR modifier_set LIKE '%CO%')")
             add("modifier", "assistant-provided only (CQ/CO)")
@@ -654,6 +655,7 @@ def methodology_text(cfg: MrfxConfig, store: Store, grain: str, fs: FilterSet,
         "Non-dollar negotiated_type rows (percentage, per diem) are excluded when "
         f"dollar_rates_only is true (currently: {fs.described.get('dollar_rates_only')}).",
         "SSN-pattern TINs are masked in every export.",
+        MODIFIER_INGEST_NOTE,
         "Per-row provenance: source_files names ONE representative file per row; "
         "source_count is the number of distinct files behind that row.",
         "Rate files in the store at export time (the export above draws on the "

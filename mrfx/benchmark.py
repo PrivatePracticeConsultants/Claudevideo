@@ -17,6 +17,7 @@ import statistics
 from . import __version__
 from .catalog import code_info
 from .config import MrfxConfig
+from .modifiers import BASE_ASSISTANT_RULE_TEXT, BASE_RULE_TEXT, base_sql
 from .store import BY_TIN_QUERY, Store, mask_tin
 
 log = logging.getLogger(__name__)
@@ -25,7 +26,7 @@ PERCENTILES = (10, 25, 40, 50, 75, 90)
 
 BASIS_NOTE = (
     "Market statistics computed over dollar-rate, base-modifier rows "
-    "(no CQ/CO assistant modifiers, no percentage/per-diem rows), "
+    f"({BASE_RULE_TEXT}; no CQ/CO assistant rows, no percentage/per-diem rows), "
     "professional billing class unless stated otherwise."
 )
 GHOST_RATE_NOTE = (
@@ -265,18 +266,12 @@ def _market_where(market: dict, include_assistant: bool, include_non_dollar: boo
     if not include_assistant:
         clauses.append("t.modifier_set NOT LIKE '%CQ%' AND t.modifier_set NOT LIKE '%CO%'")
     if market.get("base_only", True):
-        if include_assistant:
-            # base + assistant: any combination of discipline (GP/GO/GN) and
-            # assistant (CQ/CO) modifiers — still excludes KX/59/X{EPSU} rows.
-            # Without this, base_only filtered assistant rows straight back
-            # out and the include_assistant toggle changed nothing but the
-            # methodology note (a false provenance claim on reports).
-            clauses.append(
-                "(t.modifier_set = '' OR regexp_full_match(t.modifier_set, "
-                "'(GP|GO|GN|CQ|CO)(\\|(GP|GO|GN|CQ|CO))*'))")
-        else:
-            # base = no modifiers at all, OR discipline modifier only
-            clauses.append("(t.modifier_set = '' OR t.modifier_set IN ('GP','GO','GN'))")
+        # ONE definition (mrfx/modifiers.py), shared with the Explorer's
+        # "base modifiers only" filter. With include_assistant, any mix of
+        # GP/GO/GN and CQ/CO — without it base_only would filter the assistant
+        # rows straight back out and the toggle would change nothing but the
+        # methodology note. KX/59/X{EPSU}/52/26/TC... rows stay excluded.
+        clauses.append(base_sql("t.modifier_set", include_assistant))
     if market.get("billing_class", "professional"):
         clauses.append("t.billing_class = ?")
         params.append(market.get("billing_class", "professional"))
@@ -575,7 +570,8 @@ def compute_benchmark(store: Store, subject: str, market: dict) -> dict:
         "mpfs_loaded": bool(mpfs),
         "mpfs_source": mpfs_source,
         "basis_note": BASIS_NOTE + (
-            " [assistant rows INCLUDED by explicit toggle]" if include_assistant else ""
+            f" [assistant rows INCLUDED by explicit toggle: {BASE_ASSISTANT_RULE_TEXT}]"
+            if include_assistant else ""
         ) + (
             " [non-dollar rows INCLUDED by explicit toggle]" if include_non_dollar else ""
         ) + (

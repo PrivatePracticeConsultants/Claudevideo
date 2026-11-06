@@ -34,6 +34,7 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from .modifiers import MODIFIER_RULES_VERSION
 from .catalog import (THERAPY_CLINIC_STRONG_CODES, THERAPY_MIN_SHARE_PCT,
                       THERAPY_SMALL_PRACTICE_NPIS,
                       excluded_facility_taxonomy_sql, hospital_taxonomy_sql,
@@ -928,6 +929,9 @@ class Store:
             self._quarantine_corrupt_parts()
             self._init_tables(con)
             self._register_views(con)
+        # BEFORE the rollup check: a full rebuild it may trigger must see the
+        # fixed rows, and the payers this queues ride the next incremental
+        self._migrate_modifier_fields()
         self._migrate_stale_rollups()
 
     def _quarantine_corrupt_parts(self) -> None:
@@ -1066,6 +1070,121 @@ class Store:
             import logging as _logging
             _logging.getLogger(__name__).warning(
                 "rollup schema-migration check skipped (%s)", e)
+
+    def _migrate_modifier_fields(self) -> None:
+        """Rewrite, once, the rate parts written under an older modifier rule
+        (files.modifier_rules < MODIFIER_RULES_VERSION) so they read exactly as
+        a re-ingest by this version would write them — no re-download.
+
+        The rule (mrfx/modifiers.py) is a pure function of two stored columns,
+        billing_code_modifier and service_code, plus the code for discipline:
+        so the distinct (code, modifiers, service codes) combinations of a part
+        (a few hundred) go through the SAME Python function the parser calls,
+        and only the rows whose combination changes are rewritten. Each part is
+        swapped atomically through finalize_rates_part, which queues its payers
+        and TINs for the next incremental rollup. A part that can't be read or
+        written is left as it was and retried at the next start."""
+        log = logging.getLogger(__name__)
+        try:
+            with self.connect() as con:
+                todo = [r[0] for r in con.execute(
+                    "SELECT filename FROM files WHERE coalesce(modifier_rules, 0) < ? "
+                    "ORDER BY filename", [MODIFIER_RULES_VERSION]).fetchall()]
+        except Exception as e:  # noqa: BLE001 — never block the app from opening
+            log.warning("modifier-field check skipped (%s)", e)
+            return
+        if not todo:
+            return
+        t0 = time.monotonic()
+        fixed = rows_fixed = 0
+        for name in todo:
+            try:
+                n = self._normalize_part_modifiers(name)
+            except Exception as e:  # noqa: BLE001 — one bad part never blocks the rest
+                log.warning("could not update the modifier fields of %s (%s) — its "
+                            "rows are unchanged; will retry at the next start", name, e)
+                continue
+            if n:
+                fixed += 1
+                rows_fixed += n
+        if fixed:
+            log.info("updated the modifier / place-of-service fields of %s rows in %d "
+                     "file(s) to the current rules in %.0f s (one time; see the Files "
+                     "tab's data-quality line)", f"{rows_fixed:,}", fixed,
+                     time.monotonic() - t0)
+
+    def _normalize_part_modifiers(self, name: str) -> int:
+        """One file's part -> current modifier rules. Returns rows changed."""
+        from .catalog import resolve_discipline
+        from .modifiers import normalize
+        path = self.rates_dir / f"{file_key(name)}.parquet"
+        changed_rows = 0
+        if path.exists():
+            src = f"read_parquet('{sql_path(path)}')"
+            with self.connect() as con:
+                combos = con.execute(
+                    f"SELECT DISTINCT billing_code, billing_code_modifier, service_code "
+                    f"FROM {src}").fetchall()
+            mapping = []   # (code, old mods, old pos, new mods, new pos, discipline, split, moved)
+            for code, mods, pos in combos:
+                mods, pos = list(mods or []), list(pos or [])
+                new_mods, new_pos, split, moved = normalize(mods, pos)
+                if new_mods != mods or new_pos != pos:
+                    mapping.append((code, mods, pos, new_mods, new_pos,
+                                    resolve_discipline(code, new_mods), split, moved))
+            if mapping:
+                changed_rows = self._rewrite_part_modifiers(name, path, src, mapping)
+        with self.write_lock, self.connect() as con:
+            con.execute("UPDATE files SET modifier_rules = ? WHERE filename = ?",
+                        [MODIFIER_RULES_VERSION, name])
+        return changed_rows
+
+    def _rewrite_part_modifiers(self, name: str, path: Path, src: str, mapping: list) -> int:
+        tmp = self.rates_dir / f".{file_key(name)}.{os.getpid()}.parquet.tmp"
+        # a hash join on the (code, modifier list, service-code list) key —
+        # measured 12 s for a 13.5M-row part vs 50 s for a per-row map lookup
+        join = (f"FROM {src} r LEFT JOIN _modfix f ON r.billing_code = f.c "
+                "AND r.billing_code_modifier = f.m AND r.service_code = f.s")
+        with self.connect() as con:
+            con.execute("CREATE OR REPLACE TEMP TABLE _modfix (c VARCHAR, m VARCHAR[], "
+                        "s VARCHAR[], nm VARCHAR[], ns VARCHAR[], nd VARCHAR, "
+                        "split BOOLEAN, moved BOOLEAN)")
+            con.executemany("INSERT INTO _modfix VALUES (?, ?, ?, ?, ?, ?, ?, ?)", mapping)
+            changed, split_rows, moved_rows = con.execute(
+                f"SELECT count(f.c), count(*) FILTER (WHERE f.split), "
+                f"count(*) FILTER (WHERE f.moved) {join}").fetchone()
+            reader = con.execute(
+                f"""SELECT r.* REPLACE (
+                        coalesce(f.nm, r.billing_code_modifier) AS billing_code_modifier,
+                        coalesce(f.ns, r.service_code) AS service_code,
+                        coalesce(f.nd, r.discipline) AS discipline) {join}"""
+            ).to_arrow_reader(200_000)
+            rows = 0
+            tmp.unlink(missing_ok=True)
+            try:
+                with pq.ParquetWriter(tmp, RATES_SCHEMA, compression=PARQUET_COMPRESSION) as w:
+                    for batch in reader:
+                        w.write_table(pa.Table.from_batches([batch]).select(
+                            RATES_SCHEMA.names).cast(RATES_SCHEMA))
+                        rows += batch.num_rows
+                con.execute("DROP TABLE IF EXISTS _modfix")
+            except BaseException:
+                tmp.unlink(missing_ok=True)
+                raise
+        self.finalize_rates_part(name, tmp, rows)
+        # the Files tab's data-quality line: same counters a re-ingest reports
+        with self.write_lock, self.connect() as con:
+            raw = con.execute("SELECT qa FROM files WHERE filename = ?", [name]).fetchone()
+            try:
+                qa = json.loads(raw[0]) if raw and raw[0] else {}
+            except ValueError:
+                qa = {}
+            if isinstance(qa, dict):
+                qa["modifier_split_rows"] = int(split_rows)
+                qa["pos_in_modifier_rows"] = int(moved_rows)
+                con.execute("UPDATE files SET qa = ? WHERE filename = ?",
+                            [json.dumps(qa), name])
+        return int(changed)
 
     def _meta_get(self, con: duckdb.DuckDBPyConnection, key: str) -> str | None:
         try:
@@ -1467,6 +1586,9 @@ class Store:
         con.execute("ALTER TABLE url_queue ADD COLUMN IF NOT EXISTS content_sha VARCHAR")
         # migrate stores created before the "download anyway" size override
         con.execute("ALTER TABLE url_queue ADD COLUMN IF NOT EXISTS force_size BOOLEAN DEFAULT false")
+        # the modifier rules (mrfx/modifiers.py) a file's rows were written
+        # under; older parts are rewritten once at open (_migrate_modifier_fields)
+        con.execute("ALTER TABLE files ADD COLUMN IF NOT EXISTS modifier_rules INTEGER")
         # bulk "retry failed" rounds a row has been through: _claim_next serves
         # never-retried rows first (fair scheduling)
         con.execute("ALTER TABLE url_queue ADD COLUMN IF NOT EXISTS retries INTEGER DEFAULT 0")
@@ -3073,9 +3195,13 @@ class Store:
             "payer", "file_type", "status", "schema_version", "last_updated_on",
             "size_bytes", "rows_emitted", "ref_groups_skipped", "error",
             "preflight", "qa", "progress", "chunks_done", "chunks_total",
-            "started_at", "finished_at",
+            "started_at", "finished_at", "modifier_rules",
         }
         fields = {k: v for k, v in fields.items() if k in cols}
+        if fields.get("status") == "done":
+            # every "done" follows a fresh parse by THIS version's parser, so
+            # its part already follows the current modifier rules
+            fields.setdefault("modifier_rules", MODIFIER_RULES_VERSION)
         for jcol in ("preflight", "qa"):
             if jcol in fields and not isinstance(fields[jcol], (str, type(None))):
                 fields[jcol] = json.dumps(fields[jcol])
