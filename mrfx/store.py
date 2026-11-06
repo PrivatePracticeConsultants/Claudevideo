@@ -2262,29 +2262,48 @@ class Store:
         finally:
             self.write_lock.release()
 
+    # Files & imports lists the queue in this order — what is moving now,
+    # then what needs the user, then what is finished, then what waits:
+    # downloading (and reading an index), processing, downloaded-and-waiting-
+    # to-process, too big, paused, failed, done, skipped, queued.
+    URL_LIST_ORDER = ("downloading", "expanding", "ingesting", "fetched", "oversize",
+                      "paused", "failed", "done", "skipped", "queued")
+    _URL_IN_PROGRESS = ("downloading", "expanding", "ingesting", "fetched")
+
     def list_urls(self, limit: int = 500) -> list[dict]:
-        """Rows the user pasted (top-level, no parent) are listed first — a
-        764-file index expansion must not push the row the user is watching
-        out of the window — then children with the ACTIONABLE statuses
-        (failed/skipped: the only rows with retry buttons — a file forgotten
-        mid-grind on a 2,000-row queue must keep its retry button reachable),
-        then the newest `limit` other children. Each slice is capped at
-        `limit` so the payload stays bounded."""
+        """The queue as Files & imports shows it, in URL_LIST_ORDER. Within a
+        status: links the user pasted first (a 764-file index expansion must
+        not bury the row they are watching), then in-progress rows in the
+        order they started, queued rows in the order they will be downloaded
+        (the claim order: retries, then id), and finished rows newest first.
+
+        Which rows are SENT stays bounded: every in-progress row (as many as
+        there are download/parse slots), every pasted link, the actionable
+        children (failed/skipped/too big/paused: the only rows with retry or
+        "download anyway" buttons — a file forgotten mid-grind on a 2,000-row
+        queue must keep its button reachable), the newest done children and
+        the next queued ones — each slice capped at `limit`. (Taking the
+        "newest `limit`" of everything else used to fill the window with
+        queued rows and could leave the files downloading RIGHT NOW out of
+        it on a big index.)"""
+        actionable = "('failed', 'skipped', 'oversize', 'paused')"
+        slices = (
+            ("status IN ('downloading', 'expanding', 'ingesting', 'fetched')", "id"),
+            ("parent_id IS NULL", "id DESC"),
+            (f"parent_id IS NOT NULL AND status IN {actionable}", "id DESC"),
+            ("parent_id IS NOT NULL AND status = 'done'",
+             "finished_at DESC NULLS LAST, id DESC"),
+            ("parent_id IS NOT NULL AND status = 'queued'", "coalesce(retries, 0), id"),
+            # anything else (a status this list does not know yet) still shows
+            ("parent_id IS NOT NULL AND status NOT IN ('downloading', 'expanding', "
+             f"'ingesting', 'fetched', 'done', 'queued') AND status NOT IN {actionable}",
+             "id DESC"),
+        )
         with self.connect() as con:
-            rows = con.execute(
-                "SELECT * FROM url_queue WHERE parent_id IS NULL ORDER BY id DESC LIMIT ?",
-                [limit],
-            ).fetchall()
-            rows += con.execute(
-                "SELECT * FROM url_queue WHERE parent_id IS NOT NULL "
-                "AND status IN ('failed', 'skipped', 'oversize', 'paused') ORDER BY id DESC LIMIT ?",
-                [limit],
-            ).fetchall()
-            rows += con.execute(
-                "SELECT * FROM url_queue WHERE parent_id IS NOT NULL "
-                "AND status NOT IN ('failed', 'skipped', 'oversize', 'paused') ORDER BY id DESC LIMIT ?",
-                [limit],
-            ).fetchall()
+            rows = []
+            for where, order in slices:
+                rows += con.execute(f"SELECT * FROM url_queue WHERE {where} "
+                                    f"ORDER BY {order} LIMIT ?", [limit]).fetchall()
             cols = [d[0] for d in con.description]
         out, seen = [], set()
         for r in rows:
@@ -2293,10 +2312,25 @@ class Store:
                 continue  # slices run as separate queries; a row changing
                 # status between them must not render twice in one poll
             seen.add(d["id"])
+            out.append(d)
+        rank = {s: i for i, s in enumerate(self.URL_LIST_ORDER)}
+
+        def key(d: dict) -> tuple:
+            st = d.get("status")
+            pasted = 0 if d.get("parent_id") is None else 1
+            if st in self._URL_IN_PROGRESS:
+                within: tuple = (d["id"],)
+            elif st == "queued":
+                within = (d.get("retries") or 0, d["id"])
+            else:                       # finished / needs the user: newest first
+                fin = d.get("finished_at")
+                within = (fin is None, -(fin.timestamp() if fin else 0), -d["id"])
+            return (rank.get(st, len(rank)), pasted, *within)
+        out.sort(key=key)
+        for d in out:
             for k in ("added_at", "finished_at", "retry_after"):
                 if d.get(k) is not None:
                     d[k] = str(d[k])
-            out.append(d)
         return out
 
     def url_queue_counts(self) -> dict:

@@ -2696,3 +2696,36 @@ def test_a_server_that_dribbles_on_one_connection_trips_the_stall_deadline(cfg):
         assert "no download progress" in str(ei.value) and ei.value.retryable
     finally:
         httpd.shutdown()
+
+
+def test_queue_lists_active_then_attention_then_finished_then_queued(cfg, store):
+    """Files & imports order (user request): downloading, processing, too big,
+    failed, done, then queued — paused next to too big, skipped after done,
+    queued in the order they will be downloaded. And on a big index the files
+    downloading RIGHT NOW are always in the window (the newest-N window was
+    full of queued rows and could drop them)."""
+    parent = store.enqueue_url("https://x.example/toc.json", "https://x.example/toc.json")
+    store.enqueue_urls([(f"https://x.example/f{i}.json.gz", f"https://x.example/f{i}.json.gz")
+                        for i in range(40)], parent_id=parent)
+    want = {1: "downloading", 2: "ingesting", 3: "oversize", 4: "failed", 5: "done",
+            6: "paused", 7: "fetched", 8: "skipped", 9: "done", 10: "expanding"}
+    with store.write_lock, store.connect() as con:
+        ids = [r[0] for r in con.execute(
+            "SELECT id FROM url_queue WHERE parent_id IS NOT NULL ORDER BY id").fetchall()]
+        for k, st in want.items():
+            con.execute("UPDATE url_queue SET status = ?, finished_at = CASE WHEN ? IN "
+                        "('done', 'failed', 'skipped') THEN TIMESTAMP '2026-11-01' + "
+                        "INTERVAL (?) MINUTE END WHERE id = ?", [st, st, k, ids[k]])
+        con.execute("UPDATE url_queue SET status = 'done', finished_at = TIMESTAMP "
+                    "'2026-10-01' WHERE id = ?", [parent])
+        con.execute("UPDATE url_queue SET retries = 1 WHERE id = ?", [ids[11]])  # a retried one
+    listed = store.list_urls(limit=5)
+    order = [r["status"] for r in listed]
+    firsts = list(dict.fromkeys(order))
+    assert firsts == ["downloading", "expanding", "ingesting", "fetched", "oversize", "paused",
+                      "failed", "done", "skipped", "queued"]
+    done = [r["id"] for r in listed if r["status"] == "done"]
+    assert done == [parent, ids[9], ids[5]]          # the pasted link first, then newest
+    queued = [r["id"] for r in listed if r["status"] == "queued"]
+    assert queued == [ids[0], ids[12], ids[13], ids[14], ids[15]]   # download order; retried last
+    assert ids[1] in [r["id"] for r in listed]       # downloading stays in a tiny window

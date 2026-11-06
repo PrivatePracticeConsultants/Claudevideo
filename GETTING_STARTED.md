@@ -837,6 +837,11 @@ already have is automatically **skipped, not duplicated**.
   rebuild. Every number is the same as before. On the Code page the ranking
   now appears as soon as it is ready and the month-by-month table fills in
   after; clicking another code cancels the previous one.
+- **Download list order (Files & imports)**: what is moving now first —
+  downloading, then processing — then what needs you (too big, paused,
+  failed), then done and skipped, and the queue last, in the order it will
+  download. The files downloading right now always appear, even in a queue
+  of thousands.
 - **Long runs**: a download whose server stalls is **paused** (slot freed,
   bytes kept, automatic retry in 24 h, up to 5 times — `download_pause_hours`
   / `download_auto_resumes`); Resume stopped; the monthly refresh (if on)

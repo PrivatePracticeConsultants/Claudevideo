@@ -3904,20 +3904,24 @@ async function loadUrlQueue() {
   wrap.style.display = "block";
   const c = d.counts || {};
   const total = Object.values(c).reduce((a, b) => a + b, 0);
-  const parts = ["queued", "downloading", "fetched", "expanding", "ingesting", "done", "skipped"]
-    .filter((k) => c[k]).map((k) => k === "skipped"
-      // skips are the app working as designed (duplicates of files already
-      // ingested, files without the target codes) — say so, or a healthy
-      // grind reads as mass failure
-      ? `${fmtInt(c[k])} skipped <span class="muted">(duplicates &amp; non-matches — normal)</span>`
-      : `${fmtInt(c[k])} ${k}`);
-  // over-size files are their OWN category, not failures — otherwise one big
-  // payer's shards make the failure count look alarming and bury real errors
-  if (c.oversize) parts.push(`<span class="warn-text">${fmtInt(c.oversize)} too big (needs your OK)</span>`);
-  if (c.paused) parts.push(`<span class="warn-text">${fmtInt(c.paused)} paused <span class="muted">(their servers stalled — they retry by themselves)</span></span>`);
-  if (c.failed) parts.push(`<span class="err-text">${fmtInt(c.failed)} failed</span>`);
+  // the same order as the table below (store.URL_LIST_ORDER): what is moving
+  // now, then what needs you, then what is finished, then what waits
+  const countLabel = {
+    // skips are the app working as designed (duplicates of files already
+    // ingested, files without the target codes) — say so, or a healthy
+    // grind reads as mass failure
+    skipped: (n) => `${n} skipped <span class="muted">(duplicates &amp; non-matches — normal)</span>`,
+    // over-size files are their OWN category, not failures — otherwise one big
+    // payer's shards make the failure count look alarming and bury real errors
+    oversize: (n) => `<span class="warn-text">${n} too big (needs your OK)</span>`,
+    paused: (n) => `<span class="warn-text">${n} paused <span class="muted">(their servers stalled — they retry by themselves)</span></span>`,
+    failed: (n) => `<span class="err-text">${n} failed</span>`,
+  };
+  const parts = ["downloading", "expanding", "ingesting", "fetched", "oversize", "paused",
+                 "failed", "done", "skipped", "queued"]
+    .filter((k) => c[k]).map((k) => (countLabel[k] || ((n) => `${n} ${k}`))(fmtInt(c[k])));
   countsEl.innerHTML = parts.join(" · ") +
-    (total > d.urls.length ? ` <span class="muted">(showing the newest ${fmtInt(d.urls.length)} of ${fmtInt(total)} links)</span>` : "");
+    (total > d.urls.length ? ` <span class="muted">(showing ${fmtInt(d.urls.length)} of ${fmtInt(total)} links — every active, too-big, paused and failed one; the newest finished; the next queued)</span>` : "");
   if (c.failed) {
     const btn = document.createElement("button");
     btn.className = "btn";
