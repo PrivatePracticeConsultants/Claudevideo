@@ -348,3 +348,46 @@ def test_tin_search_works_at_every_grain(ka):
         assert rows and all(T2 in r["tin_value"] for r in rows), grain
     # a partial number still substring-matches while typing
     assert c.get("/api/rates?grain=tin&q=22000&limit=100").json()["rows"]
+
+
+def test_latest_is_decided_before_row_filters(ka):
+    """Round 3 P0.2. T1's current 97110 rate is June's GP $42; May's GP $40 and
+    59|GP $40 are superseded. A rate filter <= $41 must therefore show NO T1
+    line (its current rate is $42) — not resurrect May's $40s. By hand, under
+    rate_max=41 every latest line is above $41 (T1 42, T2 44, SSN 45, T3 50):
+    the ranked list is empty. Same for a modifier filter: 59|GP exists only in
+    May, so under latest T1 has no 59 line at all."""
+    _, c = ka
+    assert c.get("/api/code/97110?grain=tin&rate_max=41").json()["ranked"] == []
+    assert c.get("/api/rates?grain=tin&cpt=97110&latest=1&rate_max=41&limit=100").json()["rows"] == []
+    assert c.get("/api/rates?grain=npi&q=1111111111&cpt=97110&latest=1&mod_has=59&limit=100"
+                 ).json()["rows"] == []
+    # without latest (all months pooled) May's $40 rows are legitimately there
+    pooled = c.get("/api/rates?grain=tin&cpt=97110&rate_max=41&limit=100").json()["rows"]
+    assert sorted((r["unit_id"], r["modifier_set"], r["file_month"], r["negotiated_rate"])
+                  for r in pooled) == [(T1, "59|GP", "2026-05", 40.0), (T1, "GP", "2026-05", 40.0)]
+
+
+def test_latest_npi_under_two_tins_keeps_both_contracts(ka):
+    """X bills 97110 under T1 (newest: June $42) and T2 (only May: $44). Two
+    contracts — T1's June file must not supersede T2's May line. By hand:
+    latest NPI view for X / 97110 = {(T1, June, 42), (T2, May, 44)}."""
+    _, c = ka
+    rows = c.get(f"/api/rates?grain=npi&q={X}&cpt=97110&latest=1&limit=100").json()["rows"]
+    assert sorted((r["tin_value"], r["file_month"], r["negotiated_rate"]) for r in rows) == [
+        (T1, "2026-06", 42.0), (T2, "2026-05", 44.0)]
+
+
+def test_code_and_trend_views_refuse_whole_store_entity_scans_on_a_big_store(ka, monkeypatch):
+    """Round 3 P0.2: /api/code and /api/trend skipped the big-store guard, so
+    ?grain=entity on a 300M-row store ran the whole-store aggregation that
+    ends in a temp-disk 500. Now they answer like the table: a plain 422."""
+    _, c = ka
+    monkeypatch.setattr("mrfx.api.NARROW_REQUIRED_ROWS", 0)
+    for u in ("/api/code/97110?grain=entity", "/api/code/97110?grain=npi",
+              "/api/trend?grain=entity", "/api/trend?grain=npi&cpt=97110"):
+        r = c.get(u)
+        assert r.status_code == 422 and "large" in r.json()["detail"], u
+    # a narrowed question still answers
+    assert c.get(f"/api/trend?grain=npi&q={X}&cpt=97110").status_code == 200
+    assert c.get("/api/code/97110?grain=tin").status_code == 200

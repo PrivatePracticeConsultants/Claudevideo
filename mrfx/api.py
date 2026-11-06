@@ -134,7 +134,11 @@ _TIN_PROJECTION = f"""
     coalesce(td.cities, CASE WHEN nn.city IS NULL THEN [] ELSE [nn.city] END) AS cities,
     -- PT/OT/SLP practice? from tin_directory (EIN TINs) or, for an NPI-in-the-
     -- TIN-slot row, that NPI's own taxonomy.
-    coalesce(td.is_therapy, {_THERAPY_NN}, FALSE) AS is_therapy
+    coalesce(td.is_therapy, {_THERAPY_NN}, FALSE) AS is_therapy,
+    -- for the entity key only (see _ENTITY_KEY_SQL): is the display name an
+    -- ORGANIZATION's (an NPI-2), and the practice's main state
+    coalesce(td.entity_kind = 'org', nn.entity_type = 'NPI-2', FALSE) AS name_is_org,
+    coalesce(td.primary_state, nn.state) AS primary_state
 """
 _TIN_JOINS = """
     LEFT JOIN tin_directory td USING (tin_value)
@@ -145,20 +149,71 @@ _TIN_JOINS = """
 """
 _TIN_REL = f"SELECT {_TIN_PROJECTION} FROM rates_by_tin t {_TIN_JOINS}"
 
-_ENTITY_REL = f"""
+# The entity a TIN rolls up to. A manual entity_map name wins. Otherwise an
+# ORGANIZATION name (from an NPI-2) plus the practice's main state: two TINs of
+# "GREATER BOSTON WELLNESS PHYSICIANS" in MA are one entity, an unrelated
+# "ACTIVE PHYSICAL THERAPY" in KS is another. A TIN with no organization NPI is
+# named after one of its clinicians — and that clinician often bills under
+# several unrelated TINs (real store: 462 person-names shared by 1,008 TINs),
+# so such a TIN is its OWN entity (key = tin_value), as is a no-name TIN.
+_ENTITY_KEY_SQL = """coalesce(
+    s2.entity_name,
+    CASE WHEN NOT s.name_is_org OR s.display_name LIKE 'TIN %' THEN s.tin_value
+         ELSE s.display_name || coalesce(' · ' || s.primary_state, '') END)"""
+
+
+def _entity_keyed(tin_rows: str) -> str:
+    """TIN rows (the _TIN_REL column set) + their entity_key."""
+    return (f"SELECT s.*, {_ENTITY_KEY_SQL} AS entity_key FROM ({tin_rows}) s "
+            "LEFT JOIN entity_map s2 ON s2.tin_value = s.tin_value")
+
+
+def _resolve_entity_key(con, key: str) -> str:
+    """An entity drawer link may carry a bare organization name (a bookmark,
+    an older build's link, a hand-typed URL) where the key is now "NAME · ST".
+    Exactly one entity of that name -> its key; several -> say which (never
+    pick one); none -> the key as given (the caller 404s)."""
+    if con.execute(f"SELECT 1 FROM ({_entity_keyed(_TIN_REL)}) WHERE entity_key = ? LIMIT 1",
+                   [key]).fetchone():
+        return key
+    keys = [r[0] for r in con.execute(
+        f"SELECT DISTINCT entity_key FROM ({_entity_keyed(_TIN_REL)}) "
+        "WHERE display_name = ? AND entity_key <> tin_value ORDER BY 1", [key]).fetchall()]
+    if len(keys) > 1:
+        raise HTTPException(409, f"several practices are named {key!r}: "
+                                 + "; ".join(keys) + " — open the one you mean")
+    return keys[0] if keys else key
+
+
+def _entity_rel(tin_rows: str, latest: bool = False) -> str:
+    """Entity grain over the given TIN rows: one row per entity x payer x code x
+    modifier set x class x POS set (x month, unless `latest`). Under `latest`
+    each member TIN has ALREADY been reduced to its own newest month (rel_sql),
+    so the entity rate is the median over every member's current rate — the
+    Benchmark's rule. Grouping by month first and then keeping the entity's
+    newest month dropped a member whose payer hadn't republished it yet
+    (A: July $55, B: June $40 -> $55 from A alone, vs the Benchmark's $47.50)."""
+    month_col = "max(file_month) AS file_month" if latest else "file_month"
+    month_key = "" if latest else " file_month,"
+    return f"""
     SELECT min(display_name) AS display_name,
            entity_key AS unit_id,
            string_agg(DISTINCT tin_value, '; ' ORDER BY tin_value) AS tin_value,
            bool_or(is_mapped_entity) AS is_mapped_entity,
            bool_or(tin_is_really_npi) AS tin_is_really_npi,
            count(DISTINCT tin_value) AS tin_count,
+           -- member TINs' NPI counts summed: an NPI listed under two member
+           -- TINs counts twice (the rollup keeps per-TIN counts, not the NPIs;
+           -- stated in the export methodology)
            sum(npi_count) AS npi_count,
-           CASE WHEN count(DISTINCT negotiated_rate) > 1 THEN count(DISTINCT negotiated_rate)
-                ELSE max(rate_variants) END AS rate_variants,
+           -- ONE meaning: how many different member-TIN rates the shown
+           -- median is taken over (rate_min/rate_max still span every
+           -- published value of every member)
+           count(DISTINCT negotiated_rate) AS rate_variants,
            min(rate_min) AS rate_min, max(rate_max) AS rate_max,
            payer, billing_code, min(billing_code_type) AS billing_code_type,
            discipline, min(is_timed) AS is_timed,
-           modifier_set, billing_class, service_code_set, file_month,
+           modifier_set, billing_class, service_code_set, {month_col},
            -- Re-median across the entity's member TINs — but a placeholder-ONLY
            -- TIN carries its 0.01 as its per-TIN "median" (store.BY_TIN_QUERY's
            -- coalesce fallback), so folding it in would drag a multi-TIN entity
@@ -173,29 +228,25 @@ _ENTITY_REL = f"""
                median(negotiated_rate)
            ), 4) AS negotiated_rate,
            min(negotiated_type) AS negotiated_type, is_dollar_rate,
-           sum(source_count) AS source_count,
+           -- files behind the line: members of one payer usually share ONE
+           -- file, so summing per-member counts multiplied it (2 TINs from one
+           -- file read "2 files"). Distinct representative files, never less
+           -- than any single member's count — exact whenever each member's
+           -- line comes from one file (the export methodology says so)
+           greatest(max(source_count), count(DISTINCT source_files)) AS source_count,
            string_agg(DISTINCT source_files, ';' ORDER BY source_files) AS source_files,
            min(schema_version) AS schema_version,
            max(last_updated_on) AS last_updated_on,
            list_sort(list_distinct(flatten(list(states)))) AS states,
            list_sort(list_distinct(flatten(list(cities)))) AS cities,
            bool_or(is_therapy) AS is_therapy   -- entity is therapy if any TIN is
-    FROM (
-        -- Group on the entity NAME, but a no-name SSN-pattern TIN falls back to
-        -- the literal 'TIN MASKED-SSN' label — identical for EVERY such TIN — so
-        -- grouping on it would merge unrelated sole-proprietor practices into one
-        -- bogus entity. Fall back to the (unique) tin_value in that case so each
-        -- stays its own entity; the masked label is still what renders.
-        SELECT s.*, coalesce(
-            s2.entity_name,
-            CASE WHEN s.display_name = 'TIN MASKED-SSN' THEN s.tin_value
-                 ELSE s.display_name END
-        ) AS entity_key
-        FROM ({_TIN_REL}) s LEFT JOIN entity_map s2 ON s2.tin_value = s.tin_value
-    )
+    FROM ({_entity_keyed(tin_rows)})
     GROUP BY entity_key, payer, billing_code, discipline, modifier_set,
-             billing_class, service_code_set, file_month, is_dollar_rate
+             billing_class, service_code_set,{month_key} is_dollar_rate
 """
+
+
+_ENTITY_REL = _entity_rel(_TIN_REL)
 
 _NPI_REL = f"""
     SELECT coalesce(n.org_name, 'NPI ' || d.npi) AS display_name,
@@ -263,7 +314,24 @@ class FilterSet:
                 return [x.strip() for x in v if x and x.strip()]
             return split(v)
 
-        clauses, params = [], []
+        # Every clause lands in ONE bucket; rel_sql needs to know which:
+        #  key   — payer / code / pinned month: pick whole contracts
+        #  unit  — state, city, therapy-practice, hide-TIN=NPI: attributes of
+        #          the practice (constant across its rows)
+        #  ident — the search box: picks units (NPI / TIN / entity)
+        #  row   — everything else (modifier, class, POS, rate bounds,
+        #          dollar-only, discipline): picks rows WITHIN a contract
+        # "latest" must be decided over key/unit/ident-filtered rows ONLY: a
+        # row filter applied first removes the newest row and promotes a
+        # superseded month (rate_max=41 showed May's $40 instead of June's $42).
+        # Params are kept in bucket order key, unit, ident, row — the order
+        # every query assembles them in (see rel_sql / where_of).
+        self._buckets: dict[str, tuple[list, list]] = {
+            k: ([], []) for k in ("key", "unit", "ident", "row")}
+
+        def put(kind, clause, *ps):
+            self._buckets[kind][0].append(clause)
+            self._buckets[kind][1].extend(ps)
         self.described: dict = {}
         self.ident_kind: str | None = None   # set by an exact NPI/TIN search
         # True once a filter references a column that only exists AFTER the
@@ -276,54 +344,52 @@ class FilterSet:
 
         payers = multi("payer")
         if payers:
-            clauses.append(f"payer IN ({', '.join('?' for _ in payers)})")
-            params += payers
+            put("key", f"payer IN ({', '.join('?' for _ in payers)})", *payers)
             add("payers", payers)
         codes = split(qp.get("cpt") or qp.get("code"))
         if codes:
-            clauses.append(f"billing_code IN ({', '.join('?' for _ in codes)})")
-            params += codes
+            put("key", f"billing_code IN ({', '.join('?' for _ in codes)})", *codes)
             add("codes", codes)
         disciplines = split(qp.get("discipline"))
         if disciplines:
-            clauses.append(f"discipline IN ({', '.join('?' for _ in disciplines)})")
-            params += disciplines
-            add("disciplines", disciplines)
+            # + 'unspecified', the Benchmark's rule (_market_where): a shared
+            # code (97110, 97530...) the payer prices without GP/GO/GN is ONE
+            # rate for every discipline — excluding it showed "PT 97110" as
+            # only the few GP-tagged lines (PT $70 + untagged $65: Explorer 70,
+            # Benchmark 67.5)
+            put("row", f"(discipline IN ({', '.join('?' for _ in disciplines)}) "
+                "OR discipline = 'unspecified')", *disciplines)
+            add("disciplines", f"{', '.join(disciplines)} (plus lines the payer did not tag "
+                "with a discipline: a shared code priced without GP/GO/GN applies to every "
+                "discipline)")
         modifier = qp.get("modifier")
         if modifier == "base":
-            clauses.append(base_sql("modifier_set"))
+            put("row", base_sql("modifier_set"))
             add("modifier", BASE_RULE_TEXT)
         elif modifier == "assistant":
-            clauses.append("(modifier_set LIKE '%CQ%' OR modifier_set LIKE '%CO%')")
+            put("row", "(modifier_set LIKE '%CQ%' OR modifier_set LIKE '%CO%')")
             add("modifier", "assistant-provided only (CQ/CO)")
         elif modifier:
-            clauses.append("('|' || modifier_set || '|') LIKE ('%|' || ? || '|%')")
-            params.append(modifier)
+            put("row", "('|' || modifier_set || '|') LIKE ('%|' || ? || '|%')", modifier)
             add("modifier", f"contains {modifier}")
         for m in split(qp.get("mod_has")):
-            clauses.append("('|' || modifier_set || '|') LIKE ('%|' || ? || '|%')")
-            params.append(m)
+            put("row", "('|' || modifier_set || '|') LIKE ('%|' || ? || '|%')", m)
             add(f"mod_has:{m}", True)
         for m in split(qp.get("mod_not")):
-            clauses.append("('|' || modifier_set || '|') NOT LIKE ('%|' || ? || '|%')")
-            params.append(m)
+            put("row", "('|' || modifier_set || '|') NOT LIKE ('%|' || ? || '|%')", m)
             add(f"mod_not:{m}", True)
         if qp.get("billing_class"):
-            clauses.append("billing_class = ?")
-            params.append(qp["billing_class"])
+            put("row", "billing_class = ?", qp["billing_class"])
             add("billing_class", qp["billing_class"])
         if qp.get("pos"):
-            clauses.append("('|' || service_code_set || '|') LIKE ('%|' || ? || '|%')")
-            params.append(qp["pos"])
+            put("row", "('|' || service_code_set || '|') LIKE ('%|' || ? || '|%')", qp["pos"])
             add("place_of_service", qp["pos"])
         if qp.get("state"):
-            clauses.append("list_contains(states, ?)")
-            params.append(qp["state"].upper())
+            put("unit", "list_contains(states, ?)", qp["state"].upper())
             add("state", qp["state"].upper())
             self.uses_dim_cols = True  # `states` is a joined column
         if qp.get("city"):
-            clauses.append("len(list_filter(cities, c -> upper(c) = upper(?))) > 0")
-            params.append(qp["city"])
+            put("unit", "len(list_filter(cities, c -> upper(c) = upper(?))) > 0", qp["city"])
             add("city", qp["city"])
             self.uses_dim_cols = True  # `cities` is a joined column
         if qp.get("month"):
@@ -334,8 +400,7 @@ class FilterSet:
                 raise ValueError(
                     "the explorer month filter takes a real month like 2026-07 "
                     "(leave it empty to see all months)")
-            clauses.append("file_month = ?")
-            params.append(qp["month"])
+            put("key", "file_month = ?", qp["month"])
             add("as_of_month", qp["month"])
         q = qp.get("q")
         ident = re.sub(r"[\s-]", "", q) if q else ""
@@ -354,21 +419,17 @@ class FilterSet:
                 # an OR across columns is evaluated only after reading every
                 # row). Which column depends on the grain, so rel_sql swaps
                 # this token for the grain's clause (exactly one parameter).
-                clauses.append(_IDENT_TOKEN)
-                params.append(ident)
+                put("ident", _IDENT_TOKEN, ident)
                 self.ident_kind = "npi" if len(ident) == 10 else "tin"
             else:   # a partial number while typing
-                clauses.append("(unit_id LIKE ? OR tin_value LIKE ?)")
-                params += [f"%{ident}%", f"%{ident}%"]
+                put("ident", "(unit_id LIKE ? OR tin_value LIKE ?)", f"%{ident}%", f"%{ident}%")
             add("search", q)
             # unit_id is a projected name (tin_value / npi / entity), not a
             # base-table column: keep the TIN grain off the late-join path
             self.uses_dim_cols = True
         elif q:
-            clauses.append(
-                "(unit_id LIKE ? OR upper(display_name) LIKE upper(?) OR tin_value LIKE ?)"
-            )
-            params += [f"%{q}%", f"%{q}%", f"%{q}%"]
+            put("ident", "(unit_id LIKE ? OR upper(display_name) LIKE upper(?) OR tin_value LIKE ?)",
+                f"%{q}%", f"%{q}%", f"%{q}%")
             add("search", q)
             self.uses_dim_cols = True  # searches display_name (a joined column)
         dollar_only = qp.get("dollar_only", "1") not in ("0", "false")
@@ -379,16 +440,16 @@ class FilterSet:
             # Without this the same store shows a lower median on one screen than
             # another. The per-file zero_rates QA count still reports how many
             # placeholders a payer published (transparency preserved there).
-            clauses.append("is_dollar_rate AND negotiated_rate > 0.01")
+            put("row", "is_dollar_rate AND negotiated_rate > 0.01")
         add("dollar_rates_only", dollar_only)
         if qp.get("hide_tin_npi", "0") in ("1", "true"):
-            clauses.append("NOT tin_is_really_npi")
+            put("unit", "NOT tin_is_really_npi")
             add("hide_tin_is_really_npi", True)
         if qp.get("therapy_only", "0") in ("1", "true"):
             # STRICT outpatient-practice test (tin_directory.is_therapy) — the
             # description below ships verbatim in every export's methodology
             # sidecar, so it must state the rule the query ACTUALLY applied.
-            clauses.append("is_therapy")
+            put("unit", "is_therapy")
             add("therapy_practices_only",
                 f"outpatient PT/OT/SLP practices only: >= {THERAPY_MIN_SHARE_PCT}% of the "
                 "practice's identified CLINICIANS are PT/OT/SLP (incl. PTA/OTA/SLPA); "
@@ -413,8 +474,7 @@ class FilterSet:
                 val = float(raw)
             except (TypeError, ValueError):
                 continue  # junk numeric input is ignored, not a 500
-            clauses.append(f"negotiated_rate {op} ?")
-            params.append(val)
+            put("row", f"negotiated_rate {op} ?", val)
             add(bound, val)
         # "newest file per contract" — the report tabs' LATEST rule, for the
         # explorer-shaped views: payers republish monthly, so with no month
@@ -426,8 +486,15 @@ class FilterSet:
             add("as_of_month", "latest")
         self.hide_outliers = qp.get("hide_outliers", "0") in ("1", "true")
         add("hide_outliers", f"ON — {OUTLIER_RULE}" if self.hide_outliers else "off")
-        self.where = " AND ".join(clauses) if clauses else "1=1"
-        self.params = params
+        self.where = self.where_of("key", "unit", "ident", "row")
+        self.params = [p for k in ("key", "unit", "ident", "row") for p in self._buckets[k][1]]
+
+    def where_of(self, *kinds: str) -> str:
+        """AND of the named buckets' clauses, in the canonical bucket order
+        (so a query assembling buckets in that order binds fs.params as-is)."""
+        cl = [c for k in ("key", "unit", "ident", "row") if k in kinds
+              for c in self._buckets[k][0]]
+        return " AND ".join(cl) if cl else "1=1"
 
 
 def _qp(request: "Request") -> dict:
@@ -469,19 +536,50 @@ def grain_of(qp: dict, cfg: MrfxConfig, store: Store) -> str:
     return grain if grain in GRAIN_REL else "tin"
 
 
+# "latest" = each CONTRACT's newest month — a contract is a payer x provider x
+# code line, the Benchmark's rule (benchmark._rates_relation). tin_is_really_npi
+# is part of the identity: an EIN and a same-digits npi-typed TIN are different
+# providers and must never supersede each other. An NPI billing under two TINs
+# holds two contracts, so the NPI grain keys by TIN too.
+_LATEST_PARTITION = {
+    "tin": "payer, tin_value, tin_is_really_npi, billing_code",
+    "npi": "payer, unit_id, tin_value, tin_is_really_npi, billing_code",
+}
+_LATEST_QUALIFY = "QUALIFY file_month = max(file_month) OVER (PARTITION BY {})"
+
+
 def rel_sql(grain: str, fs: FilterSet) -> str:
-    where = fs.where
-    if fs.ident_kind:
-        where = where.replace(_IDENT_TOKEN, f"({_ident_clause(grain, fs.ident_kind)})")
-    base = f"WITH base AS ({GRAIN_REL[grain]}) SELECT * FROM base WHERE {where}"
-    if fs.latest_only:
-        # each contract's NEWEST month among the filtered rows. An NPI billing
-        # under two TINs holds two contracts — one must not supersede the
-        # other (benchmark._rates_relation's rule), so NPI grain keys by TIN too
-        part = ("payer, unit_id, tin_value, billing_code" if grain == "npi"
-                else "payer, unit_id, billing_code")
-        base = (f"SELECT * FROM ({base}) QUALIFY file_month = max(file_month) "
-                f"OVER (PARTITION BY {part})")
+    """The filtered grain relation. Binds fs.params in bucket order (key, unit,
+    ident, row) — every branch below assembles the WHERE in that order.
+
+    Under "latest" the newest month is chosen over rows filtered ONLY by
+    whole-contract / whole-unit predicates (key, unit, ident); row filters
+    (rate bounds, modifiers, POS, class, dollar-only, discipline) apply after.
+    Filtering first let a row filter remove a contract's newest row and
+    promote a superseded month — rate_max=41 showed May's $40 under 'latest'
+    while June's $42 was the payer's current rate."""
+    def sub(w: str) -> str:
+        if fs.ident_kind:
+            return w.replace(_IDENT_TOKEN, f"({_ident_clause(grain, fs.ident_kind)})")
+        return w
+    if grain == "entity":
+        # member TINs are filtered by contract and practice attributes FIRST —
+        # a state=MO filter keeps the entity's MO TINs, not every TIN of an
+        # entity that has one MO TIN (that showed a MO+KS blend under "MO") —
+        # and, under latest, each member is reduced to ITS newest month before
+        # the member rates are combined
+        inner = f"SELECT * FROM ({_TIN_REL}) WHERE {fs.where_of('key', 'unit')}"
+        if fs.latest_only:
+            inner += " " + _LATEST_QUALIFY.format(_LATEST_PARTITION["tin"])
+        base = (f"SELECT * FROM ({_entity_rel(inner, fs.latest_only)}) "
+                f"WHERE {sub(fs.where_of('ident', 'row'))}")
+    elif fs.latest_only:
+        pre = sub(fs.where_of("key", "unit", "ident"))
+        base = (f"SELECT * FROM (WITH base AS ({GRAIN_REL[grain]}) SELECT * FROM base "
+                f"WHERE {pre} {_LATEST_QUALIFY.format(_LATEST_PARTITION[grain])}) "
+                f"WHERE {fs.where_of('row')}")
+    else:
+        base = f"WITH base AS ({GRAIN_REL[grain]}) SELECT * FROM base WHERE {sub(fs.where)}"
     if fs.hide_outliers:
         # The reference median must exclude $0/$0.01 placeholders: with
         # "dollar rates only" OFF, fs.where no longer strips them, and a
@@ -504,6 +602,25 @@ def rel_sql(grain: str, fs: FilterSet) -> str:
     return base
 
 
+def practice_basis(fs: FilterSet) -> tuple[str, str]:
+    """(SQL predicate, plain-words label) for "a practice's rate" in the
+    Code page's payer leaderboard and the summary's by-code strip — the
+    Benchmark's basis (benchmark._market_where), so the same store and month
+    give the same median on every screen: dollar rates without $0/$0.01
+    placeholders, no NPI-in-the-TIN-slot rows, professional class and base
+    modifiers — unless the user's own filter picked a class or a modifier,
+    which then wins (the relation is already restricted to it)."""
+    preds = ["is_dollar_rate", "negotiated_rate > 0.01", "NOT tin_is_really_npi"]
+    notes = ["dollar rates (no $0/$0.01 placeholders)", "no NPI-in-the-TIN-slot rows"]
+    if "billing_class" not in fs.described:
+        preds.append("billing_class = 'professional'")
+        notes.append("professional class")
+    if not any(k == "modifier" or k.startswith(("mod_has:", "mod_not:")) for k in fs.described):
+        preds.append(base_sql("modifier_set"))
+        notes.append(BASE_RULE_TEXT)
+    return " AND ".join(preds), "; ".join(notes)
+
+
 def order_sql(sort: str, direction: str) -> str:
     if sort not in SORTABLE:
         sort = "negotiated_rate"
@@ -514,9 +631,12 @@ def order_sql(sort: str, direction: str) -> str:
     # page — rows silently duplicated on one page and MISSING from another.
     # Multi-month stores are tie-dense (a TIN's rate for a code is usually
     # unchanged month over month), so every identity column joins the order.
+    # tin_value + negotiated_rate complete it: at NPI grain an NPI under two
+    # TINs ties on every other key (an export came back ...13 before ...12 on
+    # one run, and a paged view could show one twice and drop the other).
     return (f"ORDER BY {sort} {direction} NULLS LAST, unit_id ASC, billing_code ASC, "
             "modifier_set ASC, payer ASC, file_month ASC, billing_class ASC, "
-            "service_code_set ASC, is_dollar_rate ASC")
+            "service_code_set ASC, is_dollar_rate ASC, tin_value ASC, negotiated_rate ASC")
 
 
 def _mask_tin_sql(col: str) -> str:
@@ -636,8 +756,13 @@ def methodology_text(cfg: MrfxConfig, store: Store, grain: str, fs: FilterSet,
         "median of its distinct published values EXCLUDING $0/$0.01 dollar "
         "placeholders (rate_variants still counts them, and rate_min/rate_max "
         "still show them); an ENTITY rate is the median of its member TINs' "
-        "rates, and entity npi_count/source_count sum members (an NPI shared by "
-        "two member TINs counts twice).",
+        "rates (under 'latest', each member TIN at ITS newest month); an entity "
+        "is an organization (NPI-2) name plus the practice's main state (where "
+        "most of its NPIs are), a TIN named only after a clinician is its own "
+        "entity, and entity_map.yaml overrides both; entity npi_count sums members (an NPI listed under two member TINs "
+        "counts twice); entity source_count counts distinct files (exact when "
+        "each member's line comes from one file, otherwise a minimum); entity "
+        "rate_variants = how many different member-TIN rates the median is over.",
         f"Outlier handling: {fs.described.get('hide_outliers')}",
         # honesty: with no month filter the grain keeps each file_month as its
         # own row, so a rate republished monthly appears once per month and the
@@ -935,11 +1060,18 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 # is analytically meaningless (different services), so give a row
                 # per code — median, spread (IQR), practice count, and % of
                 # Medicare / below-Medicare flag when an MPFS anchor is loaded.
+                # Practice basis = the Benchmark's (practice_basis): each
+                # practice's own median first, then the spread ACROSS
+                # practices — a raw-row quantile let a TIN publishing many
+                # variants outvote the rest, and blended professional with
+                # institutional and NPI-slot rows the Benchmark excludes.
+                basis, basis_text = practice_basis(fs)
                 by_code = _dicts(con.execute(
                     f"""
-                    WITH r AS (SELECT billing_code, negotiated_rate, unit_id
+                    WITH r AS (SELECT billing_code, unit_id, median(negotiated_rate) AS negotiated_rate
                                FROM ({rel_sql(grain, fs)})
-                               WHERE is_dollar_rate AND negotiated_rate > 0.01)
+                               WHERE {basis}
+                               GROUP BY billing_code, unit_id)
                     SELECT billing_code, q[2] AS median, q[1] AS p25, q[3] AS p75,
                            entities, mpfs_rate FROM (
                     SELECT r.billing_code,
@@ -961,6 +1093,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                                            and c["median"] < mc)
             keys = ["n", "entities", "codes", "min", "p25", "median", "p75", "max"]
             result = {**dict(zip(keys, row)), "grain": grain, "by_code": by_code,
+                      "by_code_basis": basis_text,
                       "mpfs_loaded": any(c["pct_medicare"] is not None for c in by_code)}
             if len(_summary_cache) > 256:
                 _summary_cache.clear()
@@ -976,9 +1109,12 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         if grain not in GRAIN_REL:
             raise HTTPException(404, "grain must be entity|tin|npi")
         with store.connect() as con:
+            if grain == "entity":
+                unit_id = _resolve_entity_key(con, unit_id)
             rows = _dicts(con.execute(
                 f"SELECT * FROM ({GRAIN_REL[grain]}) WHERE unit_id = ? "
-                "ORDER BY billing_code, payer, modifier_set, file_month",
+                "ORDER BY billing_code, payer, modifier_set, file_month, billing_class, "
+                "service_code_set, is_dollar_rate, tin_value, negotiated_rate",
                 [unit_id],
             ))
             if not rows:
@@ -992,21 +1128,15 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 if grain == "tin":
                     tin_list = [unit_id]  # unit_id IS the tax id
                 else:
-                    # Entity: resolve EVERY tax id that rolls up to this entity,
-                    # whether by a manual entity_map name or by the automatic
-                    # NPPES-name grouping. The TIN relation's display_name IS the
-                    # entity_key the grain groups on (it already coalesces the
-                    # manual map over the NPPES name), so matching on it here
-                    # yields exactly the members the entity row aggregated —
-                    # without this, an auto-grouped org showed an empty drawer.
-                    # `OR tin_value = ?`: a NO-NAME entity's key falls back to
-                    # the raw tin_value while its display_name is the masked
-                    # 'TIN …' label — display_name alone can't match, and the
-                    # drawer showed rates with no member table.
+                    # Entity: resolve EVERY tax id that rolls up to this entity
+                    # through the SAME key the grain groups on (_ENTITY_KEY_SQL:
+                    # manual map name, else NPPES name + state(s), else the raw
+                    # TIN for a no-name SSN-pattern TIN) — so the drawer lists
+                    # exactly the members the entity row aggregated.
                     tin_list = [r[0] for r in con.execute(
-                        f"SELECT DISTINCT tin_value FROM ({GRAIN_REL['tin']}) "
-                        "WHERE display_name = ? OR tin_value = ?",
-                        [unit_id, unit_id],
+                        f"SELECT DISTINCT tin_value FROM ({_entity_keyed(_TIN_REL)}) "
+                        "WHERE entity_key = ? ORDER BY tin_value",
+                        [unit_id],
                     ).fetchall()]
                 tins = _dicts(con.execute(
                     f"SELECT * FROM tin_directory WHERE tin_value IN ({', '.join('?' for _ in tin_list)})",
@@ -1109,6 +1239,9 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         qp.setdefault("latest", "1")
         grain = grain_of(qp, cfg, store)
         fs = _fs(qp)
+        # the same guard as the table: an entity/NPI-grain code view on a big
+        # store is a whole-store live aggregation (temp-disk 500 at 306M rows)
+        _require_narrowing(grain, fs)
         rel = rel_sql(grain, fs)
         as_of = qp.get("month") or ("latest" if fs.latest_only else "all")
         with store.connect() as con:
@@ -1130,7 +1263,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                        max(npi_count) AS npi_count, count(*) AS n
                 FROM ({rel})
                 GROUP BY unit_id, payer, modifier_set, billing_class, is_dollar_rate
-                ORDER BY median_rate DESC, unit_id, payer, modifier_set LIMIT 500
+                ORDER BY median_rate DESC, unit_id, payer, modifier_set, billing_class,
+                         is_dollar_rate LIMIT 500
                 """,
                 fs.params,
             ))
@@ -1151,12 +1285,16 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             # Benchmark/Markets/report grain — not a raw-row median that
             # over-weights variant-heavy TINs). Placeholders ($0/$0.01) excluded
             # even when the user turns dollar-only off.
+            # basis = the Benchmark's (practice_basis): a practice billing
+            # professional $50 and institutional $100 was one $75 "practice
+            # rate" here while the Benchmark said $50
+            basis, basis_text = practice_basis(fs)
             payer_rank = _dicts(con.execute(
                 f"""
                 WITH per_unit AS (
                     SELECT payer, unit_id, median(negotiated_rate) AS rate
                     FROM ({rel})
-                    WHERE is_dollar_rate AND negotiated_rate > 0.01
+                    WHERE {basis}
                     GROUP BY payer, unit_id
                 )
                 SELECT payer,
@@ -1182,7 +1320,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                                  if base and p.get("median_rate") else None)
         info = catalog_json().get(code, {})
         return {"billing_code": code, "grain": grain, "as_of": as_of, **info, "ranked": ranked,
-                "histogram": hist, "payer_rank": payer_rank,
+                "histogram": hist, "payer_rank": payer_rank, "payer_rank_basis": basis_text,
                 "mpfs_rate": round(base, 2) if base else None}
 
     @app.get("/api/trend")
@@ -1191,6 +1329,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         qp.pop("month", None)  # trend spans months by definition
         grain = grain_of(qp, cfg, store)
         fs = _fs(qp)
+        _require_narrowing(grain, fs)
         with store.connect() as con:
             rows = _dicts(con.execute(
                 f"""

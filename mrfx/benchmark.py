@@ -351,6 +351,17 @@ def resolve_subject_tins(store: Store, subject: str) -> list[str]:
         ).fetchall()]
         if named:
             return named
+        # the Explorer's entity key for an organization: "NAME · ST" (name +
+        # the practice's main state — api._ENTITY_KEY_SQL)
+        if " · " in subject:
+            nm, _, st = subject.rpartition(" · ")
+            named = [r[0] for r in con.execute(
+                "SELECT tin_value FROM tin_directory WHERE lower(display_name) = lower(?) "
+                "AND entity_kind = 'org' AND primary_state = upper(?) ORDER BY tin_value",
+                [nm.strip(), st.strip()],
+            ).fetchall()]
+            if named:
+                return named
         # A 10-digit all-digit id is an NPI (TINs/EINs are 9). Only treat it as
         # one when it isn't already a known TIN, so a payer that publishes NPIs
         # in the TIN slot still resolves to itself.

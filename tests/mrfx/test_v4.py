@@ -246,7 +246,10 @@ def test_discipline_attribution(cfg, store):
     assert by[("97161", "")] == "PT"            # single-discipline code attributes by code
     pt_only = client.get("/api/rates?discipline=PT").json()
     assert {r["billing_code"] for r in pt_only["rows"]} == {"97110", "97161"}
-    assert all(r["discipline"] == "PT" for r in pt_only["rows"])
+    # the Benchmark's rule (round 3): an untagged line of a shared code is one
+    # rate for every discipline, so it counts under PT; an OT-tagged line never
+    assert {(r["billing_code"], r["discipline"]) for r in pt_only["rows"]} == {
+        ("97110", "PT"), ("97110", "unspecified"), ("97161", "PT")}
 
 
 # ---------------------------------------------------------------------------

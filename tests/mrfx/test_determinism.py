@@ -228,3 +228,65 @@ def test_a_real_binder_error_still_raises_immediately(store, monkeypatch):
     with pytest.raises(_duckdb.BinderException, match="nope"):
         store.connect()
     assert calls["n"] == 1                   # no retries for a real error
+
+
+def _row(**kw):
+    base = dict(payer="Aetna", tin_value="431000000", tin_type="ein", npi="1417594896",
+                source_file="b.json", billing_code="97110", billing_code_type="CPT",
+                discipline="PT", is_timed=True, billing_class="professional",
+                negotiated_rate=40.0, negotiated_type="negotiated", is_dollar_rate=True,
+                billing_code_modifier=[], service_code=["11"], file_month="2026-06",
+                last_updated_on="2026-06-01", expiration_date=None, schema_version="2.0.0",
+                tin_is_really_npi=False)
+    return {**base, **kw}
+
+
+def test_npi_under_two_tins_exports_in_one_order(cfg, store):
+    """Round 3 P0.5: one NPI billing 97110 under two TINs at the same rate,
+    month, class and POS ties on every ORDER BY key except tin_value — the
+    export must come back in ONE order (…12 before …13), 20 times."""
+    with store.rates_part_writer("b.json") as w:
+        w.write_batch([_row(tin_value="431000013"), _row(tin_value="431000012")])
+    store.upsert_file("b.json", payer="Aetna", status="done", file_type="in_network",
+                      last_updated_on="2026-06-01")
+    store.rebuild_rollups()
+    c = TestClient(create_app(cfg, store))
+    outs = {c.get("/api/export.csv?grain=npi&q=1417594896").content for _ in range(20)}
+    assert len(outs) == 1
+    body = outs.pop().decode()
+    assert body.index("431000012") < body.index("431000013")
+    pages = [c.get(f"/api/rates?grain=npi&q=1417594896&page_size=1&page={p}").json()["rows"][0]["tin_value"]
+             for p in (1, 2)]
+    assert pages == ["431000012", "431000013"]
+
+
+def test_tied_practice_name_is_the_same_on_every_rebuild(cfg, store):
+    """Round 3 P0.5: a TIN whose two organization NPIs carry different names,
+    one each, used to get its display name from mode() — whichever thread
+    finished first. Ties now break alphabetically: always 'ALPHA SITE', on
+    every one of 20 rebuilds (Z is inserted first, so first-seen != rule)."""
+    rows, dirs = [], []
+    for i in range(40):          # 40 tied TINs so a parallel scan has work to split
+        tin = str(432000000 + i)
+        for j, name in enumerate(("ZETA PARENT", "ALPHA SITE")):
+            npi = str(1500000000 + i * 2 + j)
+            rows.append(_row(tin_value=tin, npi=npi,
+                             discipline=("PT", "OT")[j]))      # tied disciplines too
+            dirs.append(dict(npi=npi, org_name=name,
+                             entity_type="NPI-2", taxonomy_code="261QP2000X",
+                             taxonomy_codes="261QP2000X", city="X", state="MO",
+                             address="x", zip="63103", phone=None))
+    with store.rates_part_writer("c.json") as w:
+        w.write_batch(rows)
+    store.save_npis_bulk(dirs)
+    seen = set()
+    for _ in range(20):
+        store.rebuild_rollups(names_only=True)
+        with store.connect() as con:
+            seen.add(tuple(con.execute(
+                "SELECT tin_value, display_name, primary_discipline, tin_type "
+                "FROM tin_directory ORDER BY tin_value").fetchall()))
+    assert len(seen) == 1
+    got = seen.pop()
+    assert {r[1] for r in got} == {"ALPHA SITE"}
+    assert {r[2] for r in got} == {"OT"}

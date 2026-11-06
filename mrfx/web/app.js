@@ -803,7 +803,7 @@ async function loadSummary() {
     const note = $("#summary-strip-note");
     if (note) note.textContent =
       "Min · P25 · Median · P75 · Max span every matched code together; per-code medians are in the table below.";
-    renderByCode($("#summary-bycode"), s.by_code, s.mpfs_loaded);
+    renderByCode($("#summary-bycode"), s.by_code, s.mpfs_loaded, s.by_code_basis);
   } catch (e) {
     // Don't blank silently: a 503 here is almost always the summary's exact
     // aggregates hitting the memory cap on a big unfiltered view. Say so and
@@ -833,7 +833,7 @@ async function loadSummary() {
 // Per-code breakdown of the current filter — the strip's one blended median
 // mixes different services (97110 vs 97530), so give a real median + spread PER
 // code, with a below-Medicare flag when an MPFS anchor is loaded.
-function renderByCode(el, rows, mpfs) {
+function renderByCode(el, rows, mpfs, basis) {
   if (!el) return;
   if (!rows || rows.length < 2) { el.innerHTML = ""; return; }  // one code: strip is enough
   const body = rows.map((c) => `<tr>
@@ -845,7 +845,8 @@ function renderByCode(el, rows, mpfs) {
   el.innerHTML = `<div class="ov-block"><h3>By code${mpfs ? " · ⚠ = below Medicare" : ""}</h3>
     <div class="tablewrap" style="max-height:34vh"><table>
       <thead><tr><th>Code</th><th class="num">Median</th><th class="num">P25–P75</th>${mpfs ? `<th class="num">% of Medicare</th>` : ""}<th class="num">Practices</th></tr></thead>
-      <tbody>${body}</tbody></table></div></div>`;
+      <tbody>${body}</tbody></table></div>
+    <div class="muted" style="margin-top:4px">Per code: each practice's own median first, then the spread across practices — the Benchmark's basis: ${esc(basis || "")}.</div></div>`;
 }
 
 const refresh = () => { loadRates(); loadSummary(); };
@@ -1260,7 +1261,7 @@ async function selectCpt(code) {
     (cptState ? ` · ${cptState}` : "") +
     (info.timed ? " (timed 15-min units)" : "") +
     (d.as_of === "latest" ? " · newest file per contract" : (d.as_of ? ` · ${d.as_of}` : ""));
-  renderPayerRank($("#cpt-payer-rank"), d.payer_rank, d.mpfs_rate);
+  renderPayerRank($("#cpt-payer-rank"), d.payer_rank, d.mpfs_rate, d.payer_rank_basis);
   renderHistogram($("#cpt-hist"), d.histogram, code);
   renderTrend($("#cpt-trend"), trend.rows);
   if (!d.ranked.length) {
@@ -1284,7 +1285,7 @@ async function selectCpt(code) {
 }
 
 // Payer leaderboard for one code: who pays best, with spread + confidence.
-function renderPayerRank(el, rows, mpfsRate) {
+function renderPayerRank(el, rows, mpfsRate, basis) {
   if (!el) return;
   if (!rows || !rows.length) { el.innerHTML = ""; return; }
   const mp = rows.some((r) => r.pct_medicare != null);
@@ -1302,7 +1303,7 @@ function renderPayerRank(el, rows, mpfsRate) {
     <div class="tablewrap" style="max-height:34vh"><table>
       <thead><tr><th>Payer</th><th class="num">Median</th><th class="num">P25–P75</th>${mp ? `<th class="num">% of Medicare</th>` : ""}<th class="num">Practices</th></tr></thead>
       <tbody>${body}</tbody></table></div>
-    <div class="muted" style="margin-top:4px">One row per payer — the median across the distinct practices it prices for this code. ⚠ marks a thin sample (&lt;5 practices).</div></div>`;
+    <div class="muted" style="margin-top:4px">One row per payer — the median across the distinct practices it prices for this code (each practice's own median first; same basis as the Benchmark: ${esc(basis || "")}). ⚠ marks a thin sample (&lt;5 practices).</div></div>`;
 }
 
 function renderTrend(el, rows) {

@@ -460,7 +460,10 @@ ROLLUP_SCHEMA_VERSION = 2
 # existing store would keep serving the old primary-only verdicts (measured on
 # the live registry: 9% of real therapy providers misclassified) until some
 # unrelated ingest happened to rebuild the directory.
-DIRECTORY_SCHEMA_VERSION = 5
+# v6: deterministic practice names / primary discipline / tin_type (ties broken
+# alphabetically instead of by thread arrival) — invariant 7; + primary_state
+# (the entity grain's organization key).
+DIRECTORY_SCHEMA_VERSION = 6
 
 # Sentinel for upsert_file(finished_at=...): "stamp the completion time INSIDE
 # the write lock". Callers must never pre-compute a done-timestamp in Python —
@@ -551,20 +554,50 @@ TIN_DIRECTORY_QUERY = """
                d.taxonomy_code, d.taxonomy_codes
         FROM tin_npis t LEFT JOIN npi_directory d USING (npi)
     ),
+    -- The practice NAME is the most common organization name among the TIN's
+    -- NPIs — with ties broken ALPHABETICALLY. mode() broke ties by thread
+    -- arrival: a TIN whose NPI-2s split evenly between a parent name and a
+    -- per-site entity got a different name on each rebuild (a reviewer's
+    -- probe: 5 different results in 6 runs) — on a rate card that is sold.
+    name_counts AS (
+        SELECT tin_value, org_name,
+               count(*) FILTER (entity_type = 'NPI-2') AS c_org,
+               count(*)                                AS c_any
+        FROM joined WHERE org_name IS NOT NULL
+        GROUP BY tin_value, org_name
+    ),
     names AS (
-        SELECT tin_value,
-               mode(org_name) FILTER (entity_type = 'NPI-2' AND org_name IS NOT NULL) AS org_mode,
-               mode(org_name) FILTER (org_name IS NOT NULL)                           AS any_mode,
-               count(*) FILTER (entity_type = 'NPI-2')                                AS n_orgs
-        FROM joined GROUP BY tin_value
+        SELECT o.tin_value, o.n_orgs, nm.org_mode, nm.any_mode
+        FROM (SELECT tin_value, count(*) FILTER (entity_type = 'NPI-2') AS n_orgs
+              FROM joined GROUP BY tin_value) o
+        LEFT JOIN (
+            SELECT tin_value,
+                   first(org_name ORDER BY c_org DESC, org_name) FILTER (c_org > 0) AS org_mode,
+                   first(org_name ORDER BY c_any DESC, org_name)                    AS any_mode
+            FROM name_counts GROUP BY tin_value) nm USING (tin_value)
+    ),
+    -- the practice's MAIN state: where most of its NPIs are (ties
+    -- alphabetical). The entity grain keys an organization on name + this
+    -- state — the full state list split one org whose TINs' NPI lists
+    -- reached different neighbouring states.
+    pstate AS (
+        SELECT tin_value, first(state ORDER BY c DESC, state) AS primary_state
+        FROM (SELECT tin_value, state, count(*) AS c FROM joined
+              WHERE state IS NOT NULL GROUP BY tin_value, state)
+        GROUP BY tin_value
     ),
     disc AS (
-        SELECT tin_value, mode(discipline) AS primary_discipline
-        FROM rates WHERE tin_value IS NOT NULL AND discipline != 'unspecified' AND {part}
+        -- same rule: most rows, ties alphabetical
+        SELECT tin_value, first(discipline ORDER BY c DESC, discipline) AS primary_discipline
+        FROM (SELECT tin_value, discipline, count(*) AS c
+              FROM rates WHERE tin_value IS NOT NULL AND discipline != 'unspecified' AND {part}
+              GROUP BY tin_value, discipline)
         GROUP BY tin_value
     )
     SELECT j.tin_value,
-           any_value(r.tin_type)                                    AS tin_type,
+           -- min, not any_value: a TIN published as both 'ein' and another
+           -- type must read the same on every rebuild
+           min(r.tin_type)                                          AS tin_type,
            -- the no-name fallback label must never surface a raw SSN-pattern
            -- TIN: display_name renders in the UI and every export
            coalesce(any_value(n.org_mode), any_value(n.any_mode),
@@ -578,6 +611,7 @@ TIN_DIRECTORY_QUERY = """
            count(DISTINCT j.npi)                                    AS npi_count,
            list_sort(list_distinct(list(j.state)
                      FILTER (j.state IS NOT NULL)))                 AS states,
+           any_value(ps.primary_state)                              AS primary_state,
            list_sort(list_distinct(list(j.city)
                      FILTER (j.city IS NOT NULL)))                  AS cities,
            any_value(d2.primary_discipline)                         AS primary_discipline,
@@ -692,6 +726,7 @@ TIN_DIRECTORY_QUERY = """
     FROM joined j
     LEFT JOIN names n ON n.tin_value = j.tin_value
     LEFT JOIN disc d2 ON d2.tin_value = j.tin_value
+    LEFT JOIN pstate ps ON ps.tin_value = j.tin_value
     LEFT JOIN (SELECT DISTINCT tin_value, tin_type FROM rates WHERE {part}) r
            ON r.tin_value = j.tin_value
     GROUP BY j.tin_value
@@ -1030,7 +1065,8 @@ class Store:
                     ver or "?", ROLLUP_SCHEMA_VERSION)
                 self.rebuild_rollups()
                 return
-            if "has_facility" not in cols or dver != str(DIRECTORY_SCHEMA_VERSION):
+            if ("has_facility" not in cols or "primary_state" not in cols
+                    or dver != str(DIRECTORY_SCHEMA_VERSION)):
                 # DIRECTORY-ONLY drift (e.g. the therapy-practice rules changed):
                 # rebuild just tin_directory — minutes — instead of dragging the
                 # whole rate spine through an hours-long pass on every such tweak.
@@ -1766,7 +1802,7 @@ class Store:
         # plan_index is keyed by URL; url_queue turns that into the local
         # filename; `files` is the only place the payer name lives per file.
         q = """
-            SELECT f.payer, p.plan_name, any_value(p.market_type) AS market_type,
+            SELECT f.payer, p.plan_name, min(p.market_type) AS market_type,
                    count(DISTINCT f.filename) AS files
             FROM plan_index p
             JOIN url_queue q ON q.dedup_key = p.dedup_key
