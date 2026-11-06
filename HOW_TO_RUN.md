@@ -158,9 +158,11 @@ exactly where it stopped, including half-finished downloads.
 3. Click **Add links**.
    - Not sure where to start? Click **Show tested sources**: it lists about
      145 insurer and administrator links this program has been tested against
-     (each with the date it was checked and what to expect). **Copy the ones
-     for the states and insurers you care about** into the box above and click
-     **Add links**.
+     (each with the states it covers, the date it was checked and what to
+     expect). Type **your state(s)** in the box above the list (for example
+     `MO KS`) — the list narrows to those states plus the national insurers —
+     and click **Queue these states**. That is the easy way to load the
+     insurers that matter to you.
    - **Queue tested payer indexes** queues ALL of the roughly 100 automatic
      ones at once. That is hundreds of thousands of files and many terabytes,
      a grind of weeks, so only use it if you really want everything. (Each big
@@ -170,6 +172,10 @@ exactly where it stopped, including half-finished downloads.
    done*. The bar shows progress. Large files take a while (see the table in
    `GETTING_STARTED.md` under "what to expect"); you can keep using the
    dashboard while they run.
+
+**Too much at once?** **Clear queue** sets aside everything still waiting and
+**Stop downloads** pauses the ones downloading; **Resume stopped** puts all of
+them back in one click (partial downloads continue where they stopped).
 
 **Pasted the wrong link?** While a file is being processed its row has a
 **stop** button. Nothing from the stopped run is saved. A file from a link
@@ -320,6 +326,16 @@ need it if you want to look at new options.
 On the first start after an update, the program may spend a few minutes
 "rebuilding analytics" (shown in the window). That's normal and happens once;
 nothing is re-downloaded.
+
+**The November 2026 update also fixes stored data once, by itself.** On its
+first start it may say it "updated … stored row(s) … to the current rules"
+(about half a minute per 15 million rates) and "stored times converted once
+from this PC's time zone". That corrects three things in rates you already
+have — no re-download needed: some insurers (BCBS Alabama is the big one) put
+place-of-service codes where modifiers belong, which hid ALL of their rates
+from "base modifiers only" and the Benchmark; two modifiers written as one
+("52,53") are split; and a file dated in the future is filed under its real
+month. The **Files** tab shows a note on each file that was corrected.
 
 ### The very first time (your current copy has no updater yet)
 

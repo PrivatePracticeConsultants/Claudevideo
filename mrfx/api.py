@@ -1544,11 +1544,16 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return {"sources": load_known_sources(cfg.known_sources_path)}
 
     @app.post("/api/urls/known")
-    def urls_add_known():
+    def urls_add_known(body: dict | None = Body(None)):
         from .fetch import add_urls
-        from .known_sources import load_known_sources
+        from .known_sources import for_states, load_known_sources
 
-        sources = load_known_sources(cfg.known_sources_path)
+        # {"states": ["MO", "KS"]} queues only those states' payers plus the
+        # national ones — not all 104 indexes (hundreds of thousands of files)
+        states = (body or {}).get("states") or []
+        if isinstance(states, str):
+            states = [x for x in states.replace(",", " ").split() if x]
+        sources = for_states(load_known_sources(cfg.known_sources_path), states)
         counts = add_urls(store, [s["url"] for s in sources if s["queueable"]])
         counts["portals"] = sum(1 for s in sources if not s["queueable"])
         return counts

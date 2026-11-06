@@ -7,6 +7,34 @@ from (a) three independent fresh-eyes code reviews of `api.py`/`benchmark.py`,
 a real 32M-rate store of 12 payer files — every finding below carries the
 evidence that found it. Copy everything below the line into a fresh session.
 
+> **STATUS (round 3 executed, Nov 2026).** What it closed, with numbers —
+> details in the commits (9f4cd8d, 3b99b47, e6dfad9, f009201, 73a50f8 and the
+> P2/P3/P4 commit) and AI_HANDOFF Step 8:
+> - P0.1 `mrfx/modifiers.py`: Alabama's POS codes moved out of the modifier
+>   field, ND's "52,53" split, one base rule; First Choice's 26|NU|RR|TC|UE
+>   lines turned out to be DIFFERENT rates (kept, not base). Alabama 97110
+>   under base: 0 -> 6,190 of 6,190. Existing stores are fixed once at open
+>   (row-identical to a fresh re-ingest on 32.1M real rows; recount 0 diffs).
+> - P0.2–P0.5: latest decided before row filters; entity grain = each member
+>   at its own newest month, filters per member, key = org name + main state
+>   (person-named TINs stand alone: 1,569 TINs in 412 false "entities" ->
+>   84 in 38 on 97110); one practice basis for leaderboard/by-code/Benchmark;
+>   deterministic names and ORDER BYs.
+> - P0.6 future header -> file-name month (HEALTHSCOPE 2026-12 -> 2026-11),
+>   published month recorded. P0.7 one UTC clock (+ one-time conversion).
+>   P0.8 % of Medicare per state's locality, refused (never borrowed) on a
+>   mismatch.
+> - P1.1–P1.4, P1.6(a,b,c,f,g): no silent thread death, scoped monthly
+>   refresh with a not-yet-posted grace, stop/cancel loose ends, NPPES lock +
+>   59 s / 0.40 GB cache build (was 164 s), parts never drift from rollups.
+> - P2.3 header counts from metadata + spine; P2.5 concatenated-JSON indexes,
+>   ZIP-in-ZIP, link cap keeps rate files first. P3 `states:` on all 145
+>   sources + "Queue these states"; `mrfx sources --check`; HealthSparq
+>   fixture + plain shape-change message.
+> - NOT done: P1.5 (no Windows machine), P1.6(d)/(e), P2.1 (no spine bump was
+>   needed), P2.2, P2.4 (full Aetna re-measure), `.7z`/`.zst` (would add
+>   py7zr/zstandard dependencies). See AI_HANDOFF Step 8.
+
 ---
 
 You are picking up MRF Explorer (`mrfx/`). Read `CLAUDE.md`, then

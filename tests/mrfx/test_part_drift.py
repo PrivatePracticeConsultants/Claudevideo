@@ -119,3 +119,22 @@ def test_a_failed_reingest_queues_the_surviving_part(cfg, store, two, monkeypatc
     p.write_text(json.dumps(_mrf("Alpha", "830000001", "1830000001", 40.0)))
     assert mi.ingest_file(cfg, store, p, rebuild_rollups=False)["status"] == "failed"
     assert "Alpha" in (store.meta_get("rollup_pending_payers") or "")
+
+
+def test_header_counts_from_the_spine_match_the_raw_store(cfg, store, two):
+    """P2.3: the header's TIN/payer counts come from the TIN spine when it is
+    current (a whole-store raw hash was 35-42 s cold at 306M rows) — and from
+    the raw parts while a new file awaits its rollup, so they never lag."""
+    from mrfx.ingest import ingest_file
+
+    def raw():
+        with store.connect() as con:
+            return con.execute("SELECT count(*), count(DISTINCT tin_value), "
+                               "count(DISTINCT payer) FROM rates").fetchone()
+    s = store.store_stats(max_age_seconds=0)
+    assert (s["rates"], s["tins"], s["payers"]) == raw() == (2, 2, 2)
+    c = cfg.inbox_dir / "charlie_2026-05.json"
+    c.write_text(json.dumps(_mrf("Charlie", "830000003", "1830000003", 60.0)))
+    ingest_file(cfg, store, c, rebuild_rollups=False)
+    s = store.store_stats(max_age_seconds=0)
+    assert (s["rates"], s["tins"], s["payers"]) == raw() == (3, 3, 3)

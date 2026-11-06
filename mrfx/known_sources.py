@@ -51,9 +51,22 @@ def load_known_sources(path: Path | str, today: dt.date | None = None) -> list[d
             "name": str(s.get("name") or url),
             "url": expand_placeholders(url, today),
             "url_template": url,
+            # two-letter states the source covers; "US" = national (it
+            # matches every state pick)
+            "states": [str(x).strip().upper() for x in (s.get("states") or [])
+                       if str(x).strip()],
             "kind": str(s.get("kind") or "toc"),
             "queueable": bool(s.get("queueable")),
             "verified": str(s.get("verified") or ""),
             "notes": " ".join(str(s.get("notes") or "").split()),
         })
     return out
+
+
+def for_states(sources: list[dict], states) -> list[dict]:
+    """The sources relevant to `states` (two-letter codes): those that cover
+    any of them, plus national ones (US). No states -> all sources."""
+    want = {str(s).strip().upper() for s in (states or []) if str(s).strip()}
+    if not want:
+        return sources
+    return [s for s in sources if "US" in s.get("states", []) or want & set(s.get("states", []))]

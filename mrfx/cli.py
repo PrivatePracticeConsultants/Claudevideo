@@ -311,7 +311,9 @@ def cmd_add(cfg: MrfxConfig, args) -> int:
     if args.known:
         from .known_sources import load_known_sources
 
-        known = load_known_sources(cfg.known_sources_path)
+        from .known_sources import for_states
+        known = for_states(load_known_sources(cfg.known_sources_path),
+                           (getattr(args, "states", "") or "").replace(",", " ").split())
         queueable = [s for s in known if s["queueable"]]
         for s in queueable:
             print(f"  + {s['name']}")
@@ -808,6 +810,42 @@ def cmd_outreach(cfg: MrfxConfig, args) -> int:
     sidecar.write_text(methodology_text(cfg, store, grain, fs, "display_name", "asc", "outreach"))
     print(f"exported {len(rows)} entities -> {out}\nmethodology -> {sidecar}")
     print("columns:", ", ".join(headers[:14]), f"... + {len(headers) - 14} per-code merge fields")
+    return 0
+
+
+def cmd_sources(cfg: MrfxConfig, args) -> int:
+    """List the tested-sources catalog, or --check it live (monthly re-audit:
+    payer pages move — 18 of 72 entries were dead after four months)."""
+    from .known_sources import for_states, load_known_sources
+
+    sources = for_states(load_known_sources(cfg.known_sources_path),
+                         (args.states or "").replace(",", " ").split())
+    if not args.check:
+        for s in sources:
+            kind = "auto" if s["queueable"] else "portal"
+            print(f"{kind:6} {' '.join(s['states']) or '?':12} {s['name']}")
+        print(f"{len(sources)} source(s); --check fetches each one to see if it still works")
+        return 0
+    from .source_check import check_sources
+
+    print(f"checking {len(sources)} source(s) — the first 2 MB of each, read-only…")
+    results = check_sources(cfg, sources, progress=lambda r: print(
+        f"  {r['result']:8} {r['name'][:60]:60} {r.get('detail', '')}", flush=True))
+    kinds = ("OK", "NEEDS-BROWSER", "PORTAL", "CHANGED", "DEAD")
+    n = {k: sum(1 for r in results if r["result"] == k) for k in kinds}
+    print("\n" + " · ".join(f"{n[k]} {k}" for k in kinds) +
+          "\nCHANGED / DEAD need a look (open them in a browser); NEEDS-BROWSER pages "
+          "list their files only in a browser; see docs/SOURCES_AUDIT_2026-11.md for "
+          "how each source was verified")
+    if args.report:
+        import csv as _csv
+        with open(args.report, "w", newline="", encoding="utf-8") as f:
+            w = _csv.writer(f)
+            w.writerow(["result", "name", "states", "queueable", "http", "detail", "url"])
+            for r in results:
+                w.writerow([r["result"], r["name"], " ".join(r.get("states", [])),
+                            r.get("queueable"), r.get("http", ""), r.get("detail", ""), r["url"]])
+        print(f"report written to {args.report}")
     return 0
 
 
@@ -1748,6 +1786,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--retry-failed", action="store_true", help="also re-queue previously failed URLs")
     p.add_argument("--known", action="store_true",
                    help="queue every tested payer index from config/known_sources.yaml")
+    p.add_argument("--states", default="",
+                   help="with --known: only these states' payers (plus national ones), "
+                        "e.g. --states MO,KS")
     p = sub.add_parser("preflight", help="inspect a file before committing to a long parse")
     p.add_argument("path")
     p = sub.add_parser("ingest", help="one-shot ingest of a file or directory (default: inbox)")
@@ -1780,6 +1821,12 @@ def main(argv: list[str] | None = None) -> int:
                    help="base-modifier rows only (default on; --no-base-only includes modified rows)")
     p = sub.add_parser("forget", help="erase chosen files' rates + raw copies (see `mrfx status` for names)")
     p.add_argument("filenames", nargs="+")
+    p = sub.add_parser("sources", help="the tested payer sources: list them, or --check them live")
+    p.add_argument("--check", action="store_true",
+                   help="fetch the first 2 MB of each source and report OK / CHANGED / DEAD "
+                        "(read-only; queues nothing)")
+    p.add_argument("--states", default="", help="only these states' sources (+ national), e.g. MO,KS")
+    p.add_argument("--report", default="", help="also write the results to this CSV file")
     p = sub.add_parser("enrich", help="resolve NPI names/geography now (NPPES bulk file or API)")
     p.add_argument("--bulk", dest="bulk_file", metavar="PATH",
                    help="NPPES full-file .zip (or unzipped .csv) — resolves all names in one local pass")
@@ -1959,6 +2006,7 @@ def main(argv: list[str] | None = None) -> int:
         "export": cmd_export,
         "outreach": cmd_outreach,
         "forget": cmd_forget,
+        "sources": cmd_sources,
         "enrich": cmd_enrich,
         "medicare": cmd_medicare,
         "orgreport": cmd_orgreport,

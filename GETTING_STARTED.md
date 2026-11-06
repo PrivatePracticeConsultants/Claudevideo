@@ -803,6 +803,31 @@ already have is automatically **skipped, not duplicated**.
 
 ---
 
+## What changed in the November 2026 (round 3) update
+
+- **Modifier field read correctly.** BCBS Alabama publishes place-of-service
+  codes (11 office, 22 outpatient hospital, …) in the modifier field; read as
+  modifiers, every Alabama rate failed "base modifiers only" (97110: 0 of 6,190
+  practices). They are now moved to place of service. "52,53" is split into
+  52 and 53. One rule for "base" everywhere: no modifier, or only GP/GO/GN.
+  Rates already in your store are corrected once at startup (no re-download).
+- **"Latest" means the payer's current rate**, even when you also filter by
+  rate or modifier; the Entity view combines each practice at its own newest
+  month and keys organizations on name + main state (a TIN named after a
+  therapist is its own entity).
+- **% of Medicare** uses the Medicare locality of the view's state (or the
+  practice's state). Load each state's locality (Benchmark tab → Load MPFS);
+  with no matching locality the percentage is not shown — it is never
+  borrowed from another state.
+- **Months**: a file dated in the future is filed under its real month; the
+  Files tab shows each file's rates month and published month.
+- **Sources**: every tested source lists its states; "Queue these states"
+  queues just yours. `mrfx sources --check` re-checks the whole list live
+  (read-only) — run it monthly.
+- **Long runs**: Resume stopped; the monthly refresh (if on) retries a
+  not-yet-posted monthly file daily until the 10th; NPPES name file built in
+  about a minute.
+
 ## Debug FAQ — what it says, what it means, what to do
 
 Every message the app shows is designed to tell you the fix. This FAQ collects

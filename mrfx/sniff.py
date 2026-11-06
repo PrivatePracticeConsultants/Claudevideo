@@ -157,6 +157,15 @@ def open_stream(path: Path, progress_cb=None) -> io.BufferedIOBase:
             members = [m for m in zf.infolist()
                        if m.filename.lower().endswith((".json", ".json.gz"))]
             if not members:
+                # a ZIP inside the ZIP (CareSource ships its files that way):
+                # open the largest inner zip and read ITS json member — one
+                # level, which is all any payer does
+                zips = [m for m in zf.infolist() if m.filename.lower().endswith(".zip")]
+                if zips:
+                    zf = zipfile.ZipFile(zf.open(max(zips, key=lambda m: m.file_size)))
+                    members = [m for m in zf.infolist()
+                               if m.filename.lower().endswith((".json", ".json.gz"))]
+            if not members:
                 raise ValueError("zip archive contains no .json member")
             # the LARGEST member is the rate file; picking namelist()[0] silently
             # ingested a small manifest JSON and dropped the real data

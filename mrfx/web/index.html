@@ -1015,8 +1015,13 @@
           is enough; the app expands it into every rate file inside.
         </div>
         <div class="tablewrap">
+          <div style="display:flex;gap:8px;align-items:center;margin:0 0 8px 0;flex-wrap:wrap">
+            <label>Your state(s): <input id="known-states" placeholder="e.g. MO KS" style="width:9em"></label>
+            <button class="btn" id="known-queue-states" title="Queue the auto-queueable sources for these states plus the national payers">Queue these states</button>
+            <span class="muted">National payers (UnitedHealthcare, Aetna, Cigna, TPAs…) are included with any state.</span>
+          </div>
           <table>
-            <thead><tr><th>Payer source</th><th>Type</th><th>Verified</th><th>Notes / how to load it</th></tr></thead>
+            <thead><tr><th>Payer source</th><th>States</th><th>Type</th><th>Verified</th><th>Notes / how to load it</th></tr></thead>
             <tbody id="known-body"></tbody>
           </table>
         </div>

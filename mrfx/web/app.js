@@ -4068,14 +4068,36 @@ function initFilesView() {
     let d;
     try { d = await api("/api/known-sources"); }
     catch (e) { $("#url-msg").textContent = `couldn't load the source list: ${e.message}`; return; }
-    $("#known-body").innerHTML = (d.sources || []).map((s) => `
+    const renderKnown = () => {
+      const want = ($("#known-states").value || "").toUpperCase().split(/[\s,]+/).filter(Boolean);
+      const rows = (d.sources || []).filter((s) => !want.length ||
+        (s.states || []).some((x) => x === "US" || want.includes(x)));
+      $("#known-body").innerHTML = rows.map((s) => `
       <tr>
         <td><a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.name)}</a></td>
+        <td>${esc((s.states || []).join(" ") === "US" ? "national" : (s.states || []).join(" "))}</td>
         <td>${s.queueable ? "auto-queueable" : "portal (open in browser)"}</td>
         <td>${esc(s.verified || "")}</td>
         <td style="max-width:480px">${esc(s.notes || "")}</td>
       </tr>`).join("");
+    };
+    $("#known-states").oninput = renderKnown;
+    renderKnown();
     wrap.style.display = "";
+  });
+
+  $("#known-queue-states").addEventListener("click", async () => {
+    const msg = $("#url-msg");
+    const states = ($("#known-states").value || "").toUpperCase().split(/[\s,]+/).filter(Boolean);
+    if (!states.length) { msg.textContent = "type your state(s) first, e.g. MO KS"; return; }
+    msg.textContent = `queueing tested sources for ${states.join(", ")}…`;
+    try {
+      const r = await postJson("/api/urls/known", { states });
+      msg.textContent = `${r.added} indexes queued for ${states.join(", ")} + national payers` +
+        (r.skipped ? `, ${r.skipped} already known` : "") +
+        (r.portals ? ` (${r.portals} portal-only sources for these states need a browser)` : "");
+    } catch (e) { msg.textContent = "could not queue: " + e.message; }
+    loadUrlQueue();
   });
 
   $("#btn-scan").addEventListener("click", async () => {

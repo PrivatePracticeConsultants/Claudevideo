@@ -1074,7 +1074,9 @@ def expand_toc_with_plans(path: Path, max_files: int, base_url: str = "",
         cur_plans, cur_locs = [], []
 
     with open_stream(path) as stream:
-        for prefix, event, value in ijson.parse(stream):
+        # multiple_values: some payers (UCare, 1199SEIU, Network Health)
+        # publish an index as SEVERAL JSON objects back to back
+        for prefix, event, value in ijson.parse(stream, multiple_values=True):
             if prefix == "reporting_structure.item" and event == "start_map":
                 flush_item()          # previous item ended
             elif prefix.endswith("reporting_plans.item") and event == "start_map":
@@ -1146,13 +1148,15 @@ def expand_toc(path: Path, max_files: int, base_url: str = "") -> tuple[list[str
 
     with open_stream(path) as stream:
         # reporting_structure[].in_network_files[].location  (CMS TiC index)
-        for loc in ijson.items(stream, "reporting_structure.item.in_network_files.item.location"):
+        for loc in ijson.items(stream, "reporting_structure.item.in_network_files.item.location",
+                               multiple_values=True):
             if take(loc):
                 break
     if not urls:
         # some payers put in_network_files at the top level instead
         with open_stream(path) as stream:
-            for loc in ijson.items(stream, "in_network_files.item.location"):
+            for loc in ijson.items(stream, "in_network_files.item.location",
+                                   multiple_values=True):
                 if take(loc):
                     break
     return urls, truncated
@@ -1179,7 +1183,7 @@ def expand_blobs_listing(path: Path, max_files: int, base_url: str = "") -> tupl
     excluded: dict[str, int] = {"allowed-amounts": 0, "drug-pricing": 0}
 
     with open_stream(path) as stream:
-        for item in ijson.items(stream, "blobs.item"):
+        for item in ijson.items(stream, "blobs.item", multiple_values=True):
             if not isinstance(item, dict):
                 continue
             name = str(item.get("name") or "")
@@ -1312,6 +1316,10 @@ def extract_links_from_text(text: str, base_url: str, max_files: int,
     across multiple sources (rendered DOM + captured API responses)."""
     seen = seen if seen is not None else set()
     out: list[str] = []
+    # gather well past the cap (bounded), then keep the most useful first: a
+    # page listing 32,397 group indexes (Allied) or 4,173 mixed files
+    # (Meritain) used to keep whichever 2,000 came first on the page
+    ceiling = max_files * 20
     for pattern in (_ATTR_LINK_RE, _ABS_LINK_RE, _REL_JSON_RE):
         for m in pattern.finditer(text):
             # payer filenames legitimately contain spaces ("carefirst ppo_
@@ -1326,9 +1334,23 @@ def extract_links_from_text(text: str, base_url: str, max_files: int,
                 continue
             seen.add(k)
             out.append(u)
-            if len(out) >= max_files:
-                return out
-    return out
+            if len(out) >= ceiling:
+                break
+    out.sort(key=_link_priority)          # stable: page order within a rank
+    return out[:max_files]
+
+
+_USEFUL_LINK_RE = re.compile(r"in[-_ ]?network|table[-_ ]?of[-_ ]?contents|index|toc", re.I)
+_SKIPPED_LINK_RE = re.compile(r"allowed[-_ ]?amount|prescription|drug|formular|\brx\b", re.I)
+
+
+def _link_priority(u: str) -> int:
+    """0: in-network rate files and indexes; 1: anything else; 2: files the
+    app skips anyway (allowed amounts, drug pricing)."""
+    name = u.rsplit("/", 1)[-1].split("?", 1)[0]
+    if _SKIPPED_LINK_RE.search(name):
+        return 2
+    return 0 if _USEFUL_LINK_RE.search(name) else 1
 
 
 def extract_links_from_page(path: Path, base_url: str, max_files: int) -> list[str]:
@@ -1964,8 +1986,16 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
                 log.info("%s — link container: %d file links, %d newly queued", url, len(links), added)
                 store.update_url(url_id, status="done", kind="page", child_count=added, error=None)
                 return False
-        store.update_url(url_id, status="failed", kind="unknown",
-                         error="; ".join(pf.messages) or "unrecognized file (not MRF JSON)")
+        err = "; ".join(pf.messages) or "unrecognized file (not MRF JSON)"
+        if url.split("?", 1)[0].endswith("latest_metadata.json"):
+            # HealthSparq's file list (16 catalog sources) is an undocumented
+            # endpoint: if its shape changes, say THAT instead of a riddle
+            err = ("this HealthSparq file list (latest_metadata.json) no longer looks the "
+                   "way MRF Explorer expects — a \"files\" list whose entries carry a "
+                   "\"filePath\" — so the payer's platform changed it. Open the payer's "
+                   "transparency page in a browser and paste its file links instead; "
+                   "and please report it so the app can be updated.")
+        store.update_url(url_id, status="failed", kind="unknown", error=err)
         dest.unlink(missing_ok=True)
         return False
 

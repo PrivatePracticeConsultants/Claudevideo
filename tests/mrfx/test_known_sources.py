@@ -67,3 +67,34 @@ def test_known_sources_api(cfg, store):
     # queued rows visible in the queue listing, pinned as top-level
     q = client.get("/api/urls").json()
     assert q["counts"].get("queued", 0) == r["added"]
+
+
+def test_every_catalog_entry_names_its_states():
+    """Round 3 P3: the catalog carries `states:` so the user can queue THEIR
+    states (plus national payers) instead of all 104 indexes."""
+    from mrfx.known_sources import load_known_sources
+    from mrfx.states import state_code
+    sources = load_known_sources("config/known_sources.yaml")
+    assert sources and all(s["states"] for s in sources), [s["name"] for s in sources if not s["states"]]
+    for s in sources:
+        for st in s["states"]:
+            assert st == "US" or state_code(st) == st, (s["name"], st)
+
+
+def test_queue_by_state_takes_that_states_payers_plus_national_ones(cfg, store):
+    from fastapi.testclient import TestClient
+
+    from mrfx.api import create_app
+    from mrfx.known_sources import for_states, load_known_sources
+    sources = load_known_sources("config/known_sources.yaml")
+    mo = for_states(sources, ["mo"])
+    names = {s["name"] for s in mo}
+    assert "Blue Cross and Blue Shield of Kansas City (Blue KC)" in names      # MO payer
+    assert "UnitedHealthcare (national)" in names                               # national
+    assert "Highmark BCBS West Virginia" not in names                           # other state
+    assert for_states(sources, []) == sources
+    cfg.known_sources_path = __import__("pathlib").Path("config/known_sources.yaml")
+    c = TestClient(create_app(cfg, store))
+    r = c.post("/api/urls/known", json={"states": ["MO"]}).json()
+    assert r["added"] == sum(1 for s in mo if s["queueable"])
+    assert r["added"] < sum(1 for s in sources if s["queueable"])

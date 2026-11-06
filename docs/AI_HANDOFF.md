@@ -566,6 +566,32 @@ disk-space guard, both with actionable messages.
 
 ## Step 8 — Known limitations / next frontiers
 
+Round 3 (docs/NEXT_STEPS_PROMPT_3.md, status block) — still open after it:
+- Windows has STILL never been run by an agent (P1.5). The round-3 Windows
+  fixes (`_nt_alive_without_handle`, parked part swaps, UTC timestamps under a
+  non-UTC clock) are tested on Linux with simulated conditions only.
+- P1.6(d) the rollup OOM ladder re-runs tables it already committed; (e)
+  `unenriched_npis` is O(store) per call in API mode. Performance, not numbers.
+- P2.1 (COPY ... PARTITION_BY full rebuild) is needed before the next
+  ROLLUP_SCHEMA_VERSION bump — round 3 avoided one (the modifier and month
+  rules are row rules: `store.ROW_RULES_VERSION` rewrites only affected parts
+  at open; the directory change is a DIRECTORY_SCHEMA_VERSION bump, minutes).
+  P2.2 (sorted parts) and P2.4 (re-measure worker RSS on the full 590M-row
+  Aetna file) not done.
+- `.7z` (Baylor Scott & White) and `.zst` (MercyCare) need py7zr / zstandard —
+  not added (new dependencies on the user's machine); the queue says
+  "unrecognized file" for them.
+- The download retry "as a browser" (fetch.BROWSER_UA after a 403 or repeated
+  early closes) and the JS-portal renderer present a desktop-Chrome
+  User-Agent. That is pre-existing behaviour for legally public MRF data;
+  `mrfx sources --check` deliberately does NOT use it (it asks only as MRF
+  Explorer and reports NEEDS-BROWSER instead). Whether the product should keep
+  the fallback is a decision for the owner.
+- Entity key = organization (NPI-2) name + `tin_directory.primary_state`; a
+  TIN named only after a clinician is its own entity. A chain that operates
+  one TIN per state therefore shows one entity per state (by design — a
+  market is a state); merge them with entity_map.yaml if wanted.
+
 Open after the Nov 2026 performance/correctness pass (docs/NEXT_STEPS_PROMPT.md
 lists the full audit plan; these are what it left open):
 - Remote `location` provider references are NOT downloaded. The groups that

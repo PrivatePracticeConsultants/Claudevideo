@@ -2512,3 +2512,47 @@ def test_resume_stopped_undoes_clear_queue_and_stop_downloads(store):
     assert {u["status"] for u in store.list_urls()} == {"skipped"}
     assert store.resume_canceled() == 3
     assert {(u["status"], u["kind"]) for u in store.list_urls()} == {("queued", "unknown")}
+
+
+def test_healthsparq_latest_metadata_shape(cfg, store, tmp_path):
+    """Round 3 P3: 16 catalog sources rely on HealthSparq's undocumented
+    latest_metadata.json. Fixture = the live shape (2026-11-06, BCBS Nebraska,
+    trimmed; the allowed-amounts entry is synthesized in the same shape). The
+    app lifts every filePath, resolved against the listing's own URL, rate
+    files first; and if the shape ever changes the row says so plainly."""
+    import http.server
+    import shutil
+
+    from mrfx.fetch import extract_links_from_page
+    from tests.mrfx.conftest import FIXTURES
+    base = "https://mrf.healthsparq.com/bcbsne-egress.nophi.kyruushsq.com/prd/mrf/BCBSNE_I/BCBSNE/"
+    links = extract_links_from_page(FIXTURES / "healthsparq_latest_metadata.json",
+                                    base + "latest_metadata.json", 100)
+    assert links == [
+        base + "2026-11-01/inNetworkRates/2026-11-01_ANTELOPEMEMORIALNETWORK_BCBSNE.json.gz",
+        base + "2026-11-01/inNetworkRates/2026-11-01_BLAIRMCHNETWORK_BCBSNE.json.gz",
+        base + "2026-11-01/allowedAmounts/2026-11-01_BCBSNE_allowed-amounts.json.gz",
+    ]
+
+    # a CHANGED shape (no filePath anywhere) fails with a plain-language reason
+    root = tmp_path / "hs"
+    (root / "prd").mkdir(parents=True)
+    (root / "prd" / "latest_metadata.json").write_text(
+        json.dumps({"documents": [{"path": "somewhere", "type": "rates"}]}))
+
+    class H(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **k):
+            super().__init__(*a, directory=str(root), **k)
+
+        def log_message(self, *a):
+            pass
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        add_urls(store, [f"http://127.0.0.1:{srv.server_address[1]}/prd/latest_metadata.json"])
+        drain(cfg, store)
+    finally:
+        srv.shutdown()
+    row = store.list_urls()[0]
+    assert row["status"] == "failed" and "HealthSparq file list" in row["error"]
+    shutil.rmtree(root, ignore_errors=True)

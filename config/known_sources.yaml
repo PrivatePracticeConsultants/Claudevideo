@@ -15,6 +15,7 @@
 sources:
   # ---- Highmark-hosted plans (mrfdata.hmhs.com) — monthly dated indexes ----
   - name: Highmark BCBS West Virginia
+    states: [WV]
     url: https://mrfdata.hmhs.com/files/443/wv/inbound/local/{FIRST_OF_MONTH}_Highmark_Blue_Cross_Blue_Shield_of_West_Virginia_index.json
     kind: toc
     queueable: true
@@ -29,6 +30,7 @@ sources:
       2,993,969 rows.
 
   - name: Blue Cross Blue Shield of Wyoming
+    states: [WY]
     url: https://mrfdata.hmhs.com/files/460/wy/inbound/local/{FIRST_OF_MONTH}_Blue_Cross_Blue_Shield_of_Wyoming_index.json
     kind: toc
     queueable: true
@@ -40,6 +42,7 @@ sources:
       expanded to 559 files; two shards ingested, 606,227 rows.
 
   - name: Highmark Blue Shield of Western New York
+    states: [NY]
     url: https://mrfdata.hmhs.com/files/301/wny/inbound/local/{FIRST_OF_MONTH}_Highmark_Blue_Shield_of_Western_New_York_index.json
     kind: toc
     queueable: true
@@ -52,6 +55,7 @@ sources:
       606,183 rows.
 
   - name: Highmark BCBS Delaware
+    states: [DE]
     url: https://mrfdata.hmhs.com/files/070/del/inbound/local/{FIRST_OF_MONTH}_Highmark_Blue_Cross_Blue_Shield_of_Delaware_index.json
     kind: toc
     queueable: true
@@ -65,6 +69,7 @@ sources:
       monthly index URL is the cleaner entry point.
 
   - name: Blue Cross Blue Shield of North Dakota
+    states: [ND]
     url: https://mrfdata.hmhs.com/files/320/nd/inbound/local/{FIRST_OF_MONTH}_BlueCrossBlueShieldND_index.json
     kind: toc
     queueable: true
@@ -78,6 +83,7 @@ sources:
       parser memory.
 
   - name: Highmark BCBS Pennsylvania
+    states: [PA]
     url: https://mrfdata.hmhs.com/files/363/pa/inbound/local/{FIRST_OF_MONTH}_Highmark_Blue_Cross_Blue_Shield_of_Pennsylvania_index.json
     kind: toc
     queueable: true
@@ -93,6 +99,7 @@ sources:
       one is known.
 
   - name: Blue Cross of Idaho
+    states: [ID]
     url: https://bci.sapphiremrfhub.com/
     kind: page
     queueable: true
@@ -104,6 +111,7 @@ sources:
       Cross of Idaho" index, which was a copy of Highmark PA's index.
 
   - name: Florida Blue (Blue Cross and Blue Shield of Florida)
+    states: [FL]
     url: https://www.floridablue.com/members/tools-resources/transparency/machine-readable-files
     kind: portal
     queueable: false
@@ -119,6 +127,7 @@ sources:
       book.)
 
   - name: BCBS Nebraska (own book)
+    states: [NE]
     url: https://mrf.healthsparq.com/bcbsne-egress.nophi.kyruushsq.com/prd/mrf/BCBSNE_I/BCBSNE/latest_metadata.json
     kind: listing
     queueable: true
@@ -131,6 +140,7 @@ sources:
       browser-only portal entry.
 
   - name: BCBS Arizona (own book)
+    states: [AZ]
     url: https://mrf.healthsparq.com/bcbsaz-egress.nophi.kyruushsq.com/prd/mrf/BCBSAZ_I/BCBSAZ/latest_metadata.json
     kind: listing
     queueable: true
@@ -143,6 +153,7 @@ sources:
       answer HTTP 200. Previously a browser-only portal entry.
 
   - name: Highmark Blue Shield of Pennsylvania
+    states: [PA]
     url: https://mrfdata.hmhs.com/files/378/pa/inbound/local/{FIRST_OF_MONTH}_Highmark_Blue_Shield_of_Pennsylvania_index.json
     kind: toc
     queueable: true
@@ -154,6 +165,7 @@ sources:
       URL live-verified (HTTP); not yet expanded in testing.
 
   - name: Highmark Blue Shield of Northeastern New York
+    states: [NY]
     url: https://mrfdata.hmhs.com/files/800/nny/inbound/local/{FIRST_OF_MONTH}_Highmark_Blue_Shield_of_Northeastern_New_York_index.json
     kind: toc
     queueable: true
@@ -166,6 +178,7 @@ sources:
 
   # ---- Other Blues ----
   - name: Blue Cross & Blue Shield of Mississippi
+    states: [MS]
     url: https://tcr.bcbsms.com/Table_of_Contents/Local_TOC.json
     kind: toc
     queueable: true
@@ -178,6 +191,7 @@ sources:
       cross-host).
 
   - name: Anthem / Elevance national master index (14 states)
+    states: [CA, CO, CT, GA, IN, KY, ME, MO, NH, NV, NY, OH, VA, WI]
     url: https://antm-pt-prod-dataz-nogbd-nophi-us-east1.s3.amazonaws.com/anthem/{FIRST_OF_MONTH}_anthem_index.json.gz
     kind: toc
     queueable: true
@@ -194,6 +208,7 @@ sources:
       shard (8 GB uncompressed) previously ingested 1,057,258 rows.
 
   - name: Blue Cross and Blue Shield of Kansas City (Blue KC)
+    states: [MO, KS]
     url: https://bcbskc.sapphiremrfhub.com
     kind: page
     queueable: true
@@ -206,6 +221,7 @@ sources:
       "BKC"). Other payers on *.sapphiremrfhub.com hubs work the same way.
 
   - name: Blue Cross Blue Shield of Michigan
+    states: [MI]
     url: https://bcbsm.sapphiremrfhub.com
     kind: page
     queueable: true
@@ -219,6 +235,7 @@ sources:
       until confirm_over_gb is raised.
 
   - name: Blue Cross Blue Shield of Louisiana
+    states: [LA]
     url: https://bcbsla.sapphiremrfhub.com
     kind: page
     queueable: true
@@ -233,6 +250,7 @@ sources:
 
   # ---- National non-Blues ----
   - name: Centene / Ambetter (all states, one page)
+    states: [US]
     url: https://www.centene.com/price-transparency-files.html
     kind: page
     queueable: true
@@ -248,6 +266,7 @@ sources:
       need no separate entries.
 
   - name: UnitedHealthcare (national)
+    states: [US]
     url: https://transparency-in-coverage.uhc.com/
     kind: page
     queueable: true
@@ -275,6 +294,7 @@ sources:
 
   # ---- Regional non-Blues & rental networks ----
   - name: SelectHealth (Intermountain — Utah / Idaho / Nevada)
+    states: [UT, ID, NV]
     url: https://ebu.intermountainhealthcare.org/selecthealth/transparencyincoverage/
     kind: page
     queueable: true
@@ -289,6 +309,7 @@ sources:
       files are .json.gz on the same host.
 
   - name: Moda Health (Oregon / Alaska / Texas)
+    states: [OR, AK, TX]
     url: https://mrf.modahealth.com/mrf/Moda/{FIRST_OF_MONTH}_moda_ModaSelect_index.json
     kind: toc
     queueable: true
@@ -306,6 +327,7 @@ sources:
       (static page — also pasteable directly).
 
   - name: First Health PPO via Healthgram (national rental network)
+    states: [US]
     url: https://mrf.healthgram.com/mrfiles/FRST/FirstHealth_index.json
     kind: toc
     queueable: true
@@ -322,6 +344,7 @@ sources:
       portal).
 
   - name: Tufts Health Public Plans (Point32Health — Massachusetts)
+    states: [MA]
     url: https://eusprdtransparencymrfp32.blob.core.windows.net/thp/{FIRST_OF_MONTH}_TuftsHealthPublicPlansInc_index.json
     kind: toc
     queueable: true
@@ -336,6 +359,7 @@ sources:
       via the mrfdatasolutions.com payer directory.
 
   - name: Security Health Plan (Wisconsin)
+    states: [WI]
     url: https://www.securityhealth.org/insurance-resources/json
     kind: page
     queueable: true
@@ -353,6 +377,7 @@ sources:
       mrfdatasolutions.com payer directory.
 
   - name: Optum Health (transparency portal)
+    states: [US]
     url: https://transparency-in-coverage.optum.com/
     kind: portal
     queueable: false
@@ -364,6 +389,7 @@ sources:
       downloads.
 
   - name: Cigna
+    states: [US]
     url: https://www.cigna.com/legal/compliance/machine-readable-files
     kind: page
     queueable: true
@@ -384,6 +410,7 @@ sources:
       partitions.
 
   - name: Aetna / CVS Health
+    states: [US]
     url: https://health1.aetna.com/app/public/#/one/insurerCode=AETNACVS_I&brandCode=ALICFI/machine-readable-transparency-in-coverage
     kind: page
     queueable: true
@@ -404,6 +431,7 @@ sources:
       — link harvest verified the same way.
 
   - name: Humana
+    states: [US]
     url: https://developers.humana.com/cost-transparency
     kind: portal
     queueable: false
@@ -414,6 +442,7 @@ sources:
       returning 502 when re-tested). Open in a browser and paste the file links.
 
   - name: HCSC (BCBS Illinois / Texas / New Mexico / Oklahoma / Montana)
+    states: [IL, TX, NM, OK, MT]
     url: https://www.bcbsil.com/provider/standards/standard-requirements/caa/caa-tic
     kind: portal
     queueable: false
@@ -424,6 +453,7 @@ sources:
       and paste the index links.
 
   - name: CareFirst (Maryland / DC / N. Virginia)
+    states: [MD, DC, VA]
     url: https://individual.carefirst.com/individuals-families/mandates-policies/machine-readable-file.page
     kind: page
     queueable: true
@@ -441,6 +471,7 @@ sources:
       present.
 
   - name: BCBS Tennessee
+    states: [TN]
     url: https://www.bcbst.com/tcr
     kind: page
     queueable: true
@@ -455,6 +486,7 @@ sources:
       Dakota) — more cross-hosted national files, attributed per-file as always.
 
   - name: Universal Health Services (UHS — hospital system employer plan)
+    states: [US]
     url: https://uhs.com/transparency-in-coverage-machine-readable-files/
     kind: portal
     queueable: false
@@ -465,6 +497,7 @@ sources:
       browser; if files download there, drop them into data/inbox/.
 
   - name: Wellmark BCBS (Iowa / South Dakota)
+    states: [IA, SD]
     url: https://mrf.healthsparq.com/wmrk-egress.nophi.kyruushsq.com/prd/mrf/WMRK_I/WELLMARK/latest_metadata.json
     kind: listing
     queueable: true
@@ -477,6 +510,7 @@ sources:
       browser-only portal entry.
 
   - name: Horizon BCBS New Jersey
+    states: [NJ]
     url: https://horizonblue.sapphiremrfhub.com/
     kind: page
     queueable: true
@@ -489,6 +523,7 @@ sources:
       returns 404.
 
   - name: Premera Blue Cross (Washington / Alaska)
+    states: [WA, AK]
     url: https://mrf.healthsparq.com/premera-egress.nophi.kyruushsq.com/prd/mrf/PREMERA_I/PREMERA/latest_metadata.json
     kind: listing
     queueable: true
@@ -501,6 +536,7 @@ sources:
       HTTP 200. Previously a browser-only portal entry.
 
   - name: Regence (Cambia — OR / WA / UT / ID)
+    states: [OR, WA, UT, ID]
     url: https://www.regence.com/transparency-in-coverage/
     kind: page
     queueable: true
@@ -515,6 +551,7 @@ sources:
       attributed per-file as always): 366,680 + 239,547 rows.
 
   - name: Kaiser Permanente (all regions)
+    states: [CA, CO, GA, HI, MD, VA, DC, OR, WA]
     url: https://healthy.kaiserpermanente.org/southern-california/front-door/machine-readable
     kind: page
     queueable: true
@@ -530,6 +567,7 @@ sources:
       rows. Allowed-amounts entries skipped.
 
   - name: Oscar Health
+    states: [US]
     url: https://www.hioscar.com/transparency-in-coverage-files/oscar
     kind: page
     queueable: true
@@ -546,6 +584,7 @@ sources:
       Optum/UBH behavioral book 460 therapy rows.
 
   - name: Harvard Pilgrim / Point32Health (MA / NH / ME / CT)
+    states: [MA, NH, ME, CT]
     url: https://www.harvardpilgrim.org/public/machine-readable-files
     kind: page
     queueable: true
@@ -561,6 +600,7 @@ sources:
       re-queue monthly.
 
   - name: Molina Healthcare (all states)
+    states: [US]
     url: https://www.molinahealthcare.com/
     kind: portal
     queueable: false
@@ -574,6 +614,7 @@ sources:
       under your state's Marketplace pages, then paste the index links it lists.
 
   - name: BCBS North Carolina
+    states: [NC]
     url: https://www.bluecrossnc.com/policies-best-practices/machine-readable-files
     kind: page
     queueable: true
@@ -588,6 +629,7 @@ sources:
       carries its book).
 
   - name: BCBS South Carolina
+    states: [SC]
     url: https://www.southcarolinablues.com/web/public/brands/universal/transparency-in-coverage/?branding=sc
     kind: page
     queueable: true
@@ -609,6 +651,7 @@ sources:
       confirm_over_gb/disk allow.
 
   - name: Priority Health (Michigan)
+    states: [MI]
     url: https://priorityhealthtransparencymrfs.s3.us-east-1.amazonaws.com/CompleteList.html
     kind: page
     queueable: true
@@ -620,6 +663,7 @@ sources:
       priorityhealth.com/machine-readable-files page now returns 404.
 
   - name: BCBS Alabama
+    states: [AL]
     url: https://www.bcbsal.org/web/transparency-in-coverage
     kind: portal
     queueable: false
@@ -630,6 +674,7 @@ sources:
       also appear inside other Blues' indexes (the BCBS-MS TOC ingested one).
 
   - name: BCBS Massachusetts
+    states: [MA]
     url: https://transparency-in-coverage.bluecrossma.com/
     kind: portal
     queueable: false
@@ -643,6 +688,7 @@ sources:
       now returns 404.
 
   - name: BCBS Rhode Island
+    states: [RI]
     url: https://www.bcbsri.com/developers
     kind: portal
     queueable: false
@@ -654,6 +700,7 @@ sources:
       browser. The old bcbsri.com/transparency-in-coverage page now returns 404.
 
   - name: BCBS Vermont
+    states: [VT]
     url: https://www.bluecrossvt.org/documents/toc-json
     kind: toc
     queueable: true
@@ -667,6 +714,7 @@ sources:
       bluecrossvt.org/transparency-in-coverage page now returns 404.
 
   - name: BCBS Kansas
+    states: [KS]
     url: https://www.bcbsks.com/transparency-in-coverage
     kind: portal
     queueable: false
@@ -676,6 +724,7 @@ sources:
       static links); paste file links from a browser.
 
   - name: Arkansas BCBS
+    states: [AR]
     url: https://www.arkansasbluecross.com/members/tools-resources/rights/transparency-in-coverage
     kind: portal
     queueable: false
@@ -687,6 +736,7 @@ sources:
       Wyoming/Nebraska/Western-NY trials.
 
   - name: HMSA (BCBS Hawaii)
+    states: [HI]
     url: https://hmsa.com/help-center/transparency-in-coverage-machine-readable-files/
     kind: portal
     queueable: false
@@ -698,6 +748,7 @@ sources:
       browser.
 
   - name: Blue Shield of California
+    states: [CA]
     url: https://mrf.healthsparq.com/bsca-egress.nophi.kyruushsq.com/prd/mrf/BSCA_I/BSCA/latest_metadata.json
     kind: listing
     queueable: true
@@ -710,6 +761,7 @@ sources:
       answer HTTP 200. Previously a browser-only portal entry.
 
   - name: Excellus BCBS (upstate New York)
+    states: [NY]
     url: https://mrf.healthsparq.com/exc-egress.nophi.kyruushsq.com/prd/mrf/EXC_I/EXC/latest_metadata.json
     kind: listing
     queueable: true
@@ -722,6 +774,7 @@ sources:
       answer HTTP 200. Previously a browser-only portal entry.
 
   - name: Capital Blue Cross (central Pennsylvania)
+    states: [PA]
     url: https://mrf.healthsparq.com/capbc-egress.nophi.kyruushsq.com/prd/mrf/CAPBC_I/CAPBC/latest_metadata.json
     kind: listing
     queueable: true
@@ -734,6 +787,7 @@ sources:
       answer HTTP 200. Previously a browser-only portal entry.
 
   - name: Independence Blue Cross (Philadelphia)
+    states: [PA]
     url: https://www.ibx.com/resources/for-members/transparency-in-coverage
     kind: portal
     queueable: false
@@ -745,6 +799,7 @@ sources:
       Highmark PA's own index, not IBX's book, and was removed.)
 
   - name: BCBS Minnesota (own book)
+    states: [MN]
     url: https://www.bluecrossmn.com/about-us/transparency-coverage-regulations
     kind: portal
     queueable: false
@@ -763,6 +818,7 @@ sources:
   # paste into the dashboard's "Paste file links" box. One TOC link expands
   # into all the rate files inside it.
   - name: Christus Health Plan (TX/LA/NM)
+    states: [TX, LA, NM]
     url: https://christushealthplan.healthsparq.com/healthsparq/public/#/one/insurerCode=CHRISTUS_I&brandCode=CHRISTUS/machine-readable-transparency-in-coverage
     kind: portal
     queueable: false
@@ -775,6 +831,7 @@ sources:
       Table-of-Contents / in-network file links and paste them here.
 
   - name: HAP — Health Alliance Plan (Michigan)
+    states: [MI]
     url: https://www.hap.org/readable
     kind: portal
     queueable: false
@@ -786,6 +843,7 @@ sources:
       hap.org/transparency page now returns 404.
 
   - name: Health New England (Massachusetts)
+    states: [MA]
     url: https://mrf.healthsparq.com/hne-egress.nophi.kyruushsq.com/prd/mrf/HNE_I/HNE/latest_metadata.json
     kind: listing
     queueable: true
@@ -798,6 +856,7 @@ sources:
       answer HTTP 200. Previously a browser-only portal entry.
 
   - name: SummaCare (Ohio)
+    states: [OH]
     url: https://files.myplancentral.com/TIC/TOC/
     kind: page
     queueable: true
@@ -810,6 +869,7 @@ sources:
       summacare.com homepage.
 
   - name: Univera Healthcare (western New York)
+    states: [NY]
     url: https://mrf.healthsparq.com/unvra-egress.nophi.kyruushsq.com/prd/mrf/UNVRA_I/UNVRA/latest_metadata.json
     kind: listing
     queueable: true
@@ -822,6 +882,7 @@ sources:
       answer HTTP 200. Previously a browser-only portal entry.
 
   - name: ConnectiCare (Connecticut)
+    states: [CT]
     url: https://transparency.connecticare.com/
     kind: portal
     queueable: false
@@ -834,6 +895,7 @@ sources:
       connecticare.com/about-us/... page now returns 404.
 
   - name: CommunityCare (Oklahoma)
+    states: [OK]
     url: https://www.ccok.com/Price-Transparency/Machine-Readable/
     kind: portal
     queueable: false
@@ -845,6 +907,7 @@ sources:
       ccok.com/transparency-coverage-information page shows a 404 page.
 
   - name: Network Health (Wisconsin)
+    states: [WI]
     url: https://networkhealth.com/employer/transparency
     kind: portal
     queueable: false
@@ -861,6 +924,7 @@ sources:
       The old networkhealth.com/price-transparency page shows a 404 page.
 
   - name: Optima Health / Sentara (Virginia)
+    states: [VA]
     url: https://mrfproddestinationdata.blob.core.windows.net/sentara-mrf-output/Sentara-Health-Plans-INN_index.html
     kind: page
     queueable: true
@@ -874,6 +938,7 @@ sources:
       the Sentara homepage.
 
   - name: UPMC Health Plan (Pennsylvania)
+    states: [PA]
     url: https://content.upmchp.com/publicweb/table-of-contents/{FIRST_OF_MONTH}_UPMC-Health-Plan_index.json
     kind: toc
     queueable: true
@@ -886,6 +951,7 @@ sources:
       Previously this entry pointed only at the homepage.
 
   - name: Viva Health (Alabama)
+    states: [AL]
     url: https://www.vivahealth.com/mrf
     kind: portal
     queueable: false
@@ -899,6 +965,7 @@ sources:
       the disk space. Previously this entry pointed only at the homepage.
 
   - name: Capital Health Plan (Florida)
+    states: [FL]
     url: https://capitalhealth.com/legal/transparency-in-coverage/
     kind: portal
     queueable: false
@@ -909,6 +976,7 @@ sources:
       list, paste the .json/TOC links here.
 
   - name: Western Health Advantage (California)
+    states: [CA]
     url: https://www.westernhealth.com/
     kind: portal
     queueable: false
@@ -920,6 +988,7 @@ sources:
       here.
 
   - name: EmblemHealth (New York)
+    states: [NY]
     url: https://transparency.emblemhealth.com/
     kind: portal
     queueable: false
@@ -933,6 +1002,7 @@ sources:
   # ---- Added 2026-11-05 — Northeast (live-verified) ----
 
   - name: Healthfirst (New York)
+    states: [NY]
     url: https://healthfirst.org/health-data
     kind: page
     queueable: true
@@ -944,6 +1014,7 @@ sources:
       code filter ignores.
 
   - name: Fallon Health (Massachusetts)
+    states: [MA]
     url: https://fallon.sapphiremrfhub.com/
     kind: page
     queueable: true
@@ -954,6 +1025,7 @@ sources:
       its one index lists 5 rate files.
 
   - name: Neighborhood Health Plan of Rhode Island
+    states: [RI]
     url: https://files.nhpri.org/mrf/nhp/TOC/
     kind: page
     queueable: true
@@ -965,6 +1037,7 @@ sources:
       queue.
 
   - name: Mass General Brigham Health Plan (formerly AllWays)
+    states: [MA]
     url: https://massgeneralbrighamhealthplan.org/pricetransparency/MRF/Base
     kind: toc
     queueable: true
@@ -976,6 +1049,7 @@ sources:
       MultiPlan/PHCS files.
 
   - name: CDPHP (New York)
+    states: [NY]
     url: https://www.cdphp.com/interoperability/machine-readable-pricing-data-files
     kind: page
     queueable: true
@@ -988,6 +1062,7 @@ sources:
       app skips.
 
   - name: Geisinger Health Plan (Pennsylvania)
+    states: [PA]
     url: https://mrf.thehealthplan.com/content/MRF/toc.zip
     kind: toc
     queueable: true
@@ -998,6 +1073,7 @@ sources:
       geisinger.org/health-plan/no-surprises-act).
 
   - name: AmeriHealth New Jersey (PPO)
+    states: [NJ]
     url: https://www.amerihealthnj.com/cmstic/?brand=ahnj
     kind: page
     queueable: true
@@ -1008,6 +1084,7 @@ sources:
       brand's monthly index.
 
   - name: AmeriHealth New Jersey (HMO)
+    states: [NJ]
     url: https://www.amerihealthnj.com/cmstic/?brand=ahnjhmo
     kind: page
     queueable: true
@@ -1018,6 +1095,7 @@ sources:
       brand's monthly index.
 
   - name: AmeriHealth Pennsylvania
+    states: [PA]
     url: https://www.amerihealth.com/cmstic/?brand=ahpa
     kind: page
     queueable: true
@@ -1028,6 +1106,7 @@ sources:
       2026-10-01_ahpa_index.json.
 
   - name: Independent Health (western New York)
+    states: [NY]
     url: https://mrf.healthsparq.com/ihny-egress.nophi.kyruushsq.com/prd/mrf/IHNY_I/IHNY/latest_metadata.json
     kind: listing
     queueable: true
@@ -1039,6 +1118,7 @@ sources:
       links, newest dated 2026-10; sampled files answer HTTP 200.
 
   - name: MVP Health Care (New York / Vermont)
+    states: [NY, VT]
     url: https://mrf.healthsparq.com/mvp-egress.nophi.kyruushsq.com/prd/mrf/MVP_I/MVP/latest_metadata.json
     kind: listing
     queueable: true
@@ -1053,6 +1133,7 @@ sources:
   # ---- Added 2026-11-05 — Southeast (live-verified) ----
 
   - name: AvMed (Florida)
+    states: [FL]
     url: https://mrfproddestinationdata.blob.core.windows.net/avmed-mrf-output/AvMed-Health-Plans_INN_index.html
     kind: page
     queueable: true
@@ -1063,6 +1144,7 @@ sources:
       the current monthly index; 10 in-network ZIPs, each holding one JSON.
 
   - name: Health First Health Plans (Florida)
+    states: [FL]
     url: https://apps.hf.org/applications/dn/cms_json/files/tic/index.json
     kind: toc
     queueable: true
@@ -1073,6 +1155,7 @@ sources:
       months behind.
 
   - name: Alliant Health Plans (Georgia / Tennessee)
+    states: [GA, TN]
     url: https://alliantplans.com/json/pt/latestpt_nlc.html
     kind: page
     queueable: true
@@ -1083,6 +1166,7 @@ sources:
       (from alliantplans.com/machine-readable-data).
 
   - name: AmeriHealth Caritas Next (FL / NC / LA / DE marketplace)
+    states: [FL, NC, LA, DE]
     url: https://www.amerihealthcaritasnext.com/json
     kind: page
     queueable: true
@@ -1092,6 +1176,7 @@ sources:
       answer HTTP 200. Plain page of dated state indexes.
 
   - name: First Choice Next (South Carolina marketplace)
+    states: [SC]
     url: https://www.firstchoicenext.com/json
     kind: page
     queueable: true
@@ -1101,6 +1186,7 @@ sources:
       answer HTTP 200. Plain page of dated indexes (AmeriHealth Caritas family).
 
   - name: The Health Plan (West Virginia / eastern Ohio)
+    states: [WV, OH]
     url: https://www.healthplan.org/thp_mrfs
     kind: page
     queueable: true
@@ -1111,6 +1197,7 @@ sources:
       PEIA in-network ZIPs.
 
   - name: MedCost (rental network — NC / SC / VA)
+    states: [NC, SC, VA]
     url: https://mrf.mmsanalytics.com/medcost/
     kind: page
     queueable: true
@@ -1122,6 +1209,7 @@ sources:
       — raise it for full reach.
 
   - name: Health Advantage HMO (Arkansas Blue Cross family — individual)
+    states: [AR]
     url: https://mrf.arkansasbluecross.com/mrf/hmo_ha_hii_arkbluecross_index
     kind: toc
     queueable: true
@@ -1131,6 +1219,7 @@ sources:
       answer HTTP 200. Fixed link that redirects to the current month's index.
 
   - name: Health Advantage Octave (Arkansas Blue Cross family — individual)
+    states: [AR]
     url: https://mrf.arkansasbluecross.com/mrf/hmo_octave_hii_arkbluecross_index
     kind: toc
     queueable: true
@@ -1140,6 +1229,7 @@ sources:
       answer HTTP 200. Fixed link that redirects to the current month's index.
 
   - name: Health Advantage HMO (Arkansas Blue Cross family — TPA)
+    states: [AR]
     url: https://mrf.arkansasbluecross.com/mrf/hmo_ha_tpa_arkbluecross_index
     kind: toc
     queueable: true
@@ -1151,6 +1241,7 @@ sources:
   # ---- Added 2026-11-05 — Midwest (live-verified) ----
 
   - name: HealthPartners (MN / WI / IA / ND / SD)
+    states: [MN, WI, IA, ND, SD]
     url: https://mrfproddestinationdata.blob.core.windows.net/mrf-output/HealthPartners_In-Network_MRF_Index.html
     kind: page
     queueable: true
@@ -1161,6 +1252,7 @@ sources:
       current index; 6 network ZIPs, each one JSON.
 
   - name: Medical Mutual of Ohio
+    states: [OH]
     url: https://mrf.healthsparq.com/mmo-egress.nophi.kyruushsq.com/prd/mrf/MMO_I/MMO/latest_metadata.json
     kind: listing
     queueable: true
@@ -1172,6 +1264,7 @@ sources:
       2026-11; sampled files answer HTTP 200.
 
   - name: Paramount Health Care (Ohio / Michigan)
+    states: [OH, MI]
     url: https://mrf.healthsparq.com/paramount-egress.nophi.kyruushsq.com/prd/mrf/PARAMOUNT_I/PARAMOUNT/latest_metadata.json
     kind: listing
     queueable: true
@@ -1183,6 +1276,7 @@ sources:
       links, newest dated 2026-11; sampled files answer HTTP 200.
 
   - name: Quartz Health Solutions (WI / IL / MN)
+    states: [WI, IL, MN]
     url: https://mrf.healthsparq.com/quartz-egress.nophi.kyruushsq.com/prd/mrf/QUARTZ_I/QUARTZ/latest_metadata.json
     kind: listing
     queueable: true
@@ -1195,6 +1289,7 @@ sources:
       holding one JSON each.
 
   - name: Aspirus Health Plan (Wisconsin / Michigan)
+    states: [WI, MI]
     url: https://mrf.healthsparq.com/preferredone-egress.nophi.kyruushsq.com/prd/mrf/ASPIRUS_I/ASPIRUS/latest_metadata.json
     kind: listing
     queueable: true
@@ -1207,6 +1302,7 @@ sources:
       200.
 
   - name: McLaren Health Plan — HealthAdvantage (Michigan)
+    states: [MI]
     url: https://www.mclarenhealthplan.org/Uploads/Public/Documents/HealthPlan/documents/no-surprise-bill-mhp-mrf/McLarenHealthPlan_HealthAdvantage_in-network-rates_table_of_content.json
     kind: toc
     queueable: true
@@ -1216,6 +1312,7 @@ sources:
       index URL (index dated 2026-10-05).
 
   - name: McLaren Health Plan — Community Individual (Michigan)
+    states: [MI]
     url: https://www.mclarenhealthplan.org/Uploads/Public/Documents/HealthPlan/documents/no-surprise-bill-mhp-mrf/McLarenHealthPlan_Community_Individual_in-network-rates_table_of_content.json
     kind: toc
     queueable: true
@@ -1225,6 +1322,7 @@ sources:
       index URL.
 
   - name: Sanford Health Plan (ND / SD / MN / IA)
+    states: [ND, SD, MN, IA]
     url: https://www.sanfordhealthplan.com/transparency-in-coverage-rule
     kind: page
     queueable: true
@@ -1235,6 +1333,7 @@ sources:
       JSON.
 
   - name: Avera Health Plans (SD / IA / NE / MN)
+    states: [SD, IA, NE, MN]
     url: https://portaldocs.avera.org/machinereadablefiles
     kind: page
     queueable: true
@@ -1246,6 +1345,7 @@ sources:
       GB).
 
   - name: AultCare (Ohio)
+    states: [OH]
     url: https://www.aultcare.com/notices/pricetransparency/aultcare-mrf-2
     kind: page
     queueable: true
@@ -1255,6 +1355,7 @@ sources:
       answer HTTP 200. Plain page: index plus HMO, PPO and AEN files.
 
   - name: Ohio Health Choice / Ohio PPO Connect (AultCare network)
+    states: [OH]
     url: https://www.aultcare.com/notices/pricetransparency/ohio-ppo-connect-ohc
     kind: page
     queueable: true
@@ -1264,6 +1365,7 @@ sources:
       page of 4 network rate files (dated Oct 16, 2026).
 
   - name: Physicians Health Plan of Northern Indiana
+    states: [IN]
     url: https://services.phpni.com/machine-readable-files/files/phpni/phpni
     kind: page
     queueable: true
@@ -1274,6 +1376,7 @@ sources:
       answered).
 
   - name: Group Health Cooperative of South Central Wisconsin
+    states: [WI]
     url: https://ghcmrf.azureedge.net/public?restype=container&comp=list
     kind: page
     queueable: true
@@ -1284,6 +1387,7 @@ sources:
       current set is kept).
 
   - name: WPS Health Insurance (Wisconsin)
+    states: [WI]
     url: https://transparency.healthcare/wps/mrf/table-of-contents/
     kind: page
     queueable: true
@@ -1296,6 +1400,7 @@ sources:
   # ---- Added 2026-11-05 — South-central & West (live-verified) ----
 
   - name: PacificSource (ID / MT / OR / WA)
+    states: [ID, MT, OR, WA]
     url: https://w2bipdmrfsa.blob.core.windows.net/$web?restype=container&comp=list&prefix=20
     kind: page
     queueable: true
@@ -1307,6 +1412,7 @@ sources:
       capped by max_toc_files unless raised.
 
   - name: Mountain Health CO-OP (MT / ID / WY)
+    states: [MT, ID, WY]
     url: https://mrf.mmsanalytics.com/talon-mrf-generation/tocs/spyglass/mountain-health-co-op/toclist.json
     kind: page
     queueable: true
@@ -1317,6 +1423,7 @@ sources:
       current master index (440 files).
 
   - name: UHA Health Insurance (Hawaii)
+    states: [HI]
     url: https://app.uhahealth.com/mrf
     kind: toc
     queueable: true
@@ -1327,6 +1434,7 @@ sources:
       ZIPs each hold one JSON.
 
   - name: Sutter Health Plan (California)
+    states: [CA]
     url: https://xmc-sutterhealt962c-sutterhealt8fce-production57cc.sitecorecloud.io/-/media/Project/SutterHealth/SutterHealthPlan/PDF/{FIRST_OF_MONTH}_sutter-health-plus_index
     kind: toc
     queueable: true
@@ -1337,6 +1445,7 @@ sources:
       from sutterhealthplan.org/technical-information).
 
   - name: University of Utah Health Plans
+    states: [UT]
     url: https://doc.uhealthplan.utah.edu/machine-readable-data/TIC_MRF/u-of-u-health-plans_index.json
     kind: toc
     queueable: true
@@ -1347,6 +1456,7 @@ sources:
       files.
 
   - name: Hometown Health (Nevada)
+    states: [NV]
     url: https://www.hometownhealth.com/about-us/transparency-in-coverage/
     kind: page
     queueable: true
@@ -1356,6 +1466,7 @@ sources:
       answer HTTP 200. Page with the main index and per-employer indexes.
 
   - name: Community Health Plan of Washington (Cascade Select)
+    states: [WA]
     url: https://api-mkt.chpw.org/blob
     kind: page
     queueable: true
@@ -1366,6 +1477,7 @@ sources:
       ~24 h — the app fetches the list fresh each time it is queued.
 
   - name: Sharp Health Plan (California)
+    states: [CA]
     url: https://www.sharphealthplan.com/api-access-for-developers
     kind: page
     queueable: true
@@ -1376,6 +1488,7 @@ sources:
       in-network ZIPs; November not yet posted.
 
   - name: Baylor Scott & White Health Plan (Texas)
+    states: [TX]
     url: https://www.bswhealthplan.com/transparency
     kind: page
     queueable: true
@@ -1387,6 +1500,7 @@ sources:
       ingest.
 
   - name: HMAA (Hawaii)
+    states: [HI]
     url: https://hmaa.com/NSA/MRF
     kind: file
     queueable: true
@@ -1396,6 +1510,7 @@ sources:
       2026-11-02 despite the 2022 folder name).
 
   - name: Presbyterian Health Plan (New Mexico)
+    states: [NM]
     url: https://onbaseext.phs.org/PEL/DisplayDocument?ContentID=OB_000000007649
     kind: file
     queueable: true
@@ -1408,6 +1523,7 @@ sources:
   # ---- Added 2026-11-05 — National TPAs, rental networks and hubs (live-verified) ----
 
   - name: Meritain Health (Aetna's TPA)
+    states: [US]
     url: https://mrf.healthsparq.com/aetnacvs-egress.nophi.kyruushsq.com/prd/mrf/MERITAIN_I/MERITAINOVER/latest_metadata.json
     kind: listing
     queueable: true
@@ -1420,6 +1536,7 @@ sources:
       (default 2,000) is capped alphabetically — raise it for full reach.
 
   - name: Allied Benefit Systems (TPA)
+    states: [US]
     url: https://alliedbenefit.sapphiremrfhub.com/
     kind: page
     queueable: true
@@ -1431,6 +1548,7 @@ sources:
       2,000); raise it for deeper reach.
 
   - name: HealthComp / Personify Health (TPA)
+    states: [US]
     url: https://healthcomp.sapphiremrfhub.com/
     kind: page
     queueable: true
@@ -1441,6 +1559,7 @@ sources:
       older group links are stale.
 
   - name: ACS Benefit Services (TPA)
+    states: [US]
     url: https://acsbenefitservices.sapphiremrfhub.com/
     kind: page
     queueable: true
@@ -1450,6 +1569,7 @@ sources:
       answer HTTP 200. Sapphire hub.
 
   - name: Zenith American Solutions (TPA)
+    states: [US]
     url: https://zenith-american.sapphiremrfhub.com/
     kind: page
     queueable: true
@@ -1459,6 +1579,7 @@ sources:
       answer HTTP 200. Sapphire hub; a few group entries are missing files.
 
   - name: QuikTrip employee plan
+    states: [US]
     url: https://quiktrip.sapphiremrfhub.com/
     kind: page
     queueable: true
@@ -1468,6 +1589,7 @@ sources:
       answer HTTP 200. Single-employer Sapphire hub (4 rate files).
 
   - name: Healthcare Highways (network)
+    states: [TX, OK]
     url: https://hchmrfblob.blob.core.windows.net/clearcost?restype=container&comp=list
     kind: page
     queueable: true
@@ -1477,6 +1599,7 @@ sources:
       file listing; ZIPs hold JSON / JSON.GZ files (modified Oct–Nov 2026).
 
   - name: Luminare Health (formerly Trustmark) — via Valenz Bluebook
+    states: [US]
     url: https://mrf.healthcarebluebook.com/luminarehealth
     kind: page
     queueable: true
@@ -1486,6 +1609,7 @@ sources:
       answer HTTP 200. Server-rendered Valenz hub page.
 
   - name: MultiPlan / PHCS network (via SISCO's mirror)
+    states: [US]
     url: https://sisconosurprise.com/ppo/phcs/index.html
     kind: page
     queueable: true
@@ -1497,6 +1621,7 @@ sources:
       that we could reach.
 
   - name: Curative
+    states: [TX, OK, GA]
     url: https://static.curative.com/transparency_in_coverage/table-of-contents.json
     kind: toc
     queueable: true
@@ -1506,6 +1631,7 @@ sources:
       answer HTTP 200. Fixed index URL (linked from curative.com).
 
   - name: Gravie
+    states: [US]
     url: https://www.gravie.com/compliance/transparency-in-coverage/
     kind: page
     queueable: true
@@ -1515,6 +1641,7 @@ sources:
       Gravie's files (mostly Cigna network plus an HPS/Paymedix ZIP).
 
   - name: Preferred Health Professionals (network — KC region)
+    states: [MO, KS]
     url: https://phpmrffiles.phpkc.com/
     kind: page
     queueable: true
@@ -1527,6 +1654,7 @@ sources:
   # ---- Added 2026-11-05 — open in a browser (found, but not readable automatically) ----
 
   - name: CareSource (marketplace — OH / IN / MI / WI / GA / KY / WV / NC)
+    states: [OH, IN, MI, WI, GA, KY, WV, NC]
     url: https://www.caresource.com/vendor/tic/tic-data-index.json
     kind: portal
     queueable: false
@@ -1538,6 +1666,7 @@ sources:
       data/inbox. Some states are stale (KY Jan 2026, NC Dec 2025).
 
   - name: MercyCare Health Plans (Wisconsin / Illinois)
+    states: [WI, IL]
     url: https://stmercycaremrf.z14.web.core.windows.net/in_network.html
     kind: portal
     queueable: false
@@ -1548,6 +1677,7 @@ sources:
       the .json files into data/inbox.
 
   - name: UCare (Minnesota individual plans)
+    states: [MN]
     url: https://ucm-p-001.sitecorecontenthub.cloud/api/public/content/ucare_toc.json?download=true
     kind: portal
     queueable: false
@@ -1559,6 +1689,7 @@ sources:
       links.
 
   - name: 1199SEIU Benefit Funds (NY / NJ / MA / MD / DC)
+    states: [NY, NJ, MA, MD, DC]
     url: https://www.1199seiubenefits.org/price-transparency
     kind: portal
     queueable: false
@@ -1569,6 +1700,7 @@ sources:
       JSON, so the app can't expand it — paste its file links by hand.
 
   - name: Johns Hopkins Employer Health Programs (MD / DC)
+    states: [MD, DC]
     url: https://ehptransparency.org/
     kind: portal
     queueable: false
@@ -1580,6 +1712,7 @@ sources:
       behind.
 
   - name: Jefferson Health Plans (PA / NJ)
+    states: [PA, NJ]
     url: https://jhp.blob.core.windows.net/jhp/mrf/Jefferson-Health-Plans_index.json
     kind: portal
     queueable: false
@@ -1590,6 +1723,7 @@ sources:
       it into the queue from your own computer.
 
   - name: WellSense Health Plan (Massachusetts)
+    states: [MA]
     url: https://www.wellsense.org/about-us/interoperability
     kind: portal
     queueable: false
@@ -1600,6 +1734,7 @@ sources:
       own computer.
 
   - name: Midlands Choice (rental network — NE / IA / SD / KS)
+    states: [NE, IA, SD, KS]
     url: https://api.midlandschoice.com/mrf
     kind: portal
     queueable: false
@@ -1611,6 +1746,7 @@ sources:
       2026-11-01_midlands-choice_<net>_in-network-rates.json.gz.
 
   - name: GlobalHealth (Oklahoma)
+    states: [OK]
     url: https://www.globalhealth.com/oklahoma/providers/forms-and-resources/
     kind: portal
     queueable: false
@@ -1621,6 +1757,7 @@ sources:
       a browser and drop them into data/inbox.
 
   - name: Community Health Options (Maine)
+    states: [ME]
     url: https://index.opynhealth.com/Community-Health-Options/Community-Health-Options
     kind: portal
     queueable: false
@@ -1631,6 +1768,7 @@ sources:
       open in a browser.
 
   - name: Collective Health
+    states: [US]
     url: https://mrfhost.serifhealth.com/?list-type=2&prefix=current/&delimiter=/
     kind: portal
     queueable: false
@@ -1641,6 +1779,7 @@ sources:
       — prefix each with https://mrfhost.serifhealth.com/ and paste.
 
   - name: L.A. Care Covered California
+    states: [CA]
     url: https://transparency.lacare.org/
     kind: portal
     queueable: false
@@ -1652,6 +1791,7 @@ sources:
       per month) — paste the newest.
 
   - name: WebTPA (TPA)
+    states: [US]
     url: https://price-transparency.webtpa.com/machinereadablefile/plans
     kind: portal
     queueable: false
@@ -1662,6 +1802,7 @@ sources:
       Florida Blue networks already covered elsewhere.
 
   - name: Imagine360 (TPA — employer groups)
+    states: [US]
     url: https://caa.imagine360.com/
     kind: portal
     queueable: false
@@ -1672,6 +1813,7 @@ sources:
       open in a browser and paste a group's index link.
 
   - name: Providence Health Plan (Oregon / Washington)
+    states: [OR, WA]
     url: https://mrfhub.providencehealthplan.com/
     kind: portal
     queueable: false
@@ -1681,6 +1823,7 @@ sources:
       list; open in a browser.
 
   - name: Sendero Health Plans — IdealCare (Texas)
+    states: [TX]
     url: https://www.mymedicalshopper.com/mrf/idealcare-by-sendero-sendero-health-plans-inc-idealcare
     kind: portal
     queueable: false
@@ -1690,6 +1833,7 @@ sources:
       in a browser.
 
   - name: Community Health Choice (Texas marketplace)
+    states: [TX]
     url: https://www.communityhealthchoice.org/health-insurance-marketplace/transparency-in-coverage-2026/
     kind: portal
     queueable: false
@@ -1700,6 +1844,7 @@ sources:
       2026-08-13. The page name changes each plan year.
 
   - name: Medica (incl. Dean / WellFirst — MN / WI / IA / NE / KS / MO / ND / SD / OK)
+    states: [MN, WI, IA, NE, KS, MO, ND, SD, OK]
     url: https://www.medica.com/price-transparency
     kind: portal
     queueable: false

@@ -34,7 +34,9 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt && .venv/bin/
 .venv/bin/pip-audit -r requirements.txt    # dependency CVEs: was 25 across 5 packages, now clean
 ```
 
-Other commands: `mrfx add <url>… [--file links.txt] [--known] [--retry-failed]`,
+Other commands: `mrfx add <url>… [--file links.txt] [--known [--states MO,KS]] [--retry-failed]`,
+`mrfx sources [--check] [--states …] [--report out.csv]` (the tested-sources catalog; `--check`
+re-audits it live, read-only, as MRF Explorer — OK / NEEDS-BROWSER / PORTAL / CHANGED / DEAD),
 `mrfx preflight <path>`, `mrfx ingest [path] [--force]`, `mrfx status`,
 `mrfx export out.csv [--cpt … --payer … --grain tin]`, `mrfx outreach`,
 `mrfx forget <filename>`, `mrfx speedtest <url>`,
