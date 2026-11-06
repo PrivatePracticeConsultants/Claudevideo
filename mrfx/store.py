@@ -597,9 +597,11 @@ LATEST_PARTITION = "payer, tin_value, tin_is_really_npi, billing_code"
 # a contract shares payer, code and TIN). Measured at 99M rates: full rebuild
 # 577 s -> 619 s, payer delta 49 s either way. Rejected after measuring: a
 # window per slice (+31% on the full rebuild), a join to one store-wide
-# newest-month table (+53% per slice), and an UPDATE after the inserts —
-# DuckDB 1.5 does not show rows appended in the same transaction to a later
-# statement, so it marked 0 of 79M rows while every one-shot test passed.
+# newest-month table (+53% per slice), and an UPDATE after the inserts — it
+# marked 0 of 79M rows: in DuckDB 1.5.5/1.5.6, after the build's (then) empty
+# CTAS, rows an INSERT … ORDER BY adds are invisible to EVERY statement until a
+# CHECKPOINT (round 5 found the mechanism and fixed the build itself; see
+# _build_rollup_tables and tests/mrfx/test_rollup_visibility.py).
 # NOT part of the GROUP BY grain, so no ROLLUP_SCHEMA_VERSION bump.
 _BY_TIN_BODY = BY_TIN_QUERY.rsplit("ORDER BY billing_code, tin_value", 1)[0]
 _NEWEST_JOIN = " AND ".join(f"n.{c} IS NOT DISTINCT FROM spine.{c}"
@@ -3647,8 +3649,21 @@ class Store:
                 if parts == 1:
                     con.execute(f"CREATE OR REPLACE TABLE {tbl} AS {query.format(part='TRUE')}")
                 else:
-                    con.execute(  # schema only; slices append below
-                        f"CREATE OR REPLACE TABLE {tbl} AS {query.format(part='FALSE')}")
+                    # schema only, as EXPLICIT columns — never an empty
+                    # `CREATE TABLE … AS (… WHERE FALSE)`. DuckDB 1.5.5: after an
+                    # empty CTAS, rows that a later INSERT … ORDER BY of more than
+                    # one row group (~123k rows) adds in the same transaction stay
+                    # invisible to EVERY connection, even after COMMIT, until a
+                    # CHECKPOINT. The CHECKPOINT below fails whenever another
+                    # connection has a write open (a queue update, a name save:
+                    # "Cannot CHECKPOINT: there are other write transactions
+                    # active"), and the rebuilt spine then read as EMPTY on every
+                    # screen until a later checkpoint. Explicit DDL + the same
+                    # INSERTs: visible at COMMIT (round 5, P1.2; reproduced in
+                    # tests/mrfx/test_rollup_visibility.py).
+                    cols = con.execute(f"DESCRIBE {query.format(part='FALSE')}").fetchall()
+                    ddl = ", ".join(f'"{name}" {typ}' for name, typ, *_ in cols)
+                    con.execute(f"CREATE OR REPLACE TABLE {tbl} ({ddl})")
                     for i in range(parts):
                         log.info("rollup %s: partition %d/%d (%d rows total)", tbl, i + 1, parts, n_rows)
                         pred = f"hash({key}) % {parts} = {i}"
