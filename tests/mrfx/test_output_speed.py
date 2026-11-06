@@ -61,8 +61,9 @@ def test_name_progress_matches_the_full_scan_through_parts_changing(cfg, store):
     list(scan_inbox(cfg, store))
     p = store.enrichment_progress(max_age_seconds=0)
     assert p == _slow_progress(store) and p["total"] == 3
-    with store.connect() as con:                      # the side table was built
-        assert con.execute("SELECT count(*) FROM rate_npis").fetchone()[0] == 3
+    with store.connect() as con:                      # kept per part
+        assert con.execute("SELECT count(DISTINCT npi) FROM rate_npi_set").fetchone()[0] == 3
+        assert con.execute("SELECT count(*) FROM rate_npi_parts").fetchone()[0] == 1
     # names arriving change enriched/named WITHOUT a part changing
     store.save_npi(NP1, "KAPPA PT", "261QP2000X", "Clinic/Center PT", "Town", "MO",
                    entity_type="NPI-2")

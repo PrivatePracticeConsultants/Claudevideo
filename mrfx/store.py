@@ -565,15 +565,17 @@ BY_TIN_QUERY = """
     ORDER BY billing_code, tin_value
 """
 
-# The well-formed NPIs the rates reference (an NPI in the TIN slot included) —
-# the population name enrichment works through (Store.enrichment_progress).
-_RATE_NPIS_SQL = """
+# The well-formed NPIs a rate relation references (an NPI in the TIN slot
+# included) — the population name enrichment works through
+# (Store.enrichment_progress). {src} is `rates` or one part's read_parquet().
+_RATE_NPIS_SQL_T = """
     SELECT DISTINCT npi FROM (
-        SELECT npi FROM rates
+        SELECT npi FROM {src}
         UNION
-        SELECT tin_value AS npi FROM rates
+        SELECT tin_value AS npi FROM {src}
         WHERE tin_is_really_npi AND tin_value IS NOT NULL
-    ) WHERE regexp_full_match(npi, '[0-9]{10}')"""
+    ) WHERE regexp_full_match(npi, '[0-9]{{10}}')"""
+_RATE_NPIS_SQL = _RATE_NPIS_SQL_T.format(src="rates")
 
 # "Latest" = each CONTRACT's newest month, a contract being a payer x provider x
 # code line (benchmark._rates_relation explains the grain). tin_is_really_npi is
@@ -1809,6 +1811,11 @@ class Store:
             -- a directory row depends only on its own TIN's rows, so these are
             -- the ONLY directory rows a removal can change
             CREATE TABLE IF NOT EXISTS rollup_pending_tins (tin_value VARCHAR);
+            -- The NPIs each rate PART references (Store.enrichment_progress),
+            -- kept per part with the part's size|mtime: a new file costs one
+            -- scan of THAT file, never of the whole store
+            CREATE TABLE IF NOT EXISTS rate_npi_parts (part VARCHAR PRIMARY KEY, sig VARCHAR);
+            CREATE TABLE IF NOT EXISTS rate_npi_set (part VARCHAR, npi VARCHAR);
             -- Which health PLANS a rate file serves, harvested from the payer's
             -- table-of-contents (the rate file itself never names a plan).
             -- Keyed by the URL's dedup_key so it joins to url_queue, which
@@ -3966,57 +3973,22 @@ class Store:
             return cached[1] if cached is not None else {
                 "total": 0, "enriched": 0, "named": 0, "remaining": 0}
         try:
-            # The NPIs the rates reference change ONLY when a rate part does.
-            # They used to be re-derived by two DISTINCT scans of every raw
-            # rate row each minute the dashboard was open — the same answer,
-            # recomputed, competing with the user's clicks and the parser for
-            # the disk. Kept instead in a side table (rate_npis), rebuilt when
-            # the parts' signature changes; the counts are then a join of the
-            # name directory with that small table. Nothing else reads it.
-            sig = self._parts_signature()
+            # The NPIs the rates reference change ONLY when a rate part does,
+            # so they are kept PER PART (rate_npi_set / rate_npi_parts): a
+            # file landing costs one scan of that file, outside the writer
+            # lock, and the counts are a join of the name directory with the
+            # kept set. Before round 4 this was two DISTINCT scans of every
+            # raw row each minute the dashboard was open; round 4's first cut
+            # rebuilt a whole-store table under the writer lock whenever a
+            # part changed — 80 s at 99M rates, during which every file
+            # finishing had to wait for its bookkeeping (found in the round-5
+            # review; see docs/NEXT_STEPS_PROMPT_5.md).
             with self.connect() as con:
-                fresh = (self._meta_get(con, "rate_npis_parts") == sig and con.execute(
-                    "SELECT count(*) FROM information_schema.tables "
-                    "WHERE table_name = 'rate_npis'").fetchone()[0] > 0)
-            # never wait on a writer for a banner: with the lock busy, the
-            # old two-scan answer below is still exact, just not saved
-            if not fresh and self.write_lock.acquire(blocking=False):
-                try:
-                    with self.connect() as con:
-                        con.execute("BEGIN TRANSACTION")
-                        try:
-                            # sig was read BEFORE this scan: a part landing
-                            # meanwhile changes the next signature, so the
-                            # table is rebuilt again rather than ever trusted
-                            con.execute(f"CREATE OR REPLACE TABLE rate_npis AS {_RATE_NPIS_SQL}")
-                            con.execute("INSERT OR REPLACE INTO meta VALUES "
-                                        "('rate_npis_parts', ?)", [sig])
-                            con.execute("COMMIT")
-                            fresh = True
-                        except Exception:
-                            try:
-                                con.execute("ROLLBACK")
-                            except duckdb.Error:
-                                pass
-                            raise
-                finally:
-                    self.write_lock.release()
-            with self.connect() as con:
-                if fresh:
-                    total = con.execute("SELECT count(*) FROM rate_npis").fetchone()[0]
-                    enriched, named = con.execute(
-                        "SELECT count(*), count(*) FILTER (WHERE org_name IS NOT NULL) "
-                        "FROM npi_directory JOIN rate_npis USING (npi)").fetchone()
-                else:
-                    total = con.execute(
-                        f"SELECT count(*) FROM ({_RATE_NPIS_SQL})").fetchone()[0]
-                    enriched, named = con.execute(
-                        f"""
-                        SELECT count(*), count(*) FILTER (WHERE org_name IS NOT NULL)
-                        FROM npi_directory
-                        WHERE npi IN ({_RATE_NPIS_SQL})  -- same population as `total`
-                        """
-                    ).fetchone()
+                rel = self._rate_npis_relation(con)
+                total = con.execute(f"SELECT count(DISTINCT npi) FROM {rel}").fetchone()[0]
+                enriched, named = con.execute(
+                    "SELECT count(*), count(*) FILTER (WHERE org_name IS NOT NULL) "
+                    f"FROM npi_directory WHERE npi IN (SELECT npi FROM {rel})").fetchone()
             remaining = max(0, total - enriched)
             result = {"total": total, "enriched": enriched, "named": named,
                       "remaining": remaining}
@@ -4025,18 +3997,81 @@ class Store:
         finally:
             self._enrich_progress_lock.release()
 
-    def _parts_signature(self) -> str:
-        """Fingerprint of the rate parts on disk (name, size, mtime): every
-        change to the `rates` view's rows changes it — a part landing, being
-        replaced, rewritten by a row-rule migration, or removed."""
-        h = hashlib.sha1()
-        for p in sorted(self.rates_dir.glob("*.parquet")):
+    def _part_sigs(self) -> dict[str, str]:
+        """{part file name: size|mtime} for the rate parts on disk: every
+        change to the `rates` view's rows changes a part's entry — a part
+        landing, being replaced, rewritten by a row-rule migration, removed."""
+        out = {}
+        for p in self.rates_dir.glob("*.parquet"):
             try:
                 st = p.stat()
             except OSError:
                 continue
-            h.update(f"{p.name}|{st.st_size}|{st.st_mtime_ns}\n".encode())
-        return h.hexdigest()
+            out[p.name] = f"{st.st_size}|{st.st_mtime_ns}"
+        return out
+
+    def _rate_npis_relation(self, con: duckdb.DuckDBPyConnection) -> str:
+        """Bring rate_npi_set up to date with the parts on disk and return a
+        relation (SQL, one column `npi`) of the current set, on `con`.
+
+        Parts that are new or rewritten are scanned one file at a time with
+        NO lock held, into a temp table on `con`; the result is applied in one
+        short transaction under the writer lock — the rows of parts that are
+        gone or rescanned dropped, the new rows added, each scanned part's
+        signature recorded. A part that cannot be read right now (being
+        replaced, quarantined) keeps its old rows and signature and is tried
+        again next call. If a writer holds the lock for more than a few
+        seconds the apply waits for the next call — a banner never waits on a
+        rollup — and the answer comes from the kept rows plus the temp table,
+        which is the same set, exactly."""
+        current = self._part_sigs()
+        known = dict(con.execute("SELECT part, sig FROM rate_npi_parts").fetchall())
+        gone = [p for p in known if p not in current]
+        changed = sorted(p for p, sig in current.items() if known.get(p) != sig)
+        if not gone and not changed:
+            return "(SELECT npi FROM rate_npi_set)"
+        con.execute("CREATE OR REPLACE TEMP TABLE __npi_new (part VARCHAR, npi VARCHAR)")
+        scanned = []
+        for name in changed:
+            src = f"read_parquet('{sql_path(self.rates_dir / name)}')"
+            try:
+                con.execute("INSERT INTO __npi_new SELECT ?, npi FROM ("
+                            + _RATE_NPIS_SQL_T.format(src=src) + ")", [name])
+                scanned.append(name)
+            except duckdb.Error:
+                continue        # unreadable right now: retried next call
+        drop = gone + scanned
+        if not drop:
+            return "(SELECT npi FROM rate_npi_set)"
+        if self.write_lock.acquire(timeout=3):
+            try:
+                con.execute("BEGIN TRANSACTION")
+                try:
+                    con.execute("DELETE FROM rate_npi_set WHERE part IN (SELECT unnest(?::VARCHAR[]))",
+                                [drop])
+                    con.execute("DELETE FROM rate_npi_parts WHERE part IN (SELECT unnest(?::VARCHAR[]))",
+                                [drop])
+                    con.execute("INSERT INTO rate_npi_set SELECT part, npi FROM __npi_new")
+                    for name in scanned:
+                        con.execute("INSERT INTO rate_npi_parts VALUES (?, ?)", [name, current[name]])
+                    # the round-4 whole-store table, superseded by the per-part set
+                    con.execute("DROP TABLE IF EXISTS rate_npis")
+                    con.execute("DELETE FROM meta WHERE key = 'rate_npis_parts'")
+                    con.execute("COMMIT")
+                    return "(SELECT npi FROM rate_npi_set)"
+                except Exception:
+                    try:
+                        con.execute("ROLLBACK")
+                    except duckdb.Error:
+                        pass
+                    raise
+            finally:
+                self.write_lock.release()
+        # a writer is busy: the exact current set, from what was just read
+        con.execute("CREATE OR REPLACE TEMP TABLE __npi_drop AS "
+                    "SELECT unnest(?::VARCHAR[]) AS part", [drop])
+        return ("(SELECT npi FROM rate_npi_set WHERE part NOT IN (SELECT part FROM __npi_drop) "
+                "UNION SELECT npi FROM __npi_new)")
 
     def available_states(self, max_age_seconds: float = 60.0) -> list[str]:
         """Distinct US states present in the enriched directory — used to fill
@@ -4351,7 +4386,8 @@ class Store:
                     # hashes) would refuse to re-queue / dedup-away the very
                     # URLs the user re-pastes to rebuild the store they just
                     # wiped. entity_map and org_websites stay — user config.
-                    "DELETE FROM url_queue; DELETE FROM rollup_pending_tins;"
+                    "DELETE FROM url_queue; DELETE FROM rollup_pending_tins; "
+                    "DELETE FROM rate_npi_parts; DELETE FROM rate_npi_set;"
                 )
                 for tbl in ("rates_dedup_tbl", "rates_by_tin_tbl", "tin_directory_tbl"):
                     con.execute(f"DROP TABLE IF EXISTS {tbl}")
