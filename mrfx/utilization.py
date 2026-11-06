@@ -537,7 +537,7 @@ def service_line_gaps(store: Store, subject: str, *, zip_code: str | None = None
         home = zip_code and str(zip_code).strip()[:5]
         if not home:
             r = con.execute("""
-                SELECT mode(lpad(substr(trim(n.zip), 1, 5), 5, '0'))
+                SELECT mode(lpad(substr(trim(n.zip), 1, 5), 5, '0') ORDER BY lpad(substr(trim(n.zip), 1, 5), 5, '0'))
                 FROM rates r JOIN npi_directory n ON n.npi = r.npi
                 WHERE r.tin_value IN (SELECT unnest(?::VARCHAR[]))
                   AND n.zip IS NOT NULL AND trim(n.zip) <> ''

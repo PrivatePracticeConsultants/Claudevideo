@@ -827,6 +827,16 @@ already have is automatically **skipped, not duplicated**.
 - **Speed with names loaded**: once practice names arrive, the Explorer
   table took 158 s and the Code page 10 s on a 32M-rate store (a join DuckDB
   could only run as a nested loop); fixed — 1.2 s and 0.17 s on the same store.
+- **Speed on a big store (0.4)**: "newest file per contract" is now stored
+  with the rates instead of being worked out on every click. On a 99M-rate
+  test store the Explorer's opening view went from "needs more memory" to
+  about 1 second, the summary strip from 40 s to 5 s, the Code page from
+  2.5 s to under 1 s, the Overview from 25 s to 10 s (then instant until new
+  data lands). The first start after updating spends a few seconds marking
+  the newest months (log: "marked each contract's newest month") — no long
+  rebuild. Every number is the same as before. On the Code page the ranking
+  now appears as soon as it is ready and the month-by-month table fills in
+  after; clicking another code cancels the previous one.
 - **Long runs**: a download whose server stalls is **paused** (slot freed,
   bytes kept, automatic retry in 24 h, up to 5 times — `download_pause_hours`
   / `download_auto_resumes`); Resume stopped; the monthly refresh (if on)

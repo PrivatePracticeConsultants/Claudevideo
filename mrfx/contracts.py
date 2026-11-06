@@ -131,7 +131,7 @@ def renewal_radar(store: Store, subjects: list[str] | None = None,
             WHERE {where} AND {usable.replace('expiration_date', 't.expiration_date')}
               AND t.expiration_date <= ?{tin_filter}
             GROUP BY 1, 2, 3, 4
-            ORDER BY t.expiration_date, practice, t.payer
+            ORDER BY t.expiration_date, practice, t.payer, t.tin_value
             LIMIT {max(1, min(int(limit), 5000))}
         """, [today, *params, horizon, *tin_params])
         rows = [dict(zip([c[0] for c in cur.description], r)) for r in cur.fetchall()]
@@ -180,7 +180,7 @@ def new_to_network(store: Store, market: dict | None = None,
         # would report its whole book as "new"
         pairs = con.execute("""
             SELECT payer, max(file_month) FROM rates_by_tin
-            WHERE file_month < ? GROUP BY payer
+            WHERE file_month < ? GROUP BY payer ORDER BY payer
         """, [month]).fetchall()
         if prev_month:
             # a payer that did not publish in the requested prev_month has an
@@ -245,7 +245,7 @@ def new_to_network(store: Store, market: dict | None = None,
                 SELECT r.tin_value,
                        bool_or(n.npi IS NOT NULL),
                        coalesce(bool_or({therapy}), FALSE),
-                       mode(substr(trim(n.zip), 1, 5))
+                       mode(substr(trim(n.zip), 1, 5) ORDER BY substr(trim(n.zip), 1, 5))
                 FROM rates r LEFT JOIN npi_directory n ON n.npi = r.npi
                 WHERE r.tin_value IN (SELECT unnest(?::VARCHAR[]))
                 GROUP BY 1
@@ -274,11 +274,14 @@ def new_to_network(store: Store, market: dict | None = None,
                     kept.append(r)
                 out = kept
             rows = out
+    # tin_value completes the order: two practices of one name (and code
+    # count) came back in thread order (invariant 7) — sorted on the RAW tax
+    # id, before masking makes every SSN-pattern one tie
+    rows.sort(key=lambda r: (-(r.get("codes") or 0), r["practice"], r["payer"], r["tin_value"]))
     for r in rows:
         r["cities"] = list(r.get("cities") or [])
         r["states"] = list(r.get("states") or [])
         r["tin_value"] = mask_tin(r["tin_value"])
-    rows.sort(key=lambda r: (-(r.get("codes") or 0), r["practice"]))
     return {"rows": rows[:limit], "month": month,
             "compared": sorted({(r["payer"], r["prev_month"]) for r in rows}) or
                         [(p, pm) for p, pm in pairs],

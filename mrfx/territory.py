@@ -29,6 +29,7 @@ import re
 
 from .catalog import code_info
 from .states import state_code_or_none
+from .sqlfn import modal_zip_by_tin, modal_zip_of
 from .store import Store, mask_tin
 
 log = logging.getLogger(__name__)
@@ -244,11 +245,8 @@ def _add_miles(store: Store, rows: list[dict], subject_tins: list[str],
         from .medicare import haversine_miles_sql, load_centroids
         with store.connect() as con:
             load_centroids(con, centroids_path)
-            origin = con.execute("""
-                SELECT mode(lpad(substr(trim(n.zip), 1, 5), 5, '0'))
-                FROM rates r JOIN npi_directory n ON n.npi = r.npi
-                WHERE r.tin_value IN (SELECT unnest(?::VARCHAR[]))
-                  AND n.zip IS NOT NULL AND trim(n.zip) <> ''
+            origin = con.execute(f"""
+                SELECT * FROM ({modal_zip_of("SELECT unnest(?::VARCHAR[])")})
             """, [subject_tins]).fetchone()
             home = origin[0] if origin else None
             if not home:
@@ -477,14 +475,7 @@ def radius_rate_map(store: Store, code: str, market: dict, *,
             WHERE {where}
             GROUP BY t.tin_value
         ),
-        tin_zip AS (
-            SELECT r.tin_value,
-                   mode(lpad(substr(trim(n.zip), 1, 5), 5, '0')) AS zip
-            FROM rates r JOIN npi_directory n ON n.npi = r.npi
-            WHERE r.tin_value IN (SELECT tin_value FROM per_tin)
-              AND n.zip IS NOT NULL AND trim(n.zip) <> ''
-            GROUP BY r.tin_value
-        ),
+        tin_zip AS ({modal_zip_by_tin("SELECT tin_value FROM per_tin")}),
         placed AS (
             SELECT p.tin_value, p.rate, z.zip,
                    {haversine_miles_sql('c.lat', 'c.lon', origin[0], origin[1])} AS miles

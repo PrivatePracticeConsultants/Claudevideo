@@ -66,12 +66,12 @@ def compute_org_profile(store: Store, subject: str, market: dict) -> dict:
             [tins]).fetchone() or (None, [], [])
         # NPPES contact detail, same source the outreach export uses
         contact = con.execute(
-            "SELECT mode(org_name) FILTER (org_name IS NOT NULL), "
-            "       mode(address)  FILTER (address IS NOT NULL), "
-            "       mode(city)     FILTER (city IS NOT NULL), "
-            "       mode(state)    FILTER (state IS NOT NULL), "
-            "       mode(zip)      FILTER (zip IS NOT NULL), "
-            "       mode(phone)    FILTER (phone IS NOT NULL) "
+            "SELECT mode(org_name ORDER BY org_name) FILTER (org_name IS NOT NULL), "
+            "       mode(address ORDER BY address)  FILTER (address IS NOT NULL), "
+            "       mode(city ORDER BY city)     FILTER (city IS NOT NULL), "
+            "       mode(state ORDER BY state)    FILTER (state IS NOT NULL), "
+            "       mode(zip ORDER BY zip)      FILTER (zip IS NOT NULL), "
+            "       mode(phone ORDER BY phone)    FILTER (phone IS NOT NULL) "
             "FROM npi_directory WHERE npi IN (SELECT unnest(?::VARCHAR[]))",
             [npis or [""]]).fetchone() or (None,) * 6
         months = [r[0] for r in con.execute(

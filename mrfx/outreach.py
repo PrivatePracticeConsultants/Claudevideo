@@ -65,11 +65,11 @@ def _geo_by_tin(store: Store, scope_tins: list[str]) -> dict[str, dict]:
                     WHERE r.tin_value IS NOT NULL AND r.tin_is_really_npi
                 )
                 SELECT tin_value,
-                       mode(n.city)    FILTER (n.city IS NOT NULL)    AS city,
-                       mode(n.state)   FILTER (n.state IS NOT NULL)   AS state,
-                       mode(n.zip)     FILTER (n.zip IS NOT NULL)     AS zip,
-                       mode(n.address) FILTER (n.address IS NOT NULL) AS address,
-                       mode(n.phone)   FILTER (n.phone IS NOT NULL)   AS phone
+                       mode(n.city ORDER BY n.city)    FILTER (n.city IS NOT NULL)    AS city,
+                       mode(n.state ORDER BY n.state)   FILTER (n.state IS NOT NULL)   AS state,
+                       mode(n.zip ORDER BY n.zip)     FILTER (n.zip IS NOT NULL)     AS zip,
+                       mode(n.address ORDER BY n.address) FILTER (n.address IS NOT NULL) AS address,
+                       mode(n.phone ORDER BY n.phone)   FILTER (n.phone IS NOT NULL)   AS phone
                 FROM tin_npi JOIN npi_directory n USING (npi)
                 GROUP BY tin_value
                 """

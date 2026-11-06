@@ -611,7 +611,7 @@ def org_referrals(store: Store, npis: list[str], direction: str = "in",
                    coalesce(n.taxonomy_code, '')          AS taxonomy,
                    sum(p.patients)                        AS patients,
                    sum(p.transactions)                    AS transactions,
-                   round(avg(p.avg_day_wait), 1)          AS avg_day_wait
+                   round(avg(p.avg_day_wait::DECIMAL(18, 6)), 1) AS avg_day_wait
             FROM referral_pairs p
             LEFT JOIN npi_directory n ON n.npi = p.{theirs}
             WHERE p.dataset_id = ?
@@ -763,9 +763,9 @@ def referral_leaders(store: Store, zip_code: str | None = None,
         base = f"""
             WITH agg AS (
                 SELECT coalesce(nullif(trim(n.org_name), ''), p.target_npi) AS practice,
-                       mode(n.city)                          AS city,
-                       mode(n.state)                         AS state,
-                       mode(substr(trim(n.zip), 1, 5))       AS zip,
+                       mode(n.city ORDER BY n.city)                          AS city,
+                       mode(n.state ORDER BY n.state)                         AS state,
+                       mode(substr(trim(n.zip), 1, 5) ORDER BY substr(trim(n.zip), 1, 5))       AS zip,
                        sum(p.patients)                       AS patients,
                        count(DISTINCT p.source_npi)          AS sources,
                        count(DISTINCT p.target_npi)          AS npis,
@@ -803,7 +803,7 @@ def referral_leaders(store: Store, zip_code: str | None = None,
         wanted = sorted({n for r in rows if r["in_store"]
                          for n in members[r["practice"]]})
         tin_of = dict(con.execute(
-            "SELECT npi, mode(tin_value) FROM rates WHERE npi IN "
+            "SELECT npi, mode(tin_value ORDER BY tin_value) FROM rates WHERE npi IN "
             "(SELECT unnest(?::VARCHAR[])) GROUP BY npi",
             [wanted]).fetchall()) if wanted else {}
         for r in rows:

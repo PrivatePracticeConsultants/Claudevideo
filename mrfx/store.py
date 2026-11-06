@@ -565,6 +565,59 @@ BY_TIN_QUERY = """
     ORDER BY billing_code, tin_value
 """
 
+# The well-formed NPIs the rates reference (an NPI in the TIN slot included) —
+# the population name enrichment works through (Store.enrichment_progress).
+_RATE_NPIS_SQL = """
+    SELECT DISTINCT npi FROM (
+        SELECT npi FROM rates
+        UNION
+        SELECT tin_value AS npi FROM rates
+        WHERE tin_is_really_npi AND tin_value IS NOT NULL
+    ) WHERE regexp_full_match(npi, '[0-9]{10}')"""
+
+# "Latest" = each CONTRACT's newest month, a contract being a payer x provider x
+# code line (benchmark._rates_relation explains the grain). tin_is_really_npi is
+# part of the identity: an EIN and a same-digits npi-typed TIN never supersede
+# each other.
+LATEST_PARTITION = "payer, tin_value, tin_is_really_npi, billing_code"
+
+# The MATERIALIZED spine = BY_TIN_QUERY + `is_latest`: TRUE on the rows of each
+# contract's newest month. Every "latest" screen used to work this out per
+# request with `QUALIFY file_month = max(file_month) OVER (PARTITION BY ...)` —
+# a window over the WHOLE spine (plus the name joins under it) on every click:
+# 4.4 s of WINDOW + 1.6 s of projection on the real 1.41M-row spine; on a
+# 99M-rate store the Explorer's default view ran out of memory. Stored,
+# "latest" is `WHERE is_latest`, a scan filter.
+# How the build sets it: each slice statement derives its contracts' newest
+# month from its OWN aggregated rows (a CTE: GROUP BY max + hash join) — exact
+# because no slice ever splits a contract (the full build slices by
+# hash(billing_code || tin_value), a delta takes whole payers, and every row of
+# a contract shares payer, code and TIN). Measured at 99M rates: full rebuild
+# 577 s -> 619 s, payer delta 49 s either way. Rejected after measuring: a
+# window per slice (+31% on the full rebuild), a join to one store-wide
+# newest-month table (+53% per slice), and an UPDATE after the inserts —
+# DuckDB 1.5 does not show rows appended in the same transaction to a later
+# statement, so it marked 0 of 79M rows while every one-shot test passed.
+# NOT part of the GROUP BY grain, so no ROLLUP_SCHEMA_VERSION bump.
+_BY_TIN_BODY = BY_TIN_QUERY.rsplit("ORDER BY billing_code, tin_value", 1)[0]
+_NEWEST_JOIN = " AND ".join(f"n.{c} IS NOT DISTINCT FROM spine.{c}"
+                            for c in LATEST_PARTITION.split(", "))
+SPINE_QUERY = (
+    # the newline before ')' is load-bearing: the body's last line is a comment
+    f"WITH spine AS ({_BY_TIN_BODY}\n),\n"
+    f"newest AS (SELECT {LATEST_PARTITION}, max(file_month) AS newest\n"
+    f"           FROM spine GROUP BY {LATEST_PARTITION})\n"
+    "SELECT spine.*, coalesce(spine.file_month = n.newest, FALSE) AS is_latest\n"
+    f"FROM spine LEFT JOIN newest n ON {_NEWEST_JOIN}\n"
+    "ORDER BY spine.billing_code, spine.tin_value\n")
+# A store with no materialized spine yet serves this live view: the flag is
+# the window itself (tiny stores only — the first build materializes).
+SPINE_LIVE_QUERY = (
+    "SELECT spine.*, coalesce(file_month = max(file_month) OVER "
+    f"(PARTITION BY {LATEST_PARTITION}), FALSE) AS is_latest\n"
+    f"FROM ({_BY_TIN_BODY}\n) spine\n")
+
+
 # TIN directory (§3.3a): display name from NPPES org names of the TIN's
 # Type-2 NPIs (mode); individual-billed TINs labeled by dominant person name.
 # {part} partitions on tin_value (every group key below is a single TIN, so
@@ -945,6 +998,7 @@ class Store:
         # workers stream from — the "starts strong, stalls after a few minutes,
         # CPU busy, chunks frozen, recovers when I close the dashboard" report.
         self._store_stats_cache: tuple[float, dict] | None = None
+        self._spine_counts: tuple[int, tuple[int, int]] | None = None  # (generation, counts)
         self._store_stats_lock = threading.Lock()
         self._states_cache: tuple[float, list[str]] | None = None
         self._states_lock = threading.Lock()
@@ -999,6 +1053,7 @@ class Store:
         # fixed rows, and the payers this queues ride the next incremental
         self._migrate_row_rules()
         self._migrate_stale_rollups()
+        self._migrate_latest_flag()
 
     def _quarantine_corrupt_parts(self) -> None:
         """Move any UNREADABLE .parquet part out of the rates glob before the
@@ -1161,6 +1216,74 @@ class Store:
             import logging as _logging
             _logging.getLogger(__name__).warning(
                 "rollup schema-migration check skipped (%s)", e)
+
+    def _migrate_latest_flag(self) -> None:
+        """Give a spine built before `is_latest` existed (SPINE_QUERY) the
+        column IN PLACE: _mark_latest over the whole spine — 5.6 s on 79M rows
+        — instead of the hour-long rebuild a spine-grain change costs at 300M
+        rates. The rate rows themselves are untouched. One transaction: a failure leaves the store exactly as it
+        was, and until the column exists the rates_by_tin VIEW supplies it per
+        query (_register_views) — the old cost, never a wrong or failing
+        screen. Retried at every open; any full or payer-slice rebuild writes
+        the column as well."""
+        import logging as _logging
+        log = _logging.getLogger(__name__)
+        try:
+            with self.write_lock, self.connect() as con:
+                cols = {r[0] for r in con.execute(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = 'rates_by_tin_tbl'").fetchall()}
+                if not cols or "is_latest" in cols:
+                    return
+                t0 = time.monotonic()
+                con.execute("BEGIN TRANSACTION")
+                try:
+                    con.execute("ALTER TABLE rates_by_tin_tbl "
+                                "ADD COLUMN is_latest BOOLEAN DEFAULT FALSE")
+                    self._mark_latest(con)
+                    con.execute("COMMIT")
+                except Exception:
+                    try:
+                        con.execute("ROLLBACK")
+                    except duckdb.Error:
+                        pass
+                    raise
+                self._register_views(con)
+                try:
+                    con.execute("CHECKPOINT")
+                except duckdb.Error:
+                    pass
+                log.info("analytics: marked each contract's newest month on the "
+                         "rate summary in %.1fs (one time; the rates are untouched)",
+                         time.monotonic() - t0)
+        except Exception as e:  # noqa: BLE001 — never stops the store opening
+            log.warning("could not mark the newest months on the rate summary (%s) — "
+                        "'latest' views work it out per request until the next "
+                        "analytics rebuild", e)
+
+    @staticmethod
+    def _mark_latest(con: duckdb.DuckDBPyConnection, payer_pred: str = "TRUE") -> None:
+        """Set rates_by_tin_tbl.is_latest on the rows of each contract's newest
+        month, for the contracts of the payers `payer_pred` selects, on a spine
+        whose rows are COMMITTED and FALSE there (the in-place migration; a
+        build sets the flag inside each slice statement — see SPINE_QUERY). The SAME rule as the per-request window it replaced —
+        `file_month = max(file_month) OVER (PARTITION BY LATEST_PARTITION)` —
+        written as a GROUP BY + hash join, which spills and is ~200x cheaper
+        than windowing every build slice. A whole payer is always in or out
+        (payer is part of the partition), so a payer-scoped mark is exact.
+        NOT DISTINCT FROM: a NULL tin_value is one contract to PARTITION BY too;
+        a row with no month never equals the max and stays FALSE, as QUALIFY
+        dropped it. Runs inside the caller's transaction."""
+        con.execute(f"""
+            UPDATE rates_by_tin_tbl AS t SET is_latest = TRUE
+            FROM (SELECT {LATEST_PARTITION}, max(file_month) AS newest
+                  FROM rates_by_tin_tbl WHERE {payer_pred}
+                  GROUP BY {LATEST_PARTITION}) k
+            WHERE t.payer IS NOT DISTINCT FROM k.payer
+              AND t.tin_value IS NOT DISTINCT FROM k.tin_value
+              AND t.tin_is_really_npi IS NOT DISTINCT FROM k.tin_is_really_npi
+              AND t.billing_code IS NOT DISTINCT FROM k.billing_code
+              AND t.file_month = k.newest""")
 
     # (table, column) pairs every writer stamped with an AWARE datetime or SQL
     # current_timestamp before round 3 — i.e. LOCAL wall-clock time, exactly
@@ -1805,16 +1928,24 @@ class Store:
             con.execute(f"CREATE OR REPLACE VIEW rates AS SELECT * FROM (SELECT {cols}) WHERE FALSE")
         for view, tbl, q in (
             ("rates_dedup", "rates_dedup_tbl", DEDUP_QUERY),
-            ("rates_by_tin", "rates_by_tin_tbl", BY_TIN_QUERY.format(part="TRUE")),
+            ("rates_by_tin", "rates_by_tin_tbl", SPINE_LIVE_QUERY.format(part="TRUE")),
             ("tin_directory", "tin_directory_tbl", TIN_DIRECTORY_QUERY.format(part="TRUE")),
         ):
-            has = con.execute(
-                "SELECT count(*) FROM information_schema.tables WHERE table_name = ?", [tbl]
-            ).fetchone()[0]
-            con.execute(
-                f"CREATE OR REPLACE VIEW {view} AS SELECT * FROM {tbl}" if has
-                else f"CREATE OR REPLACE VIEW {view} AS {q}"
-            )
+            cols = {r[0] for r in con.execute(
+                "SELECT column_name FROM information_schema.columns WHERE table_name = ?",
+                [tbl]).fetchall()}
+            if not cols:
+                con.execute(f"CREATE OR REPLACE VIEW {view} AS {q}")
+            elif tbl == "rates_by_tin_tbl" and "is_latest" not in cols:
+                # a spine not yet given its stored flag (_migrate_latest_flag
+                # failed or has not run): supply it per query — the old cost,
+                # the same rows
+                con.execute(
+                    f"CREATE OR REPLACE VIEW {view} AS SELECT *, coalesce(file_month = "
+                    f"max(file_month) OVER (PARTITION BY {LATEST_PARTITION}), FALSE) "
+                    f"AS is_latest FROM {tbl}")
+            else:
+                con.execute(f"CREATE OR REPLACE VIEW {view} AS SELECT * FROM {tbl}")
 
     # -- rates parts ---------------------------------------------------------
     # (the old write_rates_part, which wrote DIRECTLY to the live part path with
@@ -3285,7 +3416,7 @@ class Store:
                                    threads: int, log, directory_scoped: bool = True) -> None:
         rows_per_part = self._rollup_partition_rows(split, threads)
         parts = max(1, -(-n_rows // rows_per_part))
-        specs = [("rates_by_tin_tbl", BY_TIN_QUERY, "billing_code || coalesce(tin_value, '')", payer_pred)]
+        specs = [("rates_by_tin_tbl", SPINE_QUERY, "billing_code || coalesce(tin_value, '')", payer_pred)]
         if directory_scoped:
             # a removal skips this and rebuilds the directory in full afterward
             specs.append(("tin_directory_tbl", TIN_DIRECTORY_QUERY, "tin_value", tin_pred))
@@ -3300,7 +3431,9 @@ class Store:
                     part = pred if parts == 1 else f"({pred}) AND hash({key}) % {parts} = {i}"
                     if parts > 1:
                         log.info("analytics update %s: partition %d/%d", tbl, i + 1, parts)
-                    con.execute(f"INSERT INTO {tbl} {query.format(part=part)}")
+                    # BY NAME: a spine that gained is_latest in place
+                    # (_migrate_latest_flag) has it as its LAST column
+                    con.execute(f"INSERT INTO {tbl} BY NAME {query.format(part=part)}")
                 # (no whole-store ghost prune here: every TIN whose rows could
                 # have vanished — a removed or shrunk part's — is in tin_pred
                 # via rollup_pending_tins, so the DELETE above drops its row
@@ -3437,7 +3570,7 @@ class Store:
         # a names-only enrichment refresh rebuilds just tin_directory_tbl and
         # leaves the (unchanged, expensive) rate spine alone.
         specs = {
-            "rates_by_tin_tbl": (BY_TIN_QUERY, "billing_code || coalesce(tin_value, '')", "rates_by_tin"),
+            "rates_by_tin_tbl": (SPINE_QUERY, "billing_code || coalesce(tin_value, '')", "rates_by_tin"),
             "tin_directory_tbl": (TIN_DIRECTORY_QUERY, "tin_value", "tin_directory"),
         }
         selected = tables if tables is not None else tuple(specs)
@@ -3753,9 +3886,19 @@ class Store:
                         "SELECT count(*) FROM information_schema.tables "
                         "WHERE table_name = 'rates_by_tin_tbl'").fetchone()[0]:
                     rates_n = con.execute("SELECT count(*) FROM rates").fetchone()[0]
-                    tins, payers = con.execute(
-                        "SELECT count(DISTINCT tin_value), count(DISTINCT payer) "
-                        "FROM rates_by_tin_tbl").fetchone()
+                    # the spine changes only with a data generation (every
+                    # rollup write bumps it after its commit): its distinct
+                    # counts are recounted once per generation, not every
+                    # minute the header polls (2 s a poll on a 79M-row spine)
+                    gen = self.data_generation
+                    held = self._spine_counts
+                    if held is not None and held[0] == gen:
+                        tins, payers = held[1]
+                    else:
+                        tins, payers = con.execute(
+                            "SELECT count(DISTINCT tin_value), count(DISTINCT payer) "
+                            "FROM rates_by_tin_tbl").fetchone()
+                        self._spine_counts = (gen, (tins, payers))
                 else:
                     rates_n, tins, payers = con.execute(
                         "SELECT count(*), count(DISTINCT tin_value), count(DISTINCT payer) "
@@ -3789,31 +3932,57 @@ class Store:
             return cached[1] if cached is not None else {
                 "total": 0, "enriched": 0, "named": 0, "remaining": 0}
         try:
+            # The NPIs the rates reference change ONLY when a rate part does.
+            # They used to be re-derived by two DISTINCT scans of every raw
+            # rate row each minute the dashboard was open — the same answer,
+            # recomputed, competing with the user's clicks and the parser for
+            # the disk. Kept instead in a side table (rate_npis), rebuilt when
+            # the parts' signature changes; the counts are then a join of the
+            # name directory with that small table. Nothing else reads it.
+            sig = self._parts_signature()
             with self.connect() as con:
-                total = con.execute(
-                    """
-                    SELECT count(*) FROM (
-                        SELECT DISTINCT npi FROM (
-                            SELECT npi FROM rates
-                            UNION
-                            SELECT tin_value AS npi FROM rates
-                            WHERE tin_is_really_npi AND tin_value IS NOT NULL
-                        ) WHERE regexp_full_match(npi, '[0-9]{10}')
-                    )
-                    """
-                ).fetchone()[0]
-                enriched, named = con.execute(
-                    """
-                    SELECT count(*), count(*) FILTER (WHERE org_name IS NOT NULL)
-                    FROM npi_directory
-                    WHERE regexp_full_match(npi, '[0-9]{10}')  -- same population as `total`
-                      AND npi IN (
-                        SELECT npi FROM rates
-                        UNION
-                        SELECT tin_value FROM rates WHERE tin_is_really_npi AND tin_value IS NOT NULL
-                    )
-                    """
-                ).fetchone()
+                fresh = (self._meta_get(con, "rate_npis_parts") == sig and con.execute(
+                    "SELECT count(*) FROM information_schema.tables "
+                    "WHERE table_name = 'rate_npis'").fetchone()[0] > 0)
+            # never wait on a writer for a banner: with the lock busy, the
+            # old two-scan answer below is still exact, just not saved
+            if not fresh and self.write_lock.acquire(blocking=False):
+                try:
+                    with self.connect() as con:
+                        con.execute("BEGIN TRANSACTION")
+                        try:
+                            # sig was read BEFORE this scan: a part landing
+                            # meanwhile changes the next signature, so the
+                            # table is rebuilt again rather than ever trusted
+                            con.execute(f"CREATE OR REPLACE TABLE rate_npis AS {_RATE_NPIS_SQL}")
+                            con.execute("INSERT OR REPLACE INTO meta VALUES "
+                                        "('rate_npis_parts', ?)", [sig])
+                            con.execute("COMMIT")
+                            fresh = True
+                        except Exception:
+                            try:
+                                con.execute("ROLLBACK")
+                            except duckdb.Error:
+                                pass
+                            raise
+                finally:
+                    self.write_lock.release()
+            with self.connect() as con:
+                if fresh:
+                    total = con.execute("SELECT count(*) FROM rate_npis").fetchone()[0]
+                    enriched, named = con.execute(
+                        "SELECT count(*), count(*) FILTER (WHERE org_name IS NOT NULL) "
+                        "FROM npi_directory JOIN rate_npis USING (npi)").fetchone()
+                else:
+                    total = con.execute(
+                        f"SELECT count(*) FROM ({_RATE_NPIS_SQL})").fetchone()[0]
+                    enriched, named = con.execute(
+                        f"""
+                        SELECT count(*), count(*) FILTER (WHERE org_name IS NOT NULL)
+                        FROM npi_directory
+                        WHERE npi IN ({_RATE_NPIS_SQL})  -- same population as `total`
+                        """
+                    ).fetchone()
             remaining = max(0, total - enriched)
             result = {"total": total, "enriched": enriched, "named": named,
                       "remaining": remaining}
@@ -3821,6 +3990,19 @@ class Store:
             return result
         finally:
             self._enrich_progress_lock.release()
+
+    def _parts_signature(self) -> str:
+        """Fingerprint of the rate parts on disk (name, size, mtime): every
+        change to the `rates` view's rows changes it — a part landing, being
+        replaced, rewritten by a row-rule migration, or removed."""
+        h = hashlib.sha1()
+        for p in sorted(self.rates_dir.glob("*.parquet")):
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            h.update(f"{p.name}|{st.st_size}|{st.st_mtime_ns}\n".encode())
+        return h.hexdigest()
 
     def available_states(self, max_age_seconds: float = 60.0) -> list[str]:
         """Distinct US states present in the enriched directory — used to fill

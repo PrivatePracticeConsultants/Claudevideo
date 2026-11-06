@@ -18,7 +18,7 @@ from . import __version__
 from .catalog import code_info
 from .config import MrfxConfig
 from .modifiers import BASE_ASSISTANT_RULE_TEXT, BASE_RULE_TEXT, base_sql
-from .store import BY_TIN_QUERY, Store, mask_tin
+from .store import BY_TIN_QUERY, LATEST_PARTITION, Store, mask_tin
 
 log = logging.getLogger(__name__)
 
@@ -212,11 +212,18 @@ def _rates_relation(market: dict, prefilter: str = "") -> str:
     base = spine_relation(market)
     where = f" WHERE {prefilter}" if prefilter else ""
     if is_latest(market):
-        # tin_is_really_npi is part of the identity: an EIN row and a same-
-        # digit-string npi-typed row are different providers — one must never
-        # supersede the other
+        if base == "rates_by_tin":
+            # the materialized spine carries the answer (store.SPINE_QUERY's
+            # is_latest, the same partition as below): a scan filter instead
+            # of a window over the whole spine on every report
+            return (f"(SELECT * FROM rates_by_tin t0 WHERE t0.is_latest"
+                    f"{' AND (' + prefilter + ')' if prefilter else ''})")
+        # a PLAN scope's spine is built on the fly from that plan's files —
+        # its newest months are worked out here. tin_is_really_npi is part of
+        # the identity: an EIN row and a same-digit-string npi-typed row are
+        # different providers — one must never supersede the other
         return (f"(SELECT * FROM {base} t0{where} QUALIFY file_month = max(file_month) "
-                "OVER (PARTITION BY payer, tin_value, tin_is_really_npi, billing_code))")
+                f"OVER (PARTITION BY {LATEST_PARTITION}))")
     # A prefilter is ALWAYS consumed, pinned month included — it is a plain
     # pushed-down filter there (no window to perturb), and a caller that binds
     # its placeholders must not have to guess whether the relation took them.
@@ -1202,6 +1209,10 @@ def compute_rate_proposal(store: Store, subject: str, payer: str, market: dict,
     A proposed rate is never below the current one (those rows read 'keep');
     annual value uses owner-supplied volumes and only volumes — codes without
     a volume still get a proposed rate, with the value column honest-blank."""
+    if isinstance(target, str):          # "p50" alone is natural input (was a 500)
+        target = {"kind": target}
+    elif not isinstance(target, dict):
+        raise BenchmarkError(f"target must be one of {', '.join(PROPOSAL_TARGETS)}")
     kind = str(target.get("kind") or "").strip()
     if kind not in PROPOSAL_TARGETS:
         raise BenchmarkError(f"target must be one of {', '.join(PROPOSAL_TARGETS)}")

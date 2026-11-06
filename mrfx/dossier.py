@@ -29,6 +29,7 @@ import logging
 
 from . import __version__
 from .config import MrfxConfig
+from .sqlfn import modal_zip_of
 from .store import Store
 
 log = logging.getLogger(__name__)
@@ -257,11 +258,8 @@ def build_prospect_dossier(cfg: MrfxConfig, store: Store, subject: str,
     def _market():
         from .demographics import market_sizing
         with store.connect() as con:
-            z = con.execute("""
-                SELECT mode(lpad(substr(trim(n.zip), 1, 5), 5, '0'))
-                FROM rates r JOIN npi_directory n ON n.npi = r.npi
-                WHERE r.tin_value IN (SELECT unnest(?::VARCHAR[]))
-                  AND n.zip IS NOT NULL AND trim(n.zip) <> ''
+            z = con.execute(f"""
+                SELECT * FROM ({modal_zip_of("SELECT unnest(?::VARCHAR[])")})
             """, [tins]).fetchone()
         home = z[0] if z else None
         if not home:

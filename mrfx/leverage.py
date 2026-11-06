@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import logging
 
+from .sqlfn import modal_zip_of, pick_modal_zip, zip_counts_by_tin
 from .store import Store, mask_tin
 
 log = logging.getLogger(__name__)
@@ -88,11 +89,8 @@ def network_leverage(store: Store, subject: str, payer: str,
     with store.connect() as con:
         load_centroids(con, centroids_path)
         # the subject sits at the ZIP most of its own NPIs share
-        home = con.execute("""
-            SELECT mode(lpad(substr(trim(n.zip), 1, 5), 5, '0'))
-            FROM rates r JOIN npi_directory n ON n.npi = r.npi
-            WHERE r.tin_value IN (SELECT unnest(?::VARCHAR[]))
-              AND n.zip IS NOT NULL AND trim(n.zip) <> ''
+        home = con.execute(f"""
+            SELECT * FROM ({modal_zip_of("SELECT unnest(?::VARCHAR[])")})
         """, [subject_tins]).fetchone()
         home_zip = home[0] if home else None
         if not home_zip:
@@ -119,15 +117,15 @@ def network_leverage(store: Store, subject: str, payer: str,
                 WHERE {where}
                   AND t.tin_value NOT IN (SELECT unnest(?::VARCHAR[]))
             ),
+            zc AS ({zip_counts_by_tin("SELECT tin_value FROM priced",
+                                      f", count(DISTINCT n.npi) FILTER ({therapy}) AS nt"
+                                      ", count(DISTINCT n.npi) AS nn")}),
+            -- the ZIP most of its rows carry (ties: lowest, see mrfx/sqlfn);
+            -- an NPI has one ZIP, so per-ZIP distinct counts sum to the total
             placed AS (
-                SELECT r.tin_value,
-                       mode(lpad(substr(trim(n.zip), 1, 5), 5, '0')) AS zip,
-                       count(DISTINCT n.npi) FILTER ({therapy})      AS n_therapy,
-                       count(DISTINCT n.npi)                         AS n_npis
-                FROM rates r JOIN npi_directory n ON n.npi = r.npi
-                WHERE r.tin_value IN (SELECT tin_value FROM priced)
-                  AND n.zip IS NOT NULL AND trim(n.zip) <> ''
-                GROUP BY r.tin_value
+                SELECT tin_value, {pick_modal_zip()} AS zip,
+                       sum(nt) AS n_therapy, sum(nn) AS n_npis
+                FROM zc GROUP BY tin_value
             )
             SELECT p.tin_value, p.zip, p.n_therapy, p.n_npis,
                    any_value(d.display_name) AS display_name,
@@ -156,6 +154,10 @@ def network_leverage(store: Store, subject: str, payer: str,
             population = seniors = None
 
     rows = []
+    # nearest first; a UNIQUE order (invariant 7): practices in one ZIP tie on
+    # miles, and the query hands them back in thread order
+    alts = sorted(alts, key=lambda a: (a[1] not in dist, dist.get(a[1]) or 0,
+                                       a[4] or "", a[0]))
     for tin, zipc, n_therapy, n_npis, name, is_therapy in alts:
         # therapy_only scoping already applied by _market_where when the caller
         # asked for it; is_therapy is carried so the reader can see the mix
@@ -168,7 +170,6 @@ def network_leverage(store: Store, subject: str, payer: str,
             "therapy_npis": n_therapy,
             "is_therapy_practice": bool(is_therapy),
         })
-    rows.sort(key=lambda r: (r["miles"] is None, r["miles"] or 0))
 
     n_alt = len(rows)
     per_alt = (round(seniors / n_alt, 0)

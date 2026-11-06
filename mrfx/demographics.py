@@ -347,7 +347,7 @@ def market_sizing(store: Store, zip_code: str, radius_miles: float = 25,
                 WHERE tin_value IS NOT NULL AND NOT tin_is_really_npi
             ), p AS (
                 SELECT pr.tin_value AS tin,
-                       mode(lpad(substr(trim(n.zip), 1, 5), 5, '0')) AS zip,
+                       mode(lpad(substr(trim(n.zip), 1, 5), 5, '0') ORDER BY lpad(substr(trim(n.zip), 1, 5), 5, '0')) AS zip,
                        count(DISTINCT pr.npi) AS npis
                 FROM pairs pr JOIN npi_directory n ON n.npi = pr.npi
                 WHERE {therapy}

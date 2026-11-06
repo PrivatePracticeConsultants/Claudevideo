@@ -131,6 +131,7 @@ def compute_rate_changes(store: Store, market: dict, *, subject: str | None = No
     WITH cur AS ({side(where_cur)}), prev AS ({side(where_prev)}),
     moves AS (
         SELECT c.payer, c.tin_value, c.billing_code, c.modifier_set,
+               c.billing_class, c.service_code_set,
                round(p.rate, 2) AS old_rate, round(c.rate, 2) AS new_rate,
                round(c.rate - p.rate, 2) AS delta,
                round(100.0 * (c.rate - p.rate) / p.rate, 1) AS pct_change,
@@ -142,7 +143,11 @@ def compute_rate_changes(store: Store, market: dict, *, subject: str | None = No
     )
     SELECT * FROM moves
     WHERE abs(pct_change) >= ?
-    ORDER BY abs(pct_change) DESC, pct_change ASC
+    -- the contract key completes the order: at book scale the cap cuts
+    -- through thousands of identical % moves, and a tie-only order let each
+    -- call keep a DIFFERENT 5,000 (invariant 7)
+    ORDER BY abs(pct_change) DESC, pct_change ASC, payer, tin_value, billing_code,
+             modifier_set, billing_class, service_code_set
     LIMIT ?
     """
     params = [*p_cur, *subj_params, *p_prev, *subj_params, min_pct_sql, _CHANGES_CAP + 1]

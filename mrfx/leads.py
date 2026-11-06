@@ -82,7 +82,9 @@ def compute_leads(store: Store, market: dict, *, threshold_percentile: int = 25,
         SELECT tin_value,
                count(*)                                   AS n_codes,
                round(median(pct), 0)                      AS median_pct,
-               round(avg(greatest(0, code_median - rate)), 2) AS avg_gap_to_median
+               -- summed as exact decimals: a DOUBLE sum depends on the threads'
+               -- order, and the rounded cent flipped between calls (16.45 / 16.44)
+               round(avg(greatest(0, code_median - rate)::DECIMAL(18, 6)), 2) AS avg_gap_to_median
         FROM ranked WHERE n_in_code >= 2
         GROUP BY tin_value
     )
@@ -125,7 +127,7 @@ def compute_leads(store: Store, market: dict, *, threshold_percentile: int = 25,
             ),
             gap AS (
                 SELECT tp.tin_value, tp.payer,
-                       round(avg(greatest(0, m.code_median - tp.rate)), 2) AS avg_gap,
+                       round(avg(greatest(0, m.code_median - tp.rate)::DECIMAL(18, 6)), 2) AS avg_gap,
                        count(*) AS n_codes
                 FROM tp JOIN mkt m USING (billing_code)
                 GROUP BY tp.tin_value, tp.payer

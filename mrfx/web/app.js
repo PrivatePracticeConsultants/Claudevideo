@@ -1242,36 +1242,58 @@ function initCptView() {
   });
 }
 
+// The Code page's in-flight request. A newer click (another code, the state
+// box, the base-only toggle) aborts it: the old answer can never land under
+// the new code's heading, and the browser stops waiting on it at once.
+let cptCtl = null;
+
 async function selectCpt(code) {
   state.cptSelected = code;
   $$("#cpt-chips .chip").forEach((c) => c.classList.toggle("on", c.dataset.cpt === code));
+  if (cptCtl) cptCtl.abort();
+  const ctl = new AbortController();
+  cptCtl = ctl;
+  const current = () => cptCtl === ctl;
   const body = $("#cpt-body"), stateEl = $("#cpt-state");
+  const cptState = $("#cpt-state-filter").value.trim();
+  const info = state.catalog[code] || {};
+  const heading = (asOf) =>
+    `Which entities get paid most for ${code}${info.description ? " — " + info.description : ""}` +
+    (cptState ? ` · ${cptState}` : "") +
+    (info.timed ? " (timed 15-min units)" : "") +
+    (asOf === "latest" ? " · newest file per contract" : (asOf ? ` · ${asOf}` : ""));
+  // every section says it is loading THIS code — nothing from the previous
+  // code stays on screen under the new heading while the answer is on its way
+  $("#view-cpt h2").textContent = heading(null);
   body.innerHTML = "";
   stateEl.innerHTML = `<div class="loading">Loading ${esc(code)}</div>`;
-  const cptState = $("#cpt-state-filter").value.trim();
+  $("#cpt-payer-rank").innerHTML = `<div class="loading">Payers for ${esc(code)}</div>`;
+  $("#cpt-hist").innerHTML = "";
+  $("#cpt-trend").innerHTML = "";
   const p = new URLSearchParams({ grain: "tin" });
   if ($("#cpt-base-only").checked) p.set("modifier", "base");
   if (cptState) p.set("state", cptState);
   const trendP = new URLSearchParams({ cpt: code, grain: "tin" });
   if ($("#cpt-base-only").checked) trendP.set("modifier", "base");
   if (cptState) trendP.set("state", cptState);
-  let d, trend;
+  // both start now; the ranking renders the moment it lands and the
+  // month-by-month table fills in after — never one waiting on the other
+  const trendReq = api(`/api/trend?${trendP}`, { signal: ctl.signal }).catch(() => null);
+  let d;
   try {
-    [d, trend] = await Promise.all([
-      api(`/api/code/${code}?${p}`),
-      api(`/api/trend?${trendP}`),
-    ]);
-  } catch (e) { stateEl.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
-  const info = state.catalog[code] || {};
-  $("#view-cpt h2").textContent =
-    `Which entities get paid most for ${code}${info.description ? " — " + info.description : ""}` +
-    (cptState ? ` · ${cptState}` : "") +
-    (info.timed ? " (timed 15-min units)" : "") +
-    (d.as_of === "latest" ? " · newest file per contract" : (d.as_of ? ` · ${d.as_of}` : ""));
+    d = await api(`/api/code/${code}?${p}`, { signal: ctl.signal });
+  } catch (e) {
+    if (!current()) return;            // superseded by a newer click
+    $("#cpt-payer-rank").innerHTML = "";
+    stateEl.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+    return;
+  }
+  if (!current()) return;
+  $("#view-cpt h2").textContent = heading(d.as_of);
   renderPayerRank($("#cpt-payer-rank"), d.payer_rank, d.mpfs_rate, d.payer_rank_basis,
                   d.medicare_anchor, d.medicare_refusal);
   renderHistogram($("#cpt-hist"), d.histogram, code);
-  renderTrend($("#cpt-trend"), trend.rows);
+  trendReq.then((trend) => { if (current() && trend) renderTrend($("#cpt-trend"), trend.rows); });
   if (!d.ranked.length) {
     stateEl.innerHTML = `<div class="empty"><h3>No rates for ${esc(code)} under these filters</h3></div>`;
     return;

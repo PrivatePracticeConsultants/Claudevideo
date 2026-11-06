@@ -37,6 +37,16 @@ def market_overview(store: Store, state: str | None = None) -> dict:
     j = "LEFT JOIN tin_directory td USING (tin_value)"
 
     with store.connect() as con:
+        # ONE pass over the spine: the market's rows (the five columns every
+        # section below reads) into a per-request temp table, then four small
+        # aggregates over it — the four sections used to each scan, filter and
+        # join the whole spine. Same rows, so the same numbers. (Temp tables
+        # are private to this connection and dropped with it.)
+        con.execute(
+            f"""CREATE OR REPLACE TEMP TABLE __overview AS
+                SELECT t.payer, t.billing_code, t.tin_value, t.discipline, t.negotiated_rate
+                FROM {rel} t {j} WHERE {where}""", params)
+        rel, j, where, params = "__overview", "", "TRUE", []
         counts = con.execute(
             f"""SELECT count(DISTINCT t.payer)        AS payers,
                        count(DISTINCT t.billing_code) AS codes,
@@ -97,6 +107,7 @@ def market_overview(store: Store, state: str | None = None) -> dict:
                 GROUP BY b.payer
                 HAVING count(DISTINCT b.billing_code) >= {_MIN_INDEX_CODES}
                 ORDER BY idx DESC, b.payer""", params).fetchall()
+        con.execute("DROP TABLE IF EXISTS __overview")
 
     disc_label = {"pt": "Physical therapy", "ot": "Occupational therapy",
                   "slp": "Speech-language pathology"}

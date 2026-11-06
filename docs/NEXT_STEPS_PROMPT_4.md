@@ -6,6 +6,32 @@ Growth and Practice** must answer as fast as the data allows, while every number
 stays exactly what it is today. Copy everything below the line into a fresh
 session on this repo.
 
+
+> **STATUS (round 4 executed, Nov 2026).** Old code vs new, every dashboard
+> endpoint, response bodies diffed byte for byte, on the named 32M-rate store
+> AND a 99M-rate, 3-month, named synthetic store (79M spine rows, denser than
+> a real 300M store's). Full table in the commit message and AI_HANDOFF Step 8.
+> - P0.1 done WITHOUT a spine rebuild: `rates_by_tin_tbl.is_latest`, added in
+>   place at open (79M rows: 5.6 s), written by every build slice (full
+>   rebuild 577 -> 619 s at 99M; payer delta unchanged, 49 s). Identical to the
+>   old window on all 79,027,749 rows. Explorer default view at 99M: out of
+>   memory (16 s) -> 1.2 s; summary strip 39.7 -> 4.9 s; Overview 24 -> 10 s
+>   (state 10.6 -> 1.3 s); Code page 2.5 -> 0.9 s; rate card 7.0 -> 2.3 s.
+> - P0.2/P0.3: aggregates read the bare spine when no filter needs a name
+>   (`stat_rel`), the page-first late join covers latest, Overview is one pass,
+>   header counts per data generation, rate-NPI set per parts signature.
+>   Semi-joins for state/city/therapy/name filters NOT done (2.4-3.9 s at 79M).
+> - P0.4: Code page renders the ranking first, trend after, aborts superseded
+>   clicks. Under ingest + enrichment (named store): Explorer 1.97 -> 0.14 s
+>   median, summary 1.60 -> 0.45 s, Code page 0.42 -> 0.13 s.
+> - Found on the way: the entity view's DISTINCT aggregates ran the whole-store
+>   view out of memory (old code already did, pooled); `mode()`, six ranked
+>   lists, the rate-change cap and two float averages answered differently
+>   per call. Fixed; every endpoint now returns identical bytes run to run.
+> - Left: P2.1 (no spine bump needed), P2.2 sorted parts, unit-filter
+>   semi-joins, leverage/dossier (raw-rows ZIP placement, 3.8 / 5.2 s on the
+>   named store).
+
 ---
 
 You are picking up MRF Explorer (`mrfx/`). Read `CLAUDE.md`, then

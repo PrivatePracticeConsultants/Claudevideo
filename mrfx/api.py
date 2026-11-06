@@ -156,6 +156,9 @@ _TIN_JOINS = """
     LEFT JOIN npi_directory nn ON nn.npi = CASE WHEN t.tin_is_really_npi THEN t.tin_value END
 """
 _TIN_REL = f"SELECT {_TIN_PROJECTION} FROM rates_by_tin t {_TIN_JOINS}"
+# each contract's newest month only: the spine's stored flag (store.SPINE_QUERY)
+# — a filter DuckDB applies in the scan, under the joins
+_TIN_REL_LATEST = _TIN_REL + " WHERE t.is_latest"
 
 # The entity a TIN rolls up to. A manual entity_map name wins. Otherwise an
 # ORGANIZATION name (from an NPI-2) plus the practice's main state: two TINs of
@@ -203,21 +206,49 @@ def _entity_rel(tin_rows: str, latest: bool = False) -> str:
     (A: July $55, B: June $40 -> $55 from A alone, vs the Benchmark's $47.50)."""
     month_col = "max(file_month) AS file_month" if latest else "file_month"
     month_key = "" if latest else " file_month,"
+    # The DISTINCT counts and lists are taken from ONE list() per column
+    # (list_distinct + len / list_sort + array_to_string — the same values as
+    # count(DISTINCT x) / string_agg(DISTINCT x ORDER BY x), NULLs ignored
+    # alike). A DISTINCT aggregate builds its own hash table over every group
+    # key plus the value, per thread: four of them over an unfiltered spine
+    # (1.4M groups of long string keys) ran the whole-store entity view out
+    # of memory once "latest" stopped being a window that happened to feed
+    # the aggregate pre-clustered rows (old plan 19 s; this one: see
+    # tests/mrfx/test_known_answer_entity.py and the round-4 report).
     return f"""
+    SELECT display_name, unit_id,
+           CASE WHEN len(tins) > 0 THEN array_to_string(tins, '; ') END AS tin_value,
+           is_mapped_entity, tin_is_really_npi,
+           len(tins) AS tin_count,
+           npi_count,
+           -- ONE meaning: how many different member-TIN rates the shown
+           -- median is taken over (rate_min/rate_max still span every
+           -- published value of every member)
+           len(list_distinct(rates)) AS rate_variants,
+           rate_min, rate_max,
+           payer, billing_code, billing_code_type,
+           discipline, is_timed,
+           modifier_set, billing_class, service_code_set, file_month,
+           negotiated_rate, negotiated_type, is_dollar_rate,
+           -- files behind the line: members of one payer usually share ONE
+           -- file, so summing per-member counts multiplied it (2 TINs from one
+           -- file read "2 files"). Distinct representative files, never less
+           -- than any single member's count — exact whenever each member's
+           -- line comes from one file (the export methodology says so)
+           greatest(max_source_count, len(files)) AS source_count,
+           CASE WHEN len(files) > 0 THEN array_to_string(files, ';') END AS source_files,
+           schema_version, last_updated_on, states, cities, is_therapy
+    FROM (
     SELECT min(display_name) AS display_name,
            entity_key AS unit_id,
-           string_agg(DISTINCT tin_value, '; ' ORDER BY tin_value) AS tin_value,
+           list_sort(list_distinct(list(tin_value))) AS tins,
            bool_or(is_mapped_entity) AS is_mapped_entity,
            bool_or(tin_is_really_npi) AS tin_is_really_npi,
-           count(DISTINCT tin_value) AS tin_count,
            -- member TINs' NPI counts summed: an NPI listed under two member
            -- TINs counts twice (the rollup keeps per-TIN counts, not the NPIs;
            -- stated in the export methodology)
            sum(npi_count) AS npi_count,
-           -- ONE meaning: how many different member-TIN rates the shown
-           -- median is taken over (rate_min/rate_max still span every
-           -- published value of every member)
-           count(DISTINCT negotiated_rate) AS rate_variants,
+           list(negotiated_rate) AS rates,
            min(rate_min) AS rate_min, max(rate_max) AS rate_max,
            payer, billing_code, min(billing_code_type) AS billing_code_type,
            discipline, min(is_timed) AS is_timed,
@@ -236,13 +267,8 @@ def _entity_rel(tin_rows: str, latest: bool = False) -> str:
                median(negotiated_rate)
            ), 4) AS negotiated_rate,
            min(negotiated_type) AS negotiated_type, is_dollar_rate,
-           -- files behind the line: members of one payer usually share ONE
-           -- file, so summing per-member counts multiplied it (2 TINs from one
-           -- file read "2 files"). Distinct representative files, never less
-           -- than any single member's count — exact whenever each member's
-           -- line comes from one file (the export methodology says so)
-           greatest(max(source_count), count(DISTINCT source_files)) AS source_count,
-           string_agg(DISTINCT source_files, ';' ORDER BY source_files) AS source_files,
+           max(source_count) AS max_source_count,
+           list_sort(list_distinct(list(source_files))) AS files,
            min(schema_version) AS schema_version,
            max(last_updated_on) AS last_updated_on,
            list_sort(list_distinct(flatten(list(states)))) AS states,
@@ -251,6 +277,7 @@ def _entity_rel(tin_rows: str, latest: bool = False) -> str:
     FROM ({_entity_keyed(tin_rows)})
     GROUP BY entity_key, payer, billing_code, discipline, modifier_set,
              billing_class, service_code_set,{month_key} is_dollar_rate
+    )
 """
 
 
@@ -547,25 +574,29 @@ def grain_of(qp: dict, cfg: MrfxConfig, store: Store) -> str:
 # "latest" = each CONTRACT's newest month — a contract is a payer x provider x
 # code line, the Benchmark's rule (benchmark._rates_relation). tin_is_really_npi
 # is part of the identity: an EIN and a same-digits npi-typed TIN are different
-# providers and must never supersede each other. An NPI billing under two TINs
-# holds two contracts, so the NPI grain keys by TIN too.
-_LATEST_PARTITION = {
-    "tin": "payer, tin_value, tin_is_really_npi, billing_code",
-    "npi": "payer, unit_id, tin_value, tin_is_really_npi, billing_code",
-}
-_LATEST_QUALIFY = "QUALIFY file_month = max(file_month) OVER (PARTITION BY {})"
+# providers and must never supersede each other. The TIN and entity grains read
+# it from the spine's stored is_latest (store.LATEST_PARTITION, the same key).
+# An NPI billing under two TINs holds two contracts, and an NPI's newest month
+# under a TIN can be older than the TIN's (it left the roster), so the NPI
+# grain — live over the raw rows, always narrowed by an exact ID or payer+code
+# — keeps its own window.
+_NPI_LATEST_QUALIFY = ("QUALIFY file_month = max(file_month) OVER "
+                       "(PARTITION BY payer, unit_id, tin_value, tin_is_really_npi, billing_code)")
 
 
 def rel_sql(grain: str, fs: FilterSet) -> str:
     """The filtered grain relation. Binds fs.params in bucket order (key, unit,
     ident, row) — every branch below assembles the WHERE in that order.
 
-    Under "latest" the newest month is chosen over rows filtered ONLY by
-    whole-contract / whole-unit predicates (key, unit, ident); row filters
-    (rate bounds, modifiers, POS, class, dollar-only, discipline) apply after.
-    Filtering first let a row filter remove a contract's newest row and
-    promote a superseded month — rate_max=41 showed May's $40 under 'latest'
-    while June's $42 was the payer's current rate."""
+    Under "latest" the newest month is decided over the WHOLE contract, never
+    over the rows a filter left: a row filter (rate bounds, modifiers, POS,
+    class, dollar-only, discipline) applied first removed a contract's newest
+    row and promoted a superseded month — rate_max=41 showed May's $40 under
+    'latest' while June's $42 was the payer's current rate. At the TIN and
+    entity grains the spine's stored is_latest IS that whole-contract answer
+    (key/unit/ident filters select whole contracts, so it equals the window
+    over the filtered rows); the NPI grain filters by key/unit/ident first and
+    windows, then applies row filters."""
     def sub(w: str) -> str:
         if fs.ident_kind:
             return w.replace(_IDENT_TOKEN, f"({_ident_clause(grain, fs.ident_kind)})")
@@ -576,27 +607,53 @@ def rel_sql(grain: str, fs: FilterSet) -> str:
         # entity that has one MO TIN (that showed a MO+KS blend under "MO") —
         # and, under latest, each member is reduced to ITS newest month before
         # the member rates are combined
-        inner = f"SELECT * FROM ({_TIN_REL}) WHERE {fs.where_of('key', 'unit')}"
-        if fs.latest_only:
-            inner += " " + _LATEST_QUALIFY.format(_LATEST_PARTITION["tin"])
+        tin_rel = _TIN_REL_LATEST if fs.latest_only else _TIN_REL
+        inner = f"SELECT * FROM ({tin_rel}) WHERE {fs.where_of('key', 'unit')}"
         base = (f"SELECT * FROM ({_entity_rel(inner, fs.latest_only)}) "
                 f"WHERE {sub(fs.where_of('ident', 'row'))}")
+    elif fs.latest_only and grain == "tin":
+        base = f"WITH base AS ({_TIN_REL_LATEST}) SELECT * FROM base WHERE {sub(fs.where)}"
     elif fs.latest_only:
         pre = sub(fs.where_of("key", "unit", "ident"))
         base = (f"SELECT * FROM (WITH base AS ({GRAIN_REL[grain]}) SELECT * FROM base "
-                f"WHERE {pre} {_LATEST_QUALIFY.format(_LATEST_PARTITION[grain])}) "
+                f"WHERE {pre} {_NPI_LATEST_QUALIFY}) "
                 f"WHERE {fs.where_of('row')}")
     else:
         base = f"WITH base AS ({GRAIN_REL[grain]}) SELECT * FROM base WHERE {sub(fs.where)}"
-    if fs.hide_outliers:
-        # The reference median must exclude $0/$0.01 placeholders: with
-        # "dollar rates only" OFF, fs.where no longer strips them, and a
-        # placeholder-heavy code's median collapsed toward $0.01 — the 0.2x-5x
-        # band then hid most REAL rates. And the band is denominated in
-        # dollars, so percentage/per-diem rows (rate ~1.5) must be exempt from
-        # it — hiding them was exactly what unchecking dollar-only asked to
-        # undo.
-        base = f"""
+    return _outlier_band(base) if fs.hide_outliers else base
+
+
+def spine_where(fs: FilterSet) -> str:
+    """WHERE over the BARE spine (rates_by_tin, no joins) equal to the TIN
+    relation's filter — valid only when no filter touches a joined column
+    (not fs.uses_dim_cols). Binds fs.params."""
+    return f"is_latest AND {fs.where}" if fs.latest_only else fs.where
+
+
+def stat_rel(grain: str, fs: FilterSet) -> str:
+    """The relation the AGGREGATE views read — the summary strip and its
+    by-code rows, the Code page's histogram and payer leaderboard, the trend:
+    rel_sql's rows. At the TIN grain with no name/geo/search filter they come
+    straight off the spine: the three LEFT JOINs match at most one row each,
+    so they never add or drop a row, and none of these aggregates reads a
+    joined column — joining names onto every spine row only to count and
+    median the rates was most of their cost. Same rows, same columns used."""
+    if grain != "tin" or fs.uses_dim_cols:
+        return rel_sql(grain, fs)
+    base = f"SELECT *, tin_value AS unit_id FROM rates_by_tin WHERE {spine_where(fs)}"
+    return _outlier_band(base) if fs.hide_outliers else base
+
+
+def _outlier_band(base: str) -> str:
+    """`base` without rows >5x or <0.2x of their code's median within it.
+
+    The reference median must exclude $0/$0.01 placeholders: with "dollar
+    rates only" OFF, the filter no longer strips them, and a placeholder-heavy
+    code's median collapsed toward $0.01 — the 0.2x-5x band then hid most REAL
+    rates. And the band is denominated in dollars, so percentage/per-diem rows
+    (rate ~1.5) must be exempt from it — hiding them was exactly what
+    unchecking dollar-only asked to undo."""
+    return f"""
         WITH filtered AS ({base}),
         med AS (
             SELECT billing_code, median(negotiated_rate) AS m
@@ -607,7 +664,6 @@ def rel_sql(grain: str, fs: FilterSet) -> str:
         WHERE NOT is_dollar_rate OR m IS NULL
            OR (negotiated_rate <= 5 * m AND negotiated_rate >= 0.2 * m)
         """
-    return base
 
 
 def practice_basis(fs: FilterSet) -> tuple[str, str]:
@@ -629,22 +685,31 @@ def practice_basis(fs: FilterSet) -> tuple[str, str]:
     return " AND ".join(preds), "; ".join(notes)
 
 
-def order_sql(sort: str, direction: str) -> str:
+# The tiebreaker must be a TOTAL order over the grain's row identity:
+# LIMIT/OFFSET pages are independent queries, and DuckDB (with
+# preserve_insertion_order off) may order still-tied rows differently per page —
+# rows silently duplicated on one page and MISSING from another. Multi-month
+# stores are tie-dense (a TIN's rate for a code is usually unchanged month over
+# month), so every identity column joins the order. tin_value + negotiated_rate
+# complete it: at NPI grain an NPI under two TINs ties on every other key (an
+# export came back ...13 before ...12 on one run, and a paged view could show
+# one twice and drop the other).
+_ORDER_TIEBREAK = ("unit_id", "billing_code", "modifier_set", "payer", "file_month",
+                   "billing_class", "service_code_set", "is_dollar_rate", "tin_value",
+                   "negotiated_rate")
+
+
+def order_sql(sort: str, direction: str, src: str = "") -> str:
+    """`src` qualifies every column ("src."): the export's select list re-uses
+    the names unit_id / tin_value / payer for MASKED or formula-defused values,
+    and an unqualified ORDER BY binds to those aliases — every SSN-pattern TIN
+    then tied as 'MASKED-SSN' and the export came out in thread order, a
+    different file on each download (and not the screen's order)."""
     if sort not in SORTABLE:
         sort = "negotiated_rate"
     direction = "ASC" if direction.lower() == "asc" else "DESC"
-    # The tiebreaker must be a TOTAL order over the grain's row identity:
-    # LIMIT/OFFSET pages are independent queries, and DuckDB (with
-    # preserve_insertion_order off) may order still-tied rows differently per
-    # page — rows silently duplicated on one page and MISSING from another.
-    # Multi-month stores are tie-dense (a TIN's rate for a code is usually
-    # unchanged month over month), so every identity column joins the order.
-    # tin_value + negotiated_rate complete it: at NPI grain an NPI under two
-    # TINs ties on every other key (an export came back ...13 before ...12 on
-    # one run, and a paged view could show one twice and drop the other).
-    return (f"ORDER BY {sort} {direction} NULLS LAST, unit_id ASC, billing_code ASC, "
-            "modifier_set ASC, payer ASC, file_month ASC, billing_class ASC, "
-            "service_code_set ASC, is_dollar_rate ASC, tin_value ASC, negotiated_rate ASC")
+    return (f"ORDER BY {src}{sort} {direction} NULLS LAST, "
+            + ", ".join(f"{src}{c} ASC" for c in _ORDER_TIEBREAK))
 
 
 def _mask_tin_sql(col: str) -> str:
@@ -741,7 +806,7 @@ def export_select(grain: str, fs: FilterSet, sort: str, direction: str) -> tuple
                {d('schema_version')} AS schema_version,
                source_count,
                {d('source_files')} AS source_files
-        FROM ({rel_sql(grain, fs)}) {order_sql(sort, direction)}
+        FROM ({rel_sql(grain, fs)}) src {order_sql(sort, direction, "src.")}
     """
     return sql, fs.params
 
@@ -889,8 +954,9 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         `1 AS tin_count` (sorting the base table by it was a BinderException →
         500). Every other ORDER BY tiebreaker is a base rates_by_tin column, so
         the page — and its order — is byte-identical to the full-join query,
-        just far cheaper."""
-        return (grain == "tin" and not fs.hide_outliers and not fs.latest_only
+        just far cheaper. "Latest" qualifies too: it is the spine's own stored
+        is_latest column (store.SPINE_QUERY), see spine_where."""
+        return (grain == "tin" and not fs.hide_outliers
                 and not fs.uses_dim_cols and sort not in ("display_name", "tin_count"))
 
     def _filtered_count(con, grain: str, fs: FilterSet) -> int:
@@ -906,7 +972,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         # (indexed on the materialized table) and needs no single-flight.
         if _tin_late_join_ok(grain, fs, "negotiated_rate"):
             total = con.execute(
-                f"SELECT count(*) FROM rates_by_tin WHERE {fs.where}", fs.params).fetchone()[0]
+                f"SELECT count(*) FROM rates_by_tin WHERE {spine_where(fs)}",
+                fs.params).fetchone()[0]
             _count_cache[key] = (now, total)
             return total
         # The heavy path (entity/NPI grain, or dim-filtered) is a full-store
@@ -997,7 +1064,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             # join would be ambiguous for a sort column that also exists in a
             # dimension table (e.g. npi_count lives in tin_directory too).
             sql = (f"WITH page AS (SELECT *, tin_value AS unit_id FROM rates_by_tin "
-                   f"WHERE {fs.where} {order} LIMIT ? OFFSET ?) "
+                   f"WHERE {spine_where(fs)} {order} LIMIT ? OFFSET ?) "
                    f"SELECT * FROM (SELECT {_TIN_PROJECTION} FROM page t {_TIN_JOINS}) {order}")
         else:
             sql = f"{rel_sql(grain, fs)} {order} LIMIT ? OFFSET ?"
@@ -1050,6 +1117,9 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             hit = _summary_cache.get(key)  # re-check under the lock
             if hit is not None and time.monotonic() - hit[0] < _SUMMARY_TTL:
                 return hit[1]
+            # the strip and the by-code rows read only spine columns: off the
+            # bare spine when no name/geo filter needs the joins (stat_rel)
+            srel = stat_rel(grain, fs)
             with store.connect() as con:
                 row = con.execute(
                     f"""
@@ -1066,7 +1136,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                            quantile_cont(negotiated_rate, [0.25, 0.5, 0.75])
                                FILTER (is_dollar_rate AND negotiated_rate > 0.01) AS q,
                            max(negotiated_rate) FILTER (is_dollar_rate AND negotiated_rate > 0.01) AS mx
-                    FROM ({rel_sql(grain, fs)}))
+                    FROM ({srel}))
                     """,
                     fs.params,
                 ).fetchone()
@@ -1083,7 +1153,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 by_code = _dicts(con.execute(
                     f"""
                     WITH r AS (SELECT billing_code, unit_id, median(negotiated_rate) AS negotiated_rate
-                               FROM ({rel_sql(grain, fs)})
+                               FROM ({srel})
                                WHERE {basis}
                                GROUP BY billing_code, unit_id)
                     SELECT billing_code, q[2] AS median, q[1] AS p25, q[3] AS p75,
@@ -1258,6 +1328,9 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         # store is a whole-store live aggregation (temp-disk 500 at 306M rows)
         _require_narrowing(grain, fs)
         rel = rel_sql(grain, fs)
+        # histogram + payer leaderboard read only spine columns (stat_rel);
+        # the ranking needs the practice names, so it reads `rel`
+        srel = stat_rel(grain, fs)
         as_of = qp.get("month") or ("latest" if fs.latest_only else "all")
         with store.connect() as con:
             ranked = _dicts(con.execute(
@@ -1285,7 +1358,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             ))
             hist = _dicts(con.execute(
                 f"""
-                WITH r AS (SELECT negotiated_rate FROM ({rel}) WHERE is_dollar_rate AND negotiated_rate > 0.01)
+                WITH r AS (SELECT negotiated_rate FROM ({srel}) WHERE is_dollar_rate AND negotiated_rate > 0.01)
                 SELECT floor(negotiated_rate / g.w) * g.w AS bucket, count(*) AS n
                 FROM r, (SELECT greatest((max(negotiated_rate) - min(negotiated_rate)) / 20, 0.01) AS w FROM r) g
                 GROUP BY 1 ORDER BY 1
@@ -1308,7 +1381,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 f"""
                 WITH per_unit AS (
                     SELECT payer, unit_id, median(negotiated_rate) AS rate
-                    FROM ({rel})
+                    FROM ({srel})
                     WHERE {basis}
                     GROUP BY payer, unit_id
                 )
@@ -1351,7 +1424,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 SELECT billing_code, payer, file_month,
                        median(negotiated_rate) AS median_rate,
                        count(DISTINCT unit_id) AS entities
-                FROM ({rel_sql(grain, fs)}) WHERE is_dollar_rate AND negotiated_rate > 0.01
+                FROM ({stat_rel(grain, fs)}) WHERE is_dollar_rate AND negotiated_rate > 0.01
                 GROUP BY billing_code, payer, file_month
                 ORDER BY billing_code, payer, file_month
                 """,
@@ -2707,19 +2780,24 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             auto_sql = ("SELECT display_name FROM tin_directory "
                         "WHERE display_name NOT LIKE 'TIN %' "
                         + ("AND lower(display_name) LIKE ? " if ql else "")
-                        + "GROUP BY display_name HAVING count(*) > 1 LIMIT ?")
+                        # the biggest multi-TIN practices first; a UNIQUE
+                        # order (invariant 7) — without it LIMIT kept a
+                        # different 50 on each call
+                        + "GROUP BY display_name HAVING count(*) > 1 "
+                        "ORDER BY count(*) DESC, display_name LIMIT ?")
             auto = [r[0] for r in con.execute(
                 auto_sql, ([like] if ql else []) + [limit]).fetchall()]
             if ql:
                 tins = _dicts(con.execute(
                     "SELECT tin_value, display_name, npi_count, states FROM tin_directory "
                     "WHERE lower(display_name) LIKE ? OR tin_value LIKE ? "
-                    "ORDER BY npi_count DESC NULLS LAST, display_name LIMIT ?",
+                    "ORDER BY npi_count DESC NULLS LAST, display_name, tin_value LIMIT ?",
                     [like, f"{ql}%", limit]))
             else:
                 tins = _dicts(con.execute(
                     "SELECT tin_value, display_name, npi_count, states FROM tin_directory "
-                    "ORDER BY npi_count DESC NULLS LAST, display_name LIMIT ?", [limit]))
+                    "ORDER BY npi_count DESC NULLS LAST, display_name, tin_value LIMIT ?",
+                    [limit]))
         entities = sorted(set(emap.values()) | set(auto))
         if ql:
             entities = [e for e in entities if ql in e.lower()]
