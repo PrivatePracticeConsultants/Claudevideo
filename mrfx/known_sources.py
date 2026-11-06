@@ -50,6 +50,7 @@ def load_known_sources(path: Path | str, today: dt.date | None = None) -> list[d
         out.append({
             "name": str(s.get("name") or url),
             "url": expand_placeholders(url, today),
+            "url_template": url,
             "kind": str(s.get("kind") or "toc"),
             "queueable": bool(s.get("queueable")),
             "verified": str(s.get("verified") or ""),

@@ -136,26 +136,16 @@ def _monthly_refresh_loop(cfg: MrfxConfig, store: Store, stop: threading.Event) 
     one download per file and no re-ingest, but re-queueing on every boot
     would still thrash the queue and the disk.
     """
-    import datetime as _dt
+    from .fetch import monthly_refresh_tick
 
-    from .fetch import add_urls
-    from .known_sources import load_known_sources
-
-    KEY = "monthly_refresh_last"
     while not stop.is_set():
         try:
-            month = _dt.date.today().strftime("%Y-%m")
-            if store.meta_get(KEY) != month:
-                sources = load_known_sources(cfg.known_sources_path)
-                urls = [s["url"] for s in sources if s.get("queueable")]
-                if urls:
-                    counts = add_urls(store, urls)
-                    log.info("monthly refresh %s: queued %s new link(s), "
-                             "%s already known", month, counts["added"],
-                             counts["skipped"])
-                # mark AFTER a successful pass — a crash mid-queue retries
-                # next tick rather than skipping the month entirely
-                store.meta_set(KEY, month)
+            r = monthly_refresh_tick(cfg, store)
+            if r.get("queued") or r.get("retried") or r.get("requeued_static"):
+                log.info("monthly refresh %s: %d dated source(s) queued, %d not-yet-"
+                         "posted retried, %d index(es) re-fetched (only sources you "
+                         "have loaded)", r["month"], r["queued"], r["retried"],
+                         r["requeued_static"])
         except Exception:  # noqa: BLE001 — a refresh must never kill the server
             log.exception("monthly refresh failed; will retry")
         # hourly tick: cheap, and it catches the month rollover on a machine

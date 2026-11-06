@@ -2359,3 +2359,156 @@ def test_stopped_link_keeps_its_download_and_retry_reuses_it(cfg, store, server,
     (rec,) = store.list_urls()
     assert rec["status"] == "done" and rec["rows_emitted"] > 0
     assert len(downloads) == 1                                  # never re-downloaded
+
+
+def _drain_with_deadline(cfg, store, seconds=60):
+    """run_queue in a thread: a stalled queue (a dead processor thread) would
+    otherwise hang the test forever instead of failing it."""
+    done = {}
+    t = threading.Thread(target=lambda: done.setdefault("n", drain(cfg, store)), daemon=True)
+    t.start()
+    t.join(seconds)
+    return not t.is_alive()
+
+
+def test_a_systemexit_from_a_worker_does_not_kill_the_processor(cfg, store, server, monkeypatch):
+    """Round 3 P1.1: a SystemExit re-raised by fut.result() (a worker that
+    wrongly decided its parent was dead) passed every `except Exception`,
+    ended the processor thread silently with its row 'ingesting', and the
+    queue stalled. Now the row fails with a message and the queue drains."""
+    import mrfx.fetch as mf
+    real = mf.process_url_record
+    calls = {"n": 0}
+
+    def flaky(cfg_, store_, rec, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise SystemExit("parent process died — abandoning orphaned parse")
+        return real(cfg_, store_, rec, **kw)
+    monkeypatch.setattr(mf, "process_url_record", flaky)
+    add_urls(store, [f"{server}/rates.json.gz", f"{server}/companion.json"])
+    assert _drain_with_deadline(cfg, store), "queue stalled — the processor thread died"
+    st = {r["status"] for r in store.list_urls()}
+    assert "failed" in st and "ingesting" not in st and "fetched" not in st
+
+
+def test_a_dead_processor_thread_is_replaced(cfg, store, server, monkeypatch, caplog):
+    """Anything that still ends a processor thread (here a KeyboardInterrupt
+    from the claim call, which the loop deliberately re-raises) gets a
+    replacement thread and an ERROR line — never a silently shrinking pool."""
+    real = store.next_fetched_url
+    calls = {"n": 0}
+
+    def claim():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise KeyboardInterrupt
+        return real()
+    monkeypatch.setattr(store, "next_fetched_url", claim)
+    add_urls(store, [f"{server}/rates.json.gz"])
+    with caplog.at_level("ERROR"):
+        assert _drain_with_deadline(cfg, store), "queue stalled — no replacement thread"
+    assert "stopped unexpectedly" in caplog.text
+    assert {r["status"] for r in store.list_urls()} == {"done"}
+
+
+def test_windows_liveness_access_denied_means_alive():
+    from mrfx.store import _nt_alive_without_handle
+    assert _nt_alive_without_handle(87) is False      # ERROR_INVALID_PARAMETER: no such pid
+    assert _nt_alive_without_handle(5) is True        # ACCESS_DENIED (EDR, elevation): alive
+    assert _nt_alive_without_handle(0) is True        # unknown: unsure -> alive
+
+
+def _catalog(monkeypatch, *templates):
+    import mrfx.known_sources as ks
+    from mrfx.known_sources import expand_placeholders
+    monkeypatch.setattr(ks, "load_known_sources", lambda p, today=None: [
+        {"url": expand_placeholders(t, today), "url_template": t, "queueable": True}
+        for t in templates])
+
+
+def test_monthly_refresh_retries_a_not_yet_posted_file_until_the_10th(cfg, store, monkeypatch):
+    """Round 3 P1.2: the month used to be stamped done at the first tick after
+    midnight on the 1st — a {FIRST_OF_MONTH} index the payer posts on the 3rd
+    404'd and stayed failed all month. Now: queued on the 1st, retried once a
+    day while it fails, month closed when it succeeds (or after the 10th)."""
+    import datetime as dt
+
+    from mrfx.fetch import dedup_key, monthly_refresh_tick
+    tpl = "https://p.example/{FIRST_OF_MONTH}_index.json"
+    _catalog(monkeypatch, tpl, "https://unused.example/{FIRST_OF_MONTH}_index.json")
+    old = "https://p.example/2026-10-01_index.json"          # loaded last month
+    store.update_url(store.enqueue_url(old, dedup_key(old)), status="done")
+    cur = "https://p.example/2026-11-01_index.json"
+
+    r = monthly_refresh_tick(cfg, store, dt.date(2026, 11, 1))
+    assert (r["dated"], r["queued"], r.get("done")) == (1, 1, None)
+    urls = {u["url"]: u for u in store.list_urls()}
+    assert cur in urls and not any("unused" in u for u in urls)   # only loaded sources
+    store.update_url(urls[cur]["id"], status="failed", error="HTTP 404")
+    # same day, failed minutes ago: not retried yet, month stays open
+    r = monthly_refresh_tick(cfg, store, dt.date(2026, 11, 1))
+    assert (r["retried"], r.get("done")) == (0, None)
+    with store.connect() as con:      # the failure is a day old now
+        con.execute("UPDATE url_queue SET finished_at = finished_at - INTERVAL 21 HOUR")
+    r = monthly_refresh_tick(cfg, store, dt.date(2026, 11, 2))
+    assert r["retried"] == 1 and {u["url"]: u["status"] for u in store.list_urls()}[cur] == "queued"
+    store.update_url(urls[cur]["id"], status="done")
+    r = monthly_refresh_tick(cfg, store, dt.date(2026, 11, 3))
+    assert r.get("done") is True and store.meta_get("monthly_refresh_last") == "2026-11"
+
+
+def test_monthly_refresh_closes_the_month_after_the_grace_period(cfg, store, monkeypatch):
+    import datetime as dt
+
+    from mrfx.fetch import dedup_key, monthly_refresh_tick
+    _catalog(monkeypatch, "https://p.example/{FIRST_OF_MONTH}_index.json")
+    old = "https://p.example/2026-10-01_index.json"
+    store.update_url(store.enqueue_url(old, dedup_key(old)), status="done")
+    monthly_refresh_tick(cfg, store, dt.date(2026, 11, 1))
+    cur = next(u for u in store.list_urls() if "2026-11-01" in u["url"])
+    store.update_url(cur["id"], status="failed", error="HTTP 404")
+    assert monthly_refresh_tick(cfg, store, dt.date(2026, 11, 9)).get("done") is None
+    r = monthly_refresh_tick(cfg, store, dt.date(2026, 11, 11))
+    assert r.get("done") is True and r["retried"] == 0
+
+
+def test_a_404_when_last_months_file_is_already_loaded_explains_itself(cfg, store):
+    import datetime as dt
+
+    from mrfx.fetch import _maybe_queue_prev_month, dedup_key
+    today = dt.date.today()
+    prev = (today.replace(day=1) - dt.timedelta(days=1)).replace(day=1)
+    cur_url = f"https://p.example/{today.replace(day=1).isoformat()}_index.json"
+    prev_url = f"https://p.example/{prev.isoformat()}_index.json"
+    store.update_url(store.enqueue_url(prev_url, dedup_key(prev_url)), status="done")
+    cid = store.enqueue_url(cur_url, dedup_key(cur_url))
+    _maybe_queue_prev_month(store, {"id": cid, "url": cur_url, "parent_id": None}, "HTTP 404")
+    row = next(u for u in store.list_urls() if u["url"] == cur_url)
+    assert "isn't posted yet" in row["error"] and "already in your data" in row["error"]
+
+
+def test_a_chunked_download_never_fits_the_size_limit(store):
+    """Round 3 P1.3(e): bytes_total = 0 (chunked transfer, length unknown)
+    'fit' every limit, so an 8 GB chunked file was re-queued, re-downloaded
+    5 GB and tripped oversize again on every restart."""
+    from mrfx.fetch import dedup_key
+    a = store.enqueue_url("https://x/chunked.json.gz", dedup_key("https://x/chunked.json.gz"))
+    b = store.enqueue_url("https://x/known.json.gz", dedup_key("https://x/known.json.gz"))
+    store.update_url(a, status="oversize", bytes_total=0)
+    store.update_url(b, status="oversize", bytes_total=4_000_000_000)
+    assert store.requeue_oversize_within(5_000_000_000) == 1
+    st = {u["url"]: u["status"] for u in store.list_urls()}
+    assert st == {"https://x/chunked.json.gz": "oversize", "https://x/known.json.gz": "queued"}
+
+
+def test_resume_stopped_undoes_clear_queue_and_stop_downloads(store):
+    from mrfx.fetch import dedup_key
+    ids = [store.enqueue_url(f"https://x/{i}.json", dedup_key(f"https://x/{i}.json"))
+           for i in range(3)]
+    store.update_url(ids[0], status="downloading")
+    assert store.cancel_all_downloading() == 1 and store.is_download_canceled(ids[0])
+    assert store.clear_queued() == 2
+    assert {u["status"] for u in store.list_urls()} == {"skipped"}
+    assert store.resume_canceled() == 3
+    assert {(u["status"], u["kind"]) for u in store.list_urls()} == {("queued", "unknown")}

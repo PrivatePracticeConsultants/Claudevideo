@@ -586,24 +586,130 @@ def _ensure_nppes_cache(cfg: MrfxConfig, store: Store, sig: tuple,
         return None
 
 
+# pyarrow's CSV reader, streamed from the zip in 4 MB blocks, single thread:
+# measured on the real November 2026 file (9,891,116 providers) 61 s at 0.39 GB
+# peak RSS vs 164 s / 0.26 GB for the Python reader below, byte-identical
+# output (hash of every column). 64 MB blocks were 54-72 s but 1.0-2.9 GB —
+# too much next to 2 GB parse workers. Any surprise (invalid UTF-8, a short
+# row, a renamed column) falls back to the Python reader, which tolerates them.
+_ARROW_BLOCK = 4 << 20
+
+
+def _write_nppes_parquet_arrow(path: Path, tmp: Path, schema, stop) -> int:
+    import pyarrow as pa
+    import pyarrow.compute as pc
+    import pyarrow.csv as pacsv
+    import pyarrow.parquet as pq
+
+    p = Path(path)
+    zf = None
+    if p.suffix.lower() == ".zip":
+        zf = zipfile.ZipFile(p)
+        csvs = [m for m in zf.infolist() if m.filename.lower().endswith(".csv")]
+        main = [m for m in csvs if "npidata_pfile" in m.filename.lower()
+                and "fileheader" not in m.filename.lower()]
+        pick = max(main or csvs, key=lambda m: m.file_size, default=None)
+        if pick is None:
+            raise ValueError(f"no CSV found inside {p.name}")
+        opener = lambda: zf.open(pick)   # noqa: E731
+    else:
+        opener = lambda: open(p, "rb")   # noqa: E731, SIM115 — used as `with opener()`
+    try:
+        with opener() as raw:
+            header = next(csv.reader([raw.readline().decode("utf-8-sig")]))
+        want = list(dict.fromkeys([v for v in _BULK_COLS.values() if v in header]
+                                  + [c for c in _BULK_TAX_SLOTS if c in header]))
+        if _BULK_COLS["npi"] not in header:
+            raise ValueError("NPPES file has no 'NPI' column — wrong file inside the zip?")
+        tax_cols = [c for c in _BULK_TAX_SLOTS if c in header]
+        total = 0
+        with opener() as raw, pq.ParquetWriter(str(tmp), schema, compression="zstd") as w:
+            reader = pacsv.open_csv(
+                raw, read_options=pacsv.ReadOptions(block_size=_ARROW_BLOCK, use_threads=False),
+                convert_options=pacsv.ConvertOptions(
+                    include_columns=want, column_types={c: pa.string() for c in want},
+                    strings_can_be_null=True, null_values=[""]))
+            null = pa.scalar(None, pa.string())
+            for b in reader:
+                if stop is not None and stop.is_set():
+                    break
+                t = pa.Table.from_batches([b])
+                t = t.filter(pc.is_valid(t.column(_BULK_COLS["npi"])))   # no NPI: skipped
+                n = t.num_rows
+                if not n:
+                    continue
+
+                def g(k, t=t, n=n):
+                    c = _BULK_COLS[k]
+                    return t.column(c) if c in t.column_names else pa.nulls(n, pa.string())
+                # name: organization, else "first last" (whichever exist) —
+                # exactly the Python reader's rule, no trimming
+                first, last = g("first"), g("last")
+                person = pc.coalesce(pc.binary_join_element_wise(first, last, " "), first, last)
+                name = pc.coalesce(g("org"), person)
+                ent = pc.utf8_trim_whitespace(pc.fill_null(g("entity"), ""))
+                entity = pc.if_else(pc.equal(ent, "1"), pa.scalar("NPI-1"),
+                                    pc.if_else(pc.equal(ent, "2"), pa.scalar("NPI-2"), null))
+                joined = None
+                for c in tax_cols:
+                    v = pc.utf8_trim_whitespace(pc.fill_null(t.column(c), ""))
+                    joined = v if joined is None else pc.if_else(
+                        pc.equal(v, ""), joined,
+                        pc.if_else(pc.equal(joined, ""), v,
+                                   pc.binary_join_element_wise(joined, v, "|")))
+                taxes = (pc.if_else(pc.equal(joined, ""), null, joined)
+                         if joined is not None else pa.nulls(n, pa.string()))
+                out = pa.table({
+                    "npi": g("npi"), "org_name": name, "entity_type": entity,
+                    "taxonomy_code": g("tax1"), "taxonomy_codes": taxes,
+                    "city": g("city"), "state": g("state"), "address": g("address"),
+                    "zip": g("zip"), "phone": g("phone"),
+                    "enumeration_date": g("enumerated"), "deactivation_date": g("deactivated"),
+                    "reactivation_date": g("reactivated")}).select(list(_NPPES_CACHE_COLS)).cast(schema)
+                w.write_table(out)
+                total += n
+        return total
+    finally:
+        if zf is not None:
+            zf.close()
+
+
 def _write_nppes_parquet(cfg: MrfxConfig, store: Store, pqp: Path,
                          stop: threading.Event | None,
                          src: Path | None = None) -> int:
     """One streaming pass over an NPPES file -> compact parquet (the ~9 kept
-    columns). Positional reader, batched writes; interruptible via `stop`.
+    columns). Batched writes; interruptible via `stop`.
 
     `src` overrides the configured bulk file — the weekly incremental path
     reuses this exact projection so a weekly row and a monthly row can never be
     parsed by two slightly different readers."""
     import pyarrow as pa
-    import pyarrow.parquet as pq
 
     schema = pa.schema([(c, pa.string()) for c in _NPPES_CACHE_COLS])
     tmp = pqp.with_suffix(".parquet.tmp")
+    path = src or bulk_source(cfg)
+    try:
+        total = _write_nppes_parquet_arrow(path, tmp, schema, stop)
+        replace_with_retry(tmp, pqp)
+        return total
+    except Exception as e:  # noqa: BLE001 — the tolerant reader below handles it
+        log.info("NPPES: fast reader declined %s (%s) — using the tolerant reader",
+                 Path(path).name, e)
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return _write_nppes_parquet_python(path, tmp, pqp, schema, stop)
+
+
+def _write_nppes_parquet_python(path, tmp: Path, pqp: Path, schema, stop) -> int:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
     total = 0
     writer = pq.ParquetWriter(str(tmp), schema, compression="zstd")
     try:
-        with _open_bulk_text(src or bulk_source(cfg)) as f:
+        with _open_bulk_text(path) as f:
             reader = csv.reader(f)
             header = next(reader, [])
             col = {k: header.index(v) for k, v in _BULK_COLS.items() if v in header}

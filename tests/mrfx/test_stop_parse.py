@@ -131,3 +131,61 @@ def test_stop_works_on_the_big_file_paths(cfg, store, monkeypatch, mode):
     assert _part_rows(store, p.name) == 0
     assert [f.name for f in store.rates_dir.iterdir()
             if f.name.endswith((".tmp", ".progress", ".stop"))] == []
+
+
+def test_a_stop_pressed_after_the_last_read_does_not_stop_the_next_ingest(cfg, store, monkeypatch):
+    """Round 3 P1.3(a): a stop pressed after the parse's last read (during QA /
+    finalize) was never honored by ParseStopped, so it stayed set for the
+    server's life and the NEXT ingest of that filename died at its first read
+    as "stopped by you". Any outcome now clears it."""
+    import json
+
+    import mrfx.ingest as mi
+    from mrfx.ingest import ingest_file
+    doc = {"reporting_entity_name": "Stopco", "reporting_entity_type": "issuer",
+           "last_updated_on": "2026-05-01", "version": "2.0.0", "provider_references": [],
+           "in_network": [{"negotiation_arrangement": "ffs", "name": "x",
+                           "billing_code_type": "CPT", "billing_code_type_version": "2026",
+                           "billing_code": "97110", "description": "x",
+                           "negotiated_rates": [{
+                               "provider_groups": [{"npi": ["1777000001"],
+                                                    "tin": {"type": "ein", "value": "777000001"}}],
+                               "negotiated_prices": [{"negotiated_type": "negotiated",
+                                                      "negotiated_rate": 40.0,
+                                                      "billing_class": "professional",
+                                                      "expiration_date": "9999-12-31"}]}]}]}
+    p = cfg.inbox_dir / "stopco_2026-05.json"
+    p.write_text(json.dumps(doc))
+    real_qa = mi.qa_report
+
+    def qa_then_stop(store_, qa, name, agg=None):
+        store_.request_parse_stop(name)          # the click lands during QA
+        return real_qa(store_, qa, name, agg=agg)
+    monkeypatch.setattr(mi, "qa_report", qa_then_stop)
+    assert ingest_file(cfg, store, p)["status"] == "done"
+    assert not store.is_parse_stopped(p.name)
+
+
+def test_a_parse_cancelled_by_a_pool_restart_requeues_itself(cfg, store, monkeypatch):
+    """Round 3 P1.3(c): force_heal(cancel_futures=True) turned OTHER threads'
+    pending parses into 'failed' rows needing a manual retry, although the log
+    said they "re-queue automatically". Now the file goes back to queued and
+    stays where it is (inbox / download), and the URL row returns to 'fetched'."""
+    import json
+
+    import mrfx.ingest as mi
+    from mrfx.ingest import PoolRestarted, ingest_file
+
+    class FakePool:
+        pass
+    monkeypatch.setattr(mi, "_parse_pool", FakePool(), raising=False)
+    monkeypatch.setattr(mi, "get_parse_pool", lambda: FakePool(), raising=False)
+
+    def cancelled(*a, **k):
+        raise PoolRestarted("parse was cancelled by a worker-pool restart before it began")
+    monkeypatch.setattr(mi, "_ingest_in_network_pooled", cancelled)
+    p = cfg.inbox_dir / "poolco_2026-05.json"
+    p.write_text(json.dumps({"reporting_entity_name": "Poolco", "last_updated_on": "2026-05-01",
+                             "version": "2.0.0", "in_network": []}))
+    assert ingest_file(cfg, store, p)["status"] == "requeued"
+    assert store.file_status(p.name)["status"] == "queued" and p.exists()

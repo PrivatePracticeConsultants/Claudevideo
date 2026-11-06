@@ -226,7 +226,7 @@ def _prefetch(stream, chunk_size: int):
     """Chunks of `stream`, read by a background thread so decompression
     (zlib releases the GIL) overlaps the numpy scan of the previous chunk.
     At most _PREFETCH_DEPTH chunks wait in memory. Exceptions raised by the
-    reader (including the progress callback's SystemExit for an orphaned
+    reader (including the progress callback's ParentGone for an orphaned
     worker) are re-raised in the consumer; closing the generator early (a
     caller that stops reading) stops the thread."""
     import queue

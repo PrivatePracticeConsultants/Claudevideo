@@ -4031,6 +4031,16 @@ function initFilesView() {
     loadUrlQueue();
   });
 
+  $("#url-resume").addEventListener("click", async () => {
+    const msg = $("#url-msg");
+    msg.textContent = "resuming…";
+    try {
+      const r = await postJson("/api/urls/resume-stopped", {});
+      msg.textContent = `resumed ${r.resumed} link${r.resumed === 1 ? "" : "s"}`;
+    } catch (e) { msg.textContent = "could not resume: " + e.message; }
+    loadUrlQueue();
+  });
+
   $("#url-known").addEventListener("click", async () => {
     const msg = $("#url-msg");
     if (!confirm(

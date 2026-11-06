@@ -296,44 +296,50 @@ def test_packets_are_written_per_client_and_omissions_explained(cfg, store, tmp_
 
 def test_monthly_refresh_runs_once_per_month(cfg, store, monkeypatch, tmp_path):
     """Re-queueing on every boot would thrash the queue and the disk; the
-    'already ran this month' marker is DURABLE (store meta), not in-memory."""
+    'already ran this month' marker is DURABLE (store meta), not in-memory.
+    Round 3: only sources the user has LOADED are refreshed, and an index a
+    payer updates in place (a 'done' row) is really re-fetched — re-adding it
+    used to be a no-op."""
     import threading
+    import time
 
     from mrfx import cli
+    from mrfx.fetch import dedup_key
 
-    calls: list[list[str]] = []
-    monkeypatch.setattr(cli, "_something_owns_the_port", lambda *a, **k: False,
-                        raising=False)
-    import mrfx.fetch as fetch
-    monkeypatch.setattr(fetch, "add_urls",
-                        lambda st, urls: calls.append(list(urls)) or
-                        {"added": len(urls), "skipped": 0, "invalid": 0})
     import mrfx.known_sources as ks
     monkeypatch.setattr(ks, "load_known_sources",
-                        lambda p, today=None: [{"url": "https://x/toc.json",
-                                                "queueable": True}])
+                        lambda p, today=None: [
+                            {"url": "https://x/toc.json", "url_template": "https://x/toc.json",
+                             "queueable": True},
+                            {"url": "https://never-loaded/toc.json",
+                             "url_template": "https://never-loaded/toc.json", "queueable": True}])
+    rid = store.enqueue_url("https://x/toc.json", dedup_key("https://x/toc.json"))
+    store.update_url(rid, status="done")
 
     stop = threading.Event()
+
+    def statuses():
+        return {r["url"]: r["status"] for r in store.list_urls()}
 
     def run_once():
         stop.clear()
         t = threading.Thread(target=cli._monthly_refresh_loop, args=(cfg, store, stop))
         t.start()
-        # the loop queues immediately, then waits an hour — stop it right after
         for _ in range(200):
-            if calls or store.meta_get("monthly_refresh_last"):
+            if store.meta_get("monthly_refresh_last"):
                 break
-            import time
             time.sleep(0.02)
         stop.set()
         t.join(timeout=10)
 
     run_once()
-    assert len(calls) == 1, "first run of the month queues"
+    assert statuses() == {"https://x/toc.json": "queued"}, "loaded index re-fetched; unloaded not"
     assert store.meta_get("monthly_refresh_last") == dt.date.today().strftime("%Y-%m")
+    store.update_url(rid, status="done")
     run_once()
-    assert len(calls) == 1, "a restart in the same month must NOT re-queue"
+    assert statuses()["https://x/toc.json"] == "done", "a restart in the same month must NOT re-queue"
 
     store.meta_set("monthly_refresh_last", "2020-01")   # pretend a month passed
+    store.meta_set("monthly_refresh_static", "2020-01")
     run_once()
-    assert len(calls) == 2, "a new month queues again"
+    assert statuses()["https://x/toc.json"] == "queued", "a new month re-fetches again"

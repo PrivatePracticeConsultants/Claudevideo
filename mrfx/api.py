@@ -1522,6 +1522,11 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         # (retryable), nothing destroyed.
         return {"cleared": store.clear_queued()}
 
+    @app.post("/api/urls/resume-stopped")
+    def urls_resume_stopped():
+        # bulk undo of "Clear queue" / "Stop downloads" (rows parked as skipped)
+        return {"resumed": store.resume_canceled()}
+
     @app.post("/api/urls/stop-downloads")
     def urls_stop_downloads():
         # abort in-flight downloads mid-stream to free the slots; partial files

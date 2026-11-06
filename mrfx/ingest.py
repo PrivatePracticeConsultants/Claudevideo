@@ -301,6 +301,19 @@ def _apply_qa_aggregates(qa: dict, total: int, agg: tuple[int, int, int]) -> Non
     })
 
 
+class PoolRestarted(RuntimeError):
+    """A QUEUED parse cancelled by another file's force_heal (a wedged worker
+    was killed). Nothing of THIS file was read: the URL path re-queues it
+    (the download and its sidecar are on disk) instead of leaving a 'failed'
+    row the user must notice and retry by hand."""
+
+
+class ParentGone(RuntimeError):
+    """A parse worker found the app that started it gone and stopped. If the
+    app IS alive (Windows refused the check), the file fails with this plain
+    message and "retry" processes it again — nothing is silently lost."""
+
+
 def _now() -> dt.datetime:
     # naive UTC — the store's one clock (store._utcnow explains why not aware)
     return dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
@@ -540,7 +553,11 @@ def _parse_worker(cfg: MrfxConfig, path_str: str, name: str, header_defaults: di
         died = (os.getppid() != parent_pid if os.name != "nt"
                 else not _pid_alive(parent_pid))
         if died:
-            raise SystemExit("parent process died — abandoning orphaned parse")
+            # RuntimeError, not SystemExit: a SystemExit re-raised by
+            # fut.result() in a LIVE parent (a false "parent gone") passed
+            # every `except Exception` and silently killed a processor thread
+            raise ParentGone("this file's worker lost contact with MRF Explorer and "
+                             "stopped (press retry to process it again)")
         try:
             tmp = progress_path + ".tmp"
             with open(tmp, "w") as f:
@@ -596,7 +613,7 @@ def _parse_worker(cfg: MrfxConfig, path_str: str, name: str, header_defaults: di
                 state["pass"] = 1
             _, result = run_in_network_parse(
                 cfg, lambda: make_parser(keep_ref_ids), lambda: open_stream(path, progress_cb=report))
-    except SystemExit:
+    except ParentGone:
         # the parent is gone (report_chunk noticed): nobody will adopt these
         # files, and they carry the dead parent's pid — they'd sit (possibly
         # GBs) until the next start's sweep. Remove our own temps now.
@@ -790,9 +807,9 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
             # sails past every `except Exception` fault-isolation layer and
             # silently kills the processor/watcher thread that hit it
             # (verification audit). Convert so the normal failed+retry flow runs.
-            raise RuntimeError(
-                "parse was cancelled by a worker-pool restart — press retry "
-                "on this file; other files resume automatically") from e
+            raise PoolRestarted(
+                "parse was cancelled by a worker-pool restart before it began — "
+                "it is re-queued automatically") from e
     except Exception:
         _cleanup_unlink(tmp_out)
         raise
@@ -811,6 +828,11 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
         # process's pid, so the orphan sweep would keep it until restart.
         # It can be GBs; the parent always removes it.
         _cleanup_unlink(spool_path_for(tmp_out))
+        # same for the worker's QA spill folder (a worker killed mid-QA leaves
+        # GBs that the sweep keeps while THIS process lives)
+        _qa_spill = Path(str(tmp_out).removesuffix(".parquet.tmp") + ".qa-spill")
+        if _qa_spill.exists():
+            shutil.rmtree(_qa_spill, ignore_errors=True)
 
     store.update_progress(name, 100.0, chunks_done=payload["chunks_total"],
                           chunks_total=payload["chunks_total"])
@@ -1173,7 +1195,7 @@ def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight
         }
 
     except ParseStopped:
-        store.clear_parse_stop(name)
+        store.requeue_part_payers(name)   # a stopped RE-ingest leaves the old part live
         in_inbox = cfg.inbox_dir in path.parents
         msg = STOPPED_MSG + (" — the file was moved to data/failed; drop it into the "
                              "inbox again to process it" if in_inbox else
@@ -1184,11 +1206,24 @@ def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight
             # left in the inbox, the watcher would simply start it again
             _finish_file(cfg, path, ok=False)
         return {"status": "stopped", "error": msg}
+    except PoolRestarted as e:
+        # nothing of this file was read; its source stays where it is (inbox
+        # file / downloaded copy) and it is picked up again automatically
+        log.info("%s: %s", name, e)
+        store.upsert_file(name, status="queued", error=str(e))
+        return {"status": "requeued", "error": str(e)}
     except Exception as e:  # noqa: BLE001 — fault isolation is the contract here
         log.exception("ingest failed for %s", name)
         store.upsert_file(name, status="failed", error=f"{type(e).__name__}: {e}", finished_at=_now())
+        store.requeue_part_payers(name)   # a failed RE-ingest leaves the old part live
         _finish_file(cfg, path, ok=False)  # never raises; the row is already 'failed'
         return {"status": "failed", "error": str(e)}
+    finally:
+        # ANY outcome ends a stop request: a stop pressed after the last read
+        # (QA, finalize, rollup) was never honored by ParseStopped, stayed set
+        # for the server's life, and the NEXT ingest of this filename died at
+        # its first read as "stopped by you"
+        store.clear_parse_stop(name)
 
 
 def requeue_skipped(cfg: MrfxConfig, store: Store, payer: str) -> list[str]:

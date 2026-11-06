@@ -279,6 +279,15 @@ def unlink_with_retry(p: Path, attempts: int = 4) -> bool:
     return True
 
 
+def _nt_alive_without_handle(last_error: int) -> bool:
+    """OpenProcess gave no handle: only ERROR_INVALID_PARAMETER (87) means
+    "no such process". ACCESS_DENIED (5) — antivirus/EDR, an elevation
+    mismatch, a protected process — means it EXISTS. Treating every failure as
+    dead made a parse worker under EDR conclude its parent was gone at the
+    first progress tick and abandon every file."""
+    return last_error != 87
+
+
 def _pid_alive(pid: int) -> bool:
     """Is `pid` a live process? Platform-aware: on Windows `os.kill(pid, 0)` is
     NOT a liveness probe — signal 0 is CTRL_C_EVENT, so it either delivers a
@@ -290,15 +299,16 @@ def _pid_alive(pid: int) -> bool:
     if os.name == "nt":
         try:
             import ctypes
+            k32 = ctypes.WinDLL("kernel32", use_last_error=True)
             SYNCHRONIZE = 0x00100000
-            h = ctypes.windll.kernel32.OpenProcess(SYNCHRONIZE, False, pid)
+            h = k32.OpenProcess(SYNCHRONIZE, False, pid)
             if not h:
-                return False  # no such process (or access denied w/ no handle -> treat dead)
+                return _nt_alive_without_handle(ctypes.get_last_error())
             try:
                 # WAIT_TIMEOUT (0x102) = still running; WAIT_OBJECT_0 = exited
-                return ctypes.windll.kernel32.WaitForSingleObject(h, 0) == 0x102
+                return k32.WaitForSingleObject(h, 0) == 0x102
             finally:
-                ctypes.windll.kernel32.CloseHandle(h)
+                k32.CloseHandle(h)
         except Exception:  # noqa: BLE001 — can't tell: keep the file
             return True
     try:
@@ -978,10 +988,13 @@ class Store:
             # auto-spill SSD that's the user's system drive filling up with no
             # visible cause. Sweep BEFORE _init_tables (nothing has spilled yet).
             self._sweep_stale_spill()
-            self._quarantine_corrupt_parts()
+            quarantined = self._quarantine_corrupt_parts()
             self._init_tables(con)
+            self._flag_quarantined_files(con, quarantined)
             self._migrate_timestamps_to_utc(con)
             self._register_views(con)
+        # parts a locked file kept from being deleted / swapped in last time
+        self._retry_pending_part_ops()
         # BEFORE the rollup check: a full rebuild it may trigger must see the
         # fixed rows, and the payers this queues ride the next incremental
         self._migrate_row_rules()
@@ -1010,7 +1023,7 @@ class Store:
         try:
             parts = list(self.rates_dir.glob("*.parquet"))
         except OSError:
-            return
+            return []
         bad = []
         for p in parts:
             try:
@@ -1027,12 +1040,14 @@ class Store:
             except OSError:
                 continue  # can't read it now (locked/vanishing) — leave it
         if not bad:
-            return
+            return []
         quar = self.rates_dir / "corrupt"
+        moved = []
         for p in bad:
             try:
                 quar.mkdir(exist_ok=True)
                 replace_with_retry(p, quar / p.name)
+                moved.append(p.stem)
             except OSError:
                 continue
         import logging as _logging
@@ -1040,6 +1055,28 @@ class Store:
             "quarantined %d unreadable rate part(s) to %s so the rest of the "
             "store still loads — re-ingest the source file(s) to restore them: %s",
             len(bad), quar, ", ".join(p.name for p in bad))
+        return moved
+
+    def _flag_quarantined_files(self, con: duckdb.DuckDBPyConnection,
+                                stems: list[str]) -> None:
+        """A quarantined part's rows left the raw store, but its files row
+        still said 'done' (older than the rollup marker), so the analytics kept
+        serving its rows while the NPI view (live over the raw parts) didn't,
+        and nothing looked stale. Flip the row to failed with the reason and
+        ask for ONE full rebuild (the damaged part can't be read to scope it)."""
+        if not stems:
+            return
+        want = set(stems)
+        names = [r[0] for r in con.execute("SELECT filename FROM files").fetchall()
+                 if file_key(r[0]) in want]
+        for n in names:
+            con.execute("UPDATE files SET status = 'failed', error = ? WHERE filename = ?",
+                        ["its stored rates were damaged on disk and were set aside "
+                         "(data/mrfx_store/rates/corrupt) — re-add this file or link "
+                         "to restore them", n])
+        if con.execute("SELECT count(*) FROM information_schema.tables "
+                       "WHERE table_name = 'rates_by_tin_tbl'").fetchone()[0]:
+            con.execute("INSERT OR REPLACE INTO meta VALUES ('rollup_needs_full', '1')")
 
     def _sweep_stale_spill(self) -> None:
         """Best-effort removal of dead DuckDB spill files in our spill dir.
@@ -1795,24 +1832,39 @@ class Store:
         with self.write_lock:
             with self.connect() as con:
                 self._queue_removed_payers(con, doomed)
-            if rows_written:
-                # replace() overwrites atomically — a preceding unlink would
-                # open a no-file window for lock-free concurrent readers
-                replace_with_retry(tmp, path)
-            else:
-                unlink_with_retry(tmp)
-                if not unlink_with_retry(path) and path.exists():
-                    # a long reader held the old part open: its rows survive
-                    # while the files row will say 0 — say so loudly instead
-                    # of silently serving numbers the ledger disclaims
-                    import logging as _logging
-                    _logging.getLogger(__name__).warning(
-                        "%s re-ingested to 0 rows but its OLD rates file is "
-                        "held open by a running query — old rows remain "
-                        "visible until the next rebuild or restart", source_file)
+            self._swap_in_part(source_file, tmp, path, rows_written)
             with self.connect() as con:
                 self._register_views(con)
         self._invalidate_scan_caches()
+
+    def _swap_in_part(self, source_file: str, tmp: Path, path: Path, rows_written: int) -> None:
+        """Under write_lock: the finished part replaces the old one (atomic
+        replace — never an unlink-first window for lock-free readers); a
+        0-row outcome removes the old one. A Windows lock on the old part
+        (a long export) no longer fails a finished, possibly hours-long parse:
+        the complete part is PARKED under a name the sweep leaves alone and
+        swapped in at the next open or rollup; an old part that can't be
+        deleted is retried the same way (_retry_pending_part_ops)."""
+        if rows_written:
+            try:
+                replace_with_retry(tmp, path)
+            except PermissionError:
+                park = f".{file_key(source_file)}.parked"
+                replace_with_retry(tmp, self.rates_dir / park)
+                with self.connect() as con:
+                    parked = json.loads(self._meta_get(con, "parked_parts") or "{}")
+                    parked[park] = path.name
+                    con.execute("INSERT OR REPLACE INTO meta VALUES ('parked_parts', ?)",
+                                [json.dumps(parked)])
+                logging.getLogger(__name__).warning(
+                    "%s: its finished rates couldn't replace the old ones (the old "
+                    "file is held open by another program) — kept, and swapped in "
+                    "automatically as soon as it is free", source_file)
+        else:
+            unlink_with_retry(tmp)
+            if not unlink_with_retry(path) and path.exists():
+                with self.connect() as con:
+                    self._note_doomed(con, path.name)
 
     def rates_part_writer(self, source_file: str) -> "RatesPartWriter":
         """Streaming writer: accept row batches and flush them to the part
@@ -2249,16 +2301,17 @@ class Store:
         the next inbox scan re-ingests them. Called when a worker starts
         (same single-owner assumption as recover_stuck_urls)."""
         with self.write_lock, self.connect() as con:
-            n = con.execute(
-                "SELECT count(*) FROM files WHERE status = 'processing'"
-            ).fetchone()[0]
-            if n:
+            names = [r[0] for r in con.execute(
+                "SELECT filename FROM files WHERE status = 'processing'").fetchall()]
+            if names:
                 con.execute(
                     "UPDATE files SET status = 'failed', "
                     "error = 'interrupted by a restart — will re-ingest on the next scan' "
                     "WHERE status = 'processing'"
                 )
-        return n
+        for n in names:          # an interrupted RE-ingest leaves the old part live
+            self.requeue_part_payers(n)
+        return len(names)
 
     def recover_stuck_urls(self) -> int:
         """Rows left mid-flight by a crash/Ctrl-C go back to queued so the
@@ -2350,6 +2403,24 @@ class Store:
                 "progress = 0, bytes_done = 0 WHERE id = ?", [url_id])
             return True
 
+    def requeue_urls(self, urls: list[str]) -> int:
+        """Back to 'queued' (from done/failed/skipped) for these exact URLs —
+        the monthly refresh's re-fetch of an index updated in place, and its
+        daily retry of a not-yet-posted monthly file. Returns rows changed."""
+        if not urls:
+            return 0
+        with self.write_lock, self.connect() as con:
+            n = con.execute(
+                "SELECT count(*) FROM url_queue WHERE url IN (SELECT unnest(?::VARCHAR[])) "
+                "AND status IN ('done', 'failed', 'skipped')", [list(urls)]).fetchone()[0]
+            if n:
+                con.execute(
+                    "UPDATE url_queue SET status = 'queued', error = NULL, "
+                    "retries = coalesce(retries, 0) + 1, progress = 0, bytes_done = 0, "
+                    "force_size = false WHERE url IN (SELECT unnest(?::VARCHAR[])) "
+                    "AND status IN ('done', 'failed', 'skipped')", [list(urls)])
+        return n
+
     def requeue_failed(self) -> int:
         """Bulk retry: every failed row back to queued in ONE statement — the
         per-row path capped at list_urls' window silently stranded failures
@@ -2391,13 +2462,29 @@ class Store:
         with self.write_lock, self.connect() as con:
             ids = [r[0] for r in con.execute(
                 "SELECT id FROM url_queue WHERE status = 'downloading'").fetchall()]
+            # signal the downloader threads BEFORE the commit: a download
+            # finishing in the window after it overwrote the user's skip, and
+            # its id lingered in the set to abort that row's NEXT retry
+            with self._cancel_lock:
+                self._canceled_downloads.update(ids)
             if ids:
                 con.execute(
                     "UPDATE url_queue SET status = 'skipped', kind = 'canceled', "
-                    "error = 'download stopped by user' WHERE status = 'downloading'")
-        with self._cancel_lock:
-            self._canceled_downloads.update(ids)
+                    "error = 'download stopped by user' WHERE id IN "
+                    "(SELECT unnest(?::BIGINT[]))", [ids])
         return len(ids)
+
+    def resume_canceled(self) -> int:
+        """Undo "Clear queue" / "Stop downloads" in one go: every row they
+        parked (skipped, kind 'canceled') back to 'queued'. Partial downloads
+        resume. Returns rows resumed."""
+        with self.write_lock, self.connect() as con:
+            n = con.execute("SELECT count(*) FROM url_queue WHERE status = 'skipped' "
+                            "AND kind = 'canceled'").fetchone()[0]
+            if n:
+                con.execute("UPDATE url_queue SET status = 'queued', kind = 'unknown', "
+                            "error = NULL WHERE status = 'skipped' AND kind = 'canceled'")
+        return n
 
     def is_download_canceled(self, url_id: int) -> bool:
         with self._cancel_lock:
@@ -2441,12 +2528,15 @@ class Store:
         with self.write_lock, self.connect() as con:
             n = con.execute(
                 "SELECT count(*) FROM url_queue WHERE status = 'oversize' "
-                "AND bytes_total IS NOT NULL AND bytes_total <= ?",
+                "AND bytes_total > 0 AND bytes_total <= ?",
                 [limit_bytes]).fetchone()[0]
             if n:
+                # bytes_total > 0: a chunked transfer (length unknown) records
+                # 0, which "fit" every limit — an 8 GB chunked file re-
+                # downloaded 5 GB and tripped oversize on every restart
                 con.execute(
                     "UPDATE url_queue SET status = 'queued', error = NULL "
-                    "WHERE status = 'oversize' AND bytes_total IS NOT NULL "
+                    "WHERE status = 'oversize' AND bytes_total > 0 "
                     "AND bytes_total <= ?", [limit_bytes])
         return n
 
@@ -2582,10 +2672,91 @@ class Store:
         with self.write_lock:
             with self.connect() as con:
                 self._queue_removed_payers(con, doomed)
-            unlink_with_retry(path)
-            with self.connect() as con:
+                if not unlink_with_retry(path) and path.exists():
+                    self._note_doomed(con, path.name)
                 self._register_views(con)
         self._invalidate_scan_caches()
+
+    def _note_doomed(self, con: duckdb.DuckDBPyConnection, part_name: str) -> None:
+        """A part that should be gone but couldn't be deleted (a long export or
+        antivirus held it open on Windows) — remembered in meta and retried at
+        every open and before every rollup (_retry_pending_part_ops); the sweep
+        ignores *.parquet, so it would otherwise stay in the glob for good while
+        the files row says it is gone."""
+        cur = json.loads(self._meta_get(con, "doomed_parts") or "[]")
+        if part_name not in cur:
+            cur.append(part_name)
+        con.execute("INSERT OR REPLACE INTO meta VALUES ('doomed_parts', ?)", [json.dumps(cur)])
+        logging.getLogger(__name__).warning(
+            "%s could not be deleted (held open by another program) — it keeps "
+            "being served until it can be; retried automatically", part_name)
+
+    def _retry_pending_part_ops(self) -> None:
+        """Finish part operations a locked file blocked: delete doomed parts
+        (then queue their payers — the analytics must drop their rows) and
+        adopt parked parts (then queue their payers — the analytics must add
+        them). Never raises."""
+        log = logging.getLogger(__name__)
+        try:
+            with self.connect() as con:
+                doomed = json.loads(self._meta_get(con, "doomed_parts") or "[]")
+                parked = json.loads(self._meta_get(con, "parked_parts") or "{}")
+        except Exception:  # noqa: BLE001
+            return
+        if not doomed and not parked:
+            return
+        still_doomed, still_parked = [], {}
+        for name in doomed:
+            path = self.rates_dir / name
+            if not path.exists():
+                continue
+            scope = self._part_payers_for_removal(path)
+            with self.write_lock, self.connect() as con:
+                if unlink_with_retry(path) or not path.exists():
+                    self._queue_removed_payers(con, scope)
+                    self._register_views(con)
+                    log.info("removed %s (it was held open earlier)", name)
+                else:
+                    still_doomed.append(name)
+        for park, name in parked.items():
+            src, dst = self.rates_dir / park, self.rates_dir / name
+            if not src.exists():
+                continue
+            old = self._part_payers_for_removal(dst)
+            try:
+                replace_with_retry(src, dst)
+            except OSError:
+                still_parked[park] = name
+                continue
+            new = self._part_payers_for_removal(dst)
+            with self.write_lock, self.connect() as con:
+                self._queue_removed_payers(con, old)
+                self._queue_removed_payers(con, new)
+                self._register_views(con)
+            log.info("adopted %s (its file was held open when the parse finished)", name)
+        with self.write_lock, self.connect() as con:
+            con.execute("INSERT OR REPLACE INTO meta VALUES ('doomed_parts', ?)",
+                        [json.dumps(still_doomed)])
+            con.execute("INSERT OR REPLACE INTO meta VALUES ('parked_parts', ?)",
+                        [json.dumps(still_parked)])
+        self._invalidate_scan_caches()
+
+    def requeue_part_payers(self, source_file: str) -> None:
+        """A re-ingest that failed / stopped / crashed leaves the OLD part live
+        while the files row is not 'done' — invisible to the incremental
+        delta. If the rollup marker moved past the file meanwhile, those live
+        rows never reached the analytics. Queue the surviving part's payers
+        and TINs so the next incremental recomputes them from the raw parts."""
+        path = self.rates_dir / f"{file_key(source_file)}.parquet"
+        if not path.exists():
+            return
+        scope = self._part_payers_for_removal(path)
+        try:
+            with self.write_lock, self.connect() as con:
+                self._queue_removed_payers(con, scope)
+        except Exception:  # noqa: BLE001 — a failure path must not fail again
+            logging.getLogger(__name__).warning(
+                "could not queue %s's surviving rates for the analytics", source_file)
 
     def forget_file(self, filename: str) -> dict:
         """User-driven per-file erasure: delete this file's rates (its parquet
@@ -2692,6 +2863,7 @@ class Store:
         rebuilt the whole spine every ~4 minutes during a long identification,
         starving concurrent searches. Ingest (new rates) still does a full
         rebuild."""
+        self._retry_pending_part_ops()   # a held-open part delete / swap-in
         import logging as _logging
 
         log = _logging.getLogger(__name__)
@@ -2774,6 +2946,7 @@ class Store:
         migration pending, a file with no recorded payer, an unscopable
         removal (`rollup_needs_full`), OOM at max split — and callers fall
         back to rebuild_rollups(), which is always correct."""
+        self._retry_pending_part_ops()   # a held-open part delete / swap-in
         import logging as _logging
 
         log = _logging.getLogger(__name__)
@@ -4044,17 +4217,7 @@ class RatesPartWriter:
         with self.store.write_lock:
             with self.store.connect() as con:
                 self.store._queue_removed_payers(con, doomed)
-            if self.rows_written:
-                # replace() overwrites atomically — no unlink-first window
-                replace_with_retry(self.tmp, self.path)
-            else:
-                unlink_with_retry(self.tmp)
-                if not unlink_with_retry(self.path) and self.path.exists():
-                    import logging as _logging
-                    _logging.getLogger(__name__).warning(
-                        "%s re-ingested to 0 rows but its OLD rates file is "
-                        "held open by a running query — old rows remain "
-                        "visible until the next rebuild or restart", self.source_file)
+            self.store._swap_in_part(self.source_file, self.tmp, self.path, self.rows_written)
             with self.store.connect() as con:
                 self.store._register_views(con)
         self.store._invalidate_scan_caches()

@@ -378,7 +378,9 @@ def test_orphaned_parse_worker_exits_at_chunk_boundary(cfg, tmp_path, monkeypatc
     monkeypatch.setattr(ing.os, "getppid", fake_getppid)
     p = tmp_path / "rates.json"
     shutil.copy(FIXTURES / "innetwork_mixed.json", p)
-    with pytest.raises(SystemExit, match="parent process died"):
+    # ParentGone (a RuntimeError), not SystemExit: a SystemExit re-raised in a
+    # live parent killed its processor thread silently (round 3, P1.1)
+    with pytest.raises(ing.ParentGone, match="lost contact with MRF Explorer"):
         ing._parse_worker(cfg, str(p), p.name, {}, {}, 0, p.stat().st_size,
                           str(tmp_path / "out.parquet.tmp"), str(tmp_path / "prog.json"))
 

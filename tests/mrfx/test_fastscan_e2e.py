@@ -611,7 +611,8 @@ def test_a_zombie_process_counts_as_dead_for_the_orphan_sweep():
 
 
 def test_a_worker_whose_parent_died_removes_its_own_temp_files(tmp_path, monkeypatch):
-    """An orphaned worker exits (SystemExit from its liveness check); it used
+    """An orphaned worker exits (ParentGone from its liveness check — a
+    RuntimeError since round 3, never SystemExit); it used
     to leave its .parquet.tmp / spool / progress files — named with the DEAD
     parent's pid — for the next start's sweep. It now removes them on the way
     out. Deterministic: the exit fires once rows AND a progress file exist
@@ -639,10 +640,46 @@ def test_a_worker_whose_parent_died_removes_its_own_temp_files(tmp_path, monkeyp
         while not tmp_out.exists() and time.monotonic() < deadline:
             time.sleep(0.01)
         seen["tmp"], seen["progress"] = tmp_out.exists(), Path(progress).exists()
-        raise SystemExit("parent process died — abandoning orphaned parse")
+        raise ingest_mod.ParentGone("parent process died — abandoning orphaned parse")
     monkeypatch.setattr(store_mod.BackgroundParquetWriter, "write_table", write_then_parent_dies)
-    with pytest.raises(SystemExit):
+    with pytest.raises(ingest_mod.ParentGone):
         _parse_worker(cfg, str(p), p.name, {}, {}, 0, p.stat().st_size, str(tmp_out), progress)
     assert seen == {"tmp": True, "progress": True}, seen          # not vacuous
     leftovers = [x for x in (tmp_out, spool_path_for(tmp_out), Path(progress), Path(progress + ".tmp")) if x.exists()]
     assert leftovers == []
+
+
+def test_parent_removes_a_qa_spill_its_worker_left_behind(tmp_path):
+    """Round 3 P1.3(b): a worker killed during its in-worker QA leaves a
+    `.{key}.{pid}.qa-spill/` folder (GBs on a big file) named with the
+    PARENT's live pid, so the sweep keeps it — the parent removes it. The
+    "worker" here dies the way a killed one does: the pool raises
+    BrokenProcessPool twice (the retry dies too) and nothing cleans up."""
+    import concurrent.futures
+    import concurrent.futures.process
+    import os
+
+    from mrfx.store import file_key
+
+    cfg = _make_cfg(tmp_path, True)
+    store = Store(cfg.store_dir)
+    p = cfg.inbox_dir / "y_2026-01.json"
+    p.write_text(json.dumps({"in_network": [_item("97110", groups=G)]}))
+    spill = store.rates_dir / f".{file_key(p.name)}.{os.getpid()}.qa-spill"
+
+    class DyingPool:
+        def submit(self, *a, **k):
+            spill.mkdir(exist_ok=True)                      # QA had started...
+            (spill / "duckdb_temp_block").write_bytes(b"x" * 1000)
+            f = concurrent.futures.Future()
+            f.set_exception(concurrent.futures.process.BrokenProcessPool("killed"))
+            return f                                        # ...then the worker died
+
+        def heal(self):
+            pass
+    set_parse_pool(DyingPool())
+    try:
+        assert ingest_file(cfg, store, p)["status"] == "failed"
+    finally:
+        set_parse_pool(None)
+    assert not spill.exists()

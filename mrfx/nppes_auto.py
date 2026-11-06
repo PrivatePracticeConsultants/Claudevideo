@@ -108,17 +108,72 @@ def latest_remote(cfg) -> tuple[str, str] | None:
     return (best[1], best[2]) if best else None
 
 
+# In-memory twin of the stamp file: if the stamp can't be WRITTEN (a
+# OneDrive-locked or read-only data folder), _stamp_fresh was always False and
+# the enrichment loop asked CMS every ~20 s, all day.
+_LAST_CHECK: dict[str, float] = {}
+_LOCK = ".nppes_download.lock"
+LOCK_STALE_S = 6 * 3600     # a lock older than this is a crashed download's
+
+
 def _stamp_fresh(folder: Path) -> bool:
+    mem = _LAST_CHECK.get(str(folder))
+    if mem is not None and time.time() - mem < CHECK_INTERVAL_S:
+        return True
     try:
         return time.time() - (folder / _STAMP).stat().st_mtime < CHECK_INTERVAL_S
     except OSError:
         return False
 
 
+def _take_download_lock(folder: Path) -> bool:
+    """Only ONE process downloads the monthly file. Serve's enrichment loop and
+    a CLI command could both see a stale stamp and append to the same .part
+    (on Windows the second rename fails or adopts an interleaved zip the
+    validator throws away — two 1.1 GB downloads wasted). O_EXCL lock with the
+    owner's pid; a lock whose owner is gone, or older than LOCK_STALE_S, is a
+    crashed download's and is taken over."""
+    from .store import _pid_alive
+    p = folder / _LOCK
+    for _ in range(2):
+        try:
+            fd = os.open(p, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            try:
+                owner = int(p.read_text(encoding="utf-8").strip() or 0)
+                age = time.time() - p.stat().st_mtime
+            except (OSError, ValueError):
+                owner, age = 0, LOCK_STALE_S + 1
+            if owner and _pid_alive(owner) and age < LOCK_STALE_S:
+                return False
+            try:
+                p.unlink()                       # stale: take it over
+            except OSError:
+                return False
+            continue
+        except OSError:
+            return True    # can't create a lock at all (read-only): don't block the feature
+        with os.fdopen(fd, "w") as f:
+            f.write(str(os.getpid()))
+        return True
+    return False
+
+
+def _release_download_lock(folder: Path) -> None:
+    try:
+        p = folder / _LOCK
+        if p.read_text(encoding="utf-8").strip() == str(os.getpid()):
+            p.unlink()
+    except OSError:
+        pass
+
+
 def _touch_stamp(folder: Path, retry_in: float | None = None) -> None:
     """Record a check. retry_in (seconds) backdates it so the next check
     happens that soon instead of a day later."""
     p = folder / _STAMP
+    _LAST_CHECK[str(folder)] = time.time() - (
+        (CHECK_INTERVAL_S - retry_in) if retry_in is not None else 0)
     try:
         p.write_text(time.strftime("%Y-%m-%d %H:%M:%S"), encoding="utf-8")
         if retry_in is not None:
@@ -168,6 +223,17 @@ def ensure_current(cfg, stop=None, force: bool = False) -> Path | None:
     if have is not None and _month_key(have.name) >= _month_key(name):
         _touch_stamp(folder)
         return have
+    if not _take_download_lock(folder):
+        log.info("NPPES: another MRF Explorer process is already downloading %s — "
+                 "leaving it to that one", name)
+        return have
+    try:
+        return _download_monthly(cfg, folder, url, name, have, stop)
+    finally:
+        _release_download_lock(folder)
+
+
+def _download_monthly(cfg, folder: Path, url: str, name: str, have, stop):
     from .fetch import DownloadError, download
 
     dest = folder / name

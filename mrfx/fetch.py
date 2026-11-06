@@ -1447,6 +1447,82 @@ def _maybe_queue_prev_month(store: Store, rec: dict, err: str) -> None:
         store.update_url(rec["id"],
                          error=err + " — this month's file isn't posted yet; "
                                "queued last month's version instead")
+    else:
+        # last month's version is already queued or loaded (after a month of
+        # use it always is) — say so instead of leaving a bare 404
+        store.update_url(rec["id"],
+                         error=err + " — this month's file isn't posted yet; last "
+                               "month's version is already in your data. The monthly "
+                               "refresh (if on) retries this link daily until the 10th; "
+                               "otherwise press retry later in the month.")
+
+
+NOT_POSTED_GRACE_DAYS = 10   # payers post monthly files during the first ~week
+
+
+def monthly_refresh_tick(cfg: MrfxConfig, store: Store, today=None) -> dict:
+    """One pass of the OPT-IN monthly refresh (cli._monthly_refresh_loop
+    calls it hourly). Returns what it did; idempotent within a month.
+
+    Scope: only the catalog sources the user has actually LOADED (a 'done'
+    row for that source, any month) — with 104 queueable sources, refreshing
+    the whole catalog queued hundreds of thousands of files the user never
+    chose.
+    - a {FIRST_OF_MONTH} source: this month's URL is queued; if the payer
+      hasn't posted it yet (failed, e.g. 404), it is retried once a day until
+      day NOT_POSTED_GRACE_DAYS — the month is marked done only when every
+      such URL succeeded or the grace period is over (it used to be marked at
+      the first tick after midnight on the 1st, leaving every dated source
+      failed all month);
+    - a static index URL that payers update in place: re-queued ONCE per
+      month (re-adding a 'done' row was a no-op, so it was never refreshed).
+    """
+    import datetime as dt
+    import re as _re
+
+    from .known_sources import load_known_sources
+
+    today = today or dt.date.today()
+    month = today.strftime("%Y-%m")
+    if store.meta_get("monthly_refresh_last") == month:
+        return {"month": month, "done": True}
+    sources = [s for s in load_known_sources(cfg.known_sources_path, today) if s.get("queueable")]
+    with store.connect() as con:
+        top = con.execute("SELECT id, url, dedup_key, status, finished_at FROM url_queue "
+                          "WHERE parent_id IS NULL").fetchall()
+    done_urls = [r[1] for r in top if r[3] == "done"]
+    dated, static = [], []
+    for s in sources:
+        tpl = s.get("url_template") or s["url"]
+        if "{FIRST_OF_MONTH}" in tpl:
+            pat = _re.compile(_re.escape(tpl).replace(_re.escape("{FIRST_OF_MONTH}"),
+                                                      r"\d{4}-\d{2}-01"))
+            if any(pat.fullmatch(u or "") for u in done_urls):
+                dated.append(s["url"])
+        elif s["url"] in done_urls:
+            static.append(s["url"])
+    out = {"month": month, "dated": len(dated), "static": len(static),
+           "queued": 0, "retried": 0, "requeued_static": 0}
+    by_url = {r[1]: r for r in top}
+    new = [u for u in dated if u not in by_url]
+    if new:
+        # only URLs not in the queue yet: add_urls REVIVES a failed row, which
+        # would retry a not-yet-posted file every hourly tick instead of daily
+        out["queued"] = add_urls(store, new)["added"]
+    if static and store.meta_get("monthly_refresh_static") != month:
+        out["requeued_static"] = store.requeue_urls(static)
+        store.meta_set("monthly_refresh_static", month)
+    # a dated URL the payer hasn't posted yet: retry once a day in the grace window
+    now = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+    stale = [u for u in dated if u in by_url and by_url[u][3] == "failed"
+             and (by_url[u][4] is None or now - by_url[u][4] >= dt.timedelta(hours=20))]
+    if stale and today.day <= NOT_POSTED_GRACE_DAYS:
+        out["retried"] = store.requeue_urls(stale)
+    finished = all(by_url.get(u) is not None and by_url[u][3] == "done" for u in dated)
+    if finished or today.day > NOT_POSTED_GRACE_DAYS:
+        store.meta_set("monthly_refresh_last", month)
+        out["done"] = True
+    return out
 
 
 _META_SUFFIX = ".fetchmeta"  # sidecar handing a prefetched download to the processor
@@ -1945,6 +2021,12 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
                 dup.unlink(missing_ok=True)
                 _meta_path(dup).unlink(missing_ok=True)
         return True
+    elif status == "requeued":
+        # cancelled before it began by another file's worker-pool restart: the
+        # download + sidecar are on disk, so back to 'fetched' for the next
+        # processor — the log promised "re-queue automatically", and it does
+        store.update_url(url_id, status="fetched", kind=pf.file_type,
+                         error=result.get("error"))
     elif status == "stopped":
         # the user pressed "stop": not a failure. The download (and its
         # sidecar) stay in place, so retry re-parses it without downloading
@@ -2204,7 +2286,11 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
                     continue
                 try:
                     fetch_url_record(cfg, store, rec)
-                except Exception:  # noqa: BLE001 — downloader must never die
+                except KeyboardInterrupt:
+                    raise
+                except BaseException:  # noqa: BLE001 — downloader must never die
+                    # (BaseException: a SystemExit from any library call would
+                    # otherwise end this thread silently and stall the queue)
                     log.exception("prefetch: unexpected error on %s", rec.get("url"))
                     try:
                         store.update_url(rec["id"], status="failed", error="unexpected download error")
@@ -2256,7 +2342,13 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
                 active += 1
             try:
                 rec = store.next_fetched_url()
-            except Exception:  # noqa: BLE001 — transient store error: back off, never die
+            except KeyboardInterrupt:
+                # leaving: give back the busy slot, or the coordinator counts
+                # this thread as working forever and the queue never drains
+                with state:
+                    active -= 1
+                raise
+            except BaseException:  # noqa: BLE001 — transient store error: back off, never die
                 log.exception("url worker: transient store error while claiming; retrying")
                 with state:
                     active -= 1
@@ -2274,7 +2366,13 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
                         cfg, store, rec,
                         progress_bar=progress_bar if parallel == 1 else None,
                         rebuild_rollups=False)
-                except Exception:  # noqa: BLE001 — a bad URL must never kill the worker
+                except KeyboardInterrupt:
+                    raise
+                except BaseException:  # noqa: BLE001 — a bad URL must never kill the worker
+                    # BaseException: a SystemExit re-raised from a worker
+                    # process passed `except Exception` and ended this thread
+                    # with the row left 'ingesting' — the queue stalled with
+                    # nothing logged
                     log.exception("url worker: unexpected error on %s", rec.get("url"))
                     try:
                         store.update_url(rec["id"], status="failed", error="unexpected worker error")
@@ -2299,6 +2397,22 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
     for t in proc_threads:
         t.start()
 
+    def respawn_dead_threads() -> None:
+        """A processor/downloader thread that died anyway (an error the loops
+        could not catch) is replaced and SAID — never a silent, shrinking
+        pool that finally stops the queue with rows piling up 'fetched'."""
+        if dl_stop.is_set() or (stop is not None and stop.is_set()):
+            return
+        for pool_, target, label in ((proc_threads, processor, "mrfx-proc"),
+                                     (dl_threads, downloader, "mrfx-prefetch")):
+            for i, t in enumerate(pool_):
+                if not t.is_alive():
+                    log.error("%s-%d stopped unexpectedly — starting a replacement "
+                              "(the file it was on is re-queued at the next start "
+                              "if it was mid-way)", label, i)
+                    pool_[i] = threading.Thread(target=target, daemon=True, name=f"{label}-{i}")
+                    pool_[i].start()
+
     interrupted = False
     try:
         while stop is None or not stop.is_set():
@@ -2314,6 +2428,7 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
             in_flight = (counts.get("queued", 0) + counts.get("downloading", 0)
                          + counts.get("fetched", 0) + counts.get("expanding", 0)
                          + counts.get("ingesting", 0) + busy)
+            respawn_dead_threads()
             if _rollup_due(pend, in_flight, time.monotonic() - last_rebuild_at,
                            rollup_min_interval):
                 if rebuild_now():
