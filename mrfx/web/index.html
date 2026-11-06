@@ -663,6 +663,23 @@
       <div class="bench-results">
         <div id="rc-out" class="empty"><h3>Pick a practice</h3>
           See every code it has a negotiated rate for, by payer, and which payers pay best.</div>
+        <div class="validate-card" style="margin-top:14px">
+          <h3>One visit, by payer — what a standard visit is worth</h3>
+          <p class="muted">Prices one follow-up visit at this practice's own contracted rates with
+            each payer (the same rates and filters as the rate card). Units follow the CMS
+            8-minute rule. The default visit is the four most-billed timed therapy codes, one
+            15-minute unit each; pick another visit or edit the codes and minutes. The total
+            is the contracted value per visit — the ceiling on net revenue per visit (NRPV).</p>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <select id="sv-preset" style="max-width:520px"></select>
+            <button class="btn primary" id="sv-run">Price a visit</button>
+            <span id="sv-msg" class="muted"></span>
+          </div>
+          <textarea id="sv-lines" rows="4" style="margin-top:6px;width:100%;max-width:520px"
+                    title="One code and its minutes of one-on-one treatment per line, e.g. 97110, 15"
+                    placeholder="97110, 15&#10;97530, 15&#10;97140, 15&#10;97112, 15"></textarea>
+          <div id="sv-out" style="margin-top:8px"></div>
+        </div>
       </div>
     </div>
   </section>

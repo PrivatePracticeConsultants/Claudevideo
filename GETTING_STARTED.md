@@ -294,6 +294,17 @@ Once a file is `done`:
   every one paid below what that payer published for the practice, with the
   shortfall and a CSV. Read the caveats: MPPR, assistant modifiers and patient
   cost-share all legitimately sit between a published rate and a payment.
+- **Rate card** tab → **One visit, by payer**: what one follow-up visit is
+  worth from each payer at that practice's own contracted rates (type the
+  practice name, TIN or an NPI, then **Build rate card** — the visit prices
+  itself). The default visit is the four most-billed timed therapy codes
+  (97110, 97530, 97140, 97112), 15 minutes each = 4 units; pick the version
+  without the 97140 + 97530 pair, the gait visit, or type your own codes and
+  minutes. Units always follow the CMS 8-minute rule. The dollar figure is
+  the contracted value per visit — the ceiling on net revenue per visit
+  (NRPV); real collections are lower (patient balances, denials, and some
+  payers cut the 2nd+ therapy unit). A payer missing a rate for one of the
+  codes shows "–" instead of a made-up total.
 - **Negotiate** tab now also builds the **rate proposal** — pick a basis
   (payer's median or p75, best comparable rate, or % of Medicare), paste
   annual volumes, and print the proposal grid the payer receives. Proposed

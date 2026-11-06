@@ -3022,6 +3022,23 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             # the JSON body — a client input error (422), never a 500.
             raise HTTPException(422, str(e))
 
+    @app.get("/api/schedule/visit/presets")
+    def schedule_visit_presets():
+        """The standard-visit baskets the Rate card's visit calculator offers."""
+        from .visit import DEFAULT_PRESET, UNITS_RULE, presets_public
+        return {"presets": presets_public(), "default": DEFAULT_PRESET, "units_rule": UNITS_RULE}
+
+    @app.post("/api/schedule/visit")
+    def schedule_visit(body: dict = Body(...)):
+        """One standard therapy visit, priced per payer at the practice's own
+        rates — units by the CMS 8-minute rule (mrfx/visit.py)."""
+        from .visit import VisitError, price_visit
+        try:
+            return price_visit(store, str(body.get("subject", "")), body.get("market") or {},
+                               body.get("lines"), body.get("preset"))
+        except (VisitError, BenchmarkError, ValueError, TypeError) as e:
+            raise HTTPException(422, str(e))
+
     @app.post("/api/report/ratecard", response_class=HTMLResponse)
     def ratecard_report(body: dict = Body(...)):
         try:

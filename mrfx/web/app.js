@@ -1998,6 +1998,61 @@ async function initRatecard() {
     openReportWith("/api/report/ratecard", state.lastRatecardPayload));
   $("#rc-csv").addEventListener("click", downloadRatecardCsv);
   $("#rc-bundle").addEventListener("click", downloadTrackerBundle);
+  initStandardVisit();
+}
+
+/* ---- one standard visit, priced per payer (mrfx/visit.py) --------------- */
+const visitLinesText = (lines) => lines.map((l) => `${l.code}, ${l.minutes}`).join("\n");
+
+async function initStandardVisit() {
+  const d = await api("/api/schedule/visit/presets").catch(() => null);
+  if (!d) return;
+  state.visitPresets = Object.fromEntries(d.presets.map((p) => [p.key, p]));
+  $("#sv-preset").innerHTML = d.presets.map((p) =>
+    `<option value="${esc(p.key)}"${p.key === d.default ? " selected" : ""}>${esc(p.label)}</option>`).join("") +
+    '<option value="">Custom — edit the codes and minutes below</option>';
+  const fill = () => {
+    const p = state.visitPresets[$("#sv-preset").value];
+    if (p) $("#sv-lines").value = visitLinesText(p.lines);
+  };
+  fill();
+  $("#sv-preset").addEventListener("change", fill);
+  $("#sv-lines").addEventListener("input", () => {
+    const p = state.visitPresets[$("#sv-preset").value];
+    if (p && $("#sv-lines").value.trim() !== visitLinesText(p.lines)) $("#sv-preset").value = "";
+  });
+  $("#sv-run").addEventListener("click", priceStandardVisit);
+}
+
+async function priceStandardVisit() {
+  const out = $("#sv-out");
+  let payload;
+  try { payload = ratecardPayload(); }
+  catch (e) { $("#sv-msg").textContent = e.message; return; }
+  const key = $("#sv-preset").value;
+  if (key) payload.preset = key; else payload.lines = $("#sv-lines").value;
+  $("#sv-msg").textContent = "pricing…";
+  let d;
+  try { d = await postJson("/api/schedule/visit", payload); }
+  catch (e) { $("#sv-msg").textContent = ""; out.innerHTML = `<div class="muted">${esc(e.message)}</div>`; return; }
+  $("#sv-msg").textContent = "";
+  const lines = d.lines.map((l) => `<b>${esc(l.code)}</b> ${esc(l.description)} — ${
+      l.timed ? `${l.minutes} min → ${l.units} unit${l.units === 1 ? "" : "s"}` : "untimed, 1 unit"}`).join("<br>");
+  const rows = d.rows.map((r, i) => `<tr class="${i === 0 && r.complete ? "best-row" : ""}">
+      <td>${esc(r.payer)}</td>
+      <td class="num"><b>${r.complete ? money(r.visit_value) : "–"}</b></td>
+      <td class="sub">${r.parts.map((p) => `${esc(p.code)} ${p.units}×${money(p.rate)}`).join(" · ")}</td>
+      <td class="sub">${r.complete ? "every code priced" :
+        `<span class="warn-text">no published rate for ${esc(r.missing_codes.join(", "))}</span> — ${
+          money(r.priced_value)} covers ${r.priced_units} of ${d.units} units`}</td></tr>`).join("");
+  out.innerHTML = `<div class="rc-summary">${esc(d.headline)}</div>
+    <div class="muted" style="margin:6px 0">${esc(d.label)} — ${d.total_timed_minutes} timed minutes →
+      <b>${d.units} units</b> (CMS 8-minute rule).<br>${lines}</div>
+    ${d.flags.map((f) => `<div class="warn-text" style="margin-top:4px">${esc(f)}</div>`).join("")}
+    ${d.rows.length ? `<div class="tablewrap" style="max-height:40vh;margin-top:8px"><table><thead><tr>
+      <th>Payer</th><th class="num">Per visit</th><th>Units × rate</th><th>Status</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>` : ""}
+    <div class="muted" style="font-size:11.5px;margin-top:6px">Visit: ${esc(d.basis)}. ${esc(d.units_rule)} ${esc(d.note)}</div>`;
 }
 
 async function refreshRcMpfs() {
@@ -2049,6 +2104,8 @@ async function buildRatecard() {
   $("#rc-csv").disabled = !hasCard;
   $("#rc-bundle").disabled = !hasCard;
   renderRatecard(out, data.fee_schedule, data.scorecard);
+  if (hasCard && $("#sv-preset").options.length) priceStandardVisit();
+  else $("#sv-out").innerHTML = "";
 }
 
 const pctOrDash = (v) => (v == null ? "–" : `${v}%`);
