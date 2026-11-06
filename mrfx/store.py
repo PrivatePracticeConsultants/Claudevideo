@@ -471,6 +471,16 @@ DIRECTORY_SCHEMA_VERSION = 6
 # the rollup coverage marker (see upsert_file).
 FINISHED_NOW = object()
 
+
+def _utcnow() -> dt.datetime:
+    """THE timestamp for anything stored: naive UTC. An AWARE datetime lands in
+    a DuckDB TIMESTAMP column as the PC's LOCAL wall-clock time (06:30Z ->
+    01:30 under New York), and local time runs backwards once a year — on the
+    fall-back night a file finishing 30 real minutes after the rollup marker
+    got an EARLIER stamp and never reached the analytics. Naive UTC never
+    goes backwards (and the instance runs SET TimeZone='UTC' as well)."""
+    return dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+
 # Returned by a skip_if_busy rebuild that found another rebuild already running.
 # The periodic triggers (ingest rollup, name refresh) pass skip_if_busy=True so
 # they DON'T queue behind a multi-hour rebuild and then each run their own
@@ -932,6 +942,7 @@ class Store:
         # `mrfx status`/`export`/BI tool (DuckDB is single-writer per process),
         # and the CLI's brief runs don't benefit anyway.
         self._pin: duckdb.DuckDBPyConnection | None = None
+        self._local_tz: str | None = None   # the PC's zone, read before SET TimeZone
         if keep_warm:
             try:
                 # same retry budget as connect(): a one-second external reader
@@ -963,6 +974,7 @@ class Store:
             self._sweep_stale_spill()
             self._quarantine_corrupt_parts()
             self._init_tables(con)
+            self._migrate_timestamps_to_utc(con)
             self._register_views(con)
         # BEFORE the rollup check: a full rebuild it may trigger must see the
         # fixed rows, and the payers this queues ride the next incremental
@@ -1106,6 +1118,59 @@ class Store:
             import logging as _logging
             _logging.getLogger(__name__).warning(
                 "rollup schema-migration check skipped (%s)", e)
+
+    # (table, column) pairs every writer stamped with an AWARE datetime or SQL
+    # current_timestamp before round 3 — i.e. LOCAL wall-clock time, exactly
+    # convertible. npi_directory.enriched_at is NOT here: the bulk path wrote
+    # naive UTC and the API path local time, so its marker is shifted instead.
+    _LOCAL_TIME_COLUMNS = (
+        ("files", "started_at"), ("files", "finished_at"),
+        ("url_queue", "added_at"), ("url_queue", "finished_at"),
+        ("peer_sets", "created_at"), ("hospital_files", "imported_at"),
+        ("inflation_index", "added_at"), ("client_watchlist", "added_at"),
+        ("engagement_baselines", "created_at"),
+    )
+
+    def _migrate_timestamps_to_utc(self, con: duckdb.DuckDBPyConnection) -> None:
+        """Once per store (meta timestamps_utc): convert the local-time stamps
+        older versions wrote to UTC, in the PC's own zone, together with the
+        rollup marker copied from them — so old and new stamps (and the
+        marker) share one clock. The names marker is compared against a mixed
+        column, so it moves back 14 h (the widest UTC offset): at worst a few
+        practices' names are re-checked once. Caller holds write_lock."""
+        if self._meta_get(con, "timestamps_utc") == "1":
+            return
+        tz = self._local_tz or "UTC"
+        try:
+            con.execute("BEGIN TRANSACTION")
+            if tz.upper() not in ("UTC", "GMT", "ETC/UTC", "Z"):
+                have = {(t, c) for t, c in con.execute(
+                    "SELECT table_name, column_name FROM information_schema.columns").fetchall()}
+                for t, c in self._LOCAL_TIME_COLUMNS:
+                    if (t, c) in have:
+                        con.execute(f"UPDATE {t} SET {c} = timezone(?, {c})::TIMESTAMP "
+                                    f"WHERE {c} IS NOT NULL", [tz])
+                cov = self._meta_get(con, "rollup_covered_through")
+                if cov:
+                    con.execute("INSERT OR REPLACE INTO meta VALUES ('rollup_covered_through', "
+                                "(SELECT timezone(?, ?::TIMESTAMP)::TIMESTAMP::VARCHAR))", [tz, cov])
+                names = self._meta_get(con, "directory_names_through")
+                if names:
+                    con.execute("INSERT OR REPLACE INTO meta VALUES ('directory_names_through', "
+                                "(SELECT (?::TIMESTAMP - INTERVAL 14 HOUR)::VARCHAR))", [names])
+            con.execute("INSERT OR REPLACE INTO meta VALUES ('timestamps_utc', '1')")
+            con.execute("COMMIT")
+            if tz.upper() not in ("UTC", "GMT", "ETC/UTC", "Z"):
+                logging.getLogger(__name__).info(
+                    "stored times converted once from this PC's time zone (%s) to UTC "
+                    "— the dashboard shows them in your local time", tz)
+        except Exception as e:  # noqa: BLE001 — never block the store from opening
+            try:
+                con.execute("ROLLBACK")
+            except duckdb.Error:
+                pass
+            logging.getLogger(__name__).warning(
+                "could not convert stored times to UTC (%s) — will retry at next start", e)
 
     def _migrate_modifier_fields(self) -> None:
         """Rewrite, once, the rate parts written under an older modifier rule
@@ -1399,6 +1464,17 @@ class Store:
         (it waits for them to quiesce; they wait for the scheduler it seized —
         observed live as a total freeze). The other settings here are
         config/buffer-pool writes that do not quiesce the scheduler."""
+        try:
+            # every TIMESTAMP this app writes is UTC (_utcnow); make the
+            # instance agree, so an aware stamp from any module and SQL
+            # current_timestamp land as UTC too. The PC's own zone is read
+            # FIRST — the one-time conversion of an older store needs it.
+            if self._local_tz is None:
+                self._local_tz = str(con.execute(
+                    "SELECT current_setting('TimeZone')").fetchone()[0] or "UTC")
+            con.execute("SET GLOBAL TimeZone = 'UTC'")
+        except duckdb.Error:   # no ICU in this build: naive-UTC stamps still hold
+            self._local_tz = self._local_tz or "UTC"
         try:
             con.execute(f"SET temp_directory = '{sql_path(self._tmp_dir)}'")
             con.execute("SET preserve_insertion_order = false")
@@ -1919,7 +1995,7 @@ class Store:
                    "content_sha"}
         fields = {k: v for k, v in fields.items() if k in allowed}
         if fields.get("status") in ("done", "failed", "skipped", "oversize"):
-            fields["finished_at"] = dt.datetime.now(dt.timezone.utc)
+            fields["finished_at"] = _utcnow()
         if not fields:
             return
         sets = ", ".join(f"{k} = ?" for k in fields)
@@ -2060,7 +2136,7 @@ class Store:
                     con.execute(
                         "UPDATE url_queue SET status = 'skipped', kind = 'duplicate', "
                         "error = ?, finished_at = ? WHERE id = ?",
-                        [msg, dt.datetime.now(dt.timezone.utc), url_id],
+                        [msg, _utcnow(), url_id],
                     )
                     return (twin_url, twin_status)
             con.execute(
@@ -3250,9 +3326,9 @@ class Store:
                 # already-advanced rollup coverage marker — that file would be
                 # invisible to every future delta AND to rollups_stale(),
                 # its rows silently missing from analytics forever.
-                # UTC-aware to match ingest's _now() (mixed naive/aware stamps
-                # would corrupt the marker's chronological ordering).
-                fields["finished_at"] = dt.datetime.now(dt.timezone.utc)
+                # naive UTC, like ingest's _now() (see _utcnow: an aware stamp
+                # is stored as local time and breaks the marker's ordering)
+                fields["finished_at"] = _utcnow()
             exists = con.execute("SELECT 1 FROM files WHERE filename = ?", [filename]).fetchone()
             if exists:
                 sets = ", ".join(f"{k} = ?" for k in fields)
@@ -3548,7 +3624,7 @@ class Store:
                 [npi, entity_type, org_name, taxonomy_code, taxonomy_desc,
                  taxonomy_codes, city, state,
                  address, (zip_code or "")[:5] or None, phone,
-                 dt.datetime.now(dt.timezone.utc)],
+                 _utcnow()],
             )
         self._enrich_progress_cache = None  # progress moved; don't serve stale counts
         self._store_stats_cache = None
@@ -3594,7 +3670,7 @@ class Store:
             # stamp below that max would be permanently skipped (latent; the
             # single enrichment loop serializes today, but a second bulk writer
             # would trip it).
-            now = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+            now = _utcnow()
             con.register("_npi_batch", batch)
             try:
                 con.execute(f"INSERT OR REPLACE INTO npi_directory ({cols}) "
@@ -3674,7 +3750,7 @@ class Store:
         with self.write_lock, self.connect() as con:
             con.execute(
                 "INSERT OR REPLACE INTO peer_sets VALUES (?, ?, ?)",
-                [name, json.dumps(definition), dt.datetime.now(dt.timezone.utc)],
+                [name, json.dumps(definition), _utcnow()],
             )
 
     def peer_sets(self) -> dict[str, dict]:

@@ -67,6 +67,12 @@ const fmtMoney = (v) =>
 const money = (v) =>
   v == null ? "–" : v < 0 ? "-$" + fmtMoney(-v) : "$" + fmtMoney(v);
 const fmtInt = (v) => (v == null ? "–" : Number(v).toLocaleString("en-US"));
+// stored times are UTC ("2026-11-06 04:30:00.123"); show them on this PC's clock
+const localTime = (s) => {
+  if (!s) return "";
+  const d = new Date(String(s).slice(0, 19).replace(" ", "T") + "Z");
+  return isNaN(d) ? String(s).slice(0, 19) : d.toLocaleString();
+};
 const esc = (s) =>
   String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 // client twin of the server's SSN-pattern TIN mask — for the few places that
@@ -3812,7 +3818,7 @@ async function loadFiles() {
       <td class="num">${fmtInt(f.rows_emitted)}</td>
       <td>${qaLine(f.qa)}</td>
       <td>${warn}${f.error ? `<div class="${f.status === "pending_confirmation" ? "warn-text" : "err-text"}">${esc(f.error)}</div>` : ""}</td>
-      <td class="sub">${f.finished_at ? esc(f.finished_at.slice(0, 19)) : ""}</td>
+      <td class="sub">${f.finished_at ? esc(localTime(f.finished_at)) : ""}</td>
       <td>${f.status === "processing" || f.status === "queued" ? "" : `<button class="btn forget-btn" title="erase this file's rates and free its disk space (re-add its link or file to get it back)" data-forget="${esc(f.filename)}">remove</button>`}</td>
     </tr>`;
   }).join("");

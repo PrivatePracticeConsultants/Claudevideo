@@ -301,7 +301,8 @@ def _apply_qa_aggregates(qa: dict, total: int, agg: tuple[int, int, int]) -> Non
 
 
 def _now() -> dt.datetime:
-    return dt.datetime.now(dt.timezone.utc)
+    # naive UTC — the store's one clock (store._utcnow explains why not aware)
+    return dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
 
 
 def _finish_file(cfg: MrfxConfig, path: Path, ok: bool) -> None:
