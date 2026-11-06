@@ -750,6 +750,12 @@ def methodology_text(cfg: MrfxConfig, store: Store, grain: str, fs: FilterSet,
         f"MRF Explorer v{__version__} export methodology — view: {view}",
         f"Generated: {dt.datetime.now(dt.timezone.utc).isoformat()}",
         f"Grain: {grain} (one row per payer x billing_code x {grain} x modifier-set x class x POS-set x month)",
+        "Month (file_month): the payer's own date in the file (header last_updated_on), "
+        "else the date in the file name, else the month the file was read. A header "
+        "dated AFTER the file was read is not trusted: the file is filed under its "
+        "name's month (or the month read) and its Files-tab line says so. Payers' "
+        "clocks differ — one payer's October files can carry an August date — so a "
+        "pinned month compares payers' own statements of vintage.",
         f"Filters: {json.dumps(fs.described, default=str)}",
         f"Sort: {sort} {direction}",
         "Dedup rule: distinct negotiated facts per grain tuple. A TIN rate is the "
@@ -1073,20 +1079,20 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                                WHERE {basis}
                                GROUP BY billing_code, unit_id)
                     SELECT billing_code, q[2] AS median, q[1] AS p25, q[3] AS p75,
-                           entities, mpfs_rate FROM (
+                           entities FROM (
                     SELECT r.billing_code,
                            quantile_cont(r.negotiated_rate, [0.25, 0.5, 0.75]) AS q,
-                           count(DISTINCT r.unit_id)             AS entities,
-                           m.mc                                  AS mpfs_rate
-                    FROM r LEFT JOIN (SELECT code, median(non_facility_rate) AS mc
-                                      FROM mpfs GROUP BY code) m ON m.code = r.billing_code
-                    GROUP BY r.billing_code, m.mc)
+                           count(DISTINCT r.unit_id)             AS entities
+                    FROM r GROUP BY r.billing_code)
                     ORDER BY billing_code
                     """,
                     fs.params,
                 ))
+            # the Medicare anchor for THIS view's state (store.medicare_anchor):
+            # one locality applied to another state's practices misstates the %
+            anchor = store.medicare_anchor(fs.described.get("state"))
             for c in by_code:
-                mc = c.pop("mpfs_rate", None)
+                mc = anchor["rates"].get(c["billing_code"])
                 c["pct_medicare"] = (round(100 * c["median"] / mc)
                                      if mc and c.get("median") else None)
                 c["below_medicare"] = bool(mc and c.get("median") is not None
@@ -1094,6 +1100,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             keys = ["n", "entities", "codes", "min", "p25", "median", "p75", "max"]
             result = {**dict(zip(keys, row)), "grain": grain, "by_code": by_code,
                       "by_code_basis": basis_text,
+                      "medicare_anchor": anchor["label"], "medicare_refusal": anchor["refusal"],
                       "mpfs_loaded": any(c["pct_medicare"] is not None for c in by_code)}
             if len(_summary_cache) > 256:
                 _summary_cache.clear()
@@ -1309,9 +1316,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 """,
                 fs.params,
             ))
-            base = con.execute(
-                "SELECT median(non_facility_rate) FROM mpfs WHERE code = ?", [code]
-            ).fetchone()[0]
+            anchor = store.medicare_anchor(fs.described.get("state"))
+            base = anchor["rates"].get(code)
         # % of Medicare per payer when an MPFS anchor is loaded; the key is
         # always present (None without an anchor) so the frontend never reads
         # undefined — matching /api/summary by_code.
@@ -1321,6 +1327,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         info = catalog_json().get(code, {})
         return {"billing_code": code, "grain": grain, "as_of": as_of, **info, "ranked": ranked,
                 "histogram": hist, "payer_rank": payer_rank, "payer_rank_basis": basis_text,
+                "medicare_anchor": anchor["label"], "medicare_refusal": anchor["refusal"],
                 "mpfs_rate": round(base, 2) if base else None}
 
     @app.get("/api/trend")
@@ -3312,6 +3319,9 @@ def _load_mpfs_csv(store: Store, data: bytes, source: str) -> int:
         rows.append({
             "code": code,
             "locality": (row.get(fields.get("locality", ""), "") or "") if fields.get("locality") else "",
+            # optional: which state the row prices (else "% of Medicare" says
+            # the file didn't state its locality)
+            "state": (row.get(fields["state"]) or "").strip().upper()[:2] if fields.get("state") else "",
             "non_facility_rate": rate,
         })
     return store.load_mpfs(rows, source)

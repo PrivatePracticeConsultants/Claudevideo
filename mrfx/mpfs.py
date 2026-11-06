@@ -227,7 +227,7 @@ def import_official(store, data: bytes, filename: str, *, conversion_factor: flo
     rows = compute_locality_rates(rvus, gpci, conversion_factor)
     source = (f"{fname} · locality {gpci['name']} ({state.upper()}) · "
               f"CF ${float(conversion_factor):.4f} · locality-adjusted non-facility")
-    n = store.load_mpfs(rows, source)
+    n = store.load_mpfs(rows, source, state=state)
     log.info("MPFS: %s codes at %s", f"{n:,}", source)
     return {"rows": n, "source": source, "locality": gpci["name"],
             "conversion_factor": float(conversion_factor)}

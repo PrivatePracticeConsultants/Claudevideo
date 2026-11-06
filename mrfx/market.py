@@ -26,7 +26,7 @@ proof of collection, and absence in an MRF is not proof of non-coverage.
 from __future__ import annotations
 
 from .benchmark import (BASIS_NOTE, BenchmarkError, _market_where,
-                        _rates_relation, month_label, normalize_market)
+                        _rates_relation, anchor_state, month_label, normalize_market)
 from .catalog import code_info
 from .store import Store
 
@@ -182,10 +182,11 @@ def medicare_index(store: Store, code: str, market: dict) -> dict:
     with store.connect() as con:
         rows = _dicts(con.execute(per_payer, [*params, _MIN_CELL]))
         mkt = con.execute(market_sql, params).fetchone()
-        # median across whatever localities were loaded — a single national
-        # anchor, NOT locality/GPCI-matched to the practice (stated in the note)
-        base = con.execute(
-            "SELECT median(non_facility_rate) FROM mpfs WHERE code = ?", [code]).fetchone()[0]
+
+    # the market state's Medicare locality (store.medicare_anchor) — refused,
+    # not borrowed, when no loaded locality matches
+    anchor = store.medicare_anchor(anchor_state(store, m))
+    base = anchor["rates"].get(code)
 
     def pct(v):
         return round(100 * v / base) if base and v else None
@@ -196,7 +197,7 @@ def medicare_index(store: Store, code: str, market: dict) -> dict:
         "code": code, "description": code_info(code)[0],
         "as_of": month_label(m["month"]), "min_practices": _MIN_CELL,
         "mpfs_rate": round(base, 2) if base else None,
-        "mpfs_loaded": store.mpfs_loaded(),
+        "mpfs_loaded": anchor["label"],
         "market_median": mkt[0], "market_p25": mkt[1], "market_p75": mkt[2],
         # surface the backing count so a "market median" from 1-4 practices reads
         # as thin, not authoritative (the per-payer rows already gate on _MIN_CELL)
@@ -205,11 +206,11 @@ def medicare_index(store: Store, code: str, market: dict) -> dict:
         "market_p25_pct_medicare": pct(mkt[1]),
         "market_p75_pct_medicare": pct(mkt[2]),
         "payers": rows, "basis_note": BASIS_NOTE,
-        "medicare_note": (
-            "% of Medicare uses the median non-facility MPFS rate across the "
-            "localities you loaded — one national anchor applied to every rate, "
-            "NOT matched to each practice's GPCI locality. Load a single-locality "
-            "MPFS file to anchor to that region."),
+        "medicare_note": (anchor["refusal"] or (
+            f"% of Medicare uses the non-facility rate of {anchor['label']} — the "
+            "locality loaded for this market's state; one locality per state, not "
+            "each practice's own GPCI locality within the state.")
+            if anchor["label"] or anchor["refusal"] else ""),
     }
 
 

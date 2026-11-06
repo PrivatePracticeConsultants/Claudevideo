@@ -34,7 +34,6 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from .modifiers import MODIFIER_RULES_VERSION
 from .catalog import (THERAPY_CLINIC_STRONG_CODES, THERAPY_MIN_SHARE_PCT,
                       THERAPY_SMALL_PRACTICE_NPIS,
                       excluded_facility_taxonomy_sql, hospital_taxonomy_sql,
@@ -470,6 +469,13 @@ DIRECTORY_SCHEMA_VERSION = 6
 # the lock wait between computing it and committing can put the value behind
 # the rollup coverage marker (see upsert_file).
 FINISHED_NOW = object()
+
+# Rules that decide what a STORED rate row looks like. Bumping this makes every
+# part written under an older rule be rewritten once at open (_migrate_row_rules)
+# — exactly as a re-ingest would write it, no re-download. 1: modifier field
+# (mrfx/modifiers.py). 2: + a header dated after the file was read is not its
+# month (parser.file_month_for).
+ROW_RULES_VERSION = 2
 
 
 def _utcnow() -> dt.datetime:
@@ -978,7 +984,7 @@ class Store:
             self._register_views(con)
         # BEFORE the rollup check: a full rebuild it may trigger must see the
         # fixed rows, and the payers this queues ride the next incremental
-        self._migrate_modifier_fields()
+        self._migrate_row_rules()
         self._migrate_stale_rollups()
 
     def _quarantine_corrupt_parts(self) -> None:
@@ -1172,27 +1178,28 @@ class Store:
             logging.getLogger(__name__).warning(
                 "could not convert stored times to UTC (%s) — will retry at next start", e)
 
-    def _migrate_modifier_fields(self) -> None:
-        """Rewrite, once, the rate parts written under an older modifier rule
-        (files.modifier_rules < MODIFIER_RULES_VERSION) so they read exactly as
-        a re-ingest by this version would write them — no re-download.
+    def _migrate_row_rules(self) -> None:
+        """Rewrite, once, the rate parts written under older ROW rules
+        (files.row_rules < ROW_RULES_VERSION) so they read exactly as a
+        re-ingest by this version would write them — no re-download.
 
-        The rule (mrfx/modifiers.py) is a pure function of two stored columns,
-        billing_code_modifier and service_code, plus the code for discipline:
-        so the distinct (code, modifiers, service codes) combinations of a part
-        (a few hundred) go through the SAME Python function the parser calls,
-        and only the rows whose combination changes are rewritten. Each part is
-        swapped atomically through finalize_rates_part, which queues its payers
-        and TINs for the next incremental rollup. A part that can't be read or
-        written is left as it was and retried at the next start."""
+        Every rule is a pure function of stored columns, run through the SAME
+        Python function the parser calls: the modifier rule (mrfx/modifiers.py)
+        over (billing_code, billing_code_modifier, service_code), the month
+        rule (parser.file_month_for) over (last_updated_on, source_file, the
+        month of ingested_at). The distinct inputs of a part are few (hundreds),
+        so only rows whose inputs change are rewritten, via a hash join. Each
+        part is swapped atomically through finalize_rates_part, which queues its
+        payers and TINs for the next incremental rollup. A part that can't be
+        read or written is left as it was and retried at the next start."""
         log = logging.getLogger(__name__)
         try:
             with self.connect() as con:
                 todo = [r[0] for r in con.execute(
-                    "SELECT filename FROM files WHERE coalesce(modifier_rules, 0) < ? "
-                    "ORDER BY filename", [MODIFIER_RULES_VERSION]).fetchall()]
+                    "SELECT filename FROM files WHERE coalesce(row_rules, 0) < ? "
+                    "ORDER BY filename", [ROW_RULES_VERSION]).fetchall()]
         except Exception as e:  # noqa: BLE001 — never block the app from opening
-            log.warning("modifier-field check skipped (%s)", e)
+            log.warning("row-rules check skipped (%s)", e)
             return
         if not todo:
             return
@@ -1200,65 +1207,97 @@ class Store:
         fixed = rows_fixed = 0
         for name in todo:
             try:
-                n = self._normalize_part_modifiers(name)
+                n = self._normalize_part(name)
             except Exception as e:  # noqa: BLE001 — one bad part never blocks the rest
-                log.warning("could not update the modifier fields of %s (%s) — its "
-                            "rows are unchanged; will retry at the next start", name, e)
+                log.warning("could not update the stored rows of %s to the current rules "
+                            "(%s) — its rows are unchanged; will retry at the next start",
+                            name, e)
                 continue
             if n:
                 fixed += 1
                 rows_fixed += n
         if fixed:
-            log.info("updated the modifier / place-of-service fields of %s rows in %d "
-                     "file(s) to the current rules in %.0f s (one time; see the Files "
-                     "tab's data-quality line)", f"{rows_fixed:,}", fixed,
-                     time.monotonic() - t0)
+            log.info("updated %s stored row(s) in %d file(s) to the current rules "
+                     "(modifier / place-of-service fields, future-dated months) in "
+                     "%.0f s — one time; see the Files tab's data-quality line",
+                     f"{rows_fixed:,}", fixed, time.monotonic() - t0)
 
-    def _normalize_part_modifiers(self, name: str) -> int:
-        """One file's part -> current modifier rules. Returns rows changed."""
+    def _normalize_part(self, name: str) -> int:
+        """One file's part -> the current row rules. Returns rows changed."""
         from .catalog import resolve_discipline
         from .modifiers import normalize
+        from .parser import file_month_for, published_month_of
         path = self.rates_dir / f"{file_key(name)}.parquet"
         changed_rows = 0
+        months: dict = {}
         if path.exists():
             src = f"read_parquet('{sql_path(path)}')"
             with self.connect() as con:
                 combos = con.execute(
                     f"SELECT DISTINCT billing_code, billing_code_modifier, service_code "
                     f"FROM {src}").fetchall()
-            mapping = []   # (code, old mods, old pos, new mods, new pos, discipline, split, moved)
+                mrows = con.execute(
+                    f"SELECT DISTINCT last_updated_on, source_file, file_month, "
+                    f"substr(ingested_at, 1, 7) FROM {src}").fetchall()
+            mod_map = []   # (code, old mods, old pos, new mods, new pos, discipline, split, moved)
             for code, mods, pos in combos:
                 mods, pos = list(mods or []), list(pos or [])
                 new_mods, new_pos, split, moved = normalize(mods, pos)
                 if new_mods != mods or new_pos != pos:
-                    mapping.append((code, mods, pos, new_mods, new_pos,
+                    mod_map.append((code, mods, pos, new_mods, new_pos,
                                     resolve_discipline(code, new_mods), split, moved))
-            if mapping:
-                changed_rows = self._rewrite_part_modifiers(name, path, src, mapping)
+            month_map = []  # (header, source_file, old month, ingest month, new month)
+            for hdr, sf, fm, im in mrows:
+                new_fm, future = file_month_for(hdr, sf, im or fm)
+                if future and new_fm != fm:
+                    month_map.append((hdr, sf, fm, im, new_fm))
+                months = {"file_month": new_fm,
+                          "published_month": published_month_of(sf or name, im or fm),
+                          "future_header_date": str(hdr) if future else ""}
+            if mod_map or month_map:
+                changed_rows = self._rewrite_part(name, src, mod_map, month_map,
+                                                  months.get("future_header_date", ""))
         with self.write_lock, self.connect() as con:
-            con.execute("UPDATE files SET modifier_rules = ? WHERE filename = ?",
-                        [MODIFIER_RULES_VERSION, name])
+            con.execute("UPDATE files SET row_rules = ? WHERE filename = ?",
+                        [ROW_RULES_VERSION, name])
+            if months:
+                con.execute("UPDATE files SET file_month = coalesce(file_month, ?), "
+                            "published_month = coalesce(published_month, ?) "
+                            "WHERE filename = ?",
+                            [months["file_month"], months["published_month"], name])
         return changed_rows
 
-    def _rewrite_part_modifiers(self, name: str, path: Path, src: str, mapping: list) -> int:
+    def _rewrite_part(self, name: str, src: str, mod_map: list, month_map: list,
+                      future_header: str) -> int:
         tmp = self.rates_dir / f".{file_key(name)}.{os.getpid()}.parquet.tmp"
-        # a hash join on the (code, modifier list, service-code list) key —
-        # measured 12 s for a 13.5M-row part vs 50 s for a per-row map lookup
+        # hash joins on the rules' inputs — measured 12 s for a 13.5M-row part
+        # vs 50 s for a per-row map lookup
         join = (f"FROM {src} r LEFT JOIN _modfix f ON r.billing_code = f.c "
-                "AND r.billing_code_modifier = f.m AND r.service_code = f.s")
+                "AND r.billing_code_modifier = f.m AND r.service_code = f.s "
+                "LEFT JOIN _monthfix m ON r.file_month = m.fm "
+                "AND r.last_updated_on IS NOT DISTINCT FROM m.h "
+                "AND r.source_file IS NOT DISTINCT FROM m.sf "
+                "AND substr(r.ingested_at, 1, 7) IS NOT DISTINCT FROM m.im")
         with self.connect() as con:
             con.execute("CREATE OR REPLACE TEMP TABLE _modfix (c VARCHAR, m VARCHAR[], "
                         "s VARCHAR[], nm VARCHAR[], ns VARCHAR[], nd VARCHAR, "
                         "split BOOLEAN, moved BOOLEAN)")
-            con.executemany("INSERT INTO _modfix VALUES (?, ?, ?, ?, ?, ?, ?, ?)", mapping)
+            con.execute("CREATE OR REPLACE TEMP TABLE _monthfix (h VARCHAR, sf VARCHAR, "
+                        "fm VARCHAR, im VARCHAR, nfm VARCHAR)")
+            if mod_map:
+                con.executemany("INSERT INTO _modfix VALUES (?, ?, ?, ?, ?, ?, ?, ?)", mod_map)
+            if month_map:
+                con.executemany("INSERT INTO _monthfix VALUES (?, ?, ?, ?, ?)", month_map)
             changed, split_rows, moved_rows = con.execute(
-                f"SELECT count(f.c), count(*) FILTER (WHERE f.split), "
+                f"SELECT count(*) FILTER (WHERE f.c IS NOT NULL OR m.nfm IS NOT NULL), "
+                f"count(*) FILTER (WHERE f.split), "
                 f"count(*) FILTER (WHERE f.moved) {join}").fetchone()
             reader = con.execute(
                 f"""SELECT r.* REPLACE (
                         coalesce(f.nm, r.billing_code_modifier) AS billing_code_modifier,
                         coalesce(f.ns, r.service_code) AS service_code,
-                        coalesce(f.nd, r.discipline) AS discipline) {join}"""
+                        coalesce(f.nd, r.discipline) AS discipline,
+                        coalesce(m.nfm, r.file_month) AS file_month) {join}"""
             ).to_arrow_reader(200_000)
             rows = 0
             tmp.unlink(missing_ok=True)
@@ -1269,6 +1308,7 @@ class Store:
                             RATES_SCHEMA.names).cast(RATES_SCHEMA))
                         rows += batch.num_rows
                 con.execute("DROP TABLE IF EXISTS _modfix")
+                con.execute("DROP TABLE IF EXISTS _monthfix")
             except BaseException:
                 tmp.unlink(missing_ok=True)
                 raise
@@ -1283,6 +1323,7 @@ class Store:
             if isinstance(qa, dict):
                 qa["modifier_split_rows"] = int(split_rows)
                 qa["pos_in_modifier_rows"] = int(moved_rows)
+                qa["future_header_date"] = future_header
                 con.execute("UPDATE files SET qa = ? WHERE filename = ?",
                             [json.dumps(qa), name])
         return int(changed)
@@ -1698,9 +1739,14 @@ class Store:
         con.execute("ALTER TABLE url_queue ADD COLUMN IF NOT EXISTS content_sha VARCHAR")
         # migrate stores created before the "download anyway" size override
         con.execute("ALTER TABLE url_queue ADD COLUMN IF NOT EXISTS force_size BOOLEAN DEFAULT false")
-        # the modifier rules (mrfx/modifiers.py) a file's rows were written
-        # under; older parts are rewritten once at open (_migrate_modifier_fields)
-        con.execute("ALTER TABLE files ADD COLUMN IF NOT EXISTS modifier_rules INTEGER")
+        # the row rules (ROW_RULES_VERSION) a file's rows were written under;
+        # older parts are rewritten once at open (_migrate_row_rules) — plus
+        # the file's month (header rule) and its published month (file name)
+        con.execute("ALTER TABLE files ADD COLUMN IF NOT EXISTS row_rules INTEGER")
+        # the state a Medicare fee-schedule row prices (None: the file didn't say)
+        con.execute("ALTER TABLE mpfs ADD COLUMN IF NOT EXISTS state VARCHAR")
+        con.execute("ALTER TABLE files ADD COLUMN IF NOT EXISTS file_month VARCHAR")
+        con.execute("ALTER TABLE files ADD COLUMN IF NOT EXISTS published_month VARCHAR")
         # bulk "retry failed" rounds a row has been through: _claim_next serves
         # never-retried rows first (fair scheduling)
         con.execute("ALTER TABLE url_queue ADD COLUMN IF NOT EXISTS retries INTEGER DEFAULT 0")
@@ -3307,13 +3353,13 @@ class Store:
             "payer", "file_type", "status", "schema_version", "last_updated_on",
             "size_bytes", "rows_emitted", "ref_groups_skipped", "error",
             "preflight", "qa", "progress", "chunks_done", "chunks_total",
-            "started_at", "finished_at", "modifier_rules",
+            "started_at", "finished_at", "row_rules", "file_month", "published_month",
         }
         fields = {k: v for k, v in fields.items() if k in cols}
         if fields.get("status") == "done":
             # every "done" follows a fresh parse by THIS version's parser, so
-            # its part already follows the current modifier rules
-            fields.setdefault("modifier_rules", MODIFIER_RULES_VERSION)
+            # its part already follows the current row rules
+            fields.setdefault("row_rules", ROW_RULES_VERSION)
         for jcol in ("preflight", "qa"):
             if jcol in fields and not isinstance(fields[jcol], (str, type(None))):
                 fields[jcol] = json.dumps(fields[jcol])
@@ -3766,18 +3812,30 @@ class Store:
 
     # -- MPFS ----------------------------------------------------------------------
 
-    def load_mpfs(self, rows: list[dict], source: str) -> int:
+    def load_mpfs(self, rows: list[dict], source: str, state: str | None = None) -> int:
+        """Load a Medicare fee schedule. With `state` (an official locality
+        import) it REPLACES that state's anchor only — so MO's and KS's
+        localities can both be loaded — plus any older anchor whose locality
+        was never stated (it could have been either). Without a state (the
+        simple CSV) it replaces everything, as before; rows may still carry a
+        per-row "state"."""
+        st = (state or "").strip().upper() or None
         # one transaction: readers (benchmark % of Medicare) must never see the
         # empty instant between the DELETE and the INSERT (no PK on mpfs, so
         # the DuckDB tombstone edge that bit entity_map doesn't apply here)
         with self.write_lock, self.connect() as con:
             con.execute("BEGIN TRANSACTION")
             try:
-                con.execute("DELETE FROM mpfs")
+                if st:
+                    con.execute("DELETE FROM mpfs WHERE state = ? OR state IS NULL", [st])
+                else:
+                    con.execute("DELETE FROM mpfs")
                 if rows:
                     con.executemany(
-                        "INSERT INTO mpfs VALUES (?, ?, ?, ?)",
-                        [[r["code"], r.get("locality", ""), float(r["non_facility_rate"]), source] for r in rows],
+                        "INSERT INTO mpfs (code, locality, non_facility_rate, source, state) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        [[r["code"], r.get("locality", ""), float(r["non_facility_rate"]), source,
+                          (str(r.get("state") or "").strip().upper() or st)] for r in rows],
                     )
                 con.execute("COMMIT")
             except Exception:
@@ -3789,9 +3847,60 @@ class Store:
         return len(rows)
 
     def mpfs_loaded(self) -> str | None:
+        """Every loaded anchor's source line (locality, state, CF), or None."""
         with self.connect() as con:
-            row = con.execute("SELECT any_value(source) FROM mpfs").fetchone()
-        return row[0] if row else None
+            srcs = [r[0] for r in con.execute(
+                "SELECT DISTINCT source FROM mpfs WHERE source IS NOT NULL ORDER BY 1").fetchall()]
+        return "; ".join(srcs) if srcs else None
+
+    def medicare_anchor(self, state: str | None) -> dict:
+        """The Medicare rates a "% of Medicare" may be computed against, for a
+        view or practice in `state`: {"rates": {code: rate}, "label": what was
+        used (locality + source), "refusal": why nothing is shown}.
+
+        One locality's fee schedule applied to another state's practices
+        misstates the percentage (GPCIs differ by state), so:
+        - the state's own anchor when loaded (several localities of that state
+          -> their median, and the label says so);
+        - no state given and exactly one state loaded -> that one, labelled;
+        - an anchor whose file never said its locality -> used, labelled so;
+        - otherwise REFUSED with the reason — never estimated."""
+        st = (state or "").strip().upper() or None
+        with self.connect() as con:
+            rows = con.execute("SELECT state, locality, source, code, non_facility_rate "
+                               "FROM mpfs").fetchall()
+        if not rows:
+            return {"rates": {}, "label": None, "refusal": None}
+        states = sorted({r[0] for r in rows if r[0]})
+        unlabelled = [r for r in rows if not r[0]]
+        if st and st in states:
+            use = [r for r in rows if r[0] == st]
+        elif unlabelled:
+            use = unlabelled
+        elif st:
+            return {"rates": {}, "label": None, "refusal": (
+                f"% of Medicare not shown: the Medicare fee schedule loaded is for "
+                f"{', '.join(states)}, not {st} — load {st}'s locality (Benchmark tab -> "
+                "Load MPFS) to compare.")}
+        elif len(states) == 1:
+            use = rows
+        else:
+            return {"rates": {}, "label": None, "refusal": (
+                "% of Medicare not shown: Medicare fee schedules are loaded for "
+                f"{', '.join(states)} — pick a state (or a practice) so the right "
+                "locality is used.")}
+        by_code: dict[str, list[float]] = {}
+        for r in use:
+            by_code.setdefault(r[3], []).append(r[4])
+        import statistics as _st
+        rates = {c: _st.median(v) for c, v in by_code.items()}
+        locs = sorted({r[1] for r in use if r[1]})
+        label = "; ".join(sorted({r[2] for r in use if r[2]})) or "Medicare fee schedule"
+        if len(locs) > 1:
+            label += f" (median of {len(locs)} localities)"
+        if use is unlabelled:
+            label += " — the loaded file does not say which locality"
+        return {"rates": rates, "label": label, "refusal": None}
 
     # -- reset ------------------------------------------------------------------------
 

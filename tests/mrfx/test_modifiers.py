@@ -1,5 +1,5 @@
 """mrfx/modifiers.py — the modifier-field rule — and the one-time rewrite of
-parts written under the old rule (Store._migrate_modifier_fields)."""
+parts written under the old rule (Store._migrate_row_rules)."""
 
 from __future__ import annotations
 
@@ -111,7 +111,7 @@ def test_old_store_is_fixed_once_at_open_exactly_like_a_reingest(cfg, tmp_path, 
     (cfg.inbox_dir / NAME).write_text(json.dumps(FILE))
     list(scan_inbox(cfg, old))
     with old.connect() as con:
-        con.execute("UPDATE files SET modifier_rules = NULL")
+        con.execute("UPDATE files SET row_rules = NULL")
         con.execute("UPDATE files SET qa = json_object('rows', 8)")
     old.update_rollups_incremental()
     old.close()
@@ -122,8 +122,8 @@ def test_old_store_is_fixed_once_at_open_exactly_like_a_reingest(cfg, tmp_path, 
     st = Store(cfg.store_dir)
     assert _rows(rates) == _rows(ref_cfg.store_dir / "rates")
     with st.connect() as con:
-        rules, qa = con.execute("SELECT modifier_rules, qa FROM files").fetchone()
-    assert rules == 1
+        rules, qa = con.execute("SELECT row_rules, qa FROM files").fetchone()
+    assert rules == 2
     qa = json.loads(qa)
     assert (qa["pos_in_modifier_rows"], qa["modifier_split_rows"], qa["rows"]) == (2, 1, 8)
     assert "Beta Health" in st.meta_get("rollup_pending_payers")
@@ -155,7 +155,7 @@ def test_failed_rewrite_leaves_rows_and_retries_next_start(cfg, monkeypatch, cap
     (cfg.inbox_dir / NAME).write_text(json.dumps(FILE))
     list(scan_inbox(cfg, old))
     with old.connect() as con:
-        con.execute("UPDATE files SET modifier_rules = NULL")
+        con.execute("UPDATE files SET row_rules = NULL")
     old.close()
     monkeypatch.undo()
     rates = cfg.store_dir / "rates"
@@ -163,18 +163,18 @@ def test_failed_rewrite_leaves_rows_and_retries_next_start(cfg, monkeypatch, cap
 
     def boom(*a, **k):
         raise OSError("disk full")
-    monkeypatch.setattr(Store, "_rewrite_part_modifiers", boom)
+    monkeypatch.setattr(Store, "_rewrite_part", boom)
     with caplog.at_level("WARNING"):
         st = Store(cfg.store_dir)
     assert "will retry at the next start" in caplog.text
     assert _rows(rates) == before
     assert not list(rates.glob(".*.tmp"))
     with st.connect() as con:
-        assert con.execute("SELECT modifier_rules FROM files").fetchone()[0] is None
+        assert con.execute("SELECT row_rules FROM files").fetchone()[0] is None
     st.close()
     monkeypatch.undo()
     st = Store(cfg.store_dir)
     with st.connect() as con:
-        assert con.execute("SELECT modifier_rules FROM files").fetchone()[0] == 1
+        assert con.execute("SELECT row_rules FROM files").fetchone()[0] == 2
     assert _rows(rates) != before
     st.close()

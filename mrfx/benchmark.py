@@ -225,6 +225,28 @@ def _rates_relation(market: dict, prefilter: str = "") -> str:
     return f"(SELECT * FROM {base} t0{where})" if prefilter else base
 
 
+def anchor_state(store: Store, market: dict, tins: list[str] | None = None) -> str | None:
+    """The state whose Medicare locality a % of Medicare should use: the
+    market's state if set, else the main state of the subject's practice(s)
+    (tin_directory.primary_state, most common among its TINs, ties
+    alphabetical), else None."""
+    st = (market or {}).get("state")
+    if st:
+        return str(st).upper()
+    if not tins:
+        return None
+    try:
+        with store.connect() as con:
+            row = con.execute(
+                "SELECT primary_state FROM tin_directory WHERE tin_value IN "
+                "(SELECT unnest(?::VARCHAR[])) AND primary_state IS NOT NULL "
+                "GROUP BY primary_state ORDER BY count(*) DESC, primary_state LIMIT 1",
+                [list(tins)]).fetchone()
+    except Exception:  # noqa: BLE001 — no directory yet: no state context
+        return None
+    return row[0] if row else None
+
+
 def month_label(month) -> str:
     """Human/report label for an as-of value."""
     return ("latest available (newest file per contract)"
@@ -543,13 +565,11 @@ def compute_benchmark(store: Store, subject: str, market: dict) -> dict:
         cur = con.execute(sql, [subject_tins, *params, *peer_params])
         cols = [d[0] for d in cur.description]
         rows = [dict(zip(cols, r)) for r in cur.fetchall()]
-        # median across loaded localities: a national PFS extract carries
-        # 100+ localities per code, and any_value() anchored "% of Medicare"
-        # to whichever locality DuckDB scanned first (nondeterministic)
-        mpfs = dict(con.execute(
-            "SELECT code, median(non_facility_rate) FROM mpfs GROUP BY code"
-        ).fetchall())
-        mpfs_source = store.mpfs_loaded()
+    # the Medicare anchor for the market's state, else the subject practice's
+    # main state (store.medicare_anchor) — REST OF MISSOURI applied to a
+    # Kansas client misstated every % (and the Explorer showed it bare)
+    anchor = store.medicare_anchor(anchor_state(store, market, subject_tins))
+    mpfs, mpfs_source = anchor["rates"], anchor["label"]
 
     target = int(market.get("target_percentile", 50))
     if target not in PERCENTILES:
@@ -580,6 +600,7 @@ def compute_benchmark(store: Store, subject: str, market: dict) -> dict:
         "rows": rows,
         "mpfs_loaded": bool(mpfs),
         "mpfs_source": mpfs_source,
+        "mpfs_refusal": anchor["refusal"],
         "basis_note": BASIS_NOTE + (
             f" [assistant rows INCLUDED by explicit toggle: {BASE_ASSISTANT_RULE_TEXT}]"
             if include_assistant else ""
@@ -1200,10 +1221,11 @@ def compute_rate_proposal(store: Store, subject: str, payer: str, market: dict,
         if not comp.get("mpfs_loaded"):
             raise BenchmarkError("a % of Medicare target needs the MPFS loaded "
                                  "(Benchmark tab -> Load MPFS)")
-        with store.connect() as con:
-            mpfs = dict(con.execute(
-                "SELECT code, median(non_facility_rate) FROM mpfs GROUP BY code"
-            ).fetchall())
+        anchor = store.medicare_anchor(
+            anchor_state(store, market, resolve_subject_tins(store, subject)))
+        if anchor["refusal"]:
+            raise BenchmarkError(anchor["refusal"])
+        mpfs = anchor["rates"]
 
     volumes = clean_volumes(volumes)
     basis_label = {"p50": f"{payer}'s median", "p75": f"{payer}'s p75",
@@ -1555,9 +1577,11 @@ def methodology_footer(store: Store, benchmark: dict) -> str:
     ]
     if benchmark.get("mpfs_loaded"):
         lines.append(
-            "% of Medicare anchor: the MEDIAN non-facility rate across all "
-            f"localities in the loaded MPFS extract ({benchmark.get('mpfs_source')}) — "
-            "not your specific locality's fee schedule.")
+            "% of Medicare anchor: the non-facility Medicare rate of "
+            f"{benchmark.get('mpfs_source')} — chosen for the market's state, else "
+            "the practice's main state; a state with no loaded locality shows no %.")
+    elif benchmark.get("mpfs_refusal"):
+        lines.append(benchmark["mpfs_refusal"])
     return "\n".join(lines)
 
 

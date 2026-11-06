@@ -189,6 +189,7 @@ class QaCounters:
     prices: int = 0                   # readable prices seen (denominator for price-level shares)
     modifier_split_rows: int = 0      # rows whose modifier element held several ("52,53" -> 52|53)
     pos_in_modifier_rows: int = 0     # rows whose "modifiers" were place-of-service codes (moved)
+    future_header_date: str = ""      # header last_updated_on later than the day the file was read
     rows: int = 0
 
     def to_dict(self) -> dict:
@@ -207,6 +208,7 @@ class ParseResult:
     embedded_refs: dict[int, list[PGroup]] = field(default_factory=dict)
     qa: QaCounters = field(default_factory=QaCounters)
     source_file: str | None = None
+    ingest_month: str | None = None   # UTC month the file was read (from ingested_at)
 
     @property
     def file_month(self) -> str:
@@ -220,24 +222,55 @@ class ParseResult:
         regex used to run millions of times per file for a file-constant
         value. The cache key recomputes if last_updated_on/source_file
         change (the header-at-EOF case), so the value stays correct."""
-        key = (self.last_updated_on, self.source_file)
+        key = (self.last_updated_on, self.source_file, self.ingest_month)
         if getattr(self, "_fm_key", None) != key:
             self._fm_key = key
             self._fm = self._compute_file_month()
         return self._fm
 
     def _compute_file_month(self) -> str:
-        for candidate in (self.last_updated_on, self.source_file):
-            # constrain the month to 01-12 INSIDE the pattern (not as a post
-            # check): a junk token like '2024_20' (month 20) in
-            # 'plan_2024_2025-03_rates.json' then fails the regex, and the
-            # engine continues to the real '2025-03' that OVERLAPS it. A plain
-            # first-match-then-validate would consume the '20' of '2025' and
-            # miss the valid date entirely. Also rejects '2024-13'.
-            m = re.search(r"(20\d{2})[-_](0[1-9]|1[0-2])", str(candidate or ""))
-            if m:
-                return f"{m.group(1)}-{m.group(2)}"
-        return dt.date.today().strftime("%Y-%m")
+        im = self.ingest_month or dt.datetime.now(dt.timezone.utc).strftime("%Y-%m")
+        month, future = file_month_for(self.last_updated_on, self.source_file, im)
+        self.qa.future_header_date = str(self.last_updated_on) if future else ""
+        return month
+
+
+_MONTH_RE = re.compile(r"(20\d{2})[-_](0[1-9]|1[0-2])")
+
+
+def month_in(v) -> str | None:
+    """'YYYY-MM' found in a header date or a file name. The month is
+    constrained to 01-12 INSIDE the pattern (not as a post check): a junk token
+    like '2024_20' (month 20) in 'plan_2024_2025-03_rates.json' then fails, and
+    the engine continues to the real '2025-03' that OVERLAPS it. Rejects
+    '2024-13'."""
+    m = _MONTH_RE.search(str(v or ""))
+    return f"{m.group(1)}-{m.group(2)}" if m else None
+
+
+def file_month_for(last_updated_on, source_file, ingest_month: str) -> tuple[str, bool]:
+    """(file_month, header_was_in_the_future) — THE month rule, shared by the
+    parser and the one-time fix of rows already stored (a pure function of
+    stored columns: last_updated_on, source_file, ingested_at's month).
+
+    The month is the payer's own statement of vintage — the header's
+    last_updated_on — else the file name's date, else the month it was read.
+    A header dated AFTER the month the file was read cannot be its vintage
+    (measured: a UHC HEALTHSCOPE file read 2026-11-05 says 2026-12-01; the
+    Months list offered December in November and "latest" preferred it, and
+    when the real December file arrived the two would have pooled as one
+    month): it is filed under the file name's month, else the month read."""
+    hdr, name = month_in(last_updated_on), month_in(source_file)
+    if hdr and hdr > ingest_month:
+        return (name if name and name <= ingest_month else ingest_month), True
+    return hdr or name or ingest_month, False
+
+
+def published_month_of(source_file, ingest_month: str) -> str:
+    """The month a file was PUBLISHED, as its name says (index / file date),
+    else the month it was read — shown beside file_month, because payers'
+    clocks differ (BCBS MS's October files carry a 2026-08-25 header)."""
+    return month_in(source_file) or ingest_month
 
 
 def parse_provider_group(pg: dict, qa: QaCounters | None = None) -> PGroup:
@@ -488,6 +521,7 @@ class InNetworkParser:
         self._refs_complete = False
         self._deferred: list[_DeferredGroup] = []
         self._ingested_at = dt.datetime.now(dt.timezone.utc).isoformat()
+        self.result.ingest_month = self._ingested_at[:7]
         self._remote_rids: set[int] = set()
         self._strings: dict = {}   # shared NPI/TIN strings for kept references
         # therapy_only_ingest: keep only PT/OT/SLP-provider rows. The set of

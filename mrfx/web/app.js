@@ -809,7 +809,8 @@ async function loadSummary() {
     const note = $("#summary-strip-note");
     if (note) note.textContent =
       "Min · P25 · Median · P75 · Max span every matched code together; per-code medians are in the table below.";
-    renderByCode($("#summary-bycode"), s.by_code, s.mpfs_loaded, s.by_code_basis);
+    renderByCode($("#summary-bycode"), s.by_code, s.mpfs_loaded, s.by_code_basis,
+                 s.medicare_anchor, s.medicare_refusal);
   } catch (e) {
     // Don't blank silently: a 503 here is almost always the summary's exact
     // aggregates hitting the memory cap on a big unfiltered view. Say so and
@@ -839,7 +840,7 @@ async function loadSummary() {
 // Per-code breakdown of the current filter — the strip's one blended median
 // mixes different services (97110 vs 97530), so give a real median + spread PER
 // code, with a below-Medicare flag when an MPFS anchor is loaded.
-function renderByCode(el, rows, mpfs, basis) {
+function renderByCode(el, rows, mpfs, basis, anchor, refusal) {
   if (!el) return;
   if (!rows || rows.length < 2) { el.innerHTML = ""; return; }  // one code: strip is enough
   const body = rows.map((c) => `<tr>
@@ -852,7 +853,7 @@ function renderByCode(el, rows, mpfs, basis) {
     <div class="tablewrap" style="max-height:34vh"><table>
       <thead><tr><th>Code</th><th class="num">Median</th><th class="num">P25–P75</th>${mpfs ? `<th class="num">% of Medicare</th>` : ""}<th class="num">Practices</th></tr></thead>
       <tbody>${body}</tbody></table></div>
-    <div class="muted" style="margin-top:4px">Per code: each practice's own median first, then the spread across practices — the Benchmark's basis: ${esc(basis || "")}.</div></div>`;
+    <div class="muted" style="margin-top:4px">Per code: each practice's own median first, then the spread across practices — the Benchmark's basis: ${esc(basis || "")}.${anchor ? ` % of Medicare vs ${esc(anchor)}.` : ""}${refusal ? ` <span class="warn-text">${esc(refusal)}</span>` : ""}</div></div>`;
 }
 
 const refresh = () => { loadRates(); loadSummary(); };
@@ -1267,7 +1268,8 @@ async function selectCpt(code) {
     (cptState ? ` · ${cptState}` : "") +
     (info.timed ? " (timed 15-min units)" : "") +
     (d.as_of === "latest" ? " · newest file per contract" : (d.as_of ? ` · ${d.as_of}` : ""));
-  renderPayerRank($("#cpt-payer-rank"), d.payer_rank, d.mpfs_rate, d.payer_rank_basis);
+  renderPayerRank($("#cpt-payer-rank"), d.payer_rank, d.mpfs_rate, d.payer_rank_basis,
+                  d.medicare_anchor, d.medicare_refusal);
   renderHistogram($("#cpt-hist"), d.histogram, code);
   renderTrend($("#cpt-trend"), trend.rows);
   if (!d.ranked.length) {
@@ -1291,7 +1293,7 @@ async function selectCpt(code) {
 }
 
 // Payer leaderboard for one code: who pays best, with spread + confidence.
-function renderPayerRank(el, rows, mpfsRate, basis) {
+function renderPayerRank(el, rows, mpfsRate, basis, anchor, refusal) {
   if (!el) return;
   if (!rows || !rows.length) { el.innerHTML = ""; return; }
   const mp = rows.some((r) => r.pct_medicare != null);
@@ -1309,7 +1311,7 @@ function renderPayerRank(el, rows, mpfsRate, basis) {
     <div class="tablewrap" style="max-height:34vh"><table>
       <thead><tr><th>Payer</th><th class="num">Median</th><th class="num">P25–P75</th>${mp ? `<th class="num">% of Medicare</th>` : ""}<th class="num">Practices</th></tr></thead>
       <tbody>${body}</tbody></table></div>
-    <div class="muted" style="margin-top:4px">One row per payer — the median across the distinct practices it prices for this code (each practice's own median first; same basis as the Benchmark: ${esc(basis || "")}). ⚠ marks a thin sample (&lt;5 practices).</div></div>`;
+    <div class="muted" style="margin-top:4px">One row per payer — the median across the distinct practices it prices for this code (each practice's own median first; same basis as the Benchmark: ${esc(basis || "")}).${anchor ? ` Medicare = ${esc(anchor)}.` : ""}${refusal ? ` <span class="warn-text">${esc(refusal)}</span>` : ""} ⚠ marks a thin sample (&lt;5 practices).</div></div>`;
 }
 
 function renderTrend(el, rows) {
@@ -1642,7 +1644,7 @@ function renderBenchmark(out, bench, opp) {
       <tbody>${rows}</tbody></table></div>
     ${oppHtml}
     <div id="b-quality"></div>
-    <div class="bench-note">${esc(bench.basis_note)}${spreadNote} Ghost rates: a published rate does not mean a
+    <div class="bench-note">${esc(bench.basis_note)}${bench.mpfs_source ? ` % of Medicare vs ${esc(bench.mpfs_source)}.` : ""}${bench.mpfs_refusal ? ` <span class="warn-text">${esc(bench.mpfs_refusal)}</span>` : ""}${spreadNote} Ghost rates: a published rate does not mean a
     peer bills that code — scoping the market to a discipline or code list mitigates this
     (the market definition above shows which filters were actually applied). A published rate
     is not proof a peer collects it — this is directional market positioning.</div>`;
@@ -3769,6 +3771,7 @@ function qaLine(qa) {
   if (qa.multi_code_fields) bits.push(`<span class="bad">${fmtInt(qa.multi_code_fields)} multi-code fields</span>`);
   if (qa.tin_is_really_npi_rows) bits.push(`${fmtInt(qa.tin_is_really_npi_rows)} TIN=NPI`);
   if (qa.pos_in_modifier_rows) bits.push(`<span title="This payer put place-of-service codes (11 office, 22 outpatient hospital, ...) in the modifier field. MRF Explorer moved them to place of service, so these rates count as base (no modifier).">${fmtInt(qa.pos_in_modifier_rows)} POS codes moved out of modifiers</span>`);
+  if (qa.future_header_date) bits.push(`<span class="warn" title="The payer dated this file ${esc(qa.future_header_date)} — later than the day it was read — so it is filed under the month in its name (or the month it was read) instead.">dated in the future (${esc(String(qa.future_header_date).slice(0, 10))})</span>`);
   if (qa.modifier_split_rows) bits.push(`<span title="This payer wrote two modifiers as one (e.g. &quot;52,53&quot;). MRF Explorer split them.">${fmtInt(qa.modifier_split_rows)} combined modifiers split</span>`);
   if (qa.duplicate_explosion_ratio > 1.5) bits.push(`<span class="warn">${qa.duplicate_explosion_ratio}x dup</span>`);
   return bits.length
@@ -3812,7 +3815,7 @@ async function loadFiles() {
       : "";
     return `<tr>
       <td>${esc(f.filename)}</td>
-      <td>${esc(f.payer || "?")}</td>
+      <td>${esc(f.payer || "?")}${f.file_month ? `<div class="sub" title="Rates month = the payer's own date in the file (last_updated_on). Published = the date in the file's name. Payers' clocks differ, so these can disagree.">rates month ${esc(f.file_month)}${f.published_month && f.published_month !== f.file_month ? ` · published ${esc(f.published_month)}` : ""}</div>` : ""}</td>
       <td>${esc(f.file_type || "?")}${f.schema_version && !String(f.schema_version).startsWith("2.") ? ` <span class="warn-text">v${esc(f.schema_version)}</span>` : ""}</td>
       <td><span class="badge ${esc(f.status)}">${esc(f.status)}</span>${statusExtra}${progressBar}</td>
       <td class="num">${fmtInt(f.rows_emitted)}</td>

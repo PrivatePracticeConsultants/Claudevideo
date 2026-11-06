@@ -26,6 +26,7 @@ import statistics
 from . import __version__
 from .benchmark import (
     BASIS_NOTE,
+    anchor_state,
     COLLECTION_NOTE,
     GHOST_RATE_NOTE,
     BenchmarkError,
@@ -102,10 +103,10 @@ def compute_fee_schedule(store: Store, subject: str, market: dict) -> dict:
     with store.connect() as con:
         cur = con.execute(sql, [subject_tins, *subject_params])
         raw = [dict(zip([d[0] for d in cur.description], r)) for r in cur.fetchall()]
-        mpfs = dict(con.execute(
-            "SELECT code, median(non_facility_rate) FROM mpfs GROUP BY code"
-        ).fetchall())
-        mpfs_source = store.mpfs_loaded()
+        # Medicare locality for the market's state, else the subject's main
+        # state (store.medicare_anchor: refused, not borrowed, on a mismatch)
+        anchor = store.medicare_anchor(anchor_state(store, market, subject_tins))
+        mpfs, mpfs_source = anchor["rates"], anchor["label"]
 
         # For each (payer, code) the subject is priced on, what does THAT payer
         # pay the subject's PEERS for the same code — the median across every
@@ -200,6 +201,7 @@ def compute_fee_schedule(store: Store, subject: str, market: dict) -> dict:
         "codes": codes,
         "mpfs_loaded": bool(mpfs),
         "mpfs_source": mpfs_source,
+        "mpfs_refusal": anchor["refusal"],
         "basis_note": BASIS_NOTE,
     }
 
@@ -328,9 +330,11 @@ def _methodology(store: Store, fee_schedule: dict) -> str:
     ]
     if fee_schedule.get("mpfs_loaded"):
         lines.append(
-            "% of Medicare anchor: the MEDIAN non-facility rate across all "
-            f"localities in the loaded MPFS extract ({fee_schedule.get('mpfs_source')}) — "
-            "not your specific locality's fee schedule.")
+            "% of Medicare anchor: the non-facility Medicare rate of "
+            f"{fee_schedule.get('mpfs_source')} — chosen for the market's state, else "
+            "the practice's main state; a state with no loaded locality shows no %.")
+    elif fee_schedule.get("mpfs_refusal"):
+        lines.append(fee_schedule["mpfs_refusal"])
     return "\n".join(lines)
 
 

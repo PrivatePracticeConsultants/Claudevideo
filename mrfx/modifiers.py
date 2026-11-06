@@ -34,10 +34,10 @@ from __future__ import annotations
 import re
 from itertools import combinations
 
-# Bumped whenever the normalization below changes what a stored row looks like:
-# parts written under an older rule are rewritten once at store open (see
-# Store._migrate_modifier_fields) — a pure function of the stored columns.
-MODIFIER_RULES_VERSION = 1
+# A change to the normalization below changes what a stored row looks like:
+# bump store.ROW_RULES_VERSION so parts written under the older rule are
+# rewritten once at store open (Store._migrate_row_rules) — a pure function of
+# the stored columns.
 
 # Level I CPT numeric modifiers in use (AMA CPT Appendix A; 21 was deleted in
 # 2013, 09950-style 5-digit forms are obsolete). Anything 2-digit NOT in here
