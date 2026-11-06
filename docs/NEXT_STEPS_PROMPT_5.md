@@ -10,6 +10,54 @@ and whether the database engine does what the code assumes. Every item below
 carries the measurement or reproduction that found it; nothing is listed on
 suspicion. Copy everything below the line into a fresh session on this repo.
 
+> **STATUS (round 5 executed, Nov 6 2026; version 0.5.0).** Commits
+> `0aefccf`, `bef93c9`, `4628f62`, `ce7479c` and the docs/quick-list commit
+> after them; each message carries its numbers.
+> - P0.1 done: both `.bat` files run `".venv\Scripts\python.exe" -m mrfx` from
+>   their own folder; `mrfx update` re-links with `pip --no-build-isolation`
+>   (setuptools pinned) and checks where the typed command really imports
+>   from. Proven offline in a fresh venv: renaming the folder reproduces the
+>   user's "No module named 'mrfx'"; `python -m mrfx` from the renamed folder
+>   works; the new re-link succeeds offline, the old one fails
+>   (`tests/mrfx/test_install_paths.py`).
+> - P1.1 done: idle `mrfx serve` 7.0% -> 0.4% of a core (422 -> 24 jiffies /
+>   60 s); idle queue threads open <= 3 connections in 3 s (was ~90); a new
+>   link is claimed 17 ms after it is added (`tests/mrfx/test_queue_signal.py`).
+> - P1.2 answered: DuckDB 1.5.5 AND 1.5.6 lose every row an `INSERT … ORDER BY`
+>   of more than one row group adds after an EMPTY CTAS in the same
+>   transaction, until a CHECKPOINT — which fails while any other connection
+>   writes. 2.0.0 is fixed. The sliced build now creates its tables from
+>   explicit DDL: 0 -> 308,104 of 308,104 spine rows visible with a write held
+>   open (`tests/mrfx/test_rollup_visibility.py`).
+> - P1.3 decided (b): the Explorer keeps its pooled default (round-2 month
+>   contract); the strip read off the bare spine is cached per data
+>   generation. 99M rates: revisiting the Explorer 8.44 -> 0.02 s (cold first
+>   look 9.5–9.8 s, unchanged); named store 0.34 s cold either way.
+> - P1.4 done for SELECTIVE filters (state, city, name / partial-ID search):
+>   practices found first, then their rows (`_tin_rows_by_unit`). 99M rates:
+>   city 5.27 -> 2.09 s, name 5.49 -> 2.52 s, state 5.15 -> 3.08 s (table);
+>   therapy-only alone keeps the join filter (finding practices first cost
+>   0.77 -> 1.41 s when nearly all pass). Identical relation, every row and
+>   column, for 21 cases on the named store; `tests/mrfx/test_unit_filters.py`.
+> - Leads tab (asked for in this round): known-answer tests for every output
+>   (`tests/mrfx/test_known_answer_leads.py`) found and fixed the worst-payer
+>   scope, the closures panel rendering into the Clients tab (duplicate id),
+>   the dossier's always-blank weakest-payer columns and mean-as-median, the
+>   leverage label, and an all-code payer median under a one-code heading.
+> - P2: TIN->ZIP side table NOT built — ZIP placement reads `npi_directory`
+>   live and enrichment changes it between directory rebuilds, so a side table
+>   would lag new names; leverage/dossier stay 3.8 / 5.2 s on the named store.
+>   Quantile memory: covered by P1.3 (b). Quick list regenerated from a --durations=0 run of the full suite (866 passed, 12.5 min): `pytest -m quick` = 497 tests in 2 min 48 s.
+> - P3: histogram gutter fixed (label -6 px -> +10 px) and empty buckets now
+>   drawn (the axis had squeezed $85.72 next to $300.03); httpx2 recorded
+>   beside the starlette pin, not installed (requirements.txt installs on the
+>   user's PC).
+> - Snapshots, named store, every dashboard endpoint, before vs after the Explorer
+>   commit: 118 of 125 byte-identical; the 7 others are Code pages whose only
+>   change is the added empty histogram buckets (every non-empty bucket equal).
+> - Not measured: Windows (all numbers are Linux); P1.1 under the real
+>   20,000-link queue; the 300M real store (99M synthetic stands in).
+
 ---
 
 You are picking up MRF Explorer (`mrfx/`). Read `CLAUDE.md`, then

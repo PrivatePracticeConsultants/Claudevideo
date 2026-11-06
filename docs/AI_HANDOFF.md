@@ -535,7 +535,8 @@ retry button reachable.
 ## Step 7 — Test and verify like the history did
 
 - `.venv/bin/python -m pytest tests/ -q -m quick` — the ~3-min inner loop
-  (503 of 670 tests; the >= 0.8 s ones are listed in `tests/slow_tests.txt`).
+  (497 of 866 tests, 2 min 48 s on Nov 6 2026; the >= 0.5 s ones are listed in
+  `tests/slow_tests.txt` — regenerate it from a `--durations=0` run).
   Run the full suite before every commit that touches numbers.
 - `tests/mrfx/test_known_answer.py` — the hand-computed end-to-end answer
   check (ingest -> rollups -> API -> CSV/ZIP, masking, month rules). If a
