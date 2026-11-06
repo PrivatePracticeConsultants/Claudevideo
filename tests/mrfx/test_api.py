@@ -257,6 +257,11 @@ def test_entity_detail_and_code_views(client):
     assert c["timed"] is True
     assert c["ranked"][0]["median_rate"] >= c["ranked"][-1]["median_rate"]
     assert sum(b["n"] for b in c["histogram"]) == 4
+    # one entry per bucket, empty ones included: evenly spaced bars must mean
+    # evenly spaced dollars
+    steps = {round(b["bucket"] - a["bucket"], 6)
+             for a, b in zip(c["histogram"], c["histogram"][1:])}
+    assert len(steps) <= 1 and len(c["histogram"]) <= 21
 
 
 def test_csv_export_matches_view_exactly(client):

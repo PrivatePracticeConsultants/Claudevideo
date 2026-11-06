@@ -19,6 +19,10 @@ setuptools==80.9.0
 fastapi==0.141.1
 # pinned explicitly: transitive via fastapi, and the web layer's CVEs land here
 starlette==1.6.0
+# ^ its test client prefers `httpx2` and, without it, falls back to httpx with a
+#   DeprecationWarning (seen on every suite run). Not added here: this file also
+#   installs on the user's PC and the app itself needs only httpx. Before ANY
+#   starlette bump, add httpx2 (2.16.0 on PyPI, Nov 2026) or the tests stop importing.
 uvicorn==0.35.0
 watchfiles==1.2.0
 python-multipart==0.0.32

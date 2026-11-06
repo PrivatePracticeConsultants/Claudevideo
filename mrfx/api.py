@@ -119,9 +119,20 @@ _THERAPY_N = therapy_taxonomy_sql("n.taxonomy_code")     # NPI grain
 # directory). Split into projection + joins so the table endpoint can attach them
 # AFTER sorting+limiting the base rows to one page — joining 100 rows instead of
 # the whole store (see api.rates()'s late-join path). `t` is the base relation.
+# The PRACTICE-level columns: each reads only t.tin_value / t.tin_is_really_npi
+# and the three dimension tables, so it is constant across a practice's rows.
+# One definition, used by the full projection and by the unit lookup that
+# filters on them (_tin_rows_by_unit) — the two must never disagree.
+_UNIT_COLS = {
+    "display_name": f"coalesce(em.entity_name, td.display_name, nn.org_name, {_TIN_LABEL_SQL})",
+    "states": "coalesce(td.states, CASE WHEN nn.state IS NULL THEN [] ELSE [nn.state] END)",
+    "cities": "coalesce(td.cities, CASE WHEN nn.city IS NULL THEN [] ELSE [nn.city] END)",
+    # PT/OT/SLP practice? from tin_directory (EIN TINs) or, for an NPI-in-the-
+    # TIN-slot row, that NPI's own taxonomy.
+    "is_therapy": f"coalesce(td.is_therapy, {_THERAPY_NN}, FALSE)",
+}
 _TIN_PROJECTION = f"""
-    coalesce(em.entity_name, td.display_name, nn.org_name,
-             {_TIN_LABEL_SQL}) AS display_name,
+    {_UNIT_COLS["display_name"]} AS display_name,
     t.tin_value AS unit_id, t.tin_value,
     em.entity_name IS NOT NULL AS is_mapped_entity,
     t.tin_is_really_npi,
@@ -130,11 +141,9 @@ _TIN_PROJECTION = f"""
     t.modifier_set, t.billing_class, t.service_code_set, t.file_month,
     t.negotiated_rate, t.negotiated_type, t.is_dollar_rate,
     t.source_count, t.source_files, t.schema_version, t.last_updated_on,
-    coalesce(td.states, CASE WHEN nn.state IS NULL THEN [] ELSE [nn.state] END) AS states,
-    coalesce(td.cities, CASE WHEN nn.city IS NULL THEN [] ELSE [nn.city] END) AS cities,
-    -- PT/OT/SLP practice? from tin_directory (EIN TINs) or, for an NPI-in-the-
-    -- TIN-slot row, that NPI's own taxonomy.
-    coalesce(td.is_therapy, {_THERAPY_NN}, FALSE) AS is_therapy,
+    {_UNIT_COLS["states"]} AS states,
+    {_UNIT_COLS["cities"]} AS cities,
+    {_UNIT_COLS["is_therapy"]} AS is_therapy,
     -- for the entity key only (see _ENTITY_KEY_SQL): is the display name an
     -- ORGANIZATION's (an NPI-2), and the practice's main state
     coalesce(td.entity_kind = 'org', nn.entity_type = 'NPI-2', FALSE) AS name_is_org,
@@ -156,6 +165,33 @@ _TIN_JOINS = """
     LEFT JOIN npi_directory nn ON nn.npi = CASE WHEN t.tin_is_really_npi THEN t.tin_value END
 """
 _TIN_REL = f"SELECT {_TIN_PROJECTION} FROM rates_by_tin t {_TIN_JOINS}"
+
+
+def _tin_rows_by_unit(where_key: str, where_unit: str, latest: bool) -> str:
+    """The TIN relation's rows whose contract passes `where_key` and whose
+    PRACTICE passes `where_unit` — the same rows as
+    `SELECT * FROM (_TIN_REL[_LATEST]) WHERE key AND unit`, found the other way
+    round. Joining the three dimension tables onto every spine row and only
+    then testing state / city / therapy / a name was most of a filtered
+    Explorer view's cost (round 5, P1.4: a state filter 2.9 s and a name
+    search 3.9 s at 99M rates). Here the practice columns are computed once
+    per (tin_value, tin_is_really_npi) — from _UNIT_COLS, the projection's own
+    expressions — the passing practices are found, and only their rows are
+    read and joined. Binds the key params, then the unit params (bucket order)."""
+    spine = "rates_by_tin WHERE " + ("is_latest AND " if latest else "") + where_key
+    unit_cols = ", ".join(f"{sql} AS {name}" for name, sql in _UNIT_COLS.items())
+    return f"""
+        WITH k AS NOT MATERIALIZED (SELECT * FROM {spine}),
+        u AS (
+            SELECT tin_value, tin_is_really_npi FROM (
+                SELECT t.tin_value, t.tin_value AS unit_id, t.tin_is_really_npi,
+                       {unit_cols}
+                FROM (SELECT DISTINCT tin_value, tin_is_really_npi FROM k) t {_TIN_JOINS})
+            WHERE {where_unit})
+        SELECT {_TIN_PROJECTION}
+        FROM k t SEMI JOIN u ON u.tin_value = t.tin_value
+                            AND u.tin_is_really_npi = t.tin_is_really_npi
+        {_TIN_JOINS}"""
 # each contract's newest month only: the spine's stored flag (store.SPINE_QUERY)
 # — a filter DuckDB applies in the scan, under the joins
 _TIN_REL_LATEST = _TIN_REL + " WHERE t.is_latest"
@@ -373,6 +409,12 @@ class FilterSet:
         # name/geo joins (states, cities, display_name). The table endpoint can
         # take its fast late-join path only when this stays False.
         self.uses_dim_cols = False
+        # a practice attribute that usually keeps a SMALL share of practices
+        # (state, city, a name or partial-ID search): rel_sql then finds those
+        # practices first (_tin_rows_by_unit). "Therapy practices only" alone
+        # keeps most of a therapy store — listing practices first only added
+        # a scan there (99M rates: 0.77 -> 1.41 s), so it stays a join filter.
+        self.selective_dims = False
 
         def add(desc_key, desc_val):
             self.described[desc_key] = desc_val
@@ -423,10 +465,12 @@ class FilterSet:
             put("unit", "list_contains(states, ?)", qp["state"].upper())
             add("state", qp["state"].upper())
             self.uses_dim_cols = True  # `states` is a joined column
+            self.selective_dims = True
         if qp.get("city"):
             put("unit", "len(list_filter(cities, c -> upper(c) = upper(?))) > 0", qp["city"])
             add("city", qp["city"])
             self.uses_dim_cols = True  # `cities` is a joined column
+            self.selective_dims = True
         if qp.get("month"):
             if str(qp["month"]).strip().lower() == "latest":
                 # the report tabs' "latest" sentinel is not a real file_month —
@@ -458,6 +502,7 @@ class FilterSet:
                 self.ident_kind = "npi" if len(ident) == 10 else "tin"
             else:   # a partial number while typing
                 put("ident", "(unit_id LIKE ? OR tin_value LIKE ?)", f"%{ident}%", f"%{ident}%")
+                self.selective_dims = True
             add("search", q)
             # unit_id is a projected name (tin_value / npi / entity), not a
             # base-table column: keep the TIN grain off the late-join path
@@ -467,6 +512,7 @@ class FilterSet:
                 f"%{q}%", f"%{q}%", f"%{q}%")
             add("search", q)
             self.uses_dim_cols = True  # searches display_name (a joined column)
+            self.selective_dims = True
         dollar_only = qp.get("dollar_only", "1") not in ("0", "false")
         if dollar_only:
             # exclude $0/$0.01/negative DOLLAR placeholders here too, so the
@@ -523,6 +569,10 @@ class FilterSet:
         add("hide_outliers", f"ON — {OUTLIER_RULE}" if self.hide_outliers else "off")
         self.where = self.where_of("key", "unit", "ident", "row")
         self.params = [p for k in ("key", "unit", "ident", "row") for p in self._buckets[k][1]]
+
+    def has(self, kind: str) -> bool:
+        """Whether any clause landed in bucket `kind`."""
+        return bool(self._buckets[kind][0])
 
     def where_of(self, *kinds: str) -> str:
         """AND of the named buckets' clauses, in the canonical bucket order
@@ -601,16 +651,28 @@ def rel_sql(grain: str, fs: FilterSet) -> str:
         if fs.ident_kind:
             return w.replace(_IDENT_TOKEN, f"({_ident_clause(grain, fs.ident_kind)})")
         return w
+    # a selective practice-attribute filter (state, city, a name or partial-ID
+    # search) finds its practices first, then reads only their rows; an exact
+    # ID alone stays a plain spine predicate (pushed into the scan already),
+    # and so does "therapy only" alone (see FilterSet.selective_dims)
+    by_unit = fs.selective_dims and grain in ("tin", "entity")
     if grain == "entity":
         # member TINs are filtered by contract and practice attributes FIRST —
         # a state=MO filter keeps the entity's MO TINs, not every TIN of an
         # entity that has one MO TIN (that showed a MO+KS blend under "MO") —
         # and, under latest, each member is reduced to ITS newest month before
         # the member rates are combined
-        tin_rel = _TIN_REL_LATEST if fs.latest_only else _TIN_REL
-        inner = f"SELECT * FROM ({tin_rel}) WHERE {fs.where_of('key', 'unit')}"
+        if by_unit and fs.has("unit"):
+            inner = _tin_rows_by_unit(fs.where_of("key"), fs.where_of("unit"), fs.latest_only)
+        else:
+            tin_rel = _TIN_REL_LATEST if fs.latest_only else _TIN_REL
+            inner = f"SELECT * FROM ({tin_rel}) WHERE {fs.where_of('key', 'unit')}"
         base = (f"SELECT * FROM ({_entity_rel(inner, fs.latest_only)}) "
                 f"WHERE {sub(fs.where_of('ident', 'row'))}")
+    elif by_unit and (fs.has("unit") or not fs.ident_kind):
+        rows = _tin_rows_by_unit(fs.where_of("key"), sub(fs.where_of("unit", "ident")),
+                                 fs.latest_only)
+        base = f"WITH base AS ({rows}) SELECT * FROM base WHERE {fs.where_of('row')}"
     elif fs.latest_only and grain == "tin":
         base = f"WITH base AS ({_TIN_REL_LATEST}) SELECT * FROM base WHERE {sub(fs.where)}"
     elif fs.latest_only:
@@ -621,6 +683,11 @@ def rel_sql(grain: str, fs: FilterSet) -> str:
     else:
         base = f"WITH base AS ({GRAIN_REL[grain]}) SELECT * FROM base WHERE {sub(fs.where)}"
     return _outlier_band(base) if fs.hide_outliers else base
+
+
+# how long a JOINED view's summary strip is reused (a spine-only strip lives
+# for its data generation — see the summary endpoint)
+SUMMARY_TTL_SECONDS = 30.0
 
 
 def spine_where(fs: FilterSet) -> str:
@@ -1082,7 +1149,6 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     # this collapses repeated identical loads and stops stacking.
     _summary_cache: dict[tuple, tuple[float, dict]] = {}
     _summary_lock = threading.Lock()
-    _SUMMARY_TTL = 30.0
     # the market overview does several whole-spine GROUP BYs — heavy at book
     # scale — so cache per (state, data_generation); it changes only on a rebuild.
     _overview_cache: dict[tuple, dict] = {}
@@ -1101,22 +1167,34 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         # reproduced live: max=$9000 shown with the outlier "hidden")
         key = (grain, fs.where, tuple(fs.params), fs.hide_outliers, fs.latest_only,
                store.data_generation)
+        # Off the bare spine (stat_rel's own test) the strip is a pure function
+        # of the key: the spine changes only with data_generation, which every
+        # rollup write bumps after its commit. So it lives for the generation,
+        # not 30 s — the Explorer opens on the pooled, unfiltered strip (9.1 s
+        # cold at 99M rates) and recomputed it on every visit to the tab more
+        # than 30 s after the last (round 5, P1.3). A joined view (names, state,
+        # therapy) reads tables enrichment updates between generations: TTL.
+        per_generation = grain == "tin" and not fs.uses_dim_cols
+
+        def fresh(h):
+            return h is not None and (per_generation
+                                      or time.monotonic() - h[0] < SUMMARY_TTL_SECONDS)
+
         hit = _summary_cache.get(key)
-        now = time.monotonic()
-        if hit is not None and now - hit[0] < _SUMMARY_TTL:
-            return hit[1]
+        if fresh(hit):
+            return _with_anchor(hit[1], fs)
         if not _summary_lock.acquire(blocking=False):
             # a heavy scan is already running — serve the last value for THIS
             # key, else say "busy" honestly (serving another filter's numbers
             # under this view's label would be a wrong number; and iterating
             # the cache dict here races the winner's insert/clear)
             if hit is not None:
-                return hit[1]
+                return _with_anchor(hit[1], fs)
             raise HTTPException(503, "summary is busy — it will load on the next refresh")
         try:
             hit = _summary_cache.get(key)  # re-check under the lock
-            if hit is not None and time.monotonic() - hit[0] < _SUMMARY_TTL:
-                return hit[1]
+            if fresh(hit):
+                return _with_anchor(hit[1], fs)
             # the strip and the by-code rows read only spine columns: off the
             # bare spine when no name/geo filter needs the joins (stat_rel)
             srel = stat_rel(grain, fs)
@@ -1166,26 +1244,35 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                     """,
                     fs.params,
                 ))
-            # the Medicare anchor for THIS view's state (store.medicare_anchor):
-            # one locality applied to another state's practices misstates the %
-            anchor = store.medicare_anchor(fs.described.get("state"))
-            for c in by_code:
-                mc = anchor["rates"].get(c["billing_code"])
-                c["pct_medicare"] = (round(100 * c["median"] / mc)
-                                     if mc and c.get("median") else None)
-                c["below_medicare"] = bool(mc and c.get("median") is not None
-                                           and c["median"] < mc)
             keys = ["n", "entities", "codes", "min", "p25", "median", "p75", "max"]
-            result = {**dict(zip(keys, row)), "grain": grain, "by_code": by_code,
-                      "by_code_basis": basis_text,
-                      "medicare_anchor": anchor["label"], "medicare_refusal": anchor["refusal"],
-                      "mpfs_loaded": any(c["pct_medicare"] is not None for c in by_code)}
+            scanned = {**dict(zip(keys, row)), "grain": grain, "by_code": by_code,
+                       "by_code_basis": basis_text}
             if len(_summary_cache) > 256:
                 _summary_cache.clear()
-            _summary_cache[key] = (time.monotonic(), result)
-            return result
+            _summary_cache[key] = (time.monotonic(), scanned)
+            return _with_anchor(scanned, fs)
         finally:
             _summary_lock.release()
+
+    def _with_anchor(scanned: dict, fs: FilterSet) -> dict:
+        """The cached scan + the Medicare comparison, applied per request: an
+        MPFS import changes the anchor without a new data generation, and a
+        per-generation strip must not keep the old percentages."""
+        # the Medicare anchor for THIS view's state (store.medicare_anchor):
+        # one locality applied to another state's practices misstates the %
+        anchor = store.medicare_anchor(fs.described.get("state"))
+        by_code = []
+        for c0 in scanned["by_code"]:
+            c = dict(c0)
+            mc = anchor["rates"].get(c["billing_code"])
+            c["pct_medicare"] = (round(100 * c["median"] / mc)
+                                 if mc and c.get("median") else None)
+            c["below_medicare"] = bool(mc and c.get("median") is not None
+                                       and c["median"] < mc)
+            by_code.append(c)
+        return {**scanned, "by_code": by_code,
+                "medicare_anchor": anchor["label"], "medicare_refusal": anchor["refusal"],
+                "mpfs_loaded": any(c["pct_medicare"] is not None for c in by_code)}
 
     # -- detail views -----------------------------------------------------------
 
@@ -1356,12 +1443,20 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 """,
                 fs.params,
             ))
+            # EVERY bucket between the lowest and highest, empty ones as 0: the
+            # chart draws one evenly spaced bar per entry, so leaving the empty
+            # ones out squeezed the axis ($85.72 next to $300.03) and drew a
+            # different distribution than the data's. Same buckets, same counts.
             hist = _dicts(con.execute(
                 f"""
-                WITH r AS (SELECT negotiated_rate FROM ({srel}) WHERE is_dollar_rate AND negotiated_rate > 0.01)
-                SELECT floor(negotiated_rate / g.w) * g.w AS bucket, count(*) AS n
-                FROM r, (SELECT greatest((max(negotiated_rate) - min(negotiated_rate)) / 20, 0.01) AS w FROM r) g
-                GROUP BY 1 ORDER BY 1
+                WITH r AS (SELECT negotiated_rate FROM ({srel}) WHERE is_dollar_rate AND negotiated_rate > 0.01),
+                g AS (SELECT w, floor(lo / w)::BIGINT AS k0, floor(hi / w)::BIGINT AS k1 FROM (
+                        SELECT greatest((max(negotiated_rate) - min(negotiated_rate)) / 20, 0.01) AS w,
+                               min(negotiated_rate) AS lo, max(negotiated_rate) AS hi FROM r)),
+                c AS (SELECT floor(negotiated_rate / g.w)::BIGINT AS k, count(*) AS n FROM r, g GROUP BY 1)
+                SELECT t.k * g.w AS bucket, coalesce(c.n, 0) AS n
+                FROM g, range(g.k0, g.k1 + 1) t(k) LEFT JOIN c ON c.k = t.k
+                ORDER BY t.k
                 """,
                 fs.params,
             ))

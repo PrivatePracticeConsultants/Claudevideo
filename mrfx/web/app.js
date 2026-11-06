@@ -1160,11 +1160,15 @@ function renderHistogram(el, hist, code) {
   if (!hist.length) { el.innerHTML = ""; return; }
   const maxN = Math.max(...hist.map((b) => b.n));
   const w = Math.min(1200, Math.max(560, hist.length * 44));
-  const left = 40, bottom = 26, top = 12, h = 190;
+  // the gutter fits the widest count label: a fixed 40 px cut "10,000" to
+  // "0,000" (text-anchor end at x = 34 runs off the left edge)
+  const ticks = niceTicks(maxN, 3);
+  const widest = Math.max(1, ...ticks.map((t) => fmtInt(t).length));
+  const left = Math.max(40, 14 + widest * 7), bottom = 26, top = 12, h = 190;
   const bw = (w - left - 16) / hist.length;
   const y = (n) => top + (1 - n / maxN) * (h - top - bottom);
   let svg = `<svg class="chart" viewBox="0 0 ${w} ${h}" role="img" aria-label="rate distribution for ${esc(code)}" style="max-width:${w}px">`;
-  for (const t of niceTicks(maxN, 3)) {
+  for (const t of ticks) {
     svg += `<line class="grid-line" x1="${left}" y1="${y(t)}" x2="${w - 10}" y2="${y(t)}"/>` +
            `<text class="lbl" x="${left - 6}" y="${y(t) + 4}" text-anchor="end">${fmtInt(t)}</text>`;
   }
