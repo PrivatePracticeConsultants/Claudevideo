@@ -154,6 +154,22 @@ def _monthly_refresh_loop(cfg: MrfxConfig, store: Store, stop: threading.Event) 
             return
 
 
+def _warn_if_running_another_folders_code() -> str | None:
+    """The typed `mrfx` command imports the package from the folder it was
+    INSTALLED in. Started from a copy in another folder (an update unzipped
+    to a new folder while the old one still exists), it would run the OLD
+    program against this folder's data without a word. Say so."""
+    running = Path(__file__).resolve().parents[1]
+    here = Path.cwd().resolve()
+    if (here / "mrfx" / "__init__.py").is_file() and here != running:
+        msg = (f"this window is in {here}, but the program running is the copy in "
+               f"{running}. Close it and double-click \"Start MRF Explorer\" in the "
+               "folder you want to use.")
+        print("NOTE: " + msg, file=sys.stderr)
+        return msg
+    return None
+
+
 def cmd_serve(cfg: MrfxConfig, args) -> int:
     import faulthandler
     import socket
@@ -169,6 +185,7 @@ def cmd_serve(cfg: MrfxConfig, args) -> int:
         faulthandler.enable()
     except (RuntimeError, OSError, ValueError):
         pass  # no usable stderr (e.g. pythonw) — diagnostics are cosmetic
+    _warn_if_running_another_folders_code()
 
     # Claim the port BEFORE touching the store: a second `mrfx serve` used to
     # run crash-recovery (flipping the live server's in-flight rows) and start

@@ -141,7 +141,8 @@ up where it left off.
 1. Open a command window in the project folder (Step 3).
 2. Turn the environment on — Windows: `.\.venv\Scripts\Activate.ps1`,
    Mac: `source .venv/bin/activate`. You'll see `(.venv)` at the start of the line.
-3. Type `mrfx serve` and press Enter.
+3. Type `python -m mrfx serve` and press Enter. (`mrfx serve` also works, but
+   only while the folder keeps the name and place it was installed with.)
 
 Then open your web browser and go to **<http://localhost:8377>**.
 
@@ -345,6 +346,12 @@ month. The **Files** tab shows a note on each file that was corrected. For
 about a minute after that first start the dashboard may still show the old
 numbers while it refreshes its summaries in the background (the window says
 "analytics update finished" when done) — then press **Ctrl-Shift-R**.
+
+**Renaming or moving the program folder is fine** from version 0.5 on: the
+Start and Update files run the folder's own program wherever it lives. (Before
+0.5, a renamed folder made Start fail with "No module named 'mrfx'". If you
+see that on an older copy, open a command window in the folder and run
+`.\.venv\Scripts\python.exe -m pip install -e .` once.)
 
 ### The very first time (your current copy has no updater yet)
 

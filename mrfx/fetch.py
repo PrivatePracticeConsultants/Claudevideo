@@ -2221,6 +2221,12 @@ def _rollup_due(pend: int, in_flight: int, since_last: float, min_interval: floa
 PREFETCH_AHEAD = 1
 
 
+# An idle download/parse thread sleeps until a queue write signals it
+# (Store.queue_changed); this is only the safety net for a write path that
+# somehow did not signal. Not a latency: real work wakes the threads at once.
+QUEUE_IDLE_WAIT_SECONDS = 30.0
+
+
 def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain: bool = False) -> int:
     """Process queued URLs one at a time until the queue is empty (drain=True,
     for the CLI) or `stop` is set (the serve worker). Returns files processed.
@@ -2357,13 +2363,18 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
     def downloader():
         while not dl_stop.is_set() and (stop is None or not stop.is_set()):
             try:
+                # read the queue epoch BEFORE looking: a change in between
+                # makes the wait below return at once (no lost wake-up)
+                epoch = store.queue_epoch()
                 counts = store.url_queue_counts()
                 if counts.get("fetched", 0) >= prefetch_ahead:
-                    dl_stop.wait(0.5)
+                    store.wait_queue_change(epoch, QUEUE_IDLE_WAIT_SECONDS)
                     continue
                 rec = store.next_queued_url()  # atomic claim — threads never share a row
                 if rec is None:
-                    dl_stop.wait(0.5)
+                    # nothing to download: sleep until a queue write signals
+                    # (was: re-query every 0.5 s, forever, on 6 threads)
+                    store.wait_queue_change(epoch, QUEUE_IDLE_WAIT_SECONDS)
                     continue
                 try:
                     fetch_url_record(cfg, store, rec)
@@ -2421,6 +2432,7 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
         while not dl_stop.is_set() and (stop is None or not stop.is_set()):
             with state:
                 active += 1
+            epoch = store.queue_epoch()
             try:
                 rec = store.next_fetched_url()
             except KeyboardInterrupt:
@@ -2438,7 +2450,7 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
             if rec is None:
                 with state:
                     active -= 1
-                dl_stop.wait(0.4)
+                store.wait_queue_change(epoch, QUEUE_IDLE_WAIT_SECONDS)
                 continue
             try:
                 ok = False
@@ -2543,6 +2555,7 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
         raise
     finally:
         dl_stop.set()
+        store.queue_changed()   # wake every worker sleeping on the queue so it sees the stop
         join_proc = 2.0 if interrupted else cfg.download_timeout_seconds + 60
         join_dl = 2.0 if interrupted else cfg.download_timeout_seconds + 30
         for t in proc_threads:

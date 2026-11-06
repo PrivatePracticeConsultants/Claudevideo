@@ -10,7 +10,9 @@ Drag the zip onto "Update MRF Explorer.bat", or run the command. Steps:
 3. Write every changed file from the new build — except data/, .venv/ and the
    user's settings (PROTECTED); a protected file the new build changed is
    saved next to it as <name>.new for reference.
-4. Re-sync the environment (pip install -r requirements.txt, pip install -e .).
+4. Re-sync the environment (pip install -r requirements.txt, then pip install
+   --no-build-isolation -e . — works offline) and check where the typed `mrfx`
+   command now points.
 
 It never deletes anything."""
 
@@ -128,17 +130,55 @@ def apply_update(zip_path: Path, root: Path, run_pip: bool = True, log=print) ->
         log(f"  your settings were kept; the new version's copy is saved as {c} "
             "(only needed if you want to see new options)")
     pip_ok = True
+    linked = None
     if run_pip:
         log("re-syncing the program's components (pip) — usually a few seconds…")
-        for args in (["-m", "pip", "install", "-q", "-r", "requirements.txt"],
-                     ["-m", "pip", "install", "-q", "-e", "."]):
+        for args in PIP_STEPS:
             r = subprocess.run([sys.executable, *args], cwd=root)
             if r.returncode != 0:
                 pip_ok = False
-                log("  pip reported a problem (see above). The update itself is in place; "
-                    "run these two lines in the program folder to finish:\n"
-                    "    python -m pip install -r requirements.txt\n"
-                    "    python -m pip install -e .")
+                log("  pip reported a problem (see above). The update itself is in place, "
+                    "and \"Start MRF Explorer\" runs this folder's program regardless. "
+                    "To finish the re-sync, run these two lines in the program folder:\n"
+                    "    .venv\\Scripts\\python.exe -m pip install -r requirements.txt\n"
+                    "    .venv\\Scripts\\python.exe -m pip install --no-build-isolation -e .")
                 break
+        if pip_ok:
+            linked = linked_folder(sys.executable)
+            if linked is not None and linked != (root / "mrfx").resolve():
+                pip_ok = False
+                where = ("is not set up in this environment" if linked == NOT_IMPORTABLE
+                         else f"still points at {linked.parent}, not this folder")
+                log(f"  the typed `mrfx` command {where}. \"Start MRF Explorer\" and "
+                    "\"Update MRF Explorer\" are not affected (they run this folder's "
+                    "program directly).")
     return {"written": written, "kept_settings": new_copies, "backup": str(backup) if replaced else None,
-            "old_version": old_v, "new_version": new_v, "pip_ok": pip_ok}
+            "old_version": old_v, "new_version": new_v, "pip_ok": pip_ok, "linked": linked}
+
+
+# The re-sync after an update. `-e .` re-points the typed `mrfx` command at THIS
+# folder (it remembers an absolute path, so a renamed or moved folder broke it:
+# "No module named 'mrfx'"). --no-build-isolation builds with the setuptools
+# pinned in requirements.txt instead of downloading one: with isolation, every
+# update needed PyPI, and offline the step failed and left the old path.
+PIP_STEPS = (["-m", "pip", "install", "-q", "-r", "requirements.txt"],
+             ["-m", "pip", "install", "-q", "--no-build-isolation", "--no-deps", "-e", "."])
+
+
+NOT_IMPORTABLE = Path("<not importable>")
+
+
+def linked_folder(python: str) -> Path | None:
+    """The mrfx package folder the environment's `mrfx` command imports —
+    asked from OUTSIDE the program folder, where the current directory cannot
+    mask a stale install path. None when it cannot be told."""
+    import tempfile
+    try:
+        r = subprocess.run([python, "-c", "import mrfx, pathlib; "
+                            "print(pathlib.Path(mrfx.__file__).resolve().parent)"],
+                           cwd=tempfile.gettempdir(), capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0 or not r.stdout.strip():
+        return NOT_IMPORTABLE
+    return Path(r.stdout.strip().splitlines()[-1])

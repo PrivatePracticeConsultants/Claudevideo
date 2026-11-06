@@ -13,6 +13,9 @@ PyYAML==6.0.3
 rich==14.0.0
 tqdm==4.67.1
 pytest==9.1.1
+# builds the program's own `pip install -e .` offline (the updater passes
+# --no-build-isolation): without it every update needed PyPI to fetch one
+setuptools==80.9.0
 fastapi==0.141.1
 # pinned explicitly: transitive via fastapi, and the web layer's CVEs land here
 starlette==1.6.0

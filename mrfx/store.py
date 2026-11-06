@@ -900,6 +900,13 @@ class Store:
         self._tmp_dir.mkdir(parents=True, exist_ok=True)
         self.db_path = self.dir / "mrfx.duckdb"
         self.write_lock = threading.Lock()
+        # "the URL queue changed": the download/parse worker threads sleep on
+        # this instead of re-querying the queue every half second (round 5:
+        # 9 idle threads made ~30 DuckDB queries and 18 lock grabs a second,
+        # 7% of a core, for weeks). Bumped by every queue writer
+        # (_QUEUE_WRITERS below); waiters re-check with a long fallback.
+        self._queue_cond = threading.Condition()
+        self._queue_epoch = 0
         # url_ids the user asked to cancel mid-download ("stop downloads"): the
         # in-flight downloader thread polls is_download_canceled() and aborts.
         # In-memory (same process as the workers); cleared once the download
@@ -2268,6 +2275,23 @@ class Store:
                 "download-progress write for url %s skipped (%s) — cosmetic only", url_id, e)
         finally:
             self.write_lock.release()
+
+    def queue_epoch(self) -> int:
+        """A counter that moves whenever a URL-queue row was added or changed
+        status. Read it BEFORE looking for work, then wait_queue_change(it):
+        a change in between returns at once (no lost wake-up)."""
+        return self._queue_epoch
+
+    def queue_changed(self) -> None:
+        """Wake every thread waiting for queue work (also used on shutdown)."""
+        with self._queue_cond:
+            self._queue_epoch += 1
+            self._queue_cond.notify_all()
+
+    def wait_queue_change(self, seen: int, timeout: float) -> bool:
+        """Sleep until the queue changes after `seen`, or `timeout` seconds."""
+        with self._queue_cond:
+            return self._queue_cond.wait_for(lambda: self._queue_epoch != seen, timeout)
 
     # Files & imports lists the queue in this order — what is moving now,
     # then what needs the user, then what is finished, then what waits:
@@ -4401,6 +4425,39 @@ class Store:
         # against the now-empty store.
         self._bump_generation()
         self._invalidate_scan_caches()
+
+
+# Every Store method that writes url_queue signals the waiting worker threads
+# (Store.queue_changed). "always": the write always changes something. "if
+# done": it returns what it changed (a claimed row, a count, True) and signals
+# only then — a claim that found nothing must NOT signal, or every idle worker
+# would wake every other one in a loop. url_progress (byte counts during a
+# download) is deliberately absent: no worker waits on progress.
+# tests/mrfx/test_queue_signal.py fails if a url_queue writer is missing here.
+_QUEUE_WRITERS_ALWAYS = ("update_url", "pause_url", "forget_file", "reset")
+_QUEUE_WRITERS_IF_DONE = ("_claim_next", "enqueue_url", "enqueue_urls", "requeue_failed",
+                          "requeue_oversize_within", "requeue_urls", "wake_paused_urls",
+                          "recover_stuck_urls", "set_url_status_by_id", "force_size_requeue",
+                          "clear_queued", "cancel_all_downloading", "resume_canceled",
+                          "revive_skipped_duplicates", "claim_content_ingest")
+
+
+def _signals_queue(fn, always: bool):
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        result = fn(self, *args, **kwargs)
+        if always or result:
+            self.queue_changed()
+        return result
+    return wrapper
+
+
+for _name in _QUEUE_WRITERS_ALWAYS:
+    setattr(Store, _name, _signals_queue(getattr(Store, _name), True))
+for _name in _QUEUE_WRITERS_IF_DONE:
+    setattr(Store, _name, _signals_queue(getattr(Store, _name), False))
 
 
 class BackgroundParquetWriter:
