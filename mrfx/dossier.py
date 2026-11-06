@@ -26,6 +26,7 @@ from __future__ import annotations
 import datetime as dt
 import html
 import logging
+import statistics
 
 from . import __version__
 from .config import MrfxConfig
@@ -181,9 +182,12 @@ def build_prospect_dossier(cfg: MrfxConfig, store: Store, subject: str,
                 if r.get("subject_percentile") is not None]
         if not rows:
             raise BenchmarkError("no comparable published rates under this scope")
-        low = sorted(rows, key=lambda r: r["subject_percentile"])[:8]
+        low = sorted(rows, key=lambda r: (r["subject_percentile"], r["billing_code"]))[:8]
+        # the MEDIAN of the per-code positions — the one headline rule the
+        # Leads list and the per-payer view use. This was a mean stored under
+        # this name, so one outlier code swung the dossier but not the list.
         facts["median_percentile"] = round(
-            sum(r["subject_percentile"] for r in rows) / len(rows), 1)
+            statistics.median(r["subject_percentile"] for r in rows), 1)
         body = "".join(
             f"<tr><td>{e(r['billing_code'])}</td>"
             f"<td class='num'>${(r['subject_rate'] or 0):,.2f}</td>"
@@ -191,8 +195,8 @@ def build_prospect_dossier(cfg: MrfxConfig, store: Store, subject: str,
             f"<td class='num'>p{r['subject_percentile']:.0f}</td></tr>"
             for r in low)
         return ("<h2>Where their rates sit</h2>"
-                f"<p>Across {len(rows)} comparable code(s) they average "
-                f"<b>p{facts['median_percentile']:g}</b> against their market. "
+                f"<p>Across {len(rows)} comparable code(s) their median position "
+                f"is <b>p{facts['median_percentile']:g}</b> against their market. "
                 "Weakest lines:</p>"
                 "<table><thead><tr><th>Code</th><th class='num'>Their rate</th>"
                 "<th class='num'>Market median</th><th class='num'>Position</th>"
@@ -207,10 +211,18 @@ def build_prospect_dossier(cfg: MrfxConfig, store: Store, subject: str,
         secs = neg.get("sections") or []
         if not secs:
             raise BenchmarkError("no payer sections could be built")
+        # Position and the below-median count come from the section itself and
+        # its rows. They were read from a `summary` block that only the
+        # one-payer comparison builds — never this one — so every dossier
+        # printed "–" in both columns (tests/mrfx/test_known_answer_leads.py).
+        def _below(s):
+            rows = [r for r in s["benchmark"]["rows"]
+                    if r.get("subject_rate") is not None and r.get("p50") is not None]
+            return f"{sum(r['subject_rate'] < r['p50'] for r in rows)} of {len(rows)}"
         rows = "".join(
             f"<tr><td>{e(s['payer'])}</td>"
-            f"<td class='num'>{('p%.0f' % s['benchmark']['summary']['headline_percentile']) if (s.get('benchmark') or {}).get('summary', {}).get('headline_percentile') is not None else '–'}</td>"
-            f"<td class='num'>{(s.get('benchmark') or {}).get('summary', {}).get('n_below_median', '–')}</td></tr>"
+            f"<td class='num'>{'–' if s.get('headline_percentile') is None else 'p%d' % s['headline_percentile']}</td>"
+            f"<td class='num'>{_below(s)}</td></tr>"
             for s in secs[:6])
         facts["weakest_payer"] = secs[0]["payer"]
         return ("<h2>Which payer is weakest for them</h2>"
@@ -343,18 +355,19 @@ def build_market_report(cfg: MrfxConfig, store: Store, *, state: str,
 
     def _concentration():
         from .territory import payer_concentration
-        r = payer_concentration(store, m)
+        r = payer_concentration(store, m, code=code)
         if not r["payers"]:
             raise BenchmarkError("no payers in this scope")
         rows = "".join(
             f"<tr><td>{e(p['payer'])}</td><td class='num'>{p['share_pct']}%</td>"
             f"<td class='num'>{p['n_practices']:,}</td>"
-            f"<td class='num'>${(p['median_rate'] or 0):,.2f}</td></tr>"
+            # a payer with no rate for this code has no median — never "$0.00"
+            f"<td class='num'>{'–' if p['median_rate'] is None else '$%s' % format(p['median_rate'], ',.2f')}</td></tr>"
             for p in r["payers"][:12])
         return ("<h2>Who holds the contracts</h2>"
                 f"<p>{e(r['headline'])}</p>"
                 "<table><thead><tr><th>Payer</th><th class='num'>Share</th>"
-                "<th class='num'>Practices</th><th class='num'>Median rate</th>"
+                f"<th class='num'>Practices</th><th class='num'>Median {e(code)} rate</th>"
                 "</tr></thead>"
                 f"<tbody>{rows}</tbody></table>"
                 f"<p class='note'>{e(r['note'])}</p>")

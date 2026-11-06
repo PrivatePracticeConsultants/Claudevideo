@@ -411,7 +411,7 @@ async function loadMarkets() {
     renderMkDifferential(diff);
   renderMkLocal(code, market);
   renderMkRadius(code, market);
-  renderMkConcentration(market);
+  renderMkConcentration(market, code);
 }
 
 // Inside ONE state, cities differ enough to matter to a client choosing where
@@ -483,10 +483,10 @@ async function renderMkRadius(code, market) {
 
 // Who holds the contracts here. The caveat is louder than the number: this is
 // the store's own payer coverage, not market share of covered lives.
-async function renderMkConcentration(market) {
+async function renderMkConcentration(market, code) {
   const el = $("#mk-hhi");
   if (!el) return;
-  const d = await postJson("/api/territory/concentration", { market })
+  const d = await postJson("/api/territory/concentration", { market, code })
     .catch((e) => ({ _err: e.message }));
   if (d._err) { el.innerHTML = mkErr(d, "Payer concentration"); return; }
   if (!d.payers.length) { el.innerHTML = ""; return; }
@@ -500,7 +500,7 @@ async function renderMkConcentration(market) {
     <div class="muted" style="margin-bottom:6px">${esc(d.headline)}</div>
     <div class="tablewrap"><table><thead><tr><th>Payer</th>
       <th class="num">Share of contracted practices</th><th class="num">Practices</th>
-      <th class="num">Median rate</th></tr></thead><tbody>${rows}</tbody></table></div>
+      <th class="num">${d.median_code ? `Median ${esc(d.median_code)} rate` : "Median rate, all codes"}</th></tr></thead><tbody>${rows}</tbody></table></div>
     <div class="muted" style="font-size:11.5px;margin-top:6px">${esc(d.note)}</div></div>`;
 }
 
@@ -2923,19 +2923,19 @@ async function runHospitalParity() {
 
 /* ---- closures (NPPES deactivation dates) -------------------------------- */
 function initClosures() {
-  $("#cl-run").addEventListener("click", async () => {
-    const out = $("#cl-out");
-    $("#cl-msg").textContent = "looking…";
+  $("#cz-run").addEventListener("click", async () => {
+    const out = $("#cz-out");
+    $("#cz-msg").textContent = "looking…";
     let d;
     try {
       d = await postJson("/api/closures", {
-        zip: $("#cl-zip").value.trim() || null,
-        radius_miles: $("#cl-zip").value.trim() ? Number($("#cl-radius").value) : null,
-        state: $("#cl-state").value.trim() || null,
-        days: Number($("#cl-days").value),
+        zip: $("#cz-zip").value.trim() || null,
+        radius_miles: $("#cz-zip").value.trim() ? Number($("#cz-radius").value) : null,
+        state: $("#cz-state").value.trim() || null,
+        days: Number($("#cz-days").value),
       });
-    } catch (e) { $("#cl-msg").textContent = ""; out.innerHTML = `<div class="muted">${esc(e.message)}</div>`; return; }
-    $("#cl-msg").textContent = "";
+    } catch (e) { $("#cz-msg").textContent = ""; out.innerHTML = `<div class="muted">${esc(e.message)}</div>`; return; }
+    $("#cz-msg").textContent = "";
     if (d.reason) { out.innerHTML = `<div class="muted">${esc(d.reason)}</div>`; return; }
     if (!d.rows.length) {
       out.innerHTML = `<div class="muted">No therapy NPI was deactivated in the last ${d.days} days

@@ -92,7 +92,8 @@ def compute_leads(store: Store, market: dict, *, threshold_percentile: int = 25,
            td.display_name, td.entity_kind, td.npi_count, td.states, td.cities
     FROM per_tin p JOIN tin_directory td USING (tin_value)
     WHERE p.n_codes >= ? AND p.median_pct <= ? {excl_clause}
-    ORDER BY p.median_pct ASC, td.npi_count DESC NULLS LAST, p.avg_gap_to_median DESC
+    ORDER BY p.median_pct ASC, td.npi_count DESC NULLS LAST, p.avg_gap_to_median DESC,
+             p.tin_value   -- unique: equal leads came back in thread order (invariant 7)
     LIMIT ?
     """
     # the state the user filtered on (if any) — a matched TIN is guaranteed to
@@ -118,7 +119,8 @@ def compute_leads(store: Store, market: dict, *, threshold_percentile: int = 25,
                 GROUP BY t.tin_value, t.payer, t.billing_code
             ),
             mkt AS (
-                SELECT billing_code, median(rate) AS code_median FROM (
+                SELECT billing_code, median(rate) AS code_median,
+                       count(*) AS n_in_code FROM (
                     SELECT t.billing_code, t.tin_value,
                            median(t.negotiated_rate) AS rate
                     FROM {rel} t LEFT JOIN tin_directory td USING (tin_value)
@@ -126,10 +128,16 @@ def compute_leads(store: Store, market: dict, *, threshold_percentile: int = 25,
                 ) GROUP BY billing_code
             ),
             gap AS (
+                -- the SAME codes the position counts: a code only this practice
+                -- prices has no market to be under. Averaging its 0 in made a
+                -- payer pricing one such extra code look less stingy — a payer
+                -- $20 under on every shared code lost "worst payer" to one $16
+                -- under on one code (tests/mrfx/test_known_answer_leads.py)
                 SELECT tp.tin_value, tp.payer,
                        round(avg(greatest(0, m.code_median - tp.rate)::DECIMAL(18, 6)), 2) AS avg_gap,
                        count(*) AS n_codes
                 FROM tp JOIN mkt m USING (billing_code)
+                WHERE m.n_in_code >= 2
                 GROUP BY tp.tin_value, tp.payer
             )
             SELECT tin_value, payer, avg_gap FROM (

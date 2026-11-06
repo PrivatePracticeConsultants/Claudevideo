@@ -2333,7 +2333,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         """How contracted relationships divide across payers (HHI)."""
         from .territory import payer_concentration
         try:
-            return payer_concentration(store, body.get("market") or {})
+            return payer_concentration(store, body.get("market") or {},
+                                       code=body.get("code") or None)
         except BenchmarkError as e:
             raise HTTPException(422, str(e))
         except (TypeError, ValueError) as e:

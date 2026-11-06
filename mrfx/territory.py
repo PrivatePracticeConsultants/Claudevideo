@@ -171,9 +171,17 @@ def local_rate_map(store: Store, code: str, market: dict, *,
 
 
 def payer_concentration(store: Store, market: dict | None = None,
-                        *, limit: int = 25) -> dict:
-    """How the contracted relationships in a market divide across payers."""
+                        *, limit: int = 25, code: str | None = None) -> dict:
+    """How the contracted relationships in a market divide across payers.
+
+    Shares count relationships on every code in scope. `median_rate` is one
+    code's median when `code` is given: pooled over every code it moved with
+    each payer's code MIX, not its price level, and it sat beside one-code
+    screens reading as that code's rate (a market report for 97110 printed
+    Rho at $50, its all-code median, where its 97110 median is $45). Without
+    a code the column is labelled all-codes by its callers."""
     limit = max(1, min(int(limit), 500))
+    code = str(code or "").strip().upper() or None
     from .benchmark import (_market_where, _rates_relation, month_label,
                             normalize_market, resolve_plan_scope)
 
@@ -185,13 +193,14 @@ def payer_concentration(store: Store, market: dict | None = None,
         SELECT t.payer,
                count(DISTINCT t.tin_value)         AS n_practices,
                count(DISTINCT t.billing_code)      AS n_codes,
-               round(median(t.negotiated_rate), 2) AS median_rate
+               round(median(t.negotiated_rate) {"FILTER (WHERE t.billing_code = ?)" if code else ""}, 2)
+                                                   AS median_rate
         FROM {rel} t LEFT JOIN tin_directory td USING (tin_value)
         WHERE {where}
         GROUP BY t.payer ORDER BY n_practices DESC, t.payer
     """
     with store.connect() as con:
-        cur = con.execute(sql, params)
+        cur = con.execute(sql, ([code] if code else []) + list(params))
         rows = [dict(zip([d[0] for d in cur.description], r)) for r in cur.fetchall()]
         # how much of the store's payer universe this market's scope covers —
         # the number that decides whether the index means anything at all
@@ -215,6 +224,7 @@ def payer_concentration(store: Store, market: dict | None = None,
         "top_payer": top["payer"] if top else None,
         "top_share_pct": top["share_pct"] if top else None,
         "as_of": month_label(m["month"]),
+        "median_code": code,
         "files_ingested": n_files, "payers_with_files": n_payer_files,
         "market": {k: v for k, v in m.items() if not k.startswith("_")},
         "headline": (

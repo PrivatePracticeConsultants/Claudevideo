@@ -172,6 +172,17 @@ def network_leverage(store: Store, subject: str, payer: str,
         })
 
     n_alt = len(rows)
+    # Name what was counted. Without "therapy practices only" a physician
+    # office or chiropractor billing 97110/97140 is a payer alternative too,
+    # and the headline called all of them "therapy practices" (a prospect
+    # dossier said "6 other therapy practices" over 5 PT clinics and an
+    # internal-medicine group). Unknown taxonomy is "not identified yet",
+    # never "not therapy", so only an explicit False counts against.
+    n_non = 0 if m.get("therapy_only") else sum(1 for a in alts if a[5] is False)
+    s_alt = "s" if n_alt != 1 else ""
+    alts_phrase = (f"{n_alt} other therapy practice{s_alt}" if not n_non else
+                   f"{n_alt} other practice{s_alt} ({n_non} of them "
+                   f"{'not a therapy practice' if n_non == 1 else 'not therapy practices'})")
     per_alt = (round(seniors / n_alt, 0)
                if seniors and n_alt else None)
     band = ("thin" if n_alt <= THIN_ALTERNATIVES
@@ -184,20 +195,19 @@ def network_leverage(store: Store, subject: str, payer: str,
             "has no published local alternative at all.")
     elif band == "thin":
         headline = (
-            f"{payer} publishes rates for only {n_alt} other therapy "
-            f"practice{'s' if n_alt != 1 else ''} within {radius:g} miles"
+            f"{payer} publishes rates for only {alts_phrase} within {radius:g} miles"
             + (f", covering {int(seniors):,} residents aged 65+ — about "
                f"{int(per_alt):,} seniors per remaining practice"
                if per_alt else "")
             + ". That is a thin fallback for the payer.")
     elif band == "crowded":
         headline = (
-            f"{payer} publishes rates for {n_alt} other therapy practices "
+            f"{payer} publishes rates for {alts_phrase} "
             f"within {radius:g} miles. The payer has ready alternatives here, "
             "so leverage has to come from the rate case itself, not from scarcity.")
     else:
         headline = (
-            f"{payer} publishes rates for {n_alt} other therapy practices "
+            f"{payer} publishes rates for {alts_phrase} "
             f"within {radius:g} miles"
             + (f" ({int(per_alt):,} seniors each)" if per_alt else "")
             + " — a moderate fallback.")
