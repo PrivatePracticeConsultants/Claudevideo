@@ -335,7 +335,10 @@ have — no re-download needed: some insurers (BCBS Alabama is the big one) put
 place-of-service codes where modifiers belong, which hid ALL of their rates
 from "base modifiers only" and the Benchmark; two modifiers written as one
 ("52,53") are split; and a file dated in the future is filed under its real
-month. The **Files** tab shows a note on each file that was corrected.
+month. The **Files** tab shows a note on each file that was corrected. For
+about a minute after that first start the dashboard may still show the old
+numbers while it refreshes its summaries in the background (the window says
+"analytics update finished" when done) — then press **Ctrl-Shift-R**.
 
 ### The very first time (your current copy has no updater yet)
 
