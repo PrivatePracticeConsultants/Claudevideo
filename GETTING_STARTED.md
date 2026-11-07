@@ -250,6 +250,10 @@ If you already downloaded MRF files yourself, two ways to load them:
   cp ~/Downloads/2026-07-01_somepayer_in-network-rates.json.gz data/inbox/
   ```
 
+`.json`, `.json.gz` and `.zip` all work. **A `.zip` holding several JSON files
+is read for its LARGEST one only** — the others are ignored; if a payer's zip
+packs several rate files, unzip it and drop each `.json` in.
+
 Watch the **Files** tab: the file shows `processing` (with a progress bar for
 large files) and then `done`, with a row count and a data-quality summary. Big
 files can take several minutes — that's normal; the progress bar shows chunks
@@ -810,13 +814,20 @@ Close the app, then drag the new build's `.zip` onto `Update MRF Explorer.bat`
 in the project folder (or run `mrfx update path\to\mrfx_project.zip`). It:
 
 - refuses while the app is running (the database must be closed);
-- checks the zip is a complete MRF Explorer build;
+- checks the zip is a complete MRF Explorer build, and refuses an OLDER build
+  than the one you have (an older program must not run against data a newer
+  one has upgraded — `mrfx update <zip> --allow-downgrade` if you really mean it);
+- installs the new build's components FIRST (needs internet for a few
+  seconds). If that fails, nothing is changed and it says so — run it again
+  once you are online;
 - saves the program files it will replace to `data/update_backups/`;
 - writes only the files that changed — **never** `data/`, `.venv/`, or your
   `config/mrfx.yaml` / `entity_map.yaml` / `registry_overrides.yaml` (if the new
   build ships a different `mrfx.yaml`, it's saved beside yours as
-  `mrfx.yaml.new` so you can see new options);
-- re-installs components (`pip install -r requirements.txt` and `-e .`).
+  `mrfx.yaml.new` so you can see new options). If a file can't be written
+  (antivirus holding it), every file already written is put back and it says
+  so — close other programs and run it again;
+- re-points the environment at this folder (`pip install -e .`).
 
 Then start the app and press **Ctrl-Shift-R** once in the dashboard tab
 (browsers cache the dashboard's code; a hard-refresh loads the new page).
@@ -908,6 +919,77 @@ already have is automatically **skipped, not duplicated**.
   rate per practice; notes on every report name exactly which rows were used.
 - **The dashboard never shows a stale answer**: change a filter twice quickly
   and the slower, older reply can no longer paint over the newer one.
+
+## What changed in the November 7, 2026 (round 7) update — version 0.7.0
+
+Numbers that were wrong, now right (each checked by hand in a test):
+
+- **"nan" / "Infinity" in a payer file** can no longer turn a practice's rate
+  into "nan"; "2 x 34.50" is no longer read as $234.50.
+- **The negotiation one-pager no longer adds payers together.** Each payer's
+  figure counts all your units as if they were billed to that payer, so two
+  payers worth $10,000 each are alternatives, not $20,000. The page now names
+  the largest single-payer opportunity.
+- **Trend lines follow the same contracts every month**: a payer that starts
+  publishing no longer moves the line.
+- **Leads, the leaderboard and the payer roster use the same "position" as
+  the Benchmark.** A market where every practice is paid the same fee schedule
+  is no longer a list of "p0 underpaid" leads.
+- **Inflation:** a year entered under another index name (e.g. MEI) is never
+  divided by a CPI-U year.
+- **Referral leaders:** two therapists with the same name are two rows.
+- **Census 65+ counts** are no longer double or triple counted.
+- **Annual-units boxes** read "97110, 1,200" as 1,200 everywhere and say which
+  lines they could not read.
+- **Overview "Which payers pay above vs below market"** divides by the market
+  median the page shows, and leaves out a payer's code when it prices fewer
+  than 3 practices for it.
+- **One rounding rule:** 112.5 % of Medicare prints as 113 % everywhere.
+- **The pitch report's "In real terms" block** says it is the market's
+  trajectory, not your client's own contracts.
+
+Safety and install:
+
+- **A web page you visit can no longer send files or commands to the
+  dashboard** (it only answers its own page on this computer).
+- **Install Python 3.13** (python.org's big button now gives 3.15, which some
+  components don't support yet) and put the folder on a short local path like
+  `C:\mrfx\`, not Documents/Desktop/OneDrive.
+- **Double-clicking Start while the app is already running** now says so and
+  stops, instead of retrying forever.
+- **The updater** installs components before changing anything, refuses an
+  older build, and puts everything back if a file is locked.
+
+Speed and big stores:
+
+- **Exports are built on the drive that holds your data**, once (not twice),
+  and a drive that is too full gets a plain sentence instead of an error page.
+- **Benchmark, negotiation, contract gaps, leads, leaderboard, fee schedule,
+  digest and packets** reuse one pre-computed table per data refresh: on a
+  99-million-rate store the benchmark went 3.3 s → 1.0 s, contract gaps
+  3.0 s → 0.6 s, 5 client packets 21 s → 11 s. Same numbers to the cent.
+- **A website you save** shows on the Leads list at once.
+- **The dashboard notices new data**: after an ingest the payer and month
+  pickers and the open Explorer / Code page refresh by themselves.
+- **Rate changes ("What changed")** are remembered until the next data refresh.
+
+Downloads and files:
+
+- **A big file downloaded in several parallel pieces** (`download_segments`)
+  can now take as long as it needs; the time cap no longer restarts it.
+- **An index listing more than `max_toc_files` files** says so in amber on its
+  row (and the count shows how many it listed).
+- **A rate group whose provider list is only partly in the file** is counted
+  on the Files tab and re-read when the payer's reference file arrives.
+- **NPPES weekly updates** now rename/move providers in the practice
+  directory too.
+- **Hospital price files**: the CMS "wide" layout (one column per payer) and
+  files with the CPT in a second code column now import correctly.
+- **The official 2026 Medicare RVU zip from cms.gov now imports** (its title
+  rows used to make it refuse); the non-QPP rates are used, and a conversion
+  factor that doesn't match the file's own is refused.
+- **"fee for service" / "fee_schedule"** spelled differently by a payer no
+  longer drop rates.
 
 ## Debug FAQ — what it says, what it means, what to do
 
@@ -1147,6 +1229,10 @@ them in one place, grouped by where you'll hit them.
 
 - `mrfx status` summarizes everything the store knows.
 - Each failed row's error text is written to be actionable — read it first.
+- Closed the server window before reading its last message? Started with
+  `Start MRF Explorer (auto-restart).bat`, everything it showed is also saved
+  in `data/mrfx_store/diagnostics/serve.log` (the newest lines are at the end).
+- `mrfx --version` prints which version you are running.
 - For anything beyond this FAQ, hand `docs/AI_HANDOFF.md` plus the row's
   error text to an AI assistant — that document tells it exactly how this
   codebase works and how to debug it safely.

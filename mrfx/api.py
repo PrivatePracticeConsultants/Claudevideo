@@ -28,6 +28,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, PlainTe
 from starlette.background import BackgroundTask
 from fastapi.staticfiles import StaticFiles
 
+from .rounding import half_up
 from . import __version__
 from .benchmark import (
     BenchmarkError,
@@ -1414,7 +1415,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         for c0 in scanned["by_code"]:
             c = dict(c0)
             mc = anchor["rates"].get(c["billing_code"])
-            c["pct_medicare"] = (round(100 * c["median"] / mc)
+            c["pct_medicare"] = (half_up(100 * c["median"] / mc)
                                  if mc and c.get("median") else None)
             c["below_medicare"] = bool(mc and c.get("median") is not None
                                        and c["median"] < mc)
@@ -1652,13 +1653,13 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         # always present (None without an anchor) so the frontend never reads
         # undefined — matching /api/summary by_code.
         for p in payer_rank:
-            p["pct_medicare"] = (round(100 * p["median_rate"] / base)
+            p["pct_medicare"] = (half_up(100 * p["median_rate"] / base)
                                  if base and p.get("median_rate") else None)
         info = catalog_json().get(code, {})
         return {"billing_code": code, "grain": grain, "as_of": as_of, **info, "ranked": ranked,
                 "histogram": hist, "payer_rank": payer_rank, "payer_rank_basis": basis_text,
                 "medicare_anchor": anchor["label"], "medicare_refusal": anchor["refusal"],
-                "mpfs_rate": round(base, 2) if base else None}
+                "mpfs_rate": half_up(base, 2) if base else None}
 
     @app.get("/api/trend")
     def trend(request: Request):
@@ -1735,10 +1736,14 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 """,
                 [code, ident, ident],
             ))
+        from .config import DOLLAR_TYPES
+        dollar = {*DOLLAR_TYPES, ""}
         for r in rows:
             r["tin_value"] = mask_tin(r["tin_value"])
-            if expected is not None and r["negotiated_rate"]:
-                r["delta_vs_expected"] = round(r["negotiated_rate"] - float(expected), 2)
+            # a percentage / per-diem row has no dollar delta (round 7 P1.24)
+            if (expected is not None and r["negotiated_rate"]
+                    and str(r.get("negotiated_type") or "").strip().lower() in dollar):
+                r["delta_vs_expected"] = half_up(r["negotiated_rate"] - float(expected), 2)
         return {"rows": rows, "expected_rate": expected,
                 "match": any(abs(r.get("delta_vs_expected", 1)) < 0.005 for r in rows)
                 if expected is not None else None}
@@ -3603,7 +3608,11 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 # True when the fast local NPPES bulk file is actually in use, so
                 # the dashboard only nudges toward it when we're on the slow API.
                 "enrichment_bulk_active": use_bulk_enrichment(cfg),
-                "default_grain": grain_of({}, cfg, store)}
+                "default_grain": grain_of({}, cfg, store),
+                # bumps when a rollup lands (new rates, new payers, new
+                # months): the dashboard refreshes its pickers and the open
+                # Explorer/Code view when it changes (round 7 P1.20)
+                "data_generation": store.data_generation}
 
     @app.get("/api/states")
     def states():

@@ -340,6 +340,61 @@ Two codebases live in this repo:
    A rollup failure after the parquet part is durable does NOT fail the
    file (`_rebuild_rollups_best_effort`).
 
+### Round 7 additions (Nov 7, 2026) — rules a change must keep
+
+- **Request guard** (`api.LocalOnlyMiddleware`): only Host `localhost` /
+  `127.0.0.1` / `::1` (any port) is answered, and an unsafe method whose
+  `Origin` is foreign or whose `Sec-Fetch-Site` is `cross-site` gets 403. A
+  web page the user visits could otherwise upload a file (a re-ingest under a
+  real payer's filename REPLACES its rates), replace the Medicare anchor or
+  queue the catalog. Tests add `"testserver"` to `api.TRUSTED_HOSTS`
+  (`tests/mrfx/conftest.py`); a scratch harness built on TestClient must too.
+- **Materialised practice medians** (`Store.spine_materialised`,
+  `benchmark.practice_base_sql`): `practice_medians_v1` per (code, TIN) and
+  `practice_medians_payer_v1` per (payer, code, TIN), house basis, built
+  lazily once per `spine_generation` (bumped by every spine write, NOT by a
+  directory name refresh), parquet next to the DB, previous generation
+  removed. Readers get them only when `_house_eligible(market)`; the
+  practice/code filters come after via `_practice_attr_where` (the same
+  clauses `_market_where` ends with). Change the table SQL → bump the name's
+  `_vN`; never ROLLUP_SCHEMA_VERSION. A new reader of "median per practice"
+  must go through `practice_base_sql`, and the both-ways test in
+  `test_round7.py` must cover it.
+- **User edits vs the cache**: `Store.note_user_edit()` (a separate
+  `user_edit_generation`) invalidates every `Store.cached` answer without a
+  rebuild. Any new user-edited table a cached reader reads must call it.
+- **Exports** are built in `<spill dir>/exports` (never the system temp
+  folder), once, streamed with the BOM; the size check estimates rows x 243 B
+  (x1.25 ZIP, + the sort spill when it cannot sort in memory) and answers
+  507 with a sentence. DuckDB's COPY writes `tmp_<name>` and renames: clean
+  both on failure.
+- **Rounding**: every Python round of a displayed number goes through
+  `mrfx/rounding.half_up` (half away from zero on the printed decimal — what
+  DuckDB's `round()` and a person do). Python's `round()` is half-to-even and
+  printed 112 % where SQL printed 113 %.
+- **Supervisor**: `serve` exits `EXIT_NO_RESTART` (3) for port-in-use and a
+  broken config; the supervisor stops on it. The child's output is teed to
+  `<store>/diagnostics/serve.log`. A test of the supervisor must stub
+  `cli._serve_log_path` (or `_run_child_teed`): with a log path the child is
+  a real `Popen` of the repo's config.
+- **Updater order**: the new build's requirements install FIRST (from the zip,
+  in a temp dir); a failure changes nothing. Then the backup, the writes
+  (rolled back from the backup on an OSError), then `pip install -e .` only.
+  An older build is refused without `--allow-downgrade`.
+- **Ingest commit**: `ingest._commit_done` — after a part goes live, the
+  done-upsert is retried once, then the part is withdrawn; a non-done row
+  never owns the part it just wrote. Parked parts are adopted only while a
+  `files` row for them exists; forget/drop/reset discard them.
+- **Downloads**: segments are bound by no-progress, not the wall-clock cap;
+  a dead worker thread's claimed row goes back via `Store.release_claim`;
+  every link extractor reports truncation (`cap_note`), `child_count` is the
+  number listed.
+- **External files**: hospital CSVs read every `code|N` slot and the CMS wide
+  layout (`standard_charge|<payer>|<plan>|negotiated_dollar`); hospital
+  modifiers go through `modifiers.normalize`. The MPFS importer finds the
+  header under title rows (`_read_rows(text, key)`), prefers the non-QPP
+  PPRRVU and cross-checks the file's CONV FACTOR.
+
 ## Step 4 — Know the URL pipeline states
 
 `url_queue.status`: `queued → downloading → fetched → (expanding|ingesting) →

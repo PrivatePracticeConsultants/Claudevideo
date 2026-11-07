@@ -22,7 +22,7 @@ from .benchmark import (BenchmarkError, _market_where, normalize_market,
 from .catalog import code_info
 from .inflation import (BASIS_CAVEAT, deflator, erosion_line, load_index,
                         real_change_pct)
-from .store import Store, defuse_csv, mask_tin
+from .store import Store, defuse_csv, generation_cached, mask_tin
 
 # a rate-change list beyond this is unusable in a browser and a memory risk to
 # drain whole; cap it, keeping the biggest moves, and flag truncation honestly
@@ -44,6 +44,9 @@ def available_months(store: Store) -> list[str]:
 LATEST_PER_PAYER = "each payer's newest file vs its previous one"
 
 
+# per data generation: the digest asked once PER CLIENT (5 x 0.3-0.5 s on a
+# 99M-rate store) for an answer that changes only when a rollup lands
+@generation_cached('monitor.payer_months')
 def payer_months(store: Store, payers: list[str] | None = None) -> list[tuple]:
     """[(payer, newest_month, previous_month_or_None)], one row per payer —
     each payer's OWN publication history, ordered by payer."""
@@ -66,6 +69,10 @@ def payer_months(store: Store, payers: list[str] | None = None) -> list[tuple]:
         """, params).fetchall()]
 
 
+# per data generation (round 7 P2): an unscoped `changes` is one whole-store
+# two-month self-join — 13-24 s on a 99M-rate store, and the second call
+# paid it again
+@generation_cached('monitor.compute_rate_changes')
 def compute_rate_changes(store: Store, market: dict, *, subject: str | None = None,
                          min_pct: float | None = None) -> dict:
     """Rate moves between two months on matching contract lines (§7E.1).

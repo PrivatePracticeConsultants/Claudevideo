@@ -14,6 +14,7 @@ import json
 import logging
 import statistics
 
+from .rounding import half_up
 from . import __version__
 from .catalog import code_info
 from .config import MrfxConfig
@@ -721,15 +722,15 @@ def compute_benchmark(store: Store, subject: str, market: dict) -> dict:
         t = r.get(f"p{target}")
         r["target_rate"] = t
         r["gap_to_target"] = (
-            round(t - r["subject_rate"], 2)
+            half_up(t - r["subject_rate"], 2)
             if t is not None and r["subject_rate"] is not None else None
         )
         if mpfs and r["billing_code"] in mpfs and mpfs[r["billing_code"]]:
             base = mpfs[r["billing_code"]]
             r["subject_pct_medicare"] = (
-                round(100 * r["subject_rate"] / base, 0) if r["subject_rate"] else None
+                half_up(100 * r["subject_rate"] / base, 0) if r["subject_rate"] else None
             )
-            r["median_pct_medicare"] = round(100 * r["p50"] / base, 0) if r["p50"] else None
+            r["median_pct_medicare"] = half_up(100 * r["p50"] / base, 0) if r["p50"] else None
 
     return {
         "subject": subject,
@@ -806,15 +807,15 @@ def compute_opportunity(benchmark: dict, volumes: dict[str, float],
             "subject_rate": r["subject_rate"],
             "target_rate": t_rate,
             "conservative_rate": c_rate,
-            "opportunity_at_target": round(gap_t * units, 2),
-            "opportunity_at_conservative": round(gap_c * units, 2),
+            "opportunity_at_target": half_up(gap_t * units, 2),
+            "opportunity_at_conservative": half_up(gap_c * units, 2),
         })
         total_target += gap_t * units
         total_conservative += gap_c * units
     return {
         "rows": rows,
-        "total_at_target": round(total_target, 2),
-        "total_at_conservative": round(total_conservative, 2),
+        "total_at_target": half_up(total_target, 2),
+        "total_at_conservative": half_up(total_conservative, 2),
         "target_percentile": target,
         "conservative_percentile": conservative_percentile,
         "assumptions": (
@@ -911,7 +912,7 @@ def compute_payer_negotiation(store: Store, subject: str, market: dict,
         # and the report tables; a mean let one outlier code swing the headline)
         pcts = [r["subject_percentile"] for r in priced
                 if r.get("subject_percentile") is not None]
-        headline_pct = round(statistics.median(pcts)) if pcts else None
+        headline_pct = half_up(statistics.median(pcts)) if pcts else None
         sections.append({
             "payer": payer,
             "benchmark": bench,
@@ -946,8 +947,8 @@ def compute_payer_negotiation(store: Store, subject: str, market: dict,
         "payers": [s["payer"] for s in sections],
         "sections": sections,
         "has_volumes": bool(volumes),
-        "total_at_target": round(total_target, 2) if volumes and additive else None,
-        "total_at_conservative": (round(total_conservative, 2)
+        "total_at_target": half_up(total_target, 2) if volumes and additive else None,
+        "total_at_conservative": (half_up(total_conservative, 2)
                                   if volumes and additive else None),
         "best_single_payer": ({"payer": best["payer"],
                                "at_target": best["opportunity"]["total_at_target"],
@@ -1065,11 +1066,11 @@ def compute_payer_comparison(store: Store, subject: str, payer: str, market: dic
             continue
         subj, p50 = r["subject_rate"], r.get("p50")
         row = dict(r)
-        row["gap_to_median"] = round(p50 - subj, 2) if p50 is not None else None
+        row["gap_to_median"] = half_up(p50 - subj, 2) if p50 is not None else None
         # UPLIFT semantics, denominator = YOUR rate ("+45%" means your rate
         # × 1.45 reaches the median) — consistent across every % in this view
         row["gap_to_median_pct"] = (
-            round(100 * (p50 - subj) / subj, 1) if p50 is not None and subj else None)
+            half_up(100 * (p50 - subj) / subj, 1) if p50 is not None and subj else None)
         o = others.get(code)
         row["other_payers_rate"] = o["rate"] if o else None
         row["n_other_payers"] = o["n_payers"] if o else 0
@@ -1084,7 +1085,7 @@ def compute_payer_comparison(store: Store, subject: str, payer: str, market: dic
 
     def _avg(vals):
         vals = [v for v in vals if v is not None]
-        return round(statistics.mean(vals), 1) if vals else None
+        return half_up(statistics.mean(vals), 1) if vals else None
 
     pcts = [r["subject_percentile"] for r in rows if r.get("subject_percentile") is not None]
     below = [r for r in rows if r.get("p50") is not None and r["subject_rate"] < r["p50"]]
@@ -1092,11 +1093,11 @@ def compute_payer_comparison(store: Store, subject: str, payer: str, market: dic
     for i, c in enumerate(comps):
         pairs = [(r["subject_rate"], r["comp_rates"][i]) for r in rows
                  if r["comp_rates"][i] is not None]
-        prem = [round(100 * (cr - sr) / sr, 1) for sr, cr in pairs if sr]
+        prem = [half_up(100 * (cr - sr) / sr, 1) for sr, cr in pairs if sr]
         comp_summaries.append({
             "name": c["name"], "n_shared_codes": len(pairs),
             "n_paid_more": sum(1 for sr, cr in pairs if cr > sr),
-            "median_premium_pct": round(statistics.median(prem), 1) if prem else None,
+            "median_premium_pct": half_up(statistics.median(prem), 1) if prem else None,
         })
     return {
         "subject": subject,
@@ -1111,7 +1112,7 @@ def compute_payer_comparison(store: Store, subject: str, payer: str, market: dic
         "peer_set": bench["peer_set"],
         "target_percentile": bench["target_percentile"],
         "summary": {
-            "headline_percentile": round(statistics.median(pcts)) if pcts else None,
+            "headline_percentile": half_up(statistics.median(pcts)) if pcts else None,
             "n_codes": len(rows),
             "n_below_median": len(below),
             # honest averages across the subject's priced codes (each code
@@ -1121,10 +1122,10 @@ def compute_payer_comparison(store: Store, subject: str, payer: str, market: dic
             # and every % in the document agrees with every other.
             "avg_gap_to_median_pct": _avg([r["gap_to_median_pct"] for r in rows]),
             "avg_uplift_to_p75_pct": _avg([
-                round(100 * (r["p75"] - r["subject_rate"]) / r["subject_rate"], 1)
+                half_up(100 * (r["p75"] - r["subject_rate"]) / r["subject_rate"], 1)
                 for r in rows if r.get("p75") and r["subject_rate"]]),
             "avg_other_payer_diff_pct": _avg([
-                round(100 * (r["other_payers_rate"] - r["subject_rate"]) / r["subject_rate"], 1)
+                half_up(100 * (r["other_payers_rate"] - r["subject_rate"]) / r["subject_rate"], 1)
                 for r in rows if r.get("other_payers_rate") and r["subject_rate"]]),
         },
     }
@@ -1441,11 +1442,11 @@ def compute_rate_proposal(store: Store, subject: str, payer: str, market: dict,
             tgt = r.get("best_comparable")
         else:
             m = mpfs.get(r["billing_code"])
-            tgt = round(m * pct / 100.0, 2) if m is not None else None
-        proposed = None if tgt is None else max(round(float(tgt), 2), cur)
+            tgt = half_up(m * pct / 100.0, 2) if m is not None else None
+        proposed = None if tgt is None else max(half_up(float(tgt), 2), cur)
         units = volumes.get(r["billing_code"])
-        delta = None if proposed is None else round(proposed - cur, 2)
-        value = (round(delta * units, 2)
+        delta = None if proposed is None else half_up(proposed - cur, 2)
+        value = (half_up(delta * units, 2)
                  if delta is not None and units is not None else None)
         if value is not None:
             total_value += value
@@ -1454,7 +1455,7 @@ def compute_rate_proposal(store: Store, subject: str, payer: str, market: dict,
             "billing_code": r["billing_code"], "description": r.get("description"),
             "is_timed": r.get("is_timed"), "current": cur, "proposed": proposed,
             "delta": delta,
-            "delta_pct": (round(100 * delta / cur, 1)
+            "delta_pct": (half_up(100 * delta / cur, 1)
                           if delta is not None and cur else None),
             "kept": proposed is not None and proposed == cur,
             "no_reference": proposed is None,
@@ -1474,7 +1475,7 @@ def compute_rate_proposal(store: Store, subject: str, payer: str, market: dict,
             "n_no_reference": sum(1 for r in rows if r["no_reference"]),
             "has_volumes": bool(volumes),
             "n_valued": priced_value_units,
-            "total_annual_value": round(total_value, 2) if volumes else None,
+            "total_annual_value": half_up(total_value, 2) if volumes else None,
         },
     }
 
@@ -1822,9 +1823,19 @@ def _erosion_block(store: Store, benchmark: dict, e) -> str:
         f"<td class='num gap'>{p['real_cumulative_pct']:+.1f}%</td></tr>"
         for p in rows)
     worst = min(rows, key=lambda p: p["real_cumulative_pct"])
+    # These are the MARKET's per-payer median trajectories (every practice in
+    # scope, per month) — printed unlabelled inside a client's own report they
+    # read as the client's contracts: the client's 97110 went $40 -> $50
+    # while three peers went $60 -> $50, and the report told the client
+    # "Zed Health: -16.7 % ... the cut is deeper than it looks" (round 7
+    # P1.14). Say whose numbers they are.
+    who = e(str(benchmark.get("subject") or "this practice"))
     return (
-        "<h2>In real terms</h2>"
-        f"<p>{e(worst['erosion_line'])}</p>"
+        "<h2>In real terms — the market, not this practice</h2>"
+        "<p class='note'>Each line is that payer's MEDIAN rate across every practice "
+        f"in this market scope, month by month — the market's trajectory, not "
+        f"{who}'s own contracts.</p>"
+        f"<p>Market median — {e(worst['erosion_line'])}</p>"
         "<table><thead><tr><th>Payer</th><th class='num'>Span</th>"
         "<th class='num'>Change in dollars</th>"
         "<th class='num'>Change in real terms</th></tr></thead>"

@@ -1886,6 +1886,8 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="mrfx", description="MRF Explorer — drop-in payer rate dashboard")
     ap.add_argument("--config", default="config/mrfx.yaml")
     ap.add_argument("-v", "--verbose", action="store_true")
+    from . import __version__ as _v
+    ap.add_argument("--version", action="version", version=f"mrfx {_v}")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("serve", help="start API + dashboard + inbox watcher")

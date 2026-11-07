@@ -165,7 +165,15 @@ def test_the_placement_file_matches_the_raw_rows_and_follows_new_data(leads_app,
         a = con.execute(f"SELECT zip, nn FROM {moved} WHERE tin_value = ? ORDER BY zip",
                         [TINS["A"]]).fetchall()
     assert a == [("64105", 2), ("64106", 1)]
-    assert len(list(store.dir.glob("tin_zip_place.*.parquet"))) == 1, "the old file is removed"
+    # round 7 P2: the newest PREVIOUS stamp is kept (a request may still hold
+    # its read_parquet string); anything older is removed
+    assert len(list(store.dir.glob("tin_zip_place.*.parquet"))) == 2
+    store.save_npi("1510000003", "CLINICIAN 1510000003", "225100000X", "x", "Town", "MO",
+                   entity_type="NPI-1", zip_code="64107")
+    third = store.placement_relation()
+    left = sorted(p.name for p in store.dir.glob("tin_zip_place.*.parquet"))
+    assert len(left) == 2 and place.split("'")[1].rsplit("/", 1)[-1] not in left
+    assert third != moved
 
 
 # -- P1.7: leads are cached per generation and the second call is free ----------------

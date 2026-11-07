@@ -205,6 +205,9 @@ class QaCounters:
     bad_ref_ids: int = 0              # provider_reference ids that are not numeric
     bundled_items: int = 0            # bundle/capitation items excluded (not per-code rates)
     remote_ref_groups: int = 0        # skipped rate groups whose references are remote `location` links
+    unknown_arrangement: int = 0      # items whose negotiation_arrangement is neither ffs nor
+                                      # bundle/capitation (kept, counted — round 7 P2)
+    missing_negotiated_type: int = 0  # prices with a blank/missing negotiated_type (not dollars)
     missing_ref_ids: int = 0          # provider_reference ids a rate group cited that no reference
                                       # file defined (remote links excluded) — even when the
                                       # group's OTHER ids resolved (round 7 P1.7)
@@ -762,13 +765,21 @@ class InNetworkParser:
             code_type = "HCPCS" if re.fullmatch(r"[A-Z]\d{4}", code) else "CPT"
         else:
             code_type = family  # normalized 'CPT'/'HCPCS' (e.g. from 'CPT4')
-        arrangement = str(item.get("negotiation_arrangement") or "ffs").strip().lower()
-        if arrangement not in ("", "ffs"):
+        # "fee for service" / "fee-for-service" / "FFS" are all ffs: only an
+        # exact "ffs" passed before, and a payer spelling it out sent a whole
+        # file to 0 rows under bundled_items (round 7 P2)
+        arrangement = re.sub(r"[\s_\-]+", " ",
+                             str(item.get("negotiation_arrangement") or "ffs").strip().lower())
+        if arrangement == "fee for service":
+            arrangement = "ffs"
+        if arrangement in ("bundle", "capitation") or arrangement.startswith(("bundle", "capitat")):
             # bundle/capitation: negotiated_rate prices the whole bundle, NOT
             # this billing_code — letting it through would put a $500 bundle
             # price into an $85 per-service market median
             qa.bundled_items += 1
             return
+        if arrangement not in ("", "ffs"):
+            qa.unknown_arrangement += 1   # kept: a per-code price, labelled oddly
         self.result.items_matched += 1
         for grp in as_list(item.get("negotiated_rates")):
             if not isinstance(grp, dict):
@@ -883,7 +894,12 @@ class InNetworkParser:
                 as_list(price.get("billing_code_modifier")),
                 # sorted+deduped for the same grain reason as modifiers
                 sorted({clean_code(s) for s in as_list(price.get("service_code")) if str(s).strip()}))
-            ntype = str(price.get("negotiated_type", "") or "").strip().lower()
+            # "fee_schedule" / "Fee-Schedule" are "fee schedule": an exact
+            # match stored them as NOT dollars — out of every median (P2)
+            ntype = re.sub(r"[\s_\-]+", " ",
+                           str(price.get("negotiated_type", "") or "").strip().lower())
+            if not ntype:
+                r.qa.missing_negotiated_type += 1
             rate = clean_rate(price.get("negotiated_rate"))
             if rate is None:
                 # no readable dollar figure: nothing to analyze, never fabricate 0.0

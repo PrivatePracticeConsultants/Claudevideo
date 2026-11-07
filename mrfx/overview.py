@@ -26,6 +26,9 @@ from .store import Store
 # a payer must price at least this many distinct codes to appear in the index —
 # otherwise one lucky code makes it look like the best/worst payer in the market
 _MIN_INDEX_CODES = 3
+# a payer's code enters its index only when it prices this many practices
+# for it: one practice is that practice's contract, not the payer's level
+_MIN_INDEX_PRACTICES = 3
 
 
 def market_overview(store: Store, state: str | None = None) -> dict:
@@ -82,6 +85,13 @@ def market_overview(store: Store, state: str | None = None) -> dict:
         # codes — all on the per-TIN grain. `per_tin` collapses each practice to
         # one rate first; `pcnt` counts DISTINCT practices per payer (summing the
         # per-code counts would double-count a practice priced on >1 code).
+        # The denominator is the code's MARKET median — one rate per practice
+        # across all its payers, then the median across practices: the same
+        # number this page prints under "Most-priced codes". It was the median
+        # of PAYER medians, so a payer pricing one practice at $100 dragged
+        # the "market" to $75 and a payer paying ten practices exactly the
+        # market's $50 read 0.667, "~33 % below market" (round 7 P1.15). A
+        # payer's code counts only with _MIN_INDEX_PRACTICES practices.
         payer_index = con.execute(
             f"""WITH per_tin AS (
                     SELECT t.payer, t.billing_code, t.tin_value,
@@ -92,9 +102,15 @@ def market_overview(store: Store, state: str | None = None) -> dict:
                 base AS (
                     SELECT payer, billing_code, median(rate) AS payer_med
                     FROM per_tin GROUP BY payer, billing_code
+                    HAVING count(DISTINCT tin_value) >= {_MIN_INDEX_PRACTICES}
                 ),
-                mkt AS (SELECT billing_code, median(payer_med) AS mkt_med
-                        FROM base GROUP BY billing_code),
+                practice AS (
+                    SELECT billing_code, tin_value, median(t.negotiated_rate) AS rate
+                    FROM {rel} t {j} WHERE {where}
+                    GROUP BY billing_code, tin_value
+                ),
+                mkt AS (SELECT billing_code, median(rate) AS mkt_med
+                        FROM practice GROUP BY billing_code),
                 pcnt AS (SELECT payer, count(DISTINCT tin_value) AS practices
                          FROM per_tin GROUP BY payer)
                 SELECT b.payer,

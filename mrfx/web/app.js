@@ -151,6 +151,8 @@ function switchView(view) {
     const first = Object.keys(state.catalog)[0];
     if (first) selectCpt(first);
   }
+  // data landed while this view was closed: reload it now (P1.20)
+  if (view === "explorer" || view === "cpt") reloadIfStale(view);
   if (view === "markets") initMarkets();
   if (view === "roster") initRoster();
   if (view === "benchmark") initBenchmark();
@@ -204,6 +206,14 @@ async function loadStats(given) {
       if (state.lastNamed != null && e.named > state.lastNamed) onNamesUpdated();
       state.lastNamed = e.named;
     }
+    // new data landed (an ingest's rollup): every payer/month picker and the
+    // open Explorer/Code view were filled once at boot and went stale — a
+    // new payer was missing from every chip list and the Explorer strip said
+    // 51 rows while the store held 73 (round 7 P1.20)
+    if (s.data_generation != null) {
+      if (state.dataGen != null && s.data_generation !== state.dataGen) onDataUpdated();
+      state.dataGen = s.data_generation;
+    }
     $("#dataset-stats").innerHTML = html;
   } catch { $("#dataset-stats").textContent = "API unreachable"; }
 }
@@ -223,6 +233,46 @@ function onNamesUpdated() {
   if (v === "explorer") loadRates();
   // never abort a Code-page request still running to restart the same one
   else if (v === "cpt" && state.cptSelected && !cptCtl) selectCpt(state.cptSelected);
+}
+
+// Called when /api/stats reports a new data generation. Refills the pickers
+// that were filled once (payer chips, months, the Markets/Roster datalists),
+// keeping what the user picked, and reloads the open Explorer/Code view; a
+// view not open now reloads when it is next opened.
+async function onDataUpdated() {
+  loadStateOptions();
+  try {
+    const [{ payers }, { months }] = await Promise.all([
+      api("/api/payers").catch(() => ({ payers: null })),
+      api("/api/months").catch(() => ({ months: null })),
+    ]);
+    if (payers) {
+      const chips = $("#f-payer-chips");
+      const on = new Set(state.filters.payers || []);
+      if (chips) chips.innerHTML = payers.length
+        ? payers.map((p) => `<button class="chip${on.has(p) ? " on" : ""}" data-payer="${esc(p)}">${esc(p)}</button>`).join("")
+        : `<span class="muted">none ingested yet</span>`;
+      const opts = payers.map((p) => `<option value="${esc(p)}">`).join("");
+      for (const id of ["#mk-payer-opts", "#ro-payer-opts"]) { const dl = $(id); if (dl) dl.innerHTML = opts; }
+    }
+    if (months) {
+      const sel = $("#f-month");
+      if (sel) {
+        const keep = sel.value;
+        sel.innerHTML = `<option value="">all months</option>` +
+          months.map((m) => `<option>${esc(m)}</option>`).join("");
+        sel.value = months.includes(keep) ? keep : "";
+      }
+    }
+  } catch { /* the next generation retries */ }
+  state.staleViews = new Set(["explorer", "cpt"]);
+  reloadIfStale(state.view);
+}
+
+function reloadIfStale(v) {
+  if (!state.staleViews || !state.staleViews.has(v)) return;
+  if (v === "explorer") { state.staleViews.delete(v); loadRates(); loadSummary(); }
+  else if (v === "cpt" && state.cptSelected && !cptCtl) { state.staleViews.delete(v); selectCpt(state.cptSelected); }
 }
 
 async function loadStateOptions() {
@@ -282,7 +332,7 @@ async function loadOverview(stateCode = "") {
   const idx = (d.payer_index || []);
   const payerBlock = idx.length
     ? `<div class="ov-block"><h3>Which payers pay above vs below market</h3>
-       <div class="muted" style="margin-bottom:6px">Index = this payer's median rate ÷ the market median, across the codes it prices. <b>1.10 = pays ~10% above market</b>; 0.90 = ~10% below. Payers pricing under 3 codes are omitted.</div>
+       <div class="muted" style="margin-bottom:6px">Index = this payer's median rate ÷ the market median (all practices, all payers — the medians under "Most-priced codes"), across the codes it prices for at least 3 practices. <b>1.10 = pays ~10% above market</b>; 0.90 = ~10% below. Payers pricing under 3 such codes are omitted.</div>
        <div class="tablewrap"><table>
         <thead><tr><th>Payer</th><th class="num">Index</th><th>vs market</th><th class="num">Codes</th></tr></thead>
         <tbody>${idx.map((p) => {
@@ -892,9 +942,9 @@ function renderByCode(el, rows, mpfs, basis, anchor, refusal) {
     <td class="num muted">${fmtInt(c.entities)}</td></tr>`).join("");
   el.innerHTML = `<div class="ov-block"><h3>By code${mpfs ? " · ⚠ = below Medicare" : ""}</h3>
     <div class="tablewrap" style="max-height:34vh"><table>
-      <thead><tr><th>Code</th><th class="num">Median</th><th class="num">P25–P75</th>${mpfs ? `<th class="num">% of Medicare</th>` : ""}<th class="num">Practices</th></tr></thead>
+      <thead><tr><th>Code</th><th class="num">Median</th><th class="num">P25–P75</th>${mpfs ? `<th class="num">% of Medicare</th>` : ""}<th class="num">${state.grain === "npi" ? "NPIs" : "Practices"}</th></tr></thead>
       <tbody>${body}</tbody></table></div>
-    <div class="muted" style="margin-top:4px">Per code: each practice's own median first, then the spread across practices — the Benchmark's basis: ${esc(basis || "")}.${anchor ? ` % of Medicare vs ${esc(anchor)}.` : ""}${refusal ? ` <span class="warn-text">${esc(refusal)}</span>` : ""}</div></div>`;
+    <div class="muted" style="margin-top:4px">Per code: each ${state.grain === "npi" ? "NPI's" : "practice's"} own median first, then the spread across practices — the Benchmark's basis: ${esc(basis || "")}.${anchor ? ` % of Medicare vs ${esc(anchor)}.` : ""}${refusal ? ` <span class="warn-text">${esc(refusal)}</span>` : ""}</div></div>`;
 }
 
 const refresh = () => { loadRates(); loadSummary(); };
@@ -1011,15 +1061,15 @@ async function initFilters() {
     refreshFromFirstPage();
   });
   $("#btn-export").addEventListener("click", () => {
-    location.href = `/api/export.csv?${filterQuery({ sort: state.sort.col, dir: state.sort.dir, view: "explorer" })}`;
+    downloadInFrame(`/api/export.csv?${filterQuery({ sort: state.sort.col, dir: state.sort.dir, view: "explorer" })}`);
   });
   $("#btn-export-zip").addEventListener("click", () => {
-    location.href = `/api/export.zip?${filterQuery({ sort: state.sort.col, dir: state.sort.dir, view: "explorer" })}`;
+    downloadInFrame(`/api/export.zip?${filterQuery({ sort: state.sort.col, dir: state.sort.dir, view: "explorer" })}`);
   });
   $("#btn-outreach").addEventListener("click", () => {
     // .zip: the outreach CSV + its methodology sidecar together (comment lines
     // inside the CSV itself would break the mail-merge import it exists for)
-    location.href = `/api/export/outreach.zip?${filterQuery()}`;
+    downloadInFrame(`/api/export/outreach.zip?${filterQuery()}`);
   });
 
   $$("#rates-table thead th[data-sort]").forEach((th) =>
@@ -1286,7 +1336,7 @@ function initCptView() {
       grain: "tin", sort: "negotiated_rate", dir: "desc", latest: "1" });
     if ($("#cpt-base-only").checked) p.set("modifier", "base");
     if (cptState.value.trim()) p.set("state", cptState.value.trim().toUpperCase());
-    location.href = `/api/export.zip?${p}`;
+    downloadInFrame(`/api/export.zip?${p}`);
   });
 }
 
@@ -1302,6 +1352,9 @@ async function selectCpt(code) {
   const ctl = new AbortController();
   cptCtl = ctl;
   const current = () => cptCtl === ctl;
+  // a FINISHED request releases the gate (it stayed set for ever, so the
+  // Code page never refreshed when names or data arrived)
+  const done = () => { if (cptCtl === ctl) cptCtl = null; };
   const body = $("#cpt-body"), stateEl = $("#cpt-state");
   const cptState = $("#cpt-state-filter").value.trim();
   const info = state.catalog[code] || {};
@@ -1331,10 +1384,10 @@ async function selectCpt(code) {
   try {
     d = await api(`/api/code/${code}?${p}`, { signal: ctl.signal });
   } catch (e) {
-    if (!current()) return;            // superseded by a newer click
+    if (!current()) return;            // superseded by a newer click (it owns the gate)
     $("#cpt-payer-rank").innerHTML = "";
     stateEl.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
-    return;
+    return done();
   }
   if (!current()) return;
   $("#view-cpt h2").textContent = heading(d.as_of);
@@ -1344,7 +1397,7 @@ async function selectCpt(code) {
   trendReq.then((trend) => { if (current() && trend) renderTrend($("#cpt-trend"), trend.rows); });
   if (!d.ranked.length) {
     stateEl.innerHTML = `<div class="empty"><h3>No rates for ${esc(code)} under these filters</h3></div>`;
-    return;
+    return done();
   }
   stateEl.innerHTML = "";
   body.innerHTML = d.ranked.map((r, i) => `
@@ -1360,6 +1413,7 @@ async function selectCpt(code) {
       <td class="num">$${fmtMoney(r.max_rate)}</td>
     </tr>`).join("");
   $$("tr.clickable", body).forEach((tr) => tr.addEventListener("click", () => openEntity("tin", tr.dataset.uid)));
+  done();
 }
 
 // Payer leaderboard for one code: who pays best, with spread + confidence.
@@ -1776,8 +1830,39 @@ function reportPayloadOrConfirmNational() {
   return { ...p, market: { ...m, allow_national: true } };
 }
 
-async function openReportWith(url, payload) {
+// The detail sentence of a refused request (FastAPI {"detail": …}), never
+// the raw JSON wrapper.
+async function refusalText(r) {
+  const raw = await r.text();
+  try { return JSON.parse(raw).detail || raw; } catch (_) { return raw; }
+}
+
+// A GET export (CSV/ZIP, possibly many GB): the browser still streams it
+// straight to disk — no in-memory blob — through a hidden frame. A download
+// never "loads" the frame; a REFUSAL does (a JSON page), and its sentence is
+// shown here. `location.href` replaced the whole dashboard with
+// {"detail": …} and the user had to press Back (round 7 P1.21).
+function downloadInFrame(url) {
+  const f = document.createElement("iframe");
+  f.style.display = "none";
+  f.addEventListener("load", () => {
+    let text = "";
+    try { text = (f.contentDocument && f.contentDocument.body) ? f.contentDocument.body.innerText : ""; }
+    catch (_) { text = ""; }
+    if (text && text.trim()) {
+      let msg = text;
+      try { msg = JSON.parse(text).detail || text; } catch (_) { /* plain text */ }
+      alert("The export was not built.\n\n" + msg);
+    }
+    setTimeout(() => f.remove(), 1000);
+  });
+  f.src = url;
+  document.body.appendChild(f);
+}
+
+async function openReportWith(url, payload, onError) {
   if (!payload) return;  // e.g. national-confirm cancelled
+  const fail = (msg) => (onError ? onError(msg) : alert("Can't build this report.\n\n" + msg));
   // Open the tab SYNCHRONOUSLY, still inside the click's user-activation window
   // (any confirm() before this call is synchronous, so activation is preserved).
   // If we waited until after the await, a slow server render would push
@@ -1794,10 +1879,7 @@ async function openReportWith(url, payload) {
       // The refusals here are deliberate, plain-language guards (no state
       // scope, no rates for this subject) that the user is meant to ACT on —
       // so show the message, not the raw {"detail": …} JSON wrapper.
-      const raw = await r.text();
-      let msg = raw;
-      try { msg = JSON.parse(raw).detail || raw; } catch (_) { /* not JSON */ }
-      alert("Can't build this report.\n\n" + msg);
+      fail(await refusalText(r));
       return;
     }
     const objUrl = URL.createObjectURL(await r.blob());
@@ -1805,7 +1887,7 @@ async function openReportWith(url, payload) {
     setTimeout(() => URL.revokeObjectURL(objUrl), 60000);  // let the tab load, then free it
   } catch (e) {
     if (w) w.close();
-    alert("report failed: " + e.message);
+    fail("report failed: " + e.message);
   }
 }
 
@@ -2259,7 +2341,7 @@ async function downloadRatecardCsv() {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(state.lastRatecardPayload),
     });
-    if (!r.ok) { alert("CSV export failed: " + (await r.text())); return; }
+    if (!r.ok) { alert("CSV export failed.\n\n" + await refusalText(r)); return; }
     const a = document.createElement("a");
     a.href = URL.createObjectURL(await r.blob());
     a.download = "rate_card.csv";
@@ -2886,38 +2968,33 @@ function initDossier() {
     $("#ds-msg").textContent = "assembling…";
     const body = { subject, radius_miles: Number($("#ds-radius").value),
                    market: { month: "latest", therapy_only: false } };
+    // the tab opens NOW, inside the click (after the awaits Chrome's
+    // activation window has expired on a slow store and the popup is
+    // blocked); the HTML report's refusal is caught and shown (P1.23)
+    const reportTab = openReportWith("/api/report/dossier", body,
+                                     (msg) => { $("#ds-msg").textContent = msg; });
     try {
       const meta = await postJson("/api/report/dossier.json", body);
       $("#ds-msg").textContent = "";
       $("#ds-out").innerHTML = (meta.skipped || []).length
         ? `<div class="muted">Built with ${meta.skipped.length} section(s) omitted: ${
             esc(meta.skipped.join("; "))}</div>` : "";
-      postDownloadHtml("/api/report/dossier", body);
     } catch (e) { $("#ds-msg").textContent = ""; $("#ds-out").innerHTML = `<div class="muted">${esc(e.message)}</div>`; }
+    await reportTab;
   });
-  $("#mr-run").addEventListener("click", () => {
+  $("#mr-run").addEventListener("click", async () => {
     const st = $("#mr-state").value.trim();
     if (!st) { $("#mr-msg").textContent = "enter a state"; return; }
-    $("#mr-msg").textContent = "";
-    postDownloadHtml("/api/report/market", {
+    $("#mr-msg").textContent = "building…";
+    // an invalid state ("ZZ") threw an unhandled rejection and showed
+    // nothing (P1.23): the refusal now lands in the message line
+    await openReportWith("/api/report/market", {
       state: st, code: $("#mr-code").value.trim() || "97110",
       zip: $("#mr-zip").value.trim() || null,
-      market: { month: "latest", therapy_only: false } });
+      market: { month: "latest", therapy_only: false } },
+      (msg) => { $("#mr-msg").textContent = msg; });
+    if ($("#mr-msg").textContent === "building…") $("#mr-msg").textContent = "";
   });
-}
-
-// open a POSTed HTML report in a new tab (same trick the other reports use)
-async function postDownloadHtml(url, body) {
-  const r = await fetch(url, { method: "POST",
-    headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-  if (!r.ok) {
-    let msg = `HTTP ${r.status}`;
-    try { msg = (await r.json()).detail || msg; } catch { /* not json */ }
-    throw new Error(msg);
-  }
-  const html = await r.text();
-  const w = window.open("", "_blank");
-  if (w) { w.document.write(html); w.document.close(); }
 }
 
 function initGrowth() {
@@ -3634,7 +3711,7 @@ async function postDownload(url, payload, filename) {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    if (!r.ok) { alert("export failed: " + (await r.text())); return; }
+    if (!r.ok) { alert("The export was not built.\n\n" + await refusalText(r)); return; }
     const a = document.createElement("a");
     a.href = URL.createObjectURL(await r.blob());
     a.download = filename;
@@ -4363,10 +4440,17 @@ function initFilesView() {
     $("#v-body").innerHTML = r.rows.map((row) => `
       <tr><td>${esc(row.payer)}</td><td>${esc(row.tin_value || "")}</td><td>${esc(row.npi)}</td>
       <td>${esc(row.billing_code)}</td><td>${modTags(row.modifiers)}</td>
-      <td class="num">$${fmtMoney(row.negotiated_rate)}</td>
+      <td>${esc(row.negotiated_type || "")}</td>
+      <td class="num">${isDollarType(row.negotiated_type) ? "$" + fmtMoney(row.negotiated_rate) : esc(String(row.negotiated_rate))}</td>
       <td class="num">${row.delta_vs_expected != null ? fmtMoney(row.delta_vs_expected) : "–"}</td>
       <td class="sub">${esc(row.file_month || "")}</td><td class="sub">${esc(row.source_file)}</td></tr>`).join("");
   });
+}
+
+// a percentage / per-diem row is not dollars: no "$", no delta (P1.24)
+function isDollarType(t) {
+  const k = String(t || "").trim().toLowerCase();
+  return !k || ["negotiated", "fee schedule", "derived"].includes(k);
 }
 
 async function uploadFiles(files) {

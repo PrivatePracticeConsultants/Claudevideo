@@ -25,6 +25,7 @@ proof of collection, and absence in an MRF is not proof of non-coverage.
 
 from __future__ import annotations
 
+from .rounding import half_up
 from .benchmark import (BASIS_NOTE, BenchmarkError, _market_where,
                         _rates_relation, anchor_state, month_label, normalize_market)
 from .catalog import code_info
@@ -136,8 +137,8 @@ def negotiability(store: Store, code: str, market: dict) -> dict:
         rows = _dicts(con.execute(sql, [*params, _MIN_CELL]))
     for r in rows:
         p10, p50, p90 = r["p10"], r["p50"], r["p90"]
-        r["spread_pct"] = round(100 * (p90 - p10) / p50) if p50 else None
-        r["spread_ratio"] = round(p90 / p10, 2) if p10 else None
+        r["spread_pct"] = half_up(100 * (p90 - p10) / p50) if p50 else None
+        r["spread_ratio"] = half_up(p90 / p10, 2) if p10 else None
         sp = r["spread_pct"]
         r["negotiability"] = (
             "wide" if sp is not None and sp >= 25 else
@@ -189,14 +190,14 @@ def medicare_index(store: Store, code: str, market: dict) -> dict:
     base = anchor["rates"].get(code)
 
     def pct(v):
-        return round(100 * v / base) if base and v else None
+        return half_up(100 * v / base) if base and v else None
 
     for r in rows:
         r["pct_medicare"] = pct(r["median_rate"])
     return {
         "code": code, "description": code_info(code)[0],
         "as_of": month_label(m["month"]), "min_practices": _MIN_CELL,
-        "mpfs_rate": round(base, 2) if base else None,
+        "mpfs_rate": half_up(base, 2) if base else None,
         "mpfs_loaded": anchor["label"],
         "market_median": mkt[0], "market_p25": mkt[1], "market_p75": mkt[2],
         # surface the backing count so a "market median" from 1-4 practices reads

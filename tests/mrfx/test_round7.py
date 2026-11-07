@@ -317,7 +317,9 @@ def _js_function(name: str) -> str:
     from pathlib import Path
     src = (Path(__file__).resolve().parents[2] / "mrfx" / "web" / "app.js").read_text()
     i = src.index(f"function {name}(")
-    j = src.index("{", i)
+    if src[max(0, i - 6):i] == "async ":        # keep the keyword: `await` needs it
+        i -= 6
+    j = src.index("{", src.index(")", i))
     depth = 0
     for k in range(j, len(src)):
         depth += {"{": 1, "}": -1}.get(src[k], 0)
@@ -995,3 +997,223 @@ def test_the_real_2026_cms_layout_imports(store):
     with pytest.raises(MpfsImportError, match="33.4009"):
         import_official(store, data, "rvu26d.zip", conversion_factor=32.3465, state="MO")
     assert looks_official(_PPRRVU_2026_HEAD.encode(), "PPRRVU2026_Oct_nonQPP.csv")
+
+
+# -- P1.13 one rounding rule --------------------------------------------------------
+
+def test_half_up_is_the_rule_a_person_and_sql_use():
+    from mrfx.rounding import half_up
+    assert half_up(112.5) == 113 and isinstance(half_up(112.5), int)
+    assert half_up(12.5) == 13 and half_up(13.5) == 14          # round() said 12 and 14
+    assert half_up(2.675, 2) == 2.68                            # round() said 2.67
+    assert half_up(-0.5) == -1 and half_up(0.125, 2) == 0.13
+    assert half_up(112.5, 0) == 113.0 and isinstance(half_up(112.5, 0), float)
+    assert half_up(7) == 7 and half_up(1e300, 2) == 1e300
+
+
+def test_a_rate_at_112_5_pct_of_medicare_prints_113_everywhere(cfg, store):
+    """The subject is paid $45.00, the MPFS is $40.00: 112.5 %. By hand and
+    in SQL that is 113 %; Python's round() printed 112. Two codes put the
+    subject at positions 0 and 25: the headline is the median, 12.5 -> p13
+    (round() said p12 while the per-code SQL said p13)."""
+    from mrfx.benchmark import compute_benchmark, compute_payer_negotiation
+    from tests.mrfx.conftest import make_fixture
+    from tests.mrfx.test_v4 import innetwork, item
+
+    def group(i, rate):
+        return ([f"1{i:09d}"], f"43-00000{i:02d}", "ein", [(rate, None)])
+    items = [item("97110", [group(0, 45.0)] + [group(i, r) for i, r in
+                                               enumerate((50.0, 52.0, 54.0, 56.0), start=1)]),
+             item("97140", [group(0, 45.0)] + [group(i, r) for i, r in
+                                               enumerate((40.0, 50.0, 52.0, 54.0), start=1)])]
+    ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "r.json", innetwork(items=items)))
+    store.load_mpfs([{"code": "97110", "non_facility_rate": 40.0, "locality": "X"},
+                     {"code": "97140", "non_facility_rate": 40.0, "locality": "X"}], "test MPFS")
+    m = {"month": "2026-06", "allow_national": True}
+    b = compute_benchmark(store, "430000000", m)
+    row = {r["billing_code"]: r for r in b["rows"]}
+    assert row["97110"]["subject_pct_medicare"] == 113
+    assert (row["97110"]["subject_percentile"], row["97140"]["subject_percentile"]) == (0, 25)
+    neg = compute_payer_negotiation(store, "430000000", m)
+    assert neg["sections"][0]["headline_percentile"] == 13
+
+
+# -- P1.15 the payer index divides by the market median the page prints ----------
+
+def test_the_payer_index_divides_by_the_practice_market_median(cfg, store):
+    """Payer A pays ten practices $50 on three codes; payer B pays one other
+    practice $100. The page's market median is $50 (one rate per practice),
+    so A is AT market: 1.000. It read 0.667 ("~33 % below market") because
+    the denominator was the median of the two PAYER medians, $75. B prices
+    one practice — that practice's contract, not B's level: not indexed."""
+    from mrfx.overview import market_overview
+    from tests.mrfx.conftest import make_fixture
+    from tests.mrfx.test_v4 import innetwork, item
+    codes = ("97110", "97140", "97530")
+    a = [item(c, [([f"1{i:09d}"], f"43-00000{i:02d}", "ein", [(50.0, None)])
+                  for i in range(10)]) for c in codes]
+    b = [item(c, [(["1999999999"], "43-0000099", "ein", [(100.0, None)])]) for c in codes]
+    ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "a.json", innetwork(payer="A Health", items=a)))
+    ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "b.json", innetwork(payer="B Health", items=b)))
+    store.rebuild_rollups()
+    ov = market_overview(store)
+    idx = {p["payer"]: p["index"] for p in ov["payer_index"]}
+    assert idx == {"A Health": 1.0}
+    assert {c["billing_code"]: c["median"] for c in ov["top_codes"]}["97110"] == 50.0
+
+
+# -- P1.20 the dashboard learns that new data landed ------------------------------
+
+def test_stats_carries_the_data_generation_and_it_moves_with_a_rollup(cfg, store):
+    from fastapi.testclient import TestClient
+
+    from mrfx.api import create_app
+    from tests.mrfx.conftest import make_fixture
+    from tests.mrfx.test_v4 import innetwork, item
+    c = TestClient(create_app(cfg, store))
+    g0 = c.get("/api/stats").json()["data_generation"]
+    ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "n.json", innetwork(items=[
+        item("97110", [(["1000000000"], "43-0000000", "ein", [(40.0, None)])])])))
+    store.rebuild_rollups()
+    assert c.get("/api/stats").json()["data_generation"] != g0
+    from pathlib import Path
+    app = (Path(__file__).resolve().parents[2] / "mrfx" / "web" / "app.js").read_text()
+    assert "onDataUpdated()" in app and "reloadIfStale(view)" in app
+    assert "const done = () => { if (cptCtl === ctl) cptCtl = null; };" in app
+
+
+# -- P1.21 / P1.23 refusals are sentences, never a raw-JSON page -----------------
+
+def test_a_refused_export_and_report_show_their_sentence(tmp_path):
+    """Grain Entity -> Export CSV on a big store replaced the dashboard with
+    {"detail": …}; "Open market report" with state ZZ threw an unhandled
+    rejection and showed nothing. Both now say the sentence."""
+    pw, browser, page = _browser_page()
+    try:
+        def handler(route):
+            u = route.request.url
+            if u.endswith("/"):
+                route.fulfill(status=200, content_type="text/html",
+                              body='<span id="msg"></span>')
+            elif "/api/export.csv" in u:
+                route.fulfill(status=422, content_type="application/json",
+                              body='{"detail":"pick a payer and a code first"}')
+            elif "/api/report/market" in u:
+                route.fulfill(status=422, content_type="application/json",
+                              body='{"detail":"\'ZZ\' is not a US state code"}')
+            else:
+                route.fulfill(status=404, body="")
+        page.route("http://mrfx.test/**", handler)
+        page.goto("http://mrfx.test/")
+        page.add_script_tag(content="const $ = (s) => document.querySelector(s);\n"
+                                    + _js_function("refusalText") + "\n"
+                                    + _js_function("downloadInFrame") + "\n"
+                                    + _js_function("openReportWith"))
+        alerts = []
+        page.on("dialog", lambda d: (alerts.append(d.message), d.dismiss()))
+        page.evaluate("downloadInFrame('/api/export.csv?grain=entity')")
+        page.wait_for_timeout(1500)
+        assert any("pick a payer and a code first" in a for a in alerts), alerts
+        assert page.url == "http://mrfx.test/", "the dashboard stays where it was"
+        page.evaluate("openReportWith('/api/report/market', {state: 'ZZ'}, "
+                      "(m) => { document.querySelector('#msg').textContent = m; })")
+        page.wait_for_timeout(500)
+        assert "not a US state code" in page.inner_text("#msg")
+    finally:
+        browser.close()
+        pw.stop()
+
+
+# -- P1.22 / P1.24 labels -----------------------------------------------------------
+
+def test_the_by_code_header_and_the_validation_type_column(cfg, store):
+    """NPI grain: the by-code table said "Practices" for NPI counts. The
+    validation cross-check printed a percentage row as "$150.00" with a
+    dollar delta: it now has a Type column, "$" only on dollar rows, and no
+    delta for a non-dollar row."""
+    from pathlib import Path
+
+    from fastapi.testclient import TestClient
+
+    from mrfx.api import create_app
+    from tests.mrfx.conftest import make_fixture
+    from tests.mrfx.test_v4 import innetwork, item
+    app = (Path(__file__).resolve().parents[2] / "mrfx" / "web" / "app.js").read_text()
+    assert '${state.grain === "npi" ? "NPIs" : "Practices"}</th>' in app
+    assert "isDollarType(row.negotiated_type)" in app
+    doc = innetwork(items=[item("97110", [(["1000000000"], "43-0000000", "ein", [(40.0, None)])])])
+    doc["in_network"][0]["negotiated_rates"][0]["negotiated_prices"].append(
+        {"negotiated_type": "percentage", "negotiated_rate": 150.0,
+         "billing_class": "professional", "service_code": ["11"], "expiration_date": "9999-12-31"})
+    ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "v.json", doc))
+    rows = TestClient(create_app(cfg, store)).post("/api/validate", json={
+        "id": "430000000", "code": "97110", "expected_rate": 40}).json()["rows"]
+    by_type = {r["negotiated_type"]: r for r in rows}
+    assert by_type["negotiated"]["delta_vs_expected"] == 0.0
+    assert "delta_vs_expected" not in by_type["percentage"]
+
+
+# -- P1.14 the pitch report's real-terms block says whose numbers they are -------
+
+def test_the_real_terms_block_is_labelled_as_the_market(monkeypatch):
+    """The block is each payer's MEDIAN across every practice in scope. The
+    client's own 97110 went $40 -> $50 while three peers went $60 -> $50,
+    and the client's report printed "Zed Health: -16.7 % in dollars … the
+    cut is deeper than it looks" with no label. It now says it is the
+    market's trajectory, not the client's contracts."""
+    import html
+
+    import mrfx.monitor as mon
+    from mrfx.benchmark import _erosion_block
+    monkeypatch.setattr(mon, "compute_payer_trajectory", lambda store, m: {
+        "payers": [{"payer": "Zed Health", "first_month": "2025-01", "last_month": "2025-06",
+                    "cumulative_pct": -16.7, "real_cumulative_pct": -18.2,
+                    "erosion_line": "Zed Health: -16.7% in dollars, -18.2% in real terms"}],
+        "inflation": {"caveat": "", "basis": "index", "index_name": "CPI-U", "source": "BLS"}})
+    out = _erosion_block(None, {"market": {"month": "latest"}, "subject": "A REHAB"}, html.escape)
+    assert "the market, not this practice" in out
+    assert "not A REHAB&#x27;s own contracts" in out or "not A REHAB's own contracts" in out
+    assert "Market median — Zed Health" in out
+
+
+# -- P2 / P3 --------------------------------------------------------------------------
+
+def test_arrangement_and_type_spellings_are_normalised(cfg, store):
+    """"fee for service" sent a whole item to 0 rows as a "bundle", and a
+    "fee_schedule" price was stored as NOT dollars (out of every median).
+    By hand: the bundle is excluded (1 bundled item), "fee-for-service" and
+    "Fee_Schedule" are a dollar row at $50, an odd arrangement is kept and
+    counted, a blank type is counted and stays out of the dollar rows."""
+    from tests.mrfx.conftest import make_fixture
+    from tests.mrfx.test_v4 import innetwork, item
+
+    def it(arr, ntype, rate, npi):
+        x = item("97110", [([npi], "43-0000000", "ein", [(rate, None)])])
+        x["negotiation_arrangement"] = arr
+        x["negotiated_rates"][0]["negotiated_prices"][0]["negotiated_type"] = ntype
+        return x
+    doc = innetwork(items=[it("bundle", "negotiated", 500.0, "1000000001"),
+                           it("Fee-For-Service", "Fee_Schedule", 50.0, "1000000002"),
+                           it("per diem plan", "negotiated", 51.0, "1000000003"),
+                           it("ffs", "", 52.0, "1000000004")])
+    ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "arr.json", doc))
+    with store.connect() as con:
+        rows = dict(con.execute("SELECT npi, is_dollar_rate FROM rates").fetchall())
+        qa = json.loads(con.execute("SELECT qa FROM files").fetchone()[0])
+    assert rows == {"1000000002": True, "1000000003": True, "1000000004": False}
+    assert (qa["bundled_items"], qa["unknown_arrangement"], qa["missing_negotiated_type"]) == (1, 1, 1)
+
+
+def test_paused_rows_block_forget_and_the_caches_and_version(cfg, store, capsys):
+    from mrfx import __version__
+    from mrfx.cli import main
+    from mrfx.fetch import dedup_key
+    from mrfx.monitor import compute_rate_changes, payer_months
+    a = store.enqueue_url("https://x.example/a.json.gz", dedup_key("https://x.example/a.json.gz"))
+    store.update_url(a, filename="deadbeef_a.json.gz")
+    store.pause_url(a, 24, "paused: test")
+    assert store.url_inflight_for_filename("deadbeef_a.json.gz") is True
+    assert hasattr(compute_rate_changes, "uncached") and hasattr(payer_months, "uncached")
+    with pytest.raises(SystemExit):
+        main(["--version"])
+    assert capsys.readouterr().out.strip() == f"mrfx {__version__}" == "mrfx 0.7.0"

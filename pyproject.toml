@@ -1,6 +1,6 @@
 [project]
 name = "bcbs-mo-mrf"
-version = "0.1.0"
+dynamic = ["version"]
 description = "BCBS-MO PT/rehab MRF pipeline + MRF Explorer dashboard"
 requires-python = ">=3.11"
 
@@ -55,3 +55,6 @@ select = [
 [tool.ruff.lint.per-file-ignores]
 # Tests re-import inside test bodies on purpose (locality of the thing tested).
 "tests/**" = ["F401"]
+
+[tool.setuptools.dynamic]
+version = {attr = "mrfx.__version__"}

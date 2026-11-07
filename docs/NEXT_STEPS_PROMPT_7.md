@@ -1,5 +1,66 @@
 # Prompt for the next session, round 7 — the whole program, end to end (written for Claude Opus 5.5)
 
+> **STATUS (Nov 7, 2026): executed.** Commits 7f26133 (P0.1-P0.8), 74e2606
+> (P1.16-P1.19), 2d93825 (P1.1-P1.3), 8867aab (a stale updater test),
+> 0016d11 (P1.4-P1.12), then the round-7 group-5 commit (P1.13-P1.15,
+> P1.20-P1.24, the P2/P3 subset below, docs, version 0.7.0). Every item has
+> its test in `tests/mrfx/test_round7.py`; the P1.4-P1.12 tests were run
+> against the commit before theirs and failed there with the reproduction.
+> - **Snapshot (125 named-store endpoints):** after P0, 118 identical and the
+>   7 different are all P0.4 endpoints (leads / leaderboard / roster and the
+>   leads exports); after P1.1-P1.3, 125/125 identical to the post-P0
+>   snapshot (the P1.2 identical-numbers proof, plus the reader-by-reader
+>   both-ways test); after group 5, 123 identical and the 2 different are
+>   the Overview payer index (P1.15) — BCBS of Alabama in AL 1.122 -> 1.000
+>   (it IS that market), payers pricing < 3 practices per code dropped.
+>   P1.13's half-up rule moved nothing in the 125 (no .5 ties there).
+> - **Timings, 99M store, first call (second), before -> after P1.2:**
+>   benchmark 3.34 (3.45) -> 0.99 (0.99); negotiation report MO 2.81 (2.12)
+>   -> 1.32 (0.86); payer compare 1.11 -> 0.76; contract gaps 2.96 -> 0.64;
+>   quality/size 10.18 -> 5.56; digest 9.86 -> 7.86; packets (5) 20.84 ->
+>   11.19; leaderboard 4.43 -> 2.17; leads 6.66 -> 4.66; fee schedule 2.28
+>   (2.28) -> 6.10 (0.74) and dossier 4.23 (3.79) -> 5.05 (1.78), whose first
+>   calls now include a table build (2.98 s all-payer, 5.63 s per-payer, once
+>   per data generation). Named store: benchmark 0.35 -> 0.21, gaps 0.24 ->
+>   0.12, quality/size 0.36 -> 0.18, whole-store CSV 3.31 -> 2.43 s. Peak
+>   RSS unchanged (99M 6.31 -> 6.33 GB, the DuckDB pool at its cap; named
+>   2.59 GB). The 99M whole-store export: before, `No space left on device`
+>   (and 2.4 GB left in /tmp); after, a 507 sentence in 7.1 s, nothing left.
+> - **Live checks:** a real `mrfx serve` on a scratch copy of the named store
+>   in Chromium — dashboard loads behind the Origin guard, same-origin POSTs
+>   200, market report "ZZ" shows its sentence, a new payer's uploaded file
+>   appears in the Explorer chips 3 s after its rollup with no reload; on the
+>   99M scratch store the Entity export and the whole-store export each show
+>   their refusal sentence and the dashboard stays. The real CMS RVU26D zip
+>   imports (non-QPP, CF 33.4009 from the file, 97110 REST OF MISSOURI
+>   $27.16). The supervisor: a second launch exits 3 in ~1 s, a bad config
+>   exits 3, Ctrl-C stops parent and child.
+> - **P2/P3 done:** `changes` and `payer_months` cached per generation;
+>   `Store.cached` copies outside its lock; the previous placement stamp is
+>   kept one generation; `paused` rows block forget; "fee for service" /
+>   "fee_schedule" spellings normalised (unknown arrangements kept and
+>   counted, blank types counted); `mrfx --version`; pyproject reads the
+>   package version (`pip show` says 0.7.0); setuptools 84.2.1 (pip-audit
+>   clean); `tests/slow_tests.txt` regenerated (425 tests >= 0.5 s).
+> - **Suites at the end:** full 978 passed in 14 min 45 s; quick 563 in
+>   3 min 25 s (CLAUDE.md updated); ruff 0.
+> - **Left, with the reason:** the resume-guard items (206 after a republish,
+>   416 on a complete `.part`, the dead validator branch), `Retry-After`, the
+>   inline-download policy helper and the Windows rename locks — each needs a
+>   purpose-built HTTP fake and a Windows box to verify, and none moves a
+>   number; the re-paste URL refresh for queued rows; multi-JSON zips (still
+>   read the largest member; GETTING_STARTED Step 6 now says so); two same-month files of
+>   one payer pooled (needs a supersede rule and a methodology line — a number
+>   change to decide deliberately); 8-digit numeric EIN padding (changes
+>   entity grouping; decide with the user); the deferred-group memory bound
+>   of the classic fallback; enrichment's per-batch raw scans;
+>   `medicare_anchor` per call; the bulk-cache taxonomy slot; ZIP placement
+>   in market sizing; the radius-before-LIMIT feeds; leverage's unplaced
+>   practices; the leave-one-out Leads gap; the P3 parser/store/external nits
+>   and the queue polish list. **Not measurable here:** Windows (locks, the
+>   .bat launchers, OneDrive paths), a full-size NPPES weekly, the 2026
+>   referral (Hop Teaming) release.
+
 Rounds 1–6 are `docs/NEXT_STEPS_PROMPT.md`, `_2.md` … `_6.md`; each has a
 status block of what it closed. This memo came out of a whole-program audit on
 Nov 7, 2026 (HEAD f5bb463): is everything running as it should — accuracy,

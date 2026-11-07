@@ -41,6 +41,7 @@ from __future__ import annotations
 import logging
 import statistics
 
+from .rounding import half_up
 from .catalog import code_info
 from .store import Store
 
@@ -147,19 +148,19 @@ def visit_economics(store: Store, subject: str, market: dict | None = None, *,
             priced[(payer, c)] * u for c, u in covered.items()) / cov_units
         rows.append({
             "payer": payer,
-            "value_per_billed_unit": round(value_per_unit, 2),
-            "value_per_visit": (round(value_per_unit * units_per_visit, 2)
+            "value_per_billed_unit": half_up(value_per_unit, 2),
+            "value_per_visit": (half_up(value_per_unit * units_per_visit, 2)
                                 if units_per_visit else None),
             "codes_priced": len(covered),
             "codes_in_mix": len(mix),
-            "mix_coverage_pct": round(100.0 * cov_units / total_units, 1),
+            "mix_coverage_pct": half_up(100.0 * cov_units / total_units, 1),
             "annual_medicare_units": int(cov_units),
-            "annual_value_at_this_rate": round(value_per_unit * cov_units, 2),
+            "annual_value_at_this_rate": half_up(value_per_unit * cov_units, 2),
         })
     rows.sort(key=lambda r: r["value_per_billed_unit"], reverse=True)
 
     best, worst = (rows[0], rows[-1]) if rows else (None, None)
-    spread = (round(best["value_per_billed_unit"] - worst["value_per_billed_unit"], 2)
+    spread = (half_up(best["value_per_billed_unit"] - worst["value_per_billed_unit"], 2)
               if best and worst and best is not worst else None)
     unit_word = "visit" if units_per_visit else "billed unit"
 
@@ -169,7 +170,7 @@ def visit_economics(store: Store, subject: str, market: dict | None = None, *,
 
     headline = "No payer prices enough of this practice's mix to value a visit."
     if rows and spread:
-        gap = (round(_fig(best) - _fig(worst), 2))
+        gap = (half_up(_fig(best) - _fig(worst), 2))
         headline = (
             f"On this practice's own Medicare mix, a {unit_word} is worth "
             f"${_fig(best):,.2f} from {best['payer']} and ${_fig(worst):,.2f} "
@@ -188,7 +189,7 @@ def visit_economics(store: Store, subject: str, market: dict | None = None, *,
             if units_per_visit else None),
         "mix": [{"billing_code": c, "description": code_info(c)[0],
                  "annual_units": int(u),
-                 "share_pct": round(100.0 * u / total_units, 1)}
+                 "share_pct": half_up(100.0 * u / total_units, 1)}
                 for c, u in top_mix],
         "mix_year": util.get("year"),
         "total_annual_units": int(total_units),
@@ -238,10 +239,10 @@ def weighted_position(store: Store, subject: str, market: dict | None = None, *,
 
     weighted_rows = [r for r in rows if vols.get(r["billing_code"], 0) > 0]
     covered_codes = len(weighted_rows)
-    coverage = round(100.0 * covered_codes / len(rows), 1) if rows else 0.0
+    coverage = half_up(100.0 * covered_codes / len(rows), 1) if rows else 0.0
 
-    unweighted = round(sum(r["subject_percentile"] for r in rows) / len(rows), 1)
-    median_pct = round(statistics.median(r["subject_percentile"] for r in rows), 1)
+    unweighted = half_up(sum(r["subject_percentile"] for r in rows) / len(rows), 1)
+    median_pct = half_up(statistics.median(r["subject_percentile"] for r in rows), 1)
     if coverage < MIN_WEIGHT_COVERAGE_PCT or not weighted_rows:
         return {
             "loaded": False, "subject": subject,
@@ -257,9 +258,9 @@ def weighted_position(store: Store, subject: str, market: dict | None = None, *,
         }
 
     total_w = sum(vols[r["billing_code"]] for r in weighted_rows)
-    weighted = round(sum(r["subject_percentile"] * vols[r["billing_code"]]
+    weighted = half_up(sum(r["subject_percentile"] * vols[r["billing_code"]]
                          for r in weighted_rows) / total_w, 1)
-    shift = round(weighted - unweighted, 1)
+    shift = half_up(weighted - unweighted, 1)
     heaviest = max(weighted_rows, key=lambda r: vols[r["billing_code"]])
     return {
         "loaded": True, "subject": subject,
@@ -271,14 +272,14 @@ def weighted_position(store: Store, subject: str, market: dict | None = None, *,
         "n_codes_total": len(rows),
         "volume_source": src,
         "heaviest_code": heaviest["billing_code"],
-        "heaviest_code_share_pct": round(
+        "heaviest_code_share_pct": half_up(
             100.0 * vols[heaviest["billing_code"]] / total_w, 1),
         "headline": (
             f"Weighted by what this practice actually bills, its position is "
             f"p{weighted:g} — {abs(shift):g} points "
             f"{'above' if shift > 0 else 'below'} the unweighted average p{unweighted:g}, "
             f"because {heaviest['billing_code']} carries "
-            f"{round(100.0 * vols[heaviest['billing_code']] / total_w):g}% of the volume."
+            f"{half_up(100.0 * vols[heaviest['billing_code']] / total_w):g}% of the volume."
             if abs(shift) >= 1 else
             f"Weighting by volume barely moves this practice's position "
             f"(p{weighted:g} vs an unweighted average of p{unweighted:g}) — the rate case is consistent "

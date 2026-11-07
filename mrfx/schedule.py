@@ -23,6 +23,7 @@ import html
 import json
 import statistics
 
+from .rounding import half_up
 from . import __version__
 from .benchmark import (
     anchor_state,
@@ -175,7 +176,7 @@ def compute_fee_schedule(store: Store, subject: str, market: dict, *,
         pct = None
         base = mpfs.get(code)
         if base and r["rate"]:
-            pct = round(100 * r["rate"] / base, 0)
+            pct = half_up(100 * r["rate"] / base, 0)
         mk = market_by.get((r["payer"], code)) or {}
         mkt_med, n_peers = mk.get("market_median"), mk.get("n_peers") or 0
         # THINNESS GATE: "the peer median" over one or two contracts is a single
@@ -187,7 +188,7 @@ def compute_fee_schedule(store: Store, subject: str, market: dict, *,
             mkt_med = None
         # signed % the subject sits above (+) or below (-) what this payer pays
         # peers; None when there aren't enough peers to say
-        vs = (round(100 * (r["rate"] - mkt_med) / mkt_med)
+        vs = (half_up(100 * (r["rate"] - mkt_med) / mkt_med)
               if r["rate"] and mkt_med else None)
         entry["rates"][r["payer"]] = {
             "rate": r["rate"], "pct_medicare": pct,
@@ -251,13 +252,13 @@ def payer_scorecard(fee_schedule: dict) -> dict:
                 pcts_best.append(100 * v["rate"] / best_rate[code])
         if not rates:
             continue
-        med_medicare = round(statistics.median(pcts_med), 0) if pcts_med else None
-        med_best = round(statistics.median(pcts_best), 0) if pcts_best else None
+        med_medicare = half_up(statistics.median(pcts_med), 0) if pcts_med else None
+        med_best = half_up(statistics.median(pcts_best), 0) if pcts_best else None
         rows.append({
             "payer": payer,
             "n_codes": len(rates),
             "n_comparable": len(pcts_best),
-            "median_rate": round(statistics.median(rates), 2),
+            "median_rate": half_up(statistics.median(rates), 2),
             "median_pct_medicare": med_medicare,
             "median_pct_of_best": med_best,
             # one scale for everyone (see use_medicare): a payer that lacks the

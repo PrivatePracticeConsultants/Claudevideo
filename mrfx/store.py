@@ -2525,8 +2525,11 @@ class Store:
         QUEUE, not just the files table)."""
         with self.connect() as con:
             return con.execute(
+                # 'paused' too: a paused (or parked) row wakes by itself,
+                # re-downloads and re-ingests the file the user just removed
                 "SELECT 1 FROM url_queue WHERE filename = ? AND status IN "
-                "('queued', 'downloading', 'fetched', 'expanding', 'ingesting') LIMIT 1",
+                "('queued', 'downloading', 'fetched', 'expanding', 'ingesting', 'paused') "
+                "LIMIT 1",
                 [filename],
             ).fetchone() is not None
 
@@ -3880,8 +3883,11 @@ class Store:
         with self._gen_cache_lock:
             if self._gen_cache.get("_gen") != gen:
                 self._gen_cache = {"_gen": gen}
-            if k in self._gen_cache:
-                return copy.deepcopy(self._gen_cache[k])
+            held = self._gen_cache.get(k, _MISSING)
+        if held is not _MISSING:
+            # copied OUTSIDE the process-wide lock: a big answer's deep copy
+            # held every other cached reader waiting (round 7 P2)
+            return copy.deepcopy(held)
         value = compute()
         with self._gen_cache_lock:
             if self._gen_cache.get("_gen") == gen:
@@ -4293,12 +4299,19 @@ class Store:
                                 GROUP BY 1, 2
                             ) TO '{sql_path(tmp)}' (FORMAT PARQUET)""")
                     os.replace(tmp, path)
-                    for old in self.dir.glob("tin_zip_place.*.parquet"):
-                        if old != path:
-                            try:
-                                old.unlink()
-                            except OSError:      # still open on Windows: next time
-                                pass
+                    # keep the newest PREVIOUS stamp too: a request that took
+                    # its read_parquet('…') string a moment ago (leverage,
+                    # radius and the dossier reuse it across statements)
+                    # must not get "No files found" because a part landed
+                    # mid-request (round 7 P2)
+                    olds = sorted((p for p in self.dir.glob("tin_zip_place.*.parquet")
+                                   if p != path), key=lambda p: p.stat().st_mtime,
+                                  reverse=True)
+                    for old in olds[1:]:
+                        try:
+                            old.unlink()
+                        except OSError:      # still open on Windows: next time
+                            pass
         return f"read_parquet('{sql_path(path)}')"
 
     def _part_sigs(self) -> dict[str, str]:
@@ -4760,6 +4773,9 @@ for _name in _QUEUE_WRITERS_ALWAYS:
     setattr(Store, _name, _signals_queue(getattr(Store, _name), True))
 for _name in _QUEUE_WRITERS_IF_DONE:
     setattr(Store, _name, _signals_queue(getattr(Store, _name), False))
+
+
+_MISSING = object()
 
 
 def generation_cached(name: str, *, daily: bool = False):
