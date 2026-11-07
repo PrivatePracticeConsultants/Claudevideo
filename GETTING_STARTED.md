@@ -698,6 +698,24 @@ it (Ctrl-C), edit, start again; the queue resumes where it left off.
 > cores, and past your RAM they crash the machine into the swap file. The
 > caps above are where more truly stops helping.
 
+### When a payer's server stops answering
+
+Payer servers often accept a download and then go quiet for minutes. The app
+no longer lets that hold one of your download slots: after **4 minutes with no
+data** the file is **parked**. Its slot goes to the next file in the queue
+straight away, and everything it had downloaded so far is kept. The parked
+file goes back in line after 10 minutes, or immediately if nothing else is
+waiting, and picks up exactly where it stopped. If the next file's server also
+goes quiet, it is parked the same way and the slot moves on again. So
+something is always downloading while you wait on a slow payer.
+
+In the Files & imports list a parked file shows an amber **parked** badge and
+the time it goes back in line; **try now** sends it back at once. If a server
+sends nothing at all six times in a row, it is treated as down: the file is
+paused for 24 hours (the longer pause above) and then tries again by itself.
+All of this is in `config/mrfx.yaml` (`download_park_seconds: 240`,
+`download_park_minutes: 10`, `download_park_limit: 6`; `0` turns parking off).
+
 ---
 
 ## Command-line reference (optional)
@@ -858,6 +876,31 @@ already have is automatically **skipped, not duplicated**.
   / `download_auto_resumes`); Resume stopped; the monthly refresh (if on)
   retries a not-yet-posted monthly file daily until the 10th; NPPES name file
   built in about a minute.
+
+## What changed in the November 7, 2026 (round 6) update
+
+- **Downloads never wait on a silent payer.** A file whose server goes quiet
+  for 4 minutes is parked and the next file starts (see "When a payer's server
+  stops answering" above).
+- **Client packets and the monthly digest compare each payer's own newest file
+  with that payer's previous one.** On real data one payer's late file used to
+  make "this month" empty for everyone else; the packet now says which months
+  it compared, payer by payer.
+- **Much faster on big stores**, same numbers: client packets about 3×, the
+  Clients tab digest about 2× (instant on a repeat visit), the outreach export
+  about 10×, the visit calculator about 6×, the radius map and leverage
+  summary 4-20×, and the Overview's quality panels instant on a repeat visit.
+- **The prospect dossier compares a practice within its own state** (it used
+  to pool every state you had loaded) and every position now shows how many
+  peer practices stand behind it; the printed benchmark marks positions resting
+  on fewer than 5 peers as *thin*.
+- **Smaller honesty fixes:** steal-share counts only therapy practices as
+  competitors and says CMS hides referral pairs under 11 patients; tax IDs
+  that look personal are masked the same way on screen and in every export;
+  the Leads list says when it stops at 1,000; payer concentration uses one
+  rate per practice; notes on every report name exactly which rows were used.
+- **The dashboard never shows a stale answer**: change a filter twice quickly
+  and the slower, older reply can no longer paint over the newer one.
 
 ## Debug FAQ — what it says, what it means, what to do
 

@@ -343,7 +343,19 @@ Two codebases live in this repo:
 ## Step 4 — Know the URL pipeline states
 
 `url_queue.status`: `queued → downloading → fetched → (expanding|ingesting) →
-done | failed | skipped | oversize`. `kind`: `toc / page / in_network /
+done | failed | skipped | oversize`, plus `paused` off `downloading`. A
+`paused` row with `park_count > 0` is PARKED (round 6, user request): its
+server sent < 1 MB for `download_park_seconds` (240), so `download()` raised
+`DownloadError(parked=True)` straight out of the stream, the .part is kept,
+and `Store.park_url` set it aside for `download_park_minutes` (10).
+`wake_parked_urls(only_if_idle=True)` hands it back to a downloader that finds
+nothing fresh queued; the 60 s coordinator wake returns it when the cool-down
+ends; a CLI drain counts parked rows as in flight. A park after >= 1 MB of
+progress resets the count; `download_park_limit` (6) fruitless parks in a row
+fall through to the long pause (`pause_url`, `park_count = 0`,
+`download_pause_hours`, `auto_resumes`). The park only engages when it is
+shorter than `download_stall_seconds`. `tests/mrfx/test_download_park.py`
+(one slot, stalled file first in line: the next file still lands). `kind`: `toc / page / in_network /
 provider_reference / allowed_amounts / duplicate / unknown`.
 `oversize` is a distinct terminal state for files over confirm_over_gb — NOT
 'failed' (so one big payer's shards don't inflate the failure count or bury a
@@ -584,12 +596,29 @@ condition that isn't an equality between the two sides
 `docs/NEXT_STEPS_PROMPT_4.md` was the output-speed plan (executed; status block);
 `docs/NEXT_STEPS_PROMPT_5.md` was the round-5 plan (install robustness, idle
 polling, the DuckDB visibility bug, the Explorer's pooled default, joined-column
-filters — executed; status block at its top). `docs/NEXT_STEPS_PROMPT_6.md` is
-the current plan: an audit of every output — the store-wide "newest month"
-that empties client packets on real data, new-to-network's missing basis,
-the 500s and silent state-name misses, the remaining tie-order spots, and the
-measured per-visit costs (packets O(N²), the Clients digest, the visit card,
-outreach, quality scans, ZIP placement).
+filters — executed; status block at its top). `docs/NEXT_STEPS_PROMPT_6.md` was
+the round-6 audit of every output (executed; status block at its top): each
+payer's own months for packets, digest, rate changes and new-to-network; the
+500s and state-name misses; tie orders; and the per-visit costs.
+
+**Round 6 lessons.** *A store-wide "newest month" is a bug, not a
+simplification:* one payer's file dated two months ahead (HEALTHSCOPE, 76 rows
+in 2026-12) emptied every other payer's "this month". Months are per payer
+(`monitor.payer_months`). *Cache by data generation, hand out copies:*
+`Store.cached` / `@generation_cached` keep whole-store answers until the next
+rollup; a caller that decorates its result gets a deep copy. *Placement is a
+file, stamped by its inputs:* `Store.placement_relation()` writes
+`tin_zip_place.<sha of part signatures + NPI-directory size/ZIPs/last
+enrichment>.parquet`, so any change to either yields a new file on the next
+request and never a stale one — and it is built per (TIN, NPI) before the
+directory join (39 s -> 6 s at 99M: the therapy-taxonomy LIKEs had run on every
+rate row). *Count the newcomers before taking medians* (new-to-network 10.7 ->
+4.4 s). *Every client document is scoped to one state* — the dossier now
+defaults to the practice's own state, labelled; leverage keeps the caller's
+market because its geography is the radius. *Playwright's sync API delivers
+route callbacks and events only inside Playwright calls:* wait with
+`page.wait_for_timeout`, never `time.sleep`, and fire a promise you mean to
+hold with `evaluate("() => { f(); }")` — `evaluate("f()")` awaits it.
 
 **Round 5 lessons.** *Every panel writes to its own box:* the Leads tab's
 closures panel and the Clients panel both used `id="cl-out"`, so "Find

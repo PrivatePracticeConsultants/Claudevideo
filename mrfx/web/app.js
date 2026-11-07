@@ -4087,7 +4087,7 @@ async function loadUrlQueue() {
     // over-size files are their OWN category, not failures — otherwise one big
     // payer's shards make the failure count look alarming and bury real errors
     oversize: (n) => `<span class="warn-text">${n} too big (needs your OK)</span>`,
-    paused: (n) => `<span class="warn-text">${n} paused <span class="muted">(their servers stalled — they retry by themselves)</span></span>`,
+    paused: (n) => `<span class="warn-text">${n} paused <span class="muted">(their servers stopped sending — parked ones rejoin the line within minutes, the rest retry by themselves)</span></span>`,
     failed: (n) => `<span class="err-text">${n} failed</span>`,
   };
   const parts = ["downloading", "expanding", "ingesting", "fetched", "oversize", "paused",
@@ -4115,7 +4115,10 @@ async function loadUrlQueue() {
       : u.status === "skipped" ? "skipped"
       : u.status === "oversize" || u.status === "paused" ? "pending_confirmation"  // amber, not red
       : "processing";
-    const badgeLabel = u.status === "oversize" ? "too big" : u.status;
+    // a PARKED download (its server went quiet for a few minutes) stepped
+    // aside so the next file could use the slot; it rejoins within minutes
+    const parked = u.status === "paused" && (u.park_count || 0) > 0;
+    const badgeLabel = u.status === "oversize" ? "too big" : parked ? "parked" : u.status;
     let statusCell = `<span class="badge ${esc(badgeClass)}">${esc(badgeLabel)}</span>`;
     if (u.status === "downloading" && u.bytes_total > 0) {
       statusCell += `<div class="progress"><div class="progress-fill" style="width:${Math.round(u.progress)}%"></div>
@@ -4161,7 +4164,9 @@ async function loadUrlQueue() {
     // files are showing errors".
     else if (u.error) notes = `<span class="${
       u.status === "oversize" || u.status === "paused" ? "warn-text" : u.status === "skipped" ? "muted" : "err-text"
-    }">${esc(u.error)}${u.status === "paused" && u.retry_after ? ` Resumes about ${esc(localTime(u.retry_after))}.` : ""}</span>`;
+    }">${esc(u.error)}${u.status === "paused" && u.retry_after
+      ? (parked ? ` Back in line about ${esc(localTime(u.retry_after))}.`
+                : ` Resumes about ${esc(localTime(u.retry_after))}.`) : ""}</span>`;
     return `<tr>
       <td title="${esc(u.url)}">${esc(shown)}</td>
       <td>${esc(KIND_LABEL[u.kind] || u.kind || "…")}</td>

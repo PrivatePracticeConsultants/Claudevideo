@@ -1940,6 +1940,10 @@ class Store:
         # how many times it has already been paused (fetch.download_pause_hours)
         con.execute("ALTER TABLE url_queue ADD COLUMN IF NOT EXISTS retry_after TIMESTAMP")
         con.execute("ALTER TABLE url_queue ADD COLUMN IF NOT EXISTS auto_resumes INTEGER DEFAULT 0")
+        # parks in a row with no progress (fetch: download_park_seconds); a
+        # paused row with park_count > 0 is PARKED (back within minutes), one
+        # with 0 is on the long pause
+        con.execute("ALTER TABLE url_queue ADD COLUMN IF NOT EXISTS park_count INTEGER DEFAULT 0")
 
     def _register_views(self, con: duckdb.DuckDBPyConnection) -> None:
         """(Re)point the derived views. Callers must hold write_lock."""
@@ -2251,7 +2255,7 @@ class Store:
     def update_url(self, url_id: int, **fields) -> None:
         allowed = {"kind", "status", "filename", "bytes_total", "bytes_done",
                    "progress", "rows_emitted", "child_count", "error", "parent_id",
-                   "content_sha"}
+                   "content_sha", "park_count"}
         fields = {k: v for k, v in fields.items() if k in allowed}
         if fields.get("status") in ("done", "failed", "skipped", "oversize"):
             fields["finished_at"] = _utcnow()
@@ -2598,7 +2602,8 @@ class Store:
                 "UPDATE url_queue SET status = ?, error = NULL, progress = 0, bytes_done = 0, "
                 # plain retry must NOT inherit a prior "download anyway" — that
                 # override is one-shot; only force_size_requeue re-sets it
-                "force_size = false, retry_after = NULL WHERE id = ?", [status, url_id])
+                "force_size = false, retry_after = NULL, park_count = 0 WHERE id = ?",
+                [status, url_id])
             return True
 
     def force_size_requeue(self, url_id: int) -> bool:
@@ -2642,8 +2647,45 @@ class Store:
             con.execute(
                 "UPDATE url_queue SET status = 'paused', error = ?, "
                 "retry_after = ? + to_seconds(CAST(? AS DOUBLE)), "
-                "auto_resumes = coalesce(auto_resumes, 0) + 1 WHERE id = ?",
+                "auto_resumes = coalesce(auto_resumes, 0) + 1, park_count = 0 WHERE id = ?",
                 [error, _utcnow(), float(hours) * 3600.0, url_id])
+
+    def park_url(self, url_id: int, minutes: float, park_count: int, error: str) -> None:
+        """Step a download aside for a few minutes (its server sent nothing for
+        download_park_seconds): it holds no slot, keeps its partial bytes, and
+        rejoins the queue when the cool-down ends — or at once, through
+        wake_parked_urls, when no other file is waiting. Not a long pause: it
+        does not spend one of the download_auto_resumes."""
+        with self.write_lock, self.connect() as con:
+            con.execute(
+                "UPDATE url_queue SET status = 'paused', error = ?, "
+                "retry_after = ? + to_seconds(CAST(? AS DOUBLE)), park_count = ? "
+                "WHERE id = ?",
+                [error, _utcnow(), float(minutes) * 60.0, int(park_count), url_id])
+        self.queue_changed()
+
+    def wake_parked_urls(self, only_if_idle: bool = False) -> int:
+        """Every PARKED download back in the queue now, oldest park first in
+        the claim order (they keep their ids). `only_if_idle`: only when no
+        fresh file is queued — a downloader with nothing else to do goes back
+        to the files it stepped away from instead of sitting idle."""
+        with self.write_lock, self.connect() as con:
+            if only_if_idle and con.execute(
+                    "SELECT count(*) FROM url_queue WHERE status = 'queued'").fetchone()[0]:
+                return 0
+            n = con.execute("SELECT count(*) FROM url_queue WHERE status = 'paused' "
+                            "AND coalesce(park_count, 0) > 0").fetchone()[0]
+            if n:
+                con.execute("UPDATE url_queue SET status = 'queued', retry_after = NULL "
+                            "WHERE status = 'paused' AND coalesce(park_count, 0) > 0")
+        if n:
+            self.queue_changed()
+        return n
+
+    def parked_count(self) -> int:
+        with self.connect() as con:
+            return con.execute("SELECT count(*) FROM url_queue WHERE status = 'paused' "
+                               "AND coalesce(park_count, 0) > 0").fetchone()[0]
 
     def wake_paused_urls(self) -> int:
         """Paused downloads whose time has come go back in the queue (they
@@ -2669,7 +2711,7 @@ class Store:
                 # paused rows too: pressing retry means "now", not tomorrow
                 con.execute(
                     "UPDATE url_queue SET status = 'queued', error = NULL, retry_after = NULL, "
-                    "retries = coalesce(retries, 0) + 1, "
+                    "retries = coalesce(retries, 0) + 1, park_count = 0, "
                     # bulk retry never inherits a one-shot "download anyway"
                     "progress = 0, bytes_done = 0, force_size = false "
                     "WHERE status IN ('failed', 'paused')"

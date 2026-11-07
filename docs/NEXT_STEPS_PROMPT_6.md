@@ -1,5 +1,40 @@
 # Prompt for the next session, round 6 — every output, end to end (written for Claude Opus 5.5)
 
+> **STATUS (Nov 7, 2026): executed.** Commits e084b8d (P0.1), 80d8652 (P0.2-
+> P0.4), 296f71b (P1-P3), then the download-park feature and docs.
+> - **P0.1** months are per payer (`monitor.payer_months`): named-store packets
+>   went from empty to full (rate card, this month, gaps), labelled with each
+>   payer's month; new-to-network compares each payer's newest file with its
+>   own previous one. **P0.2** new-to-network on the house basis. **P0.3** the
+>   500s are 422s with a reason; state names normalized. **P0.4** unique tie
+>   orders; snapshot 125/125 identical across two full runs.
+> - **P1** (byte-identical bodies, A/B on one machine; 99M store unless named):
+>   packets 79.9 -> 26.1 s (named 5.1 -> 2.5); digest 23.2 -> 12.2 s, repeat
+>   0.05 s; visit card 2.53 -> 0.39 s; outreach state export 83.3 -> 8.6 s
+>   (named 11.6 -> 1.7); quality / leads / leaderboard / roster / freshness
+>   cached per data generation (repeats ~0 s); ZIP placement from a stamped
+>   parquet (decision (a)+(b): rebuilt whenever a rate part or the NPI
+>   directory's size, ZIP count or last-enrichment time changes, so never
+>   stale), build 5.7 s; radius map 10.1 -> 0.5 s, leverage summary 2.3 -> 0.6
+>   (named 7.3 -> 0.5), dossier named 6.2 -> 1.6; new-to-network 10.7 -> 4.4 s
+>   query; all-market leads 7.4 -> 5.0 s first call; P1.8 gate restored.
+> - **P2** all verified in Chromium: 422 shown as written, 503 retries (2
+>   requests, then stats), an older answer released last never paints, three
+>   name batches -> one table reload and no strip reload, one /api/stats at
+>   boot, one subjects + months fetch on Negotiate re-entry.
+> - **P3** fixed: weighted position carries the house median (the average
+>   stays for the like-for-like shift); steal-share rivals therapy-only + CMS
+>   <11 note; dossier scoped to the practice's state + peer counts, pitch
+>   peers + "thin"; basis notes name every toggle (fee schedule, gaps);
+>   engagement value uses clean_volumes; leverage summary echoes the clamped
+>   radius; leads limit 1,000 everywhere with `truncated`; ONE masking rule;
+>   Code-page export comment; concentration median per practice + HHI exact;
+>   national % of Medicare labelled. Stated, not changed: the leads threshold
+>   tests the rounded (shown) position; outreach PCTL is "at or below".
+> - **Left:** Windows still unmeasured; the NPPES-fed feeds and referral
+>   leaders not timed against a full-size NPPES cache / referral release;
+>   segmented downloads (`download_segments` > 1) do not park.
+
 Rounds 1–5 are `docs/NEXT_STEPS_PROMPT.md`, `_2.md` … `_5.md`; each has a
 status block of what it closed. This memo came out of a full audit on
 Nov 6–7, 2026 of EVERY output the program produces — 131 API endpoints, every

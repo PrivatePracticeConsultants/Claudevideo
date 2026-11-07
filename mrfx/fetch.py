@@ -289,7 +289,8 @@ def _client(cfg: MrfxConfig, verify=None, ua: str | None = None) -> httpx.Client
 class DownloadError(Exception):
     def __init__(self, msg: str, status: int | None = None, retryable: bool = False,
                  oversize: bool = False, canceled: bool = False,
-                 set_aside: bool = False):
+                 set_aside: bool = False, parked: bool = False,
+                 progressed: bool = False):
         super().__init__(msg)
         self.status = status
         self.retryable = retryable
@@ -298,6 +299,12 @@ class DownloadError(Exception):
         # hit the wall-clock cap while STILL MAKING PROGRESS: it yielded its
         # slot on purpose and should resume by itself, not sit awaiting a human
         self.set_aside = set_aside
+        # no data for download_park_seconds: step aside for the next file and
+        # rejoin the line soon (fetch_url_record parks the row). `progressed`
+        # says whether THIS turn moved the file forward first (>= 1 MB): a park
+        # after progress starts the no-progress count again
+        self.parked = parked
+        self.progressed = progressed
 
 
 # Concurrent downloads must never COLLECTIVELY overcommit the disk. The single
@@ -631,6 +638,21 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
     stall_budget = cfg.download_stall_seconds
     last_progress_t = time.monotonic()
     highwater = part.stat().st_size if part.exists() else 0
+    # PARK: a shorter silence than the stall window hands the slot to the next
+    # file (see config.download_park_seconds). Only when it IS shorter: a
+    # park that could never fire before the stall would be dead config.
+    park_budget = cfg.download_park_seconds
+    if not park_budget or (stall_budget and park_budget >= stall_budget):
+        park_budget = 0.0
+    start_hw = highwater
+
+    def _park(at_bytes: int) -> DownloadError:
+        got = f"{at_bytes / 1e6:.0f} MB kept" if at_bytes else "nothing received yet"
+        return DownloadError(
+            f"the payer's server stopped sending data (under 1 MB in "
+            f"{int(park_budget)} s; {got})",
+            retryable=True, parked=True,
+            progressed=at_bytes - start_hw >= _STALL_MIN_PROGRESS_BYTES)
     # bytes at the last stall-clock reset — the clock only resets once the file
     # has advanced _STALL_MIN_PROGRESS_BYTES past this, so KB-sized dribbles from
     # a connection-closing CDN can't keep a dead download alive to the wall cap
@@ -677,6 +699,8 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
     while attempt <= cfg.download_retries and connections < _MAX_DOWNLOAD_CONNECTIONS:
         if _canceled():
             raise DownloadError("download canceled", retryable=False, canceled=True)
+        if park_budget and time.monotonic() - last_progress_t > park_budget:
+            raise _park(max(highwater, part.stat().st_size if part.exists() else 0))
         if stall_budget and time.monotonic() - last_progress_t > stall_budget:
             # bounded by the stall deadline, not the (progress-resetting) retry
             # count — this is the terminator for a dribbling/stuck server
@@ -890,6 +914,8 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                         if done - stream_anchor >= _STALL_MIN_PROGRESS_BYTES:
                             stream_anchor = done
                             last_progress_t = now
+                        elif park_budget and now - last_progress_t > park_budget:
+                            raise _park(max(done, highwater))
                         elif stall_budget and now - last_progress_t > stall_budget:
                             raise DownloadError(
                                 "no meaningful progress mid-stream", retryable=True)
@@ -926,6 +952,8 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
             return sha.hexdigest(), final_url
         except DownloadError as e:
             last_exc = e
+            if e.parked:
+                raise          # straight out: the slot goes to the next file NOW
             if not e.retryable:
                 # keep the .part when a retry could finish it: the disk-space
                 # and confirm_over_gb guards tell the user to fix the setting
@@ -998,7 +1026,11 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                 #    parallel downloads that started together fail in lockstep,
                 #    so a deterministic offset would re-slam the host in sync
                 import random
-                time.sleep(min(90.0, 2.0 * (2 ** (attempt - 1))) + random.uniform(0, 3))
+                pause = min(90.0, 2.0 * (2 ** (attempt - 1))) + random.uniform(0, 3)
+                if park_budget:
+                    left = park_budget - (time.monotonic() - last_progress_t)
+                    pause = max(0.0, min(pause, left + 0.05))
+                time.sleep(pause)
     # keep the .part: every failure that lands here was transient (terminal
     # ones raised above), so a later "retry" on the queue resumes the download
     # instead of restarting a multi-GB file from byte zero
@@ -1752,6 +1784,23 @@ def fetch_url_record(cfg: MrfxConfig, store: Store, rec: dict) -> bool:
             store.update_url(url_id, status="queued", error=str(e))
             log.info("url %s: %s", url, e)
             return False
+        if e.parked:
+            # no data for a few minutes: step aside for the next file and
+            # rejoin the line soon (wake_parked_urls: when the cool-down ends,
+            # or at once when nothing else is waiting). A park after real
+            # progress starts the count again; only parks in a ROW with no
+            # progress at all count toward the long pause below.
+            n = 1 if e.progressed else int(rec.get("park_count") or 0) + 1
+            if n <= cfg.download_park_limit:
+                mins = cfg.download_park_minutes
+                store.park_url(url_id, mins, n, (
+                    f"parked: {e}. Other files download meanwhile; this one goes "
+                    f"back in line in {mins:g} min (sooner if nothing else is "
+                    f"waiting) and resumes where it stopped (park {n} of "
+                    f"{cfg.download_park_limit})."))
+                log.info("url %s: parked (%d of %d) — %s", url, n,
+                         cfg.download_park_limit, e)
+                return False
         if (e.retryable and not e.oversize and cfg.download_pause_hours > 0
                 and int(rec.get("auto_resumes") or 0) < cfg.download_auto_resumes):
             # A STALLED or flaky server: free the slot for the next file now
@@ -1762,7 +1811,7 @@ def fetch_url_record(cfg: MrfxConfig, store: Store, rec: dict) -> bool:
             got = part.stat().st_size if part.exists() else 0
             n = int(rec.get("auto_resumes") or 0) + 1
             why = ("the payer's server stopped sending data"
-                   if "no download progress" in str(e) else
+                   if e.parked or "no download progress" in str(e) else
                    f"the download kept failing ({str(e)[:120]})")
             hours = cfg.download_pause_hours
             when = f"{hours:g} hour{'s' if hours != 1 else ''}"
@@ -1795,7 +1844,7 @@ def fetch_url_record(cfg: MrfxConfig, store: Store, rec: dict) -> bool:
         # the stop instead of overwriting it with 'fetched'.
         log.info("url %s: finished just as the user stopped it — kept for retry", url)
         return False
-      store.update_url(url_id, content_sha=content_sha, status="fetched")
+      store.update_url(url_id, content_sha=content_sha, status="fetched", park_count=0)
       return True
     finally:
       # a one-shot flag: once download() has returned (any outcome) it has done
@@ -2371,6 +2420,10 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
                     store.wait_queue_change(epoch, QUEUE_IDLE_WAIT_SECONDS)
                     continue
                 rec = store.next_queued_url()  # atomic claim — threads never share a row
+                if rec is None and store.wake_parked_urls(only_if_idle=True):
+                    # nothing fresh to fetch: go back to a PARKED file now
+                    # rather than leave this slot idle until its cool-down ends
+                    rec = store.next_queued_url()
                 if rec is None:
                     # nothing to download: sleep until a queue write signals
                     # (was: re-query every 0.5 s, forever, on 6 threads)
@@ -2521,6 +2574,10 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
             in_flight = (counts.get("queued", 0) + counts.get("downloading", 0)
                          + counts.get("fetched", 0) + counts.get("expanding", 0)
                          + counts.get("ingesting", 0) + busy)
+            if drain and counts.get("paused", 0):
+                # a PARKED file rejoins within minutes, so a CLI drain waits
+                # for it (a long-paused one, hours away, does not)
+                in_flight += store.parked_count()
             respawn_dead_threads()
             if time.monotonic() - last_wake_check >= 60:
                 last_wake_check = time.monotonic()

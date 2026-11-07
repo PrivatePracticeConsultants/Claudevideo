@@ -240,6 +240,19 @@ class MrfxConfig(BaseModel):
     # really dead must not cycle forever). 0 hours = the old behavior (failed).
     download_pause_hours: float = Field(default=24.0, ge=0)
     download_auto_resumes: int = Field(default=5, ge=0)
+    # PARK a download its payer's server has stopped feeding, long before the
+    # stall window above runs out: after this many seconds with no data (under
+    # 1 MB of progress) the file steps aside, its slot goes to the NEXT file in
+    # the queue at once, and its bytes so far are kept. It rejoins the line
+    # after download_park_minutes, or straight away when no other file is
+    # waiting, and resumes where it stopped. So a slow-to-answer payer no
+    # longer leaves a download slot idle: something is always downloading.
+    # After download_park_limit parks in a row with no progress at all, the
+    # server is really down and the file takes the long pause above.
+    # 0 = off (the old behaviour: hold the slot for the whole stall window).
+    download_park_seconds: float = Field(default=240.0, ge=0)
+    download_park_minutes: float = Field(default=10.0, ge=0)
+    download_park_limit: int = Field(default=6, ge=1)
     registry_path: Path = Path("config/payer_registry.yaml")
     registry_overrides_path: Path = Path("config/registry_overrides.yaml")
     known_sources_path: Path = Path("config/known_sources.yaml")

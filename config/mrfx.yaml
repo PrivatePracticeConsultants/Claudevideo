@@ -173,6 +173,18 @@ download_max_seconds: 10800
 download_pause_hours: 24
 download_auto_resumes: 5
 
+# PARK a download whose payer's server goes quiet, long before the stall window
+# above: after this many seconds with no data (under 1 MB) the file steps aside,
+# its download slot goes to the NEXT file in the queue straight away, and the
+# bytes so far are kept. It rejoins the line after download_park_minutes, or at
+# once if nothing else is waiting, and resumes where it stopped ("parked" in the
+# Files tab). So a slow-to-answer payer never leaves a slot idle. After
+# download_park_limit parks in a row with no progress at all, the server is
+# treated as down and the file takes the pause above. 0 turns parking off.
+download_park_seconds: 240
+download_park_minutes: 10
+download_park_limit: 6
+
 inbox_dir: data/inbox
 processed_dir: data/processed
 failed_dir: data/failed
