@@ -37,6 +37,35 @@ def available_months(store: Store) -> list[str]:
         ).fetchall()]
 
 
+# "latest" for a rate change = EACH PAYER'S newest published month against
+# THAT payer's previous one. The store's newest month is not a month most
+# payers published in: on the real store one payer's 76-row file dated a
+# month ahead made every other payer's book read as "no change" (round 6).
+LATEST_PER_PAYER = "each payer's newest file vs its previous one"
+
+
+def payer_months(store: Store, payers: list[str] | None = None) -> list[tuple]:
+    """[(payer, newest_month, previous_month_or_None)], one row per payer —
+    each payer's OWN publication history, ordered by payer."""
+    clause, params = "", []
+    if payers:
+        clause = f"AND payer IN ({', '.join('?' for _ in payers)})"
+        params = list(payers)
+    with store.connect() as con:
+        return [tuple(r) for r in con.execute(f"""
+            WITH pm AS (
+                SELECT DISTINCT payer, file_month FROM rates_by_tin
+                WHERE file_month IS NOT NULL AND payer IS NOT NULL {clause}
+            ), ranked AS (
+                SELECT payer, file_month,
+                       row_number() OVER (PARTITION BY payer ORDER BY file_month DESC) AS k
+                FROM pm
+            )
+            SELECT payer, max(file_month) FILTER (k = 1), max(file_month) FILTER (k = 2)
+            FROM ranked GROUP BY payer ORDER BY payer
+        """, params).fetchall()]
+
+
 def compute_rate_changes(store: Store, market: dict, *, subject: str | None = None,
                          min_pct: float | None = None) -> dict:
     """Rate moves between two months on matching contract lines (§7E.1).
@@ -58,15 +87,16 @@ def compute_rate_changes(store: Store, market: dict, *, subject: str | None = No
     new_month = market.get("month")
     if not new_month:
         raise BenchmarkError("an as-of month is required (7A.5) — pass market.month")
-    if str(new_month).strip().lower() == "latest" or \
-       str(market.get("prev_month") or "").strip().lower() == "latest":
-        # rate CHANGES compare two specific publication months — "latest" names
-        # no single month, and treating it as a literal string fabricated a
-        # comparison (lexically > every YYYY-MM, so prev auto-picked the newest
-        # real month against a phantom new one)
+    if str(market.get("prev_month") or "").strip().lower() == "latest":
         raise BenchmarkError(
-            "rate changes compare two specific months — pick a real month "
-            "(e.g. 2026-07), not 'latest'")
+            "'compare to' takes a real month (e.g. 2026-06) — leave it empty to "
+            "compare each payer with its own previous file")
+    if str(new_month).strip().lower() == "latest":
+        if market.get("prev_month"):
+            raise BenchmarkError(
+                "with 'latest' each payer is compared with its OWN previous file — "
+                "leave 'compare to' empty, or pick a specific new month")
+        return _latest_changes(store, market, subject=subject, min_pct=min_pct)
     months = available_months(store)
     if new_month not in months:
         # "0 changes for 2027-01" when 2027-01 has no rows is fabrication —
@@ -92,13 +122,56 @@ def compute_rate_changes(store: Store, market: dict, *, subject: str | None = No
             f"direction when the two months are in order")
 
     market = resolve_plan_scope(store, market)
+    result = _diff(store, market, [], [], {"month": new_month}, {"month": old_month},
+                   subject=subject, min_pct=min_pct)
+    result.update({"new_month": new_month, "prev_month": old_month})
+    return result
+
+
+def _latest_changes(store: Store, market: dict, *, subject: str | None,
+                    min_pct: float | None) -> dict:
+    """Each payer's newest file vs its own previous file (LATEST_PER_PAYER)."""
+    market = resolve_plan_scope(store, {**market, "month": "latest"})
+    pm = payer_months(store, market.get("payers") or None)
+    pairs = [(p, new, prev) for p, new, prev in pm if prev]
+    if not pairs:
+        raise BenchmarkError(
+            "rate-change monitoring needs two published months of the same payer — "
+            "every payer in scope has only one. Re-ingest a payer's newer file and "
+            "try again.")
+    pairs_cte = ("pairs AS (SELECT unnest(?::VARCHAR[]) AS payer, "
+                 "unnest(?::VARCHAR[]) AS m_new, unnest(?::VARCHAR[]) AS m_prev)")
+    pair_params = [[p for p, _, _ in pairs], [n for _, n, _ in pairs], [o for _, _, o in pairs]]
+    result = _diff(store, market, [pairs_cte], pair_params,
+                   {"month": "latest", "_join": "m_new"},
+                   {"month": "latest", "_join": "m_prev"},
+                   subject=subject, min_pct=min_pct)
+    result.update({
+        "new_month": "latest", "prev_month": None, "per_payer": True,
+        "compared": [{"payer": p, "new_month": n, "prev_month": o} for p, n, o in pairs],
+        "not_compared": [{"payer": p, "new_month": n} for p, n, o in pm if not o],
+        "basis": LATEST_PER_PAYER,
+    })
+    return result
+
+
+def _diff(store: Store, market: dict, ctes: list[str], cte_params: list,
+          cur_m: dict, prev_m: dict, *, subject: str | None,
+          min_pct: float | None) -> dict:
+    """The matched-contract-line diff between two sides. A side is either one
+    month (`{"month": "2026-06"}`) or, per payer, the month the `pairs` CTE
+    names in `_join` (m_new / m_prev)."""
     rel = spine_relation(market)
     include_assistant = bool(market.get("include_assistant", False))
     include_non_dollar = bool(market.get("include_non_dollar", False))
-    where_cur, p_cur = _market_where({**market, "month": new_month},
+    where_cur, p_cur = _market_where({**market, **{k: v for k, v in cur_m.items() if k == "month"}},
                                      include_assistant, include_non_dollar)
-    where_prev, p_prev = _market_where({**market, "month": old_month},
+    where_prev, p_prev = _market_where({**market, **{k: v for k, v in prev_m.items() if k == "month"}},
                                        include_assistant, include_non_dollar)
+    join_cur = (f"JOIN pairs pp ON pp.payer = t.payer AND t.file_month = pp.{cur_m['_join']}"
+                if cur_m.get("_join") else "")
+    join_prev = (f"JOIN pairs pp ON pp.payer = t.payer AND t.file_month = pp.{prev_m['_join']}"
+                 if prev_m.get("_join") else "")
 
     subject_tins = resolve_subject_tins(store, subject) if subject else None
     subj_clause, subj_params = "", []
@@ -108,12 +181,12 @@ def compute_rate_changes(store: Store, market: dict, *, subject: str | None = No
 
     # median per (payer, tin, code, modifier, class, POS) within each month, so
     # a TIN's rate variants collapse the same way the rest of the app dedups
-    def side(where: str) -> str:
+    def side(where: str, join: str) -> str:
         return f"""
             SELECT t.payer, t.tin_value, t.billing_code, t.modifier_set,
                    t.billing_class, t.service_code_set,
                    median(t.negotiated_rate) AS rate
-            FROM {rel} t LEFT JOIN tin_directory td USING (tin_value)
+            FROM {rel} t LEFT JOIN tin_directory td USING (tin_value) {join}
             WHERE {where} {subj_clause}
             GROUP BY t.payer, t.tin_value, t.billing_code, t.modifier_set,
                      t.billing_class, t.service_code_set
@@ -127,18 +200,23 @@ def compute_rate_changes(store: Store, market: dict, *, subject: str | None = No
     # that whole set into Python (then copying it twice more) would OOM the
     # single user's process / wedge their browser. Keep the biggest moves.
     min_pct_sql = float(min_pct) if min_pct is not None else 0.0
+    per_payer = bool(cur_m.get("_join"))
     sql = f"""
-    WITH cur AS ({side(where_cur)}), prev AS ({side(where_prev)}),
+    WITH {''.join(c + ', ' for c in ctes)}cur AS ({side(where_cur, join_cur)}),
+    prev AS ({side(where_prev, join_prev)}),
     moves AS (
         SELECT c.payer, c.tin_value, c.billing_code, c.modifier_set,
                c.billing_class, c.service_code_set,
                round(p.rate, 2) AS old_rate, round(c.rate, 2) AS new_rate,
                round(c.rate - p.rate, 2) AS delta,
                round(100.0 * (c.rate - p.rate) / p.rate, 1) AS pct_change,
-               td.display_name AS display_name
+               td.display_name AS display_name,
+               {"mp.m_new AS new_month, mp.m_prev AS prev_month" if per_payer
+                else "NULL::VARCHAR AS new_month, NULL::VARCHAR AS prev_month"}
         FROM cur c JOIN prev p USING
             (payer, tin_value, billing_code, modifier_set, billing_class, service_code_set)
         LEFT JOIN tin_directory td ON td.tin_value = c.tin_value
+        {"JOIN pairs mp ON mp.payer = c.payer" if per_payer else ""}
         WHERE p.rate > 0 AND abs(c.rate - p.rate) >= 0.01
     )
     SELECT * FROM moves
@@ -150,7 +228,8 @@ def compute_rate_changes(store: Store, market: dict, *, subject: str | None = No
              modifier_set, billing_class, service_code_set
     LIMIT ?
     """
-    params = [*p_cur, *subj_params, *p_prev, *subj_params, min_pct_sql, _CHANGES_CAP + 1]
+    params = [*cte_params, *p_cur, *subj_params, *p_prev, *subj_params, min_pct_sql,
+              _CHANGES_CAP + 1]
     with store.connect() as con:
         cur = con.execute(sql, params)
         cols = [d[0] for d in cur.description]
@@ -179,6 +258,8 @@ def compute_rate_changes(store: Store, market: dict, *, subject: str | None = No
             "delta": r["delta"],
             "pct_change": r["pct_change"],
             "direction": direction,
+            **({"new_month": r["new_month"], "prev_month": r["prev_month"]}
+               if per_payer else {}),
         })
     # only negative moves are cuts / only positive are increases — taking the
     # min/max over ALL rows would report the smallest increase as a "cut" when
@@ -203,8 +284,6 @@ def compute_rate_changes(store: Store, market: dict, *, subject: str | None = No
         key=lambda d: d["median_pct_change"])
     return {
         "market": {k: v for k, v in public_market(market).items() if v not in (None, [], "")},
-        "new_month": new_month,
-        "prev_month": old_month,
         "subject": subject,
         "count": len(rows),
         "truncated": truncated,
@@ -342,8 +421,13 @@ def rate_changes_csv(result: dict) -> str:
     out = io.StringIO()
     for line in [
         f"Generated {dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} by MRF Explorer v{__version__}.",
-        f"Rate changes from {result['prev_month']} to {result['new_month']} "
-        f"({result['n_cuts']} cuts, {result['n_increases']} increases)."
+        (f"Rate changes, {LATEST_PER_PAYER}: "
+         + "; ".join(f"{c['payer']} {c['prev_month']} -> {c['new_month']}"
+                     for c in result.get("compared") or [])
+         + f" ({result['n_cuts']} cuts, {result['n_increases']} increases)."
+         if result.get("per_payer") else
+         f"Rate changes from {result['prev_month']} to {result['new_month']} "
+         f"({result['n_cuts']} cuts, {result['n_increases']} increases).")
         + (f" NOTE: capped at the {result['cap']} largest moves — the counts "
            "above cover only these rows; narrow the market "
            "(payer/state/discipline) to see the rest."
@@ -355,11 +439,14 @@ def rate_changes_csv(result: dict) -> str:
     ]:
         out.write(f"# {line}\n")
     w = csv.writer(out)
+    per_payer = bool(result.get("per_payer"))
     w.writerow(["payer", "display_name", "tin", "billing_code", "description",
-                "modifier_set", "old_rate", "new_rate", "delta", "pct_change", "direction"])
+                "modifier_set", "old_rate", "new_rate", "delta", "pct_change", "direction"]
+               + (["prev_month", "new_month"] if per_payer else []))
     for x in result["changes"]:
         w.writerow([defuse_csv(x["payer"]), defuse_csv(x["display_name"]) or "", x["tin_value"],
                     x["billing_code"], defuse_csv(x["description"]) or "",
                     defuse_csv(x["modifier_set"]) or "",
-                    x["old_rate"], x["new_rate"], x["delta"], x["pct_change"], x["direction"]])
+                    x["old_rate"], x["new_rate"], x["delta"], x["pct_change"], x["direction"]]
+                   + ([x["prev_month"], x["new_month"]] if per_payer else []))
     return out.getvalue()

@@ -24,7 +24,8 @@ import datetime as dt
 import json
 import logging
 
-from .benchmark import BenchmarkError, compute_benchmark, normalize_market
+from .benchmark import (BenchmarkError, compute_benchmark, normalize_market,
+                        resolve_subject_tins)
 from .store import Store
 
 log = logging.getLogger(__name__)
@@ -43,17 +44,29 @@ def _ensure_table(con) -> None:
     """)
 
 
-def _concrete_month(store: Store, month) -> str | None:
-    """'latest' resolved to the store's newest file month, for LABELS only.
-    A baseline row or a wins report that says 'as of latest' is meaningless
-    the day after it is written — the vintage-honesty rule everywhere else
-    (packets pin max(file_month)) applies here too. The computation itself
-    still runs on the 'latest' basis (newest file per contract)."""
+def _concrete_month(store: Store, month, subject: str | None = None) -> str | None:
+    """'latest' resolved to a real month, for LABELS only — the newest file
+    month among THIS practice's current contract lines (each contract's newest
+    month). A baseline that says 'as of latest' is meaningless the day after
+    it is written; one labelled with the STORE's newest month named a month
+    another payer published (round 6: a 76-row file dated a month ahead
+    labelled every practice). The computation itself still runs on 'latest'."""
     if month and str(month).strip().lower() != "latest":
         return month
+    tins = []
+    if subject:
+        try:
+            tins = resolve_subject_tins(store, subject)
+        except BenchmarkError:
+            tins = []
     with store.connect() as con:
-        m = (con.execute(
-            "SELECT max(file_month) FROM rates_by_tin").fetchone() or [None])[0]
+        if tins:
+            m = (con.execute(
+                "SELECT max(file_month) FROM rates_by_tin WHERE is_latest AND tin_value IN "
+                "(SELECT unnest(?::VARCHAR[]))", [tins]).fetchone() or [None])[0]
+        else:
+            m = (con.execute(
+                "SELECT max(file_month) FROM rates_by_tin").fetchone() or [None])[0]
     return m or month
 
 
@@ -88,7 +101,7 @@ def save_baseline(store: Store, subject: str, market: dict | None = None,
     label = (str(label or "").strip() or "engagement start")[:60]
     market = normalize_market(market or {"month": "latest"})
     snap = _snapshot(store, subject, market)
-    snap["month"] = _concrete_month(store, snap["month"])
+    snap["month"] = _concrete_month(store, snap["month"], subject)
     if not snap["codes"]:
         raise BenchmarkError(
             f"no published rates for '{subject}' under the current basis — "
@@ -167,7 +180,7 @@ def compare_to_baseline(store: Store, subject: str, label: str = "engagement sta
     cmp_market.update(market or {})
     cmp_market.setdefault("month", "latest")
     now = _snapshot(store, subject, normalize_market(cmp_market))
-    now["month"] = _concrete_month(store, now["month"])
+    now["month"] = _concrete_month(store, now["month"], subject)
 
     try:
         volumes = {str(k).strip().upper(): float(v)

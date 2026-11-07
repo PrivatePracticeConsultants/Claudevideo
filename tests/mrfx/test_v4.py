@@ -1519,10 +1519,16 @@ def test_latest_month_uses_newest_file_per_contract(cfg, store):
                "market": {"month": "latest", "allow_national": True}})
     assert r.status_code == 200 and "latest available" in r.text
 
-    # rate CHANGES compare two real months: "latest" is lexically > every
-    # YYYY-MM, so it silently fabricated a comparison — must 422 instead
-    bad = c.post("/api/changes", json={"market": {"month": "latest"}})
-    assert bad.status_code == 422 and "specific months" in bad.json()["detail"]
+    # rate CHANGES: "latest" once silently fabricated a comparison ("latest" is
+    # lexically > every YYYY-MM). Since round 6 it has a defined meaning — each
+    # payer's newest file against that payer's own previous file — and every
+    # payer it compared is named with its two months; a "latest" baseline month
+    # is still refused
+    per_payer = c.post("/api/changes", json={"market": {"month": "latest"}})
+    assert per_payer.status_code == 200 and per_payer.json()["per_payer"] is True
+    assert all(x["prev_month"] < x["new_month"] for x in per_payer.json()["compared"])
+    bad = c.post("/api/changes", json={"market": {"month": "2026-06", "prev_month": "latest"}})
+    assert bad.status_code == 422 and "real month" in bad.json()["detail"]
     ok = c.post("/api/changes", json={"market": {"month": "2026-06"}})
     assert ok.status_code == 200 and ok.json()["new_month"] == "2026-06"
 

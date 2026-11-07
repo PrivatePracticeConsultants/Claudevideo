@@ -2286,12 +2286,15 @@ async function loadClientDigest() {
     if (!d.can_diff) chg = `<span class="muted" title="rate changes need two loaded months of the same payer">needs 2 months</span>`;
     else if (!c.changes) chg = `<span class="muted">–</span>`;
     else if (c.changes.error) chg = `<span class="muted">${esc(c.changes.error)}</span>`;
-    else if (!c.changes.n) chg = `<span class="muted">no moves in ${esc(c.changes.month)}</span>`;
+    else if (c.changes.month === "latest" && !(c.changes.compared || []).length)
+      chg = `<span class="muted" title="none of this client's payers has two files loaded">needs 2 files of a payer</span>`;
+    else if (!c.changes.n) chg = `<span class="muted" title="${esc(c.changes.span || "")}">no moves</span>`;
     else {
       const b = c.changes.biggest_pct;
       chg = `<a href="#" data-cl-changes="${esc(c.subject)}"><b>${fmtInt(c.changes.n)}</b> line${c.changes.n === 1 ? "" : "s"} moved</a>
         <div class="sub">biggest: <span class="${b > 0 ? "peer-up" : "peer-down"}">${b > 0 ? "+" : ""}${b}%</span>
-        on ${esc(c.changes.biggest_code || "")} (${esc(c.changes.biggest_payer || "")})</div>`;
+        on ${esc(c.changes.biggest_code || "")} (${esc(c.changes.biggest_payer || "")}${
+          c.changes.biggest_span ? `, ${esc(c.changes.biggest_span)}` : ""})</div>`;
     }
     let gaps;
     if (!c.gaps) gaps = `<span class="muted">–</span>`;
@@ -2313,8 +2316,8 @@ async function loadClientDigest() {
       </td></tr>`;
   }).join("");
   out.innerHTML = `
-    <div class="muted" style="margin-bottom:8px">Newest month in the store: <b>${esc(d.month || "–")}</b>.
-      Rate moves compare it to the month before it, per payer contract line.</div>
+    <div class="muted" style="margin-bottom:8px">Rate moves compare each payer's newest file with
+      that payer's previous one, per contract line.</div>
     <div class="tablewrap"><table><thead><tr>
       <th>Client</th><th>Rate moves</th><th>Contract gaps</th><th>Referral alerts</th><th></th>
     </tr></thead><tbody>${rows}</tbody></table></div>`;
@@ -2492,9 +2495,15 @@ function initNewToNetwork() {
     } catch (e) { $("#nn-msg").textContent = ""; out.innerHTML = `<div class="muted">${esc(e.message)}</div>`; return; }
     $("#nn-msg").textContent = "";
     if (d.reason) { out.innerHTML = `<div class="muted">${esc(d.reason)}</div>`; return; }
+    // the months actually compared, per payer — "latest" is each payer's own
+    // newest file against its own previous one
+    const span = (d.compared_months || []).map((c) =>
+      `${esc(c.payer)} ${esc(c.prev_month)} → ${esc(c.month)}`).join("; ");
+    const when = d.month === "latest" ? "each payer's newest file" : esc(String(d.month));
     if (!d.rows.length) {
-      out.innerHTML = `<div class="muted">No practice newly appeared in a payer's book for
-        ${esc(String(d.month))}${d.zip ? ` within ${d.radius_miles} miles of ${esc(d.zip)}` : ""}.</div>`;
+      out.innerHTML = `<div class="muted">No practice newly appeared in a payer's book
+        (${when})${d.zip ? ` within ${d.radius_miles} miles of ${esc(d.zip)}` : ""}.
+        <div class="sub">Compared: ${span || "–"}</div></div>`;
       return;
     }
     const rows = d.rows.map((r, i) => `<tr>
@@ -2503,13 +2512,13 @@ function initNewToNetwork() {
       <td>${esc([...(r.cities || []), ...(r.states || [])].join(", "))}</td>
       <td>${esc(r.zip || "")}</td>
       <td class="num">${r.miles == null ? "–" : r.miles}</td>
-      <td>${esc(r.payer)}</td><td class="sub">${esc(r.prev_month)}</td>
+      <td>${esc(r.payer)}</td><td class="sub">${esc(r.prev_month)} → ${esc(r.month || d.month)}</td>
       <td class="num">${fmtInt(r.codes)}</td><td class="num">${money(r.median_rate)}</td></tr>`).join("");
     out.innerHTML = `<div class="muted" style="margin-bottom:6px">${fmtInt(d.total)} newly
-      contracted practice(s) in <b>${esc(String(d.month))}</b>.</div>
+      contracted practice(s), ${when}.<div class="sub">Compared: ${span}</div></div>
       <div class="tablewrap" style="max-height:40vh"><table><thead><tr>
         <th>#</th><th>Practice</th><th>Location</th><th>ZIP</th><th class="num">Miles</th>
-        <th>Payer</th><th>Prev. month</th><th class="num">Codes</th><th class="num">Median</th>
+        <th>Payer</th><th>Months</th><th class="num">Codes</th><th class="num">Median</th>
       </tr></thead><tbody>${rows}</tbody></table></div>
       <div class="muted" style="font-size:11.5px;margin-top:6px">${esc(d.note || "")}</div>`;
   });
@@ -3698,7 +3707,8 @@ let changesInit = false;
 async function initChanges() {
   if (changesInit) {
     refreshSubjectPickers("#ch-subjects",
-      [{ sel: "#ch-month" }, { sel: "#ch-prev", prefix: `<option value="">auto — the previous month present</option>` }]);
+      [{ sel: "#ch-month", prefix: `<option value="latest">Latest — each payer's newest file vs its previous one</option>` },
+       { sel: "#ch-prev", prefix: `<option value="">auto — the previous month present</option>` }]);
     return;
   }
   changesInit = true;
@@ -3707,7 +3717,7 @@ async function initChanges() {
     api("/api/months").catch(() => null),
     api("/api/payers").catch(() => null),
   ]);
-  fillMonthSelect("#ch-month", months);
+  fillMonthSelect("#ch-month", months, `<option value="latest">Latest — each payer's newest file vs its previous one</option>`);
   fillMonthSelect("#ch-prev", months, `<option value="">auto — the previous month present</option>`);
   if (payers) $("#ch-payer-chips").innerHTML = payers.payers.map((p) => `<button class="chip" data-payer="${esc(p)}">${esc(p)}</button>`).join("");
   $("#ch-payer-chips").addEventListener("click", (ev) => { const b = ev.target.closest(".chip"); if (b) b.classList.toggle("on"); });
@@ -3791,7 +3801,12 @@ async function runChanges() {
   // order. Say which way round it goes here rather than spending a round trip
   // to be told — the server still validates.
   const mNew = $("#ch-month").value, mPrev = $("#ch-prev").value;
-  if (mPrev && mNew && mPrev >= mNew) {
+  if (mNew === "latest" && mPrev) {
+    out.innerHTML = `<div class="empty"><h3>"Latest" compares each payer with its own previous file</h3>
+      Leave "compare to" on auto, or pick a specific new month to compare against ${esc(mPrev)}.</div>`;
+    return;
+  }
+  if (mPrev && mNew && mNew !== "latest" && mPrev >= mNew) {
     out.innerHTML = `<div class="empty"><h3>Pick the earlier month to compare against</h3>
       ${esc(mPrev === mNew
         ? `Both boxes are set to ${mNew}. Choose an earlier month in "compare to".`
@@ -3807,8 +3822,16 @@ async function runChanges() {
 }
 
 function renderChanges(out, d) {
+  // per payer: which two of ITS files were compared, and which payers have
+  // only one file loaded (nothing to compare yet)
+  const span = d.per_payer
+    ? `each payer's newest file vs its previous one (${(d.compared || []).map((c) =>
+        `${esc(c.payer)} ${esc(c.prev_month)} → ${esc(c.new_month)}`).join("; ")})${
+        (d.not_compared || []).length ? `<div class="sub">Only one file loaded, not compared: ${
+          d.not_compared.map((c) => esc(c.payer)).join(", ")}</div>` : ""}`
+    : `${esc(d.prev_month)} → ${esc(d.new_month)}`;
   if (!d.changes.length) {
-    out.innerHTML = `<div class="empty"><h3>No changes</h3>No rate moves from ${esc(d.prev_month)} to ${esc(d.new_month)} under the current filters.</div>`;
+    out.innerHTML = `<div class="empty"><h3>No changes</h3>No rate moves, ${span}, under the current filters.</div>`;
     return;
   }
   const rows = d.changes.map((c) => {
@@ -3818,7 +3841,8 @@ function renderChanges(out, d) {
       <td>${esc(c.billing_code)}<div class="sub">${esc(c.description || "")}${c.modifier_set ? ` · ${esc(c.modifier_set)}` : ""}</div></td>
       <td class="num">$${fmtMoney(c.old_rate)}</td><td class="num">$${fmtMoney(c.new_rate)}</td>
       <td class="num ${cls}">${c.delta < 0 ? "−" : "+"}$${fmtMoney(Math.abs(c.delta))}</td>
-      <td class="num ${cls}">${c.pct_change > 0 ? "+" : ""}${c.pct_change}%</td></tr>`;
+      <td class="num ${cls}">${c.pct_change > 0 ? "+" : ""}${c.pct_change}%</td>${
+        d.per_payer ? `<td class="sub">${esc(c.prev_month)} → ${esc(c.new_month)}</td>` : ""}</tr>`;
   }).join("");
   // by-payer direction: is a payer systematically cutting across the market?
   const bp = (d.by_payer || []).filter((p) => p.n >= 2);
@@ -3835,9 +3859,9 @@ function renderChanges(out, d) {
   const capNote = d.truncated
     ? ` <span class="warn-text">Showing the ${fmtInt(d.cap)} largest moves — the cut/increase counts and by-payer stats cover only these. Narrow the market (payer/state/discipline) to see the rest.</span>`
     : "";
-  out.innerHTML = `<div class="rc-summary"><b>${d.n_cuts}</b> cut(s), <b>${d.n_increases}</b> increase(s) from ${esc(d.prev_month)} → ${esc(d.new_month)}.${d.biggest_cut_pct != null ? ` Biggest cut ${d.biggest_cut_pct}%.` : ""}${capNote}</div>
+  out.innerHTML = `<div class="rc-summary"><b>${d.n_cuts}</b> cut(s), <b>${d.n_increases}</b> increase(s), ${span}.${d.biggest_cut_pct != null ? ` Biggest cut ${d.biggest_cut_pct}%.` : ""}${capNote}</div>
     ${byPayer}
-    <div class="tablewrap"><table class="rc-table"><thead><tr><th>Payer</th><th>Practice</th><th>Code</th><th class="num">Was</th><th class="num">Now</th><th class="num">Δ</th><th class="num">%</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    <div class="tablewrap"><table class="rc-table"><thead><tr><th>Payer</th><th>Practice</th><th>Code</th><th class="num">Was</th><th class="num">Now</th><th class="num">Δ</th><th class="num">%</th>${d.per_payer ? "<th>Months</th>" : ""}</tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
 /* =======================================================================
