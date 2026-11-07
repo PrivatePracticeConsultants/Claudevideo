@@ -381,7 +381,7 @@ def code_type_flag(store: Store, market: dict | None, subject: str) -> dict:
                count(*) AS n
         FROM {rel} t LEFT JOIN tin_directory td USING (tin_value)
         WHERE {where} AND t.tin_value IN (SELECT unnest(?::VARCHAR[]))
-        GROUP BY 1, 2, 3 ORDER BY 1, 2
+        GROUP BY 1, 2, 3 ORDER BY 1, 2, 3
     """
     with store.connect() as con:
         raw = [dict(zip(["payer", "billing_code", "rate_type", "n"], r))

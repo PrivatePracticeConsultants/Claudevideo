@@ -876,7 +876,10 @@ def compute_payer_comparison(store: Store, subject: str, payer: str, market: dic
     # cross-payer leverage: the subject's own rates for the same codes with
     # every OTHER payer (same month/basis) — "you pay me less than my other
     # contracts do" is often the strongest single line in the room
-    other_market = public_market(market, drop=("payers",))
+    # the market minus its payer, KEEPING the resolved plan scope: building it
+    # with public_market() dropped `_plan_files`, and _market_where then
+    # refused every plan-scoped Negotiate compare / payer-compare / proposal
+    other_market = {k: v for k, v in market.items() if k != "payers"}
     o_where, o_params = _market_where(other_market, bool(market.get("include_assistant")),
                                       bool(market.get("include_non_dollar")))
     orel = _rates_relation(other_market)
@@ -1232,8 +1235,11 @@ def compute_rate_proposal(store: Store, subject: str, payer: str, market: dict,
         if not comp.get("mpfs_loaded"):
             raise BenchmarkError("a % of Medicare target needs the MPFS loaded "
                                  "(Benchmark tab -> Load MPFS)")
+        # the NORMALIZED market's state ("Missouri" -> "MO"), the one the
+        # comparison itself used; the raw one read "MISSOURI" and was refused
         anchor = store.medicare_anchor(
-            anchor_state(store, market, resolve_subject_tins(store, subject)))
+            anchor_state(store, normalize_market(market),
+                         resolve_subject_tins(store, subject)))
         if anchor["refusal"]:
             raise BenchmarkError(anchor["refusal"])
         mpfs = anchor["rates"]

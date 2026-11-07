@@ -1639,11 +1639,13 @@ def test_payer_comparison_math_and_report(cfg, store):
                 json={"subject": "439111111", "payer": "Testco",
                       "market": market, "comparables": ["43-9222222"]})
     assert ok.status_code == 200 and ok.json()["rows"][0]["p50"] == 72.5
-    # a string comparables body must not char-split into garbage columns
+    # a string comparables body must not char-split into garbage columns —
+    # nor be silently dropped (round 6: refused, the same on all four
+    # compare/proposal endpoints)
     guard = c.post("/api/negotiate/compare",
                    json={"subject": "439111111", "payer": "Testco",
                          "market": market, "comparables": "Acme"})
-    assert guard.status_code == 200 and guard.json()["comparables"] == []
+    assert guard.status_code == 422 and "list of practice names" in guard.json()["detail"]
 
     # OTHER-payers column follows the two-level entity rule: per-TIN median
     # first, then across TINs/payers. Subject = two TINs grouped by NPPES name;

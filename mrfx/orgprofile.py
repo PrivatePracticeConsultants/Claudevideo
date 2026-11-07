@@ -59,7 +59,8 @@ def compute_org_profile(store: Store, subject: str, market: dict) -> dict:
             "(SELECT unnest(?::VARCHAR[])) AND npi IS NOT NULL ORDER BY npi",
             [tins]).fetchall()]
         ident = con.execute(
-            "SELECT any_value(display_name), "
+            "SELECT first(display_name ORDER BY npi_count DESC NULLS LAST, tin_value) "
+            "       FILTER (display_name IS NOT NULL), "
             "       list_sort(list_distinct(flatten(list(states)))), "
             "       list_sort(list_distinct(flatten(list(cities)))) "
             "FROM tin_directory WHERE tin_value IN (SELECT unnest(?::VARCHAR[]))",

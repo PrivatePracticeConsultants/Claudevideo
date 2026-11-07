@@ -139,9 +139,14 @@ def build_prospect_dossier(cfg: MrfxConfig, store: Store, subject: str,
     # 1. who they are
     def _identity():
         with store.connect() as con:
+            # one name, the same on every call (the member TIN with the most
+            # NPIs, ties to the lowest tax ID) and the practice's member-TIN
+            # NPI total — any_value() mixed one TIN's name with another's count
             row = con.execute(
-                "SELECT any_value(display_name), any_value(npi_count), "
-                "any_value(cities), any_value(states) FROM tin_directory "
+                "SELECT first(display_name ORDER BY npi_count DESC NULLS LAST, tin_value) "
+                "       FILTER (display_name IS NOT NULL), sum(npi_count), "
+                "list_sort(list_distinct(flatten(list(cities)))), "
+                "list_sort(list_distinct(flatten(list(states)))) FROM tin_directory "
                 "WHERE tin_value IN (SELECT unnest(?::VARCHAR[]))", [tins]).fetchone()
         name, npis, cities, states = row or (None, None, None, None)
         facts["display_name"] = name or subject

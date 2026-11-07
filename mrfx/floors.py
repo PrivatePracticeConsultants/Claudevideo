@@ -277,10 +277,22 @@ def floor_comparison(store: Store, market: dict | None = None, *,
                 FROM per_tin GROUP BY billing_code
             """, [*params, subject_tins])
             subj = dict(scur.fetchall())
-        floors = con.execute(
-            "SELECT kind, code, rate, any_value(label) FROM floor_schedules "
-            "WHERE state = ? GROUP BY kind, code, rate ORDER BY code",
-            [scope_state]).fetchall()
+        # the NEWEST loaded year of each schedule kind, and that year's label:
+        # two years of one state's Medicaid schedule both came back, and the
+        # last row per code won (row order) under the last row's label
+        floors = con.execute("""
+            WITH newest AS (
+                SELECT kind, max(year) AS year FROM floor_schedules
+                WHERE state = ? GROUP BY kind
+            )
+            SELECT f.kind, f.code, median(f.rate) AS rate,
+                   min(f.label) AS label, f.year
+            FROM floor_schedules f JOIN newest n
+              ON n.kind = f.kind AND n.year IS NOT DISTINCT FROM f.year
+            WHERE f.state = ?
+            GROUP BY f.kind, f.code, f.year
+            ORDER BY f.code, f.kind
+        """, [scope_state, scope_state]).fetchall()
 
     if not floors:
         return {"loaded": False, "rows": [],
@@ -291,9 +303,11 @@ def floor_comparison(store: Store, market: dict | None = None, *,
 
     by_code: dict[str, dict] = {}
     labels: dict[str, str] = {}
-    for kind, code, rate, label in floors:
+    years: dict[str, str] = {}
+    for kind, code, rate, label, year in floors:
         by_code.setdefault(code, {})[kind] = rate
         labels[kind] = label
+        years[kind] = year
 
     rows = []
     for code in sorted(set(by_code) & set(commercial)):
@@ -342,6 +356,7 @@ def floor_comparison(store: Store, market: dict | None = None, *,
         "loaded": True, "rows": rows, "count": len(rows), "state": scope_state,
         "as_of": month_label(m["month"]), "payer": payer, "subject": subject,
         "schedule_labels": labels,
+        "schedule_years": years,
         "median_pct_of_medicaid": med_pct,
         "median_pct_of_workers_comp": wc_pct,
         "subject_median_pct_of_medicaid": subj_med,

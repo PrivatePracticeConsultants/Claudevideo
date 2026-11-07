@@ -763,7 +763,7 @@ def practice_basis(fs: FilterSet) -> tuple[str, str]:
 # one twice and drop the other).
 _ORDER_TIEBREAK = ("unit_id", "billing_code", "modifier_set", "payer", "file_month",
                    "billing_class", "service_code_set", "is_dollar_rate", "tin_value",
-                   "negotiated_rate")
+                   "tin_is_really_npi", "negotiated_rate")
 
 
 def order_sql(sort: str, direction: str, src: str = "") -> str:
@@ -831,6 +831,19 @@ def _as_float(v, default):
         return float(v)
     except (TypeError, ValueError):
         raise BenchmarkError(f"expected a number, got {v!r}")
+
+
+def _comparables_arg(v) -> list[str] | None:
+    """Comparable practices off the wire: a LIST of names. A bare string used
+    to be iterated letter by letter ("Acme" -> columns A, c, m, e) and a
+    number raised TypeError (HTTP 500) in the proposal endpoints."""
+    if v in (None, "", []):
+        return None
+    if not isinstance(v, list):
+        raise BenchmarkError("comparables must be a list of practice names, "
+                             'e.g. ["Acme PT", "431234567"]')
+    out = [str(c).strip() for c in v if c is not None and str(c).strip()]
+    return out or None
 
 
 def _state_arg(v):
@@ -1311,7 +1324,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                         [unit_id],
                     ).fetchall()]
                 tins = _dicts(con.execute(
-                    f"SELECT * FROM tin_directory WHERE tin_value IN ({', '.join('?' for _ in tin_list)})",
+                    f"SELECT * FROM tin_directory WHERE tin_value IN ({', '.join('?' for _ in tin_list)}) "
+                    "ORDER BY npi_count DESC NULLS LAST, tin_value",
                     tin_list,
                 )) if tin_list else []
                 for _t in tins:  # SSN-pattern TINs masked on every surface
@@ -1569,7 +1583,11 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                        file_month, source_file
                 FROM rates
                 WHERE billing_code = ? AND (tin_value = ? OR npi = ?)
-                ORDER BY payer, file_month, negotiated_rate
+                -- unique (invariant 7): payer+month+rate tied across TINs,
+                -- NPIs, modifiers, classes and files; two identical requests
+                -- came back in different orders on the 99M store
+                ORDER BY payer, file_month, negotiated_rate, tin_value, npi, modifiers,
+                         billing_class, negotiated_type, source_file
                 """,
                 [code, ident, ident],
             ))
@@ -2593,6 +2611,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 basis=str(body.get("basis") or "allowed"))
         except BenchmarkError as e:
             raise HTTPException(422, str(e))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(422, f"bad input: {e}")
 
     @app.post("/api/remits/check.csv", response_class=PlainTextResponse)
     def api_remit_check_csv(body: dict = Body(...)):
@@ -2604,6 +2624,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 basis=str(body.get("basis") or "allowed")))
         except BenchmarkError as e:
             raise HTTPException(422, str(e))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(422, f"bad input: {e}")
 
     # -- engagement baselines / win tracking -------------------------------------------
 
@@ -2967,8 +2989,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             return compute_payer_comparison(
                 store, str(body.get("subject", "")), str(body.get("payer", "")),
                 body.get("market") or {},
-                comparables=[str(c) for c in (body.get("comparables") or [])]
-                if isinstance(body.get("comparables") or [], list) else [],
+                comparables=_comparables_arg(body.get("comparables")) or [],
             )
         except (BenchmarkError, ValueError, TypeError) as e:
             raise HTTPException(422, str(e))
@@ -2979,8 +3000,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             comp = compute_payer_comparison(
                 store, str(body.get("subject", "")), str(body.get("payer", "")),
                 body.get("market") or {},
-                comparables=[str(c) for c in (body.get("comparables") or [])]
-                if isinstance(body.get("comparables") or [], list) else [],
+                comparables=_comparables_arg(body.get("comparables")) or [],
             )
             return HTMLResponse(render_payer_compare_report(cfg, store, comp))
         except (BenchmarkError, ValueError, TypeError) as e:
@@ -2995,8 +3015,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 store, str(body.get("subject", "")), str(body.get("payer", "")),
                 body.get("market") or {}, body.get("target") or {},
                 volumes=body.get("volumes") or None,
-                comparables=body.get("comparables") or None)
-        except BenchmarkError as e:
+                comparables=_comparables_arg(body.get("comparables")))
+        except (BenchmarkError, ValueError, TypeError) as e:
             raise HTTPException(422, str(e))
 
     @app.post("/api/report/proposal", response_class=HTMLResponse)
@@ -3007,9 +3027,9 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 store, str(body.get("subject", "")), str(body.get("payer", "")),
                 body.get("market") or {}, body.get("target") or {},
                 volumes=body.get("volumes") or None,
-                comparables=body.get("comparables") or None)
+                comparables=_comparables_arg(body.get("comparables")))
             return render_proposal_report(cfg, store, prop)
-        except BenchmarkError as e:
+        except (BenchmarkError, ValueError, TypeError) as e:
             raise HTTPException(422, str(e))
 
     @app.post("/api/schedule/fee")

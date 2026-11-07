@@ -290,3 +290,80 @@ def test_tied_practice_name_is_the_same_on_every_rebuild(cfg, store):
     got = seen.pop()
     assert {r[1] for r in got} == {"ALPHA SITE"}
     assert {r[2] for r in got} == {"OT"}
+
+
+# --- round 6: tie orders found in the every-output audit ---------------------
+
+def _r6row(tin, npi, code, rate, payer="Aetna"):
+    return dict(payer=payer, tin_value=tin, tin_type="ein", npi=npi, source_file="b.json",
+                billing_code=code, billing_code_type="CPT", discipline="PT", is_timed=True,
+                billing_class="professional", negotiated_rate=rate,
+                negotiated_type="negotiated", is_dollar_rate=True,
+                billing_code_modifier=[], service_code=["11"], file_month="2026-06",
+                last_updated_on="2026-06-01", expiration_date=None, schema_version="2.0.0",
+                tin_is_really_npi=False, state="MO")
+
+
+def test_validate_returns_one_order_for_an_npi_under_two_tins(tied_store):
+    """The same NPI billing 97110 at Aetna for $40 under two TINs: the rows
+    tie on payer, month and rate. Two identical requests came back in
+    different orders on the 99M store."""
+    cfg, store = tied_store
+    with store.rates_part_writer("b.json") as w:
+        w.write_batch([_r6row("439999999", "1417594896", "97110", 40.0)])
+    store.rebuild_rollups()
+    c = TestClient(create_app(cfg, store))
+    bodies = {c.post("/api/validate", json={"id": "1417594896", "code": "97110"}).content
+              for _ in range(REPEATS)}
+    assert len(bodies) == 1
+    rows = c.post("/api/validate", json={"id": "1417594896", "code": "97110"}).json()["rows"]
+    aetna = [r["tin_value"] for r in rows if r["payer"] == "Aetna"]
+    assert aetna == ["431000000", "439999999"]
+
+
+def test_outreach_code_columns_break_coverage_ties_by_code(tied_store, monkeypatch):
+    """97110 and 97140 are priced by the same five practices: with room for one
+    code column the lower code must win every time (the dict order behind the
+    old tie changed between calls)."""
+    import mrfx.outreach as outreach
+    cfg, store = tied_store
+    monkeypatch.setattr(outreach, "MAX_CODE_COLUMNS", 1)
+    c = TestClient(create_app(cfg, store))
+    heads = {c.get("/api/export/outreach.csv?grain=tin&latest=1").text.splitlines()[0]
+             for _ in range(REPEATS)}
+    assert len(heads) == 1
+    head = heads.pop()
+    assert "C97110_RATE" in head and "C97140_RATE" not in head
+
+
+def test_floors_use_the_newest_schedule_year_and_say_so(tied_store, tmp_path):
+    from mrfx.floors import floor_comparison, import_fee_schedule
+    cfg, store = tied_store
+    for year, rate in (("2026", 26.0), ("2025", 20.0)):          # newest loaded FIRST
+        p = tmp_path / f"mo_{year}.csv"
+        p.write_text(f"code,rate\n97110,{rate}\n97140,{rate}\n")
+        import_fee_schedule(store, p, kind="medicaid", state="MO", year=year,
+                            label=f"MO Medicaid {year}")
+    for _ in range(REPEATS):
+        d = floor_comparison(store, M, state="MO")
+        assert {r["billing_code"]: r["medicaid"] for r in d["rows"]} == {"97110": 26.0, "97140": 26.0}
+        assert d["schedule_years"] == {"medicaid": "2026"}
+        assert d["schedule_labels"] == {"medicaid": "MO Medicaid 2026"}
+
+
+def test_the_entity_drawer_lists_member_tins_in_one_order(tied_store):
+    cfg, store = tied_store
+    c = TestClient(create_app(cfg, store))          # (startup syncs the map from config)
+    store.set_entity_map({"431000003": "Two TIN Group", "431000001": "Two TIN Group"})
+    r = c.get("/api/entity/entity/Two TIN Group")
+    assert r.status_code == 200, r.text
+    seen = {tuple(t["tin_value"] for t in c.get("/api/entity/entity/Two TIN Group").json()["tins"])
+            for _ in range(REPEATS)}
+    assert seen == {("431000001", "431000003")}
+
+
+def test_a_tied_modal_tin_goes_to_the_lowest():
+    from mrfx.medicare import modal_tin
+    assert modal_tin(["b", "a", "b", "a"]) == "a"
+    assert modal_tin(["c", "b", "b"]) == "b"
+    assert modal_tin([]) is None

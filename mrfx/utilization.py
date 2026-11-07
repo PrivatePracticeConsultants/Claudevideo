@@ -577,7 +577,7 @@ def service_line_gaps(store: Store, subject: str, *, zip_code: str | None = None
             WHERE u.data_year = ?
             GROUP BY u.billing_code
             HAVING count(DISTINCT u.npi) >= ?
-            ORDER BY n_peers DESC, peer_units DESC
+            ORDER BY n_peers DESC, peer_units DESC, u.billing_code
         """, [in_radius, mine, yr, min_peers])
         peer_codes = [dict(zip(["billing_code", "n_peers", "peer_units",
                                 "median_units_each"], r)) for r in cur.fetchall()]

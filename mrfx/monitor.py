@@ -84,6 +84,15 @@ def compute_rate_changes(store: Store, market: dict, *, subject: str | None = No
     for k in ("month", "prev_month"):
         if market.get(k) is not None:
             market[k] = str(market[k]).strip()
+    # a state NAME is normalized like every other entry point does
+    # (normalize_market): "Missouri" matched no practice and reported
+    # "0 changes" where "MO" found the move
+    if market.get("state") is not None:
+        from .states import state_code
+        try:
+            market["state"] = state_code(market["state"])
+        except ValueError as exc:
+            raise BenchmarkError(str(exc)) from exc
     new_month = market.get("month")
     if not new_month:
         raise BenchmarkError("an as-of month is required (7A.5) — pass market.month")

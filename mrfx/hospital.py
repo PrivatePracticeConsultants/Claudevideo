@@ -489,7 +489,13 @@ def hospital_parity(store: Store, market: dict | None = None, *,
     if payer:
         m = {**m, "payers": [payer]}
     if state:
-        m = {**m, "state": state}
+        # normalized ("Missouri" -> "MO"): set raw AFTER normalize_market, it
+        # matched no practice while the hospital side matched the state
+        from .states import state_code
+        try:
+            m = {**m, "state": state_code(state)}
+        except ValueError as exc:
+            raise BenchmarkError(str(exc)) from exc
     where, params = _market_where(m, bool(m.get("include_assistant")),
                                   bool(m.get("include_non_dollar")))
     rel = _rates_relation(m)
@@ -537,7 +543,7 @@ def hospital_parity(store: Store, market: dict | None = None, *,
            hs.hospital_median, hs.hospital_min, hs.hospital_max, hs.n_hospitals
     FROM pmkt p JOIN hosp hs USING (payer, billing_code)
     ORDER BY (hs.hospital_median / nullif(p.practice_median, 0)) DESC NULLS LAST,
-             p.billing_code
+             p.billing_code, p.payer
     LIMIT {int(limit)}
     """
     with store.connect() as con:

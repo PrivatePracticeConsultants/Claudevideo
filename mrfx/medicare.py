@@ -695,6 +695,13 @@ def load_centroids(con, centroids_path=None) -> None:
         f"types = {{'zip': 'VARCHAR', 'lat': 'DOUBLE', 'lon': 'DOUBLE'}})")
 
 
+def modal_tin(tins: list[str]) -> str | None:
+    """The most frequent TIN, ties to the lowest. max() over a set() broke a
+    tie by Python's per-process string-hash order, so a referral leader's
+    drawer moved to another TIN after a restart (invariant 7)."""
+    return min(set(tins), key=lambda t: (-tins.count(t), t)) if tins else None
+
+
 def haversine_miles_sql(lat_col: str, lon_col: str, lat0: float, lon0: float) -> str:
     """Great-circle miles from a fixed origin to (lat_col, lon_col). Verified
     against an independent implementation to 0 ULPs and against published
@@ -809,7 +816,7 @@ def referral_leaders(store: Store, zip_code: str | None = None,
         for r in rows:
             tins = [tin_of[n] for n in members[r["practice"]] if n in tin_of]
             # the practice's modal TIN — the drawer that shows most of its book
-            r["tin"] = max(set(tins), key=tins.count) if tins else None
+            r["tin"] = modal_tin(tins)
         total, unplaced, unidentified = con.execute(base + f"""
             SELECT count(*),
                    count(*) FILTER (zip IS NULL{

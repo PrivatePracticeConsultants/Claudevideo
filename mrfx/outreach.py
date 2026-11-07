@@ -104,8 +104,8 @@ def build_outreach_rows(store: Store, rel_sql: str, params: list,
         units = con.execute(
             f"""
             SELECT unit_id,
-                   any_value(display_name)                       AS display_name,
-                   string_agg(DISTINCT tin_value, '; ')          AS tins,
+                   min(display_name)                             AS display_name,
+                   string_agg(DISTINCT tin_value, '; ' ORDER BY tin_value) AS tins,
                    max(npi_count)                                AS npi_count,
                    string_agg(DISTINCT payer, '; ' ORDER BY payer)  AS payers,
                    string_agg(DISTINCT file_month, '; ' ORDER BY file_month) AS months
@@ -123,6 +123,7 @@ def build_outreach_rows(store: Store, rel_sql: str, params: list,
             SELECT unit_id, billing_code, median(negotiated_rate) AS rate
             FROM ({rel_sql}) WHERE is_dollar_rate AND negotiated_rate > 0.01
             GROUP BY unit_id, billing_code
+            ORDER BY billing_code, unit_id
             """,
             params,
         ).fetchall()
@@ -142,7 +143,9 @@ def build_outreach_rows(store: Store, rel_sql: str, params: list,
     if codes:
         wanted = [c for c in codes if c in by_code]
     else:
-        wanted = sorted(by_code, key=lambda c: -len(by_code[c]))[:MAX_CODE_COLUMNS]
+        # most-covered codes, ties to the lower code — the dict order behind
+        # the old -len tie changed which codes made the cut between calls
+        wanted = sorted(by_code, key=lambda c: (-len(by_code[c]), c))[:MAX_CODE_COLUMNS]
         wanted.sort()
     if not codes and len(by_code) > MAX_CODE_COLUMNS:
         log.info("outreach export: limiting to the %d most-covered codes of %d "
