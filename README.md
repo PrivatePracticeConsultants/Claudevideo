@@ -342,7 +342,7 @@ badge and are never displayed as authoritative; confirming a URL persists it to
 
 `config/known_sources.yaml` is a shipped catalog of every payer entry point
 this app has been live-tested against — each entry carries its verification
-date and what happened (files listed, rows ingested, quirks). 38 entries are
+date and what happened (files listed, rows ingested, quirks). 110 entries (as of 2026-11-07) are
 **auto-queueable** (Highmark's 15 hosted Blue plans incl. FL/AZ/ID/MN/LA/NE,
 BCBS Mississippi's stable TOC, BCBS Tennessee's /tcr directory page,
 Cigna's signed-manifest page, BCBS South Carolina's CloudFront indexes,

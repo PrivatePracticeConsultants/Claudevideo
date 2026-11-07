@@ -428,7 +428,16 @@ sources:
       single file tested; Aetna Health Inc. Maine 1,527,562 rows. FirstHealth
       (Aetna's rental PPO network) lives on the same platform:
       https://www.health1.firsthealth.com/app/public/#/one/insurerCode=FIRSTHEALTH_I&brandCode=FIRSTH/machine-readable-transparency-in-coverage
-      — link harvest verified the same way.
+      — link harvest verified the same way. 2026-11-07: this portal is the
+      ALICFI (fully-insured) brand only; Aetna publishes SIX more brand
+      portals on health1 (brandCode=ALICSI, ALICUNDER100, AETNACVS, TEXASFI,
+      ASA, AFEHBPFI — listed at docs.payerset.com/payers/aetna-price-
+      transparency). Each brand's HealthSparq listing can be read directly,
+      without a browser — see the "Aetna brand listings" entries at the end
+      of this file. The AETNACVS (individual exchange) and TEXASFI (Texas
+      fully-insured) listings were EMPTY on 2026-11-07 (latest_metadata.json
+      is "{}"), matching payerset's "no files this cycle"; they are not
+      catalogued until they publish.
 
   - name: Humana
     states: [US]
@@ -1854,3 +1863,83 @@ sources:
       (medica-egress … MEDICA_I/MEDICA/latest_metadata.json) still only has
       2026-03 files, and medica.com refuses automated requests, so a newer
       location couldn't be checked.
+
+  # ---- Added 2026-11-07 — Aetna brand listings (live-verified; no browser needed) ----
+  # HealthSparq's undated latest_metadata.json per Aetna brand (the same route
+  # the Meritain entry uses). Each lists in-network rate files, per-employer
+  # table-of-contents files and a few allowed-amounts files; the app expands
+  # the indexes, skips allowed-amounts files with the reason, and skips
+  # byte-identical files by content after download. All files were dated
+  # 2026-11-05 on 2026-11-07.
+
+  - name: Aetna — fully insured (ALICFI) direct listing
+    states: [US]
+    url: https://mrf.healthsparq.com/aetnacvs-egress.nophi.kyruushsq.com/prd/mrf/AETNACVS_I/ALICFI/latest_metadata.json
+    kind: listing
+    queueable: true
+    verified: "2026-11-07"
+    notes: >-
+      Verified 2026-11-07: 1,983 distinct file links (4,416 in-network plan
+      rows, 19 indexes, 2 allowed-amounts), all dated 2026-11-05; sampled
+      files answer HTTP 200/206 (one in-network file is 1.1 GB). Reporting
+      entities: Aetna Life Insurance Company, Aetna Health of California,
+      Aetna Health Inc. (FL, PA, ...). The SAME book the "Aetna / CVS Health"
+      portal entry lifts with the headless browser (1,984 links there) —
+      queue one or the other, not both.
+
+  - name: Aetna — self-insured employer plans (ALICSI) direct listing
+    states: [US]
+    url: https://mrf.healthsparq.com/aetnacvs-egress.nophi.kyruushsq.com/prd/mrf/AETNACVS_I/ALICSI/latest_metadata.json
+    kind: listing
+    queueable: true
+    verified: "2026-11-07"
+    notes: >-
+      Verified 2026-11-07: 8,243 distinct file links (9,153 in-network plan
+      rows, 1,977 per-employer indexes, 634 allowed-amounts), all dated
+      2026-11-05; sampled files answer HTTP 200/206. Reporting entity: Aetna
+      Life Insurance Company (ASO / self-funded employer groups). More than
+      max_toc_files (default 2,000) is capped alphabetically — raise it in
+      config/mrfx.yaml for full reach.
+
+  - name: Aetna — self-insured small groups under 100 (ALICUNDER100) direct listing
+    states: [US]
+    url: https://mrf.healthsparq.com/aetnacvs-egress.nophi.kyruushsq.com/prd/mrf/AETNACVS_I/ALICUNDER100/latest_metadata.json
+    kind: listing
+    queueable: true
+    verified: "2026-11-07"
+    notes: >-
+      Verified 2026-11-07: a 43 MB listing of 30,884 distinct file links
+      (48,566 in-network plan rows, 30,720 per-employer indexes of a few
+      hundred bytes each, 14 allowed-amounts), all dated 2026-11-05; sampled
+      files answer HTTP 200/206. Reporting entity: Aetna Life Insurance
+      Company. The per-employer indexes point back to a far smaller set of
+      shared network rate files (the app skips repeats by content after
+      download), but with max_toc_files at its default 2,000 only the
+      alphabetically-first 2,000 links are queued — for the small-group book
+      raise max_toc_files, or start with the ALICSI listing above.
+
+  - name: Aetna Signature Administrators (ASA) direct listing
+    states: [US]
+    url: https://mrf.healthsparq.com/aetnacvs-egress.nophi.kyruushsq.com/prd/mrf/AETNACVS_I/ASA/latest_metadata.json
+    kind: listing
+    queueable: true
+    verified: "2026-11-07"
+    notes: >-
+      Verified 2026-11-07: 29 distinct file links (22 in-network plan rows,
+      22 indexes), all dated 2026-11-05; sampled files answer HTTP 200/206
+      (one in-network file is 1.49 GB). Reporting entity: Aetna Signature
+      Administrators — Aetna's rental/TPA network, also reached through
+      WebTPA and other administrators.
+
+  - name: Aetna Federal Employees Health Benefits (AFEHBPFI) direct listing
+    states: [US]
+    url: https://mrf.healthsparq.com/aetnacvs-egress.nophi.kyruushsq.com/prd/mrf/AETNACVS_I/AFEHBPFI/latest_metadata.json
+    kind: listing
+    queueable: true
+    verified: "2026-11-07"
+    notes: >-
+      Verified 2026-11-07: 78 distinct file links (132 in-network plan rows,
+      10 indexes), all dated 2026-11-05; sampled files answer HTTP 200/206
+      (one in-network file is 950 MB). Reporting entities: Aetna Health Inc.
+      / Aetna Health of <state> (Utah, Georgia, California, New Jersey, ...) —
+      the federal-employee (FEHB) plans.
