@@ -182,12 +182,11 @@ def compare_to_baseline(store: Store, subject: str, label: str = "engagement sta
     now = _snapshot(store, subject, normalize_market(cmp_market))
     now["month"] = _concrete_month(store, now["month"], subject)
 
-    try:
-        volumes = {str(k).strip().upper(): float(v)
-                   for k, v in (volumes or {}).items()}
-    except (TypeError, ValueError, AttributeError):
-        raise BenchmarkError(
-            "volumes must map a billing code to annual units, e.g. 97110: 1200")
+    # the house validator (round 6 P3): a bare float() let -4,000 units turn a
+    # $5 rate win into a NEGATIVE "annual value" on the client's win report,
+    # and NaN/inf straight through to the total
+    from .benchmark import clean_volumes
+    volumes = clean_volumes(volumes)
     both, gained, lost = [], [], []
     total_value = 0.0
     for code, b in sorted(base["codes"].items()):

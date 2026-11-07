@@ -330,8 +330,13 @@ def _pid_alive(pid: int) -> bool:
 
 
 # --- SSN masking (§7A.7b) ----------------------------------------------------
-# EINs and SSNs are both 9 digits. A number is masked when it satisfies SSN
-# structural rules AND its 2-digit prefix is not a valid IRS EIN campus prefix.
+# EINs and SSNs are both 9 digits. A 9-digit number is masked when its 2-digit
+# prefix is not a valid IRS EIN campus prefix: it cannot be an EIN, so it is
+# an SSN, an ITIN (9xx: as personal as an SSN) or junk, and none of those is
+# shown raw. ONE rule for the screen (SQL) and the exports (Python): the
+# Python rule used to also demand SSN structure (no 000/666/9xx area, no 00
+# group, no 0000 serial), so 96x/97x/000-style numbers were masked on screen
+# and printed raw in every CSV (round 6 P3).
 _VALID_EIN_PREFIXES = {
     "01","02","03","04","05","06","10","11","12","13","14","15","16",
     "20","21","22","23","24","25","26","27","30","31","32","33","34","35",
@@ -341,13 +346,14 @@ _VALID_EIN_PREFIXES = {
     "80","81","82","83","84","85","86","87","88","90","91","92","93","94",
     "95","98","99",
 }
-_SSN_RE = re.compile(r"^(?!000|666|9\d\d)\d{3}(?!00\d{4})\d{2}(?!0000)\d{4}$")
+# the complement, for the SQL twins (api._mask_tin_sql, the no-name label)
+SSN_PREFIXES = tuple(f"{i:02d}" for i in range(100) if f"{i:02d}" not in _VALID_EIN_PREFIXES)
 
 
 def looks_like_ssn(tin: str | None) -> bool:
     if not tin or not re.fullmatch(r"\d{9}", tin):
         return False
-    return tin[:2] not in _VALID_EIN_PREFIXES and bool(_SSN_RE.match(tin))
+    return tin[:2] not in _VALID_EIN_PREFIXES
 
 
 def mask_tin(tin: str | None) -> str | None:
@@ -992,6 +998,10 @@ class Store:
         # row-count cache can key on it and never serve a stale total across an
         # ingest — see api.rates(). Cheap monotonic int, not a data hash.
         self.data_generation = 0
+        self._placement_lock = threading.Lock()
+        # results that change only when the analytics tables do (see cached())
+        self._gen_cache: dict = {}
+        self._gen_cache_lock = threading.Lock()
         self._generation_lock = threading.Lock()  # leaf lock: bump sites hold
         # DIFFERENT outer locks (rollup_lock vs write_lock), so a bare += 1
         # read-modify-write could lose an increment and let the API's
@@ -3747,6 +3757,31 @@ class Store:
                 _query, _key, view = specs[tbl]
                 con.execute(f"CREATE OR REPLACE VIEW {view} AS SELECT * FROM {tbl}")
 
+    def cached(self, name: str, key, compute):
+        """`compute()`, remembered until the next data generation.
+
+        For whole-store answers that change only when a rollup lands — the
+        quality panels on every Overview visit, payer freshness inside every
+        benchmark, a market's leads and leaderboard (round 6: 0.45-14 s each
+        on a 99M-rate store, recomputed per request). `key` must hold every
+        input of the answer; values are handed out as deep copies, so a
+        caller that decorates its result cannot change the cached one."""
+        import copy
+        gen = self.data_generation
+        k = (name, key)
+        with self._gen_cache_lock:
+            if self._gen_cache.get("_gen") != gen:
+                self._gen_cache = {"_gen": gen}
+            if k in self._gen_cache:
+                return copy.deepcopy(self._gen_cache[k])
+        value = compute()
+        with self._gen_cache_lock:
+            if self._gen_cache.get("_gen") == gen:
+                if len(self._gen_cache) > 512:
+                    self._gen_cache = {"_gen": gen}
+                self._gen_cache[k] = value
+        return copy.deepcopy(value)
+
     def _bump_generation(self) -> None:
         with self._generation_lock:
             self.data_generation += 1
@@ -4035,6 +4070,68 @@ class Store:
             return result
         finally:
             self._enrich_progress_lock.release()
+
+    PLACEMENT_SCHEMA = 1
+
+    def placement_relation(self) -> str:
+        """`read_parquet(...)` of every practice's NPI-ZIP counts, current.
+
+        (tin_value, zip, c, nn, nt): the rate rows per (TIN, 5-digit ZIP) of
+        its NPIs, and its distinct NPIs / therapy NPIs there — exactly what
+        sqlfn.zip_counts_by_tin computed from the raw rows on EVERY leverage,
+        radius-map, dossier and new-to-network call (round 6: a radius map
+        11-62 s on a 99M-rate store; the whole-store placement is 8 s once).
+        The file is stamped with the rate parts' signatures and the NPI
+        directory's size, ZIP count and newest enrichment time, so any change
+        to either input yields a new file on the next request — never a stale
+        placement. Written outside the database (no writer lock), atomically."""
+        import hashlib
+        import json as _json
+
+        from .catalog import therapy_taxonomy_sql
+        from .sqlfn import _HAS_ZIP, ZIP5
+        with self.connect() as con:
+            n, z, last = con.execute(
+                "SELECT count(*), count(zip), max(enriched_at) FROM npi_directory").fetchone()
+        stamp = hashlib.sha1(_json.dumps(
+            [sorted(self._part_sigs().items()), n, z, str(last), self.PLACEMENT_SCHEMA]
+        ).encode()).hexdigest()[:16]
+        path = self.dir / f"tin_zip_place.{stamp}.parquet"
+        if not path.exists():
+            with self._placement_lock:
+                if not path.exists():
+                    therapy = therapy_taxonomy_sql("n.taxonomy_code", all_col="n.taxonomy_codes")
+                    tmp = self.dir / f"tin_zip_place.{stamp}.parquet.tmp"
+                    # rows per (TIN, NPI) first, then ONE directory lookup per
+                    # NPI: joining first evaluated the therapy-taxonomy LIKEs on
+                    # every rate row (39 s on a 99M-rate store; 6 s this way,
+                    # the same 194,000 rows to the byte)
+                    with self.connect() as con:
+                        con.execute(f"""
+                            COPY (
+                                WITH tn AS (
+                                    SELECT tin_value, npi, count(*) AS c FROM rates
+                                    WHERE tin_value IS NOT NULL AND npi IS NOT NULL
+                                    GROUP BY 1, 2
+                                ),
+                                nz AS (
+                                    SELECT n.npi, {ZIP5} AS zip, {therapy} AS is_t
+                                    FROM npi_directory n WHERE {_HAS_ZIP}
+                                )
+                                SELECT tn.tin_value, nz.zip, sum(tn.c)::BIGINT AS c,
+                                       count(DISTINCT tn.npi) AS nn,
+                                       count(DISTINCT tn.npi) FILTER (nz.is_t) AS nt
+                                FROM tn JOIN nz USING (npi)
+                                GROUP BY 1, 2
+                            ) TO '{sql_path(tmp)}' (FORMAT PARQUET)""")
+                    os.replace(tmp, path)
+                    for old in self.dir.glob("tin_zip_place.*.parquet"):
+                        if old != path:
+                            try:
+                                old.unlink()
+                            except OSError:      # still open on Windows: next time
+                                pass
+        return f"read_parquet('{sql_path(path)}')"
 
     def _part_sigs(self) -> dict[str, str]:
         """{part file name: size|mtime} for the rate parts on disk: every
@@ -4417,6 +4514,8 @@ class Store:
         with self.write_lock:
             for p in self.rates_dir.glob("*.parquet"):
                 unlink_with_retry(p)
+            for p in self.dir.glob("tin_zip_place.*"):
+                unlink_with_retry(p)
             with self.connect() as con:
                 con.execute(
                     "DELETE FROM files; DELETE FROM npi_directory; DELETE FROM provider_refs; "
@@ -4473,6 +4572,25 @@ for _name in _QUEUE_WRITERS_ALWAYS:
     setattr(Store, _name, _signals_queue(getattr(Store, _name), True))
 for _name in _QUEUE_WRITERS_IF_DONE:
     setattr(Store, _name, _signals_queue(getattr(Store, _name), False))
+
+
+def generation_cached(name: str, *, daily: bool = False):
+    """Decorator: remember `fn(store, *args, **kwargs)` per data generation
+    (Store.cached). `daily` adds today's date to the key, for answers that
+    report an age in days."""
+    import functools
+    import json as _json
+
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(store, *args, **kwargs):
+            key = _json.dumps([args, kwargs], sort_keys=True, default=str)
+            if daily:
+                key += "|" + dt.date.today().isoformat()
+            return store.cached(name, key, lambda: fn(store, *args, **kwargs))
+        wrapper.uncached = fn
+        return wrapper
+    return deco
 
 
 class BackgroundParquetWriter:

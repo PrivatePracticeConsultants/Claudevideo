@@ -42,7 +42,7 @@ from .catalog import (THERAPY_MIN_SHARE_PCT, THERAPY_SMALL_PRACTICE_NPIS,
                       catalog_json, therapy_taxonomy_sql)
 from .config import MrfxConfig
 from .enrich import use_bulk_enrichment
-from .leads import (compute_leaderboard, compute_leads, compute_payer_roster,
+from .leads import (LEADS_LIMIT, compute_leaderboard, compute_leads, compute_payer_roster,
                     leads_csv, payer_roster_csv)
 from .market import (
     assistant_pos_diff,
@@ -61,7 +61,7 @@ from .schedule import (
 from .entities import sync_entity_map, update_entity
 from .ingest import ingest_file, scan_inbox, thread_stacks_text
 from .registry import Registry
-from .store import Store, mask_tin, sql_path
+from .store import SSN_PREFIXES, Store, mask_tin, sql_path
 
 log = logging.getLogger(__name__)
 
@@ -96,8 +96,8 @@ UPLOAD_LIMIT_BYTES = 1 << 30  # browser uploads capped at 1 GB (§5.4)
 
 OUTLIER_RULE = "hide rows >5x or <0.2x of the code's median within the current filter"
 
-_SSN_PREFIXES = ("('00','07','08','09','17','18','19','28','29','49',"
-                 "'69','70','78','79','89','96','97')")
+# the SQL twin of store.looks_like_ssn, from the same prefix set
+_SSN_PREFIXES = "(" + ",".join(f"'{p}'" for p in SSN_PREFIXES) + ")"
 
 # the no-name fallback label must never surface a raw SSN-pattern TIN — it is
 # rendered as display_name in the UI, CSV exports, and outreach ORG_NAME
@@ -424,6 +424,7 @@ class FilterSet:
             put("key", f"payer IN ({', '.join('?' for _ in payers)})", *payers)
             add("payers", payers)
         codes = split(qp.get("cpt") or qp.get("code"))
+        self.codes = codes
         if codes:
             put("key", f"billing_code IN ({', '.join('?' for _ in codes)})", *codes)
             add("codes", codes)
@@ -655,7 +656,10 @@ def rel_sql(grain: str, fs: FilterSet) -> str:
     # search) finds its practices first, then reads only their rows; an exact
     # ID alone stays a plain spine predicate (pushed into the scan already),
     # and so does "therapy only" alone (see FilterSet.selective_dims)
-    by_unit = fs.selective_dims and grain in ("tin", "entity")
+    # ... unless a code filter already narrowed the rows: the join over one
+    # code's rows is cheaper than listing practices first (round 6 A/B at 99M
+    # rates: the Code page with a state 0.54 s joined vs 0.72 s practices-first)
+    by_unit = fs.selective_dims and not fs.codes and grain in ("tin", "entity")
     if grain == "entity":
         # member TINs are filtered by contract and practice attributes FIRST —
         # a state=MO filter keeps the entity's MO TINs, not every TIN of an
@@ -1421,7 +1425,11 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         # May's $40 and June's $42 into a "$41" median nobody published, and
         # counted the same NPIs once per month. Default to each contract's
         # NEWEST month (FilterSet.latest_only) unless a month is pinned; the
-        # page's export button sends the same latest=1, so export == screen.
+        # page's export button sends the same latest=1, so the export holds
+        # exactly the rows this page summarises. It is NOT the page itself:
+        # the page shows medians per practice/payer, the export is those
+        # rows one per contract line (each POS set separately), rate-sorted,
+        # so a reader can recompute every median shown.
         qp.setdefault("latest", "1")
         grain = grain_of(qp, cfg, store)
         fs = _fs(qp)
@@ -1543,13 +1551,17 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
 
     @app.get("/api/months")
     def months():
-        with store.connect() as con:
-            rows = con.execute(
-                "SELECT DISTINCT file_month FROM rates_by_tin "
-                "WHERE file_month IS NOT NULL AND file_month <> '' "
-                "ORDER BY file_month DESC"
-            ).fetchall()
-        return {"months": [r[0] for r in rows]}
+        # a whole-store DISTINCT that every tab entry asked for — it changes
+        # only with a data generation (Store.cached)
+        def compute():
+            with store.connect() as con:
+                rows = con.execute(
+                    "SELECT DISTINCT file_month FROM rates_by_tin "
+                    "WHERE file_month IS NOT NULL AND file_month <> '' "
+                    "ORDER BY file_month DESC"
+                ).fetchall()
+            return {"months": [r[0] for r in rows]}
+        return store.cached("api.months", None, compute)
 
     # -- validation cross-check (§7A.10) -----------------------------------------
 
@@ -3089,7 +3101,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 store, body.get("market") or {},
                 threshold_percentile=_as_int(body.get("threshold_percentile"), 25),
                 min_codes=_bounded_int(body.get("min_codes"), 3, 1, 1000),
-                limit=_bounded_int(body.get("limit"), 100, 1, 5000),
+                limit=_bounded_int(body.get("limit"), 100, 1, LEADS_LIMIT),
                 exclude_subject=(str(body["exclude_subject"]) if body.get("exclude_subject") else None),
             )
         except (BenchmarkError, ValueError, TypeError) as e:
@@ -3104,7 +3116,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 store, body.get("market") or {},
                 threshold_percentile=_as_int(body.get("threshold_percentile"), 25),
                 min_codes=_bounded_int(body.get("min_codes"), 3, 1, 1000),
-                limit=_bounded_int(body.get("limit"), 1000, 1, 5000),
+                limit=_bounded_int(body.get("limit"), LEADS_LIMIT, 1, LEADS_LIMIT),
                 exclude_subject=(str(body["exclude_subject"]) if body.get("exclude_subject") else None),
             )
             return PlainTextResponse("﻿" + leads_csv(store, result), headers={
@@ -3411,14 +3423,21 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         # every raw parquet part in the store (an uncached full-store scan on the
         # interactive dashboard-load path). Fall back to raw `rates` only before
         # the first rollup exists, so a brand-new store still lists its payers.
-        with store.connect() as con:
-            has_tbl = con.execute(
-                "SELECT count(*) FROM information_schema.tables "
-                "WHERE table_name = 'rates_by_tin_tbl'").fetchone()[0]
-            src = "rates_by_tin_tbl" if has_tbl else "rates"
-            rows = con.execute(
-                f"SELECT DISTINCT payer FROM {src} ORDER BY payer").fetchall()
-        return {"payers": [r[0] for r in rows]}
+        def compute():
+            with store.connect() as con:
+                has_tbl = con.execute(
+                    "SELECT count(*) FROM information_schema.tables "
+                    "WHERE table_name = 'rates_by_tin_tbl'").fetchone()[0]
+                src = "rates_by_tin_tbl" if has_tbl else "rates"
+                rows = con.execute(
+                    f"SELECT DISTINCT payer FROM {src} ORDER BY payer").fetchall()
+            return {"payers": [r[0] for r in rows], "_spine": bool(has_tbl)}
+        got = store.cached("api.payers", None, compute)
+        if not got.pop("_spine"):
+            # before the first rollup the list reads raw parts, which land
+            # without a new generation: never hold that one
+            store._gen_cache.pop(("api.payers", None), None)
+        return got
 
     @app.get("/api/catalog")
     def catalog():

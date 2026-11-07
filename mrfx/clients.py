@@ -14,7 +14,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 
-from .benchmark import BenchmarkError, contract_gaps, resolve_subject_tins
+from .benchmark import BenchmarkError, resolve_subject_tins
 from .store import Store
 
 log = logging.getLogger(__name__)
@@ -58,23 +58,55 @@ def remove_client(store: Store, subject: str) -> list[str]:
     return watchlist(store)
 
 
-def client_digest(store: Store) -> dict:
+DIGEST_GAPS_MARKET = {"month": "latest", "therapy_only": True}
+
+
+def client_digest(store: Store, gaps_book: dict | None = None) -> dict:
     """One row per saved client. FAULT-ISOLATED per client and per section: a
     client whose name no longer resolves gets an error cell, never a dead
     digest; a store with only one month simply reports changes as unavailable
-    rather than fabricating a comparison."""
-    from .medicare import medicare_status, org_referrals, recent_losses
+    rather than fabricating a comparison.
 
-    from .monitor import LATEST_PER_PAYER, payer_months
+    Cached per (data generation, watchlist, Medicare layers): the Clients tab
+    rebuilt it on every visit (23 s for 5 clients on a 99M-rate store) though
+    nothing in it changes until data, the list or a Medicare import does.
+    `gaps_book` lets the packet build hand in the gaps it already computed."""
+    import json
+
+    from .medicare import medicare_status
 
     subjects = watchlist(store)
+    mstatus = medicare_status(store)
+    key = (store.data_generation, tuple(subjects),
+           json.dumps(mstatus, sort_keys=True, default=str))
+    held = getattr(store, "_digest_cache", None)
+    if held is not None and held[0] == key:
+        return held[1]
+    result = _build_digest(store, subjects, mstatus, gaps_book)
+    store._digest_cache = (key, result)
+    return result
+
+
+def _build_digest(store: Store, subjects: list[str], mstatus: dict,
+                  gaps_book: dict | None) -> dict:
+    from .benchmark import contract_gaps_book
+    from .medicare import org_referrals, recent_losses
+    from .monitor import LATEST_PER_PAYER, payer_months
+
     # rate moves compare EACH PAYER's newest file with that payer's previous
     # one: the store's newest month is a month only some payers published in
     # (round 6: one payer's 76 rows dated a month ahead hid every other
     # payer's moves from every client)
     pm = payer_months(store)
-    have_medicare = bool(medicare_status(store).get("referrals"))
+    have_medicare = bool(mstatus.get("referrals"))
     can_diff = any(prev for _, _, prev in pm)
+    # contract gaps for the WHOLE book in one market pass (exact — see
+    # contract_gaps_book); was the national market aggregation per client
+    if gaps_book is None:
+        try:
+            gaps_book = contract_gaps_book(store, subjects, DIGEST_GAPS_MARKET)
+        except BenchmarkError as e:
+            gaps_book = {s: e for s in subjects}
 
     rows = []
     for subject in subjects:
@@ -123,15 +155,15 @@ def client_digest(store: Store) -> dict:
                 except BenchmarkError as e:
                     row["changes"] = {"error": str(e)}
 
-            # contract gaps — same function as the Benchmark tab's button
-            try:
-                g = contract_gaps(store, subject, {"month": "latest",
-                                                   "therapy_only": True})
+            # contract gaps — the Benchmark tab button's numbers (contract_gaps
+            # is defined through the same book function)
+            g = gaps_book.get(subject)
+            if isinstance(g, BenchmarkError) or g is None:
+                row["gaps"] = {"error": str(g or "no contract-gap result")}
+            else:
                 gaps = g.get("gaps") or []
                 row["gaps"] = {"n": len(gaps),
                                "top": [x.get("billing_code") for x in gaps[:3]]}
-            except BenchmarkError as e:
-                row["gaps"] = {"error": str(e)}
 
             # referral sources that lost order/refer standing — the alert
             row["lost_referrers"] = None

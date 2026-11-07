@@ -27,10 +27,10 @@ from __future__ import annotations
 import logging
 import re
 
-from .catalog import code_info
+from .catalog import code_info, therapy_taxonomy_sql
 from .states import state_code_or_none
 from .sqlfn import modal_zip_by_tin, modal_zip_of
-from .store import Store, mask_tin
+from .store import Store, generation_cached, mask_tin
 
 log = logging.getLogger(__name__)
 
@@ -63,7 +63,10 @@ STEAL_NOTE = (
     "for referral, not a record of one. A physician sending to another practice "
     "may have a contractual or ownership reason that no data here can see. "
     "These are the calls worth making first, not proof a relationship is "
-    "winnable."
+    "winnable. Competitors are the PT/OT/SLP providers and therapy clinics "
+    "(by NPPES taxonomy) in the practice's own cities. CMS suppresses any pair "
+    "under 11 shared patients, so 'none to this one' means none the release "
+    "shows: a physician sending 1-10 patients here is invisible."
 )
 
 # DOJ/FTC Horizontal Merger Guidelines bands, used because they are the ones a
@@ -170,6 +173,7 @@ def local_rate_map(store: Store, code: str, market: dict, *,
     }
 
 
+@generation_cached('territory.payer_concentration')
 def payer_concentration(store: Store, market: dict | None = None,
                         *, limit: int = 25, code: str | None = None) -> dict:
     """How the contracted relationships in a market divide across payers.
@@ -189,18 +193,28 @@ def payer_concentration(store: Store, market: dict | None = None,
     where, params = _market_where(m, bool(m.get("include_assistant")),
                                   bool(m.get("include_non_dollar")))
     rel = _rates_relation(m)
+    # median_rate is the house rule: ONE rate per practice (its median for
+    # the code), then the median across practices. It was a median over raw
+    # contract lines, so a practice published on three POS sets counted
+    # three times (round 6 P3).
     sql = f"""
-        SELECT t.payer,
-               count(DISTINCT t.tin_value)         AS n_practices,
-               count(DISTINCT t.billing_code)      AS n_codes,
-               round(median(t.negotiated_rate) {"FILTER (WHERE t.billing_code = ?)" if code else ""}, 2)
+        WITH base AS (
+            SELECT t.payer, t.tin_value, t.billing_code,
+                   median(t.negotiated_rate) AS rate
+            FROM {rel} t LEFT JOIN tin_directory td USING (tin_value)
+            WHERE {where}
+            GROUP BY t.payer, t.tin_value, t.billing_code
+        )
+        SELECT payer,
+               count(DISTINCT tin_value)           AS n_practices,
+               count(DISTINCT billing_code)        AS n_codes,
+               round(median(rate) {"FILTER (WHERE billing_code = ?)" if code else ""}, 2)
                                                    AS median_rate
-        FROM {rel} t LEFT JOIN tin_directory td USING (tin_value)
-        WHERE {where}
-        GROUP BY t.payer ORDER BY n_practices DESC, t.payer
+        FROM base
+        GROUP BY payer ORDER BY n_practices DESC, payer
     """
     with store.connect() as con:
-        cur = con.execute(sql, ([code] if code else []) + list(params))
+        cur = con.execute(sql, list(params) + ([code] if code else []))
         rows = [dict(zip([d[0] for d in cur.description], r)) for r in cur.fetchall()]
         # how much of the store's payer universe this market's scope covers —
         # the number that decides whether the index means anything at all
@@ -211,7 +225,10 @@ def payer_concentration(store: Store, market: dict | None = None,
     total = sum(r["n_practices"] for r in rows)
     for r in rows:
         r["share_pct"] = round(100.0 * r["n_practices"] / total, 1) if total else None
-    hhi = round(sum((r["share_pct"] or 0) ** 2 for r in rows), 0) if total else None
+    # from the EXACT shares: squaring the 1-dp display shares drifted the
+    # index by up to a few points (round 6 P3)
+    hhi = (round(sum((100.0 * r["n_practices"] / total) ** 2 for r in rows), 0)
+           if total else None)
     top = rows[0] if rows else None
     # Fewer than ~5 payers cannot produce a meaningful index — with 3 payers the
     # minimum possible HHI is 3333, i.e. "highly concentrated" by construction.
@@ -253,10 +270,11 @@ def _add_miles(store: Store, rows: list[dict], subject_tins: list[str],
         return
     try:
         from .medicare import haversine_miles_sql, load_centroids
+        place = store.placement_relation()
         with store.connect() as con:
             load_centroids(con, centroids_path)
             origin = con.execute(f"""
-                SELECT * FROM ({modal_zip_of("SELECT unnest(?::VARCHAR[])")})
+                SELECT * FROM ({modal_zip_of("SELECT unnest(?::VARCHAR[])", place)})
             """, [subject_tins]).fetchone()
             home = origin[0] if origin else None
             if not home:
@@ -339,13 +357,18 @@ def steal_share(store: Store, subject: str, *, radius_miles: float | None = None
                                "NPI enrichment first"),
                     "note": STEAL_NOTE}
 
-        sql = """
+        sql = f"""
         WITH mine AS (SELECT unnest(?::VARCHAR[]) AS npi),
         local_rivals AS (
+            -- THERAPY competitors only: the headline says "therapy practices",
+            -- and every NPI in the city (the hospital, the orthopaedic group,
+            -- the imaging centre) used to count as a rival, so a physician
+            -- referring to a radiologist became a "steal" target
             SELECT DISTINCT n.npi
             FROM npi_directory n
             WHERE upper(trim(coalesce(n.city, ''))) IN (SELECT unnest(?::VARCHAR[]))
               AND n.npi NOT IN (SELECT npi FROM mine)
+              AND {_THERAPY_N}
         ),
         to_rivals AS (
             SELECT p.source_npi, sum(p.patients) AS patients_elsewhere,
@@ -413,7 +436,8 @@ def steal_share(store: Store, subject: str, *, radius_miles: float | None = None
             "referral flow, or the release does not cover these providers"),
         "headline": (
             f"{len(cold)} physician(s) send patients to therapy practices in "
-            f"{', '.join(c.title() for c in cities[:3])} and none to this one; "
+            f"{', '.join(c.title() for c in cities[:3])} and none this release "
+            "records to this one (CMS hides pairs under 11 patients); "
             f"the largest sends {cold[0]['patients_elsewhere']:,} elsewhere."
             if cold else
             f"{len(rows)} referral source(s) send more elsewhere than here."
@@ -421,6 +445,8 @@ def steal_share(store: Store, subject: str, *, radius_miles: float | None = None
         "note": STEAL_NOTE,
     }
 
+
+_THERAPY_N = therapy_taxonomy_sql("n.taxonomy_code")
 
 RADIUS_NOTE = (
     "Distance is from the centre of the ZIP you named to the centre of each "
@@ -469,6 +495,7 @@ def radius_rate_map(store: Store, code: str, market: dict, *,
                                   bool(m.get("include_non_dollar")))
     rel = _rates_relation(m)
 
+    place = store.placement_relation()
     with store.connect() as con:
         load_centroids(con, centroids_path)
         origin = con.execute("SELECT lat, lon FROM _zcta WHERE zip = ?",
@@ -485,7 +512,7 @@ def radius_rate_map(store: Store, code: str, market: dict, *,
             WHERE {where}
             GROUP BY t.tin_value
         ),
-        tin_zip AS ({modal_zip_by_tin("SELECT tin_value FROM per_tin")}),
+        tin_zip AS ({modal_zip_by_tin("SELECT tin_value FROM per_tin", place)}),
         placed AS (
             SELECT p.tin_value, p.rate, z.zip,
                    {haversine_miles_sql('c.lat', 'c.lon', origin[0], origin[1])} AS miles

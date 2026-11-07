@@ -14,6 +14,8 @@ C{code}_PCTL (share of entities at or below), C{code}_GAP_TO_MEDIAN.
 
 from __future__ import annotations
 
+import bisect
+
 import csv
 import io
 import logging
@@ -159,6 +161,10 @@ def build_outreach_rows(store: Store, rel_sql: str, params: list,
         return round((vals[mid] if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2), 2)
 
     medians = {c: market_median(c) for c in wanted}
+    # each code's rates sorted ONCE: "how many are at or below this rate" is a
+    # binary search. Counting them per practice per code was quadratic — one
+    # state's export (5,700 practices) spent 11.6 s in 244M generator steps.
+    sorted_vals = {c: sorted(by_code.get(c, {}).values()) for c in wanted}
     verified_sites = store.org_websites()
 
     headers = list(BASE_HEADERS)
@@ -194,11 +200,11 @@ def build_outreach_rows(store: Store, rel_sql: str, params: list,
         }
         for c in wanted:
             rate = by_code.get(c, {}).get(unit_id)
-            vals = list(by_code.get(c, {}).values())
+            vals = sorted_vals[c]
             if rate is None or not vals:
                 row[f"C{c}_RATE"] = row[f"C{c}_MKT_MEDIAN"] = row[f"C{c}_PCTL"] = row[f"C{c}_GAP_TO_MEDIAN"] = ""
                 continue
-            pctl = round(100 * sum(1 for v in vals if v <= rate) / len(vals))
+            pctl = round(100 * bisect.bisect_right(vals, rate) / len(vals))
             med = medians[c]
             row[f"C{c}_RATE"] = round(rate, 2)
             row[f"C{c}_MKT_MEDIAN"] = med if med is not None else ""

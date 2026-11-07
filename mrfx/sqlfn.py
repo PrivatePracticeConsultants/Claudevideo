@@ -19,11 +19,18 @@ _HAS_ZIP = "n.zip IS NOT NULL AND trim(n.zip) <> ''"
 _PICK = "arg_min(zip, struct_pack(c := -c, z := zip))"
 
 
-def zip_counts_by_tin(tins_sql: str, extra: str = "") -> str:
+def zip_counts_by_tin(tins_sql: str, extra: str = "", place: str | None = None) -> str:
     """(tin_value, zip, c[, extra...]) — rate rows per practice per ZIP for the
     TINs `tins_sql` selects (a subquery or `SELECT unnest(?::VARCHAR[])`).
     `extra` adds aggregates (", count(DISTINCT n.npi) AS nn"); an NPI has ONE
-    ZIP, so a per-NPI count summed over a practice's ZIPs is its total."""
+    ZIP, so a per-NPI count summed over a practice's ZIPs is its total.
+
+    `place` (Store.placement_relation()) reads the same counts, precomputed;
+    it carries `nn` and `nt` (distinct NPIs / therapy NPIs), so `extra` must
+    name those columns (", nt, nn") rather than aggregate them."""
+    if place:
+        return (f"SELECT tin_value, zip, c{extra} FROM {place} "
+                f"WHERE tin_value IN ({tins_sql})")
     return f"""
         SELECT r.tin_value, {ZIP5} AS zip, count(*) AS c{extra}
         FROM rates r JOIN npi_directory n ON n.npi = r.npi
@@ -31,17 +38,17 @@ def zip_counts_by_tin(tins_sql: str, extra: str = "") -> str:
         GROUP BY 1, 2"""
 
 
-def modal_zip_by_tin(tins_sql: str) -> str:
+def modal_zip_by_tin(tins_sql: str, place: str | None = None) -> str:
     """(tin_value, zip): each practice's ZIP."""
-    return (f"SELECT tin_value, {_PICK} AS zip FROM ({zip_counts_by_tin(tins_sql)}) "
+    return (f"SELECT tin_value, {_PICK} AS zip FROM ({zip_counts_by_tin(tins_sql, place=place)}) "
             "GROUP BY tin_value")
 
 
-def modal_zip_of(tins_sql: str) -> str:
+def modal_zip_of(tins_sql: str, place: str | None = None) -> str:
     """One row, one column: the ZIP of a practice made of the given TINs
     (their rows pooled, as mode() over them all did)."""
     return (f"SELECT {_PICK} FROM (SELECT zip, sum(c) AS c FROM "
-            f"({zip_counts_by_tin(tins_sql)}) GROUP BY zip)")
+            f"({zip_counts_by_tin(tins_sql, place=place)}) GROUP BY zip)")
 
 
 def pick_modal_zip() -> str:

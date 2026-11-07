@@ -39,11 +39,23 @@ those carry, restated wherever a number appears:
 from __future__ import annotations
 
 import logging
+import statistics
 
 from .catalog import code_info
 from .store import Store
 
 log = logging.getLogger(__name__)
+
+# The weighted figure is a volume-weighted MEAN of per-code positions, so the
+# figure it is compared against has to be the plain MEAN — a median against a
+# weighted mean would report a "shift" that is partly just mean-vs-median. The
+# house headline everywhere else (negotiation, Leads, dossier) is the MEDIAN,
+# so it travels alongside under its own name.
+POSITION_BASIS = (
+    "Weighted and unweighted positions are AVERAGES of the per-code positions, "
+    "so the shift compares like with like. The headline position used elsewhere "
+    "(negotiation, Leads, dossier) is the MEDIAN of the same per-code positions, "
+    "shown here as median_percentile.")
 
 MIX_NOTE = (
     "The visit basket is built from this practice's own MEDICARE fee-for-"
@@ -108,7 +120,7 @@ def visit_economics(store: Store, subject: str, market: dict | None = None, *,
                 "reason": "this practice's Medicare rows carry no service units",
                 "note": MIX_NOTE}
 
-    fs = compute_fee_schedule(store, subject, market or {})
+    fs = compute_fee_schedule(store, subject, market or {}, peers=False)
     # rate lookup: {(payer, code): rate}
     priced: dict[tuple, float] = {}
     for entry in fs["codes"]:
@@ -229,10 +241,12 @@ def weighted_position(store: Store, subject: str, market: dict | None = None, *,
     coverage = round(100.0 * covered_codes / len(rows), 1) if rows else 0.0
 
     unweighted = round(sum(r["subject_percentile"] for r in rows) / len(rows), 1)
+    median_pct = round(statistics.median(r["subject_percentile"] for r in rows), 1)
     if coverage < MIN_WEIGHT_COVERAGE_PCT or not weighted_rows:
         return {
             "loaded": False, "subject": subject,
             "unweighted_percentile": unweighted,
+            "median_percentile": median_pct, "basis": POSITION_BASIS,
             "coverage_pct": coverage, "min_coverage_pct": MIN_WEIGHT_COVERAGE_PCT,
             "volume_source": src,
             "reason": (
@@ -251,6 +265,7 @@ def weighted_position(store: Store, subject: str, market: dict | None = None, *,
         "loaded": True, "subject": subject,
         "weighted_percentile": weighted,
         "unweighted_percentile": unweighted,
+        "median_percentile": median_pct, "basis": POSITION_BASIS,
         "shift": shift,
         "coverage_pct": coverage, "n_codes_weighted": covered_codes,
         "n_codes_total": len(rows),
@@ -261,12 +276,12 @@ def weighted_position(store: Store, subject: str, market: dict | None = None, *,
         "headline": (
             f"Weighted by what this practice actually bills, its position is "
             f"p{weighted:g} — {abs(shift):g} points "
-            f"{'above' if shift > 0 else 'below'} the unweighted p{unweighted:g}, "
+            f"{'above' if shift > 0 else 'below'} the unweighted average p{unweighted:g}, "
             f"because {heaviest['billing_code']} carries "
             f"{round(100.0 * vols[heaviest['billing_code']] / total_w):g}% of the volume."
             if abs(shift) >= 1 else
             f"Weighting by volume barely moves this practice's position "
-            f"(p{weighted:g} vs p{unweighted:g}) — the rate case is consistent "
+            f"(p{weighted:g} vs an unweighted average of p{unweighted:g}) — the rate case is consistent "
             "across its whole book."),
         "note": MIX_NOTE + (
             " Volumes are the ones you supplied." if src == "supplied"

@@ -21,11 +21,20 @@ import json
 from . import __version__
 from .benchmark import (BenchmarkError, _market_where, _rates_relation,
                         normalize_market, resolve_subject_tins)
-from .store import Store, defuse_csv, mask_tin
+from .store import Store, defuse_csv, generation_cached, mask_tin
 
 PERCENTILES = (10, 25, 40, 50, 75, 90)
+LEADS_LIMIT = 1000
+# The sweep tests the position AS SHOWN: the median of the per-code
+# percentiles, rounded to a whole percentile. A practice listed at "p25" is
+# therefore always inside a p25 sweep, whatever its unrounded median.
+LEADS_RULE = (
+    "A lead is a practice whose median percentile across its priced codes, "
+    "rounded to a whole percentile as shown, is at or below the threshold; "
+    "only codes with at least 2 practices in the market count.")
 
 
+@generation_cached('leads.compute_leads')
 def compute_leads(store: Store, market: dict, *, threshold_percentile: int = 25,
                   min_codes: int = 3, limit: int = 100,
                   exclude_subject: str | None = None) -> dict:
@@ -35,7 +44,7 @@ def compute_leads(store: Store, market: dict, *, threshold_percentile: int = 25,
         raise BenchmarkError("threshold_percentile must be between 1 and 99")
     if min_codes < 1:
         raise BenchmarkError("min_codes must be at least 1")
-    limit = max(1, min(int(limit), 1000))
+    limit = max(1, min(int(limit), LEADS_LIMIT))
     include_assistant = bool(market.get("include_assistant", False))
     include_non_dollar = bool(market.get("include_non_dollar", False))
     where, params = _market_where(market, include_assistant, include_non_dollar)
@@ -52,13 +61,18 @@ def compute_leads(store: Store, market: dict, *, threshold_percentile: int = 25,
         excl_clause = "AND p.tin_value NOT IN (SELECT unnest(?::VARCHAR[]))"
         excl_params = [excl]
 
-    sql = f"""
-    WITH base AS (
+    # The market base -- one median per (code, practice) -- is built ONCE into a
+    # connection-local temp table: the ranking and the worst-payer step both
+    # read it. The worst-payer step used to rebuild the whole market a second
+    # time just to get each code's median.
+    base_sql = f"""
         SELECT t.billing_code, t.tin_value, median(t.negotiated_rate) AS rate
         FROM {rel} t LEFT JOIN tin_directory td USING (tin_value)
         WHERE {where}
         GROUP BY t.billing_code, t.tin_value
-    ),
+    """
+    sql = f"""
+    WITH base AS (SELECT * FROM _lead_base),
     ranked AS (
         -- percent_rank (0 at the cheapest, = fraction strictly below): the
         -- cheapest practice sits at 0 so in a thin 2-3 provider market the
@@ -100,9 +114,14 @@ def compute_leads(store: Store, market: dict, *, threshold_percentile: int = 25,
     # carry it, so it's the state to SHOW even for a multi-state billing entity
     filter_state = (market.get("state") or "").upper() or None
     with store.connect() as con:
-        cur = con.execute(sql, [*params, min_codes, threshold_percentile, *excl_params, limit])
+        con.execute(f"CREATE OR REPLACE TEMP TABLE _lead_base AS {base_sql}", params)
+        # one row past the cap says whether the list was CUT: a 1,000-row
+        # list used to look complete when the market held more leads
+        cur = con.execute(sql, [min_codes, threshold_percentile, *excl_params, limit + 1])
         cols = [d[0] for d in cur.description]
         rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+        truncated = len(rows) > limit
+        rows = rows[:limit]
         # OUTREACH HOOK: for each prospect, WHICH payer underpays them most —
         # the payer with the biggest average shortfall vs the code's market
         # median. Turns "this practice is at p18" into "…because <payer> pays
@@ -120,12 +139,8 @@ def compute_leads(store: Store, market: dict, *, threshold_percentile: int = 25,
             ),
             mkt AS (
                 SELECT billing_code, median(rate) AS code_median,
-                       count(*) AS n_in_code FROM (
-                    SELECT t.billing_code, t.tin_value,
-                           median(t.negotiated_rate) AS rate
-                    FROM {rel} t LEFT JOIN tin_directory td USING (tin_value)
-                    WHERE {where} GROUP BY t.billing_code, t.tin_value
-                ) GROUP BY billing_code
+                       count(*) AS n_in_code
+                FROM _lead_base GROUP BY billing_code
             ),
             gap AS (
                 -- the SAME codes the position counts: a code only this practice
@@ -146,7 +161,7 @@ def compute_leads(store: Store, market: dict, *, threshold_percentile: int = 25,
                 FROM gap) WHERE rn = 1 AND avg_gap > 0
             """
             for tv, payer, gap in con.execute(
-                    wsql, [*params, lead_tins, *params]).fetchall():
+                    wsql, [*params, lead_tins]).fetchall():
                 worst_payer[tv] = {"payer": payer, "avg_gap": gap}
     sites = store.org_websites()
     leads = []
@@ -185,10 +200,14 @@ def compute_leads(store: Store, market: dict, *, threshold_percentile: int = 25,
         "threshold_percentile": threshold_percentile,
         "min_codes": min_codes,
         "count": len(leads),
+        "limit": limit,
+        "truncated": truncated,
         "leads": leads,
+        "note": LEADS_RULE,
     }
 
 
+@generation_cached('leads.compute_leaderboard')
 def compute_leaderboard(store: Store, market: dict, *, min_codes: int = 3,
                         limit: int = 50, sort: str = "size") -> dict:
     """The inverse of the lead finder: rank the market's practices by SIZE
@@ -273,6 +292,7 @@ def compute_leaderboard(store: Store, market: dict, *, min_codes: int = 3,
     }
 
 
+@generation_cached('leads.compute_payer_roster')
 def compute_payer_roster(store: Store, payer: str, market: dict, *,
                          min_codes: int = 1, limit: int = 500,
                          sort: str = "name") -> dict:
@@ -436,6 +456,10 @@ def leads_csv(store: Store, result: dict) -> str:
         f"priced codes is at or below p{result['threshold_percentile']}, pricing "
         f"at least {result['min_codes']} codes with a real market (≥2 providers).",
         f"Market definition: {json.dumps(m)}.",
+        LEADS_RULE,
+        *([f"List CUT at {result['limit']:,} leads; the market holds more. Narrow it "
+           "(state, payer, discipline) or raise the minimum code count to see the rest."]
+          if result.get("truncated") else []),
         "Percentile position comes from published negotiated rates, not "
         "collections; avg_gap_to_median is a rate-level magnitude, NOT annual "
         "dollars (that needs the practice's own volumes — run the benchmark's "

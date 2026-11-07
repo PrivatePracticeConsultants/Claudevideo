@@ -25,10 +25,11 @@ import statistics
 
 from . import __version__
 from .benchmark import (
-    BASIS_NOTE,
     anchor_state,
+    basis_note_for,
     COLLECTION_NOTE,
     GHOST_RATE_NOTE,
+    THIN_PEERS,
     BenchmarkError,
     _brand_header,
     _geo_banner_html,
@@ -50,14 +51,20 @@ from .store import Store, defuse_csv, mask_tin
 # The rate card is a client-facing deliverable, so a one-contract "market" must
 # never appear in it unlabeled (matches market._MIN_CELL's intent).
 _MIN_PEERS = 3
-_THIN_PEERS = 5
+_THIN_PEERS = THIN_PEERS   # one threshold for every deliverable
 
 
-def compute_fee_schedule(store: Store, subject: str, market: dict) -> dict:
+def compute_fee_schedule(store: Store, subject: str, market: dict, *,
+                         peers: bool = True) -> dict:
     """The subject's negotiated rate for every code, by payer (§7C.1).
 
     Rate for a (payer, code) = median across the subject's TINs of each TIN's
     median published rate — the same entity-grain rule the rest of the app uses.
+
+    `peers=False` skips the per-cell peer medians (market_median / n_peers /
+    vs_market_pct come back empty): callers that read only the practice's own
+    rates — the visit calculators — paid for that query and threw it away
+    (95% of the call: 4.13 of 4.34 s on a 99M-rate store).
     """
     from .benchmark import resolve_plan_scope
     market = resolve_plan_scope(store, normalize_market(market))
@@ -119,7 +126,7 @@ def compute_fee_schedule(store: Store, subject: str, market: dict) -> dict:
         subj_payers = sorted({r["payer"] for r in raw})
         subj_codes = sorted({r["billing_code"] for r in raw})
         market_by: dict[tuple, dict] = {}
-        if subj_payers and subj_codes:
+        if peers and subj_payers and subj_codes:
             # The peer side must NOT reuse `rel` — that one is narrowed to the
             # subject's TINs and would return zero peers. Narrow this one by
             # payer + billing_code instead: both are partition-key columns, so
@@ -202,7 +209,8 @@ def compute_fee_schedule(store: Store, subject: str, market: dict) -> dict:
         "mpfs_loaded": bool(mpfs),
         "mpfs_source": mpfs_source,
         "mpfs_refusal": anchor["refusal"],
-        "basis_note": BASIS_NOTE,
+        "basis_note": basis_note_for({**market, "include_assistant": include_assistant,
+                                      "include_non_dollar": include_non_dollar}),
     }
 
 

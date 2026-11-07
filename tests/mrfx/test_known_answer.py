@@ -278,8 +278,10 @@ def test_ssn_pattern_tin_is_masked_wherever_it_is_shown_or_exported(ka):
 
 
 def test_python_and_sql_masking_agree_on_real_ssn_shapes():
-    """SQL masks by invalid-EIN prefix alone; Python also requires an SSN
-    structure. SQL must mask EVERY value Python masks (the safe direction)."""
+    """ONE rule (round 6 P3): a 9-digit number whose prefix is not a valid EIN
+    campus prefix is masked on screen (SQL) AND in every export (Python). The
+    Python rule also demanded SSN structure, so 96x/97x (ITIN-shaped) and
+    000-area numbers showed masked on screen and raw in the CSVs."""
     import duckdb
 
     from mrfx.api import _mask_tin_sql
@@ -290,8 +292,11 @@ def test_python_and_sql_masking_agree_on_real_ssn_shapes():
     for s in samples:
         sql_masked = con.execute(f"SELECT {_mask_tin_sql('t')} FROM (SELECT ? AS t)",
                                  [s]).fetchone()[0] != s
-        if looks_like_ssn(s):
-            assert sql_masked, s
+        assert sql_masked == looks_like_ssn(s), s
+    # the shapes that used to disagree
+    for s in ("961234567", "971234567", "000123456", "070000000"):
+        assert looks_like_ssn(s), s
+    assert not looks_like_ssn("431111111") and not looks_like_ssn("1712345678")
 
 
 def test_code_comparison_export_matches_its_screen(ka):

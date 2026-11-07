@@ -28,8 +28,8 @@ import re
 from pathlib import Path
 
 from .benchmark import (BenchmarkError, compute_benchmark, contract_gaps,
-                        resolve_subject_tins,
-                        render_pitch_report)
+                        normalize_market, render_pitch_report,
+                        resolve_subject_tins)
 from .config import MrfxConfig
 from .schedule import (compute_fee_schedule, payer_scorecard,
                        render_rate_card, require_rate_card_content)
@@ -79,7 +79,7 @@ def subject_vintage(store: Store, subject: str) -> list[tuple[str, str]]:
 
 def build_client_packet(cfg: MrfxConfig, store: Store, subject: str,
                         out_dir: Path, market: dict | None = None,
-                        digest: dict | None = None) -> dict:
+                        digest: dict | None = None, gaps: dict | None = None) -> dict:
     """One client's packet. Returns what was written and what was skipped.
     `digest` is the book's client digest when the caller already built it
     (build_all_packets does, once for the whole book)."""
@@ -135,6 +135,11 @@ def build_client_packet(cfg: MrfxConfig, store: Store, subject: str,
 
     # 2. market position + opportunity (the pitch report)
     def _pitch():
+        # the report's own scope rule FIRST: it refuses a market with no state,
+        # and the full-market benchmark it would have refused cost 4.6 s per
+        # client on a 99M-rate store
+        from .benchmark import normalize_market, require_geographic_scope
+        require_geographic_scope(normalize_market(market), "pitch report")
         bench = compute_benchmark(store, subject, market)
         if not bench.get("rows"):
             raise BenchmarkError("no benchmarkable codes this month")
@@ -160,7 +165,9 @@ def build_client_packet(cfg: MrfxConfig, store: Store, subject: str,
 
     # 4. contract gaps as a working list
     def _gaps():
-        g = contract_gaps(store, subject, market)
+        g = gaps if gaps is not None else contract_gaps(store, subject, market)
+        if isinstance(g, BenchmarkError):
+            raise g
         if not g.get("gaps"):
             raise BenchmarkError("no contract gaps found — nothing to chase")
         rows = "".join(
@@ -280,16 +287,30 @@ def build_all_packets(cfg: MrfxConfig, store: Store, out_root: Path | str | None
     root = Path(out_root) if out_root else (Path(store.dir).parent / "packets")
     mdir = _month_dir(root, month)
 
-    # the whole book's digest ONCE: each packet used to rebuild it for every
-    # client (O(N²): 5 clients took 175 s on a 99M-rate store)
+    # the book's contract gaps and digest ONCE: each packet used to rebuild
+    # the whole digest for every client (O(N²): 5 clients took 175 s on a
+    # 99M-rate store) and its gaps ran the national market per client
+    from .benchmark import contract_gaps_book
+    from .clients import DIGEST_GAPS_MARKET
+    pmarket = dict(market or {})
+    pmarket.setdefault("month", "latest")
+    pmarket.setdefault("therapy_only", True)
+    if progress:
+        progress("finding contract gaps for the book")
+    try:
+        book = contract_gaps_book(store, subjects, pmarket)
+    except BenchmarkError as e:
+        book = {s: e for s in subjects}
     if progress:
         progress("building the book's digest")
-    digest = client_digest(store)
+    same = (normalize_market(pmarket) == normalize_market(DIGEST_GAPS_MARKET))
+    digest = client_digest(store, gaps_book=book if same else None)
     packets = []
     for i, s in enumerate(subjects, 1):
         if progress:
             progress(f"building packet {i} of {len(subjects)}: {s}")
-        packets.append(build_client_packet(cfg, store, s, mdir, market, digest=digest))
+        packets.append(build_client_packet(cfg, store, s, mdir, market, digest=digest,
+                                           gaps=book.get(s)))
     (mdir / "index.html").write_text(
         _book_index_html(cfg, month, packets), encoding="utf-8")
     log.info("packets: %s client(s) written to %s", len(packets), mdir)

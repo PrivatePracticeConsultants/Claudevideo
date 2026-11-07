@@ -89,9 +89,21 @@ async function api(path, opts) {
   if (!r.ok) {
     let msg = `HTTP ${r.status}`;
     try { const d = await r.json(); msg = d.detail || d.error || msg; } catch { /* keep */ }
-    throw new Error(msg);
+    const err = new Error(msg);
+    err.status = r.status;          // "busy" (503) is told apart from a refusal (422)
+    throw err;
   }
   return r.json();
+}
+
+// One ticket per view: a slow answer to an OLDER request must never paint over
+// the newer one (change a filter twice quickly and the first reply can land
+// last). `const fresh = ticket("rates")` before the fetch; `if (!fresh()) return`
+// after every await.
+const _tickets = {};
+function ticket(view) {
+  const n = (_tickets[view] = (_tickets[view] || 0) + 1);
+  return () => _tickets[view] === n;
 }
 const postJson = (path, body) =>
   api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -155,9 +167,9 @@ function switchView(view) {
 }
 
 /* ---------- header stats ---------- */
-async function loadStats() {
+async function loadStats(given) {
   try {
-    const s = await api("/api/stats");
+    const s = given || await api("/api/stats");
     let html =
       `<b>${fmtInt(s.rates)}</b> rate rows · <b>${fmtInt(s.tins)}</b> TINs · ` +
       `<b>${s.payers}</b> payer${s.payers === 1 ? "" : "s"} · <b>${fmtInt(s.files_done)}</b> files`;
@@ -201,9 +213,16 @@ async function loadStats() {
 // whichever view is open so freshly-identified names/geo appear live.
 function onNamesUpdated() {
   loadStateOptions();
+  // at most once a minute: the 15 s poll re-ran the open view on every batch
+  // of names for as long as enrichment ran (hours on a big book)
+  const now = Date.now();
+  if (state.namesRefreshedAt && now - state.namesRefreshedAt < 60000) return;
+  state.namesRefreshedAt = now;
   const v = state.view;
-  if (v === "explorer") { loadRates(); loadSummary(); }
-  else if (v === "cpt" && state.cptSelected) selectCpt(state.cptSelected);
+  // the table shows the names; the strip's numbers do not depend on them
+  if (v === "explorer") loadRates();
+  // never abort a Code-page request still running to restart the same one
+  else if (v === "cpt" && state.cptSelected && !cptCtl) selectCpt(state.cptSelected);
 }
 
 async function loadStateOptions() {
@@ -234,8 +253,13 @@ async function loadOverview(stateCode = "") {
   const out = $("#ov-out");
   out.innerHTML = `<div class="loading">Loading market overview</div>`;
   let d;
+  const isFresh = ticket("overview");
   try { d = await api(`/api/overview${stateCode ? `?state=${encodeURIComponent(stateCode)}` : ""}`); }
-  catch (e) { out.innerHTML = `<div class="empty">Couldn't load the overview (${esc(e.message)}).</div>`; return; }
+  catch (e) {
+    if (!isFresh()) return;
+    out.innerHTML = `<div class="empty">Couldn't load the overview (${esc(e.message)}).</div>`; return;
+  }
+  if (!isFresh()) return;
   if (!d.practices) {
     out.innerHTML = `<div class="empty"><h3>No rates${stateCode ? " in " + esc(stateCode) : ""} yet</h3>Ingest some payer files first, or clear the state filter.</div>`;
     return;
@@ -294,11 +318,13 @@ async function renderDataQuality(stateCode) {
   if (!el) return;
   const market = { month: "latest" };
   if (stateCode) market.state = stateCode;
+  const isFresh = ticket("quality");
   const [fresh, types, posture] = await Promise.all([
     api("/api/quality/freshness").catch(() => null),
     postJson("/api/quality/types", { market }).catch(() => null),
     postJson("/api/quality/posture", { market }).catch(() => null),
   ]);
+  if (!isFresh()) return;
   if (!fresh && !types && !posture) return;
   const rows = (fresh?.payers || []).map((p) => `<tr>
       <td>${esc(p.payer)}</td>
@@ -394,12 +420,14 @@ async function loadMarkets() {
   out.innerHTML = `<div class="loading">Loading market intelligence for ${esc(code)}</div>`;
   // fetch all four views in parallel; each renders (or shows its own error) so
   // one failing section never blanks the others
+  const isFresh = ticket("markets");
   const [geo, neg, mcr, diff] = await Promise.all([
     postJson("/api/market/geography", body).catch((e) => ({ _err: e.message })),
     postJson("/api/market/negotiability", body).catch((e) => ({ _err: e.message })),
     postJson("/api/market/medicare", body).catch((e) => ({ _err: e.message })),
     postJson("/api/market/differential", body).catch((e) => ({ _err: e.message })),
   ]);
+  if (!isFresh()) return;
   const desc = state.catalog[code]?.description || "";
   out.classList.remove("empty");
   out.innerHTML =
@@ -720,9 +748,14 @@ async function loadRates() {
   stateEl.innerHTML = `<div class="loading">Loading rates</div>`;
   body.innerHTML = "";
   const q = filterQuery({ sort: state.sort.col, dir: state.sort.dir, page: state.page, page_size: state.pageSize });
+  const fresh = ticket("rates");
   let data;
   try { data = await api(`/api/rates?${q}`); }
-  catch (e) { stateEl.innerHTML = `<div class="empty"><h3>Could not load rates</h3>${esc(e.message)}</div>`; return; }
+  catch (e) {
+    if (!fresh()) return;
+    stateEl.innerHTML = `<div class="empty"><h3>Could not load rates</h3>${esc(e.message)}</div>`; return;
+  }
+  if (!fresh()) return;
   if (!data.total) {
     stateEl.innerHTML = `<div class="empty"><h3>No rates match</h3>
       Drop MRF files into <code class="inline">data/inbox/</code> or loosen the filters.</div>`;
@@ -792,8 +825,11 @@ function rateRow(r) {
 
 async function loadSummary() {
   const el = $("#summary-strip");
+  const fresh = ticket("summary");
+  const asked = filterQuery().toString();
   try {
-    const s = await api(`/api/summary?${filterQuery()}`);
+    const s = await api(`/api/summary?${asked}`);
+    if (!fresh()) return;
     const stat = (k, v) => `<div class="stat"><div class="k">${k}</div><div class="v">${v}</div></div>`;
     el.innerHTML =
       stat("Rows", fmtInt(s.n)) +
@@ -812,14 +848,18 @@ async function loadSummary() {
     renderByCode($("#summary-bycode"), s.by_code, s.mpfs_loaded, s.by_code_basis,
                  s.medicare_anchor, s.medicare_refusal);
   } catch (e) {
-    // Don't blank silently: a 503 here is almost always the summary's exact
-    // aggregates hitting the memory cap on a big unfiltered view. Say so and
-    // what to do — the same guidance loadRates gives — instead of a mystery
-    // empty strip.
-    const busy = !/memory/i.test(e.message || "");
+    if (!fresh()) return;
+    // Say what actually happened. "Busy" is a 503 from the single-flight lock
+    // (the answer is seconds away); a memory refusal needs a filter; any other
+    // refusal (e.g. the 422 "your store is large — pick a payer and a code")
+    // is shown as the server wrote it. Every error used to read "busy".
+    const memory = /memory/i.test(e.message || "");
+    const busy = e.status === 503 && !memory;
     const msg = busy
       ? "Stats are busy — retrying…"
-      : "Stats need more memory than the current limit — add a filter (payer, code, or state), or raise duckdb_memory_gb in config and restart.";
+      : memory
+        ? "Stats need more memory than the current limit — add a filter (payer, code, or state), or raise duckdb_memory_gb in config and restart."
+        : `Summary unavailable: ${e.message}`;
     el.innerHTML = `<div class="stat" style="flex:1"><div class="k">Summary</div><div class="v" style="font-size:0.8rem;font-weight:normal">${esc(msg)}</div></div>`;
     const bc = $("#summary-bycode"); if (bc) bc.innerHTML = "";
     // "busy" means another scan holds the single-flight lock, so the answer is
@@ -827,11 +867,12 @@ async function loadSummary() {
     // has to poke a filter to clear — but only once, and only if the filter
     // hasn't moved on since (a later refresh supersedes this retry).
     if (busy && !loadSummary._retrying) {
-      const q = filterQuery();
       loadSummary._retrying = true;
       setTimeout(() => {
         loadSummary._retrying = false;
-        if (filterQuery() === q) loadSummary();
+        // compare the query STRINGS: two URLSearchParams objects are never
+        // ===, so this retry never fired and the strip said "retrying…" forever
+        if (filterQuery().toString() === asked) loadSummary();
       }, 1400);
     }
   }
@@ -1014,12 +1055,15 @@ async function openEntity(grain, unitId) {
   drawer.classList.add("open"); overlay.classList.add("open");
   overlay.onclick = closeDrawer;
   let d;
+  const isFresh = ticket("drawer");
   try { d = await api(`/api/entity/${grain}/${encodeURIComponent(unitId)}`); }
   catch (e) {
+    if (!isFresh()) return;
     drawer.innerHTML = `<button class="close">×</button><div class="empty">${esc(e.message)}</div>`;
     $(".close", drawer).onclick = closeDrawer;
     return;
   }
+  if (!isFresh()) return;
   const payers = [...new Set(d.rates.map((r) => r.payer))];
   const tinsHtml = d.tins.length ? `
     <h3>Constituent TIN${d.tins.length === 1 ? "" : "s"}</h3>
@@ -1588,11 +1632,16 @@ async function runBenchmark() {
   catch (e) { out.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
   out.innerHTML = `<div class="loading">Computing benchmark</div>`;
   let data;
+  const isFresh = ticket("benchmark");
   try {
     data = Object.keys(payload.volumes).length
       ? await postJson("/api/benchmark/opportunity", payload)
       : { benchmark: await postJson("/api/benchmark/market", payload) };
-  } catch (e) { out.innerHTML = `<div class="empty"><h3>Benchmark failed</h3>${esc(e.message)}</div>`; return; }
+  } catch (e) {
+    if (!isFresh()) return;
+    out.innerHTML = `<div class="empty"><h3>Benchmark failed</h3>${esc(e.message)}</div>`; return;
+  }
+  if (!isFresh()) return;
   state.lastBenchmarkPayload = payload;
   $("#b-report").disabled = false;
   $("#b-negotiation").disabled = false;
@@ -1784,8 +1833,8 @@ async function initNegotiate() {
   if (state.ngInited) {
     // re-entry: refresh pickers like every sibling tab — a payer/month/org
     // ingested since the first open must show up without a page reload
-    refreshSubjectPickers("#ng-subjects", [{ sel: "#ng-month", prefix: LATEST_MONTH_OPT }]);
-    refreshSubjectPickers("#ng-comps", []);
+    refreshSubjectPickers("#ng-subjects", [{ sel: "#ng-month", prefix: LATEST_MONTH_OPT }])
+      .then(() => { $("#ng-comps").innerHTML = $("#ng-subjects").innerHTML; });
     api("/api/payers").then((p) => {
       const el = $("#ng-payer"); const cur = el.value;
       el.innerHTML = `<option value="">— pick a payer —</option>` +
@@ -1932,8 +1981,13 @@ async function runNegotiate() {
   state.lastNegotiatePayload = null;
   $("#ng-report").disabled = true;
   let d;
+  const isFresh = ticket("negotiate");
   try { d = await postJson("/api/negotiate/compare", payload); }
-  catch (e) { out.innerHTML = `<div class="empty"><h3>Couldn't compare</h3>${esc(e.message)}</div>`; return; }
+  catch (e) {
+    if (!isFresh()) return;
+    out.innerHTML = `<div class="empty"><h3>Couldn't compare</h3>${esc(e.message)}</div>`; return;
+  }
+  if (!isFresh()) return;
   state.lastNegotiatePayload = payload;
   $("#ng-report").disabled = false;
   const mny = (v) => (v == null ? "–" : v < 0 ? `-$${fmtMoney(-v)}` : `$${fmtMoney(v)}`);
@@ -2033,8 +2087,13 @@ async function priceStandardVisit() {
   if (key) payload.preset = key; else payload.lines = $("#sv-lines").value;
   $("#sv-msg").textContent = "pricing…";
   let d;
+  const isFresh = ticket("visit");
   try { d = await postJson("/api/schedule/visit", payload); }
-  catch (e) { $("#sv-msg").textContent = ""; out.innerHTML = `<div class="muted">${esc(e.message)}</div>`; return; }
+  catch (e) {
+    if (!isFresh()) return;
+    $("#sv-msg").textContent = ""; out.innerHTML = `<div class="muted">${esc(e.message)}</div>`; return;
+  }
+  if (!isFresh()) return;
   $("#sv-msg").textContent = "";
   const lines = d.lines.map((l) => `<b>${esc(l.code)}</b> ${esc(l.description)} — ${
       l.timed ? `${l.minutes} min → ${l.units} unit${l.units === 1 ? "" : "s"}` : "untimed, 1 unit"}`).join("<br>");
@@ -2092,8 +2151,13 @@ async function buildRatecard() {
   catch (e) { out.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
   out.innerHTML = `<div class="loading">Building rate card</div>`;
   let data;
+  const isFresh = ticket("ratecard");
   try { data = await postJson("/api/schedule/fee", payload); }
-  catch (e) { out.innerHTML = `<div class="empty"><h3>Could not build</h3>${esc(e.message)}</div>`; return; }
+  catch (e) {
+    if (!isFresh()) return;
+    out.innerHTML = `<div class="empty"><h3>Could not build</h3>${esc(e.message)}</div>`; return;
+  }
+  if (!isFresh()) return;
   state.lastRatecardPayload = payload;
   // Only offer the client-facing deliverables when there IS a card. With zero
   // codes the server now refuses to render one, so enabling the buttons would
@@ -2262,7 +2326,9 @@ async function clientJump(view, inputSel, runFn, subject, readySel) {
 
 async function loadClientDigest() {
   const out = $("#cl-out");
+  const isFresh = ticket("digest");
   const have = await api("/api/clients").catch(() => null);
+  if (!isFresh()) return;
   if (!have || !have.clients.length) {
     out.classList.add("empty");
     out.innerHTML = `<h3>No clients saved yet</h3>Add the practices you work for. Each refresh
@@ -2274,7 +2340,11 @@ async function loadClientDigest() {
   out.innerHTML = `<div class="loading">Building the digest for ${have.clients.length} client${have.clients.length === 1 ? "" : "s"}</div>`;
   let d;
   try { d = await api("/api/clients/digest"); }
-  catch (e) { out.innerHTML = `<div class="empty"><h3>Digest failed</h3>${esc(e.message)}</div>`; return; }
+  catch (e) {
+    if (!isFresh()) return;
+    out.innerHTML = `<div class="empty"><h3>Digest failed</h3>${esc(e.message)}</div>`; return;
+  }
+  if (!isFresh()) return;
   const rows = d.clients.map((c) => {
     const name = `<b>${esc(c.display_name || c.subject)}</b>${
       c.display_name && c.display_name !== c.subject ? `<div class="sub">${esc(c.subject)}</div>` : ""}`;
@@ -3605,10 +3675,15 @@ async function runLeaderboard() {
   const sort = $("#ld-board-sort").value;
   el.innerHTML = `<div class="loading">Building market leaderboard</div>`;
   let d;
+  const isFresh = ticket("leaderboard");
   try {
     d = await postJson("/api/leaderboard", {
       market: payload.market, min_codes: payload.min_codes, sort, limit: 50 });
-  } catch (e) { el.innerHTML = `<div class="empty">Couldn't build the leaderboard (${esc(e.message)}).</div>`; return; }
+  } catch (e) {
+    if (!isFresh()) return;
+    el.innerHTML = `<div class="empty">Couldn't build the leaderboard (${esc(e.message)}).</div>`; return;
+  }
+  if (!isFresh()) return;
   if (!d.count) {
     el.innerHTML = `<div class="ov-block"><h3>Market leaderboard</h3><div class="muted">No practices price at least ${d.min_codes} codes with a real market under this scope.</div></div>`;
     return;
@@ -3678,7 +3753,12 @@ async function runLeads() {
   try { payload = leadsPayload(); } catch (e) { out.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
   out.innerHTML = `<div class="loading">Finding leads</div>`;
   let data;
-  try { data = await postJson("/api/leads", payload); } catch (e) { out.innerHTML = `<div class="empty"><h3>Search failed</h3>${esc(e.message)}</div>`; return; }
+  const isFresh = ticket("leads");
+  try { data = await postJson("/api/leads", payload); } catch (e) {
+    if (!isFresh()) return;
+    out.innerHTML = `<div class="empty"><h3>Search failed</h3>${esc(e.message)}</div>`; return;
+  }
+  if (!isFresh()) return;
   state.lastLeadsPayload = payload;
   $("#ld-csv").disabled = false;
   renderLeads(out, data);
@@ -3699,7 +3779,10 @@ function renderLeads(out, data) {
     <td class="num">${money(l.avg_gap_to_median)}</td>
     <td>${l.worst_payer ? `${esc(l.worst_payer)}<div class="sub">${money(l.worst_payer_gap)}/code under mkt</div>` : "<span class='muted'>–</span>"}</td>
     <td class="sub">${esc(l.tin_value)}</td></tr>`).join("");
-  out.innerHTML = `<div class="rc-summary">${data.count} practice(s) at or below p${data.threshold_percentile}, most underpaid first. <span class="muted">"Underpaid by" is the payer with the biggest average shortfall vs the market median — your outreach hook. Avg $ below median is a rate-level gap, not annual dollars.</span></div>
+  const cut = data.truncated
+    ? ` <span class="warn-text">The list stops at ${fmtInt(data.limit)} — the market holds more. Narrow it (state, payer) or raise the min codes to see the rest.</span>`
+    : "";
+  out.innerHTML = `<div class="rc-summary">${data.count} practice(s) at or below p${data.threshold_percentile}, most underpaid first.${cut} <span class="muted">"Underpaid by" is the payer with the biggest average shortfall vs the market median — your outreach hook. Avg $ below median is a rate-level gap, not annual dollars.</span></div>
     <div class="tablewrap"><table class="rc-table"><thead><tr><th>Practice</th><th>Location</th><th class="num">Providers</th><th class="num">Codes</th><th class="num">Position</th><th class="num">Avg $ below median</th><th>Underpaid most by</th><th>Tax ID</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
@@ -3815,7 +3898,12 @@ async function runChanges() {
   }
   out.innerHTML = `<div class="loading">Comparing months</div>`;
   let data;
-  try { data = await postJson("/api/changes", payload); } catch (e) { out.innerHTML = `<div class="empty"><h3>Could not compare</h3>${esc(e.message)}</div>`; return; }
+  const isFresh = ticket("changes");
+  try { data = await postJson("/api/changes", payload); } catch (e) {
+    if (!isFresh()) return;
+    out.innerHTML = `<div class="empty"><h3>Could not compare</h3>${esc(e.message)}</div>`; return;
+  }
+  if (!isFresh()) return;
   state.lastChangesPayload = payload;
   $("#ch-csv").disabled = false;
   renderChanges(out, data);
@@ -4381,7 +4469,7 @@ function hookOverrideForms(root) {
     state.grain = stats.default_grain;
     $$("#f-grain button").forEach((b) => b.classList.toggle("on", b.dataset.g === state.grain));
   }
-  loadStats();
+  loadStats(stats || undefined);
   loadStateOptions();
   // one failed boot fetch must not brick the page: without this guard an
   // /api/payers hiccup at load left the Code and Files tabs never wired

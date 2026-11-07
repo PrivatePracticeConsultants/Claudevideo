@@ -231,7 +231,7 @@ def price_visit(store, subject: str, market: dict | None, raw_lines=None,
     visit = define_visit(lines)
     billed = [r for r in visit["lines"] if r["units"]]
 
-    fs = compute_fee_schedule(store, subject, market or {})
+    fs = compute_fee_schedule(store, subject, market or {}, peers=False)
     rate = {(p, e["billing_code"]): cell["rate"]
             for e in fs["codes"] for p, cell in (e.get("rates") or {}).items()
             if cell.get("rate") is not None}

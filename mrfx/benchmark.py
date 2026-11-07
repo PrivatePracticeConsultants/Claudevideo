@@ -29,6 +29,35 @@ BASIS_NOTE = (
     f"({BASE_RULE_TEXT}; no CQ/CO assistant rows, no percentage/per-diem rows), "
     "professional billing class unless stated otherwise."
 )
+
+
+def basis_note_for(market: dict) -> str:
+    """BASIS_NOTE plus every toggle the query actually applied. The note must
+    never claim a basis the SQL did not use: the fee schedule and contract
+    gaps printed the bare BASIS_NOTE ("base-modifier, professional") even when
+    market.base_only / billing_class / include_assistant had turned those off
+    (round 6 P3) - only compute_benchmark appended the toggles."""
+    m = market or {}
+    return BASIS_NOTE + (
+        f" [assistant rows INCLUDED by explicit toggle: {BASE_ASSISTANT_RULE_TEXT}]"
+        if m.get("include_assistant") else ""
+    ) + (
+        " [non-dollar rows INCLUDED by explicit toggle]" if m.get("include_non_dollar") else ""
+    ) + (
+        # both escape hatches are API-reachable; the note must never
+        # claim a basis the query didn't apply
+        " [ALL modifier rows included: market.base_only=false]"
+        if m.get("base_only", True) is False else ""
+    ) + (
+        " [all billing classes included: market.billing_class='']"
+        if not m.get("billing_class", "professional") else ""
+    )
+
+
+# Fewer peer practices than this behind a percentile is flagged "thin" on
+# every printed deliverable (the rate card's rule, schedule._THIN_PEERS).
+THIN_PEERS = 5
+
 GHOST_RATE_NOTE = (
     "Ghost rates: payers publish rates for provider-code combinations that are "
     "never actually billed; presence of a rate does not mean a peer performs "
@@ -577,6 +606,11 @@ def compute_benchmark(store: Store, subject: str, market: dict) -> dict:
     # Kansas client misstated every % (and the Explorer showed it bare)
     anchor = store.medicare_anchor(anchor_state(store, market, subject_tins))
     mpfs, mpfs_source = anchor["rates"], anchor["label"]
+    if mpfs and not market.get("state"):
+        # a pooled national market has no one Medicare locality: the peers'
+        # "% of Medicare" uses the SUBJECT's state for every peer (round 6 P3)
+        mpfs_source = (f"{mpfs_source} - the subject's state, applied to peers in "
+                       "every state of this national pool")
 
     target = int(market.get("target_percentile", 50))
     if target not in PERCENTILES:
@@ -608,20 +642,8 @@ def compute_benchmark(store: Store, subject: str, market: dict) -> dict:
         "mpfs_loaded": bool(mpfs),
         "mpfs_source": mpfs_source,
         "mpfs_refusal": anchor["refusal"],
-        "basis_note": BASIS_NOTE + (
-            f" [assistant rows INCLUDED by explicit toggle: {BASE_ASSISTANT_RULE_TEXT}]"
-            if include_assistant else ""
-        ) + (
-            " [non-dollar rows INCLUDED by explicit toggle]" if include_non_dollar else ""
-        ) + (
-            # both escape hatches are API-reachable; the note must never
-            # claim a basis the query didn't apply
-            " [ALL modifier rows included: market.base_only=false]"
-            if market.get("base_only", True) is False else ""
-        ) + (
-            " [all billing classes included: market.billing_class='']"
-            if not market.get("billing_class", "professional") else ""
-        ),
+        "basis_note": basis_note_for({**market, "include_assistant": include_assistant,
+                                      "include_non_dollar": include_non_dollar}),
         # Which payers behind THIS benchmark have not re-published recently. A
         # stale file does not mean a stale contract, but a client is about to
         # quote these numbers, so the age belongs beside them rather than on
@@ -996,88 +1018,135 @@ def compute_payer_comparison(store: Store, subject: str, payer: str, market: dic
 # ---------------------------------------------------------------------------
 
 
+GAP_NOTE = (
+    "A code appears here when peers publish a rate for it and the subject "
+    "does not. Absence in an MRF is not proof the subject lacks the "
+    "contract — it can be a publishing gap. Directional; confirm against "
+    "the subject's actual fee schedule before acting.")
+
+
 def contract_gaps(store: Store, subject: str, market: dict, *,
                   min_peers: int = 5, limit: int = 100) -> dict:
     """Codes that at least `min_peers` of the subject's market peers have a
     published rate for, but the subject has NO rate on — candidate contract or
     fee-schedule gaps to chase. Directional: absence in an MRF is a publishing
     gap as often as a real coverage gap, so this opens a question, not a claim."""
+    res = contract_gaps_book(store, [subject], market, min_peers=min_peers,
+                             limit=limit)[str(subject or "").strip()]
+    if isinstance(res, BenchmarkError):
+        raise res
+    return res
+
+
+def contract_gaps_book(store: Store, subjects: list[str], market: dict, *,
+                       min_peers: int = 5, limit: int = 100) -> dict:
+    """contract_gaps for a whole book at once: {subject: result | BenchmarkError}.
+
+    The market's per-code peer statistics are computed ONCE. That is exact:
+    a gap is a code the subject has NO rate for, so the subject contributes no
+    row to that code's statistics and excluding it from the peers changes
+    nothing. The client digest and the packets ran the whole national market
+    aggregation once per client (3.8 s each on a 99M-rate store). A curated
+    peer set changes the peer population per subject, so it keeps the
+    per-subject query."""
     if min_peers < 1:
         raise BenchmarkError("min_peers must be at least 1")
     limit = max(1, min(int(limit), 1000))
-    subject = str(subject or "").strip()
-    if not subject:
-        raise BenchmarkError("pick a subject practice")
     market = resolve_plan_scope(store, normalize_market(market))
-    subject_tins = resolve_subject_tins(store, subject)
-    # a blank/unknown subject resolves to [""], which matches no rows — the subj
-    # CTE would then exclude nothing and EVERY peer-priced code would read as a
-    # "gap" for a practice that isn't there. Refuse instead of fabricating.
-    if not any(t for t in subject_tins):
-        raise BenchmarkError("subject not found — pick a practice that has rates in the store")
     peer_desc, market = resolve_peer_set(store, market)
     where, params = _market_where(market, bool(market.get("include_assistant")),
                                   bool(market.get("include_non_dollar")))
     rel = _rates_relation(market)
     curated = market.get("curated_tins")
-    peer_clause = "b.tin_value NOT IN (SELECT tin FROM subject_tins)"
-    peer_params: list = []
-    if curated:
-        peer_clause += f" AND b.tin_value IN ({', '.join('?' for _ in curated)})"
-        peer_params = list(curated)
-    sql = f"""
-    WITH subject_tins AS (SELECT unnest(?::VARCHAR[]) AS tin),
-    base AS (
+
+    out: dict = {}
+    tins_of: dict[str, list[str]] = {}
+    for subject in subjects:
+        key = str(subject or "").strip()
+        if not key:
+            out[key] = BenchmarkError("pick a subject practice")
+            continue
+        try:
+            tins = resolve_subject_tins(store, key)
+        except BenchmarkError as e:
+            out[key] = e
+            continue
+        # a blank/unknown subject resolves to [""], which matches no rows —
+        # EVERY peer-priced code would then read as a "gap" for a practice that
+        # isn't there. Refuse instead of fabricating.
+        if not any(t for t in tins):
+            out[key] = BenchmarkError(
+                "subject not found — pick a practice that has rates in the store")
+            continue
+        tins_of[key] = tins
+
+    def result(subject: str, tins: list[str], rows: list[dict]) -> dict:
+        for r in rows:
+            desc, _, timed = code_info(r["billing_code"])
+            r["description"] = desc
+            r["is_timed"] = timed
+        return {"subject": subject, "subject_tins": [mask_tin(t) for t in tins],
+                "market": public_market(market, drop=("curated_tins",)),
+                "peer_set": peer_desc, "min_peers": min_peers, "count": len(rows),
+                "gaps": rows, "basis_note": basis_note_for(market), "gap_note": GAP_NOTE}
+
+    stat_cols = """count(DISTINCT b.tin_value)          AS n_peers,
+               round(median(b.rate), 2)             AS peer_median,
+               round(quantile_cont(b.rate, .25), 2) AS peer_p25,
+               round(quantile_cont(b.rate, .75), 2) AS peer_p75"""
+    base = f"""
         SELECT t.billing_code, t.tin_value, median(t.negotiated_rate) AS rate
         FROM {rel} t LEFT JOIN tin_directory td USING (tin_value)
         WHERE {where}
-        GROUP BY t.billing_code, t.tin_value
-    ),
-    subj AS (
-        SELECT DISTINCT billing_code FROM base
-        WHERE tin_value IN (SELECT tin FROM subject_tins)
-    ),
-    peers AS (
-        SELECT b.billing_code,
-               count(DISTINCT b.tin_value)          AS n_peers,
-               round(median(b.rate), 2)             AS peer_median,
-               round(quantile_cont(b.rate, .25), 2) AS peer_p25,
-               round(quantile_cont(b.rate, .75), 2) AS peer_p75
-        FROM base b WHERE {peer_clause}
-        GROUP BY b.billing_code
-    )
-    SELECT p.billing_code, p.n_peers, p.peer_median, p.peer_p25, p.peer_p75
-    FROM peers p
-    WHERE p.n_peers >= ?
-      -- NOT IN with a NULL in the subquery zeroes the whole result; billing_code
-      -- is non-null in the schema, but guard the subquery to be safe
-      AND p.billing_code NOT IN (SELECT billing_code FROM subj WHERE billing_code IS NOT NULL)
-    ORDER BY p.n_peers DESC, p.billing_code
-    LIMIT ?
-    """
+        GROUP BY t.billing_code, t.tin_value"""
+    cols = ["billing_code", "n_peers", "peer_median", "peer_p25", "peer_p75"]
     with store.connect() as con:
-        cur = con.execute(sql, [subject_tins, *params, *peer_params, min_peers, limit])
-        cols = [d[0] for d in cur.description]
-        rows = [dict(zip(cols, r)) for r in cur.fetchall()]
-    for r in rows:
-        desc, _, timed = code_info(r["billing_code"])
-        r["description"] = desc
-        r["is_timed"] = timed
-    return {
-        "subject": subject,
-        "subject_tins": [mask_tin(t) for t in subject_tins],
-        "market": public_market(market, drop=("curated_tins",)),
-        "peer_set": peer_desc,
-        "min_peers": min_peers,
-        "count": len(rows),
-        "gaps": rows,
-        "basis_note": BASIS_NOTE,
-        "gap_note": (
-            "A code appears here when peers publish a rate for it and the subject "
-            "does not. Absence in an MRF is not proof the subject lacks the "
-            "contract — it can be a publishing gap. Directional; confirm against "
-            "the subject's actual fee schedule before acting."),
-    }
+        if curated:
+            for subject, tins in tins_of.items():
+                cur = con.execute(f"""
+                    WITH subject_tins AS (SELECT unnest(?::VARCHAR[]) AS tin),
+                    base AS ({base}),
+                    subj AS (SELECT DISTINCT billing_code FROM base
+                             WHERE tin_value IN (SELECT tin FROM subject_tins)),
+                    peers AS (
+                        SELECT b.billing_code, {stat_cols}
+                        FROM base b
+                        WHERE b.tin_value NOT IN (SELECT tin FROM subject_tins)
+                          AND b.tin_value IN ({', '.join('?' for _ in curated)})
+                        GROUP BY b.billing_code)
+                    SELECT p.billing_code, p.n_peers, p.peer_median, p.peer_p25, p.peer_p75
+                    FROM peers p
+                    WHERE p.n_peers >= ?
+                      AND p.billing_code NOT IN (SELECT billing_code FROM subj
+                                                 WHERE billing_code IS NOT NULL)
+                    ORDER BY p.n_peers DESC, p.billing_code
+                    LIMIT ?
+                """, [tins, *params, *curated, min_peers, limit])
+                out[subject] = result(subject, tins,
+                                      [dict(zip(cols, r)) for r in cur.fetchall()])
+            return out
+        if not tins_of:
+            return out
+        all_tins = sorted({t for ts in tins_of.values() for t in ts})
+        market_stats = [dict(zip(cols, r)) for r in con.execute(f"""
+            WITH base AS ({base})
+            SELECT b.billing_code, {stat_cols}
+            FROM base b GROUP BY b.billing_code
+            HAVING count(DISTINCT b.tin_value) >= ?
+            ORDER BY n_peers DESC, b.billing_code
+        """, [*params, min_peers]).fetchall()]
+        priced: dict[str, set] = {}
+        for tin, code in con.execute(f"""
+            SELECT DISTINCT t.tin_value, t.billing_code
+            FROM {rel} t LEFT JOIN tin_directory td USING (tin_value)
+            WHERE {where} AND t.tin_value IN (SELECT unnest(?::VARCHAR[]))
+        """, [*params, all_tins]).fetchall():
+            priced.setdefault(tin, set()).add(code)
+    for subject, tins in tins_of.items():
+        mine = set().union(*(priced.get(t, set()) for t in tins))
+        rows = [dict(r) for r in market_stats if r["billing_code"] not in mine][:limit]
+        out[subject] = result(subject, tins, rows)
+    return out
 
 
 def render_payer_compare_report(cfg: MrfxConfig, store: Store, comp: dict) -> str:
@@ -1713,9 +1782,19 @@ def render_pitch_report(cfg: MrfxConfig, store: Store, benchmark: dict,
         + (f"<td class='num'>{_pctnum(r.get('subject_pct_medicare'))}</td>"
            f"<td class='num'>{_pctnum(r.get('median_pct_medicare'))}</td>" if mp else "")
         + trend(r)
-        + f"<td class='pos'>{strip(r)}</td></tr>"
+        + f"<td class='pos'>{strip(r)}</td>"
+        # the peer count behind every percentile (round 6 P3): P25-P75 over
+        # one or two practices is a competitor's rate, not a market's
+        + f"<td class='num sub'>{int(r.get('n_peers') or 0):,}"
+        + (" <span class='thin'>thin</span>" if (r.get("n_peers") or 0) < THIN_PEERS else "")
+        + "</td></tr>"
         for r in benchmark["rows"]
     )
+    n_thin = sum(1 for r in benchmark["rows"] if (r.get("n_peers") or 0) < THIN_PEERS)
+    thin_note = (
+        f'<p class="note">{n_thin} code(s) marked <i>thin</i> rest on fewer than '
+        f'{THIN_PEERS} peer practices: their percentiles describe one or two '
+        'competitors, not a market. Weigh them accordingly.</p>' if n_thin else "")
     opp_html = ""
     if opportunity:
         opp_rows = "".join(
@@ -1760,6 +1839,7 @@ def render_pitch_report(cfg: MrfxConfig, store: Store, benchmark: dict,
  th, td {{ text-align: left; padding: 6px 8px; border-bottom: 1px solid #eaecf0; vertical-align: middle; }}
  th {{ font-size: 11px; color: #667085; text-transform: uppercase; letter-spacing: .04em; }}
  .num {{ text-align: right; }} .sub {{ color: #667085; font-size: 11.5px; }}
+ .thin {{ color: #b54708; font-weight: 600; }}
  .gap {{ font-weight: 650; }}
  .strip {{ position: relative; width: 120px; height: 8px; background: #eee;
           border-radius: 4px; display: inline-block; vertical-align: middle; }}
@@ -1781,8 +1861,9 @@ def render_pitch_report(cfg: MrfxConfig, store: Store, benchmark: dict,
 {geo_banner}
 <table><thead><tr><th>Code</th><th class="num">Your rate</th><th class="num">P25</th>
 <th class="num">Median</th><th class="num">P75</th><th class="num">Target (p{target})</th>
-<th class="num">Gap</th>{mp_heads}{trend_head}<th>Your position</th></tr></thead>
+<th class="num">Gap</th>{mp_heads}{trend_head}<th>Your position</th><th class="num">Peers</th></tr></thead>
 <tbody>{rows_html}</tbody></table>
+{thin_note}
 {trend_note}
 {erosion_html}
 {opp_html}

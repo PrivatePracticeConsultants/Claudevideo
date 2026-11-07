@@ -358,20 +358,41 @@ def _text(html_doc):
 
 
 def test_the_dossier_is_the_hand_answer(leads_app):
+    """No state chosen -> the dossier is scoped to A's own state, MO (round 6
+    P3: it used to pool every loaded state). By hand, MO peers of A with
+    therapy-only OFF are B C D E G (F is KS-only): on 97110 only G ($5) sits
+    below A's $32 -> 1 of 5 = p20, peer median median(5,40,50,60,70) = $50;
+    97140 $25 vs 5,35,45,55,65 -> p20, $45; 97530 $40 vs 5,50,60,70,80 ->
+    p20, $60. Rho alone: A's 30/25/40 vs the same peers -> p20, 3 of 3 below."""
     meta = leads_app.post("/api/report/dossier.json", json=DOSSIER)
     assert meta.status_code == 200, meta.text
     facts = meta.json()["facts"]
-    assert (facts["display_name"], facts["median_percentile"], facts["weakest_payer"]) == (
-        "A REHAB", 33.0, "Rho Health")
+    assert (facts["display_name"], facts["median_percentile"], facts["weakest_payer"],
+            facts["state"]) == ("A REHAB", 20.0, "Rho Health", "MO")
     page = leads_app.post("/api/report/dossier", json=DOSSIER)
     assert page.status_code == 200
     t = _text(page.text)
-    assert "97110 $32.00 $45.00 p33 97140 $25.00 $40.00 p33 97530 $40.00 $55.00 p33" in t
+    assert "compared within MO, this practice's main state" in t
+    # every position carries its peer count
+    assert ("97110 $32.00 $50.00 p20 5 97140 $25.00 $45.00 p20 5 "
+            "97530 $40.00 $60.00 p20 5") in t
     # the weakest-payer table carries numbers, not dashes, and no payer without peers
-    assert "Codes below median Rho Health p33 3 of 3 " in t
+    assert "Codes below median Rho Health p20 3 of 3 " in t
     assert "Sigma Health" not in t
     assert ("Rho Health publishes rates for 6 other practices (1 of them not a therapy "
             "practice) within 25 miles — a moderate fallback.") in t
+
+
+def test_a_national_dossier_is_a_deliberate_labelled_choice(leads_app):
+    """allow_national keeps the pooled comparison, under the national banner.
+    By hand, all states: A's peers B C D E F G; on 97110 F ($10) and G ($5)
+    sit below $32 -> 2 of 6 = p33, peer median median(5,10,40,50,60,70) = $45."""
+    body = {**DOSSIER, "market": {**DOSSIER["market"], "allow_national": True}}
+    meta = leads_app.post("/api/report/dossier.json", json=body).json()
+    assert (meta["facts"]["median_percentile"], meta["facts"]["state"]) == (33.0, None)
+    t = _text(leads_app.post("/api/report/dossier", json=body).text)
+    assert "97110 $32.00 $45.00 p33 6 " in t
+    assert "NATIONAL COMPARISON" in t
 
 
 def test_the_dossier_position_is_a_median_not_a_mean(leads_app, monkeypatch):

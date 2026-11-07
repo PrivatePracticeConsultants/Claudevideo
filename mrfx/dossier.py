@@ -121,9 +121,32 @@ def build_prospect_dossier(cfg: MrfxConfig, store: Store, subject: str,
             "practice name, tax ID or NPI. A dossier is a document you send, "
             "so it is refused rather than rendered empty.")
 
+    # GEOGRAPHY (round 6 P3). Every other client document is scoped to one
+    # state (require_geographic_scope); the dossier pooled every loaded state
+    # into one "market", so a Missouri practice was ranked against Florida
+    # rates. With no state chosen it is now scoped to the practice's OWN main
+    # state and says so. A deliberate national comparison (allow_national)
+    # still works, under the same banner the other reports print; a practice
+    # with no known state gets its rate sections omitted with the reason.
+    from .benchmark import anchor_state, require_geographic_scope
+    # leverage keeps the caller's market: its geography is the RADIUS, and a
+    # payer's alternatives across a state line (Kansas City) are real ones
+    radius_market = dict(market)
+    scope_note = ""
+    if not market.get("state"):
+        try:
+            scope_note = require_geographic_scope(market, "prospect dossier")
+        except BenchmarkError:
+            home_state = anchor_state(store, {}, tins)
+            if home_state:
+                market["state"] = home_state
+                scope_note = (
+                    f"Rates are compared within {home_state}, this practice's main "
+                    "state (no state was chosen, and reimbursement varies by state).")
+
     parts: list[str] = []
     skipped: list[str] = []
-    facts: dict = {"subject": subject}
+    facts: dict = {"subject": subject, "state": market.get("state")}
 
     def section(name: str, fn):
         try:
@@ -182,6 +205,7 @@ def build_prospect_dossier(cfg: MrfxConfig, store: Store, subject: str,
     # 3. where their rates sit
     def _rates():
         from .benchmark import compute_benchmark
+        require_geographic_scope(market, "prospect dossier")
         b = compute_benchmark(store, subject, market)
         rows = [r for r in b.get("rows", [])
                 if r.get("subject_percentile") is not None]
@@ -197,21 +221,26 @@ def build_prospect_dossier(cfg: MrfxConfig, store: Store, subject: str,
             f"<tr><td>{e(r['billing_code'])}</td>"
             f"<td class='num'>${(r['subject_rate'] or 0):,.2f}</td>"
             f"<td class='num'>${(r['p50'] or 0):,.2f}</td>"
-            f"<td class='num'>p{r['subject_percentile']:.0f}</td></tr>"
+            f"<td class='num'>p{r['subject_percentile']:.0f}</td>"
+            # the peer count travels with every position (the rate card's rule):
+            # p10 of two practices is not p10 of a market
+            f"<td class='num'>{int(r.get('n_peers') or 0):,}</td></tr>"
             for r in low)
         return ("<h2>Where their rates sit</h2>"
                 f"<p>Across {len(rows)} comparable code(s) their median position "
                 f"is <b>p{facts['median_percentile']:g}</b> against their market. "
                 "Weakest lines:</p>"
-                "<table><thead><tr><th>Code</th><th class='num'>Their rate</th>"
+                + (f"<p class='note'>{e(scope_note)}</p>" if scope_note else "")
+                + "<table><thead><tr><th>Code</th><th class='num'>Their rate</th>"
                 "<th class='num'>Market median</th><th class='num'>Position</th>"
-                "</tr></thead>"
+                "<th class='num'>Peers</th></tr></thead>"
                 f"<tbody>{body}</tbody></table>"
                 f"<p class='note'>{e(b.get('basis_note') or '')}</p>")
 
     # 4. which payer is weakest for them
     def _weakest():
         from .benchmark import compute_payer_negotiation
+        require_geographic_scope(market, "prospect dossier")
         neg = compute_payer_negotiation(store, subject, market)
         secs = neg.get("sections") or []
         if not secs:
@@ -241,7 +270,7 @@ def build_prospect_dossier(cfg: MrfxConfig, store: Store, subject: str,
         from .leverage import network_leverage
         if not facts.get("weakest_payer"):
             raise BenchmarkError("no payer identified to measure leverage against")
-        lv = network_leverage(store, subject, facts["weakest_payer"], market,
+        lv = network_leverage(store, subject, facts["weakest_payer"], radius_market,
                               radius_miles=radius_miles)
         return ("<h2>Their leverage with that payer</h2>"
                 f"<p>{e(lv['headline'])}</p>"
@@ -274,9 +303,10 @@ def build_prospect_dossier(cfg: MrfxConfig, store: Store, subject: str,
     # 7. is their market growing
     def _market():
         from .demographics import market_sizing
+        place = store.placement_relation()
         with store.connect() as con:
             z = con.execute(f"""
-                SELECT * FROM ({modal_zip_of("SELECT unnest(?::VARCHAR[])")})
+                SELECT * FROM ({modal_zip_of("SELECT unnest(?::VARCHAR[])", place)})
             """, [tins]).fetchone()
         home = z[0] if z else None
         if not home:

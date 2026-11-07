@@ -63,7 +63,6 @@ def network_leverage(store: Store, subject: str, payer: str,
     from .benchmark import (BenchmarkError, _market_where, _rates_relation,
                             normalize_market, resolve_plan_scope,
                             resolve_subject_tins)
-    from .catalog import therapy_taxonomy_sql
     from .medicare import haversine_miles_sql, load_centroids
 
     payer = str(payer or "").strip()
@@ -71,10 +70,7 @@ def network_leverage(store: Store, subject: str, payer: str,
         raise BenchmarkError(
             "pick the payer you're negotiating with — leverage is per payer, "
             "because each one has a different local network")
-    try:
-        radius = max(1.0, min(float(radius_miles), 250.0))
-    except (TypeError, ValueError):
-        raise BenchmarkError("radius must be a number of miles")
+    radius = _clamp_radius(radius_miles)
 
     m = resolve_plan_scope(store, normalize_market(market or {}))
     m = {**m, "payers": [payer]}
@@ -84,13 +80,14 @@ def network_leverage(store: Store, subject: str, payer: str,
     where, params = _market_where(m, bool(m.get("include_assistant")),
                                   bool(m.get("include_non_dollar")))
     rel = _rates_relation(m)
-    therapy = therapy_taxonomy_sql("n.taxonomy_code", all_col="n.taxonomy_codes")
 
+    # every practice's NPI-ZIP counts, precomputed (Store.placement_relation)
+    place = store.placement_relation()
     with store.connect() as con:
         load_centroids(con, centroids_path)
         # the subject sits at the ZIP most of its own NPIs share
         home = con.execute(f"""
-            SELECT * FROM ({modal_zip_of("SELECT unnest(?::VARCHAR[])")})
+            SELECT * FROM ({modal_zip_of("SELECT unnest(?::VARCHAR[])", place)})
         """, [subject_tins]).fetchone()
         home_zip = home[0] if home else None
         if not home_zip:
@@ -117,9 +114,8 @@ def network_leverage(store: Store, subject: str, payer: str,
                 WHERE {where}
                   AND t.tin_value NOT IN (SELECT unnest(?::VARCHAR[]))
             ),
-            zc AS ({zip_counts_by_tin("SELECT tin_value FROM priced",
-                                      f", count(DISTINCT n.npi) FILTER ({therapy}) AS nt"
-                                      ", count(DISTINCT n.npi) AS nn")}),
+            zc AS ({zip_counts_by_tin("SELECT tin_value FROM priced", ", nt, nn",
+                                      place=place)}),
             -- the ZIP most of its rows carry (ties: lowest, see mrfx/sqlfn);
             -- an NPI has one ZIP, so per-ZIP distinct counts sum to the total
             placed AS (
@@ -229,6 +225,17 @@ def network_leverage(store: Store, subject: str, payer: str,
     }
 
 
+def _clamp_radius(radius_miles) -> float:
+    """1-250 miles. One rule for the per-payer view and the summary: the
+    summary printed the radius as REQUESTED ("within 900 miles") over counts
+    measured at the 250 the per-payer call had silently clamped to."""
+    from .benchmark import BenchmarkError
+    try:
+        return max(1.0, min(float(radius_miles), 250.0))
+    except (TypeError, ValueError):
+        raise BenchmarkError("radius must be a number of miles")
+
+
 def leverage_summary(store: Store, subject: str, market: dict | None = None,
                      *, radius_miles: float = 15.0) -> dict:
     """Leverage against EVERY payer the subject contracts with, thinnest first.
@@ -239,6 +246,7 @@ def leverage_summary(store: Store, subject: str, market: dict | None = None,
     """
     from .benchmark import BenchmarkError, subject_payers
 
+    radius_miles = _clamp_radius(radius_miles)
     payers = subject_payers(store, subject, market or {})
     out, skipped = [], []
     for p in payers:

@@ -29,7 +29,7 @@ import datetime as dt
 import logging
 
 from .catalog import code_info
-from .store import Store
+from .store import Store, generation_cached
 
 log = logging.getLogger(__name__)
 
@@ -82,6 +82,7 @@ def _band(n: int | None) -> str | None:
     return None
 
 
+@generation_cached('quality.rate_type_mix')
 def rate_type_mix(store: Store, market: dict | None = None) -> dict:
     """What KINDS of rate the scoped market is built from.
 
@@ -145,6 +146,7 @@ def rate_type_mix(store: Store, market: dict | None = None) -> dict:
     }
 
 
+@generation_cached('quality.payer_freshness', daily=True)
 def payer_freshness(store: Store, *, stale_days: int = 270) -> dict:
     """How recently each payer re-published, by its own last_updated_on."""
     with store.connect() as con:
@@ -207,6 +209,7 @@ def _as_date(s) -> dt.date | None:
     return None
 
 
+@generation_cached('quality.size_premium')
 def size_premium(store: Store, market: dict | None = None, *,
                  subject: str | None = None, min_practices: int = 5) -> dict:
     """Does a bigger practice get paid more, in this market?
@@ -427,6 +430,7 @@ POSTURE_NOTE = (
 )
 
 
+@generation_cached('quality.payer_posture')
 def payer_posture(store: Store, market: dict | None = None,
                   *, min_codes: int = 3) -> dict:
     """Per payer: does it negotiate, or publish one schedule for everyone?

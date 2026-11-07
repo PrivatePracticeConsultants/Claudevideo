@@ -102,9 +102,9 @@ def test_finding_practices_first_is_the_same_answer(world, grain, qs, floor):
     import mrfx.api as api
     fs = api.FilterSet(dict(parse_qsl(qs)))
     new_sql = api.rel_sql(grain, fs)
-    if fs.selective_dims and (fs.has("unit") or (grain == "tin" and not fs.ident_kind)):
+    if fs.selective_dims and not fs.codes and (fs.has("unit") or (grain == "tin" and not fs.ident_kind)):
         assert "SEMI JOIN" in new_sql, "the case must exercise the rewrite"
-    if not fs.selective_dims:
+    if not fs.selective_dims or fs.codes:
         assert "SEMI JOIN" not in new_sql
     with world.connect() as con:
         new = con.execute(f"SELECT * FROM ({new_sql})", fs.params).fetchall()
