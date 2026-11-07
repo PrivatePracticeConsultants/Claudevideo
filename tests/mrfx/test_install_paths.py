@@ -75,7 +75,11 @@ def test_update_relinks_without_build_isolation_and_checks_the_link(tmp_path, mo
     monkeypatch.setattr(up, "linked_folder", lambda py: Path("/somewhere/else/mrfx"))
     logs = []
     res = up.apply_update(build, root, log=logs.append)
-    assert [c[1:] for c in calls] == [list(s) for s in up.PIP_STEPS]
+    # round 7 P1.19: the NEW build's requirements first (from the zip, before
+    # any file is written), then the editable relink only
+    assert calls[0][1:5] == ["-m", "pip", "install", "-q"] and calls[0][5] == "-r"
+    assert calls[0][6].endswith("requirements.txt")
+    assert [c[1:] for c in calls[1:]] == [list(s) for s in up.PIP_STEPS[1:]]
     assert not res["pip_ok"] and any("still points at" in m for m in logs)
     # and the right link is accepted
     monkeypatch.setattr(up, "linked_folder", lambda py: (root / "mrfx").resolve())
