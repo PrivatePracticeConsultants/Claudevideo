@@ -600,6 +600,16 @@ filters — executed; status block at its top). `docs/NEXT_STEPS_PROMPT_6.md` wa
 the round-6 audit of every output (executed; status block at its top): each
 payer's own months for packets, digest, rate changes and new-to-network; the
 500s and state-name misses; tie orders; and the per-visit costs.
+`docs/NEXT_STEPS_PROMPT_7.md` is the current plan: a whole-program audit
+(Nov 7, 2026 — measurements at HEAD on both stores, determinism, profiles,
+peak RSS, a real inbox run, and eight independent line-by-line reads). Its
+P0s are wrong numbers on sold outputs (NaN string rates, the negotiation
+one-pager's cross-payer total, cross-payer sparklines, tied-schedule leads,
+a merged inflation basis, name-only referral grouping, ACS senior
+over-count); its P1s are the shared per-practice-median cost (materialise
+once per generation), exports on the system drive, round-6 cache staleness
+on user edits, queue/updater/launcher holes, and the cross-site POST
+surface.
 
 **Round 6 lessons.** *A store-wide "newest month" is a bug, not a
 simplification:* one payer's file dated two months ahead (HEALTHSCOPE, 76 rows
