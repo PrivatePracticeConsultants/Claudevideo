@@ -205,6 +205,9 @@ class QaCounters:
     bad_ref_ids: int = 0              # provider_reference ids that are not numeric
     bundled_items: int = 0            # bundle/capitation items excluded (not per-code rates)
     remote_ref_groups: int = 0        # skipped rate groups whose references are remote `location` links
+    missing_ref_ids: int = 0          # provider_reference ids a rate group cited that no reference
+                                      # file defined (remote links excluded) — even when the
+                                      # group's OTHER ids resolved (round 7 P1.7)
     prices: int = 0                   # readable prices seen (denominator for price-level shares)
     modifier_split_rows: int = 0      # rows whose modifier element held several ("52,53" -> 52|53)
     pos_in_modifier_rows: int = 0     # rows whose "modifiers" were place-of-service codes (moved)
@@ -812,7 +815,14 @@ class InNetworkParser:
                 got = resolved.get(rid)
                 if not got:
                     missing_ref = True
-                    remote_ref = remote_ref or rid in self._remote_rids
+                    if rid in self._remote_rids:
+                        remote_ref = True
+                    else:
+                        # counted even when the group's other ids resolved:
+                        # [7, 8] with only 7 known emitted 7's practices and
+                        # dropped 8's in silence, and the file was never
+                        # re-ingested when the companion landed
+                        self.result.qa.missing_ref_ids += 1
                     continue
                 all_groups.extend(got)
         if missing_ref and not all_groups:

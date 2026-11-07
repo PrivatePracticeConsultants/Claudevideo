@@ -633,3 +633,365 @@ def test_a_saved_website_shows_in_the_cached_leads_at_once(leads_app, store):  #
     store.set_entity_map({TINS["B"]: "B GROUP"})
     assert store.user_edit_generation == gen + 1, "the entity map is a user edit too"
 
+
+
+# -- P1.5 a worker thread that dies hands its row back at once -----------------
+
+def test_a_dead_downloader_thread_hands_its_row_back(cfg, store, monkeypatch):
+    """The first fetch dies with an error the loop re-raises. The row used to
+    stay 'downloading' with no owner until the next start, and a CLI drain
+    counted it in flight for ever. Now the replacement thread's start puts it
+    back in the queue; it is fetched again (port 9: refused -> failed) and the
+    drain ends."""
+    import threading
+
+    import mrfx.fetch as F
+    real = F.fetch_url_record
+    calls = {"n": 0}
+
+    def boom(c, s, rec):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise KeyboardInterrupt          # anything the loop re-raises
+        return real(c, s, rec)
+    monkeypatch.setattr(F, "fetch_url_record", boom)
+    cfg.download_retries = 0
+    F.add_urls(store, ["http://127.0.0.1:9/never.json.gz"])
+    done: dict = {}
+    t = threading.Thread(target=lambda: done.setdefault("n", F.run_queue(cfg, store, drain=True)),
+                         daemon=True)
+    t.start()
+    t.join(60)
+    assert not t.is_alive(), "the drain ends"
+    row = store.list_urls()[0]
+    assert calls["n"] >= 2 and row["status"] in ("failed", "paused"), row
+
+
+# -- P1.6 an index cut at max_toc_files says so -----------------------------------
+
+def test_a_capped_index_says_so_and_counts_what_it_listed(cfg, store, tmp_path):
+    """A TOC listing 5 files with max_toc_files = 3: the row said "done",
+    error None, and child_count = newly queued (0 after a monthly re-fetch).
+    Now child_count = 3 listed, and the amber note names the cap."""
+    from mrfx.fetch import cap_note, extract_links_from_text
+    trunc: dict = {}
+    links = extract_links_from_text(
+        " ".join(f'<a href="https://x.example/f{i}_in-network.json.gz">f</a>' for i in range(5)),
+        "https://x.example/", 3, trunc=trunc)
+    assert len(links) == 3 and trunc == {"truncated": True}
+    trunc = {}
+    extract_links_from_text('<a href="https://x.example/a_in-network.json">a</a>',
+                            "https://x.example/", 3, trunc=trunc)
+    assert trunc == {}
+    assert "MORE than 2,000" in cap_note(2000) and "max_toc_files" in cap_note(2000)
+
+
+# -- P1.7 a partly resolved rate group is counted and re-ingested ----------------
+
+def test_a_partly_resolved_reference_group_is_counted_and_refilled(cfg, store):
+    """A rate group cites provider references [101, 555]; the file defines
+    only 101. It used to emit 101's practice, drop 555's, report
+    ref_groups_skipped = 0 and never re-ingest when the companion landed.
+    By hand: one missing id; after the companion, 555's two NPIs at $27.50."""
+    from pathlib import Path
+
+    from tests.mrfx.conftest import make_fixture
+    data = json.loads((Path(__file__).parent / "fixtures" / "innetwork_mixed.json").read_text())
+    for it in data["in_network"]:
+        for nr in it["negotiated_rates"]:
+            if nr.get("provider_references") == [555]:
+                nr["provider_references"] = [101, 555]
+    p = make_fixture(cfg.inbox_dir, "partial_refs.json", data)
+    assert ingest_file(cfg, store, p)["status"] == "done"
+    with store.connect() as con:
+        qa = json.loads(con.execute("SELECT qa FROM files WHERE filename = ?", [p.name]).fetchone()[0])
+        npis = {r[0] for r in con.execute("SELECT DISTINCT npi FROM rates").fetchall()}
+    assert qa["missing_ref_ids"] == 1 and store.file_status(p.name)["ref_groups_skipped"] == 0
+    assert "5555555555" not in npis
+    ref = make_fixture(cfg.inbox_dir, "provider_reference_companion.json", json.loads(
+        (Path(__file__).parent / "fixtures" / "provider_reference_companion.json").read_text()))
+    res = ingest_file(cfg, store, ref)
+    assert p.name in res["requeued"]
+    with store.connect() as con:
+        got = con.execute("SELECT DISTINCT npi, negotiated_rate FROM rates "
+                          "WHERE npi IN ('5555555555', '5555555556') ORDER BY 1").fetchall()
+        qa = json.loads(con.execute("SELECT qa FROM files WHERE filename = ?", [p.name]).fetchone()[0])
+    assert got == [("5555555555", 27.5), ("5555555556", 27.5)] and qa["missing_ref_ids"] == 0
+
+
+# -- P1.4 a segmented download may take longer than the wall-clock cap -----------
+
+def test_a_segmented_download_finishes_past_the_time_cap(cfg, monkeypatch):
+    """Four segments, each served at ~30 KB/s (2.5 s per segment) with
+    download_max_seconds = 1. The cap used to end every segment, delete the
+    holey .part and fall back to a single connection judged against the
+    first attempt's clock — "nothing received yet", parked, and from byte 0
+    on every retry. Segments now run until done (bounded by NO progress)."""
+    import hashlib
+    import http.server as hs
+    import os as _os
+    import threading
+    import time as _t
+
+    import mrfx.fetch as F
+    payload = _os.urandom(300_000)
+
+    class Slow(hs.BaseHTTPRequestHandler):
+        def do_GET(self):
+            rng = self.headers.get("Range", "")
+            a, b = rng[6:].split("-") if rng.startswith("bytes=") else ("0", "")
+            start, end = int(a), min(int(b) if b else len(payload) - 1, len(payload) - 1)
+            body = payload[start:end + 1]
+            self.send_response(206 if rng else 200)
+            if rng:
+                self.send_header("Content-Range", f"bytes {start}-{end}/{len(payload)}")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            if len(body) <= 1:                      # the range probe
+                self.wfile.write(body)
+                return
+            for i in range(0, len(body), 7_500):
+                self.wfile.write(body[i:i + 7_500])
+                self.wfile.flush()
+                _t.sleep(0.25)
+
+        def log_message(self, *a):
+            pass
+
+    httpd = hs.ThreadingHTTPServer(("127.0.0.1", 0), Slow)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        monkeypatch.setattr(F, "_SEGMENT_MIN_BYTES", 1000)
+        monkeypatch.setattr(F, "_SEGMENT_MIN_PIECE", 50_000)
+        cfg.download_segments = 4
+        cfg.download_max_seconds = 1
+        url = f"http://127.0.0.1:{httpd.server_address[1]}/slow.json.gz"
+        dest = cfg.downloads_dir / F.filename_for(url)
+        t0 = _t.monotonic()
+        sha, _final = F.download(cfg, url, dest)
+        assert _t.monotonic() - t0 > 1.5, "it really ran past the cap"
+        assert sha == hashlib.sha256(payload).hexdigest() and dest.read_bytes() == payload
+    finally:
+        httpd.shutdown()
+
+
+# -- P1.8 a failed commit never leaves a failed file's rates live ------------------
+
+def test_a_failed_done_upsert_withdraws_the_part(cfg, store, monkeypatch):
+    """The part goes live, then recording the file as done fails (twice). It
+    used to leave files = failed while SELECT count(*) FROM rates = 1 and the
+    rows reached every number after the rebuild. Now the part is withdrawn."""
+    from tests.mrfx.conftest import make_fixture
+    from tests.mrfx.test_v4 import innetwork, item
+    real = store.upsert_file
+
+    def flaky(name, **kw):
+        if kw.get("status") == "done":
+            raise RuntimeError("disk hiccup while recording the file")
+        return real(name, **kw)
+    monkeypatch.setattr(store, "upsert_file", flaky)
+    p = make_fixture(cfg.inbox_dir, "f.json", innetwork(items=[
+        item("97110", [(["1000000000"], "43-0000000", "ein", [(40.0, None)])])]))
+    assert ingest_file(cfg, store, p)["status"] == "failed"
+    monkeypatch.undo()
+    store.rebuild_rollups()
+    with store.connect() as con:
+        assert con.execute("SELECT status FROM files").fetchone()[0] == "failed"
+        assert con.execute("SELECT count(*) FROM rates").fetchone()[0] == 0
+        assert con.execute("SELECT count(*) FROM rates_by_tin").fetchone()[0] == 0
+
+
+# -- P1.9 reset and forget never bring a parked part back ------------------------
+
+def test_reset_and_forget_never_bring_a_parked_part_back(cfg, store):
+    """A finished parse that could not swap in (Windows lock) is PARKED and
+    adopted at the next open. After forget (or reset) the park was adopted
+    anyway: rates = 1, files = 0, and forget could not remove it again."""
+    import shutil
+
+    from mrfx.store import file_key
+    from tests.mrfx.conftest import make_fixture
+    from tests.mrfx.test_v4 import innetwork, item
+
+    def ingest_and_park(name):
+        p = make_fixture(cfg.inbox_dir, name, innetwork(items=[
+            item("97110", [(["1000000000"], "43-0000000", "ein", [(40.0, None)])])]))
+        assert ingest_file(cfg, store, p)["status"] == "done"
+        part = store.rates_dir / f"{file_key(name)}.parquet"
+        park = store.rates_dir / f".{file_key(name)}.parked"
+        shutil.copy(part, park)
+        with store.write_lock, store.connect() as con:
+            parked = json.loads(store._meta_get(con, "parked_parts") or "{}")
+            parked[park.name] = part.name
+            con.execute("INSERT OR REPLACE INTO meta VALUES ('parked_parts', ?)",
+                        [json.dumps(parked)])
+        return park
+
+    park = ingest_and_park("a.json")
+    store.forget_file("a.json")
+    assert not park.exists()
+    s2 = Store(cfg.store_dir)
+    with s2.connect() as con:
+        assert con.execute("SELECT count(*) FROM rates").fetchone()[0] == 0
+    park = ingest_and_park("b.json")
+    s2.reset()
+    assert not park.exists()
+    s3 = Store(cfg.store_dir)
+    with s3.connect() as con:
+        assert con.execute("SELECT count(*) FROM rates").fetchone()[0] == 0
+        assert con.execute("SELECT count(*) FROM files").fetchone()[0] == 0
+    # a park whose file has no files row (left by an older version) is never
+    # adopted: it is removed at the next open
+    p = make_fixture(cfg.inbox_dir, "c.json", innetwork(items=[
+        item("97110", [(["1000000000"], "43-0000000", "ein", [(40.0, None)])])]))
+    assert ingest_file(cfg, s3, p)["status"] == "done"
+    ghost = s3.rates_dir / f".{file_key('ghost.json')}.parked"
+    shutil.copy(s3.rates_dir / f"{file_key('c.json')}.parquet", ghost)
+    with s3.write_lock, s3.connect() as con:
+        con.execute("INSERT OR REPLACE INTO meta VALUES ('parked_parts', ?)",
+                    [json.dumps({ghost.name: f"{file_key('ghost.json')}.parquet"})])
+    s4 = Store(cfg.store_dir)
+    assert not ghost.exists()
+    assert not (s4.rates_dir / f"{file_key('ghost.json')}.parquet").exists()
+
+
+# -- P1.10 a weekly NPPES update reaches the practice directory ------------------
+
+def test_a_weekly_update_renames_an_identified_provider_everywhere(cfg, store, tmp_path):
+    """The monthly names NPI 1417594896 OLD CLINIC NAME at 63101; the weekly
+    renames it NEW CLINIC NAME at 63099. apply_weekly_update reported 1
+    updated, but npi_directory kept OLD / 63101 (the practice stayed at the
+    old ZIP while the new-clinics feed showed the new one)."""
+    from mrfx.enrich import _nppes_cache_path, _write_nppes_parquet, apply_weekly_update
+    from tests.mrfx.test_floors import _nppes_csv, _nppes_row
+    old = _nppes_row("1417594896", "OLD CLINIC NAME")
+    old[8] = "63101"
+    cfg.enrichment.bulk_csv_path = _nppes_csv(tmp_path, [old], name="npidata_pfile_m.csv")
+    assert _write_nppes_parquet(cfg, store, _nppes_cache_path(store), None) == 1
+    store.save_npi("1417594896", "OLD CLINIC NAME", "261QP2000X", "1 Main St", "StL", "MO",
+                   entity_type="NPI-2", zip_code="63101")
+    new = _nppes_row("1417594896", "NEW CLINIC NAME")
+    new[8] = "63099"
+    res = apply_weekly_update(cfg, store, _nppes_csv(tmp_path, [new]))
+    assert res["updated_npis"] == 1 and res["directory_refreshed"] == 1
+    with store.connect() as con:
+        assert con.execute("SELECT org_name, zip FROM npi_directory WHERE npi = '1417594896'"
+                           ).fetchone() == ("NEW CLINIC NAME", "63099")
+
+
+# -- P1.11 hospital files: the CMS wide layout, code|N slots, one modifier rule --
+
+def _hosp_csv(tmp_path, header, rows, name="h.csv"):
+    import csv as _csv
+    import io as _io
+    buf = _io.StringIO()
+    w = _csv.writer(buf)
+    w.writerow(["hospital_name", "last_updated_on", "version"])
+    w.writerow(["Test General", "2026-07-01", "2.0.0"])
+    w.writerow(header)
+    w.writerows(rows)
+    p = tmp_path / name
+    p.write_text(buf.getvalue())
+    return p
+
+
+def test_a_wide_hospital_file_imports_every_payer(store, tmp_path):
+    """standard_charge|Aetna|PPO|negotiated_dollar = 88.50 and
+    …|Anthem BCBS|HMO|… = 132.75 on one 97110 line: it imported "rows 2,
+    payers 1" — Aetna's column as "Unknown payer". By hand: two rows, two
+    payers, 88.50 and 132.75."""
+    from mrfx.hospital import import_hospital_file
+    p = _hosp_csv(tmp_path, [
+        "description", "code|1", "code|1|type", "setting", "modifiers",
+        "standard_charge|gross", "standard_charge|Aetna|PPO|negotiated_dollar",
+        "standard_charge|Aetna|PPO|methodology",
+        "standard_charge|Anthem BCBS|HMO|negotiated_dollar"],
+        [["Ther exercise", "97110", "CPT", "outpatient", "", "300",
+          "88.50", "fee schedule", "132.75"]])
+    res = import_hospital_file(store, p, state="MO")
+    assert res["rows"] == 2 and res["payers"] == 2
+    with store.connect() as con:
+        got = con.execute("SELECT payer, plan_name, billing_code, rate FROM hospital_rates "
+                          "ORDER BY payer").fetchall()
+    assert got == [("Aetna", "PPO", "97110", 88.5), ("Anthem BCBS", "HMO", "97110", 132.75)]
+
+
+def test_a_tall_file_with_the_cpt_in_code_2_and_raw_modifiers(store, tmp_path):
+    """code|1 = the chargemaster number (type CDM), code|2 = 97110 (CPT): it
+    imported nothing. Modifiers "GP|59" / "59,GP" were stored raw and the
+    parity pooled them with base rows. By hand: two rows, both stored as the
+    sorted set "59|GP"; with a base-only market the parity's hospital side
+    keeps only the plain row (100.00)."""
+    from mrfx.hospital import import_hospital_file
+    p = _hosp_csv(tmp_path, [
+        "description", "code|1", "code|1|type", "code|2", "code|2|type", "setting",
+        "modifiers", "payer_name", "plan_name", "standard_charge|negotiated_dollar"],
+        [["Ther ex", "CDM-4410", "CDM", "97110", "CPT", "outpatient", "", "Aetna", "PPO", "100"],
+         ["Ther ex", "CDM-4411", "CDM", "97110", "CPT", "outpatient", "GP|59", "Aetna", "PPO", "150"],
+         ["Ther ex", "CDM-4412", "CDM", "97110", "CPT", "outpatient", "59,GP", "Aetna", "PPO", "160"]])
+    assert import_hospital_file(store, p, state="MO")["rows"] == 3
+    with store.connect() as con:
+        mods = sorted(r[0] or "" for r in con.execute(
+            "SELECT modifiers FROM hospital_rates").fetchall())
+    assert mods == ["", "59|GP", "59|GP"]
+    from mrfx.hospital import base_sql
+    with store.connect() as con:
+        kept = con.execute("SELECT rate FROM hospital_rates h WHERE "
+                           + base_sql("coalesce(h.modifiers, '')")).fetchall()
+    assert kept == [(100.0,)]
+
+
+# -- P1.12 the real 2026 CMS RVU files ---------------------------------------------
+
+_PPRRVU_2026_HEAD = (
+    ",,2026 National Physician Fee Schedule Relative Value File October Release,,,,,,,,,,,,,,,,,,,,,,,,,,\n"
+    ",,CPT codes and descriptions only are copyright 2026 American Medical Association.,,,,,,,,,,,,,,,,,,,,,,,,,,\n"
+    ",,,,,,,,,,,,,,,,,,,,,,,,,,,,\n"
+    ",,RELEASED 08/26/2026,,,,,,,,,,,,,,,,,,,,,,,,,,\n"
+    ",,,,,,,,,,,,,,,,,,,,,,,,,NON-FACILITY,FACILITY,\n"
+    ",,,,NOT USED,,,,,,,,,,,,,,,,,,,,,,PHYSICIAN,,DIAGNOSTIC,PE USED,PE USED,MP USED\n"
+    ",,,,FOR,,,NON-FAC,,FACILITY,,,,,,,,,,,,,,,,,SUPERVISION OF,,IMAGING,FOR OPPS,FOR OPPS,FOR OPPS\n"
+    ",,,STATUS,MEDICARE,WORK,NON-FAC,NA,FACILITY,NA,MP,NON-FACILITY,FACILITY,PCTC,GLOB,PRE,INTRA,"
+    "POST,MULT,BILAT,ASST,CO-,TEAM,PRIC,ENDO,CONV,DIAGNOSTIC,CALCULATION,FAMILY,PAYMENT,PAYMENT,PAYMENT\n"
+    "HCPCS,MOD,DESCRIPTION,CODE,PAYMENT,RVU,PE RVU,INDICATOR,PE RVU,INDICATOR,RVU,TOTAL,TOTAL,IND,DAYS,"
+    "OP,OP,OP,PROC,SURG,SURG,SURG,SURG,IND,BASE,FACTOR,PROCEDURES,FLAG,INDICATOR,AMOUNT,AMOUNT,AMOUNT\n"
+    "97110,,Therapeutic exercises,A,,0.45,0.41,,0.41,NA,0.01,0.87,0.87,7,XXX,0.00,0.00,0.00,5,0,0,0,0,9,,"
+    "33.4009,09,0,99,0.00,0.00,0.00\n"
+    "97110,GP,Therapeutic exercises,A,,0.45,0.41,,0.41,NA,0.01,0.87,0.87,7,XXX,0.00,0.00,0.00,5,0,0,0,0,9,,"
+    "33.4009,09,0,99,0.00,0.00,0.00\n")
+_GPCI_2026_HEAD = (
+    "ADDENDUM E. FINAL CY 2026 GEOGRAPHIC PRACTICE COST INDICES (GPCIs) BY STATE AND MEDICARE LOCALITY,,,,,,\n"
+    ",,,,,,\n"
+    "Medicare Administrative Contractor (MAC),State,Locality Number,Locality Name,"
+    "2026 PW GPCI (with 1.0 Floor)***,2026 PE GPCI,2026 MP GPCI\n"
+    "05302,MO,02,METROPOLITAN KANSAS CITY,1.000,0.957,0.913\n"
+    "05302,MO,99,REST OF MISSOURI*,1.000,0.857,0.913\n")
+
+
+def test_the_real_2026_cms_layout_imports(store):
+    """The 2026 PPRRVU starts with nine title rows and stacks each column
+    name over several rows; the GPCI with two. Both were refused ("could not
+    find column(s) HCPCS …"). Rows copied from the CMS RVU26D release.
+    By hand, REST OF MISSOURI, 97110: (0.45 x 1.000 + 0.41 x 0.857 + 0.01 x
+    0.913) = 0.8105 RVU x 33.4009 = 27.0714 -> $27.07. The file's own CONV FACTOR is
+    33.4009: a different typed value is refused."""
+    import io
+    import zipfile
+
+    from mrfx.mpfs import MpfsImportError, import_official, looks_official, parse_pprrvu
+    rv = parse_pprrvu(_PPRRVU_2026_HEAD)
+    assert rv == {"97110": {"work": 0.45, "pe_nonfac": 0.41, "mp": 0.01}}
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("PPRRVU2026_Oct_QPP.csv", _PPRRVU_2026_HEAD.replace("33.4009", "33.5675"))
+        z.writestr("PPRRVU2026_Oct_nonQPP.csv", _PPRRVU_2026_HEAD)
+        z.writestr("GPCI2026.csv", _GPCI_2026_HEAD)
+    data = buf.getvalue()
+    res = import_official(store, data, "rvu26d.zip", conversion_factor=33.4009, state="MO")
+    assert "PPRRVU2026_Oct_nonQPP.csv" in res["source"] and res["locality"] == "REST OF MISSOURI*"
+    with store.connect() as con:
+        assert con.execute("SELECT non_facility_rate FROM mpfs WHERE code = '97110'"
+                           ).fetchone()[0] == 27.07
+    with pytest.raises(MpfsImportError, match="33.4009"):
+        import_official(store, data, "rvu26d.zip", conversion_factor=32.3465, state="MO")
+    assert looks_official(_PPRRVU_2026_HEAD.encode(), "PPRRVU2026_Oct_nonQPP.csv")

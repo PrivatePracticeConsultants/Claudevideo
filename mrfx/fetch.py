@@ -403,7 +403,7 @@ def _probe_ranges(cfg: MrfxConfig, url: str, ua: str | None) -> tuple[int, str] 
 
 def _segmented_download(cfg: MrfxConfig, url: str, dest: Path, part: Path, val_p: Path,
                         total: int, my_key: int, progress_cb, cancel_check,
-                        n_segments: int, max_budget: float, dl_start: float,
+                        n_segments: int, stall_budget: float, dl_start: float,
                         ua: str | None) -> tuple[str, str]:
     """Download `total` bytes as `n_segments` contiguous ranges in parallel,
     each on its own connection writing to its own offset of the preallocated
@@ -412,7 +412,16 @@ def _segmented_download(cfg: MrfxConfig, url: str, dest: Path, part: Path, val_p
     .part deleted); on the user's stop raise a canceled DownloadError. A
     segmented .part is NEVER kept (its size == total but content is holey, so a
     later sequential resume would finish it CORRUPT) — hence delete-on-any-exit
-    except success."""
+    except success.
+
+    NOT bound by the wall-clock cap (download_max_seconds). The cap exists to
+    free a slot a trickling single connection holds for hours; segments are
+    the remedy for exactly that, and capping them meant a file needing longer
+    than the cap could NEVER finish: the holey .part was deleted, the
+    sequential fallback saw a clock hours old and parked with "nothing
+    received yet", and the next turn started again from byte 0 (round 7
+    P1.4). What bounds a segmented download instead is NO PROGRESS: no byte
+    on any segment for stall_budget seconds ends it."""
     with open(part, "wb") as f:            # preallocate so each thread can seek
         f.truncate(total)
     seg = total // n_segments
@@ -423,8 +432,6 @@ def _segmented_download(cfg: MrfxConfig, url: str, dest: Path, part: Path, val_p
     state = {"canceled": False, "err": None}
 
     def _halt() -> str | None:
-        if max_budget and time.monotonic() - dl_start > max_budget:
-            return "cap"
         try:
             if cancel_check and cancel_check():
                 return "cancel"
@@ -439,9 +446,6 @@ def _segmented_download(cfg: MrfxConfig, url: str, dest: Path, part: Path, val_p
             h = _halt()
             if h == "cancel":
                 state["canceled"] = True
-                return
-            if h == "cap":
-                state["err"] = "download time cap"
                 return
             try:
                 headers = {"Range": f"bytes={start + got}-{end}"}
@@ -467,9 +471,6 @@ def _segmented_download(cfg: MrfxConfig, url: str, dest: Path, part: Path, val_p
                             if h == "cancel":
                                 state["canceled"] = True
                                 return
-                            if h == "cap":
-                                state["err"] = "download time cap"
-                                return
                             f.write(chunk)
                             got += len(chunk)
                             with lock:
@@ -489,12 +490,17 @@ def _segmented_download(cfg: MrfxConfig, url: str, dest: Path, part: Path, val_p
     for t in threads:
         t.start()
     last_report_t = 0.0
+    seen_done, seen_t = 0, time.monotonic()
     while any(t.is_alive() for t in threads):
         time.sleep(0.4)
         with lock:
             done = prog["done"]
         _set_reservation(my_key, total - done)
         now = time.monotonic()
+        if done != seen_done:
+            seen_done, seen_t = done, now
+        elif stall_budget and now - seen_t > stall_budget:
+            state["err"] = f"no data on any segment for {int(stall_budget)} s"
         if progress_cb and now - last_report_t >= 1.5:
             progress_cb(done, total)
             last_report_t = now
@@ -685,10 +691,14 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                     try:
                         return _segmented_download(
                             cfg, final_url, dest, part, val_p, total_sz, my_key,
-                            progress_cb, cancel_check, segs, max_budget, dl_start,
+                            progress_cb, cancel_check, segs, stall_budget, dl_start,
                             ua_override)
                     except _SegmentationFailed as e:
                         log.info("%s: %s — falling back to a single connection", url, e)
+                        # the single connection gets its OWN clocks: judged
+                        # against the segmented attempt's start it parked at
+                        # once with "nothing received yet" (P1.4)
+                        dl_start = last_progress_t = time.monotonic()
 
     # the running hash of the .part's bytes, carried across reconnects so a
     # resume does NOT re-read everything downloaded so far (that re-hash grew
@@ -1368,10 +1378,13 @@ _FRAMEWORK_ASSET_RE = re.compile(
 
 
 def extract_links_from_text(text: str, base_url: str, max_files: int,
-                            seen: set[str] | None = None) -> list[str]:
+                            seen: set[str] | None = None,
+                            trunc: dict | None = None) -> list[str]:
     """Pull .json / .json.gz / .zip MRF links out of markup or JS/JSON text.
     Returns absolute, deduped URLs; pass `seen` (dedup keys) to accumulate
-    across multiple sources (rendered DOM + captured API responses)."""
+    across multiple sources (rendered DOM + captured API responses). Pass
+    `trunc` (a dict) to learn whether links were left out at the cap:
+    trunc["truncated"] is set True (round 7 P1.6 — a cut list said nothing)."""
     seen = seen if seen is not None else set()
     out: list[str] = []
     # gather well past the cap (bounded), then keep the most useful first: a
@@ -1395,6 +1408,8 @@ def extract_links_from_text(text: str, base_url: str, max_files: int,
             if len(out) >= ceiling:
                 break
     out.sort(key=_link_priority)          # stable: page order within a rank
+    if trunc is not None and len(out) > max_files:
+        trunc["truncated"] = True
     return out[:max_files]
 
 
@@ -1411,7 +1426,8 @@ def _link_priority(u: str) -> int:
     return 0 if _USEFUL_LINK_RE.search(name) else 1
 
 
-def extract_links_from_page(path: Path, base_url: str, max_files: int) -> list[str]:
+def extract_links_from_page(path: Path, base_url: str, max_files: int,
+                            trunc: dict | None = None) -> list[str]:
     """Best effort: pull .json / .json.gz links out of an HTML page (payer
     directory listings like mrfdata.hmhs.com are plain pages full of file
     links). Returns absolute, deduped URLs. Empty for JS-only portals."""
@@ -1420,7 +1436,17 @@ def extract_links_from_page(path: Path, base_url: str, max_files: int) -> list[s
             text = f.read(64 << 20).decode(errors="replace")  # match the 64 MB link-container admit limit
     except OSError:
         return []
-    return extract_links_from_text(text, base_url, max_files)
+    return extract_links_from_text(text, base_url, max_files, trunc=trunc)
+
+
+def cap_note(max_files: int) -> str:
+    """The amber note on a done index/page row that listed more files than
+    max_toc_files (round 7 P1.6: Meritain 4,173, Allied 32,397 and Aetna
+    ALICUNDER100 30,884 files read "found 2,000 files inside" and nothing
+    about the rest)."""
+    return (f"this list has MORE than {max_files:,} files — only {max_files:,} were taken "
+            f"(in-network rate files and indexes first). To take more, raise "
+            f"max_toc_files in config/mrfx.yaml and press retry on this row.")
 
 
 PAGE_HELP = (
@@ -1445,7 +1471,8 @@ def _page_help() -> str:
     return PAGE_HELP if render_available() else PAGE_HELP_NO_RENDERER
 
 
-def crawl_gatsby_hub(cfg: MrfxConfig, page_url: str, max_files: int) -> list[str]:
+def crawl_gatsby_hub(cfg: MrfxConfig, page_url: str, max_files: int,
+                     trunc: dict | None = None) -> list[str]:
     """Some payer MRF hubs (the Sapphire/HealthSparq platform — Blue KC is
     one) are Gatsby apps: the page is empty HTML, but the file list ships as
     static JSON the site itself fetches. Do what the browser would:
@@ -1456,11 +1483,12 @@ def crawl_gatsby_hub(cfg: MrfxConfig, page_url: str, max_files: int) -> list[str
     origin = f"{parts.scheme}://{parts.netloc}"
     seen: set[str] = set()
     out: list[str] = []
+    cut = {"t": False}
 
     def walk(node):
         """Collect node['url'] JSON links, skipping entries the payer marked
         suppressed (files pulled from publication — honesty over volume)."""
-        if len(out) >= max_files:
+        if cut["t"]:
             return
         if isinstance(node, dict):
             u = node.get("url")
@@ -1469,6 +1497,9 @@ def crawl_gatsby_hub(cfg: MrfxConfig, page_url: str, max_files: int) -> list[str
                 full = urljoin(origin + "/", u.strip())
                 k = dedup_key(full)
                 if k not in seen and full.lower().startswith(("http://", "https://")):
+                    if len(out) >= max_files:
+                        cut["t"] = True      # one more real link than we keep
+                        return
                     seen.add(k)
                     out.append(full)
             for v in node.values():
@@ -1490,11 +1521,13 @@ def crawl_gatsby_hub(cfg: MrfxConfig, page_url: str, max_files: int) -> list[str
                 sq = client.get(f"{origin}/page-data/sq/d/{h}.json")
                 if sq.status_code == 200:
                     walk(sq.json())
-                if len(out) >= max_files:
+                if cut["t"]:
                     break
     except (httpx.HTTPError, ValueError) as e:  # network or non-JSON — not a hub
         log.debug("gatsby probe %s: %s", origin, e)
         return []
+    if cut["t"] and trunc is not None:
+        trunc["truncated"] = True
     return out[:max_files]
 
 
@@ -2006,6 +2039,7 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
         msg = f"index expanded: {len(child_urls)} files listed, {added} newly queued"
         if truncated:
             msg += f" (capped at max_toc_files={cfg.max_toc_files})"
+            log.warning("%s — %s", url, cap_note(cfg.max_toc_files))
         if not child_urls:
             # a TOC with only allowed_amount_file entries is a common TPA
             # shape (out-of-network averages, no negotiated rates) — that's
@@ -2020,8 +2054,11 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
         else:
             log.info("%s — %s", url, msg)
             # child_count on a done TOC row is how the dashboard says
-            # "found N files inside, working through them"
-            store.update_url(url_id, status="done", kind="toc", child_count=added, error=None)
+            # "found N files inside": the number LISTED — after a monthly
+            # re-fetch every child is already queued, and "found 0 files
+            # inside" read as an empty index (round 7 P1.6)
+            store.update_url(url_id, status="done", kind="toc", child_count=len(child_urls),
+                             error=cap_note(cfg.max_toc_files) if truncated else None)
         dest.unlink(missing_ok=True)  # the index itself carries no rates
         return False
 
@@ -2037,14 +2074,18 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
         # file. If it's HTML, try to lift the file links off it; otherwise
         # explain what to do in plain language.
         if looks_like_html(dest):
-            links = extract_links_from_page(dest, final_url, cfg.max_toc_files)
+            trunc: dict = {}
+            links = extract_links_from_page(dest, final_url, cfg.max_toc_files, trunc=trunc)
             dest.unlink(missing_ok=True)
             # a Gatsby-built MRF hub (Sapphire etc.) may render some links in
             # the HTML and ship the rest as static JSON next to the page —
             # probe it either way and merge (one cheap request for non-hubs)
             seen_keys = {dedup_key(u) for u in links}
-            for hub_url in crawl_gatsby_hub(cfg, final_url, cfg.max_toc_files):
-                if dedup_key(hub_url) not in seen_keys and len(links) < cfg.max_toc_files:
+            for hub_url in crawl_gatsby_hub(cfg, final_url, cfg.max_toc_files, trunc=trunc):
+                if dedup_key(hub_url) not in seen_keys:
+                    if len(links) >= cfg.max_toc_files:
+                        trunc["truncated"] = True
+                        break
                     seen_keys.add(dedup_key(hub_url))
                     links.append(hub_url)
             if not links:
@@ -2060,12 +2101,17 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
                 store.update_url(url_id, error="page has no static links — rendering it in a headless browser…")
                 try:
                     links = render_page_links(cfg, final_url, cfg.max_toc_files)
+                    if len(links) >= cfg.max_toc_files:
+                        # the renderer stops collecting at the cap: reaching
+                        # it means there may be more
+                        trunc["truncated"] = True
                 except RenderBrowserMissing:
                     browser_missing = True
             if links:
                 added = _enqueue_children(store, links, url_id)
                 log.info("%s — web page: found %d file links, %d newly queued", url, len(links), added)
-                store.update_url(url_id, status="done", kind="page", child_count=added, error=None)
+                store.update_url(url_id, status="done", kind="page", child_count=len(links),
+                                 error=cap_note(cfg.max_toc_files) if trunc.get("truncated") else None)
             else:
                 msg = (PAGE_HELP + " The app tried to download the headless browser "
                        "automatically but couldn't (usually no internet, or disk full). "
@@ -2078,12 +2124,14 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
         # {"TOC_Files": [...]} directories, for example) — lift any MRF-shaped
         # links out of a small unknown file before giving up.
         if dest.stat().st_size <= 64 << 20:
-            links = extract_links_from_page(dest, final_url, cfg.max_toc_files)
+            trunc = {}
+            links = extract_links_from_page(dest, final_url, cfg.max_toc_files, trunc=trunc)
             if links:
                 dest.unlink(missing_ok=True)
                 added = _enqueue_children(store, links, url_id)
                 log.info("%s — link container: %d file links, %d newly queued", url, len(links), added)
-                store.update_url(url_id, status="done", kind="page", child_count=added, error=None)
+                store.update_url(url_id, status="done", kind="page", child_count=len(links),
+                                 error=cap_note(cfg.max_toc_files) if trunc.get("truncated") else None)
                 return False
         err = "; ".join(pf.messages) or "unrecognized file (not MRF JSON)"
         if url.split("?", 1)[0].endswith("latest_metadata.json"):
@@ -2408,6 +2456,12 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
     # reservations against free space, so concurrent fetches can never
     # collectively overcommit the drive.
     dl_stop = threading.Event()
+    # thread name -> the url_queue id it has claimed and not yet finished.
+    # A thread that dies anyway (an error its loop re-raises) hands its row
+    # back through this before its replacement starts (round 7 P1.5: the row
+    # stayed 'downloading' with no owner until the next start, and a CLI
+    # drain counted it in flight for ever).
+    holding: dict[str, int] = {}
 
     # keep every parser fed: allow one fetched file per worker plus one spare
     prefetch_ahead = max(PREFETCH_AHEAD, resolve_worker_count(cfg) + 1)
@@ -2432,6 +2486,7 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
                     # (was: re-query every 0.5 s, forever, on 6 threads)
                     store.wait_queue_change(epoch, QUEUE_IDLE_WAIT_SECONDS)
                     continue
+                holding[threading.current_thread().name] = rec["id"]
                 try:
                     fetch_url_record(cfg, store, rec)
                 except KeyboardInterrupt:
@@ -2455,6 +2510,7 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
                         log.exception(
                             "prefetch: could not record the failure for %s — the row "
                             "will be recovered on the next start", rec.get("url"))
+                holding.pop(threading.current_thread().name, None)
             except Exception:  # noqa: BLE001 — even store hiccups must not kill the loop
                 log.exception("prefetch: transient store error; retrying shortly")
                 dl_stop.wait(2.0)
@@ -2508,6 +2564,7 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
                     active -= 1
                 store.wait_queue_change(epoch, QUEUE_IDLE_WAIT_SECONDS)
                 continue
+            holding[threading.current_thread().name] = rec["id"]
             try:
                 ok = False
                 try:
@@ -2537,6 +2594,7 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
                     processed += 1
                     if ok:
                         ingests_pending_rollup += 1
+                holding.pop(threading.current_thread().name, None)
             finally:
                 with state:
                     active -= 1
@@ -2556,9 +2614,16 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
                                      (dl_threads, downloader, "mrfx-prefetch")):
             for i, t in enumerate(pool_):
                 if not t.is_alive():
-                    log.error("%s-%d stopped unexpectedly — starting a replacement "
-                              "(the file it was on is re-queued at the next start "
-                              "if it was mid-way)", label, i)
+                    rid = holding.pop(t.name, None)
+                    released = False
+                    if rid is not None:
+                        try:
+                            released = store.release_claim(rid)
+                        except Exception:  # noqa: BLE001 — recover_stuck_urls still catches it at the next start
+                            log.exception("could not hand back queue row %s", rid)
+                    log.error("%s-%d stopped unexpectedly — starting a replacement%s",
+                              label, i, " (the file it was on goes back in the queue)"
+                              if released else "")
                     pool_[i] = threading.Thread(target=target, daemon=True, name=f"{label}-{i}")
                     pool_[i].start()
 

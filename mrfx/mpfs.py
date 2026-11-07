@@ -11,10 +11,17 @@ in one zip). The payment formula is published and exact:
            x conversion_factor
 
 ACCURACY RULES:
-- The conversion factor is NOT in the RVU files (CMS publishes it separately,
-  and it changes mid-year some years). It is a REQUIRED input, validated to a
-  sane range and echoed into the stored source string — never guessed from a
-  hardcoded table that silently goes stale.
+- The conversion factor is a REQUIRED input, validated to a sane range and
+  echoed into the stored source string — never guessed from a hardcoded table
+  that silently goes stale. The PPRRVU file does carry a CONV FACTOR column
+  (2026 October non-QPP: 33.4009); when it does, a typed value that
+  disagrees is refused with the file's value in the message.
+- The real CMS CSVs start with TITLE rows (the 2026 PPRRVU: nine, with each
+  column name stacked over several rows; the GPCI: two) — the header is
+  found by its first cell, and stacked header rows are joined. The 2026
+  bundle ships a QPP and a non-QPP PPRRVU (two conversion factors); the
+  non-QPP one is used unless the zip has only the other, and the source
+  string names the file.
 - Locality matters (a state has 1..n localities). Chosen by explicit name if
   given, else the state's "REST OF" locality, else the state's only locality —
   and the choice is disclosed in the source string every report prints.
@@ -59,8 +66,51 @@ def _find_col(fieldnames: list[str], *want_all: str, exclude: tuple = ()) -> str
     return None
 
 
-def _read_rows(text: str) -> csv.DictReader:
-    return csv.DictReader(io.StringIO(text))
+def _read_rows(text: str, key: str = "hcpcs") -> csv.DictReader:
+    """Rows of a CMS CSV as dicts keyed by the REAL header, wherever it is:
+    the first row with a cell that normalizes to `key` ('hcpcs' for the
+    PPRRVU, 'state' for the GPCI). Rows directly above it that carry two or
+    more cells are the upper lines of a stacked header ("NON-FAC" over
+    "PE RVU") and are joined into each column's name; title rows above
+    them (one long cell, or blank) are skipped. A file whose first row IS
+    the header (older years, the tests) reads exactly as before."""
+    rows = list(csv.reader(io.StringIO(text)))
+    h = next((i for i, r in enumerate(rows)
+              if any(_norm(c) == key for c in r)), None)
+    if h is None:
+        return csv.DictReader(io.StringIO(text))
+    top = h
+    while top > 0 and sum(1 for c in rows[top - 1] if c.strip()) >= 2:
+        top -= 1
+    width = max(len(r) for r in rows[top:h + 1])
+    names = []
+    for j in range(width):
+        parts = [rows[i][j].strip() for i in range(top, h + 1)
+                 if j < len(rows[i]) and rows[i][j].strip()]
+        names.append(" ".join(parts) or f"col{j}")
+    out = io.StringIO()
+    w = csv.writer(out)
+    w.writerow(names)
+    w.writerows(rows[h + 1:])
+    return csv.DictReader(io.StringIO(out.getvalue()))
+
+
+def file_conversion_factor(text: str) -> float | None:
+    """The CONV FACTOR the PPRRVU file itself carries (the most common value
+    on payable rows), or None when the file has no such column."""
+    r = _read_rows(text)
+    col = _find_col(list(r.fieldnames or []), "conv", "factor")
+    if not col:
+        return None
+    seen: dict[float, int] = {}
+    for row in r:
+        try:
+            v = float(row.get(col) or "")
+        except ValueError:
+            continue
+        if v > 0:
+            seen[v] = seen.get(v, 0) + 1
+    return max(seen, key=seen.get) if seen else None
 
 
 def parse_pprrvu(text: str) -> dict[str, dict]:
@@ -113,7 +163,7 @@ def parse_pprrvu(text: str) -> dict[str, dict]:
 def parse_gpci(text: str, state: str, locality_name: str | None = None) -> dict:
     """The GPCI row to price with: explicit locality name, else the state's
     'REST OF' locality, else the state's only locality."""
-    r = _read_rows(text)
+    r = _read_rows(text, key="state")
     fields = list(r.fieldnames or [])
     col_state = _find_col(fields, "state")
     col_locnum = _find_col(fields, "locality", "number") or _find_col(fields, "locality")
@@ -182,8 +232,9 @@ def compute_locality_rates(rvus: dict[str, dict], gpci: dict,
     } for code, v in sorted(rvus.items())]
 
 
-def _pick_from_zip(data: bytes) -> tuple[str, str]:
-    """(pprrvu_text, gpci_text) from a CMS RVU bundle zip."""
+def _pick_from_zip(data: bytes) -> tuple[str, str, str]:
+    """(pprrvu_text, gpci_text, the PPRRVU file's name) from a CMS RVU
+    bundle zip."""
     try:
         z = zipfile.ZipFile(io.BytesIO(data))
     except zipfile.BadZipFile:
@@ -191,19 +242,27 @@ def _pick_from_zip(data: bytes) -> tuple[str, str]:
     names = z.namelist()
 
     def read(patterns):
-        for n in names:
-            base = Path(n).name.lower()
-            if any(base.startswith(p) and base.endswith((".csv", ".txt"))
-                   for p in patterns):
-                return z.read(n).decode("utf-8-sig", errors="replace")
+        # .csv before .txt (the same table; the .txt is fixed-width in some
+        # years), and the NON-QPP PPRRVU before the QPP one: 2026 ships both,
+        # with different conversion factors, and most practices are paid
+        # non-QPP. The name goes into the source string either way.
+        hits = [n for n in names
+                if any(Path(n).name.lower().startswith(p) for p in patterns)
+                and Path(n).name.lower().endswith((".csv", ".txt"))]
+        hits.sort(key=lambda n: ("_qpp" in Path(n).name.lower(),
+                                 not Path(n).name.lower().endswith(".csv"), n))
+        if hits:
+            _picked.append(Path(hits[0]).name)
+            return z.read(hits[0]).decode("utf-8-sig", errors="replace")
         return None
+    _picked: list[str] = []
     ppr = read(("pprrvu",))
     gp = read(("gpci",))
     if ppr is None or gp is None:
         raise MpfsImportError(
             "the zip does not contain the expected PPRRVU*.csv and GPCI*.csv "
             f"— found: {', '.join(Path(n).name for n in names[:12])}")
-    return ppr, gp
+    return ppr, gp, _picked[0]
 
 
 def import_official(store, data: bytes, filename: str, *, conversion_factor: float,
@@ -214,7 +273,8 @@ def import_official(store, data: bytes, filename: str, *, conversion_factor: flo
     the same string every methodology sidecar will print."""
     fname = Path(filename or "upload").name
     if fname.lower().endswith(".zip") or data[:2] == b"PK":
-        ppr_text, gpci_text = _pick_from_zip(data)
+        ppr_text, gpci_text, picked = _pick_from_zip(data)
+        fname = f"{fname} ({picked})"
     else:
         ppr_text = data.decode("utf-8-sig", errors="replace")
         if gpci_data is None:
@@ -223,6 +283,13 @@ def import_official(store, data: bytes, filename: str, *, conversion_factor: flo
                 "CMS zip — easiest is to load the whole zip).")
         gpci_text = gpci_data.decode("utf-8-sig", errors="replace")
     rvus = parse_pprrvu(ppr_text)
+    file_cf = file_conversion_factor(ppr_text)
+    if file_cf and abs(float(conversion_factor) - file_cf) > 0.00005:
+        raise MpfsImportError(
+            f"the conversion factor typed ({float(conversion_factor):.4f}) is not the "
+            f"one this PPRRVU file carries ({file_cf:.4f}). Use the file's value — "
+            "or, if CMS changed it after this release, load the release that "
+            "carries the new one.")
     gpci = parse_gpci(gpci_text, state, locality_name)
     rows = compute_locality_rates(rvus, gpci, conversion_factor)
     source = (f"{fname} · locality {gpci['name']} ({state.upper()}) · "
@@ -237,5 +304,6 @@ def looks_official(data: bytes, filename: str) -> bool:
     """Route an upload: CMS delivery vs the simple code,rate CSV."""
     if (filename or "").lower().endswith(".zip") or data[:2] == b"PK":
         return True
-    head = data[:2048].decode("utf-8-sig", errors="replace").lower()
+    # the 2026 PPRRVU's header sits under ~1.5 KB of title rows
+    head = data[:16384].decode("utf-8-sig", errors="replace").lower()
     return "hcpcs" in head and "rvu" in head

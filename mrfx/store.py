@@ -2549,6 +2549,20 @@ class Store:
             self.requeue_part_payers(n)
         return len(names)
 
+    def release_claim(self, url_id: int) -> bool:
+        """A worker thread died holding this row: put it back in the queue
+        NOW (round 7 P1.5), the same way recover_stuck_urls does at the next
+        start — a 'fetched' download whose sidecar survived is reused, and
+        the content hash prevents a double ingest. Only an in-flight row is
+        touched: one that already reached done/failed stays as it is."""
+        with self.write_lock, self.connect() as con:
+            r = con.execute("SELECT status FROM url_queue WHERE id = ?", [url_id]).fetchone()
+            if not r or r[0] not in ("downloading", "fetched", "expanding", "ingesting"):
+                return False
+            con.execute("UPDATE url_queue SET status = 'queued', progress = 0, bytes_done = 0 "
+                        "WHERE id = ?", [url_id])
+            return True
+
     def recover_stuck_urls(self) -> int:
         """Rows left mid-flight by a crash/Ctrl-C go back to queued so the
         next run resumes them ('fetched' rows whose download + sidecar
@@ -2967,11 +2981,29 @@ class Store:
                     "could not record removed-part payers — rollups may lag "
                     "until the next full rebuild")
 
+    def _discard_park(self, con: duckdb.DuckDBPyConnection, source_file: str) -> None:
+        """Forget a PARKED replacement of this file's part (a finished parse
+        that could not swap in because the old part was held open): the file
+        is being removed, so the park must not be adopted at the next open
+        (round 7 P1.9: forget / reset, then a restart, brought the "removed"
+        rates back with no files row — and forget could not remove them
+        again, because it reads `files`). Caller holds write_lock."""
+        park = f".{file_key(source_file)}.parked"
+        p = self.rates_dir / park
+        if p.exists() and not unlink_with_retry(p) and p.exists():
+            logging.getLogger(__name__).warning(
+                "%s could not be deleted yet; it will not be adopted", park)
+        parked = json.loads(self._meta_get(con, "parked_parts") or "{}")
+        if parked.pop(park, None) is not None:
+            con.execute("INSERT OR REPLACE INTO meta VALUES ('parked_parts', ?)",
+                        [json.dumps(parked)])
+
     def drop_rates_part(self, source_file: str) -> None:
         path = self.rates_dir / f"{file_key(source_file)}.parquet"
         doomed = self._part_payers_for_removal(path)  # scan OUTSIDE the lock
         with self.write_lock:
             with self.connect() as con:
+                self._discard_park(con, source_file)
                 self._queue_removed_payers(con, doomed)
                 if not unlink_with_retry(path) and path.exists():
                     self._note_doomed(con, path.name)
@@ -3007,6 +3039,14 @@ class Store:
         if not doomed and not parked:
             return
         still_doomed, still_parked = [], {}
+        live_parts: set[str] = set()
+        if parked:
+            try:
+                with self.connect() as con:
+                    live_parts = {f"{file_key(r[0])}.parquet" for r in con.execute(
+                        "SELECT filename FROM files").fetchall()}
+            except Exception:  # noqa: BLE001
+                return
         for name in doomed:
             path = self.rates_dir / name
             if not path.exists():
@@ -3022,6 +3062,12 @@ class Store:
         for park, name in parked.items():
             src, dst = self.rates_dir / park, self.rates_dir / name
             if not src.exists():
+                continue
+            if name not in live_parts:
+                # its file was forgotten / the store reset since it parked:
+                # adopting it would bring back rates nothing owns (P1.9)
+                if not unlink_with_retry(src) and src.exists():
+                    still_parked[park] = name   # retried — never adopted
                 continue
             old = self._part_payers_for_removal(dst)
             try:
@@ -3075,6 +3121,7 @@ class Store:
         freed = path.stat().st_size if path.exists() else 0
         doomed = self._part_payers_for_removal(path)  # scan OUTSIDE the lock
         with self.write_lock, self.connect() as con:
+            self._discard_park(con, filename)
             self._queue_removed_payers(con, doomed)
             row = con.execute(
                 "SELECT rows_emitted FROM files WHERE filename = ?", [filename]
@@ -4634,8 +4681,14 @@ class Store:
     # -- reset ------------------------------------------------------------------------
 
     def reset(self) -> None:
+        held: list[str] = []
         with self.write_lock:
             for p in self.rates_dir.glob("*.parquet"):
+                if not unlink_with_retry(p) and p.exists():
+                    held.append(p.name)       # retried at the next open (doomed)
+            # a parked replacement would be ADOPTED at the next open — with
+            # no files row (round 7 P1.9)
+            for p in self.rates_dir.glob(".*.parked"):
                 unlink_with_retry(p)
             for p in self.dir.glob("tin_zip_place.*"):
                 unlink_with_retry(p)
@@ -4651,8 +4704,15 @@ class Store:
                     # URLs the user re-pastes to rebuild the store they just
                     # wiped. entity_map and org_websites stay — user config.
                     "DELETE FROM url_queue; DELETE FROM rollup_pending_tins; "
-                    "DELETE FROM rate_npi_parts; DELETE FROM rate_npi_set;"
+                    "DELETE FROM rate_npi_parts; DELETE FROM rate_npi_set; "
+                    # part-operation and rollup bookkeeping of the wiped store
+                    "DELETE FROM meta WHERE key IN ('parked_parts', "
+                    "'rollup_pending_payers', 'rollup_needs_full');"
                 )
+                # a part Windows would not let go of is deleted at the next
+                # open, never served as the "empty" store's rates
+                con.execute("INSERT OR REPLACE INTO meta VALUES ('doomed_parts', ?)",
+                            [json.dumps(held)])
                 for tbl in ("rates_dedup_tbl", "rates_by_tin_tbl", "tin_directory_tbl"):
                     con.execute(f"DROP TABLE IF EXISTS {tbl}")
                 self._register_views(con)
@@ -4680,7 +4740,8 @@ _QUEUE_WRITERS_IF_DONE = ("_claim_next", "enqueue_url", "enqueue_urls", "requeue
                           "wake_parked_urls",
                           "recover_stuck_urls", "set_url_status_by_id", "force_size_requeue",
                           "clear_queued", "cancel_all_downloading", "resume_canceled",
-                          "revive_skipped_duplicates", "claim_content_ingest")
+                          "revive_skipped_duplicates", "claim_content_ingest",
+                          "release_claim")
 
 
 def _signals_queue(fn, always: bool):

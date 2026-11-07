@@ -4001,6 +4001,12 @@ async function loadFiles() {
           ? `<span class="warn-text">⚠ ${fmtInt(f.ref_groups_skipped)} rate groups skipped — ${fmtInt(remote)} point at remote provider lists MRF Explorer doesn't download; the rest need the payer's provider reference file</span>`
           : `<span class="warn-text">⚠ ${fmtInt(f.ref_groups_skipped)} rate groups skipped — missing provider reference file</span>`;
     }
+    // a group whose references were only PARTLY found kept the practices it
+    // could name and dropped the rest — say so (round 7 P1.7)
+    const missingIds = (f.qa && f.qa.missing_ref_ids) || 0;
+    if (missingIds > 0 && !(f.ref_groups_skipped > 0)) {
+      warn = `<span class="warn-text" title="Some rate groups listed several provider references and only some were in the file. The practices behind the missing ones are not in the store yet; dropping the payer's provider reference file in re-ingests this file automatically.">⚠ ${fmtInt(missingIds)} provider reference(s) not found — some practices missing; needs the payer's provider reference file</span>`;
+    }
     let statusExtra = "";
     if (f.status === "pending_confirmation")
       statusExtra = ` <button class="btn" style="padding:2px 8px;font-size:12px" data-confirm="${esc(f.filename)}">ingest anyway</button>`;
@@ -4160,6 +4166,8 @@ async function loadUrlQueue() {
     let notes = "";
     if (u.kind === "toc" && u.status === "done") notes = `found ${fmtInt(u.child_count)} files inside — queued below`;
     else if (u.kind === "page" && u.status === "done") notes = `found ${fmtInt(u.child_count)} file links on the page`;
+    // a list cut at max_toc_files says so, in amber (round 7 P1.6)
+    if (notes && u.error) notes += ` — <span class="warn-text">${esc(u.error)}</span>`;
     // Color the note by what it actually is: red is reserved for real
     // failures. Over-size is amber ("your OK needed"), and SKIPPED rows are
     // neutral — a duplicate of an already-ingested file, a file with none of
@@ -4235,7 +4243,9 @@ function initFilesView() {
   $("#url-stop-dl").addEventListener("click", async () => {
     const msg = $("#url-msg");
     if (!confirm("Stop the downloads in progress right now?\n\nPartial files " +
-      "are kept, so a retry resumes them. The freed slots let ingesting catch up.")) return;
+      "are kept, so a retry resumes them — except a file being fetched over several " +
+      "parallel connections (download_segments above 1), which starts over. The " +
+      "freed slots let ingesting catch up.")) return;
     msg.textContent = "stopping downloads…";
     try {
       const r = await postJson("/api/urls/stop-downloads", {});

@@ -850,8 +850,8 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
         return {"status": "done", "rows": 0, "payer": pf.payer, "note": msg}
 
     store.finalize_rates_part(name, tmp_out, payload["rows_written"])
-    store.upsert_file(
-        name,
+    _commit_done(
+        store, name,
         payer=payload["payer"],
         schema_version=payload["schema_version"],
         last_updated_on=payload["last_updated_on"],
@@ -876,6 +876,29 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
     return {"status": "done", "rows": payload["rows"],
             "ref_groups_skipped": payload["ref_groups_skipped"],
             "remote_ref_groups": (payload.get("qa") or {}).get("remote_ref_groups", 0)}
+
+
+def _commit_done(store: Store, name: str, **fields) -> None:
+    """The 'done' upsert that follows a part going live. If it fails, the
+    handler marked the row failed while its rates stayed live in every
+    number — and the source went to failed/, so nothing ever healed it
+    (round 7 P1.8). Retry once (a transient lock), then take the part back
+    out before the error propagates: a row that is not 'done' never owns a
+    live part it just wrote."""
+    try:
+        store.upsert_file(name, **fields)
+        return
+    except Exception:  # noqa: BLE001 — one retry, then undo
+        log.warning("%s: recording the finished file failed once — retrying", name,
+                    exc_info=True)
+    try:
+        store.upsert_file(name, **fields)
+    except Exception:
+        try:
+            store.drop_rates_part(name)
+        except Exception:  # noqa: BLE001 — the original error is the one to report
+            log.exception("%s: could not withdraw the part after a failed commit", name)
+        raise
 
 
 # One ingest per filename at a time, process-wide. Guards the shared
@@ -1165,8 +1188,8 @@ def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight
                 )
         if progress is not None:
             progress.finish()
-        store.upsert_file(
-            name,
+        _commit_done(
+            store, name,
             payer=result.payer,
             schema_version=result.schema_version,
             last_updated_on=result.last_updated_on,
@@ -1234,7 +1257,8 @@ def requeue_skipped(cfg: MrfxConfig, store: Store, payer: str) -> list[str]:
             """
             SELECT filename FROM files
             WHERE payer = ? AND file_type = 'in_network'
-              AND status = 'done' AND ref_groups_skipped > 0
+              AND status = 'done'
+              AND (ref_groups_skipped > 0 OR coalesce(TRY_CAST(json_extract_string(qa, '$.missing_ref_ids') AS BIGINT), 0) > 0)
             """,
             [payer],
         ).fetchall()

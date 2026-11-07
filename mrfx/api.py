@@ -1868,7 +1868,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     @app.post("/api/urls/stop-downloads")
     def urls_stop_downloads():
         # abort in-flight downloads mid-stream to free the slots; partial files
-        # are kept so a later retry resumes them.
+        # are kept so a later retry resumes them (a SEGMENTED download's holey
+        # .part cannot be resumed and is discarded — the confirm says so)
         return {"stopped": store.cancel_all_downloading()}
 
     @app.get("/api/urls")
@@ -3589,9 +3590,10 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             files_done = con.execute("SELECT count(*) FROM files WHERE status = 'done'").fetchone()[0]
             attention = _dicts(con.execute(
                 """
-                SELECT filename, status, ref_groups_skipped, error FROM files
+                SELECT filename, status, ref_groups_skipped, error,
+                       coalesce(TRY_CAST(json_extract_string(qa, '$.missing_ref_ids') AS BIGINT), 0) AS missing_ref_ids FROM files
                 WHERE status IN ('failed', 'quarantined', 'pending_confirmation')
-                   OR ref_groups_skipped > 0
+                   OR ref_groups_skipped > 0 OR coalesce(TRY_CAST(json_extract_string(qa, '$.missing_ref_ids') AS BIGINT), 0) > 0
                 """
             ))
         return {"rates": counts["rates"], "tins": counts["tins"], "payers": counts["payers"],

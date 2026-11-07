@@ -41,6 +41,7 @@ import re
 from pathlib import Path
 
 from .catalog import CODE_CATALOG, code_info, resolve_discipline
+from .modifiers import base_sql, normalize as normalize_modifiers
 from .sniff import open_stream
 from .states import state_code_or_none
 from .store import Store, sql_path
@@ -75,6 +76,23 @@ _DOLLAR_COLS = (
 
 def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
+
+
+def _modifier_set(raw) -> str | None:
+    """The ONE modifier rule (mrfx/modifiers.py) applied to a hospital's
+    modifiers: sorted, de-duplicated, split, a place-of-service list moved
+    out — stored '|'-joined like the insurer side, so base_sql reads both
+    the same way (round 7 P1.11: hospital modifiers were stored raw)."""
+    if raw is None:
+        return None
+    items = raw if isinstance(raw, (list, tuple)) else [str(raw).replace("|", ",")]
+    mods, _pos, _split, _moved = normalize_modifiers(list(items), [])
+    return "|".join(mods) or None
+
+
+_CODE_SLOT_RE = re.compile(r"^code (\d+)$")
+_CODE_TYPE_SLOT_RE = re.compile(r"^code (\d+) type$")
+_CPT_TYPES = ("CPT", "HCPC")
 
 
 def _slug(s: str) -> str:
@@ -133,7 +151,43 @@ def _csv_columns(header: list[str]) -> dict:
         "gross": find("standard_charge|gross", contains=("gross",)),
         "cash": find("standard_charge|discounted_cash", contains=("discounted", "cash")),
         "modifiers": find("modifiers"),
+        "code_slots": _code_slots(header),
+        "wide": _wide_payer_columns(header),
     }
+
+
+def _code_slots(header: list[str]) -> list[tuple[int, int | None]]:
+    """[(code|N column, code|N|type column)] in N order. The CMS template
+    allows several codes per line (code|1 a chargemaster number, code|2 the
+    CPT); only code|1 was read, so such a file imported nothing (P1.11)."""
+    codes, types = {}, {}
+    for i, raw in enumerate(header):
+        k = _norm(raw)
+        m = _CODE_SLOT_RE.match(k)
+        if m:
+            codes.setdefault(int(m.group(1)), i)
+            continue
+        m = _CODE_TYPE_SLOT_RE.match(k)
+        if m:
+            types.setdefault(int(m.group(1)), i)
+    return [(codes[n], types.get(n)) for n in sorted(codes)]
+
+
+def _wide_payer_columns(header: list[str]) -> dict[tuple[str, str], dict]:
+    """The CMS WIDE CSV puts each payer and plan in the column NAME:
+    standard_charge|<payer>|<plan>|negotiated_dollar (+ …|methodology,
+    estimated_amount|<payer>|<plan>). {(payer, plan): {field: column}}."""
+    out: dict[tuple[str, str], dict] = {}
+    for i, raw in enumerate(header):
+        parts = [p.strip() for p in str(raw).split("|")]
+        if len(parts) == 4 and parts[0].lower() == "standard_charge" and parts[1]:
+            field = parts[3].lower()
+            if field in ("negotiated_dollar", "methodology"):
+                out.setdefault((parts[1], parts[2]), {})[
+                    "dollar" if field == "negotiated_dollar" else "methodology"] = i
+        elif len(parts) == 3 and parts[0].lower() == "estimated_amount" and parts[1]:
+            out.setdefault((parts[1], parts[2]), {})["estimate"] = i
+    return {k: v for k, v in out.items() if "dollar" in v or "estimate" in v}
 
 
 def _csv_meta(path: Path) -> dict:
@@ -176,42 +230,74 @@ def _read_csv_rows(path: Path, want: set[str]):
         if not header:
             raise HospitalImportError("the file has no header row")
         col = _csv_columns(header)
-        if col["code"] is None or col["dollar"] is None:
+        # WIDE layout: no payer column, payers in the column names. The
+        # tall-file "negotiated dollar" lookup then matched the FIRST payer's
+        # column, so a two-payer file imported one payer as "Unknown payer"
+        # (P1.11) — read every payer/plan column instead.
+        wide = col["wide"] if col["payer"] is None else {}
+        slots = col["code_slots"] or ([(col["code"], col["code_type"])]
+                                      if col["code"] is not None else [])
+        if not slots or (col["dollar"] is None and not wide):
             raise HospitalImportError(
                 "this CSV has no code column and/or no negotiated-dollar column "
                 "— it does not look like a CMS hospital standard-charges file "
                 f"(columns seen: {', '.join(header[:12])}…)")
 
-        def at(row, key):
-            i = col[key]
+        def cell(row, i):
             return (row[i] if i is not None and i < len(row) else None) or None
 
+        def at(row, key):
+            return cell(row, col[key])
+
+        def code_of(row):
+            """The first code|N slot holding a wanted CPT/HCPCS code (a slot
+            typed as something else — CDM, RC, NDC — never matches)."""
+            for ci, ti in slots:
+                c = str(cell(row, ci) or "").strip().upper()
+                if c in want:
+                    t = str(cell(row, ti) or "").strip().upper() if ti is not None else ""
+                    if not t or t.startswith(_CPT_TYPES):     # "CPT", "CPT4", "HCPCS"
+                        return c, t or None
+            return None, None
+
         for row in reader:
-            code = str(at(row, "code") or "").strip().upper()
-            if code not in want:
+            code, ctype = code_of(row)
+            if code is None:
                 continue
             setting = _norm(at(row, "setting") or "")
             if setting and setting not in _KEEP_SETTINGS:
+                continue
+            base = {
+                "hospital_name": meta["hospital_name"],
+                "last_updated_on": meta["last_updated_on"],
+                "billing_code": code,
+                "code_type": ctype,
+                "setting": setting or None,
+                "gross_charge": _num(at(row, "gross")),
+                "cash_price": _num(at(row, "cash")),
+                "modifiers": _modifier_set(at(row, "modifiers")),
+            }
+            if wide:
+                for (payer, plan), cols in wide.items():
+                    dollar = _num(cell(row, cols.get("dollar")))
+                    estimate = _num(cell(row, cols.get("estimate")))
+                    if dollar is None and estimate is None:
+                        continue
+                    yield {**base, "payer_raw": payer or None, "plan_name": plan or None,
+                           "rate": dollar, "estimated_amount": estimate,
+                           "methodology": str(cell(row, cols.get("methodology")) or ""
+                                              ).strip() or None}
                 continue
             dollar = _num(at(row, "dollar"))
             estimate = _num(at(row, "estimate"))
             if dollar is None and estimate is None:
                 continue
-            yield {
-                "hospital_name": meta["hospital_name"],
-                "last_updated_on": meta["last_updated_on"],
-                "billing_code": code,
-                "code_type": str(at(row, "code_type") or "").strip().upper() or None,
-                "payer_raw": str(at(row, "payer") or "").strip() or None,
-                "plan_name": str(at(row, "plan") or "").strip() or None,
-                "setting": setting or None,
-                "rate": dollar,
-                "estimated_amount": estimate,
-                "methodology": str(at(row, "methodology") or "").strip() or None,
-                "gross_charge": _num(at(row, "gross")),
-                "cash_price": _num(at(row, "cash")),
-                "modifiers": str(at(row, "modifiers") or "").strip() or None,
-            }
+            yield {**base,
+                   "payer_raw": str(at(row, "payer") or "").strip() or None,
+                   "plan_name": str(at(row, "plan") or "").strip() or None,
+                   "rate": dollar,
+                   "estimated_amount": estimate,
+                   "methodology": str(at(row, "methodology") or "").strip() or None}
 
 
 # -------------------------------------------------------------------- JSON
@@ -285,9 +371,8 @@ def _read_json_rows(path: Path, want: set[str]):
                                     or pi.get("methodology") or "").strip()[:120] or None,
                                 "gross_charge": gross,
                                 "cash_price": cash,
-                                "modifiers": "|".join(
-                                    str(m) for m in (sc.get("billing_code_modifier") or [])
-                                ) or None,
+                                "modifiers": _modifier_set(
+                                    [str(m) for m in (sc.get("billing_code_modifier") or [])]),
                             }
         except HospitalImportError:
             raise
@@ -507,6 +592,12 @@ def hospital_parity(store: Store, market: dict | None = None, *,
             raise BenchmarkError(f"no practice matches {subject!r}")
 
     hosp_where = ["h.rate IS NOT NULL"]
+    if m.get("base_only", True):
+        # the practice side reads base modifiers only (the house basis); the
+        # hospital side pooled every modifier — a 59/KX line beside a base
+        # rate (round 7 P1.11). One rule on both sides.
+        hosp_where.append(base_sql("coalesce(h.modifiers, '')",
+                                   bool(m.get("include_assistant"))))
     hosp_params: list = []
     if payer:
         hosp_where.append("h.payer = ?")

@@ -926,6 +926,9 @@ def cmd_enrich(cfg: MrfxConfig, args) -> int:
               f"({res['new_npis']:,} new NPIs, {res['updated_npis']:,} updated, "
               f"{res['deactivations_in_file']:,} carrying a deactivation date); "
               f"cache {res['cache_rows_before']:,} -> {res['cache_rows_after']:,}")
+        if res.get("directory_refreshed"):
+            print(f"{res['directory_refreshed']:,} already-identified provider(s) "
+                  "updated in the practice directory (new name, specialty or address).")
         print(f"\n{res['note']}")
         return 0
     if getattr(args, "bulk_file", None):

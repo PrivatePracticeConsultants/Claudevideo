@@ -488,8 +488,24 @@ def apply_weekly_update(cfg: MrfxConfig, store: Store, path) -> dict:
 
     log.info("NPPES weekly: %s rows applied (%s new NPIs); cache %s -> %s",
              f"{n_week:,}", f"{fresh:,}", f"{before:,}", f"{after:,}")
+    # ...and into the practice directory. The merge only rewrote the cache:
+    # an already-identified provider renamed or moved by the weekly kept its
+    # old name and ZIP in npi_directory (the refresh runs only when a new
+    # MONTHLY file arrives), so the practice stayed at the old address while
+    # the new-clinics feed, which reads the cache, showed the new one — two
+    # tabs disagreeing (round 7 P1.10). Same set-based refresh as a monthly.
+    refreshed = 0
+    try:
+        refreshed = _refresh_changed_from_parquet(store, cache)
+        if refreshed:
+            _maybe_refresh_directory(store, force=True)
+    except Exception as e:  # noqa: BLE001 — the cache merge itself succeeded
+        log.warning("NPPES weekly: the cache is updated, but refreshing already-"
+                    "identified providers failed (%s) — they refresh with the next "
+                    "monthly file", e)
     return {
         "file": src.name, "rows_in_weekly": n_week,
+        "directory_refreshed": refreshed,
         "n_npis_in_weekly": wk_npis,
         "new_npis": fresh, "updated_npis": wk_npis - fresh,
         "deactivations_in_file": deact,
