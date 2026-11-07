@@ -9,6 +9,12 @@ from mrfx.store import Store
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
+# Starlette's TestClient addresses requests to "testserver"; the dashboard
+# only answers requests addressed to this machine (mrfx.api.TRUSTED_HOSTS).
+import mrfx.api as _api  # noqa: E402
+
+_api.TRUSTED_HOSTS.add("testserver")
+
 
 @pytest.fixture
 def cfg(tmp_path) -> MrfxConfig:

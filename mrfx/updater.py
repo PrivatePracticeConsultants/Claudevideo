@@ -5,14 +5,20 @@ queue, backups), the .venv/ environment, and their settings files.
 Drag the zip onto "Update MRF Explorer.bat", or run the command. Steps:
 1. Check the zip is an MRF Explorer build (mrfx/ package + requirements.txt)
    and has no unsafe paths.
-2. Zip up the program files it is about to replace into
+2. Refuse an OLDER build than the one installed (an older program must never
+   run against a store a newer one upgraded) unless allow_downgrade.
+3. Install the new build's requirements FIRST. If pip fails, nothing else is
+   changed: new code importing against old packages would not start at all.
+4. Zip up the program files it is about to replace into
    data/update_backups/ (so an update can be undone by hand).
-3. Write every changed file from the new build — except data/, .venv/ and the
+5. Write every changed file from the new build — except data/, .venv/ and the
    user's settings (PROTECTED); a protected file the new build changed is
-   saved next to it as <name>.new for reference.
-4. Re-sync the environment (pip install -r requirements.txt, then pip install
-   --no-build-isolation -e . — works offline) and check where the typed `mrfx`
-   command now points.
+   saved next to it as <name>.new for reference. If a write fails (antivirus
+   or the indexer holding a file), every file already written is put back
+   from that backup and the update is refused, never left half-applied.
+6. Re-point the environment at this folder (pip install --no-build-isolation
+   --no-deps -e . — works offline) and check where the typed `mrfx` command
+   now points.
 
 It never deletes anything."""
 
@@ -24,7 +30,8 @@ import sys
 import zipfile
 from pathlib import Path, PurePosixPath
 
-# never written by an update: the user's data and environment
+# never written by an update: the user's data and environment. Compared
+# lower-cased: NTFS is case-insensitive, so "Data/inbox/x" IS data/inbox/x.
 SKIP_DIRS = ("data/", ".venv/", "venv/", ".git/")
 # the user's settings: kept as they are; the new build's copy -> <name>.new
 PROTECTED = ("config/mrfx.yaml", "config/entity_map.yaml", "config/registry_overrides.yaml")
@@ -37,11 +44,17 @@ class UpdateError(Exception):
 def _members(z: zipfile.ZipFile) -> tuple[str, dict[str, zipfile.ZipInfo]]:
     """(top-level prefix, {relative path: info}) for the build in the zip."""
     names = [i for i in z.infolist() if not i.is_dir()]
+    all_names = {i.filename for i in names}
     inits = [i.filename for i in names if i.filename.endswith("mrfx/__init__.py")]
-    if not inits:
+    prefixes = sorted({f[: -len("mrfx/__init__.py")] for f in inits}, key=len)
+    good = [p for p in prefixes if p + "requirements.txt" in all_names]
+    reqs = [f[: -len("requirements.txt")] for f in all_names if f.endswith("requirements.txt")]
+    if not prefixes or (not good and any(r + "mrfx/__init__.py" not in all_names for r in reqs)):
+        # (a build whose only mrfx/__init__.py is tests/mrfx/__init__.py is
+        # not a build — say THAT, not "missing requirements.txt")
         raise UpdateError("this zip doesn't contain MRF Explorer (no mrfx/__init__.py) — "
                           "check you picked the right file")
-    prefix = min(inits, key=len)[: -len("mrfx/__init__.py")]
+    prefix = (good or prefixes)[0]
     out = {}
     for i in names:
         if not i.filename.startswith(prefix):
@@ -62,7 +75,34 @@ def _version_in(text: str) -> str | None:
     return m.group(1) if m else None
 
 
-def apply_update(zip_path: Path, root: Path, run_pip: bool = True, log=print) -> dict:
+def _version_tuple(v: str | None) -> tuple | None:
+    import re
+    if not v:
+        return None
+    parts = re.findall(r"\d+", v)
+    return tuple(int(x) for x in parts[:4]) if parts else None
+
+
+def _restore(root: Path, backup: Path | None, written: list[str], created: list[str]) -> None:
+    """Undo a partly applied update: replaced files back from the backup,
+    files the update created removed."""
+    if backup is not None and backup.exists():
+        with zipfile.ZipFile(backup) as bz:
+            for rel in bz.namelist():
+                if rel in written:
+                    target = root / rel
+                    tmp = target.with_name(target.name + ".restoring")
+                    tmp.write_bytes(bz.read(rel))
+                    tmp.replace(target)
+    for rel in created:
+        try:
+            (root / rel).unlink()
+        except OSError:
+            pass
+
+
+def apply_update(zip_path: Path, root: Path, run_pip: bool = True, log=print,
+                 allow_downgrade: bool = False) -> dict:
     zip_path, root = Path(zip_path), Path(root)
     if not zip_path.is_file():
         raise UpdateError(f"file not found: {zip_path}")
@@ -78,10 +118,17 @@ def apply_update(zip_path: Path, root: Path, run_pip: bool = True, log=print) ->
         except OSError:
             pass
         new_v = _version_in(z.read(members["mrfx/__init__.py"]).decode("utf-8", "replace"))
+        ov, nv = _version_tuple(old_v), _version_tuple(new_v)
+        if ov and nv and nv < ov and not allow_downgrade:
+            raise UpdateError(
+                f"this zip is an OLDER version ({new_v}) than the one installed "
+                f"({old_v}). An older program must not run against a store a newer "
+                "one has upgraded — download the newest build. (To go back on "
+                "purpose, run `mrfx update <zip> --allow-downgrade`.)")
 
         plan = []                  # (rel, info, mode) mode: write | new
         for rel, info in sorted(members.items()):
-            if rel.startswith(SKIP_DIRS):
+            if rel.lower().startswith(SKIP_DIRS):
                 continue
             target = root / rel
             data = z.read(info)
@@ -91,7 +138,7 @@ def apply_update(zip_path: Path, root: Path, run_pip: bool = True, log=print) ->
                 same = False
             if same:
                 continue
-            if rel in PROTECTED and target.exists():
+            if rel.lower() in PROTECTED and target.exists():
                 try:   # the same .new from an earlier run: nothing to do
                     if target.with_name(target.name + ".new").read_bytes() == data:
                         continue
@@ -100,6 +147,24 @@ def apply_update(zip_path: Path, root: Path, run_pip: bool = True, log=print) ->
                 plan.append((rel, data, "new"))
             else:
                 plan.append((rel, data, "write"))
+
+        # the new requirements BEFORE any program file: new code importing
+        # against old packages does not start, and the launcher would then
+        # restart it for ever (round 7 P1.19)
+        if run_pip and plan:
+            import tempfile
+            req = z.read(members["requirements.txt"])
+            with tempfile.TemporaryDirectory(prefix="mrfx-update-") as td:
+                rp = Path(td) / "requirements.txt"
+                rp.write_bytes(req)
+                log("installing the new version's components (pip) — usually a few seconds…")
+                r = subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-r", str(rp)],
+                                   cwd=root)
+            if r.returncode != 0:
+                raise UpdateError(
+                    "pip could not install the new version's components (see the lines "
+                    "above — usually no internet connection). The program was NOT "
+                    "changed; run the update again once you are online.")
 
         stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
         backup = root / "data" / "update_backups" / f"before_update_{stamp}.zip"
@@ -112,6 +177,8 @@ def apply_update(zip_path: Path, root: Path, run_pip: bool = True, log=print) ->
             log(f"saved the {len(replaced)} program file(s) being replaced to {backup}")
 
         written, new_copies = 0, []
+        done_rel: list[str] = []          # replaced program files, for a rollback
+        created: list[str] = []           # files that did not exist before
         # the updater's own launcher LAST: cmd.exe re-reads a running .bat
         plan.sort(key=lambda t: t[0].lower().endswith(".bat"))
         for rel, data, mode in plan:
@@ -119,10 +186,28 @@ def apply_update(zip_path: Path, root: Path, run_pip: bool = True, log=print) ->
             if mode == "new":
                 target = target.with_name(target.name + ".new")
                 new_copies.append(str(target.relative_to(root)))
-            target.parent.mkdir(parents=True, exist_ok=True)
+            existed = target.exists()
             tmp = target.with_name(target.name + ".updating")
-            tmp.write_bytes(data)
-            tmp.replace(target)
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                tmp.write_bytes(data)
+                tmp.replace(target)
+            except OSError as e:
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+                _restore(root, backup if replaced else None, done_rel, created)
+                raise UpdateError(
+                    f"could not write {rel} ({e.__class__.__name__}: {e}) — usually "
+                    "antivirus or another program holding the file. Every file already "
+                    "updated was put back, so the program is exactly as it was; close "
+                    "other programs (or pause the antivirus scan) and run the update "
+                    "again.") from e
+            if existed and mode == "write":
+                done_rel.append(rel)
+            elif not existed:
+                created.append(target.relative_to(root).as_posix())
             written += 1
     log(f"updated {written} file(s) (version {old_v or '?'} -> {new_v or '?'}); "
         "your data folder and settings were not touched")
@@ -132,15 +217,16 @@ def apply_update(zip_path: Path, root: Path, run_pip: bool = True, log=print) ->
     pip_ok = True
     linked = None
     if run_pip:
-        log("re-syncing the program's components (pip) — usually a few seconds…")
-        for args in PIP_STEPS:
+        log("pointing this folder's environment at the new version (pip)…")
+        for args in PIP_STEPS[1:]:      # the requirements went in before the files
             r = subprocess.run([sys.executable, *args], cwd=root)
             if r.returncode != 0:
                 pip_ok = False
-                log("  pip reported a problem (see above). The update itself is in place, "
-                    "and \"Start MRF Explorer\" runs this folder's program regardless. "
-                    "To finish the re-sync, run these two lines in the program folder:\n"
-                    "    .venv\\Scripts\\python.exe -m pip install -r requirements.txt\n"
+                log("  pip reported a problem (see above). The new components are "
+                    "installed and \"Start MRF Explorer\" runs this folder's program "
+                    "directly, so the app starts normally; only the typed `mrfx` "
+                    "command may still point elsewhere. To fix that, run in the "
+                    "program folder:\n"
                     "    .venv\\Scripts\\python.exe -m pip install --no-build-isolation -e .")
                 break
         if pip_ok:

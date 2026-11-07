@@ -11,6 +11,9 @@ REM renamed or moved it failed with "No module named 'mrfx'". This works
 REM wherever the folder lives.
 title MRF Explorer (auto-restart)
 cd /d "%~dp0"
+REM UTF-8 for everything the program prints (a redirected or legacy-code-page
+REM console crashed on the first non-ASCII character)
+set PYTHONUTF8=1
 if not exist ".venv\Scripts\python.exe" goto noenv
 ".venv\Scripts\python.exe" -m mrfx serve --supervise
 echo.

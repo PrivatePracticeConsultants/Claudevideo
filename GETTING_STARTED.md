@@ -23,9 +23,13 @@ python --version
 ```
 
 (On Windows, `py -0p` lists every version installed.) If it prints 3.11, 3.12,
-3.13 or 3.14 you are done — skip to Step 2. Otherwise install the current
-release from <https://www.python.org/downloads/>; on Windows tick
-**"Add python.exe to PATH"** on the first installer screen.
+3.13 or 3.14 you are done — skip to Step 2. Otherwise install **Python 3.13**
+from <https://www.python.org/downloads/windows/> (macOS:
+<https://www.python.org/downloads/macos/>); on Windows tick **"Add python.exe
+to PATH"** on the first installer screen. **Not 3.15:** python.org's big
+"Download Python" button now gives 3.15, and duckdb, pyarrow, numpy, ijson,
+PyYAML and watchfiles publish no 3.15 installers yet, so the install fails
+with "Failed to build installable wheels".
 
 > **Historical note.** Older copies of this guide insisted on Python 3.12,
 > because `duckdb` 1.3.2 shipped no build for anything newer and pip fell back
@@ -37,9 +41,11 @@ release from <https://www.python.org/downloads/>; on Windows tick
 
 ## Step 2 — Get the code
 
-**Option A — you have the zip I sent** (`mrfx.zip`): double-click to unzip it,
-which gives you a folder (e.g. `Claudevideo`). Move it somewhere easy like your
-home folder or Desktop.
+**Option A — you have the zip I sent** (`mrfx_project.zip`): double-click to
+unzip it, which gives you a folder (e.g. `Claudevideo`). Move it to a short
+local path that is NOT synced to the cloud, e.g. `C:\mrfx\`. Avoid Desktop,
+Documents and OneDrive: on Windows 11 they sync to the cloud by default, so the
+database and multi-GB downloads would be uploaded and locked mid-write.
 
 **Option B — download with git** (if you use GitHub):
 
@@ -73,7 +79,7 @@ pip install -e .
 
 **Windows (PowerShell):**
 ```
-py -3 -m venv .venv
+py -3.13 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python --version
 python -m pip install -r requirements.txt
@@ -85,7 +91,8 @@ one with e.g. `py -3.13 -m venv .venv`.)
 
 > **If you see `Failed to build installable wheels` (duckdb, pyarrow,
 > watchfiles, pydantic-core):** pip found no ready-made installer for your
-> Python and tried to compile one. That means either a Python NEWER than 3.14,
+> Python and tried to compile one. That means either a Python NEWER than 3.14
+> (python.org's default download is 3.15 since autumn 2026),
 > or an old copy of `requirements.txt`. Don't install a compiler: delete the
 > half-made `.venv` folder, use Python 3.11–3.14 (`py -3.13 -m venv .venv`),
 > and re-run the lines above.

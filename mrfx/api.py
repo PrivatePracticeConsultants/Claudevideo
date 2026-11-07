@@ -987,6 +987,52 @@ def _fs(qp: dict) -> FilterSet:
         raise HTTPException(422, str(e))
 
 
+# The dashboard is served on the user's own machine, to the user's own
+# browser. Any other web page that browser opens can still SEND requests to
+# localhost: a cross-site <form> or a no-cors fetch is a CORS "simple
+# request" that goes out without a preflight, so the server ran it and only
+# the reply was hidden — a drive-by page could drop a file into the ingest
+# pipeline (overwriting a real payer's rates by filename), replace the
+# Medicare anchor, queue the whole catalog or wipe the queue; a DNS-rebinding
+# page could also READ everything. Round 7 P1.16: every request must name
+# this machine in its Host header, and a state-changing request that carries
+# an Origin must come from this same origin. Requests without an Origin (the
+# CLI's hand-off, scripts, tests) are unaffected.
+TRUSTED_HOSTS = {"localhost", "127.0.0.1", "::1"}
+_UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+class LocalOnlyMiddleware:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        headers = {k.decode("latin-1").lower(): v.decode("latin-1")
+                   for k, v in scope.get("headers") or []}
+        host = headers.get("host", "")
+        hostname = host.rsplit(":", 1)[0] if not host.startswith("[") else host[1:].split("]")[0]
+        why = None
+        if hostname.lower() not in TRUSTED_HOSTS:
+            why = "this dashboard only answers requests addressed to this computer (localhost)"
+        elif scope.get("method", "GET").upper() in _UNSAFE_METHODS:
+            origin = headers.get("origin")
+            site = headers.get("sec-fetch-site", "")
+            same = origin is None or origin.lower() in (
+                f"http://{host}".lower(), f"https://{host}".lower())
+            if not same or site == "cross-site":
+                why = ("changes can only be made from this dashboard's own page — "
+                       "a request from another web site was refused")
+        if why is None:
+            return await self.app(scope, receive, send)
+        body = json.dumps({"detail": why}).encode()
+        await send({"type": "http.response.start", "status": 403,
+                    "headers": [(b"content-type", b"application/json"),
+                                (b"content-length", str(len(body)).encode())]})
+        await send({"type": "http.response.body", "body": body})
+
+
 def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     # Startup work is collected here and run by the lifespan handler below.
     # `@app.on_event("startup")` is deprecated and slated for removal, but the
@@ -1004,6 +1050,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         yield
 
     app = FastAPI(title="MRF Explorer", docs_url="/api/docs", lifespan=lifespan)
+    app.add_middleware(LocalOnlyMiddleware)
     registry = Registry(cfg)
     sync_entity_map(cfg, store)
     if cfg.mpfs_path and Path(cfg.mpfs_path).exists():

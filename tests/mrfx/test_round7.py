@@ -364,3 +364,106 @@ def test_every_volumes_box_reads_thousands_and_spaces_the_same():
     assert 'parseVolumes("#b-volumes"' in app and 'parseVolumes("#ng-volumes"' in app
     assert 'parseVolumes("#en-volumes"' in app
     assert 'split(/[,\\t]/)' not in app, "the Benchmark box's own reader is gone"
+
+
+# -- P1.16 the dashboard only answers its own page on this machine --------------
+
+def test_a_foreign_web_page_cannot_change_or_read_the_store(cfg, store):
+    """Reproductions from the audit: a cross-site multipart upload landed in
+    the inbox and was ingested; a cross-site POST /api/mpfs/upload replaced
+    the Medicare anchor; a body-less POST /api/urls/known queued all 109
+    catalog sources; a DNS-rebinding Host read /api/stats. All four are
+    refused now; the dashboard's own same-origin requests still work."""
+    from fastapi.testclient import TestClient
+
+    from mrfx.api import create_app
+    c = TestClient(create_app(cfg, store))
+    evil = {"Origin": "https://evil.example"}
+    up = c.post("/api/upload", headers=evil,
+                files={"file": ("x_in-network.json", b'{"in_network": []}', "application/json")})
+    assert up.status_code == 403 and not list(cfg.inbox_dir.iterdir())
+    assert c.post("/api/mpfs/upload", headers=evil,
+                  files={"file": ("m.csv", b"code,locality,non_facility_rate,state\n97110,00,40,MO\n",
+                                  "text/csv")}).status_code == 403
+    assert c.post("/api/urls/known", headers=evil).status_code == 403
+    assert c.post("/api/urls/known", headers={"Sec-Fetch-Site": "cross-site"}).status_code == 403
+    assert c.get("/api/stats", headers={"Host": "attacker.example.com"}).status_code == 403
+    # same origin (the dashboard's own fetch) and no origin (CLI, scripts) pass
+    assert c.get("/api/stats").status_code == 200
+    ok = c.post("/api/urls", json={"urls": []}, headers={"Origin": "http://testserver"})
+    assert ok.status_code != 403
+    assert c.get("/api/stats", headers={"Host": "localhost:8377"}).status_code == 200
+    assert c.get("/api/stats", headers={"Host": "127.0.0.1:8377"}).status_code == 200
+
+
+# -- P1.18 the supervisor never restarts what a restart cannot fix ---------------
+
+def test_supervisor_stops_on_port_in_use_and_restarts_only_real_crashes(monkeypatch, tmp_path):
+    """Double-clicking Start while the dashboard was up looped "port in use …
+    restarting in 5 s, 10 s, 20 s …" for ever; a config typo did the same.
+    `serve` now exits EXIT_NO_RESTART for both and the supervisor stops. A
+    real crash (exit 1) is still restarted, then a clean exit (0) ends it."""
+    import mrfx.cli as cli
+    codes = iter([1, 3])
+    sleeps = []
+    monkeypatch.setattr(cli, "_run_child_teed", lambda child, log: next(codes))
+    monkeypatch.setattr(cli, "_serve_log_path", lambda p: None)
+    monkeypatch.setattr("time.sleep", lambda s: sleeps.append(s))
+    assert cli._supervise_serve("cfg.yaml") == cli.EXIT_NO_RESTART
+    assert sleeps == [5], "one restart for the crash, none for the port"
+    codes = iter([1, 0])
+    assert cli._supervise_serve("cfg.yaml") == 0
+    bad = tmp_path / "bad.yaml"
+    bad.write_text("port: eighty\n")
+    assert cli.main(["--config", str(bad), "serve"]) == cli.EXIT_NO_RESTART
+    assert cli.main(["--config", str(bad), "status"]) == 1
+
+
+# -- P1.19 the updater: pip first, no silent downgrade, no half-applied tree -----
+
+def test_updater_refuses_a_downgrade_and_rolls_back_a_failed_write(tmp_path, monkeypatch):
+    """(1) A 0.1.0 zip over 0.2.0 used to apply silently; it is refused unless
+    allow_downgrade. (2) A file that cannot be written (antivirus lock) used
+    to escape as a traceback with config/ and docs/ already replaced and mrfx/
+    not: every replaced file is now restored and created files removed. (3)
+    pip runs on the NEW requirements before any file is written; a failed
+    pip changes nothing. (4) Data/ in another letter case is still data/."""
+    import subprocess as _sp
+
+    from mrfx.updater import UpdateError, apply_update
+    from tests.mrfx.test_updater import NEW, _build_zip, _install
+    root = tmp_path / "install"
+    before = _install(root)
+    old = _build_zip(tmp_path / "old.zip", {**NEW, "mrfx/__init__.py": '__version__ = "0.1.0"\n'})
+    with pytest.raises(UpdateError, match="OLDER version"):
+        apply_update(old, root, run_pip=False, log=lambda *a: None)
+    assert (root / "mrfx/old.py").read_text() == before["mrfx/old.py"]
+
+    # (2) the write of mrfx/old.py fails after config/known_sources.yaml went in
+    z = _build_zip(tmp_path / "new.zip", {**NEW, "Data/inbox/evil.json": "x"})
+    real = type(root).replace
+
+    def flaky(self, target):
+        if str(target).endswith("mrfx/old.py"):
+            raise PermissionError("locked by antivirus")
+        return real(self, target)
+    monkeypatch.setattr(type(root), "replace", flaky)
+    with pytest.raises(UpdateError, match="put back"):
+        apply_update(z, root, run_pip=False, log=lambda *a: None)
+    monkeypatch.undo()
+    for rel, text in before.items():
+        assert (root / rel).read_text() == text, rel
+    assert not (root / "mrfx/brand_new.py").exists()
+    assert not (root / "Data").exists(), "Data/ is data/ on NTFS: never written"
+
+    # (3) pip on the new requirements first; when it fails nothing is written
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return _sp.CompletedProcess(cmd, 1)
+    monkeypatch.setattr("mrfx.updater.subprocess.run", fake_run)
+    with pytest.raises(UpdateError, match="NOT changed"):
+        apply_update(z, root, run_pip=True, log=lambda *a: None)
+    assert calls and calls[0][2:5] == ["pip", "install", "-q"]
+    assert (root / "mrfx/old.py").read_text() == before["mrfx/old.py"]

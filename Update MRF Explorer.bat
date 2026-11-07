@@ -8,6 +8,9 @@ REM -m mrfx"), so it works even after the folder was renamed or moved.
 (
   title Update MRF Explorer
   cd /d "%~dp0"
+REM UTF-8 for everything the program prints (a redirected or legacy-code-page
+REM console crashed on the first non-ASCII character)
+set PYTHONUTF8=1
   if "%~1"=="" (
     echo.
     echo To update: close MRF Explorer, then DRAG the new mrfx_project.zip file

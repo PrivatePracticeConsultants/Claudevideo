@@ -210,7 +210,7 @@ def cmd_serve(cfg: MrfxConfig, args) -> int:
         print(f"port {cfg.port} is already in use — another mrfx dashboard (or other "
               "app) is running. Not touching its database. Stop it first, or change "
               "`port:` in config/mrfx.yaml.", file=sys.stderr)
-        return 1
+        return EXIT_NO_RESTART
 
     # keep_warm: serve is long-lived and fires several queries per dashboard
     # click, so pin the DuckDB settings once instead of re-SETting them on every
@@ -1391,9 +1391,15 @@ def cmd_update(cfg: MrfxConfig, args) -> int:
     root = Path(__file__).resolve().parent.parent
     print(f"updating MRF Explorer in {root}\n  from {args.zip}")
     try:
-        res = apply_update(Path(args.zip), root, run_pip=not args.no_pip)
+        res = apply_update(Path(args.zip), root, run_pip=not args.no_pip,
+                           allow_downgrade=getattr(args, "allow_downgrade", False))
     except UpdateError as e:
         print(f"update NOT applied — nothing was changed: {e}", file=sys.stderr)
+        return 1
+    except OSError as e:
+        print(f"update stopped by a file error ({e}). The previous program files are "
+              "saved in data/update_backups/ — run the update again after closing "
+              "other programs.", file=sys.stderr)
         return 1
     print("\nDone. Start MRF Explorer again as usual, then press Ctrl+Shift+R once in "
           "the dashboard tab so your browser loads the new screens.")
@@ -1745,25 +1751,111 @@ def cmd_reset(cfg: MrfxConfig, args) -> int:
     return 0
 
 
+# `mrfx serve` exits with this when relaunching cannot help: the port is
+# already taken (the app is ALREADY running) or the config file has a typo.
+# The supervisor used to restart on anything but 0 — double-clicking Start
+# while the dashboard was up looped "port in use … restarting in 5 s, 10 s,
+# 20 s, 60 s" until the window was closed (round 7 P1.18).
+EXIT_NO_RESTART = 3
+
+_SERVE_LOG_MAX_BYTES = 5 << 20
+
+
+def _serve_log_path(config_path: str):
+    """<store>/diagnostics/serve.log, or None when the config can't say."""
+    try:
+        cfg = load_mrfx_config(config_path)
+        d = Path(cfg.store_dir) / "diagnostics"
+        d.mkdir(parents=True, exist_ok=True)
+        return d / "serve.log"
+    except Exception:  # noqa: BLE001 — the child reports config problems itself
+        return None
+
+
+def _run_child_teed(child: list, log_path) -> int:
+    """Run the server, echoing its output to this window AND appending it to
+    serve.log, so the last error survives the window being closed (the docs
+    send the user to "the mrfx serve window"; a closed window lost it)."""
+    import subprocess
+    env = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
+    if log_path is None:
+        return subprocess.call(child, env=env)
+    try:
+        if log_path.exists() and log_path.stat().st_size > _SERVE_LOG_MAX_BYTES:
+            os.replace(log_path, log_path.with_name("serve.log.1"))
+    except OSError:
+        pass
+    proc = subprocess.Popen(child, env=env, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT)
+    out = getattr(sys.stderr, "buffer", None)
+    try:
+        return _pump(proc, log_path, out)
+    except KeyboardInterrupt:
+        # Ctrl-C reaches the server too (same console): let it shut down
+        # cleanly instead of leaving it running behind a closed supervisor
+        try:
+            proc.wait(timeout=60)
+        except Exception:  # noqa: BLE001
+            proc.terminate()
+        raise
+
+
+def _pump(proc, log_path, out) -> int:
+    try:
+        with open(log_path, "ab") as logf:
+            logf.write(f"\n===== {_dt_now()} supervisor started the server =====\n".encode())
+            for line in iter(proc.stdout.readline, b""):
+                try:
+                    logf.write(line)
+                    logf.flush()
+                except OSError:
+                    pass
+                try:
+                    if out is not None:
+                        out.write(line)
+                        out.flush()
+                    else:
+                        sys.stderr.write(line.decode("utf-8", "replace"))
+                except (OSError, ValueError):
+                    pass
+    except OSError:
+        pass
+    return proc.wait()
+
+
+def _dt_now() -> str:
+    import datetime as _dtm
+    return _dtm.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
 def _supervise_serve(config_path: str) -> int:
     """Run `mrfx serve` in a child process, restarting on any abnormal exit.
-    Stops cleanly on a normal exit (code 0, e.g. the port is taken) or on
-    Ctrl-C. Backs off between restarts so a crash-on-boot can't hot-loop."""
-    import subprocess
+    Stops on a normal exit (0, Ctrl-C) and on EXIT_NO_RESTART (the port is
+    taken — the app is already running — or the config is broken); backs off
+    between restarts so a crash-on-boot can't hot-loop."""
     import time as _time
 
     child = [sys.executable, "-m", "mrfx", "--config", config_path, "serve"]
+    log_path = _serve_log_path(config_path)
     print("MRF Explorer supervisor: auto-restart is ON. If the server ever "
           "stops unexpectedly it will relaunch in a few seconds and resume "
-          "where it left off. Press Ctrl-C (twice) to stop for good.\n",
-          file=sys.stderr)
+          "where it left off. Press Ctrl-C to stop for good."
+          + (f" Everything shown here is also saved to {log_path}." if log_path else "")
+          + "\n", file=sys.stderr)
     backoff = 5
     while True:
         started = _time.monotonic()
         try:
-            code = subprocess.call(child)
+            code = _run_child_teed(child, log_path)
         except KeyboardInterrupt:
             return 0  # user stopping the whole thing
+        if code == EXIT_NO_RESTART:
+            print("\nMRF Explorer did not start, and restarting would not help — "
+                  "see the message above (usually: it is ALREADY running, so just "
+                  "open the dashboard in your browser, or config/mrfx.yaml has a "
+                  "typo). "
+                  "Supervisor stopping.", file=sys.stderr)
+            return code
         # a server that ran healthily for a while then died is a fresh incident,
         # not a boot loop — reset the backoff so it comes right back
         if _time.monotonic() - started > 120:
@@ -1945,6 +2037,9 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("update", help="install a newer version from its .zip — keeps your data and settings")
     p.add_argument("zip", help="the new mrfx_project.zip you downloaded")
     p.add_argument("--no-pip", action="store_true", help="skip re-syncing the Python packages")
+    p.add_argument("--allow-downgrade", action="store_true",
+                   help="install an OLDER build on purpose (not recommended: an older "
+                        "program must not run against a store a newer one upgraded)")
     p = sub.add_parser("backup", help="copy the whole store into one zip with a checksum manifest")
     p.add_argument("dest", help="backup filename, e.g. E:\\backups\\mrfx_2026-08-12.zip")
     p = sub.add_parser("verify", help="check a backup zip against its manifest, or the live store's integrity")
@@ -2004,16 +2099,19 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "serve" and getattr(args, "supervise", False):
         return _supervise_serve(args.config)
 
+    # a broken config is not something a restart fixes: serve says so with
+    # EXIT_NO_RESTART so the supervisor stops instead of looping
+    fatal = EXIT_NO_RESTART if args.cmd == "serve" else 1
     try:
         cfg = load_mrfx_config(args.config)
         cfg.ensure_dirs()
     except ConfigFileError as e:
         print(f"config problem: {e}", file=sys.stderr)
-        return 1
+        return fatal
     except OSError as e:
         print(f"could not create the data directories from {args.config}: {e}\n"
               "Check the *_dir settings point at usable folder paths.", file=sys.stderr)
-        return 1
+        return fatal
     handler = {
         "serve": cmd_serve,
         "add": cmd_add,

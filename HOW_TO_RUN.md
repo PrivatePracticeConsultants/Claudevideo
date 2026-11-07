@@ -18,8 +18,13 @@ Everything stays on your computer. Nothing is uploaded anywhere.
 
 ### Step 1. Install Python
 
-1. Go to <https://www.python.org/downloads/> and click the big yellow
-   **Download Python** button. (Any version 3.11, 3.12, 3.13 or 3.14 works.)
+1. Go to <https://www.python.org/downloads/windows/> (Mac:
+   <https://www.python.org/downloads/macos/>) and download the newest
+   **Python 3.13** release — "Windows installer (64-bit)". **Do not use the
+   big yellow "Download Python" button:** it now gives Python 3.15, and
+   several parts this program needs are not published for 3.15 yet, so the
+   install in Step 4 would fail. (3.11, 3.12, 3.13 and 3.14 all work; 3.13 is
+   the one to pick.)
 2. Open the file you downloaded.
 3. **Important (Windows):** on the first screen, tick the box
    **"Add python.exe to PATH"** at the bottom. Then click **Install Now**.
@@ -29,8 +34,12 @@ Everything stays on your computer. Nothing is uploaded anywhere.
 
 1. Find the zip file you were sent (`mrfx_project.zip`) in your Downloads.
 2. Right-click it → **Extract All…** → **Extract**.
-3. Move the folder it makes somewhere easy to find, for example your
-   **Documents** folder. Don't rename anything inside it.
+3. Move the folder it makes to a short path on a local drive that is NOT
+   synced to the cloud — for example **`C:\mrfx\`**. Avoid **Documents**,
+   **Desktop** and anything under **OneDrive**: on Windows 11 those are
+   copied to the cloud by default, and the program's database and multi-GB
+   downloads would be uploaded and locked while they sync. Don't rename
+   anything inside it.
 4. **Important:** inside that folder is ONE more folder called
    **`Claudevideo`**. That inner `Claudevideo` folder is the program — it
    holds `requirements.txt`, `HOW_TO_RUN.md` and the
@@ -64,7 +73,7 @@ A window with a blinking cursor opens. You'll paste commands into it.
 **Windows:**
 
 ```
-py -3 -m venv .venv
+py -3.13 -m venv .venv
 ```
 ```
 .\.venv\Scripts\Activate.ps1
@@ -94,6 +103,11 @@ pip install -e .
 The third command takes a few minutes and prints a lot of text — that's
 normal. It's done when the blinking cursor comes back.
 
+- If the first line says **"No suitable Python runtime found"**, Python
+  3.13 isn't installed — go back to Step 1. (If you installed 3.14 instead,
+  type `py -3.14 -m venv .venv`.)
+- If the window title says **Command Prompt** (not PowerShell), the second
+  line is `.venv\Scripts\activate.bat` instead.
 - If Windows says **"running scripts is disabled on this system"** after the
   second line, paste this once, press Enter, answer **Y**, then redo the
   second line:
@@ -107,9 +121,10 @@ normal. It's done when the blinking cursor comes back.
   delete it whenever you like.)
 - A yellow **"A new release of pip is available"** line is just a notice,
   not an error — ignore it.
-- If you see **"Failed to build installable wheels"**, your Python is too new
-  or too old. Install 3.13 from python.org, delete the `.venv` folder inside
-  the project, and start Step 4 again.
+- If you see **"Failed to build installable wheels"**, the `.venv` was made
+  with a Python that is too new (3.15) or too old. Install 3.13 (Step 1),
+  delete the `.venv` folder inside the project, and start Step 4 again with
+  `py -3.13 -m venv .venv`.
 
 ### Step 5 (optional, 2 minutes). Check the install works
 
