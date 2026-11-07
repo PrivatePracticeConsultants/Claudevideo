@@ -1759,7 +1759,6 @@ def fetch_url_record(cfg: MrfxConfig, store: Store, rec: dict) -> bool:
             return False
         # over the size limit is NOT a failure — it's "too big, needs your OK"
         # (distinct amber state so it never buries a real error in the count)
-        log.warning("url %s download stopped: %s", url, e)
         if "free disk space" in str(e):
             # a FULL DISK is one condition, not a per-row failure: failing this
             # row and instantly claiming the next converted every remaining
@@ -1822,6 +1821,10 @@ def fetch_url_record(cfg: MrfxConfig, store: Store, rec: dict) -> bool:
                 f"{cfg.download_auto_resumes}); other files keep downloading meanwhile."))
             log.info("url %s: paused for %s — %s", url, when, why)
             return False
+        # the handled cases above (disk full, set aside, parked, paused) said
+        # their piece at INFO; only a real failure is a WARNING (round-7 audit:
+        # every routine park logged two warnings)
+        log.warning("url %s download stopped: %s", url, e)
         store.update_url(url_id, status="oversize" if e.oversize else "failed",
                          error=_failure_message(store, rec, e))
         # duplicates may have deferred to this row in an earlier life (it

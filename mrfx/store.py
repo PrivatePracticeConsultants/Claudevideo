@@ -2662,7 +2662,6 @@ class Store:
                 "retry_after = ? + to_seconds(CAST(? AS DOUBLE)), park_count = ? "
                 "WHERE id = ?",
                 [error, _utcnow(), float(minutes) * 60.0, int(park_count), url_id])
-        self.queue_changed()
 
     def wake_parked_urls(self, only_if_idle: bool = False) -> int:
         """Every PARKED download back in the queue now, oldest park first in
@@ -2676,10 +2675,10 @@ class Store:
             n = con.execute("SELECT count(*) FROM url_queue WHERE status = 'paused' "
                             "AND coalesce(park_count, 0) > 0").fetchone()[0]
             if n:
-                con.execute("UPDATE url_queue SET status = 'queued', retry_after = NULL "
-                            "WHERE status = 'paused' AND coalesce(park_count, 0) > 0")
-        if n:
-            self.queue_changed()
+                # error cleared like wake_paused_urls: a queued row must not
+                # keep reading "parked: ..." (round-7 audit)
+                con.execute("UPDATE url_queue SET status = 'queued', retry_after = NULL, "
+                            "error = NULL WHERE status = 'paused' AND coalesce(park_count, 0) > 0")
         return n
 
     def parked_count(self) -> int:
@@ -4590,9 +4589,10 @@ class Store:
 # would wake every other one in a loop. url_progress (byte counts during a
 # download) is deliberately absent: no worker waits on progress.
 # tests/mrfx/test_queue_signal.py fails if a url_queue writer is missing here.
-_QUEUE_WRITERS_ALWAYS = ("update_url", "pause_url", "forget_file", "reset")
+_QUEUE_WRITERS_ALWAYS = ("update_url", "pause_url", "park_url", "forget_file", "reset")
 _QUEUE_WRITERS_IF_DONE = ("_claim_next", "enqueue_url", "enqueue_urls", "requeue_failed",
                           "requeue_oversize_within", "requeue_urls", "wake_paused_urls",
+                          "wake_parked_urls",
                           "recover_stuck_urls", "set_url_status_by_id", "force_size_requeue",
                           "clear_queued", "cancel_all_downloading", "resume_canceled",
                           "revive_skipped_duplicates", "claim_content_ingest")
