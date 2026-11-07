@@ -1005,6 +1005,19 @@ class Store:
         # row-count cache can key on it and never serve a stale total across an
         # ingest — see api.rates(). Cheap monotonic int, not a data hash.
         self.data_generation = 0
+        # bumped only when the TIN spine itself is rewritten (a rollup, a
+        # reset) — NOT by a directory name refresh, which changes no rate:
+        # the per-spine materialised files (spine_materialised) key on it
+        self.spine_generation = 0
+        self._spine_mat: dict = {}
+        self._spine_mat_locks: dict = {}
+        self._spine_mat_guard = threading.Lock()
+        self._instance_tag = os.urandom(4).hex()
+        # user edits a cached answer shows (a verified website, the entity
+        # map): they invalidate Store.cached answers WITHOUT counting as a new
+        # data generation — the materialised per-generation files (placement,
+        # practice medians) are rates-only and must not rebuild on a click
+        self.user_edit_generation = 0
         self._placement_lock = threading.Lock()
         # results that change only when the analytics tables do (see cached())
         self._gen_cache: dict = {}
@@ -3467,7 +3480,7 @@ class Store:
                 con.execute(
                     "INSERT OR REPLACE INTO meta VALUES ('directory_names_through', ?)",
                     [new_max])
-                self._bump_generation()
+                self._bump_generation(spine=False)
                 took = time.monotonic() - t0
                 log.info("name refresh: %d TIN(s) updated in %.0fs (scoped to "
                          "newly identified NPIs, not the whole store)", n_new, took)
@@ -3815,7 +3828,7 @@ class Store:
         input of the answer; values are handed out as deep copies, so a
         caller that decorates its result cannot change the cached one."""
         import copy
-        gen = self.data_generation
+        gen = (self.data_generation, self.user_edit_generation)
         k = (name, key)
         with self._gen_cache_lock:
             if self._gen_cache.get("_gen") != gen:
@@ -3830,9 +3843,69 @@ class Store:
                 self._gen_cache[k] = value
         return copy.deepcopy(value)
 
-    def _bump_generation(self) -> None:
+    def _bump_generation(self, spine: bool = True) -> None:
         with self._generation_lock:
             self.data_generation += 1
+            if spine:
+                self.spine_generation += 1
+
+    def spine_materialised(self, name: str, select_sql: str, params=()) -> str:
+        """`read_parquet(...)` of `select_sql`'s rows, built lazily ONCE per
+        spine generation (round 7 P1.2: every benchmark-family call recomputed
+        the same per-practice medians from the whole spine — 2-8 s each on a
+        99M-rate store).
+
+        `select_sql` must read only the TIN spine (rates_by_tin): the file is
+        valid exactly as long as the spine is, and every spine write bumps
+        spine_generation after its commit (the same contract as
+        Store.cached). `name` carries its own schema version — a change to
+        the SQL renames the file, it never needs ROLLUP_SCHEMA_VERSION.
+        Written outside the database (no writer lock) to a temp name and
+        os.replace'd; the previous generation's file is removed (on Windows a
+        file still open is left for the next build)."""
+        gen = self.spine_generation
+        with self._spine_mat_guard:
+            lock = self._spine_mat_locks.setdefault(name, threading.Lock())
+        with lock:
+            held = self._spine_mat.get(name)
+            if held and held[0] == gen and held[1].exists():
+                return f"read_parquet('{sql_path(held[1])}')"
+            path = self.dir / f"{name}.{self._instance_tag}-{gen}.parquet"
+            tmp = path.with_name(path.name + ".tmp")
+            try:
+                with self.connect() as con:
+                    con.execute(f"COPY ({select_sql}) TO '{sql_path(tmp)}' "
+                                "(FORMAT PARQUET)", list(params))
+                os.replace(tmp, path)
+            except BaseException:
+                tmp.unlink(missing_ok=True)
+                raise
+            self._spine_mat[name] = (gen, path)
+            now = time.time()
+            for old in self.dir.glob(f"{name}.*.parquet*"):
+                if old == path:
+                    continue
+                try:
+                    # this instance's older generations always; another
+                    # instance's (a second Store on the same folder: tests, a
+                    # CLI command) only once it is clearly abandoned
+                    mine = old.name.startswith(f"{name}.{self._instance_tag}-")
+                    if mine or now - old.stat().st_mtime > 6 * 3600:
+                        old.unlink()
+                except OSError:          # still open on Windows: next time
+                    pass
+            return f"read_parquet('{sql_path(path)}')"
+
+    def note_user_edit(self) -> None:
+        """A user edit that a cached answer reads (Store.cached) just landed:
+        drop every cached answer. Round 7 P1.3: Leads, the leaderboard and
+        the payer roster are cached per generation and print
+        store.org_websites(); a website saved for A REHAB still showed
+        `website: null` until the next rollup. Call from EVERY writer whose
+        table a cached reader reads — today set_org_website and
+        set_entity_map (tests/mrfx/test_round7.py pins both)."""
+        with self._generation_lock:
+            self.user_edit_generation += 1
 
     def _invalidate_scan_caches(self) -> None:
         """Drop the cached whole-store scans (header counts, states,
@@ -4414,6 +4487,7 @@ class Store:
                 except duckdb.Error:
                     pass
                 raise
+        self.note_user_edit()
 
     def entity_map(self) -> dict[str, str]:
         with self.connect() as con:
@@ -4443,6 +4517,7 @@ class Store:
             else:
                 con.executemany("DELETE FROM org_websites WHERE tin_value = ?",
                                 [[t] for t in tins])
+        self.note_user_edit()
 
     # -- peer sets ---------------------------------------------------------------
 
@@ -4564,6 +4639,9 @@ class Store:
                 unlink_with_retry(p)
             for p in self.dir.glob("tin_zip_place.*"):
                 unlink_with_retry(p)
+            for p in self.dir.glob("practice_medians*.parquet*"):
+                unlink_with_retry(p)
+            self._spine_mat.clear()
             with self.connect() as con:
                 con.execute(
                     "DELETE FROM files; DELETE FROM npi_directory; DELETE FROM provider_refs; "

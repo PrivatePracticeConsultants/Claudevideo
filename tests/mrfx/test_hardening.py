@@ -1391,12 +1391,15 @@ def test_serve_supervisor_restarts_on_crash_stops_on_clean(monkeypatch):
     calls = {"n": 0}
     sleeps = []
 
-    def fake_call(argv):
+    def fake_call(argv, **kw):
         calls["n"] += 1
         # crash twice (non-zero), then exit cleanly
         return -1073740940 if calls["n"] <= 2 else 0
 
     monkeypatch.setattr(subprocess, "call", fake_call)
+    # no serve.log tee: with one, the child runs through Popen — and the
+    # config path below would be the repo's REAL config/mrfx.yaml
+    monkeypatch.setattr(cli, "_serve_log_path", lambda p: None)
     # the function does `import time as _time`, so patch the real time.sleep
     monkeypatch.setattr(_t, "sleep", lambda s: sleeps.append(s))
 
@@ -1411,9 +1414,10 @@ def test_serve_supervisor_stops_on_ctrl_c(monkeypatch):
 
     import mrfx.cli as cli
 
-    def boom(argv):
+    def boom(argv, **kw):
         raise KeyboardInterrupt
     monkeypatch.setattr(subprocess, "call", boom)
+    monkeypatch.setattr(cli, "_serve_log_path", lambda p: None)
     assert cli._supervise_serve("config/mrfx.yaml") == 0  # Ctrl-C → clean stop
 
 

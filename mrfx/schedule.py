@@ -39,6 +39,7 @@ from .benchmark import (
     _rates_relation,
     normalize_market,
     month_label,
+    practice_base_sql,
     public_market,
     resolve_subject_tins,
 )
@@ -132,24 +133,20 @@ def compute_fee_schedule(store: Store, subject: str, market: dict, *,
             # payer + billing_code instead: both are partition-key columns, so
             # the surviving vintages are unchanged, and the window no longer
             # sorts the whole store to compare a handful of codes.
-            peer_rel = _rates_relation(market, (
-                f"payer IN ({', '.join('?' for _ in subj_payers)}) "
-                f"AND billing_code IN ({', '.join('?' for _ in subj_codes)})"))
-            # _rates_relation always consumes a non-empty prefilter, so its
-            # placeholders always need binding
-            peer_rel_params = [*subj_payers, *subj_codes]
+            # (on the house basis this reads the materialised per-payer
+            # medians — round 7 P1.2 — and the prefilter is not needed)
+            in_p = ', '.join('?' for _ in subj_payers)
+            in_c = ', '.join('?' for _ in subj_codes)
+            peer_q, peer_params = practice_base_sql(
+                store, market, per_payer=True, dollar_only=True,
+                prefilter=f"payer IN ({in_p}) AND billing_code IN ({in_c})",
+                prefilter_params=[*subj_payers, *subj_codes],
+                extra=(f" AND t.payer IN ({in_p}) AND t.billing_code IN ({in_c})"
+                       " AND t.tin_value NOT IN (SELECT tin FROM subject_tins)"),
+                extra_params=[*subj_payers, *subj_codes])
             msql = f"""
             WITH subject_tins AS (SELECT unnest(?::VARCHAR[]) AS tin),
-            per_tin AS (
-                SELECT t.payer, t.billing_code, t.tin_value,
-                       median(t.negotiated_rate) AS rate
-                FROM {peer_rel} t LEFT JOIN tin_directory td USING (tin_value)
-                WHERE {where} AND t.is_dollar_rate
-                  AND t.payer IN ({', '.join('?' for _ in subj_payers)})
-                  AND t.billing_code IN ({', '.join('?' for _ in subj_codes)})
-                  AND t.tin_value NOT IN (SELECT tin FROM subject_tins)
-                GROUP BY t.payer, t.billing_code, t.tin_value
-            )
+            per_tin AS ({peer_q})
             SELECT payer, billing_code,
                    round(median(rate), 2)     AS market_median,
                    count(DISTINCT tin_value)  AS n_peers
@@ -158,8 +155,7 @@ def compute_fee_schedule(store: Store, subject: str, market: dict, *,
             # bind order follows the SQL TEXT: the subject_tins CTE, then the
             # relation's own filter inside FROM, then the shared WHERE, then the
             # explicit payer/code lists
-            mcur = con.execute(msql, [subject_tins, *peer_rel_params, *params,
-                                      *subj_payers, *subj_codes])
+            mcur = con.execute(msql, [subject_tins, *peer_params])
             for row in mcur.fetchall():
                 d = dict(zip([c[0] for c in mcur.description], row))
                 market_by[(d["payer"], d["billing_code"])] = d

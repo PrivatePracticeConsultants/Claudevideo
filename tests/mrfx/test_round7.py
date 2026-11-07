@@ -10,6 +10,7 @@ import pytest
 from mrfx.ingest import ingest_file
 from mrfx.store import Store
 from tests.mrfx.test_fastscan_e2e import _make_cfg
+from tests.mrfx.test_known_answer_leads import leads_app  # noqa: F401 — fixture
 
 
 # -- P0.1 non-finite string rates ------------------------------------------------
@@ -467,3 +468,168 @@ def test_updater_refuses_a_downgrade_and_rolls_back_a_failed_write(tmp_path, mon
         apply_update(z, root, run_pip=True, log=lambda *a: None)
     assert calls and calls[0][2:5] == ["pip", "install", "-q"]
     assert (root / "mrfx/old.py").read_text() == before["mrfx/old.py"]
+
+
+# -- P1.1 exports are built on the store's drive and refused before it fills ----
+
+def test_exports_live_on_the_store_drive_and_a_full_drive_is_a_sentence(cfg, store, monkeypatch):
+    """The whole-store CSV was COPY'd to the SYSTEM temp folder, then copied a
+    second time just to put the Excel BOM in front: ~40 GB of C: per click on
+    the 99M store, and an unhandled 500 ("No space left on device") when it
+    filled. Now: one file, in the store's temp folder, streamed with the BOM;
+    refused up front with a plain sentence when the drive cannot hold it."""
+    import shutil
+    import tempfile
+    import zipfile
+    from collections import namedtuple
+    from pathlib import Path
+
+    from fastapi.testclient import TestClient
+
+    from mrfx.api import create_app
+    from tests.mrfx.conftest import make_fixture
+    from tests.mrfx.test_v4 import innetwork, item
+    ingest_file(cfg, store, make_fixture(cfg.inbox_dir, "e.json", innetwork(items=[
+        item("97110", [(["1000000000"], "43-0000000", "ein", [(40.0, None)]),
+                       (["1000000001"], "43-0000001", "ein", [(45.0, None)])])])))
+    c = TestClient(create_app(cfg, store))
+    exports = Path(store._tmp_dir) / "exports"
+    made = []
+    real = tempfile.mkstemp
+
+    def spy(*a, **k):
+        made.append(k.get("dir"))
+        return real(*a, **k)
+    monkeypatch.setattr(tempfile, "mkstemp", spy)
+    r = c.get("/api/export.csv?full=true")
+    assert r.status_code == 200 and r.content.startswith(b"\xef\xbb\xbf")
+    assert r.content.count(b"\xef\xbb\xbf") == 1
+    lines = r.content.decode("utf-8-sig").splitlines()
+    assert len(lines) == 3 and "43" not in lines[0]        # header + the two practices
+    z = c.get("/api/export.zip?full=true")
+    assert z.status_code == 200
+    with zipfile.ZipFile(__import__("io").BytesIO(z.content)) as zf:
+        names = zf.namelist()
+        member = zf.read([n for n in names if n.endswith(".csv")][0])
+    assert member.startswith(b"\xef\xbb\xbf") and member.decode("utf-8-sig").splitlines() == lines
+    assert any(n.endswith("_methodology.txt") for n in names)
+    assert made and {Path(d) for d in made} == {exports}, "never the system temp folder"
+    assert not list(exports.iterdir()), "every temp file is removed after the download"
+
+    Usage = namedtuple("Usage", "total used free")
+    monkeypatch.setattr(shutil, "disk_usage", lambda p: Usage(10**12, 10**12 - 10**6, 10**6))
+    for url in ("/api/export.csv?full=true", "/api/export.zip?full=true"):
+        r = c.get(url)
+        assert r.status_code == 507, (url, r.status_code)
+        assert "free" in r.json()["detail"] and "Narrow the export" in r.json()["detail"]
+    assert not list(exports.iterdir()), "a refused export leaves nothing behind"
+    # a killed server's half-written export — DuckDB's own "tmp_" partial
+    # included — is swept at the next start once it is clearly abandoned
+    import os
+    import time
+    stale = [exports / "mrfx-export-old.csv", exports / "tmp_mrfx-export-old.csv"]
+    for f in stale:
+        f.write_bytes(b"x")
+        os.utime(f, (time.time() - 7 * 3600, time.time() - 7 * 3600))
+    fresh = exports / "mrfx-export-live.csv"
+    fresh.write_bytes(b"x")
+    create_app(cfg, store)
+    assert not any(f.exists() for f in stale) and fresh.exists()
+
+
+# -- P1.2 the materialised medians give the live query's numbers, to the bit ------
+
+def test_every_benchmark_reader_is_identical_from_the_materialised_medians(leads_app, store,  # noqa: F811
+                                                                           monkeypatch):
+    """The known-answer Leads store (A..G, Rho + Sigma, MO/KS, a non-therapy
+    practice, A on two payers for 97110 so its all-payer median 32 is NOT a
+    median of its payer medians). Every reader is run on the house basis
+    twice — from the materialised per-practice medians, and with them
+    switched off — under several markets; the answers must be equal."""
+    import mrfx.benchmark as bm
+    from mrfx.benchmark import (compute_benchmark, compute_payer_comparison,
+                                compute_payer_negotiation, contract_gaps_book)
+    from mrfx.leads import compute_leaderboard, compute_leads, compute_payer_roster
+    from mrfx.quality import size_premium
+    from mrfx.schedule import compute_fee_schedule
+
+    markets = [{"month": "latest", "state": "MO", "therapy_only": True},
+               {"month": "latest", "therapy_only": False, "allow_national": True},
+               {"month": "latest", "payers": ["Rho Health"], "allow_national": True},
+               {"month": "latest", "codes": ["97110", "97140"], "state": "MO"},
+               {"month": "latest", "city": "Town", "therapy_only": True}]
+
+    def run_all():
+        out = []
+        for m in markets:
+            out.append(compute_benchmark(store, "A REHAB", m))
+            out.append(compute_payer_negotiation(store, "A REHAB", m,
+                                                 volumes={"97110": 100, "97140": 50}))
+            out.append(compute_payer_comparison(store, "A REHAB", "Rho Health", m))
+            out.append({k: (v if isinstance(v, dict) else str(v)) for k, v in
+                        contract_gaps_book(store, ["B REHAB", "F REHAB"], m,
+                                           min_peers=1).items()})
+            out.append(compute_leads.uncached(store, m, threshold_percentile=60, min_codes=1))
+            out.append(compute_leaderboard.uncached(store, m, min_codes=1))
+            out.append(compute_payer_roster.uncached(store, "Rho Health", m, min_codes=1))
+            out.append(size_premium.uncached(store, m, min_practices=1))
+            out.append(compute_fee_schedule(store, "A REHAB", m))
+        return json.loads(json.dumps(out, sort_keys=True, default=str))
+
+    built = []
+    real = store.spine_materialised
+    monkeypatch.setattr(store, "spine_materialised",
+                        lambda name, *a: built.append(name) or real(name, *a))
+    from_tables = run_all()
+    assert set(built) == {bm.PRACTICE_MEDIANS, bm.PAYER_PRACTICE_MEDIANS}
+    monkeypatch.setattr(bm, "_house_eligible", lambda m: False)
+    live = run_all()
+    assert from_tables == live
+    # and the hand answer survives: A's 97110 all-payer median is 32
+    monkeypatch.undo()
+    b = compute_benchmark(store, "A REHAB", {"month": "latest", "state": "MO",
+                                             "therapy_only": True})
+    assert {r["billing_code"]: r["subject_rate"] for r in b["rows"]}["97110"] == 32.0
+
+
+def test_the_materialised_medians_follow_the_spine_not_a_name_refresh(leads_app, store):  # noqa: F811
+    """Built once per spine generation: a second read reuses the file; a
+    rollup makes a new one (the old one is removed); a user edit or a
+    directory name refresh does not rebuild (no rate changed)."""
+    from mrfx.benchmark import PRACTICE_MEDIANS, compute_benchmark
+    m = {"month": "latest", "state": "MO", "therapy_only": True}
+    compute_benchmark(store, "A REHAB", m)
+    first = sorted(store.dir.glob(f"{PRACTICE_MEDIANS}.*.parquet"))
+    assert len(first) == 1
+    compute_benchmark(store, "B REHAB", m)
+    store.note_user_edit()
+    store._bump_generation(spine=False)
+    compute_benchmark(store, "C REHAB", m)
+    assert sorted(store.dir.glob(f"{PRACTICE_MEDIANS}.*.parquet")) == first
+    store.rebuild_rollups()
+    compute_benchmark(store, "A REHAB", m)
+    now = sorted(store.dir.glob(f"{PRACTICE_MEDIANS}.*.parquet"))
+    assert len(now) == 1 and now != first
+
+
+# -- P1.3 a saved website reaches the cached Leads list at once -----------------
+
+def test_a_saved_website_shows_in_the_cached_leads_at_once(leads_app, store):  # noqa: F811
+    """Leads, the leaderboard and the roster are cached per generation and
+    print store.org_websites(); saving https://a-rehab.example for A REHAB
+    still showed website: null until the next rollup."""
+    from tests.mrfx.test_known_answer_leads import TINS, _leads
+    assert _leads(leads_app)["leads"][0]["website"] is None
+    r = leads_app.post("/api/org-website", json={"tins": [TINS["A"]],
+                                                 "url": "https://a-rehab.example"})
+    assert r.status_code == 200, r.text
+    assert _leads(leads_app)["leads"][0]["website"] == "https://a-rehab.example"
+    lb = leads_app.post("/api/leaderboard", json={"market": {"month": "latest", "state": "MO",
+                                                             "therapy_only": True}})
+    assert lb.status_code == 200, lb.text
+    assert {p["display_name"]: p.get("website") for p in lb.json()["practices"]}[
+        "A REHAB"] == "https://a-rehab.example"
+    gen = store.user_edit_generation
+    store.set_entity_map({TINS["B"]: "B GROUP"})
+    assert store.user_edit_generation == gen + 1, "the entity map is a user edit too"
+

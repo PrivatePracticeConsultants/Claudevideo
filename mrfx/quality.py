@@ -220,15 +220,16 @@ def size_premium(store: Store, market: dict | None = None, *,
     then compared on those scores.
     """
     from .benchmark import (BenchmarkError, _market_where, _rates_relation,
-                            normalize_market, resolve_plan_scope,
+                            normalize_market, practice_base_sql, resolve_plan_scope,
                             resolve_subject_tins)
 
     # a band below ONE practice cannot exist; a hostile 0/negative walked
     # straight into indexing an empty percentile list (found by audit)
     min_practices = max(1, int(min_practices))
     m = resolve_plan_scope(store, normalize_market(market or {}))
-    where, params = _market_where(m, bool(m.get("include_assistant")),
-                                  bool(m.get("include_non_dollar")))
+    base_q, params = practice_base_sql(store, m, per_payer=True)
+    where, wparams = _market_where(m, bool(m.get("include_assistant")),
+                                   bool(m.get("include_non_dollar")))
     rel = _rates_relation(m)
     subject_tins = resolve_subject_tins(store, subject) if subject else []
     if subject and not subject_tins:
@@ -237,13 +238,7 @@ def size_premium(store: Store, market: dict | None = None, *,
     # percent_rank within (payer, code): strictly-below share, so the metric is
     # a POSITION and comparable across codes with very different dollar levels
     sql = f"""
-        WITH per_tin AS (
-            SELECT t.payer, t.billing_code, t.tin_value,
-                   median(t.negotiated_rate) AS rate
-            FROM {rel} t LEFT JOIN tin_directory td USING (tin_value)
-            WHERE {where}
-            GROUP BY t.payer, t.billing_code, t.tin_value
-        ),
+        WITH per_tin AS ({base_q}),
         cells AS (
             SELECT *, count(*) OVER (PARTITION BY payer, billing_code) AS n_in_cell,
                    percent_rank() OVER (PARTITION BY payer, billing_code
@@ -311,7 +306,7 @@ def size_premium(store: Store, market: dict | None = None, *,
                 present = con.execute(
                     f"SELECT 1 FROM {rel} t LEFT JOIN tin_directory td USING (tin_value) "
                     f"WHERE {where} AND t.tin_value IN (SELECT unnest(?::VARCHAR[])) "
-                    "LIMIT 1", [*params, subject_tins]).fetchone()
+                    "LIMIT 1", [*wparams, subject_tins]).fetchone()
             if not present:
                 raise BenchmarkError(
                     f"no rates under this market scope for {subject!r} — check "

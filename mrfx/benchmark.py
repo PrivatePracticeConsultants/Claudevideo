@@ -359,6 +359,18 @@ def _market_where(market: dict, include_assistant: bool, include_non_dollar: boo
     if market.get("pos"):
         clauses.append("('|' || t.service_code_set || '|') LIKE ('%|' || ? || '|%')")
         params.append(str(market["pos"]))
+    attr, attr_params = _practice_attr_where(market)
+    return " AND ".join(clauses + attr), params + attr_params
+
+
+def _practice_attr_where(market: dict) -> tuple[list, list]:
+    """The market clauses that select WHOLE practices or whole codes (never
+    some of a practice's lines for a code): practice attributes from the
+    directory (alias td) and the code list. A per-(code, practice) median is
+    unchanged by them, which is what lets the materialised medians
+    (practice_base_sql) apply them afterwards. _market_where ends with these
+    — one definition for both paths."""
+    clauses, params = [], []
     if market.get("therapy_only"):
         # only PT/OT/SLP providers & therapy practices (by NPPES taxonomy) — the
         # market and the subject both restrict to real therapists, so the
@@ -376,7 +388,91 @@ def _market_where(market: dict, include_assistant: bool, include_non_dollar: boo
         codes = market["codes"]
         clauses.append(f"t.billing_code IN ({', '.join('?' for _ in codes)})")
         params += codes
-    return " AND ".join(clauses), params
+    return clauses, params
+
+
+# Round 7 P1.2 — the house-basis per-practice medians, materialised once per
+# spine generation (Store.spine_materialised). Every benchmark-family reader
+# (benchmark, negotiation, contract gaps, leads, leaderboard, roster, size
+# premium, the fee schedule's peers, and through them the digest, packets and
+# dossier) computed "median per (code, practice[, payer]) over the latest
+# spine" from scratch: 2-8 s each on a 99M-rate store. Two tables, because a
+# median of per-payer medians is NOT the all-payer median: (a) per
+# (billing_code, tin_value) over ALL that practice's lines; (b) per (payer,
+# billing_code, tin_value). The version is in the name: change the SQL, bump it.
+PRACTICE_MEDIANS = "practice_medians_v1"
+PAYER_PRACTICE_MEDIANS = "practice_medians_payer_v1"
+
+
+def _house_eligible(market: dict) -> bool:
+    """True when `market` is on the HOUSE basis the tables are built on:
+    latest, no plan scope, dollar rows, base modifiers, professional, no
+    assistant rows, no discipline/POS line filter. Anything else reads the
+    live query (exact, just not precomputed)."""
+    return (is_latest(market) and market.get("_plan_files") is None
+            and not market.get("plan")
+            and not market.get("include_assistant")
+            and not market.get("include_non_dollar")
+            and bool(market.get("base_only", True))
+            and market.get("billing_class", "professional") == "professional"
+            and not market.get("discipline") and not market.get("pos"))
+
+
+def _house_table_sql(per_payer: bool) -> tuple[str, list]:
+    house = {"month": LATEST_MONTH}
+    where, params = _market_where(house, False, False)
+    keys = "t.payer, t.billing_code, t.tin_value" if per_payer else "t.billing_code, t.tin_value"
+    # ordered by code so a code-filtered read prunes row groups
+    return (f"SELECT {keys}, median(t.negotiated_rate) AS rate "
+            f"FROM {_rates_relation(house)} t WHERE {where} "
+            f"GROUP BY {keys} ORDER BY t.billing_code, t.tin_value"
+            + (", t.payer" if per_payer else "")), params
+
+
+def practice_base_sql(store: Store, market: dict, *, per_payer: bool = False,
+                      extra: str = "", extra_params=(), prefilter: str = "",
+                      prefilter_params=(), dollar_only: bool = False) -> tuple[str, list]:
+    """(sql, params) for ONE median rate per (billing_code, tin_value) — or
+    per (payer, billing_code, tin_value) with `per_payer` — under `market`.
+    Columns: [payer,] billing_code, tin_value, rate.
+
+    On the house basis it reads the materialised medians and applies the
+    market's practice/code filters (and a payer list on the per-payer
+    table) afterwards; otherwise it is the live GROUP BY over the spine.
+    Both paths return the same rows to the last bit
+    (tests/mrfx/test_round7.py runs every reader both ways).
+
+    `extra` (" AND …") may name only t.payer, t.billing_code, t.tin_value
+    and td.*; its params bind after the market's. `prefilter` narrows the
+    live relation (see _rates_relation). `dollar_only` adds is_dollar_rate
+    on the live path (the table holds dollar rows only)."""
+    ia = bool(market.get("include_assistant"))
+    ind = bool(market.get("include_non_dollar"))
+    where, params = _market_where(market, ia, ind)       # validates the market too
+    keys = (["t.payer"] if per_payer else []) + ["t.billing_code", "t.tin_value"]
+    payers = market.get("payers") or []
+    if _house_eligible(market) and (per_payer or len(payers) <= 1):
+        use_payer = per_payer or len(payers) == 1
+        name = PAYER_PRACTICE_MEDIANS if use_payer else PRACTICE_MEDIANS
+        rel = store.spine_materialised(name, *_house_table_sql(use_payer))
+        clauses, cparams = [], []
+        if payers:
+            clauses.append(f"t.payer IN ({', '.join('?' for _ in payers)})")
+            cparams += payers
+        attr, attr_params = _practice_attr_where(market)
+        clauses += attr
+        cparams += attr_params
+        join = (" LEFT JOIN tin_directory td USING (tin_value)"
+                if any("td." in c for c in clauses) or "td." in extra else "")
+        sql = (f"SELECT {', '.join(keys)}, t.rate FROM {rel} t{join} "
+               f"WHERE {' AND '.join(clauses) or 'TRUE'}{extra}")
+        return sql, [*cparams, *extra_params]
+    rel = _rates_relation(market, prefilter)
+    sql = (f"SELECT {', '.join(keys)}, median(t.negotiated_rate) AS rate "
+           f"FROM {rel} t LEFT JOIN tin_directory td USING (tin_value) "
+           f"WHERE {where}{' AND t.is_dollar_rate' if dollar_only else ''}{extra} "
+           f"GROUP BY {', '.join(keys)}")
+    return sql, [*(prefilter_params if prefilter else ()), *params, *extra_params]
 
 
 def resolve_subject_tins(store: Store, subject: str) -> list[str]:
@@ -532,8 +628,7 @@ def compute_benchmark(store: Store, subject: str, market: dict) -> dict:
     peer_desc, market = resolve_peer_set(store, market)
     include_assistant = bool(market.get("include_assistant", False))
     include_non_dollar = bool(market.get("include_non_dollar", False))
-    where, params = _market_where(market, include_assistant, include_non_dollar)
-    rel = _rates_relation(market)
+    base_q, params = practice_base_sql(store, market)
 
     curated = market.get("curated_tins")
     # peers filter runs directly on the already-grouped `base` CTE (aliased b) —
@@ -551,12 +646,7 @@ def compute_benchmark(store: Store, subject: str, market: dict) -> dict:
     )
     sql = f"""
     WITH subject_tins AS (SELECT unnest(?::VARCHAR[]) AS tin),
-    base AS (
-        SELECT t.billing_code, t.tin_value, median(t.negotiated_rate) AS rate
-        FROM {rel} t LEFT JOIN tin_directory td USING (tin_value)
-        WHERE {where}
-        GROUP BY t.billing_code, t.tin_value
-    ),
+    base AS ({base_q}),
     subject AS (
         SELECT billing_code, round(median(rate), 2) AS subject_rate
         FROM base WHERE tin_value IN (SELECT tin FROM subject_tins)
@@ -1084,6 +1174,7 @@ def contract_gaps_book(store: Store, subjects: list[str], market: dict, *,
     where, params = _market_where(market, bool(market.get("include_assistant")),
                                   bool(market.get("include_non_dollar")))
     rel = _rates_relation(market)
+    base, base_params = practice_base_sql(store, market)
     curated = market.get("curated_tins")
 
     out: dict = {}
@@ -1121,11 +1212,6 @@ def contract_gaps_book(store: Store, subjects: list[str], market: dict, *,
                round(median(b.rate), 2)             AS peer_median,
                round(quantile_cont(b.rate, .25), 2) AS peer_p25,
                round(quantile_cont(b.rate, .75), 2) AS peer_p75"""
-    base = f"""
-        SELECT t.billing_code, t.tin_value, median(t.negotiated_rate) AS rate
-        FROM {rel} t LEFT JOIN tin_directory td USING (tin_value)
-        WHERE {where}
-        GROUP BY t.billing_code, t.tin_value"""
     cols = ["billing_code", "n_peers", "peer_median", "peer_p25", "peer_p75"]
     with store.connect() as con:
         if curated:
@@ -1148,7 +1234,7 @@ def contract_gaps_book(store: Store, subjects: list[str], market: dict, *,
                                                  WHERE billing_code IS NOT NULL)
                     ORDER BY p.n_peers DESC, p.billing_code
                     LIMIT ?
-                """, [tins, *params, *curated, min_peers, limit])
+                """, [tins, *base_params, *curated, min_peers, limit])
                 out[subject] = result(subject, tins,
                                       [dict(zip(cols, r)) for r in cur.fetchall()])
             return out
@@ -1161,7 +1247,7 @@ def contract_gaps_book(store: Store, subjects: list[str], market: dict, *,
             FROM base b GROUP BY b.billing_code
             HAVING count(DISTINCT b.tin_value) >= ?
             ORDER BY n_peers DESC, b.billing_code
-        """, [*params, min_peers]).fetchall()]
+        """, [*base_params, min_peers]).fetchall()]
         priced: dict[str, set] = {}
         for tin, code in con.execute(f"""
             SELECT DISTINCT t.tin_value, t.billing_code

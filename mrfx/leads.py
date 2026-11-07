@@ -20,7 +20,7 @@ import json
 
 from . import __version__
 from .benchmark import (BenchmarkError, _market_where, _rates_relation,
-                        normalize_market, resolve_subject_tins)
+                        normalize_market, practice_base_sql, resolve_subject_tins)
 from .store import Store, defuse_csv, generation_cached, mask_tin
 
 PERCENTILES = (10, 25, 40, 50, 75, 90)
@@ -82,12 +82,7 @@ def compute_leads(store: Store, market: dict, *, threshold_percentile: int = 25,
     # connection-local temp table: the ranking and the worst-payer step both
     # read it. The worst-payer step used to rebuild the whole market a second
     # time just to get each code's median.
-    base_sql = f"""
-        SELECT t.billing_code, t.tin_value, median(t.negotiated_rate) AS rate
-        FROM {rel} t LEFT JOIN tin_directory td USING (tin_value)
-        WHERE {where}
-        GROUP BY t.billing_code, t.tin_value
-    """
+    base_sql, base_params = practice_base_sql(store, market)
     sql = f"""
     WITH base AS (SELECT * FROM _lead_base),
     ranked AS (
@@ -124,7 +119,7 @@ def compute_leads(store: Store, market: dict, *, threshold_percentile: int = 25,
     # carry it, so it's the state to SHOW even for a multi-state billing entity
     filter_state = (market.get("state") or "").upper() or None
     with store.connect() as con:
-        con.execute(f"CREATE OR REPLACE TEMP TABLE _lead_base AS {base_sql}", params)
+        con.execute(f"CREATE OR REPLACE TEMP TABLE _lead_base AS {base_sql}", base_params)
         # one row past the cap says whether the list was CUT: a 1,000-row
         # list used to look complete when the market held more leads
         cur = con.execute(sql, [min_codes, threshold_percentile, *excl_params, limit + 1])
@@ -230,23 +225,15 @@ def compute_leaderboard(store: Store, market: dict, *, min_codes: int = 3,
         raise BenchmarkError("min_codes must be at least 1")
     limit = max(1, min(int(limit), 1000))
     sort = sort if sort in ("size", "paid", "footprint") else "size"
-    include_assistant = bool(market.get("include_assistant", False))
-    include_non_dollar = bool(market.get("include_non_dollar", False))
-    where, params = _market_where(market, include_assistant, include_non_dollar)
-    rel = _rates_relation(market)
     order = {
         # biggest groups first; then best-paid; then widest footprint
         "size": "td.npi_count DESC NULLS LAST, p.median_pct DESC",
         "paid": "p.median_pct DESC, td.npi_count DESC NULLS LAST",
         "footprint": "len(td.states) DESC NULLS LAST, td.npi_count DESC NULLS LAST",
     }[sort]
+    base_q, base_params = practice_base_sql(store, market)
     sql = f"""
-    WITH base AS (
-        SELECT t.billing_code, t.tin_value, median(t.negotiated_rate) AS rate
-        FROM {rel} t LEFT JOIN tin_directory td USING (tin_value)
-        WHERE {where}
-        GROUP BY t.billing_code, t.tin_value
-    ),
+    WITH base AS ({base_q}),
     ranked AS (
         SELECT billing_code, tin_value, rate,
                {MIDRANK_PCT} AS pct,
@@ -268,7 +255,7 @@ def compute_leaderboard(store: Store, market: dict, *, min_codes: int = 3,
     """
     filter_state = (market.get("state") or "").upper() or None
     with store.connect() as con:
-        cur = con.execute(sql, [*params, min_codes, limit])
+        cur = con.execute(sql, [*base_params, min_codes, limit])
         cols = [d[0] for d in cur.description]
         rows = [dict(zip(cols, r)) for r in cur.fetchall()]
     sites = store.org_websites()
@@ -327,23 +314,15 @@ def compute_payer_roster(store: Store, payer: str, market: dict, *,
     limit = max(1, min(int(limit), 2000))
     sort = sort if sort in ("name", "size", "paid", "codes") else "name"
     market = normalize_market({**(market or {}), "payers": [payer]})
-    include_assistant = bool(market.get("include_assistant", False))
-    include_non_dollar = bool(market.get("include_non_dollar", False))
-    where, params = _market_where(market, include_assistant, include_non_dollar)
-    rel = _rates_relation(market)
     order = {
         "name": "td.display_name NULLS LAST, td.npi_count DESC NULLS LAST",
         "size": "td.npi_count DESC NULLS LAST, td.display_name NULLS LAST",
         "paid": "p.median_pct DESC NULLS LAST, td.npi_count DESC NULLS LAST",
         "codes": "p.n_codes DESC, td.npi_count DESC NULLS LAST",
     }[sort]
+    base_q, base_params = practice_base_sql(store, market)
     sql = f"""
-    WITH base AS (
-        SELECT t.billing_code, t.tin_value, median(t.negotiated_rate) AS rate
-        FROM {rel} t LEFT JOIN tin_directory td USING (tin_value)
-        WHERE {where}
-        GROUP BY t.billing_code, t.tin_value
-    ),
+    WITH base AS ({base_q}),
     ranked AS (
         SELECT billing_code, tin_value, rate,
                {MIDRANK_PCT} AS pct,
@@ -368,7 +347,7 @@ def compute_payer_roster(store: Store, payer: str, market: dict, *,
     """
     filter_state = (market.get("state") or "").upper() or None
     with store.connect() as con:
-        cur = con.execute(sql, [*params, min_codes, limit + 1])
+        cur = con.execute(sql, [*base_params, min_codes, limit + 1])
         cols = [d[0] for d in cur.description]
         rows = [dict(zip(cols, r)) for r in cur.fetchall()]
     truncated = len(rows) > limit

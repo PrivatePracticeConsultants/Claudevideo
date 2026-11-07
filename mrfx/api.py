@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import tempfile
 import threading
 import time
@@ -22,7 +23,9 @@ import zipfile
 from pathlib import Path
 
 from fastapi import BackgroundTasks, Body, FastAPI, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, PlainTextResponse,
+                               StreamingResponse)
+from starlette.background import BackgroundTask
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
@@ -967,6 +970,88 @@ def _mask_row_tins(rows: list[dict]) -> list[dict]:
     return rows
 
 
+# Export sizing (round 7 P1.1). Measured on the named store: the all-latest
+# CSV is 342 MB for 1.41M rows = 243 bytes a row. A ZIP needs the CSV AND the
+# archive on disk at once; DEFLATE takes a rate CSV to well under a quarter.
+EXPORT_BYTES_PER_ROW = 243
+EXPORT_ZIP_FACTOR = 1.25
+# never fill the drive to the last byte: the store, its spill and Windows
+# itself live there too
+EXPORT_FREE_HEADROOM = 1 << 30
+_BOM = b"\xef\xbb\xbf"
+
+
+class ExportSpaceError(Exception):
+    """Not enough free space for an export — a plain sentence for the user."""
+
+
+def _export_dir(store) -> Path:
+    """Exports are built in the STORE's temp folder (the drive the user put
+    the data on, already chosen for free space) — never the system temp
+    folder: %LOCALAPPDATA%\\Temp is on C: whatever drive the store is on, and
+    a whole-store export is tens of GB."""
+    d = Path(store._tmp_dir) / "exports"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _sweep_stale_exports(store, older_than_s: float = 6 * 3600) -> None:
+    """A killed server leaves its half-built export behind; one sweep at
+    start-up. Only OLD files: a second app on the same store (tests, a
+    double-click) may be streaming one right now. Cosmetic tier."""
+    try:
+        now = time.time()
+        for f in _export_dir(store).glob("*mrfx-export-*"):
+            try:
+                if now - f.stat().st_mtime > older_than_s:
+                    f.unlink()
+            except OSError:
+                continue
+    except OSError:
+        pass
+
+
+def _export_need(rows: int, factor: float, memory_bytes: float) -> int:
+    """Bytes an export of `rows` needs on the temp drive: the CSV (x1.25 for
+    a ZIP, which holds the CSV and the archive at once) plus, when the sorted
+    result cannot be held in memory, DuckDB's sort spill — about the data
+    size again, in the SAME folder (measured on the 99M store: a 7.2 GB
+    export failed with 9 GB free, the spill and the CSV together)."""
+    csv_bytes = rows * EXPORT_BYTES_PER_ROW
+    spill = csv_bytes if csv_bytes > memory_bytes / 2 else 0
+    return int(csv_bytes * factor + spill)
+
+
+def _check_export_space(where: Path, rows: int, factor: float = 1.0,
+                        memory_bytes: float = 4e9) -> int:
+    """Refuse BEFORE writing when the export cannot fit. Returns the estimate."""
+    need = _export_need(rows, factor, memory_bytes)
+    try:
+        free = shutil.disk_usage(where).free
+    except OSError:
+        return need          # can't tell — let the write itself report it
+    if need + EXPORT_FREE_HEADROOM > free:
+        raise ExportSpaceError(
+            f"This export needs about {_gb(need)} of working space ({rows:,} rows), "
+            "but the drive that "
+            f"holds the program's temporary folder ({where}) has only {_gb(free)} free "
+            "(1 GB is always left for the database and Windows). Narrow the export "
+            "with the filters (a state, a payer or a few codes), or free space on that "
+            "drive — or point `duckdb_temp_dir:` in config/mrfx.yaml at a drive with "
+            "more room — and try again.")
+    return need
+
+
+def _gb(n: float) -> str:
+    return f"{n / 1e9:.1f} GB" if n >= 1e8 else f"{n / 1e6:.0f} MB"
+
+
+def _is_disk_full(e: BaseException) -> bool:
+    t = str(e).lower()
+    return ("no space left" in t or "disk full" in t or "not enough space" in t
+            or "could not write file" in t or getattr(e, "errno", None) == 28)
+
+
 def _bg_safe(fn, *args) -> None:
     """Daemon-thread wrapper for long background work (inbox scans, confirmed
     ingests): log failures instead of dying silently. Deliberately NOT
@@ -1895,17 +1980,34 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     # -- export (CSV + methodology sidecar, §7A.6) ---------------------------------
 
 
+    _sweep_stale_exports(store)
+
     def _mktemp(suffix: str) -> Path:
-        fd, p = tempfile.mkstemp(suffix=suffix)
+        fd, p = tempfile.mkstemp(suffix=suffix, prefix="mrfx-export-",
+                                 dir=_export_dir(store))
         os.close(fd)  # mkstemp returns an OPEN fd — dropping it leaks one per export
         return Path(p)
 
-    def _export_payload(request: Request, view: str, sort: str, dir: str, full: bool):
-        """Build the export as a temp FILE (BOM-prefixed for Excel) and return
-        its path — never the CSV as a Python string. `?full=true` on a 64M-row
-        store is multiple GB; DuckDB streams the COPY to disk under its own
-        memory cap, and everything after must stay disk-to-disk so the export
-        can't balloon the process RSS with data-sized strings."""
+    def _space_refused(e: Exception, *paths: Path):
+        for f in paths:
+            f.unlink(missing_ok=True)
+            # DuckDB's COPY writes to "tmp_<name>" and renames at the end: a
+            # COPY stopped by a full disk leaves THAT behind (4 GB, measured)
+            f.with_name("tmp_" + f.name).unlink(missing_ok=True)
+        return HTTPException(507, str(e) if isinstance(e, ExportSpaceError) else (
+            f"The drive holding the program's temporary folder ({_export_dir(store)}) "
+            "filled up while the export was being written, so it was stopped and the "
+            "partial file removed. Narrow the export with the filters (a state, a payer "
+            "or a few codes), or free space on that drive, and try again."))
+
+    def _export_payload(request: Request, view: str, sort: str, dir: str, full: bool,
+                        zip_factor: float = 1.0):
+        """Build the export as ONE temp file in the store's temp folder and
+        return its path — never the CSV as a Python string. `?full=true` on a
+        64M-row store is multiple GB; DuckDB streams the COPY to disk under its
+        own memory cap. The Excel BOM is NOT written by copying the file again
+        (that doubled the disk a whole-store export needs): the response
+        streams BOM + file. Refused up front when the drive cannot hold it."""
         qp = {} if full else _qp(request)
         grain = grain_of(qp, cfg, store)
         fs = _fs(qp if not full else {"dollar_only": "0"})
@@ -1914,16 +2016,51 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         select, params = export_select(grain, fs, sort, dir)
         stamp = dt.datetime.now().strftime("%Y-%m-%d_%H%M")
         tmp = _mktemp(".csv")
-        with store.connect() as con:
-            con.execute(f"COPY ({select}) TO '{sql_path(tmp)}' (FORMAT CSV, HEADER)", params)
-        out = _mktemp(".csv")
-        import shutil as _shutil
-        with open(out, "wb") as dst, open(tmp, "rb") as src:
-            dst.write(b"\xef\xbb\xbf")           # BOM for Excel
-            _shutil.copyfileobj(src, dst, 1 << 20)
-        tmp.unlink()
+        mem = float(getattr(store, "_memory_limit_gb", 4) or 4) * 1e9
+        try:
+            # the exact row count costs a query (7 s for a whole 99M-rate
+            # store), so it runs only when the store's RAW row count — an
+            # upper bound for every grain — would not fit anyway
+            bound = int(store.store_stats().get("rates") or 0)
+            try:
+                roomy = (shutil.disk_usage(tmp.parent).free - EXPORT_FREE_HEADROOM
+                         > _export_need(bound, zip_factor, mem))
+            except OSError:
+                roomy = True
+            with store.connect() as con:
+                if not roomy:
+                    rows = con.execute(f"SELECT count(*) FROM ({select})",
+                                       params).fetchone()[0]
+                    _check_export_space(tmp.parent, rows, zip_factor, mem)
+                con.execute(f"COPY ({select}) TO '{sql_path(tmp)}' (FORMAT CSV, HEADER)",
+                            params)
+        except ExportSpaceError as e:
+            raise _space_refused(e, tmp)
+        except Exception as e:  # noqa: BLE001 — duckdb.IOException / OSError on a full disk
+            if _is_disk_full(e):
+                raise _space_refused(e, tmp)
+            tmp.unlink(missing_ok=True)
+            tmp.with_name("tmp_" + tmp.name).unlink(missing_ok=True)
+            raise
         method = methodology_text(cfg, store, grain, fs, sort, dir, view)
-        return stamp, out, method
+        return stamp, tmp, method
+
+    def _stream_with_bom(path: Path, filename: str, media_type: str):
+        """BOM + the file, streamed in 1 MB chunks; the file is removed once
+        the response is done (or the browser went away)."""
+        size = path.stat().st_size
+
+        def body():
+            yield _BOM
+            with open(path, "rb") as f:
+                while chunk := f.read(1 << 20):
+                    yield chunk
+
+        return StreamingResponse(
+            body(), media_type=media_type,
+            headers={"Content-Disposition": f'attachment; filename="{filename}"',
+                     "Content-Length": str(size + len(_BOM))},
+            background=BackgroundTask(path.unlink, missing_ok=True))
 
     @app.get("/api/export.csv")
     def export_csv(
@@ -1935,8 +2072,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         full: bool = False,
     ):
         stamp, out, _method = _export_payload(request, view, sort, dir, full)
-        background.add_task(out.unlink, missing_ok=True)  # or it orphans per export
-        return FileResponse(out, filename=f"mrfx_{view}_{stamp}.csv", media_type="text/csv")
+        return _stream_with_bom(out, f"mrfx_{view}_{stamp}.csv", "text/csv")
 
     @app.get("/api/export.zip")
     def export_zip(
@@ -1947,13 +2083,24 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         dir: str = "desc",
         full: bool = False,
     ):
-        stamp, csv_path, method = _export_payload(request, view, sort, dir, full)
+        stamp, csv_path, method = _export_payload(request, view, sort, dir, full,
+                                                  zip_factor=EXPORT_ZIP_FACTOR)
         out = _mktemp(".zip")
-        # z.write streams the CSV from disk; ZipFile writes to the file as it
-        # goes — no data-sized BytesIO copy of a multi-GB export in RAM
-        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
-            z.write(csv_path, f"mrfx_{view}_{stamp}.csv")
-            z.writestr(f"mrfx_{view}_{stamp}_methodology.txt", method)
+        # streamed disk-to-disk into the member (BOM first, for Excel) — no
+        # data-sized BytesIO copy and no second BOM'd copy of the CSV
+        try:
+            with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+                with z.open(f"mrfx_{view}_{stamp}.csv", "w", force_zip64=True) as m, \
+                        open(csv_path, "rb") as src:
+                    m.write(_BOM)
+                    shutil.copyfileobj(src, m, 1 << 20)
+                z.writestr(f"mrfx_{view}_{stamp}_methodology.txt", method)
+        except OSError as e:
+            if _is_disk_full(e):
+                raise _space_refused(e, csv_path, out)
+            csv_path.unlink(missing_ok=True)
+            out.unlink(missing_ok=True)
+            raise
         csv_path.unlink(missing_ok=True)
         background.add_task(out.unlink, missing_ok=True)
         return FileResponse(out, filename=f"mrfx_{view}_{stamp}.zip", media_type="application/zip")
