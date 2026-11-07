@@ -584,7 +584,12 @@ condition that isn't an equality between the two sides
 `docs/NEXT_STEPS_PROMPT_4.md` was the output-speed plan (executed; status block);
 `docs/NEXT_STEPS_PROMPT_5.md` was the round-5 plan (install robustness, idle
 polling, the DuckDB visibility bug, the Explorer's pooled default, joined-column
-filters — executed; status block at its top).
+filters — executed; status block at its top). `docs/NEXT_STEPS_PROMPT_6.md` is
+the current plan: an audit of every output — the store-wide "newest month"
+that empties client packets on real data, new-to-network's missing basis,
+the 500s and silent state-name misses, the remaining tie-order spots, and the
+measured per-visit costs (packets O(N²), the Clients digest, the visit card,
+outreach, quality scans, ZIP placement).
 
 **Round 5 lessons.** *Every panel writes to its own box:* the Leads tab's
 closures panel and the Clients panel both used `id="cl-out"`, so "Find
