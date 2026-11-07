@@ -29,9 +29,26 @@ LEADS_LIMIT = 1000
 # percentiles, rounded to a whole percentile. A practice listed at "p25" is
 # therefore always inside a p25 sweep, whatever its unrounded median.
 LEADS_RULE = (
-    "A lead is a practice whose median percentile across its priced codes, "
-    "rounded to a whole percentile as shown, is at or below the threshold; "
-    "only codes with at least 2 practices in the market count.")
+    "A practice's position on a code is its MID-RANK among the OTHER practices "
+    "in the market (those paid less, plus half of those paid the same), so a "
+    "practice paid exactly what everyone else is paid sits at p50. A lead is a "
+    "practice whose median position across its priced codes, rounded to a "
+    "whole percentile as shown, is at or below the threshold; only codes with "
+    "at least 2 practices and at least 2 different rates count (a code where "
+    "every practice is paid the same says nothing about underpayment). The "
+    "gap is to the code's market median, this practice included.")
+
+# MID-RANK position among the OTHER practices on the code (strictly below +
+# half the ties, self excluded) — the Benchmark tab's convention. It was
+# percent_rank (strictly below, ties scored 0): a payer's flat fee schedule
+# put EVERY practice at p0 with a $0.00 gap, i.e. the whole market was an
+# "underpaid lead" (round 7 P0.4; BCBS Alabama publishes one 97110 rate to
+# 6,190 practices). Rates compared at the cent, as the Benchmark does.
+# Identical to percent_rank whenever no two practices tie.
+MIDRANK_PCT = (
+    "100.0 * ((rank() OVER (PARTITION BY billing_code ORDER BY round(rate, 2))) - 1"
+    " + 0.5 * ((count(*) OVER (PARTITION BY billing_code, round(rate, 2))) - 1))"
+    " / nullif((count(*) OVER (PARTITION BY billing_code)) - 1, 0)")
 
 
 @generation_cached('leads.compute_leads')
@@ -74,21 +91,14 @@ def compute_leads(store: Store, market: dict, *, threshold_percentile: int = 25,
     sql = f"""
     WITH base AS (SELECT * FROM _lead_base),
     ranked AS (
-        -- percent_rank (0 at the cheapest, = fraction strictly below): the
-        -- cheapest practice sits at 0 so in a thin 2-3 provider market the
-        -- most-underpaid practice can still reach the default p25 sweep (the
-        -- very practice the finder exists to surface — cume_dist would floor it
-        -- at 1/n and hide it). NOTE this is a DIFFERENT convention and scope
-        -- than the Benchmark tab's position (market-wide incl. self here vs
-        -- intra-payer excl. self there, and strictly-below here vs MID-RANK
-        -- — strictly-below plus half the ties — there), so a practice's leads
-        -- percentile can differ from its benchmark position by up to ~1/n.
-        -- They are not meant to be identical: this one is deliberately the
-        -- more sensitive of the two, so a thin market still yields leads.
+        -- MID-RANK among the other practices (MIDRANK_PCT): the cheapest of
+        -- a thin market still sits at 0, so the finder still surfaces it,
+        -- and a flat fee schedule no longer makes everyone a p0 lead
         SELECT billing_code, tin_value, rate,
-               100 * percent_rank() OVER (PARTITION BY billing_code ORDER BY rate) AS pct,
+               {MIDRANK_PCT} AS pct,
                median(rate)      OVER (PARTITION BY billing_code) AS code_median,
-               count(*)          OVER (PARTITION BY billing_code) AS n_in_code
+               count(*)          OVER (PARTITION BY billing_code) AS n_in_code,
+               count(DISTINCT round(rate, 2)) OVER (PARTITION BY billing_code) AS n_rates
         FROM base
     ),
     per_tin AS (
@@ -99,7 +109,7 @@ def compute_leads(store: Store, market: dict, *, threshold_percentile: int = 25,
                -- summed as exact decimals: a DOUBLE sum depends on the threads'
                -- order, and the rounded cent flipped between calls (16.45 / 16.44)
                round(avg(greatest(0, code_median - rate)::DECIMAL(18, 6)), 2) AS avg_gap_to_median
-        FROM ranked WHERE n_in_code >= 2
+        FROM ranked WHERE n_in_code >= 2 AND n_rates >= 2
         GROUP BY tin_value
     )
     SELECT p.tin_value, p.n_codes, p.median_pct, p.avg_gap_to_median,
@@ -239,7 +249,7 @@ def compute_leaderboard(store: Store, market: dict, *, min_codes: int = 3,
     ),
     ranked AS (
         SELECT billing_code, tin_value, rate,
-               100 * percent_rank() OVER (PARTITION BY billing_code ORDER BY rate) AS pct,
+               {MIDRANK_PCT} AS pct,
                count(*) OVER (PARTITION BY billing_code) AS n_in_code
         FROM base
     ),
@@ -288,7 +298,10 @@ def compute_leaderboard(store: Store, market: dict, *, min_codes: int = 3,
         "practices": out,
         "note": ("Ranked over published negotiated rates; size is distinct NPIs "
                  "under the billing TIN (a hospital system collapses many NPIs "
-                 "into one TIN). Percentile position is not collections."),
+                 "into one TIN). Position is the practice's mid-rank among the "
+                 "other practices on each code (paid the same as everyone = p50), "
+                 "median across its codes; it describes published rates, not "
+                 "collections."),
     }
 
 
@@ -333,7 +346,7 @@ def compute_payer_roster(store: Store, payer: str, market: dict, *,
     ),
     ranked AS (
         SELECT billing_code, tin_value, rate,
-               100 * percent_rank() OVER (PARTITION BY billing_code ORDER BY rate) AS pct,
+               {MIDRANK_PCT} AS pct,
                count(*) OVER (PARTITION BY billing_code) AS n_in_code
         FROM base
     ),
@@ -403,8 +416,9 @@ def compute_payer_roster(store: Store, payer: str, market: dict, *,
         "freshness": freshness,
         "note": ("'Contracted' = the payer published negotiated rates for the "
                  "practice; a published rate is not proof of an active or billed "
-                 "contract. Percentile is the practice's position among THIS "
-                 "payer's other practices (codes it prices for ≥2 practices); "
+                 "contract. Percentile is the practice's mid-rank among THIS "
+                 "payer's other practices (paid less, plus half of those paid the "
+                 "same; codes it prices for ≥2 practices); "
                  "size is distinct NPIs under the billing TIN. Names/geography "
                  "from NPPES enrichment — practices still being identified show "
                  "a masked TIN and no location."),

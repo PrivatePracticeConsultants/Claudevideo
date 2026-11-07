@@ -58,6 +58,15 @@ def basis_note_for(market: dict) -> str:
 # every printed deliverable (the rate card's rule, schedule._THIN_PEERS).
 THIN_PEERS = 5
 
+# The opportunity models multiply a gap by the units the user typed — the
+# PRACTICE's annual units. Per payer that assumes every unit is billed to
+# that payer, which is why per-payer figures never add up across payers.
+VOLUME_PER_PAYER_NOTE = (
+    "Each payer is valued as if every one of the practice's annual units were "
+    "billed to it, so the per-payer figures are alternatives, not a sum. For a "
+    "combined figure, split the units by payer and run each payer on its own "
+    "share.")
+
 GHOST_RATE_NOTE = (
     "Ghost rates: payers publish rates for provider-code combinations that are "
     "never actually billed; presence of a rate does not mean a peer performs "
@@ -828,6 +837,18 @@ def compute_payer_negotiation(store: Store, subject: str, market: dict,
     # relative to peers, i.e. the strongest renegotiation case
     sections.sort(key=lambda s: (s["headline_percentile"] is None,
                                  s["headline_percentile"] if s["headline_percentile"] is not None else 999))
+    # The volumes are the PRACTICE's annual units (the box says so, and "Fill
+    # from Medicare" fills practice-wide units). Valuing every payer with all
+    # of them and ADDING the payers counted each unit once per payer: two
+    # payers each $10 under on 1,000 units printed $20,000/yr, where no payer
+    # mix can make it more than $10,000 (round 7 P0.2). With more than one
+    # payer the per-payer figures are ALTERNATIVES — "if every unit were
+    # billed to this payer" — so there is no cross-payer total; the largest
+    # single-payer figure is reported instead, named as what it is.
+    valued = [s for s in sections if s.get("opportunity")]
+    best = (max(valued, key=lambda s: (s["opportunity"]["total_at_target"], s["payer"]))
+            if valued else None)
+    additive = len(valued) <= 1
     return {
         "subject": subject,
         "subject_tins": sections[0]["benchmark"]["subject_tins"],
@@ -835,8 +856,14 @@ def compute_payer_negotiation(store: Store, subject: str, market: dict,
         "payers": [s["payer"] for s in sections],
         "sections": sections,
         "has_volumes": bool(volumes),
-        "total_at_target": round(total_target, 2) if volumes else None,
-        "total_at_conservative": round(total_conservative, 2) if volumes else None,
+        "total_at_target": round(total_target, 2) if volumes and additive else None,
+        "total_at_conservative": (round(total_conservative, 2)
+                                  if volumes and additive else None),
+        "best_single_payer": ({"payer": best["payer"],
+                               "at_target": best["opportunity"]["total_at_target"],
+                               "at_conservative": best["opportunity"]["total_at_conservative"]}
+                              if best else None),
+        "volume_note": (VOLUME_PER_PAYER_NOTE if volumes and not additive else None),
         "target_percentile": sections[0]["benchmark"]["target_percentile"],
         "conservative_percentile": conservative_percentile if volumes else None,
     }
@@ -1392,7 +1419,9 @@ def render_proposal_report(cfg: MrfxConfig, store: Store, prop: dict) -> str:
         value_band = (f'<p class="band">At the practice\'s stated annual volumes, this '
                       f'proposal is worth <b>{_m(s["total_annual_value"])}</b> per year '
                       f'({s["n_valued"]} of {s["n_codes"]} codes carry volumes; '
-                      f'codes without a stated volume are excluded from the total).</p>')
+                      f'codes without a stated volume are excluded from the total). The units '
+                      f'are counted as if all of them were billed to {e(prop["payer"])} — '
+                      f'scale by its share of the practice\'s volume.</p>')
     nr = (f' {s["n_no_reference"]} code(s) show no proposal — the reference '
           f'basis has no rate to point to there.' if s["n_no_reference"] else "")
     footer = methodology_footer(store, {
@@ -1532,12 +1561,20 @@ def render_negotiation_report(cfg: MrfxConfig, store: Store, neg: dict) -> str:
     month = neg["market"].get("month")
 
     summary = ""
-    if neg.get("has_volumes"):
+    if neg.get("has_volumes") and neg.get("total_at_target") is not None:
         summary = (
-            f'<p class="band">Across {len(neg["sections"])} payer(s), lifting every '
-            f'contract to p{target} is worth <b>{_m(neg["total_at_target"])}</b>/yr '
+            f'<p class="band">Lifting this contract to p{target} is worth '
+            f'<b>{_m(neg["total_at_target"])}</b>/yr '
             f'(conservative p{neg["conservative_percentile"]}: '
             f'<b>{_m(neg["total_at_conservative"])}</b>).</p>'
+        )
+    elif neg.get("has_volumes") and neg.get("best_single_payer"):
+        b = neg["best_single_payer"]
+        summary = (
+            f'<p class="band">The largest single-payer opportunity is with '
+            f'<b>{e(b["payer"])}</b>: <b>{_m(b["at_target"])}</b>/yr at p{target} '
+            f'(conservative p{neg["conservative_percentile"]}: <b>{_m(b["at_conservative"])}</b>).</p>'
+            f'<p class="note">{e(neg["volume_note"])}</p>'
         )
 
     def payer_section(sec) -> str:

@@ -1610,13 +1610,7 @@ function benchmarkPayload() {
   if ($("#b-pos").value) market.pos = $("#b-pos").value;
   if ($("#b-peerset").value) market.peer_set = $("#b-peerset").value;
   if ($("#b-plan") && $("#b-plan").value) market.plan = $("#b-plan").value;
-  const volumes = {};
-  for (const line of $("#b-volumes").value.split(/\n+/)) {
-    const m = line.split(/[,\t]/).map((s) => s.trim());
-    // require a non-empty numeric second field: "97110," -> +"" === 0, which
-    // would silently record 0 units instead of skipping the malformed line
-    if (m.length >= 2 && m[0] && m[1] !== "" && !isNaN(+m[1])) volumes[m[0]] = +m[1];
-  }
+  const volumes = parseVolumes("#b-volumes", "#b-vol-msg") || {};
   return { subject, market, volumes };
 }
 
@@ -1919,13 +1913,9 @@ function proposalPayload() {
   const p = negotiatePayload();
   p.target = { kind: $("#ng-target").value };
   if (p.target.kind === "pct_medicare") p.target.value = Number($("#ng-target-pct").value);
-  // "97110, 4200" per line — same format as the Benchmark tab's volumes box
-  const vols = {};
-  $("#ng-volumes").value.split("\n").forEach((line) => {
-    const m = line.match(/^\s*([A-Za-z0-9]+)\s*[,;\t ]\s*([\d,.]+)\s*$/);
-    if (m) vols[m[1].toUpperCase()] = Number(m[2].replace(/,/g, ""));
-  });
-  if (Object.keys(vols).length) p.volumes = vols;
+  // "97110, 4200" per line — the same reader as every other volumes box
+  const vols = parseVolumes("#ng-volumes", "#ng-vol-msg");
+  if (vols) p.volumes = vols;
   return p;
 }
 
@@ -1952,7 +1942,7 @@ async function runProposal() {
   out.innerHTML = `
     <div class="rc-summary">Proposal basis: <b>${esc(d.target.label)}</b> — ${s.n_raised} of ${s.n_codes}
       codes raised, ${s.n_kept} kept${s.n_no_reference ? `, ${s.n_no_reference} with no reference rate` : ""}.
-      ${s.total_annual_value != null ? `At your volumes this ask is worth <b>${money(s.total_annual_value)}</b>/yr.` : ""}
+      ${s.total_annual_value != null ? `At your volumes this ask is worth <b>${money(s.total_annual_value)}</b>/yr <span class="muted">(every unit counted as billed to ${esc(d.payer)} — scale by its share of your volume)</span>.` : ""}
       Proposed rates never fall below current.</div>
     <div class="tablewrap"><table class="rc-table"><thead><tr>
       <th>Code</th><th class="num">Current</th><th class="num">Proposed</th>
@@ -2451,12 +2441,27 @@ async function pollPackets(quiet = false) {
 }
 
 /* ---- engagement baselines: before/after proof --------------------------- */
-function parseVolumes(sel) {
+// ONE reader for every "Annual units per code" box (Benchmark, Negotiate,
+// engagements). "97110, 4,200" / "97110 4200" / "97110\t4200" / "97110: 4200"
+// all read 4200. The Benchmark box had its own split-on-comma reader that
+// turned "4,200" into 4 units and dropped "97140 1800" without a word, so its
+// opportunity was a fraction of the truth (round 7 P0.8). A line that is not
+// a code and a number is NOT guessed at: it is listed under the box.
+function parseVolumes(sel, msgSel) {
   const vols = {};
-  ($(sel).value || "").split("\n").forEach((line) => {
-    const m = line.match(/^\s*([A-Za-z0-9]+)\s*[,;\t ]\s*([\d,.]+)\s*$/);
-    if (m) vols[m[1].toUpperCase()] = Number(m[2].replace(/,/g, ""));
+  const skipped = [];
+  ($(sel).value || "").split(/\r?\n/).forEach((line) => {
+    if (!line.trim()) return;
+    const m = line.match(/^\s*([A-Za-z0-9]+)\s*[,;:\t ]\s*(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)\s*$/);
+    const n = m ? Number(m[2].replace(/,/g, "")) : NaN;
+    if (m && Number.isFinite(n)) vols[m[1].toUpperCase()] = n;
+    else skipped.push(line.trim());
   });
+  if (msgSel && $(msgSel)) {
+    $(msgSel).textContent = skipped.length
+      ? `Not read (expected "code, units"): ${skipped.slice(0, 3).join(" · ")}${skipped.length > 3 ? ` (+${skipped.length - 3} more)` : ""}`
+      : "";
+  }
   return Object.keys(vols).length ? vols : null;
 }
 
@@ -2483,7 +2488,7 @@ async function runEngagementCompare() {
   let d;
   try {
     d = await postJson("/api/engagements/compare",
-                       { subject, volumes: parseVolumes("#en-volumes") });
+                       { subject, volumes: parseVolumes("#en-volumes", "#en-vol-msg") });
   } catch (e) { $("#en-msg").textContent = ""; out.innerHTML = `<div class="muted">${esc(e.message)}</div>`; return; }
   $("#en-msg").textContent = "";
   const s = d.summary;

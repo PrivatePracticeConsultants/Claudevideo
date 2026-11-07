@@ -123,21 +123,40 @@ def clean_code(v) -> str:
     return s
 
 
+# one money token, optionally "$"-prefixed, thousands commas and a trailing
+# currency word allowed: '$34.50', '34.50 USD', '1,234.50'. Anything else
+# ("2 x 34.50", "Rate: 34.50 (2 units)") is not one rate and is refused —
+# stripping every non-digit used to glue them into 234.5 / 34.502.
+_MONEY_RE = re.compile(r"\s*\$?\s*(-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?|-?\.\d+)"
+                       r"\s*(?:usd|dollars?)?\s*", re.I)
+
+
 def clean_rate(v) -> float | None:
-    """Rate as number or string ('34.50', '$34.50', '34.50 USD') -> float, else None."""
-    if v is None:
+    """Rate as number or string ('34.50', '$34.50', '34.50 USD') -> float, else None.
+
+    Only FINITE numbers come back. float() accepts "nan", "Infinity" and
+    "1e999" — a payer pipeline that stringifies its rates writes exactly
+    those — and a NaN rate then poisoned the practice's median (DuckDB orders
+    NaN above every number, so the rollup's `> 0.01` filter kept it). Round 7
+    P0.1: they land under unparseable_rates instead. A JSON boolean is not a
+    rate either (bool is an int in Python: True used to read as $1.00)."""
+    import math
+    if v is None or isinstance(v, bool):
         return None
     if isinstance(v, (int, float)):
-        return float(v)
+        f = float(v)
+        return f if math.isfinite(f) else None
     try:
-        return float(v)  # plain numerics (incl. "1e3") parse correctly first
-    except (TypeError, ValueError):
-        pass
-    s = re.sub(r"[^0-9.\-]", "", str(v))
-    try:
-        return float(s) if s else None
-    except ValueError:
-        return None
+        f = float(v)  # plain numerics (incl. "1e3") parse correctly first
+    except (TypeError, ValueError, OverflowError):
+        m = _MONEY_RE.fullmatch(str(v))
+        if not m:
+            return None
+        try:
+            f = float(m.group(1).replace(",", ""))
+        except ValueError:
+            return None
+    return f if math.isfinite(f) else None
 
 
 _NON_DIGIT_RE = re.compile(r"\D")

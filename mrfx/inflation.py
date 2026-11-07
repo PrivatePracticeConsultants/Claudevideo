@@ -34,6 +34,7 @@ HONESTY:
 from __future__ import annotations
 
 import datetime as dt
+import math
 import logging
 
 from .store import Store
@@ -84,7 +85,12 @@ def load_index(store: Store) -> dict:
     loaded, user values winning for the same year (they are newer, or a
     deliberate switch to a different basket)."""
     values = dict(DEFAULT_VALUES)
-    name, source = DEFAULT_INDEX, DEFAULT_INDEX_SOURCE
+    # every year carries the name of the index it came from: a user value
+    # entered under another name ("MEI") must never be divided by a shipped
+    # CPI-U value (round 7 P0.5 — that read a flat payer as "+90% in real
+    # terms"), and one row's name must never relabel the whole series
+    names = {y: DEFAULT_INDEX for y in values}
+    source = DEFAULT_INDEX_SOURCE
     user: dict[int, float] = {}
     try:
         with store.connect() as con:
@@ -98,13 +104,15 @@ def load_index(store: Store) -> dict:
             user[int(y)] = float(v)
         except (TypeError, ValueError):
             continue
-        if nm:
-            name = str(nm)
+        names[int(y)] = str(nm).strip() if nm and str(nm).strip() else DEFAULT_INDEX
         if src:
             source = str(src)
     values.update(user)
+    distinct = sorted(set(names.values()))
+    name = distinct[0] if len(distinct) == 1 else " / ".join(distinct)
     return {
         "index_name": name,
+        "names": names,
         "source": source if not user else f"{source}; extended locally",
         "values": values,
         "years": sorted(values),
@@ -128,6 +136,8 @@ def save_index_values(store: Store, rows: list[tuple], *, index_name: str | None
                 f"each row must be a year and a number, got {r!r}")
         if not 1900 <= y <= 2200:
             raise InflationError(f"{y} is not a plausible year")
+        if not math.isfinite(v):
+            raise InflationError(f"an index value must be a real number, got {v} for {y}")
         if v <= 0:
             raise InflationError(
                 f"an index value must be positive, got {v} for {y}")
@@ -168,11 +178,21 @@ def deflator(index: dict, from_month: str | None, to_month: str | None,
         return {"factor": None, "basis": None,
                 "reason": "a real-terms figure needs two readable YYYY-MM months"}
     vals = index.get("values") or {}
+    names = index.get("names") or {}
+    n0, n1 = names.get(y0), names.get(y1)
+    if y0 in vals and y1 in vals and n0 and n1 and n0 != n1:
+        return {
+            "factor": None, "basis": None, "from_year": y0, "to_year": y1,
+            "reason": (
+                f"{y0} is {n0} and {y1} is {n1} — two different price indexes "
+                f"cannot be divided into one another. Load a full {n1} series "
+                f"(every year from {y0}), or the {n0} value for {y1}."),
+        }
     if y0 in vals and y1 in vals and vals[y0]:
         return {
             "factor": vals[y1] / vals[y0],
             "basis": "index",
-            "index_name": index.get("index_name"),
+            "index_name": n1 or index.get("index_name"),
             "source": index.get("source"),
             "from_year": y0, "to_year": y1,
             "from_value": vals[y0], "to_value": vals[y1],

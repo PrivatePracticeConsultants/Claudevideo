@@ -434,6 +434,9 @@ DEDUP_QUERY = """
     -- TIN-only rows (npi IS NULL) live at the TIN grain only; excluding them
     -- here keeps the NPI grain from showing a phantom "no-NPI" unit.
     WHERE npi IS NOT NULL
+      -- a non-finite rate is not a rate (round 7 P0.1: parts ingested before
+      -- clean_rate refused "nan"/"Infinity" strings may still hold them)
+      AND (negotiated_rate IS NULL OR isfinite(negotiated_rate))
     GROUP BY payer, npi, billing_code,
              coalesce(array_to_string(billing_code_modifier, '|'), ''),
              negotiated_rate, billing_class,
@@ -547,6 +550,10 @@ BY_TIN_QUERY = """
            min(expiration_date)                                      AS expiration_date
     FROM rates
     WHERE {part}
+      -- a non-finite rate is not a rate: DuckDB orders NaN above every
+      -- number, so the median FILTER below kept it and the practice's
+      -- median became NaN (round 7 P0.1; clean_rate refuses them at ingest)
+      AND (negotiated_rate IS NULL OR isfinite(negotiated_rate))
     GROUP BY payer, tin_value, billing_code,
              coalesce(array_to_string(billing_code_modifier, '|'), ''),
              billing_class,
