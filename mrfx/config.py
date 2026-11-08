@@ -183,6 +183,14 @@ class MrfxConfig(BaseModel):
     # segment count with a LOWER parallel_downloads (e.g. segments 4, downloads
     # 2). Best for a queue of a few very large files, not hundreds of small ones.
     download_segments: int = Field(default=1, ge=1, le=8)
+    # EARLY DUPLICATE CHECK. Payers host copies of each other's files under
+    # different web addresses. Once this many MB of a download have arrived,
+    # the app compares them with every file already ingested of exactly the
+    # same total size; if the first MB match, it fetches the file's LAST 1 MB
+    # (one small range request) and, if that matches too, stops and skips the
+    # file as a duplicate. 0 turns the check off (duplicates are then caught
+    # after the full download, as before).
+    early_dedup_mb: int = Field(default=100, ge=0, le=10_000)
     max_toc_files: int = Field(default=2000, ge=1)  # cap child files enqueued from one TOC
     # JavaScript-only portals: when a pasted page yields no static links,
     # render it in headless Chromium and harvest links from the rendered DOM

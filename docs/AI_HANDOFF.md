@@ -389,6 +389,20 @@ Two codebases live in this repo:
   a dead worker thread's claimed row goes back via `Store.release_claim`;
   every link extractor reports truncation (`cap_note`), `child_count` is the
   number listed.
+- **Early duplicate check** (`fetch.early_duplicate_check`, config
+  `early_dedup_mb`, default 100): every successfully ingested source file
+  (link or inbox) records `content_fingerprints` (size, sha of the first
+  `early_dedup_mb` MB, sha of the last 1 MB) in `ingest._finish_ok`. A
+  download, once that many MB have arrived, is compared only with
+  fingerprints of `files` rows that are `done` (a failed / forgotten / reset
+  twin never counts) of EXACTLY its Content-Length; a head match is then
+  confirmed with ONE range request for the last 1 MB (for .gz that holds the
+  CRC-32 + length of the whole content). Anything unproven — unknown length,
+  a server refusing the range, segmented downloads — downloads as before and
+  the full-content sha256 dedup still runs after. Never skip on the head
+  alone: payers repeat a huge provider_references block at the top of many
+  different files (`tests/mrfx/test_early_dedup.py` pins a same-size,
+  same-head, different-tail file being ingested).
 - **External files**: hospital CSVs read every `code|N` slot and the CMS wide
   layout (`standard_charge|<payer>|<plan>|negotiated_dollar`); hospital
   modifiers go through `modifiers.normalize`. The MPFS importer finds the

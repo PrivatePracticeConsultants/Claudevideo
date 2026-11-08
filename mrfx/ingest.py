@@ -319,6 +319,22 @@ def _now() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
 
 
+def _finish_ok(cfg: MrfxConfig, store: Store, path: Path) -> None:
+    """A file ingested successfully: remember its fingerprint (so a copy of
+    it under another web address is recognised before it finishes
+    downloading — fetch.early_duplicate_check), then the usual housekeeping.
+    Cosmetic tier: a fingerprint that can't be recorded costs only the early
+    skip, never the ingest."""
+    try:
+        from .fetch import file_fingerprint
+        fp = file_fingerprint(path, cfg.early_dedup_mb)
+        if fp is not None:
+            store.record_fingerprint(path.name, *fp)
+    except Exception:  # noqa: BLE001
+        log.debug("fingerprint not recorded for %s", path.name, exc_info=True)
+    _finish_file(cfg, path, ok=True)
+
+
 def _finish_file(cfg: MrfxConfig, path: Path, ok: bool) -> None:
     """Move a fully-processed file out of the inbox (config-controlled).
 
@@ -845,7 +861,7 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
         store.drop_rates_part(name)
         store.upsert_file(name, payer=pf.payer, status="done", rows_emitted=0,
                           qa={"rows": 0, "messages": [msg]}, finished_at=FINISHED_NOW)
-        _finish_file(cfg, path, ok=True)
+        _finish_ok(cfg, store, path)
         log.info("%s: %s", name, msg)
         return {"status": "done", "rows": 0, "payer": pf.payer, "note": msg}
 
@@ -869,7 +885,7 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
     # (a crash between the two leaves the marker behind; serve-start catches up)
     if rebuild_rollups:
         _rebuild_rollups_best_effort(store, name)
-    _finish_file(cfg, path, ok=True)
+    _finish_ok(cfg, store, path)
     if payload["ref_groups_skipped"]:
         log.warning("%s: %d rate groups skipped — missing provider reference file",
                     name, payload["ref_groups_skipped"])
@@ -1092,7 +1108,7 @@ def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight
                 name, payer=payer, status="done", last_updated_on=last_updated,
                 rows_emitted=len(refs), finished_at=FINISHED_NOW,
             )
-            _finish_file(cfg, path, ok=True)
+            _finish_ok(cfg, store, path)
             requeued = requeue_skipped(cfg, store, payer)
             return {"status": "done", "refs": len(refs), "requeued": requeued}
 
@@ -1166,7 +1182,7 @@ def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight
                     name, payer=pf.payer, status="done", rows_emitted=0,
                     qa={"rows": 0, "messages": [msg]}, finished_at=FINISHED_NOW,
                 )
-                _finish_file(cfg, path, ok=True)
+                _finish_ok(cfg, store, path)
                 log.info("%s: %s", name, msg)
                 return {"status": "done", "rows": 0, "payer": pf.payer, "note": msg}
             if result is None:
@@ -1205,7 +1221,7 @@ def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight
         # incremental update keys on done files newer than the coverage marker
         if rebuild_rollups:
             _rebuild_rollups_best_effort(store, name)
-        _finish_file(cfg, path, ok=True)
+        _finish_ok(cfg, store, path)
         if result.ref_groups_skipped:
             log.warning(
                 "%s: %d rate groups skipped — missing provider reference file", name, result.ref_groups_skipped

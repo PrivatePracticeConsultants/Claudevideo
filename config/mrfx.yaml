@@ -138,6 +138,13 @@ parallel_downloads: 0
 # segment count with a LOWER parallel_downloads — e.g. segments 4, downloads 2.
 download_segments: 1
 
+# Skip a download early when it is a copy of a file already ingested (payers
+# host each other's files under different web addresses). After this many MB
+# arrive, a file with exactly the same size as one already ingested is compared
+# with it: same first MB AND same last 1 MB -> stopped and skipped as a
+# duplicate. 0 = off (duplicates are still caught after the full download).
+early_dedup_mb: 100
+
 # How long to wait for the NEXT piece of data before hanging up and
 # reconnecting. This is the gap BETWEEN bytes, not a limit on how long a file
 # may take — a big file that keeps streaming, however slowly, is never affected.

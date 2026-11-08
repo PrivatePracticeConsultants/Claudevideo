@@ -1854,6 +1854,17 @@ class Store:
             -- kept per part with the part's size|mtime: a new file costs one
             -- scan of THAT file, never of the whole store
             CREATE TABLE IF NOT EXISTS rate_npi_parts (part VARCHAR PRIMARY KEY, sig VARCHAR);
+            -- size + first/last bytes of every ingested source file, so a
+            -- download can be recognised as a copy BEFORE it finishes
+            CREATE TABLE IF NOT EXISTS content_fingerprints (
+                filename VARCHAR PRIMARY KEY,
+                size BIGINT,
+                head_bytes BIGINT,
+                head_sha VARCHAR,
+                tail_bytes BIGINT,
+                tail_sha VARCHAR,
+                recorded_at TIMESTAMP
+            );
             CREATE TABLE IF NOT EXISTS rate_npi_set (part VARCHAR, npi VARCHAR);
             -- Which health PLANS a rate file serves, harvested from the payer's
             -- table-of-contents (the rate file itself never names a plan).
@@ -2404,6 +2415,26 @@ class Store:
         with self.connect() as con:
             rows = con.execute("SELECT status, count(*) FROM url_queue GROUP BY status").fetchall()
         return {s: n for s, n in rows}
+
+    def record_fingerprint(self, filename: str, size: int, head_bytes: int, head_sha: str,
+                           tail_bytes: int, tail_sha: str) -> None:
+        with self.write_lock, self.connect() as con:
+            con.execute("INSERT OR REPLACE INTO content_fingerprints VALUES "
+                        "(?, ?, ?, ?, ?, ?, current_timestamp)",
+                        [filename, size, head_bytes, head_sha, tail_bytes, tail_sha])
+
+    def fingerprint_candidates(self, size: int, exclude_filename: str | None = None) -> list[dict]:
+        """Fingerprints of SUCCESSFULLY ingested files (files row 'done') of
+        exactly `size` bytes. A failed, forgotten or reset file is not a twin:
+        the join on files drops it, so its copy downloads and ingests again."""
+        with self.connect() as con:
+            cur = con.execute(
+                "SELECT c.filename, c.head_bytes, c.head_sha, c.tail_bytes, c.tail_sha "
+                "FROM content_fingerprints c JOIN files f ON f.filename = c.filename "
+                "WHERE c.size = ? AND f.status = 'done' AND c.filename IS DISTINCT FROM ? "
+                "ORDER BY c.filename", [size, exclude_filename])
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, r)) for r in cur.fetchall()]
 
     def find_url_with_same_content(self, content_sha: str, exclude_id: int) -> tuple[str, str] | None:
         """(url, status) of a DONE queue row whose downloaded bytes were
@@ -4717,6 +4748,7 @@ class Store:
                     # URLs the user re-pastes to rebuild the store they just
                     # wiped. entity_map and org_websites stay — user config.
                     "DELETE FROM url_queue; DELETE FROM rollup_pending_tins; "
+                    "DELETE FROM content_fingerprints; "
                     "DELETE FROM rate_npi_parts; DELETE FROM rate_npi_set; "
                     # part-operation and rollup bookkeeping of the wiped store
                     "DELETE FROM meta WHERE key IN ('parked_parts', "

@@ -189,9 +189,21 @@ and skips them rather than loading junk. The app also spots **duplicates**:
 Blue plans publish copies of each other's national files, so when a link
 downloads to the exact same bytes as a file another link already loaded, it's
 skipped with a note saying which link it duplicates — your database stays
-clean even if you paste every state's index. (Duplicate detection compares
-link downloads to each other; files you copy into `data/inbox/` by hand
-aren't part of that comparison.)
+clean even if you paste every state's index.
+
+- **The same link twice** is never downloaded again: once a link is done,
+  pasting it again (even with a fresh "signed" ending) is ignored.
+- **The same file under a different link** is caught EARLY: after the first
+  100 MB arrive, the app compares them with every file you have already
+  loaded of exactly the same size — links AND files you dropped into
+  `data/inbox/`. If the first 100 MB match, it asks the server for just the
+  file's last 1 MB; if that matches too, it stops and skips the file as a
+  duplicate instead of downloading the rest. A file that only *starts* the
+  same (payers put the same long provider list at the top of many different
+  files) is downloaded and loaded normally. Change the 100 with
+  `early_dedup_mb:` in `config/mrfx.yaml` (0 turns the early check off).
+  It works for files loaded after this update; a duplicate of an older file
+  is still caught, just after its full download as before.
 
 **Don't want to hunt for links at all?** The app ships ready to go:
 
@@ -1054,7 +1066,9 @@ them in one place, grouped by where you'll hit them.
   Correct behavior; nothing to fix.
 - **`identical to a file already ingested … skipped as duplicate`** — Blue
   plans host copies of each other's national files. Your data already has
-  it; nothing was lost.
+  it; nothing was lost. When it says **`same size, same first 100 MB and same
+  last 1 MB — skipped after N MB`**, the copy was recognised early and the
+  rest of it was never downloaded.
 - **`out-of-network allowed-amounts file (no negotiated rates) — skipped`** —
   the link was a billed-charges report, not a rate file. Normal.
 - **`scanned: none of the target billing codes appear in this file`** — the

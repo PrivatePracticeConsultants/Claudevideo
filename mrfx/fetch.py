@@ -290,8 +290,11 @@ class DownloadError(Exception):
     def __init__(self, msg: str, status: int | None = None, retryable: bool = False,
                  oversize: bool = False, canceled: bool = False,
                  set_aside: bool = False, parked: bool = False,
-                 progressed: bool = False):
+                 progressed: bool = False, duplicate_of: str | None = None):
         super().__init__(msg)
+        # proven a copy of an already-ingested file part-way through
+        # (early_duplicate_check): the rest was never downloaded
+        self.duplicate_of = duplicate_of
         self.status = status
         self.retryable = retryable
         self.oversize = oversize  # tripped confirm_over_gb — not a real failure
@@ -585,7 +588,7 @@ def _body_chunks(resp, size: int = BODY_CHUNK_BYTES):
 
 
 def download(cfg: MrfxConfig, url: str, dest: Path, progress_cb=None,
-             max_bytes: int | None = None, cancel_check=None) -> tuple[str, str]:
+             max_bytes: int | None = None, cancel_check=None, early_check=None) -> tuple[str, str]:
     """Stream a URL to `dest` (atomic via .part). Returns (sha256_hex,
     final_url) — the hash detects the same file arriving under a different
     domain, and final_url (post-redirect) is the correct base for resolving
@@ -602,14 +605,14 @@ def download(cfg: MrfxConfig, url: str, dest: Path, progress_cb=None,
     _token = object()
     try:
         return _download_reserved(cfg, url, dest, progress_cb, max_bytes,
-                                  id(_token), cancel_check)
+                                  id(_token), cancel_check, early_check)
     finally:
         _clear_reservation(id(_token))
 
 
 def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                        max_bytes: int | None, my_key: int,
-                       cancel_check=None) -> tuple[str, str]:
+                       cancel_check=None, early_check=None) -> tuple[str, str]:
     dest.parent.mkdir(parents=True, exist_ok=True)
     part = dest.with_suffix(dest.suffix + ".part")
     val_p = Path(str(part) + ".val")  # ETag/Last-Modified guarding resumes
@@ -632,6 +635,9 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
 
     verify_override = None
     tried_chain_repair = False
+    # early duplicate check: ONE look per download, once enough has arrived
+    early_head = (cfg.early_dedup_mb << 20) if early_check else 0
+    early_done = not early_check
     ua_override: str | None = None
     attempt = 0            # CONSECUTIVE no-progress attempts, counted vs the budget
     connections = 0        # total connections, runaway backstop
@@ -884,6 +890,15 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                         sha.update(chunk)
                         done += len(chunk)
                         sha_carry = (sha, done)
+                        if not early_done and total and total > early_head \
+                                and done >= early_head:
+                            early_done = True
+                            f.flush()
+                            twin = early_check(part, total, str(resp.url))
+                            if twin:
+                                raise DownloadError(
+                                    f"identical to {twin}, already ingested", retryable=False,
+                                    duplicate_of=twin)
                         if total:
                             # written bytes now show in disk_usage; shrink the
                             # reservation so they're never counted twice
@@ -1747,6 +1762,117 @@ def _write_meta(dest: Path, content_sha: str, final_url: str) -> None:
     tmp.replace(meta_p)
 
 
+
+# ---------------------------------------------------------------------------
+# early duplicate detection
+# ---------------------------------------------------------------------------
+
+EARLY_DEDUP_TAIL = 1 << 20     # the last 1 MB: for .gz it holds the CRC-32 and
+                               # length of the WHOLE uncompressed content
+
+
+def _sha_range(path: Path, start: int, n: int) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        f.seek(start)
+        left = n
+        while left > 0:
+            blk = f.read(min(left, 4 << 20))
+            if not blk:
+                break
+            h.update(blk)
+            left -= len(blk)
+    return h.hexdigest()
+
+
+def file_fingerprint(path: Path, head_mb: int) -> tuple | None:
+    """(size, head_bytes, head_sha, tail_bytes, tail_sha) of a file on disk,
+    or None when the check is off. Recorded for every ingested file."""
+    if not head_mb:
+        return None
+    size = path.stat().st_size
+    head = min(size, head_mb << 20)
+    tail = min(size, EARLY_DEDUP_TAIL)
+    return (size, head, _sha_range(path, 0, head), tail, _sha_range(path, size - tail, tail))
+
+
+def _fetch_tail(cfg: MrfxConfig, url: str, total: int, n: int) -> bytes | None:
+    """The last `n` bytes of the remote file, or None when the server will not
+    serve exactly that range of a file of exactly `total` bytes."""
+    try:
+        with _client(cfg) as client, client.stream(
+                "GET", url, headers={"Range": f"bytes={total - n}-{total - 1}",
+                                     "Accept-Encoding": "identity"}) as resp:
+            if resp.status_code != 206:
+                return None
+            rng = resp.headers.get("Content-Range", "")
+            if rng.strip() != f"bytes {total - n}-{total - 1}/{total}":
+                return None
+            buf = bytearray()
+            for chunk in resp.iter_raw():
+                buf += chunk
+                if len(buf) > n:
+                    return None
+            return bytes(buf) if len(buf) == n else None
+    except (httpx.HTTPError, ValueError):
+        return None
+
+
+def early_duplicate_check(cfg: MrfxConfig, store: Store, own_filename: str):
+    """The hook download() calls once `early_dedup_mb` MB have arrived.
+    Returns the twin's filename only when a file ALREADY INGESTED has exactly
+    the same size, the same first bytes and the same last 1 MB — the last
+    checked with one small range request, so a file that merely starts the
+    same (payers repeat a huge provider list at the top of many different
+    files) is never mistaken for a copy. Anything it cannot prove — no size
+    match, a server that won't serve the range — means "download as usual"."""
+    def check(part: Path, total: int, url: str) -> str | None:
+        try:
+            cands = store.fingerprint_candidates(total, exclude_filename=own_filename)
+            if not cands:
+                return None
+            got = part.stat().st_size
+            heads: dict[int, str] = {}
+            hits = []
+            for c in cands:
+                hb = int(c["head_bytes"] or 0)
+                if not hb or hb > got:
+                    continue
+                if hb not in heads:
+                    heads[hb] = _sha_range(part, 0, hb)
+                if heads[hb] == c["head_sha"]:
+                    hits.append(c)
+            if not hits:
+                return None
+            tb = int(hits[0]["tail_bytes"] or 0)
+            tail = _fetch_tail(cfg, url, total, tb) if tb else None
+            if tail is None:
+                return None
+            tsha = hashlib.sha256(tail).hexdigest()
+            for c in hits:
+                if int(c["tail_bytes"] or 0) == tb and c["tail_sha"] == tsha:
+                    return c["filename"]
+        except Exception:  # noqa: BLE001 — an optimisation: never fails a download
+            log.debug("early duplicate check skipped", exc_info=True)
+        return None
+    return check
+
+def _skip_early_duplicate(cfg: MrfxConfig, store: Store, url_id: int, url: str,
+                          dest: Path, e: "DownloadError") -> bool:
+    part = dest.with_suffix(dest.suffix + ".part")
+    got = part.stat().st_size if part.exists() else 0
+    part.unlink(missing_ok=True)
+    Path(str(part) + ".val").unlink(missing_ok=True)
+    store.update_url(url_id, status="skipped", kind="duplicate", error=(
+        f"identical to {e.duplicate_of}, already ingested — same size, same "
+        f"first {cfg.early_dedup_mb} MB and same last 1 MB — skipped after "
+        f"{got / 1e6:,.0f} MB instead of downloading the whole file "
+        "(payers host copies of each other's files)"))
+    log.info("%s — copy of %s (early check); skipped after %.0f MB",
+             url, e.duplicate_of, got / 1e6)
+    return False
+
+
 def fetch_url_record(cfg: MrfxConfig, store: Store, rec: dict) -> bool:
     """Download stage only (used by the prefetch thread): stream the file to
     disk, record its hash, and mark the row 'fetched' for the processor.
@@ -1778,8 +1904,12 @@ def fetch_url_record(cfg: MrfxConfig, store: Store, rec: dict) -> bool:
             cfg, url, dest,
             progress_cb=lambda d, t: store.url_progress(url_id, d, t),
             max_bytes=_size_limit_for(cfg, rec),
-            cancel_check=lambda: store.is_download_canceled(url_id))
+            cancel_check=lambda: store.is_download_canceled(url_id),
+            early_check=(early_duplicate_check(cfg, store, dest.name)
+                         if cfg.early_dedup_mb else None))
       except DownloadError as e:
+        if e.duplicate_of:
+            return _skip_early_duplicate(cfg, store, url_id, url, dest, e)
         if e.canceled or store.is_download_canceled(url_id):
             # the user pressed "stop downloads": the row was already flipped to
             # 'skipped' by cancel_all_downloading, and the .part is kept for a
@@ -1941,8 +2071,12 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
                 cfg, url, dest,
                 progress_cb=lambda d, t: store.url_progress(url_id, d, t),
                 max_bytes=_size_limit_for(cfg, rec),
-                cancel_check=lambda: store.is_download_canceled(url_id))
+                cancel_check=lambda: store.is_download_canceled(url_id),
+                early_check=(early_duplicate_check(cfg, store, dest.name)
+                             if cfg.early_dedup_mb else None))
         except DownloadError as e:
+            if e.duplicate_of:
+                return _skip_early_duplicate(cfg, store, url_id, url, dest, e)
             if e.canceled or store.is_download_canceled(url_id):
                 # user stopped it — row already 'skipped', .part kept. The
                 # second check catches a stop that landed during a backoff
