@@ -193,29 +193,35 @@ clean even if you paste every state's index.
 
 - **The same link twice** is never downloaded again: once a link is done,
   pasting it again (even with a fresh "signed" ending) is ignored.
-- **The same file under a different link** is caught EARLY: after the first
-  15 MB arrive, the app compares them with every file you have already
-  loaded of exactly the same size — links AND files you dropped into
-  `data/inbox/`. If the first 15 MB match, it asks the server for just the
-  file's last 1 MB; if that matches too, it stops and skips the file as a
-  duplicate instead of downloading the rest. A file that only *starts* the
-  same (payers put the same long provider list at the top of many different
-  files) is downloaded and loaded normally. Change the 15 with
-  `early_dedup_mb:` in `config/mrfx.yaml` (0 turns the early check off).
-  A file loaded before this check existed is caught after its first copy's
-  full download — and that copy then fingerprints it, so every LATER copy is
-  caught early.
+- **The same file under a different link** is caught EARLY when it can be
+  proven a copy: after the first 15 MB arrive, the app compares them with
+  every file you have already loaded of exactly the same size (links AND
+  files you dropped into `data/inbox/`). If they match, it asks the server for
+  the file's last 1 MB and 8 small samples from the middle; if all match AND
+  the file is compressed (`.gz` or `.zip` — their last bytes carry a checksum
+  of the whole file), it stops and skips the file as a duplicate. A plain
+  `.json` can differ in a single rate in the middle while matching all of
+  that, so a plain `.json` always downloads in full and the full-content check
+  decides — nothing different is ever skipped. Change the 15 with
+  `early_dedup_mb:` in `config/mrfx.yaml` (0 turns the early check off; if
+  your `mrfx.yaml` has no such line, add it — `config/mrfx.yaml.new` from the
+  update shows it). A file loaded before this check existed is caught after
+  its first copy's full download — and that copy then fingerprints it, so
+  every LATER copy is caught early.
 - **Two copies downloading at the same time** (several states' indexes list
-  the same national file): the later one, once its first 15 MB match the
-  earlier one's, steps aside with "waiting: a copy that starts identically is
-  already downloading" and comes back when the first is loaded — then it is
-  skipped early instead of downloaded twice.
-- **Small files go first.** Of the 6 download slots, 3 take only files of
-  100 MB or less, so small files are never stuck behind huge ones; the other
-  3 take the big files (and help with small ones when no big file is
-  waiting). A small slot that finds a file is bigger hands it to a big slot
-  at once. Change with `small_file_downloads:` / `small_file_mb:` in
-  `config/mrfx.yaml` (0 = no lanes).
+  the same national file): the later one, once its beginning matches the
+  earlier one's, shows **"waiting: an identical-looking copy is already
+  downloading"** and sits still — no reconnecting — until the earlier one is
+  loaded (then it is skipped without downloading the rest) or fails (then it
+  carries on by itself). Nothing is lost either way.
+- **Small files go first.** Of the 6 download slots, 3 take files of 100 MB
+  or less (and files whose size isn't known yet), so small files are never
+  stuck behind huge ones. One of those 3 never takes anything else; the
+  other two help with big files whenever no small file is waiting. A small
+  slot that finds a file is bigger (or the server won't say its size) hands
+  it to a big slot at once, before saving any of it. Change with
+  `small_file_downloads:` / `small_file_mb:` in `config/mrfx.yaml` (0 = no
+  lanes; add the lines if your file doesn't have them).
 
 **Don't want to hunt for links at all?** The app ships ready to go:
 

@@ -329,7 +329,7 @@ def _finish_ok(cfg: MrfxConfig, store: Store, path: Path) -> None:
         from .fetch import file_fingerprint
         fp = file_fingerprint(path, cfg.early_dedup_mb)
         if fp is not None:
-            store.record_fingerprint(path.name, *fp)
+            store.record_fingerprint(path.name, fp)
     except Exception:  # noqa: BLE001
         log.debug("fingerprint not recorded for %s", path.name, exc_info=True)
     _finish_file(cfg, path, ok=True)

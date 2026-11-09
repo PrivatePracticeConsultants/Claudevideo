@@ -390,32 +390,31 @@ Two codebases live in this repo:
   every link extractor reports truncation (`cap_note`), `child_count` is the
   number listed.
 - **Early duplicate check** (`fetch.early_duplicate_check`, config
-  `early_dedup_mb`, default 15): every successfully ingested source file
-  (link or inbox) records `content_fingerprints` (size, sha of the first
-  `early_dedup_mb` MB, sha of the last 1 MB) in `ingest._finish_ok`. A
-  download, once that many MB have arrived, is compared only with
-  fingerprints of `files` rows that are `done` (a failed / forgotten / reset
-  twin never counts) of EXACTLY its Content-Length; a head match is then
-  confirmed with ONE range request for the last 1 MB (for .gz that holds the
-  CRC-32 + length of the whole content). Anything unproven — unknown length,
-  a server refusing the range, segmented downloads — downloads as before and
-  the full-content sha256 dedup still runs after. Never skip on the head
-  alone: payers repeat a huge provider_references block at the top of many
-  different files (`tests/mrfx/test_early_dedup.py` pins a same-size,
-  same-head, different-tail file being ingested). Every download also
-  records a PROVISIONAL fingerprint (head only, `url_id` = its queue row) at
-  the check point and a full one when it finishes; a later row whose head
-  matches an EARLIER row still downloading / fetched / ingesting parks
-  ("waiting") and re-checks when woken (lower id wins, so two copies never
-  wait on each other). A copy caught only by the full-content sha (original
-  loaded before fingerprints) fingerprints the original from its own bytes.
-- **Download lanes** (`small_file_downloads`, `small_file_mb`): the first
-  `small_file_downloads` slots claim only rows with `bytes_total` <= the
-  limit or unknown (known-small first); the rest claim known-big first, then
-  anything. A small slot that learns the size is bigger raises a `handoff`
-  DownloadError before writing (or, without Content-Length, mid-stream with
-  the .part kept): the row goes back to 'queued' with `bytes_total` set.
-  At least one big slot always remains; respawned slots keep their lane.
+  `early_dedup_mb`, default 15). LOADED fingerprints (`content_fingerprints`:
+  size, sha of the first N MB, of the last 1 MB, of 8 x 64 KB windows, and
+  the container `magic`) are written ONLY by `ingest._finish_ok` (and
+  backfilled from a copy caught by the full-content sha). IN-FLIGHT ones live
+  apart in `inflight_fingerprints`, one per queue row, dropped when the row
+  ends — a re-fetch under an old file name never passes for that file (audit
+  8 F2). A download's beginning is compared once N MB arrived; only on a
+  same-size beginning match are its end + windows fetched by range requests
+  (with the download's own UA / TLS context). A SKIP needs a loaded twin, a
+  full match and a COMPRESSED file (gzip/zip: the end carries a CRC of the
+  whole content) — a plain .json can differ in one middle rate with equal
+  size/head/tail/windows (audit 8 F3), so it never skips early. A match
+  against an EARLIER in-flight row parks the copy with `waiting_on` set; the
+  wake functions never release it while that row is downloading / fetched /
+  ingesting (no reconnect loop, audit 8 F1), `release_mismatched_waiters`
+  frees it when the twin's full fingerprint differs, and on wake the verdict
+  is taken from local data before any request (`_local_duplicate_verdict`,
+  so an expired link never matters, F6). Early-skipped rows carry
+  `duplicate_of`; forget rewrites them.
+- **Download lanes** (`small_file_downloads`, `small_file_mb`): slot 0 is
+  `small_only`, the other small slots take small/unsized rows first and help
+  with big ones when none wait, big slots take big rows first then anything.
+  A small slot hands back any row whose response is bigger OR unsized
+  (`big_lane` set, before a byte is written); `url_progress` never replaces a
+  known size with 0.
 - **External files**: hospital CSVs read every `code|N` slot and the CMS wide
   layout (`standard_charge|<payer>|<plan>|negotiated_dollar`); hospital
   modifiers go through `modifiers.normalize`. The MPFS importer finds the

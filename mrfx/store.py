@@ -497,6 +497,12 @@ FINISHED_NOW = object()
 ROW_RULES_VERSION = 2
 
 
+# a paused row that is NOT a copy waiting on an earlier row still in flight
+# (early duplicate check): only those may be woken
+_NOT_WAITING = ("(waiting_on IS NULL OR waiting_on NOT IN (SELECT q.id FROM url_queue q "
+                "WHERE q.status IN ('downloading', 'fetched', 'ingesting')))")
+
+
 def _utcnow() -> dt.datetime:
     """THE timestamp for anything stored: naive UTC. An AWARE datetime lands in
     a DuckDB TIMESTAMP column as the PC's LOCAL wall-clock time (06:30Z ->
@@ -1865,9 +1871,29 @@ class Store:
                 tail_sha VARCHAR,
                 recorded_at TIMESTAMP
             );
-            -- the queue row whose download produced the fingerprint: a copy
-            -- still DOWNLOADING or waiting to be loaded is an in-flight twin
+            -- (legacy column; loaded fingerprints are no longer tied to a row)
             ALTER TABLE content_fingerprints ADD COLUMN IF NOT EXISTS url_id BIGINT;
+            -- sha of 8 x 64 KB windows spread through the file, and the
+            -- container ('gz' / 'zip' / 'other'): only a compressed file,
+            -- whose tail carries a CRC of its whole content, can be proven a
+            -- copy early (audit 8 F3)
+            ALTER TABLE content_fingerprints ADD COLUMN IF NOT EXISTS win_sha VARCHAR;
+            ALTER TABLE content_fingerprints ADD COLUMN IF NOT EXISTS magic VARCHAR;
+            -- fingerprints of downloads IN FLIGHT, one per queue row. Kept
+            -- apart from the loaded ones: a re-fetch of a file under its old
+            -- name must never pass for the file already loaded (audit 8 F2)
+            CREATE TABLE IF NOT EXISTS inflight_fingerprints (
+                url_id BIGINT PRIMARY KEY,
+                filename VARCHAR,
+                size BIGINT,
+                head_bytes BIGINT,
+                head_sha VARCHAR,
+                tail_bytes BIGINT,
+                tail_sha VARCHAR,
+                win_sha VARCHAR,
+                magic VARCHAR,
+                recorded_at TIMESTAMP
+            );
             CREATE TABLE IF NOT EXISTS rate_npi_set (part VARCHAR, npi VARCHAR);
             -- Which health PLANS a rate file serves, harvested from the payer's
             -- table-of-contents (the rate file itself never names a plan).
@@ -1978,6 +2004,12 @@ class Store:
         # paused row with park_count > 0 is PARKED (back within minutes), one
         # with 0 is on the long pause
         con.execute("ALTER TABLE url_queue ADD COLUMN IF NOT EXISTS park_count INTEGER DEFAULT 0")
+        # the earlier queue row a "waiting" copy waits on (early duplicate
+        # check); the loaded file an early-skipped copy duplicated; and the
+        # size lane a small-file slot handed the row to
+        con.execute("ALTER TABLE url_queue ADD COLUMN IF NOT EXISTS waiting_on BIGINT")
+        con.execute("ALTER TABLE url_queue ADD COLUMN IF NOT EXISTS duplicate_of VARCHAR")
+        con.execute("ALTER TABLE url_queue ADD COLUMN IF NOT EXISTS big_lane BOOLEAN DEFAULT false")
 
     def _register_views(self, con: duckdb.DuckDBPyConnection) -> None:
         """(Re)point the derived views. Callers must hold write_lock."""
@@ -2260,15 +2292,19 @@ class Store:
         to be <= lane_bytes, or not yet sized (known-small first); "large":
         files known to be bigger first, then anything (a big-file slot never
         idles while small files wait). None: the plain order."""
-        if lane == "small":
-            return self._claim_next(
-                "queued", "downloading",
-                where=f"coalesce(bytes_total, 0) <= {int(lane_bytes)}",
-                order="(coalesce(bytes_total, 0) = 0), ")
+        big = (f"(coalesce(big_lane, false) OR coalesce(bytes_total, 0) > {int(lane_bytes)})")
+        if lane in ("small", "small_only"):
+            rec = self._claim_next("queued", "downloading", where=f"NOT {big}",
+                                   order="(coalesce(bytes_total, 0) = 0), ")
+            if rec is not None or lane == "small_only":
+                return rec
+            # nothing small (or unsized) is waiting: help with the big files
+            # rather than leave the slot idle (with lanes on, a queue of big
+            # files ran on half the slots — audit 8 F4). One small slot always
+            # stays small-only, so a small file arriving is picked up at once.
+            return self._claim_next("queued", "downloading", order=f"{big} DESC, ")
         if lane == "large":
-            return self._claim_next(
-                "queued", "downloading",
-                order=f"(coalesce(bytes_total, 0) > {int(lane_bytes)}) DESC, ")
+            return self._claim_next("queued", "downloading", order=f"{big} DESC, ")
         return self._claim_next("queued", "downloading")
 
     def next_fetched_url(self) -> dict | None:
@@ -2304,15 +2340,19 @@ class Store:
     def update_url(self, url_id: int, **fields) -> None:
         allowed = {"kind", "status", "filename", "bytes_total", "bytes_done",
                    "progress", "rows_emitted", "child_count", "error", "parent_id",
-                   "content_sha", "park_count"}
+                   "content_sha", "park_count", "duplicate_of", "big_lane"}
         fields = {k: v for k, v in fields.items() if k in allowed}
-        if fields.get("status") in ("done", "failed", "skipped", "oversize"):
+        terminal = fields.get("status") in ("done", "failed", "skipped", "oversize")
+        if terminal:
             fields["finished_at"] = _utcnow()
         if not fields:
             return
         sets = ", ".join(f"{k} = ?" for k in fields)
         with self.write_lock, self.connect() as con:
             con.execute(f"UPDATE url_queue SET {sets} WHERE id = ?", [*fields.values(), url_id])
+            if terminal:
+                # its in-flight fingerprint has done its job (audit 8 F10)
+                con.execute("DELETE FROM inflight_fingerprints WHERE url_id = ?", [url_id])
 
     def url_progress(self, url_id: int, bytes_done: int, bytes_total: int | None) -> None:
         """BEST-EFFORT by contract: called from inside download stream loops —
@@ -2330,8 +2370,13 @@ class Store:
         try:
             with self.connect() as con:
                 con.execute(
-                    "UPDATE url_queue SET bytes_done = ?, bytes_total = ?, progress = ? WHERE id = ?",
-                    [bytes_done, bytes_total or 0, round(pct, 2), url_id],
+                    # a known size is never overwritten by "unknown" (a
+                    # resume from a server without Content-Length reported 0
+                    # and sent a big file back to a small-file slot)
+                    "UPDATE url_queue SET bytes_done = ?, "
+                    "bytes_total = CASE WHEN ? > 0 THEN ? ELSE bytes_total END, "
+                    "progress = ? WHERE id = ?",
+                    [bytes_done, bytes_total or 0, bytes_total or 0, round(pct, 2), url_id],
                 )
         except Exception as e:  # noqa: BLE001
             import logging as _logging
@@ -2434,46 +2479,112 @@ class Store:
             rows = con.execute("SELECT status, count(*) FROM url_queue GROUP BY status").fetchall()
         return {s: n for s, n in rows}
 
-    def record_fingerprint(self, filename: str, size: int, head_bytes: int, head_sha: str,
-                           tail_bytes: int | None, tail_sha: str | None,
-                           url_id: int | None = None) -> None:
-        """Insert or refresh a file's fingerprint. A refresh never forgets
-        which queue row produced it, nor a tail it already knew."""
+    def record_fingerprint(self, filename: str, fp: dict) -> None:
+        """The fingerprint of a file that has been LOADED (written by the
+        ingest's success path, or backfilled from an identical copy)."""
         with self.write_lock, self.connect() as con:
             con.execute(
-                "INSERT INTO content_fingerprints (filename, size, head_bytes, head_sha, "
-                "tail_bytes, tail_sha, recorded_at, url_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, current_timestamp, ?) "
-                "ON CONFLICT (filename) DO UPDATE SET size = excluded.size, "
-                "head_bytes = excluded.head_bytes, head_sha = excluded.head_sha, "
-                "tail_bytes = coalesce(excluded.tail_bytes, content_fingerprints.tail_bytes), "
-                "tail_sha = coalesce(excluded.tail_sha, content_fingerprints.tail_sha), "
-                "recorded_at = excluded.recorded_at, "
-                "url_id = coalesce(excluded.url_id, content_fingerprints.url_id)",
-                [filename, size, head_bytes, head_sha, tail_bytes, tail_sha, url_id])
+                "INSERT OR REPLACE INTO content_fingerprints (filename, size, head_bytes, "
+                "head_sha, tail_bytes, tail_sha, recorded_at, url_id, win_sha, magic) "
+                "VALUES (?, ?, ?, ?, ?, ?, current_timestamp, NULL, ?, ?)",
+                [filename, fp["size"], fp["head_bytes"], fp["head_sha"], fp["tail_bytes"],
+                 fp["tail_sha"], fp["win_sha"], fp["magic"]])
 
     def drop_fingerprint(self, filename: str) -> None:
         with self.write_lock, self.connect() as con:
             con.execute("DELETE FROM content_fingerprints WHERE filename = ?", [filename])
 
-    def fingerprint_candidates(self, size: int, exclude_filename: str | None = None) -> list[dict]:
-        """Fingerprints of exactly `size` bytes, each with where its file
-        stands: `file_status` (the files row — 'done' = loaded, a confirmed
-        twin) and `url_status` / `url_id` (the queue row that downloaded it —
-        'downloading' / 'fetched' / 'ingesting' = an in-flight twin). A
-        failed, forgotten or reset file is neither, so its copy downloads and
-        ingests again."""
+    def record_inflight(self, url_id: int, filename: str, fp: dict,
+                        wait: float | None = None) -> bool:
+        """A download's own fingerprint while it is in flight (head only, or
+        head + tail + windows). `wait`: give up after this many seconds when
+        the writer lock is busy — this runs INSIDE a download stream, which
+        must never sit on an idle payer connection behind an index expansion
+        (audit 8 F7). Returns whether it was written."""
+        if wait is not None:
+            if not self.write_lock.acquire(timeout=wait):
+                return False
+        else:
+            self.write_lock.acquire()
+        try:
+            with self.connect() as con:
+                con.execute(
+                    "INSERT OR REPLACE INTO inflight_fingerprints VALUES "
+                    "(?, ?, ?, ?, ?, ?, ?, ?, ?, current_timestamp)",
+                    [url_id, filename, fp["size"], fp["head_bytes"], fp["head_sha"],
+                     fp.get("tail_bytes"), fp.get("tail_sha"), fp.get("win_sha"),
+                     fp.get("magic")])
+            return True
+        finally:
+            self.write_lock.release()
+
+    def inflight_fingerprint(self, url_id: int) -> dict | None:
+        with self.connect() as con:
+            cur = con.execute("SELECT * FROM inflight_fingerprints WHERE url_id = ?", [url_id])
+            row = cur.fetchone()
+            return dict(zip([d[0] for d in cur.description], row)) if row else None
+
+    def fingerprint_candidates(self, size: int, own_url_id: int | None,
+                               own_filename: str | None = None) -> list[dict]:
+        """Possible twins of a download of exactly `size` bytes:
+        kind 'loaded' — a file whose files row is 'done' (never this row's
+        own file name: a re-fetch is not a copy of its old self);
+        kind 'inflight' — an EARLIER queue row (lower id: two copies never
+        wait on each other) still downloading, downloaded or loading."""
         with self.connect() as con:
             cur = con.execute(
-                "SELECT c.filename, c.head_bytes, c.head_sha, c.tail_bytes, c.tail_sha, "
-                "       c.url_id, f.status AS file_status, u.status AS url_status "
-                "FROM content_fingerprints c "
-                "LEFT JOIN files f ON f.filename = c.filename "
-                "LEFT JOIN url_queue u ON u.id = c.url_id "
-                "WHERE c.size = ? AND c.filename IS DISTINCT FROM ? "
-                "ORDER BY c.filename", [size, exclude_filename])
+                "SELECT 'loaded' AS kind, c.filename, NULL::BIGINT AS url_id, c.head_bytes, "
+                "       c.head_sha, c.tail_bytes, c.tail_sha, c.win_sha, c.magic "
+                "FROM content_fingerprints c JOIN files f ON f.filename = c.filename "
+                "WHERE c.size = ? AND f.status = 'done' AND c.filename IS DISTINCT FROM ? "
+                "UNION ALL "
+                "SELECT 'inflight', i.filename, i.url_id, i.head_bytes, i.head_sha, "
+                "       i.tail_bytes, i.tail_sha, i.win_sha, i.magic "
+                "FROM inflight_fingerprints i JOIN url_queue u ON u.id = i.url_id "
+                "WHERE i.size = ? AND u.status IN ('downloading', 'fetched', 'ingesting') "
+                "  AND i.url_id < ? "
+                "ORDER BY 1, 2", [size, own_filename, size, own_url_id if own_url_id is not None else -1])
             cols = [d[0] for d in cur.description]
             return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+    def park_waiting(self, url_id: int, twin_id: int, minutes: float, error: str) -> None:
+        """A copy waits for an EARLIER row with the same beginning: parked,
+        tied to that row. It is NOT woken while that row is still in flight
+        (no reconnect-and-re-park loop against the payer, audit 8 F1); the
+        wake functions let it go once the earlier row is loaded, fails or
+        stops, or when release_mismatched_waiters finds it differs."""
+        with self.write_lock, self.connect() as con:
+            con.execute(
+                "UPDATE url_queue SET status = 'paused', waiting_on = ?, error = ?, "
+                "retry_after = ?, park_count = 1 WHERE id = ?",
+                [twin_id, error, _utcnow() + dt.timedelta(minutes=minutes), url_id])
+
+    def release_mismatched_waiters(self, twin_id: int) -> int:
+        """The earlier row finished downloading: rows waiting on it whose own
+        full fingerprint DIFFERS from its full fingerprint are not copies —
+        let them go now instead of after its (maybe hours-long) load."""
+        with self.write_lock, self.connect() as con:
+            rows = con.execute(
+                "SELECT u.id FROM url_queue u "
+                "JOIN inflight_fingerprints me ON me.url_id = u.id "
+                "JOIN inflight_fingerprints tw ON tw.url_id = ? "
+                "WHERE u.waiting_on = ? AND u.status = 'paused' "
+                "  AND me.tail_sha IS NOT NULL AND tw.tail_sha IS NOT NULL "
+                "  AND (me.tail_sha <> tw.tail_sha OR coalesce(me.win_sha, '') <> "
+                "       coalesce(tw.win_sha, '') OR me.size <> tw.size)",
+                [twin_id, twin_id]).fetchall()
+            ids = [r[0] for r in rows]
+            if ids:
+                con.execute("UPDATE url_queue SET waiting_on = NULL, retry_after = NULL "
+                            "WHERE id IN (SELECT unnest(?::BIGINT[]))", [ids])
+        return len(ids)
+
+    def url_for_filename(self, filename: str) -> str | None:
+        """The link a loaded file came from (None for an inbox drop)."""
+        with self.connect() as con:
+            row = con.execute("SELECT url FROM url_queue WHERE filename = ? "
+                              "ORDER BY (status = 'done') DESC, id LIMIT 1", [filename]).fetchone()
+        return row[0] if row else None
 
     def done_filename_with_content(self, content_sha: str, exclude_id: int) -> str | None:
         """The local filename of a DONE queue row with these exact bytes."""
@@ -2791,12 +2902,13 @@ class Store:
                     "SELECT count(*) FROM url_queue WHERE status = 'queued'").fetchone()[0]:
                 return 0
             n = con.execute("SELECT count(*) FROM url_queue WHERE status = 'paused' "
-                            "AND coalesce(park_count, 0) > 0").fetchone()[0]
+                            f"AND coalesce(park_count, 0) > 0 AND {_NOT_WAITING}").fetchone()[0]
             if n:
                 # error cleared like wake_paused_urls: a queued row must not
                 # keep reading "parked: ..." (round-7 audit)
                 con.execute("UPDATE url_queue SET status = 'queued', retry_after = NULL, "
-                            "error = NULL WHERE status = 'paused' AND coalesce(park_count, 0) > 0")
+                            "error = NULL, waiting_on = NULL WHERE status = 'paused' "
+                            f"AND coalesce(park_count, 0) > 0 AND {_NOT_WAITING}")
         return n
 
     def parked_count(self) -> int:
@@ -2809,12 +2921,18 @@ class Store:
         resume from their kept bytes). Returns how many woke."""
         with self.write_lock, self.connect() as con:
             now = _utcnow()
-            n = con.execute("SELECT count(*) FROM url_queue WHERE status = 'paused' "
-                            "AND (retry_after IS NULL OR retry_after <= ?)", [now]).fetchone()[0]
+            # a waiting copy's own timer does not wake it while the row it
+            # waits on is still in flight; once that row is loaded / failed /
+            # stopped it wakes at the next pass (the coordinator calls this
+            # every minute), its timer notwithstanding
+            due = (f"((retry_after IS NULL OR retry_after <= ?) AND {_NOT_WAITING}) "
+                   f"OR (waiting_on IS NOT NULL AND {_NOT_WAITING})")
+            n = con.execute(f"SELECT count(*) FROM url_queue WHERE status = 'paused' "
+                            f"AND ({due})", [now]).fetchone()[0]
             if n:
                 con.execute("UPDATE url_queue SET status = 'queued', error = NULL, "
-                            "retry_after = NULL WHERE status = 'paused' "
-                            "AND (retry_after IS NULL OR retry_after <= ?)", [now])
+                            "retry_after = NULL, waiting_on = NULL WHERE status = 'paused' "
+                            f"AND ({due})", [now])
         return n
 
     def requeue_failed(self) -> int:
@@ -3251,6 +3369,14 @@ class Store:
                     "UPDATE url_queue SET status = 'skipped', "
                     "error = 'data removed by user — press retry to re-download and re-ingest' "
                     "WHERE filename = ? AND status = 'done'", [filename])
+                # copies skipped EARLY as duplicates of this file no longer
+                # duplicate anything loaded (audit 8 F11)
+                con.execute(
+                    "UPDATE url_queue SET duplicate_of = NULL, "
+                    "error = 'the identical file this was skipped for was removed by "
+                    "the user — press retry to download it' "
+                    "WHERE duplicate_of = ? AND status = 'skipped'", [filename])
+                con.execute("DELETE FROM content_fingerprints WHERE filename = ?", [filename])
                 con.execute("DELETE FROM files WHERE filename = ?", [filename])
                 con.execute("COMMIT")
             except Exception:
@@ -4798,7 +4924,7 @@ class Store:
                     # URLs the user re-pastes to rebuild the store they just
                     # wiped. entity_map and org_websites stay — user config.
                     "DELETE FROM url_queue; DELETE FROM rollup_pending_tins; "
-                    "DELETE FROM content_fingerprints; "
+                    "DELETE FROM content_fingerprints; DELETE FROM inflight_fingerprints; "
                     "DELETE FROM rate_npi_parts; DELETE FROM rate_npi_set; "
                     # part-operation and rollup bookkeeping of the wiped store
                     "DELETE FROM meta WHERE key IN ('parked_parts', "
@@ -4829,14 +4955,15 @@ class Store:
 # would wake every other one in a loop. url_progress (byte counts during a
 # download) is deliberately absent: no worker waits on progress.
 # tests/mrfx/test_queue_signal.py fails if a url_queue writer is missing here.
-_QUEUE_WRITERS_ALWAYS = ("update_url", "pause_url", "park_url", "forget_file", "reset")
+_QUEUE_WRITERS_ALWAYS = ("update_url", "pause_url", "park_url", "park_waiting",
+                         "forget_file", "reset")
 _QUEUE_WRITERS_IF_DONE = ("_claim_next", "enqueue_url", "enqueue_urls", "requeue_failed",
                           "requeue_oversize_within", "requeue_urls", "wake_paused_urls",
                           "wake_parked_urls",
                           "recover_stuck_urls", "set_url_status_by_id", "force_size_requeue",
                           "clear_queued", "cancel_all_downloading", "resume_canceled",
                           "revive_skipped_duplicates", "claim_content_ingest",
-                          "release_claim")
+                          "release_claim", "release_mismatched_waiters")
 
 
 def _signals_queue(fn, always: bool):
