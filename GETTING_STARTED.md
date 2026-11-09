@@ -202,8 +202,20 @@ clean even if you paste every state's index.
   same (payers put the same long provider list at the top of many different
   files) is downloaded and loaded normally. Change the 15 with
   `early_dedup_mb:` in `config/mrfx.yaml` (0 turns the early check off).
-  It works for files loaded after this update; a duplicate of an older file
-  is still caught, just after its full download as before.
+  A file loaded before this check existed is caught after its first copy's
+  full download — and that copy then fingerprints it, so every LATER copy is
+  caught early.
+- **Two copies downloading at the same time** (several states' indexes list
+  the same national file): the later one, once its first 15 MB match the
+  earlier one's, steps aside with "waiting: a copy that starts identically is
+  already downloading" and comes back when the first is loaded — then it is
+  skipped early instead of downloaded twice.
+- **Small files go first.** Of the 6 download slots, 3 take only files of
+  100 MB or less, so small files are never stuck behind huge ones; the other
+  3 take the big files (and help with small ones when no big file is
+  waiting). A small slot that finds a file is bigger hands it to a big slot
+  at once. Change with `small_file_downloads:` / `small_file_mb:` in
+  `config/mrfx.yaml` (0 = no lanes).
 
 **Don't want to hunt for links at all?** The app ships ready to go:
 

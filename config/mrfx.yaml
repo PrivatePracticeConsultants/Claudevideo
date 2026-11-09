@@ -145,6 +145,12 @@ download_segments: 1
 # duplicate. 0 = off (duplicates are still caught after the full download).
 early_dedup_mb: 15
 
+# Size lanes: of the parallel downloads, this many work only on files of
+# small_file_mb or less, so small files are never stuck behind huge ones; the
+# rest take the big files first. 0 = no lanes.
+small_file_downloads: 3
+small_file_mb: 100
+
 # How long to wait for the NEXT piece of data before hanging up and
 # reconnecting. This is the gap BETWEEN bytes, not a limit on how long a file
 # may take — a big file that keeps streaming, however slowly, is never affected.

@@ -402,7 +402,20 @@ Two codebases live in this repo:
   the full-content sha256 dedup still runs after. Never skip on the head
   alone: payers repeat a huge provider_references block at the top of many
   different files (`tests/mrfx/test_early_dedup.py` pins a same-size,
-  same-head, different-tail file being ingested).
+  same-head, different-tail file being ingested). Every download also
+  records a PROVISIONAL fingerprint (head only, `url_id` = its queue row) at
+  the check point and a full one when it finishes; a later row whose head
+  matches an EARLIER row still downloading / fetched / ingesting parks
+  ("waiting") and re-checks when woken (lower id wins, so two copies never
+  wait on each other). A copy caught only by the full-content sha (original
+  loaded before fingerprints) fingerprints the original from its own bytes.
+- **Download lanes** (`small_file_downloads`, `small_file_mb`): the first
+  `small_file_downloads` slots claim only rows with `bytes_total` <= the
+  limit or unknown (known-small first); the rest claim known-big first, then
+  anything. A small slot that learns the size is bigger raises a `handoff`
+  DownloadError before writing (or, without Content-Length, mid-stream with
+  the .part kept): the row goes back to 'queued' with `bytes_total` set.
+  At least one big slot always remains; respawned slots keep their lane.
 - **External files**: hospital CSVs read every `code|N` slot and the CMS wide
   layout (`standard_charge|<payer>|<plan>|negotiated_dollar`); hospital
   modifiers go through `modifiers.normalize`. The MPFS importer finds the

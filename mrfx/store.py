@@ -1865,6 +1865,9 @@ class Store:
                 tail_sha VARCHAR,
                 recorded_at TIMESTAMP
             );
+            -- the queue row whose download produced the fingerprint: a copy
+            -- still DOWNLOADING or waiting to be loaded is an in-flight twin
+            ALTER TABLE content_fingerprints ADD COLUMN IF NOT EXISTS url_id BIGINT;
             CREATE TABLE IF NOT EXISTS rate_npi_set (part VARCHAR, npi VARCHAR);
             -- Which health PLANS a rate file serves, harvested from the payer's
             -- table-of-contents (the rate file itself never names a plan).
@@ -2252,21 +2255,36 @@ class Store:
             ).fetchall()
         return [r[0] for r in rows if r[0]]
 
-    def next_queued_url(self) -> dict | None:
+    def next_queued_url(self, lane: str | None = None, lane_bytes: int = 0) -> dict | None:
+        """Claim the next queued download. `lane` "small": only files known
+        to be <= lane_bytes, or not yet sized (known-small first); "large":
+        files known to be bigger first, then anything (a big-file slot never
+        idles while small files wait). None: the plain order."""
+        if lane == "small":
+            return self._claim_next(
+                "queued", "downloading",
+                where=f"coalesce(bytes_total, 0) <= {int(lane_bytes)}",
+                order="(coalesce(bytes_total, 0) = 0), ")
+        if lane == "large":
+            return self._claim_next(
+                "queued", "downloading",
+                order=f"(coalesce(bytes_total, 0) > {int(lane_bytes)}) DESC, ")
         return self._claim_next("queued", "downloading")
 
     def next_fetched_url(self) -> dict | None:
         """Claim the next prefetched row (file already on disk) for processing."""
         return self._claim_next("fetched", "ingesting")
 
-    def _claim_next(self, from_status: str, to_status: str) -> dict | None:
+    def _claim_next(self, from_status: str, to_status: str, where: str = "",
+                    order: str = "") -> dict | None:
         with self.write_lock, self.connect() as con:
             row = con.execute(
                 # FAIR order: rows a bulk "retry failed" sent back (flaky or
                 # dead links, usually low ids) go after fresh files instead of
                 # re-burning the download slots first; id within each tier
                 f"SELECT * FROM url_queue WHERE status = '{from_status}' "
-                "ORDER BY coalesce(retries, 0), id LIMIT 1"
+                + (f"AND {where} " if where else "")
+                + f"ORDER BY {order}coalesce(retries, 0), id LIMIT 1"
             ).fetchall()
             if not row:
                 return None
@@ -2417,24 +2435,56 @@ class Store:
         return {s: n for s, n in rows}
 
     def record_fingerprint(self, filename: str, size: int, head_bytes: int, head_sha: str,
-                           tail_bytes: int, tail_sha: str) -> None:
+                           tail_bytes: int | None, tail_sha: str | None,
+                           url_id: int | None = None) -> None:
+        """Insert or refresh a file's fingerprint. A refresh never forgets
+        which queue row produced it, nor a tail it already knew."""
         with self.write_lock, self.connect() as con:
-            con.execute("INSERT OR REPLACE INTO content_fingerprints VALUES "
-                        "(?, ?, ?, ?, ?, ?, current_timestamp)",
-                        [filename, size, head_bytes, head_sha, tail_bytes, tail_sha])
+            con.execute(
+                "INSERT INTO content_fingerprints (filename, size, head_bytes, head_sha, "
+                "tail_bytes, tail_sha, recorded_at, url_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, current_timestamp, ?) "
+                "ON CONFLICT (filename) DO UPDATE SET size = excluded.size, "
+                "head_bytes = excluded.head_bytes, head_sha = excluded.head_sha, "
+                "tail_bytes = coalesce(excluded.tail_bytes, content_fingerprints.tail_bytes), "
+                "tail_sha = coalesce(excluded.tail_sha, content_fingerprints.tail_sha), "
+                "recorded_at = excluded.recorded_at, "
+                "url_id = coalesce(excluded.url_id, content_fingerprints.url_id)",
+                [filename, size, head_bytes, head_sha, tail_bytes, tail_sha, url_id])
+
+    def drop_fingerprint(self, filename: str) -> None:
+        with self.write_lock, self.connect() as con:
+            con.execute("DELETE FROM content_fingerprints WHERE filename = ?", [filename])
 
     def fingerprint_candidates(self, size: int, exclude_filename: str | None = None) -> list[dict]:
-        """Fingerprints of SUCCESSFULLY ingested files (files row 'done') of
-        exactly `size` bytes. A failed, forgotten or reset file is not a twin:
-        the join on files drops it, so its copy downloads and ingests again."""
+        """Fingerprints of exactly `size` bytes, each with where its file
+        stands: `file_status` (the files row — 'done' = loaded, a confirmed
+        twin) and `url_status` / `url_id` (the queue row that downloaded it —
+        'downloading' / 'fetched' / 'ingesting' = an in-flight twin). A
+        failed, forgotten or reset file is neither, so its copy downloads and
+        ingests again."""
         with self.connect() as con:
             cur = con.execute(
-                "SELECT c.filename, c.head_bytes, c.head_sha, c.tail_bytes, c.tail_sha "
-                "FROM content_fingerprints c JOIN files f ON f.filename = c.filename "
-                "WHERE c.size = ? AND f.status = 'done' AND c.filename IS DISTINCT FROM ? "
+                "SELECT c.filename, c.head_bytes, c.head_sha, c.tail_bytes, c.tail_sha, "
+                "       c.url_id, f.status AS file_status, u.status AS url_status "
+                "FROM content_fingerprints c "
+                "LEFT JOIN files f ON f.filename = c.filename "
+                "LEFT JOIN url_queue u ON u.id = c.url_id "
+                "WHERE c.size = ? AND c.filename IS DISTINCT FROM ? "
                 "ORDER BY c.filename", [size, exclude_filename])
             cols = [d[0] for d in cur.description]
             return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+    def done_filename_with_content(self, content_sha: str, exclude_id: int) -> str | None:
+        """The local filename of a DONE queue row with these exact bytes."""
+        if not content_sha:
+            return None
+        with self.connect() as con:
+            row = con.execute(
+                "SELECT filename FROM url_queue WHERE content_sha = ? AND id != ? "
+                "AND status = 'done' AND filename IS NOT NULL ORDER BY id LIMIT 1",
+                [content_sha, exclude_id]).fetchone()
+        return row[0] if row else None
 
     def find_url_with_same_content(self, content_sha: str, exclude_id: int) -> tuple[str, str] | None:
         """(url, status) of a DONE queue row whose downloaded bytes were

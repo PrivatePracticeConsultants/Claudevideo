@@ -191,6 +191,14 @@ class MrfxConfig(BaseModel):
     # file as a duplicate. 0 turns the check off (duplicates are then caught
     # after the full download, as before).
     early_dedup_mb: int = Field(default=15, ge=0, le=10_000)
+    # SIZE LANES. Of the parallel downloads, this many take only files of
+    # small_file_mb or less (a small file is never stuck behind a run of huge
+    # ones); the rest take the big files first and help with small ones when
+    # no big file is waiting. A "small" slot that finds its file is bigger
+    # hands it straight to a big-file slot. 0 = no lanes (every slot takes
+    # the next file in line). Always leaves at least one big-file slot.
+    small_file_downloads: int = Field(default=3, ge=0, le=8)
+    small_file_mb: int = Field(default=100, ge=1, le=100_000)
     max_toc_files: int = Field(default=2000, ge=1)  # cap child files enqueued from one TOC
     # JavaScript-only portals: when a pasted page yields no static links,
     # render it in headless Chromium and harvest links from the rendered DOM

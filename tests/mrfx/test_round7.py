@@ -651,11 +651,11 @@ def test_a_dead_downloader_thread_hands_its_row_back(cfg, store, monkeypatch):
     real = F.fetch_url_record
     calls = {"n": 0}
 
-    def boom(c, s, rec):
+    def boom(c, s, rec, **kw):
         calls["n"] += 1
         if calls["n"] == 1:
             raise KeyboardInterrupt          # anything the loop re-raises
-        return real(c, s, rec)
+        return real(c, s, rec, **kw)
     monkeypatch.setattr(F, "fetch_url_record", boom)
     cfg.download_retries = 0
     F.add_urls(store, ["http://127.0.0.1:9/never.json.gz"])
