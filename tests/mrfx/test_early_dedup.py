@@ -109,8 +109,8 @@ def test_a_copy_under_another_address_is_skipped_after_the_first_mb(cfg, store):
         # the download stopped once ~1 MB had arrived (the rest of the 3.2 MB
         # file was never written), and the tail came from one range request
         import re
-        after_mb = int(re.search(r"skipped after ([\d,]+) MB", b["error"]).group(1))
-        assert after_mb <= 2 < len(a) / 1e6, b["error"]
+        after_mb = float(re.search(r"skipped after ([\d.,]+) MB", b["error"]).group(1))
+        assert 1.0 <= after_mb <= 2.2 < len(a) / 1e6, b["error"]
         assert any(r.startswith("bytes=") and r.endswith(f"-{len(a) - 1}") for r in ranges)
 
         # same size, same first MB, different ending: NOT a copy — ingested
@@ -142,3 +142,33 @@ def test_the_same_link_again_is_never_downloaded(cfg, store):
     res = add_urls(store, ["https://cdn.example/x/rates.json.gz?sig=2&Expires=2"])
     assert res == {"added": 0, "skipped": 1, "invalid": 0}
     assert [u["status"] for u in store.list_urls()] == ["done"]
+
+
+def test_a_fingerprint_taken_with_a_longer_head_is_checked_when_that_much_arrived(cfg, store):
+    """The setting went 100 MB -> 15 MB: files loaded under 100 MB carry a
+    100 MB head. A copy of one is not compared at 15 MB (nothing to compare
+    with) but again once 100 MB have arrived — here 2 MB, then 1 MB."""
+    a = _mrf(40.0)
+    sent: dict[str, int] = {}
+    httpd = _server({"/x/rates.json": a, "/y/rates.json": a}, sent)
+    base = f"http://127.0.0.1:{httpd.server_address[1]}"
+    try:
+        cfg.early_dedup_mb = 2
+        add_urls(store, [base + "/x/rates.json"])
+        run_queue(cfg, store, drain=True)
+        assert _row(store, base + "/x/rates.json")["status"] == "done"
+        cfg.early_dedup_mb = 1
+        add_urls(store, [base + "/y/rates.json"])
+        run_queue(cfg, store, drain=True)
+        y = _row(store, base + "/y/rates.json")
+        assert (y["status"], y["kind"]) == ("skipped", "duplicate"), y
+        import re
+        after_mb = float(re.search(r"skipped after ([\d.,]+) MB", y["error"]).group(1))
+        assert 2.0 <= after_mb < len(a) / 1e6, y["error"]   # looked again at 2 MB
+    finally:
+        httpd.shutdown()
+
+
+def test_the_default_early_check_is_15_mb():
+    from mrfx.config import MrfxConfig
+    assert MrfxConfig().early_dedup_mb == 15

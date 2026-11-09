@@ -390,7 +390,7 @@ Two codebases live in this repo:
   every link extractor reports truncation (`cap_note`), `child_count` is the
   number listed.
 - **Early duplicate check** (`fetch.early_duplicate_check`, config
-  `early_dedup_mb`, default 100): every successfully ingested source file
+  `early_dedup_mb`, default 15): every successfully ingested source file
   (link or inbox) records `content_fingerprints` (size, sha of the first
   `early_dedup_mb` MB, sha of the last 1 MB) in `ingest._finish_ok`. A
   download, once that many MB have arrived, is compared only with

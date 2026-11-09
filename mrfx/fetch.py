@@ -636,8 +636,10 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
     verify_override = None
     tried_chain_repair = False
     # early duplicate check: ONE look per download, once enough has arrived
+    # the hook may answer "look again at N bytes" (an older fingerprint was
+    # taken over a longer head than today's setting): next_early moves on
     early_head = (cfg.early_dedup_mb << 20) if early_check else 0
-    early_done = not early_check
+    next_early = early_head if early_check else 0
     ua_override: str | None = None
     attempt = 0            # CONSECUTIVE no-progress attempts, counted vs the budget
     connections = 0        # total connections, runaway backstop
@@ -890,15 +892,19 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                         sha.update(chunk)
                         done += len(chunk)
                         sha_carry = (sha, done)
-                        if not early_done and total and total > early_head \
-                                and done >= early_head:
-                            early_done = True
+                        if next_early and total and total > next_early \
+                                and done >= next_early:
                             f.flush()
                             twin = early_check(part, total, str(resp.url))
+                            next_early = 0
+                            if isinstance(twin, int) and not isinstance(twin, bool):
+                                next_early, twin = twin, None
                             if twin:
-                                raise DownloadError(
+                                dup = DownloadError(
                                     f"identical to {twin}, already ingested", retryable=False,
                                     duplicate_of=twin)
+                                dup.dup_bytes = done   # the .part is gone by the handler
+                                raise dup
                         if total:
                             # written bytes now show in disk_usage; shrink the
                             # reservation so they're never counted twice
@@ -1826,7 +1832,7 @@ def early_duplicate_check(cfg: MrfxConfig, store: Store, own_filename: str):
     same (payers repeat a huge provider list at the top of many different
     files) is never mistaken for a copy. Anything it cannot prove — no size
     match, a server that won't serve the range — means "download as usual"."""
-    def check(part: Path, total: int, url: str) -> str | None:
+    def check(part: Path, total: int, url: str) -> str | int | None:
         try:
             cands = store.fingerprint_candidates(total, exclude_filename=own_filename)
             if not cands:
@@ -1834,16 +1840,20 @@ def early_duplicate_check(cfg: MrfxConfig, store: Store, own_filename: str):
             got = part.stat().st_size
             heads: dict[int, str] = {}
             hits = []
+            later = []
             for c in cands:
                 hb = int(c["head_bytes"] or 0)
-                if not hb or hb > got:
+                if not hb:
+                    continue
+                if hb > got:
+                    later.append(hb)       # taken over a longer head: look again then
                     continue
                 if hb not in heads:
                     heads[hb] = _sha_range(part, 0, hb)
                 if heads[hb] == c["head_sha"]:
                     hits.append(c)
             if not hits:
-                return None
+                return min(later) if later else None
             tb = int(hits[0]["tail_bytes"] or 0)
             tail = _fetch_tail(cfg, url, total, tb) if tb else None
             if tail is None:
@@ -1852,6 +1862,8 @@ def early_duplicate_check(cfg: MrfxConfig, store: Store, own_filename: str):
             for c in hits:
                 if int(c["tail_bytes"] or 0) == tb and c["tail_sha"] == tsha:
                     return c["filename"]
+            if later:
+                return min(later)
         except Exception:  # noqa: BLE001 — an optimisation: never fails a download
             log.debug("early duplicate check skipped", exc_info=True)
         return None
@@ -1860,13 +1872,15 @@ def early_duplicate_check(cfg: MrfxConfig, store: Store, own_filename: str):
 def _skip_early_duplicate(cfg: MrfxConfig, store: Store, url_id: int, url: str,
                           dest: Path, e: "DownloadError") -> bool:
     part = dest.with_suffix(dest.suffix + ".part")
-    got = part.stat().st_size if part.exists() else 0
+    got = getattr(e, "dup_bytes", None)
+    if got is None:
+        got = part.stat().st_size if part.exists() else 0
     part.unlink(missing_ok=True)
     Path(str(part) + ".val").unlink(missing_ok=True)
     store.update_url(url_id, status="skipped", kind="duplicate", error=(
         f"identical to {e.duplicate_of}, already ingested — same size, same "
         f"first {cfg.early_dedup_mb} MB and same last 1 MB — skipped after "
-        f"{got / 1e6:,.0f} MB instead of downloading the whole file "
+        f"{got / 1e6:,.1f} MB instead of downloading the whole file "
         "(payers host copies of each other's files)"))
     log.info("%s — copy of %s (early check); skipped after %.0f MB",
              url, e.duplicate_of, got / 1e6)

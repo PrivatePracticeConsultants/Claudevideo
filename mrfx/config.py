@@ -190,7 +190,7 @@ class MrfxConfig(BaseModel):
     # (one small range request) and, if that matches too, stops and skips the
     # file as a duplicate. 0 turns the check off (duplicates are then caught
     # after the full download, as before).
-    early_dedup_mb: int = Field(default=100, ge=0, le=10_000)
+    early_dedup_mb: int = Field(default=15, ge=0, le=10_000)
     max_toc_files: int = Field(default=2000, ge=1)  # cap child files enqueued from one TOC
     # JavaScript-only portals: when a pasted page yields no static links,
     # render it in headless Chromium and harvest links from the rendered DOM
