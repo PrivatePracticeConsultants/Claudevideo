@@ -1025,6 +1025,63 @@ Downloads and files:
 - **"fee for service" / "fee_schedule"** spelled differently by a payer no
   longer drop rates.
 
+## What changed in version 0.7.3 (review 9)
+
+**Starting the program.** The window now says what it is doing from the first
+second: `opening the store at …`, the one-time update if there is one (with
+progress), and finally `the dashboard is ready — open http://localhost:8377`.
+The check of your stored files at start-up only reads files that are new or
+changed since the last start, so a big store opens in about the same time
+however many files it holds. If one stored file can't be read, the others are
+still updated and the window says which one was left.
+
+**Dropping or uploading a file again.** The program now recognises a file it
+already has by its contents, not just its name or size:
+- the *same* file again is reported as already loaded and is not read twice
+  (before, a 2–3 MB file could be loaded twice and every number became the
+  median of the two copies);
+- a *different* file under a loaded name, for the same insurer and month, is
+  held with two buttons on the Files tab — **Replace** or **Keep both** —
+  instead of being blended in silently;
+- a file that changes while it is being read is not recorded as loaded; the
+  next scan offers the new version.
+
+**Provider lists follow their month.** A rate file now uses the provider list
+the insurer published for the *same* month (or the newest one when it can't
+tell). Before, a June rate file could pick up March's list. A rate file that
+loaded from a link before its provider list arrived is read again (or
+downloaded again, once) when the list lands; until then its note says
+*waiting for this payer's provider reference file*. Very large provider lists
+are stored correctly on every path, and files that rely on a provider list no
+longer use memory in proportion to their size.
+
+**Numbers you sell.**
+- A report pinned to a month ("as of 2023-06") no longer shows rate changes
+  from after that month.
+- The "cut streak" counts only real month-to-month cuts on the same
+  practices and codes.
+- A practice's overall position is the same number on every screen (Leads,
+  leaderboard, payer roster, Negotiate, the one-pager, the dossier, size
+  premium). Leads' "worst payer" compares payers on the codes they both price.
+- A practice name typed in part ("ACME"), a practice outside the market's
+  state, and a mapped group are treated the same way on every screen; the
+  dossier is titled with the group's own name.
+- Report footers describe the market in words, percentages never read
+  "-0.0%", and the outreach file explains its own columns.
+
+**Faster.** The Rate changes tab's trajectory is remembered until new data
+arrives (instant on the second click) and has a State box; the outreach
+export is about twice as fast; the medians behind Benchmark and Leads are kept
+across restarts instead of being rebuilt each time.
+
+**Downloads.** Each file is requested once (a big file found by a
+small-file slot keeps downloading instead of being started again), so a queue
+of big files finishes sooner and asks the insurer's server for less.
+
+**Safer input.** A wrong value sent to the dashboard gets a plain sentence
+back, never a database error; very long file names are refused with a
+sentence.
+
 ## Version 0.7.2 — start-up fix
 
 0.7.1 updated the stored rows of every file once, at the first start, before

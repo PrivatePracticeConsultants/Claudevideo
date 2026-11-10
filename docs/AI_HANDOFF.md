@@ -409,17 +409,70 @@ Two codebases live in this repo:
   is taken from local data before any request (`_local_duplicate_verdict`,
   so an expired link never matters, F6). Early-skipped rows carry
   `duplicate_of`; forget rewrites them.
-- **Download lanes** (`small_file_downloads`, `small_file_mb`): slot 0 is
-  `small_only`, the other small slots take small/unsized rows first and help
-  with big ones when none wait, big slots take big rows first then anything.
-  A small slot hands back any row whose response is bigger OR unsized
-  (`big_lane` set, before a byte is written); `url_progress` never replaces a
-  known size with 0.
+- **Download lanes** (`small_file_downloads`, `small_file_mb`): small slots
+  take small/unsized rows first and help with big ones when none wait, big
+  slots take big rows first then anything. Since round 9 the downloader
+  never hands a started row back (it cost every big file a second GET);
+  `fetch_url_record(lane_max=…)` still can, for callers that want it.
+  `url_progress` never replaces a known size with 0.
 - **External files**: hospital CSVs read every `code|N` slot and the CMS wide
   layout (`standard_charge|<payer>|<plan>|negotiated_dollar`); hospital
   modifiers go through `modifiers.normalize`. The MPFS importer finds the
   header under title rows (`_read_rows(text, key)`), prefers the non-QPP
   PPRRVU and cross-checks the file's CONV FACTOR.
+
+### Round 9 additions (Nov 10, 2026, v0.7.3) — rules a change must keep
+
+- **File identity** (`content_fingerprints`: `size`, `mtime_ns`, `full_sha`,
+  `trailer_proves`; `ingest.same_name_verdict` -> same / replace / new):
+  "same" needs the recorded size+mtime, an equal full sha256
+  (`Store.done_file_with_sha`) or the legacy fallback — never size alone. A
+  different file for the same payer and month is HELD (`inbox/.held`,
+  status `needs_choice`) until `POST /api/files/{name}/choose`
+  (replace -> `inbox/.replacing`, keep -> a content-tagged name). A file that
+  changed while read is not recorded (`_INGEST_STAT`). `record_identity`
+  re-queues copies skipped against the OLD content when the content under a
+  name changes.
+- **Provider lists by vintage**: `Store.companion_files_for(payer,
+  last_updated_on, month)`; no vintage -> the newest. `requeue_skipped`
+  looks in downloads/ and otherwise re-queues the link
+  (`Store.requeue_url_for_file`). Ids are exact (`refid.clean_ref_id`;
+  floats only below 2^53). Empty companion entries are missing, `location`
+  ones are `REMOTE_REF` — both counted. Deferred groups spill past
+  `DEFER_MEMORY_GROUPS` (`parser._DeferredSpool`). The skims report the
+  file's `shape`; a table with no in_network is a reference file on every
+  path.
+- **Row rules 4**: a part is stamped only after it was read
+  (`_TYPE_SCAN_BATCH`, mapped by basename); a file with a parked
+  replacement waits for a later start. `.verified_parts.json` lets the
+  start-up check skip unchanged parts.
+- **One overall position** (`benchmark.overall_position` and the same rule
+  in Leads / leaderboard / roster SQL / size premium): the median of
+  UNROUNDED per-code mid-ranks over codes whose rates differ, rounded once;
+  p50 when every compared code is all-tied. Benchmark rows carry
+  `subject_percentile_exact` and `in_position`. Leads' worst payer is
+  compared on the codes all its payers share (`leads._worst_payer`).
+- **The subject rule everywhere**: every subject reader uses
+  `subject_tins_for_market` (partial names too; ids unchanged) and reads the
+  subject's own rows through `subject_market`; `resolve_subject_tins` is
+  sorted; a mapped entity is titled `mapped_entity_name`.
+- **Trajectory**: bounded by a pinned month; cut streak from chain-linked
+  steps (`step`); ONE window pass (measured faster than every self-join /
+  list / integer-key / hash-CTE variant on the 99M store), generation-cached.
+- **Materialised medians** are named by `Store.spine_key()` (a `spine_token`
+  each spine writer stores IN its own transaction + the parts' signatures +
+  rollup bookkeeping) and reused across restarts. A new spine writer must
+  write the token in its transaction.
+- **Input**: `benchmark._typed_market` — `_` keys and `curated_tins` are
+  never taken from the wire; each key typed or refused; `include_non_dollar`
+  is refused (no pooling of % with $). DuckDB conversion/binder/parser
+  errors -> 422 sentence; no SQL or path in any body (`api._plain`).
+  `test_no_wrong_typed_market_reaches_the_database` fuzzes every POST route.
+- **Printing**: `rounding.signed_pct` for every signed %; footers use
+  `benchmark.market_in_words`.
+- **Lanes are claim preferences only**: the downloader never hands a started
+  download back (one GET per file); slot 0 helps with big files; no lanes
+  with <= 2 slots. User actions and parks clear `waiting_on`.
 
 ### Audit 8 additions (Nov 10, 2026) — rules a change must keep
 

@@ -202,11 +202,21 @@ file that is downloading right now. Rather than download it twice, it waits;
 when the other one finishes it is checked and skipped as a duplicate, or
 downloaded if it turns out to be different. Nothing to do.
 
-**"big file — waiting for a big-file download slot"?** Up to three of the
-download slots take files of 100 MB or less first (one of them only ever takes
-small files), so small files never queue behind a run of huge ones; a big file
-found by a small-file slot is handed to the next free big-file slot. The numbers
-are on the line above the list and can be changed in `config/mrfx.yaml`.
+**Small files first.** Up to three of the download slots pick files of 100 MB
+or less first, so small files never queue behind a run of huge ones. When no
+small file is waiting they help with the big ones, and a slot that only finds
+out a file is big once it starts keeps downloading it (each file is
+requested once). With two slots or fewer this is off. The numbers are on the
+line above the list and can be changed in `config/mrfx.yaml`.
+
+**"A different file with the same name"?** If you drop or upload a file whose
+name is already loaded, the program checks the contents first. The very same
+file is simply reported as already loaded. A *different* file for the same
+insurer and month (a corrected re-publication, usually) is held and its row
+shows two buttons: **Replace** (use only the new file — the usual choice) or
+**Keep both** (both count toward every number). Nothing is mixed until you
+choose. A same-named file for a *different* month loads beside the old one
+under a new name, and the note says so.
 
 **Too much at once?** **Clear queue** sets aside everything still waiting and
 **Stop downloads** pauses the ones downloading; **Resume stopped** puts all of
@@ -260,6 +270,11 @@ ranked by rate, a chart of how rates spread out, and which insurer pays best.
 This page uses each practice's **newest** file only (an old rate an insurer
 has since replaced is not mixed in) — the heading says "newest file per
 contract".
+
+**Rate changes tab — State.** The *Payer trajectory* button uses the State
+box on that tab (for example `MO`). Leave it empty for every state; on a big
+store that takes noticeably longer the first time (later clicks are instant
+until new data arrives).
 
 ### Step 10. Export to Excel
 
