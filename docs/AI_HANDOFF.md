@@ -529,6 +529,74 @@ Two codebases live in this repo:
 - **`config/starter_links.txt` is generated** from the catalog
   (`known_sources.starter_links_text`); a test pins them equal.
 
+### Round 10 additions (Nov 10, 2026, v0.7.4) — rules a change must keep
+
+Pinned by `tests/mrfx/test_review10.py` (26 of its 30 cases fail on 2bb81b8).
+
+- **A superseded search is interrupted, never queued.** The page sends every
+  Explorer request with `X-Mrfx-View: <view>` and an AbortController
+  (`app.js supersede()`); the server's `_view_query` registry calls
+  `con.interrupt()` on the older request of the same view, which answers 409
+  "superseded by a newer search". `/api/summary` waits for the single-flight
+  lock (≤ 8 s) when the older holder was interrupted instead of refusing.
+  One debounce per typed box (`bind()`); a name needs ≥ 2 characters.
+- **Every per-generation cache is keyed by `Store.spine_key()`**: the
+  practice list (`spine_units_v1`, `FilterSet.units_provider`, set per app in
+  `_fs_app` — never a module global), the persisted unfiltered strip
+  (`summary_strips.v2.<spine_key>.json`; bump the `v2` when the strip's shape
+  or rounding changes). `mrfx reset` deletes both.
+- **Late name join**: a practices-first page reads spine rows by unit
+  (`_spine_rows_by_unit`) and joins names after the cut (`spine_by_unit_ok`).
+- **Entity grain is two-pass** (`entity_two_pass_ok`, `entity_light_rel`,
+  `entity_page_sql`): a light aggregate (median, newest month, AND the TIN
+  list — it is an order tiebreak) picks / filters / counts / pages the groups;
+  the list columns (`_ENTITY_HEAVY`) are built for the kept groups only.
+  Any new entity column that can be sorted or filtered on must be in the
+  light pass. A/B: 0 mismatches over 11 filters × 6 sorts × 3 offsets.
+- **NPI-grain guard follows the memory budget** (`NPI_ROWS_PER_GB`); below
+  `NARROW_REQUIRED_ROWS` a code alone is narrow enough.
+- **LIKE text is literal**: `_lit()` escapes `\ % _`, every LIKE carries
+  `ESCAPE '\'`.
+- **The house basis everywhere a rate is summarised** — newest file per
+  contract, professional, base modifiers, no NPI-in-slot rows, one rate per
+  practice first: the drawer chart, `/api/trend` (one rate per unit per
+  month; a payer needs ≥ 2 months), the overview (one comparable service per
+  discipline — the moderate evaluation codes), the Explorer's default month
+  ("latest"). The user's own class/modifier filter wins (`practice_basis`).
+- **Server-side rounding**: every median the API sends for display is
+  `round(x, 2)` in SQL / `half_up` in Python (summary strip, by-code, Code
+  page ranking); figures derived from several values are computed from the
+  UNROUNDED inputs and rounded once (weighted position, hospital multiple,
+  floors percentages).
+- **One market median**: the median of the OTHER practices
+  (`leads.others_median_sql` / `leads.median_of_others`) — Benchmark, Leads,
+  the worst-payer gap and the outreach file. Exact, without per-row lists.
+- **One subject rule** on every surface (remits, leverage, orgprofile,
+  economics, floors, utilization added this round):
+  `subject_tins_for_market`, and the subject's own rows through
+  `subject_market`.
+- **Geography is the dimension, not a filter**, on Markets' state ranking
+  (`geographic_rates` drops state/city and returns `selected_state`) and on
+  leverage alternatives (the radius is the geography). A state's city table
+  explodes only the NPIs located in that state (`territory.local_rate_map`).
+- **Rate changes for a picked month** pair each payer's file with ITS OWN
+  previous file (`monitor.payer_months`); `compared` / `not_compared` are
+  always returned and an empty comparison is a refusal, never "No changes".
+- **Ranking payers** (rate-card scorecard, Leads' worst payer, per-visit
+  value) is on the codes every compared payer prices; % of Medicare is shown,
+  not ranked on.
+- **Pinned documents stop at their month**: source-file lists, trajectory
+  `months`, sparklines. Sidecars print `file_month` per file and filters in
+  words (`api.filters_in_words`).
+- **States are two-letter codes**: `store._state_cell` normalises names on
+  save; `_compute_states` keeps `STATE_CODES` only.
+- **Wire inputs**: `_as_float` refuses NaN/inf, `_as_int` refuses overflow,
+  radii go through `_radius_arg`; a non-object `market` is a 422 everywhere.
+- **User edits that cached answers read call `Store.note_user_edit()`** —
+  now including `inflation.save_index_values`.
+- **Clients**: `clients.add_client` refuses a name that matches no practice;
+  `_save_client` is the raw writer.
+
 ## Step 4 — Know the URL pipeline states
 
 `url_queue.status`: `queued → downloading → fetched → (expanding|ingesting) →

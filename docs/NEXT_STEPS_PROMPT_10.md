@@ -1,7 +1,80 @@
 # Prompt for the next session, round 10 — fast searches, and every output says the same thing (written for Claude Opus 5.5)
 
-> **STATUS: not started.** Replace this block with what you closed, the
-> numbers, and what you left (with the reason), as rounds 7–9 did.
+> **STATUS (Nov 10, 2026, v0.7.4): Groups 1–4 closed except 1.5 (partly)
+> and 1.9's page cache — below.** Code + tests: 23d19a2; release (docs,
+> slow-test list, counts, this block): the commit after it. One code commit,
+> not one per group: the groups share `api.py` / `app.js` / `index.html`
+> hunk by hunk and a split leaves commits that do not import; its message
+> is organised by group and names each test with its 2bb81b8 value.
+> `tests/mrfx/test_review10.py`: 30 cases, 26 fail on 2bb81b8 (the 4
+> bad-input cases are covered by the reviewer's fuzz instead, below). Full
+> suite 1115 tests (the first run's 7 failures were tests pinning the old
+> rules — each updated with the reason; those files re-run green); quick
+> tier 549 tests; ruff 0; `tests/slow_tests.txt` regenerated.
+>
+> **Search, 99M-rate store, Chromium `search/ui_search.py`, quiet** (full
+> table: `review10_repros/search/ui_table_r10.md`; cold = store evicted
+> from the page cache, server started fresh, same store and driver):
+>
+> | Scenario | 0.7.3 cold | 0.7.4 cold | 0.7.3 warm (review) | 0.7.4 warm |
+> |---|---|---|---|---|
+> | First screen after a start | 11.3 s | **2.4 s** | 2.2 s | 1.1 s |
+> | Name typed at 120 ms/key | 6.0 s | **3.8 s** | 6.1 s | 3.9 s |
+> | Partial name at 400 ms/key (slow typist) | 45.2 s, 12 refused | **5.6 s**, 0 | 26.6 s, 15 | 5.7 s, 0 |
+> | 9-digit TIN at 400 ms/key | 10.4 s, 12 refused | **3.6 s**, 0 | 21.1 s, 8 | 3.6 s, 0 |
+> | Request after the last key → result | 41.1 s (slow name) | **1.5 s** | 22.5 s | 1.6 s |
+> | State typed | 6.8 s | 3.4 s | 7.3 s | 3.4 s |
+> | Clear all filters | 5.1 s | 2.7 s | 5.1 s | 2.7 s |
+>
+> First start of 0.7.4 on a store 0.7.3 built (no practice list, no stored
+> strip, cold cache): 6.5 s. One earlier first start, right after a
+> disk-heavy snapshot run, took 60.3 s (`/api/stats` 57.8 s); it did not
+> reproduce under the same conditions — like the review's unreproduced
+> 38 s `/api/stats`, worth instrumenting if a user reports it.
+> Entity grain (32M store, A/B in process): default page 3.68 → 1.29 s,
+> AL 2.32 → 0.90 s, sort by rate_max 3.09 → 1.28 s; 0 mismatches over
+> 11 filters × 6 sorts × 3 offsets + counts.
+>
+> **Byte identity** (`review9_repros/outputs/snapshot.py` + `diff_snap.py`,
+> 32M store, 125 endpoints, 2bb81b8 vs 0.7.4): 70 identical — including
+> all 24 `/api/rates` pages at every grain, search, sort, page, state and
+> the entity two-pass path, and the CSV exports; the 14 `/api/summary`
+> diffs are only the half-up rounding (3.2); every other diff is a fix
+> listed below (geography, city table, states list, scorecard, leads gaps,
+> trend basis, overview, freshness, wording). Two 0.7.4 runs: 125/125
+> identical (per-generation caches; invariant 7).
+>
+> **Bad input** (`consulting/p5_fuzz.py`): 2bb81b8 17 unique 500s in 4,501
+> requests (contract-gaps `min_peers` 1e308, new-to-network `radius_miles`
+> "NaN", trajectory and engagements/compare with a non-object market);
+> 0.7.4 none in 4,525. The run found one class this round introduced
+> (economics/visit with a non-object market, via the new subject rule);
+> closed at `subject_tins_for_market` for every surface.
+>
+> **Live Chromium, 32M real store:** `consulting/ui10.py` (63 steps, every
+> tab): 0 page errors, the same 2 expected refusals and 7 downloads as
+> 0.7.3; one new "raw JSON" hit is a tested-catalog note on Sources quoting
+> a manifest format (`{"mrfs": [...]}`) — prose, left as is. Fixed screens
+> checked (`screens.json`): Explorer month "latest", no "busy" text while
+> typing, the NPI hint, Markets ND ranks every state with ND marked, a
+> picked month with nothing comparable says so, Sources WV carries the
+> tested link, the Code page claim-type box, the evaluation-code overview.
+>
+> **Left, with the reason.**
+> - 1.5: the 2-character minimum removes the one-letter case; serving the
+>   cached unfiltered answer when a text matches every practice was not
+>   built (the strip's per-generation cache cannot hold name searches — names
+>   change as NPPES identification lands without a new generation).
+> - 1.9: the unfiltered page's base rows are not remembered and the name
+>   sort is unchanged (Clear all filters 5.1 → 2.7 s through the other
+>   fixes). The rest of 1.9 is done.
+> - Markets' state ranking still lists military mail codes (AE, 7
+>   practices on the real store): they are NPPES practice-location values
+>   in `tin_directory.states`. The "states with data" count and the state
+>   pickers exclude them; filtering the ranking the same way is a one-line
+>   follow-up (`market.geographic_rates`).
+> - Not run on Windows: everything here ran on Linux; the Windows-specific
+>   paths (launcher, updater) were not touched this round.
 
 Rounds 1–9 are `docs/NEXT_STEPS_PROMPT.md`, `_2.md` … `_9.md`. This memo
 comes from a review on Nov 10, 2026 at HEAD 2bb81b8 (version 0.7.3). The

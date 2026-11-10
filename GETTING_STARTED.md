@@ -1025,6 +1025,72 @@ Downloads and files:
 - **"fee for service" / "fee_schedule"** spelled differently by a payer no
   longer drop rates.
 
+## What changed in version 0.7.4 (review 10)
+
+**Searching is faster.** Typing in the Explorer's search box now starts the
+search as soon as you pause (it waited over half a second before), and each
+new letter cancels the search before it — the old ones no longer queue up
+behind each other, so the answer arrives sooner and is always for what is in
+the box. While it loads, the previous rows stay on screen, dimmed, instead of
+the table going blank. A name needs at least two letters. The first screen
+after a start shows up without waiting for the header counts, the summary
+strip is remembered across restarts, the Entity view pages and sorts in
+about a third of the time, and the NPI view now answers a code on its own on
+a mid-size database instead of refusing. "Stats are busy — retrying…" no
+longer appears for the search you meant. Typing an NPI in the TIN or Entity
+view says which tax ID it bills under; an NPI typed into a practice box
+suggests its practice. `%` and `_` in a search are plain characters.
+
+**The Explorer shows the same numbers as every other tab.** Its Month box now
+starts on **latest — each contract's newest file** (the basis Benchmark,
+Markets and Leads use); **all months (pooled)** is still there.
+
+**Numbers that were wrong.**
+- The market report's city table lists only the state's own cities (a practice
+  with one clinician across the border put that city in the report).
+- Markets with a State picked ranks every state on its own practices and
+  highlights the picked one (other states were computed from the picked
+  state's practices).
+- Rate changes for a picked month compare each insurer's file with that
+  insurer's own previous file, list any insurer that could not be compared,
+  and say "nothing was compared" instead of "No changes" when that is the case.
+  Each row now shows its claim type and place of service.
+- The rate card's best-paying insurer is judged on the codes the insurers
+  both price (a Medicare anchor could crown an insurer that pays less on the
+  same code).
+- Monthly packets include "Market position" again (it was always left out).
+- The row details chart, the Code page's month-by-month table and the
+  overview use the same basis as everything else (newest file, practice
+  claims, base rates); the overview's "by discipline" block compares one
+  service — the moderate evaluation — for each discipline.
+- Leads, the outreach file and Benchmark use one market median: the median
+  of the OTHER practices (Leads included the practice itself — $47.50 on
+  Leads against $48.00 on Benchmark). Positions are unchanged; "average
+  below median" and the worst-payer gap can each move by a few dollars.
+- Leads flags a practice that an insurer's newest file no longer lists (its
+  rate there is from an older file).
+- New-to-network means absent from every earlier file of that insurer.
+- Printed documents fit their columns on a landscape page.
+- Half-cents are rounded the same way everywhere ($70.70 on one screen and
+  $70.69 on another).
+- "States with data" counts states only (foreign provinces and spelled-out
+  names are folded or dropped).
+- Weighted position, the hospital multiple, the floors percentages and the
+  referral wait are rounded once, at the end.
+
+**Clearer wording.** The dossier and market report state their month and
+market; Leads' "underpaid most by" and the dossier's "weakest payer" say
+which measure they are; the Sources tab shows the links the Files tab has
+tested; freshness ignores empty files and says "dated in the future"; the
+Code page has a claim-type box (practices vs facilities); a client name that
+matches no practice is refused when you add it; the Leads CSV keeps its old
+column order (new columns are at the end) and money in CSVs has two decimals.
+
+**Positions already quoted may move.** Because Leads now measures the gap to
+the median of the other practices, a Leads "average below median" figure
+and its worst-payer gap can differ from 0.7.3 by a few dollars; positions
+(the p-numbers) do not change.
+
 ## What changed in version 0.7.3 (review 9)
 
 **Starting the program.** The window now says what it is doing from the first
@@ -1060,9 +1126,18 @@ longer use memory in proportion to their size.
   from after that month.
 - The "cut streak" counts only real month-to-month cuts on the same
   practices and codes.
-- A practice's overall position is the same number on every screen (Leads,
-  leaderboard, payer roster, Negotiate, the one-pager, the dossier, size
-  premium). Leads' "worst payer" compares payers on the codes they both price.
+- A practice's overall position is the same number on Leads, the
+  leaderboard, the payer roster, Negotiate, the one-pager and the dossier.
+  (Correction: the size-premium panel still printed a different figure — its
+  within-payer band average — until 0.7.4, which shows the overall position
+  there too.) Leads' "worst payer" compares payers on the codes they both
+  price, so Leads can name a different worst payer than 0.7.2 did.
+- Positions already quoted can move by a point (the payer roster now starts
+  from the same p50 rule), the leaderboard's code count counts the codes in
+  the position, sparkline percentages round half-up, and the negotiability
+  list can come back in a different order.
+- The Rate changes tab's State box filters "Find changes" too, not only the
+  trajectory.
 - A practice name typed in part ("ACME"), a practice outside the market's
   state, and a mapped group are treated the same way on every screen; the
   dossier is titled with the group's own name.

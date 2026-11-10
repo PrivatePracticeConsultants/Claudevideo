@@ -248,14 +248,21 @@ Each row is one insurer's rate for one code. The columns you'll use most:
 | Rate | The negotiated dollar amount for that code |
 | Payer | The insurer |
 | Code / Modifiers | The CPT code, and modifiers like GP (PT), GO (OT), GN (speech), CQ/CO (assistant) |
-| Month | Which month's file the rate came from. **By default you see every month you've loaded**, so a rate that changed shows up once per month (click the Month heading to sort). Pick a month in the **Month** box above the table to see just one. |
+| Month | Which month's file the rate came from. **By default you see each contract's newest file** ("latest — each contract's newest file" in the **Month** box) — the same rates Benchmark, Markets and Leads use, so the numbers match those tabs. Pick **all months (pooled)** to see every month you've loaded (a rate that changed then shows up once per month), or pick one month to see just that one. |
 | Variants | 1 = one clear rate. A number with ⚠ means the insurer published several different rates for the same thing; the Rate shown is their middle value — check before quoting it. |
 
-**Once your database gets big** (over about 40 million rates — many insurers
-loaded), the NPI and Entity views only answer narrow questions, so they stay
-fast: a full NPI or TIN in the search box, or a payer **and** a code picked.
-If you ask for more, a message tells you exactly what to add. To find a
-practice by **name**, use the **TIN** view's search, then click the practice.
+**Once your database gets big**, the NPI view only answers narrow questions,
+so it stays fast: a full NPI or TIN in the search box, or a code picked (on
+a very big database — over about 40 million rates — a payer **and** a code).
+How big is "big" depends on your computer's memory; if you ask for more, a
+message tells you exactly what to add. To find a practice by **name**, use
+the **TIN** view's search, then click the practice. Typing an NPI in the
+**TIN** or **Entity** view tells you which tax ID it bills under.
+
+**Searching.** Results start as soon as you stop typing (a name needs at
+least two letters). While the new results load, the old ones stay on screen,
+dimmed; each new letter cancels the search before it, so the answer you see
+is always for what is in the box.
 
 Things the program leaves out on purpose (so the numbers are real rates):
 "bundled" package prices, percentage-of-charge rates (switch **dollar rates
