@@ -20,6 +20,16 @@ from __future__ import annotations
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 
+def signed_pct(x, ndigits: int = 1) -> str:
+    """A signed percentage the way every report prints one: half-up (half_up)
+    and never "-0.0%" — $40.00 -> $39.99 is -0.025 %, which Python's format
+    printed as "-0.0% in dollars … but -2.9% in real terms" (review 9 4.9)."""
+    v = half_up(float(x), ndigits)
+    if v == 0:
+        v = 0.0
+    return f"{v:+.{ndigits}f}%"
+
+
 def half_up(x, ndigits: int | None = None):
     if x is None:
         raise TypeError("half_up() of None")   # same contract as round()

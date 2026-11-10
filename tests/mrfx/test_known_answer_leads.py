@@ -408,6 +408,7 @@ def test_the_dossier_position_is_a_median_not_a_mean(leads_app, monkeypatch):
         for r in b["rows"]:
             if r.get("subject_percentile") is not None:
                 r["subject_percentile"] = {"97530": 90.0}.get(r["billing_code"], 10.0)
+                r["subject_percentile_exact"] = r["subject_percentile"]
         return b
     monkeypatch.setattr(bm, "compute_benchmark", skewed)
     meta = leads_app.post("/api/report/dossier.json", json=DOSSIER).json()

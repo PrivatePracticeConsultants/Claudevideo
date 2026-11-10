@@ -1333,6 +1333,7 @@ class Store:
                     con.execute("ALTER TABLE rates_by_tin_tbl "
                                 "ADD COLUMN is_latest BOOLEAN DEFAULT FALSE")
                     self._mark_latest(con)
+                    con.execute("INSERT OR REPLACE INTO meta VALUES ('spine_token', ?)", [os.urandom(8).hex()])
                     con.execute("COMMIT")
                 except Exception:
                     try:
@@ -4223,6 +4224,10 @@ class Store:
                 # via rollup_pending_tins, so the DELETE above drops its row
                 # and the INSERT re-creates it only if rates remain. The old
                 # anti-join scanned all of `rates` on every update.)
+                if tbl == "rates_by_tin_tbl":
+                    # in the spine's own transaction: a crash can never leave
+                    # a new spine under the old token (spine_key)
+                    con.execute("INSERT OR REPLACE INTO meta VALUES ('spine_token', ?)", [os.urandom(8).hex()])
                 con.execute("COMMIT")
             except Exception:
                 try:
@@ -4387,6 +4392,8 @@ class Store:
                         con.execute(f"INSERT INTO {tbl} {query.format(part=pred)}")
                     log.info("rollup %s: writing to the database file (can take "
                              "minutes on a hard drive; not stuck)", tbl)
+                if tbl == "rates_by_tin_tbl":
+                    con.execute("INSERT OR REPLACE INTO meta VALUES ('spine_token', ?)", [os.urandom(8).hex()])
                 con.execute("COMMIT")
             except Exception:
                 try:
@@ -4519,31 +4526,57 @@ class Store:
             held = self._spine_mat.get(name)
             if held and held[0] == gen and held[1].exists():
                 return f"read_parquet('{sql_path(held[1])}')"
-            path = self.dir / f"{name}.{self._instance_tag}-{gen}.parquet"
-            tmp = path.with_name(path.name + ".tmp")
-            try:
-                with self.connect() as con:
-                    con.execute(f"COPY ({select_sql}) TO '{sql_path(tmp)}' "
-                                "(FORMAT PARQUET)", list(params))
-                os.replace(tmp, path)
-            except BaseException:
-                tmp.unlink(missing_ok=True)
-                raise
+            # keyed by the spine's CONTENT (spine_key), not by this process:
+            # a random per-process tag rebuilt every file on every start (part
+            # of an 8-13 s first call) and left other instances' files for 6
+            # hours — five restarts left ~490 MB beside the store (review 9
+            # item 4.6). The same spine is the same file, across restarts.
+            path = self.dir / f"{name}.{self.spine_key()}.parquet"
+            if not path.exists():
+                tmp = path.with_name(f"{path.name}.{os.getpid()}-{os.urandom(3).hex()}.tmp")
+                try:
+                    with self.connect() as con:
+                        con.execute(f"COPY ({select_sql}) TO '{sql_path(tmp)}' "
+                                    "(FORMAT PARQUET)", list(params))
+                    os.replace(tmp, path)
+                except BaseException:
+                    tmp.unlink(missing_ok=True)
+                    raise
             self._spine_mat[name] = (gen, path)
-            now = time.time()
+            # every other file of this name is superseded (a newer spine) or
+            # an old naming; a reader that still holds one rebuilds it (the
+            # exists() check above)
             for old in self.dir.glob(f"{name}.*.parquet*"):
-                if old == path:
+                if old == path or old.name.endswith(".tmp"):
                     continue
                 try:
-                    # this instance's older generations always; another
-                    # instance's (a second Store on the same folder: tests, a
-                    # CLI command) only once it is clearly abandoned
-                    mine = old.name.startswith(f"{name}.{self._instance_tag}-")
-                    if mine or now - old.stat().st_mtime > 6 * 3600:
-                        old.unlink()
+                    old.unlink()
                 except OSError:          # still open on Windows: next time
                     pass
             return f"read_parquet('{sql_path(path)}')"
+
+    def spine_key(self) -> str:
+        """The identity of the spine's content: the token every spine write
+        stores in its own transaction, plus the rate parts' signatures and the
+        rollup bookkeeping (so a writer that forgot the token still changes
+        the key). Two processes on the same spine compute the same key."""
+        import hashlib
+        with self.connect() as con:
+            meta = dict(con.execute(
+                "SELECT key, value FROM meta WHERE key IN ('spine_token', "
+                "'rollup_covered_through', 'rollup_covered_names', "
+                "'rollup_pending_payers', 'rollup_needs_full', "
+                "'rollup_schema_version')").fetchall())
+        if not meta.get("spine_token"):
+            with self.write_lock, self.connect() as con:
+                con.execute("INSERT INTO meta SELECT 'spine_token', ? WHERE NOT EXISTS "
+                            "(SELECT 1 FROM meta WHERE key = 'spine_token')",
+                            [os.urandom(8).hex()])
+                meta["spine_token"] = con.execute(
+                    "SELECT value FROM meta WHERE key = 'spine_token'").fetchone()[0]
+        return hashlib.sha1(json.dumps(
+            [sorted(meta.items()), sorted(self._part_sigs().items())]
+        ).encode()).hexdigest()[:16]
 
     def note_user_edit(self) -> None:
         """A user edit that a cached answer reads (Store.cached) just landed:
@@ -5403,6 +5436,7 @@ class Store:
                             [json.dumps(held)])
                 for tbl in ("rates_dedup_tbl", "rates_by_tin_tbl", "tin_directory_tbl"):
                     con.execute(f"DROP TABLE IF EXISTS {tbl}")
+                con.execute("INSERT OR REPLACE INTO meta VALUES ('spine_token', ?)", [os.urandom(8).hex()])
                 self._register_views(con)
             # url_queue ids are gone; drop any lingering cancel flags so a reused
             # id can never inherit a stale "canceled" verdict

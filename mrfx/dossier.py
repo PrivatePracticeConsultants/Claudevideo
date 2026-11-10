@@ -26,13 +26,11 @@ from __future__ import annotations
 import datetime as dt
 import html
 import logging
-import statistics
 
 from . import __version__
 from .config import MrfxConfig
 from .sqlfn import modal_zip_of
 from .store import Store
-from .rounding import half_up
 
 log = logging.getLogger(__name__)
 
@@ -102,10 +100,13 @@ def build_prospect_dossier(cfg: MrfxConfig, store: Store, subject: str,
                            market: dict | None = None, *,
                            radius_miles: float = 25.0) -> dict:
     """One page about a practice you have never spoken to."""
-    from .benchmark import BenchmarkError, resolve_subject_tins
+    from .benchmark import BenchmarkError, mapped_entity_name, subject_tins_for_market
     e = html.escape
     market = dict(market or {})
-    tins = resolve_subject_tins(store, subject)
+    # the same TINs every section uses: the header said "(KS, MO)" above a
+    # rate table of the MO practice only (review 9 item 4.4)
+    tins = subject_tins_for_market(store, subject, market)
+    mapped = mapped_entity_name(store, subject)
     if not tins:
         raise BenchmarkError(f"no practice matches {subject!r}")
     # resolve_subject_tins falls through to the RAW STRING for an unknown
@@ -173,6 +174,7 @@ def build_prospect_dossier(cfg: MrfxConfig, store: Store, subject: str,
                 "list_sort(list_distinct(flatten(list(states)))) FROM tin_directory "
                 "WHERE tin_value IN (SELECT unnest(?::VARCHAR[]))", [tins]).fetchone()
         name, npis, cities, states = row or (None, None, None, None)
+        name = mapped or name
         facts["display_name"] = name or subject
         facts["npi_count"] = npis
         where = ", ".join(list(cities or [])[:3]) + \
@@ -216,8 +218,8 @@ def build_prospect_dossier(cfg: MrfxConfig, store: Store, subject: str,
         # the MEDIAN of the per-code positions — the one headline rule the
         # Leads list and the per-payer view use. This was a mean stored under
         # this name, so one outlier code swung the dossier but not the list.
-        facts["median_percentile"] = half_up(
-            statistics.median(r["subject_percentile"] for r in rows), 0)
+        from .benchmark import overall_position
+        facts["median_percentile"] = overall_position(rows)
         body = "".join(
             f"<tr><td>{e(r['billing_code'])}</td>"
             f"<td class='num'>${(r['subject_rate'] or 0):,.2f}</td>"

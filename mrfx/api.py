@@ -587,6 +587,50 @@ class FilterSet:
         return " AND ".join(cl) if cl else "1=1"
 
 
+_PATHISH = re.compile(r"(?:[A-Za-z]:[\\/]|/)(?:[^\s'\"]+[\\/])+[^\s'\"]*")
+
+
+def _plain(text: str) -> str:
+    """An error sentence for the client with no file-system path in it (a
+    300-character upload name answered "File name too long: '<the whole inbox
+    path>'" — review 9 item 4.7). The full text is in the log."""
+    return _PATHISH.sub("<path>", str(text))[:600]
+
+
+def _str_list(v, field: str, *, cap: int = 5000) -> list[str]:
+    """A list of names/ids off the wire: one string is a list of one, a number
+    is refused in words (`{"tins": 5}` answered 500 TypeError; a 20,000-
+    character `subjects` string was iterated per character and stalled the
+    server for minutes — review 9 item 4.7)."""
+    if v in (None, "", []):
+        return []
+    if isinstance(v, str):
+        v = [v]
+    if not isinstance(v, (list, tuple)) or any(isinstance(x, (dict, list, tuple)) for x in v):
+        raise HTTPException(422, f"{field} must be a list of text values")
+    if len(v) > cap:
+        raise HTTPException(422, f"{field} lists more than {cap:,} values")
+    return [str(x).strip() for x in v if x is not None and str(x).strip()]
+
+
+# a file name the app writes under its own folders: Windows' 260-character
+# path limit bites well before Linux's 255-byte name limit
+MAX_NAME_CHARS = 150
+
+
+def _import_path(body: dict, missing: str) -> str:
+    """A path to a file on this computer, from an import request."""
+    v = body.get("path")
+    if v is not None and not isinstance(v, str):
+        raise HTTPException(422, "path must be text — the location of the file")
+    path = (v or "").strip()
+    if not path:
+        raise HTTPException(422, missing)
+    if len(path) > 1000 or "\x00" in path:
+        raise HTTPException(422, "that is not a file path this computer can open")
+    return path
+
+
 def _qp(request: "Request") -> dict:
     """Query params as a MUTABLE plain dict (handlers add/remove keys), but with
     the free-text multi-value `payer` filter preserved as the FULL list of
@@ -897,6 +941,51 @@ def export_select(grain: str, fs: FilterSet, sort: str, direction: str) -> tuple
         FROM ({rel_sql(grain, fs)}) src {order_sql(sort, direction, "src.")}
     """
     return sql, fs.params
+
+
+def outreach_methodology(store: Store, grain: str, fs: FilterSet, market: dict) -> str:
+    """The outreach file's OWN methodology (review 9 item 4.8). It reused the
+    Explorer's, which described a different file: "one row per payer x
+    billing_code x entity x … x month" and "ALL months pooled" above columns
+    that are one row per organization on the latest month — and it listed a
+    billing_class filter as if it changed numbers that stay professional.
+    Here the dashboard's filters choose WHICH organizations are listed; the
+    basis of every number is stated once."""
+    from .outreach import OUTREACH_COLUMNS_NOTE
+    month = market.get("month") or "latest"
+    payers = market.get("payers") or []
+    with store.connect() as con:
+        files = con.execute(
+            "SELECT filename, payer, substr(coalesce(last_updated_on, ''), 1, 7) "
+            "FROM files WHERE status = 'done' AND file_type = 'in_network' "
+            "ORDER BY filename").fetchall()
+    unit = "organization (entity)" if grain == "entity" else "billing tax ID (TIN)"
+    return "\n".join([
+        f"MRF Explorer v{__version__} outreach file methodology",
+        f"Generated: {dt.datetime.now(dt.timezone.utc).isoformat()}",
+        f"Rows: one row per {unit}, with its name, address and contact fields and "
+        "per-code columns. One row per organization — not one per payer, code or month.",
+        "Which organizations are listed: those with at least one published rate "
+        "matching the dashboard's filters at export time "
+        f"({json.dumps(fs.described, default=str)}). These filters choose the LIST; "
+        "they do not change the numbers below.",
+        "The numbers (every C<code>_* column) are on one basis: "
+        + ("the newest published month of each payer's contract (latest)"
+           if str(month).lower() == "latest" else f"the published month {month}")
+        + (f", payers {', '.join(payers)}" if payers else ", every payer")
+        + ", dollar rates, base modifiers, professional claims, $0/$0.01 "
+        "placeholders excluded — whatever class, modifier or outlier filter "
+        "chose the list.",
+        "",
+        OUTREACH_COLUMNS_NOTE,
+        "",
+        "SSN-pattern tax IDs are masked. Names and addresses come from NPPES.",
+        "Rate files in the store at export time: "
+        + ("; ".join(f"{f[0]} ({f[1]}, month {f[2]})" for f in files) or "none"),
+        "Caveats: a negotiated rate is not per-visit revenue (timed 15-minute "
+        "units, MPPR, CQ/CO reductions, cost-share); payers publish rates for "
+        "codes a practice never bills; a published rate is not proof of collection.",
+    ])
 
 
 def methodology_text(cfg: MrfxConfig, store: Store, grain: str, fs: FilterSet,
@@ -1782,7 +1871,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         so it shows on the org however a later view resolves it. Accepts only
         http(s) URLs; anything else is rejected rather than stored as a bad
         link."""
-        tins = [str(t).strip() for t in (body.get("tins") or []) if str(t).strip()]
+        tins = _str_list(body.get("tins"), "tins")
         url = str(body.get("url") or "").strip()
         if not tins:
             raise HTTPException(422, "at least one tax id (tins) is required")
@@ -2002,6 +2091,11 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         # collapse to "" → dest would be the inbox dir itself; fall back to a
         # safe name so the temp/rename never targets a directory
         safe = Path(file.filename or "upload.json").name or "upload.json"
+        if len(safe) > MAX_NAME_CHARS:
+            # the OS refusal named the whole inbox path (review 9 item 4.7),
+            # and Windows refuses far earlier than Linux
+            raise HTTPException(422, f"that file name is {len(safe)} characters long — "
+                                f"rename it to under {MAX_NAME_CHARS} and drop it again")
         dest = cfg.inbox_dir / safe
         # stream to a name the inbox scanner ignores, rename when COMPLETE —
         # the watcher fires on creation and would otherwise preflight (and
@@ -2323,7 +2417,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                                 "message": "finding the tracker's files…"})
         try:
             found = {p["path"]: p for p in _tracker_discover()["pending"]}
-            want = body.get("paths")
+            want = _str_list(body.get("paths"), "paths")
             # Import only what discovery just offered: the request names files
             # by path, and echoing an arbitrary path back into a reader would
             # let the dashboard read anywhere on disk.
@@ -2371,7 +2465,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         inconsistently and a sparse radar must never read as a schedule."""
         from .contracts import renewal_radar
         try:
-            return renewal_radar(store, body.get("subjects") or None,
+            return renewal_radar(store, _str_list(body.get("subjects"), "subjects", cap=500) or None,
                                  body.get("market") or {},
                                  within_days=_as_int(body.get("within_days"), 365))
         except BenchmarkError as e:
@@ -2433,13 +2527,13 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         fragile than DuckDB streaming it off disk (same reason the Medicare
         tab imports the tracker's files by path)."""
         from .utilization import UtilizationImportError, import_utilization
-        path = str(body.get("path") or "").strip()
-        if not path:
-            raise HTTPException(422, "give the path to the CSV you downloaded")
+        path = _import_path(body, "give the path to the CSV you downloaded")
         try:
             return import_utilization(store, path, str(body.get("year") or "") or None)
         except UtilizationImportError as e:
             raise HTTPException(422, str(e))
+        except OSError as e:
+            raise HTTPException(422, f"could not read that file: {_plain(e)}")
 
     @app.get("/api/demographics/status")
     def api_demographics_status():
@@ -2449,14 +2543,14 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     @app.post("/api/demographics/import")
     def api_demographics_import(body: dict = Body(...)):
         from .demographics import DemographicsImportError, import_demographics
-        path = str(body.get("path") or "").strip()
-        if not path:
-            raise HTTPException(422, "give the path to the ACS CSV you downloaded")
+        path = _import_path(body, "give the path to the ACS CSV you downloaded")
         try:
             return import_demographics(store, path,
                                        str(body.get("vintage") or "") or None)
         except DemographicsImportError as e:
             raise HTTPException(422, str(e))
+        except OSError as e:
+            raise HTTPException(422, f"could not read that file: {_plain(e)}")
 
     @app.post("/api/market/sizing")
     def api_market_sizing(body: dict = Body(...)):
@@ -2534,7 +2628,11 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         dest = (Path(cfg.store_dir) / "uploads" /
                 f"{os.getpid()}-{_uuid.uuid4().hex[:8]}")
         dest.mkdir(parents=True, exist_ok=True)
-        p = dest / (Path(file.filename or "schedule.csv").name or "schedule.csv")
+        fname = Path(file.filename or "schedule.csv").name or "schedule.csv"
+        if len(fname) > MAX_NAME_CHARS:
+            raise HTTPException(422, f"that file name is {len(fname)} characters long — "
+                                f"rename it to under {MAX_NAME_CHARS} and try again")
+        p = dest / fname
         try:
             with open(p, "wb") as out:
                 while chunk := file.file.read(1 << 20):
@@ -2546,7 +2644,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         except FloorImportError as e:
             raise HTTPException(422, str(e))
         except (OSError, ValueError) as e:
-            raise HTTPException(422, f"could not read that file: {e}")
+            raise HTTPException(422, f"could not read that file: {_plain(e)}")
         finally:
             p.unlink(missing_ok=True)
             try:
@@ -2876,7 +2974,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         except HospitalImportError as e:
             raise HTTPException(422, str(e))
         except (OSError, ValueError) as e:
-            raise HTTPException(422, f"could not read that file: {e}")
+            raise HTTPException(422, f"could not read that file: {_plain(e)}")
         finally:
             p.unlink(missing_ok=True)
             try:
@@ -3116,9 +3214,11 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 "SELECT DISTINCT npi FROM rates WHERE tin_value IN "
                 "(SELECT unnest(?::VARCHAR[])) AND npi IS NOT NULL ORDER BY npi",
                 [tins]).fetchall()]
-            name = (con.execute(
-                "SELECT any_value(display_name) FROM tin_directory WHERE tin_value "
-                "IN (SELECT unnest(?::VARCHAR[]))", [tins]).fetchone() or [None])[0]
+            # one name, the same on every call (review 9 4.10: any_value
+            # gave a multi-TIN subject a different member's name per call)
+            from .benchmark import mapped_entity_name
+            from .clients import subject_display_name
+            name = subject_display_name(con, tins, mapped_entity_name(store, subject))
         if not npis:
             raise HTTPException(
                 422, f"no practice with NPIs matched '{subject}'. The Medicare "
@@ -3162,7 +3262,6 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         grain = grain_of(qp, cfg, store)
         if grain == "npi":
             grain = "tin"  # outreach is entity-level by definition
-        from .outreach import OUTREACH_COLUMNS_NOTE
         fs = _fs(qp)
         # the per-code columns are on the house basis, at the dashboard's
         # month and payer choice (outreach.build_outreach_rows)
@@ -3171,8 +3270,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         headers, rows = build_outreach_rows(
             store, rel_sql(grain, fs), fs.params, fs.described.get("codes"), market=market
         )
-        method = methodology_text(cfg, store, grain, fs, "display_name", "asc", "outreach")
-        return outreach_csv(headers, rows), method + "\n\n" + OUTREACH_COLUMNS_NOTE
+        return outreach_csv(headers, rows), outreach_methodology(store, grain, fs, market)
 
     @app.get("/api/export/outreach.csv")
     def export_outreach(request: Request, background: BackgroundTasks):
@@ -3594,7 +3692,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, "peer set name required")
         store.save_peer_set(name, {
             "mode": body.get("mode", "curated"),
-            "tins": [str(t).replace("-", "") for t in (body.get("tins") or [])],
+            "tins": [t.replace("-", "") for t in _str_list(body.get("tins"), "tins")],
             "notes": body.get("notes", ""),
         })
         return {"peer_sets": store.peer_sets()}
@@ -3791,8 +3889,21 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             # a filter/parameter the request supplied was unusable (e.g. the
             # explorer month filter given the report tabs' 'latest' sentinel) —
             # client input, not a server fault
-            return JSONResponse(status_code=422, content={"error": str(exc)})
-        return JSONResponse(status_code=500, content={"error": f"{type(exc).__name__}: {exc}"})
+            return JSONResponse(status_code=422, content={"error": _plain(str(exc))})
+        import duckdb
+        if isinstance(exc, (duckdb.ConversionException, duckdb.BinderException,
+                            duckdb.ParserException, duckdb.InvalidInputException,
+                            duckdb.OutOfRangeException, TypeError)):
+            # a value of the wrong kind reached the database: the client's
+            # input, said in words. The raw text quoted the SQL ("LINE 3: …")
+            # and file paths (review 9 item 4.7); it is in the log
+            return JSONResponse(status_code=422, content={"error": (
+                "One of the values sent could not be used (a filter of the wrong "
+                "kind, e.g. a list where a single value belongs). Check the "
+                "filters and try again.")})
+        return JSONResponse(status_code=500, content={"error": (
+            f"Something went wrong answering this ({type(exc).__name__}). The "
+            "details are in the server log.")})
 
     async def _widen_threadpool():
         # sync endpoints + their lock-waits share anyio's default 40-token

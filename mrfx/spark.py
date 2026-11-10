@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import html
 import math
-from .rounding import half_up
+from .rounding import half_up, signed_pct
 
 
 def _fmt(v) -> str:
@@ -75,7 +75,9 @@ def sparkline(points, *, width: int = 84, height: int = 22,
     end_x, end_y = x(n - 1), y(last)
     tip = (f"{label + ' — ' if label else ''}median contract: "
            + " → ".join(f"{m} {_fmt(v)}" for m, v in pts))
-    pct = (f" ({(last - first) / first * 100:+.1f}%)" if first else "")
+    # half-up like every printed number: $80.00 -> $81.00 is +1.25 %, which
+    # Python's format printed "+1.2%" beside "+1.3" in Rate changes (4.9)
+    pct = (f" ({signed_pct((last - first) / first * 100)})" if first else "")
     return (
         f'<svg class="spark" width="{width}" height="{height}" '
         f'viewBox="0 0 {width} {height}" role="img" '

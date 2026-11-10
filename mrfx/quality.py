@@ -221,8 +221,7 @@ def size_premium(store: Store, market: dict | None = None, *,
     then compared on those scores.
     """
     from .benchmark import (BenchmarkError, _market_where, _rates_relation,
-                            normalize_market, practice_base_sql, resolve_plan_scope,
-                            resolve_subject_tins)
+                            normalize_market, practice_base_sql, resolve_plan_scope)
 
     # a band below ONE practice cannot exist; a hostile 0/negative walked
     # straight into indexing an empty percentile list (found by audit)
@@ -231,10 +230,17 @@ def size_premium(store: Store, market: dict | None = None, *,
     base_q, params = practice_base_sql(store, m, per_payer=True)
     where, wparams = _market_where(m, bool(m.get("include_assistant")),
                                    bool(m.get("include_non_dollar")))
-    rel = _rates_relation(m)
-    subject_tins = resolve_subject_tins(store, subject) if subject else []
+    # the subject: its own TINs and rows under the ONE subject rule, ranked
+    # against the market's peers — an out-of-state subject answered "no rates
+    # under this market scope" beside a Benchmark that priced it (review 9 4.4)
+    from .benchmark import subject_market, subject_tins_for_market
+    subject_tins = subject_tins_for_market(store, subject, m) if subject else []
     if subject and not subject_tins:
         raise BenchmarkError(f"no practice matches {subject!r}")
+    s_m = subject_market(m)
+    where, wparams = _market_where(s_m, bool(m.get("include_assistant")),
+                                   bool(m.get("include_non_dollar")))
+    rel = _rates_relation(s_m)
 
     # the house MID-RANK within (payer, code) (leads.MIDRANK_PCT), so the
     # metric is a POSITION comparable across codes with very different dollar
@@ -246,16 +252,21 @@ def size_premium(store: Store, market: dict | None = None, *,
         WITH per_tin AS ({base_q}),
         cells AS (
             SELECT *, count(*) OVER (PARTITION BY payer, billing_code) AS n_in_cell,
+                   count(DISTINCT round(rate, 2)) OVER (PARTITION BY payer, billing_code)
+                                            AS n_rates,
                    {midrank_pct_sql("payer, billing_code")} AS pct
             FROM per_tin
         )
         SELECT c.tin_value,
-               round(avg(c.pct), 1)         AS avg_percentile,
+               -- p50 when every cell it is in pays everyone the same
+               coalesce(avg(c.pct) FILTER (WHERE c.n_rates >= 2), 50.0) AS avg_percentile,
                count(*)                     AS n_cells,
                round(median(c.rate), 2)     AS median_rate,
                any_value(d.npi_count)       AS npi_count
         FROM cells c LEFT JOIN tin_directory d USING (tin_value)
-        -- a one- or two-practice cell has no meaningful percentile
+        -- a one- or two-practice cell has no meaningful percentile, and a
+        -- cell where everyone is paid the same ranks no one (the one
+        -- overall-position code set; review 9 item 4.3)
         WHERE c.n_in_cell >= 3
         GROUP BY c.tin_value
     """
@@ -297,7 +308,38 @@ def size_premium(store: Store, market: dict | None = None, *,
 
     subj = None
     if subject_tins:
-        mine = [r for r in rows if r["tin_value"] in set(subject_tins)]
+        # the subject's position in each (payer, code) cell: mid-rank among
+        # the OTHER practices of the market (identical to the cell rank above
+        # for a subject inside the market; defined for one outside it)
+        subj_q, subj_params = practice_base_sql(
+            store, s_m, per_payer=True,
+            extra=" AND t.tin_value IN (SELECT unnest(?::VARCHAR[]))",
+            extra_params=[subject_tins])
+        with store.connect() as con:
+            cur = con.execute(f"""
+                WITH per_tin AS ({base_q}),
+                subj AS ({subj_q}),
+                peers AS (SELECT * FROM per_tin
+                          WHERE tin_value NOT IN (SELECT unnest(?::VARCHAR[]))),
+                scored AS (
+                    SELECT s.tin_value, s.rate,
+                           100.0 * (count(*) FILTER (WHERE round(p.rate, 2) < round(s.rate, 2))
+                                    + 0.5 * count(*) FILTER (WHERE round(p.rate, 2) = round(s.rate, 2)))
+                           / count(*) AS pct,
+                           NOT (min(round(p.rate, 2)) = round(s.rate, 2)
+                                AND max(round(p.rate, 2)) = round(s.rate, 2)) AS ranks
+                    FROM subj s JOIN peers p USING (payer, billing_code)
+                    GROUP BY s.tin_value, s.payer, s.billing_code, s.rate
+                    HAVING count(*) >= 2
+                )
+                SELECT c.tin_value,
+                       coalesce(avg(c.pct) FILTER (WHERE c.ranks), 50.0) AS avg_percentile,
+                       count(*) AS n_cells, round(median(c.rate), 2) AS median_rate,
+                       any_value(d.npi_count) AS npi_count
+                FROM scored c LEFT JOIN tin_directory d USING (tin_value)
+                GROUP BY c.tin_value
+            """, [*params, *subj_params, subject_tins])
+            mine = [dict(zip([x[0] for x in cur.description], r)) for r in cur.fetchall()]
         if not mine:
             # Two very different reasons for no rows, and they must not be
             # conflated. resolve_subject_tins falls through to the RAW STRING
@@ -368,12 +410,14 @@ def code_type_flag(store: Store, market: dict | None, subject: str) -> dict:
     """What kind of rate the SUBJECT's own rows are — the version of the
     rate-type question that belongs in a client's own report."""
     from .benchmark import (_market_where, _rates_relation, normalize_market,
-                            resolve_plan_scope, resolve_subject_tins)
+                            resolve_plan_scope)
 
+    from .benchmark import subject_market, subject_tins_for_market
     m = resolve_plan_scope(store, normalize_market(market or {}))
-    tins = resolve_subject_tins(store, subject)
+    tins = subject_tins_for_market(store, subject, m)
     if not tins:
         return {"rows": [], "derived_pct": None, "flag": False, "note": TYPE_NOTE}
+    m = subject_market(m)            # the subject's OWN rows (review 9 4.4)
     where, params = _market_where(m, bool(m.get("include_assistant")),
                                   bool(m.get("include_non_dollar")))
     rel = _rates_relation(m)

@@ -10,11 +10,10 @@ from __future__ import annotations
 
 import datetime as dt
 import html
-import json
 import logging
 import statistics
 
-from .rounding import half_up
+from .rounding import half_up, signed_pct
 from . import __version__
 from .catalog import code_info
 from .config import MrfxConfig
@@ -101,6 +100,83 @@ def is_latest(market: dict) -> bool:
     return str(market.get("month") or "").strip().lower() == LATEST_MONTH
 
 
+# Every market key a client may send, by type (review 9 item 4.7). A key the
+# app derives itself — `_plan_files`, `curated_tins`, anything starting with
+# "_" — is NEVER taken from the wire: a client sending
+# `_plan_files: ["alpha_2026-06.json"]` silently scoped Benchmark to one file
+# ($40.00 with 9 peers instead of $41.00 with 10) and the echoed market did
+# not show it. A wrong-typed value is a refusal in words; it used to reach
+# DuckDB and come back as a 500 quoting the SQL ("can't be cast to VARCHAR[]
+# … LINE 3: …").
+_MARKET_TEXT = ("month", "prev_month", "billing_class", "discipline", "pos", "city",
+                "plan", "peer_set", "primary_discipline", "entity_kind")
+_MARKET_FLAGS = ("base_only", "include_assistant", "include_non_dollar", "therapy_only",
+                 "allow_national")
+_MARKET_DERIVED = ("curated_tins",)
+
+
+def _market_text(key: str, v):
+    if v is None:
+        return None
+    if isinstance(v, bool) or not isinstance(v, (str, int, float)):
+        raise BenchmarkError(f"market.{key} must be text, not {_kind(v)}")
+    s = str(v).strip()
+    if "\x00" in s:
+        raise BenchmarkError(f"market.{key} contains a character that cannot be used")
+    return s[:200]
+
+
+def _market_flag(key: str, v):
+    if v is None or isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)) and v in (0, 1):
+        return bool(v)
+    if isinstance(v, str) and v.strip().lower() in ("true", "false", "1", "0", "yes", "no", ""):
+        return v.strip().lower() in ("true", "1", "yes")
+    raise BenchmarkError(f"market.{key} must be true or false, not {_kind(v)}")
+
+
+def _kind(v) -> str:
+    return {dict: "an object", list: "a list", tuple: "a list", bool: "true/false",
+            str: "text"}.get(type(v), "a number" if isinstance(v, (int, float)) else "that")
+
+
+def _typed_market(market: dict) -> dict:
+    m: dict = {}
+    for k, v in market.items():
+        k = str(k)
+        if k.startswith("_") or k in _MARKET_DERIVED:
+            continue                              # derived by the app, never the wire
+        if k in _MARKET_TEXT:
+            m[k] = _market_text(k, v)
+        elif k in _MARKET_FLAGS:
+            m[k] = _market_flag(k, v)
+        elif k == "codes":
+            if v in (None, "", []):
+                continue
+            codes = [v] if isinstance(v, str) else v
+            if not isinstance(codes, (list, tuple)):
+                raise BenchmarkError("market.codes must be a list of billing codes")
+            m[k] = [_market_text("codes", c).upper() for c in codes
+                    if c is not None and str(c).strip()][:5000]
+        elif k == "target_percentile":
+            if v in (None, ""):
+                continue
+            try:
+                if isinstance(v, bool):
+                    raise ValueError
+                m[k] = int(v)
+            except (TypeError, ValueError):
+                raise BenchmarkError(
+                    f"market.target_percentile must be one of {PERCENTILES}") from None
+        elif k in ("payers", "state"):
+            m[k] = v                              # validated just below
+        elif v is None or isinstance(v, (str, int, float, bool)):
+            m[k] = v                              # unknown scalar: harmless, echoed
+        # an unknown object/list key is dropped: nothing reads it
+    return m
+
+
 def normalize_market(market: dict | None) -> dict:
     """Copy of `market` with an explicit as-of vintage: an empty/missing month
     means LATEST_MONTH (newest file per contract). Every compute entry point
@@ -118,7 +194,16 @@ def normalize_market(market: dict | None) -> dict:
     if market is not None and not isinstance(market, dict):
         raise BenchmarkError("market must be an object of filters, "
                              "e.g. {\"month\": \"latest\"}")
-    m = dict(market or {})
+    m = _typed_market(market or {})
+    if m.get("include_non_dollar"):
+        # (API only.) A percentage-of-charges or per-diem "rate" is not a
+        # price in dollars: pooled, an 80 (%) and a $40 gave a $60.00
+        # median that no contract pays, while the rate card printed $40.00
+        # (review 9 item 4.9). Refused rather than blended.
+        raise BenchmarkError(
+            "percentage and per-diem rates cannot be pooled with dollar rates — "
+            "these views compare dollars. See them in the Explorer (untick "
+            "'dollar rates only').")
     if not str(m.get("month") or "").strip():
         m["month"] = LATEST_MONTH
     else:
@@ -130,6 +215,8 @@ def normalize_market(market: dict | None) -> dict:
         if isinstance(payers, str):          # a single payer is natural input
             payers = [payers]
         elif not isinstance(payers, (list, tuple)):
+            raise BenchmarkError("payers must be a list of payer names")
+        if any(isinstance(p, (dict, list, tuple)) for p in payers):
             raise BenchmarkError("payers must be a list of payer names")
         m["payers"] = [str(p).strip() for p in payers
                        if p is not None and str(p).strip()]
@@ -183,6 +270,49 @@ def public_market(market: dict, drop: tuple = ()) -> dict:
     be a human-readable restatement of what was asked for."""
     return {k: v for k, v in market.items()
             if not k.startswith("_") and k not in drop}
+
+
+def market_in_words(market: dict) -> str:
+    """The market definition as a sentence for a client-facing footer. Every
+    report printed it as raw JSON — `Market definition: {"month": "latest",
+    "billing_class": "professional", …}` (review 9 item 4.9)."""
+    m = public_market(market or {})
+    parts = []
+    month = str(m.get("month") or "latest")
+    parts.append("each payer's newest published month" if month.lower() == "latest"
+                 else f"the published month {month}")
+    if m.get("prev_month"):
+        parts.append(f"compared with {m['prev_month']}")
+    parts.append(f"practices in {m['state']}" if m.get("state")
+                 else "practices in every state")
+    if m.get("city"):
+        parts.append(f"in the city of {m['city']}")
+    payers = m.get("payers") or []
+    parts.append(("payer " if len(payers) == 1 else "payers ") + ", ".join(payers)
+                 if payers else "every payer")
+    if m.get("plan"):
+        parts.append(f"plan {m['plan']}")
+    if m.get("discipline"):
+        parts.append(f"{m['discipline']} lines")
+    if m.get("codes"):
+        codes = list(m["codes"])
+        parts.append("codes " + ", ".join(codes[:12]) + (" and more" if len(codes) > 12 else ""))
+    if m.get("therapy_only"):
+        parts.append("therapy practices only")
+    if m.get("peer_set"):
+        parts.append(f"peer set {m['peer_set']}")
+    cls = m.get("billing_class", "professional")
+    parts.append(f"{cls} claims" if cls else "every billing class")
+    parts.append("base modifiers only" if m.get("base_only", True) else "every modifier")
+    if m.get("include_assistant"):
+        parts.append("assistant (CQ/CO) lines included")
+    if m.get("include_non_dollar"):
+        parts.append("percentage and per-diem lines kept apart from dollars")
+    if m.get("target_percentile") not in (None, 50):
+        parts.append(f"target p{m['target_percentile']}")
+    if m.get("pos"):
+        parts.append(f"place of service {m['pos']}")
+    return "; ".join(parts)
 
 
 def _sql_str_list(values) -> str:
@@ -489,6 +619,17 @@ def practice_base_sql(store: Store, market: dict, *, per_payer: bool = False,
     return sql, [*(prefilter_params if prefilter else ()), *params, *extra_params]
 
 
+def mapped_entity_name(store: Store, subject: str) -> str | None:
+    """The entity-map name `subject` refers to (case-insensitive), else None.
+    A mapped entity is titled with ITS name, not one member's NPPES name
+    ("Practice profile — NORTH CLINIC" over BIG GROUP's numbers; review 9 4.4)."""
+    folded = str(subject or "").strip().casefold()
+    for name in store.entity_map().values():
+        if str(name).strip().casefold() == folded:
+            return str(name)
+    return None
+
+
 def subject_tins_for_market(store: Store, subject: str, market: dict) -> list[str]:
     """The subject's TINs for a report scoped by `market` — ONE rule for
     Benchmark, Negotiate and the rate card (audit 8 P1-2).
@@ -507,12 +648,18 @@ def subject_tins_for_market(store: Store, subject: str, market: dict) -> list[st
     folded = subject.strip().casefold()
     if any(str(n).strip().casefold() == folded for n in store.entity_map().values()):
         return tins                       # a mapped entity: one practice by definition
+    if folded.replace("-", "").replace(" ", "").isdigit():
+        return tins                       # a TIN or an NPI: exactly what was named
     with store.connect() as con:
         rows = con.execute(
             "SELECT tin_value, primary_state, lower(display_name) FROM tin_directory "
             "WHERE tin_value IN (SELECT unnest(?::VARCHAR[]))", [tins]).fetchall()
-    if not rows or any(name != folded for _t, _s, name in rows):
-        return tins                       # not a by-name match (an id, a partial name)
+    # a name — typed in full or in part ("ACME" for "ACME REHAB") — that
+    # resolves to ONE practice name used in several states takes the state
+    # rule; a partial name used to resolve to every state's TINs ($50.50 p70
+    # against $41.00 p10 for the full name; review 9 item 4.4)
+    if not rows or len({name for _t, _s, name in rows}) != 1:
+        return tins
     states = {s for _t, s, _n in rows}
     if len(states) < 2:
         return tins
@@ -531,6 +678,12 @@ def resolve_subject_tins(store: Store, subject: str) -> list[str]:
     excludes NPI-in-the-TIN-slot rows), and every report came back "no published
     rates for this practice" for a provider that plainly has them.
     """
+    return sorted(_resolve_subject_tins(store, subject))
+
+
+def _resolve_subject_tins(store: Store, subject: str) -> list[str]:
+    # (sorted by the caller: the "Subject tax IDs" line of a rate card came
+    # back in three orders in six calls — invariant 7, review 9 item 4.4)
     emap = store.entity_map()
     tins = [t for t, name in emap.items() if name == subject]
     if tins:
@@ -666,6 +819,24 @@ def resolve_peer_set(store: Store, market: dict) -> tuple[str, dict]:
     return (f"curated peer set {name!r} ({len(market['curated_tins'])} TINs)", market)
 
 
+def overall_position(rows: list[dict]) -> float | None:
+    """A practice's ONE overall position from its per-code Benchmark rows —
+    the rule Leads, the leaderboard and the payer roster apply in SQL: the
+    MEDIAN of the UNROUNDED per-code mid-ranks over the codes whose rates
+    differ (a code the subject and every peer are paid the same on ranks no
+    one), rounded once. p50 when every compared code is all-tied; None with no
+    compared code. Negotiate and the dossier took the median of positions
+    already rounded to whole points (p32 where Leads said p31) and counted an
+    all-tied code at p50 (p50 where Leads said p31) — review 9 item 4.3."""
+    compared = [r for r in rows if r.get("subject_percentile") is not None]
+    if not compared:
+        return None
+    ranked = [r["subject_percentile_exact"] if r.get("subject_percentile_exact") is not None
+              else r["subject_percentile"]
+              for r in compared if r.get("in_position", True)]
+    return half_up(statistics.median(ranked)) if ranked else 50
+
+
 def compute_benchmark(store: Store, subject: str, market: dict) -> dict:
     """Per-code subject vs market percentiles (§7B.1)."""
     market = resolve_plan_scope(store, normalize_market(market))
@@ -729,16 +900,22 @@ def compute_benchmark(store: Store, subject: str, market: dict) -> dict:
         -- already rounded, peers.rate is not, and an exact '=' between them
         -- misses real ties (median 33.325 vs a displayed 33.33).
         SELECT p.billing_code,
-               round(100.0 * (
+               100.0 * (
                    sum(CASE WHEN round(p.rate, 2) < s.subject_rate THEN 1 ELSE 0 END)
                    + 0.5 * sum(CASE WHEN round(p.rate, 2) = s.subject_rate THEN 1 ELSE 0 END)
-               ) / count(*), 0) AS subject_percentile
+               ) / count(*) AS pct_exact,
+               -- does the code rank anyone? Not when the subject and every
+               -- peer are paid the same (overall_position's code set)
+               NOT (min(round(p.rate, 2)) = any_value(s.subject_rate)
+                    AND max(round(p.rate, 2)) = any_value(s.subject_rate)) AS ranks
         FROM peers p JOIN subject s USING (billing_code)
         GROUP BY p.billing_code
     )
     SELECT m.billing_code, s.subject_rate, m.n_peers,
            m.p10, m.p25, m.p40, m.p50, m.p75, m.p90,
-           pos.subject_percentile
+           round(pos.pct_exact, 0) AS subject_percentile,
+           pos.pct_exact AS subject_percentile_exact,
+           pos.ranks AS in_position
     FROM market_stats m
     LEFT JOIN subject s USING (billing_code)
     LEFT JOIN position pos USING (billing_code)
@@ -802,6 +979,10 @@ def compute_benchmark(store: Store, subject: str, market: dict) -> dict:
 def _stale_payers_for(store: Store, market: dict) -> list[dict]:
     """Payers in this market whose own last_updated_on is old. Returns [] on
     any failure — a freshness caveat must never break a benchmark."""
+    # a document pinned to an as-of month states that month; "last published
+    # 2024-06" in a report as of 2023-06 is news from after it (review 9 4.1)
+    if str(market.get("month") or "latest").strip().lower() != "latest":
+        return []
     try:
         from .quality import payer_freshness
         scope = set(market.get("payers") or [])
@@ -893,7 +1074,7 @@ def subject_payers(store: Store, subject: str, market: dict) -> list[str]:
     store (a payer the subject doesn't contract with has nothing to negotiate).
     """
     market = resolve_plan_scope(store, normalize_market(market))
-    subject_tins = resolve_subject_tins(store, subject)
+    subject_tins = subject_tins_for_market(store, subject, market)
     if not subject_tins:
         return []
     # "latest": payers the subject contracts with in ANY month present
@@ -955,11 +1136,9 @@ def compute_payer_negotiation(store: Store, subject: str, market: dict,
             opp = compute_opportunity(bench, volumes, conservative_percentile)
             total_target += opp["total_at_target"]
             total_conservative += opp["total_at_conservative"]
-        # headline percentile: MEDIAN of the per-code positions (matches leads
-        # and the report tables; a mean let one outlier code swing the headline)
-        pcts = [r["subject_percentile"] for r in priced
-                if r.get("subject_percentile") is not None]
-        headline_pct = half_up(statistics.median(pcts)) if pcts else None
+        # headline percentile: the one overall-position rule (overall_position;
+        # a mean let one outlier code swing the headline)
+        headline_pct = overall_position(priced)
         sections.append({
             "payer": payer,
             "benchmark": bench,
@@ -1136,7 +1315,6 @@ def compute_payer_comparison(store: Store, subject: str, payer: str, market: dic
         vals = [v for v in vals if v is not None]
         return half_up(statistics.mean(vals), 1) if vals else None
 
-    pcts = [r["subject_percentile"] for r in rows if r.get("subject_percentile") is not None]
     below = [r for r in rows if r.get("p50") is not None and r["subject_rate"] < r["p50"]]
     comp_summaries = []
     for i, c in enumerate(comps):
@@ -1161,7 +1339,7 @@ def compute_payer_comparison(store: Store, subject: str, payer: str, market: dic
         "peer_set": bench["peer_set"],
         "target_percentile": bench["target_percentile"],
         "summary": {
-            "headline_percentile": half_up(statistics.median(pcts)) if pcts else None,
+            "headline_percentile": overall_position(rows),
             "n_codes": len(rows),
             "n_below_median": len(below),
             # honest averages across the subject's priced codes (each code
@@ -1223,9 +1401,15 @@ def contract_gaps_book(store: Store, subjects: list[str], market: dict, *,
     peer_desc, market = resolve_peer_set(store, market)
     where, params = _market_where(market, bool(market.get("include_assistant")),
                                   bool(market.get("include_non_dollar")))
-    rel = _rates_relation(market)
     base, base_params = practice_base_sql(store, market)
     curated = market.get("curated_tins")
+    # the subject's OWN codes, without the peer-only filters: an out-of-state
+    # practice's priced codes were listed as "gaps" beside a Benchmark that
+    # printed their rates (review 9 item 4.4)
+    smarket = subject_market(market)
+    s_where, s_params = _market_where(smarket, bool(market.get("include_assistant")),
+                                      bool(market.get("include_non_dollar")))
+    s_rel = _rates_relation(smarket)
 
     out: dict = {}
     tins_of: dict[str, list[str]] = {}
@@ -1235,7 +1419,7 @@ def contract_gaps_book(store: Store, subjects: list[str], market: dict, *,
             out[key] = BenchmarkError("pick a subject practice")
             continue
         try:
-            tins = resolve_subject_tins(store, key)
+            tins = subject_tins_for_market(store, key, market)
         except BenchmarkError as e:
             out[key] = e
             continue
@@ -1269,8 +1453,10 @@ def contract_gaps_book(store: Store, subjects: list[str], market: dict, *,
                 cur = con.execute(f"""
                     WITH subject_tins AS (SELECT unnest(?::VARCHAR[]) AS tin),
                     base AS ({base}),
-                    subj AS (SELECT DISTINCT billing_code FROM base
-                             WHERE tin_value IN (SELECT tin FROM subject_tins)),
+                    subj AS (SELECT DISTINCT t.billing_code FROM {s_rel} t
+                             LEFT JOIN tin_directory td USING (tin_value)
+                             WHERE {s_where}
+                               AND t.tin_value IN (SELECT tin FROM subject_tins)),
                     peers AS (
                         SELECT b.billing_code, {stat_cols}
                         FROM base b
@@ -1284,7 +1470,7 @@ def contract_gaps_book(store: Store, subjects: list[str], market: dict, *,
                                                  WHERE billing_code IS NOT NULL)
                     ORDER BY p.n_peers DESC, p.billing_code
                     LIMIT ?
-                """, [tins, *base_params, *curated, min_peers, limit])
+                """, [tins, *base_params, *s_params, *curated, min_peers, limit])
                 out[subject] = result(subject, tins,
                                       [dict(zip(cols, r)) for r in cur.fetchall()])
             return out
@@ -1301,9 +1487,9 @@ def contract_gaps_book(store: Store, subjects: list[str], market: dict, *,
         priced: dict[str, set] = {}
         for tin, code in con.execute(f"""
             SELECT DISTINCT t.tin_value, t.billing_code
-            FROM {rel} t LEFT JOIN tin_directory td USING (tin_value)
-            WHERE {where} AND t.tin_value IN (SELECT unnest(?::VARCHAR[]))
-        """, [*params, all_tins]).fetchall():
+            FROM {s_rel} t LEFT JOIN tin_directory td USING (tin_value)
+            WHERE {s_where} AND t.tin_value IN (SELECT unnest(?::VARCHAR[]))
+        """, [*s_params, all_tins]).fetchall():
             priced.setdefault(tin, set()).add(code)
     for subject, tins in tins_of.items():
         mine = set().union(*(priced.get(t, set()) for t in tins))
@@ -1359,7 +1545,7 @@ def render_payer_compare_report(cfg: MrfxConfig, store: Store, comp: dict) -> st
     comp_lines = "".join(
         f"<li><b>{e(c['name'])}</b>: this payer pays them more than you on "
         f"{c['n_paid_more']} of {c['n_shared_codes']} shared code(s)"
-        + (f", median premium {c['median_premium_pct']:+.1f}% vs your rate"
+        + (f", median premium {signed_pct(c['median_premium_pct'])} vs your rate"
            if c['median_premium_pct'] is not None else "") + ".</li>"
         for c in comp["comparables"] if c["n_shared_codes"]
     )
@@ -1545,7 +1731,7 @@ def render_proposal_report(cfg: MrfxConfig, store: Store, prop: dict) -> str:
         <div class="sub">{e(r.get('description') or '')}</div></td>
         <td class="num">{_m(r['current'])}</td>
         <td class="num gap">{'—' if r['no_reference'] else _m(r['proposed'])}</td>
-        <td class="num">{'' if r['delta'] is None else ('keep' if r['kept'] else f"+{_m(r['delta'])} ({r['delta_pct']:+.1f}%)")}</td>
+        <td class="num">{'' if r['delta'] is None else ('keep' if r['kept'] else f"+{_m(r['delta'])} ({signed_pct(r['delta_pct'])})")}</td>
         <td class="num">{'' if r['units'] is None else f"{r['units']:,.0f}"}</td>
         <td class="num">{'' if r['annual_value'] is None else _m(r['annual_value'])}</td>
         <td class="num sub">{r.get('n_peers') if r.get('n_peers') is not None else ''}</td></tr>"""
@@ -1628,13 +1814,15 @@ def require_geographic_scope(market: dict, kind: str) -> str:
 
 
 def _subject_has_scoped_rates(store: Store, subject: str, market: dict) -> bool:
-    """Does the subject have any rate rows under the FULL market scope (state,
-    discipline, basis, month)? Mirrors compute_benchmark's `subject` CTE, unlike
-    subject_payers() which deliberately ignores geography."""
-    subject_tins = resolve_subject_tins(store, subject)
+    """Does the subject have any rate rows under the market's basis, month
+    and content filters? Mirrors compute_benchmark's `subject` CTE: the
+    subject's own TINs (subject_tins_for_market) without the peer-only
+    filters (subject_market)."""
+    market = resolve_plan_scope(store, normalize_market(market))
+    subject_tins = subject_tins_for_market(store, subject, market)
     if not subject_tins:
         return False
-    market = resolve_plan_scope(store, normalize_market(market))
+    market = subject_market(market)
     where, params = _market_where(market,
                                   bool(market.get("include_assistant", False)),
                                   bool(market.get("include_non_dollar", False)))
@@ -1822,7 +2010,7 @@ def methodology_footer(store: Store, benchmark: dict) -> str:
     lines = [
         f"Generated {dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} by MRF Explorer v{__version__}.",
         f"As-of month: {month_label(market.get('month'))}. Peer basis: {benchmark['peer_set']}.",
-        f"Market definition: {json.dumps({k: v for k, v in public_market(market).items() if v not in (None, [], '')})}.",
+        f"Market definition: {market_in_words(market)}.",
         *([plan_line] if plan_line else []),
         benchmark["basis_note"],
         "Dedup rule: one row per (payer, TIN, code, modifier-set, billing class, "
@@ -1855,8 +2043,8 @@ def _erosion_block(store: Store, benchmark: dict, e) -> str:
         from .monitor import compute_payer_trajectory
         market = dict(benchmark.get("market") or {})
         payers = market.get("payers") or []
-        traj = compute_payer_trajectory(
-            store, {k: v for k, v in market.items() if k != "month"})
+        # the report's as-of month bounds the trajectory (review 9 item 4.1)
+        traj = compute_payer_trajectory(store, dict(market))
     except Exception:  # noqa: BLE001 — one month in the store is the usual case
         return ""
     rows = [p for p in traj.get("payers", [])
@@ -1868,8 +2056,8 @@ def _erosion_block(store: Store, benchmark: dict, e) -> str:
     lines = "".join(
         f"<tr><td>{e(p['payer'])}</td>"
         f"<td class='num muted'>{e(p['first_month'])}→{e(p['last_month'])}</td>"
-        f"<td class='num'>{p['cumulative_pct']:+.1f}%</td>"
-        f"<td class='num gap'>{p['real_cumulative_pct']:+.1f}%</td></tr>"
+        f"<td class='num'>{signed_pct(p['cumulative_pct'])}</td>"
+        f"<td class='num gap'>{signed_pct(p['real_cumulative_pct'])}</td></tr>"
         for p in rows)
     worst = min(rows, key=lambda p: p["real_cumulative_pct"])
     # These are the MARKET's per-payer median trajectories (every practice in
@@ -2089,4 +2277,4 @@ def _m(v) -> str:
 
 
 def _pctnum(v) -> str:
-    return f"{v:.0f}%" if v is not None else "–"
+    return f"{half_up(v)}%" if v is not None else "–"

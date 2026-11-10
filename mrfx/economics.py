@@ -39,7 +39,6 @@ those carry, restated wherever a number appears:
 from __future__ import annotations
 
 import logging
-import statistics
 
 from .rounding import half_up
 from .catalog import code_info
@@ -263,7 +262,8 @@ def weighted_position(store: Store, subject: str, market: dict | None = None, *,
     coverage = half_up(100.0 * covered_codes / len(rows), 1) if rows else 0.0
 
     unweighted = half_up(sum(r["subject_percentile"] for r in rows) / len(rows), 1)
-    median_pct = half_up(statistics.median(r["subject_percentile"] for r in rows), 1)
+    from .benchmark import overall_position
+    median_pct = overall_position(rows)      # the one overall-position rule (4.3)
     if coverage < MIN_WEIGHT_COVERAGE_PCT or not weighted_rows:
         return {
             "loaded": False, "subject": subject,

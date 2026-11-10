@@ -155,36 +155,51 @@ def build_outreach_rows(store: Store, rel_sql: str, params: list,
 
     # per-code entity rates on the house basis: per-TIN medians (the
     # materialised practice medians when the basis allows), then the median
-    # across an organization's TINs
+    # across an organization's TINs — IN SQL, for the wanted codes only. The
+    # (TIN, code) pairs used to come back to Python as a dict (4.85M entries
+    # for a no-filter TIN-grain export, RSS near 6 GB) with all 194,000 TINs
+    # passed as one parameter (review 9 item 4.6)
     m = normalize_market(market or {"month": "latest"})
     by_code: dict[str, dict[str, float]] = {}
-    if scope_tins:
+    n_codes_total = 0
+    wanted: list[str] = []
+    if tins_of:
+        import uuid
+        tag = uuid.uuid4().hex[:10]
+        tu, tr = f"_outreach_units_{tag}", f"_outreach_rates_{tag}"
         q, qp = practice_base_sql(
-            store, m, extra=" AND t.tin_value IN (SELECT unnest(?::VARCHAR[]))",
-            extra_params=[scope_tins])
+            store, m, extra=f" AND t.tin_value IN (SELECT tin_value FROM {tu})")
         with store.connect() as con:
-            tin_rates: dict[tuple, float] = {
-                (tv, code): rate for code, tv, rate in con.execute(
-                    f"SELECT billing_code, tin_value, rate FROM ({q}) "
-                    f"ORDER BY billing_code, tin_value", qp).fetchall()}
-        codes_seen = sorted({c for _t, c in tin_rates})
-        for unit_id, ts in tins_of.items():
-            for c in codes_seen:
-                vals = sorted(tin_rates[(t, c)] for t in ts if (t, c) in tin_rates)
-                if vals:
-                    mid = len(vals) // 2
-                    by_code.setdefault(c, {})[unit_id] = (
-                        vals[mid] if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2)
-    if codes:
-        wanted = [c for c in codes if c in by_code]
-    else:
-        # most-covered codes, ties to the lower code — the dict order behind
-        # the old -len tie changed which codes made the cut between calls
-        wanted = sorted(by_code, key=lambda c: (-len(by_code[c]), c))[:MAX_CODE_COLUMNS]
-        wanted.sort()
-    if not codes and len(by_code) > MAX_CODE_COLUMNS:
+            con.execute(
+                f"CREATE OR REPLACE TEMP TABLE {tu} AS "
+                f"SELECT DISTINCT unit_id, tin_value FROM ({rel_sql}) "
+                "WHERE is_dollar_rate AND negotiated_rate > 0.01", params)
+            con.execute(
+                f"CREATE OR REPLACE TEMP TABLE {tr} AS "
+                "SELECT u.unit_id, p.billing_code, median(p.rate) AS rate "
+                f"FROM ({q}) p JOIN {tu} u USING (tin_value) "
+                "GROUP BY u.unit_id, p.billing_code", qp)
+            coverage = con.execute(
+                f"SELECT billing_code, count(*) AS n FROM {tr} "
+                "GROUP BY billing_code ORDER BY n DESC, billing_code").fetchall()
+            n_codes_total = len(coverage)
+            have = {c for c, _n in coverage}
+            if codes:
+                wanted = [c for c in codes if c in have]
+            else:
+                # most-covered codes, ties to the lower code (a stable cut)
+                wanted = sorted(c for c, _n in coverage[:MAX_CODE_COLUMNS])
+            if wanted:
+                for unit_id, code, rate in con.execute(
+                        f"SELECT unit_id, billing_code, rate FROM {tr} "
+                        "WHERE billing_code IN (SELECT unnest(?::VARCHAR[])) "
+                        "ORDER BY billing_code, unit_id", [wanted]).fetchall():
+                    by_code.setdefault(code, {})[unit_id] = rate
+            con.execute(f"DROP TABLE IF EXISTS {tr}")
+            con.execute(f"DROP TABLE IF EXISTS {tu}")
+    if not codes and n_codes_total > MAX_CODE_COLUMNS:
         log.info("outreach export: limiting to the %d most-covered codes of %d "
-                 "(pass explicit codes to choose)", MAX_CODE_COLUMNS, len(by_code))
+                 "(pass explicit codes to choose)", MAX_CODE_COLUMNS, n_codes_total)
 
     def market_median(code: str) -> float | None:
         vals = sorted(by_code.get(code, {}).values())

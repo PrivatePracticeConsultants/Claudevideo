@@ -38,7 +38,7 @@ import math
 import logging
 
 from .store import Store
-from .rounding import half_up
+from .rounding import half_up, signed_pct
 
 log = logging.getLogger(__name__)
 
@@ -250,16 +250,16 @@ def erosion_line(payer: str, nominal_pct: float | None, real_pct: float | None,
     if real_pct is None:
         return ""
     span = f"{first_month} to {last_month}"
-    nom = f"{nominal_pct:+.1f}%" if nominal_pct is not None else "unchanged"
+    nom = signed_pct(nominal_pct) if nominal_pct is not None else "unchanged"
     basis = (f"{defl.get('index_name')}" if defl.get("basis") == "index"
              else f"an assumed {defl.get('assumed_pct_per_year'):g}%/yr")
     if real_pct < 0 and (nominal_pct or 0) >= 0:
-        return (f"{payer}: {nom} in dollars over {span}, but {real_pct:+.1f}% in "
+        return (f"{payer}: {nom} in dollars over {span}, but {signed_pct(real_pct)} in "
                 f"real terms — flat pay is a pay cut once costs rise ({basis}).")
     if real_pct < 0:
-        return (f"{payer}: {nom} in dollars over {span}, and {real_pct:+.1f}% "
+        return (f"{payer}: {nom} in dollars over {span}, and {signed_pct(real_pct)} "
                 f"after inflation ({basis}) — the cut is deeper than it looks.")
-    return (f"{payer}: {nom} in dollars over {span}, {real_pct:+.1f}% in real "
+    return (f"{payer}: {nom} in dollars over {span}, {signed_pct(real_pct)} in real "
             f"terms ({basis}) — this payer kept ahead of costs.")
 
 

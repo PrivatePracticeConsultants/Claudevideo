@@ -561,8 +561,7 @@ def hospital_parity(store: Store, market: dict | None = None, *,
     "you're owed $X" figure — the two rates pay for different things.
     """
     from .benchmark import (BenchmarkError, _market_where, _rates_relation,
-                            normalize_market, resolve_plan_scope,
-                            resolve_subject_tins)
+                            normalize_market, resolve_plan_scope)
 
     limit = max(1, min(int(limit), 2000))
     ensure_view(store)
@@ -588,9 +587,15 @@ def hospital_parity(store: Store, market: dict | None = None, *,
 
     subject_tins: list[str] = []
     if subject:
-        subject_tins = resolve_subject_tins(store, subject)
+        # the subject's own TINs and rows: the ONE subject rule (review 9 4.4)
+        from .benchmark import subject_market, subject_tins_for_market
+        subject_tins = subject_tins_for_market(store, subject, m)
         if not subject_tins:
             raise BenchmarkError(f"no practice matches {subject!r}")
+        s_m = subject_market(m)
+        s_where, s_params = _market_where(s_m, bool(m.get("include_assistant")),
+                                          bool(m.get("include_non_dollar")))
+        s_rel = _rates_relation(s_m)
 
     hosp_where = ["h.rate IS NOT NULL"]
     if m.get("base_only", True):
@@ -626,17 +631,19 @@ def hospital_parity(store: Store, market: dict | None = None, *,
         -- practice side is per-TIN first: a hospital listing three plans at
         -- $100 outvoted one listing a single $200 plan — median $100, 2.0x,
         -- where per hospital it is $150, 3.0x (audit 8 P2-11)
-        SELECT h.payer, h.billing_code, h.hospital_name, median(h.rate) AS rate
+        SELECT h.payer, h.billing_code, h.hospital_name, h.state, median(h.rate) AS rate
         FROM hospital_rates h
         WHERE {' AND '.join(hosp_where)}
-        GROUP BY h.payer, h.billing_code, h.hospital_name
+        -- name AND state: two hospitals of one name in two states were pooled
+        -- as one hospital with no state filter (review 9 item 4.10)
+        GROUP BY h.payer, h.billing_code, h.hospital_name, h.state
     ),
     hosp AS (
         SELECT payer, billing_code,
                round(median(rate), 2)        AS hospital_median,
                round(min(rate), 2)           AS hospital_min,
                round(max(rate), 2)           AS hospital_max,
-               count(DISTINCT hospital_name) AS n_hospitals
+               count(*)                      AS n_hospitals
         FROM per_hosp
         GROUP BY payer, billing_code
     )
@@ -657,13 +664,13 @@ def hospital_parity(store: Store, market: dict | None = None, *,
                 WITH per_tin AS (
                     SELECT t.payer, t.billing_code, t.tin_value,
                            median(t.negotiated_rate) AS rate
-                    FROM {rel} t LEFT JOIN tin_directory td USING (tin_value)
-                    WHERE {where} AND t.tin_value IN (SELECT unnest(?::VARCHAR[]))
+                    FROM {s_rel} t LEFT JOIN tin_directory td USING (tin_value)
+                    WHERE {s_where} AND t.tin_value IN (SELECT unnest(?::VARCHAR[]))
                     GROUP BY t.payer, t.billing_code, t.tin_value
                 )
                 SELECT payer, billing_code, round(median(rate), 2)
                 FROM per_tin GROUP BY payer, billing_code
-            """, [*params, subject_tins])
+            """, [*s_params, subject_tins])
             subj = {(p, c): r for p, c, r in scur.fetchall()}
 
     for r in rows:

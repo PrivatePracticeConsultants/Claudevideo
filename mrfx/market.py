@@ -146,6 +146,9 @@ def negotiability(store: Store, code: str, market: dict) -> dict:
         r["negotiability"] = (
             "wide" if sp is not None and sp >= 25 else
             "moderate" if sp is not None and sp >= 10 else "tight")
+    # ordered by the spread PRINTED beside each row (from the rounded p10 /
+    # p50 / p90), so adjacent rows never look inverted by a point (4.10)
+    rows.sort(key=lambda r: (r["spread_pct"] is None, -(r["spread_pct"] or 0), r["payer"]))
     return {
         "code": code, "description": code_info(code)[0],
         "as_of": month_label(m["month"]), "min_practices": _MIN_CELL,

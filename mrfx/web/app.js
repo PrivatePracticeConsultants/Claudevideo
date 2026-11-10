@@ -3868,7 +3868,7 @@ function renderLeads(out, data) {
     <td class="num">${l.n_codes}</td>
     <td class="num">p${l.median_percentile}</td>
     <td class="num">${money(l.avg_gap_to_median)}</td>
-    <td>${l.worst_payer ? `${esc(l.worst_payer)}<div class="sub">${money(l.worst_payer_gap)}/code under mkt</div>` : "<span class='muted'>–</span>"}</td>
+    <td>${l.worst_payer ? `${esc(l.worst_payer)}<div class="sub">${money(l.worst_payer_gap)}/code under mkt${l.worst_payer_codes ? ` · ${l.worst_payer_codes} ${l.worst_payer_basis === "shared" ? "shared " : ""}code${l.worst_payer_codes === 1 ? "" : "s"}` : ""}</div>` : "<span class='muted'>–</span>"}</td>
     <td class="sub">${esc(l.tin_value)}</td></tr>`).join("");
   const cut = data.truncated
     ? ` <span class="warn-text">The list stops at ${fmtInt(data.limit)} — the market holds more. Narrow it (state, payer) or raise the min codes to see the rest.</span>`
@@ -3905,10 +3905,14 @@ async function initChanges() {
 async function runTrajectory() {
   const el = $("#ch-traj");
   // trajectory spans all months, so it ignores the two-month picker; it reuses
-  // only the payer/discipline scope from the changes market
+  // the payer / discipline / STATE scope of the changes market (it was always
+  // the national call: 20 s on a 99M store where one state takes 2 s)
   const market = { payers: $$("#ch-payer-chips .chip.on").map((c) => c.dataset.payer) };
   if ($("#ch-disc").value) market.discipline = $("#ch-disc").value;
-  el.innerHTML = `<div class="loading">Tracing payer trajectories across all months</div>`;
+  const st = $("#ch-state").value.trim();
+  if (st) market.state = st;
+  else market.allow_national = true;
+  el.innerHTML = `<div class="loading">Tracing payer trajectories across all months${st ? ` in ${esc(st.toUpperCase())}` : " in every state (the slowest view on a big store)"}</div>`;
   let d;
   try { d = await postJson("/api/trajectory", { market }); }
   catch (e) { el.innerHTML = `<div class="empty">Couldn't build the trajectory (${esc(e.message)}).</div>`; return; }
@@ -3927,7 +3931,7 @@ async function runTrajectory() {
     return `<tr>
       <td>${esc(p.payer)}</td>
       <td class="num muted">${esc(p.first_month)}→${esc(p.last_month)} (${p.n_months})</td>
-      <td class="num muted" title="the codes and practices this payer priced in both its first and last month — the change is measured on these only">${fmtInt(p.panel_codes || 0)} codes · ${fmtInt(p.panel_practices || 0)} practices</td>
+      <td class="num muted" title="the codes and practices this payer priced in both its first and last month — the change is measured on these only">${fmtInt(p.panel_codes || 0)} code${p.panel_codes === 1 ? "" : "s"} · ${fmtInt(p.panel_practices || 0)} practice${p.panel_practices === 1 ? "" : "s"}</td>
       <td class="num ${cls}">${arrow[p.direction] || ""} ${pctTxt(p.cumulative_pct)}</td>
       <td class="num ${realCls}" title="${esc(p.erosion_line || p.real_reason || "")}">${pctTxt(p.real_cumulative_pct)}</td>
       <td class="num muted">${p.cut_streak || 0}</td></tr>`;
@@ -3959,6 +3963,7 @@ function changesPayload() {
   const market = { month, payers: $$("#ch-payer-chips .chip.on").map((c) => c.dataset.payer) };
   if ($("#ch-prev").value) market.prev_month = $("#ch-prev").value;
   if ($("#ch-disc").value) market.discipline = $("#ch-disc").value;
+  if ($("#ch-state").value.trim()) market.state = $("#ch-state").value.trim();
   const p = { market };
   if ($("#ch-subject").value.trim()) p.subject = $("#ch-subject").value.trim();
   if ($("#ch-minpct").value.trim()) p.min_pct = +$("#ch-minpct").value;
@@ -4005,10 +4010,13 @@ function renderChanges(out, d) {
   // only one file loaded (nothing to compare yet)
   const span = d.per_payer
     ? `each payer's newest file vs its previous one (${(d.compared || []).map((c) =>
-        `${esc(c.payer)} ${esc(c.prev_month)} → ${esc(c.new_month)}`).join("; ")})${
-        (d.not_compared || []).length ? `<div class="sub">Only one file loaded, not compared: ${
-          d.not_compared.map((c) => esc(c.payer)).join(", ")}</div>` : ""}`
+        `${esc(c.payer)} ${esc(c.prev_month)} → ${esc(c.new_month)}`).join("; ")})`
     : `${esc(d.prev_month)} → ${esc(d.new_month)}`;
+  // a block AFTER the sentence: inside it, the sentence's "." and "Biggest
+  // cut" started a new line (". Biggest cut -10%.")
+  const notCompared = d.per_payer && (d.not_compared || []).length
+    ? `<div class="sub">Only one file loaded, not compared: ${
+        d.not_compared.map((c) => esc(c.payer)).join(", ")}</div>` : "";
   if (!d.changes.length) {
     out.innerHTML = `<div class="empty"><h3>No changes</h3>No rate moves, ${span}, under the current filters.</div>`;
     return;
@@ -4038,7 +4046,7 @@ function renderChanges(out, d) {
   const capNote = d.truncated
     ? ` <span class="warn-text">Showing the ${fmtInt(d.cap)} largest moves — the cut/increase counts and by-payer stats cover only these. Narrow the market (payer/state/discipline) to see the rest.</span>`
     : "";
-  out.innerHTML = `<div class="rc-summary"><b>${d.n_cuts}</b> cut(s), <b>${d.n_increases}</b> increase(s), ${span}.${d.biggest_cut_pct != null ? ` Biggest cut ${d.biggest_cut_pct}%.` : ""}${capNote}</div>
+  out.innerHTML = `<div class="rc-summary"><b>${d.n_cuts}</b> cut(s), <b>${d.n_increases}</b> increase(s), ${span}.${d.biggest_cut_pct != null ? ` Biggest cut ${d.biggest_cut_pct}%.` : ""}${capNote}${notCompared}</div>
     ${byPayer}
     <div class="tablewrap"><table class="rc-table"><thead><tr><th>Payer</th><th>Practice</th><th>Code</th><th class="num">Was</th><th class="num">Now</th><th class="num">Δ</th><th class="num">%</th>${d.per_payer ? "<th>Months</th>" : ""}</tr></thead><tbody>${rows}</tbody></table></div>`;
 }
@@ -4469,7 +4477,9 @@ function initFilesView() {
   });
   const dz = $("#dropzone"), input = $("#file-input");
   dz.addEventListener("click", () => input.click());
-  input.addEventListener("change", () => uploadFiles([...input.files]));
+  // reset after reading: picking the SAME file again fires no change event
+  // while the input still holds it (review 9 item 4.10)
+  input.addEventListener("change", () => { const fs = [...input.files]; input.value = ""; uploadFiles(fs); });
   ["dragenter", "dragover"].forEach((t) =>
     dz.addEventListener(t, (e) => { e.preventDefault(); dz.classList.add("drag"); }));
   ["dragleave", "drop"].forEach((t) =>

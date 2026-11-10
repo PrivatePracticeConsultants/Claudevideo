@@ -13,10 +13,9 @@ base-modifier, professional basis by default — same as the benchmark.
 from __future__ import annotations
 
 import datetime as dt
-import json
 
 from . import __version__
-from .benchmark import (BenchmarkError, _market_where, normalize_market,
+from .benchmark import (BenchmarkError, _market_where, market_in_words, normalize_market,
                         public_market, resolve_plan_scope, resolve_subject_tins,
                         spine_relation)
 from .catalog import code_info
@@ -314,6 +313,7 @@ def _diff(store: Store, market: dict, ctes: list[str], cte_params: list,
     }
 
 
+@generation_cached('monitor.compute_payer_trajectory')
 def compute_payer_trajectory(store: Store, market: dict, *, min_months: int = 2,
                              assume_inflation_pct: float | None = None) -> dict:
     """Each payer's therapy-rate trajectory across ALL loaded months — the
@@ -338,37 +338,67 @@ def compute_payer_trajectory(store: Store, market: dict, *, min_months: int = 2,
     # _market_where skip the file_month clause; we then read rates_by_tin
     # directly (NOT the 'latest' supersession relation, which would collapse
     # history to one row per contract).
+    # a document pinned to an as-of month must not show what happened after
+    # it (review 9 item 4.1: a report "as of 2023-06" printed a 2024 cut):
+    # the pinned month bounds the series; "latest" means every month
+    through = str((market or {}).get("month") or "").strip()
+    through = through[:7] if through and through.lower() != "latest" else None
     m = resolve_plan_scope(store, normalize_market({**(market or {}), "month": "latest"}))
     include_assistant = bool(m.get("include_assistant", False))
     include_non_dollar = bool(m.get("include_non_dollar", False))
     where, params = _market_where(m, include_assistant, include_non_dollar)
+    bound = " AND t.file_month <= ?" if through else ""
+    if through:
+        params = [*params, through]
     sql = f"""
-    WITH base AS (
+    WITH base AS MATERIALIZED (
         SELECT t.payer, t.billing_code, t.file_month, t.tin_value,
                median(t.negotiated_rate) AS rate
         FROM {spine_relation(m)} t LEFT JOIN tin_directory td USING (tin_value)
-        WHERE {where}
+        WHERE {where}{bound}
         GROUP BY t.payer, t.billing_code, t.file_month, t.tin_value
+    ),
+    -- each payer's months, numbered (k): a month-to-month STEP is between a
+    -- payer's adjacent months only
+    pm AS (
+        SELECT payer, file_month,
+               dense_rank() OVER (PARTITION BY payer ORDER BY file_month) AS k
+        FROM (SELECT DISTINCT payer, file_month FROM base)
     ),
     ends AS (
         SELECT payer, min(file_month) AS m0, max(file_month) AS m1,
-               count(DISTINCT file_month) AS n_months
-        FROM base GROUP BY payer
+               count(*) AS n_months
+        FROM pm GROUP BY payer
     ),
-    first_pt AS (
-        SELECT b.payer, b.billing_code, b.tin_value, b.rate AS r0
-        FROM base b JOIN ends e ON b.payer = e.payer AND b.file_month = e.m0
-        WHERE b.rate > 0
+    -- ONE sorted pass over each (payer, code, practice) series: its first
+    -- and last priced month and rate, and the previous priced month. The
+    -- panel / pairs / steps self-joins of the same rule read the 35M-row
+    -- base four times (82 s national on a 99M store; review 9 item 4.6)
+    w AS (
+        SELECT b.payer, b.billing_code, b.tin_value, b.file_month, b.rate, pm.k,
+               e.m0, e.m1,
+               first_value(b.file_month) OVER s AS f_month,
+               first_value(b.rate)       OVER s AS f_rate,
+               last_value(b.file_month)  OVER s AS l_month,
+               lag(b.rate) OVER s        AS prev_rate,
+               lag(pm.k)   OVER s        AS prev_k
+        FROM base b JOIN pm USING (payer, file_month) JOIN ends e USING (payer)
+        WINDOW s AS (PARTITION BY b.payer, b.billing_code, b.tin_value
+                     ORDER BY b.file_month
+                     ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
     ),
-    panel AS (
-        SELECT f.* FROM first_pt f
-        JOIN base b ON b.payer = f.payer AND b.billing_code = f.billing_code
-                   AND b.tin_value = f.tin_value
-        JOIN ends e ON e.payer = b.payer AND b.file_month = e.m1
-    ),
-    pairs AS (
-        SELECT b.payer, b.billing_code, b.file_month, b.tin_value, b.rate / p.r0 AS ratio
-        FROM base b JOIN panel p USING (payer, billing_code, tin_value)
+    -- the MATCHED panel: (code, practice) pairs the payer priced in both its
+    -- first and its last month (a positive first rate); each month's ratio
+    -- to the pair's own first rate, and — when the pair was also priced in
+    -- the payer's previous month — its month-to-month step (chain-linked).
+    -- Comparing each month's index with the previous one mixed panels: a
+    -- middle month that priced 2 of 5 practices read +12.5 % and the next
+    -- "cut" back to 0 % was a cut that never happened (review 9 item 4.2)
+    pairs AS MATERIALIZED (
+        SELECT payer, billing_code, file_month, tin_value, rate / f_rate AS ratio,
+               CASE WHEN prev_k = k - 1 AND prev_rate > 0 THEN rate / prev_rate END AS step
+        FROM w
+        WHERE f_month = m0 AND l_month = m1 AND f_rate > 0
     ),
     per_code AS (
         SELECT payer, billing_code, file_month, median(ratio) AS ratio
@@ -382,18 +412,26 @@ def compute_payer_trajectory(store: Store, market: dict, *, min_months: int = 2,
         SELECT payer, file_month, count(DISTINCT tin_value) AS n_practices
         FROM pairs GROUP BY payer, file_month
     ),
+    step_month AS (
+        SELECT payer, file_month, median(step) AS step FROM (
+            SELECT payer, billing_code, file_month, median(step) AS step
+            FROM pairs WHERE step IS NOT NULL
+            GROUP BY payer, billing_code, file_month)
+        GROUP BY payer, file_month
+    ),
     panel_size AS (
         SELECT payer, count(DISTINCT billing_code) AS panel_codes,
                count(DISTINCT tin_value) AS panel_practices
-        FROM panel GROUP BY payer
+        FROM pairs GROUP BY payer       -- every pair has its first-month row
     )
     SELECT e.payer, e.n_months, e.m0, e.m1, coalesce(ps.panel_codes, 0) AS panel_codes,
            coalesce(ps.panel_practices, 0) AS panel_practices,
-           pm.file_month, pm.ratio, pm.n_codes, pr.n_practices
+           pm.file_month, pm.ratio, pm.n_codes, pr.n_practices, sm.step
     FROM ends e
     LEFT JOIN panel_size ps USING (payer)
     LEFT JOIN per_month pm USING (payer)
     LEFT JOIN practices pr ON pr.payer = pm.payer AND pr.file_month = pm.file_month
+    LEFT JOIN step_month sm ON sm.payer = pm.payer AND sm.file_month = pm.file_month
     ORDER BY e.payer, pm.file_month
     """
     with store.connect() as con:
@@ -421,10 +459,12 @@ def compute_payer_trajectory(store: Store, market: dict, *, min_months: int = 2,
         # no (code, practice) pair priced at both ends: nothing to compare —
         # say so, never a number from two different panels
         cumulative = last_pt["index_pct"] if last_pt and head["panel_codes"] else None
-        # consecutive months of decline counting back from the newest point
+        # consecutive month-to-month CUTS (chain-linked steps on the same
+        # pairs; a step rounded to no change is not a cut), from the newest
         streak = 0
-        for i in range(len(index_pts) - 1, 0, -1):
-            if index_pts[i]["index_pct"] < index_pts[i - 1]["index_pct"]:
+        for x in reversed(pts[1:]):
+            step = x.get("step")
+            if step is not None and half_up(100.0 * (step - 1.0), 1) < 0:
                 streak += 1
             else:
                 break
@@ -511,7 +551,7 @@ def rate_changes_csv(result: dict) -> str:
            "above cover only these rows; narrow the market "
            "(payer/state/discipline) to see the rest."
            if result.get("truncated") else ""),
-        f"Market definition: {json.dumps(result['market'])}.",
+        f"Market definition: {market_in_words(result['market'])}.",
         "A change is a rate move on the SAME contract line (payer, TIN, code, "
         "modifier-set, billing class, place-of-service set) present in BOTH "
         "months. Published negotiated rates, not collections.",

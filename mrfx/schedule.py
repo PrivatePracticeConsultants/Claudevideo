@@ -20,13 +20,13 @@ from __future__ import annotations
 
 import datetime as dt
 import html
-import json
 import statistics
 
 from .rounding import half_up
 from . import __version__
 from .benchmark import (
     anchor_state,
+    market_in_words,
     basis_note_for,
     COLLECTION_NOTE,
     GHOST_RATE_NOTE,
@@ -309,7 +309,7 @@ def _methodology(store: Store, fee_schedule: dict) -> str:
     lines = [
         f"Generated {dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} by MRF Explorer v{__version__}.",
         f"As-of month: {month_label(market.get('month'))}. Subject tax IDs: {', '.join(fee_schedule['subject_tins']) or 'n/a'}.",
-        f"Market definition: {json.dumps(public_market(market))}.",
+        f"Market definition: {market_in_words(market)}.",
         fee_schedule["basis_note"],
         "Rate for a (payer, code) is the median across the subject's tax IDs of "
         "each tax ID's median published value (variants collapse per the app's "

@@ -545,3 +545,344 @@ def test_a_stopped_download_keeps_no_inflight_fingerprint(cfg, store):
     store.cancel_all_downloading()
     assert q(store, "SELECT count(*) FROM inflight_fingerprints") == [(0,)]
 
+
+# -- Group 4: the numbers a report sells ----------------------------------------
+
+def _px(rate, mods=("GP",)):
+    return {"negotiated_type": "negotiated", "negotiated_rate": float(rate),
+            "billing_class": "professional", "service_code": ["11"],
+            "billing_code_modifier": list(mods), "expiration_date": "9999-12-31"}
+
+
+def _pdoc(payer, day, prices):
+    """prices: {code: {tin: rate}}; each TIN's one NPI is '1' + tin."""
+    items = [{"negotiation_arrangement": "ffs", "billing_code_type": "CPT", "billing_code": code,
+              "negotiated_rates": [{"provider_groups": [{"npi": ["1" + t], "tin": {"type": "ein", "value": t}}],
+                                    "negotiated_prices": [_px(r)]} for t, r in by_tin.items()]}
+             for code, by_tin in prices.items()]
+    return {"reporting_entity_name": payer, "version": "2.0.0", "last_updated_on": day,
+            "in_network": items}
+
+
+def _load(cfg, store, docs, names):
+    for fname, d in docs:
+        put(cfg, fname, d)
+    assert all(r["status"] == "done" for r in scan_inbox(cfg, store))
+    for t, (label, st) in names.items():
+        store.save_npi("1" + t, label, "261QP2000X", "x", "Town", st, entity_type="NPI-2",
+                       zip_code="64105")
+    store.rebuild_rollups()
+
+
+def _client(cfg, store):
+    from fastapi.testclient import TestClient
+
+    from mrfx.api import create_app
+    return TestClient(create_app(cfg, store))
+
+
+FIVE = {f"5{i}1000001": (f"{k} REHAB", "MO") for i, k in enumerate("ABCDE", start=1)}
+
+
+def test_a_pinned_report_does_not_show_a_cut_from_after_its_month(cfg, store):
+    # 64a371c: the trajectory behind a pitch report "as of 2023-06" ran to
+    # 2024-06 and printed the 20 % cut that happened a year later
+    T = list(FIVE)
+    _load(cfg, store, [(f"p_{d}.json", _pdoc("P Health", d, {"97110": {t: r for t in T}}))
+                       for d, r in (("2022-06-01", 50), ("2023-06-01", 50), ("2024-06-01", 40))], FIVE)
+    from mrfx.monitor import compute_payer_trajectory
+    pinned = compute_payer_trajectory(store, {"state": "MO", "month": "2023-06"})["payers"][0]
+    assert (pinned["last_month"], pinned["cumulative_pct"]) == ("2023-06", 0.0)
+    latest = compute_payer_trajectory(store, {"state": "MO"})["payers"][0]
+    assert (latest["last_month"], latest["cumulative_pct"]) == ("2024-06", -20.0)
+    h = _client(cfg, store).post("/api/report/pitch", json={
+        "subject": "A REHAB", "market": {"month": "2023-06", "state": "MO"}}).text
+    import re
+    i = h.find("In real terms")
+    assert i >= 0
+    blk = re.sub(r"<[^>]+>", " ", h[i:i + 2000])
+    blk = blk[:blk.find("Sources")] if "Sources" in blk else blk
+    assert "2023-06" in blk and "2024-06" not in blk and "-20" not in blk, blk
+
+
+def test_a_cut_streak_is_measured_on_the_same_pairs_month_to_month(cfg, store):
+    # 64a371c: May priced two of five practices (+12.5 % on the panel), June
+    # priced all five back at their April level for three and higher for two:
+    # the index fell 12.5 -> 0 and the streak said 1 cut. On the pairs priced
+    # in both May and June, rates went up (C 50 -> 50, D 50 -> 55).
+    A, B, C, D, E = list(FIVE)
+    _load(cfg, store, [
+        ("al_04.json", _pdoc("Alpha Health", "2026-04-01", {"97110": {A: 40, B: 45, C: 40, D: 50, E: 60}})),
+        ("al_05.json", _pdoc("Alpha Health", "2026-05-01", {"97110": {C: 50, D: 50}})),
+        ("al_06.json", _pdoc("Alpha Health", "2026-06-01", {"97110": {A: 40, B: 45, C: 50, D: 55, E: 60}})),
+    ], FIVE)
+    from mrfx.monitor import compute_payer_trajectory
+    p = compute_payer_trajectory(store, {"state": "MO"})["payers"][0]
+    assert [s["index_pct"] for s in p["series"]] == [0.0, 12.5, 0.0]
+    assert p["cut_streak"] == 0
+
+
+# the subject rule: one practice name in two states, a mapped two-TIN entity
+S_MO, S_KS, M1, M2 = "610000001", "610000002", "620000001", "620000002"
+PEERS = {f"6{i}0000001": (f"{k} REHAB", "MO") for i, k in zip(range(3, 9), "BCDEFG")}
+SUBJ_NAMES = {S_MO: ("ACME REHAB", "MO"), S_KS: ("ACME REHAB", "KS"),
+              M1: ("NORTH CLINIC", "MO"), M2: ("SOUTH CLINIC", "MO"), **PEERS}
+
+
+def _subjects(cfg, store):
+    peers = list(PEERS)
+    p97110 = {t: 44 + i for i, t in enumerate(peers)}
+    p97140 = {t: 30 + i for i, t in enumerate(peers)}
+    p97112 = {t: 40 + i for i, t in enumerate(peers)}        # nobody named ACME prices it
+    _load(cfg, store, [("al_06.json", _pdoc("Alpha Health", "2026-06-01", {
+        "97110": {S_MO: 41, S_KS: 60, M1: 44, M2: 52, **p97110},
+        "97140": {S_MO: 30, S_KS: 36, **p97140},
+        "97112": p97112}))], SUBJ_NAMES)
+    from mrfx.entities import update_entity
+    update_entity(cfg, store, "BIG GROUP", add_tins=[M1, M2])
+    store.rebuild_rollups()
+
+
+MO = {"month": "latest", "state": "MO"}
+
+
+def test_an_out_of_state_subjects_priced_codes_are_not_gaps(cfg, store):
+    # 64a371c: the KS ACME was benchmarked on 97110 and 97140 in a MO market,
+    # and contract gaps listed the same two codes as "not in your contract"
+    _subjects(cfg, store)
+    c = _client(cfg, store)
+    for subj in ("ACME REHAB · KS", S_KS):
+        b = c.post("/api/benchmark/market", json={"subject": subj, "market": MO}).json()
+        priced = {r["billing_code"] for r in b["rows"] if r["subject_rate"] is not None}
+        assert priced == {"97110", "97140"}
+        g = c.post("/api/contract-gaps", json={"subject": subj, "market": MO, "min_peers": 3}).json()
+        assert {x["billing_code"] for x in g["gaps"]} == {"97112"}
+        size = c.post("/api/quality/size", json={"subject": subj, "market": MO})
+        assert size.status_code == 200 and size.json()["subject"], size.text
+
+
+def test_a_partial_name_takes_the_market_state_like_the_full_name(cfg, store):
+    # 64a371c: "ACME" resolved to both states' TINs ($50.50 at p70), the full
+    # name to the MO one only ($41.00 at p10)
+    _subjects(cfg, store)
+    from mrfx.benchmark import resolve_subject_tins, subject_tins_for_market
+    for subj in ("ACME REHAB", "acme rehab", "ACME"):
+        assert subject_tins_for_market(store, subj, {"state": "MO"}) == [S_MO], subj
+    assert subject_tins_for_market(store, S_KS, {"state": "MO"}) == [S_KS]   # an id is what it names
+    assert resolve_subject_tins(store, "ACME") == sorted(resolve_subject_tins(store, "ACME"))
+    b = _client(cfg, store).post("/api/benchmark/market", json={"subject": "ACME", "market": MO}).json()
+    r = next(x for x in b["rows"] if x["billing_code"] == "97110")
+    assert (b["subject_tins"], r["subject_rate"]) == ([S_MO], 41.0)
+
+
+def test_the_dossier_names_the_mapped_entity_and_the_practice_it_prices(cfg, store):
+    # 64a371c: "Practice profile — NORTH CLINIC" over BIG GROUP's numbers, and
+    # "ACME REHAB (KS, MO)" above a rate table of the MO practice only
+    _subjects(cfg, store)
+    c = _client(cfg, store)
+    f = c.post("/api/report/dossier.json", json={"subject": "BIG GROUP", "market": MO}).json()["facts"]
+    assert f["display_name"] == "BIG GROUP"
+    f = c.post("/api/report/dossier.json", json={"subject": "ACME REHAB", "market": MO}).json()["facts"]
+    assert "KS" not in json.dumps(f.get("states") or f.get("state") or "")
+
+
+@pytest.mark.parametrize("flat", [False, True])
+def test_one_practice_has_one_position_on_every_screen(cfg, store, flat):
+    # nine MO practices, one payer: A is 2nd lowest on 97110 (12.5) and in the
+    # exact middle on 97140 (50) -> median 31.25 -> p31. 64a371c: Negotiate and
+    # the dossier said p32 (median of rounded positions), and with an all-tied
+    # 97530 the roster, Negotiate and the dossier said p50, the size premium 37.5
+    names = "ABCDEFGHI"
+    T = {k: f"5{i}1000001" for i, k in enumerate(names, start=1)}
+    prices = {"97110": {T[k]: v for k, v in zip(names, [41, 40, 42, 43, 44, 45, 46, 47, 48])},
+              "97140": {T[k]: v for k, v in zip(names, [35, 31, 32, 33, 34, 36, 37, 38, 39])}}
+    if flat:
+        prices["97530"] = {t: 50 for t in T.values()}
+    _load(cfg, store, [("p_06.json", _pdoc("P Health", "2026-06-01", prices))],
+          {t: (f"{k} REHAB", "MO") for k, t in T.items()})
+    c = _client(cfg, store)
+    mine = lambda rows: next(x for x in rows if x["display_name"] == "A REHAB")  # noqa: E731
+    lead = mine(c.post("/api/leads", json={"market": MO, "threshold_percentile": 99,
+                                           "min_codes": 1}).json()["leads"])
+    board = mine(c.post("/api/leaderboard", json={"market": MO, "min_codes": 1}).json()["practices"])
+    roster = mine(c.post("/api/roster", json={"market": MO, "payer": "P Health",
+                                              "min_codes": 1}).json()["organizations"])
+    neg = c.post("/api/negotiate/compare", json={"subject": "A REHAB", "payer": "P Health",
+                                                 "market": MO}).json()["summary"]["headline_percentile"]
+    dossier = c.post("/api/report/dossier.json", json={"subject": "A REHAB", "market": MO}
+                     ).json()["facts"]["median_percentile"]
+    one_pager = c.post("/api/report/negotiation", json={"subject": "A REHAB", "market": MO}).text
+    size = c.post("/api/quality/size", json={"subject": "A REHAB", "market": MO}).json()
+    assert [lead["median_percentile"], board["median_percentile"], roster["median_percentile"],
+            neg, dossier] == [31] * 5
+    assert "You sit at roughly <b>p31</b>" in one_pager
+    assert (lead["n_codes"], board["n_codes"]) == (2, 2)
+    assert size["subject"]["avg_percentile"] == 31.3          # the size premium's mean, same codes
+
+
+def test_the_worst_payer_is_judged_on_the_codes_its_payers_share(cfg, store):
+    # Alpha: 97110 $40 (market median $48), 97140 $30 (median $32);
+    # Beta: 97110 $42. 64a371c averaged each payer over its own codes —
+    # Alpha (8+2)/2 = $5.00 vs Beta $6.00 -> "worst: Beta" — although Alpha
+    # pays less on the only code both price
+    peers = list(PEERS)
+    _load(cfg, store, [
+        ("al.json", _pdoc("Alpha Health", "2026-06-01", {
+            "97110": {S_MO: 40, **{t: 44 + 2 * i for i, t in enumerate(peers)}},
+            "97140": {S_MO: 30, **{t: 30 + i for i, t in enumerate(peers)}}})),
+        ("be.json", _pdoc("Beta Health", "2026-06-01", {"97110": {S_MO: 42, peers[0]: 47}}))],
+        SUBJ_NAMES)
+    leads = _client(cfg, store).post("/api/leads", json={
+        "market": MO, "threshold_percentile": 99, "min_codes": 1}).json()["leads"]
+    a = next(x for x in leads if x["display_name"] == "ACME REHAB")
+    assert (a["worst_payer"], a["worst_payer_codes"], a["worst_payer_basis"]) == (
+        "Alpha Health", 1, "shared")
+
+
+def _outreach_zip(c, **params):
+    import csv
+    import io
+    import zipfile
+    r = c.get("/api/export/outreach.zip", params=params)
+    z = zipfile.ZipFile(io.BytesIO(r.content))
+    rows = list(csv.DictReader(io.StringIO(
+        z.read(next(n for n in z.namelist() if n.endswith(".csv"))).decode("utf-8-sig"))))
+    return rows, z.read(next(n for n in z.namelist() if n.endswith(".txt"))).decode()
+
+
+def test_the_outreach_file_describes_itself(cfg, store):
+    # 64a371c: its sidecar was the Explorer's — "one row per payer x
+    # billing_code x entity x ... x month", "ALL months pooled" — above
+    # columns that are one row per organization on the latest month
+    _subjects(cfg, store)
+    rows, meth = _outreach_zip(_client(cfg, store), grain="tin", dollar_only="1",
+                               billing_class="institutional")
+    assert "one row per organization" in meth.lower()
+    assert "ALL months pooled" not in meth and "modifier-set x class" not in meth
+    assert "do not change the numbers" in meth and "C<code>_PCTL" in meth
+
+
+def test_outreach_medians_are_computed_in_the_database(cfg, store, monkeypatch):
+    # 4.6: the per-organization medians come back per (organization, code)
+    # for the wanted codes only — never one Python entry per (TIN, code) with
+    # every TIN passed as one parameter (RSS near 6 GB on a 99M store)
+    _subjects(cfg, store)
+    import mrfx.benchmark as bm
+    seen = []
+    real = bm.practice_base_sql
+
+    def spy(store, market, **kw):
+        seen.append(kw.get("extra_params"))
+        return real(store, market, **kw)
+    monkeypatch.setattr(bm, "practice_base_sql", spy)
+    rows, _meth = _outreach_zip(_client(cfg, store), grain="tin", dollar_only="1", state="MO")
+    assert seen and not any(seen)                 # no TIN list as a parameter
+    acme = next(x for x in rows if x["ENTITY_ID"] == S_MO)
+    assert (acme["C97110_RATE"], acme["C97140_RATE"]) == ("41.0", "30.0")
+
+
+WRONG = [{"billing_class": ["professional"]}, {"discipline": {"a": 1}}, {"city": [5]},
+         {"payers": [{"x": 1}]}, {"codes": 5}, {"base_only": "maybe"},
+         {"target_percentile": "high"}, {"month": ["2026-06"]}, {"pos": {"a": 1}},
+         {"state": 5}, {"city": "\u0000"}]
+
+
+def test_no_wrong_typed_market_reaches_the_database(cfg, store):
+    # 4.7: {"billing_class": ["professional"]} answered 500 with
+    # "ConversionException: ... LINE 3: ..." on a dozen routes; fuzzed here
+    # over EVERY POST route the API publishes
+    _subjects(cfg, store)
+    c = _client(cfg, store)
+    routes = [p for p, ops in c.get("/openapi.json").json()["paths"].items()
+              if "post" in ops and "{" not in p]
+    assert len(routes) > 40
+    bad = []
+    for path in routes:
+        for m in WRONG:
+            body = {"market": m, "subject": "ACME REHAB", "payer": "Alpha Health",
+                    "tins": 5, "paths": 5, "subjects": 5, "path": 5}
+            r = c.post(path, json=body)
+            text = r.text
+            if r.status_code >= 500 or "LINE " in text or "/tmp/" in text or "\\\\" in text:
+                bad.append((path, m, r.status_code, text[:120]))
+    assert not bad, bad[:8]
+
+
+def test_a_private_market_key_is_never_taken_from_the_wire(cfg, store):
+    # 4.7: `_plan_files: ["al_06.json"]` silently scoped Benchmark to one file
+    from mrfx.benchmark import normalize_market
+    m = normalize_market({"_plan_files": ["x.json"], "curated_tins": ["1"], "state": "mo",
+                          "base_only": "false", "codes": "97110"})
+    assert "_plan_files" not in m and "curated_tins" not in m
+    assert (m["state"], m["base_only"], m["codes"]) == ("MO", False, ["97110"])
+
+
+def test_long_names_and_bad_paths_are_refused_in_words(cfg, store):
+    c = _client(cfg, store)
+    r = c.post("/api/upload", files={"file": ("x" * 300 + ".json", b"{}")})
+    assert r.status_code == 422 and str(cfg.inbox_dir) not in r.text
+    for route in ("/api/utilization/import", "/api/demographics/import"):
+        r = c.post(route, json={"path": "/" + "y" * 3000})
+        assert r.status_code == 422 and "y" * 50 not in r.text
+    r = c.get("/api/files", params={"offset": 99999999999999999999})
+    assert r.status_code == 422
+
+
+def test_percentages_are_never_pooled_with_dollars(cfg, store):
+    # 4.9: include_non_dollar pooled an 80 (%) with $40 and printed $60.00
+    _subjects(cfg, store)
+    r = _client(cfg, store).post("/api/benchmark/market", json={
+        "subject": "ACME REHAB", "market": {**MO, "include_non_dollar": True}})
+    assert r.status_code == 422 and "cannot be pooled" in r.text
+
+
+def test_printed_percentages_round_half_up_and_never_read_minus_zero():
+    from mrfx.inflation import erosion_line
+    from mrfx.rounding import signed_pct
+    from mrfx.spark import sparkline
+    assert (signed_pct(-0.025), signed_pct(1.25), signed_pct(0)) == ("+0.0%", "+1.3%", "+0.0%")
+    line = erosion_line("Q Health", -0.025, -2.9, "2023-06", "2024-06",
+                        {"basis": "assumed", "assumed_pct_per_year": 3})
+    assert "-0.0%" not in line and "+0.0%" in line
+    svg = sparkline([("2026-05", 80.0), ("2026-06", 81.0)])
+    assert "(+1.3%)" in svg
+
+
+def test_report_footers_state_the_market_in_words(cfg, store):
+    _subjects(cfg, store)
+    h = _client(cfg, store).post("/api/report/pitch", json={"subject": "ACME REHAB",
+                                                            "market": MO}).text
+    assert 'Market definition: {"' not in h
+    assert "Market definition: each payer&#x27;s newest published month; practices in MO" in h \
+        or "Market definition: each payer's newest published month; practices in MO" in h
+
+
+def test_shipped_catalogs_are_found_when_the_config_lives_elsewhere(tmp_path):
+    from mrfx.config import load_mrfx_config
+    from mrfx.known_sources import load_known_sources
+    (tmp_path / "mrfx.yaml").write_text("store_dir: s\n")
+    c = load_mrfx_config(tmp_path / "mrfx.yaml")
+    assert c.store_dir == tmp_path / "s"
+    assert len(load_known_sources(c.known_sources_path)) > 50
+
+
+def test_practice_medians_survive_a_restart_and_superseded_ones_go(cfg, store):
+    # 4.6 (P3): the materialised medians were named by a random per-process
+    # tag — rebuilt at every start, and five restarts left ~490 MB beside the
+    # store
+    _subjects(cfg, store)
+    from mrfx.benchmark import compute_benchmark
+    compute_benchmark(store, "ACME REHAB", MO)
+    files = sorted(p.name for p in store.dir.glob("practice_medians*.parquet"))
+    assert files
+    again = S.Store(cfg.store_dir)
+    compute_benchmark(again, "ACME REHAB", MO)
+    assert sorted(p.name for p in store.dir.glob("practice_medians*.parquet")) == files
+    stale = store.dir / "practice_medians_v1.deadbeef-3.parquet"
+    stale.write_bytes(b"old")
+    put(cfg, "be.json", _pdoc("Beta Health", "2026-06-01", {"97110": {S_MO: 42}}))
+    scan_inbox(cfg, again)
+    again.rebuild_rollups()
+    compute_benchmark(again, "ACME REHAB", MO)
+    now = sorted(p.name for p in store.dir.glob("practice_medians*.parquet"))
+    assert now and now != files and stale.name not in now

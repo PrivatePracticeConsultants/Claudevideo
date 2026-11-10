@@ -317,11 +317,22 @@ def _project_root_of(config_path: Path) -> Path:
     return parent.parent if parent.name.lower() == "config" else parent
 
 
+# files the APP ships (not user data): a config kept outside the project folder
+# anchored them beside itself, where they do not exist, and the Sources tab was
+# silently empty (`/api/known-sources` -> {"sources": []}; review 9 item 4.9)
+_SHIPPED_FILES = ("registry_path", "known_sources_path")
+_APP_ROOT = Path(__file__).resolve().parent.parent
+
+
 def _anchor_paths(cfg: MrfxConfig, root: Path) -> MrfxConfig:
     for name in _ANCHORED_FIELDS:
         v = getattr(cfg, name, None)
         if v is not None and not Path(v).is_absolute():
-            setattr(cfg, name, root / v)
+            anchored = root / v
+            if (name in _SHIPPED_FILES and not anchored.exists()
+                    and (_APP_ROOT / v).exists()):
+                anchored = _APP_ROOT / v
+            setattr(cfg, name, anchored)
     b = getattr(cfg.enrichment, "bulk_csv_path", None)
     if b is not None and not Path(b).is_absolute():
         cfg.enrichment.bulk_csv_path = root / b

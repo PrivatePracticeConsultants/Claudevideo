@@ -105,7 +105,9 @@ def build_client_packet(cfg: MrfxConfig, store: Store, subject: str,
     display = subject
     try:
         with store.connect() as con:
-            display = subject_display_name(con, resolve_subject_tins(store, subject)) or subject
+            from .benchmark import mapped_entity_name
+            display = subject_display_name(con, resolve_subject_tins(store, subject),
+                                           mapped_entity_name(store, subject)) or subject
     except Exception:  # noqa: BLE001 — a name is cosmetic; the packet still builds
         pass
 

@@ -121,7 +121,8 @@ def _build_digest(store: Store, subjects: list[str], mstatus: dict,
                     "SELECT DISTINCT npi FROM rates WHERE tin_value IN "
                     "(SELECT unnest(?::VARCHAR[])) AND npi IS NOT NULL",
                     [tins]).fetchall()]
-                display = subject_display_name(con, tins)
+                from .benchmark import mapped_entity_name
+                display = subject_display_name(con, tins, mapped_entity_name(store, subject))
                 my_payers = {r[0] for r in con.execute(
                     "SELECT DISTINCT payer FROM rates_by_tin WHERE is_latest AND tin_value IN "
                     "(SELECT unnest(?::VARCHAR[]))", [tins]).fetchall()}
@@ -187,10 +188,13 @@ def _build_digest(store: Store, subjects: list[str], mstatus: dict,
             "can_diff": can_diff, "have_medicare": have_medicare}
 
 
-def subject_display_name(con, tins: list[str]) -> str | None:
+def subject_display_name(con, tins: list[str], mapped: str | None = None) -> str | None:
     """One name for a (possibly multi-TIN) practice, the same on every call:
-    the name of its TIN with the most NPIs, ties to the lowest tax ID.
+    a mapped entity's own name (`mapped`, from benchmark.mapped_entity_name),
+    else the name of its TIN with the most NPIs, ties to the lowest tax ID.
     `any_value` here gave a different member's name from call to call."""
+    if mapped:
+        return mapped
     if not tins:
         return None
     return (con.execute(

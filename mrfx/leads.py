@@ -16,10 +16,10 @@ full benchmark/opportunity per lead once they pick one.
 from __future__ import annotations
 
 import datetime as dt
-import json
+from decimal import ROUND_HALF_UP, Decimal
 
 from . import __version__
-from .benchmark import (BenchmarkError, _market_where, _rates_relation,
+from .benchmark import (BenchmarkError, _market_where, _rates_relation, market_in_words,
                         normalize_market, practice_base_sql, resolve_subject_tins)
 from .store import Store, defuse_csv, generation_cached, mask_tin
 
@@ -55,6 +55,35 @@ def midrank_pct_sql(partition: str = "billing_code") -> str:
 
 
 MIDRANK_PCT = midrank_pct_sql("billing_code")
+
+
+def _worst_payer(by_payer: dict) -> dict | None:
+    """The payer that underpays a practice most, compared on the codes ALL its
+    payers price (a like-for-like basket — the rule visit economics uses).
+    Each payer's average over ITS OWN codes named Beta ($6 under on 97110)
+    over Alpha ($8 under on 97110, $2 on 97140), although Alpha pays less on
+    the only code both price (review 9 item 4.3). With no code every payer
+    prices, the payers are not ranked against each other: the one with the
+    biggest average gap is named with its code count, so the reader sees what
+    it rests on. None when no payer is under the market."""
+    payers = sorted(by_payer)
+    if not payers:
+        return None
+    shared = set.intersection(*(set(v) for v in by_payer.values()))
+    basis = "shared" if shared and len(payers) > 1 else ("own" if len(payers) > 1 else "only")
+    scored = []
+    for p in payers:
+        codes = sorted(shared) if basis == "shared" else sorted(by_payer[p])
+        gaps = [by_payer[p][c] for c in codes]
+        # exact decimals, half-up to the cent: a DOUBLE sum depends on order
+        avg = (float((sum(gaps, Decimal(0)) / len(gaps)).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP)) if gaps else 0.0)
+        scored.append((-avg, p, avg, len(codes)))
+    scored.sort()
+    _neg, payer, avg, n = scored[0]
+    if avg <= 0:
+        return None
+    return {"payer": payer, "avg_gap": avg, "n_codes": n, "basis": basis}
 
 
 @generation_cached('leads.compute_leads')
@@ -164,21 +193,22 @@ def compute_leads(store: Store, market: dict, *, threshold_percentile: int = 25,
                 -- payer pricing one such extra code look less stingy — a payer
                 -- $20 under on every shared code lost "worst payer" to one $16
                 -- under on one code (tests/mrfx/test_known_answer_leads.py)
-                SELECT tp.tin_value, tp.payer,
-                       round(avg(greatest(0, m.code_median - tp.rate)::DECIMAL(18, 6)), 2) AS avg_gap,
-                       count(*) AS n_codes
+                SELECT tp.tin_value, tp.payer, tp.billing_code,
+                       greatest(0, m.code_median - tp.rate)::DECIMAL(18, 6) AS gap
                 FROM tp JOIN mkt m USING (billing_code)
                 WHERE m.n_in_code >= 2
-                GROUP BY tp.tin_value, tp.payer
             )
-            SELECT tin_value, payer, avg_gap FROM (
-                SELECT *, row_number() OVER (
-                    PARTITION BY tin_value ORDER BY avg_gap DESC, payer) AS rn
-                FROM gap) WHERE rn = 1 AND avg_gap > 0
+            SELECT tin_value, payer, billing_code, gap FROM gap
+            ORDER BY tin_value, payer, billing_code
             """
-            for tv, payer, gap in con.execute(
+            per: dict[str, dict] = {}
+            for tv, payer, code, gap in con.execute(
                     wsql, [*params, lead_tins]).fetchall():
-                worst_payer[tv] = {"payer": payer, "avg_gap": gap}
+                per.setdefault(tv, {}).setdefault(payer, {})[code] = gap
+            for tv, by_payer in per.items():
+                w = _worst_payer(by_payer)
+                if w:
+                    worst_payer[tv] = w
     sites = store.org_websites()
     leads = []
     for r in rows:
@@ -210,6 +240,10 @@ def compute_leads(store: Store, market: dict, *, threshold_percentile: int = 25,
             # the payer driving the underpayment — the outreach angle
             "worst_payer": (worst_payer.get(r["tin_value"]) or {}).get("payer"),
             "worst_payer_gap": (worst_payer.get(r["tin_value"]) or {}).get("avg_gap"),
+            # how many codes the gap rests on, and whether the payers were
+            # compared on a common basket ("shared") or each on its own
+            "worst_payer_codes": (worst_payer.get(r["tin_value"]) or {}).get("n_codes"),
+            "worst_payer_basis": (worst_payer.get(r["tin_value"]) or {}).get("basis"),
         })
     return {
         "market": {k: v for k, v in market.items() if v not in (None, [], "")},
@@ -258,7 +292,11 @@ def compute_leaderboard(store: Store, market: dict, *, min_codes: int = 3,
         -- practice is paid the same on was averaged in (audit 8 P1-3). A
         -- practice whose codes are ALL paid the same as everyone sits at
         -- p50 — it stays on the board (size / footprint sorts need it).
-        SELECT tin_value, count(*) AS n_codes,
+        -- n_codes counts the codes IN the position (Leads' count: the same
+        -- practice read 2 codes on Leads and 3 here — review 9 item 4.3);
+        -- the min_codes gate counts every compared code
+        SELECT tin_value, count(*) FILTER (WHERE n_rates >= 2) AS n_codes,
+               count(*) AS n_compared,
                coalesce(round(median(pct) FILTER (WHERE n_rates >= 2), 0), 50.0)
                                       AS median_pct,
                round(median(rate), 2) AS median_rate
@@ -267,7 +305,7 @@ def compute_leaderboard(store: Store, market: dict, *, min_codes: int = 3,
     SELECT p.tin_value, p.n_codes, p.median_pct, p.median_rate,
            td.display_name, td.entity_kind, td.npi_count, td.states, td.cities
     FROM per_tin p JOIN tin_directory td USING (tin_value)
-    WHERE p.n_codes >= ?
+    WHERE p.n_compared >= ?
     ORDER BY {order}, p.tin_value
     LIMIT ?
     """
@@ -345,16 +383,23 @@ def compute_payer_roster(store: Store, payer: str, market: dict, *,
     ranked AS (
         SELECT billing_code, tin_value, rate,
                {MIDRANK_PCT} AS pct,
-               count(*) OVER (PARTITION BY billing_code) AS n_in_code
+               count(*) OVER (PARTITION BY billing_code) AS n_in_code,
+               count(DISTINCT round(rate, 2)) OVER (PARTITION BY billing_code) AS n_rates
         FROM base
     ),
     per_tin AS (
         -- n_codes counts EVERY code the practice prices with the payer (book
-        -- size); median_pct only over codes the payer prices for ≥2 practices
-        -- (a real distribution to place them in), null when there are none
+        -- size); median_pct is the one overall-position rule (Leads, the
+        -- leaderboard, benchmark.overall_position): codes the payer prices
+        -- for ≥2 practices at ≥2 different rates; p50 when every such code is
+        -- all-tied (an all-tied code read p50 here and was skipped on Leads:
+        -- p50 vs p31 for one practice — review 9 item 4.3); null with none
         SELECT tin_value, count(*) AS n_codes,
                round(median(rate), 2) AS median_rate,
-               round(median(pct) FILTER (WHERE n_in_code >= 2), 0) AS median_pct
+               CASE WHEN count(*) FILTER (WHERE n_in_code >= 2) = 0 THEN NULL
+                    ELSE coalesce(round(median(pct) FILTER (
+                             WHERE n_in_code >= 2 AND n_rates >= 2), 0), 50.0)
+               END AS median_pct
         FROM ranked GROUP BY tin_value
     )
     SELECT p.tin_value, p.n_codes, p.median_pct, p.median_rate,
@@ -433,7 +478,7 @@ def payer_roster_csv(result: dict) -> str:
         f"Organizations contracted with {result['payer']} "
         f"({result['count']}{'+' if result.get('truncated') else ''}, "
         f"pricing at least {result['min_codes']} code(s)).",
-        f"Market definition: {json.dumps(result['market'])}.",
+        f"Market definition: {market_in_words(result['market'])}.",
         "'Contracted' = the payer published negotiated rates for the practice — "
         "not proof of an active/billed contract. Percentile is the practice's "
         "position among this payer's other practices; not collections. "
@@ -467,7 +512,7 @@ def leads_csv(store: Store, result: dict) -> str:
         f"Underpaid-practice leads: entities whose median percentile across "
         f"priced codes is at or below p{result['threshold_percentile']}, pricing "
         f"at least {result['min_codes']} codes with a real market (≥2 providers).",
-        f"Market definition: {json.dumps(m)}.",
+        f"Market definition: {market_in_words(m)}.",
         LEADS_RULE,
         *([f"List CUT at {result['limit']:,} leads; the market holds more. Narrow it "
            "(state, payer, discipline) or raise the minimum code count to see the rest."]
@@ -476,6 +521,9 @@ def leads_csv(store: Store, result: dict) -> str:
         "collections; avg_gap_to_median is a rate-level magnitude, NOT annual "
         "dollars (that needs the practice's own volumes — run the benchmark's "
         "opportunity model per lead). Geography/name from NPPES enrichment.",
+        "worst_payer is compared on the codes every one of the practice's "
+        "payers prices (worst_payer_codes of them); when they share none, each "
+        "payer's own codes are averaged.",
     ]:
         out.write(f"# {line}\n")
     w = csv.writer(out)
@@ -483,12 +531,14 @@ def leads_csv(store: Store, result: dict) -> str:
     # multi-state billing entity is never silently presented as single-state
     w.writerow(["display_name", "tin", "entity_kind", "state", "all_states",
                 "city", "npi_count", "n_codes", "median_percentile",
-                "avg_gap_to_median", "worst_payer", "worst_payer_gap", "website"])
+                "avg_gap_to_median", "worst_payer", "worst_payer_gap",
+                "worst_payer_codes", "website"])
     for x in result["leads"]:
         w.writerow([defuse_csv(x["display_name"]), x["tin_value"], x["entity_kind"],
                     x["state"] or "", "; ".join(x.get("states") or []),
                     defuse_csv(x["city"]) or "", x["npi_count"],
                     x["n_codes"], x["median_percentile"], x["avg_gap_to_median"],
                     defuse_csv(x.get("worst_payer")) or "", x.get("worst_payer_gap") or "",
+                    x.get("worst_payer_codes") or "",
                     defuse_csv(x["website"]) or ""])
     return out.getvalue()
