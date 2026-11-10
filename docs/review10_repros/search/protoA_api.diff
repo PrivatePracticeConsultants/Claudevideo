@@ -1,0 +1,165 @@
+--- /home/user/Claudevideo/mrfx/api.py	2026-11-10 06:06:08.299048959 +0000
++++ proto/mrfx/api.py	2026-11-10 08:47:15.730209814 +0000
+@@ -22,6 +22,7 @@
+ import zipfile
+ from pathlib import Path
+ 
++import duckdb
+ from fastapi import BackgroundTasks, Body, FastAPI, HTTPException, Query, Request, UploadFile
+ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, PlainTextResponse,
+                                StreamingResponse)
+@@ -171,6 +172,9 @@
+ _TIN_REL = f"SELECT {_TIN_PROJECTION} FROM rates_by_tin t {_TIN_JOINS}"
+ 
+ 
++_UNITS_REL = None   # PROTO F4: set by create_app
++
++
+ def _tin_rows_by_unit(where_key: str, where_unit: str, latest: bool) -> str:
+     """The TIN relation's rows whose contract passes `where_key` and whose
+     PRACTICE passes `where_unit` — the same rows as
+@@ -183,6 +187,10 @@
+     expressions — the passing practices are found, and only their rows are
+     read and joined. Binds the key params, then the unit params (bucket order)."""
+     spine = "rates_by_tin WHERE " + ("is_latest AND " if latest else "") + where_key
++    # PROTO F4: every practice of the spine, kept once per spine generation
++    # (Store.spine_materialised). A superset of k's practices, so the SEMI JOIN
++    # below keeps exactly the same rows — without re-reading the spine to list them.
++    units = (_UNITS_REL() if _UNITS_REL else None) or "(SELECT DISTINCT tin_value, tin_is_really_npi FROM k)"
+     unit_cols = ", ".join(f"{sql} AS {name}" for name, sql in _UNIT_COLS.items())
+     return f"""
+         WITH k AS NOT MATERIALIZED (SELECT * FROM {spine}),
+@@ -190,7 +198,7 @@
+             SELECT tin_value, tin_is_really_npi FROM (
+                 SELECT t.tin_value, t.tin_value AS unit_id, t.tin_is_really_npi,
+                        {unit_cols}
+-                FROM (SELECT DISTINCT tin_value, tin_is_really_npi FROM k) t {_TIN_JOINS})
++                FROM {units} t {_TIN_JOINS})
+             WHERE {where_unit})
+         SELECT {_TIN_PROJECTION}
+         FROM k t SEMI JOIN u ON u.tin_value = t.tin_value
+@@ -1245,6 +1253,63 @@
+                 "off until the file is fixed (code,locality,non_facility_rate)",
+                 cfg.mpfs_path)
+ 
++    # PROTO F4
++    def _units_rel():
++        try:
++            if store.rollups_stale():
++                return None
++            return store.spine_materialised(
++                "spine_units_v1", "SELECT DISTINCT tin_value, tin_is_really_npi FROM rates_by_tin")
++        except Exception:  # noqa: BLE001 — an optimisation never fails a search
++            log.debug("practice list unavailable", exc_info=True)
++            return None
++    global _UNITS_REL
++    _UNITS_REL = _units_rel
++
++    # PROTO F2: one running query per (page, view). The page sends
++    # X-Mrfx-View: <page id>:<view>; a newer request under the same key
++    # interrupts the older one's DuckDB statement (its answer would be thrown
++    # away by the page anyway) so superseded scans never pile up.
++    _views: dict[str, dict] = {}
++    _views_lock = threading.Lock()
++
++    class _Superseded(Exception):
++        pass
++
++    @contextlib.contextmanager
++    def _view_query(request: Request, con):
++        key = request.headers.get("x-mrfx-view")
++        if not key:
++            yield lambda: None
++            return
++        me = {"con": con, "dead": False}
++        with _views_lock:
++            old = _views.get(key)
++            _views[key] = me
++            if len(_views) > 256:
++                for k in [k for k, v in _views.items() if v is not me][:128]:
++                    _views.pop(k, None)
++        if old is not None:
++            old["dead"] = True
++            try:
++                old["con"].interrupt()
++            except Exception:  # noqa: BLE001
++                pass
++
++        def alive():
++            if me["dead"]:
++                raise _Superseded()
++        try:
++            yield alive
++        except duckdb.InterruptException:
++            raise HTTPException(409, "superseded by a newer search")
++        except _Superseded:
++            raise HTTPException(409, "superseded by a newer search")
++        finally:
++            with _views_lock:
++                if _views.get(key) is me:
++                    _views.pop(key, None)
++
+     # -- rates table ---------------------------------------------------------
+ 
+     # Row-count cache for the table's pagination total. The count is the same
+@@ -1383,8 +1448,10 @@
+                    f"SELECT * FROM (SELECT {_TIN_PROJECTION} FROM page t {_TIN_JOINS}) {order}")
+         else:
+             sql = f"{rel_sql(grain, fs)} {order} LIMIT ? OFFSET ?"
+-        with store.connect() as con:
++        with store.connect() as con, _view_query(request, con) as alive:
++            alive()
+             rows = _dicts(con.execute(sql, limit_params))
++            alive()
+             total = _filtered_count(con, grain, fs)
+         return {"rows": _mask_row_tins(rows), "total": total, "page": page,
+                 "page_size": page_size, "grain": grain}
+@@ -1431,7 +1498,17 @@
+         hit = _summary_cache.get(key)
+         if fresh(hit):
+             return _with_anchor(hit[1], fs)
+-        if not _summary_lock.acquire(blocking=False):
++        # PROTO F2/F3: this page view's older summary (if any) is interrupted
++        # first, so the lock it holds is released in a moment — wait for it
++        # instead of answering "busy" to the search the user actually meant
++        if not request.headers.get("x-mrfx-view"):
++            return _summary_locked(fs, grain, key, hit, fresh, None, lambda: None, False)
++        with store.connect() as vcon, _view_query(request, vcon) as alive:
++            return _summary_locked(fs, grain, key, hit, fresh, vcon, alive, True)
++
++    def _summary_locked(fs, grain, key, hit, fresh, vcon, alive, wait):
++        if not (_summary_lock.acquire(timeout=8.0) if wait
++                else _summary_lock.acquire(blocking=False)):
+             # a heavy scan is already running — serve the last value for THIS
+             # key, else say "busy" honestly (serving another filter's numbers
+             # under this view's label would be a wrong number; and iterating
+@@ -1446,7 +1523,8 @@
+             # the strip and the by-code rows read only spine columns: off the
+             # bare spine when no name/geo filter needs the joins (stat_rel)
+             srel = stat_rel(grain, fs)
+-            with store.connect() as con:
++            alive()
++            with (contextlib.nullcontext(vcon) if vcon is not None else store.connect()) as con:
+                 row = con.execute(
+                     f"""
+                     -- ONE list-form quantile, not median + two quantile_cont:
+@@ -1476,6 +1554,7 @@
+                 # variants outvote the rest, and blended professional with
+                 # institutional and NPI-slot rows the Benchmark excludes.
+                 basis, basis_text = practice_basis(fs)
++                alive()
+                 by_code = _dicts(con.execute(
+                     f"""
+                     WITH r AS (SELECT billing_code, unit_id, median(negotiated_rate) AS negotiated_rate
+@@ -3824,6 +3903,11 @@
+                 # Explorer/Code view when it changes (round 7 P1.20)
+                 "data_generation": store.data_generation}
+ 
++    @app.get("/api/boot")
++    def boot_info():
++        """PROTO F5: the one thing the first paint needs from /api/stats."""
++        return {"default_grain": grain_of({}, cfg, store)}
++
+     @app.get("/api/states")
+     def states():
+         """Distinct states that actually have enriched data — populates the
