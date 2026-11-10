@@ -391,6 +391,88 @@ class _DeferredGroup:
     prices: list[dict]
 
 
+class _DeferredSpool:
+    """The rate groups a file defers until its reference table is complete,
+    held in memory up to DEFER_MEMORY_GROUPS and spilled to a disk file
+    beyond that (pickled one by one, read back in order). Since audit 8 a
+    file with NO table of its own defers every group to its end of file:
+    peak memory grew ~5 MB per MB of file (a 401 MB file: 2.3-2.8 GB, was
+    0.4 GB) — invariant 1 says it must not grow with file size (review 9
+    item 3.3). The spill sits next to the store's parts as
+    .{key}-deferred.{pid}.spool.tmp, which the orphan sweep removes if killed."""
+
+    def __init__(self, spill_dir: Path | None, key: str):
+        self._mem: list = []
+        self._spill_dir = spill_dir
+        self._key = key
+        self._path: Path | None = None
+        self._fh = None
+        self.spilled = 0
+
+    def append(self, dg) -> None:
+        if self._fh is None and (len(self._mem) < DEFER_MEMORY_GROUPS or self._spill_dir is None):
+            self._mem.append(dg)
+            return
+        import pickle
+        if self._fh is None:
+            import os
+            self._spill_dir.mkdir(parents=True, exist_ok=True)
+            # unique per spool: a declined fast parse and its classic retry
+            # run in one process and must never share (or delete) a spill
+            self._path = self._spill_dir / f".{self._key}-deferred{id(self):x}.{os.getpid()}.spool.tmp"
+            self._fh = open(self._path, "wb")  # noqa: SIM115 — closed in drain()
+            for old in self._mem:
+                pickle.dump(old, self._fh, protocol=pickle.HIGHEST_PROTOCOL)
+                self.spilled += 1
+            self._mem = []
+        pickle.dump(dg, self._fh, protocol=pickle.HIGHEST_PROTOCOL)
+        self.spilled += 1
+
+    def __len__(self) -> int:
+        return len(self._mem) + self.spilled
+
+    def drain(self):
+        """Every deferred group, in arrival order; removes the spill file."""
+        if self._fh is None:
+            yield from self._mem
+            self._mem = []
+            return
+        import pickle
+        self._fh.close()
+        self._fh = None
+        try:
+            with open(self._path, "rb") as fh:
+                while True:
+                    try:
+                        yield pickle.load(fh)
+                    except EOFError:
+                        break
+        finally:
+            self.close()
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:  # noqa: BLE001 — interpreter shutdown
+            pass
+
+    def close(self) -> None:
+        if self._fh is not None:
+            self._fh.close()
+            self._fh = None
+        if self._path is not None:
+            try:
+                self._path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            self._path = None
+
+
+# deferred groups held in memory before the rest spill to disk (a group is a
+# few KB: ~40 MB at most)
+DEFER_MEMORY_GROUPS = 10_000
+
+
 _ROW_COLS = ("tin_value", "tin_type", "tin_is_really_npi", "npi")
 
 
@@ -571,7 +653,13 @@ class InNetworkParser:
         # that the 1 MB sniff could not tell apart (its table outgrew the
         # window): ingest stores its references instead (audit 8 P1-2)
         self.saw_in_network = False
-        self._deferred: list[_DeferredGroup] = []
+        try:
+            from .store import file_key
+            _spill = Path(cfg.store_dir) / "rates" if getattr(cfg, "store_dir", None) else None
+            _key = file_key(source_file or "file")
+        except Exception:  # noqa: BLE001 — no store: keep everything in memory
+            _spill, _key = None, "file"
+        self._deferred = _DeferredSpool(_spill, _key)
         self._ingested_at = dt.datetime.now(dt.timezone.utc).isoformat()
         self.result.ingest_month = self._ingested_at[:7]
         self._remote_rids: set[int] = set()
@@ -671,7 +759,7 @@ class InNetworkParser:
             row["schema_version"] = r.schema_version
             row["last_updated_on"] = r.last_updated_on
             row["file_month"] = r.file_month
-        for dg in self._deferred:
+        for dg in self._deferred.drain():
             self._emit_group(dg.billing_code, dg.billing_code_type, dg.groups, dg.ref_ids, dg.prices)
         self._flush(final=True)
         return r
@@ -787,13 +875,18 @@ class InNetworkParser:
         companion; an id the companions define two different ways (None)
         stays unresolved. Callers resolve only once the table is complete
         (_handle_item defers until then)."""
+        from .refid import REMOTE_REF
         out: dict[int, list[PGroup] | None] = {}
         own = self.result.embedded_refs
         for rid in ref_ids:
             if rid in own:
                 out[rid] = own[rid] or None
             else:
-                out[rid] = self.external_refs.get(rid)
+                ext = self.external_refs.get(rid)
+                if ext == REMOTE_REF:
+                    self._remote_rids.add(rid)
+                    ext = None
+                out[rid] = ext or None
         return out
 
     # -- items ----------------------------------------------------------------
@@ -849,7 +942,12 @@ class InNetworkParser:
             # layout never defers. A standalone companion that happens to
             # define the id is NOT a reason to emit early: whether this file
             # has its own table is not known yet (audit 8 P0-1).
-            if ref_ids and not self._refs_complete and any(
+            # ...and while ANY cited id is not in the table read so far: the
+            # file's table is every provider_references array it contains (a
+            # second array after in_network defined ids the first did not —
+            # they were filled from a companion; review 9 item 3.5). Deferred
+            # groups spill to disk (_DeferredSpool), so this costs no memory.
+            if ref_ids and any(
                 rid not in self.result.embedded_refs for rid in ref_ids
             ):
                 self._deferred.append(_DeferredGroup(code, code_type, groups, ref_ids, prices))
@@ -1003,7 +1101,7 @@ class InNetworkParser:
         self._flush()
 
 
-def skim_needed_ref_ids(cfg: MrfxConfig, stream) -> tuple[set[int], int]:
+def skim_needed_ref_ids(cfg: MrfxConfig, stream, shape: dict | None = None) -> tuple[set[int], int]:
     """Fast first pass over a huge in-network file: find the provider_reference
     ids that the TARGET billing codes actually cite. The (millions-strong)
     provider_references table and every non-target in_network item are skipped
@@ -1014,6 +1112,9 @@ def skim_needed_ref_ids(cfg: MrfxConfig, stream) -> tuple[set[int], int]:
     in_network items whose billing code IS in the target set — when it is 0
     the file provably contains none of the codes the user cares about, so the
     caller can skip the extraction pass entirely (this scan was the answer).
+    `shape` (optional) receives {"in_network": seen, "refs": seen} for the
+    top-level arrays, so a reference-only file the 1 MB sniff misread is
+    stored as references on this path too (review 9 item 3.1).
     """
     code_set = cfg.code_set
     needed: set[int] = set()
@@ -1023,6 +1124,11 @@ def skim_needed_ref_ids(cfg: MrfxConfig, stream) -> tuple[set[int], int]:
     cur_code_ok = False
 
     for prefix, event, value in ijson.parse(stream, use_float=True):
+        if shape is not None and event == "start_array":
+            if prefix == "in_network":
+                shape["in_network"] = True
+            elif prefix == "provider_references":
+                shape["refs"] = True
         # skip the whole provider_references array cheaply
         if prefix.startswith("provider_references"):
             continue
@@ -1068,7 +1174,7 @@ def skim_needed_ref_ids(cfg: MrfxConfig, stream) -> tuple[set[int], int]:
     return needed, target_items
 
 
-def skim_needed_ref_ids_fast(cfg: MrfxConfig, stream) -> tuple[set[int], int]:
+def skim_needed_ref_ids_fast(cfg: MrfxConfig, stream, shape: dict | None = None) -> tuple[set[int], int]:
     """skim_needed_ref_ids via the byte-level splitter (same contract and
     result): only target-code members are decoded; the reference table and
     non-target members are skipped as raw bytes."""
@@ -1082,7 +1188,11 @@ def skim_needed_ref_ids_fast(cfg: MrfxConfig, stream) -> tuple[set[int], int]:
     needed: set[int] = set()
     target_items = 0
     for array, data in iter_members(stream, probe._want_item, None, target_codes=code_set):
-        if data is None or array != "in_network":
+        if data is None:
+            if shape is not None and array in ("in_network", "provider_references"):
+                shape["in_network" if array == "in_network" else "refs"] = True
+            continue
+        if array != "in_network":
             continue
         item = decode_member(data)
         # the ijson skim counts an item only once a string/number billing_code
@@ -1311,17 +1421,21 @@ def fast_big_file_available(cfg: MrfxConfig) -> bool:
     return _fast_scan_unsupported(cfg) is not None
 
 
-def run_skim(cfg: MrfxConfig, open_fn) -> tuple[set[int], int]:
+def run_skim(cfg: MrfxConfig, open_fn, shape: dict | None = None) -> tuple[set[int], int]:
     """Pass 1 of a big file (see skim_needed_ref_ids), fast path first."""
     FastScanUnsupported = _fast_scan_unsupported(cfg)
     if FastScanUnsupported is not None:
         try:
             with open_fn() as stream:
-                return skim_needed_ref_ids_fast(cfg, stream)
+                if shape is not None:
+                    shape.clear()
+                return skim_needed_ref_ids_fast(cfg, stream, shape)
         except FastScanUnsupported as e:
             log.info("fast skim declined (%s) — using the classic skim", e)
     with open_fn() as stream:
-        return skim_needed_ref_ids(cfg, stream)
+        if shape is not None:
+            shape.clear()
+        return skim_needed_ref_ids(cfg, stream, shape)
 
 
 REF_BATCH = 200_000   # reference ids per write when streaming a reference file
@@ -1346,7 +1460,15 @@ def parse_provider_reference_file(cfg: MrfxConfig, stream, on_batch=None,
                 entry = builder.value
                 rid = clean_ref_id(entry.get("provider_group_id"))
                 if rid is not None:
-                    refs[rid] = share_strings(parse_groups(entry.get("provider_groups") or []), strings)
+                    groups = entry.get("provider_groups")
+                    if groups is None and entry.get("location"):
+                        # the providers are at a remote link MRF Explorer does
+                        # not download: remembered as remote, so a rate file
+                        # citing it counts remote_ref_groups (review 9 3.4)
+                        from .refid import REMOTE_REF
+                        refs[rid] = REMOTE_REF
+                    else:
+                        refs[rid] = share_strings(parse_groups(groups or []), strings)
                     if on_batch is not None and len(refs) >= REF_BATCH:
                         on_batch(refs)
                         refs = {}

@@ -679,10 +679,14 @@ def _parse_worker(cfg: MrfxConfig, path_str: str, name: str, header_defaults: di
         if result is None:
             keep_ref_ids = None
             if big:
+                shape: dict = {}
                 keep_ref_ids, target_items = run_skim(
-                    cfg, lambda: open_stream(path, progress_cb=report))
+                    cfg, lambda: open_stream(path, progress_cb=report), shape)
                 if target_items == 0:
-                    return {"short_circuit": True, "chunks_total": chunks_total}
+                    # a reference table and no in_network: a provider list
+                    # the sniff misread (review 9 item 3.1)
+                    return {"short_circuit": True, "chunks_total": chunks_total,
+                            "refs_only": bool(shape.get("refs") and not shape.get("in_network"))}
                 state["pass"] = 1
             _, result = run_in_network_parse(
                 cfg, lambda: make_parser(keep_ref_ids), lambda: open_stream(path, progress_cb=report))
@@ -1226,9 +1230,13 @@ def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight
                     result = None
                     progress.set_pass(0)
             if result is None:
+                shape: dict = {}
                 keep_ref_ids, target_items = run_skim(
                     cfg, lambda: open_stream(
-                        path, progress_cb=_stop_aware(store, name, progress.update)))
+                        path, progress_cb=_stop_aware(store, name, progress.update)), shape)
+                if target_items == 0 and shape.get("refs") and not shape.get("in_network"):
+                    progress.finish()
+                    return _ingest_reference_file(cfg, store, path, pf)
                 log.info("%s: pass 1 done — %d target-code items, %d target-cited references",
                          name, target_items, len(keep_ref_ids))
             if target_items == 0:
@@ -1390,35 +1398,59 @@ def _ingest_reference_file(cfg: MrfxConfig, store: Store, path: Path, pf: Prefli
         file_type="provider_reference", rows_emitted=state["n"], finished_at=FINISHED_NOW,
     )
     _finish_ok(cfg, store, path)
-    requeued = requeue_skipped(cfg, store, payer)
+    from .parser import file_month_for
+    ref_month = file_month_for(last_updated, name,
+                               dt.datetime.now(dt.timezone.utc).strftime("%Y-%m"))[0]
+    requeued = requeue_skipped(cfg, store, payer, last_updated, ref_month)
     log.info("%s: provider reference file — %d reference ids stored", name, state["n"])
     return {"status": "done", "refs": state["n"], "requeued": requeued}
 
 
-def requeue_skipped(cfg: MrfxConfig, store: Store, payer: str) -> list[str]:
-    """After a reference file lands, re-ingest this payer's in-network files
-    that had skipped groups (if their source file is still on disk)."""
+def requeue_skipped(cfg: MrfxConfig, store: Store, payer: str,
+                    last_updated_on: str | None = None, month: str | None = None) -> list[str]:
+    """After a reference file lands, load again this payer's in-network files
+    OF ITS VINTAGE (item 1.3) that had skipped / missing / ambiguous ids:
+    from the raw copy if it is still on disk (processed/, inbox/ or
+    downloads/), else by downloading its link again — a linked rate file
+    loaded before its provider list stayed at 0 rows for good, because
+    downloads were looked for only in processed/ and inbox/ (review 9 item
+    3.2). Files of other months are left alone: a new list never makes
+    another month's files download again."""
     with store.connect() as con:
         rows = con.execute(
             """
-            SELECT filename FROM files
+            SELECT filename, last_updated_on, file_month FROM files
             WHERE payer = ? AND file_type = 'in_network'
               AND status = 'done'
               AND (ref_groups_skipped > 0
                    OR coalesce(TRY_CAST(json_extract_string(qa, '$.missing_ref_ids') AS BIGINT), 0) > 0
                    OR coalesce(TRY_CAST(json_extract_string(qa, '$.ambiguous_ref_ids') AS BIGINT), 0) > 0)
+            ORDER BY filename
             """,
             [payer],
         ).fetchall()
+    lu = str(last_updated_on or "").strip()[:10]
     requeued = []
-    for (fname,) in rows:
-        for base in (cfg.processed_dir, cfg.inbox_dir):
+    for fname, flu, fmonth in rows:
+        if lu or month:
+            same = (lu and str(flu or "").strip()[:10] == lu) or \
+                   (month and str(fmonth or "")[:7] == str(month)[:7])
+            if not same:
+                continue
+        for base in (cfg.processed_dir, cfg.inbox_dir, cfg.downloads_dir):
             src = base / fname
             if src.exists():
                 log.info("re-ingesting %s now that %s reference data is present", fname, payer)
                 ingest_file(cfg, store, src)
                 requeued.append(fname)
                 break
+        else:
+            if store.requeue_url_for_file(
+                    fname, "downloading again: this payer's provider reference file "
+                           "arrived after this file was loaded"):
+                log.info("%s: its provider reference file arrived after it was loaded and "
+                         "its download was removed — downloading it again", fname)
+                requeued.append(fname)
     return requeued
 
 

@@ -441,3 +441,107 @@ def test_freeze_diagnostics_start_before_the_store_opens():
     assert src.index("_start_stack_recorder(") < src.index("store = Store(")
     assert src.index('"opening the store at') < src.index("store = Store(")
     assert "the dashboard is ready" in src
+
+
+# -- Group 3: ingest robustness ------------------------------------------------------
+
+def _refs_doc(n, month_day="2026-05-01"):
+    return {**HDR, "last_updated_on": month_day, "provider_references": [
+        {"provider_group_id": i, "provider_groups": [grp(str(1000000000 + i), str(100000000 + i))]}
+        for i in range(1, n + 1)]}
+
+
+@pytest.mark.parametrize("why", ["fast_scan_off", "low_disk"])
+def test_a_big_reference_file_is_stored_on_the_two_pass_path(cfg, store, monkeypatch, why):
+    import mrfx.ingest as ing
+    import mrfx.parser as P
+    cfg.move_processed = False
+    if why == "fast_scan_off":
+        cfg.fast_scan = False
+    else:
+        monkeypatch.setattr(P, "_free_disk", lambda _p: 1 << 30)   # under the 2 GB floor
+    assert ingest_file(cfg, store, put(cfg, "acme_B_2026-05.json",
+                                       {**HDR, "in_network": [item("97110", refs=[1, 2])]}))["rows"] == 0
+    monkeypatch.setattr(ing, "LARGE_FILE_UNCOMPRESSED_BYTES", 1)
+    out = ingest_file(cfg, store, put(cfg, "acme_refs_2026-05.json", _refs_doc(20000)))
+    assert out["refs"] == 20000 and out["requeued"] == ["acme_B_2026-05.json"]
+    assert q(store, "SELECT file_type FROM files WHERE filename = 'acme_refs_2026-05.json'") == [
+        ("provider_reference",)]
+
+
+def test_a_linked_rate_file_is_downloaded_again_when_its_list_lands(cfg, store):
+    cfg.move_processed = False
+    uid = store.enqueue_url("https://x.example/acme_B_2026-05.json", "b")
+    p = put(cfg, "acme_B_2026-05.json", {**HDR, "in_network": [item("97110", refs=[1, 2])]})
+    assert ingest_file(cfg, store, p)["rows"] == 0
+    store.update_url(uid, status="done", filename="acme_B_2026-05.json")
+    p.unlink()                                       # the download was removed after ingest
+    out = ingest_file(cfg, store, put(cfg, "acme_refs_2026-05.json", _refs_doc(2)))
+    assert out["requeued"] == ["acme_B_2026-05.json"]
+    row = q(store, "SELECT status, error FROM url_queue WHERE id = ?", uid)[0]
+    assert row[0] == "queued" and "provider reference file arrived" in row[1]
+    # another month's list re-downloads nothing
+    store.update_url(uid, status="done")
+    out = ingest_file(cfg, store, put(cfg, "acme_refs_2026-07.json", _refs_doc(2, "2026-07-01")))
+    assert out["requeued"] == [] and q(store, "SELECT status FROM url_queue") == [("done",)]
+
+
+def test_deferred_groups_spill_to_disk_and_are_all_emitted(cfg, store, monkeypatch):
+    import mrfx.parser as P
+    monkeypatch.setattr(P, "DEFER_MEMORY_GROUPS", 5)
+    cfg.move_processed = False
+    ingest_file(cfg, store, put(cfg, "acme_refs_2026-05.json", _refs_doc(60)))
+    spilled = []
+    real = P._DeferredSpool.drain
+
+    def spy(self):
+        spilled.append(self.spilled)
+        return real(self)
+    monkeypatch.setattr(P._DeferredSpool, "drain", spy)
+    doc = {**HDR, "in_network": [item("97110", refs=[i]) for i in range(1, 51)]}
+    assert ingest_file(cfg, store, put(cfg, "acme_B_2026-05.json", doc))["rows"] == 50
+    assert spilled and spilled[0] == 50
+    assert not list((cfg.store_dir / "rates").glob("*deferred*"))
+
+
+def test_empty_or_remote_companion_entries_are_counted(cfg, store):
+    cfg.move_processed = False
+    comp = {**HDR, "provider_references": [
+        {"provider_group_id": 1, "provider_groups": [grp("1111111111", "111111111")]},
+        {"provider_group_id": 2, "provider_groups": []},
+        {"provider_group_id": 3, "location": "https://x.example/ref3.json"}]}
+    ingest_file(cfg, store, put(cfg, "acme_refs_2026-05.json", comp))
+    doc = {**HDR, "in_network": [item("97110", refs=[1]), item("97112", refs=[2]),
+                                 item("97140", refs=[3])]}
+    out = ingest_file(cfg, store, put(cfg, "acme_B_2026-05.json", doc))
+    assert out["rows"] == 1 and out["ref_groups_skipped"] == 2 and out["remote_ref_groups"] == 1
+    qa = json.loads(q(store, "SELECT qa FROM files WHERE filename = 'acme_B_2026-05.json'")[0][0])
+    assert qa["missing_ref_ids"] == 1
+
+
+def test_a_table_split_around_in_network_is_all_the_files_own(cfg, store):
+    cfg.move_processed = False
+    ingest_file(cfg, store, put(cfg, "acme_refs_2026-05.json", {**HDR, "provider_references": [
+        {"provider_group_id": 2, "provider_groups": [grp("8888888888", "888888888")]}]}))
+    raw = ('{"reporting_entity_name": "Acme Health", "version": "1.0", "last_updated_on": "2026-05-01", '
+           '"provider_references": [{"provider_group_id": 1, "provider_groups": '
+           '[{"npi": ["1111111111"], "tin": {"type": "ein", "value": "111111111"}}]}], '
+           '"in_network": [' + json.dumps(item("97110", refs=[2])) + '], '
+           '"provider_references": [{"provider_group_id": 2, "provider_groups": '
+           '[{"npi": ["2222222222"], "tin": {"type": "ein", "value": "222222222"}}]}]}')
+    p = cfg.inbox_dir / "acme_B_2026-05.json"
+    p.write_text(raw)
+    ingest_file(cfg, store, p)
+    assert q(store, "SELECT tin_value FROM rates") == [("222222222",)]
+
+
+def test_a_stopped_download_keeps_no_inflight_fingerprint(cfg, store):
+    uid = store.enqueue_url("https://x.example/a.json.gz", "a")
+    store.update_url(uid, status="downloading")
+    store.record_inflight(uid, "a.json.gz", {"size": 10, "head_bytes": 10, "head_sha": "h",
+                                             "tail_bytes": 0, "tail_sha": None, "win_sha": None,
+                                             "magic": "gz"})
+    assert q(store, "SELECT count(*) FROM inflight_fingerprints") == [(1,)]
+    store.cancel_all_downloading()
+    assert q(store, "SELECT count(*) FROM inflight_fingerprints") == [(0,)]
+

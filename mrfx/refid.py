@@ -19,6 +19,11 @@ from __future__ import annotations
 from decimal import Decimal, InvalidOperation
 
 _INT64_MIN, _INT64_MAX = -(1 << 63), (1 << 63) - 1
+
+# a standalone provider list's entry whose providers live at a remote
+# `location` link (stored with this tin_type; served as REMOTE_REF) — counted
+# as remote_ref_groups like the file's own remote entries (review 9 3.4)
+REMOTE_REF = "__remote__"
 _FLOAT_EXACT = 1 << 53
 
 

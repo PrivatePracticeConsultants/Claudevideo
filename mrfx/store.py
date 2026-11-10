@@ -3033,6 +3033,8 @@ class Store:
                         "error = ?, finished_at = ? WHERE id = ?",
                         [msg, _utcnow(), url_id],
                     )
+                    # a terminal row keeps no in-flight fingerprint (review 9 3.5)
+                    con.execute("DELETE FROM inflight_fingerprints WHERE url_id = ?", [url_id])
                     return (twin_url, twin_status)
             con.execute(
                 "UPDATE url_queue SET status = 'ingesting', kind = ?, filename = ? WHERE id = ?",
@@ -3204,6 +3206,22 @@ class Store:
                 [status, url_id])
             return True
 
+    def requeue_url_for_file(self, filename: str, reason: str) -> bool:
+        """Download a loaded file's link again (its raw copy is gone) — the
+        payer's provider list for it arrived after it was loaded (review 9
+        item 3.2). Only a finished row; True when one was re-queued."""
+        with self.write_lock, self.connect() as con:
+            row = con.execute(
+                "SELECT id FROM url_queue WHERE filename = ? AND status IN ('done', 'skipped') "
+                "ORDER BY (status = 'done') DESC, id DESC LIMIT 1", [filename]).fetchone()
+            if not row:
+                return False
+            con.execute(
+                "UPDATE url_queue SET status = 'queued', error = ?, progress = 0, "
+                "bytes_done = 0, retry_after = NULL, park_count = 0, waiting_on = NULL "
+                "WHERE id = ?", [reason, row[0]])
+            return True
+
     def force_size_requeue(self, url_id: int) -> bool:
         """User pressed 'download anyway' on a row the confirm_over_gb guard
         stopped: set the per-row override and re-queue it. Only a failed or
@@ -3358,6 +3376,8 @@ class Store:
                     "UPDATE url_queue SET status = 'skipped', kind = 'canceled', "
                     "error = 'download stopped by user' WHERE id IN "
                     "(SELECT unnest(?::BIGINT[]))", [ids])
+                con.execute("DELETE FROM inflight_fingerprints WHERE url_id IN "
+                            "(SELECT unnest(?::BIGINT[]))", [ids])
         return len(ids)
 
     def resume_canceled(self) -> int:
@@ -4619,6 +4639,9 @@ class Store:
             # under the store write lock that every other worker waits on
             rids, tins, types, npi_lists = [], [], [], []
             for rid, groups in refs.items():
+                from .refid import REMOTE_REF
+                if groups == REMOTE_REF:
+                    groups = [(None, REMOTE_REF, ())]
                 for tin_value, tin_type, npis in (groups or [(None, None, ())]):
                     rids.append(rid)
                     tins.append(tin_value)
@@ -4722,10 +4745,22 @@ class Store:
         out: dict[int, list | None] = {}
         pool: dict = {}   # one object per distinct NPI/TIN (see parser.share_strings);
         get = pool.setdefault   # also shrinks the pickle shipped to each worker
+        from .refid import REMOTE_REF
+        empty = frozenset({(None, None, ())})
+        remote = frozenset({(None, REMOTE_REF, ())})
         for rid, by_src in per_file.items():
             versions = {frozenset(v) for v in by_src.values()}
             if len(versions) > 1:
                 out[rid] = None
+                continue
+            only = next(iter(versions))
+            if only == empty:
+                # an entry with no providers is MISSING, not "resolved to
+                # nothing": a group citing it was dropped with no counter
+                # (review 9 item 3.4) — leave it out so it is counted
+                continue
+            if only == remote:
+                out[rid] = REMOTE_REF
                 continue
             out[rid] = [
                 (get(tin_value, tin_value) if tin_value is not None else None, tin_type,
@@ -5395,7 +5430,8 @@ _QUEUE_WRITERS_IF_DONE = ("_claim_next", "enqueue_url", "enqueue_urls", "requeue
                           "recover_stuck_urls", "set_url_status_by_id", "force_size_requeue",
                           "clear_queued", "cancel_all_downloading", "resume_canceled",
                           "revive_skipped_duplicates", "claim_content_ingest",
-                          "release_claim", "release_mismatched_waiters")
+                          "release_claim", "release_mismatched_waiters",
+                          "requeue_url_for_file")
 
 
 def _signals_queue(fn, always: bool):

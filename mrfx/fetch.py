@@ -2620,8 +2620,16 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
     status = result.get("status")
     if status == "done":
         n = result.get("rows", result.get("refs", 0))
+        # a rate file whose provider list has not arrived yet says so, not a
+        # bare 0 (review 9 item 3.2): it is loaded again when the list lands
+        skipped = int(result.get("ref_groups_skipped") or 0)
+        remote = int(result.get("remote_ref_groups") or 0)
+        note = ("waiting for this payer's provider reference file — "
+                f"{skipped:,} rate group(s) name providers only that file lists; "
+                "this file is loaded again automatically when it arrives"
+                if skipped > remote else None)
         store.update_url(url_id, status="done", kind=pf.file_type,
-                         rows_emitted=n or 0, error=None)
+                         rows_emitted=n or 0, error=note)
         if cfg.delete_raw_after_ingest:
             _cleanup_raw(cfg, dest)
             # duplicates that deferred to this row kept their downloads in

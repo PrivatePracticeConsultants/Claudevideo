@@ -4314,7 +4314,7 @@ async function loadUrlQueue() {
     // Painting those red made a healthy run read as "the vast majority of
     // files are showing errors".
     else if (u.error) notes = `<span class="${
-      u.status === "oversize" || u.status === "paused" ? "warn-text" : u.status === "skipped" ? "muted" : "err-text"
+      u.status === "oversize" || u.status === "paused" || u.status === "done" ? "warn-text" : u.status === "skipped" ? "muted" : "err-text"
     }">${esc(u.error)}${u.status === "paused" && u.retry_after
       ? (parked ? ` Back in line about ${esc(localTime(u.retry_after))}.`
                 : ` Resumes about ${esc(localTime(u.retry_after))}.`) : ""}</span>`;
