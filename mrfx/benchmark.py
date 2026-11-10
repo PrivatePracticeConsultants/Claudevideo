@@ -979,10 +979,6 @@ def compute_benchmark(store: Store, subject: str, market: dict) -> dict:
 def _stale_payers_for(store: Store, market: dict) -> list[dict]:
     """Payers in this market whose own last_updated_on is old. Returns [] on
     any failure — a freshness caveat must never break a benchmark."""
-    # a document pinned to an as-of month states that month; "last published
-    # 2024-06" in a report as of 2023-06 is news from after it (review 9 4.1)
-    if str(market.get("month") or "latest").strip().lower() != "latest":
-        return []
     try:
         from .quality import payer_freshness
         scope = set(market.get("payers") or [])
@@ -1814,15 +1810,15 @@ def require_geographic_scope(market: dict, kind: str) -> str:
 
 
 def _subject_has_scoped_rates(store: Store, subject: str, market: dict) -> bool:
-    """Does the subject have any rate rows under the market's basis, month
-    and content filters? Mirrors compute_benchmark's `subject` CTE: the
-    subject's own TINs (subject_tins_for_market) without the peer-only
-    filters (subject_market)."""
+    """Does the subject have any rate rows under the FULL market scope (state,
+    discipline, basis, month)? Asked only when the market side is EMPTY: then
+    the report has nothing to compare and its subject must be inside the
+    market scope for it to say anything (the AK case of test_v4). The
+    subject's TINs follow the subject rule (subject_tins_for_market)."""
     market = resolve_plan_scope(store, normalize_market(market))
     subject_tins = subject_tins_for_market(store, subject, market)
     if not subject_tins:
         return False
-    market = subject_market(market)
     where, params = _market_where(market,
                                   bool(market.get("include_assistant", False)),
                                   bool(market.get("include_non_dollar", False)))

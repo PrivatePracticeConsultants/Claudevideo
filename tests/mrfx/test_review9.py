@@ -601,7 +601,10 @@ def test_a_pinned_report_does_not_show_a_cut_from_after_its_month(cfg, store):
     i = h.find("In real terms")
     assert i >= 0
     blk = re.sub(r"<[^>]+>", " ", h[i:i + 2000])
-    blk = blk[:blk.find("Sources")] if "Sources" in blk else blk
+    # the erosion block only: the "Publication age" caveat after it says,
+    # deliberately, how long ago a payer last published (relative to today)
+    for end in ("Publication age", "METHODOLOGY", "Sources"):
+        blk = blk[:blk.find(end)] if end in blk else blk
     assert "2023-06" in blk and "2024-06" not in blk and "-20" not in blk, blk
 
 

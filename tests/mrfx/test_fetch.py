@@ -902,7 +902,12 @@ def test_parallel_ingest_matches_serial(cfg, store, server, http_root, tmp_path)
     a = recs[dedup_key(f"{server}/rates.json.gz")]
     b = recs[dedup_key(f"{server}/rates_b.json.gz")]
     assert a["status"] == "done" and b["status"] == "done"
-    assert a["rows_emitted"] == b["rows_emitted"] > 0  # same fixture -> same rows
+    # the same fixture under two payers: only the FIRST payer has a provider
+    # list (companion.json). Its rate file is read again when that list lands
+    # (review 9 item 3.2: at 64a371c both ended at 4 rows — the list arriving
+    # third was never applied); the second payer's cannot borrow another
+    # payer's list and keeps its 4
+    assert (a["rows_emitted"], b["rows_emitted"]) == (6, 4)
     with store.connect() as con:
         total = con.execute("SELECT count(*) FROM rates").fetchone()[0]
         payers = {r[0] for r in con.execute("SELECT DISTINCT payer FROM rates").fetchall()}
